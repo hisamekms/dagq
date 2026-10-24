@@ -321,7 +321,8 @@ fn a_verification_set_to_the_container_runs_its_commands_there_and_leaves_nothin
          [container.build_output]\ndir = \"/build\"\n\
          [container.worker_cache]\ndirs = [\"/cache/registry\"]\n\
          [container.verification]\nprepare = {}\n\
-         [run.env]\nRUSTC_WRAPPER = {}\nCARGO_BUILD_JOBS = '2'\n",
+         [run.env]\nRUSTC_WRAPPER = {}\nCARGO_BUILD_JOBS = '2'\n\
+         SCCACHE_DIR = '/cache/registry/sccache'\n",
         toml_string(&format!("sh {}", shell_path(&prepare))),
         toml_string(&sccache.display().to_string())
     ));
@@ -447,9 +448,20 @@ fn a_verification_set_to_the_container_runs_its_commands_there_and_leaves_nothin
     assert_eq!(removed[0]["job"], "verification");
     assert_eq!(removed[0]["runtime"], "container");
     assert_eq!(payloads(&detail, "verification_command").len(), 2);
+    // No sccache server is started in a verification's container, its
+    // cache directory in the worker cache though it is (ADR-t2114-4
+    // decision 4).
+    assert!(payloads(&detail, "sccache_container_server_started").is_empty());
+    assert!(payloads(&detail, "sccache_container_server_start_failed").is_empty());
 
     // What it left goes: its containers, its build output, its directory.
     let calls = fs::read_to_string(queue.state.join("calls")).unwrap();
+    assert!(
+        !calls
+            .lines()
+            .any(|call| call.starts_with("--connection dagq exec ")),
+        "{calls}"
+    );
     assert!(
         calls.contains(&format!(
             "--connection dagq rm --force --ignore --time 0 dagq-{QUEUE}-verify-{id}"

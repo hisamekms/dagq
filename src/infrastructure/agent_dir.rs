@@ -244,6 +244,21 @@ impl Directory {
         File::from(unsafe { OwnedFd::from_raw_fd(fd) }).write_all(bytes)
     }
 
+    /// A hard link `name` to this directory's entry `target`, made only
+    /// where no entry `name` is (`linkat`, a link at `target` not
+    /// followed): a file written whole elsewhere appears under `name` at
+    /// once, and only once.
+    pub(crate) fn link(
+        &self,
+        target: impl AsRef<OsStr>,
+        name: impl AsRef<OsStr>,
+    ) -> io::Result<()> {
+        let target = entry_name(target)?;
+        let name = entry_name(name)?;
+        // SAFETY: the descriptor is open and both names are NUL terminated.
+        check(unsafe { libc::linkat(self.0.fd(), target.as_ptr(), self.0.fd(), name.as_ptr(), 0) })
+    }
+
     pub(crate) fn read_file(&self, name: impl AsRef<OsStr>) -> io::Result<File> {
         let name = entry_name(name)?;
         // Nonblocking open, then fstat: a FIFO cannot hold the caller.

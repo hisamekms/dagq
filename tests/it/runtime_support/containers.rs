@@ -17,7 +17,12 @@ pub const QUEUE: &str = "bbbbbbbbbbbbbbbb";
 /// `--rm`), and runs the container's command on the host as the container
 /// would: in `--workdir`, with the `--env` variables, and `dagq` and
 /// `claude` found in `state/bin`. Its `rm` removes the container named
-/// last; its volumes are files of `state/volumes`. Under coverage it also
+/// last; its volumes are files of `state/volumes`. Its `container inspect`
+/// prints what its `run` wrote for the container in `state/containers`
+/// (an ID, `true` and the sccache gate of its environment), and its
+/// `exec` of a container's ID writes its arguments to `state/exec-args`
+/// and runs the command on the host as `run` does, with the container's
+/// variables. Under coverage it also
 /// gives the command the test's `LLVM_PROFILE_FILE`, which the runtime
 /// keeps out of the container's env: else the instrumented `dagq` writes
 /// its profile into the run's clone and the clone is not clean to land.
@@ -35,6 +40,9 @@ S={s}
 printf '%s\n' "$*" >> "$S/calls"
 [ "$1 $2" = "--connection dagq" ] || exit 125
 shift 2
+# A container is given only its own variables: none of sccache's the
+# test's process may have (a worker's `[run.env]`).
+unset RUSTC_WRAPPER SCCACHE_ERROR_LOG SCCACHE_DIR SCCACHE_SERVER_PORT SCCACHE_IDLE_TIMEOUT DAGQ_SCCACHE_PROGRAM DAGQ_SCCACHE_GATE DAGQ_SCCACHE_TURN
 case "$1" in
 rm) eval "name=\${{$#}}"; rm -f "$S/containers/$name" ;;
 volume)
@@ -43,15 +51,54 @@ volume)
   exists) [ -f "$S/volumes/$3" ] ;;
   rm) eval "name=\${{$#}}"; rm "$S/volumes/$name" ;;
   esac ;;
+container)
+  # A machine the test took down answers nothing of its containers.
+  [ -f "$S/machine-down" ] && {{ echo "Error: unable to connect to Podman socket" >&2; exit 125; }}
+  eval "name=\${{$#}}"
+  case "$2" in
+  inspect) if [ -f "$S/containers/$name" ]; then cat "$S/containers/$name"; else echo "Error: no such container $name" >&2; exit 125; fi ;;
+  exists) [ -f "$S/containers/$name" ] || exit 1 ;;
+  *) exit 125 ;;
+  esac ;;
+exec)
+  shift
+  printf '%s\n' "$@" > "$S/exec-args"
+  # The container's own variables, as a real exec inherits them: the
+  # image's, less those it was started without, then its own.
+  [ -f "$S/image-env" ] && while IFS= read -r pair; do export "$pair"; done < "$S/image-env"
+  prev=
+  [ -f "$S/run-args" ] && while IFS= read -r arg; do
+    [ "$prev" = --unsetenv ] && unset "$arg"
+    [ "$prev" = --env ] && export "$arg"
+    prev=$arg
+  done < "$S/run-args"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+    --env) export "$2"; shift 2 ;;
+    --*) shift 2 ;;
+    *) break ;;
+    esac
+  done
+  # By its ID: the container whose line starts with it.
+  found=
+  for file in "$S"/containers/*; do
+    [ -f "$file" ] && [ "$(cut -d ' ' -f 1 < "$file")" = "$1" ] && found=$file
+  done
+  shift
+  [ -n "$found" ] || exit 125
+  PATH="$S/bin:$PATH" "$@" ;;
 run)
   shift
   printf '%s\n' "$@" > "$S/run-args"
-  workdir=; name=; keep=1
+  workdir=; name=; keep=1; sccache=
+  # What the image sets (`ENV`), which `--unsetenv` drops.
+  [ -f "$S/image-env" ] && while IFS= read -r pair; do export "$pair"; done < "$S/image-env"
   while [ $# -gt 0 ]; do
     case "$1" in
     --rm) keep=; shift ;;
     --read-only|--interactive) shift ;;
-    --env) export "$2"; shift 2 ;;
+    --unsetenv) unset "$2"; shift 2 ;;
+    --env) export "$2"; case "$2" in DAGQ_SCCACHE_GATE=*|DAGQ_SCCACHE_TURN=*) sccache="$sccache${{sccache:+,}}\"$2\"" ;; esac; shift 2 ;;
     --workdir) workdir=$2; shift 2 ;;
     --name) name=$2; shift 2 ;;
     --*) shift 2 ;;
@@ -59,7 +106,7 @@ run)
     esac
   done
   shift
-  touch "$S/containers/$name"
+  printf 'id%s true [%s]\n' "$$" "$sccache" > "$S/containers/$name"
   cd "$workdir" || exit 125
   {profile}
   PATH="$S/bin:$PATH" "$@"
@@ -113,6 +160,11 @@ printf '{"type":"system","subtype":"init","session_id":"%s","model":"stub","perm
   echo "target=$CARGO_TARGET_DIR"
   echo "pwd=$(pwd)"
   echo "main=$(git rev-parse refs/remotes/dagq/main)"
+  echo "wrapper=${RUSTC_WRAPPER-unset}"
+  echo "error_log=${SCCACHE_ERROR_LOG-unset}"
+  echo "sccache_program=${DAGQ_SCCACHE_PROGRAM-unset}"
+  echo "server=$(head -n 1 "${0%/*}/../sccache-started" 2>/dev/null)"
+  [ "${RUSTC_WRAPPER##*/}" = dagq-rustc-wrapper ] && echo "guarded=$("$RUSTC_WRAPPER" /bin/echo compiled 2>&1)"
 } > "$RUN_DIR/stub-env"
 echo "$MODE $SESSION" >> "$RUN_DIR/stub-calls"
 DENIALS=
@@ -247,13 +299,14 @@ pub struct ContainerQueue {
 
 impl ContainerQueue {
     pub fn new(turn: Option<&str>) -> Self {
+        Self::configured(turn, "[roles.worker]\nruntime = \"container\"\n")
+    }
+
+    /// [`Self::new`] with `config` as its committed `dagq.toml`.
+    pub fn configured(turn: Option<&str>, config: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (repo, db) = queue_fixture(dir.path());
-        fs::write(
-            repo.join("dagq.toml"),
-            "[roles.worker]\nruntime = \"container\"\n",
-        )
-        .unwrap();
+        fs::write(repo.join("dagq.toml"), config).unwrap();
         git(&repo, &["add", "dagq.toml"]);
         git(&repo, &["commit", "-qm", "the worker in the container"]);
         let state = dir.path().join("podman");

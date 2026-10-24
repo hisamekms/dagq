@@ -1110,6 +1110,11 @@ impl<'a> Turns<'a> {
                     service,
                     containers,
                 )
+                .with_sccache_records(super::run_container::SccacheRecords {
+                    events,
+                    at: i64::try_from(unix_secs(self.clock)).unwrap_or(i64::MAX),
+                    turn,
+                })
                 .spawn(spec)
             }
             None => executor.spawn(spec),

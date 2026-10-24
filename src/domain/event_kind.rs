@@ -403,6 +403,8 @@ event_kinds! {
     RunWaitingEnded => "run_waiting_ended",
     RunWaitingStarted => "run_waiting_started",
     RuntimeError => "runtime_error",
+    SccacheContainerServerStartFailed => "sccache_container_server_start_failed",
+    SccacheContainerServerStarted => "sccache_container_server_started",
     SccacheServerStartFailed => "sccache_server_start_failed",
     SccacheServerDetected => "sccache_server_detected",
     SccacheServerUnhealthy => "sccache_server_unhealthy",
@@ -1867,6 +1869,14 @@ mod tests {
             (EventKind::RunWaitingEnded, "run_waiting_ended"),
             (EventKind::RunWaitingStarted, "run_waiting_started"),
             (EventKind::RuntimeError, "runtime_error"),
+            (
+                EventKind::SccacheContainerServerStartFailed,
+                "sccache_container_server_start_failed",
+            ),
+            (
+                EventKind::SccacheContainerServerStarted,
+                "sccache_container_server_started",
+            ),
             (
                 EventKind::SccacheServerStartFailed,
                 "sccache_server_start_failed",

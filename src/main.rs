@@ -2119,6 +2119,14 @@ enum RelayCommand {
         )]
         agent: Vec<String>,
     },
+    /// Make the sccache guard of a worker's turn in its container: a link named
+    /// dagq-rustc-wrapper in --dir to this dagq, made anew unless it is one already. What the
+    /// supervisor runs in the container (podman exec) before it opens the turn's sccache gate.
+    #[command(hide = true)]
+    Guard {
+        #[arg(long)]
+        dir: PathBuf,
+    },
     /// One command of integrate's verification in its container: start the forwarder, give the
     /// command after `--` the proxy variables with the verification's token of --token-file
     /// and the run of DAGQ_RUN_ID, and run it in the current directory. Exits with its code;
@@ -3681,6 +3689,11 @@ fn relay(command: &RelayCommand) -> Result<Value> {
                 |name| env::var(name).ok(),
             )?;
             std::process::exit(code)
+        }
+        RelayCommand::Guard { dir } => {
+            let dagq = env::current_exe().context("find this dagq")?;
+            let guard = dagq::infrastructure::sccache::link_guard(dir, &dagq)?;
+            Ok(json!({"guard": guard.to_string_lossy()}))
         }
         // The command's output and exit code are the verification's.
         RelayCommand::Verify {
@@ -6398,6 +6411,9 @@ mod tests {
         // A command of integrate's verification in its container (`dagq
         // relay verify`): it opens no queue, and runs the task's command.
         "relay verify",
+        // The sccache guard of a worker's turn in its container (`dagq
+        // relay guard`): it opens no queue, and makes a link to itself.
+        "relay guard",
     ];
 
     /// Every subcommand clap knows, nested ones by their path (`goal

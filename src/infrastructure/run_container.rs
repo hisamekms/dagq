@@ -7,8 +7,10 @@
 //! volumes of the directories `dagq.toml` lists), and reads `[run.env]`
 //! and the containers' limits; it hands
 //! the run token over as a 0600 file of the run directory; it starts
-//! `podman --connection dagq run`; it removes a run's container by its
-//! name. The limits are the `[container]` table of the host-wide
+//! `podman --connection dagq run`; at the supervisor's call it starts the
+//! sccache server and makes the guard in a running container by `podman
+//! exec` and writes the gate the container's launcher waits for; it removes
+//! a run's container by its name. The limits are the `[container]` table of the host-wide
 //! `host.toml` ([`load_container_limits`]).
 //!
 //! The verifications of `integrate` set to the container have
@@ -23,7 +25,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use std::os::unix::fs::DirBuilderExt;
 
@@ -45,6 +47,7 @@ use crate::domain::run_container::{
     ContainerLimits, FactsContainer, HOME_DIR, MATERIALS_DIR, STAGED_MATERIALS, TOKEN_FILE,
     VERIFICATION_TOKEN, facts_command, facts_run_args,
 };
+use crate::domain::sccache::{is_container_gate, is_container_request};
 use crate::domain::{CommitSha, RunId, TaskRun};
 
 /// How long the removal of a run's container may take: a podman whose
@@ -203,6 +206,174 @@ impl RunContainers for PodmanRunContainers {
         Ok(())
     }
 
+    /// The gates and the requests are removed through the run directory's
+    /// descriptor: a link there goes, its target stays. The new turn's
+    /// token is a fresh UUID's.
+    fn clear_sccache(&self, run_dir: &Path) -> Result<String> {
+        let dir =
+            Directory::open(run_dir).with_context(|| format!("open {}", run_dir.display()))?;
+        let names = names_of(
+            &dir,
+            |name| is_container_gate(name) || is_container_request(name),
+            false,
+        )
+        .with_context(|| format!("read {}", run_dir.display()))?;
+        remove_all(&dir, run_dir, &names)?;
+        Ok(uuid::Uuid::new_v4().simple().to_string())
+    }
+
+    fn sccache_requests(&self, run_dir: &Path) -> Result<Vec<String>> {
+        let dir =
+            Directory::open(run_dir).with_context(|| format!("open {}", run_dir.display()))?;
+        let mut names = names_of(&dir, is_container_request, true)
+            .with_context(|| format!("read {}", run_dir.display()))?;
+        names.sort();
+        Ok(names)
+    }
+
+    fn take_sccache_requests(&self, run_dir: &Path, names: &[String]) -> Result<()> {
+        let dir =
+            Directory::open(run_dir).with_context(|| format!("open {}", run_dir.display()))?;
+        remove_all(&dir, run_dir, names)
+    }
+
+    /// As `podman container inspect` says: one not there runs not. An
+    /// inspect that fails is told from one of no container by
+    /// `podman container exists` (exit 1 for none), and looked at again
+    /// once when one is there by then (it started meanwhile); any other
+    /// failure is an error, never a container that runs not.
+    fn running_container(
+        &self,
+        run: &RunId,
+    ) -> Result<Option<crate::application::run_container::RunningContainer>> {
+        let name = self
+            .key()?
+            .run_container(run.as_str())
+            .map_err(anyhow::Error::msg)?;
+        let inspect = || -> Result<std::process::Output> {
+            let args = [
+                "container".to_owned(),
+                "inspect".to_owned(),
+                "--format".to_owned(),
+                "{{.Id}} {{.State.Running}} {{json .Config.Env}}".to_owned(),
+                name.clone(),
+            ];
+            self.podman
+                .inside_within(&args, INSPECT_TIMEOUT)?
+                .with_context(|| {
+                    format!(
+                        "podman container inspect {name} did not end within {INSPECT_TIMEOUT:?}"
+                    )
+                })
+        };
+        let mut output = inspect()?;
+        if !output.status.success() {
+            let exists = ["container".to_owned(), "exists".to_owned(), name.clone()];
+            let looked = self
+                .podman
+                .inside_within(&exists, INSPECT_TIMEOUT)?
+                .with_context(|| {
+                    format!("podman container exists {name} did not end within {INSPECT_TIMEOUT:?}")
+                })?;
+            match looked.status.code() {
+                Some(1) => return Ok(None),
+                Some(0) => output = inspect()?,
+                _ => {}
+            }
+            if !output.status.success() {
+                bail!(
+                    "podman container inspect {name} exited with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+        }
+        Ok(
+            parse_inspect(&String::from_utf8_lossy(&output.stdout)).map(|(id, gate, turn)| {
+                crate::application::run_container::RunningContainer {
+                    name,
+                    id,
+                    gate,
+                    turn,
+                }
+            }),
+        )
+    }
+
+    fn sccache_plan(&self, run: &TaskRun) -> Result<crate::domain::sccache::ContainerServer> {
+        let checkout = self
+            .main_checkout
+            .as_deref()
+            .context("the queue is bound to no checkout, whose dagq.toml decides the container")?;
+        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        Ok(crate::domain::sccache::ContainerServer::of(
+            &load_run_env(checkout, &queue_dir_of(&self.db), run_dir)?,
+            &load_worker_cache_dirs(checkout)?,
+        ))
+    }
+
+    fn start_sccache(
+        &self,
+        container: &str,
+        program: &str,
+        env: &[(String, String)],
+    ) -> Result<()> {
+        let command = [program.to_owned(), "--start-server".to_owned()];
+        self.exec_in(container, env, &command, super::sccache::START_TIMEOUT)
+    }
+
+    fn make_sccache_guard(&self, container: &str, run_dir: &Path) -> Result<()> {
+        let guard = crate::domain::sccache::container_guard(run_dir);
+        let dir = guard.parent().context("the guard has no directory")?;
+        let command = [
+            "dagq".to_owned(),
+            "relay".to_owned(),
+            "guard".to_owned(),
+            "--dir".to_owned(),
+            dir.to_str()
+                .context("the guard's path is not UTF-8")?
+                .to_owned(),
+        ];
+        self.exec_in(container, &[], &command, GUARD_TIMEOUT)
+    }
+
+    fn claim_sccache_gate(
+        &self,
+        run_dir: &Path,
+        name: &str,
+        gate: &crate::domain::sccache::ContainerGate,
+    ) -> crate::domain::sccache::GateClaim {
+        use crate::domain::sccache::GateClaim;
+        let dir = match Directory::open(run_dir) {
+            Ok(dir) => dir,
+            Err(error) => return GateClaim::Failed(format!("open {}: {error}", run_dir.display())),
+        };
+        // Written whole under a name of its own, then linked to the gate's:
+        // no reader sees it half written, and the link fails where a gate
+        // is.
+        let tmp = format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple());
+        if let Err(error) = dir.create_new(&tmp, gate.text().as_bytes()) {
+            let _ = dir.remove(&tmp);
+            return GateClaim::Failed(format!("{tmp}: {error}"));
+        }
+        let linked = dir.link(&tmp, name);
+        let _ = dir.remove(&tmp);
+        match linked {
+            Ok(()) => GateClaim::Won,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => match read_gate(&dir, name) {
+                Ok(text) => GateClaim::Lost(text.unwrap_or_default()),
+                Err(error) => GateClaim::Lost(format!("unreadable: {error:#}")),
+            },
+            Err(error) => GateClaim::Failed(format!("{name}: {error}")),
+        }
+    }
+
+    fn read_sccache_gate(&self, run_dir: &Path, name: &str) -> Result<Option<String>> {
+        let dir =
+            Directory::open(run_dir).with_context(|| format!("open {}", run_dir.display()))?;
+        read_gate(&dir, name)
+    }
+
     /// Only the machine and the image are made ready (no relay, no
     /// volume), the run token's copy a cut-off turn may have left in the
     /// run directory is removed first, and the container mounts only the
@@ -252,6 +423,166 @@ impl RunContainers for PodmanRunContainers {
                 run.id(),
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// How long one look at whether a run's container runs may take.
+pub const INSPECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the making of a turn container's guard may take: one link.
+pub const GUARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What `podman container inspect --format '{{.Id}} {{.State.Running}}
+/// {{json .Config.Env}}'` printed of a container: its ID, and the sccache
+/// gate and the turn's token its environment names
+/// ([`CONTAINER_GATE_VAR`](crate::domain::sccache::CONTAINER_GATE_VAR),
+/// [`CONTAINER_TURN_VAR`](crate::domain::sccache::CONTAINER_TURN_VAR)),
+/// when it runs; `None` when it does not, or the text is not of that form.
+fn parse_inspect(text: &str) -> Option<(String, Option<String>, Option<String>)> {
+    let mut parts = text.trim().splitn(3, ' ');
+    let (id, running, env) = (parts.next()?, parts.next()?, parts.next()?);
+    if running != "true" || id.is_empty() {
+        return None;
+    }
+    let env: Vec<String> = serde_json::from_str(env).ok()?;
+    let value = |var: &str| {
+        let prefix = format!("{var}=");
+        env.iter()
+            .find_map(|pair| pair.strip_prefix(&prefix))
+            .map(str::to_owned)
+    };
+    Some((
+        id.to_owned(),
+        value(crate::domain::sccache::CONTAINER_GATE_VAR),
+        value(crate::domain::sccache::CONTAINER_TURN_VAR),
+    ))
+}
+
+/// The names in `dir` that are `of` the turns' sccache files (their gates
+/// or requests), with `files_only` only of regular files (a link is not
+/// followed).
+fn names_of(
+    dir: &Directory,
+    of: impl Fn(&str) -> bool,
+    files_only: bool,
+) -> std::io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for name in dir.names()? {
+        let Some(name) = name.to_str().filter(|name| of(name)) else {
+            continue;
+        };
+        if !files_only || dir.kind(name)? == Some(crate::application::EntryKind::File) {
+            names.push(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+/// Remove `names` in `dir` (the run directory `run_dir`), any of them not
+/// there already left so.
+fn remove_all(dir: &Directory, run_dir: &Path, names: &[String]) -> Result<()> {
+    for name in names {
+        match dir.remove(name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("remove {name} in {}", run_dir.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The text of the sccache gate `name` in `dir`, `None` when there is
+/// none: read through a descriptor opened without following a link and
+/// without blocking (a FIFO there holds no one), only from a regular file,
+/// and only its first bytes.
+fn read_gate(dir: &Directory, name: &str) -> Result<Option<String>> {
+    let file = match dir.read_file(name) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read the sccache gate"),
+    };
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, 4096), &mut bytes)
+        .context("read the sccache gate")?;
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+impl PodmanRunContainers {
+    /// `podman exec` `command` with `env` in the running container of the
+    /// ID `container`, given at most `limit` (it is stopped then). Its
+    /// output goes to a file, never a pipe: a server it leaves running
+    /// keeps what it inherited.
+    fn exec_in(
+        &self,
+        container: &str,
+        env: &[(String, String)],
+        command: &[String],
+        limit: std::time::Duration,
+    ) -> Result<()> {
+        // An ID is hex: nothing of it is an option or a path.
+        ensure!(
+            !container.is_empty() && container.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+            "{container:?} is no container's ID"
+        );
+        let name = container;
+        let mut args = vec![
+            "--connection".to_owned(),
+            MACHINE_NAME.to_owned(),
+            "exec".to_owned(),
+        ];
+        for (key, value) in env {
+            args.extend(["--env".to_owned(), format!("{key}={value}")]);
+        }
+        args.push(name.to_owned());
+        args.extend(command.iter().cloned());
+        let program = command.first().map_or("", String::as_str);
+        // In the queue's directory, which no container mounts, and gone
+        // from it once open.
+        let log_path = queue_dir_of(&self.db).join(format!("container-exec-{container}.log"));
+        let log = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&log_path)
+            .with_context(|| format!("create {}", log_path.display()))?;
+        let _ = fs::remove_file(&log_path);
+        let mut child = std::process::Command::new(&self.podman.program)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log.try_clone()?)
+            .spawn()
+            .with_context(|| format!("run {}", self.podman.program.display()))?;
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if started.elapsed() >= limit {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("{program} in {name} did not end within {limit:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        if !status.success() {
+            let mut output = String::new();
+            let mut log = log;
+            let _ = std::io::Seek::rewind(&mut log);
+            let _ = std::io::Read::read_to_string(
+                &mut std::io::Read::take(&mut log, 4096),
+                &mut output,
+            );
+            bail!(
+                "{program} in {name} exited with {status}: {}",
+                output.trim()
             );
         }
         Ok(())
@@ -581,6 +912,31 @@ pub fn load_container_limits(host_wide: Option<&Path>) -> (ContainerLimits, Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The inspect of a running container gives its ID and the gate and
+    /// the turn's token its wrapper named; one that does not run, or text
+    /// of another form, gives none.
+    #[test]
+    fn an_inspect_gives_a_running_container_s_id_and_its_gate() {
+        assert_eq!(
+            parse_inspect(
+                "abc123 true [\"A=1\",\"DAGQ_SCCACHE_GATE=/q/runs/r1/sccache-gate.t1\",\"DAGQ_SCCACHE_TURN=t1\"]\n"
+            ),
+            Some((
+                "abc123".to_owned(),
+                Some("/q/runs/r1/sccache-gate.t1".to_owned()),
+                Some("t1".to_owned())
+            ))
+        );
+        assert_eq!(parse_inspect("abc123 true null"), None);
+        assert_eq!(
+            parse_inspect("abc123 true []"),
+            Some(("abc123".to_owned(), None, None))
+        );
+        for text in ["abc123 false []", "abc123 true", "", "abc123 true [1]"] {
+            assert_eq!(parse_inspect(text), None, "{text}");
+        }
+    }
 
     #[test]
     fn the_host_s_container_table_sets_the_limits_and_keeps_a_default_for_a_bad_value() {

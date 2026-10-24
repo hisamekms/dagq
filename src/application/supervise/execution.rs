@@ -36,6 +36,7 @@ mod agent_eval;
 pub(super) mod background;
 pub(super) mod claim_defer;
 mod container;
+mod container_sccache;
 mod deliver;
 mod e2e;
 mod eval_gate;
@@ -1098,6 +1099,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         verifier: ports.verifier.clone(),
         container: ports.container.clone(),
         run_containers: ports.run_containers.clone(),
+        container_servers: Default::default(),
         verification_tokens: ports.verification_tokens.clone(),
         verification_containers: ports.verification_containers.clone(),
         sessions: &sessions,
@@ -1272,6 +1274,9 @@ struct Supervisor<'a> {
     container: Arc<dyn crate::application::ContainerRuntime + Send + Sync>,
     /// The runs' containers ([`Ports::run_containers`]).
     run_containers: Arc<dyn crate::application::run_container::RunContainers>,
+    /// The answers to the requests of the runs' containers for their
+    /// sccache server under way.
+    container_servers: container_sccache::ContainerServers,
     /// The tokens of the landings' verifications
     /// ([`Ports::verification_tokens`]).
     verification_tokens: Arc<dyn crate::application::queue_broker::VerificationTokens>,
@@ -3571,6 +3576,8 @@ impl Supervisor<'_> {
     /// was asked, so the step is neither given up on nor taken for done.
     fn tick(&mut self, unsettled_only: bool) -> Result<()> {
         self.sample_load();
+        // A turn's container waits for its sccache server before its agent.
+        self.answer_sccache_requests();
         if !unsettled_only {
             self.start_waits();
         }

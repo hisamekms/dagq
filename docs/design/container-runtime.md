@@ -210,6 +210,7 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
 - buildの出力とworkerのcache: `dagq.toml`の`[container.build_output]`が名指すdirにrunごとのvolumeを、`[container.worker_cache]`が挙げるdirごとにqueueのvolumeをmountする（綴りと意味と既定の無しは`run_env`の各表のdoc comment）。
   runtimeは言語の道具を知らず、projectが`[run.env]`で道具をそこに向ける。
   workerのcacheは信頼せず、同じqueueのworker・resumeだけが共有する（ADR-t2257-1決定5）。
+- sccache: containerの中のserverを使う（[Run environment](supervisor-lifecycle/run-environment.md#sccacheのserver)）。
 - containerの中: `dagq relay turn`がagentの前後の手順を持ち（順は`infrastructure::container_turn`のdoc comment）、agentが終われば結果に依らず、run dirの事実のファイルを上の「git」の形で書く。
   agentのhomeはrun dirの下に置き、次のturnがsessionをresumeできる。
 - transcript: agentのhomeの`.claude`の下に、containerの中のcwd（clone）を名にしたprojectのdirでできる。
@@ -255,5 +256,4 @@ podmanがcontainerを起動しなかった（`podman_failed`）commandは判定�
 次の部品が揃ったら、それぞれが`ContainerRuntime`の答えを埋める。
 どれかが欠ければ使えないと答え、上の境界のまま控える。
 
-- containerの中のsccache（[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）。
 - verificationの保護されたcache。

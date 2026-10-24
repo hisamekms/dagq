@@ -9,10 +9,12 @@
 //! run's work the control side handed is applied to the clone and answered
 //! ([`restore_clone`]), a clone that cannot be restored running no agent;
 //! main's bundle the control side left in the run directory is fetched
-//! into the clone's [`CLONE_MAIN_REF`]; the forwarder starts on the
-//! container's loopback; the agent runs in the clone with [`turn_env`],
-//! made from the run token's file and the run; and whatever the agent did,
-//! the run branch's bundle, the clone's uncommitted work and the run's
+//! into the clone's [`CLONE_MAIN_REF`]; the gate of the container's
+//! sccache server is waited for when the supervisor starts one
+//! ([`sccache_env`]); the forwarder starts on the container's loopback;
+//! the agent runs in the clone with [`turn_env`], made from the run
+//! token's file and the run; and whatever the agent did, the run branch's
+//! bundle, the clone's uncommitted work and the run's
 //! state are written to the run directory, each to a temporary file
 //! renamed into place. Its exit code is the agent's. It writes nothing to
 //! its standard output, which is the agent's (the turn's output the
@@ -47,6 +49,10 @@ use crate::domain::run_clone::{
     TurnStart,
 };
 use crate::domain::run_container::{TOKEN_FILE, turn_env, verification_env};
+use crate::domain::sccache::{
+    CONTAINER_GATE_VAR, CONTAINER_TURN_VAR, ContainerGate, GUARD_PROGRAM_VAR, GateStep,
+    WRAPPER_VAR, container_agent_env, container_guard, container_request, gate_step,
+};
 
 /// How `dagq relay turn` runs.
 #[derive(Debug, Clone)]
@@ -87,6 +93,9 @@ pub fn run_turn(options: &TurnOptions, env: impl Fn(&str) -> Option<String>) -> 
     if let Err(error) = import_main(&options.clone, &options.run_dir) {
         eprintln!("dagq: main's bundle was not fetched into {CLONE_MAIN_REF}: {error:#}");
     }
+    // Before the agent: the server the supervisor starts in this
+    // container is up, or known not to be.
+    let sccache = sccache_env(&options.run_dir, &env, GATE_WAIT)?;
     let stop = Arc::new(AtomicBool::new(false));
     let forwarder = start_forwarder(options.port, stop.clone());
     let (program, args) = options
@@ -97,6 +106,10 @@ pub fn run_turn(options: &TurnOptions, env: impl Fn(&str) -> Option<String>) -> 
         .args(args)
         .current_dir(&options.clone)
         .envs(turn_env(&run, token))
+        // A turn whose sccache the supervisor handles was started without
+        // the image's `RUSTC_WRAPPER`, so the agent's is only the guard
+        // these give behind a started gate.
+        .envs(sccache)
         // The turn's prompt, which podman's `--interactive` passes on.
         .stdin(Stdio::inherit())
         .status()
@@ -120,6 +133,113 @@ pub fn run_turn(options: &TurnOptions, env: impl Fn(&str) -> Option<String>) -> 
         .code()
         .or_else(|| status.signal().map(|signal| 128 + signal))
         .unwrap_or(1))
+}
+
+/// How long the launcher waits for the gate of the container's sccache
+/// server before it writes its own and runs the agent without
+/// `RUSTC_WRAPPER`: longer than the supervisor takes to see the request
+/// (a pass) and start the server and make the guard in the container
+/// (its `podman exec`s), so a gate is missed only when no supervisor looks.
+pub const GATE_WAIT: Duration = Duration::from_secs(180);
+
+/// The agent's variables about sccache (ADR-t2114-4 decision 2), when the
+/// container's environment (read with `env`) names the gate of a server
+/// the supervisor starts ([`CONTAINER_GATE_VAR`]); none otherwise, the
+/// container's `[run.env]` left as it is. It leaves the request named by
+/// the turn's token ([`CONTAINER_TURN_VAR`], [`container_request`]) in the
+/// gate's directory, waits up to `wait` for
+/// the gate, writes its own where none came ([`gate_step`]), and gives the
+/// agent what the gate there says ([`container_agent_env`]): behind a
+/// started gate, the guard the supervisor made in the agent's home in
+/// `run_dir`. `Err` when no gate could be settled, which runs no agent.
+pub fn sccache_env(
+    run_dir: &Path,
+    env: impl Fn(&str) -> Option<String>,
+    wait: Duration,
+) -> Result<Vec<(String, String)>> {
+    let Some(gate_file) = env(CONTAINER_GATE_VAR) else {
+        return Ok(Vec::new());
+    };
+    let gate_file = PathBuf::from(gate_file);
+    let dir = gate_file
+        .parent()
+        .context("the sccache gate has no directory")?;
+    let program = env(GUARD_PROGRAM_VAR).unwrap_or_default();
+    // A request that cannot be left is waited out as any unanswered one.
+    let left = env(CONTAINER_TURN_VAR)
+        .as_deref()
+        .and_then(container_request)
+        .context("the turn has no token to name its request by")
+        .and_then(|name| write_file(dir, &name, b""));
+    if let Err(error) = left {
+        eprintln!("dagq: the request for the container's sccache server was not left: {error:#}");
+    }
+    let gate = wait_for_gate(&gate_file, wait)?;
+    if let ContainerGate::Failed(why) | ContainerGate::TimedOut(why) = &gate {
+        eprintln!("dagq: {why}; the agent compiles without {WRAPPER_VAR}");
+    }
+    let guard = container_guard(run_dir);
+    let guard = guard.to_str().context("the guard's path is not UTF-8")?;
+    Ok(container_agent_env(&program, &gate, guard))
+}
+
+/// The gate in `file` the launcher obeys: the one there within `wait`,
+/// else its own [`ContainerGate::TimedOut`] written where none is, else
+/// the one written there first. Its own names itself (a token no other
+/// gate has), so the supervisor records it once whenever it finds it.
+fn wait_for_gate(file: &Path, wait: Duration) -> Result<ContainerGate> {
+    let started = std::time::Instant::now();
+    loop {
+        // One there that cannot be read says nothing yet: it is waited for
+        // as an empty one.
+        let read = match fs::read_to_string(file) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(_) => Some(String::new()),
+        };
+        match gate_step(read.as_deref(), started.elapsed(), wait) {
+            GateStep::Wait => {}
+            GateStep::Obey(gate) => return Ok(gate),
+            GateStep::Claim => {
+                let gate = ContainerGate::TimedOut(format!(
+                    "the container's launcher found no sccache gate within {wait:?} (gate {})",
+                    uuid::Uuid::new_v4().simple()
+                ));
+                match write_new(file, gate.text().as_bytes()) {
+                    Ok(()) => return Ok(gate),
+                    // The supervisor's came meanwhile: that one is obeyed.
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        bail!("the sccache gate could not be written: {error}; no agent runs")
+                    }
+                }
+            }
+            GateStep::Abort(why) => bail!("{why}; no agent runs"),
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Write `bytes` as `path` only where nothing is there, whole: to a file
+/// of its own first, then linked to `path`, which fails where an entry is.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .map_or_else(Default::default, |name| name.to_string_lossy()),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut file| file.write_all(bytes))
+        .and_then(|()| fs::hard_link(&tmp, path));
+    let _ = fs::remove_file(&tmp);
+    written
 }
 
 /// A facts-only turn (`dagq relay turn --facts-only`): what the control

@@ -3517,6 +3517,7 @@ mod tests {
             worker_cache: &["/cache".to_owned()],
             limits: ContainerLimits::default(),
             env: &[],
+            unset_env: &[],
             command: &["claude".to_owned()],
         })
         .unwrap();

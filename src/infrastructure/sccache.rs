@@ -307,31 +307,36 @@ impl SccacheServer for SystemSccache {
             .dagq
             .as_deref()
             .context("no dagq binary to make the guard of")?;
-        // The run's directory is the worker's to write: its entries are
-        // reached through the directory's descriptor, never by a path a
-        // link could redirect (ADR-t813-3 decision 6).
-        let run_dir = Directory::open(dir).with_context(|| format!("open {}", dir.display()))?;
-        if run_dir
-            .read_link(GUARD_NAME)
-            .is_ok_and(|target| target == dagq)
-        {
-            return Ok(dir.join(GUARD_NAME));
-        }
-        // A link of its own renamed over the name: a turn and a job of the
-        // same run may make it at once.
-        let tmp = format!(".{GUARD_NAME}.{}.tmp", std::process::id());
-        let _ = run_dir.remove(&tmp);
-        run_dir
-            .symlink(dagq, &tmp)
-            .with_context(|| format!("link {tmp} in {} to {}", dir.display(), dagq.display()))?;
-        if let Err(error) = run_dir.rename(&tmp, &run_dir, GUARD_NAME) {
-            let _ = run_dir.remove(&tmp);
-            return Err(error)
-                .with_context(|| format!("rename to {GUARD_NAME} in {}", dir.display()));
-        }
-        let guard = dir.join(GUARD_NAME);
-        Ok(guard)
+        link_guard(dir, dagq)
     }
+}
+
+/// The guard in `dir`: a link named [`GUARD_NAME`] to the `dagq` binary
+/// `dagq`, kept when it is one already, else made anew: the host's guard in
+/// a run directory, and the guard a turn's container makes for its agent.
+pub fn link_guard(dir: &Path, dagq: &Path) -> Result<PathBuf> {
+    // The run's directory is the worker's to write: its entries are
+    // reached through the directory's descriptor, never by a path a
+    // link could redirect (ADR-t813-3 decision 6).
+    let run_dir = Directory::open(dir).with_context(|| format!("open {}", dir.display()))?;
+    if run_dir
+        .read_link(GUARD_NAME)
+        .is_ok_and(|target| target == dagq)
+    {
+        return Ok(dir.join(GUARD_NAME));
+    }
+    // A link of its own renamed over the name: a turn and a job of the
+    // same run may make it at once.
+    let tmp = format!(".{GUARD_NAME}.{}.tmp", std::process::id());
+    let _ = run_dir.remove(&tmp);
+    run_dir
+        .symlink(dagq, &tmp)
+        .with_context(|| format!("link {tmp} in {} to {}", dir.display(), dagq.display()))?;
+    if let Err(error) = run_dir.rename(&tmp, &run_dir, GUARD_NAME) {
+        let _ = run_dir.remove(&tmp);
+        return Err(error).with_context(|| format!("rename to {GUARD_NAME} in {}", dir.display()));
+    }
+    Ok(dir.join(GUARD_NAME))
 }
 
 /// The guard (ADR-t2086-1): `dagq` run by cargo as `RUSTC_WRAPPER` under

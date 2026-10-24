@@ -159,7 +159,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 
 ## sccacheのserver
 
-sccacheのserverはsupervisorがsandboxの外で起動して持ち、runtimeが`[run.env]`を渡すほかのprocessには、sandboxの中でも外でも起動させない（[ADR-t1215-1](../../adr/2026-10-02-t1215-1-supervisor-owns-the-sccache-server.md)、[ADR-t2086-1](../../adr/2026-10-08-t2086-1-no-runtime-process-starts-the-sccache-server.md)）。
+hostのsccacheのserverはsupervisorがsandboxの外で起動して持ち、runtimeが`[run.env]`を渡すほかのprocessには、sandboxの中でも外でも起動させない（[ADR-t1215-1](../../adr/2026-10-02-t1215-1-supervisor-owns-the-sccache-server.md)、[ADR-t2086-1](../../adr/2026-10-08-t2086-1-no-runtime-process-starts-the-sccache-server.md)）。
 clientが起動したserverはclientのsandboxを引き継いで他のrunのbuildも失敗させ、起動の記録も残さないため。
 適用先は渡し先(a)〜(d)と(a)の開き直し（providerを問わない）、着地前の再確認とe2eのコマンド。
 適用先には、どのprocessも開けない`SCCACHE_ERROR_LOG`を渡す（supervisor自身の起動には渡さない）。
@@ -169,9 +169,9 @@ guardはcompileごとにportを確かめ、listenしていれば`[run.env]`のsc
 listenしていないとき、確認の直後に止まったserverの起動を拒まれてclientが自分のerrorで失敗したときは、compilerを直接実行する。
 serverを確かめられないもの、guardを作れなかったもの、containerのverificationはwrapperを外してcacheなしでbuildを通し、eventに残す。
 supervisorが始めるものの前の確認は、居ないserverを起動する機会でもある。
-wrapperのturnの前・人の`integrate`・e2eのgateの確認とguardはportを見るだけで起動しない。
+hostのserverを、wrapperのturnの前・人の`integrate`・e2eのgateの確認とguardはportを見るだけで起動しない。
 runtimeの外からの起動までは防げず、下の検知が扱う。
-workerのcacheのdirは`dagq.toml`が与え、hostのcacheはcontainerに、workerのcacheはverificationにmountしない。
+workerのcontainerは`[run.env]`がsccacheを名指すときだけ、supervisorがagentより前にcontainerの中に起動したserverを使う（`domain::sccache::ContainerServer`）。
 
 ### 外部serverと失敗の偏り
 
@@ -191,7 +191,7 @@ supervisorが置換の起動を記録すると知らせが消え、人が別のs
 
 - 監視と再試行の入口は`supervise::host_ops::sccache`。
   drain中も監視し、待ちの経過は注入した時計で測る。
-- 判断はdomain、出どころと再起動の記録と確認はapplication、hostへの問い合わせと起動とguardのlinkはinfrastructureの、それぞれ`sccache`のmoduleが持つ。
+- 判断・記録と確認・hostへの問い合わせ・guardのlinkは各層の`sccache`のmoduleが持つ。
   再起動の失敗の通知は、稼働中とserver不在の両経路から同じ照合を通る。
   guardの適用はturnが`application::headless_session`、ほかは`[run.env]`を組む各所（review・`integrate`・recheck・着地の前のe2eの関門）。
 - doctor/statusの表示条件と読み取りは`application::sccache::add_diagnostics`。

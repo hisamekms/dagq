@@ -6,6 +6,13 @@
 //! `RUSTC_WRAPPER`, and one whose server was confirmed compiles through
 //! the guard, which runs the compiler itself should the server stop after
 //! the look ([`GuardLook`]).
+//!
+//! A worker's or a resume's turn in its container has a server of its own
+//! inside the container when `[run.env]` names sccache (ADR-t2114-4,
+//! ADR-t2257-1 decision 5): the supervisor starts it before the agent
+//! runs, its cache in the queue's worker cache ([`ContainerServer`]), and
+//! the container's launcher gives the agent the guard behind the gate the
+//! start left ([`ContainerGate`], [`gate_step`]).
 
 use std::path::Path;
 
@@ -25,6 +32,12 @@ pub const SCCACHE_SERVER_START_FAILED: &str =
     crate::domain::event_kind::EventKind::SccacheServerStartFailed.as_str();
 pub const SCCACHE_WRAPPER_REMOVED: &str =
     crate::domain::event_kind::EventKind::SccacheWrapperRemoved.as_str();
+/// The server of a run's container the control side started, or failed to
+/// (ADR-t2114-4 decision 1): events of the run, never the host server's.
+pub const SCCACHE_CONTAINER_SERVER_STARTED: &str =
+    crate::domain::event_kind::EventKind::SccacheContainerServerStarted.as_str();
+pub const SCCACHE_CONTAINER_SERVER_START_FAILED: &str =
+    crate::domain::event_kind::EventKind::SccacheContainerServerStartFailed.as_str();
 
 /// Process identity: `pid` plus `started_at` distinguishes reused PIDs.
 /// `started_at` is the host's C-locale `ps lstart` text, not a queue timestamp.
@@ -372,6 +385,358 @@ impl GuardStep {
     }
 }
 
+/// The variable that names sccache's local cache directory: the server of
+/// a run's container keeps its cache there.
+pub const CACHE_DIR_VAR: &str = "SCCACHE_DIR";
+
+/// The variable a turn's container is given when its server is to be
+/// started (ADR-t2114-4 decisions 1 and 2): the path of the turn's gate
+/// file in the run directory ([`container_gate`]), which the container's
+/// launcher waits for before it runs the agent and obeys ([`gate_step`]).
+pub const CONTAINER_GATE_VAR: &str = "DAGQ_SCCACHE_GATE";
+/// The variable a turn's container is given beside [`CONTAINER_GATE_VAR`]:
+/// the turn's own token, which no other turn of the run has and which
+/// names the turn's gate and the request its launcher leaves
+/// ([`container_gate`], [`container_request`]), so that an answer to one
+/// turn acts on no later turn's.
+pub const CONTAINER_TURN_VAR: &str = "DAGQ_SCCACHE_TURN";
+/// The start of the name of a turn's gate file in the run directory, the
+/// rest being the turn's token: written once per turn, whole, and only
+/// where none is (a file of its own linked to the name, which fails where
+/// one is), by the supervisor with its verdict or by the launcher that
+/// waited for none in time; the first one there is the turn's, and both
+/// obey it ([`ContainerGate`]).
+pub const CONTAINER_GATE_PREFIX: &str = "sccache-gate.";
+/// The start of the name of a request in the run directory, which the
+/// launcher leaves once it waits for the gate: the supervisor's sign that
+/// the turn's container runs and waits for its server. The rest of the
+/// name is the turn's token.
+pub const CONTAINER_REQUEST_PREFIX: &str = "sccache-request.";
+
+/// `prefix` and the token `turn`; `None` for a token that is empty or has
+/// anything but ASCII letters and digits.
+fn turn_file(prefix: &str, turn: &str) -> Option<String> {
+    (!turn.is_empty() && turn.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        .then(|| format!("{prefix}{turn}"))
+}
+
+/// The name of the gate of the turn whose token is `turn`
+/// ([`CONTAINER_GATE_PREFIX`]); `None` for a token that names none.
+pub fn container_gate(turn: &str) -> Option<String> {
+    turn_file(CONTAINER_GATE_PREFIX, turn)
+}
+
+/// The name of the request of the turn whose token is `turn`
+/// ([`CONTAINER_REQUEST_PREFIX`]); `None` for a token that names none.
+pub fn container_request(turn: &str) -> Option<String> {
+    turn_file(CONTAINER_REQUEST_PREFIX, turn)
+}
+
+/// The token of the turn the request `name` is of ([`container_request`]);
+/// `None` for a name that is no request's.
+pub fn request_turn(name: &str) -> Option<&str> {
+    name.strip_prefix(CONTAINER_REQUEST_PREFIX)
+        .filter(|turn| container_request(turn).is_some())
+}
+
+/// Whether `name` is the name of a turn's request ([`container_request`]).
+pub fn is_container_request(name: &str) -> bool {
+    request_turn(name).is_some()
+}
+
+/// Whether `name` is the name of a turn's gate ([`container_gate`]).
+pub fn is_container_gate(name: &str) -> bool {
+    name.strip_prefix(CONTAINER_GATE_PREFIX)
+        .is_some_and(|turn| container_gate(turn).is_some())
+}
+
+/// The guard of a turn's container in the run directory `run_dir`: a link
+/// to the container's `dagq` in the agent's home, which the supervisor
+/// makes in the container (`dagq relay guard`) before it opens the gate.
+pub fn container_guard(run_dir: &Path) -> std::path::PathBuf {
+    run_dir
+        .join(super::run_container::HOME_DIR)
+        .join(GUARD_NAME)
+}
+
+/// What the gate of a turn's container says, the one text both its
+/// writers and its launcher read the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainerGate {
+    /// The supervisor started the server and made the guard: the agent
+    /// compiles through the guard.
+    Started,
+    /// The supervisor could not start the server or make the guard (why):
+    /// the agent runs without `RUSTC_WRAPPER`.
+    Failed(String),
+    /// The launcher found no gate within its wait and wrote this one
+    /// (why): the agent runs without `RUSTC_WRAPPER`.
+    TimedOut(String),
+}
+
+impl ContainerGate {
+    /// The file's text: `started`, `failed: <why>` or `timed out: <why>`.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Started => "started".to_owned(),
+            Self::Failed(why) => format!("failed: {why}"),
+            Self::TimedOut(why) => format!("timed out: {why}"),
+        }
+    }
+
+    /// The gate a file's text says; `None` for an empty one (no writer
+    /// leaves one, so it is not settled). Any other text is
+    /// [`Self::Failed`], so that no text a worker left opens it wider.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        Some(if text == "started" {
+            Self::Started
+        } else if let Some(why) = text.strip_prefix("failed: ") {
+            Self::Failed(why.to_owned())
+        } else if let Some(why) = text.strip_prefix("timed out: ") {
+            Self::TimedOut(why.to_owned())
+        } else {
+            Self::Failed(format!("the gate {text:?} is not one"))
+        })
+    }
+}
+
+/// What the launcher's wait for the gate does next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateStep {
+    /// Look again.
+    Wait,
+    /// The gate is there: give the agent what it says.
+    Obey(ContainerGate),
+    /// None came within the wait: write [`ContainerGate::TimedOut`] where
+    /// none is, then obey whichever gate is there.
+    Claim,
+    /// A gate there that says nothing in time: run no agent (why), since
+    /// no environment would agree with what is recorded.
+    Abort(String),
+}
+
+/// The launcher's next step after `waited` of its wait `wait`, the gate
+/// file's text being `read` (`None` while there is none; an empty text
+/// for one that is there but cannot be read). A gate that says nothing is
+/// waited for up to twice the wait.
+pub fn gate_step(
+    read: Option<&str>,
+    waited: std::time::Duration,
+    wait: std::time::Duration,
+) -> GateStep {
+    match read.map(ContainerGate::parse) {
+        Some(Some(gate)) => GateStep::Obey(gate),
+        Some(None) if waited >= wait.saturating_mul(2) => {
+            GateStep::Abort(format!("the sccache gate stayed empty for {waited:?}"))
+        }
+        None if waited >= wait => GateStep::Claim,
+        _ => GateStep::Wait,
+    }
+}
+
+/// The variables the launcher of a turn's container gives the agent about
+/// sccache once it obeys `gate` (ADR-t2114-4 decision 2): always the
+/// [`REFUSED_ERROR_LOG`], so that no sccache it runs starts a server;
+/// behind [`ContainerGate::Started`] alone, the guard `guard` the
+/// supervisor made as `RUSTC_WRAPPER` and `program` as the sccache it
+/// compiles through. The guard looks at the server's port on the
+/// container's own loopback.
+pub fn container_agent_env(
+    program: &str,
+    gate: &ContainerGate,
+    guard: &str,
+) -> Vec<(String, String)> {
+    let target = SccacheTarget {
+        program: program.to_owned(),
+        port: DEFAULT_PORT,
+    };
+    guarded_env(&target, (*gate == ContainerGate::Started).then_some(guard))
+}
+
+/// What the supervisor does at a turn container's request, by the gate it
+/// finds there (`None` for none), once no record of the container is
+/// there yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestStep {
+    /// No gate yet: start the server, make the guard and write the gate.
+    Start,
+    /// A gate is the turn's already and nothing records it yet (the
+    /// launcher's timed out one, or the supervisor's own that a process
+    /// before this one wrote and did not record): record what it says.
+    Record(ContainerGate),
+    /// A gate being written: look again on the next pass.
+    Wait,
+}
+
+impl RequestStep {
+    pub fn of(gate: Option<&str>) -> Self {
+        match gate.map(ContainerGate::parse) {
+            None => Self::Start,
+            Some(Some(gate)) => Self::Record(gate),
+            Some(None) => Self::Wait,
+        }
+    }
+}
+
+/// The supervisor's verdict on a turn container's server: started only
+/// when the server started and the guard was made.
+pub fn container_verdict(
+    started: &Result<(), String>,
+    guard: &Result<(), String>,
+) -> ContainerGate {
+    match (started, guard) {
+        (Err(why), _) => ContainerGate::Failed(format!(
+            "the container's sccache server was not started: {why}"
+        )),
+        (Ok(()), Err(why)) => {
+            ContainerGate::Failed(format!("the guard was not made in the container: {why}"))
+        }
+        (Ok(()), Ok(())) => ContainerGate::Started,
+    }
+}
+
+/// How the supervisor's write of its gate went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateClaim {
+    /// Its gate is the turn's.
+    Won,
+    /// A gate was there first, with this text.
+    Lost(String),
+    /// None could be written (why): the launcher writes its own once its
+    /// wait ends, or runs no agent.
+    Failed(String),
+}
+
+/// Why the agent of a turn's container runs without `RUSTC_WRAPPER` once
+/// the supervisor wrote `verdict` as `claim` says, to record as
+/// `sccache_wrapper_removed`; `None` when it compiles through the guard or
+/// another writer records it. It agrees with the gate the launcher obeys:
+/// the supervisor's when it won, the launcher's timed out one when that
+/// was there first, and the launcher's timed out one to come (or no agent)
+/// when none could be written.
+pub fn removed_after(verdict: &ContainerGate, claim: &GateClaim) -> Option<String> {
+    match claim {
+        GateClaim::Won => match verdict {
+            ContainerGate::Started => None,
+            ContainerGate::Failed(why) | ContainerGate::TimedOut(why) => Some(why.clone()),
+        },
+        GateClaim::Lost(text) => match ContainerGate::parse(text) {
+            Some(ContainerGate::TimedOut(why)) => Some(why),
+            _ => None,
+        },
+        GateClaim::Failed(why) => Some(format!(
+            "the sccache gate could not be written: {why}; the agent runs without {WRAPPER_VAR}, or none runs"
+        )),
+    }
+}
+
+/// What the supervisor does about sccache for a turn's container of a
+/// worker or a resume (ADR-t2114-4 decisions 1 to 3, ADR-t2257-1
+/// decision 5), from the run's `[run.env]` and the directories the queue's
+/// worker cache is mounted at.
+///
+/// The container never reaches the host's server or its cache. Only the
+/// supervisor starts the container's server (ADR-t2114-4 decision 1):
+/// the session wrapper gives the container a token of the turn's own and
+/// the path of the gate it names, and clears the earlier turns' gates and
+/// requests; the container's launcher leaves the request the token names
+/// once it waits; the supervisor, at a request of a run it leases, starts
+/// the server and makes the guard in the container by `podman exec`,
+/// writes its verdict as the gate of that container's turn, records the
+/// start or its failure on the run (`sccache_container_server_*`), and
+/// takes away only the requests it listed before it looked at the
+/// container. What an answer writes and takes is its turn's, never a later
+/// turn's, whenever that turn's container replaces the one answered. The
+/// gate is written once ([`CONTAINER_GATE_PREFIX`]): the launcher that
+/// waited for none in time writes its own, and the event follows whichever
+/// gate is the turn's ([`removed_after`]). The agent is always refused the
+/// server's start and compiles through the guard only behind a started
+/// gate ([`container_agent_env`]); otherwise it runs without
+/// `RUSTC_WRAPPER`, the image's too (the container is started without it),
+/// recorded as `sccache_wrapper_removed`. A `[run.env]`
+/// naming no sccache is given as it is, and a verification's container
+/// never has a server (ADR-t2114-4 decision 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainerServer {
+    /// `[run.env]` names no sccache: no server is started and the
+    /// environment is left as it is.
+    NotNamed,
+    /// Start the server in the container with `env` (its `[run.env]`
+    /// without `RUSTC_WRAPPER` and [`ERROR_LOG_VAR`], with the idle timeout
+    /// that never stops it) before the agent runs.
+    Start {
+        target: SccacheTarget,
+        env: Vec<(String, String)>,
+    },
+    /// No server is started and the agent runs without `RUSTC_WRAPPER`,
+    /// recorded with `why`: the cache directory the server would use is
+    /// not in the queue's worker cache, so it would be the run's own (no
+    /// [`CACHE_DIR_VAR`] puts it in the agent's home) or a directory no
+    /// other run's server shares.
+    Refused { target: SccacheTarget, why: String },
+}
+
+impl ContainerServer {
+    /// The plan of a turn's container whose `[run.env]` is `run_env` and
+    /// whose queue's worker cache is mounted at `worker_cache`. The
+    /// server's cache directory ([`CACHE_DIR_VAR`]) must be one of those
+    /// directories or under one: the queue's shared worker cache, never
+    /// copied for a run from a seed nor gathered into one server.
+    pub fn of(run_env: &[(String, String)], worker_cache: &[String]) -> Self {
+        let Some(target) = SccacheTarget::of_pairs(run_env) else {
+            return Self::NotNamed;
+        };
+        let dir = run_env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == CACHE_DIR_VAR)
+            .map(|(_, value)| value.as_str());
+        let Some(dir) = dir.filter(|dir| !dir.is_empty()) else {
+            return Self::Refused {
+                target,
+                why: format!(
+                    "[run.env] sets no {CACHE_DIR_VAR}: the container's sccache server would keep its cache in the run's home, not the queue's worker cache"
+                ),
+            };
+        };
+        if !worker_cache
+            .iter()
+            .any(|mount| within(Path::new(dir), Path::new(mount)))
+        {
+            return Self::Refused {
+                target,
+                why: format!(
+                    "{CACHE_DIR_VAR} {dir} is not in a directory of [container.worker_cache]: the container's sccache server keeps its cache only in the queue's worker cache"
+                ),
+            };
+        }
+        let mut env: Vec<(String, String)> = run_env
+            .iter()
+            .filter(|(key, _)| {
+                ![WRAPPER_VAR, ERROR_LOG_VAR, IDLE_TIMEOUT_VAR].contains(&key.as_str())
+            })
+            .cloned()
+            .collect();
+        env.push((IDLE_TIMEOUT_VAR.to_owned(), IDLE_TIMEOUT.to_owned()));
+        Self::Start { target, env }
+    }
+}
+
+/// Whether the absolute path `path` is `dir` or under it, by whole
+/// components: `/cache/sccache` is under `/cache`, `/cachex` is not, and a
+/// `..` component is never under anything.
+fn within(path: &Path, dir: &Path) -> bool {
+    use std::path::Component;
+    path.is_absolute()
+        && dir.is_absolute()
+        && !path.components().any(|part| part == Component::ParentDir)
+        && path.starts_with(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +997,234 @@ mod tests {
         assert_eq!(SCCACHE_SERVER_STARTED, "sccache_server_started");
         assert_eq!(SCCACHE_SERVER_START_FAILED, "sccache_server_start_failed");
         assert_eq!(SCCACHE_WRAPPER_REMOVED, "sccache_wrapper_removed");
+    }
+
+    fn pairs(env: &[(&str, &str)]) -> Vec<(String, String)> {
+        env.iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    /// The container's server starts only for a `[run.env]` naming sccache
+    /// whose cache directory is in the queue's worker cache, with the
+    /// environment that lets it start and never stops it on idle.
+    #[test]
+    fn the_container_s_server_starts_only_with_its_cache_in_the_queue_s_worker_cache() {
+        let cache = ["/cache/registry".to_owned(), "/cache/sccache".to_owned()];
+        assert_eq!(
+            ContainerServer::of(&pairs(&[("CARGO_BUILD_JOBS", "2")]), &cache),
+            ContainerServer::NotNamed
+        );
+        assert_eq!(
+            ContainerServer::of(&pairs(&[("RUSTC_WRAPPER", "cachepot")]), &cache),
+            ContainerServer::NotNamed
+        );
+        let named = pairs(&[
+            ("RUSTC_WRAPPER", "sccache"),
+            ("SCCACHE_SERVER_PORT", "4300"),
+            ("SCCACHE_ERROR_LOG", "/tmp/log"),
+            ("SCCACHE_IDLE_TIMEOUT", "600"),
+            ("SCCACHE_DIR", "/cache/sccache/dagq"),
+        ]);
+        let ContainerServer::Start { target, env } = ContainerServer::of(&named, &cache) else {
+            panic!("not started")
+        };
+        assert_eq!(target.port, 4300);
+        assert_eq!(
+            env,
+            pairs(&[
+                ("SCCACHE_SERVER_PORT", "4300"),
+                ("SCCACHE_DIR", "/cache/sccache/dagq"),
+                ("SCCACHE_IDLE_TIMEOUT", "0"),
+            ])
+        );
+        for dir in [
+            None,
+            Some(""),
+            Some("/cachex"),
+            Some("/cache/sccache/../../etc"),
+            Some("cache/sccache"),
+        ] {
+            let mut env = pairs(&[("RUSTC_WRAPPER", "/usr/bin/sccache")]);
+            if let Some(dir) = dir {
+                env.push(("SCCACHE_DIR".to_owned(), dir.to_owned()));
+            }
+            let plan = ContainerServer::of(&env, &cache);
+            assert!(
+                matches!(&plan, ContainerServer::Refused { target, why }
+                    if target.port == DEFAULT_PORT && why.contains("SCCACHE_DIR")),
+                "{dir:?}: {plan:?}"
+            );
+        }
+        // No worker cache mounted: no shared directory to keep it in.
+        assert!(matches!(
+            ContainerServer::of(&named, &[]),
+            ContainerServer::Refused { .. }
+        ));
+    }
+
+    /// A turn's request and gate are named by its token alone: one that
+    /// could name another entry (a path, a dot) names neither.
+    #[test]
+    fn a_turn_s_request_and_gate_are_named_by_its_token_alone() {
+        assert_eq!(
+            container_request("0123abcd").as_deref(),
+            Some("sccache-request.0123abcd")
+        );
+        for turn in ["", "../gate", "a.b", "a/b", "a b"] {
+            assert_eq!(container_request(turn), None, "{turn:?}");
+        }
+        assert_eq!(
+            container_gate("0123abcd").as_deref(),
+            Some("sccache-gate.0123abcd")
+        );
+        assert_eq!(container_gate("a/b"), None);
+        assert!(is_container_request("sccache-request.0123abcd"));
+        assert_eq!(request_turn("sccache-request.0123abcd"), Some("0123abcd"));
+        assert!(is_container_gate("sccache-gate.0123abcd"));
+        for name in [
+            "sccache-request",
+            "sccache-request.",
+            "sccache-request.a.tmp",
+            ".sccache-request.a",
+            "sccache-gate.a",
+        ] {
+            assert!(!is_container_request(name), "{name}");
+        }
+        for name in [
+            "sccache-gate",
+            "sccache-gate.",
+            ".sccache-gate.a.b.tmp",
+            "sccache-request.a",
+        ] {
+            assert!(!is_container_gate(name), "{name}");
+        }
+    }
+
+    /// The gate's text reads back as written, an empty one is being
+    /// written, and any other text keeps the gate closed.
+    #[test]
+    fn the_gate_reads_back_and_any_other_text_keeps_it_closed() {
+        for gate in [
+            ContainerGate::Started,
+            ContainerGate::Failed("no server".to_owned()),
+            ContainerGate::TimedOut("no gate in 180s".to_owned()),
+        ] {
+            assert_eq!(ContainerGate::parse(&gate.text()), Some(gate.clone()));
+        }
+        assert_eq!(ContainerGate::parse(" \n"), None);
+        assert_eq!(
+            ContainerGate::parse("started\n"),
+            Some(ContainerGate::Started)
+        );
+        for text in ["Started", "started now", "open"] {
+            assert!(
+                matches!(ContainerGate::parse(text), Some(ContainerGate::Failed(why)) if why.contains(text)),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            container_guard(Path::new("/q/runs/r1")),
+            Path::new("/q/runs/r1/container-home/dagq-rustc-wrapper")
+        );
+    }
+
+    /// Acceptance (2) of task 2181: the launcher waits for the gate, writes
+    /// its own once the wait ends, waits for a gate being written up to
+    /// twice the wait, and gives the agent the refused log always and the
+    /// guard only behind a started gate. The times are values.
+    #[test]
+    fn the_launcher_waits_for_the_gate_and_guards_the_agent_only_behind_a_started_one() {
+        use std::time::Duration;
+        let wait = Duration::from_secs(180);
+        let at = Duration::from_secs;
+        assert_eq!(gate_step(None, at(179), wait), GateStep::Wait);
+        assert_eq!(gate_step(None, wait, wait), GateStep::Claim);
+        assert_eq!(
+            gate_step(Some("started"), at(999), wait),
+            GateStep::Obey(ContainerGate::Started)
+        );
+        assert_eq!(gate_step(Some(""), at(359), wait), GateStep::Wait);
+        assert!(matches!(
+            gate_step(Some(""), at(360), wait),
+            GateStep::Abort(_)
+        ));
+
+        let refused = ("SCCACHE_ERROR_LOG".to_owned(), REFUSED_ERROR_LOG.to_owned());
+        let guard = "/q/runs/r1/container-home/dagq-rustc-wrapper";
+        assert_eq!(
+            container_agent_env("sccache", &ContainerGate::Started, guard),
+            [
+                refused.clone(),
+                ("RUSTC_WRAPPER".to_owned(), guard.to_owned()),
+                ("DAGQ_SCCACHE_PROGRAM".to_owned(), "sccache".to_owned()),
+            ]
+        );
+        for gate in [
+            ContainerGate::Failed("x".to_owned()),
+            ContainerGate::TimedOut("y".to_owned()),
+        ] {
+            assert_eq!(
+                container_agent_env("sccache", &gate, guard),
+                std::slice::from_ref(&refused),
+                "{gate:?}"
+            );
+        }
+    }
+
+    /// Acceptance (3) of task 2181: what the supervisor records follows the
+    /// gate the launcher obeys. Its own verdict when it won; the
+    /// launcher's timed out gate when that was there first, late as the
+    /// supervisor may be; the launcher's gate to come (or no agent) when
+    /// its own could not be written.
+    #[test]
+    fn the_supervisor_records_what_the_gate_the_launcher_obeys_says() {
+        let ok = Ok(());
+        let no = |why: &str| Err(why.to_owned());
+        assert_eq!(container_verdict(&ok, &ok), ContainerGate::Started);
+        assert!(
+            matches!(container_verdict(&no("exit 2"), &ok), ContainerGate::Failed(why) if why.contains("not started: exit 2"))
+        );
+        assert!(
+            matches!(container_verdict(&ok, &no("a directory")), ContainerGate::Failed(why) if why.contains("guard was not made in the container: a directory"))
+        );
+
+        let started = ContainerGate::Started;
+        let failed = ContainerGate::Failed("the guard was not made".to_owned());
+        let timed_out = ContainerGate::TimedOut("no gate within 180s".to_owned());
+        assert_eq!(removed_after(&started, &GateClaim::Won), None);
+        assert_eq!(
+            removed_after(&failed, &GateClaim::Won).as_deref(),
+            Some("the guard was not made")
+        );
+        // The launcher's gate came first: its agent has no wrapper,
+        // whatever the supervisor started.
+        assert_eq!(
+            removed_after(&started, &GateClaim::Lost(timed_out.text())).as_deref(),
+            Some("no gate within 180s")
+        );
+        for there in [started.text(), failed.text(), String::new()] {
+            assert_eq!(
+                removed_after(&started, &GateClaim::Lost(there.clone())),
+                None,
+                "{there}"
+            );
+        }
+        assert!(
+            removed_after(&started, &GateClaim::Failed("EACCES".to_owned()))
+                .is_some_and(|why| why.contains("EACCES"))
+        );
+
+        // At a request: no gate is a start; a gate no record has yet
+        // (the launcher's, or one a process before this one wrote) is
+        // recorded as it says; one that says nothing is looked at again.
+        assert_eq!(RequestStep::of(None), RequestStep::Start);
+        for gate in [started, failed, timed_out] {
+            assert_eq!(
+                RequestStep::of(Some(&gate.text())),
+                RequestStep::Record(gate.clone())
+            );
+        }
+        assert_eq!(RequestStep::of(Some("")), RequestStep::Wait);
     }
 }

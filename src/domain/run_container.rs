@@ -84,11 +84,6 @@ pub const AGENT: &str = "claude";
 /// [`super::broker_relay::QUEUE_LABEL`]).
 pub const RUN_LABEL: &str = "dagq.run";
 
-/// The variable a turn's container is not given from `[run.env]`: a
-/// compiler wrapper names a server of the host's, which the container
-/// cannot reach (the sccache inside the container is a later part, ADR-t2114-4).
-pub const WITHOUT_ENV: [&str; 1] = ["RUSTC_WRAPPER"];
-
 /// Take the sccache wrapper out of `env`, the `[run.env]` of a
 /// verification in the container: until a protected cache exists, it
 /// compiles without one (ADR-t2114-4 decision 4). Only a `RUSTC_WRAPPER`
@@ -203,6 +198,10 @@ pub struct WorkerContainer<'a> {
     pub limits: ContainerLimits,
     /// The variables of the agent: none holds a secret.
     pub env: &'a [(String, String)],
+    /// The variables the container is started without whatever its image
+    /// sets (`--unsetenv`): `RUSTC_WRAPPER` of a turn whose sccache the
+    /// supervisor handles, which only the launcher gives the agent.
+    pub unset_env: &'a [&'a str],
     /// What the container runs: [`launcher_command`].
     pub command: &'a [String],
 }
@@ -249,6 +248,12 @@ pub fn worker_run_args(container: &WorkerContainer<'_>) -> Result<Vec<String>, S
     // The turn's prompt is podman's standard input, which only
     // `--interactive` hands the container's launcher and so the agent.
     args.extend(["--interactive".to_owned(), "--workdir".to_owned(), clone]);
+    for key in container.unset_env {
+        if key.is_empty() || key.contains('=') {
+            return Err(format!("{key:?} cannot name a variable of the container"));
+        }
+        args.extend(["--unsetenv".to_owned(), (*key).to_owned()]);
+    }
     finish_args(&mut args, container.env, container.image, container.command)?;
     Ok(args)
 }
@@ -683,6 +688,7 @@ mod tests {
             worker_cache: &[],
             limits: ContainerLimits::default(),
             env: &env,
+            unset_env: &[],
             command: &command,
         };
         let args = worker_run_args(&container).unwrap();
@@ -743,6 +749,28 @@ mod tests {
             })
             .is_err()
         );
+        // A variable the image sets is unset before the container's own
+        // are given; one that is no variable's name is refused.
+        let unset = worker_run_args(&WorkerContainer {
+            unset_env: &["RUSTC_WRAPPER"],
+            ..container.clone()
+        })
+        .unwrap();
+        assert_eq!(values(&unset, "--unsetenv"), ["RUSTC_WRAPPER"]);
+        assert!(
+            unset.iter().position(|arg| arg == "--unsetenv")
+                < unset.iter().position(|arg| arg == "--env")
+        );
+        for bad in ["", "A=B"] {
+            assert!(
+                worker_run_args(&WorkerContainer {
+                    unset_env: &[bad],
+                    ..container.clone()
+                })
+                .is_err(),
+                "{bad:?}"
+            );
+        }
         let bad_env = vec![("A=B".to_owned(), "x".to_owned())];
         assert!(
             worker_run_args(&WorkerContainer {
@@ -774,6 +802,7 @@ mod tests {
             worker_cache: &dirs,
             limits: ContainerLimits::default(),
             env: &[],
+            unset_env: &[],
             command: &command,
         };
         let args = worker_run_args(&container).unwrap();

@@ -402,6 +402,39 @@ pub fn record_wrapper_removed(
     }
 }
 
+/// Record the supervisor's start of the sccache server in the turn
+/// container `container` of run `run` on `port` (ADR-t2114-4 decision 1):
+/// `sccache_container_server_started`, or
+/// `sccache_container_server_start_failed` with why (`reason`), each with
+/// `at` (Unix seconds) and the container's `fields`. Events of the run,
+/// which no look at the host's server reads; a failure to record is only
+/// logged.
+pub fn record_container_server(
+    events: &(impl super::actor_executor::ExecutorEvents + ?Sized),
+    run: &crate::domain::RunId,
+    at: i64,
+    port: u16,
+    container: &str,
+    started: Result<(), String>,
+    fields: Value,
+) {
+    let mut payload = json!({"at": at, "port": port, "container": container});
+    let kind = match &started {
+        Ok(()) => EventKind::SccacheContainerServerStarted,
+        Err(why) => {
+            tracing::warn!(run_id = %run, "run {run}: the sccache server of its container {container} was not started: {why}");
+            payload["reason"] = json!(why);
+            EventKind::SccacheContainerServerStartFailed
+        }
+    };
+    if let (Some(payload), Some(fields)) = (payload.as_object_mut(), fields.as_object()) {
+        payload.extend(fields.clone());
+    }
+    if let Err(error) = events.record_agent_event(Some(run), kind, payload) {
+        tracing::warn!(run_id = %run, error = %format_args!("{error:#}"), "{} could not be recorded: {error:#}", kind.as_str());
+    }
+}
+
 /// How the log names the process of `fields`: its job, or its turn.
 fn process_name(fields: &Value) -> String {
     match (fields["job"].as_str(), fields["turn"].as_u64()) {

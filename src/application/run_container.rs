@@ -4,7 +4,11 @@
 //! instead of a process of the host ([`PodmanActorExecutor`]), through the
 //! [`RunContainers`] port, which makes the machine, the image, the run's
 //! relay, its build output and its queue's worker cache ready, hands the run token over as a file
-//! of the run directory, starts `podman` and removes a run's container.
+//! of the run directory, starts `podman`, starts the container's sccache
+//! server and makes its guard at the supervisor's call when `[run.env]`
+//! names sccache
+//! ([`ContainerServer`](crate::domain::sccache::ContainerServer)) and
+//! removes a run's container.
 //!
 //! The session wrapper stays on the host (the control side): it reads the
 //! turn's output and the run's files as for a turn on the host, and the
@@ -20,6 +24,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use serde_json::json;
 
 use super::actor_executor::{
     ActorExecutionSpec, ActorExecutor, ActorHandle, ActorProgram, EnforcementLevel,
@@ -32,10 +37,13 @@ use crate::domain::local_checks;
 use crate::domain::podman_machine::QueueKey;
 use crate::domain::queue_service::{CLIENT_ENV, CREDENTIAL_FILE_ENV, Principal};
 use crate::domain::run_container::{
-    AGENT, ContainerLimits, HOME_DIR, WITHOUT_ENV, WorkerContainer, launcher_command,
-    worker_run_args,
+    AGENT, ContainerLimits, HOME_DIR, WorkerContainer, launcher_command, worker_run_args,
 };
-use crate::domain::{ActorRole, CommitSha, Provider, RunId, TaskRun};
+use crate::domain::sccache::{
+    CONTAINER_GATE_VAR, CONTAINER_TURN_VAR, ContainerGate, ContainerServer, ERROR_LOG_VAR,
+    GUARD_PROGRAM_VAR, GateClaim, REFUSED_ERROR_LOG, WRAPPER_VAR, container_gate,
+};
+use crate::domain::{ActorRole, CommitSha, EventKind, Provider, RunId, TaskRun};
 
 /// What a turn's container runs with, once [`RunContainers::prepare`] made
 /// its parts ready.
@@ -57,6 +65,19 @@ pub struct PreparedRun {
     pub run_env: Vec<(String, String)>,
     /// The limits of the container (`host.toml`).
     pub limits: ContainerLimits,
+}
+
+/// A run's turn container that runs: its name, its ID, which no other
+/// container of the run has (each turn's is made anew), and the sccache
+/// gate and the turn's token its wrapper gave it ([`CONTAINER_GATE_VAR`],
+/// [`CONTAINER_TURN_VAR`]), `None` for a turn whose server is not to be
+/// started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningContainer {
+    pub name: String,
+    pub id: String,
+    pub gate: Option<String>,
+    pub turn: Option<String>,
 }
 
 /// The containers of the runs of one queue in the dagq machine.
@@ -93,6 +114,79 @@ pub trait RunContainers: Send + Sync {
     /// exited with an error or past its limit); none runs on the host
     /// instead.
     fn facts_turn(&self, run: &TaskRun) -> Result<()>;
+    /// Remove the sccache gates and the requests earlier turns left in the
+    /// run directory `run_dir` ([`container_gate`] and
+    /// [`container_request`](crate::domain::sccache::container_request)),
+    /// a link there removed, never followed, and give the token of the turn
+    /// about to start, which no earlier turn had ([`CONTAINER_TURN_VAR`]):
+    /// what the wrapper does before a turn whose container's server is to
+    /// be started.
+    fn clear_sccache(&self, run_dir: &Path) -> Result<String> {
+        let _ = run_dir;
+        Ok("turn".to_owned())
+    }
+    /// The names of the requests the launchers of turns left in `run_dir`
+    /// for their server (regular files, a link not followed), sorted.
+    fn sccache_requests(&self, run_dir: &Path) -> Result<Vec<String>> {
+        let _ = run_dir;
+        Ok(Vec::new())
+    }
+    /// Remove the requests `names` in `run_dir`, once answered; one not
+    /// there is so already.
+    fn take_sccache_requests(&self, run_dir: &Path, names: &[String]) -> Result<()> {
+        let _ = (run_dir, names);
+        Ok(())
+    }
+    /// The turn container of `run` when it runs; `None` when none runs,
+    /// and `Err` when that cannot be told.
+    fn running_container(&self, run: &RunId) -> Result<Option<RunningContainer>> {
+        let _ = run;
+        Ok(None)
+    }
+    /// What `[run.env]` and the worker cache of `dagq.toml` make of the
+    /// sccache of `run`'s turn container ([`ContainerServer::of`]).
+    fn sccache_plan(&self, run: &TaskRun) -> Result<ContainerServer> {
+        let _ = run;
+        Ok(ContainerServer::NotNamed)
+    }
+    /// Start the sccache server in the running container of the ID
+    /// `container` (ADR-t2114-4 decision 1): `podman exec` `program
+    /// --start-server` in it with `env` (the server's own environment);
+    /// by its ID, so that no later turn's container of the same name is
+    /// reached. `Err` says why no server was started.
+    fn start_sccache(
+        &self,
+        container: &str,
+        program: &str,
+        env: &[(String, String)],
+    ) -> Result<()> {
+        let _ = (program, env);
+        bail!("this process starts no sccache server in the container {container}")
+    }
+    /// Make the guard of the running container of the ID `container` in
+    /// its agent's home under `run_dir`
+    /// ([`container_guard`](crate::domain::sccache::container_guard)):
+    /// `podman exec` `dagq relay guard` in it, a link to the container's
+    /// own `dagq`.
+    fn make_sccache_guard(&self, container: &str, run_dir: &Path) -> Result<()> {
+        let _ = run_dir;
+        bail!("this process makes no sccache guard in the container {container}")
+    }
+    /// Write `gate` as the sccache gate `name` (a turn's,
+    /// [`container_gate`]) of `run_dir` only where none is there, whole (a
+    /// file of its own linked to the name), following no link; the text of
+    /// the one there first otherwise, read through a descriptor that
+    /// follows no link and does not block.
+    fn claim_sccache_gate(&self, run_dir: &Path, name: &str, gate: &ContainerGate) -> GateClaim {
+        let _ = (run_dir, name, gate);
+        GateClaim::Failed("this process writes no sccache gate".to_owned())
+    }
+    /// The text of the sccache gate `name` in `run_dir`, `None` when there
+    /// is none, read as [`Self::claim_sccache_gate`] reads one.
+    fn read_sccache_gate(&self, run_dir: &Path, name: &str) -> Result<Option<String>> {
+        let _ = (run_dir, name);
+        Ok(None)
+    }
 }
 
 /// One verification of `integrate` in the container, once
@@ -257,6 +351,17 @@ pub struct PodmanActorExecutor<'a> {
     spawner: &'a dyn Spawner,
     service: &'a dyn ServiceAccess,
     containers: &'a dyn RunContainers,
+    sccache: Option<SccacheRecords<'a>>,
+}
+
+/// Where the executor records an agent's run without `RUSTC_WRAPPER`, and
+/// what the record says of the turn.
+#[derive(Clone, Copy)]
+pub struct SccacheRecords<'a> {
+    pub events: &'a dyn super::actor_executor::ExecutorEvents,
+    /// When the turn starts, in Unix seconds.
+    pub at: i64,
+    pub turn: u64,
 }
 
 impl<'a> PodmanActorExecutor<'a> {
@@ -275,6 +380,32 @@ impl<'a> PodmanActorExecutor<'a> {
             spawner,
             service,
             containers,
+            sccache: None,
+        }
+    }
+
+    /// Record the agent's run without `RUSTC_WRAPPER` of a turn whose
+    /// `[run.env]` keeps the container's server from starting in
+    /// `records`; without, it is only logged.
+    pub fn with_sccache_records(mut self, records: SccacheRecords<'a>) -> Self {
+        self.sccache = Some(records);
+        self
+    }
+
+    fn wrapper_removed(&self, run: &RunId, port: u16, why: &str) {
+        match &self.sccache {
+            Some(records) => super::sccache::record_wrapper_removed(
+                records.events,
+                run,
+                records.at,
+                "wrapper",
+                port,
+                why,
+                json!({"turn": records.turn}),
+            ),
+            None => {
+                tracing::warn!(run_id = %run, "run {run}: its turn's container runs without {WRAPPER_VAR}: {why}")
+            }
         }
     }
 }
@@ -347,7 +478,24 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
             .containers
             .prepare_run_dir(run_dir, &credential)
             .map_err(|error| anyhow!("hand the run token to the container: {error:#}"))?;
-        let mut env = turn_variables(&prepared.run_env, &agent);
+        let mut plan = ContainerServer::of(&prepared.run_env, &prepared.worker_cache);
+        // A gate or request an earlier turn left is not this turn's.
+        let mut turn = String::new();
+        if let ContainerServer::Start { target, .. } = &plan {
+            match self.containers.clear_sccache(run_dir) {
+                Ok(token) => turn = token,
+                Err(error) => {
+                    plan = ContainerServer::Refused {
+                        target: target.clone(),
+                        why: format!(
+                            "the sccache gate an earlier turn left could not be removed: {error:#}"
+                        ),
+                    };
+                }
+            }
+        }
+        let mut env = turn_variables(&prepared.run_env, &agent, &plan);
+        env.extend(sccache_variables(&plan, run_dir, &turn)?);
         env.extend(actor.env());
         env.push(super::actor_executor::local_checks_env(run)?);
         env.push((
@@ -390,6 +538,7 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
             worker_cache: &prepared.worker_cache,
             limits: prepared.limits,
             env: &env,
+            unset_env: unset_variables(&plan),
             command: &command,
         })
         .map_err(|why| anyhow!("the run's container cannot be made: {why}"))?;
@@ -408,19 +557,226 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
             .spawner
             .spawn(&podman, Streams::Files { stdout, stderr })
             .map_err(|error| anyhow!("start the run's container with podman: {error:#}"))?;
+        // A server to start is the supervisor's, at the launcher's request
+        // (ADR-t2114-4 decision 1).
+        if let ContainerServer::Refused { target, why } = &plan {
+            self.wrapper_removed(run.id(), target.port, why);
+        }
         Ok(ActorHandle::Process(child))
     }
 }
 
+/// Answer the request the launcher of `run`'s turn container left for its
+/// sccache server, as the supervisor that leases `run` does (ADR-t2114-4
+/// decision 1), recording on `queue` at `at` (Unix seconds).
+///
+/// Only the request of a running container its wrapper gave this run's
+/// gate of its turn, both named by that turn's token ([`container_gate`],
+/// [`container_request`]), is served, and once: one already recorded (by
+/// its ID) is not started again, whatever the worker leaves in its run
+/// directory. With no gate there, it starts the server and makes the guard
+/// in the container by its ID, writes its verdict as that turn's gate
+/// where none is while the same container still runs, and records the
+/// start or its failure and, as [`removed_after`] says of the gate that is
+/// the turn's, the agent's run without `RUSTC_WRAPPER`. A gate there that
+/// nothing records yet (the launcher's timed out one, or one an earlier
+/// process wrote) is recorded as it says. Once no container runs, only the
+/// launcher's timed out gate of a turn that ended is left to record, once
+/// by the gate's own token and of one turn a pass; while one runs, another
+/// turn's request is only taken away. The requests listed before the
+/// container is looked at are taken
+/// away once answered, and no other. What it writes and takes is the
+/// answered turn's alone, so a next turn's container that replaces it at
+/// any point (its gate and request named by its own token) is that turn's
+/// to answer. An error leaves the requests for the next pass.
+pub fn serve_sccache_request<Q: super::RunLog + ?Sized>(
+    containers: &dyn RunContainers,
+    queue: &Q,
+    run: &TaskRun,
+    at: i64,
+) -> Result<()> {
+    use crate::domain::sccache::{
+        DEFAULT_PORT, RequestStep, container_request, container_verdict, removed_after,
+        request_turn,
+    };
+    let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+    // Listed before the container is looked at: each is of the container
+    // found then or of a turn that ended before it.
+    let requests = containers.sccache_requests(run_dir)?;
+    let take = || containers.take_sccache_requests(run_dir, &requests);
+    let events = queue.run_events(run.id())?;
+    let recorded = |key: &str, value: &str| {
+        events.iter().any(|event| {
+            [
+                EventKind::SccacheContainerServerStarted,
+                EventKind::SccacheContainerServerStartFailed,
+                EventKind::SccacheWrapperRemoved,
+            ]
+            .iter()
+            .any(|kind| event.kind == *kind)
+                && event.payload[key] == value
+        })
+    };
+    let port = || -> Result<u16> {
+        Ok(match containers.sccache_plan(run)? {
+            ContainerServer::Start { target, .. } | ContainerServer::Refused { target, .. } => {
+                target.port
+            }
+            ContainerServer::NotNamed => DEFAULT_PORT,
+        })
+    };
+    let removed = |port: u16, why: &str, fields: serde_json::Value| {
+        super::sccache::record_wrapper_removed(
+            queue,
+            run.id(),
+            at,
+            "supervisor",
+            port,
+            why,
+            fields,
+        );
+    };
+    let running = containers.running_container(run.id())?;
+    // The running container's turn and its gate, when its wrapper asked for
+    // a server; a request in any other is the worker's.
+    let own = match &running {
+        Some(RunningContainer {
+            gate: Some(path),
+            turn: Some(turn),
+            ..
+        }) => match container_gate(turn) {
+            Some(gate) if *path == super::path_text(&run_dir.join(&gate))? => {
+                Some((turn.as_str(), gate))
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(container) = &running else {
+        // The turn ended: what its launcher wrote alone is left to record,
+        // once by the gate's own token, and of one turn a pass (no other
+        // turn's container can write in the run directory once the turn's
+        // ended).
+        for turn in requests.iter().filter_map(|name| request_turn(name)) {
+            let Some(gate) = container_gate(turn) else {
+                continue;
+            };
+            if let Some(text) = containers.read_sccache_gate(run_dir, &gate)?
+                && let Some(ContainerGate::TimedOut(why)) = ContainerGate::parse(&text)
+                && !recorded("gate", &text)
+            {
+                removed(port()?, &why, json!({"container_id": null, "gate": text}));
+                break;
+            }
+        }
+        return take();
+    };
+    let Some((turn, gate)) = own else {
+        return take();
+    };
+    // One served already is served; its own request not left yet is
+    // answered once it is.
+    if recorded("container_id", &container.id)
+        || !container_request(turn).is_some_and(|own| requests.contains(&own))
+    {
+        return take();
+    }
+    let same = || -> Result<bool> {
+        Ok(containers
+            .running_container(run.id())?
+            .is_some_and(|now| now.id == container.id))
+    };
+    let fields = json!({"container_id": container.id});
+    match RequestStep::of(containers.read_sccache_gate(run_dir, &gate)?.as_deref()) {
+        RequestStep::Wait => return Ok(()),
+        RequestStep::Record(found) => {
+            let mut fields = fields.clone();
+            fields["gate"] = json!(found.text());
+            match &found {
+                ContainerGate::Started => super::sccache::record_container_server(
+                    queue,
+                    run.id(),
+                    at,
+                    port()?,
+                    &container.name,
+                    Ok(()),
+                    json!({"container_id": container.id, "by": "supervisor"}),
+                ),
+                ContainerGate::Failed(why) | ContainerGate::TimedOut(why) => {
+                    removed(port()?, why, fields);
+                }
+            }
+        }
+        RequestStep::Start => {
+            let (port, started, guard) = match containers.sccache_plan(run)? {
+                ContainerServer::Start { target, env } => {
+                    let started = containers
+                        .start_sccache(&container.id, &target.program, &env)
+                        .map_err(|error| format!("{error:#}"));
+                    let guard = match &started {
+                        Ok(()) => containers
+                            .make_sccache_guard(&container.id, run_dir)
+                            .map_err(|error| format!("{error:#}")),
+                        Err(_) => Ok(()),
+                    };
+                    (target.port, started, guard)
+                }
+                ContainerServer::Refused { target, why } => (target.port, Err(why), Ok(())),
+                ContainerServer::NotNamed => (
+                    DEFAULT_PORT,
+                    Err("[run.env] names sccache no more".to_owned()),
+                    Ok(()),
+                ),
+            };
+            // A container that ended meanwhile has no launcher left to
+            // answer. One that ends after this look is answered in its own
+            // turn's gate, which no later turn's launcher reads.
+            if !same()? {
+                return take();
+            }
+            let verdict = container_verdict(&started, &guard);
+            let claim = containers.claim_sccache_gate(run_dir, &gate, &verdict);
+            super::sccache::record_container_server(
+                queue,
+                run.id(),
+                at,
+                port,
+                &container.name,
+                started,
+                json!({"container_id": container.id, "by": "supervisor"}),
+            );
+            if let Some(why) = removed_after(&verdict, &claim) {
+                let mut fields = fields;
+                // The launcher's gate is recorded by its own token, as
+                // when no answer comes before its container ends.
+                if let GateClaim::Lost(text) = &claim {
+                    fields["gate"] = json!(text);
+                }
+                removed(port, &why, fields);
+            }
+        }
+    }
+    take()
+}
+
 /// The variables a turn's container is given beside the actor's and the
-/// token file's: `[run.env]` but [`WITHOUT_ENV`], then what the agent's
-/// command sets; none naming the actor, the queue service or the home,
-/// which the executor sets itself, nor Claude Code's configuration
-/// directory, which stays the home's for the control side to find the
-/// sessions there ([`crate::domain::run_container::CLAUDE_DIR`]).
-fn turn_variables(run_env: &[(String, String)], agent: &CommandSpec) -> Vec<(String, String)> {
+/// token file's: `[run.env]`, then what the agent's command sets; none
+/// naming the actor, the queue service or the home, which the executor
+/// sets itself, nor Claude Code's configuration directory, which stays the
+/// home's for the control side to find the sessions there
+/// ([`crate::domain::run_container::CLAUDE_DIR`]). A `[run.env]` naming
+/// sccache (`plan` is not [`ContainerServer::NotNamed`]) is given without
+/// `RUSTC_WRAPPER` and `SCCACHE_ERROR_LOG`, which [`sccache_variables`] and
+/// the launcher decide (ADR-t2114-4 decisions 2 and 3); any other is given
+/// as it is.
+fn turn_variables(
+    run_env: &[(String, String)],
+    agent: &CommandSpec,
+    plan: &ContainerServer,
+) -> Vec<(String, String)> {
+    let sccache = !matches!(plan, ContainerServer::NotNamed);
     let reserved = |key: &str| {
-        WITHOUT_ENV.contains(&key)
+        (sccache && (key == WRAPPER_VAR || key == ERROR_LOG_VAR))
             || ACTOR_ENV.contains(&key)
             || CLIENT_ENV.contains(&key)
             || key == "HOME"
@@ -436,6 +792,50 @@ fn turn_variables(run_env: &[(String, String)], agent: &CommandSpec) -> Vec<(Str
         .chain(from_agent)
         .filter(|(key, _)| !reserved(key))
         .collect()
+}
+
+/// The variables a turn's container is started without, whatever its
+/// image sets: for a `plan` the supervisor handles (a server to start or
+/// one refused), `RUSTC_WRAPPER`, which the launcher gives the agent only
+/// as the guard behind a started gate (ADR-t2114-4 decisions 2 and 3), so
+/// no wrapper the image names reaches the agent when no server was
+/// started or no guard made; for a `[run.env]` naming no sccache, none.
+fn unset_variables(plan: &ContainerServer) -> &'static [&'static str] {
+    match plan {
+        ContainerServer::NotNamed => &[],
+        ContainerServer::Start { .. } | ContainerServer::Refused { .. } => &[WRAPPER_VAR],
+    }
+}
+
+/// The variables a turn's container is given about sccache by `plan`
+/// (ADR-t2114-4 decisions 1 to 3): for a server the supervisor starts,
+/// the sccache the guard compiles through, the token `turn` and the gate
+/// file in `run_dir` it names, which the launcher waits for before the
+/// agent and then gives the agent the refused `SCCACHE_ERROR_LOG` and,
+/// behind a started gate, the guard; for one refused,
+/// the refused `SCCACHE_ERROR_LOG` alone (no `RUSTC_WRAPPER`); for none,
+/// nothing.
+fn sccache_variables(
+    plan: &ContainerServer,
+    run_dir: &Path,
+    turn: &str,
+) -> Result<Vec<(String, String)>> {
+    Ok(match plan {
+        ContainerServer::NotNamed => Vec::new(),
+        ContainerServer::Start { target, .. } => vec![
+            (GUARD_PROGRAM_VAR.to_owned(), target.program.clone()),
+            (
+                CONTAINER_GATE_VAR.to_owned(),
+                super::path_text(&run_dir.join(
+                    container_gate(turn).context("the turn's token names no sccache gate")?,
+                ))?,
+            ),
+            (CONTAINER_TURN_VAR.to_owned(), turn.to_owned()),
+        ],
+        ContainerServer::Refused { .. } => {
+            vec![(ERROR_LOG_VAR.to_owned(), REFUSED_ERROR_LOG.to_owned())]
+        }
+    })
 }
 
 #[cfg(test)]
@@ -455,9 +855,10 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_s_variables_leave_the_host_s_compiler_wrapper_and_the_actor_s_names_out() {
+    fn a_turn_s_variables_leave_the_sccache_wrapper_and_the_actor_s_names_out() {
         let run_env = vec![
             ("RUSTC_WRAPPER".to_owned(), "sccache".to_owned()),
+            ("SCCACHE_ERROR_LOG".to_owned(), "/tmp/log".to_owned()),
             ("CARGO_TARGET_DIR".to_owned(), "/build".to_owned()),
             ("DAGQ_RUN_ID".to_owned(), "other".to_owned()),
             ("DAGQ_SERVICE_SOCKET".to_owned(), "/x".to_owned()),
@@ -470,12 +871,63 @@ mod tests {
         ];
         let mut agent = CommandSpec::new("claude");
         agent.env("CLAUDE_X", "1").env_remove("GONE");
+        let plan = ContainerServer::of(&run_env, &[]);
+        assert!(matches!(plan, ContainerServer::Refused { .. }), "{plan:?}");
         assert_eq!(
-            turn_variables(&run_env, &agent),
+            turn_variables(&run_env, &agent, &plan),
             [
                 ("CARGO_TARGET_DIR".to_owned(), "/build".to_owned()),
                 ("CLAUDE_X".to_owned(), "1".to_owned()),
             ]
+        );
+    }
+
+    /// A `[run.env]` naming no sccache is given as it is, its own wrapper
+    /// and log too, and nothing about sccache is added or unset (ADR-t2257-1
+    /// decision 5); one naming sccache whose server is started is told the
+    /// gate and the sccache, one refused only the refused log, and both
+    /// are started without the image's wrapper.
+    #[test]
+    fn only_a_run_env_naming_sccache_has_its_wrapper_handled() {
+        let run_env = vec![
+            ("RUSTC_WRAPPER".to_owned(), "cachepot".to_owned()),
+            ("SCCACHE_ERROR_LOG".to_owned(), "/tmp/log".to_owned()),
+        ];
+        let plan = ContainerServer::of(&run_env, &["/cache".to_owned()]);
+        assert_eq!(plan, ContainerServer::NotNamed);
+        let agent = CommandSpec::new("claude");
+        assert_eq!(turn_variables(&run_env, &agent, &plan), run_env);
+        let run_dir = Path::new("/q/runs/r1");
+        assert!(sccache_variables(&plan, run_dir, "t1").unwrap().is_empty());
+        assert!(unset_variables(&plan).is_empty());
+
+        let named = vec![
+            ("RUSTC_WRAPPER".to_owned(), "/usr/bin/sccache".to_owned()),
+            ("SCCACHE_DIR".to_owned(), "/cache/sccache".to_owned()),
+        ];
+        let plan = ContainerServer::of(&named, &["/cache".to_owned()]);
+        assert_eq!(
+            sccache_variables(&plan, run_dir, "t1").unwrap(),
+            [
+                (
+                    "DAGQ_SCCACHE_PROGRAM".to_owned(),
+                    "/usr/bin/sccache".to_owned()
+                ),
+                (
+                    "DAGQ_SCCACHE_GATE".to_owned(),
+                    "/q/runs/r1/sccache-gate.t1".to_owned()
+                ),
+                ("DAGQ_SCCACHE_TURN".to_owned(), "t1".to_owned()),
+            ]
+        );
+        // The image's wrapper never reaches the agent of a turn the
+        // supervisor handles, a server started or refused.
+        assert_eq!(unset_variables(&plan), ["RUSTC_WRAPPER"]);
+        let refused = ContainerServer::of(&named, &[]);
+        assert_eq!(unset_variables(&refused), ["RUSTC_WRAPPER"]);
+        assert_eq!(
+            sccache_variables(&refused, run_dir, "t1").unwrap(),
+            [("SCCACHE_ERROR_LOG".to_owned(), REFUSED_ERROR_LOG.to_owned())]
         );
     }
 }

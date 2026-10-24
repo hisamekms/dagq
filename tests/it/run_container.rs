@@ -237,7 +237,9 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
             .to_string(),
         queue_dir.join("verification").display().to_string(),
         format!("{home}:"),
-        "RUSTC_WRAPPER".to_owned(),
+        // No compiler wrapper is given the container: only the image's is
+        // unset.
+        "RUSTC_WRAPPER=".to_owned(),
     ] {
         assert!(
             !volumes.iter().any(|volume| volume.contains(&absent)) && !text.contains(&absent),
@@ -371,6 +373,1181 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
             .next()
             .is_none()
     );
+}
+
+/// The compiler wrapper the image of [`one_container_turn`] sets (its
+/// `ENV`), which reaches the agent only where nothing else decides it.
+const IMAGE_WRAPPER: &str = "/usr/local/bin/sccache-of-the-image";
+
+/// One turn of a run in a clone whose worker `dagq.toml` (`config`) sets to
+/// the container, in an image that sets [`IMAGE_WRAPPER`], the fake
+/// podman's `sccache` the script `sccache` when given, the run directory
+/// made ready by `prepare` before the turn, until
+/// the turn finished and the session exits: the queue, the run, its
+/// directory and the fake podman's state. Meanwhile the requests of the
+/// turn's container are answered as the supervisor that leases the run
+/// answers them on its passes ([`answer_requests`]).
+fn one_container_turn(
+    dir: &Path,
+    config: &str,
+    sccache: Option<&str>,
+    prepare: impl FnOnce(&Path),
+) -> (PathBuf, TaskRun, PathBuf, PathBuf) {
+    let (repo, db) = queue_fixture(dir);
+    fs::write(repo.join("dagq.toml"), config).unwrap();
+    let (run, token) = claim_in_container(&db, &repo, "container-run");
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let stand = Stand::start().unwrap();
+    let start = BackgroundHandle::parse(&stand.handle).unwrap().start;
+    {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        queue
+            .workspace_created(run.id(), &token, &stand.handle)
+            .unwrap();
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::WrapperLaunched,
+                json!({"pid": stand.pid, "start": start, "workspace_id": stand.handle,
+                       "log": run_dir.join("session.log").to_string_lossy()}),
+            )
+            .unwrap();
+    }
+    let state = dir.join("podman");
+    let containers = containers(&state, &db, &repo);
+    fs::write(
+        state.join("image-env"),
+        format!("RUSTC_WRAPPER={IMAGE_WRAPPER}\n"),
+    )
+    .unwrap();
+    if let Some(script) = sccache {
+        crate::common::template::script(&state.join("bin").join("sccache"), script);
+    }
+    // A gate and a request an earlier turn left are not this turn's.
+    fs::write(run_dir.join("sccache-gate.earlier"), "started").unwrap();
+    fs::write(request(&run_dir, "earlier"), "").unwrap();
+    prepare(&run_dir);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let provider = dagq::infrastructure::adapters::ClaudeCode {
+        executable: PathBuf::from("/nonexistent/claude-on-the-host"),
+    };
+    let ended = thread::scope(|scope| {
+        scope.spawn(|| answer_requests(&containers, &db, &run, &stop));
+        // A panic below ends the answers too, so that the scope ends.
+        let _stop = StopOnDrop(&stop);
+        let wrapper = scope.spawn(|| {
+            runtime::session_in_background_with_containers(
+                &db,
+                run.id(),
+                &token,
+                &provider,
+                &process::LocalSpawner,
+                false,
+                stand.pid,
+                &dagq::infrastructure::adapters::SystemProcesses,
+                &containers,
+            )
+        });
+        wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+            queue
+                .show(TaskId::new(1))
+                .unwrap()
+                .events
+                .iter()
+                .any(|event| event.kind == EventKind::TurnFinished)
+        });
+        fs::write(dagq::domain::turn::exit_path(&run_dir), "").unwrap();
+        let _waiting =
+            crate::common::within(crate::common::STEP_LIMIT, "the session wrapper to return");
+        wrapper.join().unwrap()
+    })
+    .unwrap();
+    assert_eq!(ended["exit_code"], 0, "{ended}");
+    (db, run, run_dir, state)
+}
+
+/// Sets its flag when dropped.
+struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Answer the requests the launcher of `run`'s turn container leaves, as
+/// the supervisor that leases the run does on each pass
+/// ([`dagq::application::run_container::serve_sccache_request`]), until
+/// `stop`.
+fn answer_requests(
+    containers: &dyn RunContainers,
+    db: &Path,
+    run: &TaskRun,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+        if containers
+            .sccache_requests(&run_dir)
+            .is_ok_and(|requests| !requests.is_empty())
+        {
+            dagq::application::run_container::serve_sccache_request(
+                containers,
+                &SqliteQueue::open(db).unwrap(),
+                run,
+                0,
+            )
+            .unwrap();
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// What the stub agent of the fake podman was given.
+fn agent_env(run_dir: &Path) -> HashMap<String, String> {
+    fs::read_to_string(run_dir.join("stub-env"))
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
+}
+
+/// A `[run.env]` naming sccache whose server listens on `port` and keeps
+/// its cache in the worker cache.
+fn sccache_config(port: u16) -> String {
+    format!(
+        "[roles.worker]\nruntime = \"container\"\n\
+         [container.worker_cache]\ndirs = [\"/cache/registry\", \"/cache/sccache\"]\n\
+         [run.env]\nRUSTC_WRAPPER = 'sccache'\nSCCACHE_SERVER_PORT = '{port}'\n\
+         SCCACHE_DIR = '/cache/sccache/server'\nSCCACHE_ERROR_LOG = '/tmp/sccache.log'\n"
+    )
+}
+
+/// Acceptance (1), (2) and (4) of task 2181: a `[run.env]` naming sccache
+/// has the supervisor start the server inside the turn's container at its
+/// launcher's request and before the agent runs (`podman exec`, no idle
+/// timeout, not refused its start, the cache in the queue's worker cache
+/// volume), make the guard there, and record the start on the run; the
+/// agent is refused the server's start and compiles through the guard,
+/// which finds the server on the loopback, never through
+/// `RUSTC_WRAPPER = sccache` itself.
+#[test]
+fn the_container_s_sccache_server_is_started_before_the_agent_with_its_cache_in_the_worker_cache() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    // The container's server: what listens on the loopback, where the
+    // guard looks. Started, the stub says how; given a compile, it says
+    // so and runs the compiler.
+    let server = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = server.local_addr().unwrap().port();
+    let (db, run, run_dir, state) = one_container_turn(
+        dir.path(),
+        &sccache_config(port),
+        Some(
+            "#!/bin/sh\nif [ \"$1\" != --start-server ]; then \
+             echo \"$*\" >> \"${0%/*}/../sccache-compiles\"; exec \"$@\"; fi\n\
+             { echo \"args=$*\"; echo \"dir=$SCCACHE_DIR\"; \
+             echo \"idle=$SCCACHE_IDLE_TIMEOUT\"; echo \"port=$SCCACHE_SERVER_PORT\"; \
+             echo \"log=${SCCACHE_ERROR_LOG-unset}\"; echo \"wrapper=${RUSTC_WRAPPER-unset}\"; \
+             } > \"${0%/*}/../sccache-started\"\n",
+        ),
+        |_| {},
+    );
+    let container = format!("dagq-{QUEUE}-run-{}", run.id());
+    // The supervisor's calls in the running container: the server's
+    // start, then the guard's making.
+    let execs: Vec<String> = calls(&state)
+        .into_iter()
+        .filter(|call| call.starts_with("--connection dagq exec "))
+        .collect();
+    assert_eq!(execs.len(), 2, "{execs:?}");
+    // By the container's ID, which no later turn's container has.
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let recorded = payloads(&detail, "sccache_container_server_started");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    let id = recorded[0]["container_id"].as_str().unwrap().to_owned();
+    assert!(id.starts_with("id"), "{recorded:?}");
+    assert!(
+        execs[0].ends_with(&format!("{id} sccache --start-server")),
+        "{execs:?}"
+    );
+    assert!(
+        execs[1].ends_with(&format!(
+            "{id} dagq relay guard --dir {}",
+            run_dir.join("container-home").display()
+        )),
+        "{execs:?}"
+    );
+    let started = fs::read_to_string(state.join("sccache-started")).unwrap();
+    for line in [
+        "args=--start-server",
+        "dir=/cache/sccache/server",
+        "idle=0",
+        &format!("port={port}"),
+        "log=unset",
+        "wrapper=unset",
+    ] {
+        assert!(
+            started.lines().any(|seen| seen == line),
+            "{line}: {started}"
+        );
+    }
+    // The cache's directory is a mount of the queue's worker cache volume.
+    let args = fs::read_to_string(state.join("run-args")).unwrap();
+    let volume = QueueKey::new(QUEUE)
+        .unwrap()
+        .worker_cache_volume_of("/cache/sccache");
+    assert!(
+        args.lines()
+            .any(|arg| arg == format!("{volume}:/cache/sccache")),
+        "{args}"
+    );
+    // No wrapper is given the container, and the image's is unset: the
+    // agent's is only the guard the launcher gives.
+    assert!(!args.contains("RUSTC_WRAPPER="), "{args}");
+    assert!(args.contains("--unsetenv\nRUSTC_WRAPPER\n"), "{args}");
+    assert!(!args.contains("/tmp/sccache.log"), "{args}");
+    // The agent ran after the start, refused its own start, behind the guard.
+    let seen = agent_env(&run_dir);
+    assert_eq!(seen["server"], "args=--start-server");
+    let guard = run_dir.join("container-home").join("dagq-rustc-wrapper");
+    assert_eq!(seen["wrapper"], guard.display().to_string());
+    assert_eq!(seen["error_log"], dagq::domain::sccache::REFUSED_ERROR_LOG);
+    assert_eq!(seen["sccache_program"], "sccache");
+    // The guard found the server on the loopback and compiled through it.
+    assert_eq!(seen["guarded"], "compiled");
+    assert_eq!(
+        fs::read_to_string(state.join("sccache-compiles")).unwrap(),
+        "/bin/echo compiled\n"
+    );
+    drop(server);
+    assert_eq!(turn_gate(&run_dir), "started");
+    assert_eq!(requests(&run_dir), Vec::<String>::new());
+    assert_eq!(recorded[0]["port"], port);
+    assert_eq!(recorded[0]["container"], container);
+    assert_eq!(recorded[0]["by"], "supervisor");
+    assert!(payloads(&detail, "sccache_wrapper_removed").is_empty());
+    assert!(payloads(&detail, "sccache_container_server_start_failed").is_empty());
+}
+
+/// Acceptance (3) of task 2181: a server that cannot be started in the
+/// container leaves the agent without `RUSTC_WRAPPER`, still refused the
+/// server's start, and the failure and the removal are recorded on the
+/// run.
+#[test]
+fn a_container_s_sccache_server_that_cannot_start_leaves_the_agent_without_the_wrapper() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _, run_dir, _) = one_container_turn(
+        dir.path(),
+        &sccache_config(4301),
+        Some(
+            "#!/bin/sh\necho 'sccache: error: Timed out waiting for server startup' >&2\nexit 2\n",
+        ),
+        |_| {},
+    );
+    let seen = agent_env(&run_dir);
+    // Nor the image's: the container was started without it.
+    assert_eq!(seen["wrapper"], "unset");
+    assert_eq!(seen["error_log"], dagq::domain::sccache::REFUSED_ERROR_LOG);
+    assert!(
+        turn_gate(&run_dir).starts_with("failed: the container's sccache server was not started")
+    );
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let failed = payloads(&detail, "sccache_container_server_start_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Timed out waiting for server startup"),
+        "{failed:?}"
+    );
+    let removed = payloads(&detail, "sccache_wrapper_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["by"], "supervisor");
+    assert_eq!(removed[0]["port"], 4301);
+    assert_eq!(removed[0]["container_id"], failed[0]["container_id"]);
+}
+
+/// Acceptance (3) of task 2181: a server started whose guard the
+/// supervisor cannot make in the container (a directory left where the
+/// link goes) closes the gate: the agent runs without `RUSTC_WRAPPER`,
+/// and the removal is recorded beside the start.
+#[test]
+fn a_guard_the_container_cannot_make_leaves_the_agent_without_the_wrapper_recorded() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _, run_dir, _) = one_container_turn(
+        dir.path(),
+        &sccache_config(4301),
+        Some("#!/bin/sh\nexit 0\n"),
+        |run_dir| {
+            let left = run_dir.join("container-home").join("dagq-rustc-wrapper");
+            fs::create_dir_all(&left).unwrap();
+            fs::write(left.join("kept"), "").unwrap();
+        },
+    );
+    let seen = agent_env(&run_dir);
+    // Nor the image's: the container was started without it.
+    assert_eq!(seen["wrapper"], "unset");
+    assert_eq!(seen["error_log"], dagq::domain::sccache::REFUSED_ERROR_LOG);
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    assert_eq!(
+        payloads(&detail, "sccache_container_server_started").len(),
+        1
+    );
+    let removed = payloads(&detail, "sccache_wrapper_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert!(
+        removed[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("the guard was not made in the container"),
+        "{removed:?}"
+    );
+    assert_eq!(removed[0]["port"], 4301);
+}
+
+/// Acceptance (1) of task 2181 through the supervisor (ADR-t2114-4
+/// decision 1): the supervisor that leases a run in a clone answers its
+/// turn container's request on its pass, starting the server and making
+/// the guard there before the agent runs, which compiles through the
+/// guard; the run lands as any other.
+#[test]
+fn the_supervisor_starts_the_sccache_server_of_a_turn_s_container_on_its_pass() {
+    let _test = crate::common::test();
+    let queue = ContainerQueue::configured(None, &sccache_config(4301));
+    crate::common::template::script(
+        &queue.state.join("bin").join("sccache"),
+        "#!/bin/sh\n[ \"$1\" = --start-server ] && echo started > \"${0%/*}/../sccache-started\"\nexit 0\n",
+    );
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]);
+    let outcome = supervise_reviewed_with(
+        &queue.db,
+        &queue.repo,
+        &queue.backend,
+        &reviewer,
+        &queue.options,
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let detail = queue.detail();
+    let run_dir = PathBuf::from(detail.runs[0].run_dir().unwrap());
+    let seen = agent_env(&run_dir);
+    assert_eq!(seen["server"], "started");
+    assert_eq!(
+        seen["wrapper"],
+        run_dir
+            .join("container-home")
+            .join("dagq-rustc-wrapper")
+            .display()
+            .to_string()
+    );
+    let started = payloads(&detail, "sccache_container_server_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["by"], "supervisor");
+    assert!(payloads(&detail, "sccache_wrapper_removed").is_empty());
+    queue.none_left();
+}
+
+/// A run in a clone whose `dagq.toml` names sccache with its cache in the
+/// worker cache, its turn's container running in the fake machine with
+/// the ID `id` (the fake podman's `sccache` exits 0), and the variables
+/// its launcher reads: the queue, the run, its directory, the fake
+/// podman's state and its containers.
+fn running_container(
+    dir: &Path,
+    id: &str,
+) -> (
+    PathBuf,
+    TaskRun,
+    PathBuf,
+    PathBuf,
+    dagq::infrastructure::run_container::PodmanRunContainers,
+) {
+    let (repo, db) = queue_fixture(dir);
+    fs::write(repo.join("dagq.toml"), sccache_config(4301)).unwrap();
+    let (run, _) = claim_in_container(&db, &repo, "container-run");
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    fs::create_dir_all(run_dir.join("container-home")).unwrap();
+    let state = dir.join("podman");
+    let containers = containers(&state, &db, &repo);
+    crate::common::template::script(&state.join("bin").join("sccache"), "#!/bin/sh\nexit 0\n");
+    fs::write(
+        state
+            .join("containers")
+            .join(format!("dagq-{QUEUE}-run-{}", run.id())),
+        format!(
+            "{id} true [\"DAGQ_SCCACHE_GATE={}\",\"DAGQ_SCCACHE_TURN={TURN}\"]\n",
+            gate_file(&run_dir, TURN).display()
+        ),
+    )
+    .unwrap();
+    (db, run, run_dir, state, containers)
+}
+
+/// The token of the turn whose container [`running_container`] makes.
+const TURN: &str = "turn1";
+
+/// The request the launcher of the turn of the token `turn` leaves in
+/// `run_dir`.
+fn request(run_dir: &Path, turn: &str) -> PathBuf {
+    run_dir.join(format!("sccache-request.{turn}"))
+}
+
+/// The gate of the turn of the token `turn` in `run_dir`.
+fn gate_file(run_dir: &Path, turn: &str) -> PathBuf {
+    run_dir.join(format!("sccache-gate.{turn}"))
+}
+
+/// The names in `run_dir` that start with `prefix`, sorted.
+fn named(run_dir: &Path, prefix: &str) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(run_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with(prefix))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The names of the turns' requests in `run_dir`.
+fn requests(run_dir: &Path) -> Vec<String> {
+    named(run_dir, "sccache-request")
+}
+
+/// The text of the one gate in `run_dir`: the last turn's, the earlier
+/// turns' cleared before it.
+fn turn_gate(run_dir: &Path) -> String {
+    let gates = named(run_dir, "sccache-gate");
+    assert_eq!(gates.len(), 1, "{gates:?}");
+    fs::read_to_string(run_dir.join(&gates[0])).unwrap()
+}
+
+/// The variables of the launcher of a turn in `run_dir` whose server the
+/// supervisor starts.
+fn launcher_env(run_dir: &Path) -> impl Fn(&str) -> Option<String> {
+    let gate = gate_file(run_dir, TURN).display().to_string();
+    move |key| match key {
+        "DAGQ_SCCACHE_GATE" => Some(gate.clone()),
+        "DAGQ_SCCACHE_TURN" => Some(TURN.to_owned()),
+        "DAGQ_SCCACHE_PROGRAM" => Some("sccache".to_owned()),
+        _ => None,
+    }
+}
+
+/// Acceptance (3) of task 2181: a launcher whose wait for the gate ends
+/// before the supervisor answers writes its own gate and runs the agent
+/// without `RUSTC_WRAPPER`; the supervisor answering late starts nothing,
+/// leaves that gate, and records the removal once for the container,
+/// however often a request is left again.
+#[test]
+fn a_launcher_whose_gate_comes_late_runs_without_the_wrapper_as_recorded() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, run, run_dir, state, containers) = running_container(dir.path(), "idlate");
+    let vars = dagq::infrastructure::container_turn::sccache_env(
+        &run_dir,
+        launcher_env(&run_dir),
+        Duration::ZERO,
+    )
+    .unwrap();
+    assert_eq!(
+        vars,
+        [(
+            "SCCACHE_ERROR_LOG".to_owned(),
+            dagq::domain::sccache::REFUSED_ERROR_LOG.to_owned()
+        )]
+    );
+    let gate = fs::read_to_string(gate_file(&run_dir, TURN)).unwrap();
+    assert!(gate.starts_with("timed out: "), "{gate}");
+    assert!(request(&run_dir, TURN).exists());
+    for _ in 0..2 {
+        dagq::application::run_container::serve_sccache_request(
+            &containers,
+            &SqliteQueue::open(&db).unwrap(),
+            &run,
+            0,
+        )
+        .unwrap();
+        assert!(!request(&run_dir, TURN).exists());
+        // The worker leaves another.
+        fs::write(request(&run_dir, TURN), "").unwrap();
+    }
+    assert_eq!(fs::read_to_string(gate_file(&run_dir, TURN)).unwrap(), gate);
+    assert!(
+        !calls(&state)
+            .iter()
+            .any(|call| call.starts_with("--connection dagq exec ")),
+        "{:?}",
+        calls(&state)
+    );
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let removed = payloads(&detail, "sccache_wrapper_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["by"], "supervisor");
+    assert_eq!(removed[0]["container_id"], "idlate");
+    assert!(
+        removed[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("found no sccache gate"),
+        "{removed:?}"
+    );
+    assert!(payloads(&detail, "sccache_container_server_started").is_empty());
+}
+
+/// Acceptance (3) of task 2181: a gate nothing recorded yet is recorded
+/// once as it says. The supervisor's own an earlier process wrote and did
+/// not record (it stopped in between) is recorded for its container; a
+/// launcher's timed out one whose container ended before any answer is
+/// recorded by the gate's own token. A request left again records nothing
+/// more.
+#[test]
+fn a_gate_nothing_recorded_is_recorded_once_as_it_says() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, run, run_dir, state, containers) = running_container(dir.path(), "idkept");
+    let serve = |turn: &str| {
+        fs::write(request(&run_dir, turn), "").unwrap();
+        dagq::application::run_container::serve_sccache_request(
+            &containers,
+            &SqliteQueue::open(&db).unwrap(),
+            &run,
+            0,
+        )
+        .unwrap();
+        assert!(!request(&run_dir, turn).exists());
+    };
+    let detail = || {
+        SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(1))
+            .unwrap()
+    };
+    fs::write(gate_file(&run_dir, TURN), "started").unwrap();
+    serve(TURN);
+    serve(TURN);
+    let first = detail();
+    let started = payloads(&first, "sccache_container_server_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["container_id"], "idkept");
+    // The next turn's launcher waited out its gate, and its container
+    // ended before the supervisor looked.
+    fs::remove_file(
+        state
+            .join("containers")
+            .join(format!("dagq-{QUEUE}-run-{}", run.id())),
+    )
+    .unwrap();
+    let gate = "timed out: no sccache gate within 180s (gate 0123abcd)";
+    fs::write(gate_file(&run_dir, "turn2"), gate).unwrap();
+    serve("turn2");
+    serve("turn2");
+    let then = detail();
+    let removed = payloads(&then, "sccache_wrapper_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["gate"], gate);
+    assert_eq!(removed[0]["container_id"], Value::Null);
+    assert!(
+        !calls(&state)
+            .iter()
+            .any(|call| call.starts_with("--connection dagq exec ")),
+        "{:?}",
+        calls(&state)
+    );
+}
+
+/// A request in a running container its wrapper gave no sccache gate (a
+/// worker's, not a launcher's) starts nothing and records nothing: it is
+/// only taken away.
+#[test]
+fn a_request_of_a_container_given_no_gate_is_not_served() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, run, run_dir, state, containers) = running_container(dir.path(), "idforged");
+    fs::write(
+        state
+            .join("containers")
+            .join(format!("dagq-{QUEUE}-run-{}", run.id())),
+        "idforged true []\n",
+    )
+    .unwrap();
+    fs::write(request(&run_dir, TURN), "").unwrap();
+    dagq::application::run_container::serve_sccache_request(
+        &containers,
+        &SqliteQueue::open(&db).unwrap(),
+        &run,
+        0,
+    )
+    .unwrap();
+    assert!(!request(&run_dir, TURN).exists());
+    assert!(!gate_file(&run_dir, TURN).exists());
+    assert!(
+        !calls(&state)
+            .iter()
+            .any(|call| call.starts_with("--connection dagq exec ")),
+        "{:?}",
+        calls(&state)
+    );
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    for kind in [
+        "sccache_wrapper_removed",
+        "sccache_container_server_started",
+        "sccache_container_server_start_failed",
+    ] {
+        assert!(payloads(&detail, kind).is_empty(), "{kind}");
+    }
+}
+
+/// Leave in `run_dir` the next turn's container, of the ID `id` and the
+/// token `turn`, in place of the run's container `container` (the fake
+/// machine's file of it), and its launcher's request: what the fake
+/// machine shows once one turn's container ended and the next one's runs.
+fn next_turn(container: &Path, run_dir: &Path, id: &str, turn: &str) {
+    fs::write(
+        container,
+        format!(
+            "{id} true [\"DAGQ_SCCACHE_GATE={}\",\"DAGQ_SCCACHE_TURN={turn}\"]\n",
+            gate_file(run_dir, turn).display()
+        ),
+    )
+    .unwrap();
+    fs::write(request(run_dir, turn), "").unwrap();
+}
+
+/// An answer whose container ended while it started the server (the next
+/// turn's container runs and its launcher left its request) takes away only
+/// the request it answered and writes no gate: the next turn's request is
+/// left for the next pass, which starts that container's server.
+#[test]
+fn an_answer_that_outlives_its_turn_leaves_the_next_turn_s_request() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, run, run_dir, state, containers) = running_container(dir.path(), "idold");
+    let container = state
+        .join("containers")
+        .join(format!("dagq-{QUEUE}-run-{}", run.id()));
+    // While the old container's server starts, that container ends, the
+    // next turn's starts and its launcher leaves its request.
+    let line = format!(
+        "idnew true [\"DAGQ_SCCACHE_GATE={}\",\"DAGQ_SCCACHE_TURN=turn2\"]",
+        gate_file(&run_dir, "turn2").display()
+    );
+    crate::common::template::script(
+        &state.join("bin").join("sccache"),
+        format!(
+            "#!/bin/sh\n[ -f {switched} ] && exit 0\n: > {switched}\nprintf '%s\\n' {line} > {container}\n: > {next}\n",
+            switched = crate::common::shell_path(state.join("switched")),
+            line = dagq::infrastructure::adapters::shell_quote(&line),
+            container = crate::common::shell_path(&container),
+            next = crate::common::shell_path(request(&run_dir, "turn2")),
+        ),
+    );
+    fs::write(request(&run_dir, TURN), "").unwrap();
+    let serve = || {
+        dagq::application::run_container::serve_sccache_request(
+            &containers,
+            &SqliteQueue::open(&db).unwrap(),
+            &run,
+            0,
+        )
+        .unwrap();
+    };
+    serve();
+    assert_eq!(requests(&run_dir), ["sccache-request.turn2"]);
+    assert_eq!(named(&run_dir, "sccache-gate"), Vec::<String>::new());
+    let detail = || {
+        SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(1))
+            .unwrap()
+    };
+    assert!(payloads(&detail(), "sccache_container_server_started").is_empty());
+    serve();
+    assert_eq!(requests(&run_dir), Vec::<String>::new());
+    assert_eq!(
+        fs::read_to_string(gate_file(&run_dir, "turn2")).unwrap(),
+        "started"
+    );
+    let then = detail();
+    let started = payloads(&then, "sccache_container_server_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["container_id"], "idnew");
+    assert!(payloads(&then, "sccache_wrapper_removed").is_empty());
+}
+
+/// The run containers of the fake machine (`inner`), with what a test
+/// makes happen meanwhile: `on_look` right after each look at the
+/// container that runs returned (given its count, from 1), and `on_guard`
+/// right after the guard was made.
+struct Hooked<'a> {
+    inner: &'a dagq::infrastructure::run_container::PodmanRunContainers,
+    looks: std::sync::atomic::AtomicUsize,
+    on_look: Box<dyn Fn(usize) + Send + Sync + 'a>,
+    on_guard: Box<dyn Fn() + Send + Sync + 'a>,
+}
+
+impl<'a> Hooked<'a> {
+    fn new(inner: &'a dagq::infrastructure::run_container::PodmanRunContainers) -> Self {
+        Self {
+            inner,
+            looks: std::sync::atomic::AtomicUsize::new(0),
+            on_look: Box::new(|_| {}),
+            on_guard: Box::new(|| {}),
+        }
+    }
+}
+
+impl RunContainers for Hooked<'_> {
+    fn prepare(
+        &self,
+        run: &TaskRun,
+    ) -> anyhow::Result<dagq::application::run_container::PreparedRun> {
+        self.inner.prepare(run)
+    }
+    fn prepare_run_dir(&self, run_dir: &Path, credential: &Path) -> anyhow::Result<PathBuf> {
+        self.inner.prepare_run_dir(run_dir, credential)
+    }
+    fn command(&self, args: &[String]) -> dagq::application::CommandSpec {
+        self.inner.command(args)
+    }
+    fn remove(&self, run: &dagq::domain::RunId) -> anyhow::Result<()> {
+        self.inner.remove(run)
+    }
+    fn facts_turn(&self, run: &TaskRun) -> anyhow::Result<()> {
+        self.inner.facts_turn(run)
+    }
+    fn sccache_requests(&self, run_dir: &Path) -> anyhow::Result<Vec<String>> {
+        self.inner.sccache_requests(run_dir)
+    }
+    fn take_sccache_requests(&self, run_dir: &Path, names: &[String]) -> anyhow::Result<()> {
+        self.inner.take_sccache_requests(run_dir, names)
+    }
+    fn running_container(
+        &self,
+        run: &dagq::domain::RunId,
+    ) -> anyhow::Result<Option<dagq::application::run_container::RunningContainer>> {
+        let found = self.inner.running_container(run)?;
+        (self.on_look)(self.looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
+        Ok(found)
+    }
+    fn sccache_plan(
+        &self,
+        run: &TaskRun,
+    ) -> anyhow::Result<dagq::domain::sccache::ContainerServer> {
+        self.inner.sccache_plan(run)
+    }
+    fn start_sccache(
+        &self,
+        container: &str,
+        program: &str,
+        env: &[(String, String)],
+    ) -> anyhow::Result<()> {
+        self.inner.start_sccache(container, program, env)
+    }
+    fn make_sccache_guard(&self, container: &str, run_dir: &Path) -> anyhow::Result<()> {
+        let made = self.inner.make_sccache_guard(container, run_dir);
+        (self.on_guard)();
+        made
+    }
+    fn claim_sccache_gate(
+        &self,
+        run_dir: &Path,
+        name: &str,
+        gate: &dagq::domain::sccache::ContainerGate,
+    ) -> dagq::domain::sccache::GateClaim {
+        self.inner.claim_sccache_gate(run_dir, name, gate)
+    }
+    fn read_sccache_gate(&self, run_dir: &Path, name: &str) -> anyhow::Result<Option<String>> {
+        self.inner.read_sccache_gate(run_dir, name)
+    }
+}
+
+/// An answer whose container is replaced by the next turn's after the
+/// supervisor saw it still run and before it writes its verdict writes
+/// only the gate of the turn it answered: the next turn's launcher, which
+/// waits for its own turn's gate, finds none, and the next pass starts that
+/// container's server and opens its gate.
+#[test]
+fn an_answer_whose_container_is_replaced_before_its_gate_opens_no_later_turn_s_gate() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, run, run_dir, state, podman) = running_container(dir.path(), "idold");
+    let container = state
+        .join("containers")
+        .join(format!("dagq-{QUEUE}-run-{}", run.id()));
+    let mut containers = Hooked::new(&podman);
+    // The first look finds the container to answer; the second is the one
+    // before the gate is written.
+    containers.on_look = Box::new(|look| {
+        if look == 2 {
+            next_turn(&container, &run_dir, "idnew", "turn2");
+        }
+    });
+    fs::write(request(&run_dir, TURN), "").unwrap();
+    let serve = || {
+        dagq::application::run_container::serve_sccache_request(
+            &containers,
+            &SqliteQueue::open(&db).unwrap(),
+            &run,
+            0,
+        )
+        .unwrap();
+    };
+    serve();
+    assert_eq!(
+        fs::read_to_string(gate_file(&run_dir, TURN)).unwrap(),
+        "started"
+    );
+    assert!(!gate_file(&run_dir, "turn2").exists());
+    assert_eq!(requests(&run_dir), ["sccache-request.turn2"]);
+    serve();
+    assert_eq!(
+        fs::read_to_string(gate_file(&run_dir, "turn2")).unwrap(),
+        "started"
+    );
+    assert_eq!(requests(&run_dir), Vec::<String>::new());
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let started = payloads(&detail, "sccache_container_server_started");
+    let ids: Vec<_> = started.iter().map(|event| &event["container_id"]).collect();
+    assert_eq!(ids, ["idold", "idnew"], "{started:?}");
+    assert!(payloads(&detail, "sccache_wrapper_removed").is_empty());
+    // Each container's server was started in that container, by its ID.
+    let starts: Vec<_> = calls(&state)
+        .into_iter()
+        .filter(|call| {
+            call.starts_with("--connection dagq exec ") && call.ends_with("--start-server")
+        })
+        .collect();
+    assert_eq!(starts.len(), 2, "{starts:?}");
+    assert!(starts[0].contains(" idold "), "{starts:?}");
+    assert!(starts[1].contains(" idnew "), "{starts:?}");
+}
+
+/// Requests and timed out gates of other turns the worker leaves while its
+/// container runs record nothing and are only taken away; once the turn
+/// ended, what is left records one turn's removal, not one for each file.
+#[test]
+fn a_worker_s_requests_and_gates_record_nothing_while_its_container_runs() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, run, run_dir, state, containers) = running_container(dir.path(), "idrun");
+    let leave = || {
+        for turn in ["forged1", "forged2"] {
+            fs::write(request(&run_dir, turn), "").unwrap();
+            fs::write(gate_file(&run_dir, turn), format!("timed out: {turn}")).unwrap();
+        }
+    };
+    let serve = || {
+        dagq::application::run_container::serve_sccache_request(
+            &containers,
+            &SqliteQueue::open(&db).unwrap(),
+            &run,
+            0,
+        )
+        .unwrap();
+        assert_eq!(requests(&run_dir), Vec::<String>::new());
+    };
+    let detail = || {
+        SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(1))
+            .unwrap()
+    };
+    for _ in 0..3 {
+        leave();
+        serve();
+    }
+    assert!(payloads(&detail(), "sccache_wrapper_removed").is_empty());
+    leave();
+    fs::remove_file(
+        state
+            .join("containers")
+            .join(format!("dagq-{QUEUE}-run-{}", run.id())),
+    )
+    .unwrap();
+    serve();
+    let then = detail();
+    let removed = payloads(&then, "sccache_wrapper_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["gate"], "timed out: forged1");
+    assert_eq!(removed[0]["container_id"], Value::Null);
+}
+
+/// An inspect that fails for another reason than no container (the machine
+/// cannot be asked) is an error that leaves the request for the next pass,
+/// not a turn that ended; the next pass, the machine answering again,
+/// starts the server.
+#[test]
+fn an_inspect_that_fails_leaves_the_request_for_the_next_pass() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, run, run_dir, state, containers) = running_container(dir.path(), "idup");
+    fs::write(request(&run_dir, TURN), "").unwrap();
+    let serve = || {
+        dagq::application::run_container::serve_sccache_request(
+            &containers,
+            &SqliteQueue::open(&db).unwrap(),
+            &run,
+            0,
+        )
+    };
+    let detail = || {
+        SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(1))
+            .unwrap()
+    };
+    fs::write(state.join("machine-down"), "").unwrap();
+    let error = format!("{:#}", serve().unwrap_err());
+    assert!(error.contains("unable to connect"), "{error}");
+    assert_eq!(requests(&run_dir), ["sccache-request.turn1"]);
+    assert!(!gate_file(&run_dir, TURN).exists());
+    assert!(
+        detail()
+            .events
+            .iter()
+            .all(|event| !event.kind.as_str().starts_with("sccache"))
+    );
+    fs::remove_file(state.join("machine-down")).unwrap();
+    serve().unwrap();
+    assert_eq!(requests(&run_dir), Vec::<String>::new());
+    assert_eq!(
+        fs::read_to_string(gate_file(&run_dir, TURN)).unwrap(),
+        "started"
+    );
+    let then = detail();
+    let started = payloads(&then, "sccache_container_server_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["container_id"], "idup");
+}
+
+/// A launcher whose wait ends while the supervisor starts the server
+/// writes its timed out gate first: the supervisor's verdict loses to it,
+/// the removal is recorded by that gate's token, and the same gate is not
+/// recorded again once the turn ended with its request left again.
+#[test]
+fn a_launcher_s_gate_that_wins_over_the_answer_is_recorded_once() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, run, run_dir, state, podman) = running_container(dir.path(), "idslow");
+    let gate = "timed out: the container's launcher found no sccache gate within 180s (gate 0a1b)";
+    let mut containers = Hooked::new(&podman);
+    containers.on_guard = Box::new(|| fs::write(gate_file(&run_dir, TURN), gate).unwrap());
+    fs::write(request(&run_dir, TURN), "").unwrap();
+    dagq::application::run_container::serve_sccache_request(
+        &containers,
+        &SqliteQueue::open(&db).unwrap(),
+        &run,
+        0,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(gate_file(&run_dir, TURN)).unwrap(), gate);
+    // The worker leaves the request again and the turn ends.
+    fs::write(request(&run_dir, TURN), "").unwrap();
+    fs::remove_file(
+        state
+            .join("containers")
+            .join(format!("dagq-{QUEUE}-run-{}", run.id())),
+    )
+    .unwrap();
+    dagq::application::run_container::serve_sccache_request(
+        &podman,
+        &SqliteQueue::open(&db).unwrap(),
+        &run,
+        0,
+    )
+    .unwrap();
+    assert_eq!(requests(&run_dir), Vec::<String>::new());
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let removed = payloads(&detail, "sccache_wrapper_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["gate"], gate);
+    assert_eq!(removed[0]["container_id"], "idslow");
+}
+
+/// Before a turn whose server is to be started, the wrapper clears every
+/// gate and request earlier turns left (a link there removed, its target
+/// kept), leaves the run directory's other files, and gives the new turn a
+/// token of its own that names a gate and a request.
+#[test]
+fn a_new_turn_clears_every_earlier_turn_s_gate_and_request() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (_, _, run_dir, _, containers) = running_container(dir.path(), "idclear");
+    for turn in ["turn1", "turn2"] {
+        fs::write(request(&run_dir, turn), "").unwrap();
+        fs::write(gate_file(&run_dir, turn), "started").unwrap();
+    }
+    let outside = dir.path().join("outside");
+    fs::write(&outside, "kept").unwrap();
+    std::os::unix::fs::symlink(&outside, request(&run_dir, "linked")).unwrap();
+    fs::write(run_dir.join("sccache-gate"), "not a turn's").unwrap();
+    let first = containers.clear_sccache(&run_dir).unwrap();
+    assert_eq!(requests(&run_dir), Vec::<String>::new());
+    assert_eq!(named(&run_dir, "sccache-gate"), ["sccache-gate"]);
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "kept");
+    let second = containers.clear_sccache(&run_dir).unwrap();
+    assert_ne!(first, second);
+    for turn in [&first, &second] {
+        assert!(
+            dagq::domain::sccache::container_gate(turn).is_some(),
+            "{turn}"
+        );
+        assert!(
+            dagq::domain::sccache::container_request(turn).is_some(),
+            "{turn}"
+        );
+    }
+}
+
+/// Acceptance (3) of task 2181: a gate the supervisor cannot write is
+/// recorded as the agent's run without `RUSTC_WRAPPER` beside the server's
+/// start, and its launcher, which cannot write its own either, runs no
+/// agent: no agent compiles through a guard the records deny.
+#[test]
+fn a_gate_that_cannot_be_written_leaves_no_agent_with_the_wrapper() {
+    use std::os::unix::fs::PermissionsExt;
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, run, run_dir, _, containers) = running_container(dir.path(), "idro");
+    fs::write(request(&run_dir, TURN), "").unwrap();
+    fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o500)).unwrap();
+    let served = dagq::application::run_container::serve_sccache_request(
+        &containers,
+        &SqliteQueue::open(&db).unwrap(),
+        &run,
+        0,
+    );
+    let launched = dagq::infrastructure::container_turn::sccache_env(
+        &run_dir,
+        launcher_env(&run_dir),
+        Duration::ZERO,
+    );
+    fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    // The request could not be taken away either.
+    assert!(served.is_err());
+    let error = format!("{:#}", launched.unwrap_err());
+    assert!(error.contains("no agent runs"), "{error}");
+    assert!(!gate_file(&run_dir, TURN).exists());
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    assert_eq!(
+        payloads(&detail, "sccache_container_server_started").len(),
+        1
+    );
+    let removed = payloads(&detail, "sccache_wrapper_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert!(
+        removed[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("could not be written"),
+        "{removed:?}"
+    );
+}
+
+/// Acceptance (3) and (4) of task 2181: a cache directory outside the
+/// queue's worker cache starts no server, and the agent runs without
+/// `RUSTC_WRAPPER`, recorded.
+#[test]
+fn a_cache_directory_outside_the_worker_cache_starts_no_container_server() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _, run_dir, state) = one_container_turn(
+        dir.path(),
+        &sccache_config(4301).replace("/cache/sccache/server", "/elsewhere"),
+        Some("#!/bin/sh\nexit 0\n"),
+        |_| {},
+    );
+    assert!(!state.join("exec-args").exists());
+    let seen = agent_env(&run_dir);
+    // Nor the image's: the container was started without it.
+    assert_eq!(seen["wrapper"], "unset");
+    assert_eq!(seen["sccache_program"], "unset");
+    assert_eq!(seen["error_log"], dagq::domain::sccache::REFUSED_ERROR_LOG);
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let removed = payloads(&detail, "sccache_wrapper_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert!(
+        removed[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("[container.worker_cache]"),
+        "{removed:?}"
+    );
+    assert!(payloads(&detail, "sccache_container_server_started").is_empty());
+}
+
+/// Acceptance (1) of task 2181: a `[run.env]` naming no sccache starts no
+/// server and gives the container its environment as it is, its own
+/// compiler wrapper and log too.
+#[test]
+fn a_run_env_naming_no_sccache_starts_no_server_and_keeps_its_environment() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _, run_dir, state) = one_container_turn(
+        dir.path(),
+        "[roles.worker]\nruntime = \"container\"\n\
+         [container.worker_cache]\ndirs = [\"/cache/sccache\"]\n\
+         [run.env]\nRUSTC_WRAPPER = 'cachepot'\nSCCACHE_ERROR_LOG = '/tmp/own.log'\n\
+         SCCACHE_DIR = '/cache/sccache/server'\n",
+        Some("#!/bin/sh\nexit 0\n"),
+        |_| {},
+    );
+    assert!(!state.join("exec-args").exists());
+    // Nothing the image sets is unset: no wrapper is handled.
+    assert!(
+        !fs::read_to_string(state.join("run-args"))
+            .unwrap()
+            .lines()
+            .any(|arg| arg == "--unsetenv")
+    );
+    let seen = agent_env(&run_dir);
+    assert_eq!(seen["wrapper"], "cachepot");
+    assert_eq!(seen["error_log"], "/tmp/own.log");
+    assert_eq!(seen["sccache_program"], "unset");
+    assert_eq!(seen["server"], "");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    for kind in [
+        "sccache_wrapper_removed",
+        "sccache_container_server_started",
+        "sccache_container_server_start_failed",
+    ] {
+        assert!(payloads(&detail, kind).is_empty(), "{kind}");
+    }
 }
 
 /// A run in a clone is never started on the host once `dagq.toml` sets the
@@ -938,6 +2115,7 @@ fn a_turn_s_container_runs_hardened_in_the_real_machine() {
             worker_cache: &cache,
             limits: ContainerLimits::default(),
             env: &env,
+            unset_env: &[],
             command: &command,
         },
     )
