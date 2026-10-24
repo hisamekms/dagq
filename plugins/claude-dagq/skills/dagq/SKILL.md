@@ -65,7 +65,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
 
 ## 3. Inspect
 
-`goal list`, `goal show ID`, `list`, `show ID`, `graph`, `search` / `related`, `findings`, `events`, `timeline RUN`, `observe --history`, `notes` / `note`, `stats`, `kpi` / `mark` / `marks` / `forecast` / `report` (`reference/kpi.md`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags and fields: `"$DAGQ" <command> --help`; which command to read and statuses: `reference/inspect.md`.
+`goal list`, `goal show ID`, `list`, `show ID`, `graph`, `search` / `related`, `findings`, `events`, `timeline RUN`, `observe --history`, `notes` / `note`, `stats`, `kpi` / `mark` / `marks` / `forecast` / `report` (`reference/kpi.md`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags: `"$DAGQ" <command> --help`; fields: the JSON output; which command to read and statuses: `reference/inspect.md`.
 
 ## 4. Report results
 

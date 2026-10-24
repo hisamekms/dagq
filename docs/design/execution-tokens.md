@@ -113,7 +113,7 @@ stats / kpi
 
 ## statsとkpiでの集約
 
-入口は`domain::stats::executions`（窓への集約とactor・provider・model）と`domain::kpi::window`（kpiの層）で、kpiの層と出力の形は`dagq kpi --help`、読み方はpluginの`dagq`の`reference/kpi.md`。
+入口は`domain::stats::executions`（窓への集約とactor・provider・model）と`domain::kpi::window`（kpiの層）で、kpiのflagと層は`dagq kpi --help`、出力の形はJSONの出力そのもの、読み方はpluginの`dagq`の`reference/kpi.md`。
 
 - 窓に入れるのは窓の中で終わったExecutionと区切りの時刻が窓の中の区切りで、eventを書いた時刻ではない。
 - actorはsupervisorが起動した区間のkindで、区切りは区間のkind。
