@@ -1,7 +1,8 @@
 //! How the resumes of a `needs_session` run are counted, and when a run
 //! whose resumes are used up is retried with its branch carried over
-//! (ADR-0047 decision 24, amended by ADR-t946-1, ADR-t2946-1 and
-//! ADR-t2664-1). Both are read from the run's events alone.
+//! (ADR-0047 decision 24, amended by ADR-t946-1, ADR-t2946-1,
+//! ADR-t2664-1 and ADR-t3255-1). Both are read from the run's events
+//! alone.
 
 use super::{
     CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, RunEvent,
@@ -10,7 +11,9 @@ use super::{
     task_hold::Released,
 };
 use crate::domain::EventKind;
+use crate::domain::provider_switch::SwitchReason;
 use crate::domain::run::{ConflictPrecheck, restore_payload};
+use crate::domain::turn::{TurnFailure, TurnOutcome};
 use serde_json::{Value, json};
 
 /// How many conflict-only attempts of one run the supervisor makes: the
@@ -30,10 +33,21 @@ pub const CONFLICT_ONLY_RESUME_LIMIT: usize = 5;
 /// killed again and again stops here (ADR-t946-1).
 pub const KILL_ONLY_RESUME_LIMIT: usize = 3;
 
+/// How many provider-only resumes of one run the supervisor makes: the
+/// resumes whose session's turns ended only at their provider's wall (a
+/// usage limit, a login, an agent that did not start) and that ended with
+/// no new commit and no rewritten receipt ([`provider_only_resume`]). They
+/// are neither [`MAX_RESUME_ATTEMPTS`] nor conflict-only attempts, and the
+/// next resume after one waits for the provider's hold to end
+/// ([`waits_for_provider`]), but a provider that fails again and again
+/// stops the run here: 3 (ADR-t3255-1 decision 3).
+pub const PROVIDER_ONLY_RESUME_LIMIT: usize = 3;
+
 /// `[resume]` of `dagq.toml` (ADR-0047 decision 24): the limit of the
 /// conflict-only attempts of one run. The counted resumes'
-/// [`MAX_RESUME_ATTEMPTS`] and the kill-only ones'
-/// [`KILL_ONLY_RESUME_LIMIT`] are not configurable.
+/// [`MAX_RESUME_ATTEMPTS`], the kill-only ones' [`KILL_ONLY_RESUME_LIMIT`]
+/// and the provider-only ones' [`PROVIDER_ONLY_RESUME_LIMIT`] are not
+/// configurable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResumeConfig {
     /// The conflict-only attempts one run makes at most.
@@ -266,23 +280,249 @@ pub struct ResumeCount {
     /// ([`parked_for_hold`]): its next resume is a hold's, which no used-up
     /// limit stops.
     pub parked_for_hold: bool,
+    /// Resumes that turned out provider-only as they finished
+    /// ([`provider_only_resume`], ADR-t3255-1): taken out of
+    /// [`Self::counted`] or [`Self::conflict_only`], where they started,
+    /// and fenced by [`PROVIDER_ONLY_RESUME_LIMIT`].
+    #[serde(default)]
+    pub provider_only: usize,
+    /// Whether the latest resume finished provider-only and no resume
+    /// started since: the next one waits while the run's provider is held
+    /// ([`waits_for_provider`]).
+    #[serde(default)]
+    pub after_provider_only: bool,
+}
+
+/// Where a resume was counted as it started, so that one that turns out
+/// provider-only is taken back out of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Started {
+    Counted,
+    ConflictOnly,
+    Held,
+    KillOnly,
+}
+
+/// What the run's events show of the resume in progress since its
+/// `resume_started`, to judge it as it finishes
+/// ([`provider_only_resume`]): whether one of its turns failed at its
+/// provider's wall, whether one ended otherwise (it worked, or failed for
+/// another reason), and the worktree head its resolution request was sent
+/// at (`resume_request_sent`'s `head`).
+#[derive(Debug, Clone, Default)]
+struct Resuming {
+    walled: bool,
+    worked: bool,
+    request_head: Option<Value>,
+}
+
+impl Resuming {
+    fn see(&mut self, event: &RunEvent) {
+        match event.kind.known() {
+            Some(EventKind::TurnFinished) => {
+                let outcome = event.payload["outcome"].as_str();
+                let failure = event.payload["failure"]
+                    .as_str()
+                    .and_then(|failure| failure.parse::<TurnFailure>().ok());
+                if outcome == Some(TurnOutcome::Failed.as_str())
+                    && failure.is_some_and(|failure| SwitchReason::of_failure(failure).is_some())
+                {
+                    self.walled = true;
+                } else if outcome != Some(TurnOutcome::Stopped.as_str()) {
+                    // A turn the runtime stopped (the `/exit` after the
+                    // wall) did no work either.
+                    self.worked = true;
+                }
+            }
+            Some(EventKind::ResumeRequestSent) => {
+                self.request_head = Some(event.payload["head"].clone());
+            }
+            _ => {}
+        }
+    }
+
+    /// ADR-t3255-1 decision 2: the resume's turns ended only at the
+    /// provider's wall, and `finished` (its `resume_finished`) ended it
+    /// unresolved, its `receipt_rewritten` false and its `head` the one its
+    /// request was sent at (no new commit). A finish without those facts
+    /// (an older event) is not provider-only.
+    fn provider_only(&self, finished: &Value) -> bool {
+        self.walled
+            && !self.worked
+            && finished["outcome"] == "unresolved"
+            && finished["receipt_rewritten"] == false
+            && finished["head"].is_string()
+            && self.request_head.as_ref() == Some(&finished["head"])
+    }
+}
+
+/// Whether the resume that `finished` (the payload of its
+/// `resume_finished`, not yet recorded) ends is a provider-only one
+/// (ADR-t3255-1 decision 2): with `events` the run's events so far, the
+/// session's turns since the last `resume_started` ended only at their
+/// provider's wall (a usage limit, a login, an agent that did not start:
+/// a [`SwitchReason`]), and the resume ended unresolved with no new commit
+/// and no rewritten receipt, however its session ended after the wall
+/// (`/exit` after a lost heartbeat, a silent wrapper, its own end).
+pub fn provider_only_resume(events: &[RunEvent], finished: &Value) -> bool {
+    let Some(started) = events
+        .iter()
+        .rposition(|event| event.kind == EventKind::ResumeStarted)
+    else {
+        return false;
+    };
+    let mut resuming = Resuming::default();
+    for event in &events[started + 1..] {
+        resuming.see(event);
+    }
+    resuming.provider_only(finished)
+}
+
+/// Mark `finished`, the payload of the `resume_finished` about to be
+/// recorded after the run's `events`, when it ends a provider-only resume
+/// ([`provider_only_resume`]) that started counted or conflict-only:
+/// `counted: false` and `provider_only: true`,
+/// and the payload of the `auto_repaired` (`provider_resume_uncounted`)
+/// that records the resume was not counted, with the run's resumes once
+/// it ends. `None`, and `finished` as it was, for any other resume.
+pub fn finish_provider_only(events: &[RunEvent], finished: &mut Value) -> Option<Value> {
+    let resumes = ResumeCount::after_finish(events, finished);
+    // Only a resume taken out of the counted or the conflict-only ones: a
+    // hold's or a kill's was not counted already.
+    if resumes.provider_only == ResumeCount::of(events).provider_only {
+        return None;
+    }
+    finished["counted"] = json!(false);
+    finished["provider_only"] = json!(true);
+    Some(json!({
+        "layer": "runtime",
+        "repair": "provider_resume_uncounted",
+        "conditions": {
+            "turns": "provider_wall",
+            "commit": false,
+            "receipt_rewritten": false,
+            "counted_resumes": resumes.counted,
+            "conflict_only_resumes": resumes.conflict_only,
+            "provider_only_resumes": resumes.provider_only,
+        },
+        "detail": {"attempt": finished["attempt"], "head": finished["head"]},
+    }))
+}
+
+/// `provider_waiting`'s `phase` for a run whose next resume waits for its
+/// provider ([`waits_for_provider`]), recorded once per wait, without a
+/// `turn`.
+pub const RESUME_WAIT_PHASE: &str = "resume";
+
+/// Whether the run's wait for its provider before its next resume is
+/// recorded already: a `provider_waiting` of [`RESUME_WAIT_PHASE`] comes
+/// after its last resume, skipped resume and park.
+pub fn resume_wait_recorded(events: &[RunEvent]) -> bool {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.kind.is_in(&[
+                EventKind::ProviderWaiting,
+                EventKind::ResumeStarted,
+                EventKind::ResumeSkipped,
+            ]) || parks(event)
+        })
+        .is_some_and(|event| {
+            event.kind == EventKind::ProviderWaiting && event.payload["phase"] == RESUME_WAIT_PHASE
+        })
+}
+
+/// Whether a conflict-only attempt, or a resume after a provider-only one
+/// (`gated`, [`ResumeCount::waits_on_a_held_provider`]), waits for the
+/// run's provider (ADR-t3255-1 decisions 1 and 3): its provider is held
+/// (`held`) while the run cannot move to the other one (`[provider_fallback]
+/// workers` is on (`fallback`, ADR-t1857-1), it has switches left
+/// (`may_switch`) and that provider can be used (`other_usable`)). The
+/// wait is no attempt.
+pub const fn waits_for_provider(
+    gated: bool,
+    held: Option<SwitchReason>,
+    fallback: bool,
+    may_switch: bool,
+    other_usable: bool,
+) -> bool {
+    gated && held.is_some() && !(fallback && may_switch && other_usable)
 }
 
 impl ResumeCount {
     pub fn of(events: &[RunEvent]) -> Self {
+        Self::of_events(events)
+    }
+
+    /// [`Self::of`] the run's `events` and the `resume_finished` with
+    /// `finished` as its payload, before it is recorded: what the run's
+    /// resumes are once the resume in progress ends so.
+    pub fn after_finish(events: &[RunEvent], finished: &Value) -> Self {
+        let finish = RunEvent {
+            id: super::EventId::new(0),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: EventKind::ResumeFinished.into(),
+            payload: finished.clone(),
+            created_at: String::new(),
+            actor: None,
+        };
+        Self::of_events(events.iter().chain(std::iter::once(&finish)))
+    }
+
+    fn of_events<'a>(events: impl IntoIterator<Item = &'a RunEvent>) -> Self {
         let mut history = History::default();
         let mut count = Self::default();
         let mut withdrawn = 0;
+        // The resume in progress: where it was counted, what parked it for
+        // a person's `send_back` (given back when it turns out
+        // provider-only), and what its session showed.
+        let mut resuming: Option<(Started, bool, Resuming)> = None;
         for event in events {
+            if let Some((_, _, facts)) = &mut resuming {
+                facts.see(event);
+            }
             if event.kind == EventKind::ResumeStarted {
-                if history.conflict_only() {
+                let started = if history.conflict_only() {
                     count.conflict_only += 1;
+                    Started::ConflictOnly
                 } else if history.hold_only() {
                     count.held += 1;
+                    Started::Held
                 } else if history.kill_only() {
                     count.kill_only += 1;
+                    Started::KillOnly
                 } else {
                     count.counted += 1;
+                    Started::Counted
+                };
+                count.after_provider_only = false;
+                resuming = Some((started, history.sent_back, Resuming::default()));
+            } else if event.kind == EventKind::ResumeFinished {
+                // Neither counted nor conflict-only (ADR-t3255-1 decision
+                // 2); a hold's and a kill's stay theirs, which no counted
+                // limit fences either, but the next resume waits for the
+                // provider all the same.
+                if let Some((started, sent_back, facts)) = resuming.take()
+                    && facts.provider_only(&event.payload)
+                {
+                    count.after_provider_only = true;
+                    if matches!(started, Started::Counted | Started::ConflictOnly) {
+                        if started == Started::Counted {
+                            count.counted -= 1;
+                        } else {
+                            count.conflict_only -= 1;
+                        }
+                        count.provider_only += 1;
+                        history.see(event);
+                        // The resume did not happen as far as the park
+                        // before it goes: a person's `send_back` still lets
+                        // the next one pass the conflict-only limit.
+                        history.sent_back = sent_back;
+                        continue;
+                    }
                 }
             } else if event.kind == EventKind::ConflictPrecheck {
                 if restore_payload::<ConflictPrecheck>(&event.payload).requested == Some(true) {
@@ -309,7 +549,14 @@ impl ResumeCount {
 
     /// Every resume started, counted or not: the number of the last one.
     pub const fn total(self) -> usize {
-        self.counted + self.conflict_only + self.kill_only + self.held
+        self.counted + self.conflict_only + self.kill_only + self.held + self.provider_only
+    }
+
+    /// Whether the next resume waits while the run's provider is held
+    /// ([`waits_for_provider`]): it would be a conflict-only one, or it
+    /// follows a provider-only one (ADR-t3255-1 decisions 1 and 3).
+    pub const fn waits_on_a_held_provider(self) -> bool {
+        self.parked_for_conflict || self.after_provider_only
     }
 
     /// How many counted resumes are left.
@@ -329,12 +576,15 @@ impl ResumeCount {
     /// reached it (ADR-t2946-1): the fence stops a conflict that never
     /// resolves, not a person's explicit send-back. A run parked by a hold
     /// of its task ([`Self::parked_for_hold`]) is never used up: its next
-    /// resume follows the hold's release (ADR-t2664-1).
+    /// resume follows the hold's release (ADR-t2664-1). The provider-only
+    /// resumes reaching [`PROVIDER_ONLY_RESUME_LIMIT`] use the run up too
+    /// (ADR-t3255-1 decision 3).
     pub const fn exhausted(self, config: ResumeConfig) -> bool {
         let limit = config.conflict_only_limit;
         !self.parked_for_hold
             && (self.counted >= MAX_RESUME_ATTEMPTS
                 || self.kill_only >= KILL_ONLY_RESUME_LIMIT
+                || self.provider_only >= PROVIDER_ONLY_RESUME_LIMIT
                 || (self.conflict_only >= limit && !self.parked_for_send_back)
                 || (self.parked_for_conflict && self.conflict_attempts() >= limit))
     }
@@ -615,6 +865,8 @@ mod tests {
                 parked_for_conflict: true,
                 parked_for_hold: false,
                 parked_for_send_back: false,
+                provider_only: 0,
+                after_provider_only: false,
             }
         );
         assert_eq!(count.total(), 2);
@@ -700,6 +952,8 @@ mod tests {
                 parked_for_conflict: true,
                 parked_for_hold: false,
                 parked_for_send_back: false,
+                provider_only: 0,
+                after_provider_only: false,
             }
         );
     }
@@ -857,6 +1111,8 @@ mod tests {
                 parked_for_conflict: true,
                 parked_for_hold: false,
                 parked_for_send_back: false,
+                provider_only: 0,
+                after_provider_only: false,
             }
         );
         assert_eq!(count.total(), 1);
@@ -1063,6 +1319,8 @@ mod tests {
                 parked_for_conflict: false,
                 parked_for_hold: false,
                 parked_for_send_back: false,
+                provider_only: 0,
+                after_provider_only: false,
             }
         );
         assert_eq!(count.total(), 1);
@@ -1194,6 +1452,8 @@ mod tests {
                 parked_for_conflict: true,
                 parked_for_hold: false,
                 parked_for_send_back: false,
+                provider_only: 0,
+                after_provider_only: false,
             }
         );
         // The retry that carries the branch over still needs a review that
@@ -1321,5 +1581,284 @@ mod tests {
                 })),
             }
         );
+    }
+
+    const HEAD: &str = "1111111111111111111111111111111111111111";
+
+    /// The resume 3 of run d2cf121b (finding 474): after a landing
+    /// recheck's conflict, its turn 7 failed at Claude's usage limit, the
+    /// run waited for its provider, the wrapper's heartbeat expired, the
+    /// session was asked to `/exit`, and the resume finished unresolved
+    /// with the head its request was sent at and no rewritten receipt.
+    /// `finished` is that `resume_finished`'s payload.
+    fn provider_only_resume_events(finished: Value) -> Vec<RunEvent> {
+        vec![
+            event("resume_started", json!({"attempt": 3, "counted": false})),
+            event(
+                "resume_request_sent",
+                json!({"resume_attempt": 3, "head": HEAD}),
+            ),
+            event("turn_started", json!({"turn": 7})),
+            event(
+                "turn_finished",
+                json!({"turn": 7, "outcome": "failed", "failure": "usage_limit"}),
+            ),
+            event(
+                "provider_waiting",
+                json!({"turn": 7, "provider": "claude", "reason": "usage_limit"}),
+            ),
+            event(
+                "wrapper_heartbeat_expired",
+                json!({"heartbeat_age_secs": 935}),
+            ),
+            event("exit_requested", json!({"resume_attempt": 3})),
+            event("resume_finished", finished),
+        ]
+    }
+
+    fn unresolved(head: &str, receipt_rewritten: bool) -> Value {
+        json!({
+            "attempt": 3,
+            "outcome": "unresolved",
+            "head": head,
+            "receipt_rewritten": receipt_rewritten,
+        })
+    }
+
+    fn rechecked_conflict() -> Vec<RunEvent> {
+        vec![pass(), recheck("rebase_conflict", recheck::RESUMED)]
+    }
+
+    /// ADR-t3255-1 decision 2: d2cf121b's resume 3 is neither a
+    /// conflict-only attempt nor a counted one but a provider-only one,
+    /// however its session ended after the wall; one that made a commit or
+    /// rewrote its receipt is counted as before.
+    #[test]
+    fn a_resume_that_ended_only_at_its_providers_wall_is_not_counted() {
+        let mut events = rechecked_conflict();
+        events.extend(provider_only_resume_events(unresolved(HEAD, false)));
+        let count = ResumeCount::of(&events);
+        assert_eq!(
+            (count.counted, count.conflict_only, count.provider_only),
+            (0, 0, 1)
+        );
+        assert_eq!(count.total(), 1);
+        assert!(count.after_provider_only);
+        assert!(count.parked_for_conflict);
+        assert!(count.waits_on_a_held_provider());
+        assert!(!count.exhausted(ResumeConfig::default()));
+        // The same resume after a failed verification is not counted either.
+        let mut failed = vec![verification_failed()];
+        failed.extend(provider_only_resume_events(unresolved(HEAD, false)));
+        let count = ResumeCount::of(&failed);
+        assert_eq!((count.counted, count.provider_only), (0, 1));
+        // A session that ended by itself or went silent after the wall is
+        // judged the same: only the turns and the repair decide.
+        let ended: Vec<RunEvent> = rechecked_conflict()
+            .into_iter()
+            .chain(provider_only_resume_events(unresolved(HEAD, false)))
+            .filter(|e| {
+                !matches!(
+                    e.kind.known(),
+                    Some(EventKind::WrapperHeartbeatExpired | EventKind::ExitRequested)
+                )
+            })
+            .collect();
+        assert_eq!(ResumeCount::of(&ended).provider_only, 1);
+        // A new commit, a rewritten receipt, or a turn that did work is a
+        // repair attempt: counted as before.
+        for finished in [
+            unresolved("2222222222222222222222222222222222222222", false),
+            unresolved(HEAD, true),
+        ] {
+            let mut repaired = rechecked_conflict();
+            repaired.extend(provider_only_resume_events(finished.clone()));
+            let count = ResumeCount::of(&repaired);
+            assert_eq!(
+                (count.conflict_only, count.provider_only),
+                (1, 0),
+                "{finished}"
+            );
+            assert!(!count.after_provider_only);
+        }
+        let mut worked = rechecked_conflict();
+        worked.extend(provider_only_resume_events(unresolved(HEAD, false)));
+        worked.insert(
+            4,
+            event("turn_finished", json!({"turn": 6, "outcome": "succeeded"})),
+        );
+        assert_eq!(ResumeCount::of(&worked).conflict_only, 1);
+        // An older `resume_finished` without the facts is counted.
+        let mut older = rechecked_conflict();
+        older.extend(provider_only_resume_events(
+            json!({"attempt": 3, "outcome": "unresolved", "head": HEAD}),
+        ));
+        assert_eq!(ResumeCount::of(&older).conflict_only, 1);
+        // So is a turn that failed for another reason.
+        let mut other = rechecked_conflict();
+        other.extend(provider_only_resume_events(unresolved(HEAD, false)));
+        other[5] = event(
+            "turn_finished",
+            json!({"turn": 7, "outcome": "failed", "failure": "model"}),
+        );
+        assert_eq!(ResumeCount::of(&other).conflict_only, 1);
+    }
+
+    /// A hold's resume that ended only at its provider's wall stays the
+    /// hold's and is not marked, but the next resume waits for the provider
+    /// all the same.
+    #[test]
+    fn a_holds_resume_at_the_wall_stays_the_holds_and_the_next_waits() {
+        let mut events = vec![hold_parked(), released()];
+        events.extend(provider_only_resume_events(unresolved(HEAD, false)));
+        let mut finished = events.pop().unwrap().payload;
+        assert_eq!(finish_provider_only(&events, &mut finished), None);
+        assert_eq!(finished, unresolved(HEAD, false));
+        let count = ResumeCount::after_finish(&events, &finished);
+        assert_eq!((count.held, count.provider_only), (1, 0));
+        assert!(count.waits_on_a_held_provider());
+    }
+
+    /// The provider-only resume is recorded as it finishes: its
+    /// `resume_finished` says `counted: false` and the repair
+    /// `provider_resume_uncounted` gives the resumes once it ends.
+    #[test]
+    fn a_provider_only_resume_is_marked_and_recorded_as_a_repair() {
+        let mut events = rechecked_conflict();
+        events.extend(provider_only_resume_events(unresolved(HEAD, false)));
+        let finish = events.pop().unwrap();
+        let mut finished = finish.payload.clone();
+        assert!(provider_only_resume(&events, &finished));
+        let repair = finish_provider_only(&events, &mut finished);
+        assert_eq!(finished["counted"], false);
+        assert_eq!(finished["provider_only"], true);
+        assert_eq!(
+            repair,
+            Some(json!({
+                "layer": "runtime",
+                "repair": "provider_resume_uncounted",
+                "conditions": {
+                    "turns": "provider_wall",
+                    "commit": false,
+                    "receipt_rewritten": false,
+                    "counted_resumes": 0,
+                    "conflict_only_resumes": 0,
+                    "provider_only_resumes": 1,
+                },
+                "detail": {"attempt": 3, "head": HEAD},
+            }))
+        );
+        assert_eq!(
+            ResumeCount::after_finish(&events, &finished).provider_only,
+            1
+        );
+        let mut repaired = unresolved(HEAD, true);
+        assert_eq!(finish_provider_only(&events, &mut repaired), None);
+        assert_eq!(repaired, unresolved(HEAD, true));
+    }
+
+    /// ADR-t3255-1 decisions 3 and 4: provider-only resumes stop at their
+    /// own limit, which uses the run up as decision 24 says (a conflict
+    /// after a passed review retries with the branch carried over), and a
+    /// resume after one that parked for another reason is counted by it.
+    #[test]
+    fn provider_only_resumes_are_used_up_at_their_own_limit() {
+        let mut events = rechecked_conflict();
+        for _ in 0..PROVIDER_ONLY_RESUME_LIMIT {
+            events.extend(provider_only_resume_events(unresolved(HEAD, false)));
+        }
+        let count = ResumeCount::of(&events);
+        assert_eq!(count.provider_only, PROVIDER_ONLY_RESUME_LIMIT);
+        assert_eq!((count.counted, count.conflict_only), (0, 0));
+        assert!(count.exhausted(ResumeConfig::default()));
+        assert!(inherits_on_exhaustion(&events, &[]));
+        let fewer = ResumeCount::of(&events[..events.len() - 8]);
+        assert!(!fewer.exhausted(ResumeConfig::default()));
+        // After a provider-only resume, a park for another reason decides
+        // the next resume: a failed verification is counted.
+        let mut parked = rechecked_conflict();
+        parked.extend(provider_only_resume_events(unresolved(HEAD, false)));
+        parked.extend([verification_failed(), resume()]);
+        let count = ResumeCount::of(&parked);
+        assert_eq!(
+            (count.counted, count.conflict_only, count.provider_only),
+            (1, 0, 1)
+        );
+        assert!(!count.after_provider_only);
+        // A conflict after a passed review is conflict-only again.
+        let mut conflicted = rechecked_conflict();
+        conflicted.extend(provider_only_resume_events(unresolved(HEAD, false)));
+        conflicted.extend([conflict(), resume()]);
+        let count = ResumeCount::of(&conflicted);
+        assert_eq!((count.conflict_only, count.provider_only), (1, 1));
+        // A person's send-back still lets the resume after the
+        // provider-only one past the conflict-only limit.
+        let mut sent_back = vec![pass()];
+        for _ in 0..CONFLICT_ONLY_RESUME_LIMIT {
+            sent_back.extend([conflict(), resume()]);
+        }
+        sent_back.push(event(
+            "landing_decided",
+            json!({"answer": "send_back", "code": "sent_back"}),
+        ));
+        sent_back.extend(provider_only_resume_events(unresolved(HEAD, false)));
+        let count = ResumeCount::of(&sent_back);
+        assert_eq!((count.counted, count.provider_only), (0, 1));
+        assert!(count.parked_for_send_back);
+        assert!(!count.exhausted(ResumeConfig::default()));
+    }
+
+    /// ADR-t3255-1 decision 1: a conflict-only attempt (or a resume after a
+    /// provider-only one) does not start while the run's provider is held,
+    /// with `[provider_fallback] workers` off; it starts once the hold
+    /// ends, or when the run may move to the other provider and that one
+    /// can be used. Any other resume is not held back.
+    #[test]
+    fn a_conflict_only_resume_waits_while_its_provider_is_held() {
+        let held = Some(SwitchReason::UsageLimit);
+        // Held, fallback off: it waits.
+        assert!(waits_for_provider(true, held, false, true, true));
+        // The hold ended: it starts.
+        assert!(!waits_for_provider(true, None, false, true, true));
+        // The run may move and the other provider can be used: it starts.
+        assert!(!waits_for_provider(true, held, true, true, true));
+        // It cannot move: no switch left, or the other one cannot be used.
+        assert!(waits_for_provider(true, held, true, false, true));
+        assert!(waits_for_provider(true, held, true, true, false));
+        // A counted resume of another reason is not held back.
+        assert!(!waits_for_provider(false, held, false, true, true));
+        let mut events = rechecked_conflict();
+        assert!(ResumeCount::of(&events).waits_on_a_held_provider());
+        events.extend([verification_failed()]);
+        assert!(!ResumeCount::of(&events).waits_on_a_held_provider());
+        events.extend(provider_only_resume_events(unresolved(HEAD, false)));
+        assert!(ResumeCount::of(&events).waits_on_a_held_provider());
+        events.push(resume());
+        assert!(!ResumeCount::of(&events).waits_on_a_held_provider());
+    }
+
+    /// The wait before a resume is recorded once, until the next resume or
+    /// park.
+    #[test]
+    fn the_wait_before_a_resume_is_recorded_once() {
+        let waiting = event(
+            "provider_waiting",
+            json!({"phase": RESUME_WAIT_PHASE, "provider": "claude"}),
+        );
+        let mut events = rechecked_conflict();
+        assert!(!resume_wait_recorded(&events));
+        events.push(waiting.clone());
+        assert!(resume_wait_recorded(&events));
+        events.push(event("provider_held", json!({})));
+        assert!(resume_wait_recorded(&events));
+        events.push(resume());
+        assert!(!resume_wait_recorded(&events));
+        // A turn's wait is not the resume's.
+        events.push(event("provider_waiting", json!({"turn": 9})));
+        assert!(!resume_wait_recorded(&events));
+        events.extend([conflict(), waiting]);
+        assert!(resume_wait_recorded(&events));
+        events.push(conflict());
+        assert!(!resume_wait_recorded(&events));
     }
 }

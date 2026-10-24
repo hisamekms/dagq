@@ -44,7 +44,9 @@
 //! and read how it ended from the events past it too; each aggregate's
 //! doc says which.
 use crate::domain::EventKind;
-use crate::domain::run::{AskOpened, ResumeStarted, ReviewFinished, restore_payload};
+use crate::domain::run::{
+    AskOpened, ResumeFinished, ResumeStarted, ReviewFinished, restore_payload,
+};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -290,11 +292,13 @@ pub struct RunStats {
     /// same.
     pub without_held: Option<WithoutHeld>,
     /// The `resume_started` counted toward `MAX_RESUME_ATTEMPTS`: those
-    /// whose `counted` is not false (an event without it is counted).
+    /// whose `counted` is not false (an event without it is counted), but
+    /// those whose `resume_finished` says they were provider-only.
     pub resumes: i64,
     /// The `resume_started` with `counted: false`, which the limit does
     /// not count (a conflict-only resume after the landing recheck, the
-    /// resume after a hold's release, ...).
+    /// resume after a hold's release, ...), and the counted ones whose
+    /// `resume_finished` says `provider_only: true` (ADR-t3255-1).
     pub uncounted_resumes: i64,
     /// The `verdict` of the last `review_finished`.
     pub review_verdict: Option<String>,
@@ -2202,6 +2206,10 @@ struct Track {
     /// The wait to land by phase, from the first `validation_finished`.
     land: Option<LandClock>,
     measure: measures::MeasureTrack,
+    /// Whether the latest `resume_started` was counted, so that its
+    /// `resume_finished` marked provider-only (`provider_only: true`,
+    /// ADR-t3255-1) moves it to the uncounted ones.
+    resume_counted: bool,
 }
 
 /// The `status` of a run [`RunStats`] counts as closed on a verified
@@ -2285,6 +2293,7 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                 held_since: None,
                 land: None,
                 measure: measures::MeasureTrack::default(),
+                resume_counted: false,
             }
         });
         track.measure.observe(event);
@@ -2325,11 +2334,20 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
             }
             Some(EventKind::IntegrationStarted) => run.status = Some("integrating".to_owned()),
             Some(EventKind::ResumeStarted) => {
-                if restore_payload::<ResumeStarted>(&event.payload).counted() {
+                track.resume_counted = restore_payload::<ResumeStarted>(&event.payload).counted();
+                if track.resume_counted {
                     run.resumes += 1;
                 } else {
                     run.uncounted_resumes += 1;
                 }
+            }
+            Some(EventKind::ResumeFinished)
+                if track.resume_counted
+                    && restore_payload::<ResumeFinished>(&event.payload).provider_only() =>
+            {
+                track.resume_counted = false;
+                run.resumes -= 1;
+                run.uncounted_resumes += 1;
             }
             Some(EventKind::ReviewFinished) => {
                 run.review_verdict = restore_payload::<ReviewFinished>(&event.payload)
@@ -2607,6 +2625,31 @@ mod tests {
             created_at: at(secs),
             ..event(id, 1, kind, payload)
         }
+    }
+
+    /// A counted resume whose `resume_finished` says it was provider-only
+    /// (ADR-t3255-1) is not one of the run's counted resumes; one that
+    /// started uncounted is not moved twice.
+    #[test]
+    fn a_provider_only_resume_is_an_uncounted_one() {
+        let provider_only =
+            json!({"outcome": "unresolved", "counted": false, "provider_only": true});
+        let events = [
+            run_event(1, R1, "resume_started", json!({"counted": true}), T),
+            run_event(2, R1, "resume_finished", provider_only.clone(), T + 1),
+            run_event(3, R1, "resume_started", json!({"counted": false}), T + 2),
+            run_event(4, R1, "resume_finished", provider_only, T + 3),
+            run_event(5, R1, "resume_started", json!({}), T + 4),
+            run_event(
+                6,
+                R1,
+                "resume_finished",
+                json!({"outcome": "unresolved"}),
+                T + 5,
+            ),
+        ];
+        let run = &run_stats(&events)[0];
+        assert_eq!((run.resumes, run.uncounted_resumes), (1, 2));
     }
 
     /// An ask of a run integrated since, and a `blocked` ask of its task

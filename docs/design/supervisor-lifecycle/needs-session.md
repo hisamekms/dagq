@@ -8,6 +8,7 @@ scope: runtime
 related:
   - adr-t639-1
   - adr-t946-1
+  - adr-t3255-1
   - design-supervisor-lifecycle
   - adr-0027
   - adr-0026
@@ -49,14 +50,14 @@ supervisorが承認済みのrunを着地させるときは、この`push`に従�
 `integrate`を呼ぶことが着地の承認で（ADR-0016の決定5）、runtimeが自分で着地させるのは承認済みのrun、reviewがpassしたrun（上限の後の差し戻しが収束した`revise_limit_judged`も含む。[Review](review.md#reviewの流れ)の4a）、`approve_landing`に`land`と答えたrunだけ（[ADR-0027](../../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）。
 
 **試行の数え方**（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定24）: 判定はdomainの`domain::resume`がrunのイベントだけから行う。
-`resume_started`ごとに、それより前のイベントで (a) reviewがpass済み（`integration_approved`がある（`integrate`か`approve_landing`の`land`）か、最新の`review_finished`の`verdict`が`pass`か、その後に収束した（`converged: true`の）`revise_limit_judged`がある）で、(b) runを`needs_session`にした最新のイベントが`code: rebase_conflict`の`integration_deferred`なら、その試行は**衝突だけの試行**で、上限に数えない。
+`resume_started`ごとに、それより前のイベントで (a) reviewがpass済み（着地の承認か、passか収束したreview）で、(b) runを`needs_session`にした最新のイベントが`code: rebase_conflict`の`integration_deferred`なら、その試行は**衝突だけの試行**で、上限に数えない。
 それ以外（検証の失敗、`evidence_missing`、`scope_violation`、人の`send_back`、triageのresume、reviewがpassしていない衝突）は数える。
 着地前の衝突の確認（[Review](review.md#review-supervisor)の5のprecheck、ADR-0027の決定4）が生きているsessionに送った解消依頼（後で取り消したものを除く）も、reviewがpassした後の衝突だけなので衝突だけの試行で、上限に数えない。
 衝突だけの試行（衝突だけのresumeとprecheckの依頼の和）は別に`dagq.toml`の`[resume] conflict_only_limit`（書式は[Run environment](run-environment.md)）で止める（同じ衝突が解けないまま回り続けないための柵）。
 使い切りの判定と、askやlast_error・復旧jobのpromptの文面は、supervisorが起動時に読んだ設定の値を使う。
 数える試行が上限に達したか、衝突だけのresumeが衝突だけの上限に達したrun、または衝突だけで`needs_session`になっている（次のresumeが衝突だけの試行になる）runで衝突だけの試行（precheckの依頼を含む）が衝突だけの上限に達したものは、試行を使い切っている。
 precheckの依頼で衝突だけの上限に達したrunでも、検証の失敗・`evidence_missing`・`scope_violation`など別の理由でparkしたなら、数える試行が残っていればresumeする。
-人の`send_back`（`approve_landing`の`send_back`）で`needs_session`になったrunは、衝突だけのresumeが衝突だけの上限に達していても、数える試行が残っていればresumeする（[ADR-t2946-1](../../adr/2026-10-22-t2946-1-a-persons-send-back-resumes-past-the-conflict-only-limit.md)。衝突だけの上限は同じ衝突を解けないまま回り続けないための柵で、人の差し戻しを止めない）。
+人の`send_back`（`approve_landing`の`send_back`）で`needs_session`になったrunは、衝突だけのresumeが衝突だけの上限に達していても、数える試行が残っていればresumeする（[ADR-t2946-1](../../adr/2026-10-22-t2946-1-a-persons-send-back-resumes-past-the-conflict-only-limit.md)）。
 この例外はsend_backの直後の1回のresumeだけで、そのresumeは数える試行に数え、その後に衝突や別の理由でparkすれば衝突だけの上限で今どおり使い切りになる。
 triageのresumeの上限と`resumes_left`は数える試行だけを見る。
 precheckは、数える試行が上限に達していればaskにし、衝突だけの試行が上限に達していれば依頼を送らずに着地へ進め、着地のrebaseの衝突で`needs_session`になったrunは試行を使い切っているので下の「引き継ぐretry」に進む（引き継げなければprecheckがaskにする）。
@@ -66,11 +67,14 @@ precheckは、数える試行が上限に達していればaskにし、衝突だ
 killだけの試行は別の上限（設定にしない）で止め、達したrunは試行を使い切っている（復旧jobの`resume`も拒まれ、`resume_exhausted`として下の「復旧jobに渡す」に進む）。
 killだけの試行はkillの後の`resume`の直後の1回だけで、そのresumeのsessionが解消せずに終わって次のresumeに回るなら（間に新しいkillが無ければ）数える試行になる。
 また数えるかどうかは衝突だけの試行と同じくresumeの直前の`needs_session`の理由で決まるので、killの後のresumeが検証の失敗などでparkすれば次のresumeは数える試行、reviewがpass済みの衝突なら衝突だけの試行になる。
-使い切ったrunの`recovery_requested`・`last_error`・復旧jobのpromptの文面はkillだけの試行の数も書く。
+使い切ったrunの`recovery_requested`・`last_error`・復旧jobのpromptの文面はkillだけの試行とproviderだけの試行の数も書く。
 
 **holdの後の試行**（[ADR-t2664-1](../../adr/2026-10-22-t2664-1-resumes-after-a-hold-release-are-not-counted.md)）: runを`needs_session`にした最新のparkがholdの待ち（`hold_parked`）なら、解除の後の次の`resume_started`は上限に数えず、killだけの試行と同じく`auto_repaired`で記録する。
 holdの待ちにあるrunは、数える試行が上限に達していても試行を使い切ったものとして扱わず、解除の後にresumeする（holdの試行には上限を設けない。解除は人の操作でしか起きない）。
 holdの試行は`hold_parked`の後の最初のresumeだけで、その後か、resumeの前に別の理由でparkし直したrunは、その理由で数える。
+
+**providerだけの試行**（[ADR-t3255-1](../../adr/2026-10-24-t3255-1-provider-only-resumes-wait-for-the-hold-and-are-not-counted.md)）: turnがproviderの壁だけで終わり、commitもreceiptの書き直しも無く終わったresumeは、sessionの終わり方を問わず数える試行にも衝突だけの試行にも数えず、別の上限（設定にしない）で止める（`domain::resume::finish_provider_only`）。
+衝突だけの試行とproviderだけの試行の後のresumeは、providerの控えが解けるか移れるまで始めず（precheckの依頼も）、待ちは数えない（`domain::resume::waits_for_provider`）。
 
 supervisorは`needs_session`のrunを自分でresumeする（ADR-0019の決定1。`resume_candidates`）。
 ループの各回で、adoptの後、`needs_session`のrunを古い順に見て再開の候補を集める。
@@ -88,7 +92,7 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
 
 0. **解消済みの確認**（`resolved_head`）: resumeを始める前に、前の試行で解消済みかを確かめる。
    前の試行のsessionがreceiptを書き直した後に判定されたrunは、`rewritten_receipt`がresume開始より新しいreceiptを要求するので`unresolved`になり試行を空費する。
-   次をすべて満たせばsessionを開かない: (a) runを`needs_session`にした最後のイベントが`landing_decided`（人の`send_back`。指摘への対応はsessionが要る）ではなく、parkのイベントと`resume_finished` / `resume_skipped`のうち最後が`outcome: unresolved`の`resume_finished`、(b) receiptがparseでき、`run_id`がこのrunで`succeeded`、taskの`required_evidence`とSpikeの結果を満たす、(c) receiptの`commit`がworktreeのHEADに一致し、worktreeがclean、(d) HEADが今の`main`ではなく、`main`を祖先に持つ。
+   次をすべて満たせばsessionを開かない（`skips_resume`）: (a) 人の`send_back`（指摘への対応はsessionが要る）でないparkの後にsessionが`unresolved`で終わった、(b) receiptがこのrunの`succeeded`で要求を満たし、(c) cleanなworktreeのHEADを名指し、(d) HEADが`main`を真の祖先に持つ。
    どれかが読めない・満たさないときは1に進む。
    宣言外のパスはここでは見ず、skipの後の[Validation](validation.md#validation)か着地が検査する。
    満たせば1トランザクションで`needs_session`でleaseが無いかstale、heartbeatする未終了のprocessが無ければleaseし、`resume_skipped`を記録する。
@@ -106,7 +110,6 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
    runの状態は`needs_session`のままで、新しい状態は足さない。
    進行は`resume_started` / `resume_finished`で読む。
 2. **起動**: worker と同じ非対話の wrapper を起動する。
-   begin_resume は interactive と記録された run も headless に変換し、worker_mode_convertedを同じ transaction で記録する。
    runtime の snapshot を置き換え、resume の wrapper を background で起動する（`SessionWrappers::launch_background`。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)。run は workspace を開かない）。
    handle を `workspace_created` で記録し、`wrapper_launched` を記録してから、wrapper の登録を待つ。
    記録できなければ wrapper を止めてエラーにし、起動できなければ `backend_call_failed` を run に記録して下の6の error になる。

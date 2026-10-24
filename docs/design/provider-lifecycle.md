@@ -7,6 +7,7 @@ created: 2026-09-21
 scope: provider
 related:
   - adr-t1857-1
+  - adr-t3255-1
   - adr-t1486-1
   - design-execution-tokens
   - adr-t1570-1
@@ -164,6 +165,7 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 - headless jobの行き先は`domain::actor_model::job_route`、timer jobの使えない終わりは`domain::actor_model::records_unusable`。
 - 約束: Claudeの認証と利用上限の控えは`queue_hold`のaskで、常に人に届く（[Queue hold](supervisor-lifecycle/queue-hold.md)）。
 - 切り替えられないときもrunは失敗にせず、wrapperはsessionを終えずに次の依頼を待つ。
+- sessionの無い`needs_session`のrunは、次のresumeが衝突だけの試行かproviderだけの試行の後なら、控えが解けるか移れるまでresumeを始めず、待ちは試行に数えない（[ADR-t3255-1](../adr/2026-10-24-t3255-1-provider-only-resumes-wait-for-the-hold-and-are-not-counted.md)、[needs_session](supervisor-lifecycle/needs-session.md)の「providerだけの試行」）。
 - 落とし穴: 切り替えた後は会話が引き継がれず、promptも新しいproviderの文面で書き直す。
 - runtimeのplannerは同じ壁で待つが、providerは切り替えない（[Plan planners](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)）。
 - runのreviewとgoal reviewの起動し直しは[Review](supervisor-lifecycle/review.md)と[Goal review](supervisor-lifecycle/goal-review.md)。

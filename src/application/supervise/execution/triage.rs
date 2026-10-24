@@ -911,11 +911,12 @@ impl Supervisor<'_> {
                     ResumeCount::of(&self.queue.run_events(run.id()).map_err(unreadable)?);
                 if resumes.exhausted(self.resume.config) {
                     return Err(format!(
-                        "its resumes are used up ({} counted of at most {MAX_RESUME_ATTEMPTS}, {} after conflicts only, {} of at most {KILL_ONLY_RESUME_LIMIT} after its session was killed, {} not counted after a hold of its task was released)",
+                        "its resumes are used up ({} counted of at most {MAX_RESUME_ATTEMPTS}, {} after conflicts only, {} of at most {KILL_ONLY_RESUME_LIMIT} after its session was killed, {} not counted after a hold of its task was released, {} of at most {PROVIDER_ONLY_RESUME_LIMIT} that ended only at the provider's wall)",
                         resumes.counted,
                         resumes.conflict_attempts(),
                         resumes.kill_only,
-                        resumes.held
+                        resumes.held,
+                        resumes.provider_only
                     ));
                 }
                 let worktree = run
@@ -931,7 +932,7 @@ impl Supervisor<'_> {
                 };
                 Ok((
                     TriageAction::Resume { instruction },
-                    json!({"counted_resumes": resumes.counted, "kill_only_resumes": resumes.kill_only, "resumes": resumes.total(), "worktree": true}),
+                    json!({"counted_resumes": resumes.counted, "kill_only_resumes": resumes.kill_only, "provider_only_resumes": resumes.provider_only, "resumes": resumes.total(), "worktree": true}),
                 ))
             }
             RecoveryAction::HandOff => {

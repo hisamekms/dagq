@@ -429,23 +429,27 @@ pub fn ended_run_material(
     };
     let resume_rule = if resumes.exhausted(config) {
         format!(
-            "The run was resumed {} time(s) ({} of at most {MAX_RESUME_ATTEMPTS} counted, {} of at most {} conflict-only attempts with the conflict precheck's requests, {} of at most {} after a signal from outside killed its session, {} not counted after a hold of its task was released) and its resumes are used up: do not choose resume.",
+            "The run was resumed {} time(s) ({} of at most {MAX_RESUME_ATTEMPTS} counted, {} of at most {} conflict-only attempts with the conflict precheck's requests, {} of at most {} after a signal from outside killed its session, {} not counted after a hold of its task was released, {} of at most {} that ended only at the provider's wall) and its resumes are used up: do not choose resume.",
             resumes.total(),
             resumes.counted,
             resumes.conflict_attempts(),
             config.conflict_only_limit,
             resumes.kill_only,
             crate::domain::resume::KILL_ONLY_RESUME_LIMIT,
-            resumes.held
+            resumes.held,
+            resumes.provider_only,
+            crate::domain::resume::PROVIDER_ONLY_RESUME_LIMIT
         )
     } else {
         format!(
-            "The run was resumed {} time(s) ({} of at most {MAX_RESUME_ATTEMPTS} counted, {} of at most {} after a signal from outside killed its session, {} not counted after a hold of its task was released); resume needs the run's worktree.",
+            "The run was resumed {} time(s) ({} of at most {MAX_RESUME_ATTEMPTS} counted, {} of at most {} after a signal from outside killed its session, {} not counted after a hold of its task was released, {} of at most {} that ended only at the provider's wall); resume needs the run's worktree.",
             resumes.total(),
             resumes.counted,
             resumes.kill_only,
             crate::domain::resume::KILL_ONLY_RESUME_LIMIT,
-            resumes.held
+            resumes.held,
+            resumes.provider_only,
+            crate::domain::resume::PROVIDER_ONLY_RESUME_LIMIT
         )
     };
     material.push_str(&format!("Rules: {retry_rule} {resume_rule}\n"));

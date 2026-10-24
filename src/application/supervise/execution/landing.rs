@@ -2230,8 +2230,21 @@ impl Supervisor<'_> {
                 )));
             }
         }
+        // Nor while the run's provider is held and it cannot move
+        // (ADR-t3255-1 decision 1): the run lands, and a conflicting
+        // landing parks it for a resume that waits for the hold's end.
+        let provider_wait = self
+            .provider_wait(run, &events, true)
+            .map(|(reason, blocked)| {
+                format!(
+                    "its provider {} is held ({}) and the run cannot move ({blocked})",
+                    run.actual_provider().as_str(),
+                    reason.as_str()
+                )
+            });
         let live = session
             .clone()
+            .filter(|_| provider_wait.is_none())
             .filter(|_| session_alive(self, run.id()).unwrap_or(false));
         let sent = match &live {
             Some(live) => {
@@ -2276,7 +2289,9 @@ impl Supervisor<'_> {
                 .map(|_submission| (sent_at, sent_at))
                 .map_err(|error| format!("the request could not be sent: {error:#}"))
             }
-            None => Err("the session had ended".to_owned()),
+            None => Err(provider_wait
+                .filter(|_| session.is_some())
+                .unwrap_or_else(|| "the session had ended".to_owned())),
         };
         let (Some(live), Ok((sent_at, start))) = (live.clone(), sent.clone()) else {
             let error = sent.err().unwrap_or_default();

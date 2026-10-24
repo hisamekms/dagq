@@ -78,8 +78,8 @@ use crate::domain::{
     queue_hold::{HoldJob, Wall},
     recovery::{RecoveryAlert, RecoveryDecision, RecoveryVerdict},
     resume::{
-        KILL_ONLY_RESUME_LIMIT, ResumeConfig, ResumeCount, inherits_on_exhaustion,
-        uses_automatic_inherit,
+        KILL_ONLY_RESUME_LIMIT, PROVIDER_ONLY_RESUME_LIMIT, ResumeConfig, ResumeCount,
+        inherits_on_exhaustion, uses_automatic_inherit,
     },
     run_env::RUN_ENV_PROGRAM_KINDS,
     stall::{BackgroundTask, StallConfig},

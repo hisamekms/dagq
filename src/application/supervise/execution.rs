@@ -4292,7 +4292,8 @@ impl Supervisor<'_> {
                 };
                 let attempt = watch.attempt;
                 let workspace = watch.workspace.clone();
-                self.finish_resumed_session(slot, attempt, &workspace, verdict)
+                let rewritten = watch.receipt_rewritten(&*self.files);
+                self.finish_resumed_session(slot, attempt, &workspace, verdict, rewritten)
             }
             Phase::AwaitingSlot => {
                 // Judged again on each look: only the landing of another run
@@ -5040,6 +5041,36 @@ fn resumes_exhausted(queue: &dyn Queue, run_id: &RunId, config: ResumeConfig) ->
         Ok(events) => Ok(ResumeCount::of(&events).exhausted(config)),
         Err(error) if crate::application::supervisor_service::unreachable(&error) => Err(error),
         Err(_) => Ok(true),
+    }
+}
+
+/// Complete `finished`, the payload of the `resume_finished` of an
+/// unresolved resume of `run_id`: `exhausted`, whether the run's resumes
+/// are used up once it ends so (ADR-0047 decision 24: its counted resumes,
+/// its conflict-only ones up to `config`'s limit, its provider-only ones),
+/// and, for a provider-only resume, `counted: false` with the payload of
+/// the `auto_repaired` that records it (ADR-t3255-1 decision 2,
+/// [`crate::domain::resume::finish_provider_only`]). Unreadable events count as used up,
+/// and as no provider-only resume, but not a read the queue service did
+/// not answer, which is the caller's error.
+fn finish_unresolved(
+    queue: &dyn Queue,
+    run_id: &RunId,
+    config: ResumeConfig,
+    finished: &mut Value,
+) -> Result<Option<Value>> {
+    match queue.run_events(run_id) {
+        Ok(events) => {
+            let repair = crate::domain::resume::finish_provider_only(&events, finished);
+            finished["exhausted"] =
+                json!(ResumeCount::after_finish(&events, finished).exhausted(config));
+            Ok(repair)
+        }
+        Err(error) if crate::application::supervisor_service::unreachable(&error) => Err(error),
+        Err(_) => {
+            finished["exhausted"] = json!(true);
+            Ok(None)
+        }
     }
 }
 

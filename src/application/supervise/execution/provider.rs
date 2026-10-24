@@ -105,6 +105,84 @@ impl Supervisor<'_> {
         }
     }
 
+    /// Why `run`'s conflict-only attempt, or its resume after a
+    /// provider-only one (`gated`), waits for its provider now
+    /// (ADR-t3255-1 decision 1): its provider is held, and it cannot move
+    /// to the other one (`[provider_fallback] workers` is off
+    /// (ADR-t1857-1), its switches are used up, or that one cannot be
+    /// used either). The hold's reason and why it does not move.
+    pub(super) fn provider_wait(
+        &self,
+        run: &TaskRun,
+        events: &[RunEvent],
+        gated: bool,
+    ) -> Option<(SwitchReason, String)> {
+        let from = run.actual_provider();
+        let held = self.provider_held(from)?;
+        let to = from.other();
+        let fallback = self.provider.fallback.workers;
+        let may_switch = provider_switch::may_switch(events);
+        let other_usable = may_switch && self.headless_usable(to);
+        crate::domain::resume::waits_for_provider(
+            gated,
+            Some(held),
+            fallback,
+            may_switch,
+            other_usable,
+        )
+        .then(|| {
+            (
+                held,
+                switch_blocked(fallback, events, self.provider_held(to)),
+            )
+        })
+    }
+
+    /// Whether the next resume of `run` (with `resumes`) waits for its
+    /// provider ([`Self::provider_wait`]): it would be a conflict-only one,
+    /// or follows a provider-only one (ADR-t3255-1 decisions 1 and 3). The
+    /// wait is recorded once (`provider_waiting` with `phase: resume`) and
+    /// is no attempt; the resume starts once the hold ends or the run can
+    /// move.
+    pub(super) fn resume_waits_for_provider(
+        &mut self,
+        run: &TaskRun,
+        resumes: ResumeCount,
+    ) -> Result<bool> {
+        if !resumes.waits_on_a_held_provider()
+            || self.provider_held(run.actual_provider()).is_none()
+        {
+            return Ok(false);
+        }
+        let events = self.queue.run_events(run.id())?;
+        let Some((reason, blocked)) = self.provider_wait(run, &events, true) else {
+            return Ok(false);
+        };
+        if !crate::domain::resume::resume_wait_recorded(&events) {
+            let from = run.actual_provider();
+            self.queue.record_runtime_event(
+                run.id(),
+                EventKind::ProviderWaiting,
+                json!({
+                    "phase": crate::domain::resume::RESUME_WAIT_PHASE,
+                    "provider": from,
+                    "reason": reason,
+                    "other": from.other(),
+                    "blocked": blocked,
+                    "conflict_only": resumes.parked_for_conflict,
+                    "after_provider_only": resumes.after_provider_only,
+                    "retry_at": self
+                        .provider.holds
+                        .iter()
+                        .find(|hold| hold.provider == from)
+                        .map(|hold| hold.retry_at),
+                }),
+            )?;
+            info!(run_id = %run.id(), "run {}: its next resume waits for a provider: {} cannot be used ({}) and the run cannot move to {} ({blocked})", run.id(), from.as_str(), reason.as_str(), from.other().as_str());
+        }
+        Ok(true)
+    }
+
     /// Whether a headless worker of `provider` can take a run now: this
     /// supervisor has its adapters and it is not held.
     fn headless_usable(&self, provider: Provider) -> bool {

@@ -170,7 +170,7 @@ pub(super) struct StatusOf<'a> {
 
 /// `resume_finished`.
 #[derive(Debug, Default, Deserialize)]
-pub(super) struct ResumeFinished<'a> {
+pub struct ResumeFinished<'a> {
     #[serde(default, borrow, deserialize_with = "typed")]
     pub(super) status: Option<&'a str>,
     #[serde(default, borrow, deserialize_with = "typed")]
@@ -179,6 +179,20 @@ pub(super) struct ResumeFinished<'a> {
     pub(super) workspace_id: Option<&'a str>,
     #[serde(default, deserialize_with = "typed")]
     pub(super) attempt: Option<u64>,
+    /// The resume ended provider-only (ADR-t3255-1,
+    /// `domain::resume::finish_provider_only`); absent on any other
+    /// resume and on an event older than the field.
+    #[serde(default, deserialize_with = "typed")]
+    provider_only: Option<bool>,
+}
+
+impl ResumeFinished<'_> {
+    /// Whether the resume was marked provider-only as it finished, and so
+    /// not counted however it started: only those recorded
+    /// `provider_only: true`.
+    pub fn provider_only(&self) -> bool {
+        self.provider_only == Some(true)
+    }
 }
 
 /// `workspace_closed`.

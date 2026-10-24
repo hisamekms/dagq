@@ -109,6 +109,12 @@ impl Supervisor<'_> {
                 }
                 continue;
             }
+            // Nor a conflict-only resume, or one after a provider-only
+            // one, while the run's provider is held and it cannot move
+            // (ADR-t3255-1 decision 1): it waits, no attempt spent.
+            if self.resume_waits_for_provider(run, candidate.resumes)? {
+                continue;
+            }
             // Nor on a container that cannot be used or does not reach its
             // provider: it waits, never on the host (goal 38).
             if self.container_deferral(run.actual_provider()).is_some() {
@@ -821,6 +827,7 @@ impl Supervisor<'_> {
         attempt: usize,
         workspace: &str,
         mut verdict: ResumeVerdict,
+        receipt_rewritten: bool,
     ) -> Result<Step> {
         let approved = RunHistory::from_events(&self.queue.run_events(slot.run.id())?).approved();
         // The commit an approved resolved run lands, read before anything
@@ -860,6 +867,7 @@ impl Supervisor<'_> {
             "workspace_id": workspace,
             "workspace_closed": closed,
             "approved": approved,
+            "receipt_rewritten": receipt_rewritten,
         });
         if verdict.exit_timed_out {
             payload["exit_timed_out"] = json!(true);
@@ -923,16 +931,29 @@ impl Supervisor<'_> {
                 Reason::new(ReasonCode::WorkerFailed).on(payload),
             )?,
             (ResumeOutcome::Unresolved, _) => {
-                payload["exhausted"] =
-                    json!(resumes_exhausted(&*self.queue, &id, self.resume.config)?);
-                self.queue.finish_resume(
+                // A resume whose turns ended only at the provider's wall
+                // with nothing repaired is not counted (ADR-t3255-1
+                // decision 2): marked so, and recorded as a repair.
+                let repair =
+                    finish_unresolved(&*self.queue, &id, self.resume.config, &mut payload)?;
+                let run = self.queue.finish_resume(
                     &id,
                     self.registration.token(),
                     None,
                     None,
                     false,
                     payload,
-                )?
+                )?;
+                if let Some(repair) = repair {
+                    info!(run_id = %id, "run {id}: resume {attempt} ended only at its provider's wall with nothing repaired; not counted");
+                    if let Err(error) =
+                        self.queue
+                            .record_runtime_event(&id, EventKind::AutoRepaired, repair)
+                    {
+                        warn!(run_id = %id, error = %format_args!("{error:#}"), "run {id}: the uncounted provider-only resume {attempt} could not be recorded as a repair: {error:#}");
+                    }
+                }
+                run
             }
         };
         Ok(Step::Done(Box::new(run)))
@@ -1024,7 +1045,9 @@ pub(super) fn skips_resume(facts: &SkipFacts<'_>) -> bool {
 /// ones against `config`'s limit (ADR-0047 decision 24) when there were any, with the conflict
 /// precheck's requests that shared their limit, and the kill-only ones
 /// against [`KILL_ONLY_RESUME_LIMIT`] (ADR-t946-1), and the ones after a
-/// hold's release, which no limit fences (ADR-t2664-1).
+/// hold's release, which no limit fences (ADR-t2664-1), and the
+/// provider-only ones against [`PROVIDER_ONLY_RESUME_LIMIT`]
+/// (ADR-t3255-1).
 fn resumed_text(resumes: ResumeCount, config: ResumeConfig) -> String {
     let limit = config.conflict_only_limit;
     let mut killed = if resumes.kill_only == 0 {
@@ -1041,7 +1064,17 @@ fn resumed_text(resumes: ResumeCount, config: ResumeConfig) -> String {
             resumes.held
         ));
     }
-    if resumes.conflict_attempts() == 0 && resumes.kill_only == 0 && resumes.held == 0 {
+    if resumes.provider_only > 0 {
+        killed.push_str(&format!(
+            ", {} of at most {PROVIDER_ONLY_RESUME_LIMIT} not counted that ended only at the provider's wall",
+            resumes.provider_only
+        ));
+    }
+    if resumes.conflict_attempts() == 0
+        && resumes.kill_only == 0
+        && resumes.held == 0
+        && resumes.provider_only == 0
+    {
         format!(
             "resumed {} times (at most {MAX_RESUME_ATTEMPTS})",
             resumes.counted
@@ -1524,6 +1557,8 @@ impl ResumeWatch {
     /// session took it.
     fn send_request(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
         let sent_at = sv.files.now();
+        // Read before the session can take the request and commit.
+        let head = run_git::head(&*sv.repository, run).ok();
         let message = self.message.clone();
         let input = Input::Prompt {
             text: &message,
@@ -1533,7 +1568,9 @@ impl ResumeWatch {
         self.message_sent = Some((sv.generators.clock.monotonic(), sent_at));
         self.live.input_at = Some(sent_at);
         // A supervisor that adopts this resume does not send it again; a
-        // record that fails is only noted.
+        // record that fails is only noted. `head`, the worktree's HEAD
+        // before the request, tells a resume that made no new commit as it
+        // finishes (`domain::resume::provider_only_resume`).
         if let Err(error) = sv.queue.record_runtime_event(
             run.id(),
             EventKind::ResumeRequestSent,
@@ -1541,6 +1578,7 @@ impl ResumeWatch {
                 "resume_attempt": self.attempt,
                 "workspace_id": self.workspace,
                 "sent_at": sent_at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64(),
+                "head": head,
             }),
         ) {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{RESUME_REQUEST_SENT} of {} could not be recorded: {error:#}", run.id());
@@ -2122,6 +2160,8 @@ mod tests {
                     parked_for_conflict: false,
                     parked_for_send_back: false,
                     parked_for_hold: false,
+                    provider_only: 0,
+                    after_provider_only: false,
                 },
                 ResumeConfig::default(),
             )
@@ -2135,6 +2175,16 @@ mod tests {
         assert_eq!(
             resumed_text(held, ResumeConfig::default()),
             "resumed 4 times (3 of at most 3 counted, 1 not counted after a hold of its task was released)"
+        );
+        let walled = ResumeCount {
+            counted: 1,
+            conflict_only: 2,
+            provider_only: 3,
+            ..ResumeCount::default()
+        };
+        assert_eq!(
+            resumed_text(walled, ResumeConfig::default()),
+            "resumed 6 times (1 of at most 3 counted, 3 of at most 3 not counted that ended only at the provider's wall, and 2 of at most 5 for conflicts only after its review passed)"
         );
         assert_eq!(
             text(1, 0, 3, 0),
