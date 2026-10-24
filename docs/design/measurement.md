@@ -145,8 +145,8 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
   警告の鍵（`AlertKey`）はleaseの持ち主を含めないので、leaseが移っても何も書かない。
 - **判定の入力と警告の開閉**: 入力は離散の時刻と値で、経過で伸びる長さは持たない（入力の中身は`domain::live_alerts`のmodule doc）。
   開閉のeventは警告がいつ立ち消えたかの記録で、値の再現には使わない。
-- **走っているrun**: receiptの無いidleは、markerのturnの後に`provider_waiting`でproviderを待つ間は数えず、次のturnのmarkerから数える（stallの見張りと同じ、ADR-t813-2）。
-  入力と警告のworkspaceはrunが最後に開いたsession（最新の`workspace_created`か`wrapper_launched`）。
+- **走っているrun**: receiptの無いidleは、markerの後の`provider_waiting`とcloseまでの`worker_question`・`answer_prompt`を数えず、次のturnのmarkerから数える（stallの見張りと同じ）。
+  入力と警告のworkspaceはrunが最後に開いたsession（`LiveRun`のdoc comment）。
 - **記録**（流れはsupervisorのtokenごと）: 起動の後の最初の成功した観測が`live_alert_baseline`。
   入力の値が変わった対象ごとに`live_alert_input_changed`。
   警告の鍵の集合が変わったときだけ`live_alert_started`・`live_alert_ended`。

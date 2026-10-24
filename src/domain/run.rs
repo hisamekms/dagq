@@ -23,10 +23,10 @@ pub use history::{
     ReviseDecision, RunHistory, after_validation, decide_conflict, decide_revise, run_attention_of,
 };
 pub use payload::{
-    AskOpened, AttemptOf, AutoRepaired, ConcernDecided, ConflictPrecheck, JobEnd, NewStallNudged,
-    NewStallResolved, RecoveryRecord, ResumeFinished, ResumeStarted, ReviewFinished,
-    ReviseRequested, ReviseUnsent, SentBackReview, StallNudged, StallResolved, TurnRequested,
-    restore as restore_payload, review_findings, review_sent_back, review_verdict,
+    AskAnswered, AskOpened, AskRef, AttemptOf, AutoRepaired, ConcernDecided, ConflictPrecheck,
+    JobEnd, NewStallNudged, NewStallResolved, RecoveryRecord, ResumeFinished, ResumeStarted,
+    ReviewFinished, ReviseRequested, ReviseUnsent, SentBackReview, StallNudged, StallResolved,
+    TurnRequested, restore as restore_payload, review_findings, review_sent_back, review_verdict,
 };
 pub use recorded::{
     NewRunEvent, Recorded, end_session, finish_validation, record_e2e_park,

@@ -45,7 +45,7 @@
 //! doc says which.
 use crate::domain::EventKind;
 use crate::domain::run::{
-    AskOpened, ResumeFinished, ResumeStarted, ReviewFinished, restore_payload,
+    AskAnswered, AskOpened, AskRef, ResumeFinished, ResumeStarted, ReviewFinished, restore_payload,
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -1552,22 +1552,91 @@ fn waits_for_provider(run_events: &[&RunEvent], idle: i64) -> bool {
     let began = at(began);
     let ended = run_events[waiting + 1..]
         .iter()
-        .find(|event| {
-            matches!(
-                event.kind.known(),
-                Some(
-                    EventKind::TurnStarted
-                        | EventKind::AgentStarted
-                        | EventKind::ResumeStarted
-                        | EventKind::ProviderSwitched
-                        | EventKind::SessionRenewed
-                        | EventKind::WorkspaceCreated
-                        | EventKind::WrapperLaunched
-                )
-            )
-        })
+        .find(|event| starts_a_turn(event))
         .and_then(|event| at(event));
     began.is_some_and(|began| began <= idle) && ended.is_none_or(|ended| idle < ended)
+}
+
+/// Whether `event` is the start of a turn after a wait: the next turn, a
+/// new session of the worker, a resume or a switch of its provider.
+fn starts_a_turn(event: &RunEvent) -> bool {
+    matches!(
+        event.kind.known(),
+        Some(
+            EventKind::TurnStarted
+                | EventKind::AgentStarted
+                | EventKind::ResumeStarted
+                | EventKind::ProviderSwitched
+                | EventKind::SessionRenewed
+                | EventKind::WorkspaceCreated
+                | EventKind::WrapperLaunched
+        )
+    )
+}
+
+/// How the run's `worker_question` or `answer_prompt` opened after the idle
+/// marker written at `idle` (unix milliseconds) bears on that marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuestionWait {
+    /// No such question: the marker is timed from itself.
+    None,
+    /// The question is not closed (its answer not delivered, `ask_delivered`
+    /// or `ask_closed`), answered or not, or the next turn started after it:
+    /// the marker is from before the wait and is not timed. The supervisor's
+    /// watch holds an unclosed `worker_question` the same way; the next
+    /// turn's marker is timed from itself.
+    Held,
+    /// The question closed at this time (unix milliseconds) with no turn
+    /// started since: the idle is timed from the close, without the wait.
+    ClosedAt(i64),
+}
+
+/// How the `worker_question`s and `answer_prompt`s of `run_events` opened
+/// after the marker at `idle` bear on the marker ([`QuestionWait`]): held
+/// while any of them is not closed (`ask_delivered`, `ask_closed`, or an
+/// `ask_answered` the runtime closed it with) or a turn started after one;
+/// else timed from the last close.
+fn question_wait(run_events: &[&RunEvent], idle: i64) -> QuestionWait {
+    let at = |event: &RunEvent| timestamp_millis(&event.created_at);
+    let mut wait = QuestionWait::None;
+    for (opened, event) in run_events.iter().enumerate() {
+        if event.kind != EventKind::AskOpened
+            || !at(event).is_some_and(|opened| opened > idle)
+            || !restore_payload::<AskOpened>(&event.payload)
+                .kind
+                .is_some_and(|kind| ["worker_question", "answer_prompt"].contains(&kind))
+        {
+            continue;
+        }
+        let id = ask_key(event);
+        let after = &run_events[opened + 1..];
+        if after.iter().any(|event| starts_a_turn(event)) {
+            return QuestionWait::Held;
+        }
+        let Some(closed) = after
+            .iter()
+            .find(|event| {
+                let closes = match event.kind.known() {
+                    Some(EventKind::AskDelivered | EventKind::AskClosed) => true,
+                    Some(EventKind::AskAnswered) => {
+                        restore_payload::<AskAnswered>(&event.payload).runtime_closed == Some(true)
+                    }
+                    _ => false,
+                };
+                closes && ask_key(event) == id
+            })
+            .and_then(|event| at(event))
+        else {
+            return QuestionWait::Held;
+        };
+        if let QuestionWait::ClosedAt(last) = wait
+            && last >= closed
+        {
+            continue;
+        }
+        wait = QuestionWait::ClosedAt(closed);
+    }
+    wait
 }
 
 /// How many runs in flight last opened a session in the background, whose
@@ -1690,12 +1759,18 @@ pub fn judge_running_alerts(
                     event.kind == EventKind::PromptWaiting
                         && timestamp_millis(&event.created_at).is_some_and(|at| at >= start)
                 });
-            let idle_secs = (now_ms - idle) / 1000;
+            let question = question_wait(&run_events, *idle);
+            let timed_from = match question {
+                QuestionWait::ClosedAt(closed) => closed,
+                QuestionWait::None | QuestionWait::Held => *idle,
+            };
+            let idle_secs = (now_ms - timed_from) / 1000;
             if *idle > start
                 && run.receipt.is_none_or(|receipt| receipt <= start)
                 && run.input.is_none_or(|input| input <= *idle)
                 && !dialog
                 && !open_ask(&["worker_question", "answer_prompt"])
+                && question != QuestionWait::Held
                 && !waits_for_provider(&run_events, *idle)
                 && idle_secs > config.idle_without_receipt_secs
             {
@@ -2486,14 +2561,7 @@ struct OpenAsk {
 /// answer it. The runtime closes the `blocked` and `approve_landing` ones
 /// on landing; others, and ones from before it did, stay unanswered.
 fn open_asks(events: &[RunEvent]) -> Vec<OpenAsk> {
-    let key = |event: &RunEvent| {
-        let id = event
-            .payload
-            .get("ask_id")
-            .or_else(|| event.payload.get("id"))
-            .map(|id| id.as_str().map_or_else(|| id.to_string(), str::to_owned));
-        (id, event.task_id, event.run_id.clone())
-    };
+    let key = ask_key;
     let mut open: Vec<(_, OpenAsk)> = Vec::new();
     for event in events {
         match event.kind.known() {
@@ -2531,6 +2599,13 @@ fn open_asks(events: &[RunEvent]) -> Vec<OpenAsk> {
         }
     }
     open.into_iter().map(|(_, ask)| ask).collect()
+}
+
+/// What pairs an ask's events: the payload's `ask_id` (or `id`), with the
+/// event's task and run.
+fn ask_key(event: &RunEvent) -> (Option<String>, Option<TaskId>, Option<RunId>) {
+    let id = restore_payload::<AskRef>(&event.payload).key();
+    (id, event.task_id, event.run_id.clone())
 }
 
 /// Unix milliseconds of a queue timestamp `YYYY-MM-DDTHH:MM:SS[.fff]Z`
@@ -3104,6 +3179,156 @@ mod tests {
             T + 5000,
         ));
         assert_eq!(running(&switched, &live, T + 5100 + 1300).len(), 1);
+    }
+
+    /// A `worker_question` opened after the marker holds the marker while
+    /// its answer is not delivered, answered or not, as the supervisor's
+    /// watch holds an unclosed question; the marker from before the wait is
+    /// never timed once the next turn started (finding 635).
+    #[test]
+    fn an_answered_question_not_delivered_yet_is_not_idle_without_a_receipt() {
+        let asked = vec![
+            run_event(1, R1, "agent_started", json!({}), T),
+            run_event(2, R1, "turn_started", json!({"turn": 1}), T + 10),
+            run_event(
+                3,
+                R1,
+                "ask_opened",
+                json!({"ask_id": 833, "kind": "worker_question"}),
+                T + 900,
+            ),
+            run_event(4, R1, "ask_answered", json!({"ask_id": 833}), T + 14_700),
+        ];
+        let mut run = live_run(R1, RunStatus::Running);
+        run.idle = Some(((T + 60) * 1000, Vec::new()));
+        let live = snapshot(vec![run.clone()]);
+        // Answered, not delivered: still the wait, past the threshold.
+        assert!(running(&asked, &live, T + 14_707).is_empty());
+        assert!(running(&asked, &live, T + 60_000).is_empty());
+        // The same for an `answer_prompt`.
+        let mut prompt = asked.clone();
+        prompt[2].payload = json!({"ask_id": 833, "kind": "answer_prompt"});
+        assert!(running(&prompt, &live, T + 60_000).is_empty());
+        // Another ask's delivery does not end it.
+        let mut other = asked.clone();
+        other.push(run_event(
+            5,
+            R1,
+            "ask_delivered",
+            json!({"ask_id": 9}),
+            T + 14_800,
+        ));
+        assert!(running(&other, &live, T + 60_000).is_empty());
+
+        // Delivered and the next turn started: the marker before the wait
+        // is not timed.
+        let mut resumed = asked.clone();
+        resumed.push(run_event(
+            5,
+            R1,
+            "ask_delivered",
+            json!({"ask_id": 833, "workspace_id": "w"}),
+            T + 14_790,
+        ));
+        resumed.push(run_event(
+            6,
+            R1,
+            "turn_started",
+            json!({"turn": 2}),
+            T + 14_791,
+        ));
+        assert!(running(&resumed, &live, T + 60_000).is_empty());
+        // That turn went idle: timed from its own marker alone.
+        let mut next = run.clone();
+        next.idle = Some(((T + 15_000) * 1000, Vec::new()));
+        let live_next = snapshot(vec![next]);
+        assert!(running(&resumed, &live_next, T + 15_000 + 1200).is_empty());
+        let alerts = running(&resumed, &live_next, T + 15_000 + 1300);
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].kind, "idle_without_receipt");
+        assert_eq!(alerts[0].value, Some(1300));
+
+        // Closed with no turn since: timed from the close, not the marker.
+        let mut closed = asked.clone();
+        closed.push(run_event(
+            5,
+            R1,
+            "ask_closed",
+            json!({"ask_id": 833}),
+            T + 14_800,
+        ));
+        assert!(running(&closed, &live, T + 14_800 + 1200).is_empty());
+        let alerts = running(&closed, &live, T + 14_800 + 1300);
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].value, Some(1300));
+
+        // Closed by the runtime with its answer: the same.
+        let mut by_runtime = asked.clone();
+        by_runtime.push(run_event(
+            5,
+            R1,
+            "ask_answered",
+            json!({"ask_id": 833, "runtime_closed": true}),
+            T + 14_800,
+        ));
+        assert_eq!(
+            running(&by_runtime, &live, T + 14_800 + 1300)[0].value,
+            Some(1300)
+        );
+        // A later question closed does not end an earlier one not delivered.
+        let mut two = asked.clone();
+        two.push(run_event(
+            5,
+            R1,
+            "ask_opened",
+            json!({"ask_id": 834, "kind": "worker_question"}),
+            T + 14_750,
+        ));
+        two.push(run_event(
+            6,
+            R1,
+            "ask_closed",
+            json!({"ask_id": 834}),
+            T + 14_800,
+        ));
+        assert!(running(&two, &live, T + 60_000).is_empty());
+        // Closed and the next turn started: the marker before is not timed.
+        let mut closed_resumed = closed.clone();
+        closed_resumed.push(run_event(
+            6,
+            R1,
+            "turn_started",
+            json!({"turn": 2}),
+            T + 14_900,
+        ));
+        assert!(running(&closed_resumed, &live, T + 60_000).is_empty());
+
+        // An older question named by `id`, delivered by the same `id` as a
+        // string, pairs the same way.
+        let mut by_id = asked.clone();
+        by_id[2].payload = json!({"id": "833", "kind": "worker_question"});
+        by_id.push(run_event(
+            5,
+            R1,
+            "ask_closed",
+            json!({"id": "833"}),
+            T + 14_800,
+        ));
+        assert_eq!(
+            running(&by_id, &live, T + 14_800 + 1300)[0].value,
+            Some(1300)
+        );
+        // `ask_id` comes before `id`: a close naming another ask by
+        // `ask_id` does not end it.
+        let mut other_key = by_id.clone();
+        other_key[4].payload = json!({"ask_id": 9, "id": "833"});
+        assert!(running(&other_key, &live, T + 60_000).is_empty());
+
+        // A question opened before the marker and answered leaves the
+        // marker timed from itself.
+        let mut before = asked.clone();
+        before[2].created_at = at(T + 30);
+        assert_eq!(running(&before, &live, T + 14_707)[0].value, Some(14_647));
     }
 
     #[test]

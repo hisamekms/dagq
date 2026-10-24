@@ -143,6 +143,43 @@ pub struct AskOpened<'a> {
     pub ask_id: Option<i64>,
 }
 
+/// The ask an ask's event (`ask_opened`, `ask_answered`, `ask_delivered`,
+/// `ask_closed`) names, for pairing its events: `ask_id`, or `id` that
+/// older events wrote, of whatever type (even `null`).
+#[derive(Debug, Default, Deserialize)]
+pub struct AskRef {
+    #[serde(default, deserialize_with = "kept")]
+    ask_id: Option<Value>,
+    #[serde(default, deserialize_with = "kept")]
+    id: Option<Value>,
+}
+
+impl AskRef {
+    /// The ask's id as text: `ask_id` when the key is there, else `id`; a
+    /// string as it is, another value as its JSON. `None` when neither key
+    /// is there.
+    pub fn key(&self) -> Option<String> {
+        self.ask_id
+            .as_ref()
+            .or(self.id.as_ref())
+            .map(|id| id.as_str().map_or_else(|| id.to_string(), str::to_owned))
+    }
+}
+
+/// A key kept with whatever value it has, `null` too (`Some(Value::Null)`).
+fn kept<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+/// `ask_answered`.
+#[derive(Debug, Default, Deserialize)]
+pub struct AskAnswered {
+    /// Whether the runtime answered and closed the ask in one step
+    /// (`close_by_runtime`, `discard_by_runtime`), writing no `ask_closed`.
+    #[serde(default, deserialize_with = "typed")]
+    pub runtime_closed: Option<bool>,
+}
+
 /// `run_recovered`.
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct RunRecovered<'a> {
