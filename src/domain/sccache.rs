@@ -724,6 +724,42 @@ impl ContainerServer {
         env.push((IDLE_TIMEOUT_VAR.to_owned(), IDLE_TIMEOUT.to_owned()));
         Self::Start { target, env }
     }
+
+    /// The plan of a running turn container as its podman says it was
+    /// started: `env` its environment, which names the sccache to start
+    /// as [`GUARD_PROGRAM_VAR`] (its `RUSTC_WRAPPER` is unset), and
+    /// `worker_cache` the directories the queue's worker cache volumes are
+    /// mounted at in it. The port, the cache directory and the server's
+    /// variables are those the container and its agent's guard run with,
+    /// never what `dagq.toml` says when the supervisor answers, nor
+    /// anything the worker writes; a cache directory not in those mounts
+    /// is [`Self::Refused`]. The server is given only sccache's own
+    /// variables, the rest its `podman exec` inherits from the container.
+    /// A container whose environment names no sccache to start is
+    /// [`Self::NotNamed`].
+    pub fn of_container(env: &[(String, String)], worker_cache: &[String]) -> Self {
+        let Some(program) = env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == GUARD_PROGRAM_VAR)
+            .map(|(_, value)| value.clone())
+        else {
+            return Self::NotNamed;
+        };
+        let mut started_with: Vec<(String, String)> = env
+            .iter()
+            .filter(|(key, _)| key != WRAPPER_VAR)
+            .cloned()
+            .collect();
+        started_with.push((WRAPPER_VAR.to_owned(), program));
+        match Self::of(&started_with, worker_cache) {
+            Self::Start { target, mut env } => {
+                env.retain(|(key, _)| key.starts_with("SCCACHE_"));
+                Self::Start { target, env }
+            }
+            plan => plan,
+        }
+    }
 }
 
 /// Whether the absolute path `path` is `dir` or under it, by whole
@@ -1061,6 +1097,47 @@ mod tests {
             ContainerServer::of(&named, &[]),
             ContainerServer::Refused { .. }
         ));
+    }
+
+    /// A running container's plan is what it was started with: the
+    /// sccache its environment names to start, its port and cache
+    /// directory, refused when that directory is not in its worker cache
+    /// mounts; one naming no sccache to start has none.
+    #[test]
+    fn a_running_container_s_plan_is_the_one_it_was_started_with() {
+        let started = pairs(&[
+            ("RUSTC_WRAPPER", "/usr/local/bin/sccache-of-the-image"),
+            ("DAGQ_SCCACHE_PROGRAM", "/usr/bin/sccache"),
+            ("SCCACHE_SERVER_PORT", "4301"),
+            ("SCCACHE_DIR", "/cache/sccache/server"),
+        ]);
+        let ContainerServer::Start { target, env } =
+            ContainerServer::of_container(&started, &["/cache/sccache".to_owned()])
+        else {
+            panic!("not started")
+        };
+        assert_eq!(target.program, "/usr/bin/sccache");
+        assert_eq!(target.port, 4301);
+        assert_eq!(
+            env,
+            pairs(&[
+                ("SCCACHE_SERVER_PORT", "4301"),
+                ("SCCACHE_DIR", "/cache/sccache/server"),
+                ("SCCACHE_IDLE_TIMEOUT", "0"),
+            ])
+        );
+        assert!(matches!(
+            ContainerServer::of_container(&started, &["/cache/registry".to_owned()]),
+            ContainerServer::Refused { target, why }
+                if target.port == 4301 && why.contains("/cache/sccache/server")
+        ));
+        assert_eq!(
+            ContainerServer::of_container(
+                &pairs(&[("RUSTC_WRAPPER", "sccache"), ("SCCACHE_DIR", "/cache/s")]),
+                &["/cache".to_owned()]
+            ),
+            ContainerServer::NotNamed
+        );
     }
 
     /// A turn's request and gate are named by its token alone: one that

@@ -393,6 +393,19 @@ fn one_container_turn(
     sccache: Option<&str>,
     prepare: impl FnOnce(&Path),
 ) -> (PathBuf, TaskRun, PathBuf, PathBuf) {
+    one_container_turn_changed(dir, config, sccache, prepare, |_| {})
+}
+
+/// [`one_container_turn`] with `change` run on the main checkout once the
+/// turn's container runs and its launcher left its request, before the
+/// supervisor answers it.
+fn one_container_turn_changed(
+    dir: &Path,
+    config: &str,
+    sccache: Option<&str>,
+    prepare: impl FnOnce(&Path),
+    change: impl FnOnce(&Path) + Send,
+) -> (PathBuf, TaskRun, PathBuf, PathBuf) {
     let (repo, db) = queue_fixture(dir);
     fs::write(repo.join("dagq.toml"), config).unwrap();
     let (run, token) = claim_in_container(&db, &repo, "container-run");
@@ -432,7 +445,7 @@ fn one_container_turn(
         executable: PathBuf::from("/nonexistent/claude-on-the-host"),
     };
     let ended = thread::scope(|scope| {
-        scope.spawn(|| answer_requests(&containers, &db, &run, &stop));
+        scope.spawn(|| answer_requests(&containers, &db, &run, &stop, || change(&repo)));
         // A panic below ends the answers too, so that the scope ends.
         let _stop = StopOnDrop(&stop);
         let wrapper = scope.spawn(|| {
@@ -478,19 +491,27 @@ impl Drop for StopOnDrop<'_> {
 /// Answer the requests the launcher of `run`'s turn container leaves, as
 /// the supervisor that leases the run does on each pass
 /// ([`dagq::application::run_container::serve_sccache_request`]), until
-/// `stop`.
+/// `stop`, `before` run once before the first answer to a request of the
+/// turn's (not the one an earlier turn left).
 fn answer_requests(
     containers: &dyn RunContainers,
     db: &Path,
     run: &TaskRun,
     stop: &std::sync::atomic::AtomicBool,
+    before: impl FnOnce(),
 ) {
     let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let earlier = request(&run_dir, "earlier");
+    let earlier = earlier.file_name().unwrap().to_str().unwrap();
+    let mut before = Some(before);
     while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-        if containers
-            .sccache_requests(&run_dir)
-            .is_ok_and(|requests| !requests.is_empty())
-        {
+        let requests = containers.sccache_requests(&run_dir).unwrap_or_default();
+        if !requests.is_empty() {
+            if requests.iter().any(|name| name != earlier)
+                && let Some(before) = before.take()
+            {
+                before();
+            }
             dagq::application::run_container::serve_sccache_request(
                 containers,
                 &SqliteQueue::open(db).unwrap(),
@@ -632,6 +653,74 @@ fn the_container_s_sccache_server_is_started_before_the_agent_with_its_cache_in_
     assert_eq!(recorded[0]["by"], "supervisor");
     assert!(payloads(&detail, "sccache_wrapper_removed").is_empty());
     assert!(payloads(&detail, "sccache_container_server_start_failed").is_empty());
+}
+
+/// The fake podman's `sccache` that says how it was started, and runs a
+/// compile it is given.
+const SAYS_HOW_STARTED: &str = "#!/bin/sh\nif [ \"$1\" != --start-server ]; then \
+     echo \"$*\" >> \"${0%/*}/../sccache-compiles\"; exec \"$@\"; fi\n\
+     { echo \"args=$*\"; echo \"dir=$SCCACHE_DIR\"; echo \"port=$SCCACHE_SERVER_PORT\"; \
+     } > \"${0%/*}/../sccache-started\"\n";
+
+/// Acceptance (1) and (2) of task 3282: `dagq.toml` changed after the
+/// turn's container started and before the supervisor answers (another
+/// port, a cache directory and a worker cache the container does not
+/// mount) does not reach the server: it is started with the port and the
+/// cache directory the container was started with, the port recorded is
+/// the one the agent's guard sees, and the guard finds the server there.
+#[test]
+fn a_dagq_toml_changed_before_the_answer_starts_the_server_as_the_container_was_started() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let server = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = server.local_addr().unwrap().port();
+    let changed = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let other = changed.local_addr().unwrap().port();
+    drop(changed);
+    let (db, _, run_dir, state) = one_container_turn_changed(
+        dir.path(),
+        &sccache_config(port),
+        Some(SAYS_HOW_STARTED),
+        |_| {},
+        |repo| {
+            fs::write(
+                repo.join("dagq.toml"),
+                format!(
+                    "[roles.worker]\nruntime = \"container\"\n\
+                     [container.worker_cache]\ndirs = [\"/tmp/new-cache\"]\n\
+                     [run.env]\nRUSTC_WRAPPER = 'sccache'\nSCCACHE_SERVER_PORT = '{other}'\n\
+                     SCCACHE_DIR = '/tmp/new-cache'\n"
+                ),
+            )
+            .unwrap();
+        },
+    );
+    let started = fs::read_to_string(state.join("sccache-started")).unwrap();
+    for line in [
+        "args=--start-server",
+        "dir=/cache/sccache/server",
+        &format!("port={port}"),
+    ] {
+        assert!(
+            started.lines().any(|seen| seen == line),
+            "{line}: {started}"
+        );
+    }
+    let exec = fs::read_to_string(state.join("exec-args")).unwrap();
+    assert!(!exec.contains("/tmp/new-cache"), "{exec}");
+    assert!(!exec.contains(&other.to_string()), "{exec}");
+    let seen = agent_env(&run_dir);
+    assert_eq!(seen["port"], port.to_string());
+    assert_eq!(seen["guarded"], "compiled");
+    drop(server);
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let recorded = payloads(&detail, "sccache_container_server_started");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["port"], port);
+    assert!(payloads(&detail, "sccache_wrapper_removed").is_empty());
 }
 
 /// Acceptance (3) of task 2181: a server that cannot be started in the
@@ -788,13 +877,27 @@ fn running_container(
         state
             .join("containers")
             .join(format!("dagq-{QUEUE}-run-{}", run.id())),
-        format!(
-            "{id} true [\"DAGQ_SCCACHE_GATE={}\",\"DAGQ_SCCACHE_TURN={TURN}\"]\n",
-            gate_file(&run_dir, TURN).display()
-        ),
+        container_line(id, &run_dir, TURN, 4301, "/cache/sccache") + "\n",
     )
     .unwrap();
     (db, run, run_dir, state, containers)
+}
+
+/// The fake machine's line of a running turn container of the ID `id` and
+/// the token `turn` in `run_dir` (what `podman container inspect` prints):
+/// started to have its server listen on `port` with its cache in
+/// `/cache/sccache/server`, its worker cache volume mounted at `mounted`.
+fn container_line(id: &str, run_dir: &Path, turn: &str, port: u16, mounted: &str) -> String {
+    format!(
+        "{id}\ntrue\n[\"DAGQ_SCCACHE_GATE={}\",\"DAGQ_SCCACHE_TURN={turn}\",\
+         \"DAGQ_SCCACHE_PROGRAM=sccache\",\"SCCACHE_SERVER_PORT={port}\",\
+         \"SCCACHE_DIR=/cache/sccache/server\"]\n\
+         [{{\"Type\":\"volume\",\"Name\":\"{}\",\"Destination\":\"{mounted}\"}}]",
+        gate_file(run_dir, turn).display(),
+        QueueKey::new(QUEUE)
+            .unwrap()
+            .worker_cache_volume_of(mounted),
+    )
 }
 
 /// The token of the turn whose container [`running_container`] makes.
@@ -984,7 +1087,7 @@ fn a_request_of_a_container_given_no_gate_is_not_served() {
         state
             .join("containers")
             .join(format!("dagq-{QUEUE}-run-{}", run.id())),
-        "idforged true []\n",
+        "idforged\ntrue\n[]\n[]\n",
     )
     .unwrap();
     fs::write(request(&run_dir, TURN), "").unwrap();
@@ -1017,6 +1120,98 @@ fn a_request_of_a_container_given_no_gate_is_not_served() {
     }
 }
 
+/// Acceptance (2) and (3) of task 3282: the server's plan is the running
+/// container's, never `dagq.toml`'s by now nor one the worker leaves in the
+/// run directory. With `dagq.toml` and a planted plan naming another port
+/// and a cache the container does not mount, the server starts with the
+/// container's port and cache; a container whose cache directory is not in
+/// its worker cache mounts starts none, and the agent runs without
+/// `RUSTC_WRAPPER` as recorded.
+#[test]
+fn the_server_s_plan_is_the_running_container_s_whatever_dagq_toml_or_the_run_directory_say() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, run, run_dir, state, containers) = running_container(dir.path(), "idplan");
+    let repo = dir.path().join("repo");
+    assert!(repo.join("dagq.toml").exists());
+    fs::write(
+        repo.join("dagq.toml"),
+        "[roles.worker]\nruntime = \"container\"\n\
+         [container.worker_cache]\ndirs = [\"/tmp/new-cache\"]\n\
+         [run.env]\nRUSTC_WRAPPER = 'sccache'\nSCCACHE_SERVER_PORT = '4999'\n\
+         SCCACHE_DIR = '/tmp/new-cache'\n",
+    )
+    .unwrap();
+    for name in ["sccache-plan", "sccache-plan.json", "container-env"] {
+        fs::write(
+            run_dir.join(name),
+            "SCCACHE_SERVER_PORT=4998\nSCCACHE_DIR=/tmp/forged\n",
+        )
+        .unwrap();
+    }
+    crate::common::template::script(&state.join("bin").join("sccache"), SAYS_HOW_STARTED);
+    fs::write(request(&run_dir, TURN), "").unwrap();
+    dagq::application::run_container::serve_sccache_request(
+        &containers,
+        &SqliteQueue::open(&db).unwrap(),
+        &run,
+        0,
+    )
+    .unwrap();
+    let started = fs::read_to_string(state.join("sccache-started")).unwrap();
+    assert!(started.contains("port=4301\n"), "{started}");
+    assert!(started.contains("dir=/cache/sccache/server\n"), "{started}");
+    assert_eq!(turn_gate(&run_dir), "started");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let recorded = payloads(&detail, "sccache_container_server_started");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["port"], 4301);
+
+    // The next turn's container mounts its worker cache elsewhere than its
+    // cache directory: its server is not started.
+    let container = state
+        .join("containers")
+        .join(format!("dagq-{QUEUE}-run-{}", run.id()));
+    fs::write(
+        &container,
+        container_line("idbare", &run_dir, "turn2", 4301, "/cache/registry") + "\n",
+    )
+    .unwrap();
+    fs::remove_file(state.join("sccache-started")).unwrap();
+    fs::write(request(&run_dir, "turn2"), "").unwrap();
+    dagq::application::run_container::serve_sccache_request(
+        &containers,
+        &SqliteQueue::open(&db).unwrap(),
+        &run,
+        0,
+    )
+    .unwrap();
+    assert!(!state.join("sccache-started").exists());
+    let gate = fs::read_to_string(gate_file(&run_dir, "turn2")).unwrap();
+    assert!(gate.starts_with("failed: "), "{gate}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let failed = payloads(&detail, "sccache_container_server_start_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["container_id"], "idbare");
+    let removed = payloads(&detail, "sccache_wrapper_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["container_id"], "idbare");
+    assert_eq!(removed[0]["port"], 4301);
+    assert!(
+        removed[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("/cache/sccache/server is not in a directory"),
+        "{removed:?}"
+    );
+}
+
 /// Leave in `run_dir` the next turn's container, of the ID `id` and the
 /// token `turn`, in place of the run's container `container` (the fake
 /// machine's file of it), and its launcher's request: what the fake
@@ -1024,10 +1219,7 @@ fn a_request_of_a_container_given_no_gate_is_not_served() {
 fn next_turn(container: &Path, run_dir: &Path, id: &str, turn: &str) {
     fs::write(
         container,
-        format!(
-            "{id} true [\"DAGQ_SCCACHE_GATE={}\",\"DAGQ_SCCACHE_TURN={turn}\"]\n",
-            gate_file(run_dir, turn).display()
-        ),
+        container_line(id, run_dir, turn, 4301, "/cache/sccache") + "\n",
     )
     .unwrap();
     fs::write(request(run_dir, turn), "").unwrap();
@@ -1047,10 +1239,7 @@ fn an_answer_that_outlives_its_turn_leaves_the_next_turn_s_request() {
         .join(format!("dagq-{QUEUE}-run-{}", run.id()));
     // While the old container's server starts, that container ends, the
     // next turn's starts and its launcher leaves its request.
-    let line = format!(
-        "idnew true [\"DAGQ_SCCACHE_GATE={}\",\"DAGQ_SCCACHE_TURN=turn2\"]",
-        gate_file(&run_dir, "turn2").display()
-    );
+    let line = container_line("idnew", &run_dir, "turn2", 4301, "/cache/sccache");
     crate::common::template::script(
         &state.join("bin").join("sccache"),
         format!(
@@ -1148,12 +1337,6 @@ impl RunContainers for Hooked<'_> {
         let found = self.inner.running_container(run)?;
         (self.on_look)(self.looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
         Ok(found)
-    }
-    fn sccache_plan(
-        &self,
-        run: &TaskRun,
-    ) -> anyhow::Result<dagq::domain::sccache::ContainerServer> {
-        self.inner.sccache_plan(run)
     }
     fn start_sccache(
         &self,

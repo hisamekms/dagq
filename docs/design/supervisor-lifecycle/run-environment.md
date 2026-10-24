@@ -171,7 +171,7 @@ serverを確かめられないもの、guardを作れなかったもの、contai
 supervisorが始めるものの前の確認は、居ないserverを起動する機会でもある。
 hostのserverを、wrapperのturnの前・人の`integrate`・e2eのgateの確認とguardはportを見るだけで起動しない。
 runtimeの外からの起動までは防げず、下の検知が扱う。
-workerのcontainerは`[run.env]`がsccacheを名指すときだけ、supervisorがagentより前にcontainerの中に起動したserverを使う（`domain::sccache::ContainerServer`）。
+workerのcontainerは`[run.env]`がsccacheを名指すときだけ、supervisorがagentより前にcontainerの中に起動したserverを使い、portとcacheのdirは起こした時のcontainerのenvとmountから取る（`domain::sccache::ContainerServer`）。
 
 ### 外部serverと失敗の偏り
 

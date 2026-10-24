@@ -19,7 +19,8 @@ pub const QUEUE: &str = "bbbbbbbbbbbbbbbb";
 /// `claude` found in `state/bin`. Its `rm` removes the container named
 /// last; its volumes are files of `state/volumes`. Its `container inspect`
 /// prints what its `run` wrote for the container in `state/containers`
-/// (an ID, `true` and the sccache gate of its environment), and its
+/// (an ID, `true`, its `--env` variables and its `--volume` mounts, a
+/// line each, as the runtime's inspect format asks), and its
 /// `exec` of a container's ID writes its arguments to `state/exec-args`
 /// and runs the command on the host as `run` does, with the container's
 /// variables. Under coverage it also
@@ -40,6 +41,8 @@ S={s}
 printf '%s\n' "$*" >> "$S/calls"
 [ "$1 $2" = "--connection dagq" ] || exit 125
 shift 2
+# A value as the text of a JSON string.
+json_text() {{ printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }}
 # A container is given only its own variables: none of sccache's the
 # test's process may have (a worker's `[run.env]`).
 unset RUSTC_WRAPPER SCCACHE_ERROR_LOG SCCACHE_DIR SCCACHE_SERVER_PORT SCCACHE_IDLE_TIMEOUT DAGQ_SCCACHE_PROGRAM DAGQ_SCCACHE_GATE DAGQ_SCCACHE_TURN
@@ -82,7 +85,7 @@ exec)
   # By its ID: the container whose line starts with it.
   found=
   for file in "$S"/containers/*; do
-    [ -f "$file" ] && [ "$(cut -d ' ' -f 1 < "$file")" = "$1" ] && found=$file
+    [ -f "$file" ] && [ "$(head -n 1 < "$file")" = "$1" ] && found=$file
   done
   shift
   [ -n "$found" ] || exit 125
@@ -90,7 +93,7 @@ exec)
 run)
   shift
   printf '%s\n' "$@" > "$S/run-args"
-  workdir=; name=; keep=1; sccache=
+  workdir=; name=; keep=1; envs=; mounts=
   # What the image sets (`ENV`), which `--unsetenv` drops.
   [ -f "$S/image-env" ] && while IFS= read -r pair; do export "$pair"; done < "$S/image-env"
   while [ $# -gt 0 ]; do
@@ -98,7 +101,14 @@ run)
     --rm) keep=; shift ;;
     --read-only|--interactive) shift ;;
     --unsetenv) unset "$2"; shift 2 ;;
-    --env) export "$2"; case "$2" in DAGQ_SCCACHE_GATE=*|DAGQ_SCCACHE_TURN=*) sccache="$sccache${{sccache:+,}}\"$2\"" ;; esac; shift 2 ;;
+    --env) export "$2"; envs="$envs${{envs:+,}}\"$(json_text "$2")\""; shift 2 ;;
+    --volume)
+      source=${{2%%:*}}; destination=${{2#*:}}
+      case "$source" in
+      /*) mount="{{\"Type\":\"bind\",\"Source\":\"$source\",\"Destination\":\"$destination\"}}" ;;
+      *) mount="{{\"Type\":\"volume\",\"Name\":\"$source\",\"Destination\":\"$destination\"}}" ;;
+      esac
+      mounts="$mounts${{mounts:+,}}$mount"; shift 2 ;;
     --workdir) workdir=$2; shift 2 ;;
     --name) name=$2; shift 2 ;;
     --*) shift 2 ;;
@@ -106,7 +116,7 @@ run)
     esac
   done
   shift
-  printf 'id%s true [%s]\n' "$$" "$sccache" > "$S/containers/$name"
+  printf 'id%s\ntrue\n[%s]\n[%s]\n' "$$" "$envs" "$mounts" > "$S/containers/$name"
   cd "$workdir" || exit 125
   {profile}
   PATH="$S/bin:$PATH" "$@"
@@ -163,6 +173,7 @@ printf '{"type":"system","subtype":"init","session_id":"%s","model":"stub","perm
   echo "wrapper=${RUSTC_WRAPPER-unset}"
   echo "error_log=${SCCACHE_ERROR_LOG-unset}"
   echo "sccache_program=${DAGQ_SCCACHE_PROGRAM-unset}"
+  echo "port=${SCCACHE_SERVER_PORT-unset}"
   echo "server=$(head -n 1 "${0%/*}/../sccache-started" 2>/dev/null)"
   [ "${RUSTC_WRAPPER##*/}" = dagq-rustc-wrapper ] && echo "guarded=$("$RUSTC_WRAPPER" /bin/echo compiled 2>&1)"
 } > "$RUN_DIR/stub-env"

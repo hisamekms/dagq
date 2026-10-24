@@ -71,13 +71,29 @@ pub struct PreparedRun {
 /// container of the run has (each turn's is made anew), and the sccache
 /// gate and the turn's token its wrapper gave it ([`CONTAINER_GATE_VAR`],
 /// [`CONTAINER_TURN_VAR`]), `None` for a turn whose server is not to be
-/// started.
+/// started. All of it is what podman says the container was started with,
+/// which nothing in the container changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningContainer {
     pub name: String,
     pub id: String,
     pub gate: Option<String>,
     pub turn: Option<String>,
+    /// The container's environment.
+    pub env: Vec<(String, String)>,
+    /// The directories in the container the queue's worker cache volumes
+    /// are mounted at.
+    pub worker_cache: Vec<String>,
+}
+
+impl RunningContainer {
+    /// The plan of the container's sccache server: the one it was started
+    /// with ([`ContainerServer::of_container`]), never one `dagq.toml`
+    /// makes when the supervisor answers, nor one of the run directory,
+    /// which the worker writes.
+    pub fn sccache_plan(&self) -> ContainerServer {
+        ContainerServer::of_container(&self.env, &self.worker_cache)
+    }
 }
 
 /// The containers of the runs of one queue in the dagq machine.
@@ -142,12 +158,6 @@ pub trait RunContainers: Send + Sync {
     fn running_container(&self, run: &RunId) -> Result<Option<RunningContainer>> {
         let _ = run;
         Ok(None)
-    }
-    /// What `[run.env]` and the worker cache of `dagq.toml` make of the
-    /// sccache of `run`'s turn container ([`ContainerServer::of`]).
-    fn sccache_plan(&self, run: &TaskRun) -> Result<ContainerServer> {
-        let _ = run;
-        Ok(ContainerServer::NotNamed)
     }
     /// Start the sccache server in the running container of the ID
     /// `container` (ADR-t2114-4 decision 1): `podman exec` `program
@@ -575,7 +585,9 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
 /// [`container_request`]), is served, and once: one already recorded (by
 /// its ID) is not started again, whatever the worker leaves in its run
 /// directory. With no gate there, it starts the server and makes the guard
-/// in the container by its ID, writes its verdict as that turn's gate
+/// in the container by its ID with the plan the container was started with
+/// ([`RunningContainer::sccache_plan`]: its port, its cache directory in
+/// its worker cache mounts or refused), writes its verdict as that turn's gate
 /// where none is while the same container still runs, and records the
 /// start or its failure and, as [`removed_after`] says of the gate that is
 /// the turn's, the agent's run without `RUSTC_WRAPPER`. A gate there that
@@ -617,21 +629,18 @@ pub fn serve_sccache_request<Q: super::RunLog + ?Sized>(
                 && event.payload[key] == value
         })
     };
-    let port = || -> Result<u16> {
-        Ok(match containers.sccache_plan(run)? {
-            ContainerServer::Start { target, .. } | ContainerServer::Refused { target, .. } => {
-                target.port
-            }
-            ContainerServer::NotNamed => DEFAULT_PORT,
-        })
-    };
-    let removed = |port: u16, why: &str, fields: serde_json::Value| {
+    // The port is the one the turn's container was started with; once it
+    // ended, nothing trusted says it, and none is recorded.
+    let removed = |port: Option<u16>, why: &str, mut fields: serde_json::Value| {
+        if port.is_none() {
+            fields["port"] = serde_json::Value::Null;
+        }
         super::sccache::record_wrapper_removed(
             queue,
             run.id(),
             at,
             "supervisor",
-            port,
+            port.unwrap_or(DEFAULT_PORT),
             why,
             fields,
         );
@@ -665,7 +674,7 @@ pub fn serve_sccache_request<Q: super::RunLog + ?Sized>(
                 && let Some(ContainerGate::TimedOut(why)) = ContainerGate::parse(&text)
                 && !recorded("gate", &text)
             {
-                removed(port()?, &why, json!({"container_id": null, "gate": text}));
+                removed(None, &why, json!({"container_id": null, "gate": text}));
                 break;
             }
         }
@@ -687,6 +696,15 @@ pub fn serve_sccache_request<Q: super::RunLog + ?Sized>(
             .is_some_and(|now| now.id == container.id))
     };
     let fields = json!({"container_id": container.id});
+    // The plan the container was started with, whatever `dagq.toml` says
+    // by now (ADR-t2114-4 decisions 1 and 3).
+    let plan = container.sccache_plan();
+    let port = match &plan {
+        ContainerServer::Start { target, .. } | ContainerServer::Refused { target, .. } => {
+            target.port
+        }
+        ContainerServer::NotNamed => DEFAULT_PORT,
+    };
     match RequestStep::of(containers.read_sccache_gate(run_dir, &gate)?.as_deref()) {
         RequestStep::Wait => return Ok(()),
         RequestStep::Record(found) => {
@@ -697,18 +715,18 @@ pub fn serve_sccache_request<Q: super::RunLog + ?Sized>(
                     queue,
                     run.id(),
                     at,
-                    port()?,
+                    port,
                     &container.name,
                     Ok(()),
                     json!({"container_id": container.id, "by": "supervisor"}),
                 ),
                 ContainerGate::Failed(why) | ContainerGate::TimedOut(why) => {
-                    removed(port()?, why, fields);
+                    removed(Some(port), why, fields);
                 }
             }
         }
         RequestStep::Start => {
-            let (port, started, guard) = match containers.sccache_plan(run)? {
+            let (started, guard) = match plan {
                 ContainerServer::Start { target, env } => {
                     let started = containers
                         .start_sccache(&container.id, &target.program, &env)
@@ -719,12 +737,11 @@ pub fn serve_sccache_request<Q: super::RunLog + ?Sized>(
                             .map_err(|error| format!("{error:#}")),
                         Err(_) => Ok(()),
                     };
-                    (target.port, started, guard)
+                    (started, guard)
                 }
-                ContainerServer::Refused { target, why } => (target.port, Err(why), Ok(())),
+                ContainerServer::Refused { why, .. } => (Err(why), Ok(())),
                 ContainerServer::NotNamed => (
-                    DEFAULT_PORT,
-                    Err("[run.env] names sccache no more".to_owned()),
+                    Err("the container was started naming no sccache to start".to_owned()),
                     Ok(()),
                 ),
             };
@@ -752,7 +769,7 @@ pub fn serve_sccache_request<Q: super::RunLog + ?Sized>(
                 if let GateClaim::Lost(text) = &claim {
                     fields["gate"] = json!(text);
                 }
-                removed(port, &why, fields);
+                removed(Some(port), &why, fields);
             }
         }
     }

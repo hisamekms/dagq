@@ -255,7 +255,7 @@ impl RunContainers for PodmanRunContainers {
                 "container".to_owned(),
                 "inspect".to_owned(),
                 "--format".to_owned(),
-                "{{.Id}} {{.State.Running}} {{json .Config.Env}}".to_owned(),
+                INSPECT_FORMAT.to_owned(),
                 name.clone(),
             ];
             self.podman
@@ -288,28 +288,19 @@ impl RunContainers for PodmanRunContainers {
                 );
             }
         }
+        let key = self.key()?;
         Ok(
-            parse_inspect(&String::from_utf8_lossy(&output.stdout)).map(|(id, gate, turn)| {
+            parse_inspect(&String::from_utf8_lossy(&output.stdout)).map(|inspected| {
                 crate::application::run_container::RunningContainer {
                     name,
-                    id,
-                    gate,
-                    turn,
+                    worker_cache: inspected.worker_cache(&key),
+                    id: inspected.id,
+                    gate: inspected.gate,
+                    turn: inspected.turn,
+                    env: inspected.env,
                 }
             }),
         )
-    }
-
-    fn sccache_plan(&self, run: &TaskRun) -> Result<crate::domain::sccache::ContainerServer> {
-        let checkout = self
-            .main_checkout
-            .as_deref()
-            .context("the queue is bound to no checkout, whose dagq.toml decides the container")?;
-        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
-        Ok(crate::domain::sccache::ContainerServer::of(
-            &load_run_env(checkout, &queue_dir_of(&self.db), run_dir)?,
-            &load_worker_cache_dirs(checkout)?,
-        ))
     }
 
     fn start_sccache(
@@ -435,30 +426,84 @@ pub const INSPECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// How long the making of a turn container's guard may take: one link.
 pub const GUARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// What `podman container inspect --format '{{.Id}} {{.State.Running}}
-/// {{json .Config.Env}}'` printed of a container: its ID, and the sccache
-/// gate and the turn's token its environment names
-/// ([`CONTAINER_GATE_VAR`](crate::domain::sccache::CONTAINER_GATE_VAR),
-/// [`CONTAINER_TURN_VAR`](crate::domain::sccache::CONTAINER_TURN_VAR)),
-/// when it runs; `None` when it does not, or the text is not of that form.
-fn parse_inspect(text: &str) -> Option<(String, Option<String>, Option<String>)> {
-    let mut parts = text.trim().splitn(3, ' ');
-    let (id, running, env) = (parts.next()?, parts.next()?, parts.next()?);
-    if running != "true" || id.is_empty() {
+/// What `podman container inspect` prints of a run's container: its ID,
+/// whether it runs, its environment and its mounts, a line each: podman
+/// pads a tab of the format into spaces, and JSON leaves no newline
+/// unescaped.
+const INSPECT_FORMAT: &str = "{{.Id}}\n{{.State.Running}}\n{{json .Config.Env}}\n{{json .Mounts}}";
+
+/// A running container as [`INSPECT_FORMAT`] printed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Inspected {
+    id: String,
+    /// The sccache gate and the turn's token its environment names
+    /// ([`CONTAINER_GATE_VAR`](crate::domain::sccache::CONTAINER_GATE_VAR),
+    /// [`CONTAINER_TURN_VAR`](crate::domain::sccache::CONTAINER_TURN_VAR)).
+    gate: Option<String>,
+    turn: Option<String>,
+    env: Vec<(String, String)>,
+    /// The named volumes it mounts and where: `(name, destination)`.
+    volumes: Vec<(String, String)>,
+}
+
+impl Inspected {
+    /// The directories the queue `key`'s worker cache volumes are mounted
+    /// at: each a volume of [`QueueKey::worker_cache_volume_of`] its own
+    /// destination.
+    fn worker_cache(&self, key: &QueueKey) -> Vec<String> {
+        self.volumes
+            .iter()
+            .filter(|(name, dir)| *name == key.worker_cache_volume_of(dir))
+            .map(|(_, dir)| dir.clone())
+            .collect()
+    }
+}
+
+/// What [`INSPECT_FORMAT`] printed of a container, when it runs; `None`
+/// when it does not, or the text is not of that form.
+fn parse_inspect(text: &str) -> Option<Inspected> {
+    #[derive(serde::Deserialize)]
+    struct Mount {
+        #[serde(rename = "Type", default)]
+        kind: String,
+        #[serde(rename = "Name", default)]
+        name: String,
+        #[serde(rename = "Destination", default)]
+        destination: String,
+    }
+    let mut parts = text.trim_end_matches('\n').split('\n');
+    let (id, running, env, mounts) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if running != "true" || id.is_empty() || parts.next().is_some() {
         return None;
     }
-    let env: Vec<String> = serde_json::from_str(env).ok()?;
+    let env: Vec<(String, String)> = serde_json::from_str::<Vec<String>>(env)
+        .ok()?
+        .into_iter()
+        .filter_map(|pair| {
+            pair.split_once('=')
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        })
+        .collect();
+    let mounts: Vec<Mount> = serde_json::from_str::<Option<Vec<Mount>>>(mounts)
+        .ok()?
+        .unwrap_or_default();
     let value = |var: &str| {
-        let prefix = format!("{var}=");
         env.iter()
-            .find_map(|pair| pair.strip_prefix(&prefix))
-            .map(str::to_owned)
+            .rev()
+            .find(|(key, _)| key == var)
+            .map(|(_, value)| value.clone())
     };
-    Some((
-        id.to_owned(),
-        value(crate::domain::sccache::CONTAINER_GATE_VAR),
-        value(crate::domain::sccache::CONTAINER_TURN_VAR),
-    ))
+    Some(Inspected {
+        id: id.to_owned(),
+        gate: value(crate::domain::sccache::CONTAINER_GATE_VAR),
+        turn: value(crate::domain::sccache::CONTAINER_TURN_VAR),
+        volumes: mounts
+            .into_iter()
+            .filter(|mount| mount.kind == "volume")
+            .map(|mount| (mount.name, mount.destination))
+            .collect(),
+        env,
+    })
 }
 
 /// The names in `dir` that are `of` the turns' sccache files (their gates
@@ -913,27 +958,48 @@ pub fn load_container_limits(host_wide: Option<&Path>) -> (ContainerLimits, Vec<
 mod tests {
     use super::*;
 
-    /// The inspect of a running container gives its ID and the gate and
-    /// the turn's token its wrapper named; one that does not run, or text
-    /// of another form, gives none.
+    /// The inspect of a running container gives its ID, the gate and the
+    /// turn's token its wrapper named, its environment and the directories
+    /// the queue's own worker cache volumes are mounted at (no other
+    /// volume's, no bind mount's); one that does not run, or text of
+    /// another form, gives none.
     #[test]
-    fn an_inspect_gives_a_running_container_s_id_and_its_gate() {
-        assert_eq!(
-            parse_inspect(
-                "abc123 true [\"A=1\",\"DAGQ_SCCACHE_GATE=/q/runs/r1/sccache-gate.t1\",\"DAGQ_SCCACHE_TURN=t1\"]\n"
-            ),
-            Some((
-                "abc123".to_owned(),
-                Some("/q/runs/r1/sccache-gate.t1".to_owned()),
-                Some("t1".to_owned())
-            ))
+    fn an_inspect_gives_a_running_container_s_id_its_gate_and_its_worker_cache() {
+        let key = QueueKey::new("bbbbbbbbbbbbbbbb").unwrap();
+        let other = QueueKey::new("cccccccccccccccc").unwrap();
+        let mounts = format!(
+            "[{{\"Type\":\"volume\",\"Name\":\"{}\",\"Destination\":\"/cache/sccache\"}},\
+             {{\"Type\":\"volume\",\"Name\":\"{}\",\"Destination\":\"/cache/registry\"}},\
+             {{\"Type\":\"volume\",\"Name\":\"{}\",\"Destination\":\"/tmp/new-cache\"}},\
+             {{\"Type\":\"bind\",\"Source\":\"/q/runs/r1\",\"Destination\":\"/q/runs/r1\"}}]",
+            key.worker_cache_volume_of("/cache/sccache"),
+            other.worker_cache_volume_of("/cache/registry"),
+            key.worker_cache_volume_of("/cache/elsewhere"),
         );
-        assert_eq!(parse_inspect("abc123 true null"), None);
+        let inspected = parse_inspect(&format!(
+            "abc123\ntrue\n[\"A=1 2\",\"DAGQ_SCCACHE_GATE=/q/runs/r1/sccache-gate.t1\",\"DAGQ_SCCACHE_TURN=t1\"]\n{mounts}\n"
+        ))
+        .unwrap();
+        assert_eq!(inspected.id, "abc123");
         assert_eq!(
-            parse_inspect("abc123 true []"),
-            Some(("abc123".to_owned(), None, None))
+            inspected.gate.as_deref(),
+            Some("/q/runs/r1/sccache-gate.t1")
         );
-        for text in ["abc123 false []", "abc123 true", "", "abc123 true [1]"] {
+        assert_eq!(inspected.turn.as_deref(), Some("t1"));
+        assert_eq!(inspected.env[0], ("A".to_owned(), "1 2".to_owned()));
+        assert_eq!(inspected.worker_cache(&key), ["/cache/sccache"]);
+        assert_eq!(parse_inspect("abc123\ntrue\nnull\n[]"), None);
+        let bare = parse_inspect("abc123\ntrue\n[]\nnull").unwrap();
+        assert_eq!((&bare.gate, &bare.turn), (&None, &None));
+        assert!(bare.worker_cache(&key).is_empty());
+        for text in [
+            "abc123\nfalse\n[]\n[]",
+            "abc123\ntrue\n[]",
+            "",
+            "abc123\ntrue\n[1]\n[]",
+            "abc123 true [] []",
+            "abc123\ntrue\n[]\n[]\nextra",
+        ] {
             assert_eq!(parse_inspect(text), None, "{text}");
         }
     }
