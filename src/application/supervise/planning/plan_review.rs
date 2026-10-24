@@ -563,13 +563,7 @@ impl PlanningState {
         let language = env.verifier.language();
         // A replacement of a parked task: its plan, the conditions and the
         // saved work it maps (ADR-t1521-2 decision 4).
-        let replacement = env.queue.replacement_brief(proposal.id())?;
-        let snapshot = replacement
-            .as_ref()
-            .and_then(|brief| brief.operation.snapshot_id.as_deref())
-            .map(|snapshot| {
-                crate::domain::replan_snapshot::snapshot_dir(&env.layout.replans_dir, snapshot)
-            });
+        let (replacement, snapshot) = replacement_material(env, proposal.id())?;
         plan_review_prompt(&PlanReviewMaterial {
             proposal,
             tasks: &tasks,
@@ -1090,6 +1084,7 @@ impl PlanningState {
                     let carried = Carried {
                         answers: &answers,
                         handovers: &handovers,
+                        replacement: None,
                     };
                     let opened =
                         match self.open_planner_for(env, proposal, &revise.reasons, carried) {
@@ -1399,7 +1394,12 @@ impl PlanningState {
     }
 
     /// Open a planner of the runtime's for `proposal` with its reasons and
-    /// what it carries from the planner before it.
+    /// what it carries from the planner before it. A proposal that
+    /// replaces a parked task also carries what the planner of the
+    /// operation's request read: the conditions as the operation fixed
+    /// them, the snapshot and the latest plan ([`Carried::replacement`],
+    /// ADR-t1521-2 decision 3), so the new planner submits it again with
+    /// `--replacement`.
     fn open_planner_for(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -1412,6 +1412,13 @@ impl PlanningState {
             .iter()
             .map(|&id| Ok(env.queue.show(id)?.task))
             .collect::<Result<Vec<_>>>()?;
+        let (replacement, snapshot) = replacement_material(env, proposal.id())?;
+        let carried = Carried {
+            replacement: replacement
+                .as_ref()
+                .map(|brief| (brief, snapshot.as_deref())),
+            ..carried
+        };
         open_runtime_planner(
             &self.planner_launch(env),
             proposal.id(),
@@ -2428,6 +2435,26 @@ It recommends {recommended} (confidence {confidence}); left to a person: {becaus
 /// included, since no value chooses anything.
 fn warns_of_ignored_route(warned: bool, roles: &RoleModels) -> Option<&str> {
     roles.ignored_planner_route().filter(|_| !warned)
+}
+
+/// The brief of the replanning operation whose task `proposal` replaces,
+/// if it replaces one's, with the directory of its snapshot: what plan
+/// review and a planner opened for its revise read of the replacement.
+fn replacement_material(
+    env: &PlanningEnv<'_>,
+    proposal: ProposalId,
+) -> Result<(
+    Option<crate::domain::replan_plan::ReplanBrief>,
+    Option<std::path::PathBuf>,
+)> {
+    let replacement = env.queue.replacement_brief(proposal)?;
+    let snapshot = replacement
+        .as_ref()
+        .and_then(|brief| brief.operation.snapshot_id.as_deref())
+        .map(|snapshot| {
+            crate::domain::replan_snapshot::snapshot_dir(&env.layout.replans_dir, snapshot)
+        });
+    Ok((replacement, snapshot))
 }
 
 #[cfg(test)]

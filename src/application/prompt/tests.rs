@@ -4171,6 +4171,7 @@ fn a_runtime_planner_prompt_of_many_reasons_and_carried_answers_stays_within_its
         Carried {
             answers: &answers,
             handovers: std::slice::from_ref(&handover),
+            replacement: None,
         },
     )
     .unwrap();
@@ -4201,6 +4202,129 @@ fn a_runtime_planner_prompt_of_many_reasons_and_carried_answers_stays_within_its
     // The first reasons are kept, cut to their own limit.
     assert!(text.contains("- reason 1 reason 1"));
     assert!(text.contains("dagq submit --proposal 3"));
+}
+
+/// A revise of a proposal that replaces a parked task, opened after the
+/// planner of the operation's request ended, carries what that planner
+/// read (the conditions as the operation fixed them, the snapshot, the
+/// latest plan, each cut with a way to read the rest) and the steps of
+/// submitting the proposal again with `--replacement` whole, past every
+/// section's limit; it never asks for a submit without the plan
+/// (ADR-t1521-2 decisions 3 and 4).
+#[test]
+fn a_revise_planner_of_a_replacement_gets_its_material_and_resubmits_with_the_plan() {
+    use crate::domain::replan_plan::{
+        CarrySource, ItemDisposition, PlanChild, PlanChoice, PlanMapping, PlanRevision,
+        ReplacementPlan,
+    };
+    let mut brief = huge_replan_brief();
+    let op = &brief.operation;
+    brief.plan = Some(PlanRevision {
+        revision: 2,
+        proposal_id: ProposalId::new(3),
+        plan: ReplacementPlan {
+            operation_id: op.id,
+            task_version: op.task_version.clone(),
+            goal_acceptance_version: None,
+            choice: PlanChoice::Split,
+            rationale: "why ".repeat(15_000),
+            children: vec![PlanChild {
+                task_id: TaskId::new(11),
+                carry: CarrySource::SnapshotHead,
+                order: Some(1),
+            }],
+            mappings: vec![PlanMapping {
+                ordinal: 1,
+                hash: op.conditions.acceptance[0].hash.clone(),
+                disposition: ItemDisposition::Split,
+                children: Vec::new(),
+                landed_task_id: None,
+                authority_ask_id: None,
+                reason: None,
+            }],
+            successors: Vec::new(),
+        },
+        hash: "h".into(),
+        approved_at: None,
+    });
+    let tasks: Vec<Task> = (1..=500)
+        .map(|id| task(id, &big("title", 2_000), TaskStatus::Submitted))
+        .collect();
+    let reasons: Vec<String> = (1..=100)
+        .map(|n| big(&format!("reason {n}"), 5_000))
+        .collect();
+    let answers: Vec<Ask> = (1..=20).map(|id| asked(id, 20_000)).collect();
+    let handover = big_handover();
+    let fitted = runtime_planner_prompt(
+        Path::new("/q/queue.db"),
+        ProposalId::new(3),
+        &tasks,
+        &reasons,
+        Some(TaskId::new(42)),
+        Carried {
+            answers: &answers,
+            handovers: std::slice::from_ref(&handover),
+            replacement: Some((&brief, Some(Path::new("/q/replans/snap-1")))),
+        },
+    )
+    .unwrap();
+    within(&fitted, RUNTIME_REPLACEMENT_PROMPT_LIMIT);
+    sections_within(&fitted);
+    assert!(fitted.bytes.omitted["replan"] > 0, "{:?}", fitted.bytes);
+    let text = &fitted.text;
+    for expected in [
+        "## Replan operation 1 of task 1".to_owned(),
+        format!("task_version `{}`", brief.operation.task_version),
+        format!(
+            "- 1 `{}` item 1",
+            brief.operation.conditions.acceptance[0].hash
+        ),
+        "read it with `dagq replans 1` and `dagq show 1 --full`".to_owned(),
+        "with `dagq replans 1`. Fix what the reasons point at".to_owned(),
+        "]\nThis proposal replaces task 1 of replan operation 1:".to_owned(),
+        "`dagq submit --proposal 3 --replacement <plan.json>`".to_owned(),
+        "Submit refuses this proposal without `--replacement`".to_owned(),
+        "The plan holds `operation_id` 1".to_owned(),
+        "`successors` (one per task that waits for task 1".to_owned(),
+        "Never edit task 1, its run or its worktree.".to_owned(),
+        "- reason 1 reason 1".to_owned(),
+    ] {
+        assert!(text.contains(&expected), "{expected}");
+    }
+    assert!(!text.contains("submit it again with `dagq submit --proposal 3`."));
+    // What the material names to read the rest by is a planner's read.
+    for (named, form) in [
+        ("`dagq replans 1`", "dagq replans ID"),
+        ("`dagq show 1 --full`", "dagq show ID --full"),
+    ] {
+        assert!(text.contains(named), "{named}");
+        assert!(PLANNER_READS.contains(&form), "{form}");
+    }
+}
+
+/// The planner opened for a revise of a proposal that replaces no parked
+/// task is given the prompt it had: the plain resubmit, and nothing of a
+/// replanning operation.
+#[test]
+fn a_revise_planner_of_another_proposal_keeps_its_prompt() {
+    let fitted = runtime_planner_prompt(
+        Path::new("/q/queue.db"),
+        ProposalId::new(3),
+        &[task(5, "work", TaskStatus::Submitted)],
+        &["fix it".into()],
+        Some(TaskId::new(42)),
+        Carried::default(),
+    )
+    .unwrap();
+    assert_eq!(fitted.bytes.limit, RUNTIME_PLANNER_PROMPT_LIMIT);
+    let text = &fitted.text;
+    assert!(text.contains(
+        "Its tasks:\n- task 5 (submitted): work\nFollow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show 3` and each task with `dagq show ID`, fix what the reasons point at, and submit it again with `dagq submit --proposal 3`.\n"
+    ), "{text}");
+    for absent in ["replacement", "Replan operation", "dagq replans"] {
+        assert!(!text.contains(absent), "{absent}\n{text}");
+    }
+    assert!(!fitted.bytes.sections.contains_key("replan"));
 }
 
 /// ADR-t1704-1 decision 3: a planner the runtime opens for a revise
@@ -4237,6 +4361,7 @@ fn a_planner_carrying_an_answer_shows_what_the_planner_before_it_left_within_its
         Carried {
             answers: &answers,
             handovers: std::slice::from_ref(&handover),
+            replacement: None,
         },
     )
     .unwrap();
@@ -4300,6 +4425,7 @@ fn a_planner_carrying_answers_of_two_planners_shows_what_each_left_within_one_li
         Carried {
             answers: &answers,
             handovers: &handovers,
+            replacement: None,
         },
     )
     .unwrap();
@@ -4367,6 +4493,7 @@ fn revise_prompt_carrying(handovers: &[PlannerHandover]) -> FittedPrompt {
         Carried {
             answers: &answers,
             handovers,
+            replacement: None,
         },
     )
     .unwrap();

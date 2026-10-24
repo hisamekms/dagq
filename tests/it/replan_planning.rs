@@ -1039,3 +1039,74 @@ fn a_planners_decline_with_continue_run_continues_the_run() {
         .to_string();
     assert!(error.contains("--continue-run"), "{error}");
 }
+
+/// A revise of a replacement proposal whose request's planner ended goes
+/// to a planner opened for the proposal alone with the operation's
+/// material and the steps of submitting it again with `--replacement`
+/// (ADR-t1521-2 decisions 3 and 4): that planner's submit without the
+/// plan is refused, and with it the plan is checked and kept as the next
+/// revision.
+#[test]
+fn a_revise_planner_of_a_replacement_resubmits_it_with_its_plan() {
+    let p = parked(0);
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[
+        json!({"verdict": "revise", "reasons": ["say why the docs wait"], "summary": "s"}),
+    ]);
+    supervise(&p, &backend, &reviewer, 1);
+    let (first, handle) = request_planner(&p, p.request).unwrap();
+    let api = child(&p, "API", &[]);
+    let docs = child(&p, "docs", &[]);
+    let proposal = submit(
+        &p,
+        &handle,
+        &[api, docs],
+        None,
+        Some(&plan(&p, [api, docs])),
+    )
+    .unwrap()
+    .id();
+    queue(&p).close_planner(first, None).unwrap();
+    supervise(&p, &backend, &reviewer, 1);
+    let planner = revise_planner(&p, proposal).expect("a planner for the revise");
+    let op = operation(&p);
+    let prompt = planner_prompt(&p.fx.db, planner);
+    for expected in [
+        "say why the docs wait".to_owned(),
+        format!("## Replan operation {} of task {}", op.id, p.task),
+        op.task_version.clone(),
+        format!("- 1 `{}` the API behaves", op.conditions.acceptance[0].hash),
+        "snap-1".to_owned(),
+        format!("The latest plan (revision 1, proposal {proposal}"),
+        format!("dagq replans {}", op.id),
+        format!("dagq submit --proposal {proposal} --replacement <plan.json>"),
+    ] {
+        assert!(prompt.contains(&expected), "{expected}\n{prompt}");
+    }
+    let handle = queue(&p)
+        .planners(false)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == planner)
+        .and_then(|row| row.workspace_id)
+        .unwrap();
+    let error = format!(
+        "{:#}",
+        submit(&p, &handle, &[], Some(proposal), None).unwrap_err()
+    );
+    assert!(error.contains("--replacement"), "{error}");
+    submit(
+        &p,
+        &handle,
+        &[],
+        Some(proposal),
+        Some(&plan(&p, [api, docs])),
+    )
+    .unwrap();
+    let submitted = events(&p, p.task, "replan_plan_submitted");
+    assert_eq!(submitted.len(), 2, "{submitted:?}");
+    assert_eq!(submitted[1]["proposal_id"], json!(proposal));
+    assert_eq!(submitted[1]["revision"], json!(2));
+    assert_eq!(operation(&p).status, ReplanStatus::Reviewing);
+    assert_kept(&p);
+}

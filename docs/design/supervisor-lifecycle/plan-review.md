@@ -131,6 +131,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - plannerを終わらせない理由: `PlannerBusy`と`PlanningState::busy_reasons`。
 - 届ける依頼の文: `prompt::plan_revise_request`。
 - 持ち主が居ないreviseは、回答済みの`planner_question`とそれを出したplannerごとの引き継ぎ材料を同じ新しいplannerに運び、`plan_revise_sent`と運んだanswerのclose（`ask_delivered`）を1トランザクションで記録する（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定2〜4、`PlanReviewStore::revise_sent`）。
+- 持ち主が居ない置換proposalのreviseは、元の依頼のplannerと同じ再計画の材料（元の条件の版・snapshot・最新の置換計画と、省いた部分を読む経路）を新しいplannerに渡し、`--replacement`を付けた出し直しを指示する（[ADR-t1521-2](../../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)決定3・4、`PlanningState::open_planner_for`と`prompt::runtime_planner_prompt`）。
 - 差し戻しで開き直すplannerのeffortは1段上げ、生きているsessionのmodel / effortは切り替えない（[Actor model](actor-model.md#差し戻しで開き直すplannerの段上げ)）。
 - goalを再計画する依頼のproposalのreviseは、同じgoalの他の依頼のplannerが閉じるまで受け取らない（[Spikeの再計画の依頼](plan-planners.md#spikeの再計画の依頼)）。
 - 落とし穴: sessionが見つからないだけではplannerが終わった証拠にせず、wrapperで判定する（workerと同じ。`PlanningState::planner_gone`）。

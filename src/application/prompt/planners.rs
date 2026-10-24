@@ -56,6 +56,7 @@ pub const PLANNER_READS: &[&str] = &[
     "dagq proposal show ID",
     "dagq findings ID --full",
     "dagq requests ID",
+    "dagq replans ID",
     "dagq asks --all",
     "dagq events --full --task ID --kind plan_review_finished",
     "dagq events --full --task ID --kind integration_receipt",
@@ -316,6 +317,17 @@ pub const PLANNER_HANDOVER_MIN_SHARE: usize = 1_000;
 pub struct Carried<'a> {
     pub answers: &'a [Ask],
     pub handovers: &'a [PlannerHandover],
+    /// For a proposal that replaces the task of a replanning operation
+    /// (the plan review store's `replacement_brief`), what the planner of
+    /// the operation's request read of it and where its snapshot is: a
+    /// planner opened for its revise after that planner ended is given the
+    /// same material and submits the proposal again with `--replacement`
+    /// (ADR-t1521-2 decisions 3 and 4). `None` for any other proposal,
+    /// whose revise prompt it leaves as it is.
+    pub replacement: Option<(
+        &'a crate::domain::replan_plan::ReplanBrief,
+        Option<&'a Path>,
+    )>,
 }
 
 const HANDOVER_NOTES: &str = "notes (the oldest; event IDs)";
@@ -575,6 +587,18 @@ fn handovers_text(fit: &mut Fit, handovers: &[PlannerHandover]) -> String {
 pub const RUNTIME_PLANNER_PROMPT_LIMIT: usize =
     32_000 + RUNTIME_PLANNER_ANSWERS_BYTES + PLANNER_HANDOVER_BYTES;
 
+/// [`RUNTIME_PLANNER_PROMPT_LIMIT`] of a revise of a proposal that
+/// replaces a parked task ([`Carried::replacement`]): it grows by the
+/// operation's section ([`REQUEST_REPLAN_BYTES`], cut with a way to read
+/// the rest) and by the steps of submitting the plan again, which are
+/// never cut ([`RUNTIME_REPLACEMENT_STEPS_BYTES`]).
+pub const RUNTIME_REPLACEMENT_PROMPT_LIMIT: usize =
+    RUNTIME_PLANNER_PROMPT_LIMIT + REQUEST_REPLAN_BYTES + RUNTIME_REPLACEMENT_STEPS_BYTES;
+
+/// The room the steps of [`replacement_revise_steps`] take over the
+/// sentence they stand in for, the plan's form included.
+pub const RUNTIME_REPLACEMENT_STEPS_BYTES: usize = 4_000;
+
 /// The bytes of the answered questions a planner opened for a revise
 /// carries (the oldest first, each question and answer cut to
 /// [`PLANNER_ANSWER_BYTES`]); the rest are named with `dagq asks --all`.
@@ -603,7 +627,11 @@ pub fn runtime_planner_prompt(
     review_anchor: Option<TaskId>,
     carried: Carried<'_>,
 ) -> Result<FittedPrompt> {
-    let mut fit = Fit::new(RUNTIME_PLANNER_PROMPT_LIMIT);
+    let mut fit = Fit::new(if carried.replacement.is_some() {
+        RUNTIME_REPLACEMENT_PROMPT_LIMIT
+    } else {
+        RUNTIME_PLANNER_PROMPT_LIMIT
+    });
     let goal_tasks: Vec<GoalTask> = tasks
         .iter()
         .map(|task| GoalTask {
@@ -718,11 +746,25 @@ pub fn runtime_planner_prompt(
     }
     fit.section("answer", &carried_text);
     carried_text.push_str(&handovers_text(&mut fit, carried.handovers));
+    // A replacement's material is cut with a way to read the rest; its
+    // steps stand in for the plain resubmit and are never cut.
+    let (replan, steps) = match carried.replacement {
+        Some((brief, snapshot)) => (
+            replan_section(&mut fit, brief, snapshot)?,
+            format!("\n{}", replacement_revise_steps(proposal, brief)),
+        ),
+        None => (
+            String::new(),
+            format!(
+                "Follow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show {proposal}` and each task with `dagq show ID`, fix what the reasons point at, and submit it again with `dagq submit --proposal {proposal}`."
+            ),
+        ),
+    };
     Ok(fit.finish(format!(
         "You are a planner the dagq runtime opened for proposal {proposal} of the queue at {db}; no person watches this session.\n\
          Plan review sent the proposal back. Its reasons:\n{reasons}\nFull reasons: {reason_read}.\n\
-         Its tasks:\n{tasks}\n\
-         Follow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show {proposal}` and each task with `dagq show ID`, fix what the reasons point at, and submit it again with `dagq submit --proposal {proposal}`.\n\
+         Its tasks:\n{tasks}\n{replan}\
+         {steps}\n\
          {RECORD_READING}\n\
          {rules}\n\
          A fix that changes the plan's intent (acceptance, scope, the relation to the goal) needs a person: raise it to the inbox with `dagq ask --task ID --kind planner_question --because scope` as the skill describes, stop, and continue from the answer, which arrives as the prompt of your next turn. {BEFORE_YOU_STOP_AT_A_QUESTION}\n\
@@ -730,6 +772,27 @@ pub fn runtime_planner_prompt(
         db = crate::application::path_text(db)?,
         rules = repository_rules(RUNTIME_PLANNER_ASK),
     )))
+}
+
+/// What a planner opened for a revise of `proposal`, which replaces the
+/// task of the operation `brief` reads, does in place of the plain
+/// resubmit of [`runtime_planner_prompt`]: fix the children and the plan
+/// and submit the proposal again with the whole plan
+/// (`--replacement`), which submit refuses to go without (ADR-t1521-2
+/// decision 4).
+fn replacement_revise_steps(
+    proposal: ProposalId,
+    brief: &crate::domain::replan_plan::ReplanBrief,
+) -> String {
+    let op = &brief.operation;
+    format!(
+        "This proposal replaces task {tid} of replan operation {oid}: the trusted runtime parked run {run} of task {tid} with its work saved, and the proposal's tasks are the children of its replacement plan, which stay submitted after plan review's pass until the runtime applies it. The operation's conditions, the saved work and the latest plan are above.\n\
+         Follow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show {proposal}`, each task with `dagq show ID`, and the operation with its latest plan and that plan's problems now with `dagq replans {oid}`. Fix what the reasons point at, in the children and in the plan alike, and keep every acceptance item of task {tid} mapped to the children; a mapping `deleted` stays only with the `authority_ask_id` it already has. {form} Write the whole plan as JSON and submit the proposal again with it: `dagq submit --proposal {proposal} --replacement <plan.json>`. Submit refuses this proposal without `--replacement`, and refuses a plan that leaves an item unmapped, weakens a verification, closes a loop, is stale, or leaves the saved work's carrying unclear, saying why: fix it and submit again. Never edit task {tid}, its run or its worktree.",
+        oid = op.id,
+        tid = op.task_id,
+        run = op.run_id,
+        form = replan_plan_form(op.id, op.task_id),
+    )
 }
 
 /// What the initial prompt of a planner the runtime opens for a bundle of
@@ -1832,12 +1895,21 @@ fn replan_section(
         REQUEST_REPLAN_BYTES,
         Keep::Start,
         &format!(
-            "read it with `dagq replans --all` and `dagq show {}`",
-            op.task_id
+            "read it with `dagq replans {}` and `dagq show {} --full`",
+            op.id, op.task_id
         ),
     );
     fit.section("replan", &section);
     Ok(section)
+}
+
+/// What the replacement plan of operation `oid`, which replaces task
+/// `tid`, holds: the form both the planner of the operation's request and
+/// a planner opened for a revise of its proposal write it in.
+fn replan_plan_form(oid: crate::domain::ReplanId, tid: TaskId) -> String {
+    format!(
+        "The plan holds `operation_id` {oid}, `task_version` and `goal_acceptance_version` as the operation fixed them, `choice` (`split` or `redistribute`), `rationale`, `children` (each `{{\"task_id\", \"carry\": \"base\"|\"snapshot_head\"|\"snapshot_diff\", \"order\"}}`: each part of the saved work goes to one child only, with its order, and the others start from `base`), `mappings` (one per acceptance item of task {tid} as the operation fixed them: `{{\"ordinal\", \"hash\", \"disposition\": \"split\"|\"redistribute\"|\"landed\"|\"deleted\", \"children\": [{{\"task_id\", \"ordinal\"}}]}}`; `landed` needs `landed_task_id`, a completed task whose landing meets it, and still a child that checks it: the parked run's saved work has not landed), and `successors` (one per task that waits for task {tid}: `{{\"task_id\", \"needs\": [children], \"reason\"}}`, all the children unless the reason says why fewer hold what it needs)."
+    )
 }
 
 /// What a planner of a replanning operation's request decides and how
@@ -1852,11 +1924,11 @@ fn replan_steps(
          Follow the dagq-planner skill of the dagq plugin, its Basic policy above all: {DECIDE_YOURSELF} Read the repository's AGENTS.md (or CLAUDE.md) first, and the documents it names for what you plan. {rules}\n\
          First diagnose from the material above why the run went long: a local defect, an acceptance unclear or contradictory, a unit too large with independent conditions, a conflict, a verification failure, or the environment. Do not split only because there were many turns. Then decide exactly one of these, with your rationale:\n\
          1. Continue: when the same conditions are best finished in the same run (a local defect, a conflict, the environment), run `dagq request decline {id} --continue-run --reason '<the diagnosis and why continuing is best>'`. The runtime resumes the run on its saved work. Decide this before you submit: once a proposal is submitted the request is proposed and can no longer be declined.\n\
-         2. Split, or redistribute the scope: add the child tasks to goal {goal} (`dagq add --goal {goal} ...`, `--context` beginning with `from request {id}`), each with its acceptance, `--paths`, `--verify` and `--evidence`; together they keep every verification command and evidence of task {tid}. Each child waits for the predecessors of task {tid} that have not ended, never for task {tid} or a task that waits for it. Write the plan as JSON and submit the children with it: `dagq submit <child>... --replacement <plan.json>`. The plan holds `operation_id` {oid}, `task_version` and `goal_acceptance_version` as above, `choice` (`split` or `redistribute`), `rationale`, `children` (each `{{\"task_id\", \"carry\": \"base\"|\"snapshot_head\"|\"snapshot_diff\", \"order\"}}`: each part of the saved work goes to one child only, with its order, and the others start from `base`), `mappings` (one per acceptance item above: `{{\"ordinal\", \"hash\", \"disposition\": \"split\"|\"redistribute\"|\"landed\"|\"deleted\", \"children\": [{{\"task_id\", \"ordinal\"}}]}}`; `landed` needs `landed_task_id`, a completed task whose landing meets it, and still a child that checks it: the parked run's saved work has not landed), and `successors` (one per task that waits for task {tid}: `{{\"task_id\", \"needs\": [children], \"reason\"}}`, all the children unless the reason says why fewer hold what it needs). Submit refuses a plan that leaves an item unmapped, weakens a verification, closes a loop, is stale, or leaves the saved work's carrying unclear, and says why: fix it and submit again. Plan review checks it; its pass leaves the children submitted until the runtime applies the replacement, and a revise comes back to you: submit the proposal again with its plan, `dagq submit --proposal <N> --replacement <plan.json>`.\n\
+         2. Split, or redistribute the scope: add the child tasks to goal {goal} (`dagq add --goal {goal} ...`, `--context` beginning with `from request {id}`), each with its acceptance, `--paths`, `--verify` and `--evidence`; together they keep every verification command and evidence of task {tid}. Each child waits for the predecessors of task {tid} that have not ended, never for task {tid} or a task that waits for it. Write the plan as JSON and submit the children with it: `dagq submit <child>... --replacement <plan.json>`. {form} Submit refuses a plan that leaves an item unmapped, weakens a verification, closes a loop, is stale, or leaves the saved work's carrying unclear, and says why: fix it and submit again. Plan review checks it; its pass leaves the children submitted until the runtime applies the replacement, and a revise comes back to you: submit the proposal again with its plan, `dagq submit --proposal <N> --replacement <plan.json>`.\n\
          3. Ask: dropping an acceptance item, changing the goal's intent, or throwing the saved work away is a person's decision: `dagq ask --request {id} --kind planner_question --because scope` (`--because discard` for the saved work) `--recommend <option> --confidence <high|low> --question '<everything the person needs>' --option ...`, report briefly and stop; {BEFORE_YOU_STOP_AT_A_QUESTION} The answer arrives as `answer to ask <id>: ...`. To delete an item, offer `--option delete:<ordinal>:<the first 12 characters of its hash>` for it (one option per item) and `--option keep`: only a person's answer that is that option, whole, allows the deletion, as `disposition` `deleted` with `authority_ask_id` naming the ask; an answer that keeps it, or names another item, allows none. Ask likewise when your confidence is low. Never decline without --continue-run only to drop the request: the operation then waits for a person with the run parked.\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this request. Never open the queue database directly; use the dagq CLI only.\n",
         rules = repository_rules(RUNTIME_PLANNER_ASK),
-        oid = op.id,
+        form = replan_plan_form(op.id, op.task_id),
         tid = op.task_id,
         goal = op
             .goal_id
