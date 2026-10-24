@@ -1,0 +1,17 @@
+  >_ OpenAI Codex (v0.160.0)
+     /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3336-NpaEvU/repo
+  Nice place you’ve got here. Very monospace.
+› Run the shell command `echo probe` and reply with its output only.
+• Ran echo probe
+  └ probe
+• probe
+  Worked for 5s • 03:56
+› Ask Codex to do anything
+  GPT-6.1-Sol low · /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3336-NpaEvU/repo · Run echo probe
+  ? for shortcuts
+Token usage: total=4,130 input=4,097 (+ 27,776 cached) output=33
+To continue this session, run:
+  codex resume 01a16f45-b05e-7352-8d8a-71b7f442e060
+Or run codex resume and select Run echo probe.
+EXIT=0
+exited

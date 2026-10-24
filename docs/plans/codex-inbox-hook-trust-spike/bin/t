@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "$HOME/.local/share/mise/installs/tmux/3.6a/bin/tmux" -L dagq-t3336 -f /dev/null "$@"

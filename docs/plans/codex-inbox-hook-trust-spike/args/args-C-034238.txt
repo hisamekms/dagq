@@ -1,0 +1,8 @@
+-c
+hooks.SessionStart=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3336-NpaEvU/bin/hook.sh dagq SessionStart"}]}]
+-c
+hooks.SessionEnd=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3336-NpaEvU/bin/hook.sh dagq SessionEnd"}]}]
+-c
+hooks.Stop=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3336-NpaEvU/bin/hook.sh dagq Stop"}]}]
+-c
+hooks.PreToolUse=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3336-NpaEvU/bin/hook.sh dagq PreToolUse"}]}]

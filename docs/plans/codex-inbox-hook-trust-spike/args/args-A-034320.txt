@@ -1,0 +1,10 @@
+-c
+hooks.SessionStart=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3336-NpaEvU/bin/hook.sh dagq SessionStart"}]}]
+-c
+hooks.SessionEnd=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3336-NpaEvU/bin/hook.sh dagq SessionEnd"}]}]
+-c
+hooks.Stop=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3336-NpaEvU/bin/hook.sh dagq Stop"}]}]
+-c
+hooks.PreToolUse=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3336-NpaEvU/bin/hook.sh dagq PreToolUse"}]}]
+-c
+hooks.state={"/<session-flags>/config.toml:session_start:0:0"={trusted_hash="sha256:8d33ed88d73d3485ae3d1d8820642940571d12980ec108eaafa67f3a9bb70ba0"},"/<session-flags>/config.toml:session_end:0:0"={trusted_hash="sha256:8f21f5d7ad8985c07396a7d191e5dc09febe69a7b12198a896a5dd9b00a9acef"},"/<session-flags>/config.toml:stop:0:0"={trusted_hash="sha256:47f07108b959f9a6f1703a7b585d91457c6ced0940ac3a843a8547b332e6f723"},"/<session-flags>/config.toml:pre_tool_use:0:0"={trusted_hash="sha256:e7f5fd1a6ac4cd8da468412e25026bc1d5a59f49cba15c551918082cfcbaa5c7"}}
