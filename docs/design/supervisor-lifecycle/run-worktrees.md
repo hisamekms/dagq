@@ -26,8 +26,8 @@ landing recheckは、hostで流すたびにscratchを作る前に、`recheck/`�
 古い配置のrunのrestoreは、前のrestoreが古い名前のscratch（`worktree.restoring`）にrunのbranchをcheckoutしたまま止まっていても、新しいscratchを作る前にそれを消す（`replan_snapshot::legacy_scratch_worktree`）。
 消すのは、linkでなく、そのrunのbranchかdetachedのworktreeか登録の無いdirだけで（`discard_worktree`）、それ以外（link・file・別のbranchのworktree）はrunのbranchを持たないので残して復元を続ける。
 新しいaddは`worktree`・`worktreeN`の名前を使わないので、古い配置の記録の名前を使い回さない。
-同じrepositoryで同時に流れる`git worktree add`は、別のGitのコマンドがその時に変えていた記録で落ちることがある（別のaddが書きかけの記録に`commondir`がまだ無い、addが記録のdirを作ってGit自身の`locked`を書くまでの間にpruneがそのdirを消す）。
-その失敗のときは少し待って同じaddを流し直す（`worktree_command`）。
+同じrepositoryで同時に流れる`git worktree add`は、別のGitのコマンドがその時に変えていた記録で落ちることがある（別のaddが書きかけの記録に`commondir`がまだ無い、addが記録のdirを作ってGit自身の`locked`を書くまでの間にpruneがそのdirを消す、addが作った記録を読み直す前にpruneがそれを消す）。
+その失敗のときは少し待ち、落ちたaddが残したもの（空か`.git`だけを持つworktreeのdirと、そのdirを指すか、何も指さず作りかけでもない記録）を片付けてから、同じaddを流し直す（`worktree_command`・`clear_failed_add`）。
 新しいbranchはaddの前に作り、addが失敗したら消す。
 消したものはもう無いので、何度見てもよい。
 ただし片付けるものが何も残っていないrunは、同じsupervisorのプロセスの次の掃除からは候補にしない（下の「片付け終わったrun」）。

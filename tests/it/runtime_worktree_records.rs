@@ -378,3 +378,60 @@ fn the_recheck_scratches_of_queues_named_alike_have_records_of_their_own() {
     assert!(!lost.exists(), "B took the name A's .git names");
     assert_eq!(git.head(&scratches[1]).unwrap(), head);
 }
+
+/// What `git worktree add` leaves when a prune took its record before it
+/// read it back (`could not find created worktree`): its directory with
+/// the `.git` it wrote, and a record naming that `.git`. The clearing
+/// before the retry takes both away, so the run's add makes its worktree
+/// under its own name; it keeps a directory with more than the `.git`, a
+/// record naming another worktree, and a record an add is still making;
+/// and nothing there, as a prune that came first leaves it, is no error.
+#[test]
+fn what_an_add_a_prune_raced_left_is_cleared_for_the_retry() {
+    let _test = common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (repo, git) = repository(dir.path());
+    let runs = dir.path().join("runs");
+    let run = worktree_run(&git, &runs, RUN_A);
+    let path = worktree_of(&run);
+    let name = format!("worktree-{RUN_A}");
+    let record = repo.join(".git/worktrees").join(&name);
+    // As Git writes it, its links resolved (`/var` is `/private/var`).
+    let dotgit = runs
+        .canonicalize()
+        .unwrap()
+        .join(RUN_A)
+        .join(&name)
+        .join(".git");
+    let leave = |gitdir: &str| {
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join(".git"), format!("gitdir: {}\n", record.display())).unwrap();
+        fs::create_dir_all(&record).unwrap();
+        fs::write(record.join("gitdir"), gitdir).unwrap();
+    };
+    // Another worktree's record, and a directory with more than its `.git`,
+    // stay.
+    leave("/elsewhere/worktree/.git\n");
+    fs::write(path.join("work"), "kept\n").unwrap();
+    git.clear_failed_add(&path).unwrap();
+    assert!(path.join("work").exists());
+    assert!(record.join("gitdir").exists());
+    fs::remove_file(path.join("work")).unwrap();
+    // A record with no `gitdir` that an add is still making stays.
+    fs::remove_file(record.join("gitdir")).unwrap();
+    fs::write(record.join("locked"), "initializing\n").unwrap();
+    git.clear_failed_add(&path).unwrap();
+    assert!(record.exists());
+    fs::remove_dir_all(&record).unwrap();
+    // What the failed add left goes, and the run's add then makes its own.
+    leave(&format!("{}\n", dotgit.display()));
+    git.clear_failed_add(&path).unwrap();
+    assert!(!path.exists());
+    assert!(!record.exists());
+    git.create_worktree(&run).unwrap();
+    assert_eq!(record_name(&path), name);
+    assert_eq!(branch_at(&git, &path), on(RUN_A));
+    // Nothing there is no error.
+    git.clear_failed_add(&runs.join(RUN_B).join("worktree-b"))
+        .unwrap();
+}

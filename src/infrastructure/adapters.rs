@@ -748,12 +748,35 @@ const WORKTREE_ATTEMPTS: u32 = 50;
 /// [`output`] of the Git worktree command `command` makes, made and run
 /// again while it fails on a record another Git command was writing or
 /// pruning at that moment ([`record_raced`]), which a retry does not meet.
-fn worktree_command(mut command: impl FnMut() -> Command) -> Result<String> {
+/// `clear` runs before each retry, to take away what the failed command
+/// left for the next to find.
+fn worktree_command(
+    mut command: impl FnMut() -> Command,
+    clear: impl FnMut() -> Result<()>,
+) -> Result<String> {
+    retry_raced(
+        || output(&mut command()),
+        clear,
+        |attempt| {
+            std::thread::sleep(Duration::from_millis(10 * u64::from(attempt.min(10))));
+        },
+    )
+}
+
+/// [`worktree_command`]'s loop: `run` again, up to [`WORKTREE_ATTEMPTS`]
+/// in all, while it fails as [`record_raced`] reads, after `wait` for the
+/// attempt that failed and `clear`; a failing `clear` ends it.
+fn retry_raced<T>(
+    mut run: impl FnMut() -> Result<T>,
+    mut clear: impl FnMut() -> Result<()>,
+    mut wait: impl FnMut(u32),
+) -> Result<T> {
     let mut attempt = 1;
     loop {
-        match output(&mut command()) {
+        match run() {
             Err(error) if attempt < WORKTREE_ATTEMPTS && record_raced(&error) => {
-                std::thread::sleep(Duration::from_millis(10 * u64::from(attempt.min(10))));
+                wait(attempt);
+                clear().with_context(|| format!("clear what a raced add left: {error:#}"))?;
                 attempt += 1;
             }
             done => return done,
@@ -770,14 +793,38 @@ fn worktree_command(mut command: impl FnMut() -> Command) -> Result<String> {
 /// '.git/worktrees/<name>/locked' for writing`); and a prune that left
 /// `.git/worktrees` empty removes it too before an add makes its record's
 /// directory in it (`could not create directory of
-/// '.git/worktrees/<name>'`). The add dies with what it made removed. The
-/// add runs with `LC_ALL=C` for these to be read.
+/// '.git/worktrees/<name>'`); and a prune that removes an add's record
+/// before the add reads it back finds the add no record of its own
+/// (`could not find created worktree '<name>'`). The add dies, and what
+/// it made may be left ([`GitRepository::clear_failed_add`]). The add
+/// runs with `LC_ALL=C` for these to be read.
 fn record_raced(error: &anyhow::Error) -> bool {
     let error = format!("{error:#}");
-    error.contains("worktrees/")
-        && ((error.contains("failed to read") && error.contains("/commondir"))
-            || (error.contains("could not open") && error.contains("for writing"))
-            || error.contains("could not create directory of"))
+    error.contains("could not find created worktree")
+        || (error.contains("worktrees/")
+            && ((error.contains("failed to read") && error.contains("/commondir"))
+                || (error.contains("could not open") && error.contains("for writing"))
+                || error.contains("could not create directory of")))
+}
+
+/// Whether [`GitRepository::clear_failed_add`] removes a record whose
+/// `gitdir` reads `gitdir` (empty when it has none) and that has
+/// `locked` or not: one naming `dotgit`, the `.git` of the failed add's
+/// path with its links resolved as Git writes it, or one naming nothing
+/// that no add is still making (an add writes `locked` first, and one
+/// that fails removes it).
+fn clears_record(gitdir: &str, locked: bool, dotgit: Option<&Path>) -> bool {
+    let gitdir = gitdir.trim();
+    (gitdir.is_empty() && !locked) || dotgit == Some(Path::new(gitdir))
+}
+
+/// `removed`, with what was gone already (a prune took it first) as
+/// removed.
+fn gone_is_removed(removed: io::Result<()>) -> io::Result<()> {
+    match removed {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        removed => removed,
+    }
 }
 
 /// Remove whatever is at `path` without following it: a directory with
@@ -2053,20 +2100,23 @@ impl GitRepository {
         if let AddedCheckout::NewBranch(branch) = checkout {
             output(git().args(["branch", "--no-track", branch, commit]))?;
         }
-        let added = worktree_command(|| {
-            let mut command = git();
-            command.args(["worktree", "add"]);
-            match checkout {
-                AddedCheckout::NewBranch(branch) => command.arg(path).arg(branch),
-                AddedCheckout::ResetBranch(branch) => {
-                    command.args(["-B", branch]).arg(path).arg(commit)
-                }
-                AddedCheckout::Detached => {
-                    command.args(["--detach", "--force"]).arg(path).arg(commit)
-                }
-            };
-            command
-        });
+        let added = worktree_command(
+            || {
+                let mut command = git();
+                command.args(["worktree", "add"]);
+                match checkout {
+                    AddedCheckout::NewBranch(branch) => command.arg(path).arg(branch),
+                    AddedCheckout::ResetBranch(branch) => {
+                        command.args(["-B", branch]).arg(path).arg(commit)
+                    }
+                    AddedCheckout::Detached => {
+                        command.args(["--detach", "--force"]).arg(path).arg(commit)
+                    }
+                };
+                command
+            },
+            || self.clear_failed_add(path),
+        );
         match (added, checkout) {
             (Err(error), AddedCheckout::NewBranch(branch)) => {
                 Err(match self.delete_branch_from(&self.root, branch) {
@@ -2076,6 +2126,41 @@ impl GitRepository {
             }
             (added, _) => added,
         }
+    }
+
+    /// Take away what a `git worktree add` at `path` that failed may have
+    /// left, so the next add there meets no `already exists`: the
+    /// directory, when it holds nothing or only the `.git` file the add
+    /// wrote (anything else in it is left), and the record named by the
+    /// path's last component, when [`clears_record`] says so. What a
+    /// prune removes first is cleared as well.
+    pub fn clear_failed_add(&self, path: &Path) -> Result<()> {
+        let name = path.file_name().context("a worktree path with no name")?;
+        let record = self.common_dir.join("worktrees").join(name);
+        let dotgit = path
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .map(|parent| parent.join(name).join(".git"));
+        if record.is_dir() {
+            let back = fs::read_to_string(record.join("gitdir")).unwrap_or_default();
+            if clears_record(&back, record.join("locked").exists(), dotgit.as_deref()) {
+                gone_is_removed(fs::remove_dir_all(&record))
+                    .with_context(|| format!("remove {}", record.display()))?;
+            }
+        }
+        let left_by_add = fs::read_dir(path).is_ok_and(|entries| {
+            entries
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .all(|entry| entry.is_ok_and(|entry| entry == ".git"))
+        });
+        let is_dir = fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
+        let no_repository =
+            fs::symlink_metadata(path.join(".git")).map_or(true, |metadata| metadata.is_file());
+        if is_dir && left_by_add && no_repository {
+            gone_is_removed(fs::remove_dir_all(path))
+                .with_context(|| format!("remove {}", path.display()))?;
+        }
+        Ok(())
     }
 
     /// Whether a `git rebase` was left half-done in the worktree (by a
@@ -7099,8 +7184,111 @@ mod tests {
         assert!(raced(
             "fatal: could not create directory of '.git/worktrees/worktree-a': No such file or directory"
         ));
+        assert!(raced("error: could not find created worktree 'worktree-a'"));
         assert!(!raced("fatal: '/runs/a/worktree-a' already exists"));
         assert!(!raced("fatal: a branch named 'dagq/a' already exists"));
         assert!(!raced("fatal: could not open 'x' for writing"));
+    }
+
+    /// An add that failed as raced is run again after its leftovers are
+    /// cleared, with the wait before each retry; one that failed otherwise,
+    /// or whose clearing failed, is not.
+    #[test]
+    fn a_raced_add_is_cleared_and_run_again() {
+        let (mut runs, mut clears, mut waits) = (0, 0, Vec::new());
+        let added = retry_raced(
+            || {
+                runs += 1;
+                match runs {
+                    1 => Err(anyhow::anyhow!(
+                        "git failed: error: could not find created worktree 'worktree-a'"
+                    )),
+                    _ => Ok("added"),
+                }
+            },
+            || {
+                clears += 1;
+                Ok(())
+            },
+            |attempt| waits.push(attempt),
+        );
+        assert_eq!(added.unwrap(), "added");
+        assert_eq!((runs, clears, waits), (2, 1, vec![1]));
+        let mut runs = 0;
+        let other = retry_raced(
+            || -> Result<()> {
+                runs += 1;
+                Err(anyhow::anyhow!(
+                    "fatal: '/runs/a/worktree-a' already exists"
+                ))
+            },
+            || panic!("cleared after a failure that was no race"),
+            |_| {},
+        );
+        assert!(other.is_err());
+        assert_eq!(runs, 1);
+        let mut runs = 0;
+        let uncleared = retry_raced(
+            || -> Result<()> {
+                runs += 1;
+                Err(anyhow::anyhow!(
+                    "git failed: error: could not find created worktree 'worktree-a'"
+                ))
+            },
+            || Err(anyhow::anyhow!("remove failed")),
+            |_| {},
+        );
+        assert!(format!("{:#}", uncleared.unwrap_err()).contains("remove failed"));
+        assert_eq!(runs, 1);
+        let mut runs = 0;
+        let raced = retry_raced(
+            || -> Result<()> {
+                runs += 1;
+                Err(anyhow::anyhow!(
+                    "git failed: error: could not find created worktree 'worktree-a'"
+                ))
+            },
+            || Ok(()),
+            |_| {},
+        );
+        assert!(raced.is_err());
+        assert_eq!(runs, WORKTREE_ATTEMPTS);
+    }
+
+    /// The record a failed add left is removed when it names the add's
+    /// `.git` or names nothing and is not being made; one naming another
+    /// worktree, or one an add is still making, stays.
+    #[test]
+    fn only_the_record_of_the_failed_add_is_cleared() {
+        let dotgit = Path::new("/private/var/runs/a/worktree-a/.git");
+        assert!(clears_record(
+            "/private/var/runs/a/worktree-a/.git\n",
+            false,
+            Some(dotgit)
+        ));
+        assert!(clears_record("", false, Some(dotgit)));
+        assert!(clears_record("", false, None));
+        assert!(!clears_record("", true, Some(dotgit)));
+        assert!(!clears_record(
+            "/private/var/runs/b/worktree-a/.git",
+            false,
+            Some(dotgit)
+        ));
+        assert!(!clears_record(
+            "/private/var/runs/a/worktree-a/.git",
+            false,
+            None
+        ));
+    }
+
+    /// What a prune removed before the clearing did is cleared; any other
+    /// failure to remove stays one.
+    #[test]
+    fn what_a_prune_removed_first_is_cleared() {
+        let failed = |kind| Err(io::Error::from(kind));
+        assert!(gone_is_removed(Ok(())).is_ok());
+        assert!(gone_is_removed(failed(io::ErrorKind::NotFound)).is_ok());
+        let denied = gone_is_removed(failed(io::ErrorKind::PermissionDenied));
+        assert_eq!(denied.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 }
