@@ -232,6 +232,12 @@ changes = ["feature", "fix", "refactor", "test", "measure", "docs", "config"]
 # 一覧の正本は .config/committed.toml の allowed_types で、両者を同じ並びに揃える。
 title_prefixes = ["feat", "fix", "docs", "test", "refactor", "perf", "chore"]
 
+# lint の hints が照らす文書の glob（ADR-t3321-1、task 3321）。lint はこの glob の文書の中から、task が名指す
+# コードの識別子と path を含むのに description と context が名指していない節を、submit を拒まない hints として出す。
+# この repository の関連文書は docs/development/documents.md の「workerの文書の照合」が挙げる docs/design が主なので、そこに向ける。
+# [tasks] の未知の key で旧バイナリが dagq.toml を読めなくならないよう、固定バイナリが task 3321 を含んでから足した。
+related_docs = ["docs/design/**/*.md"]
+
 # goal のラベル（tag）の語彙（ADR-t1639-1 決定 6、task 1643。task 1642 の
 # docs/plans/goal-priority-inventory.md「1. ラベルの語彙の案」を採用）。
 # 書式は docs/design/supervisor-lifecycle/run-environment.md、各ラベルの意味と付け方は
