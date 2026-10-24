@@ -537,10 +537,15 @@ fn agent_env(run_dir: &Path) -> HashMap<String, String> {
 /// A `[run.env]` naming sccache whose server listens on `port` and keeps
 /// its cache in the worker cache.
 fn sccache_config(port: u16) -> String {
+    sccache_config_naming("sccache", port)
+}
+
+/// [`sccache_config`] naming `program` as `RUSTC_WRAPPER`.
+fn sccache_config_naming(program: &str, port: u16) -> String {
     format!(
         "[roles.worker]\nruntime = \"container\"\n\
          [container.worker_cache]\ndirs = [\"/cache/registry\", \"/cache/sccache\"]\n\
-         [run.env]\nRUSTC_WRAPPER = 'sccache'\nSCCACHE_SERVER_PORT = '{port}'\n\
+         [run.env]\nRUSTC_WRAPPER = '{program}'\nSCCACHE_SERVER_PORT = '{port}'\n\
          SCCACHE_DIR = '/cache/sccache/server'\nSCCACHE_ERROR_LOG = '/tmp/sccache.log'\n"
     )
 }
@@ -812,11 +817,17 @@ fn a_guard_the_container_cannot_make_leaves_the_agent_without_the_wrapper_record
 /// decision 1): the supervisor that leases a run in a clone answers its
 /// turn container's request on its pass, starting the server and making
 /// the guard there before the agent runs, which compiles through the
-/// guard; the run lands as any other.
+/// guard; the run lands as any other. The supervisor claims nothing while
+/// a program of `[run.env]` is not found on the host, so `RUSTC_WRAPPER`
+/// names the fake podman's sccache by its path: the host the test runs on
+/// need have no sccache of its own.
 #[test]
 fn the_supervisor_starts_the_sccache_server_of_a_turn_s_container_on_its_pass() {
     let _test = crate::common::test();
-    let queue = ContainerQueue::configured(None, &sccache_config(4301));
+    let queue = ContainerQueue::configured(None, |state| {
+        let program = state.join("bin").join("sccache");
+        sccache_config_naming(program.to_str().unwrap(), 4301)
+    });
     crate::common::template::script(
         &queue.state.join("bin").join("sccache"),
         "#!/bin/sh\n[ \"$1\" = --start-server ] && echo started > \"${0%/*}/../sccache-started\"\nexit 0\n",

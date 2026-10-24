@@ -310,17 +310,21 @@ pub struct ContainerQueue {
 
 impl ContainerQueue {
     pub fn new(turn: Option<&str>) -> Self {
-        Self::configured(turn, "[roles.worker]\nruntime = \"container\"\n")
+        Self::configured(turn, |_| {
+            "[roles.worker]\nruntime = \"container\"\n".to_owned()
+        })
     }
 
-    /// [`Self::new`] with `config` as its committed `dagq.toml`.
-    pub fn configured(turn: Option<&str>, config: &str) -> Self {
+    /// [`Self::new`] with what `config` makes of the fake podman's state
+    /// directory (its `bin` holds the container's programs) as its
+    /// committed `dagq.toml`.
+    pub fn configured(turn: Option<&str>, config: impl FnOnce(&Path) -> String) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (repo, db) = queue_fixture(dir.path());
-        fs::write(repo.join("dagq.toml"), config).unwrap();
+        let state = dir.path().join("podman");
+        fs::write(repo.join("dagq.toml"), config(&state)).unwrap();
         git(&repo, &["add", "dagq.toml"]);
         git(&repo, &["commit", "-qm", "the worker in the container"]);
-        let state = dir.path().join("podman");
         let containers = Arc::new(containers(&state, &db, &repo));
         if let Some(turn) = turn {
             fs::write(state.join("turn.sh"), turn).unwrap();

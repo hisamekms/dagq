@@ -1,7 +1,7 @@
 # The items of task 2181 in the allow list of the time gate of tests/it
 # (the format and the rule are in the header of .config/it-slow-allow.toml).
 
-# 5.4〜8.5s (stress 3 under the host's load of other runs, task 2181)
+# 3.9〜5.5s, the median of a stress 5 4.6〜5.1s (under the host's load of other runs, task 3288)
 [[test]]
 name = "run_container::the_supervisor_starts_the_sccache_server_of_a_turn_s_container_on_its_pass"
 reason = "B 境界（supervisor の配線・プロセス）: supervisor の pass が自分の lease の run の container の launcher の依頼を見つけ、fake の podman の exec で server の起動と guard の作成をしてから gate を書き、その後に実の dagq relay turn の agent が guard 付きで動いて着地することを確かめる。gate・依頼・記録の判断は domain::sccache の unit test"
