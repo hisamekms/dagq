@@ -1696,6 +1696,12 @@ pub struct RequestPlannerMaterial<'a> {
     /// For a Spike's request (ADR-t1487-1 decision 5), the results of the
     /// other Spikes of its goal; empty for a person's request.
     pub other_spikes: &'a [SpikeResultMaterial],
+    /// For a replanning operation's request (ADR-t1521-2 decision 3), what
+    /// the planner reads of the operation and where its snapshot is.
+    pub replan: Option<(
+        &'a crate::domain::replan_plan::ReplanBrief,
+        Option<&'a Path>,
+    )>,
 }
 
 /// A Spike of the goal of a Spike's request, as its planner's prompt shows
@@ -1710,6 +1716,153 @@ pub struct SpikeResultMaterial {
 
 /// The bytes of the section on the other Spikes of a Spike request's goal.
 pub const REQUEST_SPIKES_BYTES: usize = 12_000;
+
+/// The bytes of the section on a replanning operation of a replanning
+/// request: a request is a Spike's or an operation's, never both, so it
+/// takes the room of [`REQUEST_SPIKES_BYTES`].
+pub const REQUEST_REPLAN_BYTES: usize = REQUEST_SPIKES_BYTES;
+
+/// The section on the replanning operation of a replanning request, held
+/// to [`REQUEST_REPLAN_BYTES`]: the task's conditions as the operation
+/// fixed them and their version, where the saved work is, the parked
+/// run's turns by what each was for and its reviews that did not pass, the
+/// successors of the task, and the latest plan submitted with its
+/// problems now.
+fn replan_section(
+    fit: &mut Fit,
+    brief: &crate::domain::replan_plan::ReplanBrief,
+    snapshot: Option<&Path>,
+) -> Result<String> {
+    let op = &brief.operation;
+    let conditions = &op.conditions;
+    let mut section = format!(
+        "\n## Replan operation {oid} of task {tid}\n\n\
+         The trusted runtime parked run {run} of task {tid} ({status}) and saved its work; the task stays in_progress and you do not edit it, its run or its worktree. Why: {reason}\n\n\
+         Conditions as the operation fixed them: task_version `{version}`, goal {goal} acceptance version {gav}.\n",
+        oid = op.id,
+        tid = op.task_id,
+        run = op.run_id,
+        status = op.status.as_str(),
+        reason = op.reason,
+        version = op.task_version,
+        goal = op
+            .goal_id
+            .map_or_else(|| "none".to_owned(), |goal| goal.to_string()),
+        gav = op
+            .goal_acceptance_version
+            .map_or_else(|| "none".to_owned(), |v| v.to_string()),
+    );
+    section.push_str(&format!(
+        "\nAcceptance items (ordinal, hash, text):\n{}",
+        conditions
+            .acceptance
+            .iter()
+            .map(|item| format!("- {} `{}` {}\n", item.ordinal, item.hash, item.text))
+            .collect::<String>()
+    ));
+    section.push_str(&format!(
+        "\nVerify: {:?}\nPaths: {:?}\nEvidence: {}\nPredecessors: {:?}\n",
+        conditions.verify, conditions.paths, conditions.evidence, conditions.predecessors
+    ));
+    match snapshot {
+        Some(dir) => section.push_str(&format!(
+            "\nThe saved work (read only): {} — `manifest.json` names its head, diffs, untracked files, receipt, logs and turns.\n",
+            dir.display()
+        )),
+        None => section.push_str("\nNo snapshot is recorded yet.\n"),
+    }
+    if !brief.turns.is_empty() {
+        section.push_str(&format!(
+            "\nTurns of the run by what each was for: {}\n",
+            brief
+                .turns
+                .iter()
+                .map(|(cause, n)| format!("{cause} {n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !brief.reviews.is_empty() {
+        section.push_str("\nReviews that sent the run back, oldest first:\n");
+        for review in &brief.reviews {
+            section.push_str(&format!(
+                "- {}: {}\n",
+                review.verdict,
+                review.reasons.join("; ")
+            ));
+        }
+    }
+    if brief.successors.is_empty() {
+        section.push_str("\nNo task waits for it.\n");
+    } else {
+        section.push_str(
+            "\nTasks that wait for it (each needs the children it waits for in its place):\n",
+        );
+        for successor in &brief.successors {
+            section.push_str(&format!(
+                "- task {} ({}): {}\n",
+                successor.task_id,
+                successor.status.as_str(),
+                short_title(&successor.title)
+            ));
+        }
+    }
+    if let Some(plan) = &brief.plan {
+        section.push_str(&format!(
+            "\nThe latest plan (revision {}, proposal {}{}):\n{}",
+            plan.revision,
+            plan.proposal_id,
+            if plan.approved_at.is_some() {
+                ", approved"
+            } else {
+                ""
+            },
+            fenced("json", &serde_json::to_string_pretty(&plan.plan)?)
+        ));
+        if !brief.problems.is_empty() {
+            section.push_str("\nIts problems now:\n");
+            for line in crate::domain::replan_plan::describe(&brief.problems) {
+                section.push_str(&format!("- {line}\n"));
+            }
+        }
+    }
+    let section = fit.text(
+        "replan",
+        &section,
+        REQUEST_REPLAN_BYTES,
+        Keep::Start,
+        &format!(
+            "read it with `dagq replans --all` and `dagq show {}`",
+            op.task_id
+        ),
+    );
+    fit.section("replan", &section);
+    Ok(section)
+}
+
+/// What a planner of a replanning operation's request decides and how
+/// (ADR-t1521-1 decisions 2 and 3, ADR-t1521-2 decisions 3 and 4).
+fn replan_steps(
+    id: crate::domain::RequestId,
+    brief: &crate::domain::replan_plan::ReplanBrief,
+) -> String {
+    let op = &brief.operation;
+    format!(
+        "\n## What to do\n\n\
+         Follow the dagq-planner skill of the dagq plugin, its Basic policy above all: {DECIDE_YOURSELF} Read the repository's AGENTS.md (or CLAUDE.md) first, and the documents it names for what you plan. {rules}\n\
+         First diagnose from the material above why the run went long: a local defect, an acceptance unclear or contradictory, a unit too large with independent conditions, a conflict, a verification failure, or the environment. Do not split only because there were many turns. Then decide exactly one of these, with your rationale:\n\
+         1. Continue: when the same conditions are best finished in the same run (a local defect, a conflict, the environment), run `dagq request decline {id} --continue-run --reason '<the diagnosis and why continuing is best>'`. The runtime resumes the run on its saved work. Decide this before you submit: once a proposal is submitted the request is proposed and can no longer be declined.\n\
+         2. Split, or redistribute the scope: add the child tasks to goal {goal} (`dagq add --goal {goal} ...`, `--context` beginning with `from request {id}`), each with its acceptance, `--paths`, `--verify` and `--evidence`; together they keep every verification command and evidence of task {tid}. Each child waits for the predecessors of task {tid} that have not ended, never for task {tid} or a task that waits for it. Write the plan as JSON and submit the children with it: `dagq submit <child>... --replacement <plan.json>`. The plan holds `operation_id` {oid}, `task_version` and `goal_acceptance_version` as above, `choice` (`split` or `redistribute`), `rationale`, `children` (each `{{\"task_id\", \"carry\": \"base\"|\"snapshot_head\"|\"snapshot_diff\", \"order\"}}`: each part of the saved work goes to one child only, with its order, and the others start from `base`), `mappings` (one per acceptance item above: `{{\"ordinal\", \"hash\", \"disposition\": \"split\"|\"redistribute\"|\"landed\"|\"deleted\", \"children\": [{{\"task_id\", \"ordinal\"}}]}}`; `landed` needs `landed_task_id`, a completed task whose landing meets it, and still a child that checks it: the parked run's saved work has not landed), and `successors` (one per task that waits for task {tid}: `{{\"task_id\", \"needs\": [children], \"reason\"}}`, all the children unless the reason says why fewer hold what it needs). Submit refuses a plan that leaves an item unmapped, weakens a verification, closes a loop, is stale, or leaves the saved work's carrying unclear, and says why: fix it and submit again. Plan review checks it; its pass leaves the children submitted until the runtime applies the replacement, and a revise comes back to you: submit the proposal again with its plan, `dagq submit --proposal <N> --replacement <plan.json>`.\n\
+         3. Ask: dropping an acceptance item, changing the goal's intent, or throwing the saved work away is a person's decision: `dagq ask --request {id} --kind planner_question --because scope` (`--because discard` for the saved work) `--recommend <option> --confidence <high|low> --question '<everything the person needs>' --option ...`, report briefly and stop; {BEFORE_YOU_STOP_AT_A_QUESTION} The answer arrives as `answer to ask <id>: ...`. To delete an item, offer `--option delete:<ordinal>:<the first 12 characters of its hash>` for it (one option per item) and `--option keep`: only a person's answer that is that option, whole, allows the deletion, as `disposition` `deleted` with `authority_ask_id` naming the ask; an answer that keeps it, or names another item, allows none. Ask likewise when your confidence is low. Never decline without --continue-run only to drop the request: the operation then waits for a person with the run parked.\n\
+         When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this request. Never open the queue database directly; use the dagq CLI only.\n",
+        rules = repository_rules(RUNTIME_PLANNER_ASK),
+        oid = op.id,
+        tid = op.task_id,
+        goal = op
+            .goal_id
+            .map_or_else(|| "GOAL".to_owned(), |goal| goal.to_string()),
+    )
+}
 
 /// What a planner of a Spike's request decides and how (ADR-t1487-1
 /// decisions 5, 6 and 8): one of the five ways on from the result, after
@@ -1876,12 +2029,17 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
         .collect();
     out.push_str(&planner_goals(&mut fit, goals));
     out.push_str(&other_spikes_section(&mut fit, material.other_spikes)?);
+    if let Some((brief, snapshot)) = material.replan {
+        out.push_str(&replan_section(&mut fit, brief, snapshot)?);
+    }
     if !material.asks.is_empty() {
         out.push_str("\n## Earlier questions about it\n\n");
         out.push_str(&planner_asks(&mut fit, material.asks, false));
     }
     if let Some(spike) = request.spike_task {
         out.push_str(&spike_replan_steps(id, spike));
+    } else if let Some((brief, _)) = material.replan {
+        out.push_str(&replan_steps(id, brief));
     } else {
         out.push_str(&format!(
         "\n## What to do\n\n\

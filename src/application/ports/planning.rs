@@ -238,6 +238,27 @@ pub trait PlanRequestStore {
     fn request_asks(&self, request: crate::domain::RequestId) -> Result<Vec<Ask>>;
     /// The event `id`, when there is one: what a request refers to.
     fn event_by_id(&self, id: EventId) -> Result<Option<RunEvent>>;
+    /// What the planner of replanning operation `id`'s request reads of
+    /// the operation (ADR-t1521-2 decision 3).
+    fn replan_brief(
+        &self,
+        id: crate::domain::ReplanId,
+    ) -> Result<crate::domain::replan_plan::ReplanBrief>;
+    /// What plan review reads of the replanning operation whose task
+    /// `proposal` replaces, if it replaces one's: the operation, its
+    /// latest plan and that plan's problems now.
+    fn replacement_brief(
+        &self,
+        proposal: crate::domain::ProposalId,
+    ) -> Result<Option<crate::domain::replan_plan::ReplanBrief>>;
+    /// End the planning of each replanning operation whose request ended
+    /// with no proposal under review, as the trusted runtime: continue the
+    /// run when its planner declined the request to continue it, else
+    /// leave the operation `blocked` with the work kept. The operations
+    /// moved.
+    fn settle_replan_requests(
+        &mut self,
+    ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>>;
 }
 
 /// Where the answer of a `planner_question` goes (ADR-0041 decision 13).
@@ -474,6 +495,20 @@ pub struct PlanReviewApply {
     pub session: Option<crate::domain::headless_job::JobSession>,
     /// What the job's prompt took, recorded as `prompt_bytes` (task 1561).
     pub prompt_bytes: Option<crate::application::prompt::PromptBytes>,
+    /// What the runtime makes of a `pass` if the transaction that would
+    /// apply it finds the proposal's replacement plan does not hold; `None`
+    /// for any other decision.
+    pub replacement_refused: Option<RefusedPass>,
+}
+
+/// A `pass` refused because the proposal's replacement plan does not hold
+/// ([`crate::domain::plan_review::refuse_replacement`]): what it becomes,
+/// and the `approve_plan` ask it opens past the revises, to which the
+/// transaction adds the plan's problems.
+#[derive(Debug, Clone)]
+pub struct RefusedPass {
+    pub decided: crate::domain::plan_review::PlanVerdictDecision,
+    pub ask: Option<NewAsk>,
 }
 
 /// Why a plan review job failed (`plan_review_failed`).
@@ -549,6 +584,18 @@ pub struct PlanReviewHold {
 pub struct PlanDecided {
     pub proposal: Proposal,
     pub answer: String,
+}
+
+/// How a revise waits for another request that replans its goal
+/// ([`PlanReviewStore::revise_goal_wait`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviseGoalWait {
+    /// That request's planner is at work: [`PlanReviewStore::claim_revise`]
+    /// refuses the revise meanwhile.
+    pub waiting: bool,
+    /// When the last planner it could have waited for closed after the
+    /// revise was recorded.
+    pub ended: Option<i64>,
 }
 
 /// Plan review (ADR-0041 decisions 11-15, 17): the submitted proposals it
@@ -663,6 +710,9 @@ pub trait PlanReviewStore {
     /// Claim the delivery of the revise of `proposal` (it records when):
     /// `false` when another process claimed it, or it is no longer waiting.
     fn claim_revise(&mut self, proposal: ProposalId) -> Result<bool>;
+    /// How the revise of `proposal` waits for another request that replans
+    /// the goal of a request it was submitted for (ADR-t1521-2 decision 3).
+    fn revise_goal_wait(&self, proposal: ProposalId) -> Result<ReviseGoalWait>;
     /// The claimed revise of `proposal` went to `planner`
     /// (`plan_revise_sent`); `opened` is what the planner's agent started
     /// with when the runtime opened that planner for it (its effort raised

@@ -3,7 +3,8 @@
 //! read a read role's job or a worker runs (`events`, `timeline`, `stats`,
 //! `kpi`, `marks`, `forecast`, `search`, `related`, `findings`, `goal
 //! show`, ...) is answered on the service's side for the principal of a
-//! token, with the JSON the command line prints; the worker reads the
+//! token, with the JSON the command line prints (`replans` too, what plan
+//! review reads of a replacement plan its prompt cut); the worker reads the
 //! whole queue as the measure tasks do; and what is no read use case
 //! (`watch`, a file to write, a program to run) is refused.
 
@@ -441,6 +442,22 @@ fn the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it() {
             .as_array()
             .unwrap()
             .is_empty()
+    );
+    // What plan review's prompt cut of a replacement plan, the job reads
+    // with `replans ID`, as the command line prints it (ADR-t1566-1
+    // decision 3). Recorded last, so the reads above see no operation.
+    let recorded = crate::common::cli::ok_as(
+        "inbox",
+        &queue.db,
+        &["replan", "request", "--run", &run, "--reason", "served"],
+    );
+    let op = recorded["operation"]["id"].clone();
+    same_as_cli(
+        &queue,
+        &plan_review,
+        UseCase::Replans,
+        &json!({"id": op}),
+        &["replans", &op.to_string()],
     );
 }
 

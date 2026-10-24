@@ -56,6 +56,10 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - verdictとanswerの適用はそれぞれ1トランザクションで、actionが1つでも検査に外れればverdictの何も適用しない。
 - jobの開始より後に検査中のproposalのtaskが編集されたら、verdictも失敗も適用せず、次のpassで編集後の内容をかけ直す。
 - 失敗で保留したproposalはsubmittedのまま動かさず、supervisorは自分では取り直さない。
+- 再計画の操作のtaskを置き換えるproposalのjobには置換計画と元条件・snapshotの場所を渡し、意味上の対応を検査させる。
+  passとconcernへの人の`ready`は、同じtransactionで置換計画を今の版で検査し直し、外れればreviseとして問題を届ける（passはreviseの上限を過ぎていればconcernのaskにして、askの文に問題を足す。`domain::plan_review::refuse_replacement`）。
+  passはそのaction（`cancel_duplicate`で子を取り消す、`add_dependency`で子を待たせる）を当てた後の姿で検査し、外れればactionを1つも当てない。
+  passでも子は`submitted`に残り、readyにするのはtrusted runtimeの適用だけ（[taskの再計画](../../plans/task-replanning.md#実装の状態)）。
 - plannerには何も打ち込まない。
   runtimeのplannerへの指摘・答え・終了は次のturnの依頼として置き、古い記録のworkspaceの行には何も送らない（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3・5）。
 - runtimeがplannerを立てるのは`runtime_planners`の上限の中だけ。
@@ -125,6 +129,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - 届ける依頼の文: `prompt::plan_revise_request`。
 - 持ち主が居ないreviseは、回答済みの`planner_question`とそれを出したplannerごとの引き継ぎ材料を同じ新しいplannerに運び、`plan_revise_sent`と運んだanswerのclose（`ask_delivered`）を1トランザクションで記録する（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定2〜4、`PlanReviewStore::revise_sent`）。
 - 差し戻しで開き直すplannerのeffortは1段上げ、生きているsessionのmodel / effortは切り替えない（[Actor model](actor-model.md#差し戻しで開き直すplannerの段上げ)）。
+- goalを再計画する依頼のproposalのreviseは、同じgoalの他の依頼のplannerが閉じるまで受け取らない（[Spikeの再計画の依頼](plan-planners.md#spikeの再計画の依頼)）。
 - 落とし穴: sessionが見つからないだけではplannerが終わった証拠にせず、wrapperで判定する（workerと同じ。`PlanningState::planner_gone`）。
 - 落とし穴: plannerはClaudeのsessionなので、Claudeの控えの間はruntimeのplannerへの配送を止める。
 - 上限・期限・pluginの設定は`supervise`の`--help`、`runtime_planners`の優先順と読み直しは[Run environment](run-environment.md)の`[supervisor]`。

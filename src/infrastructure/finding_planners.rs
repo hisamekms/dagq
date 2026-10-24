@@ -62,6 +62,7 @@ impl SqliteQueue {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let previous = super::plan_requests::previous_proposals(&tx, &submission)?;
+        let held_retry = super::proposals::held_retry(&tx, &submission)?;
         let proposal = super::proposals::submit(
             &tx,
             submission,
@@ -85,6 +86,19 @@ impl SqliteQueue {
             &previous,
             now,
         )?;
+        // A proposal of a replanning operation's request goes with its
+        // replacement plan (ADR-t1521-2 decision 4), also when it is
+        // submitted again after a revise; only one plan review holds for a
+        // person goes again as it is, with the plan it had.
+        if !(held_retry && self.replacement.is_none()) {
+            super::replans::record_replacement(
+                &tx,
+                proposal.id(),
+                proposal.task_ids(),
+                self.replacement.as_ref(),
+                now,
+            )?;
+        }
         let proposal = super::proposals::read(&tx, proposal.id())?;
         tx.commit()?;
         Ok(proposal)

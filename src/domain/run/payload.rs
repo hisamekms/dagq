@@ -536,3 +536,92 @@ pub fn review_verdict(payload: &Value) -> serde_json::Result<ReviewVerdict> {
     }
     serde_json::from_value(verdict)
 }
+
+/// The route of a `review_finished` (`payload`) whose agents' judgments
+/// decide it: recorded as `route(true)` gave it, so `None` for a verdict
+/// recorded without one, which is judged by its own reasons.
+fn deciding_route(
+    payload: &Value,
+    verdict: &ReviewVerdict,
+) -> Option<crate::domain::review_subagents::VerdictRoute> {
+    payload
+        .get("route")
+        .filter(|route| route.is_object())
+        .map(|_| verdict.route(true))
+        .filter(|route| !route.deciding().is_empty())
+}
+
+/// The findings a `review_finished` (`payload`) sent the run back with, as
+/// its `approve_landing` ask showed them: when it recorded a route that its
+/// agents' judgments decide (ADR-t1453-1 decision 7), each deciding
+/// agent's under its name and the verdict's own only when its judgment
+/// went there too; else the verdict's reasons, or its summary when it gave
+/// none ([`ReviewVerdict::sent_back_findings`]). `None` when the payload is
+/// no verdict.
+pub fn review_findings(payload: &Value) -> Option<Vec<String>> {
+    let verdict = review_verdict(payload).ok()?;
+    let route = deciding_route(payload, &verdict);
+    Some(
+        verdict
+            .sent_back_findings(route.as_ref())
+            .into_iter()
+            .map(|finding| finding.text)
+            .collect(),
+    )
+}
+
+/// A review that sent the run back, as a reader of the run's reviews sees
+/// it ([`review_sent_back`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentBackReview {
+    /// The verdicts of the judgments that sent it back, each once: the
+    /// review's own when its judgment went where the route went, then each
+    /// deciding agent's.
+    pub verdicts: Vec<crate::domain::ReviewDecision>,
+    /// Its findings ([`review_findings`]).
+    pub findings: Vec<String>,
+}
+
+/// What a `review_finished` (`payload`) sent the run back with: `None`
+/// when it did not send it back (its recorded route went to `land`, or it
+/// recorded none and passed) or is no verdict. A review whose own verdict
+/// passed but whose agents sent the run back is one.
+pub fn review_sent_back(payload: &Value) -> Option<SentBackReview> {
+    let verdict = review_verdict(payload).ok()?;
+    let finished: ReviewFinished = restore(payload);
+    let landed = match finished.destination() {
+        Some(destination) => destination == "land",
+        None => verdict.verdict == crate::domain::ReviewDecision::Pass,
+    };
+    if landed {
+        return None;
+    }
+    let route = deciding_route(payload, &verdict);
+    let mut verdicts = Vec::new();
+    if route
+        .as_ref()
+        .is_none_or(|route| route.parent == route.destination)
+    {
+        verdicts.push(verdict.verdict);
+    }
+    for deciding in route.iter().flat_map(|route| route.deciding()) {
+        let agent = verdict
+            .agents
+            .iter()
+            .find(|result| result.agent == deciding.agent)
+            .and_then(|result| result.verdict);
+        if let Some(agent) = agent
+            && !verdicts.contains(&agent)
+        {
+            verdicts.push(agent);
+        }
+    }
+    Some(SentBackReview {
+        verdicts,
+        findings: verdict
+            .sent_back_findings(route.as_ref())
+            .into_iter()
+            .map(|finding| finding.text)
+            .collect(),
+    })
+}

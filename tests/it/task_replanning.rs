@@ -1262,7 +1262,10 @@ fn a_request_whose_planner_ended_undecided_is_declined_when_its_operation_closes
         else {
             panic!("no planner was opened for request {request}")
         };
-        let generation = moved(queue, id, generation, ReplanStatus::Planning, None);
+        // The planner's opening moved the operation on to it.
+        let op = queue.replan_operation(id).unwrap();
+        assert_eq!(op.status, ReplanStatus::Planning);
+        assert_eq!(op.generation, generation);
         assert!(
             queue
                 .end_planner(planner.id, &json!({"code": "runtime_exited"}))
@@ -1364,7 +1367,10 @@ fn a_request_whose_planner_ended_undecided_is_declined_when_its_operation_closes
     }
     // That planner submits nothing either; withdrawn after it ended, the
     // new request is declined too.
-    let generation = moved(&mut queue, first, generation, ReplanStatus::Planning, None);
+    assert_eq!(
+        queue.replan_operation(first).unwrap().status,
+        ReplanStatus::Planning
+    );
     assert!(
         queue
             .end_planner(planner.id, &json!({"code": "runtime_exited"}))
@@ -1433,7 +1439,10 @@ fn a_request_declined_as_its_operation_closes_closes_its_planner_question() {
         else {
             panic!("no planner was opened for request {request}")
         };
-        let generation = moved(queue, id, generation, ReplanStatus::Planning);
+        // The planner's opening moved the operation on to it.
+        let op = queue.replan_operation(id).unwrap();
+        assert_eq!(op.status, ReplanStatus::Planning);
+        assert_eq!(op.generation, generation);
         let ask = queue
             .ask(NewAsk {
                 recommendation: None,

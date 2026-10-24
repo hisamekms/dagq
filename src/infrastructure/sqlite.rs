@@ -337,6 +337,9 @@ pub struct SqliteQueue {
     /// `[goals] max_spike_cycles` (ADR-t1487-1 decision 8), which `submit`
     /// holds a planner of the runtime's to; none limits nothing.
     pub(super) max_spike_cycles: Option<usize>,
+    /// The replacement plan `submit --replacement` goes with
+    /// ([`crate::domain::replan_plan`]); none for any other submit.
+    pub(super) replacement: Option<crate::domain::replan_plan::ReplacementPlan>,
     /// How long a [`WriteTx`] of this connection may hold the write lock
     /// before it warns; [`WRITE_HOLD_WARN`] unless a test lowers it.
     pub(super) write_hold_warn: Duration,
@@ -458,6 +461,7 @@ impl SqliteQueue {
             title_prefixes: queue.title_prefixes.clone(),
             goal_tags: queue.goal_tags.clone(),
             max_spike_cycles: queue.max_spike_cycles,
+            replacement: queue.replacement.clone(),
             write_hold_warn: queue.write_hold_warn,
         };
         copy.apply(state.version, None)?;
@@ -593,6 +597,16 @@ impl SqliteQueue {
         self
     }
 
+    /// The queue whose next `submit` goes with the replacement plan `plan`
+    /// of a replanning operation's request (ADR-t1521-2 decision 4).
+    pub fn with_replacement_plan(
+        mut self,
+        plan: Option<crate::domain::replan_plan::ReplacementPlan>,
+    ) -> Self {
+        self.replacement = plan;
+        self
+    }
+
     pub fn with_goal_tags(mut self, tags: Option<TagSet>) -> Self {
         self.goal_tags = tags;
         self
@@ -677,6 +691,7 @@ impl SqliteQueue {
             title_prefixes: None,
             goal_tags: None,
             max_spike_cycles: None,
+            replacement: None,
             write_hold_warn: WRITE_HOLD_WARN,
         })
     }
@@ -2584,6 +2599,25 @@ fn read_lint_input(conn: &Connection, targets: &[TaskId]) -> Result<LintInput> {
             membership_gaps.insert(task.id(), gap);
         }
     }
+    // A replacement plan's problems, once per proposal, on its first
+    // target.
+    let mut replacement = BTreeMap::new();
+    let mut proposals = std::collections::BTreeSet::new();
+    for task in &targets {
+        let proposal: Option<ProposalId> = conn.query_row(
+            "SELECT proposal_id FROM tasks WHERE id=?1",
+            [task.id()],
+            |r| r.get(0),
+        )?;
+        if let Some(proposal) = proposal
+            && proposals.insert(proposal)
+        {
+            let problems = super::replans::replacement_problems(conn, proposal, &[])?;
+            if !problems.is_empty() {
+                replacement.insert(task.id(), problems);
+            }
+        }
+    }
     Ok(LintInput {
         targets,
         nodes,
@@ -2593,6 +2627,7 @@ fn read_lint_input(conn: &Connection, targets: &[TaskId]) -> Result<LintInput> {
         goal_tags: None,
         draft_goal_tags,
         membership_gaps,
+        replacement,
     })
 }
 
@@ -3129,6 +3164,14 @@ fn apply_transition(
             TaskAction::Draft | TaskAction::Submit | TaskAction::Reopen => GuardedStep::Edit,
         },
     )?;
+    // A child of a replacement proposal waits for the trusted runtime's
+    // apply, whoever readies it.
+    if matches!(
+        action,
+        TaskAction::Ready | TaskAction::BypassReview | TaskAction::Approve
+    ) {
+        super::replans::check_child_ready(conn, task_id)?;
+    }
     let task = read_task(conn, task_id)?;
     let from = task.status();
     if action == TaskAction::BypassReview {

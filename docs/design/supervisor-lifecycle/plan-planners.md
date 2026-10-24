@@ -132,7 +132,9 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 
 - Spikeが`completed`になると、runtimeがSpikeごとに1件の依頼を記録し、上の3〜8の経路で再計画する（[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)決定5・6・8）。
   記録と欠けの補いは`infrastructure::plan_requests`、promptは`request_planner_prompt`のSpikeの分岐が持つ。
-- 同じgoalのSpikeの依頼は1件ずつ進め、goalを並行して再計画しない（`TARGETS`）。
+- 同じgoalを再計画する依頼（Spikeの依頼と下の再計画の操作の依頼）は1件ずつ進め、answerでplannerを開き直すときも他の依頼のplannerが閉じるのを待ち、goalを並行して再計画しない（`TARGETS`と`open_request_planner`、[ADR-t1521-2](../../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)決定3）。
+  依頼のplannerが終わった後のreviseが立てるplannerと、受け取られてplannerを待つreviseもその依頼のplannerとして数え、そのreviseの受け取り（`claim_revise`）も同じgoalの他の依頼のplannerが閉じるのを待つ（`REVISE_WAITS_FOR_GOAL`）。
+  そのreviseは枠でなくその依頼のplannerを待つので、plannerの居ないreviseとしてinboxに知らせ上限で枠を空ける`--planner-timeout`は、そのplannerが閉じた時から数える。
 - 頼んだ人が居ないので、attentionにするのは`request_planner_exhausted`だけである（`domain::event_attention`）。
 - goalのSpikeの周期は再計画の回で数え、調査中の計画が開いたままでも、そのSpikeの依頼が`open`のあいだにruntimeのplannerが追加のSpikeをsubmitすると次の回に入る（[ADR-t2414-1](../../adr/2026-10-19-t2414-1-spike-cycles-count-each-replanning-round-even-inside-one-investigation.md)、`domain::investigation::spike_submit`）。
   周期の上限（`[goals] max_spike_cycles`）に達したgoalのSpikeはruntimeのplannerのsubmitが拒み、plannerは人に上げる（`infrastructure::proposals`、[claimを控える](claim-hold.md#調査中の計画の上限)）。
@@ -153,4 +155,8 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
   runtimeが依頼を`declined`にするどちらの経路も、同じtransactionでその依頼の閉じていないask（答えを待って終わったplannerの`planner_question`）をruntimeが閉じ、計画されない依頼のaskを人に残さない。
   閉じた操作が復元の失敗で`blocked`に戻り、再びplannerに渡す段へ進むときは、runtimeが閉じるときに`declined`にした依頼を開き直さず、同じ言葉の新しい依頼を作って操作に結ぶので、plannerは新しい依頼に1度だけ立つ。
   plannerがsubmitか却下で決めた依頼は作り直さない。
-  残りの予定は[taskの再計画](../../plans/task-replanning.md)が持つ。
+- 依頼のplannerが立つと、同じtransactionで操作を`planning`へ進める（`replans.rs`の`planner_opened`）。
+  そのplannerのsubmitは置換計画を要し、計画は依頼の操作のproposalにだけ付く。
+  reviseの後の出し直しも置換計画を要し、plan reviewが人に保留したproposalの再試行だけが前の計画のまま出し直す。
+  plannerが`--continue-run`で却下した依頼の操作は継続へ、そのほかの却下か`exhausted`の操作とproposalを取り下げたplannerが次を出さずに終わった操作は成果を保ったまま`blocked`へ、supervisorが依頼のplannerを立てる前に進める（`settle_replan_requests`）。
+  置換計画の検査とplan reviewでの扱いと残りの予定は[taskの再計画](../../plans/task-replanning.md)が持つ。

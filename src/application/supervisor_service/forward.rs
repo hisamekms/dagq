@@ -236,6 +236,26 @@ impl PlanRequestStore for SupervisorQueue {
         let local = self.local()?;
         PlanRequestStore::event_by_id(&**local, id)
     }
+    fn replan_brief(
+        &self,
+        id: crate::domain::ReplanId,
+    ) -> Result<crate::domain::replan_plan::ReplanBrief> {
+        let local = self.local()?;
+        PlanRequestStore::replan_brief(&**local, id)
+    }
+    fn replacement_brief(
+        &self,
+        proposal: crate::domain::ProposalId,
+    ) -> Result<Option<crate::domain::replan_plan::ReplanBrief>> {
+        let local = self.local()?;
+        PlanRequestStore::replacement_brief(&**local, proposal)
+    }
+    fn settle_replan_requests(
+        &mut self,
+    ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        let mut local = self.local()?;
+        PlanRequestStore::settle_replan_requests(&mut **local)
+    }
 }
 
 impl DraftPlannerReads for SupervisorQueue {
@@ -450,6 +470,10 @@ impl PlanReviewStore for SupervisorQueue {
     fn claim_revise(&mut self, proposal: ProposalId) -> Result<bool> {
         let mut local = self.local()?;
         PlanReviewStore::claim_revise(&mut **local, proposal)
+    }
+    fn revise_goal_wait(&self, proposal: ProposalId) -> Result<ReviseGoalWait> {
+        let local = self.local()?;
+        PlanReviewStore::revise_goal_wait(&**local, proposal)
     }
     #[allow(clippy::too_many_arguments)]
     fn revise_sent(

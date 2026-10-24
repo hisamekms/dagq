@@ -333,11 +333,18 @@ enum Command {
         /// proposal. A planner the runtime opened for a finding links that one without it.
         #[arg(long = "finding")]
         findings: Vec<i64>,
+        /// The replacement plan (JSON) a planner of a replanning operation's request submits its
+        /// proposal with: how the parked task's acceptance items, saved work, verification and
+        /// successors go to the proposal's child tasks. Refused for any other proposal; such a
+        /// proposal is refused without it.
+        #[arg(long)]
+        replacement: Option<PathBuf>,
     },
     /// Check the fixed rules of a plan (plan review's mechanical checks): dependency cycles,
     /// dependencies on completed, canceled or unsubmitted draft tasks and on abandoned goals, no
-    /// verification (with or without declared paths), invalid path globs, blank acceptance and
-    /// titles repeated within the set. Lints TASKs and the members of each --proposal. Prints
+    /// verification (with or without declared paths), invalid path globs, blank acceptance,
+    /// titles repeated within the set, and the problems of a replacement plan a proposal of a
+    /// replanning request went with. Lints TASKs and the members of each --proposal. Prints
     /// {"tasks", "violations"}, each violation {"code", "task_id", "reason"}; none: an empty list.
     #[command(group = clap::ArgGroup::new("targets").multiple(true).required(true))]
     Lint {
@@ -668,7 +675,8 @@ enum Command {
         command: ReplanCommand,
     },
     /// List the replanning operations, oldest first: the open ones unless --all, or the one ID
-    /// names, each with the copy of its task's conditions, its diagnosis and its outcome.
+    /// names, each with the copy of its task's conditions, its diagnosis and its outcome; the
+    /// one ID names also with its latest replacement plan and that plan's problems now.
     /// Prints {"replans"}.
     Replans {
         /// Only this operation, whatever its status.
@@ -1913,6 +1921,10 @@ enum RequestCommand {
         id: i64,
         #[arg(long)]
         reason: String,
+        /// For a request of a replanning operation: continue the parked run on its saved work
+        /// rather than replace its task (the runtime resumes it).
+        #[arg(long)]
+        continue_run: bool,
     },
 }
 
@@ -4145,6 +4157,17 @@ fn execute(cli: Cli) -> Result<Value> {
     // task's title the tasks it submits (`add` and `edit` take any title,
     // so the drafts the runtime makes keep theirs until a planner edits
     // them).
+    if let Command::Submit {
+        replacement: Some(path),
+        ..
+    } = &cli.command
+    {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("read the replacement plan {}", path.display()))?;
+        queue = queue.with_replacement_plan(Some(
+            dagq::domain::replan_plan::ReplacementPlan::parse(&text)?,
+        ));
+    }
     if matches!(cli.command, Command::Submit { .. }) {
         let max = dagq::compose::max_spike_cycles(&queue)?;
         queue = queue.with_max_spike_cycles(max);
@@ -4295,6 +4318,7 @@ fn execute(cli: Cli) -> Result<Value> {
             goals,
             proposal,
             findings,
+            ..
         } => {
             use dagq::application::lifecycle::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV};
             let origin = match env::var(PLANNER_ORIGIN_ENV) {
@@ -4635,10 +4659,15 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Request {
-            command: RequestCommand::Decline { id, reason },
+            command:
+                RequestCommand::Decline {
+                    id,
+                    reason,
+                    continue_run,
+                },
         } => serde_json::to_value(
             dagq::application::commands::requests::Requests::new(&mut queue, &actor, &StaticPolicy)
-                .decline(RequestId::new(id), &reason)?,
+                .decline(RequestId::new(id), &reason, continue_run)?,
         )?,
         Command::Agent { command } => {
             let evals =

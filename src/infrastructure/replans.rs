@@ -24,12 +24,19 @@ use super::sqlite::{
     SqliteQueue, enum_col, event, json_col, read_task, record_queue_event_in, replan_guarding,
 };
 use crate::domain::event_kind::EventKind;
-use crate::domain::plan_request::RequestRef;
+use crate::domain::plan_request::{RequestRef, RequestStatus};
+use crate::domain::plan_review::PlanReviewAction;
+use crate::domain::replan_plan::{
+    self, DeletionAuthority, PlanContext, PlanProblem, PlanRevision, PlanTask, ReplacementPlan,
+    ReplanBrief, ReviewFinding, SuccessorBrief,
+};
 use crate::domain::task_replan::{
     self, GoalConditions, GuardedStep, NewReplan, OriginalConditions, ReplanGuard, ReplanMove,
     ReplanOperation, ReplanOrigin, ReplanRecorded, ReplanStatus, acceptance_items,
 };
-use crate::domain::{GoalId, ReplanId, RunId, RunStatus, TaskId, TaskStatus};
+use crate::domain::{GoalId, ProposalId, ReplanId, RunId, RunStatus, TaskId, TaskStatus};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The open operations (not closed), oldest first.
 const OPEN: &str = "SELECT * FROM replan_operations WHERE closed_at IS NULL ORDER BY id";
@@ -375,6 +382,9 @@ pub(crate) fn move_in(
             generation,
         ],
     )?;
+    if step.to.is_closed() && step.to != ReplanStatus::Applied {
+        release_children(conn, &op, now)?;
+    }
     let planner_open = op
         .request_id
         .map(|request| super::plan_requests::planner_open(conn, request))
@@ -760,6 +770,611 @@ fn operation_row(r: &Row<'_>) -> rusqlite::Result<ReplanOperation> {
         updated_at: r.get("updated_at")?,
         closed_at: r.get("closed_at")?,
     })
+}
+
+/// The open operation whose planning request `proposal` is linked to: the
+/// operation the proposal would replace the task of, read on `conn`.
+pub(super) fn replacing_operation(
+    conn: &Connection,
+    proposal: ProposalId,
+) -> Result<Option<ReplanOperation>> {
+    let id: Option<ReplanId> = conn
+        .query_row(
+            "SELECT o.id FROM plan_request_proposals l
+             JOIN plan_requests r ON r.id=l.request_id
+             JOIN replan_operations o ON o.id=r.replan_operation_id
+             WHERE l.proposal_id=?1 AND o.closed_at IS NULL ORDER BY o.id LIMIT 1",
+            [proposal],
+            |r| r.get(0),
+        )
+        .optional()?;
+    id.map(|id| read_operation(conn, id)).transpose()
+}
+
+/// The latest plan operation `id` was submitted with, if any.
+pub(super) fn latest_plan(conn: &Connection, id: ReplanId) -> Result<Option<PlanRevision>> {
+    let row: Option<(i64, ProposalId, String, String, Option<i64>)> = conn
+        .query_row(
+            "SELECT revision, proposal_id, plan, hash, approved_at FROM replan_plans
+             WHERE operation_id=?1 ORDER BY revision DESC LIMIT 1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    row.map(|(revision, proposal_id, plan, hash, approved_at)| {
+        Ok(PlanRevision {
+            revision,
+            proposal_id,
+            plan: ReplacementPlan::parse(&plan)?,
+            hash,
+            approved_at,
+        })
+    })
+    .transpose()
+}
+
+/// The problems of `plan` for `op`, whose proposal holds `members`, as the
+/// queue is on `conn` now once plan review's pass applies `actions` (none
+/// outside a pass) ([`replan_plan::check_plan`],
+/// [`replan_plan::PlanContext::after_actions`]).
+pub(super) fn check_replacement(
+    conn: &Connection,
+    op: &ReplanOperation,
+    plan: &ReplacementPlan,
+    members: &[TaskId],
+    actions: &[PlanReviewAction],
+) -> Result<Vec<PlanProblem>> {
+    let mut named: BTreeSet<TaskId> = plan.child_ids().into_iter().collect();
+    named.extend(members.iter().copied());
+    named.extend(plan.successors.iter().map(|successor| successor.task_id));
+    named.extend(op.conditions.successors.iter().copied());
+    named.extend(op.conditions.predecessors.iter().copied());
+    named.extend(
+        plan.mappings
+            .iter()
+            .filter_map(|mapping| mapping.landed_task_id),
+    );
+    let mut tasks = BTreeMap::new();
+    for id in named {
+        if let Some(task) = plan_task(conn, id)? {
+            tasks.insert(id, task);
+        }
+    }
+    let mut downstream = BTreeSet::new();
+    let mut stack = vec![op.task_id];
+    while let Some(next) = stack.pop() {
+        let waiting: Vec<TaskId> = conn
+            .prepare("SELECT task_id FROM task_dependencies WHERE predecessor_id=?1")?
+            .query_map([next], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for task in waiting {
+            if downstream.insert(task) {
+                stack.push(task);
+            }
+        }
+    }
+    let mut authorities = BTreeMap::new();
+    for ask in plan
+        .mappings
+        .iter()
+        .filter_map(|mapping| mapping.authority_ask_id)
+    {
+        let Ok(read) = super::asks::read_ask(conn, ask) else {
+            continue;
+        };
+        // Asked since the operation began: an older answer decided
+        // something else.
+        let about_operation = read.created_at >= op.created_at
+            && ((read.request_id.is_some() && read.request_id == op.request_id)
+                || read.run_id.as_ref() == Some(&op.run_id)
+                || read.task_id == Some(op.task_id));
+        let answered_by_person = read.answer.is_some()
+            && read.answered_by.as_deref().is_some_and(|by| {
+                matches!(by, crate::domain::ANSWERED_BY_PERSON | "user" | "inbox")
+            });
+        authorities.insert(
+            ask,
+            DeletionAuthority {
+                about_operation,
+                scope: read.reason_category == crate::domain::AskReason::Scope,
+                answered_by_person,
+                answer: read.answer.clone().unwrap_or_default(),
+                options: read.options.clone(),
+            },
+        );
+    }
+    let goal_acceptance_version_now = op
+        .goal_id
+        .map(|goal| {
+            conn.query_row(
+                "SELECT acceptance_version FROM goals WHERE id=?1",
+                [goal],
+                |r| r.get(0),
+            )
+        })
+        .transpose()?;
+    let ctx = PlanContext {
+        operation: op,
+        task_version_now: conditions_of(conn, op.task_id)?.version(),
+        goal_acceptance_version_now,
+        members: members.to_vec(),
+        tasks,
+        downstream,
+        authorities,
+    }
+    .after_actions(actions);
+    Ok(replan_plan::check_plan(plan, &ctx))
+}
+
+/// Task `id` as [`replan_plan::check_plan`] reads it; `None` for a task
+/// the queue does not have.
+fn plan_task(conn: &Connection, id: TaskId) -> Result<Option<PlanTask>> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+        [id],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    let task = read_task(conn, id)?;
+    let depends_on = conn
+        .prepare("SELECT predecessor_id FROM task_dependencies WHERE task_id=?1 ORDER BY 1")?
+        .query_map([id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let evidence = match serde_json::to_value(task.required_evidence())? {
+        serde_json::Value::Array(items) => items,
+        _ => Vec::new(),
+    };
+    Ok(Some(PlanTask {
+        status: task.status(),
+        goal_id: task.goal_id(),
+        acceptance: acceptance_items(task.acceptance()),
+        verify: task.verification_commands().to_vec(),
+        paths: task.paths().to_vec(),
+        evidence,
+        depends_on,
+    }))
+}
+
+/// Record, inside the submit's transaction, the plan `plan` of `proposal`
+/// (holding `members`) when the proposal is linked to the planning request
+/// of an open operation: the submit is refused without a plan, with a plan
+/// that is not one of such a proposal, or with one [`check_replacement`]
+/// finds problems in. A plan that holds is kept as the operation's next
+/// revision, names the proposal on the operation, and moves the operation
+/// on to `reviewing` (through `planning` from `parked`), with
+/// `replan_plan_submitted`. The children stay `submitted` until the
+/// trusted runtime applies the replacement: plan review's pass does not
+/// make them ready ([`approve_replacement`]).
+pub(super) fn record_replacement(
+    conn: &Connection,
+    proposal: ProposalId,
+    members: &[TaskId],
+    plan: Option<&ReplacementPlan>,
+    now: i64,
+) -> Result<()> {
+    let Some(mut op) = replacing_operation(conn, proposal)? else {
+        ensure!(
+            plan.is_none(),
+            "a replacement plan goes only with a proposal of a planner of a replanning operation's request; proposal {proposal} is not one"
+        );
+        return Ok(());
+    };
+    let plan = plan.with_context(|| {
+        format!(
+            "proposal {proposal} replaces task {} of replan operation {}: submit it with --replacement <plan.json> (the request's prompt says what the plan holds), or decline the request with --continue-run to continue the run",
+            op.task_id, op.id
+        )
+    })?;
+    let problems = check_replacement(conn, &op, plan, members, &[])?;
+    ensure!(
+        problems.is_empty(),
+        "the replacement plan of proposal {proposal} for replan operation {} is refused:\n{}",
+        op.id,
+        replan_plan::describe(&problems).join("\n")
+    );
+    let text = serde_json::to_string(plan)?;
+    let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let revision: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(revision), 0) + 1 FROM replan_plans WHERE operation_id=?1",
+        [op.id],
+        |r| r.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO replan_plans(operation_id, revision, proposal_id, plan, hash, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![op.id, revision, proposal, text, hash, now],
+    )?;
+    conn.execute(
+        "UPDATE replan_operations SET proposal_id=?1, updated_at=?2 WHERE id=?3",
+        params![proposal, now, op.id],
+    )?;
+    let reason = format!("proposal {proposal} was submitted with plan revision {revision}");
+    if op.status == ReplanStatus::Parked {
+        op = move_in(conn, op.id, op.generation, &planning_step(&reason), now)?;
+    }
+    if op.status != ReplanStatus::Reviewing {
+        move_in(
+            conn,
+            op.id,
+            op.generation,
+            &ReplanMove {
+                to: ReplanStatus::Reviewing,
+                reason,
+                snapshot_id: None,
+                diagnosis: None,
+            },
+            now,
+        )?;
+    }
+    event(
+        conn,
+        op.task_id,
+        Some(&op.run_id),
+        EventKind::ReplanPlanSubmitted,
+        json!({"operation_id": op.id, "proposal_id": proposal, "revision": revision,
+               "hash": hash, "choice": plan.choice, "children": plan.child_ids()}),
+    )?;
+    Ok(())
+}
+
+/// The move of an operation to `planning` for `reason`.
+fn planning_step(reason: &str) -> ReplanMove {
+    ReplanMove {
+        to: ReplanStatus::Planning,
+        reason: reason.to_owned(),
+        snapshot_id: None,
+        diagnosis: None,
+    }
+}
+
+/// Move the operation of `request` from `parked` to `planning` as planner
+/// `planner` opens for it, inside the opening's transaction; nothing for a
+/// request of no operation or one past `parked`.
+pub(super) fn planner_opened(
+    conn: &Connection,
+    request: crate::domain::RequestId,
+    planner: crate::domain::PlannerId,
+    now: i64,
+) -> Result<()> {
+    let op: Option<ReplanId> = conn
+        .query_row(
+            "SELECT replan_operation_id FROM plan_requests WHERE id=?1",
+            [request],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(op) = op.map(|id| read_operation(conn, id)).transpose()? else {
+        return Ok(());
+    };
+    if op.status == ReplanStatus::Parked {
+        let reason = format!("planner {planner} opened for request {request}");
+        move_in(conn, op.id, op.generation, &planning_step(&reason), now)?;
+    }
+    Ok(())
+}
+
+/// Accept `proposal`, which replaces the task of the open operation `op`,
+/// inside the caller's transaction: plan review's pass, or a person's
+/// ready answer to its concern, found it applicable. Its latest plan is
+/// checked again ([`check_replacement`]) and refused with its problems;
+/// one that holds is marked approved, the proposal accepted, and the
+/// children stay `submitted`, where no claim takes them, until the trusted
+/// runtime applies the replacement (ADR-t1521-2 decision 4). An operation
+/// awaiting a person's answer goes back to `reviewing`, with
+/// `replan_plan_approved`.
+pub(super) fn approve_replacement(
+    conn: &Connection,
+    op: &ReplanOperation,
+    proposal: ProposalId,
+    accepted: &crate::domain::Proposal,
+    now: i64,
+) -> Result<()> {
+    let latest = latest_plan(conn, op.id)?
+        .filter(|plan| plan.proposal_id == proposal)
+        .with_context(|| {
+            format!(
+                "proposal {proposal} replaces task {} of replan operation {} without a plan",
+                op.task_id, op.id
+            )
+        })?;
+    let problems = check_replacement(conn, op, &latest.plan, accepted.task_ids(), &[])?;
+    ensure!(
+        problems.is_empty(),
+        "proposal {proposal} cannot be accepted: its replacement plan for replan operation {} no longer holds:\n{}",
+        op.id,
+        replan_plan::describe(&problems).join("\n")
+    );
+    conn.execute(
+        "UPDATE replan_plans SET approved_at=?1 WHERE operation_id=?2 AND revision=?3",
+        params![now, op.id, latest.revision],
+    )?;
+    if op.status == ReplanStatus::AwaitingAnswer {
+        move_in(
+            conn,
+            op.id,
+            op.generation,
+            &ReplanMove {
+                to: ReplanStatus::Reviewing,
+                reason: format!("proposal {proposal} was accepted"),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+            now,
+        )?;
+    }
+    event(
+        conn,
+        op.task_id,
+        Some(&op.run_id),
+        EventKind::ReplanPlanApproved,
+        json!({"operation_id": op.id, "proposal_id": proposal, "revision": latest.revision,
+               "hash": latest.hash, "children": latest.plan.child_ids()}),
+    )?;
+    Ok(())
+}
+
+/// The problems plan review's pass of `proposal` would accept, inside its
+/// transaction: those of the latest plan of the operation whose task the
+/// proposal replaces, now and once the pass applies `actions` (none for a
+/// person's `ready` and for `lint`); none for any other proposal, and a
+/// missing plan is one.
+pub(super) fn replacement_problems(
+    conn: &Connection,
+    proposal: ProposalId,
+    actions: &[PlanReviewAction],
+) -> Result<Vec<String>> {
+    let Some(op) = replacing_operation(conn, proposal)? else {
+        return Ok(Vec::new());
+    };
+    let members = super::proposals::read(conn, proposal)?.task_ids().to_vec();
+    match latest_plan(conn, op.id)?.filter(|plan| plan.proposal_id == proposal) {
+        Some(latest) => Ok(replan_plan::describe(&check_replacement(
+            conn,
+            &op,
+            &latest.plan,
+            &members,
+            actions,
+        )?)),
+        None => Ok(vec![format!(
+            "proposal {proposal} replaces task {} of replan operation {} without a replacement plan",
+            op.task_id, op.id
+        )]),
+    }
+}
+
+/// Move the operation whose task `proposal` replaces as plan review holds
+/// it for a person (its concern) or its planner withdraws it, inside that
+/// transaction: to `awaiting_answer`, or back to `planning`. Nothing for
+/// any other proposal.
+pub(super) fn proposal_moved(
+    conn: &Connection,
+    proposal: ProposalId,
+    to: ReplanStatus,
+    reason: &str,
+    now: i64,
+) -> Result<()> {
+    let Some(op) = replacing_operation(conn, proposal)? else {
+        return Ok(());
+    };
+    if op.proposal_id == Some(proposal) && op.status != to && op.status.can_move_to(to) {
+        move_in(
+            conn,
+            op.id,
+            op.generation,
+            &ReplanMove {
+                to,
+                reason: reason.to_owned(),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+/// Refuse to make task `task` ready while it is a child of the replacement
+/// proposal of an open operation: only the trusted runtime's apply does.
+pub(super) fn check_child_ready(conn: &Connection, task: TaskId) -> Result<()> {
+    let proposal: Option<ProposalId> = conn
+        .query_row("SELECT proposal_id FROM tasks WHERE id=?1", [task], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten();
+    // Any live proposal linked to an open operation's request, not only
+    // the one the operation names: an older one sent back stays its.
+    if let Some(proposal) = proposal
+        && let Some(op) = replacing_operation(conn, proposal)?
+        && super::proposals::read(conn, proposal)?.status()
+            != crate::domain::ProposalStatus::Canceled
+    {
+        anyhow::bail!(
+            "task {task} is a child of proposal {proposal}, which replaces task {} of replan operation {} ({}): it becomes ready only when the trusted runtime applies the replacement",
+            op.task_id,
+            op.id,
+            op.status.as_str()
+        );
+    }
+    Ok(())
+}
+
+/// Release the children of operation `op`'s replacement proposal, which
+/// was never applied, as the operation closes (a continuation or a
+/// withdrawal), inside the move's transaction: an active proposal is
+/// withdrawn and an accepted one's children go back from `submitted` to
+/// `draft`, so none is claimed, with `replan_children_released`.
+fn release_children(conn: &Connection, op: &ReplanOperation, now: i64) -> Result<()> {
+    let Some(proposal) = op.proposal_id else {
+        return Ok(());
+    };
+    let stamp = crate::application::timestamp(
+        std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(u64::try_from(now).unwrap_or_default()),
+    );
+    let current = super::proposals::read(conn, proposal)?;
+    if current.status().is_active() {
+        super::proposals::withdraw(conn, proposal, &stamp, now)?;
+    }
+    let mut released = Vec::new();
+    for &task in current.task_ids() {
+        if read_task(conn, task)?.status() == TaskStatus::Submitted {
+            super::sqlite::transition_task(conn, task, crate::domain::TaskAction::Draft, &stamp)?;
+        }
+        if read_task(conn, task)?.status() == TaskStatus::Draft {
+            released.push(task);
+        }
+    }
+    event(
+        conn,
+        op.task_id,
+        Some(&op.run_id),
+        EventKind::ReplanChildrenReleased,
+        json!({"operation_id": op.id, "proposal_id": proposal, "children": released}),
+    )?;
+    Ok(())
+}
+
+impl SqliteQueue {
+    /// What the planner of operation `id`'s request reads of it
+    /// ([`ReplanBrief`]).
+    pub fn replan_brief(&self, id: ReplanId) -> Result<ReplanBrief> {
+        let op = read_operation(&self.conn, id)?;
+        let mut turns: BTreeMap<String, usize> = BTreeMap::new();
+        let mut reviews = Vec::new();
+        let mut statement = self.conn.prepare(
+            "SELECT kind, payload FROM run_events WHERE run_id=?1
+             AND kind IN ('turn_started','review_finished') ORDER BY id",
+        )?;
+        let rows = statement.query_map([&op.run_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (kind, payload) = row?;
+            let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+            if kind == "turn_started" {
+                let what = payload["what"].as_str().unwrap_or_default();
+                *turns.entry(replan_plan::turn_cause(what)).or_default() += 1;
+            } else if let Some(sent) = crate::domain::run::review_sent_back(&payload) {
+                // Where the route sent the run, not the review's own
+                // verdict alone: its agents may send back a review that
+                // passed.
+                let verdict = sent
+                    .verdicts
+                    .iter()
+                    .map(|verdict| verdict.as_str())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                reviews.push(ReviewFinding {
+                    verdict,
+                    reasons: sent.findings,
+                });
+            }
+        }
+        let mut successors = Vec::new();
+        for &task in &op.conditions.successors {
+            if let Some(read) = plan_task(&self.conn, task)? {
+                successors.push(SuccessorBrief {
+                    task_id: task,
+                    status: read.status,
+                    title: read_task(&self.conn, task)?.title().to_owned(),
+                });
+            }
+        }
+        let plan = latest_plan(&self.conn, id)?;
+        let problems = match &plan {
+            Some(latest) => {
+                let members = super::proposals::read(&self.conn, latest.proposal_id)?
+                    .task_ids()
+                    .to_vec();
+                check_replacement(&self.conn, &op, &latest.plan, &members, &[])?
+            }
+            None => Vec::new(),
+        };
+        Ok(ReplanBrief {
+            operation: op,
+            turns: turns.into_iter().collect(),
+            reviews,
+            successors,
+            plan,
+            problems,
+        })
+    }
+
+    /// The brief of the operation whose task `proposal` replaces, if it
+    /// replaces an open one's ([`Self::replan_brief`]).
+    pub fn replacement_brief(&self, proposal: ProposalId) -> Result<Option<ReplanBrief>> {
+        replacing_operation(&self.conn, proposal)?
+            .map(|op| self.replan_brief(op.id))
+            .transpose()
+    }
+
+    /// End the planning of each operation with the planner whose request
+    /// ended without a proposal under review, as the trusted runtime (the
+    /// planner that declined it has decided, whether or not its session
+    /// has ended yet): a
+    /// request its planner declined to continue the run
+    /// (`request_declined` with `continue_run`) continues it
+    /// (`continuing_after_park`, whose restore resumes the run on its
+    /// saved work); one declined otherwise, out of planners (`exhausted`),
+    /// or whose replacement proposal its planner withdrew and ended without
+    /// another, leaves the operation `blocked` with the work kept, for a
+    /// person. The operations moved, oldest first.
+    pub fn settle_replan_requests(&mut self) -> Result<Vec<ReplanOperation>> {
+        let now = self.generators.clock.now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ended: Vec<(ReplanId, String)> = tx
+            .prepare(
+                "SELECT o.id, r.status FROM replan_operations o
+                 JOIN plan_requests r ON r.id=o.request_id
+                 WHERE o.closed_at IS NULL AND o.status IN ('parked','planning')
+                 AND (r.status IN ('declined','exhausted')
+                   OR (r.status='proposed' AND o.status='planning'
+                     AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.request_id=r.id
+                         AND p.closed_at IS NULL)
+                     AND NOT EXISTS(SELECT 1 FROM proposals x WHERE x.id=o.proposal_id
+                         AND x.status IN ('submitted','revising','accepted'))))
+                 ORDER BY o.id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut moved = Vec::new();
+        for (id, status) in ended {
+            let op = read_operation(&tx, id)?;
+            let request = op.request_id.context("an ended request")?;
+            let declined: Option<(bool, String)> = tx
+                .query_row(
+                    "SELECT COALESCE(json_extract(payload,'$.continue_run'), 0),
+                       COALESCE(json_extract(payload,'$.reason'), '')
+                     FROM run_events WHERE kind='request_declined'
+                     AND json_extract(payload,'$.request_id')=?1 ORDER BY id DESC LIMIT 1",
+                    [request],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let (to, reason) =
+                replan_plan::planning_end(request, status.parse::<RequestStatus>()?, declined);
+            moved.push(move_in(
+                &tx,
+                id,
+                op.generation,
+                &ReplanMove {
+                    to,
+                    reason,
+                    snapshot_id: None,
+                    diagnosis: None,
+                },
+                now,
+            )?);
+        }
+        tx.commit()?;
+        Ok(moved)
+    }
 }
 
 #[cfg(test)]

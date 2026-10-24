@@ -25,15 +25,100 @@ use crate::domain::{
     },
 };
 
+/// The goal request `$r` replans, as SQL: its Spike's goal, or the goal of
+/// the task its replanning operation replaces; `NULL` for a request that
+/// replans none.
+macro_rules! replanned_goal {
+    ($r:literal) => {
+        concat!(
+            "COALESCE((SELECT t.goal_id FROM tasks t WHERE t.id=",
+            $r,
+            ".spike_task_id), (SELECT t.goal_id FROM replan_operations x JOIN tasks t \
+             ON t.id=x.task_id WHERE x.id=",
+            $r,
+            ".replan_operation_id))"
+        )
+    };
+}
+
+/// Whether, as SQL on request `r`, another request that replans the goal
+/// `r` replans has a planner at work: one open for it, or for a proposal
+/// submitted for it (the planner a revise opens once the request's own
+/// planner ended), or a revise of such a proposal claimed for delivery
+/// before its planner opens. `r` waits for it, whether a pass opens `r`'s
+/// planner or a person's answer does, and so does a revise of a proposal
+/// submitted for `r` ([`REVISE_WAITS_FOR_GOAL`]): one replans the goal at
+/// a time (ADR-t1487-1 decision 5, ADR-t1521-2 decision 3). Requests that
+/// replan no goal never wait for each other.
+macro_rules! goal_replanned_elsewhere {
+    () => {
+        concat!(
+            "(EXISTS(SELECT 1 FROM planners p JOIN plan_requests o ON o.id=p.request_id \
+             OR o.id IN (SELECT l.request_id FROM plan_request_proposals l \
+                 WHERE l.proposal_id=p.proposal_id) \
+             WHERE p.closed_at IS NULL AND o.id!=r.id \
+             AND NOT EXISTS(SELECT 1 FROM plan_request_proposals m WHERE m.request_id=r.id \
+                 AND m.proposal_id=p.proposal_id) AND ",
+            replanned_goal!("o"),
+            "=",
+            replanned_goal!("r"),
+            ") OR EXISTS(SELECT 1 FROM proposals x JOIN plan_request_proposals l \
+             ON l.proposal_id=x.id JOIN plan_requests o ON o.id=l.request_id \
+             WHERE x.status='revising' AND x.revise_sent_at IS NOT NULL \
+             AND x.revise_planner_id IS NULL AND o.id!=r.id \
+             AND NOT EXISTS(SELECT 1 FROM plan_request_proposals m WHERE m.request_id=r.id \
+                 AND m.proposal_id=x.id) AND ",
+            replanned_goal!("o"),
+            "=",
+            replanned_goal!("r"),
+            "))"
+        )
+    };
+}
+
+/// Whether, as SQL on the row of `proposals` a revise is claimed on, the
+/// revise waits because another request that replans the goal of a
+/// request the proposal was submitted for has a planner at work
+/// (`goal_replanned_elsewhere!`): the claim refuses it until that planner
+/// ends, so a revise's planner and that request's do not replan the goal
+/// side by side (ADR-t1521-2 decision 3).
+pub(super) const REVISE_WAITS_FOR_GOAL: &str = concat!(
+    "EXISTS(SELECT 1 FROM plan_request_proposals k JOIN plan_requests r ON r.id=k.request_id \
+     WHERE k.proposal_id=proposals.id AND ",
+    goal_replanned_elsewhere!(),
+    ")"
+);
+
+/// As SQL on the row of `proposals` a revise is claimed on, when the last
+/// planner closed that [`REVISE_WAITS_FOR_GOAL`] could have made the revise
+/// wait for, after the revise was recorded (NULL if none): from then on the
+/// revise waits for a planner rather than for the goal.
+pub(super) const REVISE_GOAL_WAIT_ENDED: &str = concat!(
+    "(SELECT MAX(p.closed_at) FROM plan_request_proposals k \
+     JOIN plan_requests r ON r.id=k.request_id \
+     JOIN planners p ON p.closed_at IS NOT NULL AND p.closed_at>proposals.revised_at \
+     JOIN plan_requests o ON o.id=p.request_id OR o.id IN (SELECT l.request_id \
+         FROM plan_request_proposals l WHERE l.proposal_id=p.proposal_id) \
+     WHERE k.proposal_id=proposals.id AND o.id!=r.id \
+     AND NOT EXISTS(SELECT 1 FROM plan_request_proposals m WHERE m.request_id=r.id \
+         AND m.proposal_id=p.proposal_id) AND ",
+    replanned_goal!("o"),
+    "=",
+    replanned_goal!("r"),
+    ")"
+);
+
 /// The requests waiting for a planner of the runtime's: `open`, no planner
 /// of the runtime's open for it, no `planner_question` about it or about a
 /// draft its planner left (ADR-t2015-1, as `request_of_draft` tells one)
 /// nobody closed, and no draft it names (`task:N`) taken by an open planner of
 /// the runtime's for drafts, such as one its revisit time opened: the
-/// request's planner waits for it to end (ADR-t1540-1). A Spike's request
-/// also waits while a planner of another Spike's request of the same goal
-/// is open: one replans the goal at a time, and the later reads how the
-/// earlier ended (ADR-t1487-1 decision 5). A request recorded for a
+/// request's planner waits for it to end (ADR-t1540-1). A request that
+/// replans a goal, a Spike's or a replanning operation's, also waits while
+/// another request that replans the same goal has a planner at work, its
+/// own or its revise's (`goal_replanned_elsewhere!`): one replans the goal
+/// at a time, and the later reads how the earlier ended (ADR-t1487-1
+/// decision 5, ADR-t1521-2 decision 3). A request recorded for a
 /// replanning operation waits until the operation holds a complete
 /// snapshot and is with the planner (ADR-t1521-2 decision 2, the statuses
 /// of `ReplanStatus::hands_to_planner`); one whose operation closes with
@@ -44,7 +129,7 @@ use crate::domain::{
 /// that is no longer with the planner. A closed operation whose restore
 /// failed that goes on to the planner again gets a new request
 /// ([`renew_declined`]) rather than this one back.
-const TARGETS: &str = "SELECT r.id FROM plan_requests r WHERE r.status='open'
+const TARGETS: &str = concat!("SELECT r.id FROM plan_requests r WHERE r.status='open'
     AND (r.replan_operation_id IS NULL OR EXISTS(SELECT 1 FROM replan_operations o
         WHERE o.id=r.replan_operation_id AND o.snapshot_id IS NOT NULL
         AND o.status IN ('parked','planning','reviewing','awaiting_answer')))
@@ -61,15 +146,12 @@ const TARGETS: &str = "SELECT r.id FROM plan_requests r WHERE r.status='open'
         AND NOT EXISTS(SELECT 1 FROM draft_reopens d WHERE d.task_id=t.id
             AND json_extract(d.material,'$.proposal_id')=t.proposal_id)
         AND NOT EXISTS(SELECT 1 FROM proposals x WHERE x.id=t.proposal_id AND x.status!='canceled'))
-    AND NOT EXISTS(SELECT 1 FROM plan_requests o JOIN tasks ot ON ot.id=o.spike_task_id
-        JOIN tasks rt ON rt.id=r.spike_task_id AND rt.goal_id=ot.goal_id
-        JOIN planners p ON p.request_id=o.id AND p.closed_at IS NULL
-        WHERE o.id!=r.id)
+    AND NOT ", goal_replanned_elsewhere!(), "
     AND NOT EXISTS(SELECT 1 FROM json_each(r.refs) j JOIN planners p ON p.closed_at IS NULL
         AND p.origin='runtime' AND (p.draft_task_id=json_extract(j.value,'$.id')
              OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id
                  AND m.task_id=json_extract(j.value,'$.id')))
-        WHERE json_extract(j.value,'$.kind')='task')";
+        WHERE json_extract(j.value,'$.kind')='task')");
 
 impl SqliteQueue {
     /// Record `request` as `by_role` (`inbox`, `user`) with actor id
@@ -153,12 +235,32 @@ impl SqliteQueue {
         by: &str,
         authorized: Option<PlannerId>,
     ) -> Result<PlanRequest> {
+        self.decline_request_choosing(request, reason, by, authorized, false)
+    }
+
+    /// [`Self::decline_request`], with `continue_run` the planner's choice
+    /// to continue the run of the replanning operation the request was
+    /// recorded for (refused for any other request), which
+    /// `request_declined` records for the trusted runtime
+    /// ([`Self::settle_replan_requests`]).
+    pub fn decline_request_choosing(
+        &mut self,
+        request: RequestId,
+        reason: &str,
+        by: &str,
+        authorized: Option<PlannerId>,
+        continue_run: bool,
+    ) -> Result<PlanRequest> {
         let now = self.generators.clock.now();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = read_request(&tx, request)?;
         check_decline(&current, reason)?;
+        anyhow::ensure!(
+            !continue_run || current.replan_operation.is_some(),
+            "request {request} was not recorded for a replanning operation: --continue-run continues a parked run"
+        );
         let planner = open_planner_of(&tx, request)?.map(|planner| planner.id);
         // The decline was authorized for the planner open then; another
         // opened since is not the decliner's.
@@ -175,6 +277,7 @@ impl SqliteQueue {
                 "reason": reason,
                 "by": by,
                 "spike_task_id": current.spike_task,
+                "continue_run": continue_run,
             }),
         )?;
         let declined = read_request(&tx, request)?;
@@ -215,12 +318,22 @@ impl PlanRequestStore for SqliteQueue {
             // and still for a new planner of this request.
             // A planner of the request still open (asked to exit because
             // only a person's answer was left) is waited for: one planner
-            // per request (ADR-t1704-1 decision 2).
+            // per request (ADR-t1704-1 decision 2). So is one of another
+            // request that replans the same goal.
             Some(ask) => {
                 let ask = read_ask(&tx, ask)?;
                 super::draft_planners::answer_request(&tx, &ask)? == Some(request)
                     && super::draft_planners::route_of(&tx, &ask)? == PlannerAnswerRoute::NewPlanner
                     && open_planner_of(&tx, request)?.is_none()
+                    && !tx.query_row(
+                        concat!(
+                            "SELECT ",
+                            goal_replanned_elsewhere!(),
+                            " FROM plan_requests r WHERE r.id=?1"
+                        ),
+                        [request],
+                        |r| r.get::<_, bool>(0),
+                    )?
             }
         };
         if !eligible {
@@ -247,6 +360,7 @@ impl PlanRequestStore for SqliteQueue {
             params![PlannerOrigin::Runtime.as_str(), request, now],
         )?;
         let planner = PlannerId::new(tx.last_insert_rowid());
+        super::replans::planner_opened(&tx, request, planner, now)?;
         record_queue_event_in(
             &tx,
             EventKind::RequestPlannerOpened,
@@ -283,6 +397,26 @@ impl PlanRequestStore for SqliteQueue {
             .conn
             .query_row("SELECT * FROM run_events WHERE id=?1", [id], event_row)
             .optional()?)
+    }
+
+    fn replan_brief(
+        &self,
+        id: crate::domain::ReplanId,
+    ) -> Result<crate::domain::replan_plan::ReplanBrief> {
+        SqliteQueue::replan_brief(self, id)
+    }
+
+    fn replacement_brief(
+        &self,
+        proposal: crate::domain::ProposalId,
+    ) -> Result<Option<crate::domain::replan_plan::ReplanBrief>> {
+        SqliteQueue::replacement_brief(self, proposal)
+    }
+
+    fn settle_replan_requests(
+        &mut self,
+    ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        SqliteQueue::settle_replan_requests(self)
     }
 }
 
@@ -833,7 +967,8 @@ impl crate::application::commands::requests::RequestStore for SqliteQueue {
         reason: &str,
         by: &str,
         planner: Option<PlannerId>,
+        continue_run: bool,
     ) -> Result<PlanRequest> {
-        SqliteQueue::decline_request(self, request, reason, by, planner)
+        SqliteQueue::decline_request_choosing(self, request, reason, by, planner, continue_run)
     }
 }

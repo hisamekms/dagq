@@ -25,7 +25,8 @@ pub use history::{
 pub use payload::{
     AskOpened, AttemptOf, AutoRepaired, ConcernDecided, ConflictPrecheck, JobEnd, NewStallNudged,
     NewStallResolved, RecoveryRecord, ResumeStarted, ReviewFinished, ReviseRequested, ReviseUnsent,
-    StallNudged, StallResolved, TurnRequested, restore as restore_payload, review_verdict,
+    SentBackReview, StallNudged, StallResolved, TurnRequested, restore as restore_payload,
+    review_findings, review_sent_back, review_verdict,
 };
 pub use recorded::{
     NewRunEvent, Recorded, end_session, finish_validation, record_e2e_park,
@@ -1553,5 +1554,50 @@ mod tests {
             moved.landing_path().unwrap(),
             std::path::Path::new("/moved/landing/r1")
         );
+    }
+
+    /// A review whose own verdict passed but whose agents sent the run
+    /// back is a send-back with the agents' findings and verdicts; one
+    /// whose route landed, or that recorded no route and passed, is none.
+    #[test]
+    fn a_review_its_agents_sent_back_is_a_send_back_with_their_findings() {
+        use crate::domain::ReviewDecision;
+        let finished = serde_json::json!({"verdict": "pass", "reasons": [], "summary": "fine",
+            "agents": [
+                {"agent": "test-rules", "status": "completed", "verdict": "revise",
+                    "reasons": ["add a unit test"], "summary": "s"},
+                {"agent": "security", "status": "completed", "verdict": "revise",
+                    "reasons": ["check the token"], "summary": "s"},
+                {"agent": "design", "status": "completed", "verdict": "pass",
+                    "reasons": [], "summary": "ok"},
+            ],
+            "route": {"destination": "send_back", "parent": "land"}});
+        assert_eq!(
+            review_sent_back(&finished),
+            Some(SentBackReview {
+                verdicts: vec![ReviewDecision::Revise],
+                findings: vec![
+                    "test-rules: add a unit test".into(),
+                    "security: check the token".into()
+                ],
+            })
+        );
+        let landed = serde_json::json!({"verdict": "pass", "reasons": ["a note"], "summary": "ok",
+            "agents": [], "route": {"destination": "land", "parent": "land"}});
+        assert_eq!(review_sent_back(&landed), None);
+        let unrouted = serde_json::json!({"verdict": "pass", "reasons": [], "summary": "ok"});
+        assert_eq!(review_sent_back(&unrouted), None);
+        // Recorded without a route, a verdict that did not pass is judged
+        // by its own reasons.
+        let concern =
+            serde_json::json!({"verdict": "concern", "reasons": ["a finding"], "summary": "s"});
+        assert_eq!(
+            review_sent_back(&concern),
+            Some(SentBackReview {
+                verdicts: vec![ReviewDecision::Concern],
+                findings: vec!["a finding".into()],
+            })
+        );
+        assert_eq!(review_sent_back(&serde_json::json!({"verdict": 3})), None);
     }
 }

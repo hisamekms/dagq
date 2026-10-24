@@ -165,6 +165,17 @@ impl PlanningState {
         runtime_open: &mut usize,
     ) -> Result<()> {
         env.queue.investigations()?;
+        // A replanning request whose planner declined it or ran out ends
+        // its operation's planning first (ADR-t1521-2 decision 4).
+        for op in env.queue.settle_replan_requests()? {
+            info!(
+                "replan operation {} of task {}: {} ({})",
+                op.id,
+                op.task_id,
+                op.status.as_str(),
+                op.status_reason.as_deref().unwrap_or_default()
+            );
+        }
         for request in env.queue.planner_requests()? {
             if *runtime_open >= env.runtime_planners {
                 break;
@@ -280,6 +291,18 @@ impl PlanningState {
             }
         }
         let asks = env.queue.request_asks(request.id)?;
+        // A replanning operation's request: the operation, its snapshot and
+        // what the parked run went through (ADR-t1521-2 decision 3).
+        let replan = request
+            .replan_operation
+            .map(|id| env.queue.replan_brief(id))
+            .transpose()?;
+        let snapshot_dir = replan
+            .as_ref()
+            .and_then(|brief| brief.operation.snapshot_id.as_deref())
+            .map(|snapshot| {
+                crate::domain::replan_snapshot::snapshot_dir(&env.layout.replans_dir, snapshot)
+            });
         // What the planner that asked left as it ended for the answer alone
         // (ADR-t1704-1 decision 3).
         let handover = match answer {
@@ -297,6 +320,9 @@ impl PlanningState {
             answer,
             handover: handover.as_ref(),
             other_spikes: &other_spikes,
+            replan: replan
+                .as_ref()
+                .map(|brief| (brief, snapshot_dir.as_deref())),
         })
     }
 

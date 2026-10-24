@@ -10,6 +10,7 @@ pub mod background_wrappers;
 pub mod ci_watch;
 pub mod containers;
 pub mod headless;
+pub mod plan_review;
 mod reviewer;
 pub use headless::{CODEX_HOME, Stand, set_codex_model};
 pub use reviewer::*;

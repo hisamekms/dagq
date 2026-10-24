@@ -83,8 +83,20 @@ Claude/Codexで同じ状態機械を使う。
 - 閉じた操作の依頼を閉じること: 済み（[taskの再計画の依頼](../design/supervisor-lifecycle/plan-planners.md#taskの再計画の依頼)）。
   依頼のplannerが今開いていなければ閉じる移動が閉じ（`replans.rs`の`move_in`）、開いていればそのplannerが決めずに終わったときに閉じる（`plan_requests.rs`の`decline_after_planner`）。
   復元の失敗から再びplannerに渡る段では新しい依頼を作る（`plan_requests.rs`の`renew_declined`）。
-- 未実装: 診断（`pause_requested`へ進める判断）・plannerのprompt・置換の適用・goal closeの判定。
-  適用（`applying`・`applied`）へはどの経路も動かせない。
+- plannerへの依頼とplan review: 済み（`src/domain/replan_plan.rs`、`replans.rs`、`request_planner.rs`）。
+  依頼のplannerが立つと操作は`parked`から`planning`へ進み、promptは元条件とその版・snapshotの場所・runの原因別のturnとpassしなかったreviewの指摘・全後続を渡す。
+  plannerは継続（`request decline --continue-run`）か、子taskを置換計画とともに`submit --replacement`するか、条件の削除・意図の変更・成果の破棄をscope / discardのaskにする。
+  置換計画は元条件の各項目の子への対応（削除は、操作の後に開いた操作のscopeのaskにそのaskが選択肢に出した項目の序数とhashを名指す`delete:<序数>:<hashの先頭12文字>`を人がそのまま選んだものだけが認め、`keep`や別の項目への答え、tokenを含む拒否や説明は認めない。`landed`は着地したtaskを要する）、子ごとの元のverifyと全体のevidenceとpaths、保存した成果の各部分を1つの子に順とともに渡すこと、元の前提依存の引き継ぎと元taskや後続への依存の禁止、全後続が待つ子を持つ。
+  submit・`lint`・plan reviewのpassは同じ検査（`check_plan`）を今の版で当て、外れればsubmitは拒み、passとconcernへの人の`ready`はreviseに変えて問題をplannerへ届ける（passはreviseの上限を過ぎていればconcernにする）。
+  子は`draft`か`submitted`のtaskに限り、取り消された子に項目・成果・後続の待ちを渡す計画は通らない。passはそのactionを当てた後の姿で検査する（`PlanContext::after_actions`）。
+  reviseの後の出し直しのsubmitも計画を要して検査し、plan reviewが人に保留したproposalの再試行だけが前の計画のまま出し直す（`proposals.rs`の`held_retry`）。
+  同じgoalのSpikeと再計画の操作の依頼のplannerは、answerによる開き直しとその依頼のproposalのreviseが立てるplannerも含めて1つずつ開く（`plan_requests.rs`の`TARGETS`・`open_request_planner`・`REVISE_WAITS_FOR_GOAL`）。
+  plan reviewのjobには計画・元条件・snapshotの場所・後続を渡し、意味上の対応と成果の引き継ぎ方を検査させる。`replans ID`は最新の計画とその今の問題を出す。
+  passは計画を承認済みにして子を`submitted`のまま残し（readyは誰の手でも拒む）、concernは操作を`awaiting_answer`に、proposalの取り下げは`planning`に戻し、どれもrunの保留とsnapshotを保つ。
+  操作が継続か撤回で閉じると、未適用のproposalの子はdraftに戻る。
+  依頼が`--continue-run`の却下で終われば操作は`continuing_after_park`へ、そのほかの却下か`exhausted`、proposalを取り下げたplannerが次を出さずに終わったときは`blocked`へ進む（`settle_replan_requests`）。
+- 未実装: 診断（`pause_requested`へ進める判断）・置換の適用・goal closeの判定。
+  適用（`applying`・`applied`）へはどの経路も動かせず、承認済みの置換の子は`submitted`のまま待つ。
 
 ## 入口と診断
 

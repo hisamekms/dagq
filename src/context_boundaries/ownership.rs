@@ -328,6 +328,7 @@ pub(super) const TABLES: &[Table] = &[
     table("replan_operations", Planning), // the replanning of a run; its guard is read by every step of the task
     table("replan_mappings", Planning),
     table("replan_replacements", Planning),
+    table("replan_plans", Planning), // the replacement plans a planner of a replanning request submits
     table("task_holds", Planning), // the hold of a task; the claim, the resume and the recovery round read it
     table("draft_origins", Planning),
     table("draft_reopens", Planning),

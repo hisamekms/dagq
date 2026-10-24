@@ -27,13 +27,16 @@ pub trait RequestStore: DenialLog {
     /// is an error.
     fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>>;
     /// Decline `request`, unless the planner open for it is no longer
-    /// `planner`, the one the decline was authorized for.
+    /// `planner`, the one the decline was authorized for. With
+    /// `continue_run`, the decline of a replanning operation's request
+    /// chooses to continue the parked run rather than replace its task.
     fn decline_request(
         &mut self,
         request: RequestId,
         reason: &str,
         by: &str,
         planner: Option<PlannerId>,
+        continue_run: bool,
     ) -> Result<PlanRequest>;
 }
 
@@ -63,8 +66,15 @@ impl<'a, S: RequestStore> Requests<'a, S> {
 
     /// `request decline`: a role without the capability is refused before
     /// the request is read; a planner, unless it is the one open for the
-    /// request.
-    pub fn decline(&mut self, id: RequestId, reason: &str) -> Result<PlanRequest> {
+    /// request. `continue_run` (`--continue-run`) is the planner's choice,
+    /// for a replanning operation's request, to continue the parked run:
+    /// the trusted runtime then resumes it on its saved work.
+    pub fn decline(
+        &mut self,
+        id: RequestId,
+        reason: &str,
+        continue_run: bool,
+    ) -> Result<PlanRequest> {
         self.gate.refuse_ungranted(
             &*self.store,
             Capability::RequestDecline,
@@ -77,7 +87,8 @@ impl<'a, S: RequestStore> Requests<'a, S> {
             &Resource::Request { id, planner },
         )?;
         let by = self.gate.actor.written_by();
-        self.store.decline_request(id, reason, by, planner)
+        self.store
+            .decline_request(id, reason, by, planner, continue_run)
     }
 }
 
@@ -149,6 +160,7 @@ mod tests {
             reason: &str,
             by: &str,
             _: Option<PlannerId>,
+            _: bool,
         ) -> Result<PlanRequest> {
             check_decline(&request(RequestStatus::Open), reason)?;
             self.declined.push(by.into());
@@ -209,7 +221,7 @@ mod tests {
             ..Store::default()
         };
         Requests::new(&mut store, &own, &StaticPolicy)
-            .decline(RequestId::new(1), "done already")
+            .decline(RequestId::new(1), "done already", false)
             .unwrap();
         assert_eq!(store.declined, vec!["planner".to_owned()]);
         for actor in [
@@ -224,7 +236,7 @@ mod tests {
             };
             assert!(
                 Requests::new(&mut store, &actor, &StaticPolicy)
-                    .decline(RequestId::new(1), "no")
+                    .decline(RequestId::new(1), "no", false)
                     .is_err()
             );
             assert!(store.declined.is_empty());

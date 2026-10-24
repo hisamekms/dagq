@@ -9,45 +9,16 @@
 //! are plan review's.
 
 use crate::plan_review::{
-    PlanWorkspace, StubReviewer, add, fixture, open_goal, options, planner_prompt, supervise_with,
+    PlanWorkspace, StubReviewer, add, completed_spike, fixture, open_goal, options, planner_prompt,
+    supervise_with,
 };
 use dagq::{
-    domain::{EventId, GoalId, PlannerId, Priority, TaskId},
+    domain::{EventId, PlannerId, Priority, TaskId},
     infrastructure::sqlite::SqliteQueue,
 };
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
-
-/// Make `task` a Spike of `goal` that completed with `verdict` as an older
-/// binary's landing leaves it: completed, its receipt recorded, no request.
-fn completed_spike(db: &Path, task: TaskId, goal: Option<GoalId>, verdict: &str) {
-    let connection = Connection::open(db).unwrap();
-    connection
-        .execute(
-            "UPDATE tasks SET execution_class='spike', status='completed', goal_id=?2 WHERE id=?1",
-            params![task.as_i64(), goal.map(GoalId::as_i64)],
-        )
-        .unwrap();
-    let receipt = json!({"receipt": {
-        "summary": format!("measured: {verdict}"),
-        "follow_ups": [{"title": format!("tidy after {task}"), "description": "d", "category": "improvement"}],
-        "spike_result": {
-            "verdict": verdict,
-            "grounds": format!("grounds of {task}"),
-            "evidence": "docs/plans/x.md",
-            "conditions": {"commit": "0123abc", "tools": "cargo 1.90",
-                "provider": "claude headless worker", "environment": "macOS"},
-            "spent": "40 minutes",
-        },
-    }});
-    connection
-        .execute(
-            "INSERT INTO run_events(task_id, kind, payload) VALUES (?1, 'integration_receipt', ?2)",
-            params![task.as_i64(), receipt.to_string()],
-        )
-        .unwrap();
-}
 
 /// Each open planner's request.
 fn planners(queue: &SqliteQueue) -> Vec<(PlannerId, Option<i64>)> {

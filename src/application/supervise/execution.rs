@@ -70,6 +70,7 @@ mod triage;
 mod waiting;
 
 use crate::application::telemetry_tokens;
+use crate::domain::run::review_findings;
 
 pub(super) use self::background::WorkspaceCloser;
 use self::background::{close_ended_landing_asks, close_open_workspaces};
@@ -5021,31 +5022,6 @@ fn latest_review_reasons(queue: &dyn Queue, run_id: &RunId) -> Result<Vec<String
             _ => review_findings(&e.payload),
         })
         .unwrap_or_default())
-}
-
-/// The findings a `review_finished` (`payload`) sent the run back with, as
-/// its `approve_landing` ask showed them: when it recorded a route that its
-/// agents' judgments decide (ADR-t1453-1 decision 7), each deciding
-/// agent's under its name and the verdict's own only when its judgment
-/// went there too; else the verdict's reasons, or its summary when it gave
-/// none ([`crate::domain::ReviewVerdict::sent_back_findings`]). `None` when
-/// the payload is no verdict.
-fn review_findings(payload: &Value) -> Option<Vec<String>> {
-    let verdict = crate::domain::run::review_verdict(payload).ok()?;
-    // The route is recorded as `route(true)` gave it; a verdict recorded
-    // without one is judged by its own reasons.
-    let route = payload
-        .get("route")
-        .filter(|route| route.is_object())
-        .map(|_| verdict.route(true))
-        .filter(|route| !route.deciding().is_empty());
-    Some(
-        verdict
-            .sent_back_findings(route.as_ref())
-            .into_iter()
-            .map(|finding| finding.text)
-            .collect(),
-    )
 }
 
 /// Cross-check the agent's receipt against Git on a thread with its own

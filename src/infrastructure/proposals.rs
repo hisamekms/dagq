@@ -320,9 +320,28 @@ fn record_submitter(
 /// wait on records `dependency_stranded` for the inbox (task 421), once
 /// every member has its status, and so does a strand a task made `ready`
 /// waits on (the draft of another goal an abandoned close did not count).
+///
+/// A proposal that replaces the task of an open replanning operation is
+/// accepted with its children left `submitted`: its replacement plan is
+/// checked again and marked approved, and only the trusted runtime's apply
+/// makes the children ready (ADR-t1521-2 decision 4).
 pub(super) fn approve(conn: &Connection, id: ProposalId, now: &str) -> Result<Proposal> {
     let accepted = proposal::accept(read(conn, id)?, now.into())?;
     save(conn, &accepted)?;
+    if let Some(op) = super::replans::replacing_operation(conn, id)? {
+        ensure!(
+            op.proposal_id == Some(id),
+            "proposal {id} is linked to replan operation {}'s request but is not its replacement proposal {:?}: it cannot be accepted",
+            op.id,
+            op.proposal_id
+        );
+        let secs: i64 =
+            conn.query_row("SELECT CAST(strftime('%s', ?1) AS INTEGER)", [now], |r| {
+                r.get(0)
+            })?;
+        super::replans::approve_replacement(conn, &op, id, &accepted, secs)?;
+        return read(conn, id);
+    }
     let (mut withheld, mut readied) = (Vec::new(), Vec::new());
     for &task_id in accepted.task_ids() {
         if status(conn, task_id)? != TaskStatus::Submitted {
@@ -433,6 +452,15 @@ pub(super) fn withdraw(
         "UPDATE proposals SET review_hold=NULL, revise_reasons=NULL, revise_sent_at=NULL,
              revise_planner_id=NULL, unresponsive_at=NULL WHERE id=?1",
         [id],
+    )?;
+    // Its replanning operation, if it replaces one's task, goes back to its
+    // planner with the run still parked and its work kept.
+    super::replans::proposal_moved(
+        conn,
+        id,
+        crate::domain::task_replan::ReplanStatus::Planning,
+        &format!("proposal {id} was withdrawn"),
+        now_secs,
     )?;
     let payload = json!({"proposal_id": id, "from": from});
     for &task_id in withdrawn.task_ids() {
@@ -625,6 +653,25 @@ fn membership(
             |row| Ok((row.get(0)?, enum_col(row, "status")?)),
         )
         .optional()?)
+}
+
+/// Whether `submission` is the retry of a proposal plan review holds for a
+/// person, which [`submit`] sends again as it is: it names a `submitted`
+/// proposal that plan review holds. A proposal plan review sent back is
+/// `revising`, so submitting it again after a revise is no retry, whatever
+/// it adds.
+pub(super) fn held_retry(conn: &Connection, submission: &Submission) -> Result<bool> {
+    let Some(id) = submission.proposal else {
+        return Ok(false);
+    };
+    Ok(conn
+        .query_row(
+            "SELECT status='submitted' AND review_hold IS NOT NULL FROM proposals WHERE id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
 }
 
 /// Whether plan review holds the proposal for a person.

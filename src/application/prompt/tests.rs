@@ -705,6 +705,7 @@ impl PlanCase {
             candidates: &self.candidates,
             repo_root: Path::new("/repo"),
             language: self.language.as_ref(),
+            replacement: None,
         })
         .unwrap()
     }
@@ -5218,6 +5219,7 @@ fn request_planner_refs_count_each_reference_once() {
             answer: None,
             handover: None,
             other_spikes: &[],
+            replan: None,
         })
         .unwrap();
         let shown = (1..=refs.len())
@@ -5476,6 +5478,7 @@ fn a_request_planner_prompt_of_huge_references_stays_within_its_limits() {
     let asks: Vec<Ask> = (1..=100).map(|id| asked(id, 2_000)).collect();
     let handover = big_handover();
     let answer = asked(300, 20_000);
+    let brief = huge_replan_brief();
     let fitted = request_planner_prompt(&RequestPlannerMaterial {
         db: Path::new("/q/queue.db"),
         request: &request,
@@ -5487,12 +5490,13 @@ fn a_request_planner_prompt_of_huge_references_stays_within_its_limits() {
         answer: Some(&answer),
         handover: Some(&handover),
         other_spikes: &[],
+        replan: Some((&brief, Some(Path::new("/q/replans/snap-1")))),
     })
     .unwrap();
     within(&fitted, REQUEST_PLANNER_PROMPT_LIMIT);
     sections_within(&fitted);
     let (text, bytes) = (&fitted.text, &fitted.bytes);
-    for section in ["note", "refs", "goals", "asks", "answer"] {
+    for section in ["note", "refs", "goals", "asks", "answer", "replan"] {
         assert!(
             bytes.omitted.get(section).is_some_and(|n| *n > 0),
             "{section}: {bytes:?}"
@@ -5513,6 +5517,77 @@ fn a_request_planner_prompt_of_huge_references_stays_within_its_limits() {
     // What the largest input takes, for the limit's reason in
     // docs/design/supervisor-lifecycle/prompt.md.
     assert!(bytes.total > 60_000, "{bytes:?}");
+}
+
+/// A replanning operation's brief whose every part is huge: its
+/// acceptance, its reviews' reasons, its successors and its plan.
+fn huge_replan_brief() -> crate::domain::replan_plan::ReplanBrief {
+    use crate::domain::replan_plan::{ReplanBrief, ReviewFinding, SuccessorBrief};
+    use crate::domain::task_replan::{
+        Diagnosis, OriginalConditions, ReplanOperation, ReplanOrigin, ReplanStatus,
+        acceptance_items,
+    };
+    let conditions = OriginalConditions {
+        title: "big".into(),
+        description: big("description", 20_000),
+        acceptance: acceptance_items(
+            &(1..=200)
+                .map(|n| format!("item {n} {}", big("item", 200)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        paths: vec!["src/**".into()],
+        verify: vec!["cargo test".into()],
+        evidence: json!([]),
+        predecessors: Vec::new(),
+        successors: Vec::new(),
+        goal: None,
+    };
+    ReplanBrief {
+        operation: ReplanOperation {
+            id: crate::domain::ReplanId::new(1),
+            task_id: TaskId::new(1),
+            run_id: RunId::new(RUN).unwrap(),
+            goal_id: None,
+            origin: ReplanOrigin::Manual,
+            status: ReplanStatus::Planning,
+            status_reason: None,
+            generation: 2,
+            return_phase: None,
+            reason: big("reason", 10_000),
+            task_version: conditions.version(),
+            conditions,
+            goal_acceptance_version: None,
+            diagnosis: Diagnosis::default(),
+            snapshot_id: Some("snap-1".into()),
+            request_id: None,
+            request_status: None,
+            proposal_id: None,
+            requested_by: "inbox".into(),
+            requested_by_id: "inbox".into(),
+            mappings: Vec::new(),
+            replaced_by: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+            closed_at: None,
+        },
+        turns: vec![("revise".into(), 40), ("resume".into(), 3)],
+        reviews: (0..50)
+            .map(|_| ReviewFinding {
+                verdict: "revise".into(),
+                reasons: vec![big("reason", 2_000)],
+            })
+            .collect(),
+        successors: (2..100)
+            .map(|n| SuccessorBrief {
+                task_id: TaskId::new(n),
+                status: TaskStatus::Ready,
+                title: big("title", 300),
+            })
+            .collect(),
+        plan: None,
+        problems: Vec::new(),
+    }
 }
 
 /// A task of the worker's prompt with every field of its own `size`
@@ -7372,4 +7447,136 @@ fn a_recovery_prompt_tells_the_job_how_to_declare_its_options() {
     assert!(RECOVERY_LIVE_OPTIONS_RULE.contains(
         "choosing it moves nothing and sends nothing to the session, and your next job for the alert runs with the person's choice"
     ));
+}
+
+/// A replacement plan past the section's limit is cut and named to read
+/// with `dagq replans ID`, and the checks of its meaning stay whole after
+/// it (ADR-t1566-1 decision 2).
+#[test]
+fn a_replacement_section_past_its_limit_keeps_its_checks_whole() {
+    use crate::domain::replan_plan::{
+        CarrySource, ItemDisposition, PlanChild, PlanChoice, PlanMapping, PlanRevision,
+        ReplacementPlan, ReplanBrief,
+    };
+    use crate::domain::task_replan::{
+        Diagnosis, OriginalConditions, ReplanOperation, ReplanOrigin, ReplanStatus,
+        acceptance_items,
+    };
+    use crate::domain::{GoalId, ReplanId};
+    let conditions = OriginalConditions {
+        title: "big".into(),
+        description: "d".into(),
+        acceptance: acceptance_items("the API behaves\nthe operations are documented"),
+        paths: vec!["src/**".into()],
+        verify: vec!["cargo test".into()],
+        evidence: json!([]),
+        predecessors: Vec::new(),
+        successors: Vec::new(),
+        goal: None,
+    };
+    let operation = ReplanOperation {
+        id: ReplanId::new(7),
+        task_id: TaskId::new(10),
+        run_id: RunId::new(RUN).unwrap(),
+        goal_id: Some(GoalId::new(3)),
+        origin: ReplanOrigin::Manual,
+        status: ReplanStatus::Reviewing,
+        status_reason: None,
+        generation: 2,
+        return_phase: None,
+        reason: "too big".into(),
+        task_version: conditions.version(),
+        conditions,
+        goal_acceptance_version: Some(4),
+        diagnosis: Diagnosis::default(),
+        snapshot_id: Some("s".into()),
+        request_id: None,
+        request_status: None,
+        proposal_id: Some(ProposalId::new(1)),
+        requested_by: "inbox".into(),
+        requested_by_id: "inbox".into(),
+        mappings: Vec::new(),
+        replaced_by: Vec::new(),
+        created_at: 0,
+        updated_at: 0,
+        closed_at: None,
+    };
+    let plan = ReplacementPlan {
+        operation_id: operation.id,
+        task_version: operation.task_version.clone(),
+        goal_acceptance_version: Some(4),
+        choice: PlanChoice::Split,
+        rationale: "why ".repeat(15_000),
+        children: vec![PlanChild {
+            task_id: TaskId::new(11),
+            carry: CarrySource::SnapshotHead,
+            order: Some(1),
+        }],
+        mappings: vec![PlanMapping {
+            ordinal: 1,
+            hash: operation.conditions.acceptance[0].hash.clone(),
+            disposition: ItemDisposition::Split,
+            children: Vec::new(),
+            landed_task_id: None,
+            authority_ask_id: None,
+            reason: None,
+        }],
+        successors: Vec::new(),
+    };
+    let brief = ReplanBrief {
+        turns: Vec::new(),
+        reviews: Vec::new(),
+        successors: Vec::new(),
+        plan: Some(PlanRevision {
+            revision: 1,
+            proposal_id: ProposalId::new(1),
+            plan,
+            hash: "h".into(),
+            approved_at: None,
+        }),
+        problems: Vec::new(),
+        operation,
+    };
+    let proposal = Proposal::restore(crate::domain::ProposalRecord {
+        id: ProposalId::new(1),
+        status: crate::domain::ProposalStatus::Submitted,
+        owner: crate::domain::PlannerOwner {
+            origin: crate::domain::PlannerOrigin::Runtime,
+            workspace_id: None,
+        },
+        submitted_at: "now".into(),
+        revise_count: 0,
+        task_ids: vec![TaskId::new(11)],
+        goal_ids: Vec::new(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    })
+    .unwrap();
+    let section = plan_review::replacement_section(&PlanReviewMaterial {
+        proposal: &proposal,
+        tasks: &[],
+        goals: &[],
+        lint: &[],
+        others: &[],
+        queued: &[],
+        queued_left_out: 0,
+        expected: &BTreeMap::new(),
+        precedents: &[],
+        hotspots: &[],
+        candidates: &[],
+        repo_root: Path::new("/repo"),
+        language: None,
+        replacement: Some((&brief, None)),
+    });
+    let header = "\n\nThe replacement of a parked task:\n";
+    assert!(section.starts_with(header), "{section}");
+    assert!(section.len() <= header.len() + PLAN_REVIEW_REPLACEMENT_BYTES);
+    assert!(
+        section.ends_with(&format!("\n{}", plan_review::REPLACEMENT_CHECKS)),
+        "{}",
+        &section[section.len() - 2_000..]
+    );
+    assert!(section.contains("read it with `dagq replans 7`"));
+    assert!(section.contains("the operations are documented"));
+    assert_reads_are_the_jobs(&section);
 }

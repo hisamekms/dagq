@@ -63,6 +63,11 @@ pub enum LintCode {
     /// acceptance version (ADR-t1504-2 decision 7): submit refuses such a
     /// draft and a person's bypass such a draft or submitted task.
     FollowUpMembershipUnjudged,
+    /// The task is a child of a proposal that replaces a replanning
+    /// operation's task, and the proposal's replacement plan does not hold
+    /// ([`super::replan_plan::check_plan`]): reported on the first child
+    /// of the proposal among the targets.
+    ReplacementPlan,
 }
 
 /// One broken rule: its code, the task it is about and why.
@@ -106,6 +111,9 @@ pub struct LintInput {
     /// The follow_up targets whose membership judgement is missing,
     /// undecided or needs a recheck (ADR-t1504-2 decision 7).
     pub membership_gaps: BTreeMap<TaskId, MembershipGap>,
+    /// The problems of the replacement plans the targets' proposals go
+    /// with, each on the target to report it on.
+    pub replacement: BTreeMap<TaskId, Vec<String>>,
 }
 
 /// Check every rule on `input.targets`. The violations come per target in
@@ -177,6 +185,9 @@ pub fn lint(input: &LintInput) -> Vec<LintViolation> {
                     gap.explain()
                 ),
             ));
+        }
+        for problem in input.replacement.get(&task.id()).into_iter().flatten() {
+            found.push(violation(LintCode::ReplacementPlan, task, problem.clone()));
         }
         violations.extend(found);
     }
@@ -411,6 +422,7 @@ mod tests {
             goal_tags: None,
             draft_goal_tags: BTreeMap::new(),
             membership_gaps: BTreeMap::new(),
+            replacement: BTreeMap::new(),
         }
     }
 
@@ -419,6 +431,16 @@ mod tests {
             .into_iter()
             .map(|v| (v.task_id.as_i64(), v.code))
             .collect()
+    }
+
+    #[test]
+    fn a_replacement_plans_problems_are_reported_on_their_child() {
+        let mut lint_input = input(vec![task(1, "a"), task(2, "b")], Vec::new());
+        lint_input.replacement.insert(
+            TaskId::new(1),
+            vec!["item_unmapped: acceptance item 2 is mapped to no child".into()],
+        );
+        assert_eq!(codes(&lint_input), vec![(1, LintCode::ReplacementPlan)]);
     }
 
     #[test]

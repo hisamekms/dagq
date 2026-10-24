@@ -25,7 +25,8 @@ use super::{
 use crate::{
     application::{
         PlanDecided, PlanReviewApplied, PlanReviewApply, PlanReviewFailure, PlanReviewHold,
-        PlanReviewJob, PlanReviewStore, PlannerHold, ReopenedTask, RevisingProposal,
+        PlanReviewJob, PlanReviewStore, PlannerHold, ReopenedTask, ReviseGoalWait,
+        RevisingProposal,
     },
     domain::{
         Ask, AskId, AskKind, HEARTBEAT_TIMEOUT_SECS, PlanAnswer, PlanReviewAction,
@@ -646,6 +647,46 @@ impl PlanReviewStore for SqliteQueue {
             Some(over) => (over.decision, over.overridden.clone()),
             None => (apply.decision, apply.overridden.clone()),
         };
+        // A pass of a proposal that replaces a replanning operation's task
+        // stands only while its replacement plan holds now, as the pass's
+        // own actions leave it (ADR-t1521-2 decision 4): otherwise none of
+        // its actions applies, and it becomes what the runtime made of it
+        // (`replacement_refused`): a revise with the problems within the
+        // revises, a concern past them (ADR-0047 decision 11).
+        let replacement = if decision == PlanReviewDecision::Pass {
+            let mut problems =
+                super::replans::replacement_problems(&tx, job.proposal_id, &apply.verdict.actions)?;
+            if !problems.is_empty() && !apply.verdict.actions.is_empty() {
+                problems.insert(
+                    0,
+                    format!(
+                        "the replacement plan was checked as the pass's actions would leave it: {}",
+                        serde_json::to_string(&apply.verdict.actions)?
+                    ),
+                );
+            }
+            problems
+        } else {
+            Vec::new()
+        };
+        let refused = if replacement.is_empty() {
+            None
+        } else {
+            Some(
+                apply
+                    .replacement_refused
+                    .as_ref()
+                    .context("a pass comes with what its refused replacement plan makes of it")?,
+            )
+        };
+        let (decision, overridden, concern) = match refused {
+            Some(refused) => (
+                refused.decided.decision,
+                refused.decided.overridden.clone(),
+                refused.decided.concern,
+            ),
+            None => (decision, overridden, apply.concern),
+        };
         // A pass leaves a priority it may not change (ADR-t1971-1
         // decision 3, by the records of ADR-t1975-1 decision 7) unapplied
         // with why, and the rest of the verdict goes on.
@@ -699,12 +740,13 @@ impl PlanReviewStore for SqliteQueue {
                 proposals::send_back(&tx, job.proposal_id, &stamp)?;
                 let mut reasons = apply.revise_reasons.clone();
                 reasons.extend(over_limit.as_ref().map(|over| over.reason.clone()));
+                reasons.extend(replacement.iter().cloned());
                 await_delivery(&tx, job.proposal_id, &reasons, now)?;
             }
             PlanReviewDecision::Concern => {
                 set_hold(&tx, job.proposal_id, Some(ReviewHold::Concern))?;
-                let mut ask = apply
-                    .ask
+                let mut ask = refused
+                    .map_or(&apply.ask, |refused| &refused.ask)
                     .clone()
                     .context("a concern opens an approve_plan ask")?;
                 if let Some(over) = &over_limit {
@@ -712,8 +754,19 @@ impl PlanReviewStore for SqliteQueue {
                     ask.question.push_str(&over.reason);
                     ask.question.push('.');
                 }
+                for problem in &replacement {
+                    ask.question.push_str("\n- ");
+                    ask.question.push_str(problem);
+                }
                 ask.validate()?;
                 applied.ask = Some(insert_ask(&tx, &ask)?);
+                super::replans::proposal_moved(
+                    &tx,
+                    job.proposal_id,
+                    crate::domain::task_replan::ReplanStatus::AwaitingAnswer,
+                    "plan review raised a concern a person answers",
+                    now,
+                )?;
             }
         }
         let reopens = if over_limit.is_some() {
@@ -761,6 +814,7 @@ impl PlanReviewStore for SqliteQueue {
                 "duration_secs": apply.duration_secs,
                 "prediction_error": predictions.as_ref().err(),
                 "prompt_bytes": apply.prompt_bytes,
+                "replacement_problems": replacement,
         });
         if let Some(session) = &apply.session {
             session.record(&mut finished);
@@ -772,7 +826,7 @@ impl PlanReviewStore for SqliteQueue {
             EventKind::PlanReviewFinished,
             finished,
         )?;
-        if let Some(decided) = &apply.concern {
+        if let Some(decided) = &concern {
             // What became of the concern (ADR-t451-1 decision 4): applied
             // as its recommendation, or left to a person and why.
             event(
@@ -888,13 +942,33 @@ impl PlanReviewStore for SqliteQueue {
             .collect()
     }
 
+    /// A revise of a proposal submitted for a request that replans a goal
+    /// is not claimed while another request of that goal has a planner at
+    /// work ([`super::plan_requests::REVISE_WAITS_FOR_GOAL`]): it waits.
     fn claim_revise(&mut self, proposal_id: ProposalId) -> Result<bool> {
         let now = self.generators.clock.now();
         Ok(self.conn.execute(
-            "UPDATE proposals SET revise_sent_at=?2, revise_planner_id=NULL
-             WHERE id=?1 AND status='revising' AND revise_sent_at IS NULL",
+            &format!(
+                "UPDATE proposals SET revise_sent_at=?2, revise_planner_id=NULL
+                 WHERE id=?1 AND status='revising' AND revise_sent_at IS NULL
+                 AND NOT {}",
+                super::plan_requests::REVISE_WAITS_FOR_GOAL
+            ),
             params![proposal_id, now],
         )? == 1)
+    }
+
+    fn revise_goal_wait(&self, proposal_id: ProposalId) -> Result<ReviseGoalWait> {
+        let (waiting, ended) = self.conn.query_row(
+            &format!(
+                "SELECT {}, {} FROM proposals WHERE id=?1",
+                super::plan_requests::REVISE_WAITS_FOR_GOAL,
+                super::plan_requests::REVISE_GOAL_WAIT_ENDED
+            ),
+            [proposal_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(ReviseGoalWait { waiting, ended })
     }
 
     /// Records `plan_revise_sent`. `opened` is the launch of a planner the
@@ -1132,7 +1206,30 @@ impl PlanReviewStore for SqliteQueue {
         let proposal_id = ask_proposal(&tx, &ask)?.context("the ask's task has no proposal")?;
         set_hold(&tx, proposal_id, None)?;
         let decided = match &answer {
-            PlanAnswer::Ready => proposals::approve(&tx, proposal_id, &stamp)?,
+            PlanAnswer::Ready => {
+                // A replacement whose plan no longer holds goes back to
+                // its planner with why, as a pass would, rather than fail
+                // the answer (ADR-t1521-2 decision 4).
+                let problems = super::replans::replacement_problems(&tx, proposal_id, &[])?;
+                if problems.is_empty() {
+                    proposals::approve(&tx, proposal_id, &stamp)?
+                } else {
+                    let sent = proposals::send_back(&tx, proposal_id, &stamp)?;
+                    let mut reasons = vec![format!(
+                        "a person answered ready to ask {ask_id}, but the replacement plan no longer holds"
+                    )];
+                    reasons.extend(problems);
+                    await_delivery(&tx, proposal_id, &reasons, now)?;
+                    super::replans::proposal_moved(
+                        &tx,
+                        proposal_id,
+                        crate::domain::task_replan::ReplanStatus::Reviewing,
+                        &format!("the replacement plan of proposal {proposal_id} no longer holds"),
+                        now,
+                    )?;
+                    sent
+                }
+            }
             PlanAnswer::SendBack(reason) => {
                 let sent = proposals::send_back(&tx, proposal_id, &stamp)?;
                 let mut reasons = vec![plan_review::person_send_back_reason(
@@ -1141,9 +1238,25 @@ impl PlanReviewStore for SqliteQueue {
                 )];
                 reasons.extend(latest_reasons(&tx, proposal_id)?);
                 await_delivery(&tx, proposal_id, &reasons, now)?;
+                super::replans::proposal_moved(
+                    &tx,
+                    proposal_id,
+                    crate::domain::task_replan::ReplanStatus::Reviewing,
+                    &format!("a person sent proposal {proposal_id} back (ask {ask_id})"),
+                    now,
+                )?;
                 sent
             }
             PlanAnswer::Cancel => {
+                // A replacement a person canceled goes back to its planner
+                // with the run still parked.
+                super::replans::proposal_moved(
+                    &tx,
+                    proposal_id,
+                    crate::domain::task_replan::ReplanStatus::Planning,
+                    &format!("a person canceled proposal {proposal_id} (ask {ask_id})"),
+                    now,
+                )?;
                 let canceled = proposal::cancel(proposals::read(&tx, proposal_id)?, stamp.clone())?;
                 proposals::save(&tx, &canceled)?;
                 for &task_id in canceled.task_ids() {
@@ -1649,6 +1762,7 @@ mod tests {
                             duration_secs: 1,
                             session,
                             prompt_bytes: None,
+                            replacement_refused: None,
                         },
                     )
                     .unwrap();
@@ -1766,6 +1880,7 @@ mod tests {
                             duration_secs: 1,
                             session,
                             prompt_bytes: None,
+                            replacement_refused: None,
                         },
                     )
                     .unwrap();

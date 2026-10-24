@@ -110,6 +110,7 @@ mod queue_tasks;
 mod recovery_codex;
 mod recurring_drafts;
 mod related;
+mod replan_planning;
 mod request_planner;
 mod request_planner_spike;
 mod review_builtins;

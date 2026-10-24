@@ -730,12 +730,12 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
     ) -> Result<Vec<crate::domain::plan_request::PlanRequest>> {
         queue.plan_requests(all)
     }
-    fn replan_operation(
+    fn replan_brief(
         &self,
         queue: &SqliteQueue,
         id: crate::domain::ReplanId,
-    ) -> Result<crate::domain::task_replan::ReplanOperation> {
-        queue.replan_operation(id)
+    ) -> Result<crate::domain::replan_plan::ReplanBrief> {
+        queue.replan_brief(id)
     }
     fn replan_operations(
         &self,

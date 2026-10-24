@@ -427,24 +427,54 @@ pub fn decide_verdict(
         }
         decision => (decision, overridden),
     };
-    // A sure concern applied as a pass says what it became instead: a
-    // send-back, or left to a person past the revises.
-    let concern = concern.map(|mut decided| {
-        if decided.applied == Some(PlanReviewDecision::Pass) && decision != PlanReviewDecision::Pass
-        {
-            if decision == PlanReviewDecision::Revise {
-                decided.applied = Some(PlanReviewDecision::Revise);
-            } else {
-                decided.applied = None;
-                decided.escalated_because = Some(PlanConcernEscalation::ReviseLimit);
-            }
-        }
-        decided
-    });
     PlanVerdictDecision {
         decision,
         overridden,
-        concern,
+        concern: concern.map(|decided| became(decided, decision)),
+    }
+}
+
+/// A sure concern applied as a pass says what it became instead when the
+/// pass did not stand as `decision`: a send-back, or left to a person past
+/// the revises.
+fn became(mut decided: PlanConcernDecision, decision: PlanReviewDecision) -> PlanConcernDecision {
+    if decided.applied == Some(PlanReviewDecision::Pass) && decision != PlanReviewDecision::Pass {
+        if decision == PlanReviewDecision::Revise {
+            decided.applied = Some(PlanReviewDecision::Revise);
+        } else {
+            decided.applied = None;
+            decided.escalated_because = Some(PlanConcernEscalation::ReviseLimit);
+        }
+    }
+    decided
+}
+
+/// What the runtime makes of `decided`, a `pass` of `proposal` sent back
+/// `revise_count` times when its job started, when the transaction that
+/// would apply it finds the proposal's replacement plan does not hold
+/// (ADR-t1521-2 decision 4): a `revise` naming why, within the revises as
+/// any other, and past [`MAX_PLAN_REVISES`] a `concern` a person decides
+/// (ADR-0047 decision 11), as [`decide_verdict`] makes of a `revise`.
+pub fn refuse_replacement(
+    proposal: ProposalId,
+    revise_count: u32,
+    decided: &PlanVerdictDecision,
+) -> PlanVerdictDecision {
+    let why = "the replacement plan does not hold";
+    let (decision, overridden) = if revise_count >= MAX_PLAN_REVISES {
+        (
+            PlanReviewDecision::Concern,
+            format!(
+                "{why}, and proposal {proposal} was sent back {revise_count} times already (at most {MAX_PLAN_REVISES})"
+            ),
+        )
+    } else {
+        (PlanReviewDecision::Revise, format!("pass: {why}"))
+    };
+    PlanVerdictDecision {
+        decision,
+        overridden: Some(overridden),
+        concern: decided.concern.map(|concern| became(concern, decision)),
     }
 }
 
@@ -1139,6 +1169,54 @@ mod tests {
             assert_eq!(decided.decision, D::Concern, "{text}");
             assert_eq!(decided.concern.unwrap().applied, None, "{text}");
         }
+    }
+
+    #[test]
+    fn a_pass_whose_replacement_plan_does_not_hold_is_a_revise_until_the_limit() {
+        use PlanReviewDecision as D;
+        let proposal = ProposalId::new(1);
+        let pass = verdict(r#"{"verdict":"pass","reasons":[],"summary":"ok"}"#);
+        for count in 0..MAX_PLAN_REVISES {
+            let refused =
+                refuse_replacement(proposal, count, &decide_verdict(proposal, &pass, count));
+            assert_eq!(refused.decision, D::Revise, "{count}");
+            assert_eq!(
+                refused.overridden.as_deref(),
+                Some("pass: the replacement plan does not hold")
+            );
+        }
+        let refused = refuse_replacement(
+            proposal,
+            MAX_PLAN_REVISES,
+            &decide_verdict(proposal, &pass, MAX_PLAN_REVISES),
+        );
+        assert_eq!(refused.decision, D::Concern);
+        assert_eq!(
+            refused.overridden.as_deref(),
+            Some(
+                "the replacement plan does not hold, and proposal 1 was sent back 2 times already (at most 2)"
+            )
+        );
+        assert_eq!(refused.concern, None);
+        // A sure ready applied as the pass says what it became.
+        let ready = verdict(
+            r#"{"verdict":"concern","reasons":["x"],"summary":"s","recommendation":"ready",
+                "confidence":"high"}"#,
+        );
+        let within = refuse_replacement(proposal, 0, &decide_verdict(proposal, &ready, 0));
+        assert_eq!(within.concern.unwrap().applied, Some(D::Revise));
+        let past = refuse_replacement(
+            proposal,
+            MAX_PLAN_REVISES,
+            &decide_verdict(proposal, &ready, MAX_PLAN_REVISES),
+        )
+        .concern
+        .unwrap();
+        assert_eq!(past.applied, None);
+        assert_eq!(
+            past.escalated_because,
+            Some(PlanConcernEscalation::ReviseLimit)
+        );
     }
 
     /// A pass's actions are checked against the proposal before any is

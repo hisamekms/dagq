@@ -22,6 +22,7 @@ use crate::application::{
 };
 use crate::domain::kpi::KpiQuery;
 use crate::domain::plan_request::PlanRequest;
+use crate::domain::replan_plan::ReplanBrief;
 use crate::domain::stats::StatsQuery;
 use crate::domain::task_replan::ReplanOperation;
 use crate::domain::{
@@ -52,8 +53,9 @@ pub trait ObservationSources<Q: ?Sized> {
     fn plan_request(&self, queue: &Q, id: RequestId) -> Result<PlanRequest>;
     /// The open planning requests, every one with `all`.
     fn plan_requests(&self, queue: &Q, all: bool) -> Result<Vec<PlanRequest>>;
-    /// The replanning operation `id`, whatever its status.
-    fn replan_operation(&self, queue: &Q, id: ReplanId) -> Result<ReplanOperation>;
+    /// The replanning operation `id`, whatever its status, with what its
+    /// request's planner reads of it ([`ReplanBrief`]).
+    fn replan_brief(&self, queue: &Q, id: ReplanId) -> Result<ReplanBrief>;
     /// The open replanning operations, every one with `all`.
     fn replan_operations(&self, queue: &Q, all: bool) -> Result<Vec<ReplanOperation>>;
     /// `ci failures`: the landing branch's known failures by the bound
@@ -87,16 +89,24 @@ pub fn requests<Q: ?Sized>(
     Ok(json!({ "requests": requests }))
 }
 
-/// `replans`: the one operation `read` names whatever its status, or the
-/// open ones (every one with `all`), as `{"replans"}`.
+/// `replans`: the one operation `read` names whatever its status, with
+/// its latest replacement plan and that plan's problems now (`plan`,
+/// `plan_problems`), or the open ones (every one with `all`), as
+/// `{"replans"}`.
 pub fn replans<Q: ?Sized>(
     queue: &Q,
     sources: &(impl ObservationSources<Q> + ?Sized),
     read: &super::RecordsRead,
 ) -> Result<Value> {
     let replans = match read.id {
-        Some(id) => vec![sources.replan_operation(queue, ReplanId::new(id))?],
-        None => sources.replan_operations(queue, read.all)?,
+        Some(id) => {
+            let brief = sources.replan_brief(queue, ReplanId::new(id))?;
+            let mut operation = serde_json::to_value(&brief.operation)?;
+            operation["plan"] = serde_json::to_value(&brief.plan)?;
+            operation["plan_problems"] = serde_json::to_value(&brief.problems)?;
+            json!([operation])
+        }
+        None => serde_json::to_value(sources.replan_operations(queue, read.all)?)?,
     };
     Ok(json!({ "replans": replans }))
 }
@@ -315,7 +325,7 @@ mod tests {
         fn plan_requests(&self, _: &Records, _: bool) -> Result<Vec<PlanRequest>> {
             unimplemented!()
         }
-        fn replan_operation(&self, _: &Records, _: ReplanId) -> Result<ReplanOperation> {
+        fn replan_brief(&self, _: &Records, _: ReplanId) -> Result<ReplanBrief> {
             unimplemented!()
         }
         fn replan_operations(&self, _: &Records, _: bool) -> Result<Vec<ReplanOperation>> {

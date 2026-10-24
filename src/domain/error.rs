@@ -396,6 +396,10 @@ pub enum DomainError {
     ReplanApplyUnavailable {
         operation: ReplanId,
     },
+    /// A replacement plan that is not the JSON of one.
+    InvalidReplacementPlan {
+        reason: String,
+    },
     /// A second deletion of one acceptance item of a replanning
     /// operation in its condition mappings.
     ReplanDeletionRepeated {
@@ -1018,6 +1022,9 @@ impl fmt::Display for DomainError {
                 f,
                 "replan operation {operation} cannot be applied: this binary has no atomic replacement yet"
             ),
+            Self::InvalidReplacementPlan { reason } => {
+                write!(f, "the replacement plan is not valid JSON of one: {reason}")
+            }
             Self::ReplanDeletionRepeated { operation, ordinal } => write!(
                 f,
                 "replan operation {operation} already deletes acceptance item {ordinal}: an item is deleted once"

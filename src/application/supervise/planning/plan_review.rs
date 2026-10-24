@@ -16,8 +16,8 @@ use crate::domain::provider_switch::SwitchReason;
 use crate::domain::{ActorContext, Ask, AskConfidence, PlannerId};
 use crate::{
     application::{
-        PlanReviewApply, PlanReviewFailure, PlanReviewJob, PlannerHold, RevisingProposal,
-        StatusFilter, TaskListItem, TaskQuery, job_start_failure,
+        PlanReviewApply, PlanReviewFailure, PlanReviewJob, PlannerHold, RefusedPass,
+        ReviseGoalWait, RevisingProposal, StatusFilter, TaskListItem, TaskQuery, job_start_failure,
         planner::{
             self, PlannerLaunch, PlannerProbes, PlannerView, open_runtime_planner,
             planner_last_activity, planner_view, retired_workspace,
@@ -38,7 +38,7 @@ use crate::{
         next_to_review,
         plan_review::{
             PlanConcernDecision, PlanConcernEscalation, PlanRecommendation, PlanVerdictDecision,
-            decide_verdict,
+            decide_verdict, refuse_replacement,
         },
         search::{SearchKind, SearchQuery, SearchRef, any_word_query},
         stats::{LiveSnapshot, SlotSnapshot, StatsQuery, conflicts::ConflictHotspot},
@@ -559,6 +559,15 @@ impl PlanningState {
             .map(|detail| self.duplicate_candidates(env, proposal, &detail.task))
             .collect::<Result<Vec<_>>>()?;
         let language = env.verifier.language();
+        // A replacement of a parked task: its plan, the conditions and the
+        // saved work it maps (ADR-t1521-2 decision 4).
+        let replacement = env.queue.replacement_brief(proposal.id())?;
+        let snapshot = replacement
+            .as_ref()
+            .and_then(|brief| brief.operation.snapshot_id.as_deref())
+            .map(|snapshot| {
+                crate::domain::replan_snapshot::snapshot_dir(&env.layout.replans_dir, snapshot)
+            });
         plan_review_prompt(&PlanReviewMaterial {
             proposal,
             tasks: &tasks,
@@ -573,6 +582,9 @@ impl PlanningState {
             candidates: &candidates,
             repo_root: &env.layout.repo_root,
             language: language.as_ref(),
+            replacement: replacement
+                .as_ref()
+                .map(|brief| (brief, snapshot.as_deref())),
         })
     }
 
@@ -802,6 +814,16 @@ impl PlanningState {
         let mut revise_reasons = verdict.reasons.clone();
         revise_reasons.extend(precedents.iter().cloned());
         let ask = plan_ask(job, &verdict, &decided, &precedents);
+        // A pass whose replacement plan the applying transaction finds does
+        // not hold is a revise within the revises, a concern past them
+        // (ADR-0047 decision 11, ADR-t1521-2 decision 4).
+        let replacement_refused = (decided.decision == PlanReviewDecision::Pass).then(|| {
+            let refused = refuse_replacement(proposal, revise_count, &decided);
+            RefusedPass {
+                ask: plan_ask(job, &verdict, &refused, &precedents),
+                decided: refused,
+            }
+        });
         let PlanVerdictDecision {
             decision,
             overridden,
@@ -820,6 +842,7 @@ impl PlanningState {
                 duration_secs,
                 session,
                 prompt_bytes: Some(prompt_bytes.clone()),
+                replacement_refused,
             },
         )?;
         if applied.stale {
@@ -930,10 +953,16 @@ impl PlanningState {
                     .find(|view| view.planner.id == planner_id)
                     .is_none_or(|view| self.planner_gone(env, view))
             };
+            let waits_since = match revise.sent_at {
+                None => {
+                    planner_wait_start(revise.revised_at, env.queue.revise_goal_wait(proposal)?)
+                }
+                Some(_) => revise.revised_at,
+            };
             match revise_watch(
                 (revise.sent_at, revise.planner_id),
                 revise.unresponsive_at,
-                revise.revised_at,
+                waits_since,
                 gone,
                 now,
                 timeout,
@@ -1098,7 +1127,13 @@ impl PlanningState {
                 // At the limit: the revise waits for a runtime planner to
                 // end, and past the timeout frees a place (task 884).
                 _ => {
-                    if starved.is_none() && revise.revised_at.is_some_and(|at| now - at > timeout) {
+                    if starved.is_none()
+                        && planner_wait_start(
+                            revise.revised_at,
+                            env.queue.revise_goal_wait(proposal.id())?,
+                        )
+                        .is_some_and(|at| now - at > timeout)
+                    {
                         starved = Some(proposal.id());
                     }
                 }
@@ -1894,6 +1929,19 @@ enum ReviseWatch {
     Nothing,
 }
 
+/// Since when a revise not delivered, recorded at `revised_at`, waits for
+/// a planner: not while it waits for another request that replans its
+/// goal (`goal`), and from the close of the last planner it could have
+/// waited for when that is later, so neither the planner timeout nor a
+/// place freed at the limit counts its wait for the goal (ADR-t1521-2
+/// decision 3).
+fn planner_wait_start(revised_at: Option<i64>, goal: ReviseGoalWait) -> Option<i64> {
+    if goal.waiting {
+        return None;
+    }
+    revised_at.map(|at| goal.ended.map_or(at, |ended| at.max(ended)))
+}
+
 /// What a pass at `now` makes of a revise (`sent`: when its delivery was
 /// claimed and the planner it went to; `unresponsive_at`: when the inbox
 /// was told; `revised_at`: since when it waits), `planner_gone` judging
@@ -2674,6 +2722,41 @@ mod tests {
                 "precedent: ask 5 (blocked) asked: task 9 changes a type — a person answered: keep it",
                 "precedent: ask 3 (blocked) asked: task 9 changes a type — a person answered: drop that line",
             ]
+        );
+    }
+
+    /// A revise waits for a planner from when it was recorded, not while
+    /// another request of its goal has a planner at work, and from that
+    /// planner's close when it is later: a revise that waited for the goal
+    /// past the timeout is neither told of nor frees a place as that
+    /// planner closes.
+    #[test]
+    fn a_revise_waits_for_a_planner_from_the_end_of_its_wait_for_the_goal() {
+        let wait = |waiting, ended| ReviseGoalWait { waiting, ended };
+        assert_eq!(planner_wait_start(Some(900), wait(false, None)), Some(900));
+        assert_eq!(planner_wait_start(Some(900), wait(true, None)), None);
+        assert_eq!(planner_wait_start(Some(900), wait(true, Some(950))), None);
+        assert_eq!(
+            planner_wait_start(Some(900), wait(false, Some(990))),
+            Some(990)
+        );
+        assert_eq!(
+            planner_wait_start(Some(900), wait(false, Some(800))),
+            Some(900)
+        );
+        assert_eq!(planner_wait_start(None, wait(false, Some(990))), None);
+        let watch = |since| revise_watch((None, None), None, since, |_| false, 1_000, 60);
+        assert_eq!(
+            watch(planner_wait_start(Some(900), wait(false, None))),
+            ReviseWatch::NoPlanner { waited: 100 }
+        );
+        assert_eq!(
+            watch(planner_wait_start(Some(900), wait(false, Some(990)))),
+            ReviseWatch::Nothing
+        );
+        assert_eq!(
+            watch(planner_wait_start(Some(900), wait(true, None))),
+            ReviseWatch::Nothing
         );
     }
 

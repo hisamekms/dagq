@@ -72,6 +72,99 @@ pub struct PlanReviewMaterial<'a> {
     /// The language whose instruction ends the prompt (ADR-t616-2
     /// decision 3); counted within its limit.
     pub language: Option<&'a crate::domain::language::Language>,
+    /// For a proposal that replaces the task of a parked run (ADR-t1521-2
+    /// decision 4), the replanning operation with its latest plan, and
+    /// where the saved work is.
+    pub replacement: Option<(
+        &'a crate::domain::replan_plan::ReplanBrief,
+        Option<&'a Path>,
+    )>,
+}
+
+/// The bytes the section on a replacement plan takes at most: the plan, the
+/// conditions it maps and the successors, the rest read with `dagq replans
+/// ID`, and [`REPLACEMENT_CHECKS`], which is never cut.
+pub const PLAN_REVIEW_REPLACEMENT_BYTES: usize = 40_000;
+
+/// What plan review checks of a replacement plan's meaning beyond the
+/// mechanical checks: the end of [`replacement_section`], kept whole
+/// however much of the material before it is cut.
+pub const REPLACEMENT_CHECKS: &str = "Check its meaning, beyond the mechanical checks: each original item is really what the child items it names ask (an item mapped to a child item that says something else is a revise); the children together keep the whole scope and the goal's intent; what each child takes of the saved work (the snapshot's commits or its diff, and the order) fits what that child changes, read from the snapshot's diffs; nothing counts as done on the parked run's work, which has not landed; each successor waits for the children that hold what it needs; verification, evidence and the review of the parked run's findings are not weakened. A wrong mapping or carrying is a revise; a deletion or a change of intent no person's answer decided is a concern (scope).\n";
+
+/// The section on the replacement plan of a proposal that replaces a parked
+/// task, with what to check of its meaning, held to
+/// [`PLAN_REVIEW_REPLACEMENT_BYTES`]: the material (the conditions, the
+/// successors, the reviews and the plan) is cut to what the checks leave,
+/// and the rest named to read with `dagq replans ID`; empty for any other
+/// proposal.
+pub(super) fn replacement_section(material: &PlanReviewMaterial<'_>) -> String {
+    let Some((brief, snapshot)) = material.replacement else {
+        return String::new();
+    };
+    let op = &brief.operation;
+    let conditions = &op.conditions;
+    let mut text = format!(
+        "This proposal replaces task {tid} of replan operation {oid} ({status}): the run {run} of task {tid} is parked with its work saved{saved}. Its children stay submitted after your pass, until the runtime applies the replacement; your pass approves the plan below.\n\
+         The conditions of task {tid} as the operation fixed them (version {version}), one line per acceptance item (ordinal, hash, text):\n",
+        tid = op.task_id,
+        oid = op.id,
+        status = op.status.as_str(),
+        run = op.run_id,
+        saved = snapshot.map_or_else(String::new, |dir| format!(
+            " in {} (read only: `manifest.json` names its head, diffs, untracked files, receipt and logs)",
+            dir.display()
+        )),
+        version = op.task_version,
+    );
+    for item in &conditions.acceptance {
+        text.push_str(&format!(
+            "- {} `{}` {}\n",
+            item.ordinal, item.hash, item.text
+        ));
+    }
+    text.push_str(&format!(
+        "verify {:?}, paths {:?}, evidence {}, predecessors {:?}\n",
+        conditions.verify, conditions.paths, conditions.evidence, conditions.predecessors
+    ));
+    for successor in &brief.successors {
+        text.push_str(&format!(
+            "successor: task {} ({}) {}\n",
+            successor.task_id,
+            successor.status.as_str(),
+            successor.title
+        ));
+    }
+    for review in &brief.reviews {
+        text.push_str(&format!(
+            "review that sent the parked run back, {}: {}\n",
+            review.verdict,
+            review.reasons.join("; ")
+        ));
+    }
+    match &brief.plan {
+        Some(plan) => {
+            text.push_str(&format!(
+                "The replacement plan (revision {}, proposal {}): the mapping of each item to child items, what each child takes of the saved work and in which order, and which children each successor waits for:\n{}\n",
+                plan.revision,
+                plan.proposal_id,
+                serde_json::to_string_pretty(&plan.plan).unwrap_or_default()
+            ));
+        }
+        None => text.push_str("No replacement plan is recorded for it.\n"),
+    }
+    for line in crate::domain::replan_plan::describe(&brief.problems) {
+        text.push_str(&format!("mechanical problem now: {line}\n"));
+    }
+    // The material ends with a line's end, or the cut's note, which
+    // takes one before the checks.
+    let (text, _) = crate::application::prompt_fit::cut_part(
+        &text,
+        PLAN_REVIEW_REPLACEMENT_BYTES - REPLACEMENT_CHECKS.len() - 1,
+        crate::application::prompt_fit::Keep::Start,
+        &format!("read it with `dagq replans {}`", op.id),
+    );
+    let end = if text.ends_with('\n') { "" } else { "\n" };
+    format!("\n\nThe replacement of a parked task:\n{text}{end}{REPLACEMENT_CHECKS}")
 }
 
 /// One line quoting an answered ask as a precedent.
@@ -149,6 +242,7 @@ pub const OTHER_PROPOSAL_BYTES: usize = 48_000;
 /// the plan review job's role may run (task 1561, ADR-t1566-1 decision 3).
 pub const PLAN_REVIEW_READS: &[&str] = &[
     "dagq show ID --full",
+    "dagq replans ID",
     "dagq goal show ID --full",
     "dagq proposal show ID",
     "dagq lint --proposal ID",
@@ -975,7 +1069,7 @@ pub(super) fn plan_review_text(
          Tasks of the proposal:\n{tasks}\n\n\
          Files each task of the proposal is expected to touch (its declared paths without wildcards; without any, the files the landings of its 3 most related completed tasks changed; a guess, so check it against the source):\n{own_expected}\n\n\
          Goals they belong to (description, acceptance, constraints; constraints win over a task's description):\n{goals}\n\n\
-         The mechanical checks (`dagq lint`) found:\n{lint}\n\n\
+         The mechanical checks (`dagq lint`) found:\n{lint}{replacement}\n\n\
          Other proposals not ready yet:\n{others}\n\n\
          Ready and in-progress tasks, in summary, newest first (expected_files as for the proposal's tasks, and for an in-progress task also what its run changed so far; full_text_below marks a task given in full below; `dagq show ID --full` reads any of them in full):\n{queued}\n\n\
          In full, the ready and in-progress tasks among the candidates below or expected to touch a hotspot a task of the proposal is expected to touch, the most related to the proposal first:\n{queued_full}\n\n\
@@ -1041,6 +1135,7 @@ pub(super) fn plan_review_text(
         } else {
             ""
         },
+        replacement = replacement_section(material),
     )
 }
 
