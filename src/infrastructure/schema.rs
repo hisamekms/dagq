@@ -345,6 +345,35 @@ mod tests {
     }
 
     #[test]
+    fn the_floor_refuses_every_binary_before_the_replacement_guard() {
+        // A binary that does not know replan_plans has no guard keeping a
+        // replacement proposal's children submitted until the trusted
+        // runtime applies it: its plan review pass or its `ready` would
+        // ready a child before the apply (ADR-t1521-2 decision 4). The
+        // replan_plans migration is compatible, so a breaking one after it
+        // raises the floor past the latest schema without the table. Found
+        // by what they create and say so a renumbering on landing does not
+        // move them.
+        let plans = MIGRATIONS
+            .iter()
+            .position(|migration| migration.contains("CREATE TABLE replan_plans"))
+            .expect("the migration of the replacement plans");
+        assert!(is_compatible(MIGRATIONS[plans]));
+        let fence = MIGRATIONS
+            .iter()
+            .position(|migration| migration.contains("The fence of the replacement proposals"))
+            .expect("the fence of the replacement proposals");
+        assert!(fence > plans);
+        assert!(!is_compatible(MIGRATIONS[fence]));
+        // replan_plans alone left the floor below it, so a binary without
+        // the table still opened the queue.
+        let with_plans = plans as i64 + 1;
+        assert!(floor_for(with_plans) < with_plans);
+        assert!(floor_for(BINARY_SCHEMA) > with_plans);
+        assert!(recorded_floor(BINARY_SCHEMA).unwrap() > with_plans);
+    }
+
+    #[test]
     fn the_floor_refuses_every_binary_before_the_recurring_origin() {
         // A binary that does not know the origin `recurring` fails reading
         // a draft of it (draft_origins.origin is read fail closed,

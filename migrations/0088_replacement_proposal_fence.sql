@@ -1,0 +1,12 @@
+-- dagq-schema: breaking
+-- The fence of the replacement proposals (ADR-t1521-2 decision 4): a
+-- replacement proposal's children stay submitted through the plan review's
+-- pass and a person's `ready`, and only the trusted runtime's atomic apply
+-- readies them. A binary from before replan_plans has no such guard: its
+-- plan review pass (proposals::approve) or its `ready` would ready a child
+-- before the apply, and a worker could then claim it. replan_plans itself
+-- is compatible, so this one raises the floor past it and the queue then
+-- refuses every such binary at open, the fixed binary put back included.
+--
+-- No statement: the breaking declaration alone moves the floor, and
+-- `migrate` applies it only on an idle queue.

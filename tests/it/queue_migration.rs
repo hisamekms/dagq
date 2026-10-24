@@ -1289,6 +1289,51 @@ fn migration_fencing_the_recurring_origin_refuses_older_binaries() {
     assert_eq!(material["source_task_id"], 9);
 }
 
+/// The fence of the replacement proposals (ADR-t1521-2 decision 4): a
+/// binary from before replan_plans has no guard keeping a replacement
+/// proposal's children submitted until the trusted runtime's apply, so the
+/// migrated queue refuses every binary that knows only the schemas before
+/// the fence at open, and this binary opens it.
+#[test]
+fn migration_fencing_the_replacement_proposals_refuses_older_binaries() {
+    // Found by what it says, not its number, which a landing may change.
+    let at = MIGRATIONS
+        .iter()
+        .position(|migration| migration.contains("The fence of the replacement proposals"))
+        .unwrap();
+    let before = i64::try_from(at).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.db");
+    let raw = Connection::open(&path).unwrap();
+    for migration in &MIGRATIONS[..at] {
+        raw.execute_batch(migration).unwrap();
+    }
+    raw.execute_batch(&format!(
+        "PRAGMA application_id = 1129599281; PRAGMA user_version = {before};
+         INSERT INTO schema_floor(singleton, floor) VALUES (1, {floor});",
+        floor = floor_for(before),
+    ))
+    .unwrap();
+    drop(raw);
+    // Before it, a binary that knows only schema `before` opens the queue.
+    let older = SqliteQueue::schema(&path).unwrap();
+    let as_older = |state: &dagq::infrastructure::sqlite::SchemaState| {
+        dagq::infrastructure::sqlite::SchemaState {
+            binary_schema_version: before,
+            ..state.clone()
+        }
+    };
+    assert!(!as_older(&older).refuses_binary(), "{}", older.floor);
+    SqliteQueue::migrate(&path, None, 0).unwrap();
+    let migrated = SqliteQueue::schema(&path).unwrap();
+    // After it, the queue refuses that binary and this one opens it.
+    assert!(migrated.floor > before, "{}", migrated.floor);
+    assert!(as_older(&migrated).refuses_binary());
+    assert!(!migrated.refuses_binary());
+    assert!(migrated.opens);
+    SqliteQueue::open(&path).unwrap();
+}
+
 /// Task 325: the answerer and the chosen option of an ask are additions.
 /// An ask answered before the migration reads with both null (unknown),
 /// shown as null in its JSON, and an older binary's answer that names
