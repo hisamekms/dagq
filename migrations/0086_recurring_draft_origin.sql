@@ -1,0 +1,12 @@
+-- dagq-schema: breaking
+-- The fence of the recurring drafts' origin (ADR-0072 decision 2): the
+-- supervisor writes `recurring` to draft_origins.origin, a column read fail
+-- closed (docs/design/persistence.md "CHECK制約を使わない", ADR-t876-1).
+-- A binary from before it stops at the value: its `planner_drafts` fails
+-- for every draft and its `show` of the draft fails for good, since the
+-- row stays after the setting is gone. This migration raises the floor past
+-- every such binary, so the queue refuses it at open, the fixed binary put
+-- back included, before any of them reads the value.
+--
+-- No statement: the breaking declaration alone moves the floor, and
+-- `migrate` applies it only on an idle queue.

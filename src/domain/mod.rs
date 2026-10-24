@@ -1296,6 +1296,7 @@ pub mod reason;
 mod receipt;
 pub mod recheck;
 pub mod recovery;
+pub mod recurring;
 pub mod related;
 pub mod release_update;
 pub mod replan_snapshot;

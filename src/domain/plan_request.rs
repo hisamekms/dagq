@@ -345,7 +345,7 @@ impl OriginKind {
             Some(DraftOrigin::FollowUp) => Self::FollowUp,
             Some(DraftOrigin::GoalGap) => Self::GoalGap,
             Some(DraftOrigin::Reopened) => Self::Reopened,
-            Some(DraftOrigin::Revisit) | None => Self::Draft,
+            Some(DraftOrigin::Revisit | DraftOrigin::Recurring) | None => Self::Draft,
         }
     }
 }

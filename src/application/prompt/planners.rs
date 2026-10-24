@@ -949,6 +949,34 @@ pub const DRAFT_SOURCE_TEXT_BYTES: usize = 3_000;
 pub const DRAFT_RECEIPT_SUMMARY_BYTES: usize = 12_000;
 pub const DRAFT_RECEIPT_FOLLOW_UPS_BYTES: usize = 6_000;
 
+/// Where a `recurring` draft came from (ADR-0072): its key and interval,
+/// the previous registration of the key, the setting as it was when the
+/// draft was registered, and how to decide it: the time coming says only
+/// that the need is to be checked, so the planner checks it, adopts the
+/// draft made concrete when the work is needed and cancels it with the
+/// evidence when not, and asks a person only what it cannot decide.
+fn recurring_origin(target: &DraftTarget) -> Result<String> {
+    let material = &target.material;
+    let previous = match (
+        material["previous_task_id"].as_i64(),
+        material["previous_registered_at"].as_i64(),
+    ) {
+        (Some(task), Some(at)) => format!(
+            "the previous draft of the key was task {task}, registered at {} (it ended: completed or canceled)",
+            crate::domain::marks::utc_text(at.saturating_mul(1000))
+        ),
+        _ => "it is the first draft of the key".to_owned(),
+    };
+    Ok(format!(
+        "Task {id} is the draft of the recurring proposal with key `{key}` of the repository's dagq.toml `[[recurring]]`, registered every {days} days; {previous}. The interval coming means only that the need is to be checked now, not that the work is needed or adopted. The setting when it was registered:\n{snapshot}\
+         Check whether the work is needed now from what the proposal names (for a toolchain, the latest official stable release and the date you checked it against the version the repository pins). When it is needed, adopt it made concrete. When it is not (nothing new, already done), cancel it with `--reason not_worth` or `--reason stale` and a note with what you checked; the next draft of the key comes at its next interval. While it stays a draft no next draft of the key is registered, so keep it only with a revisit time. Neither the interval coming, nor that nothing is new, nor whether to adopt a recurring draft is a reason to ask a person.\n",
+        id = target.task.id(),
+        key = material["key"].as_str().unwrap_or("?"),
+        days = material["setting"]["interval_days"],
+        snapshot = fenced("json", &serde_json::to_string_pretty(&material["setting"])?),
+    ))
+}
+
 /// The initial prompt of a planner the runtime opens for a bundle of drafts
 /// the runtime or a job registered (ADR-0041 decision 16, ADR-t807-1): the
 /// material, and the three things it may do with each draft — submit it
@@ -983,6 +1011,9 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
         }
         DraftOrigin::FollowUp | DraftOrigin::GoalGap => "the runtime or a job registered it",
         DraftOrigin::Revisit => "a person added it and gave it a revisit time, which came",
+        DraftOrigin::Recurring => {
+            "the supervisor registered it because the interval of a recurring proposal in dagq.toml came"
+        }
     };
     let mut out = if single {
         format!(
@@ -1200,6 +1231,11 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
                 "A person added it (the runtime and the jobs did not): no origin of theirs to read. It came to you because its revisit time came (below).\n",
             );
         }
+        DraftOrigin::Recurring => {
+            for (target, _) in material.members {
+                out.push_str(&recurring_origin(target)?);
+            }
+        }
         DraftOrigin::GoalGap => {
             out.push_str(if single {
                 "A job that judged the goal below against its acceptance found this gap. Its findings:\n"
@@ -1258,7 +1294,11 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
         .filter(|(target, _)| target.task.goal_id().is_none())
         .map(|(target, _)| target.task.id().to_string())
         .collect();
-    if !goalless.is_empty() {
+    if !goalless.is_empty() && origin == DraftOrigin::Recurring {
+        out.push_str(
+            "\n## Goal\n\nThe draft belongs to no goal (its [[recurring]] table names none, or the goal it names is not open). When you adopt it, give it an open goal that needs the work with `dagq set-goal ID <goal>`, or add one under the goals' rules first.\n",
+        );
+    } else if !goalless.is_empty() {
         out.push_str(&if single {
             "\n## Goal\n\nThe draft belongs to no goal (the source's goal was closed, or it had none).\n".to_owned()
         } else {
@@ -1295,6 +1335,10 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
         ),
         DraftOrigin::Revisit => format!(
             "complete the draft with `dagq edit {t}` (acceptance, `--verify`, `--paths`, `--evidence`, and a line in `--context` that it was decided at its revisit time), keeping the person's intent,"
+        ),
+        DraftOrigin::Recurring => format!(
+            "make the draft concrete with `dagq edit {t}` (what this time's change is, such as the exact version, in its description and acceptance, `--verify`, `--paths`, `--evidence`, and `--context` beginning with `recurring draft (dagq.toml [[recurring]] key {key})` with what you checked, where and when, that shows the work is needed),",
+            key = first.material["key"].as_str().unwrap_or("?"),
         ),
     };
     out.push_str(&format!(

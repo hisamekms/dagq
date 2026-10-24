@@ -53,20 +53,33 @@ impl OwnedByTest for Command {
 
 /// A `dagq` in `dir` that runs the tests' binary [`OwnedByTest`], for a
 /// supervisor the test runs in its own process to start the service with:
-/// the service would inherit no owner from the test's environment.
+/// the service would inherit no owner from the test's environment. The
+/// supervisor copies it into a planner's or a run's directory under the
+/// queue's (`planners/<id>/runner`, `runs/<id>/runner`), where its sidecar
+/// is not, so the script looks for `owned-dagq.env` up to two directories
+/// above itself (`dir` is the queue's directory) when its own is missing.
 pub fn owned_executable(dir: &Path) -> PathBuf {
-    let wrapper = dir.join("owned-dagq");
+    let wrapper = dir.join(OWNED_DAGQ);
     let owner = std::process::id().to_string();
-    crate::common::template::script_env(
+    let mut values = String::new();
+    for (key, value) in [
+        (dagq::domain::queue_service::OWNER_PID_ENV, owner.as_str()),
+        ("OWNED_DAGQ", env!("CARGO_BIN_EXE_dagq")),
+    ] {
+        values.push_str(&format!("{key}='{}'\n", value.replace('\'', "'\\''")));
+    }
+    std::fs::write(dir.join(format!("{OWNED_DAGQ}.env")), values).unwrap();
+    crate::common::template::script(
         &wrapper,
-        "#!/bin/sh\nexport DAGQ_SERVICE_OWNER_PID\nexec \"$OWNED_DAGQ\" \"$@\"\n",
-        &[
-            (dagq::domain::queue_service::OWNER_PID_ENV, &owner),
-            ("OWNED_DAGQ", env!("CARGO_BIN_EXE_dagq")),
-        ],
+        format!(
+            "#!/bin/sh\nenv=\"$0.env\"\ndir=\"${{0%/*}}\"\nfor _ in 1 2 3; do\n  [ -f \"$env\" ] && break\n  env=\"$dir/{OWNED_DAGQ}.env\"\n  dir=\"${{dir%/*}}\"\ndone\n. \"$env\"\nexport DAGQ_SERVICE_OWNER_PID\nexec \"$OWNED_DAGQ\" \"$@\"\n"
+        ),
     );
     wrapper
 }
+
+/// The name of [`owned_executable`] in its directory.
+const OWNED_DAGQ: &str = "owned-dagq";
 
 /// A process that stands for a test's, given to a supervisor as its owner
 /// ([`dagq::domain::queue_service::OWNER_PID_ENV`]) so that the test can end

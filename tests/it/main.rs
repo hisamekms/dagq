@@ -108,6 +108,7 @@ mod queue_service_reads;
 mod queue_service_telemetry;
 mod queue_tasks;
 mod recovery_codex;
+mod recurring_drafts;
 mod related;
 mod request_planner;
 mod request_planner_spike;

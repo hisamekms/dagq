@@ -799,3 +799,22 @@ pub fn replans(
         "problems": problems,
     })
 }
+
+/// `status`'s, `stats`' and `doctor`'s `recurring` (ADR-0072) of `read`,
+/// the `[[recurring]]` tables of the bound main checkout's `dagq.toml` as
+/// read: `{schedule}` with one entry per key from `schedule`, the queue's
+/// history of them ([`crate::domain::recurring::RecurringSchedule`]),
+/// `{error}` when the file cannot be read (how `doctor` tells of a mistake
+/// of their format), none without a table.
+pub fn recurring(
+    read: Result<Vec<crate::domain::recurring::RecurringDraft>>,
+    schedule: impl FnOnce(
+        &[crate::domain::recurring::RecurringDraft],
+    ) -> Result<Vec<crate::domain::recurring::RecurringSchedule>>,
+) -> Result<Option<Value>> {
+    match read {
+        Err(error) => Ok(Some(json!({"error": format!("{error:#}")}))),
+        Ok(items) if items.is_empty() => Ok(None),
+        Ok(items) => Ok(Some(json!({"schedule": schedule(&items)?}))),
+    }
+}

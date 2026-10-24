@@ -345,6 +345,24 @@ mod tests {
     }
 
     #[test]
+    fn the_floor_refuses_every_binary_before_the_recurring_origin() {
+        // A binary that does not know the origin `recurring` fails reading
+        // a draft of it (draft_origins.origin is read fail closed,
+        // ADR-t876-1), so a breaking migration raises the floor past the
+        // latest schema such a binary knows. Found by what it says so a
+        // renumbering on landing does not move it.
+        let fence = MIGRATIONS
+            .iter()
+            .position(|migration| migration.contains("The fence of the recurring drafts' origin"))
+            .expect("the fence of the recurring origin");
+        assert!(!is_compatible(MIGRATIONS[fence]));
+        let latest_without = fence as i64;
+        assert!(floor_for(latest_without) <= latest_without);
+        assert!(floor_for(BINARY_SCHEMA) > latest_without);
+        assert!(recorded_floor(BINARY_SCHEMA).unwrap() > latest_without);
+    }
+
+    #[test]
     fn checks_naming_a_kind_are_found_and_are_never_compatible() {
         let sql = "-- dagq-schema: compatible
             CREATE TABLE a (kind TEXT NOT NULL CHECK (kind IN ('x', 'y')));

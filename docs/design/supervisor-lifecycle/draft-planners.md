@@ -28,7 +28,7 @@ related:
 
 [ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定13・16と[ADR-t807-1](../../adr/2026-09-28-t807-1-bundle-drafts-of-one-piece-of-work-for-one-runtime-planner.md)。
 runtimeやjobが作ったdraftを、同じきっかけで作られ同時に待っているものの束にし、束ごとにsupervisorがruntimeのplannerを1つ立て、plannerがdraftごとに採用・不採用・askのどれかを選ぶ。
-対象はfollow_upのdraftに限らず、runtimeやjobが作ったdraft全般（follow_up、goalの判断jobのgap）とする。
+対象はfollow_upのdraftに限らず、runtimeやjobが作ったdraft全般（follow_up、goalの判断jobのgap、定期の提案）とする。
 再検討の時刻（[ADR-t1540-1](../../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）は下の[再検討の時刻](#再検討の時刻)。
 use caseは`src/application/supervise/planning/draft_planner.rs`、storeは`src/infrastructure/draft_planners.rs`（port `DraftPlannerStore`）、規則と型は`src/domain/follow_up.rs`、promptは`prompt::draft_planner_prompt`。
 run slotは使わず、[Plan review](plan-review.md#reviseの配送)の`tend_planners`の中で、reviseの配送の後に進める（drain中は立てない）。
@@ -38,6 +38,7 @@ run slotは使わず、[Plan review](plan-review.md#reviseの配送)の`tend_pla
    材料に所属の提案の無いdraftはpromptが`(none)`として、種類の無いdraftはpromptと集計が`unlabeled`として扱う。
    runのreviewの`follow_ups`は、supervisorがreviewの判定（着地の前）で同じ経路で種類`docs_drift`のdraftにするので、同じrunのreceiptのdraftより先に対象になりうる（[Review](review.md#文書の照合)）。
    `goal_gap`は、[goal review](goal-review.md)のjobの`gaps`のverdict（と人の`approve_goal`の`gaps`のanswer）からruntimeが登録するdraftの出どころとする。
+   `recurring`は、supervisorが`dagq.toml`の定期の提案から登録するdraftの出どころとする（下の[recurringのdraft](#recurringのdraft)）。
    人が`add`で作ったdraftとobserverのdraft goalのtaskには行が無く、plannerは立たない（再検討の時刻が来たときだけ、出どころ`revisit`として立つ。[再検討の時刻](#再検討の時刻)）。
    出どころ`reopened`は、plan reviewがreadyから戻して自分のproposalに入れたtask（ADR-0044の決定14）が、そのproposalのwithdrawで`draft`に戻ったときにwithdrawが`draft_reopens`に書く。
    人が作ったtaskで`draft_origins`の行が無くても、これで誰かが拾う。
@@ -219,15 +220,22 @@ CLI、必須の欄、訂正とacceptanceの版、旧材料の移行は[所属の
   follow_upを外すためにacceptanceを弱めず、人に聞く（`--because scope`）。
   goal_gapとreopenedのdraftにはこの段落も提案の行も出ない（ADR-t1504-2決定10）。
 
-## 予定: recurringのdraft（未実装）
+## recurringのdraft<a id="予定-recurringのdraft未実装"></a>
 
-[ADR-0072](../../adr/0072-recurring-drafts-from-dagq-toml.md)の決定2〜4。supervisorが[定期設定](run-environment.md#予定-定期draft未実装)から登録したdraftも、上の2の対象に加える。現在の出どころの列挙と登録処理にはまだ`recurring`は無い。
+[ADR-0072](../../adr/0072-recurring-drafts-from-dagq-toml.md)の決定2〜4。
+supervisorが[定期設定](run-environment.md#定期draft)から登録したdraftも、上の2の対象に加える。
+登録は`tend_planners`の始め（`register_recurring_drafts`）で、立てるのは同じpassの`open_draft_planners`。
+storeは`src/infrastructure/recurring_drafts.rs`、規則と型は`src/domain/recurring.rs`。
 
-- **登録と記録**: `draft_origins.origin = recurring`とし、`material`に`key`、`previous_task_id`、`previous_registered_at`（初回はいずれもnull）、登録時の設定のsnapshotを持たせる。今の登録時刻は`draft_origins.created_at`に残す。queueの同じkeyの登録履歴から前回を引き、未完了のdraft/taskが無いことと期限を`BEGIN IMMEDIATE`で再検査して、draftと出どころを同じtransactionで書く。取り戻しも新規の登録も同じ経路を使う。
+- **登録と記録**: `draft_origins.origin = recurring`とし、`material`に`key`、`previous_task_id`、`previous_registered_at`（初回はいずれもnull）、登録時の設定のsnapshot（`setting`）を持たせる。
+  今の登録時刻は`draft_origins.created_at`に残し、queueの同じkeyの登録履歴はこの行だけが持つ。
+  同じkeyのtaskでcompletedかcanceledでないものが無いことと期限を`BEGIN IMMEDIATE`で再検査して、draftと出どころを同じtransactionで書くので、引き継ぎ中に重なったsupervisorも二重に登録しない。
 - **planner**: recurringは各登録を1件の束（task IDの鍵）として扱い、別keyや別周期を時刻の近さで束ねない。
-  初期promptにkey・前回の登録・設定のsnapshotとgoalの材料を載せる。
-  同時数`runtime_planners`、同じdraftへの二重起動の防止、上限と使い切った後の経路は既存のものを使う。
+  初期promptにkey・前回の登録・設定のsnapshotと採否の手順（`prompt::draft_planner_prompt`）を載せる。
   上限や`keep_draft`で残ったdraftも非終端なので、次の周期を登録して迂回しない。
-- **採否**: 必要性を確認し、採用はedit・lint・submit、不採用はcancelとnote。採用の根拠はcontextに残し、通常のplan reviewを通る。Rustでは公式stableの版と確認日・今の固定版を記録し、更新が無ければcancelのnoteに根拠を残す。goalが未指定なら採用するplannerが適切な開いたgoalを探すか作り、閉じたgoalへの追加や再開は既存のgoalの規則に従う。
+- **採否**: 必要性を確認し、採用はedit・lint・submit、不採用はcancelとnote。
+  採用の根拠はcontextに残し、通常のplan reviewを通る。
+  所属の無いdraftは採用するplannerが`set-goal`で開いたgoalに入れる。
 - **深さと柵**: recurringのdraftは`follow_up_depth = 0`で、採用の記録は`draft_adopted`とする。recurring自体にはfollow_upの元goal・深さによるadoptの柵を当てない。派生するfollow_upには通常どおり深さ+1と登録時の元goalの記録・所属の判断・自動採用の柵を適用する。
-- **人への問い**: 上の「推奨が出せればplannerが決める」とADR-0047決定41を適用する。判断できる採否は自分で決め、材料で決めきれないscope/discard、低い確信度、既存の柵が求める判断だけを理由の分類・推奨・確信度つきの`planner_question`にする。不要な定期の提案をcancelすることだけで人に聞かない。
+- **人への問い**: 上の「推奨が出せればplannerが決める」とADR-0047決定41を適用する。
+  不要な定期の提案をcancelすることだけで人に聞かない。

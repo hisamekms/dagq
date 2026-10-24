@@ -137,7 +137,7 @@ Its planner (or a person) withdraws a `submitted` or `revising` proposal without
 - **A revising proposal that cannot be resubmitted.** Its drafts were all readied with `ready --bypass-review` or canceled, so `submit --proposal ID` fails with `EmptyProposal` and the proposal would stay `revising` for good.
 - **The plan is dropped or reshaped.** The person no longer wants it, or its tasks go into another proposal.
 
-The proposal ends `canceled`, its `submitted` tasks go back to `draft` (others stay as they are), and an open `approve_plan` ask on it is closed, so no answer lands on the tasks' next proposal. Then submit the drafts in another proposal, `cancel` them, or leave them; a draft with an origin (`follow_up`, `goal_gap`) goes back to the runtime's planners. An `accepted` or `canceled` proposal is refused; the observer and the review jobs cannot run it.
+The proposal ends `canceled`, its `submitted` tasks go back to `draft` (others stay as they are), and an open `approve_plan` ask on it is closed, so no answer lands on the tasks' next proposal. Then submit the drafts in another proposal, `cancel` them, or leave them; a draft with an origin (`follow_up`, `goal_gap`, `recurring`) goes back to the runtime's planners. An `accepted` or `canceled` proposal is refused; the observer and the review jobs cannot run it.
 
 ## A run that needs paths outside its task
 

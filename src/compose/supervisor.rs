@@ -693,6 +693,12 @@ pub fn supervise_with_reviewer(
         Arc::new(move || load_fresh_session(&checkout))
             as crate::application::supervise::FreshSessionFile
     });
+    // `[[recurring]]` (ADR-0072), read each pass that tends the planners.
+    let recurring_file = Some({
+        let checkout = main_checkout.clone();
+        Arc::new(move || crate::infrastructure::run_env::load_recurring(&checkout))
+            as crate::application::supervise::RecurringFile
+    });
     // `[review.jobs]` (ADR-t1895-1 decision 1), read at the start: a table
     // that cannot be read keeps each kind's timeout the provider's.
     let review_jobs = load_review_jobs(&main_checkout)
@@ -1037,6 +1043,7 @@ pub fn supervise_with_reviewer(
         supervisor_file,
         provider_fallback_file,
         fresh_session_file,
+        recurring_file,
         forecasts,
         agent_watch: options.agent_watch,
         release: Some(release),

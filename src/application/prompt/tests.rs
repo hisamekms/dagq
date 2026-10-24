@@ -2739,6 +2739,64 @@ fn a_revisited_draft_s_planner_reads_the_last_decision() {
     }
 }
 
+/// A recurring draft's planner (ADR-0072) reads its key, the previous
+/// registration and the setting, checks whether the work is needed, adopts
+/// it made concrete or cancels it with what it checked, does not ask for
+/// the interval or the lack of anything new, and gives a goal-less draft an
+/// open goal when it adopts it.
+#[test]
+fn a_recurring_draft_s_planner_checks_the_need_and_decides() {
+    let draft = task(9, "chore: raise Rust", TaskStatus::Draft);
+    let material = json!({
+        "key": "rust-toolchain",
+        "previous_task_id": 4,
+        "previous_registered_at": 1_791_115_200,
+        "setting": {"key": "rust-toolchain", "interval_days": 42, "paths": ["rust-toolchain.toml"]},
+    });
+    let members = [(
+        DraftTarget {
+            task: draft,
+            origin: DraftOrigin::Recurring,
+            material,
+            planners: 0,
+            revisit: None,
+        },
+        1,
+    )];
+    let key = members[0].0.bundle_key();
+    assert_eq!(key.kind.as_str(), "task_id");
+    let prompt = draft_planner_prompt(&DraftPlannerMaterial {
+        db: Path::new("/q/queue.db"),
+        key: &key,
+        members: &members,
+        source: None,
+        receipt: None,
+        goals: &[],
+        answer: None,
+        handover: None,
+        revisits: &[],
+    })
+    .unwrap()
+    .text;
+    for part in [
+        "The recurring draft is not ready: the supervisor registered it because the interval of a recurring proposal in dagq.toml came",
+        "## Where it came from: recurring",
+        "recurring proposal with key `rust-toolchain`",
+        "registered every 42 days; the previous draft of the key was task 4, registered at 2026-10-04T12:00:00.000Z",
+        "\"paths\": [",
+        "the latest official stable release",
+        "cancel it with `--reason not_worth` or `--reason stale`",
+        "is a reason to ask a person",
+        "keep it only with a revisit time",
+        "`--context` beginning with `recurring draft (dagq.toml [[recurring]] key rust-toolchain)`",
+        "give it an open goal that needs the work with `dagq set-goal ID <goal>`",
+    ] {
+        assert!(prompt.contains(part), "{part} in {prompt}");
+    }
+    assert!(!prompt.contains("Membership proposal"), "{prompt}");
+    assert!(!prompt.contains("ADR"), "{prompt}");
+}
+
 /// Task 1508 (ADR-t1504-1, ADR-t1504-2): a follow_up draft's planner
 /// sees the worker's membership proposal, and judges and records where
 /// the draft belongs before it adopts, drops or asks: membership apart

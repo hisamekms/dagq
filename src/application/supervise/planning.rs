@@ -11,6 +11,7 @@ pub(super) mod finding_planner;
 pub(super) mod goal_review;
 pub(super) mod plan_review;
 pub(super) mod planner_turns;
+pub(super) mod recurring;
 pub(super) mod request_planner;
 
 /// 計画管理's state: the plan review and the goal review running now (one
@@ -30,6 +31,11 @@ pub(super) struct PlanningState {
     route_setting_warned: bool,
     /// Reads the limit on the improvement proposals running.
     max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
+    /// Reads `[[recurring]]`; `None` registers no recurring draft.
+    recurring_file: Option<RecurringFile>,
+    /// The last error reading `[[recurring]]` warned of, so one error is
+    /// warned of once.
+    recurring_error: Option<String>,
 }
 
 impl PlanningState {
@@ -40,6 +46,8 @@ impl PlanningState {
             planner_exits: Vec::new(),
             route_setting_warned: false,
             max_improvement_proposals: ports.max_improvement_proposals.clone(),
+            recurring_file: ports.recurring_file.clone(),
+            recurring_error: None,
         }
     }
 

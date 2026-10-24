@@ -913,6 +913,9 @@ impl PlanningState {
     /// Under `--no-claude` no planner is started: a person stands in.
     fn tend_planners(&mut self, env: &mut PlanningEnv<'_>, options: &LoopSettings) -> Result<()> {
         self.close_person_planners(env);
+        // The recurring drafts whose interval came (ADR-0072) are drafts
+        // like the others below, taken by a planner of the runtime's.
+        self.register_recurring_drafts(env);
         if env.jobs.no_claude() {
             return Ok(());
         }

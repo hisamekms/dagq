@@ -272,6 +272,13 @@ impl DraftPlannerStore for SupervisorQueue {
         let local = self.local()?;
         DraftPlannerStore::draft_origin(&**local, task)
     }
+    fn register_recurring_draft(
+        &mut self,
+        item: &crate::domain::recurring::RecurringDraft,
+    ) -> Result<crate::domain::recurring::RecurringOutcome> {
+        let mut local = self.local()?;
+        DraftPlannerStore::register_recurring_draft(&mut **local, item)
+    }
     fn planner_drafts(&self) -> Result<Vec<DraftTarget>> {
         let local = self.local()?;
         DraftPlannerStore::planner_drafts(&**local)

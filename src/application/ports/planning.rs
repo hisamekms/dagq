@@ -297,6 +297,13 @@ pub trait DraftPlannerStore: DraftPlannerReads {
     ) -> Result<()>;
     /// Where the draft came from, if the runtime or a job registered it.
     fn draft_origin(&self, task: TaskId) -> Result<Option<(DraftOrigin, serde_json::Value)>>;
+    /// Register the draft of a `[[recurring]]` table when its interval
+    /// came and no task of its key is still to end (ADR-0072 decision 2),
+    /// re-checked in the write transaction that registers it.
+    fn register_recurring_draft(
+        &mut self,
+        item: &crate::domain::recurring::RecurringDraft,
+    ) -> Result<crate::domain::recurring::RecurringOutcome>;
     /// The drafts waiting for a planner of the runtime's, by ID: `draft`,
     /// in no proposal, with an origin, no planner open for it, no
     /// `planner_question` about it nobody closed, not kept as a draft by

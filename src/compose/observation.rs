@@ -545,6 +545,19 @@ fn doctor_ci_watch(queue: &SqliteQueue) -> Result<Option<Value>> {
     )
 }
 
+/// `status`'s, `stats`' and `doctor`'s `recurring` ([`health::recurring`])
+/// of the `dagq.toml` of the bound main checkout and the queue's history;
+/// none for a queue bound to no checkout.
+fn recurring_view(queue: &SqliteQueue) -> Result<Option<Value>> {
+    let Some(checkout) = bound_checkout(queue)? else {
+        return Ok(None);
+    };
+    health::recurring(
+        crate::infrastructure::run_env::load_recurring(&checkout),
+        |items| queue.recurring_schedule(items),
+    )
+}
+
 /// `stats` on the system clock: see [`OneShot::stats`].
 pub fn stats(db: &Path, query: &StatsQuery) -> Result<Value> {
     OneShot::system().stats(db, query)
@@ -1222,6 +1235,9 @@ impl OneShot {
             status["toolchains"] = toolchains;
         }
         status["replans"] = health::replans(&queue.open_replans()?);
+        if let Some(recurring) = recurring_view(queue)? {
+            status["recurring"] = recurring;
+        }
         health::add_held_tasks(
             &mut status,
             &queue.held_tasks()?,
@@ -1333,6 +1349,11 @@ impl OneShot {
                     report["command_rules"] = rules;
                 }
                 health::add_runtimes(&mut report, &queue, &SystemProcesses, runtimes_of(&queue))?;
+                // The recurring drafts and a mistake of their tables
+                // (ADR-0072).
+                if let Some(recurring) = recurring_view(&queue)? {
+                    report["recurring"] = recurring;
+                }
                 // The means the CI watch reads GitHub with (ADR-t1920-1).
                 if let Some(ci_watch) = doctor_ci_watch(&queue)? {
                     report["ci_watch"] = ci_watch;
@@ -1399,7 +1420,7 @@ impl OneShot {
     /// [`Self::stats`] on `queue`, the queue at `db` the caller already
     /// opened, so a command opens it once.
     pub fn stats_of(&self, queue: &SqliteQueue, db: &Path, query: &StatsQuery) -> Result<Value> {
-        self.with_stats_sources(queue, db, |now, sources| {
+        let mut stats = self.with_stats_sources(queue, db, |now, sources| {
             Ok(serde_json::to_value(statistics::stats(
                 queue,
                 &SystemProcesses,
@@ -1407,7 +1428,12 @@ impl OneShot {
                 query,
                 sources,
             )?)?)
-        })
+        })?;
+        // When each recurring draft is registered next (ADR-0072).
+        if let Some(recurring) = recurring_view(queue)? {
+            stats["recurring"] = recurring;
+        }
+        Ok(stats)
     }
 
     /// `stats --ledger` on `queue`, the queue at `db`: see

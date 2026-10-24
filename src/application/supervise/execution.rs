@@ -529,6 +529,10 @@ pub struct Ports<'a> {
     /// `[fresh_session]` of the main checkout's `dagq.toml` (`None` for no
     /// file), read again each pass (ADR-t2080-1); `None` reads nothing.
     pub fresh_session_file: Option<FreshSessionFile>,
+    /// `[[recurring]]` of the main checkout's `dagq.toml` (ADR-0072
+    /// decision 1), read again each pass; `None` registers no recurring
+    /// draft.
+    pub recurring_file: Option<RecurringFile>,
     /// Records the forecast snapshots (ADR-0070 decision 3); `None`
     /// records none.
     pub forecasts: Option<ForecastPort>,
@@ -594,6 +598,10 @@ pub type ProviderFallbackFile =
 /// (ADR-t2080-1).
 pub type FreshSessionFile =
     Arc<dyn Fn() -> Result<Option<crate::domain::fresh_session::FreshSessionConfig>> + Send + Sync>;
+
+/// Reads `[[recurring]]` of the main checkout's `dagq.toml` (ADR-0072).
+pub type RecurringFile =
+    Arc<dyn Fn() -> Result<Vec<crate::domain::recurring::RecurringDraft>> + Send + Sync>;
 
 /// Spawn a thread that reports its `tracing` events to the subscriber of
 /// the spawning thread, so a supervisor run under a scoped subscriber (the

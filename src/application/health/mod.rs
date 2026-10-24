@@ -49,6 +49,39 @@ pub use runs::*;
 mod tests {
     use super::*;
 
+    /// `recurring` shows each key's schedule, the error of a file that
+    /// cannot be read (how `doctor` tells of a mistake), and nothing
+    /// without a table.
+    #[test]
+    fn the_recurring_view_shows_the_schedule_or_the_error() {
+        use crate::domain::recurring::{RecurringDraft, RecurringSchedule};
+        let item = RecurringDraft {
+            key: "k".into(),
+            interval_days: 1,
+            title: "t".into(),
+            description: "d".into(),
+            acceptance: "a".into(),
+            verification: Vec::new(),
+            paths: Vec::new(),
+            evidence: Vec::new(),
+            goal: None,
+        };
+        let schedule = |items: &[RecurringDraft]| {
+            Ok(items
+                .iter()
+                .map(|item| RecurringSchedule::of(&item.key, item.interval_days, None, None))
+                .collect())
+        };
+        let shown = recurring(Ok(vec![item]), schedule).unwrap().unwrap();
+        assert_eq!(shown["schedule"][0]["key"], "k");
+        assert_eq!(shown["schedule"][0]["next_at"], serde_json::Value::Null);
+        let error = recurring(Err(anyhow::anyhow!("dagq.toml:3: bad")), schedule)
+            .unwrap()
+            .unwrap();
+        assert_eq!(error["error"], "dagq.toml:3: bad");
+        assert!(recurring(Ok(Vec::new()), schedule).unwrap().is_none());
+    }
+
     /// `doctor`'s `roles` keys every role but the worker's, gives the
     /// runtime's planner the headless route only, and keeps the defaults
     /// with `error` when `[roles.*]` could not be read.

@@ -786,6 +786,12 @@ impl DraftPlannerStore for SqliteQueue {
     fn draft_origin(&self, task: TaskId) -> Result<Option<(DraftOrigin, Value)>> {
         SqliteQueue::draft_origin(self, task)
     }
+    fn register_recurring_draft(
+        &mut self,
+        item: &crate::domain::recurring::RecurringDraft,
+    ) -> Result<crate::domain::recurring::RecurringOutcome> {
+        SqliteQueue::register_recurring_draft(self, item)
+    }
     fn planner_drafts(&self) -> Result<Vec<DraftTarget>> {
         SqliteQueue::planner_drafts(self)
     }
@@ -1644,9 +1650,10 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
         };
         let kind = match origin {
             DraftOrigin::FollowUp => EventKind::FollowUpAdopted,
-            DraftOrigin::GoalGap | DraftOrigin::Reopened | DraftOrigin::Revisit => {
-                EventKind::DraftAdopted
-            }
+            DraftOrigin::GoalGap
+            | DraftOrigin::Reopened
+            | DraftOrigin::Revisit
+            | DraftOrigin::Recurring => EventKind::DraftAdopted,
         };
         let recorded: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind=?2)",

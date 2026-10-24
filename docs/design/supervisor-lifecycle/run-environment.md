@@ -242,22 +242,20 @@ inboxのwatchのaskの通知は、queueが束縛されたcommon directoryの名�
 - 2つのkindはtaskにもgoalにも紐づかない行として`run_events`に入る（[persistence](../persistence.md)）。
 
 
-## 予定: 定期draft（未実装）
+## 定期draft<a id="予定-定期draft未実装"></a>
 
-[ADR-0072](../../adr/0072-recurring-drafts-from-dagq-toml.md)の決定1・2・5。現在の読み手は`[[recurring]]`を受け付けない。固定バイナリが対応してから設定を置く。読むのは上の「main checkoutの決め方」の作業ファイルで、supervisorが各passで読み直す。表が無ければ登録しない。
+[ADR-0072](../../adr/0072-recurring-drafts-from-dagq-toml.md)の決定1・2・5。
+`[[recurring]]`は1表で1つの定期の提案で、欄の意味は`domain::recurring::RecurringDraft`、読み手と誤りの種類は`infrastructure::recurring_config`のdoc commentが持つ。
+読むのは上の「main checkoutの決め方」の作業ファイルで、supervisorがruntimeのplannerを立てる各passで読み直す（`load_recurring`）。
+表が無ければ登録しない。
 
-| `[[recurring]]`の欄 | 型と意味 |
-| --- | --- |
-| `key` | 必須の空でない文字列。repositoryのqueue内で一意の恒久的な識別子 |
-| `interval_days` | 必須の正の整数。1日を24時間とした経過日数 |
-| `title`・`description`・`acceptance` | 必須の空でない文字列。draftの提案の材料 |
-| `verification` | 必須の文字列の配列。検証コマンドの提案 |
-| `paths` | 必須の文字列の配列。taskと同じglobの規則で検査する変更範囲 |
-| `evidence` | 必須の文字列の配列。taskのevidenceと同じ規則で検査する証拠の提案 |
-| `goal` | 任意の正の整数。draftに所属を提案するgoal ID |
-
-keyの重複、未知の欄、必須欄の欠け、型・値の不正を拒否する。設定を読めないpassは定期draftを登録せず、エラーを記録する。設定の誤りだけを人の判断のaskにはしない。既存のdraftの材料は登録時のsnapshotで、設定の変更は次の登録から効く。keyの削除で既存のdraftをcancelしない。
-
-期限はqueueの同じkeyの最後の登録時刻（UTC）に`interval_days`の日数を足す。
-重複の防止、履歴の無いkey、停止中の期限の取り戻し、登録履歴の扱いと最初の設定の予定は[ADR-0072](../../adr/0072-recurring-drafts-from-dagq-toml.md)の決定2・5が持つ。
-登録時のtransactionとplannerへの材料は[定期draftの予定](draft-planners.md#予定-recurringのdraft未実装)。
+- **誤り**: 表の誤りは`dagq.toml`全体の行番号付きの誤り。
+  読めないpassは定期draftを登録せず、同じ誤りごとに1回logにwarnを出す。
+  設定の誤りだけを人の判断のaskにはしない。
+  `doctor`の`recurring`の`error`がその誤りを出す。
+- **材料**: draftの材料は登録時のsnapshotで、設定の変更は次の登録から効く。
+  keyの削除で既存のdraftをcancelせず、同じkeyの再追加や内容の編集で間隔と重複の防止をリセットしない。
+  `goal`はそのgoalがtaskを受け付けるあいだだけdraftの所属にし、閉じていれば所属なしで登録して採用するplannerに任せる。
+- **期限**: queueの同じkeyの最後の登録時刻（UTC）に`interval_days`の日数を足す。
+  重複の防止、履歴の無いkey、停止中の期限の取り戻しは[ADR-0072](../../adr/0072-recurring-drafts-from-dagq-toml.md)の決定2のとおりで、登録時のtransactionとplannerへの材料は[recurringのdraft](draft-planners.md#recurringのdraft)。
+- **見え方**: `status`と`stats`の`recurring`の`schedule`がkeyごとの最後の登録・終わっていないtask・次の登録の予定を出す（欄は`domain::recurring::RecurringSchedule`）。

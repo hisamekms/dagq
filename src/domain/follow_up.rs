@@ -10,7 +10,9 @@
 //! that proposal is withdrawn gets origin `reopened` (task 418). A draft a
 //! person registers with `add` has no origin, and no planner is opened for
 //! it unless a revisit time it was given comes (origin `revisit`,
-//! ADR-t1540-1).
+//! ADR-t1540-1). A draft the supervisor registers from `[[recurring]]` of
+//! `dagq.toml` when its interval came gets origin `recurring` (ADR-0072,
+//! [`super::recurring`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +29,7 @@ string_enum!(
     GoalGap => "goal_gap",
     Reopened => "reopened",
     Revisit => "revisit",
+    Recurring => "recurring",
 });
 
 /// The material of a `reopened` draft: why plan review reopened the task
@@ -469,7 +472,7 @@ impl BundleKey {
             DraftOrigin::FollowUp => BundleKeyKind::SourceRun,
             DraftOrigin::GoalGap => BundleKeyKind::GoalReview,
             DraftOrigin::Reopened => BundleKeyKind::ReviewedProposal,
-            DraftOrigin::Revisit => BundleKeyKind::Task,
+            DraftOrigin::Revisit | DraftOrigin::Recurring => BundleKeyKind::Task,
         };
         match material.get(kind.as_str()) {
             Some(serde_json::Value::String(value)) if !value.is_empty() => Self {

@@ -1244,6 +1244,51 @@ fn migration_adding_the_execution_class_keeps_older_tasks_implementing() {
     assert_eq!(class(&mut queue, 2), ExecutionClass::Spike);
 }
 
+/// The fence of the recurring drafts' origin (ADR-0072, ADR-t876-1): a
+/// queue from before it keeps its drafts and their origins through the
+/// migration, and its floor then rises past the schema of every binary
+/// that does not know the origin `recurring`, so such a binary is refused
+/// at open; this binary opens it and reads the origins.
+#[test]
+fn migration_fencing_the_recurring_origin_refuses_older_binaries() {
+    use dagq::domain::DraftOrigin;
+    // Found by what it says, not its number, which a landing may change.
+    let at = MIGRATIONS
+        .iter()
+        .position(|migration| migration.contains("The fence of the recurring drafts' origin"))
+        .unwrap();
+    let before = i64::try_from(at).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.db");
+    let raw = Connection::open(&path).unwrap();
+    for migration in &MIGRATIONS[..at] {
+        raw.execute_batch(migration).unwrap();
+    }
+    raw.execute_batch(&format!(
+        "PRAGMA application_id = 1129599281; PRAGMA user_version = {before};
+         INSERT INTO schema_floor(singleton, floor) VALUES (1, {floor});
+         INSERT INTO tasks(title,description,acceptance,verification_commands,status)
+         VALUES ('follow','','','[]','draft');
+         INSERT INTO draft_origins(task_id, origin, material, created_at)
+         VALUES (1, 'follow_up', '{{\"source_task_id\": 9}}', 1);",
+        floor = floor_for(before),
+    ))
+    .unwrap();
+    drop(raw);
+    // Before it, a binary that knows schema `before` opens the queue.
+    let older = SqliteQueue::schema(&path).unwrap();
+    assert!(older.floor <= before, "{}", older.floor);
+    SqliteQueue::migrate(&path, None, 0).unwrap();
+    let migrated = SqliteQueue::schema(&path).unwrap();
+    // After it, the queue refuses every binary of schema `before` or older.
+    assert!(migrated.floor > before, "{}", migrated.floor);
+    assert!(migrated.opens);
+    let queue = SqliteQueue::open(&path).unwrap();
+    let (origin, material) = queue.draft_origin(TaskId::new(1)).unwrap().unwrap();
+    assert_eq!(origin, DraftOrigin::FollowUp);
+    assert_eq!(material["source_task_id"], 9);
+}
+
 /// Task 325: the answerer and the chosen option of an ask are additions.
 /// An ask answered before the migration reads with both null (unknown),
 /// shown as null in its JSON, and an older binary's answer that names
