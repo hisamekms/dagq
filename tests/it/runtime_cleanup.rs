@@ -615,7 +615,7 @@ fn a_landing_whose_worktree_removal_fails_stops_its_processes_and_leaves_no_git(
     let worktree = Path::new(run.worktree_path().unwrap()).to_path_buf();
     git(&repo, &["worktree", "lock", worktree.to_str().unwrap()]);
     // A copy of dagq in the worktree, kept out of its status, waiting from
-    // elsewhere on a queue of its own (as in the cleanup's test above).
+    // elsewhere on a queue of its own ([`idle_watch`]).
     let common_dir = PathBuf::from(git_out(
         &repo,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -627,21 +627,8 @@ fn a_landing_whose_worktree_removal_fails_stops_its_processes_and_leaves_no_git(
         .open(common_dir.join("info").join("exclude"))
         .and_then(|mut exclude| io::Write::write_all(&mut exclude, b"\ntools/\n"))
         .unwrap();
-    let idle = dir.path().join("idle.db");
-    drop(common::template::queue(&idle));
-    let executable = worktree.join("tools").join("dagq");
-    fs::create_dir_all(executable.parent().unwrap()).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_dagq"), &executable).unwrap();
     let mut started = Detached::default();
-    let left = started.hold(detached(
-        &format!(
-            "{} --db {} watch --timeout 30 --interval 1",
-            shell_path(&executable),
-            shell_path(&idle)
-        ),
-        dir.path(),
-        &dir.path().join("left.pid"),
-    ));
+    let left = started.hold(idle_watch(dir.path(), &worktree));
 
     let outcome = integrate(&db, 1, &repo).unwrap();
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
@@ -749,6 +736,32 @@ fn detached(command: &str, cwd: &Path, pid_file: &Path) -> u32 {
         .unwrap()
 }
 
+/// Start a copy of dagq at `tools/dagq` in `worktree`, detached in `dir`,
+/// that runs until it is stopped: the user's `watch` on a queue of its own
+/// in `dir` that nothing writes to (a copy of a system binary does not run
+/// on macOS). The user's watch reaches its queue only through the queue's
+/// service and ends at once when none answers, so the queue's service is
+/// started first; it stops with the test's process or its directory. Its
+/// pid.
+fn idle_watch(dir: &Path, worktree: &Path) -> u32 {
+    let idle = dir.join("idle").join("idle.db");
+    fs::create_dir_all(idle.parent().unwrap()).unwrap();
+    drop(common::template::queue(&idle));
+    assert!(common::service::host_client_env(&idle, &[], &["watch"]).is_empty());
+    let executable = worktree.join("tools").join("dagq");
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_dagq"), &executable).unwrap();
+    detached(
+        &format!(
+            "{} --db {} watch --timeout 30 --interval 1",
+            shell_path(&executable),
+            shell_path(&idle)
+        ),
+        dir,
+        &dir.join("left.pid"),
+    )
+}
+
 /// Task 1590: a process running an executable from under an ended run's
 /// worktree (as a test's child `dagq` left running from `target/`) is
 /// left alone while the task goes on, and stopped before the worktree
@@ -766,25 +779,11 @@ fn a_process_running_from_an_ended_runs_worktree_is_stopped_before_it_goes() {
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     let worktree = Path::new(run.worktree_path().unwrap()).to_path_buf();
     // A copy of dagq in the worktree, waiting from elsewhere on a queue of
-    // its own that nothing writes to, so it runs until stopped (a copy of
-    // a system binary does not run on macOS).
-    let idle = dir.path().join("idle.db");
-    drop(common::template::queue(&idle));
-    let executable = worktree.join("tools").join("dagq");
-    fs::create_dir_all(executable.parent().unwrap()).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_dagq"), &executable).unwrap();
-    // Both end by themselves too: the watch after its 30 reads, the
-    // sleeper once the test's directory is gone or after 60 seconds.
+    // its own ([`idle_watch`]). Both end by themselves too: the watch after
+    // its 30 seconds or once its queue's service is gone, the sleeper once
+    // the test's directory is gone or after 60 seconds.
     let mut started = Detached::default();
-    let left = started.hold(detached(
-        &format!(
-            "{} --db {} watch --timeout 30 --interval 1",
-            shell_path(&executable),
-            shell_path(&idle)
-        ),
-        dir.path(),
-        &dir.path().join("left.pid"),
-    ));
+    let left = started.hold(idle_watch(dir.path(), &worktree));
     let sleeper = started.hold(detached(
         &format!(
             "(i=0; while [ -d {} ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done)",
