@@ -1,7 +1,7 @@
 ---
 id: development-manual-smoke
 type: development
-title: 実ClaudeとCodexを含む経路の手動スモークの手順（故障経路・独立taskの完走・作業の内訳・非対話のworker・非対話のClaudeの前提・Codexのgoal reviewとrun review・runのreviewの実CLI・他のrepository）
+title: 実ClaudeとCodexを含む経路の手動スモークの手順（故障経路・独立taskの完走・作業の内訳・非対話のworker・非対話のClaudeの前提・Codexのgoal reviewとrun review・Codexのinbox・runのreviewの実CLI・他のrepository）
 status: current
 created: 2026-10-13
 owners:
@@ -13,6 +13,7 @@ related:
   - development-testing
   - development-operations
   - plan-manual-smoke-results
+  - plan-codex-inbox-spike
   - design-provider-lifecycle
   - adr-t813-1
   - adr-t813-3
@@ -36,6 +37,7 @@ runtime の振る舞いを大きく変えたとき、Claude Code か Codex CLI �
 - [非対話の Claude の前提の確認](#非対話の-claude-の前提の確認): queue を使わずに実 `claude -p` を起動し、非対話の経路が前提にする CLI の振る舞いを確かめる。
 - [Codex の goal review のスモーク](#codex-の-goal-review-のスモーク): 使い捨て repository で goal review を実 Codex で動かし、launch と sandbox と記録を確かめる。
 - [Codex の run review のスモーク](#codex-の-run-review-のスモーク): 使い捨て repository で通常 run の review を実 Codex で動かし、verdict から着地まで確かめる。
+- [Codex の inbox のスモーク](#codex-の-inbox-のスモーク): 使い捨て repository の queue に対して人が自分の terminal で Codex の inbox を開き、watch・ask の answer・復帰・区間の記録を確かめる。
 - [run の review の実 CLI の確認](#runのreviewの実cliの確認): ignored の IT で run の review の job の制限を実 Claude で確かめる。
 - [他の repository のスモーク](#他の-repository-のスモーク): dagq のソースでない使い捨て repository（default branch が `master`、`origin` なし、`Cargo.toml` も `AGENTS.md` も無い）で、`cargo install` したバイナリと公式の手順で入れた plugin を使い、`up`・計画の依頼から着地までを通す。
 
@@ -314,6 +316,66 @@ Claude Code の版を上げたとき、または読み手（`ClaudeTurnReader`�
    queue service 向けの置き換え前の `review_command` 単体は、上の profile の 5 つの `-c` の代わりに `--sandbox read-only` を持つが、worktree の `untrusted` の `-c` は同じである。
    実 Codex が使えない権限環境では `review_failed` と `approve_landing` ask を確認し、権限を直して別 task で再試験する。
 4. [後始末](#後始末)と同じく supervisor を止める。
+
+## Codex の inbox のスモーク
+
+inbox を Codex CLI の対話の session で開く経路（goal 77）は、worker が確かめられない。
+人の terminal・使い捨ての queue・`watch --role inbox` が要るためである。
+Codex の対話の TUI で inbox に要るものを queue なしで調べた結果は [codex-inbox-spike](../plans/codex-inbox-spike.md) にある。
+ここでは、それを使い捨ての queue の実物で確かめる。
+Codex の inbox を開く経路を入れたとき、Codex CLI の版を上げたとき、inbox の起動（`AgentProvider::inbox_command`）・hook・skill を変えたときに流す。
+人か inbox が行う（worker は使い捨ての queue を作れない。[隔離](#隔離)）。
+inbox を開く terminal の種類は問わず、cmux も tmux も使わない。
+
+1. [非対話の worker のスモーク](#非対話の-worker-のスモーク)の 1・2 と同じ用意をする。
+   使い捨て repository `dagq-smoke`、bare の `origin`、scratch のバイナリの wrapper `tq`、`tq init`、`codex login status` がログイン済みであること。
+   `~/.codex/config.toml`・`~/.codex/auth.json`・`CODEX_HOME` は書き換えない。
+   `~/.codex/config.toml` の更新時刻と sha256 を控える。
+   以後の `tq up` と `tq inbox` は、scratch のバイナリの dir を先頭にした `PATH` で打つ（inbox の Codex が打つ `dagq` も scratch のバイナリにするため。[他の repository のスモーク](#他の-repository-のスモーク)の 1 と同じ）。
+   `tq` は人の terminal だけで使い、inbox の中では使わない（`tq` の `env -u DAGQ_ROLE -u DAGQ_QUEUE …` が inbox の身元の環境を外し、inbox の実際の呼び出しの経路を確かめられなくなるため）。
+   inbox の中の `dagq` は、この `PATH` で scratch のバイナリに解決される。
+   worker の `dagq ask` が scratch の queue に届くよう、使い捨て repository の `dagq.toml` の `[run.env]` を[scratch の worker が打つ `dagq` の環境](#scratch-の-worker-が打つ-dagq-の環境)のとおり置く。
+2. inbox の provider を Codex にする手段を確かめる。
+   ADR（task 1181）が選んだ設定（`dagq.toml` の `[roles.inbox]`）か、`tq inbox --help` の起動の引数を使う。
+   どちらも無ければ、Codex で inbox を開く手段が無いことと scratch のバイナリの版を結果に書き、7 の後始末に進む。
+3. 自分の terminal で `tq up --claude ~/.local/bin/claude --codex ~/.local/bin/codex` を打つ。
+   [隔離](#隔離)の「`up` は使わない」の例外で、`dagq inbox` の経路を確かめるため `up` を使う（LaunchAgent ができる）。
+   supervisor が起動し、inbox は開かずに `dagq inbox` の案内が出ることを見る。
+4. 別の terminal（`DAGQ_ROLE` の無い、人自身の terminal）で `dagq-smoke` の中から、2 の設定か引数で `tq inbox` を打つ。
+   次を見る。
+   - Codex の TUI が前面で開き、`/status` の `Model provider`・`Model`・`Session` が出る。
+     `tq events --all --full` の `inbox_opened` に provider と guardrail の有無がある。
+     `tq status` の `inbox_guardrail` が ADR の決めたとおりである。
+   - 起動の時に更新の案内・hook の trust・開発中の feature の警告のどれが出たかを記録する。
+     hook の trust を求められたら、ADR の決めた扱いに従う（人の設定に書く「Trust all」は、ADR がそうと決めたときだけ選ぶ）。
+   - inbox の中で `command -v dagq` が scratch のバイナリを指し、`DAGQ_ROLE` が `inbox` であることを、inbox の画面の command の出力で見る。
+   - 最初の turn で inbox が `dagq status --role inbox` を読み、`dagq watch --role inbox --until-attention` を ADR の決めた形で回し始める（どちらも inbox の中の `dagq` で、`tq` ではない）。
+     Codex の background terminal か前景の待ちか、外の process からの `codex queue` か。
+     `tq status` の `inbox_watcher` が running になる。
+5. inbox に届くものを起こして確かめる。
+   - `dagq-smoke` に task を 1 件登録し、最初に `dagq ask --run $DAGQ_RUN_ID --kind worker_question --because scope --topic other --question '続けてよいか'` を打つよう description に書いて、`tq ready ID --bypass-review` する（add が返した ID だけに打つ）。
+     worker の ask が開くと、inbox の watch が返り、inbox が人に ask を見せる。
+     選択肢の提示（`request_user_input` か番号つきの文）と、待ちの間に人が打てるかを記録する。
+   - 人が答え、inbox がそれを `answer` で書く。
+     `tq events --all --full` の `ask_answered` の actor が inbox で、`authorization_denied` と `no_use_case` が無く、worker の run が再開する。
+     inbox の Codex の sandbox の中の `dagq` が queue に書けたか（queue service の socket か、ADR の決めた経路か）を、inbox の画面の command の出力で見る。
+     inbox の書き込みが service 経由になる前の build（[ADR-t3102-2](../adr/2026-10-22-t3102-2-only-the-queue-service-opens-the-db-schema-by-the-service-build-and-migration-order.md) 決定 6 の段 4 の前）では、`answer` が DB を直接開くので sandbox の中で失敗しうる。その出力を記録する。
+   - watch が返った後、inbox が watch をまた回すことを見る。
+     30 分以上 attention が無い間も watch が続き、次の attention で起きるかを見る（前景の待ちなら、turn が開いたままか、途中で止まったか）。
+6. 復帰と区間を確かめる。
+   - inbox で `/compact` を打ち、次の turn で inbox が `status --role inbox` から読み直して watch を続けるかを見る。
+   - `/clear` を打ち、新しい session で同じことを見る。
+   - `/quit` で終え、`codex resume <id>` ではなく `tq inbox` で開き直す。
+   - `tq events --all --full` と `tq stats --full` に inbox の session の区間（開いた・閉じた、provider `codex`、model）が残り、Claude の inbox の区間と見分けられることを見る。
+     `/clear` の前の session の区間がいつ閉じたかを記録する。
+   - Codex の rollout（`~/.codex/sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl`）の `turn_context` の `model` と、記録の model が同じであることを見る。
+7. 後始末。
+   - inbox の session を `/quit` で終え（外の見張りの process を `dagq inbox` が起こしていれば、それが残っていないことを pid で見る）、`tq down --wait` で supervisor を止め、`up` が作った LaunchAgent が残っていないことを見る。
+   - `tq doctor` の `unfinished_runs` が空であることを見る。
+   - 使い捨て repository `dagq-smoke`、bare の `origin`、`<scratch>/xdg` の queue の dir と scratch のバイナリを消す。
+   - `~/.codex/config.toml` の更新時刻と sha256 が 1 と同じかを見る。
+     変わっていれば、変わった欄（`[projects."…"]` の `trust_level`、`[tui.model_availability_nux]`、hook の trust など）を結果に書き、戻すかは人が決める。
+   - 結果は [manual-smoke-results](../plans/manual-smoke-results.md) に、Codex CLI の版・2 の手段・各確認の結果・見つけた問題として残す。
 
 ## run の review の実 CLI の確認<a id="runのreviewの実cliの確認"></a>
 
