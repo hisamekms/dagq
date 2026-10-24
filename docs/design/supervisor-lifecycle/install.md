@@ -82,7 +82,8 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
      `stats`の`updates`での数え方は`domain::stats::updates`が持つ。
      askの答えはsupervisorの自動更新のpassもリリースのpassも適用しない（ビルドを起こさない）ので、inboxが答えを読み、人の言葉で問いに書いた手を打ってaskを閉じる（dagq-recover skillの`reference/update.md`の`update_failed`）。
 
-queue serviceとqueueのbrokerは5の引き継ぎでは止めず、execした新しいbinaryのsupervisorの最初の見張りが前のbuildのものを1回だけ入れ替え、6のdrainの後は`up`が新しいbinaryで起動する（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
+queue serviceとqueueのbrokerは5の引き継ぎでは止めず、6のdrainの後は`up`が新しいbinaryで起動する。
+5の引き継ぎでは、execした新しいbinaryのsupervisorが、queue serviceは登録とsign inの前に（記録は最初の見張りで）、brokerは最初の見張りで、前のbuildのものを1回だけ入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
 
 `install`自身は引き継ぎの完了と、その後の見張り（上の7）を待つ。
 起動し直さなかったもの（modeの無いもの、起動し直しに失敗したもの）は止まったままなので、inboxの`supervisor_stopped`と問いを見て、人が`up`する（leaseはstaleになり、adoptで引き継がれる）。

@@ -175,7 +175,8 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
     どちらもinboxが閉じる。
 - **待ちの見直し**: 引き継いだsupervisorは、execした新しいprocessの最初のpassで、`wait_for_build`のtaskの待ち（[claimを控える](claim-hold.md#依存先の着地を含むbuildを待つtask)、ADR-t1632-1）を自分の新しいbuild識別子で判定し直し、依存先の着地を含めばclaimする（含むかの答えはprocessの中だけでcacheするので、引き継ぎの後は空から読む）。
   `update_installed`そのものは待ちを変えない: 待ちを決めるのは固定バイナリのfileではなくsupervisorの走っているbuildで、引き継いだsupervisorのbuildはそのfileと同じになる。
-- **queue serviceとqueueのbroker**: 3の引き継ぎはどちらも止めず、引き継いだsupervisorの最初の見張りが前のbuildのものを1回だけ入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
+- **queue serviceとqueueのbroker**: 3の引き継ぎはどちらも止めず、引き継いだsupervisorが前のbuildのものを1回だけ入れ替える。
+  queue serviceは登録とsign inの前に入れ替えて最初の見張りで記録し、brokerは最初の見張りで入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
 - **status**: `status`は結果を作ったprocessのbuild識別子と、自動更新（liveな登録のどれかが有効か、最新の段）と、登録ごとの設定と今のbuild識別子を出す。
   `status`はqueue serviceが作るので（人・inbox・plannerは[hostのCLI](../queue-service-host-cli.md#送る範囲)、実行側は[クライアントモード](../queue-service.md#クライアントモード)）、出るのは打った`dagq`ではなくserviceのbuild識別子になる。
   `state`の値の意味と、人の`dagq install`の`update_failed`を数えないことは`application::update::status`のdoc commentが持つ。

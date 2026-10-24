@@ -252,15 +252,16 @@ queueのDBが消えれば（使い捨てのqueueの片付け）自分で終わ�
 - `up`: preflightの後、supervisorより先に`application::queue_service::ensure`を打つ。
   起動できなければ`up`はsupervisorを起動せずに止まる。
   結果は`up`の出力の`queue_service`で、起動か入れ替えはevent `queue_service_started`に残す
-- supervisor: CLIのsupervisor（`--once`も）は一定の間隔でserviceを見て、居ない・答えないものは起動し直し、別のbuildのもの（`install`や自動更新の引き継ぎの前のバイナリが残したもの）は入れ替える（`queue_service_started`）。
+- supervisor: CLIのsupervisor（`--once`も）は登録とsign inの前に、居ないか別のbuild（`install`や自動更新の前のバイナリ）のserviceを起動か入れ替えし、最初の見張りで`queue_service_started`に残す（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
+  その後も一定の間隔で見て、同じように起動し直すか入れ替える。
   起動し直しの上限と、別のbuildの入れ替えとexecの前の起動の失敗の扱いは`application::supervise::host_ops::queue_service`のmodule doc。
-  drainと引き継ぎの間は見ない（execはserviceを次のプロセスに残し、次のプロセスがbuildの違いで入れ替える）
+  drainと引き継ぎの間は見ない（execはserviceを次のプロセスに残す）
 - serviceが居ない間、supervisorは新しいclaimと、queueのjob（plan review・goal review・observer・スループットの見直し）の起動を控える。
   走っているrunとそのreview・復旧は止めない（ADR-t1233-4決定2）
 - `down`: supervisorが居なければserviceを止めて`queue_service_stopped`に残す（`application::lifecycle::down`）。
   drainを待たない`down`は、signalの前に`queue_service_stop_requested`を書き、drainを終えた最後のsupervisorが止める（`queue_service_stopped`）
 - `install`と`install --allow-breaking`: `install`のdrain（`down --wait`）の後の`up`が新しいバイナリで起動する。
-  drainしない引き継ぎでは、新しいバイナリのsupervisorの最初の見張りが入れ替える
+  drainしない引き継ぎでは上のsupervisorが入れ替える
 - 人の手: `dagq service start`（`service.lifecycle`。`ensure`と同じ）・`dagq service stop`（supervisorが動いていれば次の見張りで起動し直す）・`dagq service status`（`queue.read`）
 
 ## 落ちたときの知らせ（ADR-t3102-3決定1・2）
