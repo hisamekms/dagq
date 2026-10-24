@@ -118,7 +118,12 @@ SQLiteのキュー・CLI・cwdからのqueueの解決、providerをテストダ�
 Claudeの代わりに、workerの非対話のturnとしてpromptどおりに変更・commit・receiptを書くstub（`tests/e2e/stub.rs`）をproviderにする。
 e2eは実プロセスを要るので`#[ignore]`にし（流し方は`tests/e2e.rs`のmodule doc）、カバレッジに含めない。
 
-タスクは`draft | submitted | ready | in_progress | completed | canceled`を持つ。`submitted`はplan review待ちで（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定8）、plannerが`submit`でproposalにして出す。`ready`にするのはplan reviewの経路と、人の`ready --bypass-review`と、失敗したrunの再試行だけ。`ready`で依存先がすべて`completed`のタスクだけがschedulerの起動候補になる。詳細な実行状態はTaskRunに保存する。
+タスクは`draft | submitted | ready | in_progress | completed | canceled`を持つ。
+`submitted`は通常はplan review待ちで（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定8）、plannerが`submit`でproposalにして出す。
+再計画の置換proposalの子はpassの後もtrusted runtimeの適用待ちとして`submitted`に残る（[taskの再計画](../plans/task-replanning.md#実装の状態)）。
+`ready`にするのはplan reviewの経路と、人の`ready --bypass-review`と、失敗したrunの再試行だけ。
+`ready`で依存先がすべて`completed`のタスクだけがschedulerの起動候補になる。
+詳細な実行状態はTaskRunに保存する。
 
 supervisorはagentの完了レシート、コミット、テスト、worktreeのclean状態を確認してからrunのsession wrapperを止める。worktreeとbranchは`integrate`がmainへ着地させるまで残し、着地後に`integrate`が削除する。
 

@@ -181,7 +181,7 @@ review・recovery・plan review・goal reviewのjobは、jobごとに別のrole�
 | review-job（`already_satisfied`の主張の判定） | jobの失敗（答えが無い） | 1回だけやり直し、それも答えが無ければ理由`recovery_failed`の`approve_close`のask（下の「壊れた出力はfail closed」） |
 | recovery-job | `repair`（`confidence: high`） | `RecoveryVerdict::applies()`を通り、さらにalertごとの前提（終わったrunは`plan_ended`、生きているrunは`check_live`）を今も満たすactionだけを適用する。満たさなければaskにする |
 | recovery-job | `repair`（`low`）/ `escalate` | 適用せず、actionを推奨として`decide`などのaskにする |
-| plan-review-job | `pass` / `revise` / `concern` | 1つのtransactionで`ready`・plannerへの差し戻し・`approve_plan`のask。`concern`の`high`で`reason_category`が`null`の`ready` / `send_back`はpass / reviseとして適用する（[Plan review](plan-review.md#aiが決めるconcern未実装)、ADR-t451-1決定4）。`actions`は`pass`（と適用した`ready`）のときだけ許された3種を適用し、`reopen`はverdictに関わらず検査して適用し、上限を超えれば1件も適用せず、最終の判定でproposalを差し戻すかconcernのaskにする（passはrevise、reviseの上限を過ぎていればconcern）。`pass`での優先度の扱いは各taskの記録の由来と優先度の出どころで分かれる（[Plan review](plan-review.md#verdictと適用)） |
+| plan-review-job | `pass` / `revise` / `concern` | 1つのtransactionで`ready`・plannerへの差し戻し・`approve_plan`のask。再計画の置換proposalの`pass`は承認だけを記録し、子を`ready`にせず`submitted`に留める（[Plan review](plan-review.md#不変条件)）。`concern`の`high`で`reason_category`が`null`の`ready` / `send_back`はpass / reviseとして適用する（[Plan review](plan-review.md#aiが決めるconcern未実装)、ADR-t451-1決定4）。`actions`は`pass`（と適用した`ready`）のときだけ許された3種を適用し、`reopen`はverdictに関わらず検査して適用し、上限を超えれば1件も適用せず、最終の判定でproposalを差し戻すかconcernのaskにする（passはrevise、reviseの上限を過ぎていればconcern）。`pass`での優先度の扱いは各taskの記録の由来と優先度の出どころで分かれる（[Plan review](plan-review.md#verdictと適用)） |
 | goal-review-job | `achieved` / `gaps` / `ask` | goalを閉じる・gapをdraftにする・`approve_goal`のask（`gaps`の連続が上限を超えたら`ask`） |
 
 `already_satisfied`の主張の判定のverdictは専用の入口（`ClaimJudgment::parse`）で読み、`pass`でも確信度を保つ。
