@@ -87,6 +87,7 @@ Claude/Codexで同じ状態機械を使う。
   依頼のplannerが立つと操作は`parked`から`planning`へ進み、promptは元条件とその版・snapshotの場所・runの原因別のturnとpassしなかったreviewの指摘・全後続を渡す。
   plannerは継続（`request decline --continue-run`）か、子taskを置換計画とともに`submit --replacement`するか、条件の削除・意図の変更・成果の破棄をscope / discardのaskにする。
   置換計画は元条件の各項目の子への対応（削除は、操作の後に開いた操作のscopeのaskにそのaskが選択肢に出した項目の序数とhashを名指す`delete:<序数>:<hashの先頭12文字>`を人がそのまま選んだものだけが認め、`keep`や別の項目への答え、tokenを含む拒否や説明は認めない。`landed`は着地したtaskを要する）、子ごとの元のverifyと全体のevidenceとpaths、保存した成果の各部分を1つの子に順とともに渡すこと、元の前提依存の引き継ぎと元taskや後続への依存の禁止、全後続が待つ子を持つ。
+  置換proposalのreviseのplannerは、保留したtaskへの削除の権限のaskを打ち、その答えを受け取れる（下の「ask・request・再起動・継続と撤回」）。
   submit・`lint`・plan reviewのpassは同じ検査（`check_plan`）を今の版で当て、外れればsubmitは拒み、passとconcernへの人の`ready`はreviseに変えて問題をplannerへ届ける（passはreviseの上限を過ぎていればconcernにする）。
   子は`draft`か`submitted`のtaskに限り、取り消された子に項目・成果・後続の待ちを渡す計画は通らない。passはそのactionを当てた後の姿で検査する（`PlanContext::after_actions`）。
   reviseの後の出し直しのsubmitも計画を要して検査し、plan reviewが人に保留したproposalの再試行だけが前の計画のまま出し直す（`proposals.rs`の`held_retry`）。
@@ -194,7 +195,7 @@ fingerprintには既存の入力に加えて、置換元と再置換先のID・s
 
 ## ask・request・再起動・継続と撤回
 
-askの行の持ち主（元runかrequest）を付け替えない。operationは関連askと未配送answerを参照し、保留中の旧workerへの配送を止める。worker_questionのanswerは元条件の判断材料としてplannerに参照で渡すが、旧workerへのask_deliveredとは記録しない。planner自身の問いは同じrequestのplannerだけが開く。既存approve_landingのanswerも保留中は着地に使わない。旧計画を対象にしたland/cancelの答えを新計画の承認に読み替えず、版違いを記録し必要なら新しい問いを作る。
+askの行の持ち主（元runかrequest）を付け替えない。operationは関連askと未配送answerを参照し、保留中の旧workerへの配送を止める。worker_questionのanswerは元条件の判断材料としてplannerに参照で渡すが、旧workerへのask_deliveredとは記録しない。requestについてのplanner自身の問い（`--request`のask）はそのrequestのplannerだけが打て、答えもそのrequestのplannerへ届く（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)決定7）。これとは別に、閉じていない操作の置換proposalのreviseのplannerは、保留したtaskに`--task`の`planner_question`で項目の削除を聞ける。その答えは置換proposalのtaskについての答えと同じplanner（reviseの持ち主か、reviseとともに新しく開くplanner）へ届き（`draft_planners::route_of`、[reviseの配送](../design/supervisor-lifecycle/plan-review.md#reviseの配送)）、操作についてのaskとして削除の権限に使える（`replans.rs`の`check_replacement`）。子taskへのaskは操作についてのaskではないので、削除の権限にならない。既存approve_landingのanswerも保留中は着地に使わない。旧計画を対象にしたland/cancelの答えを新計画の承認に読み替えず、版違いを記録し必要なら新しい問いを作る。
 
 継続時は未配送answerと元の指摘を同じrunの新generationのbackground wrapperへ一度だけ送る。置換確定時は適用できなくなった旧runのaskを理由と置換先参照付きでruntimeがanswer/closeし、既存の人の答えは上書きしない。引き継ぐ判断はsnapshot/子promptに参照する。approve_plan/planner_questionのanswerもproposal/request versionと適用の結末を再検査し、古いanswerで適用しない。
 
