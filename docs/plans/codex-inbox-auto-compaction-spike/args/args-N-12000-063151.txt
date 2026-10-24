@@ -1,0 +1,12 @@
+-c
+hooks.SessionStart=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3339-tkVJfH/bin/hook.sh dagq SessionStart"}]}]
+-c
+hooks.PreCompact=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3339-tkVJfH/bin/hook.sh dagq PreCompact"}]}]
+-c
+hooks.PostCompact=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3339-tkVJfH/bin/hook.sh dagq PostCompact"}]}]
+-c
+hooks.SessionEnd=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3339-tkVJfH/bin/hook.sh dagq SessionEnd"}]}]
+-c
+model_auto_compact_token_limit=12000
+-c
+notify=["sh","/private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3339-tkVJfH/bin/notify.sh"]

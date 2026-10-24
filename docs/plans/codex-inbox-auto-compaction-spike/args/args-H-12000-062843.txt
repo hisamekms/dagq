@@ -1,0 +1,14 @@
+-c
+hooks.SessionStart=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3339-tkVJfH/bin/hook.sh dagq SessionStart"}]}]
+-c
+hooks.PreCompact=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3339-tkVJfH/bin/hook.sh dagq PreCompact"}]}]
+-c
+hooks.PostCompact=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3339-tkVJfH/bin/hook.sh dagq PostCompact"}]}]
+-c
+hooks.SessionEnd=[{hooks=[{type="command",command="sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3339-tkVJfH/bin/hook.sh dagq SessionEnd"}]}]
+-c
+hooks.state={"/<session-flags>/config.toml:session_start:0:0"={trusted_hash="sha256:5b23f73c3cd8cd2777d8d700875fbcf3d75c7f620c65cf758e965923f17f4c4c"},"/<session-flags>/config.toml:pre_compact:0:0"={trusted_hash="sha256:4480b3b7c6139205e74c170f97a6194a4c5f8bb436d46ba42c86ab08b3858566"},"/<session-flags>/config.toml:post_compact:0:0"={trusted_hash="sha256:ae25df7c55ec624a76911ce8b37c2352c2c63ca5a7a192d1688c8d3117c59c27"},"/<session-flags>/config.toml:session_end:0:0"={trusted_hash="sha256:1a7a144dde8ec3bfadcba8c16ab06cd75ed42760074b2055567ddbfc91dc1350"}}
+-c
+model_auto_compact_token_limit=12000
+-c
+notify=["sh","/private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3339-tkVJfH/bin/notify.sh"]

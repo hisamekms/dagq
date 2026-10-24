@@ -1,0 +1,63 @@
+### rollout-2026-10-25T06-25-19-01a16fcd-c676-7ad0-8638-8d303f852fab.jsonl
+2026-10-24T21:25:30.076Z session_meta id=01a16fcd-c676-7ad0-8638-8d303f852fab originator=codex-tui cli_version=0.160.0 source=cli model_provider=openai
+2026-10-24T21:25:30.078Z event_msg task_started {"type": "task_started", "turn_id": "01a16fcd-f125-7a11-b818-e8fd5b365d2c", "root_turn_id": "01a16fcd-f125-7a11-b818-e8fd5b365d2c", "started_at": 1792877130, "model_context_window": 475000, "collaboration_mode_kind": "default"}
+2026-10-24T21:25:30.320Z turn_context model=gpt-6.1-sol effort=low turn_id=01a16fcd-f125-7a11-b818-e8fd5b365d2c
+2026-10-24T21:25:52.139Z event_msg token_count total=16478 ctx_window=475000
+2026-10-24T21:25:52.163Z event_msg task_complete {"type": "task_complete", "turn_id": "01a16fcd-f125-7a11-b818-e8fd5b365d2c", "started_at": 1792877130, "completed_at": 1792877152, "duration_ms": 22136, "time_to_first_token_ms": 7115}
+2026-10-24T21:25:58.912Z event_msg task_started {"type": "task_started", "turn_id": "01a16fce-61fb-70c1-b6f2-f12314cee6ee", "root_turn_id": "01a16fce-61fb-70c1-b6f2-f12314cee6ee", "started_at": 1792877158, "model_context_window": 475000, "collaboration_mode_kind": "default"}
+2026-10-24T21:26:03.767Z compacted keys=['compaction_response_id', 'first_window_id', 'latest_token_usage_record', 'message', 'previous_window_id', 'replacement_history', 'replacement_history_metadata', 'resume_metadata', 'retained_context', 'window_id', 'window_number'] trigger=None replacement_history=2 usage.session_id=01a16fcd-c676-7ad0-8638-8d303f852fab usage.thread_id=01a16fcd-c676-7ad0-8638-8d303f852fab usage.turn_id=01a16fce-61fb-70c1-b6f2-f12314cee6ee
+2026-10-24T21:26:03.768Z event_msg token_count total=16478 ctx_window=475000
+2026-10-24T21:26:03.785Z turn_context model=gpt-6.1-sol effort=low turn_id=01a16fce-61fb-70c1-b6f2-f12314cee6ee
+2026-10-24T21:26:05.082Z event_msg token_count total=32891 ctx_window=475000
+2026-10-24T21:26:05.094Z event_msg task_complete {"type": "task_complete", "turn_id": "01a16fce-61fb-70c1-b6f2-f12314cee6ee", "started_at": 1792877158, "completed_at": 1792877165, "duration_ms": 6181, "time_to_first_token_ms": 6103}
+### rollout-2026-10-25T06-28-45-01a16fd0-ea53-77d3-8a8a-46698a8bd53e.jsonl
+2026-10-24T21:28:52.103Z session_meta id=01a16fd0-ea53-77d3-8a8a-46698a8bd53e originator=codex-tui cli_version=0.160.0 source=cli model_provider=openai
+2026-10-24T21:28:52.103Z event_msg task_started {"type": "task_started", "turn_id": "01a16fd1-0651-7621-8f59-667e6f1e74bc", "root_turn_id": "01a16fd1-0651-7621-8f59-667e6f1e74bc", "started_at": 1792877332, "model_context_window": 475000, "collaboration_mode_kind": "default"}
+2026-10-24T21:28:52.382Z turn_context model=gpt-6.1-sol effort=low turn_id=01a16fd1-0651-7621-8f59-667e6f1e74bc
+2026-10-24T21:29:16.358Z event_msg token_count total=17092 ctx_window=475000
+2026-10-24T21:29:16.371Z event_msg task_complete {"type": "task_complete", "turn_id": "01a16fd1-0651-7621-8f59-667e6f1e74bc", "started_at": 1792877332, "completed_at": 1792877356, "duration_ms": 24318, "time_to_first_token_ms": 21816}
+2026-10-24T21:29:17.184Z event_msg task_started {"type": "task_started", "turn_id": "01a16fd1-687d-7fa2-9334-d897a646d435", "root_turn_id": "01a16fd1-687d-7fa2-9334-d897a646d435", "started_at": 1792877357, "model_context_window": 475000, "collaboration_mode_kind": "default"}
+2026-10-24T21:29:21.793Z compacted keys=['compaction_response_id', 'first_window_id', 'latest_token_usage_record', 'message', 'previous_window_id', 'replacement_history', 'replacement_history_metadata', 'resume_metadata', 'retained_context', 'window_id', 'window_number'] trigger=None replacement_history=2 usage.session_id=01a16fd0-ea53-77d3-8a8a-46698a8bd53e usage.thread_id=01a16fd0-ea53-77d3-8a8a-46698a8bd53e usage.turn_id=01a16fd1-687d-7fa2-9334-d897a646d435
+2026-10-24T21:29:21.803Z event_msg token_count total=17092 ctx_window=475000
+2026-10-24T21:29:21.821Z turn_context model=gpt-6.1-sol effort=low turn_id=01a16fd1-687d-7fa2-9334-d897a646d435
+2026-10-24T21:29:23.139Z event_msg token_count total=33488 ctx_window=475000
+2026-10-24T21:29:23.151Z event_msg task_complete {"type": "task_complete", "turn_id": "01a16fd1-687d-7fa2-9334-d897a646d435", "started_at": 1792877357, "completed_at": 1792877363, "duration_ms": 5966, "time_to_first_token_ms": 5894}
+### rollout-2026-10-25T06-31-04-01a16fd3-0d06-7621-b9fa-40dbd8c037b2.jsonl
+2026-10-24T21:31:13.059Z session_meta id=01a16fd3-0d06-7621-b9fa-40dbd8c037b2 originator=codex-tui cli_version=0.160.0 source=cli model_provider=openai
+2026-10-24T21:31:13.059Z event_msg task_started {"type": "task_started", "turn_id": "01a16fd3-2cf1-7cc1-9069-25616726ea89", "root_turn_id": "01a16fd3-2cf1-7cc1-9069-25616726ea89", "started_at": 1792877473, "model_context_window": 475000, "collaboration_mode_kind": "default"}
+2026-10-24T21:31:13.292Z turn_context model=gpt-6.1-sol effort=low turn_id=01a16fd3-2cf1-7cc1-9069-25616726ea89
+2026-10-24T21:31:34.528Z event_msg token_count total=16368 ctx_window=475000
+2026-10-24T21:31:39.930Z compacted keys=['compaction_response_id', 'first_window_id', 'latest_token_usage_record', 'message', 'previous_window_id', 'replacement_history', 'replacement_history_metadata', 'resume_metadata', 'retained_context', 'window_id', 'window_number'] trigger=None replacement_history=6 usage.session_id=01a16fd3-0d06-7621-b9fa-40dbd8c037b2 usage.thread_id=01a16fd3-0d06-7621-b9fa-40dbd8c037b2 usage.turn_id=01a16fd3-2cf1-7cc1-9069-25616726ea89
+2026-10-24T21:31:39.930Z turn_context model=gpt-6.1-sol effort=low turn_id=01a16fd3-2cf1-7cc1-9069-25616726ea89
+2026-10-24T21:31:39.933Z event_msg token_count total=16368 ctx_window=475000
+2026-10-24T21:31:41.674Z event_msg token_count total=32742 ctx_window=475000
+2026-10-24T21:31:41.688Z event_msg task_complete {"type": "task_complete", "turn_id": "01a16fd3-2cf1-7cc1-9069-25616726ea89", "started_at": 1792877473, "completed_at": 1792877501, "duration_ms": 28675, "time_to_first_token_ms": 4160}
+### rollout-2026-10-25T06-31-58-01a16fd3-df0b-7003-ab41-399fbf533eac.jsonl
+2026-10-24T21:32:03.702Z session_meta id=01a16fd3-df0b-7003-ab41-399fbf533eac originator=codex-tui cli_version=0.160.0 source=cli model_provider=openai
+2026-10-24T21:32:03.703Z event_msg task_started {"type": "task_started", "turn_id": "01a16fd3-f2a4-7952-b32b-06963e83ab15", "root_turn_id": "01a16fd3-f2a4-7952-b32b-06963e83ab15", "started_at": 1792877523, "model_context_window": 475000, "collaboration_mode_kind": "default"}
+2026-10-24T21:32:03.905Z turn_context model=gpt-6.1-sol effort=low turn_id=01a16fd3-f2a4-7952-b32b-06963e83ab15
+2026-10-24T21:32:30.313Z event_msg token_count total=16463 ctx_window=475000
+2026-10-24T21:32:35.921Z compacted keys=['compaction_response_id', 'first_window_id', 'latest_token_usage_record', 'message', 'previous_window_id', 'replacement_history', 'replacement_history_metadata', 'resume_metadata', 'retained_context', 'window_id', 'window_number'] trigger=None replacement_history=6 usage.session_id=01a16fd3-df0b-7003-ab41-399fbf533eac usage.thread_id=01a16fd3-df0b-7003-ab41-399fbf533eac usage.turn_id=01a16fd3-f2a4-7952-b32b-06963e83ab15
+2026-10-24T21:32:35.922Z turn_context model=gpt-6.1-sol effort=low turn_id=01a16fd3-f2a4-7952-b32b-06963e83ab15
+2026-10-24T21:32:35.943Z event_msg token_count total=16463 ctx_window=475000
+2026-10-24T21:32:37.802Z event_msg token_count total=32853 ctx_window=475000
+2026-10-24T21:32:37.821Z event_msg task_complete {"type": "task_complete", "turn_id": "01a16fd3-f2a4-7952-b32b-06963e83ab15", "started_at": 1792877523, "completed_at": 1792877557, "duration_ms": 34197, "time_to_first_token_ms": 7950}
+### rollout-2026-10-24T05-46-38-01a16a84-0010-71c3-b056-450aec2116e5.jsonl (task 1180 manual /compact, for comparison)
+2026-10-23T20:47:08.637Z session_meta id=01a16a84-0010-71c3-b056-450aec2116e5 originator=codex-tui cli_version=0.160.0 source=cli model_provider=openai
+2026-10-23T20:47:08.637Z event_msg task_started {"type": "task_started", "turn_id": "01a16a84-76fc-79f0-a827-bdd220bac86e", "root_turn_id": "01a16a84-76fc-79f0-a827-bdd220bac86e", "started_at": 1792788428, "model_context_window": 475000, "collaboration_mode_kind": "default"}
+2026-10-23T20:47:08.831Z turn_context model=gpt-6.1-sol effort=low turn_id=01a16a84-76fc-79f0-a827-bdd220bac86e
+2026-10-23T20:47:10.754Z event_msg token_count total=16202 ctx_window=475000
+2026-10-23T20:47:10.780Z event_msg task_complete {"type": "task_complete", "turn_id": "01a16a84-76fc-79f0-a827-bdd220bac86e", "started_at": 1792788428, "completed_at": 1792788430, "duration_ms": 2227, "time_to_first_token_ms": 1586}
+2026-10-23T20:47:36.851Z event_msg task_started {"type": "task_started", "turn_id": "01a16a84-e58e-7ae0-a805-fd4337b3cab6", "root_turn_id": "01a16a84-e58e-7ae0-a805-fd4337b3cab6", "started_at": 1792788456, "model_context_window": 475000, "collaboration_mode_kind": "default"}
+2026-10-23T20:47:36.861Z turn_context model=gpt-6.1-sol effort=low turn_id=01a16a84-e58e-7ae0-a805-fd4337b3cab6
+2026-10-23T20:48:01.734Z event_msg token_count total=32559 ctx_window=475000
+2026-10-23T20:48:06.023Z event_msg token_count total=48950 ctx_window=475000
+2026-10-23T20:48:06.047Z event_msg task_complete {"type": "task_complete", "turn_id": "01a16a84-e58e-7ae0-a805-fd4337b3cab6", "started_at": 1792788456, "completed_at": 1792788486, "duration_ms": 29195, "time_to_first_token_ms": 1589}
+2026-10-23T20:48:21.100Z event_msg task_started {"type": "task_started", "turn_id": "01a16a85-9262-75a1-b6db-1d6849607b7b", "root_turn_id": "01a16a85-9262-75a1-b6db-1d6849607b7b", "started_at": 1792788501, "model_context_window": 475000, "collaboration_mode_kind": "default"}
+2026-10-23T20:48:31.358Z compacted keys=['compaction_response_id', 'first_window_id', 'latest_token_usage_record', 'message', 'previous_window_id', 'replacement_history', 'replacement_history_metadata', 'resume_metadata', 'retained_context', 'window_id', 'window_number'] trigger=None replacement_history=3 usage.session_id=01a16a84-0010-71c3-b056-450aec2116e5 usage.thread_id=01a16a84-0010-71c3-b056-450aec2116e5 usage.turn_id=01a16a85-9262-75a1-b6db-1d6849607b7b
+2026-10-23T20:48:31.364Z event_msg token_count total=48950 ctx_window=475000
+2026-10-23T20:48:31.389Z event_msg task_complete {"type": "task_complete", "turn_id": "01a16a85-9262-75a1-b6db-1d6849607b7b", "started_at": 1792788501, "completed_at": 1792788511, "duration_ms": 10294}
+2026-10-23T20:48:52.310Z event_msg task_started {"type": "task_started", "turn_id": "01a16a86-0c4c-70e0-a921-aa36cd36f033", "root_turn_id": "01a16a86-0c4c-70e0-a921-aa36cd36f033", "started_at": 1792788532, "model_context_window": 475000, "collaboration_mode_kind": "default"}
+2026-10-23T20:48:52.336Z turn_context model=gpt-6.1-sol effort=low turn_id=01a16a86-0c4c-70e0-a921-aa36cd36f033
+2026-10-23T20:48:55.263Z event_msg token_count total=65777 ctx_window=475000
+2026-10-23T20:48:55.305Z event_msg task_complete {"type": "task_complete", "turn_id": "01a16a86-0c4c-70e0-a921-aa36cd36f033", "started_at": 1792788532, "completed_at": 1792788535, "duration_ms": 2995, "time_to_first_token_ms": 2290}

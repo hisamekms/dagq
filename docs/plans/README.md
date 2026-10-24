@@ -58,6 +58,7 @@ tags:
 - [dagq の build・test の process ごとと合計の peak のメモリ、下げる手の効き、host.toml の machine と container の上限の推奨](build-memory.md)（goal 184、task 3161）
 - [スパイク：Codex CLI の対話の session で inbox に要るもの（常駐・background の見張り・answer・指示の読み込み・復帰・区間の記録・画面の判定・sandbox からの状態を変える dagq）ができるか](codex-inbox-spike.md)（goal 77、task 1180）
 - [スパイク：Codex の対話の TUI で、dagq が起動の引数で渡す hook だけに起動の引数で trust を与え、人の ~/.codex/config.toml を書かずに動かせるか](codex-inbox-hook-trust-spike.md)（goal 77、task 3336）
+- [スパイク：Codex の対話の TUI で自動の compaction が起きた後に、inbox の区間の記録に要る値が hook か rollout から取れるか](codex-inbox-auto-compaction-spike.md)（goal 77、task 3339）
 - [スパイク：Codex の対話の TUI の起動が、欄の無い config.toml に書き足すものと、それを起動の引数で止められるか](codex-inbox-config-writes-spike.md)（goal 77、task 3338）
 - [スパイク：Codex の対話の TUI で、起動の引数で渡す PreToolUse の hook が、inbox の role に禁じた dagq のコマンドと身元の環境変数を含む shell のコマンドを実行の前に拒めるか](codex-inbox-guardrail-spike.md)（goal 77、task 3337）
 - [スパイク：run の review job の中で review の subagent を Claude と Codex の非対話の呼び出しで動かせるか](review-subagents-spike.md)（goal 94、task 1453）
