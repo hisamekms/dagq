@@ -688,6 +688,9 @@ fn a_receipt_a_resumed_turn_rewrote_at_the_hold_is_validated_and_starts_no_revie
 /// Boundary: a hold during a revise's turn lets the turn end, and the
 /// receipt it rewrote is judged and validated as before; the next review
 /// does not start, the run waits, and a release before that is refused.
+/// The turn writes its receipt and ends while the park stands at its first
+/// look, past the look at the receipt: the receipt found once the writer
+/// ended is still judged.
 #[test]
 fn a_receipt_a_revise_rewrote_at_the_hold_is_validated_and_starts_no_review() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
@@ -702,7 +705,9 @@ fn a_receipt_a_revise_rewrote_at_the_hold_is_validated_and_starts_no_review() {
         verdict("revise", &["add fixed.txt"], "needs a fix"),
         verdict("pass", &[], "fine"),
     ]);
-    let supervisor = supervise_with_parts(&db, &repo, backend.clone(), reviewer, None);
+    let (paused, go) = (dir.path().join("paused"), dir.path().join("back"));
+    let pauses = pause_once(runtime::PausePoint::ParkLook, paused.clone(), go.clone());
+    let supervisor = supervise_with_parts(&db, &repo, backend.clone(), reviewer, Some(pauses));
     wait_for_kind(&db, "turn_started");
     let run = detail(&db).runs[0].clone();
     fs::write(Path::new(run.run_dir().unwrap()).join("go"), "").unwrap();
@@ -712,7 +717,12 @@ fn a_receipt_a_revise_rewrote_at_the_hold_is_validated_and_starts_no_review() {
     });
     assert_eq!(hold(&db)["state"], "settling");
     release_refused(&db);
+    wait_for_file(&paused);
     fs::write(Path::new(run.run_dir().unwrap()).join("go2"), "").unwrap();
+    // The turn rewrites the receipt and the wrapper ends at the fence
+    // while the park stands still.
+    wait_for_kind(&db, "session_exited");
+    fs::write(&go, "").unwrap();
     finished(&db, &backend, supervisor);
     let detail = detail(&db);
     let run = &detail.runs[0];

@@ -1535,12 +1535,6 @@ name = "runtime_task_hold_park::a_receipt_a_resumed_turn_rewrote_at_the_hold_is_
 reason = "B 境界（resume の wrapper・validation・supervisor の二度の起動）: 一度 hold で待った run を release で resume し、その resume の turn の途中の hold で、turn が書き直した receipt が resume の判定と validation を通り、review を始めずに再び待ちへ入ることを、実際の wrapper と Git で確かめる。柵の判断は domain::task_replan の unit test"
 task = 1881
 
-# 5.7s to 11.0s (stress 60s under the host's load of other runs, task 1881)
-[[test]]
-name = "runtime_task_hold_park::a_receipt_a_revise_rewrote_at_the_hold_is_validated_and_starts_no_review"
-reason = "B 境界（review の job・revise の turn・validation）: review の revise を送った後の turn の途中の hold で、turn が書き直した receipt が revise の判定と validation を通り、次の review を始めずに待ちへ入ることを、実際の review の job と wrapper で確かめる。柵の判断は domain::task_replan の unit test"
-task = 1881
-
 # 2.6s to 6.7s (stress 5 under the host's load of other runs, task 1881)
 [[test]]
 name = "runtime_landing_release::a_held_task_whose_landing_ends_settles_at_its_end_and_is_not_leased_to_review"

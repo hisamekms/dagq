@@ -229,6 +229,47 @@ impl AtEnd {
     }
 }
 
+/// The receipt the turn of a run in a slot may write as it ends, which the
+/// run's phase judges (a first session's, a revise's or a resume's): one a
+/// park for a hold finds once the turn's writer is gone is judged before
+/// the run waits, as the phase's own look at the park finds it.
+pub(super) enum TurnReceipt {
+    /// A first session's receipt, judged once it is there.
+    Session(PathBuf),
+    /// A revise's, judged once it is newer than the request sent then.
+    Revise(PathBuf, SystemTime),
+    /// A resume's, judged once it is newer than the resume's start.
+    Resume(PathBuf, SystemTime),
+}
+
+impl TurnReceipt {
+    fn of(phase: &Phase, run: &TaskRun) -> Option<Self> {
+        match phase {
+            Phase::Session(watch) => Some(Self::Session(watch.receipt_path.clone())),
+            Phase::Revise(watch) => run
+                .receipt_path()
+                .map(|receipt| Self::Revise(PathBuf::from(receipt), watch.sent_at)),
+            Phase::Resume(watch) => {
+                Some(Self::Resume(watch.receipt_path.clone(), watch.started_at))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the turn wrote the receipt, as its phase's look finds it.
+    fn written(&self, files: &dyn RunFiles) -> bool {
+        match self {
+            Self::Session(receipt) => files.is_file(receipt),
+            Self::Revise(receipt, sent_at) => files
+                .modified(receipt)
+                .is_ok_and(|modified| super::revise::rewritten_after(modified, *sent_at)),
+            Self::Resume(receipt, started_at) => files
+                .modified(receipt)
+                .is_ok_and(|modified| modified > *started_at),
+        }
+    }
+}
+
 /// `payload` with the park's own part (`base`) in front.
 pub(super) fn withheld_payload(base: &Value, payload: Value) -> Value {
     let mut merged = base.clone();
@@ -521,6 +562,9 @@ impl Supervisor<'_> {
         };
         let held = matches!(park, ParkFor::Hold(_) | ParkFor::Rest(Fence::Hold(_), _));
         let (withheld_kind, withheld_base) = park.withheld();
+        // Read before the look below: a turn may write its receipt and end
+        // past that look, before the park finds its writer gone.
+        let turn_receipt = TurnReceipt::of(&slot.phase, &slot.run);
         let mut withheld = None;
         match &mut slot.phase {
             Phase::E2e(_) | Phase::Recovery(_) | Phase::Landing(_) => return Ok(None),
@@ -678,7 +722,7 @@ impl Supervisor<'_> {
             ParkFor::Replan(op) => self.park(op, &run, &token)?,
             ParkFor::Hold(hold) => {
                 let at_end = if rested { AtEnd::Rested } else { AtEnd::Park };
-                self.park_held(hold, &run, &token, at_end)?
+                self.park_held(hold, &run, &token, at_end, turn_receipt.as_ref())?
             }
             ParkFor::Rest(..) => self.rest_fenced(&park, &run, &token)?,
         };
@@ -698,13 +742,16 @@ impl Supervisor<'_> {
     /// look: the hold saves nothing, so no step fails. A run that rests as
     /// it is ([`AtEnd::rests`]) keeps its own reason: its lease is given
     /// back with the hold settled in the same transaction, the writer found
-    /// ended ([`RunTransitions::release_for_hold`]).
+    /// ended ([`RunTransitions::release_for_hold`]). A receipt the run's
+    /// turn wrote as it ended (`turn_receipt`), found once its writer is
+    /// gone, stops the park before the settle: its phase judges it first.
     fn park_held(
         &mut self,
         hold: &TaskHold,
         run: &TaskRun,
         token: &LeaseToken,
         at_end: AtEnd,
+        turn_receipt: Option<&TurnReceipt>,
     ) -> Result<Option<TaskRun>> {
         let park = ParkFor::Hold(hold.clone());
         self.pause_at(PausePoint::ParkLook, run.id());
@@ -724,6 +771,10 @@ impl Supervisor<'_> {
                 return Ok(None);
             }
             Ok(Quiet::Stopped) => {}
+        }
+        if turn_receipt.is_some_and(|receipt| receipt.written(&*self.files)) {
+            info!(run_id = %run.id(), "run {}: its turn wrote its receipt as it ended; the receipt is judged before the park for the hold {}", run.id(), hold.id);
+            return Ok(None);
         }
         let run = &self.queue.run(run.id())?;
         if at_end.rests(run.status()) {
@@ -927,7 +978,7 @@ impl Supervisor<'_> {
         } else {
             AtEnd::Resting
         };
-        self.park_held(hold, &run, &token, at_end)?;
+        self.park_held(hold, &run, &token, at_end, None)?;
         Ok(())
     }
 
@@ -2628,5 +2679,33 @@ mod tests {
         ] {
             assert!(!saved_log(name), "{name}");
         }
+    }
+
+    /// A park for a hold that finds its writer gone looks at the receipt
+    /// as the run's phase does: a first session's once it is there, a
+    /// revise's once it is newer than the request (to the millisecond), a
+    /// resume's once it is newer than the resume's start.
+    #[test]
+    fn a_receipt_the_turn_wrote_as_it_ended_is_found_as_its_phase_finds_it() {
+        use crate::application::memory_files::MemoryFiles;
+        let at = |ms: u64| SystemTime::UNIX_EPOCH + Duration::from_millis(ms);
+        let receipt = PathBuf::from("/runs/r1/receipt.json");
+        let files = MemoryFiles::default();
+        let session = TurnReceipt::Session(receipt.clone());
+        let revise = TurnReceipt::Revise(receipt.clone(), at(2_000));
+        let resume = TurnReceipt::Resume(receipt.clone(), at(2_000));
+        for turn in [&session, &revise, &resume] {
+            assert!(!turn.written(&files));
+        }
+        files.put(&receipt, at(1_000), "{}");
+        assert!(session.written(&files));
+        assert!(!revise.written(&files));
+        assert!(!resume.written(&files));
+        files.put(&receipt, at(2_000), "{}");
+        assert!(!revise.written(&files));
+        assert!(!resume.written(&files));
+        files.put(&receipt, at(2_001), "{}");
+        assert!(revise.written(&files));
+        assert!(resume.written(&files));
     }
 }
