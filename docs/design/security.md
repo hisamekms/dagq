@@ -126,17 +126,17 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 状態を変える全てのCLIのコマンドは、parseではなくapplicationの層でmutationの前に`Authorizer`を通る（[Authorization](authorization.md#適用の範囲)）。
 
 - 計画系は`Planning`、対話と記録は`Dialogue`、runtimeの操作系は`Operation`（queueを開く・作る・移す前）。
-  Codexのworkerの`dagq ask`は、クライアントモードでqueue serviceのユースケースとして送られ、serviceがworkerのprincipalで判定する（ADR-t1233-5決定5。[Queue service](queue-service.md#クライアントモード)）。
   supervisorはsandboxの外で動くので、workerが書くrun dirのfileを、supervisorと非対話のwrapperの`LocalRunFiles`とprocessの出力のopenが`O_NOFOLLOW`で開いた記述子に対する操作で扱い、workerの代わりにrunのdirの外を読み書きしない（上限は`src/infrastructure/run_files.rs`、[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)の「run dirのfile」）。
   hostのGitが作業するscratch worktree（`already_satisfied`のsnapshotの検証のもの）はrun dirに置かず、queueの`satisfied/`のrunごとのdirに置き、使うたびにそこにある`.git`もlinkも信用せずに消して（linkは辿らない）作り直す（[Validation](supervisor-lifecycle/validation.md#already_satisfiedの検証)）。
   拒否は`authorization_denied`のeventとして、拒まれた呼び出し元をactorに記録し、拒否のerrorを返す
 - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
-- queue serviceは、[ユースケース](queue-service.md#ユースケース)を、tokenから決めたprincipalのactorで同じ`Dialogue`・`Gate`と`StaticPolicy`に通す（service側の判定。`DAGQ_ROLE`は使わない）。
+- queue serviceは、[ユースケース](queue-service.md#ユースケース)と読み取りを、principalのactorで同じ`Dialogue`・`Gate`と`StaticPolicy`に通す（`DAGQ_ROLE`は使わない）。
+  principalはtokenから、tokenもroleも無い要求ではhostのsocketのpeerの資格からuserとして決める（[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)決定1）。
   拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。
-  worker（resumeを含む）・headlessのjob・observerの`dagq`はクライアントモードでserviceだけを使い、DBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
-  閉じたのはCLIを通る経路で、同じユーザーのプロセスはDBのファイルもtokenのファイルも探して読めるので、host構成では助言的なまま（ADR-t1233-1のConsequences）
-- 状態を変えないコマンドは、roleを問わず`check_access`が`StaticPolicy`に通す（default deny）。
-  拒否は同じerrorを返し、queueがあれば拒まれた呼び出し元をactorにした`authorization_denied`に記録する（queueが無いときは記録せずに拒む）。
+  worker（resumeも）・headlessのjob・observerはserviceだけを使い（[クライアントモード](queue-service.md#クライアントモード)）、人・inbox・plannerはserviceが答えるコマンドをDBを開かず送る（[hostのCLI](queue-service-host-cli.md#送る範囲)）。
+  閉じたのはCLIの経路で、同じユーザーのプロセスはDBもtokenも読め、userとしてもつなげるので、hostでは助言的なまま（ADR-t3102-1決定5）
+- serviceへ送らない状態を変えないコマンド（制御側の診断・fileを書く読み取りと、supervisorなどのもの）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny）。
+  拒否は同じerrorを返し、queueがあれば拒まれた呼び出し元をactorにした`authorization_denied`に記録する。
   通った読み取りはqueueに書かない
 - runtimeがClaudeの設定を書くactor（worker・planner・review job・inbox）の`permissions.deny`には、roleが持たないcommandの`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。
   これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定
