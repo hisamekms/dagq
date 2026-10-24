@@ -34,6 +34,7 @@ mod cli_operations;
 mod cli_planner_request;
 mod cli_proposals;
 mod cli_read;
+mod cli_related_docs;
 mod cli_request_words;
 mod cli_roles;
 mod cli_screen;

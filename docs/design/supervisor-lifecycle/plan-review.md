@@ -23,6 +23,7 @@ related:
   - adr-t1975-1
   - adr-t2751-1
   - adr-t1487-1
+  - adr-t3321-1
 ---
 
 # Plan review (supervisor)
@@ -47,6 +48,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - supervisorのloopの各passで進め、run slotを使わない（observerと同じ）。
 - jobは読むだけで、`dagq`の書き込むコマンドはCLIが役割で拒む（[Queue service](../queue-service.md#クライアントモード)）。
 - repositoryの規則をruntimeに埋め込まず、jobがrepositoryの指示と文書から読む（[Prompt](prompt.md#repositoryの規則を読む順)）。
+- `lint`のhints（関連文書の節の手がかり）はplannerがsubmitの前に読むもので、`lint`の規則にもjobの検査の規則にも入らず、submitもjobもhintsを読まない（[ADR-t3321-1](../../adr/2026-10-24-t3321-1-lint-hints-related-doc-sections-without-refusing-submit.md)）。
 - plannerの起動・行・終わりの記録は[`plan` / `planners`](plan-planners.md)が持つ。
   計画の依頼・draft・findingのplannerは[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)・[Draft planners](draft-planners.md)・[Finding planners](finding-planners.md)が持ち、reviseの配送の後に同じ上限の中で立つ。
 
@@ -72,6 +74,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
   行と欄の意味は`migrations/0027_plan_review.sql`のコメントが持つ。
 - promptの材料・検査の指示・上限と選ぶ順: `src/application/prompt/plan_review.rs`の`plan_review_prompt`と各定数。
   方針は[Prompt](prompt.md#headlessのjobのprompt)と[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)。
+- `lint`の規則とhints: `src/application/queue_reads/planning.rs`の`lint`、規則は`src/domain/lint.rs`、hintsは`src/domain/doc_hints.rs`の`hints`。
 - 境界のtestは`tests/it/`のplan reviewのmoduleで、stubのheadless providerと止めたplannerのwrapperを使う。
 
 ## 候補と開始

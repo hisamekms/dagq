@@ -23,7 +23,9 @@
 //! ADR-t1479-1). `[areas]` maps the
 //! areas `stats` and `kpi` split the landed runs by to globs (ADR-t980-1),
 //! and `[tasks] changes` names the set of changes a task declares one of,
-//! `[tasks] title_prefixes` the prefixes a task's title starts with.
+//! `[tasks] title_prefixes` the prefixes a task's title starts with,
+//! `[tasks] related_docs` the globs of the documents `lint` looks in for
+//! its hints (ADR-t3321-1).
 //! `[goals] tags` names the set of tags a goal's tags are taken from
 //! (ADR-t1639-1 decision 6).
 //! `[e2e] paths` names, as globs, the paths whose change requires `e2e` of
@@ -158,11 +160,13 @@ const SUPERVISOR_TABLE: &str = "supervisor";
 /// `[areas]`: each area's name and its globs (ADR-t980-1).
 const AREAS_TABLE: &str = "areas";
 /// `[tasks]`: `changes`, the repository's set of changes (ADR-t980-1),
-/// and `title_prefixes`, the prefixes a task's title starts with.
+/// `title_prefixes`, the prefixes a task's title starts with, and
+/// `related_docs`, the globs of `lint`'s related documents (ADR-t3321-1).
 const TASKS_TABLE: &str = "tasks";
 /// The keys of `[tasks]`.
 const TASKS_CHANGES: &str = "changes";
 const TASKS_TITLE_PREFIXES: &str = "title_prefixes";
+const TASKS_RELATED_DOCS: &str = "related_docs";
 /// `[goals]`: `tags`, the repository's set of goal tags (ADR-t1639-1
 /// decision 6).
 const GOALS_TABLE: &str = "goals";
@@ -578,6 +582,10 @@ pub struct Config {
     /// `<prefix>[(<scope>)][!]: <subject>`, which `lint` reports and
     /// `submit` refuses a task's title outside of; `None` without it.
     pub title_prefixes: Option<TitlePrefixes>,
+    /// `[tasks] related_docs`, the globs (as `add --paths` takes them) of
+    /// the documents `lint` looks in for its hints (ADR-t3321-1); `None`
+    /// without it, and an empty list, like none, gives no hints.
+    pub related_docs: Option<Vec<String>>,
     /// `[goals] tags` (ADR-t1639-1 decision 6); `None` without it.
     pub goal_tags: Option<TagSet>,
     /// `[goals] max_spike_cycles`, at least 1: the cycles (rounds of
@@ -1323,10 +1331,20 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         .with_context(with)?,
                 );
             }
+            Some(TASKS_TABLE) if key == TASKS_RELATED_DOCS => {
+                ensure!(
+                    config.related_docs.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let globs = parse_string_array(rest.trim()).with_context(with)?;
+                validate_path_globs(&globs).with_context(with)?;
+                config.related_docs = Some(dedup_globs(&globs));
+            }
             Some(TASKS_TABLE) => {
                 ensure!(
                     key == TASKS_CHANGES,
-                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{TASKS_TABLE}]; the keys are {TASKS_CHANGES} and {TASKS_TITLE_PREFIXES}"
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{TASKS_TABLE}]; the keys are {TASKS_CHANGES}, {TASKS_TITLE_PREFIXES} and {TASKS_RELATED_DOCS}"
                 );
                 ensure!(
                     config.changes.is_none(),
@@ -2972,6 +2990,19 @@ pub fn load_title_prefixes(root: &Path) -> Result<Option<TitlePrefixes>> {
                 .title_prefixes
         }
         None => None,
+    })
+}
+
+/// `[tasks] related_docs` of the `dagq.toml` in `root` (ADR-t3321-1),
+/// empty when there is no file or no such key.
+pub fn load_related_docs(root: &Path) -> Result<Vec<String>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    Ok(match read_config(&path)? {
+        Some(text) => parse_config(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .related_docs
+            .unwrap_or_default(),
+        None => Vec::new(),
     })
 }
 
@@ -4971,6 +5002,50 @@ mod tests {
         )
         .unwrap();
         assert!(load_title_prefixes(dir.path()).is_err());
+    }
+
+    /// `[tasks] related_docs` names the globs of `lint`'s related
+    /// documents, each once; an empty list is taken and a glob `add
+    /// --paths` refuses is refused.
+    #[test]
+    fn parses_the_related_docs_of_the_tasks_table() {
+        let config = parse_config(
+            "[tasks]\nrelated_docs = [\"docs/design/**/*.md\", 'README.md', \"README.md\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.related_docs.unwrap(),
+            ["docs/design/**/*.md", "README.md"]
+        );
+        assert_eq!(parse_config("[tasks]\n").unwrap().related_docs, None);
+        assert_eq!(
+            parse_config("[tasks]\nrelated_docs = []\n")
+                .unwrap()
+                .related_docs,
+            Some(vec![])
+        );
+        let error = |text: &str| format!("{:#}", parse_config(text).unwrap_err());
+        for (text, expected) in [
+            ("[tasks]\nrelated_docs = [\"/docs\"]\n", "relative"),
+            ("[tasks]\nrelated_docs = [\"../x.md\"]\n", ".."),
+            ("[tasks]\nrelated_docs = \"docs\"\n", "expected an array"),
+            (
+                "[tasks]\nrelated_docs = [\"a\"]\nrelated_docs = [\"b\"]\n",
+                "defined twice",
+            ),
+        ] {
+            let got = error(text);
+            assert!(got.contains(expected), "{text}: {got}");
+            assert!(got.contains("dagq.toml:"), "{text}: {got}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_related_docs(dir.path()).unwrap().is_empty());
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[tasks]\nrelated_docs = [\"docs/*.md\"]\n",
+        )
+        .unwrap();
+        assert_eq!(load_related_docs(dir.path()).unwrap(), ["docs/*.md"]);
     }
 
     #[test]

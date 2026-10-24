@@ -23,6 +23,7 @@ use crate::application::{
     claim_candidates, dependency_graph,
 };
 use crate::domain::claim_order;
+use crate::domain::doc_hints::{self, HintTask, RelatedDocument};
 use crate::domain::search::{self, SearchQuery};
 use crate::domain::{
     ChangeSet, GoalDetail, GoalId, Proposal, ProposalId, TagSet, TaskId, TaskStatus, TitlePrefixes,
@@ -39,6 +40,9 @@ pub trait PlanningSources<Q: ?Sized> {
     /// The repository's prefixes of a task's title, none without a
     /// checkout.
     fn title_prefixes(&self, queue: &Q) -> Result<Option<TitlePrefixes>>;
+    /// The documents `[tasks] related_docs` names, as read from the
+    /// checkout (ADR-t3321-1); none without a checkout or the key.
+    fn related_docs(&self, queue: &Q) -> Result<Vec<RelatedDocument>>;
     /// The repository's set of goal tags (ADR-t1639-1 decision 6), none
     /// without a checkout.
     fn goal_tags(&self, queue: &Q) -> Result<Option<TagSet>>;
@@ -242,7 +246,8 @@ pub fn goal_show<Q: TaskStore + ?Sized>(
 }
 
 /// `lint`: the named tasks and the proposals' tasks against the
-/// repository's sets of changes and goal tags.
+/// repository's sets of changes and goal tags, with the hints of the
+/// repository's related documents (ADR-t3321-1), which no rule reads.
 pub fn lint<Q: TaskStore + ?Sized>(
     queue: &Q,
     sources: &(impl PlanningSources<Q> + ?Sized),
@@ -259,7 +264,13 @@ pub fn lint<Q: TaskStore + ?Sized>(
     input.changes = sources.changes(queue)?;
     input.title_prefixes = sources.title_prefixes(queue)?;
     input.goal_tags = sources.goal_tags(queue)?;
-    Ok(json!({"tasks": targets, "violations": crate::domain::lint::lint(&input)}))
+    let tasks: Vec<HintTask<'_>> = input.targets.iter().map(HintTask::from).collect();
+    let hints = doc_hints::hints(&tasks, &sources.related_docs(queue)?);
+    Ok(json!({
+        "tasks": targets,
+        "violations": crate::domain::lint::lint(&input),
+        "hints": hints,
+    }))
 }
 
 /// `search`.

@@ -171,7 +171,10 @@ fn lint_reports_violations_by_code_and_passes_a_sound_plan() {
     );
 
     let passed = ok(&db, &["lint", "2"]);
-    assert_eq!(passed, serde_json::json!({"tasks": [2], "violations": []}));
+    assert_eq!(
+        passed,
+        serde_json::json!({"tasks": [2], "violations": [], "hints": []})
+    );
 
     let submitted = submit_from(&db, None, &["3", "4"]);
     assert!(submitted.status.success());

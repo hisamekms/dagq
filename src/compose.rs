@@ -340,6 +340,22 @@ pub fn task_title_prefixes(queue: &SqliteQueue) -> Result<Option<crate::domain::
     }
 }
 
+/// The documents the `[tasks] related_docs` of the `dagq.toml` of the main
+/// checkout `queue` is bound to name, read from that checkout, which `lint`
+/// gives its hints from (ADR-t3321-1); none for a queue bound to no
+/// checkout or without them.
+pub fn task_related_docs(
+    queue: &SqliteQueue,
+) -> Result<Vec<crate::domain::doc_hints::RelatedDocument>> {
+    match bound_checkout(queue)? {
+        Some(checkout) => crate::infrastructure::related_docs::read_related_docs(
+            &checkout,
+            &crate::infrastructure::run_env::load_related_docs(&checkout)?,
+        ),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// What the threshold of the aging `candidates` and `graph` show is
 /// chosen from ([`crate::application::claim_view::class_aging_secs`]):
 /// the read of `[supervisor]` of the `dagq.toml` of the main checkout

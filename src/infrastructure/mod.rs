@@ -55,6 +55,7 @@ pub mod queue_service;
 pub mod recurring_config;
 pub mod recurring_drafts;
 pub mod related;
+pub mod related_docs;
 pub mod release_update;
 mod replans;
 pub mod report_config;

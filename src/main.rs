@@ -346,7 +346,11 @@ enum Command {
     /// verification (with or without declared paths), invalid path globs, blank acceptance,
     /// titles repeated within the set, and the problems of a replacement plan a proposal of a
     /// replanning request went with. Lints TASKs and the members of each --proposal. Prints
-    /// {"tasks", "violations"}, each violation {"code", "task_id", "reason"}; none: an empty list.
+    /// {"tasks", "violations", "hints"}, each violation {"code", "task_id", "reason"}; none: an
+    /// empty list. Hints refuse nothing: per task, the sections {"path", "heading", "terms"} of
+    /// the documents dagq.toml's [tasks] related_docs names that hold the task's code identifiers
+    /// and paths while its description and context name neither the document nor the section,
+    /// with "omitted" past the limit and any "unreadable" document; none without the key.
     #[command(group = clap::ArgGroup::new("targets").multiple(true).required(true))]
     Lint {
         /// Task to check; repeatable.

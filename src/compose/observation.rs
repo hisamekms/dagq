@@ -649,6 +649,12 @@ impl crate::application::queue_reads::PlanningSources<SqliteQueue> for HostReads
     fn title_prefixes(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::TitlePrefixes>> {
         task_title_prefixes(queue)
     }
+    fn related_docs(
+        &self,
+        queue: &SqliteQueue,
+    ) -> Result<Vec<crate::domain::doc_hints::RelatedDocument>> {
+        crate::compose::task_related_docs(queue)
+    }
     fn goal_tags(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::TagSet>> {
         goal_tags(queue)
     }
