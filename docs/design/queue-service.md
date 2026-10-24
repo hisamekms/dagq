@@ -83,11 +83,14 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
     wrapperの環境には入れず、session wrapperがagentのturnを起動するときにそのfileのpathを渡す。
   - wrapperのtoken: 制御側がrunかplannerのwrapperを起動するときに、その対象のrole `wrapper`のprincipalに発行する。
     wrapperはfileを自分のactor idから引くので、envとargvに値もpathも無い
-  - jobのtoken: jobを起動するプロセス（supervisor、`observe`・`throughput-review`・`setup-review`のコマンド）が起動のときに発行し、jobのプロセスが終わったとき（それを見たwaitか、handleを捨てたとき）に失効させる（`ServiceAccess::revoke_on_exit`）
-- 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。
+  - jobのtoken: supervisorかjobを起動するコマンドが起動のときに発行し、jobのプロセスが終わったときに失効させる（`ServiceAccess::revoke_on_exit`）
+  - inboxとplannerのtoken: [hostのCLI](queue-service-host-cli.md#principal)
+- 失効: `queue_service::revoke`（`Principal::credential_key`）が値とprincipalの記録を消す。
+  inboxのtokenはsessionの終わりと開き直しで、plannerとそのwrapperのものはplannerを閉じたときに失効し（ADR-t3102-1決定2）、serviceは消える前でも断る。
+  sweepはtokenを置く名前で消すので、開き直したinboxのものは残る（`swept_token_key`）。
   加えてserviceは、principalがrunを名指すtokenを、そのrunが終わったときに断る（runの終わりで失効。`run_holds_token`）。
   workerのtokenは、supervisorがrunの終わり（slotのrunが着地・failed・interruptedで休むとき）に`ServiceAccess::revoke`で消す。
-  そこで消さなかったもの（cancel、retryで次のrunに移ったrun、supervisorが居ない間に終わったrun、queueに無いrun）は、supervisorが起動の最初のpassと終わったrunのsweepのたびに`ServiceAccess::sweep`で消す（`run_token_ended`。wrapperのtokenも）。
+  そこで消さなかったもの（cancelやsupervisorが居ない間に終わったrunなど）は、supervisorが起動の最初のpassと終わったrunのsweepのたびに`ServiceAccess::sweep`で消す（`run_token_ended`。wrapperのtokenも）。
   resumeを待つrun（`needs_session`）はtokenを保つので消さず、resumeは今までどおり発行し直す
 - executorのtelemetryのprincipal（ADR-t1662-3決定9〜11・13）: role `executor-telemetry`で、対象を1つだけ持つ（runの対象は`run_id`、runを持たない対象は種類とid。`domain::session_step::StepTarget`）。
   actor idは対象から作り、runの対象のtokenはworkerのものと同じくrunの終わりで断る。
@@ -145,7 +148,6 @@ paramsの形は`domain::telemetry::TelemetryReport`（1つのsessionの、1つ�
 - 1回の上限: executorは30秒ごとにまとめて送る（`REPORT_INTERVAL_SECS`）。
   上限はparamsのJSONとしての大きさ（`MAX_REPORT_BYTES`）で、要求の1行の上限から要求の残りの欄の分を引いたものなので、文字のescapeで膨らんでも上限の内の要求は1行に収まる。
   ほかにstepとsampleの数・idと名前の長さ・コマンドのshapeの大きさにも上限があり（値は`domain::telemetry`の定数）、超えたものは何も記録せず`bad_request`で断る。
-  `ServiceTelemetrySink`は上限を超えたものを送らずに断る。
   溜まったstep（serviceが答えなかった後など）は何回かに分けて送る
 - 認可: `telemetry.report`を、paramsが名指す対象と、そのsessionを制御側が登録した対象（`Resource::Telemetry`）でprincipalに通す。
   持つのはexecutor-telemetryだけで、tokenの対象と違う対象（他のrun・他のplanner・他のjob）と、tokenの対象に登録されていないsession（未登録も）は`authorization_denied`（記録は他のユースケースと同じ）。
@@ -198,7 +200,6 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
 - `graph --format svg`: hostのd2を起動するので、serviceは読み取りとして受け取らない（`json`と`d2`は答える）。
   promptとskillはsvgを名指さない
 - `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`: 制御側の状態を見るもので、jobのpromptは名指さない。
-  dagq skillは`doctor`を名指すが、AGENTS.mdはworkerの実queueでの`doctor`の確認を人かinboxに任せる。
   クライアントモードでの扱いは[クライアントモード](#クライアントモード)
 
 ## クライアントモード
@@ -235,7 +236,6 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
 
 - workerのturn（workspace-write、networkを開ける。ADR-t813-3決定4）: そのままsocketに届く
 - 読み取りだけのjob（goal reviewなど）: `--sandbox read-only`の代わりに、`:read-only`を継いでnetworkをCodexのnetwork proxy経由で開き、serviceのsocket（実path）だけを許すpermission profileで動かす（`AgentProvider::reach_queue_service`、設定は`codex::job_service_config`）。
-  実Codexでのjobの確認は手動スモークに任せる
 - Claude Codeのagentはsandboxを持たないので何も足さない
 - Codexのworkerの`dagq ask`はserviceのユースケースとして送る（ADR-t1233-5決定5）
 

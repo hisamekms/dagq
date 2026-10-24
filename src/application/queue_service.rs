@@ -1246,7 +1246,8 @@ pub trait ServiceAccess: Send + Sync {
         ended: &mut dyn FnMut(&Principal) -> bool,
     ) -> Result<Vec<String>>;
     /// `child`, which revokes the token of `actor_id` once it has ended (a
-    /// job's, whose token ends with it).
+    /// job's, whose token ends with it): when a wait sees it end, or when
+    /// the handle is dropped.
     fn revoke_on_exit(
         &self,
         db: &std::path::Path,

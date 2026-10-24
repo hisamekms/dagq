@@ -1022,6 +1022,19 @@ pub fn session_token_ended(principal: &Principal, alive: impl Fn(&SessionProcess
         .is_some_and(|session| !alive(session))
 }
 
+/// The name the supervisor's sweep, through the service, revokes the
+/// token of `principal` by once it ended (ADR-t3102-1 decision 2): its
+/// [`Principal::credential_key`], so that an inbox's is found in the file
+/// of its own session, and an inbox opened again since, whose key names
+/// another session, keeps its token. `None` for a supervisor's sign-in,
+/// which only that supervisor gives back.
+pub fn swept_token_key(principal: &Principal) -> Option<String> {
+    let supervisor = principal.role == ActorRole::Supervisor
+        || principal.registration.is_some()
+        || principal.actor_id.starts_with("supervisor:");
+    (!supervisor).then(|| principal.credential_key())
+}
+
 /// Whether the token of `principal` is a planner's or a planner's session
 /// wrapper's whose planner ended (ADR-t3102-1 decision 2); `None` for every
 /// other principal (an executor's telemetry token of a planner is its own
@@ -1675,6 +1688,40 @@ mod tests {
             Principal::wrapper(&StepTarget::run(&RunId::new("r1").unwrap()), None),
         ] {
             assert_eq!(ended(&other, None, Some(3)), None, "{other:?}");
+        }
+    }
+
+    /// The sweep revokes an ended token by its key: an inbox's by its
+    /// session's, so an inbox opened again keeps its own; a planner's and
+    /// a worker's by their actor ids; never a supervisor's sign-in.
+    #[test]
+    fn the_sweep_revokes_by_the_key_of_the_session_and_never_a_supervisor_s() {
+        let session = |pid| SessionProcess {
+            pid,
+            start: "Thu Oct 23 10:00:00 2026".to_owned(),
+        };
+        let (ended, again) = (Principal::inbox(session(7)), Principal::inbox(session(8)));
+        assert_eq!(
+            swept_token_key(&ended).as_deref(),
+            Some("inbox@7:Thu Oct 23 10:00:00 2026")
+        );
+        assert_ne!(swept_token_key(&ended), swept_token_key(&again));
+        assert_eq!(swept_token_key(&ended), Some(ended.credential_key()));
+        let worker = Principal::worker(&RunId::new("r1").unwrap(), TaskId::new(1));
+        for principal in [Principal::planner(3), worker] {
+            assert_eq!(
+                swept_token_key(&principal),
+                Some(principal.actor_id.clone()),
+                "{principal:?}"
+            );
+        }
+        let supervisor = Principal::supervisor(&LeaseToken::new("lease"), 42);
+        let named = Principal {
+            actor_id: supervisor.actor_id.clone(),
+            ..Principal::inbox(session(7))
+        };
+        for refused in [supervisor.clone(), named] {
+            assert_eq!(swept_token_key(&refused), None, "{refused:?}");
         }
     }
 

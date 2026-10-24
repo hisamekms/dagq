@@ -448,9 +448,10 @@ impl std::error::Error for NotOwnLease {}
 /// The operations on the tokens of the principals the supervisor starts
 /// (ADR-t3102-1 decision 2): each is done by the service, a worker's and a
 /// run's executor's under the run's lease checked in the same transaction.
-const TOKEN_OPS: [&str; 8] = [
+const TOKEN_OPS: [&str; 9] = [
     "issue_token",
     "revoke_token",
+    "revoke_principal",
     "token_principals",
     "issue_telemetry",
     "revoke_telemetry",
@@ -582,6 +583,27 @@ fn tokens(
             }
             reply(backend.access().revoke(db, &actor_id))
         }
+        "revoke_principal" => {
+            let (principal,): (Principal,) = read(op, args)?;
+            let Some(key) = crate::domain::queue_service::swept_token_key(&principal) else {
+                return Err(BadOperation(format!(
+                    "a supervisor revokes no token of {}",
+                    principal.actor_id
+                ))
+                .into());
+            };
+            // Only a token held for that very principal, and an inbox's only
+            // once its session ended: never a live session's on request.
+            let held = backend.principals()?.contains(&principal);
+            let ended = principal
+                .session
+                .as_ref()
+                .is_none_or(|session| !backend.session_alive(session));
+            if !(held && ended) {
+                return reply(Ok(false));
+            }
+            reply(backend.access().revoke(db, &key))
+        }
         "token_principals" => reply(backend.principals()),
         "issue_telemetry" => {
             let (target, task, issued_under): (StepTarget, Option<TaskId>, Option<LeaseToken>) =
@@ -672,8 +694,10 @@ impl super::queue_service::ServiceAccess for ServiceTokens {
         let queue = self.queue();
         let principals: Vec<Principal> = queue.remote("token_principals", vec![])?;
         let mut revoked = Vec::new();
+        // By the principal, whose token's file the service finds by its
+        // key: an inbox's is its session's, not its actor id's.
         for principal in principals.iter().filter(|principal| ended(principal)) {
-            let gone: bool = queue.remote("revoke_token", vec![to_value(&principal.actor_id)?])?;
+            let gone: bool = queue.remote("revoke_principal", vec![to_value(principal)?])?;
             if gone {
                 revoked.push(principal.actor_id.clone());
             }

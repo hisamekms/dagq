@@ -393,3 +393,123 @@ fn the_sweep_revokes_the_tokens_of_ended_runs_and_keeps_a_waiting_runs() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_no_tokens(&queue_dir);
 }
+
+/// ADR-t3102-1 decision 2: the supervisor's sweep removes the token files
+/// of a closed planner and of its session wrapper, and of an inbox whose
+/// session's process ended, and keeps those of an open planner whose
+/// wrapper runs and of an inbox whose session runs.
+#[test]
+fn the_sweep_revokes_the_tokens_of_closed_planners_and_ended_inboxes_and_keeps_live_ones() {
+    use dagq::application::ProcessControl;
+    use dagq::domain::{
+        PlannerOrigin,
+        background_wrapper::BackgroundHandle,
+        queue_service::{Principal, SessionProcess},
+        session_step::TargetKind,
+    };
+    use dagq::infrastructure::adapters::SystemProcesses;
+    let (_dir, repo, db) = fixture();
+    let queue_dir = db.parent().unwrap().to_owned();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let alive_pid = std::process::id();
+    // A background planner whose wrapper (this process) runs.
+    let workspace = BackgroundHandle::new(
+        alive_pid,
+        &SystemProcesses.start_identity(alive_pid).unwrap(),
+    )
+    .to_string();
+    let planner = |workspace: &str| {
+        let planner = queue.open_planner(PlannerOrigin::Runtime, None).unwrap();
+        queue
+            .planner_workspace_created(planner.id, workspace)
+            .unwrap();
+        queue
+            .register_planner_wrapper(planner.id, alive_pid)
+            .unwrap();
+        queue
+            .register_planner_agent(planner.id, alive_pid, alive_pid)
+            .unwrap();
+        planner.id
+    };
+    let closed = planner("W-CLOSED");
+    let open = planner(&workspace);
+    queue.close_planner(closed, None).unwrap();
+    // A planner's own token and its session wrapper's.
+    let files = |id: dagq::domain::PlannerId| {
+        let target = StepTarget::of(TargetKind::Planner, id.as_i64());
+        [
+            Principal::planner(id.as_i64()),
+            Principal::wrapper(&target, None),
+        ]
+        .map(|principal| service::issue(&queue_dir, &principal, 0).unwrap().file)
+    };
+    let (closed_files, open_files) = (files(closed), files(open));
+    let session = |pid| SessionProcess {
+        pid,
+        start: SystemProcesses.session_start(pid).unwrap(),
+    };
+    let live_inbox = service::issue(&queue_dir, &Principal::inbox(session(alive_pid)), 0)
+        .unwrap()
+        .file;
+    let backend = TestWorkspace::new(&db, false, "exit 0");
+    let sweeping = SuperviseOptions {
+        sweep_interval: Duration::ZERO,
+        ..supervise_options(1, true)
+    };
+    let outcome = supervise_with(&db, &repo, &backend, &sweeping).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    for file in &closed_files {
+        assert!(!file.exists(), "{}", file.display());
+    }
+    for file in open_files.iter().chain([&live_inbox]) {
+        assert!(file.is_file(), "{}", file.display());
+    }
+    // The inbox's session ends (its process exits): the next sweep removes
+    // its token.
+    let mut agent = crate::common::KillOnDrop::new(
+        std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+        "the inbox's stand-in agent",
+    );
+    let ended = service::issue(
+        &queue_dir,
+        &Principal::inbox(session(agent.child().id())),
+        0,
+    )
+    .unwrap()
+    .file;
+    agent.child().kill().unwrap();
+    {
+        let _waiting = crate::common::within(
+            crate::common::STEP_LIMIT,
+            "the inbox's stand-in agent to exit",
+        );
+        agent.child().wait().unwrap();
+    }
+    let outcome = supervise_with(&db, &repo, &backend, &sweeping).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(!ended.exists(), "{}", ended.display());
+    let planners = queue.planners(false).unwrap();
+    assert!(
+        planners.iter().any(|planner| planner.id == open),
+        "{planners:?}"
+    );
+    for file in &open_files {
+        assert!(file.is_file(), "{}", file.display());
+    }
+    assert_eq!(
+        token_files(&queue_dir).len(),
+        4,
+        "the open planner's values and records"
+    );
+}
