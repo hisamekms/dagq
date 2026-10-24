@@ -47,7 +47,9 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 - review・recovery・plan review・goal reviewのjob: 型付きのverdict。
   supervisorが写像の表どおりに適用し、読めない出力は何も進めない（[Roles](supervisor-lifecycle/roles.md#headlessのjobのverdictと遷移)）
 - observer: findingと、findingに紐づく`blocked`のaskだけ
-- planner: draftのtaskとproposal。`ready`にするのはplan reviewのverdictをsupervisorが適用するとき（と人の明示の`ready --bypass-review`）
+- planner: draftのtaskとproposal。
+  `ready`にするのは通常はplan reviewのverdictをsupervisorが適用するとき（と人の明示の`ready --bypass-review`）
+  再計画の置換proposalの子はpassの後も`submitted`に残り、`ready`にするのはtrusted runtimeの適用だけ（[Plan review](supervisor-lifecycle/plan-review.md#不変条件)）
 - inbox: 人の言葉を写したanswerと代行の操作。記録で人自身と区別する（下の「answerと代行の記録」）
 
 containerのworkerのcloneもdataで、制御側はgitを走らせない（[Container runtime](container-runtime.md#git)）。
@@ -112,8 +114,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   持つのは`telemetry.report`（ユースケース`telemetry_report`）だけで、対象はtokenの対象の、制御側がその対象に登録したsessionだけ（他の対象の名で送ったものと、未登録か他の対象のsessionは`authorization_denied`）。
   sessionの持ち主はagentのsessionを起動する制御側だけが登録し（起動の前か、agentが名前を決めるsessionはそれを読んだ時点。[計測](measurement.md#送る口)の「sessionの登録」）、他の対象に登録済みのsessionは登録し直せず、agentとAI actorとserviceのユースケースは登録しない。
   読み取りを含めほかのユースケースは全て`authorization_denied`で拒まれる。
-  runの対象のtokenはsupervisorだけがclaim・resume・runの引き継ぎと、runの上でexecutorを起動するとき自分のleaseのものが無ければ、自分のleaseの下で発行し（前のものは失効させて発行し直す）、runの終わりとleaseの喪失で失効させる。
-  leaseの喪失による失効はそのleaseで発行したものだけを消し、失効の失敗（発行し直しの前のものも）は次の見回りでやり直し、失効の記録は失効が成功した後にだけ書き、発行と失効は互いに排他にする（時点と記録は[Queue service](queue-service.md#principalとtoken)）。
+  runの対象のtokenはsupervisorだけが自分のleaseの下で発行し、runの終わりとleaseの喪失で失効させ、発行と失効は互いに排他にする（時点・やり直し・記録は[Queue service](queue-service.md#principalとtoken)と`application::telemetry_tokens`のmodule doc）。
   runを持たない対象のtokenはagentを起動する制御側が発行して対象の終わりで失効させ、起動元が失効の前に落ちても、serviceが要求ごとに対象の終わりをqueueから読んで断る。
   tokenのファイルはqueueの`service/`の下でagentのworktree・run dir・plannerとjobのdirの外にあり、executorは対象から場所を引く口を使い、agentのenvとargvには渡さない（hostでは助言的）
 - 予約のcapabilityは誰にも与えない。
