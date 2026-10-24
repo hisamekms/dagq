@@ -34,6 +34,15 @@
 //! on its own thread) reconciles at the next pass too ([`Unanswered::look`],
 //! once a pass joined what its threads did): a run it left under this
 //! supervisor's lease in no slot is found again.
+//!
+//! A step never fills a read that did not reach the service, or a write
+//! left unanswered, with a settled result (unreadable, used up, failed):
+//! it refuses no repair and gives no lease back on it, but fails and
+//! leaves the run to this reconciliation. A provisioning cut off this way
+//! does not stop the claims either. A reconciliation the service stops
+//! answering in the middle keeps the leases and starts again at the next
+//! pass, while the heartbeat goes on writing as it does when busy, until
+//! the leases would go stale ([`HeartbeatPolicy::retries`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 

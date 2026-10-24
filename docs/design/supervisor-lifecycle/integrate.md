@@ -106,7 +106,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 - 落ちたtestが全て道具の流し直しで通った失敗（`flaky`）は、resumeせず同じslotと同じheadで検証を最初からもう1回流す（ADR-t768-1）。
 - やり直しは着地の試行ごとに1回までで、宣言したprofileのやり直しのenvを渡す（ADR-t1039-1）。
-- 流し直しと流しきりは`.config/nextest.toml`の設定で、nextestでない`cargo test`の検証は`flaky`にならない。
+- 落とし穴: nextestでない`cargo test`の検証は`flaky`にならない。
 - やり直しはattentionにせず、記録と[`stats`](commands.md)で読む。
 
 ## 着地とpush
@@ -114,16 +114,16 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - squash commitは`land`の終わりが作って`Repository::advance_main`が`main`を進め、runの元の履歴は`refs/dagq/runs/<run-id>`に残る。
 - pushの先・結果・記録は`decide_push`が決め、pushが失敗してもrunは着地したままで`integrate`は成功で終わる。
   失敗したpushはattentionになり、人が原因を直してpushする（pluginの`dagq-recover`の`reference/review-by-hand.md`の「A failed push」）。
-- containerで動くrunは制御側の着地用のworktreeで着地し、作れないかgitのhookとdriverを止められなければ控える（[Container runtime](../container-runtime.md#git)）。
+- containerで動くrunの着地用のworktreeは[Container runtime](../container-runtime.md#git)が持つ。
 
 ## landing branch
 
 - 着地先のbranch・pushのremote・pushするかは`dagq.toml`の`[repository]`が持つ（ADR-t615-1）。
-- 解決は保存せず使うたびに行うが、1回の着地は開始時に1度だけ解決し、着地したcommitが`[repository]`を書き換えても、そのrebase先・`main`の進め方・pushは同じbranchへ行く（`LandingBranch`）。
+- 解決は保存せず使うたびに行い、1回の着地は開始時に1度だけ解決する（`LandingBranch`）。
 - sessionやaskの文面は「main」の代わりに解決したbranchの名前を書く。
 - `up`のpreflight・`supervise`の起動・`integrate`は解決できなければ止まり、`doctor`は同じerrorを報告し、既定のbranchを仮定しない。
   走っているsupervisorは解決できない間、claimと着地を始めずに控え、その変わり目だけを記録する（`check_landing_branch`）。
-- supervisorは解決の入力のファイルの印が変わらない間は前の解決を使い、印が見落とす変化は上限の時間で拾う（`LANDING_BRANCH_RECHECK`・`GitRepository::landing_branch_stamp`）。
+- supervisorが解決し直す時は`check_landing_branch`のdoc commentが持つ。
 
 ## 着地の前のe2e
 
@@ -137,20 +137,12 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 ## landing recheck
 
-- `main`が最後のrecheckから動けば、直接の`integrate`やdagqを通さないpushの後も、次のpassで着地待ちのrunを先回りして確かめる（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)、ADR-t1310-1）。
-- 着地しなくなったleaseの無いrunは、askの答えや`integrate`の順番を待たずにresumeへ回り、slotに持つrunは着地の直前にparkする。
-  きれいなrunにも結果を記録し、runの開いているaskは最新の結果を1つの段落で見せる（ADR-t1311-1）。
-- hostの分類で落ちたcommandと、containerのrunでcommandを流すcontainerが無かったときは何も判定せず、runは着地を待ち続ける（ADR-t639-1、ADR-t2424-1）。
-- passのどのcommandよりも前に`check_writable`がhostでcommandを流す全runのbuild outputへの書き込みを確かめ、書けないpassはhostでcommandを流さず、流すはずだったrunを記録もresumeもしない（ADR-0068決定2）。
-- 書けない間はqueueのattentionを1度だけ残し、書けたrecheckが対のeventで閉じる（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定9、`TargetCheck`）。
-- hostで流したrunのcommandがコードの分類で落ちたpassは、全てのrunを確かめた後に1回だけmainの木だけでcommandを流す（`recheck_runs`・`check_main`、[ADR-t2141-1](../../adr/2026-10-20-t2141-1-recheck-checks-main-alone-before-resuming-runs-whose-command-failed.md)）。
-  mainも落ちれば、落ちたrunはresumeせず着地を待ち続け、queueのattentionで1回だけinboxに知らせる（`domain::recheck::kept_by_main`・`MainCheck::transition`）。
-  mainが通るか判定できなければ、同じ出力で落ちた複数のrunも今までどおり各々resumeする。
-  attentionが残る間は、hostでcommandが通ったrunのあるpassでもmainを確かめ、通れば終わりの印を残す。
-- recheckを始められないか記録できないerrorはwarnだけで、runに何も記録せず着地を止めない（着地が改めて確かめる）。
-- mainの動きを見るsupervisorは選ばず、drainやhandoffの間は生きているほかのsupervisorが確かめる。
+- `main`が最後のrecheckから動けば（dagqの外のpushも）、次のpassで着地待ちのrunを先回りして確かめる（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)、ADR-t1310-1）。
+- 確かめ方、着地しなくなったrunのresumeとpark、結果の記録（ADR-t1311-1）、hostの分類の失敗とcontainerが無いときに判定しないこと（ADR-t639-1、ADR-t2424-1）、build outputの書き込みの確認（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定9）は、`application::supervise::execution::recheck`のmodule docと`domain::recheck::TargetCheck`が持つ。
+- コードの分類で落ちたrunは、mainの木だけでも落ちればresumeせず着地を待ち続け、inboxに1回だけ知らせる（[ADR-t2141-1](../../adr/2026-10-20-t2141-1-recheck-checks-main-alone-before-resuming-runs-whose-command-failed.md)、`domain::recheck::MainCheck`・`kept_by_main`）。
+- recheckのerrorはwarnだけで着地を止めず（`recheck_pass`）、mainの動きを見るsupervisorは選ばず、drainやhandoffの間は生きているほかのsupervisorが確かめる。
 - recheckも同じ番を取り、関門の間は始めずに次のpassで見直す。
-- 着地待ちのrunが無ければ確かめるものが無いので、番もrecheckのlockも取らず、そのlockの下でだけbuild outputを消す空き容量の掃除（[queueのdirのビルドのキャッシュ](claim-hold.md#queueのdirのビルドのキャッシュ)）を妨げない（`look_before_lock`）。
+- 着地待ちのrunが無ければ番もrecheckのlockも取らず、そのlockの下でだけbuild outputを消す空き容量の掃除（[queueのdirのビルドのキャッシュ](claim-hold.md#queueのdirのビルドのキャッシュ)）を妨げない（`look_before_lock`）。
 
 ## errorと復旧
 

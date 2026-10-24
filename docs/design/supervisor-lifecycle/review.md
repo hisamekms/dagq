@@ -50,11 +50,11 @@ validationを通ったrunを、着地の前にheadlessのreview jobで判定し�
 ### 全体の流れ
 
 ```text
-validationを通ったrun（awaiting_integration。supervisorがleaseとslotを持ち、workerのsessionは開いたまま）
-  → 0 プログラムのreview: 落ちたら4（agentは起動しない）、起動の失敗・時間切れは失敗
+validationを通ったrun（awaiting_integration）
+  → 0 プログラムのreview: 落ちたら4（agentは起動しない）
   → 1 開始: review.mdと各jobのpromptを書く
-  → 2 headless実行: 全体のreviewとagentごとの読み取りだけのjobを上限の中で並列に
-  → 3 判定: 全jobがそろってから。答えの無いjobはそのjobだけ1回やり直す
+  → 2 headless実行: 全体のreviewとagentごとの読み取りだけのjobを並列に
+  → 3 判定: 全jobがそろってから
        pass    → 5a 定義を変えるrunはagentのeval → 5 衝突の事前判定 → 終了の依頼とclose → 着地の前のe2e → 着地
        revise  → 4 reviseの往復（runを通した上限まで）→ validationからやり直す
        concern → AIが決めるconcern: land（passと同じ道）/ send_back（4と同じ道）/ ask
@@ -69,70 +69,52 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 - review jobは読むだけで、worktreeは生きているworkerのsessionのものなので書く道具を持たない。
 - 直すのはworkerのsessionで、supervisorは依頼を次のturnとして`turns/`に書くだけ（[非対話のworker](headless-worker.md#run-dirのturns)）。
 - 着地は`integrate`と同じ処理をsupervisorが走らせ（[integrate](integrate.md)）、review中のrunを人の`integrate`は拒む。
-- 資料`review.md`は[`review`](commands.md)、promptは[Prompt](prompt.md#headlessのjobのprompt)、providerの一般の規則は[Agent provider lifecycle](../provider-lifecycle.md)が持つ。
+- 資料`review.md`は[`review`](commands.md)、promptは[Prompt](prompt.md#headlessのjobのprompt)、providerは[Agent provider lifecycle](../provider-lifecycle.md)。
 
 ### 不変条件
 
 - passでないreviewのrunは、人の`land`の答えか、jobの確かな`land`の推奨か、4aの収束なしには着地しない。
-- やり直しはjobごとに1回まで、プログラムのreviewをやり直したreviewのjobはやり直さない。
-- 全jobが終わるまで判定せず、答えの無いjobが残れば`pass`にしない。
+- 全jobが終わるまで判定せず、答えの無いjobはそのjobだけ1回やり直し、残れば`pass`にしない（プログラムのreviewをやり直したreviewのjobはやり直さない）。
 - AIのjobが他のjobの判定をまとめることはない。
 - verdictの`follow_ups`は判定と行き先を変えず、それだけでrunを差し戻さない。
 - reviseはrunを通した上限まで返し、resumeで数え直さず、上限の後は4aで決める（[ADR-t2599-1](../../adr/2026-10-17-t2599-1-run-review-revises-counted-across-the-run-and-judged-by-code-findings-past-the-limit.md)）。
-  上限は試行ごとにlanding branchのcommitの`dagq.toml`から読む値で、書かなければ既定（[Run environment](run-environment.md)、[ADR-t3033-1](../../adr/2026-10-22-t3033-1-run-review-revise-limit-from-the-landing-branchs-dagq-toml.md)）。
+  上限は試行ごとにlanding branchの`dagq.toml`から読む（[ADR-t3033-1](../../adr/2026-10-22-t3033-1-run-review-revise-limit-from-the-landing-branchs-dagq-toml.md)、`domain::ReviseLimit`）。
 - 依頼（revise・衝突の解消）はeventを記録してから`turns/`に書くので、二重には書かない。
 - 1つのrunに開いた`approve_landing`のaskは1つ。
-- e2eはhostで同時に1本だけ流れる。
 
 ## 入口の地図
 
 | 知りたいこと | コードの入口 |
 | --- | --- |
-| reviewの始まりと行き先 | `src/application/supervise/execution/landing.rs`の`Supervisor::begin_review`・`review_route`、`supervise/execution/provider.rs` |
-| jobの起動・やり直し・判定 | `landing.rs`の`Supervisor::tend_review`、`supervise/execution/jobs.rs`、`src/domain/review_jobs.rs` |
+| reviewの始まりと行き先 | `src/application/supervise/execution/`（以下同じ）の`landing.rs`の`Supervisor::begin_review`・`review_route`、`provider.rs` |
+| jobの起動・やり直し・判定 | `landing.rs`の`Supervisor::tend_review`、`jobs.rs`、`src/domain/review_jobs.rs` |
 | verdictごとの進め方 | `landing.rs`の`act_on_verdict`・`act_on_concern`、`src/domain/concern.rs` |
-| reviseと衝突の待ち | `supervise/execution/revise.rs`の`ReviseWatch`、回数は`src/domain/run/history.rs` |
-| 理由のコードと上限の後の判定 | `src/domain/review_reason.rs` |
+| reviseと衝突の待ち | `revise.rs`の`ReviseWatch`、回数は`src/domain/run/history.rs` |
 | askとその答え | `landing.rs`の`ask_approve_landing`・`apply_landing_answers`、`src/domain/mod.rs`の`LandingAnswer` |
-| 引き継ぎ | `supervise/execution/adopt.rs` |
-| reviewのprompt | `src/application/prompt/`の`review_prompt` |
-| reviewのsubagent | `src/application/review.rs`、`src/domain/review_subagents.rs` |
-| 着地の前のagentのeval | `supervise/execution/eval_gate.rs`、判定は`src/domain/agent_eval/before_landing.rs` |
-| `already_satisfied`の主張の判定 | `supervise/execution/satisfied_review.rs`、promptは`claim_review_prompt`、verdictは`src/domain/satisfied_judgment.rs` |
+| 引き継ぎ | `adopt.rs` |
 
 ## reviewの流れ
 
 番号は上の図の段で、各段の手順と記録するeventは入口のdoc commentが持つ。
 
-1. **開始**: 資料かpromptを書けなければ、jobを起動せずにreviewの失敗にする。
 2. **headless実行**: 全体のreviewはinstructionsを読ませず、pjの規則はlanding branchの`.dagq/review/builtin-acceptance.md`だけ（ADR-t2259-1決定6）。
-   jobの起動・停止・引き継ぎは[Headless job processes](headless-job-processes.md#記録)が持つ。
-3. **判定**: 全てのjobが答えたときだけ、判定ごとに最も重い行き先を機械で取る。
-4. **reviseの往復**: receiptが依頼より後に書き直されcleanなworktreeのHEADと一致したときだけ[Validation](validation.md#validation)からやり直す。
-   落とし穴: HEADと一致しないreceiptを渡すと`failed`になって作業を失うので、HEADで書き直す依頼を送って待ち直す。
+   jobの起動・停止・引き継ぎは[Headless job processes](headless-job-processes.md#記録)。
+3. **判定**: 全てのjobが答えたときだけ、判定ごとに最も重い行き先を機械で取る（`review_jobs`）。
+4. **reviseの往復**: 書き直したreceiptがcleanなworktreeのHEADと一致したときだけ[Validation](validation.md#validation)からやり直す。
+   落とし穴: 一致しないreceiptを渡すと`failed`で作業を失うので、HEADで書き直す依頼を送って待ち直す。
    書き直さずに終われば`approve_landing`のaskで人に聞く。
-4a. **上限の後の判定**: 理由にコードの指摘が無ければ理由をfollow_upのdraftにしてpassの道で着地し、あれば`approve_landing`のaskで示す。
-   上限は試行が始めに読んで記録した値で、下げた上限に既に送った手直しの数が届いたrunは次の差し戻しから4aに入る（`RunHistory::revise_limit`）。
-   `acceptance_unmet`は`paths`が全部試行の始めに読んだコードのpath（[`[review.code]`](run-environment.md)）の外のときだけコードの指摘でない（`review_reason::Finding::is_code_finding`）。
-5a. **着地の前のagentのeval**: passの後、衝突の事前判定の前に、定義を変えるrunはsessionとslotとleaseを持ったままlanding branchのケースでdevを待つ（下の「着地の前のagentのeval」）。
+4a. **上限の後の判定**: コードの指摘が無ければ理由をfollow_upのdraftにして着地し、あればaskで示す（`Finding::is_code_finding`・`RunHistory::revise_limit`）。
 5. **終了の依頼とclose**: 着地かaskの前にworkerのsessionの終了を依頼する（[非対話のworker](headless-worker.md#wrapperがturnを止めるとき)）。
-   - **passの衝突の事前判定**（ADR-0027決定4）: 衝突すれば解消を生きているsessionに依頼して4と同じ待ちに入り、[Needs session](needs-session.md)の「試行の数え方」の衝突だけの試行に数える。
-   - **pass**: e2eが要るrunは[着地の前のe2e](integrate.md#着地の前のe2e)を通してから着地する。
-   - **ask**: askを作る前にそのrunの閉じていない前の`approve_landing`を閉じる。
-     落とし穴: 残すと開いたaskに畳まれて新しい理由が人に届かず、古い答えが新しいreviewに適用されうる。
-6. **askの回答**: 答えはslotの空きに依らずその場で適用してaskを閉じ、`land`は承認の古い順に1本ずつ着地する。
-   `retry_review`はresumeせず同じreceiptを再reviewする（[ADR-t2521-1](../../adr/2026-10-17-t2521-1-retry-review-answer-reviews-a-failed-review-again-on-the-same-run.md)）。
-   runが着地せずに終われば、runtimeがそのrunの閉じていない`approve_landing`を閉じる。
+   衝突の事前判定（ADR-0027決定4）で衝突すれば解消を生きたsessionに依頼して4と同じ待ちに入り、衝突だけの試行に数える（[Needs session](needs-session.md)の「試行の数え方」）。
+   落とし穴: askの前に前の`approve_landing`を閉じないと、開いたaskに畳まれて新しい理由が届かず古い答えが適用されうる（`ask_approve_landing`）。
+6. **askの回答**: 答えはslotの空きに依らずその場で適用し、`retry_review`はresumeせず同じreceiptを再reviewする（[ADR-t2521-1](../../adr/2026-10-17-t2521-1-retry-review-answer-reviews-a-failed-review-again-on-the-same-run.md)、`apply_landing_answers`）。
+   `land`は承認の古い順に着地し、着地せずに終わったrunの閉じていない`approve_landing`はruntimeが閉じる。
 7. **引き継ぎ**: 他のsupervisorがadoptして最後の段のeventから続きを決め、途中のerrorはrunをabandonして`review and integrate`のattentionにする。
-   passの後にleaseを返されlease行も開いたaskも無いrunは、adoptでなくfill passが拾い直して同じく続ける（[Supervise](supervise.md#leaseの解放)）。
 8. **reviseの間のask**: `worker_question`の答えを次のturnに届け、待つrunはslotから外れる（[人の答えを待つrun](waiting.md)の「差し戻しと解消依頼の段」）。
 
 ## reviewのprovider
 
-- 行き先はreviewの開始とjobの起動のたびにjobごとに決める（入口は`landing.rs`の`Supervisor::review_route`と`supervise/execution/provider.rs`の`review_route`）。
-- Codexのreviewはworktreeのprojectを信頼しない（[ADR-t1570-1](../../adr/2026-10-04-t1570-1-codex-run-review-distrusts-the-worktree-project.md)）。
 - 控えるのは実際に失敗したproviderだけで、起動できないjobは他のjobの答えを保ったまま待つ（[Queue hold](queue-hold.md)）。
-- 落とし穴: 引数・envの大きさによる起動の失敗はproviderの問題でないので、控えも切り替えもしない。
 
 ## reviewのsubagent<a id="reviewのsubagent"></a>
 
@@ -142,40 +124,27 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 - **設定**: 書式は[Run environment](run-environment.md)、誤りは`dagq doctor`が出し、built-inの規則は[`setup-review`](setup-review.md)が作る。
 - **道具の宣言**: 定義の`tools`はruntimeの一覧から選び、役割の許可を超えれば誤りにする（`AgentTools`、[ADR-t1728-2](../../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)）。
 - 必須のagentとpjの定義は試行ごとにlanding branchから読み（built-inの定義はバイナリから）、workerがrun branchで変えても選ばれるagentは変わらない（`snapshot_subagents`）。
-- 範囲は試行ごとに1回決め、`review.md`も同じ範囲で書くので、mainが進んでも差分と資料は食い違わない。
 - **agentのjobのprovider**<a id="agentのjobのprovider"></a>: `provider`を書いたjobには上の「reviewのprovider」の規則をそのjobだけに当てる（`Supervisor::review_job_route`）。
 - **誤り**: 必須の検査が分からないときは空にせず、起動せずにreviewの失敗にする。
 
 ## プログラムのreview<a id="プログラムのreview"></a>
 
 段の先頭で、pathが差分に当たるprogramをagentのjobの前に流す（[ADR-t1895-2](../../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)、[プログラムのreview](review-programs.md)）。
-landing branchのcommitから読んだscriptは、queueの`review-programs/<run id>/`（runtimeだけが持つdir）に書き出して流す。
-run dirとrunのworktreeとその下はworkerが書けるので置かない（書き出してからexecまでにworkerが置き換えたscriptが流れうる。`review_programs::program_scratch`）。
+落とし穴: scriptはworkerが書けない場所に書き出して流す（`review_programs::program_scratch`）。
 
 ## 着地の前のe2e
 
-e2eが要るpassしたrunは、着地スロットを待つ段でhostでe2eを流してから着地する（[着地の前のe2e](integrate.md#着地の前のe2e)）。
+[integrate](integrate.md#着地の前のe2e)が持つ。
 
 ## 着地の前のagentのeval
 
-[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)決定10の実装。
-差分（reviewと同じ`<base>...<head>`）が`.dagq/agents/<name>/AGENT.md`を変え、landing branchのcommitにそのagentの`evals/dev.json`があるrunは、passの後・衝突の事前判定の前に、runの定義をlanding branchのケースで測るdevの周を待つ。
-
-- 周はevalの枠で流れ（[agentのeval](../agent-eval.md)の「evalの枠」）、runは待つ間も流す間もsessionを開いたままslotとleaseを持つ。
-  待ちの理由は`run_agent_eval_waiting`に記録し、`status`のrunの`progress`に出る。
-- 全部の周がpassなら5へ進む。
-  閾値を下回った周は、失敗したケースのidとagentの理由を4と同じ経路で送り、runを通したreviseの上限に数える。
-  上限を使い切っていれば`approve_landing`のaskにする（理由のコードを持たないので4aで着地しない）。
-- 周が流せない（拒否・`incomplete`・判定の無い実行・使えないprovider）か、supervisorが止まるときは、`approve_landing`のaskに理由を載せる。
-- 定義を変えないrunは何も記録せず今のまま進み、`dev.json`の無いagentと定義を消したagentは`run_agent_eval_requested`の`skipped`に理由を残して進む。
+差分が`.dagq/agents/<name>/AGENT.md`を変え、landing branchにそのagentの`evals/dev.json`があるrunは、passの後・衝突の事前判定の前にslotのままdevの周を待つ（[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)決定10、[agentのeval](../agent-eval.md)の「採用の判定（着地の前のdev）」、`eval_gate`）。
 
 ## 文書の照合
 
-文書の照合は全体のreview（`builtin:acceptance`）だけが行い、promptは`REVIEW_DOCS_CHECK`でそれを求める（[ADR-t1942-2](../../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)決定4、[ADR-t2352-1](../../adr/2026-10-16-t2352-1-review-sends-back-only-documents-the-diff-touched-and-follows-up-the-rest.md)、[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)、[built-in](review-builtin.md)）。
+文書の照合は全体のreview（`builtin:acceptance`）だけが行う（[ADR-t2352-1](../../adr/2026-10-16-t2352-1-review-sends-back-only-documents-the-diff-touched-and-follows-up-the-rest.md)、[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)、[built-in](review-builtin.md)）。
 
-- runtimeの文は汎用の照合だけを持ち、どんな記述を文書の欠陥とするか（コードの書き写し・経緯など）はpjの規則のfile（このrepositoryでは`.dagq/review/builtin-acceptance.md`）が持つ。
-- 差し戻すのは、差分が変えた文書と差分の食い違いと、差分が文書の不変条件・約束・境界を破ることだけ。
-- 差分が触っていない文書の古い記述は`follow_ups`で返し、supervisorが`docs_drift`のdraftにする（[Draft planners](draft-planners.md)）。
+差し戻すのは差分が変えた文書と差分の食い違いと、差分が文書の不変条件・約束・境界を破ることだけで、触っていない文書の古い記述は`follow_ups`で返し`docs_drift`のdraftにする（[Draft planners](draft-planners.md)）。
 
 ## 差し戻しの分類コード<a id="差し戻しの分類コード未実装"></a>
 
@@ -184,52 +153,22 @@ e2eが要るpassしたrunは、着地スロットを待つ段でhostでe2eを流
 
 ## AIが決めるconcern<a id="aiが決めるconcern未実装"></a>
 
-[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)決定3。
+ADR-t451-1決定3。
 
 - **verdictの欄**: 推奨・確信度・人が要る理由はconcernのverdictだけが持つ（`ReviewVerdict`）。
-  例外は`already_satisfied`の主張の判定だけで、専用の入口がpass・revise・concernのどれでも確信度を読み、`high`のpassだけを閉じる側に置く（[ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)決定3・4、`domain::satisfied_judgment`）。
-  通常のrunのreviewの読み取りとconcernの判定はこの入口で変わらない。
-  mainがsnapshotから進んだ`high`のpassの判定のやり直しには上限があり、超えたら人のaskにする（値は`satisfied_judgment::MAX_JUDGMENT_RETRIES`）。
-  この判断（`satisfied_judgment::decide`）の当てはめは下の「already_satisfiedの主張の判定」の「適用」。
+  例外は下の`already_satisfied`の判定だけ（`domain::satisfied_judgment`）。
 - 推奨が無い・人が要る理由がある・確信度が`high`でないconcernはaskにし、知らない理由は人が決める側に倒す（`domain::concern::decide`）。
-- 着地を許す判定は、適用される`land`のconcernを「passした」と読む（`concern::lets_land`）。
-- 引き継いだsupervisorは記録されたconcernを生きたsupervisorと同じに決め、上限の後の`send_back`も4aで判定して同じ`concern_decided`を記録する（`adopt.rs`の`adopted_concern`）。
-  上限の前の`send_back`は依頼が記録されていないので、送れなかったものとして人に聞く。
-  4aの判定が収束を記録した後で`concern_decided`の前にsupervisorが止まったconcernは、passと同じ道（その後のconflictのprecheckを記録していればそこ）から続け、無い`concern_decided`を`revise_limit`で1回だけ記録する（`adopt.rs`の`converged_concern_undecided`）。
+- 引き継いだsupervisorは記録されたconcernを生きたものと同じに決める（`adopt.rs`）。
+  ただし上限の前の`send_back`は依頼の記録が無いので、送れなかったものとして人に聞く（`adopted_concern`）。
 - セキュリティのagentは[ADR-t1906-1](../../adr/2026-10-14-t1906-1-security-review-agent-findings-follow-the-concern-rules.md)。
 
 ## already_satisfiedの主張の判定
 
-[ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)決定4の、「差分なしで受け入れ条件を満たす」主張をreview jobが判定する段（流れの前後は[Validation](validation.md#already_satisfiedの検証)）。
+[ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)決定4の判定の段で、前後と閉じ方は[Validation](validation.md#already_satisfiedの検証)、入口は`satisfied_review`のmodule doc。
 
-- **起動**: snapshotのverifyが通ったとき（最初のものと、下の「適用」のやり直しのもの）に、同じslotとleaseのまま1つのreview jobを起動する（`run_satisfied_review_started`）。
-  verifyが落ちたときと、人の`close`の答えのためにverifyを流し直したときは起動しない。
-- **木**: jobはrunのworktreeでもrun directoryでもなく、queueの`satisfied/`のrunのscratch worktreeを、起動のたびにそこにあるもの（`.git`もlinkも）を信用せずにsnapshotのheadで作り直した木で読むだけで動く（`integrate::fresh_satisfied_scratch`）。
-  判定の後と保留の時に木を消し、途中で死んだsupervisorが残した木は次の作り直しかrunの後の掃除が消す。
-- **prompt**: taskのacceptanceとverify、receiptの根拠（summaryと`base_checks`）、snapshotのheadとそこで通ったverifyを渡し、その同じheadだけで判定させる（[Prompt](prompt.md#headlessのjobのprompt)）。
-- **subagentとprogram**: 差分が無いので、reviewのsubagentもプログラムのreviewも起動しない。
-- **verdict**: 判定専用の入口で読む（上の「verdictの欄」、`ClaimJudgment::parse`）。
-  答えの無いjob（読めない・未知のverdict・必須の欄の欠落・非0の終了・時間切れ・起動の失敗）は、runのreviewのjobと同じく1回だけやり直す。
-- **providerの失敗**: jobの終わりはrunのreviewのjobと同じ分類に通す（`Supervisor::review_job_failed`）。
-  Claudeの認証切れ・利用上限はqueueのholdのaskに加わり、もう一方のproviderが使えなければ控えて切り替えるか待つので、jobの失敗にもやり直しの1回にも数えない（[Agent provider lifecycle](../provider-lifecycle.md)）。
-- **適用**: 判定を、適用の時点のmainのheadと判定したsnapshotのhead、そのrunのやり直しの回数と比べる（`satisfied_judgment::decide`）。
-  `high`のpassでmainがsnapshotのままなら、人に聞かずにrunを`succeeded`（commitなし）、taskを`completed`にし、同じtransactionでleaseを返す（`run_satisfied_closed`の`closed_by`は`judgment`）。
-  `high`のpassでmainが進んでいれば古い判定では閉じず、slotとleaseのまま今のmainのheadを新しいsnapshotにverifyを流し直し、通ればそのheadで判定し直す。
-  やり直しには上限があり（値は`satisfied_judgment::MAX_JUDGMENT_RETRIES`）、超えた`high`のpassは閉じずに人のaskにする。
-- **ask**: `high`のpassでないもの（`low`・確信度の欠落か未知の値・revise・concern）と上限を超えたものは`approve_close`のask（理由は`scope`）を開き、headとreviewのverdict・確信度・推奨・理由と閉じなかった訳を載せ、leaseを外してrunを休ませる。
-  やり直しても答えが無ければjobの失敗として`approve_close`のask（理由は`recovery_failed`）を開く。
-  reviewのproviderが無い（`--no-claude`）ときはjobを起動せずに同じaskを開き、本文はやり直しに触れず、判定していないこととその理由を書く（`satisfied_judgment::unstarted_question`）。
-  verifyは通っているので、どちらのaskも`close`を選べる。
-- **記録**: 判定の`run_satisfied_judged`（適用の`step`つき）と、判定による閉じ・verifyの流し直しの`run_satisfied_snapshot`・判定から開くaskの`ask_opened`は`Supervisor::for_job`の中で書き、`requested_by`に判定元のjob（`review-job:<run>:satisfied-<n>`）を持つ（[roles](roles.md#eventのactor)）。
-  判定で閉じた`run_satisfied_closed`は判定・確信度・head・receiptの根拠を持ち、人の答えで閉じたもの（`closed_by`は`answer`）と分かれる。
-  jobの失敗の`run_satisfied_judged`とaskは、jobの依頼ではないので`requested_by`を持たない。
-- **引き継ぎ**: handoffはjobを止め、次のprocessはvalidatingのrunを検証し直してverifyと判定をやり直す。
-  判定を記録した後に閉じる前に止まったsupervisorのrunもleaseを残すので、adopterは記録された判定では閉じず、再validationからその時点のmainでverifyと判定をやり直す。
+- 約束: jobはsnapshotのheadで作り直したworkerが書けない木で判定し、mainが進んでいれば`high`のpassでも閉じない。
+- 判定から開くaskと閉じは判定元のjobの依頼として記録する（[roles](roles.md#eventのactor)）。
 
 ## 再計画の操作が保護するrun
 
-保護中のrunとholdの開いたtaskのrunは、走っているreviewとe2eの終了を待ち、そのverdictでrevise・ask・着地を始めない。
-`already_satisfied`の主張の判定のjobも同じく終了を待って刈り取り、その判定でaskを開かず、答えの無いjobをやり直さずに、結果を`replan_result_withheld`（holdは`hold_result_withheld`）に残してrunを保留する。
-runは[保留](headless-worker.md#再計画の保留)されてslotを返し、承認の列と`integrate --next`は飛ばす（[taskの再計画](../../plans/task-replanning.md)）。
-reviseのverdictも送らず`revise_withheld`に残し、askを開かずreviewを保留に渡す。
-保留を終えた柵（`blocked`などの保留の後の操作、落ち着いたhold）がslotに見つけたrunも、着地の順やreviewの保留のままslotで待たず、書き手の終わりを待って保留と同じ`needs_session`で休んでslotを返し、操作の結末か解除の後のresumeが新しいvalidationとreviewから続ける。
+保護中のrunとholdの開いたtaskのrunは、走っているreviewとe2eと`already_satisfied`の判定のjobの終了を待ち、その結果でrevise・ask・着地を始めずに保留する（[taskの再計画](../../plans/task-replanning.md#実装の状態)、`replan_park.rs`のmodule doc）。

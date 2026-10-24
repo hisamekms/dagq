@@ -41,6 +41,17 @@
 //! the replanning's: the hold takes no lease, and lets it wait once no
 //! writer is in its registered processes or its worktree. A resume after
 //! the release goes on in the same session from where it stopped.
+//!
+//! The withheld review: its running jobs, its e2e and the job judging an
+//! `already_satisfied` claim are waited for and reaped, but their result
+//! starts no revise, ask or landing and runs no job again; it is kept in
+//! `replan_result_withheld` (`hold_result_withheld` for a hold), a revise
+//! verdict in `revise_withheld`, and the run is parked, skipped by the
+//! approved landings and `integrate --next`. A run the fence finds in a
+//! slot after a park ended (a `blocked` operation, a settled hold) does not
+//! wait there in landing order or in a withheld review either: once its
+//! writer ended it rests as `needs_session` as a park does, giving the
+//! slot back, and its resume begins from a new validation and review.
 
 use super::*;
 use crate::domain::background_wrapper::{BackgroundHandle, is_background};

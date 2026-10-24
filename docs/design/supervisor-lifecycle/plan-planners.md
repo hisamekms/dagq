@@ -55,59 +55,48 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 ## 開き方とwrapper
 
 - `dagq plan`は何も開かずに`application::planner::PLAN_REFUSED`で拒み、権限の検査は残る（ADR-t1394-1決定1・8）。
-- 開くのは`launch_planner`で、handleを記録できないwrapperの停止はそのコメント、残ったmarkerと依頼の掃除は`start_wrapper`・`prepare_planner_turns`が持つ。
+- 開くのは`launch_planner`、wrapperは`run_planner_session`、残ったmarkerと依頼の掃除は`start_wrapper`・`prepare_planner_turns`が持つ。
 - model・effortは`[roles.runtime_planner]`で決め、reviseのために開くときだけ1段上げる（`open_runtime_planner`、[Actor model](actor-model.md)）。
-- reviseとreopenのplannerの初期promptは`runtime_planner_prompt`、上限は[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)、呼ぶ側は[Plan review](plan-review.md#reviseの配送)にある。
-- wrapperは`run_planner_session`で、最初のturnは開いた側がhandleを記録するのを待つ。
-  `submit`がproposalの持ち主をこのhandleから決めるためである。
-- 登録を断られたwrapperはerrorで終わり、workspaceを閉じない（`session::wrapper_refused`）。
+- reviseとreopenの初期promptは`runtime_planner_prompt`、上限は[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)が持つ。
+- handleの記録を待つ最初のturnは[非対話のworker](headless-worker.md#非対話のruntimeのplanner)の「起動」、断られたwrapperは`session::wrapper_refused`が持つ。
 
 ## 状態と生存
 
-- 状態の判定は`planner_view`と`PlannerSession::state`が持つ。
-- 前のbinaryがworkspaceを記録した行は`closed`と読む（`retired_workspace`）。
+- 状態の判定は`planner_view`と`PlannerSession::state`、前のbinaryがworkspaceを記録した行の読み方は`retired_workspace`が持つ。
 - backgroundのwrapperはpidと起動時刻で生存を見て、heartbeatの遅れでは死んだとしない（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定2）。
 - `dagq planners`は何も閉じない（`planner_views`）。
 
 ## 終わりと片付け
 
-- **人のplannerの終わり**: 開いたままの人のplannerの行は、plannerのpassの初めに`close_person_planners`が閉じ、workspaceは人が自分のterminalで閉じる（ADR-t1433-2決定5）。
+- **人のplannerの終わり**: 開いたままの人のplannerの行は`close_person_planners`が閉じ、workspaceは人が閉じる（ADR-t1433-2決定5）。
   その行のreviseとanswerは新しいruntimeのplannerに届く。
-- **plannerの終わりの記録**: `planner_closed`の中身は`planner_closed_payload`、codeは`PlannerCloseCode`が持つ。
+- **終わりの記録**: `planner_closed`の中身は`planner_closed_payload`、codeは`PlannerCloseCode`が持つ。
   wrapperを起動できずにerror付きで閉じる行は記録しない。
-- **行の片付け**: sweepの`close_abandoned_planners`がwrapperもsessionも居ない行を閉じ、supervisorが止まっていた間の分も拾う。
-- **`runner`の片付け**: wrapperが終わりに消し、残りはsweepの`remove_unused_planner_runners`が消す。
-- **dirの片付け**: 閉じてwrapperもagentもprocessが動いていないplannerのdirは、閉じてから`[retention]`の保持期間を過ぎるとsweepが消す（[Persistence](../persistence.md#queue-location)）。
-  行は残る。
+- **片付け**: 行はsweepの`close_abandoned_planners`、`runner`は`remove_unused_planner_runners`が片付ける。
+  閉じてwrapperもagentも動いていないplannerのdirは`[retention]`の保持期間の後にsweepが消し、行は残る（[Persistence](../persistence.md#queue-location)）。
 
 ## runtimeのplannerの経路<a id="runtimeのplannerの経路"></a>
 
 - 経路は非対話だけで、選ぶ設定は無い（[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)決定1・2、ADR-t1433-2決定3）。
-  `planners.route`は過去の対話の行を読むために残り、`[roles.runtime_planner]`の旧keyは[Actor model](actor-model.md#runtimeのplannerの経路)が持つ。
-- **turnの依頼**: supervisorが置く依頼（revise・answer・`provider retry`・終了）は全て`send_to_planner`を通り、番号の順に取られる（`write_request`）。
-  依頼の前に入力の印を書き、前のturnのidle markerでidleに見えないようにする（`stamp_planner_input`）。
-- **状態**: idle markerが最後の入力より新しく、待つ依頼が無ければ`idle`である（`planner_view`、`turn::idle_after_turn`）。
-  届けたanswerを読み終えるまで終了の依頼を置かない。
-  終了の依頼の前には`turns/`を読み直し、取られていない依頼か最後のturnの終わりより後の依頼があれば置かない（`PlanningState::request_outstanding`、[Plan review](plan-review.md#reviseの配送)）。
-  読み終えたかは、turnで配送したanswerはその依頼を取ったturnで、初期promptで運んだanswerは開いた後のidleで判じる（[Draft planners](draft-planners.md#予定-人のplannerの廃止と非対話の経路)）。
-  壁で失敗したturnの後に終わらせると、answerが読まれずに失われる。
-- **時間切れ**: plannerの時間はturnの`[stall]`の上限だけで切られ、止めたturnをinboxにplannerごとに1回知らせる（`tell_of_stopped_planner_turns`）。
+  旧keyは[Actor model](actor-model.md#runtimeのplannerの経路)が持つ。
+- **turnの依頼**: supervisorの依頼は全て`send_to_planner`を通り、前のidle markerを数えないよう`stamp_planner_input`が入力の印を書く。
+- **状態**: idleの判定は`planner_view`と`turn::idle_after_turn`、終了の依頼の前の読み直しは`PlanningState::request_outstanding`が持つ。
+  届けたanswerを読み終えるまで終了の依頼を置かない（判じ方は[Draft planners](draft-planners.md#予定-人のplannerの廃止と非対話の経路)）。
+  落とし穴: 壁で失敗したturnの後に終わらせるとanswerが失われる。
+- **時間切れ**: plannerの時間はturnの`[stall]`の上限だけで切られる（`tell_of_stopped_planner_turns`）。
   idleのまま仕事が終わらないものは、reviseの時間切れが見る（[Plan review](plan-review.md#reviseの配送)）。
 - **人の答えだけを待つplannerの終わり**: 残るのが自分の未回答の`planner_question`（と並んで渡されたrevise）だけなら、終了の依頼を置いて枠を空け、決めずに終わった回数に数えない（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)、`planner_answer_wait`）。
-  answerは行が閉じてから新しいplannerの初期promptで運ばれる（`PlannerHandover`）。
-- **使えないとき**: 最後のturnがClaudeの壁（ログイン切れ・利用上限・起動の失敗）で終わったplannerは、終わらせずに控えを待ち、解けたら`provider retry`で流し直す（`planner_turns.rs`、ADR-t1394-2決定5）。
-  wrapperは壁の後に`provider retry`より先に依頼を取らない（`turn::request_to_take`）。
-  providerは切り替えない。
-- **区間**: kind `runtime_planner`の区間はturnから稼働時間とtokenを取る（`domain::sessions::RUNTIME_PLANNER`、[計測](../measurement.md)）。
+  answerは新しいplannerの初期promptで運ばれる（`PlannerHandover`）。
+- **使えないとき**: Claudeの壁で終わったplannerは終わらせずに控えを待ち、解けたら`provider retry`で流し直し、providerは切り替えない（`planner_turns.rs`、ADR-t1394-2決定5）。
+  壁の後に取る依頼の順は`turn::request_to_take`が持つ。
+- **区間**: turnから稼働時間とtokenを取る（`domain::sessions::RUNTIME_PLANNER`、[計測](../measurement.md)）。
 
 ### 続きの依頼と非対話のplannerのCLI<a id="続きの依頼と非対話のplannerのcli"></a>
 
 - 開いているplannerへの続きの依頼は`dagq planner request`で、宛先はplannerのIDである（`application::planner_request`、ADR-t1533-1）。
-  拒む条件はmodule doc、入力の読み方は`src/main.rs`の`request_words`が持つ。
-- 権限（`planner.request`）は入力を読む前に検査し、権限の無いactorは開いたstdinを待たない。
+  拒む条件と権限の検査の順はmodule doc、入力の読み方は`src/main.rs`の`request_words`が持つ。
 - 開いたplannerの居ない依頼に言葉を足すときは、新しい依頼を`request add`で記録する。
-- `planner screen`と`planner send`は画面もキーも扱わない（`application::screen`）。
-- backgroundのplannerの出力は`dagq planner log`で読む（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）。
+- `planner screen`・`planner send`は[非対話のworker](headless-worker.md#非対話のruntimeのplanner)の「CLI」、出力の`planner log`は[同じ文書](headless-worker.md#workspaceなしのbackgroundのwrapper)が持つ。
 
 ## inboxからの計画の依頼<a id="inboxからの計画の依頼"></a>
 
@@ -118,29 +107,24 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 1. **記録**: `request add`が人の言葉を記録し、中身は記録の後に変えない（`domain::plan_request`）。
    打てるのはinboxと`DAGQ_ROLE`の無い人だけである（`request.record`）。
    優先度はruntimeが依頼の値をgoalとtaskに付け、plannerは書き写さない（[ADR-t1975-1](../../adr/2026-10-08-t1975-1-runtime-records-origin-and-person-set-priority-and-ai-actors-cannot-change-it.md)）。
-2. **一覧**: `dagq requests`。
-3. **立てる**: 対象の条件は`plan_requests.rs`の`TARGETS`、立てる順と枠は`open_request_planners`が持つ。
+2. **立てる**: 対象は`plan_requests.rs`の`TARGETS`、順と枠は`open_request_planners`が持つ。
    同じdraftに依頼と再検討のplannerを同時に立てない（[Draft planners](draft-planners.md#再検討の時刻)）。
-   plannerのpassの中で、reviseとanswerの配送の後、draftとfindingのplannerの前に進めるのは、人が待っているためである。
-4. **依頼の言葉の受け渡し**: 人の言葉はplannerのディレクトリのファイルに書き、promptは決まった文でそれを指す（`planner_handoff::hand_request_to_planner`）。
-5. **初期prompt**: `prompt::request_planner_prompt`で、上げる基準は[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)である。
-6. **結末**: submitがproposalを依頼に結び（`link_requests`）、却下の`request decline`は依頼のplanner自身だけが打てる。
+3. **受け渡しとprompt**: 人の言葉はファイルで渡し（`planner_handoff::hand_request_to_planner`）、初期promptは`prompt::request_planner_prompt`で、上げる基準は[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)である。
+4. **結末**: submitがproposalを依頼に結び（`link_requests`）、却下の`request decline`は依頼のplanner自身だけが打てる。
    決めずに終わったplannerが上限に達した依頼は`exhausted`になる（`MAX_REQUEST_PLANNERS`）。
-7. **`planner_question`**: 依頼のaskを開けるのはその依頼の閉じていないruntimeのplanner自身だけである（[Authorization](../authorization.md#対話と記録のコマンドapplication)）。
+5. **`planner_question`**: 依頼のaskを開けるのはその依頼の閉じていないruntimeのplanner自身だけである（[Authorization](../authorization.md#対話と記録のコマンドapplication)）。
    answerの行き先は`plan_requests.rs`の`route_of`、配送は`request_planner.rs`が持つ。
-8. **終わりと時間切れ**: draft・findingのplannerと同じく上の[runtimeのplannerの経路](#runtimeのplannerの経路)に従う。
+6. **終わりと時間切れ**: 上の[runtimeのplannerの経路](#runtimeのplannerの経路)に従う。
 
 ### Spikeの再計画の依頼<a id="spikeの再計画の依頼"></a>
 
-- Spikeが`completed`になると、runtimeがSpikeごとに1件の依頼を記録し、上の3〜8の経路で再計画する（[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)決定5・6・8）。
-  記録と欠けの補いは`infrastructure::plan_requests`、promptは`request_planner_prompt`のSpikeの分岐が持つ。
-- 同じgoalを再計画する依頼（Spikeの依頼と下の再計画の操作の依頼）は1件ずつ進め、answerでplannerを開き直すときも他の依頼のplannerが閉じるのを待ち、goalを並行して再計画しない（`TARGETS`と`open_request_planner`、[ADR-t1521-2](../../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)決定3）。
-  依頼のplannerが終わった後のreviseが立てるplannerと、受け取られてplannerを待つreviseもその依頼のplannerとして数え、そのreviseの受け取り（`claim_revise`）も同じgoalの他の依頼のplannerが閉じるのを待つ（`REVISE_WAITS_FOR_GOAL`）。
-  そのreviseは枠でなくその依頼のplannerを待つので、plannerの居ないreviseとしてinboxに知らせ上限で枠を空ける`--planner-timeout`は、そのplannerが閉じた時から数える。
+- Spikeが`completed`になると、runtimeがSpikeごとに1件の依頼を記録し、上の2〜6の経路で再計画する（[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)決定5・6・8）。
+  記録と欠けの補いは`infrastructure::plan_requests`が持つ。
+- 同じgoalを再計画する依頼（Spikeと再計画の操作）は、answerによる開き直しとreviseも含めて1件ずつ進める（[ADR-t1521-2](../../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)決定3）。
+  待ち方は`REVISE_WAITS_FOR_GOAL`、待つreviseの時間切れの起点は`planner_wait_start`が持つ。
 - 頼んだ人が居ないので、attentionにするのは`request_planner_exhausted`だけである（`domain::event_attention`）。
-- goalのSpikeの周期は再計画の回で数え、調査中の計画が開いたままでも、そのSpikeの依頼が`open`のあいだにruntimeのplannerが追加のSpikeをsubmitすると次の回に入る（[ADR-t2414-1](../../adr/2026-10-19-t2414-1-spike-cycles-count-each-replanning-round-even-inside-one-investigation.md)、`domain::investigation::spike_submit`）。
-  周期の上限（`[goals] max_spike_cycles`）に達したgoalのSpikeはruntimeのplannerのsubmitが拒み、plannerは人に上げる（`infrastructure::proposals`、[claimを控える](claim-hold.md#調査中の計画の上限)）。
-  runtimeは未解決を理由にSpikeを延長も連鎖もしない。
+- goalのSpikeの周期の数え方と上限（`[goals] max_spike_cycles`）でのruntimeのplannerのsubmitの拒みは`domain::investigation::spike_submit`が持つ（[ADR-t2414-1](../../adr/2026-10-19-t2414-1-spike-cycles-count-each-replanning-round-even-inside-one-investigation.md)、[claimを控える](claim-hold.md#調査中の計画の上限)）。
+  拒まれたplannerは人に上げ、runtimeは未解決を理由にSpikeを延長も連鎖もしない。
 
 ## 予定: inboxからの依頼と非対話のplanner<a id="予定-inboxからの依頼と非対話のplanner"></a>
 
@@ -148,17 +132,10 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 
 ## taskの再計画の依頼
 
-- 人の`replan request`は再計画の操作に結んだ依頼を記録し、操作が完全なsnapshotを持つまで立てる対象から外す（`plan_requests.rs`の`TARGETS`）。
-  依頼のplannerが今開いていないとき（一度も立っていないか、立ったplannerが決めずに終わった）に操作が閉じると（snapshotの前でも後でも）、依頼はその閉じる移動と同じtransactionで、操作の結末を理由に`declined`になり、`open`のまま残らない（`replans.rs`の`move_in`）。
-  閉じた操作のrunは復元を経ずに進むことがあるので、依頼を閉じるのは復元の確定を待たない。
-  `blocked`は終わりでなく、plannerに渡す段へ進めば依頼はplannerを待つ。
-  plannerが開いている間に操作が閉じると、閉じる移動は依頼に触れず、そのplannerがturnを終えてsubmitか却下で決める（turnの途中で止めて書きかけを捨てない）。
-  そのplannerが決めずに終わると、行を閉じるtransactionで依頼を`declined`にする（`plan_requests.rs`の`decline_after_planner`）。
-  runtimeが依頼を`declined`にするどちらの経路も、同じtransactionでその依頼の閉じていないask（答えを待って終わったplannerの`planner_question`）をruntimeが閉じ、計画されない依頼のaskを人に残さない。
-  閉じた操作が復元の失敗で`blocked`に戻り、再びplannerに渡す段へ進むときは、runtimeが閉じるときに`declined`にした依頼を開き直さず、同じ言葉の新しい依頼を作って操作に結ぶので、plannerは新しい依頼に1度だけ立つ。
-  plannerがsubmitか却下で決めた依頼は作り直さない。
-- 依頼のplannerが立つと、同じtransactionで操作を`planning`へ進める（`replans.rs`の`planner_opened`）。
-  そのplannerのsubmitは置換計画を要し、計画は依頼の操作のproposalにだけ付く。
-  reviseの後の出し直しも置換計画を要し、plan reviewが人に保留したproposalの再試行だけが前の計画のまま出し直す。
-  plannerが`--continue-run`で却下した依頼の操作は継続へ、そのほかの却下か`exhausted`の操作とproposalを取り下げたplannerが次を出さずに終わった操作は成果を保ったまま`blocked`へ、supervisorが依頼のplannerを立てる前に進める（`settle_replan_requests`）。
-  置換計画の検査とplan reviewでの扱いと残りの予定は[taskの再計画](../../plans/task-replanning.md)が持つ。
+人の`replan request`は再計画の操作に結んだ依頼を記録し、操作が完全なsnapshotを持つまで立てる対象から外す（`plan_requests.rs`の`TARGETS`）。
+進み方と残りの予定は[taskの再計画](../../plans/task-replanning.md)が持つ。
+
+- 約束: 操作が閉じても依頼を`open`のまま残さず、計画されない依頼のaskを人に残さない。
+  開いているplannerは途中で止めず、submitか却下で決めさせる。
+  入口は`replans.rs`の`move_in`と`plan_requests.rs`の`decline_after_planner`・`decline_for_operation`・`renew_declined`である。
+- 依頼のplannerが立つと操作を`planning`へ進め（`replans.rs`の`planner_opened`）、依頼の結末から操作を進めるのは`settle_replan_requests`である。

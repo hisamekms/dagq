@@ -82,7 +82,10 @@ pub const REVIEW_CODES: &[(&str, &str)] = &[
 ];
 
 /// The codes of a plan review with their definitions, heaviest first. The
-/// codes both lists have are defined alike (decision 2).
+/// codes both lists have are defined alike (decision 2), and
+/// `task_overlap` as a worker's question defines it, so that the share of
+/// what a plan review let through and a run's review or a worker's
+/// question raised later can be followed.
 pub const PLAN_REVIEW_CODES: &[(&str, &str)] = &[
     (
         "adr_conflict",

@@ -10,7 +10,9 @@
 //! the login, the usage limit or the start (its `provider retry` carries
 //! the failed call first, ADR-t1394-2 decision 5) are refused with the
 //! reason. The caller authorizes the
-//! command first (`planner.request`; `docs/design/authorization.md`).
+//! command first (`planner.request`; `docs/design/authorization.md`),
+//! before it reads the words, so an actor without the right does not wait
+//! on an open stdin.
 
 use std::path::Path;
 

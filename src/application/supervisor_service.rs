@@ -21,6 +21,17 @@
 //! never opens the DB for an operation the service answers, and its loop
 //! waits for the service instead ([`unreachable`]).
 //!
+//! The supervisor's token is issued after the hello and before the
+//! registration ([`ServiceCaller::sign_in`]), and revoked when the loop
+//! ends; until the service issues tokens at a parent principal's request
+//! (ADR-t3102-1 decision 2) the supervisor writes it in the service's
+//! directory itself. Its actor id is `supervisor:<pid>`, its events'
+//! actor. The events name another actor only when the landing writes as
+//! the integrator and when a job's verdict is applied (`requested_by`),
+//! and only an actor of the control side. A principal without
+//! `scheduler.supervise` is refused with `authorization_denied`, and the
+//! refusal is recorded.
+//!
 //! [Queue service]: ../../docs/design/queue-service.md
 
 mod dispatch;

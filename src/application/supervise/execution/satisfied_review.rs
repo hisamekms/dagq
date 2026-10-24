@@ -21,6 +21,20 @@
 //! after the verdict's record leaves its run leased: the one that adopts it
 //! validates, verifies and judges the claim afresh on main as it is then,
 //! never closing on the old judgment.
+//!
+//! The job reads only its checkout of the snapshot's head, made again for
+//! each start (`integrate::fresh_satisfied_scratch`),
+//! never the run's worktree or run directory; the checkout is removed once
+//! judged and when the run is parked. A provider that cannot be used (a
+//! Claude login or usage limit joins the queue's hold) counts neither as
+//! the job's failure nor as its run once more. A handoff stops the job, and
+//! the next process validates the run again and verifies and judges anew.
+//! The ask a judgment opens carries the head and the review's verdict,
+//! confidence, recommendation and reasons and why it did not close, and
+//! lets the run rest without its lease; with no provider of the reviews
+//! (`--no-claude`) no job starts and the same ask says nothing was judged
+//! (`satisfied_judgment::unstarted_question`). The verification passed,
+//! so every such ask offers `close`.
 
 use super::landing::{AfterUnusable, ReviewRoute, StartedReview, after_unusable};
 use super::provider::ReviewJobFailure;
