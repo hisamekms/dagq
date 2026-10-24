@@ -5,6 +5,7 @@ use crate::common;
 use dagq::domain::LeaseToken;
 use dagq::infrastructure::git_binary::git_executable;
 
+use common::service::Served;
 use common::{Bounded, WithoutActor};
 
 use std::{
@@ -98,6 +99,20 @@ fn expected_db(data_home: &Path, repo: &Path) -> PathBuf {
         .join("dagq")
         .join(repository_hash(&common_dir))
         .join("queue.db")
+}
+
+/// Move the directory of the queue at `from` to that of `to` as ADR-0053
+/// decision 9 moves it: its service stopped first, so none serves the old
+/// path from the new place, and started again there. The service stops
+/// when the guard goes.
+fn move_queue_directory(cwd: &Path, env: &[(&str, &Path)], from: &Path, to: &Path) -> Served {
+    ok(
+        cwd,
+        env,
+        &["--db", from.to_str().unwrap(), "service", "stop"],
+    );
+    fs::rename(from.parent().unwrap(), to.parent().unwrap()).unwrap();
+    Served::start(to)
 }
 
 fn fixture() -> (TempDir, PathBuf, PathBuf) {
@@ -441,7 +456,7 @@ fn rebind_with_db_then_move_the_queue_directory() {
         format!("{}\n", new_common_dir.display())
     );
 
-    fs::rename(old_db.parent().unwrap(), new_db.parent().unwrap()).unwrap();
+    let _served = move_queue_directory(&moved, &env, &old_db, &new_db);
     assert_eq!(ok(&moved, &env, &["list"])["total"], 1);
     ok(&moved, &env, &["status"]);
     assert_eq!(
@@ -467,7 +482,7 @@ fn move_the_queue_directory_then_rebind() {
     let moved = dir.path().join("renamed");
     fs::rename(&repo, &moved).unwrap();
     let new_db = expected_db(&data_home, &moved);
-    fs::rename(old_db.parent().unwrap(), new_db.parent().unwrap()).unwrap();
+    let _served = move_queue_directory(&moved, &env, &old_db, &new_db);
 
     for args in [&["list"][..], &["status"], &["init"], &["add", "x"]] {
         let message = error(&moved, &env, args);
