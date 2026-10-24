@@ -139,7 +139,6 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 - 人の答え待ちの印はaskが未回答か配送に失敗したときだけ書き、印の付いた行は回答の行き先とdraft・finding・依頼の上限の数から外れる（[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)）。
 - 回答の行き先は、生きているplanner・新しいplanner・人・閉じるのどれかで、`answer`も同じ判定で`runtime_delivers`を書く。
   依頼のplannerが作り由来もproposalも持たないdraftの回答は、依頼の回答の経路に乗せる（作成のeventのactorで依頼を引く、[ADR-t2015-1](../adr/2026-10-07-t2015-1-answers-about-a-request-planners-draft-go-the-requests-way.md)）。
-- runtimeのplannerがfollow-upをsubmitできる深さの上限は[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)で、`proposals::submit`が拒む。
 
 ### planning requests（`plan_requests.rs`）
 
@@ -224,6 +223,7 @@ serviceのファイル（socket・lock・`state.json`・token）はqueueのデ�
 
 follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`BEGIN IMMEDIATE`のトランザクションで行う。
 登録のトランザクションで元のtaskのgoalと状態を読み直し、`draft_origins`の材料に残す。
+out_of_scopeの判断が名指した所属先の受け入れ条件の項目は、追記の判断の行に判断の記録として残り、その行と同じトランザクションで書く。
 行・遷移・必須の情報・旧schemaの読み方は[所属の判断](follow-up-membership.md)、入口は`src/infrastructure/follow_up_membership.rs`。
 
 ## Transactions and constraints

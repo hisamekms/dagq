@@ -882,6 +882,13 @@ pub struct MembershipJudgement {
     pub reason: String,
     pub evidence: Vec<String>,
     pub destination_goal_id: Option<super::GoalId>,
+    /// For out_of_scope, the items of the destination goal's acceptance
+    /// that need the follow_up. A destination above `low` needs one or
+    /// more ([`check_destination_acceptance`]); a `low` one (the tag's
+    /// deferral goal) none. Kept on the judgement's row for plan review to
+    /// check against the destination's acceptance; the runtime never
+    /// judges what they say. Only out_of_scope takes them.
+    pub destination_acceptance_items: Vec<String>,
     /// Required when the registration history cannot name the source.
     pub source_goal_id: Option<super::GoalId>,
     pub corrects: Option<i64>,
@@ -899,6 +906,7 @@ impl MembershipJudgement {
                 .acceptance_items
                 .iter()
                 .chain(&self.evidence)
+                .chain(&self.destination_acceptance_items)
                 .any(|s| s.trim().is_empty())
         {
             return Err("reason and each supplied item/reference must be non-blank".into());
@@ -918,6 +926,9 @@ impl MembershipJudgement {
         {
             return Err("required belongs to the source goal".into());
         }
+        if self.classification != OutOfScope && !self.destination_acceptance_items.is_empty() {
+            return Err("only out_of_scope names items of a destination goal's acceptance".into());
+        }
         if let Some((id, class)) = previous {
             if class != Undecided && self.classification == Undecided {
                 return Err("a decided judgement cannot return to undecided".into());
@@ -931,6 +942,53 @@ impl MembershipJudgement {
         }
         Ok(())
     }
+}
+
+/// Refuse an out_of_scope `judgement` whose destination goal `destination`
+/// is above `low` (`priority`, the goal's) and names no item of that
+/// goal's acceptance that needs the follow_up (ADR-t3325-1): a candidate
+/// whose acceptance does not need it loses to the deferral goal of the
+/// same tag. The message says how to find or make that goal, by the source
+/// goal's tags (`source_tags`), or, for a source goal without one, to
+/// choose a fitting goal. A recheck of the same classification is checked
+/// the same. Only whether items are named and the
+/// priority are checked, never what the items say; any other judgement,
+/// and one into a `low` goal, passes.
+pub fn check_destination_acceptance(
+    judgement: &MembershipJudgement,
+    destination: super::GoalId,
+    priority: super::Priority,
+    source_tags: &[super::GoalTag],
+) -> Result<(), String> {
+    if judgement.classification != MembershipClassification::OutOfScope
+        || priority <= super::Priority::Low
+        || !judgement.destination_acceptance_items.is_empty()
+    {
+        return Ok(());
+    }
+    let head = format!(
+        "goal {destination} is {}, above low: name each item of its acceptance that needs this follow_up with --destination-acceptance-item",
+        priority.as_str()
+    );
+    let Some(tag) = source_tags.first() else {
+        // No tag to find a deferral goal by: a fitting goal, made only
+        // when none fits.
+        return Err(format!(
+            "{head}. A goal whose acceptance does not need it is no destination: \
+             the source goal has no tag and so no deferral goal, so choose a goal that needs it or a low one, \
+             or create a fitting one with `dagq goal add --draft` when none fits"
+        ));
+    };
+    let find = source_tags
+        .iter()
+        .map(|tag| format!("`dagq goal list --tag {tag}`"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    Err(format!(
+        "{head}. A goal whose acceptance does not need it loses to the deferral goal of the same tag (a low goal per tag holding the improvements no acceptance needs): \
+         find it with {find} and judge again with it as --destination-goal, \
+         or create it with `dagq goal add --draft --priority low --tag {tag}` when there is none"
+    ))
 }
 
 /// A follow_up whose source goal is the goal a review or a close looks at
@@ -1262,8 +1320,92 @@ mod membership_tests {
             reason: "cannot satisfy (1) without it".into(),
             evidence: vec!["receipt:r".into()],
             destination_goal_id: None,
+            destination_acceptance_items: vec![],
             source_goal_id: None,
             corrects: None,
+        }
+    }
+    /// Only out_of_scope names a destination's acceptance items, none blank.
+    #[test]
+    fn destination_acceptance_items_belong_to_out_of_scope_only() {
+        use MembershipClassification::*;
+        let source = GoalId::new(1);
+        let outside = MembershipJudgement {
+            classification: OutOfScope,
+            destination_goal_id: Some(GoalId::new(2)),
+            destination_acceptance_items: vec!["(2)".into()],
+            ..required()
+        };
+        assert!(outside.validate(None, source).is_ok());
+        assert!(
+            MembershipJudgement {
+                destination_acceptance_items: vec![" ".into()],
+                ..outside.clone()
+            }
+            .validate(None, source)
+            .is_err()
+        );
+        for classification in [Required, Undecided] {
+            let error = MembershipJudgement {
+                classification,
+                destination_goal_id: None,
+                ..outside.clone()
+            }
+            .validate(None, source)
+            .unwrap_err();
+            assert!(error.contains("only out_of_scope"), "{error}");
+        }
+    }
+    /// A destination above low needs its acceptance items named, and the
+    /// refusal points at the deferral goal of the source goal's tags
+    /// (ADR-t3325-1); a low destination and other classifications pass.
+    #[test]
+    fn a_destination_above_low_needs_its_acceptance_items_named() {
+        use crate::domain::{GoalTag, Priority};
+        use MembershipClassification::*;
+        let destination = GoalId::new(2);
+        let outside = MembershipJudgement {
+            classification: OutOfScope,
+            destination_goal_id: Some(destination),
+            ..required()
+        };
+        let tags = vec!["planner".parse::<GoalTag>().unwrap()];
+        for priority in [
+            Priority::Normal,
+            Priority::High,
+            Priority::Urgent,
+            Priority::Interrupt,
+        ] {
+            let error =
+                check_destination_acceptance(&outside, destination, priority, &tags).unwrap_err();
+            assert!(
+                error.contains(&format!("goal 2 is {}", priority.as_str())),
+                "{error}"
+            );
+            assert!(error.contains("--destination-acceptance-item"), "{error}");
+            assert!(error.contains("deferral goal"), "{error}");
+            assert!(error.contains("`dagq goal list --tag planner`"), "{error}");
+            assert!(error.contains("--priority low --tag planner"), "{error}");
+        }
+        let untagged =
+            check_destination_acceptance(&outside, destination, Priority::Normal, &[]).unwrap_err();
+        assert!(untagged.contains("no deferral goal"), "{untagged}");
+        assert!(untagged.contains("`dagq goal add --draft`"), "{untagged}");
+        assert!(!untagged.contains("--tag"), "{untagged}");
+        assert!(check_destination_acceptance(&outside, destination, Priority::Low, &tags).is_ok());
+        let named = MembershipJudgement {
+            destination_acceptance_items: vec!["(1)".into()],
+            ..outside.clone()
+        };
+        assert!(check_destination_acceptance(&named, destination, Priority::High, &tags).is_ok());
+        for classification in [Required, Undecided] {
+            let other = MembershipJudgement {
+                classification,
+                ..outside.clone()
+            };
+            assert!(
+                check_destination_acceptance(&other, destination, Priority::High, &tags).is_ok()
+            );
         }
     }
     #[test]

@@ -311,6 +311,7 @@ fn the_planning_commands_go_through_the_service_as_their_caller_and_print_as_on_
                 reason: "not yet".into(),
                 evidence: Vec::new(),
                 destination_goal: None,
+                destination_acceptance_item: Vec::new(),
                 source_goal: None,
                 corrects: None,
             }),

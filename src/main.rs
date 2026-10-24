@@ -404,8 +404,10 @@ enum Command {
     ///
     /// `judge-follow-up TASK --classification required|out_of_scope|undecided --reason TEXT`.
     /// required needs at least one --acceptance-item, and required and out_of_scope at least one
-    /// --evidence; the reason and each item and reference must not be blank. undecided may record
-    /// why it could not be decided. A judgement is appended and the latest one is the current one.
+    /// --evidence; the reason and each item and reference must not be blank. out_of_scope into a
+    /// destination goal above low needs at least one --destination-acceptance-item. undecided may
+    /// record why it could not be decided. A judgement is appended and the latest one is the
+    /// current one.
     JudgeFollowUp {
         /// The follow_up task judged, in any status.
         task: i64,
@@ -424,6 +426,13 @@ enum Command {
         /// For out_of_scope, the open goal other than the source goal the follow_up moves to; required belongs to the source goal and takes no other.
         #[arg(long = "destination-goal")]
         destination_goal: Option<i64>,
+        /// For out_of_scope, an item of the destination goal's acceptance that needs the follow_up;
+        /// repeatable. A destination above low needs one or more, and the judgement is refused
+        /// without: a goal whose acceptance does not need it loses to the low deferral goal of the
+        /// same tag (`goal list --tag T`). A low destination needs none. Kept on the judgement's
+        /// row; plan review checks it against the destination's acceptance.
+        #[arg(long = "destination-acceptance-item")]
+        destination_acceptance_items: Vec<String>,
         /// The source goal, found from the evidence, when the registration did not record one; later judgements use the same source goal.
         #[arg(long = "source-goal")]
         source_goal: Option<i64>,
@@ -3490,6 +3499,7 @@ fn queue_write(command: &Command) -> Result<Option<QueueWrite>> {
             reason,
             evidence,
             destination_goal,
+            destination_acceptance_items,
             source_goal,
             corrects,
         } => QueueWrite::JudgeFollowUp(writes::JudgeFollowUpWrite {
@@ -3499,6 +3509,7 @@ fn queue_write(command: &Command) -> Result<Option<QueueWrite>> {
             reason,
             evidence,
             destination_goal,
+            destination_acceptance_item: destination_acceptance_items,
             source_goal,
             corrects,
         }),

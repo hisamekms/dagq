@@ -820,6 +820,7 @@ fn the_supervisor_applies_a_reopen_answer_to_a_correction() {
                 reason: "the docs were never written".into(),
                 evidence: vec!["task:1".into()],
                 destination_goal_id: None,
+                destination_acceptance_items: vec![],
                 source_goal_id: None,
                 corrects: None,
             },

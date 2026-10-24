@@ -48,6 +48,11 @@ pub(super) fn judgements(conn: &Connection, task: TaskId) -> Result<Vec<Value>> 
             "reason": r.get::<_,String>("reason")?,
             "evidence": json_array_column(r, "evidence")?,
             "destination_goal_id": r.get::<_,Option<i64>>("destination_goal_id")?,
+            // NULL on a row an older binary wrote: it named none.
+            "destination_acceptance_items": match r.get::<_,Option<String>>("destination_acceptance_items")? {
+                Some(_) => json_array_column(r, "destination_acceptance_items")?,
+                None => json!([]),
+            },
             "acceptance_version": r.get::<_,i64>("acceptance_version")?,
             "corrects": r.get::<_,Option<i64>>("corrects")?,
             "actor_role": r.get::<_,String>("actor_role")?,
@@ -253,6 +258,13 @@ impl SqliteQueue {
             let goal = read_goal(&tx, goal)?;
             if judgement.classification == Class::OutOfScope {
                 crate::domain::goal::check_accepts_tasks(&goal)?;
+                follow_up::check_destination_acceptance(
+                    &judgement,
+                    goal.id(),
+                    goal.priority(),
+                    source_goal.tags(),
+                )
+                .map_err(anyhow::Error::msg)?;
             }
         }
         let task_row = read_task(&tx, task)?;
@@ -286,8 +298,8 @@ impl SqliteQueue {
                 .as_str()
                 .unwrap_or("recorded")
         };
-        tx.execute("INSERT INTO follow_up_judgements(task_id,source_goal_id,source_kind,classification,acceptance_items,reason,evidence,destination_goal_id,acceptance_version,corrects,actor_role,created_at)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![task,source,source_kind,judgement.classification.as_str(),serde_json::to_string(&judgement.acceptance_items)?,judgement.reason,serde_json::to_string(&judgement.evidence)?,destination,version,judgement.corrects,role,self.generators.clock.timestamp()])?;
+        tx.execute("INSERT INTO follow_up_judgements(task_id,source_goal_id,source_kind,classification,acceptance_items,reason,evidence,destination_goal_id,destination_acceptance_items,acceptance_version,corrects,actor_role,created_at)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)", params![task,source,source_kind,judgement.classification.as_str(),serde_json::to_string(&judgement.acceptance_items)?,judgement.reason,serde_json::to_string(&judgement.evidence)?,destination,serde_json::to_string(&judgement.destination_acceptance_items)?,version,judgement.corrects,role,self.generators.clock.timestamp()])?;
         let mut row = judgements(&tx, task)?.pop().unwrap();
         // A required judgement after an achieved close keeps the close and
         // its verdict, and asks a person (ADR-t1504-2 decision 9).

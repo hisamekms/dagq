@@ -56,6 +56,7 @@ fn required_membership() -> dagq::domain::follow_up::MembershipJudgement {
         reason: "(1) is not met without it".into(),
         evidence: vec!["receipt:run-a".into()],
         destination_goal_id: None,
+        destination_acceptance_items: vec![],
         source_goal_id: None,
         corrects: None,
     }

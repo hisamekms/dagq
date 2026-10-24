@@ -20,6 +20,13 @@ fn judgement(classification: Class, destination: Option<GoalId>) -> MembershipJu
         reason: "receipt demonstrates the relation to (1)".into(),
         evidence: vec!["receipt:r".into()],
         destination_goal_id: destination,
+        // The destinations here are normal goals unless a test says
+        // otherwise, so out_of_scope names an item of theirs.
+        destination_acceptance_items: if classification == Class::OutOfScope {
+            vec!["(1) of the destination".into()]
+        } else {
+            vec![]
+        },
         source_goal_id: None,
         corrects: None,
     }
@@ -211,6 +218,130 @@ fn cli_records_judgements_and_denies_workers_and_jobs() {
         )
         .status
         .success()
+    );
+}
+
+/// An out_of_scope judgement into a goal above low names the items of its
+/// acceptance that need the follow_up, or is refused with the way to the
+/// tag's deferral goal; a low destination needs none. The named items stay
+/// on the row and `show` reads them (ADR-t3325-1).
+#[test]
+fn out_of_scope_above_low_names_destination_items_or_is_sent_to_the_deferral_goal() {
+    use common::cli::{invoke, ok};
+    use dagq::domain::{GoalTag, NewGoal, Priority};
+    let (dir, mut q) = fixture();
+    let db = dir.path().join("queue.db");
+    let tag: GoalTag = "planner".parse().unwrap();
+    let source = q
+        .add_goal(NewGoal {
+            tags: vec![tag.clone()],
+            ..new_goal("source")
+        })
+        .unwrap()
+        .id();
+    let normal = q.add_goal(new_goal("normal destination")).unwrap().id();
+    let deferral = q
+        .add_goal(NewGoal {
+            priority: Some(Priority::Low),
+            tags: vec![tag],
+            ..new_goal("deferral")
+        })
+        .unwrap()
+        .id();
+    let follow_up = |q: &mut SqliteQueue| {
+        let id = q
+            .add(dagq::domain::NewTask {
+                goal_id: Some(source),
+                ..new_task("follow up")
+            })
+            .unwrap()
+            .id();
+        q.record_draft_origin(
+            id,
+            DraftOrigin::FollowUp,
+            &json!({"source_goal_id": source,
+            "source_goal_state": "open", "source_goal_provenance": "recorded"}),
+        )
+        .unwrap();
+        id.to_string()
+    };
+    let (first, second) = (follow_up(&mut q), follow_up(&mut q));
+    let judge = |task: &str, goal: GoalId, items: &[&str]| {
+        let goal = goal.to_string();
+        let mut args = vec![
+            "judge-follow-up",
+            task,
+            "--classification",
+            "out_of_scope",
+            "--reason",
+            "the source acceptance holds without it",
+            "--evidence",
+            "receipt:r",
+            "--destination-goal",
+            goal.as_str(),
+        ];
+        for item in items {
+            args.extend(["--destination-acceptance-item", item]);
+        }
+        invoke(&db, &args)
+    };
+    let refused = judge(&first, normal, &[]);
+    assert!(!refused.status.success());
+    let error = String::from_utf8_lossy(&refused.stderr);
+    for part in [
+        "is normal, above low",
+        "--destination-acceptance-item",
+        "deferral goal",
+        "`dagq goal list --tag planner`",
+    ] {
+        assert!(error.contains(part), "{part} in {error}");
+    }
+    let shown = ok(&db, &["show", first.as_str()]);
+    assert_eq!(shown["membership_judgements"], json!([]));
+    assert_eq!(shown["task"]["goal_id"], source.as_i64());
+    // The deferral goal (low) takes it without an item, as before.
+    assert!(judge(&first, deferral, &[]).status.success());
+    let shown = ok(&db, &["show", first.as_str()]);
+    assert_eq!(shown["task"]["goal_id"], deferral.as_i64());
+    assert_eq!(
+        shown["membership_judgements"][0]["destination_acceptance_items"],
+        json!([])
+    );
+    // Named items move it into the normal goal and stay on the row.
+    assert!(
+        judge(&second, normal, &["(2) of the destination"])
+            .status
+            .success()
+    );
+    let shown = ok(&db, &["show", second.as_str()]);
+    assert_eq!(shown["task"]["goal_id"], normal.as_i64());
+    assert_eq!(
+        shown["membership_judgements"][0]["destination_acceptance_items"],
+        json!(["(2) of the destination"])
+    );
+    // A recheck of the same out_of_scope into the normal goal names its
+    // items again, or is refused and leaves the row as it was.
+    assert!(!judge(&second, normal, &[]).status.success());
+    assert_eq!(
+        ok(&db, &["show", second.as_str()])["membership_judgements"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // A row an older binary wrote, without the column's value, names none.
+    let raw = Connection::open(&db).unwrap();
+    raw.execute(
+        "INSERT INTO follow_up_judgements(task_id,source_goal_id,source_kind,classification,
+         acceptance_items,reason,evidence,destination_goal_id,acceptance_version,actor_role,created_at)
+         VALUES (?1,?2,'recorded','required','[\"(1)\"]','r','[\"receipt:r\"]',?2,1,'planner','t')",
+        params![second.parse::<i64>().unwrap(), source],
+    )
+    .unwrap();
+    let shown = ok(&db, &["show", second.as_str()]);
+    assert_eq!(
+        shown["membership_judgements"][1]["destination_acceptance_items"],
+        json!([])
     );
 }
 

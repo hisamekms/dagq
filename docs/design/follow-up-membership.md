@@ -23,6 +23,10 @@ taskの状態は問わない。
 ## CLIと行
 
 out_of_scopeは元と別の、閉じていないgoalを名指す。
+所属先の優先度が`low`より高ければ、所属先の受け入れ条件のうちそのfollow_upを要る項目の名指しも要し、無ければ同じラベルの受け皿の探し方を示して拒む（ADR-t3325-1）。
+`low`の所属先（受け皿）は名指しを要さない。
+runtimeが見るのは名指しの有無と所属先の優先度だけで、項目の当否はplannerとplan reviewが判断する。
+検査はdomainの`follow_up::check_destination_acceptance`で、storeの`judge_follow_up`が所属先を読む同じtransactionで呼ぶ。
 requiredの所属先は元goalで、別の所属先は拒む。
 未知の分類、follow_up以外、元goalが無いと確定しているfollow_upは拒む。
 
@@ -51,7 +55,7 @@ required/out_of_scopeの判断を持つtaskの`set-goal`は、最後の判断の
 違うgoal（`--none`も）へ移すのを拒み、訂正を促す。未判定の移動は判断にならない。
 元のtask/run/goal、登録時の状態、provenanceと`follow_up_depth`はどの所属変更でも保つ。
 登録時に元goalが無い・閉じていた・不明、現在の所属goalが無い・閉じている、
-深さ`FOLLOW_UP_ASK_DEPTH`以上のいずれかなら、runtimeのplannerのsubmitは人のadoptなしに拒む。
+深さ`FOLLOW_UP_ASK_DEPTH`以上のいずれかなら、runtimeのplannerのsubmitは人のadoptなしに拒む（`proposals::submit`が`follow_up::adopt_needs_person`で検査）。
 既存の人のadoptは聞き直さず、adopt後のsubmitは深さを0に戻す。
 
 ## acceptanceの版と読み取り
@@ -107,6 +111,7 @@ draft / submittedのfollow_upに同じ検査をする。`lint`は同じ欠けを
 `follow_up_membership`を載せ、
 元goalを材料のgoalに足し、plannerの対応づけを起点に検査し疑わしいものは周辺の
 証拠も読むよう指示する（[Plan review](supervisor-lifecycle/plan-review.md)）。
+out_of_scopeの判断が名指した所属先の受け入れ条件の項目も載せ、plan reviewはそれが所属先の受け入れ条件にあり、そのfollow_upを要るかを照らす。
 
 ## achievedの後の訂正
 

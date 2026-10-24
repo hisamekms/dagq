@@ -1800,6 +1800,7 @@ mod tests {
                     reason: "(1) needs it".into(),
                     evidence: vec!["receipt:r".into()],
                     destination_goal_id: None,
+                    destination_acceptance_items: vec![],
                     source_goal_id: None,
                     corrects: None,
                 };

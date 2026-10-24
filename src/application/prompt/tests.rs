@@ -929,7 +929,8 @@ fn plan_review_checks_follow_up_membership_from_the_planner_s_mapping() {
     case.tasks[0].membership_judgements = vec![serde_json::json!({
             "id": 4, "classification": "out_of_scope", "acceptance_items": ["(2)"],
             "reason": "(2) holds without it", "evidence": ["receipt:r"],
-            "destination_goal_id": 10, "acceptance_version": 1,
+            "destination_goal_id": 10, "destination_acceptance_items": ["(3) of goal 10"],
+            "acceptance_version": 1,
             "current_acceptance_version": 2, "needs_recheck": true})];
     case.tasks.push(proposal_task(
         long_task(1001, TaskStatus::Submitted, &[]),
@@ -961,6 +962,12 @@ fn plan_review_checks_follow_up_membership_from_the_planner_s_mapping() {
     ] {
         assert!(!row[field].is_null(), "{field}");
     }
+    // The destination's items a planner named reach plan review to check
+    // against the destination's acceptance (ADR-t3325-1).
+    assert_eq!(
+        row["destination_acceptance_items"],
+        serde_json::json!(["(3) of goal 10"])
+    );
     assert_eq!(
         (
             row["acceptance_version"].clone(),
@@ -973,6 +980,7 @@ fn plan_review_checks_follow_up_membership_from_the_planner_s_mapping() {
         "start from the planner's mapping",
         "need not repeat the whole investigation",
         "never pass a judgement on its form alone",
+        "for out_of_scope that each destination item is in the destination goal's acceptance",
         "the reason names no item of the acceptance",
         "the evidence disagrees with the receipt or the diff",
         "an unrelated catch-all goal",
@@ -2894,6 +2902,7 @@ fn the_follow_up_draft_planner_records_membership_before_it_decides() {
     for part in [
         "Read its earlier judgements with `dagq show 9` (membership_judgements): one that still holds needs no new row; to change a required or out_of_scope one, record the other with `--corrects <its id>`; it never goes back to undecided.",
         "A draft you drop (a duplicate, already done, not worth doing) may skip the record when it would need a new goal",
+        "when that goal is above low, also `--destination-acceptance-item '<the item of its acceptance that needs the draft>'`",
         "record undecided with why, ask as step 3 says with the membership question in it, and on the answer record required or out_of_scope before you do what it says",
     ] {
         assert!(prompt.contains(part), "{part} in {prompt}");

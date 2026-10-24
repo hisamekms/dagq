@@ -207,6 +207,10 @@ pub struct JudgeFollowUpWrite {
     pub evidence: Vec<String>,
     #[serde(default)]
     pub destination_goal: Option<i64>,
+    /// Sent only when given, so a judgement without it still reaches a
+    /// service from before the flag (its `deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destination_acceptance_item: Vec<String>,
     #[serde(default)]
     pub source_goal: Option<i64>,
     #[serde(default)]
@@ -537,6 +541,7 @@ pub fn answer<S: PlanningStore + RequestStore>(
                 reason: write.reason,
                 evidence: write.evidence,
                 destination_goal_id: write.destination_goal.map(GoalId::new),
+                destination_acceptance_items: write.destination_acceptance_item,
                 source_goal_id: write.source_goal.map(GoalId::new),
                 corrects: write.corrects,
             },
@@ -911,6 +916,7 @@ mod tests {
                     reason: "r".into(),
                     evidence: Vec::new(),
                     destination_goal: None,
+                    destination_acceptance_item: Vec::new(),
                     source_goal: None,
                     corrects: None,
                 }),
@@ -998,6 +1004,35 @@ mod tests {
             assert_eq!(error.to_string(), "reached", "{write:?}");
         }
         (refused, store.denials.borrow().len())
+    }
+
+    /// A judgement without destination items sends no such key, so an
+    /// older service that denies unknown fields still takes it; one with
+    /// items sends them and reads back the same.
+    #[test]
+    fn a_judgement_sends_destination_items_only_when_given() {
+        let write = |items: Vec<String>| {
+            QueueWrite::JudgeFollowUp(JudgeFollowUpWrite {
+                task: 1,
+                classification: "required".into(),
+                acceptance_item: vec!["(1)".into()],
+                reason: "r".into(),
+                evidence: vec!["receipt:r".into()],
+                destination_goal: None,
+                destination_acceptance_item: items,
+                source_goal: None,
+                corrects: None,
+            })
+        };
+        let (_, params) = write(Vec::new()).request().unwrap();
+        assert!(
+            params.get("destination_acceptance_item").is_none(),
+            "{params}"
+        );
+        let named = write(vec!["(2)".into()]);
+        let (use_case, params) = named.request().unwrap();
+        assert_eq!(params["destination_acceptance_item"], json!(["(2)"]));
+        assert_eq!(QueueWrite::parse(use_case, &params).unwrap(), Some(named));
     }
 
     #[test]
