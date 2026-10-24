@@ -37,7 +37,7 @@ dagqのセキュリティの模型の全体を1か所にまとめる。決定の
 | 信頼しないAI actor（`UntrustedAgent`） | inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・throughput-review-job・setup-review-job・observer | Claude（とCodex）のsession / job。出力はデータ |
 
 `TrustLevel`はroleだけから決まり（`src/domain/actor.rs`）、promptや名前から推し量らない。
-`DAGQ_ROLE`の未知の値ではコマンドが止まり、queueを開かない（fail closed）。
+環境のactorを`ActorContext::from_env`で読むコマンドは、`DAGQ_ROLE`の未知の値で止まりqueueを開かない（fail closed。先に分岐して読まない経路は[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）。
 
 AI actorの出力は全てデータで、制御側が決定的に遷移へ写す:
 

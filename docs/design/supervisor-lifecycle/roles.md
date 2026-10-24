@@ -142,6 +142,7 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
 - 計画系のコマンドは全てのroleについてapplicationの層が判定し、拒んだ試みを`authorization_denied`に記録する（[Authorization](../authorization.md#計画系のコマンドapplication)）。
   対話と記録のコマンドと、runtimeの操作系のコマンド（[Authorization](../authorization.md#runtimeの操作系のコマンドapplication)）も同じ。
   runtimeのwrapperとhookは継いだworkerやplannerの環境のactorでなく、wrapperのprincipalでqueue serviceを通るので、workerとplannerはsessionを記録する権限を持たない（[Queue service](../queue-service.md#クライアントモード)）。
+  例外はinboxのhookで、上の分岐のとおりinboxとして判定されてqueueを開き、eventのactorだけがinboxのsessionのwrapperになる（[eventのactor](#eventのactor)）。
 - headlessのjobは読み取りだけの制限を受け、状態を変えるコマンドは拒まれる。
   判定は`StaticPolicy`（[Authorization](../authorization.md)）で、どのjobにもCLIの書き込みを与えない。
 
