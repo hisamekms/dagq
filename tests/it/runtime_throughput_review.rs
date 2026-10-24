@@ -289,13 +289,13 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
         "throughput-review-job"
     );
     assert_eq!(fs::read_to_string(dir.join("mcp.txt")).unwrap(), "no-mcp");
-    // The service refuses the note and the finding for the job's principal,
-    // and a mark and `ready` are none of its use cases.
+    // The service refuses the note, the finding, a mark and `ready` for the
+    // job's principal.
     for (denied, code) in [
         ("note.err", "authorization_denied"),
         ("finding.err", "authorization_denied"),
-        ("mark.err", "no_use_case"),
-        ("ready.err", "no_use_case"),
+        ("mark.err", "authorization_denied"),
+        ("ready.err", "authorization_denied"),
     ] {
         let error: Value =
             serde_json::from_str(&fs::read_to_string(dir.join(denied)).unwrap()).unwrap();

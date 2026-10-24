@@ -126,12 +126,11 @@ paramsはそのコマンドのoption、答えはそのコマンドの出力（pa
 | `session_run`・`session_record` | なし（wrapper。`SessionOp`） | `session.run`・`session.record`（wrapperの対象） |
 | `watch_poll` | hostの`dagq watch` | `queue.watch` |
 | 読み取り | そのコマンド | CLIと同じcapability。[読み取りのユースケース](#読み取りのユースケース) |
+| 計画の書き込みと`mark` | 同名のコマンド | CLIと同じ。[hostのCLI](queue-service-host-cli.md#計画のユースケース) |
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（capabilityは`finding.ask`）で送る。
 findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、eventの書き手は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。
 そのため`observe_finished`の件数と、observer自身のeventを数えない判定（[Observer](supervisor-lifecycle/observer.md)の0、`SqliteQueue::events_besides`）は、CLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。
-
-`ask`は誰にも知らせず、inboxの`watch`が人に知らせる（[人への通知](supervisor-lifecycle/ask-push.md)）。
 
 ### telemetry_report
 

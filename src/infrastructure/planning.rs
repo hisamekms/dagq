@@ -159,3 +159,12 @@ impl PlanningStore for SqliteQueue {
         GoalReviewStore::rearm_goal_review(self, goal)
     }
 }
+
+impl crate::application::queue_writes::PlannerRecords for SqliteQueue {
+    fn planner_record(
+        &self,
+        id: crate::domain::PlannerId,
+    ) -> Result<crate::domain::PlannerSession> {
+        self.planner(id)
+    }
+}

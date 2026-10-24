@@ -57,6 +57,18 @@ related:
   serviceを見る`hello`（`probe`とsupervisorの起動の確かめ）は`MIN_API_VERSION`で送るので（`request_version`）、前の版のserviceも届かないではなく別のbuildとして見え、supervisorが入れ替える。
 - `planners`は制御側の状態を見る読み取りで、hostのCLIだけが送る（クライアントモードのworkerとjobは`control_side_command`で断る）。
 
+## 計画のユースケース
+
+planner・inbox・人が打つ計画の書き込みと`mark`は、serviceのユースケースとして送る（ADR-t3102-3決定3・4）。
+一覧は`application::queue_writes::QueueWrite`（ユースケースの名前はコマンドの名前で、サブコマンドは`_`でつなぐ）で、paramsはそのコマンドのoption（名前はlong optionの名前）、答えはそのコマンドの出力。
+CLIのDBの経路とserviceは同じ`compose::write_queue`（repositoryの規則をqueueに載せてから`queue_writes::answer`）で答え、認可と拒否の記録はCLIと同じapplicationの`Planning`・`Requests`がprincipalのactorで行う。
+1つのユースケースはapplicationの1回の呼び出しで、その書き込みはstoreの1つのtransactionで終わる。
+
+- `submit`のproposalの持ち主は、環境ではなくprincipalから決める（plannerならその記録のoriginとbackgroundのhandle、ほかは人。`queue_writes::principal_owner`）
+- `request add`の言葉と`submit --replacement`の置き換えの計画は、クライアントがファイルかstdinから読んで送る。
+  環境のroleが`request.record`を持たなければ読まずに送り、serviceがprincipalで断って記録する
+- `ready --inherit`はrunのbranchを動かす制御側のGitの操作なので（ADR-t3102-3決定5）ユースケースにせず、今はDBを直接開く
+
 ## 届かないとき
 
 `status`・`watch`も`unreachable`で直ちに終わり、errorの文が次の手（`dagq service status`・`dagq up`）を言う。

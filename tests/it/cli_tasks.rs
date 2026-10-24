@@ -1097,7 +1097,7 @@ fn the_execution_class_is_added_shown_edited_and_drawn() {
     );
 
     // A submitted task still is.
-    let submitted = submit_from(&db, Some("W-1"), None, &[&spike, &plain]);
+    let submitted = submit_from(&db, None, &[&spike, &plain]);
     assert!(
         submitted.status.success(),
         "{}",

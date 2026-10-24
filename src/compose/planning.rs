@@ -190,3 +190,69 @@ impl OneShot {
         crate::application::planner_request::request_planner(queue, &probes, planner, words)
     }
 }
+
+/// Run the planning command `write` on `queue` as `actor`, as the command
+/// line and the queue service both run it
+/// ([`crate::application::queue_writes::answer`]): the queue first held to
+/// the repository's rules the command needs (its set of changes for the
+/// tasks `add`, `edit` and `submit` register, its goal tags for the goals
+/// `goal add`, `goal edit` and `submit` register, ADR-t1639-1 decision 6,
+/// and a goal's limit of Spike cycles and the prefixes of a task's title
+/// for `submit`, ADR-t1487-1 decision 8). `owner` gives the planner a
+/// submit's proposal belongs to.
+pub fn write_queue(
+    queue: &mut SqliteQueue,
+    actor: &crate::domain::ActorContext,
+    write: &crate::application::queue_writes::QueueWrite,
+    owner: impl FnOnce(&SqliteQueue) -> Result<crate::domain::PlannerOwner>,
+) -> Result<Value> {
+    use crate::application::queue_writes::QueueWrite;
+    let mut rules = crate::infrastructure::sqlite::PlanningRules::default();
+    if matches!(
+        write,
+        QueueWrite::Add(_) | QueueWrite::Edit(_) | QueueWrite::Submit(_)
+    ) {
+        rules.changes = Some(super::task_changes(queue)?);
+    }
+    if matches!(
+        write,
+        QueueWrite::GoalAdd(_) | QueueWrite::GoalEdit(_) | QueueWrite::Submit(_)
+    ) {
+        rules.goal_tags = Some(super::goal_tags(queue)?);
+    }
+    if let QueueWrite::Submit(submit) = write {
+        rules.max_spike_cycles = Some(super::max_spike_cycles(queue)?);
+        rules.title_prefixes = Some(super::task_title_prefixes(queue)?);
+        // The replacement plan of a replanning operation's request
+        // (ADR-t1521-2 decision 4), as the caller read it.
+        rules.replacement = Some(
+            submit
+                .replacement
+                .as_deref()
+                .map(crate::domain::replan_plan::ReplacementPlan::parse)
+                .transpose()?,
+        );
+    }
+    queue.hold_planning_to(rules);
+    // Read only for a submit, the one write it is asked for.
+    let owner = matches!(write, QueueWrite::Submit(_)).then(|| owner(queue));
+    crate::application::queue_writes::answer(
+        queue,
+        actor,
+        &crate::domain::StaticPolicy,
+        write,
+        || owner.context("only a submit has an owner")?,
+    )
+}
+
+/// How the queue service runs a planning command: [`write_queue`], with a
+/// submit's proposal owned by the caller's principal
+/// ([`crate::application::queue_writes::principal_owner`], the queue as its
+/// planners' records).
+pub fn service_writes() -> crate::infrastructure::queue_service::ServiceWrites {
+    std::sync::Arc::new(|queue, actor, write| {
+        write_queue(queue, actor, write, |queue| {
+            crate::application::queue_writes::principal_owner(queue, actor)
+        })
+    })
+}

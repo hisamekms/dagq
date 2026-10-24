@@ -358,7 +358,7 @@ fn a_goals_priority_orders_the_tasks_that_inherit_it_and_not_those_with_their_ow
     for id in ["1", "2", "3"] {
         ok(&db, &["ready", id, "--bypass-review"]);
     }
-    let submitted = submit_from(&db, Some("W-1"), None, &["5"]);
+    let submitted = submit_from(&db, None, &["5"]);
     assert!(submitted.status.success());
     let candidates = |db: &std::path::Path| -> Vec<i64> {
         ok(db, &["candidates"])["candidates"]

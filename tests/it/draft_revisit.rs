@@ -304,6 +304,15 @@ fn people_the_inbox_and_planners_revisit_and_workers_jobs_and_the_observer_may_n
         .len();
     assert_eq!(denied, refused_roles.len() * 2);
 
+    // A planner of the runtime's, whose actor id names it.
+    let opened = dagq::infrastructure::sqlite::SqliteQueue::open(&db).unwrap();
+    while opened
+        .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
+        .unwrap()
+        .id
+        .as_i64()
+        < 4
+    {}
     let planner = [("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "planner:4")];
     let output = invoke_with(&planner, &db, &["revisit", "1", "--at", FUTURE]);
     assert!(

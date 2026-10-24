@@ -197,7 +197,29 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::TelemetryReport
         | UseCase::Supervisor
         | UseCase::SessionRun
-        | UseCase::SessionRecord => {
+        | UseCase::SessionRecord
+        | UseCase::Add
+        | UseCase::Edit
+        | UseCase::Submit
+        | UseCase::Cancel
+        | UseCase::DependencyAdd
+        | UseCase::DependencyRemove
+        | UseCase::SetGoal
+        | UseCase::SetPaths
+        | UseCase::SetPriority
+        | UseCase::Revisit
+        | UseCase::JudgeFollowUp
+        | UseCase::Draft
+        | UseCase::Ready
+        | UseCase::GoalAdd
+        | UseCase::GoalEdit
+        | UseCase::GoalClose
+        | UseCase::GoalReady
+        | UseCase::GoalReview
+        | UseCase::ProposalWithdraw
+        | UseCase::RequestAdd
+        | UseCase::RequestDecline
+        | UseCase::Mark => {
             "narrow the read with the options of its command (dagq <command> --help)"
         }
     }
@@ -336,6 +358,34 @@ string_enum!(UseCase {
     // wrapper's principal (and the inbox's, on the queue) holds
     // `session.record`; no command line goes to it.
     SessionRecord => "session_record",
+    // The planning commands a person, the inbox or a planner runs
+    // (ADR-t3102-3 decision 3), each as the command of its name changes
+    // the queue and prints it, authorized by the application for the
+    // caller ([`crate::application::queue_writes`]): `ready` without
+    // `--inherit`, which moves a run's branch.
+    Add => "add",
+    Edit => "edit",
+    Submit => "submit",
+    Cancel => "cancel",
+    DependencyAdd => "dependency_add",
+    DependencyRemove => "dependency_remove",
+    SetGoal => "set_goal",
+    SetPaths => "set_paths",
+    SetPriority => "set_priority",
+    Revisit => "revisit",
+    JudgeFollowUp => "judge_follow_up",
+    Draft => "draft",
+    Ready => "ready",
+    GoalAdd => "goal_add",
+    GoalEdit => "goal_edit",
+    GoalClose => "goal_close",
+    GoalReady => "goal_ready",
+    GoalReview => "goal_review",
+    ProposalWithdraw => "proposal_withdraw",
+    RequestAdd => "request_add",
+    RequestDecline => "request_decline",
+    // Record a change mark, or retract one, as `dagq mark` does.
+    Mark => "mark",
 });
 
 impl UseCase {
@@ -344,8 +394,8 @@ impl UseCase {
     /// first. `None` for a command the service does not answer (the
     /// control side's, `watch`, whose looks only the host's `dagq` sends as
     /// [`Self::WatchPoll`], `report`, `graph --out`, `ask close`,
-    /// `observe` without `--history` or `--input`, `locate`, `doctor`, the planning
-    /// commands, ...).
+    /// `observe` without `--history` or `--input`, `locate`, `doctor`,
+    /// `ready --inherit`, ...).
     pub fn of_command(words: &[&str]) -> Option<Self> {
         let has = |flag: &str| {
             words
@@ -397,6 +447,29 @@ impl UseCase {
             ("agent", Some("decide")) => Self::AgentDecide,
             ("agent", Some("sets")) => Self::AgentSets,
             ("agent", Some("set")) => Self::AgentSet,
+            ("add", _) => Self::Add,
+            ("edit", _) => Self::Edit,
+            ("submit", _) => Self::Submit,
+            ("cancel", _) => Self::Cancel,
+            ("dependency", Some("add")) => Self::DependencyAdd,
+            ("dependency", Some("remove")) => Self::DependencyRemove,
+            ("set-goal", _) => Self::SetGoal,
+            ("set-paths", _) => Self::SetPaths,
+            ("set-priority", _) => Self::SetPriority,
+            ("revisit", _) => Self::Revisit,
+            ("judge-follow-up", _) => Self::JudgeFollowUp,
+            ("draft", _) => Self::Draft,
+            ("ready", _) if has("--inherit") => return None,
+            ("ready", _) => Self::Ready,
+            ("goal", Some("add")) => Self::GoalAdd,
+            ("goal", Some("edit")) => Self::GoalEdit,
+            ("goal", Some("close")) => Self::GoalClose,
+            ("goal", Some("ready")) => Self::GoalReady,
+            ("goal", Some("review")) => Self::GoalReview,
+            ("proposal", Some("withdraw")) => Self::ProposalWithdraw,
+            ("request", Some("add")) => Self::RequestAdd,
+            ("request", Some("decline")) => Self::RequestDecline,
+            ("mark", _) => Self::Mark,
             _ => return None,
         })
     }
@@ -1708,6 +1781,31 @@ mod tests {
             (&["replans", "3"], "replans"),
             (&["ci", "failures", "--task", "4"], "ci_failures"),
             (&["planners", "--all"], "planners"),
+            (&["add", "x", "--goal", "3"], "add"),
+            (&["edit", "3", "--title", "x"], "edit"),
+            (&["submit", "3"], "submit"),
+            (&["cancel", "3"], "cancel"),
+            (&["dependency", "add", "3", "2"], "dependency_add"),
+            (
+                &["dependency", "remove", "3", "--goal", "2"],
+                "dependency_remove",
+            ),
+            (&["set-goal", "3", "--none"], "set_goal"),
+            (&["set-paths", "3", "--none"], "set_paths"),
+            (&["set-priority", "3", "high"], "set_priority"),
+            (&["revisit", "3", "--clear"], "revisit"),
+            (&["judge-follow-up", "3"], "judge_follow_up"),
+            (&["draft", "3"], "draft"),
+            (&["ready", "3", "--bypass-review"], "ready"),
+            (&["goal", "add", "x"], "goal_add"),
+            (&["goal", "edit", "3"], "goal_edit"),
+            (&["goal", "close", "3"], "goal_close"),
+            (&["goal", "ready", "3"], "goal_ready"),
+            (&["goal", "review", "3"], "goal_review"),
+            (&["proposal", "withdraw", "1"], "proposal_withdraw"),
+            (&["request", "add", "--text", "x"], "request_add"),
+            (&["request", "decline", "3"], "request_decline"),
+            (&["mark", "x"], "mark"),
         ] {
             assert_eq!(
                 UseCase::of_command(words).map(UseCase::as_str),
@@ -1726,12 +1824,11 @@ mod tests {
             &["graph", "--format", "svg", "--out", "g.svg"],
             &["graph", "--out=g.d2"],
             &["ask", "close", "3"],
-            &["goal", "add", "x"],
             &["goal"],
-            &["proposal", "withdraw", "1"],
             &["finding"],
-            &["mark", "x"],
-            &["add"],
+            &["ready", "3", "--inherit", "--reason", "x"],
+            &["dependency"],
+            &["request"],
             &["integrate"],
         ] {
             assert_eq!(UseCase::of_command(words), None, "{words:?}");

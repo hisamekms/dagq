@@ -204,7 +204,7 @@ port `DialogueStore`は`src/infrastructure/dialogue.rs`の`DialogueQueue`が実�
 `ask --request ID`（`planner_question`）は上の`ask`と同じ`ask.open`で判定し、`request decline`と同じくその依頼のplannerをstoreから読んで、plannerにはその依頼のplanner自身だけを許す。
 `requests`は読み取り（`queue.read`）。
 
-`request add`はCLIの入口でも同じ`request.record`（queue）を判定し、ファイルやstdinを読む前に拒む。
+`request add`はCLIの入口でも同じ`request.record`（queue）を判定し、ファイルやstdinを読む前に拒む（queue serviceへ送るときは読まずに送り、serviceが断って記録する。[計画のユースケース](queue-service-host-cli.md#計画のユースケース)）。
 拒否はそこで記録して直ちに返すため、`authorization_denied`は1回だけになる。
 
 | コマンド | capability | resource |

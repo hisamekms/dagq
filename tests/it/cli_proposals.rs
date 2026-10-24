@@ -64,15 +64,26 @@ fn submit_bundles_drafts_into_a_proposal_that_plan_review_or_a_bypass_readies() 
             String::from_utf8_lossy(&refused.stderr)
         );
     }
-    let again = submit_from(&db, None, None, &["1"]);
+    let again = submit_from(&db, None, &["1"]);
     assert!(
         String::from_utf8_lossy(&again.stderr).contains("task 1 already belongs to proposal 1")
     );
-    let bad_origin = submit_from(&db, None, Some("robot"), &["3"]);
-    assert!(!bad_origin.status.success());
     assert!(!invoke(&db, &["submit"]).status.success(), "no members");
 
-    let runtime = submit_from(&db, None, Some("runtime"), &["3"]);
+    // A planner of the runtime's owns its proposal with the origin its
+    // record holds, whatever its environment says.
+    let planner = dagq::infrastructure::sqlite::SqliteQueue::open(&db)
+        .unwrap()
+        .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
+        .unwrap()
+        .id
+        .as_i64();
+    let runtime = submit_from(&db, Some(planner), &["3"]);
+    assert!(
+        runtime.status.success(),
+        "{}",
+        String::from_utf8_lossy(&runtime.stderr)
+    );
     let runtime: Value = serde_json::from_slice(&runtime.stdout).unwrap();
     assert_eq!(
         runtime["owner"],
@@ -109,7 +120,7 @@ fn proposal_withdraw_releases_the_members_for_another_proposal() {
     ok(&db, &["goal", "add", "planned", "--draft"]);
     ok(&db, &["add", "in goal", "--goal", "1"]);
     ok(&db, &["add", "alone"]);
-    let submitted = submit_from(&db, None, None, &["2", "--goal", "1"]);
+    let submitted = submit_from(&db, None, &["2", "--goal", "1"]);
     assert!(submitted.status.success());
 
     for role in ["observer", "reviewer"] {
@@ -134,7 +145,7 @@ fn proposal_withdraw_releases_the_members_for_another_proposal() {
             .contains("only a submitted or revising proposal is withdrawn")
     );
 
-    let resubmitted = submit_from(&db, Some("W-2"), None, &["2", "--goal", "1"]);
+    let resubmitted = submit_from(&db, None, &["2", "--goal", "1"]);
     let resubmitted: Value = serde_json::from_slice(&resubmitted.stdout).unwrap();
     assert_eq!(resubmitted["id"], 2);
     assert_eq!(resubmitted["task_ids"], serde_json::json!([1, 2]));
@@ -162,7 +173,7 @@ fn lint_reports_violations_by_code_and_passes_a_sound_plan() {
     let passed = ok(&db, &["lint", "2"]);
     assert_eq!(passed, serde_json::json!({"tasks": [2], "violations": []}));
 
-    let submitted = submit_from(&db, None, None, &["3", "4"]);
+    let submitted = submit_from(&db, None, &["3", "4"]);
     assert!(submitted.status.success());
     let linted = ok(&db, &["lint", "2", "--proposal", "1"]);
     assert_eq!(linted["tasks"], serde_json::json!([2, 3, 4]));

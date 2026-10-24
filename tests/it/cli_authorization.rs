@@ -81,6 +81,20 @@ fn ended_run_verify_edit_is_delegated_only_to_user_and_inbox() {
     );
 }
 
+/// Open the runtime's planners of the queue at `db` through id `through`:
+/// the planners whose actor ids the tests name, each a principal of its
+/// own on the queue service.
+fn open_planners(db: &Path, through: i64) {
+    let queue = dagq::infrastructure::sqlite::SqliteQueue::open(db).unwrap();
+    while queue
+        .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
+        .unwrap()
+        .id
+        .as_i64()
+        < through
+    {}
+}
+
 fn planner(id: &str) -> [(&'static str, String); 2] {
     [
         ("DAGQ_ROLE", "planner".into()),
@@ -219,6 +233,7 @@ fn workers_jobs_and_the_observer_change_no_plan_and_each_refusal_is_recorded() {
 #[test]
 fn the_planner_keeps_its_authority_on_tasks_that_have_not_started() {
     let (_dir, db) = queue();
+    open_planners(&db, 5);
     let me = planner("planner:1");
     allowed_as(&me, &db, &["goal", "add", "planned"]);
     allowed_as(&me, &db, &["goal", "edit", "1", "--title", "planned again"]);
@@ -304,6 +319,7 @@ fn the_planner_keeps_its_authority_on_tasks_that_have_not_started() {
 #[test]
 fn the_planner_may_not_ready_a_task_or_touch_one_that_started() {
     let (_dir, db) = queue();
+    open_planners(&db, 5);
     let me = planner("planner:1");
     allowed_as(&me, &db, &["add", "first"]);
     allowed_as(&me, &db, &["add", "second"]);
@@ -346,6 +362,7 @@ fn the_planner_may_not_ready_a_task_or_touch_one_that_started() {
 #[test]
 fn only_user_and_inbox_set_the_priority_of_a_task_in_progress() {
     let (_dir, db) = queue();
+    open_planners(&db, 5);
     ok(&db, &["add", "parked"]);
     ok(&db, &["ready", "1", "--bypass-review"]);
     set_status(&db, 1, "in_progress");
@@ -391,6 +408,7 @@ fn only_user_and_inbox_set_the_priority_of_a_task_in_progress() {
 #[test]
 fn a_planner_withdraws_only_its_own_proposal() {
     let (_dir, db) = queue();
+    open_planners(&db, 5);
     let mine = planner("planner:1");
     let other = planner("planner:2");
     allowed_as(&mine, &db, &["add", "first"]);
@@ -459,6 +477,7 @@ fn the_inbox_readies_at_a_persons_word_and_the_record_tells_it_from_the_user() {
 #[test]
 fn the_planner_a_revise_was_sent_to_may_withdraw_it() {
     let (_dir, db) = queue();
+    open_planners(&db, 5);
     let owner = planner("planner:1");
     allowed_as(&owner, &db, &["add", "first"]);
     let id = allowed_as(&owner, &db, &["submit", "1"])["id"].to_string();

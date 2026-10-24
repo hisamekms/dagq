@@ -628,6 +628,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/commands/requests.rs", "RequestStore", Some(Planning), Internal),
     outer_port("src/application/commands/replans.rs", "ReplanStore", Some(Planning), Public(Only(&[Host]))), // through Replans to the CLI and the queue service (a worker's proposal)
     outer_port("src/application/commands/planning.rs", "PlanningStore", Some(Planning), Internal),
+    outer_port("src/application/queue_writes.rs", "PlannerRecords", Some(Planning), Internal), // the planner record a submit's proposal owner is read from, on the queue service's path
     outer_port("src/application/commands/holds.rs", "HoldStore", Some(Planning), Internal), // through Holds to the CLI
     outer_port("src/application/commands/dialogue.rs", "DialogueStore", Some(Shared), Public(All)), // asks and notes
     outer_port("src/application/commands/mod.rs", "DenialLog", Some(Shared), Public(All)), // what a command refused

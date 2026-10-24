@@ -259,7 +259,6 @@ fn what_a_bundle_leaves_undecided_makes_the_next_and_the_outcomes_are_read() {
     let backend = PlanWorkspace::default();
     pass(&fx, &backend, &reviewer);
     let first = planner_of(&queue, a[0]).unwrap();
-    let planner = first.id.to_string();
     // The planner records each membership before it submits (ADR-t1504-2).
     for &draft in &a[1..] {
         queue
@@ -267,12 +266,7 @@ fn what_a_bundle_leaves_undecided_makes_the_next_and_the_outcomes_are_read() {
             .unwrap();
     }
 
-    let refused = submit_from(
-        &fx.db,
-        Some(&planner),
-        Some("runtime"),
-        &[&a[2].to_string()],
-    );
+    let refused = submit_from(&fx.db, Some(first.id.as_i64()), &[&a[2].to_string()]);
     assert!(!refused.status.success());
     assert!(
         String::from_utf8_lossy(&refused.stderr).contains("planner_question"),
@@ -283,12 +277,7 @@ fn what_a_bundle_leaves_undecided_makes_the_next_and_the_outcomes_are_read() {
         .unwrap();
     // It waits on the fixture's blocker once ready, so no run starts.
     queue.add_dependency(a[1], TaskId::new(1)).unwrap();
-    let submitted = submit_from(
-        &fx.db,
-        Some(&planner),
-        Some("runtime"),
-        &[&a[1].to_string()],
-    );
+    let submitted = submit_from(&fx.db, Some(first.id.as_i64()), &[&a[1].to_string()]);
     assert!(submitted.status.success(), "{submitted:?}");
     let adopted = events(&mut queue, a[1], "follow_up_adopted");
     assert_eq!(adopted[0]["planner_id"], first.id.as_i64());

@@ -310,6 +310,18 @@ const HELD_READY_QUERY: &str = concat!(
     " ORDER BY t.id"
 );
 
+/// The repository's rules a planning command holds the queue to
+/// ([`SqliteQueue::hold_planning_to`]): each `Some` sets that rule (to
+/// none with `Some(None)`), each `None` leaves it as it is.
+#[derive(Debug, Clone, Default)]
+pub struct PlanningRules {
+    pub changes: Option<Option<ChangeSet>>,
+    pub goal_tags: Option<Option<TagSet>>,
+    pub max_spike_cycles: Option<Option<usize>>,
+    pub title_prefixes: Option<Option<TitlePrefixes>>,
+    pub replacement: Option<Option<crate::domain::replan_plan::ReplacementPlan>>,
+}
+
 pub struct SqliteQueue {
     pub(super) conn: Connection,
     /// `runs/` next to the database as opened now. A run's directory, worktree,
@@ -610,6 +622,29 @@ impl SqliteQueue {
     pub fn with_goal_tags(mut self, tags: Option<TagSet>) -> Self {
         self.goal_tags = tags;
         self
+    }
+
+    /// [`Self::with_changes`], [`Self::with_goal_tags`],
+    /// [`Self::with_max_spike_cycles`], [`Self::with_title_prefixes`] and
+    /// [`Self::with_replacement_plan`] on
+    /// a queue held by reference, each set only when given: the rules a
+    /// planning command holds its tasks and goals to.
+    pub fn hold_planning_to(&mut self, rules: PlanningRules) {
+        if let Some(changes) = rules.changes {
+            self.changes = changes;
+        }
+        if let Some(tags) = rules.goal_tags {
+            self.goal_tags = tags;
+        }
+        if let Some(max) = rules.max_spike_cycles {
+            self.max_spike_cycles = max;
+        }
+        if let Some(prefixes) = rules.title_prefixes {
+            self.title_prefixes = prefixes;
+        }
+        if let Some(plan) = rules.replacement {
+            self.replacement = plan;
+        }
     }
 
     /// The queue warning of a [`WriteTx`] that held the write lock past

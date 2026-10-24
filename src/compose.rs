@@ -65,6 +65,7 @@ pub use observation::{
 };
 pub use planning::{
     PLANNER_TIMEOUT, PlannerEntry, planner_session, planner_session_with_provider, planners,
+    service_writes, write_queue,
 };
 pub use supervisor::{
     CallerLayer, ContainerRuntimePort, PausesPort, ProcessesPort, RunContainersPort, RunFilesPort,

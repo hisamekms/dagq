@@ -643,7 +643,7 @@ fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
         &Principal::worker(queue.run.id(), queue.run.task_id()),
     );
     // No use case watches, writes a report or runs another program.
-    for use_case in ["watch", "report", "locate", "doctor", "goal_add", "mark"] {
+    for use_case in ["watch", "report", "locate", "doctor", "ask_close", "answer"] {
         let response = raw(
             &queue,
             &json!({"api_version": API_VERSION, "token": worker, "use_case": use_case}),

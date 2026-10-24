@@ -51,6 +51,7 @@ pub mod push;
 pub mod queue_broker;
 pub mod queue_reads;
 pub mod queue_service;
+pub mod queue_writes;
 pub mod rebind;
 pub mod recording;
 pub mod release_update;

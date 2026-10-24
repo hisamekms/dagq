@@ -99,7 +99,7 @@ run slotは使わず、[Plan review](plan-review.md#reviseの配送)の`tend_pla
    質問したdraftは結末`answer_wait`（8）、質問していないものは先に決めさせ、残れば`undecided`。
 6. **採用の記録と上限**（`submit`の中、[persistence](../persistence.md)）: submitが出どころのあるdraftを初めて出すとき`follow_up_adopted`（goal_gapとreopenedは`draft_adopted`）を書き、plannerが決めたか人が決めたか（`by`）を残す。
    上限はdraftごとで、束の中の1件が人の`adopt`を要しても、他のdraftは出せる。
-   runtimeのplanner（`DAGQ_PLANNER_ORIGIN=runtime`）は、登録時の元goalが無い・閉じていた・不明か、現在のgoalが閉じているか無い、または`follow_up_depth`が`FOLLOW_UP_ASK_DEPTH`（[ADR-t808-1](../../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）以上のfollow_upのdraftを、そのdraftへの`planner_question`に人が`adopt`と答えていなければsubmitできない（errorで`planner_question`を促す）。
+   runtimeのplanner（originが`runtime`）は、登録時の元goalが無い・閉じていた・不明か、現在のgoalが閉じているか無い、または`follow_up_depth`が`FOLLOW_UP_ASK_DEPTH`（[ADR-t808-1](../../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）以上のfollow_upのdraftを、そのdraftへの`planner_question`に人が`adopt`と答えていなければsubmitできない（errorで`planner_question`を促す）。
    それより浅い深さは、登録時の元goalと現在のgoalがともに開いていれば人を経ずにsubmitできる。
    人のsubmit（人が`DAGQ_ROLE`の無い自分のterminalで打った`submit`）、人の`adopt`を経たsubmit、`ready --bypass-review`は深さを0に戻す。
 7. **終わり**: runtimeのplannerは束のdraftをsubmitしたか、cancelしたか、`keep_draft`で（answerか、まだ来ない再検討の時刻で）残したら（決めずに残したものがあっても）、idleになったところで終了の依頼（`turns/exit`。`planner_exits`に記録）を受け、wrapperがsessionを終える。

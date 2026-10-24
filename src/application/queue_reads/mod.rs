@@ -619,7 +619,29 @@ impl QueueRead {
             | UseCase::TelemetryReport
             | UseCase::Supervisor
             | UseCase::SessionRun
-            | UseCase::SessionRecord => return Ok(None),
+            | UseCase::SessionRecord
+            | UseCase::Add
+            | UseCase::Edit
+            | UseCase::Submit
+            | UseCase::Cancel
+            | UseCase::DependencyAdd
+            | UseCase::DependencyRemove
+            | UseCase::SetGoal
+            | UseCase::SetPaths
+            | UseCase::SetPriority
+            | UseCase::Revisit
+            | UseCase::JudgeFollowUp
+            | UseCase::Draft
+            | UseCase::Ready
+            | UseCase::GoalAdd
+            | UseCase::GoalEdit
+            | UseCase::GoalClose
+            | UseCase::GoalReady
+            | UseCase::GoalReview
+            | UseCase::ProposalWithdraw
+            | UseCase::RequestAdd
+            | UseCase::RequestDecline
+            | UseCase::Mark => return Ok(None),
         };
         read.check()?;
         Ok(Some(read))

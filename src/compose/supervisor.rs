@@ -849,6 +849,7 @@ pub fn supervise_with_reviewer(
             &db,
             generators.clone(),
             super::service_reads(),
+            super::service_writes(),
             super::service_detail(),
         ))
     };

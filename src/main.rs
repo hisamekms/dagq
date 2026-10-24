@@ -17,15 +17,15 @@ use serde_json::{Value, json};
 
 use dagq::application::commands::operations::{HookSession, Operation, WorkspaceScope};
 use dagq::application::queue_reads::{self as reads, QueueRead};
+use dagq::application::queue_writes::QueueWrite;
 use dagq::domain::queue_service::UseCase;
 use dagq::{
     application::TaskReads,
     domain::{
         ActorContext, ActorRole, AskId, AskKind, AskReason, AuthorizationError, Capability,
-        EventId, FindingId, FindingTarget, GoalEdit, GoalId, GoalVerdict, LeaseToken, NewAsk,
-        NewFinding, NewGoal, NewNote, NewTask, NoteTarget, PlannerId, PlannerOrigin, PlannerOwner,
-        ProposalId, RequestId, Resource, RunId, SessionRole, StaticPolicy, Submission, TaskEdit,
-        TaskId, TaskStatus, cancel_reason::NewCancel, worker::WorkerMode,
+        EventId, FindingId, FindingTarget, GoalId, LeaseToken, NewAsk, NewFinding, NewNote,
+        NoteTarget, PlannerId, PlannerOrigin, PlannerOwner, ProposalId, RequestId, Resource, RunId,
+        SessionRole, StaticPolicy, TaskId, TaskStatus,
     },
     infrastructure::{adapters::path_text, location::QueueLocation},
 };
@@ -2512,15 +2512,6 @@ fn request_words(
     Ok(Some(words))
 }
 
-/// The goal tags given on the command line (`--tag`), each checked for its
-/// form (ADR-t1639-1 decision 6).
-fn goal_tags(tags: &[String]) -> Result<Vec<dagq::domain::GoalTag>> {
-    Ok(tags
-        .iter()
-        .map(|tag| tag.parse())
-        .collect::<Result<_, _>>()?)
-}
-
 /// A run named on the command line, or [`Resource::Unresolved`] when its
 /// id cannot be read: no owner matches it (fail closed).
 fn run_resource(run: &str) -> Resource {
@@ -3318,11 +3309,326 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
 /// same options the service reads back as the command line's. `None` for
 /// a command the service has no use case for. A `--cmux` ([`RetiredCmux`])
 /// is not sent.
+/// The planner a proposal submitted on the DB directly belongs to: the
+/// origin the turn's environment names (a person's when it names none), and
+/// the background handle of the planner it names (ADR-t1404-1 decision
+/// 10). The terminal's variables name none (ADR-t2159-1 decision 1). The
+/// queue service finds it from the caller's principal instead
+/// ([`dagq::application::queue_writes::principal_owner`]).
+fn environment_owner(queue: &dagq::infrastructure::sqlite::SqliteQueue) -> Result<PlannerOwner> {
+    use dagq::application::lifecycle::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV};
+    let origin = match env::var(PLANNER_ORIGIN_ENV) {
+        Ok(origin) if !origin.is_empty() => origin.parse()?,
+        _ => PlannerOrigin::Person,
+    };
+    let workspace_id = env::var(PLANNER_ID_ENV)
+        .ok()
+        .and_then(|planner| planner.trim().parse().ok())
+        .and_then(|planner| queue.planner(PlannerId::new(planner)).ok())
+        .and_then(|planner| planner.workspace_id)
+        .filter(|id| dagq::domain::background_wrapper::is_background(id));
+    Ok(PlannerOwner {
+        origin,
+        workspace_id,
+    })
+}
+
+/// The planning command `command` is, as the queue service runs it too
+/// (ADR-t3102-3 decision 3): `None` for any other command, and for `ready
+/// --inherit`. The words of `request add` are read here, from its files
+/// (relative to the working directory) or stdin, so they are read once
+/// and the service gets what they held.
+fn queue_write(command: &Command) -> Result<Option<QueueWrite>> {
+    use dagq::application::queue_writes as writes;
+    Ok(Some(match command.clone() {
+        Command::Add {
+            title,
+            description,
+            acceptance,
+            verification_commands,
+            dependencies,
+            goal_dependencies,
+            goal_id,
+            context,
+            required_evidence,
+            paths,
+            priority,
+            change,
+            provider,
+            headless,
+            interactive,
+            wait_for_build,
+            execution_class,
+        } => QueueWrite::Add(writes::AddWrite {
+            title,
+            description,
+            acceptance,
+            verify: verification_commands,
+            depends_on: dependencies,
+            depends_on_goal: goal_dependencies,
+            goal: goal_id,
+            context,
+            evidence: required_evidence,
+            paths,
+            priority,
+            change,
+            provider,
+            headless,
+            interactive,
+            wait_for_build,
+            execution_class,
+        }),
+        Command::Edit {
+            task,
+            title,
+            description,
+            acceptance,
+            context,
+            verification_commands,
+            no_verify,
+            required_evidence,
+            no_evidence,
+            paths,
+            no_paths,
+            change,
+            provider,
+            headless,
+            interactive,
+            wait_for_build,
+            no_wait_for_build,
+            execution_class,
+        } => QueueWrite::Edit(writes::EditWrite {
+            task,
+            title,
+            description,
+            acceptance,
+            context,
+            verify: verification_commands,
+            no_verify,
+            evidence: required_evidence,
+            no_evidence,
+            paths,
+            no_paths,
+            change,
+            provider,
+            headless,
+            interactive,
+            wait_for_build,
+            no_wait_for_build,
+            execution_class,
+        }),
+        Command::Submit {
+            tasks,
+            goals,
+            proposal,
+            findings,
+            replacement,
+        } => QueueWrite::Submit(writes::SubmitWrite {
+            tasks,
+            goal: goals,
+            proposal,
+            finding: findings,
+            replacement: replacement
+                .map(|path| {
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("read the replacement plan {}", path.display()))
+                })
+                .transpose()?,
+        }),
+        Command::Cancel {
+            id,
+            reason,
+            duplicate_of,
+            note,
+        } => QueueWrite::Cancel(writes::CancelWrite {
+            id,
+            reason,
+            duplicate_of,
+            note,
+        }),
+        Command::Dependency { command } => match command {
+            DependencyCommand::Add {
+                task,
+                predecessor,
+                goal,
+            } => QueueWrite::DependencyAdd(writes::DependencyWrite {
+                task,
+                predecessor,
+                goal,
+            }),
+            DependencyCommand::Remove {
+                task,
+                predecessor,
+                goal,
+            } => QueueWrite::DependencyRemove(writes::DependencyWrite {
+                task,
+                predecessor,
+                goal,
+            }),
+        },
+        Command::SetGoal { task, goal, .. } => {
+            QueueWrite::SetGoal(writes::SetGoalWrite { task, goal })
+        }
+        Command::SetPaths { task, paths, .. } => {
+            QueueWrite::SetPaths(writes::SetPathsWrite { task, paths })
+        }
+        Command::SetPriority { task, level, .. } => {
+            QueueWrite::SetPriority(writes::SetPriorityWrite { task, level })
+        }
+        Command::Revisit { task, at, note, .. } => {
+            QueueWrite::Revisit(writes::RevisitWrite { task, at, note })
+        }
+        Command::JudgeFollowUp {
+            task,
+            classification,
+            acceptance_items,
+            reason,
+            evidence,
+            destination_goal,
+            source_goal,
+            corrects,
+        } => QueueWrite::JudgeFollowUp(writes::JudgeFollowUpWrite {
+            task,
+            classification,
+            acceptance_item: acceptance_items,
+            reason,
+            evidence,
+            destination_goal,
+            source_goal,
+            corrects,
+        }),
+        Command::Draft { id } => QueueWrite::Draft(writes::IdWrite { id }),
+        Command::Ready { inherit: true, .. } => return Ok(None),
+        Command::Ready {
+            id, bypass_review, ..
+        } => QueueWrite::Ready(writes::ReadyWrite { id, bypass_review }),
+        Command::Goal { command } => match command {
+            GoalCommand::Add {
+                title,
+                description,
+                acceptance,
+                constraints,
+                doc,
+                draft,
+                priority,
+                tags,
+            } => QueueWrite::GoalAdd(writes::GoalAddWrite {
+                title,
+                description,
+                acceptance,
+                constraints,
+                doc,
+                draft,
+                priority,
+                tag: tags,
+            }),
+            GoalCommand::Edit {
+                id,
+                title,
+                description,
+                acceptance,
+                constraints,
+                doc,
+                priority,
+                tags,
+                no_tags,
+            } => QueueWrite::GoalEdit(writes::GoalEditWrite {
+                id,
+                title,
+                description,
+                acceptance,
+                constraints,
+                doc,
+                priority,
+                tag: tags,
+                no_tags,
+            }),
+            GoalCommand::Close { id, verdict } => {
+                QueueWrite::GoalClose(writes::GoalCloseWrite { id, verdict })
+            }
+            GoalCommand::Ready { id } => QueueWrite::GoalReady(writes::IdWrite { id }),
+            GoalCommand::Review { id } => QueueWrite::GoalReview(writes::IdWrite { id }),
+            GoalCommand::List { .. } | GoalCommand::Show { .. } => return Ok(None),
+        },
+        Command::Proposal {
+            command: ProposalCommand::Withdraw { id },
+        } => QueueWrite::ProposalWithdraw(writes::IdWrite { id }),
+        Command::Request {
+            command:
+                RequestCommand::Add {
+                    text,
+                    text_file,
+                    note,
+                    note_file,
+                    refs,
+                    priority,
+                },
+        } => {
+            // A role that may not record a request reads no file and no
+            // stdin: the service refuses it, and records the refusal, for
+            // the principal it is.
+            // A role that does not read (none it knows) counts as one that
+            // may not.
+            let granted = ActorContext::from_env(|name| env::var(name).ok()).is_ok_and(|actor| {
+                dagq::domain::authorization::grants(actor.role())
+                    .contains(&Capability::RequestRecord)
+            });
+            if !granted {
+                return Ok(Some(QueueWrite::RequestAdd(writes::RequestAddWrite {
+                    text: None,
+                    note: None,
+                    refs,
+                    priority,
+                })));
+            }
+            if text.as_deref() == Some("-") && note.as_deref() == Some("-") {
+                bail!("--text - and --note - both read stdin; give one of them as a file");
+            }
+            let cwd = env::current_dir().context("working directory is unavailable")?;
+            let text = request_words("--text", text, text_file, &cwd)?
+                .expect("clap requires --text or --text-file");
+            let note = request_words("--note", note, note_file, &cwd)?;
+            QueueWrite::RequestAdd(writes::RequestAddWrite {
+                text: Some(text),
+                note,
+                refs,
+                priority,
+            })
+        }
+        Command::Request {
+            command:
+                RequestCommand::Decline {
+                    id,
+                    reason,
+                    continue_run,
+                },
+        } => QueueWrite::RequestDecline(writes::RequestDeclineWrite {
+            id,
+            reason,
+            continue_run,
+        }),
+        _ => return Ok(None),
+    }))
+}
+
 fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
     if let Some(read) = queue_read(command) {
         return Ok(Some(read.request()));
     }
+    if let Some(write) = queue_write(command)? {
+        return write.request().map(Some);
+    }
     Ok(Some(match command {
+        Command::Mark {
+            label,
+            note,
+            at,
+            retract,
+        } => (
+            UseCase::Mark,
+            json!({"label": label, "note": note, "at": at.map(|at| at.text()),
+                   "retract": retract}),
+        ),
         Command::Show { id, full, events } => (
             UseCase::Show,
             json!({"id": id, "full": full, "events": events}),
@@ -3556,7 +3862,16 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
 /// sends `command` to the service of a served queue: a command the service
 /// answers ([`client_request`]), and `watch`, whose looks it answers.
 fn host_routed(command: &Command) -> Result<bool> {
-    Ok(matches!(command, Command::Watch { .. }) || client_request(command)?.is_some())
+    // `request add` reads its words once, when its request is made.
+    let request_add = matches!(
+        command,
+        Command::Request {
+            command: RequestCommand::Add { .. }
+        }
+    );
+    Ok(matches!(command, Command::Watch { .. })
+        || request_add
+        || client_request(command)?.is_some())
 }
 
 /// Run `command`, a [`host_routed`] one, through the service of the queue
@@ -4068,6 +4383,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     db: db.clone(),
                     generators: generators.clone(),
                     reads: dagq::compose::service_reads(),
+                    writes: dagq::compose::service_writes(),
                     detail: dagq::compose::service_detail(),
                     stop: install_stop_signal()?,
                     poll: Duration::from_millis(50),
@@ -4131,49 +4447,6 @@ fn execute(cli: Cli) -> Result<Value> {
     if let Some(common_dir) = &common_dir {
         queue.assert_repository(common_dir)?;
     }
-    // The repository's set of changes holds the tasks the planning
-    // commands register, edit and submit (ADR-t980-1); lint reads it
-    // itself (`compose::read_queue`).
-    if matches!(
-        cli.command,
-        Command::Add { .. } | Command::Edit { .. } | Command::Submit { .. }
-    ) {
-        let changes = dagq::compose::task_changes(&queue)?;
-        queue = queue.with_changes(changes);
-    }
-    // The repository's set of goal tags holds the goals the planning
-    // commands register, edit and submit (ADR-t1639-1 decision 6).
-    if matches!(
-        cli.command,
-        Command::Goal {
-            command: GoalCommand::Add { .. } | GoalCommand::Edit { .. }
-        } | Command::Submit { .. }
-    ) {
-        let tags = dagq::compose::goal_tags(&queue)?;
-        queue = queue.with_goal_tags(tags);
-    }
-    // A goal's limit of Spike cycles holds a planner of the runtime's
-    // submit (ADR-t1487-1 decision 8), and the repository's prefixes of a
-    // task's title the tasks it submits (`add` and `edit` take any title,
-    // so the drafts the runtime makes keep theirs until a planner edits
-    // them).
-    if let Command::Submit {
-        replacement: Some(path),
-        ..
-    } = &cli.command
-    {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("read the replacement plan {}", path.display()))?;
-        queue = queue.with_replacement_plan(Some(
-            dagq::domain::replan_plan::ReplacementPlan::parse(&text)?,
-        ));
-    }
-    if matches!(cli.command, Command::Submit { .. }) {
-        let max = dagq::compose::max_spike_cycles(&queue)?;
-        queue = queue.with_max_spike_cycles(max);
-        let prefixes = dagq::compose::task_title_prefixes(&queue)?;
-        queue = queue.with_title_prefixes(prefixes);
-    }
     // The planning commands run as the caller through the application,
     // which authorizes each before it changes the queue (task 732).
     macro_rules! planning {
@@ -4199,6 +4472,12 @@ fn execute(cli: Cli) -> Result<Value> {
     // (ADR-t1233-5 decision 1).
     if let Some(read) = queue_read(&cli.command) {
         return dagq::compose::read_queue(&mut queue, &db, &one_shot, &read);
+    }
+    // The planning commands, as the queue service runs them too
+    // (ADR-t3102-3 decision 3): the application authorizes each for the
+    // caller before it changes the queue (task 732).
+    if let Some(write) = queue_write(&cli.command)? {
+        return dagq::compose::write_queue(&mut queue, &actor, &write, environment_owner);
     }
     Ok(match cli.command {
         Command::Init
@@ -4238,55 +4517,21 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Requests { .. }
         | Command::Replans { .. }
         | Command::Planners { .. } => unreachable!("a read is answered above"),
-        Command::Add {
-            title,
-            description,
-            acceptance,
-            verification_commands,
-            dependencies,
-            goal_dependencies,
-            goal_id,
-            context,
-            required_evidence,
-            paths,
-            priority,
-            change,
-            provider,
-            headless,
-            interactive,
-            wait_for_build,
-            execution_class,
-        } => serde_json::to_value(
-            planning!().add(NewTask {
-                title,
-                description,
-                acceptance,
-                verification_commands,
-                dependencies: dependencies.into_iter().map(TaskId::new).collect(),
-                goal_dependencies: goal_dependencies.into_iter().map(GoalId::new).collect(),
-                goal_id: goal_id.map(GoalId::new),
-                context,
-                required_evidence: required_evidence
-                    .iter()
-                    .map(|name| name.parse())
-                    .collect::<Result<_, _>>()?,
-                paths,
-                priority: priority.as_deref().map(str::parse).transpose()?,
-                change: change.map(|change| change.parse()).transpose()?,
-                provider: provider.map(|provider| provider.parse()).transpose()?,
-                worker_mode: match (headless, interactive) {
-                    (true, _) => Some(WorkerMode::Headless),
-                    (_, true) => Some(WorkerMode::Interactive),
-                    _ => None,
-                },
-                wait_for_build,
-                execution_class: execution_class
-                    .as_deref()
-                    .map(str::parse)
-                    .transpose()?
-                    .unwrap_or_default(),
-            })?,
-        )?,
+        // Answered above as writes.
+        Command::Add { .. }
+        | Command::Edit { .. }
+        | Command::Submit { .. }
+        | Command::Draft { .. }
+        | Command::Ready { inherit: false, .. }
+        | Command::Cancel { .. }
+        | Command::Dependency { .. }
+        | Command::Goal { .. }
+        | Command::JudgeFollowUp { .. }
+        | Command::SetGoal { .. }
+        | Command::SetPaths { .. }
+        | Command::SetPriority { .. }
+        | Command::Revisit { .. }
+        | Command::Request { .. } => unreachable!("a write is answered above"),
         Command::Show { id, full, events } => {
             let detail = queue.show(TaskId::new(id))?;
             if full {
@@ -4310,244 +4555,13 @@ fn execute(cli: Cli) -> Result<Value> {
                 },
             )?)?
         }
-        Command::Ready {
-            id, bypass_review, ..
-        } => serde_json::to_value(planning!().ready(TaskId::new(id), bypass_review)?)?,
-        Command::Submit {
-            tasks,
-            goals,
-            proposal,
-            findings,
-            ..
-        } => {
-            use dagq::application::lifecycle::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV};
-            let origin = match env::var(PLANNER_ORIGIN_ENV) {
-                Ok(origin) if !origin.is_empty() => origin.parse()?,
-                _ => PlannerOrigin::Person,
-            };
-            // The proposal's owner is the planner the turn's actor names:
-            // the background handle its record keeps (ADR-t1404-1 decision
-            // 10). The terminal's variables name none (ADR-t2159-1
-            // decision 1).
-            let workspace_id = env::var(PLANNER_ID_ENV)
-                .ok()
-                .and_then(|planner| planner.trim().parse().ok())
-                .and_then(|planner| queue.planner(PlannerId::new(planner)).ok())
-                .and_then(|planner| planner.workspace_id)
-                .filter(|id| dagq::domain::background_wrapper::is_background(id));
-            serde_json::to_value(planning!().submit(
-                Submission {
-                    tasks: tasks.into_iter().map(TaskId::new).collect(),
-                    goals: goals.into_iter().map(GoalId::new).collect(),
-                    proposal: proposal.map(ProposalId::new),
-                    owner: PlannerOwner {
-                        origin,
-                        workspace_id,
-                    },
-                },
-                &findings.into_iter().map(FindingId::new).collect::<Vec<_>>(),
-            )?)?
-        }
         Command::Proposal { command } => match command {
             ProposalCommand::List { all } => json!({"proposals": queue.proposals(all)?}),
             ProposalCommand::Show { id } => {
                 serde_json::to_value(queue.show_proposal(ProposalId::new(id))?)?
             }
-            ProposalCommand::Withdraw { id } => {
-                serde_json::to_value(planning!().withdraw(ProposalId::new(id))?)?
-            }
+            ProposalCommand::Withdraw { .. } => unreachable!("a write is answered above"),
         },
-        Command::Draft { id } => serde_json::to_value(planning!().draft(TaskId::new(id))?)?,
-        Command::Cancel {
-            id,
-            reason,
-            duplicate_of,
-            note,
-        } => serde_json::to_value(planning!().cancel(
-            TaskId::new(id),
-            NewCancel::by_hand(reason, duplicate_of.map(TaskId::new), note),
-        )?)?,
-        Command::Dependency { command } => {
-            use dagq::application::commands::planning::Dependency;
-            // clap requires a predecessor or --goal; --goal wins.
-            let on = |predecessor: Option<i64>, goal: Option<i64>| match (predecessor, goal) {
-                (_, Some(goal)) => Dependency::Goal(GoalId::new(goal)),
-                (Some(predecessor), None) => Dependency::Task(TaskId::new(predecessor)),
-                (None, None) => unreachable!("clap requires a predecessor or --goal"),
-            };
-            serde_json::to_value(match command {
-                DependencyCommand::Add {
-                    task,
-                    predecessor,
-                    goal,
-                } => planning!().add_dependency(TaskId::new(task), on(predecessor, goal))?,
-                DependencyCommand::Remove {
-                    task,
-                    predecessor,
-                    goal,
-                } => planning!().remove_dependency(TaskId::new(task), on(predecessor, goal))?,
-            })?
-        }
-        Command::Goal { command } => match command {
-            GoalCommand::Add {
-                title,
-                description,
-                acceptance,
-                constraints,
-                doc,
-                draft,
-                priority,
-                tags,
-            } => serde_json::to_value(planning!().add_goal(NewGoal {
-                title,
-                description,
-                acceptance,
-                constraints,
-                doc,
-                draft,
-                priority: priority.map(|priority| priority.parse()).transpose()?,
-                tags: goal_tags(&tags)?,
-            })?)?,
-            GoalCommand::Ready { id } => {
-                serde_json::to_value(planning!().ready_goal(GoalId::new(id))?)?
-            }
-            GoalCommand::List { .. } | GoalCommand::Show { .. } => {
-                unreachable!("a read is answered above")
-            }
-            GoalCommand::Edit {
-                id,
-                title,
-                description,
-                acceptance,
-                constraints,
-                doc,
-                priority,
-                tags,
-                no_tags,
-            } => serde_json::to_value(
-                planning!().edit_goal(
-                    GoalId::new(id),
-                    GoalEdit {
-                        title,
-                        description,
-                        acceptance,
-                        constraints,
-                        doc,
-                        priority: priority.as_deref().map(str::parse).transpose()?,
-                        tags: (!tags.is_empty() || no_tags)
-                            .then(|| goal_tags(&tags))
-                            .transpose()?,
-                    },
-                )?,
-            )?,
-            GoalCommand::Close { id, verdict } => serde_json::to_value(
-                planning!().close_goal(GoalId::new(id), verdict.parse::<GoalVerdict>()?)?,
-            )?,
-            GoalCommand::Review { id } => planning!().review_goal(GoalId::new(id))?,
-        },
-        Command::JudgeFollowUp {
-            task,
-            classification,
-            acceptance_items,
-            reason,
-            evidence,
-            destination_goal,
-            source_goal,
-            corrects,
-        } => planning!().judge_follow_up(
-            TaskId::new(task),
-            dagq::domain::follow_up::MembershipJudgement {
-                classification: classification.parse()?,
-                acceptance_items,
-                reason,
-                evidence,
-                destination_goal_id: destination_goal.map(GoalId::new),
-                source_goal_id: source_goal.map(GoalId::new),
-                corrects,
-            },
-        )?,
-        Command::SetGoal {
-            task,
-            goal,
-            none: _,
-        } => serde_json::to_value(planning!().set_goal(TaskId::new(task), goal.map(GoalId::new))?)?,
-        Command::SetPaths {
-            task,
-            paths,
-            none: _,
-        } => serde_json::to_value(planning!().set_paths(TaskId::new(task), paths)?)?,
-        Command::Edit {
-            task,
-            title,
-            description,
-            acceptance,
-            context,
-            verification_commands,
-            no_verify,
-            required_evidence,
-            no_evidence,
-            paths,
-            no_paths,
-            change,
-            provider,
-            headless,
-            interactive,
-            wait_for_build,
-            no_wait_for_build,
-            execution_class,
-        } => {
-            // A list flag replaces the list; its --no- flag empties it.
-            let replaced =
-                |values: Vec<String>, none: bool| (none || !values.is_empty()).then_some(values);
-            let required_evidence = replaced(required_evidence, no_evidence)
-                .map(|names| names.iter().map(|name| name.parse()).collect())
-                .transpose()?;
-            serde_json::to_value(planning!().edit(
-                TaskId::new(task),
-                TaskEdit {
-                    title,
-                    description,
-                    acceptance,
-                    verification_commands: replaced(verification_commands, no_verify),
-                    required_evidence,
-                    paths: replaced(paths, no_paths),
-                    context,
-                    change: change.map(|change| change.parse()).transpose()?,
-                    provider: provider.map(|provider| provider.parse()).transpose()?,
-                    worker_mode: match (headless, interactive) {
-                        (true, _) => Some(WorkerMode::Headless),
-                        (_, true) => Some(WorkerMode::Interactive),
-                        _ => None,
-                    },
-                    wait_for_build: (wait_for_build || no_wait_for_build).then_some(wait_for_build),
-                    execution_class: execution_class.as_deref().map(str::parse).transpose()?,
-                },
-            )?)?
-        }
-        Command::Revisit {
-            task,
-            at,
-            note,
-            clear: _,
-        } => {
-            use dagq::domain::follow_up::{RevisitChange, revisit_seconds};
-            let change = match at {
-                Some(at) => RevisitChange::Set {
-                    at: revisit_seconds(&at).with_context(|| {
-                        format!("--at {at} is not an RFC 3339 time (2026-10-04T12:00:00Z)")
-                    })?,
-                    note,
-                },
-                None => RevisitChange::Clear,
-            };
-            let revisit = planning!().revisit(TaskId::new(task), change)?;
-            json!({"task_id": task, "revisit": revisit})
-        }
-        Command::SetPriority { task, level, .. } => {
-            // Without a level, --inherit clears the task's own priority.
-            let level = level.as_deref().map(str::parse).transpose()?;
-            serde_json::to_value(planning!().set_priority(TaskId::new(task), level)?)?
-        }
         Command::Note {
             task,
             run,
@@ -4623,52 +4637,6 @@ fn execute(cli: Cli) -> Result<Value> {
             &reason,
             covered_by.map(TaskId::new),
         )?)?,
-        Command::Request {
-            command:
-                RequestCommand::Add {
-                    text,
-                    text_file,
-                    note,
-                    note_file,
-                    refs,
-                    priority,
-                },
-        } => {
-            if text.as_deref() == Some("-") && note.as_deref() == Some("-") {
-                bail!("--text - and --note - both read stdin; give one of them as a file");
-            }
-            let text = request_words("--text", text, text_file, &cwd)?
-                .expect("clap requires --text or --text-file");
-            let note = request_words("--note", note, note_file, &cwd)?;
-            let request = dagq::domain::plan_request::NewPlanRequest {
-                text,
-                note,
-                refs: refs
-                    .iter()
-                    .map(|value| dagq::domain::plan_request::RequestRef::parse(value))
-                    .collect::<Result<_, _>>()?,
-                priority: priority.map(|priority| priority.parse()).transpose()?,
-            };
-            serde_json::to_value(
-                dagq::application::commands::requests::Requests::new(
-                    &mut queue,
-                    &actor,
-                    &StaticPolicy,
-                )
-                .record(&request)?,
-            )?
-        }
-        Command::Request {
-            command:
-                RequestCommand::Decline {
-                    id,
-                    reason,
-                    continue_run,
-                },
-        } => serde_json::to_value(
-            dagq::application::commands::requests::Requests::new(&mut queue, &actor, &StaticPolicy)
-                .decline(RequestId::new(id), &reason, continue_run)?,
-        )?,
         Command::Agent { command } => {
             let evals =
                 dagq::application::agent_eval::AgentEvals::new(&queue, &actor, &StaticPolicy);

@@ -659,7 +659,7 @@ fn the_set_of_goal_tags_of_dagq_toml_holds_goal_add_edit_lint_and_submit() {
     assert_eq!(violations.len(), 1, "{linted}");
     assert_eq!(violations[0]["code"], "missing_goal_tag");
     assert_eq!(violations[0]["task_id"].to_string(), member);
-    let submitted = submit_from(&db, None, None, &["--goal", &draft]);
+    let submitted = submit_from(&db, None, &["--goal", &draft]);
     assert!(!submitted.status.success());
     let stderr = String::from_utf8_lossy(&submitted.stderr);
     assert!(
@@ -667,7 +667,7 @@ fn the_set_of_goal_tags_of_dagq_toml_holds_goal_add_edit_lint_and_submit() {
         "{stderr}"
     );
     // By task ID too: the task's draft goal holds the whole submit.
-    let by_task = submit_from(&db, None, None, &[&member, &other]);
+    let by_task = submit_from(&db, None, &[&member, &other]);
     assert!(!by_task.status.success());
     let stderr = String::from_utf8_lossy(&by_task.stderr);
     assert!(
@@ -682,7 +682,7 @@ fn the_set_of_goal_tags_of_dagq_toml_holds_goal_add_edit_lint_and_submit() {
         serde_json::json!([])
     );
     // A task of an open goal is not held by the tags.
-    assert!(submit_from(&db, None, None, &[&other]).status.success());
+    assert!(submit_from(&db, None, &[&other]).status.success());
     assert_eq!(ok(&db, &["show", &other])["task"]["status"], "submitted");
 
     ok(&db, &["goal", "edit", &draft, "--tag", "codex"]);
@@ -701,11 +701,7 @@ fn the_set_of_goal_tags_of_dagq_toml_holds_goal_add_edit_lint_and_submit() {
         "[goals]\ntags = [\"codex\", \"throughput\"]\n",
     )
     .unwrap();
-    assert!(
-        submit_from(&db, None, None, &["--goal", &draft])
-            .status
-            .success()
-    );
+    assert!(submit_from(&db, None, &["--goal", &draft]).status.success());
     assert_eq!(ok(&db, &["show", &member])["task"]["status"], "submitted");
 
     // Without the key, any tag of the form again, and a draft goal may
@@ -725,11 +721,7 @@ fn the_set_of_goal_tags_of_dagq_toml_holds_goal_add_edit_lint_and_submit() {
         ok(&db, &["lint", &bare_task])["violations"],
         serde_json::json!([])
     );
-    assert!(
-        submit_from(&db, None, None, &["--goal", &bare])
-            .status
-            .success()
-    );
+    assert!(submit_from(&db, None, &["--goal", &bare]).status.success());
 }
 
 /// ADR-t1639-1 decision 7: `goal list` puts the open and draft goals

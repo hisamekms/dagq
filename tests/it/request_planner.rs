@@ -383,8 +383,13 @@ fn only_the_requests_own_planner_declines_it_and_the_inbox_is_told() {
     // domain::authorization's unit test
     // only_the_user_and_the_inbox_record_a_request_and_only_its_planner_declines_it.
     let decline = ["request", "decline", &id_text, "--reason", "done already"];
+    let another = queue
+        .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
+        .unwrap()
+        .id;
+    let another = format!("planner:{another}");
     let other = invoke_with(
-        &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "planner:99")],
+        &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", &another)],
         &fx.db,
         &decline,
     );

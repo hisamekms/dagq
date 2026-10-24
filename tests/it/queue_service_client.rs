@@ -369,10 +369,17 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
         &Principal::worker(queue.run.id(), queue.run.task_id()),
     );
     let db = queue.db.to_str().unwrap();
+    // The planning commands are the service's, which refuses a worker's.
     for args in [
         vec!["ready", task.as_str()],
         vec!["add", "x"],
         vec!["mark", "m"],
+    ] {
+        let output = client(&queue, &socket, Some(&worker), "worker", &args);
+        assert_eq!(refused(&output), "authorization_denied", "{args:?}");
+    }
+    for args in [
+        vec!["ready", task.as_str(), "--inherit", "--reason", "r"],
         vec!["answer", "1", "--text", "a"],
         vec!["ask", "close", "1"],
         vec!["watch", "--timeout", "1"],

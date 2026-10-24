@@ -92,7 +92,7 @@ fn only_the_queues_binary_migrates_the_queue() {
         let error = error_of(&run(binary, &db, &["migrate"]));
         assert!(error.contains("is not the queue's binary"), "{error}");
         assert!(error.contains(&fixed.display().to_string()), "{error}");
-        let error = error_of(&run(binary, &db, &["add", "a task"]));
+        let error = error_of(&run(binary, &db, &["ask", "close", "1"]));
         assert!(
             error.contains("run `dagq migrate` with the queue's binary"),
             "{error}"

@@ -145,28 +145,26 @@ pub fn refused(db: &Path, args: &[&str]) -> String {
     error["error"].as_str().unwrap().to_owned()
 }
 
-/// `submit` as a planner session would run it: as the planner `planner`
-/// (`DAGQ_PLANNER_ID`) when given, with the planner's origin when the
-/// runtime opened it.
-pub fn submit_from(
-    db: &Path,
-    planner: Option<&str>,
-    origin: Option<&str>,
-    args: &[&str],
-) -> Output {
+/// `submit` as a planner session would run it: as the runtime's planner
+/// `planner` (its role, its actor id and the token of its own) when given,
+/// which owns the proposal with the origin and the handle its record
+/// holds, else as the user.
+pub fn submit_from(db: &Path, planner: Option<i64>, args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command.without_actor_env();
     if let Some(planner) = planner {
-        command.env("DAGQ_PLANNER_ID", planner);
+        command
+            .env("DAGQ_ROLE", "planner")
+            .env("DAGQ_ACTOR_ID", format!("planner:{planner}"))
+            .env("DAGQ_PLANNER_ID", planner.to_string());
     }
-    if let Some(origin) = origin {
-        command.env("DAGQ_PLANNER_ORIGIN", origin);
-    }
+    let mut argv = vec!["submit"];
+    argv.extend_from_slice(args);
+    reach(&mut command, db, &argv);
     command
         .arg("--db")
         .arg(db)
-        .arg("submit")
-        .args(args)
+        .args(&argv)
         .bounded_output()
         .unwrap()
 }

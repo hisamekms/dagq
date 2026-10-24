@@ -104,6 +104,7 @@ mod queue_search;
 mod queue_service;
 mod queue_service_client;
 mod queue_service_findings;
+mod queue_service_planning;
 mod queue_service_reads;
 mod queue_service_telemetry;
 mod queue_tasks;

@@ -67,7 +67,7 @@ fn every_role_reads_the_proposals_as_the_command_line_prints_them() {
     let queue = queue();
     start(&queue);
     let added = ok(&queue.db, &["add", "planned"])["id"].clone();
-    let submitted = submit_from(&queue.db, None, None, &[&added.to_string()]);
+    let submitted = submit_from(&queue.db, None, &[&added.to_string()]);
     assert!(submitted.status.success());
     let observer = token(
         &queue,

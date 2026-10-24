@@ -240,7 +240,8 @@ fn every_event_records_its_actor() {
             "waits",
         ],
     );
-    // A session from before the actor id is named by its role.
+    // A planner's change goes through the queue service as the planner its
+    // token names (the one the test opened for the role).
     run(&[("DAGQ_ROLE", "planner")], &["goal", "add", "a goal"]);
     rusqlite::Connection::open(&db)
         .unwrap()
@@ -272,9 +273,13 @@ fn every_event_records_its_actor() {
         actor_of("finding_recorded"),
         serde_json::json!({"role": "observer", "id": "observer:s1"})
     );
-    assert_eq!(
-        actor_of("goal_created"),
-        serde_json::json!({"role": "planner", "id": "planner"})
+    let planner = actor_of("goal_created");
+    assert_eq!(planner["role"], "planner");
+    assert!(
+        planner["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("planner:")),
+        "{planner}"
     );
     assert!(actor_of("older_event").is_null());
     // The compact form stays as it was.

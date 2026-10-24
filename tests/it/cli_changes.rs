@@ -82,7 +82,7 @@ fn change_is_added_shown_listed_searched_and_edited_without_a_set() {
     }
     // Nothing holds lint or submit to a change.
     assert_eq!(ok(&db, &["lint", "2"])["violations"], json!([]));
-    assert!(submit_from(&db, None, None, &["2"]).status.success());
+    assert!(submit_from(&db, None, &["2"]).status.success());
     ok(&db, &["ready", &id, "--bypass-review"]);
     assert_eq!(
         refused(&db, &["edit", &id, "--change", "feature"]),
@@ -129,7 +129,7 @@ fn the_set_of_changes_of_dagq_toml_holds_add_edit_lint_and_submit() {
     assert_eq!(violations.len(), 1, "{linted}");
     assert_eq!(violations[0]["code"], "missing_change");
     assert_eq!(violations[0]["task_id"].to_string(), undeclared);
-    let submitted = submit_from(&db, None, None, &[&declared, &undeclared]);
+    let submitted = submit_from(&db, None, &[&declared, &undeclared]);
     assert!(!submitted.status.success());
     let stderr = String::from_utf8_lossy(&submitted.stderr);
     assert!(stderr.contains("declares no change"), "{stderr}");
@@ -143,7 +143,7 @@ fn the_set_of_changes_of_dagq_toml_holds_add_edit_lint_and_submit() {
         json!([])
     );
     assert!(
-        submit_from(&db, None, None, &[&declared, &undeclared])
+        submit_from(&db, None, &[&declared, &undeclared])
             .status
             .success()
     );

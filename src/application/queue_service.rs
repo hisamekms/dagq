@@ -18,10 +18,11 @@
 //! (ADR-t1222-1 decisions 1, 2 and 4), and the reads of the whole queue a
 //! read role's job or a worker runs (`events`, `timeline`, `stats`, `kpi`,
 //! `search`, `goal_show`, ...: [`QueueRead`], answered as the command line
-//! answers them). The supervisor's claims, leases, runs and their events
+//! answers them), the planning commands (`add`, `submit`, `goal add`,
+//! `request add`, ...: [`QueueWrite`], run as the command line runs them)
+//! and `mark`. The supervisor's claims, leases, runs and their events
 //! and the tokens it issues are the `supervisor` use case
-//! ([`super::supervisor_service`]); the command line still opens the DB
-//! itself.
+//! ([`super::supervisor_service`]).
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
@@ -35,6 +36,7 @@ use tracing::warn;
 use super::commands::dialogue::{Dialogue, DialogueStore, MarkChange};
 use super::commands::{DenialLog, Gate};
 use super::queue_reads::{BadRead, QueueRead};
+use super::queue_writes::{BadWrite, QueueWrite};
 use crate::domain::EventKind;
 use crate::domain::queue_service::{
     API_VERSION, MIN_API_VERSION, Principal, ServiceErrorCode, ServiceRequest, ServiceResponse,
@@ -111,6 +113,11 @@ pub trait ServiceQueue:
         after: Option<EventId>,
         role: Option<SessionRole>,
     ) -> Result<super::watch::WatchLook>;
+    /// Run the planning command `write` as `actor`, as the command line
+    /// runs it ([`super::queue_writes::answer`], the queue held to the
+    /// repository's rules first), with the proposal of a `submit` owned by
+    /// `actor`'s planner when it is one.
+    fn write(&mut self, write: &QueueWrite, actor: &ActorContext) -> Result<Value>;
 }
 
 /// What the service runs its use cases on.
@@ -463,6 +470,7 @@ fn respond(result: Result<Value>) -> ServiceResponse {
             Some(refused) => ServiceResponse::denied(refused),
             None if error.downcast_ref::<BadParams>().is_some()
                 || error.downcast_ref::<BadRead>().is_some()
+                || error.downcast_ref::<BadWrite>().is_some()
                 || error
                     .downcast_ref::<super::supervisor_service::BadOperation>()
                     .is_some() =>
@@ -648,6 +656,22 @@ struct FindingStatusParams {
     covered_by: Option<i64>,
 }
 
+/// `mark`'s params: those of `dagq mark`, a label or the mark to retract.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MarkParams {
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+    /// `--at` as the command line takes it: an event id, `@<unix seconds>`
+    /// or an RFC 3339 time.
+    #[serde(default)]
+    at: Option<String>,
+    #[serde(default)]
+    retract: Option<i64>,
+}
+
 /// `watch_poll`'s params: those of `dagq watch` a look reads.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -796,6 +820,12 @@ fn run(
         authorize_as(&store, actor, read.capability(), &read.resource())?;
         return store.0.read(&read);
     }
+    // The planning commands (ADR-t3102-3 decision 3), each authorized by
+    // the application as the command line authorizes it, refusals
+    // recorded.
+    if let Some(write) = QueueWrite::parse(use_case, raw)? {
+        return store.0.write(&write, actor);
+    }
     match use_case {
         UseCase::Hello => unreachable!("hello is answered before a principal"),
         UseCase::Supervisor => unreachable!("a supervisor's request is answered apart"),
@@ -823,6 +853,44 @@ fn run(
         | UseCase::Replans
         | UseCase::CiFailures
         | UseCase::Planners => unreachable!("a read is answered above"),
+        UseCase::Add
+        | UseCase::Edit
+        | UseCase::Submit
+        | UseCase::Cancel
+        | UseCase::DependencyAdd
+        | UseCase::DependencyRemove
+        | UseCase::SetGoal
+        | UseCase::SetPaths
+        | UseCase::SetPriority
+        | UseCase::Revisit
+        | UseCase::JudgeFollowUp
+        | UseCase::Draft
+        | UseCase::Ready
+        | UseCase::GoalAdd
+        | UseCase::GoalEdit
+        | UseCase::GoalClose
+        | UseCase::GoalReady
+        | UseCase::GoalReview
+        | UseCase::ProposalWithdraw
+        | UseCase::RequestAdd
+        | UseCase::RequestDecline => unreachable!("a write is answered above"),
+        UseCase::Mark => {
+            let p: MarkParams = params(use_case, raw)?;
+            let change = match p.retract {
+                Some(id) => MarkChange::Retract(EventId::new(id)),
+                None => MarkChange::Record {
+                    label: p.label.unwrap_or_default(),
+                    note: p.note,
+                    at: p
+                        .at
+                        .as_deref()
+                        .map(str::parse)
+                        .transpose()
+                        .map_err(|error| BadParams(format!("mark's at: {error}")))?,
+                },
+            };
+            Dialogue::new(&mut store, actor, &StaticPolicy).mark(change)
+        }
         UseCase::TelemetryReport => {
             // A version the service does not read, or a report past its
             // bounds, is refused before anything is recorded; a field it
@@ -1588,6 +1656,13 @@ mod tests {
                 binding: None,
             })
         }
+        fn write(&mut self, write: &QueueWrite, actor: &ActorContext) -> Result<Value> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(json!({"write": write.use_case(), "actor": actor.actor_id()}));
+            Ok(json!({"written": write.use_case()}))
+        }
     }
 
     struct Backend {
@@ -1897,6 +1972,7 @@ mod tests {
                 json!({"run": "r1", "reason": "r"}),
                 Capability::ReplanPropose,
             ),
+            (UseCase::Mark, json!({"label": "m"}), Capability::MarkWrite),
         ];
         let callers = [
             (None, ActorRole::User),
@@ -1944,6 +2020,48 @@ mod tests {
             recorded,
             json!({"use_case": "show", "reason": "target_ended"})
         );
+    }
+
+    /// A planning command reaches the queue's write as its caller's actor,
+    /// which the application authorizes as the command line does
+    /// ([`super::super::queue_writes`]'s tests); params its command has not
+    /// are a bad request, and the executor's telemetry principal is refused
+    /// before they are read.
+    #[test]
+    fn a_planning_command_runs_as_its_caller_and_params_it_has_not_are_bad() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        for (token, actor) in [
+            (None, "user"),
+            (Some("planner-3"), "planner:3"),
+            (Some("worker"), "worker:r1"),
+        ] {
+            let response = service.handle_from(
+                &request(token, UseCase::Add, json!({"title": "t"})),
+                Peer::Owner,
+            );
+            assert_eq!(response.result, Some(json!({"written": "add"})), "{actor}");
+            let log = backend.log.lock().unwrap();
+            assert_eq!(
+                log.last().unwrap(),
+                &json!({"write": "add", "actor": actor})
+            );
+        }
+        let response = service.handle_from(
+            &request(None, UseCase::Draft, json!({"id": 1, "full": true})),
+            Peer::Owner,
+        );
+        assert_eq!(code(&response), Some(ServiceErrorCode::BadRequest));
+        let response = service.handle(&request(
+            Some("telemetry"),
+            UseCase::Submit,
+            json!({"nothing": "read"}),
+        ));
+        assert_eq!(code(&response), Some(ServiceErrorCode::AuthorizationDenied));
     }
 
     /// A planner asks on its planning request through the service as the

@@ -22,13 +22,15 @@ const WORDS: &str = "着地が減った。\"戻す\" 計画を立てて。\nIt's
 /// `request add` as the inbox with `stdin` on its standard input.
 fn add_with_stdin(db: &Path, args: &[&str], stdin: &[u8]) -> Output {
     let _waiting = common::within(common::STEP_LIMIT, "request add with stdin");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dagq"))
-        .without_actor_env()
-        .env("DAGQ_ROLE", "inbox")
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command.without_actor_env().env("DAGQ_ROLE", "inbox");
+    let mut argv = vec!["request", "add"];
+    argv.extend_from_slice(args);
+    reach(&mut command, db, &argv);
+    let mut child = command
         .arg("--db")
         .arg(db)
-        .args(["request", "add"])
-        .args(args)
+        .args(&argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -218,9 +220,10 @@ fn an_ungranted_actor_is_refused_before_a_file_or_open_stdin_is_read() {
         .into_iter()
         .enumerate()
     {
-        let child = Command::new(env!("CARGO_BIN_EXE_dagq"))
-            .without_actor_env()
-            .env("DAGQ_ROLE", "planner")
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+        command.without_actor_env().env("DAGQ_ROLE", "planner");
+        reach(&mut command, &db, &["request", "add"]);
+        let child = command
             .arg("--db")
             .arg(&db)
             .args(["request", "add"])

@@ -251,14 +251,14 @@ echo 'observer diagnostic' >&2
     );
     // The agent was started without MCP servers.
     assert_eq!(fs::read_to_string(dir.join("mcp.txt")).unwrap(), "no-mcp");
-    // The service refuses the ask and the note for the observer's principal,
-    // and the planning commands are none of its use cases.
+    // The service refuses the planning commands, the ask and the note for
+    // the observer's principal.
     for (denied, code) in [
-        ("ready.err", "no_use_case"),
+        ("ready.err", "authorization_denied"),
         ("ask.err", "authorization_denied"),
-        ("goal.err", "no_use_case"),
+        ("goal.err", "authorization_denied"),
         ("note.err", "authorization_denied"),
-        ("draft.err", "no_use_case"),
+        ("draft.err", "authorization_denied"),
     ] {
         let error: Value =
             serde_json::from_str(&fs::read_to_string(dir.join(denied)).unwrap()).unwrap();
@@ -272,7 +272,7 @@ echo 'observer diagnostic' >&2
         "{blocked}"
     );
     let refusals = queue_events(&db, "authorization_denied");
-    assert_eq!(refusals.len(), 2, "{refusals:?}");
+    assert_eq!(refusals.len(), 5, "{refusals:?}");
     assert!(
         fs::read_to_string(dir.join("output.out"))
             .unwrap()
