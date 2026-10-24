@@ -1713,13 +1713,12 @@ fn a_recheck_whose_command_fails_on_main_alone_too_resumes_no_run_and_tells_the_
     fs::write(recheck_dir.join("notes.txt"), "kept\n").unwrap();
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(
-        main_logs(&recheck_dir),
-        [
-            format!("main-{}.log", &main[..12]),
-            "main-feedfacecafe.log".to_owned()
-        ]
-    );
+    let mut left = vec![
+        format!("main-{}.log", &main[..12]),
+        "main-feedfacecafe.log".to_owned(),
+    ];
+    left.sort();
+    assert_eq!(main_logs(&recheck_dir), left);
     assert!(recheck_dir.join("notes.txt").is_file());
     assert!(recheck_dir.join("lock").exists());
     assert!(recheck_scratch(&recheck_dir).is_dir());

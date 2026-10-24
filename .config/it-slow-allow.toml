@@ -2037,10 +2037,10 @@ name = "runtime_recheck::a_recheck_with_no_command_does_not_check_its_build_outp
 reason = "B 境界（supervisor の配線・実 filesystem の権限）: command の無い設定では、書けない recheck/target があっても実 supervisor の pass が確かめを流さず clean を記録し attention を書かないことを確かめる。どの run の出力先を確かめるかの判断は recheck.rs の host_outputs の unit test"
 task = 2140
 
-# 9.0s on the worker's stress (task 2141)
+# 6.2s alone, 10.6s with the 22 tests of runtime_recheck (task 3356)
 [[test]]
 name = "runtime_recheck::a_recheck_whose_command_fails_on_main_alone_too_resumes_no_run_and_tells_the_inbox_once"
-reason = "B 境界（Git・プロセス・SQLite・supervisor の配線）: 実際の scratch worktree で run と main の木だけに [recheck] command を流し、main の失敗で run を park しないこと、queue の event を supervisor の pass をまたいで最新から読んで 1 回だけ書くこと、main が直れば resume することを実際の supervisor で確かめる。判断の case は domain::recheck の unit test"
+reason = "B 境界（Git・プロセス・SQLite・supervisor の配線）: 実際の scratch worktree で run と main の木だけに [recheck] command を流し、main の失敗で run を park も resume もしないこと、queue の event を supervisor の pass をまたいで最新から読んで inbox に 1 回だけ伝えること、main が直れば run の失敗が無くても pass を記録し再び壊れれば伝え直すこと、recheck の directory の main の log を誰も指さなくなれば消すことを実際の supervisor で確かめる。判断の case は domain::recheck の unit test"
 task = 2141
 
 # 9.1s on the worker's stress (task 2141)
