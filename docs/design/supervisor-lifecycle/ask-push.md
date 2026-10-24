@@ -26,13 +26,16 @@ supervisor・queue service・observerは知らせず、askを開く経路（`ask
   次のwatchは返したcursorの後から読むので、同じaskを2度知らせない。
 - messageの種類は`ask_opened`で、新しいaskの件数を伝えるだけで、askの中身（question・option・task・ID）は送らない。
   stdinの形と環境変数の名前はKPIの[push](push.md)の「送るもの」と同じで、commandが継ぐ環境変数はsupervisorのものではなく、watchを回すinboxのsessionのものである。
-- 送るのはwatchのprocessで、1回だけ試し、再試行もeventの記録もしない（watchはqueueを読み取り専用で開く）。
+- 送るのはinboxのsessionで動く`watch`のprocessで、queueを読むprocessとは分かれる。
+  各回の見る（`watch_poll`）はqueue serviceが答えてqueueのDBを開き、inboxの`watch`のprocessはDBを開かない（[hostのCLI](../queue-service-host-cli.md)）。
+  `watch`のprocessはqueueのDBに書かないので、通知は1回だけ試し、再試行もeventの記録もしない（`application::watch::notify_opened`）。
+  serviceに届かないときの`watch`の返りは[Queue service](../queue-service.md#落ちたときの知らせadr-t3102-3決定12)が持つ。
   送れなかったとき（commandの失敗・時間切れ・`[push]`が読めない）は、watchを止めずに出力の`ask_push`に理由を残し、warnのlogを出す。
   理由にはcommandの引数を出さない（KPIのpushの`stderr_tail`と同じ置き換え）。
 - 認証とコストのaskを1件にまとめるとき（ADR-0047決定42）、runが加わるだけでは`ask_opened`が無いので知らせない。
 - runの遷移・`answer`・`ask close`は知らせない（[ADR-0022](../../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)決定5）。
   inboxはattentionを`watch`で受ける。
-  `watch`はqueueを読むだけで、`integrate`などの操作を呼ばない。
+  `watch`はqueue serviceを通してqueueを読むだけで、`integrate`などの操作を呼ばない。
 
 通知は人への知らせで、inboxのClaudeのsessionを起こさない（sessionはwatchの返りで起きる）。
 watchが張られていないあいだは通知も出ないので、その後ろ盾は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)の層が持つ: watcherの記録（[`events` / `watch`](commands.md)）、pluginのSessionStart / Stop hook（[plugin integration](../plugin-integration.md)）、watcherが居ないまま閾値を超えてaskが待つときのsupervisorの`inbox_nudged`と`[push]`（下の「supervisorによるinboxへの知らせ」）。
