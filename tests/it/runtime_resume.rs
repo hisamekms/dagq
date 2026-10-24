@@ -3,6 +3,7 @@ use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 use dagq::infrastructure::git_binary::git_executable;
+use dagq::infrastructure::telemetry::Captured;
 
 use runtime_support::*;
 
@@ -918,6 +919,17 @@ fn a_skipped_run_whose_supervisor_died_is_adopted() {
 /// `last_error` keeps why the run was parked. The resume starts its
 /// wrapper in the background, whose `launch_background` is the call
 /// recorded (ADR-t1433-3).
+///
+/// One pass resumes a run at most once (one candidate per run in its
+/// line), but a `--once` call makes another pass while a slot, a job or a
+/// pass that progressed keeps its loop going, and a resume that ended as
+/// an `error` leaves the run a candidate of that pass while it has
+/// attempts left, as intended (`needs-session.md`, 6). The call here makes
+/// one pass: when it errs twice, the message gives the call's passes, the
+/// supervisor's records of its resumes and of why a pass went on to the
+/// next (its slots, the jobs it waited for, whether it progressed; logged
+/// when that changed), in order and each with its pass, and every event of
+/// the call with its payload.
 #[test]
 fn a_run_with_a_dirty_worktree_is_resumed() {
     let (_dir, repo, db) = fixture();
@@ -930,10 +942,21 @@ fn a_run_with_a_dirty_worktree_is_resumed() {
     let worktree = Path::new(run.worktree_path().unwrap());
     fs::write(worktree.join("stray.txt"), "left over\n").unwrap();
 
-    let options = supervise_options(4, true);
-    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
-    assert_eq!(outcome["errors"].as_array().unwrap().len(), 1, "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
+    let cursor = queue.latest_event_id().unwrap();
+    let options = supervise_options(4, true);
+    let (telemetry, captured) = Telemetry::capture();
+    let outcome = telemetry
+        .in_scope(|| supervise_with(&db, &repo, &backend, &options))
+        .unwrap();
+    assert_eq!(
+        outcome["errors"].as_array().unwrap().len(),
+        1,
+        "{outcome}\n{} pass(es); the passes and resumes in the log:\n{}\nthe events of the call:\n{}",
+        options.passes.load(Ordering::SeqCst),
+        passes_and_resumes(&captured),
+        events_of_the_call(&db, cursor)
+    );
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert!(
         payloads(&detail, "resume_skipped").is_empty(),
@@ -953,6 +976,56 @@ fn a_run_with_a_dirty_worktree_is_resumed() {
     assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
     assert_eq!(detail.runs[0].last_error(), Some(reason.as_str()));
     assert!(queue.run_leases().unwrap().is_empty());
+}
+
+/// The records of `captured` on the resumes and on why a `--once` pass
+/// went on to the next, oldest first, one line each with its time and
+/// pass, for a failure's message.
+fn passes_and_resumes(captured: &Captured) -> String {
+    captured
+        .records()
+        .iter()
+        .filter(|record| {
+            record["message"].as_str().is_some_and(|message| {
+                message.contains("resume") || message.starts_with("--once pass")
+            })
+        })
+        .map(|record| {
+            format!(
+                "{} pass={} {}",
+                record["timestamp"], record["fields"]["pass"], record["message"]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every event recorded after `cursor`, one line each with its id, time,
+/// kind, run and payload, for a failure's message.
+fn events_of_the_call(db: &Path, cursor: EventId) -> String {
+    let events = dagq::compose::events_matching(
+        db,
+        &dagq::application::watch::EventsQuery {
+            after: cursor,
+            limit: 1000,
+            all: true,
+            full: true,
+            filter: dagq::domain::EventFilter::default(),
+        },
+    )
+    .unwrap();
+    events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| {
+            format!(
+                "{} {} {} run={} {}",
+                event["id"], event["created_at"], event["kind"], event["run_id"], event["payload"]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Record `resumes` resumes of the run that started and ended

@@ -280,9 +280,10 @@ pub struct LoopSettings {
     /// How long a supervisor whose owner is gone may still wait before it
     /// exits ([`OWNER_GONE_GRACE`]; tests shorten it).
     pub owner_gone_grace: Duration,
-    /// Counts the loop's passes, one at the top of each; only read by
-    /// tests, which wait for passes after a threshold instead of a fixed
-    /// sleep (task 1046).
+    /// Counts the loop's passes, one at the top of each. Tests read it to
+    /// wait for passes after a threshold instead of a fixed sleep (task
+    /// 1046); a `--once` call names its records by it
+    /// ([`note_once_goes_on`]).
     pub passes: Arc<AtomicU64>,
 }
 
@@ -2426,8 +2427,14 @@ impl Supervisor<'_> {
         self.claim.slots.abandon_jobs();
     }
     fn drive(&mut self, options: &LoopSettings) -> Result<Value> {
+        // Why a `--once` call went on to its next pass, as last logged.
+        let mut goes_on = None;
         loop {
-            options.passes.fetch_add(1, Ordering::SeqCst);
+            let pass = options.passes.fetch_add(1, Ordering::SeqCst) + 1;
+            // Every record of a `--once` call's pass names the pass.
+            let _pass = options
+                .once
+                .then(|| tracing::debug_span!("pass", pass).entered());
             if let Err(error) = self.registration.check_heartbeat() {
                 // Supervisor-level failure: note it on every run and keep the
                 // leases and the registration; they go stale once this
@@ -2820,35 +2827,23 @@ impl Supervisor<'_> {
             // The production sets asked for (ADR-t1728-1 (g)), the same way.
             progressed |= self.agent_cases_pass(starting);
             if self.claim.slots.is_empty() {
-                // A running observer, KPI report job, plan review, landing recheck or
-                // cleanup for disk space (with the rest of one another job
-                // took on) or one a triage or resume waits
-                // for is waited for like a run: it is
-                // bounded by its own timeout, its command or its worktrees.
-                // A recheck just applied is followed by one more pass, which
-                // resumes the runs it parked; a cleanup for room by one
-                // that claims if there is room now. Any other cleanup is
-                // joined once the loop ends.
-                // A message being sent is bounded by the command's timeout;
-                // `--once` also waits for those still to be tried, a stop
-                // does not.
-                let job = self.observation.busy(options.once && !stopping)
-                    || self.host.release_running()
-                    || self.planning.busy()
-                    || self.agent_eval_busy()
-                    || self.agent_cases_busy()
-                    || self.landing.rechecks.running()
-                    || self.host.cleanup().for_disk()
-                    || self.host.cleanup().deferred()
-                    // A supervisor that stops leaves the park to the next.
-                    || (!stopping && self.hold_parks_going())
-                    || rechecked;
+                // The jobs it waits for ([`Self::loop_waits`]) are waited
+                // for like a run.
+                let waits = self.loop_waits(options.once, stopping, rechecked);
+                let job = !waits.is_empty();
                 if !job && !progressed && (options.once || stopping || !self.claim.claiming) {
                     break;
+                }
+                if options.once {
+                    note_once_goes_on(&mut goes_on, pass, 0, waits, progressed);
                 }
                 self.unanswered.look();
                 thread::sleep(if job { options.tick } else { options.idle_poll });
                 continue;
+            }
+            if options.once {
+                let slots = self.claim.slots.len();
+                note_once_goes_on(&mut goes_on, pass, slots, Vec::new(), false);
             }
             self.tick(false)?;
             self.unanswered.look();
@@ -2876,6 +2871,38 @@ impl Supervisor<'_> {
             "errors": self.errors,
             "triaged": self.triage.triaged,
         }))
+    }
+    /// The jobs a loop with no slot waits for, like a run, by name: a
+    /// running observer, KPI report job, plan review, landing recheck or
+    /// cleanup for disk space (with the rest of one another job took on)
+    /// or one a triage or resume waits for is bounded by its own timeout,
+    /// its command or its worktrees. A recheck just applied
+    /// (`rechecked`) is followed by one more pass, which resumes the runs
+    /// it parked; a cleanup for room by one that claims if there is room
+    /// now. Any other cleanup is joined once the loop ends. A message
+    /// being sent is bounded by the command's timeout; `once` also waits
+    /// for those still to be tried, a stop does not.
+    fn loop_waits(&self, once: bool, stopping: bool, rechecked: bool) -> Vec<&'static str> {
+        let mut waits: Vec<&'static str> = [
+            ("observation", self.observation.busy(once && !stopping)),
+            ("release", self.host.release_running()),
+            ("planning", self.planning.busy()),
+            ("agent_eval", self.agent_eval_busy()),
+            ("agent_cases", self.agent_cases_busy()),
+            ("landing_recheck", self.landing.rechecks.running()),
+            ("cleanup_for_disk", self.host.cleanup().for_disk()),
+            ("cleanup_deferred", self.host.cleanup().deferred()),
+            ("recheck_applied", rechecked),
+        ]
+        .into_iter()
+        .filter_map(|(name, waits)| waits.then_some(name))
+        .collect();
+        // Read from the queue, so only when nothing else is waited for. A
+        // supervisor that stops leaves the park to the next.
+        if waits.is_empty() && !stopping && self.hold_parks_going() {
+            waits.push("hold_park");
+        }
+        waits
     }
     /// Adopt the runs other supervisors left behind, then claim and
     /// provision candidates until every slot is taken or nothing is
@@ -4902,6 +4929,37 @@ impl Supervisor<'_> {
     }
 }
 
+/// Log why a `--once` call goes on from its pass `pass` to the next when
+/// the reason changed from `last`, and say whether it did: the slots it
+/// holds, or with none the jobs it waits for
+/// ([`Supervisor::loop_waits`]) and whether this pass progressed. Logged
+/// only with `--once`, whose passes are bounded by the call; each of its
+/// records, a resume's too, names its pass (the `pass` span of
+/// [`Supervisor::drive`]), and as one pass resumes a run at most once, two
+/// resumes of one call show in which passes they were and what kept the
+/// loop going between them.
+fn note_once_goes_on(
+    last: &mut Option<(usize, Vec<&'static str>, bool)>,
+    pass: u64,
+    slots: usize,
+    waits: Vec<&'static str>,
+    progressed: bool,
+) -> bool {
+    let now = (slots, waits, progressed);
+    if last.as_ref() == Some(&now) {
+        return false;
+    }
+    let (slots, waits, progressed) = &now;
+    tracing::debug!(
+        pass,
+        slots,
+        waits = ?waits,
+        progressed,
+        "--once pass {pass} goes on: {slots} slot(s), waiting for {waits:?}, progressed {progressed}"
+    );
+    *last = Some(now);
+    true
+}
 /// The sessions the agents of `slot`'s jobs named in their output so far
 /// ([`HeadlessJob::named_session`]).
 fn named_sessions(slot: &mut Slot) -> Vec<String> {
@@ -5193,6 +5251,31 @@ mod tests {
 
     use super::*;
     use crate::domain::{EventFilter, actor::ActorContext};
+
+    /// A `--once` call logs why it goes on to another pass only when the
+    /// reason changed since the pass it last logged.
+    #[test]
+    fn a_once_call_logs_why_it_goes_on_when_the_reason_changes() {
+        let mut last = None;
+        assert!(note_once_goes_on(&mut last, 1, 1, Vec::new(), false));
+        assert!(!note_once_goes_on(&mut last, 2, 1, Vec::new(), false));
+        assert!(note_once_goes_on(
+            &mut last,
+            3,
+            0,
+            vec!["observation"],
+            false
+        ));
+        assert!(!note_once_goes_on(
+            &mut last,
+            4,
+            0,
+            vec!["observation"],
+            false
+        ));
+        assert!(note_once_goes_on(&mut last, 5, 0, Vec::new(), true));
+        assert_eq!(last, Some((0, Vec::new(), true)));
+    }
 
     /// A service that answers each call with `answer`'s error: lost after
     /// it read the request, or refused.
