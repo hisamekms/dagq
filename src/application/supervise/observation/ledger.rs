@@ -251,6 +251,30 @@ fn pass(
             return Err(error);
         }
     }
+    sweep(store, builder, &inputs)?;
+    drop(inputs);
+    builder.swept();
+    Ok(())
+}
+
+/// Sweep the session and queue rows the pass built that are still marked
+/// while the builder has not swept ([`Builder::rows_to_sweep`]): those the
+/// store holds settled and up to date are settled now, past
+/// [`CHECKS_PER_PASS`], so that the records [`Kept`] read of every event
+/// from its cursors' start (a new process's) do not wait for the marks of
+/// every run and task before them.
+///
+/// [`Kept`]: crate::domain::ledger::builder::Kept
+fn sweep(store: &dyn LedgerQueue, builder: &mut Builder, inputs: &Inputs) -> Result<()> {
+    for target in builder.rows_to_sweep(&inputs.rows) {
+        let (kind, key) = target.row_key();
+        let stored = store.ledger_row(kind, &key)?;
+        builder.sweep(
+            &target,
+            stored.as_ref(),
+            build(&target, inputs, &[]).as_ref(),
+        );
+    }
     Ok(())
 }
 

@@ -194,10 +194,11 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 
 - **周回**: supervisorの周回が間隔ごとに、drainとhandoffの間も、jobのthreadで動く（D7）。
   着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
-- **置き場**: 係の状態（入力ごとのカーソル・印・猶予を待つ行）は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
+- **置き場**: 係の状態は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
 - **印**: EventStore・NodeSampleStore・SessionStepStore・runの資源のカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsession・queue・readyだったtaskの行（記録でない終わりも）・nodeの時間に印を付ける（全行を走査しない）。
   畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読んで持ち越す（`builder::Kept`）。
-  持ち越すのは本（一生・待ち・各eventがどの行の記録か・pushに失敗したrunの宛先と閉じたpushのid）と、確定していないsession・queue・run・taskの行が読むeventだけ（`Kept`のdoc comment）。
+  持ち越すのは本と、確定していないsession・queue・run・taskの行が読むeventだけ（`Kept`のdoc comment）。
+  カーソルの始めから読む起動の追いつきでも、最初に行を畳む周がstoreの確定した行のうち畳み直さない行のeventを落とす。
   確定した行に後のeventが届けば、記録はstoreの行から、pushはidで読み戻す。
   持つ件数と概算のbyte数は、定期的と大きく変わった時にlogへ出す（`logs_kept`）。
   周回は新しいeventが変えうる行と印の付いた行だけを畳み、周回で作る領域は前からのeventの数に比例しない。

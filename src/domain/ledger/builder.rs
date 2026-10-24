@@ -96,7 +96,9 @@
 //!   reads, so what it keeps does not grow with the rows settled; a
 //!   settled row a later event reaches gets its records back from the row
 //!   the store holds ([`Builder::to_restore`]), a settled run or task its
-//!   push by id ([`Builder::pushes_to_read`]). How much it keeps
+//!   push by id ([`Builder::pushes_to_read`]). A new process's first pass
+//!   drops those of the rows the store holds settled as it ends
+//!   ([`Builder::sweep`]), not after the marks before them. How much it keeps
 //!   ([`KeptSize`]) goes to the supervisor's log.
 //! - **What a pass makes**: each event is read into [`Kept`] once as it
 //!   comes in (the supervisors' lives, the waits before a claim, the
@@ -212,6 +214,13 @@ struct WaitsMoved {
 ///   the row the store holds, which owns exactly them
 ///   ([`Builder::restore`]), so its fold is that of every event. A row not
 ///   settled keeps its events: its grace or a later event folds it again.
+///   A builder that starts at its cursors' start (a new process) reads
+///   every event and marks every row behind the marks of every run and
+///   task; so that it does not keep every settled row's events for the
+///   passes those marks take, its first pass that builds the rows sweeps
+///   those still marked past [`CHECKS_PER_PASS`] ([`Builder::sweep`]): one
+///   the store holds settled and its fold would not write is settled and
+///   its records dropped as that pass ends ([`Builder::swept`]).
 /// - **A `push_finished` no fold not settled reads**: a run's or a
 ///   task's fold reads of the pushes only the first after the run's last
 ///   `push_pending` to the remote and branch of its last failed push
@@ -694,6 +703,9 @@ pub struct Builder {
     /// The version of the rules it last marked the runs by
     /// ([`Self::mark_rules`]); none before any.
     rules: Option<String>,
+    /// Whether a pass swept the session and queue rows it built from its
+    /// cursors' start ([`Self::sweep`]).
+    swept: bool,
 }
 
 impl Default for Builder {
@@ -717,6 +729,7 @@ impl Default for Builder {
             settled_folds: BTreeSet::new(),
             kept: Arc::default(),
             rules: None,
+            swept: false,
         }
     }
 }
@@ -964,6 +977,24 @@ impl Builder {
                 .iter()
                 .map(|start| Target::Row(LedgerKind::Queue, start.to_string())),
         );
+        self.drop_settled();
+        let due: Vec<Target> = self
+            .unsettled
+            .iter()
+            .filter(|(_, at)| **at <= now_ms)
+            .map(|(target, _)| target.clone())
+            .collect();
+        for target in due {
+            self.unsettled.remove(&target);
+            self.marks.insert(target);
+        }
+    }
+
+    /// Drop from [`Kept`] the records of the session and queue rows the
+    /// store holds settled that no event read since reached, and the
+    /// pushes of the runs and tasks it holds settled not marked again.
+    fn drop_settled(&mut self) {
+        let kept = Arc::make_mut(&mut self.kept);
         // One an event reached since stays noted until its fold is tracked.
         let (reached, settled): (BTreeSet<_>, BTreeSet<_>) = std::mem::take(&mut self.settled)
             .into_iter()
@@ -978,15 +1009,48 @@ impl Builder {
             .partition(|target| self.marks.contains(target));
         kept.settle_pushes(&settled);
         self.settled_folds = marked;
-        let due: Vec<Target> = self
-            .unsettled
-            .iter()
-            .filter(|(_, at)| **at <= now_ms)
-            .map(|(target, _)| target.clone())
-            .collect();
-        for target in due {
-            self.unsettled.remove(&target);
-            self.marks.insert(target);
+    }
+
+    /// The session and queue rows of `rows` (those [`Self::rows_to_build`]
+    /// names, as [`build`] folds them) a pass sweeps once it looked at its
+    /// marks: until a pass swept, each of them marked; none after.
+    pub fn rows_to_sweep(&self, rows: &BTreeMap<(LedgerKind, String), LedgerRow>) -> Vec<Target> {
+        if self.swept {
+            return Vec::new();
+        }
+        rows.keys()
+            .map(|(kind, key)| Target::Row(*kind, key.clone()))
+            .filter(|target| self.marks.contains(target))
+            .collect()
+    }
+
+    /// Sweep the session or queue row of `target`, `built` its fold now
+    /// and `stored` the row the store holds of it: one the store holds
+    /// settled that the fold would not write ([`writes`]) is tracked
+    /// settled and no longer marked, as a pass that looked at it would.
+    /// Another stays marked for its turn.
+    pub fn sweep(
+        &mut self,
+        target: &Target,
+        stored: Option<&LedgerRow>,
+        built: Option<&LedgerRow>,
+    ) {
+        let (Some(stored), Some(built)) = (stored, built) else {
+            return;
+        };
+        if matches!(target, Target::Row(..)) && stored.is_final && !writes(Some(stored), built) {
+            self.marks.remove(target);
+            self.track(target, stored);
+        }
+    }
+
+    /// Note the rows swept ([`Self::rows_to_sweep`]) and, the first time,
+    /// drop the records of those found settled, once no [`Inputs`] of the
+    /// pass holds [`Kept`]; a later pass drops at its [`Self::due`].
+    pub fn swept(&mut self) {
+        if !self.swept {
+            self.swept = true;
+            self.drop_settled();
         }
     }
 

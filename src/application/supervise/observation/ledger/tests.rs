@@ -1960,6 +1960,86 @@ fn a_pass_gives_a_settled_row_a_later_event_reaches_its_dropped_records_back() {
     assert_eq!(pass(&memory, &mut builder, later).kept.events(), 0);
 }
 
+/// A queue of `settled` runtime planner sessions opened and closed, each
+/// with a mark of the queue, one landing, and one session still open:
+/// every row but the open session's is settled after the grace.
+fn settled_sessions(settled: i64) -> Log {
+    let mut log = Log::default();
+    log.landed(1, &run_id(1), 0);
+    for planner in 0..settled {
+        let at = 100 + 30 * planner;
+        let opened = log.last().as_i64() + 1;
+        log.add(
+            None,
+            None,
+            "session_opened",
+            json!({"kind": "runtime_planner", "planner_id": planner}),
+            at,
+        )
+        .add(
+            None,
+            None,
+            "session_closed",
+            json!({"kind": "runtime_planner", "planner_id": planner, "opened_event_id": opened}),
+            at + 10,
+        )
+        .add(None, None, "mark_added", json!({"mark": planner}), at + 20);
+    }
+    log.add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": settled}),
+        100 + 30 * settled,
+    );
+    log
+}
+
+/// A new builder (a supervisor started again) catches up from the cursors'
+/// start over a store that holds the session and queue rows settled: after
+/// its first pass, which reads every event, it keeps as many events with a
+/// few settled rows as with more than that pass looks at
+/// ([`CHECKS_PER_PASS`]), those of the rows not settled only, and the
+/// passes leave the rows as the fold of every event makes them.
+#[test]
+fn a_new_builder_keeps_no_event_of_the_rows_the_store_holds_settled_after_its_first_pass() {
+    let kept_after_restart = |settled: i64| {
+        let log = settled_sessions(settled);
+        let memory = Memory::of(&log);
+        let mut before = Builder::default();
+        while pass(&memory, &mut before, LATER).backlog > 0 {}
+        let held = memory.rows.borrow().clone();
+        assert!(
+            held.iter()
+                .filter(|((kind, _), _)| matches!(kind, LedgerKind::Session | LedgerKind::Queue))
+                .filter(|(_, row)| row.is_final)
+                .count()
+                >= usize::try_from(settled).unwrap()
+        );
+
+        let mut builder = Builder::default();
+        let first = pass(&memory, &mut builder, LATER);
+        assert_eq!(first.failure, None);
+        while pass(&memory, &mut builder, LATER).backlog > 0 {}
+        let whole = Inputs::new(&log.events, ms(LATER), BUILT, true);
+        let rows = memory.rows.borrow().clone();
+        assert_eq!(rows, held, "the passes again leave the rows as they were");
+        for ((kind, key), row) in &rows {
+            let built = build(&target_of(*kind, key), &whole, &[]);
+            assert_eq!(built.as_ref(), Some(row), "{kind:?} {key}");
+        }
+        first.kept
+    };
+    let more = i64::try_from(CHECKS_PER_PASS).unwrap();
+    let (few, many) = (kept_after_restart(3), kept_after_restart(more));
+    assert_eq!(few.events(), many.events());
+    assert_eq!((few.sessions, few.queue), (1, 0));
+    assert_eq!(
+        many.dropped_rows,
+        few.dropped_rows + 2 * usize::try_from(more - 3).unwrap()
+    );
+}
+
 /// The log says what the builder keeps the first time, an hour after it
 /// last did, and when its bytes changed by half of those logged or more.
 #[test]
