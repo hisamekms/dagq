@@ -1,0 +1,50 @@
+Token usage: total=8,420 input=7,719 (+ 262,016 cached) output=701 (reasoning 17)
+To continue this session, run:
+  codex resume 01a16f61-3906-7b71-91e7-0c6ebafc768b
+Or run codex resume and select Test dagq guardrail hook.
+EXIT=0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

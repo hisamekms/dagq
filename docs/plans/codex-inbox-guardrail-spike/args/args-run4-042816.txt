@@ -1,0 +1,4 @@
+-c
+hooks.PreToolUse=[{hooks=[{type="command",command="python3 -I /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3337-nX7iWG/bin/guard.py"}]}]
+-c
+hooks.state={"/<session-flags>/config.toml:pre_tool_use:0:0"={trusted_hash="sha256:36160d29993f01198356c264f4cfc2f46e88eaef1a61c520c9dce70c895bb4bd"}}

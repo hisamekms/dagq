@@ -58,6 +58,7 @@ tags:
 - [dagq の build・test の process ごとと合計の peak のメモリ、下げる手の効き、host.toml の machine と container の上限の推奨](build-memory.md)（goal 184、task 3161）
 - [スパイク：Codex CLI の対話の session で inbox に要るもの（常駐・background の見張り・answer・指示の読み込み・復帰・区間の記録・画面の判定・sandbox からの状態を変える dagq）ができるか](codex-inbox-spike.md)（goal 77、task 1180）
 - [スパイク：Codex の対話の TUI で、dagq が起動の引数で渡す hook だけに起動の引数で trust を与え、人の ~/.codex/config.toml を書かずに動かせるか](codex-inbox-hook-trust-spike.md)（goal 77、task 3336）
+- [スパイク：Codex の対話の TUI で、起動の引数で渡す PreToolUse の hook が、inbox の role に禁じた dagq のコマンドと身元の環境変数を含む shell のコマンドを実行の前に拒めるか](codex-inbox-guardrail-spike.md)（goal 77、task 3337）
 - [スパイク：run の review job の中で review の subagent を Claude と Codex の非対話の呼び出しで動かせるか](review-subagents-spike.md)（goal 94、task 1453）
 - [run の review の subagent receipt-evidence の選ばれ方・トークン・行き先と親の review との検査の重なりの測定と、選択肢と推奨](receipt-evidence-review-study.md)（goal 176、task 2108）
 - [直近7日のrunのreviewの時間・トークン・選ばれたsubagentの数とslotの使い方の測定と、agentのreviewを並列のjobにしたときの同時実行の上限の既定値](review-parallel-jobs-measure.md)（goal 154、task 1902）

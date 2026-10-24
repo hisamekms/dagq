@@ -1,0 +1,4 @@
+#!/bin/sh
+# stub: append args (and DAGQ_ROLE) to the stub log; never calls the real dagq
+printf '%s ROLE=%s ARGS=%s\n' "$(date +%H:%M:%S)" "${DAGQ_ROLE-unset}" "$*" >> /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3337-nX7iWG/stub.log
+echo "stub dagq: $*"

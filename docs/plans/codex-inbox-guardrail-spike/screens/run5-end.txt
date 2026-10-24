@@ -1,0 +1,50 @@
+Token usage: total=13,690 input=12,978 (+ 256,896 cached) output=712 (reasoning 26)
+To continue this session, run:
+  codex resume 01a16f64-2efc-7ee3-9ffd-b7f9ca232782
+Or run codex resume and select Test PreToolUse guardrail hook.
+EXIT=0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,42 @@
+=== trial1 pathcheck 04:13:54 command -v dagq
+=== run1 a 04:14:31 dagq request decline
+=== run1 b 04:14:40 true && dagq request decline
+=== run1 c 04:14:49 true; dagq request decline
+=== run1 d 04:14:58 echo | dagq request decline
+=== run1 e 04:15:07 sh -c 'dagq request decline'
+=== run1 f 04:15:16 DAGQ_ROLE=worker dagq status
+=== run1 g 04:15:25 export DAGQ_ROLE=worker; dagq status
+=== run1 h 04:15:34 dagq status
+04:15:39 ROLE=worker ARGS=status
+=== run2 a 04:16:20 dagq request decline
+=== run2 b 04:18:27 true && dagq request decline
+=== run2 c 04:20:33 true; dagq request decline
+=== run2 d 04:22:39 echo | dagq request decline
+=== run2 e 04:24:45 sh -c 'dagq request decline'
+=== run3 a 04:26:51 dagq request decline
+=== run3 b 04:27:00 true && dagq request decline
+=== run3 c 04:27:10 true; dagq request decline
+=== run3 d 04:27:19 echo | dagq request decline
+=== run3 e 04:27:28 sh -c 'dagq request decline'
+=== run3 f 04:27:37 DAGQ_ROLE=worker dagq status
+=== run3 g 04:27:46 export DAGQ_ROLE=worker; dagq status
+=== run3 h 04:27:55 dagq status
+04:27:58 ROLE=worker ARGS=status
+=== run4 a 04:28:24 dagq request decline
+=== run4 b 04:28:33 true && dagq request decline
+=== run4 c 04:28:42 true; dagq request decline
+=== run4 d 04:28:51 echo | dagq request decline
+=== run4 e 04:29:00 sh -c 'dagq request decline'
+=== run4 f 04:29:09 DAGQ_ROLE=worker dagq status
+=== run4 g 04:29:18 export DAGQ_ROLE=worker; dagq status
+=== run4 h 04:29:28 dagq status
+04:29:31 ROLE=worker ARGS=status
+=== run5 a 04:30:05 dagq request decline
+=== run5 b 04:30:14 true && dagq request decline
+=== run5 c 04:30:24 true; dagq request decline
+=== run5 d 04:30:33 echo | dagq request decline
+=== run5 e 04:30:42 sh -c 'dagq request decline'
+=== run5 f 04:30:51 DAGQ_ROLE=worker dagq status
+=== run5 g 04:31:00 export DAGQ_ROLE=worker; dagq status
+=== run5 h 04:31:09 dagq status
+04:31:12 ROLE=worker ARGS=status
