@@ -6,6 +6,7 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
+  - adr-t1181-1
   - adr-t1582-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-integrate
@@ -128,6 +129,8 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
 `dagq inbox`は、inboxを打った人のterminal（種類を問わない）の前面で開く（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定2）。
 queueは`up`と同じく解決する。
 inboxのproviderはClaude Codeで、Codexはinboxのcommandを持たない。
+providerとmodelを役割の設定を既定に起動の引数で選ぶこと、Codexのinboxの見張り・hook・guardrail・sandboxの埋め方、Codexが使えないときに黙ってClaudeに替えず開かずに理由を出すことは[ADR-t1181-1](../../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)が決めたが、まだ実装されていない。
+それまで`dagq inbox`は下の手順でClaudeのinboxだけを開く。
 
 1. **inboxの中では拒む**: 打った環境が`DAGQ_ROLE=inbox`なら、`DAGQ_QUEUE`がどのqueueを指していても、何も読まず起動も記録もせずに止まる。
    inboxの中から別のinboxを開かない。

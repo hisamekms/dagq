@@ -6,6 +6,7 @@ status: current
 created: 2026-09-27
 scope: runtime
 related:
+  - adr-t1181-1
   - adr-t1394-1
   - adr-t1394-2
   - design-supervisor-lifecycle
@@ -77,6 +78,8 @@ effort = "high"         # 省けば既定
   これを使うjobと、Claudeを使わない運転で切り替え先が無いときのjobごとの振る舞いは各jobの文書が持つ（[Goal review](goal-review.md)の3と6、[Review](review.md)（[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)）、[Plan review](plan-review.md#codexで動かす)、[Throughput review](throughput-review.md#codexで動かす)、[Observer](observer.md#codexで動かす)、[Triage](triage.md#codexで動かす)・[生きているsessionの復旧job](background-recovery-job.md#codexで動かす)）。
   他の役割は`provider = "claude"`を書いても、`provider`を書かない役割と同じ起動と控え。
   `setup_review`は`job_route`を通らず、`provider`のproviderが使えなくても切り替えず待たず、起動の失敗や0でない終了をそのまま人かinboxのコマンドの誤りにする（[setup-review](setup-review.md#権限)）
+- **inbox**: 今は役割の表に無く、`dagq inbox`はClaudeで開く（[`up` / `down`](up-down.md)の「`dagq inbox`」）。
+  [ADR-t1181-1](../../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定1・4はinboxを役割に足し（起動の引数でその起動だけ上書き）、`job_route`の切り替えを当てず、providerの控えでinboxを止めないと決めた（実装前）
 - **見え方**: `dagq doctor`の`roles`が役割ごとの起動のproviderとmodel / effortと出どころを出す（queueが束縛されたmain checkoutの`dagq.toml`。`application::health::roles`）。
   jobごとに実際に動いたproviderは開始のeventの`launch.provider`と`headless_jobs.provider`
 
@@ -96,6 +99,8 @@ modelは表の値（無ければ既定を明示）のまま変えない。
   jobの区間の`session_opened`（`domain::sessions`の`job`）は開始のeventの`launch`を写す（生きているrunの復旧のjobは区間を持たない）。
   終わったrunの復旧のjobは`triage_started`の`launch`（`ActorLaunch::recorded`）で起動する
 - **planner**: 開く側（`application::planner::launch_planner`）が決めてbackgroundのwrapperに渡し、wrapperはturnの`turn_started`に`launch`を書く（下の[runtimeのplannerの経路](#runtimeのplannerの経路)）
+- **inbox**: 今は`inbox_opened`がproviderを持つだけで、`launch`を持たない（[`up` / `down`](up-down.md)の「`dagq inbox`」）。
+  ADR-t1181-1決定5は、起動の記録に選んだ場所と要求したmodelを、区間に実際のmodelとsession（thread）のidを足し、stats / kpiでproviderごとに読むと決めた（実装前）
 
 計測の層別はtranscriptから読んだ`session_closed`の値を使う。
 `launch`は起動の意図と出どころで、既定で起動したsessionの実際の値はtranscriptが持つ。
