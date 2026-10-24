@@ -176,12 +176,15 @@ pub(super) const REVIEW_ACCEPTANCE_HEADER: &str = "Acceptance criteria of the ta
 pub(super) const REVIEW_RULES_HEADER: &str =
     "The project's rules for this review, judge the diff by them as well";
 
-/// The whole review's verdicts and where `revise` ends and `concern`
-/// begins.
+/// The whole review's verdicts, where `revise` ends and `concern` begins,
+/// and that a run sent back hears every finding that sends it back in the
+/// same round, none kept for a later one. Only the whole review says so;
+/// plan review and the claim's review share none of it.
 pub(super) const REVIEW_VERDICTS: &str = "Decide one verdict:\n\
 - pass: the diff meets the acceptance criteria and the task's instructions and nothing needs fixing.\n\
 - revise: findings the worker can fix without a person's judgment: missing tests or evidence, findings of the repository's formatter, linter or other checks, a receipt that disagrees with the diff where fixing the diff settles it, or an obvious gap inside the instructed scope.\n\
-- concern: findings that call for a judgment rather than a mechanical fix: a mismatch with the acceptance criteria, changes the task did not ask for, or a finding that involves a judgment call. A concern does not by itself go to a person: you judge it below, recommending land or send_back with your confidence, and the runtime applies a sure judgment that needs no person (high, reason_category null) itself; only the rest (low, scope, discard) reaches a person.\n\n";
+- concern: findings that call for a judgment rather than a mechanical fix: a mismatch with the acceptance criteria, changes the task did not ask for, or a finding that involves a judgment call. A concern does not by itself go to a person: you judge it below, recommending land or send_back with your confidence, and the runtime applies a sure judgment that needs no person (high, reason_category null) itself; only the rest (low, scope, discard) reaches a person.\n\
+For revise or concern, list in reasons, in this round, every finding of the diff that is a reason to send the run back: do not leave one for a later round.\n\n";
 
 /// The whole review's answer: one JSON object of this schema.
 pub(super) const REVIEW_ANSWER: &str = "Answer with one JSON object and nothing else, matching this schema:\n\

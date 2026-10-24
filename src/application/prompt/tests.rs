@@ -2086,6 +2086,56 @@ fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
     assert!(!review.contains("the documents you checked against the diff"));
 }
 
+/// The whole review sends back with every finding that sends the run back
+/// in the same round, keeping none for a later one; plan review and the
+/// claim's review do not say so, and the shared reason codes do not carry it.
+#[test]
+fn only_the_whole_review_lists_every_finding_that_sends_back_in_one_round() {
+    use crate::domain::satisfied::SnapshotVerification;
+    const ONE_ROUND: &str = "For revise or concern, list in reasons, in this round, every finding of the diff that is a reason to send the run back: do not leave one for a later round.";
+    let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let review = review_prompt(&task, &run, "r", None, None).text;
+    assert_eq!(review.matches(ONE_ROUND).count(), 1, "{review}");
+    assert!(REVIEW_VERDICTS.contains(ONE_ROUND));
+    // No narrowing of a later round to the last fix's diff.
+    assert!(!review.contains("previous round"), "{review}");
+    assert!(
+        !reason_codes_section(review_reason::REVIEW_CODES, &run_review_codes_use())
+            .contains("later round")
+    );
+
+    let plan = plan_case(1, 0).prompt().text;
+    assert!(!plan.contains(ONE_ROUND), "{plan}");
+    assert!(!plan.contains("later round"), "{plan}");
+
+    let receipt = Receipt::parse(
+        &json!({"run_id": RUN, "result": "already_satisfied", "commit": SHA,
+            "tests": {"status": "passed", "evidence_or_reason": "e"},
+            "e2e": {"status": "not_applicable", "evidence_or_reason": "r"},
+            "subagent_review": {"status": "not_applicable", "evidence_or_reason": "r"},
+            "summary": "the base meets it",
+            "base_checks": [{"command": "test -f seed.txt", "result": "passed"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let claim = claim_review_prompt(
+        &task_with_evidence(7, Vec::new()),
+        &run,
+        (Some(&receipt), "/runs/run/receipt.json"),
+        &SnapshotVerification {
+            head: CommitSha::try_from(SHA).unwrap(),
+            commands: 2,
+            failure: None,
+        },
+        Path::new("/q/satisfied/run"),
+        None,
+    )
+    .text;
+    assert!(!claim.contains(ONE_ROUND), "{claim}");
+    assert!(!claim.contains("later round"), "{claim}");
+}
+
 /// ADR-t1428-1 decision 5 as ADR-t2352-1 amends it: the run's review reads the
 /// documents on the changed behavior against the diff and the summary,
 /// once, before the acceptance, sending back only for a document the diff
