@@ -1468,7 +1468,10 @@ pub fn slot_alert(slots: SlotSnapshot, held: bool, deferred: usize) -> Option<Al
 /// events: `session` (the worker's own, from its latest `agent_started`),
 /// `resume` (a `resume_started` with no end yet) or `revise` (a
 /// `revise_requested` the session has not answered), with the unix
-/// millisecond it started. `None` when no session is watched.
+/// millisecond it started. A resume or a revise whose session ended since
+/// it started ([`session_after_end`]) is watched from the next session's
+/// start, and not at all until one starts. `None` when no session is
+/// watched.
 fn watched_phase(status: RunStatus, events: &[&RunEvent]) -> Option<(&'static str, i64)> {
     let latest = |kinds: &[EventKind]| {
         events
@@ -1491,8 +1494,9 @@ fn watched_phase(status: RunStatus, events: &[&RunEvent]) -> Option<(&'static st
                 EventKind::ResumeSkipped,
             ])?;
             (event.kind == EventKind::ResumeStarted)
-                .then(|| at(event).map(|start| ("resume", start)))
+                .then(|| session_after_end(events, event))
                 .flatten()
+                .map(|start| ("resume", start))
         }
         RunStatus::Validating | RunStatus::AwaitingIntegration => {
             let event = latest(&[
@@ -1507,11 +1511,56 @@ fn watched_phase(status: RunStatus, events: &[&RunEvent]) -> Option<(&'static st
                 EventKind::ConflictResolved,
             ])?;
             (event.kind == EventKind::ReviseRequested)
-                .then(|| at(event).map(|start| ("revise", start)))
+                .then(|| session_after_end(events, event))
                 .flatten()
+                .map(|start| ("revise", start))
         }
         _ => None,
     }
+}
+
+/// When the session watched since `request` (a `resume_started` or a
+/// `revise_requested` of `events`) is watched from, in unix milliseconds:
+/// the request itself while no end of its session (`session_exited`,
+/// `wrapper_stopped`, `workspace_closed`) followed it; once one did, the
+/// start of the next session after the last end ([`starts_a_session`]),
+/// and `None` until one starts. An ended session has no one to nudge, as
+/// the supervisor's watch does not nudge it, and its last idle marker is
+/// not the next session's. A `session_closed` ends a span, written also
+/// as the request switches the spans, so it is no end of the session.
+fn session_after_end(events: &[&RunEvent], request: &RunEvent) -> Option<i64> {
+    let at = |event: &RunEvent| timestamp_millis(&event.created_at);
+    let requested = events
+        .iter()
+        .position(|event| std::ptr::eq(*event, request))?;
+    let after = &events[requested + 1..];
+    let Some(ended) = after.iter().rposition(|event| {
+        matches!(
+            event.kind.known(),
+            Some(EventKind::SessionExited | EventKind::WrapperStopped | EventKind::WorkspaceClosed)
+        )
+    }) else {
+        return at(request);
+    };
+    after[ended + 1..]
+        .iter()
+        .find(|event| starts_a_session(event))
+        .and_then(|event| at(event))
+}
+
+/// Whether `event` starts a session of the worker: a new session, a
+/// resume, a renewed session or a new wrapper or workspace for one.
+fn starts_a_session(event: &RunEvent) -> bool {
+    matches!(
+        event.kind.known(),
+        Some(
+            EventKind::AgentStarted
+                | EventKind::ResumeStarted
+                | EventKind::SessionRenewed
+                | EventKind::WorkspaceCreated
+                | EventKind::WrapperLaunched
+        )
+    )
 }
 
 /// Whether the turn the idle marker written at `idle` (unix milliseconds)
@@ -3365,6 +3414,73 @@ mod tests {
         let mut answered = revise.to_vec();
         answered.push(run_event(3, R1, "revise_finished", json!({}), T + 30));
         assert!(running(&answered, &live, now).is_empty());
+    }
+
+    /// Finding 663: a revise session that ended without its receipt or
+    /// `revise_finished` leaves no session to watch until the next starts.
+    #[test]
+    fn an_ended_revise_or_resume_session_is_not_watched_until_the_next_starts() {
+        let mut run = live_run(R1, RunStatus::AwaitingIntegration);
+        run.idle = Some(((T + 60) * 1000, Vec::new()));
+        let live = snapshot(vec![run.clone()]);
+        let revise = vec![
+            run_event(1, R1, "validation_finished", json!({}), T - 100),
+            run_event(2, R1, "revise_requested", json!({"attempt": 1}), T),
+            // The span switch at the request is no end of the session.
+            run_event(3, R1, "session_closed", json!({}), T),
+            run_event(4, R1, "session_opened", json!({}), T),
+        ];
+        assert_eq!(running(&revise, &live, T + 5000)[0].phase, Some("revise"));
+        for end in ["session_exited", "wrapper_stopped", "workspace_closed"] {
+            let mut ended = revise.clone();
+            ended.push(run_event(5, R1, end, json!({"exit_code": 1}), T + 100));
+            assert!(running(&ended, &live, T + 5000).is_empty(), "{end}");
+        }
+        let mut ended = revise.clone();
+        ended.extend([
+            run_event(5, R1, "session_exited", json!({"exit_code": 1}), T + 100),
+            run_event(6, R1, "wrapper_stopped", json!({}), T + 700),
+            run_event(7, R1, "workspace_closed", json!({}), T + 700),
+        ]);
+        assert!(running(&ended, &live, T + 60_000).is_empty());
+
+        // The next session is timed from its own marker, not the ended one's.
+        let mut next = ended.clone();
+        next.push(run_event(8, R1, "wrapper_launched", json!({}), T + 2000));
+        assert!(running(&next, &live, T + 60_000).is_empty());
+        run.idle = Some(((T + 2100) * 1000, Vec::new()));
+        let live = snapshot(vec![run.clone()]);
+        assert!(running(&next, &live, T + 2100 + 1200).is_empty());
+        let alerts = running(&next, &live, T + 2100 + 1300);
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(
+            (alerts[0].phase, alerts[0].value),
+            (Some("revise"), Some(1300))
+        );
+
+        // A resume whose session exited is the same.
+        run.status = RunStatus::NeedsSession;
+        run.idle = Some(((T + 60) * 1000, Vec::new()));
+        let live = snapshot(vec![run]);
+        let resume = [
+            run_event(1, R1, "agent_started", json!({}), T - 9000),
+            run_event(2, R1, "resume_started", json!({"attempt": 1}), T),
+            run_event(3, R1, "session_exited", json!({"exit_code": 1}), T + 100),
+        ];
+        assert!(running(&resume, &live, T + 5000).is_empty());
+        // An end before the request is the last session's, not the resume's.
+        let mut before = resume.to_vec();
+        before[2].created_at = at(T - 100);
+        before.swap(1, 2);
+        assert_eq!(running(&before, &live, T + 5000)[0].phase, Some("resume"));
+        // A session started again after the end is watched from its start:
+        // the ended session's marker is not its own.
+        let mut again = resume.to_vec();
+        again.push(run_event(4, R1, "agent_started", json!({}), T + 200));
+        assert!(running(&again, &live, T + 5000).is_empty());
+        again[3].created_at = at(T + 50);
+        let alerts = running(&again, &live, T + 5000);
+        assert_eq!(alerts[0].phase, Some("resume"), "{alerts:?}");
     }
 
     #[test]

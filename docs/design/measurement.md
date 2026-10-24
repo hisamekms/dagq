@@ -139,13 +139,13 @@ supervisorの生存と停止の証拠はEventStoreに残し、一生の終わり
 
 ### 今の判定の記録
 
-statsのslotの今の判定は状態表・run dirのmarker・processを入力に今を判定するので、supervisorの周回がその入力を観測してEventStoreに記録し、統計はeventだけから同じ値を作れる（`domain::live_alerts`、`supervise::observation::live_alerts`）。
+statsのslotの今の判定は状態表・run dirのmarker・processを入力に今を判定するので、supervisorの周回がその入力を観測してEventStoreに記録し、統計はeventだけから同じ値を作れる（`supervise::observation::live_alerts`）。
 
 - **観測**: どのsupervisorも`OBSERVE_INTERVAL_SECS`ごとに、自分のslotやleaseに限らずqueue全体をstatsと同じ読み方で読み、statsと同じ判定の関数（`live_alerts::judge`）で判定する。
   警告の鍵（`AlertKey`）はleaseの持ち主を含めないので、leaseが移っても何も書かない。
 - **判定の入力と警告の開閉**: 入力は離散の時刻と値で、経過で伸びる長さは持たない（入力の中身は`domain::live_alerts`のmodule doc）。
   開閉のeventは警告がいつ立ち消えたかの記録で、値の再現には使わない。
-- **走っているrun**: receiptの無いidleは、markerの後の`provider_waiting`とcloseまでの`worker_question`・`answer_prompt`を数えず、次のturnのmarkerから数える（stallの見張りと同じ）。
+- **走っているrun**: receiptの無いidleは、markerの後の`provider_waiting`・closeまでの`worker_question`・`answer_prompt`・終わったresumeとreviseのsessionを数えず、次のturnのmarkerから数える（stallの見張りと同じ）。
   入力と警告のworkspaceはrunが最後に開いたsession（`LiveRun`のdoc comment）。
 - **記録**（流れはsupervisorのtokenごと）: 起動の後の最初の成功した観測が`live_alert_baseline`。
   入力の値が変わった対象ごとに`live_alert_input_changed`。
