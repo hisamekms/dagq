@@ -26,7 +26,7 @@ Your prompt holds the person's words. Look for work that covers it first (`searc
 "$DAGQ" submit TASK...          # or --goal GOAL
 ```
 
-  `submit` (refusing what `lint` rejects) makes the request `proposed`; report the proposal ID.
+  `submit` makes the request `proposed`; report the proposal ID.
 - **Decline** (done already, a duplicate in flight, or not plannable as asked; say why): `"$DAGQ" request decline N --reason '<why>'`. The inbox tells the person.
 - **Ask**: `"$DAGQ" ask --request N --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --question '...' --option plan --option decline`.
 
@@ -38,7 +38,7 @@ First list the unconfirmed premises that would change the plan; settle those a s
 
 ## 2. When plan review sends it back (revise)
 
-"Plan review sent proposal N back" arrives with reasons. Fix them, `lint --proposal N`, `"$DAGQ" submit --proposal N`; on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. Details: `register.md`, "A revise".
+"Plan review sent proposal N back" arrives with reasons. Fix them, `lint --proposal N`, `"$DAGQ" submit --proposal N` (a replan's replacement proposal: fix its plan too and add `--replacement <plan.json>`); on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. Details: `register.md`, "A revise".
 
 ## 3. A draft or a finding you were opened for
 
@@ -50,7 +50,7 @@ Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`e
 
 ## 4. Goals, forecasts, findings, KPIs
 
-Progress: `goal show`, `graph --goal`, `forecast --goal`. Deferring what an acceptance does not need: section 3. Findings: `skills/dagq/reference/observer.md`. `mark` a setting, operation or host change and judge it with `kpi --compare` (`skills/dagq/reference/kpi.md`).
+Progress: `goal show`, `graph --goal`, `forecast --goal`. Findings: `skills/dagq/reference/observer.md`. `mark` a setting, operation or host change and judge it with `kpi --compare` (`skills/dagq/reference/kpi.md`).
 
 ## 5. A finished goal
 
