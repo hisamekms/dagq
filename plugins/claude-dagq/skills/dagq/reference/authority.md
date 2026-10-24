@@ -4,7 +4,7 @@ Read this when the binary refuses a command, or before doing on a person's word 
 
 ## The check
 
-Every command that changes the queue names its caller from the environment (`DAGQ_ROLE`; none is the person, `user`; an unknown one stops every command) and is checked against a default-deny policy first. A refusal (`<role> may not ...`) changes nothing and is recorded with you as its actor.
+Every command that changes the queue is checked against a default-deny policy first. A command that takes its caller from the environment names it by `DAGQ_ROLE` (none is the person, `user`; an unknown one stops the command before it opens the queue). A client-mode `dagq` (below) and the runtime's session wrapper and hooks do not: the queue service checks what they send for the token's principal (a planner's hook sends nothing itself: its wrapper records its report), except the inbox's hook, which is checked as the inbox. A refusal (`<role> may not ...`) changes nothing and is recorded with you as its actor.
 
 Take a refusal as the answer: never retry it under another `DAGQ_ROLE`, without it, through a path to the binary or a script, or in the database. Hand it to the role that has it (below), or tell the person.
 

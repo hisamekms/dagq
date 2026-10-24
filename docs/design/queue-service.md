@@ -35,7 +35,7 @@ hostで動き、queue DBを開いてユースケース単位のAPIを、service�
 
 今の段（段(2)・(3)）: serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
 **worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。
-session wrapperとhookはwrapperのprincipalでserviceを通り、人・inbox・plannerのCLIは[hostのCLI](queue-service-host-cli.md)。
+session wrapperとhookはwrapperのprincipalでserviceを通り（plannerとinboxのhookは例外、[クライアントモード](#クライアントモード)）、人・inbox・plannerのCLIは[hostのCLI](queue-service-host-cli.md)。
 supervisorはclaim・lease・runの状態とevent・tokenをserviceで行い、着地とjobの結果はDBを開く（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
 例外はexecutorのsessionのstepだけで、制御側が対象ごとに発行するtelemetry専用のprincipalで[`telemetry_report`](#telemetry_report)を通る（[ADR-t1662-3](../adr/2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md)決定13）。
 
@@ -228,8 +228,8 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
   pluginの`--resolve`が最初に打ち、dagq skillはDBが無いと分かったときだけ`init`を言うので、workerとjobが`init`を試みない
 - workerとjobのpromptとskillのコマンド（`dagq ask`・`dagq show`など）は変えない。
   observerとスループットの見直しのpromptは、`dagq --db <db>`ではなく`dagq`を名指す（promptはagentの引数なので、DBのpathを含めない）
-- session wrapper（`session`・`planner-session`）は継いだ環境のactorでなくwrapperのtokenで送り、DBを開かず（containerのrunのturnの準備を除く）、届かなければそのerrorで終わる（`ServiceWrapperStore`）。
-  plannerのhook（`session-event`）は報告をwrapperに渡し（`session::spool_hook`）、inboxのhookはinboxとして書く
+- session wrapper（`session`・`planner-session`）は継いだ環境のactorでなくwrapperのtokenで送り、DBを開かず（containerのrunのturnの準備を除く）、届かなければそのerrorで終わる。
+  plannerのhook（`session-event`）は報告をwrapperに渡し、inboxのhookはinboxとしてDBを開く
 
 ### Codexのsandboxからの到達（ADR-t1233-5決定4）
 
