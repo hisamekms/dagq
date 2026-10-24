@@ -63,14 +63,14 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — | ○ | ○ | ○ | ○ | — | — |
 | inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — | ○ | ○（`--yes`は—） | ○ | ○ | — | — |
-| planner | ○ | △ draft・submitted・readyのtask（`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ・— / — | △ 自分のplannerだけ | ○（setup-reviewは—） | — | — | — | — |
-| worker | 読み取り（`watch`・`queue.export`・`ci.read`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / —・— / △ 自分のrunだけ | △ 自分のrunだけ | — | — | — | — | — |
+| planner | ○ | △ draft・submitted・readyのtask（`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ・— / — | — | ○（setup-reviewは—） | — | — | — | — |
+| worker | 読み取り（`watch`・`queue.export`・`ci.read`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / —・— / △ 自分のrunだけ | — | — | — | — | — | — |
 | review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — | — |
 | recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — | — |
 | plan-review-job・goal-review-job・throughput-review-job・setup-review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — | — |
 | observer | ○ | — | — / — | — | △ findingに紐づく`blocked`だけ | — / — | △ recordとresolve（dismissは—） | — / —・— / — | — | — | — | — | — | — |
 | supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / —・— / —（保留と置換は○） | ○（recordは—） | ○（setup-reviewは—） | ○ | ○ | — | — |
-| wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | ○ | — | — | — | — | — |
+| wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | △ 自分のrunかplannerだけ | — | — | — | — | — |
 | integrator | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | ○ | — |
 | executor-telemetry | — | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — | △ 自分のtokenの対象に登録されたsessionだけ |
 
@@ -91,7 +91,8 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   拒否と記録は[Authorization](authorization.md#policy)、移動の判断は`task::set_goal`が持つ。
 - plannerの行は[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定7のとおり、この段で運用の権限を変えていない（`dagq-planner` skillの「Where your authority ends」はこの行と一致させる。規則は[文書の規則](../development/documents.md)の「権限の表を写す文書」）
 - sessionの画面とlogを読む・送る`screen.read`・`screen.send`（[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定7）はuserとinboxだけが持つ。
-  表のsessionの列のplannerの△とsupervisorの○はこれを含まない（plannerは自分のplannerのものも拒まれ、supervisorは自分の送信の経路を使う）。
+  表のsessionの列のsupervisorの○とwrapperの△はこれを含まない（supervisorは自分の送信の経路を使う）。
+  plannerは自分のplannerのものも拒まれる。
   runには画面が無く、`run screen`は認可を通った後もどのrunにも理由とturnのlogのCLIを示して拒む（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）
 - 終わったrunの残ったworkspaceの片付けの`workspace.cleanup`もuserとinboxだけが持ち、ほかのroleは`authorization_denied`で拒まれる。
   runtimeはrunのworkspaceを開かないので、認可を通った後も理由を示して拒み（ADR-t1433-3の決定3）、残ったrunのworkspaceは人が自分のterminalで閉じる。
