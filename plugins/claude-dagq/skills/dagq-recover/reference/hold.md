@@ -16,27 +16,10 @@ Read this to make a task wait while something in the way of its run is removed (
 ```
 
 - `--reason` is required and is what `status` and the reminder show: write why the task waits and what ends the wait.
-- `--until` only reminds: nothing releases a hold by itself. Without it the person is reminded a day after the hold.
-- The task keeps its status (`ready` stays `ready`, `in_progress` stays `in_progress`) and plan review's pass. `edit`, `set-priority` and `draft` keep their own rules and do not lift the hold.
-- A task that ends (`completed`, or `canceled` by `cancel`, plan review or a `cancel` answer to an ask) closes its hold in the same transaction (`task_hold_ended`, reason `completed` or `canceled`). Every recovery job's verdict, and every answer to a recovery job's ask, that the hold kept is discarded (`hold_result_discarded`), the answered ask closed with it, and a task opened again later does not carry the old hold.
-- One open hold per task: a second `hold` is refused. To change the reason or `--until`, release it and hold it again; between the two the task may go on (a claim, a resume or a new run), so only do it on the person's word.
-- A `ready`, `submitted` or `in_progress` task can be held; a `draft` or finished one is refused.
-
-## What a hold does in each state
-
-The output's `state` is `settling` while what was going still goes, and `held` once the task waits.
-
-| The task when held | What the hold does | `held` from |
-| --- | --- | --- |
-| `ready` or `submitted` | Not claimed | At once |
-| A run's turn, validation, review or e2e goes | Let it finish (never cut short), then start no next step; the run waits with its session and worktree kept, out of its slot | When that step ended |
-| A run waits for a person's answer | The answer is kept, not delivered; it goes with the resume only when the release resumes the same run (`continue` (`resume`), below). A release that ends the run and starts a new one (`new_run`) leaves the answer with the ended run, and the next run does not get it | When its session process ended |
-| A run waits to land (`awaiting_integration`) | Not landed | At once |
-| A run is landing (`integrating`) | The landing goes on; if it lands, the task completes | When the landing parks or waits again |
-| A run stopped (`failed`, `interrupted`) | No recovery job starts; a job already going finishes, and its verdict or answer is kept, not applied | When no job goes |
-| A run waits for a resume (`needs_session`) | Not resumed | At once |
-
-A held run counts toward no slot and no `--max-waiting`, and no stall, idle or resume timeout is measured while it waits.
+- `--until` only reminds: nothing releases a hold by itself.
+- The task keeps its status and plan review's pass; the runtime neither claims it nor resumes, recovers or lands its run until the release. What is going (a turn, a validation, a review, a landing) is never cut short.
+- One open hold per task. To change the reason or `--until`, release it and hold it again; between the two the task may go on, so only do it on the person's word.
+- A task that ends closes its hold; a task opened again later does not carry it.
 
 ## Release
 
@@ -46,15 +29,9 @@ A held run counts toward no slot and no `--max-waiting`, and no stall, idle or r
 "$DAGQ" release TASK --model MODEL                     # a model that provider takes (codex takes none)
 ```
 
-- Refused with `hold_not_settled` while the hold is `settling`: wait until `status`' `held` shows `state` `held`, then release. A refusal changes nothing.
-- The output's `continuation` and `decision` say how the task goes on:
-  - `claim`: a task with no run is among the claims again; `--provider` and `--model` are its next claim's.
-  - `continue` (`resume`): a run that waits (not `failed` or `interrupted`) on the same provider with a session goes on in it (a `needs_session` run through its resume, a run waiting to land to its landing). `--model` alone keeps the session and takes effect from the next turn. An approval or review pass from before the hold is not used for a landing after that resume, so a new `approve_landing` ask may come. A stopped run whose recovery job's verdict or answer was kept also gets `resume` when neither `--provider` nor `--model` is given (below).
-  - `new_run` (`retry_inherit`): another `--provider`, a run with no session, or a stopped run (`failed`, `interrupted`) with nothing kept for it or released with `--provider` (its own included) or `--model`. The run ends; the task goes back to `ready` without plan review, and the next run carries over the run's branch and its uncommitted work (saved as a commit). This is not counted as the recovery job's automatic carry-over.
-  - `new_run` (`retry_fresh`): the same, for a run with no commit of its own: the next run starts from the current main, with only its saved uncommitted work.
-- A stopped run whose recovery job's verdict or answer was kept gets that applied after a release that changes neither provider nor model; it is discarded, and its ask closed with the reason, when the task or run changed meanwhile or the release chose a new run.
-- A release whose work cannot be saved, or whose task's hold or run moved while it read the work (`release_read_moved`), is refused and changes nothing: read `status` again and retry.
+- A release is refused while what was going still goes: wait until `status` shows the task held, then release. A refusal changes nothing; when it says the task moved meanwhile, read `status` again and retry.
+- The output says how the task goes on: a run that waits goes on in its session when the provider stays; another provider, or a run that cannot go on, ends the run and the task's next run carries its work over. A stopped run whose recovery result the hold kept goes on with it only when the release gives neither `--provider` nor `--model`; with either, the run ends and the kept result is dropped. An answer kept for a waiting run is lost when the release starts a new run. A resumed run's landing goes through review again, so a new `approve_landing` ask may come.
 
 ## Reminders and the attention
 
-`status`' `held` lists every open hold with its reason, `until`, who held it and when, `state`, the task's latest run and `overdue`. Once `until` passes (`until_passed`), or a day after a hold with none (`long_held`), the hold is the attention `release or keep the hold of task N` and `watch` tells it once a day. Bring the reason to the person: on their word `release` it, or keep it (nothing to do: it is told again a day later). A new `--until` needs a release first (above).
+Once the reminder time (`--until`) passes, or after a long hold with none, the hold is the attention `release or keep the hold of task N`. Bring the reason to the person: on their word `release` it, or keep it (nothing to do). A new `--until` needs a release first (above).

@@ -11,11 +11,11 @@ Pass the cursor from `status --role inbox` (or from the last `watch` that return
 ```
 
 - It returns only when there is something to handle. Do not wrap it in a shell loop and do not add `--timeout`.
-- When it returns, handle its `events` (steps 3 and 4), then start the command again from its `cursor`.
+- When it returns, handle the events it returns (steps 3 and 4), then start the command again from the cursor it returns.
 - `report the update` and an hourly `report the review` may arrive late, with another return; the delay is no failure. When telling `report the update`, add that sessions reopened after it load the updated plugin.
 - A non-zero exit is a failure, never "nothing new": report the error to the person, but `unreachable` as below.
-- A watch that cannot reach the queue's service ends at once with `queue_service.code` `unreachable`; its error says what to do next, and `queue_service.outage` is the outage the supervisor recorded, if any. Run `"$DAGQ" service status` first: an update replaces the service, so a `state` of `running` now means it was only being replaced; start the watch again from the same cursor and tell no one. Otherwise tell the person, show them that status, start the service again only on their word (`up`, `dagq-recover`'s `reference/up-down.md`), then start the watch again from the same cursor. The next watch waits a recorded outage out, and at its timeout returns no events with `outage_since`: start it again from the same cursor and tell no one. With no outage recorded, do not restart it in a loop while the service is down.
-- `unauthenticated` with an error that says to open the inbox again: this inbox has no token of its own (it was opened by an earlier build) or its session ended. Tell the person to open the inbox again (`dagq-recover`'s `reference/up-down.md`, "Open the inbox again").
+- A watch that cannot reach the queue's service (`unreachable`) says what to do next. Run `"$DAGQ" service status` first: when it is running now, the service was only being replaced; start the watch again from the same cursor and tell no one. Otherwise tell the person, show them that status, start the service again only on their word (`up`, `dagq-recover`'s `reference/up-down.md`), then start the watch again from the same cursor. A watch that returns no events during a recorded outage: start it again from the same cursor and tell no one. Do not restart it in a loop while the service is down.
+- `unauthenticated` with an error that says to open the inbox again: this inbox cannot use the service as it is. Tell the person to open the inbox again (`dagq-recover`'s `reference/up-down.md`, "Open the inbox again").
 
 ## One watch, never a status poll
 

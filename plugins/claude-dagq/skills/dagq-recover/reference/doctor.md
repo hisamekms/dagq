@@ -6,15 +6,15 @@ Read this when diagnosing a run by hand (the `dagq-recover` skill, sections 1–
 
 Plain `doctor` is the compact form; diagnosing needs `--full`.
 
-- `supervisors`: a `stale` registration is left by a killed or hung supervisor. A live supervisor of the queue removes one whose pid is gone (or taken by another process) on its first sweep after the heartbeat expired, recording `supervisor_stopped` `pruned`; one whose process lives (hung) stays. Do not remove a registration yourself: report one that stays to the person; `recover` works regardless of it. Empty `supervisors` means nobody owns any run.
-- `runs`: each run's `blockers` say what still prevents its recovery; none means it is recoverable.
-- `inbox_guardrail` `false`: `reference/up-down.md`, "Open the inbox again".
-- `agents` `errors`: a review needing such an agent does not pass; the configuration is fixed on the landing branch.
-- `ci_watch`: what `gh` resolved to on your PATH, which may differ from the supervisor's. While the supervisor cannot read the CI it claims and lands nothing.
+- A stale supervisor registration is left by a killed or hung supervisor. Do not remove a registration yourself: report one that stays to the person; `recover` works regardless of it. With no supervisor listed, nobody owns any run.
+- A run with nothing listed as blocking its recovery is recoverable.
+- The inbox's guardrail off: `reference/up-down.md`, "Open the inbox again".
+- An agent's errors: a review needing such an agent does not pass; the configuration is fixed on the landing branch.
+- The CI watch: what `gh` resolved to on your PATH, which may differ from the supervisor's.
 
 ## sccache server
 
-`doctor` shows `sccache` only when `[run.env] RUSTC_WRAPPER` names sccache; it never starts a server. On `sccache_server_restart_failed` (`stop sccache on the host; the supervisor starts it`), show the person the server's identity, `health` and the error. On their word they stop that server on the host after checking its identity and port with `doctor`; the supervisor starts the replacement itself, which clears the attention. Do not start one by hand: it gets a foreign identity and the notice stays. A missing `sccache` field does not mean the server is healthy.
+On the attention `stop sccache on the host; the supervisor starts it`, show the person the server's identity, health and the error from `doctor`. On their word they stop that server on the host after checking its identity and port; the supervisor starts the replacement itself. Do not start one by hand.
 
 ## When to recover
 
@@ -29,6 +29,4 @@ Leave to the supervisor:
 
 ## recover
 
-`"$DAGQ" recover RUN_ID` makes the run `interrupted` (an `integrating` or leased `awaiting_integration` run keeps a landable status instead: land it as in `reference/review-by-hand.md`), deletes only that run's lease and keeps its worktree, branch and run directory. The next supervisor's recovery job takes an `interrupted` run.
-
-It is refused while a process of the run is alive or its lease is fresh. With a supervisor running, leave the run to it; nothing types into a session (`run send` refuses every run). The person ends a hung supervisor or a session no supervisor serves in their own terminal; never kill processes unless the person asks.
+`"$DAGQ" recover RUN_ID` releases the run for the next supervisor's recovery, keeping its worktree, branch and run directory; a run left landable is landed as in `reference/review-by-hand.md`. It is refused while a process of the run is alive or its lease is fresh. With a supervisor running, leave the run to it; nothing types into a session. The person ends a hung supervisor or a session no supervisor serves in their own terminal; never kill processes unless the person asks.

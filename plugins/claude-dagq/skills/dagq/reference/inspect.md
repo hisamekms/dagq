@@ -6,15 +6,15 @@ Each command's flags and the fields it prints are in `"$DAGQ" <command> --help` 
 
 | Command | Answers |
 | --- | --- |
-| `goal list` / `goal show ID` | Which goals there are and how far each is / one goal, and the unfinished tasks of any goal waiting on it |
+| `goal list` / `goal show ID` | Which goals there are and how far each is / one goal and what waits on it |
 | `list` / `show ID` | Unfinished tasks, a page at a time / one task |
-| `search QUERY` / `related TASK` | Tasks, goals, notes and landed commits matching words / the tasks most related to one by fixed clues (below) |
-| `graph` / `candidates` | Dependencies, what each task still waits for and the critical chain / which ready tasks the supervisor claims next, which it deferred and why, what holds every claim, and how many ready tasks never enter the order and why (below) |
-| `events` / `timeline RUN` | What happened, by kind, task, run or goal / where one run's time went between its steps |
-| `notes` / `note` | Notes on a goal, task or run / record one (changes the queue: an `observation` event) |
-| `findings` / `finding dismiss` / `finding resolve` | The observer's findings and how to decide them: `reference/observer.md`. `--covered-by TASK` only for a `ci_failure` finding and an open task that already fixes its tests (`reference/register.md`). `finding record` refuses the `ci_failure` kind (only the supervisor's CI watch records it) and the `agent_eval_watch_due` and `agent_eval_below_threshold` kinds (only its agent watch records them) |
-| `ci failures [--task ID]` | The tests already failing on the branch the supervisor's CI watch watches; `--task ID` sets apart those the task fixes. Workers and jobs may not run it |
-| `status` / `doctor` | Supervisors, slots, waiting runs and the runs in flight / the same per run with what blocks its recovery (`reference/doctor.md` of the recover skill for acting on it) |
+| `search QUERY` / `related TASK` | Tasks, goals, notes and landed commits matching words / the tasks most related to one (below) |
+| `graph` / `candidates` | Dependencies, what each task waits for and the critical chain / which ready tasks the supervisor claims next and why the others wait (below) |
+| `events` / `timeline RUN` | What happened, by kind, task, run or goal / where one run's time went |
+| `notes` / `note` | Notes on a goal, task or run / record one (changes the queue) |
+| `findings` / `finding dismiss` / `finding resolve` | The observer's findings and how to decide them: `reference/observer.md`. `--covered-by TASK` only for a `ci_failure` finding (`reference/register.md`) |
+| `ci failures [--task ID]` | The tests already failing on the watched branch; `--task ID` sets apart those the task fixes |
+| `status` / `doctor` | Supervisors, slots, waiting runs and the runs in flight / the same per run with what blocks its recovery (the recover skill's `reference/doctor.md`) |
 | `stats` | Where time goes, per run, goal and overall |
 | `kpi` / `forecast` / `marks` / `mark` / `report` | KPIs, forecasts and change marks: `reference/kpi.md` |
 | `observe --history` / `observe --input` | The observer's past observations and their whole input |
@@ -22,63 +22,54 @@ Each command's flags and the fields it prints are in `"$DAGQ" <command> --help` 
 
 ## Read the output
 
-- **Pages.** Page `list`, `events` and `notes` with the cursor the output gives, with the same filters, until it is null (`<command> --help`); decide whether more pages exist from it alone, never by counting items. `stats`' cursor reads the runs finished later (`stats --help`); its totals already cover the whole window: never sum them across pages.
-- **Cut texts.** `show`, `goal show` and `doctor` may cut long texts, ending them in `…`. Add `--full` only when you need them whole. Take the text to edit from `show --full`, never from the cut one.
-- **Holds.** `show ID`'s `hold` is the task's open hold: its reason (cut), `until`, who held it and when, the run it named and `settled_at` (when the task stopped moving under it; null while what was going still goes). `status`' `held` lists every open hold with its `state`, the task's latest run and `overdue`. Holding and releasing: the `dagq-recover` skill's `reference/hold.md`.
+- **Pages.** Page `list`, `events`, `notes` and `stats` with the cursor the output gives, with the same filters, until it gives none; never decide by counting items. `stats`' totals already cover the whole window: never sum them across pages.
+- **Cut texts.** `show`, `goal show` and `doctor` may cut long texts, ending them in `…`. Take the text to edit from `show --full`, never from the cut one.
+- **Holds.** Holding and releasing: the `dagq-recover` skill's `reference/hold.md`.
 - **One task.** Prefer `show ID` to `list --full`. To see why a ready task is passed over at claim, read `show ID` or `candidates`.
 
 ## Statuses
 
-Task: `draft` → `submitted` (in a proposal, waiting for plan review; never claimed) → `ready` → `in_progress` → `completed`, or `canceled`. Only plan review, a person's explicit `ready --bypass-review` and a retry of an `in_progress` task whose runs failed make a task `ready`. A task stays `in_progress` while any run is unfinished or awaiting integration.
-
-A hold is a mark beside the status, not a status: a held task keeps its status, and the runtime neither claims it nor resumes or recovers its run, nor starts its landing, until it is released.
-
-Run: `claimed`, `starting`, `running` and `validating` are unfinished. `awaiting_integration` passed validation and waits for `integrate`, which runs the verification commands after its rebase; `integrating` is being landed now. `needs_session` hit a rebase conflict, a failed verification or a scope violation, and the runtime resumes or recovers it (`last_error` says why). `integrated` landed (`result_commit`) and completed the task. `failed` and `interrupted` keep their worktree for inspection; the runtime's recovery handles them. A dependent task waits until every predecessor is `completed`.
-
-A run whose live session only waits for a person's answer frees its slot (`status`'s `waiting`); answering its ask is all it needs. The inbox skill's `reference/status.md` says how to read it.
+Task: `draft` → `submitted` (waiting for plan review) → `ready` → `in_progress` → `completed`, or `canceled`. A dependent task waits until every predecessor is `completed`. A hold is a mark beside the status, not a status. What a run's state asks of you: the inbox skill's `reference/status.md`.
 
 ## Claude session time
 
-Read a Claude session's time and tokens with `"$DAGQ" stats` (its fields: `"$DAGQ" stats --help` and its output).
+Read a Claude session's time and tokens with `"$DAGQ" stats` (`stats --help`).
 
 - A session open much longer than it was active sat idle, waiting for a review, a person or its end: look for what it waited on, not for slow work.
 - The inbox and the planners have no run: read them in the window's sessions, not per run.
-- Tokens (`execution_tokens`) are advisory: never for billing or authorization.
-- A context or token value not recorded is missing, never 0.
+- Tokens are advisory: never for billing or authorization.
+- A value not recorded is missing, never 0.
 
 ## Find duplicates and work already done (`search`, `related`, `--duplicate-of`)
 
 Take candidates from `search` and `related`, read only those in full (`show ID --full`), and judge only them:
 
-1. **Before `add`**: `search` the problem's words: file names, test names, decision record numbers and the title you are about to write. Look at hits in every status: a `completed` task or a landed `commit` means the work may be done; an unfinished task may be the same work. Narrow with `--status` or `--kind` when the hits are many.
-2. **After `add`, before `submit`**: `related ID` on each new draft. Its clues come from the task as registered (declared `--paths`, the texts, the goal), so it cannot run before `add`. Read the top few candidates' `clues`, then only their full text.
-3. **A duplicate or work already done**: do not submit it; `cancel ID --duplicate-of X`, where X is the task it duplicates (a `completed` X means "already done by X"). X must exist, differ from ID and not be `canceled`; if X was itself canceled as a duplicate, the error names its target: use that. A `cancel` with neither `--reason` nor `--duplicate-of` is refused; a task whose content X took names X the same way (`reference/register.md`, "Cancel reasons"). If the new task only overlaps X, keep it and narrow it (`edit`), or depend on X (`dependency add`).
+1. **Before `add`**: `search` the problem's words: file names, test names, decision record numbers and the title you are about to write. Look at hits in every status: a `completed` task or a landed `commit` means the work may be done; an unfinished task may be the same work.
+2. **After `add`, before `submit`**: `related ID` on each new draft (it needs the registered task). Read the top few candidates' clues, then only their full text.
+3. **A duplicate or work already done**: do not submit it; `cancel ID --duplicate-of X` (`reference/register.md`, "Cancel reasons"). If the new task only overlaps X, keep it and narrow it (`edit`), or depend on X (`dependency add`).
 
-Every planner does this, a runtime planner for a follow_up or finding draft included. `search` and `related` change nothing, so any role may run them. Plan review checks the same; it does not replace your own check.
+Every planner does this, a runtime planner for a follow_up or finding draft included. Plan review checks the same; it does not replace your own check.
 
 ## Wait for another goal (goal dependencies)
 
-A task can depend on a goal as well as on tasks. It is not claimed until that goal is closed `achieved`; whether the goal's tasks are all finished does not matter, since follow-up and gap drafts can join the goal until it closes (`reference/goal-close.md`).
+A task can depend on a goal as well as on tasks: it is not claimed until that goal is closed `achieved` (`reference/goal-close.md`).
 
 ```sh
 "$DAGQ" add "TITLE" --goal 2 --depends-on-goal 1 ...   # repeatable; combines with --depends-on
 "$DAGQ" dependency add TASK --goal 1                    # or remove; instead of a PREDECESSOR
 ```
 
-- **When to use which.** To wait for another goal's outcome, depend on the goal, not on its last task: a task dependency is met once that task is `completed`, even while drafts added to the goal later are unfinished. Order inside one goal stays task dependencies.
-- **Rules.** Only a `draft`, `submitted` or `ready` task gains or loses one. A dependency on the task's own goal and any cycle through task dependencies, goal dependencies and goal membership are refused; the error names which.
-- **Abandoned.** A goal closed `abandoned` never releases its dependents: they wait until a planner removes the dependency (`dependency remove TASK --goal ID`), points it elsewhere or cancels the task, as the person's request says (`reference/goal-close.md`).
+- **When to use which.** To wait for another goal's outcome, depend on the goal, not on its last task: follow-up and gap drafts can join the goal after that task completes. Order inside one goal stays task dependencies.
+- **Abandoned.** A goal closed `abandoned` never releases its dependents: a planner removes the dependency, points it elsewhere or cancels the task, as the person's request says.
 
 ## Decide what to run first with `graph`
 
 When planning a goal or deciding what to submit next, read `"$DAGQ" graph --goal ID` (or `graph`) instead of each task's dependencies:
 
-1. `critical` is the chain that holds back the most work. Its first task should be `ready` and running; if it is `draft`, complete it and `submit` it before tasks with small `unblocks`.
-2. A task with a large `unblocks` missing from `candidates` waits on its `ready_after`: finish (or review and land) those first. For a ready task missing from `candidates`, look first in `excluded` (`status`' `claim_excluded`): it counts the ready tasks that never enter the order, by why (`draft_goal`; `dependencies`, a predecessor unfinished or canceled, even with an empty `ready_after`; `goal_dependencies`), with the lowest IDs of each. No supervisor defers those, and a draft goal's task waits for the goal to open. A ready task not in `excluded` is in `deferred` with the supervisor's reason, or held (`held`).
+1. Start from the chain the output names as critical. Its first task should be `ready` and running; if it is `draft`, complete it and `submit` it before tasks that unblock little.
+2. A task that unblocks much but is missing from `candidates` waits on what the output names: finish (or review and land) those first. Read why each other ready task waits in `candidates`.
 3. When one task blocks many, split it or remove a dependency that is not real (`dependency remove`) so more run in parallel.
-4. `candidates` is the order the supervisor claims in, as of its last judgment of the deferrals; what holds every claim is in `held`. There is no need to register or submit in a particular order: to put a task ahead, give it a priority (below).
-
-While the slots are full or a hold is on, a deferral shown may be old: read its `since` and `held`. `graph --format d2|svg` draws the near-term diagram; SVG needs `d2` and its TALA plugin on PATH (`doctor` shows where they resolve).
+4. There is no need to register or submit in a particular order: to put a task ahead, give it a priority (below).
 
 ## Priority and claim order
 
@@ -93,69 +84,42 @@ A goal and every task have one of five priorities. Pick it by what waiting costs
 | `low` | Work that can wait | A conditional proposal, a remedy for a minor finding |
 
 ```sh
-"$DAGQ" goal add "TITLE" --priority high ...       # the goal's; names only (no numbers)
-"$DAGQ" goal edit GOAL --priority low               # a draft or open goal
-"$DAGQ" add "TITLE" --goal 1 --priority high ...   # the task's own; omit it to inherit the goal's
+"$DAGQ" goal edit GOAL --priority low               # the goal's
 "$DAGQ" set-priority TASK urgent                    # the task's own
 "$DAGQ" set-priority TASK --inherit                 # clear it: inherit the goal's again
 ```
 
-- **Where a task's priority comes from.** The goal's priority is the source: a task without its own takes its goal's; `priority_source` says which. Give a task its own only to raise or lower a few tasks of a goal; it does not follow the goal's changes. What a task moved to another goal keeps: `reference/register.md`.
-- **Claim order.** A higher effective priority is claimed first; within one priority, what unblocks more. Goals have no rank: order goals by their priority.
-- **Execution classes.** Within one priority the runtime balances implementation and Spike tasks itself, never above a higher priority; `candidates` and `graph` list the tasks it moved ahead in `aged`. To hurry a Spike, raise its priority (not to `interrupt`).
-- **Spike and investigation limits.** When the repository caps the Spikes running at once or the goals under investigation at once, a held Spike stays `ready` and shows in `deferred` with `spike_limit` (while Spikes fill their cap) or `investigation_limit` (when it would open one investigation too many), as the claim holds it; the free slot goes to implementation tasks, and no slot is kept for Spikes. It is claimed once a Spike ends, an investigation closes, or one waits only for a person past the grace. `submit` is not refused and no planner waits: do not ready it another way (`reference/spike.md`).
-- **Slot order.** Resumes, recovery jobs and claims compete for a free slot by their task's effective priority, so a `high` ready task is claimed before a `normal` task's resume. A hold keeps no slot free.
-- **Effective priority.** A task's priority raised to the highest of the `ready` tasks (outside a draft goal) that wait on it, directly or transitively. A `high` ready task pulls its unfinished predecessors ahead: there is no need to raise them one by one. A draft set aside pushes nothing forward.
-- **When it can change.** A task's own while it is `draft`, `submitted` or `ready`; while `in_progress` only by the user and the inbox (a planner changes only tasks that have not started); never on a finished task. A goal's on a draft or open goal. A change never stops a running run.
-- **Putting parked work behind or ahead.** When many runs wait in `needs_session` and other work should go first, `set-priority TASK low` on the parked tasks (or `high` on the one to resume first); `--inherit` gives the task back to its goal. Canceling is the other way out for a parked run nobody needs.
+- **Where a task's priority comes from.** The goal's: give a task its own only to raise or lower a few tasks of a goal (`reference/register.md`, "Priority").
+- **Claim order.** A higher effective priority is claimed first; within one priority, what unblocks more. Goals have no rank: order goals by their priority. To hurry a Spike, raise its priority (not to `interrupt`); a Spike the repository's caps hold back waits as `ready`: do not ready it another way (`reference/spike.md`).
+- **Slot order.** Resumes, recovery jobs and claims compete for a free slot by their task's effective priority, so a `high` ready task is claimed before a `normal` task's resume.
+- **Effective priority.** A `high` ready task pulls its unfinished predecessors ahead: there is no need to raise them one by one.
+- **Putting parked work behind or ahead.** When many runs wait in `needs_session` and other work should go first, `set-priority TASK low` on the parked tasks (or `high` on the one to resume first). Canceling is the other way out for a parked run nobody needs.
 - **Express urgency with priority only.** Do not move other tasks back to `draft`, and do not add or remove dependencies that are not real, to get one task claimed first.
-- **No aging of priority.** Nothing raises a priority over time: a `low` task, its resume and recovery jobs wait as long as higher ones keep arriving. Check `graph` for ready tasks, and `list --status in_progress` for parked runs, that never reach the front, and raise them by hand.
+- **No aging of priority.** Nothing raises a priority over time: check `graph` and `list --status in_progress` for work that never reaches the front, and raise it by hand.
 
 ## Edit a draft or submitted task
 
-Fix a draft or submitted task in place instead of canceling it and registering it again (that changes its ID and its dependents' edges):
+Fix a draft or submitted task in place instead of canceling it and registering it again (that changes its ID and its dependents' edges): `"$DAGQ" edit TASK ...` (`edit --help`). Each given field replaces the old value; a repeatable flag replaces the whole list, so pass every value it should keep.
 
-```sh
-"$DAGQ" edit TASK --description "..." --acceptance "..."   # also --title, --context
-"$DAGQ" edit TASK --verify 'CHECK' --verify 'TEST'
-"$DAGQ" edit TASK --evidence e2e --paths '<glob>'          # --no-verify / --no-evidence / --no-paths empty a list
-"$DAGQ" edit TASK --change fix                              # one of the repository's changes (reference/scope.md)
-```
-
-- Each given field replaces the old value; a repeatable flag replaces the whole list, so pass every value it should keep. The values follow the `add` rules.
-- **When it can change.** A `draft` or `submitted` task. A plan review already running may pass the old text, so fix a proposal while it is sent back (`draft`) rather than while it is `submitted`. A `ready` task changes only through plan review or by taking it back with `draft ID`, editing it and submitting it again. On an `in_progress` task the user or the inbox may change only `--verify` / `--no-verify`, once its latest run ended and no live run remains; a live run keeps its verification commands. A finished task is refused.
+- Fix a proposal while it is sent back (`draft`) rather than while it is `submitted`: a review already running may pass the old text. A `ready` task changes only through plan review or by taking it back with `draft ID`.
 - Priority, goal and dependencies have their own commands: `set-priority`, `set-goal`, `dependency add|remove`.
 
 ## Withdraw a proposal (`proposal withdraw`)
 
-```sh
-"$DAGQ" proposal withdraw ID
-```
-
-Its planner (or a person) withdraws a `submitted` or `revising` proposal without plan review, in two cases:
-
-- **A revising proposal that cannot be resubmitted.** Its drafts were all readied with `ready --bypass-review` or canceled, so `submit --proposal ID` fails with `EmptyProposal` and the proposal would stay `revising` for good.
-- **The plan is dropped or reshaped.** The person no longer wants it, or its tasks go into another proposal.
-
-The proposal ends `canceled`, its `submitted` tasks go back to `draft` (others stay as they are), and an open `approve_plan` ask on it is closed, so no answer lands on the tasks' next proposal. Then submit the drafts in another proposal, `cancel` them, or leave them; a draft with an origin (`follow_up`, `goal_gap`, `recurring`) goes back to the runtime's planners. An `accepted` or `canceled` proposal is refused; the observer and the review jobs cannot run it.
+Its planner (or a person) withdraws a proposal with `"$DAGQ" proposal withdraw ID` when the plan is dropped or reshaped, or when a sent-back proposal cannot be resubmitted (`EmptyProposal`: its drafts were all readied by hand or canceled). Its `submitted` tasks go back to `draft` (tasks in other states stay as they are): submit them in another proposal, `cancel` them, or leave them.
 
 ## A run that needs paths outside its task
 
-A task registered with `--paths` may change only what they match (`reference/scope.md`). Two signs say a run needed more:
-
-- **`scope_violation`.** Validation parked the run as `needs_session` or `integrate` deferred it; `events --run RUN --kind scope_violation --full` names the paths. The supervisor resumes the session to restore them; nothing is needed while the task's paths are right.
-- **A `failed` receipt naming paths.** The worker found the task truly needs a path outside its globs and stopped; its `summary` names the path and the work.
-
-Next: while the task is `draft`, `submitted` or `ready`, widen its globs with `set-paths TASK --paths ...` (every glob it should keep) or remove the limit with `--none`. A claimed run keeps the paths it started with, so after a failed run register the task again with wider `--paths` and the verification those paths need (per the repository's rules: `reference/scope.md`).
+A task registered with `--paths` may change only what they match (`reference/scope.md`). A `scope_violation` (`events --run RUN --kind scope_violation --full` names the paths) needs nothing while the task's paths are right: the supervisor has the session restore them. A `failed` receipt naming paths says the task truly needs more: while the task is `draft`, `submitted` or `ready`, widen its globs with `set-paths`; after a run, register the task again with wider `--paths` and the verification those paths need.
 
 ## Change a goal or a task's goal
 
 ```sh
 "$DAGQ" set-goal TASK GOAL                # move a draft, submitted or ready task into an open goal
-"$DAGQ" set-goal TASK --none              # take a draft, submitted or ready task out of its goal
-"$DAGQ" goal edit ID --constraints "..."  # replace one or more fields; see goal edit --help
+"$DAGQ" set-goal TASK --none              # take it out of its goal
+"$DAGQ" goal edit ID --constraints "..."  # see goal edit --help
 "$DAGQ" goal close ID --verdict achieved  # or abandoned; see goal-close.md
 "$DAGQ" goal review ID                    # rearm the goal review after a review by hand or a keep_open answer (person or inbox)
 ```
 
-A closed goal accepts no task. Take an `in_progress` task back with `draft ID` only if its run is finished; a `completed` task keeps the goal it landed with. A run already claimed keeps the prompt it started with; runs claimed after a `goal edit` see the new text. `goal edit --tag` replaces every tag, from the repository's configured tags when it lists them. A closed goal's tags and texts can still change, its priority cannot.
+A run already claimed keeps the prompt it started with; runs claimed after a `goal edit` see the new text.

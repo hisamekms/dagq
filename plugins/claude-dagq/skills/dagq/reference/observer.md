@@ -1,51 +1,46 @@
 # Findings: what the observer saw, and how they are decided
 
-The observer is a headless job the supervisor starts on a schedule. It records what goes wrong as **findings** and writes no note, goal or task and changes no run (the queue refuses that from `DAGQ_ROLE=observer`). Run it by hand with `"$DAGQ" observe`, or print its prompt with `observe --dry-run` (`observe --help`).
+The observer is a headless job the supervisor starts on a schedule. It records what goes wrong as **findings** and writes no note, goal or task and changes no run. Run it by hand with `"$DAGQ" observe`, or print its prompt with `observe --dry-run` (`observe --help`).
 
-A finding is one record per problem (a `kind`, a target and a `subject`); recording the same again updates it, and reopens a `resolved` one (the remedy did not work).
+A finding is one record per problem; one that comes back after it was resolved means the remedy did not work.
 
 ## Read
 
-- `"$DAGQ" findings` lists the open and proposed findings, biggest impact first; `findings ID` shows one in any status, `--full` with its evidence events (`findings --help`).
+- `"$DAGQ" findings` lists the open and proposed findings, biggest impact first; `findings ID` shows one (`findings --help`).
 - `"$DAGQ" events --full --run RUN_ID` (or `--task`, `--goal`, `--kind`) reads the events around a finding; `"$DAGQ" timeline RUN_ID` shows where a run's time went (`reference/inspect.md`).
-- `"$DAGQ" observe --history` lists the observations, and `observe --input OBSERVATION` reads one's whole input, including what its prompt left out. Repeated failed observations reach the inbox as `check the failed observer`.
+- `"$DAGQ" observe --history` lists the observations, and `observe --input OBSERVATION` reads one's whole input. Repeated failed observations reach the inbox as `check the failed observer`.
 
-## Threshold findings: reading `stall_thresholds` and `running_alerts`
+## Threshold findings
 
-A `threshold` finding says a `[stall]` setting looks wrong. Read `stats`' `stall_thresholds` (one entry per setting, with its detections and their outcomes) and `findings --kind threshold`:
+A `threshold` finding says a stall setting looks wrong; read the detections and their outcomes in `stats` (`stats --help`). Many asks answered `wait`: the threshold is probably too early. Many where a person stepped in first: probably too late. No outcome yet: do not judge on it. The observer never changes the value; changing it is the user's decision.
 
-- Many `answered_wait` (the ask's answer was to wait): the threshold is probably too early. Many `preempted` (a person stepped in first): probably too late. `resolved_by_*`: the detection works. `pending`: no outcome yet; do not judge on it. Compare before and after a change of the value with `by_threshold_secs`.
-- An `idle_without_receipt` alert in `running_alerts` past its threshold, neither `nudged` nor `asked`, suggests a missed stall.
-- The observer records it as `finding record --kind threshold --subject <setting name>`, with `--propose` when it recurs; it never changes the value. Changing it is the user's decision (`[stall]` in `dagq.toml`).
+## Session time
 
-## Session time: reading `sessions`
-
-For a `capacity` or `wait` finding read `stats`' `sessions` (`reference/inspect.md`, "Claude session time"): a kind whose open time grows while its active share falls is waiting, not working.
+For a `capacity` or `wait` finding read the sessions in `stats` (`reference/inspect.md`, "Claude session time"): a kind whose open time grows while its active share falls is waiting, not working.
 
 ## KPI findings: kind `kpi` and the improvement limit
 
-The observer reads the KPIs (`reference/kpi.md`) with the targets of `dagq.toml` and `host.toml`, and copies numbers from them, computing none.
+The observer reads the KPIs (`reference/kpi.md`) with the repository's and the host's targets, and copies numbers from them, computing none.
 
-- A target in `breach` becomes a finding `--kind kpi --queue --subject '<KPI>/<stratum>'` (e.g. `phase.work/area=<area>`) with the breach's event as evidence; the day and the week of one KPI and stratum are one finding. `missed` and `not_judged` make none, and a breach is never a `blocked` ask. The observer resolves it once the target is `ok` again, and marks it `--propose` when the impact and the length call for a remedy.
-- A breach of a `forecast.*` target becomes `--kind forecast --queue --subject '<metric>/<stratum>'` without the `forecast.` prefix (e.g. `p90_hit_rate/all`), never a `kpi` finding, under the same rules. A forecast bias is judged only as such a breach.
-- Read a `kpi` finding with `kpi` and the `marks` around `breach_since`: a change there may be the cause, or the remedy.
-- **Improvement limit.** While the open improvement work for findings reaches `[kpi] max_improvement_proposals` of `dagq.toml`, another marked finding waits `open` for a planner (`findings` shows it as `improvements`). A proposal is open improvement work while a task of its own or of a goal it holds is still to be done; when they all end its finding settles (`resolved` if one completed, else `open` without its mark), and an accepted proposal with no such task puts its finding back `open` without its mark. A `ci_failure` finding the supervisor's CI watch recorded is a repair, not an improvement: it is not counted and does not wait. An `agent_eval_watch_due` finding the supervisor's agent watch recorded is not counted and does not wait either (its planner submits no proposal). `finding record` refuses the `ci_failure`, `agent_eval_watch_due` and `agent_eval_below_threshold` kinds to every role, and a `ci_failure` or `agent_eval_watch_due` finding anyone else recorded counts and waits as an improvement.
+- A breached target becomes a `kpi` finding (a forecast target's, a `forecast` finding) with the breach as evidence; a target not yet breached, or not judged, makes none, and a breach is never a `blocked` ask. The observer marks it for a proposal when the impact and the length call for a remedy.
+- Read a `kpi` finding with `kpi` and the `marks` around the breach's start: a change there may be the cause, or the remedy.
+- **Improvement limit.** While the open improvement work for findings reaches the repository's limit, another marked finding waits for a planner; a repair (`ci_failure`) does not wait.
 - **Priority.** An improvement's tasks take their goal's priority, `normal` or below; a priority a person set stays.
 
 ## Agent watch findings: kinds `agent_eval_watch_due` and `agent_eval_below_threshold`
 
-The supervisor watches each agent with case lists on the landing branch (`.dagq/agents/<agent>/evals/`): once `[eval] watch_new_reviews` production reviews selected it since its last watch, or `watch_interval_days` passed with one, it records a finding on the queue, with `--propose`, for a runtime planner. It asks for no set and no round itself, and only it records these two kinds (`finding record` refuses them). Each step is one finding of `agent_eval_watch_due`; its detail says the `step` and the command to run (`ask`). The planner opened for it:
+The supervisor records an `agent_eval_watch_due` finding for a runtime planner when an agent with case lists is due for a watch. Its detail says the step and the command to run. The planner opened for it:
 
-1. **`due`**: asks for the production set of the period, `agent cases <agent> --since S --until U` as the detail gives it, then `finding resolve ID --reason 'set N asked for'`.
-2. **`holdout`** (that set is built and no round runs it): first compares the set's digest (`agent set N`) with the `case_set_digest` of the agent's rounds on the same `definition_digest` (`agent results --agent <agent>`, `agent result ID`). If it ran already, the hold-out's once rule refuses it: `finding dismiss ID --reason` with why, and no rerun. Else `agent eval <agent> --set N`, then `finding resolve ID --reason 'eval E asked for'`.
-3. **`refused`** (the round was not started: the once rule, the cost limit or an unknown cost): `finding dismiss ID --reason` with the refusal's reason. A planner never asks to run it again (`--rerun` is a person's); a raised `[eval]` limit is a person's decision.
+1. **A watch is due**: asks for the production set the detail names (`agent cases`), then `finding resolve ID --reason 'set N asked for'`.
+2. **A built set waits for its hold-out round**: first checks with `agent results` / `agent result` whether a round on the same definition already ran that set. If it did, `finding dismiss ID --reason` with why, and no rerun. Else `agent eval <agent> --set N`, then `finding resolve ID --reason 'eval E asked for'`.
+3. **The round was refused** (not started): `finding dismiss ID --reason` with the refusal's reason. A planner never asks to run it again (`--rerun` is a person's); a raised limit is a person's decision.
 
-A hold-out or production round on the landing branch's definition that ends under the threshold is an `agent_eval_below_threshold` finding, whoever asked for it, with its scores, the values under the threshold and each failed case's id and reasons. Its planner submits a task to improve the definition on those cases (`submit ... --finding ID`), an improvement that counts and waits at the limit. A failed case whose label looks wrong is a label to decide, not the definition's: it goes to a person, as a set's disputed cases do.
+A hold-out or production round on the landing branch's current definition that ends under the threshold is an `agent_eval_below_threshold` finding, whoever asked for it, with its scores and failed cases; a `dev` round of a definition not yet landed is not. Its planner submits a task to improve the definition on those cases (`submit ... --finding ID`), an improvement that counts and waits at the limit. A failed case whose label looks wrong is a label to decide, not the definition's: it goes to a person, as a set's disputed cases do.
 
 ## Where a finding goes
 
 1. **A proposal, without a person.** The observer marks a finding that needs a remedy (`finding record --propose '<why>'`: it recurs or costs much). A runtime planner then checks `search` / `related` for work already queued or done and either submits tasks (`submit ... --finding ID`), dismisses it, or asks the person with a `planner_question`. When planners leave it undecided, the inbox gets `request a plan for the finding`: on the person's word it records `request add --ref finding:N`.
-2. **An ask, only when its reading needs a person.** A finding whose reading is to wait or leave it stays a finding, with that reading in its detail. The observer raises `ask --kind blocked --finding ID --because <scope|discard|recovery_failed> --recommend <option> --confidence <high|low>` only when the reading needs a person's decision (scope, discard) or hands the runtime and the recovery job cannot lend (recovery_failed), one open ask per finding. The runtime adds the options `propose` and `dismiss` and applies those answers itself.
+2. **An ask, only when its reading needs a person.** A finding whose reading is to wait or leave it stays a finding, with that reading in its detail. The observer raises `ask --kind blocked --finding ID` only when the reading needs a person's decision (scope, discard) or hands the runtime and the recovery job cannot lend, one open ask per finding (`ask --help`). The runtime applies its `propose` and `dismiss` answers itself.
 3. **Decided on a person's word.** A person who wants a finding acted on asks the inbox, which records `request add --text '<their words>' --ref finding:N`; its runtime planner submits a proposal for it, dismisses it (`finding dismiss ID --reason '...'`) or leaves it to the observer's mark. `finding resolve ID --reason '...'` closes one that no longer happens. A runtime planner opened for anything may also dismiss or resolve a finding its work settles. The person may also decide in their own terminal (no `DAGQ_ROLE`).
 
 A note (`note` / `notes`) stays the person's and planners' free-text memo; nothing waits on it. A draft goal an older observer wrote is decided like any draft on the person's word: through `request add --ref goal:N`, whose runtime planner submits it (`submit --goal ID`) or drops it (`goal close ID --verdict abandoned`).

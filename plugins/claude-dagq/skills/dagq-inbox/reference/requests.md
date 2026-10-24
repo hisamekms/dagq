@@ -26,9 +26,9 @@ Tell the person the request's ID. The person may type the same command in a term
 
 ## What the runtime does with it
 
-A runtime planner takes each open request while a supervisor runs (none without one: `up`, `dagq-recover` section 5). It plans it (`proposed`, and plan review checks the proposal), declines it with a reason, or asks a `planner_question`; a request no planner could decide ends `exhausted`. Follow them with `"$DAGQ" requests` (`requests --help`); `dagq planners` lists the open planners.
+A runtime planner takes each open request while a supervisor runs (none without one: `up`, `dagq-recover` section 5). It plans it, declines it with a reason, or asks a `planner_question`; a request no planner could decide ends `exhausted`. Follow them with `"$DAGQ" requests` (`requests --help`); `dagq planners` lists the open planners.
 
-The runtime records a request itself when a Spike task (an investigation of a premise) completes: no person asked, and a new planner decides from its result whether to implement, investigate further, take an alternative or a smaller scope, or stop. Its proposal and its decline reach you as news only; tell the person when they follow that goal. Only `exhausted`, or a `planner_question` (another Spike past the goal's limit of Spike cycles among them), needs them. A `ready` Spike in `candidates`' `deferred` with `spike_limit` or `investigation_limit` is waiting for a running Spike or investigation to end, not stuck.
+The runtime records a request itself when a Spike task (an investigation of a premise) completes, for a new planner to decide the next step. Its proposal and its decline reach you as news only; tell the person when they follow that goal. Only `exhausted`, or a `planner_question`, needs them. A `ready` Spike the repository's Spike caps hold back is waiting, not stuck.
 
 ## Tell the person the outcome
 
@@ -39,7 +39,7 @@ The runtime records a request itself when a Spike task (an investigation of a pr
 
 ## A planner_question about a request
 
-Options `plan` / `decline`, with the planner's `recommendation` and `confidence`. Show it as every ask (the skill's step 3) and write the person's answer as given. The runtime delivers the answer to the planner, or to a new one; do not carry it out yourself.
+Options `plan` / `decline`, with the planner's recommendation and confidence. Show it as every ask (the skill's step 3) and write the person's answer as given. The runtime delivers the answer to the planner, or to a new one; do not carry it out yourself.
 
 ## More words for a planner still at work
 
@@ -51,4 +51,4 @@ A follow-up to an open runtime planner goes as its next turn, in the same forms 
 WORDS
 ```
 
-The planner id is in `dagq planners` or the request's planners. It is refused for a planner that is closed or asked to exit; then, or for a new plan, record a new request.
+The planner id is in `dagq planners`. When it is refused, or for a new plan, record a new request.

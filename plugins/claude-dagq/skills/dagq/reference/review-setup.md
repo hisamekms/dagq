@@ -1,6 +1,6 @@
 # Setting up the review
 
-Read this after `init`, when `doctor`'s `agents` names built-ins `without_rules`, or when the project's rules for the review changed.
+Read this after `init`, when `doctor` names built-in agents without project rules, or when the project's rules for the review changed.
 
 ## What a run's review reads
 
@@ -12,20 +12,20 @@ A run's review takes the built-in agents and programs (`builtin:<name>`) from th
 
 - The person writes and commits the `[toolchains.<name>]` declaration; `setup-review` (below) never writes it or the `--verify` commands, and writes the review programs that fit for the person to commit.
 - The verification commands are for a task's `--verify` when it is registered, not a key of `dagq.toml`.
-- The container's settings (`image`, `registries`, `worker_cache`, and their `[container.image]`, `[egress]` and `[container.worker_cache]` tables in `config`) are for running workers in containers: the person writes the proposed Containerfile at its path and the tables, and keeps a registry host only for the reason its comment gives. Until then the container runs the base image alone, reaches no registry and mounts no worker cache; `setup-review` never writes them.
-- An `error` there means `dagq.toml` cannot be read or names a profile dagq does not have: fix that first.
+- The container's settings are for running workers in containers: the person writes the proposed Containerfile and tables, and keeps a registry host only for the reason its comment gives. `setup-review` never writes them.
+- An error there says `dagq.toml` cannot be read or names a profile dagq does not have: fix that first.
 - The proposals assume the tool runs at the repository's root: where the profile applies to a directory below it, adapt the commands and scripts to it.
 
 ## The commands' classification
 
-The measurement classifies the commands a session ran (build, test, lint and so on) by rules: a declared profile's own rules work by the declaration alone, and the `[[telemetry.commands]]` tables of `dagq.toml` add to or override them, tried first. Write there only the rules the project needs on top (its own test targets, a tool no profile knows), never a profile's again. `init`'s `telemetry_commands` proposes templates for the tools its files show that no profile knows yet (npm/pnpm, go, pytest, gradle, make); like the rest, nothing of it works until a person writes and commits it. `"$DAGQ" doctor` shows the rules in effect as `command_rules`, each with its source. The templates show a rule's form, and `command_rules` shows the same keys for each rule in effect. `[telemetry] command_detail` (`program`, `shape` by default, or `redacted`) sets how much of a command the steps keep. A binary older than these tables refuses the file, so add them only once the binary that runs the queue reads them.
+The measurement classifies the commands a session ran (build, test, lint and so on) by rules: a declared profile's own rules work by the declaration alone, and the repository's `dagq.toml` adds to or overrides them. Write there only the rules the project needs on top (its own test targets, a tool no profile knows), never a profile's again. `init` proposes templates for the tools no profile knows yet; nothing of it works until a person writes and commits it. `"$DAGQ" doctor` shows the rules in effect, each with its source. Add these settings only once the binary that runs the queue reads them.
 
 ## Generating the settings: `setup-review`
 
 `dagq setup-review` has a coding agent read the project once and write the review's settings, its rules files and fast review programs in a temporary checkout, then shows the diff and writes it to the working tree only at the person's approval. What it may write, what it refuses and the flags are in `"$DAGQ" setup-review --help`.
 
 1. Commit or set aside every change in `dagq.toml` and `.dagq/review/` first: it refuses a file it would change that has changes not committed, ignored files included.
-2. Run it. On a refusal (another file or table changed, a `dagq.toml` it cannot read, a program script that does not take its root from the Git work tree, a symbolic link) fix the cause or run it again; nothing was written.
+2. Run it. On a refusal fix the cause it names or run it again; nothing was written.
 3. The person reads the diff and approves it at the prompt. Without approval nothing is written.
 4. It commits and pushes nothing and changes nothing in the queue: the person reads the written files and commits them; they reach the review once they land.
 5. Run it again to update the settings: the committed ones are its input.

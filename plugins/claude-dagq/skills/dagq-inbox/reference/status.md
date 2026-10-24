@@ -4,22 +4,18 @@ Read this when what `status`, `watch` or `show` says, or what to do about an att
 
 ## status
 
-- `supervisors`: one entry per process that owns runs.
-  - `registered`, `alive` and not `stale`: the resident supervisor is healthy, even with no runs.
-  - `stale`: it died or hangs. On the person's word, `up` starts a fresh one; orphaned runs go through the `dagq-recover` skill, one run at a time. A stale registration whose process is still alive is not replaced: report it and let the person stop that process (`down --force` if it is the only one).
-  - `registered: false`: a process holding a lease, normally an `integrate` landing a run.
-  - Empty: nothing serves this queue; `up` on the person's word.
-  - `slots` and `waiting` say how many runs hold a slot, wait to land and wait for a person; count them from these, never from the number of `runs`.
-- `inbox_guardrail` (also in `doctor`): `false` means this inbox was opened without its settings. Tell the person and, after your handoff, have them reopen it with `dagq inbox` (`dagq-recover`'s `reference/up-down.md`, "Open the inbox again"). A `claude` typed again in the inbox's terminal has no settings whatever this says.
-- `inbox_watcher` (also in `doctor`): `watching` `0` means no watch runs: start the one of `watch.md`. The Stop hook blocks your turn while it is `0`. When `absent_secs` was long, tell the person: asks opened meanwhile reached nobody.
-- `sccache`: when the build cache server the run environment names needs a person, act on its attention below; `doctor` shows it (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/doctor.md`, "sccache server").
-- `runs` (also in `doctor`): the unfinished runs and the runs a lease holds. Progress is the phase moving while the run holds its slot; when there is no phase, do not guess one. A person is needed only where `slot` is `waiting` (answer its ask) or `attention` names the run. A run's session is read with `run log` (below).
-- `waiting`: the runs out of their slots while they wait for a person (below).
-- `held`: the held tasks, each with its reason, `until`, who held it, `state` (`settling` while what was going still goes, `held` once it waits), its latest run and `overdue` (why it now waits for a person). A held task needs nothing until its attention comes; what a hold does and `release`: `dagq-recover`'s `reference/hold.md`.
-- `asks`: the open asks, cut short; read them whole with `asks --open --role inbox`.
-- `ci`: the CI of the watched branch. A red CI needs nothing from the inbox: a runtime planner registers the fix. The failing tests: `"$DAGQ" ci failures`.
-- `language`: write for people in it (the `dagq` skill's section 5).
-- `attention`: act on each by its `next` (below); `--role inbox` keeps all of it.
+What each part of the output holds: `"$DAGQ" status --help`. What to do with it:
+
+- No supervisor serves the queue, or the only one is stale (died or hangs): `up` on the person's word; orphaned runs go through the `dagq-recover` skill, one run at a time. A stale one whose process is still alive is not replaced: report it and let the person stop that process (`down --force` if it is the only one).
+- Count the runs holding a slot, waiting to land and waiting for a person from the counts `status` gives, never from the number of runs listed.
+- The inbox opened without its settings (`status` or `doctor` says its guardrail is off): tell the person and, after your handoff, have them reopen it with `dagq inbox` (`dagq-recover`'s `reference/up-down.md`, "Open the inbox again"). A `claude` typed again in the inbox's terminal has no settings whatever this says.
+- No watch runs: start the one of `watch.md`. When none ran for long, tell the person: asks opened meanwhile reached nobody.
+- A run's phase: when it shows none, do not guess one. A person is needed only where a run waits for an answer or an attention names it. A run's session is read with `run log` (below).
+- A held task needs nothing until its attention comes; what a hold does and `release`: `dagq-recover`'s `reference/hold.md`.
+- The asks are cut short; read them whole with `asks --open --role inbox`.
+- A red CI needs nothing from the inbox: a runtime planner registers the fix. The failing tests: `"$DAGQ" ci failures`.
+- Write for people in the language it names (the `dagq` skill's section 5).
+- Act on each attention by the next step it names (below); `--role inbox` keeps all of it.
 
 ## Each attention's next
 
@@ -35,38 +31,38 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
   - `review and integrate`: an accepted run nobody reviews (a supervisor gave it up mid-review: read what its session did first). The same section.
   - A review's concern or failure shows only as its `approve_landing` ask.
   - `push main`: a landed run whose push failed: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`.
-  - `check the e2e host`: the e2e a reviewed run needs could not run several times in a row. The person checks the host in their own terminal without `DAGQ_ROLE` (`dagq doctor`'s `run_env`, the host's e2e lock file). The runtime keeps retrying and the attention clears by itself once an e2e runs; nothing to close. If the run is left as `review and integrate`, check its e2e before integrating by hand.
-  - `stop the dead landing's processes`: a dead landing left processes that hold the integration slot. Show the person the pids (`dagq show TASK --full`); the person stops those pids, never by name or pattern. The next supervisor pass releases the run.
+  - `check the e2e host`: the e2e a reviewed run needs could not run several times in a row. The person checks the host in their own terminal without `DAGQ_ROLE` (`dagq doctor`). The attention clears by itself once an e2e runs; nothing to close. If the run is left as `review and integrate`, check its e2e before integrating by hand.
+  - `stop the dead landing's processes`: a dead landing left processes that hold the integration slot. Show the person the pids (`dagq show TASK --full`); the person stops those pids, never by name or pattern.
 - Recovery:
   - `triage by hand`: the recovery job of an ended run could not start or apply its verdict; the person decides (the `dagq-recover` skill, section 4).
   - `recover by hand`: a live run's failed recovery job that an older runtime recorded; the same section. A newer one opens a `stalled` ask instead.
-  - `recover run`: a run its supervisor gave up; the supervisor recovers it once its processes are gone, and while they live, the `dagq-recover` skill. If `watch` reported it but `status` shows the run at rest, `status` wins.
+  - `recover run`: a run its supervisor gave up; while its processes live, the `dagq-recover` skill. If `watch` reported it but `status` shows the run at rest, `status` wins.
   - `exit the session`: a run given up whose session's exit request could not be written. Tell the person, who ends it in their own terminal (the `dagq-recover` skill, section 2).
   - A turn that ended without a receipt is no attention: the runtime and its recovery job handle it. Do nothing about it until a `stalled` ask comes.
 - Planning:
   - `plan review by hand`: the headless plan review failed and holds the proposal (the `dagq-recover` skill, section 8).
   - `check the planner`: a planner did not submit a revise in time, or a turn of a runtime planner hit its time limit; the person looks at it (`"$DAGQ" planner log ID`; section 8).
-  - `goal review by hand`: a goal's review could not reach a verdict and is not tried again until its input changes. On the person's word, `goal review ID` reruns it, or the person closes the goal or asks for tasks through a planning request (section 8).
+  - `goal review by hand`: a goal's review could not reach a verdict. On the person's word, `goal review ID` reruns it, or the person closes the goal or asks for tasks through a planning request (section 8).
   - `request a plan for the draft`: no planner adopted, dropped or asked about a draft. Tell the person; on their word, record a planning request naming it (`request add --text '<their words>' --ref task:N`), or give it a revisit time (`"$DAGQ" revisit N --at <RFC 3339 time>`, `${CLAUDE_PLUGIN_ROOT}/skills/dagq/reference/register.md`, "A draft's revisit time"), or the person decides it in their own terminal.
-  - A draft a planner kept with `keep_draft` has no attention and waits for a request or its revisit time (`show ID`'s `revisit`); on the person's word, set, change or clear that time (`revisit ID --at <RFC 3339 time>` / `--clear`).
-  - `request a plan for the follow-ups of goal G`: unfinished follow-ups of goal G have no settled membership, so its goal review waits. Tell the person; on their word, record a planning request naming the goal or the follow-ups (`--ref goal:G` or `--ref task:N`). The runtime never judges or moves them itself.
+  - A draft a planner kept has no attention and waits for a request or its revisit time; on the person's word, set, change or clear that time (`revisit --help`).
+  - `request a plan for the follow-ups of goal G`: unfinished follow-ups of goal G have no settled membership, so its goal review waits. Tell the person; on their word, record a planning request naming the goal or the follow-ups (`--ref goal:G` or `--ref task:N`).
   - `request a plan for the finding`: no planner submitted, dismissed or asked about a finding. On the person's word, a planning request naming it (`--ref finding:N`), or the person submits or dismisses it in their own terminal.
   - `request a plan for the waiting tasks`: tasks of open goals wait on a task of a closed goal that will never complete. On the person's word, a planning request naming the stranded task (`--ref task:A`), or the person decides in their own terminal.
   - A request's outcomes and its planner's question: `reference/requests.md`.
-- The host and its services (the person fixes them; tell them `last_error`):
+- The host and its services (the person fixes them; tell them the error the attention carries):
   - `stop sccache on the host; the supervisor starts it`: the supervisor could not replace an unhealthy server. Show `doctor`'s server identity; the person stops it and leaves the start to the supervisor.
-  - `install tool` (`run_env_program_missing`, `ci_watch_unavailable`): a program the run environment or the CI watch needs is missing on the supervisor's PATH, and claims or landings wait. The person installs it, or asks through a planning request for a task that stops naming it.
-  - `log in to gh` (`ci_watch_unavailable`): the person runs `gh auth login` in their own terminal; the inbox does not log in.
-  - `fix dagq.toml` (`ci_watch_unavailable`, `ci_jobs_missing`, `container_runtime_unavailable`): the CI watch's remote or job names, or the container runtime, do not work as configured. The person fixes it, or on their word the inbox asks through a planning request for a task that changes the configuration.
-  - `fix the push command`: the host's push command dropped a message; the person fixes the command or its service. It clears only when a later push succeeds.
+  - `install tool`: a program the run environment or the CI watch needs is missing on the supervisor's PATH. The person installs it, or asks through a planning request for a task that stops naming it.
+  - `log in to gh`: the person runs `gh auth login` in their own terminal; the inbox does not log in.
+  - `fix dagq.toml`: the CI watch or the container runtime does not work as configured. The person fixes it, or on their word the inbox asks through a planning request for a task that changes the configuration.
+  - `fix the push command`: the host's push command dropped a message; the person fixes the command or its service.
   - `dagq service status`: the queue service stopped. Show `dagq service status` and the service's log; at the person's word, `dagq service start` (or `up`).
   - `read the queue broker's log and run up`: show the broker's log; at the person's word, `up`.
   - `look at the dagq podman machine's relays`: show `podman machine list` and the error; the person mends the machine.
-  - `restart supervisor`: no supervisor of the queue is live (`supervisor_stopped`, or every registration `supervisor_stale`). `up` on the person's word. `supervisor_duplicate`: `down --wait`, then `up` (`dagq-recover`'s `reference/up-down.md`).
-  - `stop the stale supervisor's process` (`supervisor_stale`, status `stale`): another supervisor is live and runs the queue, so `up` would only reuse it; this registration's process (`pid`) lives but stopped heartbeating. The person first checks that the pid is still a `dagq supervise` of this queue (`ps -p PID -o command`; a reused pid is another program: run `up` instead, which prunes the row), then stops it (not `down`, which stops the live one); the live supervisor then prunes the row. A dead one beside a live supervisor shows `pruned by the live supervisor (runtime)`: nothing to do.
-  - A worker provider that cannot be used is no attention: its runs move to the other provider, and the person acts only on a `queue_hold` ask (`reference/asks.md`).
+  - `restart supervisor`: no supervisor of the queue is live. `up` on the person's word. Two supervisors: `down --wait`, then `up` (`dagq-recover`'s `reference/up-down.md`).
+  - `stop the stale supervisor's process`: another supervisor runs the queue, and this registration's process lives but stopped heartbeating. The person first checks that the pid is still a `dagq supervise` of this queue (`ps -p PID -o command`; a reused pid is another program: run `up` instead), then stops that pid (not `down`, which stops the live one).
+  - A worker provider that cannot be used is no attention: the person acts only on a `queue_hold` ask (`reference/asks.md`).
 - Holds:
-  - `release or keep the hold of task N` (`task_hold_reminded`): the hold's `until` passed (`overdue` `until_passed`) or it has been on a day with none (`long_held`); `watch` tells it once a day. Tell the person the task, its reason and how long it has waited; on their word `release` it (`dagq-recover`'s `reference/hold.md`), or keep it: nothing to do, it is told again a day later.
+  - `release or keep the hold of task N`: the hold's reminder time (`--until`) passed, or it has been on long. Tell the person the task, its reason and how long it has waited; on their word `release` it (`dagq-recover`'s `reference/hold.md`), or keep it: nothing to do.
 - Notices (they do not stay in `status`; tell the person):
   - `report the update`: the supervisor updated dagq by itself, or only the plugin. Tell the person the version and what the notice says, and that sessions reopened after it load the updated plugin. Nothing to do; a failed update is an ask instead.
   - `report the review`, `check the failed review`: `watch.md`, "The throughput review's notice".
@@ -74,13 +70,11 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
 
 ## Runs waiting for a person (outside the slots)
 
-A run whose session only waits for a person's answer leaves its slot while it waits, so another task can run; its ask is the attention, so answering the ask is all it needs from you. A drain (`down --wait`) waits for these runs too, so it ends only once their asks are answered. `status`' `waiting` lists them; their limit is `up --max-waiting` (`"$DAGQ" up --help`).
-
-The run of a held task also waits out of its slot, with its session kept, but it waits for a `release`, not an answer: it is in `held`, not in `waiting`, and counts toward no limit.
+A run whose session only waits for a person's answer leaves its slot while it waits; answering its ask is all it needs from you. A drain (`down --wait`) ends only once their asks are answered. The run of a held task waits for a `release`, not an answer: it is in `held`, not in `waiting`.
 
 ## asks
 
-`"$DAGQ" asks` lists the asks nobody closed (`--open`, `--role inbox`, `--all`: `asks --help`). Show each ask's reason category with its question.
+`"$DAGQ" asks` lists the asks nobody closed (`asks --help`). Show each ask's reason category with its question.
 
 - `ask close <id>` marks an answered ask read. An unanswered ask cannot be closed: to withdraw one on the person's word, answer it first (`"$DAGQ" answer <id> --text "withdrawn: <why>"`), then close it.
 - `ask` notifies nobody; your watch tells the person of new asks through the host's push, when it has one.
@@ -91,19 +85,18 @@ The run of a held task also waits out of its slot, with its session kept, but it
 
 ## Watching a background session
 
-Every worker's and runtime planner's session runs as a background process with no screen; its wrapper writes each turn to its log. When the person wants to see what one does, or before you report one that seems stuck:
+Every worker's and runtime planner's session runs in the background with no screen. When the person wants to see what one does, or before you report one that seems stuck:
 
 ```sh
 "$DAGQ" run log RUN                # the run id, or the task id for its latest run
-"$DAGQ" run log RUN --lines 40     # the last 40 lines
 "$DAGQ" planner log ID             # a runtime planner's, the id from `planners`
 ```
 
-Never build the log's path yourself. `--follow` keeps printing: run it in the background, or let the person run it. `"$DAGQ" timeline RUN` gives the times. Nothing can be typed into a session: an answer goes as its next turn.
+Never build the log's path yourself. A following read keeps printing: run it in the background, or let the person run it. `"$DAGQ" timeline RUN` gives the times. Nothing can be typed into a session: an answer goes as its next turn.
 
 ## show
 
-`"$DAGQ" show ID` reads one task, with long texts cut; `--full` prints them whole (`show --help`). `"$DAGQ" list --status in_progress` finds the tasks worth a `show`. `stats` (`stats --help`, the `dagq` skill's `reference/inspect.md`) reads run events; leave proposals from it to the observer.
+`"$DAGQ" show ID` reads one task, with long texts cut; `--full` prints them whole. `"$DAGQ" list --status in_progress` finds the tasks worth a `show`. Leave proposals from `stats` to the observer.
 
 ## goal list
 
@@ -111,13 +104,6 @@ When the person asks which goals go first, what moves now or what a theme holds,
 
 ## Run states
 
-- `claimed` / `starting` / `running`: in progress; read the session with `run log`.
-- `validating`: the supervisor checks the receipt. An `already_satisfied` run (or a failed run with no commit that the recovery job handed off with `hand_off`) stays here while the runtime runs the task's verify on a snapshot of main's head and a review job then judges the claim on that same head. A `high` pass closes the task with no commit and no ask: do not wait for one. Anything else (a `low` pass, a revise, a concern, a missing or unknown confidence, or a job that still gave no answer after its one retry) opens an `approve_close` ask carrying the review's reasons and recommendation (or why the job failed). A failed verify asks `approve_close` with only `retry` / `cancel`. If main moved before a `high` pass closes, that judgment does not close the task: the runtime verifies and judges again on the new head, and asks the person past the retry limit.
-- `awaiting_integration`: accepted; under review or waiting to land. It needs you only through an ask or an attention.
-- `integrating`: landing. A stale lease (`doctor`) is the `dagq-recover` skill's.
-- `needs_session`: the landing failed (a conflict or a verification) or a review was sent back; the supervisor resumes its session.
-- `integrated`: landed; the task is `completed`.
-- `failed` / `interrupted`: the recovery job retries or resumes it, or a `decide` ask comes.
-- Unfinished with `last_error` and no lease: its supervisor gave it up and recovers it once the session is gone.
+A run's state needs you only through an ask or an attention: the runtime validates, reviews, lands, resumes and recovers runs itself, and an `already_satisfied` run closes its task with no commit, or asks `approve_close`. A stale landing lease (`doctor`) is the `dagq-recover` skill's.
 
-Completion is decided only by these states. A Stop hook, an idle session or a `receipt.json` is not success. One run's failure never changes another run.
+Completion is decided only by the run's state (`integrated`, or the task `completed`). A Stop hook, an idle session or a `receipt.json` is not success. One run's failure never changes another run.
