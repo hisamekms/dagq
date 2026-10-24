@@ -26,7 +26,7 @@ related:
   `correct_goal`はachievedで閉じたgoalのfollow_upにrequiredが記録されたときにruntimeがそのfollow_upのtaskについて作り、supervisorがanswerを適用する（[Goal review](goal-review.md)の9、ADR-t1504-2決定9）。
   CLIの`ask`の`--kind`には無い（ほかのaskと同じく、inboxは`watch`の`ask_opened`で受ける。[人への通知](ask-push.md)）。
   findingのために立ったplannerは`--finding ID`で作り、taskもrunも無くてよい（[Finding planners (supervisor)](finding-planners.md)）。
-  計画の依頼のために立ったplannerは`--request ID`で作り（`planner_question`だけ。開けるのはその依頼のplanner自身だけで、他のplannerは拒まれる）、taskもrunも無くてよい（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)の7）。
+  計画の依頼のために立ったplannerは`--request ID`で作り（`planner_question`だけ。開けるのはその依頼のplanner自身だけで、他のplannerは拒まれる）、taskもrunも無くてよい（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)の5）。
   findingに紐づけた`blocked`のaskにはruntimeが`propose`と`dismiss`を、`stalled`のaskには`propose`をoptionsに足し、その答えは`answer`がfindingに適用する（同じ文書の5）。
 - `dagq ask`は相談を登録してaskを返す（入口は`Dialogue::ask`）。
   workerとjob（Codexの非対話のworkerを含む）の`dagq ask`はクライアントモードでqueue serviceに送られ、serviceが呼び出しのtokenのprincipalで同じ`Dialogue`の判定を通してから開く（`asked_by`はprincipalのrole。[Queue service](../queue-service.md#クライアントモード)）。
