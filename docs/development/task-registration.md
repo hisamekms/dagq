@@ -1,7 +1,7 @@
 ---
 id: development-task-registration
 type: development
-title: このrepositoryのtaskの登録（verify・paths・evidence・change・titleの選び方、固定バイナリを待つ宣言、依存の付け方、Spikeのtask、負荷の下で落ちるtestを直すtask、ADRを書くtask、ADRがリンクする文書を消すtask、runtimeの汎用性、plan reviewが当てはめる規則）
+title: このrepositoryのtaskの登録（verify・paths・evidence・change・titleの選び方、固定バイナリを待つ宣言、依存の付け方、Spikeのtask、負荷の下で落ちるtestを直すtask、ADRを書くtask、ADRがリンクする文書を消すtask、runtimeの汎用性、文書の変更を求めるtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
 owners:
@@ -16,6 +16,8 @@ related:
   - adr-t1639-1
   - adr-t1639-2
   - adr-t1453-2
+  - adr-t1942-1
+  - adr-t1964-1
   - adr-t1504-1
   - adr-t1504-2
   - adr-t1591-1
@@ -190,6 +192,18 @@ dagqは外部のprojectで使い、このrepositoryはdogfoodingしているだ�
 - このrepositoryの値は、その設定のdogfoodingの値として登録する: `dagq.toml`に置く値はconfigのtask（新しいkeyは固定バイナリが読めるようになってから。上の「固定バイナリがtask Xを含んでから行うtask」）、`host.toml`の推奨値はdocsのtaskにする。
 - pluginの汎用性は[文書の規則](documents.md)の「pluginの汎用性」が持つ。
 
+## 文書の変更を求めるtask
+
+descriptionかacceptanceが文書の変更を求めるtaskは、登録の時に次に合わせて書く（規則の本文は[文書の規則](documents.md)が持つ）。
+
+1. 既定値・閾値の数値、設定のkeyと型、eventの欄、CLIのflag、JSONの形、関数とファイルの名前の列挙は`docs/design/`に書かせず、意味が要るなら定義のそばのdoc commentに書かせる。
+   designに求めるのは流れ・境界・不変条件・コードから読めない約束と、名前で指すコードへの入口にする（[文書の規則](documents.md)の「design」、[ADR-t1942-1](../adr/2026-10-07-t1942-1-design-docs-in-four-layers-with-size-budgets.md)）。
+2. designにtask・goalの番号と「以前は」のような経緯を書かせない（同じ「design」）。
+3. designを含むADR以外の文書に`updated`・`last_verified`の更新を求めない（[文書の規則](documents.md)の「frontmatter」、[ADR-t1964-1](../adr/2026-10-07-t1964-1-non-adr-docs-drop-updated-and-last-verified.md)）。
+4. designの記述を消させるときは、[文書の規則](documents.md)の「形と予算」の1・2・4に合わせる。
+   doc commentへ移させるのはコードから読める細かい事実で他に記述の無いものに限り、follow_upに回すだけにせず同じ変更で移させ、地図として要る約束・入口は残すか適切な文書へ移させる。
+5. pluginのskill・referenceに書かせる文言に、このrepositoryのADRの番号と固有の規則を入れない（[文書の規則](documents.md)の「pluginの汎用性」、[ADR-t1453-2](../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)決定1）。
+
 ## plan reviewが当てはめる規則
 
 この repository のplan review jobは、proposalのtaskに次を当てはめる（読む文書はAGENTS.mdの「plan review」が名指す）。
@@ -206,6 +220,7 @@ dagqは外部のprojectで使い、このrepositoryはdogfoodingしているだ�
 - ADRを書くtaskが上の「ADRを書くtask」を満たすこと（IDとファイル名の形、`check-adr-numbers.sh`のverify、置き換えか`amends`か）。足りなければ`revise`。
 - 現行のADRの決定に触れるtaskが、上の「ADRを書くtask」のとおりADRの扱い（(a)保つ決定を名指して書かない、か(b)書く）をdescriptionに確定していること。workerに選ばせる・既存のADRの本文（Consequencesを含む）の変更を許す・`superseded`のADRを今の決定として引く、のどれかに当たれば`revise`にする。
 - runtimeのtaskが上の「runtimeの汎用性」のとおり、言語・道具・外への宛先・hostで流すコマンド・cache・資源の値をruntimeに固定せず設定で受けること。固定していれば`revise`にし、設定に出す形と、このrepositoryの値を`dagq.toml`かdocsのdogfoodingの値として登録する形に直させる（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)）。
+- 文書の変更を求めるtaskのdescriptionとacceptanceが上の「文書の変更を求めるtask」の1〜5に反していれば、`concern`でなく`revise`にする（直し方が規則から一意に決まり人の判断が要らないため）。ADRの決定と矛盾して人の判断が要るものは上のADRの行のとおり`concern`にする。
 - 挙動や仕様を変えるtaskは、関連文書（[文書の規則](documents.md)の「workerの文書の照合」が挙げる文書）のpath・節と更新が要る理由をdescriptionかcontextに書くこと。欠けていて関連する文書が明らかなら、見つけたpathを理由に書いて`revise`にする。文書の差分を求めるverifyやevidenceは求めない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
 - 負荷の下で落ちるtestのtaskが上の「負荷の下で落ちるtestを直すtask」を満たすこと。acceptanceかdescriptionが高い負荷の下での再現を求めるtaskは`revise`にする（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)決定(d)）。ただし人がapprove_planのaskにreadyと答えて認めたtask（ask 323のtask 1360・1361、ask 304のtask 1344）は例外として保ち、`revise`にしない。plan reviewは自分で新しい例外を作らない（決定(e)）。
 - 優先度と所属は由来で分けて見る（[ADR-t1971-1](../adr/2026-10-07-t1971-1-plan-review-keeps-human-origin-priority-and-membership-and-ai-tasks-inherit-goal-priority.md)）。由来はproposal単位でなく、runtimeがgoal・taskの作成時に記録した由来で見る（[ADR-t1975-1](../adr/2026-10-08-t1975-1-runtime-records-origin-and-person-set-priority-and-ai-actors-cannot-change-it.md)決定5〜7。由来が`unknown`の既存の行は人間由来と同じく扱う）。人間由来のtaskとgoalの優先度と所属は自分で変えず（`lower_priority`を付けない）、疑いがあれば`concern`にする。由来を問わず、人の出どころ（`human`）の優先度（taskの個別の指定と、taskが継ぐgoalの優先度）はactionで変えず（付けても適用されず記録だけが残る）、疑いがあれば`concern`にする（同決定3）。人の言葉に優先度の無い新しいgoalにplannerが付けた段は下のAI由来のgoalと同じ目安で見てよいが、外れていれば`revise`にする。
