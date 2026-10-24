@@ -353,6 +353,10 @@ pub trait DraftPlannerStore: DraftPlannerReads {
     /// The `planner_question`s nobody closed about the tasks of
     /// `proposal`, oldest first (ADR-t1704-1 decision 4).
     fn proposal_questions(&self, proposal: ProposalId) -> Result<Vec<Ask>>;
+    /// The parked tasks of the replanning operations not closed whose
+    /// replacement proposal is `proposal`: their `planner_question`s are
+    /// its revise's.
+    fn replaced_tasks(&self, proposal: ProposalId) -> Result<Vec<TaskId>>;
     /// The planning request whose planners carry the answer of `ask`: the
     /// one it is about, or the one whose planner added the draft it is
     /// about and left it outside any proposal (ADR-t2015-1).

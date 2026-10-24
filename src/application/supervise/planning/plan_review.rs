@@ -2044,6 +2044,17 @@ fn exit_overdue(asked: Option<Duration>, timeout: Duration) -> bool {
     asked.is_some_and(|elapsed| elapsed > timeout)
 }
 
+/// Whether `ask` is a planner's `planner_question` about one of `tasks`,
+/// the tasks a planner opened for a proposal asks about (its tasks, and
+/// the parked task a replacement proposal replaces), on no run and no
+/// finding ([`PlanningState::planner_questions`]).
+fn asked_about_proposal(ask: &Ask, tasks: &[TaskId]) -> bool {
+    ask.finding_id.is_none()
+        && ask.run_id.is_none()
+        && ask.asked_by == SessionRole::Planner.as_str()
+        && ask.task_id.is_some_and(|task| tasks.contains(&task))
+}
+
 /// Whether `busy` holds a planner of the runtime's only for a person's
 /// answer (ADR-t1704-1 decision 1): its `planner_question` is not
 /// answered, and nothing else holds it but a revise it took, whose fixes
@@ -2136,8 +2147,10 @@ impl PlannerBusy {
 impl PlanningState {
     /// The `planner_question`s of a planner of the runtime's: about its
     /// request (or a draft a planner of it added), its finding, the drafts
-    /// of its bundle, or the tasks of the proposal it was opened for; one
-    /// closed only when it was delivered to this planner.
+    /// of its bundle, or the tasks of the proposal it was opened for (with
+    /// the parked task of a replanning operation not closed whose
+    /// replacement proposal it is); one closed only when it was delivered
+    /// to this planner.
     fn planner_questions(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -2149,10 +2162,14 @@ impl PlanningState {
             view.planner.request_id,
         );
         // A planner opened for a proposal (a revise's) asks about its
-        // tasks (ADR-t1704-1 decision 4).
+        // tasks (ADR-t1704-1 decision 4), and that of a replacement
+        // proposal about the parked task it replaces too: the deletion's
+        // ask is about it (ADR-t1521-2 decisions 3 and 4).
         let proposal_tasks = match (draft, finding, request, view.planner.proposal_id) {
             (None, None, None, Some(proposal)) => {
-                env.queue.show_proposal(proposal)?.task_ids().to_vec()
+                let mut tasks = env.queue.show_proposal(proposal)?.task_ids().to_vec();
+                tasks.extend(env.queue.replaced_tasks(proposal)?);
+                tasks
             }
             (None, None, None, None) => return Ok(Vec::new()),
             _ => Vec::new(),
@@ -2190,12 +2207,7 @@ impl PlanningState {
                     }
                     (Some(finding), None) => ask.finding_id == Some(finding),
                     (None, None) if draft.is_none() => {
-                        ask.finding_id.is_none()
-                            && ask.run_id.is_none()
-                            && ask.asked_by == SessionRole::Planner.as_str()
-                            && ask
-                                .task_id
-                                .is_some_and(|task| proposal_tasks.contains(&task))
+                        asked_about_proposal(&ask, &proposal_tasks)
                             && (ask.closed_at.is_none()
                                 || match view.planner.workspace_id.as_deref() {
                                     Some(workspace) => {
@@ -2483,6 +2495,32 @@ mod tests {
         ] {
             assert!(!answer_wait_only(busy), "{busy:?}");
         }
+    }
+
+    /// A planner opened for a replacement proposal asks about its tasks
+    /// and the parked task it replaces: a planner's question about either
+    /// is its own, and one about another task (another operation's parked
+    /// task), on a run, or opened by the inbox is not.
+    #[test]
+    fn a_replacement_planners_questions_are_about_its_tasks_and_its_parked_task() {
+        let ask = |task: i64, asked_by: &str, run: Option<&str>| -> Ask {
+            serde_json::from_value(serde_json::json!({
+                "id": 1, "kind": "planner_question", "task_id": task, "run_id": run,
+                "question": "q", "options": [], "answer": null, "asked_by": asked_by,
+                "reason_category": "scope", "created_at": 0, "answered_at": null,
+                "closed_at": null,
+            }))
+            .unwrap()
+        };
+        // Child 11 of the proposal, and parked task 1 it replaces.
+        let tasks = [TaskId::new(11), TaskId::new(1)];
+        assert!(asked_about_proposal(&ask(1, "planner", None), &tasks));
+        assert!(asked_about_proposal(&ask(11, "planner", None), &tasks));
+        assert!(!asked_about_proposal(&ask(2, "planner", None), &tasks));
+        assert!(!asked_about_proposal(&ask(1, "inbox", None), &tasks));
+        assert!(!asked_about_proposal(&ask(1, "planner", Some("r")), &tasks));
+        // A proposal that replaces nothing has no parked task.
+        assert!(!asked_about_proposal(&ask(1, "planner", None), &tasks[..1]));
     }
 
     /// An answer typed to a planner is taken only once it stopped after

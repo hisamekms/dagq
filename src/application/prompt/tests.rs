@@ -4288,10 +4288,19 @@ fn a_revise_planner_of_a_replacement_gets_its_material_and_resubmits_with_the_pl
         "`successors` (one per task that waits for task 1".to_owned(),
         "Never edit task 1, its run or its worktree.".to_owned(),
         "- reason 1 reason 1".to_owned(),
+        // The deletion's ask is about the parked task, with an option per
+        // item and `keep`, and the resubmit names it (ADR-t1521-1
+        // decision 3).
+        "ask it about task 1 itself, `dagq ask --task 1 --kind planner_question --because scope".to_owned(),
+        "--option delete:<ordinal>:<the first 12 characters of its hash> --option keep` (one delete option per item)".to_owned(),
+        "map the item `disposition` `deleted` with `authority_ask_id` naming that ask and submit again as below".to_owned(),
+        "An ask about a child, or one asked before the operation began, allows no deletion.".to_owned(),
+        "raise it to the inbox with `dagq ask --task 1 --kind planner_question --because scope` (about task 1, never a child)".to_owned(),
     ] {
         assert!(text.contains(&expected), "{expected}");
     }
     assert!(!text.contains("submit it again with `dagq submit --proposal 3`."));
+    assert!(!text.contains("`dagq ask --task ID"));
     // What the material names to read the rest by is a planner's read.
     for (named, form) in [
         ("`dagq replans 1`", "dagq replans ID"),
@@ -4321,7 +4330,17 @@ fn a_revise_planner_of_another_proposal_keeps_its_prompt() {
     assert!(text.contains(
         "Its tasks:\n- task 5 (submitted): work\nFollow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show 3` and each task with `dagq show ID`, fix what the reasons point at, and submit it again with `dagq submit --proposal 3`.\n"
     ), "{text}");
-    for absent in ["replacement", "Replan operation", "dagq replans"] {
+    assert!(text.contains(
+        "A fix that changes the plan's intent (acceptance, scope, the relation to the goal) needs a person: raise it to the inbox with `dagq ask --task ID --kind planner_question --because scope` as the skill describes, stop,"
+    ), "{text}");
+    for absent in [
+        "replacement",
+        "Replan operation",
+        "dagq replans",
+        "delete:<ordinal>",
+        "authority_ask_id",
+        "never a child",
+    ] {
         assert!(!text.contains(absent), "{absent}\n{text}");
     }
     assert!(!fitted.bytes.sections.contains_key("replan"));

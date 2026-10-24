@@ -11,11 +11,13 @@
 //! decline with `--continue-run` continues the run. The backend and the
 //! stub reviewer are plan review's (`runtime_support::plan_review`).
 
+use crate::common::cli::invoke_with;
 use crate::common::queue::{base, new_task};
 use crate::runtime_support::plan_review::{
     Fixture, PlanWorkspace, StubReviewer, completed_spike, fixture, open_goal, options,
     planner_prompt,
 };
+use crate::runtime_support::planner_turns::{exit_requested, idle, take_turns, turn_requests};
 use anyhow::Result;
 use dagq::{
     application::{TaskReads, TaskStore},
@@ -1107,6 +1109,239 @@ fn a_revise_planner_of_a_replacement_resubmits_it_with_its_plan() {
     assert_eq!(submitted.len(), 2, "{submitted:?}");
     assert_eq!(submitted[1]["proposal_id"], json!(proposal));
     assert_eq!(submitted[1]["revision"], json!(2));
+    assert_eq!(operation(&p).status, ReplanStatus::Reviewing);
+    assert_kept(&p);
+}
+
+/// What `planner` of `p`'s queue asks as the planner role on the dagq
+/// CLI, failing the test when the CLI refuses it: the ID of the ask it
+/// opened.
+fn ask_as_planner(p: &Parked, planner: PlannerId, about: &[&str], question: &str) -> AskId {
+    let actor = format!("planner:{planner}");
+    let mut args = vec![
+        "ask",
+        "--kind",
+        "planner_question",
+        "--because",
+        "scope",
+        "--question",
+        question,
+    ];
+    args.extend_from_slice(about);
+    let output = invoke_with(
+        &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", &actor)],
+        &p.fx.db,
+        &args,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    queue(p)
+        .asks(dagq::application::AskQuery {
+            all: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.question == question)
+        .unwrap()
+        .id
+}
+
+/// Mark `planner` idle again, as a turn of it stopped.
+fn stopped(p: &Parked, planner: PlannerId) {
+    let dir = dagq::infrastructure::location::planners_dir(&p.fx.db).join(planner.to_string());
+    std::fs::write(dagq::application::planner_idle_marker(&dir), "{}").unwrap();
+}
+
+/// The plan of [`plan`] with item 2 `deleted` on the authority of
+/// `authority`, its child `docs` holding item 1 too.
+fn deleting_plan(p: &Parked, children: [TaskId; 2], authority: AskId) -> Value {
+    let mut deleting = plan(p, children);
+    let hash = deleting["mappings"][1]["hash"].clone();
+    deleting["mappings"][1] = json!({"ordinal": 2, "hash": hash,
+                                     "disposition": "deleted", "authority_ask_id": authority});
+    deleting["mappings"][0]["children"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"task_id": children[1], "ordinal": 1}));
+    deleting
+}
+
+/// A revise of a replacement proposal opened after its request's planner
+/// ended, as far as the planner it went to, open.
+fn revising_replacement(
+    p: &Parked,
+    backend: &PlanWorkspace,
+    reviewer: &StubReviewer,
+) -> (dagq::domain::ProposalId, [TaskId; 2], PlannerId) {
+    supervise(p, backend, reviewer, 1);
+    let (first, handle) = request_planner(p, p.request).unwrap();
+    let api = child(p, "API", &[]);
+    let docs = child(p, "docs", &[]);
+    let proposal = submit(p, &handle, &[api, docs], None, Some(&plan(p, [api, docs])))
+        .unwrap()
+        .id();
+    queue(p).close_planner(first, None).unwrap();
+    supervise(p, backend, reviewer, 1);
+    let planner = revise_planner(p, proposal).expect("a planner for the revise");
+    (proposal, [api, docs], planner)
+}
+
+/// The planner of a replacement's revise, open, asks a person about the
+/// parked task to delete an item as its prompt says, and the answer is
+/// typed to it as its next turn (ADR-t1521-2 decision 3, ADR-t1704-1
+/// decision 2).
+#[test]
+fn the_deletion_ask_about_the_parked_task_reaches_the_open_revise_planner() {
+    let p = parked(0);
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[
+        json!({"verdict": "revise", "reasons": ["the docs are not needed"], "summary": "s"}),
+    ]);
+    let (_, _, planner) = revising_replacement(&p, &backend, &reviewer);
+    let item = operation(&p).conditions.acceptance[1].clone();
+    let token = deletion_token(&item);
+    let prompt = planner_prompt(&p.fx.db, planner);
+    for expected in [
+        format!(
+            "`dagq ask --task {} --kind planner_question --because scope",
+            p.task
+        ),
+        "--option delete:<ordinal>:<the first 12 characters of its hash> --option keep`".to_owned(),
+        "An ask about a child, or one asked before the operation began, allows no deletion."
+            .to_owned(),
+    ] {
+        assert!(prompt.contains(&expected), "{expected}\n{prompt}");
+    }
+    let task = p.task.to_string();
+    let asked = ask_as_planner(
+        &p,
+        planner,
+        &["--task", &task, "--option", &token, "--option", "keep"],
+        "drop the documents item?",
+    );
+    idle(&queue(&p), &p.fx.db, planner);
+    queue(&p).answer(asked, &token).unwrap();
+    supervise(&p, &backend, &reviewer, 1);
+    assert!(!exit_requested(&p.fx.db, planner));
+    let requests = turn_requests(&p.fx.db, planner);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(
+        requests[0]["prompt"],
+        format!("answer to ask {asked}: {token}")
+    );
+    assert!(queue(&p).read_ask(asked).unwrap().closed_at.is_some());
+    assert_kept(&p);
+}
+
+/// The planner of a replacement's revise that waits only for a person's
+/// answer to its deletion ask about the parked task is ended for it, and
+/// no planner is opened without the answer; the answer then goes with the
+/// revise to one new planner, whose resubmit deleting the item on that ask
+/// is accepted, while one on an ask about a child is refused
+/// (ADR-t1521-1 decision 3, ADR-t1521-2 decisions 3 and 4, ADR-t1704-1
+/// decisions 1 and 4).
+#[test]
+fn a_revise_planner_ended_for_its_deletion_ask_hands_the_answer_to_one_new_planner() {
+    let p = parked(0);
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[
+        json!({"verdict": "revise", "reasons": ["the docs are not needed"], "summary": "s"}),
+    ]);
+    let (proposal, [api, docs], planner) = revising_replacement(&p, &backend, &reviewer);
+    let item = operation(&p).conditions.acceptance[1].clone();
+    let token = deletion_token(&item);
+    let (task, docs_text) = (p.task.to_string(), docs.to_string());
+    let about_child = ask_as_planner(
+        &p,
+        planner,
+        &["--task", &docs_text, "--option", &token, "--option", "keep"],
+        "drop the documents item, asked about the child?",
+    );
+    idle(&queue(&p), &p.fx.db, planner);
+    queue(&p).answer(about_child, &token).unwrap();
+    supervise(&p, &backend, &reviewer, 1);
+    assert_eq!(turn_requests(&p.fx.db, planner).len(), 1);
+    take_turns(&queue(&p), &p.fx.db, planner);
+    let asked = ask_as_planner(
+        &p,
+        planner,
+        &["--task", &task, "--option", &token, "--option", "keep"],
+        "drop the documents item?",
+    );
+    stopped(&p, planner);
+    supervise(&p, &backend, &reviewer, 1);
+    assert!(exit_requested(&p.fx.db, planner));
+    let waited: Vec<Value> = queue(&p)
+        .latest_events_of("planner_answer_wait", 10)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.payload)
+        .collect();
+    assert_eq!(waited.len(), 1, "{waited:?}");
+    assert_eq!(waited[0]["asks"], json!([asked]), "{waited:?}");
+    assert_eq!(waited[0]["revise"], true, "{waited:?}");
+    queue(&p)
+        .planner_exited(planner, std::process::id(), 0)
+        .unwrap();
+    let launched = backend.launched().len();
+    supervise(&p, &backend, &reviewer, 1);
+    supervise(&p, &backend, &reviewer, 1);
+    assert!(revise_planner(&p, proposal).is_none());
+    assert_eq!(backend.launched().len(), launched, "not opened unanswered");
+
+    queue(&p).answer(asked, &token).unwrap();
+    supervise(&p, &backend, &reviewer, 1);
+    supervise(&p, &backend, &reviewer, 1);
+    let next = revise_planner(&p, proposal).expect("a planner carries the answer");
+    assert_ne!(next, planner);
+    assert_eq!(backend.launched().len(), launched + 1, "one planner");
+    let prompt = planner_prompt(&p.fx.db, next);
+    for expected in [
+        format!(
+            "asked a person (ask {asked}) about task {}, which this proposal replaces,",
+            p.task
+        ),
+        "drop the documents item?".to_owned(),
+        format!("answer to ask {asked}: {token}"),
+        format!("dagq submit --proposal {proposal} --replacement <plan.json>"),
+    ] {
+        assert!(prompt.contains(&expected), "{expected}\n{prompt}");
+    }
+    assert!(queue(&p).read_ask(asked).unwrap().closed_at.is_some());
+    let handle = queue(&p)
+        .planners(false)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == next)
+        .and_then(|row| row.workspace_id)
+        .unwrap();
+    // An ask about a child allows no deletion.
+    let error = format!(
+        "{:#}",
+        submit(
+            &p,
+            &handle,
+            &[],
+            Some(proposal),
+            Some(&deleting_plan(&p, [api, docs], about_child)),
+        )
+        .unwrap_err()
+    );
+    assert!(error.contains("deletion_unauthorized"), "{error}");
+    submit(
+        &p,
+        &handle,
+        &[],
+        Some(proposal),
+        Some(&deleting_plan(&p, [api, docs], asked)),
+    )
+    .unwrap();
+    let submitted = events(&p, p.task, "replan_plan_submitted");
+    assert_eq!(submitted.len(), 2, "{submitted:?}");
     assert_eq!(operation(&p).status, ReplanStatus::Reviewing);
     assert_kept(&p);
 }

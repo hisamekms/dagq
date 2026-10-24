@@ -629,17 +629,32 @@ impl SqliteQueue {
     /// The `planner_question`s a planner asked and nobody closed about the
     /// tasks of `proposal`, by ID: those not answered hold its revise back
     /// from a new planner, and those answered go with it (ADR-t1704-1
-    /// decision 4). One the inbox or a person opened holds nothing.
+    /// decision 4). One the inbox or a person opened holds nothing. The
+    /// tasks of a replacement proposal include the parked task of the
+    /// replanning operation not closed that has it as its proposal
+    /// ([`Self::replaced_tasks`]): the deletion's ask is about that task
+    /// ([`route_of`] sends its answer the same way).
     pub fn proposal_questions(&self, proposal: ProposalId) -> Result<Vec<Ask>> {
+        let parked = serde_json::to_string(&self.replaced_tasks(proposal)?)?;
         Ok(self
             .conn
             .prepare(
                 "SELECT a.* FROM asks a JOIN tasks t ON t.id=a.task_id
-                 WHERE t.proposal_id=?1 AND a.kind='planner_question' AND a.run_id IS NULL
+                 WHERE (t.proposal_id=?1 OR t.id IN (SELECT value FROM json_each(?2)))
+                 AND a.kind='planner_question' AND a.run_id IS NULL
                  AND a.asked_by='planner' AND a.closed_at IS NULL ORDER BY a.id",
             )?
-            .query_map([proposal], ask_row)?
+            .query_map(params![proposal, parked], ask_row)?
             .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The parked tasks whose replacement proposal is `proposal`
+    /// ([`parked_tasks`]).
+    pub fn replaced_tasks(&self, proposal: ProposalId) -> Result<Vec<TaskId>> {
+        Ok(parked_tasks(
+            &replan_links(&self.conn, "proposal_id", proposal.as_i64())?,
+            proposal,
+        ))
     }
 
     /// Claim the typing of the answer of `id` into `planner`'s `workspace`
@@ -816,6 +831,9 @@ impl DraftPlannerStore for SqliteQueue {
     }
     fn proposal_questions(&self, proposal: ProposalId) -> Result<Vec<Ask>> {
         SqliteQueue::proposal_questions(self, proposal)
+    }
+    fn replaced_tasks(&self, proposal: ProposalId) -> Result<Vec<TaskId>> {
+        SqliteQueue::replaced_tasks(self, proposal)
     }
     fn answer_request(&self, ask: &Ask) -> Result<Option<RequestId>> {
         answer_request(&self.conn, ask)
@@ -1346,9 +1364,157 @@ pub(super) fn answer_draft(conn: &Connection, ask: &Ask) -> Result<Option<TaskId
     Ok((status.as_deref() == Some(TaskStatus::Draft.as_str())).then_some(task_id))
 }
 
+/// A replanning operation as the routing of answers reads it: the task it
+/// parked, its replacement proposal once one was submitted, and whether it
+/// closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReplanLink {
+    task: TaskId,
+    proposal: Option<ProposalId>,
+    closed: bool,
+}
+
+/// The operations of `column` (`task_id` or `proposal_id`) `id`, oldest
+/// first.
+fn replan_links(conn: &Connection, column: &str, id: i64) -> Result<Vec<ReplanLink>> {
+    Ok(conn
+        .prepare(&format!(
+            "SELECT task_id, proposal_id, closed_at IS NOT NULL FROM replan_operations
+             WHERE {column}=?1 ORDER BY id"
+        ))?
+        .query_map([id], |r| {
+            Ok(ReplanLink {
+                task: r.get(0)?,
+                proposal: r.get(1)?,
+                closed: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The replacement proposal whose revise answers about the task `links`
+/// (the operations that parked it, oldest first) parked: that of the latest
+/// operation not closed that has one. `None` once the operation closed, or
+/// before a proposal was submitted for it.
+fn replacing_proposal(links: &[ReplanLink]) -> Option<ProposalId> {
+    links
+        .iter()
+        .filter(|link| !link.closed)
+        .filter_map(|link| link.proposal)
+        .next_back()
+}
+
+/// The tasks of `links` that the operations not closed with the
+/// replacement proposal `proposal` parked: a closed operation's task is no
+/// longer the proposal's to ask about.
+fn parked_tasks(links: &[ReplanLink], proposal: ProposalId) -> Vec<TaskId> {
+    let mut tasks: Vec<TaskId> = links
+        .iter()
+        .filter(|link| !link.closed && link.proposal == Some(proposal))
+        .map(|link| link.task)
+        .collect();
+    tasks.sort_unstable();
+    tasks.dedup();
+    tasks
+}
+
+/// Where an answer about a task of a proposal goes ([`proposal_answer`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProposalAnswer {
+    /// Typed to this planner as its next turn.
+    Planner(PlannerId),
+    /// Carried with the proposal's revise to the planner opened for it.
+    Revise,
+    /// Not the proposal's to take: it goes as any other answer.
+    Elsewhere,
+}
+
+/// Where an answer about a task of a proposal goes, given the planner of
+/// the runtime's open for it and not asked to exit for a person's answer
+/// (`open`), whether it is `revising`, and its owner (a request's or a
+/// finding's planner that submitted it) open and not asked to exit
+/// (`owner`): the open planner; else, for a revise no planner holds, its
+/// owner as its next turn, or the revise to the planner opened for it
+/// (ADR-t1704-1 decision 4); else elsewhere.
+fn proposal_answer(
+    open: Option<PlannerId>,
+    revising: bool,
+    owner: Option<PlannerId>,
+) -> ProposalAnswer {
+    match (open, revising, owner) {
+        (Some(planner), _, _) => ProposalAnswer::Planner(planner),
+        (None, true, Some(owner)) => ProposalAnswer::Planner(owner),
+        (None, true, None) => ProposalAnswer::Revise,
+        (None, false, _) => ProposalAnswer::Elsewhere,
+    }
+}
+
+/// The parked task's replacement proposal ([`replacing_proposal`]).
+fn replaced_by(conn: &Connection, task: TaskId) -> Result<Option<ProposalId>> {
+    Ok(replacing_proposal(&replan_links(
+        conn,
+        "task_id",
+        task.as_i64(),
+    )?))
+}
+
+/// Where an answer about a task of `proposal` goes, as [`route_of`] sends
+/// it ([`proposal_answer`]); `None` when it is not the proposal's to take.
+fn proposal_route(conn: &Connection, proposal: ProposalId) -> Result<Option<PlannerAnswerRoute>> {
+    let open: Option<PlannerId> = conn
+        .query_row(
+            "SELECT id FROM planners WHERE proposal_id=?1 AND origin='runtime'
+             AND closed_at IS NULL AND answer_wait_at IS NULL ORDER BY id DESC LIMIT 1",
+            [proposal],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let revising: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM proposals WHERE id=?1 AND status='revising')",
+        [proposal],
+        |r| r.get(0),
+    )?;
+    let to = proposal_answer(open, revising, proposal_owner(conn, proposal)?);
+    answer_route(conn, to, proposal)
+}
+
+/// The owner of `proposal` open and not asked to exit for a person's
+/// answer: the planner of the runtime's in the workspace that submitted it.
+fn proposal_owner(conn: &Connection, proposal: ProposalId) -> Result<Option<PlannerId>> {
+    Ok(conn
+        .query_row(
+            "SELECT p.id FROM planners p JOIN proposals x ON x.owner_workspace_id=p.workspace_id
+             WHERE x.id=?1 AND p.origin='runtime' AND p.closed_at IS NULL
+             AND p.answer_wait_at IS NULL ORDER BY p.id DESC LIMIT 1",
+            [proposal],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// The route of `to` for an answer about a task of `proposal`.
+fn answer_route(
+    conn: &Connection,
+    to: ProposalAnswer,
+    proposal: ProposalId,
+) -> Result<Option<PlannerAnswerRoute>> {
+    Ok(match to {
+        ProposalAnswer::Planner(planner) => Some(PlannerAnswerRoute::Planner(Box::new(
+            read_planner(conn, planner)?,
+        ))),
+        ProposalAnswer::Revise => Some(PlannerAnswerRoute::Revise(proposal)),
+        ProposalAnswer::Elsewhere => None,
+    })
+}
+
 /// Where the answer of `ask` goes: the planner of the runtime's not closed
 /// that works on its task (opened for its bundle of drafts, or for its
-/// proposal);
+/// proposal); for the parked task of a replanning operation not closed
+/// that has a replacement proposal ([`replaced_by`]), where an answer about
+/// a task of that proposal goes ([`proposal_route`]), so the planner of
+/// its revise gets the answer of the deletion's ask it asked about the
+/// parked task (ADR-t1521-2 decisions 3 and 4, ADR-t1704-1 decision 4;
+/// otherwise the parked task's answer goes as any other's);
 /// else closed by the supervisor for `keep_draft` (nothing to apply: the
 /// draft waits as it is for a planning request the inbox records, or for
 /// its revisit time, ADR-t1540-1) or a
@@ -1371,6 +1537,11 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
     let Some(task_id) = ask.task_id else {
         return Ok(PlannerAnswerRoute::Person);
     };
+    if let Some(proposal) = replaced_by(conn, task_id)?
+        && let Some(route) = proposal_route(conn, proposal)?
+    {
+        return Ok(route);
+    }
     let planner: Option<i64> = conn
         .query_row(
             "SELECT p.id FROM planners p JOIN tasks t ON t.id=?1
@@ -1409,24 +1580,10 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
         )
         .optional()?;
     if let Some(proposal) = revising {
-        // Its owner still there (a request's or a finding's planner that
-        // submitted it) takes it as its next turn; one asked to exit for a
-        // person's answer does not.
-        let owner: Option<i64> = conn
-            .query_row(
-                "SELECT p.id FROM planners p JOIN proposals x ON x.owner_workspace_id=p.workspace_id
-                 WHERE x.id=?1 AND p.origin='runtime' AND p.closed_at IS NULL
-                 AND p.answer_wait_at IS NULL ORDER BY p.id DESC LIMIT 1",
-                [proposal],
-                |r| r.get(0),
-            )
-            .optional()?;
-        return Ok(match owner {
-            Some(id) => {
-                PlannerAnswerRoute::Planner(Box::new(read_planner(conn, PlannerId::new(id))?))
-            }
-            None => PlannerAnswerRoute::Revise(proposal),
-        });
+        let to = proposal_answer(None, true, proposal_owner(conn, proposal)?);
+        if let Some(route) = answer_route(conn, to, proposal)? {
+            return Ok(route);
+        }
     }
     // A draft kept by the answer waits as it is for a planning request the
     // inbox records (ADR-t1394-1 decision 8), or for its revisit time
@@ -2109,6 +2266,84 @@ mod tests {
             !queue
                 .planner_answer_undelivered(next.id, asked.id, &payload)
                 .unwrap()
+        );
+    }
+
+    /// The replacement proposal a parked task's answers go to is that of
+    /// the latest operation not closed that has one: none before a
+    /// proposal was submitted or once the operation closed.
+    #[test]
+    fn a_parked_task_is_replaced_by_the_proposal_of_its_open_operation() {
+        let link = |proposal: Option<i64>, closed| ReplanLink {
+            task: TaskId::new(1),
+            proposal: proposal.map(ProposalId::new),
+            closed,
+        };
+        assert_eq!(replacing_proposal(&[]), None);
+        assert_eq!(replacing_proposal(&[link(None, false)]), None);
+        assert_eq!(replacing_proposal(&[link(Some(7), true)]), None);
+        assert_eq!(
+            replacing_proposal(&[link(Some(7), false)]),
+            Some(ProposalId::new(7))
+        );
+        assert_eq!(
+            replacing_proposal(&[link(Some(5), true), link(Some(7), false)]),
+            Some(ProposalId::new(7))
+        );
+    }
+
+    /// The parked tasks of a replacement proposal are those its operations
+    /// not closed parked: not a closed operation's, nor another
+    /// proposal's.
+    #[test]
+    fn the_parked_tasks_of_a_proposal_are_those_of_its_open_operations() {
+        let link = |task: i64, proposal: i64, closed| ReplanLink {
+            task: TaskId::new(task),
+            proposal: Some(ProposalId::new(proposal)),
+            closed,
+        };
+        let links = [link(1, 7, false), link(2, 7, true), link(3, 8, false)];
+        assert_eq!(
+            parked_tasks(&links, ProposalId::new(7)),
+            vec![TaskId::new(1)]
+        );
+        assert_eq!(
+            parked_tasks(&links, ProposalId::new(8)),
+            vec![TaskId::new(3)]
+        );
+        assert!(parked_tasks(&links, ProposalId::new(9)).is_empty());
+        let none = ReplanLink {
+            task: TaskId::new(4),
+            proposal: None,
+            closed: false,
+        };
+        assert!(parked_tasks(&[none], ProposalId::new(7)).is_empty());
+    }
+
+    /// An answer about a task of a proposal goes to the planner open for
+    /// it; else, while it is revising, to its owner open or with the
+    /// revise; else it is not the proposal's (ADR-t1704-1 decision 4).
+    #[test]
+    fn an_answer_about_a_proposals_task_goes_to_its_planner_or_its_revise() {
+        let (open, owner) = (PlannerId::new(3), PlannerId::new(2));
+        for revising in [true, false] {
+            assert_eq!(
+                proposal_answer(Some(open), revising, Some(owner)),
+                ProposalAnswer::Planner(open)
+            );
+        }
+        assert_eq!(
+            proposal_answer(None, true, Some(owner)),
+            ProposalAnswer::Planner(owner)
+        );
+        assert_eq!(proposal_answer(None, true, None), ProposalAnswer::Revise);
+        assert_eq!(
+            proposal_answer(None, false, Some(owner)),
+            ProposalAnswer::Elsewhere
+        );
+        assert_eq!(
+            proposal_answer(None, false, None),
+            ProposalAnswer::Elsewhere
         );
     }
 

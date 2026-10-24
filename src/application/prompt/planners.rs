@@ -695,6 +695,9 @@ pub fn runtime_planner_prompt(
     // The answers the planner before it stopped at, with what it left
     // (ADR-t1704-1 decisions 3 and 4).
     let read = "`dagq asks --all`";
+    let parked = carried
+        .replacement
+        .map(|(brief, _)| brief.operation.task_id);
     let (lines, cuts): (Vec<String>, Vec<bool>) = carried
         .answers
         .iter()
@@ -707,11 +710,17 @@ pub fn runtime_planner_prompt(
                 Keep::Start,
                 read,
             );
+            let task = answer.task_id.map_or("?".to_owned(), |t| t.to_string());
+            let about = match parked {
+                Some(tid) if answer.task_id == Some(tid) => {
+                    format!("task {task}, which this proposal replaces,")
+                }
+                _ => format!("task {task} of this proposal"),
+            };
             (
                 format!(
-                    "\nThe planner before you asked a person (ask {aid}) about task {task} of this proposal while it fixed it, and was ended while it waited:\n{question}\n\nanswer to ask {aid}: {text}\n",
+                    "\nThe planner before you asked a person (ask {aid}) about {about} while it fixed it, and was ended while it waited:\n{question}\n\nanswer to ask {aid}: {text}\n",
                     aid = answer.id,
-                    task = answer.task_id.map_or("?".to_owned(), |t| t.to_string()),
                 ),
                 question_cut || text_cut,
             )
@@ -748,16 +757,23 @@ pub fn runtime_planner_prompt(
     carried_text.push_str(&handovers_text(&mut fit, carried.handovers));
     // A replacement's material is cut with a way to read the rest; its
     // steps stand in for the plain resubmit and are never cut.
-    let (replan, steps) = match carried.replacement {
+    // The ask of a replacement's revise is about the parked task, whose
+    // answer alone can allow a deletion (ADR-t1521-1 decision 3).
+    let (replan, steps, ask) = match carried.replacement {
         Some((brief, snapshot)) => (
             replan_section(&mut fit, brief, snapshot)?,
             format!("\n{}", replacement_revise_steps(proposal, brief)),
+            format!(
+                "A fix that changes the plan's intent (acceptance, scope, the relation to the goal) needs a person: raise it to the inbox with `dagq ask --task {tid} --kind planner_question --because scope` (about task {tid}, never a child) as the skill describes, stop, and continue from the answer, which arrives as the prompt of your next turn.",
+                tid = brief.operation.task_id,
+            ),
         ),
         None => (
             String::new(),
             format!(
                 "Follow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show {proposal}` and each task with `dagq show ID`, fix what the reasons point at, and submit it again with `dagq submit --proposal {proposal}`."
             ),
+            "A fix that changes the plan's intent (acceptance, scope, the relation to the goal) needs a person: raise it to the inbox with `dagq ask --task ID --kind planner_question --because scope` as the skill describes, stop, and continue from the answer, which arrives as the prompt of your next turn.".to_owned(),
         ),
     };
     Ok(fit.finish(format!(
@@ -767,7 +783,7 @@ pub fn runtime_planner_prompt(
          {steps}\n\
          {RECORD_READING}\n\
          {rules}\n\
-         A fix that changes the plan's intent (acceptance, scope, the relation to the goal) needs a person: raise it to the inbox with `dagq ask --task ID --kind planner_question --because scope` as the skill describes, stop, and continue from the answer, which arrives as the prompt of your next turn. {BEFORE_YOU_STOP_AT_A_QUESTION}\n\
+         {ask} {BEFORE_YOU_STOP_AT_A_QUESTION}\n\
          Never open the queue database directly; use the dagq CLI only.\n{carried_text}",
         db = crate::application::path_text(db)?,
         rules = repository_rules(RUNTIME_PLANNER_ASK),
@@ -787,7 +803,7 @@ fn replacement_revise_steps(
     let op = &brief.operation;
     format!(
         "This proposal replaces task {tid} of replan operation {oid}: the trusted runtime parked run {run} of task {tid} with its work saved, and the proposal's tasks are the children of its replacement plan, which stay submitted after plan review's pass until the runtime applies it. The operation's conditions, the saved work and the latest plan are above.\n\
-         Follow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show {proposal}`, each task with `dagq show ID`, and the operation with its latest plan and that plan's problems now with `dagq replans {oid}`. Fix what the reasons point at, in the children and in the plan alike, and keep every acceptance item of task {tid} mapped to the children; a mapping `deleted` stays only with the `authority_ask_id` it already has. {form} Write the whole plan as JSON and submit the proposal again with it: `dagq submit --proposal {proposal} --replacement <plan.json>`. Submit refuses this proposal without `--replacement`, and refuses a plan that leaves an item unmapped, weakens a verification, closes a loop, is stale, or leaves the saved work's carrying unclear, saying why: fix it and submit again. Never edit task {tid}, its run or its worktree.",
+         Follow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show {proposal}`, each task with `dagq show ID`, and the operation with its latest plan and that plan's problems now with `dagq replans {oid}`. Fix what the reasons point at, in the children and in the plan alike, and keep every acceptance item of task {tid} mapped to the children; a mapping `deleted` stays only with the `authority_ask_id` it already has. Dropping an item is a person's decision: ask it about task {tid} itself, `dagq ask --task {tid} --kind planner_question --because scope --recommend <option> --confidence <high|low> --question '<everything the person needs>' --option delete:<ordinal>:<the first 12 characters of its hash> --option keep` (one delete option per item), report briefly and stop; the answer arrives as `answer to ask <id>: ...`. Only a person's answer that is that option, whole, allows the deletion: map the item `disposition` `deleted` with `authority_ask_id` naming that ask and submit again as below; an answer that keeps it, or names another item, allows none. An ask about a child, or one asked before the operation began, allows no deletion. {form} Write the whole plan as JSON and submit the proposal again with it: `dagq submit --proposal {proposal} --replacement <plan.json>`. Submit refuses this proposal without `--replacement`, and refuses a plan that leaves an item unmapped, weakens a verification, closes a loop, is stale, or leaves the saved work's carrying unclear, saying why: fix it and submit again. Never edit task {tid}, its run or its worktree.",
         oid = op.id,
         tid = op.task_id,
         run = op.run_id,

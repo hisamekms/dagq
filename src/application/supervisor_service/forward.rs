@@ -331,6 +331,10 @@ impl DraftPlannerStore for SupervisorQueue {
         let local = self.local()?;
         DraftPlannerStore::proposal_questions(&**local, proposal)
     }
+    fn replaced_tasks(&self, proposal: ProposalId) -> Result<Vec<TaskId>> {
+        let local = self.local()?;
+        DraftPlannerStore::replaced_tasks(&**local, proposal)
+    }
     fn answer_request(&self, ask: &Ask) -> Result<Option<crate::domain::RequestId>> {
         let local = self.local()?;
         DraftPlannerStore::answer_request(&**local, ask)
