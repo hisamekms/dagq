@@ -501,6 +501,121 @@ fn the_planner_a_revise_was_sent_to_may_withdraw_it() {
     );
 }
 
+/// A planner changes no task of a revising proposal another planner owns,
+/// nor of one whose owner the queue does not name as an actor: each change
+/// is refused as `not on this resource`, recorded with the proposal, and
+/// leaves the task, its dependencies and its events as they were. The
+/// planner the revise went to, the user and the inbox change it as before.
+#[test]
+fn a_planner_changes_no_task_of_another_planners_revising_proposal() {
+    let (_dir, db) = queue();
+    open_planners(&db, 5);
+    let replaced = planner("planner:1");
+    allowed_as(&replaced, &db, &["goal", "add", "planned"]);
+    allowed_as(&replaced, &db, &["add", "held"]);
+    allowed_as(&replaced, &db, &["add", "predecessor"]);
+    allowed_as(&replaced, &db, &["submit", "1"]);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let send_back = |owner: Option<&str>, reviser: Option<i64>| {
+        conn.execute(
+            "UPDATE proposals SET status='revising', owner_actor_id=?1, revise_planner_id=?2
+             WHERE id=1",
+            rusqlite::params![owner, reviser],
+        )
+        .unwrap();
+    };
+    set_status(&db, 1, "draft");
+    send_back(Some("planner:1"), Some(5));
+    let changes: [&[&str]; 9] = [
+        &["edit", "1", "--description", ""],
+        &["set-goal", "1", "1"],
+        &["set-paths", "1", "--paths", "docs/**"],
+        &["set-priority", "1", "high"],
+        &["revisit", "1", "--at", "2099-01-01T00:00:00Z"],
+        &["draft", "1"],
+        &["dependency", "add", "1", "2"],
+        &["dependency", "remove", "1", "2"],
+        &["cancel", "1", "--reason", "stale"],
+    ];
+    let task_events = || {
+        conn.query_row(
+            "SELECT COUNT(*) FROM run_events WHERE task_id=1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    let before = (
+        ok(&db, &["show", "1", "--full"])["task"].clone(),
+        task_events(),
+    );
+    let refused = |actor: &[(&str, String)], owner: Value| {
+        let recorded = denials(&db).len();
+        for args in changes {
+            let error = denied_as(actor, &db, args);
+            assert_eq!(
+                error["denied"]["reason"], "not on this resource",
+                "{args:?}"
+            );
+        }
+        let recorded = &denials(&db)[recorded..];
+        assert_eq!(recorded.len(), changes.len());
+        for event in recorded {
+            assert_eq!(
+                event["payload"]["resource"],
+                json!({"kind": "task", "id": 1, "status": "draft",
+                       "proposal": {"id": 1, "status": "revising", "owner": owner}}),
+            );
+        }
+        assert_eq!(
+            (
+                ok(&db, &["show", "1", "--full"])["task"].clone(),
+                task_events()
+            ),
+            before
+        );
+        assert!(
+            ok(&db, &["show", "1"])["dependencies"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    };
+    refused(&replaced, json!("planner:5"));
+    // The owner unrecorded, or a role's name that names no one actor.
+    send_back(None, None);
+    refused(&planner("planner:5"), Value::Null);
+    send_back(Some("planner"), None);
+    refused(&[("DAGQ_ROLE", "planner".to_owned())], json!("planner"));
+
+    // The planner the revise went to, the user and the inbox change it.
+    send_back(Some("planner:1"), Some(5));
+    let owner = planner("planner:5");
+    allowed_as(&owner, &db, &["edit", "1", "--description", "kept"]);
+    allowed_as(&owner, &db, &["dependency", "add", "1", "2"]);
+    allowed_as(&owner, &db, &["dependency", "remove", "1", "2"]);
+    ok(&db, &["set-paths", "1", "--paths", "docs/**"]);
+    ok_as("inbox", &db, &["set-priority", "1", "high"]);
+    // With no reviser, the planner that submitted it owns it.
+    send_back(Some("planner:1"), None);
+    allowed_as(&replaced, &db, &["edit", "1", "--title", "held again"]);
+    let task = &ok(&db, &["show", "1"])["task"];
+    assert_eq!(
+        (
+            &task["description"],
+            &task["paths"],
+            &task["priority"],
+            &task["title"]
+        ),
+        (
+            &json!("kept"),
+            &json!(["docs/**"]),
+            &json!("high"),
+            &json!("held again")
+        )
+    );
+}
+
 /// A role without the capability is refused as always, whether or not
 /// the task exists.
 #[test]

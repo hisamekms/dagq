@@ -16,7 +16,8 @@ use super::sqlite::{enum_col, event, goal_event, read_goal, transition_task};
 use crate::domain::{
     Ask, ChangeSet, DomainError, GoalId, GoalStatus, GoalSubmitted, PlannerOrigin, PlannerOwner,
     Proposal, ProposalId, ProposalRecord, ProposalStatus, Submission, TagSet, TaskAction, TaskId,
-    TaskStatus, TitlePrefixes, follow_up::reopened_material, goal, investigation, proposal,
+    TaskProposal, TaskStatus, TitlePrefixes, follow_up::reopened_material, goal, investigation,
+    proposal,
 };
 
 /// When a submit happens: the timestamp of its records and the unix
@@ -571,6 +572,27 @@ pub(super) fn owner_actor(conn: &Connection, id: ProposalId) -> Result<Option<St
     )
     .optional()?
     .with_context(|| format!("proposal {id} does not exist"))
+}
+
+/// The proposal `task` is in, with its status and its owner as
+/// [`owner_actor`] has it; `None` for a task in no proposal.
+pub(super) fn task_proposal(conn: &Connection, task: TaskId) -> Result<Option<TaskProposal>> {
+    let Some((id, status)) = conn
+        .query_row(
+            "SELECT p.id, p.status FROM tasks t JOIN proposals p ON p.id = t.proposal_id
+             WHERE t.id=?1",
+            [task],
+            |row| Ok((row.get::<_, ProposalId>(0)?, enum_col(row, "status")?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(TaskProposal {
+        id,
+        status,
+        owner: owner_actor(conn, id)?,
+    }))
 }
 
 pub(super) fn read(conn: &Connection, id: ProposalId) -> Result<Proposal> {

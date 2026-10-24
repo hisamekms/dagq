@@ -99,12 +99,13 @@ CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`req
 
 種類と各々が持つ持ち主・状態は`src/domain/authorization.rs`の`Resource`のdoc commentが持つ。
 CLIの写し（`requests`）は引数にあるものだけを入れ、持ち主と状態は`None`のまま渡す。
-計画系のコマンドはapplicationの層（下の[適用の範囲](#適用の範囲)）がqueueからtaskの状態とproposalの持ち主を読んで埋めてから判定する。
+計画系のコマンドはapplicationの層（下の[適用の範囲](#適用の範囲)）がqueueからtaskの状態と所属のproposal、proposalの持ち主を読んで埋めてから判定する。
 proposalの持ち主は、`submit`（新しいproposalと、差し戻しの後の出し直し）が出したactorとする（入口は`infrastructure::proposals`の`owner_actor`）。
 plan reviewが人を待つproposalをそのまま出し直す`submit --proposal`は持ち主を変えない。
 plan reviewが差し戻して`revising`のproposalは、reviseを送ったplannerを持ち主とする。
 持ち主を記録していないproposalは、plannerは取り下げられない（fail closed。userとinboxは取り下げられる）。
 roleの名前だけでactorを名指さないplannerのidは、どのproposalの持ち主にもならない。
+`revising`のproposalのtaskは、plannerはその持ち主のときだけ変えられ、持ち主が記録に無いかroleの名前だけなら拒む（fail closed）。
 
 ## Policy
 
@@ -112,7 +113,7 @@ roleの名前だけでactorを名指さないplannerのidは、どのproposalの
 | --- | --- | --- |
 | user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report`を除く全て | なし |
 | inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`は持たない | なし。人自身の操作との区別は記録が持つ |
-| planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくもの（`ask --request ID`）はその依頼の閉じていないruntimeのplannerのactor idが自分のときだけ（`request.decline`と同じ規則。plannerが分からなければ拒む）。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）。`revisit`（draftの再検討の時刻、`task.write`）はdraftだけで（storeがどのroleにも求める）、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。`follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
+| planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくもの（`ask --request ID`）はその依頼の閉じていないruntimeのplannerのactor idが自分のときだけ（`request.decline`と同じ規則。plannerが分からなければ拒む）。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）で、`revising`のproposalのtaskは持ち主だけ（不明なら拒む）。`revisit`（draftの再検討の時刻、`task.write`）はdraftだけで（storeがどのroleにも求める）、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。`follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
 | worker | 読み取り・`ask.open`・`note.write`・`replan.propose`・`eval.request`・`eval.read` | evalと`replan.propose`は自分のrunの分だけ。読み取り以外は自分のrun（`DAGQ_RUN_ID`）・そのtask（`DAGQ_TASK_ID`）・自分のrunのaskだけ。開けるaskは`worker_question`だけで、`--run`なら自分のrun、`--task`だけなら自分のtask（`DAGQ_RUN_ID`の無いworkerは何も持たない） |
 | review-job | 読み取り・`review.submit` | `review.submit`は自分のrunだけ |
 | recovery-job | 読み取り・`triage.submit` | `triage.submit`は自分のrunだけ |
@@ -151,7 +152,7 @@ CLI（`src/main.rs`の`execute()`）はparseと出力だけをし、これらの
 | `add` | `task.write` | `--goal`のgoal、無ければqueue |
 | `edit` `set-goal` `set-paths` `draft` `dependency add/remove` | `task.write` | task（queueにある状態） |
 | `set-priority` | `task.write` | task（queueにある状態）。`in_progress`のtask（再開待ちか復旧を待つrunを持つもの）にも置け・外せ、次の再開と復旧jobの順に効く（[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)の決定7）。`in_progress`のtaskではplannerは`not on this resource`で拒まれ、user・inboxだけが通る。`completed` / `canceled`は全てのroleでdomainが拒む |
-| `revisit ID --at` / `revisit ID --clear` | `task.write` | task（queueにある状態）。draftの再検討の時刻を付け・変え・外す（[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）。storeは同じtransactionでtaskが`draft`であることを確かめ（認可に使った状態は渡さない。draft以外は全てのroleに拒む）、`user` / `inbox`以外が`draft_planner_exhausted`のあるdraftに付けるのを拒む |
+| `revisit ID --at` / `revisit ID --clear` | `task.write` | task（queueにある状態）。draftの再検討の時刻を付け・変え・外す（[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）。storeは同じtransactionでtaskが`draft`であることを確かめ（draft以外は全てのroleに拒む）、`user` / `inbox`以外が`draft_planner_exhausted`のあるdraftに付けるのを拒む |
 | `judge-follow-up` | `follow_up.judge` | task（状態による制限なし。follow_upの出どころと必須の欄・遷移をstoreが同一transactionで検査） |
 | `edit --verify` / `edit --no-verify`（`in_progress`のみ） | `task.verify_edit` | task（最新runが終了し、生きているrunが無いことをstoreが同一transactionで検査） |
 | `ready` / `ready --bypass-review`・`ready --inherit` | `task.ready` / `task.ready_bypass_review` | task（状態） |
@@ -163,15 +164,14 @@ CLI（`src/main.rs`の`execute()`）はparseと出力だけをし、これらの
 終了runのverifyだけはuserとinboxが`task.verify_edit`で直せる（[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。
 planner・worker・jobはこの権限を持たない。
 `required_evidence`と`paths`は変更できず、修正は`task_edited`とそのactorに残る。
-`edit`のcapabilityは`Planning`がtransactionの外で読んだtaskの状態から選ぶので、`Planning`はその状態をstoreの`edit_task`に渡し、storeは同じtransactionで読んだ状態と照合する。
-食い違えば（例: `ready`で`task.write`を通った後にclaimされ、runが失敗して`in_progress`になった）、taskも`task_edited`も変えずに状態が変わったことを理由に拒む。
-taskの状態で認可する他のコマンド（`set-goal`・`set-paths`・`set-priority`・`draft`・`ready`・`cancel`・`dependency add` / `remove`）も同じく、認可に使った状態をstoreに渡し、storeは書く前に同じtransactionで照合して、食い違えばtask・依存・eventを変えずに拒む。
-domainの遷移はrunの終わった`in_progress`からの`draft`と`cancel`を許すので、照合が無いと`ready`で認可したplannerの`cancel` / `draft`が、その間にclaimされてrunが失敗した`in_progress`のtaskに当たる。
+`edit`のcapabilityは`Planning`がtransactionの外で読んだtaskの状態から選ぶので、`Planning`はその状態と所属のproposal（id・状態・持ち主）をstoreの`edit_task`に渡し、storeは同じtransactionで読んだものと照合する。
+食い違えば（例: `ready`で`task.write`を通った後にclaimされ、runが失敗して`in_progress`になった）、taskも`task_edited`も変えずに変わったことを理由に拒む。
+taskの状態で認可する他のコマンド（`set-goal`・`set-paths`・`set-priority`・`revisit`・`draft`・`ready`・`cancel`・`dependency add` / `remove`）も同じく、認可に使ったものをstoreに渡し、storeは書く前に同じtransactionで照合して、食い違えばtask・依存・eventを変えずに拒む。
+照合が無いと当たる取り違えは`src/domain/authorization.rs`の`TaskAuthorization`のdoc commentが持つ。
 
 `judge-follow-up`は`follow_up.judge`をtask resourceで判定し、user・inbox・plannerだけに許す。
 taskの状態による制限は無く、submitted以降の訂正も記録できる（所属を動かすのはdraft/readyだけ。[所属の判断](follow-up-membership.md)）。
 
-policyは上の表のまま: plannerはdraft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げを持ち、`ready`・`goal ready`・`goal review`とin_progress以降のtaskの変更（follow_upの所属判断の記録を除く。`in_progress`のtaskの`set-priority`もuserとinboxだけ）は持たない。
 `ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。
 worker・headlessのjob（一覧は`src/domain/actor.rs`の`ActorRole::is_headless_job`）・observer・wrapper・integrator・executor-telemetryは計画系を何もできない。
 supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。

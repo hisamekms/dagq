@@ -2,7 +2,8 @@
 //! [`Resource`], allowed or refused by an [`Authorizer`]. The policy is a
 //! static allowlist per [`ActorRole`] plus the resource rules of a few
 //! roles (a worker acts on its own run, a planner withdraws its own
-//! proposal and changes tasks that have not started). Everything not
+//! proposal and changes tasks that have not started, but none of another
+//! planner's revising proposal). Everything not
 //! listed is refused (default deny), and so is a resource whose owner the
 //! rule needs but the caller could not name (fail closed). On a host the
 //! check is advisory: any process can set `DAGQ_ROLE` (ADR-t728-1
@@ -13,8 +14,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ActorContext, ActorRole, AskId, AskKind, FindingId, GoalId, PlannerId, ProposalId, RequestId,
-    RunId,
+    ActorContext, ActorRole, AskId, AskKind, FindingId, GoalId, PlannerId, ProposalId,
+    ProposalStatus, RequestId, RunId,
 };
 use super::{DomainError, Priority, TaskId, TaskStatus, error::require, plan_request::PriorityBy};
 
@@ -217,10 +218,15 @@ pub enum Resource {
     /// The queue as a whole: reads, and what names nothing smaller.
     Queue,
     Goal(GoalId),
-    /// A task and its status when known.
+    /// A task and its status when known, with the proposal it is in when
+    /// the caller read its status (`None` for a task in no proposal, or one
+    /// named without its status). A planner changes no task of a revising
+    /// proposal that it does not own, nor of one whose owner the queue does
+    /// not name as an actor.
     Task {
         id: TaskId,
         status: Option<TaskStatus>,
+        proposal: Option<TaskProposal>,
     },
     /// A run and its task when known.
     Run {
@@ -276,9 +282,88 @@ pub enum Resource {
     Unresolved,
 }
 
+/// The proposal a task is in, as a change of the task is authorized with
+/// it: its status and the actor id of the planner that owns it now (the
+/// planner a revise went to while it is revising), `None` when the queue
+/// recorded none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskProposal {
+    pub id: ProposalId,
+    pub status: ProposalStatus,
+    pub owner: Option<String>,
+}
+
+impl TaskProposal {
+    /// Whether `actor` may change the tasks of this proposal as a planner:
+    /// any but a revising one, which only its owner may, and an owner that
+    /// names a role but no one actor (`planner`) is no owner.
+    fn open_to(&self, actor: &ActorContext) -> bool {
+        self.status != ProposalStatus::Revising
+            || self
+                .owner
+                .as_deref()
+                .is_some_and(|owner| owner.contains(':') && owner == actor.actor_id())
+    }
+}
+
+/// What a planning command's change of a task was authorized with: the
+/// task's status and the proposal it is in, as the store read them before.
+/// The store reads them again in its transaction and refuses the change,
+/// writing nothing, when any of them differs (ADR-t883-1). Without it, a
+/// planner's `cancel` or `draft` authorized on a `ready` task would reach
+/// one claimed in between whose run failed (the domain lets an `in_progress`
+/// task with an ended run go to either), and a planner's change authorized
+/// on a draft would reach it after plan review moved it into another
+/// planner's revising proposal, or sent its proposal to another planner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskAuthorization {
+    pub status: TaskStatus,
+    pub proposal: Option<TaskProposal>,
+}
+
+impl TaskAuthorization {
+    /// A task in no proposal with `status`.
+    pub const fn outside_proposals(status: TaskStatus) -> Self {
+        Self {
+            status,
+            proposal: None,
+        }
+    }
+
+    /// The task `id` as the authorizer is asked about it.
+    pub fn resource(&self, id: TaskId) -> Resource {
+        Resource::Task {
+            id,
+            status: Some(self.status),
+            proposal: self.proposal.clone(),
+        }
+    }
+
+    /// Refuse `now`, the task `task_id` as the store reads it in the
+    /// transaction of the change, unless it is what the change was
+    /// authorized with: another status is refused as such, another
+    /// proposal, proposal status or owner as a change of its proposal.
+    pub fn check_unchanged(&self, task_id: TaskId, now: &Self) -> Result<(), DomainError> {
+        require(self.status == now.status, || {
+            DomainError::TaskStatusChangedSinceAuthorized {
+                task_id,
+                authorized: self.status,
+                status: now.status,
+            }
+        })?;
+        require(self.proposal == now.proposal, || {
+            DomainError::TaskProposalChangedSinceAuthorized { task_id }
+        })
+    }
+}
+
 impl Resource {
     pub const fn task(id: TaskId) -> Self {
-        Self::Task { id, status: None }
+        Self::Task {
+            id,
+            status: None,
+            proposal: None,
+        }
     }
 
     pub const fn run(id: RunId) -> Self {
@@ -292,7 +377,22 @@ impl Resource {
         match self {
             Self::Queue => json!({"kind": "queue"}),
             Self::Goal(id) => json!({"kind": "goal", "id": id}),
-            Self::Task { id, status } => json!({"kind": "task", "id": id, "status": status}),
+            Self::Task {
+                id,
+                status,
+                proposal,
+            } => {
+                let mut record = json!({"kind": "task", "id": id, "status": status});
+                // A task in a proposal names it, its status and its owner.
+                if let Some(proposal) = proposal {
+                    record["proposal"] = json!({
+                        "id": proposal.id,
+                        "status": proposal.status,
+                        "owner": proposal.owner,
+                    });
+                }
+                record
+            }
             Self::Run { id, task } => json!({"kind": "run", "id": id, "task": task}),
             Self::Ask { id, run } => json!({"kind": "ask", "id": id, "run": run}),
             Self::NewAsk {
@@ -731,13 +831,15 @@ fn planner_permits(actor: &ActorContext, capability: Capability, resource: &Reso
         | Resource::Ask { run: Some(_), .. }
         | Resource::NewAsk { run: Some(_), .. }
         | Resource::Unresolved => false,
-        // Changes to tasks before they start (draft, submitted, ready); a
-        // note on any task.
-        Resource::Task { status, .. } if matches!(capability, C::TaskWrite | C::TaskCancel) => {
+        // Changes to tasks before they start (draft, submitted, ready), but
+        // not of another planner's revising proposal; a note on any task.
+        Resource::Task {
+            status, proposal, ..
+        } if matches!(capability, C::TaskWrite | C::TaskCancel) => {
             matches!(
                 status,
                 Some(TaskStatus::Draft | TaskStatus::Submitted | TaskStatus::Ready)
-            )
+            ) && proposal.as_ref().is_none_or(|p| p.open_to(actor))
         }
         Resource::Proposal { owner, .. } if capability == C::ProposalWithdraw => {
             owner.as_deref() == Some(actor.actor_id())
@@ -822,10 +924,7 @@ mod tests {
 
     #[test]
     fn only_user_and_inbox_can_correct_an_ended_tasks_verify() {
-        let task = Resource::Task {
-            id: TaskId::new(1),
-            status: Some(TaskStatus::InProgress),
-        };
+        let task = task_in(TaskStatus::InProgress);
         for role in [ActorRole::User, ActorRole::Inbox] {
             assert!(allowed(
                 &ActorContext::instance(role, 1),
@@ -857,10 +956,7 @@ mod tests {
     }
 
     fn task_in(status: TaskStatus) -> Resource {
-        Resource::Task {
-            id: TaskId::new(1),
-            status: Some(status),
-        }
+        TaskAuthorization::outside_proposals(status).resource(TaskId::new(1))
     }
 
     fn role(role: ActorRole) -> ActorContext {
@@ -1219,6 +1315,118 @@ mod tests {
         for role_ in [ActorRole::User, ActorRole::Inbox] {
             assert!(allowed(&role(role_), C::ProposalWithdraw, &proposal(None)));
         }
+    }
+
+    /// A planner changes no task of a revising proposal but its own, and
+    /// one whose owner is unrecorded or names a role but no one actor is
+    /// no planner's; a proposal in any other status, and every proposal for
+    /// the user, the inbox and the supervisor's cancel, decide nothing.
+    #[test]
+    fn a_planner_changes_no_task_of_another_planners_revising_proposal() {
+        let me = ActorContext::instance(ActorRole::Planner, 7);
+        let legacy = ActorContext::new(ActorRole::Planner, "planner");
+        let task = |status: ProposalStatus, owner: Option<&str>| {
+            TaskAuthorization {
+                status: TaskStatus::Draft,
+                proposal: Some(TaskProposal {
+                    id: ProposalId::new(1),
+                    status,
+                    owner: owner.map(str::to_owned),
+                }),
+            }
+            .resource(TaskId::new(1))
+        };
+        for capability in [C::TaskWrite, C::TaskCancel] {
+            let revising = |owner| task(ProposalStatus::Revising, owner);
+            assert!(allowed(&me, capability, &revising(Some("planner:7"))));
+            for owner in [Some("planner:8"), Some("planner"), None] {
+                let error = StaticPolicy
+                    .authorize(&me, capability, &revising(owner))
+                    .unwrap_err();
+                assert_eq!(error.reason, DenyReason::Resource, "{owner:?}");
+            }
+            assert!(!allowed(&legacy, capability, &revising(Some("planner"))));
+            for status in [
+                ProposalStatus::Submitted,
+                ProposalStatus::Accepted,
+                ProposalStatus::Canceled,
+            ] {
+                for owner in [Some("planner:8"), Some("planner"), None] {
+                    assert!(
+                        allowed(&me, capability, &task(status, owner)),
+                        "{status:?} {owner:?}"
+                    );
+                }
+            }
+            for role_ in [ActorRole::User, ActorRole::Inbox] {
+                for owner in [Some("planner:8"), None] {
+                    assert!(allowed(&role(role_), capability, &revising(owner)));
+                }
+            }
+        }
+        assert!(allowed(
+            &role(ActorRole::Supervisor),
+            C::TaskCancel,
+            &task(ProposalStatus::Revising, None)
+        ));
+        assert_eq!(
+            task(ProposalStatus::Revising, Some("planner:8")).record(),
+            serde_json::json!({"kind": "task", "id": 1, "status": "draft",
+                "proposal": {"id": 1, "status": "revising", "owner": "planner:8"}})
+        );
+    }
+
+    /// The store refuses a change whose task's status, proposal, proposal
+    /// status or owner differs from what it was authorized with.
+    #[test]
+    fn a_change_goes_on_only_with_the_task_and_proposal_it_was_authorized_with() {
+        let id = TaskId::new(5);
+        let in_proposal = |status: ProposalStatus, owner: &str| TaskAuthorization {
+            status: TaskStatus::Draft,
+            proposal: Some(TaskProposal {
+                id: ProposalId::new(1),
+                status,
+                owner: Some(owner.into()),
+            }),
+        };
+        let authorized = in_proposal(ProposalStatus::Revising, "planner:1");
+        assert_eq!(authorized.check_unchanged(id, &authorized.clone()), Ok(()));
+        let outside = TaskAuthorization::outside_proposals(TaskStatus::Draft);
+        assert_eq!(outside.check_unchanged(id, &outside.clone()), Ok(()));
+        let moved = TaskAuthorization {
+            proposal: Some(TaskProposal {
+                id: ProposalId::new(2),
+                ..authorized.proposal.clone().unwrap()
+            }),
+            ..authorized.clone()
+        };
+        for now in [
+            outside.clone(),
+            moved,
+            in_proposal(ProposalStatus::Submitted, "planner:1"),
+            in_proposal(ProposalStatus::Revising, "planner:2"),
+        ] {
+            assert_eq!(
+                authorized.check_unchanged(id, &now),
+                Err(DomainError::TaskProposalChangedSinceAuthorized { task_id: id }),
+                "{now:?}"
+            );
+        }
+        assert_eq!(
+            outside.check_unchanged(id, &authorized),
+            Err(DomainError::TaskProposalChangedSinceAuthorized { task_id: id })
+        );
+        assert_eq!(
+            outside.check_unchanged(
+                id,
+                &TaskAuthorization::outside_proposals(TaskStatus::Submitted)
+            ),
+            Err(DomainError::TaskStatusChangedSinceAuthorized {
+                task_id: id,
+                authorized: TaskStatus::Draft,
+                status: TaskStatus::Submitted,
+            })
+        );
     }
 
     /// Workers, wrappers, the integrator and the jobs read the queue but
@@ -1788,10 +1996,7 @@ mod membership_policy_tests {
                 let result = StaticPolicy.authorize(
                     &actor,
                     Capability::FollowUpJudge,
-                    &Resource::Task {
-                        id: TaskId::new(1),
-                        status: Some(status),
-                    },
+                    &TaskAuthorization::outside_proposals(status).resource(TaskId::new(1)),
                 );
                 assert_eq!(
                     result.is_ok(),

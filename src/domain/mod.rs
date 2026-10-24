@@ -1355,7 +1355,10 @@ pub mod worktime;
 pub mod write_rules;
 
 pub use actor::{ActorContext, ActorRole, TrustLevel};
-pub use authorization::{AuthorizationError, Authorizer, Capability, Resource, StaticPolicy};
+pub use authorization::{
+    AuthorizationError, Authorizer, Capability, Resource, StaticPolicy, TaskAuthorization,
+    TaskProposal,
+};
 pub use change::{ChangeSet, TaskChange};
 pub use error::DomainError;
 use error::require;

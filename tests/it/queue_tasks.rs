@@ -10,8 +10,8 @@ use dagq::{
         dependency_graph,
     },
     domain::{
-        ClaimOutcome, EvidenceCheck, GoalId, Priority, PrioritySource, TaskAction, TaskEdit,
-        TaskId, TaskStatus, cancel_reason::NewCancel,
+        ClaimOutcome, EvidenceCheck, GoalId, Priority, PrioritySource, TaskAction,
+        TaskAuthorization, TaskEdit, TaskId, TaskStatus, cancel_reason::NewCancel,
     },
     infrastructure::sqlite::SqliteQueue,
 };
@@ -760,15 +760,15 @@ fn changes_authorized_on_another_status_change_nothing() {
     let goal = queue.add_goal(new_goal("grouped")).unwrap().id();
     let task = claimed_and_failed(&dir, &mut queue, "claimed in between");
     let before = queue.show(task).unwrap();
-    let ready = TaskStatus::Ready;
+    let ready = || TaskAuthorization::outside_proposals(TaskStatus::Ready);
     let errors = [
-        planning::PlanningStore::transition(&mut queue, task, TaskAction::Cancel, ready),
-        planning::PlanningStore::transition(&mut queue, task, TaskAction::Draft, ready),
-        planning::PlanningStore::transition(&mut queue, task, TaskAction::BypassReview, ready),
-        planning::PlanningStore::cancel(&mut queue, task, duplicate_of(other), ready),
-        planning::PlanningStore::set_goal(&mut queue, task, Some(goal), ready),
-        planning::PlanningStore::set_paths(&mut queue, task, vec!["docs/**".into()], ready),
-        planning::PlanningStore::set_priority(&mut queue, task, Some(Priority::High), ready),
+        planning::PlanningStore::transition(&mut queue, task, TaskAction::Cancel, ready()),
+        planning::PlanningStore::transition(&mut queue, task, TaskAction::Draft, ready()),
+        planning::PlanningStore::transition(&mut queue, task, TaskAction::BypassReview, ready()),
+        planning::PlanningStore::cancel(&mut queue, task, duplicate_of(other), ready()),
+        planning::PlanningStore::set_goal(&mut queue, task, Some(goal), ready()),
+        planning::PlanningStore::set_paths(&mut queue, task, vec!["docs/**".into()], ready()),
+        planning::PlanningStore::set_priority(&mut queue, task, Some(Priority::High), ready()),
     ]
     .into_iter()
     .map(|result| result.unwrap_err().to_string())
@@ -778,25 +778,25 @@ fn changes_authorized_on_another_status_change_nothing() {
                 &mut queue,
                 task,
                 Dependency::Task(other),
-                ready,
+                ready(),
             ),
             planning::PlanningStore::add_dependency(
                 &mut queue,
                 task,
                 Dependency::Goal(goal),
-                ready,
+                ready(),
             ),
             planning::PlanningStore::remove_dependency(
                 &mut queue,
                 task,
                 Dependency::Task(other),
-                ready,
+                ready(),
             ),
             planning::PlanningStore::remove_dependency(
                 &mut queue,
                 task,
                 Dependency::Goal(goal),
-                ready,
+                ready(),
             ),
         ]
         .into_iter()
@@ -816,19 +816,19 @@ fn changes_authorized_on_another_status_change_nothing() {
 
     // Authorized with the status the task has, `cancel` and `draft` of an
     // `in_progress` task whose run ended go on as before.
-    let in_progress = TaskStatus::InProgress;
+    let in_progress = || TaskAuthorization::outside_proposals(TaskStatus::InProgress);
     let canceled =
-        planning::PlanningStore::transition(&mut queue, task, TaskAction::Cancel, in_progress)
+        planning::PlanningStore::transition(&mut queue, task, TaskAction::Cancel, in_progress())
             .unwrap();
     assert_eq!(canceled.status(), TaskStatus::Canceled);
     let task = claimed_and_failed(&dir, &mut queue, "drafted again");
     let drafted =
-        planning::PlanningStore::transition(&mut queue, task, TaskAction::Draft, in_progress)
+        planning::PlanningStore::transition(&mut queue, task, TaskAction::Draft, in_progress())
             .unwrap();
     assert_eq!(drafted.status(), TaskStatus::Draft);
     let task = claimed_and_failed(&dir, &mut queue, "a duplicate");
     let duplicate =
-        planning::PlanningStore::cancel(&mut queue, task, duplicate_of(other), in_progress)
+        planning::PlanningStore::cancel(&mut queue, task, duplicate_of(other), in_progress())
             .unwrap();
     assert_eq!(duplicate.status(), TaskStatus::Canceled);
 
@@ -838,17 +838,17 @@ fn changes_authorized_on_another_status_change_nothing() {
         &mut queue,
         task,
         TaskAction::BypassReview,
-        TaskStatus::Draft,
+        TaskAuthorization::outside_proposals(TaskStatus::Draft),
     )
     .unwrap();
-    let moved = planning::PlanningStore::set_goal(&mut queue, task, Some(goal), ready).unwrap();
+    let moved = planning::PlanningStore::set_goal(&mut queue, task, Some(goal), ready()).unwrap();
     assert_eq!(moved.goal_id(), Some(goal));
-    planning::PlanningStore::set_paths(&mut queue, task, vec!["docs/**".into()], ready).unwrap();
-    planning::PlanningStore::set_priority(&mut queue, task, Some(Priority::High), ready).unwrap();
-    planning::PlanningStore::add_dependency(&mut queue, task, Dependency::Task(other), ready)
+    planning::PlanningStore::set_paths(&mut queue, task, vec!["docs/**".into()], ready()).unwrap();
+    planning::PlanningStore::set_priority(&mut queue, task, Some(Priority::High), ready()).unwrap();
+    planning::PlanningStore::add_dependency(&mut queue, task, Dependency::Task(other), ready())
         .unwrap();
     assert_eq!(queue.show(task).unwrap().dependencies.len(), 1);
-    planning::PlanningStore::remove_dependency(&mut queue, task, Dependency::Task(other), ready)
+    planning::PlanningStore::remove_dependency(&mut queue, task, Dependency::Task(other), ready())
         .unwrap();
     assert!(queue.show(task).unwrap().dependencies.is_empty());
     let task = queue.show(task).unwrap().task;
@@ -860,9 +860,132 @@ fn changes_authorized_on_another_status_change_nothing() {
             &mut queue,
             task.id(),
             TaskAction::Cancel,
-            TaskStatus::Draft
+            TaskAuthorization::outside_proposals(TaskStatus::Draft)
         )
         .is_err()
     );
-    assert_eq!(queue.show(task.id()).unwrap().task.status(), ready);
+    assert_eq!(
+        queue.show(task.id()).unwrap().task.status(),
+        TaskStatus::Ready
+    );
+}
+
+/// What a planner's change of a task was authorized with includes the
+/// proposal the task is in, its status and its owner: a change authorized
+/// before the draft moved into another planner's revising proposal, or
+/// before its revising proposal changed owner, is refused by the store,
+/// and the task, its dependencies and its events stay as they were.
+/// Authorized with what the store holds, the same change goes on.
+#[test]
+fn changes_authorized_before_the_tasks_proposal_changed_change_nothing() {
+    use dagq::domain::{
+        PlannerOrigin, PlannerOwner, ProposalStatus, Submission, TaskProposal,
+        follow_up::RevisitChange,
+    };
+    let (dir, mut queue) = fixture();
+    let other = queue.add(new_task("predecessor")).unwrap().id();
+    let goal = queue.add_goal(new_goal("grouped")).unwrap().id();
+    let task = queue.add(new_task("moved in between")).unwrap().id();
+    let refused = format!(
+        "task {task} is in another proposal now, or its proposal's status or owner changed, since this command was authorized; nothing was changed, run it again"
+    );
+    let proposal = queue
+        .submit(Submission {
+            tasks: vec![task],
+            goals: Vec::new(),
+            proposal: None,
+            owner: PlannerOwner {
+                origin: PlannerOrigin::Runtime,
+                workspace_id: None,
+            },
+        })
+        .unwrap()
+        .id();
+    let conn = Connection::open(dir.path().join("queue.db")).unwrap();
+    let send_back_to = |owner: &str| {
+        conn.execute(
+            "UPDATE proposals SET status='revising', owner_actor_id=?1, revise_planner_id=NULL
+             WHERE id=?2",
+            rusqlite::params![owner, proposal],
+        )
+        .unwrap();
+        conn.execute("UPDATE tasks SET status='draft' WHERE id=?1", [task])
+            .unwrap();
+    };
+    let revising = |owner: &str| TaskAuthorization {
+        status: TaskStatus::Draft,
+        proposal: Some(TaskProposal {
+            id: proposal,
+            status: ProposalStatus::Revising,
+            owner: Some(owner.into()),
+        }),
+    };
+    send_back_to("planner:5");
+    // Authorized while the draft was in no proposal, and while its revising
+    // proposal was planner 1's.
+    for stale in [
+        TaskAuthorization::outside_proposals(TaskStatus::Draft),
+        revising("planner:1"),
+    ] {
+        let before = queue.show(task).unwrap();
+        let s = || stale.clone();
+        let mut errors = [
+            planning::PlanningStore::edit_task(
+                &mut queue,
+                task,
+                TaskEdit {
+                    description: Some(String::new()),
+                    ..TaskEdit::default()
+                },
+                s(),
+            ),
+            planning::PlanningStore::transition(&mut queue, task, TaskAction::Draft, s()),
+            planning::PlanningStore::cancel(&mut queue, task, duplicate_of(other), s()),
+            planning::PlanningStore::set_goal(&mut queue, task, Some(goal), s()),
+            planning::PlanningStore::set_paths(&mut queue, task, vec!["docs/**".into()], s()),
+            planning::PlanningStore::set_priority(&mut queue, task, Some(Priority::High), s()),
+        ]
+        .into_iter()
+        .map(|result| result.unwrap_err().to_string())
+        .collect::<Vec<_>>();
+        for on in [Dependency::Task(other), Dependency::Goal(goal)] {
+            for result in [
+                planning::PlanningStore::add_dependency(&mut queue, task, on, s()),
+                planning::PlanningStore::remove_dependency(&mut queue, task, on, s()),
+            ] {
+                errors.push(result.unwrap_err().to_string());
+            }
+        }
+        errors.push(
+            planning::PlanningStore::revisit_draft(
+                &mut queue,
+                task,
+                RevisitChange::Set { at: 1, note: None },
+                "planner",
+                "planner:1",
+                s(),
+            )
+            .unwrap_err()
+            .to_string(),
+        );
+        assert_eq!(errors, vec![refused.clone(); 11], "{stale:?}");
+        let after = queue.show(task).unwrap();
+        assert_eq!(
+            serde_json::to_value(&after.task).unwrap(),
+            serde_json::to_value(&before.task).unwrap()
+        );
+        assert_eq!(after.events.len(), before.events.len());
+        assert!(after.dependencies.is_empty());
+        assert!(after.goal_dependencies.is_empty());
+    }
+
+    // Authorized with the proposal and owner the store holds, it goes on.
+    let paths = planning::PlanningStore::set_paths(
+        &mut queue,
+        task,
+        vec!["docs/**".into()],
+        revising("planner:5"),
+    )
+    .unwrap();
+    assert_eq!(paths.paths(), ["docs/**"]);
 }

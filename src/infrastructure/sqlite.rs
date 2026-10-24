@@ -47,8 +47,8 @@ use crate::{
         GoalId, GoalPredecessor, GoalRecord, GoalSummary, GoalTask, GoalVerdict, LintInput,
         LintNode, NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND,
         PlannerOrigin, Predecessor, Priority, Proposal, ProposalId, RequestId, RunEvent, RunId,
-        RunRecord, Submission, TagSet, Task, TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId,
-        TaskRecord, TaskRun, TaskStatus, TaskStatusCounts, TitlePrefixes,
+        RunRecord, Submission, TagSet, Task, TaskAction, TaskAuthorization, TaskChange, TaskDetail,
+        TaskEdit, TaskId, TaskRecord, TaskRun, TaskStatus, TaskStatusCounts, TitlePrefixes,
         actor::{ActorContext, ActorRole},
         authorization::{PriorityHolder, check_priority_change},
         cancel_reason::{self, CancelRecord, NewCancel},
@@ -1026,15 +1026,16 @@ fn path_text(path: &Path) -> Result<&str> {
 }
 
 /// The planning commands' changes of a task (task 1609): each refuses,
-/// before it writes, a task whose status in its transaction is not
-/// `authorized`, the one the caller authorized it with. The [`TaskStore`]
-/// methods of the same names pass `None` and check nothing more.
+/// before it writes, a task whose status, proposal, proposal status or
+/// proposal owner in its transaction is not `authorized`, what the caller
+/// authorized it with. The [`TaskStore`] methods of the same names pass
+/// `None` and check nothing more.
 impl SqliteQueue {
     pub(super) fn transition_authorized(
         &mut self,
         task_id: TaskId,
         action: TaskAction,
-        authorized: Option<TaskStatus>,
+        authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
         let tx = self
             .conn
@@ -1049,7 +1050,7 @@ impl SqliteQueue {
         &mut self,
         task_id: TaskId,
         cancel: &NewCancel,
-        authorized: Option<TaskStatus>,
+        authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
         let tx = self
             .conn
@@ -1064,7 +1065,7 @@ impl SqliteQueue {
         &mut self,
         task_id: TaskId,
         predecessor_id: TaskId,
-        authorized: Option<TaskStatus>,
+        authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
         let tx = self
             .conn
@@ -1084,7 +1085,7 @@ impl SqliteQueue {
         &mut self,
         task_id: TaskId,
         predecessor_id: TaskId,
-        authorized: Option<TaskStatus>,
+        authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
         let tx = self
             .conn
@@ -1117,7 +1118,7 @@ impl SqliteQueue {
         &mut self,
         task_id: TaskId,
         goal_id: GoalId,
-        authorized: Option<TaskStatus>,
+        authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
         let tx = self
             .conn
@@ -1133,7 +1134,7 @@ impl SqliteQueue {
         &mut self,
         task_id: TaskId,
         goal_id: GoalId,
-        authorized: Option<TaskStatus>,
+        authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
         let tx = self
             .conn
@@ -1165,7 +1166,7 @@ impl SqliteQueue {
         &mut self,
         task_id: TaskId,
         goal_id: Option<GoalId>,
-        authorized: Option<TaskStatus>,
+        authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
         let tx = self
             .conn
@@ -1189,7 +1190,7 @@ impl SqliteQueue {
         &mut self,
         task_id: TaskId,
         paths: Vec<String>,
-        authorized: Option<TaskStatus>,
+        authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
         // Checked before the task is read, so a bad glob is reported first.
         validate_path_globs(&paths)?;
@@ -1227,7 +1228,7 @@ impl SqliteQueue {
         &mut self,
         task_id: TaskId,
         priority: Option<Priority>,
-        authorized: Option<TaskStatus>,
+        authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
         let tx = self
             .conn
@@ -1240,6 +1241,110 @@ impl SqliteQueue {
             &self.generators.clock.timestamp(),
             None,
         )?;
+        let result = read_task(&tx, task_id)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// [`TaskStore::edit_task`], refusing too a task whose proposal, its
+    /// status or its owner is not `full`'s (`None` checks the status only).
+    pub(super) fn edit_task_authorized(
+        &mut self,
+        task_id: TaskId,
+        edit: TaskEdit,
+        authorized: TaskStatus,
+        full: Option<&TaskAuthorization>,
+    ) -> Result<Task> {
+        ensure!(!edit.is_empty(), "task edit changes nothing");
+        // Checked before the task is read, so a bad value is reported first.
+        edit.validate()?;
+        if let (Some(changes), Some(change)) = (&self.changes, &edit.change) {
+            changes.check(change)?;
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::replans::check_task_step(&tx, task_id, GuardedStep::Edit)?;
+        let old = read_task(&tx, task_id)?;
+        task::check_status_authorized(&old, authorized)?;
+        check_authorized(&tx, task_id, full)?;
+        // The event keeps the fields before the edit, which consumes the task.
+        let old_json = serde_json::to_value(&old)?;
+        let old_mode = old.stored_worker_mode();
+        let new = if old.status() == TaskStatus::InProgress {
+            let latest: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+                    [task_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            ensure!(
+                edit.verify_only()
+                    && !has_unfinished_run(&tx, task_id)?
+                    && !tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM run_leases l JOIN task_runs r ON r.id=l.run_id WHERE r.task_id=?1)",
+                        [task_id], |row| row.get::<_, bool>(0),
+                    )?
+                    && matches!(latest.as_deref(), Some("failed" | "interrupted")),
+                "task {task_id} is in_progress; only --verify/--no-verify may be edited by user or inbox after its latest run has ended and no live run remains"
+            );
+            task::edit_ended_verify(old, edit)?
+        } else {
+            task::edit(old, edit)?
+        };
+        let new_json = serde_json::to_value(&new)?;
+        let (mut from, mut to) = (serde_json::Map::new(), serde_json::Map::new());
+        // The JSON leaves out a wait for the build not declared: recorded
+        // as false (ADR-t1632-1).
+        let value = |json: &serde_json::Value, field: &str| match field {
+            "wait_for_build" => json!(json[field].as_bool().unwrap_or(false)),
+            _ => json[field].clone(),
+        };
+        for field in EDITABLE_TASK_FIELDS {
+            if old_json[field] != new_json[field] {
+                from.insert(field.to_owned(), value(&old_json, field));
+                to.insert(field.to_owned(), value(&new_json, field));
+            }
+        }
+        // Naming the mode the default already resolves to (`--headless` on a
+        // Claude task that named none) changes what is stored, not what is
+        // shown: recorded with the stored values, null for the default.
+        if old_mode != new.stored_worker_mode() && !to.contains_key("worker_mode") {
+            from.insert("worker_mode".to_owned(), json!(old_mode));
+            to.insert("worker_mode".to_owned(), json!(new.stored_worker_mode()));
+        }
+        if !to.is_empty() {
+            tx.execute(
+                "UPDATE tasks SET title=?1, description=?2, acceptance=?3,
+                 verification_commands=?4, required_evidence=?5, paths=?6, context=?7,
+                 worker_provider=?10, worker_mode=?11, change=?12, wait_for_build=?13,
+                 execution_class=?14, updated_at=?8 WHERE id=?9",
+                params![
+                    new.title(),
+                    new.description(),
+                    new.acceptance(),
+                    serde_json::to_string(new.verification_commands())?,
+                    serde_json::to_string(new.required_evidence())?,
+                    serde_json::to_string(new.paths())?,
+                    new.context(),
+                    self.generators.clock.timestamp(),
+                    task_id,
+                    new.worker().provider.as_str(),
+                    new.stored_worker_mode().map(WorkerMode::as_str),
+                    new.change().map(TaskChange::as_str),
+                    new.wait_for_build(),
+                    new.execution_class().as_str(),
+                ],
+            )?;
+            event(
+                &tx,
+                task_id,
+                None,
+                EventKind::TaskEdited,
+                json!({"from": from, "to": to}),
+            )?;
+        }
         let result = read_task(&tx, task_id)?;
         tx.commit()?;
         Ok(result)
@@ -1572,98 +1677,7 @@ impl TaskStore for SqliteQueue {
         edit: TaskEdit,
         authorized: TaskStatus,
     ) -> Result<Task> {
-        ensure!(!edit.is_empty(), "task edit changes nothing");
-        // Checked before the task is read, so a bad value is reported first.
-        edit.validate()?;
-        if let (Some(changes), Some(change)) = (&self.changes, &edit.change) {
-            changes.check(change)?;
-        }
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        super::replans::check_task_step(&tx, task_id, GuardedStep::Edit)?;
-        let old = read_task(&tx, task_id)?;
-        task::check_status_authorized(&old, authorized)?;
-        // The event keeps the fields before the edit, which consumes the task.
-        let old_json = serde_json::to_value(&old)?;
-        let old_mode = old.stored_worker_mode();
-        let new = if old.status() == TaskStatus::InProgress {
-            let latest: Option<String> = tx
-                .query_row(
-                    "SELECT status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
-                    [task_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            ensure!(
-                edit.verify_only()
-                    && !has_unfinished_run(&tx, task_id)?
-                    && !tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM run_leases l JOIN task_runs r ON r.id=l.run_id WHERE r.task_id=?1)",
-                        [task_id], |row| row.get::<_, bool>(0),
-                    )?
-                    && matches!(latest.as_deref(), Some("failed" | "interrupted")),
-                "task {task_id} is in_progress; only --verify/--no-verify may be edited by user or inbox after its latest run has ended and no live run remains"
-            );
-            task::edit_ended_verify(old, edit)?
-        } else {
-            task::edit(old, edit)?
-        };
-        let new_json = serde_json::to_value(&new)?;
-        let (mut from, mut to) = (serde_json::Map::new(), serde_json::Map::new());
-        // The JSON leaves out a wait for the build not declared: recorded
-        // as false (ADR-t1632-1).
-        let value = |json: &serde_json::Value, field: &str| match field {
-            "wait_for_build" => json!(json[field].as_bool().unwrap_or(false)),
-            _ => json[field].clone(),
-        };
-        for field in EDITABLE_TASK_FIELDS {
-            if old_json[field] != new_json[field] {
-                from.insert(field.to_owned(), value(&old_json, field));
-                to.insert(field.to_owned(), value(&new_json, field));
-            }
-        }
-        // Naming the mode the default already resolves to (`--headless` on a
-        // Claude task that named none) changes what is stored, not what is
-        // shown: recorded with the stored values, null for the default.
-        if old_mode != new.stored_worker_mode() && !to.contains_key("worker_mode") {
-            from.insert("worker_mode".to_owned(), json!(old_mode));
-            to.insert("worker_mode".to_owned(), json!(new.stored_worker_mode()));
-        }
-        if !to.is_empty() {
-            tx.execute(
-                "UPDATE tasks SET title=?1, description=?2, acceptance=?3,
-                 verification_commands=?4, required_evidence=?5, paths=?6, context=?7,
-                 worker_provider=?10, worker_mode=?11, change=?12, wait_for_build=?13,
-                 execution_class=?14, updated_at=?8 WHERE id=?9",
-                params![
-                    new.title(),
-                    new.description(),
-                    new.acceptance(),
-                    serde_json::to_string(new.verification_commands())?,
-                    serde_json::to_string(new.required_evidence())?,
-                    serde_json::to_string(new.paths())?,
-                    new.context(),
-                    self.generators.clock.timestamp(),
-                    task_id,
-                    new.worker().provider.as_str(),
-                    new.stored_worker_mode().map(WorkerMode::as_str),
-                    new.change().map(TaskChange::as_str),
-                    new.wait_for_build(),
-                    new.execution_class().as_str(),
-                ],
-            )?;
-            event(
-                &tx,
-                task_id,
-                None,
-                EventKind::TaskEdited,
-                json!({"from": from, "to": to}),
-            )?;
-        }
-        let result = read_task(&tx, task_id)?;
-        tx.commit()?;
-        Ok(result)
+        self.edit_task_authorized(task_id, edit, authorized, None)
     }
 
     fn set_priority(&mut self, task_id: TaskId, priority: Option<Priority>) -> Result<Task> {
@@ -3353,18 +3367,28 @@ fn insert_goal_dependency(
     Ok(())
 }
 
-/// Refuse, before anything is written, a task whose status in the open
-/// transaction is not `authorized`, the one its command was authorized
-/// with (ADR-t883-1, task 1609); `None` checks nothing.
-fn check_authorized(
+/// Refuse, before anything is written, a task whose status, proposal,
+/// proposal status or proposal owner in the open transaction is not
+/// `authorized`, what its command was authorized with (ADR-t883-1, task
+/// 1609); `None` checks nothing.
+pub(super) fn check_authorized(
     conn: &Connection,
     task_id: TaskId,
-    authorized: Option<TaskStatus>,
+    authorized: Option<&TaskAuthorization>,
 ) -> Result<()> {
     if let Some(authorized) = authorized {
-        task::check_status_authorized(&read_task(conn, task_id)?, authorized)?;
+        authorized.check_unchanged(task_id, &task_authorization(conn, task_id)?)?;
     }
     Ok(())
+}
+
+/// The status of `task` and the proposal it is in, as a planning command
+/// is authorized with them; a missing task is an error.
+pub(super) fn task_authorization(conn: &Connection, task: TaskId) -> Result<TaskAuthorization> {
+    Ok(TaskAuthorization {
+        status: read_task(conn, task)?.status(),
+        proposal: super::proposals::task_proposal(conn, task)?,
+    })
 }
 
 fn touch(conn: &Connection, task_id: TaskId, now: &str) -> Result<()> {

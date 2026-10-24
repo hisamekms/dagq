@@ -712,7 +712,7 @@ mod tests {
     use crate::domain::plan_request::PlanRequest;
     use crate::domain::{
         ActorRole, AuthorizationError, DraftRevisit, Goal, PlannerId, PlannerOrigin, Priority,
-        Proposal, StaticPolicy, Task, TaskAction, TaskDetail, TaskStatus,
+        Proposal, StaticPolicy, Task, TaskAction, TaskAuthorization, TaskDetail, TaskStatus,
     };
 
     /// A store whose tasks are drafts, whose proposals are planner 1's and
@@ -729,8 +729,8 @@ mod tests {
     }
 
     impl PlanningStore for Store {
-        fn task_status(&self, _: TaskId) -> Result<TaskStatus> {
-            Ok(TaskStatus::Draft)
+        fn task_authorization(&self, _: TaskId) -> Result<TaskAuthorization> {
+            Ok(TaskAuthorization::outside_proposals(TaskStatus::Draft))
         }
         fn proposal_owner(&self, _: ProposalId) -> Result<Option<String>> {
             Ok(Some("planner:1".into()))
@@ -742,19 +742,24 @@ mod tests {
         fn add(&mut self, _: NewTask) -> Result<Task> {
             reached()
         }
-        fn edit_task(&mut self, _: TaskId, _: TaskEdit, _: TaskStatus) -> Result<Task> {
+        fn edit_task(&mut self, _: TaskId, _: TaskEdit, _: TaskAuthorization) -> Result<Task> {
             reached()
         }
         fn judge_follow_up(&mut self, _: TaskId, _: MembershipJudgement, _: &str) -> Result<Value> {
             reached()
         }
-        fn set_goal(&mut self, _: TaskId, _: Option<GoalId>, _: TaskStatus) -> Result<Task> {
+        fn set_goal(&mut self, _: TaskId, _: Option<GoalId>, _: TaskAuthorization) -> Result<Task> {
             reached()
         }
-        fn set_paths(&mut self, _: TaskId, _: Vec<String>, _: TaskStatus) -> Result<Task> {
+        fn set_paths(&mut self, _: TaskId, _: Vec<String>, _: TaskAuthorization) -> Result<Task> {
             reached()
         }
-        fn set_priority(&mut self, _: TaskId, _: Option<Priority>, _: TaskStatus) -> Result<Task> {
+        fn set_priority(
+            &mut self,
+            _: TaskId,
+            _: Option<Priority>,
+            _: TaskAuthorization,
+        ) -> Result<Task> {
             reached()
         }
         fn revisit_draft(
@@ -763,19 +768,25 @@ mod tests {
             _: RevisitChange,
             _: &str,
             _: &str,
+            _: TaskAuthorization,
         ) -> Result<Option<DraftRevisit>> {
             reached()
         }
-        fn transition(&mut self, _: TaskId, _: TaskAction, _: TaskStatus) -> Result<Task> {
+        fn transition(&mut self, _: TaskId, _: TaskAction, _: TaskAuthorization) -> Result<Task> {
             reached()
         }
-        fn cancel(&mut self, _: TaskId, _: NewCancel, _: TaskStatus) -> Result<Task> {
+        fn cancel(&mut self, _: TaskId, _: NewCancel, _: TaskAuthorization) -> Result<Task> {
             reached()
         }
-        fn add_dependency(&mut self, _: TaskId, _: Dependency, _: TaskStatus) -> Result<()> {
+        fn add_dependency(&mut self, _: TaskId, _: Dependency, _: TaskAuthorization) -> Result<()> {
             reached()
         }
-        fn remove_dependency(&mut self, _: TaskId, _: Dependency, _: TaskStatus) -> Result<()> {
+        fn remove_dependency(
+            &mut self,
+            _: TaskId,
+            _: Dependency,
+            _: TaskAuthorization,
+        ) -> Result<()> {
             reached()
         }
         fn show(&mut self, _: TaskId) -> Result<TaskDetail> {

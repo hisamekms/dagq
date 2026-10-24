@@ -71,6 +71,12 @@ pub enum DomainError {
         authorized: TaskStatus,
         status: TaskStatus,
     },
+    /// A planning command's change of a task whose proposal, the status of
+    /// that proposal or its owner is not what the command was authorized
+    /// with: a planner's rights on the task were decided from them.
+    TaskProposalChangedSinceAuthorized {
+        task_id: TaskId,
+    },
     /// A cancel with neither a reason nor a task that holds its content
     /// (ADR-t947-4 decision 1).
     CancelReasonMissing,
@@ -599,6 +605,10 @@ impl fmt::Display for DomainError {
                 "task {task_id} is {} now, not {} as when this command was authorized; nothing was changed, run it again",
                 status.as_str(),
                 authorized.as_str()
+            ),
+            Self::TaskProposalChangedSinceAuthorized { task_id } => write!(
+                f,
+                "task {task_id} is in another proposal now, or its proposal's status or owner changed, since this command was authorized; nothing was changed, run it again"
             ),
             Self::CancelReasonMissing => f.write_str(
                 "cancel needs --reason CODE, or --duplicate-of X for a task X that holds its content",

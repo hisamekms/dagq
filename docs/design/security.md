@@ -63,7 +63,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — | ○ | ○ | ○ | ○ | — | — |
 | inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — | ○ | ○（`--yes`は—） | ○ | ○ | — | — |
-| planner | ○ | △ draft・submitted・readyのtask（`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ・— / — | — | ○（setup-reviewは—） | — | — | — | — |
+| planner | ○ | △ draft・submitted・readyのtask（`revising`のproposalのtaskは持ち主だけ、`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ・— / — | — | ○（setup-reviewは—） | — | — | — | — |
 | worker | 読み取り（`watch`・`queue.export`・`ci.read`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / —・— / △ 自分のrunだけ | — | — | — | — | — | — |
 | review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — | — |
 | recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — | — |
@@ -82,7 +82,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 - `judge-follow-up`（`follow_up.judge`）はuser・inbox・plannerだけが全状態のfollow_upに記録でき、worker・job・supervisorは拒む。所属変更はdraft/readyだけ。表のplannerのtask変更の例外はこの判断の記録だけである。
 - draftの再検討の時刻（`revisit`、[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）は計画の列の`task.write`に含める。
   user・inbox・plannerが付け・変え・外し、worker・observer・job・supervisorは拒む。
-  plannerは`draft_planner_exhausted`のあるdraftに付けられない（人・inboxが付けたものだけがplannerの上限を越えて1回立つため）
+  plannerは`draft_planner_exhausted`のあるdraftに付けられない
 - user・inboxの計画権限には、最新runが終了し生きているrunの無い`in_progress` taskのverifyだけを直す`task.verify_edit`も含む（ADR-t883-1）。
   planner・worker・jobは持たない。
 - 人の出どころの優先度はuserとinboxだけが変え、planner・supervisor（plan reviewのverdictの適用とruntimeの自動の修正）・jobは計画の列の権限があっても変えられない（[ADR-t1975-1](../adr/2026-10-08-t1975-1-runtime-records-origin-and-person-set-priority-and-ai-actors-cannot-change-it.md)の決定2〜4）。

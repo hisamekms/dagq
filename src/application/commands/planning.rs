@@ -1,8 +1,9 @@
 //! The planning commands (task 732): goals, tasks before they run, their
 //! dependencies and proposals. Each is authorized as the caller before it
-//! reaches the store, with the task's status and the proposal's owner read
-//! from the store, so the planner's rules (tasks in draft, submitted or
-//! ready only; its own proposal only) apply to what the queue holds rather
+//! reaches the store, with the task's status, the proposal it is in and the
+//! proposal's owner read from the store, so the planner's rules (tasks in
+//! draft, submitted or ready only, and not of another planner's revising
+//! proposal; its own proposal only) apply to what the queue holds rather
 //! than to what the command line says. The policy is the
 //! [`crate::domain::StaticPolicy`]'s (`docs/design/authorization.md`).
 
@@ -15,14 +16,15 @@ use crate::application::inherit::{CarriedBranches, InheritRequest, InheritStore,
 use crate::domain::{
     ActorContext, AuthorizationError, Authorizer, Capability, DomainError, DraftRevisit, FindingId,
     Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal, ProposalId,
-    Resource, Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus,
-    authorization::DenyReason, cancel_reason::NewCancel, follow_up::RevisitChange,
+    Resource, Submission, Task, TaskAction, TaskAuthorization, TaskDetail, TaskEdit, TaskId,
+    TaskStatus, authorization::DenyReason, cancel_reason::NewCancel, follow_up::RevisitChange,
 };
 
 /// What the planning commands read and change of the queue.
 pub trait PlanningStore {
-    /// The status of `task`; a missing task is an error.
-    fn task_status(&self, task: TaskId) -> Result<TaskStatus>;
+    /// The status of `task` and the proposal it is in, with that
+    /// proposal's status and owner; a missing task is an error.
+    fn task_authorization(&self, task: TaskId) -> Result<TaskAuthorization>;
     /// The actor id of the planner that owns `proposal`, `None` when the
     /// queue did not record it; a missing proposal is an error.
     fn proposal_owner(&self, proposal: ProposalId) -> Result<Option<String>>;
@@ -30,35 +32,41 @@ pub trait PlanningStore {
     fn record_denial(&self, payload: Value) -> Result<()>;
 
     fn add(&mut self, task: NewTask) -> Result<Task>;
-    /// `authorized` is the status the edit was authorized with; the store
-    /// refuses the edit when the task has another one in its transaction.
-    fn edit_task(&mut self, task: TaskId, edit: TaskEdit, authorized: TaskStatus) -> Result<Task>;
+    /// `authorized` is what the edit was authorized with; the store
+    /// refuses the edit when the task has another status, proposal,
+    /// proposal status or owner in its transaction.
+    fn edit_task(
+        &mut self,
+        task: TaskId,
+        edit: TaskEdit,
+        authorized: TaskAuthorization,
+    ) -> Result<Task>;
     fn judge_follow_up(
         &mut self,
         task: TaskId,
         judgement: crate::domain::follow_up::MembershipJudgement,
         role: &str,
     ) -> Result<Value>;
-    // Like `edit_task`, each change of a task below gets the status it was
+    // Like `edit_task`, each change of a task below gets what it was
     // authorized with and refuses, changing nothing, a task with another
-    // one in the store's transaction (task 1609).
+    // status or proposal in the store's transaction (task 1609).
     fn set_goal(
         &mut self,
         task: TaskId,
         goal: Option<GoalId>,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<Task>;
     fn set_paths(
         &mut self,
         task: TaskId,
         paths: Vec<String>,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<Task>;
     fn set_priority(
         &mut self,
         task: TaskId,
         priority: Option<Priority>,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<Task>;
     /// Set, change or clear the revisit time of the draft `task` as `role`
     /// with actor id `actor` (ADR-t1540-1): the revisit time afterwards.
@@ -68,25 +76,31 @@ pub trait PlanningStore {
         change: RevisitChange,
         role: &str,
         actor: &str,
+        authorized: TaskAuthorization,
     ) -> Result<Option<DraftRevisit>>;
     fn transition(
         &mut self,
         task: TaskId,
         action: TaskAction,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<Task>;
-    fn cancel(&mut self, task: TaskId, cancel: NewCancel, authorized: TaskStatus) -> Result<Task>;
+    fn cancel(
+        &mut self,
+        task: TaskId,
+        cancel: NewCancel,
+        authorized: TaskAuthorization,
+    ) -> Result<Task>;
     fn add_dependency(
         &mut self,
         task: TaskId,
         on: Dependency,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<()>;
     fn remove_dependency(
         &mut self,
         task: TaskId,
         on: Dependency,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<()>;
     fn show(&mut self, task: TaskId) -> Result<TaskDetail>;
     fn submit(&mut self, submission: Submission, findings: &[FindingId]) -> Result<Proposal>;
@@ -133,24 +147,19 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
 
     pub fn edit(&mut self, task: TaskId, edit: TaskEdit) -> Result<Task> {
         self.refuse_ungranted(Capability::TaskWrite, &Resource::task(task))?;
-        let status = self.store.task_status(task)?;
-        let capability = if status == TaskStatus::InProgress && edit.verify_only() {
+        let authorized = self.store.task_authorization(task)?;
+        let capability = if authorized.status == TaskStatus::InProgress && edit.verify_only() {
             Capability::TaskVerifyEdit
         } else {
             Capability::TaskWrite
         };
-        // Authorized with the status the capability was chosen from, the
-        // one the store checks again in its transaction (ADR-t883-1).
+        // Authorized with the status and proposal the capability was chosen
+        // from, the ones the store checks again in its transaction
+        // (ADR-t883-1).
         self.refuse_ungranted(capability, &Resource::task(task))?;
-        self.authorize(
-            capability,
-            Resource::Task {
-                id: task,
-                status: Some(status),
-            },
-        )?;
+        self.authorize(capability, authorized.resource(task))?;
         crate::domain::worker::refuse_interactive(edit.worker_mode)?;
-        self.store.edit_task(task, edit, status)
+        self.store.edit_task(task, edit, authorized)
     }
 
     pub fn judge_follow_up(
@@ -164,25 +173,22 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     }
 
     pub fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task> {
-        let status = self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.set_goal(task, goal, status)
+        let authorized = self.authorize_task(Capability::TaskWrite, task)?;
+        self.store.set_goal(task, goal, authorized)
     }
 
     pub fn set_paths(&mut self, task: TaskId, paths: Vec<String>) -> Result<Task> {
-        let status = self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.set_paths(task, paths, status)
+        let authorized = self.authorize_task(Capability::TaskWrite, task)?;
+        self.store.set_paths(task, paths, authorized)
     }
 
     /// `set-priority`: the store refuses to change a person's priority
     /// for an actor other than a person (ADR-t1975-1 decision 3), and the
     /// refusal is recorded as the authorizer's are.
     pub fn set_priority(&mut self, task: TaskId, priority: Option<Priority>) -> Result<Task> {
-        let status = self.authorize_task(Capability::TaskWrite, task)?;
-        let result = self.store.set_priority(task, priority, status);
-        let resource = Resource::Task {
-            id: task,
-            status: Some(status),
-        };
+        let authorized = self.authorize_task(Capability::TaskWrite, task)?;
+        let resource = authorized.resource(task);
+        let result = self.store.set_priority(task, priority, authorized);
         self.recorded(result, Capability::TaskWrite, &resource)
     }
 
@@ -190,15 +196,15 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     /// (ADR-t1540-1). It changes a task before it starts, as `task.write`:
     /// the user's and the inbox's, and a planner's on a draft.
     pub fn revisit(&mut self, task: TaskId, change: RevisitChange) -> Result<Option<DraftRevisit>> {
-        self.authorize_task(Capability::TaskWrite, task)?;
+        let authorized = self.authorize_task(Capability::TaskWrite, task)?;
         let (role, actor) = (self.actor.role(), self.actor.actor_id().to_owned());
         self.store
-            .revisit_draft(task, change, role.as_str(), &actor)
+            .revisit_draft(task, change, role.as_str(), &actor, authorized)
     }
 
     pub fn draft(&mut self, task: TaskId) -> Result<Task> {
-        let status = self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.transition(task, TaskAction::Draft, status)
+        let authorized = self.authorize_task(Capability::TaskWrite, task)?;
+        self.store.transition(task, TaskAction::Draft, authorized)
     }
 
     /// `ready`, or `ready --bypass-review` past plan review: the user's and
@@ -209,28 +215,28 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
         } else {
             (Capability::TaskReady, TaskAction::Ready)
         };
-        let status = self.authorize_task(capability, task)?;
-        self.store.transition(task, action, status)
+        let authorized = self.authorize_task(capability, task)?;
+        self.store.transition(task, action, authorized)
     }
 
     /// `cancel` with its reason and the task that holds its content, when
     /// it names one (ADR-t947-4): the store refuses one without either.
     pub fn cancel(&mut self, task: TaskId, cancel: NewCancel) -> Result<Task> {
-        let status = self.authorize_task(Capability::TaskCancel, task)?;
-        self.store.cancel(task, cancel, status)
+        let authorized = self.authorize_task(Capability::TaskCancel, task)?;
+        self.store.cancel(task, cancel, authorized)
     }
 
     /// `dependency add`: the task as it is afterwards.
     pub fn add_dependency(&mut self, task: TaskId, on: Dependency) -> Result<TaskDetail> {
-        let status = self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.add_dependency(task, on, status)?;
+        let authorized = self.authorize_task(Capability::TaskWrite, task)?;
+        self.store.add_dependency(task, on, authorized)?;
         self.store.show(task)
     }
 
     /// `dependency remove`: the task as it is afterwards.
     pub fn remove_dependency(&mut self, task: TaskId, on: Dependency) -> Result<TaskDetail> {
-        let status = self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.remove_dependency(task, on, status)?;
+        let authorized = self.authorize_task(Capability::TaskWrite, task)?;
+        self.store.remove_dependency(task, on, authorized)?;
         self.store.show(task)
     }
 
@@ -300,20 +306,14 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
         Ok(Resource::Proposal { id, owner })
     }
 
-    /// Authorize `capability` on the task as the store holds it now; the
-    /// status it was authorized with is returned for the store to check
-    /// again in its transaction (task 1609).
-    fn authorize_task(&mut self, capability: Capability, id: TaskId) -> Result<TaskStatus> {
+    /// Authorize `capability` on the task as the store holds it now; what
+    /// it was authorized with (its status and the proposal it is in) is
+    /// returned for the store to check again in its transaction (task 1609).
+    fn authorize_task(&mut self, capability: Capability, id: TaskId) -> Result<TaskAuthorization> {
         self.refuse_ungranted(capability, &Resource::task(id))?;
-        let status = self.store.task_status(id)?;
-        self.authorize(
-            capability,
-            Resource::Task {
-                id,
-                status: Some(status),
-            },
-        )?;
-        Ok(status)
+        let authorized = self.store.task_authorization(id)?;
+        self.authorize(capability, authorized.resource(id))?;
+        Ok(authorized)
     }
 
     /// Refuse, before the store is read, a capability the actor has on no
@@ -393,7 +393,9 @@ impl<S: PlanningStore + InheritStore + ?Sized> Planning<'_, S> {
         reason: &str,
         branches: &dyn CarriedBranches,
     ) -> Result<InheritedByHand> {
-        let status = self.authorize_task(Capability::TaskReadyBypassReview, task)?;
+        let status = self
+            .authorize_task(Capability::TaskReadyBypassReview, task)?
+            .status;
         let reason = reason.trim();
         ensure!(
             !reason.is_empty(),
@@ -441,12 +443,13 @@ mod tests {
     #[derive(Default)]
     struct Store {
         status: Option<TaskStatus>,
+        /// The proposal the task is in.
+        proposal: Option<crate::domain::TaskProposal>,
         owner: Option<String>,
         denials: RefCell<Vec<Value>>,
         record_fails: bool,
-        /// The status the last change of a task was handed as the
-        /// authorized one.
-        authorized_as: Option<TaskStatus>,
+        /// What the last change of a task was handed as authorized.
+        authorized_as: Option<TaskAuthorization>,
         /// The store refuses a change of priority as a person's.
         persons_priority: bool,
     }
@@ -499,8 +502,12 @@ mod tests {
     }
 
     impl PlanningStore for Store {
-        fn task_status(&self, _: TaskId) -> Result<TaskStatus> {
-            self.status.ok_or_else(|| anyhow!("task does not exist"))
+        fn task_authorization(&self, _: TaskId) -> Result<TaskAuthorization> {
+            let status = self.status.ok_or_else(|| anyhow!("task does not exist"))?;
+            Ok(TaskAuthorization {
+                status,
+                proposal: self.proposal.clone(),
+            })
         }
         fn proposal_owner(&self, _: ProposalId) -> Result<Option<String>> {
             Ok(self.owner.clone())
@@ -515,7 +522,12 @@ mod tests {
         fn add(&mut self, _: NewTask) -> Result<Task> {
             Err(self.request_refusal("add"))
         }
-        fn edit_task(&mut self, _: TaskId, _: TaskEdit, authorized: TaskStatus) -> Result<Task> {
+        fn edit_task(
+            &mut self,
+            _: TaskId,
+            _: TaskEdit,
+            authorized: TaskAuthorization,
+        ) -> Result<Task> {
             self.authorized_as = Some(authorized);
             Err(reached("edit"))
         }
@@ -531,12 +543,17 @@ mod tests {
             &mut self,
             _: TaskId,
             _: Option<GoalId>,
-            authorized: TaskStatus,
+            authorized: TaskAuthorization,
         ) -> Result<Task> {
             self.authorized_as = Some(authorized);
             Err(reached("set-goal"))
         }
-        fn set_paths(&mut self, _: TaskId, _: Vec<String>, authorized: TaskStatus) -> Result<Task> {
+        fn set_paths(
+            &mut self,
+            _: TaskId,
+            _: Vec<String>,
+            authorized: TaskAuthorization,
+        ) -> Result<Task> {
             self.authorized_as = Some(authorized);
             Err(reached("set-paths"))
         }
@@ -544,7 +561,7 @@ mod tests {
             &mut self,
             _: TaskId,
             _: Option<Priority>,
-            authorized: TaskStatus,
+            authorized: TaskAuthorization,
         ) -> Result<Task> {
             self.authorized_as = Some(authorized);
             Err(self.refusal(
@@ -558,19 +575,26 @@ mod tests {
             _: RevisitChange,
             _: &str,
             _: &str,
+            authorized: TaskAuthorization,
         ) -> Result<Option<DraftRevisit>> {
+            self.authorized_as = Some(authorized);
             Err(reached("revisit"))
         }
         fn transition(
             &mut self,
             _: TaskId,
             action: TaskAction,
-            authorized: TaskStatus,
+            authorized: TaskAuthorization,
         ) -> Result<Task> {
             self.authorized_as = Some(authorized);
             Err(reached(&format!("{action:?}")))
         }
-        fn cancel(&mut self, _: TaskId, cancel: NewCancel, authorized: TaskStatus) -> Result<Task> {
+        fn cancel(
+            &mut self,
+            _: TaskId,
+            cancel: NewCancel,
+            authorized: TaskAuthorization,
+        ) -> Result<Task> {
             self.authorized_as = Some(authorized);
             Err(reached(match cancel.duplicate_of {
                 Some(_) => "cancel-duplicate",
@@ -581,7 +605,7 @@ mod tests {
             &mut self,
             _: TaskId,
             _: Dependency,
-            authorized: TaskStatus,
+            authorized: TaskAuthorization,
         ) -> Result<()> {
             self.authorized_as = Some(authorized);
             Err(reached("dependency add"))
@@ -590,7 +614,7 @@ mod tests {
             &mut self,
             _: TaskId,
             _: Dependency,
-            authorized: TaskStatus,
+            authorized: TaskAuthorization,
         ) -> Result<()> {
             self.authorized_as = Some(authorized);
             Err(reached("dependency remove"))
@@ -1105,6 +1129,85 @@ mod tests {
         }
     }
 
+    /// The task's proposal is read from the store with its status: a
+    /// planner's change of a task of another planner's revising proposal,
+    /// or of one whose owner names no actor, is refused before the store
+    /// and recorded with the proposal; its owner, the user, the inbox and
+    /// the supervisor's cancel reach the store with what they were
+    /// authorized with.
+    #[test]
+    fn a_planner_changes_no_task_of_another_planners_revising_proposal() {
+        use crate::domain::{ProposalStatus, TaskProposal};
+        let changes = [
+            "edit",
+            "set-goal",
+            "set-paths",
+            "set-priority",
+            "revisit",
+            "revisit --clear",
+            "draft",
+            "cancel",
+            "cancel --duplicate-of",
+            "dependency add",
+            "dependency remove",
+        ];
+        let command = |name: &str| commands().into_iter().find(|(n, _)| *n == name).unwrap().1;
+        let in_proposal = |owner: Option<&str>| TaskProposal {
+            id: ProposalId::new(3),
+            status: ProposalStatus::Revising,
+            owner: owner.map(str::to_owned),
+        };
+        let reach = |actor: &ActorContext, owner: Option<&str>, name: &str| {
+            let mut store = Store {
+                status: Some(TaskStatus::Draft),
+                proposal: Some(in_proposal(owner)),
+                ..Store::default()
+            };
+            let result = command(name)(&mut Planning::new(&mut store, actor, &StaticPolicy));
+            (result.unwrap_err(), store)
+        };
+        for owner in [Some("planner:8"), Some("planner"), None] {
+            for name in changes {
+                let (error, store) = reach(&planner(7), owner, name);
+                let denied = error.downcast::<AuthorizationError>().unwrap();
+                assert_eq!(denied.reason, DenyReason::Resource, "{owner:?} {name}");
+                assert_eq!(store.authorized_as, None, "{name}");
+                assert_eq!(
+                    store.denials.into_inner()[0]["resource"],
+                    json!({"kind": "task", "id": 1, "status": "draft",
+                           "proposal": {"id": 3, "status": "revising", "owner": owner}}),
+                    "{name}"
+                );
+            }
+        }
+        let supervisor = ActorContext::instance(ActorRole::Supervisor, 1);
+        let mut reaching: Vec<(ActorContext, &str)> = changes
+            .iter()
+            .flat_map(|name| {
+                [
+                    planner(8),
+                    ActorContext::user(),
+                    ActorContext::instance(ActorRole::Inbox, 1),
+                ]
+                .map(|actor| (actor, *name))
+            })
+            .collect();
+        reaching.push((supervisor.clone(), "cancel"));
+        for (actor, name) in reaching {
+            let (error, store) = reach(&actor, Some("planner:8"), name);
+            assert!(error.to_string().starts_with("store: "), "{actor:?} {name}");
+            assert!(store.denials.into_inner().is_empty());
+            assert_eq!(
+                store.authorized_as,
+                Some(TaskAuthorization {
+                    status: TaskStatus::Draft,
+                    proposal: Some(in_proposal(Some("planner:8"))),
+                }),
+                "{name}"
+            );
+        }
+    }
+
     /// ADR-t883-1: the store gets the status the edit was authorized
     /// with, so it can refuse a task that moved on before its transaction.
     #[test]
@@ -1130,7 +1233,11 @@ mod tests {
                 .edit(TASK, verify())
                 .unwrap_err();
             assert_eq!(error.to_string(), "store: edit", "{actor:?} {status:?}");
-            assert_eq!(store.authorized_as, Some(status), "{actor:?}");
+            assert_eq!(
+                store.authorized_as,
+                Some(TaskAuthorization::outside_proposals(status)),
+                "{actor:?}"
+            );
         }
     }
 
@@ -1172,7 +1279,11 @@ mod tests {
                 let error =
                     command(&mut Planning::new(&mut store, &me, &StaticPolicy)).unwrap_err();
                 assert_eq!(error.to_string(), reached, "{status:?}");
-                assert_eq!(store.authorized_as, Some(status), "{reached}");
+                assert_eq!(
+                    store.authorized_as,
+                    Some(TaskAuthorization::outside_proposals(status)),
+                    "{reached}"
+                );
             }
         }
     }

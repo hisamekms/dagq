@@ -329,10 +329,25 @@ impl SqliteQueue {
         role: &str,
         actor: &str,
     ) -> Result<Option<DraftRevisit>> {
+        self.revisit_draft_authorized(task, change, role, actor, None)
+    }
+
+    /// [`Self::revisit_draft`], refusing first, writing nothing, a task
+    /// whose status or proposal is not what `authorized` has (`None`
+    /// checks nothing more).
+    pub(super) fn revisit_draft_authorized(
+        &mut self,
+        task: TaskId,
+        change: RevisitChange,
+        role: &str,
+        actor: &str,
+        authorized: Option<&crate::domain::TaskAuthorization>,
+    ) -> Result<Option<DraftRevisit>> {
         let now = self.generators.clock.now();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::sqlite::check_authorized(&tx, task, authorized)?;
         let status = read_task(&tx, task)?.status();
         ensure!(
             status == TaskStatus::Draft,

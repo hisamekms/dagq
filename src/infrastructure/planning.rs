@@ -6,18 +6,18 @@ use crate::domain::EventKind;
 use anyhow::Result;
 use serde_json::Value;
 
-use super::sqlite::{SqliteQueue, read_task};
+use super::sqlite::SqliteQueue;
 use crate::application::commands::planning::{Dependency, PlanningStore};
 use crate::application::{EventStore, GoalReviewStore, TaskReads, TaskStore};
 use crate::domain::{
     FindingId, Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal,
-    ProposalId, Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus,
+    ProposalId, Submission, Task, TaskAction, TaskAuthorization, TaskDetail, TaskEdit, TaskId,
     cancel_reason::NewCancel,
 };
 
 impl PlanningStore for SqliteQueue {
-    fn task_status(&self, task: TaskId) -> Result<TaskStatus> {
-        Ok(read_task(&self.conn, task)?.status())
+    fn task_authorization(&self, task: TaskId) -> Result<TaskAuthorization> {
+        super::sqlite::task_authorization(&self.conn, task)
     }
 
     fn proposal_owner(&self, proposal: ProposalId) -> Result<Option<String>> {
@@ -32,8 +32,13 @@ impl PlanningStore for SqliteQueue {
         TaskStore::add(self, task)
     }
 
-    fn edit_task(&mut self, task: TaskId, edit: TaskEdit, authorized: TaskStatus) -> Result<Task> {
-        TaskStore::edit_task(self, task, edit, authorized)
+    fn edit_task(
+        &mut self,
+        task: TaskId,
+        edit: TaskEdit,
+        authorized: TaskAuthorization,
+    ) -> Result<Task> {
+        self.edit_task_authorized(task, edit, authorized.status, Some(&authorized))
     }
 
     fn judge_follow_up(
@@ -49,27 +54,27 @@ impl PlanningStore for SqliteQueue {
         &mut self,
         task: TaskId,
         goal: Option<GoalId>,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<Task> {
-        self.set_goal_authorized(task, goal, Some(authorized))
+        self.set_goal_authorized(task, goal, Some(&authorized))
     }
 
     fn set_paths(
         &mut self,
         task: TaskId,
         paths: Vec<String>,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<Task> {
-        self.set_paths_authorized(task, paths, Some(authorized))
+        self.set_paths_authorized(task, paths, Some(&authorized))
     }
 
     fn set_priority(
         &mut self,
         task: TaskId,
         priority: Option<Priority>,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<Task> {
-        self.set_priority_authorized(task, priority, Some(authorized))
+        self.set_priority_authorized(task, priority, Some(&authorized))
     }
 
     fn revisit_draft(
@@ -78,30 +83,36 @@ impl PlanningStore for SqliteQueue {
         change: crate::domain::follow_up::RevisitChange,
         role: &str,
         actor: &str,
+        authorized: TaskAuthorization,
     ) -> Result<Option<crate::domain::DraftRevisit>> {
-        SqliteQueue::revisit_draft(self, task, change, role, actor)
+        self.revisit_draft_authorized(task, change, role, actor, Some(&authorized))
     }
 
     fn transition(
         &mut self,
         task: TaskId,
         action: TaskAction,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<Task> {
-        self.transition_authorized(task, action, Some(authorized))
+        self.transition_authorized(task, action, Some(&authorized))
     }
 
-    fn cancel(&mut self, task: TaskId, cancel: NewCancel, authorized: TaskStatus) -> Result<Task> {
-        self.cancel_authorized(task, &cancel, Some(authorized))
+    fn cancel(
+        &mut self,
+        task: TaskId,
+        cancel: NewCancel,
+        authorized: TaskAuthorization,
+    ) -> Result<Task> {
+        self.cancel_authorized(task, &cancel, Some(&authorized))
     }
 
     fn add_dependency(
         &mut self,
         task: TaskId,
         on: Dependency,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<()> {
-        let authorized = Some(authorized);
+        let authorized = Some(&authorized);
         match on {
             Dependency::Task(predecessor) => {
                 self.add_dependency_authorized(task, predecessor, authorized)
@@ -114,9 +125,9 @@ impl PlanningStore for SqliteQueue {
         &mut self,
         task: TaskId,
         on: Dependency,
-        authorized: TaskStatus,
+        authorized: TaskAuthorization,
     ) -> Result<()> {
-        let authorized = Some(authorized);
+        let authorized = Some(&authorized);
         match on {
             Dependency::Task(predecessor) => {
                 self.remove_dependency_authorized(task, predecessor, authorized)
