@@ -445,7 +445,13 @@ fn one_container_turn_changed(
         executable: PathBuf::from("/nonexistent/claude-on-the-host"),
     };
     let ended = thread::scope(|scope| {
-        scope.spawn(|| answer_requests(&containers, &db, &run, &stop, || change(&repo)));
+        scope.spawn(|| {
+            // Errors a later pass got over, kept in the test's output.
+            let answers = answer_requests(&containers, &db, &run, &stop, || change(&repo));
+            if !answers.errors.is_empty() {
+                eprintln!("{} passes, failed: {:#?}", answers.passes, answers.errors);
+            }
+        });
         // A panic below ends the answers too, so that the scope ends.
         let _stop = StopOnDrop(&stop);
         let wrapper = scope.spawn(|| {
@@ -488,22 +494,40 @@ impl Drop for StopOnDrop<'_> {
     }
 }
 
+/// What [`answer_requests`] met: its passes that found requests to answer,
+/// and the error of each pass that failed, in order.
+struct Answers {
+    passes: usize,
+    errors: Vec<String>,
+}
+
 /// Answer the requests the launcher of `run`'s turn container leaves, as
 /// the supervisor that leases the run does on each pass
 /// ([`dagq::application::run_container::serve_sccache_request`]), until
 /// `stop`, `before` run once before the first answer to a request of the
-/// turn's (not the one an earlier turn left).
+/// turn's (not the one an earlier turn left). As the supervisor's pass, a
+/// pass that fails (a turn's container that started and was gone again
+/// between its looks) leaves its requests for the next pass and is kept in
+/// what it returns. Once stopped, a last pass that failed with a request
+/// still there has one more pass (the supervisor's next), and when that
+/// one fails too it panics with the passes and every error: errors that go
+/// on to the end are not dropped.
 fn answer_requests(
     containers: &dyn RunContainers,
     db: &Path,
     run: &TaskRun,
     stop: &std::sync::atomic::AtomicBool,
     before: impl FnOnce(),
-) {
+) -> Answers {
     let run_dir = PathBuf::from(run.run_dir().unwrap());
     let earlier = request(&run_dir, "earlier");
     let earlier = earlier.file_name().unwrap().to_str().unwrap();
     let mut before = Some(before);
+    let mut answers = Answers {
+        passes: 0,
+        errors: Vec::new(),
+    };
+    let mut failing = false;
     while !stop.load(std::sync::atomic::Ordering::SeqCst) {
         let requests = containers.sccache_requests(&run_dir).unwrap_or_default();
         if !requests.is_empty() {
@@ -512,16 +536,47 @@ fn answer_requests(
             {
                 before();
             }
-            dagq::application::run_container::serve_sccache_request(
+            answers.passes += 1;
+            match dagq::application::run_container::serve_sccache_request(
                 containers,
                 &SqliteQueue::open(db).unwrap(),
                 run,
                 0,
-            )
-            .unwrap();
+            ) {
+                Ok(()) => failing = false,
+                Err(error) => {
+                    answers.errors.push(format!("{error:#}"));
+                    failing = true;
+                }
+            }
         }
         thread::sleep(Duration::from_millis(20));
     }
+    if failing
+        && !containers
+            .sccache_requests(&run_dir)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        answers.passes += 1;
+        match dagq::application::run_container::serve_sccache_request(
+            containers,
+            &SqliteQueue::open(db).unwrap(),
+            run,
+            0,
+        ) {
+            Ok(()) => failing = false,
+            Err(error) => answers.errors.push(format!("{error:#}")),
+        }
+    }
+    let left = containers.sccache_requests(&run_dir).unwrap_or_default();
+    assert!(
+        !failing || left.is_empty(),
+        "the passes failed to the end with {left:?} left after {} passes: {:#?}",
+        answers.passes,
+        answers.errors
+    );
+    answers
 }
 
 /// What the stub agent of the fake podman was given.
@@ -1535,6 +1590,60 @@ fn an_inspect_that_fails_leaves_the_request_for_the_next_pass() {
     let started = payloads(&then, "sccache_container_server_started");
     assert_eq!(started.len(), 1, "{started:?}");
     assert_eq!(started[0]["container_id"], "idup");
+}
+
+/// A turn's container that starts and is gone again between the looks of
+/// one pass (an inspect that finds none, an exists that finds one, and the
+/// inspect after it that finds none again) makes that pass an error of
+/// podman's "no such container", not a container that runs not; the
+/// requests are answered as the supervisor answers them
+/// ([`answer_requests`]): the request is left for the next pass, which finds
+/// no container and takes the request away.
+#[test]
+fn a_container_gone_between_the_looks_of_a_pass_leaves_the_request_for_the_next_pass() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (db, run, run_dir, state, containers) = running_container(dir.path(), "idgone");
+    fs::remove_file(
+        state
+            .join("containers")
+            .join(format!("dagq-{QUEUE}-run-{}", run.id())),
+    )
+    .unwrap();
+    fs::write(state.join("exists-gone"), "").unwrap();
+    let error = format!("{:#}", containers.running_container(run.id()).unwrap_err());
+    assert!(error.contains("no such container"), "{error}");
+    let looks: Vec<String> = calls(&state)
+        .iter()
+        .filter_map(|call| call.strip_prefix("--connection dagq container "))
+        .filter_map(|call| call.split_whitespace().next().map(str::to_owned))
+        .collect();
+    assert_eq!(looks, ["inspect", "exists", "inspect"]);
+    fs::write(request(&run_dir, TURN), "").unwrap();
+    fs::write(state.join("exists-gone"), "").unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let answers = thread::scope(|scope| {
+        let answering = scope.spawn(|| answer_requests(&containers, &db, &run, &stop, || {}));
+        let _stop = StopOnDrop(&stop);
+        let until = std::time::Instant::now() + crate::common::STEP_LIMIT;
+        while !requests(&run_dir).is_empty()
+            && !answering.is_finished()
+            && std::time::Instant::now() < until
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        answering.join().unwrap()
+    });
+    assert_eq!(requests(&run_dir), Vec::<String>::new());
+    assert!(!state.join("exists-gone").exists());
+    assert_eq!(answers.errors.len(), 1, "{:?}", answers.errors);
+    assert!(
+        answers.errors[0].contains("no such container"),
+        "{:?}",
+        answers.errors
+    );
+    assert!(answers.passes >= 2, "{}", answers.passes);
 }
 
 /// A launcher whose wait ends while the supervisor starts the server

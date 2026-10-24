@@ -20,7 +20,9 @@ pub const QUEUE: &str = "bbbbbbbbbbbbbbbb";
 /// last; its volumes are files of `state/volumes`. Its `container inspect`
 /// prints what its `run` wrote for the container in `state/containers`
 /// (an ID, `true`, its `--env` variables and its `--volume` mounts, a
-/// line each, as the runtime's inspect format asks), and its
+/// line each, as the runtime's inspect format asks); its `container
+/// exists` says a container is there once when `state/exists-gone` is
+/// (taking that file away), as if one started and was gone again; and its
 /// `exec` of a container's ID writes its arguments to `state/exec-args`
 /// and runs the command on the host as `run` does, with the container's
 /// variables. Under coverage it also
@@ -60,7 +62,10 @@ container)
   eval "name=\${{$#}}"
   case "$2" in
   inspect) if [ -f "$S/containers/$name" ]; then cat "$S/containers/$name"; else echo "Error: no such container $name" >&2; exit 125; fi ;;
-  exists) [ -f "$S/containers/$name" ] || exit 1 ;;
+  # A container the test has start and go between this exists and the
+  # inspect after it: there once, and gone again.
+  exists) if [ -f "$S/exists-gone" ]; then rm -f "$S/exists-gone"; exit 0; fi
+    [ -f "$S/containers/$name" ] || exit 1 ;;
   *) exit 125 ;;
   esac ;;
 exec)
