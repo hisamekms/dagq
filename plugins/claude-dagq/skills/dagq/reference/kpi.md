@@ -1,6 +1,6 @@
 # KPIs, change marks, forecasts, reports and push
 
-Each command below prints JSON; its flags, strata and output are in `"$DAGQ" <command> --help`. This file says how to read them and what to do.
+Each command below prints JSON; `"$DAGQ" <command> --help` lists its flags (and the strata `kpi` can split by), and the JSON output itself is where the values are. This file says how to read them and what to do.
 
 ## `dagq kpi`: periods, strata, targets
 
@@ -12,7 +12,7 @@ Each command below prints JSON; its flags, strata and output are in `"$DAGQ" <co
 
 - A missing value is no record, not zero. A period not over yet and a value with too few samples are not judged: read no trend from them.
 - Compare work time only within one `area=` or `change=` stratum (which one is the repository's rule): tasks differ by an order of magnitude, so `all` moves with the mix of tasks.
-- What each KPI and stratum measures: `kpi --help`.
+- `kpi --help` lists the flags and the strata to split by; it does not explain the values. Read each value in the JSON output where it stands.
 - **Targets** are set in the repository's `dagq.toml` and the host's `host.toml`; only the targets set there are judged. Act on a target only when the output says it is breached (off target for several periods in a row), not on a single miss. Add a `[kpi]` table to `dagq.toml` only once the installed binary knows it: an older one rejects it.
 
 ## Before and after a change: `mark`, `marks`, `kpi --compare`
@@ -29,7 +29,7 @@ Each command below prints JSON; its flags, strata and output are in `"$DAGQ" <co
 
 Any queue, once a week, in this order (`kpi --period week --last 4` for the numbers, `kpi --period day` for the days). Keep the time runs wait for a person apart from their own time and show both.
 
-1. **Check the arithmetic.** Compare the week's slot occupancy measured from the slots with the one expected from the landings and their slot time (`kpi --help` says which values these are and how each is made). They come from different records: when they agree, the slot numbers can be read; when they do not, doubt the records or your reading before anything else, and name the value and the cause you found. A day strays more than a week.
+1. **Check the arithmetic.** Compare the week's slot occupancy measured from the slots with the one expected from the landings and their slot time (both are in the week's JSON output). They come from different records: when they agree, the slot numbers can be read; when they do not, doubt the records or your reading before anything else, and name the value and the cause you found. A day strays more than a week.
 2. **Find the one constraint.** Look for what sits at 1: the share of slots held (read it with the landing queue and `candidates`, since a run waiting to land still holds its slot), the CPU load per core, the serial landing slot's utilization, and the time runs wait for people. Only the constraint is worth fixing; a faster non-constraint lands nothing more. Slots full and CPU saturated: do not add slots, lower the CPU each landing takes.
 3. **Pareto of slot time.** Sort the phases of slot time by median × count, largest first, then split the top one into its parts, never adding a part to its whole; fix only the top one or two. With the landing slot as the constraint, the landing's own phases and attempts are the list.
 4. **Outliers.** Read `p90` and `max`, not only the median. Take the longest runs in `stats --full` and read each with `timeline RUN` (the gaps and their reasons, a person's wait among them); a few long runs often cost more than every median together. The first-pass and verification-failure rates tell how much slot time is rework; the send-back rates of reviews and plan reviews, split by their primary code, tell why.
