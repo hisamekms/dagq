@@ -705,6 +705,11 @@ pub trait PlanReviewStore {
         token: &LeaseToken,
         failure: &PlanReviewFailure,
     ) -> Result<()>;
+    /// The ID of every plan review that finished at or before `before`
+    /// (UNIX seconds), for the sweep to remove its directory under
+    /// `plan_reviews_dir` past its retention (ADR-t697-1); an unfinished
+    /// one is never among them.
+    fn plan_reviews_finished_before(&self, before: i64) -> Result<Vec<i64>>;
     /// Every proposal sent back to its planner, oldest first.
     fn revising_proposals(&self) -> Result<Vec<RevisingProposal>>;
     /// Claim the delivery of the revise of `proposal` (it records when):

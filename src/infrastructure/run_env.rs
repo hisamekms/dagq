@@ -97,6 +97,7 @@ use crate::{
         queue_broker::RegistryHost,
         recheck::RecheckConfig,
         resume::ResumeConfig,
+        retention::RetentionConfig,
         review_builtins::{self, BuiltinAgent, BuiltinSetting},
         review_programs::{
             self, BuiltinProgram, BuiltinProgramSetting, ReviewProgram, ReviewPrograms,
@@ -126,6 +127,10 @@ const CONFLICTS_TABLE: &str = "conflicts";
 const RECHECK_TABLE: &str = "recheck";
 const DISK_TABLE: &str = "disk";
 const RESUME_TABLE: &str = "resume";
+/// `[retention]`: how long the directories of ended planners, plan
+/// reviews and observations stay, and how many backups (ADR-t697-1); its
+/// keys are on [`RetentionConfig`].
+const RETENTION_TABLE: &str = "retention";
 const EXIT_TABLE: &str = "exit";
 /// `[repository]`: the landing branch and its push (ADR-t615-1).
 const REPOSITORY_TABLE: &str = "repository";
@@ -460,13 +465,14 @@ const LOCAL_GATE_PATHS: &str = "paths";
 const LOCAL_GATE_KIND: &str = "kind";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 30] = [
+const TABLES: [&str; 31] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
     RECHECK_TABLE,
     DISK_TABLE,
     RESUME_TABLE,
+    RETENTION_TABLE,
     EXIT_TABLE,
     REPOSITORY_TABLE,
     WORKER_TRIAL_TABLE,
@@ -543,6 +549,9 @@ pub struct Config {
     pub disk: DiskConfig,
     /// `[resume]`, the default for the key it does not set.
     pub resume: ResumeConfig,
+    /// `[retention]` (ADR-t697-1), the defaults for the keys it does not
+    /// set.
+    pub retention: RetentionConfig,
     /// `[exit]`, the defaults for the keys it does not set: checked and
     /// otherwise ignored since task 1437 (no `/exit` is retried).
     pub exit: ExitConfig,
@@ -693,6 +702,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut conflict_keys: Vec<String> = Vec::new();
     let mut disk_keys: Vec<String> = Vec::new();
     let mut resume_keys: Vec<String> = Vec::new();
+    let mut retention_keys: Vec<String> = Vec::new();
     let mut exit_keys: Vec<String> = Vec::new();
     let mut trial_keys: Vec<String> = Vec::new();
     let mut supervisor_keys: Vec<String> = Vec::new();
@@ -1055,7 +1065,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{RETENTION_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -2076,6 +2086,25 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 config.resume.conflict_only_limit = usize::try_from(limit).with_context(with)?;
                 resume_keys.push(key.to_owned());
             }
+            Some(RETENTION_TABLE) => {
+                ensure!(
+                    RetentionConfig::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{RETENTION_TABLE}]; the keys are {}",
+                    RetentionConfig::KEYS.join(", ")
+                );
+                ensure!(
+                    !retention_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let value = parse_positive(rest.trim(), "number").with_context(with)?;
+                if key == "days" {
+                    config.retention.days = u64::try_from(value).with_context(with)?;
+                } else {
+                    config.retention.backups = usize::try_from(value).with_context(with)?;
+                }
+                retention_keys.push(key.to_owned());
+            }
             Some(EXIT_TABLE) => {
                 ensure!(
                     ExitConfig::KEYS.contains(&key),
@@ -2655,6 +2684,18 @@ pub fn load_resume_config(root: &Path) -> Result<Option<ResumeConfig>> {
             .with_context(|| format!("parse {}", path.display()))?
             .resume,
     ))
+}
+
+/// `[retention]` of the `dagq.toml` in `root` (ADR-t697-1); no file, no
+/// table or no key is the default.
+pub fn load_retention_config(root: &Path) -> Result<RetentionConfig> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(RetentionConfig::default());
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .retention)
 }
 
 /// `[stall]` of the `dagq.toml` in `root` (ADR-0043 decision 4), `None`
@@ -3441,6 +3482,9 @@ impl Verifier for ShellVerifier {
     }
     fn ci_watch_config(&self) -> Result<Option<CiWatchConfig>> {
         load_ci_watch(&self.checkout)
+    }
+    fn retention_config(&self) -> Result<RetentionConfig> {
+        load_retention_config(&self.checkout)
     }
     fn e2e_paths(&self) -> Result<Vec<String>> {
         load_e2e_paths(&self.checkout)
@@ -6104,6 +6148,58 @@ LITERAL = 'no \n escapes # here'
             load_review_jobs(dir.path()).unwrap().unwrap().program,
             Some(30)
         );
+    }
+
+    /// `[retention]` sets `days` and `backups`, each a whole number above
+    /// 0 taken once, and leaves a key it does not set at its default
+    /// (ADR-t697-1).
+    #[test]
+    fn parses_the_retention_table() {
+        let retention = |text: &str| parse_config(text).unwrap().retention;
+        assert_eq!(retention(""), RetentionConfig::default());
+        assert_eq!(
+            retention("[retention]\ndays = 3 # days\n"),
+            RetentionConfig {
+                days: 3,
+                ..RetentionConfig::default()
+            }
+        );
+        assert_eq!(
+            retention("[retention]\nbackups = 5\ndays = 14\n"),
+            RetentionConfig {
+                days: 14,
+                backups: 5
+            }
+        );
+        for (text, error) in [
+            ("[retention]\ndays = 0\n", "dagq.toml:2: value of days"),
+            (
+                "[retention]\nbackups = -1\n",
+                "dagq.toml:2: value of backups",
+            ),
+            (
+                "[retention]\nhours = 1\n",
+                "dagq.toml:2: unknown key hours in [retention]; the keys are days, backups",
+            ),
+            (
+                "[retention]\ndays = 1\ndays = 2\n",
+                "dagq.toml:3: days is defined twice",
+            ),
+        ] {
+            let got = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(got.contains(error), "{text:?}: {got}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_retention_config(dir.path()).unwrap(),
+            RetentionConfig::default()
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[retention]\nbackups = 1\n",
+        )
+        .unwrap();
+        assert_eq!(load_retention_config(dir.path()).unwrap().backups, 1);
     }
 
     /// `[fresh_session] peak_context_above` is a whole number of tokens

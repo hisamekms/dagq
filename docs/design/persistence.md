@@ -180,7 +180,7 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
   supervisorは使う設定の値と出どころを自分の登録に書き、`install --allow-breaking`はdrainした登録のflag由来の値だけを起動し直す`up`に渡す（`install_breaking`のdoc comment）。
   `binary_version`は登録するプロセス自身だけが書き、`mode`は`supervise`が受けた`--mode`を自分の登録に書く（[`up` / `down`](supervisor-lifecycle/up-down.md)のmodeの記録）。
 - 登録の行を消すのは`supervise`自身の終了と、`up`・`down`と生きているsupervisorの掃除（`prune_supervisor`）だけで、どれも同じトランザクションで`supervisor_stopped`を書く。
-  生きているsupervisorはsweepの間隔ごとに、自分以外でheartbeatが`HEARTBEAT_TIMEOUT_SECS`を過ぎ、PIDが死んだか別プロセスに取られた登録だけを消す（判定は`supervisor_prune::left_behind`のdoc comment）。
+  生きているsupervisorはsweepの間隔ごとに、自分以外でheartbeatが`HEARTBEAT_TIMEOUT_SECS`を過ぎ、PIDが死んだか別プロセスに取られた登録だけを消す。
   heartbeatか停止の記録に失敗したときは消さず、staleとして次の掃除に任せる。
   `status`・`doctor`・`recover`は消さない。
 - `recover`だけがtokenなしで未完了のrunを止め、同じトランザクションでleaseとプロセスを再検査する。
@@ -280,7 +280,7 @@ $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.l
 - repositoryを移すとhashが変わり、新しいqueueに解決される。
   付け替えは明示の`rebind`だけが行う（[ADR-0020](../adr/0020-rebind-queue-to-a-moved-repository.md)、[コマンドをまたぐ約束](supervisor-lifecycle/commands.md)）。
 - queueのディレクトリは丸ごと移せる: runのpathは開いた場所から解決し直し、worktreeのGitの管理情報は`integrate`が直す（[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。
-- `logs/`の書式と消す時期は`infrastructure::telemetry`。
+- `logs/`の書式と消す時期は`infrastructure::telemetry`、`planners/`・`plan-reviews/`・`observer/`・`backups/`は`[retention]`（ADR-t697-1）。
 
 ## Database setup and migrations
 

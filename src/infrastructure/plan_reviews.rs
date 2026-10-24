@@ -905,6 +905,17 @@ impl PlanReviewStore for SqliteQueue {
         Ok(())
     }
 
+    fn plan_reviews_finished_before(&self, before: i64) -> Result<Vec<i64>> {
+        self.conn
+            .prepare(
+                "SELECT id FROM plan_reviews
+                 WHERE finished_at IS NOT NULL AND finished_at <= ?1 ORDER BY id",
+            )?
+            .query_map([before], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(Into::into)
+    }
+
     fn revising_proposals(&self) -> Result<Vec<RevisingProposal>> {
         let tx = self.conn.unchecked_transaction()?;
         let ids: Vec<ProposalId> = tx

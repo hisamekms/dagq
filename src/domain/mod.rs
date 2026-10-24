@@ -1302,6 +1302,7 @@ pub mod release_update;
 pub mod replan_plan;
 pub mod replan_snapshot;
 pub mod resume;
+pub mod retention;
 pub mod review_builtins;
 pub mod review_jobs;
 pub mod review_programs;

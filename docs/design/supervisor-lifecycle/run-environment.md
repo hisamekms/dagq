@@ -69,7 +69,9 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   supervisorが起動時に読み（`SuperviseOptions::resume`で上書きできる）、読めなければ既定値で動く。
   起動の後の変更はsupervisorを起動し直すまで効かない。
 
-- `[supervisor]`はsupervisorの同時に走らせるrunの数・人の答えを待つrunの上限・runtimeが同時に立てるplannerの上限・claimの間隔・軽い枠のchange・実行区分の上限とaging・調査中の計画の上限を持ち、keyと意味は`domain::slot_limits::SupervisorConfig`が持つ（[人の答えを待つrun](waiting.md)・[Draft planners](draft-planners.md)・[Finding planners](finding-planners.md)・[Plan review (supervisor)](plan-review.md#plan-review-supervisor)・[claimを控える](claim-hold.md)・[実行区分の上限とaging](claim-hold.md#実行区分の上限とaging)、ADR-t1479-1、ADR-t1591-1）。
+- `[retention]`は終わったplanner・plan review・observationのdirを残す日数`days`（既定7）と`backups/`の数`backups`（既定2）で、意味は`RetentionConfig`（ADR-t697-1）。
+
+- `[supervisor]`はsupervisorの枠と控えの設定で、keyと意味は`domain::slot_limits::SupervisorConfig`が持つ（[人の答えを待つrun](waiting.md)・[Draft planners](draft-planners.md)・[Finding planners](finding-planners.md)・[Plan review (supervisor)](plan-review.md#plan-review-supervisor)・[claimを控える](claim-hold.md)・[実行区分の上限とaging](claim-hold.md#実行区分の上限とaging)、ADR-t1479-1、ADR-t1591-1）。
   projectごとのbuildの重さに合わせた並列数と、答えを待つplannerが枠をふさいでもdraftとreviseが進む数と、buildのloadが出るまでの間をrepositoryに置くため。
   - **優先順**: flagの明示 > `[supervisor]` > 既定で、keyごとのflagの有無は`domain::slot_limits`のdoc commentが持つ。
     `up`はflagを明示されたときだけ`supervise`の引数に渡し、明示が無ければ焼き込まない（[`up` / `down`](up-down.md)）ので、`up`で起動したsupervisorもこの順で決まる。

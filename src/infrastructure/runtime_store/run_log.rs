@@ -4,6 +4,12 @@
 
 use super::*;
 
+/// The events of one kind in a range of ids, oldest first, at most a
+/// limit: a range of `events_by_kind`.
+const EVENTS_OF_KIND_BETWEEN_SQL: &str =
+    "SELECT * FROM run_events WHERE kind=?1 AND id>?2 AND id<=?3
+     ORDER BY id LIMIT ?4";
+
 /// The rows of [`SqliteQueue::installs_after`]: the queue's events of kind
 /// `?1` past id `?2` that installed more than the plugin.
 const INSTALLS_AFTER: &str = "FROM run_events
@@ -253,7 +259,11 @@ impl SqliteQueue {
     }
 
     /// The events of one of `kinds` with `after < id <= upto`, oldest
-    /// first, at most `limit`.
+    /// first, at most `limit`
+    /// ([`EVENTS_OF_KIND_BETWEEN_SQL`]).
+    /// One range per kind, so each walks `events_by_kind`: the
+    /// supervisor's sweep reads these every minute, and a kind list made
+    /// SQLite walk every event of the range instead.
     pub fn events_of_between(
         &self,
         kinds: &[&str],
@@ -261,11 +271,24 @@ impl SqliteQueue {
         upto: EventId,
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
-        let filter = EventFilter {
-            kinds: Some(kinds.iter().map(|&kind| kind.to_owned()).collect()),
-            ..EventFilter::default()
-        };
-        self.events_between(after, upto, &filter, limit)
+        let mut kinds = kinds.to_vec();
+        kinds.sort_unstable();
+        kinds.dedup();
+        let mut events = Vec::new();
+        for kind in kinds {
+            events.extend(
+                self.conn
+                    .prepare_cached(EVENTS_OF_KIND_BETWEEN_SQL)?
+                    .query_map(
+                        params![kind, after, upto, i64::try_from(limit).unwrap_or(i64::MAX)],
+                        event_row,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
+        events.sort_by_key(|event| event.id);
+        events.truncate(limit);
+        Ok(events)
     }
 
     /// The newest event of `kind`, on whatever task, goal or run.
@@ -1136,6 +1159,32 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
+    }
+
+    /// The range of one kind is read by `events_by_kind`, not a walk of
+    /// every event. In memory, on the table's columns and the index as the
+    /// migrations leave them: the plan needs no queue file.
+    #[test]
+    fn a_range_of_one_kind_is_read_by_its_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE run_events (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, goal_id INTEGER,
+                 run_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
+             CREATE INDEX events_by_kind ON run_events(kind, id);",
+        )
+        .unwrap();
+        let steps = plan(&conn, EVENTS_OF_KIND_BETWEEN_SQL);
+        assert!(
+            steps
+                .iter()
+                .any(|line| line.starts_with("SEARCH run_events USING INDEX events_by_kind")),
+            "{steps:#?}"
+        );
+        assert!(
+            !steps.iter().any(|line| line.starts_with("SCAN")),
+            "{steps:#?}"
+        );
     }
 
     /// The cleanup job's check of one run (task 1586) finds the run by its

@@ -32,8 +32,8 @@ use std::{
 use tracing::warn;
 
 use super::{
-    AgentProvider, AgentSignals, Clock, PlannerCommand, ProcessControl, Queue, RunFiles,
-    SessionWrappers, Spawner,
+    AgentProvider, AgentSignals, Clock, PlanReviewStore, PlannerCommand, ProcessControl, Queue,
+    RunFiles, SessionWrappers, Spawner,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
         WorkspaceAccess,
@@ -45,6 +45,7 @@ use super::{
     screen_idle::{self, MarkerState},
     session::wrapper_refused,
 };
+use crate::domain::retention::{RetentionConfig, Swept};
 use crate::domain::{
     ActorContext, IdleProbe, PlannerCloseCode, PlannerId, PlannerOrigin, PlannerProbe,
     PlannerRoute, PlannerSession, PlannerState, ProposalId, Task,
@@ -950,6 +951,61 @@ pub fn close_person_planners(queue: &dyn Queue) -> Result<Vec<PlannerId>> {
     Ok(closed)
 }
 
+/// The directories of 計画管理 whose ended jobs the retention removes.
+#[derive(Debug, Clone, Copy)]
+pub struct PlanningDirs<'a> {
+    /// `planners/`: one directory per planner, by its ID.
+    pub planners: &'a Path,
+    /// `plan-reviews/`: one directory per plan review, by its row's ID.
+    pub plan_reviews: &'a Path,
+}
+
+/// Remove 計画管理's directories past their retention at `now` under
+/// `config` (ADR-t697-1): of each of `planners` whose row closed at or
+/// before [`RetentionConfig::cutoff`] and no process of which runs
+/// ([`dir_unused`]: a live wrapper or agent keeps it), and of each plan
+/// review that finished by then (an unfinished one is never among them).
+/// The rows stay. Every removal is tried, and what went is returned with
+/// the first failure, if any.
+pub fn remove_expired_dirs(
+    planners: &[PlannerSession],
+    reviews: &dyn PlanReviewStore,
+    processes: &dyn ProcessControl,
+    files: &dyn RunFiles,
+    now: i64,
+    dirs: PlanningDirs<'_>,
+    config: &RetentionConfig,
+) -> Swept<anyhow::Error> {
+    let mut swept = Swept::new();
+    let mut expired: Vec<PathBuf> = planners
+        .iter()
+        .filter(|row| config.expired(row.closed_at, now))
+        .filter(|row| dir_unused(row, processes))
+        .map(|row| planner_dir(dirs.planners, row.id))
+        .collect();
+    match reviews.plan_reviews_finished_before(config.cutoff(now)) {
+        Ok(ids) => expired.extend(
+            ids.into_iter()
+                .map(|id| dirs.plan_reviews.join(id.to_string())),
+        ),
+        Err(error) => swept.failed(error),
+    }
+    for dir in expired {
+        // A link in a directory's place is not followed.
+        if !matches!(files.entry_kind(&dir), Ok(super::EntryKind::Dir)) {
+            continue;
+        }
+        match files.remove_dir_all(&dir) {
+            Ok(()) => swept.removed.push(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                swept.failed(anyhow::Error::new(error).context(format!("remove {}", dir.display())))
+            }
+        }
+    }
+    swept
+}
+
 /// Remove the runner of every planner, closed or not, that nothing runs
 /// any more ([`PlannerSession::runner_unused`]: its exit recorded, its
 /// wrapper dead, in a workspace silent past the heartbeat timeout, or
@@ -999,20 +1055,36 @@ pub fn remove_unused_planner_runners(
 /// background handle's pid shows the start the handle recorded, or, with
 /// no handle, while its wrapper's pid runs.
 fn runner_unused(planner: &PlannerSession, processes: &dyn ProcessControl, now: i64) -> bool {
+    planner.runner_unused(&PlannerProbe {
+        now,
+        workspace_listed: false,
+        wrapper_alive: wrapper_alive(planner, processes),
+        idle: None,
+    })
+}
+
+/// Whether `planner`'s directory may go past its retention
+/// ([`PlannerSession::dir_unused`]): its row closed, its wrapper not
+/// alive (as [`runner_unused`] tells it) and its agent's pid not running.
+fn dir_unused(planner: &PlannerSession, processes: &dyn ProcessControl) -> bool {
+    planner.dir_unused(
+        wrapper_alive(planner, processes),
+        planner.agent_pid.is_some_and(|pid| processes.alive(pid)),
+    )
+}
+
+/// Whether `planner`'s wrapper runs: while its background handle's pid
+/// shows the start the handle recorded, or, with no handle, while its
+/// wrapper's pid runs.
+fn wrapper_alive(planner: &PlannerSession, processes: &dyn ProcessControl) -> bool {
     let handle = planner
         .workspace_id
         .as_deref()
         .and_then(BackgroundHandle::parse);
-    let wrapper_alive = match handle {
+    match handle {
         Some(handle) => handle.is(handle.pid, processes.start_identity(handle.pid).as_deref()),
         None => planner.wrapper_pid.is_some_and(|pid| processes.alive(pid)),
-    };
-    planner.runner_unused(&PlannerProbe {
-        now,
-        workspace_listed: false,
-        wrapper_alive,
-        idle: None,
-    })
+    }
 }
 
 #[cfg(test)]

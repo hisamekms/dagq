@@ -254,6 +254,18 @@ impl PlannerSession {
     }
 }
 
+impl PlannerSession {
+    /// Whether the planner's directory may go once its retention passed
+    /// (ADR-t697-1 decision 2): its row is closed and neither its
+    /// wrapper's process (`wrapper_alive`) nor its agent's
+    /// (`agent_alive`) runs. Unlike [`Self::runner_unused`], a recorded
+    /// exit or a stale heartbeat is no evidence: a process still running
+    /// keeps the directory however old the close.
+    pub fn dir_unused(&self, wrapper_alive: bool, agent_alive: bool) -> bool {
+        self.closed_at.is_some() && !wrapper_alive && !agent_alive
+    }
+}
+
 impl PlannerState {
     /// Whether the planner's session can still take text: it is opening,
     /// working or idle in a workspace cmux lists.
@@ -307,6 +319,25 @@ mod tests {
             route: PlannerRoute::Interactive,
             answer_wait_at: None,
         }
+    }
+
+    #[test]
+    fn a_closed_planners_dir_is_unused_only_once_no_process_of_it_runs() {
+        let closed = PlannerSession {
+            closed_at: Some(120),
+            exited_at: Some(115),
+            exit_code: Some(0),
+            heartbeat_at: Some(1),
+            ..session()
+        };
+        assert!(closed.dir_unused(false, false));
+        // A recorded exit and a stale heartbeat free the runner, not the
+        // directory of a process still running.
+        assert!(closed.runner_unused(&probe()));
+        assert!(!closed.dir_unused(true, false));
+        assert!(!closed.dir_unused(false, true));
+        // An open row keeps it whatever runs.
+        assert!(!session().dir_unused(false, false));
     }
 
     fn probe() -> PlannerProbe {

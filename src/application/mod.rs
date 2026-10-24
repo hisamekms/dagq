@@ -56,6 +56,7 @@ pub mod rebind;
 pub mod recording;
 pub mod release_update;
 pub mod report;
+pub mod retention;
 pub mod review;
 pub mod review_programs;
 pub mod run_container;

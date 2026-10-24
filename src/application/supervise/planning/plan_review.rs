@@ -174,11 +174,13 @@ impl PlanningState {
 
     /// The sweep's part of 計画管理, on host運用's sweep interval: close the
     /// rows of the runtime's planners whose session is gone and whose
-    /// wrapper is done, then remove the runners of the planners nothing
-    /// runs any more.
+    /// wrapper is done, remove the runners of the planners nothing runs
+    /// any more, then the directories of the planners and plan reviews
+    /// past their retention.
     pub(in crate::application::supervise) fn sweep_planners(&mut self, env: &mut PassEnv<'_>) {
         self.close_abandoned_planners(env);
         remove_unused_planner_runners(env);
+        remove_expired_dirs(env);
     }
 
     /// Close the rows of the runtime's planners whose session is gone and
@@ -1853,6 +1855,44 @@ impl PlanningState {
         }
         self.planner_exits
             .push((view.planner.id, env.generators.clock.monotonic()));
+    }
+}
+
+/// Remove the directories of the planners and plan reviews past
+/// `[retention]` of `dagq.toml` as read now
+/// ([`planner::remove_expired_dirs`]; one that cannot be read keeps the
+/// defaults). Each removal is logged, a failure only warned of and retried
+/// on the next sweep.
+fn remove_expired_dirs(env: &PassEnv<'_>) {
+    let config = env.verifier.retention_config().unwrap_or_else(|error| {
+        warn!(error = %format_args!("{error:#}"), "[retention] of dagq.toml not read: {error:#}; using the defaults");
+        Default::default()
+    });
+    let planners = match env.queue.planners(true) {
+        Ok(planners) => planners,
+        Err(error) => {
+            warn!(error = %format_args!("{error:#}"), "the planners could not be read for their retention: {error:#}");
+            Vec::new()
+        }
+    };
+    let swept = planner::remove_expired_dirs(
+        &planners,
+        &*env.queue,
+        &**env.processes,
+        &**env.files,
+        env.generators.clock.now(),
+        planner::PlanningDirs {
+            planners: &env.layout.planners_dir,
+            plan_reviews: &env.layout.plan_reviews_dir,
+        },
+        &config,
+    );
+    // What went is logged even when something else failed.
+    for path in swept.removed {
+        info!(path = %path.display(), retention_days = config.days, "removed {} past its retention", path.display());
+    }
+    if let Some(error) = swept.failure {
+        warn!(error = %format_args!("{error:#}"), "the directories of ended planners and plan reviews could not all be removed: {error:#}");
     }
 }
 

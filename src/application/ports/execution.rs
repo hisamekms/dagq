@@ -2383,6 +2383,12 @@ pub trait Verifier {
     fn ci_watch_config(&self) -> Result<Option<crate::domain::ci_watch::CiWatchConfig>> {
         Ok(None)
     }
+    /// `[retention]` of `dagq.toml` (ADR-t697-1): how long the sweep keeps
+    /// the directories of ended planners, plan reviews and observations,
+    /// and how many backups; the defaults by default.
+    fn retention_config(&self) -> Result<crate::domain::retention::RetentionConfig> {
+        Ok(Default::default())
+    }
     /// Where the worker and the verification of `integrate` run
     /// (`runtime` of `[roles.worker]` and `[roles.verification]` of
     /// `dagq.toml`, goal 38); the host by default.

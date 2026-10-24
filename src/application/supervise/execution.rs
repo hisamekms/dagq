@@ -2167,7 +2167,9 @@ impl Supervisor<'_> {
     /// runs is asked to be freed ([`Self::request_cleanup`]), 計画管理
     /// sweeps its planners ([`PlanningState::sweep_planners`]), the
     /// registrations other supervisors left behind are pruned
-    /// ([`sweep::prune_left_supervisors`]), and the background wrappers of
+    /// ([`sweep::prune_left_supervisors`]), what ended sessions and jobs
+    /// left past its retention is removed
+    /// ([`HostOpsState::remove_expired`]), and the background wrappers of
     /// ended runs still running are stopped
     /// ([`sweep::SweepWatch::sweep_ended_sessions`]).
     fn sweep_ended_runs(&mut self, interval: Duration) -> Result<()> {
@@ -2188,6 +2190,7 @@ impl Supervisor<'_> {
         if let Err(error) = host.prune_left_supervisors(&env) {
             warn!(error = %format_args!("{error:#}"), "the registrations other supervisors left behind could not be read: {error:#}");
         }
+        host.remove_expired(&env);
         host.sweep_ended_sessions(&mut env, &held)
     }
 

@@ -540,6 +540,7 @@ pub(super) const MODULES: &[ModuleContext] = &[
     module("src/application/queue_broker.rs", Host),
     module("src/application/broker_relay.rs", Host),
     module("src/application/sccache.rs", Host),
+    module("src/application/retention.rs", Host), // the observations' directories and the backups past their retention
     module("src/application/sccache/", Host),
     module("src/application/actor_executor.rs", Host),
     module("src/application/execution.rs", Host),
@@ -690,6 +691,7 @@ pub(super) const METHODS: &[Method] = &[
     method("DraftPlannerStore", "register_follow_ups", Only(&[Execution])), // T7
     method("Verifier", "run_env", Only(&[Host])), // the environment, for host運用's diagnosis
     method("Verifier", "run_env_programs", Only(&[Host])), // the programs, for host運用's diagnosis
+    method("Verifier", "retention_config", Only(&[Host, Planning])), // [retention], for the sweeps of their ended jobs' directories (ADR-t697-1)
     method("QueueRecords", "findings", All), // the reads; record_* are internal
     method("QueueRecords", "reports_written", All),
     method("QueueRecords", "kpi_breaches_open", All),

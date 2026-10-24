@@ -165,6 +165,34 @@ impl HostOpsState {
         )
     }
 
+    /// Remove what ended observations left, and the old backups, past
+    /// `[retention]` of `dagq.toml` as read now
+    /// ([`crate::application::retention::remove_expired`]; one that cannot
+    /// be read keeps the defaults). Each removal is logged, a failure only
+    /// warned of and retried on the next sweep.
+    pub(super) fn remove_expired(&self, env: &PassEnv<'_>) {
+        use crate::application::retention::{RetentionDirs, remove_expired};
+        let config = env.verifier.retention_config().unwrap_or_else(|error| {
+            warn!(error = %format_args!("{error:#}"), "[retention] of dagq.toml not read: {error:#}; using the defaults");
+            Default::default()
+        });
+        let swept = remove_expired(
+            &*env.queue,
+            &**env.processes,
+            &**env.files,
+            &*env.generators.clock,
+            &RetentionDirs::of(&env.layout.db, &**env.files),
+            &config,
+        );
+        // What went is logged even when something else failed.
+        for path in swept.removed {
+            info!(path = %path.display(), retention_days = config.days, backups = config.backups, "removed {} past its retention", path.display());
+        }
+        if let Some(error) = swept.failure {
+            warn!(error = %format_args!("{error:#}"), "what ended observations left, or the old backups, could not all be removed: {error:#}");
+        }
+    }
+
     /// Sample the host's load ([`host_metrics::HostMetricsWatch::pass`]).
     pub(super) fn host_metrics_pass(
         &mut self,

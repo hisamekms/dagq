@@ -77,6 +77,8 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
   wrapperを起動できずにerror付きで閉じる行は記録しない。
 - **行の片付け**: sweepの`close_abandoned_planners`がwrapperもsessionも居ない行を閉じ、supervisorが止まっていた間の分も拾う。
 - **`runner`の片付け**: wrapperが終わりに消し、残りはsweepの`remove_unused_planner_runners`が消す。
+- **dirの片付け**: 閉じてwrapperもagentもprocessが動いていないplannerのdirは、閉じてから`[retention]`の保持期間を過ぎるとsweepが消す（[Persistence](../persistence.md#queue-location)）。
+  行は残る。
 
 ## runtimeのplannerの経路<a id="runtimeのplannerの経路"></a>
 

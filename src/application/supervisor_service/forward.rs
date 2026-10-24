@@ -463,6 +463,10 @@ impl PlanReviewStore for SupervisorQueue {
         let mut local = self.local()?;
         PlanReviewStore::fail_plan_review(&mut **local, job, token, failure)
     }
+    fn plan_reviews_finished_before(&self, before: i64) -> Result<Vec<i64>> {
+        let local = self.local()?;
+        PlanReviewStore::plan_reviews_finished_before(&**local, before)
+    }
     fn revising_proposals(&self) -> Result<Vec<RevisingProposal>> {
         let local = self.local()?;
         PlanReviewStore::revising_proposals(&**local)
