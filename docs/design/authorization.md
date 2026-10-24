@@ -49,7 +49,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 
 | 群 | capability | 対応するCLI |
 | --- | --- | --- |
-| 読み取り | `queue.read` | `locate` `list` `show` `candidates` `graph`（`--out`なし） `status` `asks` `events` `timeline` `stats` `kpi` `forecast` `doctor` `notes` `marks` `findings` `search` `related` `proposal list/show` `planners` `requests` `lint` `goal list/show` `observe --history` `observe --input` |
+| 読み取り | `queue.read` | `locate` `list` `show` `candidates` `graph`（`--out`なし） `status` `asks` `events` `timeline` `stats` `kpi` `forecast` `doctor` `notes` `marks` `findings` `search` `related` `proposal list/show` `planners` `requests` `replans` `lint` `goal list/show` `observe --history` `observe --input` |
 | | `queue.watch` | `watch` |
 | | `ci.read` | `ci failures`（着地先のbranchで既に落ちているtestの一覧。[CI watch](supervisor-lifecycle/ci-watch.md)） |
 | | `queue.export` | `graph --out` `report`（ファイルを書く） |
@@ -110,7 +110,7 @@ roleの名前だけでactorを名指さないplannerのidは、どのproposalの
 
 | role | 許すcapability | resourceの規則 |
 | --- | --- | --- |
-| user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.park` `replan.apply` `telemetry.report`を除く全て | なし |
+| user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report`を除く全て | なし |
 | inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`は持たない | なし。人自身の操作との区別は記録が持つ |
 | planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくもの（`ask --request ID`）はその依頼の閉じていないruntimeのplannerのactor idが自分のときだけ（`request.decline`と同じ規則。plannerが分からなければ拒む）。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）。`revisit`（draftの再検討の時刻、`task.write`）はdraftだけで（storeがどのroleにも求める）、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。`follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
 | worker | 読み取り・`ask.open`・`note.write`・`replan.propose`・`eval.request`・`eval.read` | evalと`replan.propose`は自分のrunの分だけ。読み取り以外は自分のrun（`DAGQ_RUN_ID`）・そのtask（`DAGQ_TASK_ID`）・自分のrunのaskだけ。開けるaskは`worker_question`だけで、`--run`なら自分のrun、`--task`だけなら自分のtask（`DAGQ_RUN_ID`の無いworkerは何も持たない） |
@@ -313,13 +313,13 @@ host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユ
 
 ### queue serviceのユースケース（service側）
 
-queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、要求のtokenから決めたprincipalをactorにして、対話と記録のユースケースを上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue。CLIの`proposal list|show`と同じ）に通す。
+queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、要求のtokenから決めたprincipalをactorにして、対話と記録のユースケースを上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue。CLIの`proposal list|show`と同じ）に、`watch_poll`を`queue.watch`に通す。
 findingの書き込みもCLIと同じpolicyで判定する（ADR-t1222-1決定2）。
-クライアントが名乗るroleは使わない（workerとjobのクライアントモードのdagqは`DAGQ_ROLE`を読まず、そのtokenのprincipalで判定される。[クライアントモード](queue-service.md#クライアントモード)）。
+クライアントの名乗るroleは認可に使わずtokenのprincipalで判定し、tokenの無いuserはsocketのpeerで決める（[hostのCLI](queue-service-host-cli.md)）。
 拒否は同じ`authorization_denied`（拒まれたprincipalがactor）に残る。
 tokenを発行するのは制御側だけで、AI actorにtokenを作るコマンドは無い。
 読み取りは狭めず、executor-telemetryのほかの全roleがqueue全体を読める（ADR-t1233-5決定3）。
-queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがその読み取りのコマンドに求めるのと同じ`queue.read`（queue）を`Gate`でprincipalに通してから答えるので、workerとjobも読める。
+queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがそのコマンドに求めるのと同じcapability（`ci failures`は`ci.read`、ほかは`queue.read`）を`Gate`で通して答える。
 
 ### ほかのコマンド（CLIの入口）
 

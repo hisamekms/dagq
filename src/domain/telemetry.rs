@@ -684,6 +684,9 @@ mod tests {
         let request = crate::domain::queue_service::ServiceRequest {
             api_version: u32::MAX,
             token: Some("f".repeat(64)),
+            env_role: None,
+            queue: None,
+            binding: None,
             use_case: crate::domain::queue_service::UseCase::TelemetryReport,
             params: serde_json::to_value(&report).unwrap(),
         };

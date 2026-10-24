@@ -52,6 +52,7 @@ mod finding_planner;
 mod finding_records;
 mod goal_review;
 mod goal_review_codex;
+mod host_client;
 mod inbox_nudge;
 mod inbox_watch_push;
 mod inbox_watch_wake;

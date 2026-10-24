@@ -157,7 +157,7 @@ containerに置いたworkerのturnを除き、actorは全て同じユーザー�
 
 同じhostの敵対的なプロセスは次で迂回できる:
 
-- envの偽装: `DAGQ_ROLE`を外せばuser、`DAGQ_ROLE=inbox`にすればinboxとして判定される。
+- envの偽装: `DAGQ_ROLE`を外せばuser、`DAGQ_ROLE=inbox`にすればinboxとして判定される（queue serviceへはこのユーザーが読めるinboxのtokenのfileも渡す）。
   `DAGQ_RUN_ID`も書き換えられる。
   `permissions.deny`はClaude Codeのコマンドの先頭の形しか見ないので、pathや`sh -c`やscriptからは通る
 - DBの直接操作: queueのSQLiteファイルはこのユーザーが読み書きでき、CLIを通らずに状態とeventを書き換えられる
@@ -165,8 +165,7 @@ containerに置いたworkerのturnを除き、actorは全て同じユーザー�
 - プロセス: 他のactorのプロセスにsignalを送れる（`pkill`・`killall`を拒むのもguardrail）
 - 古いバイナリへの戻し: 未知の`DAGQ_ROLE`を拒まないバイナリへ戻すと、新しいバイナリが起動したjobのroleを制限しない窓ができる（[Authorization](authorization.md#固定バイナリを戻したときの窓)）
 
-`status`と`doctor`は、AI actorごとのbackendとenforcementを出し、隔離していないことを実行時にも明示する（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）。
-`dagq.toml`がworkerかintegrateのverificationをcontainerにしたときは、適用先ごとのruntimeとenforcementも出し、workerのbackendもそれに従う（[Container runtime](container-runtime.md)）。
+`status`と`doctor`は、AI actorごとのbackendとenforcement（containerの適用先は[Container runtime](container-runtime.md)）を出し、隔離していないことを実行時にも明示する（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）。
 ActorExecutorのspecもhostでは記録と整合の検査だけで、プロセスはこのユーザーにできることを全てできる。
 
 

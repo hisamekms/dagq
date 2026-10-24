@@ -301,6 +301,9 @@ struct Fixture {
     /// Declared first so that it drops first, while the run directories
     /// its wrappers run from are still there.
     wrappers: WrapperGuard,
+    /// The queue's service, stopped after the wrappers and before the
+    /// directory goes.
+    _service: ServiceGuard,
     _dir: tempfile::TempDir,
     repo: PathBuf,
     stub: PathBuf,
@@ -359,8 +362,18 @@ fn fixture_on(branch: &str, files: &[(&str, &str)]) -> Fixture {
     let db = PathBuf::from(init["db"].as_str().unwrap());
     assert!(db.starts_with(env.data_home.join("dagq")));
     assert_eq!(dagq(&env, &["locate"])["db_exists"], true);
+    // The queue's service, which a person's `up` starts: a person's reads
+    // and a worker's `dagq` go to it and never open the queue (ADR-t3102-2
+    // decision 5, goal 82's stage (3)). It runs for the fixture's life, and
+    // the supervisors the tests start find it and keep it.
+    dagq(&env, &["service", "start"]);
+    let service = ServiceGuard(Env {
+        repo: repo.clone(),
+        data_home: env.data_home.clone(),
+    });
     Fixture {
         wrappers: WrapperGuard::default(),
+        _service: service,
         _dir: dir,
         repo,
         stub,
@@ -531,12 +544,12 @@ fn stop_wrapper(id: &str) {
     }
 }
 
-/// Stops the queue's service [`supervise_once`] started when it goes.
-struct ServiceGuard<'a>(&'a Env);
+/// Stops the queue's service [`fixture_on`] started when it goes.
+struct ServiceGuard(Env);
 
-impl Drop for ServiceGuard<'_> {
+impl Drop for ServiceGuard {
     fn drop(&mut self) {
-        let _ = dagq_output(self.0, &[], &["service", "stop"]);
+        let _ = dagq_output(&self.0, &[], &["service", "stop"]);
     }
 }
 
@@ -553,11 +566,8 @@ fn supervise_once(fixture: &Fixture, extra: &[&str], tasks: &[&str]) -> Pass {
     let listed = shared.join("listed");
     let _ = fs::remove_file(&listed);
     fs::write(&watching, "").unwrap();
-    // The queue's service, which `up` starts and a worker's `dagq` goes to
-    // in client mode (goal 82's stage (3)); a one-shot `supervise` keeps
-    // none of its own. It is stopped when the pass ends.
-    dagq(&fixture.env, &["service", "start"]);
-    let _service = ServiceGuard(&fixture.env);
+    // A one-shot `supervise` keeps no queue service of its own: the
+    // fixture's runs through the pass and after it, for the test's reads.
     let started = Instant::now();
     let deadline = common::deadline_after(started, SUPERVISE_TIMEOUT);
     let mut child = ChildGuard::new(
@@ -1823,6 +1833,14 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
     assert!(!pid_alive(pid), "supervisor {pid} is still alive");
     assert!(!agent.loaded(), "the agent is still loaded");
     assert!(!plist.exists(), "the plist was not removed");
+    // The drain `down` asked for stopped the queue's service too, and a
+    // person's read says so rather than open the queue (ADR-t3102-3
+    // decision 2) until the service runs again.
+    let unserved = dagq_output(env, &[], &["status"]);
+    assert!(!unserved.status.success());
+    let refused: Value = serde_json::from_slice(&unserved.stderr).unwrap();
+    assert_eq!(refused["queue_service"]["code"], "unreachable", "{refused}");
+    dagq(env, &["service", "start"]);
     let status = dagq(env, &["status"]);
     assert_eq!(status["supervisors"], Value::Array(vec![]), "{status}");
     let log = log_messages(&logs[0]);

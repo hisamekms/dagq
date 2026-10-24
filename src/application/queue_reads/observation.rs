@@ -21,10 +21,12 @@ use crate::application::{
     Clock, EventStore, ObserverLog, QueueRecords, RunLog, TaskReads, observer, watch,
 };
 use crate::domain::kpi::KpiQuery;
+use crate::domain::plan_request::PlanRequest;
 use crate::domain::stats::StatsQuery;
+use crate::domain::task_replan::ReplanOperation;
 use crate::domain::{
-    EventFilter, EventId, FindingId, FindingQuery, FindingTarget, GoalId, NoteQuery, RunId,
-    SessionRole, TaskId,
+    EventFilter, EventId, FindingId, FindingQuery, FindingTarget, GoalId, NoteQuery, ReplanId,
+    RequestId, RunId, SessionRole, TaskId,
 };
 
 /// What the observation reads take beyond the queue's records that the
@@ -46,6 +48,20 @@ pub trait ObservationSources<Q: ?Sized> {
     fn observe_input(&self, read: &ObserveInputRead) -> Result<Value>;
     /// The clock of `queue` (`timeline`'s time since the last event).
     fn clock<'q>(&self, queue: &'q Q) -> &'q dyn Clock;
+    /// The planning request `id`, whatever its status.
+    fn plan_request(&self, queue: &Q, id: RequestId) -> Result<PlanRequest>;
+    /// The open planning requests, every one with `all`.
+    fn plan_requests(&self, queue: &Q, all: bool) -> Result<Vec<PlanRequest>>;
+    /// The replanning operation `id`, whatever its status.
+    fn replan_operation(&self, queue: &Q, id: ReplanId) -> Result<ReplanOperation>;
+    /// The open replanning operations, every one with `all`.
+    fn replan_operations(&self, queue: &Q, all: bool) -> Result<Vec<ReplanOperation>>;
+    /// `ci failures`: the landing branch's known failures by the bound
+    /// checkout's `[ci_watch]` ([`crate::application::ci_watch::known_failures`]).
+    fn ci_failures(&self, queue: &Q, read: &super::CiFailuresRead) -> Result<Value>;
+    /// `planners`: the planners `read` names with their states, as
+    /// `{"planners"}` ([`crate::application::planner::planner_views`]).
+    fn planners(&self, queue: &Q, read: &super::PlannersRead) -> Result<Value>;
 }
 
 /// `status`: the attention of the role named, every role's without one.
@@ -55,6 +71,34 @@ pub fn status<Q: ?Sized>(
     read: &RoleRead,
 ) -> Result<Value> {
     sources.status(queue, super::session_role(read.role.as_ref())?)
+}
+
+/// `requests`: the one request `read` names whatever its status, or the
+/// open ones (every one with `all`), as `{"requests"}`.
+pub fn requests<Q: ?Sized>(
+    queue: &Q,
+    sources: &(impl ObservationSources<Q> + ?Sized),
+    read: &super::RecordsRead,
+) -> Result<Value> {
+    let requests = match read.id {
+        Some(id) => vec![sources.plan_request(queue, RequestId::new(id))?],
+        None => sources.plan_requests(queue, read.all)?,
+    };
+    Ok(json!({ "requests": requests }))
+}
+
+/// `replans`: the one operation `read` names whatever its status, or the
+/// open ones (every one with `all`), as `{"replans"}`.
+pub fn replans<Q: ?Sized>(
+    queue: &Q,
+    sources: &(impl ObservationSources<Q> + ?Sized),
+    read: &super::RecordsRead,
+) -> Result<Value> {
+    let replans = match read.id {
+        Some(id) => vec![sources.replan_operation(queue, ReplanId::new(id))?],
+        None => sources.replan_operations(queue, read.all)?,
+    };
+    Ok(json!({ "replans": replans }))
 }
 
 /// `events`.
@@ -263,6 +307,24 @@ mod tests {
             unimplemented!()
         }
         fn clock<'q>(&self, _: &'q Records) -> &'q dyn Clock {
+            unimplemented!()
+        }
+        fn plan_request(&self, _: &Records, _: RequestId) -> Result<PlanRequest> {
+            unimplemented!()
+        }
+        fn plan_requests(&self, _: &Records, _: bool) -> Result<Vec<PlanRequest>> {
+            unimplemented!()
+        }
+        fn replan_operation(&self, _: &Records, _: ReplanId) -> Result<ReplanOperation> {
+            unimplemented!()
+        }
+        fn replan_operations(&self, _: &Records, _: bool) -> Result<Vec<ReplanOperation>> {
+            unimplemented!()
+        }
+        fn ci_failures(&self, _: &Records, _: &super::super::CiFailuresRead) -> Result<Value> {
+            unimplemented!()
+        }
+        fn planners(&self, _: &Records, _: &super::super::PlannersRead) -> Result<Value> {
             unimplemented!()
         }
     }

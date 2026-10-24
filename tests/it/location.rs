@@ -45,17 +45,34 @@ fn repository(dir: &Path, name: &str) -> PathBuf {
 /// `XDG_DATA_HOME`/`HOME` (both removed first) so no real queue is touched.
 /// It runs as the user, not as the actor of the session running the tests.
 fn invoke(cwd: &Path, env: &[(&str, &Path)], args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
-    command.without_actor_env();
-    command
-        .env_remove("XDG_DATA_HOME")
-        .env_remove("HOME")
-        .current_dir(cwd)
-        .args(args);
-    for (key, value) in env {
-        command.env(key, value);
+    let command = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+        command.without_actor_env();
+        command
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("HOME")
+            .current_dir(cwd)
+            .args(args);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        command
+    };
+    let mut run = command(args);
+    // The queue the command resolves, whose service answers its reads.
+    let (named, words) = match args {
+        ["--db", db, rest @ ..] => (vec!["--db", *db], rest),
+        _ => (Vec::new(), args),
+    };
+    let located = command(&[&named[..], &["locate"]].concat())
+        .bounded_output()
+        .unwrap();
+    if let Ok(location) = serde_json::from_slice::<Value>(&located.stdout)
+        && let Some(db) = location["db"].as_str()
+    {
+        crate::common::cli::reach(&mut run, Path::new(db), words);
     }
-    command.bounded_output().unwrap()
+    run.bounded_output().unwrap()
 }
 
 fn ok(cwd: &Path, env: &[(&str, &Path)], args: &[&str]) -> Value {

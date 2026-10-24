@@ -158,9 +158,10 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
     // gave neither task a p50, so both of its rows are left out.
     let config = dir.path().join("config");
     fs::create_dir_all(&config).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
-        .without_actor_env()
-        .env("XDG_CONFIG_HOME", &config)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command.without_actor_env().env("XDG_CONFIG_HOME", &config);
+    crate::common::cli::reach(&mut command, &db, &["kpi"]);
+    let output = command
         .arg("--db")
         .arg(&db)
         .args(["kpi", "--last", "1"])

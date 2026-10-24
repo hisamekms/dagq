@@ -300,9 +300,9 @@ migrationを足すtaskの規則は[migrations.md](../development/migrations.md)�
   バイナリより新しくても下限以下なら動く。
   このため`INSERT`は必ず列を列挙し、行は列名で読む。
   claimのときに写したバイナリ（`runs/<id>/runner`）も互換のmigrationの後に動き続ける。
-- 読み取り専用のopen: 状態を変えないコマンドは読み取り専用の接続で開き、何も書かない（[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)決定18）。
-  queueがバイナリより古ければメモリの複製をmigrateして読むので、開発中のバイナリで本番のqueueを読める。
-  複製はsnapshotなので、待ち続ける`watch`はファイルを直接開き、古いschemaなら`dagq migrate`を促して終わる。
+- 読み取り専用のopen: DBを開く読み取り（hostのCLIの読み取りを答える[service](queue-service-host-cli.md)も）は読み取り専用の接続で開き、何も書かない（[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)決定18）。
+  queueがバイナリより古ければメモリの複製をmigrateして読む。
+  複製はsnapshotなので、`watch`はファイルを直接開き、古いschemaなら`dagq migrate`を促して終わる。
   複製はGitからcommit messageを埋めないので、その`search`はmessageの無い着地を見つけない。
 - `dagq migrate`: 非互換のmigrationが残っていれば、使用中のsupervisor・run・wrapperが1つでもあると何も適用せずに挙げて止まり、通れば`backups/`に複製してから適用する。
 - 表の作り直し: 全ての列を列挙してrowidと`sqlite_sequence`も写し（消した行のIDを再び払い出さない）、`foreign_keys`はrunnerがトランザクションの外でOFFにしてcommitの前に`pragma_foreign_key_check`を確かめる。

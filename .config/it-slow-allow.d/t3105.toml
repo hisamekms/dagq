@@ -1,0 +1,11 @@
+# 6.451s
+[[test]]
+name = "planner_headless_turns::a_headless_planners_turn_reads_and_notes_through_the_service_as_its_planner"
+reason = "B 境界（プロセス・supervisor の配線）: runtime が非対話の planner の turn に渡す token の file と、その dagq が queue service を通って planner の actor で読み書きし service 側で断られる配線の代表。発行の判断は actor_executor の unit test"
+task = 3105
+
+# 7.564s in the worker's stress
+[[test]]
+name = "runtime_candidates::the_supervisor_samples_the_candidates_when_they_change"
+reason = "境界: supervisorのprocessが候補の変化を見本としてfileに書く配線と、その見本を読むkpiがqueue serviceを通る経路（hostのCLIはDBを開かず、testのserviceを起動して読む）"
+task = 3105

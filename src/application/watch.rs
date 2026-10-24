@@ -23,6 +23,7 @@ use crate::{
     },
 };
 use anyhow::{Result, anyhow, bail, ensure};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{thread, time::Duration};
 
@@ -282,6 +283,143 @@ pub struct WatchOptions {
     pub role: Option<SessionRole>,
 }
 
+/// One look of a `watch` at the queue past its cursor: the attention for
+/// its role up to the newest event now, and the supervisors' health
+/// (ADR-t3102-3 decision 2). The queue service answers one as `watch_poll`
+/// for a client-mode watch, which waits between its looks itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WatchLook {
+    /// The cursor looked past: the one asked for, or the newest event when
+    /// none was.
+    pub after: EventId,
+    /// The events kept for the role, oldest first, as `watch` prints them.
+    pub events: Vec<Value>,
+    /// The cursor to continue from.
+    pub cursor: EventId,
+    /// Whether one kept wakes a `watch` for the role ([`wakes_inbox`]).
+    pub woken: bool,
+    /// The `ask_opened` among those kept, which the inbox's watch notifies.
+    pub opened: Vec<RunEvent>,
+    /// The registered supervisors' health as `watch` compares it: the set
+    /// of tokens, their PIDs, `alive` and `stale`.
+    pub pulses: Value,
+    /// The supervisors as `watch` prints them.
+    pub supervisors: Value,
+    /// The Git common directory the queue is bound to, which the inbox's
+    /// notification names it after wherever the watch runs; `None` for a
+    /// queue bound to none, and from a service that does not give it.
+    #[serde(default)]
+    pub binding: Option<String>,
+}
+
+/// One look at `queue` past `after` (`None`: the newest event now) for
+/// `role`: what [`watch`] reads at each of its reads of the queue.
+pub fn look(
+    queue: &(impl RunLog + CoordinationReads + SupervisorReads),
+    clock: &dyn Clock,
+    control: &dyn ProcessControl,
+    after: Option<EventId>,
+    role: Option<SessionRole>,
+) -> Result<WatchLook> {
+    let upto = queue.latest_event_id()?;
+    let after = after.unwrap_or(upto);
+    let query = EventsQuery {
+        after,
+        limit: if role == Some(SessionRole::Inbox) {
+            usize::MAX
+        } else {
+            WATCH_LIMIT
+        },
+        all: false,
+        full: false,
+        filter: EventFilter::default(),
+    };
+    let Read {
+        events,
+        cursor,
+        woken,
+        opened,
+    } = read_events(queue, &query, upto.max(after), role)?;
+    let registrations = queue.supervisors()?;
+    let now = clock.now();
+    Ok(WatchLook {
+        after,
+        events,
+        cursor,
+        woken,
+        opened,
+        pulses: serde_json::to_value(pulses(&registrations, now, control))?,
+        supervisors: serde_json::to_value(supervisors(
+            &registrations,
+            &queue.run_leases()?,
+            now,
+            control,
+        ))?,
+        // A binding that cannot be read names the queue as one bound to
+        // none, and stops no look.
+        binding: queue.repository_binding().ok().flatten(),
+    })
+}
+
+/// Where a `watch` takes its looks: the queue it opened, or the queue
+/// service, whose `watch_poll` a client-mode watch calls. An error ends
+/// the watch at once: a service that does not answer is returned as that,
+/// never as a timeout or no events, but the same recorded outage only once
+/// ([`OutageNotices`]).
+pub trait WatchSource {
+    /// One look past `after` (`None`: the newest event now) for `role`,
+    /// taking `limit` at most: a service that has not answered by then
+    /// fails the look as one that does not answer ([`look_limit`]).
+    fn look(
+        &self,
+        after: Option<EventId>,
+        role: Option<SessionRole>,
+        limit: Duration,
+    ) -> Result<WatchLook>;
+
+    /// What the source knows of the outages of the queue's service a look
+    /// meets ([`OutageNotices`]); `None` for one that has no service, the
+    /// queue a watch opened.
+    fn outages(&self) -> Option<&dyn OutageNotices> {
+        None
+    }
+}
+
+/// The outages of the queue's service a host's watch meets, as the
+/// supervisor recorded them outside the DB, and which of them a watch of
+/// each role returned already (ADR-t3102-3 decisions 1 and 2).
+pub trait OutageNotices {
+    /// The start (unix seconds) of the outage the supervisor recorded,
+    /// when `error`, a look's, says the queue's service did not answer and
+    /// one stands; `None` for any other error, or no record.
+    fn recorded(&self, error: &anyhow::Error) -> Option<i64>;
+    /// Whether a watch of `role` returned the outage that began at `since`.
+    fn told(&self, role: Option<SessionRole>, since: i64) -> bool;
+    /// That a watch of `role` returns the outage that began at `since` now.
+    fn tell(&self, role: Option<SessionRole>, since: i64) -> Result<()>;
+}
+
+/// The queue a `watch` opened, as its [`WatchSource`].
+pub struct QueueWatch<'a, Q> {
+    pub queue: &'a Q,
+    pub clock: &'a dyn Clock,
+    pub control: &'a dyn ProcessControl,
+}
+
+impl<Q> WatchSource for QueueWatch<'_, Q>
+where
+    Q: RunLog + CoordinationReads + SupervisorReads,
+{
+    fn look(
+        &self,
+        after: Option<EventId>,
+        role: Option<SessionRole>,
+        _limit: Duration,
+    ) -> Result<WatchLook> {
+        look(self.queue, self.clock, self.control, after, role)
+    }
+}
+
 /// Block until an attention event past the cursor exists or the health of
 /// the registered supervisors (the set of tokens, their PIDs, `alive` and
 /// `stale`) differs from what it was when `watch` started, reading the queue
@@ -309,49 +447,71 @@ pub fn watch(
     queue: &(impl RunLog + CoordinationReads + SupervisorReads),
     clock: &dyn Clock,
     control: &dyn ProcessControl,
+    record: Option<&mut dyn WatchRecord>,
+    notifier: Option<&dyn AskNotifier>,
+    options: &WatchOptions,
+) -> Result<Value> {
+    watch_through(
+        &QueueWatch {
+            queue,
+            clock,
+            control,
+        },
+        clock,
+        record,
+        notifier,
+        options,
+    )
+}
+
+/// [`watch`] with its looks taken from `source`: the supervisors' health
+/// of its first look is the one later looks are compared with. A look
+/// that meets an outage of the queue's service ends the watch with that
+/// failure once per outage and role; a later watch of the role waits it
+/// out ([`look_through`]).
+pub fn watch_through(
+    source: &dyn WatchSource,
+    clock: &dyn Clock,
     mut record: Option<&mut dyn WatchRecord>,
     notifier: Option<&dyn AskNotifier>,
     options: &WatchOptions,
 ) -> Result<Value> {
-    let after = match options.after {
-        Some(after) => after,
-        None => queue.latest_event_id()?,
-    };
-    let baseline = pulses(&queue.supervisors()?, clock.now(), control);
-    let query = EventsQuery {
-        after,
-        limit: if options.role == Some(SessionRole::Inbox) {
-            usize::MAX
-        } else {
-            WATCH_LIMIT
-        },
-        all: false,
-        full: false,
-        filter: EventFilter::default(),
-    };
     let started = clock.monotonic();
+    let first = match look_through(source, clock, &mut record, options, started, options.after)? {
+        Looked::Look(look) => look,
+        Looked::WaitedOut { since } => {
+            return Ok(waited_out(&mut record, clock, options.after, since));
+        }
+    };
+    let after = first.after;
+    let baseline = first.pulses.clone();
+    let mut next = Some(first);
     loop {
-        let upto = queue.latest_event_id()?;
-        let Read {
-            events,
-            cursor,
-            woken,
-            opened,
-        } = read_events(queue, &query, upto, options.role)?;
-        let registrations = queue.supervisors()?;
+        let look = match next.take() {
+            Some(look) => look,
+            None => {
+                match look_through(source, clock, &mut record, options, started, Some(after))? {
+                    Looked::Look(look) => look,
+                    Looked::WaitedOut { since } => {
+                        return Ok(waited_out(&mut record, clock, Some(after), since));
+                    }
+                }
+            }
+        };
         let now = clock.now();
         if let Some(record) = record.as_deref_mut() {
             let _ = record.heartbeat(now);
         }
-        let changed = for_role(options.role) && pulses(&registrations, now, control) != baseline;
+        let changed = for_role(options.role) && look.pulses != baseline;
         let remaining = options
             .timeout
             .map(|timeout| super::time_left(clock.since(started), timeout));
+        let woken = look.woken;
         if woken || changed || remaining.is_some_and(|r| r.is_zero()) {
             // A timeout with nothing that woke it keeps the notices for the
             // next watch.
             let (events, cursor) = if woken || changed {
-                (events, cursor)
+                (look.events, look.cursor)
             } else {
                 (Vec::new(), after)
             };
@@ -359,14 +519,19 @@ pub fn watch(
                 let _ = record.end(now);
             }
             let pushed = if woken || changed {
-                notify_opened(options.role, &opened, notifier)
+                notify_opened(
+                    options.role,
+                    &look.opened,
+                    look.binding.as_deref(),
+                    notifier,
+                )
             } else {
                 None
             };
             let mut value = json!({
                 "events": events,
                 "supervisors_changed": changed,
-                "supervisors": supervisors(&registrations, &queue.run_leases()?, now, control),
+                "supervisors": look.supervisors,
                 "cursor": cursor,
             });
             if let Some(pushed) = pushed {
@@ -378,32 +543,172 @@ pub fn watch(
     }
 }
 
+/// A look of a watch, or the timeout that passed while it waited out an
+/// outage of the queue's service that began at `since`.
+enum Looked {
+    Look(WatchLook),
+    WaitedOut { since: i64 },
+}
+
+/// The longest one look of a watch, or the host's `status`, may take when
+/// its timeout leaves longer or it has none: a service that takes the call
+/// and does not answer is not answering after it (ADR-t3102-3 decision 2).
+pub const LOOK_LIMIT: Duration = Duration::from_secs(30);
+
+/// The least one look is given: a watch's last look starts as its
+/// timeout passes (and `--timeout 0`'s only one at once), and a service
+/// that answers it in a moment is not taken for one that does not answer.
+/// A watch of a service that does not answer ends this long past its
+/// timeout at most.
+pub const LOOK_FLOOR: Duration = Duration::from_secs(3);
+
+/// How long one look may take with `remaining` of the watch's timeout
+/// left (`None`: it has none): what is left, within [`LOOK_FLOOR`] and
+/// [`LOOK_LIMIT`].
+pub fn look_limit(remaining: Option<Duration>) -> Duration {
+    remaining.map_or(LOOK_LIMIT, |remaining| {
+        remaining.clamp(LOOK_FLOOR, LOOK_LIMIT)
+    })
+}
+
+/// What a watch does with a look its queue's service did not answer
+/// (ADR-t3102-3 decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailedLook {
+    /// End the watch with the failure: no outage is recorded.
+    Fail,
+    /// End the watch with the failure, and note that a watch of its role
+    /// returned the outage that began at `since`.
+    Tell { since: i64 },
+    /// Look again after this long: a watch of its role returned the
+    /// outage already.
+    Wait(Duration),
+    /// The timeout passed while the watch waited out the outage that began
+    /// at `since`.
+    WaitedOut { since: i64 },
+}
+
+/// The step after a failed look: `recorded` is the start of the outage the
+/// supervisor recorded (`None`: none), `told` whether a watch of the role
+/// returned it, `remaining` the time left of the watch's timeout (`None`:
+/// it has none), and `interval` its wait between looks.
+fn failed_look(
+    recorded: Option<i64>,
+    told: bool,
+    remaining: Option<Duration>,
+    interval: Duration,
+) -> FailedLook {
+    let Some(since) = recorded else {
+        return FailedLook::Fail;
+    };
+    if !told {
+        return FailedLook::Tell { since };
+    }
+    match remaining {
+        Some(remaining) if remaining.is_zero() => FailedLook::WaitedOut { since },
+        Some(remaining) => FailedLook::Wait(interval.min(remaining)),
+        None => FailedLook::Wait(interval),
+    }
+}
+
+/// One look of `source` past `after` for the watch of `options` started
+/// at `started`, and what [`failed_look`] says to do with one the queue's
+/// service does not answer: end the watch with the failure (noting the
+/// recorded outage as told the first time a watch of its role meets it),
+/// or wait it out, looking every interval, until the service answers or
+/// another outage is recorded, and be [`Looked::WaitedOut`] once its
+/// timeout passed meanwhile.
+fn look_through(
+    source: &dyn WatchSource,
+    clock: &dyn Clock,
+    record: &mut Option<&mut dyn WatchRecord>,
+    options: &WatchOptions,
+    started: std::time::Instant,
+    after: Option<EventId>,
+) -> Result<Looked> {
+    let remaining = || {
+        options
+            .timeout
+            .map(|timeout| super::time_left(clock.since(started), timeout))
+    };
+    loop {
+        let error = match source.look(after, options.role, look_limit(remaining())) {
+            Ok(look) => return Ok(Looked::Look(look)),
+            Err(error) => error,
+        };
+        let outages = source.outages();
+        let recorded = outages.and_then(|outages| outages.recorded(&error));
+        let told = outages
+            .zip(recorded)
+            .is_some_and(|(outages, since)| outages.told(options.role, since));
+        match failed_look(recorded, told, remaining(), options.interval) {
+            FailedLook::Fail => return Err(error),
+            FailedLook::Tell { since } => {
+                if let Some(Err(told)) = outages.map(|outages| outages.tell(options.role, since)) {
+                    tracing::warn!(error = %format_args!("{told:#}"), "that the watch returned the queue service's outage could not be noted: {told:#}");
+                }
+                return Err(error);
+            }
+            FailedLook::WaitedOut { since } => return Ok(Looked::WaitedOut { since }),
+            FailedLook::Wait(wait) => {
+                if let Some(record) = record.as_deref_mut() {
+                    let _ = record.heartbeat(clock.now());
+                }
+                thread::sleep(wait);
+            }
+        }
+    }
+}
+
+/// The output of a watch whose timeout passed while it waited out the
+/// outage that began at `since`: no events, its cursor unchanged, and the
+/// outage it waited on.
+fn waited_out(
+    record: &mut Option<&mut dyn WatchRecord>,
+    clock: &dyn Clock,
+    cursor: Option<EventId>,
+    since: i64,
+) -> Value {
+    if let Some(record) = record.as_deref_mut() {
+        let _ = record.end(clock.now());
+    }
+    json!({
+        "events": [],
+        "supervisors_changed": false,
+        "supervisors": null,
+        "cursor": cursor,
+        "outage_since": since,
+    })
+}
+
 /// How the inbox's watch tells the person of new asks (ADR-t2159-1
 /// decision 4): a message out of the host, never keystrokes nor a wake of
 /// a session.
 pub trait AskNotifier {
     /// Tell the person that `opened`, the `ask_opened` one watch returns
-    /// (never empty), opened that many asks.
-    fn notify(&self, opened: &[RunEvent]) -> Result<()>;
+    /// (never empty), opened that many asks in the queue bound to
+    /// `binding` ([`WatchLook::binding`]).
+    fn notify(&self, opened: &[RunEvent], binding: Option<&str>) -> Result<()>;
 }
 
-/// Tell the person of `opened`, the `ask_opened` a watch returns, in one
-/// notification and only for the inbox: a watch of another role, one with
-/// no notifier (no `[push]`) or one that returns no new ask tells nobody,
-/// and the next watch reads past these asks. What was done, for the
-/// output's `ask_push`: `asks` and `sent`, with the `error` of one that
-/// failed, which is also warned of and stops nothing; `None` when nothing
-/// was tried.
+/// Tell the person of `opened`, the `ask_opened` a watch returns of the
+/// queue bound to `binding`, in one notification and only for the inbox:
+/// a watch of another role, one with no notifier (no `[push]`) or one that
+/// returns no new ask tells nobody, and the next watch reads past these
+/// asks. What was done, for the output's `ask_push`: `asks` and `sent`,
+/// with the `error` of one that failed, which is also warned of and stops
+/// nothing; `None` when nothing was tried.
 fn notify_opened(
     role: Option<SessionRole>,
     opened: &[RunEvent],
+    binding: Option<&str>,
     notifier: Option<&dyn AskNotifier>,
 ) -> Option<Value> {
     let notifier = notifier.filter(|_| role == Some(SessionRole::Inbox))?;
     if opened.is_empty() {
         return None;
     }
-    Some(match notifier.notify(opened) {
+    Some(match notifier.notify(opened, binding) {
         Ok(()) => json!({"asks": opened.len(), "sent": true}),
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "the person could not be told of {} new ask(s): {error:#}", opened.len());
@@ -420,15 +725,16 @@ pub const PUSH_UNREADABLE: &str = "host.toml's [push] could not be read or is no
 /// The notifier of new asks a watch of `role` has (ADR-t2159-1 decision
 /// 4): only the inbox's, and only when `load` (the host's `[push]` as it
 /// reads now, read only for the inbox) finds one, sending through
-/// `run_push` about `target` (made only then). A `[push]` that cannot be
-/// read still makes one, whose notifications fail with
-/// [`PUSH_UNREADABLE`], so the watch goes on and its output says why.
-pub fn push_notifier(
+/// `run_push` about what `target` makes of the queue's binding at each
+/// notification. A `[push]` that cannot be read still makes one, whose
+/// notifications fail with [`PUSH_UNREADABLE`], so the watch goes on and
+/// its output says why.
+pub fn push_notifier<'a>(
     role: Option<SessionRole>,
     load: impl FnOnce() -> Result<Option<PushConfig>>,
-    target: impl FnOnce() -> PushTarget,
+    target: impl Fn(Option<&str>) -> PushTarget + 'a,
     run_push: fn(&PushRequest) -> PushOutcome,
-) -> Option<PushNotifier> {
+) -> Option<PushNotifier<'a>> {
     if role != Some(SessionRole::Inbox) {
         return None;
     }
@@ -439,35 +745,40 @@ pub fn push_notifier(
     };
     Some(PushNotifier {
         config,
-        target: target(),
+        target: Box::new(target),
         run_push,
     })
 }
+
+/// What a [`PushNotifier`]'s message is about, made at each notification
+/// from the Git common directory the queue is bound to as the look that
+/// returned the asks read it ([`WatchLook::binding`]).
+pub type TargetOfBinding<'a> = Box<dyn Fn(Option<&str>) -> PushTarget + 'a>;
 
 /// The inbox's [`AskNotifier`] (ADR-t2159-1 decision 4): one message of
 /// kind `ask_opened` ([`ask_opened_message`]) through the host's `[push]`
 /// command, with the title and the count of the asks and nothing of their
 /// content. [`push_notifier`] makes it.
-pub struct PushNotifier {
+pub struct PushNotifier<'a> {
     /// The host's `[push]`, or why it could not be read (then every
     /// notification fails with that).
     pub config: std::result::Result<PushConfig, String>,
     /// The queue's name and database the message is about.
-    pub target: PushTarget,
+    pub target: TargetOfBinding<'a>,
     /// Runs the push command once.
     pub run_push: fn(&PushRequest) -> PushOutcome,
 }
 
-impl AskNotifier for PushNotifier {
-    fn notify(&self, opened: &[RunEvent]) -> Result<()> {
+impl AskNotifier for PushNotifier<'_> {
+    fn notify(&self, opened: &[RunEvent], binding: Option<&str>) -> Result<()> {
         let config = self
             .config
             .as_ref()
             .map_err(|error| anyhow!("[push] could not be read: {error}"))?;
+        let target = (self.target)(binding);
         let through = opened.last().map_or(0, |event| event.id.as_i64());
-        let message =
-            ask_opened_message(&self.target.name, &self.target.queue, through, opened.len());
-        let outcome = (self.run_push)(&push::request(config, &self.target, &message));
+        let message = ask_opened_message(&target.name, &target.queue, through, opened.len());
+        let outcome = (self.run_push)(&push::request(config, &target, &message));
         ensure!(
             outcome.success,
             "the push command failed on the ask_opened message: {}",
@@ -647,24 +958,28 @@ mod tests {
         assert!(!read.woken);
     }
 
-    /// A notifier that records each notification's asks, failing when
-    /// `fail`.
-    struct Told(std::sync::Mutex<Vec<Vec<i64>>>, bool);
+    /// A notifier that records each notification's asks and the binding
+    /// it was given, failing when `fail`.
+    struct Told(std::sync::Mutex<Vec<(Vec<i64>, Option<String>)>>, bool);
 
     impl AskNotifier for Told {
-        fn notify(&self, opened: &[RunEvent]) -> Result<()> {
+        fn notify(&self, opened: &[RunEvent], binding: Option<&str>) -> Result<()> {
             let ids = opened
                 .iter()
                 .map(|event| event.payload["ask_id"].as_i64().unwrap())
                 .collect();
-            self.0.lock().unwrap().push(ids);
+            self.0
+                .lock()
+                .unwrap()
+                .push((ids, binding.map(str::to_owned)));
             ensure!(!self.1, "the push command failed");
             Ok(())
         }
     }
 
     /// The inbox's watch tells the person of the `ask_opened` it returns in
-    /// one notification, and of nothing else (ADR-t2159-1 decision 4); one
+    /// one notification, and of nothing else (ADR-t2159-1 decision 4), with
+    /// the binding of the queue the look read; one
     /// that fails is reported in `ask_push` and stops nothing; a watch of
     /// another role, or none, or without a notifier (no `[push]`), tells
     /// nobody; and a read past an ask does not keep it for the next watch.
@@ -685,24 +1000,32 @@ mod tests {
         .unwrap();
         let told = Told(Default::default(), false);
         assert_eq!(
-            notify_opened(Some(SessionRole::Inbox), &read.opened, Some(&told)),
+            notify_opened(
+                Some(SessionRole::Inbox),
+                &read.opened,
+                Some("/repo/.git"),
+                Some(&told)
+            ),
             Some(json!({"asks": 2, "sent": true}))
         );
-        assert_eq!(*told.0.lock().unwrap(), [vec![7, 8]]);
+        assert_eq!(
+            *told.0.lock().unwrap(),
+            [(vec![7, 8], Some("/repo/.git".to_owned()))]
+        );
         let failing = Told(Default::default(), true);
         assert_eq!(
-            notify_opened(Some(SessionRole::Inbox), &read.opened, Some(&failing)),
+            notify_opened(Some(SessionRole::Inbox), &read.opened, None, Some(&failing)),
             Some(json!({"asks": 2, "sent": false, "error": "the push command failed"}))
         );
         let other = Told(Default::default(), false);
         assert_eq!(
-            notify_opened(Some(SessionRole::Planner), &read.opened, Some(&other)),
+            notify_opened(Some(SessionRole::Planner), &read.opened, None, Some(&other)),
             None
         );
-        assert_eq!(notify_opened(None, &read.opened, Some(&other)), None);
+        assert_eq!(notify_opened(None, &read.opened, None, Some(&other)), None);
         assert!(other.0.lock().unwrap().is_empty());
         assert_eq!(
-            notify_opened(Some(SessionRole::Inbox), &read.opened, None),
+            notify_opened(Some(SessionRole::Inbox), &read.opened, None, None),
             None
         );
         let past = read_events(
@@ -714,7 +1037,7 @@ mod tests {
         .unwrap();
         assert!(past.opened.is_empty());
         assert_eq!(
-            notify_opened(Some(SessionRole::Inbox), &past.opened, Some(&other)),
+            notify_opened(Some(SessionRole::Inbox), &past.opened, None, Some(&other)),
             None
         );
         assert!(other.0.lock().unwrap().is_empty());
@@ -740,14 +1063,15 @@ mod tests {
     }
 
     /// [`PushNotifier`] hands `[push]`'s command one `ask_opened` message
-    /// with the count and the queue, and nothing of the asks (their ids
+    /// with the count and the queue, titled with the name its target makes
+    /// of the binding it is given, and nothing of the asks (their ids
     /// are not in it either); a command that fails, or a `[push]` that
     /// could not be read, fails the notification with why, the command's
     /// arguments masked.
     #[test]
     fn the_push_notifier_sends_one_ask_opened_message_without_the_asks() {
-        let target = PushTarget {
-            name: "dagq".into(),
+        let target = |binding: Option<&str>| PushTarget {
+            name: binding.map_or("unbound", |_| "bound").to_owned(),
             queue: "/q/queue.db".into(),
         };
         let command = vec![
@@ -768,10 +1092,10 @@ mod tests {
         ];
         let notifier = PushNotifier {
             config: Ok(PushConfig::new(command.clone())),
-            target: target.clone(),
+            target: Box::new(target),
             run_push: pushed_ok,
         };
-        notifier.notify(&opened).unwrap();
+        notifier.notify(&opened, Some("/repo/.git")).unwrap();
         let request = PUSHED.lock().unwrap().take().unwrap();
         assert_eq!(request.command, command);
         assert!(
@@ -784,36 +1108,42 @@ mod tests {
         assert_eq!(body["new_asks"], 2);
         assert_eq!(body["queue"], "/q/queue.db");
         assert_eq!(body["period"], "through event 9");
+        assert_eq!(body["title"], "bound: 2 new ask(s) for the inbox");
         let text = String::from_utf8(request.stdin).unwrap();
         assert!(!text.contains("secret") && !text.contains("70"), "{text}");
+        notifier.notify(&opened, None).unwrap();
+        let request = PUSHED.lock().unwrap().take().unwrap();
+        let body: Value = serde_json::from_slice(&request.stdin).unwrap();
+        assert_eq!(body["title"], "unbound: 2 new ask(s) for the inbox");
 
         let failing = PushNotifier {
             run_push: pushed_failing,
             ..notifier
         };
-        let error = format!("{:#}", failing.notify(&opened).unwrap_err());
+        let error = format!("{:#}", failing.notify(&opened, None).unwrap_err());
         assert!(error.contains("exit code 4"), "{error}");
         assert!(!error.contains("hooks.example"), "{error}");
         let unreadable = PushNotifier {
             config: Err("bad host.toml".into()),
-            target,
+            target: Box::new(target),
             run_push: pushed_ok,
         };
-        let error = format!("{:#}", unreadable.notify(&opened).unwrap_err());
+        let error = format!("{:#}", unreadable.notify(&opened, None).unwrap_err());
         assert!(error.contains("bad host.toml"), "{error}");
         assert!(PUSHED.lock().unwrap().is_none());
     }
 
     /// Only the inbox's watch has a notifier, and only with a `[push]`:
-    /// another role's or none reads no `[push]`, a missing one makes none
-    /// (and names no target), and one that cannot be read makes one that
-    /// fails without the reading's error, which may quote the command.
+    /// another role's or none reads no `[push]`, a missing one makes none,
+    /// and one that cannot be read makes one that fails without the
+    /// reading's error, which may quote the command. None names its target
+    /// before it notifies.
     #[test]
     fn only_the_inbox_with_a_push_has_a_notifier() {
         use std::cell::Cell;
         let loads = Cell::new(0);
         let targets = Cell::new(0);
-        let target = || {
+        let target = |_: Option<&str>| {
             targets.set(targets.get() + 1);
             PushTarget {
                 name: "dagq".into(),
@@ -847,7 +1177,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(made.config, Ok(config()));
-        assert_eq!(made.target.queue, "/q/queue.db");
+        assert_eq!(targets.get(), 0);
+        assert_eq!((made.target)(None).queue, "/q/queue.db");
 
         let unreadable = push_notifier(
             Some(SessionRole::Inbox),
@@ -872,5 +1203,58 @@ mod tests {
         );
         assert!(event_time("2026-13-04").is_err());
         assert!(event_time("yesterday").is_err());
+    }
+
+    /// A look takes what is left of the watch's timeout, never less than
+    /// the floor nor more than the limit, and the limit with no timeout.
+    #[test]
+    fn a_look_takes_what_is_left_of_the_timeout_within_the_floor_and_the_limit() {
+        let second = Duration::from_secs(1);
+        assert_eq!(look_limit(None), LOOK_LIMIT);
+        assert_eq!(look_limit(Some(10 * second)), 10 * second);
+        assert_eq!(look_limit(Some(Duration::ZERO)), LOOK_FLOOR);
+        assert_eq!(look_limit(Some(LOOK_FLOOR / 2)), LOOK_FLOOR);
+        assert_eq!(look_limit(Some(LOOK_LIMIT * 10)), LOOK_LIMIT);
+    }
+
+    /// ADR-t3102-3 decision 2: a look the service did not answer ends the
+    /// watch when no outage is recorded, and the first time a watch of its
+    /// role meets a recorded one (to be noted as told); after that the
+    /// watch waits it out, the interval or what is left of its timeout,
+    /// until the timeout passes, and with no timeout it waits on.
+    #[test]
+    fn a_recorded_outage_is_returned_once_per_role_and_waited_out_after() {
+        let second = Duration::from_secs(1);
+        let interval = Duration::from_secs(5);
+        for told in [false, true] {
+            assert_eq!(
+                failed_look(None, told, Some(second), interval),
+                FailedLook::Fail
+            );
+        }
+        assert_eq!(
+            failed_look(Some(100), false, Some(Duration::ZERO), interval),
+            FailedLook::Tell { since: 100 }
+        );
+        assert_eq!(
+            failed_look(Some(100), false, None, interval),
+            FailedLook::Tell { since: 100 }
+        );
+        assert_eq!(
+            failed_look(Some(100), true, Some(60 * second), interval),
+            FailedLook::Wait(interval)
+        );
+        assert_eq!(
+            failed_look(Some(100), true, Some(second), interval),
+            FailedLook::Wait(second)
+        );
+        assert_eq!(
+            failed_look(Some(100), true, None, interval),
+            FailedLook::Wait(interval)
+        );
+        assert_eq!(
+            failed_look(Some(100), true, Some(Duration::ZERO), interval),
+            FailedLook::WaitedOut { since: 100 }
+        );
     }
 }

@@ -494,8 +494,16 @@ fn only_the_requests_own_planner_asks_a_planner_question_on_it() {
             .unwrap()
     };
 
+    // Another planner open now, which the service takes as itself.
+    let another = format!(
+        "planner:{}",
+        queue
+            .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
+            .unwrap()
+            .id
+    );
     let other = invoke_with(
-        &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "planner:99")],
+        &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", &another)],
         &fx.db,
         &ask,
     );
@@ -532,7 +540,7 @@ fn only_the_requests_own_planner_asks_a_planner_question_on_it() {
     assert_eq!(asks_on_request(), 1);
     // A planner's question on no request is not tied to one.
     let unbound = invoke_with(
-        &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "planner:99")],
+        &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", &another)],
         &fx.db,
         &[
             "ask",

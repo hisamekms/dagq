@@ -18,6 +18,10 @@ Read this when the person wants to update or roll back the `dagq` binary, turn o
 - **A breaking migration**: `install` refuses unless `--allow-breaking`, which drains (show the person the open asks first), backs the queue up, migrates and starts the supervisor again with `up`. Pass what that `up` needs (`--claude`, `--codex`, and `--plugin-dir` only when the repository's instructions name one, never `$CLAUDE_PLUGIN_ROOT`); it keeps the drained supervisor's `--auto-update` and `--max-waiting`. A `--rollback` past a breaking migration is refused; the error names the backup.
 - **`--release`** does not update the plugin: after it, run `claude plugin marketplace update dagq` and `claude plugin update claude-dagq@dagq`, then the person reopens the inbox and planner sessions (`up-down.md`, "Open the inbox again").
 
+## The update that sends the inbox's and planners' commands to the queue service
+
+Once, after the update to the first build whose inbox and planners reach the queue service with a token of their own: an inbox opened by the build before has no token, and its `dagq` commands (reads, `watch`, `note`, ...) are refused as `unauthenticated` with the reason and what to do. The person opens the inbox again from a terminal without `DAGQ_ROLE` (`up-down.md`, "Open the inbox again"). A runtime planner open at the update has none either: wait for it to close; the next one gets a token. Nothing falls back to the database, and a session opened after this update keeps working through later updates.
+
 ## Automatic updates (`up --auto-update`)
 
 ```sh

@@ -7,7 +7,7 @@
 //! whole queue as the measure tasks do; and what is no read use case
 //! (`watch`, a file to write, a program to run) is refused.
 
-use crate::common::service::{Queue, call, queue, start, token};
+use crate::common::service::{Queue, call, call_as_role, queue, start, token};
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -655,7 +655,7 @@ fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
     assert_eq!(missing["error"]["code"], "failed", "{missing}");
     assert!(!invoke(&queue.db, &["goal", "show", "999"]).status.success());
     // Without a principal nothing is read.
-    let anonymous = call(&queue, None, UseCase::Stats, json!({}));
+    let anonymous = call_as_role(&queue, "worker", UseCase::Stats, json!({}));
     assert_eq!(anonymous["error"]["code"], "unauthenticated");
 }
 

@@ -22,6 +22,7 @@ fn kpi(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::proc
     if let Some(role) = role {
         command.env("DAGQ_ROLE", role);
     }
+    reach(&mut command, db, &["kpi"]);
     command
         .arg("--db")
         .arg(db)

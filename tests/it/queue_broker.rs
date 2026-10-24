@@ -48,6 +48,9 @@ fn request(use_case: UseCase, params: Value) -> ServiceRequest {
     ServiceRequest {
         api_version: API_VERSION,
         token: None,
+        env_role: None,
+        queue: None,
+        binding: None,
         use_case,
         params,
     }
@@ -161,6 +164,7 @@ fn the_broker_passes_a_run_s_own_requests_to_the_service_and_refuses_the_rest() 
         &service::socket_path(queue.dir()),
         &ServiceRequest {
             token: Some(own.clone()),
+            env_role: None,
             ..show.clone()
         },
         TIMEOUT,

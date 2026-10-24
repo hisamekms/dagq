@@ -56,8 +56,9 @@ fn spawn_watch(db: &Path, timeout: &str) -> Child {
 fn spawn_watch_with(db: &Path, extra: &[&str], stdout: Stdio) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     common::WithoutActor::without_actor_env(&mut command);
+    command.env("XDG_CONFIG_HOME", db.parent().unwrap().join("config"));
+    common::cli::reach(&mut command, db, &["watch"]);
     command
-        .env("XDG_CONFIG_HOME", db.parent().unwrap().join("config"))
         .arg("--db")
         .arg(db)
         .args(["watch", "--role", "inbox", "--interval", "1"])

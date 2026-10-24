@@ -6,6 +6,8 @@ status: accepted
 created: 2026-10-22
 updated: 2026-10-22
 accepted_on: 2026-10-22
+amended_by:
+  - adr-t3105-1
 amends:
   - adr-t1233-4 decision 6
   - adr-t1233-1 decision 5

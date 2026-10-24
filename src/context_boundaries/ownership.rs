@@ -632,6 +632,8 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/commands/mod.rs", "DenialLog", Some(Shared), Public(All)), // what a command refused
     outer_port("src/application/watch.rs", "AskNotifier", Some(Observation), Internal), // implemented by PushNotifier
     outer_port("src/application/watch.rs", "WatchRecord", Some(Observation), Internal),
+    outer_port("src/application/watch.rs", "WatchSource", Some(Observation), Internal), // implemented by compose's ServiceWatch
+    outer_port("src/application/watch.rs", "OutageNotices", Some(Observation), Internal), // implemented by compose's ServiceWatch
     outer_port("src/application/lifecycle.rs", "LifecycleQueue", Some(Host), Internal),
     outer_port("src/application/actor_executor.rs", "ActorExecutor", Some(Host), Public(All)), // the start of an actor
     outer_port("src/application/actor_executor.rs", "ExecutorEvents", Some(Host), Public(All)), // where an executor records an agent found again: the queue's events, or a session wrapper's store

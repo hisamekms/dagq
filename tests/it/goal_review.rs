@@ -514,8 +514,10 @@ fn a_failed_goal_review_waits_for_a_person_until_rearmed() {
     assert!(queue.goal_review_candidates().unwrap().is_empty());
 
     // The inbox shows it as a goal review to do by hand.
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
-        .without_actor_env()
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command.without_actor_env();
+    crate::common::cli::reach(&mut command, &fx.db, &["status"]);
+    let out = command
         .args(["--db", fx.db.to_str().unwrap(), "status", "--role", "inbox"])
         .current_dir(&fx.repo)
         .output()

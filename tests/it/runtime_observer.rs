@@ -476,8 +476,10 @@ echo 'observer diagnostic' >&2
     );
     let limited = {
         use crate::common::{Bounded, WithoutActor};
-        std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
-            .without_actor_env()
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"));
+        command.without_actor_env();
+        crate::common::cli::reach(&mut command, &db, &["observe", "--history"]);
+        command
             .args([
                 "--db",
                 db.to_str().unwrap(),
@@ -1318,8 +1320,10 @@ env -u DAGQ_ROLE -u DAGQ_SERVICE_SOCKET -u DAGQ_SERVICE_CREDENTIAL_FILE dagq --d
 
     let output = {
         use crate::common::{Bounded, WithoutActor};
-        std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
-            .without_actor_env()
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"));
+        command.without_actor_env();
+        crate::common::cli::reach(&mut command, &db, &["observe", "--history"]);
+        command
             .args(["--db", db.to_str().unwrap(), "observe", "--history"])
             .bounded_output()
             .unwrap()

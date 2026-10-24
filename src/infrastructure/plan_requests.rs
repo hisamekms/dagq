@@ -114,6 +114,12 @@ impl SqliteQueue {
         Ok(recorded)
     }
 
+    /// The request `request`, whatever its status; a missing one is an
+    /// error.
+    pub fn request_by_id(&self, request: RequestId) -> Result<PlanRequest> {
+        read_request(&self.conn, request)
+    }
+
     /// The requests, oldest first: the `open` ones, or every one with
     /// `all`.
     pub fn plan_requests(&self, all: bool) -> Result<Vec<PlanRequest>> {

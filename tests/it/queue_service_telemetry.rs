@@ -17,7 +17,7 @@ use dagq::{
         queue_service::TelemetryTokens,
     },
     domain::{
-        ActorContext, ActorRole,
+        ActorContext,
         queue_service::{Principal, UseCase},
         session_step::{ResourceSample, Step, StepKind, StepTarget, StepsRecorded, TargetKind},
         telemetry::{
@@ -175,10 +175,14 @@ fn a_telemetry_token_records_its_targets_steps_and_samples_and_reaches_nothing_e
 
     // An agent's token does not report, of its own run included.
     register(&queue.db, &target, "s3");
+    let planner = SqliteQueue::open(&queue.db)
+        .unwrap()
+        .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
+        .unwrap();
     for principal in [
         Principal::worker(run, task),
         Principal::of(&ActorContext::review_job(run, 1)),
-        Principal::of(&ActorContext::instance(ActorRole::Planner, 3)),
+        Principal::planner(planner.id.as_i64()),
     ] {
         let agent = token(&queue, &principal);
         let refused = call(

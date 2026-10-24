@@ -122,7 +122,12 @@ fn cli_and_library_watch_refuse_old_schemas_for_every_role_and_wait_mode() {
             .unwrap(),
         old
     );
-    assert!(!dir.path().join("inbox-watchers").exists());
+    // The CLI's inbox watch goes through the queue service and records its
+    // watcher before the first look, which the service refuses: the record
+    // it leaves has ended, so no watcher is taken to be waiting.
+    let watchers =
+        dagq::infrastructure::inbox_watchers::read(&dagq::infrastructure::inbox_watchers::dir(&db));
+    assert!(watchers.iter().all(|record| record.ended_at.is_some()));
     assert!(compose::open_queue_watch(&dir.path().join("missing.db")).is_err());
     assert!(!dir.path().join("missing.db").exists());
 }

@@ -24,6 +24,8 @@ related:
   - adr-t3102-1
   - adr-t3102-2
   - adr-t3102-3
+  - adr-t3105-1
+  - design-queue-service-host-cli
 ---
 
 # Queue service
@@ -33,7 +35,7 @@ hostで動き、queue DBを開いてユースケース単位のAPIを、service�
 
 今の段（段(2)・(3)）: serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
 **worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。
-session wrapperとhookはwrapperのprincipalでserviceを通り、inbox・planner・人のCLIはDBを直接開く（段(5)まで）。
+session wrapperとhookはwrapperのprincipalでserviceを通り、人・inbox・plannerのCLIは[hostのCLI](queue-service-host-cli.md)。
 supervisorはclaim・lease・runの状態とevent・tokenをserviceで行い、着地とjobの結果はDBを開く（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
 例外はexecutorのsessionのstepだけで、制御側が対象ごとに発行するtelemetry専用のprincipalで[`telemetry_report`](#telemetry_report)を通る（[ADR-t1662-3](../adr/2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md)決定13）。
 
@@ -51,7 +53,7 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 | `state.json` | 動いているserviceの記録。止まるときに消す |
 | `service.log` | `up`・supervisor・`service start`が起動したserviceのstdoutとstderr |
 | `tokens/<値のsha256>.json` | tokenのprincipalと発行の時刻 |
-| `credentials/<actor id（supervisorは登録も）のsha256>` | tokenの値。呼び出し元にはこのfileのpathを渡し、値をenvにもargvにも置かない（ADR-t1233-4決定4）。worktreeとrun dirの外 |
+| `credentials/<keyのsha256>` | tokenの値（keyとinboxのsessionごとのfileは`Principal::credential_key`）。呼び出し元にはこのfileのpathを渡し、値をenvにもargvにも置かない（ADR-t1233-4決定4）。worktreeとrun dirの外 |
 
 1つの接続に1つの要求で、要求は1行のJSON、答えも1行のJSONで、答えた後に閉じる。
 上限（`MAX_ANSWER_BYTES`）を超える答えは送らず`response_too_large`で断る（ADR-t1233-5）。
@@ -70,11 +72,11 @@ transactionはserviceの中で完結し、クライアントとの往復で分�
 
 ## principalとtoken
 
-serviceは呼び出しのprincipal（`Principal`）をtokenから決め、クライアントが名乗るrole（`DAGQ_ROLE`）は認可に使わない（ADR-t1233-1決定4、ADR-t1233-4決定4）。
+serviceは呼び出しのprincipal（`Principal`）をtokenから決め（tokenの無い人は[hostのCLI](queue-service-host-cli.md#principal)）、クライアントが名乗るrole（`DAGQ_ROLE`）は認可に使わない（ADR-t1233-1決定4、ADR-t1233-4決定4）。
 
 - 発行: 制御側だけが`queue_service::issue`で発行する。
   AI actorにtokenを作るコマンドは無い。
-  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）・登録を対象に持つsupervisor・session wrapperだけで、人と残りの制御側（user・integrator）は段(5)まで今のままDBを直接開く（`Principal::check`）。
+  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）・登録を対象に持つsupervisor・session wrapper・inbox・plannerだけで、残りの制御側（integrator）は段(5)まで今のままDBを直接開く（`Principal::check`）。
   同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）。
   発行するのはactorの起動の1か所（applicationのport `ServiceAccess`）:
   - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するときに、serviceにrunのleaseを確かめさせて発行する。
@@ -99,7 +101,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め、クラ
 
 ## ユースケース
 
-`src/application/queue_service.rs`の`QueueService::handle`が、versionの検査、tokenの検査、ユースケースの順に行う。
+`src/application/queue_service.rs`の`QueueService::handle`が、versionの検査、宛てのqueueの検査、tokenの検査、ユースケースの順に行う。
 認可はCLIと同じapplicationの境界（`Dialogue`・`Gate`と`StaticPolicy`）を、principalのactorでservice側で通す。
 拒否はCLIと同じ`authorization_denied`（拒まれたprincipalがactor）に記録し、`authorization_denied`のcodeで返す。
 そのerrorはeventと同じrole・capability・reasonを`denied`に持ち（`ServiceDenial`）、知らない欄を読み飛ばす古いクライアントはcodeとmessageだけを読むので、API versionを上げない。
@@ -122,7 +124,8 @@ paramsはそのコマンドのoption、答えはそのコマンドの出力（pa
 | `replan_propose` | `dagq replan propose` | `replan.propose`（run） |
 | `telemetry_report` | なし（executorのTelemetrySink） | `telemetry.report`（tokenの対象）。[telemetry_report](#telemetry_report) |
 | `session_run`・`session_record` | なし（wrapper。`SessionOp`） | `session.run`・`session.record`（wrapperの対象） |
-| 読み取り | そのコマンド | `queue.read`（queue）。[読み取りのユースケース](#読み取りのユースケース) |
+| `watch_poll` | hostの`dagq watch` | `queue.watch` |
+| 読み取り | そのコマンド | CLIと同じcapability。[読み取りのユースケース](#読み取りのユースケース) |
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（capabilityは`finding.ask`）で送る。
 findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、eventの書き手は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。
@@ -163,7 +166,7 @@ queue全体の読み取り（ADR-t1233-5決定1〜3）。
 CLIとserviceは同じ`application::queue_reads::answer`で答える。
 serviceは起動部分が注入する読み取り（`ServiceReads`）で呼ぶので、`infrastructure::queue_service`は起動部分を参照しない。
 paramsは`application::queue_reads::QueueRead`が読み、CLIのparserが拒む値は`bad_request`。
-認可はCLIがそのコマンドに求めるのと同じ`queue.read`（queue）を`Gate`でprincipalに通す。
+認可はCLIがそのコマンドに求めるのと同じcapability（queue）を`Gate`でprincipalに通す。
 executor-telemetryのほかの全role（workerとjobを含む）がqueue全体を読める（ADR-t1233-5決定3）。
 `stats`・`kpi`・`forecast`・`status`・`candidates`の「今」はserviceが要求を受けた時刻。
 
@@ -185,17 +188,17 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
 | observer（`QueueCli`） | `observer::observer_prompt` | 読み取りと、findingの書き込みとそのask |
 | スループットの見直しのjob（`QueueCli`） | `throughput_review::review_prompt`と、それが載せるdagq skillの`reference/kpi.md`の手順 | 読み取りだけ |
 | review job・復旧job（`ReadFiles`） | `prompt::review_prompt`・`prompt::recovery_prompt` | なし（Bashを持たず、dagqを打たない） |
-| runtimeが立てるplanner | `RECORD_READING` | 読み取り（plannerは今もDBを直接開く） |
+| runtimeが立てるplanner | `RECORD_READING` | 読み取り（[hostのCLI](queue-service-host-cli.md)） |
 | worker | runtimeのprompt（`WORKER_READING`） | `ask`（書き込み）。`list`・`show`は作業の初めに打たないよう言う（権限の範囲ではない。ADR-t1233-5決定3） |
 | worker（`measure`のtask） | [taskの登録](../development/task-registration.md)の「change」の`measure`、measureのtaskのdescription | 読み取りだけ |
 | worker・job | dagq skillの`SKILL.md`と`reference/` | 読み取りだけ |
 
 ユースケースの無いコマンド（クライアントモードではserviceに届かない）:
 
-- `watch`（`queue.watch`。inboxのもの）、`report`と`graph --out`（`queue.export`。ファイルを書く）: jobとworkerのpolicyに無い操作で、今のCLIでも拒まれる
+- `watch`（`queue.watch`。hostのCLIは上の`watch_poll`）、`report`と`graph --out`（`queue.export`。ファイルを書く）: jobとworkerのpolicyに無い操作で、今のCLIでも拒まれる
 - `graph --format svg`: hostのd2を起動するので、serviceは読み取りとして受け取らない（`json`と`d2`は答える）。
   promptとskillはsvgを名指さない
-- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`・`planners`: 制御側の状態を見るもので、jobのpromptは名指さない。
+- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`: 制御側の状態を見るもので、jobのpromptは名指さない。
   dagq skillは`doctor`を名指すが、AGENTS.mdはworkerの実queueでの`doctor`の確認を人かinboxに任せる。
   クライアントモードでの扱いは[クライアントモード](#クライアントモード)
 
@@ -288,12 +291,10 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 ## まだ無いもの
 
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
-- `dagq ci failures`（`ci.read`。[CI watch](supervisor-lifecycle/ci-watch.md)）の読み取りのユースケース。
-  clientのmodeでは`no_use_case`で断る
 - containerの中からbrokerを通す`telemetry_report`（[Queue broker](queue-broker.md)の`TokenRefusal`）。
   containerのrunのstepはhostのwrapperが送る
 - 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、integrateのverificationの隔離
-- 段(5)の残り: supervisorの着地とjobの結果・CLIのservice経由化、userのprincipalと親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
+- 段(5)の残り: supervisorの着地とjobの結果・書き込みのCLIのservice経由化、親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
 
 ## CIの見張り（ADR-t1920-1）
 

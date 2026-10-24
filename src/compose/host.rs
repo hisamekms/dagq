@@ -654,6 +654,14 @@ impl OneShot {
                 resolve_language: &|checkout, user_config| {
                     crate::infrastructure::language::resolve_language(Some(checkout), user_config)
                 },
+                queue_service: &crate::infrastructure::queue_service::SystemServiceAccess,
+                session: {
+                    use crate::application::ProcessControl;
+                    let pid = std::process::id();
+                    crate::infrastructure::adapters::SystemProcesses
+                        .session_start(pid)
+                        .map(|start| crate::domain::queue_service::SessionProcess { pid, start })
+                },
             },
             &InboxAgent {
                 provider: crate::domain::Provider::Claude,

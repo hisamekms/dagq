@@ -1744,8 +1744,10 @@ pub fn git_out(repo: &Path, args: &[&str]) -> String {
 
 /// `dagq stats --full` of the queue at `db`, as the CLI prints it.
 pub fn stats_full(db: &Path) -> Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
-        .without_actor_env()
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command.without_actor_env();
+    crate::common::cli::reach(&mut command, db, &["stats"]);
+    let output = command
         .arg("--db")
         .arg(db)
         .args(["stats", "--full"])

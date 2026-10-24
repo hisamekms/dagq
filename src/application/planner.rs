@@ -422,6 +422,9 @@ pub struct PlannerWrapper<'a> {
     /// with the planner's telemetry token (ADR-t1662-3 decisions 1 and
     /// 10).
     pub telemetry: &'a dyn super::TelemetrySinks,
+    /// Issues the planner's token for the queue service, which its turns'
+    /// `dagq` takes on a served queue (ADR-t3102-1 decision 2).
+    pub queue_service: Option<&'a dyn super::queue_service::ServiceAccess>,
 }
 
 /// The session wrapper of planner `id` (`planner-session`): register this
@@ -454,6 +457,7 @@ pub fn run_planner_session(
         pid,
         clock,
         telemetry,
+        queue_service,
     } = ctx;
     // A wrapper started for a planner already closed, or with a session,
     // is refused and ends.
@@ -502,7 +506,7 @@ pub fn run_planner_session(
             provider,
             other: None,
             spawner,
-            queue_service: None,
+            queue_service,
             processes,
             files,
             pid,

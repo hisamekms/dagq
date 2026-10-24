@@ -10,16 +10,19 @@
 //! recorded of itself), `lock` (held with `flock` while one runs, which is
 //! how a look tells a live service from a stale record and how a second
 //! one is refused), `service.log`, and the tokens: `tokens/<sha256 of the
-//! value>.json` holds a token's principal, `credentials/<sha256 of the
-//! actor id>` its value (mode 0600) for the caller to be handed the path
-//! of. No token value is ever written to a log, an event or an error.
-//! `command-digest.key` (mode 0600, [`digest_key`]) is the key the
-//! executors digest their commands' words with; it is read by them alone
-//! and, like a token's value, never written anywhere else.
+//! value>.json` holds a token's principal, `credentials/<sha256 of its
+//! key>` its value (mode 0600, [`credential_path_of`]) for the caller to be
+//! handed the path of. No token value is ever written to a log, an event
+//! or an error. `command-digest.key` (mode 0600, [`digest_key`]) is the key
+//! the executors digest their commands' words with; it is read by them
+//! alone and, like a token's value, never written anywhere else.
 //! `steps/<sha256 of the telemetry actor id>.json` ([`steps_path`]) is
 //! what a session wrapper kept of its target's steps to send again,
 //! naming that target, which the supervisor's sweep removes once the
-//! target ended ([`kept_steps`]).
+//! target ended ([`kept_steps`]). `telemetry.lock` and `sessions.lock` are
+//! the `flock`s the issues of the executors' telemetry tokens
+//! ([`TelemetryLock`]) and of a session's token ([`issue`]) hold, so two of
+//! them never interleave.
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
@@ -49,8 +52,8 @@ use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
-    QueueService, QueueServiceControl, ServiceAccess, ServiceBackend, ServiceProbe, ServiceQueue,
-    TelemetryTokens,
+    Peer, QueueService, QueueServiceControl, ServiceAccess, ServiceBackend, ServiceProbe,
+    ServiceQueue, TelemetryTokens,
 };
 use crate::application::session::{AgentStart, ReasonParams, SessionOp, WrapperStore};
 use crate::application::{
@@ -59,9 +62,10 @@ use crate::application::{
 };
 use crate::domain::queue_service::wrapper_actor_id;
 use crate::domain::queue_service::{
-    API_VERSION, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OWNER_PID_ENV,
-    Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, STEPS_DIR, ServiceDenial, ServiceErrorCode,
-    ServiceRequest, ServiceResponse, ServiceState, UseCase,
+    API_VERSION, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OUTAGE_FILE,
+    OUTAGE_TOLD_FILE, OWNER_PID_ENV, Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, STEPS_DIR,
+    ServiceDenial, ServiceErrorCode, ServiceOutage, ServiceRequest, ServiceResponse, ServiceState,
+    UseCase,
 };
 use crate::domain::session_step::StepTarget;
 use crate::domain::sessions::SessionHook;
@@ -81,6 +85,10 @@ pub const TOKENS_DIR: &str = "tokens";
 pub const CREDENTIALS_DIR: &str = "credentials";
 /// The file in [`SERVICE_DIR`] [`TelemetryLock`] locks.
 const TELEMETRY_LOCK_FILE: &str = "telemetry.lock";
+/// The file in [`SERVICE_DIR`] an issue of a token bound to a session
+/// locks from the revocation of its actor's earlier sessions' tokens to its
+/// own record ([`issue`]).
+const SESSIONS_LOCK_FILE: &str = "sessions.lock";
 /// The longest socket path a unix socket takes on macOS (`sun_path`).
 const MAX_SOCKET_PATH: usize = 103;
 /// How long a look waits for `hello`.
@@ -138,6 +146,47 @@ fn prepare_socket_dir(socket: &Path) -> Result<()> {
     );
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("narrow {}", dir.display()))
+}
+
+/// The outage of the service of the queue at `queue_dir` its supervisor
+/// recorded outside the DB ([`OUTAGE_FILE`], ADR-t3102-3 decision 1), if
+/// one stands and reads.
+pub fn recorded_outage(queue_dir: &Path) -> Option<ServiceOutage> {
+    serde_json::from_slice(&fs::read(queue_dir.join(OUTAGE_FILE)).ok()?).ok()
+}
+
+/// What the host's watches of the queue at `queue_dir` returned of its
+/// service's outages ([`OUTAGE_TOLD_FILE`]): the `since` of the outage a
+/// watch of each role (`none` for one of no role) returned. A file that
+/// does not read holds nothing, so the outage is returned again rather
+/// than waited out unseen.
+pub struct OutagesTold(PathBuf);
+
+impl OutagesTold {
+    pub fn of(queue_dir: &Path) -> Self {
+        Self(queue_dir.to_path_buf())
+    }
+
+    fn file(&self, role: &str) -> PathBuf {
+        self.0.join(format!("{OUTAGE_TOLD_FILE}-{role}.json"))
+    }
+
+    /// Whether a watch of `role` returned the outage that began at `since`.
+    pub fn told(&self, role: &str, since: i64) -> bool {
+        fs::read(self.file(role))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<i64>(&bytes).ok())
+            == Some(since)
+    }
+
+    /// Note that a watch of `role` returns the outage that began at
+    /// `since`, written whole through a temporary file and a rename.
+    pub fn tell(&self, role: &str, since: i64) -> Result<()> {
+        let file = self.file(role);
+        let tmp = file.with_extension(format!("{}.tmp", std::process::id()));
+        fs::write(&tmp, since.to_string()).with_context(|| format!("write {}", tmp.display()))?;
+        fs::rename(&tmp, &file).with_context(|| format!("rename to {}", file.display()))
+    }
 }
 
 /// `<queue dir>/service/service.log`.
@@ -287,6 +336,12 @@ pub fn kept_steps(queue_dir: &Path, now: std::time::SystemTime) -> Result<Vec<Ke
     Ok(kept)
 }
 
+/// The file the value of `principal`'s token is written to: the one of its
+/// key ([`Principal::credential_key`]; an inbox's names its session).
+pub fn credential_path_of(queue_dir: &Path, principal: &Principal) -> PathBuf {
+    credential_path(queue_dir, &principal.credential_key())
+}
+
 fn record_path(queue_dir: &Path, token: &str) -> PathBuf {
     service_dir(queue_dir)
         .join(TOKENS_DIR)
@@ -296,8 +351,10 @@ fn record_path(queue_dir: &Path, token: &str) -> PathBuf {
 /// Issue a token for `principal`, revoking the one its actor held: 32
 /// random bytes in hex, its value in `credentials/` outside any worktree
 /// and run directory, its principal in `tokens/` under the value's hash.
-/// Only the control side calls this; no command of an AI actor's does
-/// (ADR-t1233-4 decision 4).
+/// One bound to a session (an inbox's) revokes every earlier session's of
+/// its actor, holding the queue's [`SESSIONS_LOCK_FILE`] to its own record,
+/// so of two issued at once only the later holds. Only the control side
+/// calls this; no command of an AI actor's does (ADR-t1233-4 decision 4).
 pub fn issue(queue_dir: &Path, principal: &Principal, now: i64) -> Result<IssuedToken> {
     write_token(queue_dir, principal, None, now)
 }
@@ -316,21 +373,29 @@ impl TelemetryLock {
     /// Take the lock of the queue at `queue_dir`, waiting while another
     /// holds it.
     pub fn take(queue_dir: &Path) -> Result<Self> {
-        let dir = service_dir(queue_dir);
-        private_dir(&dir)?;
-        let path = dir.join(TELEMETRY_LOCK_FILE);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("open {}", path.display()))?;
-        file.lock()
-            .with_context(|| format!("lock {}", path.display()))?;
-        Ok(Self { _file: file })
+        Ok(Self {
+            _file: exclusive(queue_dir, TELEMETRY_LOCK_FILE)?,
+        })
     }
+}
+
+/// The file `name` in the queue's [`SERVICE_DIR`], locked exclusively with
+/// `flock` until it is dropped, waiting while another holds it.
+fn exclusive(queue_dir: &Path, name: &str) -> Result<File> {
+    let dir = service_dir(queue_dir);
+    private_dir(&dir)?;
+    let path = dir.join(name);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("lock {}", path.display()))?;
+    Ok(file)
 }
 
 /// [`issue`] for an executor's telemetry principal under `lock`, every
@@ -357,6 +422,17 @@ fn write_token(
 ) -> Result<IssuedToken> {
     principal.check().map_err(anyhow::Error::msg)?;
     let key = principal.credential_key();
+    // Two inboxes opened at once revoke and write one after the other, so
+    // the later revokes the earlier's token and only one session holds one
+    // (ADR-t3105-1 decision 5): the lock is held to the record.
+    let _sessions = match principal.session {
+        Some(_) => {
+            let lock = exclusive(queue_dir, SESSIONS_LOCK_FILE)?;
+            revoke_sessions(queue_dir, &principal.actor_id)?;
+            Some(lock)
+        }
+        None => None,
+    };
     revoke(queue_dir, &key)?;
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes)
@@ -423,6 +499,35 @@ pub fn revoke(queue_dir: &Path, actor_id: &str) -> Result<bool> {
         }
     }
     Ok(revoked)
+}
+
+/// Revoke every token of `actor_id` bound to a session (an inbox opened
+/// before): each record, then the file of its session
+/// ([`credential_path_of`]), so the file that session was handed holds no
+/// token any more. A record that cannot be removed is an error that leaves
+/// the token to revoke again.
+fn revoke_sessions(queue_dir: &Path, actor_id: &str) -> Result<()> {
+    for (path, record) in records(queue_dir)? {
+        if record.principal.actor_id != actor_id || record.principal.session.is_none() {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("remove a token's record"),
+        }
+        let file = credential_path_of(queue_dir, &record.principal);
+        match fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => warn!(
+                actor_id,
+                "the revoked token's file {} could not be removed: {error}",
+                file.display()
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// The records of the tokens that hold, each with its principal: what
@@ -550,11 +655,12 @@ pub fn sweep(queue_dir: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Res
         if !ended(&record.principal) {
             continue;
         }
-        let actor_id = record.principal.actor_id;
-        if let Err(error) = sweep_one(queue_dir, &path, &actor_id) {
+        if let Err(error) = sweep_one(queue_dir, &path, &record.principal) {
+            let actor_id = &record.principal.actor_id;
             warn!(error = %format_args!("{error:#}"), "the token of {actor_id} could not be revoked: {error:#}");
             continue;
         }
+        let actor_id = record.principal.actor_id;
         if !revoked.contains(&actor_id) {
             revoked.push(actor_id);
         }
@@ -562,10 +668,10 @@ pub fn sweep(queue_dir: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Res
     Ok(revoked)
 }
 
-/// Remove the token's record at `record`, and the value `actor_id`'s file
-/// holds when it is that token's.
-fn sweep_one(queue_dir: &Path, record: &Path, actor_id: &str) -> Result<()> {
-    let file = credential_path(queue_dir, actor_id);
+/// Remove the token's record at `record`, and the value `principal`'s file
+/// ([`credential_path_of`]) holds when it is that token's.
+fn sweep_one(queue_dir: &Path, record: &Path, principal: &Principal) -> Result<()> {
+    let file = credential_path_of(queue_dir, principal);
     match fs::read_to_string(&file) {
         Ok(token) if record_path(queue_dir, token.trim()) == record => {
             match fs::remove_file(&file) {
@@ -875,6 +981,10 @@ impl ServiceTelemetrySink {
             client: Client {
                 route: ClientRoute::Socket(socket),
                 credential: Some(credential),
+                env_role: None,
+                next: NEXT_CONTROL_SIDE,
+                queue: None,
+                binding: None,
             },
         }
     }
@@ -1001,26 +1111,23 @@ impl std::error::Error for NotConnected {
     }
 }
 
-/// Send `request` to the service at `socket` and read its answer; an error
-/// when nothing answers (the caller does not fall back to the DB,
+/// Send `request` to the service at `socket` and read its answer within
+/// `timeout`, one deadline across the connection, the request and the
+/// answer: a listener whose backlog is full, and a service that sends its
+/// answer a little at a time, end in it as one that does not answer. An
+/// error when nothing answers (the caller does not fall back to the DB,
 /// ADR-t1233-1 decision 7), or [`AnswerPastLimit`].
 pub fn call(socket: &Path, request: &ServiceRequest, timeout: Duration) -> Result<ServiceResponse> {
-    let mut stream = UnixStream::connect(socket).map_err(|source| NotConnected {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut stream = connect_by(socket, deadline).map_err(|source| NotConnected {
         socket: socket.to_path_buf(),
         source,
     })?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
     let mut line = serde_json::to_vec(request)?;
     line.push(b'\n');
-    stream
-        .write_all(&line)
-        .context("send the request to the queue service")?;
+    write_by(&mut stream, &line, deadline).context("send the request to the queue service")?;
     stream.shutdown(std::net::Shutdown::Write).ok();
-    let mut answer = Vec::new();
-    stream
-        .take(MAX_ANSWER_BYTES as u64 + 1)
-        .read_to_end(&mut answer)
+    let answer = read_by(&mut stream, deadline, MAX_ANSWER_BYTES + 1)
         .context("read the queue service's answer")?;
     if answer.len() > MAX_ANSWER_BYTES {
         return Err(AnswerPastLimit.into());
@@ -1028,13 +1135,155 @@ pub fn call(socket: &Path, request: &ServiceRequest, timeout: Duration) -> Resul
     serde_json::from_slice(&answer).context("the queue service's answer does not read")
 }
 
-/// `hello` to the service at `socket`.
+/// What is left until `deadline`: a timeout once nothing is.
+fn left(deadline: std::time::Instant) -> std::io::Result<Duration> {
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    if left.is_zero() {
+        return Err(std::io::Error::new(
+            ErrorKind::TimedOut,
+            "the queue service did not answer in time",
+        ));
+    }
+    Ok(left)
+}
+
+/// A connection to the socket at `socket` by `deadline`. The connect does
+/// not block: a listener whose backlog is full (where a blocking connect
+/// waits for room, with no limit of its own) is tried again until the
+/// deadline. The stream it returns blocks, and closes on exec.
+fn connect_by(socket: &Path, deadline: std::time::Instant) -> std::io::Result<UnixStream> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let path = socket.as_os_str().as_bytes();
+    // SAFETY: an all-zero sockaddr_un is a valid value of it.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if path.len() >= address.sun_path.len() {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "the socket's path is too long",
+        ));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(path) {
+        *slot = *byte as libc::c_char;
+    }
+    let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    {
+        address.sun_len = length as u8;
+    }
+    // SAFETY: socket(2) takes no pointer.
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is the descriptor socket(2) just returned, owned here.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let flags = |get: libc::c_int, set: libc::c_int, change: &dyn Fn(i32) -> i32| {
+        // SAFETY: fcntl(2) on the descriptor this owns, with no pointer.
+        let current = unsafe { libc::fcntl(fd.as_raw_fd(), get) };
+        // SAFETY: as above.
+        if current < 0 || unsafe { libc::fcntl(fd.as_raw_fd(), set, change(current)) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    };
+    flags(libc::F_GETFD, libc::F_SETFD, &|f| f | libc::FD_CLOEXEC)?;
+    flags(libc::F_GETFL, libc::F_SETFL, &|f| f | libc::O_NONBLOCK)?;
+    loop {
+        // SAFETY: `address` is a sockaddr_un that lives through the call,
+        // and `length` is no more than its size.
+        let connected = unsafe {
+            libc::connect(
+                fd.as_raw_fd(),
+                (&raw const address).cast::<libc::sockaddr>(),
+                length as libc::socklen_t,
+            )
+        };
+        if connected == 0 {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EISCONN) => break,
+            Some(libc::EAGAIN | libc::EINPROGRESS | libc::EALREADY | libc::EINTR) => {
+                thread::sleep(left(deadline)?.min(Duration::from_millis(10)));
+            }
+            _ => return Err(error),
+        }
+    }
+    flags(libc::F_GETFL, libc::F_SETFL, &|f| f & !libc::O_NONBLOCK)?;
+    Ok(UnixStream::from(fd))
+}
+
+/// Set `stream`'s timeout for the next read or write (`set`) to what is
+/// left until `deadline`. macOS refuses the timeout (`EINVAL`) of a socket
+/// whose peer has closed it, on which a read or write no longer blocks:
+/// that refusal is no error.
+fn time_by(
+    stream: &UnixStream,
+    deadline: std::time::Instant,
+    set: fn(&UnixStream, Option<Duration>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match set(stream, Some(left(deadline)?)) {
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        set => set,
+    }
+}
+
+/// Write `bytes` to `stream` by `deadline`.
+fn write_by(
+    stream: &mut UnixStream,
+    bytes: &[u8],
+    deadline: std::time::Instant,
+) -> std::io::Result<()> {
+    let mut sent = 0;
+    while sent < bytes.len() {
+        time_by(stream, deadline, UnixStream::set_write_timeout)?;
+        match stream.write(&bytes[sent..]) {
+            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(written) => sent += written,
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Read `stream` to its end by `deadline`, `limit` bytes at most.
+fn read_by(
+    stream: &mut UnixStream,
+    deadline: std::time::Instant,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut answer = Vec::new();
+    let mut buffer = [0u8; 8192];
+    while answer.len() < limit {
+        time_by(stream, deadline, UnixStream::set_read_timeout)?;
+        let room = buffer.len().min(limit - answer.len());
+        match stream.read(&mut buffer[..room]) {
+            Ok(0) => break,
+            Ok(read) => answer.extend_from_slice(&buffer[..read]),
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(answer)
+}
+
+/// `hello` to the service at `socket`, sent at the version every service
+/// answers ([`crate::domain::queue_service::request_version`]): a look
+/// ([`probe`]) finds a service of an older build running as one of another
+/// build (which the supervisor replaces) rather than unreachable.
 pub fn hello(socket: &Path, timeout: Duration) -> Result<Value> {
     let response = call(
         socket,
         &ServiceRequest {
-            api_version: API_VERSION,
+            api_version: crate::domain::queue_service::request_version(UseCase::Hello),
             token: None,
+            env_role: None,
+            queue: None,
+            binding: None,
             use_case: UseCase::Hello,
             params: Value::Null,
         },
@@ -1064,7 +1313,10 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// side's (`doctor`, `service status`, `planners`), which a person or the
 /// inbox runs on the host; `no_use_case`: any other command that is none
 /// of the service's;
-/// `queue_named`: the command names a queue to open; `client_misconfigured`:
+/// `queue_named`: the command names a queue to open; `wrong_queue`: the
+/// host's `dagq` names a queue whose service did not issue the token the
+/// environment names, which is not sent to it ([`issued_by`]);
+/// `client_misconfigured`:
 /// the environment names both a socket and a broker, a broker URL that
 /// does not read, or, with a broker, a run that holds a control character).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1073,7 +1325,11 @@ pub struct ClientFailure {
     pub message: String,
     /// What the service's policy refused, with its `authorization_denied`:
     /// the command line prints it as a local refusal's `denied`.
-    pub denied: Option<ServiceDenial>,
+    pub denied: Option<Box<ServiceDenial>>,
+    /// The outage the supervisor recorded of the service the host's `dagq`
+    /// did not reach (`unreachable`), which `status` and `watch` say
+    /// (ADR-t3102-3 decision 2).
+    pub outage: Option<Box<ServiceOutage>>,
 }
 
 impl std::fmt::Display for ClientFailure {
@@ -1090,6 +1346,7 @@ impl ClientFailure {
             code: code.to_owned(),
             message: message.into(),
             denied: None,
+            outage: None,
         }
     }
 }
@@ -1119,9 +1376,31 @@ pub enum ClientRoute {
 pub struct Client {
     pub route: ClientRoute,
     /// `None` when the environment names none: the service (or the broker)
-    /// then refuses the call as `unauthenticated`.
+    /// then refuses the call as `unauthenticated`, unless it takes the
+    /// caller for the user (no role either, on the host's socket).
     pub credential: Option<PathBuf>,
+    /// The role the environment names
+    /// ([`ROLE_ENV`](crate::domain::actor::ROLE_ENV)), sent with a call
+    /// that carries no token ([`ServiceRequest::env_role`]).
+    pub env_role: Option<String>,
+    /// What a call that gets no answer says to do next.
+    pub next: &'static str,
+    /// The queue DB the host's `dagq` resolved, sent with each call for the
+    /// service to refuse when it serves another
+    /// ([`ServiceRequest::queue`]); `None` for a worker's or a job's.
+    pub queue: Option<PathBuf>,
+    /// The repository the host's `dagq` ran in for a repository queue,
+    /// sent with each call for the service to refuse when the queue is
+    /// bound to another ([`ServiceRequest::binding`]).
+    pub binding: Option<String>,
 }
+
+/// What a worker's or a job's client that gets no answer says to do next.
+const NEXT_CONTROL_SIDE: &str = "dagq service status, from the control side, says why";
+/// What the host's `dagq` that gets no answer says to do next
+/// (ADR-t3102-3 decision 2).
+const NEXT_HOST: &str = "dagq service status says why, and dagq up (or dagq service start) \
+                         starts it";
 
 impl Client {
     /// The client `env` names: `Ok(None)` with neither a socket nor a
@@ -1167,7 +1446,34 @@ impl Client {
         Ok(Some(Self {
             route,
             credential: named(CREDENTIAL_FILE_ENV).map(PathBuf::from),
+            env_role: named(crate::domain::actor::ROLE_ENV),
+            next: NEXT_CONTROL_SIDE,
+            queue: None,
+            binding: None,
         }))
+    }
+
+    /// The host `dagq` of an actor of a
+    /// [`host_client_role`](crate::domain::queue_service::host_client_role)
+    /// on the queue at `db` (ADR-t3102-2 decision 5), run in the repository
+    /// whose Git common directory is `binding` for a repository queue: the
+    /// socket of its directory's service, which refuses a call when it
+    /// serves another DB or the queue is bound to another repository, the
+    /// token's file `env` names (the inbox's and a planner's) and the role
+    /// it names, none for the user.
+    pub fn host(db: &Path, binding: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Self {
+        use crate::domain::queue_service::CREDENTIAL_FILE_ENV;
+        let named = |name: &str| env(name).filter(|value| !value.trim().is_empty());
+        Self {
+            route: ClientRoute::Socket(socket_path(&queue_dir_of(db))),
+            credential: named(CREDENTIAL_FILE_ENV).map(PathBuf::from),
+            env_role: named(crate::domain::actor::ROLE_ENV),
+            next: NEXT_HOST,
+            // Absolute, as the service resolves it from its own working
+            // directory.
+            queue: Some(std::path::absolute(db).unwrap_or_else(|_| db.to_path_buf())),
+            binding: binding.map(str::to_owned),
+        }
     }
 
     /// `use_case` with `params` done by the service as the principal of
@@ -1186,6 +1492,7 @@ impl Client {
         params: Value,
         timeout: Duration,
     ) -> Result<Value> {
+        self.check_destination()?;
         let token = match &self.credential {
             Some(file) => Some(
                 read_token(file)
@@ -1196,18 +1503,20 @@ impl Client {
         let unreachable = |error: anyhow::Error, said: &str| no_answer(&error, use_case, said);
         let response = match &self.route {
             ClientRoute::Socket(socket) => {
+                // The role goes only with no token: the service never takes
+                // a request whose environment names one for the user's.
+                let env_role = self.env_role.clone().filter(|_| token.is_none());
                 let request = ServiceRequest {
                     api_version: API_VERSION,
                     token,
+                    env_role,
+                    queue: self.queue.clone(),
+                    binding: self.binding.clone(),
                     use_case,
                     params,
                 };
-                call(socket, &request, timeout).map_err(|error| {
-                    unreachable(
-                        error,
-                        "dagq service status, from the control side, says why",
-                    )
-                })?
+                call(socket, &request, timeout)
+                    .map_err(|error| self.not_answered(&error, use_case))?
             }
             ClientRoute::Broker { address, run } => {
                 // The token goes as the `Bearer` only: the broker puts the
@@ -1215,6 +1524,9 @@ impl Client {
                 let request = ServiceRequest {
                     api_version: API_VERSION,
                     token: None,
+                    env_role: None,
+                    queue: None,
+                    binding: None,
                     use_case,
                     params,
                 };
@@ -1231,6 +1543,56 @@ impl Client {
         answer_of(response)
     }
 
+    /// [`Self::call_within`] for a look the caller is not held on
+    /// (`status`, ADR-t3102-3 decision 2): a service on a socket has to
+    /// answer `hello` within [`PROBE_TIMEOUT`] before the look is sent, so
+    /// one that takes the call and never answers, whose backlog is full or
+    /// that answers a little at a time is unreachable within it, and one
+    /// that answers `hello` has `limit` to answer the look.
+    pub fn look_within(&self, use_case: UseCase, params: Value, limit: Duration) -> Result<Value> {
+        self.check_destination()?;
+        if let ClientRoute::Socket(socket) = &self.route {
+            hello(socket, PROBE_TIMEOUT).map_err(|error| self.not_answered(&error, use_case))?;
+        }
+        self.call_within(use_case, params, limit)
+    }
+
+    /// That the token goes only to the service that issued it: the host's
+    /// `dagq` of an inbox or a planner whose `--db` names another queue
+    /// sends that queue's service nothing, a `hello` neither, and fails as
+    /// `wrong_queue` ([`issued_by`]).
+    fn check_destination(&self) -> Result<()> {
+        match (&self.credential, &self.queue) {
+            (Some(file), Some(db)) if !issued_by(file, db) => Err(ClientFailure::new(
+                "wrong_queue",
+                format!(
+                    "the token's file {} is not one the queue at {} issued: the token is not \
+                     sent to its service",
+                    file.display(),
+                    db.display()
+                ),
+            )
+            .into()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The failure of a call to the service on a socket that did not
+    /// answer `use_case`: `unreachable` with the outage the supervisor
+    /// recorded beside the DB the host's `dagq` names, or the answer's
+    /// own (`response_too_large`).
+    fn not_answered(&self, error: &anyhow::Error, use_case: UseCase) -> ClientFailure {
+        let mut failure = no_answer(error, use_case, self.next);
+        if failure.code == "unreachable" {
+            failure.outage = self
+                .queue
+                .as_deref()
+                .and_then(|db| recorded_outage(&queue_dir_of(db)))
+                .map(Box::new);
+        }
+        failure
+    }
+
     /// Whether the queue service answers `hello` within [`PROBE_TIMEOUT`],
     /// the short wait of a look at it: what `locate` adds to its answer
     /// (see [`reach_of`]). It never fails, and opens no queue whatever it
@@ -1239,6 +1601,9 @@ impl Client {
         let request = ServiceRequest {
             api_version: API_VERSION,
             token: None,
+            env_role: None,
+            queue: None,
+            binding: None,
             use_case: UseCase::Hello,
             params: Value::Null,
         };
@@ -1279,6 +1644,20 @@ impl Client {
     }
 }
 
+/// Whether the token's `file` is one the queue at `db` issued: a file in
+/// that queue's `service/credentials/` ([`credential_path`]), the file's
+/// directory resolved and the queue's directory resolved with the two
+/// names under it as they are, so a link in their place to another queue's
+/// credentials is not its own. A directory that does not resolve is
+/// another queue's.
+fn issued_by(file: &Path, db: &Path) -> bool {
+    let own = fs::canonicalize(queue_dir_of(db)).map(|dir| service_dir(&dir).join(CREDENTIALS_DIR));
+    match (file.parent().map(fs::canonicalize), own) {
+        (Some(Ok(dir)), Ok(own)) => dir == own,
+        _ => false,
+    }
+}
+
 /// What a client takes from the service's `response`: its result, or a
 /// [`ClientFailure`]. The versions of every answer are judged first
 /// (ADR-t3102-2 decision 4): a service whose range does not hold this
@@ -1300,8 +1679,7 @@ fn answer_of(response: ServiceResponse) -> Result<Value> {
         return Err(ClientFailure {
             denied: error
                 .denied
-                .filter(|_| error.code == ServiceErrorCode::AuthorizationDenied)
-                .map(|denied| *denied),
+                .filter(|_| error.code == ServiceErrorCode::AuthorizationDenied),
             ..ClientFailure::new(error.code.as_str(), error.message)
         }
         .into());
@@ -1374,6 +1752,10 @@ impl ServiceWrapperStore {
             client: Client {
                 route: ClientRoute::Socket(socket_path(&queue_dir)),
                 credential: Some(credential_path(&queue_dir, &wrapper_actor_id(&target))),
+                env_role: None,
+                next: NEXT_CONTROL_SIDE,
+                queue: None,
+                binding: None,
             },
             target,
         }
@@ -1829,7 +2211,7 @@ fn answer(stream: UnixStream, backend: &dyn ServiceBackend, pid: u32) -> Result<
                     build: crate::VERSION,
                     pid,
                 }
-                .handle(&request)
+                .handle_from(&request, peer_of(&stream))
             }
             Err(error) => ServiceResponse::failure(
                 ServiceErrorCode::BadRequest,
@@ -1839,6 +2221,48 @@ fn answer(stream: UnixStream, backend: &dyn ServiceBackend, pid: u32) -> Result<
     };
     (&stream).write_all(&answer_line(&response, use_case)?)?;
     Ok(())
+}
+
+/// Whether the peer of `stream` runs as the service's own OS user, by the
+/// credentials the OS gave the connection (ADR-t3102-1 decision 1): a peer
+/// that cannot be read is no user's.
+fn peer_of(stream: &UnixStream) -> Peer {
+    match peer_uid(stream) {
+        // SAFETY: geteuid(2) takes nothing and cannot fail.
+        Some(uid) if uid == unsafe { libc::geteuid() } => Peer::Owner,
+        _ => Peer::Other,
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_uid(stream: &UnixStream) -> Option<libc::uid_t> {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).ok()?;
+    // SAFETY: the buffer and its length are this frame's, of the size
+    // SO_PEERCRED writes.
+    let read = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut credentials).cast(),
+            &raw mut len,
+        )
+    };
+    (read == 0).then_some(credentials.uid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn peer_uid(stream: &UnixStream) -> Option<libc::uid_t> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: both pointers are this frame's.
+    let read = unsafe { libc::getpeereid(stream.as_raw_fd(), &raw mut uid, &raw mut gid) };
+    (read == 0).then_some(uid)
 }
 
 /// `response` to `use_case` as the line the service writes, or, when that
@@ -1869,6 +2293,23 @@ pub struct SqliteServiceBackend {
 }
 
 impl SqliteServiceBackend {
+    /// `queue`, a read-only one, for a read as `actor`, whose refusals of
+    /// the policy are recorded on a connection that writes.
+    fn reading(&self, queue: SqliteQueue, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
+        Ok(Box::new(ServiceSqlite {
+            queue: queue
+                .with_generators(self.generators.clone())
+                .with_actor(actor.clone()),
+            db: self.db.clone(),
+            reads: self.reads.clone(),
+            detail: self.detail,
+            denials: Some(DenialWriter {
+                generators: self.generators.clone(),
+                actor: actor.clone(),
+            }),
+        }))
+    }
+
     /// The service itself, as the records name it: a part of the control
     /// side (ADR-t1233-1 decision 1), with role `supervisor` and actor id
     /// `supervisor:queue-service:<pid>`.
@@ -1885,6 +2326,26 @@ impl ServiceBackend for SqliteServiceBackend {
         lookup(&self.queue_dir, token)
     }
 
+    /// The same file as the service's DB, by both paths resolved: a path
+    /// that does not resolve (no such file) is another queue's.
+    fn serves(&self, db: &Path) -> bool {
+        match (fs::canonicalize(db), fs::canonicalize(&self.db)) {
+            (Ok(named), Ok(own)) => named == own,
+            _ => false,
+        }
+    }
+
+    fn binding(&self) -> Result<Option<String>> {
+        SqliteQueue::open_read_only(&self.db)?.repository_binding()
+    }
+
+    fn session_alive(&self, session: &crate::domain::queue_service::SessionProcess) -> bool {
+        use crate::application::ProcessControl;
+        let processes = super::adapters::SystemProcesses;
+        processes.alive(session.pid)
+            && processes.session_start(session.pid).as_deref() == Some(session.start.as_str())
+    }
+
     fn open(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
         let queue = SqliteQueue::open(&self.db)?
             .with_generators(self.generators.clone())
@@ -1894,7 +2355,16 @@ impl ServiceBackend for SqliteServiceBackend {
             db: self.db.clone(),
             reads: self.reads.clone(),
             detail: self.detail,
+            denials: None,
         }))
+    }
+
+    fn open_read(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
+        self.reading(SqliteQueue::open_read_only(&self.db)?, actor)
+    }
+
+    fn open_watch(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
+        self.reading(SqliteQueue::open_watch(&self.db)?, actor)
     }
 
     fn record_unauthenticated(&self, payload: Value) -> Result<()> {
@@ -1996,9 +2466,13 @@ impl SocketCaller {
     }
 }
 
-/// The answer `response` of a supervisor's request as its result.
-fn supervisor_answer(response: ServiceResponse) -> Result<Value> {
-    if !crate::domain::queue_service::understands(&response) {
+/// The answer `response` of a supervisor's request of `use_case` as its
+/// result. A hello is read for the service's build only, whatever versions
+/// it answers ([`crate::domain::queue_service::request_version`]): a
+/// service of another build is replaced before anything else is sent to
+/// it.
+fn supervisor_answer(use_case: UseCase, response: ServiceResponse) -> Result<Value> {
+    if use_case != UseCase::Hello && !crate::domain::queue_service::understands(&response) {
         bail!(
             "the queue service answers API versions {} to {}, not {API_VERSION}",
             response.min_api_version,
@@ -2017,8 +2491,11 @@ fn supervisor_answer(response: ServiceResponse) -> Result<Value> {
 impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
     fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
         let request = ServiceRequest {
-            api_version: API_VERSION,
+            api_version: crate::domain::queue_service::request_version(use_case),
             token: self.signed_in.token(),
+            env_role: None,
+            queue: None,
+            binding: None,
             use_case,
             params,
         };
@@ -2034,7 +2511,7 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
                 anyhow::Error::new(ServiceUnreachable::maybe_done(format!("{error:#}")))
             }
         })?;
-        supervisor_answer(response)
+        supervisor_answer(use_case, response)
     }
 
     fn sign_in(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
@@ -2082,8 +2559,11 @@ impl InProcessCaller {
 impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
     fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
         let request = ServiceRequest {
-            api_version: API_VERSION,
+            api_version: crate::domain::queue_service::request_version(use_case),
             token: self.signed_in.token(),
+            env_role: None,
+            queue: None,
+            binding: None,
             use_case,
             params,
         };
@@ -2095,7 +2575,10 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
             pid: std::process::id(),
         }
         .handle(&request);
-        supervisor_answer(serde_json::from_slice(&serde_json::to_vec(&response)?)?)
+        supervisor_answer(
+            use_case,
+            serde_json::from_slice(&serde_json::to_vec(&response)?)?,
+        )
     }
 
     fn sign_in(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
@@ -2113,6 +2596,16 @@ struct ServiceSqlite {
     db: PathBuf,
     reads: ServiceReads,
     detail: ServiceDetail,
+    /// For a queue opened for a read: what records a refusal of the policy
+    /// on a connection of its own that writes, since the read's does not.
+    denials: Option<DenialWriter>,
+}
+
+/// What opens the queue to record a read's refusal: the service's
+/// generators and the reader as its actor.
+struct DenialWriter {
+    generators: Generators,
+    actor: ActorContext,
 }
 
 impl ServiceSqlite {
@@ -2125,8 +2618,19 @@ impl ServiceSqlite {
 
 impl DenialLog for ServiceSqlite {
     fn record_denial(&self, payload: Value) -> Result<()> {
-        EventStore::record_queue_event(&self.queue, EventKind::AuthorizationDenied, payload)
-            .map(drop)
+        match &self.denials {
+            Some(writer) => {
+                let queue = SqliteQueue::open(&self.db)?
+                    .with_generators(writer.generators.clone())
+                    .with_actor(writer.actor.clone());
+                EventStore::record_queue_event(&queue, EventKind::AuthorizationDenied, payload)
+                    .map(drop)
+            }
+            None => {
+                EventStore::record_queue_event(&self.queue, EventKind::AuthorizationDenied, payload)
+                    .map(drop)
+            }
+        }
     }
 }
 
@@ -2333,6 +2837,20 @@ impl ServiceQueue for ServiceSqlite {
 
     fn session(&mut self, op: &crate::application::session::SessionOp) -> Result<Value> {
         crate::application::session::apply(&mut self.queue, op)
+    }
+
+    fn watch_look(
+        &self,
+        after: Option<crate::domain::EventId>,
+        role: Option<crate::domain::SessionRole>,
+    ) -> Result<crate::application::watch::WatchLook> {
+        crate::application::watch::look(
+            &self.queue,
+            self.queue.generators().clock.as_ref(),
+            &super::adapters::SystemProcesses,
+            after,
+            role,
+        )
     }
 }
 
@@ -2629,6 +3147,10 @@ mod tests {
             Ok(Some(Client {
                 route: ClientRoute::Socket(PathBuf::from("/q.sock")),
                 credential: Some(PathBuf::from("/c")),
+                env_role: None,
+                next: NEXT_CONTROL_SIDE,
+                queue: None,
+                binding: None,
             }))
         );
         assert_eq!(
@@ -2643,6 +3165,10 @@ mod tests {
                     run: Some("r1".to_owned()),
                 },
                 credential: Some(PathBuf::from("/c")),
+                env_role: None,
+                next: NEXT_CONTROL_SIDE,
+                queue: None,
+                binding: None,
             }))
         );
         let both = Client::from_env(env_of(&[
@@ -2763,6 +3289,10 @@ mod tests {
                 run: Some("r1".to_owned()),
             },
             credential: Some(credential.clone()),
+            env_role: None,
+            next: NEXT_CONTROL_SIDE,
+            queue: None,
+            binding: None,
         };
         let answer = serde_json::to_vec(&ServiceResponse::success(json!({"id": 3}))).unwrap();
         let (address, broker) = one_shot_broker(200, answer);
@@ -3053,6 +3583,118 @@ mod tests {
         SystemServiceAccess.forget_steps(&db, &file).unwrap();
         let elsewhere = run_dir.join("turns").join("steps.json");
         assert!(SystemServiceAccess.forget_steps(&db, &elsewhere).is_err());
+    }
+
+    #[test]
+    fn an_inbox_s_token_is_in_its_session_s_file_and_a_later_session_s_issue_empties_the_earlier_s()
+    {
+        use crate::domain::queue_service::SessionProcess;
+        let dir = tempfile::tempdir().unwrap();
+        let session = |pid| SessionProcess {
+            pid,
+            start: "Fri Oct 23 00:00:00 2026".to_owned(),
+        };
+        let earlier = issue(dir.path(), &Principal::inbox(session(7)), 1).unwrap();
+        let earlier_token = read_token(&earlier.file).unwrap();
+        let later = issue(dir.path(), &Principal::inbox(session(8)), 2).unwrap();
+        assert_ne!(earlier.file, later.file);
+        // The file the earlier session was handed holds no token, and the
+        // value it held authenticates nothing.
+        assert!(!earlier.file.exists());
+        assert_eq!(lookup(dir.path(), &earlier_token).unwrap(), None);
+        let later_token = read_token(&later.file).unwrap();
+        assert_eq!(
+            lookup(dir.path(), &later_token).unwrap(),
+            Some(Principal::inbox(session(8)))
+        );
+        // The sweep of the later session's end empties its own file.
+        let swept = sweep(dir.path(), &mut |principal| principal.session.is_some()).unwrap();
+        assert_eq!(swept, ["inbox"]);
+        assert!(!later.file.exists());
+        assert!(principals(dir.path()).unwrap().is_empty());
+    }
+
+    /// A token's file is its queue's only in that queue's credentials, the
+    /// queue named through a link too; another queue's, or a file of no
+    /// queue, is not.
+    #[test]
+    fn a_token_s_file_is_of_the_queue_whose_credentials_hold_it() {
+        let (own, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let db = own.path().join("queue.db");
+        let file = issue(own.path(), &Principal::planner(1), 1).unwrap().file;
+        assert!(issued_by(&file, &db));
+        let link = other.path().join("link");
+        std::os::unix::fs::symlink(own.path(), &link).unwrap();
+        assert!(issued_by(&file, &link.join("queue.db")));
+        assert!(!issued_by(&file, &other.path().join("queue.db")));
+        let copied = other.path().join("token");
+        fs::copy(&file, &copied).unwrap();
+        assert!(!issued_by(&copied, &db));
+        // A queue whose credentials are a link to another queue's.
+        let forged = tempfile::tempdir().unwrap();
+        fs::create_dir_all(service_dir(forged.path())).unwrap();
+        std::os::unix::fs::symlink(
+            file.parent().unwrap(),
+            service_dir(forged.path()).join(CREDENTIALS_DIR),
+        )
+        .unwrap();
+        assert!(!issued_by(&file, &forged.path().join("queue.db")));
+        assert!(!issued_by(Path::new("token"), &db));
+    }
+
+    /// Of inboxes opened at once, one session's token holds: each issue
+    /// revokes the earlier sessions' and writes its own record under the
+    /// queue's lock, so none misses another's record. The issues are waited
+    /// for within one limit for the whole test: a lock that never comes
+    /// free fails it rather than holding it.
+    #[test]
+    fn of_inboxes_opened_at_once_one_session_s_token_holds() {
+        use crate::domain::queue_service::SessionProcess;
+        use std::sync::mpsc::RecvTimeoutError;
+        let dir = tempfile::tempdir().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        for round in 0..5u32 {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let (sent, issues) = std::sync::mpsc::channel();
+            for n in 0..8u32 {
+                let (barrier, sent) = (barrier.clone(), sent.clone());
+                let queue = dir.path().to_path_buf();
+                let inbox = Principal::inbox(SessionProcess {
+                    pid: 100 * round + n,
+                    start: "Fri Oct 23 00:00:00 2026".to_owned(),
+                });
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let _ =
+                        sent.send(issue(&queue, &inbox, 1).map_err(|error| format!("{error:#}")));
+                });
+            }
+            drop(sent);
+            let issued: Vec<IssuedToken> = (0..8)
+                .map(|_| {
+                    match issues
+                        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    {
+                        Ok(issued) => issued.unwrap(),
+                        Err(RecvTimeoutError::Timeout) => {
+                            panic!("round {round}: the inboxes' issues did not end within 30s")
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            panic!("round {round}: an issue's thread ended without its token")
+                        }
+                    }
+                })
+                .collect();
+            let held = principals(dir.path()).unwrap();
+            assert_eq!(held.len(), 1, "{held:?}");
+            let kept: Vec<&IssuedToken> = issued.iter().filter(|i| i.file.exists()).collect();
+            assert_eq!(kept.len(), 1, "{kept:?}");
+            let token = read_token(&kept[0].file).unwrap();
+            assert_eq!(
+                lookup(dir.path(), &token).unwrap(),
+                Some(kept[0].principal.clone())
+            );
+        }
     }
 
     #[test]

@@ -113,10 +113,13 @@ fn the_supervisor_samples_the_candidates_when_they_change() {
     // `kpi` over the samples the supervisor wrote.
     let config = dir.path().join("config");
     fs::create_dir_all(&config).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command
         .without_actor_env()
         .env("TZ", "UTC")
-        .env("XDG_CONFIG_HOME", &config)
+        .env("XDG_CONFIG_HOME", &config);
+    crate::common::cli::reach(&mut command, &db, &["kpi"]);
+    let output = command
         .arg("--db")
         .arg(&db)
         .args(["kpi", "--last", "1"])

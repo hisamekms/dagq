@@ -67,6 +67,37 @@ pub enum QueueRead {
     Lint(LintRead),
     ObserveHistory(ObserveHistoryRead),
     ObserveInput(ObserveInputRead),
+    Requests(RecordsRead),
+    Replans(RecordsRead),
+    CiFailures(CiFailuresRead),
+    Planners(PlannersRead),
+}
+
+/// `requests`' and `replans`' options: the one record `id` names whatever
+/// its status, or the open ones (every one with `all`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordsRead {
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub all: bool,
+}
+
+/// `ci failures`' option: the task whose run gets the list.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CiFailuresRead {
+    #[serde(default)]
+    pub task: Option<i64>,
+}
+
+/// `planners`' option: the closed planners too.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlannersRead {
+    #[serde(default)]
+    pub all: bool,
 }
 
 /// `list`'s options.
@@ -563,7 +594,12 @@ impl QueueRead {
             UseCase::Lint => Self::Lint(read(use_case, params)?),
             UseCase::ObserveHistory => Self::ObserveHistory(read(use_case, params)?),
             UseCase::ObserveInput => Self::ObserveInput(read(use_case, params)?),
+            UseCase::Requests => Self::Requests(read(use_case, params)?),
+            UseCase::Replans => Self::Replans(read(use_case, params)?),
+            UseCase::CiFailures => Self::CiFailures(read(use_case, params)?),
+            UseCase::Planners => Self::Planners(read(use_case, params)?),
             UseCase::Hello
+            | UseCase::WatchPoll
             | UseCase::Ask
             | UseCase::Show
             | UseCase::Note
@@ -700,15 +736,28 @@ impl QueueRead {
             | Self::Stats(_)
             | Self::Marks(_)
             | Self::GoalShow(_)
-            | Self::ObserveHistory(_) => {}
+            | Self::ObserveHistory(_)
+            | Self::Requests(_)
+            | Self::Replans(_)
+            | Self::CiFailures(_)
+            | Self::Planners(_) => {}
         }
         Ok(())
     }
 
     /// What the read is authorized on: the queue, as the command line
-    /// asks the policy for every read command (`queue.read`).
+    /// asks the policy for every read command.
     pub fn resource(&self) -> Resource {
         Resource::Queue
+    }
+
+    /// The capability the command line asks the policy for this read:
+    /// `ci.read` for `ci failures`, `queue.read` for every other.
+    pub fn capability(&self) -> crate::domain::Capability {
+        match self {
+            Self::CiFailures(_) => crate::domain::Capability::CiRead,
+            _ => crate::domain::Capability::QueueRead,
+        }
     }
 
     /// The use case and the params a client-mode `dagq` sends for this
@@ -803,6 +852,10 @@ impl QueueRead {
                 json!({"tasks": read.tasks, "proposals": read.proposals}),
             ),
             Self::ObserveHistory(read) => (UseCase::ObserveHistory, json!({"limit": read.limit})),
+            Self::Requests(read) => (UseCase::Requests, json!({"id": read.id, "all": read.all})),
+            Self::Replans(read) => (UseCase::Replans, json!({"id": read.id, "all": read.all})),
+            Self::CiFailures(read) => (UseCase::CiFailures, json!({"task": read.task})),
+            Self::Planners(read) => (UseCase::Planners, json!({"all": read.all})),
             Self::ObserveInput(read) => (
                 UseCase::ObserveInput,
                 json!({"observation": read.observation, "section": read.section,
@@ -851,6 +904,10 @@ where
         QueueRead::ObserveHistory(read) => observation::observe_history(queue, read),
         QueueRead::ObserveInput(read) => observation::observe_input::<Q, S>(sources, read),
         QueueRead::Asks(read) => shared::asks(queue, read),
+        QueueRead::Requests(read) => observation::requests(queue, sources, read),
+        QueueRead::Replans(read) => observation::replans(queue, sources, read),
+        QueueRead::CiFailures(read) => sources.ci_failures(queue, read),
+        QueueRead::Planners(read) => sources.planners(queue, read),
     }
 }
 

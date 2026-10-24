@@ -45,9 +45,12 @@ fn prompts(db: &Path, repo: &Path, user_config: &Path) -> (String, String) {
 /// `config_home`: each one's `language`.
 fn reported(db: &Path, config_home: &Path) -> (Value, Value) {
     let run = |args: &[&str]| -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+        command
             .without_actor_env()
-            .env("XDG_CONFIG_HOME", config_home)
+            .env("XDG_CONFIG_HOME", config_home);
+        crate::common::cli::reach(&mut command, db, args);
+        let output = command
             .arg("--db")
             .arg(db)
             .args(args)

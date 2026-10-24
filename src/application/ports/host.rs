@@ -318,6 +318,15 @@ pub trait ProcessControl {
         let _ = pid;
         None
     }
+    /// When the process `pid` started, as the system prints it in UTC
+    /// whatever the zone of the caller's environment: the start an inbox's
+    /// token is bound to (`SessionProcess`), which the person's shell, the
+    /// queue service and the supervisor read alike. `None` when there is no
+    /// such process or it cannot be read.
+    fn session_start(&self, pid: u32) -> Option<String> {
+        let _ = pid;
+        None
+    }
     /// When the process `pid` started, in unix seconds, to tell an inbox
     /// watch's process from another that took its pid later (task 927);
     /// `None` when there is no such process or its start cannot be read.

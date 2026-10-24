@@ -35,7 +35,10 @@ case \"$1\" in --version) printf 'claude-stub 0.0.0\\n'; exit 0 ;; plugin) exec 
 printf '%s\\n' \"$@\" > \"$0.argv\"\n\
 printf 'DAGQ_ROLE=%s\\nDAGQ_QUEUE=%s\\nDAGQ_ACTOR_ID=%s\\nDAGQ_SESSION_KIND=%s\\n' \
 \"$DAGQ_ROLE\" \"$DAGQ_QUEUE\" \"$DAGQ_ACTOR_ID\" \"$DAGQ_SESSION_KIND\" > \"$0.env\"\n\
-pwd > \"$0.cwd\"\n",
+pwd > \"$0.cwd\"\n\
+printf '%s' \"$DAGQ_SERVICE_CREDENTIAL_FILE\" > \"$0.credential\"\n\
+printf '%s' \"$$\" > \"$0.pid\"\n\
+TZ=UTC0 LC_ALL=C ps -o lstart= -p $$ | sed 's/^ *//; s/ *$//' | tr -d '\\n' > \"$0.start\"\n",
     );
     stub
 }
@@ -103,13 +106,38 @@ fn dagq_inbox_starts_the_inbox_agent_in_this_terminal_and_records_its_open() {
     );
 
     let plugin_dir = fixture.options.plugin_dir.clone().unwrap();
+    // A zone in the person's shell other than the service's changes
+    // nothing of the session its token is bound to.
     let output = inbox(
         &fixture,
         &stub,
-        &[],
+        &[("TZ", "Pacific/Kiritimati")],
         &["--plugin-dir", plugin_dir.to_str().unwrap()],
     );
     assert!(output.status.success(), "{output:?}");
+
+    // The agent, in the place of `dagq inbox`, was given the file of a
+    // token for the inbox of its own process (ADR-t3102-1 decisions 2 and
+    // 3), outside the repository, as the service and the supervisor read
+    // the process's start.
+    let credential = PathBuf::from(started(&stub, "credential").unwrap());
+    assert!(
+        credential.starts_with(db.parent().unwrap().join("service")),
+        "{credential:?}"
+    );
+    let token = dagq::infrastructure::queue_service::read_token(&credential).unwrap();
+    let principal = dagq::infrastructure::queue_service::lookup(db.parent().unwrap(), &token)
+        .unwrap()
+        .expect("the token names a principal");
+    assert_eq!(
+        principal,
+        dagq::domain::queue_service::Principal::inbox(
+            dagq::domain::queue_service::SessionProcess {
+                pid: started(&stub, "pid").unwrap().parse().unwrap(),
+                start: started(&stub, "start").unwrap(),
+            }
+        )
+    );
 
     let settings = db.with_file_name("claude-inbox-settings.json");
     let argv = started(&stub, "argv").expect("the stub was started as the agent");

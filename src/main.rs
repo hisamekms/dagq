@@ -19,7 +19,7 @@ use dagq::application::commands::operations::{HookSession, Operation, WorkspaceS
 use dagq::application::queue_reads::{self as reads, QueueRead};
 use dagq::domain::queue_service::UseCase;
 use dagq::{
-    application::{PlanRequestStore, TaskReads},
+    application::TaskReads,
     domain::{
         ActorContext, ActorRole, AskId, AskKind, AskReason, AuthorizationError, Capability,
         EventId, FindingId, FindingTarget, GoalEdit, GoalId, GoalVerdict, LeaseToken, NewAsk,
@@ -3022,6 +3022,11 @@ fn error_json(error: &anyhow::Error) -> Value {
     {
         let mut printed =
             json!({"error": failure.message, "queue_service": {"code": failure.code}});
+        // The outage the supervisor recorded of a service the host's `dagq`
+        // did not reach (ADR-t3102-3 decision 2).
+        if let Some(outage) = &failure.outage {
+            printed["queue_service"]["outage"] = json!(outage);
+        }
         if let Some(denied) = &failure.denied {
             if let Some(message) = denied.role.parse().ok().and_then(role_denied_message) {
                 printed["error"] = json!(message);
@@ -3278,6 +3283,12 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             offset,
             limit: limit.unwrap_or(dagq::application::observer::INPUT_PAGE),
         }),
+        Command::Requests { id, all } => QueueRead::Requests(reads::RecordsRead { id, all }),
+        Command::Replans { id, all } => QueueRead::Replans(reads::RecordsRead { id, all }),
+        Command::Ci {
+            command: CiCommand::Failures { task },
+        } => QueueRead::CiFailures(reads::CiFailuresRead { task }),
+        Command::Planners { all, cmux: _ } => QueueRead::Planners(reads::PlannersRead { all }),
         _ => return None,
     })
 }
@@ -3318,8 +3329,7 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
             task_id,
             run,
             finding,
-            // A request's planner runs on the host, never as a client.
-            request: None,
+            request,
             cmux: _,
         } => {
             let mut params = json!({"kind": kind, "question": question, "options": options,
@@ -3331,6 +3341,10 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
                 if let Some(value) = value {
                     params[key] = json!(value);
                 }
+            }
+            // A planner's ask on its request (ADR-t3102-1 decision 2).
+            if let Some(request) = request {
+                params["request_id"] = json!(request);
             }
             (UseCase::Ask, params)
         }
@@ -3517,6 +3531,81 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
     client.call(use_case, params)
 }
 
+/// Whether the host `dagq` of a
+/// [`host_client_role`](dagq::domain::queue_service::host_client_role)
+/// sends `command` to the service of a served queue: a command the service
+/// answers ([`client_request`]), and `watch`, whose looks it answers.
+fn host_routed(command: &Command) -> Result<bool> {
+    Ok(matches!(command, Command::Watch { .. }) || client_request(command)?.is_some())
+}
+
+/// Run `command`, a [`host_routed`] one, through the service of the queue
+/// at `db`, which the caller named `named`, bound to `binding` (ADR-t3102-2
+/// decision 5), as the user (no token) or the principal of the token the
+/// environment names: a service that does not answer, or never ran, is a
+/// failure that says so, and the DB is not opened instead (fail closed,
+/// ADR-t3102-3 decision 2, ADR-t3105-1 decision 3).
+fn host_client(
+    db: &Path,
+    named: &Path,
+    binding: Option<&Path>,
+    command: &Command,
+) -> Result<Value> {
+    // A repository queue's binding is checked on every command, as the
+    // command line checks it, by the service before it answers.
+    let common_dir = binding.map(path_text).transpose()?;
+    let client =
+        dagq::infrastructure::queue_service::Client::host(db, common_dir.as_deref(), |name| {
+            env::var(name).ok()
+        });
+    if let Command::Watch {
+        after,
+        timeout,
+        until_attention,
+        interval,
+        role,
+        cmux: _,
+    } = command
+    {
+        return dagq::compose::watch_through_service(
+            db,
+            named,
+            &client,
+            &dagq::application::watch::WatchOptions {
+                after: after.map(EventId::new),
+                timeout: (!until_attention)
+                    .then(|| Duration::from_secs(timeout.unwrap_or(DEFAULT_WATCH_TIMEOUT_SECS))),
+                interval: Duration::from_secs(*interval),
+                role: parse_role(role.clone())?,
+            },
+        );
+    }
+    // The service reads the diagram and the host's d2 draws it, as the
+    // command line draws it: no read starts a program on the service's side.
+    if let Command::Graph {
+        goal_id,
+        format,
+        out: None,
+    } = command
+        && format == "svg"
+    {
+        let (use_case, params) = QueueRead::Graph(reads::GraphRead {
+            goal: *goal_id,
+            format: "d2".to_owned(),
+        })
+        .request();
+        return dagq::compose::graph_svg_of(client.call(use_case, params)?);
+    }
+    let (use_case, params) =
+        client_request(command)?.context("the command is none of the service's use cases")?;
+    // `status` says at once that the service does not answer, as a look of
+    // a watch does (ADR-t3102-3 decision 2).
+    if matches!(command, Command::Status { .. }) {
+        return client.look_within(use_case, params, dagq::application::watch::LOOK_LIMIT);
+    }
+    client.call(use_case, params)
+}
+
 /// The name of `command` when it is one of the control side's, which a
 /// person or the inbox runs on the host and a client-mode `dagq` refuses
 /// as `control_side_command` rather than as `no_use_case`.
@@ -3668,6 +3757,29 @@ fn execute(cli: Cli) -> Result<Value> {
     // Who runs the command (ADR-t728-1 decision 4): no `DAGQ_ROLE` is the
     // user, and a value that is no role stops it before anything is read.
     let actor = ActorContext::from_env(|name| env::var(name).ok())?;
+    // The user's, the inbox's or a planner's `dagq` sends what the queue
+    // service answers to the queue's service, which authorizes it for its
+    // principal, and never opens the DB for it: a service that does not
+    // run, or never ran, is a failure that says so (ADR-t3102-2 decisions
+    // 5 and 6 (2), ADR-t3105-1 decision 3).
+    if dagq::domain::queue_service::host_client_role(actor.role()) && host_routed(&cli.command)? {
+        let cwd = env::current_dir().context("working directory is unavailable")?;
+        let location = QueueLocation::resolve(cli.db.as_deref(), &cwd)?;
+        anyhow::ensure!(
+            location.db.is_file(),
+            "no queue at {} (use init to create it)",
+            location.db.display()
+        );
+        // The DB a link names is its target's: its directory's service
+        // serves it.
+        let db = std::fs::canonicalize(&location.db).unwrap_or_else(|_| location.db.clone());
+        return host_client(
+            &db,
+            &location.db,
+            location.git_common_dir.as_deref(),
+            &cli.command,
+        );
+    }
     check_access(&actor, &cli.command, cli.db.as_deref())?;
     dagq::infrastructure::event_actor::set_process_actor(event_actor(&actor, &cli.command));
     let cwd = env::current_dir().context("working directory is unavailable")?;
@@ -4086,7 +4198,10 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Related { .. }
         | Command::Lint { .. }
         | Command::Observe { history: true, .. }
-        | Command::Observe { input: Some(_), .. } => unreachable!("a read is answered above"),
+        | Command::Observe { input: Some(_), .. }
+        | Command::Requests { .. }
+        | Command::Replans { .. }
+        | Command::Planners { .. } => unreachable!("a read is answered above"),
         Command::Add {
             title,
             description,
@@ -4603,14 +4718,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 },
             )?)?
         }
-        Command::Replans { id: Some(id), .. } => {
-            json!({"replans": [queue.replan_operation(dagq::domain::ReplanId::new(id))?]})
-        }
-        Command::Replans { id: None, all } => json!({"replans": queue.replan_operations(all)?}),
-        Command::Requests { id: Some(id), .. } => {
-            json!({"requests": [queue.plan_request(RequestId::new(id))?]})
-        }
-        Command::Requests { id: None, all } => json!({"requests": queue.plan_requests(all)?}),
         Command::Graph {
             goal_id,
             format,
@@ -4962,12 +5069,6 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Plan { .. } => bail!(dagq::application::planner::PLAN_REFUSED),
-        Command::Planners { all, cmux: _ } => one_shot.planners_of(
-            &queue,
-            &db,
-            &dagq::infrastructure::adapters::BackgroundSessions,
-            all,
-        )?,
         Command::Run { command } => {
             use dagq::application::screen::{self, RunTarget};
             match command {
@@ -6513,7 +6614,7 @@ mod tests {
             };
             let local = error_json(&anyhow::Error::new(refused.clone()));
             let served = error_json(&anyhow::Error::new(ClientFailure {
-                denied: Some(ServiceDenial::from(&refused)),
+                denied: Some(Box::new(ServiceDenial::from(&refused))),
                 ..ClientFailure::new("authorization_denied", refused.to_string())
             }));
             assert_eq!(served["queue_service"]["code"], "authorization_denied");
@@ -6522,11 +6623,11 @@ mod tests {
         }
         // A role this binary does not know keeps the service's message.
         let served = error_json(&anyhow::Error::new(ClientFailure {
-            denied: Some(ServiceDenial {
+            denied: Some(Box::new(ServiceDenial {
                 role: "future-job".to_owned(),
                 capability: "note.write".to_owned(),
                 reason: "not granted".to_owned(),
-            }),
+            })),
             ..ClientFailure::new("authorization_denied", "future-job may not note.write")
         }));
         assert_eq!(served["error"], "future-job may not note.write");

@@ -8,9 +8,9 @@
 //! its claims while it cannot, its outage recorded beside the queue
 //! (ADR-t3102-3).
 
-use crate::common;
+use crate::common::{self, Bounded, WithoutActor};
 use crate::runtime_support::service::{Running, idle_queue, supervisor_token};
-use common::service::{call, events, queue, start, token};
+use common::service::{call, call_as_role, events, queue, start, token};
 
 use std::{
     fs,
@@ -143,11 +143,20 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
         ]
     );
 
-    // No principal: no token, one never issued, one revoked.
-    for token in [None, Some("f".repeat(64))] {
-        let response = call(&queue, token.as_deref(), UseCase::Show, json!({"id": 1}));
-        assert_eq!(response["error"]["code"], "unauthenticated", "{response}");
-    }
+    // No token and no role from this user's process: the user.
+    let user = call(&queue, None, UseCase::Show, json!({"id": task}));
+    assert_eq!(user["ok"], true, "{user}");
+    // No principal: no token from an environment that names a role, one
+    // never issued, one revoked.
+    let response = call_as_role(&queue, "worker", UseCase::Show, json!({"id": 1}));
+    assert_eq!(response["error"]["code"], "unauthenticated", "{response}");
+    let response = call(
+        &queue,
+        Some(&"f".repeat(64)),
+        UseCase::Show,
+        json!({"id": 1}),
+    );
+    assert_eq!(response["error"]["code"], "unauthenticated", "{response}");
     service::revoke(queue.dir(), &review.actor_id).unwrap();
     let revoked = call(
         &queue,
@@ -178,6 +187,9 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
         &ServiceRequest {
             api_version: API_VERSION + 1,
             token: Some(worker_token.clone()),
+            env_role: None,
+            queue: None,
+            binding: None,
             use_case: UseCase::Show,
             params: json!({"id": task}),
         },
@@ -193,6 +205,9 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
             &ServiceRequest {
                 api_version: API_VERSION,
                 token: None,
+                env_role: None,
+                queue: None,
+                binding: None,
                 use_case: UseCase::Hello,
                 params: Value::Null,
             },
@@ -226,6 +241,9 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
             &ServiceRequest {
                 api_version: API_VERSION,
                 token: Some(worker_token),
+                env_role: None,
+                queue: None,
+                binding: None,
                 use_case: UseCase::Show,
                 params: json!({"id": task}),
             },
@@ -251,7 +269,19 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
 #[test]
 fn status_doctor_and_service_status_report_the_service() {
     let queue = queue();
-    for args in [&["status"][..], &["doctor"], &["service", "status"]] {
+    // `status` is the service's to answer: with none running it says so
+    // (ADR-t3102-3 decision 2); the control side's reports say stopped.
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .arg("--db")
+        .arg(&queue.db)
+        .arg("status")
+        .bounded_output()
+        .unwrap();
+    assert!(!status.status.success());
+    let refused: Value = serde_json::from_slice(&status.stderr).unwrap();
+    assert_eq!(refused["queue_service"]["code"], "unreachable", "{refused}");
+    for args in [&["doctor"][..], &["service", "status"]] {
         let report = ok(&queue.db, args);
         let view = if args == ["service", "status"] {
             &report
@@ -732,4 +762,83 @@ fn a_service_stops_once_the_test_process_that_started_it_is_gone() {
             service::probe(dir.path())
         );
     }
+}
+
+/// A service of the version before this build's, which answers version 1
+/// only: a look's `hello` and the supervisor's reach it and read its build
+/// (so the supervisor replaces it rather than fail to start), and anything
+/// else of this build's version it refuses before it does it.
+#[test]
+fn a_service_of_the_version_before_answers_the_hello_of_a_look_with_its_build() {
+    use dagq::application::supervisor_service::ServiceCaller;
+    use dagq::domain::queue_service::ServiceResponse;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = service::socket_path(dir.path());
+    std::fs::create_dir_all(service::service_dir(dir.path())).unwrap();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let old = std::thread::spawn(move || {
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: ServiceRequest = serde_json::from_str(&line).unwrap();
+            let mut response = if request.api_version == 1 {
+                ServiceResponse::success(json!({"build": "0.0.1", "pid": 7}))
+            } else {
+                ServiceResponse::failure(ServiceErrorCode::ApiVersionMismatch, "not 1")
+            };
+            response.api_version = 1;
+            response.min_api_version = 1;
+            (&stream)
+                .write_all(&serde_json::to_vec(&response).unwrap())
+                .unwrap();
+        }
+    });
+    let answered = service::hello(&socket, std::time::Duration::from_secs(5)).unwrap();
+    assert_eq!(answered["build"], "0.0.1");
+    let supervisor = service::SocketCaller::new(&dir.path().join("queue.db"));
+    let answered = supervisor.call(UseCase::Hello, Value::Null).unwrap();
+    assert_eq!(answered["build"], "0.0.1");
+    let refused = supervisor
+        .call(UseCase::Supervisor, json!({"op": "x"}))
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("API versions 1 to 1"),
+        "{refused:#}"
+    );
+    let _waiting = common::within(common::STEP_LIMIT, "the old service to answer its calls");
+    old.join().unwrap();
+}
+
+/// A read and a watch's look run on read-only connections, and a refusal
+/// of either is recorded all the same, on a connection of its own; a look
+/// the policy allows records nothing.
+#[test]
+fn a_refused_look_is_recorded_though_the_look_writes_nothing() {
+    let queue = queue();
+    start(&queue);
+    let review = Principal::of(&ActorContext::review_job(queue.run.id(), 1));
+    let review_token = token(&queue, &review);
+    let refused = call(&queue, Some(&review_token), UseCase::WatchPoll, json!({}));
+    assert_eq!(
+        refused["error"]["code"], "authorization_denied",
+        "{refused}"
+    );
+    let denials = events(&queue.db, "authorization_denied");
+    assert_eq!(denials.len(), 1, "{denials:?}");
+    assert_eq!(denials[0]["payload"]["capability"], "queue.watch");
+    assert_eq!(denials[0]["actor"]["role"], "review-job");
+    let looked = call(&queue, None, UseCase::WatchPoll, json!({}));
+    assert_eq!(looked["ok"], true, "{looked}");
+    let shown = call(
+        &queue,
+        Some(&review_token),
+        UseCase::Show,
+        json!({"id": queue.run.task_id().as_i64()}),
+    );
+    assert_eq!(shown["ok"], true, "{shown}");
+    assert_eq!(events(&queue.db, "authorization_denied").len(), 1);
 }

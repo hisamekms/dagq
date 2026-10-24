@@ -54,7 +54,8 @@ pub trait Binaries {
     fn build(&self, checkout: &Path) -> Result<PathBuf>;
     /// The build identifier `binary --version` reports.
     fn version(&self, binary: &Path) -> Result<String>;
-    /// Start `binary` on a throwaway queue (`init` and a read).
+    /// Start `binary` on a throwaway queue (`init`, and a read through its
+    /// queue service).
     fn probe(&self, binary: &Path) -> Result<()>;
     /// Whether `binary` continues a supervisor after an exec (it knows
     /// `supervise --handoff-token`); a binary before ADR-0045 exits on it.

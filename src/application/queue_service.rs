@@ -46,7 +46,7 @@ use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, AskKind, AskReason, AuthorizationError,
     Capability, EventId, Finding, FindingId, FindingOutcome, FindingStatus, FindingTarget, GoalId,
     NewAsk, NewFinding, NewNote, NoteTarget, PlannerId, ProposalId, RequestId, Resource, RunEvent,
-    RunId, RunStatus, StaticPolicy, TaskId,
+    RunId, RunStatus, SessionRole, StaticPolicy, TaskId,
 };
 
 /// The queue as one use case of the service reads and changes it, written
@@ -104,6 +104,13 @@ pub trait ServiceQueue:
     /// Do a session wrapper's `op`, authorized already
     /// ([`super::session::apply`]).
     fn session(&mut self, op: &super::session::SessionOp) -> Result<Value>;
+    /// One look of `dagq watch` past `after` (`None`: the newest event
+    /// now) for `role` ([`super::watch::look`]).
+    fn watch_look(
+        &self,
+        after: Option<EventId>,
+        role: Option<SessionRole>,
+    ) -> Result<super::watch::WatchLook>;
 }
 
 /// What the service runs its use cases on.
@@ -113,6 +120,21 @@ pub trait ServiceBackend: Send + Sync {
     fn principal(&self, token: &str) -> Result<Option<Principal>>;
     /// The queue, written as `actor`.
     fn open(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>>;
+    /// The queue for a read as `actor`, as the command line reads it
+    /// (ADR-0045 decision 18): on a read-only connection, or, at an older
+    /// schema within the floor, from a copy migrated in memory. Nothing of
+    /// the read writes to the queue; a refusal of the policy is recorded
+    /// all the same, on a connection of its own that writes.
+    fn open_read(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
+        self.open(actor)
+    }
+    /// The queue for one look of a watch as `actor`: the live queue on a
+    /// read-only connection, never a copy, so an older schema is refused
+    /// as the command line's `watch` refuses it. A refusal of the policy is
+    /// recorded as [`Self::open_read`] records it.
+    fn open_watch(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
+        self.open_read(actor)
+    }
     /// Record a request that named no principal
     /// (`queue_service_unauthenticated`), written as the service itself.
     fn record_unauthenticated(&self, payload: Value) -> Result<()>;
@@ -129,6 +151,17 @@ pub trait ServiceBackend: Send + Sync {
     fn telemetry(&self) -> &dyn TelemetryTokens;
     /// Every principal a token is held for.
     fn principals(&self) -> Result<Vec<Principal>>;
+    /// Whether `db`, the queue DB a request names, is the one the service
+    /// serves: the same file, compared by its path and never opened.
+    fn serves(&self, db: &std::path::Path) -> bool;
+    /// Whether the process of `session` still runs: its pid lives and the
+    /// system prints the same start for it.
+    fn session_alive(&self, session: &crate::domain::queue_service::SessionProcess) -> bool;
+    /// The Git common directory the queue is bound to, `None` for one
+    /// bound to none.
+    fn binding(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// The service's use cases on a backend.
@@ -140,10 +173,25 @@ pub struct QueueService<'a> {
     pub pid: u32,
 }
 
+/// Who is at the other end of a request's connection, as the service reads
+/// it from the socket itself (ADR-t3102-1 decision 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Peer {
+    /// A process of the service's own OS user on its unix socket.
+    Owner,
+    /// Anything else, or a peer that could not be read.
+    Other,
+}
+
 impl QueueService<'_> {
-    /// Answer `request`. An error never leaves without its code, and no
-    /// response names the token.
+    /// Answer `request` from a peer that is not the user's ([`Peer::Other`]).
     pub fn handle(&self, request: &ServiceRequest) -> ServiceResponse {
+        self.handle_from(request, Peer::Other)
+    }
+
+    /// Answer `request` from `peer`. An error never leaves without its
+    /// code, and no response names the token.
+    pub fn handle_from(&self, request: &ServiceRequest, peer: Peer) -> ServiceResponse {
         if !answers(request.api_version) {
             return ServiceResponse::failure(
                 ServiceErrorCode::ApiVersionMismatch,
@@ -151,6 +199,18 @@ impl QueueService<'_> {
                     "the queue service answers API versions {MIN_API_VERSION} to {API_VERSION}, \
                      not {}",
                     request.api_version
+                ),
+            );
+        }
+        if let Some(db) = &request.queue
+            && !self.backend.serves(db)
+        {
+            return ServiceResponse::failure(
+                ServiceErrorCode::WrongQueue,
+                format!(
+                    "this queue service serves another queue than {}: the command is refused, \
+                     and neither queue is opened",
+                    db.display()
                 ),
             );
         }
@@ -163,33 +223,90 @@ impl QueueService<'_> {
                 "min_api_version": MIN_API_VERSION,
             }));
         }
-        let principal = match self.authenticate(request) {
-            Ok(principal) => principal,
+        let connection = connection(request.use_case, &request.params);
+        let (principal, checked) = match self.authenticate(request, peer, connection) {
+            Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
+        // A repository queue answers only the repository it is bound to,
+        // as the command line refused every command of another, and only
+        // to a principal it knows.
+        if let Some(binding) = &request.binding {
+            match self.backend.binding() {
+                Ok(Some(bound)) if bound != *binding => {
+                    return ServiceResponse::failure(
+                        ServiceErrorCode::Failed,
+                        format!(
+                            "queue is bound to another Git repository: {bound} (this repository \
+                             is {binding})"
+                        ),
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return ServiceResponse::failure(
+                        ServiceErrorCode::Failed,
+                        format!("the queue's repository could not be read: {error:#}"),
+                    );
+                }
+            }
+        }
         let actor = principal.actor();
-        let result = if request.use_case == UseCase::Supervisor {
-            super::supervisor_service::answer(self.backend, &principal, &request.params)
-        } else {
-            self.backend
-                .open(&actor)
-                .and_then(|mut queue| run(&mut *queue, &actor, request.use_case, &request.params))
-        };
-        respond(result)
+        if connection == Connection::Supervisor {
+            return respond(super::supervisor_service::answer(
+                self.backend,
+                &principal,
+                &request.params,
+            ));
+        }
+        // The queue the token's run or target was read on, when it was,
+        // is the use case's: it is opened once.
+        let opened = checked.map_or_else(|| self.open_on(connection, &actor), Ok);
+        respond(
+            opened
+                .and_then(|mut queue| run(&mut *queue, &actor, request.use_case, &request.params)),
+        )
+    }
+
+    /// The queue on `connection` as `actor`; the supervisor's requests
+    /// open it to write.
+    fn open_on(
+        &self,
+        connection: Connection,
+        actor: &ActorContext,
+    ) -> Result<Box<dyn ServiceQueue>> {
+        match connection {
+            Connection::Supervisor | Connection::Write => self.backend.open(actor),
+            Connection::Read => self.backend.open_read(actor),
+            Connection::Watch => self.backend.open_watch(actor),
+        }
     }
 
     /// The principal of the request's token, whose run, when it names
     /// one, has not ended, and whose target of no run, when it has one,
-    /// has not either. A refusal is `unauthenticated`, recorded with
-    /// the use case and the reason, never the token: `missing_token` for
-    /// no token or an empty one, `unknown_token` for one the control side
-    /// did not issue or has revoked, `run_ended` for one whose run has
-    /// ended or is not in the queue, `target_ended` for a telemetry token
-    /// whose target of no run the queue says ended or whose runner is gone
+    /// has not either; with no token, the user, when `peer` is the
+    /// service's own OS user and the request names no role of its
+    /// environment (ADR-t3102-1 decision 1). A refusal is
+    /// `unauthenticated`, recorded with the use case and the reason, never
+    /// the token: `missing_token` for no token or an empty one from any
+    /// other caller, `unknown_token` for one the control side
+    /// did not issue or has revoked, `session_ended` for an inbox's whose
+    /// session's process has ended, `run_ended` for one whose run has
+    /// ended or is not in the queue, `target_ended` for a token whose
+    /// target of no run (a telemetry target, a planner) the queue says ended
+    /// or whose runner is gone
     /// ([`crate::domain::telemetry::target_token_due`]), revoked yet or
     /// not: a token the process that issued it could not revoke before it
-    /// fell is refused all the same.
-    fn authenticate(&self, request: &ServiceRequest) -> Result<Principal, ServiceResponse> {
+    /// fell is refused all the same. The run or the target is read on the
+    /// `connection` the use case runs on, so a read of an older queue
+    /// reads it from the copy the read reads, and that queue is returned
+    /// for the use case.
+    fn authenticate(
+        &self,
+        request: &ServiceRequest,
+        peer: Peer,
+        connection: Connection,
+    ) -> Result<(Principal, Option<Box<dyn ServiceQueue>>), ServiceResponse> {
         let refuse = |reason: &str, message: &str| {
             let payload = json!({"use_case": request.use_case, "reason": reason});
             if let Err(error) = self.backend.record_unauthenticated(payload) {
@@ -198,9 +315,32 @@ impl QueueService<'_> {
             ServiceResponse::failure(ServiceErrorCode::Unauthenticated, message)
         };
         let Some(token) = request.token.as_deref().filter(|token| !token.is_empty()) else {
-            return Err(refuse("missing_token", "the request carries no token"));
+            let named = request.env_role.as_deref().filter(|role| !role.is_empty());
+            return match (peer, named) {
+                (Peer::Owner, None) if request.token.is_none() => Ok((Principal::user(), None)),
+                (_, Some(role)) => {
+                    let mut message = format!(
+                        "the request carries no token, and its environment names the role \
+                         {role}, which is never taken for the user's"
+                    );
+                    if let Some(next) = crate::domain::queue_service::missing_token_next(role) {
+                        message.push_str(": ");
+                        message.push_str(next);
+                    }
+                    Err(refuse("missing_token", &message))
+                }
+                _ => Err(refuse("missing_token", "the request carries no token")),
+            };
         };
         let principal = match self.backend.principal(token) {
+            // A record of a shape no issue makes (an inbox of no session)
+            // authenticates nothing.
+            Ok(Some(principal)) if principal.check().is_err() => {
+                return Err(refuse(
+                    "unknown_token",
+                    "the token is not one the control side issued, or it was revoked",
+                ));
+            }
             Ok(Some(principal)) => principal,
             Ok(None) => {
                 return Err(refuse(
@@ -215,12 +355,35 @@ impl QueueService<'_> {
                 ));
             }
         };
+        if let Some(session) = &principal.session
+            && !self.backend.session_alive(session)
+        {
+            return Err(refuse(
+                "session_ended",
+                "the token's session has ended: open the inbox again (`dagq inbox` in a \
+                 terminal with no DAGQ_ROLE)",
+            ));
+        }
+        let target = principal.target.as_ref().filter(|t| t.run_id().is_none());
+        if principal.run_id.is_none() && target.is_none() {
+            return Ok((principal, None));
+        }
+        let read = if principal.run_id.is_some() {
+            "run"
+        } else {
+            "target"
+        };
+        let unread = |error: &anyhow::Error| {
+            ServiceResponse::failure(
+                ServiceErrorCode::Failed,
+                format!("the token's {read} could not be read: {error:#}"),
+            )
+        };
+        let queue = self
+            .open_on(connection, &principal.actor())
+            .map_err(|error| unread(&error))?;
         if let Some(run) = &principal.run_id {
-            let status = self
-                .backend
-                .open(&principal.actor())
-                .and_then(|queue| queue.run_status(run));
-            match status {
+            match queue.run_status(run) {
                 Ok(Some(status)) if run_holds_token(status) => {}
                 Ok(_) => {
                     return Err(refuse(
@@ -228,20 +391,11 @@ impl QueueService<'_> {
                         "the token's run has ended or is not in the queue",
                     ));
                 }
-                Err(error) => {
-                    return Err(ServiceResponse::failure(
-                        ServiceErrorCode::Failed,
-                        format!("the token's run could not be read: {error:#}"),
-                    ));
-                }
+                Err(error) => return Err(unread(&error)),
             }
         }
-        if let Some(target) = principal.target.as_ref().filter(|t| t.run_id().is_none()) {
-            let facts = self
-                .backend
-                .open(&principal.actor())
-                .and_then(|queue| queue.telemetry_target(target));
-            match facts {
+        if let Some(target) = target {
+            match queue.telemetry_target(target) {
                 Ok(facts)
                     if crate::domain::telemetry::target_token_due(
                         target.kind,
@@ -264,7 +418,36 @@ impl QueueService<'_> {
                 }
             }
         }
-        Ok(principal)
+        Ok((principal, Some(queue)))
+    }
+}
+
+/// The connection a use case runs on (ADR-0045 decision 18): a read
+/// (`show`, the proposals', the evals' and the case sets' and the whole
+/// queue's reads) on a read-only one, a watch's look on the live queue
+/// read-only, the supervisor's requests apart, and the rest on one that
+/// writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Connection {
+    Supervisor,
+    Write,
+    Read,
+    Watch,
+}
+
+fn connection(use_case: UseCase, params: &Value) -> Connection {
+    match use_case {
+        UseCase::Supervisor => Connection::Supervisor,
+        UseCase::WatchPoll => Connection::Watch,
+        UseCase::Show
+        | UseCase::ProposalList
+        | UseCase::ProposalShow
+        | UseCase::AgentResults
+        | UseCase::AgentResult
+        | UseCase::AgentSets
+        | UseCase::AgentSet => Connection::Read,
+        _ if matches!(QueueRead::parse(use_case, params), Ok(Some(_))) => Connection::Read,
+        _ => Connection::Write,
     }
 }
 
@@ -375,6 +558,9 @@ struct AskParams {
     run_id: Option<String>,
     #[serde(default)]
     finding_id: Option<i64>,
+    /// The planning request a planner asks on (`--request`), as its own.
+    #[serde(default)]
+    request_id: Option<i64>,
 }
 
 /// `show`'s params: those of `dagq show`.
@@ -460,6 +646,16 @@ struct FindingStatusParams {
     /// client, which never covers.
     #[serde(default)]
     covered_by: Option<i64>,
+}
+
+/// `watch_poll`'s params: those of `dagq watch` a look reads.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WatchPollParams {
+    #[serde(default)]
+    after: Option<i64>,
+    #[serde(default)]
+    role: Option<String>,
 }
 
 /// `replan_propose`'s params: those of `dagq replan propose`.
@@ -550,11 +746,21 @@ struct AgentResultParams {
 /// (ADR-t1233-5 decision 3), and the policy is still asked, on the
 /// service's side, as it would be for a narrower one.
 fn authorize_read(store: &Store<'_>, actor: &ActorContext, resource: &Resource) -> Result<()> {
+    authorize_as(store, actor, Capability::QueueRead, resource)
+}
+
+/// Authorize `capability` on `resource` for `actor`, recording a refusal.
+fn authorize_as(
+    store: &Store<'_>,
+    actor: &ActorContext,
+    capability: Capability,
+    resource: &Resource,
+) -> Result<()> {
     Gate {
         actor,
         authorizer: &StaticPolicy,
     }
-    .authorize(store, Capability::QueueRead, resource)?;
+    .authorize(store, capability, resource)?;
     Ok(())
 }
 
@@ -587,7 +793,7 @@ fn run(
     // The reads of the whole queue (ADR-t1233-5 decisions 1 to 3), each
     // authorized as the command line asks for its command.
     if let Some(read) = QueueRead::parse(use_case, raw)? {
-        authorize_read(&store, actor, &read.resource())?;
+        authorize_as(&store, actor, read.capability(), &read.resource())?;
         return store.0.read(&read);
     }
     match use_case {
@@ -612,7 +818,11 @@ fn run(
         | UseCase::GoalShow
         | UseCase::Lint
         | UseCase::ObserveHistory
-        | UseCase::ObserveInput => unreachable!("a read is answered above"),
+        | UseCase::ObserveInput
+        | UseCase::Requests
+        | UseCase::Replans
+        | UseCase::CiFailures
+        | UseCase::Planners => unreachable!("a read is answered above"),
         UseCase::TelemetryReport => {
             // A version the service does not read, or a report past its
             // bounds, is refused before anything is recorded; a field it
@@ -655,6 +865,18 @@ fn run(
             let (capability, resource) = op.request();
             gate.authorize(&store, capability, &resource)?;
             store.0.session(&op)
+        }
+        UseCase::WatchPoll => {
+            let p: WatchPollParams = params(use_case, raw)?;
+            let role = p
+                .role
+                .as_deref()
+                .map(str::parse::<SessionRole>)
+                .transpose()
+                .map_err(|error| BadParams(format!("watch_poll's role: {error}")))?;
+            gate.authorize(&store, Capability::QueueWatch, &Resource::Queue)?;
+            let look = store.0.watch_look(p.after.map(EventId::new), role)?;
+            Ok(serde_json::to_value(look)?)
         }
         UseCase::AgentEval => {
             let p: AgentEvalParams = params(use_case, raw)?;
@@ -716,7 +938,7 @@ fn run(
                 reason_category: p.because.unwrap_or_default().parse::<AskReason>()?,
                 topics: p.topics,
                 finding_id: p.finding_id.map(FindingId::new),
-                request_id: None,
+                request_id: p.request_id.map(RequestId::new),
             };
             Dialogue::new(&mut store, actor, &StaticPolicy).ask(ask)
         }
@@ -1131,6 +1353,7 @@ mod tests {
 
     use super::*;
     use crate::domain::Answerer;
+    use crate::domain::queue_service::SessionProcess;
 
     /// One queue: task 1 with run `r1` in `status`; everything it was
     /// asked to write is kept.
@@ -1152,11 +1375,20 @@ mod tests {
         fn read_ask(&self, _: AskId) -> Result<Ask> {
             Err(anyhow!("no ask"))
         }
-        fn request_planner(&self, _: RequestId) -> Result<Option<PlannerId>> {
-            Err(anyhow!("no request"))
+        /// Request 7 is planner 3's, request 8 planner 4's.
+        fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>> {
+            Ok(match request.as_i64() {
+                7 => Some(PlannerId::new(3)),
+                8 => Some(PlannerId::new(4)),
+                _ => None,
+            })
         }
         fn open_ask(&mut self, ask: NewAsk) -> Result<Value> {
-            let value = json!({"opened": ask.kind.as_str(), "run": ask.run_id, "by": ask.asked_by});
+            let mut value =
+                json!({"opened": ask.kind.as_str(), "run": ask.run_id, "by": ask.asked_by});
+            if let Some(request) = ask.request_id {
+                value["request"] = json!(request);
+            }
             self.log.lock().unwrap().push(value.clone());
             Ok(value)
         }
@@ -1336,11 +1568,51 @@ mod tests {
                 .push(json!({"session": serde_json::to_value(op)?}));
             Ok(json!({"value": null}))
         }
+        fn watch_look(
+            &self,
+            after: Option<EventId>,
+            role: Option<SessionRole>,
+        ) -> Result<crate::application::watch::WatchLook> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(json!({"watch_look": after, "role": role}));
+            Ok(crate::application::watch::WatchLook {
+                after: after.unwrap_or(EventId::new(0)),
+                events: Vec::new(),
+                cursor: after.unwrap_or(EventId::new(0)),
+                woken: false,
+                opened: Vec::new(),
+                pulses: json!([]),
+                supervisors: json!([]),
+                binding: None,
+            })
+        }
     }
 
     struct Backend {
         status: RunStatus,
         log: std::sync::Arc<Mutex<Vec<Value>>>,
+        /// The queue is at an older schema: as the SQLite backend, it
+        /// opens for a read (from a copy) and refuses to open to write or
+        /// for a watch's look.
+        older: bool,
+        /// The connections opened, in order: `write`, `read` or `watch`.
+        opened: Mutex<Vec<&'static str>>,
+    }
+
+    impl Backend {
+        fn opening(&self, connection: &'static str) -> Result<Box<dyn ServiceQueue>> {
+            self.opened.lock().unwrap().push(connection);
+            if self.older && connection != "read" {
+                anyhow::bail!("queue schema version 1 is older than this binary's schema");
+            }
+            Ok(Box::new(Queue {
+                status: self.status,
+                log: self.log.clone(),
+                denials: RefCell::default(),
+            }))
+        }
     }
 
     impl ServiceBackend for Backend {
@@ -1359,10 +1631,22 @@ mod tests {
                 "throughput-review" => Some(Principal::of(&ActorContext::throughput_review_job(
                     "hourly", "h",
                 ))),
-                "planner" => Some(Principal::of(&ActorContext::instance(
-                    ActorRole::Planner,
-                    3,
-                ))),
+                "planner" => Some(Principal::planner(3)),
+                "planner-3" => Some(Principal::planner(3)),
+                "planner-closed" => Some(Principal::planner(9)),
+                "inbox" => Some(Principal::inbox(SessionProcess {
+                    pid: 7,
+                    start: "then".into(),
+                })),
+                // A session whose process another took since.
+                "inbox-ended" => Some(Principal::inbox(SessionProcess {
+                    pid: 7,
+                    start: "earlier".into(),
+                })),
+                // A record no issue makes: an inbox of no session.
+                "inbox-unbound" => {
+                    Some(Principal::of(&ActorContext::new(ActorRole::Inbox, "inbox")))
+                }
                 "telemetry" => Some(Principal::telemetry(
                     &StepTarget::run(&run),
                     Some(TaskId::new(1)),
@@ -1394,11 +1678,13 @@ mod tests {
             })
         }
         fn open(&self, _: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
-            Ok(Box::new(Queue {
-                status: self.status,
-                log: self.log.clone(),
-                denials: RefCell::default(),
-            }))
+            self.opening("write")
+        }
+        fn open_read(&self, _: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
+            self.opening("read")
+        }
+        fn open_watch(&self, _: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
+            self.opening("watch")
         }
         fn record_unauthenticated(&self, payload: Value) -> Result<()> {
             self.log.lock().unwrap().push(payload);
@@ -1419,12 +1705,20 @@ mod tests {
         fn principals(&self) -> Result<Vec<Principal>> {
             Ok(Vec::new())
         }
+        fn serves(&self, db: &std::path::Path) -> bool {
+            db == std::path::Path::new("/q/queue.db")
+        }
+        fn session_alive(&self, session: &crate::domain::queue_service::SessionProcess) -> bool {
+            session.pid == 7 && session.start == "then"
+        }
     }
 
     fn backend(status: RunStatus) -> Backend {
         Backend {
             status,
             log: std::sync::Arc::default(),
+            older: false,
+            opened: Mutex::default(),
         }
     }
 
@@ -1432,6 +1726,9 @@ mod tests {
         ServiceRequest {
             api_version: API_VERSION,
             token: token.map(str::to_owned),
+            env_role: None,
+            queue: None,
+            binding: None,
             use_case,
             params,
         }
@@ -1462,6 +1759,435 @@ mod tests {
         assert_eq!(code(&response), Some(ServiceErrorCode::ApiVersionMismatch));
         assert_eq!(response.api_version, API_VERSION);
         assert!(backend.log.lock().unwrap().is_empty());
+        // A worker of the oldest version answered is answered.
+        let mut older = request(Some("worker"), UseCase::Show, json!({"id": 1}));
+        older.api_version = MIN_API_VERSION;
+        assert!(service.handle(&older).ok);
+    }
+
+    #[test]
+    fn no_token_is_the_user_only_from_the_owner_s_peer_with_no_role_named() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let note = || request(None, UseCase::Note, json!({"task": 1, "text": "x"}));
+        // The owner's peer naming no role: the user, whose note is its own.
+        let response = service.handle_from(&note(), Peer::Owner);
+        assert_ne!(code(&response), Some(ServiceErrorCode::Unauthenticated));
+        assert_eq!(
+            backend.log.lock().unwrap().pop().unwrap(),
+            json!({"note": "x", "by": "human"})
+        );
+        // A role named with no token is refused, from the owner's peer too,
+        // and so is a peer that is not the owner's.
+        let mut named = note();
+        named.env_role = Some("worker".to_owned());
+        for (request, peer) in [(named, Peer::Owner), (note(), Peer::Other)] {
+            let response = service.handle_from(&request, peer);
+            assert_eq!(code(&response), Some(ServiceErrorCode::Unauthenticated));
+            let recorded = backend.log.lock().unwrap().pop().unwrap();
+            assert_eq!(
+                recorded,
+                json!({"use_case": "note", "reason": "missing_token"})
+            );
+        }
+        // An empty token is no user's either.
+        let response = service.handle_from(
+            &request(Some(""), UseCase::Note, json!({"task": 1, "text": "x"})),
+            Peer::Owner,
+        );
+        assert_eq!(code(&response), Some(ServiceErrorCode::Unauthenticated));
+    }
+
+    #[test]
+    fn an_inbox_or_a_planner_with_no_token_is_told_why_and_what_to_do_next() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        for (role, next) in [
+            (
+                "inbox",
+                "open the inbox again (`dagq inbox` in a terminal with no DAGQ_ROLE)",
+            ),
+            (
+                "planner",
+                "wait for it to close (the next planner is given one)",
+            ),
+        ] {
+            let mut tokenless = request(None, UseCase::Show, json!({"id": 1}));
+            tokenless.env_role = Some(role.to_owned());
+            let response = service.handle_from(&tokenless, Peer::Owner);
+            let error = response.error.unwrap();
+            assert_eq!(error.code, ServiceErrorCode::Unauthenticated);
+            assert!(
+                error.message.contains("carries no token"),
+                "{}",
+                error.message
+            );
+            assert!(error.message.ends_with(next), "{role}: {}", error.message);
+            assert_eq!(
+                backend.log.lock().unwrap().pop().unwrap(),
+                json!({"use_case": "show", "reason": "missing_token"})
+            );
+        }
+        // Another role is only told that it carries no token.
+        let mut worker = request(None, UseCase::Show, json!({"id": 1}));
+        worker.env_role = Some("worker".to_owned());
+        let message = service
+            .handle_from(&worker, Peer::Owner)
+            .error
+            .unwrap()
+            .message;
+        assert!(message.ends_with("never taken for the user's"), "{message}");
+    }
+
+    #[test]
+    fn the_user_the_inbox_and_a_planner_are_allowed_what_the_command_line_allows() {
+        use crate::domain::authorization::grants;
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        // Each use case and the capability the command line asks for it.
+        let cases = [
+            (UseCase::Show, json!({"id": 1}), Capability::QueueRead),
+            (UseCase::List, json!({}), Capability::QueueRead),
+            (
+                UseCase::Requests,
+                json!({"all": true}),
+                Capability::QueueRead,
+            ),
+            (UseCase::Replans, json!({"id": 3}), Capability::QueueRead),
+            (UseCase::CiFailures, json!({"task": 1}), Capability::CiRead),
+            (
+                UseCase::Planners,
+                json!({"all": true}),
+                Capability::QueueRead,
+            ),
+            (
+                UseCase::WatchPoll,
+                json!({"role": "inbox"}),
+                Capability::QueueWatch,
+            ),
+            (
+                UseCase::Note,
+                json!({"task": 1, "text": "x"}),
+                Capability::NoteWrite,
+            ),
+            (
+                UseCase::FindingRecord,
+                json!({"kind": "k", "task": 1, "summary": "s"}),
+                Capability::FindingRecord,
+            ),
+            (
+                UseCase::FindingResolve,
+                json!({"id": 1, "reason": "r"}),
+                Capability::FindingResolve,
+            ),
+            (
+                UseCase::ReplanPropose,
+                json!({"run": "r1", "reason": "r"}),
+                Capability::ReplanPropose,
+            ),
+        ];
+        let callers = [
+            (None, ActorRole::User),
+            (Some("inbox"), ActorRole::Inbox),
+            (Some("planner-3"), ActorRole::Planner),
+            (Some("worker"), ActorRole::Worker),
+        ];
+        let mut refused = 0;
+        for (token, role) in callers {
+            for (use_case, params, capability) in &cases {
+                let response =
+                    service.handle_from(&request(token, *use_case, params.clone()), Peer::Owner);
+                let denied = code(&response) == Some(ServiceErrorCode::AuthorizationDenied);
+                assert_eq!(
+                    denied,
+                    !grants(role).contains(capability),
+                    "{} {}: {response:?}",
+                    role.as_str(),
+                    use_case.as_str()
+                );
+                if denied {
+                    refused += 1;
+                    // Refused as the command line refuses it, and recorded.
+                    let denial = response.error.unwrap().denied.unwrap();
+                    assert_eq!(denial.role, role.as_str());
+                    assert_eq!(denial.capability, capability.as_str());
+                    let log = backend.log.lock().unwrap();
+                    let recorded = log.last().unwrap();
+                    assert_eq!(recorded["role"], role.as_str(), "{recorded}");
+                    assert_eq!(recorded["capability"], capability.as_str(), "{recorded}");
+                }
+            }
+        }
+        // The planner's finding_record and replan_propose, the user's and
+        // the inbox's replan_propose, and the worker's watch.
+        assert!(refused >= 5, "{refused}");
+        // A planner's token ends with its planner.
+        let response = service.handle_from(
+            &request(Some("planner-closed"), UseCase::Show, json!({"id": 1})),
+            Peer::Owner,
+        );
+        assert_eq!(code(&response), Some(ServiceErrorCode::Unauthenticated));
+        let recorded = backend.log.lock().unwrap().pop().unwrap();
+        assert_eq!(
+            recorded,
+            json!({"use_case": "show", "reason": "target_ended"})
+        );
+    }
+
+    /// A planner asks on its planning request through the service as the
+    /// command line lets it (ADR-t3102-1 decision 2): only on a request
+    /// whose planner it is, the other refused and recorded.
+    #[test]
+    fn a_planner_asks_on_its_own_request_and_is_refused_another_planners() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let ask = |on: i64| {
+            let params = json!({"kind": "planner_question", "question": "which?",
+                                "because": "scope", "request_id": on});
+            service.handle_from(
+                &request(Some("planner-3"), UseCase::Ask, params),
+                Peer::Owner,
+            )
+        };
+        let response = ask(7);
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            backend.log.lock().unwrap().last().unwrap(),
+            &json!({"opened": "planner_question", "run": null, "by": "planner", "request": 7})
+        );
+        let response = ask(8);
+        assert_eq!(
+            code(&response),
+            Some(ServiceErrorCode::AuthorizationDenied),
+            "{response:?}"
+        );
+        let recorded = backend.log.lock().unwrap().last().unwrap().clone();
+        assert_eq!(recorded["role"], "planner", "{recorded}");
+        assert_eq!(recorded["capability"], "ask.open", "{recorded}");
+        assert_eq!(recorded["resource"]["request"], 8, "{recorded}");
+        assert_eq!(recorded["resource"]["planner"], 4, "{recorded}");
+    }
+
+    #[test]
+    fn a_request_naming_another_queue_is_refused_before_anything_and_an_ended_session_s_token_too()
+    {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let named = |db: &str, token: Option<&str>| {
+            let mut request = request(token, UseCase::Show, json!({"id": 1}));
+            request.queue = Some(std::path::PathBuf::from(db));
+            request
+        };
+        // Another queue's DB, or one that is not there: refused before the
+        // token is read, the use case run or anything recorded.
+        for db in ["/q/other.db", "/q/nonexistent.db"] {
+            let response = service.handle_from(&named(db, Some("worker")), Peer::Owner);
+            assert_eq!(code(&response), Some(ServiceErrorCode::WrongQueue), "{db}");
+            assert!(response.error.unwrap().message.contains(db));
+        }
+        assert!(backend.log.lock().unwrap().is_empty());
+        // Its own is served, by the user and the inbox of a live session.
+        for token in [None, Some("inbox")] {
+            let response = service.handle_from(&named("/q/queue.db", token), Peer::Owner);
+            assert!(response.ok, "{token:?}: {response:?}");
+        }
+        // A session whose process ended (or another took its pid) ends its
+        // inbox's token, which says to open the inbox again.
+        let response = service.handle_from(&named("/q/queue.db", Some("inbox-ended")), Peer::Owner);
+        let error = response.error.unwrap();
+        assert_eq!(error.code, ServiceErrorCode::Unauthenticated);
+        assert!(error.message.contains("dagq inbox"), "{}", error.message);
+        assert_eq!(
+            backend.log.lock().unwrap().pop().unwrap(),
+            json!({"use_case": "show", "reason": "session_ended"})
+        );
+        let unbound =
+            service.handle_from(&named("/q/queue.db", Some("inbox-unbound")), Peer::Owner);
+        assert_eq!(code(&unbound), Some(ServiceErrorCode::Unauthenticated));
+        assert_eq!(
+            backend.log.lock().unwrap().pop().unwrap(),
+            json!({"use_case": "show", "reason": "unknown_token"})
+        );
+    }
+
+    /// ADR-0045 decision 18: the reads and a watch's look open the queue
+    /// read-only, the supervisor's requests are answered apart, and the
+    /// rest open it to write.
+    #[test]
+    fn reads_and_a_watch_s_look_open_the_queue_read_only() {
+        for (use_case, params) in [
+            (UseCase::Show, json!({"id": 1})),
+            (UseCase::ProposalList, json!({})),
+            (UseCase::ProposalShow, json!({"id": 1})),
+            (UseCase::Status, json!({})),
+            (UseCase::Events, json!({})),
+            (UseCase::Requests, json!({})),
+            (UseCase::AgentResults, Value::Null),
+            (UseCase::AgentResult, json!({"id": 1})),
+            (UseCase::AgentSets, Value::Null),
+            (UseCase::AgentSet, json!({"id": 1})),
+        ] {
+            assert_eq!(
+                connection(use_case, &params),
+                Connection::Read,
+                "{use_case:?}"
+            );
+        }
+        assert_eq!(
+            connection(UseCase::WatchPoll, &json!({})),
+            Connection::Watch
+        );
+        assert_eq!(
+            connection(UseCase::Supervisor, &json!({"op": "x"})),
+            Connection::Supervisor
+        );
+        for (use_case, params) in [
+            (UseCase::Note, json!({"task": 1, "text": "x"})),
+            (UseCase::Ask, json!({})),
+            (UseCase::FindingRecord, json!({})),
+            (UseCase::AgentEval, json!({})),
+            (UseCase::AgentCases, json!({})),
+            (UseCase::AgentDecide, json!({})),
+        ] {
+            assert_eq!(
+                connection(use_case, &params),
+                Connection::Write,
+                "{use_case:?}"
+            );
+        }
+    }
+
+    /// A token's run or target is read on the connection its use case runs
+    /// on, opened once and kept for it: a worker's and a planner's reads of
+    /// a queue at an older schema are answered from the read's copy, as
+    /// the user's are, and what writes to it or watches it is refused as
+    /// the command line refuses it.
+    #[test]
+    fn a_token_s_run_or_target_is_read_on_the_connection_its_use_case_runs_on() {
+        let backend = Backend {
+            older: true,
+            ..backend(RunStatus::Running)
+        };
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let opened = |response: &ServiceResponse| {
+            let opened = std::mem::take(&mut *backend.opened.lock().unwrap());
+            (response.ok, code(response), opened)
+        };
+        for token in ["worker", "planner"] {
+            for (use_case, params) in [
+                (UseCase::Show, json!({"id": 1})),
+                (UseCase::Status, json!({})),
+            ] {
+                let response = service.handle(&request(Some(token), use_case, params));
+                assert_eq!(
+                    opened(&response),
+                    (true, None, vec!["read"]),
+                    "{token} {use_case:?}"
+                );
+            }
+        }
+        let response = service.handle_from(
+            &request(None, UseCase::AgentResults, Value::Null),
+            Peer::Owner,
+        );
+        assert_eq!(opened(&response), (true, None, vec!["read"]));
+        // The check fails on the connection the use case would, and
+        // nothing else is opened.
+        let note = service.handle(&request(
+            Some("planner"),
+            UseCase::Note,
+            json!({"task": 1, "text": "x"}),
+        ));
+        assert_eq!(
+            opened(&note),
+            (false, Some(ServiceErrorCode::Failed), vec!["write"])
+        );
+        assert!(
+            note.error
+                .unwrap()
+                .message
+                .contains("older than this binary"),
+            "the schema's refusal is said"
+        );
+        let watch = service.handle(&request(
+            Some("planner"),
+            UseCase::WatchPoll,
+            json!({"role": "planner"}),
+        ));
+        assert_eq!(
+            opened(&watch),
+            (false, Some(ServiceErrorCode::Failed), vec!["watch"])
+        );
+        // A refusal of the token is still decided on the same read.
+        let ended = Backend {
+            status: RunStatus::Integrated,
+            ..backend
+        };
+        let service = QueueService {
+            backend: &ended,
+            build: "b",
+            pid: 1,
+        };
+        let response = service.handle(&request(Some("worker"), UseCase::Show, json!({"id": 1})));
+        assert_eq!(code(&response), Some(ServiceErrorCode::Unauthenticated));
+        assert_eq!(*ended.opened.lock().unwrap(), ["read"]);
+        assert_eq!(
+            ended.log.lock().unwrap().pop().unwrap(),
+            json!({"use_case": "show", "reason": "run_ended"})
+        );
+    }
+
+    #[test]
+    fn watch_poll_reads_one_look_for_its_role_and_refuses_a_role_it_does_not_know() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let response = service.handle_from(
+            &request(
+                None,
+                UseCase::WatchPoll,
+                json!({"after": 7, "role": "inbox"}),
+            ),
+            Peer::Owner,
+        );
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.result.unwrap()["after"], 7);
+        assert_eq!(
+            backend.log.lock().unwrap().pop().unwrap(),
+            json!({"watch_look": 7, "role": "inbox"})
+        );
+        let response = service.handle_from(
+            &request(None, UseCase::WatchPoll, json!({"role": "nobody"})),
+            Peer::Owner,
+        );
+        assert_eq!(code(&response), Some(ServiceErrorCode::BadRequest));
     }
 
     #[test]

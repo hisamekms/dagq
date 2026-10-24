@@ -22,6 +22,7 @@ fn forecast(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> Valu
     if let Some(role) = role {
         command.env("DAGQ_ROLE", role);
     }
+    crate::common::cli::reach(&mut command, db, &["forecast"]);
     let output = command
         .arg("--db")
         .arg(db)

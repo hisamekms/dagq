@@ -513,10 +513,15 @@ fn bound_ci_watch(queue: &SqliteQueue) -> Result<Option<crate::domain::ci_watch:
 /// `ci failures [--task ID]` on the queue at `db`: see
 /// [`crate::application::ci_watch::known_failures`]. Reads only.
 pub fn ci_failures(db: &Path, task: Option<TaskId>) -> Result<Value> {
-    let queue = SqliteQueue::open_read_only(db)?;
-    let config = bound_ci_watch(&queue)?;
+    ci_failures_of(&SqliteQueue::open_read_only(db)?, task)
+}
+
+/// `ci failures [--task ID]` on `queue`, as the command line and the queue
+/// service answer it.
+fn ci_failures_of(queue: &SqliteQueue, task: Option<TaskId>) -> Result<Value> {
+    let config = bound_ci_watch(queue)?;
     let branch = config.as_ref().and_then(|config| config.branch.clone());
-    crate::application::ci_watch::known_failures(&queue, config.as_ref(), branch.as_deref(), task)
+    crate::application::ci_watch::known_failures(queue, config.as_ref(), branch.as_deref(), task)
 }
 
 /// `doctor`'s `ci_watch` (ADR-t1920-1): the table, the `gh` this PATH
@@ -561,6 +566,16 @@ pub fn graph_diagram(
         source
     };
     Ok((text, tasks))
+}
+
+/// `graph --format svg` of a served queue: `answer`, the service's
+/// `graph --format d2`, drawn by the host's d2 as the command line draws it.
+pub fn graph_svg_of(answer: Value) -> Result<Value> {
+    let source = answer
+        .get(crate::view::RAW_STDOUT)
+        .and_then(Value::as_str)
+        .context("the queue service's graph answer holds no d2 source")?;
+    Ok(json!({ crate::view::RAW_STDOUT: render_svg(source)? }))
 }
 
 /// The SVG the host's d2 on `PATH` draws from `source`.
@@ -687,6 +702,53 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
     }
     fn clock<'q>(&self, queue: &'q SqliteQueue) -> &'q dyn crate::application::Clock {
         queue.generators().clock.as_ref()
+    }
+    fn plan_request(
+        &self,
+        queue: &SqliteQueue,
+        id: crate::domain::RequestId,
+    ) -> Result<crate::domain::plan_request::PlanRequest> {
+        queue.request_by_id(id)
+    }
+    fn plan_requests(
+        &self,
+        queue: &SqliteQueue,
+        all: bool,
+    ) -> Result<Vec<crate::domain::plan_request::PlanRequest>> {
+        queue.plan_requests(all)
+    }
+    fn replan_operation(
+        &self,
+        queue: &SqliteQueue,
+        id: crate::domain::ReplanId,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        queue.replan_operation(id)
+    }
+    fn replan_operations(
+        &self,
+        queue: &SqliteQueue,
+        all: bool,
+    ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        queue.replan_operations(all)
+    }
+    fn ci_failures(
+        &self,
+        queue: &SqliteQueue,
+        read: &crate::application::queue_reads::CiFailuresRead,
+    ) -> Result<Value> {
+        ci_failures_of(queue, read.task.map(TaskId::new))
+    }
+    fn planners(
+        &self,
+        queue: &SqliteQueue,
+        read: &crate::application::queue_reads::PlannersRead,
+    ) -> Result<Value> {
+        self.one_shot.planners_of(
+            queue,
+            self.db,
+            &crate::infrastructure::adapters::BackgroundSessions,
+            read.all,
+        )
     }
 }
 
@@ -912,12 +974,123 @@ pub fn watch_in(
     options: &crate::application::watch::WatchOptions,
     push: bool,
 ) -> Result<Value> {
-    use crate::infrastructure::inbox_watchers;
     ensure!(
         queue.is_read_only()?,
         "watch requires a live read-only queue connection; use open_queue_watch"
     );
     let clock = queue.generators().clock.clone();
+    watch_from(
+        db,
+        db,
+        &crate::application::watch::QueueWatch {
+            queue,
+            clock: clock.as_ref(),
+            control: &SystemProcesses,
+        },
+        clock.as_ref(),
+        options,
+        push,
+    )
+}
+
+/// [`watch_in`] through the queue service `client` of the queue at `db`,
+/// which the caller named `named` (the path its push names; the push
+/// names the repository after the binding each answer gives, wherever the
+/// watch runs) (ADR-t3102-3 decision 2): each look is its
+/// `watch_poll`, and a look the service does not answer ends the watch at
+/// once with that failure, never with a timeout or no events, except that
+/// an outage the supervisor recorded is returned once per role and waited
+/// out by the next watch of the role. The watcher's record, the push and
+/// which outage was returned stay on this side, outside the DB.
+pub fn watch_through_service(
+    db: &Path,
+    named: &Path,
+    client: &crate::infrastructure::queue_service::Client,
+    options: &crate::application::watch::WatchOptions,
+) -> Result<Value> {
+    let clock = crate::infrastructure::clock::system().clock;
+    watch_from(
+        db,
+        named,
+        &ServiceWatch {
+            client,
+            told: crate::infrastructure::queue_service::OutagesTold::of(
+                db.parent().unwrap_or(Path::new(".")),
+            ),
+        },
+        clock.as_ref(),
+        options,
+        true,
+    )
+}
+
+/// A watch's looks as the queue service's `watch_poll`, and the outages
+/// of the service they meet.
+struct ServiceWatch<'a> {
+    client: &'a crate::infrastructure::queue_service::Client,
+    told: crate::infrastructure::queue_service::OutagesTold,
+}
+
+impl crate::application::watch::OutageNotices for ServiceWatch<'_> {
+    fn recorded(&self, error: &anyhow::Error) -> Option<i64> {
+        error
+            .downcast_ref::<crate::infrastructure::queue_service::ClientFailure>()
+            .filter(|failure| failure.code == "unreachable")
+            .and_then(|failure| failure.outage.as_ref())
+            .map(|outage| outage.since)
+    }
+
+    fn told(&self, role: Option<SessionRole>, since: i64) -> bool {
+        self.told
+            .told(role.map_or("none", SessionRole::as_str), since)
+    }
+
+    fn tell(&self, role: Option<SessionRole>, since: i64) -> Result<()> {
+        self.told
+            .tell(role.map_or("none", SessionRole::as_str), since)
+    }
+}
+
+impl crate::application::watch::WatchSource for ServiceWatch<'_> {
+    fn look(
+        &self,
+        after: Option<crate::domain::EventId>,
+        role: Option<SessionRole>,
+        limit: std::time::Duration,
+    ) -> Result<crate::application::watch::WatchLook> {
+        let mut params = serde_json::json!({});
+        if let Some(after) = after {
+            params["after"] = serde_json::json!(after);
+        }
+        if let Some(role) = role {
+            params["role"] = serde_json::json!(role.as_str());
+        }
+        let answer = self.client.call_within(
+            crate::domain::queue_service::UseCase::WatchPoll,
+            params,
+            limit,
+        )?;
+        serde_json::from_value(answer).context("the queue service's answer to watch_poll")
+    }
+
+    fn outages(&self) -> Option<&dyn crate::application::watch::OutageNotices> {
+        Some(self)
+    }
+}
+
+/// A `watch` of the queue at `db` on `source`: the inbox's watcher's
+/// record and, with `push`, its notifier of new asks, which names the
+/// queue `named` and its repository after the binding of the look that
+/// returned them.
+fn watch_from(
+    db: &Path,
+    named: &Path,
+    source: &dyn crate::application::watch::WatchSource,
+    clock: &dyn crate::application::Clock,
+    options: &crate::application::watch::WatchOptions,
+    push: bool,
+) -> Result<Value> {
+    use crate::infrastructure::inbox_watchers;
     let mut record = (options.role == Some(SessionRole::Inbox))
         .then(|| {
             let now = clock.system_time();
@@ -948,15 +1121,14 @@ pub fn watch_in(
                         crate::infrastructure::kpi_config::host_wide_file().as_deref(),
                     )
                 },
-                || push_target(db, queue),
+                |binding| push_target(named, binding.map(Path::new)),
                 crate::infrastructure::push::run_push,
             )
         })
         .flatten();
-    crate::application::watch::watch(
-        queue,
-        clock.as_ref(),
-        &SystemProcesses,
+    crate::application::watch::watch_through(
+        source,
+        clock,
         record
             .as_mut()
             .map(|record| record as &mut dyn crate::application::watch::WatchRecord),
@@ -967,17 +1139,12 @@ pub fn watch_in(
     )
 }
 
-/// The queue at `db` as the inbox's ask notification names it: after its
-/// repository, or the working directory for a queue bound to none, as the
+/// The queue at `db`, bound to `binding`, as the inbox's ask notification
+/// names it: after its repository, or the working directory for a queue bound to none, as the
 /// other commands name it.
-fn push_target(db: &Path, queue: &SqliteQueue) -> crate::application::push::PushTarget {
+fn push_target(db: &Path, binding: Option<&Path>) -> crate::application::push::PushTarget {
     let checkout = crate::infrastructure::adapters::naming_checkout(
-        queue
-            .repository_binding()
-            .ok()
-            .flatten()
-            .map(PathBuf::from)
-            .as_deref(),
+        binding,
         &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     );
     crate::application::push::PushTarget {

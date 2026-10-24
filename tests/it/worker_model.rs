@@ -229,8 +229,10 @@ fn stats_compare_the_groups() {
             queue.record_runtime_event(run.id(), kind, payload).unwrap();
         }
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
-        .without_actor_env()
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command.without_actor_env();
+    crate::common::cli::reach(&mut command, &db, &["stats"]);
+    let output = command
         .arg("--db")
         .arg(&db)
         .args(["stats", "--full", "--cmux", "/usr/bin/true"])

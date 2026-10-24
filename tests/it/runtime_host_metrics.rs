@@ -237,9 +237,10 @@ fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
     assert_eq!(stats["host"]["metrics"]["disk_free_pct"]["min"], 10.0);
     let config = dir.path().join("config");
     fs::create_dir_all(&config).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
-        .without_actor_env()
-        .env("XDG_CONFIG_HOME", &config)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command.without_actor_env().env("XDG_CONFIG_HOME", &config);
+    crate::common::cli::reach(&mut command, &db, &["kpi"]);
+    let output = command
         .arg("--db")
         .arg(&db)
         .args(["kpi", "--last", "1"])

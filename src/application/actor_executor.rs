@@ -50,7 +50,9 @@ use crate::domain::{
     authorization::{Capability, grants},
     headless_job::JobAccess,
     local_checks,
-    queue_service::{CLIENT_ENV, CREDENTIAL_FILE_ENV, Principal, SOCKET_ENV, client_role},
+    queue_service::{
+        CLIENT_ENV, CREDENTIAL_FILE_ENV, Principal, SOCKET_ENV, client_role, host_client_role,
+    },
     session_step::{StepTarget, TargetKind},
     sessions::{self, LAUNCH_ENV},
 };
@@ -702,6 +704,42 @@ impl<'a> HostActorExecutor<'a> {
     }
 }
 
+impl HostActorExecutor<'_> {
+    /// What the agent of `actor`, a planner, is given for its host `dagq`
+    /// to reach the service of a served queue ([`host_client_role`],
+    /// ADR-t3102-1 decision 2): the service's socket, for the provider to
+    /// let its sandbox reach it, and the variable that names the file of a
+    /// token for its principal; the queue's path is kept for the commands
+    /// the service does not answer yet. The one the planner holds is handed
+    /// over, and one is issued only when there is none. `None` for an executor given no service, or an actor
+    /// that takes no token (the inbox's is issued by `dagq inbox` for its
+    /// session, [`crate::application::lifecycle::inbox`]).
+    ///
+    /// The token is written to its file here through
+    /// [`ServiceAccess::issue`], as a worker's is: the service does not yet
+    /// check, in the transaction that issues it, that the parent may start
+    /// the planner and that the planner is open (ADR-t3102-1 decision 2).
+    /// It does until the service issues it (ADR-t3105-1 decision 5).
+    fn host_client_env(&self, actor: &ActorContext) -> Result<Option<(PathBuf, (String, String))>> {
+        let (Some(service), Some(principal)) = (
+            self.service.filter(|_| host_client_role(actor.role())),
+            Principal::host_client(actor),
+        ) else {
+            return Ok(None);
+        };
+        let credential = match service.credential(self.queue, actor.actor_id()) {
+            Some(file) => file,
+            None => service
+                .issue(self.queue, &principal)
+                .with_context(|| format!("issue {}'s token", actor.actor_id()))?,
+        };
+        Ok(Some((
+            service.socket(self.queue),
+            (CREDENTIAL_FILE_ENV.to_owned(), path_text(&credential)?),
+        )))
+    }
+}
+
 impl ActorExecutor for HostActorExecutor<'_> {
     fn backend(&self) -> ExecutorBackend {
         ExecutorBackend::Host
@@ -867,6 +905,12 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 } else {
                     for name in CLIENT_ENV {
                         command.env_remove(name);
+                    }
+                    // A planner's `dagq` reaches a served queue's service
+                    // with its own token (ADR-t3102-1 decision 2).
+                    if let Some((socket, credential)) = self.host_client_env(&actor)? {
+                        command.envs([credential]);
+                        provider.reach_queue_service(&mut command, &socket);
                     }
                 }
                 command.envs(with.iter().map(|(key, value)| (key, value)));
@@ -2078,6 +2122,76 @@ mod tests {
             }
             Ok(Box::new(Child))
         }
+    }
+
+    /// ADR-t3102-1 decision 2: a planner's turn is given the file of its
+    /// planner's token, issued at its first turn and handed over at the
+    /// next, and keeps the queue's path; with no service given, none.
+    #[test]
+    fn a_planners_turn_is_given_its_planners_token_and_keeps_the_queue_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::default();
+        let turn = |executor: &HostActorExecutor<'_>| {
+            executor
+                .spawn(ActorExecutionSpec::new(
+                    ActorContext::instance(ActorRole::Planner, 4),
+                    WorkspaceAccess::Write(dir.path().to_path_buf()),
+                    ActorProgram::SessionAgent {
+                        agent: SessionAgent::PlannerTurn {
+                            target: TurnTarget {
+                                role: ActorRole::Planner,
+                                dir: dir.path(),
+                                cwd: dir.path(),
+                                debug_log: None,
+                                plugin_dir: None,
+                            },
+                            prompt: "p",
+                            session: crate::domain::turn::TurnSession::New("s"),
+                            stdout: dir.path(),
+                            stderr: dir.path(),
+                        },
+                        model: None,
+                    },
+                ))
+                .unwrap()
+        };
+        let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_provider(&fake)
+            .with_spawner(&fake)
+            .with_queue_service(&fake);
+        drop(turn(&executor));
+        drop(turn(&executor));
+        let credential = |command: &CommandSpec| {
+            // The last change of the variable: a removal first, then the
+            // file.
+            command
+                .get_envs()
+                .filter(|(key, _)| *key == CREDENTIAL_FILE_ENV)
+                .last()
+                .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+        };
+        let spawned = fake.spawned.lock().unwrap().clone();
+        assert_eq!(spawned.len(), 2);
+        for command in &spawned {
+            assert_eq!(
+                credential(command).as_deref(),
+                Some("/q/service/credentials/planner:4")
+            );
+            assert!(
+                command
+                    .get_envs()
+                    .filter(|(key, _)| *key == SOCKET_ENV)
+                    .all(|(_, value)| value.is_none())
+            );
+        }
+        // Issued once, for the planner of its actor id, then handed over.
+        assert_eq!(*fake.issued.lock().unwrap(), ["planner:4"]);
+        let unserved = Fake::default();
+        let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_provider(&unserved)
+            .with_spawner(&unserved);
+        drop(turn(&executor));
+        assert_eq!(credential(&unserved.spawned.lock().unwrap()[0]), None);
     }
 
     /// ADR-t2079-1: an agent whose executable is gone at its start (a

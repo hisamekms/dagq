@@ -48,17 +48,45 @@ pub fn invoke_with(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
         std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
+    let config = db.parent().unwrap().join("config");
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command.without_actor_env().owned_by_test();
-    command.env("PATH", path);
-    command.env("XDG_CONFIG_HOME", db.parent().unwrap().join("config"));
+    command.env("PATH", &path);
+    command.env("XDG_CONFIG_HOME", &config);
     command.envs(env.iter().copied());
+    // A command the queue service answers goes to it, never to the DB.
+    let mut reach = env.to_vec();
+    for (key, value) in [
+        ("PATH", path.to_str().unwrap()),
+        ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+    ] {
+        if !env.iter().any(|(set, _)| *set == key) {
+            reach.push((key, value));
+        }
+    }
+    command.envs(super::service::host_client_env(db, &reach, args));
     command
         .arg("--db")
         .arg(db)
         .args(args)
         .bounded_output()
         .unwrap()
+}
+
+/// Make `command`, a `dagq` a test runs itself with `args` on the queue
+/// at `db`, reach the queue service as [`invoke_with`] does
+/// ([`super::service::host_client_env`]), with the variables the command
+/// sets.
+pub fn reach(command: &mut Command, db: &Path, args: &[&str]) {
+    let set: Vec<(String, String)> = command
+        .get_envs()
+        .filter_map(|(key, value)| Some((key.to_str()?.to_owned(), value?.to_str()?.to_owned())))
+        .collect();
+    let env: Vec<(&str, &str)> = set
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    command.envs(super::service::host_client_env(db, &env, args));
 }
 
 /// Give the queue at `db` a `[push]` (its `host.toml`) whose command

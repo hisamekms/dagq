@@ -330,6 +330,81 @@ say "turn $TURN""#,
     assert_eq!(queue.planners(true).unwrap().len(), 1, "no second planner");
 }
 
+/// ADR-t3102-1 decision 2, ADR-t3102-2 decision 5: on a served queue a
+/// runtime planner's turn is given its planner's token by the runtime, and
+/// its `dagq` reads and notes through the queue service as that planner;
+/// what the planner's policy refuses (a finding) is refused there and
+/// recorded as the planner's, and its submit, no use case yet, goes on.
+#[test]
+fn a_headless_planners_turn_reads_and_notes_through_the_service_as_its_planner() {
+    let fx = headless_fixture(&format!(
+        r#"printf '%s' "${{{credential}:-none}}" > "$RUN_DIR/credential"
+"$DAGQ" --db "$DB" show 2 > "$RUN_DIR/show.json" 2> "$RUN_DIR/show.err"
+"$DAGQ" --db "$DB" note --task 2 --text "planned through the service" > "$RUN_DIR/note.json" 2>&1
+"$DAGQ" --db "$DB" finding record --kind stale --task 2 --summary s > "$RUN_DIR/finding.json" 2>&1
+"$DAGQ" --db "$DB" submit 2 >> "$RUN_DIR/submit.log" 2>&1
+say "turn $TURN""#,
+        credential = dagq::domain::queue_service::CREDENTIAL_FILE_ENV,
+    ));
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(
+        &mut queue,
+        "bring it back",
+        &[TaskId::new(1)],
+        Priority::Normal,
+    );
+    assert_eq!(task, TaskId::new(2));
+    record(&mut queue, "bring the landing rate back");
+    let _served = crate::common::service::Served::start(&fx.db);
+    let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
+    let backend = PlanWorkspace::running();
+    supervise_until(
+        &fx,
+        &backend,
+        &reviewer,
+        || !queue_events(&fx.db, "planner_closed").is_empty(),
+        || diagnose_planner(&fx.db),
+    );
+    let dir = planners_dir(&fx.db).join("1");
+    let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap_or_default();
+    // The runtime handed the turn its planner's token, outside the planner's
+    // directory.
+    let credential = read("credential");
+    assert!(
+        credential.contains("/service/credentials/"),
+        "{credential}: {}",
+        diagnose_planner(&fx.db)
+    );
+    // Its reads and notes went through the service as planner 1.
+    let shown: Value =
+        serde_json::from_str(&read("show.json")).unwrap_or_else(|_| panic!("{}", read("show.err")));
+    assert_eq!(shown["task"]["id"], 2, "{shown}");
+    let noted = queue_events(&fx.db, "observation");
+    assert_eq!(noted.len(), 1, "{}", read("note.json"));
+    let notes = SqliteQueue::open(&fx.db).unwrap().all_events().unwrap();
+    let actor = notes
+        .iter()
+        .find(|event| event.payload["text"] == "planned through the service")
+        .and_then(|event| event.actor.clone())
+        .unwrap();
+    assert_eq!(
+        (actor.role.as_str(), actor.id.as_str()),
+        ("planner", "planner:1")
+    );
+    // What its policy refuses is refused on the service's side, as itself.
+    let finding: Value = serde_json::from_str(&read("finding.json")).unwrap();
+    assert_eq!(
+        finding["queue_service"]["code"], "authorization_denied",
+        "{finding}"
+    );
+    let denied = queue_events(&fx.db, "authorization_denied");
+    assert_eq!(denied.len(), 1, "{denied:?}");
+    assert_eq!(denied[0]["role"], "planner");
+    assert_eq!(denied[0]["capability"], "finding.record");
+    // The submit, which opens the DB, went on: the request is proposed.
+    assert!(!queue_events(&fx.db, "request_proposed").is_empty());
+}
+
 /// Acceptance (ADR-t1394-2 decision 2 for a revise to a live planner): a
 /// headless planner that submitted its proposal again and is still alive
 /// gets the next revise of that proposal as its next turn's request

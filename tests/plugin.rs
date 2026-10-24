@@ -785,6 +785,7 @@ fn session_event(
     for (key, value) in env {
         command.env(key, value);
     }
+    reach_hook(&mut command, env, data_home, cwd);
     let _waiting = common::within(common::STEP_LIMIT, "the session-event hook to exit");
     let mut child = command.spawn().unwrap();
     // A hook that exits without reading its input closes the pipe first.
@@ -1083,6 +1084,7 @@ fn session_start(env: &[(&str, &str)], data_home: &Path, cwd: &Path) -> Output {
     for (key, value) in env {
         command.env(key, value);
     }
+    reach_hook(&mut command, env, data_home, cwd);
     command.bounded_output().unwrap()
 }
 
@@ -1108,6 +1110,7 @@ fn hook_with_input(
     for (key, value) in env {
         command.env(key, value);
     }
+    reach_hook(&mut command, env, data_home, cwd);
     let _waiting = common::within(common::STEP_LIMIT, format!("the {script} hook to exit"));
     let mut child = command.spawn().unwrap();
     // A hook that exits without reading its input closes the pipe first.
@@ -1511,20 +1514,55 @@ fn stop_hook_blocks_only_an_inbox_without_a_watch() {
 
 /// `XDG_DATA_HOME` is always pointed away from the developer's real queues.
 fn launcher(env: &[(&str, &str)], data_home: &Path, cwd: &Path, args: &[&str]) -> Output {
-    let mut command = Command::new(plugin_root().join("bin/dagq"));
-    // As the user, not as the actor of the session running the tests.
-    command.without_actor_env();
-    command
-        .env_remove("DAGQ_BIN")
-        .env_remove("DAGQ_DB")
-        .env("XDG_DATA_HOME", data_home)
-        .env("PATH", "/usr/bin:/bin")
-        .current_dir(cwd)
-        .args(args);
-    for (key, value) in env {
-        command.env(key, value);
+    let command = |args: &[&str]| {
+        let mut command = Command::new(plugin_root().join("bin/dagq"));
+        // As the user, not as the actor of the session running the tests.
+        command.without_actor_env();
+        command
+            .env_remove("DAGQ_BIN")
+            .env_remove("DAGQ_DB")
+            .env("XDG_DATA_HOME", data_home)
+            .env("PATH", "/usr/bin:/bin")
+            .current_dir(cwd)
+            .args(args);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        command
+    };
+    let mut run = command(args);
+    // The queue the launcher resolves, whose service answers its reads.
+    if args.first().is_some_and(|first| !first.starts_with('-')) {
+        let located = command(&["locate"]).bounded_output().unwrap();
+        if let Some(db) = serde_json::from_slice::<Value>(&located.stdout)
+            .ok()
+            .and_then(|location| location["db"].as_str().map(PathBuf::from))
+        {
+            common::cli::reach(&mut run, &db, args);
+        }
     }
-    command.bounded_output().unwrap()
+    run.bounded_output().unwrap()
+}
+
+/// Make `command`, a hook run with `env` from `cwd`, reach the service of
+/// the queue `env`'s `DAGQ_QUEUE` names, else the one the launcher resolves
+/// there, as the inbox's or a planner's session would with its token
+/// ([`common::cli::reach`]).
+fn reach_hook(command: &mut Command, env: &[(&str, &str)], data_home: &Path, cwd: &Path) {
+    let db = match env.iter().find(|(key, _)| *key == "DAGQ_QUEUE") {
+        Some((_, db)) => PathBuf::from(db),
+        None => {
+            let located = launcher(env, data_home, cwd, &["locate"]);
+            match serde_json::from_slice::<Value>(&located.stdout)
+                .ok()
+                .and_then(|location| location["db"].as_str().map(PathBuf::from))
+            {
+                Some(db) => db,
+                None => return,
+            }
+        }
+    };
+    common::cli::reach(command, &db, &["status"]);
 }
 
 fn stdout_json(output: &Output) -> Value {

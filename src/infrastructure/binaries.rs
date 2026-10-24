@@ -34,6 +34,23 @@ fn output(binary: &Path, arguments: &[&str]) -> Result<String> {
 /// [`output`] with `envs` added to its environment.
 fn output_with(binary: &Path, arguments: &[&str], envs: &[(&str, &str)]) -> Result<String> {
     let mut command = Command::new(binary);
+    command.envs(envs.iter().copied());
+    checked_output(&mut command, binary, arguments)
+}
+
+/// [`output`] as the user: no actor's variables reach it, so a read the
+/// queue service answers goes as the user's whoever runs it.
+fn user_output(binary: &Path, arguments: &[&str]) -> Result<String> {
+    let mut command = Command::new(binary);
+    for name in crate::domain::actor::ACTOR_ENV {
+        command.env_remove(name);
+    }
+    checked_output(&mut command, binary, arguments)
+}
+
+/// Run `command` of `binary` with `arguments`: its stdout when it exits 0,
+/// or an error with what it wrote to stderr.
+fn checked_output(command: &mut Command, binary: &Path, arguments: &[&str]) -> Result<String> {
     // A client-mode `dagq`'s variables do not reach it: it opens the queue
     // it names (goal 82's stage (3)).
     for name in crate::domain::queue_service::CLIENT_ENV {
@@ -41,7 +58,7 @@ fn output_with(binary: &Path, arguments: &[&str], envs: &[(&str, &str)]) -> Resu
     }
     // Not `output()`: its pipes can be inherited by what the supervisor
     // spawns meanwhile and then not end (task 1273).
-    let output = unpiped_output(command.args(arguments).envs(envs.iter().copied()))
+    let output = unpiped_output(command.args(arguments))
         .with_context(|| format!("run {}", binary.display()))?;
     ensure!(
         output.status.success(),
@@ -97,9 +114,23 @@ impl Binaries for LocalBinaries {
         fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let db = dir.join("queue.db");
         let result = (|| {
-            json_output(binary, &["--db", text(&db)?, "init"])?;
-            json_output(binary, &["--db", text(&db)?, "list"])?;
-            Ok(())
+            let db = text(&db)?;
+            json_output(binary, &["--db", db, "init"])?;
+            // A person's read goes through the queue's service, which the
+            // build never opens the DB for (ADR-t3105-1 decision 3): its
+            // service is started for the read and stopped after. A build
+            // before the queue service has no `service` and reads the DB.
+            // The read is the user's: an install the inbox runs has no
+            // token for this queue's service.
+            let served = json_output(binary, &["--db", db, "service", "start"]).is_ok();
+            let read = user_output(binary, &["--db", db, "list"]).and_then(|text| {
+                serde_json::from_str::<Value>(&text)
+                    .with_context(|| format!("read what {} printed", binary.display()))
+            });
+            if served {
+                let _ = output(binary, &["--db", db, "service", "stop"]);
+            }
+            read.map(drop)
         })();
         let _ = fs::remove_dir_all(&dir);
         result

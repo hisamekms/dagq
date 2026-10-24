@@ -110,6 +110,8 @@ impl StandInOwner {
 }
 
 fn dagq(db: &Path, args: &[&str]) -> std::process::Output {
+    // A `service` command takes over a service started for the test.
+    host_client_env(db, &[], args);
     Command::new(env!("CARGO_BIN_EXE_dagq"))
         .without_actor_env()
         .owned_by_test()
@@ -118,6 +120,217 @@ fn dagq(db: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .bounded_output()
         .unwrap()
+}
+
+/// The variables a read of the queue service depends on: the service
+/// reads with its own, so a test's service runs with the caller's.
+const READ_ENV: [&str; 7] = [
+    "PATH",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "TZ",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+];
+
+/// The file beside a queue that says the helper started its service for
+/// the test ([`serve_for_test`]), with the [`READ_ENV`] it runs with.
+fn test_service_file(dir: &Path) -> PathBuf {
+    dir.join("test-service.env")
+}
+
+/// What a test's `dagq` of the user, the inbox or a planner with `env`
+/// needs for `args` on the queue at `db`, since it never opens the DB for
+/// a command the queue service answers (ADR-t3105-1 decision 3): the
+/// queue's service, started for the test when none ever ran for the queue
+/// or started again when the one started for it reads with other
+/// [`READ_ENV`] ([`serve_for_test`]), and for the inbox and a planner the
+/// environment names a token of its own unless `env` names one: the
+/// inbox's bound to this test's process as its session, a planner's to
+/// the planner its actor id names ([`role_planner`] when it names none).
+/// The variables to add to the command's environment; none for another
+/// role, a command the service does not answer, a queue that is not there,
+/// or a queue whose service the test runs itself (a `service stop` hands
+/// the one started for the test over to it).
+pub fn host_client_env(db: &Path, env: &[(&str, &str)], args: &[&str]) -> Vec<(String, String)> {
+    use dagq::domain::queue_service::{CREDENTIAL_FILE_ENV, LOCK_FILE, SERVICE_DIR};
+    let named = |name: &str| {
+        env.iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| *value)
+    };
+    let role = named(dagq::domain::actor::ROLE_ENV);
+    let Ok(db) = std::fs::canonicalize(db) else {
+        return Vec::new();
+    };
+    let dir = db.parent().unwrap();
+    if args.first() == Some(&"service") {
+        let _ = std::fs::remove_file(test_service_file(dir));
+        return Vec::new();
+    }
+    let routed = args.first() == Some(&"watch") || UseCase::of_command(args).is_some();
+    if !matches!(role, None | Some("inbox" | "planner")) || !routed {
+        return Vec::new();
+    }
+    let wanted: Vec<(String, String)> = READ_ENV
+        .iter()
+        .filter_map(|name| named(name).map(|value| ((*name).to_owned(), value.to_owned())))
+        .collect();
+    let started = std::fs::read(test_service_file(dir))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<(String, String)>>(&bytes).ok());
+    match started {
+        Some(running) => {
+            // What the service reads with: what it was started with, else
+            // the test's own. A caller that sets another value of one (but
+            // `PATH`, which only locates programs) gets a service of its
+            // own, which keeps the rest.
+            let value = |name: &str| {
+                running
+                    .iter()
+                    .find(|(set, _)| set == name)
+                    .map(|(_, value)| value.clone())
+                    .or_else(|| std::env::var(name).ok())
+            };
+            let differs = wanted
+                .iter()
+                .any(|(name, set)| name != "PATH" && value(name).as_deref() != Some(set));
+            let up =
+                service::probe(dir).state == dagq::domain::queue_service::ServiceState::Running;
+            if differs || !up {
+                let mut env = running;
+                env.retain(|(name, _)| !wanted.iter().any(|(set, _)| set == name));
+                env.extend(wanted);
+                stop_for_test(dir);
+                serve_for_test(&db, &env);
+            }
+        }
+        None if !dir.join(SERVICE_DIR).join(LOCK_FILE).exists() => {
+            serve_for_test(&db, &wanted);
+        }
+        None => {}
+    }
+    if named(CREDENTIAL_FILE_ENV).is_some() {
+        return Vec::new();
+    }
+    let mut handed = Vec::new();
+    let principal = match role {
+        Some("inbox") => {
+            let pid = std::process::id();
+            Principal::inbox(dagq::domain::queue_service::SessionProcess {
+                pid,
+                start: dagq::infrastructure::adapters::session_start(pid).unwrap(),
+            })
+        }
+        Some("planner") => match named(dagq::domain::actor::ACTOR_ID_ENV) {
+            Some(actor) => {
+                let Some(id) = actor
+                    .strip_prefix("planner:")
+                    .and_then(|id| id.parse().ok())
+                else {
+                    return Vec::new();
+                };
+                Principal::planner(id)
+            }
+            // A planner the test names by its role only is the one the
+            // test opened for it: every planner on the host is a
+            // runtime's, with an id.
+            None => {
+                let id = role_planner(&db);
+                handed.push((
+                    dagq::domain::actor::ACTOR_ID_ENV.to_owned(),
+                    format!("planner:{id}"),
+                ));
+                Principal::planner(id)
+            }
+        },
+        _ => return Vec::new(),
+    };
+    let held = service::credential_path_of(dir, &principal);
+    let file = if held.is_file() {
+        held
+    } else {
+        service::issue(dir, &principal, 1).unwrap().file
+    };
+    handed.push((
+        CREDENTIAL_FILE_ENV.to_owned(),
+        file.to_str().unwrap().to_owned(),
+    ));
+    handed
+}
+
+/// Start a service of the queue at `db` for this test with `env` (of
+/// [`READ_ENV`]), as `service serve`, which records no event, and wait
+/// until it answers. It stops when the test's process or the queue's
+/// directory goes ([`OwnedByTest`]).
+pub fn serve_for_test(db: &Path, env: &[(String, String)]) {
+    let dir = db.parent().unwrap();
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("test-service.log"))
+        .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command.without_actor_env().owned_by_test();
+    command.envs(env.iter().map(|(key, value)| (key, value)));
+    // A child left running: it is reaped with the test's process.
+    drop(
+        command
+            .arg("--db")
+            .arg(db)
+            .args(["service", "serve"])
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let _waiting = common::within(TIMEOUT, "the test's queue service to answer");
+    while service::probe(dir).state != dagq::domain::queue_service::ServiceState::Running {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::write(test_service_file(dir), serde_json::to_vec(env).unwrap()).unwrap();
+}
+
+/// Stop the service [`serve_for_test`] started for the queue in `dir`,
+/// and wait until it no longer holds the queue.
+fn stop_for_test(dir: &Path) {
+    use dagq::domain::queue_service::{SERVICE_DIR, STATE_FILE};
+    let _ = std::fs::remove_file(test_service_file(dir));
+    let pid = std::fs::read(dir.join(SERVICE_DIR).join(STATE_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|record| record["pid"].as_i64());
+    if let Some(pid) = pid.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+        // SAFETY: kill(2) takes no pointer.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+    let _waiting = common::within(TIMEOUT, "the test's queue service to stop");
+    while service::probe(dir).state != dagq::domain::queue_service::ServiceState::Stopped {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The planner of the queue at `db` a test's `dagq` named by the role
+/// `planner` only runs as: a runtime's, opened the first time and named
+/// in a file beside the queue after.
+fn role_planner(db: &Path) -> i64 {
+    let file = db.with_file_name("test-role-planner");
+    if let Some(id) = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|id| id.trim().parse().ok())
+    {
+        return id;
+    }
+    let id = dagq::infrastructure::sqlite::SqliteQueue::open(db)
+        .unwrap()
+        .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
+        .unwrap()
+        .id
+        .as_i64();
+    std::fs::write(&file, id.to_string()).unwrap();
+    id
 }
 
 /// Start the service of the queue at `db` unless this test process did
@@ -215,12 +428,33 @@ pub fn token(queue: &Queue, principal: &Principal) -> String {
     service::read_token(&issued.file).unwrap()
 }
 
+/// `use_case` with `params` to the queue's service with `token`, from this
+/// test's process: with no token, the user's (ADR-t3102-1 decision 1).
 pub fn call(queue: &Queue, token: Option<&str>, use_case: UseCase, params: Value) -> Value {
+    request(queue, token, None, use_case, params)
+}
+
+/// [`call`] with no token from an environment that names `role`, which the
+/// service never takes for the user's.
+pub fn call_as_role(queue: &Queue, role: &str, use_case: UseCase, params: Value) -> Value {
+    request(queue, None, Some(role), use_case, params)
+}
+
+fn request(
+    queue: &Queue,
+    token: Option<&str>,
+    env_role: Option<&str>,
+    use_case: UseCase,
+    params: Value,
+) -> Value {
     let response = service::call(
         &service::socket_path(queue.dir()),
         &ServiceRequest {
             api_version: API_VERSION,
             token: token.map(str::to_owned),
+            env_role: env_role.map(str::to_owned),
+            queue: None,
+            binding: None,
             use_case,
             params,
         },
@@ -230,11 +464,18 @@ pub fn call(queue: &Queue, token: Option<&str>, use_case: UseCase, params: Value
     serde_json::to_value(response).unwrap()
 }
 
+/// The queue's events of `kind`, oldest first, as `events --full` prints
+/// them, read by the test as a library: a served queue's `dagq` reads
+/// through its service, which may be stopped by then.
 pub fn events(db: &Path, kind: &str) -> Vec<Value> {
-    ok(db, &["events", "--all", "--full", "--kind", kind])["events"]
-        .as_array()
+    dagq::infrastructure::sqlite::SqliteQueue::open(db)
         .unwrap()
-        .clone()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind.as_str() == kind)
+        .map(|event| serde_json::to_value(event).unwrap())
+        .collect()
 }
 
 /// The queue's `telemetry_token_*` events of the targets of no run of

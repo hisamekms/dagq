@@ -59,9 +59,9 @@ pub use host::{
 };
 pub use observation::{
     CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, ci_failures, doctor, events,
-    events_matching, graph_diagram, observe, observer_launch, queue_agents, read_queue,
-    service_detail, service_reads, stats, status, status_for, throughput_review,
-    throughput_review_launch, timeline, timeline_in, watch, watch_in,
+    events_matching, graph_diagram, graph_svg_of, observe, observer_launch, queue_agents,
+    read_queue, service_detail, service_reads, stats, status, status_for, throughput_review,
+    throughput_review_launch, timeline, timeline_in, watch, watch_in, watch_through_service,
 };
 pub use planning::{
     PLANNER_TIMEOUT, PlannerEntry, planner_session, planner_session_with_provider, planners,

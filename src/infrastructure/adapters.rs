@@ -301,6 +301,10 @@ impl ProcessControl for SystemProcesses {
         process_started_at(pid)
     }
 
+    fn session_start(&self, pid: u32) -> Option<String> {
+        session_start(pid)
+    }
+
     fn executables(&self) -> Result<Vec<ProcessExecutable>> {
         // One `ps` for the pids and parents, then one cheap read per pid
         // for its executable (task 1590); no working directories.
@@ -320,6 +324,22 @@ impl ProcessControl for SystemProcesses {
             .map(|listing| crate::domain::headless_job::descendants(&parse_ps(&listing), pid))
             .unwrap_or_default()
     }
+}
+
+/// When the process `pid` started, as `ps` prints its `lstart` in the C
+/// locale and in UTC (`TZ=UTC0`), so the person's shell, the queue service
+/// under launchd and the supervisor read the same text whatever zone their
+/// environments name; `None` when `ps` finds no such process.
+pub fn session_start(pid: u32) -> Option<String> {
+    let start = output(
+        Command::new("ps")
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC0")
+            .args(["-o", "lstart=", "-p", &pid.to_string()]),
+    )
+    .ok()?;
+    let start = start.trim();
+    (!start.is_empty()).then(|| start.to_owned())
 }
 
 /// When the process `pid` started, in unix seconds on the system clock:

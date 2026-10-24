@@ -132,3 +132,75 @@ fn the_inbox_watch_pushes_a_new_ask_once_and_only_with_a_push_that_may_fail() {
     );
     assert!(!error.contains("hooks.example"), "{error}");
 }
+
+/// A queue bound to a repository is named after that repository in the
+/// inbox's notification, also when its watch runs in another repository
+/// and names the queue with `--db`, which binds nothing: the binding comes
+/// with the service's answer to each look, as the queue records it.
+#[test]
+fn a_bound_queue_s_push_names_its_repository_when_watched_from_another() {
+    use crate::common::{Bounded, WithoutActor, service::OwnedByTest};
+    let (dir, db) = cli::queue();
+    let bound = dir.path().join("bound-repo");
+    let elsewhere = dir.path().join("elsewhere");
+    for repo in [&bound, &elsewhere] {
+        std::fs::create_dir(repo).unwrap();
+        common::template::repository(repo, "seed");
+    }
+    let common_dir = std::fs::canonicalize(bound.join(".git")).unwrap();
+    dagq::infrastructure::sqlite::SqliteQueue::open(&db)
+        .unwrap()
+        .bind_repository(common_dir.to_str().unwrap())
+        .unwrap();
+    cli::ok(&db, &["add", "first"]);
+    let start = cli::ok(&db, &["status", "--role", "inbox"])["cursor"]
+        .as_i64()
+        .unwrap();
+    cli::push_stub(&db);
+    ask(&db, "1", "which way?");
+
+    let after = start.to_string();
+    let args = [
+        "watch",
+        "--role",
+        "inbox",
+        "--after",
+        &after,
+        "--timeout",
+        "1",
+        "--interval",
+        "1",
+    ];
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command
+        .without_actor_env()
+        .owned_by_test()
+        .current_dir(&elsewhere)
+        .env("DAGQ_ROLE", "inbox")
+        .env("XDG_CONFIG_HOME", dir.path().join("config"));
+    cli::reach(&mut command, &db, &args);
+    let output = command
+        .arg("--db")
+        .arg(&db)
+        .args(args)
+        .bounded_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let watched: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        watched["ask_push"],
+        serde_json::json!({"asks": 1, "sent": true}),
+        "{watched}"
+    );
+    let sent = cli::pushed(&db);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        sent[0]["title"], "bound-repo: 1 new ask(s) for the inbox",
+        "{sent:?}"
+    );
+    assert_eq!(sent[0]["queue"], db.display().to_string());
+}

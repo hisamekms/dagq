@@ -29,6 +29,7 @@ tags:
 - [Toolchain profiles](toolchain-profiles.md)（言語・道具の知識を持つprofileのportと組み込みの登録・`dagq.toml`の宣言と当て方・runtimeの共通の分類との分担・新しいprofileの足し方）
 - [Queue broker](queue-broker.md)（containerのrunの唯一の出口になるhostのプロセス。queue serviceの宛てへのrun tokenの検証と転送・拒否の記録・`up`・`down`・supervisorによる起動と停止）
 - [Queue service](queue-service.md)（hostで動きqueue DBを開くservice。unix socket・APIのversion・tokenによるprincipalとservice側の認可・ask・show・noteのユースケース・`up`・`down`・supervisorによる起動と停止・落ちたときのattention）
+- [Queue serviceのhostのCLI](queue-service-host-cli.md)（人・inbox・plannerのCLIがserviceへ送る範囲・userをsocketのpeerで決めること・届かないとき・段の後の一度だけの開き直し）
 - [Supervisor lifecycle](supervisor-lifecycle.md)（目次。各節は[`supervisor-lifecycle/`](supervisor-lifecycle/)の下の別のファイルにある）
 - [Provider lifecycle](provider-lifecycle.md)
 - [Executionのトークン数](execution-tokens.md)（非対話のturnとheadlessのjobの1回ごとのトークン数の記録の形・providerごとの数える元・今の穴）

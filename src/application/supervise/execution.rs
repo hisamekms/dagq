@@ -2196,28 +2196,34 @@ impl Supervisor<'_> {
     /// Revoke the tokens of the workers and the session wrappers whose
     /// runs ended or are not in the queue (`run_token_ended`), those the
     /// end of their run did not revoke: a run that ended while no
-    /// supervisor looked, by a cancel, or by another process; and those of
-    /// the planners' wrappers whose planner exited or closed. A run or a
+    /// supervisor looked, by a cancel, or by another process; those of
+    /// the planners and their wrappers whose planner ended
+    /// (`planner_token_ended`); and the inbox's whose session ended
+    /// (`session_token_ended`). A run or a
     /// planner whose record does not read keeps its token.
     fn sweep_worker_tokens(&self) {
         use crate::domain::queue_service::{Principal, run_token_ended};
-        use crate::domain::session_step::TargetKind;
         let queue = &self.queue;
+        let processes = &self.processes;
         let mut ended = |principal: &Principal| {
-            if let Some(target) = principal
-                .target
-                .as_ref()
-                .filter(|_| principal.role == crate::domain::ActorRole::Wrapper)
-                .filter(|target| target.kind == TargetKind::Planner)
+            // An inbox's ends with its session's process (ADR-t3102-1
+            // decision 2): its pid gone, or another process's start on it.
+            // A start that does not read keeps the token, as a run whose
+            // status does not read does.
+            if principal.session.is_some() {
+                return crate::domain::queue_service::session_token_ended(principal, |session| {
+                    processes.alive(session.pid)
+                        && processes
+                            .session_start(session.pid)
+                            .is_none_or(|start| start == session.start)
+                });
+            }
+            if let Some(ended) =
+                crate::domain::queue_service::planner_token_ended(principal, |id| {
+                    queue.planner(id).ok()
+                })
             {
-                return target
-                    .id
-                    .parse()
-                    .ok()
-                    .and_then(|id| queue.planner(crate::domain::PlannerId::new(id)).ok())
-                    .is_some_and(|planner| {
-                        planner.exited_at.is_some() || planner.closed_at.is_some()
-                    });
+                return ended;
             }
             let Some(run) = &principal.run_id else {
                 return false;

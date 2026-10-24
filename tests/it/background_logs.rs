@@ -212,6 +212,7 @@ fn a_closed_background_planners_log_is_read_by_its_id() {
         printed(&fx.db, &["planner", "log", &id, "--follow"]),
         written
     );
+    // The queue's service answers it, with the queue's real path.
     let planners = cli::ok(&fx.db, &["planners", "--all"]);
     assert_eq!(
         planners["planners"][0]["background"],
@@ -219,7 +220,7 @@ fn a_closed_background_planners_log_is_read_by_its_id() {
             "handle": handle,
             "pid": wrapper.pid,
             "start": wrapper.start,
-            "log": log.display().to_string(),
+            "log": log.canonicalize().unwrap().display().to_string(),
         }),
         "{planners}"
     );

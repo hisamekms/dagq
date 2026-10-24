@@ -9,10 +9,13 @@ use crate::runtime_support::*;
 /// `dagq kpi` on the queue at `db` in UTC, with the host-wide settings
 /// read from `config` rather than the home of the person running the tests.
 fn kpi(db: &Path, config: &Path, args: &[&str]) -> Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command
         .without_actor_env()
         .env("TZ", "UTC")
-        .env("XDG_CONFIG_HOME", config)
+        .env("XDG_CONFIG_HOME", config);
+    crate::common::cli::reach(&mut command, db, &["kpi"]);
+    let output = command
         .arg("--db")
         .arg(db)
         .arg("kpi")

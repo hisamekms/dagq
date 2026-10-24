@@ -23,10 +23,32 @@ use super::{
 };
 
 /// The API version this binary speaks. A change a caller of the version
-/// before cannot read raises it.
-pub const API_VERSION: u32 = 1;
-/// The oldest API version the service still answers.
+/// before cannot read raises it, and so does one a service of the version
+/// before would skip but must act on: from version 2 a host `dagq` names
+/// its queue ([`ServiceRequest::queue`]) and an inbox's token its session
+/// ([`Principal::session`]), which a service of version 1 neither compares
+/// nor checks, so that service refuses every request of version 2 before
+/// it reads the token.
+pub const API_VERSION: u32 = 2;
+/// The oldest API version the service still answers: a worker's or a
+/// job's `dagq` of version 1 names no queue, and is answered as before.
 pub const MIN_API_VERSION: u32 = 1;
+/// The first API version whose host `dagq` names its queue and whose
+/// inbox's token names its session ([`API_VERSION`]).
+pub const HOST_CLIENT_API_VERSION: u32 = 2;
+
+/// The API version a request of `use_case` is sent at: [`MIN_API_VERSION`]
+/// for a hello, which names nothing a service has to act on, so that a
+/// service of an older build that does not take [`API_VERSION`] still
+/// answers it with its build and is found as one of another build (and
+/// replaced) rather than refusing; [`API_VERSION`] for every other.
+pub fn request_version(use_case: UseCase) -> u32 {
+    if use_case == UseCase::Hello {
+        MIN_API_VERSION
+    } else {
+        API_VERSION
+    }
+}
 /// The service's directory under the queue's directory.
 pub const SERVICE_DIR: &str = "service";
 /// The socket in [`SERVICE_DIR`].
@@ -137,6 +159,9 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         UseCase::Graph => "narrow to one goal with --goal",
         UseCase::Forecast => "narrow with --task / --goal",
         UseCase::Status => "narrow the attention to one role's with --role",
+        UseCase::WatchPoll => {
+            "narrow the attention to one role's with --role, or pass a later --after"
+        }
         UseCase::Asks => "leave out --all, or narrow with --open / --role",
         UseCase::Show => "leave out --full, or show fewer events with a smaller --events",
         UseCase::Timeline => "leave out --full, or report fewer gaps with a larger --gap",
@@ -153,6 +178,9 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         UseCase::AgentResults | UseCase::AgentSets => {
             "take fewer with a smaller --limit, or narrow with --agent"
         }
+        UseCase::Requests | UseCase::Replans => "name one with its ID, or leave out --all",
+        UseCase::CiFailures => "narrow to one task's with --task",
+        UseCase::Planners => "leave out --all",
         UseCase::ProposalShow | UseCase::AgentResult | UseCase::AgentSet => {
             "its command has no option that narrows the answer"
         }
@@ -246,6 +274,14 @@ string_enum!(UseCase {
     // A section of an observation's whole input, as `dagq observe --input`
     // prints it: what the observer's prompt left out (task 1567).
     ObserveInput => "observe_input",
+    // The planning requests, the replanning operations, the landing
+    // branch's known CI failures and the planners with their states, as
+    // `dagq requests`, `dagq replans`, `dagq ci failures` and `dagq
+    // planners` print them.
+    Requests => "requests",
+    Replans => "replans",
+    CiFailures => "ci_failures",
+    Planners => "planners",
     // The eval of an agent (ADR-t1728-1 decisions 5 and 6): a request of a
     // round, which the supervisor runs, as `dagq agent eval` records it,
     // and the rounds and one round read back, as `dagq agent results` and
@@ -256,6 +292,12 @@ string_enum!(UseCase {
     // A worker's proposal to replan its own run, as `dagq replan
     // propose` records it (ADR-t1521-2 decision 3).
     ReplanPropose => "replan_propose",
+    // One look of `dagq watch` at the queue (ADR-t3102-3 decision 2): the
+    // attention past a cursor for a role and the supervisors' health, read
+    // at once and never waited on in the service, so a client-mode watch
+    // waits between its looks itself and finds at its next look that the
+    // service does not answer.
+    WatchPoll => "watch_poll",
     // A production set of an agent's cases (ADR-t1728-1 (g)): a request,
     // which the supervisor makes, and a decision on a case's label, as
     // `dagq agent cases` and `dagq agent decide` record them; a person's,
@@ -300,7 +342,8 @@ impl UseCase {
     /// The use case a `dagq` command line goes to through the service:
     /// `words` are its arguments after the global options, the subcommand
     /// first. `None` for a command the service does not answer (the
-    /// control side's, `watch`, `report`, `graph --out`, `ask close`,
+    /// control side's, `watch`, whose looks only the host's `dagq` sends as
+    /// [`Self::WatchPoll`], `report`, `graph --out`, `ask close`,
     /// `observe` without `--history` or `--input`, `locate`, `doctor`, the planning
     /// commands, ...).
     pub fn of_command(words: &[&str]) -> Option<Self> {
@@ -342,6 +385,10 @@ impl UseCase {
             ("lint", _) => Self::Lint,
             ("observe", _) if has("--history") => Self::ObserveHistory,
             ("observe", _) if has("--input") => Self::ObserveInput,
+            ("requests", _) => Self::Requests,
+            ("replans", _) => Self::Replans,
+            ("ci", Some("failures")) => Self::CiFailures,
+            ("planners", _) => Self::Planners,
             ("agent", Some("eval")) => Self::AgentEval,
             ("agent", Some("results")) => Self::AgentResults,
             ("agent", Some("result")) => Self::AgentResult,
@@ -389,6 +436,10 @@ string_enum!(
     /// answer the request the broker passed on. The broker never opens the
     /// queue instead.
     Unreachable => "unreachable",
+    /// `wrong_queue`: the request names a queue DB other than the one the
+    /// service serves (the host's `dagq` resolved another queue in the same
+    /// directory), checked before anything is read.
+    WrongQueue => "wrong_queue",
     /// `response_too_large`: the answer is longer than
     /// [`MAX_ANSWER_BYTES`], so the service sends this instead of a part of
     /// it, with how to narrow the read ([`too_large_message`]).
@@ -409,9 +460,29 @@ string_enum!(ServiceState {
 pub struct ServiceRequest {
     pub api_version: u32,
     /// The token the control side issued for the caller; `None` for
-    /// [`UseCase::Hello`].
+    /// [`UseCase::Hello`] and a person's (ADR-t3102-1 decision 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The role the caller's environment names (`DAGQ_ROLE`), sent only
+    /// with no token: a request that names one and carries no token is
+    /// refused as `missing_token` and never taken for the user's
+    /// (ADR-t3102-1 decision 1). Not what the service authorizes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_role: Option<String>,
+    /// The queue DB the caller resolved (the host's `dagq`, from `--db` or
+    /// its working directory), which the service compares with its own
+    /// before anything else and refuses as [`ServiceErrorCode::WrongQueue`]
+    /// when they differ, opening neither. `None` from a caller that names
+    /// no queue (a worker's or a job's, given only the socket).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<std::path::PathBuf>,
+    /// The Git common directory of the repository the host's `dagq` ran in
+    /// for a repository queue, which the service compares with the one the
+    /// queue is bound to before it answers, as the command line did on
+    /// every command of a repository queue; `None` from a caller that names
+    /// none (a `--db` queue's, a worker's or a job's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
     pub use_case: UseCase,
     #[serde(default)]
     pub params: Value,
@@ -570,7 +641,8 @@ pub struct Principal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<TaskId>,
     /// The one target of an executor's telemetry principal or a session
-    /// wrapper; `None` for every other principal.
+    /// wrapper, and the planner of a planner's; `None` for every other
+    /// principal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<StepTarget>,
     /// The registration of a supervisor principal (ADR-t3102-1 decisions 2
@@ -578,12 +650,75 @@ pub struct Principal {
     /// back carries. `None` for every other principal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registration: Option<LeaseToken>,
+    /// The inbox's session (ADR-t3102-1 decisions 2 and 3): the process
+    /// of its agent, whose end ends the token. `None` for every other
+    /// principal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionProcess>,
+}
+
+/// A session a token is bound to: the process of its agent, by its pid and
+/// the start the system prints for it in UTC (`ProcessControl::session_start`),
+/// so that another process that takes the pid later is not taken for it. `dagq inbox` puts the inbox's agent
+/// in its own process's place, so the pid and the start are those of the
+/// `dagq inbox` that issued the token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProcess {
+    pub pid: u32,
+    pub start: String,
 }
 
 impl Principal {
     /// The worker (or its resume) of `run` on `task`.
     pub fn worker(run: &RunId, task: TaskId) -> Self {
         Self::of(&ActorContext::worker(run, task))
+    }
+
+    /// The user: a request with no token and no role from a peer of the
+    /// service's own OS user on its socket (ADR-t3102-1 decision 1). No
+    /// token is ever issued for it ([`Self::check`] refuses it).
+    pub fn user() -> Self {
+        Self::of(&ActorContext::user())
+    }
+
+    /// The inbox of the session `session` (ADR-t3102-1 decisions 2 and 3):
+    /// its actor id is the inbox's, and its token ends with the session's
+    /// process, or when the inbox is opened again (an issue for the same
+    /// actor revokes the one before).
+    pub fn inbox(session: SessionProcess) -> Self {
+        Self {
+            session: Some(session),
+            ..Self::of(&ActorContext::new(
+                ActorRole::Inbox,
+                ActorRole::Inbox.as_str(),
+            ))
+        }
+    }
+
+    /// Planner `id` of the runtime's (ADR-t3102-1 decision 2): its actor
+    /// id is `planner:<id>`, and its one target the planner, so its token
+    /// ends when the planner is closed.
+    pub fn planner(id: i64) -> Self {
+        Self {
+            target: Some(StepTarget::of(super::session_step::TargetKind::Planner, id)),
+            ..Self::of(&ActorContext::instance(ActorRole::Planner, id))
+        }
+    }
+
+    /// The principal the control side issues, as it starts its turn, for
+    /// `actor`, a planner whose `dagq` takes a token: the planner its actor
+    /// id names ([`Self::planner`]). `None` for a planner whose id names
+    /// none and any other role: the user takes no token, and the inbox's
+    /// is issued by `dagq inbox` for its session ([`Self::inbox`]).
+    pub fn host_client(actor: &ActorContext) -> Option<Self> {
+        match actor.role() {
+            ActorRole::Planner => actor
+                .actor_id()
+                .strip_prefix("planner:")
+                .and_then(|id| id.parse().ok())
+                .map(Self::planner),
+            _ => None,
+        }
     }
 
     /// The principal of `actor`.
@@ -595,6 +730,7 @@ impl Principal {
             task_id: actor.task_id(),
             target: None,
             registration: None,
+            session: None,
         }
     }
 
@@ -620,6 +756,7 @@ impl Principal {
             run_id,
             target: Some(target.clone()),
             registration: None,
+            session: None,
         }
     }
 
@@ -636,6 +773,7 @@ impl Principal {
             run_id,
             target: Some(target.clone()),
             registration: None,
+            session: None,
         }
     }
 
@@ -643,11 +781,12 @@ impl Principal {
     /// (ADR-t1233-4 decision 4), an executor's telemetry principal whose
     /// actor id and run are its one target's (ADR-t1662-3 decisions 9 and
     /// 13), a supervisor, whose one target is its registration
-    /// (ADR-t3102-1 decision 3), and the session wrapper of one run (with
-    /// its task) or one planner (ADR-t3102-1 decision 3). No other
-    /// principal has a target or a registration. A person and the rest of
-    /// the control side (the integrator) open the DB themselves until
-    /// their stage of (5).
+    /// (ADR-t3102-1 decision 3), the session wrapper of one run (with its
+    /// task) or one planner, the inbox of one session, and a planner whose
+    /// one target is the planner its actor id names (ADR-t3102-1 decision
+    /// 3). No other principal has a target, a registration or a session.
+    /// The user takes no token (decision 1), and the rest of the control
+    /// side (the integrator) opens the DB itself until its stage.
     pub fn check(&self) -> Result<(), DomainError> {
         let refuse = |value: String| {
             Err(DomainError::UnknownValue {
@@ -667,8 +806,26 @@ impl Principal {
                 refuse(format!("{} of a registration", self.role.as_str()))
             };
         }
+        match (&self.session, self.role) {
+            (Some(_), ActorRole::Inbox) => {}
+            (Some(session), role) => {
+                return refuse(format!("{} of session {}", role.as_str(), session.pid));
+            }
+            (None, ActorRole::Inbox) => return refuse("inbox of no session".to_owned()),
+            (None, _) => {}
+        }
         match (&self.target, self.role) {
+            (None, ActorRole::Planner) => refuse("planner of no planner".to_owned()),
             (None, role) if role.trust() == super::TrustLevel::UntrustedAgent => Ok(()),
+            (None, ActorRole::Inbox) if self.run_id.is_none() && self.task_id.is_none() => Ok(()),
+            (Some(target), ActorRole::Planner)
+                if target.kind == super::session_step::TargetKind::Planner
+                    && self.actor_id == format!("planner:{}", target.id)
+                    && self.run_id.is_none()
+                    && self.task_id.is_none() =>
+            {
+                Ok(())
+            }
             (Some(target), ActorRole::ExecutorTelemetry)
                 if self.actor_id == super::telemetry::actor_id(target)
                     && self.run_id == target.run_id()
@@ -706,11 +863,16 @@ impl Principal {
     /// The name its token is kept under, which a new issue for it
     /// replaces: its actor id, and a supervisor's registration with it, as
     /// one process may run more than one supervisor (a test's does) under
-    /// the one actor id its events record.
+    /// the one actor id its events record, or an inbox's session with it,
+    /// so that the file a session was handed never holds the token of a
+    /// session opened after it (ADR-t3102-1 decision 2).
     pub fn credential_key(&self) -> String {
-        match &self.registration {
-            Some(registration) => format!("{}@{}", self.actor_id, registration.as_str()),
-            None => self.actor_id.clone(),
+        match (&self.registration, &self.session) {
+            (Some(registration), _) => format!("{}@{}", self.actor_id, registration.as_str()),
+            (None, Some(session)) => {
+                format!("{}@{}:{}", self.actor_id, session.pid, session.start)
+            }
+            (None, None) => self.actor_id.clone(),
         }
     }
 
@@ -744,11 +906,25 @@ pub fn wrapper_actor_id(target: &StepTarget) -> String {
 /// Whether the `dagq` of an actor of `role` runs in client mode (goal 82's
 /// stage (3)): the worker (and its resume) and the headless jobs with the
 /// observer get the service's socket and a token instead of the queue's
-/// path. The inbox and the planners open the queue themselves until stage
-/// (5) (ADR-t1233-4 decision 6), as the control side but the supervisor
-/// does ([`UseCase::Supervisor`]).
+/// path. The inbox and the planners keep the queue's path
+/// ([`host_client_role`]), as the control side does but the supervisor
+/// ([`UseCase::Supervisor`]).
 pub const fn client_role(role: ActorRole) -> bool {
     matches!(role, ActorRole::Worker | ActorRole::Observer) || role.is_headless_job()
+}
+
+/// Whether the host `dagq` of an actor of `role` sends the commands the
+/// service answers to the service of the queue it resolves, once that
+/// queue is served (ADR-t3102-2 decisions 5 and 6 (2)): the user as the
+/// peer of its socket, the inbox and a planner with the token the control
+/// side put in a file their environment names, with the queue's path kept
+/// for the commands the service does not answer yet, which open the DB.
+/// Never back to the DB for one the service answers (fail closed).
+pub const fn host_client_role(role: ActorRole) -> bool {
+    matches!(
+        role,
+        ActorRole::User | ActorRole::Inbox | ActorRole::Planner
+    )
 }
 
 /// Whether a token issued on a run still holds while the run is in
@@ -760,6 +936,67 @@ pub const fn run_holds_token(status: RunStatus) -> bool {
         status,
         RunStatus::Integrated | RunStatus::Succeeded | RunStatus::Failed | RunStatus::Interrupted
     )
+}
+
+/// Whether the token of `principal` is an inbox's whose session ended:
+/// `alive` says whether a session's process still runs (its pid and its
+/// start). The service refuses such a token already; the supervisor's
+/// sweep removes its value and record. Every other principal's is left.
+pub fn session_token_ended(principal: &Principal, alive: impl Fn(&SessionProcess) -> bool) -> bool {
+    principal
+        .session
+        .as_ref()
+        .is_some_and(|session| !alive(session))
+}
+
+/// Whether the token of `principal` is a planner's or a planner's session
+/// wrapper's whose planner ended (ADR-t3102-1 decision 2); `None` for every
+/// other principal (an executor's telemetry token of a planner is its own
+/// port's to revoke). `planner` reads the planner the token's target names,
+/// `None` when it does not read, which keeps the token. A planner's own
+/// lasts across its turns until the planner closes, as the service reads it
+/// (`target_ended`); its wrapper's ends as its agent exits too.
+pub fn planner_token_ended(
+    principal: &Principal,
+    planner: impl FnOnce(super::PlannerId) -> Option<super::planner::PlannerSession>,
+) -> Option<bool> {
+    let target = principal
+        .target
+        .as_ref()
+        .filter(|target| target.kind == super::session_step::TargetKind::Planner)?;
+    let wrapper = match principal.role {
+        ActorRole::Wrapper => true,
+        ActorRole::Planner => false,
+        _ => return None,
+    };
+    let session = target
+        .id
+        .parse()
+        .ok()
+        .map(super::PlannerId::new)
+        .and_then(planner);
+    Some(session.is_some_and(|session| {
+        session.closed_at.is_some() || (wrapper && session.exited_at.is_some())
+    }))
+}
+
+/// What to do next when a request of an environment naming `role` came
+/// with no token and was refused as `missing_token` (ADR-t3105-1 decision
+/// 2): an inbox or a planner opened before its build gave it a token's
+/// file has none, and is never taken for the user nor sent to the DB.
+/// `None` for any other role.
+pub fn missing_token_next(role: &str) -> Option<&'static str> {
+    match role.parse::<ActorRole>().ok()? {
+        ActorRole::Inbox => Some(
+            "an inbox opened before it was given a token has none: open the inbox again \
+             (`dagq inbox` in a terminal with no DAGQ_ROLE)",
+        ),
+        ActorRole::Planner => Some(
+            "a planner opened before it was given a token has none: wait for it to close \
+             (the next planner is given one)",
+        ),
+        _ => None,
+    }
 }
 
 /// Whether the token of `principal` is a worker's or a run's session
@@ -806,6 +1043,12 @@ pub const QUEUE_SERVICE_UNAUTHENTICATED: &str =
 /// and outside it (ADR-t3102-3 decision 1): what the supervisor knows
 /// while it reaches no service, and so writes nothing to the queue.
 pub const OUTAGE_FILE: &str = "queue-service-outage.json";
+/// Which outage of [`OUTAGE_FILE`] the host's `watch` of a role returned
+/// already (its `since`), beside it in `<this>-<role>.json` (`none` for a
+/// watch of no role), a file of each role so that watches of two roles
+/// never write over each other's: the next watch of that role waits out
+/// the same outage rather than return it again (ADR-t3102-3 decision 2).
+pub const OUTAGE_TOLD_FILE: &str = "queue-service-outage-told";
 
 /// What [`OUTAGE_FILE`] holds: since when (unix seconds) the supervisor
 /// found the service down, why (`reason`: `unreachable`, `start_failed`
@@ -930,6 +1173,34 @@ mod tests {
                 assert!(message.contains(option), "{use_case:?}: {message}");
             }
         }
+    }
+
+    #[test]
+    fn a_service_of_the_version_before_the_host_client_refuses_its_requests_and_this_one_answers_both()
+     {
+        // A service of version 1 answered that version only.
+        let answered_before = |version: u32| (1..HOST_CLIENT_API_VERSION).contains(&version);
+        let host = ServiceRequest {
+            api_version: API_VERSION,
+            token: None,
+            env_role: None,
+            queue: Some("/q/queue.db".into()),
+            binding: None,
+            use_case: UseCase::Note,
+            params: json!({"task": 3, "text": "x"}),
+        };
+        assert!(host.api_version >= HOST_CLIENT_API_VERSION);
+        assert!(!answered_before(host.api_version));
+        // This service answers the host and a worker of version 1.
+        assert!(answers(host.api_version));
+        assert!(answers(1));
+        // A host `dagq` uses no answer of a service of version 1.
+        let before = ServiceResponse {
+            api_version: 1,
+            min_api_version: 1,
+            ..ServiceResponse::failure(ServiceErrorCode::ApiVersionMismatch, "x")
+        };
+        assert!(!understands(&before));
     }
 
     #[test]
@@ -1283,6 +1554,130 @@ mod tests {
         assert!(!attention_stands(None));
     }
 
+    /// ADR-t3102-1 decision 2: a planner's token ends as its planner
+    /// closes, its wrapper's as its agent exits too; one whose planner does
+    /// not read is kept, and no other principal's is judged so.
+    #[test]
+    fn a_planner_s_token_ends_as_its_planner_closes_and_its_wrapper_s_as_it_exits() {
+        use super::super::session_step::TargetKind;
+        use super::super::{PlannerOrigin, PlannerRoute, planner::PlannerSession};
+        let session = |exited_at, closed_at| PlannerSession {
+            id: super::super::PlannerId::new(7),
+            origin: PlannerOrigin::Runtime,
+            proposal_id: None,
+            draft_task_id: None,
+            finding_id: None,
+            request_id: None,
+            workspace_id: None,
+            wrapper_pid: None,
+            agent_pid: None,
+            heartbeat_at: None,
+            exit_code: None,
+            exited_at,
+            closed_at,
+            error: None,
+            created_at: 1,
+            route: PlannerRoute::Headless,
+            answer_wait_at: None,
+        };
+        let target = StepTarget::of(TargetKind::Planner, 7);
+        let wrapper = Principal::wrapper(&target, None);
+        let planner = Principal::planner(7);
+        let ended = |principal: &Principal, exited, closed| {
+            planner_token_ended(principal, |id| {
+                assert_eq!(id.as_i64(), 7);
+                Some(session(exited, closed))
+            })
+        };
+        for principal in [&planner, &wrapper] {
+            assert_eq!(ended(principal, None, None), Some(false));
+            assert_eq!(ended(principal, Some(2), Some(3)), Some(true));
+            assert_eq!(planner_token_ended(principal, |_| None), Some(false));
+        }
+        assert_eq!(ended(&planner, Some(2), None), Some(false));
+        assert_eq!(ended(&wrapper, Some(2), None), Some(true));
+        for other in [
+            Principal::telemetry(&target, None),
+            Principal::worker(&RunId::new("r1").unwrap(), TaskId::new(1)),
+            Principal::wrapper(&StepTarget::run(&RunId::new("r1").unwrap()), None),
+        ] {
+            assert_eq!(ended(&other, None, Some(3)), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn the_inbox_of_its_session_and_a_planner_of_its_planner_take_tokens_and_the_user_none() {
+        let inbox = ActorContext::new(ActorRole::Inbox, "inbox");
+        let planner = ActorContext::instance(ActorRole::Planner, 7);
+        let session = SessionProcess {
+            pid: 42,
+            start: "Thu Oct 23 10:00:00 2026".to_owned(),
+        };
+        let of_session = Principal::inbox(session.clone());
+        assert_eq!(of_session.actor(), inbox);
+        let of_planner = Principal::host_client(&planner).unwrap();
+        assert_eq!(of_planner, Principal::planner(7));
+        assert_eq!(of_planner.actor(), planner);
+        for principal in [of_session.clone(), of_planner] {
+            assert_eq!(principal.check(), Ok(()), "{principal:?}");
+        }
+        // The user takes no token, nor an inbox of no session, a session of
+        // another role, a planner of no planner or of another one; the
+        // inbox's is not issued at a turn's start.
+        assert_eq!(Principal::host_client(&ActorContext::user()), None);
+        assert_eq!(Principal::host_client(&inbox), None);
+        assert_eq!(
+            Principal::host_client(&ActorContext::new(ActorRole::Planner, "planner")),
+            None
+        );
+        let other = Principal {
+            actor_id: "planner:8".to_owned(),
+            ..Principal::planner(7)
+        };
+        let worker_of_session = Principal {
+            session: Some(session.clone()),
+            ..Principal::worker(&RunId::new("r1").unwrap(), TaskId::new(1))
+        };
+        for refused in [
+            Principal::user(),
+            Principal::of(&inbox),
+            Principal::of(&planner),
+            other,
+            worker_of_session,
+        ] {
+            assert!(refused.check().is_err(), "{refused:?}");
+        }
+        // An inbox's token ends with its session; no other is judged so.
+        assert!(!session_token_ended(&of_session, |s| *s == session));
+        assert!(session_token_ended(&of_session, |_| false));
+        assert!(!session_token_ended(&Principal::planner(7), |_| false));
+        for role in [ActorRole::User, ActorRole::Inbox, ActorRole::Planner] {
+            assert!(host_client_role(role) && !client_role(role), "{role:?}");
+        }
+        assert!(!host_client_role(ActorRole::Worker));
+        assert!(!host_client_role(ActorRole::Supervisor));
+        // A request names the role and the queue only when given, which an
+        // older service never sees.
+        let request = ServiceRequest {
+            api_version: API_VERSION,
+            token: None,
+            env_role: None,
+            queue: None,
+            binding: None,
+            use_case: UseCase::Show,
+            params: json!({"id": 1}),
+        };
+        let sent = serde_json::to_string(&request).unwrap();
+        assert!(
+            !sent.contains("env_role") && !sent.contains("queue"),
+            "{sent}"
+        );
+        // The next step a tokenless inbox or planner is told.
+        assert!(missing_token_next("inbox").unwrap().contains("dagq inbox"));
+        assert!(missing_token_next("planner").unwrap().contains("close"));
+        assert_eq!(missing_token_next("worker"), None);
+    }
+
     #[test]
     fn a_command_line_goes_to_its_use_case_and_the_rest_to_none() {
         for (words, use_case) in [
@@ -1309,6 +1704,10 @@ mod tests {
             (&["agent", "sets", "--agent", "adr-rules"], "agent_sets"),
             (&["agent", "set", "3"], "agent_set"),
             (&["agent", "eval", "adr-rules", "--set", "3"], "agent_eval"),
+            (&["requests", "--all"], "requests"),
+            (&["replans", "3"], "replans"),
+            (&["ci", "failures", "--task", "4"], "ci_failures"),
+            (&["planners", "--all"], "planners"),
         ] {
             assert_eq!(
                 UseCase::of_command(words).map(UseCase::as_str),

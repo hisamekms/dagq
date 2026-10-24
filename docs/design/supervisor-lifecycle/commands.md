@@ -34,7 +34,7 @@ related:
 | `status` | `application::health`の`status`とattentionの導出`attention`、`compose::OneShot::status_of` |
 | `doctor` | `application::health`の`doctor`、`compose::OneShot::doctor` |
 | `events` | `application::watch::events_in`、`domain::views::EventFilter`、`domain::event_attention` |
-| `watch` | `application::watch::watch`、`compose::watch_in`、inboxのwatcherの判定は`application::inbox_watcher` |
+| `watch` | `application::watch::watch`と`watch_through`、`compose::watch_in`とserviceを通る`watch_through_service`、inboxのwatcherの判定は`application::inbox_watcher` |
 | `review` | `application::review::review`、`compose::review` |
 | log | `infrastructure::telemetry`のmodule doc、`main`の`install_telemetry` |
 | `recover` | `application::health::recover`、`RunRecovery::recover_run` |
@@ -67,7 +67,11 @@ related:
 ## 表示とreviewのコマンドをまたぐ約束
 
 - `status`・`doctor`・`events`・`watch`はqueueを読み取り専用で開き、`review`もqueueを読むだけで、どれもqueueの状態もeventも変えない。
+  人・inbox・plannerの`status`・`events`・`watch`はDBを開かずqueue serviceを通る（[hostのCLI](../queue-service-host-cli.md)）。
   `watch --role inbox`が書くwatcherの生存の記録はqueueの外のファイルに置く。
+- serviceに届かないとき、`status`と`watch`は待たずに`unreachable`（errorの`queue_service.code`）で終わり、errorの文が次の手を言い、supervisorが記録した停止を添える（そのroleの`watch`が返した後の同じ停止は除く）。
+  watchを回し直す側はそれを中身として扱い、`dagq service status`で理由を見て、同じcursorからwatchを張り直す。
+  記録された同じ停止は、そのroleの次の`watch`が繰り返さずに待つ。
 - inboxのwatcherが居るかは、`status`・`doctor`・pluginのStop hook・supervisorのinboxへの知らせが同じ判定（`application::inbox_watcher::judge_with`）で読む。
 - `status`・`doctor --full`・`watch`のsupervisorの項目は同じ基礎の情報（`application::health::SupervisorHealth`）から作り、`status`はそれにslotと待ちと控えの欄を足す。
   `status`と`doctor`は一覧に並べるrunを同じ選び方で選ぶ。

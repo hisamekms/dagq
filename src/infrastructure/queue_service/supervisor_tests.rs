@@ -73,6 +73,9 @@ fn call(backend: &SqliteServiceBackend, token: &str, op: &str, args: Value) -> S
     .handle(&ServiceRequest {
         api_version: API_VERSION,
         token: Some(token.to_owned()),
+        env_role: None,
+        queue: None,
+        binding: None,
         use_case: UseCase::Supervisor,
         params: json!({"op": op, "args": args}),
     })

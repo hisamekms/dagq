@@ -256,8 +256,9 @@ fn the_supervisors_health_wakes_the_inbox_with_every_notice_held() {
     notices.push(reported(&db, "hourly"));
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     common::WithoutActor::without_actor_env(&mut command);
+    command.env("XDG_CONFIG_HOME", db.parent().unwrap().join("config"));
+    common::cli::reach(&mut command, &db, &["watch"]);
     let child = command
-        .env("XDG_CONFIG_HOME", db.parent().unwrap().join("config"))
         .arg("--db")
         .arg(&db)
         .args([
