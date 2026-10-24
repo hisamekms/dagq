@@ -209,13 +209,12 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
 
 - 宛ての種類（`ClientRoute`）: hostのworkerとjobはserviceのsocketへ、containerのrunはqueueのbroker（containerの中の転送、[Container runtime](container-runtime.md#brokerへの経路)）へ[Queue broker](queue-broker.md#入口)の要求の形で送る。
   envの意味は`domain::queue_service`の定数のdoc comment
-- 両方があれば設定の誤りとして全てのコマンドを断り、どちらも無ければqueueを自分で開く
+- 両方があれば設定の誤りとして全てのコマンドを断る
+- 宛ての環境が無いhostの`user`・`inbox`・`planner`の`dagq`も、serviceの答えるコマンドは解決したqueueのserviceへ送り（ADR-t3102-2決定5・6(2)、ADR-t3105-1決定3）、届かなければDBを開くことに戻らない。
+  DBを自分で開くのはserviceを通らない残りのコマンドだけで、`check_access`の後に開く（分岐の順は[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）
 - コマンドを引数のとおりに読んで（clapの検査はそのまま）、ユースケースとparamsに写す（`client_request`）。
-  読み取りはCLIの読み取りと同じ`QueueRead`をparamsにし、serviceがそれを同じ読み取りに読み戻す。
 - tokenはcredentialのfileから読み、要求ごとに送る。
-  答えの`result`をCLIと同じに出す。
-  答えを待つ時間と読む長さの上限はどちらの宛ても同じ。
-  上限に達した答えも`response_too_large`
+  答えの`result`をCLIと同じに出す
 - 断り: serviceとbrokerの断りもクライアントの断りも同じ形のerror（`queue_service`の`code`）で終了コード1になり、codeの意味は`ClientFailure`のdoc comment。
   serviceの`authorization_denied`は、codeに加えてローカルのCLIの断りと同じ`denied`（role・capability・reason）とerrorの文（observerとjobには各々の決まった文）を出す。
   クライアントで断るもの（`no_use_case`・`queue_named`など）は`denied`を持たない
@@ -224,7 +223,7 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
   DBもserviceも触らない。
   `no_use_case`になるのはそのほかのserviceのユースケースでない全てのコマンド。
 - `locate`はDBのpathを出さずにsocket（brokerの宛てではbroker）を答え、DBの有無を答えない。
-  serviceへの到達は`hello`（statusの見る待ちと同じ短い待ち）で確かめて足し、答えれば`reachable: true`とserviceのAPI versionの幅とこのclientの版がその中か、答えなければ（brokerの断りも。brokerの宛てで読めるtokenが無ければbrokerに送らない）`reachable: false`と理由を足す（形は`Client::reach`のdoc comment）。
+  serviceへの到達は`hello`（statusの見る待ちと同じ短い待ち）で確かめて足し、brokerの宛てで読めるtokenが無ければbrokerに送らない（足す形は`reach_of`のdoc comment）。
   どちらでも`locate`は成功し、DBを開くことに戻らない。
   pluginの`--resolve`が最初に打ち、dagq skillはDBが無いと分かったときだけ`init`を言うので、workerとjobが`init`を試みない
 - workerとjobのpromptとskillのコマンド（`dagq ask`・`dagq show`など）は変えない。

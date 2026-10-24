@@ -124,7 +124,17 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
 
 ### CLIでの解釈
 
-`execute()`はコマンドの前に環境を`ActorContext::from_env`で読む。
+`execute()`は環境のactorを読む前に、次の経路へ順に分岐し、これらでは環境のactor（`ActorContext::from_env`）を決めない。
+
+- relayとreview program: queueを開かずに動く。
+- 宛ての環境（serviceのsocketかqueueのbroker）があればクライアントモード（`client_mode`）で、tokenのprincipalをserviceが認可する（[Queue service](../queue-service.md#クライアントモード)）。
+- plannerのhook（`session-event`）は報告をwrapperに渡す（spool）。
+  inboxのhookはこの分岐に入らず、下の経路でinboxとして判定されてqueueを開き、eventはinboxのsessionのwrapperのactorで書く（[eventのactor](#eventのactor)）。
+- session wrapper（`session`・`planner-session`）はwrapperのprincipalで動く。
+
+それ以外のコマンドは`ActorContext::from_env`でactorを決める。
+そのactorが`user`・`inbox`・`planner`でserviceの答えるコマンドならqueue serviceへ送り、残りは`check_access`の判定の後にqueueを開く（[Queue service](../queue-service.md#クライアントモード)）。
+`ActorContext::from_env`の読み方は次のとおり。
 
 - `DAGQ_ROLE`が無いか空なら`user`（人）。host実行の互換のためで、助言的（advisory）でありsandboxではない（ADR-t728-1の決定6）。
 - `DAGQ_ROLE`がroleの値（`user`と、queue serviceのprincipalだけのrole `executor-telemetry`を除く）でなければerrorで止まり、queueを開かない（fail closed）。
