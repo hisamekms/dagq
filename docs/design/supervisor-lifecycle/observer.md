@@ -89,16 +89,16 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
      ほかの回数と成功に戻ったものはattentionにしないので、1つの連続に1回だけ届く（毎時のobserverが止まり続けてもinboxを毎時起こさない。ADR-t1418-1）。
      askにせず、claimと着地を止めず、`status`にも残らない（`domain::event_attention`）。
 - **`dagq observe --history`**: 過去のobservationを新しい順に返す（`observe_finished`ごとに1件で、各件の中身は`observer::history`）。
-  読むだけなのでqueueを読み取り専用で開き、observerのenvからも打てる。
+  読むだけで、queue serviceの読み取りのユースケース`observe_history`（[Queue service](../queue-service.md#ユースケース)、`queue.read`）なので、observerのenv（クライアントモード）からも打てる（queueを開くのはservice）。
   終了した観測の出力をruntimeが読み直して分類することはない。
   失敗時の分類は、Claudeのjobは`AgentSignals::job_failure`に両streamを改行でつないで渡し（壁ならqueueのhold askに入る）、Codexのjobは役割がproviderを書いたときだけ`AgentProvider::job_failure(stdout, stderr)`で読む（下の「Codexで動かす」の`provider_unusable`）。
   成功時は分類しない。
 - **`dagq observe --input OBSERVATION`**: observation（`observe --history`の`dir`の名前）の`input.json`、promptが省いたものを含む入力の全体を読む（読み方は`infrastructure::observer::read_input`）。
   読むだけで、queue serviceの読み取りのユースケース`observe_input`（[Queue service](../queue-service.md#ユースケース)、`queue.read`）なので、observerのenv（クライアントモード）からも打てる。
   observerのClaudeは`Bash(dagq:*)`だけでファイルを読めないので、promptはファイルのpathではなくこのコマンドを読む方法として書く（Codexのobserverはread-onlyのsandboxでファイルを読めるが、promptはproviderに依らず同じ）。
-- **権限**: observerのenvからのCLIは許可一覧で判定する（`main.rs`の`check_access`が`StaticPolicy`に問い、計画系と対話・記録系（ask・answer・note・mark・finding）のコマンドはapplicationの層が判定して拒否を`authorization_denied`に記録する。policyの表は[Authorization](../authorization.md)、一覧は[domain-model](../domain-model.md#current-operations)）。
+- **権限**: observerのenvからのCLIはクライアントモードで、queueを開かず`main.rs`の`check_access`も通らない（`execute`が`client_mode`へ送る）。
+  serviceのユースケースの無いコマンドはクライアントの側で`no_use_case`で断り、serviceに届いたものはserviceがobserverのprincipalで認可して（`StaticPolicy`、policyの表は[Authorization](../authorization.md)、一覧は[domain-model](../domain-model.md#current-operations)）、認可されないもの（note・runに紐づくaskなど）を`authorization_denied`で拒んで記録する（[Queue service](../queue-service.md#クライアントモード)）。
   読み取り（`observe --history`と`observe --input`を含む）、`finding record` / `finding resolve`、`ask --kind blocked`だけが通り、ほかの状態を変えるコマンドは拒否される（[Authorization](../authorization.md)の表）。
-  jobのagentはクライアントモードなので、実際にはserviceのユースケースの無いコマンドはクライアントの側で`no_use_case`、serviceに届いて認可されないもの（note・runに紐づくaskなど）はserviceが`authorization_denied`で拒んで記録する（[Queue service](../queue-service.md#クライアントモード)）。
   Codexのobserverには、Claudeのdagqだけを許す道具の代わりのhookやrulesを作らない: read-onlyのsandboxが書き込みと他のprocessへのsignalを拒み、queueへの書き込みはserviceの認可だけが通す。
   Claudeのobserverにhookと拒むコマンドの一覧の設定は無いので、その代わりも作らない（ADR-t1222-1決定5）。
 - **timer**: `supervise`の間隔の設定（hourlyとdaily）。
