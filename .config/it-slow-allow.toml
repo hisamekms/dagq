@@ -1839,11 +1839,11 @@ name = "runtime_claim_defer::a_deferral_stays_shown_while_the_supervisor_does_no
 reason = "B 境界（守る境界）: the supervisor's wiring of its claim pass and `candidates` over SQLite while the slots are full and the claims are held"
 task = 2394
 
-# 9.123s in task 2394's stress, whose change to it was the type of its kind comparisons
+# 4.925s (median of 60 runs, 4.699s to 9.300s; the three rounds of 20: 6.205s, 4.755s, 5.379s) in task 3251's stress, whose change to it was holding the stopped server's port and awaiting the failing pass
 [[test]]
 name = "runtime_sccache::failed_restarts_in_one_supervisor_keep_retrying_but_notify_once_per_fault"
 reason = "B 境界（守る境界）: the supervisor's wiring to the sccache server process: restarts retried by one supervisor and their attention recorded once per fault in SQLite"
-task = 2394
+task = 3251
 
 # 7.884s in task 2394's stress, whose change to it was the type of its kind comparisons
 [[test]]

@@ -810,7 +810,7 @@ esac
         &ps,
         "#!/bin/sh\ncase \"$*\" in *ppid=*) echo '99 00:05 Mon Oct 5 12:00:00 2026 sccache --server';; *) echo '/usr/bin/sandbox-exec -p fixture';; esac\n",
     );
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let listener = port_listener(0);
     let port = listener.local_addr().unwrap().port();
     configure(&repo, &program, port, &path);
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -819,8 +819,14 @@ esac
     let controller = thread::spawn(move || {
         let deadline = Instant::now() + common::STEP_LIMIT;
         let mut listener = Some(listener);
+        let mut _hold = None;
         while !ended.load(Ordering::SeqCst) && Instant::now() < deadline {
-            if server_dir.join("stop-request").exists() {
+            if server_dir.join("stop-request").exists() && listener.is_some() {
+                // The stopped server's port stays this test's to the end:
+                // no replacement listens, and a socket of a test run beside
+                // it bound or connected there would stand for the server
+                // the absent-server retries look at.
+                _hold = Some(PortHold::bind(port));
                 listener.take();
             }
             thread::sleep(Duration::from_millis(5));
@@ -851,6 +857,10 @@ esac
         wait_until(&db, common::STEP_LIMIT, |_| {
             !queue_events(&db, "sccache_server_restart_failed").is_empty()
         });
+        // The pass that recorded the failure notes when it failed after the
+        // event: the clock goes ahead only once that pass has ended, or the
+        // retry would wait from the later time.
+        await_passes(&options.passes, 1);
         for retry in 1..=3 {
             ahead.by(Duration::from_secs(60));
             await_passes(&options.passes, SOME_PASSES);
