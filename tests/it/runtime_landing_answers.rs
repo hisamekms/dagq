@@ -630,3 +630,224 @@ fn a_bare_send_back_of_a_subagents_send_back_carries_its_findings_with_or_withou
     assert!(texts.iter().any(|text| text.contains(&reason)), "{texts:?}");
     assert!(queue.read_ask(second.id).unwrap().closed_at.is_some());
 }
+
+/// [`supervise_options`] of a supervisor that drains from its first pass,
+/// as one asked to stop does.
+fn draining_options(parallel: usize) -> SuperviseOptions {
+    let options = supervise_options(parallel, true);
+    options.stop.store(true, Ordering::SeqCst);
+    options
+}
+
+/// Supervise with `options`, given the `dagq` the test owns
+/// ([`common::service::owned_executable`]), so a service the supervisor
+/// starts stops once the test's process is gone.
+fn supervise_owned(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    reviewer: &TestReviewer,
+    options: &SuperviseOptions,
+) -> Value {
+    let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+    let outcome = runtime::supervise_with_reviewer(
+        db,
+        repo,
+        backend,
+        &claude_stub(db),
+        reviewer,
+        &common::service::owned_executable(db.parent().unwrap()),
+        options,
+    )
+    .unwrap();
+    backend.join();
+    outcome
+}
+
+/// A supervisor that drains for a stop applies the `land`, `send_back`,
+/// `cancel` and `retry_review` answers of runs nobody leases on its passes
+/// and closes their asks (ADR-t3330-1), but starts no new work: no claim,
+/// no resume of the run sent back, no review of the run queued to be
+/// reviewed again, and, with no run of its own left, no landing of the
+/// approved run, which stays queued.
+#[test]
+fn a_draining_supervisor_applies_the_landing_answers_and_starts_no_new_work() {
+    let (_fixture, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    for title in ["second", "third", "fourth"] {
+        add_ready_task(&mut queue, title, &[]);
+    }
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    for task in 1..=4 {
+        backend.script_for(task, &own_change(task));
+    }
+    // One slot: the tasks are reviewed one after another, task 4's review
+    // failing.
+    let reviewer = TestReviewer::new(&[
+        verdict("concern", &["scope"], "a concern"),
+        verdict("concern", &["scope"], "a concern"),
+        verdict("concern", &["scope"], "a concern"),
+        NO_VERDICT.to_owned(),
+        NO_VERDICT.to_owned(),
+    ]);
+    let outcome = supervise_owned(&db, &repo, &backend, &reviewer, &supervise_options(1, true));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let reviews = reviewer.prompts().len();
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 4, "{asks:?}");
+    let mut ask_of = |task: i64| {
+        let run = queue.show(TaskId::new(task)).unwrap().runs[0].clone();
+        asks.iter()
+            .find(|ask| ask.run_id.as_ref() == Some(run.id()))
+            .unwrap()
+            .id
+    };
+    let answers = [
+        (ask_of(1), "land"),
+        (ask_of(2), "send_back"),
+        (ask_of(3), "cancel"),
+        (ask_of(4), "retry_review"),
+    ];
+    for (ask, answer) in answers {
+        queue.answer(ask, answer).unwrap();
+    }
+    let ready = add_ready_task(&mut queue, "fifth", &[]);
+
+    let outcome = supervise_owned(&db, &repo, &backend, &reviewer, &draining_options(4));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    for (ask, _) in answers {
+        assert!(queue.read_ask(ask).unwrap().closed_at.is_some(), "{ask}");
+    }
+    let landed = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(landed.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(queue.run_lease(landed.runs[0].id()).unwrap().is_none());
+    assert_eq!(payloads(&landed, "integration_approved").len(), 1);
+    assert_eq!(payloads(&landed, "landing_queued").len(), 1);
+    assert!(payloads(&landed, "integration_started").is_empty());
+    let sent_back = queue.show(TaskId::new(2)).unwrap();
+    assert_eq!(sent_back.runs[0].status(), RunStatus::NeedsSession);
+    assert_eq!(payloads(&sent_back, "landing_decided").len(), 1);
+    assert!(payloads(&sent_back, "resume_started").is_empty());
+    let canceled = queue.show(TaskId::new(3)).unwrap();
+    assert_eq!(canceled.runs[0].status(), RunStatus::Failed);
+    assert_eq!(canceled.task.status(), TaskStatus::Canceled);
+    let retried = queue.show(TaskId::new(4)).unwrap();
+    assert_eq!(payloads(&retried, "review_retry_queued").len(), 1);
+    assert_eq!(payloads(&retried, "review_started").len(), 1);
+    assert!(queue.show(ready).unwrap().runs.is_empty());
+    assert_eq!(reviewer.prompts().len(), reviews);
+}
+
+/// A `land` answer given while a supervisor drains for a stop, its own run
+/// still at work, is applied and the approved run lands in that drain,
+/// before the drain ends with its own run (ADR-t3330-1). The approved run
+/// is not reviewed again.
+#[test]
+fn a_drain_lands_an_approved_run_while_its_own_run_keeps_it_going() {
+    let (fixture, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    backend.script_for(1, &own_change(1));
+    let reviewer = TestReviewer::new(&[
+        verdict("concern", &["scope"], "a concern"),
+        verdict("pass", &[], "fine"),
+    ]);
+    let outcome = supervise_owned(&db, &repo, &backend, &reviewer, &supervise_options(1, true));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = landing_ask(&mut queue);
+
+    let marker = fixture.dir.path().join("go");
+    let own = add_ready_task(&mut queue, "its own", &[]);
+    backend.script_for(
+        own.as_i64(),
+        &format!("await_file {}; {}", shell_path(&marker), own_change(2)),
+    );
+    let options = SuperviseOptions {
+        stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ..supervise_options(2, false)
+    };
+    let stop = options.stop.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &reviewer,
+                &common::service::owned_executable(db.parent().unwrap()),
+                &options,
+            )
+            .map(|outcome| (outcome, reviewer.prompts().len()))
+        })
+    };
+    let running = |queue: &mut SqliteQueue| {
+        queue
+            .show(own)
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| run.status() == RunStatus::Running)
+    };
+    wait_until("its own run to run", || running(&mut queue));
+    stop.store(true, Ordering::SeqCst);
+    // Answered once the drain is recorded: no pass at work applies it.
+    wait_until("the drain to be recorded", || {
+        !common::service::events(&db, "supervisor_draining").is_empty()
+    });
+    queue.answer(ask.id, "land").unwrap();
+    wait_until("the approved run to land", || {
+        queue.show(TaskId::new(1)).unwrap().runs[0].status() == RunStatus::Integrated
+    });
+    // Landed while the drain went on for its own run.
+    assert!(running(&mut queue));
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    fs::write(&marker, "").unwrap();
+    let (outcome, prompts) = joined(supervisor, "the supervisor to drain").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(payloads(&detail, "integration_approved").len(), 1);
+    assert_eq!(payloads(&detail, "integration_started").len(), 1);
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert_eq!(
+        queue.show(own).unwrap().runs[0].status(),
+        RunStatus::Integrated
+    );
+    assert_eq!(prompts, 2);
+}
+
+/// A drain with no run of its own applies a `land` answer and ends without
+/// landing it; the next supervisor lands the approved run from its events,
+/// without reviewing or asking again (ADR-t3330-1).
+#[test]
+fn a_drain_with_no_run_of_its_own_leaves_the_approved_run_to_the_next_supervisor() {
+    let (_fixture, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.script_for(1, &own_change(1));
+    let reviewer = TestReviewer::new(&[verdict("concern", &["scope"], "a concern")]);
+    let outcome = supervise_owned(&db, &repo, &backend, &reviewer, &supervise_options(1, true));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = landing_ask(&mut queue);
+    queue.answer(ask.id, "land").unwrap();
+
+    let outcome = supervise_owned(&db, &repo, &backend, &reviewer, &draining_options(4));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert_eq!(payloads(&detail, "landing_queued").len(), 1);
+    assert!(payloads(&detail, "integration_started").is_empty());
+
+    let outcome = supervise_owned(&db, &repo, &backend, &reviewer, &supervise_options(1, true));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(payloads(&detail, "integration_approved").len(), 1);
+    assert_eq!(payloads(&detail, "integration_started").len(), 1);
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert_eq!(payloads(&detail, "ask_opened").len(), 1);
+    assert_eq!(reviewer.prompts().len(), 1);
+}

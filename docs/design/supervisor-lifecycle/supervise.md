@@ -18,6 +18,7 @@ related:
   - adr-0047
   - design-persistence
   - adr-0071
+  - adr-t3330-1
   - design-supervisor-lifecycle-waiting
   - design-queue-service
   - adr-t3102-1
@@ -134,6 +135,7 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 - 持ち主の居ないrunの自動のrecoverと復旧jobは[Triage (supervisor)](triage.md#triage-supervisor)（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定3）。
 - 持ち主の居ない着地の着地スロットの解放と、worktreeに残ったプロセスの猶予は`domain::landing_release`のmodule doc。
 - drainしているsupervisorも死んだ着地の解放だけは各回で行い、自分の着地を待つrunとdrainが止まらないようにする。
+- 停止要求のdrainも各回でleaseの無いrunの答えの済んだ`approve_landing`を適用し、承認された着地は自分のrunがほかに残ってdrainが続くあいだだけ始め、残らなければ次のsupervisorに残す（`drain_landing_answers`、[ADR-t3330-1](../../adr/2026-10-25-t3330-1-stopping-drain-applies-landing-answers-and-lands-only-while-its-own-runs-keep-it-going.md)）。
 - 着地してよいrunが着地の列に並ぶか、もう一度reviewにかかるかは`RunHistory::landable`と`review_recovered_runs`。
 
 ## ループの終わり

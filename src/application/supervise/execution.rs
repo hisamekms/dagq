@@ -2756,6 +2756,12 @@ impl Supervisor<'_> {
                 // dead landing holds: its own runs waiting to land, and so
                 // the drain, would wait for it forever (task 1118).
                 self.release_dead_landings()?;
+                // A drain that stops applies the landing answers, and lands
+                // what they queued only while its own runs keep it going
+                // (ADR-t3330-1).
+                if stopping {
+                    self.drain_landing_answers()?;
+                }
             }
             self.poll_observer();
             self.record_session_turns(false);
@@ -2943,7 +2949,7 @@ impl Supervisor<'_> {
         // Like a landing answer before: an error (an `integrate` that took
         // the integration slot since the check, a main that did not
         // resolve) is noted, and the run stays queued for a later pass.
-        if let Err(error) = self.start_approved_landings(parallel) {
+        if let Err(error) = self.start_approved_landings(parallel, false) {
             warn!(error = %format_args!("{error:#}"), "an approved run could not start its landing: {error:#}");
         }
         // A run recovered from a landing it may not land again (task 1118),

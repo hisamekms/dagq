@@ -593,6 +593,10 @@ pub(super) struct LandingState {
     /// The landing recheck running and the one due (ADR-0068).
     pub(super) rechecks: recheck::Rechecks,
     pub(super) retry_unreadable_review: bool,
+    /// The runs whose landing a drain that stops started from the queue
+    /// of approved landings (ADR-t3330-1): they keep the drain going for
+    /// no other landing.
+    pub(super) drain_landings: HashSet<RunId>,
 }
 
 /// The resume, and the headless sessions opened again during a wait:

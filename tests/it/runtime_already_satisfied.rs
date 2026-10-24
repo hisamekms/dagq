@@ -1936,3 +1936,38 @@ fn a_held_claim_is_not_closed_and_its_cancel_closes_the_hold() {
     assert_eq!(detail.events[ended].payload["reason"], "canceled");
     assert_eq!(detail.events[ended - 1].kind, EventKind::TaskStatusChanged);
 }
+
+/// A supervisor that drains for a stop does not apply a `close` answer to
+/// a claim's ask: no verification on main's new head starts, the ask stays
+/// open and the run validating for the next supervisor (ADR-t3330-1).
+#[test]
+fn a_draining_supervisor_verifies_no_claim_for_its_close_answer() {
+    let (_fixture, repo, db, backend, reviewer) = claimed_owned();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = close_ask(&mut queue);
+    git(
+        &repo,
+        &["commit", "-q", "--allow-empty", "-m", "main moves"],
+    );
+    queue.answer(ask.id, "close").unwrap();
+    let options = supervise_options(2, true);
+    options.stop.store(true, Ordering::SeqCst);
+    let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+    let outcome = runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &claude_stub(&db),
+        &reviewer,
+        &common::service::owned_executable(db.parent().unwrap()),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Validating);
+    assert_eq!(payloads(&detail, "run_satisfied_verified").len(), 1);
+    assert!(payloads(&detail, "run_satisfied_closed").is_empty());
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
+}

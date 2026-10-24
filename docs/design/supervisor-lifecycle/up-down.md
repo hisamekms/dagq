@@ -96,6 +96,7 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
        それからlaunchd modeで起動する（入れ替えられる側がin-cmuxでも同じ）。
        待つ相手の除外集合はdrainの後に取り直すので、生き残った「生きているが黙っている」登録を自分の起動したものと取り違えない。
        drainに上限は置かない（runはClaude sessionなので待ち時間はrunの長さそのもの）。
+       drainのあいだも答えの済んだ着地の判断は適用され、承認された着地は自分のrunが残るあいだだけ進む（[ADR-t3330-1](../../adr/2026-10-25-t3330-1-stopping-drain-applies-landing-answers-and-lands-only-while-its-own-runs-keep-it-going.md)）。
        待たない指定は逃げ道で、入れ替える登録がleaseを持つrunが1件でもあれば、件数とrun idと状態を挙げたerrorで止まる（数えるrunと数えないrunは`leased_runs`と`no_wait_refusal`のdoc comment）。
        判定はsignalもuninstallも何もする前に行うので、止まったときの状態は`up`を打つ前と同じ（PIDの死んだ登録のprune（2）だけは済んでいる）。
        leaseを持つrunが無ければそのまま入れ替えるが、待たない指定ではdrainの待ちにも上限が付き、超えたら残っているtokenとpidを挙げたerrorで止める（停止は既に頼んであり、agentも外れているので、`status`から消えたら`up`を打ち直す）。

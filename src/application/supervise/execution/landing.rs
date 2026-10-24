@@ -2496,6 +2496,41 @@ impl Supervisor<'_> {
         }
         Ok(())
     }
+    /// The landing answers in a drain that stops (ADR-t3330-1): applied as
+    /// on a pass at work ([`Self::apply_landing_answers`]), and a run a
+    /// `land` answer queued starts its landing
+    /// ([`Self::start_approved_landings`], approvals only) only while a run
+    /// of this process other than one so started keeps the drain going and
+    /// none of those waits for the landing slot itself
+    /// ([`drain_starts_approved_landing`]); else it is left queued for the
+    /// next supervisor. A landing started here is one of the runs the drain
+    /// waits for.
+    pub(super) fn drain_landing_answers(&mut self) -> Result<()> {
+        self.apply_landing_answers()?;
+        let held = self.claim.slots.runs();
+        self.landing.drain_landings.retain(|run| held.contains(run));
+        let own_landing_waits = self.claim.slots.iter().any(|slot| {
+            matches!(slot.phase, Phase::AwaitingSlot)
+                && !self.landing.drain_landings.contains(slot.run.id())
+        });
+        if !drain_starts_approved_landing(
+            self.registration.owner_gone_since().is_some(),
+            own_landing_waits,
+            &held,
+            &self.landing.drain_landings,
+        ) {
+            return Ok(());
+        }
+        if let Err(error) = self.start_approved_landings(self.claim.parallel, true) {
+            warn!(error = %format_args!("{error:#}"), "an approved run could not start its landing: {error:#}");
+        }
+        for run in self.claim.slots.runs() {
+            if !held.contains(&run) {
+                self.landing.drain_landings.insert(run);
+            }
+        }
+        Ok(())
+    }
     /// Start the landing of the oldest run queued by a `land` answer
     /// ([`RunHistory::queued_approval`]) or by the recovery of a landing
     /// it may land again (task 1118, [`RunHistory::recovered_landing`]):
@@ -2507,8 +2542,14 @@ impl Supervisor<'_> {
     /// the queue is read from the events, so a run approved under another
     /// supervisor is landed once, with its ask left closed (task 949).
     /// A landing that fails to start is only noted by the caller, which goes on,
-    /// and the run stays queued for a later pass.
-    pub(super) fn start_approved_landings(&mut self, parallel: usize) -> Result<()> {
+    /// and the run stays queued for a later pass. `approved_only` leaves the
+    /// recovered landings out: only the runs a `land` answer queued
+    /// ([`RunHistory::queued_approval`]).
+    pub(super) fn start_approved_landings(
+        &mut self,
+        parallel: usize,
+        approved_only: bool,
+    ) -> Result<()> {
         let held = self.landing.run_env_missing
             || self.verification_container_held()
             || self.observation.ci().held()
@@ -2536,9 +2577,14 @@ impl Supervisor<'_> {
             if self.queue.turn_fence(run.task_id())?.is_some() {
                 continue;
             }
-            if let Some(approval) =
-                RunHistory::from_events(&self.queue.run_events(run.id())?).queued_to_land()
-            {
+            let events = self.queue.run_events(run.id())?;
+            let history = RunHistory::from_events(&events);
+            let event = if approved_only {
+                history.queued_approval()
+            } else {
+                history.queued_to_land()
+            };
+            if let Some(approval) = event {
                 queued.push((approval, run));
             }
         }
@@ -2882,6 +2928,21 @@ pub(super) fn approved_landing_waits(
     integrating: impl FnOnce() -> Result<bool>,
 ) -> Result<bool> {
     Ok(held || used >= parallel || integrating()?)
+}
+
+/// Whether a drain that stops starts the landing of a run a `land` answer
+/// queued (ADR-t3330-1): only while a run it holds (`held`), other than one
+/// whose landing it so started (`started`), keeps it draining, so that no
+/// answer makes the drain last longer; not while one of those waits for the
+/// landing slot itself (`own_landing_waits`), which lands first; not once
+/// its owner is gone, which ends the loop within the grace.
+pub(super) fn drain_starts_approved_landing(
+    owner_gone: bool,
+    own_landing_waits: bool,
+    held: &[RunId],
+    started: &HashSet<RunId>,
+) -> bool {
+    !owner_gone && !own_landing_waits && held.iter().any(|run| !started.contains(run))
 }
 
 /// The run of the oldest of `queued`, each with the event that queued it
@@ -3611,6 +3672,36 @@ mod tests {
         let unread = || -> Result<bool> { panic!("the integrating runs are read") };
         assert!(approved_landing_waits(true, 0, 1, unread).unwrap());
         assert!(approved_landing_waits(false, 4, 4, unread).unwrap());
+    }
+
+    /// A drain that stops starts an approved landing only while a run it
+    /// holds, not one whose landing it so started, keeps it draining: none
+    /// with no run left, none with only its own started landings left, none
+    /// while its own run waits for the landing slot, and none once its owner
+    /// is gone (ADR-t3330-1).
+    #[test]
+    fn a_drain_starts_an_approved_landing_only_while_another_run_keeps_it_going() {
+        let (waiting, landing) = (
+            RunId::new("waiting").unwrap(),
+            RunId::new("landing").unwrap(),
+        );
+        let started: HashSet<RunId> = [landing.clone()].into_iter().collect();
+        let none = HashSet::new();
+        let starts = |owner_gone, own_landing_waits, held: &[RunId], started| {
+            drain_starts_approved_landing(owner_gone, own_landing_waits, held, started)
+        };
+        assert!(!starts(false, false, &[], &started));
+        assert!(!starts(
+            false,
+            false,
+            std::slice::from_ref(&landing),
+            &started
+        ));
+        let both = [waiting.clone(), landing];
+        assert!(starts(false, false, &both, &started));
+        assert!(starts(false, false, std::slice::from_ref(&waiting), &none));
+        assert!(!starts(false, true, &both, &started));
+        assert!(!starts(true, false, &both, &started));
     }
 
     /// Approved runs land oldest approval first, whatever order the runs

@@ -1,0 +1,26 @@
+# The items of task 3330 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 7.0〜9.2s in a stress 5, 21.5〜25.9s under the host's load of other runs: four runs claimed and reviewed one after another to have four asks
+[[test]]
+name = "runtime_landing_answers::a_draining_supervisor_applies_the_landing_answers_and_starts_no_new_work"
+reason = "B 境界（supervisor の配線）: 停止要求の drain の pass が lease の無い run の land・send_back・cancel・retry_review の答えを適用して ask を閉じ、claim・resume・review のやり直し・着地を始めないことを、実の supervise のループと SQLite の queue で確かめる。drain の中で着地を始めるかの判断は supervise::execution::landing の unit test"
+task = 3330
+
+# 5.2〜6.0s in a stress 5, 12.6〜16.1s under the host's load of other runs: a drain that lands an approved run while its own run still works
+[[test]]
+name = "runtime_landing_answers::a_drain_lands_an_approved_run_while_its_own_run_keeps_it_going"
+reason = "B 境界（supervisor の配線・プロセス）: 停止要求の後に答えた land を、自分の lease の run が走って drain が続くあいだに同じ supervisor が着地させ、review をやり直さずに drain をその run の着地で終えることを、実の supervise のループと agent のプロセスで確かめる。判断は supervise::execution::landing の unit test"
+task = 3330
+
+# 2.4〜3.0s in a stress 5, 8.5〜11.9s under the host's load of other runs: three supervisors one after another
+[[test]]
+name = "runtime_landing_answers::a_drain_with_no_run_of_its_own_leaves_the_approved_run_to_the_next_supervisor"
+reason = "B 境界（supervisor の配線・復旧）: 自分の run の無い停止要求の drain が land の答えを適用して着地を始めずに終わり、次の supervisor が SQLite の queue の events からその run を拾って review をやり直さずに着地させることを、supervisor をまたいで確かめる。判断は supervise::execution::landing の unit test"
+task = 3330
+
+# 3.6〜5.1s in a stress 5, 7.1〜8.5s under the host's load of other runs: an already_satisfied claim verified, then a drain
+[[test]]
+name = "runtime_already_satisfied::a_draining_supervisor_verifies_no_claim_for_its_close_answer"
+reason = "B 境界（supervisor の配線・Git）: 停止要求の drain の pass が、main の動いた後の already_satisfied の close の答えに検証のやり直しを始めず、ask と validating の run を次の supervisor に残すことを、実の supervise のループと Git の main で確かめる"
+task = 3330
