@@ -1658,6 +1658,67 @@ fn a_session_nobody_watches_blocks_the_resume_until_it_ends() {
     assert_eq!(acquired, [json!(null), json!("dead-supervisor")]);
 }
 
+/// A `needs_session` run given up on with its session left open (the
+/// `/exit` could not be sent) waits for nobody but a person: no supervisor
+/// resumes it while that session lives, so its attention is `exit the
+/// session` (`runtime_error`), and `resuming (runtime)` once the session
+/// exited (task 751).
+#[test]
+fn a_parked_run_given_up_with_its_session_open_is_a_persons_to_end() {
+    let (_dir, repo, db) = fixture();
+    // Its wrapper (this process) lives on, heartbeating.
+    let run = orphan_run(
+        &repo,
+        &db,
+        "gone-supervisor",
+        std::process::id(),
+        dead_pid(),
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .abandon_run(
+            run.id(),
+            &LeaseToken::new("gone-supervisor"),
+            "the workspace backend failed",
+            &ReasonCode::Other.into(),
+            Some(&json!({"workspace_id": "ws", "exit": "failed", "error": "x"})),
+        )
+        .unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='needs_session' WHERE id=?1",
+            [run.id()],
+        )
+        .unwrap();
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    let attention = |db: &Path| {
+        run_attention_of(&runtime::status(db).unwrap(), run.id())
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(attention(&db)["next"], "exit the session");
+    assert_eq!(attention(&db)["kind"], "runtime_error");
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let options = SuperviseOptions {
+        retry_unreadable_review: false,
+        ..supervise_options(4, true)
+    };
+    let dagq = crate::common::service::owned_executable(db.parent().unwrap());
+    let outcome = supervise_retrying_by(&db, &repo, &backend, &options, &dagq).unwrap();
+    assert_eq!(outcome["runs"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert!(payloads(&detail, "resume_started").is_empty());
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    assert_eq!(attention(&db)["next"], "exit the session");
+
+    // A person ends the session: the supervisor's resume is next.
+    queue
+        .wrapper_exited(run.id(), std::process::id(), 0)
+        .unwrap();
+    assert_eq!(attention(&db)["next"], "resuming (runtime)");
+}
+
 /// A resumed session that finds the change no longer needed writes a failed
 /// receipt; the run ends `failed` without landing.
 #[test]

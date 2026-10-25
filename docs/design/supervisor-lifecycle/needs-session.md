@@ -122,8 +122,7 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
    worker_question の回答は次の turn として届け、stalled の待ちも slot の外で保持する。
    非対話の idle_process の復旧は残す。
    解消・失敗・未解消で終了を依頼し、wrapper の終了を確認する。
-   時間の判断（wrapperの登録の待ち、依頼か最後の入力からの`resume_timeout`、終了の依頼からのexit timeout）は注入した`Clock`の単調時計で測る。
-   ちょうど上限で過ぎたとみなす。
+   時間の判断（wrapperの登録の待ち、依頼か最後の入力からの`resume_timeout`、終了の依頼からのexit timeout）は注入した`Clock`で測る。
 
 5. **その後**: `resolved`で`integration_approved`があれば（0の解消済みの確認で`resume_skipped`になった承認済みのrunも）、`landing_queued`を記録し、leaseを持ったまま着地スロットが空くのを待ち（他のrunが`integrating`なら次の回に回す）、`begin_integration`（同じtokenのleaseはそのまま使う）から`integrate`と同じ関数を別threadで走らせる。
    承認済みのrunは、receiptのheadがbranchのheadと一致すれば同じトランザクションでそれを着地するcommit（`result_commit`）にし、一致しなければ理由を残して`unresolved`として扱う。
@@ -152,7 +151,7 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
    resume中にsupervisorが死んだ場合は下の「supervisorの入れ替わり」。
 
 resumeのwrapperを起動するのはsupervisorだけ。
-`status`のattentionは、`needs_session`のrunならどの場合も`next: resuming (runtime)`（resume中、試行が残っている、生きているsessionが次の試行を止めている、resume中のsupervisorが死んだ、試行を使い切って復旧jobへ移る直前のいずれもsupervisorのもの）。
+`status`のattentionは、[放棄](background-recovery-job.md#1-runの放棄abandon)の例外を除き、`needs_session`のrunなら`next: resuming (runtime)`（resume中、試行が残っている、生きているsessionが次の試行を止めている、resume中のsupervisorが死んだ、試行を使い切って復旧jobへ移る直前のいずれもsupervisorのもの）。
 `kind`はrunを`needs_session`にした最新のイベント。
 
 セッションが変更不要と判断した場合はreceiptを`result: failed`と理由（`summary`）で書き直す。

@@ -2238,6 +2238,46 @@ pub fn supervise_reviewed_with(
     reviewer: &TestReviewer,
     options: &SuperviseOptions,
 ) -> Value {
+    supervise_reviewed_by(
+        db,
+        repo,
+        backend,
+        reviewer,
+        options,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+    )
+}
+
+/// [`supervise_reviewed`] given the `dagq` the test owns
+/// ([`common::service::owned_executable`], in the queue's directory), so a
+/// service the supervisor starts stops once the test's process is gone.
+pub fn supervise_reviewed_owned(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    reviewer: &TestReviewer,
+) -> Value {
+    let dagq = common::service::owned_executable(db.parent().unwrap());
+    supervise_reviewed_by(
+        db,
+        repo,
+        backend,
+        reviewer,
+        &supervise_options(4, true),
+        &dagq,
+    )
+}
+
+/// [`supervise_reviewed_with`], the supervisor given `dagq` as the
+/// executable it starts.
+fn supervise_reviewed_by(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    reviewer: &TestReviewer,
+    options: &SuperviseOptions,
+    dagq: &Path,
+) -> Value {
     let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
     let _diagnostics = supervise_diagnostics(db);
     let outcome = runtime::supervise_with_reviewer(
@@ -2246,7 +2286,7 @@ pub fn supervise_reviewed_with(
         backend,
         &claude_stub(db),
         reviewer,
-        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        dagq,
         options,
     )
     .unwrap();

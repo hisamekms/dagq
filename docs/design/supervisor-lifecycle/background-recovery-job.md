@@ -162,9 +162,11 @@ turnの後の扱いの詳細は[非対話のworker](headless-worker.md#turnの�
 - verdictの後の終了の待ちと最初のsessionの終了の依頼には時間切れが無く、abandonせずleaseを持ったままsessionの終了を待つ（resumeのsessionだけはexit timeoutで手放す。[`needs_session`](needs-session.md)）。
 - supervisorがworkerのsessionを開いたまま持っている間（validating・review・revise・verdictの後の終了の待ち）に手放すときは、手放す前にそのsessionに終了を依頼する（`exit_abandoned_session`）。
   手放したrunはleaseが無く、supervisorもadoptも見ないので、送らなければsessionは誰も見ないまま開いて残る。
-- 依頼を書けなかったなら、そのrunのattentionは`exit the session`（`domain::AttentionNext::ExitSession`）になり、人がそのsessionを終える。
+- 依頼を書けなかったなら、そのrunのattentionは`exit the session`（`domain::AttentionNext::ExitSession`、`kind: runtime_error`）になり、人がそのsessionを終える。
   sessionの終了が記録されると、runは元のattentionに戻る。
-  置き換えるのは`review and integrate`と`recover run`だけで、`needs_session`・`failed`のrunは`resuming (runtime)`・`triaging (runtime)`のまま出る。
+  置き換えるのは`review and integrate`・`recover run`と、leaseの無い`needs_session`のrunの`resuming (runtime)`である（resumeは生きているsessionの終了を待つだけで、ほかに誰もrunを進めない）。
+  `failed`・`interrupted`のrunは`triaging (runtime)`のまま出る。
+  復旧jobはsessionが生きていてもrunを取り、roundの終わりにそのsessionを止める（[Triage](triage.md#triage-supervisor)）。
 - validatingとreviewの工程は、errorで手放すときにsessionが分かるよう、次の工程に移るまでsessionを工程に残しておく。
 
 ## 後片付け

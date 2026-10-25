@@ -661,13 +661,19 @@ impl<'a> RunHistory<'a> {
     }
 
     /// Whether the supervisor gave the run up with its live session left
-    /// open, the `/exit` not sent (task 237), and no session has exited
-    /// since.
+    /// open, the `/exit` not sent (task 237), and no session has exited,
+    /// been closed or made way for a resume since.
     pub fn session_left_open(&self) -> bool {
         self.events
             .iter()
             .rev()
-            .take_while(|e| e.kind != EventKind::SessionExited)
+            .take_while(|e| {
+                !e.kind.is_in(&[
+                    EventKind::SessionExited,
+                    EventKind::WorkspaceClosed,
+                    EventKind::ResumeStarted,
+                ])
+            })
             .any(|e| abandon_left_session_open(&e.kind, &e.payload))
     }
 
@@ -694,9 +700,14 @@ pub fn run_attention_of<'a>(
         (AttentionNext::Triaging, TriageState::Failed) => AttentionNext::TriageByHand,
         (next, _) => next,
     };
+    // A `needs_session` run given up on with its session left open waits
+    // for nobody but a person: no resume starts while that session lives
+    // (task 751).
+    let resume_blocked = next == AttentionNext::Resuming && !leased && history.session_left_open();
     let event = history.events.iter().rev().find(|e| match next {
         // The error the owner gave up with, whatever its payload.
         AttentionNext::RecoverRun => e.kind == EventKind::RuntimeError,
+        AttentionNext::Resuming if resume_blocked => abandon_left_session_open(&e.kind, &e.payload),
         // Whatever parked the run for a session last.
         AttentionNext::Resuming => {
             restore::<StatusOf>(&e.payload).status == Some(RunStatus::NeedsSession.as_str())
@@ -717,11 +728,14 @@ pub fn run_attention_of<'a>(
         }
         // Given up on with its session left open (task 237): the session
         // is ended first, and its exit brings the run's own attention back.
+        // A `failed` / `interrupted` run is not: its recovery job takes it
+        // and the round's end stops the session.
         AttentionNext::ReviewAndIntegrate | AttentionNext::RecoverRun
             if history.session_left_open() =>
         {
             AttentionNext::ExitSession
         }
+        AttentionNext::Resuming if resume_blocked => AttentionNext::ExitSession,
         next => next,
     };
     Some((next, kind))
@@ -1853,6 +1867,56 @@ mod tests {
                     false
                 ),
                 Some((then, Some("runtime_error".into())))
+            );
+        }
+        // A `needs_session` run's resume waits for that session to end, so
+        // it is a person's too (task 751), while a `failed` one's recovery
+        // job takes it and stops the session itself.
+        let parked = event(1, "validation_failed", json!({"status": "needs_session"}));
+        let left_open_parked = [
+            parked.clone(),
+            event(2, "runtime_error", left_open.payload.clone()),
+        ];
+        assert_eq!(
+            attention(&left_open_parked, RunStatus::NeedsSession, false),
+            Some((AttentionNext::ExitSession, Some("runtime_error".into())))
+        );
+        assert_eq!(
+            attention(
+                &[
+                    left_open_parked[0].clone(),
+                    left_open_parked[1].clone(),
+                    event(3, "session_exited", json!({}))
+                ],
+                RunStatus::NeedsSession,
+                false
+            ),
+            Some((AttentionNext::Resuming, Some("validation_failed".into())))
+        );
+        for ended in ["workspace_closed", "resume_started"] {
+            assert_eq!(
+                attention(
+                    &[
+                        left_open_parked[0].clone(),
+                        left_open_parked[1].clone(),
+                        event(3, ended, json!({}))
+                    ],
+                    RunStatus::NeedsSession,
+                    false
+                )
+                .map(|(next, _)| next),
+                Some(AttentionNext::Resuming),
+                "{ended}"
+            );
+        }
+        assert_eq!(
+            attention(&left_open_parked, RunStatus::NeedsSession, true),
+            Some((AttentionNext::Resuming, Some("validation_failed".into())))
+        );
+        for status in [RunStatus::Failed, RunStatus::Interrupted] {
+            assert_eq!(
+                attention(std::slice::from_ref(&left_open), status, false).map(|(next, _)| next),
+                Some(AttentionNext::Triaging)
             );
         }
         let sent = event(

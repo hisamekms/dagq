@@ -1061,6 +1061,66 @@ fn a_dead_run_nobody_leases_is_recovered_triaged_and_retried() {
     );
 }
 
+/// A `failed` run given up on with its session left open (the `/exit`
+/// could not be sent) is not a person's to end: the next supervisor's
+/// recovery job takes it while that session lives, and the round's end
+/// stops the session, so its attention stays `triaging (runtime)` (task
+/// 751).
+#[test]
+fn a_failed_run_given_up_with_its_session_open_is_triaged_and_its_session_stopped() {
+    let (_dir, repo, db) = fixture();
+    let run = orphan_run(&repo, &db, "gone-supervisor", dead_pid(), dead_pid());
+    // Its session lives on: a process standing for the wrapper.
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let session = backend.stand_in();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET workspace_id=?2 WHERE id=?1",
+            [run.id().as_str(), &session],
+        )
+        .unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .abandon_run(
+            run.id(),
+            &LeaseToken::new("gone-supervisor"),
+            "the workspace backend failed",
+            &ReasonCode::Other.into(),
+            Some(&json!({"workspace_id": "ws", "exit": "failed", "error": "x"})),
+        )
+        .unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='failed' WHERE id=?1",
+            [run.id()],
+        )
+        .unwrap();
+    let attention = |db: &Path| run_attention_of(&runtime::status(db).unwrap(), run.id()).cloned();
+    assert_eq!(attention(&db).unwrap()["next"], "triaging (runtime)");
+    assert!(backend.exists(&session).unwrap());
+    let reviewer = TestReviewer::new(&[]).with_triages(&[recovery(json!({
+        "verdict": "escalate",
+        "confidence": "high",
+        "diagnosis": "a person decides",
+        "question": "Is task 1 still wanted?",
+    }))]);
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let events = queue.run_events(run.id()).unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    assert!(position(&kinds, "runtime_error") < position(&kinds, "triage_started"));
+    let closed = &events[position(&kinds, "workspace_closed")].payload;
+    assert_eq!(closed["by"], "triage");
+    assert_eq!(closed["workspace_id"], session);
+    assert!(position(&kinds, "triage_finished") < position(&kinds, "workspace_closed"));
+    assert!(!backend.exists(&session).unwrap());
+    // The round asked a person, whose ask is the attention, not the run.
+    assert!(kinds.contains(&"ask_opened"), "{kinds:?}");
+    assert_eq!(attention(&db), None);
+}
+
 /// A run whose supervisor and wrapper both died keeps the dead supervisor's
 /// stale lease. Nobody adopts it (its wrapper is dead), so the next
 /// supervisor recovers it itself as it does a run nobody leases (task 236),
