@@ -397,7 +397,9 @@ impl LandClock {
             self.enter(self.phase, at);
             self.integrated = Some(at);
             return;
-        } else if payload_status(&event.payload) == Some("needs_session") {
+        } else if payload_status(&event.payload) == Some("needs_session")
+            && *kind != EventKind::IntegrationHandedOver
+        {
             Some(RESUME)
         } else {
             match kind.known() {
@@ -418,7 +420,11 @@ impl LandClock {
                     Some(CONFLICT)
                 }
                 Some(EventKind::ConflictPrecheck) => Some(EXIT),
-                Some(EventKind::LandingQueued) => Some(LANDING_QUEUE),
+                // A landing a handoff's drain handed over waits for the
+                // slot again (ADR-t3344-1).
+                Some(EventKind::LandingQueued | EventKind::IntegrationHandedOver) => {
+                    Some(LANDING_QUEUE)
+                }
                 Some(EventKind::RunE2eWaiting) => Some(E2E_WAIT),
                 Some(EventKind::RunE2eStarted) => Some(E2E),
                 Some(EventKind::RunE2eFinished) => Some(LANDING_QUEUE),
@@ -698,6 +704,36 @@ mod tests {
         assert_eq!(phases.secs.iter().sum::<i64>(), 410);
         assert_eq!(phases.push, Some(4));
         assert_eq!(phases.longest(), Some("verify"));
+    }
+
+    /// A landing a handoff's drain handed over (ADR-t3344-1) waits for the
+    /// slot again, also when it goes back to `needs_session`: its wait is
+    /// the landing queue's, not a resume's.
+    #[test]
+    fn a_handed_over_landing_waits_in_the_landing_queue() {
+        for status in ["awaiting_integration", "needs_session"] {
+            let (spent, _) = phases(
+                &[
+                    ("landing_queued", json!({}), 10),
+                    ("integration_started", json!({}), 20),
+                    ("integration_rebased", json!({}), 25),
+                    ("integration_handed_over", json!({"status": status}), 100),
+                    ("integration_started", json!({}), 150),
+                    ("run_integrated", json!({}), 160),
+                ],
+                9999,
+            );
+            assert_eq!(
+                spent,
+                map(&[
+                    ("exit", 10),
+                    ("landing_queue", 10 + 50),
+                    ("rebase", 5 + 10),
+                    ("verify", 75),
+                ]),
+                "{status}"
+            );
+        }
     }
 
     /// A hold of a run waiting to land is `held` from its `held` record to

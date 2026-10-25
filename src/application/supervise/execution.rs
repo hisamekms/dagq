@@ -1115,6 +1115,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         environment: ports.environment.clone(),
         telemetry_sinks: ports.telemetry_sinks.clone(),
         unsent_steps: Arc::default(),
+        handoff_drain: Arc::default(),
         telemetry_retries: telemetry_tokens::Retries::default(),
         telemetry_sessions: std::collections::HashSet::new(),
         pauses: ports.pauses.clone(),
@@ -1309,6 +1310,10 @@ struct Supervisor<'a> {
     /// its headless jobs) could not send by their end: sent again on each
     /// sweep while their target has its token ([`Self::sweep_telemetry`]).
     unsent_steps: Arc<crate::application::step_report::UnsentSteps>,
+    /// Whether this process drains for a handoff, a stop's drain not
+    /// (ADR-t3344-1): set on each pass, and read by a landing in progress
+    /// before it verifies again, which hands the run over instead.
+    handoff_drain: Arc<AtomicBool>,
     /// The revocations of the runs' telemetry tokens this process could
     /// not make yet and no sweep would make for it: tried again on each
     /// sweep ([`Self::sweep_telemetry`]).
@@ -2147,6 +2152,16 @@ impl Supervisor<'_> {
         );
     }
 
+    /// Tell a landing in progress whether this process drains for a
+    /// handoff now (ADR-t3344-1): a stop wins over a handoff, so a drain
+    /// that stops verifies again as one that does not drain.
+    fn note_handoff_drain(&self, stopping: bool) {
+        self.handoff_drain.store(
+            handoff::hands_landings_over(stopping, self.registration.handing_off()),
+            Ordering::SeqCst,
+        );
+    }
+
     /// The runs the slots hold, which a cleanup and the sweep leave alone.
     fn held_runs(&self) -> Vec<RunId> {
         self.claim.slots.runs()
@@ -2629,6 +2644,7 @@ impl Supervisor<'_> {
                 }
             }
             self.registration.drain_for(stopping, self.claim.claiming);
+            self.note_handoff_drain(stopping);
             // Before any new work, draining or not: a drain waits for them
             // (ADR-0062 decision 8).
             self.return_waiting_runs();
@@ -2648,6 +2664,7 @@ impl Supervisor<'_> {
                     // Read after the cleanup was polled: this pass
                     // drains on it already.
                     self.host.end_cleanup_for_handoff();
+                    self.note_handoff_drain(stopping);
                 }
                 if let Some(binary) = self.registration.handoff().map(str::to_owned) {
                     self.sample_candidates(self.claim.parallel, true);
@@ -2699,6 +2716,7 @@ impl Supervisor<'_> {
                         }
                         self.registration.follow_reread(&binary, &reread);
                         self.registration.drain_for(stopping, self.claim.claiming);
+                        self.note_handoff_drain(stopping);
                         if reread.resume_cleanup {
                             self.resume_cleanup();
                         }
@@ -4266,6 +4284,19 @@ impl Supervisor<'_> {
                     .join()
                     .map_err(|_| anyhow!("landing thread panicked"));
                 match landed.and_then(|result| result) {
+                    // Handed over before its verification was done again
+                    // (ADR-t3344-1): it waits for the landing slot again
+                    // under its lease, which a handoff hands over.
+                    Ok(IntegrationOutcome::HandedOver { run, .. }) => {
+                        info!(run_id = %run.id(), "run {} waits for the landing slot again: its landing was handed over", run.id());
+                        slot.run = *run;
+                        slot.transition(
+                            Phase::AwaitingSlot,
+                            EventKind::IntegrationHandedOver.as_str(),
+                            &*self.queue,
+                        );
+                        return Ok(Step::Continue);
+                    }
                     Ok(outcome) => {
                         let outcome = serde_json::to_value(&outcome)?;
                         info!(run_id = %slot.run.id(), "run {} landing: {}", slot.run.id(), outcome["outcome"]);

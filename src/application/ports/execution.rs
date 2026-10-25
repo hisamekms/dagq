@@ -1065,6 +1065,18 @@ pub trait RunTransitions {
         message: &str,
         reason: &Reason,
     ) -> Result<TaskRun>;
+    /// Leave the integration slot for the landing slot's queue, keeping the
+    /// lease under `token` (ADR-t3344-1): a handoff's drain hands the
+    /// landing over before its verification is done again, and the run
+    /// returns to `revert_to` with `integration_handed_over`.
+    fn hand_over_integration(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        revert_to: &str,
+        reason: &str,
+        detail: serde_json::Value,
+    ) -> Result<TaskRun>;
     /// Record the landing: the run is integrated and its task completed.
     fn finish_integration(
         &mut self,

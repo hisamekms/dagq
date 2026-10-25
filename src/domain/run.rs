@@ -742,6 +742,29 @@ pub fn abort_integration(
     leave_integration(run, revert_to, message, "abort the integration of")
 }
 
+/// A handoff's drain hands the landing over before its verification is
+/// done again (ADR-t3344-1): back to `revert_to`, the status the run had
+/// when the landing started, to wait for the landing slot again. Nothing
+/// failed, so `last_error` stays as it was.
+pub fn hand_over_integration(
+    mut run: TaskRun,
+    revert_to: RunStatus,
+) -> Result<TaskRun, DomainError> {
+    require(
+        matches!(
+            revert_to,
+            RunStatus::AwaitingIntegration | RunStatus::NeedsSession
+        ),
+        || DomainError::RunTransitionNotAllowed {
+            status: run.status,
+            operation: "return to a status it could not have integrated from",
+        },
+    )?;
+    require_status(&run, &[RunStatus::Integrating], "hand over the landing of")?;
+    run.status = revert_to;
+    Ok(run)
+}
+
 /// The run landed as `commit`: `integrating` → `integrated`, and the error
 /// of any earlier attempt is cleared.
 pub fn finish_integration(mut run: TaskRun, commit: CommitSha) -> Result<TaskRun, DomainError> {
@@ -1367,6 +1390,25 @@ mod tests {
         .unwrap();
         assert_eq!(aborted.status(), RunStatus::NeedsSession);
         assert_eq!(aborted.last_error(), Some("m"));
+        // A handed-over landing waits for the slot again with the error it
+        // had: nothing failed.
+        for status in [RunStatus::AwaitingIntegration, RunStatus::NeedsSession] {
+            let integrating = abandon(run(RunStatus::Integrating), "old".into()).unwrap();
+            let handed = hand_over_integration(integrating, status).unwrap();
+            assert_eq!(handed.status(), status);
+            assert_eq!(handed.last_error(), Some("old"));
+        }
+        refused(
+            hand_over_integration(run(RunStatus::Integrating), RunStatus::Failed),
+            RunStatus::Integrating,
+        );
+        refused(
+            hand_over_integration(
+                run(RunStatus::AwaitingIntegration),
+                RunStatus::AwaitingIntegration,
+            ),
+            RunStatus::AwaitingIntegration,
+        );
         let back = begin_integration(run(RunStatus::NeedsSession)).unwrap();
         assert_eq!(back.status(), RunStatus::Integrating);
 

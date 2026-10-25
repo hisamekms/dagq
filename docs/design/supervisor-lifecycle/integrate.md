@@ -9,6 +9,7 @@ related:
   - adr-t728-2
   - adr-t639-1
   - adr-t768-1
+  - adr-t3344-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-review
   - design-supervisor-lifecycle-validation
@@ -101,11 +102,14 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - なおhostの分類で落ちるか、やり直す空きが無ければ、leaseの無い着地待ちへ控え（`held`）、inboxのattentionになる。
   人がhostを直して`dagq integrate`を打てば、新しい試行で検証からやり直す（`domain::run_attention`）。
 - 分類の集合は人の判断なしに広げない（ADR-t639-1）。
+- 例外: handoffのdrainのあいだはやり直さず、runをleaseを持ったまま着地slotの待ちとして次のプロセスに引き継ぎ、次のプロセスが新しい試行で検証する（ADR-t3344-1、[Handoff](handoff.md)の「区切り」）。
+  止めるdrainは同じ試行でやり直す。
 
 ## 不安定なtestの着地のやり直し
 
 - 落ちたtestが全て道具の流し直しで通った失敗（`flaky`）は、resumeせず同じslotと同じheadで検証を最初からもう1回流す（ADR-t768-1）。
 - やり直しは着地の試行ごとに1回までで、宣言したprofileのやり直しのenvを渡す（ADR-t1039-1）。
+- 例外: handoffのdrainのあいだはやり直さず、runをleaseを持ったまま着地slotの待ちとして引き継ぎ、次のプロセスの新しい着地がrebase後のheadで検証し、1回をそこで数え直す（ADR-t3344-1）。
 - 落とし穴: nextestでない`cargo test`の検証は`flaky`にならない。
 - やり直しはattentionにせず、記録と[`stats`](commands.md)で読む。
 

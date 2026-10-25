@@ -1089,6 +1089,38 @@ impl SqliteQueue {
         )
     }
 
+    /// Hand the integrating run's landing over (ADR-t3344-1): the run
+    /// returns to the status it had when the landing started, to wait for
+    /// the landing slot again, and keeps its lease under `token`, so the
+    /// supervisor that continues under it lands it again.
+    pub fn hand_over_integration(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        revert_to: &str,
+        reason: &str,
+        mut detail: serde_json::Value,
+    ) -> Result<TaskRun> {
+        let revert_to: RunStatus = revert_to.parse()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        renew_lease(&tx, id, token, self.generators.clock.now())?;
+        let run = apply(
+            &tx,
+            refusals(&self.runs_dir, &self.generators),
+            id,
+            None,
+            || format!("run {id} is not integrating"),
+            |run| run::hand_over_integration(run, revert_to),
+        )?;
+        detail["status"] = json!(run.status());
+        detail["reason"] = json!(reason);
+        run_event(&tx, id, EventKind::IntegrationHandedOver, detail)?;
+        tx.commit()?;
+        Ok(run.relocated(&self.runs_dir))
+    }
+
     fn leave_integration(
         &mut self,
         id: &RunId,
@@ -1518,6 +1550,16 @@ impl RunTransitions for SqliteQueue {
         reason: &Reason,
     ) -> Result<TaskRun> {
         SqliteQueue::abort_integration(self, id, token, revert_to, message, reason)
+    }
+    fn hand_over_integration(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        revert_to: &str,
+        reason: &str,
+        detail: serde_json::Value,
+    ) -> Result<TaskRun> {
+        SqliteQueue::hand_over_integration(self, id, token, revert_to, reason, detail)
     }
     fn finish_integration(
         &mut self,

@@ -107,7 +107,11 @@ impl Phase {
             // A precheck that found no conflict moves nothing.
             Some(EventKind::ConflictPrecheck) if payload["unsent"] != true => return None,
             Some(EventKind::ExitRequested | EventKind::ExitRetried) => Some(Self::Exit),
-            Some(EventKind::LandingQueued) => Some(Self::LandingQueue),
+            // A landing a handoff's drain handed over waits for the slot
+            // again (ADR-t3344-1).
+            Some(EventKind::LandingQueued | EventKind::IntegrationHandedOver) => {
+                Some(Self::LandingQueue)
+            }
             Some(EventKind::RunAgentEvalRequested) if !rounds_asked(payload) => return None,
             Some(EventKind::RunAgentEvalRequested) => Some(Self::AgentEvalWaiting),
             Some(EventKind::RunAgentEvalWaiting) => {

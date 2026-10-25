@@ -9,6 +9,8 @@ accepted_on: 2026-09-30
 amends:
   - adr-t768-1 decision 2
   - adr-t768-1 decision 3
+amended_by:
+  - adr-t3344-1
 owners:
   - hisamekms
 tags:

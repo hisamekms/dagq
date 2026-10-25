@@ -776,6 +776,17 @@ impl RunTransitions for SupervisorQueue {
         let mut local = self.local()?;
         RunTransitions::abort_integration(&mut **local, id, token, revert_to, message, reason)
     }
+    fn hand_over_integration(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        revert_to: &str,
+        reason: &str,
+        detail: serde_json::Value,
+    ) -> Result<TaskRun> {
+        let mut local = self.local()?;
+        RunTransitions::hand_over_integration(&mut **local, id, token, revert_to, reason, detail)
+    }
     fn finish_integration(
         &mut self,
         id: &RunId,

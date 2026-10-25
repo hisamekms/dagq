@@ -140,6 +140,8 @@ impl Supervisor<'_> {
             token: self.registration.token().clone(),
         };
         let integrator = Integrator::of_process(pid);
+        // Read at its verification's retry (ADR-t3344-1).
+        let handing_off = self.handoff_drain.clone();
         Ok(spawn_traced(move || {
             let mut queue = queues.open()?;
             // As `check_disk` reads it, for the retry of a command that
@@ -171,6 +173,7 @@ impl Supervisor<'_> {
                     verification_containers: &*verification_containers,
                     heavy_turn: Some(heavy_turn),
                     steps,
+                    handing_off: Some(&handing_off),
                 },
                 &request,
             )

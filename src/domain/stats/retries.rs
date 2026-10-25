@@ -252,7 +252,11 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
         if payload_status(&event.payload) == Some("needs_session")
             && !matches!(
                 kind.known(),
-                Some(EventKind::IntegrationError | EventKind::ResumeFinished)
+                Some(
+                    EventKind::IntegrationError
+                        | EventKind::IntegrationHandedOver
+                        | EventKind::ResumeFinished
+                )
             )
             && let Some(index) = walk.watching.take()
         {

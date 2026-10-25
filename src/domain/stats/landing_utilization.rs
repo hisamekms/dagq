@@ -21,12 +21,13 @@ const HOUR_MS: i64 = 3_600_000;
 
 /// The events that end an `integrate` attempt of their run (the
 /// timeline's `integrating` gap ends at the same ones).
-const ENDS: [EventKind; 9] = [
+const ENDS: [EventKind; 10] = [
     EventKind::RunIntegrated,
     EventKind::IntegrationDeferred,
     EventKind::IntegrationError,
     EventKind::IntegrationHeld,
     EventKind::IntegrationFailed,
+    EventKind::IntegrationHandedOver,
     EventKind::RuntimeError,
     EventKind::RunAdopted,
     EventKind::RunRecovered,

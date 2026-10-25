@@ -1,0 +1,14 @@
+# The items of task 3344 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 5.2〜7.3s in a stress 5: a landing verified once, a handoff's exec and the next supervisor's landing
+[[test]]
+name = "runtime_handoff::a_handoff_hands_over_a_landing_whose_flaky_verification_would_be_done_again"
+reason = "B 境界（supervisor の配線・プロセス・復旧）: handoff の drain のあいだに走る着地の thread が検証をやり直さずに run を lease を持ったまま着地 slot の待ちに戻し、同じ token で続く次の supervisor が SQLite の queue の lease と events からその run を拾って review をやり直さずに着地させることを、実の supervise のループと着地の thread で supervisor をまたいで確かめる。どの失敗を引き継ぐかと payload は integrate の unit test、履歴の判断は domain::run::history の unit test"
+task = 3344
+
+# 4.2〜8.9s in a stress 5: a landing verified twice by one supervisor after a handoff and a stop
+[[test]]
+name = "runtime_handoff::a_stop_over_a_handoff_verifies_a_flaky_landing_once_more_itself"
+reason = "B 境界（supervisor の配線・プロセス）: handoff の要求の後の停止要求を supervise のループが pass で着地の thread に渡し、走っている着地がやり直しを同じ supervisor で行って引き継がないことを、実の停止の印・着地の thread・SQLite の queue で確かめる。停止が勝つ判断は supervise::host_ops::handoff の unit test"
+task = 3344

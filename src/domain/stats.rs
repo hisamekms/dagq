@@ -2510,13 +2510,18 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
         if let Some(status) = payload_status(&event.payload) {
             run.status = Some(status.to_owned());
             match status {
-                // `integration_error` only puts back the status the run had
-                // before the attempt, and `resume_finished` reports the run
-                // still parked (ADR-0019); neither parks anything new.
+                // `integration_error` and `integration_handed_over`
+                // (ADR-t3344-1) only put back the status the run had before
+                // the attempt, and `resume_finished` reports the run still
+                // parked (ADR-0019); none parks anything new.
                 "needs_session"
                     if !matches!(
                         event.kind.known(),
-                        Some(EventKind::IntegrationError | EventKind::ResumeFinished)
+                        Some(
+                            EventKind::IntegrationError
+                                | EventKind::IntegrationHandedOver
+                                | EventKind::ResumeFinished
+                        )
                     ) =>
                 {
                     run.needs_session += 1

@@ -231,21 +231,41 @@ impl<'a> RunHistory<'a> {
 
     /// Whether something after event `id` started a landing, a review or a
     /// resume, decided the landing, or opened an `approve_landing` ask: a
-    /// run queued by that event is not queued any more.
+    /// run queued by that event is not queued any more. A landing a
+    /// handoff's drain handed over (ADR-t3344-1) left the run queued as
+    /// it was.
     fn moved_on_after(&self, id: EventId) -> bool {
         self.events.iter().any(|e| {
             e.id > id
-                && (matches!(
-                    e.kind.known(),
-                    Some(
-                        EventKind::IntegrationStarted
-                            | EventKind::ReviewStarted
-                            | EventKind::ResumeStarted
-                            | EventKind::LandingDecided
+                && (e.kind == EventKind::IntegrationStarted && !self.handed_over(e.id)
+                    || matches!(
+                        e.kind.known(),
+                        Some(
+                            EventKind::ReviewStarted
+                                | EventKind::ResumeStarted
+                                | EventKind::LandingDecided
+                        )
                     )
-                ) || e.kind == EventKind::AskOpened
-                    && restore::<AskOpened>(&e.payload).kind == Some("approve_landing"))
+                    || e.kind == EventKind::AskOpened
+                        && restore::<AskOpened>(&e.payload).kind == Some("approve_landing"))
         })
+    }
+
+    /// Whether the landing `integration_started` `started` began was handed
+    /// over by a handoff's drain (ADR-t3344-1): its end, the first
+    /// `integration_handed_over` or `integration_started` after it, is an
+    /// `integration_handed_over`.
+    fn handed_over(&self, started: EventId) -> bool {
+        self.events
+            .iter()
+            .find(|e| {
+                e.id > started
+                    && matches!(
+                        e.kind.known(),
+                        Some(EventKind::IntegrationHandedOver | EventKind::IntegrationStarted)
+                    )
+            })
+            .is_some_and(|e| e.kind == EventKind::IntegrationHandedOver)
     }
 
     /// The `review_retry_queued` of a `retry_review` answer that queues the
@@ -1166,6 +1186,45 @@ mod tests {
             approved(3, json!(5)),
         ];
         assert_eq!(queued(&events), Some(EventId::new(3)));
+        // A landing a handoff's drain handed over leaves it queued
+        // (ADR-t3344-1), but not one that began after it.
+        let mut events = vec![
+            approved(1, json!(3)),
+            event(2, "integration_started", json!({})),
+            event(3, "integration_handed_over", json!({})),
+        ];
+        assert_eq!(queued(&events), Some(EventId::new(1)));
+        events.push(event(4, "integration_started", json!({})));
+        assert_eq!(queued(&events), None);
+        let events = [
+            approved(1, json!(3)),
+            event(2, "integration_started", json!({})),
+            event(3, "integration_deferred", json!({})),
+            event(4, "integration_started", json!({})),
+            event(5, "integration_handed_over", json!({})),
+        ];
+        assert_eq!(queued(&events), None);
+    }
+
+    /// ADR-t3344-1: an approved run whose resume resolved stays queued
+    /// after its landing was handed over, and waits for the slot again.
+    #[test]
+    fn queued_after_resume_outlives_a_handed_over_landing() {
+        let events = [
+            event(1, "landing_queued", json!({"via": "resume"})),
+            event(2, "integration_started", json!({})),
+            event(3, "integration_handed_over", json!({})),
+        ];
+        assert_eq!(
+            RunHistory::from_events(&events).queued_after_resume(),
+            Some(EventId::new(1))
+        );
+        let events = [
+            event(1, "landing_queued", json!({"via": "resume"})),
+            event(2, "integration_started", json!({})),
+            event(3, "integration_error", json!({})),
+        ];
+        assert_eq!(RunHistory::from_events(&events).queued_after_resume(), None);
     }
 
     #[test]

@@ -542,6 +542,14 @@ pub enum IntegrationOutcome {
         main: CommitSha,
         reason: String,
     },
+    /// A handoff's drain handed the landing over before its verification
+    /// was done again (ADR-t3344-1): the run waits for the landing slot
+    /// again, its lease kept, for the next process to land.
+    HandedOver {
+        run: Box<TaskRun>,
+        main: CommitSha,
+        reason: String,
+    },
     NoRunAwaiting,
 }
 

@@ -14,6 +14,7 @@ related:
   - design-supervisor-lifecycle-waiting
   - adr-t3048-1
   - adr-t3077-1
+  - adr-t3344-1
 ---
 
 # Handoff
@@ -28,6 +29,8 @@ use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）�
 - **区切り**: ループの各passの先頭で、停止要求（SIGINT/SIGTERM）が無ければ`handoff_request(token)`を読む。
   要求があれば新しいclaim・adopt・resume・triage・observer・plan review・goal reviewの起動を止め、DBとrunのファイルから組み立て直せないslot（検証・e2e・着地が進行中のもの。`Phase::rebuildable`）だけを進める（`tick(true)`）。
   着地slotを待つrunは、着地の保留の有無に依らず着地（とその前のe2e）を始めず、leaseを持ったまま引き継ぐ（`Slot::rebuildable`。待つのは要求の時点で既に始まっていた検証・e2e・着地だけ。[ADR-t3077-1](../../adr/2026-10-22-t3077-1-handoff-drain-starts-no-landing-and-hands-over-runs-awaiting-the-slot.md)）。
+  待っている着地の検証がやり直し（hostの失敗・flakyだけの失敗）になるときは、やり直しを始めずに着地を区切り、runを着地を始めた時の状態に戻して（着地slotは空く）leaseを持ったまま着地slotの待ちとして引き継ぎ、区切った理由を`integration_handed_over`に記録する（`Integration::handing_off`。[ADR-t3344-1](../../adr/2026-10-25-t3344-1-handoff-drain-hands-over-a-landing-before-its-verification-is-retried.md)）。
+  次のプロセスはそのrunも下と同じ経路で着地の列に戻し、着地を最初からやり直す（区切った着地は列から外したことに数えない。`RunHistory::moved_on_after`）。
   次のプロセスは、`awaiting_integration`のrunをreviewのadoptで着地の列に戻し（人の`land`で並んだrunはleaseを返して承認の着地へ）、resumeの後に着地の列に並んだ承認済みの`needs_session`のrunをresumeし直さずに着地slotの待ちに戻す（`Takeover::Land`）。
   止めるdrainは今どおり着地slotを待つrunを進める。
   handoffのdrainは各passで、走るworkerのslot（人の答えを待ってslotの外にいるものを除く）のreceiptを通常のpassと同じく観測して`receipt_observed`を記録する（`Slot::pass`。[ADR-t3077-1](../../adr/2026-10-22-t3077-1-handoff-drain-starts-no-landing-and-hands-over-runs-awaiting-the-slot.md)の決定2）。

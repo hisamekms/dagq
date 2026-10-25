@@ -629,6 +629,8 @@ impl OneShot {
                 .parent()
                 .map(crate::application::heavy_turn::HeavyTurn::under),
             steps: None,
+            // No handoff drains a person's landing.
+            handing_off: None,
         };
         let integrator = Integrator::of_process(std::process::id());
         let Some(request) = integrator.approve(&mut integration, &requester, target, repo)? else {

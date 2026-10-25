@@ -202,6 +202,7 @@ impl State {
                     | EventKind::IntegrationError
                     | EventKind::IntegrationHeld
                     | EventKind::IntegrationFailed
+                    | EventKind::IntegrationHandedOver
                     | EventKind::RuntimeError
                     | EventKind::RunAdopted
                     | EventKind::RunRecovered

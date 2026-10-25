@@ -651,6 +651,12 @@ pub struct Integration<'a> {
     /// the verification, before the run lands; what that could not send is
     /// sent again by the supervisor's sweeps. `None` sends none.
     pub steps: Option<super::step_report::LandingSteps>,
+    /// Whether the supervisor that asked for the landing drains for a
+    /// handoff now (ADR-t3344-1): set, a verification that would be done
+    /// again (a host's failure or only flaky tests) is not, and the
+    /// landing is handed over to wait for the slot again. `None` (a
+    /// person's `integrate`) never hands over.
+    pub handing_off: Option<&'a std::sync::atomic::AtomicBool>,
 }
 
 /// The free disk space integrate checks before it retries a verification
@@ -1167,6 +1173,7 @@ fn land_integrating(
             ctx.verification_containers,
             ctx.clock,
             ctx.steps.as_ref().map(|steps| &*steps.shared),
+            ctx.handing_off,
             &task,
             run,
             &onto,
@@ -1302,6 +1309,21 @@ fn land_integrating(
                 EventKind::IntegrationHeld,
             );
             IntegrationOutcome::Held {
+                run: Box::new(run),
+                main: main.clone(),
+                reason,
+            }
+        }
+        Verdict::HandedOver { reason, detail } => {
+            info!(
+                op = "integrate",
+                reason = %reason,
+                "run {} is handed over: {reason}",
+                run.id()
+            );
+            let run =
+                queue.hand_over_integration(run.id(), token, previous.as_str(), &reason, detail)?;
+            IntegrationOutcome::HandedOver {
                 run: Box::new(run),
                 main: main.clone(),
                 reason,
@@ -1939,6 +1961,10 @@ enum Verdict {
     /// on a full disk with no room to retry it (task 639): the run waits
     /// for a person, awaiting integration, without a resume.
     Held { reason: String, detail: Value },
+    /// A verification that would be done again while the supervisor
+    /// drains for a handoff (ADR-t3344-1): the run waits for the landing
+    /// slot again, its lease kept, and the next process lands it anew.
+    HandedOver { reason: String, detail: Value },
 }
 
 /// Rebase, re-validate and land one run. `Ok(Deferred)` and
@@ -1958,6 +1984,7 @@ fn land(
     verification_containers: &dyn super::run_container::VerificationContainers,
     clock: &dyn Clock,
     steps: Option<&super::step_report::SharedVerification>,
+    handing_off: Option<&std::sync::atomic::AtomicBool>,
     task: &Task,
     run: &TaskRun,
     landing_branch: &LandingBranch,
@@ -2374,6 +2401,18 @@ fn land(
                         Some(short),
                     ));
                 }
+                // Not retried while the supervisor drains for a handoff
+                // (ADR-t3344-1): the next process lands it anew.
+                if drains_for_handoff(handing_off) {
+                    return Ok(handed_over(
+                        main,
+                        &rebased,
+                        command,
+                        (index, attempt),
+                        &last,
+                        &first_failure,
+                    ));
+                }
                 let retried = step.run(
                     queue,
                     index,
@@ -2405,6 +2444,19 @@ fn land(
             // 1039), with the environment of the profile that read it flaky
             // (ADR-t2268-1 decision 6).
             if failure.class == verify_failure::FailureClass::Flaky && !flaky_retried {
+                // Not done again while the supervisor drains for a handoff
+                // (ADR-t3344-1): the next process lands it anew, its once
+                // counted from that landing.
+                if drains_for_handoff(handing_off) {
+                    return Ok(handed_over(
+                        main,
+                        &rebased,
+                        command,
+                        (index, attempt),
+                        &last,
+                        failure,
+                    ));
+                }
                 let retry_env = toolchains.flaky_retry_env(failure.profile.unwrap_or_default());
                 let reason = format!(
                     "verification command {command:?} failed after the rebase onto {main} only on tests that passed when run again ({}); see {}. Verifying it once more instead of resuming the session",
@@ -2468,6 +2520,47 @@ fn land(
         },
         receipt.into_follow_ups(),
     ))
+}
+
+/// Whether the supervisor that asked for the landing drains for a
+/// handoff now ([`Integration::handing_off`]).
+fn drains_for_handoff(handing_off: Option<&std::sync::atomic::AtomicBool>) -> bool {
+    handing_off.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// The verdict of a landing handed over instead of verified again
+/// (ADR-t3344-1): command `index` of verification `attempt` failed as
+/// `failure` on `rebased`, which a handoff's drain does not verify again.
+/// The payload of `integration_handed_over` says what failed and where its
+/// log is.
+fn handed_over(
+    main: &CommitSha,
+    rebased: &CommitSha,
+    command: &str,
+    (index, attempt): (usize, u32),
+    last: &Checked,
+    failure: &verify_failure::VerifyFailure,
+) -> Verdict {
+    let reason = format!(
+        "verification command {command:?} failed after the rebase onto {main} ({}); see {}. It would be verified once more, but the supervisor drains for a handoff: the landing is handed over, its lease kept, and the next process lands it again",
+        failure.class.as_str(),
+        last.log.display()
+    );
+    Verdict::HandedOver {
+        reason: reason.clone(),
+        detail: json!({
+            "main": main,
+            "head": rebased,
+            "attempt": attempt,
+            "index": index,
+            "command": command,
+            "exit_code": last.exit_code,
+            "failure": failure.to_json(),
+            "failed_tests": last.tests_json(),
+            "flaky_tests": last.flaky_tests,
+            "log_path": last.log.to_str(),
+        }),
+    }
 }
 
 /// The landing of `run` a landing before this one put on `main` as
@@ -5878,6 +5971,64 @@ mod tests {
                 "disk": null,
             })
         );
+    }
+
+    /// ADR-t3344-1: a verification a handoff's drain does not do again,
+    /// a host's failure or only flaky tests, is handed over with what
+    /// failed, where its log is and why it was not verified again.
+    #[test]
+    fn a_verification_not_done_again_while_handing_off_is_handed_over() {
+        let killed = checked(None, Some(15), "");
+        let flaky = checked(
+            Some(100),
+            None,
+            "  TRY 1 FAIL [   0.010s] (───) dagq::it runtime_x::flaky\n\
+             \x20 TRY 2 PASS [   0.007s] (1/1) dagq::it runtime_x::flaky\n\
+             \x20FLKY-FL 2/2 [   0.007s] (1/1) dagq::it runtime_x::flaky\n\
+             error: test run failed\n",
+        );
+        for (last, class) in [(&killed, "killed"), (&flaky, "flaky")] {
+            let failure = last.failure.clone().expect("failed");
+            assert_eq!(failure.class.as_str(), class);
+            let Verdict::HandedOver { reason, detail } =
+                handed_over(&sha(BASE), &sha(HEAD), "cargo test", (2, 1), last, &failure)
+            else {
+                panic!("not handed over");
+            };
+            assert_eq!(
+                reason,
+                format!(
+                    "verification command \"cargo test\" failed after the rebase onto {BASE} ({class}); see /runs/run/integrate-1-verify-2.log. It would be verified once more, but the supervisor drains for a handoff: the landing is handed over, its lease kept, and the next process lands it again"
+                )
+            );
+            assert_eq!(
+                detail,
+                json!({
+                    "main": BASE,
+                    "head": HEAD,
+                    "attempt": 1,
+                    "index": 2,
+                    "command": "cargo test",
+                    "exit_code": last.exit_code,
+                    "failure": failure.to_json(),
+                    "failed_tests": last.tests_json(),
+                    "flaky_tests": last.flaky_tests,
+                    "log_path": "/runs/run/integrate-1-verify-2.log",
+                })
+            );
+        }
+        assert_eq!(flaky.flaky_tests, ["runtime_x::flaky"]);
+        assert!(killed.flaky_tests.is_empty());
+    }
+
+    /// Only a supervisor that drains for a handoff hands a landing over
+    /// ([`Integration::handing_off`]): none, or one not set, verifies again.
+    #[test]
+    fn only_a_set_handoff_flag_hands_a_landing_over() {
+        use std::sync::atomic::AtomicBool;
+        assert!(!drains_for_handoff(None));
+        assert!(!drains_for_handoff(Some(&AtomicBool::new(false))));
+        assert!(drains_for_handoff(Some(&AtomicBool::new(true))));
     }
 
     /// A person's `integrate` (task 638) refuses below the landing

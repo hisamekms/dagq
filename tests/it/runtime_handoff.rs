@@ -400,6 +400,166 @@ receipt \"$(git rev-parse HEAD)\"",
     );
 }
 
+/// ADR-t3344-1: a handoff's drain waits for the landing that had started
+/// before it was asked, but not for that landing's verification once
+/// more: the first verification, which a handoff asked for while it ran,
+/// fails only on flaky tests (ADR-t1039-1), and the drain hands the run
+/// over awaiting the
+/// landing slot with its lease, recording why, instead of verifying it
+/// again. The process that continues under the same token lands it anew
+/// without reviewing or resuming it. With `stop`, a stop asked after the
+/// handoff wins over it, and the drain verifies the landing once more in
+/// its own attempt and lands it, as one that does not drain. Which
+/// failures a handoff hands over, a host's too (ADR-t639-1), is the unit
+/// tests' of `integrate`.
+fn hands_over_a_landing_verified_again(stop: bool) {
+    let (dir, repo, db) = fixture();
+    let release = db.with_extension("release");
+    let failed = db.with_extension("failed");
+    declare_rust(&repo);
+    let log = dir.path().join("flaky.log");
+    fs::write(
+        &log,
+        "  TRY 1 FAIL [   0.010s] (───) dagq::it runtime_x::flaky\n\
+         \x20 TRY 2 PASS [   0.007s] (1/1) dagq::it runtime_x::flaky\n\
+         ────────────\n\
+         \x20    Summary [   0.017s] 1 test run: 1 passed, 0 failed, 0 skipped\n\
+         \x20FLKY-FL 2/2 [   0.007s] (1/1) dagq::it runtime_x::flaky\n\
+         error: test run failed\n",
+    )
+    .unwrap();
+    let failure = format!("cat {}; exit 100", shell_path(&log));
+    // Fails once, after the handoff was asked; passes from then on.
+    let verification = json!([format!(
+        "if [ -f {failed} ]; then exit 0; fi; {}; : > {failed}; {failure}",
+        crate::common::await_path(&release),
+        failed = shell_path(&failed),
+    )]);
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [verification.to_string()],
+        )
+        .unwrap();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "ready to land")]));
+    let options = supervise_options(1, false);
+    let passes = options.passes.clone();
+    let stopped = options.stop.clone();
+    let supervisor = {
+        let (db, repo, backend, reviewer, options) = (
+            db.clone(),
+            repo.clone(),
+            backend.clone(),
+            reviewer.clone(),
+            options.clone(),
+        );
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
+    };
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"integration_started")
+    });
+    let token = only_registration(&db).token;
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+    await_passes(&passes, SOME_PASSES);
+    if stop {
+        stopped.store(true, Ordering::SeqCst);
+        await_passes(&passes, SOME_PASSES);
+    }
+    std::fs::write(&release, "go").unwrap();
+    let outcome = joined(supervisor, "the supervisor asked to hand off");
+    if stop {
+        assert_ne!(outcome["outcome"], "handoff", "{outcome}");
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+        let detail = queue.show(TaskId::new(1)).unwrap();
+        assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+        assert!(payloads(&detail, "integration_handed_over").is_empty());
+        let kinds = event_kinds(&detail);
+        let count = |kind: &str| kinds.iter().filter(|k| **k == kind).count();
+        assert_eq!(count("integration_started"), 1, "{kinds:?}");
+        // Verified once more in a new attempt of the same landing.
+        assert_eq!(count("integration_retried"), 1, "{kinds:?}");
+        assert_eq!(integration_verifications(&detail).len(), 2);
+        return;
+    }
+    assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // Verified once, not again, and handed over awaiting the slot with
+    // its lease.
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert_eq!(
+        queue
+            .runs_leased_by(&token)
+            .unwrap()
+            .iter()
+            .map(|run| run.id().clone())
+            .collect::<Vec<_>>(),
+        vec![run.id().clone()]
+    );
+    let verifications = integration_verifications(&detail);
+    assert_eq!(verifications.len(), 1, "{verifications:?}");
+    assert!(payloads(&detail, "integration_retried").is_empty());
+    let handed = payloads(&detail, "integration_handed_over");
+    assert_eq!(handed.len(), 1, "{:?}", event_kinds(&detail));
+    let handed = handed[0];
+    assert_eq!(handed["failure"]["class"], "flaky", "{handed}");
+    assert_eq!(handed["status"], "awaiting_integration");
+    assert_eq!(handed["attempt"], 1);
+    assert_eq!(handed["index"], 1);
+    assert_eq!(handed["log_path"], verifications[0]["log_path"]);
+    assert!(
+        handed["reason"]
+            .as_str()
+            .unwrap()
+            .contains("the supervisor drains for a handoff"),
+        "{handed}"
+    );
+    for kind in ["integration_held", "integration_deferred", "lease_released"] {
+        assert!(payloads(&detail, kind).is_empty(), "{kind}");
+    }
+
+    let outcome = supervise_reviewed_with(
+        &db,
+        &repo,
+        &backend,
+        &reviewer,
+        &SuperviseOptions {
+            handoff_token: Some(token),
+            ..supervise_options(1, true)
+        },
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let shown = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(shown.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(shown.task.status(), TaskStatus::Completed);
+    let kinds = event_kinds(&shown);
+    let count = |kind: &str| kinds.iter().filter(|k| **k == kind).count();
+    assert_eq!(count("review_started"), 1, "{kinds:?}");
+    assert_eq!(count("resume_started"), 0, "{kinds:?}");
+    assert_eq!(count("integration_started"), 2, "{kinds:?}");
+    assert_eq!(count("integration_retried"), 0, "{kinds:?}");
+    // The new landing verified it anew, its own attempt.
+    let verifications = integration_verifications(&shown);
+    assert_eq!(verifications.len(), 2, "{verifications:?}");
+    assert_eq!(verifications[1]["attempt"], 2);
+    assert_eq!(verifications[1]["exit_code"], 0);
+}
+
+#[test]
+fn a_handoff_hands_over_a_landing_whose_flaky_verification_would_be_done_again() {
+    hands_over_a_landing_verified_again(false);
+}
+
+#[test]
+fn a_stop_over_a_handoff_verifies_a_flaky_landing_once_more_itself() {
+    hands_over_a_landing_verified_again(true);
+}
+
 /// A supervisor of the handoff's tests, given the `dagq` the test owns
 /// ([`crate::common::service::owned_executable`], in the queue's
 /// directory), so a service it starts ends with the test's process. It

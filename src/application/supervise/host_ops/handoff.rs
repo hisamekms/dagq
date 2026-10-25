@@ -208,6 +208,17 @@ pub(in crate::application::supervise) const fn drains(
     stopping || !claiming || handing_off
 }
 
+/// Whether a landing in progress hands its run over instead of verifying
+/// it again (ADR-t3344-1): only while a handoff is asked and no stop is,
+/// for a stop wins over a handoff and its drain verifies again as a pass
+/// that does not drain.
+pub(in crate::application::supervise) const fn hands_landings_over(
+    stopping: bool,
+    handing_off: bool,
+) -> bool {
+    handing_off && !stopping
+}
+
 impl Registration {
     /// The registration `token` takes, kept by `heartbeat`: no handoff, no
     /// stop.
@@ -589,6 +600,16 @@ mod tests {
         assert!(drains(true, true, false));
         assert!(drains(false, false, false));
         assert!(drains(false, true, true));
+    }
+
+    /// ADR-t3344-1: a landing is handed over only while a handoff is
+    /// asked and no stop wins over it.
+    #[test]
+    fn only_a_handoff_without_a_stop_hands_landings_over() {
+        assert!(hands_landings_over(false, true));
+        assert!(!hands_landings_over(true, true));
+        assert!(!hands_landings_over(false, false));
+        assert!(!hands_landings_over(true, false));
     }
 
     /// A request withdrawn while the supervisor drains for a landing

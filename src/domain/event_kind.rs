@@ -232,6 +232,7 @@ event_kinds! {
     IntegrationDeferred => "integration_deferred",
     IntegrationError => "integration_error",
     IntegrationFailed => "integration_failed",
+    IntegrationHandedOver => "integration_handed_over",
     IntegrationHeld => "integration_held",
     IntegrationRebaseAborted => "integration_rebase_aborted",
     IntegrationRebased => "integration_rebased",
@@ -1664,6 +1665,7 @@ mod tests {
             (EventKind::IntegrationDeferred, "integration_deferred"),
             (EventKind::IntegrationError, "integration_error"),
             (EventKind::IntegrationFailed, "integration_failed"),
+            (EventKind::IntegrationHandedOver, "integration_handed_over"),
             (EventKind::IntegrationHeld, "integration_held"),
             (
                 EventKind::IntegrationRebaseAborted,
