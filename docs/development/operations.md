@@ -93,7 +93,7 @@ hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候
   測ったbuildの下げる手では2本は入らない（[build・testのpeakのメモリ](../plans/build-memory.md)の「推奨」）。
   同時の数は、containerが起動の前にmachineのメモリから上限を予約し入らなければ待つ形で抑え、`parallel`はcontainerに切り替えるときも3のままにする（[ADR-t3163-1](../adr/2026-10-25-t3163-1-containers-reserve-memory-on-the-machine.md)。予約の実装が着地するまでは上の重なりが残る）。
 - 値はhostのmacOSで測ったもので、containerの中の絶対値ではない。
-  人かinboxが流すcontainerのruntimeのスモーク（[手動スモーク](manual-smoke.md)に足す手順）でcontainerの中のpeakとtestまで通るかを確かめ、合わなければ値を見直してこの節を直す。
+  人かinboxが流すcontainerのruntimeのスモーク（[手動スモーク](manual-smoke.md#container-の-runtime-のスモーク)の「machine の資源の推奨での build と test」）でcontainerの中のpeakとtestまで通るかを確かめ、合わなければ値を見直してこの節を直す。
 
 ## `[run.env]`とtestの並列度の置き場
 

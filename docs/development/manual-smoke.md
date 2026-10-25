@@ -1,7 +1,7 @@
 ---
 id: development-manual-smoke
 type: development
-title: 実ClaudeとCodexを含む経路の手動スモークの手順（故障経路・独立taskの完走・作業の内訳・非対話のworker・非対話のClaudeの前提・Codexのgoal reviewとrun review・Codexのinbox・runのreviewの実CLI・他のrepository）
+title: 実ClaudeとCodexを含む経路の手動スモークの手順（故障経路・独立taskの完走・作業の内訳・非対話のworker・非対話のClaudeの前提・Codexのgoal reviewとrun review・Codexのinbox・runのreviewの実CLI・他のrepository・containerのruntime）
 status: current
 created: 2026-10-13
 owners:
@@ -15,6 +15,9 @@ related:
   - plan-manual-smoke-results
   - plan-codex-inbox-spike
   - design-provider-lifecycle
+  - design-container-runtime
+  - design-queue-broker
+  - adr-t3163-1
   - adr-t813-1
   - adr-t813-3
   - adr-t1233-2
@@ -39,6 +42,7 @@ runtime の振る舞いを大きく変えたとき、Claude Code か Codex CLI �
 - [Codex の run review のスモーク](#codex-の-run-review-のスモーク): 使い捨て repository で通常 run の review を実 Codex で動かし、verdict から着地まで確かめる。
 - [Codex の inbox のスモーク](#codex-の-inbox-のスモーク): 使い捨て repository の queue に対して人が自分の terminal で Codex の inbox を開き、watch・ask の answer・復帰・区間の記録を確かめる。
 - [run の review の実 CLI の確認](#runのreviewの実cliの確認): ignored の IT で run の review の job の制限を実 Claude で確かめる。
+- [container の runtime のスモーク](#container-の-runtime-のスモーク): 使い捨ての queue で worker と verification を dagq 専用の machine の container で着地させ、machine・image・broker・relay・資格情報・fail closed・後始末と、実物の test・transcript・資源・sccache を確かめる。
 - [他の repository のスモーク](#他の-repository-のスモーク): dagq のソースでない使い捨て repository（default branch が `master`、`origin` なし、`Cargo.toml` も `AGENTS.md` も無い）で、`cargo install` したバイナリと公式の手順で入れた plugin を使い、`up`・計画の依頼から着地までを通す。
 
 ## 故障経路のスモーク
@@ -418,3 +422,249 @@ e2e は `target/` のバイナリを `--claude` の stub と `supervise` で直�
      `[e2e] paths` が無く task が `e2e` を要らないので、worker の prompt に e2e の行（「E2E: do not run the e2e」）が無く、run に `run_e2e_*` の event が無い。
 8. `tq down --wait` で supervisor を止め、inbox の terminal を閉じる。
    `claude plugin uninstall claude-dagq@dagq --scope local` で入れた plugin を外す。
+
+## container の runtime のスモーク
+
+worker（resume を含む）と `integrate` の verification を container で動かす経路（[Container runtime](../design/container-runtime.md)・[Queue broker](../design/queue-broker.md)）は、fake の podman と stub の provider でだけ自動 test され、実物の podman・dagq 専用の machine・image・broker・relay・実 Claude で流す test は `#[ignore]` で関門に数えない。
+それをこの手順で確かめる。
+container の runtime の部品（machine・image・broker・relay・executor・verification・資格情報の差し替え）を変えたとき、Podman か base の Claude Code の版が変わったとき、このrepositoryの `dagq.toml` で worker か verification を container に切り替える前に流す。
+`turn_session_exists` か transcript の置き場を変えたときは、[非対話の Claude の前提の確認](#非対話の-claude-の前提の確認)と合わせて下の「transcript・resume・stdin の prompt」を流し直す。
+人か inbox が行う（worker は使い捨ての queue も machine も操作できない。[隔離](#隔離)）。
+結果は依頼した task の receipt か、依頼の元の goal の note に、版（dagq・Podman・Claude Code）・手順ごとの結果・見つけた問題として残す。
+
+長期 token と API key の値は、どの手順でも画面・log・結果・コマンドの引数に出さない。
+確かめるのは種類・file の path・有無・権限・持ち主だけで、中身の有無は `grep -F -f <file>` の一致の有無（`-l` か `-c`）で見る。
+
+### 用意
+
+1. 前提を確かめて記録する: `podman --version`、`~/.local/bin/claude --version`、`podman machine list`（dagq 以外の machine が動いていない。人の machine が動いている間は dagq の machine を起動せず fail closed になる）、`podman system connection list`（既定の接続。後片付けで比べる）。
+2. 本番が dagq の machine を使っていないことを確かめる。
+   dagq の machine は host に 1 つで全ての queue が共有するので、この手順で作り直すと本番の container も止まる。
+   - この repository の中で `dagq doctor`（読み取りなので開発中のバイナリでもよい）を打ち、`runtimes` の worker と verification がどちらも `host` であることを見る。
+     `container` なら止めて人に報告し、本番の切り替えを戻すか、本番の着地が止まってよい時間を人が決めるまで進めない。
+   - `podman --connection dagq ps -a --format '{{.Names}}'`（machine が動いていれば）に、このスモークの queue でない `dagq-<key>-…` の container が無いことを見る。
+   - 既に `dagq` の machine があれば `podman machine stop dagq` と `podman machine rm dagq`（確認に答える）で消す（volume は init でしか決まらず、scratch の queue の dir が mount されていないため。[Container runtime](../design/container-runtime.md#dagq専用のmachine)の「食い違いと作り直し」）。
+3. scratch を作る（[隔離](#隔離)の形）。
+   - 使い捨て repository `<scratch>/dagq-smoke` は、確かめたい commit の dagq のソースの clone にする（下の「machine の資源」で dagq の build と test を流すため）。
+     `main` をその commit にし、scratch の bare repository を `origin` にする。
+   - バイナリはその commit で `cargo build --locked` したものを `<scratch>/bin/dagq` に置く。
+     base の image は同じ版の Linux の client を dagq の repository の commit から build するので、commit は dagq の repository に push 済みで、作業ツリーに未 commit の変更が無いこと（[Container runtime](../design/container-runtime.md#image)の「client」）。
+   - wrapper `tq` は[非対話の worker のスモーク](#非対話の-worker-のスモーク)の 1 と同じ（`env -u DAGQ_ROLE -u DAGQ_QUEUE -u DAGQ_ACTOR_ID -u DAGQ_RUN_ID -u DAGQ_TASK_ID XDG_DATA_HOME=<scratch>/xdg <scratch>/bin/dagq`）。
+     `tq init` を打ち、出力の `recommended.toolchains` の container の image・registry・worker の cache の案を控える。
+     `tq locate` の `db` の親の dir が queue の dir（`<queue dir>`）、その名前が queue の key（`<key>`）で、machine の中の container・volume・image の名前は `dagq-<key>-…` になる（`domain::podman_machine::QueueKey`）。
+4. `host.toml` を置く。
+   - host 全体の `$XDG_CONFIG_HOME/dagq/host.toml`（無ければ `~/.config/dagq/host.toml`）が既にあれば写しを取り、後片付けで戻す。
+     `[machine]` と `[container]` に[運用の開発文書](operations.md)の「containerのmachineの資源（`host.toml`）」の値を入れる（machine の値は queue の `host.toml` では変えられない）。
+   - queue の `<queue dir>/host.toml` に `[claude_credential]`（`file` は 5 の写し）を置く（綴りと意味は `infrastructure::claude_credential` の module doc）。
+     host 全体の表を表ごと上書きするので、本番の設定に触れない。
+5. 長期 token の file を用意する。
+   - この手順は token を発行も入力もせず、値を画面に出す段を持たない。
+     人がこの手順の前に発行し、repository と scratch の外に mode 0600 で保管した、値だけを持つ file（`<人の file>`）を使う。
+     その file が無ければこの手順を始めない（`claude setup-token` の発行の画面は値を表示するので、発行と保管はこのスモークの外で人が行う）。
+   - `mkdir -m 0700 <scratch>/secret` と `install -m 0600 <人の file> <scratch>/secret/claude-credential` で写しを置き（どちらも中身を表示しない）、以下ではこの写しを `<token の file>` と呼ぶ。
+     4 の `[claude_credential]` の `file` はこの写しを名指し、下の fail closed で権限を変えるのも写しだけにして、`<人の file>` には触れない。
+     `<scratch>/secret` は `<scratch>/xdg` の外なので、machine にも container にも mount されない。
+   - `stat -f '%Lp %Su' <token の file>` が `600 <自分>` であること、`tq doctor` の `claude_credential` に種類・file・有無・mode だけが出て値が無いことを見る。
+   - `cat`・`head`・`echo` で中身を見たり書いたりしない。
+     中身に触れる確かめは、host の `grep -F -f <token の file>` の一致の数（`-c`）か一致した file の名前（`-l`）だけにする。
+6. `<scratch>/dagq-smoke/dagq.toml` を変えて main に commit し、`origin` に push する。
+   - `[roles.worker]` と `[roles.verification]` に `runtime = "container"`（綴りは `domain::container_runtime::RuntimeConfig` の doc comment）。
+   - 3 で控えた案の `[egress] registries`・`[container.image]`・`[container.worker_cache]` と、`[container.build_output]`（綴りと意味は `infrastructure::run_env` の各表の doc comment、案は[profile の推奨の設定](../design/toolchain-profiles.md#推奨の設定)）。
+     `[run.env]` には `RUSTC_WRAPPER = "sccache"`（このrepositoryの `dagq.toml` のまま）を残し、`CARGO_TARGET_DIR` を `[container.build_output]` の dir に、`SCCACHE_DIR` を `[container.worker_cache]` の dir の 1 つの下に向ける値を足す。
+   - `[container.verification]` の `prepare` に、`$DAGQ_VERIFICATION_MATERIALS` の下に印の file を置くコマンド（例 `date > "$DAGQ_VERIFICATION_MATERIALS/prepared"`）。
+   - `[run.env]` に `PATH` と `XDG_DATA_HOME` を書かない（[scratch の worker が打つ `dagq` の環境](#scratch-の-worker-が打つ-dagq-の環境)の host の worker の形は使わない）。
+     `[run.env]` は container の env にも渡り、host の `PATH` は image の `PATH`（project の image の `/usr/local/cargo/bin` の cargo と、base の `/usr/local/bin/dagq` の Linux の client）を上書きして道具が見つからなくなるため。
+     container の `dagq` はクライアントモードで broker に届くので、queue の場所も scratch のバイナリも要らない（client は「用意」の 3 のとおり scratch のバイナリと同じ版）。
+     下の worker の run の記録で `command -v cargo dagq` が image の path を指すことを見る。
+   - scratch に要らない `[ci_watch]`・`[[recurring]]`・`[e2e]` は消す（e2e の有無はこの手順の対象でない）。
+7. 専用の terminal で `tq supervise --parallel 1 --claude ~/.local/bin/claude --log-dir <scratch>/logs --observe-interval 0 --observe-daily false --report-daily false --forecast-snapshots false --host-metrics-interval 0` を起動する（`--once` は queue service・broker・relay の見張りをしないので付けない）。
+
+### 設定と部品
+
+1. `tq doctor` と `tq status` の `runtimes` で worker と verification が `container`・enforcement が `sandbox`、`actors` の worker の `backend` が container であることを見る。
+2. broker: `<queue dir>/broker/state.json` の port に `curl -fsS http://127.0.0.1:<port>/health` が答える。
+   `tq service status` の service も動いている。
+3. machine と volume: 下の最初の worker の run の claim の後に、`podman machine list` で `dagq` が動き、machine の設定の file（`"$(podman machine inspect dagq --format '{{.ConfigDir.Path}}')/dagq.json"` の `Mounts`。Podman が volume を持つのはそこだけ） の source が `<queue dir>/runs`・`<queue dir>/clones`・`<queue dir>/verification` だけで、host の `$HOME`（`/Users/<自分>`）・worker の cache・build の出力・`<queue dir>/landing` が無いことを見る。
+   `$HOME` があれば mount の食い違いとして `MachineGate` が使えないと答えるはずなので、それも記録する。
+4. image: `tq events --all --full` に base と project の `container_image_built` があり、`podman --connection dagq images` に `localhost/dagq-base:<tag>` と `localhost/dagq-<key>-image:<tag>` がある。
+   `podman --connection dagq run --rm --network none localhost/dagq-<key>-image:<tag> sh -c 'cargo --version; cargo nextest --version; sccache --version; dagq --version'` が project の Containerfile の道具を出し、`dagq --version` の build 識別子が `<scratch>/bin/dagq --version` と同じ。
+
+### container の worker の run（claim から着地まで）
+
+1. task を 1 件登録して `tq ready ID --bypass-review` する（add が返した ID だけに打つ）。
+   `--verify 'test -f smoke-container.txt'`、description に次を順に行い、出力を `smoke-container.txt` に書いて commit し、receipt を書くよう書く。
+   - `id -u`、`printenv HOME`、`pwd`、`command -v cargo dagq`、`env | sed 's/=.*//' | sort`（env の名前だけ。値は出さない）。
+   - host の `$HOME`（人が description に絶対 path で書く。以下 `<host home>`）の中身: `ls -A <host home>`、`ls -d <host home>/.ssh <host home>/.claude <host home>/.config <host home>/Library 2>&1`、`find <host home> -maxdepth 3 2>&1 | head -50`。
+     scratch が `<host home>` の下にあれば、clone と run dir は host と同じ絶対 path に mount されるので `<host home>` の dir そのものは在る（外にあれば `<host home>` は無い）。
+   - `curl -sS -o /dev/null -w '%{http_code}\n' https://index.crates.io/config.json`（allowlist の中）、`curl -sS -o /dev/null https://example.com; echo $?`（allowlist の外）、`curl --noproxy '*' -sS -o /dev/null https://index.crates.io/config.json; echo $?`（proxy を通らない）。
+   - `[container.worker_cache]` の各 dir に `touch` して書けるか、`ls -la` の持ち主。
+2. 期待する結果。
+   - `tq events --run RUN --full`: `run_claimed` の後に turn の event が続き、`claim_deferred` も `container_runtime_unavailable` も無い。
+     `turn_requested` から着地まで host で agent も検証のコマンドも起動しない（turn の間の `ps -axo pid,command` に run の clone を cwd にした host の `claude` が無い）。
+   - turn の間、`podman --connection dagq ps --format '{{.Names}}'` に `dagq-<key>-run-<run>` と `dagq-<key>-relay-<run>` がある。
+     `podman --connection dagq inspect dagq-<key>-run-<run> --format '{{json .Mounts}}'` の mount が run の clone・run dir・`dagq-<key>-socket-<run>`・`dagq-<key>-build-<run>`・`dagq-<key>-cache-<hex>` だけで、`<queue dir>/landing` と `<queue dir>/verification` が無い。
+   - `smoke-container.txt` の中身: uid が `10001`、`HOME` が run dir の `container-home`、`cargo` が `/usr/local/cargo/bin/cargo`・`dagq` が `/usr/local/bin/dagq`。
+     `<host home>` の下に見えるのは scratch の queue の dir（run の clone・run dir）へ続く途中の dir だけで、`.ssh`・`.claude`・`.config`・`Library` などの host の `$HOME` の中身が無い（許した mount の外の host の file は見えない）。
+     allowlist の中は `200`、外と proxy を通らないものは非0 で、`tq events --all --full` に allowlist の外の宛ての `queue_broker_denied`（その run と宛て）が残る。
+     worker の cache の dir が `10001` の持ち主で書ける。
+   - host で `grep -rlF -f <token の file> <queue dir>/runs/<run> <queue dir>/clones/<run>` が何も出さず、`podman --connection dagq inspect dagq-<key>-run-<run> | grep -cF -f <token の file>` と `podman --connection dagq exec dagq-<key>-run-<run> env | grep -cF -f <token の file>` が `0`（長期 token は container の設定・env・run dir に入らない。host の `grep` が数だけを出す）。
+   - 着地: `tq show ID` の task `completed`・run `integrated`、`origin/main` に 1 commit。
+     その後の `podman --connection dagq ps -a` に `dagq-<key>-run-<run>`・`dagq-<key>-relay-<run>` が無く、`podman --connection dagq volume ls` に `dagq-<key>-socket-<run>` と `dagq-<key>-build-<run>` が無く、`dagq-<key>-cache-<hex>` は残る。
+   - 2 本目の task を同じく流し、その worker が 1 本目の cache の file を読めること（queue の worker の間で共有）と、下の verification の container の mount に cache が無いこと。
+
+### container の verification
+
+1. task を 1 件登録して ready にする。
+   description は「`smoke-verify.txt` に 1 行足して commit し、receipt を書く」。
+   verify は次の 5 本（`--verify` を 5 回）。
+   - `test -f "$DAGQ_VERIFICATION_MATERIALS/prepared"`（準備のコマンドの材料）。
+   - `sh -c 'test "$(id -u)" = 10001 && test "$(stat -c %u .)" = 10001 && touch probe'`（verification ごとの dir が keep-id で container の uid の持ち主になり書ける）。
+   - `dagq relay probe --socket /run/dagq-broker/broker.sock`（container の中の転送が実物の relay を通って broker に届く）。
+   - `sh -c 'curl -sS -o /dev/null https://example.com; test $? -ne 0'`（allowlist の外は拒まれる）。
+   - `sh -c 'export CARGO_HOME="${PWD%/*}/cargo-home"; cargo build --locked'`（cache なしで、依存を verification の token で registry から取って compile が通る）。
+     verification の container は worker の cache を mount せず root filesystem も読み取り専用なので、image の `CARGO_HOME`（`/home/dagq/.cargo`）には書けない。
+     cwd は verification ごとの dir の下の clone で、その dir は書けて verification の終わりに消えるので、`CARGO_HOME` をその dir の下に置く（build の出力は `[run.env]` の `CARGO_TARGET_DIR` が向く verification ごとの volume）。
+2. 期待する結果。
+   - 準備のコマンドが host の main checkout で流れ、run dir の `verification-materials` に `prepared` が置かれ、verification の container はそれを読み取り専用で mount する。
+   - `tq events --run RUN --full` の `verification_command` が 5 本とも成功で、run が `integrated`。
+     `sccache_wrapper_removed`（verification の container は `RUSTC_WRAPPER` を外す）と、verification の宛ての `queue_broker_denied`（example.com）が残る。
+   - 検証の間の `podman --connection dagq inspect dagq-<key>-verify-<id> --format '{{json .Mounts}}'` が verification ごとの dir・材料の dir・socket の volume・build の出力の volume だけで、`dagq-<key>-cache-…`・worker の clone・`<queue dir>/landing` が無い。
+   - 終わった後、`<queue dir>/verification/` にその verification の dir が無く、`podman --connection dagq volume ls` に `dagq-<key>-build-<verification の id>` が無く、`podman --connection dagq ps -a` に `dagq-<key>-verify-…` が無い。
+3. 終了 code: 別の task で `--verify "sh -c 'exit 7'"` を流し、`verification_command` に終了 code `7` が残って run が `needs_session` に戻り、host で流し直さないことを見る（resume の後の receipt で直させるか、`tq` で task を片付ける）。
+
+### 止める経路
+
+1. turn の終わりごと: worker の turn と turn の間（例: `worker_question` の答えを待つ間）に `podman --connection dagq ps -a` に `dagq-<key>-run-<run>` が無い。
+2. 止める経路: 走っている turn の間に `tq doctor` の wrapper の pid を `kill -KILL` し（[故障経路のスモーク](#故障経路のスモーク)の 4 と同じ）、triage が stop か cancel を選ぶまで（`decide` の ask なら cancel と答える）進める。
+   その後 `podman --connection dagq ps -a` に `dagq-<key>-run-<run>` が無く、次の relay の見張りの後に `dagq-<key>-relay-<run>` と `dagq-<key>-socket-<run>` も無く、`<queue dir>/relay/` にその run の記録が無い。
+   `recover` が container の生きている間に拒んだか、止まったかを記録する。
+
+### 正常に止めた machine からの自動の start
+
+1. 走っている run が無いときに `podman machine stop dagq` を打ち、`podman machine list` で止まったことを見る。
+2. container の worker の task を 1 件 ready にする。
+3. 期待する結果: `claim_deferred` も `container_runtime_unavailable` も無く claim され、`podman machine list` で `dagq` が動き、run が着地まで進む（`MachineGate` は止まった machine を使えるとし、turn の前の `ensure` が start する）。
+
+### fail closed（長期 token の権限）
+
+machine を止めるだけでは fail closed にならない（上の手順のとおり自動で start する）。
+`host.toml` を変える手順も使わず、実際に使えない状態を作る。
+
+1. 走っている run が無いときに、長期 token の写しを `chmod 0644 <token の file>` にする。
+2. container の worker の task を 1 件 ready にする。
+3. 期待する結果。
+   - `tq candidates` の `deferred` にその task が控えの理由（Claude の資格情報が 0600 でない、選び方の案内）つきで出て、`tq events --all --full` に同じ理由の `claim_deferred` と inbox 宛ての `container_runtime_unavailable` の attention がある。
+     値はどこにも出ない。
+   - `run_claimed` が無く、host の `ps -axo pid,command` に scratch の run の `claude` も検証のコマンドも無い。
+4. `chmod 0600 <token の file>` に戻す。
+   次の pass で `container_runtime_available` が記録されて attention が消え、task が claim されて着地まで進む。
+
+### fail closed（machine の volume の食い違い）
+
+`host.toml` の `[machine]` は CPU・メモリ・disk だけで volume の設定は無く、volume は init の時に data root（`<scratch>/xdg/dagq`）の下の queue から決まる。
+machine を作った後に queue を足し、その queue の dir が mount されていない状態（`domain::podman_machine::mounts_mismatch`）を作る。
+
+1. 上の手順で machine が作られた後に、2 つ目の使い捨て repository `<scratch>/dagq-smoke-b` を同じ形で作り、同じ `XDG_DATA_HOME` の `tq` で `tq init` する（`host.toml` の `[claude_credential]` と `dagq.toml` の container の設定も同じく置く）。
+   machine の設定の file（`"$(podman machine inspect dagq --format '{{.ConfigDir.Path}}')/dagq.json"` の `Mounts`。Podman が volume を持つのはそこだけ） にその queue の 3 つの dir が無いことを見る。
+2. `dagq-smoke-b` の専用の terminal でその queue の `tq supervise ...` を起動し、container の worker の task を 1 件 ready にする。
+3. 期待する結果: `dagq-smoke-b` の queue で、task が mount の食い違いと作り直しの手順（`podman machine stop dagq` と `podman machine rm dagq`）を添えた理由で控えられ（`claim_deferred`・`tq candidates` の `deferred`）、inbox 宛ての `container_runtime_unavailable` が出て、`run_claimed` が無く、host で agent も検証のコマンドも起動しない。
+   1 つ目の queue は影響を受けない。
+4. 戻す: 2 つの queue に走っている run が無く、上の「用意」の 2 で本番が container でないことを確かめ直してから、`podman machine stop dagq` と `podman machine rm dagq` を打つ。
+   次の `ensure` が今の `host.toml` と host の 2 つの queue で init し直し、machine の設定の file の `Mounts` に両方の queue の dir が入り、`dagq-smoke-b` で `container_runtime_available` が記録されて task が claim から着地まで進む。
+   作り直した machine の volume は消えるので、worker の cache は冷えた状態から始まる。
+
+### 殺された machine start の後始末
+
+relay の見張りの machine の起動し直しは、時間の上限（`infrastructure::podman_machine::MACHINE_TIMEOUT`）を超えると podman の process だけを止める（`PodmanCli::output_within`）ので、gvproxy や vfkit が残り、machine が起動の途中のまま残り得る。
+その状態を実物で作り、何が残り、次の pass で戻るかを確かめる。
+
+1. container の worker の run が turn の間（relay が動く間）に、`podman machine stop dagq` を打つ。
+   relay の見張りが podman の繋がらないことを見て、host 全体の lock の中で machine を起動し直す。
+2. その起動し直しの `podman machine start dagq` の process を `ps -axo pid,ppid,command` で見つけ、その pid に `kill -KILL` する（時間の上限で止められたのと同じ形）。
+3. 残るものを記録する: `ps -axo pid,ppid,command` の gvproxy・vfkit（と machine の provider の他の process）、`podman machine list` と `podman machine inspect dagq --format '{{.State}}'` の状態。
+4. 期待する結果: 次の見張りの pass が machine の stop→start で machine を戻し、`podman machine list` で `dagq` が動き、relay を起動し直して（`queue_relay_started`・`queue_relay_running`）run が続く。
+   戻らなければ inbox 宛ての `queue_relay_down` の attention が出て、`RelayGate` が新しい run を控える。
+   どちらになったかと、残った process が次の start の後も残ったかを記録する。
+
+### keep-id の clone の書き込みと relay の socket の持ち主
+
+worker の container は `--userns keep-id:uid=10001,gid=10001` で動き、relay は同じ uid で socket の volume を `:z,U` で mount する。
+確かめたい commit の dagq の checkout で、`#[ignore]` の実物の test 2 つを流す（dagq の machine が動き、他の machine が動いていないこと）。
+
+1. `DAGQ_WORKER_QUEUE_DIR=<queue dir> DAGQ_WORKER_IMAGE=localhost/dagq-<key>-image:<tag> cargo test --locked --test it -- --ignored --exact run_container::a_turn_s_container_runs_hardened_in_the_real_machine`。
+   `<queue dir>` は machine が mount している scratch の queue の dir、image はその queue の project の image。
+   期待する結果: 通る（uid が `10001`・root filesystem が書けない・clone と run dir と worker の cache に書ける・relay の無い socket に届かない）。
+2. `DAGQ_RELAY_IMAGE=localhost/dagq-base:<tag> cargo test --locked --test it -- --ignored --exact broker_relay::a_relay_in_the_real_machine_reaches_the_host_s_broker`。
+   期待する結果: 通る（relay が gvproxy を通って host の broker に届き、relay の container の中で uid `10001` が 0600 の socket を開いて broker の health に届く）。
+3. 実物の run でも見る: container の worker の turn の間に `podman --connection dagq exec dagq-<key>-run-<run> stat -c '%a %u' /run/dagq-broker/broker.sock` が `600 10001`、`podman --connection dagq exec dagq-<key>-run-<run> dagq relay probe --socket /run/dagq-broker/broker.sock` が 0 で終わる。
+   着地の前に `git bundle list-heads <queue dir>/runs/<run>/run-branch.bundle` が worker の commit を run branch の head として出す（worker が clone に書いた commit が bundle に入る）。
+
+### transcript・resume・stdin の prompt
+
+container の turn は `HOME` を run dir の `container-home`、cwd を clone の mount 先にして Claude Code を動かし、host 側（session の有無の判断・token とコマンドの計測・observation）は host の `$CLAUDE_CONFIG_DIR` か `~/.claude` に無いときだけ `container-home/.claude/projects` の下を symlink を辿らずに探す（[Container runtime](../design/container-runtime.md#workerの実行)の「transcript」）。
+Claude の turn の prompt は位置引数でなく stdin で渡り、container の run では podman に `--interactive` と agent の stdin が渡る。
+
+1. task を 1 件登録して ready にする。
+   description は「最初に `dagq ask --run $DAGQ_RUN_ID --kind worker_question --because scope --topic other --question '続けてよいか'` を打って turn を終え、答えを受けたら `cargo build --locked` を流してから `smoke-resume.txt` に 1 行足して commit し、receipt を書く」。
+2. 最初の turn の間に次を見る。
+   - host の `ps -axww -o pid,command` の `podman … run … dagq-<key>-run-<run> …` の argv に `--interactive` があり、prompt の本文（description の文）が無い。
+   - `podman --connection dagq exec dagq-<key>-run-<run> sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline; echo; done'` の `claude` の argv に prompt の本文の位置引数が無く、`--session-id` がある。
+   - worker が作業を始め、ask を開く（prompt の全文を stdin から読んだ）。
+3. ask に `tq answer <id> --text 'yes'` と答える。
+   答えの turn の間に 2 と同じく見て、`claude` の argv が `--resume`（`--session-id` でない）で、prompt の本文が argv に無く、worker が答えを受けて続ける。
+4. result の前に止めた turn: `cargo build` の間に `podman --connection dagq exec dagq-<key>-run-<run> kill -TERM <claude の pid>`（2 の `/proc` で見た pid）で agent を止める。
+   その run の次の turn（wrapper の続き・resume のどれでも、同じ run の次の turn）の `claude` の argv が `--resume` で同じ session を続けることを 2 と同じく見る。
+   次の turn が無く新しい run になった（triage の retry など）なら、そうなったことと理由を記録する。
+5. 着地の前（review の間。run dir の片付けの後は消える）と着地の後に確かめる。
+   - 着地の前: `<queue dir>/runs/<run>/container-home/.claude/projects/<clone を符号化した名>/<session>.jsonl` があり、host の `~/.claude/projects` にその clone の dir が無い。
+   - 着地の後: `tq events --run RUN --full` の worker の `session_closed` に model とコマンドの計測（`work` とコマンドの数）が入る。
+6. 長い path: scratch を深い dir に作り直して clone の path が Claude Code の project の dir の名前の上限（版による）を超える形で 1 と 5 を流し、`projects` の下の dir の名前が切られて hash が付いても、`session_closed` に 5 と同じ計測が入る（projects の他の dir を探す経路が拾う）ことを見る。
+
+### machine の資源の推奨での build と test
+
+[運用の開発文書](operations.md)の「containerのmachineの資源（`host.toml`）」の推奨（machine と container の memory の上限）は host の macOS で測った値で、container の中では確かめていない。
+この手順で dagq の build と test が通るかと、同時の数の抑え方（[ADR-t3163-1](../adr/2026-10-25-t3163-1-containers-reserve-memory-on-the-machine.md)）の下で OOM が出ないかを確かめる。
+
+1. machine をその節の値で init する（「用意」の 4 の `host.toml` の後に作り直す）。
+   `podman machine inspect dagq` の CPU とメモリがその値であることを見る。
+2. 1 本だけ: `--parallel 1` の supervisor で task を 1 件流す。
+   description は「`cargo build --locked` と `cargo test --locked`（全件）を流し、それぞれの所要時間と、終わった直後の `cat /sys/fs/cgroup/memory.peak` を receipt の evidence に書く」、verify は `sh -c 'export CARGO_HOME="${PWD%/*}/cargo-home"; cargo test --locked; s=$?; cat /sys/fs/cgroup/memory.peak; exit $s'`（`CARGO_HOME` を verification ごとの dir に置く理由は上の「container の verification」の 1）。
+   worker の container の `CARGO_HOME` は image のままで、`[container.worker_cache]` の dir（推奨の案では `CARGO_HOME` そのもの）が書ける。
+   期待する結果: worker の test と verification の test がどちらも通り、OOM の印（`turn_finished` や `verification_command` の終了 code 137、`podman machine ssh dagq -- journalctl -k | grep -i -E 'oom|killed process'` の行）が無い。
+   worker の時間と peak は receipt から、verification の時間は `verification_command` から、peak はその出力の最後の行から記録する。
+3. 上限いっぱいの数: supervisor を止め、`--parallel` を付けずに起動し直して scratch の `dagq.toml` の `[supervisor] parallel`（このrepositoryと同じ値）にし、2 と同じ task を parallel の数だけ同時に ready にし、worker の turn と verification が重なる時間を作る。
+   - [Container runtime](../design/container-runtime.md#dagq専用のmachine)の「資源」が予約を実装済みとしていれば、`podman --connection dagq ps --format '{{.Names}}'` の relay でない `dagq-<key>-…` の container の数が予算 ÷ 上限を超えず、入らないものは控え（`claim_deferred`）か turn と verification の待ちになり、OOM の印が無い。
+   - 未実装と書いている間は、重なった数・重なった時刻・OOM の印の有無を記録する（上限の合計が machine を超えて動くので、machine 全体の OOM が起こりうる）。
+4. 通らなければ、落ちた test の名前と失敗の文・時間・peak を本番 queue の goal 38 か 184 の note（`dagq note --goal <id> --text ...`）に残す。
+   値は人が決め直し、inbox が operations.md の値の見直しを `dagq request add` で頼む。
+
+### container の中の sccache の server
+
+`[run.env]` が sccache を名指すとき、supervisor は走っている turn の container の `podman inspect`（`infrastructure::run_container` の `INSPECT_FORMAT`: Id・State.Running・json の Config.Env・json の Mounts を 1 行ずつ）から server の計画を作り、agent より前に container の中に server を起こす（[Run environment](../design/supervisor-lifecycle/run-environment.md#sccacheのserver)）。
+inspect の parse は fake の podman でしか確かめていない。
+
+1. 「用意」の 6 の `[run.env]`（`RUSTC_WRAPPER = "sccache"`、`SCCACHE_DIR` が worker の cache の下）のまま、`cargo build --locked` を流す task を 1 件流す。
+2. 期待する結果。
+   - `tq events --run RUN --full` に `sccache_container_server_started`（`container` がその turn の `dagq-<key>-run-<run>`、`container_id` がその container の Id）があり、`sccache_container_server_start_failed` と、その turn の `sccache_wrapper_removed`（gate の時間切れを含む）が無い。
+   - その turn の間の `podman --connection dagq inspect dagq-<key>-run-<run> --format '{{json .Config.Env}}'` の `SCCACHE_SERVER_PORT`（無ければ sccache の既定の port）が event の `port` と同じで、`SCCACHE_DIR` が `--format '{{json .Mounts}}'` の `dagq-<key>-cache-<hex>` の mount 先の下にある。
+   - `podman --connection dagq exec dagq-<key>-run-<run> sccache --show-stats` の cache の場所がその `SCCACHE_DIR` で、2 本目の run で hit が増える。
+3. image の ENV: scratch の project の Containerfile に `ENV SCCACHE_SERVER_PORT=<既定でない port>` を足して main に commit する（`[run.env]` はその変数を書かず、`RUSTC_WRAPPER` と `SCCACHE_DIR` は残す。turn の前の計画は `[run.env]` から作り、`SCCACHE_DIR` が無ければ server を起こさず `sccache_wrapper_removed` になるため）。
+   新しい image の `container_image_built` の後に 1 と同じ task を流し、inspect の `Config.Env` に image の ENV の `SCCACHE_SERVER_PORT` が入り、`sccache_container_server_started` の `port` がその port で、2 と同じく server の cache が `SCCACHE_DIR` であることを見る。
+
+### 後片付け
+
+1. 各 scratch の queue（`dagq-smoke` と `dagq-smoke-b`）の repository の中で `tq down --wait` を打つ。
+   `down` は手で起動した `supervise` にも SIGTERM を送って drain を待ち、その後に queue の broker、queue service の順で止める（[Queue broker](../design/queue-broker.md#起動と停止)の「`down`」）。
+   supervisor を止めるだけでは broker と service は止まらないので、supervisor を先に Ctrl-C で止めた queue にも打つ。
+   期待する結果。
+   - `down` の出力の `queue_broker` と `queue_service` の `outcome` が `stopped`（drain の終わりに最後の supervisor が止めていれば `not_running`）で、`tq events --all --full` に `queue_broker_stopped` と `queue_service_stopped` がある。
+   - `tq service status` が止まった service を答え、`<queue dir>/broker/state.json` の port への `curl -fsS http://127.0.0.1:<port>/health` が繋がらない。
+   - `ps -axww -o pid,command` に `<scratch>/bin/dagq` の `supervise`・`service`・`queue-broker serve` の process が無い。
+   - `tq doctor` の `unfinished_runs` が空で、`ps` に scratch の run の `claude`・wrapper が残っていない。
+   どれかが残れば記録し、残った process を `ps` で確かめた pid で止めてから次へ進む（queue の dir を先に消すと、残った process を `down` で止められなくなる）。
+2. `podman --connection dagq ps -a` と `podman --connection dagq volume ls` に `dagq-<key>-…` の container と volume が残っていれば記録してから消す。
+   `podman machine stop dagq` で machine を止める（作ったときの volume を消してよければ `podman machine rm dagq` も）。
+   人の既定の接続が `podman system connection list` で前と同じであることを見る。
+3. 1 の後に、使い捨て repository（`dagq-smoke`・`dagq-smoke-b`）、bare の `origin`、`<scratch>/xdg` の queue の dir、長期 token の写しの `<scratch>/secret`、scratch のバイナリを消す。
+4. host 全体の `host.toml` を「用意」の 4 の写しに戻す（無かったなら消す）。
+   `<人の file>` はこの手順で触れていないので、mode が 0600 のままであることだけを `stat` で見る（消さない。要らなければ人が発行元で無効にする）。
