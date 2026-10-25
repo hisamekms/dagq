@@ -6,6 +6,7 @@ status: current
 created: 2026-09-21
 scope: provider
 related:
+  - adr-t1181-1
   - adr-t1857-1
   - adr-t3255-1
   - adr-t1486-1
@@ -91,6 +92,7 @@ providerは役割ごとに決まる（[Actor model](supervisor-lifecycle/actor-m
 Claudeのinboxはqueueのdirに書くsettings（inboxのdenyだけ）とpluginで開く。
 Codexのinboxは起動の引数だけで開き、何も書かない（[ADR-t1181-1](../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定2）。
 Codexのinboxを選べるのはinboxの記録の実装の後で、それまで`lifecycle::inbox_route`が開かずに断る。
+使えないCodex（実行ファイルとlogin）も開かずに断り、Claudeに替えない。
 
 - 入口: 引数・hookのtrust・人の設定の確かめは`infrastructure::codex_inbox`（`inbox_command`・`hook_configs`・`LAUNCH_CONFIG`・`check_user_config`）、hookの答えは`application::codex_inbox`、hookを動かすのは`dagq codex-inbox-hook`。
 - 約束: 指示はpluginのskillの場所を名指す常に効く指示で渡し、見張りは上限つきの前景の`watch`にする（Codexにはbackgroundのtaskも選択肢のtoolも無い）。
@@ -176,6 +178,9 @@ ADR-t813-2決定2〜6と、切り替えを止める設定の[ADR-t1857-1](../adr
 - 落とし穴: 切り替えた後は会話が引き継がれない（`domain::turn::new_session_prompt`）。
 - runtimeのplannerは同じ壁で待つが、providerは切り替えない（[Plan planners](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)）。
 - reviewの起動し直しは[Review](supervisor-lifecycle/review.md)と[Goal review](supervisor-lifecycle/goal-review.md)、設定は[Run environment](supervisor-lifecycle/run-environment.md)。
+- 境界: inboxは切り替えと控えの外にある（[ADR-t1181-1](../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定4）。
+  runtimeはinboxを起動しないので、控えはinboxを止めず、inboxはClaudeでしか動けない役割に数えない。
+  Claudeの控えで`queue_hold`のaskを開く条件とCodexだけの控えで開かないことはinboxのproviderで変わらず、どちらのinboxもそのaskに答えられる。
 
 ## 大きなcontextからの新しいsession
 
@@ -202,3 +207,4 @@ folder trust以外のダイアログの扱いは`adapters.rs`の`stop_hook_setti
 
 - 入口: `provider_switch::held`・`actor_model::job_start_route`・`HostActorExecutor`。
 - 約束: 方針の違うsupervisorは再利用・引き継ぎせず先にdrainを求め、workerもjobもClaudeへ戻さず、Codexで続けられないjobは役割の手動の経路に渡し、plannerは起動せず人が代行する。
+- `dagq inbox`はClaudeのinboxを開かず、Codexで開くか、開けなければ理由を出す（[`up` / `down`](supervisor-lifecycle/up-down.md#dagq-inbox)）。

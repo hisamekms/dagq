@@ -18,7 +18,7 @@ use std::{
 use crate::common::{
     self, Bounded, WithoutActor,
     cli::invoke_with,
-    service::{Queue, events, queue},
+    service::{Queue, events, queue, start},
 };
 use dagq::{
     application::{
@@ -694,4 +694,59 @@ fn each_host_command_runs_in_client_mode_as_on_the_db() {
     ] {
         assert_eq!(actor_of(kind), json!(inbox.actor_id()), "{kind}");
     }
+}
+
+/// The inbox's `answer` to the queue's Claude hold (`queue_hold`) goes
+/// through the service as the inbox's principal, whatever provider the
+/// inbox runs on (ADR-t1181-1 decision 4): it is recorded as the inbox's
+/// delegated answer for the runtime to deliver, and the ask stays open
+/// for the runtime, which applies `done` to every answered hold whoever
+/// answered it (`runtime_queue_hold::an_open_usage_limit_ask_holds_claims_and_reviews_until_done`).
+#[test]
+fn the_inbox_answers_the_queue_hold_through_the_service_for_the_runtime_to_apply() {
+    let served = queue();
+    let hold = SqliteQueue::open(&served.db)
+        .unwrap()
+        .hold(dagq::domain::NewHold {
+            reason_category: dagq::domain::AskReason::Cost,
+            subject: Some(dagq::domain::queue_hold::USAGE_LIMIT_SUBJECT.to_owned()),
+            run_id: None,
+            job: None,
+            question: "Claude's usage limit".into(),
+            options: dagq::domain::HOLD_OPTIONS
+                .iter()
+                .map(|option| (*option).to_owned())
+                .collect(),
+            asked_by: "supervisor".into(),
+        })
+        .unwrap()
+        .ask;
+    start(&served);
+    let output = in_client_mode(
+        &served,
+        &Principal::inbox(this_session()),
+        "inbox",
+        &["answer", &hold.id.to_string(), "--text", "done"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let answered: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answered["answered_by"], "inbox", "{answered}");
+    assert_eq!(answered["answer_authority"], "delegated", "{answered}");
+    let events = events(&served.db, "ask_answered");
+    let event = events
+        .iter()
+        .find(|event| event["payload"]["ask_id"] == json!(hold.id))
+        .unwrap();
+    assert_eq!(event["payload"]["runtime_delivers"], true, "{event}");
+    assert_eq!(event["actor"]["role"], "inbox", "{event}");
+    let ask = SqliteQueue::open(&served.db)
+        .unwrap()
+        .read_ask(hold.id)
+        .unwrap();
+    assert_eq!(ask.answer.as_deref(), Some("done"));
+    assert!(ask.closed_at.is_none());
 }

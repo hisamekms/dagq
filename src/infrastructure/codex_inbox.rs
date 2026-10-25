@@ -640,6 +640,71 @@ pub fn check_this_user_config(cwd: &Path) -> Result<(), String> {
     check_user_config(file.as_deref())
 }
 
+/// How long each of the two runs of Codex [`check_usable`] makes may take.
+pub const USABLE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether the Codex at `executable` can be used for an inbox started in
+/// `cwd` (ADR-t1181-1 decision 3, "cannot be used" as in ADR-t813-2
+/// decision 2), checked before the exec: it starts and answers
+/// `--version`, and `login status` exits 0, which it does only with a
+/// login (codex-cli 0.164.0 prints `Logged in using …` or exits 1 with
+/// `Not logged in`). Both run in `cwd` with `codex_home` (`$CODEX_HOME`)
+/// as the inbox's Codex is given it ([`launch_codex_home`]), so the login
+/// checked is the one it reads; nothing is written. A usage limit shows
+/// only in a turn, so it is not checked here: an inbox that meets one
+/// after it opened is the person's to open again. `Err` with why, which
+/// starts like the other refusals of a Codex inbox and names the
+/// executable and what Codex printed.
+pub fn check_usable(
+    executable: &Path,
+    codex_home: Option<OsString>,
+    cwd: &Path,
+) -> Result<(), String> {
+    let home = launch_codex_home(codex_home, cwd);
+    let run = |args: &[&str]| {
+        let mut command = Command::new(executable);
+        command.args(args).current_dir(cwd);
+        if let Some(home) = &home {
+            command.env("CODEX_HOME", home);
+        }
+        super::adapters::capture(&mut command, USABLE_CHECK_TIMEOUT)
+    };
+    let shown = executable.display();
+    let printed = |stdout: &str, stderr: &str| {
+        let text = format!("{} {}", stdout.trim(), stderr.trim());
+        text.trim().to_owned()
+    };
+    match run(&["--version"]) {
+        Ok((status, _, _)) if status.success() => {}
+        Ok((status, stdout, stderr)) => {
+            return Err(format!(
+                "the Codex inbox was not opened: the Codex at {shown} does not run (`--version` exited with {status}: {})",
+                printed(&stdout, &stderr)
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "the Codex inbox was not opened: the Codex at {shown} could not be started ({error:#})"
+            ));
+        }
+    }
+    match run(&["login", "status"]) {
+        Ok((status, _, _)) if status.success() => Ok(()),
+        Ok((status, stdout, stderr)) => Err(format!(
+            "the Codex inbox was not opened: the Codex at {shown} is not logged in (`login status` exited with {status}: {}); log in with `codex login`",
+            printed(&stdout, &stderr)
+        )),
+        Err(error) => Err(format!(
+            "the Codex inbox was not opened: whether the Codex at {shown} is logged in could not be checked ({error:#})"
+        )),
+    }
+}
+
+/// [`check_usable`] with this process's `CODEX_HOME`.
+pub fn check_this_codex(executable: &Path, cwd: &Path) -> Result<(), String> {
+    check_usable(executable, std::env::var_os("CODEX_HOME"), cwd)
+}
+
 /// `dagq` with the queue of the inbox's environment (`DAGQ_DB`, else
 /// `DAGQ_QUEUE`) as `--db`, and `args`.
 fn dagq(launcher: &Path, args: &[&str]) -> Command {

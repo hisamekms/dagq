@@ -2158,6 +2158,15 @@ pub struct InboxPorts<'a> {
     /// Codex's TUI would write to them
     /// ([`crate::infrastructure::codex_inbox::check_user_config`]).
     pub codex_settings: &'a dyn Fn(&Path) -> std::result::Result<(), String>,
+    /// `codex_usable(executable, checkout)`: whether the Codex at
+    /// `executable`, started in the main checkout, can be used (its
+    /// executable runs and it is logged in), `Err` with why
+    /// ([`crate::infrastructure::codex_inbox::check_usable`]).
+    pub codex_usable: &'a dyn Fn(&Path, &Path) -> std::result::Result<(), String>,
+    /// `claude_forbidden(db)`: whether a person forbade starting Claude
+    /// for the queue at `db` ([`claude_forbidden`] over its supervisors),
+    /// read before the inbox's provider is chosen.
+    pub claude_forbidden: &'a dyn Fn(&Path) -> Result<bool>,
 }
 
 /// What `dagq inbox` is given: the plugin directory the inbox loads
@@ -2184,32 +2193,134 @@ pub struct InboxAgents<'a> {
 /// Why `dagq inbox` opens no Codex inbox yet (ADR-t1181-1, the order of
 /// implementation): a Codex inbox is selectable only once its session and
 /// launch are recorded with their provider and model, which they are not
-/// yet.
+/// yet. [`inbox_route`] follows it with [`CLAUDE_INSTEAD`] or
+/// [`NO_CLAUDE_INSTEAD`].
 pub const CODEX_INBOX_PENDING: &str = "the Codex inbox is not selectable yet: its session and \
 launch records (provider, model and thread) are not implemented, and a Codex inbox is not opened \
-without them; open the inbox on Claude with `dagq inbox --provider claude`, or remove provider = \
-\"codex\" from [roles.inbox]";
+without them";
 
-/// How the inbox starts, decided before anything is read of the queue or
-/// recorded: its launch ([`crate::domain::actor_model::inbox_launch`]:
-/// `[roles.inbox]` of `roles`, overridden by `--provider` and `--model` of
-/// `options`, a mistake refused as a mistake of the setting). A Codex
-/// inbox goes on only when the person's Codex settings would not be
-/// written (`codex_settings`), and is then refused with
-/// [`CODEX_INBOX_PENDING`]: neither starts Claude in its place.
+/// What a refused Codex inbox adds when Claude may start: the arguments
+/// that open the inbox on Claude, which the person runs themselves
+/// (ADR-t1181-1 decision 3). `dagq inbox` does not start Claude in its
+/// place.
+pub const CLAUDE_INSTEAD: &str =
+    "to open the inbox on Claude instead, run `dagq inbox --provider claude`";
+
+/// What a refused Codex inbox adds when a person forbade starting Claude
+/// ([`claude_forbidden`], ADR-t1181-1 decision 4): no inbox opens until
+/// Codex can be used.
+pub const NO_CLAUDE_INSTEAD: &str = "Claude is not opened in its place: a supervisor of this \
+queue runs under `up --no-claude`, which forbids starting Claude; run `dagq inbox` again once \
+a Codex inbox can be opened";
+
+/// Why a Claude inbox the arguments chose is refused while a person forbids
+/// starting Claude ([`claude_forbidden`], ADR-t1204-1 decision 1): the
+/// person's explicit choice is not swapped for Codex behind their back.
+pub const CLAUDE_INBOX_FORBIDDEN: &str = "a Claude inbox chosen by the arguments is refused: a supervisor \
+of this queue runs under `up --no-claude`, which forbids starting Claude, so the Claude inbox is \
+not opened; open the inbox on Codex with `dagq inbox --provider codex` and a model of Codex's";
+
+/// Whether a person forbade starting Claude for the queue (ADR-t1204-1
+/// decision 1), as `dagq inbox` reads it: a supervisor of `registrations`
+/// whose process lives was started under `up --no-claude`
+/// ([`SupervisorRegistration::claude_disabled`]). With no supervisor
+/// running nothing records the policy, and Claude may start.
+pub fn claude_forbidden(
+    registrations: &[SupervisorRegistration],
+    processes: &dyn ProcessControl,
+) -> bool {
+    registrations
+        .iter()
+        .any(|registration| registration.claude_disabled() && processes.alive(registration.pid))
+}
+
+/// What [`inbox_route`] checks besides the table and the arguments:
+/// whether a person forbade starting Claude ([`claude_forbidden`]),
+/// whether the Codex the inbox would start can be used (its executable
+/// runs and it is logged in,
+/// [`crate::infrastructure::codex_inbox::check_usable`]) and whether it
+/// may start on the person's Codex settings, which are only read
+/// ([`crate::infrastructure::codex_inbox::check_user_config`]). The two
+/// checks of Codex run for a Codex inbox only, `Err` with why.
+pub struct InboxChecks<'a> {
+    pub claude_forbidden: bool,
+    pub codex_usable: &'a dyn Fn() -> std::result::Result<(), String>,
+    pub codex_settings: &'a dyn Fn() -> std::result::Result<(), String>,
+}
+
+/// How the inbox starts, decided before anything is recorded: its launch
+/// ([`crate::domain::actor_model::inbox_launch`]: `[roles.inbox]` of
+/// `roles`, overridden by `--provider` and `--model` of `options`, a
+/// mistake refused as a mistake of the setting). While a person forbids
+/// starting Claude (`checks.claude_forbidden`, ADR-t1181-1 decision 4) a
+/// Claude launch moves to Codex with Codex's default model, and an
+/// explicit `--provider claude` is refused ([`inbox_provider`]).
+/// A Codex inbox goes on only when Codex can be used
+/// (`checks.codex_usable`, ADR-t1181-1 decision 3) and the person's Codex
+/// settings would not be written (`checks.codex_settings`), and is then
+/// refused with [`CODEX_INBOX_PENDING`]. The refusal for an unusable Codex
+/// and the pending one add [`CLAUDE_INSTEAD`], or [`NO_CLAUDE_INSTEAD`]
+/// when Claude is forbidden: nothing starts Claude in its place, and no
+/// ask is opened, since the person is at the terminal. No provider hold
+/// of the runtime's is read: the runtime does not start the inbox, so no
+/// hold keeps it closed.
 pub fn inbox_route(
     roles: &crate::domain::actor_model::RoleModels,
     options: &InboxOptions,
-    codex_settings: &dyn Fn() -> std::result::Result<(), String>,
+    checks: &InboxChecks,
 ) -> Result<crate::domain::actor_model::ActorLaunch> {
     let launch =
         crate::domain::actor_model::inbox_launch(roles, options.provider, options.model.as_deref())
             .map_err(anyhow::Error::msg)?;
+    let launch = inbox_provider(launch, options.provider, checks.claude_forbidden)?;
     if launch.provider == crate::domain::Provider::Codex {
-        codex_settings().map_err(anyhow::Error::msg)?;
-        bail!(CODEX_INBOX_PENDING);
+        let instead = if checks.claude_forbidden {
+            NO_CLAUDE_INSTEAD
+        } else {
+            CLAUDE_INSTEAD
+        };
+        (checks.codex_usable)().map_err(|why| anyhow::anyhow!("{why}; {instead}"))?;
+        // Under the ban the person did not choose Codex, so its settings'
+        // refusal says why too.
+        (checks.codex_settings)().map_err(|why| {
+            if checks.claude_forbidden {
+                anyhow::anyhow!("{why}; {instead}")
+            } else {
+                anyhow::Error::msg(why)
+            }
+        })?;
+        bail!("{CODEX_INBOX_PENDING}; {instead}");
     }
     Ok(launch)
+}
+
+/// The inbox's `launch` (from the table and the arguments) under the
+/// policy of starting Claude: as it is unless a person forbade it
+/// (`claude_forbidden`), when a Claude launch moves to Codex
+/// ([`ActorLaunch::switched`] for [`SwitchReason::Disabled`]) and a
+/// Claude launch the arguments chose (`--provider claude`, `argued`, or a
+/// Claude model by `--model`) is refused with [`CLAUDE_INBOX_FORBIDDEN`].
+///
+/// [`ActorLaunch::switched`]: crate::domain::actor_model::ActorLaunch::switched
+/// [`SwitchReason::Disabled`]: crate::domain::provider_switch::SwitchReason::Disabled
+fn inbox_provider(
+    launch: crate::domain::actor_model::ActorLaunch,
+    argued: Option<crate::domain::Provider>,
+    claude_forbidden: bool,
+) -> Result<crate::domain::actor_model::ActorLaunch> {
+    use crate::domain::Provider;
+    if launch.provider != Provider::Claude || !claude_forbidden {
+        return Ok(launch);
+    }
+    ensure!(
+        argued != Some(Provider::Claude)
+            && launch.source != crate::domain::actor_model::LaunchSource::Argument,
+        CLAUDE_INBOX_FORBIDDEN
+    );
+    Ok(launch.switched(
+        Provider::Codex,
+        crate::domain::provider_switch::SwitchReason::Disabled,
+    ))
 }
 
 /// `dagq inbox` (ADR-t2159-1 decision 2): the command that runs the
@@ -2254,10 +2365,24 @@ pub fn inbox(
     };
     let roles = (ports.roles)(&checkout)
         .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
-    // The settings of the Codex started in the main checkout, which a
-    // relative `CODEX_HOME` is taken from.
-    let launch = inbox_route(&roles, options, &|| (ports.codex_settings)(&checkout))
-        .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
+    let claude_forbidden = (ports.claude_forbidden)(&db).map_err(|error| {
+        anyhow::anyhow!(
+            "whether a person forbade starting Claude could not be read ({error:#}); the inbox \
+             was not opened"
+        )
+    })?;
+    // The Codex started in the main checkout, which a relative
+    // `CODEX_HOME` is taken from.
+    let launch = inbox_route(
+        &roles,
+        options,
+        &InboxChecks {
+            claude_forbidden,
+            codex_usable: &|| (ports.codex_usable)(&options.codex, &checkout),
+            codex_settings: &|| (ports.codex_settings)(&checkout),
+        },
+    )
+    .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
     let (agent, executable) = match launch.provider {
         crate::domain::Provider::Claude => (agents.claude, &options.agent),
         crate::domain::Provider::Codex => (agents.codex, &options.codex),
@@ -2786,27 +2911,51 @@ mod tests {
         panic!("a Claude inbox reads no Codex settings")
     }
 
+    /// Codex is not run for a Claude inbox.
+    fn not_run() -> std::result::Result<(), String> {
+        panic!("a Claude inbox runs no Codex")
+    }
+
+    fn usable() -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    /// The checks of a queue whose person does or does not forbid Claude,
+    /// with Codex's two checks.
+    fn checks<'a>(
+        claude_forbidden: bool,
+        codex_usable: &'a dyn Fn() -> std::result::Result<(), String>,
+        codex_settings: &'a dyn Fn() -> std::result::Result<(), String>,
+    ) -> InboxChecks<'a> {
+        InboxChecks {
+            claude_forbidden,
+            codex_usable,
+            codex_settings,
+        }
+    }
+
     /// With neither `[roles.inbox]` nor `--provider` / `--model` the
     /// inbox starts as before; `[roles.inbox]` is its default and the
     /// arguments override it for the one start; a mistake in either is
     /// refused as a mistake of the setting.
     #[test]
     fn the_inbox_route_takes_the_table_and_the_arguments_over_it() {
+        let claude = checks(false, &not_run, &unread);
         let none = RoleModels::default();
-        let launch = inbox_route(&none, &inbox_options(None, None), &unread).unwrap();
+        let launch = inbox_route(&none, &inbox_options(None, None), &claude).unwrap();
         assert_eq!(launch, ActorLaunch::default_of(ModelRole::Inbox));
-        let mut claude = RoleModels::default();
-        claude.entry(ModelRole::Inbox).model = Some("claude-sonnet-5-5".to_owned());
-        let launch = inbox_route(&claude, &inbox_options(None, None), &unread).unwrap();
+        let mut table = RoleModels::default();
+        table.entry(ModelRole::Inbox).model = Some("claude-sonnet-5-5".to_owned());
+        let launch = inbox_route(&table, &inbox_options(None, None), &claude).unwrap();
         assert_eq!(
             (launch.provider, launch.source),
             (Provider::Claude, LaunchSource::Config)
         );
         assert_eq!(launch.arguments(), Some(("claude-sonnet-5-5", "medium")));
         let launch = inbox_route(
-            &claude,
+            &table,
             &inbox_options(Some(Provider::Claude), Some("claude-opus-5-5")),
-            &unread,
+            &claude,
         )
         .unwrap();
         assert_eq!(launch.source, LaunchSource::Argument);
@@ -2814,19 +2963,21 @@ mod tests {
         let error = inbox_route(
             &none,
             &inbox_options(Some(Provider::Codex), Some("claude-opus-5-5")),
-            &unread,
+            &claude,
         )
         .unwrap_err();
         assert!(format!("{error}").contains("is Claude's"), "{error}");
     }
 
     /// A Codex inbox, by `[roles.inbox]` or by `--provider`, is not opened
-    /// yet: refused with why, Claude not started in its place; and before
-    /// that, refused with the settings check's reason when Codex would
-    /// write the person's settings.
+    /// yet: refused with why and the arguments that open Claude, Claude
+    /// not started in its place; and before that, refused with the
+    /// settings check's reason when Codex would write the person's
+    /// settings.
     #[test]
     fn a_codex_inbox_is_refused_until_its_records_land() {
         let settings_ok = || Ok(());
+        let codex = checks(false, &usable, &settings_ok);
         let mut table = RoleModels::default();
         table.entry(ModelRole::Inbox).provider = Some(Provider::Codex);
         for (roles, options) in [
@@ -2837,12 +2988,20 @@ mod tests {
             ),
             (&table, inbox_options(None, Some("gpt-6.1-sol"))),
         ] {
-            let error = inbox_route(roles, &options, &settings_ok).unwrap_err();
-            assert_eq!(format!("{error}"), CODEX_INBOX_PENDING);
+            let error = inbox_route(roles, &options, &codex).unwrap_err();
+            assert_eq!(
+                format!("{error}"),
+                format!("{CODEX_INBOX_PENDING}; {CLAUDE_INSTEAD}")
+            );
         }
-        assert!(CODEX_INBOX_PENDING.contains("--provider claude"));
+        assert!(CLAUDE_INSTEAD.contains("`dagq inbox --provider claude`"));
         let settings_missing = || Err("the Codex inbox was not opened: add [tui]".to_owned());
-        let error = inbox_route(&table, &inbox_options(None, None), &settings_missing).unwrap_err();
+        let error = inbox_route(
+            &table,
+            &inbox_options(None, None),
+            &checks(false, &usable, &settings_missing),
+        )
+        .unwrap_err();
         assert_eq!(
             format!("{error}"),
             "the Codex inbox was not opened: add [tui]"
@@ -2851,10 +3010,176 @@ mod tests {
         let launch = inbox_route(
             &table,
             &inbox_options(Some(Provider::Claude), None),
-            &unread,
+            &checks(false, &not_run, &unread),
         )
         .unwrap();
         assert_eq!(launch.provider, Provider::Claude);
+    }
+
+    /// A Codex whose executable does not run or that is not logged in
+    /// (ADR-t1181-1 decision 3) refuses the inbox before anything else of
+    /// Codex's is read, with why and the arguments that open the inbox on
+    /// Claude: no launch comes back, so nothing is started, Claude
+    /// included, and nothing asks.
+    #[test]
+    fn a_codex_that_cannot_be_used_is_refused_with_how_to_open_claude() {
+        let mut table = RoleModels::default();
+        table.entry(ModelRole::Inbox).provider = Some(Provider::Codex);
+        for why in [
+            "the Codex inbox was not opened: the Codex at /nowhere/codex could not be started",
+            "the Codex inbox was not opened: the Codex at /bin/codex is not logged in",
+        ] {
+            let cannot = || Err(why.to_owned());
+            for (roles, options) in [
+                (&table, inbox_options(None, None)),
+                (
+                    &RoleModels::default(),
+                    inbox_options(Some(Provider::Codex), None),
+                ),
+            ] {
+                let error =
+                    inbox_route(roles, &options, &checks(false, &cannot, &unread)).unwrap_err();
+                assert_eq!(format!("{error}"), format!("{why}; {CLAUDE_INSTEAD}"));
+            }
+        }
+    }
+
+    /// While a person forbids starting Claude (ADR-t1181-1 decision 4,
+    /// ADR-t1204-1 decision 1) the inbox is not opened on Claude: a Claude
+    /// launch from the table or the default moves to Codex with Codex's
+    /// default model, and one that cannot be used, or is not selectable
+    /// yet, is refused without the way to Claude; `--provider claude` is
+    /// refused. A Codex launch is as it was.
+    #[test]
+    fn with_claude_forbidden_the_inbox_opens_on_codex_or_not_at_all() {
+        let mut sonnet = RoleModels::default();
+        sonnet.entry(ModelRole::Inbox).model = Some("claude-sonnet-5-5".to_owned());
+        for launch in [
+            ActorLaunch::default_of(ModelRole::Inbox),
+            sonnet.launch(ModelRole::Inbox),
+        ] {
+            let moved = inbox_provider(launch.clone(), None, true).unwrap();
+            assert_eq!(moved.provider, Provider::Codex);
+            assert_eq!(moved.model, None);
+            assert_eq!(moved.switched_from, Some(Provider::Claude));
+            assert_eq!(
+                moved.switch_reason,
+                Some(crate::domain::provider_switch::SwitchReason::Disabled)
+            );
+            assert_eq!(
+                inbox_provider(launch, None, false).unwrap().provider,
+                Provider::Claude
+            );
+        }
+        let error = inbox_provider(
+            ActorLaunch::default_of(ModelRole::Inbox),
+            Some(Provider::Claude),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(format!("{error}"), CLAUDE_INBOX_FORBIDDEN);
+        // A Claude model by `--model` alone is the person's choice of Claude too.
+        let argued = crate::domain::actor_model::inbox_launch(
+            &RoleModels::default(),
+            None,
+            Some("claude-opus-5-5"),
+        )
+        .unwrap();
+        let error = inbox_provider(argued, None, true).unwrap_err();
+        assert_eq!(format!("{error}"), CLAUDE_INBOX_FORBIDDEN);
+        let codex = ActorLaunch {
+            provider: Provider::Codex,
+            ..ActorLaunch::default_of(ModelRole::Inbox)
+        };
+        assert_eq!(
+            inbox_provider(codex.clone(), Some(Provider::Codex), true).unwrap(),
+            codex
+        );
+
+        let settings_ok = || Ok(());
+        let error = inbox_route(
+            &sonnet,
+            &inbox_options(None, None),
+            &checks(true, &usable, &settings_ok),
+        )
+        .unwrap_err();
+        assert_eq!(
+            format!("{error}"),
+            format!("{CODEX_INBOX_PENDING}; {NO_CLAUDE_INSTEAD}")
+        );
+        let cannot = || Err("the Codex inbox was not opened: not logged in".to_owned());
+        let error = inbox_route(
+            &RoleModels::default(),
+            &inbox_options(None, None),
+            &checks(true, &cannot, &unread),
+        )
+        .unwrap_err();
+        assert_eq!(
+            format!("{error}"),
+            format!("the Codex inbox was not opened: not logged in; {NO_CLAUDE_INSTEAD}")
+        );
+        assert!(!NO_CLAUDE_INSTEAD.contains("--provider claude"));
+        let settings_missing = || Err("the Codex inbox was not opened: add [tui]".to_owned());
+        let error = inbox_route(
+            &RoleModels::default(),
+            &inbox_options(None, None),
+            &checks(true, &usable, &settings_missing),
+        )
+        .unwrap_err();
+        assert_eq!(
+            format!("{error}"),
+            format!("the Codex inbox was not opened: add [tui]; {NO_CLAUDE_INSTEAD}")
+        );
+        let error = inbox_route(
+            &RoleModels::default(),
+            &inbox_options(Some(Provider::Claude), None),
+            &checks(true, &not_run, &unread),
+        )
+        .unwrap_err();
+        assert_eq!(format!("{error}"), CLAUDE_INBOX_FORBIDDEN);
+    }
+
+    /// Claude is forbidden only by a live supervisor started under `up
+    /// --no-claude`: a dead one, one that may start Claude and none at
+    /// all leave it allowed.
+    #[test]
+    fn claude_is_forbidden_by_a_live_supervisor_under_no_claude_only() {
+        struct OnlyOne;
+        impl ProcessControl for OnlyOne {
+            fn alive(&self, pid: u32) -> bool {
+                pid == 1
+            }
+            fn terminate(&self, _: u32) -> Result<()> {
+                Ok(())
+            }
+            fn interrupt(&self, _: u32) -> Result<()> {
+                Ok(())
+            }
+            fn kill(&self, _: u32) -> Result<()> {
+                Ok(())
+            }
+        }
+        let with_claude = |pid: u32, disabled: bool| {
+            let mut checks = vec![crate::domain::worker::ProviderCheck {
+                provider: Provider::Claude,
+                executable: "claude".into(),
+                found: true,
+                error: None,
+                modes: vec![crate::domain::worker::WorkerMode::Headless],
+            }];
+            if disabled {
+                crate::domain::worker::ProviderCheck::disable(&mut checks, Provider::Claude);
+            }
+            SupervisorRegistration {
+                providers: Some(checks),
+                ..registration("t", pid, 0)
+            }
+        };
+        assert!(claude_forbidden(&[with_claude(1, true)], &OnlyOne));
+        assert!(!claude_forbidden(&[with_claude(2, true)], &OnlyOne));
+        assert!(!claude_forbidden(&[with_claude(1, false)], &OnlyOne));
+        assert!(!claude_forbidden(&[registration("t", 1, 0)], &OnlyOne));
+        assert!(!claude_forbidden(&[], &OnlyOne));
     }
 
     /// A launchd supervisor is handed over only when its agent is the one

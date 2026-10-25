@@ -1287,7 +1287,11 @@ enum Command {
     /// inbox's settings, the plugin and the inbox's prompt, DAGQ_ROLE=inbox and DAGQ_QUEUE) in the
     /// foreground in place of this process, from the repository's main checkout, after recording
     /// inbox_opened. Its provider and model are [roles.inbox] of dagq.toml, overridden for this
-    /// start by --provider and --model. Refused inside an inbox (DAGQ_ROLE=inbox), whatever queue.
+    /// start by --provider and --model. A Codex that does not run or is not logged in opens no
+    /// inbox, with why and how to open it on Claude; Claude is never started in its place. While
+    /// a supervisor of the queue runs under `up --no-claude` the inbox is not opened on Claude:
+    /// it goes to Codex, or is refused with why. Refused inside an inbox (DAGQ_ROLE=inbox),
+    /// whatever queue.
     Inbox {
         /// Claude Code plugin directory the inbox loads (`claude --plugin-dir`); without it the
         /// installed claude-dagq plugin, which must be enabled.

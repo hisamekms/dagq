@@ -132,9 +132,15 @@ queueは`up`と同じく解決する。
 providerとmodelはmain checkoutの`dagq.toml`の`[roles.inbox]`を既定に、`--provider`・`--model`がその起動だけ上書きし、どちらも無ければ今までどおりClaudeで何も渡さずに開く（[ADR-t1181-1](../../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定1。選び方は`lifecycle::inbox_route`と`actor_model::inbox_launch`）。
 値の誤り（実装の無いprovider、Codexに渡したClaudeのmodelなど）は設定の誤りとして、何も記録せずに止まる。
 `dagq.toml`は`[roles.inbox]`の表だけを読むので（`run_env::load_inbox_role`）、ほかの表の誤りではinboxは止まらない。
-Codexを選ぶと、まだ開かずに理由を出して0でなく終わる（ADR-t1181-1の「実装の順」: inboxのsessionと起動の記録がproviderとmodelを持つまで選べない）。
-その前に、人のCodexの`config.toml`にCodexのTUIが自分で書き足す欄が無ければ、そのfileの場所と人が足す行を出して止まる（[ADR-t3331-1](../../adr/2026-10-25-t3331-1-codex-inbox-writes-no-person-settings-and-refuses-to-open-when-codex-would.md)）。
-どちらもClaudeに替えず、askを開かず、人のfileを読むだけで書かない。
+Codexを選ぶと、execの前にCodexの実行ファイルが動くこととloginを確かめ、使えなければ開かずに、理由とClaudeで開く起動の引数を出して0でなく終わる（ADR-t1181-1決定3。`codex_inbox::check_usable`）。
+次に、人のCodexの`config.toml`にCodexのTUIが自分で書き足す欄が無ければ、そのfileの場所と人が足す行を出して止まる（[ADR-t3331-1](../../adr/2026-10-25-t3331-1-codex-inbox-writes-no-person-settings-and-refuses-to-open-when-codex-would.md)）。
+どちらも通っても、まだ開かずに理由を出して0でなく終わる（ADR-t1181-1の「実装の順」: inboxのsessionと起動の記録がproviderとmodelを持つまで選べない）。
+どれもClaudeに替えず、askを開かず（人がterminalの前にいる）、人のfileを読むだけで書かない。
+開いた後にCodexが使えなくなったら（利用上限など）、runtimeは何もせず、人が開き直す。
+人がClaudeの起動を禁じている間（queueの生きているsupervisorが`up --no-claude`で動いている。`lifecycle::claude_forbidden`）は、Claudeのinboxを開かない（ADR-t1181-1決定4）。
+`[roles.inbox]`か既定がClaudeならCodexで開こうとし、Codexが選べなければClaudeを案内せずに理由を出して0でなく終わる。
+起動の引数で選んだClaude（`--provider claude`かClaudeの`--model`）は理由を出して断る。
+runtimeはinboxを起動しないので、providerの控えはinboxを止めない。
 Codexのinboxの起動の中身は[Provider lifecycle](../provider-lifecycle.md)のinboxの起動の節が持つ。
 下の手順はClaudeのinboxのもの。
 

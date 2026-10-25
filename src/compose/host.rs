@@ -724,6 +724,14 @@ impl OneShot {
                 },
                 roles: &crate::infrastructure::run_env::load_inbox_role,
                 codex_settings: &crate::infrastructure::codex_inbox::check_this_user_config,
+                codex_usable: &crate::infrastructure::codex_inbox::check_this_codex,
+                claude_forbidden: &|db: &Path| {
+                    let supervisors = self.host_queues(db).open()?.supervisors()?;
+                    Ok(lifecycle::claude_forbidden(
+                        &supervisors,
+                        &crate::infrastructure::adapters::SystemProcesses,
+                    ))
+                },
             },
             &InboxAgents {
                 claude: &claude,

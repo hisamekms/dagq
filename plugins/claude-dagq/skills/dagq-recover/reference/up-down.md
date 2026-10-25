@@ -15,7 +15,7 @@ Read this when `up` or `down` returns something the `dagq-recover` skill (sectio
 
 ### Explicitly run without Claude
 
-On the person's word, drain first, then `up --no-claude`; existing Claude workers must finish before switching. `dagq inbox` starts Claude Code, so keep an inbox the person opened by hand. Roles on Claude are off (`handle disabled roles manually` in `status`): handle their reviews, plan reviews and recovery with this skill's manual procedures. The flag implies no approval or bypass. Do not run `observe` in their place.
+On the person's word, drain first, then `up --no-claude`; existing Claude workers must finish before switching. While a supervisor runs under `--no-claude`, `dagq inbox` opens no Claude inbox (only a Codex one that can be used, else it says why), so keep the inbox already open. Roles on Claude are off (`handle disabled roles manually` in `status`): handle their reviews, plan reviews and recovery with this skill's manual procedures. The flag implies no approval or bypass. Do not run `observe` in their place.
 
 ### A supervisor of another build
 

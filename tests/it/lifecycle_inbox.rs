@@ -12,7 +12,7 @@ use common::{Bounded, WithoutActor, lifecycle::*, service::OwnedByTest};
 use dagq::{
     domain::SessionRole,
     infrastructure::sqlite::SqliteQueue,
-    lifecycle::{self, CODEX_INBOX_PENDING, INBOX_INSIDE_REFUSED, InboxOptions},
+    lifecycle::{self, CLAUDE_INSTEAD, CODEX_INBOX_PENDING, INBOX_INSIDE_REFUSED, InboxOptions},
 };
 use serde_json::{Value, json};
 use std::{
@@ -41,6 +41,30 @@ printf '%s' \"$$\" > \"$0.pid\"\n\
 TZ=UTC0 LC_ALL=C ps -o lstart= -p $$ | sed 's/^ *//; s/ *$//' | tr -d '\\n' > \"$0.start\"\n",
     );
     stub
+}
+
+/// A `codex` in the fixture's directory that answers `--version`, and
+/// `login status` as logged in only while `<stub>.login` exists, writing
+/// the `CODEX_HOME` it was checked with next to itself; started as the
+/// inbox's agent it writes its arguments, as the Claude stub does.
+fn stub_codex(fixture: &Fixture) -> PathBuf {
+    let stub = fixture._dir.path().join("codex-inbox");
+    common::template::script(
+        &stub,
+        "#!/bin/sh\n\
+case \"$1\" in --version) printf 'codex-cli 0.0.0\\n'; exit 0 ;; \
+login) printf '%s' \"$CODEX_HOME\" > \"$0.home\"; \
+if [ -f \"$0.login\" ]; then printf 'Logged in using ChatGPT\\n'; exit 0; fi; \
+printf 'Not logged in\\n'; exit 1 ;; esac\n\
+printf '%s\\n' \"$@\" > \"$0.argv\"\n",
+    );
+    stub
+}
+
+fn logged_in(stub: &Path) {
+    let mut path = stub.as_os_str().to_owned();
+    path.push(".login");
+    fs::write(PathBuf::from(path), "").unwrap();
 }
 
 /// What the stub wrote as `suffix` (`argv`, `env`, `cwd`), or `None` when
@@ -250,7 +274,17 @@ fn a_codex_inbox_is_refused_with_why_and_starts_nothing() {
     let codex_home = fixture._dir.path().join("codex-home");
     fs::create_dir_all(&codex_home).unwrap();
     let env = [("CODEX_HOME", codex_home.to_str().unwrap())];
-    let codex = ["--plugin-dir", plugin_dir, "--provider", "codex"];
+    let codex_stub = stub_codex(&fixture);
+    logged_in(&codex_stub);
+    let codex_stub = codex_stub.to_str().unwrap();
+    let codex = [
+        "--plugin-dir",
+        plugin_dir,
+        "--provider",
+        "codex",
+        "--codex",
+        codex_stub,
+    ];
     let config = codex_home.join("config.toml");
 
     let message = error_of(&inbox(&fixture, &stub, &env, &codex));
@@ -263,7 +297,7 @@ fn a_codex_inbox_is_refused_with_why_and_starts_nothing() {
     assert!(!config.exists());
 
     fs::write(&config, "[tui]\nscreen_reader_detection_done = true\n").unwrap();
-    let pending = format!("{CODEX_INBOX_PENDING}; the inbox was not opened");
+    let pending = format!("{CODEX_INBOX_PENDING}; {CLAUDE_INSTEAD}; the inbox was not opened");
     assert_eq!(error_of(&inbox(&fixture, &stub, &env, &codex)), pending);
     // A relative CODEX_HOME is the one under the main checkout Codex
     // starts in, not under the directory `dagq inbox` was typed in (which
@@ -295,7 +329,7 @@ fn a_codex_inbox_is_refused_with_why_and_starts_nothing() {
         format!("{before}\n[roles.inbox]\nprovider = \"codex\"\n"),
     )
     .unwrap();
-    let configured = ["--plugin-dir", plugin_dir];
+    let configured = ["--plugin-dir", plugin_dir, "--codex", codex_stub];
     assert_eq!(
         error_of(&inbox(&fixture, &stub, &env, &configured)),
         pending
@@ -351,6 +385,69 @@ fn a_codex_inbox_is_refused_with_why_and_starts_nothing() {
         "{argv}"
     );
     assert_eq!(opened(&fixture).unwrap()["provider"], "claude");
+}
+
+/// A Codex that cannot be used (ADR-t1181-1 decision 3: its executable
+/// does not start, or it is not logged in for the `CODEX_HOME` the inbox
+/// would be given) refuses the inbox before the exec with why and the
+/// arguments that open it on Claude: nothing is started, Claude included,
+/// and nothing is recorded or asked.
+#[test]
+fn a_codex_that_cannot_be_used_opens_no_inbox_and_says_how_to_open_claude() {
+    let fixture = fixture();
+    let stub = stub_claude(&fixture);
+    let plugin_dir = fixture.options.plugin_dir.clone().unwrap();
+    let plugin_dir = plugin_dir.to_str().unwrap();
+    let codex_home = fixture._dir.path().join("codex-home");
+    fs::create_dir_all(&codex_home).unwrap();
+    fs::write(
+        codex_home.join("config.toml"),
+        "[tui]\nscreen_reader_detection_done = true\n",
+    )
+    .unwrap();
+    let env = [("CODEX_HOME", codex_home.to_str().unwrap())];
+    let refused = |codex: &str| {
+        error_of(&inbox(
+            &fixture,
+            &stub,
+            &env,
+            &[
+                "--plugin-dir",
+                plugin_dir,
+                "--provider",
+                "codex",
+                "--codex",
+                codex,
+            ],
+        ))
+    };
+    let instead = format!("; {CLAUDE_INSTEAD}; the inbox was not opened");
+
+    let missing = fixture._dir.path().join("no-codex");
+    let message = refused(missing.to_str().unwrap());
+    assert!(
+        message.starts_with("the Codex inbox was not opened: ")
+            && message.contains("could not be started")
+            && message.contains(missing.to_str().unwrap())
+            && message.ends_with(&instead),
+        "{message}"
+    );
+
+    let codex = stub_codex(&fixture);
+    let message = refused(codex.to_str().unwrap());
+    assert!(
+        message.starts_with("the Codex inbox was not opened: ")
+            && message.contains("is not logged in")
+            && message.contains("Not logged in")
+            && message.ends_with(&instead),
+        "{message}"
+    );
+    assert_eq!(started(&codex, "home").as_deref(), codex_home.to_str());
+    assert_eq!(started(&codex, "argv"), None);
+    assert_eq!(started(&stub, "argv"), None);
+    assert_eq!(opened(&fixture), None);
+    let queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    assert_eq!(queue.latest_event_of("ask_opened").unwrap(), None);
 }
 
 /// A `dagq.toml` that cannot be read does not keep the default inbox
