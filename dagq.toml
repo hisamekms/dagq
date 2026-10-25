@@ -491,3 +491,20 @@ paths = ["docs/design/**", ".config/design-docs-allow.toml"]
 [review.programs.check-adr-numbers]
 script = "scripts/check-adr-numbers.sh"
 paths = ["docs/adr/**"]
+
+# Rust の版の引き上げ（人の決定 2026-09-26: rust-toolchain.toml と rust-version を同じ最新の stable に固定し、stable の release ごと＝6 週ごとに上げる。goal 46）。
+# 42 日ごとに runtime が draft を 1 件登録し、runtime の planner が新しい stable の有無を確かめて採用（edit・submit）か cancel を決める。
+# 前の draft か task が終わるまで次は登録されない。仕組みは ADR-0072、書式と期限は docs/design/supervisor-lifecycle/run-environment.md の「定期draft」。
+# verification と evidence は runtime の task の推奨の組み合わせ（docs/development/task-registration.md）に、toolchain が全体の build と e2e に効くので --evidence e2e を足したもの。
+# paths は runtime の task と同じく宣言しない（clippy の差分が src・tests・設定のどこに出るか前もって決められないため）。Cargo.lock を上げないことは description と acceptance が持つ。書式の都合で文字列と配列は 1 行に書く。
+# [[recurring]] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 488 を含んでから足した。
+[[recurring]]
+key = "rust-toolchain"
+interval_days = 42
+title = "chore: rust-toolchain.toml と rust-version を最新の Rust stable に上げ、新しい clippy・rustfmt の差分を直す"
+description = "Rust の版を stable の release ごとに上げる定期の draft（人の決定 2026-09-26: 完全に固定し、MSRV も同じ版に揃え、6 週ごとに上げる）。planner は採用の前に https://static.rust-lang.org/dist/channel-rust-stable.toml などで最新の stable を確かめ、rust-toolchain.toml の channel と Cargo.toml の rust-version がもうその版なら、cancel（not_worth）にして確かめた版を note に残して閉じる（人に ask しない）。新しい stable があれば、版を title と description に書いて採用する。worker の手順: (1) 最新の stable を確かめる。(2) rust-toolchain.toml の channel をその版（例 1.99.0）に、Cargo.toml の rust-version を同じ minor（例 1.99）に揃えて上げる。README などの文書にある最低版の記述も合わせる。(3) 新しい rustfmt・clippy の差分と警告を直す（allow で黙らせず直す。直せないものは理由を書いて最小の範囲で allow）。(4) CI（.github/workflows/ci.yml）と release（release.yml）が rust-toolchain.toml に従って入れることを確かめ、版を直書きしたところがあれば合わせる。(5) Cargo.lock は上げない（依存の更新は別の task）。toolchain は build の全体と実プロセスの振る舞いに効くので、[e2e] paths に依らず --evidence e2e で着地の前に e2e を流す。"
+acceptance = "rust-toolchain.toml の channel が最新の stable で、Cargo.toml の rust-version が同じ minor の版である。cargo fmt・clippy（-D warnings）・test が新しい toolchain で通り、CI と release の workflow が rust-toolchain.toml の版を使う。Cargo.lock は変わっていない。"
+verification = ["cargo fmt --all --check", "cargo clippy --locked --all-targets -- -D warnings", "cargo llvm-cov nextest --locked --workspace --fail-under-lines 80", "sh scripts/check-design-docs.sh", "sh scripts/check-design-sentences.sh"]
+paths = []
+evidence = ["tests", "e2e", "subagent_review"]
+goal = 46

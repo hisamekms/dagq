@@ -62,6 +62,7 @@ inbox は `dagq-inbox` skill に従い、復旧と手での操作は `dagq-recov
 - docs（ADR・design・plans）: [documents.md](docs/development/documents.md)
 - plugin: documents.md の「pluginの汎用性」「権限の表を写す文書」
 - config（`dagq.toml`・`.config/`・`.dagq/`）: operations.md の「`dagq.toml`を変えるとき」「`[run.env]`とtestの並列度の置き場」、[Run environment](docs/design/supervisor-lifecycle/run-environment.md)
+- Rust の版: `rust-toolchain.toml` と `rust-version` を同じ最新の stable に固定し、6 週ごとに上げる（人の決定 2026-09-26）。引き上げの draft は `dagq.toml` の `[[recurring]]`（key `rust-toolchain`）が 42 日ごとに登録し、runtime の planner が新しい stable の有無で採用か cancel かを決める
 - worker と planner は常に background（`run log`）。`[headless]` はどの役割も読まない
 
 ## 検証と文書の規則
