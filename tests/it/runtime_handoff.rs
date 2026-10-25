@@ -400,6 +400,156 @@ receipt \"$(git rev-parse HEAD)\"",
     );
 }
 
+/// ADR-t3077-1 decision 1, in the store: a supervisor asked to hand off
+/// begins no landing, decided in the write that would record
+/// `integration_started`; once the request is withdrawn, the landing
+/// begins.
+#[test]
+fn a_supervisor_asked_to_hand_off_begins_no_landing_in_the_same_write() {
+    let (_dir, repo, db, run) = awaiting_run_owned();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let token = LeaseToken::new("handing-off");
+    queue
+        .register_supervisor(&token, std::process::id(), 1, "old")
+        .unwrap();
+    queue.accept_handoff(&token).unwrap();
+    assert_eq!(queue.handoff_request(&token).unwrap(), None);
+    // Asked after the supervisor read none, before it begins the landing.
+    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+    let main = sha(&git_out(&repo, &["rev-parse", "main"]));
+    let refused = queue
+        .begin_integration(run.id(), &token, &main)
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("asked to hand off"),
+        "{refused:#}"
+    );
+    let detail = queue.show(run.task_id()).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(!event_kinds(&detail).contains(&"integration_started"));
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    assert!(
+        refused
+            .downcast_ref::<dagq::application::HandoffAsked>()
+            .is_some()
+    );
+
+    assert!(queue.cancel_handoff(&token, "/next/dagq").unwrap());
+    let landing = queue.begin_integration(run.id(), &token, &main).unwrap();
+    assert_eq!(landing.status(), RunStatus::Integrating);
+    assert!(event_kinds(&queue.show(run.task_id()).unwrap()).contains(&"integration_started"));
+}
+
+/// What [`ask_for_a_handoff_once_queued`] asks of the supervisor a test
+/// runs on its own thread: the queue, the stop it sets with the request,
+/// if any, and whether it asked already.
+struct RacedHandoff {
+    db: PathBuf,
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    asked: bool,
+}
+
+thread_local! {
+    /// Per test thread, so the tests that race a handoff, in one process
+    /// under `cargo test` or one each under nextest, share nothing.
+    static RACED_HANDOFF: std::cell::RefCell<Option<RacedHandoff>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A load average that asks the supervisor of this thread's
+/// [`RACED_HANDOFF`] to hand off (and to stop, with a stop), once, at the
+/// first look after task 1's run was queued to land: the supervisor looks
+/// at the load after its pass read the handoff request (its claims and its
+/// slots' pass), so the request comes between that read and the landing
+/// the pass would begin. On another thread (a landing's) it asks nothing.
+fn ask_for_a_handoff_once_queued() -> Option<f64> {
+    RACED_HANDOFF.with_borrow_mut(|raced| {
+        let Some(raced) = raced.as_mut().filter(|raced| !raced.asked) else {
+            return;
+        };
+        let mut queue = SqliteQueue::open(&raced.db).unwrap();
+        if event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"landing_queued") {
+            let token = only_registration(&raced.db).token;
+            assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+            if let Some(stop) = &raced.stop {
+                stop.store(true, Ordering::SeqCst);
+            }
+            raced.asked = true;
+        }
+    });
+    Some(0.0)
+}
+
+/// ADR-t3077-1 decision 1 when the request and the landing race: a
+/// handoff asked in the pass that would begin the landing of a run waiting
+/// for the slot, after that pass read none, begins no landing. The run is
+/// handed over with its lease (the next process lands it as in
+/// [`a_handoff_starts_no_landing_and_hands_over_a_run_awaiting_the_slot`]).
+/// With `stop`, a stop asked with it wins from the next pass, and its
+/// drain lands the run whatever request it holds.
+fn a_handoff_asked_after_the_pass_read_none(stop: bool) {
+    let (_dir, repo, db) = fixture();
+    let options = supervise_options(1, false);
+    RACED_HANDOFF.set(Some(RacedHandoff {
+        db: db.clone(),
+        stop: stop.then(|| options.stop.clone()),
+        asked: false,
+    }));
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "ready to land")]));
+    // Not `once`: it returns on the handoff or the stop.
+    let waiting = crate::common::within(crate::common::STEP_LIMIT, "the supervisor to return");
+    let outcome = supervise_reviewed_owned_with(
+        &db,
+        &repo,
+        &backend,
+        &reviewer,
+        &SuperviseOptions {
+            load_average: ask_for_a_handoff_once_queued,
+            ..options
+        },
+    );
+    drop(waiting);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    let started = event_kinds(&detail)
+        .iter()
+        .filter(|kind| **kind == "integration_started")
+        .count();
+    if stop {
+        assert_ne!(outcome["outcome"], "handoff", "{outcome}");
+        assert_eq!(run.status(), RunStatus::Integrated);
+        assert_eq!(started, 1);
+        return;
+    }
+    assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert_eq!(started, 0);
+    let token = only_registration(&db).token;
+    assert_eq!(
+        queue
+            .runs_leased_by(&token)
+            .unwrap()
+            .iter()
+            .map(|run| run.id().clone())
+            .collect::<Vec<_>>(),
+        vec![run.id().clone()]
+    );
+}
+
+#[test]
+fn a_handoff_asked_after_the_pass_read_none_starts_no_landing_of_that_pass() {
+    a_handoff_asked_after_the_pass_read_none(false);
+}
+
+#[test]
+fn a_stop_with_a_handoff_asked_mid_pass_lands_the_run_awaiting_the_slot() {
+    a_handoff_asked_after_the_pass_read_none(true);
+}
+
 /// ADR-t3344-1: a handoff's drain waits for the landing that had started
 /// before it was asked, but not for that landing's verification once
 /// more: the first verification, which a handoff asked for while it ran,

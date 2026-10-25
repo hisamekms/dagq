@@ -735,6 +735,15 @@ impl RunTransitions for SupervisorQueue {
         let mut local = self.local()?;
         RunTransitions::begin_integration(&mut **local, id, token, main)
     }
+    fn begin_integration_over_handoff(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        main: &CommitSha,
+    ) -> Result<TaskRun> {
+        let mut local = self.local()?;
+        RunTransitions::begin_integration_over_handoff(&mut **local, id, token, main)
+    }
     fn defer_integration(
         &mut self,
         id: &RunId,

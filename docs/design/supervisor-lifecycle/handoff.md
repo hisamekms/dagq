@@ -29,6 +29,9 @@ use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）�
 - **区切り**: ループの各passの先頭で、停止要求（SIGINT/SIGTERM）が無ければ`handoff_request(token)`を読む。
   要求があれば新しいclaim・adopt・resume・triage・observer・plan review・goal reviewの起動を止め、DBとrunのファイルから組み立て直せないslot（検証・e2e・着地が進行中のもの。`Phase::rebuildable`）だけを進める（`tick(true)`）。
   着地slotを待つrunは、着地の保留の有無に依らず着地（とその前のe2e）を始めず、leaseを持ったまま引き継ぐ（`Slot::rebuildable`。待つのは要求の時点で既に始まっていた検証・e2e・着地だけ。[ADR-t3077-1](../../adr/2026-10-22-t3077-1-handoff-drain-starts-no-landing-and-hands-over-runs-awaiting-the-slot.md)）。
+  passの先頭で要求を読んだ後、着地を始めるまでに要求が記録されても、そのpassは着地を始めない: 着地の開始（`begin_integration`）は`integration_started`を書くのと同じwriteの中で自分のtokenの要求を読み直し、要求があれば着地を始めずに断る。
+  断られたsupervisorは、着地slotを待つrunはleaseを持ったまま、着地の列に並んだrunは列に並んだまま残し、次のpassの先頭で要求を受け取って引き継ぐ。
+  停止要求のあるpassの着地の開始は要求で断られず、停止のdrainは要求が残っていても着地する（停止は引き継ぎに勝つ）。
   待っている着地の検証がやり直し（hostの失敗・flakyだけの失敗）になるときは、やり直しを始めずに着地を区切り、runを着地を始めた時の状態に戻して（着地slotは空く）leaseを持ったまま着地slotの待ちとして引き継ぎ、区切った理由を`integration_handed_over`に記録する（`Integration::handing_off`。[ADR-t3344-1](../../adr/2026-10-25-t3344-1-handoff-drain-hands-over-a-landing-before-its-verification-is-retried.md)）。
   次のプロセスはそのrunも下と同じ経路で着地の列に戻し、着地を最初からやり直す（区切った着地は列から外したことに数えない。`RunHistory::moved_on_after`）。
   次のプロセスは、`awaiting_integration`のrunをreviewのadoptで着地の列に戻し（人の`land`で並んだrunはleaseを返して承認の着地へ）、resumeの後に着地の列に並んだ承認済みの`needs_session`のrunをresumeし直さずに着地slotの待ちに戻す（`Takeover::Land`）。

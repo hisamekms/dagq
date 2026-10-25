@@ -1053,8 +1053,19 @@ pub trait RunTransitions {
         reason: &Reason,
         session: Option<&serde_json::Value>,
     ) -> Result<TaskRun>;
-    /// Take the single integration slot for `id` under `token`.
+    /// Take the single integration slot for `id` under `token`; refused
+    /// with [`HandoffAsked`] while the supervisor `token` is asked to hand
+    /// off (ADR-t3077-1 decision 1), decided in the same write.
     fn begin_integration(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        main: &CommitSha,
+    ) -> Result<TaskRun>;
+    /// [`Self::begin_integration`] for a supervisor whose stop wins over
+    /// the handoff it was asked: its drain lands as one that does not
+    /// hand off, whatever request it holds.
+    fn begin_integration_over_handoff(
         &mut self,
         id: &RunId,
         token: &LeaseToken,
@@ -1797,6 +1808,27 @@ impl fmt::Display for RunNotFound {
 }
 
 impl std::error::Error for RunNotFound {}
+
+/// A landing the supervisor `supervisor` would begin was refused: it is
+/// asked to hand off to `binary` (ADR-t3077-1 decision 1), and nothing was
+/// written.
+#[derive(Debug)]
+pub struct HandoffAsked {
+    pub supervisor: LeaseToken,
+    pub binary: String,
+}
+
+impl fmt::Display for HandoffAsked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "supervisor {} is asked to hand off to {}; it begins no landing",
+            self.supervisor, self.binary
+        )
+    }
+}
+
+impl std::error::Error for HandoffAsked {}
 
 /// The runs as read (ADR-0032's third kind): the run rows of the
 /// [`StateStore`](super::shared::StateStore), which a run's transitions

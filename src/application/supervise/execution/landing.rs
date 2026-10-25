@@ -2631,9 +2631,21 @@ impl Supervisor<'_> {
             }
             return Ok(());
         };
-        let landing = self
-            .queue
-            .begin_integration(run.id(), self.registration.token(), &main)?;
+        let landing = match self.begin_landing(run.id(), &main) {
+            Ok(landing) => landing,
+            // A handoff asked since this pass read none at its start: the
+            // same write refused the landing (ADR-t3077-1 decision 1), and
+            // the run stays queued for the next process.
+            Err(error)
+                if error
+                    .downcast_ref::<crate::application::HandoffAsked>()
+                    .is_some() =>
+            {
+                info!(run_id = %run.id(), "run {} does not land as queued: its supervisor was asked to hand off", run.id());
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         drop(guard);
         info!(run_id = %run.id(), "run {} lands onto main {main} as queued", run.id());
         let handle = self.spawn_landing(landing.clone(), RunStatus::AwaitingIntegration, main)?;
@@ -2643,6 +2655,21 @@ impl Supervisor<'_> {
             &*self.queue,
         );
         Ok(())
+    }
+    /// Begin the landing of `id` onto `main` under this supervisor's token.
+    /// While no stop is asked, a handoff request refuses it in the same
+    /// write ([`crate::application::HandoffAsked`]), even one recorded after
+    /// this pass read none at its start (ADR-t3077-1 decision 1); the
+    /// caller leaves the run as it was for the next pass, which drains for
+    /// the request. A stop wins over a handoff, and its drain lands
+    /// whatever request it holds.
+    pub(super) fn begin_landing(&mut self, id: &RunId, main: &CommitSha) -> Result<TaskRun> {
+        let token = self.registration.token().clone();
+        if self.registration.stopping() {
+            self.queue.begin_integration_over_handoff(id, &token, main)
+        } else {
+            self.queue.begin_integration(id, &token, main)
+        }
     }
     /// Whether the landing of `run` waits for its turn
     /// ([`Self::take_check_turn`]), only looked at: the landing takes the

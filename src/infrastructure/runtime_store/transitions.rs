@@ -939,15 +939,57 @@ impl SqliteQueue {
     /// owns it through a lease row for the duration, so `doctor` can see who
     /// is landing what. A lease this `token` already holds (a supervisor
     /// landing the run it resumed) is kept; one under another token refuses. `one_integrating_run_per_queue` backs the explicit check.
+    /// A supervisor `token` asked to hand off begins no landing
+    /// (ADR-t3077-1 decision 1): the request is read in the same write
+    /// that would record `integration_started`, so one recorded after the
+    /// supervisor's pass read none, before this write, still refuses it
+    /// ([`crate::application::HandoffAsked`]).
     pub fn begin_integration(
         &mut self,
         id: &RunId,
         token: &LeaseToken,
         main: &CommitSha,
     ) -> Result<TaskRun> {
+        self.begin_integration_with(id, token, main, true)
+    }
+
+    /// [`Self::begin_integration`] for a supervisor whose stop wins over
+    /// the handoff it was asked: the request refuses nothing.
+    pub fn begin_integration_over_handoff(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        main: &CommitSha,
+    ) -> Result<TaskRun> {
+        self.begin_integration_with(id, token, main, false)
+    }
+
+    fn begin_integration_with(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        main: &CommitSha,
+        refused_by_handoff: bool,
+    ) -> Result<TaskRun> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if refused_by_handoff
+            && let Some(binary) = tx
+                .query_row(
+                    "SELECT handoff_binary FROM supervisors WHERE token=?1",
+                    [token],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten()
+        {
+            return Err(crate::application::HandoffAsked {
+                supervisor: token.clone(),
+                binary,
+            }
+            .into());
+        }
         let busy: Option<RunId> = tx
             .query_row(
                 "SELECT id FROM task_runs WHERE status='integrating'",
@@ -1513,6 +1555,14 @@ impl RunTransitions for SqliteQueue {
         main: &CommitSha,
     ) -> Result<TaskRun> {
         SqliteQueue::begin_integration(self, id, token, main)
+    }
+    fn begin_integration_over_handoff(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        main: &CommitSha,
+    ) -> Result<TaskRun> {
+        SqliteQueue::begin_integration_over_handoff(self, id, token, main)
     }
     fn defer_integration(
         &mut self,

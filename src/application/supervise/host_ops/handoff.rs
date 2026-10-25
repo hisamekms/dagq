@@ -47,6 +47,8 @@ pub(in crate::application::supervise) struct Registration {
     /// This pass drains (a stop, a handoff, or claiming stopped after a
     /// provisioning failure): nothing may wait for the program to appear.
     draining: bool,
+    /// This pass drains for a stop (SIGINT/SIGTERM or an owner gone).
+    stopping: bool,
     /// Whether this process recorded `supervisor_draining` for its stop
     /// request (task 1277): once, on the first pass that saw it.
     stop_recorded: bool,
@@ -232,6 +234,7 @@ impl Registration {
             handoff: None,
             exec: None,
             draining: false,
+            stopping: false,
             stop_recorded: false,
             owner_gone: None,
         }
@@ -265,6 +268,11 @@ impl Registration {
     /// Whether this pass drains.
     pub(in crate::application::supervise) const fn draining(&self) -> bool {
         self.draining
+    }
+
+    /// Whether this pass drains for a stop, which wins over a handoff.
+    pub(in crate::application::supervise) const fn stopping(&self) -> bool {
+        self.stopping
     }
 
     /// Whether the stop request was recorded already.
@@ -319,6 +327,7 @@ impl Registration {
     /// Whether this pass drains ([`drains`]), with `stopping` and `claiming`
     /// as the pass found them and the handoff it drains for.
     pub(in crate::application::supervise) fn drain_for(&mut self, stopping: bool, claiming: bool) {
+        self.stopping = stopping;
         self.draining = drains(stopping, claiming, self.handing_off());
     }
 

@@ -4427,16 +4427,25 @@ impl Supervisor<'_> {
                     slot.landing_turn = true;
                     return Ok(Step::Continue);
                 }
-                let run = match self.queue.begin_integration(
-                    slot.run.id(),
-                    self.registration.token(),
-                    &main,
-                ) {
+                let run = match self.begin_landing(slot.run.id(), &main) {
                     Ok(run) => run,
                     // Unanswered, it may have taken the slot for this run:
                     // the reconciliation reads what the queue holds.
                     Err(error) if crate::application::supervisor_service::unreachable(&error) => {
                         return Err(error);
+                    }
+                    // A handoff asked since this pass read none at its
+                    // start: the same write refused the landing
+                    // (ADR-t3077-1 decision 1), and the run waits, its
+                    // lease kept, for the next pass to drain for the
+                    // request.
+                    Err(error)
+                        if error
+                            .downcast_ref::<crate::application::HandoffAsked>()
+                            .is_some() =>
+                    {
+                        info!(run_id = %slot.run.id(), "run {} does not land: its supervisor was asked to hand off", slot.run.id());
+                        return Ok(Step::Continue);
                     }
                     // An `integrate` took the slot since the check: try again later.
                     Err(_)
