@@ -37,7 +37,8 @@ execの[引き継ぎ](handoff.md)のあいだの回収と止め方は引き継�
    生きていないsupervisorの未完了の行と、自分のtokenの未完了の行（execの前の自分の行）は`interrupted`で閉じる。
    eventはgoalに記録する（`run_events.goal_id`）。
    jobのpromptと出力はqueueの`goal-reviews/<行のID>/`に置く。
-2. **起動の条件**（`goal_review_candidates`、ID順の先頭を取る）: goalが`open`で閉じておらず、所属taskが1件以上あり、すべて`completed`か`canceled`か`replaced`（置換先を再置換も辿った全てのtaskが所属を問わず終わったもの）で`completed`が1件以上（`goal_review::tasks_done`。`draft` / `submitted`のtask、つまりruntimeのplannerの待ち・`keep_draft`で残ったdraft・閉じていない`planner_question`の対象は、これで除かれる）、元goalがこのgoalのfollow_up（所属は問わない）に所属の判断が済まないもの（[Follow-up membership judgements](../follow-up-membership.md)の「閉じる条件」、ADR-t1504-2決定8）が無く、goalのreviewが開いた`approve_goal`のaskで閉じていないものが無く、前回のgoal review（`interrupted`を除く最新の行）の後に入力が変わっている。
+2. **起動の条件**（`goal_review_candidates`、ID順の先頭を取る）: goalが`open`で閉じておらず、所属taskが1件以上あり、すべて`completed`か`canceled`か`replaced`で所属taskの`completed`が1件以上（`goal_review::tasks_done`。`draft` / `submitted`のtask、つまりruntimeのplannerの待ち・`keep_draft`で残ったdraft・閉じていない`planner_question`の対象は、これで除かれる）、元goalがこのgoalのfollow_up（所属は問わない）に所属の判断が済まないもの（[Follow-up membership judgements](../follow-up-membership.md)の「閉じる条件」、ADR-t1504-2決定8）が無く、goalのreviewが開いた`approve_goal`のaskで閉じていないものが無く、前回のgoal review（`interrupted`を除く最新の行）の後に入力が変わっている。
+   `replaced`は終わったものに数えるが`completed`には数えず、置換先を再置換も辿った全てのtaskが所属を問わず終わるまで起動を待つ（[ADR-t1521-2](../../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)決定5）。
    out_of_scopeと判断して別のgoalへ移したfollow_upの未完了は起動を妨げない。
    follow_upの所属の判断だけで起動しないgoalのattention（`goal_follow_ups_unsettled`）は[Follow-up membership judgements](../follow-up-membership.md)の「閉じる条件」が持つ。
    入力は`goal_review::review_fingerprint`で比べ、同じなら起動しない。
