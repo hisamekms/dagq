@@ -153,9 +153,39 @@ pub struct Inheritance {
     /// that carried it over (`ready --inherit`, ADR-t1962-1); `None` for the
     /// runtime's and the recovery job's.
     pub by_hand: Option<(String, String)>,
+    /// The part of a replaced run's saved work this child of the
+    /// replacement takes (ADR-t1521-2 decision 5); `None` for a retry's.
+    pub replan: Option<ReplanCarried>,
+}
+
+/// What a child of an applied replacement takes of the saved work of the
+/// run its replanning operation replaced, as the claim handed it over from
+/// the operation's snapshot: only what the plan named for this child.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplanCarried {
+    pub operation: crate::domain::ReplanId,
+    /// The task the operation replaced.
+    pub task: crate::domain::TaskId,
+    pub carry: crate::domain::replan_plan::CarrySource,
+    /// The ref that pins the replaced run's head.
+    pub pinned_ref: String,
+    /// For the uncommitted changes, the files copied into this run's
+    /// directory, each with what it holds.
+    pub files: Vec<(String, String)>,
 }
 
 impl Inheritance {
+    /// The ref a container run's clone fetches to carry this work over:
+    /// for a child of an applied replacement, the ref that pins the
+    /// replaced run's saved head (its own run ref is gone with the run);
+    /// otherwise the inherited run's.
+    pub fn clone_ref(&self) -> String {
+        match &self.replan {
+            Some(replan) => replan.pinned_ref.clone(),
+            None => format!("refs/dagq/runs/{}", self.run_id),
+        }
+    }
+
     /// What the next run of `previous`'s task inherits, when `previous` was
     /// ended by the retry that carries its branch over
     /// ([`crate::domain::resume::retried_with_inheritance`]): the head that
@@ -198,12 +228,16 @@ impl Inheritance {
             receipt_path,
             summary,
             by_hand,
+            replan: None,
         })
     }
 
     /// The prompt's section on it: start from its commit, bring it onto the
     /// current main, resolve the conflicts, verify and write the receipt.
     pub(super) fn section(&self) -> String {
+        if let Some(replan) = &self.replan {
+            return self.replan_section(replan);
+        }
         let why = match &self.by_hand {
             Some((by, reason)) => format!(
                 "{by} carried its work over by hand after it ended ({reason}), so this run starts from its work instead of from scratch."
@@ -225,6 +259,48 @@ impl Inheritance {
                 .unwrap_or_default(),
             receipt = self.receipt_path.as_deref().unwrap_or("no receipt path"),
             summary = self.summary,
+        )
+    }
+}
+
+impl Inheritance {
+    /// The prompt's section on a replaced run's saved work this child
+    /// takes: bring only that onto the base, keep what this task's
+    /// acceptance needs, and verify it as this task's own work, since it
+    /// passed no review as such.
+    fn replan_section(&self, replan: &ReplanCarried) -> String {
+        use crate::domain::replan_plan::CarrySource;
+        let what = match replan.carry {
+            CarrySource::SnapshotDiff => format!(
+                "This task takes the uncommitted changes that run had on top of its commit {head}, copied into your run directory: {files}. \
+                 Apply them in your worktree (`git apply --index` for the staged diff, `git apply` for the unstaged one, and copy the untracked files to the paths named, keeping an executable one's mode with `cp -p`)",
+                head = self.head,
+                files = replan
+                    .files
+                    .iter()
+                    .map(|(path, what)| format!("{path} ({what})"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            _ => format!(
+                "This task takes the commits that run made: its work is commit {head} (kept as {pinned}{branch}), its own commits {base}..{head}. \
+                 Bring them onto your base, the current landing branch (for example `git cherry-pick {base}..{head}` in your worktree)",
+                head = self.head,
+                base = self.base,
+                pinned = replan.pinned_ref,
+                branch = self
+                    .branch
+                    .as_deref()
+                    .map(|branch| format!(", branch {branch}"))
+                    .unwrap_or_default(),
+            ),
+        };
+        format!(
+            "Carried over from run {run} of task {task}, which replan operation {op} replaced with this task and others: {what}, resolve the conflicts, keep only what this task's acceptance needs, rerun your checks in the worktree as above, and write the receipt for your own head. \
+             That work passed no review as this task's work, so verify it as your own.\n",
+            run = self.run_id,
+            task = replan.task,
+            op = replan.operation,
         )
     }
 }
@@ -1455,6 +1531,7 @@ pub fn worker_template(provider: Provider) -> Result<String> {
         receipt_path: Some(value("receipt")),
         summary: value("summary"),
         by_hand: None,
+        replan: None,
     };
     let failure = KnownFailure {
         name: value("failing test"),

@@ -28,25 +28,41 @@ use crate::{
 };
 
 /// Each task of the goal with its status, in ID order.
-fn goal_tasks(conn: &Connection, goal: GoalId) -> Result<Vec<(TaskId, TaskStatus)>> {
+fn own_tasks(conn: &Connection, goal: GoalId) -> Result<Vec<(TaskId, TaskStatus)>> {
     Ok(conn
         .prepare("SELECT id, status FROM tasks WHERE goal_id=?1 ORDER BY id")?
         .query_map([goal], |r| Ok((r.get(0)?, enum_col(r, "status")?)))?
         .collect::<rusqlite::Result<_>>()?)
 }
 
+/// [`own_tasks`], then each task outside the goal that its replaced
+/// tasks' replacements reach ([`super::replan_apply::goal_replacing`]): a
+/// replaced task waits for them wherever they belong now.
+fn goal_tasks(conn: &Connection, goal: GoalId) -> Result<Vec<(TaskId, TaskStatus)>> {
+    let mut tasks = own_tasks(conn, goal)?;
+    tasks.extend(super::replan_apply::goal_replacing(conn, goal)?);
+    Ok(tasks)
+}
+
 /// What a review of the goal sees now (ADR-t1504-2 decision 8): its
 /// fingerprint (tasks, acceptance version, follow-ups and their
-/// judgements) and whether it may close as achieved — its tasks all ended,
-/// one completed, and no follow-up of it unsettled.
+/// judgements) and whether it may close as achieved — its tasks and the
+/// replacements outside it all ended, one of its own completed, and no
+/// follow-up of it unsettled.
 fn review_input(conn: &Connection, goal: GoalId) -> Result<(String, bool)> {
-    let tasks = goal_tasks(conn, goal)?;
+    let own = own_tasks(conn, goal)?;
+    let replacing = super::replan_apply::goal_replacing(conn, goal)?;
     let follow_ups = follow_up_membership::source_follow_ups(conn, goal)?;
     let version = follow_up_membership::acceptance_version(conn, goal)?;
-    let closable =
-        goal_review::tasks_done(&tasks) && follow_up::unsettled_follow_ups(&follow_ups).is_empty();
+    let closable = goal_review::tasks_done(&own, &replacing)
+        && follow_up::unsettled_follow_ups(&follow_ups).is_empty();
+    let tasks: Vec<(TaskId, TaskStatus)> = own.into_iter().chain(replacing).collect();
+    let lineage = super::replan_apply::goal_replacements(conn, goal)?.lineage;
     Ok((
-        goal_review::review_fingerprint(&tasks, version, &follow_ups),
+        goal_review::with_replacements(
+            goal_review::review_fingerprint(&tasks, version, &follow_ups),
+            &lineage,
+        ),
         closable,
     ))
 }
@@ -785,6 +801,13 @@ impl GoalReviewStore for SqliteQueue {
         Ok(holds)
     }
 
+    fn goal_replacements(
+        &self,
+        goal: GoalId,
+    ) -> Result<crate::domain::replan_apply::GoalReplacements> {
+        super::replan_apply::goal_replacements(&self.conn, goal)
+    }
+
     fn goal_follow_ups(&self) -> Result<Vec<follow_up::GoalFollowUps>> {
         let goals: Vec<GoalId> = self
             .conn
@@ -803,7 +826,8 @@ impl GoalReviewStore for SqliteQueue {
             }
             found.push(follow_up::GoalFollowUps {
                 goal,
-                tasks: goal_tasks(&self.conn, goal)?,
+                tasks: own_tasks(&self.conn, goal)?,
+                replacing: super::replan_apply::goal_replacing(&self.conn, goal)?,
                 follow_ups,
             });
         }

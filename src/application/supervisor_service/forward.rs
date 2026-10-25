@@ -256,6 +256,31 @@ impl PlanRequestStore for SupervisorQueue {
         let mut local = self.local()?;
         PlanRequestStore::settle_replan_requests(&mut **local)
     }
+    fn replacements_to_apply(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        let local = self.local()?;
+        PlanRequestStore::replacements_to_apply(&**local)
+    }
+    fn begin_replan_apply(
+        &mut self,
+        id: crate::domain::ReplanId,
+        generation: i64,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        let mut local = self.local()?;
+        PlanRequestStore::begin_replan_apply(&mut **local, id, generation)
+    }
+    fn apply_replacement(
+        &mut self,
+        id: crate::domain::ReplanId,
+        generation: i64,
+        snapshot_problem: Option<&str>,
+    ) -> Result<crate::domain::replan_apply::ApplyOutcome> {
+        let mut local = self.local()?;
+        PlanRequestStore::apply_replacement(&mut **local, id, generation, snapshot_problem)
+    }
+    fn child_carry(&self, task: TaskId) -> Result<Option<crate::domain::replan_apply::ChildCarry>> {
+        let local = self.local()?;
+        PlanRequestStore::child_carry(&**local, task)
+    }
 }
 
 impl DraftPlannerReads for SupervisorQueue {
@@ -554,6 +579,13 @@ impl GoalReviewStore for SupervisorQueue {
     fn goal_review_candidates(&self) -> Result<Vec<GoalId>> {
         let local = self.local()?;
         GoalReviewStore::goal_review_candidates(&**local)
+    }
+    fn goal_replacements(
+        &self,
+        goal: GoalId,
+    ) -> Result<crate::domain::replan_apply::GoalReplacements> {
+        let local = self.local()?;
+        GoalReviewStore::goal_replacements(&**local, goal)
     }
     #[allow(clippy::too_many_arguments)]
     fn begin_goal_review(

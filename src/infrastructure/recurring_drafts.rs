@@ -14,7 +14,7 @@ use super::{
     sqlite::{SqliteQueue, insert_task, read_goal},
 };
 use crate::domain::{
-    DraftOrigin, GoalId, TaskId,
+    DraftOrigin, GoalId, TaskId, TaskStatus,
     goal::check_accepts_tasks,
     plan_request::Creator,
     recurring::{
@@ -36,20 +36,28 @@ fn last_registration(conn: &Connection, key: &str) -> Result<Option<(TaskId, i64
         .optional()?)
 }
 
-/// The oldest task registered for `key` that is neither `completed` nor
-/// `canceled`: a draft, or one adopted and submitted, ready, running,
-/// waiting for a person or held.
+/// The oldest task registered for `key` that has not ended: a draft, or
+/// one adopted and submitted, ready, running, waiting for a person or
+/// held, or one a replanning replaced while a task its replacement reaches
+/// has not ended ([`super::replan_apply::replacement_open`]).
 fn open_task(conn: &Connection, key: &str) -> Result<Option<TaskId>> {
-    Ok(conn
-        .query_row(
-            "SELECT o.task_id FROM draft_origins o JOIN tasks t ON t.id=o.task_id
+    let tasks: Vec<(TaskId, TaskStatus)> = conn
+        .prepare(
+            "SELECT o.task_id, t.status FROM draft_origins o JOIN tasks t ON t.id=o.task_id
              WHERE o.origin=?1 AND json_extract(o.material,'$.key')=?2
                AND t.status NOT IN ('completed','canceled')
-             ORDER BY o.task_id LIMIT 1",
-            params![DraftOrigin::Recurring.as_str(), key],
-            |r| r.get(0),
-        )
-        .optional()?)
+             ORDER BY o.task_id",
+        )?
+        .query_map(params![DraftOrigin::Recurring.as_str(), key], |r| {
+            Ok((r.get(0)?, super::sqlite::enum_col(r, "status")?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (task, status) in tasks {
+        if status != TaskStatus::Replaced || super::replan_apply::replacement_open(conn, task)? {
+            return Ok(Some(task));
+        }
+    }
+    Ok(None)
 }
 
 /// Whether `goal` accepts tasks now (open, not a draft goal); a goal that

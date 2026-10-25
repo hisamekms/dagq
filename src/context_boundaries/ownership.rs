@@ -369,6 +369,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/plan_requests.rs", Planning),
     store("src/infrastructure/investigations.rs", Planning),
     store("src/infrastructure/replans.rs", Planning),
+    store("src/infrastructure/replan_apply.rs", Planning),
     store("src/infrastructure/task_holds.rs", Planning),
     store("src/infrastructure/planners.rs", Planning),
     store("src/infrastructure/draft_planners.rs", Planning),
@@ -421,6 +422,7 @@ pub(super) const TRANSACTIONS: &[Transaction] = &[
     transaction("T12", Execution, "src/infrastructure/runtime_store/transitions.rs", "close_satisfied", "a verified already_satisfied claim's run closes without a commit and its task completes in one step (ADR-t1818-1)"),
     transaction("T12", Execution, "src/infrastructure/runtime_store/transitions.rs", "decide_satisfied", "a person's retry or cancel fails the run and moves its task in one step (ADR-t1818-1)"),
     transaction("T13", Planning, "src/infrastructure/task_holds.rs", "release_task", "a release that chooses a new run closes the hold, ends the run and readies its task in one step, and refuses before it records anything while the run settles (ADR-t1879-1)"),
+    transaction("T14", Planning, "src/infrastructure/replan_apply.rs", "write_replacement", "the atomic apply of a replacement ends the parked run with its task, re-points every successor and readies the children in one step, or writes nothing (ADR-t1521-2 decision 5)"),
 ];
 
 const COORDINATION: &str = "src/infrastructure/runtime_store/coordination.rs";

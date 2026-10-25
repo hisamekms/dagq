@@ -2345,7 +2345,9 @@ fn landed_tasks(
 }
 
 /// A vertex of the wait graph (ADR-0038): a task waits for its predecessor
-/// tasks and the goals it depends on, and a goal waits for its tasks.
+/// tasks and the goals it depends on, a goal waits for its tasks, and a
+/// replaced task for the tasks its applied replacement made (ADR-t1521-2
+/// decision 5).
 #[derive(Debug, Clone, Copy)]
 enum Node {
     Task(TaskId),
@@ -2378,6 +2380,11 @@ fn waits_for(conn: &Connection, from: Node, to: Node) -> Result<bool> {
              -- A canceled task never holds its goal back (achieved allows it).
              SELECT 'goal', goal_id, 'task', id FROM tasks
                WHERE goal_id IS NOT NULL AND status <> 'canceled'
+             UNION ALL
+             -- A replaced task stands for the tasks it was replaced by,
+             -- wherever they belong (goal close waits for them).
+             SELECT 'task', r.from_task_id, 'task', r.to_task_id FROM replan_replacements r
+               JOIN replan_operations o ON o.id = r.operation_id AND o.status = 'applied'
            ),
            reached(kind, id) AS (
              SELECT ?1, ?2
@@ -2425,7 +2432,8 @@ pub(super) fn close_goal_in(
 ) -> Result<()> {
     let goal = read_goal(conn, goal_id)?;
     let counts = task_counts(conn, goal_id)?;
-    let closed = goal::close(goal, verdict, &counts, now.to_owned())?;
+    let replacing = super::replan_apply::goal_replacing(conn, goal_id)?;
+    let closed = goal::close(goal, verdict, &counts, &replacing, now.to_owned())?;
     // The follow-ups found from it, read in the same transaction as the
     // close, wherever they belong now (ADR-t1504-2 decision 8).
     goal::check_follow_ups(
@@ -3048,6 +3056,37 @@ pub(super) fn complete_task(
     read_task(conn, task_id)
 }
 
+/// End `task_id`, whose replanning operation `operation` replaced it with
+/// child tasks, inside the apply's transaction: `in_progress` →
+/// `replaced` (neither completed nor canceled), recorded as
+/// `task_status_changed` on its parked run `run`, with its open hold ended.
+pub(super) fn replace_task(
+    conn: &Connection,
+    task_id: TaskId,
+    run: &RunId,
+    operation: crate::domain::ReplanId,
+    now: &str,
+    now_secs: i64,
+) -> Result<Task> {
+    ensure!(
+        conn.execute(
+            "UPDATE tasks SET status='replaced', updated_at=?2 WHERE id=?1 AND status='in_progress'",
+            params![task_id, now],
+        )? == 1,
+        "task {task_id} is not in progress"
+    );
+    event(
+        conn,
+        task_id,
+        Some(run),
+        EventKind::TaskStatusChanged,
+        json!({"from": TaskStatus::InProgress, "to": TaskStatus::Replaced,
+               "replan_operation_id": operation}),
+    )?;
+    super::task_holds::end_with_task(conn, task_id, TaskStatus::Replaced, now_secs)?;
+    read_task(conn, task_id)
+}
+
 /// Cancel `task_id` inside the caller's transaction with the reason the
 /// domain decides of `cancel` (ADR-t947-4), recorded in the payload of its
 /// `task_status_changed`: what `cancel` does, plan review's
@@ -3314,7 +3353,11 @@ pub(super) fn insert_dependency(
     super::replans::check_task_step(conn, task_id, GuardedStep::Dependency)?;
     super::replans::check_task_step(conn, predecessor_id, GuardedStep::Dependency)?;
     task::check_dependencies_editable(&read_task(conn, task_id)?)?;
-    read_task(conn, predecessor_id)?;
+    task::check_not_replaced(
+        task_id,
+        predecessor_id,
+        read_task(conn, predecessor_id)?.status(),
+    )?;
     // Through goals too: the predecessor may wait for a goal that waits
     // for the task (ADR-0038).
     let cycle = waits_for(conn, Node::Task(predecessor_id), Node::Task(task_id))?;

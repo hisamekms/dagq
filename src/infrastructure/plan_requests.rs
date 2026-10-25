@@ -418,6 +418,31 @@ impl PlanRequestStore for SqliteQueue {
     ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
         SqliteQueue::settle_replan_requests(self)
     }
+
+    fn replacements_to_apply(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        SqliteQueue::replacements_to_apply(self)
+    }
+
+    fn begin_replan_apply(
+        &mut self,
+        id: crate::domain::ReplanId,
+        generation: i64,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        SqliteQueue::begin_replan_apply(self, id, generation)
+    }
+
+    fn apply_replacement(
+        &mut self,
+        id: crate::domain::ReplanId,
+        generation: i64,
+        snapshot_problem: Option<&str>,
+    ) -> Result<crate::domain::replan_apply::ApplyOutcome> {
+        SqliteQueue::apply_replacement(self, id, generation, snapshot_problem)
+    }
+
+    fn child_carry(&self, task: TaskId) -> Result<Option<crate::domain::replan_apply::ChildCarry>> {
+        SqliteQueue::child_carry(self, task)
+    }
 }
 
 /// Record, inside the caller's write transaction, the request of the
@@ -630,11 +655,12 @@ pub(super) fn declined_at_close(
 
 /// Record, on `conn` inside the move's own transaction, the new request of
 /// replanning operation `op` whose `ended` request the runtime declined as
-/// the operation closed undecided ([`declined_at_close`]) and which goes
-/// on to the planner again: the same words, references, priority and
-/// asker, `open`, carrying the operation, with `request_recorded` naming
-/// the request it renews. The ended request keeps its outcome, so one
-/// planner is opened, for the new one.
+/// the operation closed undecided ([`declined_at_close`]), or whose
+/// approved plan no longer applies ([`super::replans::replan_again`]), and
+/// which goes on to the planner again: the same words, references,
+/// priority and asker, `open`, carrying the operation, with
+/// `request_recorded` naming the request it renews. The ended request
+/// keeps its outcome, so one planner is opened, for the new one.
 pub(super) fn renew_declined(
     conn: &Connection,
     ended: RequestId,

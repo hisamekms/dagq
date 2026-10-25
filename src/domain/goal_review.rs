@@ -204,15 +204,41 @@ pub fn review_fingerprint(
     seen
 }
 
-/// Whether the tasks of an open goal let a review start: at least one,
-/// each completed or canceled, and one completed.
-pub fn tasks_done(tasks: &[(TaskId, TaskStatus)]) -> bool {
-    tasks
-        .iter()
-        .all(|(_, status)| matches!(status, TaskStatus::Completed | TaskStatus::Canceled))
-        && tasks
+/// [`review_fingerprint`] with what replaced the goal's replaced tasks
+/// (ADR-t1521-2 decision 5): their lineage, mappings and versions, so a
+/// verdict of a review that saw other ones is not applied. A goal without
+/// a replacement keeps its fingerprint as it was.
+pub fn with_replacements(
+    mut fingerprint: String,
+    lineage: &[super::replan_apply::ReplacementLineage],
+) -> String {
+    if !lineage.is_empty() {
+        let seen: Vec<String> = lineage
             .iter()
-            .any(|(_, status)| *status == TaskStatus::Completed)
+            .map(super::replan_apply::ReplacementLineage::fingerprint)
+            .collect();
+        fingerprint.push_str(&format!(";replaced:{}", seen.join(",")));
+    }
+    fingerprint
+}
+
+/// Whether the tasks of an open goal let a review start: each of its own
+/// (`own`) and each in `replacing` completed, canceled or replaced, and
+/// one of its own completed. A replaced task counts as ended but never as
+/// completed (ADR-t1521-2 decision 5). `replacing` is every task outside
+/// the goal its replaced tasks' replacements reach, through
+/// re-replacements too: a child moved to another goal keeps the review
+/// waiting until it has ended, as a child in the goal does, but its
+/// landing is not the goal's own completed task.
+pub fn tasks_done(own: &[(TaskId, TaskStatus)], replacing: &[(TaskId, TaskStatus)]) -> bool {
+    own.iter().chain(replacing).all(|(_, status)| {
+        matches!(
+            status,
+            TaskStatus::Completed | TaskStatus::Canceled | TaskStatus::Replaced
+        )
+    }) && own
+        .iter()
+        .any(|(_, status)| *status == TaskStatus::Completed)
 }
 
 /// How many of a goal's latest reviews that decided something were
@@ -427,13 +453,66 @@ mod tests {
             (TaskId::new(2), TaskStatus::Completed),
         ];
         assert_eq!(fingerprint(&tasks), "2:completed,3:canceled");
-        assert!(tasks_done(&tasks));
-        assert!(!tasks_done(&[(TaskId::new(1), TaskStatus::Canceled)]));
-        assert!(!tasks_done(&[]));
-        assert!(!tasks_done(&[
-            (TaskId::new(1), TaskStatus::Completed),
-            (TaskId::new(2), TaskStatus::Draft)
-        ]));
+        assert!(tasks_done(&tasks, &[]));
+        assert!(!tasks_done(&[(TaskId::new(1), TaskStatus::Canceled)], &[]));
+        assert!(!tasks_done(&[], &[]));
+        assert!(!tasks_done(
+            &[
+                (TaskId::new(1), TaskStatus::Completed),
+                (TaskId::new(2), TaskStatus::Draft)
+            ],
+            &[]
+        ));
+    }
+
+    /// A replaced task waits for the tasks its replacement reaches, in the
+    /// goal or outside it: it counts as ended, never as the completed task
+    /// a review needs, and a child outside the goal holds the review back
+    /// until it ends without counting as the goal's completed task.
+    #[test]
+    fn a_replaced_task_counts_as_ended_but_not_as_completed() {
+        let replaced = (TaskId::new(1), TaskStatus::Replaced);
+        let task = |id, status| (TaskId::new(id), status);
+        assert!(!tasks_done(&[replaced], &[]));
+        assert!(!tasks_done(&[replaced, task(2, TaskStatus::Ready)], &[]));
+        assert!(!tasks_done(&[replaced, task(2, TaskStatus::Canceled)], &[]));
+        assert!(tasks_done(
+            &[
+                replaced,
+                task(2, TaskStatus::Completed),
+                task(3, TaskStatus::Canceled)
+            ],
+            &[]
+        ));
+        // Every child moved to other goals: their landings are not the
+        // goal's own completed task.
+        assert!(!tasks_done(
+            &[replaced, task(4, TaskStatus::Canceled)],
+            &[
+                task(2, TaskStatus::Completed),
+                task(3, TaskStatus::Completed)
+            ]
+        ));
+        // A child outside the goal still running holds it back.
+        assert!(!tasks_done(
+            &[replaced, task(4, TaskStatus::Completed)],
+            &[task(2, TaskStatus::Ready)]
+        ));
+        assert!(tasks_done(
+            &[replaced, task(4, TaskStatus::Completed)],
+            &[
+                task(2, TaskStatus::Completed),
+                task(3, TaskStatus::Canceled)
+            ]
+        ));
+        assert!(TaskStatus::Replaced.is_terminal());
+        for action in [
+            crate::domain::TaskAction::Ready,
+            crate::domain::TaskAction::Cancel,
+            crate::domain::TaskAction::Draft,
+        ] {
+            assert!(TaskStatus::Replaced.transition(action, false).is_err());
+        }
     }
 
     #[test]
@@ -471,7 +550,7 @@ mod tests {
                 rearmed,
             })
         };
-        assert!(reviewable(true, tasks_done(&done), false, None, &seen));
+        assert!(reviewable(true, tasks_done(&done, &[]), false, None, &seen));
         // No task, only canceled tasks, a task still draft.
         for tasks in [
             &[][..],
@@ -483,7 +562,7 @@ mod tests {
         ] {
             assert!(!reviewable(
                 true,
-                tasks_done(tasks),
+                tasks_done(tasks, &[]),
                 false,
                 None,
                 &fingerprint(tasks)

@@ -1162,6 +1162,9 @@ pub(super) const SPIKE_CHECKS: &str = "\
 pub struct GoalReviewMaterial<'a> {
     pub goal: Value,
     pub tasks: Vec<Value>,
+    /// What replaced the goal's replaced tasks, one lineage each
+    /// (`replan_apply::ReplacementLineage`).
+    pub replacements: Vec<Value>,
     pub follow_ups: Vec<Value>,
     pub events: Vec<Value>,
     pub previous: Vec<Value>,
@@ -1194,6 +1197,8 @@ pub const GOAL_REVIEW_STUB_BYTES: usize = 8_000;
 pub const GOAL_REVIEW_FOLLOW_UPS_BYTES: usize = 16_000;
 pub const GOAL_REVIEW_EVENTS_BYTES: usize = 16_000;
 pub const GOAL_REVIEW_PREVIOUS_BYTES: usize = 12_000;
+/// The bytes of what replaced the goal's replaced tasks.
+pub const GOAL_REVIEW_REPLACEMENTS_BYTES: usize = 16_000;
 pub const GOAL_REVIEW_ITEM_BYTES: usize = 4_000;
 
 /// The read-only dagq commands the goal review prompt names to read what
@@ -1320,6 +1325,14 @@ pub fn goal_review_prompt(material: &GoalReviewMaterial<'_>) -> FittedPrompt {
         fit.section(name, &text);
         text
     };
+    let replacements = listed(
+        &mut fit,
+        "replacements",
+        &material.replacements,
+        GOAL_REVIEW_REPLACEMENTS_BYTES,
+        "replacements",
+        "`dagq replans --all` and `dagq replans ID`",
+    );
     let follow_ups = listed(
         &mut fit,
         "follow_ups",
@@ -1345,10 +1358,11 @@ pub fn goal_review_prompt(material: &GoalReviewMaterial<'_>) -> FittedPrompt {
         &format!("`dagq events --full --goal {goal_id} --kind goal_review_finished`"),
     );
     fit.finish(format!(
-        "You are the goal review of the dagq queue, a headless job. Every task of goal {goal_id} ended (completed or canceled): judge whether the goal met its acceptance. Change nothing: read the repository's documents and source in {repo} (the main checkout, where the tasks landed) and run read-only dagq commands (`dagq show ID`, `dagq goal show {goal_id} --full`, `dagq findings`, `dagq events --goal {goal_id} --full`, `dagq search ...`) as you need. \
+        "You are the goal review of the dagq queue, a headless job. Every task of goal {goal_id} ended (completed, canceled, or replaced by tasks that all ended): judge whether the goal met its acceptance. Change nothing: read the repository's documents and source in {repo} (the main checkout, where the tasks landed) and run read-only dagq commands (`dagq show ID`, `dagq goal show {goal_id} --full`, `dagq findings`, `dagq events --goal {goal_id} --full`, `dagq search ...`) as you need. \
          The material below is held to limits: a section that left something out says how many and how to read them, and an item cut short says so in its `cut`.\n\n\
          The goal:\n{goal}\n\n\
-         Its tasks, each with the run that landed it (the receipt's summary, its evidence and its follow_ups) when it was completed by a run:\n{task_text}\n\n\
+         Its tasks, each with the run that landed it (the receipt's summary, its evidence and its follow_ups) when it was completed by a run; one marked replaces_in_this_goal belongs to another goal now and holds part of a replaced task of this one:\n{task_text}\n\n\
+         The replanning replacements of its replaced tasks: each the operation, the replaced task's acceptance items as it fixed them, its children, and how each item maps to a child's item or was deleted with the authority that decided it. A replaced task never landed: judge its items only through the children's landings and the mappings, and a deleted item only by its authority:\n{replacements}\n\n\
          The follow-ups registered from its tasks' receipts, or that belong to it now, wherever they belong (goal_id), with their membership judgements (classification, the acceptance items, reason, evidence, acceptance_version against current_acceptance_version, needs_recheck):\n{follow_ups}\n\n\
          The goal's notes, edits and earlier decisions:\n{events}\n\n\
          The goal's earlier reviews (gaps verdicts in a row before this one: {gaps}; after {max} in a row a gaps verdict is turned into a question to a person):\n{previous}\n\n\

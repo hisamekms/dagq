@@ -71,15 +71,15 @@ SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（
 - 例外は全体のグラフが要る依存の循環の検出（再帰CTE）だけで、拒むかの判断はdomainが持つ。
 - 時刻とIDは`SqliteQueue`が持つ`Generators`（`Clock`と`IdGenerator`）から取り、SQLの`now`で作らない。
 - schemaの形は`migrations/*.sql`、適用と互換の判定は`src/infrastructure/schema.rs`、場所は`src/infrastructure/location.rs`が持つ。
-- runのログ本体・receipt・promptはDBに置かず、queueのディレクトリの`runs/<run-id>/`のファイルに置く（下の「Queue location」）。
+- runのログ本体・receipt・promptはDBに置かず、queueのディレクトリの`runs/<run-id>/`のファイルに置く。
 
 ## 不変条件
 
 - 状態を変える操作は`BEGIN IMMEDIATE`で直列化し、判定と書き込みとeventを1つのトランザクションに入れる。
 - taskごとに未完了のrunは1つ、`integrated`のrunは1つ、queue全体で`integrating`のrunは1つ（部分UNIQUE index）。
 - taskごとに開いた再計画の操作は高々1つで、保護しない操作はtaskの最新のrunにあり、保護する操作は保留したrunに残る（indexでなく書き込みのtransactionが守る）。
-  開く書き込みはtaskに開いた操作が無いときだけ足し、保護しない状態から開いたまま進める書き込み（診断・保留の柵・`blocked`への戻り）はtaskにほかの開いた操作があれば拒む。
-  claimと最新のrunへの依頼は前のrunに開いた保護しない操作を新しいrunへ引き継ぎ（`replan_carried`）、重なった保護しない操作だけを閉じ、保護する操作は閉じずに元のrunに残して、どのrunへの依頼もそれに合流させる（判断と理由は`domain::task_replan`の`carry`と`needs_task_alone`のdoc comment）。
+  開く書き込みはtaskに開いた操作が無いときだけ足し、保護しない状態から開いたまま進める書き込みはtaskにほかの開いた操作があれば拒む。
+  claimと最新のrunへの依頼は前のrunに開いた保護しない操作を新しいrunへ引き継ぎ（`replan_carried`）、重なった保護しない操作だけを閉じ、保護する操作は閉じずに元のrunに残して、どのrunへの依頼もそれに合流させる（`task_replan::carry`）。
 - `recover`を除き、runの状態を変える書き込みは、そのrunのlease行が自分のtokenのときだけ通る。
 - eventと所属の判断は追記だけで、eventは知らないkindも落とさずに読む。
 - DBにCHECK制約は無く、規則はdomainの型と書き込みのportが持つ（下の「CHECK制約を使わない」）。
@@ -87,8 +87,9 @@ SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（
 
 ## 表
 
-表ごとの役割と列の意味は、その表を作る`migrations/*.sql`のコメントと、表を持つstoreと`src/domain/`の型のdoc commentが持つ（上の「目的」）。
-`replan_plans`は再計画の置換計画をsubmitごとの版で持ち、plan reviewと`ready`は最新の版だけを検査する（`replans.rs`）。
+表ごとの役割と列の意味は、その表を作る`migrations/*.sql`のコメントと、表を持つstoreと`src/domain/`の型のdoc commentが持つ。
+`replan_plans`は置換計画をsubmitごとの版と承認の時の子の版で持ち、plan reviewと`ready`は最新の版だけを、適用は子の版も検査する。
+`replan_replacements`は適用した置換の子と子が引き継ぐ部分（`carry`）を持ち、goalは置換先を再置換も辿って待つ。
 
 ## 集約の読み書き
 
@@ -104,7 +105,7 @@ SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（
 - 遷移に付くevent: domainの記録つきのコマンド（`src/domain/run/recorded.rs`）が更新後のrunとeventの列を返し、storeは同じトランザクションで書くだけにする。
   storeが足すのは自分の表から読むもの（resumeの作業の内訳とtoken）とleaseの解放だけ。
 - runのdomainの拒否は、トランザクションが巻き戻ってeventに残せないので、run directoryの`refusals.log`に1行で残す（`runtime_store::REFUSALS_LOG`）。
-- 循環は、task依存・goal依存・goalの所属taskを合わせた辺の上の再帰CTE（`waits_for`）で見つけるので、goalを経る循環も拒む。
+- 循環は、依存のグラフ（[domain-model](domain-model.md#不変条件)）の辺の上の再帰CTE（`waits_for`）で見つけるので、goalを経る循環も拒む。
 - note（人とplannerのメモ）は表を持たず、`run_events`のkind `observation`として書く。
 
 ## asks

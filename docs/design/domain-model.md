@@ -60,6 +60,7 @@ submitted / ready ──draft──▶ draft、ready ──reopen（plan review�
 in_progress（runが全てfailed / interrupted）──retry──▶ ready、──draft──▶ draft
 draft / submitted / ready / in_progress（未完了のrunが無い）──cancel──▶ canceled
 draft / submitted ──人のbypass──▶ ready
+in_progress（runを再計画が保留）──trusted runtimeの置換の適用──▶ replaced
 ```
 
 runはclaimから着地までの1回の試行で、supervisorが進め、`integrate`だけが着地させる。
@@ -72,6 +73,7 @@ claimed ──▶ starting ──▶ running ──▶ validating ──accept�
 claimed〜validating ──interrupt──▶ interrupted、integrating ──interrupt──▶ awaiting_integration
 failed / interrupted ──復旧jobのresume──▶ needs_session ──resumeを使い切る──▶ failed
 validating（already_satisfied）──close──▶ succeeded（commitなし）、──retry / cancel──▶ failed
+needs_session（再計画の保留）──置換の適用──▶ replaced
 ```
 
 goalはtaskの束が解く上位の課題で、draft → openの状態と、それと独立な1回のclose（verdict）を持つ。
@@ -88,10 +90,11 @@ proposalはplannerがplan reviewに出すtaskとgoalの束で、submitted → ac
 ## 不変条件
 
 - taskは自分自身にも自分の属するgoalにも依存できない。
-- 依存のグラフ（task依存の辺、goal依存の辺、goalから`canceled`でない所属taskへの暗黙の辺）は循環しない（[ADR-0038](../adr/0038-task-depends-on-a-goal-until-it-is-achieved.md)）。
+- 依存のグラフ（task依存の辺、goal依存の辺、goalから`canceled`でない所属taskへの暗黙の辺、置換元から置換先への辺）は循環しない（[ADR-0038](../adr/0038-task-depends-on-a-goal-until-it-is-achieved.md)）。
 - taskは高々1つのgoalに属し、閉じたgoalに属するtaskは増えない。
 - goalの`closed_at`と`verdict`は同時にnullか同時に非nullで、verdictを消すのは人の`reopen`だけで、そのときも`goal_closed`のeventは残る。
-- `in_progress`はclaimしたtaskだけが持ち、終端（`completed`・`canceled`）のtaskは変わらない。
+- `in_progress`はclaimしたtaskだけが持ち、終端（`completed`・`canceled`・`replaced`）のtaskは変わらない。
+- `replaced`は置換の適用だけが書き、依存を満たさない（後続は適用で子を待つ辺に付け替わる。goalのreviewとcloseは置換先を再置換も辿った全てのtaskが終わるまで待つ。[ADR-t1521-2](../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)決定5）。
 - taskが`completed`になるのは、`integrate`によるrunの着地と、`already_satisfied`の主張を閉じたときだけ。
   receiptの自己申告だけでは成功せず、着地はrebase後に1回だけ流す検証コマンドの成功（[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)決定1）、閉じるのはsnapshotの検証と人の答え。
 - mainはtaskごとに1つのsquash commitの直線で、`integrated`のrunはtaskごとに1件、`integrating`のrunはqueueごとに1件。

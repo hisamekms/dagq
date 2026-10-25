@@ -12,6 +12,7 @@ pub(super) mod goal_review;
 pub(super) mod plan_review;
 pub(super) mod planner_turns;
 pub(super) mod recurring;
+pub(super) mod replan_apply;
 pub(super) mod request_planner;
 
 /// 計画管理's state: the plan review and the goal review running now (one

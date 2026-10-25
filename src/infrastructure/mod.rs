@@ -58,6 +58,7 @@ pub mod recurring_drafts;
 pub mod related;
 pub mod related_docs;
 pub mod release_update;
+mod replan_apply;
 mod replans;
 pub mod report_config;
 pub mod review_programs;

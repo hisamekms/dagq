@@ -248,7 +248,10 @@ impl Phase {
             RunStatus::NeedsSession => Some(Self::NeedsSession),
             RunStatus::AwaitingIntegration if queued => Some(Self::LandingQueue),
             RunStatus::AwaitingIntegration => Some(Self::LandingAnswer),
-            RunStatus::Failed | RunStatus::Interrupted | RunStatus::Succeeded => Some(Self::Ended),
+            RunStatus::Failed
+            | RunStatus::Interrupted
+            | RunStatus::Succeeded
+            | RunStatus::Replaced => Some(Self::Ended),
             RunStatus::Claimed
             | RunStatus::Starting
             | RunStatus::Running

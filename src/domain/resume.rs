@@ -730,17 +730,30 @@ pub fn retried_with_inheritance(run_events: &[RunEvent]) -> bool {
         .is_some_and(is_inherit_retry)
 }
 
+/// What a task's next run inherits of its earlier runs ([`inherited_from`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InheritedFrom {
+    /// The earlier run at this index, newest first.
+    Run(usize),
+    /// Nothing: a person's release of the task's hold ended a run since for
+    /// a new one from the current main (`retry_fresh`, nothing saved,
+    /// ADR-t1879-1), so nothing else is handed over either, not even the
+    /// saved work a replacement gave the task.
+    Fresh,
+    /// No earlier run carried its branch over, and none was released afresh.
+    Nothing,
+}
+
 /// Which of a task's earlier runs the next run inherits, given each one's
 /// events newest first (`previous`): the latest ended by a retry that
 /// carried its branch over ([`retried_with_inheritance`]), so that a run
 /// after it that failed early does not lose the carried-over work; but
 /// none past a run a release of the task's hold ended for a new run from
-/// the current main (`retry_fresh` with nothing saved, ADR-t1879-1), which
-/// a person chose to start afresh. Its index in `previous`.
-pub fn inherited_from<'a>(previous: impl IntoIterator<Item = &'a [RunEvent]>) -> Option<usize> {
+/// the current main, which a person chose to start afresh.
+pub fn inherited_from<'a>(previous: impl IntoIterator<Item = &'a [RunEvent]>) -> InheritedFrom {
     for (index, events) in previous.into_iter().enumerate() {
         if retried_with_inheritance(events) {
-            return Some(index);
+            return InheritedFrom::Run(index);
         }
         if events
             .iter()
@@ -749,10 +762,10 @@ pub fn inherited_from<'a>(previous: impl IntoIterator<Item = &'a [RunEvent]>) ->
                 released.decision == Some(super::task_hold::ReleaseDecision::RetryFresh)
             })
         {
-            return None;
+            return InheritedFrom::Fresh;
         }
     }
-    None
+    InheritedFrom::Nothing
 }
 
 #[cfg(test)]
@@ -839,15 +852,20 @@ mod tests {
         )];
         let newest_first =
             |runs: &[&Vec<RunEvent>]| inherited_from(runs.iter().map(|events| events.as_slice()));
-        assert_eq!(newest_first(&[&carried]), Some(0));
-        assert_eq!(newest_first(&[&failed_early, &carried]), Some(1));
-        assert_eq!(newest_first(&[&resumed, &carried]), Some(1));
-        assert_eq!(newest_first(&[&fresh, &carried]), None);
-        assert_eq!(newest_first(&[&failed_early, &fresh, &carried]), None);
-        assert_eq!(newest_first(&[]), None);
+        use InheritedFrom::{Fresh, Nothing, Run};
+        assert_eq!(newest_first(&[&carried]), Run(0));
+        assert_eq!(newest_first(&[&failed_early, &carried]), Run(1));
+        assert_eq!(newest_first(&[&resumed, &carried]), Run(1));
+        assert_eq!(newest_first(&[&fresh, &carried]), Fresh);
+        assert_eq!(newest_first(&[&failed_early, &fresh, &carried]), Fresh);
+        assert_eq!(newest_first(&[&fresh]), Fresh);
+        // No source is not a fresh start: a replacement's saved work may
+        // still be handed over.
+        assert_eq!(newest_first(&[]), Nothing);
+        assert_eq!(newest_first(&[&failed_early, &resumed]), Nothing);
         // A fresh release whose saved work is carried over is inherited.
         let fresh_saved = [fresh.clone(), carried.clone()].concat();
-        assert_eq!(newest_first(&[&fresh_saved]), Some(0));
+        assert_eq!(newest_first(&[&fresh_saved]), Run(0));
     }
 
     #[test]

@@ -147,7 +147,8 @@ pub fn in_flight(status: RunStatus) -> bool {
         RunStatus::Integrated
         | RunStatus::Succeeded
         | RunStatus::Failed
-        | RunStatus::Interrupted => false,
+        | RunStatus::Interrupted
+        | RunStatus::Replaced => false,
     }
 }
 

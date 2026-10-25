@@ -259,6 +259,30 @@ pub trait PlanRequestStore {
     fn settle_replan_requests(
         &mut self,
     ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>>;
+    /// The replanning operations whose replacement the trusted runtime
+    /// applies now: an approved plan waiting for its apply, an apply left
+    /// `applying`, or one a refused apply held `blocked`, checked again
+    /// (ADR-t1521-2 decisions 2 and 5).
+    fn replacements_to_apply(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>>;
+    /// Move operation `id`, read under `generation`, to `applying`.
+    fn begin_replan_apply(
+        &mut self,
+        id: crate::domain::ReplanId,
+        generation: i64,
+    ) -> Result<crate::domain::task_replan::ReplanOperation>;
+    /// Apply operation `id`'s replacement in one transaction, or refuse it
+    /// whole and hold the operation `blocked`, sending it back to a planner
+    /// when its plan no longer holds; `snapshot_problem` is why its
+    /// snapshot is not as saved.
+    fn apply_replacement(
+        &mut self,
+        id: crate::domain::ReplanId,
+        generation: i64,
+        snapshot_problem: Option<&str>,
+    ) -> Result<crate::domain::replan_apply::ApplyOutcome>;
+    /// What child `task` of an applied replacement takes of the saved
+    /// work of the run it replaced, if any: its claim hands it over.
+    fn child_carry(&self, task: TaskId) -> Result<Option<crate::domain::replan_apply::ChildCarry>>;
 }
 
 /// Where the answer of a `planner_question` goes (ADR-0041 decision 13).
@@ -902,10 +926,18 @@ pub trait GoalReviewStore {
     /// `token`, including their session spans. Call before starting jobs.
     fn interrupt_goal_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()>;
     /// Open goals a goal review may take now, in ID order: at least one
-    /// task, each completed or canceled with one completed, no unclosed
-    /// `approve_goal` ask, and tasks that changed since the goal's last
-    /// review (or a person rearmed it).
+    /// task, each completed, canceled or replaced with one completed (and
+    /// every task a replaced one's replacement reaches ended, wherever it
+    /// belongs), no unclosed `approve_goal` ask, and tasks that changed
+    /// since the goal's last review (or a person rearmed it).
     fn goal_review_candidates(&self) -> Result<Vec<GoalId>>;
+    /// What replaced the goal's replaced tasks (their lineage, mappings and
+    /// versions) and the tasks those replacements reach outside it, which
+    /// its review reads with its own tasks (ADR-t1521-2 decision 5).
+    fn goal_replacements(
+        &self,
+        goal: GoalId,
+    ) -> Result<crate::domain::replan_apply::GoalReplacements>;
     /// Record the start of a goal review of `goal` by `token`, in the
     /// directory named by its row's ID under `goal_reviews_dir`
     /// (`goal_review_started`, with the session id it gives the job, the

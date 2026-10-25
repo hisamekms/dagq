@@ -1105,11 +1105,13 @@ impl WaitingFollowUp {
     }
 }
 
-/// An open goal with its tasks and the follow-ups whose source it is.
+/// An open goal with its tasks, the tasks outside it its replaced tasks'
+/// replacements reach, and the follow-ups whose source it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoalFollowUps {
     pub goal: super::GoalId,
     pub tasks: Vec<(super::TaskId, super::TaskStatus)>,
+    pub replacing: Vec<(super::TaskId, super::TaskStatus)>,
     pub follow_ups: Vec<WaitingFollowUp>,
 }
 
@@ -1118,7 +1120,7 @@ pub struct GoalFollowUps {
 /// work is done (the rest of the goal review's candidate check). An
 /// out-of-scope one judged as such never counts (ADR-t1504-1 decision 4).
 pub fn unshown_unsettled(goal: &GoalFollowUps) -> Vec<(super::TaskId, UnsettledReason)> {
-    if !super::goal_review::tasks_done(&goal.tasks) {
+    if !super::goal_review::tasks_done(&goal.tasks, &goal.replacing) {
         return Vec::new();
     }
     let mut found: Vec<_> = goal
@@ -1566,6 +1568,7 @@ mod membership_tests {
         let goal = |tasks: Vec<_>, follow_ups| GoalFollowUps {
             goal: GoalId::new(7),
             tasks,
+            replacing: Vec::new(),
             follow_ups,
         };
         let ready = TaskStatus::Ready;
@@ -1607,6 +1610,24 @@ mod membership_tests {
         ] {
             assert!(unshown_unsettled(&goal(tasks, all.clone())).is_empty());
         }
+        // A replacement outside the goal that still runs holds it back, and
+        // one that landed is not the goal's own completed task.
+        let replaced = vec![(TaskId::new(1), TaskStatus::Replaced)];
+        for (tasks, replacing) in [
+            (done.clone(), vec![(TaskId::new(5), ready)]),
+            (replaced, vec![(TaskId::new(5), TaskStatus::Completed)]),
+        ] {
+            let goal = GoalFollowUps {
+                replacing,
+                ..goal(tasks, all.clone())
+            };
+            assert!(unshown_unsettled(&goal).is_empty());
+        }
+        let landed = GoalFollowUps {
+            replacing: vec![(TaskId::new(5), TaskStatus::Completed)],
+            ..goal(done.clone(), all.clone())
+        };
+        assert!(!unshown_unsettled(&landed).is_empty());
         // Settled or ended follow-ups never count; out of scope does not
         // wait for its work (ADR-t1504-1 decision 4).
         assert!(

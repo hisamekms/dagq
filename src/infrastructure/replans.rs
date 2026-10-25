@@ -27,12 +27,12 @@ use crate::domain::event_kind::EventKind;
 use crate::domain::plan_request::{RequestRef, RequestStatus};
 use crate::domain::plan_review::PlanReviewAction;
 use crate::domain::replan_plan::{
-    self, DeletionAuthority, PlanContext, PlanProblem, PlanRevision, PlanTask, ReplacementPlan,
-    ReplanBrief, ReviewFinding, SuccessorBrief,
+    self, DeletionAuthority, PlanContext, PlanProblem, PlanProblemCode, PlanRevision, PlanTask,
+    ReplacementPlan, ReplanBrief, ReviewFinding, SuccessorBrief,
 };
 use crate::domain::task_replan::{
-    self, GoalConditions, GuardedStep, NewReplan, OriginalConditions, ReplanGuard, ReplanMove,
-    ReplanOperation, ReplanOrigin, ReplanRecorded, ReplanStatus, acceptance_items,
+    self, ChildConditions, GoalConditions, GuardedStep, NewReplan, OriginalConditions, ReplanGuard,
+    ReplanMove, ReplanOperation, ReplanOrigin, ReplanRecorded, ReplanStatus, acceptance_items,
 };
 use crate::domain::{GoalId, ProposalId, ReplanId, RunId, RunStatus, TaskId, TaskStatus};
 use sha2::{Digest, Sha256};
@@ -327,8 +327,26 @@ pub(crate) fn move_in(
     step: &ReplanMove,
     now: i64,
 ) -> Result<ReplanOperation> {
+    move_in_as(conn, id, generation, step, now, false)
+}
+
+/// [`move_in`], by the trusted runtime's atomic apply when `apply`: the
+/// one writer that moves an operation into `applying` and `applied`
+/// ([`task_replan::check_apply_move`], [`super::replan_apply`]).
+pub(super) fn move_in_as(
+    conn: &Connection,
+    id: ReplanId,
+    generation: i64,
+    step: &ReplanMove,
+    now: i64,
+    apply: bool,
+) -> Result<ReplanOperation> {
     let op = read_operation(conn, id)?;
-    task_replan::check_move(&op, generation, step)?;
+    if apply {
+        task_replan::check_apply_move(&op, generation, step)?;
+    } else {
+        task_replan::check_move(&op, generation, step)?;
+    }
     // An operation diagnosed, fenced or reopened (a restore that failed)
     // must be the task's one open operation.
     if task_replan::needs_task_alone(op.status, step.to) {
@@ -589,7 +607,7 @@ pub(super) fn carry_open_to(conn: &Connection, task: TaskId, run: &RunId, now: i
 }
 
 /// The task's and its goal's conditions as they are on `conn` now.
-fn conditions_of(conn: &Connection, task_id: TaskId) -> Result<OriginalConditions> {
+pub(super) fn conditions_of(conn: &Connection, task_id: TaskId) -> Result<OriginalConditions> {
     let task = read_task(conn, task_id)?;
     let ids = |sql: &str| -> Result<Vec<TaskId>> {
         Ok(conn
@@ -791,6 +809,36 @@ pub(super) fn replacing_operation(
     id.map(|id| read_operation(conn, id)).transpose()
 }
 
+/// The version of child `task`'s conditions ([`ChildConditions`]) that
+/// plan review approves and the apply compares, read on `conn`.
+pub(super) fn child_version(conn: &Connection, task: TaskId) -> Result<String> {
+    let goals = conn
+        .prepare("SELECT goal_id FROM task_goal_dependencies WHERE task_id=?1 ORDER BY goal_id")?
+        .query_map([task], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ChildConditions::of(&read_task(conn, task)?, conditions_of(conn, task)?, goals).version())
+}
+
+/// The version of each child's conditions plan review approved with plan
+/// `revision` of operation `id` (`replan_plans.approved_children`), `None`
+/// when none was recorded.
+pub(super) fn approved_children(
+    conn: &Connection,
+    id: ReplanId,
+    revision: i64,
+) -> Result<Option<BTreeMap<TaskId, String>>> {
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT approved_children FROM replan_plans WHERE operation_id=?1 AND revision=?2",
+            params![id, revision],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    text.map(|text| serde_json::from_str(&text).map_err(Into::into))
+        .transpose()
+}
+
 /// The latest plan operation `id` was submitted with, if any.
 pub(super) fn latest_plan(conn: &Connection, id: ReplanId) -> Result<Option<PlanRevision>> {
     let row: Option<(i64, ProposalId, String, String, Option<i64>)> = conn
@@ -893,9 +941,14 @@ pub(super) fn check_replacement(
             )
         })
         .transpose()?;
+    // The tasks that wait for the task are read live: one that came to
+    // wait since the operation fixed its conditions makes no plan stale,
+    // and the apply has it wait for every child.
+    let mut now = conditions_of(conn, op.task_id)?;
+    now.successors.clone_from(&op.conditions.successors);
     let ctx = PlanContext {
         operation: op,
-        task_version_now: conditions_of(conn, op.task_id)?.version(),
+        task_version_now: now.version(),
         goal_acceptance_version_now,
         members: members.to_vec(),
         tasks,
@@ -903,7 +956,29 @@ pub(super) fn check_replacement(
         authorities,
     }
     .after_actions(actions);
-    Ok(replan_plan::check_plan(plan, &ctx))
+    let mut problems = replan_plan::check_plan(plan, &ctx);
+    // A loop through goals as well as tasks (ADR-0038), on the graph the
+    // apply would leave: the successors and the task wait for the
+    // children.
+    let successors: Vec<TaskId> = super::replan_apply::successors_now(conn, op.task_id)?
+        .into_keys()
+        .collect();
+    let mut edges = crate::domain::replan_apply::successor_edges(plan, &successors);
+    edges.push((op.task_id, plan.child_ids()));
+    if let Some(task) = crate::domain::replan_apply::closes_loop(
+        &super::replan_apply::wait_graph(conn, op.task_id)?,
+        &edges,
+    ) {
+        problems.push(PlanProblem {
+            code: PlanProblemCode::DependencyCycle,
+            task_id: Some(task),
+            reason: format!(
+                "task {task} would wait for itself, through the tasks and goals it waits for, once the successors of task {} wait for the children",
+                op.task_id
+            ),
+        });
+    }
+    Ok(problems)
 }
 
 /// Task `id` as [`replan_plan::check_plan`] reads it; `None` for a task
@@ -1087,9 +1162,21 @@ pub(super) fn approve_replacement(
         op.id,
         replan_plan::describe(&problems).join("\n")
     );
+    // What plan review approved of each child, which the apply compares
+    // with the child as it is then.
+    let mut approved = BTreeMap::new();
+    for child in latest.plan.child_ids() {
+        approved.insert(child, child_version(conn, child)?);
+    }
     conn.execute(
-        "UPDATE replan_plans SET approved_at=?1 WHERE operation_id=?2 AND revision=?3",
-        params![now, op.id, latest.revision],
+        "UPDATE replan_plans SET approved_at=?1, approved_children=?4
+         WHERE operation_id=?2 AND revision=?3",
+        params![
+            now,
+            op.id,
+            latest.revision,
+            serde_json::to_string(&approved)?
+        ],
     )?;
     if op.status == ReplanStatus::AwaitingAnswer {
         move_in(
@@ -1200,6 +1287,55 @@ pub(super) fn check_child_ready(conn: &Connection, task: TaskId) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Send operation `op`, held `blocked` from its apply because its approved
+/// plan no longer holds (`problems`), back to a planner inside the
+/// caller's transaction (ADR-t1521-2 decision 2): the children of the
+/// plan's proposal go back to draft ([`release_children`]), the operation
+/// to `parked` with its snapshot, and its ended request is renewed
+/// ([`super::plan_requests::renew_declined`]) so that one planner opens for
+/// it with the material and the plan's problems. That planner makes a new
+/// plan, continues the run or withdraws; the saved work stays.
+pub(super) fn replan_again(
+    conn: &Connection,
+    op: &ReplanOperation,
+    problems: &[String],
+    now: i64,
+) -> Result<ReplanOperation> {
+    release_children(conn, op, now)?;
+    let moved = move_in(
+        conn,
+        op.id,
+        op.generation,
+        &ReplanMove {
+            to: ReplanStatus::Parked,
+            reason: format!(
+                "the approved plan no longer applies, so a planner makes a new one from the saved work, continues the run or withdraws: {}",
+                problems.join("; ")
+            ),
+            snapshot_id: None,
+            diagnosis: None,
+        },
+        now,
+    )?;
+    if let Some(request) = moved.request_id
+        && moved.request_id == op.request_id
+    {
+        let open: bool = conn.query_row(
+            "SELECT status='open' FROM plan_requests WHERE id=?1",
+            [request],
+            |r| r.get(0),
+        )?;
+        if !open {
+            let renewed = super::plan_requests::renew_declined(conn, request, op.id, now)?;
+            conn.execute(
+                "UPDATE replan_operations SET request_id=?1 WHERE id=?2",
+                params![renewed, op.id],
+            )?;
+        }
+    }
+    read_operation(conn, op.id)
 }
 
 /// Release the children of operation `op`'s replacement proposal, which

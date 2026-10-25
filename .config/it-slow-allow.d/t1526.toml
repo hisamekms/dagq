@@ -1,0 +1,68 @@
+# The items of task 1526 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 9.5s in a stress 5: a worker process, its validation, its review and its landing on Git in one supervise
+[[test]]
+name = "runtime_replan_carry::a_childs_run_is_handed_its_part_of_the_saved_work_and_goes_through_its_own_gates"
+reason = "B 境界（守る境界）: 置換の子の claim が provisioning で snapshot の指定部分を run dir に渡し、その子の run が自分の receipt・検証・review・実の git への着地を通ることを supervise のループと SQLite の queue で確かめる（関門が省かれないことはこの通しでしか示せない）。引き継ぎの文面の判断は application::prompt の unit test"
+task = 1526
+
+# 5.5s (median of a stress 5): plan review's pass, then the apply and the claims, in the supervisor loop
+[[test]]
+name = "replan_planning::an_approved_replacement_is_applied_at_once_and_every_successor_waits_for_its_children"
+reason = "B 境界（守る境界）: plan review の pass と trusted runtime の適用が supervise の計画の回で SQLite の 1 つの transaction に書かれ、後続の claim が子の着地まで待つことを確かめる（判断は domain::replan_apply の unit test）"
+task = 1526
+
+# 8.0s: four supervises around a write that fails inside the apply's transaction
+[[test]]
+name = "replan_planning::an_apply_that_fails_midway_writes_nothing_and_is_applied_once_the_failure_is_gone"
+reason = "B 境界（守る境界）: SQLite の trigger で落とした適用の transaction が全て巻き戻り、blocked を supervise の回ごとに書かずに検査し直して、原因が消えた回に適用することを確かめる（復旧の判断は domain::replan_apply の unit test）"
+task = 1526
+
+# 6.3s: the refused apply, the renewed request's planner and its decline, each a supervise
+[[test]]
+name = "replan_planning::an_apply_of_a_plan_gone_stale_since_its_pass_goes_back_to_a_planner"
+reason = "B 境界（守る境界）: 適用の拒否が SQLite で操作を parked に戻して依頼を新しくし、supervise がその依頼の planner を開いて継続の却下を適用する配線を確かめる"
+task = 1526
+
+# 5.7s: the pass, the refused apply and the renewed request's planner, each a supervise
+[[test]]
+name = "replan_planning::an_apply_that_closes_a_loop_through_a_goal_writes_nothing"
+reason = "B 境界（守る境界）: goal を経る循環を適用の transaction が SQLite の task・goal・置換の辺から見つけて全て巻き戻し、planner の出し直しの submit も同じ graph で拒むことを確かめる（graph の判断は domain::replan_apply の unit test）"
+task = 1526
+
+# 6.9s: the apply, a goal review row begun and finished on SQLite, then the supervisor's goal review job
+[[test]]
+name = "replan_planning::a_goal_review_reads_the_replacement_and_a_changed_mapping_stales_its_verdict"
+reason = "B 境界（守る境界）: goal review の行の fingerprint を SQLite で起動と終わりに比べ、置換の系統が supervise の goal review の job の prompt に届くことを確かめる（fingerprint の判断は domain::replan_apply・goal_review の unit test）"
+task = 1526
+
+# 5.6s: the apply, then the replaced run's lease and receipt steps on SQLite and a supervise
+[[test]]
+name = "replan_planning::an_old_proposal_and_the_replaced_runs_late_receipt_change_nothing"
+reason = "B 境界（守る境界）: 置換した run の lease と遅れた receipt を run の store の受理の経路（finish_supervision・restart_validation・begin_integration）と supervise に渡し、SQLite の置換・子・依存と main が変わらないことを確かめる"
+task = 1526
+
+# 6.6s: the apply and the child's claim with its Git worktree in the supervisor loop
+[[test]]
+name = "replan_planning::a_child_claimed_after_the_apply_is_handed_the_saved_head"
+reason = "B 境界（守る境界）: 実の適用の後の子の claim が provisioning で Git の worktree を作り、snapshot の ref が固定した head をその子に渡すことを確かめる（文面の判断は application::prompt の unit test）"
+task = 1526
+
+# 5.7s: a supervise that provisions the child and fails its handover, then claims another task
+[[test]]
+name = "runtime_replan_carry::a_handover_from_a_snapshot_not_as_saved_fails_with_the_snapshot_kept"
+reason = "B 境界（守る境界）: 照合の合わない snapshot からの引き継ぎを supervise の provisioning が失敗にし、snapshot・Git の ref・main を残して他の task の claim を続けることを確かめる"
+task = 1526
+
+# 5.1s: plan review's pass with the apply held back, then a supervise that finds the snapshot missing
+[[test]]
+name = "replan_planning::a_replacement_by_two_children_passes_and_leaves_them_unclaimed_until_it_is_applied"
+reason = "B 境界（守る境界）: supervise の plan review の pass が子を submitted のまま残して claim させず、snapshot の無い適用を SQLite に何も書かず人に残すことを確かめる"
+task = 1526
+
+# 7.8s in a stress 5: the failed handover, a person's hold and release through the CLI, and the next claim, each a supervise
+[[test]]
+name = "runtime_replan_carry::a_child_released_to_start_afresh_is_handed_none_of_the_saved_work"
+reason = "B 境界（守る境界）: 人の hold と release が CLI と queue service で SQLite に task_released（retry_fresh）を書き、次の supervise の claim の provisioning がそれを読んで置換元の成果を渡さないことを確かめる（どれを引き継ぐかの判断は domain::resume の unit test）"
+task = 1526

@@ -1097,7 +1097,11 @@ pub const fn host_client_role(role: ActorRole) -> bool {
 pub const fn run_holds_token(status: RunStatus) -> bool {
     !matches!(
         status,
-        RunStatus::Integrated | RunStatus::Succeeded | RunStatus::Failed | RunStatus::Interrupted
+        RunStatus::Integrated
+            | RunStatus::Succeeded
+            | RunStatus::Failed
+            | RunStatus::Interrupted
+            | RunStatus::Replaced
     )
 }
 

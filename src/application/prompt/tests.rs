@@ -534,6 +534,7 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
         receipt_path: None,
         summary: "earlier".into(),
         by_hand: None,
+        replan: None,
     };
     let retried = prompt(
         &verified,
@@ -575,6 +576,75 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
     ));
     assert!(!carried.contains("its landing kept conflicting"));
     assert!(carried.contains("rerun your checks in the worktree as above"));
+    // A child of a replacement takes only the part of the saved work its
+    // plan named: the commits, or the uncommitted changes copied into its
+    // run directory, verified as its own work.
+    let replan = crate::application::prompt::ReplanCarried {
+        operation: crate::domain::ReplanId::new(4),
+        task: TaskId::new(7),
+        carry: crate::domain::replan_plan::CarrySource::SnapshotHead,
+        pinned_ref: "refs/dagq/replans/4".into(),
+        files: Vec::new(),
+    };
+    let child = |replan: crate::application::prompt::ReplanCarried| {
+        let carried = Inheritance {
+            replan: Some(replan),
+            ..inheritance.clone()
+        };
+        let text = prompt(
+            &verified,
+            &own_run,
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&carried),
+            &[],
+            None,
+        )
+        .unwrap()
+        .text;
+        text.split_once("Carried over from run")
+            .unwrap()
+            .1
+            .to_owned()
+    };
+    // A child's container clone fetches the ref that pins the saved head,
+    // a retry's the run's own.
+    let pinned = Inheritance {
+        replan: Some(replan.clone()),
+        ..inheritance.clone()
+    };
+    assert_eq!(pinned.clone_ref(), "refs/dagq/replans/4");
+    assert_eq!(
+        inheritance.clone_ref(),
+        format!("refs/dagq/runs/{}", inheritance.run_id)
+    );
+    let head = child(replan.clone());
+    for expected in [
+        "of task 7, which replan operation 4 replaced with this task",
+        "kept as refs/dagq/replans/4",
+        &format!("git cherry-pick {SHA}..{SHA}"),
+        "rerun your checks in the worktree as above",
+        "passed no review as this task's work",
+    ] {
+        assert!(head.contains(expected), "{expected}\n{head}");
+    }
+    assert!(!head.contains("its landing kept conflicting"), "{head}");
+    let diff = child(crate::application::prompt::ReplanCarried {
+        carry: crate::domain::replan_plan::CarrySource::SnapshotDiff,
+        files: vec![(
+            "/runs/r/replan-carry/index.diff".into(),
+            "staged diff".into(),
+        )],
+        ..replan
+    });
+    assert!(
+        diff.contains("/runs/r/replan-carry/index.diff (staged diff)"),
+        "{diff}"
+    );
+    assert!(diff.contains("git apply --index"), "{diff}");
+    assert!(!diff.contains("git cherry-pick"), "{diff}");
 
     let default = r#"when the instructions name no such checks, run the verification commands ["make gate"]."#;
     let reproduce = "If the reason is a verification command that failed after integrate's rebase, you may also run that command in the worktree";
@@ -2480,6 +2550,7 @@ fn the_goal_review_judges_required_follow_ups_and_leaves_out_of_scope_ones_out()
     let prompt = goal_review_prompt(&GoalReviewMaterial {
         goal: json!({"id": 7}),
         tasks: Vec::new(),
+        replacements: Vec::new(),
         follow_ups: vec![json!({"task_id": 9, "judgements": [{"classification": "out_of_scope"}]})],
         events: Vec::new(),
         previous: Vec::new(),
@@ -2494,6 +2565,38 @@ fn the_goal_review_judges_required_follow_ups_and_leaves_out_of_scope_ones_out()
     assert!(
         prompt.contains("A follow-up judged required is part of it: judge the goal with its work")
     );
+}
+
+/// The goal review is shown what replaced the goal's replaced tasks, and
+/// told to judge a replaced task's items through its children's landings
+/// and the mappings (ADR-t1521-2 decision 5).
+#[test]
+fn the_goal_review_judges_a_replaced_task_through_its_replacement() {
+    let prompt = goal_review_prompt(&GoalReviewMaterial {
+        goal: json!({"id": 7}),
+        tasks: vec![
+            json!({"id": 12, "status": "completed", "replaces_in_this_goal": true, "goal_id": 8}),
+        ],
+        replacements: vec![
+            json!({"operation": 3, "replaced_task": 10, "children": [11, 12],
+                                  "mappings": [{"ordinal": 2, "child_task_id": 12}]}),
+        ],
+        follow_ups: Vec::new(),
+        events: Vec::new(),
+        previous: Vec::new(),
+        gaps_in_a_row: 0,
+        repo_root: Path::new("/repo"),
+    })
+    .text;
+    for expected in [
+        r#""replaced_task":10"#,
+        r#""child_task_id":12"#,
+        r#""replaces_in_this_goal":true"#,
+        "replaced by tasks that all ended",
+        "judge its items only through the children's landings and the mappings",
+    ] {
+        assert!(prompt.contains(expected), "{expected}\n{prompt}");
+    }
 }
 
 /// Every `dagq` command the prompts of the jobs that read the queue
@@ -2511,6 +2614,7 @@ fn every_dagq_command_a_job_s_prompt_names_is_a_use_case_of_the_queue_service() 
     let goal = goal_review_prompt(&GoalReviewMaterial {
         goal: json!({"id": 7}),
         tasks: Vec::new(),
+        replacements: vec![json!({"operation": 1})],
         follow_ups: Vec::new(),
         events: Vec::new(),
         previous: Vec::new(),
@@ -3574,6 +3678,9 @@ fn a_goal_review_prompt_of_many_large_tasks_stays_within_its_limits() {
     let material = GoalReviewMaterial {
         goal: json!({"id": 7, "description": big("goal", 50_000)}),
         tasks,
+        replacements: (1..=50)
+            .map(|id| json!({"operation": id, "mappings": big("mapping", 2_000)}))
+            .collect(),
         follow_ups: (1..=100)
             .map(|id| json!({"task_id": 1000 + id, "reason": big("why", 2_000)}))
             .collect(),
@@ -5890,6 +5997,7 @@ fn worker_material(
         receipt_path: Some("/runs/earlier/receipt.json".into()),
         summary: format!("inherited {}", "か".repeat(size / 3)),
         by_hand: Some(("inbox".into(), format!("reason {}", "き".repeat(size / 3)))),
+        replan: None,
     };
     (
         worker_task(9, size, Some(1)),

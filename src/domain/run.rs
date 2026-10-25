@@ -614,6 +614,15 @@ pub fn park_for_hold(mut run: TaskRun, reason: String) -> Result<TaskRun, Domain
     Ok(run)
 }
 
+/// End the parked run a replanning's apply replaced (ADR-t1521-2 decision
+/// 5): a run waiting for a session becomes `replaced`, neither completed
+/// nor failed, so no receipt, landing, resume or recovery takes it again.
+pub fn end_for_replacement(mut run: TaskRun) -> Result<TaskRun, DomainError> {
+    require_status(&run, &[RunStatus::NeedsSession], "end for a replacement")?;
+    run.status = RunStatus::Replaced;
+    Ok(run)
+}
+
 /// End a run whose task's hold a person released with a new run
 /// (ADR-t1879-1): a run at rest in its hold's wait (waiting for a session,
 /// to land or for its validation, or stopped) becomes `failed` with

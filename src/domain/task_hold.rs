@@ -399,7 +399,9 @@ pub const fn run_wait(status: Option<RunStatus>, leased: bool) -> RunHoldWait {
             | RunStatus::Failed
             | RunStatus::Interrupted,
         ) => RunHoldWait::Settled,
-        Some(RunStatus::Integrated | RunStatus::Succeeded) | None => RunHoldWait::None,
+        Some(RunStatus::Integrated | RunStatus::Succeeded | RunStatus::Replaced) | None => {
+            RunHoldWait::None
+        }
     }
 }
 
@@ -663,10 +665,11 @@ string_enum!(DiscardReason {
 });
 
 // Why a hold closed with its task (`task_hold_ended`'s `reason`): the task
-// completed or was canceled.
+// completed, was canceled or was replaced by a replanning.
 string_enum!(HoldEnd {
     Completed => "completed",
     Canceled => "canceled",
+    Replaced => "replaced",
 });
 
 impl HoldEnd {
@@ -676,6 +679,7 @@ impl HoldEnd {
         match status {
             TaskStatus::Completed => Some(Self::Completed),
             TaskStatus::Canceled => Some(Self::Canceled),
+            TaskStatus::Replaced => Some(Self::Replaced),
             _ => None,
         }
     }

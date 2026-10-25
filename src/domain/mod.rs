@@ -73,7 +73,10 @@ macro_rules! known_ask_kinds {
 
 // `submitted` waits for plan review (ADR-0041 decision 8): only plan review,
 // a person's explicit bypass and a retry of the same task make a task
-// `ready`.
+// `ready`. `replaced` ends a task whose replanning operation replaced it
+// with child tasks (ADR-t1521-2 decision 5): it did not meet its
+// acceptance, satisfies no dependency (what waited for it waits for the
+// children) and is neither completed nor canceled.
 string_enum!(TaskStatus {
     Draft => "draft",
     Submitted => "submitted",
@@ -81,6 +84,7 @@ string_enum!(TaskStatus {
     InProgress => "in_progress",
     Completed => "completed",
     Canceled => "canceled",
+    Replaced => "replaced",
 });
 
 string_enum!(RunStatus {
@@ -95,6 +99,9 @@ string_enum!(RunStatus {
     Succeeded => "succeeded",
     Failed => "failed",
     Interrupted => "interrupted",
+    // The parked run of a task its replanning operation replaced: ended,
+    // never resumed, landed or claimed again (ADR-t1521-2 decision 5).
+    Replaced => "replaced",
 });
 
 impl RunStatus {
@@ -1300,6 +1307,7 @@ pub mod recovery;
 pub mod recurring;
 pub mod related;
 pub mod release_update;
+pub mod replan_apply;
 pub mod replan_plan;
 pub mod replan_snapshot;
 pub mod resume;

@@ -86,8 +86,10 @@ impl TaskStatus {
         matches!(self, Self::Draft | Self::Submitted)
     }
 
+    /// Whether the task has ended: completed, canceled, or replaced by
+    /// child tasks of its goal, which are counted on their own.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Canceled)
+        matches!(self, Self::Completed | Self::Canceled | Self::Replaced)
     }
 }
 
@@ -735,6 +737,22 @@ pub fn check_acyclic(
     })
 }
 
+/// A task never comes to wait for a task a replanning replaced
+/// (`predecessor` in that status): it never completes, so the wait would
+/// never end; its children hold its work (ADR-t1521-2 decision 5).
+pub fn check_not_replaced(
+    task_id: TaskId,
+    predecessor_id: TaskId,
+    predecessor: TaskStatus,
+) -> Result<(), DomainError> {
+    require(predecessor != TaskStatus::Replaced, || {
+        DomainError::ReplacedDependency {
+            task_id,
+            predecessor_id,
+        }
+    })
+}
+
 /// A task never depends on the goal it belongs to: the goal already waits
 /// for it.
 pub fn check_not_own_goal(task: &Task, goal_id: GoalId) -> Result<(), DomainError> {
@@ -930,6 +948,23 @@ impl From<TaskWire> for Task {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_task_comes_to_wait_for_a_replaced_one() {
+        let (task, predecessor) = (TaskId::new(2), TaskId::new(1));
+        assert!(matches!(
+            check_not_replaced(task, predecessor, TaskStatus::Replaced),
+            Err(DomainError::ReplacedDependency { .. })
+        ));
+        for status in [
+            TaskStatus::Ready,
+            TaskStatus::InProgress,
+            TaskStatus::Completed,
+            TaskStatus::Canceled,
+        ] {
+            assert!(check_not_replaced(task, predecessor, status).is_ok());
+        }
+    }
 
     fn new_task() -> NewTask {
         NewTask {

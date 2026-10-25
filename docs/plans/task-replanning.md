@@ -96,8 +96,18 @@ Claude/Codexで同じ状態機械を使う。
   passは計画を承認済みにして子を`submitted`のまま残し（readyは誰の手でも拒む）、concernは操作を`awaiting_answer`に、proposalの取り下げは`planning`に戻し、どれもrunの保留とsnapshotを保つ。
   操作が継続か撤回で閉じると、未適用のproposalの子はdraftに戻る。
   依頼が`--continue-run`の却下で終われば操作は`continuing_after_park`へ、そのほかの却下か`exhausted`、proposalを取り下げたplannerが次を出さずに終わったときは`blocked`へ進む（`settle_replan_requests`）。
-- 未実装: 診断（`pause_requested`へ進める判断）・置換の適用・goal closeの判定。
-  適用（`applying`・`applied`）へはどの経路も動かせず、承認済みの置換の子は`submitted`のまま待つ。
+- 置換の適用: 済み（`src/domain/replan_apply.rs`、`src/infrastructure/replan_apply.rs`、`src/application/supervise/planning/replan_apply.rs`）。
+  supervisorの計画の回が、passで承認された最新の計画を持つ操作を`applying`へ進め、snapshotをmanifestと固定したrefで照合してから、1つのtransactionで全てを検査し直して書く（`apply_problems`）。
+  書くのは元taskとrunの`replaced`、置換先と子ごとの引き継ぎ（`carry`）、条件の対応、全後続の辺の付け替え、子の`ready`、旧runの開いたaskの閉じ、`applied`と`replan_applied`。
+  後続は計画が挙げたものは計画の子を、挙げないもの（操作が条件を固定した後、柵の前に足された後続）は全ての子を待つ。後続の追加は計画を古くしない（`check_replacement`は版を固定した後続で比べる）。
+  承認の時の子の条件（待つtaskとgoal、runの進め方を含み、子を待つtaskと優先度は除く）の版を記録し、適用はそれと今の版を比べ、passの後に子が変われば適用しない。
+  問題か途中の失敗は全体をrollbackし、操作を`applying`からの`blocked`にして理由を残し、snapshot・ref・runは保留のまま。循環はgoal依存・goalの所属task・適用済みの置換の辺も辿り、submitとpassの検査も同じグラフを見る。
+  `blocked`の後は問題の種類で進む（`ApplyRecovery`）: 書き込みの失敗やleaseのような待てば変わるものは毎回の計画の回が検査し直し（理由が変わったときだけ`replan_apply_rechecked`で残す）、無くなれば適用する。計画が成り立たないもの（版・子・始まった後続・循環）は子をdraftに戻し、操作を`parked`に戻して依頼を新しくし、そのplannerが新しい計画・継続・撤回を選ぶ。snapshotの食い違いは人に残す。
+  `applying`で止まった操作は次の回が同じ手順で終える。適用済みの操作への2度目の適用は何も書かない。
+  子のclaimは計画が名指した部分だけを渡す: snapshotのheadは固定したrefと照合してpromptで名指し（containerのcloneにはそのrefを渡す）、未commitの変更はmanifestと照合してrun dirの`replan-carry/`へ写す（未追跡の実行可能fileはその権限ごと。`run_inherited`）。
+  渡せなければ`replan_carry_failed`を残してprovisioningの失敗とし、snapshotとrefは消さない。holdの解除が今のmainから始め直させた（`retry_fresh`）子のその後のclaimには渡さない。子の成果は子のrunのreceipt・検証・review・e2e・着地だけを通る。
+- goal close: 一部（`replaced`は終わったtaskに数え、completedには数えない。置換先を再置換も辿った全てのtaskを、別のgoalへ移ったものも含めて読むので、それが全て終わるまでgoal reviewの起動もcloseも待つ（起動に要る`completed`は所属taskだけで数える）。定期taskの次の登録も同じく待つ。goal reviewのjobには置換の系統・元条件・条件の対応を渡し、fingerprintはそれと計画・条件の版を持つので、起動の後に対応が変わればachievedを適用しない）。
+- 未実装: 診断（`pause_requested`へ進める判断）、置換先が空・欠落の記録の復旧（下の「goal reviewとgoal close」）。
 
 ## 入口と診断
 

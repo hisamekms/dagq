@@ -176,6 +176,8 @@ impl PlanningState {
                 op.status_reason.as_deref().unwrap_or_default()
             );
         }
+        // A replacement plan review approved is applied by the runtime.
+        super::replan_apply::apply_replacements(env)?;
         for request in env.queue.planner_requests()? {
             if *runtime_open >= env.runtime_planners {
                 break;

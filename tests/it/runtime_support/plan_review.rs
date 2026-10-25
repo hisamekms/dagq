@@ -306,6 +306,9 @@ pub(crate) struct PlanWorkspace {
     pub(crate) asked: Mutex<Vec<String>>,
     /// The wrappers started in the background (ADR-t1404-1 decision 8).
     pub(crate) background: BackgroundWrappers,
+    /// How long a worker's parked wrapper is waited for before its run is
+    /// given up ([`Self::giving_up_after`]); the host's default otherwise.
+    registration: Option<std::time::Duration>,
 }
 
 impl Default for PlanWorkspace {
@@ -315,6 +318,7 @@ impl Default for PlanWorkspace {
             closed: Mutex::default(),
             asked: Mutex::default(),
             background: BackgroundWrappers::parked(),
+            registration: None,
         }
     }
 }
@@ -324,6 +328,15 @@ impl PlanWorkspace {
     pub(crate) fn running() -> Self {
         Self {
             background: BackgroundWrappers::default(),
+            ..Self::default()
+        }
+    }
+    /// Parked wrappers, a worker's run given up `after` its start: a test
+    /// that reads only what a claim provisions does not wait out the
+    /// wrapper the session never starts.
+    pub(crate) fn giving_up_after(after: std::time::Duration) -> Self {
+        Self {
+            registration: Some(after),
             ..Self::default()
         }
     }
@@ -358,6 +371,10 @@ impl SessionWrappers for PlanWorkspace {
     fn exists(&self, handle: &str) -> Result<bool> {
         self.asked.lock().unwrap().push(handle.into());
         Ok(dagq::domain::background_wrapper::is_background(handle) && self.background.runs(handle))
+    }
+    fn registration_timeout(&self) -> std::time::Duration {
+        self.registration
+            .unwrap_or_else(|| std::time::Duration::from_secs(45))
     }
 }
 

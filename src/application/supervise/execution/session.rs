@@ -114,8 +114,13 @@ impl Supervisor<'_> {
     /// with its branch carried over (ADR-0047 decision 24): the one
     /// [`crate::domain::resume::inherited_from`] picks, the latest such run
     /// unless a release started afresh since. Its own commits are counted
-    /// from their merge base with `run`'s base, the current main.
-    fn inheritance(&mut self, run: &TaskRun) -> Result<Option<Inheritance>> {
+    /// from their merge base with `run`'s base, the current main. Without
+    /// one, what a child of an applied replacement takes of the replaced
+    /// run's saved work ([`Self::replan_inheritance`]), handed over into
+    /// `run_dir`; nothing at all after a release started the task afresh
+    /// (`retry_fresh`), the snapshot left as it is.
+    fn inheritance(&mut self, run: &TaskRun, run_dir: &Path) -> Result<Option<Inheritance>> {
+        use crate::domain::resume::{InheritedFrom, inherited_from};
         let runs = self.queue.show(run.task_id())?.runs;
         let previous: Vec<&TaskRun> = runs
             .iter()
@@ -128,20 +133,192 @@ impl Supervisor<'_> {
             .iter()
             .map(|previous| self.queue.run_events(previous.id()))
             .collect::<Result<Vec<_>>>()?;
-        let Some(at) = crate::domain::resume::inherited_from(events.iter().map(Vec::as_slice))
-        else {
-            return Ok(None);
+        let retried = match inherited_from(events.iter().map(Vec::as_slice)) {
+            InheritedFrom::Fresh => return Ok(None),
+            InheritedFrom::Run(at) => self.retried_inheritance(run, previous[at], &events[at]),
+            InheritedFrom::Nothing => None,
         };
-        let Some(mut inherited) = Inheritance::of(&*self.files, previous[at], &events[at]) else {
-            return Ok(None);
-        };
+        match retried {
+            Some(inherited) => Ok(Some(inherited)),
+            None => self.replan_inheritance(run, run_dir),
+        }
+    }
+    /// What `run` inherits from `previous`, a retry that carried its branch
+    /// over with `events`.
+    fn retried_inheritance(
+        &self,
+        run: &TaskRun,
+        previous: &TaskRun,
+        events: &[RunEvent],
+    ) -> Option<Inheritance> {
+        let mut inherited = Inheritance::of(&*self.files, previous, events)?;
         if let Ok(Some(base)) = self
             .repository
             .merge_base(run.base_commit().as_str(), &inherited.head)
         {
             inherited.base = base;
         }
-        Ok(Some(inherited))
+        Some(inherited)
+    }
+    /// What `run`, of a child of an applied replacement, takes of the
+    /// saved work of the run the replacement ended (ADR-t1521-2 decision
+    /// 5), handed over only as the plan said: the snapshot's head, checked
+    /// to be what its ref still pins, or its uncommitted changes, each file
+    /// checked against the manifest and copied into `run_dir`. Nothing for
+    /// a task that takes none. A handover that fails records
+    /// `replan_carry_failed` on the run and fails its provisioning
+    /// ([`ReplanCarryFailed`]: the run is abandoned with the error for its
+    /// recovery and the claims go on), with the snapshot and its ref left
+    /// as they are; nothing of the saved work goes anywhere but a run's
+    /// worktree, through that run's own receipt, review and landing.
+    fn replan_inheritance(&mut self, run: &TaskRun, run_dir: &Path) -> Result<Option<Inheritance>> {
+        let Some(carry) = self.queue.child_carry(run.task_id())? else {
+            return Ok(None);
+        };
+        match self.hand_over(run, &carry, run_dir) {
+            Ok(inherited) => Ok(Some(inherited)),
+            Err(error) => {
+                let why = format!(
+                    "the work replan operation {} saved in snapshot {} could not be handed to task {}: {error:#}; the snapshot and its ref are kept",
+                    carry.operation,
+                    carry.snapshot_id,
+                    run.task_id()
+                );
+                self.queue.record_runtime_event(
+                    run.id(),
+                    EventKind::ReplanCarryFailed,
+                    json!({"operation_id": carry.operation, "snapshot_id": carry.snapshot_id,
+                           "carry": carry.carry, "reason": why}),
+                )?;
+                Err(anyhow::Error::new(ReplanCarryFailed(why)))
+            }
+        }
+    }
+    /// [`Self::replan_inheritance`]'s handover of `carry` to `run`.
+    fn hand_over(
+        &mut self,
+        run: &TaskRun,
+        carry: &crate::domain::replan_apply::ChildCarry,
+        run_dir: &Path,
+    ) -> Result<Inheritance> {
+        use crate::domain::replan_plan::CarrySource;
+        use crate::domain::replan_snapshot::{self, MANIFEST, SavedKind, SnapshotManifest};
+        let dir = replan_snapshot::snapshot_dir(&self.layout.replans_dir, &carry.snapshot_id);
+        let manifest: SnapshotManifest =
+            serde_json::from_slice(&self.files.read(&dir.join(MANIFEST))?)
+                .context("read the snapshot's manifest")?;
+        ensure!(
+            manifest.operation == carry.operation && manifest.run_id == carry.from_run,
+            "the snapshot is of replan operation {} and run {}",
+            manifest.operation,
+            manifest.run_id
+        );
+        manifest.check_paths()?;
+        // Only the files this child takes are read and checked: the head
+        // alone is its ref, the uncommitted changes are their diffs and
+        // untracked files.
+        let taken = SnapshotManifest {
+            files: manifest
+                .files
+                .iter()
+                .filter(|file| {
+                    carry.carry == CarrySource::SnapshotDiff
+                        && matches!(
+                            file.kind,
+                            SavedKind::Index | SavedKind::Worktree | SavedKind::Untracked
+                        )
+                })
+                .cloned()
+                .collect(),
+            ..manifest.clone()
+        };
+        let mut contents = Vec::new();
+        for file in &taken.files {
+            if let Ok(bytes) = self.files.read(&dir.join(&file.name)) {
+                contents.push((file.name.clone(), bytes));
+            }
+        }
+        let saved: Vec<(String, u64, String)> = contents
+            .iter()
+            .map(|(name, bytes)| {
+                (
+                    name.clone(),
+                    bytes.len() as u64,
+                    replan_snapshot::sha256(bytes),
+                )
+            })
+            .collect();
+        replan_snapshot::check_saved(&taken, &saved)?;
+        let mut files = Vec::new();
+        match carry.carry {
+            CarrySource::SnapshotHead => {
+                let pinned = self
+                    .repository
+                    .is_ancestor(&manifest.head, &manifest.pinned_ref)?
+                    && self
+                        .repository
+                        .is_ancestor(&manifest.pinned_ref, &manifest.head)?;
+                ensure!(
+                    pinned,
+                    "{} does not name the saved head {}",
+                    manifest.pinned_ref,
+                    manifest.head
+                );
+            }
+            CarrySource::SnapshotDiff => {
+                let into = run_dir.join("replan-carry");
+                self.files.create_dir_all(&into)?;
+                for file in &taken.files {
+                    let what = match file.kind {
+                        SavedKind::Index => "staged diff".to_owned(),
+                        SavedKind::Worktree => "unstaged diff".to_owned(),
+                        SavedKind::Untracked if file.executable => {
+                            format!("untracked executable file {}", file.source)
+                        }
+                        SavedKind::Untracked => format!("untracked file {}", file.source),
+                        _ => continue,
+                    };
+                    let Some((_, bytes)) = contents.iter().find(|(name, _)| *name == file.name)
+                    else {
+                        continue;
+                    };
+                    let to = into.join(&file.name);
+                    if let Some(parent) = to.parent() {
+                        self.files.create_dir_all(parent)?;
+                    }
+                    self.files.write(&to, bytes)?;
+                    // The mode the park saved with it, as a restore does.
+                    if file.executable {
+                        self.files.set_executable(&to, true)?;
+                    }
+                    files.push((path_text(&to)?, what));
+                }
+            }
+            CarrySource::Base => {}
+        }
+        let mut base = CommitSha::try_from(manifest.base_commit.as_str())?;
+        if let Ok(Some(merged)) = self
+            .repository
+            .merge_base(run.base_commit().as_str(), &manifest.head)
+        {
+            base = merged;
+        }
+        Ok(Inheritance {
+            run_id: carry.from_run.clone(),
+            base,
+            head: manifest.head.clone(),
+            branch: manifest.branch.clone(),
+            receipt_path: None,
+            summary: String::new(),
+            by_hand: None,
+            replan: Some(crate::application::prompt::ReplanCarried {
+                operation: carry.operation,
+                task: carry.from_task,
+                carry: carry.carry,
+                pinned_ref: manifest.pinned_ref.clone(),
+                files,
+            }),
+        })
     }
     /// Write `run`'s prompt (`prompt.txt` in `run_dir`) for its task, as
     /// its worker's route and provider take it, with the known failures in
@@ -172,7 +349,7 @@ impl Supervisor<'_> {
             None => None,
         };
         let siblings = siblings_in_progress(task, self.queue.tasks_in_progress()?);
-        let inherited = self.inheritance(run)?;
+        let inherited = self.inheritance(run, run_dir)?;
         let known_failures = self.known_failures(task.id(), &run_dir.join(KNOWN_FAILURES_FILE));
         let fitted = prompt(
             task,
@@ -234,7 +411,9 @@ impl Supervisor<'_> {
             self.queue.record_runtime_event(
                 run.id(),
                 EventKind::RunInherited,
-                json!({"inherit_from_run": inherited.run_id, "head": inherited.head, "branch": inherited.branch}),
+                json!({"inherit_from_run": inherited.run_id, "head": inherited.head, "branch": inherited.branch,
+                       "replan_operation_id": inherited.replan.as_ref().map(|replan| replan.operation),
+                       "carry": inherited.replan.as_ref().map(|replan| replan.carry)}),
             )?;
             info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} carries run {}'s work over from {}", run.id(), run.task_id(), inherited.run_id, inherited.head);
         }
@@ -244,9 +423,7 @@ impl Supervisor<'_> {
             .context("snapshot runtime binary")?;
         self.prepare_turns(&run, &run_dir)?;
         let git_output = if run.in_container() {
-            let carried = inherited
-                .as_ref()
-                .map(|inherited| format!("refs/dagq/runs/{}", inherited.run_id));
+            let carried = inherited.as_ref().map(Inheritance::clone_ref);
             self.repository.create_clone(&run, carried.as_deref())?
         } else {
             self.repository.create_worktree(&run)?
@@ -1250,3 +1427,18 @@ mod tests {
         );
     }
 }
+
+/// A child's claim could not be handed its part of a replaced run's saved
+/// work ([`Supervisor::replan_inheritance`]): a failure of that run alone,
+/// which provisioning abandons with the error for its recovery while the
+/// supervisor goes on claiming other tasks.
+#[derive(Debug)]
+pub(super) struct ReplanCarryFailed(pub(super) String);
+
+impl std::fmt::Display for ReplanCarryFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ReplanCarryFailed {}

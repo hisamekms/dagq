@@ -177,6 +177,20 @@ pub(super) fn end_released_run(
     Ok(run)
 }
 
+/// End run `id`, parked for a replanning, as the apply of its replacement
+/// replaced it ([`run::end_for_replacement`]), inside the apply's
+/// transaction. The stored run comes back.
+pub(super) fn end_replaced_run(conn: &Connection, id: &RunId) -> Result<TaskRun> {
+    let run = stored_run(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
+    let from = run.status();
+    let run = run::end_for_replacement(run)?;
+    ensure!(
+        save_run(conn, &run, from, None)?,
+        "run {id} changed while its replacement was applied; nothing is applied"
+    );
+    Ok(run)
+}
+
 /// Read the run, apply the domain `command` and save the result, inside
 /// the caller's transaction; the stored (not relocated) run comes back.
 /// A missing run, a command the domain refuses and a row that changed

@@ -22,6 +22,14 @@ pub struct TaskStatusCounts {
     pub in_progress: usize,
     pub completed: usize,
     pub canceled: usize,
+    /// Ended by a replanning that replaced it with child tasks
+    /// (ADR-t1521-2 decision 5); shown only when there is one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub replaced: usize,
+}
+
+const fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl TaskStatusCounts {
@@ -34,6 +42,7 @@ impl TaskStatusCounts {
             TaskStatus::InProgress => &mut self.in_progress,
             TaskStatus::Completed => &mut self.completed,
             TaskStatus::Canceled => &mut self.canceled,
+            TaskStatus::Replaced => &mut self.replaced,
         } += n;
     }
 }

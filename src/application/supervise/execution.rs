@@ -3349,6 +3349,18 @@ impl Supervisor<'_> {
                 Ok(ClaimStep::Next)
             }
             Err(error) if crate::application::supervisor_service::unreachable(&error) => Err(error),
+            // One child's snapshot is that run's failure, not the host's:
+            // the run is abandoned with why and the claims go on.
+            Err(error)
+                if error
+                    .chain()
+                    .any(|cause| cause.is::<session::ReplanCarryFailed>()) =>
+            {
+                let message = format!("run {} provisioning failed: {error:#}", run.id());
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{message}");
+                self.abandon(run, message, &reason_of_error(&error, ReasonCode::Other));
+                Ok(ClaimStep::Next)
+            }
             Err(error) => {
                 let message = format!("run {} provisioning failed: {error:#}", run.id());
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{message}; no further tasks will be claimed");

@@ -21,11 +21,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    DomainError, EventId, GoalId, ProposalId, ReplanId, RequestId, RunId, RunStatus, TaskId,
-    TaskStatus,
+    DomainError, EventId, ExecutionClass, GoalId, ProposalId, Provider, ReplanId, RequestId, RunId,
+    RunStatus, Task, TaskChange, TaskId, TaskStatus,
     error::require,
     plan_request::RequestStatus,
     task_hold::{self, HoldGuard},
+    worker::WorkerMode,
 };
 
 // Where an operation came from: a person's (or the inbox's) request, a
@@ -409,6 +410,49 @@ impl OriginalConditions {
     }
 }
 
+/// A child's conditions as plan review approves them and the apply checks
+/// them again (ADR-t1521-2 decision 5): what it asks and how it is checked
+/// as a replaced task's, every task and goal it waits for, and how its run
+/// goes (who runs it, whether its claim waits for a build, its execution
+/// class, its change and its context). The tasks that come to wait for it
+/// change nothing it does, and its priority only orders the claims: they
+/// are not among them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChildConditions {
+    pub conditions: OriginalConditions,
+    pub goal_predecessors: Vec<GoalId>,
+    pub provider: Provider,
+    pub worker_mode: Option<WorkerMode>,
+    pub wait_for_build: bool,
+    pub execution_class: ExecutionClass,
+    pub change: Option<TaskChange>,
+    pub context: String,
+}
+
+impl ChildConditions {
+    /// Child `task`'s, from its `conditions` as a replaced task's (their
+    /// successors left out) and the goals it waits for.
+    pub fn of(task: &Task, mut conditions: OriginalConditions, goals: Vec<GoalId>) -> Self {
+        conditions.successors.clear();
+        Self {
+            conditions,
+            goal_predecessors: goals,
+            provider: task.worker().provider,
+            worker_mode: task.stored_worker_mode(),
+            wait_for_build: task.wait_for_build(),
+            execution_class: task.execution_class(),
+            change: task.change().cloned(),
+            context: task.context().to_owned(),
+        }
+    }
+
+    /// The SHA-256 of their JSON, which the apply compares with the
+    /// version plan review approved.
+    pub fn version(&self) -> String {
+        sha256(serde_json::to_string(self).unwrap_or_default().as_bytes())
+    }
+}
+
 // A cause the diagnosis tells apart (ADR-t1521-1 decision 1).
 string_enum!(ReplanCause {
     LocalDefect => "local_defect",
@@ -549,13 +593,33 @@ pub struct ReplanMove {
 
 /// Whether `op` (read under `generation`) moves as `step` says: a move the
 /// status allows, by the generation it was read under, never to a status
-/// that needs a snapshot without one, and not yet into the replacement,
-/// whose atomic apply is not built: no operation reaches `applying` or
-/// `applied` here.
+/// that needs a snapshot without one, and not into the replacement:
+/// `applying` and `applied` are reached only by the trusted runtime's
+/// atomic apply ([`check_apply_move`]).
 pub fn check_move(
     op: &ReplanOperation,
     generation: i64,
     step: &ReplanMove,
+) -> Result<(), DomainError> {
+    check_move_as(op, generation, step, false)
+}
+
+/// [`check_move`] for the trusted runtime's atomic apply
+/// ([`super::replan_apply`]), the one writer that moves an operation into
+/// `applying` and `applied`.
+pub fn check_apply_move(
+    op: &ReplanOperation,
+    generation: i64,
+    step: &ReplanMove,
+) -> Result<(), DomainError> {
+    check_move_as(op, generation, step, true)
+}
+
+fn check_move_as(
+    op: &ReplanOperation,
+    generation: i64,
+    step: &ReplanMove,
+    apply: bool,
 ) -> Result<(), DomainError> {
     require(op.generation == generation, || {
         DomainError::ReplanGenerationStale {
@@ -572,7 +636,7 @@ pub fn check_move(
         }
     })?;
     require(
-        !matches!(step.to, ReplanStatus::Applying | ReplanStatus::Applied),
+        apply || !matches!(step.to, ReplanStatus::Applying | ReplanStatus::Applied),
         || DomainError::ReplanApplyUnavailable { operation: op.id },
     )?;
     require(
@@ -1070,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn no_operation_reaches_the_replacement_before_its_apply_is_built() {
+    fn only_the_apply_moves_an_operation_into_the_replacement() {
         let mut reviewing = op(ReplanStatus::Reviewing);
         reviewing.snapshot_id = Some("snap".into());
         assert!(matches!(
@@ -1081,6 +1145,11 @@ mod tests {
         applying.snapshot_id = Some("snap".into());
         assert!(check_move(&applying, 1, &step(ReplanStatus::Applied)).is_err());
         assert!(check_move(&reviewing, 1, &step(ReplanStatus::Reviewing)).is_ok());
+        // The apply's own moves, still by the status and the generation.
+        assert!(check_apply_move(&reviewing, 1, &step(ReplanStatus::Applying)).is_ok());
+        assert!(check_apply_move(&applying, 1, &step(ReplanStatus::Applied)).is_ok());
+        assert!(check_apply_move(&applying, 2, &step(ReplanStatus::Applied)).is_err());
+        assert!(check_apply_move(&reviewing, 1, &step(ReplanStatus::Applied)).is_err());
     }
 
     #[test]
@@ -1357,5 +1426,80 @@ mod tests {
             request_on(Some(&blocked), &run("run-2")),
             Request::Join(ReplanId::new(3))
         );
+    }
+
+    /// A child's version follows what it does, every task and goal it
+    /// waits for and how its run goes, and not the tasks that come to wait
+    /// for it nor its priority (ADR-t1521-2 decision 5).
+    #[test]
+    fn a_childs_version_follows_its_goals_and_how_it_runs_not_its_successors_or_priority() {
+        use crate::domain::{Priority, TaskRecord, worker::Worker};
+        let record = || TaskRecord {
+            id: TaskId::new(10),
+            title: "t".into(),
+            description: "d".into(),
+            acceptance: "a".into(),
+            verification_commands: Vec::new(),
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: None,
+            goal_priority: None,
+            change: None,
+            status: TaskStatus::Submitted,
+            goal_id: None,
+            context: "why".into(),
+            created_at: "c".into(),
+            updated_at: "u".into(),
+            worker: Worker::CLAUDE_HEADLESS,
+            named_mode: Some(WorkerMode::Headless),
+            wait_for_build: false,
+            execution_class: ExecutionClass::Implementation,
+        };
+        let version = |edit: &dyn Fn(&mut TaskRecord), goals: &[i64], successors: &[i64]| {
+            let mut task = record();
+            edit(&mut task);
+            let mut conditions = op(ReplanStatus::Reviewing).conditions;
+            conditions.successors = successors.iter().copied().map(TaskId::new).collect();
+            let goals = goals.iter().copied().map(GoalId::new).collect();
+            ChildConditions::of(&Task::restore(task).unwrap(), conditions, goals).version()
+        };
+        let base = version(&|_| {}, &[3], &[]);
+        assert_eq!(version(&|_| {}, &[3], &[20, 21]), base);
+        assert_eq!(
+            version(&|r| r.priority = Some(Priority::Urgent), &[3], &[]),
+            base
+        );
+        let changed: [(&str, String); 8] = [
+            ("goal removed", version(&|_| {}, &[], &[])),
+            ("goal added", version(&|_| {}, &[3, 4], &[])),
+            (
+                "wait for build",
+                version(&|r| r.wait_for_build = true, &[3], &[]),
+            ),
+            (
+                "spike",
+                version(&|r| r.execution_class = ExecutionClass::Spike, &[3], &[]),
+            ),
+            (
+                "provider",
+                version(&|r| r.worker = Worker::ALL[2], &[3], &[]),
+            ),
+            ("worker mode", version(&|r| r.named_mode = None, &[3], &[])),
+            (
+                "change",
+                version(
+                    &|r| r.change = Some(TaskChange::try_from("fix".to_owned()).unwrap()),
+                    &[3],
+                    &[],
+                ),
+            ),
+            (
+                "context",
+                version(&|r| r.context = "else".into(), &[3], &[]),
+            ),
+        ];
+        for (what, changed) in changed {
+            assert_ne!(changed, base, "{what}");
+        }
     }
 }

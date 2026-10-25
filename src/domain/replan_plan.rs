@@ -803,11 +803,13 @@ fn check_successors(
                 ),
             );
         }
+        // An ended successor waits for nothing any more: its edge is left.
         if let Some(task) = ctx.tasks.get(&id)
             && !matches!(
                 task.status,
                 TaskStatus::Draft | TaskStatus::Submitted | TaskStatus::Ready
             )
+            && !task.status.is_terminal()
         {
             push(
                 PlanProblemCode::SuccessorStarted,
@@ -1277,6 +1279,9 @@ mod tests {
             vec![PlanProblemCode::SuccessorNeedsUnclear]
         );
         plan.successors[0].reason = Some("it uses only the API".into());
+        assert_eq!(codes(&plan, &ctx), Vec::new());
+        // A canceled successor waits for nothing: it has not started.
+        ctx.tasks.get_mut(&TaskId::new(20)).unwrap().status = TaskStatus::Canceled;
         assert_eq!(codes(&plan, &ctx), Vec::new());
         ctx.tasks.get_mut(&TaskId::new(20)).unwrap().status = TaskStatus::InProgress;
         assert_eq!(codes(&plan, &ctx), vec![PlanProblemCode::SuccessorStarted]);

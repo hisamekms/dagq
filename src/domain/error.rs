@@ -102,6 +102,12 @@ pub enum DomainError {
         task_id: TaskId,
         predecessor_id: TaskId,
     },
+    /// A dependency on a task a replanning replaced: it never completes,
+    /// its children hold its work.
+    ReplacedDependency {
+        task_id: TaskId,
+        predecessor_id: TaskId,
+    },
     /// A dependency of a task on the goal it belongs to: the goal waits for
     /// the task, so it is a dependency on itself (ADR-0038).
     OwnGoalDependency {
@@ -397,8 +403,8 @@ pub enum DomainError {
         operation: ReplanId,
         to: ReplanStatus,
     },
-    /// A replanning operation moved into the replacement, whose atomic
-    /// apply this binary does not have.
+    /// A replanning operation moved into the replacement by any writer but
+    /// the trusted runtime's atomic apply.
     ReplanApplyUnavailable {
         operation: ReplanId,
     },
@@ -631,6 +637,13 @@ impl fmt::Display for DomainError {
             } => write!(
                 f,
                 "dependency {task_id} -> {predecessor_id} would create a cycle"
+            ),
+            Self::ReplacedDependency {
+                task_id,
+                predecessor_id,
+            } => write!(
+                f,
+                "task {task_id} cannot wait for task {predecessor_id}: a replanning replaced it, so it never completes; wait for the tasks that replaced it (dagq replans)"
             ),
             Self::OwnGoalDependency { goal_id } => write!(
                 f,
@@ -1030,7 +1043,7 @@ impl fmt::Display for DomainError {
             ),
             Self::ReplanApplyUnavailable { operation } => write!(
                 f,
-                "replan operation {operation} cannot be applied: this binary has no atomic replacement yet"
+                "replan operation {operation} moves into the replacement only by the trusted runtime's atomic apply"
             ),
             Self::InvalidReplacementPlan { reason } => {
                 write!(f, "the replacement plan is not valid JSON of one: {reason}")

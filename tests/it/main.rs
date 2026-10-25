@@ -175,6 +175,7 @@ mod runtime_queue_hold_shared;
 mod runtime_recheck;
 mod runtime_release;
 mod runtime_repair;
+mod runtime_replan_carry;
 mod runtime_replan_park;
 mod runtime_replanning;
 mod runtime_report;

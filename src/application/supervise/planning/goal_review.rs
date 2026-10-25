@@ -271,9 +271,17 @@ impl PlanningState {
         job: &GoalReviewJob,
     ) -> Result<FittedPrompt> {
         let detail = env.queue.show_goal(job.goal_id)?;
+        // What replaced its replaced tasks, and the tasks they reach that
+        // belong elsewhere now, read with its own (ADR-t1521-2 decision 5).
+        let replacements = env.queue.goal_replacements(job.goal_id)?;
+        let ids = detail
+            .tasks
+            .iter()
+            .map(|task| (task.id, false))
+            .chain(replacements.outside.iter().map(|&task| (task, true)));
         let mut tasks = Vec::new();
-        for task in &detail.tasks {
-            let shown = env.queue.show(task.id)?;
+        for (id, outside) in ids.collect::<Vec<_>>() {
+            let shown = env.queue.show(id)?;
             let mut value = json!({
                 "id": shown.task.id(),
                 "title": shown.task.title(),
@@ -283,6 +291,10 @@ impl PlanningState {
                 "duplicate_of": shown.duplicate_of,
                 "cancel_reason": shown.cancel_reason,
             });
+            if outside {
+                value["replaces_in_this_goal"] = json!(true);
+                value["goal_id"] = json!(shown.task.goal_id());
+            }
             if let Some(run) = shown
                 .runs
                 .iter()
@@ -293,6 +305,11 @@ impl PlanningState {
             }
             tasks.push(value);
         }
+        let replacements = replacements
+            .lineage
+            .iter()
+            .map(|lineage| serde_json::to_value(lineage).map_err(Into::into))
+            .collect::<Result<Vec<Value>>>()?;
         let events = detail
             .events
             .iter()
@@ -308,6 +325,7 @@ impl PlanningState {
         Ok(goal_review_prompt(&GoalReviewMaterial {
             goal: serde_json::to_value(&detail.goal)?,
             tasks,
+            replacements,
             follow_ups: detail.follow_up_memberships.clone(),
             events,
             previous,

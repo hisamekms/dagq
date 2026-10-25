@@ -182,7 +182,7 @@ impl Phase {
             S::Integrating => self == Self::Integrating,
             S::NeedsSession => matches!(self, Self::Resume | Self::Exit),
             S::Failed | S::Interrupted => matches!(self, Self::Recovery | Self::Exit),
-            S::Integrated | S::Succeeded => self == Self::Exit,
+            S::Integrated | S::Succeeded | S::Replaced => self == Self::Exit,
         }
     }
 }

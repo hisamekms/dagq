@@ -342,20 +342,29 @@ pub fn check_follow_ups(
 }
 
 /// Close `goal` with `verdict` at `closed_at`, its tasks numbering `counts`
-/// by status. A goal is closed once; the rejection names the statuses that
-/// do not allow the verdict.
+/// by status. `replacing` is every task outside the goal that its replaced
+/// tasks' replacements reach, through re-replacements too
+/// (ADR-t1521-2 decision 5): a replaced task is resolved only once each of
+/// them has, so they hold the close back as the goal's own tasks do. A
+/// goal is closed once; the rejection names the statuses that do not allow
+/// the verdict.
 pub fn close(
     mut goal: Goal,
     verdict: GoalVerdict,
     counts: &TaskStatusCounts,
+    replacing: &[(TaskId, TaskStatus)],
     closed_at: String,
 ) -> Result<Goal, DomainError> {
     require_open(&goal)?;
+    let mut held = counts.clone();
+    for (_, status) in replacing {
+        held.count(*status, 1);
+    }
     let blocking: Vec<(TaskStatus, usize)> = [
-        (TaskStatus::Draft, counts.draft),
-        (TaskStatus::Submitted, counts.submitted),
-        (TaskStatus::Ready, counts.ready),
-        (TaskStatus::InProgress, counts.in_progress),
+        (TaskStatus::Draft, held.draft),
+        (TaskStatus::Submitted, held.submitted),
+        (TaskStatus::Ready, held.ready),
+        (TaskStatus::InProgress, held.in_progress),
     ]
     .into_iter()
     .filter(|(status, n)| *n > 0 && !verdict.allows(*status))
@@ -537,7 +546,16 @@ mod tests {
             (GoalStatus::Open, None, "later")
         );
         let counts = TaskStatusCounts::default();
-        assert!(close(reopened, GoalVerdict::Achieved, &counts, "again".into()).is_ok());
+        assert!(
+            close(
+                reopened,
+                GoalVerdict::Achieved,
+                &counts,
+                &[],
+                "again".into()
+            )
+            .is_ok()
+        );
         for verdict in [None, Some(GoalVerdict::Abandoned)] {
             let refused = reopen(goal(verdict), "later".into()).unwrap_err();
             assert_eq!(
@@ -912,14 +930,14 @@ mod tests {
         assert_eq!((counts.total, counts.submitted), (4, 1));
         let at = || "2026-09-24T00:00:00Z".to_owned();
         assert_eq!(
-            close(goal(None), GoalVerdict::Achieved, &counts, at())
+            close(goal(None), GoalVerdict::Achieved, &counts, &[], at())
                 .unwrap_err()
                 .to_string(),
             "goal 7 cannot be closed as achieved: 1 task(s) submitted, 2 task(s) ready, \
              1 task(s) in_progress"
         );
         assert_eq!(
-            close(goal(None), GoalVerdict::Abandoned, &counts, at()).unwrap_err(),
+            close(goal(None), GoalVerdict::Abandoned, &counts, &[], at()).unwrap_err(),
             DomainError::GoalCloseBlocked {
                 goal_id: GoalId::new(7),
                 verdict: GoalVerdict::Abandoned,
@@ -927,16 +945,66 @@ mod tests {
             }
         );
         counts.in_progress = 0;
-        let closed = close(goal(None), GoalVerdict::Abandoned, &counts, at()).unwrap();
+        let closed = close(goal(None), GoalVerdict::Abandoned, &counts, &[], at()).unwrap();
         assert!(closed.is_closed());
         assert_eq!(closed.verdict(), Some(GoalVerdict::Abandoned));
         assert_eq!(closed.closed_at(), Some("2026-09-24T00:00:00Z"));
         assert_eq!(closed.updated_at(), "2026-09-24T00:00:00Z");
         assert_eq!(
-            close(closed, GoalVerdict::Achieved, &counts, at())
+            close(closed, GoalVerdict::Achieved, &counts, &[], at())
                 .unwrap_err()
                 .to_string(),
             "goal 7 is already closed as abandoned"
         );
+    }
+
+    /// A replaced task is resolved only once every task its replacements
+    /// reach outside the goal has ended (ADR-t1521-2 decision 5): a child
+    /// moved to another goal holds the close back as the goal's own task
+    /// would, one in progress the abandon too.
+    #[test]
+    fn a_child_outside_the_goal_holds_its_close_back_until_it_ends() {
+        let mut counts = TaskStatusCounts::default();
+        counts.count(TaskStatus::Replaced, 1);
+        counts.count(TaskStatus::Completed, 1);
+        let at = || "2026-09-24T00:00:00Z".to_owned();
+        let moved = |status| [(TaskId::new(9), status)];
+        assert_eq!(
+            close(
+                goal(None),
+                GoalVerdict::Achieved,
+                &counts,
+                &moved(TaskStatus::Ready),
+                at()
+            )
+            .unwrap_err(),
+            DomainError::GoalCloseBlocked {
+                goal_id: GoalId::new(7),
+                verdict: GoalVerdict::Achieved,
+                blocking: vec![(TaskStatus::Ready, 1)]
+            }
+        );
+        assert!(
+            close(
+                goal(None),
+                GoalVerdict::Abandoned,
+                &counts,
+                &moved(TaskStatus::InProgress),
+                at()
+            )
+            .is_err()
+        );
+        for ended in [TaskStatus::Completed, TaskStatus::Canceled] {
+            assert!(
+                close(
+                    goal(None),
+                    GoalVerdict::Achieved,
+                    &counts,
+                    &moved(ended),
+                    at()
+                )
+                .is_ok()
+            );
+        }
     }
 }
