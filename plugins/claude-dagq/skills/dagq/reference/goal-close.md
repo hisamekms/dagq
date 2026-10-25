@@ -4,7 +4,7 @@ A goal is closed once. Closing it after its last task is not a planner's step: t
 
 ## The goal review job
 
-It comes once every task of an open goal is finished (at least one `completed`, no `draft` or `submitted` left) and its follow-ups are settled ("When a goal may close achieved" below). It returns one verdict:
+It comes once every task of an open goal is finished (at least one of its own `completed`, none `draft`, `submitted`, `ready` or `in_progress`, and every task that replaced a `replaced` one ended) and its follow-ups are settled ("When a goal may close achieved" below). It returns one verdict:
 
 - **achieved**: the goal closes `achieved` and the tasks that depend on it are released.
 - **gaps**: each gap becomes a `draft` task on the goal, which a runtime planner adopts, drops or asks about like a follow_up draft (`reference/register.md`, "A runtime planner for a draft"). Once they finish, the goal is reviewed again.
@@ -37,7 +37,7 @@ A planner, the person or the inbox (on the person's word) runs `goal close` only
 
 ## When a goal may close achieved
 
-The required work is done and every follow-up found from the goal's tasks has its membership judged: every task is `completed` or `canceled`, and each unfinished follow-up has a current judgement (not missing, not `undecided`, not older than the goal's acceptance) and is not `required` while outside the goal. A follow-up judged `out_of_scope` need not be done. `abandoned` claims nothing, so this does not hold it.
+The required work is done and every follow-up found from the goal's tasks has its membership judged: every task is `completed`, `canceled` or `replaced`, and each unfinished follow-up has a current judgement (not missing, not `undecided`, not older than the goal's acceptance) and is not `required` while outside the goal. A follow-up judged `out_of_scope` need not be done. A `replaced` task never counts as `completed`: it is settled only once every task that replaced it, followed through further replacements and wherever those tasks belong now (another goal too), is `completed` or `canceled`. Until then the goal stays open, whether by its goal review or by `goal close`. A goal whose only completed tasks are replacements that now belong to another goal gets no goal review (it has no completed task of its own); closing it is the person's decision ("What `goal close` is still for"). `abandoned` claims nothing, so this does not hold it.
 
 ## After an achieved close
 
