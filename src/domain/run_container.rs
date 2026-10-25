@@ -111,15 +111,18 @@ pub const fn podman_failed(code: Option<i32>) -> bool {
 
 /// The limits of each run's container (ADR-t2257-1 decision 6), from the
 /// `[container]` table of the host-wide `host.toml` (`memory_mib`, `cpus`,
-/// `pids`); a key left out keeps its default. The defaults are modest so
+/// `pids`); a key left out keeps its default. The memory limit is also
+/// what the container reserves of the machine before it starts
+/// ([`super::machine_memory`], ADR-t3163-1). The defaults are modest so
 /// that they hold for any project on a machine of the default size
 /// ([`super::podman_machine::DEFAULT_MACHINE_MEMORY_MIB`] and
-/// [`super::podman_machine::DEFAULT_MACHINE_CPUS`]): half the machine's
-/// memory, so a worker's container and a verification's fit at once, its
-/// CPUs, and enough processes for a build's parallel jobs and a test
-/// suite's threads. A project whose builds need more says so in the
-/// host's `host.toml` (for this repository, the value its docs recommend),
-/// with a machine made large enough.
+/// [`super::podman_machine::DEFAULT_MACHINE_CPUS`]): 2 GiB, so that a
+/// worker's container and a verification's fit at once in what the
+/// machine leaves the containers after its base and its relays, its CPUs,
+/// and enough processes for a build's parallel jobs and a test suite's
+/// threads. A project whose builds need more says so in the host's
+/// `host.toml` (for this repository, the value its docs recommend), with
+/// a machine made large enough.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContainerLimits {
     pub memory_mib: u64,

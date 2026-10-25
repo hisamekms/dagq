@@ -656,6 +656,9 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/queue_broker.rs", "BrokerBackend", Some(Host), Internal), // what the broker runs a request on
     outer_port("src/application/podman_machine.rs", "PodmanMachine", Some(Host), Internal), // the podman commands on the dagq machine
     outer_port("src/application/podman_machine.rs", "MachineUsers", Some(Host), Internal), // the host-wide lock and users of the dagq machine
+    outer_port("src/application/podman_machine.rs", "MachineMemory", Some(Host), Internal), // the dagq machine's memory and the containers it runs, read from it
+    outer_port("src/application/podman_machine.rs", "MachineReservations", Some(Host), Internal), // the host-wide reservations and waits of the dagq machine's memory
+    outer_port("src/application/podman_machine.rs", "MemoryRoom", Some(Host), Internal), // whether a worker's container would fit the dagq machine's memory now, for a new claim
     outer_port("src/application/podman_machine.rs", "MachineVolumes", Some(Host), Public(Only(&[Execution]))), // the named volumes of a queue in the dagq machine; the cleanup at a run's end and the landing removes a run's build output
     outer_port("src/application/podman_machine.rs", "RunMachine", Some(Host), Public(Only(&[Execution]))), // a run's parts in the dagq machine (the machine with the run as a user, the image, the run's relay, a build output volume), made ready before each turn of a worker and each verification in the container
     outer_port("src/application/queue_broker.rs", "VerificationTokens", Some(Host), Public(Only(&[Execution]))), // how integrate issues and revokes the token of each verification

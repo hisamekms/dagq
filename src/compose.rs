@@ -163,6 +163,7 @@ pub(crate) fn verification_containers(
             host_wide,
             kept_records: None,
         }),
+        memory_poll: std::time::Duration::from_secs(crate::domain::machine_memory::POLL_SECS),
     }
 }
 

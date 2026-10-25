@@ -40,7 +40,6 @@ related:
 supervisorは新しいrunをclaimする前に、今claimしてよいかを決める。
 hostの負荷・空き容量・providerの壁で止まるときはqueue全体のclaimを控え、衝突やbuildの待ちのように1つのtaskだけが進めないときはそのtaskだけを飛ばして次の候補を取る。
 走っているrun（sessionの監視・validation・review・resume・triage・着地）には触れない。
-空き容量は着地の検証の前にも確かめ、足りなければ着地も控える。
 
 ## 流れ
 
@@ -84,8 +83,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 
 - 控えの単位はproviderで、Claudeの控えは認証と利用上限の`queue_hold`のask、Codexの控えはaskを開かない`ProviderHold`である（[ADR-t813-2](../../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定6、[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）。
 - 毎passの読み直しは`Supervisor::check_queue_hold`で、どのaskが控えるかは`domain::queue_hold::reason_of`と`hold_of`が決める。
-- 控えがqueue全体のclaimを止めるのは、どのworkerにも経路が無いときだけである（`Supervisor::routes`）。
-  一方のproviderが控えられても、もう一方で動かせるtaskは下の「workerを動かせないtask」のとおりそちらでclaimする。
+- 控えがqueue全体のclaimを止めるのは、どのworkerにも経路が無いときだけである（`Supervisor::routes`、もう一方で動かせるtaskは下の「workerを動かせないtask」）。
 - headless jobの行き先は`Supervisor::start_route`（復旧job・observer・スループットの見直し）、runのreviewは`review_route`、plan reviewとgoal reviewは`JobDesk::held`が控えを読む。
   `provider`を書いた役割のjobは控えの間も使えるproviderで起動する（[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定5）。
   切り替えを止める設定の扱いは[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)。
@@ -137,8 +135,7 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 - 使っている間は消さない: recheckのlockと更新のlock（`update::hold_target`）を待たずに取れたときだけ消し、取れなければ何も記録せず次の空き容量の掃除で試す。
 - 消している間は使う側が待つ: recheckは次の回にやり直し（[landing recheck](integrate.md#landing-recheck)）、自動更新・release更新・`install --release`は更新のlockを待つ（[Auto-update](auto-update.md)・[Release update](release-update.md)・[install](install.md)）。
   どのsupervisorの掃除でもCLIの`install`でも同じlockのfileなので、queueの中で安全である。
-- 消すのはtarget dirの中身だけで、dir自体は空で作り直し、linkはたどらない。
-- 消せなければプロセスごとにpathあたり1回だけ`cleanup_failed`を記録する。
+- 消すのはtarget dirの中身だけで、dir自体は空で作り直し、linkはたどらず、消せなければ`cleanup_failed`に残す。
 
 ### 人が打つ`integrate`
 
@@ -227,7 +224,6 @@ Spikeがclaimされたgoal（goalの無いSpikeはそれ自体）は、未完了
 ### 判定
 
 - 入口は`domain::claim_defer::decide`で、重なれば控えて最初に控えたときだけ`claim_deferred`を書く。
-- 効く優先度が`interrupt`のtaskは控えない。
 - 最初の`claim_deferred`から設定の上限の時間を過ぎたtaskは重なっていてもclaimし、次にclaimされるまで控え直さない。
   読み直した新しい上限は進行中の控えにも効き、控えを無効にする値は無い。
 - 数えないrunを除くと重ならなくなったtaskは、上限を待たずにclaimする（`left_out`）。
@@ -241,9 +237,10 @@ Spikeがclaimされたgoal（goalの無いSpikeはそれ自体）は、未完了
 - 切り替えを止める設定のときは、頼んだproviderの控えが解けるのを待ち、実行ファイルが無いときはそれを持つsupervisorが動くまで控えたままである（[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。
   例外は`--no-claude`で、Claudeを頼んだtaskも設定に依らずCodexでclaimする。
 - containerで動かすときはproviderの経路より先にcontainerを見て（`Supervisor::container_deferral`、[Container runtime](../container-runtime.md)）、hostでは動かさない。
+- containerを使えても、machineのメモリにworkerのcontainerの上限が入らないか、メモリを待つcontainerが在れば`container_memory_wait`で控える（`Supervisor::container_memory_deferral`）。
+  resumeと着地はこの控えで止めず、次のturnとverificationが自分で待つ（[Container runtime](../container-runtime.md#dagq専用のmachine)の「メモリの予約」）。
 - 理由の値と意味は`domain::claim_defer::worker_deferred`と各理由の定数、理由の変わり方は`worker_step`が持つ。
 - 両方のproviderが使えないpassはqueue全体の控えがclaimを止めるが、その前に候補をこの判定にかけて控えを記録する。
-- 上限は無く、そのworkerを動かせるようになったsupervisorが控えを終えてclaimする。
 - claimの後戻り（`claim_for_supervisor_holding`）にも経路の一覧を渡すので、経路の無いworkerのtaskは取らない。
 
 ## 依存先の着地を含むbuildを待つtask

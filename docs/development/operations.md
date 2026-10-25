@@ -87,11 +87,12 @@ hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候
   - containerのcpus: `dagq.toml`の`[run.env]`の`CARGO_BUILD_JOBS`と同じにし、測ったpeakをそのまま上限の前提にする。
   - machine: hostの8コア / 16 GiBから、macOSとhostに残る制御側（supervisor・inbox・planner・headlessのreviewのjob）に2コアと約6 GiBを残した値。
     hostは測っている間も既にswapを使っていたので、hostに残す分を減らさない。
-- この上限いっぱいで同時に入るcontainerは1本（10 GiB ÷ 8 GiB）。
-  `[supervisor]`の並列数のworkerとverificationのcontainerは上限の合計がmachineを超え、peakが重ならない間だけ動く。
-  2本のcompileのpeakが重なると、containerの上限より先にmachine全体のOOM killerが働く。
+- この上限いっぱいで同時に入るcontainerは1本（10 GiBから基盤の分を引いた中に8 GiBが1本）。
+  containerは起動の前にmachineのメモリから上限を予約し、入らなければ待つので、上限の合計はmachineを超えず、2本目のcompileは1本目の終わりを待つ（[ADR-t3163-1](../adr/2026-10-25-t3163-1-containers-reserve-memory-on-the-machine.md)、仕組みは[Container runtime](../design/container-runtime.md)の「dagq専用のmachine」）。
   測ったbuildの下げる手では2本は入らない（[build・testのpeakのメモリ](../plans/build-memory.md)の「推奨」）。
-  同時の数は、containerが起動の前にmachineのメモリから上限を予約し入らなければ待つ形で抑え、`parallel`はcontainerに切り替えるときも3のままにする（[ADR-t3163-1](../adr/2026-10-25-t3163-1-containers-reserve-memory-on-the-machine.md)。予約の実装が着地するまでは上の重なりが残る）。
+  `parallel`はcontainerに切り替えるときも3のままにする。
+  基盤の分（`domain::machine_memory::BASE_MIB`とrelayごとの分）が2 GiBより大きければ8 GiBの1本も入らず、containerを使えないと答えるので、スモークで確かめ、足りなければmachineを大きくするか上限を下げる。
+- 待ちが長く続くとinboxに`look at the dagq podman machine's memory`のattentionが出るので、人かinboxが`podman --connection dagq ps`でmachineの中を見て、終わらないcontainerを止めるか`host.toml`の値を見直す。
 - 値はhostのmacOSで測ったもので、containerの中の絶対値ではない。
   人かinboxが流すcontainerのruntimeのスモーク（[手動スモーク](manual-smoke.md#container-の-runtime-のスモーク)の「machine の資源の推奨での build と test」）でcontainerの中のpeakとtestまで通るかを確かめ、合わなければ値を見直してこの節を直す。
 

@@ -104,6 +104,11 @@ pub const CONTAINER_UNAVAILABLE: &str = "container_unavailable";
 /// container and the task would run on Codex, which the container does not
 /// reach (ADR-t2114-1 decision 2).
 pub const CONTAINER_PROVIDER: &str = "container_provider_unsupported";
+/// Why a candidate's claim is deferred when the worker's runtime is the
+/// container and a worker's container would wait for the dagq machine's
+/// memory now: the machine's containers leave no room for its limit, or
+/// another container waits already (ADR-t3163-1 decision 4).
+pub const CONTAINER_MEMORY: &str = "container_memory_wait";
 
 /// Whether `provider` can run a worker in the container: Claude only, as
 /// the queue's broker reaches no OpenAI (ADR-t2114-1 decision 2).

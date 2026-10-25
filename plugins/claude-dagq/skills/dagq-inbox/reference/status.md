@@ -58,6 +58,7 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
   - `dagq service status`: the queue service stopped. Show `dagq service status` and the service's log; at the person's word, `dagq service start` (or `up`).
   - `read the queue broker's log and run up`: show the broker's log; at the person's word, `up`.
   - `look at the dagq podman machine's relays`: show `podman machine list` and the error; the person mends the machine.
+  - `look at the dagq podman machine's memory`: a run's turn or verification has waited long for the machine's memory before its container starts. Show the error and `podman --connection dagq ps`; the person stops a container that does not end, or changes the machine's or the containers' memory in `host.toml`. The attention clears once the wait ends.
   - `restart supervisor`: no supervisor of the queue is live. `up` on the person's word. Two supervisors: `down --wait`, then `up` (`dagq-recover`'s `reference/up-down.md`).
   - `stop the stale supervisor's process`: another supervisor runs the queue, and this registration's process lives but stopped heartbeating. The person first checks that the pid is still a `dagq supervise` of this queue (`ps -p PID -o command`; a reused pid is another program: run `up` instead), then stops that pid (not `down`, which stops the live one).
   - A worker provider that cannot be used is no attention: the person acts only on a `queue_hold` ask (`reference/asks.md`).

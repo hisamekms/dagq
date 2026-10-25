@@ -273,7 +273,7 @@ fn init_mounts_only_the_run_clone_and_verification_dirs_and_a_mismatch_is_unusab
         );
     }
     assert!(
-        init.contains("--cpus 2 --memory 4096 --disk-size 60"),
+        init.contains("--cpus 2 --memory 6144 --disk-size 60"),
         "{init}"
     );
 

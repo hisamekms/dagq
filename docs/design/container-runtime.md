@@ -47,12 +47,8 @@ containerを選ばない限りhostのrunの振る舞いは変わらない。
 containerを選んだ適用先が使えないとき、hostで動かさずに控え、hostへ黙って戻さない（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)決定4）。
 
 - 使えるかは`ContainerRuntime`のport（`application::ports`）に問う。
-  supervisorと`integrate`は`application::queue_broker::BrokerGate`越しに問い、queueのbrokerが動いていなければそれを理由に使えないと答える（[Queue broker](queue-broker.md#見張りと知らせ)）。
-  brokerの奥では`application::broker_relay::RelayGate`がrunのrelayの見張りの記録を見て、relayを動かし続けられない間は理由つきで使えないと答える（下の「brokerへの経路」）。
-  その奥では`infrastructure::claude_credential::ClaudeCredentialGate`が、workerの適用先について`host.toml`で人が選んだClaudeの資格情報を見て、未選択・欠け・0600でなければ選び方を添えて使えないと答える（[Queue broker](queue-broker.md#claudeの認証の差し替え)、[ADR-t2177-1](../adr/2026-10-12-t2177-1-broker-swaps-the-run-token-for-a-claude-credential-chosen-in-host-toml.md)決定3）。
-  その奥で`application::podman_machine::MachineGate`がdagq専用のmachineを見て、使えなければ理由つきで使えないと答える（下の「dagq専用のmachine」）。
-  machineの奥では`application::container_image::ImageGate`がimageを見る（下の「image」）。
-  その奥の`infrastructure::container_runtime::ContainerExecutors`は、workerにもverificationにも使えると答える。
+  supervisorと`integrate`は外から`BrokerGate`・`RelayGate`・`ClaudeCredentialGate`・`MachineGate`・`ImageGate`・`ContainerExecutors`の順に問い、各gateは自分の部品（queueのbroker・runのrelayの見張りの記録・workerの適用先の`host.toml`のClaudeの資格情報・dagq専用のmachineとそのメモリ・image）が使えなければ理由つきで使えないと答え、最も奥は両方の適用先に使えると答える。
+  部品ごとの条件は[Queue broker](queue-broker.md#見張りと知らせ)・[Claudeの認証](queue-broker.md#claudeの認証の差し替え)（[ADR-t2177-1](../adr/2026-10-12-t2177-1-broker-swaps-the-run-token-for-a-claude-credential-chosen-in-host-toml.md)決定3）と下の各節が持つ。
 - worker: 各候補のclaimを控え、理由を`claim_deferred`に残す（[claimを控える](supervisor-lifecycle/claim-hold.md#workerを動かせないtask)）。
   resumeの候補からも外す（`Supervisor::container_deferral`）。
   resumeを使い切ったrunを人に渡すことは止めない。
@@ -69,8 +65,7 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
 - 知らせ: supervisorと、拒んだ`integrate`が、答えがqueueの最新の記録と違うとき（待つ適用先か理由が変わったときを含む、`ContainerCheck::transition`）に`container_runtime_unavailable` / `container_runtime_available`を記録し、前者はinbox宛てのattentionになる。
   supervisorを通さない`integrate`だけでもinboxに届く。
   人は部品が揃うのを待つか、runtimeをhostに戻すtaskを頼む。
-- 直接の起動: hostのexecutor（`HostActorExecutor`・reviewのprogramのjob）は`ExecutorBackend::Container`に置いたactorを起動せず、`ensure_implemented`が拒む。
-  containerで起動するのはworkerのturnとverificationのコマンドだけで、wrapperが下の「workerの実行」で、`integrate`が下の「verificationの実行」で起動する。
+- 直接の起動: hostのexecutor（`HostActorExecutor`・reviewのprogramのjob）は`ExecutorBackend::Container`に置いたactorを起動せず、`ensure_implemented`が拒み、containerはwrapperと`integrate`だけが下の2節で起動する。
 - 適用先の外: 着地の前のe2eはhostに置き（`[e2e]`の宣言、[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定4）、verificationをcontainerにしてもrunのe2eはhostで流れる。
   containerはLinuxなので、OSに固有のtest（このrepositoryならmacOSのもの）はcontainerのverificationでbuildされず流れず、runtimeはhostに回さない。
   このrepositoryはそれをmainのCIのmacOSのjobに任せる（[ADR-t2182-1](../adr/2026-10-14-t2182-1-macos-specific-tests-are-left-to-the-ci-macos-job-not-the-container-verification.md)）。
@@ -95,7 +90,11 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
   人のmachineは止めない。
 - 資源: CPU・メモリ・diskはhost全体の`host.toml`の`[machine]`が与え、既定値と根拠は`MachineResources`のdoc commentが持つ。
   machineはhostに1つで全てのprojectが共有するので、queueの`host.toml`では変えない（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定6）。
-  起動の前にmachineのメモリから上限を予約し、入らなければ待つ形は[ADR-t3163-1](../adr/2026-10-25-t3163-1-containers-reserve-memory-on-the-machine.md)が決めたが未実装で、今は上限の合計がmachineを超えても起動する。
+- メモリの予約: workerのturnとverificationのcontainerは、`ensure`の後、起動の前に同じlockの中でmemoryの上限をmachineのメモリから予約し、入らなければlockの外で待つ（[ADR-t3163-1](../adr/2026-10-25-t3163-1-containers-reserve-memory-on-the-machine.md)）。
+  判断（予約の持ち方と待ちの順を含む）と値の根拠は`domain::machine_memory`が持つ。
+  turnの予約はturnのcontainerに結び、verificationの予約は最初のコマンドの前から片付けまで持つ。
+  新しいclaimは控え（[claimを控える](supervisor-lifecycle/claim-hold.md#workerを動かせないtask)）、次のturnはwrapperが、verificationは`integrate`が待ち、待ちはrunのevent（[計測](measurement.md#区間とタグ)）と`status`に出る。
+  着地の再確認とfacts-onlyのturnも同じく予約し、wrapperは待つ間も終了の依頼と柵を読み、当たればturnを始めずに終わる。
 - hostのmount: initのvolumeは各queueのrun dir・cloneの親のdir・verificationのcloneの親のdirだけで（`MachineMounts`）、hostの`$HOME`・workerのcache・buildの出力・着地用のworktreeのdirを含めない。
   各dirはmachineの中の同じpathにmountする。
   macOSのremoteのPodmanのbind mountのsourceはmachineの側のpathなので、containerに見せるhostのdirはmachineにmountしてある必要がある。

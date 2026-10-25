@@ -38,10 +38,12 @@ use super::run_env::{
 };
 use crate::application::CommandSpec;
 use crate::application::podman_machine::RunMachine;
+use crate::application::podman_machine::wait_for_memory;
 use crate::application::run_container::{
     PreparedRun, PreparedVerification, RunContainers, VerificationContainers,
 };
-use crate::domain::podman_machine::{MACHINE_NAME, MachineMounts, QueueKey};
+use crate::domain::machine_memory::{MemoryAsk, MemoryNote, POLL_SECS, Purpose};
+use crate::domain::podman_machine::{LeaseOwner, MACHINE_NAME, MachineMounts, QueueKey};
 use crate::domain::run_clone::CLONES_DIR;
 use crate::domain::run_container::{
     ContainerLimits, FactsContainer, HOME_DIR, MATERIALS_DIR, STAGED_MATERIALS, TOKEN_FILE,
@@ -71,6 +73,44 @@ pub struct PodmanRunContainers {
     pub host_wide: Option<PathBuf>,
     /// Makes the run's parts in the machine ready.
     pub machine: Arc<dyn RunMachine>,
+    /// How long a turn's container that waits for the machine's memory
+    /// pauses between its tries ([`POLL_SECS`]).
+    pub memory_poll: std::time::Duration,
+}
+
+/// The owner of what the run at `run` of the queue at `db` holds of the
+/// machine: by its absolute path, as another process reads the queue
+/// whatever its cwd.
+fn run_owner(db: &Path, run: &RunId) -> LeaseOwner {
+    LeaseOwner::Run {
+        db: fs::canonicalize(db).unwrap_or_else(|_| db.to_path_buf()),
+        run: run.as_str().to_owned(),
+    }
+}
+
+/// Wait for `ask`'s memory through `machine`, pausing `poll` between the
+/// tries and reading `stop` after each; what it waited for or reserved is
+/// forgotten when it gives up.
+fn reserve_with(
+    machine: &dyn RunMachine,
+    ask: &MemoryAsk,
+    poll: std::time::Duration,
+    stop: &dyn Fn() -> Option<String>,
+    notes: &mut dyn FnMut(&MemoryAsk, MemoryNote<'_>),
+) -> Result<()> {
+    let reserved = wait_for_memory(
+        |now| machine.reserve(ask, now),
+        &super::podman_machine::unix_now_ms,
+        &|| std::thread::sleep(poll),
+        stop,
+        &mut |note| notes(ask, note),
+    );
+    if reserved.is_err()
+        && let Err(error) = machine.release_memory(&ask.container)
+    {
+        tracing::warn!(error = %format_args!("{error:#}"), "the wait of container {} for the machine's memory could not be forgotten: {error:#}", ask.container);
+    }
+    reserved
 }
 
 /// The runs' containers as a client that knows no queue directory (a
@@ -136,7 +176,25 @@ impl PodmanRunContainers {
             main_checkout,
             host_wide,
             machine,
+            memory_poll: std::time::Duration::from_secs(POLL_SECS),
         }
+    }
+
+    /// The ask of the turn of `run` of the queue `queue` for the container
+    /// of `memory_mib`, by this process.
+    fn turn_ask(&self, run: &TaskRun, queue: &QueueKey, memory_mib: u64) -> Result<MemoryAsk> {
+        Ok(MemoryAsk {
+            container: queue
+                .run_container(run.id().as_str())
+                .map_err(anyhow::Error::msg)?,
+            purpose: Purpose::Turn,
+            memory_mib,
+            owner: run_owner(&self.db, run.id()),
+            pid: std::process::id(),
+            since: super::podman_machine::unix_now(),
+            seq: 0,
+            started: None,
+        })
     }
 
     fn key(&self) -> Result<QueueKey> {
@@ -250,7 +308,41 @@ impl RunContainers for PodmanRunContainers {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
+        // Its turn's reservation goes with it (ADR-t3163-1 decision 3), at
+        // once when the machine's lock is free; else the next try forgets
+        // it, its container gone. A stop is not held by it.
+        if let Err(error) = self.machine.release_memory_if_free(&name) {
+            tracing::warn!(run_id = %run, error = %format_args!("{error:#}"), "the memory reserved for run {run}'s container could not be released: {error:#}");
+        }
         Ok(())
+    }
+
+    fn reserve_memory(
+        &self,
+        run: &TaskRun,
+        prepared: &PreparedRun,
+        stop: &dyn Fn() -> Option<String>,
+        notes: &mut dyn FnMut(&MemoryAsk, MemoryNote<'_>),
+    ) -> Result<()> {
+        let ask = self.turn_ask(run, &prepared.queue, prepared.limits.memory_mib)?;
+        reserve_with(&*self.machine, &ask, self.memory_poll, stop, notes)
+    }
+
+    fn memory_started(&self, run: &RunId) -> Result<()> {
+        let name = self
+            .key()?
+            .run_container(run.as_str())
+            .map_err(anyhow::Error::msg)?;
+        self.machine
+            .mark_started(&name, super::podman_machine::unix_now())
+    }
+
+    fn release_memory(&self, run: &RunId) -> Result<()> {
+        let name = self
+            .key()?
+            .run_container(run.as_str())
+            .map_err(anyhow::Error::msg)?;
+        self.machine.release_memory(&name)
     }
 
     /// The gates and the requests are removed through the run directory's
@@ -433,17 +525,43 @@ impl RunContainers for PodmanRunContainers {
             }
         }
         let command = facts_command(run_dir, clone, run.base_commit().as_str(), branch);
+        let queue = self.key()?;
+        let limits = load_container_limits(self.host_wide.as_deref()).0;
         let args = facts_run_args(&FactsContainer {
-            queue: &self.key()?,
+            queue: &queue,
             run: run.id().as_str(),
             image: &image,
             clone,
             run_dir,
-            limits: load_container_limits(self.host_wide.as_deref()).0,
+            limits,
             command: &command,
         })
         .map_err(|why| anyhow::anyhow!("the facts-only turn's container cannot be made: {why}"))?;
-        let Some(output) = self.podman.inside_within(&args, FACTS_TURN_TIMEOUT)? else {
+        // Its memory is reserved as a turn's before it starts and forgotten
+        // when it ends, however it ends (ADR-t3163-1 decision 1): held by
+        // this process meanwhile.
+        let ask = self.turn_ask(run, &queue, limits.memory_mib)?;
+        reserve_with(
+            &*self.machine,
+            &ask,
+            self.memory_poll,
+            &|| None,
+            &mut |_, note| {
+                if note != MemoryNote::Still {
+                    tracing::info!(run_id = %run.id(), "run {}: its facts-only turn's container and the dagq machine's memory: {note:?}", run.id());
+                }
+            },
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("reserve the dagq machine's memory for the facts-only turn: {error:#}")
+        })?;
+        let released = ReleaseOnDrop {
+            machine: &*self.machine,
+            container: &ask.container,
+        };
+        let output = self.podman.inside_within(&args, FACTS_TURN_TIMEOUT);
+        drop(released);
+        let Some(output) = output? else {
             // Its podman was killed; the container may still run in the
             // machine, and goes as a turn's does.
             let removed = self.remove(run.id());
@@ -464,6 +582,20 @@ impl RunContainers for PodmanRunContainers {
             );
         }
         Ok(())
+    }
+}
+
+/// Forgets the reservation of `container` when it goes.
+struct ReleaseOnDrop<'a> {
+    machine: &'a dyn RunMachine,
+    container: &'a str,
+}
+
+impl Drop for ReleaseOnDrop<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.machine.release_memory(self.container) {
+            tracing::warn!(error = %format_args!("{error:#}"), "the memory reserved for container {} could not be released: {error:#}", self.container);
+        }
     }
 }
 
@@ -699,6 +831,9 @@ pub struct PodmanVerificationContainers {
     pub host_wide: Option<PathBuf>,
     /// Makes the run's parts in the machine ready.
     pub machine: Arc<dyn RunMachine>,
+    /// How long a verification that waits for the machine's memory pauses
+    /// between its tries ([`POLL_SECS`]).
+    pub memory_poll: std::time::Duration,
 }
 
 impl PodmanVerificationContainers {
@@ -870,16 +1005,46 @@ impl VerificationContainers for PodmanVerificationContainers {
         self.remove_named(&name)
     }
 
+    fn reserve_memory(
+        &self,
+        run: &TaskRun,
+        verification: &PreparedVerification,
+        notes: &mut dyn FnMut(&MemoryAsk, MemoryNote<'_>),
+    ) -> Result<()> {
+        let ask = MemoryAsk {
+            container: verification
+                .queue
+                .verification_container(&verification.id)
+                .map_err(anyhow::Error::msg)?,
+            purpose: Purpose::Verification,
+            memory_mib: verification.limits.memory_mib,
+            owner: run_owner(&self.db, run.id()),
+            pid: std::process::id(),
+            since: super::podman_machine::unix_now(),
+            seq: 0,
+            started: None,
+        };
+        reserve_with(&*self.machine, &ask, self.memory_poll, &|| None, notes)
+    }
+
     /// Every part is tried, and the first failure is returned: a container
-    /// that cannot be removed leaves no directory or volume behind for it.
+    /// that cannot be removed leaves no directory, volume or reservation of
+    /// the machine's memory behind for it.
     fn finish(&self, verification: &PreparedVerification) -> Result<()> {
         let container = self.remove_container(verification);
+        // Released whether or not its container went: one left is counted
+        // with its limit as a container no reservation names.
+        let memory = verification
+            .queue
+            .verification_container(&verification.id)
+            .map_err(anyhow::Error::msg)
+            .and_then(|name| self.machine.release_memory(&name));
         let volume = match verification.build_output {
             Some(_) => self.machine.remove_build_output(&verification.id),
             None => Ok(()),
         };
         let dir = GitRepository::remove_verification_dir(&verification.dir);
-        container.and(volume).and(dir)
+        container.and(memory).and(volume).and(dir)
     }
 
     /// The directories named as [`Self::prepare`] names a verification of
@@ -920,7 +1085,9 @@ impl VerificationContainers for PodmanVerificationContainers {
             let container = queue
                 .verification_container(id)
                 .map_err(anyhow::Error::msg)?;
-            self.remove_named(&container)?;
+            let gone = self.remove_named(&container);
+            self.machine.release_memory(&container)?;
+            gone?;
             self.machine.remove_build_output(id)?;
             GitRepository::remove_verification_dir(&parent.join(id))?;
             removed.push(id.to_owned());
@@ -1094,6 +1261,16 @@ mod tests {
                 bail!("no machine in this test")
             }
             fn create_worker_cache(&self, _: &[String]) -> Result<()> {
+                bail!("no machine in this test")
+            }
+            fn reserve(
+                &self,
+                _: &crate::domain::machine_memory::MemoryAsk,
+                _: i64,
+            ) -> Result<crate::domain::machine_memory::MemoryStep> {
+                bail!("no machine in this test")
+            }
+            fn release_memory(&self, _: &str) -> Result<()> {
                 bail!("no machine in this test")
             }
         }

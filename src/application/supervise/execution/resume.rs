@@ -1610,6 +1610,12 @@ impl ResumeWatch {
         }
         let processes = sv.queue.processes(run.id())?;
         let Some(wrapper) = processes.iter().find(|p| p.role == "wrapper") else {
+            // Its first turn's process, which registers it, waits for the
+            // dagq machine's memory (ADR-t3163-1 decision 4).
+            if super::recovery::waits_for_memory(sv, run)? {
+                self.startup = sv.generators.clock.monotonic();
+                return Ok(None);
+            }
             let timeout = sv.sessions.registration_timeout();
             ensure!(
                 registration_pending(sv.generators.clock.monotonic(), self.startup, timeout),
@@ -1718,6 +1724,12 @@ impl ResumeWatch {
             WallGate::Open => (),
         }
         self.watch_idle_processes(sv, run)?;
+        // A turn that waits for the dagq machine's memory has not started:
+        // the request's clock starts once it does (ADR-t3163-1 decision 4).
+        if super::recovery::waits_for_memory(sv, run)? {
+            self.restart_clocks(sv.files.now(), sv.generators.clock.monotonic());
+            return Ok(None);
+        }
         // An answer delivered by hand (or by the supervisor this one took
         // the run over from) is input too: its close, in a later second
         // than the last input, moves the last input there. The close of an

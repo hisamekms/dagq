@@ -270,10 +270,60 @@ impl RunMachine for FakeMachine {
     fn create_worker_cache(&self, _: &[String]) -> Result<()> {
         Ok(())
     }
+
+    /// The machine's memory is short while `<state>/memory-full` is there;
+    /// each try and release is written to `<state>/memory`.
+    fn reserve(
+        &self,
+        ask: &dagq::domain::machine_memory::MemoryAsk,
+        _: i64,
+    ) -> Result<dagq::domain::machine_memory::MemoryStep> {
+        use dagq::domain::machine_memory::MemoryStep;
+        let full = self.0.join(MEMORY_FULL).exists();
+        self.memory_note(format!(
+            "{} {}",
+            if full { "wait" } else { "reserve" },
+            ask.container
+        ));
+        Ok(if full {
+            MemoryStep::Wait("the test's machine is full".to_owned())
+        } else {
+            MemoryStep::Reserved
+        })
+    }
+
+    fn release_memory(&self, container: &str) -> Result<()> {
+        self.memory_note(format!("release {container}"));
+        Ok(())
+    }
+}
+
+/// The file whose presence makes [`FakeMachine`]'s memory short, and
+/// [`MemoryGated`] tell a claim to wait.
+pub const MEMORY_FULL: &str = "memory-full";
+
+impl FakeMachine {
+    fn memory_note(&self, line: String) {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.0.join("memory"))
+            .unwrap();
+        std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes()).unwrap();
+    }
+}
+
+/// What [`FakeMachine`] of `state` was asked of the machine's memory.
+pub fn memory_calls(state: &Path) -> Vec<String> {
+    fs::read_to_string(state.join("memory"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 pub fn containers(state: &Path, db: &Path, repo: &Path) -> PodmanRunContainers {
-    PodmanRunContainers::of_queue(
+    let mut containers = PodmanRunContainers::of_queue(
         PodmanCli {
             program: fake_podman(state),
         },
@@ -281,7 +331,10 @@ pub fn containers(state: &Path, db: &Path, repo: &Path) -> PodmanRunContainers {
         Some(repo.to_path_buf()),
         None,
         Arc::new(FakeMachine(state.to_path_buf())),
-    )
+    );
+    // A turn that waits for the memory tries again soon.
+    containers.memory_poll = Duration::from_millis(20);
+    containers
 }
 
 /// A container runtime whose every part answers.
@@ -293,6 +346,27 @@ impl dagq::application::ContainerRuntime for Usable {
         _: dagq::domain::container_runtime::RuntimeTarget,
     ) -> dagq::domain::container_runtime::Availability {
         dagq::domain::container_runtime::Availability::Available
+    }
+}
+
+/// A container runtime whose every part answers, and whose machine's
+/// memory leaves a new worker's container no room while
+/// `<state>/memory-full` ([`MEMORY_FULL`]) is there.
+pub struct MemoryGated(pub PathBuf);
+
+impl dagq::application::ContainerRuntime for MemoryGated {
+    fn availability(
+        &self,
+        _: dagq::domain::container_runtime::RuntimeTarget,
+    ) -> dagq::domain::container_runtime::Availability {
+        dagq::domain::container_runtime::Availability::Available
+    }
+
+    fn memory_wait(&self) -> Option<String> {
+        self.0
+            .join(MEMORY_FULL)
+            .exists()
+            .then(|| "the test's machine is full".to_owned())
     }
 }
 

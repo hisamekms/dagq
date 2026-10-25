@@ -14,7 +14,9 @@
 //! the judgement is [`crate::domain::build_wait`]). A worker set to a
 //! container that cannot be used, or that would run on a provider the
 //! container does not reach, is passed over like one this supervisor cannot
-//! run (goal 38, [`Supervisor::container_deferral`]). Of the candidates
+//! run (goal 38, [`Supervisor::container_deferral`]), and so is one whose
+//! container would wait for the dagq machine's memory now
+//! ([`Supervisor::container_memory_deferral`], ADR-t3163-1). Of the candidates
 //! left, the class limits pass over the Spikes while `[supervisor]
 //! max_spikes` of them hold a slot, and the aging across the execution
 //! classes arranges the rest (ADR-t1487-2, ADR-t1489-1; the judgement is
@@ -41,7 +43,7 @@ use crate::domain::{
         self, ClaimHolds, ClassDeferralStep, ClassLimits, class_deferrals_in_place, class_deferred,
         investigation_deferred,
     },
-    container_runtime::{CONTAINER_UNAVAILABLE, Runtime},
+    container_runtime::{CONTAINER_MEMORY, CONTAINER_UNAVAILABLE, Runtime},
     investigation::{INVESTIGATION_LIMIT, InvestigationLimit, Investigations},
     provider_switch::route_of,
     stats::{
@@ -364,9 +366,15 @@ impl Supervisor<'_> {
                 // The container the worker is set to first: one that cannot
                 // be used holds every worker; one that can holds the
                 // provider it would run on and does not reach (goal 38).
+                // A worker that could run waits while its container would
+                // wait for the machine's memory (ADR-t3163-1 decision 4).
                 let provider = route.map_or(worker.provider, |route| route.actual.provider);
-                match (route, self.container_deferral(provider)) {
+                let why = self
+                    .container_deferral(provider)
+                    .or_else(|| self.container_memory_deferral());
+                match (route, why) {
                     (_, Some(CONTAINER_UNAVAILABLE)) => Some((worker, CONTAINER_UNAVAILABLE)),
+                    (_, Some(CONTAINER_MEMORY)) => Some((worker, CONTAINER_MEMORY)),
                     (None, _) => {
                         // Held rather than missing, it is its provider that
                         // cannot be used; with the other one usable, it is the

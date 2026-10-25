@@ -806,6 +806,11 @@ impl SessionWatch {
                     }
                 }
             }
+        } else if super::recovery::waits_for_memory(sv, run)? {
+            // The wrapper registers with its first turn's process, which
+            // waits for the dagq machine's memory: its time starts once
+            // it no longer does (ADR-t3163-1 decision 4).
+            self.startup = sv.generators.clock.monotonic();
         } else {
             let timeout = sv.sessions.registration_timeout();
             ensure!(

@@ -253,6 +253,10 @@ impl<C: ContainerRuntime> ContainerRuntime for ClaudeCredentialGate<C> {
         }
         self.container.availability(target)
     }
+
+    fn memory_wait(&self) -> Option<String> {
+        self.container.memory_wait()
+    }
 }
 
 #[cfg(test)]

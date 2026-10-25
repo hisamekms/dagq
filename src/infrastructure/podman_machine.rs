@@ -15,8 +15,13 @@
 //! place Podman keeps them.
 //!
 //! Everything host-wide lives in `<data home>/dagq/machine/`: `lock`
-//! (held with `flock` while the machine is started or stopped) and
-//! `users/<user>` (the user's [`LeaseOwner`] as JSON).
+//! (held with `flock` while the machine is started or stopped, and while a
+//! container's memory is reserved), `users/<user>` (the user's
+//! [`LeaseOwner`] as JSON), and the memory the containers of every queue
+//! reserved and wait for (ADR-t3163-1): `reservations/<container>` and
+//! `waiting/<container>`, each the container's [`MemoryAsk`] as JSON. The
+//! machine's memory and its containers are read from it
+//! ([`MachineMemory`] of [`PodmanCliWithin`]).
 
 use std::any::Any;
 use std::ffi::OsString;
@@ -33,8 +38,12 @@ use serde::Deserialize;
 
 use super::location::DB_FILE_NAME;
 use super::run_env::{parse_positive, strip_comment};
-use crate::application::podman_machine::{Machine, MachineUsers, MachineVolumes, PodmanMachine};
+use crate::application::podman_machine::{
+    Machine, MachineMemory, MachineReservations, MachineUsers, MachineVolumes, MemoryMachine,
+    MemoryRoom, MemoryStep, PodmanMachine, RoomLook,
+};
 use crate::domain::broker_relay::RelayRun;
+use crate::domain::machine_memory::{MachineContainer, MemoryAsk};
 use crate::domain::podman_machine::{
     LeaseOwner, MACHINE_NAME, MachineEntry, MachineMounts, MachineResources, OwnerSeen, QueueKey,
     lease_held,
@@ -323,6 +332,109 @@ impl PodmanMachine for PodmanCliWithin {
     }
 }
 
+/// How long each podman command that reads the machine's memory and its
+/// containers may take ([`MachineMemory`] of [`PodmanCliWithin`]): 60 s,
+/// as a relay's look. They run under the machine's host-wide lock while a
+/// container's memory is reserved, so a machine that hangs holds the lock
+/// for at most this per command.
+pub const MEMORY_LOOK_TIMEOUT: Duration = Duration::from_secs(60);
+
+impl PodmanCliWithin {
+    fn inside(&self, args: &[&str]) -> Result<String> {
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        let output = self
+            .podman
+            .inside_within(&args, self.limit)?
+            .with_context(|| {
+                format!(
+                    "podman --connection {MACHINE_NAME} {} did not end within {:?}: it was stopped",
+                    args.join(" "),
+                    self.limit
+                )
+            })?;
+        if !output.status.success() {
+            bail!(
+                "podman --connection {MACHINE_NAME} {} exited with {}: {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+impl MachineMemory for PodmanCliWithin {
+    fn memory_mib(&self) -> Result<u64> {
+        let inspect = self
+            .podman
+            .run_by(&["machine", "inspect", MACHINE_NAME], Some(self.limit))?;
+        parse_machine_memory(&inspect)
+    }
+
+    /// The containers labelled with a queue, listed and then inspected: one
+    /// that ended between the two fails the read, which is tried again.
+    fn containers(&self) -> Result<Vec<MachineContainer>> {
+        let label = format!("label={}", crate::domain::broker_relay::QUEUE_LABEL);
+        let listed = self.inside(&["ps", "--quiet", "--no-trunc", "--filter", &label])?;
+        let ids: Vec<&str> = listed.split_whitespace().collect();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut args = vec!["container", "inspect"];
+        args.extend(ids);
+        parse_container_inspect(&self.inside(&args)?)
+    }
+}
+
+/// The memory of `podman machine inspect`'s machine, in MiB
+/// (`Resources.Memory`).
+pub fn parse_machine_memory(inspect: &str) -> Result<u64> {
+    let value: serde_json::Value =
+        serde_json::from_str(inspect).context("read podman machine inspect")?;
+    value
+        .get(0)
+        .and_then(|machine| machine.pointer("/Resources/Memory"))
+        .and_then(serde_json::Value::as_u64)
+        .context("podman machine inspect names no Resources.Memory")
+}
+
+/// The containers of `podman container inspect`: each one's name, its
+/// memory limit (`HostConfig.Memory` in bytes, none when 0) and whether it
+/// is a relay (labelled with [`crate::domain::broker_relay::RUN_LABEL`]).
+pub fn parse_container_inspect(text: &str) -> Result<Vec<MachineContainer>> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).context("read podman container inspect")?;
+    let Some(containers) = value.as_array() else {
+        bail!("podman container inspect gave no list");
+    };
+    containers
+        .iter()
+        .map(|container| {
+            let name = container
+                .get("Name")
+                .and_then(serde_json::Value::as_str)
+                .context("a container without a Name")?
+                .trim_start_matches('/')
+                .to_owned();
+            let memory = container
+                .pointer("/HostConfig/Memory")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|bytes| *bytes > 0)
+                .map(|bytes| bytes.div_ceil(1024 * 1024));
+            let relay = container
+                .pointer("/Config/Labels")
+                .and_then(|labels| labels.get(crate::domain::broker_relay::RUN_LABEL))
+                .is_some();
+            Ok(MachineContainer {
+                name,
+                memory_mib: memory,
+                relay,
+            })
+        })
+        .collect()
+}
+
 /// `--connection dagq` and `args`.
 fn connection_args(args: &[String]) -> Vec<OsString> {
     let mut all: Vec<OsString> = ["--connection", MACHINE_NAME]
@@ -507,6 +619,27 @@ impl MachineUsers for HostMachineUsers {
         Ok(Box::new(file))
     }
 
+    fn try_lock(&self) -> Result<Option<Box<dyn Any>>> {
+        fs::create_dir_all(&self.dir).with_context(|| format!("create {}", self.dir.display()))?;
+        let path = self.dir.join("lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        // SAFETY: flock on a descriptor this function owns; it does not
+        // block, and is released when the file closes.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                return Ok(None);
+            }
+            return Err(error).with_context(|| format!("lock {}", path.display()));
+        }
+        Ok(Some(Box::new(file)))
+    }
+
     fn join(&self, user: &str, owner: &LeaseOwner) -> Result<()> {
         let file = self.user_file(user)?;
         fs::create_dir_all(self.users())?;
@@ -550,6 +683,112 @@ impl MachineUsers for HostMachineUsers {
     }
 }
 
+impl HostMachineUsers {
+    fn asks_dir(&self, kind: &str) -> PathBuf {
+        self.dir.join(kind)
+    }
+
+    fn ask_file(&self, kind: &str, container: &str) -> Result<PathBuf> {
+        if container.is_empty() || container.starts_with('.') || container.contains(['/', '\0']) {
+            bail!("{container:?} cannot name a container of the podman machine");
+        }
+        Ok(self.asks_dir(kind).join(container))
+    }
+
+    /// The asks recorded in `kind`, skipping one being written (`.tmp`) and
+    /// one that cannot be read: a read may be a look without the lock, so
+    /// it removes nothing.
+    fn asks(&self, kind: &str) -> Result<Vec<MemoryAsk>> {
+        let dir = self.asks_dir(kind);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error).with_context(|| format!("read {}", dir.display())),
+        };
+        let mut asks = Vec::new();
+        for entry in entries.flatten() {
+            if entry.path().extension().is_some_and(|ext| ext == "tmp") {
+                continue;
+            }
+            match fs::read(entry.path()) {
+                Ok(bytes) => {
+                    if let Ok(ask) = serde_json::from_slice::<MemoryAsk>(&bytes) {
+                        asks.push(ask);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("read {}", entry.path().display()));
+                }
+            }
+        }
+        asks.sort_by(|a, b| (a.seq, a.since, &a.container).cmp(&(b.seq, b.since, &b.container)));
+        Ok(asks)
+    }
+
+    fn write_ask(&self, kind: &str, ask: &MemoryAsk) -> Result<()> {
+        let file = self.ask_file(kind, &ask.container)?;
+        fs::create_dir_all(self.asks_dir(kind))?;
+        let tmp = file.with_extension("tmp");
+        fs::write(&tmp, serde_json::to_vec(ask)?)
+            .with_context(|| format!("write {}", tmp.display()))?;
+        fs::rename(&tmp, &file).with_context(|| format!("write {}", file.display()))
+    }
+
+    fn forget(&self, kind: &str, container: &str) -> Result<()> {
+        let file = self.ask_file(kind, container)?;
+        match fs::remove_file(&file) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(error).with_context(|| format!("remove {}", file.display()))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The directories of [`HostMachineUsers`] the reservations and the waits
+/// of the machine's memory are in.
+const RESERVATIONS: &str = "reservations";
+const WAITING: &str = "waiting";
+
+impl MachineReservations for HostMachineUsers {
+    fn reservations(&self) -> Result<Vec<MemoryAsk>> {
+        self.asks(RESERVATIONS)
+    }
+
+    fn waits(&self) -> Result<Vec<MemoryAsk>> {
+        self.asks(WAITING)
+    }
+
+    fn reserve(&self, ask: &MemoryAsk) -> Result<()> {
+        self.write_ask(RESERVATIONS, ask)?;
+        self.forget(WAITING, &ask.container)
+    }
+
+    fn unreserve(&self, container: &str) -> Result<()> {
+        self.forget(RESERVATIONS, container)
+    }
+
+    fn wait(&self, ask: &MemoryAsk) -> Result<()> {
+        if self.ask_file(WAITING, &ask.container)?.exists() {
+            return Ok(());
+        }
+        self.write_ask(WAITING, ask)
+    }
+
+    fn unwait(&self, container: &str) -> Result<()> {
+        self.forget(WAITING, container)
+    }
+
+    fn owner_held(&self, owner: &LeaseOwner) -> bool {
+        lease_held(seen_of(owner, &mut Queues::new()))
+    }
+
+    fn process_alive(&self, pid: u32) -> bool {
+        super::adapters::process_alive(pid)
+    }
+}
+
 /// The queues the users of one count name, each opened once: `None` when
 /// it could not be read (why is logged), and absent while not opened.
 type Queues = std::collections::HashMap<PathBuf, Option<super::sqlite::SqliteQueue>>;
@@ -564,11 +803,18 @@ fn owner_seen(text: &str, queues: &mut Queues) -> OwnerSeen {
             .map(|pid| LeaseOwner::Process { pid })
     });
     match owner {
-        Some(LeaseOwner::Process { pid }) => OwnerSeen::Process {
-            alive: super::adapters::process_alive(pid),
-        },
-        Some(LeaseOwner::Run { db, run }) => OwnerSeen::Run(run_in_queue(&db, &run, queues)),
+        Some(owner) => seen_of(&owner, queues),
         None => OwnerSeen::Unreadable,
+    }
+}
+
+/// What is seen now of `owner`.
+fn seen_of(owner: &LeaseOwner, queues: &mut Queues) -> OwnerSeen {
+    match owner {
+        LeaseOwner::Process { pid } => OwnerSeen::Process {
+            alive: super::adapters::process_alive(*pid),
+        },
+        LeaseOwner::Run { db, run } => OwnerSeen::Run(run_in_queue(db, run, queues)),
     }
 }
 
@@ -903,7 +1149,7 @@ mod tests {
                 "--cpus",
                 "2",
                 "--memory",
-                "4096",
+                "6144",
                 "--disk-size",
                 "60",
                 "--volume",
@@ -1018,6 +1264,106 @@ mod tests {
         users.leave("old").unwrap();
         assert_eq!(users.count().unwrap(), 1);
         assert!(users.join("../x", &me).is_err());
+    }
+
+    /// The machine's memory is its own (what it was created with), and its
+    /// containers' limits are read in MiB, a relay told by its label.
+    #[test]
+    fn podman_s_json_reads_as_the_machine_s_memory_and_its_containers() {
+        assert_eq!(
+            parse_machine_memory(r#"[{"Name":"dagq","Resources":{"CPUs":6,"Memory":10240}}]"#)
+                .unwrap(),
+            10240
+        );
+        assert!(parse_machine_memory(r#"[{"Name":"dagq"}]"#).is_err());
+        let containers = parse_container_inspect(
+            r#"[
+              {"Name":"dagq-q-run-r1","HostConfig":{"Memory":8589934592},"Config":{"Labels":{"dagq.queue":"q","dagq.run":"r1"}}},
+              {"Name":"/dagq-q-relay-r1","HostConfig":{"Memory":0},"Config":{"Labels":{"dagq.queue":"q","dagq.relay.run":"r1"}}},
+              {"Name":"dagq-q-verify-v","HostConfig":{"Memory":1},"Config":{"Labels":null}}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            containers,
+            [
+                MachineContainer {
+                    name: "dagq-q-run-r1".into(),
+                    memory_mib: Some(8192),
+                    relay: false
+                },
+                MachineContainer {
+                    name: "dagq-q-relay-r1".into(),
+                    memory_mib: None,
+                    relay: true
+                },
+                MachineContainer {
+                    name: "dagq-q-verify-v".into(),
+                    memory_mib: Some(1),
+                    relay: false
+                },
+            ]
+        );
+        assert!(parse_container_inspect("{}").is_err());
+    }
+
+    /// The reservations and the waits are host-wide files beside the
+    /// users: a wait keeps when it began, a reservation takes its place,
+    /// and a record nobody reads is forgotten.
+    #[test]
+    fn the_reservations_and_the_waits_are_kept_beside_the_users() {
+        use crate::domain::machine_memory::Purpose;
+        let dir = tempfile::tempdir().unwrap();
+        let users = HostMachineUsers {
+            dir: dir.path().to_path_buf(),
+        };
+        let me = LeaseOwner::Process {
+            pid: std::process::id(),
+        };
+        let ask = |container: &str, since| MemoryAsk {
+            container: container.into(),
+            purpose: Purpose::Turn,
+            memory_mib: 4096,
+            owner: me.clone(),
+            pid: std::process::id(),
+            since,
+            seq: 0,
+            started: None,
+        };
+        assert!(users.reservations().unwrap().is_empty());
+        users.wait(&ask("dagq-q-run-r1", 5)).unwrap();
+        users.wait(&ask("dagq-q-run-r1", 9)).unwrap();
+        users.wait(&ask("dagq-q-run-r2", 7)).unwrap();
+        let waits = users.waits().unwrap();
+        assert_eq!(waits.len(), 2);
+        assert_eq!(
+            (waits[0].container.as_str(), waits[0].since),
+            ("dagq-q-run-r1", 5)
+        );
+        users.reserve(&ask("dagq-q-run-r1", 20)).unwrap();
+        assert_eq!(users.waits().unwrap().len(), 1);
+        assert_eq!(users.reservations().unwrap()[0].since, 20);
+        users.unreserve("dagq-q-run-r1").unwrap();
+        users.unreserve("dagq-q-run-r1").unwrap();
+        users.unwait("dagq-q-run-r2").unwrap();
+        assert!(users.reservations().unwrap().is_empty());
+        assert!(users.waits().unwrap().is_empty());
+        // Neither a record being written nor one nobody reads is an ask,
+        // and a read removes neither.
+        fs::write(dir.path().join("waiting/junk"), "{").unwrap();
+        fs::write(dir.path().join("waiting/dagq-q-run-r5.tmp"), "{").unwrap();
+        assert!(users.waits().unwrap().is_empty());
+        assert!(dir.path().join("waiting/junk").exists());
+        assert!(users.wait(&ask("../x", 1)).is_err());
+        // The lock is not waited for by a try while another holds it.
+        let held = users.lock().unwrap();
+        assert!(users.try_lock().unwrap().is_none());
+        drop(held);
+        assert!(users.try_lock().unwrap().is_some());
+        assert!(users.owner_held(&me));
+        assert!(!users.owner_held(&LeaseOwner::Process {
+            pid: i32::MAX as u32
+        }));
     }
 
     #[test]
@@ -1154,5 +1500,135 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
         let volumes = QueueVolumes::of_queue(self.podman.clone(), &queue_dir)?;
         dirs.iter()
             .try_for_each(|dir| volumes.create_worker_cache(dir))
+    }
+
+    fn reserve(&self, ask: &MemoryAsk, now: i64) -> Result<MemoryStep> {
+        let (users, memory) = self.memory_parts();
+        crate::application::podman_machine::try_reserve(
+            &MemoryMachine {
+                users: &users,
+                memory: &memory,
+                records: &users,
+            },
+            ask,
+            now,
+        )
+    }
+
+    fn release_memory(&self, container: &str) -> Result<()> {
+        let (users, memory) = self.memory_parts();
+        crate::application::podman_machine::release_memory(
+            &MemoryMachine {
+                users: &users,
+                memory: &memory,
+                records: &users,
+            },
+            container,
+        )
+    }
+
+    fn mark_started(&self, container: &str, now: i64) -> Result<()> {
+        let (users, memory) = self.memory_parts();
+        crate::application::podman_machine::mark_started(
+            &MemoryMachine {
+                users: &users,
+                memory: &memory,
+                records: &users,
+            },
+            container,
+            now,
+        )
+    }
+
+    fn release_memory_if_free(&self, container: &str) -> Result<()> {
+        let (users, memory) = self.memory_parts();
+        crate::application::podman_machine::release_memory_if_free(
+            &MemoryMachine {
+                users: &users,
+                memory: &memory,
+                records: &users,
+            },
+            container,
+        )
+        .map(drop)
+    }
+}
+
+impl QueueRunMachine {
+    /// The machine's host-wide records and its reads of what it holds.
+    fn memory_parts(&self) -> (HostMachineUsers, PodmanCliWithin) {
+        let queue_dir = super::queue_service::queue_dir_of(&self.db);
+        let data_root = queue_dir.parent().unwrap_or(Path::new("."));
+        (
+            HostMachineUsers {
+                dir: data_root.join(MACHINE_DIR_NAME),
+            },
+            PodmanCliWithin {
+                podman: self.podman.clone(),
+                limit: MEMORY_LOOK_TIMEOUT,
+            },
+        )
+    }
+}
+
+/// Now in Unix milliseconds: the clock of a wait for the machine's memory.
+pub(super) fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+/// Now in Unix seconds.
+pub(super) fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+/// How the dagq machine's memory looks for a new claim of a queue
+/// ([`MemoryRoom`]): the machine and its containers read through
+/// `podman`, the host-wide records in `users`, and the limits and the
+/// machine's resources of the host-wide `host.toml` (`host_wide`).
+#[derive(Debug, Clone)]
+pub struct HostMemoryRoom {
+    pub podman: PodmanCli,
+    pub users: HostMachineUsers,
+    pub host_wide: Option<PathBuf>,
+}
+
+impl HostMemoryRoom {
+    /// The room of the queues under `data_root` (`<data home>/dagq`).
+    pub fn under(data_root: &Path, host_wide: Option<PathBuf>) -> Self {
+        Self {
+            podman: PodmanCli::default(),
+            users: HostMachineUsers {
+                dir: data_root.join(MACHINE_DIR_NAME),
+            },
+            host_wide,
+        }
+    }
+}
+
+impl MemoryRoom for HostMemoryRoom {
+    fn look(&self) -> RoomLook {
+        let within = PodmanCliWithin {
+            podman: self.podman.clone(),
+            limit: MEMORY_LOOK_TIMEOUT,
+        };
+        let limit = super::run_container::load_container_limits(self.host_wide.as_deref())
+            .0
+            .memory_mib;
+        crate::application::podman_machine::look_room(
+            &within,
+            &within,
+            &self.users,
+            &load_machine_resources(self.host_wide.as_deref()).0,
+            limit,
+            unix_now(),
+        )
     }
 }

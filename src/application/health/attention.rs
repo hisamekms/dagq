@@ -227,6 +227,28 @@ pub fn attention(
             continue;
         }
         let events = queue.run_events(run.id())?;
+        // A turn or a verification of the run waits for the dagq machine's
+        // memory (ADR-t3163-1 decision 4): the runtime's while it is short,
+        // the person's once it has gone on long.
+        if let Some(event) = crate::domain::machine_memory::standing_wait(&events) {
+            attention.push(Attention {
+                run_id: Some(run.id().clone()),
+                task_id: Some(run.task_id()),
+                pid: None,
+                ask_id: None,
+                reason_category: None,
+                status: run.status().as_str().into(),
+                kind: event.kind.to_string(),
+                last_error: event.payload["why"].as_str().map(truncate_reason),
+                last_error_code: None,
+                next: if event.kind == EventKind::ContainerMemoryWaitLong {
+                    AttentionNext::CheckMachineMemory
+                } else {
+                    AttentionNext::WaitingForMemory
+                },
+            });
+            continue;
+        }
         // A claim of `already_satisfied` at rest waits in its
         // `approve_close` ask likewise, or, before its verification, for
         // the container its verification is set to, which is the queue's

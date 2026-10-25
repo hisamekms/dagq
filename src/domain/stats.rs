@@ -1835,6 +1835,9 @@ pub fn judge_running_alerts(
                 && !open_ask(&["worker_question", "answer_prompt"])
                 && question != QuestionWait::Held
                 && !waits_for_provider(&run_events, *idle)
+                // Its next turn waits for the dagq machine's memory, before
+                // it starts (ADR-t3163-1 decision 4).
+                && crate::domain::machine_memory::standing_wait(&run_events).is_none()
                 && idle_secs > config.idle_without_receipt_secs
             {
                 let mut alert = RunningAlert::new(
@@ -3247,6 +3250,41 @@ mod tests {
             T + 5000,
         ));
         assert_eq!(running(&switched, &live, T + 5100 + 1300).len(), 1);
+    }
+
+    /// A next turn that waits for the dagq machine's memory before its
+    /// container starts is no idle without a receipt, however long it
+    /// waits (ADR-t3163-1 decision 4); once the wait ended, the marker is
+    /// timed again until the next turn starts.
+    #[test]
+    fn a_turn_waiting_for_the_machine_s_memory_is_not_idle_without_a_receipt() {
+        let waited = vec![
+            run_event(1, R1, "agent_started", json!({}), T),
+            run_event(2, R1, "turn_started", json!({"turn": 1}), T + 10),
+            run_event(3, R1, "turn_finished", json!({"turn": 1}), T + 60),
+            run_event(
+                4,
+                R1,
+                "container_memory_waiting",
+                json!({"turn": 2, "purpose": "turn", "why": "full"}),
+                T + 61,
+            ),
+        ];
+        let mut run = live_run(R1, RunStatus::Running);
+        run.idle = Some(((T + 60) * 1000, Vec::new()));
+        let live = snapshot(vec![run]);
+        assert!(running(&waited, &live, T + 60 + 9000).is_empty());
+        let mut long = waited.clone();
+        long.push(run_event(
+            5,
+            R1,
+            "container_memory_wait_long",
+            json!({"turn": 2, "purpose": "turn", "why": "full"}),
+            T + 61 + 1800,
+        ));
+        assert!(running(&long, &live, T + 60 + 9000).is_empty());
+        // Without the wait the same marker is one.
+        assert_eq!(running(&waited[..3], &live, T + 60 + 1300).len(), 1);
     }
 
     /// A `worker_question` opened after the marker holds the marker while

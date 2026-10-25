@@ -964,6 +964,40 @@ mod tests {
         assert!(!read.woken);
     }
 
+    /// A container's long wait for the dagq machine's memory wakes the
+    /// inbox's watch (ADR-t3163-1 decision 4); its start and its end do not.
+    #[test]
+    fn a_long_wait_for_the_machine_s_memory_wakes_the_inbox_s_watch() {
+        let events = Events(vec![
+            event(1, "container_memory_waiting", json!({"why": "w"})),
+            event(2, "container_memory_wait_long", json!({"why": "w"})),
+            event(
+                3,
+                "container_memory_wait_ended",
+                json!({"outcome": "reserved"}),
+            ),
+        ]);
+        let upto = EventId::new(3);
+        let read = read_events(
+            &events,
+            &query(0, 10, false),
+            upto,
+            Some(SessionRole::Inbox),
+        )
+        .unwrap();
+        assert_eq!(ids(&read), [2]);
+        assert!(read.woken);
+        let read = read_events(
+            &events,
+            &query(2, 10, false),
+            upto,
+            Some(SessionRole::Inbox),
+        )
+        .unwrap();
+        assert!(ids(&read).is_empty());
+        assert!(!read.woken);
+    }
+
     /// A notifier that records each notification's asks and the binding
     /// it was given, failing when `fail`.
     struct Told(std::sync::Mutex<Vec<(Vec<i64>, Option<String>)>>, bool);

@@ -28,11 +28,18 @@ pub const MOUNT_DIR_NAMES: [&str; 3] = ["runs", "clones", "verification"];
 ///
 /// The defaults are modest values meant to suit any project on a common
 /// development host, not values measured on dagq's own build: 2 CPUs and
-/// 4 GiB leave most of an 8-core / 16 GiB host to the person and to the
-/// host's own runs, and are about what a small project's build and tests
-/// in one container need; the disk is sparse, so 60 GiB costs only what
-/// the build outputs and caches inside it take. A project whose build
-/// needs more says so in `host.toml`.
+/// 6 GiB leave most of an 8-core / 16 GiB host to the person and to the
+/// host's own runs. 6 GiB is what a worker's container and a
+/// verification's at once take with the default limits
+/// ([`super::run_container::DEFAULT_CONTAINER_MEMORY_MIB`], 2 × 2 GiB),
+/// beside the machine's own base ([`super::machine_memory::BASE_MIB`],
+/// 1 GiB) and the relays of up to [`DEFAULT_RELAYS_FIT`] runs
+/// ([`super::machine_memory::RELAY_MIB`] each): the containers reserve
+/// their limits out of the machine before they start (ADR-t3163-1), and a
+/// smaller machine would hold one of them waiting for the other. The disk
+/// is sparse, so 60 GiB costs only what the build outputs and caches
+/// inside it take. A project whose build needs more says so in
+/// `host.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MachineResources {
     pub cpus: u32,
@@ -41,7 +48,12 @@ pub struct MachineResources {
 }
 
 pub const DEFAULT_MACHINE_CPUS: u32 = 2;
-pub const DEFAULT_MACHINE_MEMORY_MIB: u64 = 4096;
+pub const DEFAULT_MACHINE_MEMORY_MIB: u64 = 6144;
+/// How many runs' relays the default machine leaves room for beside a
+/// worker's container and a verification's of the default limits: the
+/// relays of the runs of a queue whose `parallel` is a few, with those
+/// waiting for their review or landing.
+pub const DEFAULT_RELAYS_FIT: usize = 8;
 pub const DEFAULT_MACHINE_DISK_GIB: u64 = 60;
 
 impl Default for MachineResources {
@@ -519,9 +531,46 @@ mod tests {
             MachineResources::default(),
             MachineResources {
                 cpus: 2,
-                memory_mib: 4096,
+                memory_mib: 6144,
                 disk_gib: 60
             }
+        );
+    }
+
+    /// The default machine holds a worker's container and a
+    /// verification's of the default limits at once, beside its base and
+    /// the relays it leaves room for (ADR-t3163-1 decision 6).
+    #[test]
+    fn the_default_machine_holds_a_worker_and_a_verification_at_once() {
+        use super::super::machine_memory::{
+            Judgement, MachineContainer, MemoryAsk, Purpose, budget, judge,
+        };
+        use super::super::run_container::ContainerLimits;
+        let limit = ContainerLimits::default().memory_mib;
+        let memory = MachineResources::default().memory_mib;
+        assert!(budget(memory, DEFAULT_RELAYS_FIT) >= 2 * limit);
+        let relays: Vec<MachineContainer> = (0..DEFAULT_RELAYS_FIT)
+            .map(|n| MachineContainer {
+                name: format!("dagq-q-relay-r{n}"),
+                memory_mib: None,
+                relay: true,
+            })
+            .collect();
+        let ask = |container: &str, purpose| MemoryAsk {
+            container: container.into(),
+            purpose,
+            memory_mib: limit,
+            owner: LeaseOwner::Process { pid: 1 },
+            pid: 1,
+            since: 0,
+            seq: 0,
+            started: None,
+        };
+        let worker = ask("dagq-q-run-r1", Purpose::Turn);
+        let verification = ask("dagq-q-verify-v1", Purpose::Verification);
+        assert_eq!(
+            judge(memory, &relays, &[worker], &[], &verification),
+            Judgement::Reserve
         );
     }
 

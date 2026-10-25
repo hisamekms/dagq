@@ -1775,6 +1775,15 @@ fn run_in_container(
         prepared: &prepared,
         run: run.id(),
     };
+    // Its memory is reserved before its command as a verification's, and
+    // forgotten when what it left goes (ADR-t3163-1 decision 1).
+    containers
+        .reserve_memory(run, &prepared, &mut |_, note| {
+            if note != crate::domain::machine_memory::MemoryNote::Still {
+                info!(run_id = %run.id(), "run {}: its landing recheck's container and the dagq machine's memory: {note:?}", run.id());
+            }
+        })
+        .context("reserve the dagq machine's memory for the landing recheck's container")?;
     let mut env = verifier.run_env(run_dir)?;
     let wrapper = crate::domain::run_container::without_sccache_wrapper(&mut env).map(|t| t.port);
     let line = verification_line(containers, &prepared, run.id(), command, &env)?;

@@ -2268,6 +2268,18 @@ pub fn supervise_reviewed_owned(
     )
 }
 
+/// [`supervise_reviewed_owned`] with `options`.
+pub fn supervise_reviewed_owned_with(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    reviewer: &TestReviewer,
+    options: &SuperviseOptions,
+) -> Value {
+    let dagq = common::service::owned_executable(db.parent().unwrap());
+    supervise_reviewed_by(db, repo, backend, reviewer, options, &dagq)
+}
+
 /// [`supervise_reviewed_with`], the supervisor given `dagq` as the
 /// executable it starts.
 fn supervise_reviewed_by(

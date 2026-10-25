@@ -567,6 +567,12 @@ impl ReviseWatch {
             }
             WallGate::Open => (),
         }
+        // A turn that waits for the dagq machine's memory has not started:
+        // the request's clock starts once it does (ADR-t3163-1 decision 4).
+        if super::recovery::waits_for_memory(sv, run)? {
+            self.sent = sv.generators.clock.monotonic();
+            return Ok(None);
+        }
         // An answer delivered by hand (or by the supervisor this one
         // adopted the run from) is input too: the idle marker of the stop at
         // the question is older than it. Its close is known to the second: a

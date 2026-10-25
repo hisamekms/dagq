@@ -62,6 +62,7 @@ SSOTは消えてはいけない正本、ビューはSSOTから作り直せるも
 | cloneの作業と復元 | containerのrunの未commitの差分とuntracked（workerの申告）、復元するsnapshotの写しとその答え | 材料 | run dir。作業はturnの終わりにcontainerが書き再計画の保留が読む。写しは制御側が書きcontainerが次のturnの始めに当て、その答えをresumeの間に制御側が読む |
 | mainのbundle | 今のmain 1本 | 材料 | run dir。制御側が書き、次のturnの始めにcontainerが取り込む |
 | 手元の検証の記録 | workerの手元の検証の1回の実行ごとの記録とlog | 材料 | run dirの`local-checks/`（turnのenvが名指す）。pjのscriptが書き、runtimeがreceiptのcommitのtreeと照合してreviewの資料に載せる |
+| machineのメモリの予約と待ち | dagq専用のmachineの予約（持ち主・種類・上限・取った時刻）と待ちの列（同じ欄で時刻は待ち始め）。全てのqueueのclaim・wrapper・`integrate`が読む | 材料 | data homeの`dagq/machine/`のlockの下の`reservations/`と`waiting/`。寿命は持ち主のturnかverificationの間で、失っても記録の無いcontainerを上限で数えて安全側で、計測の層は読まない。待った区間の正本はEventStoreのevent |
 | 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | hostで`scripts/landing-it.sh`がartifact `it-coverage-map`から取ってqueueの外に置き、containerのverificationはrun dirの材料への写しだけを読む（置き場・取り直し・写し方はscriptの冒頭）。cacheも写しも消えてよい |
 
 計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足すか変えるtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、[文書の規則](../development/documents.md)の「design」）。
@@ -85,6 +86,7 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
 - **タグ**: `blocker`は何がrunを次へ移すか、`holds`はその間に握るslotで、値と意味は`Blocker`と`Holds`のdoc commentが持つ。
   `holds`はslotの数え方（着地の順番だけを待つrunと人の答えを待つrunはslotの外）に従い、slotに残る答え待ちの`waiting`はworker slotを握る。
 - **taskのhold**: `task_held`から待ちに入るまでは走る工程のまま、待ちに入った記録からholdが閉じるまでを`held`にする。
+- **containerのメモリの待ち**: runの`container_memory_waiting`から`container_memory_wait_ended`までで（欄は定数のdoc comment）、turnでは`turn_started`の前、verificationでは最初の`verification_command`の前にあり、工程を変えない。
 - **`already_satisfied`の主張**: mainのsnapshotの検証は`validating`と別の工程でworker slotを持ち、検証を待つ間（slotやcontainerの空き）と答えを待つ間はslotの外の工程にする（[ADR-t1818-1](../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)）。
 - **`Phase::tags()`**: 記録の工程の定義（`domain::run_phase`）の隣で網羅的な`match`がタグを返す。
   supervisorの工程も網羅的な`match`で記録の工程に対応し、どちらも工程を足して書き忘れるとコンパイルが止まる。
@@ -145,7 +147,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
   警告の鍵（`AlertKey`）はleaseの持ち主を含めないので、leaseが移っても何も書かない。
 - **判定の入力と警告の開閉**: 入力は離散の時刻と値で、経過で伸びる長さは持たない（入力の中身は`domain::live_alerts`のmodule doc）。
   開閉のeventは警告がいつ立ち消えたかの記録で、値の再現には使わない。
-- **走っているrun**: receiptの無いidleは、markerの後の`provider_waiting`・closeまでの`worker_question`・`answer_prompt`・終わったresumeとreviseのsessionを数えず、次のturnのmarkerから数える（stallの見張りと同じ）。
+- **走っているrun**: receiptの無いidleは、markerの後の`provider_waiting`・closeまでの`worker_question`・`answer_prompt`・終わったresumeとreviseのsession・containerのメモリの待ちを数えず、次のturnのmarkerから数える（stallの見張りと同じ）。
   入力と警告のworkspaceはrunが最後に開いたsession（`LiveRun`のdoc comment）。
 - **記録**（流れはsupervisorのtokenごと）: 起動の後の最初の成功した観測が`live_alert_baseline`。
   入力の値が変わった対象ごとに`live_alert_input_changed`。
@@ -186,8 +188,6 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **claimの後の事実**は`domain::after_claim`が作り、statsの`MeasureTrack`も同じものを使う。
 - **step**: runのstepは`domain::ledger::steps`が親の区間ごとにkindの内訳と被覆率に畳み（内側の層は重なってよい）、区間の外のstepとseqの抜けを数える。
 
-置き換える今の組み立て（段3で撤去）はADR-t1662-1決定20。
-
 ## 台帳を作る係
 
 何を書くかは`domain::ledger::builder`が決め（数値は定数）、`supervise::observation::ledger`が書く。
@@ -200,7 +200,6 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
   持ち越すのは本と、確定していないsession・queue・run・taskの行が読むeventだけ（`Kept`のdoc comment）。
   カーソルの始めから読む起動の追いつきでも、最初に行を畳む周がstoreの確定した行のうち畳み直さない行のeventを落とす。
   確定した行に後のeventが届けば、記録はstoreの行から、pushはidで読み戻す。
-  持つ件数と概算のbyte数は、定期的と大きく変わった時にlogへ出す（`logs_kept`）。
   周回は新しいeventが変えうる行と印の付いた行だけを畳み、周回で作る領域は前からのeventの数に比例しない。
 - **書く行**: 終わったrun（`push_pending`と旧方式を含み途中は書かない）と、全てのtask・session・queue・nodeの行。
 - **確定**（`final`）: run・taskは終わりから猶予の後で、`push_pending`には付けない。
@@ -239,12 +238,7 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 
 ## 並走の比較と照合
 
-段2の並走で使い、段3で今の値を台帳から作った後に消す読み取り（`stats --ledger`、`domain::ledger::compare`。欄と分類はdoc comment）。
-
-- runごとに、今のstatsの値と台帳の同じ意味の値、差（秒）と理由の分類。
-- run・taskを持たない欄は、台帳の行が返すeventに今の`stats`の関数を当てた値と並べる。
-- hostの欄は、`stats`の窓とkpiの日ごとの期間ごとに、nodeの行のsampleの要約と今のCSVの要約を並べ、片方にだけあるsampleを理由で分ける。
-- 照合は、窓に終わった対象（run・taskは旧方式も「終端」のeventの時刻）と台帳の行を比べ、行の無い・dirtyの対象と、確定していない行を`push_pending`と猶予の中とそれ以外に分け、確定しdirtyでないrun・taskの行の値を足す（`compare::totals`）。
+段2の並走で使い、段3で今の値を台帳から作った後に消す読み取り（`stats --ledger`）で、runの値・run・taskを持たない欄・hostの欄の比べ方と台帳の照合は`domain::ledger::compare`のmodule docが持つ。
 
 ## runの比較の軸
 

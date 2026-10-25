@@ -27,7 +27,9 @@
 //!   `recovery_*`, `integration_*`, `landing_*`, `conflict_*`,
 //!   `concern_*`, `exit_*`, `stall_*`, `provider_*`, `hold_*`, `submit_*`
 //!   (typing into a session), `push_*` (the landing's push), `agent_eval_*`
-//!   (the eval of a review agent, ADR-t1728-1), and the
+//!   (the eval of a review agent, ADR-t1728-1), `container_memory_*` (a
+//!   run's turn or verification waiting for the dagq machine's memory,
+//!   ADR-t3163-1), and the
 //!   kinds of receipts and validation (`receipt_observed`,
 //!   `validation_finished`, `verification_command`, `scope_violation`,
 //!   `evidence_missing`), of the screen (`prompt_waiting`,
@@ -167,6 +169,9 @@ event_kinds! {
     ConflictsConfigChanged => "conflicts_config_changed",
     ContainerImageBuilt => "container_image_built",
     ContainerImageFailed => "container_image_failed",
+    ContainerMemoryWaitEnded => "container_memory_wait_ended",
+    ContainerMemoryWaitLong => "container_memory_wait_long",
+    ContainerMemoryWaiting => "container_memory_waiting",
     ContainerRuntimeAvailable => "container_runtime_available",
     ContainerRuntimeUnavailable => "container_runtime_unavailable",
     DependencyAdded => "dependency_added",
@@ -990,6 +995,21 @@ pub const CONCERN_SEND_BACK_ESCALATED: &str = EventKind::ConcernSendBackEscalate
 pub const CONFLICT_PRECHECK: &str = EventKind::ConflictPrecheck.as_str();
 pub const CONFLICT_RECEIPT_REJECTED: &str = EventKind::ConflictReceiptRejected.as_str();
 pub const CONFLICT_RESOLVED: &str = EventKind::ConflictResolved.as_str();
+/// A run's turn or verification began to wait for the dagq machine's
+/// memory (ADR-t3163-1): `purpose` (`turn` or `verification`), the
+/// `container` it is for, its `memory_mib`, `why` it waits, `since` (Unix
+/// seconds), the `pid` of the process that waits and, for a turn, its
+/// `turn` (for the verification of a snapshot, its `snapshot`). The wait is outside the turn's
+/// time: the turn starts after it.
+pub const CONTAINER_MEMORY_WAITING: &str = EventKind::ContainerMemoryWaiting.as_str();
+/// The wait of [`CONTAINER_MEMORY_WAITING`] went past
+/// [`crate::domain::machine_memory::LONG_WAIT_SECS`], with the same
+/// fields: the inbox's attention while it stands.
+pub const CONTAINER_MEMORY_WAIT_LONG: &str = EventKind::ContainerMemoryWaitLong.as_str();
+/// The wait of [`CONTAINER_MEMORY_WAITING`] ended: `outcome` (`reserved`,
+/// `refused`, `failed` or `stopped`, its turn not to start), `waited_secs`
+/// and the fields of its start.
+pub const CONTAINER_MEMORY_WAIT_ENDED: &str = EventKind::ContainerMemoryWaitEnded.as_str();
 pub const DEPENDENCY_ADDED: &str = EventKind::DependencyAdded.as_str();
 pub const DEPENDENCY_REMOVED: &str = EventKind::DependencyRemoved.as_str();
 /// A task of a closed goal that will not complete has tasks waiting on it
@@ -1591,6 +1611,18 @@ mod tests {
             ),
             (EventKind::ContainerImageBuilt, "container_image_built"),
             (EventKind::ContainerImageFailed, "container_image_failed"),
+            (
+                EventKind::ContainerMemoryWaitEnded,
+                "container_memory_wait_ended",
+            ),
+            (
+                EventKind::ContainerMemoryWaitLong,
+                "container_memory_wait_long",
+            ),
+            (
+                EventKind::ContainerMemoryWaiting,
+                "container_memory_waiting",
+            ),
             (
                 EventKind::ContainerRuntimeAvailable,
                 "container_runtime_available",

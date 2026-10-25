@@ -107,6 +107,13 @@ fn values<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
 struct FakeMachine {
     ready: Mutex<Vec<(String, Option<String>)>>,
     removed: Mutex<Vec<String>>,
+    /// Each try at the machine's memory (`wait`, `reserve`) and release,
+    /// with the container named, and how many `podman run` had run then.
+    memory: Mutex<Vec<String>>,
+    /// How many tries wait before one is reserved.
+    waits: std::sync::atomic::AtomicUsize,
+    /// The fake podman's state, whose `podman run`s a try counts.
+    state: Option<PathBuf>,
 }
 
 impl RunMachine for FakeMachine {
@@ -129,6 +136,40 @@ impl RunMachine for FakeMachine {
 
     fn create_worker_cache(&self, dirs: &[String]) -> Result<()> {
         panic!("a verification made the worker cache {dirs:?} ready")
+    }
+
+    fn reserve(
+        &self,
+        ask: &dagq::domain::machine_memory::MemoryAsk,
+        _: i64,
+    ) -> Result<dagq::domain::machine_memory::MemoryStep> {
+        use dagq::domain::machine_memory::MemoryStep;
+        use std::sync::atomic::Ordering;
+        let ran = self.state.as_deref().map_or(0, |state| runs(state).len());
+        let wait = self
+            .waits
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok();
+        self.memory.lock().unwrap().push(format!(
+            "{} {} {:?} after {ran} runs",
+            if wait { "wait" } else { "reserve" },
+            ask.container,
+            ask.purpose
+        ));
+        Ok(if wait {
+            MemoryStep::Wait("the test's machine is full".to_owned())
+        } else {
+            MemoryStep::Reserved
+        })
+    }
+
+    fn release_memory(&self, container: &str) -> Result<()> {
+        let ran = self.state.as_deref().map_or(0, |state| runs(state).len());
+        self.memory
+            .lock()
+            .unwrap()
+            .push(format!("release {container} after {ran} runs"));
+        Ok(())
     }
 }
 
@@ -196,7 +237,10 @@ impl VerifyQueue {
         let db = queue_dir.join("queue's data.db");
         drop(crate::common::template::queue(&db));
         let state = dir.path().join("podman");
-        let machine = Arc::new(FakeMachine::default());
+        let machine = Arc::new(FakeMachine {
+            state: Some(state.clone()),
+            ..FakeMachine::default()
+        });
         let containers = PodmanVerificationContainers {
             podman: PodmanCli {
                 program: fake_podman(&state),
@@ -205,6 +249,7 @@ impl VerifyQueue {
             main_checkout: Some(repo.clone()),
             host_wide: None,
             machine: machine.clone(),
+            memory_poll: Duration::from_millis(10),
         };
         let mut options = supervise_options(1, true);
         options.container = Some(runtime::ContainerRuntimePort(Arc::new(Usable)));
@@ -235,10 +280,23 @@ impl VerifyQueue {
 
     /// Land `task` through the supervisor, its worker on the host.
     fn land(&self, task: TaskId) -> TaskRun {
+        self.land_by(task, supervise_reviewed_with)
+    }
+
+    /// [`Self::land`], the supervisor given the `dagq` the test owns, so a
+    /// service it starts stops once the test's process is gone.
+    fn land_owned(&self, task: TaskId) -> TaskRun {
+        self.land_by(task, supervise_reviewed_owned_with)
+    }
+
+    fn land_by(
+        &self,
+        task: TaskId,
+        supervise: fn(&Path, &Path, &TestWorkspace, &TestReviewer, &SuperviseOptions) -> Value,
+    ) -> TaskRun {
         let backend = TestWorkspace::new(&self.db, false, VALID_AGENT);
         let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]);
-        let outcome =
-            supervise_reviewed_with(&self.db, &self.repo, &backend, &reviewer, &self.options);
+        let outcome = supervise(&self.db, &self.repo, &backend, &reviewer, &self.options);
         assert_eq!(outcome["errors"], json!([]), "{outcome}");
         let detail = SqliteQueue::open(&self.db).unwrap().show(task).unwrap();
         let run = detail.runs.last().unwrap().clone();
@@ -924,6 +982,7 @@ fn the_materials_are_copied_into_the_run_directory_following_no_symlink() {
         main_checkout: None,
         host_wide: None,
         machine: Arc::new(FakeMachine::default()),
+        memory_poll: Duration::from_millis(10),
     };
     let verification = PreparedVerification {
         id: "r1-a".to_owned(),
@@ -1516,4 +1575,66 @@ fn a_verification_whose_container_podman_does_not_start_fails_the_landing_judgin
             .count(),
         0
     );
+}
+
+/// Acceptance (f) of task 3391 (ADR-t3163-1 decision 4): a landing whose
+/// verification is set to the container is not held by the supervisor for
+/// the machine's memory; `integrate` waits for its reservation before its
+/// first command, in the host-wide order, runs nothing meanwhile (in the
+/// container or on the host), holds it through every command and releases
+/// it at the verification's cleanup. The wait is the run's record.
+#[test]
+fn a_landing_s_verification_waits_for_the_machine_s_memory_before_its_first_command() {
+    let _test = crate::common::test();
+    let queue = VerifyQueue::new();
+    queue.set_config("[roles.verification]\nruntime = \"container\"\n");
+    queue
+        .machine
+        .waits
+        .store(3, std::sync::atomic::Ordering::SeqCst);
+    let task = add_task(&queue.db, &commands(&queue.state));
+    // Landed in one supervision: the supervisor did not hold the landing.
+    let run = queue.land_owned(task);
+    let memory = queue.machine.memory.lock().unwrap().clone();
+    let container = format!("dagq-{QUEUE}-verify-{}-", run.id());
+    assert_eq!(memory.len(), 5, "{memory:?}");
+    for (index, line) in memory.iter().enumerate() {
+        let expected = match index {
+            0..=2 => "wait ",
+            3 => "reserve ",
+            _ => "release ",
+        };
+        assert!(
+            line.starts_with(&format!("{expected}{container}")),
+            "{index}: {memory:?}"
+        );
+    }
+    // No command ran before it was reserved, and both ran before its
+    // release.
+    for line in &memory[..4] {
+        assert!(line.ends_with("Verification after 0 runs"), "{memory:?}");
+    }
+    assert!(memory[4].ends_with("after 2 runs"), "{memory:?}");
+    assert_eq!(runs(&queue.state).len(), 2);
+    let detail = SqliteQueue::open(&queue.db).unwrap().show(task).unwrap();
+    let kinds = event_kinds(&detail);
+    let at = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
+    assert!(
+        at("container_memory_waiting") < at("container_memory_wait_ended"),
+        "{kinds:?}"
+    );
+    assert!(
+        at("container_memory_wait_ended") < at("verification_command"),
+        "{kinds:?}"
+    );
+    let waiting = payloads(&detail, "container_memory_waiting");
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0]["purpose"], "verification");
+    assert_eq!(waiting[0]["why"], "the test's machine is full");
+    let ended = payloads(&detail, "container_memory_wait_ended");
+    assert_eq!(ended[0]["outcome"], "reserved");
+    assert!(ended[0]["waited_secs"].as_i64().unwrap() >= 0);
+    // Not held, the landing deferred nothing.
+    assert!(payloads(&detail, "integration_deferred").is_empty());
+    assert_eq!(payloads(&detail, "verification_command").len(), 2);
 }

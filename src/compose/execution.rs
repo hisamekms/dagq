@@ -577,6 +577,14 @@ impl OneShot {
                                 required: crate::domain::podman_machine::MachineMounts::of_queue(
                                     db.parent().unwrap_or(Path::new(".")),
                                 ),
+                                room: Arc::new(
+                                    crate::infrastructure::podman_machine::HostMemoryRoom::under(
+                                        db.parent()
+                                            .and_then(Path::parent)
+                                            .unwrap_or(Path::new(".")),
+                                        crate::infrastructure::kpi_config::host_wide_file(),
+                                    ),
+                                ),
                                 // Only looked at: a container's start builds it.
                                 container: crate::application::container_image::ImageGate {
                                     specs: Arc::new(

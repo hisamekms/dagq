@@ -1387,6 +1387,24 @@ impl RunContainers for Hooked<'_> {
     fn remove(&self, run: &dagq::domain::RunId) -> anyhow::Result<()> {
         self.inner.remove(run)
     }
+    fn reserve_memory(
+        &self,
+        run: &TaskRun,
+        prepared: &dagq::application::run_container::PreparedRun,
+        stop: &dyn Fn() -> Option<String>,
+        notes: &mut dyn FnMut(
+            &dagq::domain::machine_memory::MemoryAsk,
+            dagq::domain::machine_memory::MemoryNote<'_>,
+        ),
+    ) -> anyhow::Result<()> {
+        self.inner.reserve_memory(run, prepared, stop, notes)
+    }
+    fn release_memory(&self, run: &dagq::domain::RunId) -> anyhow::Result<()> {
+        self.inner.release_memory(run)
+    }
+    fn memory_started(&self, run: &dagq::domain::RunId) -> anyhow::Result<()> {
+        self.inner.memory_started(run)
+    }
     fn facts_turn(&self, run: &TaskRun) -> anyhow::Result<()> {
         self.inner.facts_turn(run)
     }
@@ -2451,4 +2469,187 @@ fn a_turn_s_container_runs_hardened_in_the_real_machine() {
     let _ = fs::remove_dir_all(&run_dir);
     assert!(status.success(), "{status}");
     assert!(wrote);
+}
+
+/// Acceptance (d) of task 3391 (ADR-t3163-1 decision 4): while a worker's
+/// container would wait for the machine's memory, a task whose worker is
+/// set to the container is not claimed, its deferral saying why; once the
+/// memory fits, it is claimed, runs in its container and lands.
+#[test]
+fn a_claim_waits_while_the_machine_s_memory_is_short_and_goes_on_once_it_fits() {
+    let _test = crate::common::test();
+    let mut queue = ContainerQueue::new(None);
+    queue.options.container = Some(runtime::ContainerRuntimePort(Arc::new(MemoryGated(
+        queue.state.clone(),
+    ))));
+    fs::write(queue.state.join(MEMORY_FULL), "").unwrap();
+    let outcome = supervise_reviewed_owned_with(
+        &queue.db,
+        &queue.repo,
+        &queue.backend,
+        &TestReviewer::new(&[]),
+        &queue.options,
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"], json!([]), "{outcome}");
+    let detail = queue.detail();
+    assert!(detail.runs.is_empty());
+    let deferred = payloads(&detail, "claim_deferred");
+    assert_eq!(deferred.len(), 1, "{deferred:?}");
+    assert_eq!(deferred[0]["reason"], "container_memory_wait");
+    let message = deferred[0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("dagq machine's memory") && message.contains("never on the host"),
+        "{message}"
+    );
+    assert!(memory_calls(&queue.state).is_empty());
+
+    fs::remove_file(queue.state.join(MEMORY_FULL)).unwrap();
+    let outcome = supervise_reviewed_owned_with(
+        &queue.db,
+        &queue.repo,
+        &queue.backend,
+        &TestReviewer::new(&[verdict("pass", &[], "fine")]),
+        &queue.options,
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let detail = queue.detail();
+    assert_eq!(
+        payloads(&detail, "claim_deferral_ended")[0]["why"],
+        "cleared"
+    );
+    // Its turn reserved its memory, and released it with its container.
+    let container = format!("dagq-{QUEUE}-run-{}", detail.runs[0].id());
+    let memory = memory_calls(&queue.state);
+    assert_eq!(
+        memory.first(),
+        Some(&format!("reserve {container}")),
+        "{memory:?}"
+    );
+    assert!(
+        memory.contains(&format!("release {container}")),
+        "{memory:?}"
+    );
+    queue.none_left();
+}
+
+/// The turns of [`a_running_run_s_next_turn_waits_for_the_machine_s_memory_outside_its_time`]:
+/// the first ends without a receipt and fills the machine, the next one
+/// finishes.
+const TURN_THEN_FULL: &str = r#"if [ -f "$RUN_DIR/stub-turn-one" ]; then
+  finish
+else
+  : > "$RUN_DIR/stub-turn-one"
+  : > "${0%/*}/../memory-full"
+  say "not done yet"
+fi
+"#;
+
+/// Acceptance (e) of task 3391 (ADR-t3163-1 decision 4): the next turn of
+/// a running run (here the nudge of a turn that ended without a receipt)
+/// waits for the machine's memory before its container starts, without an
+/// error. The wait is the run's record and shows in `status`; it is
+/// outside the turn: the turn starts after it, and neither the stall's,
+/// the idle processes' nor the request's watch counts it. Once the memory
+/// fits, the turn runs and the run lands.
+#[test]
+fn a_running_run_s_next_turn_waits_for_the_machine_s_memory_outside_its_time() {
+    let _test = crate::common::test();
+    let queue = ContainerQueue::new(Some(TURN_THEN_FULL));
+    let supervisor = queue.supervise(TestReviewer::new(&[verdict("pass", &[], "fine")]));
+    wait_until(&queue.db, crate::common::STEP_LIMIT, |sqlite| {
+        sqlite
+            .show(TaskId::new(1))
+            .unwrap()
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::ContainerMemoryWaiting)
+    });
+    let status = runtime::status(&queue.db).unwrap();
+    let waiting = status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "container_memory_waiting")
+        .cloned()
+        .unwrap_or_else(|| panic!("{status}"));
+    assert_eq!(
+        waiting["next"],
+        "waiting for the dagq podman machine's memory (runtime)"
+    );
+    assert_eq!(waiting["last_error"], "the test's machine is full");
+    // A wait past its long mark (recorded here as the wrapper records it
+    // after `LONG_WAIT_SECS`) is the person's.
+    let run_id = queue.detail().runs[0].id().clone();
+    SqliteQueue::open(&queue.db)
+        .unwrap()
+        .record_runtime_event(
+            &run_id,
+            EventKind::ContainerMemoryWaitLong,
+            json!({"purpose": "turn", "turn": 2, "why": "still full"}),
+        )
+        .unwrap();
+    let status = runtime::status(&queue.db).unwrap();
+    let long = status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "container_memory_wait_long")
+        .cloned()
+        .unwrap_or_else(|| panic!("{status}"));
+    assert_eq!(long["next"], "look at the dagq podman machine's memory");
+    assert_eq!(long["last_error"], "still full");
+    // Held a while, the turn has not started and nothing took the wait for
+    // a stall.
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(payloads(&queue.detail(), "turn_started").len(), 1);
+    fs::remove_file(queue.state.join(MEMORY_FULL)).unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    queue.backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.detail();
+    let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::Integrated, "{outcome}");
+    let kinds = event_kinds(&detail);
+    let at = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
+    let last = |kind: &str| kinds.iter().rposition(|k| *k == kind).unwrap();
+    assert!(at("container_memory_waiting") < at("container_memory_wait_ended"));
+    assert!(
+        at("container_memory_wait_ended") < last("turn_started"),
+        "{kinds:?}"
+    );
+    let waiting = payloads(&detail, "container_memory_waiting");
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0]["purpose"], "turn");
+    assert_eq!(waiting[0]["turn"], 2);
+    let ended = payloads(&detail, "container_memory_wait_ended");
+    assert_eq!(ended[0]["outcome"], "reserved");
+    // Whole seconds of the wall clock: a wait shorter than one may read 0.
+    assert!(ended[0]["waited_secs"].as_i64().unwrap() >= 0, "{ended:?}");
+    // The wait was no stall nor idle: one nudge, for the first turn, no
+    // recovery job and no ask.
+    assert_eq!(payloads(&detail, "stall_nudged").len(), 1, "{kinds:?}");
+    assert!(
+        payloads(&detail, "recovery_requested").is_empty(),
+        "{kinds:?}"
+    );
+    assert!(stalled_asks(&SqliteQueue::open(&queue.db).unwrap()).is_empty());
+    let container = format!("dagq-{QUEUE}-run-{}", run.id());
+    let memory = memory_calls(&queue.state);
+    assert!(memory.contains(&format!("wait {container}")), "{memory:?}");
+    assert_eq!(
+        memory
+            .iter()
+            .filter(|line| **line == format!("reserve {container}"))
+            .count(),
+        2,
+        "{memory:?}"
+    );
+    let status = runtime::status(&queue.db).unwrap();
+    assert!(
+        !status.to_string().contains("container_memory_wait"),
+        "{status}"
+    );
+    queue.none_left();
 }

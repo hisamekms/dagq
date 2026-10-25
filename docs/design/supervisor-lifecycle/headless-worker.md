@@ -104,7 +104,6 @@ supervisor
 
 - 最初のturnは`prompt.txt`でsessionを始め、後のturnはsupervisorの依頼を1つずつ取って同じsessionをresumeする。
   Claudeはsessionの名前をrunのidにし、Codexは出力で名乗ったthreadのidを記録してそれをresumeする。
-- 各turnの前にwrapperはworkerのruntimeを読み直し（`RuntimesFile`）、拒めばerrorで終わりrunは失敗する。
 - runtimeがsessionに渡すのは答え・revise・resume・催促・終了の依頼だけで、どれも`deliver::submit`が`turns/`に書く。
 - 終了はどれも終了の依頼になり（reviewのpassの後、resumeの終わり、黙ったwrapper、`stalled`のaskへの`stop`）、wrapperは走っているturnを止めてexit code 0で終わる。
 
@@ -147,6 +146,7 @@ run dirのI/Oの約束と落とし穴（`agent_dir`のmodule docと`agent_dir::i
 - 次のturnをresumeするか始め直すかは、sessionが作られたか、providerがsessionを持っているか（`turn_session_exists`）で決める。
   Claude Codeは使われている名前のsessionを拒むので、答える前に失敗したturnが残したsessionもresumeする。
   containerで動くrunのsessionは、hostに無ければrun dirのagentのhomeのtranscriptで探す（[Container runtime](../container-runtime.md#workerの実行)）。
+- containerのturnのメモリの待ち（[Container runtime](../container-runtime.md#dagq専用のmachine)）は`turn_started`の前で、稼働時間・沈黙・上限に数えない。
 
 ## Claudeの呼び出しと出力（`ClaudeCode`・`ClaudeTurnReader`）
 

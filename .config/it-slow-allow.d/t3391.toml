@@ -1,0 +1,14 @@
+# The items of task 3391 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 6.2s: two supervises (the claim held, then the claim, the worker in its container, its review and its landing), with the test's own dagq
+[[test]]
+name = "run_container::a_claim_waits_while_the_machine_s_memory_is_short_and_goes_on_once_it_fits"
+reason = "B 境界（守る境界）: supervise の claim が machine のメモリの不足で container の worker の候補を理由つきで控え、空いた回に claim して container の turn・review・実の git への着地を通すことを確かめる（予算の判断は domain::machine_memory の unit test）"
+task = 3391
+
+# 5.0s: a supervisor thread whose worker's second turn waits in the wrapper, then lands
+[[test]]
+name = "run_container::a_running_run_s_next_turn_waits_for_the_machine_s_memory_outside_its_time"
+reason = "B 境界（守る境界）: 走っている run の wrapper が次の turn の container の予約を待つ間、supervise が idle・stall・時間切れにせず、待ちの event が SQLite に残り status に出て、空けば turn が始まり着地することを確かめる（待ちの判断は domain::machine_memory::wait_next の unit test）"
+task = 3391

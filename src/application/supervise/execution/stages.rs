@@ -577,6 +577,11 @@ pub(super) struct LandingState {
     /// be used: their claims, resumes or landings wait meanwhile.
     pub(super) runtimes: crate::domain::container_runtime::RuntimeConfig,
     pub(super) container: crate::domain::container_runtime::ContainerCheck,
+    /// Why a worker's container would wait for the dagq machine's memory
+    /// at the last look (ADR-t3163-1 decision 4): new claims of a worker
+    /// set to the container wait meanwhile; a run's next turn and a
+    /// landing's verification do not, and wait for their memory themselves.
+    pub(super) memory_wait: Option<String>,
     /// The landing branch did not resolve at the top of this pass
     /// (ADR-t615-1): nothing is claimed and no passed run lands until it
     /// does.

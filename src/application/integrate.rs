@@ -346,8 +346,30 @@ pub fn verify_snapshot(
             run.id(),
             super::queue_broker::TokenFor::Snapshot,
         )?;
-        let container =
-            ContainerVerification::start(containers.containers, verifier, run, head, &token.file)?;
+        let container = ContainerVerification::start(
+            containers.containers,
+            verifier,
+            run,
+            head,
+            &token.file,
+            &mut |ask, note| {
+                if note != crate::domain::machine_memory::MemoryNote::Still {
+                    tracing::info!(run_id = %run.id(), "run {}: its snapshot's verification and the dagq machine's memory: {note:?}", run.id());
+                }
+                let Some((kind, payload)) = super::run_container::memory_note_event(
+                    ask,
+                    note,
+                    json!({"snapshot": head.as_str()}),
+                ) else {
+                    return;
+                };
+                if let Some(events) = containers.events
+                    && let Err(error) = events.record_runtime_event(run.id(), kind, payload)
+                {
+                    warn!(run_id = %run.id(), "run {}: the wait of its snapshot's verification for the dagq machine's memory could not be recorded: {error:#}", run.id());
+                }
+            },
+        )?;
         // Staged with the preparation's materials, as the landing's.
         let landing_env = plan.landing_env(
             files,
@@ -472,6 +494,9 @@ fn with_landing_env(
 pub struct SnapshotContainers<'a> {
     pub containers: &'a dyn super::run_container::VerificationContainers,
     pub tokens: &'a dyn super::queue_broker::VerificationTokens,
+    /// Where the wait of its container for the dagq machine's memory is
+    /// recorded, as the landing's is; without, it is only logged.
+    pub events: Option<&'a dyn EventStore>,
 }
 
 /// Run `commands` of the snapshot `head` in order through `run_to_log`,
@@ -2307,13 +2332,28 @@ fn land(
     // removed with what it left when it goes, however the verification
     // ends.
     let container_verification = match (&verification_token, in_container) {
-        (Some(token), true) => Some(ContainerVerification::start(
-            verification_containers,
-            verifier,
-            run,
-            &rebased,
-            &token.file,
-        )?),
+        (Some(token), true) => {
+            // The wait for the machine's memory is the run's record, between
+            // the landing's start and its first command.
+            let records = &*queue;
+            Some(ContainerVerification::start(
+                verification_containers,
+                verifier,
+                run,
+                &rebased,
+                &token.file,
+                &mut |ask, note| {
+                    let Some((kind, payload)) =
+                        super::run_container::memory_note_event(ask, note, json!({}))
+                    else {
+                        return;
+                    };
+                    if let Err(error) = records.record_runtime_event(run.id(), kind, payload) {
+                        warn!(run_id = %run.id(), "run {}: the wait of its verification for the dagq machine's memory could not be recorded: {error:#}", run.id());
+                    }
+                },
+            )?)
+        }
         (None, true) => bail!("the verification in the container has no token"),
         (_, false) => None,
     };
@@ -2808,13 +2848,21 @@ impl<'a> ContainerVerification<'a> {
     /// Make the verification of `run`'s commit `commit` ready with the
     /// token whose file is `token`, then run the preparation command
     /// `dagq.toml` declares, if any, on the host: one that fails runs no
-    /// verification command.
+    /// verification command. Then reserve the dagq machine's memory for its
+    /// commands, waiting in the host-wide order until it fits, `notes` told
+    /// of the wait (ADR-t3163-1 decision 4): held to the verification's end,
+    /// never released between its commands, and no command runs before it
+    /// is reserved, on the host or anywhere.
     fn start(
         containers: &'a dyn super::run_container::VerificationContainers,
         verifier: &dyn Verifier,
         run: &TaskRun,
         commit: &CommitSha,
         token: &Path,
+        notes: &mut dyn FnMut(
+            &crate::domain::machine_memory::MemoryAsk,
+            crate::domain::machine_memory::MemoryNote<'_>,
+        ),
     ) -> Result<Self> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         let prepared = containers
@@ -2836,6 +2884,9 @@ impl<'a> ContainerVerification<'a> {
                 log.display()
             );
         }
+        containers
+            .reserve_memory(run, &verification.prepared, notes)
+            .context("reserve the dagq machine's memory for the verification's container")?;
         Ok(verification)
     }
 
@@ -4439,6 +4490,7 @@ mod tests {
             SnapshotContainers {
                 containers: self,
                 tokens: self,
+                events: None,
             }
         }
         fn note(&self, call: String) {
@@ -4493,6 +4545,18 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        fn reserve_memory(
+            &self,
+            _: &TaskRun,
+            verification: &super::super::run_container::PreparedVerification,
+            _: &mut dyn FnMut(
+                &crate::domain::machine_memory::MemoryAsk,
+                crate::domain::machine_memory::MemoryNote<'_>,
+            ),
+        ) -> Result<()> {
+            self.note(format!("reserve_memory {}", verification.id));
+            Ok(())
+        }
         fn finish(&self, _: &super::super::run_container::PreparedVerification) -> Result<()> {
             self.note("finish".to_owned());
             Ok(())
@@ -4543,6 +4607,9 @@ mod tests {
             [
                 format!("issue {RUN} Snapshot"),
                 format!("prepare {RUN} {HEAD} /q/token"),
+                // The machine's memory before the first command, held to
+                // the end.
+                "reserve_memory v".to_owned(),
                 "publish_materials".to_owned(),
                 "finish".to_owned(),
                 format!("revoke {RUN} Snapshot"),

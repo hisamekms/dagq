@@ -262,11 +262,18 @@ impl Supervisor<'_> {
         let files = self.files.clone();
         let containers = self.verification_containers.clone();
         let tokens = self.verification_tokens.clone();
+        let queues = self.queues.clone();
         let (target, snapshot) = (run.clone(), head.clone());
         let handle = spawn_traced(move || {
             if let Err(why) = stale {
                 anyhow::bail!("{why}; the verification did not start");
             }
+            // The wait of its container for the machine's memory is the
+            // run's record, as the landing's.
+            let queue = queues
+                .open()
+                .map_err(|error| warn!(run_id = %target.id(), "run {}: the queue to record its snapshot's wait for the dagq machine's memory in could not be opened: {error:#}", target.id()))
+                .ok();
             integration::verify_snapshot(
                 &*repository,
                 &*verifier,
@@ -277,6 +284,9 @@ impl Supervisor<'_> {
                 integration::SnapshotContainers {
                     containers: &*containers,
                     tokens: &*tokens,
+                    events: queue
+                        .as_deref()
+                        .map(|queue| queue as &dyn crate::application::EventStore),
                 },
             )
         });

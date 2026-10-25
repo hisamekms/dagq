@@ -45,6 +45,50 @@ use crate::domain::sccache::{
 };
 use crate::domain::{ActorRole, CommitSha, EventKind, Provider, RunId, TaskRun};
 
+use crate::domain::machine_memory::{MemoryAsk, MemoryNote};
+
+/// The run's event of `note`, told of the wait for `ask`'s memory
+/// ([`EventKind::ContainerMemoryWaiting`] and the two after it), with
+/// `fields` (the turn's number) besides: the fields of the ask, why it
+/// waits, and how long it waited when it ended; `None` for a try it waits
+/// on, which is not recorded.
+pub fn memory_note_event(
+    ask: &MemoryAsk,
+    note: MemoryNote<'_>,
+    fields: serde_json::Value,
+) -> Option<(EventKind, serde_json::Value)> {
+    let mut payload = json!({
+        "purpose": ask.purpose.as_str(),
+        "container": ask.container,
+        "memory_mib": ask.memory_mib,
+        "since": ask.since,
+        "pid": ask.pid,
+    });
+    let kind = match note {
+        MemoryNote::Waiting { why } => {
+            payload["why"] = json!(why);
+            EventKind::ContainerMemoryWaiting
+        }
+        MemoryNote::Long { why } => {
+            payload["why"] = json!(why);
+            EventKind::ContainerMemoryWaitLong
+        }
+        MemoryNote::Ended {
+            outcome,
+            waited_secs,
+        } => {
+            payload["outcome"] = json!(outcome);
+            payload["waited_secs"] = json!(waited_secs);
+            EventKind::ContainerMemoryWaitEnded
+        }
+        MemoryNote::Still => return None,
+    };
+    if let (Some(payload), serde_json::Value::Object(fields)) = (payload.as_object_mut(), fields) {
+        payload.extend(fields);
+    }
+    Some((kind, payload))
+}
+
 /// What a turn's container runs with, once [`RunContainers::prepare`] made
 /// its parts ready.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,9 +158,47 @@ pub trait RunContainers: Send + Sync {
     fn prepare_run_dir(&self, run_dir: &Path, credential: &Path) -> Result<PathBuf>;
     /// `podman --connection dagq` with `args`.
     fn command(&self, args: &[String]) -> CommandSpec;
-    /// Stop and remove the container of the run `run`; nothing when there
-    /// is none.
+    /// Stop and remove the container of the run `run`, and forget the
+    /// memory its turn reserved ([`Self::reserve_memory`]); nothing when
+    /// there is none.
     fn remove(&self, run: &RunId) -> Result<()>;
+    /// Reserve the dagq machine's memory for the container of `run`'s turn
+    /// (`prepared`'s limit), waiting while it does not fit (ADR-t3163-1):
+    /// after [`Self::prepare`] made the machine run with the run among its
+    /// users, before the container starts. `notes` is told of a wait as it
+    /// goes ([`MemoryNote`]), for the run's records, and `stop` is read
+    /// after each try: why the turn is not to start (its run's stop, a
+    /// hold or a replanning), which ends the wait and forgets what it
+    /// reserved ([`super::podman_machine::MemoryWaitStopped`]). `Err` says
+    /// why the turn cannot run in the container (its limit never fits the
+    /// machine, the machine's records cannot be written, it was stopped);
+    /// it runs nowhere else.
+    fn reserve_memory(
+        &self,
+        run: &TaskRun,
+        prepared: &PreparedRun,
+        stop: &dyn Fn() -> Option<String>,
+        notes: &mut dyn FnMut(&MemoryAsk, MemoryNote<'_>),
+    ) -> Result<()> {
+        let _ = (prepared, stop, notes);
+        bail!(
+            "this process reserves no memory of the dagq machine for run {}",
+            run.id()
+        )
+    }
+    /// Forget what [`Self::reserve_memory`] reserved for `run`'s turn, if
+    /// anything: a turn whose container did not start.
+    fn release_memory(&self, run: &RunId) -> Result<()> {
+        let _ = run;
+        Ok(())
+    }
+    /// Record that the container of `run`'s turn was started on its
+    /// reservation: from then on the reservation ends with the container
+    /// ([`crate::domain::machine_memory::reservation_held`]).
+    fn memory_started(&self, run: &RunId) -> Result<()> {
+        let _ = run;
+        Ok(())
+    }
     /// Run a facts-only turn of `run` in its container and wait for its
     /// end: no agent, no run token (a copy left in the run directory is
     /// removed first) and no path to the queue broker (no relay is opened,
@@ -258,8 +340,28 @@ pub trait VerificationContainers: Send + Sync {
     fn command_line(&self, args: &[String]) -> String;
     /// Stop and remove the container of `verification`, if it is there.
     fn remove_container(&self, verification: &PreparedVerification) -> Result<()>;
+    /// Reserve the dagq machine's memory for `verification` of `run`
+    /// (its limit), waiting in the host-wide order while it does not fit
+    /// (ADR-t3163-1 decision 4): before its first command, held through
+    /// every command to [`Self::finish`]. `notes` is told of a wait as it
+    /// goes. `Err` says why no command runs (its limit never fits, the
+    /// machine's records cannot be written); none runs on the host
+    /// instead.
+    fn reserve_memory(
+        &self,
+        run: &TaskRun,
+        verification: &PreparedVerification,
+        notes: &mut dyn FnMut(&MemoryAsk, MemoryNote<'_>),
+    ) -> Result<()> {
+        let _ = (verification, notes);
+        bail!(
+            "this process reserves no memory of the dagq machine for the verification of run {}",
+            run.id()
+        )
+    }
     /// Remove what `verification` left: its container, its build output
-    /// volume and its directory, without git and following no symlink.
+    /// volume and its directory, without git and following no symlink, and
+    /// forget the memory it reserved.
     fn finish(&self, verification: &PreparedVerification) -> Result<()>;
     /// Remove, as [`Self::finish`] does, what the verifications of `run`
     /// an earlier process made left (its supervisor died while they ran):
@@ -362,6 +464,39 @@ pub struct PodmanActorExecutor<'a> {
     service: &'a dyn ServiceAccess,
     containers: &'a dyn RunContainers,
     sccache: Option<SccacheRecords<'a>>,
+    memory: Option<MemoryRecords<'a>>,
+}
+
+/// Where the executor records the wait of a turn's container for the dagq
+/// machine's memory, and the turn it is of.
+#[derive(Clone, Copy)]
+pub struct MemoryRecords<'a> {
+    pub events: &'a dyn super::actor_executor::ExecutorEvents,
+    pub turn: u64,
+    /// What shows the turn's wrapper lives while it waits: its heartbeat.
+    pub beat: &'a dyn Fn(),
+    /// Why the turn is not to start after all, read after each try at the
+    /// memory, the one that reserved it included: its run's exit request,
+    /// a hold or a replanning that fences its task.
+    pub stop: &'a dyn Fn() -> Option<String>,
+}
+
+/// Forgets the memory reserved for a run's turn whose container did not
+/// start, unless it started.
+struct Reserved<'a> {
+    containers: &'a dyn RunContainers,
+    run: &'a RunId,
+    started: bool,
+}
+
+impl Drop for Reserved<'_> {
+    fn drop(&mut self) {
+        if !self.started
+            && let Err(error) = self.containers.release_memory(self.run)
+        {
+            tracing::warn!(run_id = %self.run, error = %format_args!("{error:#}"), "the memory reserved for run {}'s container could not be released: {error:#}", self.run);
+        }
+    }
 }
 
 /// Where the executor records an agent's run without `RUSTC_WRAPPER`, and
@@ -391,6 +526,31 @@ impl<'a> PodmanActorExecutor<'a> {
             service,
             containers,
             sccache: None,
+            memory: None,
+        }
+    }
+
+    /// Record the wait of the turn's container for the dagq machine's
+    /// memory in `records`; without, it is only logged.
+    pub fn with_memory_records(mut self, records: MemoryRecords<'a>) -> Self {
+        self.memory = Some(records);
+        self
+    }
+
+    fn memory_note(&self, run: &RunId, ask: &MemoryAsk, note: MemoryNote<'_>) {
+        if note != MemoryNote::Still {
+            tracing::info!(run_id = %run, "run {run}: its turn's container and the dagq machine's memory: {note:?}");
+        }
+        let Some(records) = &self.memory else {
+            return;
+        };
+        let Some((kind, payload)) = memory_note_event(ask, note, json!({"turn": records.turn}))
+        else {
+            (records.beat)();
+            return;
+        };
+        if let Err(error) = records.events.record_agent_event(Some(run), kind, payload) {
+            tracing::warn!(run_id = %run, error = %format_args!("{error:#}"), "the wait of run {run}'s container for the machine's memory could not be recorded: {error:#}");
         }
     }
 
@@ -478,6 +638,35 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
             .containers
             .prepare(run)
             .map_err(|error| anyhow!("make the run's container ready: {error:#}"))?;
+        // Before the container starts, outside the turn's time: the turn is
+        // recorded as started once its container is (ADR-t3163-1 decision
+        // 4).
+        let go_on = || None;
+        let stop = self
+            .memory
+            .as_ref()
+            .map_or(&go_on as &dyn Fn() -> Option<String>, |records| {
+                records.stop
+            });
+        self.containers
+            .reserve_memory(run, &prepared, stop, &mut |ask, note| {
+                self.memory_note(run.id(), ask, note);
+            })
+            .map_err(|error| {
+                match error.downcast::<super::podman_machine::MemoryWaitStopped>() {
+                    Ok(stopped) => anyhow::Error::new(stopped),
+                    Err(error) => {
+                        anyhow!(
+                            "reserve the dagq machine's memory for the run's container: {error:#}"
+                        )
+                    }
+                }
+            })?;
+        let mut reserved = Reserved {
+            containers: self.containers,
+            run: run.id(),
+            started: false,
+        };
         // The token the supervisor issued at the claim or the resume; one
         // is issued only when there is none.
         let credential = match self.service.credential(self.queue, actor.actor_id()) {
@@ -567,6 +756,11 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
             .spawner
             .spawn(&podman, Streams::Files { stdout, stderr })
             .map_err(|error| anyhow!("start the run's container with podman: {error:#}"))?;
+        // Held by the container now: the turn's end removes both.
+        reserved.started = true;
+        if let Err(error) = self.containers.memory_started(run.id()) {
+            tracing::warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the start of run {}'s container could not be recorded with its memory: {error:#}", run.id());
+        }
         // A server to start is the supervisor's, at the launcher's request
         // (ADR-t2114-4 decision 1).
         if let ContainerServer::Refused { target, why } = &plan {

@@ -680,7 +680,7 @@ impl<'a> Turns<'a> {
             // Each turn is a process of its own, started with the model
             // recorded last ([`Self::model`]).
             let session = self.model()?;
-            let ended = self.turn(
+            let ended = match self.turn(
                 &run_dir,
                 turn,
                 &prompt,
@@ -690,7 +690,26 @@ impl<'a> Turns<'a> {
                 session,
                 &mut registered,
                 child_may_be_alive,
-            )?;
+            ) {
+                Ok(ended) => ended,
+                // Its container's wait for the machine's memory ended at an
+                // exit, a hold or a replanning before the turn started: the
+                // session ends between turns, as at any turn's boundary,
+                // a fence's requests recorded as withheld.
+                Err(error)
+                    if error
+                        .downcast_ref::<super::podman_machine::MemoryWaitStopped>()
+                        .is_some() =>
+                {
+                    say(
+                        self.background,
+                        &format!("{error:#}; the session ends between turns"),
+                    );
+                    self.fenced(&run_dir);
+                    return Ok(0);
+                }
+                Err(error) => return Err(error),
+            };
             on.created |= ended.result.session_created;
             if let Some(missing) = resume.filter(|_| from_output && ended.result.session_missing) {
                 // The agent kept no thread of that id (the turn that named
@@ -1093,8 +1112,35 @@ impl<'a> Turns<'a> {
             Some(id) => Some(id.to_owned()),
             None => (!agent.turn_session_from_output()).then(|| on.name.clone()),
         };
-        self.steps
-            .start_turn(step_reader, now_millis(self.clock), known);
+        // What shows the wrapper lives while its turn's container waits for
+        // the machine's memory, before the turn starts.
+        // Only a registered wrapper heartbeats: the first turn's registers
+        // it, and the supervisor does not time its registration meanwhile.
+        let store: &dyn super::session::WrapperStore = &*self.queue;
+        let pid = self.pid;
+        let beats = *registered;
+        let beat = || {
+            if let Some(run) = in_container.filter(|_| beats)
+                && let Err(error) = store.heartbeat_wrapper(run.id(), pid)
+            {
+                tracing::warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "wrapper heartbeat failed: {error:#}");
+            }
+        };
+        // The turn's boundary is kept while it waits: an exit requested, or
+        // a hold or a replanning that fences its task, ends the wait and
+        // starts no container. A fence that cannot be read is read again
+        // at the next try.
+        let (files, queue, exit) = (self.files, &*self.queue, exit_path(run_dir));
+        let stop = || {
+            if files.is_file(&exit) {
+                return Some("the run's exit was requested".to_owned());
+            }
+            let run = in_container?;
+            match queue.turn_fence(run.task_id()) {
+                Ok(Some(fence)) => Some(fence.describe()),
+                Ok(None) | Err(_) => None,
+            }
+        };
         let spawned = match in_container {
             Some(_) => {
                 let containers = self
@@ -1115,6 +1161,12 @@ impl<'a> Turns<'a> {
                     at: i64::try_from(unix_secs(self.clock)).unwrap_or(i64::MAX),
                     turn,
                 })
+                .with_memory_records(super::run_container::MemoryRecords {
+                    events,
+                    turn,
+                    beat: &beat,
+                    stop: &stop,
+                })
                 .spawn(spec)
             }
             None => executor.spawn(spec),
@@ -1130,6 +1182,10 @@ impl<'a> Turns<'a> {
             }
             Err(error) => return Err(error),
         };
+        // Started once its process is: a container's wait for the machine's
+        // memory before it is no part of the turn (ADR-t3163-1 decision 4).
+        self.steps
+            .start_turn(step_reader, now_millis(self.clock), known);
         *child_may_be_alive = true;
         let ended = self.follow_turn(
             run_dir,

@@ -1190,6 +1190,12 @@ pub(super) fn container_parts(
             crate::application::podman_machine::MachineGate {
                 podman: Arc::new(crate::infrastructure::podman_machine::PodmanCli::default()),
                 required: crate::domain::podman_machine::MachineMounts::of_queue(queue_dir),
+                room: Arc::new(
+                    crate::infrastructure::podman_machine::HostMemoryRoom::under(
+                        queue_dir.parent().unwrap_or(Path::new(".")),
+                        crate::infrastructure::kpi_config::host_wide_file(),
+                    ),
+                ),
                 container: crate::application::container_image::ImageGate {
                     specs: Arc::new(crate::infrastructure::container_image::CheckoutImages::new(
                         main_checkout,

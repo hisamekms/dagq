@@ -1286,6 +1286,7 @@ pub mod lint;
 pub mod live_alerts;
 pub mod local_checks;
 pub mod local_gates;
+pub mod machine_memory;
 pub mod marks;
 pub mod measure;
 pub mod plan_quality;
@@ -2576,6 +2577,18 @@ pub enum AttentionNext {
     /// nothing set to the container runs. It ends once every relay runs
     /// again.
     QueueRelayMachine,
+    /// Not a person's to act on: a run's turn or its landing's
+    /// verification waits for the dagq machine's memory
+    /// (`container_memory_waiting`, ADR-t3163-1 decision 4), in the
+    /// host-wide order; it starts once the containers before it leave
+    /// room.
+    WaitingForMemory,
+    /// A run's turn or verification has waited for the dagq machine's
+    /// memory past [`machine_memory::LONG_WAIT_SECS`]
+    /// (`container_memory_wait_long`): a person looks at what the machine
+    /// runs (`podman --connection dagq ps`) and at the machine's and the
+    /// containers' memory in `host.toml`. It ends once the wait does.
+    CheckMachineMemory,
     /// The runtime's e2e of a run after its review could not run several
     /// times in a row (it could not start, a `[run.env]` that cannot be
     /// read, past its timeout: `run_e2e_finished` with `outcome: unavailable` and
@@ -2714,6 +2727,10 @@ impl fmt::Display for AttentionNext {
             Self::QueueServiceStatus => f.write_str("dagq service status"),
             Self::QueueBrokerLog => f.write_str("read the queue broker's log and run up"),
             Self::QueueRelayMachine => f.write_str("look at the dagq podman machine's relays"),
+            Self::WaitingForMemory => {
+                f.write_str("waiting for the dagq podman machine's memory (runtime)")
+            }
+            Self::CheckMachineMemory => f.write_str("look at the dagq podman machine's memory"),
             Self::CheckE2e => f.write_str("check the e2e host"),
             Self::ExitSession => f.write_str("exit the session"),
             Self::StopLandingProcesses => f.write_str("stop the dead landing's processes"),
@@ -2768,6 +2785,9 @@ pub const ATTENTION_KINDS: &[&str] = &[
     // ([`AttentionNext::FixRecheckTarget`]).
     recheck::LANDING_RECHECK_TARGET_UNWRITABLE,
     container_runtime::CONTAINER_RUNTIME_UNAVAILABLE,
+    // A turn or a verification waited long for the dagq machine's memory
+    // (ADR-t3163-1 decision 4); its start and its end are no attention.
+    event_kind::CONTAINER_MEMORY_WAIT_LONG,
     ci_watch::CI_WATCH_UNAVAILABLE,
     ci_watch::CI_JOBS_MISSING,
     sccache::RESTART_FAILED,
@@ -3073,6 +3093,10 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
         // the host (ADR-t2113-1 decision 4): the container is made usable,
         // or a task sets the runtime back to the host.
         (Some(EventKind::ContainerRuntimeUnavailable), _) => Some(AttentionNext::FixDagqToml),
+        // A container waited past the long mark for the dagq machine's
+        // memory (ADR-t3163-1 decision 4): the machine or a limit is too
+        // small for the work, or a container does not end.
+        (Some(EventKind::ContainerMemoryWaitLong), _) => Some(AttentionNext::CheckMachineMemory),
         // The means to read the CI went away (ADR-t1920-1 decision 2); its
         // return is no attention.
         (Some(EventKind::CiWatchUnavailable), _) => Some(ci_watch::Unavailable::next_of(
@@ -4360,6 +4384,17 @@ mod attention_tests {
             ),
             ("container_runtime_available", json!({}), None),
             (
+                "container_memory_wait_long",
+                json!({"purpose": "turn", "container": "dagq-q-run-r", "why": "w"}),
+                Some(CheckMachineMemory),
+            ),
+            ("container_memory_waiting", json!({"why": "w"}), None),
+            (
+                "container_memory_wait_ended",
+                json!({"outcome": "reserved"}),
+                None,
+            ),
+            (
                 "ci_watch_unavailable",
                 json!({"reason": "gh_missing"}),
                 Some(InstallTool),
@@ -4790,6 +4825,14 @@ mod attention_tests {
         assert_eq!(
             QueueRelayMachine.to_string(),
             "look at the dagq podman machine's relays"
+        );
+        assert_eq!(
+            WaitingForMemory.to_string(),
+            "waiting for the dagq podman machine's memory (runtime)"
+        );
+        assert_eq!(
+            CheckMachineMemory.to_string(),
+            "look at the dagq podman machine's memory"
         );
         assert_eq!(DecideDraft.to_string(), "request a plan for the draft");
         assert_eq!(DecideFinding.to_string(), "request a plan for the finding");

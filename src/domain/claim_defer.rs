@@ -475,10 +475,14 @@ pub fn worker_deferred(
     worker: super::worker::Worker,
     token: &LeaseToken,
 ) -> (EventKind, Value) {
-    use super::container_runtime::{CONTAINER_PROVIDER, CONTAINER_UNAVAILABLE};
+    use super::container_runtime::{CONTAINER_MEMORY, CONTAINER_PROVIDER, CONTAINER_UNAVAILABLE};
     let message = if reason == CONTAINER_UNAVAILABLE {
         format!(
             "dagq.toml sets the worker's runtime to the container, which cannot be used now ({reason}): not claimed until it can, never on the host instead"
+        )
+    } else if reason == CONTAINER_MEMORY {
+        format!(
+            "dagq.toml sets the worker's runtime to the container, and a worker's container would wait for the dagq machine's memory now ({reason}): not claimed until it fits, never on the host instead"
         )
     } else if reason == CONTAINER_PROVIDER {
         format!(

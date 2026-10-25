@@ -2398,6 +2398,12 @@ pub trait ContainerRuntime {
         &self,
         target: crate::domain::container_runtime::RuntimeTarget,
     ) -> crate::domain::container_runtime::Availability;
+    /// Why a new worker's container would wait for the dagq machine's
+    /// memory now, so its claim waits instead (ADR-t3163-1 decision 4);
+    /// `None` when it would fit, or the runtime reserves none.
+    fn memory_wait(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Runs a task's verification commands for `integrate` (ADR-0023

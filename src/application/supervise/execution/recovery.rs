@@ -997,6 +997,23 @@ impl RecoveryWatch {
         self.cpu = std::mem::take(&mut self.cpu).released();
     }
 
+    /// Forget the samples of the run's processes while its turn's container
+    /// waits for the dagq machine's memory: its wrapper sleeps then, and
+    /// the wait is no idle (ADR-t3163-1 decision 4). The watch looks anew
+    /// once the turn starts, its first sample one interval later.
+    pub(super) fn forget_idle_samples(&mut self) {
+        if self
+            .job
+            .as_ref()
+            .is_some_and(|job| job.alert == RecoveryAlert::IdleProcess)
+        {
+            return;
+        }
+        self.cpu = CpuWatch::default();
+        self.cpu_sampled = None;
+        self.idle_watched = None;
+    }
+
     /// The idle processes last handed to a job, for its ask.
     pub(super) fn idle_processes(&self) -> &[IdleProcess] {
         &self.idle
@@ -1680,6 +1697,20 @@ fn apply_live_verdict(
     Ok(Ok(applied))
 }
 
+/// Whether a turn or a verification of `run` waits for the dagq machine's
+/// memory now ([`crate::domain::machine_memory::standing_wait`]) and the
+/// process that waits lives: it is outside the turn's time, and the
+/// watches of idle processes and of the request's time do not count it
+/// (ADR-t3163-1 decision 4). A wait whose process is gone without saying
+/// so is no wait, so the watches end its run as they would.
+pub(super) fn waits_for_memory(sv: &Supervisor<'_>, run: &TaskRun) -> Result<bool> {
+    let events = sv.queue.run_events(run.id())?;
+    Ok(crate::domain::machine_memory::standing_wait(&events)
+        .and_then(|event| event.payload["pid"].as_u64())
+        .and_then(|pid| u32::try_from(pid).ok())
+        .is_some_and(|pid| sv.processes.alive(pid)))
+}
+
 impl SessionWatch {
     pub(super) fn watch_idle_processes(
         &mut self,
@@ -1687,6 +1718,12 @@ impl SessionWatch {
         run: &TaskRun,
     ) -> Result<()> {
         if !self.recovery.running() && sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled)? {
+            return Ok(());
+        }
+        // A turn that waits for the machine's memory has not started: its
+        // wrapper's sleep is no idle process.
+        if waits_for_memory(sv, run)? {
+            self.recovery.forget_idle_samples();
             return Ok(());
         }
         let phase = if self.receipt_seen {

@@ -7,13 +7,17 @@
 //! (each candidate's claim is deferred, `container_unavailable`) and no run
 //! is resumed; a worker that would run on Codex waits the same way, as the
 //! container does not reach it (`container_provider_unsupported`,
-//! ADR-t2114-1 decision 2). While the verification's cannot, no run lands.
+//! ADR-t2114-1 decision 2). While a worker's container would wait for the
+//! dagq machine's memory, new claims of such a worker wait too
+//! (`container_memory_wait`, ADR-t3163-1 decision 4); resumes and landings
+//! go on and wait for their memory themselves. While the verification's
+//! cannot, no run lands.
 //! Nothing set to the container runs on the host instead (ADR-t2113-1
 //! decision 4).
 
 use super::*;
 use crate::domain::container_runtime::{
-    CONTAINER_RUNTIME_KINDS, ContainerCheck, RuntimeTarget, worker_deferral,
+    CONTAINER_MEMORY, CONTAINER_RUNTIME_KINDS, ContainerCheck, RuntimeTarget, worker_deferral,
 };
 
 impl Supervisor<'_> {
@@ -44,9 +48,31 @@ impl Supervisor<'_> {
                 ),
             }
         }
+        // Only a worker set to the container that can be used reserves the
+        // machine's memory.
+        let memory_wait = (runtimes.worker == crate::domain::container_runtime::Runtime::Container
+            && check.why(RuntimeTarget::Worker).is_none())
+        .then(|| container.memory_wait())
+        .flatten();
+        if memory_wait != self.landing.memory_wait
+            && let Some(why) = &memory_wait
+        {
+            info!(
+                "a worker's container would wait for the dagq machine's memory ({why}): new claims of a worker set to the container wait"
+            );
+        }
+        self.landing.memory_wait = memory_wait;
         self.landing.runtimes = runtimes;
         self.landing.container = check;
         Ok(())
+    }
+
+    /// Why a new claim of a worker set to the container waits for the dagq
+    /// machine's memory ([`CONTAINER_MEMORY`]), `None` when it fits; a
+    /// resume is not held by it, as a run's next turn waits for its memory
+    /// itself (ADR-t3163-1 decision 4).
+    pub(super) fn container_memory_deferral(&self) -> Option<&'static str> {
+        self.landing.memory_wait.as_ref().map(|_| CONTAINER_MEMORY)
     }
 
     /// Why a worker that would run on `provider` is not claimed or
