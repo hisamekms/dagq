@@ -302,8 +302,12 @@ pub fn running(pid: u32) -> bool {
     !stat.trim().is_empty() && !stat.trim().starts_with('Z')
 }
 
+/// A queue with a ready task and its repository, in a directory of their
+/// own in `/tmp` ([`common::short_tempdir`]): the sweep's, the cleanup's
+/// and the retention's tests need the queue under no run directory and its
+/// runs' worktrees short enough to name their scratchpads.
 pub fn fixture() -> (Fixture, PathBuf, PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::short_tempdir();
     let repo = dir.path().join("repo's directory");
     fs::create_dir(&repo).unwrap();
     common::template::repository(&repo, "fixture\n");

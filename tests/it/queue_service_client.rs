@@ -760,7 +760,8 @@ fn an_answer_past_the_client_s_limit_on_the_socket_is_refused_as_too_large() {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     let _test = crate::common::test();
-    let dir = tempfile::tempdir().unwrap();
+    // Not in `$TMPDIR`, which may be too deep for a socket's path.
+    let dir = crate::common::short_tempdir();
     let socket = dir.path().join("s.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     // A service that answers one request with a line past the limit.

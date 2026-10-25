@@ -490,6 +490,19 @@ pub fn shell_path(path: impl AsRef<std::path::Path>) -> String {
     dagq::infrastructure::adapters::shell_quote(path.as_ref().to_str().unwrap())
 }
 
+/// A temporary directory in `/tmp`, not in `$TMPDIR`, for a fixture that
+/// must be short and under no `runs/` directory. The landing's
+/// verification on the host has its run directory's `tmp`
+/// (`<queue>/runs/<run>/tmp`) as its `TMPDIR`. Under it, a fixture's queue
+/// is taken for a run directory's files (no link followed, no directory's
+/// time read). A socket's path there may pass the `sun_path` limit (104
+/// bytes on macOS), and the queue's socket then moves out of its
+/// `service/`. A run's worktree there is too long to name its Claude Code
+/// scratchpad (200 characters at most).
+pub fn short_tempdir() -> tempfile::TempDir {
+    tempfile::tempdir_in("/tmp").unwrap()
+}
+
 /// Set the permission bits of `path` to `mode`: a test makes a file or a
 /// directory of the queue unreadable or unwritable to inject a failure of
 /// the host, and gives the bits back once the failure is to be gone.
