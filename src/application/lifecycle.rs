@@ -2145,28 +2145,80 @@ pub struct InboxPorts<'a> {
     /// takes: the session its token is bound to. `None` when its start
     /// cannot be read, and then the inbox is not opened.
     pub session: Option<crate::domain::queue_service::SessionProcess>,
+    /// `[roles.inbox]` of the `dagq.toml` in a checkout, the inbox's
+    /// default provider and model (ADR-t1181-1 decision 1): an error is a
+    /// mistake of that table only, which the inbox is refused for; one
+    /// elsewhere in the file does not keep the inbox closed
+    /// ([`crate::infrastructure::run_env::load_inbox_role`]).
+    pub roles: &'a dyn Fn(&Path) -> Result<crate::domain::actor_model::RoleModels>,
+    /// Whether a Codex inbox started in the given directory (the main
+    /// checkout, which a relative `CODEX_HOME` is taken from, as Codex
+    /// takes it) may start on the person's Codex settings, which are only
+    /// read: `Err` with why, where and what the person adds themselves when
+    /// Codex's TUI would write to them
+    /// ([`crate::infrastructure::codex_inbox::check_user_config`]).
+    pub codex_settings: &'a dyn Fn(&Path) -> std::result::Result<(), String>,
 }
 
 /// What `dagq inbox` is given: the plugin directory the inbox loads
-/// (`--plugin-dir`; without it the installed plugin, which is checked) and
-/// the executable of its agent as given (`--claude`).
+/// (`--plugin-dir`; without it the installed plugin, which is checked for
+/// Claude), the executables of Claude Code (`agent`, `--claude`) and Codex
+/// (`--codex`) as given, and the provider and model of this start alone
+/// (`--provider`, `--model`; `None` takes `[roles.inbox]`).
 #[derive(Debug, Clone)]
 pub struct InboxOptions {
     pub plugin_dir: Option<PathBuf>,
     pub agent: PathBuf,
+    pub codex: PathBuf,
+    pub provider: Option<crate::domain::Provider>,
+    pub model: Option<String>,
 }
 
-/// The agent `dagq inbox` starts: its provider, which `inbox_opened`
-/// records, and the adapter that makes its command.
-pub struct InboxAgent<'a> {
-    pub provider: crate::domain::Provider,
-    pub agent: &'a dyn AgentProvider,
+/// The adapters `dagq inbox` makes the inbox's command with, one per
+/// provider; [`inbox_route`] chooses.
+pub struct InboxAgents<'a> {
+    pub claude: &'a dyn AgentProvider,
+    pub codex: &'a dyn AgentProvider,
+}
+
+/// Why `dagq inbox` opens no Codex inbox yet (ADR-t1181-1, the order of
+/// implementation): a Codex inbox is selectable only once its session and
+/// launch are recorded with their provider and model, which they are not
+/// yet.
+pub const CODEX_INBOX_PENDING: &str = "the Codex inbox is not selectable yet: its session and \
+launch records (provider, model and thread) are not implemented, and a Codex inbox is not opened \
+without them; open the inbox on Claude with `dagq inbox --provider claude`, or remove provider = \
+\"codex\" from [roles.inbox]";
+
+/// How the inbox starts, decided before anything is read of the queue or
+/// recorded: its launch ([`crate::domain::actor_model::inbox_launch`]:
+/// `[roles.inbox]` of `roles`, overridden by `--provider` and `--model` of
+/// `options`, a mistake refused as a mistake of the setting). A Codex
+/// inbox goes on only when the person's Codex settings would not be
+/// written (`codex_settings`), and is then refused with
+/// [`CODEX_INBOX_PENDING`]: neither starts Claude in its place.
+pub fn inbox_route(
+    roles: &crate::domain::actor_model::RoleModels,
+    options: &InboxOptions,
+    codex_settings: &dyn Fn() -> std::result::Result<(), String>,
+) -> Result<crate::domain::actor_model::ActorLaunch> {
+    let launch =
+        crate::domain::actor_model::inbox_launch(roles, options.provider, options.model.as_deref())
+            .map_err(anyhow::Error::msg)?;
+    if launch.provider == crate::domain::Provider::Codex {
+        codex_settings().map_err(anyhow::Error::msg)?;
+        bail!(CODEX_INBOX_PENDING);
+    }
+    Ok(launch)
 }
 
 /// `dagq inbox` (ADR-t2159-1 decision 2): the command that runs the
 /// inbox's agent, for the caller to start in the foreground of its own
 /// terminal (it execs it). Refused inside an inbox ([`INBOX_INSIDE_REFUSED`])
-/// before anything is read or recorded. Then the same check of the agent
+/// before anything is read or recorded. Its provider and model are
+/// [`inbox_route`]'s, from the main checkout's `[roles.inbox]` (a
+/// mistake there refused as a mistake of the setting) and the
+/// arguments, refused before anything is recorded. Then the same check of the agent
 /// and the plugin as `up` ([`require_agent`]), the provider's
 /// [`AgentProvider::inbox_command`] (its settings, the plugin directory and
 /// [`inbox_session_prompt`]) through the actor executor, in the
@@ -2176,10 +2228,12 @@ pub struct InboxAgent<'a> {
 /// inbox's guardrail by ([`super::inbox_guardrail::judge`]). Its payload
 /// is `guardrail` (whether the provider has the settings,
 /// [`AgentProvider::inbox_settings`]), `settings` (their path or null) and
-/// `provider`; an inbox opened this way has no workspace.
+/// `provider`; an inbox opened this way has no workspace. A launch that
+/// names a model or effort ([`AgentProvider::apply_launch`]) starts with
+/// it.
 pub fn inbox(
     ports: &InboxPorts,
-    started: &InboxAgent,
+    agents: &InboxAgents,
     db: &Path,
     repo: &Path,
     environment: &UpEnvironment,
@@ -2189,7 +2243,6 @@ pub fn inbox(
         environment.role.as_deref() != Some(INBOX_ROLE),
         INBOX_INSIDE_REFUSED
     );
-    let agent = started.agent;
     let db = ports
         .files
         .canonicalize(db)
@@ -2199,13 +2252,23 @@ pub fn inbox(
         Ok(checkout) => checkout.clone(),
         Err(error) => bail!("{error}; the inbox was not opened"),
     };
+    let roles = (ports.roles)(&checkout)
+        .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
+    // The settings of the Codex started in the main checkout, which a
+    // relative `CODEX_HOME` is taken from.
+    let launch = inbox_route(&roles, options, &|| (ports.codex_settings)(&checkout))
+        .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
+    let (agent, executable) = match launch.provider {
+        crate::domain::Provider::Claude => (agents.claude, &options.agent),
+        crate::domain::Provider::Codex => (agents.codex, &options.codex),
+    };
     require_agent(
         agent,
-        &options.agent,
+        executable,
         options.plugin_dir.as_deref(),
         &checkout,
         "inbox",
-        true,
+        launch.provider == crate::domain::Provider::Claude,
     )
     .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
     let language = (ports.resolve_language)(&checkout, environment.user_config.as_deref())
@@ -2254,6 +2317,7 @@ pub fn inbox(
             },
         ))?
         .foreground()?;
+    agent.apply_launch(&mut command, &launch);
     command.env(
         crate::domain::queue_service::CREDENTIAL_FILE_ENV,
         path_text(&credential)?,
@@ -2265,7 +2329,7 @@ pub fn inbox(
         json!({
             "guardrail": settings.is_some(),
             "settings": settings,
-            "provider": started.provider.as_str(),
+            "provider": launch.provider.as_str(),
         }),
     )?;
     Ok(command)
@@ -2702,6 +2766,96 @@ fn escape(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::application::EventStore;
+    use crate::domain::{
+        Provider,
+        actor_model::{ActorLaunch, LaunchSource, ModelRole, RoleModels},
+    };
+
+    fn inbox_options(provider: Option<Provider>, model: Option<&str>) -> InboxOptions {
+        InboxOptions {
+            plugin_dir: None,
+            agent: PathBuf::from("claude"),
+            codex: PathBuf::from("codex"),
+            provider,
+            model: model.map(str::to_owned),
+        }
+    }
+
+    /// The person's Codex settings are not looked at for a Claude inbox.
+    fn unread() -> std::result::Result<(), String> {
+        panic!("a Claude inbox reads no Codex settings")
+    }
+
+    /// With neither `[roles.inbox]` nor `--provider` / `--model` the
+    /// inbox starts as before; `[roles.inbox]` is its default and the
+    /// arguments override it for the one start; a mistake in either is
+    /// refused as a mistake of the setting.
+    #[test]
+    fn the_inbox_route_takes_the_table_and_the_arguments_over_it() {
+        let none = RoleModels::default();
+        let launch = inbox_route(&none, &inbox_options(None, None), &unread).unwrap();
+        assert_eq!(launch, ActorLaunch::default_of(ModelRole::Inbox));
+        let mut claude = RoleModels::default();
+        claude.entry(ModelRole::Inbox).model = Some("claude-sonnet-5-5".to_owned());
+        let launch = inbox_route(&claude, &inbox_options(None, None), &unread).unwrap();
+        assert_eq!(
+            (launch.provider, launch.source),
+            (Provider::Claude, LaunchSource::Config)
+        );
+        assert_eq!(launch.arguments(), Some(("claude-sonnet-5-5", "medium")));
+        let launch = inbox_route(
+            &claude,
+            &inbox_options(Some(Provider::Claude), Some("claude-opus-5-5")),
+            &unread,
+        )
+        .unwrap();
+        assert_eq!(launch.source, LaunchSource::Argument);
+        assert_eq!(launch.model.as_deref(), Some("claude-opus-5-5"));
+        let error = inbox_route(
+            &none,
+            &inbox_options(Some(Provider::Codex), Some("claude-opus-5-5")),
+            &unread,
+        )
+        .unwrap_err();
+        assert!(format!("{error}").contains("is Claude's"), "{error}");
+    }
+
+    /// A Codex inbox, by `[roles.inbox]` or by `--provider`, is not opened
+    /// yet: refused with why, Claude not started in its place; and before
+    /// that, refused with the settings check's reason when Codex would
+    /// write the person's settings.
+    #[test]
+    fn a_codex_inbox_is_refused_until_its_records_land() {
+        let settings_ok = || Ok(());
+        let mut table = RoleModels::default();
+        table.entry(ModelRole::Inbox).provider = Some(Provider::Codex);
+        for (roles, options) in [
+            (&table, inbox_options(None, None)),
+            (
+                &RoleModels::default(),
+                inbox_options(Some(Provider::Codex), None),
+            ),
+            (&table, inbox_options(None, Some("gpt-6.1-sol"))),
+        ] {
+            let error = inbox_route(roles, &options, &settings_ok).unwrap_err();
+            assert_eq!(format!("{error}"), CODEX_INBOX_PENDING);
+        }
+        assert!(CODEX_INBOX_PENDING.contains("--provider claude"));
+        let settings_missing = || Err("the Codex inbox was not opened: add [tui]".to_owned());
+        let error = inbox_route(&table, &inbox_options(None, None), &settings_missing).unwrap_err();
+        assert_eq!(
+            format!("{error}"),
+            "the Codex inbox was not opened: add [tui]"
+        );
+        // `--provider claude` over a Codex table opens Claude.
+        let launch = inbox_route(
+            &table,
+            &inbox_options(Some(Provider::Claude), None),
+            &unread,
+        )
+        .unwrap();
+        assert_eq!(launch.provider, Provider::Claude);
+    }
 
     /// A launchd supervisor is handed over only when its agent is the one
     /// this binary writes in what an exec cannot change: the path it

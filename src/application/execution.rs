@@ -397,22 +397,70 @@ const IDENTITY_ENV: [&str; 4] = [ROLE_ENV, ACTOR_ID_ENV, RUN_ID_ENV, TASK_ID_ENV
 /// another shell or a script is not matched, and the CLI's own check stays
 /// the one that refuses (ADR-t728-1 decision 6).
 pub fn permission_deny(role: ActorRole) -> Vec<String> {
+    deny_forms(role).iter().map(DenyForm::claude_rule).collect()
+}
+
+/// One shape of shell command a role's guardrail refuses, matched on the
+/// head of the command only: Claude Code's `permissions.deny` rule
+/// ([`permission_deny`]) and the Codex inbox's PreToolUse hook
+/// ([`super::codex_inbox::guard`]) are both written from these, so the two
+/// guardrails refuse the same heads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DenyForm {
+    /// `dagq <command>` as a whole word sequence: the command alone or
+    /// followed by whitespace (`Bash(dagq <command>:*)`).
+    Command(String),
+    /// Any command that starts with this text (`Bash(<text>*)`).
+    Prefix(String),
+}
+
+impl DenyForm {
+    /// The Claude Code rule of this form.
+    pub fn claude_rule(&self) -> String {
+        match self {
+            Self::Command(command) => format!("Bash({command}:*)"),
+            Self::Prefix(text) => format!("Bash({text}*)"),
+        }
+    }
+
+    /// Whether the shell command `command`, its leading whitespace left
+    /// out, starts with this form. A command wrapped in another (after
+    /// `&&`, `;`, a pipe, inside `sh -c`) is not matched, as Claude Code's
+    /// rule does not match it either.
+    pub fn matches_head(&self, command: &str) -> bool {
+        let command = command.trim_start();
+        match self {
+            Self::Command(form) => command
+                .strip_prefix(form.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace)),
+            Self::Prefix(text) => command.starts_with(text.as_str()),
+        }
+    }
+}
+
+/// The forms of `role`'s guardrail, from its policy ([`grants`]): each
+/// [`DAGQ_COMMANDS`] entry it has no capability for, and setting,
+/// exporting or unsetting the variables that name the actor.
+pub fn deny_forms(role: ActorRole) -> Vec<DenyForm> {
     let granted = grants(role);
-    let mut rules: Vec<String> = DAGQ_COMMANDS
+    let mut forms: Vec<DenyForm> = DAGQ_COMMANDS
         .iter()
         .filter(|(_, needs)| !needs.iter().any(|need| granted.contains(need)))
-        .map(|(command, _)| format!("Bash(dagq {command}:*)"))
+        .map(|(command, _)| DenyForm::Command(format!("dagq {command}")))
         .collect();
     for name in IDENTITY_ENV {
-        rules.extend([
-            format!("Bash({name}=*)"),
-            format!("Bash(export {name}*)"),
-            format!("Bash(env {name}=*)"),
-            format!("Bash(env -u {name}*)"),
-            format!("Bash(unset {name}*)"),
-        ]);
+        forms.extend(
+            [
+                format!("{name}="),
+                format!("export {name}"),
+                format!("env {name}="),
+                format!("env -u {name}"),
+                format!("unset {name}"),
+            ]
+            .map(DenyForm::Prefix),
+        );
     }
-    rules
+    forms
 }
 
 #[cfg(test)]

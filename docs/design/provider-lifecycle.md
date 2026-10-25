@@ -85,6 +85,31 @@ providerは役割ごとに決まる（[Actor model](supervisor-lifecycle/actor-m
 - queue serviceへの到達は[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)。
 - 落とし穴: runのreviewと`setup-review`のjobだけはworktreeを`untrusted`にする（`codex::distrust_config`、[ADR-t1570-1](../adr/2026-10-04-t1570-1-codex-run-review-distrusts-the-worktree-project.md)）。
 
+## inboxの起動
+
+`dagq inbox`はproviderの`AgentProvider::inbox_command`でinboxのcommandを作る（選び方と記録の手順は[`up` / `down`](supervisor-lifecycle/up-down.md#dagq-inbox)）。
+Claudeのinboxはqueueのdirに書くsettings（inboxのdenyだけ）とpluginで開く。
+Codexのinboxは起動の引数だけで開き、何も書かない（[ADR-t1181-1](../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定2）。
+Codexのinboxを選べるのはinboxの記録の実装の後で、それまで`lifecycle::inbox_route`が開かずに断る。
+
+- 入口: 引数・hookのtrust・人の設定の確かめは`infrastructure::codex_inbox`（`inbox_command`・`hook_configs`・`LAUNCH_CONFIG`・`check_user_config`）、hookの答えは`application::codex_inbox`、hookを動かすのは`dagq codex-inbox-hook`。
+- 約束: 指示はpluginのskillの場所を名指す常に効く指示で渡し、見張りは上限つきの前景の`watch`にする（Codexにはbackgroundのtaskも選択肢のtoolも無い）。
+- 約束: hookのtrustは、dagqが起動の引数で渡すhookだけに、その起動だけ与える。
+  全hookのtrustを飛ばす引数とsandbox・承認を外す引数は使わない。
+  trustはhookごとに決まるので、渡すhookの全部に与える。
+  人やrepositoryの`.codex/`のhookは、Codexのtrustの画面に残る。
+- 限界: trustの値はCodexの内部の実装（hookの正規化とhash）に依る。
+  版が上がって合わなくなったhookは、Codexのtrustの画面に戻り、trustしなければ動かない。
+  黙って動くことは無い。
+  そのときは、版を名指した既知の値のunit testを測り直す。
+  SessionStartが届いても、guardrail・Stop・SessionEndのhookが動いたことは分からない。
+- 約束: 人のCodexの設定（`CODEX_HOME`か`~/.codex`の`config.toml`・`auth.json`）と`~/.claude`は書かない（[ADR-t3331-1](../adr/2026-10-25-t3331-1-codex-inbox-writes-no-person-settings-and-refuses-to-open-when-codex-would.md)）。
+  TUIが自分で書き足す欄は、引数で止められるものは止め、止められないものはexecの前に人のfileを読むだけで確かめ、欠けていれば開かない。
+- 境界: sandboxはどこも書かせず、queue serviceのsocketへの接続だけを足す（`Codex::reach_queue_service`、jobと同じprofile。[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。
+  inboxの`dagq`はinboxのtokenとともにserviceへ送り、serviceがinboxのprincipalで認可する。
+  queueのdirとDBはsandboxから書けないので、DBを開く制御側のコマンド（`up`・`integrate`など）はCodexのinboxからは動かず、人が自分のterminalで打つ。
+  hookはsandboxの外のhostで動き、queueはinboxの身元の`dagq`で読む。
+
 ## Claude sessionの区間
 
 runtimeが起動するsessionとjobは、kindごとの区間として記録する（[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)）。

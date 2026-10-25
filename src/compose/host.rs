@@ -23,7 +23,7 @@ use crate::{
         AgentProvider, CommandSpec, HostOpsQueue, LaunchAgent, ProcessControl, QueueOpener, RunLog,
         install::{self as installation, Binaries, InstallOptions},
         lifecycle::{
-            self, DownOptions, InboxAgent, InboxOptions, InboxPorts, LifecycleQueue,
+            self, DownOptions, InboxAgents, InboxOptions, InboxPorts, LifecycleQueue,
             Ports as LifecyclePorts, QueuePaths, RepositoryPaths, UpEnvironment, UpOptions,
         },
         rebind::{self as rebinding, Rebind, RebindTarget},
@@ -292,7 +292,12 @@ pub fn inbox_command(
     let command = ClaudeCode {
         executable: claude.to_owned(),
     }
-    .inbox_command(&prompt, plugin_dir, db.parent().unwrap_or(Path::new(".")))?;
+    .inbox_command(
+        &prompt,
+        plugin_dir,
+        db.parent().unwrap_or(Path::new(".")),
+        Path::new("."),
+    )?;
     crate::application::actor_executor::command_line(&command)
 }
 
@@ -696,6 +701,10 @@ impl OneShot {
             executable: crate::infrastructure::adapters::claude_at_entry(&options.agent)
                 .unwrap_or_else(|_| options.agent.clone()),
         };
+        let codex = crate::infrastructure::codex::Codex::new(
+            crate::infrastructure::codex::codex_at_entry(&options.codex)
+                .unwrap_or_else(|_| options.codex.clone()),
+        );
         let queues = |db: &Path| self.event_queues(db);
         lifecycle::inbox(
             &InboxPorts {
@@ -713,16 +722,19 @@ impl OneShot {
                         .session_start(pid)
                         .map(|start| crate::domain::queue_service::SessionProcess { pid, start })
                 },
+                roles: &crate::infrastructure::run_env::load_inbox_role,
+                codex_settings: &crate::infrastructure::codex_inbox::check_this_user_config,
             },
-            &InboxAgent {
-                provider: crate::domain::Provider::Claude,
-                agent: &claude,
+            &InboxAgents {
+                claude: &claude,
+                codex: &codex,
             },
             &location.db,
             repo,
             environment,
             &InboxOptions {
                 agent: claude.executable.clone(),
+                codex: codex.executable.clone(),
                 ..options.clone()
             },
         )

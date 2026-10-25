@@ -4272,6 +4272,7 @@ impl AgentProvider for ClaudeCode {
         prompt: &str,
         plugin_dir: Option<&Path>,
         queue_dir: &Path,
+        _cwd: &Path,
     ) -> Result<CommandSpec> {
         let settings = queue_dir.join(INBOX_SETTINGS);
         crate::application::RunFiles::write(
@@ -6754,7 +6755,9 @@ mod tests {
 
         let queue_dir = dir.path().join("queue");
         fs::create_dir_all(&queue_dir).unwrap();
-        let command = claude.inbox_command("inbox", None, &queue_dir).unwrap();
+        let command = claude
+            .inbox_command("inbox", None, &queue_dir, dir.path())
+            .unwrap();
         let path = queue_dir.join(INBOX_SETTINGS);
         assert_eq!(claude.inbox_settings(&queue_dir), Some(path.clone()));
         let args: Vec<_> = command.get_args().collect();

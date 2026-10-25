@@ -3092,6 +3092,44 @@ pub fn load_role_models(root: &Path) -> Result<RoleModels> {
         .roles)
 }
 
+/// `[roles.inbox]` of the `dagq.toml` in `root` (ADR-t1181-1 decision 1),
+/// read alone: the file with every line outside that table blanked
+/// ([`inbox_table_only`]), parsed and checked as the whole file is. So a
+/// mistake of that table (an unknown provider, a Claude model for Codex,
+/// an unknown key) is an error and one elsewhere in the file (a table a
+/// newer binary knows) is not: `dagq inbox` refuses the first and is not
+/// kept closed by the second. No file is no table.
+pub fn load_inbox_role(root: &Path) -> Result<RoleModels> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(RoleModels::default());
+    };
+    Ok(parse_config(&inbox_table_only(&text))
+        .with_context(|| format!("parse {}", path.display()))?
+        .roles)
+}
+
+/// `text` with every line blanked but those of its `[roles.inbox]` table
+/// (its header to the next header, a header being a line that starts with
+/// `[` as [`parse_config`] reads one), so the line numbers stay those of
+/// the file.
+fn inbox_table_only(text: &str) -> String {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut inside = false;
+    text.lines()
+        .map(|raw| {
+            let line = raw.trim();
+            if let Some(header) = line.strip_prefix('[') {
+                let name = strip_comment(header).trim();
+                inside = name.strip_suffix(']').map(str::trim)
+                    == Some(&format!("{ROLES_PREFIX}inbox")[..]);
+            }
+            if inside { raw } else { "" }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `runtime` of `[roles.worker]` and `[roles.verification]` of the
 /// `dagq.toml` in `root` (goal 38); no file is the host for both.
 pub fn load_runtimes(root: &Path) -> Result<RuntimeConfig> {
@@ -3579,6 +3617,46 @@ impl Verifier for ShellVerifier {
 
 #[cfg(test)]
 mod tests {
+    /// The inbox reads its own table alone: a mistake there is an error
+    /// whatever its message, one in another table is not seen.
+    #[test]
+    fn the_inbox_table_is_read_alone_and_its_mistakes_are_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(CONFIG_FILE_NAME);
+        let load = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            load_inbox_role(dir.path()).map_err(|error| format!("{error:#}"))
+        };
+        assert_eq!(load_inbox_role(dir.path()).unwrap(), RoleModels::default());
+        let other = "[no_such_table]\nkey = 1\n[roles.review]\nprovider = 'gemini'\n";
+        assert!(parse_config(other).is_err());
+        assert_eq!(load(other).unwrap(), RoleModels::default());
+        let codex = load(
+            "[no_such_table]\nkey = 1\n[roles.inbox] # the inbox\nprovider = 'codex'\n[x]\ny = 2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            codex.get(ModelRole::Inbox).unwrap().provider,
+            Some(crate::domain::Provider::Codex)
+        );
+        for (text, line) in [
+            ("[a]\nb = 1\n[roles.inbox]\nprovider = \"gemini\"\n", ":4"),
+            (
+                "[roles.inbox]\nprovider = 'codex'\nmodel = 'claude-opus-5-5'\n",
+                "[roles.inbox]",
+            ),
+            ("[roles.inbox]\nflavour = 'x'\n", ":2"),
+        ] {
+            let error = load(text).unwrap_err();
+            assert!(error.contains(line), "{text:?}: {error}");
+        }
+        assert!(
+            load("[roles.inbox]\nprovider = \"gemini\"\n")
+                .unwrap_err()
+                .contains("gemini")
+        );
+    }
+
     use super::*;
 
     /// This repository's own `dagq.toml` declares the Rust profile and has
@@ -5295,11 +5373,6 @@ LITERAL = 'no \n escapes # here'
             );
         }
         for (text, expected) in [
-            // The inbox is no role of the file at all.
-            (
-                "[roles.inbox]\nruntime = 'container'",
-                "unknown role [roles.inbox]",
-            ),
             (
                 "[roles.worker]\nruntime = 'podman'",
                 "unknown runtime \"podman\"",

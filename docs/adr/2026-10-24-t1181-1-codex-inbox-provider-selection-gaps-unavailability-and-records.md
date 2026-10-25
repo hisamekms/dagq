@@ -10,6 +10,8 @@ amends:
   - adr-t1063-1 decision 1
   - adr-t1063-1 decision 5
   - adr-t1063-1 decision 6
+amended_by:
+  - adr-t3331-1
 owners:
   - hisamekms
 tags:

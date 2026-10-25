@@ -1,7 +1,8 @@
 //! The provider, model and effort of the sessions other than the worker's
 //! (ADR-0079 decision 7 (b)(c), ADR-t1063-1): the plan review, the review, the recovery (triage)
 //! job, the goal review, the observer, the throughput review, the runtime's
-//! planners and a person's planner. Each
+//! planners, a person's planner and the inbox (ADR-t1181-1 decision 1,
+//! whose launch arguments override its table, [`inbox_launch`]). Each
 //! role takes `[roles.<role>]` of `dagq.toml` when it has one, and is
 //! started as before (the provider's default, no model or effort given)
 //! when it has none. A planner the runtime opens again for a plan review's
@@ -28,10 +29,11 @@ string_enum!(ModelRole {
     SetupReview => "setup_review",
     RuntimePlanner => "runtime_planner",
     Planner => "planner",
+    Inbox => "inbox",
 });
 
 impl ModelRole {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::PlanReview,
         Self::Review,
         Self::Recovery,
@@ -41,6 +43,7 @@ impl ModelRole {
         Self::SetupReview,
         Self::RuntimePlanner,
         Self::Planner,
+        Self::Inbox,
     ];
 }
 
@@ -51,9 +54,9 @@ pub const ROLE_PROVIDER: Provider = Provider::Claude;
 /// The roles Codex has an implementation for (ADR-t1063-1 decisions 1
 /// and 7): goal, run and plan reviews, the throughput review, the
 /// observer (ADR-t1222-1, task 1223), the recovery job (task 1225) and
-/// the job of `setup-review` (ADR-t2259-1 decision 7). Claude runs every
-/// role.
-pub const CODEX_ROLES: [ModelRole; 7] = [
+/// the job of `setup-review` (ADR-t2259-1 decision 7) and the inbox
+/// (ADR-t1181-1 decision 2). Claude runs every role.
+pub const CODEX_ROLES: [ModelRole; 8] = [
     ModelRole::GoalReview,
     ModelRole::Review,
     ModelRole::PlanReview,
@@ -61,6 +64,7 @@ pub const CODEX_ROLES: [ModelRole; 7] = [
     ModelRole::Observer,
     ModelRole::Recovery,
     ModelRole::SetupReview,
+    ModelRole::Inbox,
 ];
 
 /// Whether `provider` can run a session of `role`.
@@ -282,6 +286,51 @@ impl RoleModels {
     }
 }
 
+/// What the inbox starts with (ADR-t1181-1 decision 1): `[roles.inbox]`
+/// ([`RoleModels::launch`]) when `dagq inbox` names neither a provider
+/// nor a model, so with neither it starts as before (Claude, nothing
+/// given). Otherwise that start alone takes the arguments, its source
+/// [`LaunchSource::Argument`]: the provider named, else the table's; the
+/// model named, else the table's when the provider is the table's (a
+/// model is its provider's own name); the table's effort, `medium` for a
+/// model named without one. The result is checked as a table of the inbox
+/// is ([`RoleModel::check`]), so a Claude model for Codex is refused as in
+/// `dagq.toml`.
+pub fn inbox_launch(
+    roles: &RoleModels,
+    provider: Option<Provider>,
+    model: Option<&str>,
+) -> Result<ActorLaunch, String> {
+    let table = roles.launch(ModelRole::Inbox);
+    if provider.is_none() && model.is_none() {
+        return Ok(table);
+    }
+    let provider = provider.unwrap_or(table.provider);
+    let model = match model {
+        Some(model) => Some(model.to_owned()),
+        None if provider == table.provider => table.model.clone(),
+        None => None,
+    };
+    let effort = table
+        .effort
+        .clone()
+        .or_else(|| model.is_some().then(|| MEDIUM.to_owned()));
+    RoleModel {
+        provider: Some(provider),
+        model: model.clone(),
+        effort: None,
+    }
+    .check(ModelRole::Inbox)
+    .map_err(|error| format!("dagq inbox: {error}"))?;
+    Ok(ActorLaunch {
+        provider,
+        model,
+        effort,
+        source: LaunchSource::Argument,
+        ..ActorLaunch::default_of(ModelRole::Inbox)
+    })
+}
+
 /// Where a headless job of a role starts (ADR-t1063-1 decisions 4 and 5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobRoute {
@@ -427,12 +476,14 @@ pub fn job_wait_text(provider: Provider, reason: SwitchReason, fallback: bool) -
 // step up for a revise ([`ActorLaunch::escalated`]); `review.subagents`, the
 // provider a review agent's `[review.subagents.<agent>]` names
 // ([`RoleModels::agent_launch`]), kept when the job moves off it
-// ([`ActorLaunch::switched`]).
+// ([`ActorLaunch::switched`]); `argument`, the launch arguments of `dagq
+// inbox` ([`inbox_launch`]).
 string_enum!(LaunchSource {
     Default => "default",
     Config => "dagq.toml",
     ReviseEscalation => "revise_escalation",
     Subagent => "review.subagents",
+    Argument => "argument",
 });
 
 /// The provider, model and effort a session was started with, and where
@@ -585,6 +636,73 @@ pub const fn records_unusable(provider: Provider, switchable: bool, fallback: bo
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// With neither `[roles.inbox]` nor an argument the inbox starts as
+    /// before: Claude, nothing given, the default's source.
+    #[test]
+    fn an_inbox_with_no_table_and_no_argument_starts_as_before() {
+        let launch = inbox_launch(&RoleModels::default(), None, None).unwrap();
+        assert_eq!(launch, ActorLaunch::default_of(ModelRole::Inbox));
+        assert_eq!(launch.provider, Provider::Claude);
+        assert_eq!(launch.arguments(), None);
+        assert_eq!(launch.source, LaunchSource::Default);
+    }
+
+    /// `[roles.inbox]` is the default and an argument overrides it for the
+    /// one start (ADR-t1181-1 decision 1); a model is its provider's own
+    /// name, and what fits no provider is refused as in `dagq.toml`.
+    #[test]
+    fn the_inbox_takes_its_table_and_the_arguments_override_it() {
+        let mut roles = RoleModels::default();
+        let table = roles.entry(ModelRole::Inbox);
+        table.provider = Some(Provider::Codex);
+        table.model = Some("gpt-6.1-sol".to_owned());
+        assert_eq!(roles.check(), Ok(()));
+        let configured = inbox_launch(&roles, None, None).unwrap();
+        assert_eq!(
+            (
+                configured.provider,
+                configured.model.as_deref(),
+                configured.source
+            ),
+            (Provider::Codex, Some("gpt-6.1-sol"), LaunchSource::Config)
+        );
+        // Another provider by argument drops the table's model.
+        let claude = inbox_launch(&roles, Some(Provider::Claude), None).unwrap();
+        assert_eq!(
+            (claude.provider, claude.model, claude.source),
+            (Provider::Claude, None, LaunchSource::Argument)
+        );
+        // The same provider keeps it; a model named replaces it.
+        let same = inbox_launch(&roles, Some(Provider::Codex), None).unwrap();
+        assert_eq!(same.model.as_deref(), Some("gpt-6.1-sol"));
+        let named = inbox_launch(&roles, None, Some("gpt-6-astra")).unwrap();
+        assert_eq!(
+            (named.provider, named.model.as_deref(), named.source),
+            (Provider::Codex, Some("gpt-6-astra"), LaunchSource::Argument)
+        );
+        // A Claude model named alone on a default inbox starts Claude with
+        // it at `medium`.
+        let opus = inbox_launch(&RoleModels::default(), None, Some(OPUS)).unwrap();
+        assert_eq!(opus.arguments(), Some((OPUS, MEDIUM)));
+        assert_eq!(opus.to_value()["source"], "argument");
+        // A Claude model for Codex, by argument or by table.
+        let error = inbox_launch(&roles, None, Some("claude-opus-5-5")).unwrap_err();
+        assert!(
+            error.starts_with("dagq inbox: model claude-opus-5-5 is Claude's"),
+            "{error}"
+        );
+        roles.entry(ModelRole::Inbox).model = Some("claude-opus-5-5".to_owned());
+        assert!(
+            roles
+                .check()
+                .unwrap_err()
+                .starts_with("[roles.inbox]: model")
+        );
+        // Codex runs the inbox: a provider with an implementation.
+        assert!(runs_on(ModelRole::Inbox, Provider::Codex));
+        assert_eq!("inbox".parse::<ModelRole>().unwrap(), ModelRole::Inbox);
+    }
 
     /// An agent that names its provider starts there, its source the
     /// agent's table: with `[roles.review]`'s model and effort when that
@@ -843,6 +961,7 @@ mod tests {
                         | ModelRole::Observer
                         | ModelRole::Recovery
                         | ModelRole::SetupReview
+                        | ModelRole::Inbox
                 )
             );
         }

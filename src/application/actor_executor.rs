@@ -823,6 +823,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     &prompt,
                     plugin_dir,
                     self.queue.parent().unwrap_or(Path::new(".")),
+                    cwd,
                 )?;
                 command
                     .current_dir(cwd)
@@ -1132,6 +1133,7 @@ mod tests {
             prompt: &str,
             plugin_dir: Option<&Path>,
             _queue_dir: &Path,
+            _cwd: &Path,
         ) -> Result<CommandSpec> {
             let mut command = CommandSpec::new("/opt/claude");
             if let Some(dir) = plugin_dir {

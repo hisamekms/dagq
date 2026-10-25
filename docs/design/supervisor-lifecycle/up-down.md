@@ -129,9 +129,14 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
 
 `dagq inbox`は、inboxを打った人のterminal（種類を問わない）の前面で開く（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定2）。
 queueは`up`と同じく解決する。
-inboxのproviderはClaude Codeで、Codexはinboxのcommandを持たない。
-providerとmodelを役割の設定を既定に起動の引数で選ぶこと、Codexのinboxの見張り・hook・guardrail・sandboxの埋め方、Codexが使えないときに黙ってClaudeに替えず開かずに理由を出すことは[ADR-t1181-1](../../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)が決めたが、まだ実装されていない。
-それまで`dagq inbox`は下の手順でClaudeのinboxだけを開く。
+providerとmodelはmain checkoutの`dagq.toml`の`[roles.inbox]`を既定に、`--provider`・`--model`がその起動だけ上書きし、どちらも無ければ今までどおりClaudeで何も渡さずに開く（[ADR-t1181-1](../../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定1。選び方は`lifecycle::inbox_route`と`actor_model::inbox_launch`）。
+値の誤り（実装の無いprovider、Codexに渡したClaudeのmodelなど）は設定の誤りとして、何も記録せずに止まる。
+`dagq.toml`は`[roles.inbox]`の表だけを読むので（`run_env::load_inbox_role`）、ほかの表の誤りではinboxは止まらない。
+Codexを選ぶと、まだ開かずに理由を出して0でなく終わる（ADR-t1181-1の「実装の順」: inboxのsessionと起動の記録がproviderとmodelを持つまで選べない）。
+その前に、人のCodexの`config.toml`にCodexのTUIが自分で書き足す欄が無ければ、そのfileの場所と人が足す行を出して止まる（[ADR-t3331-1](../../adr/2026-10-25-t3331-1-codex-inbox-writes-no-person-settings-and-refuses-to-open-when-codex-would.md)）。
+どちらもClaudeに替えず、askを開かず、人のfileを読むだけで書かない。
+Codexのinboxの起動の中身は[Provider lifecycle](../provider-lifecycle.md)のinboxの起動の節が持つ。
+下の手順はClaudeのinboxのもの。
 
 1. **inboxの中では拒む**: 打った環境が`DAGQ_ROLE=inbox`なら、`DAGQ_QUEUE`がどのqueueを指していても、何も読まず起動も記録もせずに止まる。
    inboxの中から別のinboxを開かない。

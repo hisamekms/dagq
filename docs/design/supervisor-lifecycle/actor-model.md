@@ -78,8 +78,10 @@ effort = "high"         # 省けば既定
   これを使うjobと、Claudeを使わない運転で切り替え先が無いときのjobごとの振る舞いは各jobの文書が持つ（[Goal review](goal-review.md)の3と6、[Review](review.md)（[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)）、[Plan review](plan-review.md#codexで動かす)、[Throughput review](throughput-review.md#codexで動かす)、[Observer](observer.md#codexで動かす)、[Triage](triage.md#codexで動かす)・[生きているsessionの復旧job](background-recovery-job.md#codexで動かす)）。
   他の役割は`provider = "claude"`を書いても、`provider`を書かない役割と同じ起動と控え。
   `setup_review`は`job_route`を通らず、`provider`のproviderが使えなくても切り替えず待たず、起動の失敗や0でない終了をそのまま人かinboxのコマンドの誤りにする（[setup-review](setup-review.md#権限)）
-- **inbox**: 今は役割の表に無く、`dagq inbox`はClaudeで開く（[`up` / `down`](up-down.md)の「`dagq inbox`」）。
-  [ADR-t1181-1](../../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定1・4はinboxを役割に足し（起動の引数でその起動だけ上書き）、`job_route`の切り替えを当てず、providerの控えでinboxを止めないと決めた（実装前）
+- **inbox**: `[roles.inbox]`がinboxの既定のproviderとmodelで、`dagq inbox`の起動の引数がその起動だけ上書きする（`actor_model::inbox_launch`、その`source`は`argument`。[`up` / `down`](up-down.md)の「`dagq inbox`」）。
+  値の検査は他の役割と同じ`RoleModel::check`で、Codexは`CODEX_ROLES`にinboxを持つ。
+  inboxは`job_route`を通らず、providerの控えでinboxを止めない（[ADR-t1181-1](../../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定1・4）。
+  Codexのinboxは記録の実装の後まで開かない
 - **見え方**: `dagq doctor`の`roles`が役割ごとの起動のproviderとmodel / effortと出どころを出す（queueが束縛されたmain checkoutの`dagq.toml`。`application::health::roles`）。
   jobごとに実際に動いたproviderは開始のeventの`launch.provider`と`headless_jobs.provider`
 

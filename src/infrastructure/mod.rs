@@ -13,6 +13,7 @@ pub mod claude_steps;
 pub mod claude_turns;
 pub mod clock;
 pub mod codex;
+pub mod codex_inbox;
 pub mod codex_steps;
 pub mod codex_turns;
 pub mod container_image;

@@ -340,10 +340,9 @@ queue全体の読み取りのユースケース（一覧は[Queue service](queue
 - `DAGQ_COMMANDS`はroleによって拒まれうる`dagq`のsubcommandと、その形のどれかが要るcapabilityの表。
   roleの`grants`がどれも持たないcommandを`Bash(dagq <command>:*)`で拒む。
   表と`src/main.rs`の`requests`が食い違わないことはunit testが確かめる。
-  clapの全subcommandが`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`のどちらかにあることもunit testが確かめ、どちらにも無いsubcommandを足すと落ちる。
-  roleによって拒まれうるsubcommandを足したら、読み取りの形を持つものを除いて表に入れる。
+  表に入れない形（読み取りの形を持つもの）と全subcommandの検査は`DAGQ_COMMANDS`のdoc comment。
 - actorを名指す変数（`IDENTITY_ENV`）の書き換えも全roleで拒む。
-- workerとplannerのsession・turnの設定とreview jobの設定では、`SIGNAL_BY_NAME_DENIED`の後に置く（turnの設定ではその間に`AskUserQuestion`と予約の道具を挟む。[非対話のworker](supervisor-lifecycle/headless-worker.md)。review jobの設定はroleの規則だけ）。
+- workerとplannerのsession・turnの設定では`SIGNAL_BY_NAME_DENIED`の後に置き（turnの並びは`headless_worker_settings`のdoc comment）、review jobの設定はroleの規則だけ。
   inboxの設定（[`up` / `down`](supervisor-lifecycle/up-down.md)）は`permissions.deny`だけで、roleの規則だけを持ち、`SIGNAL_BY_NAME_DENIED`は入れない。
 
 これはguardrailでenforcementではない。
@@ -362,6 +361,9 @@ Claude Codeの規則はコマンドの先頭の形しか見ないので、path�
    guardrailは「間違いで打つのを先に止める」ためのもので、pathやglobal flagの形で打った呼び出しもCLIが拒み、`authorization_denied`に記録する。
 
 規則の形は`Bash(dagq <command>:*)`と識別の変数の書き換えのままにする。
+
+Codexのinboxは同じ形（`deny_forms`）をPreToolUseのhook（`codex_inbox::guard`）で先頭だけ照らし、包んだ形（`&&`・`;`・パイプ・`sh -c`）はCLIの`Authorizer`が拒む。
+hookが動かなければ（trustの欠けなど）guardrailの無いinboxになる。
 
 ## CIの見張り（ADR-t1920-1）
 

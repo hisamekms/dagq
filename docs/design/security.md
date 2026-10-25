@@ -147,9 +147,8 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   これは**guardrailであってenforcementではない**: denyはClaude Codeのtoolの呼び出しの綴りで照合する助言的な抑止で、`dagq inbox`を通さずに開いたinboxと、`claude`を打ち直したsessionには効かない（inboxがguardrailつきで開かれたかは`status` / `doctor`の`inbox_guardrail`が見せる）。
   hostの判定は助言的なまま（ADR-t728-1決定6）。
   人自身のterminal（`DAGQ_ROLE`なし）はsettingsを持たない
-- Codexのinboxは、同じ趣旨（dagqのCLIを通す）をCodexの手段で持たせる（ADR-t2159-1決定5）。
-  今のproviderの口（`AgentProvider::inbox_command`）でinboxを持つのはClaudeだけで、Codexはinboxを持たない（settingsを持たないproviderのinboxが入れば`inbox_guardrail`が見せる）。
-  Codexのinboxを作るtaskが手段を持たせるか、手段が無ければこのguardrailが無いことをここに書き、skillの手順をCLIだけにすることで足りるとする
+- Codexのinboxは、同じ規則を`dagq inbox`が起動の引数で渡すPreToolUseのhookで持つ（ADR-t2159-1決定5。一致の範囲とClaudeとの違いは[Authorization](authorization.md#claudeのpermissionsdenyguardrail)）。
+  hookが動かない（trustの欠けなど）Codexのinboxはguardrailの無いinboxで、これも助言的な抑止にとどまる
 
 ## host実行は助言的（advisory）
 

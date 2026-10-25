@@ -12,7 +12,7 @@ use common::{Bounded, WithoutActor, lifecycle::*, service::OwnedByTest};
 use dagq::{
     domain::SessionRole,
     infrastructure::sqlite::SqliteQueue,
-    lifecycle::{self, INBOX_INSIDE_REFUSED, InboxOptions},
+    lifecycle::{self, CODEX_INBOX_PENDING, INBOX_INSIDE_REFUSED, InboxOptions},
 };
 use serde_json::{Value, json};
 use std::{
@@ -235,6 +235,146 @@ fn dagq_inbox_inside_an_inbox_opens_nothing_whatever_the_queue() {
     }
 }
 
+/// A Codex inbox, chosen by `--provider codex` or by `[roles.inbox]`, is
+/// not opened yet (ADR-t1181-1): before that, a person's Codex settings
+/// that Codex would write to stop it with where they are and the lines to
+/// add, left unwritten; then it is refused with why. Neither starts
+/// Claude in its place or records an open, and a Claude model given to
+/// Codex in `[roles.inbox]` is a mistake of the setting.
+#[test]
+fn a_codex_inbox_is_refused_with_why_and_starts_nothing() {
+    let fixture = fixture();
+    let stub = stub_claude(&fixture);
+    let plugin_dir = fixture.options.plugin_dir.clone().unwrap();
+    let plugin_dir = plugin_dir.to_str().unwrap();
+    let codex_home = fixture._dir.path().join("codex-home");
+    fs::create_dir_all(&codex_home).unwrap();
+    let env = [("CODEX_HOME", codex_home.to_str().unwrap())];
+    let codex = ["--plugin-dir", plugin_dir, "--provider", "codex"];
+    let config = codex_home.join("config.toml");
+
+    let message = error_of(&inbox(&fixture, &stub, &env, &codex));
+    assert!(
+        message.starts_with("the Codex inbox was not opened: ")
+            && message.contains(config.to_str().unwrap())
+            && message.contains("[tui]\nscreen_reader_detection_done = true"),
+        "{message}"
+    );
+    assert!(!config.exists());
+
+    fs::write(&config, "[tui]\nscreen_reader_detection_done = true\n").unwrap();
+    let pending = format!("{CODEX_INBOX_PENDING}; the inbox was not opened");
+    assert_eq!(error_of(&inbox(&fixture, &stub, &env, &codex)), pending);
+    // A relative CODEX_HOME is the one under the main checkout Codex
+    // starts in, not under the directory `dagq inbox` was typed in (which
+    // has the setting here and is not read).
+    let typed_in = fixture._dir.path().join("elsewhere").join("codex-rel");
+    fs::create_dir_all(&typed_in).unwrap();
+    fs::write(
+        typed_in.join("config.toml"),
+        "[tui]\nscreen_reader_detection_done = true\n",
+    )
+    .unwrap();
+    let relative = [("CODEX_HOME", "codex-rel")];
+    let message = error_of(&inbox(&fixture, &stub, &relative, &codex));
+    let at_checkout = fixture.repo.join("codex-rel").join("config.toml");
+    assert!(
+        message.contains("does not exist") && message.contains(at_checkout.to_str().unwrap()),
+        "{message}"
+    );
+    fs::create_dir_all(at_checkout.parent().unwrap()).unwrap();
+    fs::write(&at_checkout, "[tui]\nscreen_reader_detection_done = true\n").unwrap();
+    assert_eq!(
+        error_of(&inbox(&fixture, &stub, &relative, &codex)),
+        pending
+    );
+    let toml = fixture.repo.join("dagq.toml");
+    let before = fs::read_to_string(&toml).unwrap_or_default();
+    fs::write(
+        &toml,
+        format!("{before}\n[roles.inbox]\nprovider = \"codex\"\n"),
+    )
+    .unwrap();
+    let configured = ["--plugin-dir", plugin_dir];
+    assert_eq!(
+        error_of(&inbox(&fixture, &stub, &env, &configured)),
+        pending
+    );
+    fs::write(
+        &toml,
+        format!("{before}\n[roles.inbox]\nprovider = \"codex\"\nmodel = \"claude-opus-5-5\"\n"),
+    )
+    .unwrap();
+    let message = error_of(&inbox(&fixture, &stub, &env, &configured));
+    assert!(
+        message.contains("[roles.inbox]: model claude-opus-5-5 is Claude's"),
+        "{message}"
+    );
+    // A provider with no implementation is a mistake of the setting too,
+    // whatever its message names.
+    fs::write(
+        &toml,
+        format!("{before}\n[roles.inbox]\nprovider = \"gemini\"\n"),
+    )
+    .unwrap();
+    let message = error_of(&inbox(&fixture, &stub, &env, &configured));
+    assert!(
+        message.contains("gemini") && message.ends_with("; the inbox was not opened"),
+        "{message}"
+    );
+    assert_eq!(started(&stub, "argv"), None);
+    assert_eq!(opened(&fixture), None);
+    // A Claude model named by argument over a Codex table starts Claude
+    // with it, and nothing of Codex's.
+    fs::write(
+        &toml,
+        format!("{before}\n[roles.inbox]\nprovider = \"codex\"\n"),
+    )
+    .unwrap();
+    let output = inbox(
+        &fixture,
+        &stub,
+        &env,
+        &[
+            "--plugin-dir",
+            plugin_dir,
+            "--provider",
+            "claude",
+            "--model",
+            "claude-sonnet-5-5",
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let argv = started(&stub, "argv").unwrap();
+    assert!(
+        argv.contains("--model\nclaude-sonnet-5-5\n--effort\nmedium\n--\n"),
+        "{argv}"
+    );
+    assert_eq!(opened(&fixture).unwrap()["provider"], "claude");
+}
+
+/// A `dagq.toml` that cannot be read does not keep the default inbox
+/// closed: it opens on Claude as before.
+#[test]
+fn a_dagq_toml_that_cannot_be_read_still_opens_the_default_inbox() {
+    let fixture = fixture();
+    let stub = stub_claude(&fixture);
+    let plugin_dir = fixture.options.plugin_dir.clone().unwrap();
+    let toml = fixture.repo.join("dagq.toml");
+    let before = fs::read_to_string(&toml).unwrap_or_default();
+    fs::write(&toml, format!("{before}\n[no_such_table]\nkey = 1\n")).unwrap();
+    let output = inbox(
+        &fixture,
+        &stub,
+        &[],
+        &["--plugin-dir", plugin_dir.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let argv = started(&stub, "argv").unwrap();
+    assert!(!argv.contains("--model"), "{argv}");
+    assert_eq!(opened(&fixture).unwrap()["provider"], "claude");
+}
+
 /// Without `--plugin-dir`, `dagq inbox` checks the installed plugin as `up`
 /// does: a disabled one stops it with the way to install or enable it,
 /// before anything is started or recorded; an enabled one opens it.
@@ -283,6 +423,9 @@ fn the_inbox_prompt_carries_the_language_and_a_wrong_one_opens_nothing() {
     let options = InboxOptions {
         plugin_dir: fixture.options.plugin_dir.clone(),
         agent: fixture.options.claude.clone(),
+        codex: PathBuf::from("codex"),
+        provider: None,
+        model: None,
     };
     let error = lifecycle::inbox(
         &fixture.location,

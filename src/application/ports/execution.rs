@@ -406,21 +406,22 @@ pub trait AgentProvider {
         let _ = job;
         anyhow::bail!("this provider has no agent job")
     }
-    /// The agent of the inbox (ADR-0022): an interactive agent with
-    /// `prompt` as its first message that loads `plugin_dir`, which `dagq
-    /// inbox` starts in the foreground of a person's terminal (ADR-t2159-1
-    /// decision 2). Its settings, if the provider has a way
-    /// to give them, are only the inbox's denials (ADR-t1228-2 decision 3),
-    /// written under `queue_dir`: no hook, no idle marker, the prompt
-    /// suggestions as they are (a person works in it). A provider without
-    /// one refuses.
+    /// The agent of the inbox (ADR-0022): an interactive agent in `cwd`
+    /// (the main checkout) with `prompt` as its first message that loads
+    /// `plugin_dir`, which `dagq inbox` starts in the foreground of a
+    /// person's terminal (ADR-t2159-1 decision 2). Claude Code's settings
+    /// are only the inbox's denials (ADR-t1228-2 decision 3), written under
+    /// `queue_dir`: no hook, no idle marker, the prompt suggestions as they
+    /// are (a person works in it). Codex's are its launch arguments alone
+    /// (ADR-t1181-1 decision 2). A provider without one refuses.
     fn inbox_command(
         &self,
         prompt: &str,
         plugin_dir: Option<&std::path::Path>,
         queue_dir: &std::path::Path,
+        cwd: &std::path::Path,
     ) -> Result<CommandSpec> {
-        let _ = (prompt, plugin_dir, queue_dir);
+        let _ = (prompt, plugin_dir, queue_dir, cwd);
         anyhow::bail!("this provider has no inbox session")
     }
     /// The settings file [`AgentProvider::inbox_command`] writes under

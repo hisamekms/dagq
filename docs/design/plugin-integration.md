@@ -138,11 +138,11 @@ inbox（唯一の常駐session）とplanner（proposalごとのオンデマン�
   `status`は言語の設定があるときの指示の文面も持つので（[Language](supervisor-lifecycle/language.md#promptへの渡し方)、ADR-t616-2）、compactionと`/clear`で初期promptが失われても指示が残る。
   Claude Codeはこのstdoutをcontextに入れる。
   先頭の1行は必須で、Claude CodeはstdoutがJSONとして読めればhookの制御JSONとして解釈し、未知のキーを捨ててcontextに何も足さない。
-  `DAGQ_QUEUE`があり`DAGQ_DB`が無ければ`DAGQ_DB`にしてlauncherに渡すので、cwdがrepositoryの外でもそのsessionのqueueを読む。
   inboxでは役割の1行の前に、最初の一手として`status`のcursorから`watch --role inbox --until-attention`を張ることを命じる1行を出す。
   このwatchはattentionが来たときだけ返るので、sessionはshellのループを書かない（語分割でcursorが空になったループは空回りし、askが届かなくなる）。
 - バイナリが見つからない（`DAGQ_BIN`が実行可能でない、PATHに`dagq`が無い）時や`status`が失敗した時も1行だけ理由を出してexit 0し、session開始を止めない。
 - inboxはhookの出力を起点に`dagq-inbox`の手順（openなaskを人に見せ、残りのattentionを知らせ、`watch --role inbox`を再開）へ、plannerは`dagq-planner`の手順へ戻る。`watch`の結果で`integrate`は呼ばない。
+- Codexのinboxは起動の引数の`dagq codex-inbox-hook`が同じ役目で、compactionの後も`status`を出しwatchは前景で張らせる（[Provider lifecycle](provider-lifecycle.md#inboxの起動)）。
 
 ### watchを張らせるStop hook（ADR-t906-1）
 
@@ -153,7 +153,6 @@ Stop hookがそのturnの終わりを止める。
 - `hooks/hooks.json`は`Stop`（matcherなし）で`${CLAUDE_PLUGIN_ROOT}/hooks/stop-watch.sh`を呼ぶ。
 - `stop-watch.sh`は`DAGQ_ROLE`が`inbox`のときだけ働き、生きている`watch --role inbox`が無ければturnの終わりを止める。
   数え方と出力の形はscriptの冒頭のコメントが持つ。
-  reasonは未処理のwatchの出力の扱いとwatchの張り方を書く（文面もscriptが持つ）。
   Claude Codeはturnを続けてreasonをmodelに渡す。
 - 猶予（watchが返った後の時間）を使わないのは、watchが返った後にinboxが報告だけしてturnを終えると、猶予の中では止められず、そのまま誰も起こさなくなるため。
   `status`の猶予は居ない時間を数えすぎないためのもの。
@@ -168,7 +167,6 @@ runtimeのplanner（全て非対話）の区間はturnから記録する（[ADR-
 - `hooks/hooks.json`は`SessionStart`にmatcherの無い2つ目のグループ（全部のsource）で`${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh open`を、`SessionEnd`（matcherなし）で`session-event.sh close`を呼ぶ。
   起き直しの`session-start.sh`のグループと出力はそのまま。
 - `session-event.sh`は`DAGQ_ROLE`が`inbox` / `planner`で`DAGQ_QUEUE`があるときだけ、hookのstdinをそのまま`bin/dagq session-event open|close`（隠しコマンド）に渡す。
-  `DAGQ_DB`が無ければ`DAGQ_QUEUE`を`DAGQ_DB`にする。
   それ以外のsession（workerを含む。workerの区間はruntimeが書く）では何もしない。
 - 区間のkindは`domain::sessions`の`hook_kind`が決める（読む環境変数は`SessionHook`のdoc comment）。
 - `/clear`とcompactionで二重に数えない: 同じsession_idの`SessionStart`（`resume`・`compact`）は開いている区間を続け、別のsession_idの`SessionStart`は同kindの開いている区間を推定の終了で閉じてから開き（時間の閾値は使わない。次の開始1回が契機）、閉じた区間への2回目の`SessionEnd`は何も書かない。
@@ -177,6 +175,7 @@ runtimeのplanner（全て非対話）の区間はturnから記録する（[ADR-
   sessionが動くterminalは問わず、前のbinaryが区間に記録したworkspace IDは読まない。
   同じIDのresume・compactや別kindの区間には影響しない。
   詳細と同時sessionの制約は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)。
+- Codexのinboxは同じhookが`session-event`に入力を渡し、動かなければ（trustの欠け）区間が無い。
 - 失敗してもsessionを止めない: 何も出力せず（`SessionStart`のstdoutはcontextに入るので）、`dagq`が無い・実行できない、queueが開けない、入力にsession_idが無い、記録に失敗した、のどれでもexit 0する。記録のCLIは区間のeventだけを書き、run・proposal・plannerの状態を変えない。
 
 ### launcher

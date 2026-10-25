@@ -15,6 +15,7 @@ pub mod ask;
 pub mod broker_relay;
 pub mod ci_watch;
 pub mod claim_view;
+pub mod codex_inbox;
 pub mod commands;
 pub mod container_image;
 pub mod diagram;

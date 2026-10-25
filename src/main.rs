@@ -1282,11 +1282,12 @@ enum Command {
         #[arg(long)]
         auto_update: bool,
     },
-    // ADR-t2159-1 decision 2.
+    // ADR-t2159-1 decision 2, ADR-t1181-1 decision 1.
     /// Open the queue's inbox in this terminal: start the inbox's agent (Claude Code with the
     /// inbox's settings, the plugin and the inbox's prompt, DAGQ_ROLE=inbox and DAGQ_QUEUE) in the
     /// foreground in place of this process, from the repository's main checkout, after recording
-    /// inbox_opened. Refused inside an inbox (DAGQ_ROLE=inbox), whatever queue.
+    /// inbox_opened. Its provider and model are [roles.inbox] of dagq.toml, overridden for this
+    /// start by --provider and --model. Refused inside an inbox (DAGQ_ROLE=inbox), whatever queue.
     Inbox {
         /// Claude Code plugin directory the inbox loads (`claude --plugin-dir`); without it the
         /// installed claude-dagq plugin, which must be enabled.
@@ -1298,10 +1299,17 @@ enum Command {
         /// Claude Code executable; a bare name is resolved on PATH.
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
-        /// Codex CLI, accepted beside --claude: the inbox's provider is Claude Code, as Codex has
-        /// no inbox session.
+        /// Codex CLI executable, for a Codex inbox; a bare name is resolved on PATH. A Codex
+        /// inbox is not opened yet: it is refused with why until its records are implemented.
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
+        /// The inbox's provider for this start (claude or codex) over [roles.inbox]'s; without
+        /// either, Claude.
+        #[arg(long, value_parser = ["claude", "codex"])]
+        provider: Option<String>,
+        /// The inbox's model for this start, a name of its provider's, over [roles.inbox]'s.
+        #[arg(long)]
+        model: Option<String>,
     },
     // ADR-t1394-1.
     /// Refused: planners a person opens were abolished. Ask the inbox for a plan instead; it
@@ -1709,6 +1717,15 @@ enum Command {
         name: String,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    // ADR-t1181-1 decision 2.
+    /// A hook of a Codex inbox, which `dagq inbox` gives Codex in its launch arguments: reads
+    /// the hook's input on stdin and prints its answer (the status at a session start, a Stop's
+    /// block, the guardrail's refusal). Opens no queue itself; always exits 0.
+    #[command(hide = true)]
+    CodexInboxHook {
+        #[arg(value_parser = ["session-start", "session-end", "stop", "pre-tool-use"])]
+        hook: String,
     },
     /// Bind the queue to the repository containing the working directory (or
     /// --repo) after the repository moved; the one command that changes the
@@ -2541,7 +2558,9 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
     match command {
         // Run before any actor is read (`execute`): it opens no queue and
         // carries bytes only (ADR-t2114-3).
-        Command::Relay { .. } | Command::ReviewProgram { .. } => Vec::new(),
+        Command::Relay { .. } | Command::ReviewProgram { .. } | Command::CodexInboxHook { .. } => {
+            Vec::new()
+        }
         Command::Locate
         | Command::List { .. }
         | Command::Show { .. }
@@ -4327,6 +4346,13 @@ fn execute(cli: Cli) -> Result<Value> {
     if let Command::ReviewProgram { name, args } = &cli.command {
         std::process::exit(dagq::infrastructure::review_secrets::run(name, args));
     }
+    // A Codex inbox's hook answers on its stdin and stdout; the `dagq` it
+    // runs for the status and the span reach the queue as the inbox's.
+    if let Command::CodexInboxHook { hook } = &cli.command {
+        let hook = dagq::application::codex_inbox::InboxHook::from_argument(hook)
+            .context("unknown Codex inbox hook")?;
+        std::process::exit(dagq::infrastructure::codex_inbox::run_hook(hook));
+    }
     // A worker's or a job's `dagq` goes to the queue service, which
     // authorizes it for the principal of its token: neither `DAGQ_ROLE`
     // nor the queue's path is read (goal 82's stage (3)). An environment
@@ -4624,7 +4650,9 @@ fn execute(cli: Cli) -> Result<Value> {
         plugin_dir,
         repo,
         claude,
-        codex: _,
+        codex,
+        provider,
+        model,
     } = cli.command
     {
         let command = one_shot.inbox(
@@ -4634,6 +4662,9 @@ fn execute(cli: Cli) -> Result<Value> {
             &dagq::lifecycle::InboxOptions {
                 plugin_dir,
                 agent: claude,
+                codex,
+                provider: provider.as_deref().map(str::parse).transpose()?,
+                model,
             },
         )?;
         let error = dagq::infrastructure::process::exec(&command);
@@ -4798,6 +4829,7 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::QueueBroker { .. }
         | Command::Relay { .. }
         | Command::ReviewProgram { .. }
+        | Command::CodexInboxHook { .. }
         | Command::SetupReview { .. } => {
             unreachable!()
         }
@@ -6294,6 +6326,7 @@ mod tests {
             ("relay verify", NO_QUEUE),
             ("relay guard", NO_QUEUE),
             ("review-program", NO_QUEUE),
+            ("codex-inbox-hook", NO_QUEUE),
             (
                 "session",
                 "the wrapper's own principal: ADR-t3102-2 decision 6 (3)",
@@ -6432,6 +6465,7 @@ mod tests {
             ("relay verify", &["--token-file", "/t", "--", "true"]),
             ("relay guard", &["--dir", "/d"]),
             ("review-program", &["secrets"]),
+            ("codex-inbox-hook", &["stop"]),
             (
                 "session",
                 &["--run", "r1", "--lease", "l", "--claude", "/c"],
@@ -6874,6 +6908,9 @@ mod tests {
         // The sccache guard of a worker's turn in its container (`dagq
         // relay guard`): it opens no queue, and makes a link to itself.
         "relay guard",
+        // A Codex inbox's hook: it opens no queue, and the `dagq` it runs
+        // is checked as the inbox's (ADR-t1181-1 decision 2).
+        "codex-inbox-hook",
     ];
 
     /// Every subcommand clap knows, nested ones by their path (`goal

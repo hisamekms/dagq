@@ -797,9 +797,12 @@ impl AgentProvider for Codex {
     fn job_reply(&self, stdout: &str) -> String {
         last_message(stdout)
     }
-    /// A job ([`JOB_SANDBOX`]) runs in [`job_service_config`]'s profile
-    /// instead, which reaches the socket and keeps the rest read-only and
-    /// offline. A worker's turn needs nothing: its sandbox's network is
+    /// A job ([`JOB_SANDBOX`]) and the inbox (also started in it,
+    /// [`super::codex_inbox::inbox_command`], ADR-t1181-1 decision 2) run
+    /// in [`job_service_config`]'s profile instead, which reaches the
+    /// socket and keeps the rest read-only and offline: the queue's
+    /// directory is not written, and its `dagq` sends the commands with
+    /// its token to the service. A worker's turn needs nothing: its sandbox's network is
     /// open (ADR-t813-3 decision 4), and the socket is reached through it.
     fn reach_queue_service(&self, command: &mut CommandSpec, socket: &Path) {
         // A case's agent job is in the profile already
@@ -858,6 +861,28 @@ impl AgentProvider for Codex {
     }
     fn turn_session_from_output(&self) -> bool {
         true
+    }
+    /// The Codex inbox ([`super::codex_inbox::inbox_command`]), its hooks
+    /// run by this process's `dagq` and this process's `CODEX_HOME` made
+    /// absolute from `cwd` ([`super::codex_inbox::launch_codex_home`]);
+    /// nothing is written under `queue_dir`.
+    fn inbox_command(
+        &self,
+        prompt: &str,
+        plugin_dir: Option<&Path>,
+        _queue_dir: &Path,
+        cwd: &Path,
+    ) -> Result<CommandSpec> {
+        let dagq = std::env::current_exe().context("find this dagq for the inbox's hooks")?;
+        let home = super::codex_inbox::launch_codex_home(std::env::var_os("CODEX_HOME"), cwd);
+        super::codex_inbox::inbox_command(
+            &self.executable,
+            &dagq,
+            cwd,
+            home.as_deref(),
+            plugin_dir,
+            prompt,
+        )
     }
 }
 
