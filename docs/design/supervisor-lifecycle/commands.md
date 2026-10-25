@@ -51,8 +51,9 @@ related:
 - 出力はstdoutのJSONで、既存の欄は変えず足すだけにする。
   observer・レポート・plan reviewやスループットの見直しのpromptが欄を名前で読むため。
 - 記録の無い古いeventは書き換えず、null・`unknown`・`unlabeled`として数え、0と区別する。
-- `stats`・`kpi`・`marks`・`timeline`は読むだけのコマンドで、queueを読み取り専用で開き、observerとheadlessのjobも打てる。
-- `report`はqueueを読み取り専用で開くがファイルを書き、`mark`はeventを書くので、どちらもobserverとheadlessのjobには許さない（[Authorization](../authorization.md)）。
+- `stats`・`kpi`・`marks`・`timeline`は読むだけのコマンドで、queueの状態もeventも変えず、observerとheadlessのjobも打てる。
+- `report`もqueueの状態とeventを変えないがファイルを書き、`mark`はeventを書くので、どちらもobserverとheadlessのjobには許さない（[Authorization](../authorization.md)）。
+- 人・inbox・plannerとクライアントモードの`dagq`は、これらをqueue serviceへ送ってDBを開かず、serviceが答える（[hostのCLI](../queue-service-host-cli.md#送る範囲)）。
 - cursor（event ID・unix秒・RFC 3339の時刻）の読み方はどのコマンドでも同じで、`domain::stats::Cursor`のdoc commentが持つ。
 - goalで絞ると、taskを持たないevent（observerの観察、taskの無いask、plannerのturnなど）の多くは0か数えないので、絞った値と絞らない値をその種類の欄で比べない。
 - 日と週の期間は、hostのlocal timezoneの今のoffsetで全ての期間を切るので、夏時間の切り替えをまたぐ期間は1時間ずれる。
@@ -66,8 +67,9 @@ related:
 
 ## 表示とreviewのコマンドをまたぐ約束
 
-- `status`・`doctor`・`events`・`watch`はqueueを読み取り専用で開き、`review`もqueueを読むだけで、どれもqueueの状態もeventも変えない。
-  人・inbox・plannerの`status`・`events`・`watch`はDBを開かずqueue serviceを通る（[hostのCLI](../queue-service-host-cli.md)）。
+- `status`・`doctor`・`events`・`watch`と`review`はqueueを読むだけで、どれもqueueの状態もeventも変えない。
+  人・inbox・plannerの`status`・`events`・`watch`はDBを開かずqueue serviceを通り、serviceが読み取り専用の接続で答える。
+  制御側として残る`doctor`と`review`はqueue serviceを通らず、CLIがDBを開いて読む（`doctor`は読み取り専用で開く）（[hostのCLI](../queue-service-host-cli.md#送る範囲)）。
   `watch --role inbox`が書くwatcherの生存の記録はqueueの外のファイルに置く。
 - serviceに届かないとき、`status`と`watch`は待たずに`unreachable`（errorの`queue_service.code`）で終わり、errorの文が次の手を言い、supervisorが記録した停止を添える（そのroleの`watch`が返した後の同じ停止は除く）。
   watchを回し直す側はそれを中身として扱い、`dagq service status`で理由を見て、同じcursorからwatchを張り直す。
