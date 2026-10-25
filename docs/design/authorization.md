@@ -275,7 +275,7 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
   queueが無い・このバイナリが開けない（`init`の前、`migrate`の前）ときは記録できず、拒否は拒否のまま返す。
   errorの形は計画系と同じ
 - sessionへの操作は上の`run` / `planner`のCLIで行う。
-  Codexのinboxは同じ趣旨（dagqのCLIを通す）をCodexの手段で持たせ、無ければguardrailが無いと[Security](security.md#判定の場所)に書く（[ADR-t2159-1](../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定5）。
+  Codexのinboxは同じ趣旨（dagqのCLIを通す）をPreToolUseのhookで持つ（[ADR-t2159-1](../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定5）。
   settingsの場所・中身と`status` / `doctor`の`inbox_guardrail`は[`up` / `down`](supervisor-lifecycle/up-down.md)と[Security](security.md)が持つ
 
 #### 制御側の起動としての`supervise`と`auto-update`
@@ -363,7 +363,8 @@ Claude Codeの規則はコマンドの先頭の形しか見ないので、path�
 規則の形は`Bash(dagq <command>:*)`と識別の変数の書き換えのままにする。
 
 Codexのinboxは同じ形（`deny_forms`）をPreToolUseのhook（`codex_inbox::guard`）で先頭だけ照らし、包んだ形（`&&`・`;`・パイプ・`sh -c`）はCLIの`Authorizer`が拒む。
-hookが動かなければ（trustの欠けなど）guardrailの無いinboxになる。
+trustされないhookは動かず、起動の記録では動くか分からない。
+`status`と`doctor`はClaudeのinboxをsettings、Codexのinboxをhookを渡した記録で判定し、動いた記録を分けて出す。
 
 ## CIの見張り（ADR-t1920-1）
 

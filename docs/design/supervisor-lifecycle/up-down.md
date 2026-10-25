@@ -157,11 +157,13 @@ Codexのinboxの起動の中身は[Provider lifecycle](../provider-lifecycle.md)
    - **inboxのsettings**: inboxのcommandを作るたびにqueueのディレクトリへ書き直す。
      中身はinboxのroleの`permissions.deny`だけで、hook・idle marker・サジェストの設定は入れない（inboxはidleで判定せず、人が打つ）。
    - **見せる欄**: `status`と`doctor`のinboxのguardrailは、最新の`inbox_opened`で判定し、その起動のproviderとmodelを添える。
+     判定は起動のproviderで分かれ、Claudeのinboxはsettingsを渡したこと、CodexのinboxはPreToolUseのhookを渡したことで判定する（[Authorization](../authorization.md#claudeのpermissionsdenyguardrail)）。
      Codexのinboxのguardrailはhookなので、渡したことと動いた記録を分けて出す。
      `[roles.inbox]`に設定したproviderは`doctor`の`roles`が出す。
      前のbinaryの`up`が開いたinboxの記録も同じく判定する。
      guardrailが無ければ、引き継ぎを書き、`DAGQ_ROLE`の無いterminalでinboxを終えて`dagq inbox`で開き直すよう案内する（手順の正本はpluginの`dagq-recover`の`reference/up-down.md`の「Open the inbox again」）。
    - **限界**: settingsはClaude Codeの起動の引数なので、inboxのterminalで`claude`を打ち直したsessionと、`dagq inbox`を通さずに開いたinboxには効かず、見えない（ADR-t2159-1決定5）。
+     Codexのhookはtrustされなければ動かず、起動の記録はhookを渡したことしか持たないので、動いた記録が無いうちはguardrailが効いているか分からない。
      denyはtoolの呼び出しの綴りでの照合で、絶対path・scriptの中・別のshellからの呼び出しは止めず、enforcementではない（[Security](../security.md)）。
 
 `dagq down`はsupervisorを止める。

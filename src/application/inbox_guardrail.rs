@@ -20,39 +20,71 @@ pub use crate::domain::sessions::GUARDRAIL_HOOK;
 
 /// The guardrail of the inbox by `opened`, the payload of the newest
 /// `inbox_opened`, and `reached`, whether its guardrail's hook was
-/// recorded running since (an `inbox_guardrail_reached` after it):
+/// recorded running since (an `inbox_guardrail_reached` after it). It is
+/// read by the launch's `provider`: a Codex inbox has the guardrail when
+/// its PreToolUse hook ([`GUARDRAIL_HOOK`]) is among the `hooks` given,
+/// and any other (Claude, and an open recorded before the provider was,
+/// which only Claude opened) when its `settings` went with it (an open
+/// that recorded only `guardrail` is read by it).
+///
 /// `guardrail` is `true` when it went with the launch, with
-/// `guardrail_by` (`settings` with their path, or the hook with
-/// `reached`: `false` until the hook is seen to run, which a hook Codex
-/// did not trust never does); `false` with why (`reason`) and `next` when
-/// none went; `null` with `reason: no_record` when no inbox was ever
-/// recorded opened. Each but the last names the launch's `provider`,
-/// `source` and requested `model` (null for the provider's default, and
-/// for an open recorded before they were).
+/// `guardrail_by` how: `settings` with their path, or the hook with
+/// `reached` apart, `false` until the hook is seen to run. A hook given is
+/// not a hook run (Codex trusts each hook on its own and runs no hook it
+/// did not trust), so `reached: false` says only that no run of it was
+/// recorded, and the launch's record cannot tell whether it will run.
+/// `guardrail` is `false` with why (`reason`) and `next` when none went,
+/// and `null` with `reason: no_record` when no inbox was ever recorded
+/// opened. Each but the last names the launch's `provider`, `source` and
+/// requested `model` (null for the provider's default, and for an open
+/// recorded before they were).
 pub fn judge(opened: Option<&Value>, reached: bool) -> Value {
     let Some(payload) = opened else {
         return json!({"guardrail": null, "reason": "no_record"});
     };
+    let by = guardrail_by(payload);
     let mut view = json!({
-        "guardrail": payload["guardrail"] == true,
+        "guardrail": by.is_some(),
         "provider": payload["provider"],
         "source": payload["source"],
         "model": payload["model"],
     });
-    if payload["guardrail"] != true {
-        view["reason"] = json!("opened_without_guardrail");
-        view["next"] = json!(REOPEN);
-        return view;
-    }
-    if payload["guardrail_by"] == GUARDRAIL_HOOK {
-        view["guardrail_by"] = json!(GUARDRAIL_HOOK);
-        view["reached"] = json!(reached);
-    } else {
-        view["guardrail_by"] = json!("settings");
-        view["settings"] = payload["settings"].clone();
+    match by {
+        None => {
+            view["reason"] = json!("opened_without_guardrail");
+            view["next"] = json!(REOPEN);
+        }
+        Some(GUARDRAIL_HOOK) => {
+            view["guardrail_by"] = json!(GUARDRAIL_HOOK);
+            view["reached"] = json!(reached);
+        }
+        Some(_) => {
+            view["guardrail_by"] = json!(SETTINGS);
+            view["settings"] = payload["settings"].clone();
+        }
     }
     view
 }
+
+/// How the guardrail went with the launch `payload` records, if it did:
+/// see [`judge`].
+fn guardrail_by(payload: &Value) -> Option<&'static str> {
+    if payload["provider"] == "codex" {
+        let hooked = payload["hooks"]
+            .as_array()
+            .is_some_and(|hooks| hooks.iter().any(|hook| hook["hook"] == GUARDRAIL_HOOK));
+        return hooked.then_some(GUARDRAIL_HOOK);
+    }
+    let settings = if payload["provider"].is_null() {
+        !payload["settings"].is_null() || payload["guardrail"] == true
+    } else {
+        !payload["settings"].is_null()
+    };
+    settings.then_some(SETTINGS)
+}
+
+/// `guardrail_by` of an inbox whose guardrail is Claude's settings.
+const SETTINGS: &str = "settings";
 
 /// [`judge`] of the newest `inbox_opened` (`opened`) and the newest
 /// `inbox_guardrail_reached` (`reached`): the guardrail's hook counts as
@@ -91,7 +123,8 @@ mod tests {
         let opened = event(
             5,
             "inbox_opened",
-            json!({"guardrail": true, "guardrail_by": "pre_tool_use", "provider": "codex"}),
+            json!({"guardrail": true, "guardrail_by": "pre_tool_use", "provider": "codex",
+                   "hooks": [{"hook": "pre_tool_use"}]}),
         );
         let reached = |id| event(id, "inbox_guardrail_reached", json!({"session_id": "s"}));
         assert_eq!(judge_latest(Some(&opened), None)["reached"], false);
@@ -117,13 +150,19 @@ mod tests {
         assert!(view.get("next").is_none());
     }
 
-    /// A Codex inbox's guardrail is its hook: given with the launch, and
-    /// reached once its run was recorded; the launch's provider, source
-    /// and model are shown.
+    /// A Codex inbox's guardrail is its hook among those given: given with
+    /// the launch, and reached once its run was recorded, so no record of
+    /// a run leaves it given and not reached; the launch's provider,
+    /// source and model are shown.
     #[test]
     fn a_codex_inbox_has_its_guardrail_hook_given_and_reached_apart() {
+        let hooks = json!([
+            {"hook": "session_start", "key": "/c/config.toml:session_start:0:0", "trusted_hash": "sha256:a"},
+            {"hook": "pre_tool_use", "key": "/c/config.toml:pre_tool_use:0:0", "trusted_hash": "sha256:b"},
+        ]);
         let opened = json!({"guardrail": true, "guardrail_by": "pre_tool_use", "settings": null,
-                            "provider": "codex", "source": "dagq.toml", "model": "gpt-6.1-sol"});
+                            "provider": "codex", "source": "dagq.toml", "model": "gpt-6.1-sol",
+                            "hooks": hooks});
         let given = judge(Some(&opened), false);
         assert_eq!(given["guardrail"], true);
         assert_eq!(given["guardrail_by"], GUARDRAIL_HOOK);
@@ -133,6 +172,54 @@ mod tests {
         assert_eq!(given["model"], "gpt-6.1-sol");
         assert!(given.get("settings").is_none() && given.get("next").is_none());
         assert_eq!(judge(Some(&opened), true)["reached"], true);
+    }
+
+    /// A Codex inbox is judged by the hooks given, not by the settings or
+    /// the recorded `guardrail`: without its PreToolUse hook among them
+    /// (none given, other hooks only, or an open recorded before Codex's
+    /// hooks were) it has none.
+    #[test]
+    fn a_codex_inbox_without_its_guardrail_hook_given_has_none() {
+        for hooks in [
+            Value::Null,
+            json!([]),
+            json!([{"hook": "session_start", "key": "k", "trusted_hash": "h"}]),
+        ] {
+            let opened = json!({"guardrail": true, "guardrail_by": "pre_tool_use",
+                                "settings": "/q/s.json", "provider": "codex", "hooks": hooks});
+            let view = judge(Some(&opened), true);
+            assert_eq!(view["guardrail"], false, "{hooks}");
+            assert_eq!(view["reason"], "opened_without_guardrail");
+            assert_eq!(view["next"], REOPEN);
+            assert!(view.get("guardrail_by").is_none() && view.get("reached").is_none());
+        }
+    }
+
+    /// A Claude inbox is judged by its settings, whatever else it records,
+    /// and an open recorded before the provider was by its settings or
+    /// its `guardrail`.
+    #[test]
+    fn a_claude_inbox_and_an_open_without_a_provider_are_judged_by_the_settings() {
+        let claude = |settings: Value| {
+            judge(
+                Some(
+                    &json!({"guardrail": true, "settings": settings, "provider": "claude",
+                             "hooks": [{"hook": "pre_tool_use"}]}),
+                ),
+                true,
+            )
+        };
+        assert_eq!(claude(json!("/q/s.json"))["guardrail_by"], "settings");
+        assert_eq!(claude(Value::Null)["reason"], "opened_without_guardrail");
+        let before = |payload: Value| judge(Some(&payload), false);
+        let guarded = before(json!({"guardrail": true}));
+        assert_eq!(guarded["guardrail"], true);
+        assert_eq!(guarded["guardrail_by"], "settings");
+        assert_eq!(guarded["provider"], Value::Null);
+        assert_eq!(
+            before(json!({"guardrail": false, "settings": null}))["reason"],
+            "opened_without_guardrail"
+        );
     }
 
     #[test]

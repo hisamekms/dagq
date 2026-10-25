@@ -10,7 +10,7 @@ use crate::common;
 use common::{Bounded, WithoutActor, lifecycle::*, service::OwnedByTest};
 
 use dagq::{
-    domain::SessionRole,
+    domain::{EventKind, SessionRole},
     infrastructure::sqlite::SqliteQueue,
     lifecycle::{self, CLAUDE_INSTEAD, INBOX_INSIDE_REFUSED, InboxOptions},
 };
@@ -515,6 +515,38 @@ fn a_codex_that_cannot_be_used_opens_no_inbox_and_says_how_to_open_claude() {
     assert_eq!(opened(&fixture), None);
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
     assert_eq!(queue.latest_event_of("ask_opened").unwrap(), None);
+}
+
+/// `status` and `doctor` read the newest `inbox_opened` and the newest
+/// `inbox_guardrail_reached` from the queue: a Codex inbox given its
+/// PreToolUse hook shows the hook, reached once its run is recorded after
+/// the open (the judgment's cases are `inbox_guardrail`'s unit tests).
+#[test]
+fn status_and_doctor_judge_a_codex_inbox_by_the_hooks_it_was_given() {
+    let fixture = fixture();
+    let db = fixture.location.db.canonicalize().unwrap();
+    let queue = SqliteQueue::open(&db).unwrap();
+    let record = |kind, payload| {
+        queue.record_queue_event(kind, payload).unwrap();
+    };
+    let shown = || {
+        let status =
+            dagq::compose::status_for(&db, Some(SessionRole::Inbox)).unwrap()["inbox_guardrail"]
+                .clone();
+        let doctor = dagq::compose::doctor(&db, false).unwrap()["inbox_guardrail"].clone();
+        assert_eq!(status, doctor);
+        status
+    };
+    record(
+        EventKind::InboxOpened,
+        json!({"guardrail": true, "guardrail_by": "pre_tool_use", "settings": null,
+               "provider": "codex", "hooks": [{"hook": "pre_tool_use"}]}),
+    );
+    let given = shown();
+    assert_eq!(given["guardrail_by"], "pre_tool_use", "{given}");
+    assert_eq!(given["reached"], false, "{given}");
+    record(EventKind::InboxGuardrailReached, json!({"session_id": "s"}));
+    assert_eq!(shown()["reached"], true);
 }
 
 /// A `dagq.toml` that cannot be read does not keep the default inbox
