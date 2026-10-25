@@ -166,7 +166,7 @@ planner・worker・jobはこの権限を持たない。
 `required_evidence`と`paths`は変更できず、修正は`task_edited`とそのactorに残る。
 `edit`がtitle・description・acceptanceを空か空白だけにするのはどのroleにも許さず、storeが認可の後・transactionの前の空欄の検査で拒めばtaskも`task_edited`も変えない。
 `edit`のcapabilityは`Planning`がtransactionの外で読んだtaskの状態から選ぶので、`Planning`はその状態と所属のproposal（id・状態・持ち主）をstoreの`edit_task`に渡し、storeは同じtransactionで読んだものと照合する。
-食い違えば（例: `ready`で`task.write`を通った後にclaimされ、runが失敗して`in_progress`になった）、taskも`task_edited`も変えずに変わったことを理由に拒む。
+食い違えば、taskも`task_edited`も変えずに変わったことを理由に拒む。
 taskの状態で認可する他のコマンド（`set-goal`・`set-paths`・`set-priority`・`revisit`・`draft`・`ready`・`cancel`・`dependency add` / `remove`）も同じく、認可に使ったものをstoreに渡し、storeは書く前に同じtransactionで照合して、食い違えばtask・依存・eventを変えずに拒む。
 照合が無いと当たる取り違えは`src/domain/authorization.rs`の`TaskAuthorization`のdoc commentが持つ。
 
@@ -327,7 +327,7 @@ queue全体の読み取りのユースケース（一覧は[Queue service](queue
 上の3つ以外（読み取り・`watch`など）は状態を変えない。
 
 - 宛ての環境のあるworker・job・observerはserviceのユースケースだけを送り、ほかはCLIが拒みDBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
-- 宛ての環境の無いuser・inbox・plannerはserviceが答える読み取り・`watch`・`status`をserviceへ送り、serviceが上の節のとおり認可する。
+- 宛ての環境の無いuser・inbox・plannerはserviceが答える読み取り・`watch`・`status`・`report`・`graph --out`をserviceへ送り、serviceがprincipalで認可する（読み取りは上の節、後の2つは`Gate`の`queue.export`）。
   CLIはDBを開かず、届かなくても開かない（[hostのCLI](queue-service-host-cli.md)）。
 - 残り（3つのroleのserviceが答えないものと、ほかのrole）は`check_access`が（default deny）`requests`の全てで`StaticPolicy`に通す。
   拒んだときだけ`QueueDenials`で`authorization_denied`を呼び出し元をactorに記録する。
