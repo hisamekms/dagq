@@ -44,6 +44,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - 渡し先: (a) `provision`がworkerのsession wrapperをbackgroundで起動するとき、`DAGQ_ROLE`ほかのworkerの変数の後ろにwrapperのprocessのenvとして足す（ADR-0026の仕組みを[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定3でprocessのenvと読む）。
   worktreeを作る前に読むので、壊れた`dagq.toml`はprovisioningの失敗になり、wrapperは起動せずsupervisorはclaimを止める。
   (b) `integrate`と`already_satisfied`の検証の`verification_commands`を`Command`のenvに足す（それ以外のvalidatingは流さない）。
+  hostの`integrate`の検証（flakyの流し直しを含む）だけは`TMPDIR`をrunの一時ファイルのdirで置き換え、`already_satisfied`とcontainerの検証は置き換えない（[Run worktrees](run-worktrees.md#終わっていないrunのビルド成果物)）。
   読めないファイルは着地処理のエラーで、runは元の状態に戻る。
   (c) reviewのheadless実行（ADR-0049の決定2）のコマンドのenvに足す。
   (d) `needs_session`のresumeが起動するwrapperのprocessのenvに、(a)と同じくworkerのenv（`DAGQ_ROLE` / `DAGQ_QUEUE`とworkerのactorの名前）の後ろに並べる。
@@ -57,10 +58,10 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - cargo-nextestは`[run.env]`が名指すプログラムではないので下の検査の対象ではなく、無いhostでは着地の検証の失敗になる（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)の決定8）。
 - `[recheck]`は着地のたびにsupervisorが着地待ちのrunをmainに載せた木で実行する軽い検査で、keyの意味は`domain::recheck::RecheckConfig`、流れとcommandに渡るenvは`supervise::execution::recheck`が持つ（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)の決定2、[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
 
-- `[review.subagents.<agent>]`はreviewのsubagentを必須にするglobで、`paths`（`--paths`と同じglobの配列）と任意の`provider`（[Review](review.md#agentのjobのprovider)）を持つ（[ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の決定1）。
+- `[review.subagents.<agent>]`はreviewのsubagentを必須にするglobで、`paths`（`--paths`と同じglobの配列）と任意の`provider`（[Review](review.md#agentのjobのprovider)）を持つ（ADR-t1453-1の決定1）。
   - `<agent>`はkebab-caseで、定義のファイル`.dagq/agents/<agent>/AGENT.md`のdirectoryの名前になる（[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。
   - `builtin:`で始まる名前はbuilt-inのagentの表で、任意の`enabled`・`paths`・`provider`を持ち、書いた`paths`は既定を置き換え、書かないものは既定に従う（意味と既定は`domain::review_builtins`、[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)）。
-  - 書き方の誤り（知らないbuilt-inの名前・真偽でない`enabled`・`builtin:acceptance`の`enabled = false`と`paths`・`provider`）は`dagq.toml`全体の誤り。
+  - 書き方の誤り（`domain::review_builtins`と`run_env`）は`dagq.toml`全体の誤り。
   - 定義の無いagentと複数の役割の節が名指すagentは`dagq doctor`の`agents`の`errors`が出す（reviewでの扱いは[Review](review.md#reviewのsubagent)の「誤り」）。
   - 読むのはreviewを始めるときのlanding branchのcommitの`dagq.toml`で、選び方とsnapshotは[Review](review.md#reviewのsubagent)。
 
@@ -70,7 +71,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   supervisorが起動時に読み（`SuperviseOptions::resume`で上書きできる）、読めなければ既定値で動く。
   起動の後の変更はsupervisorを起動し直すまで効かない。
 
-- `[retention]`は終わったplanner・plan review・observationのdirを残す日数`days`（既定7）と`backups/`の数`backups`（既定2）で、意味は`RetentionConfig`（ADR-t697-1）。
+- `[retention]`は終わったplanner・plan review・observationのdirを残す日数`days`と`backups/`の数`backups`で、意味は`RetentionConfig`（ADR-t697-1）。
 
 - `[supervisor]`はsupervisorの枠と控えの設定で、keyと意味は`domain::slot_limits::SupervisorConfig`が持つ（[人の答えを待つrun](waiting.md)・[Draft planners](draft-planners.md)・[Finding planners](finding-planners.md)・[Plan review (supervisor)](plan-review.md#plan-review-supervisor)・[claimを控える](claim-hold.md)・[実行区分の上限とaging](claim-hold.md#実行区分の上限とaging)、ADR-t1479-1、ADR-t1591-1）。
   projectごとのbuildの重さに合わせた並列数と、答えを待つplannerが枠をふさいでもdraftとreviseが進む数と、buildのloadが出るまでの間をrepositoryに置くため。
@@ -98,7 +99,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   他のjobに効かず（evalのケースのprogramのjobはreviewの段に数える）、無いkeyは今の上限（[Headless job processes](headless-job-processes.md#記録)）。
   supervisorが起動時に読む。
 - `[review.programs.<name>]`はreviewのprogramのjobで（[プログラムのreview](review-programs.md)）、keyと意味は`ReviewProgram`が持つ。
-  `[review.programs."builtin:<名前>"]`はbuilt-inの`enabled`と`paths`（既定を置き換える）だけを持ち（`BuiltinProgramSetting`）、`script`・`args`・知らない名前・pjのprogramの`builtin:`の名前は誤り。
+  `[review.programs."builtin:<名前>"]`はbuilt-inの`enabled`と`paths`（既定を置き換える）だけを持ち（`BuiltinProgramSetting`）、ほかのkeyは誤り。
   読むのは作業ファイルでなく、reviewの試行ごとのlanding branchのcommitの`dagq.toml`と`script`（`Verifier::review_programs_in`）。
 - `[review.code]`は上限の後の判定（[Review](review.md)の4a）のコードのpath、`[review] revise_limit`はrunを通した手直しの上限（ADR-t3033-1）で、意味と既定は`review_reason::CodePaths`・`ReviseLimit`が持つ。
   どちらも読むのはreviewの試行の始めのlanding branchのcommitの`dagq.toml`で、作業ファイルとrunのbranchは読まず、読めなければ既定に戻さず試行をreviewの失敗にする。
@@ -126,7 +127,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[kpi]`と`[kpi.targets."<KPI>"]`はKPIの判定の設定と目標で、KPIの計算（`kpi`・レポート・push・observerの入力）だけが読む（[計測のコマンド](commands.md)、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定17・19。解析は`src/infrastructure/kpi_config.rs`の`KpiTables`）。
   `[kpi]`の設定の数値は既定のまま書かない。
 
-- `[headless]`は`wrapper`だけを持ち、`"workspace"`か`"background"`を書く（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定7）。
+- `[headless]`は`wrapper`だけを持ち、`"workspace"`か`"background"`を書く（ADR-t1404-1決定7）。
   欄は受け付けるがworkerにもruntimeのplannerにも効かず、wrapperは値に関わらずbackgroundで起動する（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定2、[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)、[Plan planners](plan-planners.md)）。
   値が`"workspace"`なら、supervisorはworkerに効かないことをprocessごとに1回だけ警告する（`Verifier::headless_wrapper_setting`）。
   欄を消すのは、古い固定バイナリが欄の無い`dagq.toml`を読めることを確かめた後にする。
