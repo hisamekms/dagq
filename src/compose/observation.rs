@@ -1850,8 +1850,9 @@ impl OneShot {
     }
 
     /// `report_inputs` ([`crate::application::report::report_inputs`]) of
-    /// `queue`, with the `[kpi]` settings of the checkout it names and the
-    /// host's.
+    /// `queue`, with the `[kpi]` settings of the main checkout
+    /// [`served_checkout`] finds (the one a checkout `params` names is
+    /// accepted only as) and the host's.
     pub fn report_inputs_of(
         &self,
         queue: &SqliteQueue,
@@ -1876,6 +1877,7 @@ impl OneShot {
         Ok(serde_json::to_value(report::report_inputs(
             params,
             queue.repository_binding()?,
+            served_checkout(queue)?.as_deref(),
             || report::diagram_draft(queue),
             &report::ReportInputsSources {
                 files: &LocalRunFiles,
@@ -1892,8 +1894,9 @@ impl OneShot {
     /// ([`prepare_report`]: the near-term diagram, the main checkout and
     /// the landed commits' areas) and written under `out` (the queue's
     /// `reports/` without), or with `print` only returned. No Git or
-    /// program runs: a checkout that is not the bound repository's is
-    /// refused.
+    /// program runs: the `dagq.toml` read is the main checkout's
+    /// [`served_checkout`] finds, and a checkout `params` names that is not
+    /// it is refused ([`crate::application::report::accept_checkout`]).
     pub fn report_of(
         &self,
         queue: &SqliteQueue,
@@ -1911,14 +1914,12 @@ impl OneShot {
         let diagram = params.diagram.clone().context(
             "report is sent with what its caller read and drew from report_inputs' answer",
         )?;
-        let checkout = params.checkout.as_deref();
-        if let Some(checkout) = checkout {
-            report::accept_checkout(
-                &LocalRunFiles,
-                checkout,
-                queue.repository_binding()?.as_deref(),
-            )?;
-        }
+        let served = served_checkout(queue)?;
+        let checkout = params
+            .checkout
+            .as_deref()
+            .map(|checkout| report::accept_checkout(&LocalRunFiles, checkout, served.as_deref()))
+            .transpose()?;
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
         let setup = report_setup_with(

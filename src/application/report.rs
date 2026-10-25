@@ -223,15 +223,17 @@ pub struct ReportInputsSources<'a> {
 
 /// `report_inputs` (ADR-t3102-3 decision 5): the near-term diagram's draft
 /// `diagram` reads (after the rest), the bound repository `repository`
-/// and, for the checkout `params` names (accepted as [`accept_checkout`]
-/// accepts it), the commits landed in the periods the report of its
-/// period at its `at` reads at `now`, by that checkout's and the host's
-/// `[kpi]` settings ([`crate::domain::kpi::landed_in_periods`]); none for
-/// no checkout, whose settings and events are not read. No Git or program
-/// runs.
+/// and, when `params` names a checkout (accepted as [`accept_checkout`]
+/// accepts it against `served`, the main checkout the service found from
+/// the binding), the commits landed in the periods the report of its
+/// period at its `at` reads at `now`, by the served checkout's and the
+/// host's `[kpi]` settings ([`crate::domain::kpi::landed_in_periods`]);
+/// none for no checkout, whose settings and events are not read. No Git
+/// or program runs.
 pub fn report_inputs(
     params: &super::queue_commands::ReportInputsParams,
     repository: Option<String>,
+    served: Option<&Path>,
     diagram: impl FnOnce() -> DiagramDraft,
     sources: &ReportInputsSources<'_>,
     now: i64,
@@ -239,7 +241,7 @@ pub fn report_inputs(
     let landed = match params.checkout.as_deref() {
         None => Vec::new(),
         Some(checkout) => {
-            accept_checkout(sources.files, checkout, repository.as_deref())?;
+            let checkout = accept_checkout(sources.files, checkout, served)?;
             let query = KpiQuery {
                 period: params.period.parse().map_err(anyhow::Error::msg)?,
                 at: params
@@ -354,42 +356,28 @@ pub fn prepare_request(
     )
 }
 
-/// That `checkout`, a report's caller sent, is a checkout of the
-/// repository whose Git common directory is `common_dir` (the queue's
-/// binding), judged from its `.git` alone with no Git run: the directory
-/// itself, or a file whose `gitdir:` is under it. One that is not, or a
-/// queue bound to none, is refused.
-pub fn accept_checkout(
+/// The checkout the queue service reads a report's `dagq.toml` in, for
+/// the `checkout` its caller sent: `served`, the main checkout the service
+/// found from the queue's binding with no Git run
+/// ([`crate::infrastructure::adapters::main_checkout_from_files`]), and
+/// only when `checkout` has the same real path. Nothing in `checkout`
+/// (its `.git` included) is read to judge it, so a directory whose `.git`
+/// file names the bound common directory is still refused; so is any
+/// checkout of a queue bound to none or whose main checkout is not found.
+pub fn accept_checkout<'a>(
     files: &dyn RunFiles,
     checkout: &Path,
-    common_dir: Option<&str>,
-) -> Result<()> {
-    anyhow::ensure!(
-        is_checkout_of(files, checkout, common_dir),
-        "{} is no checkout of the repository the queue is bound to",
-        checkout.display()
-    );
-    Ok(())
-}
-
-fn is_checkout_of(files: &dyn RunFiles, checkout: &Path, common_dir: Option<&str>) -> bool {
-    let Some(common_dir) = common_dir.and_then(|dir| files.canonicalize(Path::new(dir)).ok())
-    else {
-        return false;
-    };
-    let git = checkout.join(".git");
-    if files.is_dir(&git) {
-        return files.canonicalize(&git).is_ok_and(|git| git == common_dir);
-    }
-    files
-        .read(&git)
-        .ok()
-        .and_then(|bytes| {
-            let text = String::from_utf8(bytes).ok()?;
-            let dir = text.trim().strip_prefix("gitdir:")?.trim().to_owned();
-            files.canonicalize(&checkout.join(dir)).ok()
+    served: Option<&'a Path>,
+) -> Result<&'a Path> {
+    let real = |path: &Path| files.canonicalize(path).ok();
+    served
+        .filter(|served| real(served).is_some_and(|served| real(checkout) == Some(served)))
+        .with_context(|| {
+            format!(
+                "{} is not the main checkout of the repository the queue is bound to",
+                checkout.display()
+            )
         })
-        .is_some_and(|dir| dir.starts_with(&common_dir))
 }
 
 /// [`DiagramDraft`] of the queue now. A queue with no near-term task has
@@ -866,8 +854,11 @@ mod tests {
         use super::super::queue_commands::ReportInputsParams;
         use crate::domain::{EventId, RunEvent, RunId, TaskId};
         let files = super::super::memory_files::MemoryFiles::default();
+        files.put_dir(Path::new("/r/main"));
         files.put_dir(Path::new("/r/main/.git"));
+        files.put_dir(Path::new("/r/other"));
         files.put_dir(Path::new("/r/other/.git"));
+        let served = Some(Path::new("/r/main"));
         // 2026-09-29T01:00:00Z, an hour after the run landed.
         let now = 1_790_640_000 + 3600;
         let events = vec![RunEvent {
@@ -910,6 +901,7 @@ mod tests {
         let first = report_inputs(
             &params(None),
             bound.clone(),
+            served,
             || draft.clone(),
             &sources,
             now,
@@ -928,6 +920,7 @@ mod tests {
         let again = report_inputs(
             &params(Some("/r/main")),
             bound.clone(),
+            served,
             || draft.clone(),
             &sources,
             now,
@@ -945,43 +938,46 @@ mod tests {
         let error = report_inputs(
             &params(Some("/r/other")),
             bound,
+            served,
             || draft.clone(),
             &sources,
             now,
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("is no checkout"), "{error}");
+        assert!(error.contains("is not the main checkout"), "{error}");
         assert_eq!(read.get(), 2);
     }
 
-    /// A checkout is accepted for the queue bound to its repository: the
-    /// main checkout whose `.git` is the common directory, and a worktree
-    /// whose `.git` file names a directory under it; another repository's,
-    /// a directory with no `.git` and a queue bound to none are refused.
+    /// A checkout is accepted only as the main checkout the service found
+    /// from the binding, by its real path: a worktree whose `.git` file
+    /// names a directory under the bound common directory, another
+    /// repository's checkout, a missing directory and any checkout with no
+    /// served main checkout are refused.
     #[test]
-    fn only_a_checkout_of_the_bound_repository_is_accepted() {
+    fn only_the_served_main_checkout_is_accepted() {
         let files = super::super::memory_files::MemoryFiles::default();
         let main = Path::new("/r/main");
         let common = main.join(".git");
+        files.put_dir(main);
         files.put_dir(&common);
         files.put_dir(&common.join("worktrees/w"));
         let worktree = Path::new("/r/w");
+        files.put_dir(worktree);
         files.put(
             &worktree.join(".git"),
             std::time::UNIX_EPOCH,
             &format!("gitdir: {}\n", common.join("worktrees/w").display()),
         );
         let other = Path::new("/r/other");
+        files.put_dir(other);
         files.put_dir(&other.join(".git"));
-        let bound = common.to_str();
-        accept_checkout(&files, main, bound).unwrap();
-        accept_checkout(&files, worktree, bound).unwrap();
-        for refused in [other, Path::new("/r/bare")] {
-            let error = accept_checkout(&files, refused, bound)
+        assert_eq!(accept_checkout(&files, main, Some(main)).unwrap(), main);
+        for refused in [worktree, other, Path::new("/r/bare")] {
+            let error = accept_checkout(&files, refused, Some(main))
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("is no checkout"), "{error}");
+            assert!(error.contains("is not the main checkout"), "{error}");
         }
         assert!(accept_checkout(&files, main, None).is_err());
     }

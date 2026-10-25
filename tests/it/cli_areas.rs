@@ -144,6 +144,86 @@ fn a_report_through_the_service_reads_the_areas_with_the_client_s_git() {
     );
 }
 
+/// `report_inputs` and `report` sent straight to the queue service of a
+/// queue bound to a repository, naming a directory whose `.git` file's
+/// `gitdir:` is under the bound common directory: the service refuses both
+/// without reading that directory's `dagq.toml` (one that does not parse),
+/// and answers both for the main checkout it finds from the binding, the
+/// landed commit with them.
+#[test]
+fn a_report_naming_another_directory_than_the_main_checkout_is_refused_unread() {
+    use dagq::domain::queue_service::{API_VERSION, ServiceRequest, UseCase};
+    use dagq::infrastructure::queue_service as service;
+    let (dir, repo, db, _run) = awaiting_run();
+    integrate(&db, 1, &repo).unwrap();
+    let common = fs::canonicalize(repo.join(".git")).unwrap();
+    fs::create_dir_all(common.join("worktrees/x")).unwrap();
+    let forged = dir.path().join("forged");
+    fs::create_dir(&forged).unwrap();
+    fs::write(
+        forged.join(".git"),
+        format!("gitdir: {}\n", common.join("worktrees/x").display()),
+    )
+    .unwrap();
+    fs::write(forged.join("dagq.toml"), "[kpi\nnot toml = =\n").unwrap();
+    let config = dir.path().join("config");
+    let git_log = crate::common::service::serve_logging_git(
+        &db,
+        &[("TZ", "UTC"), ("XDG_CONFIG_HOME", config.to_str().unwrap())],
+    );
+    let queue_dir = fs::canonicalize(&db).unwrap().parent().unwrap().to_owned();
+    let call = |use_case: UseCase, params: Value| -> Value {
+        let response = service::call(
+            &service::socket_path(&queue_dir),
+            &ServiceRequest {
+                api_version: API_VERSION,
+                token: None,
+                env_role: None,
+                queue: None,
+                binding: None,
+                use_case,
+                params,
+            },
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+        serde_json::to_value(response).unwrap()
+    };
+    let inputs = |checkout: &Path| json!({"period": "day", "checkout": checkout});
+    let report = |checkout: &Path| {
+        json!({
+            "period": "day",
+            "print": true,
+            "diagram": {"tasks": [], "d2_source": false, "reason": "not drawn"},
+            "checkout": checkout,
+        })
+    };
+    for (use_case, params) in [
+        (UseCase::ReportInputs, inputs(&forged)),
+        (UseCase::Report, report(&forged)),
+    ] {
+        let refused = call(use_case, params);
+        assert_eq!(refused["ok"], false, "{use_case:?}: {refused}");
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("is not the main checkout"),
+            "{use_case:?}: {message}"
+        );
+    }
+    let commit =
+        crate::common::service::events(&db, "run_integrated")[0]["payload"]["commit"].clone();
+    let answered = call(UseCase::ReportInputs, inputs(&repo));
+    assert_eq!(answered["ok"], true, "{answered}");
+    assert_eq!(answered["result"]["landed"], json!([commit]), "{answered}");
+    let made = call(UseCase::Report, report(&repo));
+    assert_eq!(made["ok"], true, "{made}");
+    assert_eq!(
+        fs::read_to_string(&git_log).unwrap_or_default(),
+        "",
+        "the service ran Git"
+    );
+}
+
 /// `dagq` with `args` on the queue at `db` through the queue service, in
 /// the host's time zone (the one the test reads the DB in) with the
 /// host-wide settings of `config`: the JSON it prints.

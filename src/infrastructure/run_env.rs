@@ -3242,12 +3242,46 @@ pub fn load_worker_trial(root: &Path) -> Result<WorkerTrial> {
         .worker_trial)
 }
 
+/// The most bytes of a `dagq.toml` dagq reads: the queue service reads the
+/// main checkout's with its own rights, and a larger one is refused rather
+/// than read on.
+const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The text of the `dagq.toml` at `path`; none when there is none. Only a
+/// regular file (a symlink is followed) of at most [`MAX_CONFIG_BYTES`] is
+/// read: a device, a FIFO or a directory, and a larger file, are refused
+/// with why, so that a `dagq.toml` that is a symlink to `/dev/zero` cannot
+/// make the reader take memory without end. The file is opened without
+/// blocking, so that one swapped for a FIFO after the check does not hang.
 fn read_config(path: &Path) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    let not_regular = |path: &Path| format!("read {}: not a regular file", path.display());
+    match fs::metadata(path) {
+        Ok(metadata) => ensure!(metadata.is_file(), not_regular(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("read {}", path.display()))?;
+    ensure!(metadata.is_file(), not_regular(path));
+    let mut bytes = Vec::new();
+    file.take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {}", path.display()))?;
+    ensure!(
+        bytes.len() as u64 <= MAX_CONFIG_BYTES,
+        "read {}: larger than the {MAX_CONFIG_BYTES} bytes dagq reads of it",
+        path.display()
+    );
+    String::from_utf8(bytes)
+        .map(Some)
+        .with_context(|| format!("read {}: not UTF-8", path.display()))
 }
 
 /// `value` with `${DAGQ_QUEUE_DIR}` and `${DAGQ_RUN_DIR}` replaced. Any other
@@ -3617,6 +3651,51 @@ impl Verifier for ShellVerifier {
 
 #[cfg(test)]
 mod tests {
+    /// A `dagq.toml` is read only as a regular file of at most
+    /// [`MAX_CONFIG_BYTES`]: a symlink to `/dev/zero` or to a FIFO, a
+    /// directory and a larger file are refused with why, not read on;
+    /// a symlink to a regular file and a missing file read as before.
+    #[test]
+    fn a_dagq_toml_is_read_only_as_a_bounded_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(CONFIG_FILE_NAME);
+        let refused = |why: &str| {
+            let error = format!("{:#}", load_kpi_settings(dir.path()).unwrap_err());
+            assert!(error.contains(why), "{error}");
+        };
+        assert_eq!(read_config(&file).unwrap(), None);
+
+        std::os::unix::fs::symlink("/dev/zero", &file).unwrap();
+        refused("not a regular file");
+        std::fs::remove_file(&file).unwrap();
+
+        let fifo = dir.path().join("fifo");
+        let path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        std::os::unix::fs::symlink(&fifo, &file).unwrap();
+        refused("not a regular file");
+        std::fs::remove_file(&file).unwrap();
+
+        std::fs::create_dir(&file).unwrap();
+        refused("not a regular file");
+        std::fs::remove_dir(&file).unwrap();
+
+        let large = vec![b'#'; usize::try_from(MAX_CONFIG_BYTES).unwrap() + 1];
+        std::fs::write(&file, &large).unwrap();
+        refused("larger than the");
+
+        let real = dir.path().join("real.toml");
+        std::fs::write(&real, "[kpi]\nmax_improvement_proposals = 3\n").unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&real, &file).unwrap();
+        assert_eq!(
+            load_kpi_settings(dir.path())
+                .unwrap()
+                .and_then(|kpi| kpi.max_improvement_proposals),
+            Some(3)
+        );
+    }
+
     /// The inbox reads its own table alone: a mistake there is an error
     /// whatever its message, one in another table is not seen.
     #[test]

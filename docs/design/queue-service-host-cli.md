@@ -66,7 +66,8 @@ Gitとprogramはserviceでなくクライアントがユースケースの外で
   要求がserviceの受ける大きさを超えれば図を描かなかったものとして理由と送り、それでも超えれば送らずに断る
   serviceはそれとserviceの環境（`TZ`・`host.toml`）でreportを作り、`--out`の無いものはqueueの`reports/`に書く。
   SVGはd2の出力と同じく整ったXMLの`<svg>`であることだけを確かめ（整っていないものは図を載せない）、pageはそのbytesの`data:` URLの`<img>`として載せるので、browserは画像として描いてscriptを動かさず外を読まず、そのstyleはpageに及ばない。
-  checkoutは束縛したrepositoryのものだけを受ける
+  serviceが`dagq.toml`を読むcheckoutは、`stats`・`kpi`と同じく束縛からGitなしで決めたmain checkoutだけで、クライアントが名指すcheckoutはそれとreal pathが同じときだけ受け、違えばその中を読まずに断る（`application::report::accept_checkout`）。
+  serviceが読む`dagq.toml`は大きさに上限があり、通常のfileでないもの（deviceやFIFOへのsymlinkなど）は読まずに断る
 - `release`はまず`release_read`で成果を読むrunを聞き、runを終える解除ならクライアントが成果を読んで保存し、headを`refs/dagq/runs/<run-id>`に残してから送る。
   serviceは読んだ時のholdと版を確定の中で照らし直し、食い違えば何も変えずに断る。
   hostの`dagq`はcontainerのrunのfacts-onlyのturnを自分で走らせ、そのimageの記録はDBを開かずに`release_images`で送る（成果が読めたかに依らず、失敗の時刻はserviceが記録する時のもの）。
