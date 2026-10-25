@@ -103,13 +103,14 @@ impl PlanningState {
         let Some(&goal) = env.queue.goal_review_candidates()?.first() else {
             return Ok(());
         };
-        let (token, layout) = (env.token, env.layout);
+        let (token, layout, processes) = (env.token, env.layout, env.processes);
         let Some(job) = env.queue.begin_goal_review(
             goal,
             token,
             &layout.goal_reviews_dir,
             &layout.repo_root,
             &launch,
+            &|pid| pid != layout.pid && processes.alive(pid),
         )?
         else {
             return Ok(());

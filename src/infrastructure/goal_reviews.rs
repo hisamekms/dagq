@@ -21,9 +21,9 @@ use crate::{
         GoalReviewJob, GoalReviewRecord, GoalReviewStore,
     },
     domain::{
-        Ask, AskId, AskKind, GoalId, GoalVerdict, HEARTBEAT_TIMEOUT_SECS, NewTask, TaskId,
-        TaskStatus, follow_up,
+        Ask, AskId, AskKind, GoalId, GoalVerdict, NewTask, TaskId, TaskStatus, follow_up,
         goal_review::{self, GoalAnswer, GoalGap, GoalReviewDecision, LatestReview},
+        job_supervisor_lives,
     },
 };
 
@@ -356,6 +356,7 @@ impl GoalReviewStore for SqliteQueue {
         goal_reviews_dir: &Path,
         cwd: &Path,
         launch: &crate::domain::actor_model::ActorLaunch,
+        supervisor_alive: &dyn Fn(u32) -> bool,
     ) -> Result<Option<GoalReviewJob>> {
         let now = self.generators.clock.now();
         // The spans it closes read their transcripts first (task 543).
@@ -363,17 +364,18 @@ impl GoalReviewStore for SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let unfinished: Vec<(i64, LeaseToken, Option<i64>)> = tx
+        type Unfinished = (i64, LeaseToken, Option<u32>, Option<i64>);
+        let unfinished: Vec<Unfinished> = tx
             .prepare(
-                "SELECT r.id, r.supervisor_token, s.heartbeat_at FROM goal_reviews r
+                "SELECT r.id, r.supervisor_token, s.pid, s.heartbeat_at FROM goal_reviews r
                  LEFT JOIN supervisors s ON s.token = r.supervisor_token
                  WHERE r.finished_at IS NULL",
             )?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        for (id, owner, heartbeat) in unfinished {
+        for (id, owner, pid, heartbeat) in unfinished {
             let live =
-                owner != *token && heartbeat.is_some_and(|at| now - at <= HEARTBEAT_TIMEOUT_SECS);
+                job_supervisor_lives(owner == *token, pid.zip(heartbeat), now, supervisor_alive);
             if live {
                 return Ok(None);
             }

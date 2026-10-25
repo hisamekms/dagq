@@ -315,13 +315,14 @@ impl PlanningState {
                 (env.actor_launch(ModelRole::PlanReview), false, Some(why))
             }
         };
-        let (token, layout) = (env.token, env.layout);
+        let (token, layout, processes) = (env.token, env.layout, env.processes);
         let Some(job) = env.queue.begin_plan_review(
             proposal_id,
             token,
             &layout.plan_reviews_dir,
             &layout.repo_root,
             &launch,
+            &|pid| pid != layout.pid && processes.alive(pid),
         )?
         else {
             return Ok(());

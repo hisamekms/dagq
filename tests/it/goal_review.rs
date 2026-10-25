@@ -309,6 +309,7 @@ fn a_fourth_gaps_in_a_row_asks_a_person() {
                 &fx.repo.join("goal-reviews"),
                 &fx.repo,
                 &ActorLaunch::default_of(ModelRole::GoalReview),
+                &|_| false,
             )
             .unwrap()
             .unwrap();
@@ -693,6 +694,7 @@ fn handoff_reviews(keep_candidates: bool) {
             &fx.repo.join("goal-reviews"),
             &fx.repo,
             &ActorLaunch::default_of(ModelRole::GoalReview),
+            &|_| false,
         )
         .unwrap()
         .unwrap();
@@ -703,6 +705,7 @@ fn handoff_reviews(keep_candidates: bool) {
             &fx.repo.join("plan-reviews"),
             &fx.repo,
             &ActorLaunch::default_of(ModelRole::PlanReview),
+            &|_| false,
         )
         .unwrap()
         .unwrap();
@@ -935,5 +938,99 @@ fn goal_answer_attention_uses_the_recorded_delivery_decision() {
                 .iter()
                 .all(|a| a["ask_id"] != json!(ask.id))
         );
+    }
+}
+
+/// A goal review and a plan review begun by one supervisor whose heartbeat
+/// then goes stale: while its pid lives, another supervisor leaves both
+/// rows unfinished and starts no job; once its pid is dead, both rows are
+/// `interrupted` and a new job starts. The judgement itself, with the
+/// unregistered and own-token rows, is `domain::job_supervisor_lives`'s
+/// unit test.
+#[test]
+fn a_stale_supervisor_keeps_its_reviews_while_its_pid_lives() {
+    use crate::plan_review::submit;
+    use dagq::application::PlanReviewStore;
+    use dagq::domain::{
+        LeaseToken,
+        actor_model::{ActorLaunch, ModelRole},
+    };
+
+    const OWNER_PID: u32 = 4_000_001;
+    let fx = fixture();
+    let (goal, _) = goal_done(&fx);
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(
+        &mut queue,
+        "review this plan",
+        &[TaskId::new(1)],
+        Priority::Normal,
+    );
+    let proposal = submit(&mut queue, &[task], None);
+    let begin = |queue: &mut SqliteQueue, token: &LeaseToken, alive: &dyn Fn(u32) -> bool| {
+        let goal_job = queue
+            .begin_goal_review(
+                goal,
+                token,
+                &fx.repo.join("goal-reviews"),
+                &fx.repo,
+                &ActorLaunch::default_of(ModelRole::GoalReview),
+                alive,
+            )
+            .unwrap();
+        let plan_job = queue
+            .begin_plan_review(
+                proposal,
+                token,
+                &fx.repo.join("plan-reviews"),
+                &fx.repo,
+                &ActorLaunch::default_of(ModelRole::PlanReview),
+                alive,
+            )
+            .unwrap();
+        (goal_job.map(|j| j.id), plan_job.map(|j| j.id))
+    };
+    let first = LeaseToken::new("stale-review-owner");
+    queue
+        .register_supervisor(&first, OWNER_PID, 2, "previous")
+        .unwrap();
+    let (goal_job, plan_job) = begin(&mut queue, &first, &|_| false);
+    let (goal_job, plan_job) = (goal_job.unwrap(), plan_job.unwrap());
+    let conn = Connection::open(&fx.db).unwrap();
+    conn.execute(
+        "UPDATE supervisors SET heartbeat_at=0 WHERE token=?1",
+        [&first],
+    )
+    .unwrap();
+    let row = |table: &str, id: i64| -> (Option<String>, Option<String>) {
+        conn.query_row(
+            &format!("SELECT outcome, error FROM {table} WHERE id=?1"),
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    let next = LeaseToken::new("next-supervisor");
+
+    let waited = begin(&mut queue, &next, &|pid| pid == OWNER_PID);
+    assert_eq!(waited, (None, None), "no second job starts");
+    for (table, id) in [("goal_reviews", goal_job), ("plan_reviews", plan_job)] {
+        assert_eq!(row(table, id), (None, None), "{table}");
+    }
+
+    let (goal_again, plan_again) = begin(&mut queue, &next, &|_| false);
+    for (table, id, again) in [
+        ("goal_reviews", goal_job, goal_again),
+        ("plan_reviews", plan_job, plan_again),
+    ] {
+        assert_eq!(
+            row(table, id),
+            (
+                Some("interrupted".into()),
+                Some("its supervisor is gone".into())
+            ),
+            "{table}"
+        );
+        assert!(again.is_some_and(|again| again != id), "{table}");
     }
 }

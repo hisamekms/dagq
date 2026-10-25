@@ -621,7 +621,10 @@ pub trait PlanReviewStore {
     /// directory named by its row's ID under `plan_reviews_dir`
     /// (`plan_review_started`, with `cwd`, the checkout the job runs in, for
     /// its Claude session: ADR-0048). Rows of gone supervisors are finished
-    /// as `interrupted` first. `None`: another supervisor's job runs, or the
+    /// as `interrupted` first: `token`'s own, and those of a supervisor
+    /// that is not registered, or whose heartbeat is stale and whose pid
+    /// `supervisor_alive` says is dead ([`crate::domain::job_supervisor_lives`]).
+    /// `None`: another supervisor's job runs, or the
     /// proposal is no longer a candidate. `launch` is what the job is
     /// started with (ADR-0079 decision 7), recorded as the event's `launch`.
     /// Its attempt counts the proposal's earlier rows that were not
@@ -633,6 +636,7 @@ pub trait PlanReviewStore {
         plan_reviews_dir: &Path,
         cwd: &Path,
         launch: &crate::domain::actor_model::ActorLaunch,
+        supervisor_alive: &dyn Fn(u32) -> bool,
     ) -> Result<Option<PlanReviewJob>>;
     /// Apply what the runtime made of the verdict and finish the job
     /// (`plan_review_finished`); an action the job may not take is an
@@ -906,8 +910,10 @@ pub trait GoalReviewStore {
     /// directory named by its row's ID under `goal_reviews_dir`
     /// (`goal_review_started`, with the session id it gives the job, the
     /// checkout `cwd` it runs in and its `launch`). Rows of gone
-    /// supervisors are finished as `interrupted` first. `None`: another
-    /// supervisor's job runs, or the goal is no longer a candidate.
+    /// supervisors are finished as `interrupted` first, as
+    /// [`PlanReviewStore::begin_plan_review`] tells them by
+    /// `supervisor_alive`. `None`: another supervisor's job runs, or the
+    /// goal is no longer a candidate.
     fn begin_goal_review(
         &mut self,
         goal: GoalId,
@@ -915,6 +921,7 @@ pub trait GoalReviewStore {
         goal_reviews_dir: &Path,
         cwd: &Path,
         launch: &crate::domain::actor_model::ActorLaunch,
+        supervisor_alive: &dyn Fn(u32) -> bool,
     ) -> Result<Option<GoalReviewJob>>;
     /// The finished reviews of `goal`, oldest first.
     fn goal_reviews(&self, goal: GoalId) -> Result<Vec<GoalReviewRecord>>;

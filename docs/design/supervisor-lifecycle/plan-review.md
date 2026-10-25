@@ -76,6 +76,8 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 ## 候補と開始
 
 - 次に取るproposalと開始: `domain::plan_review::next_to_review`・`PlanReviewStore::begin_plan_review`・`PlanningState::start_plan_review_job`。
+- 同時に1つ（queue全体）は、`begin_plan_review`が`BEGIN IMMEDIATE`の中で生きているsupervisorの未完了の行が無いことを確かめてから行を書くことで守る。
+  生きているかと、生きていないsupervisorと自分のtokenの未完了の行を`interrupted`で閉じることは[goal review](goal-review.md)の1（記録）と同じ規則（`domain::job_supervisor_lives`）。
 - 予想するファイルは[claimを控える](claim-hold.md#判定の入力)と同じ規則で求める（[ADR-t1981-1](../../adr/2026-10-07-t1981-1-expected-files-leave-out-path-globs.md)）。
 - 依存は中身の前提のときだけで、同じファイルを触ることはclaimの控えに任せる（[ADR-t1985-1](../../adr/2026-10-07-t1985-1-dependencies-only-for-content-prerequisites-and-conflicts-left-to-claim-deferral.md)）。
 - 落とし穴: run_eventsはtaskかgoalを要るので、proposalのeventはproposalの最初のtaskに付く。

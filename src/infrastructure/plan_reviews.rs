@@ -29,11 +29,11 @@ use crate::{
         RevisingProposal,
     },
     domain::{
-        Ask, AskId, AskKind, HEARTBEAT_TIMEOUT_SECS, PlanAnswer, PlanReviewAction,
-        PlanReviewCandidate, PlanReviewDecision, PlannerId, Priority, ProposalId, ProposalStatus,
-        TaskAction, TaskId, TaskStatus,
+        Ask, AskId, AskKind, PlanAnswer, PlanReviewAction, PlanReviewCandidate, PlanReviewDecision,
+        PlannerId, Priority, ProposalId, ProposalStatus, TaskAction, TaskId, TaskStatus,
         cancel_reason::NewCancel,
         headless_job::JobSession,
+        job_supervisor_lives,
         plan_quality::{self, ProposalFeatures},
         plan_review::{
             self, PassPriority, PlanReviewEnd, PlanReviewOutcome, ReopenDecision, ReviewHold,
@@ -495,6 +495,7 @@ impl PlanReviewStore for SqliteQueue {
         plan_reviews_dir: &Path,
         cwd: &Path,
         launch: &crate::domain::actor_model::ActorLaunch,
+        supervisor_alive: &dyn Fn(u32) -> bool,
     ) -> Result<Option<PlanReviewJob>> {
         let now = self.generators.clock.now();
         // What the proposal is like, read before the write lock (task
@@ -511,17 +512,18 @@ impl PlanReviewStore for SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let unfinished: Vec<(i64, LeaseToken, Option<i64>)> = tx
+        type Unfinished = (i64, LeaseToken, Option<u32>, Option<i64>);
+        let unfinished: Vec<Unfinished> = tx
             .prepare(
-                "SELECT r.id, r.supervisor_token, s.heartbeat_at FROM plan_reviews r
+                "SELECT r.id, r.supervisor_token, s.pid, s.heartbeat_at FROM plan_reviews r
                  LEFT JOIN supervisors s ON s.token = r.supervisor_token
                  WHERE r.finished_at IS NULL",
             )?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        for (id, owner, heartbeat) in unfinished {
+        for (id, owner, pid, heartbeat) in unfinished {
             let live =
-                owner != *token && heartbeat.is_some_and(|at| now - at <= HEARTBEAT_TIMEOUT_SECS);
+                job_supervisor_lives(owner == *token, pid.zip(heartbeat), now, supervisor_alive);
             if live {
                 return Ok(None);
             }
@@ -1563,6 +1565,7 @@ mod tests {
                 &dir.path().join("plan-reviews"),
                 Path::new("/repo"),
                 &ActorLaunch::default_of(crate::domain::actor_model::ModelRole::PlanReview),
+                &|_| false,
             )
             .unwrap()
             .unwrap();
@@ -1654,6 +1657,7 @@ mod tests {
                 &dir.path().join("plan-reviews"),
                 Path::new("/repo"),
                 &ActorLaunch::default_of(crate::domain::actor_model::ModelRole::PlanReview),
+                &|_| false,
             )
             .unwrap()
             .unwrap();
@@ -1742,6 +1746,7 @@ mod tests {
                     &dir.path().join("plan-reviews"),
                     Path::new("/repo"),
                     &ActorLaunch::default_of(crate::domain::actor_model::ModelRole::PlanReview),
+                    &|_| false,
                 )
                 .unwrap()
                 .unwrap();
@@ -1863,6 +1868,7 @@ mod tests {
                     &dir.path().join("plan-reviews"),
                     Path::new("/repo"),
                     &ActorLaunch::default_of(crate::domain::actor_model::ModelRole::PlanReview),
+                    &|_| false,
                 )
                 .unwrap()
                 .unwrap();

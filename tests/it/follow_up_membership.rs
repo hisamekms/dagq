@@ -767,6 +767,7 @@ impl Landed {
                 &dir.join("goal-reviews"),
                 &dir,
                 &ActorLaunch::default_of(ModelRole::GoalReview),
+                &|_| false,
             )
             .unwrap()
             .expect("the goal is reviewed")

@@ -438,6 +438,7 @@ impl PlanReviewStore for SupervisorQueue {
         plan_reviews_dir: &Path,
         cwd: &Path,
         launch: &crate::domain::actor_model::ActorLaunch,
+        supervisor_alive: &dyn Fn(u32) -> bool,
     ) -> Result<Option<PlanReviewJob>> {
         let mut local = self.local()?;
         PlanReviewStore::begin_plan_review(
@@ -447,6 +448,7 @@ impl PlanReviewStore for SupervisorQueue {
             plan_reviews_dir,
             cwd,
             launch,
+            supervisor_alive,
         )
     }
     fn finish_plan_review(
@@ -561,9 +563,18 @@ impl GoalReviewStore for SupervisorQueue {
         goal_reviews_dir: &Path,
         cwd: &Path,
         launch: &crate::domain::actor_model::ActorLaunch,
+        supervisor_alive: &dyn Fn(u32) -> bool,
     ) -> Result<Option<GoalReviewJob>> {
         let mut local = self.local()?;
-        GoalReviewStore::begin_goal_review(&mut **local, goal, token, goal_reviews_dir, cwd, launch)
+        GoalReviewStore::begin_goal_review(
+            &mut **local,
+            goal,
+            token,
+            goal_reviews_dir,
+            cwd,
+            launch,
+            supervisor_alive,
+        )
     }
     fn goal_reviews(&self, goal: GoalId) -> Result<Vec<GoalReviewRecord>> {
         let local = self.local()?;

@@ -2016,6 +2016,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_job_supervisor_lives_by_a_fresh_heartbeat_or_a_live_pid_unless_it_is_the_asking_one() {
+        let now = 1_000;
+        let fresh = now - HEARTBEAT_TIMEOUT_SECS;
+        let stale = fresh - 1;
+        // Another registered supervisor, by its heartbeat or its pid.
+        assert!(job_supervisor_lives(false, Some((7, fresh)), now, |_| {
+            false
+        }));
+        assert!(job_supervisor_lives(
+            false,
+            Some((7, stale)),
+            now,
+            |pid| pid == 7
+        ));
+        assert!(!job_supervisor_lives(false, Some((7, stale)), now, |_| {
+            false
+        }));
+        // No registration, or the asking supervisor's own row.
+        assert!(!job_supervisor_lives(false, None, now, |_| true));
+        assert!(!job_supervisor_lives(true, Some((7, fresh)), now, |_| true));
+    }
+
+    #[test]
     fn an_approve_landing_ask_is_closed_once_its_run_failed_or_its_task_ended() {
         assert_eq!(
             ended_landing_ask_answer(RunStatus::Failed, TaskStatus::InProgress).as_deref(),
@@ -2312,6 +2335,24 @@ mod tests {
 /// A process whose heartbeat is older than this has no working process behind
 /// it, whatever its PID says: the rule for leases, wrappers and supervisors.
 pub const HEARTBEAT_TIMEOUT_SECS: i64 = 30;
+
+/// Whether the supervisor that started a job still watches it: it is
+/// another supervisor than the one that asks (not `own`: a row of its own
+/// token is one from before its exec), registered (`pid`, with its
+/// `heartbeat_at`), and its heartbeat is within [`HEARTBEAT_TIMEOUT_SECS`]
+/// or its pid is `alive`. A heartbeat gone stale while its process lives
+/// (every heartbeat is old right after the host wakes from sleep) is
+/// waited for.
+pub fn job_supervisor_lives(
+    own: bool,
+    registration: Option<(u32, i64)>,
+    now: i64,
+    alive: impl FnOnce(u32) -> bool,
+) -> bool {
+    !own && registration.is_some_and(|(pid, heartbeat_at)| {
+        now - heartbeat_at <= HEARTBEAT_TIMEOUT_SECS || alive(pid)
+    })
+}
 
 /// What a person (through the inbox) does about an attention (ADR-0016). The
 /// values are short fixed phrases, part of the public contract of `status`,
