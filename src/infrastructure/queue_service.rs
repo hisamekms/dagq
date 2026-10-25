@@ -3873,7 +3873,8 @@ mod tests {
 
     #[test]
     fn a_queue_too_deep_for_a_socket_gets_a_short_one() {
-        let dir = tempfile::tempdir().unwrap();
+        // Not in `$TMPDIR`, which may be too deep for the short queue's.
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         let short = dir.path().join("q");
         assert_eq!(socket_path(&short), short.join("service/queue.sock"));
         let deep = dir.path().join("d".repeat(120));

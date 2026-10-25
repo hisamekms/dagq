@@ -658,7 +658,9 @@ mod tests {
     #[test]
     fn host_links_are_followed_and_a_large_log_has_its_tail_read() {
         use std::os::unix::fs::{PermissionsExt, symlink};
-        let dir = tempfile::tempdir().unwrap();
+        // Not in `$TMPDIR`: a run's verification has its run directory's
+        // `tmp` there, under a `runs/<run>` the host's paths must not be in.
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         let files = LocalRunFiles;
         let data = dir.path().join("data");
         fs::create_dir(&data).unwrap();
@@ -708,7 +710,9 @@ mod tests {
     #[test]
     fn a_linked_host_file_is_a_file_and_a_linked_run_file_is_not() {
         use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
+        // Not in `$TMPDIR`: a run's verification has its run directory's
+        // `tmp` there, under a `runs/<run>` the host's paths must not be in.
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         let files = LocalRunFiles;
         let target = dir.path().join("dagq-real");
         fs::write(&target, b"binary").unwrap();

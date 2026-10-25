@@ -515,18 +515,25 @@ fn a_verification_set_to_a_held_container_runs_nothing_on_the_host() {
 /// the gate's check.
 const LANDING: &str = r#"[landing_verification]
 replaces = ['test ! -f broken.txt']
-command = 'echo "base=$DAGQ_LANDING_BASE"; echo "list=$DAGQ_CI_KNOWN_FAILURES"; echo "fix=$DAGQ_CI_FIX_RUN"; test ! -f broken.txt'
+command = 'echo "base=$DAGQ_LANDING_BASE"; echo "list=$DAGQ_CI_KNOWN_FAILURES"; echo "fix=$DAGQ_CI_FIX_RUN"; echo "tmp=$TMPDIR"; mkdir "$TMPDIR/fixture" && : > "$TMPDIR/fixture/data" && test ! -f broken.txt'
 "#;
 
 /// With `[landing_verification]` the snapshot of a claim runs the
 /// repository's command in place of the task's command it names, as the
 /// landing does (ADR-t2740-1): the command gets the snapshot's head as its
 /// base, the known failures written to the run's directory and that the
-/// task fixes no CI failure; the other command runs as registered.
+/// task fixes no CI failure; the other command runs as registered. On the
+/// host its `TMPDIR` is the run directory's `tmp`, over the one `[run.env]`
+/// names, and what it makes there stays in the run's directory.
 #[test]
 fn a_snapshot_runs_the_landing_command_in_place_of_what_it_replaces() {
-    let (_fixture, repo, db, _backend, _reviewer) =
-        claimed_after(|repo| set_runtimes(repo, LANDING));
+    let mut named = PathBuf::new();
+    let (_fixture, repo, db, _backend, _reviewer) = claimed_after(|repo| {
+        named = repo.parent().unwrap().join("named-tmp");
+        fs::create_dir(&named).unwrap();
+        let run_env = format!("[run.env]\nTMPDIR = '{}'\n", named.display());
+        set_runtimes(repo, &format!("{LANDING}{run_env}"));
+    });
     let head = main_head(&repo);
     let detail = SqliteQueue::open(&db)
         .unwrap()
@@ -549,6 +556,13 @@ fn a_snapshot_runs_the_landing_command_in_place_of_what_it_replaces() {
         "{replaced}"
     );
     assert!(replaced.contains("fix=0\n"), "{replaced}");
+    let tmp = run_dir.join("tmp");
+    assert!(
+        replaced.contains(&format!("tmp={}\n", tmp.display())),
+        "{replaced}"
+    );
+    assert!(tmp.join("fixture/data").is_file());
+    assert!(!named.join("fixture").exists());
     let failures: Value = serde_json::from_str(&fs::read_to_string(&list).unwrap()).unwrap();
     assert_eq!(failures["failures"], json!([]), "{failures}");
 }

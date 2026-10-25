@@ -19,9 +19,9 @@ use std::{
 
 /// The directory under a run's directory the runtime gives the run's
 /// worker turns (Claude's and Codex's, the first and the resumed ones) and
-/// the verification commands its landing runs on the host as their
-/// `TMPDIR` ([`run_tmp_dir`]), and removes with the run's leftovers once
-/// its task is over.
+/// the verification commands its landing or its `already_satisfied`
+/// snapshot runs on the host as their `TMPDIR` ([`run_tmp_dir`]), and
+/// removes with the run's leftovers once its task is over.
 pub const RUN_TMP_DIR: &str = "tmp";
 
 /// The run directory's [`RUN_TMP_DIR`], made a real directory to be a

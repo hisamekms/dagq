@@ -602,7 +602,9 @@ mod tests {
     /// directory and what is in it are refused as links.
     #[test]
     fn links_above_the_run_directories_are_the_hosts_and_followed() {
-        let temp = tempfile::tempdir().unwrap();
+        // Not in `$TMPDIR`: a run's verification has its run directory's
+        // `tmp` there, under a `runs/<run>` the fixture must not be in.
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
         let data = temp.path().join("data");
         fs::create_dir_all(data.join("queue")).unwrap();
         let linked = temp.path().join("linked");

@@ -308,7 +308,9 @@ fn unguarded_rejection(facts: ReceiptFacts<'_>, run: &TaskRun, error: &anyhow::E
 /// run's own worktree keeps the base its receipt names. On the host they
 /// run in the run's scratch worktree of `scratches`, the queue's
 /// `satisfied/`, made again with `head` checked out detached
-/// ([`fresh_satisfied_scratch`]). Set to the container (ADR-t2113-3
+/// ([`fresh_satisfied_scratch`]), with the run directory's temporary
+/// files' directory as their `TMPDIR` ([`host_verification_tmpdir`]), as
+/// the landing's verification on the host. Set to the container (ADR-t2113-3
 /// decision 1), they run as the landing's verification does: each in a
 /// container of its own on a clone of `head` made by `containers`, with a
 /// token of the snapshot's own and without the sccache wrapper, never on
@@ -401,7 +403,8 @@ pub fn verify_snapshot(
     if let Some(message) = verifier.run_env_programs(Some(run_dir))?.missing_message() {
         bail!("{message}");
     }
-    let env = verifier.run_env(run_dir)?;
+    let mut env = verifier.run_env(run_dir)?;
+    host_verification_tmpdir(files, run_dir, &mut env)?;
     let landing_env = plan.landing_env(files, run_dir, run_dir, head)?;
     // The scratch worktree goes whatever the commands did.
     let ran = fresh_satisfied_scratch(repository, scratches, run.id(), head).and_then(|scratch| {
@@ -2936,12 +2939,13 @@ impl Drop for ContainerVerification<'_> {
 }
 
 /// Set in `env`, the `[run.env]` of the landing's verification commands on
-/// the host (its flaky retry included), `TMPDIR` to the run directory's
-/// [`RUN_TMP_DIR`](super::RUN_TMP_DIR), over a `TMPDIR` the `[run.env]`
-/// names: what their tests make there (a queue's fixtures, a whole e2e
-/// workspace) goes with the run's leftovers once its task is over, and
-/// counts in the size of a recent run, instead of staying in the host's
-/// `$TMPDIR`. A container's verification is not given it: the container
+/// the host (its flaky retry included) or of an `already_satisfied`
+/// snapshot's on the host ([`verify_snapshot`]), `TMPDIR` to the run
+/// directory's [`RUN_TMP_DIR`](super::RUN_TMP_DIR), over a `TMPDIR` the
+/// `[run.env]` names: what their tests make there (a queue's fixtures, a
+/// whole e2e workspace) goes with the run's leftovers once its task is
+/// over, and counts in the size of a recent run, instead of staying in the
+/// host's `$TMPDIR`. A container's verification is not given it: the container
 /// takes what it left when it goes. Neither is the landing recheck: it runs
 /// in a scratch worktree of the queue's that the runs it checks and main's
 /// own check share, so what it leaves is no one run's to remove.
@@ -4383,6 +4387,8 @@ mod tests {
         container: bool,
         /// `[landing_verification]`.
         landing: Option<landing_verification::LandingVerification>,
+        /// `[run.env]`.
+        run_env: Vec<(String, String)>,
     }
 
     impl ScriptedVerifier {
@@ -4393,6 +4399,7 @@ mod tests {
                 envs: RefCell::new(Vec::new()),
                 container,
                 landing: None,
+                run_env: Vec::new(),
             }
         }
     }
@@ -4415,7 +4422,7 @@ mod tests {
             })
         }
         fn run_env(&self, _: &Path) -> Result<Vec<(String, String)>> {
-            Ok(Vec::new())
+            Ok(self.run_env.clone())
         }
         fn run_env_programs(
             &self,
@@ -4499,6 +4506,41 @@ mod tests {
         assert_eq!((second.commands, ran.len()), (2, 2));
         let (passed, ran, _) = verify(vec![true, true, true]);
         assert_eq!((passed.commands, passed.failure, ran.len()), (3, None, 3));
+    }
+
+    /// On the host the snapshot's commands have the run directory's `tmp`,
+    /// made for them, as their `TMPDIR`, over the one `[run.env]` names, so
+    /// what their tests make there goes with the run's leftovers; the rest
+    /// of the `[run.env]` stays.
+    #[test]
+    fn a_snapshot_verification_on_the_host_keeps_its_temporary_files_in_the_run_directory() {
+        let mut record = task_record(&[], &[]);
+        record.verification_commands = vec!["first".into(), "second".into()];
+        let task = Task::restore(record).unwrap();
+        let (files, dir) = (MemoryFiles::default(), Path::new(DIR));
+        let mut verifier = ScriptedVerifier::new(vec![true, true], false);
+        verifier.run_env = vec![
+            ("TMPDIR".to_owned(), "/tmp/person".to_owned()),
+            ("CARGO_BUILD_JOBS".to_owned(), "4".to_owned()),
+        ];
+        let verification = verify_snapshot(
+            &FakeRepository::sound(),
+            &verifier,
+            &files,
+            &as_registered(&task),
+            &run(dir),
+            (&sha(HEAD), Path::new(SCRATCHES)),
+            NoContainers::parts(&NoContainers::default()),
+        )
+        .unwrap();
+        assert_eq!((verification.commands, verification.failure), (2, None));
+        let tmp = dir.join(super::super::RUN_TMP_DIR);
+        let expected = vec![
+            ("CARGO_BUILD_JOBS".to_owned(), "4".to_owned()),
+            ("TMPDIR".to_owned(), tmp.to_str().unwrap().to_owned()),
+        ];
+        assert_eq!(verifier.envs.into_inner(), [expected.clone(), expected]);
+        assert!(files.is_dir(&tmp));
     }
 
     /// The containers and the tokens of a snapshot's verification in a
@@ -4758,13 +4800,22 @@ mod tests {
             ]
         );
         let list = dir.join(landing_verification::KNOWN_FAILURES_FILE);
+        let tmpdir = vec![(
+            "TMPDIR".to_owned(),
+            dir.join(super::super::RUN_TMP_DIR)
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        )];
+        let mut replacing = tmpdir.clone();
+        replacing.extend(landing_verification::env(
+            HEAD,
+            list.to_str().unwrap(),
+            false,
+        ));
         assert_eq!(
             verifier.envs.into_inner(),
-            [
-                Vec::new(),
-                landing_verification::env(HEAD, list.to_str().unwrap(), false),
-                Vec::new(),
-            ]
+            [tmpdir.clone(), replacing, tmpdir]
         );
         let written: Value = serde_json::from_slice(&files.read(&list).unwrap()).unwrap();
         assert_eq!(written, known_failures().failures);

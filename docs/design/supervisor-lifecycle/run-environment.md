@@ -44,7 +44,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - 渡し先: (a) `provision`がworkerのsession wrapperをbackgroundで起動するとき、`DAGQ_ROLE`ほかのworkerの変数の後ろにwrapperのprocessのenvとして足す（ADR-0026の仕組みを[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定3でprocessのenvと読む）。
   worktreeを作る前に読むので、壊れた`dagq.toml`はprovisioningの失敗になり、wrapperは起動せずsupervisorはclaimを止める。
   (b) `integrate`と`already_satisfied`の検証の`verification_commands`を`Command`のenvに足す（それ以外のvalidatingは流さない）。
-  hostの`integrate`の検証（flakyの流し直しを含む）だけは`TMPDIR`をrunの一時ファイルのdirで置き換え、`already_satisfied`とcontainerの検証は置き換えない（[Run worktrees](run-worktrees.md#終わっていないrunのビルド成果物)）。
+  hostの検証（`integrate`のflakyの流し直しと`already_satisfied`を含む）は`TMPDIR`をrunの一時ファイルのdirで置き換え、containerの検証は置き換えない（[Run worktrees](run-worktrees.md#終わっていないrunのビルド成果物)）。
   読めないファイルは着地処理のエラーで、runは元の状態に戻る。
   (c) reviewのheadless実行（ADR-0049の決定2）のコマンドのenvに足す。
   (d) `needs_session`のresumeが起動するwrapperのprocessのenvに、(a)と同じくworkerのenv（`DAGQ_ROLE` / `DAGQ_QUEUE`とworkerのactorの名前）の後ろに並べる。

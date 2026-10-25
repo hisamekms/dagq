@@ -607,7 +607,8 @@ mod tests {
 
     #[test]
     fn the_forwarder_carries_a_loopback_connection_to_the_socket_both_ways() {
-        let dir = tempfile::tempdir().unwrap();
+        // Not in `$TMPDIR`, which may be too deep for a socket's path.
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         let socket = dir.path().join("b.sock");
         let broker = UnixListener::bind(&socket).unwrap();
         let peer = thread::spawn(move || {
@@ -635,7 +636,8 @@ mod tests {
 
     #[test]
     fn the_relay_s_socket_is_its_owner_s_alone_and_carries_to_the_broker_both_ways() {
-        let dir = tempfile::tempdir().unwrap();
+        // Not in `$TMPDIR`, which may be too deep for a socket's path.
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         let socket = dir.path().join("r.sock");
         // A file left by a relay before is replaced; anything else is not.
         UnixListener::bind(&socket).unwrap();
