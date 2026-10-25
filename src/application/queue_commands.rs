@@ -5,7 +5,8 @@
 //! it) that changes or reads the queue apart from the reads of
 //! [`super::queue_reads`]: `answer`, `ask close`, `hold`, `release`,
 //! `replan request`, `rebind`, `recover`, `run screen|send|log`, `planner
-//! screen|send|log|request`, `report` and `graph --out`.
+//! screen|send|log|request`, `report`, `graph --out` and `ready
+//! --inherit`.
 //!
 //! The params are the command line's options as the client resolved them:
 //! a path is absolute (the service runs in another directory), the words
@@ -30,7 +31,11 @@
 //! areas the client reads in its main checkout and whose diagram it
 //! draws), `release` after
 //! [`QueueCommand::ReleaseRead`] (the run whose work the client reads and
-//! keeps, which the release's transaction checks again), and `rebind` with
+//! keeps, which the release's transaction checks again), `ready --inherit`
+//! after [`QueueCommand::ReadyInheritRead`] (the latest run whose head the
+//! client chooses and writes under `refs/dagq/runs/<run-id>` before the
+//! record, putting the ref back when the record is refused, ADR-t3294-1),
+//! and `rebind` with
 //! the Git common directory the client read; the client repairs the run
 //! worktrees `rebind`'s answer lists.
 //!
@@ -70,6 +75,9 @@ pub enum QueueCommand {
     Report(ReportParams),
     ReportInputs(ReportInputsParams),
     GraphExport(GraphExportParams),
+    ReadyInheritRead(ReadyInheritParams),
+    ReadyInherit(ReadyInheritParams),
+    ReadyInheritImages(ReadyInheritImagesParams),
 }
 
 /// `answer`'s: the ask and the answer's text.
@@ -148,6 +156,55 @@ pub struct ReleaseToRead {
         crate::domain::TaskRun,
     )>,
     pub repository: Option<String>,
+}
+
+/// `ready --inherit`'s and `ready_inherit_read`'s: the task and the reason
+/// it is carried over for; `ready --inherit`'s also the head its client
+/// chose and wrote, from what `ready_inherit_read` read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyInheritParams {
+    pub id: i64,
+    pub reason: String,
+    #[serde(default)]
+    pub work: Option<InheritWork>,
+}
+
+/// The head a `ready --inherit`'s client chose and wrote under
+/// `refs/dagq/runs/<run-id>` (none when the run's branch holds nothing to
+/// carry over), and what it was chosen from, which the store's transaction
+/// checks again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InheritWork {
+    pub at: super::inherit::InheritReadAt,
+    #[serde(default)]
+    pub head: Option<crate::domain::CommitSha>,
+}
+
+/// `ready_inherit_read`'s answer: what the head is chosen from, the Git
+/// common directory of the repository the queue is bound to, whose main
+/// checkout the client's containers are found from, and the path of the
+/// queue's DB the answer is of, whose directory names the queue's machine,
+/// image and volumes a facts-only turn runs in; the client opens no DB at
+/// it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyInheritToRead {
+    #[serde(flatten)]
+    pub read: super::commands::planning::InheritToRead,
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub queue: Option<String>,
+}
+
+/// `ready_inherit_images`'s: the task `ready --inherit` names, by whose
+/// authorization the records are, and the image records its client kept as
+/// it made the image of the run's facts-only turn ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyInheritImagesParams {
+    pub id: i64,
+    pub records: Vec<super::container_image::KeptImageRecord>,
 }
 
 /// `replan request`'s: the run, the reason and the events it cites.
@@ -321,6 +378,9 @@ impl QueueCommand {
             UseCase::Report => Self::Report(read(use_case, params)?),
             UseCase::ReportInputs => Self::ReportInputs(read(use_case, params)?),
             UseCase::GraphExport => Self::GraphExport(read(use_case, params)?),
+            UseCase::ReadyInheritRead => Self::ReadyInheritRead(read(use_case, params)?),
+            UseCase::ReadyInherit => Self::ReadyInherit(read(use_case, params)?),
+            UseCase::ReadyInheritImages => Self::ReadyInheritImages(read(use_case, params)?),
             _ => return Ok(None),
         };
         command.check()?;
@@ -333,6 +393,17 @@ impl QueueCommand {
         match self {
             Self::ReleaseRead(params) if params.work.is_some() => Err(BadCommand(
                 "release_read takes no work: it names the work to read".to_owned(),
+            )
+            .into()),
+            Self::ReadyInheritRead(params) if params.work.is_some() => Err(BadCommand(
+                "ready_inherit_read takes no work: it reads what the head is chosen from"
+                    .to_owned(),
+            )
+            .into()),
+            Self::ReadyInherit(params) if params.work.is_none() => Err(BadCommand(
+                "ready_inherit is sent with the head its client chose of what ready_inherit_read \
+                 read"
+                    .to_owned(),
             )
             .into()),
             Self::Rebind(params) => [
@@ -393,6 +464,9 @@ impl QueueCommand {
             Self::Report(_) => UseCase::Report,
             Self::ReportInputs(_) => UseCase::ReportInputs,
             Self::GraphExport(_) => UseCase::GraphExport,
+            Self::ReadyInheritRead(_) => UseCase::ReadyInheritRead,
+            Self::ReadyInherit(_) => UseCase::ReadyInherit,
+            Self::ReadyInheritImages(_) => UseCase::ReadyInheritImages,
         }
     }
 
@@ -418,6 +492,10 @@ impl QueueCommand {
             Self::Report(params) => serde_json::to_value(params),
             Self::ReportInputs(params) => serde_json::to_value(params),
             Self::GraphExport(params) => serde_json::to_value(params),
+            Self::ReadyInheritRead(params) | Self::ReadyInherit(params) => {
+                serde_json::to_value(params)
+            }
+            Self::ReadyInheritImages(params) => serde_json::to_value(params),
         };
         // Every params type is a struct of plain fields.
         (self.use_case(), params.unwrap_or(Value::Null))
@@ -455,7 +533,7 @@ impl QueueCommand {
     /// `queue.export` on the queue for `report` and `graph --out`. `None`
     /// for the ones the application authorizes itself as it runs them,
     /// with what it reads of the queue (`answer`, `ask close`, `hold`,
-    /// `release`, `replan request`).
+    /// `release`, `replan request`, `ready --inherit`).
     pub fn authorization(&self) -> Option<(Capability, Resource)> {
         match self {
             Self::Report(_) | Self::ReportInputs(_) | Self::GraphExport(_) => {
@@ -531,6 +609,30 @@ mod tests {
                 reason: "split".to_owned(),
                 evidence: vec![7],
             }),
+            QueueCommand::ReadyInheritRead(ReadyInheritParams {
+                id: 7,
+                reason: "keep it".to_owned(),
+                work: None,
+            }),
+            QueueCommand::ReadyInherit(ReadyInheritParams {
+                id: 7,
+                reason: "keep it".to_owned(),
+                work: Some(InheritWork {
+                    at: super::super::inherit::InheritReadAt {
+                        task: crate::domain::TaskStatus::InProgress,
+                        run: Some(super::super::inherit::InheritRunAt {
+                            id: RunId::new("r1").unwrap(),
+                            status: crate::domain::RunStatus::Failed,
+                            result_commit: None,
+                        }),
+                    },
+                    head: Some(crate::domain::CommitSha::try_from("b".repeat(40)).unwrap()),
+                }),
+            }),
+            QueueCommand::ReadyInheritImages(ReadyInheritImagesParams {
+                id: 7,
+                records: Vec::new(),
+            }),
             QueueCommand::Rebind(RebindParams {
                 git_common_dir: Some(PathBuf::from("/repo/.git")),
                 repository_queue_dir: Some(PathBuf::from("/data/dagq/0123456789abcdef")),
@@ -589,6 +691,12 @@ mod tests {
         for (use_case, params) in [
             (UseCase::Answer, json!({"id": 3})),
             (UseCase::AskClose, json!({"id": 3, "extra": true})),
+            // The read names no head, and the record is sent with one.
+            (
+                UseCase::ReadyInheritRead,
+                json!({"id": 3, "reason": "r", "work": {"at": {"task": "in_progress", "run": null}}}),
+            ),
+            (UseCase::ReadyInherit, json!({"id": 3, "reason": "r"})),
             (UseCase::Rebind, json!({"git_common_dir": "relative/.git"})),
             (UseCase::Rebind, json!({"repo": "/checkout"})),
             (UseCase::Report, json!({"period": "month"})),
@@ -628,6 +736,9 @@ mod tests {
                 (UseCase::ReleaseRead, None),
                 (UseCase::ReleaseImages, None),
                 (UseCase::ReplanRequest, None),
+                (UseCase::ReadyInheritRead, None),
+                (UseCase::ReadyInherit, None),
+                (UseCase::ReadyInheritImages, None),
                 (UseCase::Rebind, Some(Capability::QueueAdmin)),
                 (UseCase::Recover, Some(Capability::RunRecover)),
                 (UseCase::RunScreen, Some(Capability::ScreenRead)),

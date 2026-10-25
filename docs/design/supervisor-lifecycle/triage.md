@@ -123,7 +123,16 @@ decideのaskの答えに無い引き継ぎを、人の判断として直接打�
 認可は計画管理の`ready`が行い、引き継ぎの確定は実行と着地が公開するportが行う（境界をまたぐtransactionのT10、`src/context_boundaries/ownership.rs`）。
 
 - 引き継ぐcommitは自動の`retry_inherit`と同じ選び方で決める。
-  CLIは確定の前にこれを読み、`refs/dagq/runs/<run-id>`は確定が通った後にだけ書くので、断ったときはtask・ask・refのどれも変えない。
+  CLI（制御側）は確定の前にこれを読んで`refs/dagq/runs/<run-id>`に書く（refが読んだ値のままのときだけ。書けなければ確定を求めずに拒む）。
+  確定の間はrefのlockを持たないので、確定が通った時のrefは記録と食い違う値（その間に別の書き手が書いた別のhead・書く前の値・無し）でありうる。
+  確定が断られたらtask・askは変えず、refがまだ自分の書いたheadを持つときだけ書く前の値に戻す（[ADR-t3294-1](../../adr/2026-10-25-t3294-1-carry-over-by-hand-keeps-the-ref-before-the-record-and-puts-it-back-on-refusal.md)）。
+  別のheadを書いた書き手の値は残るが、同じheadを記録した別の書き手（別の呼び出し・release・復旧jobのラウンド・自動の引き継ぎ）のrefは戻して消すことがある。
+  確定は読んだ時のtaskの状態とrunの状態・検証済みのcommitを照らし直す。
+- 保証するのは次のrunが記録されたheadから始まることで、refの値ではない。
+  containerのrunのcloneはそのheadをidで取り込み、promptもheadをidで名指す。
+  supervisorはworktreeかcloneを作る前に、記録が名指すheadを前のrunの`refs/dagq/runs/<run-id>`に書く（ほかの値か無ければ書き直す）。
+  その後に届いた断りの戻しがrefを動かすことはあり、そのrunの間のrefの値は保証しない。
+  断った呼び出しが戻したrefや、記録と競った書き手の値、確定の前後に止まったCLIは、次のrunの始まりを変えない。
 - 前提（taskの状態、runがまだ最新で`failed`か`interrupted`であること、生きたprocessとstaleでないleaseが無いこと、独自のcommitがあること）は確定のトランザクションの中で確かめ、崩れていれば理由つきで断る（独自のcommitが無ければ素の`ready`を案内する）。
 - 復旧jobのラウンドとの競合は、`begin_triage`と同じ`BEGIN IMMEDIATE`の確定の中でrunのleaseを見て解く。
   staleでないlease（ラウンドが生きている）があれば断る。

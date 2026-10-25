@@ -13,8 +13,9 @@
 //! Each write is one call of the application's [`Planning`] or
 //! [`Requests`], whose store makes its change in one transaction of its
 //! own; nothing of a write is split across round trips with the caller.
-//! `ready --inherit` is no write use case: it moves a run's branch, a Git
-//! operation of the control side's (ADR-t3102-3 decision 5).
+//! `ready --inherit` is no write use case here: its client keeps the run's
+//! head with Git between a read and a record (ADR-t3102-3 decision 5,
+//! ADR-t3294-1), so it is a [`super::queue_commands::QueueCommand`].
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 

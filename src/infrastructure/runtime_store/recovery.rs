@@ -1512,7 +1512,8 @@ impl SqliteQueue {
     /// A person's retry that carries the task's latest run over
     /// (`ready --inherit`, ADR-t1962-1), in one transaction as immediate as
     /// [`Self::begin_triage`]'s: check the task's status against the
-    /// authorized one, that `request.run` is still its latest run, and the
+    /// authorized one, that the run `request.at` read is still its latest
+    /// run, with the same status and validated commit, and the
     /// preconditions of [`crate::domain::inherit_by_hand::check`] (a lease
     /// that is not stale refuses; a stale one is removed, so that the round
     /// that held it can neither finish nor apply anything after this). Then
@@ -1530,10 +1531,10 @@ impl SqliteQueue {
         let refused =
             |refusal: InheritRefusal| anyhow!("task {task_id} is not carried over: {refusal}");
         // The spans it closes read their transcripts first (task 543).
-        let _read = match &request.run {
-            Some(id) => Some(read_before(
+        let _read = match &request.at.run {
+            Some(run) => Some(read_before(
                 &self.conn,
-                Closing::Run(id, &[EventKind::TriageFinished]),
+                Closing::Run(&run.id, &[EventKind::TriageFinished]),
             )?),
             None => None,
         };
@@ -1543,6 +1544,7 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let task = read_task(&tx, task_id)?;
         crate::domain::task::check_status_authorized(&task, request.authorized)?;
+        crate::domain::task::check_status_authorized(&task, request.at.task)?;
         let latest = tx
             .query_row(
                 "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
@@ -1551,7 +1553,10 @@ impl SqliteQueue {
             )
             .optional()?;
         ensure!(
-            latest.as_ref().map(TaskRun::id) == request.run.as_ref(),
+            latest
+                .as_ref()
+                .map(crate::application::inherit::InheritRunAt::of)
+                == request.at.run,
             "task {task_id}'s latest run changed while it was read; nothing is carried over, try again"
         );
         let (lease, process_alive) = match &latest {
@@ -1663,6 +1668,10 @@ impl crate::application::inherit::InheritStore for SqliteQueue {
         request: crate::application::inherit::InheritRequest,
     ) -> Result<crate::application::inherit::InheritedByHand> {
         SqliteQueue::inherit_by_hand(self, request)
+    }
+
+    fn record_images(&mut self, records: &[(EventKind, serde_json::Value)]) -> Result<()> {
+        crate::application::EventStore::record_queue_events(self, records.to_vec()).map(drop)
     }
 }
 

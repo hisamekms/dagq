@@ -423,7 +423,7 @@ impl GitRepository {
     /// attempt left is removed first while the queue records no worker
     /// started for the run, and one this attempt leaves half made is
     /// removed before its error returns, both as files.
-    pub fn create_clone(&self, run: &TaskRun, carried: Option<&str>) -> Result<String> {
+    pub fn create_clone(&self, run: &TaskRun, carried: Option<(&str, &str)>) -> Result<String> {
         let clone = Path::new(run.worktree_path().context("missing worktree")?);
         ensure!(run.in_container(), "run {} has no clone", run.id());
         let guarded = self.guarded_repository()?;
@@ -452,7 +452,12 @@ impl GitRepository {
 
     /// Make the clone at `clone` and the control side's run branch, with
     /// this repository guarded.
-    fn fill_clone(&self, run: &TaskRun, clone: &Path, carried: Option<&str>) -> Result<String> {
+    fn fill_clone(
+        &self,
+        run: &TaskRun,
+        clone: &Path,
+        carried: Option<(&str, &str)>,
+    ) -> Result<String> {
         let branch = run.branch().context("missing branch")?;
         let base = run.base_commit().as_str();
         let guarded = self;
@@ -473,8 +478,10 @@ impl GitRepository {
             .args(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head"])
             .arg(format!("file://{}", self.root.display()))
             .arg(format!("{base}:refs/heads/{branch}"));
-        if let Some(carried) = carried {
-            fetch.arg(format!("{carried}:{carried}"));
+        // The head the retry recorded, by its id: what the ref holds now
+        // may be a racing writer's.
+        if let Some((name, head)) = carried {
+            fetch.arg(format!("{head}:{name}"));
         }
         log.push_str(&output(&mut fetch)?);
         output(in_clone().args(["update-ref", CLONE_MAIN_REF, base]))?;

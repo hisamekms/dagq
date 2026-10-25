@@ -674,6 +674,9 @@ impl QueueRead {
             | UseCase::Release
             | UseCase::ReleaseRead
             | UseCase::ReleaseImages
+            | UseCase::ReadyInherit
+            | UseCase::ReadyInheritRead
+            | UseCase::ReadyInheritImages
             | UseCase::ReplanRequest
             | UseCase::Rebind
             | UseCase::Recover

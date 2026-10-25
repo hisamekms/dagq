@@ -11,13 +11,23 @@ use anyhow::{Result, ensure};
 use serde_json::Value;
 use tracing::warn;
 
-use crate::application::inherit::{CarriedBranches, InheritRequest, InheritStore, InheritedByHand};
+use std::path::{Path, PathBuf};
+
+use crate::application::container_image::KeptImageRecord;
+use crate::application::inherit::{
+    CarriedBranches, InheritReadAt, InheritRequest, InheritRunAt, InheritStore, InheritedByHand,
+    keep_head,
+};
+use crate::application::queue_commands::{
+    InheritWork, QueueCommand, ReadyInheritImagesParams, ReadyInheritParams, ReadyInheritToRead,
+};
 
 use crate::domain::{
-    ActorContext, AuthorizationError, Authorizer, Capability, DomainError, DraftRevisit, FindingId,
-    Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal, ProposalId,
-    Resource, Submission, Task, TaskAction, TaskAuthorization, TaskDetail, TaskEdit, TaskId,
-    TaskStatus, authorization::DenyReason, cancel_reason::NewCancel, follow_up::RevisitChange,
+    ActorContext, AuthorizationError, Authorizer, Capability, CommitSha, DomainError, DraftRevisit,
+    FindingId, Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal,
+    ProposalId, Resource, Submission, Task, TaskAction, TaskAuthorization, TaskDetail, TaskEdit,
+    TaskId, TaskStatus, authorization::DenyReason, cancel_reason::NewCancel,
+    follow_up::RevisitChange,
 };
 
 /// What the planning commands read and change of the queue.
@@ -380,50 +390,212 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
 }
 
 impl<S: PlanningStore + InheritStore + ?Sized> Planning<'_, S> {
-    /// `ready --inherit`: a person's (user's, or the inbox's at their
-    /// word) retry of an `in_progress` task whose latest run failed or was
-    /// interrupted, carrying that run's branch over to the next run without
-    /// plan review (ADR-t1962-1). Authorized as `task.ready_bypass_review`;
-    /// the retry itself is execution and landing's ([`InheritStore`]).
-    /// The head is read before the store's transaction and kept under
-    /// `refs/dagq/runs/<run-id>` only after it committed.
-    pub fn ready_inheriting(
-        &mut self,
-        task: TaskId,
-        reason: &str,
-        branches: &dyn CarriedBranches,
-    ) -> Result<InheritedByHand> {
+    /// What `ready --inherit` reads before its head is chosen (a person's,
+    /// the user's or the inbox's at their word, retry of an `in_progress`
+    /// task whose latest run failed or was interrupted, carrying that run's
+    /// branch over to the next run without plan review, ADR-t1962-1): the
+    /// task's status it is authorized with (`task.ready_bypass_review`) and
+    /// its latest run, which the control side chooses the head of and
+    /// writes under `refs/dagq/runs/<run-id>` with its own Git (ADR-t3102-3
+    /// decision 5, ADR-t3294-1, [`crate::application::inherit::keep_head`])
+    /// before it asks for [`Self::ready_inherit_by_caller`].
+    pub fn ready_inherit_read(&mut self, task: TaskId, reason: &str) -> Result<InheritToRead> {
         let status = self
             .authorize_task(Capability::TaskReadyBypassReview, task)?
             .status;
-        let reason = reason.trim();
-        ensure!(
-            !reason.is_empty(),
-            "--reason must say why the run is carried over"
-        );
-        let detail = self.store.show(task)?;
-        let latest = detail.runs.last();
-        let head = match latest {
-            Some(run) => branches.carried_head(run)?,
-            None => None,
-        };
-        let inherited = InheritStore::inherit_by_hand(
+        check_reason(reason)?;
+        let run = self.store.show(task)?.runs.pop();
+        Ok(InheritToRead {
+            at: InheritReadAt {
+                task: status,
+                run: run.as_ref().map(InheritRunAt::of),
+            },
+            run,
+        })
+    }
+
+    /// The records of the image the client of `ready --inherit` of `task`
+    /// made ready for a run's facts-only turn as it chose the head,
+    /// recorded as the caller's events once authorized as
+    /// [`Self::ready_inherit_read`] is, whether the head was chosen or not;
+    /// how many. Each is stamped at `now`, the time it is recorded here
+    /// (Unix seconds), as a release's are
+    /// ([`super::holds::Holds::record_images`]).
+    pub fn ready_inherit_images(
+        &mut self,
+        task: TaskId,
+        records: &[KeptImageRecord],
+        now: i64,
+    ) -> Result<usize> {
+        self.authorize_task(Capability::TaskReadyBypassReview, task)?;
+        if !records.is_empty() {
+            let records: Vec<_> = records.iter().map(|record| record.recorded(now)).collect();
+            InheritStore::record_images(&mut *self.store, &records)?;
+        }
+        Ok(records.len())
+    }
+
+    /// `ready --inherit` with the head its caller chose and wrote, from what
+    /// [`Self::ready_inherit_read`] read (`at`): authorized again, and
+    /// recorded in the store's one transaction, which checks `at` again
+    /// (the task's status it was authorized with, its latest run, and that
+    /// run's status and validated commit) and refuses, changing nothing,
+    /// when any moved since ([`InheritStore`]). No Git runs here.
+    pub fn ready_inherit_by_caller(
+        &mut self,
+        task: TaskId,
+        reason: &str,
+        at: InheritReadAt,
+        head: Option<CommitSha>,
+    ) -> Result<InheritedByHand> {
+        let authorized = self
+            .authorize_task(Capability::TaskReadyBypassReview, task)?
+            .status;
+        check_reason(reason)?;
+        InheritStore::inherit_by_hand(
             &mut *self.store,
             InheritRequest {
                 task,
-                authorized: status,
-                run: latest.map(|run| run.id().clone()),
+                authorized,
+                at,
                 head,
                 role: self.actor.role(),
-                reason: reason.to_owned(),
+                reason: reason.trim().to_owned(),
             },
-        )?;
-        // The store refuses unless `latest` is the run it carried over.
-        if let Some(run) = latest {
-            branches.keep(run, &inherited.head)?;
-        }
-        Ok(inherited)
+        )
     }
+}
+
+/// [`Planning::ready_inherit_read`]'s answer: what the head is chosen from,
+/// and the latest run to choose it of.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InheritToRead {
+    pub at: InheritReadAt,
+    pub run: Option<crate::domain::TaskRun>,
+}
+
+/// What a `ready --inherit`'s caller chooses and keeps the head with,
+/// outside the queue service (ADR-t3102-3 decision 5): the ports
+/// [`ready_inherit`] runs through.
+pub struct InheritClient<'a> {
+    /// The main checkout of the repository whose Git common directory it
+    /// is given.
+    pub main_checkout: &'a dyn Fn(&Path) -> Result<PathBuf>,
+    /// Runs its callback with the branches of the runs' repositories,
+    /// their containers bound to the main checkout given (none when none
+    /// was found) and of the queue at the DB path given (the queue the read
+    /// answered for), and what takes the records of the images a facts-only
+    /// turn of a run in a container made ready since it was last asked, in
+    /// the order made (none for a caller that runs no such turn).
+    pub git: &'a WithInheritGit<'a>,
+}
+
+/// [`InheritClient::git`]: given the main checkout and the queue's DB path,
+/// it runs the callback with the runs' branches and what takes the image's
+/// records.
+pub type WithInheritGit<'a> = dyn Fn(
+        Option<PathBuf>,
+        Option<PathBuf>,
+        &mut dyn FnMut(&dyn CarriedBranches, &dyn Fn() -> Vec<KeptImageRecord>),
+    ) + 'a;
+
+/// `params` as the queue service's client runs `ready --inherit`
+/// (ADR-t3102-3 decision 5, ADR-t3294-1), asking `call` (the service, or
+/// the command line on the DB) and answering what the record answered:
+/// what the head is chosen from ([`QueueCommand::ReadyInheritRead`]); the
+/// head chosen and written under `refs/dagq/runs/<run-id>` with the
+/// client's Git ([`keep_head`]), in the main checkout of the repository the
+/// queue is bound to and with the containers of the queue the read
+/// answered for; the records of the images a facts-only turn made ready,
+/// sent whether the head was chosen or not
+/// ([`QueueCommand::ReadyInheritImages`]: when both fail, the head's error
+/// is the command's and the records' is logged; when only the records fail,
+/// nothing is recorded and the ref is put back); and the record
+/// ([`QueueCommand::ReadyInherit`]), whose answer settles the ref
+/// ([`crate::application::inherit::KeptHead::settle`]: `refused` tells a
+/// refusal, which puts it back, from a failure whose outcome is not
+/// known).
+pub fn ready_inherit(
+    params: &ReadyInheritParams,
+    client: &InheritClient<'_>,
+    mut call: impl FnMut(&QueueCommand) -> Result<Value>,
+    refused: impl Fn(&anyhow::Error) -> bool,
+) -> Result<Value> {
+    use anyhow::Context;
+    let to_read: ReadyInheritToRead =
+        serde_json::from_value(call(&QueueCommand::ReadyInheritRead(ReadyInheritParams {
+            work: None,
+            ..params.clone()
+        }))?)
+        .context("the read of ready --inherit does not read")?;
+    let main = to_read
+        .repository
+        .as_deref()
+        .and_then(|common_dir| (client.main_checkout)(Path::new(common_dir)).ok());
+    let queue = to_read.queue.map(PathBuf::from);
+    let mut read = Some(to_read.read);
+    let mut done = None;
+    (client.git)(main, queue, &mut |branches, images| {
+        if let Some(read) = read.take() {
+            done = Some(carry_over(
+                params, read, branches, images, &mut call, &refused,
+            ));
+        }
+    });
+    done.context("the head of ready --inherit was not chosen")?
+}
+
+/// [`ready_inherit`] once the head is read from `read` with `branches`,
+/// `images` taking the image's records made meanwhile.
+fn carry_over(
+    params: &ReadyInheritParams,
+    read: InheritToRead,
+    branches: &dyn CarriedBranches,
+    images: &dyn Fn() -> Vec<KeptImageRecord>,
+    call: &mut dyn FnMut(&QueueCommand) -> Result<Value>,
+    refused: &dyn Fn(&anyhow::Error) -> bool,
+) -> Result<Value> {
+    let kept = keep_head(read.run.as_ref(), branches);
+    let records = images();
+    let sent = if records.is_empty() {
+        Ok(())
+    } else {
+        call(&QueueCommand::ReadyInheritImages(
+            ReadyInheritImagesParams {
+                id: params.id,
+                records,
+            },
+        ))
+        .map(drop)
+    };
+    let kept = match (kept, sent) {
+        (kept, Ok(())) => kept?,
+        // Nothing is recorded: the ref goes back as it was.
+        (Ok(kept), Err(error)) => return kept.settle(branches, Err(error), |_| true),
+        (Err(error), Err(images)) => {
+            warn!(
+                error = %format_args!("{images:#}"),
+                "the image's records of a ready --inherit's facts-only turn were not recorded: {images:#}"
+            );
+            return Err(error);
+        }
+    };
+    let recorded = call(&QueueCommand::ReadyInherit(ReadyInheritParams {
+        work: Some(InheritWork {
+            at: read.at,
+            head: kept.head.clone(),
+        }),
+        ..params.clone()
+    }));
+    kept.settle(branches, recorded, refused)
+}
+
+fn check_reason(reason: &str) -> Result<()> {
+    ensure!(
+        !reason.trim().is_empty(),
+        "--reason must say why the run is carried over"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -652,22 +824,18 @@ mod tests {
         fn inherit_by_hand(&mut self, _: InheritRequest) -> Result<InheritedByHand> {
             Err(reached("inherit"))
         }
+        fn record_images(&mut self, _: &[(crate::domain::EventKind, Value)]) -> Result<()> {
+            Err(reached("images"))
+        }
     }
 
     type Command = fn(&mut Planning<'_, Store>) -> Result<()>;
 
-    /// A repository whose runs carry nothing over.
-    struct NoBranches;
-
-    impl CarriedBranches for NoBranches {
-        fn carried_head(
-            &self,
-            _: &crate::domain::TaskRun,
-        ) -> Result<Option<crate::domain::CommitSha>> {
-            Ok(None)
-        }
-        fn keep(&self, _: &crate::domain::TaskRun, _: &crate::domain::CommitSha) -> Result<()> {
-            Err(anyhow!("kept"))
+    /// What `ready --inherit` read of an `in_progress` task with no run.
+    fn read_at() -> InheritReadAt {
+        InheritReadAt {
+            task: TaskStatus::InProgress,
+            run: None,
         }
     }
 
@@ -730,7 +898,22 @@ mod tests {
             ("ready", |p| p.ready(TASK, false).map(drop)),
             ("ready --bypass-review", |p| p.ready(TASK, true).map(drop)),
             ("ready --inherit", |p| {
-                p.ready_inheriting(TASK, "why", &NoBranches).map(drop)
+                p.ready_inherit_by_caller(TASK, "why", read_at(), None)
+                    .map(drop)
+            }),
+            ("ready --inherit (read)", |p| {
+                p.ready_inherit_read(TASK, "why").map(drop)
+            }),
+            ("ready --inherit (images)", |p| {
+                p.ready_inherit_images(
+                    TASK,
+                    &[KeptImageRecord::ContainerImageFailed {
+                        image: None,
+                        reason: "no image".into(),
+                    }],
+                    1,
+                )
+                .map(drop)
             }),
             ("cancel", |p| p.cancel(TASK, stale()).map(drop)),
             ("cancel --duplicate-of", |p| {
@@ -1077,6 +1260,8 @@ mod tests {
             "ready",
             "ready --bypass-review",
             "ready --inherit",
+            "ready --inherit (read)",
+            "ready --inherit (images)",
             "goal ready",
             "goal review",
         ] {
@@ -1328,5 +1513,218 @@ mod tests {
             error.downcast::<AuthorizationError>().unwrap().to_string(),
             "observer may not goal.write (not granted)"
         );
+    }
+
+    /// The ref of the run a `ready --inherit` client keeps the head `b`
+    /// under (its writes fail when `refuse_keep`), whether a write is
+    /// prepared, and the image records a facts-only turn made.
+    struct ClientGit {
+        value: std::rc::Rc<RefCell<Option<crate::domain::CommitSha>>>,
+        prepared: std::rc::Rc<std::cell::Cell<bool>>,
+        refuse_keep: bool,
+        /// Its writes are checked and locked, but fail as they commit.
+        commit_fails: bool,
+        images: RefCell<Vec<KeptImageRecord>>,
+    }
+
+    /// A write [`ClientGit`] prepared.
+    struct ClientWrite {
+        value: std::rc::Rc<RefCell<Option<crate::domain::CommitSha>>>,
+        prepared: std::rc::Rc<std::cell::Cell<bool>>,
+        to: Option<CommitSha>,
+        fails: bool,
+    }
+
+    impl crate::application::PreparedRef for ClientWrite {
+        fn commit(self: Box<Self>) -> Result<()> {
+            anyhow::ensure!(!self.fails, "the run's ref could not be written");
+            *self.value.borrow_mut() = self.to.clone();
+            Ok(())
+        }
+        fn abort(self: Box<Self>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for ClientWrite {
+        fn drop(&mut self) {
+            self.prepared.set(false);
+        }
+    }
+
+    impl CarriedBranches for ClientGit {
+        fn carried_head(&self, _: &crate::domain::TaskRun) -> Result<Option<CommitSha>> {
+            Ok(Some(head()))
+        }
+        fn keep(&self, _: &crate::domain::TaskRun, _: &CommitSha) -> Result<()> {
+            unreachable!("ready --inherit writes the ref against what it read")
+        }
+        fn kept(&self, _: &crate::domain::TaskRun) -> Result<Option<CommitSha>> {
+            Ok(self.value.borrow().clone())
+        }
+        fn prepare_write(
+            &self,
+            _: &crate::domain::TaskRun,
+            value: Option<&CommitSha>,
+            old: Option<&CommitSha>,
+        ) -> Result<Box<dyn crate::application::PreparedRef>> {
+            anyhow::ensure!(!self.refuse_keep, "a ref is under the run's");
+            anyhow::ensure!(!self.prepared.get(), "the run's ref is locked");
+            anyhow::ensure!(self.value.borrow().as_ref() == old, "the run's ref moved");
+            self.prepared.set(true);
+            Ok(Box::new(ClientWrite {
+                value: self.value.clone(),
+                prepared: self.prepared.clone(),
+                to: value.cloned(),
+                fails: self.commit_fails,
+            }))
+        }
+    }
+
+    fn head() -> CommitSha {
+        CommitSha::try_from("b".repeat(40)).unwrap()
+    }
+
+    /// `ready --inherit` as its client runs it on `git`, the service
+    /// failing the images when `images_fail` and refusing the record when
+    /// `refuse`: the use cases it asked for, in order, and its answer.
+    fn client_run(
+        git: &ClientGit,
+        images_fail: bool,
+        refuse: bool,
+    ) -> (Vec<String>, Result<Value>) {
+        use crate::domain::{Provider, RunRecord, RunStatus};
+        let run = crate::domain::TaskRun::restore(RunRecord {
+            id: RunId::new("r1").unwrap(),
+            task_id: TASK,
+            status: RunStatus::Failed,
+            requested_provider: Provider::Claude,
+            actual_provider: Provider::Claude,
+            worker_mode: crate::domain::worker::WorkerMode::Headless,
+            base_commit: CommitSha::try_from("a".repeat(40)).unwrap(),
+            branch: Some("dagq/r1".into()),
+            worktree_path: None,
+            workspace_id: None,
+            receipt_path: None,
+            log_path: None,
+            result_commit: None,
+            repo_path: None,
+            run_dir: None,
+            last_error: None,
+            workspace_closed_at: None,
+            created_at: String::new(),
+        })
+        .unwrap();
+        let read = ReadyInheritToRead {
+            read: InheritToRead {
+                at: InheritReadAt {
+                    task: TaskStatus::InProgress,
+                    run: Some(InheritRunAt::of(&run)),
+                },
+                run: Some(run),
+            },
+            repository: None,
+            queue: Some("/queues/q/queue.db".into()),
+        };
+        let asked = RefCell::new(Vec::new());
+        let answer = ready_inherit(
+            &ReadyInheritParams {
+                id: TASK.as_i64(),
+                reason: "why".into(),
+                work: None,
+            },
+            &InheritClient {
+                main_checkout: &|_| unreachable!("no repository is bound"),
+                git: &|main, queue, carry| {
+                    assert_eq!(main, None);
+                    assert_eq!(queue, Some(PathBuf::from("/queues/q/queue.db")));
+                    carry(git, &|| git.images.take());
+                },
+            },
+            |command| {
+                asked
+                    .borrow_mut()
+                    .push(command.use_case().as_str().to_owned());
+                match command {
+                    QueueCommand::ReadyInheritRead(_) => Ok(serde_json::to_value(&read)?),
+                    QueueCommand::ReadyInheritImages(_) if images_fail => {
+                        Err(anyhow!("the images were refused"))
+                    }
+                    QueueCommand::ReadyInheritImages(_) => Ok(serde_json::json!({"recorded": 1})),
+                    QueueCommand::ReadyInherit(params) => {
+                        // The head is written, and no lock is held across
+                        // the record.
+                        assert!(!git.prepared.get());
+                        assert_eq!(*git.value.borrow(), Some(head()));
+                        assert_eq!(params.work.as_ref().unwrap().head, Some(head()));
+                        if refuse {
+                            Err(anyhow!("the run moved"))
+                        } else {
+                            Ok(serde_json::json!({"recorded": true}))
+                        }
+                    }
+                    other => panic!("{other:?}"),
+                }
+            },
+            |_| true,
+        );
+        (asked.into_inner(), answer)
+    }
+
+    /// The client's order (ADR-t3294-1): a head that cannot be kept, or
+    /// whose write fails as it commits, asks for no record; the head is
+    /// written before the image records and the record are sent; the image
+    /// records' failure puts the ref back and records nothing; a refused
+    /// record puts it back; a recorded one leaves the head.
+    #[test]
+    fn the_client_writes_the_head_before_the_record_and_puts_it_back_on_a_refusal() {
+        let git = |refuse_keep: bool, commit_fails: bool, images: usize| ClientGit {
+            value: Default::default(),
+            prepared: Default::default(),
+            refuse_keep,
+            commit_fails,
+            images: RefCell::new(
+                (0..images)
+                    .map(|_| KeptImageRecord::ContainerImageFailed {
+                        image: None,
+                        reason: "no image".into(),
+                    })
+                    .collect(),
+            ),
+        };
+        for unkept in [git(true, false, 0), git(false, true, 0)] {
+            let (asked, answer) = client_run(&unkept, false, false);
+            assert_eq!(asked, ["ready_inherit_read"]);
+            assert!(format!("{:#}", answer.unwrap_err()).contains("nothing is carried over"));
+            assert_eq!(*unkept.value.borrow(), None);
+        }
+
+        let imaged = git(false, false, 1);
+        let (asked, answer) = client_run(&imaged, true, false);
+        assert_eq!(asked, ["ready_inherit_read", "ready_inherit_images"]);
+        assert!(answer.is_err());
+        assert_eq!(*imaged.value.borrow(), None);
+        assert!(!imaged.prepared.get());
+
+        let refused = git(false, false, 0);
+        let (asked, answer) = client_run(&refused, false, true);
+        assert_eq!(asked, ["ready_inherit_read", "ready_inherit"]);
+        assert_eq!(answer.unwrap_err().to_string(), "the run moved");
+        assert_eq!(*refused.value.borrow(), None);
+        assert!(!refused.prepared.get());
+
+        let recorded = git(false, false, 1);
+        let (asked, answer) = client_run(&recorded, false, false);
+        assert_eq!(
+            asked,
+            [
+                "ready_inherit_read",
+                "ready_inherit_images",
+                "ready_inherit"
+            ]
+        );
+        assert_eq!(answer.unwrap(), serde_json::json!({"recorded": true}));
+        assert_eq!(*recorded.value.borrow(), Some(head()));
+        assert!(!recorded.prepared.get());
     }
 }

@@ -1,5 +1,6 @@
 use crate::infrastructure::git_binary::git_executable;
 
+mod ref_transaction;
 mod run_clones;
 use crate::{
     application::{
@@ -3489,6 +3490,29 @@ impl crate::application::inherit::CarriedBranches for RunRepositories<'_> {
             head,
         )
     }
+
+    fn kept(&self, run: &TaskRun) -> Result<Option<CommitSha>> {
+        match Self::of(run)? {
+            Some(repository) => crate::application::run_git::for_run(&repository, run)?
+                .ref_value(&crate::application::inherit::run_ref(run.id())),
+            None => Ok(None),
+        }
+    }
+
+    fn prepare_write(
+        &self,
+        run: &TaskRun,
+        value: Option<&CommitSha>,
+        old: Option<&CommitSha>,
+    ) -> Result<Box<dyn crate::application::PreparedRef>> {
+        let repository = Self::of(run)?
+            .with_context(|| format!("run {} has no repository to keep its head in", run.id()))?;
+        crate::application::run_git::for_run(&repository, run)?.prepare_ref(
+            &crate::application::inherit::run_ref(run.id()),
+            value.map(CommitSha::as_str),
+            old.map(CommitSha::as_str),
+        )
+    }
 }
 
 impl crate::application::inherit::ReleasedBranches for RunRepositories<'_> {
@@ -3638,6 +3662,19 @@ impl Repository for GitRepository {
     fn update_ref(&self, name: &str, value: &str) -> Result<()> {
         GitRepository::update_ref(self, name, value)
     }
+    fn ref_value(&self, name: &str) -> Result<Option<CommitSha>> {
+        GitRepository::ref_exists(self, name)
+    }
+    fn prepare_ref(
+        &self,
+        name: &str,
+        value: Option<&str>,
+        old: Option<&str>,
+    ) -> Result<Box<dyn crate::application::PreparedRef>> {
+        Ok(Box::new(GitRepository::prepare_ref(
+            self, name, value, old,
+        )?))
+    }
     fn advance_main(&self, branch: &LandingBranch, from: &str, to: &str) -> Result<()> {
         GitRepository::advance_main(self, branch, from, to)
     }
@@ -3706,7 +3743,7 @@ impl Repository for GitRepository {
     fn create_worktree(&self, run: &TaskRun) -> Result<String> {
         GitRepository::create_worktree(self, run)
     }
-    fn create_clone(&self, run: &TaskRun, carried: Option<&str>) -> Result<String> {
+    fn create_clone(&self, run: &TaskRun, carried: Option<(&str, &str)>) -> Result<String> {
         GitRepository::create_clone(self, run, carried)
     }
     fn clone_facts(

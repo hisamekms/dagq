@@ -1877,6 +1877,15 @@ pub trait RepositoryReads {
     fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>>;
 }
 
+/// A ref write [`Repository::prepare_ref`] staged and holds the lock of.
+/// Dropped unsettled, it is aborted.
+pub trait PreparedRef {
+    /// Move the ref to the value staged and let go of its lock.
+    fn commit(self: Box<Self>) -> Result<()>;
+    /// Let go of its lock, leaving the ref as it was.
+    fn abort(self: Box<Self>) -> Result<()>;
+}
+
 /// The Git operations `integrate` and the supervisor use on the repository
 /// the queue is bound to and on its run worktrees. Commits are named by
 /// their full SHA; a failed Git command is an error with Git's message.
@@ -2021,6 +2030,30 @@ pub trait Repository: RepositoryReads {
     /// One commit with `tree` on top of `parent`, `paragraphs` its message.
     fn commit_tree(&self, tree: &str, parent: &str, paragraphs: &[String]) -> Result<CommitSha>;
     fn update_ref(&self, name: &str, value: &str) -> Result<()>;
+    /// The commit the ref `name` holds; `None` when there is no such ref.
+    fn ref_value(&self, name: &str) -> Result<Option<CommitSha>> {
+        let _ = name;
+        anyhow::bail!("this repository reads no ref")
+    }
+    /// Lock the ref `name` and stage its write to `value` (`None` deletes
+    /// it), refused unless it holds `old` now (`None`: no such ref), in a
+    /// `git update-ref --stdin` transaction (`start`, then `update`,
+    /// `create` or `delete`, then `prepare`), which checks the write can be
+    /// done without doing it: the handle does it ([`PreparedRef::commit`])
+    /// or leaves the ref as it was ([`PreparedRef::abort`], or dropped).
+    /// While the handle is held, no other writer moves the ref: its write
+    /// fails on the lock (with the reftable backend, on the lock of every
+    /// ref of the repository; a staged delete also holds the lock of
+    /// `packed-refs`, on which every ref's delete fails).
+    fn prepare_ref(
+        &self,
+        name: &str,
+        value: Option<&str>,
+        old: Option<&str>,
+    ) -> Result<Box<dyn PreparedRef>> {
+        let _ = (name, value, old);
+        anyhow::bail!("this repository prepares no ref")
+    }
     /// Fast-forward `branch`, the landing branch resolved when the landing
     /// began, from `from` to `to`.
     fn advance_main(
@@ -2159,16 +2192,17 @@ pub trait Repository: RepositoryReads {
     /// Make the clone a run in a container works in (ADR-t2113-2 decisions 1
     /// and 3, ADR-t2179-1): at the run's worktree path, sharing no object
     /// file of this repository (no hard link, no alternates), with the run
-    /// branch checked out at the base commit, the ref `carried` names (an
-    /// earlier run's head kept as `refs/dagq/runs/<run id>`, whose work the
-    /// run carries over) under the same name, and
+    /// branch checked out at the base commit, the commit `carried` names
+    /// under the ref it names (an earlier run's head, recorded with the
+    /// retry that carries its work over, under `refs/dagq/runs/<run id>`),
+    /// fetched by its id whatever this repository's ref holds, and
     /// [`CLONE_MAIN_REF`](crate::domain::run_clone::CLONE_MAIN_REF) at the
     /// base; no remote, no credential helper and no credential. The control
     /// side's run branch is made at the base too. Git's output. A clone
     /// half made is removed before the error returns, and one an earlier
     /// attempt left is removed and made again while the run records no
     /// worker started (`workspace_id`), never judged by what is in it.
-    fn create_clone(&self, run: &TaskRun, carried: Option<&str>) -> Result<String> {
+    fn create_clone(&self, run: &TaskRun, carried: Option<(&str, &str)>) -> Result<String> {
         let _ = (run, carried);
         anyhow::bail!("this repository cannot make a run's clone")
     }

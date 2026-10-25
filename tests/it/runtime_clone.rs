@@ -1806,22 +1806,121 @@ fn ready_inherit_of_a_cut_off_container_run_carries_the_head_its_facts_only_turn
     recover(&db, &run);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let inbox = dagq::domain::ActorContext::instance(dagq::domain::ActorRole::Inbox, 1);
-    let inherited = dagq::application::commands::planning::Planning::new(
-        &mut queue,
-        &inbox,
-        &dagq::domain::StaticPolicy,
-    )
-    .ready_inheriting(
-        TaskId::new(1),
-        "the turn's work is in its clone",
-        &dagq::infrastructure::adapters::RunRepositories { containers: &fake },
-    )
-    .unwrap();
+    let branches = dagq::infrastructure::adapters::RunRepositories { containers: &fake };
+    use dagq::application::commands::planning::Planning;
+    let reason = "the turn's work is in its clone";
+    let read = Planning::new(&mut queue, &inbox, &dagq::domain::StaticPolicy)
+        .ready_inherit_read(TaskId::new(1), reason)
+        .unwrap();
+    let kept = dagq::application::inherit::keep_head(read.run.as_ref(), &branches).unwrap();
+    let recorded = Planning::new(&mut queue, &inbox, &dagq::domain::StaticPolicy)
+        .ready_inherit_by_caller(TaskId::new(1), reason, read.at, kept.head.clone());
+    let inherited = kept.settle(&branches, recorded, |_| true).unwrap();
     assert_eq!(inherited.head.as_str(), latest);
     assert_eq!(kept_ref(&repo, &run), Some(latest.clone()));
     assert_eq!(run_state(&run).turn_ended, Some(true));
     let detail = SqliteQueue::open(&db).unwrap().show(run.task).unwrap();
     assert_eq!(detail.task.status(), TaskStatus::Ready);
+}
+
+/// The inbox's client-mode `dagq` (the service's socket and its token, no
+/// queue's path) carrying a cut-off container run over runs the run's
+/// facts-only turn as the command line on the DB does, in the containers
+/// of the queue the service answered for: it makes that queue's machine
+/// and starts it, counts the run among the machine's users (under the
+/// queue's data root), and readies the image, which this machine
+/// cannot list. The image's failure reaches the queue only through the
+/// service, as the inbox's record, and the carry-over is refused with
+/// nothing else recorded, the ref untouched and no Git of the service's.
+#[test]
+fn a_client_mode_ready_inherit_runs_a_cut_off_container_run_s_facts_only_turn_in_its_queue() {
+    use crate::common::{Bounded, WithoutActor};
+    use dagq::domain::queue_service::{CREDENTIAL_FILE_ENV, Principal, SOCKET_ENV, SessionProcess};
+    use dagq::infrastructure::queue_service as service;
+    let (dir, repo, db, _fake) = container_queue();
+    let run = claim_in_container(&db, &repo, TaskId::new(1));
+    ended_turn(&run, "feature");
+    cut_off_turn(&run, "more");
+    recover(&db, &run);
+    let config = dir.path().join("config");
+    let git_log = crate::common::service::serve_logging_git(
+        &db,
+        &[("XDG_CONFIG_HOME", config.to_str().unwrap())],
+    );
+    fs::write(&git_log, "").unwrap();
+    let queue_dir = fs::canonicalize(&db).unwrap().parent().unwrap().to_owned();
+    let pid = std::process::id();
+    let inbox = Principal::inbox(SessionProcess {
+        pid,
+        start: dagq::application::ProcessControl::session_start(
+            &dagq::infrastructure::adapters::SystemProcesses,
+            pid,
+        )
+        .unwrap(),
+    });
+    let credential = service::issue(&queue_dir, &inbox, 1).unwrap().file;
+    let calls = machine_without_images(&db);
+    let path = std::env::join_paths(
+        std::iter::once(db.parent().unwrap().join("bin"))
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let elsewhere = dir.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .owned_by_test()
+        .current_dir(&elsewhere)
+        .env("PATH", path)
+        .env("XDG_CONFIG_HOME", &config)
+        .env(SOCKET_ENV, service::socket_path(&queue_dir))
+        .env(CREDENTIAL_FILE_ENV, credential)
+        .env("DAGQ_ROLE", "inbox")
+        .args([
+            "ready",
+            "1",
+            "--inherit",
+            "--reason",
+            "the turn's work is in its clone",
+        ])
+        .bounded_output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("facts-only turn"), "{error}");
+    assert!(
+        error.contains("make the machine and the image ready"),
+        "{error}"
+    );
+    assert!(!error.contains("list the podman machines"), "{error}");
+    assert!(!error.contains("knows no queue directory"), "{error}");
+    let calls = fs::read_to_string(calls).unwrap();
+    assert!(
+        calls.contains("machine init") && calls.contains("machine start"),
+        "{calls}"
+    );
+    let user = queue_dir
+        .parent()
+        .unwrap()
+        .join("machine")
+        .join("users")
+        .join(run.run.id().as_str());
+    let owner = fs::read_to_string(&user).unwrap_or_default();
+    assert!(
+        owner.contains(run.run.id().as_str()),
+        "the run is not among the served queue's machine's users: {owner:?}"
+    );
+    let failed = crate::common::service::events(&db, "container_image_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["actor"]["role"], "inbox", "{failed:?}");
+    assert_eq!(kept_ref(&repo, &run), None);
+    assert_eq!(
+        fs::read_to_string(&git_log).unwrap(),
+        "",
+        "the service ran Git"
+    );
+    let detail = SqliteQueue::open(&db).unwrap().show(run.task).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::InProgress);
 }
 
 /// A container run of task 1 whose first turn ended at its base and whose
@@ -2339,8 +2438,8 @@ fn a_container_runs_cleanup_follows_no_symlink_the_worker_planted() {
     assert!(facts.is_none());
 }
 
-/// A clone whose making fails half way (a fetch of a ref the repository
-/// does not have) leaves nothing at its path, and the run's next
+/// A clone whose making fails half way (a fetch of a carried head the
+/// repository does not have) leaves nothing at its path, and the run's next
 /// provisioning makes it; a clone an earlier attempt left is removed and
 /// made again while no worker was started for the run, and kept as it is
 /// once one was.
@@ -2349,13 +2448,11 @@ fn a_clone_left_half_made_is_removed_and_made_again_before_the_worker_starts() {
     let (_fixture, repo, db) = fixture();
     let run = plan_in_container(&db, &repo, TaskId::new(1));
     let repository = GitRepository::inspect(&repo).unwrap();
+    let missing = "0".repeat(40);
     let error = repository
-        .create_clone(&run.run, Some("refs/dagq/runs/missing"))
+        .create_clone(&run.run, Some(("refs/dagq/runs/missing", &missing)))
         .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("refs/dagq/runs/missing"),
-        "{error:#}"
-    );
+    assert!(format!("{error:#}").contains(&missing), "{error:#}");
     assert!(
         fs::symlink_metadata(&run.clone).is_err(),
         "the half made clone is left"
@@ -2384,6 +2481,32 @@ fn a_clone_left_half_made_is_removed_and_made_again_before_the_worker_starts() {
         "{error:#}"
     );
     assert!(run.clone.join("worker.txt").exists());
+}
+
+/// ADR-t3294-1: a container run's clone takes the head it carries over by
+/// the id its retry recorded, under the ref of the run it is carried from,
+/// whatever this repository's ref holds then (another writer's head that
+/// raced the record), and a head no ref of the repository holds.
+#[test]
+fn a_container_runs_clone_takes_the_carried_head_by_its_recorded_id() {
+    let (_fixture, repo, db) = fixture();
+    let run = plan_in_container(&db, &repo, TaskId::new(1));
+    let repository = GitRepository::inspect(&repo).unwrap();
+    let name = "refs/dagq/runs/earlier";
+    let carried = git_out(
+        &repo,
+        &["commit-tree", "main^{tree}", "-p", "main", "-m", "carried"],
+    );
+    let other = git_out(
+        &repo,
+        &["commit-tree", "main^{tree}", "-p", "main", "-m", "other"],
+    );
+    git(&repo, &["update-ref", name, &other]);
+    repository
+        .create_clone(&run.run, Some((name, &carried)))
+        .unwrap();
+    assert_eq!(in_clone(&run.clone, &["rev-parse", name]), carried);
+    assert_eq!(in_clone(&run.clone, &["rev-parse", "HEAD"]), run.base);
 }
 
 /// Where [`remove_unguarded_child_process`] reads what to remove.

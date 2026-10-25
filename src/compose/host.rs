@@ -1260,7 +1260,9 @@ pub(super) fn sccache_port(
 /// [`QueueCommand::authorization`] says; the dialogue, the holds and the
 /// replans by the application as they run.
 pub fn run_command(queue: &mut SqliteQueue, db: &Path, command: &QueueCommand) -> Result<Value> {
-    use crate::application::commands::{dialogue::Dialogue, holds::Holds, replans::Replans};
+    use crate::application::commands::{
+        dialogue::Dialogue, holds::Holds, planning::Planning, replans::Replans,
+    };
     use crate::application::queue_commands::QueueCommand as C;
     use crate::application::screen::{self, RunTarget};
     use crate::domain::{AskId, EventId, PlannerId, RunId, StaticPolicy, TaskId};
@@ -1383,6 +1385,37 @@ pub fn run_command(queue: &mut SqliteQueue, db: &Path, command: &QueueCommand) -
         )?,
         C::Report(params) => one_shot.report_of(queue, db, params)?,
         C::ReportInputs(params) => one_shot.report_inputs_of(queue, db, params)?,
+        // The head is chosen and kept by the caller with Git between the
+        // two (`ready_inherit`); the record's transaction checks the read
+        // again.
+        C::ReadyInheritRead(params) => {
+            let read = Planning::new(queue, &actor, &StaticPolicy)
+                .ready_inherit_read(TaskId::new(params.id), &params.reason)?;
+            serde_json::to_value(crate::application::queue_commands::ReadyInheritToRead {
+                read,
+                repository: queue.repository_binding()?,
+                queue: db.to_str().map(str::to_owned),
+            })?
+        }
+        C::ReadyInherit(params) => {
+            let work = params
+                .work
+                .clone()
+                .context("ready --inherit is sent with the head its client chose")?;
+            serde_json::to_value(
+                Planning::new(queue, &actor, &StaticPolicy).ready_inherit_by_caller(
+                    TaskId::new(params.id),
+                    &params.reason,
+                    work.at,
+                    work.head,
+                )?,
+            )?
+        }
+        C::ReadyInheritImages(params) => {
+            let now = crate::application::unix_seconds(queue.generators().clock.system_time());
+            json!({"recorded": Planning::new(queue, &actor, &StaticPolicy)
+                .ready_inherit_images(TaskId::new(params.id), &params.records, now)?})
+        }
         C::GraphExport(params) => {
             let (source, tasks) = crate::application::queue_reads::planning::graph_diagram(
                 queue,
@@ -1442,6 +1475,50 @@ pub(super) fn prepare_release(
             },
         },
         call,
+    )
+}
+
+/// A person's `ready --inherit` of `params` as its caller runs it
+/// ([`crate::application::commands::planning::ready_inherit`]), asking
+/// `call` (the service, or [`run_command`] on the DB of the queue at `db`),
+/// with the host's Git for the main checkout and the run's head. A
+/// facts-only turn of a run in a container runs in the containers of the
+/// queue the read answered for (or the one at `db`), which keep the
+/// image's records for it to send: a client-mode `dagq`, which knows no
+/// queue path, runs it too and opens no DB.
+pub(super) fn ready_inherit(
+    params: &crate::application::queue_commands::ReadyInheritParams,
+    db: Option<&Path>,
+    call: impl FnMut(&QueueCommand) -> Result<Value>,
+    refused: impl Fn(&anyhow::Error) -> bool,
+) -> Result<Value> {
+    use crate::application::commands::planning::{self, InheritClient};
+    planning::ready_inherit(
+        params,
+        &InheritClient {
+            main_checkout: &crate::infrastructure::adapters::main_checkout_of,
+            git: &|main, queue, carry| match queue.as_deref().or(db) {
+                Some(db) => {
+                    let kept =
+                        Arc::new(crate::application::container_image::KeptImageRecords::default());
+                    let containers = super::run_containers_keeping(db, main, Some(kept.clone()));
+                    carry(
+                        &crate::infrastructure::adapters::RunRepositories {
+                            containers: &containers,
+                        },
+                        &|| kept.take(),
+                    );
+                }
+                None => carry(
+                    &crate::infrastructure::adapters::RunRepositories {
+                        containers: &crate::infrastructure::run_container::UnknownQueueContainers,
+                    },
+                    &Vec::new,
+                ),
+            },
+        },
+        call,
+        refused,
     )
 }
 

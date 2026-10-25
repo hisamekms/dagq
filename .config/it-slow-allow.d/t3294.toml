@@ -1,0 +1,29 @@
+# 3.86s to 7.01s (stress 5, median 5.37s, load average ~19)
+[[test]]
+name = "runtime_clone::ready_inherit_of_a_cut_off_container_run_carries_the_head_its_facts_only_turn_found"
+reason = "境界（Git・プロセス・container の clone）: 最後の turn が切れた container の run を、facts-only の turn を走らせて読んだ head で引き継ぎ、その head を記録の前に host の Git の refs/dagq/runs に書くことを実の clone と Git で確かめる。facts の判断は application::inherit の unit test"
+task = 3294
+
+# 5.40s to 8.91s (stress 5, median 6.73s, load average ~19)
+[[test]]
+name = "runtime_inherit_by_hand::a_client_mode_ready_inherit_carries_the_run_over_through_the_service"
+reason = "境界（CLI・queue service・SQLite・Git・supervisor）: supervisor が失敗させた run を、queue の path を知らないクライアントモードの dagq が別のプロセスの queue service に ready --inherit で引き継ぎ、自分の Git で head を refs/dagq/runs に残し、service が Git を走らせず inbox の記録をし、planner を断ることを確かめる。記録の前後の判断は application::commands::planning と application::inherit の unit test"
+task = 3294
+
+# 5.46s to 8.97s (stress 5, median 6.79s, load average ~19)
+[[test]]
+name = "runtime_inherit_by_hand::a_head_that_cannot_be_kept_refuses_ready_inherit_with_nothing_recorded"
+reason = "境界（CLI・Git・SQLite・supervisor）: supervisor が失敗させた run の refs/dagq/runs/<run-id> の下に ref があると、実の Git が書き込みを断り、CLI が何も記録せずに拒むことを確かめる。書けないときの判断は application::inherit の unit test"
+task = 3294
+
+# 5.69s to 8.35s (stress 5, median 6.93s, load average ~19)
+[[test]]
+name = "runtime_inherit_by_hand::a_refused_record_puts_the_runs_ref_back_as_it_was"
+reason = "境界（CLI・Git・SQLite・supervisor）: supervisor が失敗させた run の ready --inherit を store が lease で断ると、記録の前に書いた実の Git の ref が書く前の値（別の commit か、無し）に戻ることを確かめる。戻し方の判断は application::inherit の unit test"
+task = 3294
+
+# 4.68s to 7.35s (stress 5, median 5.58s, load average ~17)
+[[test]]
+name = "runtime_inherit_by_hand::ready_inherit_is_refused_with_its_reason_and_changes_nothing"
+reason = "境界（CLI・Git・SQLite・supervisor）: supervisor が失敗させた run の ready --inherit を、独自の commit が無い・生きた process と lease・最新の run が失敗していない・run の無い task・user と inbox でない actor の各理由で CLI が断り、task・ask・ref が変わらないことを実の CLI と Git で確かめる。断る判断は domain::inherit_by_hand と application::commands::planning の unit test"
+task = 3294

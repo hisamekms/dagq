@@ -1111,6 +1111,16 @@ impl std::fmt::Display for AnswerPastLimit {
 
 impl std::error::Error for AnswerPastLimit {}
 
+/// Whether `error`, the failure of a [`Client::call`] that writes, says the
+/// write was not done: any but one whose answer did not come or was not
+/// read (`unreachable`, `response_too_large`), after which the service may
+/// have done it.
+pub fn answered_refusal(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ClientFailure>().is_none_or(|failure| {
+        failure.code != "unreachable" && failure.code != ServiceErrorCode::ResponseTooLarge.as_str()
+    })
+}
+
 /// The refusal of a client whose call to `use_case` got no answer it
 /// reads: `response_too_large` for an [`AnswerPastLimit`] (the service
 /// answered), `unreachable` with `said` (where to look) for any other.

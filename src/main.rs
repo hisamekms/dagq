@@ -3463,6 +3463,18 @@ fn queue_command(command: &Command) -> Result<Option<QueueCommand>> {
             anyhow::ensure!(format != "json", "--out needs --format d2 or svg");
             QueueCommand::GraphExport(commands::GraphExportParams { goal: *goal_id })
         }
+        // Sent once its client chose the head and kept it
+        // (`compose::ready_inherit`).
+        Command::Ready {
+            id,
+            inherit: true,
+            reason,
+            ..
+        } => QueueCommand::ReadyInherit(commands::ReadyInheritParams {
+            id: *id,
+            reason: reason.clone().unwrap_or_default(),
+            work: None,
+        }),
         _ => return Ok(None),
     }))
 }
@@ -3544,7 +3556,11 @@ fn rebind_checkout(repo: Option<&Path>) -> Result<PathBuf> {
 /// here before they are sent ([`dagq::compose::prepare_command`]), for the
 /// queue at `db` when the caller knows it; so do `stats` and `kpi`
 /// ([`dagq::compose::call_stats_read`], sent again while the service finds
-/// the Git reads older than the queue's events).
+/// the Git reads older than the queue's events). A `ready --inherit` writes
+/// the head it chose here before it is recorded and puts the ref back when
+/// the service refuses the record ([`dagq::compose::ready_inherit`]), a
+/// facts-only turn running in the containers of the queue the service
+/// answers for (or the one at `db`).
 fn call_service(
     client: &dagq::infrastructure::queue_service::Client,
     db: Option<&Path>,
@@ -3553,6 +3569,23 @@ fn call_service(
     params: Value,
 ) -> Result<Value> {
     let params = match command {
+        Command::Ready { inherit: true, .. } => {
+            let Some(QueueCommand::ReadyInherit(params)) = queue_command(command)? else {
+                unreachable!("ready --inherit is a queue command");
+            };
+            return finish_command(
+                command,
+                dagq::compose::ready_inherit(
+                    &params,
+                    db,
+                    |call| {
+                        let (use_case, params) = call.request();
+                        client.call(use_case, params)
+                    },
+                    dagq::infrastructure::queue_service::answered_refusal,
+                )?,
+            );
+        }
         Command::Report { .. } | Command::Release { .. } => {
             let queued = queue_command(command)?.context("the command is one of the service's")?;
             dagq::compose::prepare_command(queued, db, |first| {
@@ -3608,7 +3641,7 @@ fn environment_owner(queue: &dagq::infrastructure::sqlite::SqliteQueue) -> Resul
 
 /// The planning command `command` is, as the queue service runs it too
 /// (ADR-t3102-3 decision 3): `None` for any other command, and for `ready
-/// --inherit`. The words of `request add` are read here, from its files
+/// --inherit`, which is a [`queue_command`]. The words of `request add` are read here, from its files
 /// (relative to the working directory) or stdin, so they are read once
 /// and the service gets what they held.
 fn queue_write(command: &Command) -> Result<Option<QueueWrite>> {
@@ -4791,13 +4824,6 @@ fn execute(cli: Cli) -> Result<Value> {
     if let Some(common_dir) = &common_dir {
         queue.assert_repository(common_dir)?;
     }
-    // The planning commands run as the caller through the application,
-    // which authorizes each before it changes the queue (task 732).
-    macro_rules! planning {
-        () => {
-            dagq::application::commands::planning::Planning::new(&mut queue, &actor, &StaticPolicy)
-        };
-    }
     // The asks, answers, notes, marks and findings, likewise (task 733).
     // None notifies: the inbox's watch tells the person of a new ask
     // (ADR-t1433-1 decision 2).
@@ -4825,6 +4851,18 @@ fn execute(cli: Cli) -> Result<Value> {
     }
     // The host's dialogue and operations, as the queue service runs them
     // too (ADR-t3102-2 decision 6 (4)).
+    if let Some(QueueCommand::ReadyInherit(params)) = queue_command(&cli.command)? {
+        // Every failure on the DB is a refusal: nothing was recorded.
+        return finish_command(
+            &cli.command,
+            dagq::compose::ready_inherit(
+                &params,
+                Some(&db),
+                |call| dagq::compose::run_command(&mut queue, &db, call),
+                |_| true,
+            )?,
+        );
+    }
     if let Some(command) = queue_command(&cli.command)? {
         let command = dagq::compose::prepare_command(command, Some(&db), |first| {
             dagq::compose::run_command(&mut queue, &db, first)
@@ -4905,6 +4943,7 @@ fn execute(cli: Cli) -> Result<Value> {
         }
         | Command::Planner { .. }
         | Command::Report { .. }
+        | Command::Ready { inherit: true, .. }
         | Command::Graph { out: Some(_), .. } => unreachable!("a command is run above"),
         Command::Show { id, full, events } => {
             let detail = queue.show(TaskId::new(id))?;
@@ -4913,21 +4952,6 @@ fn execute(cli: Cli) -> Result<Value> {
             } else {
                 dagq::view::task_detail(&detail, events)
             }
-        }
-        Command::Ready {
-            id,
-            inherit: true,
-            reason,
-            ..
-        } => {
-            let containers = dagq::compose::queue_run_containers(&queue, &db);
-            serde_json::to_value(planning!().ready_inheriting(
-                TaskId::new(id),
-                reason.as_deref().unwrap_or_default(),
-                &dagq::infrastructure::adapters::RunRepositories {
-                    containers: &containers,
-                },
-            )?)?
         }
         Command::Proposal { command } => match command {
             ProposalCommand::List { all } => json!({"proposals": queue.proposals(all)?}),
@@ -6270,9 +6294,9 @@ mod tests {
     /// processes that open the DB at the end (decision 1), the ones that
     /// open no queue for the command, the wrappers' and the hooks' own
     /// route (decision 6 (3)), the control side's processes (decision 6
-    /// (5)) and the migration and the diagnosis (decision 6 (6)); and
-    /// `ready --inherit`, which moves a run's branch (ADR-t3102-3 decision
-    /// 5), of a command the service runs otherwise. A client-mode `dagq`
+    /// (5)) and the migration and the diagnosis (decision 6 (6)). `ready
+    /// --inherit`, whose client keeps the run's head with its own Git
+    /// (ADR-t3294-1), is sent too. A client-mode `dagq`
     /// refuses by name (`control_side_command`) only `doctor` and `service
     /// status`, which have no use case yet, and sends every command the
     /// service answers.
@@ -6539,10 +6563,17 @@ mod tests {
             let cli = Cli::try_parse_from(argv).unwrap();
             assert!(host_routed(&cli.command).unwrap(), "{argv:?}");
         }
-        // A sent command's form that moves a run's branch is not.
+        // The form that carries a run's branch over is sent as its own use
+        // case.
         let cli =
             Cli::try_parse_from(["dagq", "ready", "1", "--inherit", "--reason", "r"]).unwrap();
-        assert!(!host_routed(&cli.command).unwrap());
+        assert!(host_routed(&cli.command).unwrap());
+        assert_eq!(
+            client_request(&cli.command)
+                .unwrap()
+                .map(|(use_case, _)| use_case),
+            Some(UseCase::ReadyInherit)
+        );
     }
 
     /// ADR-t2159-1 decision 6: the command lines an earlier binary

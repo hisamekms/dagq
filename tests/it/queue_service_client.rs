@@ -372,6 +372,7 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
     // The planning commands are the service's, which refuses a worker's.
     for args in [
         vec!["ready", task.as_str()],
+        vec!["ready", task.as_str(), "--inherit", "--reason", "r"],
         vec!["add", "x"],
         vec!["mark", "m"],
     ] {
@@ -379,7 +380,6 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
         assert_eq!(refused(&output), "authorization_denied", "{args:?}");
     }
     for args in [
-        vec!["ready", task.as_str(), "--inherit", "--reason", "r"],
         vec!["watch", "--timeout", "1"],
         vec!["init"],
         vec!["observe"],

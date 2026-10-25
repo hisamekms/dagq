@@ -142,19 +142,6 @@ pub(crate) fn run_containers_keeping(
     )
 }
 
-/// The runs' containers of the queue at `db` ([`run_containers`]), bound to
-/// the main checkout `queue` is bound to: where a person's release of a
-/// hold and `ready --inherit` run the facts-only turn of a run in a
-/// container whose facts are not of the end of its last turn. A binding
-/// that cannot be read is no checkout, which runs no facts-only turn (the
-/// read of such a run is refused) and leaves a host run's command alone.
-pub fn queue_run_containers(
-    queue: &SqliteQueue,
-    db: &Path,
-) -> crate::infrastructure::run_container::PodmanRunContainers {
-    run_containers(db, bound_checkout(queue).ok().flatten())
-}
-
 /// The verifications' containers of the queue at `db`, whose parts the
 /// host's context makes ready as it does a worker's
 /// ([`run_containers`]).
@@ -197,6 +184,18 @@ pub fn prepare_command(
         _ => {}
     }
     Ok(command)
+}
+
+/// A person's `ready --inherit` as its caller runs it, writing the head it
+/// chose with the host's Git between the read and the record, and putting
+/// the ref back when the record is refused ([`host::ready_inherit`]).
+pub fn ready_inherit(
+    params: &crate::application::queue_commands::ReadyInheritParams,
+    db: Option<&Path>,
+    call: impl FnMut(&crate::application::queue_commands::QueueCommand) -> Result<serde_json::Value>,
+    refused: impl Fn(&anyhow::Error) -> bool,
+) -> Result<serde_json::Value> {
+    host::ready_inherit(params, db, call, refused)
 }
 
 /// The main checkout of the repository the queue is bound to; `None` for a

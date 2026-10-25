@@ -26,7 +26,7 @@ related:
 
 - 宛ての環境が無い`dagq`のうちuser・inbox・plannerのもの（`host_client_role`）は、serviceが答えるコマンド（`client_request`）と`watch`の各回の見る（`watch_poll`）をそのsocketへ送り、DBを開かない。
   serviceが一度も動いていないqueueも同じで、DBが無ければ送る前に`no queue at`で終わる（ADR-t3105-1決定3）。
-- 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、wrapperとhookの経路（決定6の(3)）、runのbranchを動かす`ready --inherit`（ADR-t3102-3決定5）、制御側のプロセス（`supervise`・`up`・`integrate`・`review`・`observe`など。(5)）と`migrate`・`doctor`（(6)）。
+- 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、wrapperとhookの経路（決定6の(3)）、制御側のプロセス（`supervise`・`up`・`integrate`・`review`・`observe`など。(5)）と`migrate`・`doctor`（(6)）。
   CLIの全ての葉は送るものかこの例外のどれかに当たり、どちらでもない葉は無い（unit testが全ての葉を数えて確かめる）。
   1つのコマンドの中で経路を混ぜない。
 - repositoryのqueueの束縛は、CLIが解決したrepositoryを要求に載せ（`ServiceRequest::binding`）、serviceが答える前に照らす。
@@ -106,7 +106,13 @@ CLIのDBの経路とserviceは同じ`compose::write_queue`（repositoryの規則
 - `submit`のproposalの持ち主は、環境ではなくprincipalから決める（plannerならその記録のoriginとbackgroundのhandle、ほかは人。`queue_writes::principal_owner`）
 - `request add`の言葉と`submit --replacement`の置き換えの計画は、クライアントがファイルかstdinから読んで送る。
   環境のroleが`request.record`を持たなければ読まずに送り、serviceがprincipalで断って記録する
-- `ready --inherit`はrunのbranchを動かす制御側のGitの操作なので（ADR-t3102-3決定5）ユースケースにせず、今はDBを直接開く
+- `ready --inherit`はまず`ready_inherit_read`でtaskの状態と最新のrunを読み、クライアントが引き継ぐheadを選んで`refs/dagq/runs/<run-id>`に書いてから（refが読んだ値のままのときだけ書いて確定する）、`ready_inherit`で記録を送る（ADR-t3102-3決定5、[ADR-t3294-1](../adr/2026-10-25-t3294-1-carry-over-by-hand-keeps-the-ref-before-the-record-and-puts-it-back-on-refusal.md)。`application::commands::planning::ready_inherit`、`application::inherit::keep_head`）。
+  refを書けなければ記録を送らずに拒む。
+  serviceは読んだ時のtaskの状態とrunの状態・検証済みのcommitを確定の中で照らし直し、食い違えば何も変えずに断り、クライアントはrefがまだ自分の書いたheadを持つときだけ書く前の値に戻す。
+  答えが届かず記録したかが分からないときは、headを残す。
+  次のrunは記録されたheadから始まり、refの今の値には拠らない（[triage](supervisor-lifecycle/triage.md)の「人の手での引き継ぎ」）。
+  `ready_inherit_read`の答えはserviceのqueueのDBのpathも返し、クライアントはそのqueueのcontainerで最後のturnが切れたcontainerのrunのfacts-onlyのturnを走らせる（DBは開かない）。
+  そのturnが作ったimageの記録は`ready_inherit_images`で送る
 
 ## 届かないとき
 

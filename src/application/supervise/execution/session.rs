@@ -320,6 +320,25 @@ impl Supervisor<'_> {
             }),
         })
     }
+    /// Keep the head `inherited` names, the head its run's record of the
+    /// retry chose, under `refs/dagq/runs/<run-id>` of the run it is carried
+    /// from, before the next run's clone or worktree is made
+    /// (ADR-t3294-1): whatever a writer that raced the record, or a refused
+    /// `ready --inherit` putting the ref back, left it holding, the ref
+    /// holds the recorded head as the run starts. A refusal that arrives
+    /// later may still put it back; nothing writes it again then, and the
+    /// clone and the prompt name the head by its id whatever the ref holds.
+    /// Not for a child of an applied replacement, whose head the snapshot's
+    /// own ref pins.
+    fn keep_inherited(&mut self, inherited: &Inheritance) -> Result<()> {
+        let from = self.queue.run(&inherited.run_id)?;
+        let head = CommitSha::parse(inherited.head.clone(), "inherited head")?;
+        crate::application::inherit::keep_inherited_head(
+            &*crate::application::run_git::for_run(&*self.repository, &from)?,
+            from.id(),
+            &head,
+        )
+    }
     /// Write `run`'s prompt (`prompt.txt` in `run_dir`) for its task, as
     /// its worker's route and provider take it, with the known failures in
     /// [`KNOWN_FAILURES_FILE`]; the branch it inherits, if any, and what
@@ -422,9 +441,22 @@ impl Supervisor<'_> {
             .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
         self.prepare_turns(&run, &run_dir)?;
+        if let Some(inherited) = &inherited
+            && inherited.replan.is_none()
+            && let Err(error) = self.keep_inherited(inherited)
+        {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the head {} it carries over from run {} could not be kept under its ref: {error:#}", run.id(), inherited.head, inherited.run_id);
+        }
         let git_output = if run.in_container() {
-            let carried = inherited.as_ref().map(Inheritance::clone_ref);
-            self.repository.create_clone(&run, carried.as_deref())?
+            let carried = inherited
+                .as_ref()
+                .map(|inherited| (inherited.clone_ref(), inherited.head.clone()));
+            self.repository.create_clone(
+                &run,
+                carried
+                    .as_ref()
+                    .map(|(name, head)| (name.as_str(), head.as_str())),
+            )?
         } else {
             self.repository.create_worktree(&run)?
         };

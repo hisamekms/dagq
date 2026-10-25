@@ -197,6 +197,9 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::Release
         | UseCase::ReleaseRead
         | UseCase::ReleaseImages
+        | UseCase::ReadyInherit
+        | UseCase::ReadyInheritRead
+        | UseCase::ReadyInheritImages
         | UseCase::ReplanRequest
         | UseCase::Rebind
         | UseCase::Recover
@@ -394,7 +397,7 @@ string_enum!(UseCase {
     // (ADR-t3102-3 decision 3), each as the command of its name changes
     // the queue and prints it, authorized by the application for the
     // caller ([`crate::application::queue_writes`]): `ready` without
-    // `--inherit`, which moves a run's branch.
+    // `--inherit`, which is [`Self::ReadyInherit`].
     Add => "add",
     Edit => "edit",
     Submit => "submit",
@@ -463,6 +466,19 @@ string_enum!(UseCase {
     // The dependency diagram `dagq graph --out` writes: its d2 source and
     // the tasks it shows, which the client draws (`svg`) and writes.
     GraphExport => "graph_export",
+    // A person's `ready --inherit`, recorded in one transaction once its
+    // client chose the head and wrote it under `refs/dagq/runs/<run-id>`
+    // with its own Git (ADR-t3294-1); the client puts the ref back when the
+    // record is refused.
+    ReadyInherit => "ready_inherit",
+    // What `dagq ready --inherit` asks for first: the task's status and its
+    // latest run, which the client chooses the head of and which the
+    // record checks again. No command line goes to it alone.
+    ReadyInheritRead => "ready_inherit_read",
+    // The records of the image the client of `ready --inherit` made ready
+    // for a run's facts-only turn as it chose the head. No command line
+    // goes to it alone.
+    ReadyInheritImages => "ready_inherit_images",
 });
 
 impl UseCase {
@@ -471,7 +487,7 @@ impl UseCase {
     /// first. `None` for a command the service does not answer (the
     /// control side's, `watch`, whose looks only the host's `dagq` sends as
     /// [`Self::WatchPoll`], `observe` without `--history` or `--input`,
-    /// `locate`, `doctor`, `ready --inherit`, ...).
+    /// `locate`, `doctor`, ...).
     pub fn of_command(words: &[&str]) -> Option<Self> {
         let has = |flag: &str| {
             words
@@ -549,7 +565,7 @@ impl UseCase {
             ("revisit", _) => Self::Revisit,
             ("judge-follow-up", _) => Self::JudgeFollowUp,
             ("draft", _) => Self::Draft,
-            ("ready", _) if has("--inherit") => return None,
+            ("ready", _) if has("--inherit") => Self::ReadyInherit,
             ("ready", _) => Self::Ready,
             ("goal", Some("add")) => Self::GoalAdd,
             ("goal", Some("edit")) => Self::GoalEdit,
@@ -1970,6 +1986,11 @@ mod tests {
                 "graph_export",
             ),
             (&["graph", "--out=g.d2"], "graph_export"),
+            (
+                &["ready", "3", "--inherit", "--reason", "x"],
+                "ready_inherit",
+            ),
+            (&["ready", "3"], "ready"),
         ] {
             assert_eq!(
                 UseCase::of_command(words).map(UseCase::as_str),
@@ -1987,7 +2008,6 @@ mod tests {
             &["run", "close-workspaces"],
             &["goal"],
             &["finding"],
-            &["ready", "3", "--inherit", "--reason", "x"],
             &["dependency"],
             &["request"],
             &["integrate"],
