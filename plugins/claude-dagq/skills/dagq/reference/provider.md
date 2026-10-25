@@ -8,7 +8,7 @@ A task's worker has a **provider** (`claude` or `codex`); its session is always 
 
 An `in_progress` task's provider and model change only through a release of its hold, on the person's word (the `dagq-recover` skill's `reference/hold.md`).
 
-The task's provider changes only its worker. A headless job's provider is the repository's setting for its role; planners and the inbox stay on Claude. `"$DAGQ" doctor` shows each role's provider and where it comes from.
+The task's provider changes only its worker. A headless job's provider is the repository's setting for its role; planners stay on Claude. The inbox's provider (`claude` or `codex`) and model come from its role's setting, and `dagq inbox`'s arguments override them for one launch (`dagq inbox --help`); with neither, it opens on Claude (unless Claude may not start, below). How the inbox is opened, watches and comes back: the `dagq-inbox` skill and `skills/dagq-recover/reference/up-down.md` (opening the inbox again). `"$DAGQ" doctor` shows each role's provider and where it comes from.
 
 ### Which to choose (planner)
 
@@ -32,6 +32,7 @@ What reaches the person (the inbox shows it):
 - **The `queue_hold` ask**: Claude's login ran out or it hit its limit, or no provider can be used. The person logs in again (or waits for the limit to reset), then answers `done`, or `cancel_affected`. A task already moved to the other provider needs nothing.
 - **Nothing opens** for Codex held or for a provider that merely fails to start: the runtime tries again. If `status` keeps showing it held or unavailable, report it: the person checks the executable (`doctor`) and, for a missing or moved `codex`, restarts the supervisor with `--codex` (`skills/dagq-recover/reference/up-down.md`).
 - Under `--no-claude` nothing falls back to Claude: what had no provider left goes to a person (an `approve_landing` ask, `plan review by hand`, a recovery ask) or records why it did not run.
+- **The inbox** is outside the fallback: the runtime does not start it, so a hold never stops an open inbox, and `dagq inbox` never quietly opens it on Claude instead. When Claude may start and Codex is chosen but cannot be used, it does not open: it says why and how to open it on Claude. While Claude may not start (the supervisor runs without Claude, above), it opens no Claude inbox: with Claude from the role's setting or the default, it opens on Codex if Codex can be chosen and used, else it does not open and says why; Claude asked for in the launch's arguments is refused with the reason. Any other check that stops a Codex inbox (such as the person's Codex settings) also says why. None of these opens an ask: the person follows the reason and runs `dagq inbox` again.
 
 ### Turning the fallback off
 
