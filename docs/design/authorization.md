@@ -164,6 +164,7 @@ CLI（`src/main.rs`の`execute()`）はparseと出力だけをし、これらの
 終了runのverifyだけはuserとinboxが`task.verify_edit`で直せる（[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。
 planner・worker・jobはこの権限を持たない。
 `required_evidence`と`paths`は変更できず、修正は`task_edited`とそのactorに残る。
+`edit`がtitle・description・acceptanceを空か空白だけにするのはどのroleにも許さず、storeが認可の後・transactionの前の空欄の検査で拒めばtaskも`task_edited`も変えない。
 `edit`のcapabilityは`Planning`がtransactionの外で読んだtaskの状態から選ぶので、`Planning`はその状態と所属のproposal（id・状態・持ち主）をstoreの`edit_task`に渡し、storeは同じtransactionで読んだものと照合する。
 食い違えば（例: `ready`で`task.write`を通った後にclaimされ、runが失敗して`in_progress`になった）、taskも`task_edited`も変えずに変わったことを理由に拒む。
 taskの状態で認可する他のコマンド（`set-goal`・`set-paths`・`set-priority`・`revisit`・`draft`・`ready`・`cancel`・`dependency add` / `remove`）も同じく、認可に使ったものをstoreに渡し、storeは書く前に同じtransactionで照合して、食い違えばtask・依存・eventを変えずに拒む。
