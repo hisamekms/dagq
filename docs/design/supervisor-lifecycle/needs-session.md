@@ -134,7 +134,7 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
 6. **打ち切りとerror**: 試行を使い切った後の`resume_finished`が未解消で、次の`resume_candidates`でそのrunにstaleでないleaseも生きているwrapperも無ければ（slotの空きに関わらず）、supervisorは次の**引き継ぐretry**か、復旧jobに渡すかを決める。
 
    **引き継ぐretry**（ADR-0047の決定24）: runが今も衝突だけで`needs_session`（上の(a)(b)がすべてのイベントについて成り立つ）で、同じtaskのどのrunもこのretryをしていなければ（taskごとに1回まで。人の手での引き継ぎ（[Triage](triage.md#人の手での引き継ぎ)）は数えない。`inherits_on_exhaustion`）、人に聞かずにretryする。
-   runの`result_commit`（着地するcommit（5）。無ければ、rebaseの途中でないworktreeのHEAD）がbaseと違えば、それを`refs/dagq/runs/<run-id>`に向け（branchを消されても残るように）、1トランザクションで下と同じ確認と、衝突だけで止まっていることとtaskごとに1回までであることの再確認をしてrunを`failed`にし、taskを`in_progress`から`ready`に戻し（中身は変えないのでplan reviewにはかけない。triageの`retry`と同じ例外）、`auto_repaired`と`triage_finished`を記録する。
+   runの`result_commit`（着地するcommit（5）。無ければ、rebaseの途中でないworktreeのHEAD。登録の壊れたworktreeのrunは[triageの`retry`の前提](triage.md#triage-supervisor)と同じく読む）がbaseと違えば、それを`refs/dagq/runs/<run-id>`に向け（branchを消されても残るように）、1トランザクションで下と同じ確認と、衝突だけで止まっていることとtaskごとに1回までであることの再確認をしてrunを`failed`にし、taskを`in_progress`から`ready`に戻し（中身は変えないのでplan reviewにはかけない）、`auto_repaired`と`triage_finished`を記録する。
    askは開かない。
    残したresumeのwrapperはtriageと同じく止め、worktreeとbranchはtaskが`ready`なので残る。
    次のrunのclaimでsupervisorは、前のrunのうち最も新しい引き継ぐretryで終わったrunがあれば（直前のrunが早くに失敗してtriageでretryされても引き継ぐ）、worker promptに引き継ぎの節（前のrunのreviewはpassしたが衝突で試行を使い切ったこと、commit（`refs/dagq/runs/<id>`とbranch）と、そのrun自身のcommitの範囲（headと新しいrunのbaseのmerge-baseから。途中までrebaseしたresumeがmainのcommitを下に積んでいても、それを含めない）、今のmain（新しいrunのbase）に載せ直して衝突を解き、検証を再実行して自分のheadでreceiptを書くこと、前のreceiptのpathとsummary）を足し、新しいrunに`run_inherited`を記録する。
@@ -142,7 +142,7 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
    2回目の使い切りも復旧jobに渡す。
 
    **復旧jobに渡す**（`exhaust_resumes`。ADR-0047の決定39）: 1トランザクションで、runがまだ`needs_session`で試行を使い切り、taskが`in_progress`でrunがその最新で、staleでないleaseが無いことを確かめ、runを`failed`にし（`last_error`は元の`last_error`に試行の回数を添え、衝突だけの試行やprecheckの依頼があればその内訳と上限も書く）、`recovery_requested`（`alert: resume_exhausted`）を記録する。
-   `triage_finished`は書かないので、[Triage](triage.md#triage-supervisor)の復旧jobがこのalertでrunを取る（resumeはもう選べない。jobの`retry_inherit`や`retry`は前提を満たせば適用され、escalateなら`decide`のask（`retry` / `cancel`とjobのoptions））。
+   `triage_finished`は書かないので、[Triage](triage.md#triage-supervisor)の復旧jobがこのalertでrunを取る（resumeはもう選べない）。
    続けて残したresumeのwrapperを止める。
    wrapperの起動・依頼の書き込み・heartbeat切れなどresume自体のerrorは`resume_finished`（`outcome: error`）とsupervisor logに書き、leaseを外す。
    runの`last_error`（衝突の理由）は変えず、試行は1回と数える。
