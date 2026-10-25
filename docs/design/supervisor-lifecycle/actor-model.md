@@ -81,7 +81,6 @@ effort = "high"         # 省けば既定
 - **inbox**: `[roles.inbox]`がinboxの既定のproviderとmodelで、`dagq inbox`の起動の引数がその起動だけ上書きする（`actor_model::inbox_launch`、その`source`は`argument`。[`up` / `down`](up-down.md)の「`dagq inbox`」）。
   値の検査は他の役割と同じ`RoleModel::check`で、Codexは`CODEX_ROLES`にinboxを持つ。
   inboxは`job_route`を通らず、providerの控えでinboxを止めない（[ADR-t1181-1](../../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定1・4）。
-  Codexのinboxは記録の実装の後まで開かない
 - **見え方**: `dagq doctor`の`roles`が役割ごとの起動のproviderとmodel / effortと出どころを出す（queueが束縛されたmain checkoutの`dagq.toml`。`application::health::roles`）。
   jobごとに実際に動いたproviderは開始のeventの`launch.provider`と`headless_jobs.provider`
 
@@ -101,8 +100,8 @@ modelは表の値（無ければ既定を明示）のまま変えない。
   jobの区間の`session_opened`（`domain::sessions`の`job`）は開始のeventの`launch`を写す（生きているrunの復旧のjobは区間を持たない）。
   終わったrunの復旧のjobは`triage_started`の`launch`（`ActorLaunch::recorded`）で起動する
 - **planner**: 開く側（`application::planner::launch_planner`）が決めてbackgroundのwrapperに渡し、wrapperはturnの`turn_started`に`launch`を書く（下の[runtimeのplannerの経路](#runtimeのplannerの経路)）
-- **inbox**: 今は`inbox_opened`がproviderを持つだけで、`launch`を持たない（[`up` / `down`](up-down.md)の「`dagq inbox`」）。
-  ADR-t1181-1決定5は、起動の記録に選んだ場所と要求したmodelを、区間に実際のmodelとsession（thread）のidを足し、stats / kpiでproviderごとに読むと決めた（実装前）
+- **inbox**: `dagq inbox`が起動の記録（`inbox_opened`）に`launch`を残し、同じ`launch`をinboxのhookに渡して区間に写させる（ADR-t1181-1決定5。欄は`lifecycle::inbox`と`domain::sessions::hook_changes`のdoc comment）。
+  区間の境界と記録の欠けの読み方は[Provider lifecycle](../provider-lifecycle.md#inboxの区間)が持つ
 
 計測の層別はtranscriptから読んだ`session_closed`の値を使う。
 `launch`は起動の意図と出どころで、既定で起動したsessionの実際の値はtranscriptが持つ。

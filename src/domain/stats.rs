@@ -1326,6 +1326,20 @@ pub fn stats(
         }
         kind_sessions.context = kind_contexts.remove(*kind).unwrap_or_default();
     }
+    // No inbox is of a goal.
+    if query.goal_id.is_some() {
+        sessions.inbox_launches.clear();
+    }
+    for (kind, providers) in &mut sessions.by_provider {
+        for (provider, provider_sessions) in providers.iter_mut() {
+            provider_sessions.tokens = execution_tokens
+                .by_actor
+                .get(kind)
+                .and_then(|actor| actor.by_provider.get(provider))
+                .map(|tokens| tokens.totals.clone())
+                .unwrap_or_default();
+        }
+    }
     for (kind, routes) in &mut sessions.by_route {
         for (route, route_sessions) in routes.iter_mut() {
             route_sessions.tokens = execution_tokens

@@ -251,7 +251,7 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
 | `run screen RUN`（認可の後に拒む） `run log RUN` / `run send RUN` | `screen.read` / `screen.send` | run（数字はtask。読めないidは`Unresolved`） |
 | `planner screen ID` `planner log ID` / `planner send ID` | `screen.read` / `screen.send` | planner |
 | `planner request ID` | `planner.request` | planner |
-| `session-event open/close`（inboxのspan） | `session.record` | queue |
+| `session-event`（inboxのspanとその印） | `session.record` | queue |
 
 結果（上のPolicyの表から決まる）:
 

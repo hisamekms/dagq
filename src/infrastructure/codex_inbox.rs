@@ -74,6 +74,8 @@ fn event(hook: InboxHook) -> &'static str {
         InboxHook::SessionEnd => "SessionEnd",
         InboxHook::Stop => "Stop",
         InboxHook::PreToolUse => "PreToolUse",
+        InboxHook::PreCompact => "PreCompact",
+        InboxHook::PostCompact => "PostCompact",
     }
 }
 
@@ -85,6 +87,8 @@ fn label(hook: InboxHook) -> &'static str {
         InboxHook::SessionEnd => "session_end",
         InboxHook::Stop => "stop",
         InboxHook::PreToolUse => "pre_tool_use",
+        InboxHook::PreCompact => "pre_compact",
+        InboxHook::PostCompact => "post_compact",
     }
 }
 
@@ -169,6 +173,34 @@ pub fn hook_configs(dagq: &Path) -> Result<Vec<String>> {
     }
     configs.push(format!("hooks.state={{{}}}", state.join(",")));
     Ok(configs)
+}
+
+/// The hooks [`hook_configs`] gives, as `inbox_opened` records them
+/// (`hooks`): per hook its event's label (`hook`), its key and the hash
+/// trusted for it (`trusted_hash`), made from the same command text. A
+/// Codex trusts each on its own, so a hook whose record never comes (no
+/// span opened for a launch without a SessionStart, no
+/// `inbox_guardrail_reached` without a PreToolUse) is read against these.
+///
+/// Codex's own view of each hook's trust is not read: codex-cli 0.164.0
+/// lists it only through its app server's `hooks/list` (each entry's
+/// `key`, `currentHash` and `trustStatus`, `trusted` / `untrusted` /
+/// `modified` / `managed`), a second Codex process apart from the TUI's
+/// session, whose start was not measured to leave the person's
+/// `CODEX_HOME` unwritten.
+pub fn given_hooks(dagq: &Path) -> Result<Value> {
+    InboxHook::ALL
+        .into_iter()
+        .map(|hook| {
+            let command = hook_command(dagq, hook)?;
+            Ok(json!({
+                "hook": label(hook),
+                "key": hook_key(hook, 0, 0),
+                "trusted_hash": hook_hash(label(hook), &command, default_timeout(hook)),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Value::Array)
 }
 
 /// The `SKILL.md` of the dagq-inbox skill in the plugin directory
@@ -738,17 +770,25 @@ fn status(launcher: &Path) -> Result<String, String> {
 /// span of the inbox's session, recorded as the Claude inbox's hooks
 /// record it. Its failure is left out: it never stops the session.
 fn record_span(launcher: &Path, event: &str, input: &str) {
+    if let Some(mut child) = start_record(launcher, event, input) {
+        let _ = child.wait();
+    }
+}
+
+/// `dagq session-event <event>` started with the hook's `input` written to
+/// its stdin and left to run: the guardrail's hook records without waiting,
+/// so neither its answer nor the tool call waits on the queue.
+fn start_record(launcher: &Path, event: &str, input: &str) -> Option<std::process::Child> {
     let child = dagq(launcher, &["session-event", event])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
-    if let Ok(mut child) = child {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input.as_bytes());
-        }
-        let _ = child.wait();
+    let mut child = child.ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
     }
+    Some(child)
 }
 
 /// `dagq codex-inbox-hook <hook>`: reads the hook's input on stdin, does
@@ -774,6 +814,10 @@ pub fn run_hook(hook: InboxHook) -> i32 {
             record_span(&launcher, "close", &input);
             None
         }
+        InboxHook::PreCompact | InboxHook::PostCompact => {
+            record_span(&launcher, "compact", &input);
+            None
+        }
         InboxHook::Stop => {
             let read = || {
                 status(&launcher)
@@ -790,7 +834,14 @@ pub fn run_hook(hook: InboxHook) -> i32 {
                 })
                 .map(|block| format!("{block}\n"))
         }
-        InboxHook::PreToolUse => guard(&parsed).map(|deny| format!("{deny}\n")),
+        InboxHook::PreToolUse => {
+            // That the guardrail ran, apart from its being given: once a
+            // session ([`crate::domain::sessions::HookEvent::Guard`]), not
+            // waited for, after the answer is decided.
+            let answer = guard(&parsed).map(|deny| format!("{deny}\n"));
+            let _ = start_record(&launcher, "guard", &input);
+            answer
+        }
     };
     if let Some(answer) = answer {
         let mut stdout = std::io::stdout();
@@ -846,13 +897,69 @@ mod tests {
         }
     }
 
+    /// The compaction's hooks of the measurement whose arguments are
+    /// recorded in
+    /// `docs/plans/codex-inbox-auto-compaction-spike/args/args-H-12000-062843.txt`,
+    /// which Codex 0.160.0 ran trusted after an automatic compaction.
+    #[test]
+    fn the_compaction_hooks_keys_and_hashes_are_the_ones_codex_trusted() {
+        const COMPACTION: &str = "sh /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3339-tkVJfH/bin/hook.sh dagq";
+        let known = [
+            (
+                InboxHook::PreCompact,
+                "/<session-flags>/config.toml:pre_compact:0:0",
+                "sha256:4480b3b7c6139205e74c170f97a6194a4c5f8bb436d46ba42c86ab08b3858566",
+            ),
+            (
+                InboxHook::PostCompact,
+                "/<session-flags>/config.toml:post_compact:0:0",
+                "sha256:ae25df7c55ec624a76911ce8b37c2352c2c63ca5a7a192d1688c8d3117c59c27",
+            ),
+        ];
+        for (hook, key, hash) in known {
+            assert_eq!(hook_key(hook, 0, 0), key);
+            let command = format!("{COMPACTION} {}", event(hook));
+            assert_eq!(
+                hook_hash(label(hook), &command, default_timeout(hook)),
+                hash,
+                "{hook:?}"
+            );
+        }
+    }
+
+    /// What `inbox_opened` records of the hooks is each hook given, its
+    /// key and the hash in the trust given with it.
+    #[test]
+    fn the_given_hooks_are_recorded_with_the_trust_given_with_them() {
+        let dagq = Path::new("/Users/me/.local/bin/dagq");
+        let given = given_hooks(dagq).unwrap();
+        let given = given.as_array().unwrap();
+        assert_eq!(given.len(), InboxHook::ALL.len());
+        assert_eq!(
+            label(InboxHook::PreToolUse),
+            crate::domain::sessions::GUARDRAIL_HOOK
+        );
+        let configs = hook_configs(dagq).unwrap();
+        let state = configs.last().unwrap();
+        for (hook, record) in InboxHook::ALL.into_iter().zip(given) {
+            assert_eq!(record["hook"], label(hook));
+            assert_eq!(record["key"], hook_key(hook, 0, 0));
+            let entry = format!(
+                "\"{}\"={{trusted_hash=\"{}\"}}",
+                record["key"].as_str().unwrap(),
+                record["trusted_hash"].as_str().unwrap()
+            );
+            assert!(state.contains(&entry), "{state}");
+        }
+    }
+
     /// Each hook is given with its key and the hash of its own command,
-    /// all four in the one `hooks.state`.
+    /// all of them in the one `hooks.state`.
     #[test]
     fn the_hooks_are_given_with_every_keys_hash() {
         let dagq = Path::new("/Users/me/.local/bin/dagq");
         let configs = hook_configs(dagq).unwrap();
-        assert_eq!(configs.len(), 5);
+        assert_eq!(configs.len(), InboxHook::ALL.len() + 1);
         assert_eq!(
             configs[0],
             r#"hooks.SessionStart=[{hooks=[{type="command",command="/Users/me/.local/bin/dagq codex-inbox-hook session-start"}]}]"#
@@ -861,7 +968,17 @@ mod tests {
             configs[3],
             r#"hooks.PreToolUse=[{hooks=[{type="command",command="/Users/me/.local/bin/dagq codex-inbox-hook pre-tool-use"}]}]"#
         );
-        let state = configs[4].strip_prefix("hooks.state={").unwrap();
+        assert_eq!(
+            configs[4],
+            r#"hooks.PreCompact=[{hooks=[{type="command",command="/Users/me/.local/bin/dagq codex-inbox-hook pre-compact"}]}]"#
+        );
+        assert_eq!(
+            configs[5],
+            r#"hooks.PostCompact=[{hooks=[{type="command",command="/Users/me/.local/bin/dagq codex-inbox-hook post-compact"}]}]"#
+        );
+        let state = configs[InboxHook::ALL.len()]
+            .strip_prefix("hooks.state={")
+            .unwrap();
         for hook in InboxHook::ALL {
             let command = hook_command(dagq, hook).unwrap();
             let entry = format!(

@@ -884,6 +884,11 @@ impl AgentProvider for Codex {
             prompt,
         )
     }
+    /// The hooks [`Self::inbox_command`] gives, with the `dagq` they run.
+    fn inbox_hooks(&self) -> Result<Option<serde_json::Value>> {
+        let dagq = std::env::current_exe().context("find this dagq for the inbox's hooks")?;
+        super::codex_inbox::given_hooks(&dagq).map(Some)
+    }
 }
 
 /// The tokens of a job, one Execution in a thread of its own

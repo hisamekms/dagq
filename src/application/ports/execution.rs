@@ -433,6 +433,15 @@ pub trait AgentProvider {
         let _ = queue_dir;
         None
     }
+    /// The hooks [`AgentProvider::inbox_command`] gives the inbox in its
+    /// launch arguments, as `inbox_opened` records them (`hooks`): each
+    /// hook with its key and the hash trusted for it, Codex's
+    /// ([`crate::infrastructure::codex_inbox::given_hooks`]); `None` for a
+    /// provider whose inbox's hooks are not its launch's (Claude Code's
+    /// are the plugin's).
+    fn inbox_hooks(&self) -> Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
     /// Start the agent of `command` (a turn from
     /// [`AgentProvider::turn_command`], or another role's through
     /// [`AgentProvider::apply_launch`]) with `model` at `effort` (ADR-0079

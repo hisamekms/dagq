@@ -1286,7 +1286,8 @@ enum Command {
     /// Open the queue's inbox in this terminal: start the inbox's agent (Claude Code with the
     /// inbox's settings, the plugin and the inbox's prompt, DAGQ_ROLE=inbox and DAGQ_QUEUE) in the
     /// foreground in place of this process, from the repository's main checkout, after recording
-    /// inbox_opened. Its provider and model are [roles.inbox] of dagq.toml, overridden for this
+    /// inbox_opened (the provider, where it came from, the model asked for and the hooks given).
+    /// Its provider and model are [roles.inbox] of dagq.toml, overridden for this
     /// start by --provider and --model. A Codex that does not run or is not logged in opens no
     /// inbox, with why and how to open it on Claude; Claude is never started in its place. While
     /// a supervisor of the queue runs under `up --no-claude` the inbox is not opened on Claude:
@@ -1303,8 +1304,7 @@ enum Command {
         /// Claude Code executable; a bare name is resolved on PATH.
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
-        /// Codex CLI executable, for a Codex inbox; a bare name is resolved on PATH. A Codex
-        /// inbox is not opened yet: it is refused with why until its records are implemented.
+        /// Codex CLI executable, for a Codex inbox; a bare name is resolved on PATH.
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
         /// The inbox's provider for this start (claude or codex) over [roles.inbox]'s; without
@@ -1725,10 +1725,11 @@ enum Command {
     // ADR-t1181-1 decision 2.
     /// A hook of a Codex inbox, which `dagq inbox` gives Codex in its launch arguments: reads
     /// the hook's input on stdin and prints its answer (the status at a session start, a Stop's
-    /// block, the guardrail's refusal). Opens no queue itself; always exits 0.
+    /// block, the guardrail's refusal; a compaction's hooks print nothing). Opens no queue
+    /// itself; always exits 0.
     #[command(hide = true)]
     CodexInboxHook {
-        #[arg(value_parser = ["session-start", "session-end", "stop", "pre-tool-use"])]
+        #[arg(value_parser = ["session-start", "session-end", "stop", "pre-tool-use", "pre-compact", "post-compact"])]
         hook: String,
     },
     /// Bind the queue to the repository containing the working directory (or
@@ -1783,12 +1784,13 @@ enum Command {
         background: bool,
     },
     // ADR-0048 decision 6.
-    /// Record a SessionStart (`open`) or SessionEnd (`close`) of an inbox or planner session:
-    /// the plugin's hook passes its stdin, and the session's environment names its kind. Only
-    /// the session spans are written.
+    /// Record a SessionStart (`open`) or SessionEnd (`close`) of an inbox or planner session,
+    /// or a Codex inbox's compaction (`compact`, its PreCompact or PostCompact) or its
+    /// guardrail's hook having run (`guard`): the hook passes its stdin, and the session's
+    /// environment names its kind. Only the session spans and their marks are written.
     #[command(hide = true)]
     SessionEvent {
-        #[arg(value_parser = ["open", "close"])]
+        #[arg(value_parser = ["open", "close", "compact", "guard"])]
         event: String,
         // task 734.
         /// The run whose session reports, when it is no inbox or planner

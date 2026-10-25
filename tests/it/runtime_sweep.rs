@@ -611,6 +611,7 @@ fn the_spans_of_ended_inbox_and_planner_sessions_close_as_inferred_without_listi
                 cwd: None,
                 planner_id: planner,
                 launch: None,
+                model: None,
             })
             .unwrap();
     };

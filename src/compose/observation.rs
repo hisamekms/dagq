@@ -151,13 +151,15 @@ impl Default for CiWatchOptions {
     }
 }
 
-/// Whether the inbox was opened with its guardrail settings
-/// ([`crate::application::inbox_guardrail::judge`]), by the newest
-/// `inbox_opened`.
+/// Whether the inbox was opened with its guardrail, by the newest
+/// `inbox_opened` and `inbox_guardrail_reached`
+/// ([`crate::application::inbox_guardrail::judge_latest`]).
 fn inbox_guardrail(queue: &SqliteQueue) -> Result<Value> {
     let opened = queue.latest_event_of(EventKind::InboxOpened.as_str())?;
-    Ok(crate::application::inbox_guardrail::judge(
-        opened.as_ref().map(|event| &event.payload),
+    let reached = queue.latest_event_of(EventKind::InboxGuardrailReached.as_str())?;
+    Ok(crate::application::inbox_guardrail::judge_latest(
+        opened.as_ref(),
+        reached.as_ref(),
     ))
 }
 

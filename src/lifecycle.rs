@@ -3,8 +3,8 @@
 //! [`crate::application::lifecycle`] and the entry points
 //! [`crate::compose::up`] and [`crate::compose::down`].
 pub use crate::application::lifecycle::{
-    CLAUDE_INBOX_FORBIDDEN, CLAUDE_INSTEAD, CODEX_INBOX_PENDING, DownOptions, Handed,
-    IN_CMUX_RETIRED, INBOX_INSIDE_REFUSED, INBOX_NEXT, INBOX_ROLE, InboxOptions, LAUNCHD_LOG_NAME,
+    CLAUDE_INBOX_FORBIDDEN, CLAUDE_INSTEAD, DownOptions, Handed, IN_CMUX_RETIRED,
+    INBOX_INSIDE_REFUSED, INBOX_NEXT, INBOX_ROLE, InboxOptions, LAUNCHD_LOG_NAME,
     NO_CLAUDE_INSTEAD, OBSERVER_ROLE, PLANNER_ROLE, PartialHandoff, QUEUE_ENV, QueueAgent,
     REVIEWER_ROLE, ROLE_ENV, UP_RESTART_ENV, UpEnvironment, UpOptions, WORKER_ROLE, hand_off,
     handoff_failures, launch_agent_spec, untrusted_repository_hint,

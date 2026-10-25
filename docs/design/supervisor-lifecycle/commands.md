@@ -65,6 +65,7 @@ related:
 - `stats`とworktimeのcargo専用の計測（`integrate`と重なる検証の数）は、効く規則が`integrate`の検証を数えないrepositoryのqueueではどのコマンドも出さない（[Source repository](source-repository.md#cargo専用の計測)）。
   claimのhostの`rustc`の記録と`kpi`の`toolchain=`の層と`stats`の`rustc`の欄は、宣言したRustのprofileで分ける。
   どちらもdagqのソースかでは分けず、宣言も規則も無いrepositoryではソースでも出さない。
+- `stats`のsessionの区間はkindごとにrouteとproviderでも分け、ClaudeのinboxとCodexのinboxを並べて読める（区間と起動の欠けの読み方は[Provider lifecycle](../provider-lifecycle.md#inboxの区間)）。
 
 ## 表示とreviewのコマンドをまたぐ約束
 

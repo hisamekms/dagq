@@ -37,8 +37,8 @@ use crate::{
         sessions::{
             GOAL_REVIEW, HEADLESS_ROUTE, HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW,
             REVIEW, RUN_SESSION, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS,
-            Scope, SessionHook, SpanChange, SpanContext, changes, hook_changes, queue_span_kind,
-            scope,
+            Scope, SessionHook, SpanChange, SpanContext, changes, hook_changes, hook_mark,
+            queue_span_kind, scope,
         },
         stats::rfc3339_millis,
         tokens::{self, ModelUse, SpanTokens, TokenUsage},
@@ -2016,8 +2016,17 @@ pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value
     }
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let (task_id, context) = planner_context(&tx, hook)?;
-    let changes = hook_changes(hook, &open_hook_spans(&tx)?, &context);
+    let open = open_hook_spans(&tx)?;
+    let changes = hook_changes(hook, &open, &context);
     let now = now(&tx)?;
+    // A compaction's mark, and the guardrail's having run once a session.
+    let mut marked = None;
+    if let Some((kind, payload)) = hook_mark(hook, &open)
+        && (kind != EventKind::InboxGuardrailReached || !guardrail_reached(&tx, hook)?)
+    {
+        insert_at(&tx, None, None, kind, &payload, &now)?;
+        marked = Some(kind.as_str());
+    }
     let mut opened = None;
     let mut closed = Vec::new();
     for change in changes {
@@ -2042,7 +2051,18 @@ pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value
         "session_id": hook.session_id,
         "opened": opened,
         "closed": closed,
+        "marked": marked,
     }))
+}
+
+/// Whether the guardrail's hook of `hook`'s session was recorded running.
+fn guardrail_reached(conn: &Connection, hook: &SessionHook) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
+           AND json_extract(payload,'$.session_id')=?2)",
+        params![EventKind::InboxGuardrailReached.as_str(), hook.session_id],
+        |r| r.get(0),
+    )?)
 }
 
 /// Where a span of `hook` is recorded, and what its payload adds: a
@@ -4506,6 +4526,7 @@ pub(super) mod tests {
                 },
             },
             kind,
+            model: None,
             session_id: session.into(),
             transcript_path: Some(dir.join(format!("{session}.jsonl")).display().to_string()),
             cwd: Some("/repo".into()),

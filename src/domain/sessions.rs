@@ -607,8 +607,10 @@ pub fn token_cut_due(since: i64, now: i64) -> bool {
 pub const LAUNCH_ENV: &str = "DAGQ_LAUNCH";
 
 /// A `SessionStart` or `SessionEnd` of an inbox or planner session, as the
-/// plugin's hook reports it (ADR-0048 decision 6). It reads and writes as
-/// JSON for a planner's wrapper to relay it ([`HookRecord`]).
+/// plugin's hook reports it (ADR-0048 decision 6), or a Codex inbox's
+/// hook does (ADR-t1181-1 decisions 2 and 5), which reports its
+/// compactions and its guardrail's runs too. It reads and writes as JSON
+/// for a planner's wrapper to relay it ([`HookRecord`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(into = "HookRecord")]
 pub struct SessionHook {
@@ -620,16 +622,23 @@ pub struct SessionHook {
     pub cwd: Option<String>,
     /// The planner session (`DAGQ_PLANNER_ID`) of a planner's.
     pub planner_id: Option<i64>,
-    /// What the runtime started the planner's agent with
+    /// What the runtime or `dagq inbox` started the agent with
     /// (`DAGQ_LAUNCH`, ADR-0079 decision 7), as JSON.
     pub launch: Option<Value>,
+    /// The model the session runs on as the hook's input names it
+    /// (`model`): a Codex inbox's SessionStart, PreCompact, PostCompact
+    /// and PreToolUse give it (codex-cli 0.160.0), its SessionEnd does
+    /// not.
+    pub model: Option<String>,
 }
 
 impl SessionHook {
     /// The hook's report of `event` (`open` for a `SessionStart`, `close`
-    /// for a `SessionEnd`) from its stdin `input` and the session's
-    /// environment `env`; `None` when the session is not one the hook
-    /// records ([`hook_kind`]). An input without a session id is an error.
+    /// for a `SessionEnd`, `compact` for a PreCompact or PostCompact named
+    /// by the input's `hook_event_name`, `guard` for a PreToolUse) from
+    /// its stdin `input` and the session's environment `env`; `None` when
+    /// the session is not one the hook records ([`hook_kind`]). An input
+    /// without a session id is an error.
     pub fn from_hook(
         event: &str,
         input: &Value,
@@ -657,7 +666,19 @@ impl SessionHook {
             "close" => HookEvent::End {
                 reason: text("reason").unwrap_or_else(|| "other".into()),
             },
-            other => return Err(format!("unknown session event {other:?}: open or close")),
+            "compact" => HookEvent::Compact {
+                hook: match text("hook_event_name").as_deref() {
+                    Some("PostCompact") => POST_COMPACT.into(),
+                    _ => PRE_COMPACT.into(),
+                },
+                trigger: text("trigger").unwrap_or_else(|| "unknown".into()),
+            },
+            "guard" => HookEvent::Guard,
+            other => {
+                return Err(format!(
+                    "unknown session event {other:?}: open, close, compact or guard"
+                ));
+            }
         };
         Ok(Some(Self {
             event,
@@ -669,6 +690,7 @@ impl SessionHook {
             launch: env(LAUNCH_ENV)
                 .and_then(|launch| serde_json::from_str::<Value>(&launch).ok())
                 .filter(Value::is_object),
+            model: text("model"),
         }))
     }
 }
@@ -687,6 +709,8 @@ struct HookRecord {
     planner_id: Option<i64>,
     #[serde(default)]
     launch: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 impl From<SessionHook> for HookRecord {
@@ -699,6 +723,7 @@ impl From<SessionHook> for HookRecord {
             cwd: hook.cwd,
             planner_id: hook.planner_id,
             launch: hook.launch,
+            model: hook.model,
         }
     }
 }
@@ -727,18 +752,48 @@ impl TryFrom<HookRecord> for SessionHook {
             cwd: record.cwd,
             planner_id: record.planner_id,
             launch: record.launch,
+            model: record.model,
         })
     }
 }
 
 /// What the hook saw: a session starting (its `source`: `startup`,
-/// `resume`, `clear`, `compact`) or ending (its `reason`).
+/// `resume`, `clear`, `compact`) or ending (its `reason`); a Codex
+/// inbox's compaction, before or after it (`hook`, [`PRE_COMPACT`] or
+/// [`POST_COMPACT`]) with its `trigger` (`auto` or `manual`; `unknown`
+/// when the input has none); or a Codex inbox's guardrail hook running
+/// (`guard`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "hook", rename_all = "snake_case")]
 pub enum HookEvent {
-    Start { source: String },
-    End { reason: String },
+    Start {
+        source: String,
+    },
+    End {
+        reason: String,
+    },
+    Compact {
+        #[serde(rename = "compaction")]
+        hook: String,
+        trigger: String,
+    },
+    Guard,
 }
+
+/// The hooks a compaction's mark names: the one before it and the one
+/// after it, and a start of the same session after it (`session_start`,
+/// its `source` `compact`).
+pub const PRE_COMPACT: &str = "pre_compact";
+pub const POST_COMPACT: &str = "post_compact";
+pub const SESSION_START: &str = "session_start";
+/// The label of a Codex inbox's guardrail hook (its PreToolUse) in
+/// `inbox_opened`'s `hooks` and its `guardrail_by`.
+pub const GUARDRAIL_HOOK: &str = "pre_tool_use";
+
+/// Why the span of a hook names no model it read: the hook's input had
+/// none, so `model` is the one the launch asked for (null for the
+/// provider's default).
+pub const MODEL_NOT_IN_HOOK: &str = "not_in_hook_input";
 
 /// The kind of the span of a session with `DAGQ_SESSION_KIND` `session_kind`,
 /// `DAGQ_ROLE` `role` and `DAGQ_PLANNER_ORIGIN` `origin`, when the hook
@@ -782,8 +837,13 @@ pub fn end_reason(reason: &str) -> &'static str {
 /// told apart. The terminal is not asked which session it runs
 /// (ADR-t2159-1 decision 1), and the `workspace_id` an earlier binary
 /// recorded in a span is not read. An end closes the session's span; one
-/// already closed changes nothing. `context` is added to the opened
-/// payload (a runtime planner's proposal and goals).
+/// already closed changes nothing. A compaction's hooks and the
+/// guardrail's change no span ([`hook_mark`] records them). `context` is
+/// added to the opened payload (a runtime planner's proposal and goals).
+///
+/// The span opens with the session's `provider` (its launch's, else
+/// `claude`, the plugin's hook's) and `model`: the hook input's, else the
+/// one its launch asked for with `model_unknown` [`MODEL_NOT_IN_HOOK`].
 pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> Vec<SpanChange> {
     let own = |span: &&OpenSpan| {
         HOOK_KINDS.contains(&span.kind()) && span.session_id() == Some(hook.session_id.as_str())
@@ -797,6 +857,7 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
                 reason: end_reason(reason),
             })
             .collect(),
+        HookEvent::Compact { .. } | HookEvent::Guard => Vec::new(),
         HookEvent::Start { .. } if open.iter().any(|span| own(&span)) => Vec::new(),
         HookEvent::Start { source } => {
             let mut changes: Vec<SpanChange> = open
@@ -807,14 +868,25 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
                     reason: INFERRED,
                 })
                 .collect();
+            let launched = hook.launch.as_ref();
             let mut payload = json!({
                 "kind": hook.kind,
                 "session_id": hook.session_id,
                 "cwd": hook.cwd,
                 "transcript_path": hook.transcript_path,
-                "provider": "claude",
+                "provider": launched
+                    .and_then(|launch| launch["provider"].as_str())
+                    .unwrap_or("claude"),
                 "source": source,
             });
+            match &hook.model {
+                Some(model) => payload["model"] = json!(model),
+                None => {
+                    payload["model"] =
+                        launched.map_or(Value::Null, |launch| launch["model"].clone());
+                    payload["model_unknown"] = json!(MODEL_NOT_IN_HOOK);
+                }
+            }
             if let Some(planner) = hook.planner_id {
                 payload["planner_id"] = json!(planner);
             }
@@ -830,6 +902,44 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
             changes
         }
     }
+}
+
+/// The mark an inbox's hook leaves beside its span, and its event's kind:
+/// a compaction's (`session_compacted`: a Codex inbox's PreCompact or
+/// PostCompact with its `trigger`, or a start of `source` `compact` of the
+/// session whose span is open, which goes on in it, Claude's inbox's too) and the guardrail's having run
+/// (`inbox_guardrail_reached`, which the caller records once a session).
+/// It names the session's open span (`opened_event_id`, null when none is
+/// open: its SessionStart's hook did not run) and the hook input's
+/// `model`. Any other report, and any other kind's, leaves none.
+pub fn hook_mark(hook: &SessionHook, open: &[OpenSpan]) -> Option<(EventKind, Value)> {
+    if hook.kind != INBOX {
+        return None;
+    }
+    let span = open
+        .iter()
+        .find(|span| span.kind() == INBOX && span.session_id() == Some(hook.session_id.as_str()));
+    let mut payload = json!({
+        "opened_event_id": span.map(|span| span.opened_event_id),
+        "kind": hook.kind,
+        "session_id": hook.session_id,
+        "model": hook.model,
+    });
+    let kind = match &hook.event {
+        HookEvent::Compact { hook, trigger } => {
+            payload["hook"] = json!(hook);
+            payload["trigger"] = json!(trigger);
+            EventKind::SessionCompacted
+        }
+        HookEvent::Start { source } if source == "compact" && span.is_some() => {
+            payload["hook"] = json!(SESSION_START);
+            payload["source"] = json!(source);
+            EventKind::SessionCompacted
+        }
+        HookEvent::Guard => EventKind::InboxGuardrailReached,
+        _ => return None,
+    };
+    Some((kind, payload))
 }
 
 /// The open spans the hook recorded (oldest first, headless planners'
@@ -1428,6 +1538,7 @@ mod tests {
                     source: "clear".into()
                 },
                 kind: RUNTIME_PLANNER,
+                model: None,
                 session_id: "s".into(),
                 transcript_path: Some("/t.jsonl".into()),
                 cwd: Some("/repo".into()),
@@ -1500,6 +1611,7 @@ mod tests {
         let hook = |event: HookEvent, kind: &'static str, session: &str| SessionHook {
             event,
             kind,
+            model: None,
             session_id: session.into(),
             transcript_path: None,
             cwd: None,
@@ -1576,6 +1688,223 @@ mod tests {
         assert_eq!(ended.len(), 1);
         assert_eq!(closed(&ended[0]), (1, "clear"));
         assert!(hook_changes(&end("s-4"), &open, &Value::Null).is_empty());
+    }
+
+    /// The five hook inputs of a Codex inbox's session with an automatic
+    /// compaction, as codex-cli 0.160.0 gave them (its SessionStart
+    /// `startup`, PreCompact and PostCompact `auto`, SessionStart
+    /// `compact`, SessionEnd; `transcript_path` and `cwd` replaced).
+    fn codex_compaction_inputs() -> [(&'static str, Value); 5] {
+        let base = |name: &str| {
+            json!({"session_id": "01a16fd0-ea53-77d3-8a8a-46698a8bd53e",
+                   "transcript_path": "/codex/sessions/rollout-01a16fd0.jsonl",
+                   "cwd": "/repo", "hook_event_name": name})
+        };
+        let with = |name: &str, extra: Value| {
+            let mut input = base(name);
+            for (key, value) in extra.as_object().unwrap() {
+                input[key] = value.clone();
+            }
+            input
+        };
+        [
+            (
+                "open",
+                with(
+                    "SessionStart",
+                    json!({"model": "gpt-6.1-sol", "permission_mode": "default", "source": "startup"}),
+                ),
+            ),
+            (
+                "compact",
+                with(
+                    "PreCompact",
+                    json!({"turn_id": "01a16fd1-687d", "model": "gpt-6.1-sol", "trigger": "auto"}),
+                ),
+            ),
+            (
+                "compact",
+                with(
+                    "PostCompact",
+                    json!({"turn_id": "01a16fd1-687d", "model": "gpt-6.1-sol", "trigger": "auto"}),
+                ),
+            ),
+            (
+                "open",
+                with(
+                    "SessionStart",
+                    json!({"model": "gpt-6.1-sol", "permission_mode": "default", "source": "compact"}),
+                ),
+            ),
+            ("close", with("SessionEnd", json!({"reason": "other"}))),
+        ]
+    }
+
+    /// The environment `dagq inbox` gives a Codex inbox it launched with
+    /// `launch`.
+    fn inbox_env(launch: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |name: &str| match name {
+            "DAGQ_ROLE" | "DAGQ_SESSION_KIND" => Some("inbox".to_owned()),
+            "DAGQ_LAUNCH" => Some(launch.to_owned()),
+            _ => None,
+        }
+    }
+
+    /// A Codex inbox's span (ADR-t1181-1 decision 5): its first
+    /// SessionStart opens it with the launch's provider and the hook's
+    /// model and thread; the compaction's PreCompact and PostCompact
+    /// (`trigger` `auto`) and the SessionStart of `source` `compact` of the
+    /// same session id mark it and open nothing new; its SessionEnd closes
+    /// it as exited. A later session id (a `/clear`) closes it as inferred.
+    #[test]
+    fn a_codex_inboxs_compaction_marks_its_span_and_its_end_closes_it() {
+        let env = inbox_env(
+            r#"{"role":"inbox","provider":"codex","model":null,"effort":null,"source":"dagq.toml"}"#,
+        );
+        let mut open: Vec<OpenSpan> = Vec::new();
+        let mut marks = Vec::new();
+        let mut closes = Vec::new();
+        for (n, (event, input)) in codex_compaction_inputs().into_iter().enumerate() {
+            let hook = SessionHook::from_hook(event, &input, &env)
+                .unwrap()
+                .unwrap();
+            assert_eq!(hook.kind, INBOX);
+            if let Some(mark) = hook_mark(&hook, &open) {
+                marks.push(mark);
+            }
+            for change in hook_changes(&hook, &open, &Value::Null) {
+                match change {
+                    SpanChange::Open(payload) => open.push(span(n as i64 + 1, payload)),
+                    SpanChange::Close { span, reason } => {
+                        open.retain(|open| open.opened_event_id != span.opened_event_id);
+                        closes.push((span, reason));
+                    }
+                }
+            }
+            if n < 4 {
+                assert_eq!(open.len(), 1, "after input {n}: {open:?}");
+            }
+        }
+        assert!(open.is_empty());
+        let [(ended, reason)] = closes.as_slice() else {
+            panic!("one span, closed once: {closes:?}");
+        };
+        assert_eq!(*reason, EXITED);
+        assert_eq!(ended.opened_event_id.as_i64(), 1);
+        assert_eq!(ended.provider(), Some("codex"));
+        assert!(!ended.claude());
+        assert_eq!(
+            ended.session_id(),
+            Some("01a16fd0-ea53-77d3-8a8a-46698a8bd53e")
+        );
+        assert_eq!(ended.payload["model"], "gpt-6.1-sol");
+        assert!(ended.payload.get("model_unknown").is_none());
+        assert_eq!(ended.payload["launch"]["source"], "dagq.toml");
+        let summary: Vec<(EventKind, &str, &str, i64)> = marks
+            .iter()
+            .map(|(kind, payload)| {
+                (
+                    *kind,
+                    payload["hook"].as_str().unwrap(),
+                    payload["trigger"]
+                        .as_str()
+                        .or(payload["source"].as_str())
+                        .unwrap(),
+                    payload["opened_event_id"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (EventKind::SessionCompacted, PRE_COMPACT, "auto", 1),
+                (EventKind::SessionCompacted, POST_COMPACT, "auto", 1),
+                (EventKind::SessionCompacted, SESSION_START, "compact", 1),
+            ]
+        );
+        assert!(marks.iter().all(|(_, mark)| mark["model"] == "gpt-6.1-sol"));
+
+        // A `/clear`: the new session id's start closes the span as inferred.
+        let inputs = codex_compaction_inputs();
+        let first = SessionHook::from_hook("open", &inputs[0].1, &env)
+            .unwrap()
+            .unwrap();
+        let SpanChange::Open(payload) = &hook_changes(&first, &[], &Value::Null)[0] else {
+            panic!("an open");
+        };
+        let mut cleared = inputs[0].1.clone();
+        cleared["session_id"] = json!("01a16fd9-0000");
+        cleared["source"] = json!("clear");
+        let next = SessionHook::from_hook("open", &cleared, &env)
+            .unwrap()
+            .unwrap();
+        let changes = hook_changes(&next, &[span(1, payload.clone())], &Value::Null);
+        assert_eq!(closed(&changes[0]), (1, INFERRED));
+        assert_eq!(opened(&changes[1])["session_id"], "01a16fd9-0000");
+    }
+
+    /// A span whose hook input names no model opens with the model its
+    /// launch asked for (null for the provider's default) and says it read
+    /// none; a launch of none is Claude's. The guardrail's hook marks the
+    /// session whether or not its span opened, and another kind's hooks
+    /// mark nothing.
+    #[test]
+    fn a_hook_without_a_model_records_the_asked_one_and_the_guardrail_marks_its_session() {
+        let asked = inbox_env(
+            r#"{"role":"inbox","provider":"codex","model":"gpt-6.1-sol","effort":"medium","source":"argument"}"#,
+        );
+        let input = json!({"session_id": "s", "source": "startup"});
+        let hook = SessionHook::from_hook("open", &input, &asked)
+            .unwrap()
+            .unwrap();
+        let payload = opened(&hook_changes(&hook, &[], &Value::Null)[0]).clone();
+        assert_eq!(payload["provider"], "codex");
+        assert_eq!(payload["model"], "gpt-6.1-sol");
+        assert_eq!(payload["model_unknown"], MODEL_NOT_IN_HOOK);
+        let claude = |name: &str| (name == "DAGQ_ROLE").then(|| "inbox".to_owned());
+        let hook = SessionHook::from_hook("open", &input, claude)
+            .unwrap()
+            .unwrap();
+        let payload = opened(&hook_changes(&hook, &[], &Value::Null)[0]).clone();
+        assert_eq!(payload["provider"], "claude");
+        assert_eq!(payload["model"], Value::Null);
+        assert_eq!(payload["model_unknown"], MODEL_NOT_IN_HOOK);
+
+        let tool = json!({"session_id": "s", "hook_event_name": "PreToolUse",
+                          "model": "gpt-6.1-sol", "tool_name": "Bash"});
+        let guard = SessionHook::from_hook("guard", &tool, &asked)
+            .unwrap()
+            .unwrap();
+        assert_eq!(guard.event, HookEvent::Guard);
+        assert!(hook_changes(&guard, &[], &Value::Null).is_empty());
+        let (kind, mark) = hook_mark(&guard, &[]).unwrap();
+        assert_eq!(kind, EventKind::InboxGuardrailReached);
+        assert_eq!(mark["opened_event_id"], Value::Null);
+        assert_eq!(mark["model"], "gpt-6.1-sol");
+        let open = [span(4, payload)];
+        assert_eq!(hook_mark(&guard, &open).unwrap().1["opened_event_id"], 4);
+        // A start that is no compaction marks nothing.
+        assert!(hook_mark(&hook, &open).is_none());
+        let compact = json!({"session_id": "s", "hook_event_name": "PreCompact"});
+        let planner = |name: &str| (name == "DAGQ_ROLE").then(|| "planner".to_owned());
+        let hook = SessionHook::from_hook("compact", &compact, planner)
+            .unwrap()
+            .unwrap();
+        assert!(hook_mark(&hook, &[]).is_none());
+        let hook = SessionHook::from_hook("compact", &compact, &asked)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            hook.event,
+            HookEvent::Compact {
+                hook: PRE_COMPACT.into(),
+                trigger: "unknown".into()
+            }
+        );
+        // The report relays as JSON as it reads.
+        let relayed: SessionHook =
+            serde_json::from_value(serde_json::to_value(&hook).unwrap()).unwrap();
+        assert_eq!(relayed, hook);
     }
 
     /// A headless planner's first turn opens its span with its route,

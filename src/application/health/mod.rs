@@ -102,6 +102,15 @@ mod tests {
         for role in ModelRole::ALL {
             assert_eq!(failed[role.as_str()], read[role.as_str()]);
         }
+        // The inbox's provider set in `[roles.inbox]` (ADR-t1181-1
+        // decision 5), Claude's by default.
+        assert_eq!(read["inbox"]["provider"], "claude");
+        assert_eq!(read["inbox"]["source"], "default");
+        let mut codex = RoleModels::default();
+        codex.entry(ModelRole::Inbox).provider = Some(crate::domain::Provider::Codex);
+        let configured = roles(Ok(codex));
+        assert_eq!(configured["inbox"]["provider"], "codex");
+        assert_eq!(configured["inbox"]["source"], "dagq.toml");
     }
 
     #[test]

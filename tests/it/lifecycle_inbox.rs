@@ -12,7 +12,7 @@ use common::{Bounded, WithoutActor, lifecycle::*, service::OwnedByTest};
 use dagq::{
     domain::SessionRole,
     infrastructure::sqlite::SqliteQueue,
-    lifecycle::{self, CLAUDE_INSTEAD, CODEX_INBOX_PENDING, INBOX_INSIDE_REFUSED, InboxOptions},
+    lifecycle::{self, CLAUDE_INSTEAD, INBOX_INSIDE_REFUSED, InboxOptions},
 };
 use serde_json::{Value, json};
 use std::{
@@ -59,6 +59,22 @@ printf 'Not logged in\\n'; exit 1 ;; esac\n\
 printf '%s\\n' \"$@\" > \"$0.argv\"\n",
     );
     stub
+}
+
+/// How many launches the queue recorded (`inbox_opened`).
+fn launches(fixture: &Fixture) -> i64 {
+    rusqlite::Connection::open(&fixture.location.db)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM run_events WHERE kind='inbox_opened'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+fn codex_stub_path(stub: &str) -> PathBuf {
+    PathBuf::from(stub)
 }
 
 fn logged_in(stub: &Path) {
@@ -220,13 +236,20 @@ fn dagq_inbox_starts_the_inbox_agent_in_this_terminal_and_records_its_open() {
     assert!(!deny.contains(&"Bash(dagq answer:*)"), "{deny:?}");
     assert!(!deny.contains(&"Bash(dagq inbox:*)"), "{deny:?}");
 
+    // The launch's record: Claude by default, no model asked for, the
+    // plugin's hooks (none given in the launch).
     assert_eq!(
         opened(&fixture).unwrap(),
-        json!({"guardrail": true, "settings": settings, "provider": "claude"})
+        json!({"guardrail": true, "guardrail_by": "settings", "settings": settings,
+               "provider": "claude", "source": "default", "model": null,
+               "launch": {"role": "inbox", "provider": "claude", "model": null,
+                          "effort": null, "source": "default"},
+               "hooks": null})
     );
     assert_eq!(
         status()["inbox_guardrail"],
-        json!({"guardrail": true, "settings": settings, "provider": "claude"})
+        json!({"guardrail": true, "guardrail_by": "settings", "settings": settings,
+               "provider": "claude", "source": "default", "model": null})
     );
     let doctor = dagq::compose::doctor(&db, false).unwrap();
     assert_eq!(doctor["inbox_guardrail"]["guardrail"], true, "{doctor}");
@@ -259,14 +282,15 @@ fn dagq_inbox_inside_an_inbox_opens_nothing_whatever_the_queue() {
     }
 }
 
-/// A Codex inbox, chosen by `--provider codex` or by `[roles.inbox]`, is
-/// not opened yet (ADR-t1181-1): before that, a person's Codex settings
-/// that Codex would write to stop it with where they are and the lines to
-/// add, left unwritten; then it is refused with why. Neither starts
-/// Claude in its place or records an open, and a Claude model given to
-/// Codex in `[roles.inbox]` is a mistake of the setting.
+/// A Codex inbox, chosen by `--provider codex` or by `[roles.inbox]`
+/// (ADR-t1181-1): a person's Codex settings that Codex would write to stop
+/// it with where they are and the lines to add, left unwritten, starting
+/// nothing; once they hold the setting, Codex starts in the place of
+/// `dagq inbox` and the launch is recorded with its provider, where it
+/// came from and the hooks given with it, which `status` reads. A Claude
+/// model given to Codex in `[roles.inbox]` is a mistake of the setting.
 #[test]
-fn a_codex_inbox_is_refused_with_why_and_starts_nothing() {
+fn a_codex_inbox_opens_once_the_persons_settings_hold_and_records_its_launch() {
     let fixture = fixture();
     let stub = stub_claude(&fixture);
     let plugin_dir = fixture.options.plugin_dir.clone().unwrap();
@@ -296,9 +320,53 @@ fn a_codex_inbox_is_refused_with_why_and_starts_nothing() {
     );
     assert!(!config.exists());
 
+    assert_eq!(started(&codex_stub_path(codex_stub), "argv"), None);
+    assert_eq!(opened(&fixture), None);
+
     fs::write(&config, "[tui]\nscreen_reader_detection_done = true\n").unwrap();
-    let pending = format!("{CODEX_INBOX_PENDING}; {CLAUDE_INSTEAD}; the inbox was not opened");
-    assert_eq!(error_of(&inbox(&fixture, &stub, &env, &codex)), pending);
+    let opens = |env: &[(&str, &str)], args: &[&str]| {
+        let output = inbox(&fixture, &stub, env, args);
+        assert!(output.status.success(), "{output:?}");
+        let argv = started(&codex_stub_path(codex_stub), "argv").expect("Codex was started");
+        assert!(argv.starts_with("--no-daemon\n"), "{argv}");
+        fs::remove_file(codex_stub_path(codex_stub).with_extension("argv")).unwrap();
+        opened(&fixture).unwrap()
+    };
+    let launch = opens(&env, &codex);
+    assert_eq!(launch["provider"], "codex");
+    assert_eq!(launch["source"], "argument");
+    assert_eq!(launch["model"], Value::Null);
+    assert_eq!(launch["guardrail"], true);
+    assert_eq!(launch["guardrail_by"], "pre_tool_use");
+    let hooks: Vec<&str> = launch["hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hook| {
+            assert!(
+                hook["trusted_hash"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("sha256:"),
+                "{hook}"
+            );
+            hook["key"].as_str().unwrap()
+        })
+        .collect();
+    assert!(
+        hooks.contains(&"/<session-flags>/config.toml:session_start:0:0")
+            && hooks.contains(&"/<session-flags>/config.toml:pre_compact:0:0"),
+        "{hooks:?}"
+    );
+    let db = fixture.location.db.canonicalize().unwrap();
+    let guardrail =
+        dagq::compose::status_for(&db, Some(SessionRole::Inbox)).unwrap()["inbox_guardrail"]
+            .clone();
+    assert_eq!(
+        guardrail,
+        json!({"guardrail": true, "guardrail_by": "pre_tool_use", "reached": false,
+               "provider": "codex", "source": "argument", "model": null})
+    );
     // A relative CODEX_HOME is the one under the main checkout Codex
     // starts in, not under the directory `dagq inbox` was typed in (which
     // has the setting here and is not read).
@@ -318,10 +386,7 @@ fn a_codex_inbox_is_refused_with_why_and_starts_nothing() {
     );
     fs::create_dir_all(at_checkout.parent().unwrap()).unwrap();
     fs::write(&at_checkout, "[tui]\nscreen_reader_detection_done = true\n").unwrap();
-    assert_eq!(
-        error_of(&inbox(&fixture, &stub, &relative, &codex)),
-        pending
-    );
+    assert_eq!(opens(&relative, &codex)["provider"], "codex");
     let toml = fixture.repo.join("dagq.toml");
     let before = fs::read_to_string(&toml).unwrap_or_default();
     fs::write(
@@ -330,10 +395,10 @@ fn a_codex_inbox_is_refused_with_why_and_starts_nothing() {
     )
     .unwrap();
     let configured = ["--plugin-dir", plugin_dir, "--codex", codex_stub];
-    assert_eq!(
-        error_of(&inbox(&fixture, &stub, &env, &configured)),
-        pending
-    );
+    let launch = opens(&env, &configured);
+    assert_eq!(launch["provider"], "codex");
+    assert_eq!(launch["source"], "dagq.toml");
+    let launches = launches(&fixture);
     fs::write(
         &toml,
         format!("{before}\n[roles.inbox]\nprovider = \"codex\"\nmodel = \"claude-opus-5-5\"\n"),
@@ -356,8 +421,10 @@ fn a_codex_inbox_is_refused_with_why_and_starts_nothing() {
         message.contains("gemini") && message.ends_with("; the inbox was not opened"),
         "{message}"
     );
+    // The refused ones started nothing and recorded no launch.
     assert_eq!(started(&stub, "argv"), None);
-    assert_eq!(opened(&fixture), None);
+    assert_eq!(started(&codex_stub_path(codex_stub), "argv"), None);
+    assert_eq!(self::launches(&fixture), launches);
     // A Claude model named by argument over a Codex table starts Claude
     // with it, and nothing of Codex's.
     fs::write(

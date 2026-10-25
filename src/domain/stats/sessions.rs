@@ -61,6 +61,16 @@ pub struct Span {
     pub route: Option<String>,
     /// The planner of the runtime's whose session it is.
     pub planner_id: Option<i64>,
+    /// The provider its session ran on: its `provider`, else its
+    /// launch's; `claude` for a kind the plugin's hook records that names
+    /// none (it recorded none before a Codex inbox could open). `None`
+    /// for one of another kind that recorded none.
+    pub provider: Option<String>,
+    /// The model the hook's input named when it opened (a Codex inbox's,
+    /// which has no transcript to read one from), `model effort` with its
+    /// launch's effort: its `model` when its close and final turns record
+    /// none.
+    pub opened_model: Option<String>,
 }
 
 impl Span {
@@ -133,6 +143,28 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
                             HOOK_KINDS.contains(&kind).then(|| INTERACTIVE.to_owned())
                         }),
                     planner_id: event.payload["planner_id"].as_i64(),
+                    provider: event.payload["provider"]
+                        .as_str()
+                        .or_else(|| event.payload["launch"]["provider"].as_str())
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            let kind = event.payload["kind"].as_str()?;
+                            HOOK_KINDS.contains(&kind).then(|| "claude".to_owned())
+                        }),
+                    opened_model: event.payload["model"]
+                        .as_str()
+                        .filter(|_| event.payload["model_unknown"].is_null())
+                        .filter(|_| {
+                            event.payload["kind"]
+                                .as_str()
+                                .is_some_and(|kind| HOOK_KINDS.contains(&kind))
+                        })
+                        .map(|model| {
+                            let effort = event.payload["launch"]["effort"]
+                                .as_str()
+                                .unwrap_or("unknown");
+                            format!("{model} {effort}")
+                        }),
                 });
             }
             Some(EventKind::SessionTurns) => {
@@ -187,10 +219,13 @@ fn measurements(span: &mut Span, payload: &Value) {
     span.active_unavailable = payload["active"] == "unavailable";
     span.work = payload.get("work").filter(|w| w.is_object()).cloned();
     span.tokens = payload.get("tokens").filter(|t| t.is_object()).cloned();
-    span.model = payload["model"].as_str().map(|model| {
-        let effort = payload["effort"].as_str().unwrap_or("unknown");
-        format!("{model} {effort}")
-    });
+    span.model = payload["model"]
+        .as_str()
+        .map(|model| {
+            let effort = payload["effort"].as_str().unwrap_or("unknown");
+            format!("{model} {effort}")
+        })
+        .or_else(|| span.opened_model.clone());
 }
 
 /// Count, sum, median, 90th percentile and maximum of seconds.
@@ -296,11 +331,94 @@ pub struct Sessions {
     /// ([`Span::route`], ADR-t1394-2 decision 4); kinds and routes without
     /// a span are not listed.
     pub by_route: BTreeMap<&'static str, BTreeMap<String, KindSessions>>,
+    /// The same per kind and per provider of the spans that name one
+    /// ([`Span::provider`], ADR-t1181-1 decision 5: the inbox's on Claude
+    /// and on Codex side by side, with their `models`); `stats` puts in
+    /// the tokens of the kind's Executions on that provider, and `context`
+    /// is left to `by_kind`'s, which is per provider already.
+    pub by_provider: BTreeMap<&'static str, BTreeMap<String, KindSessions>>,
+    /// The inbox's launches in the window (`inbox_opened`), per provider
+    /// ([`inbox_launches`]); none with `--goal`, which no inbox is of.
+    pub inbox_launches: BTreeMap<String, InboxLaunches>,
     /// Each span `by_kind` counted, in the order of their opening, for
     /// what compares the window span by span (`stats --ledger`); not in
     /// `stats`' JSON.
     #[serde(skip)]
     pub spans: Vec<SpanInWindow>,
+}
+
+/// The inbox's launches on one provider, and what their records lack
+/// (ADR-t1181-1 decision 5). A launch's records are the hooks', so one
+/// whose hook did not run (its provider did not trust it) records nothing
+/// of it, not even its end: what is missing is read from its
+/// `inbox_opened` alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct InboxLaunches {
+    pub count: usize,
+    /// Launches no inbox span opened after, before the next launch: their
+    /// SessionStart's hook did not run (or the session never started).
+    pub without_span: usize,
+    /// Launches whose guardrail went with them, by its settings or its
+    /// hook (`inbox_opened`'s `guardrail`).
+    pub guardrail_given: usize,
+    /// Of those by a hook, the launches whose hook was recorded running
+    /// (`inbox_guardrail_reached`) before the next launch.
+    pub guardrail_hook_given: usize,
+    pub guardrail_hook_reached: usize,
+}
+
+/// The inbox's launches of `events` (ascending id) after `window.after`
+/// up to `window.upto`, per the provider of their `inbox_opened` (`claude`
+/// for one recorded before it named one). Each is read up to the next
+/// launch (or the window's last event): an inbox `session_opened` there is its
+/// span, an `inbox_guardrail_reached` its guardrail's hook running. An
+/// earlier inbox still open past a later launch is read as the later
+/// one's.
+pub fn inbox_launches(
+    events: &[RunEvent],
+    window: SessionWindow,
+) -> BTreeMap<String, InboxLaunches> {
+    let mut launches: BTreeMap<String, InboxLaunches> = BTreeMap::new();
+    let opened: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.kind == EventKind::InboxOpened)
+        .map(|(at, _)| at)
+        .collect();
+    for (n, &at) in opened.iter().enumerate() {
+        let launch = &events[at];
+        if launch.id <= window.after || launch.id > window.upto {
+            continue;
+        }
+        let until = opened.get(n + 1).copied().unwrap_or(events.len());
+        let after = events[at + 1..until]
+            .iter()
+            .take_while(|event| event.id <= window.upto);
+        let spanned = after.clone().any(|event| {
+            event.kind == EventKind::SessionOpened
+                && event.payload["kind"] == crate::domain::sessions::INBOX
+        });
+        let reached = after
+            .clone()
+            .any(|event| event.kind == EventKind::InboxGuardrailReached);
+        let payload = &launch.payload;
+        let provider = payload["provider"].as_str().unwrap_or("claude").to_owned();
+        let tally = launches.entry(provider).or_default();
+        tally.count += 1;
+        if !spanned {
+            tally.without_span += 1;
+        }
+        if payload["guardrail"] == true {
+            tally.guardrail_given += 1;
+        }
+        if payload["guardrail_by"] == crate::domain::sessions::GUARDRAIL_HOOK {
+            tally.guardrail_hook_given += 1;
+            if reached {
+                tally.guardrail_hook_reached += 1;
+            }
+        }
+    }
+    launches
 }
 
 /// One span a window counted and its active seconds in it.
@@ -441,6 +559,7 @@ pub fn by_kind(
     let mut by_kind: BTreeMap<&'static str, Tally> =
         KINDS.iter().map(|&kind| (kind, Tally::default())).collect();
     let mut by_route: BTreeMap<&'static str, BTreeMap<String, Tally>> = BTreeMap::new();
+    let mut by_provider: BTreeMap<&'static str, BTreeMap<String, Tally>> = BTreeMap::new();
     let mut counted = Vec::new();
     for span in spans.iter().filter(|span| {
         span.opened <= window.upto
@@ -489,23 +608,36 @@ pub fn by_kind(
                 .or_default()
                 .add(span, window, from, end);
         }
+        if let Some(provider) = &span.provider {
+            by_provider
+                .entry(kind)
+                .or_default()
+                .entry(provider.clone())
+                .or_default()
+                .add(span, window, from, end);
+        }
     }
+    let finish = |groups: BTreeMap<&'static str, BTreeMap<String, Tally>>| {
+        groups
+            .into_iter()
+            .map(|(kind, groups)| {
+                let groups = groups
+                    .into_iter()
+                    .map(|(group, tally)| (group, tally.finish()))
+                    .collect();
+                (kind, groups)
+            })
+            .collect()
+    };
     Sessions {
         window,
         by_kind: by_kind
             .into_iter()
             .map(|(kind, tally)| (kind, tally.finish()))
             .collect(),
-        by_route: by_route
-            .into_iter()
-            .map(|(kind, routes)| {
-                let routes = routes
-                    .into_iter()
-                    .map(|(route, tally)| (route, tally.finish()))
-                    .collect();
-                (kind, routes)
-            })
-            .collect(),
+        by_route: finish(by_route),
+        by_provider: finish(by_provider),
+        inbox_launches: inbox_launches(events, window),
         spans: counted,
     }
 }
@@ -967,5 +1099,126 @@ mod tests {
         assert_eq!(sessions.by_route["worker"].len(), 1);
         assert_eq!(sessions.by_route["worker"]["headless"].count, 1);
         assert!(!sessions.by_route.contains_key("observer"));
+    }
+
+    /// The inbox's spans per provider (ADR-t1181-1 decision 5): a Codex
+    /// inbox's apart from Claude's, with the model its hook named when
+    /// its close read none; one recorded before spans named a provider is
+    /// Claude's.
+    #[test]
+    fn the_inbox_spans_are_counted_per_provider_with_their_models() {
+        let events = vec![
+            event(
+                1,
+                None,
+                SESSION_OPENED,
+                json!({"kind": "inbox", "session_id": "c-1", "provider": "codex",
+                       "model": "gpt-6.1-sol", "launch": {"provider": "codex", "effort": "medium"}}),
+                0,
+            ),
+            event(
+                2,
+                None,
+                SESSION_OPENED,
+                json!({"kind": "inbox", "session_id": "a-1", "provider": "claude",
+                       "model": null, "model_unknown": "not_in_hook_input"}),
+                10,
+            ),
+            opened(3, None, "inbox", 20),
+            closed(4, None, 1, "exited", 100),
+            event(
+                5,
+                None,
+                SESSION_CLOSED,
+                json!({"opened_event_id": 2, "reason": "exited",
+                       "model": "claude-opus-5-5", "effort": "high"}),
+                110,
+            ),
+        ];
+        let spans = spans(&events);
+        assert_eq!(spans[0].provider.as_deref(), Some("codex"));
+        assert_eq!(spans[0].model.as_deref(), Some("gpt-6.1-sol medium"));
+        assert_eq!(spans[2].provider.as_deref(), Some("claude"));
+        let window = SessionWindow {
+            after: EventId::new(0),
+            upto: EventId::new(5),
+        };
+        let sessions = by_kind(&spans, &events, window, 200_000, |_| true);
+        let inbox = &sessions.by_provider["inbox"];
+        assert_eq!(inbox["codex"].count, 1);
+        assert_eq!(inbox["codex"].open.summary.total, 100);
+        assert_eq!(inbox["codex"].models["gpt-6.1-sol medium"], 1);
+        assert_eq!(inbox["claude"].count, 2);
+        assert_eq!(inbox["claude"].open_now, 1);
+        assert_eq!(inbox["claude"].models["claude-opus-5-5 high"], 1);
+        assert_eq!(sessions.by_kind["inbox"].count, 3);
+    }
+
+    /// A launch no hook recorded anything of reads as a launch without a
+    /// span; one whose SessionStart's hook ran has its span, and its
+    /// guardrail hook is counted given and, once recorded running,
+    /// reached. A launch recorded before launches named a provider is
+    /// Claude's.
+    #[test]
+    fn a_launch_no_hook_recorded_reads_as_one_without_a_span() {
+        let codex = json!({"provider": "codex", "guardrail": true,
+                           "guardrail_by": "pre_tool_use", "hooks": []});
+        let events = vec![
+            event(1, None, "inbox_opened", codex.clone(), 0),
+            event(2, None, "inbox_opened", codex.clone(), 10),
+            event(
+                3,
+                None,
+                SESSION_OPENED,
+                json!({"kind": "inbox", "session_id": "c-2", "provider": "codex"}),
+                12,
+            ),
+            event(
+                4,
+                None,
+                "inbox_guardrail_reached",
+                json!({"session_id": "c-2"}),
+                13,
+            ),
+            event(5, None, "inbox_opened", codex, 20),
+            event(
+                6,
+                None,
+                "inbox_opened",
+                json!({"guardrail": true, "settings": "/s"}),
+                30,
+            ),
+            opened(7, None, "inbox", 31),
+        ];
+        let window = SessionWindow {
+            after: EventId::new(0),
+            upto: EventId::new(7),
+        };
+        let launches = inbox_launches(&events, window);
+        assert_eq!(
+            launches["codex"],
+            InboxLaunches {
+                count: 3,
+                without_span: 2,
+                guardrail_given: 3,
+                guardrail_hook_given: 3,
+                guardrail_hook_reached: 1,
+            }
+        );
+        assert_eq!(
+            launches["claude"],
+            InboxLaunches {
+                count: 1,
+                without_span: 0,
+                guardrail_given: 1,
+                guardrail_hook_given: 0,
+                guardrail_hook_reached: 0,
+            }
+        );
+        let later = SessionWindow {
+            after: EventId::new(4),
+            upto: EventId::new(7),
+        };
+        assert_eq!(inbox_launches(&events, later)["codex"].count, 1);
     }
 }

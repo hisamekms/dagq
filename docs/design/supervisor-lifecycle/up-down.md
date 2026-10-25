@@ -134,8 +134,8 @@ providerとmodelはmain checkoutの`dagq.toml`の`[roles.inbox]`を既定に、`
 `dagq.toml`は`[roles.inbox]`の表だけを読むので（`run_env::load_inbox_role`）、ほかの表の誤りではinboxは止まらない。
 Codexを選ぶと、execの前にCodexの実行ファイルが動くこととloginを確かめ、使えなければ開かずに、理由とClaudeで開く起動の引数を出して0でなく終わる（ADR-t1181-1決定3。`codex_inbox::check_usable`）。
 次に、人のCodexの`config.toml`にCodexのTUIが自分で書き足す欄が無ければ、そのfileの場所と人が足す行を出して止まる（[ADR-t3331-1](../../adr/2026-10-25-t3331-1-codex-inbox-writes-no-person-settings-and-refuses-to-open-when-codex-would.md)）。
-どちらも通っても、まだ開かずに理由を出して0でなく終わる（ADR-t1181-1の「実装の順」: inboxのsessionと起動の記録がproviderとmodelを持つまで選べない）。
-どれもClaudeに替えず、askを開かず（人がterminalの前にいる）、人のfileを読むだけで書かない。
+両方が通ればCodexのinboxを開く。
+止まるときはどれもClaudeに替えず、askを開かず（人がterminalの前にいる）、人のfileを読むだけで書かない。
 開いた後にCodexが使えなくなったら（利用上限など）、runtimeは何もせず、人が開き直す。
 人がClaudeの起動を禁じている間（queueの生きているsupervisorが`up --no-claude`で動いている。`lifecycle::claude_forbidden`）は、Claudeのinboxを開かない（ADR-t1181-1決定4）。
 `[roles.inbox]`か既定がClaudeならCodexで開こうとし、Codexが選べなければClaudeを案内せずに理由を出して0でなく終わる。
@@ -150,13 +150,15 @@ Codexのinboxの起動の中身は[Provider lifecycle](../provider-lifecycle.md)
    Claudeとinstall済みのpluginは`up`と同じ判定で確かめ、だめなら`dagq inbox`を打ち直す案内を付けて止まる。
    言語（`dagq.toml`と利用者の`config.toml`）の間違いも止まる。
 3. **記録とexec**: providerが作るinboxのcommand（inboxのsettings・plugin・inboxのprompt）を、actor executorからinboxの身元の環境付きで受け取り、cwdをmain checkoutにする。
-   その前にqueueのevent `inbox_opened`に、guardrailのsettingsで開いたかとproviderを残す。
+   その前にqueueのevent `inbox_opened`に起動の記録を残す（ADR-t1181-1決定5。欄は`lifecycle::inbox`のdoc comment）。
    それから`dagq`のプロセスをそのcommandでexecで置き換え、inboxはそのterminalの前面で動く。
    execが失敗したときだけerrorで戻る。
    inboxを閉じるのは人で、`DAGQ_ROLE`は起動したcommandにだけ付くので、閉じたterminalには残らない。
    - **inboxのsettings**: inboxのcommandを作るたびにqueueのディレクトリへ書き直す。
      中身はinboxのroleの`permissions.deny`だけで、hook・idle marker・サジェストの設定は入れない（inboxはidleで判定せず、人が打つ）。
-   - **見せる欄**: `status`と`doctor`のinboxのguardrailは、最新の`inbox_opened`で判定する。
+   - **見せる欄**: `status`と`doctor`のinboxのguardrailは、最新の`inbox_opened`で判定し、その起動のproviderとmodelを添える。
+     Codexのinboxのguardrailはhookなので、渡したことと動いた記録を分けて出す。
+     `[roles.inbox]`に設定したproviderは`doctor`の`roles`が出す。
      前のbinaryの`up`が開いたinboxの記録も同じく判定する。
      guardrailが無ければ、引き継ぎを書き、`DAGQ_ROLE`の無いterminalでinboxを終えて`dagq inbox`で開き直すよう案内する（手順の正本はpluginの`dagq-recover`の`reference/up-down.md`の「Open the inbox again」）。
    - **限界**: settingsはClaude Codeの起動の引数なので、inboxのterminalで`claude`を打ち直したsessionと、`dagq inbox`を通さずに開いたinboxには効かず、見えない（ADR-t2159-1決定5）。

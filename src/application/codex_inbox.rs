@@ -9,13 +9,20 @@
 //!   (`startup`, `resume`, `clear`, `compact`), so the inbox re-orients
 //!   itself after a start, a compaction or `/clear`; and the span's open.
 //! - `session-end`: the span's close.
+//! - `pre-compact`, `post-compact`: the compaction's mark on the span
+//!   (its `trigger`, `auto` or `manual`); the span goes on.
 //! - `stop`: keeps a turn from ending without the inbox's watch.
-//! - `pre-tool-use`: the guardrail ([`guard`]).
+//! - `pre-tool-use`: the guardrail ([`guard`]), and the record that it
+//!   ran, once a session.
 //!
 //! The input is the hook's stdin JSON as Codex 0.160.0 gives it (the same
 //! names as Claude Code's): `session_id`, `transcript_path`, `cwd`,
-//! `hook_event_name`, `model`, and per event `source` (SessionStart),
-//! `stop_hook_active` (Stop) or `tool_name` and `tool_input.command`
+//! `hook_event_name`, `model` (but SessionEnd's), and per event `source`
+//! (SessionStart), `reason` (SessionEnd), `trigger` and `turn_id`
+//! (PreCompact, PostCompact; measured with 0.160.0 after an automatic
+//! compaction: `auto`, then a SessionStart of `source` `compact` with the
+//! same `session_id`), `stop_hook_active` (Stop) or `tool_name` and
+//! `tool_input.command`
 //! (PreToolUse; a shell command arrives as `tool_name` `Bash` with the
 //! command string as the model gave it, not wrapped in a shell).
 
@@ -32,14 +39,18 @@ pub enum InboxHook {
     SessionEnd,
     Stop,
     PreToolUse,
+    PreCompact,
+    PostCompact,
 }
 
 impl InboxHook {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 6] = [
         Self::SessionStart,
         Self::SessionEnd,
         Self::Stop,
         Self::PreToolUse,
+        Self::PreCompact,
+        Self::PostCompact,
     ];
 
     /// The argument of `dagq codex-inbox-hook` that runs this hook.
@@ -49,6 +60,8 @@ impl InboxHook {
             Self::SessionEnd => "session-end",
             Self::Stop => "stop",
             Self::PreToolUse => "pre-tool-use",
+            Self::PreCompact => "pre-compact",
+            Self::PostCompact => "post-compact",
         }
     }
 

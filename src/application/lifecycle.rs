@@ -2190,15 +2190,6 @@ pub struct InboxAgents<'a> {
     pub codex: &'a dyn AgentProvider,
 }
 
-/// Why `dagq inbox` opens no Codex inbox yet (ADR-t1181-1, the order of
-/// implementation): a Codex inbox is selectable only once its session and
-/// launch are recorded with their provider and model, which they are not
-/// yet. [`inbox_route`] follows it with [`CLAUDE_INSTEAD`] or
-/// [`NO_CLAUDE_INSTEAD`].
-pub const CODEX_INBOX_PENDING: &str = "the Codex inbox is not selectable yet: its session and \
-launch records (provider, model and thread) are not implemented, and a Codex inbox is not opened \
-without them";
-
 /// What a refused Codex inbox adds when Claude may start: the arguments
 /// that open the inbox on Claude, which the person runs themselves
 /// (ADR-t1181-1 decision 3). `dagq inbox` does not start Claude in its
@@ -2257,9 +2248,8 @@ pub struct InboxChecks<'a> {
 /// explicit `--provider claude` is refused ([`inbox_provider`]).
 /// A Codex inbox goes on only when Codex can be used
 /// (`checks.codex_usable`, ADR-t1181-1 decision 3) and the person's Codex
-/// settings would not be written (`checks.codex_settings`), and is then
-/// refused with [`CODEX_INBOX_PENDING`]. The refusal for an unusable Codex
-/// and the pending one add [`CLAUDE_INSTEAD`], or [`NO_CLAUDE_INSTEAD`]
+/// settings would not be written (`checks.codex_settings`). The refusal
+/// for an unusable Codex adds [`CLAUDE_INSTEAD`], or [`NO_CLAUDE_INSTEAD`]
 /// when Claude is forbidden: nothing starts Claude in its place, and no
 /// ask is opened, since the person is at the terminal. No provider hold
 /// of the runtime's is read: the runtime does not start the inbox, so no
@@ -2289,7 +2279,6 @@ pub fn inbox_route(
                 anyhow::Error::msg(why)
             }
         })?;
-        bail!("{CODEX_INBOX_PENDING}; {instead}");
     }
     Ok(launch)
 }
@@ -2334,14 +2323,27 @@ fn inbox_provider(
 /// [`AgentProvider::inbox_command`] (its settings, the plugin directory and
 /// [`inbox_session_prompt`]) through the actor executor, in the
 /// repository's main checkout with the inbox's `DAGQ_ROLE` and
-/// `DAGQ_QUEUE`; and, before it is returned, `inbox_opened` with whether
-/// the settings went with it, which `status` and `doctor` judge the
-/// inbox's guardrail by ([`super::inbox_guardrail::judge`]). Its payload
-/// is `guardrail` (whether the provider has the settings,
-/// [`AgentProvider::inbox_settings`]), `settings` (their path or null) and
-/// `provider`; an inbox opened this way has no workspace. A launch that
-/// names a model or effort ([`AgentProvider::apply_launch`]) starts with
-/// it.
+/// `DAGQ_QUEUE`, and the launch as `DAGQ_LAUNCH`, which its hooks copy
+/// into the span they open; and, before it is returned, `inbox_opened`,
+/// the launch's record (ADR-t1181-1 decision 5), which `status` and
+/// `doctor` judge the inbox's guardrail by
+/// ([`super::inbox_guardrail::judge`]). Its payload is:
+///
+/// - `provider`, `source` (where the provider and model came from:
+///   `default`, `dagq.toml` for `[roles.inbox]`, `argument` for
+///   `--provider` / `--model`) and `model` (the model asked for, null for
+///   the provider's default), and the whole `launch` (its effort, and
+///   `switched_from` / `switch_reason` of one moved off Claude);
+/// - `hooks`: the hooks given in the launch arguments, each with its key
+///   and the hash trusted for it ([`AgentProvider::inbox_hooks`]), null
+///   for Claude, whose hooks are the plugin's;
+/// - `guardrail`: whether the guardrail went with the launch, and
+///   `guardrail_by` how: Claude's settings ([`AgentProvider::inbox_settings`],
+///   their path in `settings`) or Codex's PreToolUse hook among `hooks`
+///   (that the hook ran is recorded apart, `inbox_guardrail_reached`).
+///
+/// An inbox opened this way has no workspace. A launch that names a model
+/// or effort ([`AgentProvider::apply_launch`]) starts with it.
 pub fn inbox(
     ports: &InboxPorts,
     agents: &InboxAgents,
@@ -2438,7 +2440,7 @@ pub fn inbox(
                 cwd: &checkout,
                 prompt: inbox_session_prompt(&db, language.as_ref())?,
                 plugin_dir: plugin_dir.as_deref(),
-                launch: None,
+                launch: Some(&launch),
             },
         ))?
         .foreground()?;
@@ -2449,15 +2451,47 @@ pub fn inbox(
     );
     agent.reach_queue_service(&mut command, &ports.queue_service.socket(&db));
     let settings = agent.inbox_settings(db.parent().unwrap_or(Path::new(".")));
+    let hooks = agent.inbox_hooks()?;
     queue.record_queue_event(
         EventKind::InboxOpened,
-        json!({
-            "guardrail": settings.is_some(),
-            "settings": settings,
-            "provider": launch.provider.as_str(),
-        }),
+        inbox_opened(&launch, settings.as_deref(), hooks),
     )?;
     Ok(command)
+}
+
+/// The `inbox_opened` of an inbox started with `launch`, the guardrail's
+/// `settings` (Claude's) and the `hooks` given in its launch arguments
+/// (Codex's): see [`inbox`].
+pub fn inbox_opened(
+    launch: &crate::domain::actor_model::ActorLaunch,
+    settings: Option<&Path>,
+    hooks: Option<Value>,
+) -> Value {
+    let hooked = hooks
+        .as_ref()
+        .and_then(Value::as_array)
+        .is_some_and(|hooks| {
+            hooks
+                .iter()
+                .any(|hook| hook["hook"] == super::inbox_guardrail::GUARDRAIL_HOOK)
+        });
+    let guardrail_by = if settings.is_some() {
+        Some("settings")
+    } else if hooked {
+        Some(super::inbox_guardrail::GUARDRAIL_HOOK)
+    } else {
+        None
+    };
+    json!({
+        "guardrail": guardrail_by.is_some(),
+        "guardrail_by": guardrail_by,
+        "settings": settings,
+        "provider": launch.provider.as_str(),
+        "source": launch.source,
+        "model": launch.model,
+        "launch": launch.to_value(),
+        "hooks": hooks,
+    })
 }
 
 /// What a person looks at first after `up`: unfinished runs with whether their
@@ -2969,30 +3003,41 @@ mod tests {
         assert!(format!("{error}").contains("is Claude's"), "{error}");
     }
 
-    /// A Codex inbox, by `[roles.inbox]` or by `--provider`, is not opened
-    /// yet: refused with why and the arguments that open Claude, Claude
-    /// not started in its place; and before that, refused with the
+    /// A Codex inbox, by `[roles.inbox]` or by `--provider`, opens on
+    /// Codex once Codex can be used and its settings would not be written,
+    /// with where its provider and model came from; refused with the
     /// settings check's reason when Codex would write the person's
     /// settings.
     #[test]
-    fn a_codex_inbox_is_refused_until_its_records_land() {
+    fn a_codex_inbox_opens_when_codex_is_usable_and_its_settings_are_kept() {
         let settings_ok = || Ok(());
         let codex = checks(false, &usable, &settings_ok);
         let mut table = RoleModels::default();
         table.entry(ModelRole::Inbox).provider = Some(Provider::Codex);
-        for (roles, options) in [
-            (&table, inbox_options(None, None)),
+        for (roles, options, source, model) in [
+            (
+                &table,
+                inbox_options(None, None),
+                LaunchSource::Config,
+                None,
+            ),
             (
                 &RoleModels::default(),
                 inbox_options(Some(Provider::Codex), None),
+                LaunchSource::Argument,
+                None,
             ),
-            (&table, inbox_options(None, Some("gpt-6.1-sol"))),
+            (
+                &table,
+                inbox_options(None, Some("gpt-6.1-sol")),
+                LaunchSource::Argument,
+                Some("gpt-6.1-sol"),
+            ),
         ] {
-            let error = inbox_route(roles, &options, &codex).unwrap_err();
-            assert_eq!(
-                format!("{error}"),
-                format!("{CODEX_INBOX_PENDING}; {CLAUDE_INSTEAD}")
-            );
+            let launch = inbox_route(roles, &options, &codex).unwrap();
+            assert_eq!(launch.provider, Provider::Codex);
+            assert_eq!(launch.source, source);
+            assert_eq!(launch.model.as_deref(), model);
         }
         assert!(CLAUDE_INSTEAD.contains("`dagq inbox --provider claude`"));
         let settings_missing = || Err("the Codex inbox was not opened: add [tui]".to_owned());
@@ -3014,6 +3059,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(launch.provider, Provider::Claude);
+    }
+
+    /// The launch's record (ADR-t1181-1 decision 5): the provider, where
+    /// it came from and the model asked for, the hooks given and how the
+    /// guardrail went with it; Claude's default with its settings and no
+    /// hooks of the launch's.
+    #[test]
+    fn the_inbox_opened_records_the_launch_its_hooks_and_its_guardrail() {
+        let claude = inbox_opened(
+            &ActorLaunch::default_of(ModelRole::Inbox),
+            Some(Path::new("/q/claude-inbox-settings.json")),
+            None,
+        );
+        assert_eq!(claude["provider"], "claude");
+        assert_eq!(claude["source"], "default");
+        assert_eq!(claude["model"], Value::Null);
+        assert_eq!(claude["guardrail"], true);
+        assert_eq!(claude["guardrail_by"], "settings");
+        assert_eq!(claude["settings"], "/q/claude-inbox-settings.json");
+        assert_eq!(claude["hooks"], Value::Null);
+        let launch = ActorLaunch {
+            provider: Provider::Codex,
+            model: Some("gpt-6.1-sol".to_owned()),
+            source: LaunchSource::Argument,
+            ..ActorLaunch::default_of(ModelRole::Inbox)
+        };
+        let hooks = json!([
+            {"hook": "session_start", "key": "/<session-flags>/config.toml:session_start:0:0",
+             "trusted_hash": "sha256:a"},
+            {"hook": "pre_tool_use", "key": "/<session-flags>/config.toml:pre_tool_use:0:0",
+             "trusted_hash": "sha256:b"},
+        ]);
+        let codex = inbox_opened(&launch, None, Some(hooks.clone()));
+        assert_eq!(codex["provider"], "codex");
+        assert_eq!(codex["source"], "argument");
+        assert_eq!(codex["model"], "gpt-6.1-sol");
+        assert_eq!(codex["launch"]["model"], "gpt-6.1-sol");
+        assert_eq!(codex["guardrail"], true);
+        assert_eq!(codex["guardrail_by"], "pre_tool_use");
+        assert_eq!(codex["hooks"], hooks);
+        let unguarded = inbox_opened(&launch, None, Some(json!([hooks[0]])));
+        assert_eq!(unguarded["guardrail"], false);
+        assert_eq!(unguarded["guardrail_by"], Value::Null);
     }
 
     /// A Codex whose executable does not run or that is not logged in
@@ -3047,9 +3135,9 @@ mod tests {
     /// While a person forbids starting Claude (ADR-t1181-1 decision 4,
     /// ADR-t1204-1 decision 1) the inbox is not opened on Claude: a Claude
     /// launch from the table or the default moves to Codex with Codex's
-    /// default model, and one that cannot be used, or is not selectable
-    /// yet, is refused without the way to Claude; `--provider claude` is
-    /// refused. A Codex launch is as it was.
+    /// default model, and one that cannot be used is refused without the
+    /// way to Claude; `--provider claude` is refused. A Codex launch is as
+    /// it was.
     #[test]
     fn with_claude_forbidden_the_inbox_opens_on_codex_or_not_at_all() {
         let mut sonnet = RoleModels::default();
@@ -3097,16 +3185,14 @@ mod tests {
         );
 
         let settings_ok = || Ok(());
-        let error = inbox_route(
+        let moved = inbox_route(
             &sonnet,
             &inbox_options(None, None),
             &checks(true, &usable, &settings_ok),
         )
-        .unwrap_err();
-        assert_eq!(
-            format!("{error}"),
-            format!("{CODEX_INBOX_PENDING}; {NO_CLAUDE_INSTEAD}")
-        );
+        .unwrap();
+        assert_eq!(moved.provider, Provider::Codex);
+        assert_eq!(moved.switched_from, Some(Provider::Claude));
         let cannot = || Err("the Codex inbox was not opened: not logged in".to_owned());
         let error = inbox_route(
             &RoleModels::default(),

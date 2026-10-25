@@ -221,6 +221,7 @@ event_kinds! {
     HoldResultKept => "hold_result_kept",
     HoldResultWithheld => "hold_result_withheld",
     IdleInferred => "idle_inferred",
+    InboxGuardrailReached => "inbox_guardrail_reached",
     InboxNudgeFailed => "inbox_nudge_failed",
     InboxNudged => "inbox_nudged",
     InboxOpened => "inbox_opened",
@@ -423,6 +424,7 @@ event_kinds! {
     ScreenInputSent => "screen_input_sent",
     ScreenRead => "screen_read",
     SessionClosed => "session_closed",
+    SessionCompacted => "session_compacted",
     SessionExited => "session_exited",
     SessionGoneParked => "session_gone_parked",
     SessionIdleObserved => "session_idle_observed",
@@ -606,6 +608,9 @@ impl EventKind {
                 | LandingRecheckMainPassed
                 | SessionOpened
                 | SessionClosed
+                // An inbox's compaction, the mark on its span
+                // (`domain::sessions::hook_mark`).
+                | SessionCompacted
                 // A planner's screen inferred idle without its idle marker
                 // (ADR-t803-1).
                 | IdleInferred
@@ -638,6 +643,9 @@ impl EventKind {
                 // The inbox `dagq inbox` opened, with whether it had its
                 // guardrail settings (ADR-t2159-1 decisions 2 and 5).
                 | InboxOpened
+                // That a Codex inbox's guardrail hook ran, once a session
+                // (`domain::sessions::hook_mark`).
+                | InboxGuardrailReached
                 // The inbox's watcher gone and back, for the KPI of how long
                 // an ask waits to be seen (task 1021).
                 | InboxWatcherAbsent
@@ -1648,6 +1656,7 @@ mod tests {
             (EventKind::InboxNudgeFailed, "inbox_nudge_failed"),
             (EventKind::InboxNudged, "inbox_nudged"),
             (EventKind::InboxOpened, "inbox_opened"),
+            (EventKind::InboxGuardrailReached, "inbox_guardrail_reached"),
             (EventKind::InboxWatcherAbsent, "inbox_watcher_absent"),
             (EventKind::InboxWatcherReturned, "inbox_watcher_returned"),
             (EventKind::InputNotReady, "input_not_ready"),
@@ -1917,6 +1926,7 @@ mod tests {
             (EventKind::SessionGoneParked, "session_gone_parked"),
             (EventKind::SessionIdleObserved, "session_idle_observed"),
             (EventKind::SessionOpened, "session_opened"),
+            (EventKind::SessionCompacted, "session_compacted"),
             (EventKind::SessionRenewed, "session_renewed"),
             (EventKind::SessionReopenFailed, "session_reopen_failed"),
             (EventKind::SessionTokens, "session_tokens"),

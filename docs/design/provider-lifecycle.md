@@ -91,7 +91,6 @@ providerは役割ごとに決まる（[Actor model](supervisor-lifecycle/actor-m
 `dagq inbox`はproviderの`AgentProvider::inbox_command`でinboxのcommandを作る（選び方と記録の手順は[`up` / `down`](supervisor-lifecycle/up-down.md#dagq-inbox)）。
 Claudeのinboxはqueueのdirに書くsettings（inboxのdenyだけ）とpluginで開く。
 Codexのinboxは起動の引数だけで開き、何も書かない（[ADR-t1181-1](../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定2）。
-Codexのinboxを選べるのはinboxの記録の実装の後で、それまで`lifecycle::inbox_route`が開かずに断る。
 使えないCodex（実行ファイルとlogin）も開かずに断り、Claudeに替えない。
 
 - 入口: 引数・hookのtrust・人の設定の確かめは`infrastructure::codex_inbox`（`inbox_command`・`hook_configs`・`LAUNCH_CONFIG`・`check_user_config`）、hookの答えは`application::codex_inbox`、hookを動かすのは`dagq codex-inbox-hook`。
@@ -105,6 +104,9 @@ Codexのinboxを選べるのはinboxの記録の実装の後で、それまで`l
   黙って動くことは無い。
   そのときは、版を名指した既知の値のunit testを測り直す。
   SessionStartが届いても、guardrail・Stop・SessionEndのhookが動いたことは分からない。
+- 限界: hookごとのtrustの状態はCodexのapp serverの一覧からしか読めず、dagqは読まない（`codex_inbox::given_hooks`）。
+  別のCodexのprocessを起こすことになり、それが人の設定を書かないことを測っていないためである。
+  代わりに起動の記録に渡したhookのkeyとhashを残し、届かないhookの記録から欠けを読む（下の「inboxの区間」）。
 - 約束: 人のCodexの設定（`CODEX_HOME`か`~/.codex`の`config.toml`・`auth.json`）と`~/.claude`は書かない（[ADR-t3331-1](../adr/2026-10-25-t3331-1-codex-inbox-writes-no-person-settings-and-refuses-to-open-when-codex-would.md)）。
   TUIが自分で書き足す欄は、引数で止められるものは止め、止められないものはexecの前に人のfileを読むだけで確かめ、欠けていれば開かない。
 - 境界: sandboxはどこも書かせず、queue serviceのsocketへの接続だけを足す（`Codex::reach_queue_service`、jobと同じprofile。[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。
@@ -119,6 +121,22 @@ runtimeが起動するsessionとjobは、kindごとの区間として記録す�
 - 入口: 区間の開閉は`domain::sessions::changes`、書くのは`infrastructure::sessions::follow`。
 - hookの区間は`domain::sessions::hook_changes`と`inferred_hook_closes`（hookの側は[plugin-integration](plugin-integration.md#sessionの区間hookadr-0048)、[ADR-t2022-1](../adr/2026-10-08-t2022-1-supervisor-infers-ended-hook-sessions-without-cmux.md)）。
 - 落とし穴: hookの区間は`SessionEnd`を取り逃しうるが、経過時間では閉じない（常駐sessionの長いidleがあるため）。
+
+### inboxの区間
+
+inboxの区間はproviderによらずhookが記録し、起動の記録（`inbox_opened`）と並べて読む（[ADR-t1181-1](../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定5）。
+
+- 境界: 起動の後の最初のSessionStartで開き、SessionEndで閉じる。
+  `/clear`の後の新しいsession idのSessionStartで、前の区間を閉じたと推定する（ADR-t2022-1と同じ）。
+  同じsession idのcompaction（SessionStartの`source`が`compact`）は区間を閉じず、新しい区間も開かずに続ける。
+  Codexのcompactionの前と後のhookの`trigger`は、compactionの印として区間の横に残す（`domain::sessions::hook_mark`）。
+- 落とし穴: Codexがcompactionの後に`source`の`compact`か`trigger`を送らなくなったら、compactionで区間を閉じたと推定する形に替える。
+- 欠け: hookが動かない起動は区間の記録が始まりから無く、SessionEndも無いので、起動の記録だけがある起動を欠けとして読む。
+  trustはhookごとに決まるので、SessionStartが届いて分かるのはそのhookが動いたことだけで、guardrailのhookが動いたことは別の記録（`inbox_guardrail_reached`）で読む。
+  欠けをrolloutで補わない。
+- 限界: CodexのinboxにはClaude Codeのtranscriptが無いので、区間は稼働時間とトークン数を持たずに閉じ、modelはhookの入力のものになる。
+- 読む入口: `stats`の`sessions.by_provider`がkindごとの区間をproviderで分け、`sessions.inbox_launches`がproviderごとの起動とその欠けを数える（`domain::stats::sessions`）。
+  `status`と`doctor`の`inbox_guardrail`は最新の起動を、`doctor`の`roles`は`[roles.inbox]`のproviderを出す。
 
 ### transcriptと稼働時間
 
