@@ -17,10 +17,40 @@ use std::{
     time::SystemTime,
 };
 
-/// The directory under a run's directory the runtime gives a Codex
-/// worker's turns as their `TMPDIR` (task 1290), and removes with the
-/// run's leftovers once its task is over.
+/// The directory under a run's directory the runtime gives the run's
+/// worker turns (Claude's and Codex's, the first and the resumed ones) and
+/// the verification commands its landing runs on the host as their
+/// `TMPDIR` ([`run_tmp_dir`]), and removes with the run's leftovers once
+/// its task is over.
 pub const RUN_TMP_DIR: &str = "tmp";
+
+/// The run directory's [`RUN_TMP_DIR`], made a real directory to be a
+/// `TMPDIR`. What the worker may have put there in its place (a link, a
+/// file: it writes its run directory) is removed, not followed, so that
+/// the `TMPDIR` is never a directory outside the run directory.
+pub fn run_tmp_dir(files: &dyn RunFiles, run_dir: &Path) -> Result<PathBuf> {
+    let tmp = run_dir.join(RUN_TMP_DIR);
+    match files.entry_kind(&tmp) {
+        Ok(EntryKind::Dir) => return Ok(tmp),
+        Ok(_) => files
+            .remove_file(&tmp)
+            .with_context(|| format!("remove {}", tmp.display()))?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("read {}", tmp.display())),
+    }
+    files
+        .create_dir_all(run_dir)
+        .with_context(|| format!("create {}", run_dir.display()))?;
+    match files.create_new_dir(&tmp) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error).with_context(|| format!("create {}", tmp.display())),
+    }
+    if !matches!(files.entry_kind(&tmp), Ok(EntryKind::Dir)) {
+        anyhow::bail!("{} is not a directory", tmp.display());
+    }
+    Ok(tmp)
+}
 
 /// The files of the runs (the run directory, its prompt, the receipt, the
 /// idle marker and `review.md`) and of the queue directory (`rebind`'s log

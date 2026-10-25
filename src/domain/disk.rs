@@ -6,7 +6,8 @@
 //! `build_outputs_removed` (the `target/` an ended run left, task 376) and
 //! of the latest `scratchpad_removed` (the Claude Code scratchpad a run's
 //! session wrote to, task 1100) and `run_tmp_removed` (the `TMPDIR` the
-//! runtime gave a Codex worker's turns, task 1290) together
+//! runtime gave a run's worker turns and its landing's verification on
+//! the host, task 1290) together
 //! ([`run_size`]), times a
 //! factor per step, never below `min_free_bytes`. The `[disk]` table of
 //! `dagq.toml` sets them.

@@ -15,7 +15,7 @@
 //! directory, whose reply, thread and model are read from its JSONL and
 //! its rollout the way a turn's are.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::{
     collections::BTreeMap,
     fs,
@@ -24,7 +24,7 @@ use std::{
 };
 
 use crate::application::{
-    AgentJobLaunch, AgentProvider, AgentReads, CommandSpec, RUN_TMP_DIR, TurnReader, TurnTarget,
+    AgentJobLaunch, AgentProvider, AgentReads, CommandSpec, TurnReader, TurnTarget,
 };
 use crate::domain::{
     TaskRun,
@@ -192,7 +192,7 @@ fn common_dir(admin: &Path) -> Result<PathBuf> {
 
 /// The `$TMPDIR` the turn would have had (the session wrapper's, `value`)
 /// as a writable root, since the turn's own `TMPDIR` is the run
-/// directory's [`RUN_TMP_DIR`] (task 1290): workspace-write lets the
+/// directory's [`RUN_TMP_DIR`](crate::application::RUN_TMP_DIR) (task 1290): workspace-write lets the
 /// sandbox write the `$TMPDIR` of Codex's own environment, which is no
 /// longer that one, and ADR-t813-3 decision 2 keeps it writable. `None`
 /// when unset, empty or relative; resolved when it can be (the sandbox
@@ -205,29 +205,11 @@ pub fn starter_tmpdir(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
     Some(dir.canonicalize().unwrap_or(dir))
 }
 
-/// The run directory's [`RUN_TMP_DIR`], made a real directory for a turn's
-/// `TMPDIR` (task 1290). What the worker may have put there in its place
-/// (a link, a file: the run directory is a writable root) is removed, not
-/// followed, so that the `TMPDIR` the sandbox lets the turn write is never
-/// a directory outside the run directory.
+/// The run directory's [`RUN_TMP_DIR`](crate::application::RUN_TMP_DIR) for a turn's `TMPDIR`
+/// ([`crate::application::run_tmp_dir`]): the run directory is a writable
+/// root, so what the worker put there in its place is not followed.
 pub fn run_tmp_dir(run_dir: &Path) -> Result<PathBuf> {
-    let tmp = run_dir.join(RUN_TMP_DIR);
-    match fs::symlink_metadata(&tmp) {
-        Ok(metadata) if metadata.is_dir() => return Ok(tmp),
-        Ok(_) => fs::remove_file(&tmp).with_context(|| format!("remove {}", tmp.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).with_context(|| format!("read {}", tmp.display())),
-    }
-    fs::create_dir_all(run_dir).with_context(|| format!("create {}", run_dir.display()))?;
-    match fs::create_dir(&tmp) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error).with_context(|| format!("create {}", tmp.display())),
-    }
-    if !fs::symlink_metadata(&tmp).is_ok_and(|metadata| metadata.is_dir()) {
-        bail!("{} is not a directory", tmp.display());
-    }
-    Ok(tmp)
+    crate::application::run_tmp_dir(&super::run_files::LocalRunFiles, run_dir)
 }
 
 /// Cargo's home: `$CARGO_HOME`, else `~/.cargo`.
@@ -662,7 +644,7 @@ impl AgentProvider for Codex {
     /// worktree is its working directory either way), with
     /// [`SANDBOX_CONFIG`], the run's [`writable_roots`] and the worktree's
     /// [`trust_config`] as `-c` on each, the prompt after `--`, and
-    /// `TMPDIR` set to the run directory's [`RUN_TMP_DIR`] (made if
+    /// `TMPDIR` set to the run directory's [`RUN_TMP_DIR`](crate::application::RUN_TMP_DIR) (made if
     /// missing). It leads a session of its own, but Codex runs
     /// each command in a process group of the command's own, which a
     /// signal to the turn's group does not reach (task 1061): the wrapper
@@ -931,6 +913,7 @@ fn read_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::RUN_TMP_DIR;
 
     /// A repository `G` with a linked worktree `wt` named `run`, as Git
     /// lays it out.

@@ -1,0 +1,14 @@
+# The items of task 3438 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 7.1s in a stress 5: a headless worker's turn, its ask and resume, its review and landing, then a sweep, each a supervise
+[[test]]
+name = "runtime_headless::a_claude_workers_turns_and_its_landings_verification_keep_their_temporary_files_in_the_run"
+reason = "B 境界（守る境界）: session の wrapper が起動する Claude の turn と resume の process、shell の着地の検証のコマンドに run_dir/tmp の TMPDIR が届き、そこに書いたものを掃除の job が filesystem から消して SQLite に run_tmp_removed を書くことを通しで確かめる（TMPDIR の組み立ては infrastructure::adapters と application::integrate、消す判断は cleanup の unit test）"
+task = 3438
+
+# 6.8s in a stress 5: a landing, a sweep under a live lease and one under a stale lease, each a supervise
+[[test]]
+name = "runtime_sweep::an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease"
+reason = "B 境界（守る境界）: SQLite の生きた lease が掃除の job から wrapper・scratchpad・run の tmp を守り、lease が古くなった回に filesystem から消して記録することを supervise のループで確かめる（候補の判断は cleanup の unit test）"
+task = 3438

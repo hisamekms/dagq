@@ -4386,7 +4386,13 @@ impl AgentProvider for ClaudeCode {
     /// standard input, never an argument (`-p` with no prompt argument
     /// reads stdin), so no command line holds the checks the prompt names
     /// for a `pgrep -f` / `ps` pattern to match. It leads a session of its
-    /// own, so that stopping it stops what it runs.
+    /// own, so that stopping it stops what it runs. A worker's turn has
+    /// `TMPDIR` set to the run directory's [`RUN_TMP_DIR`] (made if
+    /// missing), which the directory added lets it write and the cleanup
+    /// removes once the task is over; a planner's directory has no such
+    /// cleanup, so a planner keeps the `TMPDIR` it inherits.
+    ///
+    /// [`RUN_TMP_DIR`]: crate::application::RUN_TMP_DIR
     fn turn_command(
         &self,
         target: &TurnTarget<'_>,
@@ -4419,6 +4425,11 @@ impl AgentProvider for ClaudeCode {
             .arg(&settings);
         if let Some(dir) = target.plugin_dir {
             command.arg("--plugin-dir").arg(dir);
+        }
+        if target.role == crate::domain::ActorRole::Worker {
+            let tmp =
+                crate::application::run_tmp_dir(&super::run_files::LocalRunFiles, target.dir)?;
+            command.env("TMPDIR", &tmp);
         }
         command.stdin(prompt).new_session();
         Ok(command)
@@ -6682,6 +6693,80 @@ mod tests {
             assert!(settings.get("hooks").is_none(), "{settings}");
         }
         assert_eq!(claude.turn_permission_mode(), Some("auto"));
+    }
+
+    /// A worker's turn, new or resumed, has the run directory's `tmp` as
+    /// its `TMPDIR`, made inside the directory it adds (so its tools write
+    /// it), and a link the worker put there is not followed; a planner's
+    /// turn keeps the `TMPDIR` it inherits and gets no `tmp`.
+    #[test]
+    fn a_workers_turn_keeps_its_temporary_files_in_its_run_directory() {
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        let log = dir.path().join("turn.log");
+        let tmp = run_dir.join(crate::application::RUN_TMP_DIR);
+        let turn = |role, target: &Path, session| {
+            claude
+                .turn_command(
+                    &TurnTarget {
+                        role,
+                        dir: target,
+                        cwd: dir.path(),
+                        debug_log: Some(&log),
+                        plugin_dir: None,
+                    },
+                    "go",
+                    session,
+                )
+                .unwrap()
+        };
+        let tmpdirs = |command: &CommandSpec| -> Vec<Option<std::ffi::OsString>> {
+            command
+                .get_envs()
+                .filter(|(key, _)| *key == "TMPDIR")
+                .map(|(_, value)| value.map(ToOwned::to_owned))
+                .collect()
+        };
+        for session in [
+            crate::domain::turn::TurnSession::New("s"),
+            crate::domain::turn::TurnSession::Resume("s"),
+        ] {
+            let command = turn(ActorRole::Worker, &run_dir, session);
+            assert_eq!(tmpdirs(&command), [Some(tmp.clone().into_os_string())]);
+            assert!(tmp.is_dir());
+            let args: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let added = args.iter().position(|arg| arg == "--add-dir").unwrap();
+            assert!(tmp.starts_with(&args[added + 1]), "{args:?}");
+        }
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), "x").unwrap();
+        fs::remove_dir_all(&tmp).unwrap();
+        std::os::unix::fs::symlink(&outside, &tmp).unwrap();
+        turn(
+            ActorRole::Worker,
+            &run_dir,
+            crate::domain::turn::TurnSession::Resume("s"),
+        );
+        assert!(!tmp.is_symlink() && tmp.is_dir());
+        assert!(outside.join("keep").is_file());
+
+        let planner_dir = dir.path().join("planner");
+        fs::create_dir_all(&planner_dir).unwrap();
+        let planner = turn(
+            ActorRole::Planner,
+            &planner_dir,
+            crate::domain::turn::TurnSession::New("s"),
+        );
+        assert!(tmpdirs(&planner).is_empty());
+        assert!(!planner_dir.join(crate::application::RUN_TMP_DIR).exists());
     }
 
     /// Every non-interactive launch refuses the tools that schedule a later

@@ -29,8 +29,9 @@
 //! The job also removes what an ended run whose task is over left outside
 //! its worktree: the Claude Code scratchpad of its session (task 1100,
 //! [`scratchpad_dir_name`]), and the temporary files directory the runtime
-//! gave its Codex turns as their `TMPDIR` (task 1290, [`RUN_TMP_DIR`] in
-//! its run directory). The rest of the run directory stays. Of every
+//! gave its worker's turns and its landing's verification on the host as
+//! their `TMPDIR` (task 1290, [`RUN_TMP_DIR`] in its run directory). The
+//! rest of the run directory stays. Of every
 //! ended run it removes the scratch worktree an `already_satisfied`
 //! verification left in the queue's `satisfied/` (its supervisor died
 //! while it ran, [`satisfied_scratch_of`]).
@@ -1526,8 +1527,15 @@ fn scratchpad_dirs(
 
 /// The temporary files directory ([`RUN_TMP_DIR`]) of an ended run, in its
 /// run directory, once its task is over (task 1290): the `TMPDIR` the
-/// runtime gave its Codex turns. A run whose task goes on keeps it, as a
-/// resume may go on in it; nothing else of the run directory goes.
+/// runtime gave its worker's turns (Claude's and Codex's) and its
+/// landing's verification on the host. A run whose task goes on keeps it,
+/// as a resume may go on in it; nothing else of the run directory goes.
+/// The removal of the build outputs of a run left in the middle (one
+/// waiting for an answer, a landing or a resume, the cleanup for disk
+/// space included) leaves it too: what the worker keeps there (a
+/// throwaway repository, a build outside the worktree) is what its next
+/// turn goes on with in the same session, which no look at the processes
+/// running now can tell from what nothing needs any more.
 fn run_tmp_dir(candidate: &EndedRunWorktree, runs_dir: &Path) -> Option<PathBuf> {
     task_over(candidate.task_status)
         .then(|| runs_dir.join(candidate.run_id.as_str()).join(RUN_TMP_DIR))

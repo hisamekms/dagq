@@ -181,6 +181,13 @@ impl Supervisor<'_> {
         let worktree = crate::application::run_git::review_tree(&*self.repository, run)?;
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         let now = self.generators.clock.now();
+        // Not the run directory's `TMPDIR` the landing's verification on the
+        // host is given: the gate gives each pass a `TMPDIR` of its own
+        // under the scratch directory and removes it, with what still runs
+        // there, after the pass, so nothing of it stays in the host's
+        // `$TMPDIR`; and the scratch directory is also the run directory the
+        // `[run.env]` of the e2e is read for, which a per-run one would
+        // change.
         let settings = E2eSettings {
             log: run_dir.join(format!("e2e-{}.log", due.attempt)),
             utc_offset_secs: (self.utc_offset)(now),

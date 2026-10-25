@@ -71,7 +71,8 @@ impl RunFiles for MemoryFiles {
     fn create_dir_all(&self, _: &Path) -> io::Result<()> {
         Ok(())
     }
-    fn create_new_dir(&self, _: &Path) -> io::Result<()> {
+    fn create_new_dir(&self, dir: &Path) -> io::Result<()> {
+        self.put_dir(dir);
         Ok(())
     }
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {

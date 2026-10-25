@@ -225,6 +225,85 @@ esac"#
     assert!(position(&kinds, "run_waiting_ended") < position(&kinds, "ask_delivered"));
 }
 
+/// Task 3438: a Claude worker's turns, the first and the resumed one, and
+/// the landing's verification on the host have the run directory's `tmp`
+/// as their `TMPDIR` and write there; once the task is completed the
+/// cleanup removes it, recorded as `run_tmp_removed`, and the rest of the
+/// run directory stays.
+#[test]
+fn a_claude_workers_turns_and_its_landings_verification_keep_their_temporary_files_in_the_run() {
+    let (dir, repo, db, backend) = headless_fixture_verified(
+        &[],
+        r#"printf '%s\n' "$TMPDIR" > "$TMPDIR/../verify-tmpdir.log" && mkdir "$TMPDIR/fixture" && head -c 4096 /dev/zero > "$TMPDIR/fixture/data" && test -f seed.txt"#,
+    );
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"printf '%s\n' "${{TMPDIR:-unset}}" >> "$RUN_DIR/stub-tmpdir.log"
+mkdir -p "$TMPDIR/scratch" && head -c 8192 /dev/zero > "$TMPDIR/scratch/turn-$TURN"
+case "$TURN" in
+1) ask "which file"; say asked ;;
+*) {FINISH} ;;
+esac"#
+        ),
+    );
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(backend);
+    let (_reviewer, supervisor) =
+        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        queue
+            .show(TASK)
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.kind == EventKind::RunWaitingStarted)
+    });
+    let ask = SqliteQueue::open(&db)
+        .unwrap()
+        .asks(AskQuery::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.kind == AskKind::WorkerQuestion)
+        .unwrap();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .answer(ask.id, "change.txt")
+        .unwrap();
+    let detail = landed(&db, &repo, &base, &backend, supervisor);
+    let run = &detail.runs[0];
+    assert_eq!(stub_calls(run).len(), 2);
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let tmp = run_dir.join("tmp");
+    let tmp_text = tmp.to_string_lossy().into_owned();
+    let turns = fs::read_to_string(run_dir.join("stub-tmpdir.log")).unwrap();
+    assert_eq!(
+        turns.lines().collect::<Vec<_>>(),
+        [tmp_text.as_str(), tmp_text.as_str()]
+    );
+    let verified = fs::read_to_string(run_dir.join("verify-tmpdir.log")).unwrap();
+    assert_eq!(verified.trim_end(), tmp_text);
+
+    let sweeping = SuperviseOptions {
+        sweep_interval: Duration::ZERO,
+        ..supervise_options(4, true)
+    };
+    supervise_with(&db, &repo, &backend, &sweeping).unwrap();
+    assert!(!tmp.exists());
+    let detail = self::detail(&db);
+    let removed = payloads(&detail, "run_tmp_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["paths"], json!([tmp_text]));
+    // Both turns' files and the verification's fixture.
+    assert!(
+        removed[0]["bytes"].as_u64().unwrap() >= 2 * 8192 + 4096,
+        "{removed:?}"
+    );
+    assert_eq!(removed[0]["reason"], "task_completed");
+    assert!(run_dir.join("receipt.json").is_file());
+    assert!(run_dir.join("verify-tmpdir.log").is_file());
+}
+
 /// Acceptance (2): a review's revise goes to the same session as a resume;
 /// its receipt is reviewed again and the run lands. Claude's
 /// `total_cost_usd` is the session's total, so the resume's turn costs what

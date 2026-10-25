@@ -389,23 +389,27 @@ impl Route {
     }
 }
 
+/// Where a headless worker keeps its temporary files: under the `TMPDIR`
+/// the runtime gives its turns ([`crate::application::RUN_TMP_DIR`]),
+/// which the cleanup removes once the task is over, never directly in
+/// `/tmp`, which nothing of the run's removes.
+pub const RUN_TMP_LINE: &str = "Put temporary files, throwaway repositories and any build output you keep outside the worktree under $TMPDIR (a directory the runtime made for this run and removes after it), never directly in /tmp or /private/tmp; where to build otherwise is for the repository's instructions (AGENTS.md or CLAUDE.md) to say.\n";
+
 /// What a headless worker on `provider` is told of its provider (the
 /// spike's measures): Claude Code stops a turn's background shells when
 /// the turn ends, and Codex stops a command still running when the model
-/// answers. A Codex worker is also told to keep its temporary files under
-/// the `TMPDIR` the runtime gives its turns (task 1290): Claude Code's own
-/// scratchpad is cleaned after the run (task 1100), what a Codex worker
-/// made in `/tmp` was not.
-pub(super) fn headless_provider_line(provider: Provider) -> &'static str {
-    match provider {
+/// answers. Either is then told where its temporary files go
+/// ([`RUN_TMP_LINE`]).
+pub(super) fn headless_provider_line(provider: Provider) -> String {
+    let line = match provider {
         Provider::Claude => {
             "Claude Code stops the background shells of a turn when the turn ends: do not start a build, a test or a wait with run_in_background and end the turn to wait for it.\n"
         }
         Provider::Codex => {
-            "Wait for each command to finish before you answer: a command still running when you answer is stopped with the turn.\n\
-             Put temporary files, throwaway repositories and any build output you keep outside the worktree under $TMPDIR (a directory the runtime made for this run and removes after it), never directly in /tmp or /private/tmp; where to build otherwise is for the repository's instructions (AGENTS.md or CLAUDE.md) to say.\n"
+            "Wait for each command to finish before you answer: a command still running when you answer is stopped with the turn.\n"
         }
-    }
+    };
+    format!("{line}{RUN_TMP_LINE}")
 }
 
 /// The worker's step before the receipt (ADR-t1420-1): each acceptance

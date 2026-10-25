@@ -393,8 +393,8 @@ fn only_a_spike_prompt_asks_for_the_spike_result() {
 /// Goal 52 acceptance (3): what the runtime tells a worker of building,
 /// temporary files and the e2e names no build tool, build directory or
 /// e2e file of one repository, on either provider and in every text the
-/// session is sent; the Codex worker still keeps its temporary files
-/// under `$TMPDIR`, and the e2e stays the runtime's to run, reproduced by
+/// session is sent; the worker on either provider still keeps its
+/// temporary files under `$TMPDIR`, and the e2e stays the runtime's to run, reproduced by
 /// name only on an e2e resume.
 #[test]
 fn worker_and_resume_prompts_name_no_cargo_build_or_e2e_specifics() {
@@ -418,13 +418,9 @@ fn worker_and_resume_prompts_name_no_cargo_build_or_e2e_specifics() {
             assert!(!text.contains("CARGO_TARGET_DIR"), "{provider:?}: {text}");
         }
         let first = &texts[0];
-        if provider == Provider::Codex {
-            assert!(first.contains("throwaway repositories"), "{first}");
-            assert!(first.contains("under $TMPDIR (a directory the runtime made for this run"));
-            assert!(first.contains("never directly in /tmp or /private/tmp"));
-        } else {
-            assert!(!first.contains("$TMPDIR"), "{first}");
-        }
+        assert!(first.contains("throwaway repositories"), "{first}");
+        assert!(first.contains("under $TMPDIR (a directory the runtime made for this run"));
+        assert!(first.contains("never directly in /tmp or /private/tmp"));
         let with_e2e = texts.last().unwrap();
         assert!(
             with_e2e.contains("E2E: do not run the e2e yourself."),
@@ -1745,7 +1741,7 @@ fn the_worker_template_holds_every_section_and_no_tasks_values() {
             ACCEPTANCE_MAP,
             DOCS_CHECK,
             HEADLESS_STOP,
-            headless_provider_line(provider),
+            headless_provider_line(provider).as_str(),
         ] {
             assert!(template.contains(fixed), "{provider:?} {fixed}");
         }
@@ -1894,7 +1890,7 @@ fn headless_sessions_are_told_to_finish_in_a_turn_and_never_about_exit() {
         let texts = session_texts(&task, &run);
         let first = &texts[0];
         assert!(first.contains(HEADLESS_WORKER), "{first}");
-        assert!(first.contains(headless_provider_line(provider)), "{first}");
+        assert!(first.contains(&headless_provider_line(provider)), "{first}");
         assert!(first.contains("Do the whole task in this turn"), "{first}");
         assert!(first.contains("report briefly that you asked, and end the turn"));
         assert!(first.contains("as the prompt of your next turn in this same session"));
@@ -1943,13 +1939,17 @@ fn headless_sessions_are_told_to_finish_in_a_turn_and_never_about_exit() {
     let claude = session_texts(&task, &run_on(Provider::Claude, WorkerMode::Headless));
     assert!(claude[0].contains("and subagent review."));
     assert!(claude[0].contains("Required evidence: subagent_review (each"));
-    // Only a Codex worker is told where its temporary files go (task
-    // 1290): Claude Code's scratchpad is cleaned by task 1100's sweep.
+    // A worker on either provider is told where its temporary files go:
+    // under the `TMPDIR` the runtime gives its turns and removes after the
+    // run.
     let tmp = "under $TMPDIR (a directory the runtime made for this run";
-    assert!(codex[0].contains(tmp), "{}", codex[0]);
-    assert!(codex[0].contains("never directly in /tmp or /private/tmp"));
-    assert!(codex[0].contains("the repository's instructions (AGENTS.md or CLAUDE.md) to say"));
-    assert!(!claude[0].contains("$TMPDIR"), "{}", claude[0]);
+    for first in [&codex[0], &claude[0]] {
+        assert!(first.contains(tmp), "{first}");
+        assert!(first.contains("throwaway repositories"), "{first}");
+        assert!(first.contains("never directly in /tmp or /private/tmp"));
+        assert!(first.contains("the repository's instructions (AGENTS.md or CLAUDE.md) to say"));
+        assert!(first.contains(RUN_TMP_LINE), "{first}");
+    }
 }
 
 /// Task 1420 (ADR-t1420-1): every worker's prompt, on Claude or Codex,
@@ -6095,7 +6095,7 @@ fn the_worker_prompt_stays_within_its_limits_with_the_largest_input() {
     }
     // The fixed instructions stay whole after the sections.
     assert!(text.contains("Write a completion receipt to /runs/run/receipt.json"));
-    assert!(text.ends_with(headless_provider_line(Provider::Claude)));
+    assert!(text.ends_with(&headless_provider_line(Provider::Claude)));
     // What the largest input takes, for the limit's reason.
     assert!(bytes.total > 80_000, "{bytes:?}");
 }

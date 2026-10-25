@@ -497,9 +497,11 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     let scratchpad = scratchpad_of(&root, run.worktree_path().unwrap());
     fs::create_dir_all(scratchpad.join("session/scratchpad")).unwrap();
     fs::write(scratchpad.join("session/scratchpad/notes"), "x").unwrap();
-    // Task 1290: nor the temporary files directory its Codex turns had as
-    // their `TMPDIR`, in its run directory.
+    // Task 1290: nor the temporary files directory its turns and its
+    // landing's verification had as their `TMPDIR`, in its run directory
+    // (the landing's own, empty, already went with the landed run).
     let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let tmps_before = payloads_of(&queue, &run, "run_tmp_removed").len();
     let tmp = run_dir.join("tmp");
     fs::create_dir_all(tmp.join("target/debug")).unwrap();
     fs::write(tmp.join("target/debug/big"), vec![0u8; 16384]).unwrap();
@@ -530,7 +532,10 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     assert!(scratchpad.join("session/scratchpad/notes").is_file());
     assert!(payloads_of(&queue, &run, "scratchpad_removed").is_empty());
     assert!(tmp.join("target/debug/big").is_file());
-    assert!(payloads_of(&queue, &run, "run_tmp_removed").is_empty());
+    assert_eq!(
+        payloads_of(&queue, &run, "run_tmp_removed").len(),
+        tmps_before
+    );
 
     // Its holder dies before releasing it: the lease is stale.
     raw.execute("UPDATE run_leases SET pid=?1", [dead_pid()])
@@ -544,7 +549,7 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     // The run's `tmp` goes with the completed task, the rest of its run
     // directory stays.
     assert!(!tmp.exists());
-    let removed = payloads_of(&queue, &run, "run_tmp_removed");
+    let removed = payloads_of(&queue, &run, "run_tmp_removed")[tmps_before..].to_vec();
     assert_eq!(removed.len(), 1, "{removed:?}");
     assert_eq!(removed[0]["paths"], json!([tmp.to_string_lossy()]));
     assert!(

@@ -2303,6 +2303,7 @@ fn land(
             bail!("{message}");
         }
         let mut env = verifier.run_env(run_dir)?;
+        host_verification_tmpdir(files, run_dir, &mut env)?;
         if let Some((port, why)) = guard_verification(sccache, run_dir, &mut env) {
             super::sccache::record_wrapper_removed(
                 &*queue,
@@ -2932,6 +2933,31 @@ impl Drop for ContainerVerification<'_> {
             warn!(run_id = %self.run, "run {}: what the verification {} left could not all be removed: {error:#}", self.run, self.prepared.id);
         }
     }
+}
+
+/// Set in `env`, the `[run.env]` of the landing's verification commands on
+/// the host (its flaky retry included), `TMPDIR` to the run directory's
+/// [`RUN_TMP_DIR`](super::RUN_TMP_DIR), over a `TMPDIR` the `[run.env]`
+/// names: what their tests make there (a queue's fixtures, a whole e2e
+/// workspace) goes with the run's leftovers once its task is over, and
+/// counts in the size of a recent run, instead of staying in the host's
+/// `$TMPDIR`. A container's verification is not given it: the container
+/// takes what it left when it goes. Neither is the landing recheck: it runs
+/// in a scratch worktree of the queue's that the runs it checks and main's
+/// own check share, so what it leaves is no one run's to remove.
+fn host_verification_tmpdir(
+    files: &dyn RunFiles,
+    run_dir: &Path,
+    env: &mut Vec<(String, String)>,
+) -> Result<()> {
+    let tmp = super::run_tmp_dir(files, run_dir)?;
+    let tmp = tmp
+        .to_str()
+        .context("the run directory is not UTF-8")?
+        .to_owned();
+    env.retain(|(key, _)| key != "TMPDIR");
+    env.push(("TMPDIR".to_owned(), tmp));
+    Ok(())
 }
 
 /// Put into `env`, the `[run.env]` of the verification commands, what the
@@ -6293,6 +6319,22 @@ mod sccache_tests {
         env.iter()
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.as_str())
+    }
+
+    /// The landing's verification on the host has the run directory's
+    /// `tmp`, made for it, as its `TMPDIR`, over the one `[run.env]` names;
+    /// the rest of the `[run.env]` stays.
+    #[test]
+    fn the_verification_on_the_host_keeps_its_temporary_files_in_the_run_directory() {
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let run_dir = Path::new("/q/runs/r");
+        let mut env = run_env();
+        env.push(("TMPDIR".to_owned(), "/tmp/person".to_owned()));
+        host_verification_tmpdir(&files, run_dir, &mut env).unwrap();
+        assert_eq!(get(&env, "TMPDIR"), Some("/q/runs/r/tmp"));
+        assert_eq!(env.iter().filter(|(key, _)| key == "TMPDIR").count(), 1);
+        assert_eq!(get(&env, "CARGO_BUILD_JOBS"), Some("4"));
+        assert!(files.is_dir(&run_dir.join(super::super::RUN_TMP_DIR)));
     }
 
     #[test]
