@@ -148,7 +148,7 @@ impl RunMachine for FakeMachine {
         let ran = self.state.as_deref().map_or(0, |state| runs(state).len());
         let wait = self
             .waits
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok();
         self.memory.lock().unwrap().push(format!(
             "{} {} {:?} after {ran} runs",

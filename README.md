@@ -10,7 +10,7 @@ You describe a problem to a planner session, which writes it down as a goal and 
 - **A terminal for the inbox.** You open the inbox with `dagq inbox` in any terminal or IDE. Workers and planners run in the background, and their output is read with `dagq run log` and `dagq planner log`.
 - **Claude Code**, signed in, on PATH. The inbox, the planners and the headless jobs (plan review, run review, recovery, goal review, observer) are Claude Code sessions, and workers are too unless a task asks for Codex. The Codex CLI is optional (`up --codex`, `add --provider codex`).
 - **Git.** The repository needs at least one commit on the branch dagq lands on ([Landing branch, remote and push](#landing-branch-remote-and-push)).
-- **Rust and a C compiler** for `cargo install` (the crate's `rust-version`, now 1.98; the C compiler builds the bundled SQLite). The release update also runs `cargo install` ([Update](#update)).
+- **Rust and a C compiler** for `cargo install` (the crate's `rust-version`, now 1.99; the C compiler builds the bundled SQLite). The release update also runs `cargo install` ([Update](#update)).
 
 ## Install
 

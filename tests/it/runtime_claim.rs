@@ -158,7 +158,7 @@ impl SessionWrappers for TimingOutSessions {
     fn exists(&self, _: &str) -> Result<bool> {
         let left = &self.exists_timeouts;
         if left
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
         {
             bail!("background wrapper check failed: Command timed out");

@@ -514,7 +514,7 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match self
                 .failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             {
                 Ok(_) => bail!("{}", self.error),
                 Err(_) => Ok(()),
