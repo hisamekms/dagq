@@ -14,12 +14,14 @@ related:
   - adr-t2113-3
   - adr-t2257-1
   - adr-t1487-1
+  - adr-t3163-1
 ---
 
 # スパイク：container の中の process の OOM kill を runtime が確かな事実として読める方法
 
 問いは「container の中の子 process が OOM killer に殺されたことを、runtime が後から確かな事実として、container の上限によるものか machine 全体のメモリ不足によるものかを分けて読めるか」。
-答えが、OOM kill を verification の失敗と取り違えない task の形と、上限を重ねて OOM を分類に任せる案 (B) を選べるかを決める（下の「結果ごとの後続の task の形」）。
+答えが、OOM kill を verification の失敗と取り違えない task の形を決め、上限を重ねる形を見直す条件に当たるかを示す（下の「結果ごとの後続の task の形」）。
+同時に動く container の数の抑え方は、上限を重ねて OOM を分類に任せる案 (B) を外し、machine のメモリから上限を予約する形に [ADR-t3163-1](../adr/2026-10-25-t3163-1-containers-reserve-memory-on-the-machine.md) で決めたので、この答えを待たない。
 
 - コードと公式資料の調べ（下の (1)〜(3)）は worker が行い、出典は版と commit の permalink で示す。
   コードと資料で決まらない点は「実物で確かめる」と書き、どの場合（C1〜C5）で決まるかを添える。
@@ -270,14 +272,17 @@ container-oom-detection（OOM kill を事実として読めるか）
 
 ## 結果ごとの後続の task の形
 
-OOM kill を verification の失敗と取り違えない task（以下「OOM の task」）と、上限を重ねて OOM を分類に任せる案 (B) を持つ task（以下「上限の task」）は、実物の結果（上の note）が出るまで draft に置く。
+実物の結果（上の note）を待つのは、OOM kill を verification の失敗と取り違えない task（task 3162。以下「OOM の task」）だけで、結果が出るまで draft に置く。
+同時に動く container の数の抑え方（以下「上限の task」の列）は ADR-t3163-1 が決めた予約で、実物の結果を待たない。
+(B) と、verification だけ予約して turn は重ねる (C) は今の材料では採らず、実物の結果は同 ADR の「重ねる形を見直す条件」の 1 つ目（M4 か偽れなさの条件を持てる M2 の成立）に当たるかだけを決める。
+見直しは同 ADR の amends で、実物の結果を読む planner が別の task として足し、他の 2 つの条件（重なる見込みが低いと測れること・予約した側を守る手）も揃うときに限る。
 
-| 実物の結果 | OOM の task の形 | 上限の task |
+| 実物の結果 | OOM の task の形 | 上限の task（ADR-t3163-1 の予約との関係） |
 | --- | --- | --- |
-| M4 が成立（slice を作れ、C1 で slice の `oom` が正、C3 で `oom` が 0 で `oom_kill` が正、C5 で 0） | M4 で再計画する。制御側は run ごとの slice を持って前後の差分を読み、M5 を答え合わせに使う。slice と machine への道は設定で受ける | (B) を選択肢に残す |
-| M4 は不成立で、M2 の中の値が区別できる（C1 で中の `oom` が正、C3 で 0） | M2 で再計画できるが、主の process の偽れなさの条件（non-dumpable・残りを殺してから報告・最後の報告だけを採る）を設計に入れ、C2 は M5 の記録（OOM の事態が起きたことまで）だけに落とす。条件を持てなければ下の行にする | (B) を選択肢に残す（M2 の条件を持てたときだけ） |
-| 区別はできないが M5 が OOM の事態を取りこぼさない（C1・C2・有効な C4 で died の欄が true、C5 で無い） | attention の文を「事実」と「原因の候補」に分ける形に縮める。事実は「container の cgroup で OOM の事態が起きた（podman の died の OOMKilled。process が殺されたとは限らない）」、原因の候補は「container の上限（`--memory`）か、machine 全体のメモリ不足」。kill と書くのは `oom_kill` の増えを読める方法（M2・M4）を併せたときだけ。失敗を成功や控えに変えない | (B) を外し、(A) か (C) から選ぶ |
-| M5 も取りこぼす（C1・C2・有効な C4 のどれかで died の欄が無い）か、どの方法でも取れない | OOM を事実として言えないので中止するか、attention に「OOM かどうかは確かめられない」とだけ書く形にする | (B) を外し、(A) か (C) から選ぶ |
+| M4 が成立（slice を作れ、C1 で slice の `oom` が正、C3 で `oom` が 0 で `oom_kill` が正、C5 で 0） | M4 で再計画する。制御側は run ごとの slice を持って前後の差分を読み、M5 を答え合わせに使う。slice と machine への道は設定で受ける | 予約のまま。見直しの条件の 1 つ目に当たるので、他の 2 つが揃えば (B) か (C) を amends で見直せる |
+| M4 は不成立で、M2 の中の値が区別できる（C1 で中の `oom` が正、C3 で 0） | M2 で再計画できるが、主の process の偽れなさの条件（non-dumpable・残りを殺してから報告・最後の報告だけを採る）を設計に入れ、C2 は M5 の記録（OOM の事態が起きたことまで）だけに落とす。条件を持てなければ下の行にする | 予約のまま。M2 の条件を持てたときだけ見直しの条件の 1 つ目に当たり、他の 2 つが揃えば (B) か (C) を amends で見直せる |
+| 区別はできないが M5 が OOM の事態を取りこぼさない（C1・C2・有効な C4 で died の欄が true、C5 で無い） | attention の文を「事実」と「原因の候補」に分ける形に縮める。事実は「container の cgroup で OOM の事態が起きた（podman の died の OOMKilled。process が殺されたとは限らない）」、原因の候補は「container の上限（`--memory`）か、machine 全体のメモリ不足」。kill と書くのは `oom_kill` の増えを読める方法（M2・M4）を併せたときだけ。失敗を成功や控えに変えない | 予約のまま。見直しの条件に当たらないので重ねる形を見直さない |
+| M5 も取りこぼす（C1・C2・有効な C4 のどれかで died の欄が無い）か、どの方法でも取れない | OOM を事実として言えないので中止するか、attention に「OOM かどうかは確かめられない」とだけ書く形にする | 予約のまま。見直しの条件に当たらないので重ねる形を見直さない |
 
 - どの行でも、OOM の事実で失敗を成功に変えない（上の「(3) 方法の比べ」の末尾）。
 - M1・M5 の true だけで「殺された」と書かない。kill の断定には `oom_kill` の増え（M2・M4）が要る。
