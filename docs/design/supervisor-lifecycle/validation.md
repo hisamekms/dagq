@@ -67,6 +67,10 @@ bundleか状態のファイルが無い・壊れている・symlinkである・�
 検証は前の着地用のworktreeを先に消し、着地は検証が受け入れたcommitで行う。
 制御側のgitのguard（決定8）が成り立たなければ、何も読まずに`git_failed`で拒み、runは`failed`になって復旧jobとtriageから人に届く（sessionには返さない）。
 
+hostで動くrunのworktreeの登録が壊れている（`.git`が名指すadmin dirがpruneで消えたか、別のworktreeのものになっている。`run_git::registration_broken`）ときは、3のbranchが読めないか別のbranchを読むので、3で`git_failed`で拒み、runは`failed`になって復旧jobとtriageに回る（sessionには返さない）。
+後のpassでも読めないので、supervisorのエラーにしてrunを止めたままにはしない。
+登録が壊れていないworktreeでgitが失敗したときは検証のエラーで、次のpassが検証をやり直す。
+
 結果は`validation_finished`イベント（欄は`domain::validation::Validation`）と`task_runs.result_commit`/`last_error`に保存する。
 4以降で拒否した場合もcommitは確認済みなので`result_commit`を残す。
 成功しても`awaiting_integration`はTaskを`in_progress`のまま保持し、着地まで依存taskを解放しない。

@@ -69,10 +69,10 @@ related:
      直前のturnの`peak_context`が閾値を超えていれば、そのresumeは依頼を引き継ぎに入れて新しいsessionで始める（[`needs_session`](needs-session.md#needs_session)の3）。
    - `hand_off`（[ADR-t1818-2](../../adr/2026-10-05-t1818-2-recovery-job-options-map-to-runtime-options-or-pass-back.md)決定3）: workerがcommitせず、`already_satisfied`を書かずにbaseを名指したreceiptで落ちたrunを、[already_satisfiedの検証](validation.md#already_satisfiedの検証)の経路に渡す。
      runが`failed`でtaskの最新のrun（taskは`in_progress`）、最後のresumeより後の最後のvalidationがreceiptの`commit`と確かめたcommitをbaseとする`commit_mismatch`で、runのbranchのHEADがbaseでworktreeにcommitしていない変更が無く（捨てる成果が無い）、receiptがtaskの要るevidenceを裏付ける（`already_satisfied`のreceiptのvalidationと同じ）ときだけ（`domain::recovery::hand_off_refusal`）。
+     登録の壊れたworktreeの変更のように前提を読めないことも崩れたことで（`run_git::hand_off_reads`）、supervisorのエラーにせずescalateする。
      適用するとrunを`validating`にして`result_commit`と`last_error`を消し（taskの状態と最新のrunであることは同じトランザクションで確かめ直す）、そのrunは検証の始まる前の主張として休む（`satisfied::handed_off`）。
      次のpassの空いたslotで今のmainのsnapshotのverifyが始まり、通ればreview jobが判定し、`high`のpassなら閉じ、それ以外は`approve_close`のaskになる。
      jobは閉じる判断をせず、判定のpromptはworkerが主張を書いていないことと、`triage_finished`の`reason`（jobの見立て）を根拠としてreceiptの確かめと並べて載せる。
-     途中でsupervisorが死んだrunのadopterの再validationは、receiptを判定し直さずに主張として受け入れる（`satisfied::handed_off_since_resume`）。
      引き渡しの後にrunがまた`failed`か`interrupted`になれば（人の答えでtaskが動いたときを除く）、そのrunは次のラウンドを持つ（`triage_state`）。
    - `wait`: 何もしない。
      `recheck_at`（上限あり）を過ぎたら、runが同じところに居ればもう一度jobを起動する（alertの回数に数える）。

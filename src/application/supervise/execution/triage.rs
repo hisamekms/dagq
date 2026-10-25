@@ -940,10 +940,11 @@ impl Supervisor<'_> {
                 let latest = detail.task.status() == TaskStatus::InProgress
                     && detail.runs.last().map(TaskRun::id) == Some(run.id());
                 let events = self.queue.run_events(run.id()).map_err(unreadable)?;
-                let head = crate::application::run_git::head(&*self.repository, run)
-                    .map_err(|error| format!("{error:#}"));
-                let uncommitted = crate::application::run_git::status(&*self.repository, run)
-                    .map_err(|error| format!("{error:#}"));
+                let (head, uncommitted) = crate::application::run_git::hand_off_reads(
+                    &*self.repository,
+                    &*self.files,
+                    run,
+                );
                 let required = crate::domain::required_of(
                     detail.task.required_evidence(),
                     run.actual_provider(),

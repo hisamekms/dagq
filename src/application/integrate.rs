@@ -194,7 +194,30 @@ pub fn check_receipt(
                         Err(why) => return Ok(Err(back_to_session(facts, why))),
                     }
                 } else {
-                    repository.current_branch(worktree()?)?
+                    // Git finds a worktree's admin dir by name alone: one
+                    // pruned does not read, and one another worktree took
+                    // reads that one's branch.
+                    let worktree = worktree()?;
+                    let expected = format!("refs/heads/{branch}");
+                    match repository.current_branch(worktree) {
+                        Ok(current)
+                            if current.as_deref() != Some(expected.as_str())
+                                && super::run_git::registration_broken(repository, worktree) =>
+                        {
+                            let error = anyhow::anyhow!(
+                                "its git reads {}",
+                                current.as_deref().unwrap_or("a detached HEAD")
+                            );
+                            return Ok(Err(unregistered_rejection(facts, run, &error)));
+                        }
+                        Ok(current) => current,
+                        Err(error) if super::run_git::registration_broken(repository, worktree) => {
+                            return Ok(Err(unregistered_rejection(facts, run, &error)));
+                        }
+                        // A git that failed otherwise is the checks'
+                        // failure, which the next validation tries again.
+                        Err(error) => return Err(error),
+                    }
                 };
                 facts.checked_out = Some(CheckedOut {
                     branch: branch.to_owned(),
@@ -288,6 +311,32 @@ fn unguarded_rejection(facts: ReceiptFacts<'_>, run: &TaskRun, error: &anyhow::E
         e2e_requirement: facts.e2e_requirement(),
         reason: format!(
             "run {} was not validated: {error:#}; see to the git configuration; no session is resumed",
+            run.id()
+        ),
+        code: ReasonCode::GitFailed,
+        commit: None,
+        receipt: facts.into_receipt(),
+        evidence_missing: Vec::new(),
+        spike_result_missing: Vec::new(),
+        scope_violation: Vec::new(),
+    }
+}
+
+/// The rejection of a run on the host whose worktree's git cannot be read
+/// because its registration is broken
+/// ([`registration_broken`](super::run_git::registration_broken)): the run
+/// fails with `git_failed` and goes to its recovery job, never back to a
+/// session in that worktree nor kept for the next pass, which would read
+/// it no better.
+fn unregistered_rejection(
+    facts: ReceiptFacts<'_>,
+    run: &TaskRun,
+    error: &anyhow::Error,
+) -> Rejection {
+    Rejection {
+        e2e_requirement: facts.e2e_requirement(),
+        reason: format!(
+            "run {} was not validated: its worktree is not registered on its branch, so its git cannot be read ({error:#}); no session is resumed",
             run.id()
         ),
         code: ReasonCode::GitFailed,
@@ -3873,6 +3922,7 @@ fn resumes_left<Q: EventStore + ?Sized>(queue: &Q, id: &RunId) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::WorktreeAdmin;
     use crate::application::memory_files::MemoryFiles;
     use crate::domain::event_kind;
     use crate::domain::{
@@ -4005,6 +4055,10 @@ mod tests {
         /// Whether reading the configuration for the guard fails, rather
         /// than the guard not holding.
         guard_unread: bool,
+        /// Whether the worktree's git fails to read its branch.
+        branch_unread: bool,
+        /// The admin dir the worktree's `.git` names.
+        admin: WorktreeAdmin,
     }
 
     impl FakeRepository {
@@ -4020,6 +4074,8 @@ mod tests {
                 tree: Vec::new(),
                 contents: Vec::new(),
                 guard_unread: false,
+                branch_unread: false,
+                admin: WorktreeAdmin::Unreadable,
             }
         }
     }
@@ -4049,7 +4105,13 @@ mod tests {
             Ok(())
         }
         fn current_branch(&self, _: &Path) -> Result<Option<String>> {
+            if self.branch_unread {
+                anyhow::bail!("git symbolic-ref failed: fatal: not a git repository");
+            }
             Ok(self.branch.clone())
+        }
+        fn worktree_admin(&self, _: &Path) -> Result<WorktreeAdmin> {
+            Ok(self.admin.clone())
         }
         fn head(&self, _: &Path) -> Result<CommitSha> {
             Ok(self.head.clone())
@@ -4359,6 +4421,83 @@ mod tests {
             ..FakeRepository::sound()
         };
         assert!(check_receipt(&unread, &files, &task(&[]), &container, &[]).is_err());
+    }
+
+    /// A run on the host whose worktree's registration is broken (its
+    /// admin dir pruned, so its git does not read, or taken by another
+    /// worktree, so its git reads another branch) fails its validation with
+    /// `git_failed` for its recovery job, never an error of the checks that
+    /// every pass meets again. A git that fails on a worktree whose
+    /// registration holds is the checks' error, and a worktree on another
+    /// branch in its own admin dir goes back to its session as before.
+    #[test]
+    fn a_host_run_whose_worktree_is_not_registered_fails_its_validation() {
+        let files = MemoryFiles::default();
+        write_receipt(&files, Path::new(DIR), "passed");
+        let host = run(Path::new(DIR));
+        let check = |repository: &FakeRepository| {
+            check_receipt(repository, &files, &task(&[]), &host, &[]).map(|checked| checked.err())
+        };
+        let taken = WorktreeAdmin::Found {
+            points_back: false,
+            head: "ref: refs/heads/other".to_owned(),
+        };
+        for (branch_unread, branch, admin) in [
+            (true, None, WorktreeAdmin::Missing),
+            (true, None, taken.clone()),
+            (false, Some("refs/heads/other".to_owned()), taken.clone()),
+            (false, None, taken),
+        ] {
+            let broken = FakeRepository {
+                branch_unread,
+                branch,
+                admin,
+                ..FakeRepository::sound()
+            };
+            let rejection = check(&broken)
+                .unwrap()
+                .expect("a broken worktree was accepted");
+            assert_eq!(rejection.code, ReasonCode::GitFailed);
+            for said in ["not registered on its branch", "no session is resumed"] {
+                assert!(
+                    rejection.reason.contains(said),
+                    "{said}: {}",
+                    rejection.reason
+                );
+            }
+        }
+        let unread = FakeRepository {
+            branch_unread: true,
+            admin: WorktreeAdmin::Found {
+                points_back: true,
+                head: String::new(),
+            },
+            ..FakeRepository::sound()
+        };
+        assert!(check(&unread).is_err());
+        for admin in [
+            WorktreeAdmin::Unreadable,
+            WorktreeAdmin::Found {
+                points_back: true,
+                head: "ref: refs/heads/other".to_owned(),
+            },
+        ] {
+            let elsewhere = FakeRepository {
+                branch: Some("refs/heads/other".to_owned()),
+                admin,
+                ..FakeRepository::sound()
+            };
+            let rejection = check(&elsewhere)
+                .unwrap()
+                .expect("a worktree on another branch was accepted");
+            assert_eq!(rejection.code, ReasonCode::CommitMismatch);
+        }
+        let on_its_branch = FakeRepository {
+            admin: WorktreeAdmin::Missing,
+            ..FakeRepository::sound()
+        };
+        assert!(check(&on_its_branch).unwrap().is_none());
+        assert!(check(&FakeRepository::sound()).unwrap().is_none());
     }
 
     fn write_receipt(files: &MemoryFiles, dir: &Path, tests: &str) {

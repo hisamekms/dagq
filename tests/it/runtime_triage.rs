@@ -1946,3 +1946,95 @@ fn a_run_whose_worktree_names_another_runs_admin_dir_carries_its_own_branch_over
         branch
     );
 }
+
+/// A host run whose worker wrote a succeeded receipt and whose worktree
+/// then lost its admin dir (`git worktree prune`) cannot be read by its
+/// validation: it fails with `git_failed` and goes to its recovery job
+/// (here escalating to a person), rather than an error of every pass that
+/// leaves the run where it is.
+#[test]
+fn a_run_whose_worktree_lost_its_admin_dir_after_its_receipt_fails_to_its_recovery_job() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        &format!("commit work; receipt \"$(git rev-parse HEAD)\"; {ADMIN_GONE}; idle; await_exit"),
+    );
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")]).with_triages(&[recovery(
+        json!({"verdict": "escalate", "confidence": "high", "diagnosis": "its worktree is broken"}),
+    )]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    assert_eq!(detail.runs.len(), 1);
+    let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::Failed);
+    let validated = run_payloads(&detail, run, "validation_finished");
+    assert_eq!(validated.len(), 1, "{validated:?}");
+    assert_eq!(validated[0]["code"], "git_failed");
+    let reason = validated[0]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("not registered on its branch"),
+        "{validated:?}"
+    );
+    assert_eq!(
+        run_payloads(&detail, run, "recovery_requested")[0]["alert"],
+        "failed"
+    );
+    let finished = run_payloads(&detail, run, "triage_finished");
+    assert_eq!(finished.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(finished[0]["action"], "ask");
+}
+
+/// Points the worktree's `.git` at the admin dir of another worktree, on
+/// another branch at the run's base.
+const TAKES_ANOTHER_AT_BASE: &str = "git worktree add -q -b other \"$PWD-other\" HEAD && \
+printf 'gitdir: %s\\n' \"$(git rev-parse --path-format=absolute --git-common-dir)/worktrees/${PWD##*/}-other\" > .git && \
+test \"$(git symbolic-ref HEAD)\" = refs/heads/other";
+
+/// ADR-t1818-2 decision 3's preconditions read from a host run whose
+/// worktree's `.git` names another worktree's admin dir (clean, at the
+/// run's base): its head is its own branch's, and what is uncommitted in
+/// its worktree cannot be read, so the hand-off is refused and asked, with
+/// no error of the supervisor's pass.
+#[test]
+fn a_hand_off_of_a_run_whose_worktree_names_another_admin_dir_is_refused_and_asked() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "receipt \"$(git rev-parse HEAD)\"; {{ printf 'cd \"%s\" || exit 1\\n' \"$PWD\"; cat <<'BREAK'\n{TAKES_ANOTHER_AT_BASE}\nBREAK\n}} > \"$RUN_DIR/break.sh\"; idle; await_exit"
+        ),
+    );
+    let job = repair(json!({"action": "hand_off"}), "the base meets it");
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")])
+        .with_triages(&[format!("sh break.sh >&2 && {job}")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    assert_eq!(run.status(), RunStatus::Failed);
+    assert_eq!(
+        run_payloads(&detail, &run, "validation_finished")[0]["code"],
+        "commit_mismatch"
+    );
+    assert!(payloads(&detail, "auto_repaired").is_empty());
+    assert!(payloads(&detail, "run_satisfied_snapshot").is_empty());
+    let finished = run_payloads(&detail, &run, "triage_finished");
+    assert_eq!(finished.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(finished[0]["action"], "ask");
+    let ask = queue
+        .read_ask(AskId::new(finished[0]["ask_id"].as_i64().unwrap()))
+        .unwrap();
+    for part in [
+        "the hand-off does not apply",
+        "does not read as on its branch",
+    ] {
+        assert!(ask.question.contains(part), "{part}: {}", ask.question);
+    }
+}

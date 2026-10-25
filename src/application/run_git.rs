@@ -151,6 +151,63 @@ fn judged(
     }
 }
 
+/// Whether the registration of `worktree`, a run's on the host, is
+/// broken for good: the repository has no admin dir by the name its `.git`
+/// names (`git worktree prune` removed it), or that admin dir is another
+/// worktree's. Its git then cannot read the run's work again, and no later
+/// pass would read it either; a repository that cannot tell, or an admin
+/// dir that points back at it, is not broken.
+pub fn registration_broken(repository: &dyn Repository, worktree: &Path) -> bool {
+    matches!(
+        repository.worktree_admin(worktree),
+        Ok(WorktreeAdmin::Missing
+            | WorktreeAdmin::Found {
+                points_back: false,
+                ..
+            })
+    )
+}
+
+/// The head of `run`'s branch and what is uncommitted where it works, read
+/// for the preconditions of its hand-off (ADR-t1818-2 decision 3), `Err`
+/// saying why either cannot be read. A run on the host whose worktree is
+/// not registered on its branch ([`host_head`] reads anything but
+/// [`HostHead::Worktree`]) has its branch's commit as its head at most:
+/// what is uncommitted in that worktree cannot be read, so the hand-off is
+/// refused rather than read from another worktree's git or failing the
+/// supervisor's pass.
+pub fn hand_off_reads(
+    repository: &dyn Repository,
+    files: &dyn RunFiles,
+    run: &TaskRun,
+) -> (
+    std::result::Result<CommitSha, String>,
+    std::result::Result<String, String>,
+) {
+    if !run.in_container() {
+        match host_head(repository, files, run) {
+            Ok(HostHead::Worktree) => (),
+            Ok(HostHead::Branch(head)) => {
+                return (
+                    Ok(head),
+                    Err(format!(
+                        "the worktree of run {} does not read as on its branch (not registered on it, or its git fails or is on another branch), so what is uncommitted there cannot be read",
+                        run.id()
+                    )),
+                );
+            }
+            Err(error) => {
+                let why = format!("{error:#}");
+                return (Err(why.clone()), Err(why));
+            }
+        }
+    }
+    (
+        head(repository, run).map_err(|error| format!("{error:#}")),
+        status(repository, run).map_err(|error| format!("{error:#}")),
+    )
+}
+
 /// What is uncommitted where the run works (`git status --porcelain`,
 /// blank when clean): as the container's executor last wrote it for a run
 /// in a container.
