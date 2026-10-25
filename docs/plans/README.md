@@ -55,6 +55,7 @@ tags:
 - [runtime の planner の対話の期間の基準値と、非対話に切り替えた後の評価のコマンドと、対話に戻す基準の案](headless-planner-evaluation.md)（goal 87、task 1401）
 - [スパイク：container の runtime の前提の確認の手順（Claude の長期 token の代理・run ごとの clone の費用・dagq 専用の machine の最小の資源・sccache の cache の同時の書き込み）](container-runtime-spike.md)（goal 38）
 - [スパイク：container の中の process の OOM kill を runtime が確かな事実として読める方法（--rm との順序・子 process だけの kill・container の上限と machine 全体の OOM の区別）の調べと、実物の podman で確かめる手順](container-oom-detection.md)（goal 184）
+- [スパイク：run の worktree の target の内訳と、着地待ちの間の build の出力の扱い・cargo の設定で減らせる量と、その時間の代償](run-build-output-size-spike.md)（goal 224、task 3440）
 - [dagq の build・test の process ごとと合計の peak のメモリ、下げる手の効き、host.toml の machine と container の上限の推奨](build-memory.md)（goal 184、task 3161）
 - [スパイク：Codex CLI の対話の session で inbox に要るもの（常駐・background の見張り・answer・指示の読み込み・復帰・区間の記録・画面の判定・sandbox からの状態を変える dagq）ができるか](codex-inbox-spike.md)（goal 77、task 1180）
 - [スパイク：Codex の対話の TUI で、dagq が起動の引数で渡す hook だけに起動の引数で trust を与え、人の ~/.codex/config.toml を書かずに動かせるか](codex-inbox-hook-trust-spike.md)（goal 77、task 3336）
