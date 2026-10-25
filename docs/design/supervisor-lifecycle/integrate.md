@@ -115,6 +115,10 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - pushの先・結果・記録は`decide_push`が決め、pushが失敗してもrunは着地したままで`integrate`は成功で終わる。
   失敗したpushはattentionになり、人が原因を直してpushする（pluginの`dagq-recover`の`reference/review-by-hand.md`の「A failed push」）。
 - containerで動くrunの着地用のworktreeは[Container runtime](../container-runtime.md#git)が持つ。
+- 着地の後始末は、着地したrunに紐づく閉じていないaskをkindを問わず閉じる（`close_landing_asks`）。
+  着地したrunの問いはもう意味を持たないので、`worker_question`の未回答のものも回答済みで配送されていないものも`dagq asks`とinboxに残さない。
+  未回答のものはruntimeが着地で閉じた旨を答え（`runtime_closed: true`の`ask_answered`）、回答済みのものは答えを適用せず`ask_closed`で閉じ、`stalled`のaskは終わっていない検出の終わり（`stall_resolved`、未回答なら`run_ended`）も記録する。
+  runを名指さないaskは、そのtaskの`blocked`だけを閉じ、queueのaskは閉じない。
 
 ## landing branch
 

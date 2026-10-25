@@ -60,7 +60,7 @@ related:
   集計は[`stats`](commands.md)の`asks`。
 - `dagq ask close`は回答済みのaskに`closed_at`を書き、`ask_closed`を記録する。
   inboxが回答を読んで従った印（supervisorが答えを適用して閉じるときも同じ`close_ask`）で、`stats`の`asks.times`は回答の適用として読む。
-  runtimeが回答済みのaskを適用せずに閉じるとき（回答が当たらなくなった`approve_plan` / `approve_goal`、proposalの取り下げで閉じる`approve_plan`、適用の時にgoalがもうachievedで閉じていない`correct_goal`、`correct_goal`の`reopen`が閉じる同じgoalのほかの`correct_goal`と残った`approve_goal`、runが`failed`になったかtaskが`completed`・`canceled`になったrunの`approve_landing`（[Review](review.md#review-supervisor)の6））も同じ`ask_closed`をcloseと同じトランザクションで書く。
+  runtimeが回答済みのaskを適用せずに閉じるとき（回答が当たらなくなった`approve_plan` / `approve_goal`、proposalの取り下げで閉じる`approve_plan`、適用の時にgoalがもうachievedで閉じていない`correct_goal`、`correct_goal`の`reopen`が閉じる同じgoalのほかの`correct_goal`と残った`approve_goal`、runが`failed`になったかtaskが`completed`・`canceled`になったrunの`approve_landing`（[Review](review.md#review-supervisor)の6）、着地したrunのkindを問わないask（[integrate](integrate.md#着地とpush)））も同じ`ask_closed`をcloseと同じトランザクションで書く。
   `reopen`が閉じるそれらのうち未回答のものは、runtimeがgoalを開き直した旨を答えて（`ask_answered`の`runtime_closed: true`）閉じる（[Goal review](goal-review.md)の9）。
   attentionではない。
   未回答のaskはcloseできず（error）、取り下げは`answer`で取り下げた旨を書いてからcloseする。

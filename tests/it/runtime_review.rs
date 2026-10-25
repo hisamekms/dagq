@@ -734,6 +734,122 @@ fn integrate_by_hand_closes_the_landing_and_blocked_asks_of_the_run() {
     assert!(closed_of_task.run_id.is_none());
 }
 
+/// Landing a run closes every ask of the run nobody closed, whatever its
+/// kind: a `worker_question` unanswered (`ask_answered` with
+/// `runtime_closed`) or answered and not delivered yet (`ask_closed`,
+/// keeping the person's answer), and the `stuck_exit`, `answer_prompt` and
+/// `stalled` ones; the stalled ask's detection ends with `run_ended`. None is
+/// left in `dagq asks` or the inbox.
+#[test]
+fn integrate_closes_every_unclosed_ask_of_the_run_whatever_its_kind() {
+    use dagq::domain::{AskReason, NewAsk};
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("concern", &["a finding"], "first")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let mut stale = queue.asks(Default::default()).unwrap();
+    assert_eq!(stale.len(), 1, "{stale:?}");
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::StallNudged,
+            json!({"phase": "session", "idle_secs": 1250, "threshold_secs": 1200}),
+        )
+        .unwrap();
+    let asks = [
+        (
+            AskKind::WorkerQuestion,
+            "worker",
+            AskReason::Scope,
+            "answered",
+        ),
+        (AskKind::WorkerQuestion, "worker", AskReason::Scope, "open"),
+        (
+            AskKind::StuckExit,
+            "supervisor",
+            AskReason::RecoveryFailed,
+            "exit?",
+        ),
+        (
+            AskKind::AnswerPrompt,
+            "supervisor",
+            AskReason::RecoveryFailed,
+            "dialog?",
+        ),
+        (
+            AskKind::Stalled,
+            "supervisor",
+            AskReason::RecoveryFailed,
+            "idle?",
+        ),
+    ];
+    for (kind, asked_by, reason_category, question) in asks {
+        let topics = if kind == AskKind::WorkerQuestion {
+            vec!["task_overlap".into()]
+        } else {
+            Vec::new()
+        };
+        let ask = queue
+            .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
+                topics,
+                kind,
+                task_id: None,
+                run_id: Some(run.id().clone()),
+                question: question.into(),
+                options: Vec::new(),
+                asked_by: asked_by.into(),
+                reason_category,
+                finding_id: None,
+                request_id: None,
+            })
+            .unwrap()
+            .ask;
+        assert!(stale.iter().all(|earlier| earlier.id != ask.id), "{ask:?}");
+        // The person answered the first question; the run lands before
+        // the answer is delivered.
+        let ask = if question == "answered" {
+            queue.answer(ask.id, "the answer").unwrap()
+        } else {
+            ask
+        };
+        stale.push(ask);
+    }
+
+    let outcome = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    for ask in &stale {
+        assert_closed_by_runtime(
+            &mut queue,
+            &run,
+            ask,
+            "the run was integrated; closed by the runtime",
+        );
+    }
+    assert_eq!(
+        queue.read_ask(stale[1].id).unwrap().answer.as_deref(),
+        Some("the answer")
+    );
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+    let inbox = runtime::status(&db).unwrap();
+    for ask in &stale {
+        assert!(ask_attention(&inbox, ask.id).is_empty(), "{inbox}");
+    }
+    // The nudge ended when the stalled ask opened; the ask's detection
+    // ends with the landing, once.
+    let ends: Vec<_> = events_of(&db, run.id(), "stall_resolved")
+        .into_iter()
+        .filter(|end| end["detection"] == "ask")
+        .collect();
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0]["outcome"], "run_ended");
+    assert_eq!(ends[0]["ask_id"], stale[5].id.as_i64());
+}
+
 /// A headless review whose job exits non-zero runs that job once more with
 /// the same input (task 1984, ADR-t1895-1 decision 5); when that one exits
 /// non-zero too, the run exits and closes the session, and in the step that

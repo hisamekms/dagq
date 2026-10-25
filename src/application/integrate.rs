@@ -3514,23 +3514,28 @@ fn commit_message(task: &Task, run: &TaskRun, receipt: &Receipt) -> Vec<String> 
     paragraphs
 }
 
-/// The answer an `approve_landing` ask of a run nobody closed is closed
-/// with once the run is integrated (task 425).
+/// The answer an ask of a run nobody closed is closed with once the run
+/// is integrated.
 const LANDED_LANDING_ASK_CLOSED: &str = "the run was integrated; closed by the runtime";
 
-/// Close the `approve_landing` asks of the landed `run` nobody closed
-/// (task 425), then those of the task's other runs, as the task is
-/// completed, and the `blocked` asks of the run or its task (task 329):
-/// whether it was landed by hand or by the supervisor, nobody needs to
-/// answer them any more. A `blocked` ask left open would keep raising the
-/// `ask_unanswered` alert after the landing. Each close is recorded on the
-/// run, or the task alone, its `ask_opened` was, and leaves the ask's
-/// finding as it is. `main` already moved, so a failure is only reported.
+/// Close the asks nobody needs to answer once `run` landed, whether by
+/// hand or by the supervisor: every ask of the run, whatever its kind
+/// (its stalled detections ended first, so their ends are recorded), the
+/// `approve_landing` asks of the task's other runs, as the task is
+/// completed, and the `blocked` asks of the task naming no run (task 329).
+/// An ask left open would stay in `dagq asks` and the inbox after the
+/// landing. Each close is recorded on the run, or the task alone, its
+/// `ask_opened` was, and leaves the ask's finding as it is. `main` already
+/// moved, so a failure is only reported.
 fn close_landing_asks(queue: &mut dyn AskStore, run: &TaskRun) {
     let closes = [
         (
-            "approve_landing",
-            queue.close_approve_landing_asks(run.id(), LANDED_LANDING_ASK_CLOSED),
+            "stalled",
+            queue.end_stalled_detections(run.id(), LANDED_LANDING_ASK_CLOSED),
+        ),
+        (
+            "unclosed",
+            queue.close_run_asks(run.id(), LANDED_LANDING_ASK_CLOSED),
         ),
         (
             "earlier runs' approve_landing",

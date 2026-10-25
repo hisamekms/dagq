@@ -812,6 +812,28 @@ impl SqliteQueue {
         Ok(closed)
     }
 
+    /// Close every ask of the run nobody closed, whatever its kind, the way
+    /// [`Self::close_stuck_exit_asks`] does: the run was integrated, so
+    /// nothing it asked, or an answer to it not delivered yet, still fits.
+    /// Asks naming no run are left to their own closes.
+    pub fn close_run_asks(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let unclosed: Vec<Ask> = tx
+            .prepare("SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id")?
+            .query_map([run_id], ask_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        let now = self.generators.clock.now();
+        let mut closed = Vec::with_capacity(unclosed.len());
+        for ask in unclosed {
+            close_by_runtime(&tx, &ask, answer, now)?;
+            closed.push(read_ask(&tx, ask.id)?);
+        }
+        tx.commit()?;
+        Ok(closed)
+    }
+
     /// Close every `blocked` ask of the run, or of its task, nobody closed,
     /// the way [`Self::close_stuck_exit_asks`] does: the run was integrated
     /// and its task completed, so what the observer asked about is over

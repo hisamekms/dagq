@@ -463,6 +463,9 @@ pub trait AskStore {
     fn note_on_asks(&mut self, run_id: &RunId, note: &str, why: &str) -> Result<Vec<Ask>>;
     /// Close the run's `approve_landing` asks nobody closed, with `answer`.
     fn close_approve_landing_asks(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>>;
+    /// Close every ask of the run nobody closed, whatever its kind, with
+    /// `answer`.
+    fn close_run_asks(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>>;
     /// Close the `approve_landing` asks nobody closed of the runs, of
     /// `task` or of all, that ended without landing
     /// ([`crate::domain::ended_landing_ask_answer`]).

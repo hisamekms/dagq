@@ -1984,6 +1984,10 @@ impl AskStore for SupervisorQueue {
         let mut local = self.local()?;
         AskStore::close_approve_landing_asks(&mut **local, run_id, answer)
     }
+    fn close_run_asks(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>> {
+        let mut local = self.local()?;
+        AskStore::close_run_asks(&mut **local, run_id, answer)
+    }
     fn close_ended_landing_asks(&mut self, task: Option<TaskId>) -> Result<Vec<Ask>> {
         let mut local = self.local()?;
         AskStore::close_ended_landing_asks(&mut **local, task)
