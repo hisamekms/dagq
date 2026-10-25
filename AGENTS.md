@@ -48,7 +48,7 @@ run の review は差分の変更の範囲の規則で判定する。review の 
 
 ### inbox と人
 
-inbox は `dagq-inbox` skill に従い、復旧と手での操作は `dagq-recover` skill（inbox を開き直す手順は `reference/up-down.md` の「Open the inbox again」）。人が頼んだ計画は inbox が `dagq request add` で runtime の planner に移譲する（`dagq-inbox` skill の `reference/requests.md`）。着手と着地の報告と ask にして待つ規則は operations.md の「人への報告」。計画の依頼・着地・review・triage・復旧 job・ask・待ち・goal の close・inbox と planner の prompt の仕組みは [Supervisor lifecycle](docs/design/supervisor-lifecycle.md) の索引から辿る。provider は dagq skill の `reference/provider.md` と [provider-lifecycle](docs/design/provider-lifecycle.md)。background の run と planner の出力は `run log` / `planner log`（`dagq-inbox` skill の `reference/status.md`）。人が dagq を通さず直接変えたときは local-checks.md の「人の手元の検証」。
+inbox は `dagq-inbox` skill に従い、復旧と手での操作は `dagq-recover` skill（inbox を開き直す手順は `reference/up-down.md` の「Open the inbox again」）。Codex の inbox は [up-down](docs/design/supervisor-lifecycle/up-down.md#dagq-inbox) の「`dagq inbox`」と `dagq-inbox` skill の `reference/claude-and-codex.md`。人が頼んだ計画は inbox が `dagq request add` で runtime の planner に移譲する（`dagq-inbox` skill の `reference/requests.md`）。着手と着地の報告と ask にして待つ規則は operations.md の「人への報告」。計画の依頼・着地・review・triage・復旧 job・ask・待ち・goal の close・inbox と planner の prompt の仕組みは [Supervisor lifecycle](docs/design/supervisor-lifecycle.md) の索引から辿る。provider は dagq skill の `reference/provider.md` と [provider-lifecycle](docs/design/provider-lifecycle.md)。background の run と planner の出力は `run log` / `planner log`（`dagq-inbox` skill の `reference/status.md`）。人が dagq を通さず直接変えたときは local-checks.md の「人の手元の検証」。
 
 ### observer
 

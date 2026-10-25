@@ -1,6 +1,6 @@
 # The watch
 
-Read this when starting or restarting the inbox's background watch (step 2). Its flags and output: `"$DAGQ" watch --help`.
+Read this when starting or restarting the inbox's watch (step 2). Its flags and output: `"$DAGQ" watch --help`. On Claude Code it runs in the background; on Codex, which has no background task, in the foreground ("On Codex" below).
 
 ## One command in the background
 
@@ -20,6 +20,20 @@ Pass the cursor from `status --role inbox` (or from the last `watch` that return
 ## One watch, never a status poll
 
 Keep exactly one watch running: start a new one only after the previous one has ended. Never poll `status` in a loop instead. After compaction or `/clear`, check the session's background tasks first: if a watch is still running, let its notice arrive.
+
+## On Codex: the watch in the foreground
+
+Codex has no background task, so the watch is bounded and runs in the foreground of your turn:
+
+```sh
+<dagq> watch --role inbox --after <cursor>
+```
+
+- `<dagq>` is the path your instructions name. Use the cursor of the status the start hook printed, then the cursor each watch returns.
+- It returns within its timeout (no `--until-attention`), with events or with none. Handle what it returns (steps 3 and 4), then run it again from its cursor. An empty return is no failure and is told to no one.
+- Keep doing so whenever the person is not talking to you. When they are, answer them, then run the watch again; what came meanwhile waits for it. A watch is never left running past your turn.
+- The Stop hook keeps your turn from ending while no watch runs, and names the command to run. If a watch just returned output you have not handled, handle it first.
+- A non-zero exit, `unreachable` and `unauthenticated`: as above, with the watch run again in the foreground.
 
 ## The throughput review's notice
 

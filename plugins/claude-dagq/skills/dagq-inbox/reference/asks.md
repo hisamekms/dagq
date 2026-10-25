@@ -2,6 +2,8 @@
 
 Read this when an open ask's kind, options or effect is unclear (the `dagq-inbox` skill, step 3). Whatever the kind, show the ask as written and add no recommendation of your own. Listing and answering: `"$DAGQ" asks --help`, `"$DAGQ" answer --help`.
 
+On Claude Code show the options with `AskUserQuestion`; on Codex, which has no question tool, as a numbered list with the question, and take the person's reply as text. Either way, write the answer with `answer` as the person gave it: the option's exact text (not its number), or their own words.
+
 An ask an AI opened may carry its recommendation (one of its options) and confidence. Show them next to the options as the asker's, e.g. "recommended by the asker: `land` (confidence: low)", and still let the person choose: never answer with the recommendation on your own. Never ask the person for a reason code: the runtime takes it from the review.
 
 - `approve_landing`: a review's doubt: `land` / `send_back` / `cancel`. A person may give their own reason after any option as `<option>: <reason>`, as `send_back: <reason>` or `land: <reason>` (write it as given). The ask of a failed review also offers `retry_review`, which reviews the same run again: show it next to the others, for a failure that was the provider's (a login, a limit) rather than the change's.

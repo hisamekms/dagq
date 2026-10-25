@@ -41,7 +41,7 @@ A stale registration beside a live supervisor is not a restart: `up` would only 
 
 ### Open the inbox again (the guardrail)
 
-When `status` or `doctor` says the inbox's guardrail is off, the inbox was opened without its settings; a `claude` typed again in the inbox's terminal has none either and is not seen. Reopen it the same way after a plugin update, or once to move an inbox an earlier binary opened in a cmux workspace. On the person's word:
+When `status` or `doctor` says the inbox's guardrail is off, the inbox was opened without its settings; a `claude` typed again in the inbox's terminal has none either and is not seen. A Codex inbox whose guardrail hook never ran (`reached` still `false`), or one whose start left a dagq hook untrusted, is reopened the same way (`skills/dagq-inbox/reference/claude-and-codex.md`); never by resuming the Codex session by hand. Reopen it the same way after a plugin update, or once to move an inbox an earlier binary opened in a cmux workspace. On the person's word:
 
 1. The inbox writes its handoff first (open items, the watch's cursor, what the person said to keep), where the repository's instructions keep it.
 2. The person ends that inbox (it cannot end itself).

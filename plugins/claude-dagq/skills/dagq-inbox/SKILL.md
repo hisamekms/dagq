@@ -5,13 +5,13 @@ description: Be a dagq queue's inbox: start from status --role inbox, wait for i
 
 # dagq: relay the queue's asks and attention to the person
 
-Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` skill (`"$DAGQ" --resolve`). Never open or edit the queue database; go through the CLI only.
+Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` skill (`"$DAGQ" --resolve`); on Codex, the `dagq` your instructions name. Never open or edit the queue database; go through the CLI only. How Claude Code and Codex differ (watch, hooks, guardrail): `reference/claude-and-codex.md`.
 
-Roles: the **supervisor** lands runs and runs the headless jobs (review, plan review, goal review, the **recovery job**); a **worker** is one run's session; a **planner** the runtime opens writes goals and tasks (`dagq-planner`); the **observer** is a periodic job. This session, the **inbox**, is the one resident session where everything that waits for the person reaches them: an **ask** and every other **attention**. Your watch tells the person of new asks through the host's `[push]`, when it has one.
+Roles: the **supervisor** lands runs and runs the headless jobs (review, plan review, goal review, the **recovery job**); a **worker** is one run's session; a **planner** the runtime opens writes goals and tasks (`dagq-planner`); the **observer** is a periodic job. This session, the **inbox**, is the one resident session where everything that waits for the person reaches them: an **ask** and every other **attention**.
 
 Only what needs a person comes here. The runtime fixes known cases itself (`auto_repaired`: a resume, a stale receipt), and the recovery job what it can of the rest (failed runs, stalled turns, idle processes). An ask opens only when they could not, and every ask says why a person is needed (`reason_category`: `scope`, `discard`, `authentication`, `cost`, `recovery_failed`). Do none of their work by hand.
 
-This session holds no state. After a restart, compaction or `/clear`, start again from step 1 (the SessionStart hook prints `status --role inbox`). Write for the person in the language your prompt or the status's `language.instruction` names (`dagq` skill, section 5).
+This session holds no state. After a restart, compaction or `/clear` (never Codex's `/new`), start again from step 1 (the SessionStart hook prints `status --role inbox`). Write for the person in the language your prompt or the status's `language.instruction` names (`dagq` skill, section 5).
 
 ## 1. Read what waits
 
@@ -19,11 +19,11 @@ This session holds no state. After a restart, compaction or `/clear`, start agai
 "$DAGQ" status --role inbox
 ```
 
-`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). If `inbox_guardrail.guardrail` is `false`, this inbox was opened without its settings: tell the person, write your handoff, and have them end this inbox and open it again with `dagq inbox` (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
+`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). An `inbox_guardrail` without its guardrail (`reference/status.md`): tell the person, write your handoff, and have them reopen the inbox (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
 
 ## 2. Watch in the background
 
-Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`, as it is: no shell loop around it. It has no timeout and returns only with `events` or `supervisors_changed` (not `update_installed` or an hourly review alone: those come with the next); handle them (steps 3, 4), then restart it from its `cursor`. A non-zero exit is a failure: report it as `reference/watch.md` says. Keep exactly one watch; never poll `status` in a loop. When a hook says to start the watch (SessionStart's first line, or the Stop hook blocking your turn), start it first: nothing else reaches this session. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
+Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`, as it is: no shell loop around it (Codex has no background: `reference/watch.md`). It has no timeout and returns only with `events` or `supervisors_changed` (not `update_installed` or an hourly review alone: those come with the next); handle them (steps 3, 4), then restart it from its `cursor`. A non-zero exit is a failure: report it as `reference/watch.md` says. Keep exactly one watch; never poll `status` in a loop. When a hook says to start the watch (at the start, or blocking your turn's end), start it first: nothing else reaches this session. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
 
 ## 3. Show an ask and write the answer
 
@@ -33,7 +33,7 @@ Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_i
 
 It prints each open ask in full, oldest first. One at a time:
 
-1. Show the person the question as written, its `reason_category`, `asked_by`, the task and run, and the options. Use `AskUserQuestion` with the options as choices when available. Show the asker's `recommendation` and `confidence` when set. Add no recommendation of your own.
+1. Show the person the question as written, its `reason_category`, `asked_by`, the task and run, and the options. Use `AskUserQuestion` with the options as choices (Codex: a numbered list). Show the asker's `recommendation` and `confidence` when set. Add no recommendation of your own.
 2. Write the answer exactly as the person gave it: the option's text, or their own words.
 
 ```sh
@@ -44,7 +44,7 @@ It prints each open ask in full, oldest first. One at a time:
 
 Context: `"$DAGQ" show <task_id>` (`--full` for a receipt). Leave open an ask the person will not answer yet.
 
-Before showing an ask whose kind, options or effect is unclear, read `reference/asks.md` for kinds, options and runtime-applied answers (`propose`, `dismiss`, `approve_goal`). Other answers return as `read the answer of ask <id> and close it` (step 4).
+An ask whose kind, options or effect is unclear: `reference/asks.md`, with the answers the runtime applies; others return as `read the answer of ask <id> and close it` (step 4).
 
 ## 4. Report the other attention, act only on the person's word
 
