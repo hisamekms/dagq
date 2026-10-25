@@ -55,6 +55,7 @@ pub enum QueueRead {
     Events(EventsRead),
     Timeline(TimelineRead),
     Stats(StatsRead),
+    StatsInputs(StatsInputsRead),
     Kpi(KpiRead),
     Forecast(ForecastRead),
     Notes(NotesRead),
@@ -216,7 +217,19 @@ pub struct StatsRead {
     /// Today's `stats` beside the ledger's (`--ledger`).
     #[serde(default)]
     pub ledger: bool,
+    /// What the queue service's client read with Git for it
+    /// ([`crate::application::stats::prepare_read`]); the service takes
+    /// none as nothing read, and a caller on the DB reads Git itself.
+    #[serde(default)]
+    pub git: Option<crate::application::stats::StatsGitReads>,
 }
+
+/// `stats_inputs`' read: no option. Its answer is the
+/// [`crate::application::stats::StatsInputs`] the client of `stats` and
+/// `kpi` reads Git with.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatsInputsRead {}
 
 /// `kpi`'s options.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -247,6 +260,10 @@ pub struct KpiRead {
     pub window: i64,
     #[serde(default)]
     pub goal: Option<i64>,
+    /// What the queue service's client read with Git for it, as
+    /// [`StatsRead::git`].
+    #[serde(default)]
+    pub git: Option<crate::application::stats::StatsGitReads>,
 }
 
 /// `forecast`'s options.
@@ -588,6 +605,7 @@ impl QueueRead {
             UseCase::Events => Self::Events(read(use_case, params)?),
             UseCase::Timeline => Self::Timeline(read(use_case, params)?),
             UseCase::Stats => Self::Stats(read(use_case, params)?),
+            UseCase::StatsInputs => Self::StatsInputs(read(use_case, params)?),
             UseCase::Kpi => Self::Kpi(read(use_case, params)?),
             UseCase::Forecast => Self::Forecast(read(use_case, params)?),
             UseCase::Notes => Self::Notes(read(use_case, params)?),
@@ -783,6 +801,7 @@ impl QueueRead {
             }
             Self::Candidates(_)
             | Self::Stats(_)
+            | Self::StatsInputs(_)
             | Self::Marks(_)
             | Self::GoalShow(_)
             | Self::ObserveHistory(_)
@@ -853,16 +872,24 @@ impl QueueRead {
                 if read.ledger {
                     params["ledger"] = json!(true);
                 }
+                if let Some(git) = &read.git {
+                    params["git"] = json!(git);
+                }
                 (UseCase::Stats, params)
             }
-            Self::Kpi(read) => (
-                UseCase::Kpi,
-                json!({"period": read.period, "last": read.last, "at": cursor(&read.at),
-                       "since": cursor(&read.since), "until": cursor(&read.until),
-                       "change": read.changes, "area": read.areas, "by": read.by,
-                       "cross": read.cross, "compare": read.compare.map(CompareSpec::text),
-                       "window": read.window, "goal": read.goal}),
-            ),
+            Self::StatsInputs(_) => (UseCase::StatsInputs, json!({})),
+            Self::Kpi(read) => {
+                let mut params = json!({"period": read.period, "last": read.last,
+                       "at": cursor(&read.at), "since": cursor(&read.since),
+                       "until": cursor(&read.until), "change": read.changes, "area": read.areas,
+                       "by": read.by, "cross": read.cross,
+                       "compare": read.compare.map(CompareSpec::text), "window": read.window,
+                       "goal": read.goal});
+                if let Some(git) = &read.git {
+                    params["git"] = json!(git);
+                }
+                (UseCase::Kpi, params)
+            }
             Self::Forecast(read) => (
                 UseCase::Forecast,
                 json!({"task": read.task, "goal": read.goal, "parallel": read.parallel,
@@ -947,6 +974,7 @@ where
         QueueRead::Events(read) => observation::events(queue, read),
         QueueRead::Timeline(read) => observation::timeline(queue, sources, read),
         QueueRead::Stats(read) => observation::stats(queue, sources, read),
+        QueueRead::StatsInputs(_) => sources.stats_inputs(queue),
         QueueRead::Kpi(read) => observation::kpi(queue, sources, read),
         QueueRead::Forecast(read) => observation::forecast(queue, sources, read),
         QueueRead::Notes(read) => observation::notes(queue, read),

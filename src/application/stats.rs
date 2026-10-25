@@ -6,15 +6,23 @@
 //! and main's Git history for `conflict_hotspots`. Main's history and the
 //! areas are read from Git, not yet from the record of it the supervisor
 //! keeps ([`crate::domain::stats::main_log`]).
+//!
+//! No Git runs in the queue service (ADR-t3102-3 decision 5): its client
+//! asks `stats_inputs` ([`stats_inputs`]) what to read, reads it with its
+//! own Git ([`prepare_read`]) and sends what it read with `stats` and
+//! `kpi` ([`StatsGitReads`]), again while the service finds the queue's
+//! events moved past what it read ([`call_read`]). A caller on the DB reads
+//! Git itself.
 
 use crate::domain::EventKind;
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     time::SystemTime,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use super::{
     AgentSignals, CoordinationReads, EventStore, PlanningRecords, ProcessControl, RunFiles, RunLog,
@@ -28,7 +36,7 @@ use crate::domain::{
     stats::{
         ConflictConfig, ConflictConfigReport, History, LiveRun, LiveSnapshot, SlotSnapshot,
         StallConfigReport, Stats, StatsQuery,
-        conflicts::{MainHistory, earliest_conflict},
+        conflicts::{MainHistory, conflicted_files, earliest_conflict},
         outlier_thresholds, stats as aggregate, timestamp_millis, with_areas, with_changes,
         without_cargo_measures, without_rustc,
     },
@@ -37,6 +45,14 @@ use crate::domain::{
 /// The marker the agent's `UserPromptSubmit` hook writes when the session
 /// takes an input (ADR-0043 decision 2), in the run directory.
 pub const PROMPT_SUBMIT_MARKER: &str = "prompt-submit.json";
+
+/// What refuses the events `stats` or `kpi` read, when they are not the
+/// ones what was read with them was read for.
+pub type EventsCheck<'a> = dyn Fn(&[crate::domain::RunEvent]) -> Result<()> + 'a;
+
+/// A change of main as [`CompactHistory`] sends it: its path, its old
+/// name, each as an index in `names`, and whether it deletes.
+pub type SentChange = (u32, Option<u32>, bool);
 
 /// What `stats` reads outside the queue.
 pub struct StatsSources<'a> {
@@ -55,6 +71,10 @@ pub struct StatsSources<'a> {
     /// The `[areas]` of `dagq.toml` and the landed commits' changes, for
     /// the runs' areas (ADR-t980-1).
     pub areas: &'a super::areas::AreaReader,
+    /// Refuses the events `stats` aggregates when they are not the ones
+    /// `history` and `areas` were read for (the queue service's
+    /// [`ServedReads::check`]); `None` checks none.
+    pub fresh: Option<&'a EventsCheck<'a>>,
     /// The host's offset from UTC in seconds, east positive: when an ask
     /// counts as opened at night.
     pub utc_offset_secs: i64,
@@ -70,25 +90,508 @@ pub struct StatsSources<'a> {
     pub rust_toolchain: bool,
 }
 
-/// Main's history since the earliest event of `events` (a second before
-/// it), so that the landings of any window before its first conflict are
-/// counted too, or why it could not be read; none is read without a
-/// conflict.
-pub fn conflict_history(
-    events: &[crate::domain::RunEvent],
-    read: &dyn Fn(i64) -> Result<MainHistory>,
-) -> History {
+/// The unix second main's history is read since for `conflict_hotspots`:
+/// a second before the earliest event of `events`, so that the landings
+/// of any window before its first conflict are counted too; `None`, none
+/// is read, without a conflict.
+pub fn history_since(events: &[crate::domain::RunEvent]) -> Option<i64> {
     let earliest = events
         .iter()
         .filter_map(|event| timestamp_millis(&event.created_at))
         .min();
-    match earliest_conflict(events).and(earliest) {
+    earliest_conflict(events)
+        .and(earliest)
+        .map(|millis| millis.div_euclid(1000) - 1)
+}
+
+/// Main's history since [`history_since`] of `events`, or why it could not
+/// be read; none is read without a conflict.
+pub fn conflict_history(
+    events: &[crate::domain::RunEvent],
+    read: &dyn Fn(i64) -> Result<MainHistory>,
+) -> History {
+    match history_since(events) {
         None => History::Read(MainHistory::default()),
-        Some(millis) => match read(millis.div_euclid(1000) - 1) {
-            Ok(history) => History::Read(history),
-            Err(error) => History::Unavailable(format!("{error:#}")),
-        },
+        Some(since) => read_history(read, since),
     }
+}
+
+/// `read` of main's history since `since`, or why it could not be read.
+fn read_history(read: &dyn Fn(i64) -> Result<MainHistory>, since: i64) -> History {
+    match read(since) {
+        Ok(history) => History::Read(history),
+        Err(error) => History::Unavailable(format!("{error:#}")),
+    }
+}
+
+/// What the queue service's client reads with Git before it sends
+/// `stats` (with `--ledger` too) or `kpi`, as no Git runs in the service
+/// (ADR-t3102-3 decision 5): the answer of `stats_inputs`, made by
+/// [`stats_inputs`] of the queue's events.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatsInputs {
+    /// The main checkout of the repository the queue is bound to, as the
+    /// service finds it from the binding with no Git run, whose
+    /// `dagq.toml` the service reads and whose Git the client reads; none
+    /// for a queue bound to none or to one whose main checkout is not
+    /// found so.
+    pub checkout: Option<PathBuf>,
+    /// The commit of every landed run of the queue's events
+    /// ([`crate::domain::areas::landed_commits`]), in their order: the
+    /// client judges their areas and sends them in this order.
+    pub landed: Vec<String>,
+    /// The second main's history is read since ([`history_since`]); none
+    /// without a conflict, when none is read.
+    pub history_since: Option<i64>,
+    /// The files the conflict events name, which the client narrows the
+    /// history it sends to ([`MainHistory::narrowed_to`]).
+    pub conflicted: Vec<String>,
+    /// The digest of the rest: what the client sends back with what it
+    /// read, so that the service reads it only with events that give the
+    /// same inputs ([`StatsGitReads::served`]).
+    pub version: String,
+}
+
+/// `stats_inputs` of a queue whose bound main checkout is `checkout`, with
+/// `events`. No Git runs.
+pub fn stats_inputs(checkout: Option<PathBuf>, events: &[crate::domain::RunEvent]) -> StatsInputs {
+    let mut inputs = StatsInputs {
+        checkout,
+        landed: crate::domain::areas::landed_commits(events)
+            .into_iter()
+            .map(|(_, commit)| commit)
+            .collect(),
+        history_since: history_since(events),
+        conflicted: conflicted_files(events),
+        version: String::new(),
+    };
+    inputs.version = inputs.digest();
+    inputs
+}
+
+impl StatsInputs {
+    /// The SHA-256 of these inputs but the version, in hex.
+    fn digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(&(
+            &self.checkout,
+            &self.landed,
+            self.history_since,
+            &self.conflicted,
+        ))
+        .unwrap_or_default();
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+}
+
+/// Why the queue service refuses a `stats` or `kpi` whose Git reads were
+/// made from other inputs than the queue's events give now: an event that
+/// changes them (a landing, a conflict) came after its `stats_inputs`. The
+/// client asks again ([`call_read`]).
+pub const STALE: &str =
+    "the Git reads sent with it were made for other events than the queue has now";
+
+/// Why the queue service refuses a `stats` or `kpi` sent with no Git
+/// reads: its client is older than the service, and reads no Git for it.
+pub const NOT_READ: &str = "it is sent with no Git reads, which a dagq older than the queue \
+     service sends: update the dagq that sends it";
+
+/// What the queue service's client read with Git in the main checkout
+/// [`StatsInputs`] names and sends with `stats` and `kpi`; the service
+/// reads these in place of Git, with the events whose inputs have its
+/// `inputs` version only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatsGitReads {
+    /// The [`StatsInputs::version`] these were read for.
+    pub inputs: String,
+    /// The areas of the landed commits; none without `[areas]`.
+    #[serde(default)]
+    pub areas: Option<SentAreas>,
+    /// Main's history since [`StatsInputs::history_since`], narrowed to
+    /// the conflicted files, or why it could not be read; none when none
+    /// is read (no conflict, or a `kpi`).
+    #[serde(default)]
+    pub history: Option<SentHistory>,
+}
+
+/// The areas of the landed commits, each set of areas once: `of` has one
+/// item per [`StatsInputs::landed`], in its order, the index in `sets` of
+/// its commit's areas, none for a commit Git does not have.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SentAreas {
+    pub sets: Vec<Vec<String>>,
+    pub of: Vec<Option<u32>>,
+}
+
+/// Main's history as the client sends it: read, or why not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SentHistory {
+    Read(CompactHistory),
+    Unavailable(String),
+}
+
+/// A [`MainHistory`] with only what `conflict_hotspots` reads, small enough
+/// for a request: each commit's second as the difference from the one
+/// before (the first's from 0), the changes of the commits that have any
+/// by the commit's index, each as its path, its old name and whether it
+/// deletes, and the paths main has now, every name as its index in
+/// `names`. The commits' IDs are not sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactHistory {
+    pub names: Vec<String>,
+    pub at: Vec<i64>,
+    pub changes: Vec<(usize, Vec<SentChange>)>,
+    pub paths: Vec<u32>,
+}
+
+impl CompactHistory {
+    fn of(history: &MainHistory) -> Self {
+        let mut names: Vec<String> = Vec::new();
+        let mut index: HashMap<String, u32> = HashMap::new();
+        let mut name = |name: &str| -> u32 {
+            *index.entry(name.to_owned()).or_insert_with(|| {
+                names.push(name.to_owned());
+                u32::try_from(names.len() - 1).unwrap_or(u32::MAX)
+            })
+        };
+        let mut last = 0;
+        let at = history
+            .commits
+            .iter()
+            .map(|commit| {
+                let delta = commit.at - last;
+                last = commit.at;
+                delta
+            })
+            .collect();
+        let changes = history
+            .commits
+            .iter()
+            .enumerate()
+            .filter(|(_, commit)| !commit.changes.is_empty())
+            .map(|(at, commit)| {
+                let changes = commit
+                    .changes
+                    .iter()
+                    .map(|change| {
+                        (
+                            name(&change.path),
+                            change.from.as_deref().map(&mut name),
+                            change.deleted,
+                        )
+                    })
+                    .collect();
+                (at, changes)
+            })
+            .collect();
+        let mut now: Vec<&String> = history.paths.iter().collect();
+        now.sort();
+        let paths = now.into_iter().map(|path| name(path)).collect();
+        Self {
+            names,
+            at,
+            changes,
+            paths,
+        }
+    }
+
+    /// The history this was made of, with no commit IDs; refused when its
+    /// names, each counted as often as it is named, come to more than
+    /// [`DECODED_BYTES`], or a second is past what a unix millisecond holds.
+    fn history(&self) -> Result<MainHistory> {
+        use crate::domain::stats::conflicts::{MainChange, MainCommit};
+        let len = |index: u32| self.names.get(index as usize).map_or(0, String::len);
+        let named = self
+            .changes
+            .iter()
+            .flat_map(|(_, changes)| changes)
+            .map(|(path, from, _)| len(*path) + from.map_or(0, len))
+            .chain(self.paths.iter().map(|path| len(*path)))
+            .fold(0usize, usize::saturating_add);
+        within_decoded(named, "main's history")?;
+        let name = |index: u32| -> Result<String> {
+            self.names
+                .get(index as usize)
+                .cloned()
+                .context("main's history sent names a path it has not")
+        };
+        let mut at: i64 = 0;
+        let mut commits: Vec<MainCommit> = Vec::with_capacity(self.at.len());
+        for delta in &self.at {
+            at = at
+                .checked_add(*delta)
+                .filter(|at| at.checked_mul(1000).is_some())
+                .context("main's history sent has a commit's second out of range")?;
+            commits.push(MainCommit {
+                sha: String::new(),
+                at,
+                changes: Vec::new(),
+            });
+        }
+        for (index, changes) in &self.changes {
+            commits
+                .get_mut(*index)
+                .context("main's history sent names a commit it has not")?
+                .changes = changes
+                .iter()
+                .map(|(path, from, deleted)| {
+                    Ok(MainChange {
+                        path: name(*path)?,
+                        from: from.map(name).transpose()?,
+                        deleted: *deleted,
+                    })
+                })
+                .collect::<Result<_>>()?;
+        }
+        Ok(MainHistory {
+            commits,
+            paths: self
+                .paths
+                .iter()
+                .map(|path| name(*path))
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
+/// The most bytes of names the queue service makes of the Git reads a
+/// `stats` or `kpi` was sent with, each name counted as often as they name
+/// it: a request names a name by its index, so that one of
+/// [`crate::domain::queue_service::MAX_REQUEST_BYTES`] could name a long
+/// one many times over.
+pub const DECODED_BYTES: usize = 16 * crate::domain::queue_service::MAX_REQUEST_BYTES;
+
+/// That `bytes` of names, of `what`, are within [`DECODED_BYTES`].
+fn within_decoded(bytes: usize, what: &str) -> Result<()> {
+    anyhow::ensure!(
+        bytes <= DECODED_BYTES,
+        "{what} sent name {bytes} bytes, more than the {DECODED_BYTES} the queue service makes"
+    );
+    Ok(())
+}
+
+/// What the queue service reads `stats` and `kpi` with from the
+/// [`StatsGitReads`] their client sent ([`StatsGitReads::served`]).
+pub struct ServedReads {
+    pub areas: super::areas::AreaReader,
+    since: Option<i64>,
+    history: Option<History>,
+    version: String,
+    checkout: Option<PathBuf>,
+}
+
+impl StatsGitReads {
+    /// These reads, for the queue whose inputs are `inputs` now (the
+    /// service's [`stats_inputs`]): refused ([`STALE`]) when they were read
+    /// for other inputs.
+    pub fn served(&self, inputs: &StatsInputs) -> Result<ServedReads> {
+        anyhow::ensure!(self.inputs == inputs.version, "{STALE}");
+        let areas = match &self.areas {
+            None => None,
+            Some(areas) => {
+                anyhow::ensure!(
+                    areas.of.len() == inputs.landed.len(),
+                    "the areas sent are of {} landed commits, not the {} the inputs name",
+                    areas.of.len(),
+                    inputs.landed.len()
+                );
+                let named = areas
+                    .of
+                    .iter()
+                    .flatten()
+                    .map(|set| {
+                        areas.sets.get(*set as usize).map_or(0, |set| {
+                            set.iter().map(String::len).fold(0, usize::saturating_add)
+                        })
+                    })
+                    .fold(0usize, usize::saturating_add);
+                within_decoded(named, "the areas")?;
+                let mut judged = HashMap::new();
+                for (commit, set) in inputs.landed.iter().zip(&areas.of) {
+                    if let Some(set) = set {
+                        let set = areas
+                            .sets
+                            .get(*set as usize)
+                            .context("the areas sent name a set they have not")?;
+                        judged.insert(commit.clone(), set.clone());
+                    }
+                }
+                Some(judged)
+            }
+        };
+        let history = match &self.history {
+            None => None,
+            Some(SentHistory::Read(history)) => Some(History::Read(history.history()?)),
+            Some(SentHistory::Unavailable(reason)) => Some(History::Unavailable(reason.clone())),
+        };
+        Ok(ServedReads {
+            areas: super::areas::AreaReader::judged(areas),
+            since: inputs.history_since,
+            history,
+            version: inputs.version.clone(),
+            checkout: inputs.checkout.clone(),
+        })
+    }
+}
+
+impl ServedReads {
+    /// Main's history since `since` as [`StatsSources::history`] reads it:
+    /// the one the client read since the same second, or the reason it
+    /// could not; refused for another second, or with none read.
+    pub fn history(&self, since: i64) -> Result<MainHistory> {
+        anyhow::ensure!(
+            self.since == Some(since),
+            "main's history was read since {:?}, not {since}",
+            self.since
+        );
+        match &self.history {
+            Some(History::Read(history)) => Ok(history.clone()),
+            Some(History::Unavailable(reason)) => Err(anyhow::Error::msg(reason.clone())),
+            None => anyhow::bail!("the queue service's client read no main history"),
+        }
+    }
+
+    /// That `events`, the ones `stats` or `kpi` aggregate, give the inputs
+    /// these were read for ([`STALE`] when not).
+    pub fn check(&self, events: &[crate::domain::RunEvent]) -> Result<()> {
+        anyhow::ensure!(
+            stats_inputs(self.checkout.clone(), events).version == self.version,
+            "{STALE}"
+        );
+        Ok(())
+    }
+}
+
+/// What the queue service's client reads [`StatsGitReads`] with, outside
+/// the service (ADR-t3102-3 decision 5).
+pub struct StatsClient<'a> {
+    /// The `[areas]` of a checkout's `dagq.toml` and its Git.
+    pub areas: &'a dyn Fn(&Path) -> Result<super::areas::AreaReader>,
+    /// Main's history of a checkout since a unix second (Git).
+    pub history: &'a dyn Fn(&Path, i64) -> Result<MainHistory>,
+}
+
+/// Why main's history is not read for a queue bound to no main checkout.
+pub const NO_CHECKOUT: &str = "the queue is bound to no repository checkout";
+
+/// How many times a client sends `stats` or `kpi` with Git reads it made
+/// again when the service finds them [`STALE`].
+pub const ATTEMPTS: usize = 3;
+
+/// What the queue service answers `read` (a `stats` or `kpi`) sent with
+/// the Git reads [`prepare_read`] makes, by `call`; made and sent again,
+/// up to [`ATTEMPTS`] times in all, while the service finds them
+/// [`STALE`]. Any other read is sent as it is.
+pub fn call_read(
+    read: &super::queue_reads::QueueRead,
+    client: &StatsClient<'_>,
+    mut call: impl FnMut(&super::queue_reads::QueueRead) -> Result<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let mut attempt = 1;
+    loop {
+        let mut sent = read.clone();
+        prepare_read(&mut sent, client, &mut call)?;
+        match call(&sent) {
+            Err(error) if attempt < ATTEMPTS && format!("{error:#}").contains(STALE) => {
+                attempt += 1;
+            }
+            answered => return answered,
+        }
+    }
+}
+
+/// `read`, a `stats` or `kpi` its client sends to the queue service, with
+/// the [`StatsGitReads`] `client` reads in the main checkout the
+/// [`StatsInputs`] `call` answers to `stats_inputs` names: the areas of
+/// the landed commits (none without `[areas]` or a main checkout), and for
+/// a `stats` main's history since [`StatsInputs::history_since`] narrowed
+/// to the conflicted files, or why it was not read ([`NO_CHECKOUT`]
+/// without a main checkout, as on the DB). Params larger than a request
+/// takes are refused with their size, and nothing is sent. Any other read
+/// is left as it is, and nothing is asked.
+pub fn prepare_read(
+    read: &mut super::queue_reads::QueueRead,
+    client: &StatsClient<'_>,
+    call: impl FnOnce(&super::queue_reads::QueueRead) -> Result<serde_json::Value>,
+) -> Result<()> {
+    use super::queue_reads::{QueueRead, StatsInputsRead};
+    if !matches!(read, QueueRead::Stats(_) | QueueRead::Kpi(_)) {
+        return Ok(());
+    }
+    let inputs: StatsInputs =
+        serde_json::from_value(call(&QueueRead::StatsInputs(StatsInputsRead::default()))?)
+            .context("the inputs of stats do not read")?;
+    let checkout = inputs.checkout.as_deref();
+    let areas = match checkout {
+        Some(checkout) => (client.areas)(checkout)?.commit_areas(&inputs.landed),
+        None => None,
+    }
+    .map(|judged| {
+        let mut sent = SentAreas::default();
+        let mut index: HashMap<Vec<String>, u32> = HashMap::new();
+        sent.of = inputs
+            .landed
+            .iter()
+            .map(|commit| {
+                let set = judged.get(commit)?;
+                Some(*index.entry(set.clone()).or_insert_with(|| {
+                    sent.sets.push(set.clone());
+                    u32::try_from(sent.sets.len() - 1).unwrap_or(u32::MAX)
+                }))
+            })
+            .collect();
+        sent
+    });
+    // `kpi` counts no conflict hotspot: main's history is read for `stats`
+    // alone.
+    let since = inputs
+        .history_since
+        .filter(|_| matches!(read, QueueRead::Stats(_)));
+    let history = since.map(|since| match checkout {
+        Some(checkout) => match read_history(&|since| (client.history)(checkout, since), since) {
+            History::Read(history) => {
+                SentHistory::Read(CompactHistory::of(&history.narrowed_to(&inputs.conflicted)))
+            }
+            History::Unavailable(reason) => SentHistory::Unavailable(reason),
+        },
+        None => SentHistory::Unavailable(NO_CHECKOUT.to_owned()),
+    });
+    let git = Some(StatsGitReads {
+        inputs: inputs.version.clone(),
+        areas,
+        history,
+    });
+    match read {
+        QueueRead::Stats(stats) => stats.git = git,
+        QueueRead::Kpi(kpi) => kpi.git = git,
+        _ => {}
+    }
+    fit_request(
+        read,
+        crate::domain::queue_service::MAX_REQUEST_BYTES
+            - crate::domain::telemetry::REQUEST_ENVELOPE_BYTES,
+    )
+}
+
+/// That `read`'s params fit a request of at most `max` bytes: params
+/// larger are refused with their size, and nothing is sent.
+pub fn fit_request(read: &super::queue_reads::QueueRead, max: usize) -> Result<()> {
+    let (use_case, params) = read.request();
+    let size = serde_json::to_vec(&params)?.len();
+    anyhow::ensure!(
+        size <= max,
+        "the request of {} is {size} bytes, larger than the {max} a request to the queue \
+         service takes",
+        use_case.as_str()
+    );
+    Ok(())
 }
 
 /// The `[conflicts]` thresholds and where they came from.
@@ -172,6 +675,9 @@ pub(crate) fn inputs(
     sources: &StatsSources<'_>,
 ) -> Result<Inputs> {
     let events = queue.all_events()?;
+    if let Some(fresh) = sources.fresh {
+        fresh(&events)?;
+    }
     let goals = queue.task_goals()?;
     let snapshot = slot_snapshot(queue, processes, now)?;
     let config = stall_config(&events, sources.config_file)?;
@@ -687,5 +1193,442 @@ mod tests {
             conflict_config(Some(ConflictConfig::default())).source,
             "file"
         );
+    }
+
+    fn landed(id: i64, run: u32, commit: &str) -> RunEvent {
+        RunEvent {
+            run_id: Some(RunId::new(format!("{run:08x}-c873-4cec-aee3-ee7f07f52e4a")).unwrap()),
+            ..event(
+                id,
+                "run_integrated",
+                json!({"commit": commit}),
+                "1970-01-01T00:01:40.000Z",
+            )
+        }
+    }
+
+    fn conflict(id: i64, file: &str) -> RunEvent {
+        event(
+            id,
+            "integration_deferred",
+            json!({"main": "m", "conflicts": [file]}),
+            "1970-01-01T00:03:20.000Z",
+        )
+    }
+
+    fn whole_history() -> MainHistory {
+        use crate::domain::stats::conflicts::{MainChange, MainCommit};
+        let change = |path: &str, from: Option<&str>| MainChange {
+            path: path.into(),
+            from: from.map(str::to_owned),
+            deleted: false,
+        };
+        MainHistory {
+            commits: vec![
+                MainCommit {
+                    sha: "c1".into(),
+                    at: 150,
+                    changes: vec![change("a", None), change("z", None)],
+                },
+                MainCommit {
+                    sha: "c2".into(),
+                    at: 190,
+                    changes: vec![change("z", None)],
+                },
+                MainCommit {
+                    sha: "c3".into(),
+                    at: 210,
+                    changes: vec![change("b2", Some("b"))],
+                },
+            ],
+            paths: ["a", "b2", "z"].map(str::to_owned).into(),
+        }
+    }
+
+    /// A client that finds `[areas]` (`a` → docs) and reads `history`.
+    fn client_of<'a>(
+        areas: &'a dyn Fn(&Path) -> Result<super::super::areas::AreaReader>,
+        history: &'a dyn Fn(&Path, i64) -> Result<MainHistory>,
+    ) -> StatsClient<'a> {
+        StatsClient { areas, history }
+    }
+
+    fn mapped(_: &Path) -> Result<super::super::areas::AreaReader> {
+        use crate::domain::areas::AreaMap;
+        Ok(super::super::areas::AreaReader {
+            map: Some(AreaMap::new(vec![("docs".into(), vec!["a".into()])]).unwrap()),
+            changed: std::sync::Arc::new(|commits: &[String]| {
+                Ok(commits
+                    .iter()
+                    .filter(|commit| *commit != "gone")
+                    .map(|commit| {
+                        let paths = if commit == "c2" { "z" } else { "a" };
+                        (commit.clone(), vec![paths.to_owned()])
+                    })
+                    .collect())
+            }),
+            judged: None,
+        })
+    }
+
+    /// `read` (`stats` or `kpi`) as `prepare_read` makes it from the inputs
+    /// of `events` and `client`, and its Git reads as the service reads
+    /// them back from the request.
+    fn sent(
+        read: crate::domain::queue_service::UseCase,
+        events: &[RunEvent],
+        client: &StatsClient<'_>,
+    ) -> (super::super::queue_reads::QueueRead, Option<StatsGitReads>) {
+        use super::super::queue_reads::{KpiRead, QueueRead, StatsRead};
+        let inputs = stats_inputs(Some(PathBuf::from("/repo")), events);
+        let mut read = QueueRead::parse(read, &json!({})).unwrap().unwrap();
+        prepare_read(&mut read, client, |asked| {
+            assert!(matches!(asked, QueueRead::StatsInputs(_)));
+            Ok(serde_json::to_value(&inputs).unwrap())
+        })
+        .unwrap();
+        let (use_case, params) = read.request();
+        let git = match QueueRead::parse(use_case, &params).unwrap() {
+            Some(QueueRead::Stats(StatsRead { git, .. }) | QueueRead::Kpi(KpiRead { git, .. })) => {
+                git
+            }
+            other => panic!("{other:?}"),
+        };
+        (read, git)
+    }
+
+    /// `stats_inputs` names the landed commits, the second main's history
+    /// is read since by [`conflict_history`]'s rule and the conflicted
+    /// files, with a version that a landing or a conflict changes and
+    /// another event does not.
+    #[test]
+    fn stats_inputs_name_what_the_client_reads_with_git_and_their_version() {
+        let quiet = [landed(1, 1, "c1")];
+        let inputs = stats_inputs(Some(PathBuf::from("/repo")), &quiet);
+        assert_eq!(inputs.landed, ["c1"]);
+        assert_eq!((inputs.history_since, inputs.conflicted.len()), (None, 0));
+        let events = [landed(1, 1, "c1"), conflict(2, "b"), conflict(3, "a")];
+        let inputs = stats_inputs(Some(PathBuf::from("/repo")), &events);
+        assert_eq!(inputs.history_since, Some(99));
+        assert_eq!(inputs.history_since, history_since(&events));
+        assert_eq!(inputs.conflicted, ["a", "b"]);
+        let note = event(4, "note", json!({}), "1970-01-01T00:05:00.000Z");
+        let mut more = events.to_vec();
+        more.push(note);
+        assert_eq!(
+            stats_inputs(Some(PathBuf::from("/repo")), &more).version,
+            inputs.version
+        );
+        for changed in [landed(5, 2, "c2"), conflict(5, "c")] {
+            let mut more = events.to_vec();
+            more.push(changed);
+            assert_ne!(
+                stats_inputs(Some(PathBuf::from("/repo")), &more).version,
+                inputs.version
+            );
+        }
+        assert_ne!(stats_inputs(None, &events).version, inputs.version);
+    }
+
+    /// The client of `stats` reads with its Git what `stats_inputs` names
+    /// and sends it, and the service reads it back as it would have read
+    /// Git: the areas of each landed commit (none for one Git has not),
+    /// and main's history narrowed to the conflicted files, which gives
+    /// the same hotspots; `kpi` is sent no history. A history the client
+    /// could not read is the same `Unavailable`, a queue with no main
+    /// checkout gives the DB's reason and no areas, and another read asks
+    /// nothing.
+    #[test]
+    fn a_client_reads_git_for_stats_and_kpi_as_the_service_on_the_db_would() {
+        use crate::domain::queue_service::UseCase;
+        use crate::domain::stats::{ConflictConfigReport, conflicts::conflict_hotspots};
+        let events = [
+            landed(1, 1, "c1"),
+            landed(2, 2, "c2"),
+            landed(3, 3, "gone"),
+            conflict(4, "a"),
+            conflict(5, "b"),
+        ];
+        let inputs = stats_inputs(Some(PathBuf::from("/repo")), &events);
+        let read = |checkout: &Path, since: i64| {
+            assert_eq!((checkout, since), (Path::new("/repo"), 99));
+            Ok(whole_history())
+        };
+        let client = client_of(&mapped, &read);
+        let (_, git) = sent(UseCase::Stats, &events, &client);
+        let served = git.unwrap().served(&inputs).unwrap();
+        let on_db = mapped(Path::new("/repo")).unwrap();
+        assert_eq!(served.areas.run_areas(&events), on_db.run_areas(&events));
+        assert_eq!(
+            served.areas.run_areas(&events).unwrap().len(),
+            2,
+            "a commit Git has not has no areas"
+        );
+        let hotspots = |history: History| {
+            serde_json::to_value(conflict_hotspots(
+                &events,
+                crate::domain::EventId::new(0),
+                crate::domain::EventId::new(5),
+                |_| true,
+                &history,
+                ConflictConfigReport::default(),
+            ))
+            .unwrap()
+        };
+        let read_back = conflict_history(&events, &|since| served.history(since));
+        assert_eq!(
+            hotspots(read_back),
+            hotspots(conflict_history(&events, &|_| Ok(whole_history())))
+        );
+        assert!(served.history(98).is_err(), "another second");
+        let (_, kpi) = sent(UseCase::Kpi, &events, &client);
+        let kpi = kpi.unwrap();
+        assert_eq!(kpi.history, None, "kpi reads no main history");
+        assert!(kpi.areas.is_some());
+
+        let failing = |_: &Path, _: i64| -> Result<MainHistory> { anyhow::bail!("no git") };
+        let client = client_of(&mapped, &failing);
+        let served = sent(UseCase::Stats, &events, &client)
+            .1
+            .unwrap()
+            .served(&inputs)
+            .unwrap();
+        assert_eq!(
+            conflict_history(&events, &|since| served.history(since)),
+            conflict_history(&events, &|_| anyhow::bail!("no git"))
+        );
+
+        // No main checkout: no areas, and the DB's reason for the history.
+        let unbound = stats_inputs(None, &events);
+        let mut read = super::super::queue_reads::QueueRead::parse(UseCase::Stats, &json!({}))
+            .unwrap()
+            .unwrap();
+        prepare_read(&mut read, &client, |_| {
+            Ok(serde_json::to_value(&unbound).unwrap())
+        })
+        .unwrap();
+        let super::super::queue_reads::QueueRead::Stats(stats) = &read else {
+            unreachable!()
+        };
+        let served = stats.git.as_ref().unwrap().served(&unbound).unwrap();
+        assert_eq!(served.areas.run_areas(&events), None);
+        assert_eq!(
+            conflict_history(&events, &|since| served.history(since)),
+            History::Unavailable(NO_CHECKOUT.into())
+        );
+
+        let mut other = super::super::queue_reads::QueueRead::parse(UseCase::List, &json!({}))
+            .unwrap()
+            .unwrap();
+        let before = other.clone();
+        prepare_read(&mut other, &client, |_| unreachable!()).unwrap();
+        assert_eq!(other, before);
+    }
+
+    /// Reads made for other inputs than the events give are refused: by
+    /// the service before it reads them, and by the check of the events
+    /// `stats` and `kpi` aggregate (a landing or a conflict after
+    /// `stats_inputs`); the client then makes them again and sends them,
+    /// up to [`ATTEMPTS`] times.
+    #[test]
+    fn reads_of_other_events_are_refused_and_made_again() {
+        use crate::domain::queue_service::UseCase;
+        let events = [landed(1, 1, "c1"), conflict(2, "a")];
+        let inputs = stats_inputs(Some(PathBuf::from("/repo")), &events);
+        let read = |_: &Path, _: i64| Ok(whole_history());
+        let client = client_of(&mapped, &read);
+        let git = sent(UseCase::Stats, &events, &client).1.unwrap();
+        let served = git.served(&inputs).unwrap();
+        served.check(&events).unwrap();
+        for later in [landed(3, 2, "c2"), conflict(3, "b")] {
+            let mut moved = events.to_vec();
+            moved.push(later);
+            let error = served.check(&moved).unwrap_err();
+            assert!(format!("{error:#}").contains(STALE), "{error:#}");
+            let now = stats_inputs(Some(PathBuf::from("/repo")), &moved);
+            assert!(format!("{:#}", git.served(&now).err().unwrap()).contains(STALE));
+        }
+
+        let read_first = super::super::queue_reads::QueueRead::parse(UseCase::Stats, &json!({}))
+            .unwrap()
+            .unwrap();
+        let sends = std::cell::Cell::new(0);
+        let call = |stale_until: usize| {
+            let sends = &sends;
+            let inputs = &inputs;
+            move |asked: &super::super::queue_reads::QueueRead| {
+                if matches!(asked, super::super::queue_reads::QueueRead::StatsInputs(_)) {
+                    return Ok(serde_json::to_value(inputs).unwrap());
+                }
+                sends.set(sends.get() + 1);
+                if sends.get() <= stale_until {
+                    anyhow::bail!("failed: stats {STALE}")
+                }
+                Ok(json!({"answered": sends.get()}))
+            }
+        };
+        assert_eq!(
+            call_read(&read_first, &client, call(1)).unwrap(),
+            json!({"answered": 2})
+        );
+        sends.set(0);
+        let error = call_read(&read_first, &client, call(usize::MAX)).unwrap_err();
+        assert!(format!("{error:#}").contains(STALE));
+        assert_eq!(sends.get(), ATTEMPTS);
+    }
+
+    /// Reads whose plain form (every commit's ID and areas, the whole
+    /// history) is far past what a request takes are sent within it, and
+    /// read back to the same areas and the same hotspots; params past it
+    /// even so are refused with their size, and nothing is sent.
+    #[test]
+    fn reads_past_a_request_in_their_plain_form_are_sent_within_it_and_read_the_same() {
+        use crate::domain::queue_service::{MAX_REQUEST_BYTES, UseCase};
+        use crate::domain::stats::conflicts::{MainChange, MainCommit};
+        use crate::domain::stats::{ConflictConfigReport, conflicts::conflict_hotspots};
+        const COMMITS: u32 = 60_000;
+        let mut events: Vec<RunEvent> = (0..COMMITS)
+            .map(|n| landed(i64::from(n) + 1, n, &format!("{n:040x}")))
+            .collect();
+        events.push(conflict(i64::from(COMMITS) + 1, "a"));
+        let history = MainHistory {
+            commits: (0..COMMITS)
+                .map(|n| MainCommit {
+                    sha: format!("{n:040x}"),
+                    at: 100 + i64::from(n) * 7,
+                    changes: vec![
+                        MainChange {
+                            path: if n % 9 == 0 { "a" } else { "src/other/file.rs" }.into(),
+                            from: None,
+                            deleted: false,
+                        },
+                        MainChange {
+                            path: format!("docs/plans/{n}.md"),
+                            from: None,
+                            deleted: false,
+                        },
+                    ],
+                })
+                .collect(),
+            paths: (0..COMMITS)
+                .map(|n| format!("docs/plans/{n}.md"))
+                .chain(["a".to_owned()])
+                .collect(),
+        };
+        let plain: std::collections::BTreeMap<String, Vec<String>> = (0..COMMITS)
+            .map(|n| (format!("{n:040x}"), vec!["docs".to_owned()]))
+            .collect();
+        let plain_history: Vec<serde_json::Value> = history
+            .commits
+            .iter()
+            .map(|commit| {
+                let changes: Vec<serde_json::Value> = commit
+                    .changes
+                    .iter()
+                    .map(|change| json!({"path": change.path, "from": change.from, "deleted": change.deleted}))
+                    .collect();
+                json!({"sha": commit.sha, "at": commit.at, "changes": changes})
+            })
+            .collect();
+        assert!(
+            serde_json::to_vec(&(&plain, &plain_history, &history.paths))
+                .unwrap()
+                .len()
+                > 4 * MAX_REQUEST_BYTES,
+            "the plain form is past a request"
+        );
+        let all_docs = |_: &Path| {
+            use crate::domain::areas::AreaMap;
+            Ok(super::super::areas::AreaReader {
+                map: Some(AreaMap::new(vec![("docs".into(), vec!["*".into()])]).unwrap()),
+                changed: std::sync::Arc::new(|commits: &[String]| {
+                    Ok(commits
+                        .iter()
+                        .map(|commit| (commit.clone(), vec!["x".to_owned()]))
+                        .collect())
+                }),
+                judged: None,
+            })
+        };
+        let whole = history.clone();
+        let read = move |_: &Path, _: i64| Ok(whole.clone());
+        let client = client_of(&all_docs, &read);
+        let (sent_read, git) = sent(UseCase::Stats, &events, &client);
+        assert!(serde_json::to_vec(&sent_read.request().1).unwrap().len() < MAX_REQUEST_BYTES / 2);
+        let inputs = stats_inputs(Some(PathBuf::from("/repo")), &events);
+        let served = git.unwrap().served(&inputs).unwrap();
+        assert_eq!(
+            served.areas.run_areas(&events),
+            all_docs(Path::new("/repo")).unwrap().run_areas(&events)
+        );
+        let hotspots = |history: History| {
+            serde_json::to_value(conflict_hotspots(
+                &events,
+                crate::domain::EventId::new(0),
+                crate::domain::EventId::new(i64::from(COMMITS) + 1),
+                |_| true,
+                &history,
+                ConflictConfigReport::default(),
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            hotspots(conflict_history(&events, &|since| served.history(since))),
+            hotspots(History::Read(history))
+        );
+        let error = fit_request(&sent_read, 100).unwrap_err();
+        assert!(format!("{error:#}").contains("stats"), "{error:#}");
+    }
+
+    /// Git reads that name a long name over and over, so that the service
+    /// would make far more than the request holds, are refused, as are
+    /// seconds past what a unix millisecond holds; the service makes none
+    /// of them.
+    #[test]
+    fn reads_naming_more_than_the_service_makes_are_refused() {
+        let events = [landed(1, 1, "c1"), conflict(2, "a")];
+        let inputs = stats_inputs(Some(PathBuf::from("/repo")), &events);
+        let long = "x".repeat(DECODED_BYTES / 4);
+        let refused = |git: StatsGitReads| format!("{:#}", git.served(&inputs).err().unwrap());
+        let history = |history: CompactHistory| StatsGitReads {
+            inputs: inputs.version.clone(),
+            areas: None,
+            history: Some(SentHistory::Read(history)),
+        };
+        let named = refused(history(CompactHistory {
+            names: vec![long.clone()],
+            at: vec![0],
+            changes: vec![(0, vec![(0, Some(0), false); 3])],
+            paths: Vec::new(),
+        }));
+        assert!(named.contains("more than"), "{named}");
+        let past = refused(history(CompactHistory {
+            at: vec![i64::MAX / 1000 + 1],
+            ..CompactHistory::default()
+        }));
+        assert!(past.contains("out of range"), "{past}");
+        let overflow = refused(history(CompactHistory {
+            at: vec![i64::MAX / 2000, i64::MAX],
+            ..CompactHistory::default()
+        }));
+        assert!(overflow.contains("out of range"), "{overflow}");
+        let areas = refused(StatsGitReads {
+            inputs: inputs.version.clone(),
+            areas: Some(SentAreas {
+                sets: vec![vec![long.clone(); 5]],
+                of: vec![Some(0)],
+            }),
+            history: None,
+        });
+        assert!(areas.contains("more than"), "{areas}");
+        let within = StatsGitReads {
+            inputs: inputs.version.clone(),
+            areas: Some(SentAreas {
+                sets: vec![vec![long]],
+                of: vec![Some(0)],
+            }),
+            history: None,
+        };
+        assert!(within.served(&inputs).is_ok());
     }
 }

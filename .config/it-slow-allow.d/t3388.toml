@@ -1,0 +1,11 @@
+# 5.75s to 7.69s in the worker's stress (stress 5, median 6.39s, load average ~13)
+[[test]]
+name = "cli_areas::stats_and_kpi_through_the_service_read_areas_and_main_s_history_with_the_client_s_git"
+reason = "境界（Git・プロセス・SQLite）: queue service を起動し、hostのCLIのクライアントが main checkout の Git で着地した commit の file と main の履歴を読み、Git を走らせない service が stats・stats --ledger・kpi を DB の経路と同じに答える配線の代表。入力の版・詰めた形・履歴の絞り込みの判断は application::stats と domain::stats::conflicts の unit test"
+task = 3388
+
+# 6.20s in the worker's stress (stress 5, load average ~13)
+[[test]]
+name = "cli_areas::a_conflict_between_the_inputs_and_stats_is_read_again_not_mixed"
+reason = "境界（SQLite・プロセス・Git）: stats_inputs と stats の要求の間に別の接続が実の queue に衝突を書き、別のプロセスの service が古い Git の読み取りを断ってクライアントが読み直す経路。版の照合と送り直しの回数の判断は application::stats の unit test"
+task = 3388

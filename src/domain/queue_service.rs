@@ -184,7 +184,8 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         UseCase::ProposalShow
         | UseCase::AgentResult
         | UseCase::AgentSet
-        | UseCase::ServiceStatus => "its command has no option that narrows the answer",
+        | UseCase::ServiceStatus
+        | UseCase::StatsInputs => "its command has no option that narrows the answer",
         UseCase::RunLog | UseCase::PlannerLog => {
             "the answer names the log's file, which the client reads: none is longer"
         }
@@ -330,6 +331,11 @@ string_enum!(UseCase {
     // service while it answers; the host's `dagq` adds what it finds of the
     // service outside the DB.
     ServiceStatus => "service_status",
+    // What `dagq stats` and `dagq kpi` ask for first and read Git with
+    // themselves (ADR-t3102-3 decision 5): the repository the queue is
+    // bound to, the landed commits and how far back main's history is
+    // read. No command line goes to it alone.
+    StatsInputs => "stats_inputs",
     // The eval of an agent (ADR-t1728-1 decisions 5 and 6): a request of a
     // round, which the supervisor runs, as `dagq agent eval` records it,
     // and the rounds and one round read back, as `dagq agent results` and

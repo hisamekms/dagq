@@ -56,9 +56,38 @@ fn seeded() -> (Queue, i64, i64) {
 }
 
 fn answer(queue: &Queue, token: &str, use_case: UseCase, params: &Value) -> Value {
+    let params = &with_git_reads(queue, token, use_case, params);
     let response = call(queue, Some(token), use_case, params.clone());
     assert_eq!(response["ok"], true, "{use_case:?} {params}: {response}");
     response["result"].clone()
+}
+
+/// `params` of `use_case` with the Git reads a client sends a `stats` or
+/// `kpi` with ([`dagq::application::stats::prepare_read`]), made from the
+/// service's `stats_inputs` of the queue (bound to no repository, so none
+/// is read); any other read's as they are.
+fn with_git_reads(queue: &Queue, token: &str, use_case: UseCase, params: &Value) -> Value {
+    use dagq::application::{
+        areas::AreaReader,
+        queue_reads::QueueRead,
+        stats::{StatsClient, prepare_read},
+    };
+    if !matches!(use_case, UseCase::Stats | UseCase::Kpi) {
+        return params.clone();
+    }
+    let mut read = QueueRead::parse(use_case, params).unwrap().unwrap();
+    let client = StatsClient {
+        areas: &|_| Ok(AreaReader::none()),
+        history: &|_, _| anyhow::bail!("the queue is bound to no repository"),
+    };
+    prepare_read(&mut read, &client, |inputs| {
+        let (use_case, params) = inputs.request();
+        let response = call(queue, Some(token), use_case, params);
+        assert_eq!(response["ok"], true, "{response}");
+        Ok(response["result"].clone())
+    })
+    .unwrap();
+    read.request().1
 }
 
 /// The service's answer is what the command line prints for `args`, read
@@ -666,6 +695,35 @@ fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
             response["error"]["code"], "bad_request",
             "{params}: {response}"
         );
+    }
+    // No client names the checkout whose files the service reads for
+    // `stats` and `kpi`; one sent with no Git reads (a client older than
+    // the service) or with reads of other inputs is refused, not answered
+    // with less.
+    for use_case in [UseCase::Stats, UseCase::Kpi] {
+        let named = call(
+            &queue,
+            Some(&worker),
+            use_case,
+            json!({"git": {"inputs": "v", "checkout": "/elsewhere"}}),
+        );
+        assert_eq!(named["error"]["code"], "bad_request", "{named}");
+        for (params, said) in [
+            (json!({}), dagq::application::stats::NOT_READ),
+            (
+                json!({"git": {"inputs": "another"}}),
+                dagq::application::stats::STALE,
+            ),
+        ] {
+            let refused = call(&queue, Some(&worker), use_case, params.clone());
+            assert_eq!(refused["ok"], false, "{params}: {refused}");
+            assert!(
+                refused["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(said)),
+                "{params}: {refused}"
+            );
+        }
     }
     // A read of what is not there fails as the command line does.
     let missing = call(&queue, Some(&worker), UseCase::GoalShow, json!({"id": 999}));

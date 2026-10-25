@@ -54,6 +54,7 @@ related:
 - `stats`・`kpi`・`marks`・`timeline`は読むだけのコマンドで、queueの状態もeventも変えず、observerとheadlessのjobも打てる。
 - `report`もqueueの状態とeventを変えないがファイルを書き、`mark`はeventを書くので、どちらもobserverとheadlessのjobには許さない（[Authorization](../authorization.md)）。
 - 人・inbox・plannerとクライアントモードの`dagq`は、これらをqueue serviceへ送ってDBを開かず、serviceが答える（[hostのCLI](../queue-service-host-cli.md#送る範囲)）。
+  serviceはGitを起動せず、`stats`と`kpi`はクライアントがmain checkoutのGitで読んだ着地したcommitのareaを、`stats`はmainの履歴も添えて送る。
 - cursor（event ID・unix秒・RFC 3339の時刻）の読み方はどのコマンドでも同じで、`domain::stats::Cursor`のdoc commentが持つ。
 - goalで絞ると、taskを持たないevent（observerの観察、taskの無いask、plannerのturnなど）の多くは0か数えないので、絞った値と絞らない値をその種類の欄で比べない。
 - 日と週の期間は、hostのlocal timezoneの今のoffsetで全ての期間を切るので、夏時間の切り替えをまたぐ期間は1時間ずれる。

@@ -59,10 +59,11 @@ pub use host::{
     repository_common_dir, repository_queue_dir, run_command, service_commands, trace_command, up,
 };
 pub use observation::{
-    CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, ci_failures, doctor, events,
-    events_matching, graph_export_text, graph_svg_of, observe, observer_launch, queue_agents,
-    read_queue, service_detail, service_reads, stats, status, status_for, throughput_review,
-    throughput_review_launch, timeline, timeline_in, watch, watch_in, watch_through_service,
+    CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, call_stats_read, ci_failures,
+    doctor, events, events_matching, graph_export_text, graph_svg_of, observe, observer_launch,
+    queue_agents, read_queue, service_detail, service_reads, stats, status, status_for,
+    throughput_review, throughput_review_launch, timeline, timeline_in, watch, watch_in,
+    watch_through_service,
 };
 pub use planning::{
     PLANNER_TIMEOUT, PlannerEntry, planner_session, planner_session_with_provider, planners,

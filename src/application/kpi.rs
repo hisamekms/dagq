@@ -34,7 +34,27 @@ pub fn kpi(
     query: &KpiQuery,
     host_metrics: Option<HostReader<'_>>,
 ) -> Result<Kpi> {
+    kpi_checked(queue, now, host, config, areas, query, host_metrics, None)
+}
+
+/// [`kpi`] that first has `fresh` refuse the events it reads when they are
+/// not the ones `areas` were read for (the queue service's
+/// [`super::stats::ServedReads::check`]); `None` checks none.
+#[allow(clippy::too_many_arguments)]
+pub fn kpi_checked(
+    queue: &(impl EventStore + PlanningRecords + SupervisorReads + ?Sized),
+    now: i64,
+    host: Host,
+    config: &KpiConfig,
+    areas: &AreaReader,
+    query: &KpiQuery,
+    host_metrics: Option<HostReader<'_>>,
+    fresh: Option<&super::stats::EventsCheck<'_>>,
+) -> Result<Kpi> {
     let events = queue.all_events()?;
+    if let Some(fresh) = fresh {
+        fresh(&events)?;
+    }
     let run_areas = areas.run_areas(&events);
     let goals = queue.task_goals()?;
     let changes = queue.task_changes()?;

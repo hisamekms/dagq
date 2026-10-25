@@ -17,6 +17,7 @@ use super::{
     ObserveInputRead, RoleRead, StatsRead, TimelineRead,
 };
 use crate::application::forecast::ForecastQuery;
+use crate::application::stats::StatsGitReads;
 use crate::application::{
     Clock, EventStore, ObserverLog, QueueRecords, RunLog, TaskReads, observer, watch,
 };
@@ -36,11 +37,20 @@ use crate::domain::{
 /// observation's input files and the clock.
 pub trait ObservationSources<Q: ?Sized> {
     fn status(&self, queue: &Q, role: Option<SessionRole>) -> Result<Value>;
-    fn stats(&self, queue: &Q, query: &StatsQuery) -> Result<Value>;
+    /// `stats`, with what its client read with Git when it sent it
+    /// ([`StatsGitReads`]).
+    fn stats(&self, queue: &Q, query: &StatsQuery, git: Option<&StatsGitReads>) -> Result<Value>;
     /// `stats --ledger`: today's `stats` beside the ledger's
     /// ([`crate::application::ledger_check`]).
-    fn ledger_check(&self, queue: &Q, query: &StatsQuery) -> Result<Value>;
-    fn kpi(&self, queue: &Q, query: &KpiQuery) -> Result<Value>;
+    fn ledger_check(
+        &self,
+        queue: &Q,
+        query: &StatsQuery,
+        git: Option<&StatsGitReads>,
+    ) -> Result<Value>;
+    /// `stats_inputs` ([`crate::application::stats::stats_inputs`]).
+    fn stats_inputs(&self, queue: &Q) -> Result<Value>;
+    fn kpi(&self, queue: &Q, query: &KpiQuery, git: Option<&StatsGitReads>) -> Result<Value>;
     fn forecast(&self, queue: &Q, query: &ForecastQuery) -> Result<Value>;
     /// The limit of the improvement proposals and the ones waiting
     /// (`findings`' `improvements`).
@@ -151,9 +161,9 @@ pub fn stats<Q: ?Sized>(
         full: read.full,
     };
     if read.ledger {
-        sources.ledger_check(queue, &query)
+        sources.ledger_check(queue, &query, read.git.as_ref())
     } else {
-        sources.stats(queue, &query)
+        sources.stats(queue, &query, read.git.as_ref())
     }
 }
 
@@ -163,7 +173,7 @@ pub fn kpi<Q: ?Sized>(
     sources: &(impl ObservationSources<Q> + ?Sized),
     read: &KpiRead,
 ) -> Result<Value> {
-    sources.kpi(queue, &kpi_query(read)?)
+    sources.kpi(queue, &kpi_query(read)?, read.git.as_ref())
 }
 
 /// `forecast`.
@@ -304,13 +314,21 @@ mod tests {
         fn status(&self, _: &Records, _: Option<SessionRole>) -> Result<Value> {
             unimplemented!()
         }
-        fn stats(&self, _: &Records, _: &StatsQuery) -> Result<Value> {
+        fn stats(&self, _: &Records, _: &StatsQuery, _: Option<&StatsGitReads>) -> Result<Value> {
             unimplemented!()
         }
-        fn ledger_check(&self, _: &Records, _: &StatsQuery) -> Result<Value> {
+        fn ledger_check(
+            &self,
+            _: &Records,
+            _: &StatsQuery,
+            _: Option<&StatsGitReads>,
+        ) -> Result<Value> {
             unimplemented!()
         }
-        fn kpi(&self, _: &Records, _: &KpiQuery) -> Result<Value> {
+        fn stats_inputs(&self, _: &Records) -> Result<Value> {
+            unimplemented!()
+        }
+        fn kpi(&self, _: &Records, _: &KpiQuery, _: Option<&StatsGitReads>) -> Result<Value> {
             unimplemented!()
         }
         fn forecast(&self, _: &Records, _: &ForecastQuery) -> Result<Value> {

@@ -244,3 +244,59 @@ fn a_bare_repository_stops_up_supervise_integrate_and_doctor() {
     assert!(error.contains("is bare"), "{doctor}");
     assert_eq!(naming_checkout(Some(&bare), &worktree), bare);
 }
+
+/// What the queue service finds of the main checkout with no Git run, from
+/// the Git common directory a queue is bound to, is what `main_checkout_of`
+/// finds from it, in every layout: the parent of a `.git` directory,
+/// whatever `core.worktree` names (another directory, by an absolute or a
+/// relative path, or the checkout itself); and none where it finds none (a
+/// linked worktree's `.git` file, a separate Git directory, a bare
+/// repository).
+#[test]
+fn the_service_finds_the_main_checkout_main_checkout_of_finds_with_no_git() {
+    use dagq::infrastructure::adapters::main_checkout_from_files;
+    let dir = tempfile::tempdir().unwrap();
+    let (_fixture, repo, _db) = fixture();
+    let repo = repo.canonicalize().unwrap();
+    let common_dir = repo.join(".git");
+    let same = |common_dir: &Path| {
+        let found = main_checkout_from_files(common_dir);
+        assert_eq!(
+            found,
+            main_checkout_of(common_dir).ok(),
+            "{}",
+            common_dir.display()
+        );
+        found
+    };
+    assert_eq!(same(&common_dir), Some(repo.clone()));
+    let elsewhere = repo.parent().unwrap().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    for worktree in [
+        elsewhere.to_str().unwrap(),
+        "../../elsewhere",
+        repo.to_str().unwrap(),
+    ] {
+        git(&common_dir, &["config", "core.worktree", worktree]);
+        assert_eq!(same(&common_dir), Some(repo.clone()), "{worktree}");
+    }
+    git(&common_dir, &["config", "--unset", "core.worktree"]);
+    let linked = dir.path().join("linked");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(same(&linked.join(".git")), None);
+    let (main, _run) = separate_git_dir(dir.path());
+    assert_eq!(same(&dir.path().join("sep.git")), None);
+    assert_eq!(main_checkout_of(&main).unwrap(), main);
+    let (bare, _worktree) = bare_with_worktree(dir.path(), &repo);
+    assert_eq!(same(&bare), None);
+}

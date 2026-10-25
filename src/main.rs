@@ -3196,6 +3196,7 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             goal: goal_id,
             full,
             ledger,
+            git: None,
         }),
         Command::Kpi {
             period,
@@ -3223,6 +3224,7 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             compare,
             window,
             goal: goal_id,
+            git: None,
         }),
         Command::Forecast {
             task_id,
@@ -3536,7 +3538,9 @@ fn rebind_checkout(repo: Option<&Path>) -> Result<PathBuf> {
 /// [`client_request`], printed as [`finish_command`] prints it: a `report`
 /// and a `release` first ask what to read, and read it with Git and draw
 /// here before they are sent ([`dagq::compose::prepare_command`]), for the
-/// queue at `db` when the caller knows it.
+/// queue at `db` when the caller knows it; so do `stats` and `kpi`
+/// ([`dagq::compose::call_stats_read`], sent again while the service finds
+/// the Git reads older than the queue's events).
 fn call_service(
     client: &dagq::infrastructure::queue_service::Client,
     db: Option<&Path>,
@@ -3553,6 +3557,16 @@ fn call_service(
             })?
             .request()
             .1
+        }
+        Command::Stats { .. } | Command::Kpi { .. } => {
+            let read = queue_read(command).context("the command is one of the service's")?;
+            return finish_command(
+                command,
+                dagq::compose::call_stats_read(&read, |sent| {
+                    let (use_case, params) = sent.request();
+                    client.call(use_case, params)
+                })?,
+            );
         }
         _ => params,
     };

@@ -1318,7 +1318,8 @@ pub fn checkout_files(checkout: &Path) -> Result<Vec<String>> {
 /// The main checkout of the repository at `path` (any worktree of it, or
 /// its Git common directory): the main worktree, which `git worktree list`
 /// lists first and whose `dagq.toml` dagq reads. The only place dagq
-/// decides it. A bare main worktree has no files, and so no main checkout;
+/// decides it with Git; the queue service, which runs none, finds the same
+/// from a common directory with [`main_checkout_from_files`]. A bare main worktree has no files, and so no main checkout;
 /// Git does not record the main worktree of a repository with a separate
 /// Git directory (`git init --separate-git-dir`) and lists the Git
 /// directory in its place, which leaves only `path` itself when it is that
@@ -1385,6 +1386,36 @@ pub fn main_checkout_of(path: &Path) -> Result<PathBuf> {
         common_dir.display(),
         path.display()
     )
+}
+
+/// The main checkout of the repository whose Git common directory is
+/// `common_dir`, as the queue service finds it with no Git run (ADR-t3102-3
+/// decision 5), from the binding alone and never from a path a client
+/// names: the one [`main_checkout_of`] finds from `common_dir`, by the rule
+/// Git lists the main worktree first with ([`main_worktree_of`] of the
+/// real path); none when the path is no directory (a linked worktree's
+/// `.git` file is none) or not there.
+pub fn main_checkout_from_files(common_dir: &Path) -> Option<PathBuf> {
+    let common_dir = common_dir.canonicalize().ok()?;
+    if !common_dir.is_dir() {
+        return None;
+    }
+    main_worktree_of(&common_dir)
+}
+
+/// The main worktree `git worktree list` lists first for the repository
+/// whose Git common directory has the real path `common_dir`: the
+/// directory it is the `.git` of, whatever `core.worktree` or `core.bare`
+/// say, as Git takes it from the common directory's path alone. A common
+/// directory with another name is listed itself, which leaves
+/// [`main_checkout_of`] none from it (a bare repository, a separate Git
+/// directory), and so none.
+fn main_worktree_of(common_dir: &Path) -> Option<PathBuf> {
+    if common_dir.file_name()? == ".git" {
+        common_dir.parent().map(Path::to_path_buf)
+    } else {
+        None
+    }
 }
 
 /// The checkout that names, in a notification, the repository a queue is
@@ -4789,6 +4820,26 @@ pub const PRINT_MODE_DENIED_TOOLS: [&str; 2] = ["ScheduleWakeup", "CronCreate"];
 
 #[cfg(test)]
 mod tests {
+    /// The main worktree of a common directory is the directory it is the
+    /// `.git` of; a common directory with another name has none.
+    #[test]
+    fn the_main_worktree_of_a_common_directory_is_the_parent_of_its_dot_git() {
+        for (common_dir, main) in [
+            ("/repo/.git", Some("/repo")),
+            ("/a b/repo/.git", Some("/a b/repo")),
+            ("/srv/bare.git", None),
+            ("/srv/sep.git", None),
+            ("/repo/.git/modules/sub", None),
+            ("/", None),
+        ] {
+            assert_eq!(
+                main_worktree_of(Path::new(common_dir)),
+                main.map(PathBuf::from),
+                "{common_dir}"
+            );
+        }
+    }
+
     use super::*;
     use crate::domain::EventKind;
     use crate::domain::{Provider, RunId, RunStatus};

@@ -267,6 +267,7 @@ fn the_folded_streams_give_what_stats_lists_on_the_queue() {
             history: &history,
             host_metrics: None,
             areas: &areas,
+            fresh: None,
             utc_offset_secs: 0,
             counts_checks: false,
             rust_toolchain: false,

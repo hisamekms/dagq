@@ -22,7 +22,7 @@ use std::{
 use crate::{
     application::{
         AgentProvider, Verifier, health, lifecycle,
-        stats::{self as statistics, StatsSources},
+        stats::{self as statistics, StatsGitReads, StatsSources},
     },
     domain::{RunId, SessionRole, TaskId, stats::StatsQuery},
     infrastructure::{
@@ -490,6 +490,82 @@ fn area_reader(checkout: Option<&Path>) -> Result<crate::application::areas::Are
     })
 }
 
+/// What `stats` and `kpi` of a queue read in Git's place: the main
+/// checkout whose `dagq.toml` they read, and what the queue service's
+/// client read with Git there (none on the DB, which reads Git in the
+/// checkout itself).
+struct GitPart {
+    checkout: Option<PathBuf>,
+    served: Option<statistics::ServedReads>,
+}
+
+impl GitPart {
+    /// On the DB (`git` none): the bound main checkout, found with Git. In
+    /// the queue service: the one [`served_checkout`] finds with no Git
+    /// run, never one the client names, and `git` as the service reads it
+    /// with the inputs the queue's events give now
+    /// ([`statistics::StatsGitReads::served`]).
+    fn of(queue: &SqliteQueue, git: Option<&StatsGitReads>) -> Result<Self> {
+        let Some(git) = git else {
+            return Ok(Self {
+                checkout: bound_checkout(queue)?,
+                served: None,
+            });
+        };
+        let checkout = served_checkout(queue)?;
+        let inputs = statistics::stats_inputs(checkout.clone(), &queue.all_events()?);
+        Ok(Self {
+            served: Some(git.served(&inputs)?),
+            checkout,
+        })
+    }
+
+    /// The landed commits' areas: the client's, else read with Git.
+    fn areas(&self) -> Result<crate::application::areas::AreaReader> {
+        match &self.served {
+            Some(served) => Ok(served.areas.clone()),
+            None => area_reader(self.checkout.as_deref()),
+        }
+    }
+
+    /// What refuses the events read when the client's reads are not of
+    /// them; none on the DB.
+    fn fresh(&self) -> Option<impl Fn(&[crate::domain::RunEvent]) -> Result<()> + '_> {
+        self.served
+            .as_ref()
+            .map(|served| move |events: &[crate::domain::RunEvent]| served.check(events))
+    }
+}
+
+/// The main checkout of the repository `queue` is bound to as the queue
+/// service finds it, from the binding alone and with no Git run
+/// ([`crate::infrastructure::adapters::main_checkout_from_files`]); none for
+/// a queue bound to none.
+fn served_checkout(queue: &SqliteQueue) -> Result<Option<PathBuf>> {
+    Ok(queue.repository_binding()?.and_then(|common_dir| {
+        crate::infrastructure::adapters::main_checkout_from_files(Path::new(&common_dir))
+    }))
+}
+
+/// What the queue service answers `read`, a `stats` or `kpi` its client
+/// sends, by `call`, sent with what the client read with the host's Git in
+/// the main checkout the service's `stats_inputs` names
+/// ([`crate::application::stats::call_read`]). The one place a client
+/// reads Git for them.
+pub fn call_stats_read(
+    read: &crate::application::queue_reads::QueueRead,
+    call: impl FnMut(&crate::application::queue_reads::QueueRead) -> Result<Value>,
+) -> Result<Value> {
+    statistics::call_read(
+        read,
+        &statistics::StatsClient {
+            areas: &|checkout| area_reader(Some(checkout)),
+            history: &|checkout, since| GitRepository::inspect(checkout)?.main_history(since),
+        },
+        call,
+    )
+}
+
 /// Summarizes the host's load records under `dir` (task 872).
 fn host_metrics_reader(dir: PathBuf) -> crate::application::report::HostMetrics {
     crate::application::report::HostMetrics(std::sync::Arc::new(move |from, until| {
@@ -591,11 +667,17 @@ fn doctor_ci_watch(queue: &SqliteQueue) -> Result<Option<Value>> {
 /// of the `dagq.toml` of the bound main checkout and the queue's history;
 /// none for a queue bound to no checkout.
 fn recurring_view(queue: &SqliteQueue) -> Result<Option<Value>> {
-    let Some(checkout) = bound_checkout(queue)? else {
+    recurring_view_of(queue, bound_checkout(queue)?.as_deref())
+}
+
+/// [`recurring_view`] of the `dagq.toml` of `checkout`, the bound main
+/// checkout.
+fn recurring_view_of(queue: &SqliteQueue, checkout: Option<&Path>) -> Result<Option<Value>> {
+    let Some(checkout) = checkout else {
         return Ok(None);
     };
     health::recurring(
-        crate::infrastructure::run_env::load_recurring(&checkout),
+        crate::infrastructure::run_env::load_recurring(checkout),
         |items| queue.recurring_schedule(items),
     )
 }
@@ -649,7 +731,15 @@ pub fn read_queue(
     one_shot: &OneShot,
     read: &crate::application::queue_reads::QueueRead,
 ) -> Result<Value> {
-    crate::application::queue_reads::answer(queue, &HostReads { db, one_shot }, read)
+    crate::application::queue_reads::answer(
+        queue,
+        &HostReads {
+            db,
+            one_shot,
+            served: false,
+        },
+        read,
+    )
 }
 
 /// How the queue service answers a read use case: [`read_queue`] with the
@@ -660,7 +750,15 @@ pub fn service_reads() -> crate::infrastructure::queue_service::ServiceReads {
             user_config: crate::infrastructure::language::user_config_file(),
             ..OneShot::new(queue.generators().clone())
         };
-        read_queue(queue, db, &one_shot, read)
+        crate::application::queue_reads::answer(
+            queue,
+            &HostReads {
+                db,
+                one_shot: &one_shot,
+                served: true,
+            },
+            read,
+        )
     })
 }
 
@@ -670,10 +768,32 @@ pub fn service_detail() -> crate::infrastructure::queue_service::ServiceDetail {
     crate::view::task_detail
 }
 
-/// The host's side of a read of the queue at `db`.
+/// The host's side of a read of the queue at `db`; `served` in the queue
+/// service, where no Git runs (ADR-t3102-3 decision 5): a `stats` or `kpi`
+/// sent with nothing its client read with Git is read as if it read
+/// nothing ([`StatsGitReads`]'s default).
 struct HostReads<'a> {
     db: &'a Path,
     one_shot: &'a OneShot,
+    served: bool,
+}
+
+impl HostReads<'_> {
+    /// What `stats` and `kpi` (`what`) read in place of Git: what the
+    /// client sent, and Git itself (`None`) on the DB. The service refuses
+    /// one sent with none ([`statistics::NOT_READ`]), as it runs no Git.
+    fn git<'g>(
+        &self,
+        what: &str,
+        sent: Option<&'g StatsGitReads>,
+    ) -> Result<Option<&'g StatsGitReads>> {
+        anyhow::ensure!(
+            sent.is_some() || !self.served,
+            "{what} {}",
+            statistics::NOT_READ
+        );
+        Ok(sent)
+    }
 }
 
 impl crate::application::queue_reads::PlanningSources<SqliteQueue> for HostReads<'_> {
@@ -722,14 +842,38 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
     fn status(&self, queue: &SqliteQueue, role: Option<SessionRole>) -> Result<Value> {
         self.one_shot.status_of(self.db, queue, role)
     }
-    fn stats(&self, queue: &SqliteQueue, query: &StatsQuery) -> Result<Value> {
-        self.one_shot.stats_of(queue, self.db, query)
+    fn stats(
+        &self,
+        queue: &SqliteQueue,
+        query: &StatsQuery,
+        git: Option<&StatsGitReads>,
+    ) -> Result<Value> {
+        self.one_shot
+            .stats_read(queue, self.db, query, self.git("stats", git)?)
     }
-    fn ledger_check(&self, queue: &SqliteQueue, query: &StatsQuery) -> Result<Value> {
-        self.one_shot.ledger_check_of(queue, self.db, query)
+    fn ledger_check(
+        &self,
+        queue: &SqliteQueue,
+        query: &StatsQuery,
+        git: Option<&StatsGitReads>,
+    ) -> Result<Value> {
+        self.one_shot
+            .ledger_check_of(queue, self.db, query, self.git("stats", git)?)
     }
-    fn kpi(&self, queue: &SqliteQueue, query: &crate::domain::kpi::KpiQuery) -> Result<Value> {
-        self.one_shot.kpi_of(queue, self.db, query)
+    fn stats_inputs(&self, queue: &SqliteQueue) -> Result<Value> {
+        Ok(serde_json::to_value(statistics::stats_inputs(
+            served_checkout(queue)?,
+            &queue.all_events()?,
+        ))?)
+    }
+    fn kpi(
+        &self,
+        queue: &SqliteQueue,
+        query: &crate::domain::kpi::KpiQuery,
+        git: Option<&StatsGitReads>,
+    ) -> Result<Value> {
+        self.one_shot
+            .kpi_read(queue, self.db, query, self.git("kpi", git)?)
     }
     fn forecast(
         &self,
@@ -1460,7 +1604,21 @@ impl OneShot {
     /// [`Self::stats`] on `queue`, the queue at `db` the caller already
     /// opened, so a command opens it once.
     pub fn stats_of(&self, queue: &SqliteQueue, db: &Path, query: &StatsQuery) -> Result<Value> {
-        let mut stats = self.with_stats_sources(queue, db, |now, sources| {
+        self.stats_read(queue, db, query, None)
+    }
+
+    /// [`Self::stats_of`] with what the queue service's client read with
+    /// Git in place of Git (`git`, ADR-t3102-3 decision 5); `None` reads Git
+    /// in the bound main checkout.
+    pub fn stats_read(
+        &self,
+        queue: &SqliteQueue,
+        db: &Path,
+        query: &StatsQuery,
+        git: Option<&StatsGitReads>,
+    ) -> Result<Value> {
+        let part = GitPart::of(queue, git)?;
+        let mut stats = self.with_stats_sources(db, &part, |now, sources| {
             Ok(serde_json::to_value(statistics::stats(
                 queue,
                 &SystemProcesses,
@@ -1470,7 +1628,7 @@ impl OneShot {
             )?)?)
         })?;
         // When each recurring draft is registered next (ADR-0072).
-        if let Some(recurring) = recurring_view(queue)? {
+        if let Some(recurring) = recurring_view_of(queue, part.checkout.as_deref())? {
             stats["recurring"] = recurring;
         }
         Ok(stats)
@@ -1478,20 +1636,22 @@ impl OneShot {
 
     /// `stats --ledger` on `queue`, the queue at `db`: see
     /// [`crate::application::ledger_check::ledger_check`], with `stats`'
-    /// sources and today's CSV files of the host's load under the queue's
-    /// `host/`.
+    /// sources ([`Self::stats_read`]'s, `git` as it reads it) and today's
+    /// CSV files of the host's load under the queue's `host/`.
     pub fn ledger_check_of(
         &self,
         queue: &SqliteQueue,
         db: &Path,
         query: &StatsQuery,
+        git: Option<&StatsGitReads>,
     ) -> Result<Value> {
+        let part = GitPart::of(queue, git)?;
         let host_dir = db
             .parent()
             .unwrap_or(Path::new("."))
             .join(crate::domain::host_metrics::HOST_DIR);
         let csv = |from, until| crate::infrastructure::host_metrics::read(&host_dir, from, until);
-        self.with_stats_sources(queue, db, |now, sources| {
+        self.with_stats_sources(db, &part, |now, sources| {
             Ok(serde_json::to_value(
                 crate::application::ledger_check::ledger_check(
                     queue,
@@ -1505,28 +1665,33 @@ impl OneShot {
         })
     }
 
-    /// Run `read` with `stats`' sources of `queue` (at `db`) and these
-    /// generators' now.
+    /// Run `read` with `stats`' sources of the queue at `db`, the
+    /// `dagq.toml` of `part`'s main checkout and these generators' now:
+    /// main's history and the landed commits' areas as its client read
+    /// them, or read with Git in that checkout on the DB.
     fn with_stats_sources(
         &self,
-        queue: &SqliteQueue,
         db: &Path,
+        part: &GitPart,
         read: impl FnOnce(i64, &StatsSources<'_>) -> Result<Value>,
     ) -> Result<Value> {
         let now = self.generators.clock.now();
-        let checkout = bound_checkout(queue)?;
-        let config_file = || match &checkout {
+        let checkout = part.checkout.as_deref();
+        let config_file = || match checkout {
             Some(checkout) => load_stall_config(checkout),
             None => Ok(None),
         };
-        let conflicts_file = || match &checkout {
+        let conflicts_file = || match checkout {
             Some(checkout) => load_conflict_config(checkout),
             None => Ok(None),
         };
-        let history = |since| match &checkout {
-            Some(checkout) => GitRepository::inspect(checkout)?.main_history(since),
-            None => anyhow::bail!("the queue is bound to no repository checkout"),
+        let history = |since| match (&part.served, checkout) {
+            (Some(served), _) => served.history(since),
+            (None, Some(checkout)) => GitRepository::inspect(checkout)?.main_history(since),
+            (None, None) => anyhow::bail!(statistics::NO_CHECKOUT),
         };
+        let areas = part.areas()?;
+        let fresh = part.fresh();
         let signals = ClaudeCode {
             executable: PathBuf::from("claude"),
         };
@@ -1543,10 +1708,13 @@ impl OneShot {
             conflicts_file: &conflicts_file,
             history: &history,
             host_metrics: Some(&host_metrics),
-            areas: &area_reader(checkout.as_deref())?,
+            areas: &areas,
+            fresh: fresh
+                .as_ref()
+                .map(|fresh| fresh as &statistics::EventsCheck<'_>),
             utc_offset_secs: clock::local_utc_offset(now),
-            counts_checks: counts_checks(checkout.as_deref(), self.profiles),
-            rust_toolchain: records_rust_toolchain(checkout.as_deref(), self.profiles),
+            counts_checks: counts_checks(checkout, self.profiles),
+            rust_toolchain: records_rust_toolchain(checkout, self.profiles),
         };
         read(now, &sources)
     }
@@ -1561,17 +1729,34 @@ impl OneShot {
         db: &Path,
         query: &crate::domain::kpi::KpiQuery,
     ) -> Result<Value> {
+        self.kpi_read(queue, db, query, None)
+    }
+
+    /// [`Self::kpi_of`] with the landed commits' areas the queue service's
+    /// client read with Git (`git`, ADR-t3102-3 decision 5) in the main
+    /// checkout the service finds with no Git run; `None` reads Git in the
+    /// bound main checkout.
+    pub fn kpi_read(
+        &self,
+        queue: &SqliteQueue,
+        db: &Path,
+        query: &crate::domain::kpi::KpiQuery,
+        git: Option<&StatsGitReads>,
+    ) -> Result<Value> {
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
-        let setup = report_setup(
+        let part = GitPart::of(queue, git)?;
+        let setup = report_setup_with(
             db,
-            bound_checkout(queue)?.as_deref(),
+            part.checkout.as_deref(),
             None,
             host_wide.as_deref(),
             now,
             self.profiles,
+            part.areas()?,
         )?;
-        Ok(serde_json::to_value(crate::application::kpi::kpi(
+        let fresh = part.fresh();
+        Ok(serde_json::to_value(crate::application::kpi::kpi_checked(
             queue,
             now,
             setup.host,
@@ -1579,6 +1764,9 @@ impl OneShot {
             &setup.areas,
             query,
             setup.host_reader(),
+            fresh
+                .as_ref()
+                .map(|fresh| fresh as &statistics::EventsCheck<'_>),
         )?)?)
     }
 

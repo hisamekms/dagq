@@ -176,6 +176,62 @@ pub struct MainHistory {
     pub paths: HashSet<String>,
 }
 
+impl MainHistory {
+    /// This history with only what [`conflict_hotspots`] reads of it for
+    /// conflicts in `files`: every commit (each a landing of its window),
+    /// but of their changes and of the paths main has now only those of
+    /// `files` and of the names the renames give them, followed through
+    /// every commit. The hotspots of conflicts in `files` are the same
+    /// against either.
+    #[must_use]
+    pub fn narrowed_to(&self, files: &[String]) -> Self {
+        let mut names: HashSet<&str> = files.iter().map(String::as_str).collect();
+        loop {
+            let renamed: Vec<&str> = self
+                .commits
+                .iter()
+                .flat_map(|commit| &commit.changes)
+                .filter(|change| {
+                    change
+                        .from
+                        .as_deref()
+                        .is_some_and(|from| names.contains(from))
+                        && !names.contains(change.path.as_str())
+                })
+                .map(|change| change.path.as_str())
+                .collect();
+            if renamed.is_empty() {
+                break;
+            }
+            names.extend(renamed);
+        }
+        let named = |change: &&MainChange| {
+            names.contains(change.path.as_str())
+                || change
+                    .from
+                    .as_deref()
+                    .is_some_and(|from| names.contains(from))
+        };
+        Self {
+            commits: self
+                .commits
+                .iter()
+                .map(|commit| MainCommit {
+                    sha: commit.sha.clone(),
+                    at: commit.at,
+                    changes: commit.changes.iter().filter(named).cloned().collect(),
+                })
+                .collect(),
+            paths: self
+                .paths
+                .iter()
+                .filter(|path| names.contains(path.as_str()))
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
 /// Main's history, or why it could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum History {
@@ -254,6 +310,18 @@ fn conflicted(event: &RunEvent) -> Option<Vec<&str>> {
         .filter_map(Value::as_str)
         .collect();
     (!files.is_empty()).then_some(files)
+}
+
+/// Every file the conflict events of `events` name, once each, sorted.
+pub fn conflicted_files(events: &[RunEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(conflicted)
+        .flatten()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// The unix millisecond of the earliest conflict event, for how far back
@@ -637,6 +705,66 @@ mod tests {
         );
         assert_eq!(task_two.count, 1);
         assert_eq!(task_two.files.len(), 1);
+    }
+
+    /// A history narrowed to the conflicted files, the names their
+    /// renames give them followed through a chain, keeps every commit and
+    /// gives the same hotspots, of every window, as the whole history; the
+    /// changes and paths of other files are left out.
+    #[test]
+    fn a_history_narrowed_to_the_conflicted_files_gives_the_same_hotspots() {
+        let rename = |from: &str, to: &str| MainChange {
+            path: to.to_owned(),
+            from: Some(from.to_owned()),
+            deleted: false,
+        };
+        let History::Read(mut whole) = history() else {
+            unreachable!()
+        };
+        whole.commits.push(commit(
+            T + 49,
+            vec![rename("new.rs", "newer.rs"), change("other.rs")],
+        ));
+        whole.paths = ["a.rs", "newer.rs", "other.rs", "elsewhere.rs"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let files = conflicted_files(&events());
+        assert_eq!(files, ["a.rs", "gone.rs", "old.rs"]);
+        let narrowed = whole.narrowed_to(&files);
+        assert_eq!(narrowed.commits.len(), whole.commits.len());
+        assert_eq!(
+            narrowed.paths,
+            ["a.rs", "newer.rs"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(narrowed.commits[6].changes, [rename("new.rs", "newer.rs")]);
+        for (after, upto) in [(0, 6), (3, 6), (4, 5)] {
+            let of = |history: &MainHistory| {
+                serde_json::to_value(conflict_hotspots(
+                    &events(),
+                    EventId::new(after),
+                    EventId::new(upto),
+                    |_| true,
+                    &History::Read(history.clone()),
+                    ConflictConfigReport::default(),
+                ))
+                .unwrap()
+            };
+            assert_eq!(of(&narrowed), of(&whole), "{after}..{upto}");
+        }
+        let renamed = conflict_hotspots(
+            &events(),
+            EventId::new(0),
+            EventId::new(6),
+            |_| true,
+            &History::Read(narrowed.clone()),
+            ConflictConfigReport::default(),
+        );
+        assert_eq!(renamed.files[2].renamed_to.as_deref(), Some("newer.rs"));
+        assert!(conflicted_files(&[]).is_empty());
     }
 
     #[test]

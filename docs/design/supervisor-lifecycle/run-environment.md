@@ -203,8 +203,8 @@ supervisorが置換の起動を記録すると知らせが消え、人が別のs
 
 ## main checkoutの決め方
 
-`dagq.toml`を読むmain checkoutは、repositoryのmain worktree（`git worktree list --porcelain`の最初のentry）で、決めるのは`src/infrastructure/adapters.rs`の`main_checkout_of`の1か所だけ（bareと`git init --separate-git-dir`の構成の扱いはそのdoc comment）。
-`dagq.toml`を読むコマンドとaskの通知のrepositoryの名前はどれもこの結果を使い、Git common directoryの名前（`.git`かどうか）では決めない。
+`dagq.toml`を読むmain checkoutは、repositoryのmain worktree（`git worktree list --porcelain`の最初のentry）で、決めるのはGitで`main_checkout_of`、Gitを起動しないqueue serviceでは束縛から`main_checkout_from_files`の2か所だけ（bareと`git init --separate-git-dir`などの構成の扱いはそれぞれのdoc comment）。
+`dagq.toml`を読むコマンドとaskの通知のrepositoryの名前はどれもこの結果を使う。
 
 main checkoutが無いとき、実行したcheckoutやrun worktreeの`dagq.toml`で代わりにしない（runごとに設定が変わりうるため）。
 `up`はpreflightで止まってsupervisorを起動せず、`supervise`と`integrate`は起動時に同じerrorで止まり、`doctor`の`repository`は`error`を出して`run_env`は出さない。

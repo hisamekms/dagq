@@ -875,7 +875,8 @@ fn run(
         | UseCase::Replans
         | UseCase::CiFailures
         | UseCase::Planners
-        | UseCase::ServiceStatus => unreachable!("a read is answered above"),
+        | UseCase::ServiceStatus
+        | UseCase::StatsInputs => unreachable!("a read is answered above"),
         UseCase::Add
         | UseCase::Edit
         | UseCase::Submit
@@ -2209,6 +2210,7 @@ mod tests {
                 Capability::QueueRead,
             ),
             (UseCase::ServiceStatus, json!({}), Capability::QueueRead),
+            (UseCase::StatsInputs, json!({}), Capability::QueueRead),
             (
                 UseCase::WatchPoll,
                 json!({"role": "inbox"}),

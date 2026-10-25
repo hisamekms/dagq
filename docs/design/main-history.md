@@ -36,4 +36,4 @@ runtimeの制御はこの記録を読まない。
   畳む関数は後の記録を正にする。
 - **畳む関数**: `stats::main_log::fold_main_log`がeventだけからMainHistory・commitごとの変えたfile・到達時刻・Gitの読み取りの状態を返す。
   窓の終わりが到達時刻から猶予より後か、窓が取り込みより前に始まれば、`MainLog::history_for`は理由（Gitの読み取りの失敗中・supervisorの停止・到達点が古い）つきの「記録が無い」を返す。
-  statsとkpiの読み手はまだGitを読む。
+  statsとkpiの読み手はまだGitを読む（queue serviceを通すときはクライアントのGit。[hostのCLI](queue-service-host-cli.md#送る範囲)）。
