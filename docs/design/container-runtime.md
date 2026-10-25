@@ -21,6 +21,7 @@ related:
   - adr-t2257-1
   - adr-t2182-1
   - adr-t2424-1
+  - adr-t3163-1
   - design-security
   - design-supervisor-lifecycle-run-environment
 ---
@@ -94,7 +95,7 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
   人のmachineは止めない。
 - 資源: CPU・メモリ・diskはhost全体の`host.toml`の`[machine]`が与え、既定値と根拠は`MachineResources`のdoc commentが持つ。
   machineはhostに1つで全てのprojectが共有するので、queueの`host.toml`では変えない（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定6）。
-  値はinitで使われ、変えた値は作り直したmachineに効く。
+  起動の前にmachineのメモリから上限を予約し、入らなければ待つ形は[ADR-t3163-1](../adr/2026-10-25-t3163-1-containers-reserve-memory-on-the-machine.md)が決めたが未実装で、今は上限の合計がmachineを超えても起動する。
 - hostのmount: initのvolumeは各queueのrun dir・cloneの親のdir・verificationのcloneの親のdirだけで（`MachineMounts`）、hostの`$HOME`・workerのcache・buildの出力・着地用のworktreeのdirを含めない。
   各dirはmachineの中の同じpathにmountする。
   macOSのremoteのPodmanのbind mountのsourceはmachineの側のpathなので、containerに見せるhostのdirはmachineにmountしてある必要がある。
@@ -220,8 +221,6 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
   止める経路での消去はbest effortで、machineが止まって消せなければlogに残し、runの終わりの片付けに任せる。
   runのsessionを止めるどの経路（reviewの後・着地・triageのstopとcancel・sweep・resumeの終わり）も`RecordingSessions`がcontainerを消し、復旧jobの`stop_processes`も消す。
   supervisorの再起動の後にadoptしたrunも、名前がrunから決まるので同じ経路で消える。
-  runの終わりと着地では、relayの見張りがrelayを閉じるときにcontainerとbuildの出力も消す。
-- Codexに経路が向くrunは起動しない（上の「fail closedの境界」）。
 
 ## verificationの実行
 
