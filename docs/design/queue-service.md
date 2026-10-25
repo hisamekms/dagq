@@ -200,7 +200,7 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
 - `watch`（`queue.watch`。hostのCLIは上の`watch_poll`）: jobとworkerのpolicyに無い操作で、今のCLIでも拒まれる
 - `graph --format svg`: hostのd2を起動するので、serviceは読み取りとして受け取らない（`json`と`d2`は答える）。
   promptとskillはsvgを名指さない
-- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`: 制御側の状態を見るもので、jobのpromptは名指さない。
+- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`（attentionだけ`service_status`）: 制御側の状態を見るもので、jobのpromptは名指さない。
   クライアントモードでの扱いは[クライアントモード](#クライアントモード)
 
 ## クライアントモード
@@ -276,7 +276,8 @@ attentionの次の手は`dagq service status`。
 ## statusとdoctor
 
 `status`・`doctor`・`dagq service status`はserviceの状態を出す（`application::queue_service::view`。欄の意味は`ServiceProbe`と`view`、`status`の節は`StatusSections`のdoc comment）。
-見るだけで、serviceを起動も停止もしない（socketへの`hello`を1回打つ）。
+`service status`はDBを開かない（[hostのCLI](queue-service-host-cli.md#送る範囲)）。
+見るだけで、serviceを起動も停止もしない（socketへ`hello`を打つ）。
 
 ## event
 

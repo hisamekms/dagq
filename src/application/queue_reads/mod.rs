@@ -71,7 +71,13 @@ pub enum QueueRead {
     Replans(RecordsRead),
     CiFailures(CiFailuresRead),
     Planners(PlannersRead),
+    ServiceStatus(ServiceStatusRead),
 }
+
+/// `service status`' read: no option.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceStatusRead {}
 
 /// `requests`' and `replans`' options: the one record `id` names whatever
 /// its status, or the open ones (every one with `all`).
@@ -598,6 +604,7 @@ impl QueueRead {
             UseCase::Replans => Self::Replans(read(use_case, params)?),
             UseCase::CiFailures => Self::CiFailures(read(use_case, params)?),
             UseCase::Planners => Self::Planners(read(use_case, params)?),
+            UseCase::ServiceStatus => Self::ServiceStatus(read(use_case, params)?),
             UseCase::Hello
             | UseCase::WatchPoll
             | UseCase::Ask
@@ -782,7 +789,8 @@ impl QueueRead {
             | Self::Requests(_)
             | Self::Replans(_)
             | Self::CiFailures(_)
-            | Self::Planners(_) => {}
+            | Self::Planners(_)
+            | Self::ServiceStatus(_) => {}
         }
         Ok(())
     }
@@ -898,6 +906,7 @@ impl QueueRead {
             Self::Replans(read) => (UseCase::Replans, json!({"id": read.id, "all": read.all})),
             Self::CiFailures(read) => (UseCase::CiFailures, json!({"task": read.task})),
             Self::Planners(read) => (UseCase::Planners, json!({"all": read.all})),
+            Self::ServiceStatus(_) => (UseCase::ServiceStatus, json!({})),
             Self::ObserveInput(read) => (
                 UseCase::ObserveInput,
                 json!({"observation": read.observation, "section": read.section,
@@ -950,6 +959,7 @@ where
         QueueRead::Replans(read) => observation::replans(queue, sources, read),
         QueueRead::CiFailures(read) => sources.ci_failures(queue, read),
         QueueRead::Planners(read) => sources.planners(queue, read),
+        QueueRead::ServiceStatus(_) => Ok(observation::service_status(queue)),
     }
 }
 

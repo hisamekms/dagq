@@ -4101,7 +4101,8 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
 /// Whether the host `dagq` of a
 /// [`host_client_role`](dagq::domain::queue_service::host_client_role)
 /// sends `command` to the service of a served queue: a command the service
-/// answers ([`client_request`]), and `watch`, whose looks it answers.
+/// answers ([`client_request`]), `watch`, whose looks it answers, and
+/// `service status`, whose attention it reads.
 /// `planner request` and `rebind` are ones, told here without reading the
 /// words or the checkout's Git, which are read once, as it is sent.
 fn host_routed(command: &Command) -> Result<bool> {
@@ -4115,6 +4116,9 @@ fn host_routed(command: &Command) -> Result<bool> {
     Ok(matches!(
         command,
         Command::Watch { .. }
+            | Command::Service {
+                command: ServiceCommand::Status
+            }
             | Command::Rebind { .. }
             | Command::Planner {
                 command: PlannerCommand::Request { .. }
@@ -4166,6 +4170,17 @@ fn host_client(
             },
         );
     }
+    // `service status` answers whether or not the service does, and opens
+    // no queue either way (ADR-t3102-3 decision 2): it looks in the
+    // directory of the DB a link names, whose service serves it.
+    if matches!(
+        command,
+        Command::Service {
+            command: ServiceCommand::Status
+        }
+    ) {
+        return Ok(dagq::compose::queue_service_status(db, &client));
+    }
     // The service reads the diagram and the host's d2 draws it, as the
     // command line draws it: no read starts a program on the service's side.
     if let Command::Graph {
@@ -4195,8 +4210,9 @@ fn host_client(
 /// The name of `command` when it is one of the control side's, which a
 /// person or the inbox runs on the host and a client-mode `dagq` refuses
 /// as `control_side_command` rather than as `no_use_case`: none of the
-/// service's use cases, so a command it answers is sent to it and
-/// authorized on its side.
+/// service's use cases (`service status` reads the service's socket and
+/// files on the host beside its one read), so a command it answers is
+/// sent to it and authorized on its side.
 fn control_side_command(command: &Command) -> Option<&'static str> {
     match command {
         Command::Doctor { .. } => Some("doctor"),
@@ -4357,8 +4373,15 @@ fn execute(cli: Cli) -> Result<Value> {
     if dagq::domain::queue_service::host_client_role(actor.role()) && host_routed(&cli.command)? {
         let cwd = env::current_dir().context("working directory is unavailable")?;
         let location = QueueLocation::resolve(cli.db.as_deref(), &cwd)?;
+        // `service status` reads no DB, and answers where there is none.
+        let status = matches!(
+            cli.command,
+            Command::Service {
+                command: ServiceCommand::Status
+            }
+        );
         anyhow::ensure!(
-            location.db.is_file(),
+            status || location.db.is_file(),
             "no queue at {} (use init to create it)",
             location.db.display()
         );
@@ -4635,7 +4658,16 @@ fn execute(cli: Cli) -> Result<Value> {
     // The queue service needs no queue state, only its paths.
     if let Command::Service { command } = cli.command {
         return match command {
-            ServiceCommand::Status => Ok(dagq::compose::queue_service_status(&db)),
+            // A caller the service takes for no host client reads it the
+            // same, opening no queue.
+            ServiceCommand::Status => Ok(dagq::compose::queue_service_status(
+                &db,
+                &dagq::infrastructure::queue_service::Client::host(
+                    &db,
+                    common_dir.as_deref(),
+                    |name| env::var(name).ok(),
+                ),
+            )),
             ServiceCommand::Start { cmux: _ } => {
                 dagq::compose::queue_service_start(&db, &env::current_exe()?)
             }
@@ -6291,7 +6323,6 @@ mod tests {
             ("setup-review", CONTROL),
             ("migrate", DIAGNOSIS),
             ("doctor", DIAGNOSIS),
-            ("service status", DIAGNOSIS),
         ];
         // The arguments each command needs to parse.
         let samples: &[(&str, &[&str])] = &[

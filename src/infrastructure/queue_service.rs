@@ -156,6 +156,45 @@ pub fn recorded_outage(queue_dir: &Path) -> Option<ServiceOutage> {
     serde_json::from_slice(&fs::read(queue_dir.join(OUTAGE_FILE)).ok()?).ok()
 }
 
+/// Where the host's `dagq service status` of the queue at `queue_dir`
+/// looks ([`ServiceStatusSource`](crate::application::queue_service::ServiceStatusSource)):
+/// [`probe`], `client`'s `service_status` within the look's limit, and
+/// [`recorded_outage`]. A failure of the client's own `unreachable` is no
+/// answer; any other is the service's refusal.
+pub struct HostServiceStatus<'a> {
+    pub queue_dir: &'a Path,
+    pub client: &'a Client,
+}
+
+impl crate::application::queue_service::ServiceStatusSource for HostServiceStatus<'_> {
+    fn probe(&self) -> ServiceProbe {
+        probe(self.queue_dir)
+    }
+
+    fn read(&self) -> crate::application::queue_service::ServiceStatusRead {
+        use crate::application::queue_service::ServiceStatusRead;
+        let read = self.client.look_within(
+            UseCase::ServiceStatus,
+            json!({}),
+            crate::application::watch::LOOK_LIMIT,
+        );
+        match read {
+            Ok(answer) => ServiceStatusRead::Answered(answer),
+            Err(error) => match error.downcast::<ClientFailure>() {
+                Ok(failure) if failure.code == "unreachable" => {
+                    ServiceStatusRead::Unreached(failure.message)
+                }
+                Ok(failure) => ServiceStatusRead::Refused(failure.to_string()),
+                Err(error) => ServiceStatusRead::Refused(format!("{error:#}")),
+            },
+        }
+    }
+
+    fn recorded_outage(&self) -> Option<ServiceOutage> {
+        recorded_outage(self.queue_dir)
+    }
+}
+
 /// What the host's watches of the queue at `queue_dir` returned of its
 /// service's outages ([`OUTAGE_TOLD_FILE`]): the `since` of the outage a
 /// watch of each role (`none` for one of no role) returned. A file that

@@ -648,6 +648,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/queue_service.rs", "ServiceQueue", Some(Host), Internal),
     outer_port("src/application/queue_service.rs", "ServiceBackend", Some(Host), Internal),
     outer_port("src/application/queue_service.rs", "QueueServiceControl", Some(Host), Internal),
+    outer_port("src/application/queue_service.rs", "ServiceStatusSource", Some(Host), Internal), // where the host's service status looks, outside the DB
     outer_port("src/application/queue_broker.rs", "QueueBrokerControl", Some(Host), Internal), // how up, down and the supervisor start, look at and stop the broker
     outer_port("src/application/queue_broker.rs", "BrokerBackend", Some(Host), Internal), // what the broker runs a request on
     outer_port("src/application/podman_machine.rs", "PodmanMachine", Some(Host), Internal), // the podman commands on the dagq machine

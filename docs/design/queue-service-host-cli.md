@@ -26,7 +26,7 @@ related:
 
 - 宛ての環境が無い`dagq`のうちuser・inbox・plannerのもの（`host_client_role`）は、serviceが答えるコマンド（`client_request`）と`watch`の各回の見る（`watch_poll`）をそのsocketへ送り、DBを開かない。
   serviceが一度も動いていないqueueも同じで、DBが無ければ送る前に`no queue at`で終わる（ADR-t3105-1決定3）。
-- 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、wrapperとhookの経路（決定6の(3)）、runのbranchを動かす`ready --inherit`（ADR-t3102-3決定5）、制御側のプロセス（`supervise`・`up`・`integrate`・`review`・`observe`など。(5)）と`migrate`・`doctor`・`service status`（(6)）。
+- 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、wrapperとhookの経路（決定6の(3)）、runのbranchを動かす`ready --inherit`（ADR-t3102-3決定5）、制御側のプロセス（`supervise`・`up`・`integrate`・`review`・`observe`など。(5)）と`migrate`・`doctor`（(6)）。
   CLIの全ての葉は送るものかこの例外のどれかに当たり、どちらでもない葉は無い（unit testが全ての葉を数えて確かめる）。
   1つのコマンドの中で経路を混ぜない。
 - repositoryのqueueの束縛は、CLIが解決したrepositoryを要求に載せ（`ServiceRequest::binding`）、serviceが答える前に照らす。
@@ -36,6 +36,9 @@ related:
 - `watch`の待ち・inboxのwatcherの記録・`[push]`はクライアント側に残る（`application::watch::watch_through`）。
   pushが名指すrepositoryは、serviceが見るの答えに載せるqueueの束縛から取り、束縛のあるqueueではwatchを打つ場所に依らない（束縛の無いqueueは打つ場所の名前。`WatchLook::binding`）。
 - `graph --format svg`はd2のsourceをserviceから読み、hostのCLIが自分のd2で描く（serviceは読み取りでprogramを起動しない）。
+- `service status`はserviceに届かなくても答える。
+  socketとserviceの記録はhostのCLIが見て、届けばqueueのattentionだけを`service_status`（`queue.read`）で読み、届かなければ[落ちたときの知らせ](queue-service.md#落ちたときの知らせadr-t3102-3決定12)の記録と次の手を返す（`application::queue_service::host_status`）。
+  どちらでもDBを開かない。
 
 ## 対話と操作
 

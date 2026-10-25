@@ -289,11 +289,26 @@ fn status_doctor_and_service_status_report_the_service() {
             &report["queue_service"]
         };
         assert_eq!(view["state"], "stopped", "{args:?} {view}");
-        assert_eq!(view["socket"], json!(service::socket_path(queue.dir())));
+        // `service status` names the socket of the DB a link names.
+        let dir = if args == ["service", "status"] {
+            queue.dir().canonicalize().unwrap()
+        } else {
+            queue.dir().to_path_buf()
+        };
+        assert_eq!(view["socket"], json!(service::socket_path(&dir)));
         assert_eq!(view["pid"], Value::Null);
         assert_eq!(view["client_api_version"], API_VERSION);
-        assert_eq!(view["attention"], false);
     }
+    // `doctor` reads the attention from the DB; `service status` opens no
+    // queue, so it does not know it, and says no outage is recorded.
+    assert_eq!(
+        ok(&queue.db, &["doctor"])["queue_service"]["attention"],
+        false
+    );
+    let unreached = ok(&queue.db, &["service", "status"]);
+    assert_eq!(unreached["attention"], Value::Null, "{unreached}");
+    assert_eq!(unreached.get("outage"), Some(&Value::Null), "{unreached}");
+    assert!(unreached["next"].as_str().unwrap().contains("dagq up"));
     let started = start(&queue);
     for args in [&["status"][..], &["doctor"], &["service", "status"]] {
         let report = ok(&queue.db, args);
@@ -307,7 +322,85 @@ fn status_doctor_and_service_status_report_the_service() {
         assert_eq!(view["build"], dagq::VERSION);
         assert_eq!(view["build_matches"], true);
         assert_eq!(view["api_version"], API_VERSION);
+        assert_eq!(view["attention"], false, "{args:?} {view}");
     }
+}
+
+/// `dagq service status` opens no queue (ADR-t3102-2 decision 1): while
+/// the service runs it reads the attention through the service, in the
+/// shape it always had; once
+/// the service is gone it answers from the socket, the service's record
+/// and the outage its supervisor recorded outside the DB, with what to do
+/// next, even where no queue opens (ADR-t3102-3 decisions 1 and 2).
+#[test]
+fn service_status_opens_no_queue_whether_the_service_answers_or_not() {
+    let queue = queue();
+    let started = start(&queue);
+    let running = ok(&queue.db, &["service", "status"]);
+    let keys = |view: &Value| {
+        let mut keys: Vec<String> = view.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(
+        keys(&running),
+        [
+            "api_version",
+            "attention",
+            "build",
+            "build_matches",
+            "client_api_version",
+            "min_api_version",
+            "pid",
+            "socket",
+            "started_at",
+            "state"
+        ],
+        "{running}"
+    );
+    assert_eq!(running["state"], "running");
+    assert_eq!(running["pid"], started["service"]["pid"]);
+    assert_eq!(running["attention"], false);
+
+    // A queue's directory whose DB does not open, with no service and the
+    // outage its supervisor recorded beside it.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    fs::write(&db, "not a queue").unwrap();
+    let unrecorded = ok(&db, &["service", "status"]);
+    assert_eq!(unrecorded["state"], "stopped", "{unrecorded}");
+    assert_eq!(unrecorded["attention"], Value::Null);
+    assert_eq!(unrecorded.get("outage"), Some(&Value::Null));
+    assert_eq!(
+        unrecorded["next"],
+        dagq::application::queue_service::UNREACHED_NEXT
+    );
+    let outage = dagq::domain::queue_service::ServiceOutage {
+        since: 1_700_000_000,
+        reason: "restart_limit".to_owned(),
+        message: "the service stopped 3 times".to_owned(),
+        supervisor: Some("s1".to_owned()),
+        pushed: true,
+    };
+    fs::write(
+        dir.path().join(dagq::domain::queue_service::OUTAGE_FILE),
+        serde_json::to_vec(&outage).unwrap(),
+    )
+    .unwrap();
+    let recorded = ok(&db, &["service", "status"]);
+    assert_eq!(recorded["state"], "stopped", "{recorded}");
+    assert_eq!(recorded["outage"], json!(outage));
+    assert_eq!(
+        recorded["next"],
+        dagq::application::queue_service::UNREACHED_NEXT
+    );
+    assert_eq!(fs::read(&db).unwrap(), b"not a queue");
+    // Where no DB is at all, it answers the same.
+    fs::remove_file(&db).unwrap();
+    let no_db = ok(&db, &["service", "status"]);
+    assert_eq!(no_db["state"], "stopped", "{no_db}");
+    assert_eq!(no_db["outage"], json!(outage));
+    assert!(!db.exists());
 }
 
 /// A supervisor that reaches its queue through the service's socket

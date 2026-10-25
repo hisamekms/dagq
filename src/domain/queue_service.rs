@@ -181,9 +181,10 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         UseCase::Requests | UseCase::Replans => "name one with its ID, or leave out --all",
         UseCase::CiFailures => "narrow to one task's with --task",
         UseCase::Planners => "leave out --all",
-        UseCase::ProposalShow | UseCase::AgentResult | UseCase::AgentSet => {
-            "its command has no option that narrows the answer"
-        }
+        UseCase::ProposalShow
+        | UseCase::AgentResult
+        | UseCase::AgentSet
+        | UseCase::ServiceStatus => "its command has no option that narrows the answer",
         UseCase::RunLog | UseCase::PlannerLog => {
             "the answer names the log's file, which the client reads: none is longer"
         }
@@ -324,6 +325,11 @@ string_enum!(UseCase {
     Replans => "replans",
     CiFailures => "ci_failures",
     Planners => "planners",
+    // The part of `dagq service status` the queue holds, whether the
+    // inbox's attention of the service's outage stands, read through the
+    // service while it answers; the host's `dagq` adds what it finds of the
+    // service outside the DB.
+    ServiceStatus => "service_status",
     // The eval of an agent (ADR-t1728-1 decisions 5 and 6): a request of a
     // round, which the supervisor runs, as `dagq agent eval` records it,
     // and the rounds and one round read back, as `dagq agent results` and

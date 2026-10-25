@@ -75,6 +75,12 @@ pub fn status<Q: ?Sized>(
     sources.status(queue, super::session_role(read.role.as_ref())?)
 }
 
+/// The part of `service status` the queue holds, as `{"attention"}`
+/// ([`crate::application::queue_service::attention`]).
+pub fn service_status<Q: RunLog>(queue: &Q) -> Value {
+    json!({"attention": crate::application::queue_service::attention(queue)})
+}
+
 /// `requests`: the one request `read` names whatever its status, or the
 /// open ones (every one with `all`), as `{"requests"}`.
 pub fn requests<Q: ?Sized>(

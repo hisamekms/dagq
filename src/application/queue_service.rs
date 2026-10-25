@@ -874,7 +874,8 @@ fn run(
         | UseCase::Requests
         | UseCase::Replans
         | UseCase::CiFailures
-        | UseCase::Planners => unreachable!("a read is answered above"),
+        | UseCase::Planners
+        | UseCase::ServiceStatus => unreachable!("a read is answered above"),
         UseCase::Add
         | UseCase::Edit
         | UseCase::Submit
@@ -1390,22 +1391,98 @@ pub fn ensure(control: &dyn QueueServiceControl, timeout: Duration) -> Result<Va
 
 /// The queue service as `status`, `doctor` and `dagq service status` show
 /// it (ADR-t1233-4): `probe`, what a look at its record and its socket
-/// found, the API version this binary speaks, and the attention its latest
-/// event leaves standing (`queue_service_down`) when the queue's `log` can
-/// be read (`null` without one, `error` when the read fails).
+/// found, the API version this binary speaks, and the [`attention`] of the
+/// queue's `log` when it can be read (`null` without one).
 pub fn view(probe: &ServiceProbe, log: Option<&dyn super::RunLog>) -> Value {
+    view_with(probe, log.map_or(Value::Null, attention))
+}
+
+/// Whether the attention the latest of the service's events in `log`
+/// leaves stands (`queue_service_down`): a boolean, or `{"error"}` when the
+/// read fails.
+pub fn attention(log: &dyn super::RunLog) -> Value {
     use crate::domain::queue_service::QUEUE_SERVICE_ATTENTION_KINDS;
-    let mut view = serde_json::to_value(probe).unwrap_or(Value::Null);
-    view["client_api_version"] = json!(API_VERSION);
-    view["attention"] = match log.map(|log| log.latest_queue_event(&QUEUE_SERVICE_ATTENTION_KINDS))
-    {
-        None => Value::Null,
-        Some(Ok(latest)) => json!(latest.is_some_and(|event| {
+    match log.latest_queue_event(&QUEUE_SERVICE_ATTENTION_KINDS) {
+        Ok(latest) => json!(latest.is_some_and(|event| {
             crate::domain::queue_service::attention_stands(Some(&event.kind))
         })),
-        Some(Err(error)) => json!({"error": format!("{error:#}")}),
-    };
+        Err(error) => json!({"error": format!("{error:#}")}),
+    }
+}
+
+/// [`view`] with its `attention` read elsewhere: the host's `dagq service
+/// status` reads it through the service (`service_status`), and opens no
+/// queue.
+pub fn view_with(probe: &ServiceProbe, attention: Value) -> Value {
+    let mut view = serde_json::to_value(probe).unwrap_or(Value::Null);
+    view["client_api_version"] = json!(API_VERSION);
+    view["attention"] = attention;
     view
+}
+
+/// What [`unreached_view`] says to do next.
+pub const UNREACHED_NEXT: &str = "dagq up (or dagq service start) starts it; with an outage \
+                                  recorded, the supervisor's log says why it could not keep it";
+
+/// The host's `dagq service status` of a service that did not answer
+/// (ADR-t3102-3 decision 2), read without opening the queue: [`view_with`]
+/// the attention unknown (`null`), the `outage` its supervisor recorded
+/// outside the DB (`null` when none stands: no supervisor has found it
+/// down since it last answered), and what to do `next`.
+pub fn unreached_view(
+    probe: &ServiceProbe,
+    outage: Option<&crate::domain::queue_service::ServiceOutage>,
+) -> Value {
+    let mut view = view_with(probe, Value::Null);
+    view["outage"] = json!(outage);
+    view["next"] = json!(UNREACHED_NEXT);
+    view
+}
+
+/// What the host's `dagq service status` asked the service for its
+/// `service_status` came to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ServiceStatusRead {
+    /// The service's answer, `{"attention"}`.
+    Answered(Value),
+    /// Nothing answered (`unreachable`), and why.
+    Unreached(String),
+    /// The service answered with a refusal or an error (`wrong_queue`,
+    /// `authorization_denied`, a use case an older build does not know).
+    Refused(String),
+}
+
+/// Where the host's `dagq service status` looks, none of it in the DB: the
+/// service's record and socket, its read through the service, and the
+/// outage its supervisor recorded outside the DB.
+pub trait ServiceStatusSource {
+    fn probe(&self) -> ServiceProbe;
+    /// Ask the service for `service_status`.
+    fn read(&self) -> ServiceStatusRead;
+    fn recorded_outage(&self) -> Option<crate::domain::queue_service::ServiceOutage>;
+}
+
+/// The host's `dagq service status` (ADR-t3102-2 decision 1, ADR-t3102-3
+/// decisions 1 and 2): a service the look finds running is asked for its
+/// attention ([`view_with`]); a refusal leaves the attention as
+/// `{"error"}`; one the look does not find running, or that does not
+/// answer the read, is [`unreached_view`], `unreachable` with why when the
+/// look found it running.
+pub fn host_status(source: &dyn ServiceStatusSource) -> Value {
+    let mut probe = source.probe();
+    if probe.state == ServiceState::Running {
+        match source.read() {
+            ServiceStatusRead::Answered(answer) => {
+                return view_with(&probe, answer["attention"].clone());
+            }
+            ServiceStatusRead::Refused(why) => return view_with(&probe, json!({"error": why})),
+            ServiceStatusRead::Unreached(why) => {
+                probe.state = ServiceState::Unreachable;
+                probe.error = Some(why);
+            }
+        }
+    }
+    unreached_view(&probe, source.recorded_outage().as_ref())
 }
 
 /// `dagq service start`: [`ensure`] the service with `control`, recorded
@@ -1861,6 +1938,142 @@ mod tests {
         response.error.as_ref().map(|error| error.code)
     }
 
+    /// A [`ServiceStatusSource`] whose look finds `state` and whose read
+    /// comes to `read`, counting the reads.
+    struct FakeStatus {
+        state: ServiceState,
+        read: ServiceStatusRead,
+        outage: Option<crate::domain::queue_service::ServiceOutage>,
+        reads: RefCell<usize>,
+    }
+
+    impl ServiceStatusSource for FakeStatus {
+        fn probe(&self) -> ServiceProbe {
+            ServiceProbe {
+                state: self.state,
+                socket: "/q/service/queue.sock".into(),
+                pid: Some(7),
+                build: Some("b".to_owned()),
+                api_version: Some(API_VERSION),
+                min_api_version: None,
+                build_matches: Some(true),
+                started_at: Some(1),
+                error: None,
+            }
+        }
+        fn read(&self) -> ServiceStatusRead {
+            *self.reads.borrow_mut() += 1;
+            self.read.clone()
+        }
+        fn recorded_outage(&self) -> Option<crate::domain::queue_service::ServiceOutage> {
+            self.outage.clone()
+        }
+    }
+
+    /// The host's `service status` asks only a service its look finds
+    /// running; its answer is the attention, a refusal the attention's
+    /// `error`, and no answer the outage recorded with the look turned
+    /// `unreachable`, as is a service the look does not find running.
+    #[test]
+    fn host_status_reads_a_running_service_and_falls_back_to_the_outage() {
+        let outage = crate::domain::queue_service::ServiceOutage {
+            since: 5,
+            reason: "unreachable".to_owned(),
+            message: "m".to_owned(),
+            supervisor: None,
+            pushed: true,
+        };
+        let fake = |state, read| FakeStatus {
+            state,
+            read,
+            outage: Some(outage.clone()),
+            reads: RefCell::new(0),
+        };
+        let answered = fake(
+            ServiceState::Running,
+            ServiceStatusRead::Answered(json!({"attention": true})),
+        );
+        let view = host_status(&answered);
+        assert_eq!(view["state"], "running");
+        assert_eq!(view["attention"], true);
+        assert!(view.get("outage").is_none(), "{view}");
+
+        let refused = fake(
+            ServiceState::Running,
+            ServiceStatusRead::Refused("bad_request: unknown use case".to_owned()),
+        );
+        let view = host_status(&refused);
+        assert_eq!(view["state"], "running");
+        assert_eq!(
+            view["attention"],
+            json!({"error": "bad_request: unknown use case"})
+        );
+        assert!(view.get("outage").is_none(), "{view}");
+
+        let gone = fake(
+            ServiceState::Running,
+            ServiceStatusRead::Unreached("the socket refused".to_owned()),
+        );
+        let view = host_status(&gone);
+        assert_eq!(view["state"], "unreachable");
+        assert_eq!(view["error"], "the socket refused");
+        assert_eq!(view["attention"], Value::Null);
+        assert_eq!(view["outage"], json!(outage));
+        assert_eq!(view["next"], UNREACHED_NEXT);
+
+        for state in [ServiceState::Stopped, ServiceState::Unreachable] {
+            let down = fake(
+                state,
+                ServiceStatusRead::Answered(json!({"attention": true})),
+            );
+            let view = host_status(&down);
+            assert_eq!(*down.reads.borrow(), 0, "{state:?}");
+            assert_eq!(view["state"], json!(state));
+            assert_eq!(view["attention"], Value::Null);
+            assert_eq!(view["outage"], json!(outage));
+        }
+    }
+
+    /// `service status` of a service that answers is the look and the
+    /// attention it read; of one that does not, the look, no attention
+    /// (the queue is not opened), the outage recorded or `null`, and what
+    /// to do next.
+    #[test]
+    fn service_status_says_the_attention_or_the_outage_and_what_to_do() {
+        let probe = |state| ServiceProbe {
+            state,
+            socket: "/q/service/queue.sock".into(),
+            pid: Some(7),
+            build: Some("b".to_owned()),
+            api_version: Some(API_VERSION),
+            min_api_version: None,
+            build_matches: Some(true),
+            started_at: Some(1),
+            error: None,
+        };
+        let answered = view_with(&probe(ServiceState::Running), json!(true));
+        assert_eq!(answered["state"], "running");
+        assert_eq!(answered["attention"], true);
+        assert_eq!(answered["client_api_version"], API_VERSION);
+        assert!(answered.get("outage").is_none() && answered.get("next").is_none());
+        let none = unreached_view(&probe(ServiceState::Stopped), None);
+        assert_eq!(none["state"], "stopped");
+        assert_eq!(none["attention"], Value::Null);
+        assert_eq!(none["outage"], Value::Null);
+        assert_eq!(none["next"], UNREACHED_NEXT);
+        let outage = crate::domain::queue_service::ServiceOutage {
+            since: 5,
+            reason: "start_failed".to_owned(),
+            message: "m".to_owned(),
+            supervisor: None,
+            pushed: false,
+        };
+        let recorded = unreached_view(&probe(ServiceState::Unreachable), Some(&outage));
+        assert_eq!(recorded["state"], "unreachable");
+        assert_eq!(recorded["outage"], json!(outage));
+        assert_eq!(recorded["next"], UNREACHED_NEXT);
+    }
+
     #[test]
     fn hello_needs_no_token_and_names_the_build_and_the_versions() {
         let backend = backend(RunStatus::Running);
@@ -1995,6 +2208,7 @@ mod tests {
                 json!({"all": true}),
                 Capability::QueueRead,
             ),
+            (UseCase::ServiceStatus, json!({}), Capability::QueueRead),
             (
                 UseCase::WatchPoll,
                 json!({"role": "inbox"}),

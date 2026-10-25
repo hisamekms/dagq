@@ -5,10 +5,11 @@
 //! Each entry builds the adapters and calls the use case; what is decided
 //! is in `application` and `domain`.
 
-use super::{OneShot, queue_service_view};
+use super::OneShot;
 use crate::application::queue_commands::QueueCommand;
 use crate::domain::LeaseToken;
 use crate::infrastructure::location::runs_dir;
+use crate::infrastructure::queue_service as service;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::{
@@ -473,11 +474,14 @@ pub fn repair_rebound_worktrees(repo: &Path, answer: Value) -> Result<Value> {
     Ok(rebinding::repair_worktrees(&repository, answer))
 }
 
-/// `dagq service status`: [`queue_service_view`], read without changing
-/// anything.
-pub fn queue_service_status(db: &Path) -> Value {
-    let queue = SqliteQueue::open_read_only(db).ok();
-    queue_service_view(db, queue.as_ref())
+/// `dagq service status` of the queue at `db`, which opens no queue
+/// ([`host_status`](crate::application::queue_service::host_status)): the
+/// service's record and socket under its directory, read through `client`.
+pub fn queue_service_status(db: &Path, client: &service::Client) -> Value {
+    crate::application::queue_service::host_status(&service::HostServiceStatus {
+        queue_dir: db.parent().unwrap_or(Path::new(".")),
+        client,
+    })
 }
 
 /// `dagq service start`: see
