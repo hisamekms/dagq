@@ -3447,11 +3447,10 @@ fn queue_command(command: &Command) -> Result<Option<QueueCommand>> {
         } => QueueCommand::Report(commands::ReportParams {
             period: period.clone(),
             at: at.map(dagq::domain::stats::Cursor::text),
-            out: out
-                .as_ref()
-                .map(|out| cwd().map(|cwd| cwd.join(out)))
-                .transpose()?,
             print: print.is_some(),
+            // A `--out` is written here from the files answered
+            // (`finish_command`), never by the service.
+            files: out.is_some(),
             // Read and drawn here before it is sent (`call_service`).
             diagram: None,
             checkout: None,
@@ -3495,8 +3494,9 @@ fn granted_by_its_role(capability: Capability) -> bool {
 /// [`queue_command`] of `command`, whether the service or the DB answered
 /// it: a log's background session is printed (and followed) from its file,
 /// and the diagram of `graph --out` is drawn by the host's d2 (`svg`) and
-/// written, as the command line printed and wrote them; any other answer
-/// as it is.
+/// written, as are the files of `report --out`, here with the caller's
+/// permissions, as the command line printed and wrote them; any other
+/// answer as it is.
 fn finish_command(command: &Command, answer: Value) -> Result<Value> {
     match command {
         // The queue is bound; the run worktrees it lists get their Git link
@@ -3518,6 +3518,12 @@ fn finish_command(command: &Command, answer: Value) -> Result<Value> {
                 *follow,
             )
         }
+        Command::Report { out: Some(out), .. } => dagq::compose::write_report_files(
+            &env::current_dir()
+                .context("working directory is unavailable")?
+                .join(out),
+            answer,
+        ),
         Command::Graph {
             format,
             out: Some(out),

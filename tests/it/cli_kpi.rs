@@ -418,6 +418,88 @@ fn report_writes_the_html_and_json_and_returns_their_paths() {
     assert!(!report(None, &db, &config, &[]).status.success());
 }
 
+/// `report --out` through the queue service (ADR-t3102-3 decision 5): the
+/// service answers the report's files and the client writes them under its
+/// `--out` with the retention and the index there, answering as a report
+/// the service wrote; the service writes nothing under `--out` nor under
+/// the queue's `reports/`, and params naming an `out` sent to it straight
+/// are refused with nothing written.
+#[test]
+fn report_out_through_the_service_is_written_by_the_client() {
+    use dagq::domain::queue_service::{API_VERSION, ServiceRequest, UseCase};
+    use dagq::infrastructure::queue_service as service;
+    let (dir, db) = queue();
+    let db = db.canonicalize().unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    ok(&db, &["add", "first", "--change", "fix"]);
+    let out = dir.path().join("out");
+    let stale = out.join("daily/2020-01-01.json");
+    std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    std::fs::write(&stale, "{}").unwrap();
+    let output = report(
+        None,
+        &db,
+        &config,
+        &[
+            "--at",
+            "2026-09-23T12:00:00Z",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(written["period"], "day", "{written}");
+    assert_eq!(written["label"], "2026-09-23", "{written}");
+    assert_eq!(written["partial"], false, "{written}");
+    let out = out.canonicalize().unwrap();
+    assert_eq!(written["json"], json!(out.join("daily/2026-09-23.json")));
+    assert_eq!(written["html"], json!(out.join("daily/2026-09-23.html")));
+    assert_eq!(written["index"], json!(out.join("index.html")));
+    assert_eq!(
+        written["removed"],
+        json!([out.join("daily/2020-01-01.json")])
+    );
+    let json: Value =
+        serde_json::from_slice(&std::fs::read(out.join("daily/2026-09-23.json")).unwrap()).unwrap();
+    assert_eq!(json["report"]["label"], "2026-09-23");
+    assert!(out.join("index.html").exists());
+    let queue_dir = db.parent().unwrap();
+    assert!(!queue_dir.join("reports").exists());
+
+    // Straight to the service, an `out` is refused unread.
+    let elsewhere = dir.path().join("elsewhere");
+    let response = service::call(
+        &service::socket_path(queue_dir),
+        &ServiceRequest {
+            api_version: API_VERSION,
+            token: None,
+            env_role: None,
+            queue: None,
+            binding: None,
+            use_case: UseCase::Report,
+            params: json!({
+                "period": "day",
+                "out": elsewhere,
+                "diagram": {"tasks": [], "d2_source": false, "reason": "not drawn"},
+            }),
+        },
+        std::time::Duration::from_secs(10),
+    )
+    .unwrap();
+    let refused = serde_json::to_value(response).unwrap();
+    assert_eq!(refused["ok"], false, "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(message.contains("unknown field `out`"), "{message}");
+    assert!(!elsewhere.exists());
+    assert!(!queue_dir.join("reports").exists());
+}
+
 /// Any label is a change when dagq.toml names no set (ADR-t980-1):
 /// `stats` and `kpi` group the runs by the label as written, `--change` and
 /// a target's `change` take it, and a comparison without `--change`

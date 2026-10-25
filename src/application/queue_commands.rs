@@ -260,9 +260,12 @@ pub struct PlannerRequestParams {
 }
 
 /// `report`'s: the period (`day` or `week`), the cursor whose period it
-/// is (`--at`, as its text), the directory to write under (`--out`, an
-/// absolute path; the queue's `reports/` without) and whether it is only
-/// returned (`--print json`), with what the client read and drew from the
+/// is (`--at`, as its text), and whether it is only returned (`--print
+/// json`), answered as the files its caller writes under its `--out`
+/// ([`super::report::ReportFiles`]), or else written under the queue's
+/// `reports/`, the one place the service writes a report. A `--out` is
+/// never sent: params naming an `out` are refused as unknown and nothing
+/// is written. With what the client read and drew from the
 /// [`QueueCommand::ReportInputs`] answered to it: the near-term diagram
 /// (none: a command not sent yet, which the report refuses), the main
 /// checkout of the repository the queue is bound to, and the areas of each
@@ -274,9 +277,9 @@ pub struct ReportParams {
     #[serde(default)]
     pub at: Option<String>,
     #[serde(default)]
-    pub out: Option<PathBuf>,
-    #[serde(default)]
     pub print: bool,
+    #[serde(default)]
+    pub files: bool,
     #[serde(default)]
     pub diagram: Option<DrawnDiagram>,
     #[serde(default)]
@@ -427,16 +430,13 @@ impl QueueCommand {
                     at.parse::<crate::domain::stats::Cursor>()
                         .map_err(|error| BadCommand(format!("report's at: {error}")))?;
                 }
-                if params.print && params.out.is_some() {
-                    return Err(BadCommand("report's print and out conflict".to_owned()).into());
-                }
-                if let Some(checkout) = &params.checkout {
-                    absolute("report's checkout", checkout)?;
+                if params.print && params.files {
+                    return Err(BadCommand("report's print and files conflict".to_owned()).into());
                 }
                 params
-                    .out
+                    .checkout
                     .as_deref()
-                    .map_or(Ok(()), |out| absolute("report's out", out))
+                    .map_or(Ok(()), |checkout| absolute("report's checkout", checkout))
             }
             _ => Ok(()),
         }
@@ -651,8 +651,8 @@ mod tests {
             QueueCommand::Report(ReportParams {
                 period: "week".to_owned(),
                 at: Some("@1800000000".to_owned()),
-                out: Some(PathBuf::from("/reports")),
                 print: false,
+                files: true,
                 diagram: Some(DrawnDiagram {
                     tasks: vec![3],
                     d2_source: true,
@@ -701,10 +701,14 @@ mod tests {
             (UseCase::Rebind, json!({"repo": "/checkout"})),
             (UseCase::Report, json!({"period": "month"})),
             (UseCase::Report, json!({"period": "day", "at": "soon"})),
-            (UseCase::Report, json!({"period": "day", "out": "reports"})),
+            (UseCase::Report, json!({"period": "day", "out": "/reports"})),
             (
                 UseCase::Report,
-                json!({"period": "day", "out": "/reports", "print": true}),
+                json!({"period": "day", "files": true, "print": true}),
+            ),
+            (
+                UseCase::Report,
+                json!({"period": "day", "checkout": "repo"}),
             ),
         ] {
             let error = QueueCommand::parse(use_case, &params).unwrap_err();

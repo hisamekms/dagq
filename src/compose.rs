@@ -63,7 +63,7 @@ pub use observation::{
     doctor, events, events_matching, graph_export_text, graph_svg_of, observe, observer_launch,
     queue_agents, read_queue, service_detail, service_reads, stats, status, status_for,
     throughput_review, throughput_review_launch, timeline, timeline_in, watch, watch_in,
-    watch_through_service,
+    watch_through_service, write_report_files,
 };
 pub use planning::{
     PLANNER_TIMEOUT, PlannerEntry, planner_session, planner_session_with_provider, planners,

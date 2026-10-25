@@ -342,8 +342,8 @@ fn each_host_command_runs_through_the_service_as_on_the_db_and_is_refused_a_work
             QueueCommand::Report(commands::ReportParams {
                 period: "day".to_owned(),
                 at: None,
-                out: None,
                 print: true,
+                files: false,
                 diagram: None,
                 checkout: None,
                 areas: None,
@@ -521,8 +521,8 @@ fn each_host_command_runs_in_client_mode_as_on_the_db() {
             QueueCommand::Report(commands::ReportParams {
                 period: "day".to_owned(),
                 at: None,
-                out: None,
                 print: true,
+                files: false,
                 diagram: None,
                 checkout: None,
                 areas: None,

@@ -7,7 +7,7 @@
 //! caller reads the queue and writes the files.
 use std::collections::HashSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{DAY_MS, Kpi, Period, date};
 use crate::domain::{FindingAttributes, marks, stats::timestamp_millis};
@@ -39,7 +39,8 @@ pub const INDEX_FILE: &str = "index.html";
 const PARTIAL: &str = ".partial";
 
 /// How many reports are kept (`[report]` of `host.toml`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Keep {
     pub daily_days: usize,
     pub weekly_weeks: usize,

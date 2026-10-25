@@ -452,7 +452,7 @@ pub fn make_with(
 }
 
 /// Write `report` of `period` under the root: its JSON and HTML, then the
-/// retention and the index.
+/// retention and the index ([`write_files`] of [`render`]).
 pub fn write(
     files: &dyn RunFiles,
     setup: &ReportSetup,
@@ -460,20 +460,78 @@ pub fn write(
     period: Period,
     now: i64,
 ) -> Result<Written> {
+    write_files(files, &setup.root, &render(setup, report, period, now)?)
+}
+
+/// A report as the files its caller writes under a root of its own
+/// (`report --out` through the queue service, ADR-t3102-3 decision 5): the
+/// JSON and the HTML [`write`] writes, and what the retention and the
+/// index under that root are judged with (the host's UTC offset, the
+/// `[report]` retention of `host.toml` and the unix second the report was
+/// made at).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportFiles {
+    pub period: String,
+    pub label: String,
+    pub partial: bool,
+    pub json: String,
+    pub html: String,
+    pub utc_offset_secs: i64,
+    pub keep: Keep,
+    pub now: i64,
+}
+
+/// `report` of `period` made at `now` with `setup`, as [`ReportFiles`].
+pub fn render(
+    setup: &ReportSetup,
+    report: &Report,
+    period: Period,
+    now: i64,
+) -> Result<ReportFiles> {
     let file = report.file_name(period);
-    let dir = setup.root.join(file.dir());
+    let mut json = serde_json::to_string_pretty(report)?;
+    json.push('\n');
+    Ok(ReportFiles {
+        period: period.as_str().to_owned(),
+        label: file.label,
+        partial: file.partial,
+        json,
+        html: report::render_html(report),
+        utc_offset_secs: setup.host.utc_offset_secs,
+        keep: setup.keep,
+        now,
+    })
+}
+
+/// Write `rendered` under `root`: its JSON and HTML, then the retention of
+/// the reports under `root` and its index.
+pub fn write_files(files: &dyn RunFiles, root: &Path, rendered: &ReportFiles) -> Result<Written> {
+    let period: Period = rendered.period.parse().map_err(anyhow::Error::msg)?;
+    // A label not of the period's form (one naming another directory) is
+    // not written anywhere.
+    anyhow::ensure!(
+        report::label_days(period, &rendered.label).is_some(),
+        "the report's label {:?} is not a {} label",
+        rendered.label,
+        period.as_str()
+    );
+    let file = ReportFile {
+        period,
+        label: rendered.label.clone(),
+        partial: rendered.partial,
+    };
+    let dir = root.join(file.dir());
     files
         .create_dir_all(&dir)
         .with_context(|| format!("create {}", dir.display()))?;
-    let json_path = setup.root.join(file.path("json"));
-    let mut json = serde_json::to_vec_pretty(report)?;
-    json.push(b'\n');
-    write_atomic(files, &json_path, &json)?;
-    let html_path = setup.root.join(file.path("html"));
-    write_atomic(files, &html_path, report::render_html(report).as_bytes())?;
-    let offset_ms = setup.host.utc_offset_secs * 1000;
-    let removed = prune(files, &setup.root, now * 1000, offset_ms, setup.keep)?;
-    let index = write_index(files, &setup.root, now)?;
+    let json_path = root.join(file.path("json"));
+    write_atomic(files, &json_path, rendered.json.as_bytes())?;
+    let html_path = root.join(file.path("html"));
+    write_atomic(files, &html_path, rendered.html.as_bytes())?;
+    let offset_ms = rendered.utc_offset_secs * 1000;
+    let removed = prune(files, root, rendered.now * 1000, offset_ms, rendered.keep)?;
+    let index = write_index(files, root, rendered.now)?;
     Ok(Written {
         period: period.as_str(),
         label: file.label,
@@ -670,12 +728,38 @@ fn write_index(files: &dyn RunFiles, root: &Path, now: i64) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Files answered with a label not of their period's form are refused
+    /// before anything is written.
+    #[test]
+    fn report_files_with_a_label_naming_another_directory_are_not_written() {
+        let rendered = ReportFiles {
+            period: "day".to_owned(),
+            label: "../../x".to_owned(),
+            partial: false,
+            json: "{}".to_owned(),
+            html: String::new(),
+            utc_offset_secs: 0,
+            keep: Keep::default(),
+            now: 0,
+        };
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let root = Path::new("/out");
+        let error = write_files(&files, root, &rendered).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("is not a day label"),
+            "{error:#}"
+        );
+        for written in ["daily/../../x.json", "daily/../../x.html", "index.html"] {
+            assert!(files.bytes(&root.join(written)).is_err(), "{written}");
+        }
+    }
+
     fn params(svg: Option<String>, areas: usize) -> super::super::queue_commands::ReportParams {
         super::super::queue_commands::ReportParams {
             period: "day".to_owned(),
             at: None,
-            out: None,
             print: true,
+            files: false,
             diagram: Some(DrawnDiagram {
                 tasks: vec![1],
                 d2_source: true,

@@ -65,6 +65,8 @@ Gitとprogramはserviceでなくクライアントがユースケースの外で
   クライアントはmain checkoutのGitでそのcommitのareaを決め、自分のd2で描いた図と一緒に送る。
   要求がserviceの受ける大きさを超えれば図を描かなかったものとして理由と送り、それでも超えれば送らずに断る
   serviceはそれとserviceの環境（`TZ`・`host.toml`）でreportを作り、`--out`の無いものはqueueの`reports/`に書く。
+  `--out`のreportは、`graph --out`と同じくserviceが作ったものを答え（JSONとHTMLと保持の設定）、`--out`の下に書いて古いreportを消し索引を書くのはクライアントが自分の権限で行う。
+  serviceがreportを書き消すのはqueueの`reports/`の下だけで、`out`を名指すparamsは何も書かずに断る
   SVGはd2の出力と同じく整ったXMLの`<svg>`であることだけを確かめ（整っていないものは図を載せない）、pageはそのbytesの`data:` URLの`<img>`として載せるので、browserは画像として描いてscriptを動かさず外を読まず、そのstyleはpageに及ばない。
   serviceが`dagq.toml`を読むcheckoutは、`stats`・`kpi`と同じく束縛からGitなしで決めたmain checkoutだけで、クライアントが名指すcheckoutはそれとreal pathが同じときだけ受け、違えばその中を読まずに断る（`application::report::accept_checkout`）。
   serviceが読む`dagq.toml`は大きさに上限があり、通常のfileでないもの（deviceやFIFOへのsymlinkなど）は読まずに断る

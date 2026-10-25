@@ -414,7 +414,7 @@ fn counts_checks(
 /// `now`: the `[kpi]` of `checkout`'s `dagq.toml` with the host's
 /// `host.toml` (the queue's, over the host-wide one) over it, the host's
 /// time zone and cores, the `[report]` retention of `host.toml`, the
-/// reports' root (`out`, else `<queue dir>/reports/`), and the host's d2
+/// reports' root (`<queue dir>/reports/`), and the host's d2
 /// and TALA on this process's PATH for the dependency diagram; and whether
 /// the `toolchain` axis has strata, as the profiles of `checkout`'s
 /// `dagq.toml` resolved against `profiles` say
@@ -422,7 +422,6 @@ fn counts_checks(
 fn report_setup(
     db: &Path,
     checkout: Option<&Path>,
-    out: Option<&Path>,
     host_wide: Option<&Path>,
     now: i64,
     profiles: &crate::domain::toolchain::ProfileRegistry,
@@ -430,7 +429,6 @@ fn report_setup(
     report_setup_with(
         db,
         checkout,
-        out,
         host_wide,
         now,
         profiles,
@@ -442,7 +440,6 @@ fn report_setup(
 fn report_setup_with(
     db: &Path,
     checkout: Option<&Path>,
-    out: Option<&Path>,
     host_wide: Option<&Path>,
     now: i64,
     profiles: &crate::domain::toolchain::ProfileRegistry,
@@ -456,7 +453,7 @@ fn report_setup_with(
     let queue_dir = db.parent().unwrap_or(Path::new("."));
     let host = load_host_kpi(queue_dir, host_wide)?;
     Ok(crate::application::report::ReportSetup {
-        root: out.map_or_else(|| queue_dir.join(REPORTS_DIR), Path::to_path_buf),
+        root: queue_dir.join(REPORTS_DIR),
         host: crate::application::kpi::Host {
             utc_offset_secs: clock::local_utc_offset(now),
             cores: clock::logical_cores(),
@@ -593,6 +590,19 @@ pub(super) fn prepare_report(
         },
         call,
     )
+}
+
+/// Writes the report the queue service (or `run_command` on the DB)
+/// answered as files (`report --out`, [`crate::application::report::ReportFiles`])
+/// under `out` with this process's permissions, its retention and its
+/// index too: what was written and removed, as a report written under the
+/// queue's `reports/` answers it.
+pub fn write_report_files(out: &Path, answer: Value) -> Result<Value> {
+    let rendered: crate::application::report::ReportFiles =
+        serde_json::from_value(answer).context("the report's answer holds no files")?;
+    Ok(serde_json::to_value(
+        crate::application::report::write_files(&LocalRunFiles, out, &rendered)?,
+    )?)
 }
 
 /// Draws the reports' dependency diagram with d2 and TALA on `path_var`
@@ -1751,7 +1761,6 @@ impl OneShot {
         let setup = report_setup_with(
             db,
             part.checkout.as_deref(),
-            None,
             host_wide.as_deref(),
             now,
             self.profiles,
@@ -1786,7 +1795,6 @@ impl OneShot {
         let setup = report_setup(
             db,
             bound_checkout(queue)?.as_deref(),
-            None,
             host_wide.as_deref(),
             now,
             self.profiles,
@@ -1813,7 +1821,6 @@ impl OneShot {
         let setup = report_setup(
             db,
             bound_checkout(queue)?.as_deref(),
-            None,
             host_wide.as_deref(),
             now,
             self.profiles,
@@ -1868,7 +1875,6 @@ impl OneShot {
             let setup = report_setup_with(
                 db,
                 Some(checkout),
-                None,
                 host_wide.as_deref(),
                 now,
                 self.profiles,
@@ -1894,8 +1900,13 @@ impl OneShot {
     /// holds `at` (now without; today's and this week's are partial),
     /// made as the supervisor makes it with what its caller read and drew
     /// ([`prepare_report`]: the near-term diagram, the main checkout and
-    /// the landed commits' areas) and written under `out` (the queue's
-    /// `reports/` without), or with `print` only returned. No Git or
+    /// the landed commits' areas) and written under the queue's `reports/`,
+    /// with `print` only returned, or with `files` answered as the files
+    /// its caller writes under its own `--out`
+    /// ([`crate::application::report::ReportFiles`]): nothing is written or
+    /// removed anywhere but under `reports/`, and params naming an `out`
+    /// are refused before they get here
+    /// ([`crate::application::queue_commands::ReportParams`]). No Git or
     /// program runs: the `dagq.toml` read is the main checkout's
     /// [`served_checkout`] finds, and a checkout `params` names that is not
     /// it is refused ([`crate::application::report::accept_checkout`]).
@@ -1927,7 +1938,6 @@ impl OneShot {
         let setup = report_setup_with(
             db,
             checkout,
-            params.out.as_deref(),
             host_wide.as_deref(),
             now,
             self.profiles,
@@ -1941,6 +1951,11 @@ impl OneShot {
         let made = report::make_with(queue, &setup, now, period, at, diagram.into())?;
         if params.print {
             return Ok(serde_json::to_value(made)?);
+        }
+        if params.files {
+            return Ok(serde_json::to_value(report::render(
+                &setup, &made, period, now,
+            )?)?);
         }
         Ok(serde_json::to_value(report::write(
             &LocalRunFiles,
@@ -1982,7 +1997,6 @@ pub(super) fn report_port(
             let mut setup = report_setup(
                 &setup_db,
                 Some(&checkout),
-                None,
                 setup_wide.as_deref(),
                 now,
                 profiles,
@@ -2017,7 +2031,6 @@ pub(super) fn forecast_port(
             report_setup(
                 &db,
                 Some(&checkout),
-                None,
                 host_wide.as_deref(),
                 now,
                 &crate::domain::toolchain::BUILTIN,
