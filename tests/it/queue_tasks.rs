@@ -96,6 +96,90 @@ fn paths_are_stored_and_replaced_while_the_task_is_editable() {
     assert!(queue.set_paths(TaskId::new(99), Vec::new()).is_err());
 }
 
+/// `edit_task` refuses a blank acceptance and leaves the task and its
+/// `task_edited` events as they were, while a blank
+/// context replaces the old one; `add` takes a blank description and
+/// acceptance.
+#[test]
+fn edit_task_refuses_blank_plan_fields_and_changes_nothing() {
+    let (_dir, mut queue) = fixture();
+    let task = queue.add(new_task("kept")).unwrap();
+    let blank = queue
+        .add(dagq::domain::NewTask {
+            description: String::new(),
+            acceptance: " ".into(),
+            ..new_task("blank plan")
+        })
+        .unwrap();
+    assert_eq!((blank.description(), blank.acceptance()), ("", " "));
+    let edits = |queue: &mut SqliteQueue| {
+        queue
+            .show(task.id())
+            .unwrap()
+            .events
+            .into_iter()
+            .filter(|e| e.kind == EventKind::TaskEdited)
+            .count()
+    };
+    let before = queue.show(task.id()).unwrap().task;
+    // One representative refusal; which values are blank is the domain's
+    // unit test. The valid context beside it is not written either.
+    assert_eq!(
+        queue
+            .edit_task(
+                task.id(),
+                TaskEdit {
+                    acceptance: Some(" \n".into()),
+                    context: Some("ignored".into()),
+                    ..TaskEdit::default()
+                },
+                TaskStatus::Draft,
+            )
+            .unwrap_err()
+            .to_string(),
+        "task acceptance must not be blank"
+    );
+    let after = queue.show(task.id()).unwrap().task;
+    assert_eq!(
+        (
+            after.title(),
+            after.description(),
+            after.acceptance(),
+            after.context()
+        ),
+        (
+            before.title(),
+            before.description(),
+            before.acceptance(),
+            before.context()
+        )
+    );
+    assert_eq!(edits(&mut queue), 0);
+
+    queue
+        .edit_task(
+            task.id(),
+            TaskEdit {
+                context: Some("why".into()),
+                ..TaskEdit::default()
+            },
+            TaskStatus::Draft,
+        )
+        .unwrap();
+    let cleared = queue
+        .edit_task(
+            task.id(),
+            TaskEdit {
+                context: Some(String::new()),
+                ..TaskEdit::default()
+            },
+            TaskStatus::Draft,
+        )
+        .unwrap();
+    assert_eq!(cleared.context(), "");
+    assert_eq!(edits(&mut queue), 2);
+}
+
 /// `edit_task` replaces the given fields of a draft task, records
 /// `task_edited` with the old and new value of each field that changed (no
 /// event when nothing does), and refuses a task that is no longer a draft
@@ -934,7 +1018,7 @@ fn changes_authorized_before_the_tasks_proposal_changed_change_nothing() {
                 &mut queue,
                 task,
                 TaskEdit {
-                    description: Some(String::new()),
+                    description: Some("replaced".into()),
                     ..TaskEdit::default()
                 },
                 s(),

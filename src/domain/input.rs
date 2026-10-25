@@ -230,12 +230,24 @@ impl TaskEdit {
             && self.execution_class.is_none()
     }
 
-    /// The rules of [`NewTask::validate`] for the fields it replaces.
+    /// The rules of [`NewTask::validate`] for the fields it replaces, and
+    /// a description and acceptance that are not blank.
     pub fn validate(&self) -> Result<(), DomainError> {
         if let Some(title) = &self.title {
             require(!title.trim().is_empty(), || DomainError::Blank {
                 field: "task title",
             })?;
+        }
+        // Unlike add, which takes an empty description and acceptance (a
+        // follow-up's draft), an edit has no use for blanking them: a draft
+        // to throw away is canceled.
+        for (field, value) in [
+            ("task description", &self.description),
+            ("task acceptance", &self.acceptance),
+        ] {
+            if let Some(value) = value {
+                require(!value.trim().is_empty(), || DomainError::Blank { field })?;
+            }
         }
         if let Some(commands) = &self.verification_commands {
             require(commands.iter().all(|s| !s.trim().is_empty()), || {

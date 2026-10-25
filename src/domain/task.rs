@@ -1693,6 +1693,20 @@ mod tests {
                 },
                 "verification commands must not be blank",
             ),
+            (
+                TaskEdit {
+                    description: Some("".into()),
+                    ..TaskEdit::default()
+                },
+                "task description must not be blank",
+            ),
+            (
+                TaskEdit {
+                    acceptance: Some(" \n\t".into()),
+                    ..TaskEdit::default()
+                },
+                "task acceptance must not be blank",
+            ),
         ];
         for (change, message) in invalid {
             assert!(!change.is_empty());

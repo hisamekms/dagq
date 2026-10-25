@@ -477,8 +477,10 @@ enum Command {
         task: i64,
         #[arg(long, group = "field")]
         title: Option<String>,
+        /// New description; a blank one is refused.
         #[arg(long, group = "field")]
         description: Option<String>,
+        /// New acceptance criteria; a blank one is refused.
         #[arg(long, group = "field")]
         acceptance: Option<String>,
         /// Why the task exists and what to read first.

@@ -99,7 +99,7 @@ A goal and every task have one of five priorities. Pick it by what waiting costs
 
 ## Edit a draft or submitted task
 
-Fix a draft or submitted task in place instead of canceling it and registering it again (that changes its ID and its dependents' edges): `"$DAGQ" edit TASK ...` (`edit --help`). Each given field replaces the old value; a repeatable flag replaces the whole list, so pass every value it should keep.
+Fix a draft or submitted task in place instead of canceling it and registering it again (that changes its ID and its dependents' edges): `"$DAGQ" edit TASK ...` (`edit --help`). Each given field replaces the old value; a repeatable flag replaces the whole list, so pass every value it should keep. A blank title, description or acceptance is refused; to drop a draft, `cancel` it.
 
 - Fix a proposal while it is sent back (`draft`) rather than while it is `submitted`: a review already running may pass the old text. A `ready` task changes only through plan review or by taking it back with `draft ID`.
 - Priority, goal and dependencies have their own commands: `set-priority`, `set-goal`, `dependency add|remove`.

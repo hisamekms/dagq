@@ -527,7 +527,7 @@ fn a_planner_changes_no_task_of_another_planners_revising_proposal() {
     set_status(&db, 1, "draft");
     send_back(Some("planner:1"), Some(5));
     let changes: [&[&str]; 9] = [
-        &["edit", "1", "--description", ""],
+        &["edit", "1", "--description", "replaced"],
         &["set-goal", "1", "1"],
         &["set-paths", "1", "--paths", "docs/**"],
         &["set-priority", "1", "high"],
