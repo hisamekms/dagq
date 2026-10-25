@@ -919,6 +919,10 @@ pub(super) fn progress_version(
 }
 
 impl crate::application::commands::holds::HoldStore for SqliteQueue {
+    fn record_images(&mut self, records: &[(EventKind, serde_json::Value)]) -> Result<()> {
+        crate::application::EventStore::record_queue_events(self, records.to_vec()).map(drop)
+    }
+
     fn run_task(&self, run: &RunId) -> Result<Option<TaskId>> {
         Ok(self
             .conn

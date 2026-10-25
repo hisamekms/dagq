@@ -1,8 +1,8 @@
 //! The report as one self-contained HTML page (ADR-0051 decision 20): the
 //! styles and the charts (inline SVG) are in the page, and nothing is
 //! loaded from anywhere else — no script, stylesheet, font, image or CDN.
-//! The dependency diagram is d2's SVG put inline once nothing in it refers
-//! outside the page (ADR-0077 decision 7).
+//! The dependency diagram is d2's SVG (or a client's) shown as an image of
+//! its own bytes, a `data:` URL, so nothing of it reaches the page.
 //! Readable without JavaScript, which it does not use.
 use std::fmt::Write;
 
@@ -74,7 +74,7 @@ summary{cursor:pointer;color:var(--accent)}
 ul{padding-left:20px}
 a{color:var(--accent)}
 .diagram{background:#ffffff;border:1px solid var(--line);padding:8px}
-.diagram>svg{display:block;width:100%;min-width:720px;height:auto}
+.diagram>img{display:block;width:100%;min-width:720px;height:auto}
 "#;
 
 /// The page of `report`.
@@ -739,6 +739,9 @@ fn findings(page: &mut String, report: &Report) {
     page.push_str("</table></div>");
 }
 
+/// The text an image of the near-term diagram is read as.
+pub(crate) const DIAGRAM_ALT: &str = "the near-term dependency diagram";
+
 /// The near-term dependency diagram, or why it is not drawn.
 fn diagram(page: &mut String, report: &Report) {
     let section = &report.diagram;
@@ -749,8 +752,13 @@ fn diagram(page: &mut String, report: &Report) {
         esc(&report.report.generated_at),
     );
     match (&section.svg, &section.reason) {
+        // An image of the SVG's own bytes: none of it reaches the page.
         (Some(svg), _) => {
-            let _ = write!(page, "<div class=\"scroll diagram\">{svg}</div>");
+            let _ = write!(
+                page,
+                "<div class=\"scroll diagram\"><img src=\"{}\" alt=\"{DIAGRAM_ALT}\"></div>",
+                super::image_source(svg)
+            );
         }
         (None, reason) => {
             let _ = write!(

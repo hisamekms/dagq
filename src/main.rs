@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
 use dagq::application::commands::operations::{HookSession, Operation, WorkspaceScope};
+use dagq::application::queue_commands::QueueCommand;
 use dagq::application::queue_reads::{self as reads, QueueRead};
 use dagq::application::queue_writes::QueueWrite;
 use dagq::domain::queue_service::UseCase;
@@ -2448,15 +2449,6 @@ const OBSERVER_DENIED: &str = "observer may not change queue state";
 const REVIEWER_DENIED: &str = "reviewer may not change queue state";
 
 /// What `hold` and `release` name: digits are a task, anything else a run.
-fn hold_target(target: &str) -> Result<dagq::domain::task_hold::HoldTarget> {
-    use dagq::domain::task_hold::HoldTarget;
-    let target = target.trim();
-    Ok(match target.parse::<i64>() {
-        Ok(id) => HoldTarget::Task(TaskId::new(id)),
-        Err(_) => HoldTarget::Run(RunId::new(target)?),
-    })
-}
-
 fn hold_target_resource(target: &str) -> Resource {
     match target.trim().parse::<i64>() {
         Ok(id) => task_resource(id),
@@ -3320,6 +3312,234 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
     })
 }
 
+/// The host's dialogue or operation command `command` is, as the queue
+/// service's use case takes it and as the command line runs it on the DB
+/// (`compose::run_command`, ADR-t3102-2 decision 6 (4)): `None` for any
+/// other command. A path is made absolute from the working directory, what
+/// clap or the command line refuses before it runs is refused here, and the
+/// words of `planner request` are read (`--text-file`, `-`), so it is built
+/// once for a command line.
+fn queue_command(command: &Command) -> Result<Option<QueueCommand>> {
+    use dagq::application::queue_commands as commands;
+    let cwd = || env::current_dir().context("working directory is unavailable");
+    let run = |run: &String| commands::RunParams { run: run.clone() };
+    let planner = |planner: &i64| commands::PlannerParams { planner: *planner };
+    Ok(Some(match command {
+        Command::Answer { id, text } => QueueCommand::Answer(commands::AnswerParams {
+            id: *id,
+            text: text.clone(),
+        }),
+        Command::Ask {
+            command: Some(AskCommand::Close { id }),
+            ..
+        } => QueueCommand::AskClose(commands::AskCloseParams { id: *id }),
+        Command::Hold {
+            target,
+            reason,
+            until,
+        } => QueueCommand::Hold(commands::HoldParams {
+            target: target.clone(),
+            reason: reason.clone(),
+            until: hold_until(*until)?,
+        }),
+        Command::Release {
+            target,
+            provider,
+            model,
+        } => QueueCommand::Release(commands::ReleaseParams {
+            target: target.clone(),
+            provider: provider.clone(),
+            model: model.clone(),
+            // Read and kept here before it is sent (`call_service`).
+            work: None,
+        }),
+        Command::Replan {
+            command:
+                ReplanCommand::Request {
+                    run,
+                    reason,
+                    evidence,
+                },
+        } => QueueCommand::ReplanRequest(commands::ReplanRequestParams {
+            run: run.clone(),
+            reason: reason.clone(),
+            evidence: evidence.clone(),
+        }),
+        // The checkout's Git is read here, as none runs in the service; a
+        // caller the policy does not grant `rebind` reads none and sends
+        // none, and the service refuses and records it.
+        Command::Rebind { repo } => {
+            let git_common_dir = if granted_by_its_role(Capability::QueueAdmin) {
+                Some(dagq::compose::repository_common_dir(&rebind_checkout(
+                    repo.as_deref(),
+                )?)?)
+            } else {
+                None
+            };
+            QueueCommand::Rebind(commands::RebindParams {
+                repository_queue_dir: git_common_dir
+                    .as_deref()
+                    .and_then(dagq::compose::repository_queue_dir),
+                git_common_dir,
+            })
+        }
+        Command::Recover { run: id } => QueueCommand::Recover(run(id)),
+        Command::Run { command } => match command {
+            RunCommand::Screen { run: id, .. } => QueueCommand::RunScreen(run(id)),
+            RunCommand::Send { run: id, .. } => QueueCommand::RunSend(run(id)),
+            RunCommand::Log { run: id, .. } => QueueCommand::RunLog(run(id)),
+            RunCommand::CloseWorkspaces { .. } => return Ok(None),
+        },
+        Command::Planner { command } => match command {
+            PlannerCommand::Screen { planner: id, .. } => QueueCommand::PlannerScreen(planner(id)),
+            PlannerCommand::Send { planner: id, .. } => QueueCommand::PlannerSend(planner(id)),
+            PlannerCommand::Log { planner: id, .. } => QueueCommand::PlannerLog(planner(id)),
+            PlannerCommand::Request {
+                planner: id,
+                text,
+                text_file,
+                cmux: _,
+            } => QueueCommand::PlannerRequest(commands::PlannerRequestParams {
+                planner: *id,
+                // A caller the policy does not grant it is refused before a
+                // file or stdin is read: it sends no words, and the service
+                // refuses and records it before it reads the params' text.
+                text: if granted_by_its_role(Capability::PlannerRequest) {
+                    request_words("--text", text.clone(), text_file.clone(), &cwd()?)?
+                        .expect("clap requires --text or --text-file")
+                } else {
+                    String::new()
+                },
+            }),
+        },
+        Command::Report {
+            period,
+            at,
+            out,
+            print,
+        } => QueueCommand::Report(commands::ReportParams {
+            period: period.clone(),
+            at: at.map(dagq::domain::stats::Cursor::text),
+            out: out
+                .as_ref()
+                .map(|out| cwd().map(|cwd| cwd.join(out)))
+                .transpose()?,
+            print: print.is_some(),
+            // Read and drawn here before it is sent (`call_service`).
+            diagram: None,
+            checkout: None,
+            areas: None,
+        }),
+        Command::Graph {
+            goal_id,
+            format,
+            out: Some(_),
+        } => {
+            anyhow::ensure!(format != "json", "--out needs --format d2 or svg");
+            QueueCommand::GraphExport(commands::GraphExportParams { goal: *goal_id })
+        }
+        _ => return Ok(None),
+    }))
+}
+
+/// Whether the role the caller's environment names (none: the user's) is
+/// granted `capability` by the [`StaticPolicy`]: only what spares the
+/// client a read the service would refuse anyway, which decides on its own
+/// side for the principal of the request. A role that does not read is
+/// granted nothing.
+fn granted_by_its_role(capability: Capability) -> bool {
+    ActorContext::from_env(|name| env::var(name).ok())
+        .is_ok_and(|actor| dagq::domain::authorization::grants(actor.role()).contains(&capability))
+}
+
+/// What the command line prints of `answer`, the answer of the
+/// [`queue_command`] of `command`, whether the service or the DB answered
+/// it: a log's background session is printed (and followed) from its file,
+/// and the diagram of `graph --out` is drawn by the host's d2 (`svg`) and
+/// written, as the command line printed and wrote them; any other answer
+/// as it is.
+fn finish_command(command: &Command, answer: Value) -> Result<Value> {
+    match command {
+        // The queue is bound; the run worktrees it lists get their Git link
+        // from the new repository here (ADR-t3102-3 decision 5).
+        Command::Rebind { repo } => {
+            dagq::compose::repair_rebound_worktrees(&rebind_checkout(repo.as_deref())?, answer)
+        }
+        Command::Run {
+            command: RunCommand::Log { lines, follow, .. },
+        }
+        | Command::Planner {
+            command: PlannerCommand::Log { lines, follow, .. },
+        } => {
+            let session = serde_json::from_value(answer["session"].clone())
+                .context("the log's answer names no background session")?;
+            print_session_log(
+                &dagq::application::session_log::SessionLog { session },
+                *lines,
+                *follow,
+            )
+        }
+        Command::Graph {
+            format,
+            out: Some(out),
+            ..
+        } => {
+            let source = answer["source"]
+                .as_str()
+                .context("the diagram's answer holds no d2 source")?;
+            let text = dagq::compose::graph_export_text(source, format)?;
+            let out = env::current_dir()
+                .context("working directory is unavailable")?
+                .join(out);
+            std::fs::write(&out, &text).with_context(|| format!("write {}", out.display()))?;
+            Ok(json!({
+                "format": format,
+                "out": out,
+                "tasks": answer["tasks"],
+            }))
+        }
+        _ => Ok(answer),
+    }
+}
+
+/// The checkout `rebind` binds the queue to: a repository queue already
+/// resolved the working directory; `--repo` overrides it for a `--db` queue
+/// used from elsewhere or a moved checkout.
+fn rebind_checkout(repo: Option<&Path>) -> Result<PathBuf> {
+    let cwd = env::current_dir().context("working directory is unavailable")?;
+    Ok(match repo {
+        Some(repo) => cwd.join(repo),
+        None => cwd,
+    })
+}
+
+/// What `client` answers `command`, sent as the use case and params of
+/// [`client_request`], printed as [`finish_command`] prints it: a `report`
+/// and a `release` first ask what to read, and read it with Git and draw
+/// here before they are sent ([`dagq::compose::prepare_command`]), for the
+/// queue at `db` when the caller knows it.
+fn call_service(
+    client: &dagq::infrastructure::queue_service::Client,
+    db: Option<&Path>,
+    command: &Command,
+    use_case: UseCase,
+    params: Value,
+) -> Result<Value> {
+    let params = match command {
+        Command::Report { .. } | Command::Release { .. } => {
+            let queued = queue_command(command)?.context("the command is one of the service's")?;
+            dagq::compose::prepare_command(queued, db, |first| {
+                let (use_case, params) = first.request();
+                client.call(use_case, params)
+            })?
+            .request()
+            .1
+        }
+        _ => params,
+    };
+    finish_command(command, client.call(use_case, params)?)
+}
+
 /// The use case and params of the queue service a client-mode `dagq`
 /// sends `command` as (goal 82's stage (3), ADR-t1233-1 decision 7): the
 /// same options the service reads back as the command line's. `None` for
@@ -3636,6 +3856,9 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
     if let Some(write) = queue_write(command)? {
         return write.request().map(Some);
     }
+    if let Some(command) = queue_command(command)? {
+        return Ok(Some(command.request()));
+    }
     Ok(Some(match command {
         Command::Mark {
             label,
@@ -3872,13 +4095,15 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
         )
         .into());
     };
-    client.call(use_case, params)
+    call_service(client, None, &cli.command, use_case, params)
 }
 
 /// Whether the host `dagq` of a
 /// [`host_client_role`](dagq::domain::queue_service::host_client_role)
 /// sends `command` to the service of a served queue: a command the service
 /// answers ([`client_request`]), and `watch`, whose looks it answers.
+/// `planner request` and `rebind` are ones, told here without reading the
+/// words or the checkout's Git, which are read once, as it is sent.
 fn host_routed(command: &Command) -> Result<bool> {
     // `request add` reads its words once, when its request is made.
     let request_add = matches!(
@@ -3887,8 +4112,14 @@ fn host_routed(command: &Command) -> Result<bool> {
             command: RequestCommand::Add { .. }
         }
     );
-    Ok(matches!(command, Command::Watch { .. })
-        || request_add
+    Ok(matches!(
+        command,
+        Command::Watch { .. }
+            | Command::Rebind { .. }
+            | Command::Planner {
+                command: PlannerCommand::Request { .. }
+            }
+    ) || request_add
         || client_request(command)?.is_some())
 }
 
@@ -3905,7 +4136,9 @@ fn host_client(
     command: &Command,
 ) -> Result<Value> {
     // A repository queue's binding is checked on every command, as the
-    // command line checks it, by the service before it answers.
+    // command line checks it, by the service before it answers; `rebind` is
+    // the one command that runs on a queue bound elsewhere.
+    let binding = binding.filter(|_| !matches!(command, Command::Rebind { .. }));
     let common_dir = binding.map(path_text).transpose()?;
     let client =
         dagq::infrastructure::queue_service::Client::host(db, common_dir.as_deref(), |name| {
@@ -3956,19 +4189,20 @@ fn host_client(
     if matches!(command, Command::Status { .. }) {
         return client.look_within(use_case, params, dagq::application::watch::LOOK_LIMIT);
     }
-    client.call(use_case, params)
+    call_service(&client, Some(db), command, use_case, params)
 }
 
 /// The name of `command` when it is one of the control side's, which a
 /// person or the inbox runs on the host and a client-mode `dagq` refuses
-/// as `control_side_command` rather than as `no_use_case`.
+/// as `control_side_command` rather than as `no_use_case`: none of the
+/// service's use cases, so a command it answers is sent to it and
+/// authorized on its side.
 fn control_side_command(command: &Command) -> Option<&'static str> {
     match command {
         Command::Doctor { .. } => Some("doctor"),
         Command::Service {
             command: ServiceCommand::Status,
         } => Some("service status"),
-        Command::Planners { .. } => Some("planners"),
         _ => None,
     }
 }
@@ -4131,12 +4365,22 @@ fn execute(cli: Cli) -> Result<Value> {
         // The DB a link names is its target's: its directory's service
         // serves it.
         let db = std::fs::canonicalize(&location.db).unwrap_or_else(|_| location.db.clone());
-        return host_client(
+        // `rebind` records what it did in its own log as the command line
+        // did (ADR-0033 decision 2), from the service's answer.
+        let rebind = matches!(cli.command, Command::Rebind { .. });
+        if rebind {
+            install_telemetry(&cli.command, &location);
+        }
+        let result = host_client(
             &db,
             &location.db,
             location.git_common_dir.as_deref(),
             &cli.command,
         );
+        if rebind {
+            dagq::compose::trace_command("rebind", &result);
+        }
+        return result;
     }
     check_access(&actor, &cli.command, cli.db.as_deref())?;
     dagq::infrastructure::event_actor::set_process_actor(event_actor(&actor, &cli.command));
@@ -4403,6 +4647,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     reads: dagq::compose::service_reads(),
                     writes: dagq::compose::service_writes(),
                     detail: dagq::compose::service_detail(),
+                    commands: dagq::compose::service_commands(),
                     stop: install_stop_signal()?,
                     poll: Duration::from_millis(50),
                     owner: dagq::infrastructure::queue_service::owner_from_env(|name| {
@@ -4497,6 +4742,17 @@ fn execute(cli: Cli) -> Result<Value> {
     if let Some(write) = queue_write(&cli.command)? {
         return dagq::compose::write_queue(&mut queue, &actor, &write, environment_owner);
     }
+    // The host's dialogue and operations, as the queue service runs them
+    // too (ADR-t3102-2 decision 6 (4)).
+    if let Some(command) = queue_command(&cli.command)? {
+        let command = dagq::compose::prepare_command(command, Some(&db), |first| {
+            dagq::compose::run_command(&mut queue, &db, first)
+        })?;
+        return finish_command(
+            &cli.command,
+            dagq::compose::run_command(&mut queue, &db, &command)?,
+        );
+    }
     Ok(match cli.command {
         Command::Init
         | Command::Locate
@@ -4550,6 +4806,24 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::SetPriority { .. }
         | Command::Revisit { .. }
         | Command::Request { .. } => unreachable!("a write is answered above"),
+        // Run above as the queue service runs them.
+        Command::Answer { .. }
+        | Command::Ask {
+            command: Some(AskCommand::Close { .. }),
+            ..
+        }
+        | Command::Hold { .. }
+        | Command::Release { .. }
+        | Command::Replan {
+            command: ReplanCommand::Request { .. },
+        }
+        | Command::Recover { .. }
+        | Command::Run {
+            command: RunCommand::Screen { .. } | RunCommand::Send { .. } | RunCommand::Log { .. },
+        }
+        | Command::Planner { .. }
+        | Command::Report { .. }
+        | Command::Graph { out: Some(_), .. } => unreachable!("a command is run above"),
         Command::Show { id, full, events } => {
             let detail = queue.show(TaskId::new(id))?;
             if full {
@@ -4694,78 +4968,18 @@ fn execute(cli: Cli) -> Result<Value> {
                 AgentCommand::Set { id } => sets.show(id)?,
             }
         }
-        Command::Replan { command } => {
-            let mut replans = dagq::application::commands::replans::Replans::new(
-                &mut queue,
-                &actor,
-                &StaticPolicy,
-            );
-            serde_json::to_value(match command {
-                ReplanCommand::Request {
-                    run,
-                    reason,
-                    evidence,
-                } => replans.request(&new_replan(&run, reason, &evidence)?)?,
+        // A worker's proposal on its own run (ADR-t1521-2 decision 3).
+        Command::Replan {
+            command:
                 ReplanCommand::Propose {
                     run,
                     reason,
                     evidence,
-                } => replans.propose(&new_replan(&run, reason, &evidence)?)?,
-            })?
-        }
-        Command::Hold {
-            target,
-            reason,
-            until,
-        } => {
-            let mut holds =
-                dagq::application::commands::holds::Holds::new(&mut queue, &actor, &StaticPolicy);
-            serde_json::to_value(holds.hold(
-                &hold_target(&target)?,
-                &reason,
-                hold_until(until)?,
-            )?)?
-        }
-        Command::Release {
-            target,
-            provider,
-            model,
-        } => {
-            let choice = dagq::domain::task_hold::ReleaseChoice {
-                provider: provider.as_deref().map(str::parse).transpose()?,
-                model,
-            };
-            let containers = dagq::compose::queue_run_containers(&queue, &db);
-            let mut holds =
-                dagq::application::commands::holds::Holds::new(&mut queue, &actor, &StaticPolicy);
-            serde_json::to_value(holds.release(
-                &hold_target(&target)?,
-                choice,
-                &dagq::infrastructure::adapters::RunRepositories {
-                    containers: &containers,
                 },
-            )?)?
-        }
-        Command::Graph {
-            goal_id,
-            format,
-            out: Some(out),
-        } => {
-            anyhow::ensure!(format != "json", "--out needs --format d2 or svg");
-            let (text, tasks) =
-                dagq::compose::graph_diagram(&queue, goal_id.map(GoalId::new), &format)?;
-            let out = cwd.join(out);
-            std::fs::write(&out, &text).with_context(|| format!("write {}", out.display()))?;
-            json!({
-                "format": format,
-                "out": out,
-                "tasks": tasks,
-            })
-        }
-        Command::Ask {
-            command: Some(AskCommand::Close { id }),
-            ..
-        } => serde_json::to_value(dialogue!().close(AskId::new(id))?)?,
+        } => serde_json::to_value(
+            dagq::application::commands::replans::Replans::new(&mut queue, &actor, &StaticPolicy)
+                .propose(&new_replan(&run, reason, &evidence)?)?,
+        )?,
         Command::Ask {
             command: None,
             kind,
@@ -4797,11 +5011,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 finding_id: finding.map(FindingId::new),
                 request_id: request.map(RequestId::new),
             })?
-        }
-        // The user's own answer or the inbox's delegated one, which the
-        // application records from the actor (ADR-t728-3 decision 2).
-        Command::Answer { id, text } => {
-            serde_json::to_value(dialogue!().answer(AskId::new(id), &text)?)?
         }
         Command::Watch {
             after,
@@ -5097,71 +5306,9 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Plan { .. } => bail!(dagq::application::planner::PLAN_REFUSED),
-        Command::Run { command } => {
-            use dagq::application::screen::{self, RunTarget};
-            match command {
-                // Neither builds an agent adapter: they read only the queue
-                // (task 1437).
-                RunCommand::Screen { run, .. } => {
-                    screen::run_screen(&mut queue, &RunTarget::parse(&run)?)?
-                }
-                RunCommand::Log { run, lines, follow } => {
-                    let log = dagq::application::session_log::run_log(
-                        &mut queue,
-                        &RunTarget::parse(&run)?,
-                    )?;
-                    print_session_log(&log, lines, follow)?
-                }
-                RunCommand::Send { run, .. } => {
-                    screen::run_send(&mut queue, &RunTarget::parse(&run)?)?
-                }
-                RunCommand::CloseWorkspaces { .. } => {
-                    bail!(dagq::application::screen::CLOSE_WORKSPACES_REFUSED)
-                }
-            }
-        }
-        Command::Planner { command } => {
-            use dagq::application::screen;
-            match command {
-                // Neither reads a screen nor types (ADR-t1433-2).
-                PlannerCommand::Screen { planner, .. } => screen::planner_screen(
-                    &queue,
-                    &dagq::infrastructure::location::planners_dir(&db),
-                    PlannerId::new(planner),
-                )?,
-                PlannerCommand::Log {
-                    planner,
-                    lines,
-                    follow,
-                } => {
-                    let log = dagq::application::session_log::planner_log(
-                        &queue,
-                        &dagq::infrastructure::location::planners_dir(&db),
-                        PlannerId::new(planner),
-                    )?;
-                    print_session_log(&log, lines, follow)?
-                }
-                PlannerCommand::Send { planner, .. } => {
-                    screen::planner_send(&queue, PlannerId::new(planner))?
-                }
-                PlannerCommand::Request {
-                    planner,
-                    text,
-                    text_file,
-                    cmux: _,
-                } => {
-                    let words = request_words("--text", text, text_file, &cwd)?
-                        .expect("clap requires --text or --text-file");
-                    one_shot.request_planner(
-                        &mut queue,
-                        &db,
-                        &dagq::infrastructure::adapters::BackgroundSessions,
-                        PlannerId::new(planner),
-                        &words,
-                    )?
-                }
-            }
-        }
+        Command::Run {
+            command: RunCommand::CloseWorkspaces { .. },
+        } => bail!(dagq::application::screen::CLOSE_WORKSPACES_REFUSED),
         Command::Down {
             wait,
             force,
@@ -5209,19 +5356,6 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Review { id } => dagq::compose::review(&db, TaskId::new(id))?,
-        Command::Report {
-            period,
-            at,
-            out,
-            print,
-        } => one_shot.report_of(
-            &queue,
-            &db,
-            period.parse().map_err(anyhow::Error::msg)?,
-            at,
-            out.as_deref(),
-            print.is_some(),
-        )?,
         Command::Observe {
             history: false,
             input: None,
@@ -5374,7 +5508,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 },
             )?
         }
-        Command::Recover { run } => one_shot.recover(&db, &RunId::new(run)?)?,
         Command::Session { .. } | Command::PlannerSession { .. } => {
             unreachable!("a session wrapper opens no queue: session_wrapper runs it")
         }
@@ -6046,6 +6179,287 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// ADR-t3102-2 decisions 1 and 6: of every command of the command line
+    /// (each leaf clap knows, counted, so a new one must be placed), the
+    /// host `dagq` of the user, the inbox and a planner sends each to the
+    /// queue service but those the ADR keeps out, each listed with why: the
+    /// processes that open the DB at the end (decision 1), the ones that
+    /// open no queue for the command, the wrappers' and the hooks' own
+    /// route (decision 6 (3)), the control side's processes (decision 6
+    /// (5)) and the migration and the diagnosis (decision 6 (6)); and
+    /// `ready --inherit`, which moves a run's branch (ADR-t3102-3 decision
+    /// 5), of a command the service runs otherwise. A client-mode `dagq`
+    /// refuses by name (`control_side_command`) only `doctor` and `service
+    /// status`, which have no use case yet, and sends every command the
+    /// service answers.
+    #[test]
+    fn the_host_cli_sends_every_command_but_the_adr_s_exceptions() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let outcome =
+                    std::panic::catch_unwind(host_cli_sends_every_command_but_the_adr_s_exceptions);
+                let _ = done.send(outcome);
+            })
+            .unwrap();
+        if let Err(panic) = finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the count of the commands did not end within 60 seconds")
+        {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    fn host_cli_sends_every_command_but_the_adr_s_exceptions() {
+        use clap::CommandFactory;
+        // A node is a command when it takes no subcommand, or runs without
+        // one (`ask`); `help` is clap's.
+        fn leaves(command: &clap::Command, path: &str, found: &mut Vec<String>) {
+            let subs: Vec<_> = command
+                .get_subcommands()
+                .filter(|sub| sub.get_name() != "help")
+                .collect();
+            if subs.is_empty() || !command.is_subcommand_required_set() {
+                found.push(path.to_owned());
+            }
+            for sub in subs {
+                leaves(sub, &format!("{path} {}", sub.get_name()), found);
+            }
+        }
+        let mut found = Vec::new();
+        for sub in Cli::command()
+            .get_subcommands()
+            .filter(|sub| sub.get_name() != "help")
+        {
+            leaves(sub, sub.get_name(), &mut found);
+        }
+        const CONTROL: &str = "a process of the control side: ADR-t3102-2 decision 6 (5)";
+        const DIAGNOSIS: &str =
+            "the migration and the diagnosis of the queue: ADR-t3102-2 decision 6 (6)";
+        const NO_QUEUE: &str = "opens no queue for the command";
+        let kept: &[(&str, &str)] = &[
+            (
+                "init",
+                "creates the DB where there is none: ADR-t3102-2 decision 1",
+            ),
+            (
+                "service serve",
+                "the queue service itself: ADR-t3102-2 decision 1",
+            ),
+            ("locate", NO_QUEUE),
+            ("plan", "refused for every caller (ADR-t1394-1)"),
+            (
+                "run close-workspaces",
+                "refused for every caller (ADR-t1433-3 decision 3)",
+            ),
+            ("relay serve", NO_QUEUE),
+            ("relay forward", NO_QUEUE),
+            ("relay probe", NO_QUEUE),
+            ("relay turn", NO_QUEUE),
+            ("relay verify", NO_QUEUE),
+            ("relay guard", NO_QUEUE),
+            ("review-program", NO_QUEUE),
+            (
+                "session",
+                "the wrapper's own principal: ADR-t3102-2 decision 6 (3)",
+            ),
+            (
+                "planner-session",
+                "the wrapper's own principal: ADR-t3102-2 decision 6 (3)",
+            ),
+            (
+                "session-event",
+                "a session's hook: ADR-t3102-2 decision 6 (3)",
+            ),
+            ("supervise", CONTROL),
+            ("up", CONTROL),
+            ("down", CONTROL),
+            ("install", CONTROL),
+            ("auto-update", CONTROL),
+            ("release-update", CONTROL),
+            ("inbox", CONTROL),
+            ("service start", CONTROL),
+            ("service stop", CONTROL),
+            ("queue-broker serve", CONTROL),
+            ("integrate", CONTROL),
+            ("review", CONTROL),
+            ("observe", CONTROL),
+            ("throughput-review", CONTROL),
+            ("setup-review", CONTROL),
+            ("migrate", DIAGNOSIS),
+            ("doctor", DIAGNOSIS),
+            ("service status", DIAGNOSIS),
+        ];
+        // The arguments each command needs to parse.
+        let samples: &[(&str, &[&str])] = &[
+            ("add", &["t"]),
+            ("lint", &["1"]),
+            (
+                "ask",
+                &["--kind", "decide", "--question", "q", "--because", "scope"],
+            ),
+            ("show", &["1"]),
+            ("ready", &["1"]),
+            ("draft", &["1"]),
+            ("submit", &["1"]),
+            ("proposal show", &["1"]),
+            ("proposal withdraw", &["1"]),
+            ("cancel", &["1"]),
+            ("dependency add", &["1", "2"]),
+            ("dependency remove", &["1", "2"]),
+            ("goal add", &["g"]),
+            ("goal ready", &["1"]),
+            ("goal show", &["1"]),
+            ("goal edit", &["1", "--title", "g"]),
+            ("goal close", &["1", "--verdict", "achieved"]),
+            ("goal review", &["1"]),
+            (
+                "judge-follow-up",
+                &["1", "--classification", "required", "--reason", "r"],
+            ),
+            ("set-goal", &["1", "1"]),
+            ("set-paths", &["1", "--none"]),
+            ("edit", &["1", "--title", "t"]),
+            ("set-priority", &["1", "high"]),
+            ("revisit", &["1", "--clear"]),
+            ("note", &["--text", "n", "--task", "1"]),
+            ("mark", &["m"]),
+            ("request add", &["--text", "plan it"]),
+            ("request decline", &["1", "--reason", "r"]),
+            ("hold", &["7", "--reason", "r"]),
+            ("release", &["7"]),
+            ("replan request", &["--run", "r1", "--reason", "r"]),
+            ("replan propose", &["--run", "r1", "--reason", "r"]),
+            ("agent eval", &["adr-rules"]),
+            ("agent cases", &["adr-rules"]),
+            (
+                "agent decide",
+                &["3", "prod-r1-a1", "--verdict", "clean", "--reason", "r"],
+            ),
+            ("agent set", &["3"]),
+            ("agent result", &["1"]),
+            (
+                "finding record",
+                &["--kind", "k", "--summary", "s", "--queue"],
+            ),
+            ("finding resolve", &["1", "--reason", "r"]),
+            ("finding dismiss", &["1", "--reason", "r"]),
+            ("search", &["q"]),
+            ("related", &["1"]),
+            (
+                "auto-update",
+                &[
+                    "--commit", "c", "--token", "t", "--to", "/t", "--repo", "/r", "--log", "/l",
+                ],
+            ),
+            (
+                "release-update",
+                &[
+                    "--release",
+                    "1.0.0",
+                    "--token",
+                    "t",
+                    "--to",
+                    "/t",
+                    "--log",
+                    "/l",
+                ],
+            ),
+            ("run screen", &["r1"]),
+            ("run send", &["r1"]),
+            ("run log", &["r1"]),
+            ("planner screen", &["1"]),
+            ("planner log", &["1"]),
+            ("planner send", &["1"]),
+            ("planner request", &["1", "--text", "t"]),
+            ("integrate", &["1"]),
+            ("review", &["1"]),
+            ("ask close", &["1"]),
+            ("answer", &["1", "--text", "yes"]),
+            ("timeline", &["r1"]),
+            ("recover", &["r1"]),
+            ("relay serve", &["--socket", "/s", "--target", "/t"]),
+            ("relay forward", &["--socket", "/s", "--port", "1"]),
+            ("relay probe", &["--socket", "/s"]),
+            (
+                "relay turn",
+                &[
+                    "--run-dir",
+                    "/r",
+                    "--clone",
+                    "/c",
+                    "--base",
+                    "b",
+                    "--branch",
+                    "x",
+                    "--facts-only",
+                ],
+            ),
+            ("relay verify", &["--token-file", "/t", "--", "true"]),
+            ("relay guard", &["--dir", "/d"]),
+            ("review-program", &["secrets"]),
+            (
+                "session",
+                &["--run", "r1", "--lease", "l", "--claude", "/c"],
+            ),
+            ("session-event", &["open"]),
+            ("planner-session", &["--planner", "1", "--claude", "/c"]),
+        ];
+        let mut sent = 0;
+        let mut wrong = Vec::new();
+        let mut refused_by_name = Vec::new();
+        for leaf in &found {
+            let args = samples
+                .iter()
+                .find(|(of, _)| of == leaf)
+                .map_or(&[][..], |(_, args)| *args);
+            let argv: Vec<&str> = std::iter::once("dagq")
+                .chain(leaf.split(' '))
+                .chain(args.iter().copied())
+                .collect();
+            let Ok(cli) = Cli::try_parse_from(&argv) else {
+                wrong.push(format!("{leaf}: give it a sample"));
+                continue;
+            };
+            let routed = host_routed(&cli.command).unwrap();
+            let why = kept.iter().find(|(of, _)| of == leaf).map(|(_, why)| *why);
+            if routed == why.is_some() {
+                wrong.push(format!("{leaf}: sent {routed}, kept {why:?}"));
+            }
+            sent += usize::from(routed);
+            // A client-mode `dagq` refuses by name before sending only a
+            // command the service has no use case for.
+            if control_side_command(&cli.command).is_some() {
+                refused_by_name.push(leaf.as_str());
+                if client_request(&cli.command).unwrap().is_some() {
+                    wrong.push(format!(
+                        "{leaf}: a use case refused as control_side_command"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        assert_eq!(refused_by_name, ["doctor", "service status"]);
+        for (leaf, _) in kept {
+            assert!(found.iter().any(|found| found == leaf), "no command {leaf}");
+        }
+        assert_eq!(found.len(), sent + kept.len(), "{found:?}");
+        // The reads and the exports among a kept command's forms are sent.
+        for argv in [
+            &["dagq", "observe", "--history"][..],
+            &["dagq", "observe", "--input", "1"],
+            &["dagq", "graph", "--format", "svg", "--out", "g.svg"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert!(host_routed(&cli.command).unwrap(), "{argv:?}");
+        }
+        // A sent command's form that moves a run's branch is not.
+        let cli =
+            Cli::try_parse_from(["dagq", "ready", "1", "--inherit", "--reason", "r"]).unwrap();
+        assert!(!host_routed(&cli.command).unwrap());
     }
 
     /// ADR-t2159-1 decision 6: the command lines an earlier binary

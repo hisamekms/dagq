@@ -130,7 +130,8 @@ fn workers_jobs_the_observer_and_the_planner_neither_answer_nor_close() {
     ok(&db, &["answer", &answered, "--text", "retry"]);
     let mut actors: Vec<Vec<(&str, &str)>> = vec![
         WORKER.to_vec(),
-        vec![("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "planner:1")],
+        // A planner of the runtime's, with its token.
+        vec![("DAGQ_ROLE", "planner")],
     ];
     for role in [
         "review-job",

@@ -130,6 +130,7 @@ paramsはそのコマンドのoption、答えはそのコマンドの出力（pa
 | `watch_poll` | hostの`dagq watch` | `queue.watch` |
 | 読み取り | そのコマンド | CLIと同じcapability。[読み取りのユースケース](#読み取りのユースケース) |
 | 計画の書き込みと`mark` | 同名のコマンド | CLIと同じ。[hostのCLI](queue-service-host-cli.md#計画のユースケース) |
+| 対話と操作 | `answer`・`report`など | CLIと同じ。[hostのCLI](queue-service-host-cli.md#対話と操作) |
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（capabilityは`finding.ask`）で送る。
 findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、eventの書き手は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。
@@ -196,7 +197,7 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
 
 ユースケースの無いコマンド（クライアントモードではserviceに届かない）:
 
-- `watch`（`queue.watch`。hostのCLIは上の`watch_poll`）、`report`と`graph --out`（`queue.export`。ファイルを書く）: jobとworkerのpolicyに無い操作で、今のCLIでも拒まれる
+- `watch`（`queue.watch`。hostのCLIは上の`watch_poll`）: jobとworkerのpolicyに無い操作で、今のCLIでも拒まれる
 - `graph --format svg`: hostのd2を起動するので、serviceは読み取りとして受け取らない（`json`と`d2`は答える）。
   promptとskillはsvgを名指さない
 - `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`: 制御側の状態を見るもので、jobのpromptは名指さない。
@@ -219,7 +220,7 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
   serviceの`authorization_denied`は、codeに加えてローカルのCLIの断りと同じ`denied`（role・capability・reason）とerrorの文（observerとjobには各々の決まった文）を出す。
   クライアントで断るもの（`no_use_case`・`queue_named`など）は`denied`を持たない
   どの断りでもDBを開くことに戻らない（fail closed）
-- `doctor`・`service status`・`planners`は制御側（人かinboxがhostで打つ）のコマンドとして`control_side_command`で断り、errorの文がコマンド名とそれを言う。
+- `doctor`・`service status`は制御側（人かinboxがhostで打つ）のコマンドとして`control_side_command`で断り、errorの文がコマンド名とそれを言う。
   DBもserviceも触らない。
   `no_use_case`になるのはそのほかのserviceのユースケースでない全てのコマンド。
 - `locate`はDBのpathを出さずにsocket（brokerの宛てではbroker）を答え、DBの有無を答えない。
@@ -245,8 +246,7 @@ serviceは`dagq --db <db> service serve`で、固定バイナリ（`up`かsuperv
 起動したものは、このbuildのserviceが答えれば（競った別の起動元のものでも）成功とする。
 `SIGINT`・`SIGTERM`で受け付けを止めて終わる。
 queueのDBが消えれば（使い捨てのqueueの片付け）自分で終わる。
-起動元のenvがownerのpidを名指していれば、そのprocessが居なくなってからも終わる（`domain::queue_service::OWNER_PID_ENV`）。
-これを付けるのはtestだけで、本番の起動元（`up`・supervisor・`service start`）は付けないので、本番のserviceの寿命（supervisorのexecの引き継ぎやdrainの間も動き続けること）は変わらない。
+起動元のenvがownerのpidを名指していれば（testだけ。`domain::queue_service::OWNER_PID_ENV`）、そのprocessが居なくなってからも終わる。
 
 - `up`: preflightの後、supervisorより先に`application::queue_service::ensure`を打つ。
   起動できなければ`up`はsupervisorを起動せずに止まる。
@@ -293,7 +293,7 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 - containerの中からbrokerを通す`telemetry_report`（[Queue broker](queue-broker.md)の`TokenRefusal`）。
   containerのrunのstepはhostのwrapperが送る
 - 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、integrateのverificationの隔離
-- 段(5)の残り: supervisorの着地とjobの結果・書き込みのCLIのservice経由化、親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
+- 段(5)の残り: supervisorの着地とjobの結果とhostのCLIが送らないもの（[送る範囲](queue-service-host-cli.md#送る範囲)）のservice経由化、親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
 
 ## CIの見張り（ADR-t1920-1）
 

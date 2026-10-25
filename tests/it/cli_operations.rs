@@ -191,7 +191,15 @@ fn a_worker_neither_runs_nor_records_a_session() {
 fn the_user_the_inbox_and_the_planner_keep_their_operations() {
     let (_dir, db) = queue();
     ok(&db, &["add", "first"]);
-    let planner = [("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "planner:3")];
+    // A planner of the runtime's, open, with its token.
+    let id = dagq::infrastructure::sqlite::SqliteQueue::open(&db)
+        .unwrap()
+        .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
+        .unwrap()
+        .id
+        .to_string();
+    let actor = format!("planner:{id}");
+    let planner = [("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", actor.as_str())];
     let inbox = [("DAGQ_ROLE", "inbox")];
     // `down` with no supervisor and `migrate --check` succeed.
     for env in [&[][..], &inbox[..], &planner[..]] {
@@ -228,7 +236,7 @@ fn the_user_the_inbox_and_the_planner_keep_their_operations() {
     // 4): its hook leaves the report for it, and is refused nothing; the
     // inbox's hook records its own span, past the authorizer.
     let mut own = planner.to_vec();
-    own.push(("DAGQ_PLANNER_ID", "3"));
+    own.push(("DAGQ_PLANNER_ID", id.as_str()));
     failed_past_authorization(&own, &db, &["session-event", "open"]);
     failed_past_authorization(&inbox, &db, &["session-event", "open"]);
     assert_eq!(denials(&db).len(), 5);

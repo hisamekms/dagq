@@ -54,6 +54,7 @@ fn claimed(token: &LeaseToken) -> (tempfile::TempDir, SqliteServiceBackend) {
         reads: Arc::new(|_, _, _| Ok(Value::Null)),
         writes: Arc::new(|_, _, _| Ok(Value::Null)),
         detail: |_, _| Value::Null,
+        commands: Arc::new(|_, _, _| Ok(Value::Null)),
     };
     (dir, backend)
 }

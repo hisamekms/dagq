@@ -92,7 +92,12 @@ fn only_the_queues_binary_migrates_the_queue() {
         let error = error_of(&run(binary, &db, &["migrate"]));
         assert!(error.contains("is not the queue's binary"), "{error}");
         assert!(error.contains(&fixed.display().to_string()), "{error}");
-        let error = error_of(&run(binary, &db, &["ask", "close", "1"]));
+        // `ready --inherit` moves a run's branch, so it opens the DB itself.
+        let error = error_of(&run(
+            binary,
+            &db,
+            &["ready", "1", "--inherit", "--reason", "r"],
+        ));
         assert!(
             error.contains("run `dagq migrate` with the queue's binary"),
             "{error}"

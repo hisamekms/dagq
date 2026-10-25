@@ -306,6 +306,49 @@ pub fn serve_for_test(db: &Path, env: &[(String, String)]) {
     std::fs::write(test_service_file(dir), serde_json::to_vec(env).unwrap()).unwrap();
 }
 
+/// Start the queue at `db`'s service for this test, stopping one that
+/// runs, with a `git` first on its `PATH` that appends each of its runs to
+/// the file it returns and then runs the real Git: what tells a test that
+/// the service runs no Git (ADR-t3102-3 decision 5). `env` is what the
+/// test's own `dagq` sets of [`READ_ENV`] but `PATH`, so that it is served
+/// by this service rather than one of its own; that `dagq` keeps the real
+/// Git first.
+pub fn serve_logging_git(db: &Path, env: &[(&str, &str)]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let db = std::fs::canonicalize(db).unwrap();
+    let dir = db.parent().unwrap().to_owned();
+    let bin = dir.join("service-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.join("service-git.log");
+    let real = dagq::infrastructure::git_binary::git_executable().unwrap();
+    let shim = bin.join("git");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexec {} \"$@\"\n",
+            common::shell_path(&log),
+            common::shell_path(&real)
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if service::probe(&dir).state == dagq::domain::queue_service::ServiceState::Running {
+        stop_for_test(&dir);
+    }
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let mut served = vec![("PATH".to_owned(), path.to_str().unwrap().to_owned())];
+    served.extend(
+        env.iter()
+            .filter(|(name, _)| *name != "PATH")
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+    );
+    serve_for_test(&db, &served);
+    log
+}
+
 /// Stop the service [`serve_for_test`] started for the queue in `dir`,
 /// and wait until it no longer holds the queue.
 fn stop_for_test(dir: &Path) {

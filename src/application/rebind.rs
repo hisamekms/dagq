@@ -18,8 +18,6 @@ pub const REBIND_LOG: &str = "rebind.jsonl";
 /// registrations, leases and binding, and its runs.
 pub struct Rebind<'a, Q: RunCoordination + SupervisorRegistry + RunLog + ?Sized> {
     pub queue: &'a mut Q,
-    /// The repository the queue is bound to from now on.
-    pub repository: &'a dyn Repository,
     pub files: &'a dyn RunFiles,
     pub processes: &'a dyn ProcessControl,
     pub clock: &'a dyn Clock,
@@ -46,16 +44,16 @@ pub struct RebindTarget {
 /// `integrate` still lives, since both hold paths of the old repository.
 /// The change is appended to `logs/rebind.jsonl`, the queue directory's
 /// `repository` file (if any) is rewritten, and every run worktree still on
-/// disk gets its Git link repaired from the new repository. Reports where a
-/// repository-resolved queue now lives, which differs from the queue's own
-/// directory until it is moved there.
+/// disk is listed for [`repair_worktrees`], which its caller runs after it:
+/// no Git runs in the queue's own operation (ADR-t3102-3 decision 5).
+/// Reports where a repository-resolved queue now lives, which differs from
+/// the queue's own directory until it is moved there.
 pub fn rebind<Q: RunCoordination + SupervisorRegistry + RunLog + ?Sized>(
     ports: Rebind<'_, Q>,
     target: RebindTarget,
 ) -> Result<Value> {
     let Rebind {
         queue,
-        repository,
         files,
         processes,
         clock,
@@ -119,15 +117,7 @@ pub fn rebind<Q: RunCoordination + SupervisorRegistry + RunLog + ?Sized>(
             Some((run.id().clone(), path))
         })
         .filter(|(_, path)| files.is_dir(path))
-        .map(|(run_id, path)| {
-            let error = repository.repair_worktree(&path).err();
-            json!({
-                "run_id": run_id,
-                "worktree_path": path,
-                "repaired": error.is_none(),
-                "error": error.map(|e| format!("{e:#}")),
-            })
-        })
+        .map(|(run_id, path)| json!({"run_id": run_id, "worktree_path": path}))
         .collect::<Vec<_>>();
     let resolved = target.repository_queue_dir;
     let move_to = resolved
@@ -143,4 +133,22 @@ pub fn rebind<Q: RunCoordination + SupervisorRegistry + RunLog + ?Sized>(
         "move_to": move_to,
         "worktrees": worktrees,
     }))
+}
+
+/// The answer of [`rebind`] with each run worktree it lists given its Git
+/// link again from `repository`, the one the queue is bound to now: whether
+/// it was repaired, and the error when not.
+pub fn repair_worktrees(repository: &dyn Repository, mut answer: Value) -> Value {
+    if let Some(worktrees) = answer["worktrees"].as_array_mut() {
+        for worktree in worktrees {
+            let path = worktree["worktree_path"].as_str().map(PathBuf::from);
+            let error = match path {
+                Some(path) => repository.repair_worktree(&path).err(),
+                None => Some(anyhow::anyhow!("the worktree has no path")),
+            };
+            worktree["repaired"] = json!(error.is_none());
+            worktree["error"] = json!(error.map(|e| format!("{e:#}")));
+        }
+    }
+    answer
 }

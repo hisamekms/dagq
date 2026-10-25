@@ -510,7 +510,7 @@ pub fn check_release(
 /// Where a release that ends a run for a new one read the run's work,
 /// before its store's transaction: the hold open then, the run and its
 /// [`ProgressVersion`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseReadAt {
     pub hold: HoldId,
     pub run: RunId,

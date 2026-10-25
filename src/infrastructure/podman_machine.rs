@@ -1062,6 +1062,10 @@ pub struct QueueRunMachine {
     pub main_checkout: Option<PathBuf>,
     /// The host-wide `host.toml`: the machine's resources.
     pub host_wide: Option<PathBuf>,
+    /// Where the image's records go when the process opens no queue (a
+    /// command of the host's `dagq` the queue service runs): kept for it
+    /// to send; on the queue at `db` without.
+    pub kept_records: Option<std::sync::Arc<crate::application::container_image::KeptImageRecords>>,
 }
 
 impl crate::application::podman_machine::RunMachine for QueueRunMachine {
@@ -1116,15 +1120,21 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
             .map_or(0, |since| {
                 i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
             });
+        let queue_records = super::container_image::QueueImageRecords {
+            db: self.db.clone(),
+            actor: None,
+        };
+        let records: &dyn crate::application::container_image::ImageRecords =
+            match &self.kept_records {
+                Some(kept) => &**kept,
+                None => &queue_records,
+            };
         let image = crate::application::container_image::prepare(
             &super::container_image::CheckoutImages::new(checkout, &queue_dir),
             &super::container_image::PodmanImages {
                 podman: self.podman.clone(),
             },
-            &super::container_image::QueueImageRecords {
-                db: self.db.clone(),
-                actor: None,
-            },
+            records,
             now,
         )
         .map_err(anyhow::Error::msg)?;

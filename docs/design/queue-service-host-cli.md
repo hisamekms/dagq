@@ -26,7 +26,8 @@ related:
 
 - 宛ての環境が無い`dagq`のうちuser・inbox・plannerのもの（`host_client_role`）は、serviceが答えるコマンド（`client_request`）と`watch`の各回の見る（`watch_poll`）をそのsocketへ送り、DBを開かない。
   serviceが一度も動いていないqueueも同じで、DBが無ければ送る前に`no queue at`で終わる（ADR-t3105-1決定3）。
-- それ以外のコマンド（ユースケースの無い書き込みと、制御側の診断とfileを書く読み取り）は今はDBを直接開く。
+- 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、wrapperとhookの経路（決定6の(3)）、runのbranchを動かす`ready --inherit`（ADR-t3102-3決定5）、制御側のプロセス（`supervise`・`up`・`integrate`・`review`・`observe`など。(5)）と`migrate`・`doctor`・`service status`（(6)）。
+  CLIの全ての葉は送るものかこの例外のどれかに当たり、どちらでもない葉は無い（unit testが全ての葉を数えて確かめる）。
   1つのコマンドの中で経路を混ぜない。
 - repositoryのqueueの束縛は、CLIが解決したrepositoryを要求に載せ（`ServiceRequest::binding`）、serviceが答える前に照らす。
   serviceは読み取り（tokenのrunとtargetの確かめを含む）を読み取り専用の接続で（floorの内側の古いschemaはmemoryの写しで）、`watch_poll`を今のqueueの読み取り専用の接続で答え、policyの断りは書ける別の接続で残す（`ServiceBackend::open_read`・`open_watch`）。
@@ -35,6 +36,33 @@ related:
 - `watch`の待ち・inboxのwatcherの記録・`[push]`はクライアント側に残る（`application::watch::watch_through`）。
   pushが名指すrepositoryは、serviceが見るの答えに載せるqueueの束縛から取り、束縛のあるqueueではwatchを打つ場所に依らない（束縛の無いqueueは打つ場所の名前。`WatchLook::binding`）。
 - `graph --format svg`はd2のsourceをserviceから読み、hostのCLIが自分のd2で描く（serviceは読み取りでprogramを起動しない）。
+
+## 対話と操作
+
+人とinboxがhostで打つ対話と操作のコマンド（ADR-t3102-2決定6の(4)）。
+一覧は`domain::queue_service::UseCase`、paramsと認可は`application::queue_commands::QueueCommand`。
+CLIのDBの経路とserviceは同じ`compose::run_command`で走らせるので、答えはCLIの出力と同じになる。
+書き込みは1つのコマンドにつき1つのtransactionでserviceの中で終わり（`planner request`の2つのeventも一緒に確定する）、eventのactorは呼び出し元のprincipal。
+Gitとprogramはserviceでなくクライアントがユースケースの外で走らせる（ADR-t3102-3決定5）。
+
+- 認可: runtimeの操作（`rebind`・`recover`・screen・`planner request`）と`report`・`graph --out`（`queue.export`）は走らせる前にCLIと同じcapabilityを`Gate`で通し、`answer`・`ask close`・`hold`・`release`・`replan request`はapplicationがqueueを読んで通す
+- paramsのpathは絶対path（serviceは別のdirectoryで動く）。
+  `planner request`の言葉はクライアントが読み、環境が名指すroleがpolicyで`planner.request`を持たなければ読まずに送るので、断られる呼び出し元のfileとstdinは読まれない
+- `run log`・`planner log`の答えはlogを読むbackgroundのsessionで、fileを出し`--follow`で追うのはクライアント。
+  `graph --out`の答えはd2のsourceと載るtaskで、描く（svg）のと書くのはクライアント
+- `report`はまず`report_inputs`で近い依存図のd2のsourceと束縛したrepositoryを読み、main checkoutの`dagq.toml`が`[areas]`を持てばそのcheckoutを載せてもう一度聞いて、reportが読む期間（並べる期間と、その前のbaselineとtargetの連続の分）に着地したcommitだけを読む。
+  クライアントはmain checkoutのGitでそのcommitのareaを決め、自分のd2で描いた図と一緒に送る。
+  要求がserviceの受ける大きさを超えれば図を描かなかったものとして理由と送り、それでも超えれば送らずに断る
+  serviceはそれとserviceの環境（`TZ`・`host.toml`）でreportを作り、`--out`の無いものはqueueの`reports/`に書く。
+  SVGはd2の出力と同じく整ったXMLの`<svg>`であることだけを確かめ（整っていないものは図を載せない）、pageはそのbytesの`data:` URLの`<img>`として載せるので、browserは画像として描いてscriptを動かさず外を読まず、そのstyleはpageに及ばない。
+  checkoutは束縛したrepositoryのものだけを受ける
+- `release`はまず`release_read`で成果を読むrunを聞き、runを終える解除ならクライアントが成果を読んで保存し、headを`refs/dagq/runs/<run-id>`に残してから送る。
+  serviceは読んだ時のholdと版を確定の中で照らし直し、食い違えば何も変えずに断る。
+  hostの`dagq`はcontainerのrunのfacts-onlyのturnを自分で走らせ、そのimageの記録はDBを開かずに`release_images`で送る（成果が読めたかに依らず、失敗の時刻はserviceが記録する時のもの）。
+  queueのdirを知らないクライアントモードの`dagq`はcontainerを起こさずに読むので、factsが最後のturnの終わりのものでないcontainerのrun（facts-onlyのturnが要る）は断り、hostの`dagq`に任せる
+- `rebind`は別のrepositoryに束縛されたqueueで打つものなので束縛を載せずに送り、`logs/`の記録はクライアントがserviceの答えから書く。
+  checkoutのGitのcommon dirと、クライアントのdata homeがそのrepositoryに与えるqueueのdir（`move_to`の先）はクライアントが読んで送り、答えが挙げるrunのworktreeはクライアントがGitで直す。
+  生きているsupervisorが居ると拒まれ、`down`はserviceも止めるので、`up`でなく`service start`でserviceだけを起こしてから打つ（手順はpluginの`dagq`の`reference/locate.md`）
 
 ## principal
 
@@ -55,7 +83,6 @@ related:
 - hostのCLIの要求は`HOST_CLIENT_API_VERSION`からの版で送る。
   queueとsessionを読まない前の版のserviceは、tokenを読む前に`api_version_mismatch`で断る（[API versionと互換](queue-service.md#api-versionと互換)）。
   serviceを見る`hello`（`probe`とsupervisorの起動の確かめ）は`MIN_API_VERSION`で送るので（`request_version`）、前の版のserviceも届かないではなく別のbuildとして見え、supervisorが入れ替える。
-- `planners`は制御側の状態を見る読み取りで、hostのCLIだけが送る（クライアントモードのworkerとjobは`control_side_command`で断る）。
 
 ## 計画のユースケース
 

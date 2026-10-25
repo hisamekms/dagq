@@ -243,11 +243,8 @@ fn a_planner_in_a_workspace_has_no_screen_read_and_takes_no_keys_or_answers() {
 fn a_planner_a_worker_and_the_jobs_are_refused_and_recorded() {
     let (_dir, db) = queue();
     let run = run_in(&db, "guarded", false, "WS-1");
-    let planner = [
-        ("DAGQ_ROLE", "planner"),
-        ("DAGQ_ACTOR_ID", "planner:1"),
-        ("DAGQ_PLANNER_ID", "1"),
-    ];
+    // A planner of the runtime's, with its token.
+    let planner = [("DAGQ_ROLE", "planner")];
     let worker = [
         ("DAGQ_ROLE", "worker"),
         ("DAGQ_ACTOR_ID", "worker:x"),

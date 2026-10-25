@@ -380,11 +380,7 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
     }
     for args in [
         vec!["ready", task.as_str(), "--inherit", "--reason", "r"],
-        vec!["answer", "1", "--text", "a"],
-        vec!["ask", "close", "1"],
         vec!["watch", "--timeout", "1"],
-        vec!["report"],
-        vec!["graph", "--out", "g.d2", "--format", "d2"],
         vec!["init"],
         vec!["observe"],
         vec!["integrate", task.as_str()],
@@ -392,11 +388,21 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
         let output = client(&queue, &socket, Some(&worker), "worker", &args);
         assert_eq!(refused(&output), "no_use_case", "{args:?}");
     }
+    // The host's dialogue and exports are use cases, which the service
+    // refuses a worker (ADR-t3102-2 decision 6 (4)).
+    for args in [
+        vec!["answer", "1", "--text", "a"],
+        vec!["ask", "close", "1"],
+        vec!["report"],
+        vec!["graph", "--out", "g.d2", "--format", "d2"],
+    ] {
+        let output = client(&queue, &socket, Some(&worker), "worker", &args);
+        assert_eq!(refused(&output), "authorization_denied", "{args:?}");
+    }
     // The control side's commands are refused as such, by name.
     for (args, name) in [
         (vec!["doctor"], "dagq doctor"),
         (vec!["service", "status"], "dagq service status"),
-        (vec!["planners"], "dagq planners"),
     ] {
         let output = client(&queue, &socket, Some(&worker), "worker", &args);
         assert_eq!(refused(&output), "control_side_command", "{args:?}");
@@ -499,6 +505,51 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
         )),
         "control_side_command"
     );
+}
+
+/// `planners` is a read the service answers in client mode as the command
+/// line prints it, for a principal with `queue.read` (a worker, a planner),
+/// and refuses, recorded, one without it (a run's telemetry principal),
+/// not refused before it is sent as a control-side command.
+#[test]
+fn planners_is_read_through_the_service_in_client_mode_and_authorized_there() {
+    let (queue, socket) = served();
+    let planner = dagq::infrastructure::sqlite::SqliteQueue::open(&queue.db)
+        .unwrap()
+        .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
+        .unwrap();
+    let worker = issued(
+        &queue,
+        &Principal::worker(queue.run.id(), queue.run.task_id()),
+    );
+    let own = issued(&queue, &Principal::planner(planner.id.as_i64()));
+    for args in [vec!["planners"], vec!["planners", "--all"]] {
+        for (credential, role) in [(&worker, "worker"), (&own, "planner")] {
+            let read = answered(&client(&queue, &socket, Some(credential), role, &args));
+            assert_eq!(read, ok(&queue.db, &args), "{role} {args:?}");
+            assert_eq!(
+                read["planners"][0]["id"],
+                planner.id.as_i64(),
+                "{role} {args:?}: {read}"
+            );
+        }
+    }
+    let telemetry = issued(
+        &queue,
+        &Principal::telemetry(
+            &dagq::domain::session_step::StepTarget::run(queue.run.id()),
+            Some(queue.run.task_id()),
+        ),
+    );
+    let refusal = client(&queue, &socket, Some(&telemetry), "worker", &["planners"]);
+    assert_eq!(refused(&refusal), "authorization_denied");
+    assert_eq!(
+        denial(&refusal)["denied"],
+        json!({"role": "executor-telemetry", "capability": "queue.read", "reason": "not granted"})
+    );
+    let recorded = events(&queue.db, "authorization_denied");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["payload"]["capability"], "queue.read");
 }
 
 /// The observer's client-mode `dagq` records, updates and resolves its

@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde::ser::SerializeMap;
 
 use super::{
-    DraftOrigin, GoalId, RunEvent, TaskChange, TaskId,
+    DraftOrigin, EventKind, GoalId, RunEvent, TaskChange, TaskId,
     areas::RunAreas,
     host_metrics::{DiskFree, HostSummary},
     marks::{self, Mark},
@@ -752,6 +752,58 @@ pub struct Kpi {
 
 /// The time a cursor stands for: its own, or the time of the latest event
 /// at or before its id.
+/// How many periods [`kpi`] reads for `query` (a period's, not a
+/// window's): the ones listed and enough before them for the baseline and
+/// a target's streak.
+fn period_count(query: &KpiQuery, config: &KpiConfig) -> usize {
+    let breach_after = match query.period {
+        Period::Day => config.breach_periods,
+        Period::Week => config.breach_weeks,
+    };
+    query.last + query.period.lookback().max(2 * breach_after)
+}
+
+/// The commits landed (`run_integrated`, [`super::areas::landed_commits`])
+/// in the periods [`kpi`] reads for `query`, a period's, at `now` (unix
+/// seconds) with `config`: after the start of the oldest and up to the end
+/// of the latest (the one that holds `at`, now without), each once and
+/// sorted. These are the landed runs whose areas the periods' strata can
+/// name, so what a report's caller judges stays within the periods it
+/// reports, however far back `at` is. None when `at` names no event (the
+/// KPIs are refused then).
+pub fn landed_in_periods(
+    events: &[RunEvent],
+    query: &KpiQuery,
+    now: i64,
+    utc_offset_secs: i64,
+    config: &KpiConfig,
+) -> Vec<String> {
+    let anchor = match query.at {
+        Some(at) => match cursor_ms(at, events) {
+            Some(anchor) => anchor,
+            None => return Vec::new(),
+        },
+        None => now * 1000,
+    };
+    let latest = query.period.start(anchor, utc_offset_secs * 1000);
+    let back = i64::try_from(period_count(query, config).saturating_sub(1)).unwrap_or(i64::MAX);
+    let oldest = latest.saturating_sub(back.saturating_mul(query.period.length()));
+    let end = latest.saturating_add(query.period.length());
+    let within: Vec<RunEvent> = events
+        .iter()
+        .filter(|event| event.kind == EventKind::RunIntegrated)
+        .filter(|event| {
+            timestamp_millis(&event.created_at).is_some_and(|ms| ms > oldest && ms <= end)
+        })
+        .cloned()
+        .collect();
+    let landed: std::collections::BTreeSet<String> = super::areas::landed_commits(&within)
+        .into_iter()
+        .map(|(_, commit)| commit)
+        .collect();
+    landed.into_iter().collect()
+}
+
 pub fn cursor_ms(cursor: Cursor, events: &[RunEvent]) -> Option<i64> {
     match cursor {
         Cursor::Time(ms) => Some(ms),
@@ -824,12 +876,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
             None => now_ms,
         };
         let latest = query.period.start(anchor, offset_ms);
-        // Enough periods before the listed ones for a target's streak too.
-        let breach_after = match query.period {
-            Period::Day => config.breach_periods,
-            Period::Week => config.breach_weeks,
-        };
-        let count = query.last + query.period.lookback().max(2 * breach_after);
+        let count = period_count(query, config);
         (0..count)
             .rev()
             .map(|back| {

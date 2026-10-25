@@ -156,8 +156,14 @@ impl RunFiles for MemoryFiles {
     fn append_line(&self, _: &Path, _: &str) -> io::Result<()> {
         unimplemented!("no test appends to a run file")
     }
-    fn canonicalize(&self, _: &Path) -> io::Result<PathBuf> {
-        unimplemented!("no test resolves a run file")
+    /// A directory or file put is its own resolved path; no link is
+    /// followed, as none is put.
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        if self.is_dir(path) || self.exists(path) {
+            Ok(path.to_owned())
+        } else {
+            Err(missing())
+        }
     }
     fn write_fenced(&self, _: &Path, _: &str, _: &str, _: &Path) -> Result<()> {
         unimplemented!("no test writes a review")

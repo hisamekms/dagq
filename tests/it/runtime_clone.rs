@@ -1704,6 +1704,94 @@ fn a_cut_off_container_run_whose_facts_only_turn_does_not_run_is_not_released() 
     assert_eq!(run_state(&run).turn_ended, Some(false));
 }
 
+/// A `podman` first on the `PATH` of the host's `dagq` of a test
+/// (`<queue dir>/bin`, which [`crate::common::cli::invoke_with`] puts first)
+/// whose dagq machine is made and started as Podman makes it, with the
+/// volumes `machine init` is given, and in which no image can be listed:
+/// a facts-only turn's machine is made ready and its image is not. Each
+/// command line goes to the file returned.
+fn machine_without_images(db: &Path) -> PathBuf {
+    let bin = db.parent().unwrap().join("bin");
+    let state = db.parent().unwrap().join("podman-machine");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    let s = shell_path(&state);
+    let script = format!(
+        r#"#!/bin/sh
+S={s}
+printf '%s\n' "$*" >> "$S/calls"
+case "$1 $2" in
+"machine list")
+  if [ -f "$S/dagq.json" ]; then
+    r=false; [ -f "$S/running" ] && r=true
+    printf '[{{"Name":"dagq","Running":%s}}]' "$r"
+  else
+    printf '[]'
+  fi ;;
+"machine inspect") printf '[{{"ConfigDir":{{"Path":"%s"}},"Name":"dagq"}}]' "$S" ;;
+"machine init")
+  mounts=""; next=""
+  for arg in "$@"; do
+    if [ "$next" = 1 ]; then
+      [ -n "$mounts" ] && mounts="$mounts,"
+      mounts="$mounts{{\"Source\":\"${{arg%%:*}}\"}}"
+    fi
+    next=""; [ "$arg" = --volume ] && next=1
+  done
+  printf '{{"Mounts":[%s]}}' "$mounts" > "$S/dagq.json" ;;
+"machine start") touch "$S/running" ;;
+"system connection") [ "$3" = list ] && printf '[{{"Name":"dagq","Default":true}}]' ;;
+*) echo "Error: no image can be listed in this machine" >&2; exit 125 ;;
+esac
+"#
+    );
+    let program = bin.join("podman");
+    fs::write(&program, script).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    state.join("calls")
+}
+
+/// A host's `dagq` (the inbox's here) whose release reads a held container
+/// run's work through the queue service runs the run's facts-only turn
+/// itself, and opens no queue for its image's records (ADR-t3102-2
+/// decision 7): the machine is made ready by the client, the image's
+/// failure is recorded through the service as the caller's, not as the
+/// process's user it would be on the DB, and the release is refused and
+/// changes nothing.
+#[test]
+fn a_host_release_records_its_facts_only_turn_s_image_through_the_service() {
+    let (_dir, repo, db, _fake) = container_queue();
+    let (run, _latest) = held_cut_off_run(&db, &repo, true);
+    let calls = machine_without_images(&db);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let before = queue.show(run.task).unwrap();
+    let output = crate::common::cli::invoke_with(
+        &[("DAGQ_ROLE", "inbox")],
+        &db,
+        &["release", "1", "--provider", "codex"],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("make the machine and the image ready"),
+        "{stderr}"
+    );
+    let calls = fs::read_to_string(calls).unwrap();
+    assert!(
+        calls.contains("machine init") && calls.contains("machine start"),
+        "{calls}"
+    );
+    let failed = crate::common::service::events(&db, "container_image_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["actor"]["role"], "inbox", "{failed:?}");
+    let detail = queue.show(run.task).unwrap();
+    assert!(queue.task_hold(run.task).unwrap().is_some());
+    assert_eq!(detail.task.status(), before.task.status());
+    assert_eq!(detail.runs[0].status(), RunStatus::Interrupted);
+    assert!(payloads(&detail, "task_released").is_empty());
+    assert_eq!(kept_ref(&repo, &run), None);
+}
+
 /// Acceptance (f): a person's `ready --inherit` of an interrupted container
 /// run whose last turn was cut off carries over the head a facts-only turn
 /// found, as the release does: through the entry both the carried head and

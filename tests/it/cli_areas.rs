@@ -94,3 +94,52 @@ fn stats_and_kpi_split_the_landed_runs_by_the_areas_of_their_commit() {
         1.0
     );
 }
+
+/// `report` through the queue service on a queue bound to a repository
+/// with `[areas]` and a landed run (ADR-t3102-3 decision 5): the client
+/// reads the landed commit's files with Git in the main checkout, and the
+/// service, whose Git logs each run, runs none, yet the report splits the
+/// landing by its areas.
+#[test]
+fn a_report_through_the_service_reads_the_areas_with_the_client_s_git() {
+    let (dir, repo, db, _run) = awaiting_run();
+    integrate(&db, 1, &repo).unwrap();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[areas]\nchange = [\"change.txt\"]\ntext = [\"*.txt\"]\n",
+    )
+    .unwrap();
+    let config = dir.path().join("config");
+    let git_log = crate::common::service::serve_logging_git(
+        &db,
+        &[("TZ", "UTC"), ("XDG_CONFIG_HOME", config.to_str().unwrap())],
+    );
+    fs::write(&git_log, "").unwrap();
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command
+        .without_actor_env()
+        .env("TZ", "UTC")
+        .env("XDG_CONFIG_HOME", &config);
+    crate::common::cli::reach(&mut command, &db, &["report"]);
+    let output = command
+        .arg("--db")
+        .arg(&db)
+        .args(["report", "--print", "json"])
+        .bounded_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let landings = &report["periods"].as_array().unwrap().last().unwrap()["kpis"]["landings"];
+    assert_eq!(landings["area=change"]["value"], 1.0, "{landings}");
+    assert_eq!(landings["area=text"]["value"], 1.0, "{landings}");
+    assert_eq!(
+        fs::read_to_string(&git_log).unwrap(),
+        "",
+        "the service ran Git"
+    );
+}

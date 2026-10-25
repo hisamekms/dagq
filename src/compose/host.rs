@@ -6,6 +6,7 @@
 //! is in `application` and `domain`.
 
 use super::{OneShot, queue_service_view};
+use crate::application::queue_commands::QueueCommand;
 use crate::domain::LeaseToken;
 use crate::infrastructure::location::runs_dir;
 use anyhow::{Context, Result};
@@ -338,8 +339,10 @@ pub const COMMAND_TARGET: &str = "dagq::telemetry::command";
 /// report as JSON, or the error that stopped it (a refused `rebind` too).
 /// A failure before the use case (opening the queue, inspecting the
 /// repository, `up`'s compatible migration) returns early, leaving only
-/// the `dagq::telemetry::exit` record `main` writes.
-fn trace_command(command: &str, result: &Result<Value>) {
+/// the `dagq::telemetry::exit` record `main` writes. The host's `rebind`
+/// through the queue service records its answer, a refusal or a failure
+/// of the service's included, as the service does in its own log.
+pub fn trace_command(command: &str, result: &Result<Value>) {
     match result {
         Ok(report) => {
             let outcome = report["outcome"]
@@ -446,6 +449,30 @@ pub fn rebind(db: &Path, repo: &Path) -> Result<Value> {
     OneShot::system().rebind(db, repo)
 }
 
+/// The Git common directory of the repository containing `repo`, which
+/// `rebind` binds the queue to: read by the caller, as no Git runs in the
+/// queue's operation (ADR-t3102-3 decision 5).
+pub fn repository_common_dir(repo: &Path) -> Result<PathBuf> {
+    Ok(GitRepository::inspect(repo)?.common_dir)
+}
+
+/// The queue directory the data home of this process gives a queue of the
+/// repository whose Git common directory is `common_dir`, as a queue is
+/// found from a checkout; none without a data home.
+pub fn repository_queue_dir(common_dir: &Path) -> Option<PathBuf> {
+    data_home()
+        .ok()
+        .map(|home| QueueLocation::for_repository(common_dir, &home).queue_dir)
+}
+
+/// The answer of `rebind`'s queue part with the run worktrees it lists
+/// repaired from the repository containing `repo`, by the caller after the
+/// queue is bound ([`rebinding::repair_worktrees`]).
+pub fn repair_rebound_worktrees(repo: &Path, answer: Value) -> Result<Value> {
+    let repository = GitRepository::inspect(repo)?;
+    Ok(rebinding::repair_worktrees(&repository, answer))
+}
+
 /// `dagq service status`: [`queue_service_view`], read without changing
 /// anything.
 pub fn queue_service_status(db: &Path) -> Value {
@@ -522,22 +549,44 @@ pub fn migrate_queue(
 
 impl OneShot {
     /// `rebind`: bind the queue at `db` to the repository containing `repo`
-    /// (see [`rebinding::rebind`]).
+    /// (see [`rebinding::rebind`]), then repair the run worktrees it lists.
     pub fn rebind(&self, db: &Path, repo: &Path) -> Result<Value> {
+        let result = (|| {
+            let db = db
+                .canonicalize()
+                .context("queue must already be initialized")?;
+            let common_dir = repository_common_dir(repo)?;
+            let mut queue = self.open(&db)?;
+            let answer = self.rebind_on(
+                &mut queue,
+                &db,
+                &common_dir,
+                repository_queue_dir(&common_dir),
+            )?;
+            repair_rebound_worktrees(repo, answer)
+        })();
+        trace_command("rebind", &result);
+        result
+    }
+
+    /// The queue's part of [`Self::rebind`] on `queue`, the queue at `db`,
+    /// opened already and written as its actor: bound to the repository
+    /// whose Git common directory is `common_dir`. It runs no Git; its
+    /// caller repairs the worktrees it lists ([`repair_rebound_worktrees`]).
+    fn rebind_on(
+        &self,
+        queue: &mut SqliteQueue,
+        db: &Path,
+        common_dir: &Path,
+        repository_queue_dir: Option<PathBuf>,
+    ) -> Result<Value> {
         let db = db
             .canonicalize()
             .context("queue must already be initialized")?;
-        let mut queue = self.open(&db)?;
-        let repository = GitRepository::inspect(repo)?;
-        let common_dir = path_text(&repository.common_dir)?;
         let location = QueueLocation::explicit(&db);
-        let repository_queue_dir = data_home()
-            .ok()
-            .map(|home| QueueLocation::for_repository(&repository.common_dir, &home).queue_dir);
-        let result = rebinding::rebind(
+        rebinding::rebind(
             Rebind {
-                queue: &mut queue,
-                repository: &repository,
+                queue,
                 files: &LocalRunFiles,
                 processes: &SystemProcesses,
                 clock: &*self.generators.clock,
@@ -545,14 +594,12 @@ impl OneShot {
             RebindTarget {
                 repository_file: location.queue_dir.join(REPOSITORY_FILE_NAME),
                 db,
-                common_dir,
+                common_dir: path_text(common_dir)?,
                 queue_dir: location.queue_dir,
                 log_dir: location.log_dir,
                 repository_queue_dir,
             },
-        );
-        trace_command("rebind", &result);
-        result
+        )
     }
 
     /// `up`: see [`lifecycle::up`]. `repo` is any checkout of the repository.
@@ -1178,6 +1225,206 @@ pub(super) fn sccache_port(
             dagq: Some(runner.to_path_buf()),
         },
     ))
+}
+
+/// One of the host's dialogue and operation commands (`answer`, `hold`,
+/// `rebind`, `run log`, `report`, ...) on `queue`, the queue at `db`,
+/// written as its actor: how the command line runs it on the DB and how the
+/// queue service runs its use case ([`service_commands`]), so its answer is
+/// the same either way (ADR-t3102-2 decision 6 (4)). The runtime
+/// operations and the exports are authorized before it, as
+/// [`QueueCommand::authorization`] says; the dialogue, the holds and the
+/// replans by the application as they run.
+pub fn run_command(queue: &mut SqliteQueue, db: &Path, command: &QueueCommand) -> Result<Value> {
+    use crate::application::commands::{dialogue::Dialogue, holds::Holds, replans::Replans};
+    use crate::application::queue_commands::QueueCommand as C;
+    use crate::application::screen::{self, RunTarget};
+    use crate::domain::{AskId, EventId, PlannerId, RunId, StaticPolicy, TaskId};
+    let actor = queue.actor();
+    let one_shot = OneShot {
+        user_config: crate::infrastructure::language::user_config_file(),
+        ..OneShot::new(queue.generators().clone())
+    };
+    let hold_target = |target: &str| -> Result<crate::domain::task_hold::HoldTarget> {
+        use crate::domain::task_hold::HoldTarget;
+        let target = target.trim();
+        Ok(match target.parse::<i64>() {
+            Ok(id) => HoldTarget::Task(TaskId::new(id)),
+            Err(_) => HoldTarget::Run(RunId::new(target)?),
+        })
+    };
+    let planners_dir = crate::infrastructure::location::planners_dir(db);
+    Ok(match command {
+        // The user's own answer or the inbox's delegated one, which the
+        // application records from the actor (ADR-t728-3 decision 2).
+        C::Answer(params) => {
+            let mut store = crate::infrastructure::dialogue::DialogueQueue { queue };
+            serde_json::to_value(
+                Dialogue::new(&mut store, &actor, &StaticPolicy)
+                    .answer(AskId::new(params.id), &params.text)?,
+            )?
+        }
+        C::AskClose(params) => {
+            let mut store = crate::infrastructure::dialogue::DialogueQueue { queue };
+            serde_json::to_value(
+                Dialogue::new(&mut store, &actor, &StaticPolicy).close(AskId::new(params.id))?,
+            )?
+        }
+        C::Hold(params) => serde_json::to_value(Holds::new(queue, &actor, &StaticPolicy).hold(
+            &hold_target(&params.target)?,
+            &params.reason,
+            params.until,
+        )?)?,
+        // The work a release carries over is read and kept by the caller
+        // with Git between the two (`prepare_command`); the release's
+        // transaction checks the read again.
+        C::ReleaseRead(params) => {
+            let read = Holds::new(queue, &actor, &StaticPolicy)
+                .release_read(&hold_target(&params.target)?, &release_choice(params)?)?;
+            serde_json::to_value(crate::application::queue_commands::ReleaseToRead {
+                read,
+                repository: queue.repository_binding()?,
+            })?
+        }
+        C::ReleaseImages(params) => {
+            let now = crate::application::unix_seconds(queue.generators().clock.system_time());
+            serde_json::to_value(Holds::new(queue, &actor, &StaticPolicy).record_images(
+                &hold_target(&params.target)?,
+                &params.records,
+                now,
+            )?)?
+        }
+        C::Release(params) => serde_json::to_value(
+            Holds::new(queue, &actor, &StaticPolicy).release_read_by_caller(
+                &hold_target(&params.target)?,
+                release_choice(params)?,
+                params.work.clone().map(|work| (work.at, work.read)),
+            )?,
+        )?,
+        C::ReplanRequest(params) => {
+            serde_json::to_value(Replans::new(queue, &actor, &StaticPolicy).request(
+                &crate::domain::task_replan::NewReplan {
+                    run: RunId::new(&params.run)?,
+                    reason: params.reason.clone(),
+                    evidence: params.evidence.iter().copied().map(EventId::new).collect(),
+                },
+            )?)?
+        }
+        C::Rebind(params) => one_shot.rebind_on(
+            queue,
+            db,
+            params
+                .git_common_dir
+                .as_deref()
+                .context("rebind is sent with the Git common directory its caller read")?,
+            params.repository_queue_dir.clone(),
+        )?,
+        C::Recover(params) => crate::application::health::recover(
+            queue,
+            &SystemProcesses,
+            &LocalRunFiles,
+            &*one_shot.generators.clock,
+            &RunId::new(&params.run)?,
+        )?,
+        // Neither builds an agent adapter: they read only the queue
+        // (task 1437).
+        C::RunScreen(params) => screen::run_screen(queue, &RunTarget::parse(&params.run)?)?,
+        C::RunSend(params) => screen::run_send(queue, &RunTarget::parse(&params.run)?)?,
+        C::RunLog(params) => json!({
+            "session": crate::application::session_log::run_log(
+                queue,
+                &RunTarget::parse(&params.run)?,
+            )?
+            .session,
+        }),
+        // Neither reads a screen nor types (ADR-t1433-2).
+        C::PlannerScreen(params) => {
+            screen::planner_screen(queue, &planners_dir, PlannerId::new(params.planner))?
+        }
+        C::PlannerSend(params) => screen::planner_send(queue, PlannerId::new(params.planner))?,
+        C::PlannerLog(params) => json!({
+            "session": crate::application::session_log::planner_log(
+                queue,
+                &planners_dir,
+                PlannerId::new(params.planner),
+            )?
+            .session,
+        }),
+        C::PlannerRequest(params) => one_shot.request_planner(
+            queue,
+            db,
+            &crate::infrastructure::adapters::BackgroundSessions,
+            PlannerId::new(params.planner),
+            &params.text,
+        )?,
+        C::Report(params) => one_shot.report_of(queue, db, params)?,
+        C::ReportInputs(params) => one_shot.report_inputs_of(queue, db, params)?,
+        C::GraphExport(params) => {
+            let (source, tasks) = crate::application::queue_reads::planning::graph_diagram(
+                queue,
+                params.goal.map(crate::domain::GoalId::new),
+            )?;
+            json!({"source": source, "tasks": tasks})
+        }
+    })
+}
+
+/// The provider and model `release`'s params choose.
+fn release_choice(
+    params: &crate::application::queue_commands::ReleaseParams,
+) -> Result<crate::domain::task_hold::ReleaseChoice> {
+    Ok(crate::domain::task_hold::ReleaseChoice {
+        provider: params.provider.as_deref().map(str::parse).transpose()?,
+        model: params.model.clone(),
+    })
+}
+
+/// `release`'s params as its caller sends them
+/// ([`crate::application::commands::holds::prepare_release`]), from what
+/// `call` answers (the service, or [`run_command`] on the DB of the queue
+/// at `db`), with the host's Git for the main checkout and the run's work.
+/// A caller of the queue at `db` runs a facts-only turn of a run in a
+/// container in the queue's containers, which keep the image's records for
+/// it to send; one that knows no queue (`db` is `None`: a client-mode
+/// `dagq`) reads the run's work with no container of the queue
+/// ([`UnknownQueueContainers`](crate::infrastructure::run_container::UnknownQueueContainers)).
+pub(super) fn prepare_release(
+    params: &mut crate::application::queue_commands::ReleaseParams,
+    db: Option<&Path>,
+    call: impl FnMut(&QueueCommand) -> Result<Value>,
+) -> Result<()> {
+    use crate::application::commands::holds::{self, ReleaseClient};
+    use crate::infrastructure::adapters::RunRepositories;
+    holds::prepare_release(
+        params,
+        &ReleaseClient {
+            main_checkout: &crate::infrastructure::adapters::main_checkout_of,
+            branches: &|main, read| match db {
+                Some(db) => {
+                    let kept =
+                        Arc::new(crate::application::container_image::KeptImageRecords::default());
+                    let containers = super::run_containers_keeping(db, main, Some(kept.clone()));
+                    read(&RunRepositories {
+                        containers: &containers,
+                    });
+                    kept.take()
+                }
+                None => {
+                    read(&RunRepositories {
+                        containers: &crate::infrastructure::run_container::UnknownQueueContainers,
+                    });
+                    Vec::new()
+                }
+            },
+        },
+        call,
+    )
+}
+
+/// How the queue service runs the host's dialogue and operation commands:
+/// [`run_command`], as the command line runs them.
+pub fn service_commands() -> crate::infrastructure::queue_service::ServiceCommands {
+    Arc::new(run_command)
 }
 
 #[cfg(test)]

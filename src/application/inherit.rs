@@ -227,7 +227,7 @@ pub struct InheritedByHand {
 /// ([`released_work`]): the head of its own commits as its workplace has it
 /// now and the commit that saved its uncommitted work on top of that head,
 /// each `None` when there is none.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReleasedRead {
     pub own: Option<CommitSha>,
     pub saved: Option<CommitSha>,

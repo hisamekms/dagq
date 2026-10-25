@@ -20,9 +20,12 @@
 //! `search`, `goal_show`, ...: [`QueueRead`], answered as the command line
 //! answers them), the planning commands (`add`, `submit`, `goal add`,
 //! `request add`, ...: [`QueueWrite`], run as the command line runs them)
-//! and `mark`. The supervisor's claims, leases, runs and their events
-//! and the tokens it issues are the `supervisor` use case
-//! ([`super::supervisor_service`]).
+//! and `mark`. The dialogue and the operations a person or the inbox runs
+//! on the host (`answer`, `hold`, `rebind`, `run log`, `report`, ...) are
+//! use cases too ([`QueueCommand`], ADR-t3102-2 decision 6 (4)), run as
+//! the command line runs them on the DB. The supervisor's claims, leases,
+//! runs and their events and the tokens it issues are the `supervisor` use
+//! case ([`super::supervisor_service`]).
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
@@ -35,6 +38,7 @@ use tracing::warn;
 
 use super::commands::dialogue::{Dialogue, DialogueStore, MarkChange};
 use super::commands::{DenialLog, Gate};
+use super::queue_commands::{BadCommand, QueueCommand};
 use super::queue_reads::{BadRead, QueueRead};
 use super::queue_writes::{BadWrite, QueueWrite};
 use crate::domain::EventKind;
@@ -71,6 +75,11 @@ pub trait ServiceQueue:
     fn show_proposal(&self, id: ProposalId) -> Result<Value>;
     /// A read of the whole queue as its command prints it.
     fn read(&mut self, read: &QueueRead) -> Result<Value>;
+    /// One of the host's dialogue and operation commands as its command
+    /// runs it on the DB, authorized already as far as the command line
+    /// authorizes it before it runs ([`QueueCommand::authorization`]); the
+    /// rest the application authorizes as it runs it.
+    fn command(&mut self, command: &QueueCommand) -> Result<Value>;
     /// The target the control side registered `session_id` to
     /// ([`crate::application::SessionOwners`]); `None` for one never
     /// registered.
@@ -454,6 +463,9 @@ fn connection(use_case: UseCase, params: &Value) -> Connection {
         | UseCase::AgentSets
         | UseCase::AgentSet => Connection::Read,
         _ if matches!(QueueRead::parse(use_case, params), Ok(Some(_))) => Connection::Read,
+        _ if matches!(QueueCommand::parse(use_case, params), Ok(Some(command)) if command.reads_only()) => {
+            Connection::Read
+        }
         _ => Connection::Write,
     }
 }
@@ -471,6 +483,7 @@ fn respond(result: Result<Value>) -> ServiceResponse {
             None if error.downcast_ref::<BadParams>().is_some()
                 || error.downcast_ref::<BadRead>().is_some()
                 || error.downcast_ref::<BadWrite>().is_some()
+                || error.downcast_ref::<BadCommand>().is_some()
                 || error
                     .downcast_ref::<super::supervisor_service::BadOperation>()
                     .is_some() =>
@@ -826,6 +839,15 @@ fn run(
     if let Some(write) = QueueWrite::parse(use_case, raw)? {
         return store.0.write(&write, actor);
     }
+    // The host's dialogue and operations (ADR-t3102-2 decision 6 (4)),
+    // each authorized before it runs as the command line authorizes it, or
+    // by the application as it runs it.
+    if let Some(command) = QueueCommand::parse(use_case, raw)? {
+        if let Some((capability, resource)) = command.authorization() {
+            authorize_as(&store, actor, capability, &resource)?;
+        }
+        return store.0.command(&command);
+    }
     match use_case {
         UseCase::Hello => unreachable!("hello is answered before a principal"),
         UseCase::Supervisor => unreachable!("a supervisor's request is answered apart"),
@@ -891,6 +913,25 @@ fn run(
             };
             Dialogue::new(&mut store, actor, &StaticPolicy).mark(change)
         }
+        UseCase::Answer
+        | UseCase::AskClose
+        | UseCase::Hold
+        | UseCase::Release
+        | UseCase::ReleaseRead
+        | UseCase::ReleaseImages
+        | UseCase::ReplanRequest
+        | UseCase::Rebind
+        | UseCase::Recover
+        | UseCase::RunScreen
+        | UseCase::RunSend
+        | UseCase::RunLog
+        | UseCase::PlannerScreen
+        | UseCase::PlannerSend
+        | UseCase::PlannerLog
+        | UseCase::PlannerRequest
+        | UseCase::Report
+        | UseCase::ReportInputs
+        | UseCase::GraphExport => unreachable!("a command is answered above"),
         UseCase::TelemetryReport => {
             // A version the service does not read, or a report past its
             // bounds, is refused before anything is recorded; a field it
@@ -1575,6 +1616,12 @@ mod tests {
         fn read(&mut self, read: &QueueRead) -> Result<Value> {
             Ok(json!({"read": format!("{read:?}")}))
         }
+        /// Kept as asked, after its authorization.
+        fn command(&mut self, command: &QueueCommand) -> Result<Value> {
+            let value = json!({"command": command.use_case().as_str()});
+            self.log.lock().unwrap().push(value.clone());
+            Ok(value)
+        }
         /// A session `<kind>:<id>:<name>` is registered to that target,
         /// any other to none; one named `taken` has steps of another target.
         fn session_owner(&self, session_id: &str) -> Result<Option<StepTarget>> {
@@ -2065,6 +2112,125 @@ mod tests {
         assert_eq!(code(&response), Some(ServiceErrorCode::AuthorizationDenied));
     }
 
+    /// The host's dialogue and operations (ADR-t3102-2 decision 6 (4))
+    /// are asked of the policy before they run as the command line asks
+    /// it, a refusal recorded and nothing run; the ones the application
+    /// authorizes as it runs them reach it for every principal, and a
+    /// relative path is a bad request before anything is asked.
+    #[test]
+    fn the_host_s_commands_are_authorized_before_they_run_as_the_command_line_does() {
+        use crate::domain::authorization::grants;
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let gated = [
+            (
+                UseCase::Rebind,
+                json!({"git_common_dir": "/repo/.git"}),
+                Capability::QueueAdmin,
+            ),
+            (
+                UseCase::Recover,
+                json!({"run": "r1"}),
+                Capability::RunRecover,
+            ),
+            (
+                UseCase::RunLog,
+                json!({"run": "r1"}),
+                Capability::ScreenRead,
+            ),
+            (
+                UseCase::RunSend,
+                json!({"run": "1"}),
+                Capability::ScreenSend,
+            ),
+            (
+                UseCase::PlannerScreen,
+                json!({"planner": 3}),
+                Capability::ScreenRead,
+            ),
+            (
+                UseCase::PlannerRequest,
+                json!({"planner": 3, "text": "t"}),
+                Capability::PlannerRequest,
+            ),
+            (
+                UseCase::Report,
+                json!({"period": "day", "print": true}),
+                Capability::ExportFile,
+            ),
+            (
+                UseCase::ReportInputs,
+                json!({"period": "day"}),
+                Capability::ExportFile,
+            ),
+            (UseCase::GraphExport, json!({}), Capability::ExportFile),
+        ];
+        let callers = [
+            (None, ActorRole::User),
+            (Some("inbox"), ActorRole::Inbox),
+            (Some("planner-3"), ActorRole::Planner),
+            (Some("worker"), ActorRole::Worker),
+        ];
+        let mut refused = 0;
+        for (token, role) in callers {
+            for (use_case, params, capability) in &gated {
+                let response =
+                    service.handle_from(&request(token, *use_case, params.clone()), Peer::Owner);
+                let recorded = backend.log.lock().unwrap().last().cloned().unwrap();
+                if grants(role).contains(capability) {
+                    assert!(
+                        response.ok,
+                        "{} {}: {response:?}",
+                        role.as_str(),
+                        use_case.as_str()
+                    );
+                    assert_eq!(recorded, json!({"command": use_case.as_str()}));
+                } else {
+                    refused += 1;
+                    assert_eq!(
+                        code(&response),
+                        Some(ServiceErrorCode::AuthorizationDenied),
+                        "{} {}",
+                        role.as_str(),
+                        use_case.as_str()
+                    );
+                    assert_eq!(recorded["capability"], capability.as_str(), "{recorded}");
+                }
+            }
+            // The application authorizes these as it runs them.
+            for (use_case, params) in [
+                (UseCase::Answer, json!({"id": 1, "text": "yes"})),
+                (UseCase::AskClose, json!({"id": 1})),
+                (UseCase::Hold, json!({"target": "1", "reason": "r"})),
+                (UseCase::Release, json!({"target": "r1"})),
+                (UseCase::ReplanRequest, json!({"run": "r1", "reason": "r"})),
+            ] {
+                let response = service.handle_from(&request(token, use_case, params), Peer::Owner);
+                assert!(
+                    response.ok,
+                    "{} {}: {response:?}",
+                    role.as_str(),
+                    use_case.as_str()
+                );
+            }
+        }
+        // The worker's every one, the planner's operations.
+        assert!(refused >= gated.len(), "{refused}");
+        let response = service.handle_from(
+            &request(
+                None,
+                UseCase::Rebind,
+                json!({"git_common_dir": "checkout/.git"}),
+            ),
+            Peer::Owner,
+        );
+        assert_eq!(code(&response), Some(ServiceErrorCode::BadRequest));
+    }
+
     /// A planner asks on its planning request through the service as the
     /// command line lets it (ADR-t3102-1 decision 2): only on a request
     /// whose planner it is, the other refused and recorded.
@@ -2520,7 +2686,10 @@ mod tests {
             UseCase::of_command(&["replan", "propose", "--run", "r1"]),
             Some(UseCase::ReplanPropose)
         );
-        assert_eq!(UseCase::of_command(&["replan", "request"]), None);
+        assert_eq!(
+            UseCase::of_command(&["replan", "request"]),
+            Some(UseCase::ReplanRequest)
+        );
     }
 
     /// The eval through the service (ADR-t1728-1 decision 6): a worker

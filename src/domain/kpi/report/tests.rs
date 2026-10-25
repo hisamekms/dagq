@@ -282,10 +282,10 @@ fn a_report_carries_the_kpis_the_header_and_the_top_findings() {
     assert!(targets < html.find("<h2>Trend</h2>").unwrap());
 }
 
-/// The diagram d2 drew goes inline with nothing that loads from outside;
-/// without one the section says why, and the rest of the page is the same.
-/// The JSON names the tasks and whether the d2 source was made, never the
-/// SVG.
+/// The diagram d2 drew is the page's one image, a `data:` URL of the SVG's
+/// own bytes, and nothing else of the page loads from outside; without one
+/// the section says why. The JSON names the tasks and whether the d2
+/// source was made, never the SVG.
 #[test]
 fn a_report_carries_the_dependency_diagram_or_why_not() {
     let thursday = MONDAY + 3 * DAY + 12 * HOUR;
@@ -301,20 +301,19 @@ fn a_report_carries_the_dependency_diagram_or_why_not() {
 
     let d2 = concat!(
         "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 9 9\">",
-        "<style><![CDATA[@font-face{src:url(\"data:font/woff;base64,AA==\")} @import url(https://x/y.css);]]></style>",
-        "<a href=\"https://example.com\"><rect fill=\"url(#g)\"/></a><image href=\"http://x/i.png\"/>",
-        "<script>alert(1)</script><text>#7 on top</text></svg>"
+        "<style><![CDATA[@font-face{src:url(\"data:font/woff;base64,AA==\")}]]></style>",
+        "<a href=\"https://example.com\"><rect fill=\"url(#g)\"/></a><text>#7 on top</text></svg>"
     );
     report.diagram = DiagramSection::drawn(vec![7, 9], d2);
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(json["diagram"], json!({"tasks": [7, 9], "d2_source": true}));
     let html = render_html(&report);
-    assert_eq!(external_references(&html), Vec::<String>::new());
-    let start = html.find("<div class=\"scroll diagram\"><svg").unwrap();
-    let end = html[start..].find("</svg></div>").unwrap() + start;
-    assert!(html[start..end].contains("#7 on top"));
-    // Outside the SVG, the page is as it was without the diagram.
-    let outside = format!("{}{}", &html[..start], &html[end..]);
+    // The SVG as written is the page's one image, of its own bytes.
+    let svg = &d2[d2.find("<svg").unwrap()..];
+    let image = diagram_image(svg);
+    assert_eq!(html.matches(&image).count(), 1, "{html}");
+    // Outside it, the page loads nothing.
+    let outside = html.replace(&image, "");
     for external in EXTERNAL {
         assert!(!outside.contains(external), "{external} in the page");
     }
@@ -336,10 +335,76 @@ fn a_report_carries_the_dependency_diagram_or_why_not() {
         serde_json::to_value(&report).unwrap()["diagram"]["reason"],
         "cannot draw the dependency diagram: d2plugin-tala not found <PATH>"
     );
-    // An SVG that cannot go inline is a reason too.
+    // An SVG that is not kept is a reason too.
     let refused = DiagramSection::drawn(vec![7], "not an svg");
     assert!(refused.svg.is_none() && refused.d2_source);
     assert!(refused.reason.unwrap().contains("no <svg>"));
+}
+
+/// The `<div>` and `<img>` that show `svg` as the near-term diagram.
+fn diagram_image(svg: &str) -> String {
+    format!(
+        "<div class=\"scroll diagram\"><img src=\"{}\" alt=\"{}\"></div>",
+        image_source(svg),
+        html::DIAGRAM_ALT
+    )
+}
+
+/// The review's payloads in a client's SVG reach the page only inside its
+/// image: the page shows the SVG as one `<img>` of a `data:` URL of its own
+/// bytes in base64, which a browser renders in image mode (no script runs,
+/// nothing outside the image's bytes is fetched, its styles and text do
+/// not reach the page). Outside that image each page is the same as with
+/// a plain drawing: no stylesheet of the SVG hides the KPI tables or adds
+/// text, and no URL, `@import` or character reference of it is there to
+/// load anything.
+#[test]
+fn a_client_s_svg_reaches_the_page_only_as_an_image_of_its_own_bytes() {
+    let thursday = MONDAY + 3 * DAY + 12 * HOUR;
+    let mut report = report(MONDAY + 4 * DAY + 12 * HOUR, thursday, Period::Day);
+    let page = |report: &mut Report, svg: &str| {
+        report.diagram = DiagramSection::drawn(vec![7], svg);
+        assert!(report.diagram.svg.is_some(), "{svg} is not drawn");
+        let html = render_html(report);
+        let image = diagram_image(svg);
+        assert_eq!(html.matches(&image).count(), 1, "{svg}");
+        assert_eq!(html.matches("<img").count(), 1, "{svg}");
+        html.replace(&image, "")
+    };
+    let plain = page(
+        &mut report,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>#7</text></svg>",
+    );
+    assert_eq!(plain.matches("<style").count(), 1);
+    for payload in [
+        // A comment that hides a URL from a scan for `url(` up to `)`.
+        "<style>/*url(data:image/png,*/body{background-image:url(https://example.com/pixel)}/*)*/</style>",
+        // A stylesheet that hides the KPI tables and adds text.
+        "<style>table{display:none}h2::after{content:\"all KPIs green\"}</style>",
+        // An escape that spells `@import`.
+        "<style>@\\69mport \"https://example.com/leak.css\";</style>",
+        // Character references that spell `@import` and `url(`.
+        "<style>&#64;import 'https://example.com/a.css';.a{background:u&#114;l(https://example.com/p)}</style>",
+        "<rect style=\"background-image:&#117;rl(https://example.com/leak)\" onload=\"fetch('https://example.com')\"/>",
+        "<foreignObject><div xmlns=\"http://www.w3.org/1999/xhtml\"><link rel=\"stylesheet\" href=\"https://example.com/a.css\"/></div></foreignObject><script>fetch('https://example.com')</script>",
+    ] {
+        let svg =
+            format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{payload}<text>#7</text></svg>");
+        let outside = page(&mut report, &svg);
+        assert_eq!(outside, plain, "{payload}");
+        for external in EXTERNAL {
+            assert!(!outside.contains(external), "{external} of {payload}");
+        }
+        for spelled in [
+            "example.com",
+            "display:none",
+            "all KPIs green",
+            "69mport",
+            "&#",
+        ] {
+            assert!(!outside.contains(spelled), "{spelled} of {payload}");
+        }
+    }
 }
 
 /// The page shows the period's forecast errors per stratum, which way the

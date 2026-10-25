@@ -565,6 +565,18 @@ pub trait EventStore {
     -> Result<()>;
     /// Record an event of the queue itself, on no task, goal or run.
     fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId>;
+    /// Record events of the queue itself in one transaction, none unless
+    /// all; returns their ids. A store without transactions (a test's)
+    /// records them one after another.
+    fn record_queue_events(
+        &self,
+        events: Vec<(EventKind, serde_json::Value)>,
+    ) -> Result<Vec<EventId>> {
+        events
+            .into_iter()
+            .map(|(kind, payload)| self.record_queue_event(kind, payload))
+            .collect()
+    }
     /// Record the baseline of the attributes the measurement folds
     /// (`attributes_baseline`) for the tasks and goals whose records fold
     /// to other values than the state holds, compared and written in one

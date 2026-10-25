@@ -437,7 +437,7 @@ fn rebind_with_db_then_move_the_queue_directory() {
 
     // The new checkout resolves to a queue that does not exist yet.
     assert!(error(&moved, &env, &["list"]).contains("use init"));
-    assert!(error(&moved, &env, &["rebind"]).contains("initialized"));
+    assert!(error(&moved, &env, &["rebind"]).contains("use init"));
 
     let old = old_db.to_str().unwrap();
     let rebound = ok(&moved, &env, &["--db", old, "rebind"]);

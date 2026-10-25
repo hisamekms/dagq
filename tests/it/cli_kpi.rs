@@ -328,6 +328,7 @@ fn report(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::p
     if let Some(role) = role {
         command.env("DAGQ_ROLE", role);
     }
+    reach(&mut command, db, &["report"]);
     command
         .arg("--db")
         .arg(db)
@@ -342,6 +343,8 @@ fn report(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::p
 #[test]
 fn report_writes_the_html_and_json_and_returns_their_paths() {
     let (dir, db) = queue();
+    // The queue service names the queue's files by its DB's own path.
+    let db = db.canonicalize().unwrap();
     let config = dir.path().join("config");
     std::fs::create_dir_all(&config).unwrap();
     ok(&db, &["add", "first", "--change", "fix"]);

@@ -917,6 +917,10 @@ pub(super) fn dispatch(
             let (kind, payload): (EventKind, serde_json::Value) = read(op, args)?;
             answer(EventStore::record_queue_event(&*store, kind, payload))
         }
+        "record_queue_events" => {
+            let (events,): (Vec<(EventKind, serde_json::Value)>,) = read(op, args)?;
+            answer(EventStore::record_queue_events(&*store, events))
+        }
         "latest_event_of" => {
             let (kind,): (String,) = read(op, args)?;
             answer(EventStore::latest_event_of(&*store, kind.as_str()))

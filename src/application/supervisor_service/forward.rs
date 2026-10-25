@@ -2094,6 +2094,12 @@ impl EventStore for SupervisorQueue {
             vec![to_value(kind)?, to_value(payload)?],
         )
     }
+    fn record_queue_events(
+        &self,
+        events: Vec<(EventKind, serde_json::Value)>,
+    ) -> Result<Vec<EventId>> {
+        self.remote("record_queue_events", vec![to_value(events)?])
+    }
     fn record_attributes_baseline(&self) -> Result<Option<(usize, usize)>> {
         let local = self.local()?;
         EventStore::record_attributes_baseline(&**local)

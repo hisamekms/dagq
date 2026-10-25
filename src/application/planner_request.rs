@@ -121,7 +121,8 @@ fn request_names(probes: &PlannerProbes<'_>, dir: &Path) -> Result<Vec<String>> 
 /// Returns what was handed: the file, the sentence, the request's number
 /// and the planner's state when it was handed. Recorded as
 /// `turn_requested` (as the supervisor's requests) and
-/// `planner_request_handed`, both with the caller as the actor; the
+/// `planner_request_handed` in one transaction, both with the caller as
+/// the actor; the
 /// latter names the file, not the words, and neither is an attention.
 pub fn request_planner(
     queue: &mut dyn Queue,
@@ -172,14 +173,17 @@ pub fn request_planner(
         );
     }
     let file = handed.path.display().to_string();
-    queue.record_queue_event(
-        EventKind::TurnRequested,
-        json!({"planner_id": id, "seq": seq, "what": what, "workspace_id": view.planner.workspace_id}),
-    )?;
-    queue.record_queue_event(
-        EventKind::PlannerRequestHanded,
-        json!({"planner_id": id, "seq": seq, "name": name, "file": file}),
-    )?;
+    // Both in one transaction: neither is recorded without the other.
+    queue.record_queue_events(vec![
+        (
+            EventKind::TurnRequested,
+            json!({"planner_id": id, "seq": seq, "what": what, "workspace_id": view.planner.workspace_id}),
+        ),
+        (
+            EventKind::PlannerRequestHanded,
+            json!({"planner_id": id, "seq": seq, "name": name, "file": file}),
+        ),
+    ])?;
     Ok(json!({
         "planner_id": id,
         "state": view.state,

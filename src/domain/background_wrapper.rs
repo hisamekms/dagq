@@ -293,7 +293,7 @@ pub fn last_planner_turn(events: &[super::RunEvent]) -> Option<BackgroundHandle>
 /// A session wrapper started in the background, as a person reads it
 /// (`show`, `status`, `planners`, ADR-t1404-1 decision 6): its handle, pid
 /// and start, and the log its output goes to.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BackgroundSession {
     pub handle: String,
     pub pid: u32,

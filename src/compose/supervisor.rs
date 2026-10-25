@@ -851,6 +851,7 @@ pub fn supervise_with_reviewer(
             super::service_reads(),
             super::service_writes(),
             super::service_detail(),
+            super::service_commands(),
         ))
     };
     let service: Arc<dyn ServiceCaller> = match &options.service_route {

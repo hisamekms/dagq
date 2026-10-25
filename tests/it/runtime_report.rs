@@ -191,9 +191,9 @@ fn stub(bin: &Path, name: &str, body: &str) {
 }
 
 /// The reports carry the near-term dependency diagram d2 and TALA drew
-/// (ADR-0077 decision 7), inline and with nothing that loads from outside
-/// the page; the tools are found on the supervisor's PATH, and d2 runs once
-/// for all the reports owed. Without TALA the section says why and the rest
+/// (ADR-0077 decision 7) as an image of its own bytes, so nothing outside
+/// it loads from outside the page; the tools are found on the supervisor's
+/// PATH, and d2 runs once for all the reports owed. Without TALA the section says why and the rest
 /// of the report is written.
 #[test]
 fn the_reports_carry_the_dependency_diagram_or_why_not() {
@@ -255,21 +255,20 @@ fn the_reports_carry_the_dependency_diagram_or_why_not() {
     let reports = db.canonicalize().unwrap().parent().unwrap().join("reports");
     for event in [&written[0], &written[7]] {
         let html = fs::read_to_string(event["html"].as_str().unwrap()).unwrap();
-        let start = html.find("<div class=\"scroll diagram\"><svg").unwrap();
-        let end = start + html[start..].find("</svg></div>").unwrap();
-        let svg = &html[start..end];
+        // d2's SVG, from its `<svg>` as written, is the page's one image:
+        // what it would load or run stays inside the image.
+        let (svg, outside) = crate::common::report::diagram_image(&html).unwrap();
+        assert!(
+            svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\">")
+                && svg.ends_with("</svg>"),
+            "{svg}"
+        );
         assert!(
             svg.contains("on top") && svg.contains("groundwork"),
             "{svg}"
         );
         assert!(!svg.contains("someday"));
-        for gone in ["<?xml", "xmlns", "https://", "<script"] {
-            assert!(!svg.contains(gone), "{gone} in {svg}");
-        }
-        // The image keeps nothing to load; the font is carried along.
-        assert!(svg.contains("<image/>"));
-        assert!(svg.contains("url(\"data:font/woff;base64,AA==\")"));
-        let outside = format!("{}{}", &html[..start], &html[end..]);
+        assert_eq!(html.matches("<img").count(), 1);
         for external in EXTERNAL {
             assert!(
                 !outside.contains(external),

@@ -184,7 +184,27 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         UseCase::ProposalShow | UseCase::AgentResult | UseCase::AgentSet => {
             "its command has no option that narrows the answer"
         }
+        UseCase::RunLog | UseCase::PlannerLog => {
+            "the answer names the log's file, which the client reads: none is longer"
+        }
+        UseCase::GraphExport => "narrow to one goal with --goal",
         UseCase::Hello
+        | UseCase::Answer
+        | UseCase::AskClose
+        | UseCase::Hold
+        | UseCase::Release
+        | UseCase::ReleaseRead
+        | UseCase::ReleaseImages
+        | UseCase::ReplanRequest
+        | UseCase::Rebind
+        | UseCase::Recover
+        | UseCase::RunScreen
+        | UseCase::RunSend
+        | UseCase::PlannerScreen
+        | UseCase::PlannerSend
+        | UseCase::PlannerRequest
+        | UseCase::Report
+        | UseCase::ReportInputs
         | UseCase::Ask
         | UseCase::Note
         | UseCase::FindingRecord
@@ -386,6 +406,51 @@ string_enum!(UseCase {
     RequestDecline => "request_decline",
     // Record a change mark, or retract one, as `dagq mark` does.
     Mark => "mark",
+    // The dialogue and the operations a person or the inbox runs on the
+    // host, and a planner as far as the policy grants it (ADR-t3102-2
+    // decision 6 (4)), each as the command of its name runs it on the DB
+    // ([`crate::application::queue_commands::QueueCommand`]): an answer
+    // and an ask's close, the hold of a task and its release, a replanning
+    // request, the queue's binding to a repository and a run's recovery.
+    Answer => "answer",
+    AskClose => "ask_close",
+    Hold => "hold",
+    Release => "release",
+    // What `dagq release` asks for first: the run whose work the release
+    // reads, which the client reads and keeps with Git itself before it
+    // sends the release. No command line goes to it alone.
+    ReleaseRead => "release_read",
+    // The records of the image a release's client made ready for a run's
+    // facts-only turn, which the client keeps and sends once it read the
+    // run's work, read or not. No command line goes to it alone.
+    ReleaseImages => "release_images",
+    ReplanRequest => "replan_request",
+    Rebind => "rebind",
+    Recover => "recover",
+    // A run's and a planner's screen, input and log, as `dagq run
+    // screen|send|log` and `dagq planner screen|send|log` answer them: the
+    // log's answer is the background session it is read from, and the
+    // client reads the file and follows it itself.
+    RunScreen => "run_screen",
+    RunSend => "run_send",
+    RunLog => "run_log",
+    PlannerScreen => "planner_screen",
+    PlannerSend => "planner_send",
+    PlannerLog => "planner_log",
+    // A follow-up request handed to a headless planner, as `dagq planner
+    // request` hands it: the client reads the words (`--text-file`, `-`).
+    PlannerRequest => "planner_request",
+    // The KPI report of a period, as `dagq report` makes and writes it,
+    // with the near-term diagram the client drew.
+    Report => "report",
+    // What `dagq report` asks for first and reads Git and draws with
+    // itself: the near-term diagram's d2 source, the repository the queue
+    // is bound to and the landed commits. No command line goes to it
+    // alone.
+    ReportInputs => "report_inputs",
+    // The dependency diagram `dagq graph --out` writes: its d2 source and
+    // the tasks it shows, which the client draws (`svg`) and writes.
+    GraphExport => "graph_export",
 });
 
 impl UseCase {
@@ -393,9 +458,8 @@ impl UseCase {
     /// `words` are its arguments after the global options, the subcommand
     /// first. `None` for a command the service does not answer (the
     /// control side's, `watch`, whose looks only the host's `dagq` sends as
-    /// [`Self::WatchPoll`], `report`, `graph --out`, `ask close`,
-    /// `observe` without `--history` or `--input`, `locate`, `doctor`,
-    /// `ready --inherit`, ...).
+    /// [`Self::WatchPoll`], `observe` without `--history` or `--input`,
+    /// `locate`, `doctor`, `ready --inherit`, ...).
     pub fn of_command(words: &[&str]) -> Option<Self> {
         let has = |flag: &str| {
             words
@@ -405,8 +469,22 @@ impl UseCase {
         let command = *words.first()?;
         let next = words.get(1).copied();
         Some(match (command, next) {
-            ("ask", Some("close")) => return None,
+            ("ask", Some("close")) => Self::AskClose,
             ("ask", _) => Self::Ask,
+            ("answer", _) => Self::Answer,
+            ("hold", _) => Self::Hold,
+            ("release", _) => Self::Release,
+            ("replan", Some("request")) => Self::ReplanRequest,
+            ("rebind", _) => Self::Rebind,
+            ("recover", _) => Self::Recover,
+            ("run", Some("screen")) => Self::RunScreen,
+            ("run", Some("send")) => Self::RunSend,
+            ("run", Some("log")) => Self::RunLog,
+            ("planner", Some("screen")) => Self::PlannerScreen,
+            ("planner", Some("send")) => Self::PlannerSend,
+            ("planner", Some("log")) => Self::PlannerLog,
+            ("planner", Some("request")) => Self::PlannerRequest,
+            ("report", _) => Self::Report,
             ("show", _) => Self::Show,
             ("note", _) => Self::Note,
             ("proposal", Some("list")) => Self::ProposalList,
@@ -416,7 +494,7 @@ impl UseCase {
             ("finding", Some("dismiss")) => Self::FindingDismiss,
             ("list", _) => Self::List,
             ("candidates", _) => Self::Candidates,
-            ("graph", _) if has("--out") => return None,
+            ("graph", _) if has("--out") => Self::GraphExport,
             ("graph", _) => Self::Graph,
             ("status", _) => Self::Status,
             ("asks", _) => Self::Asks,
@@ -1853,6 +1931,29 @@ mod tests {
             (&["request", "add", "--text", "x"], "request_add"),
             (&["request", "decline", "3"], "request_decline"),
             (&["mark", "x"], "mark"),
+            (&["answer", "3", "yes"], "answer"),
+            (&["ask", "close", "3"], "ask_close"),
+            (&["hold", "4", "--reason", "x"], "hold"),
+            (&["release", "4"], "release"),
+            (&["replan", "request", "r1"], "replan_request"),
+            (&["rebind"], "rebind"),
+            (&["recover", "r1"], "recover"),
+            (&["run", "screen", "r1"], "run_screen"),
+            (&["run", "send", "r1"], "run_send"),
+            (&["run", "log", "r1", "--follow"], "run_log"),
+            (&["planner", "screen", "2"], "planner_screen"),
+            (&["planner", "send", "2"], "planner_send"),
+            (&["planner", "log", "2"], "planner_log"),
+            (
+                &["planner", "request", "2", "--text", "x"],
+                "planner_request",
+            ),
+            (&["report", "--period", "week"], "report"),
+            (
+                &["graph", "--format", "svg", "--out", "g.svg"],
+                "graph_export",
+            ),
+            (&["graph", "--out=g.d2"], "graph_export"),
         ] {
             assert_eq!(
                 UseCase::of_command(words).map(UseCase::as_str),
@@ -1863,14 +1964,11 @@ mod tests {
         for words in [
             &[][..],
             &["watch"],
-            &["report"],
             &["locate"],
             &["doctor"],
             &["observe"],
             &["observe", "--daily"],
-            &["graph", "--format", "svg", "--out", "g.svg"],
-            &["graph", "--out=g.d2"],
-            &["ask", "close", "3"],
+            &["run", "close-workspaces"],
             &["goal"],
             &["finding"],
             &["ready", "3", "--inherit", "--reason", "x"],

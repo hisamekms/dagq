@@ -166,8 +166,9 @@ fn graph_prints_the_near_term_diagram_as_d2_or_svg() {
 }
 
 /// `dagq report` draws the report's dependency diagram as the supervisor
-/// does (ADR-0077 decision 7): d2 and TALA from PATH, the SVG inline, and
-/// the reason in its place when they cannot draw.
+/// does (ADR-0077 decision 7): d2 and TALA from PATH, the SVG shown as an
+/// image of its own bytes, and the reason in its place when they cannot
+/// draw.
 #[test]
 fn report_carries_the_near_term_diagram_or_why_not() {
     let (dir, db) = queue();
@@ -192,11 +193,15 @@ fn report_carries_the_near_term_diagram_or_why_not() {
     let path =
         std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
     let report = |args: &[&str]| -> serde_json::Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+        command
             .without_actor_env()
             .env("PATH", &path)
             .env("TZ", "UTC")
-            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_CONFIG_HOME", &config);
+        // The queue's service makes the report, with this environment.
+        reach(&mut command, &db, &["report"]);
+        let output = command
             .arg("--db")
             .arg(&db)
             .arg("report")
@@ -235,12 +240,19 @@ fn report_carries_the_near_term_diagram_or_why_not() {
     );
     let written = report(&[]);
     let page = std::fs::read_to_string(written["html"].as_str().unwrap()).unwrap();
-    let start = page
-        .find("<div class=\"scroll diagram\"><svg><text>")
-        .unwrap();
-    assert!(page[start..].contains("on top"));
+    // d2's SVG is the page's one image, of its own bytes as d2 wrote them.
+    let (svg, outside) = common::report::diagram_image(&page).unwrap();
+    assert!(
+        svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\"><text>"),
+        "{svg}"
+    );
+    assert!(
+        svg.contains("on top") && svg.ends_with("</a></svg>"),
+        "{svg}"
+    );
+    assert_eq!(page.matches("<img").count(), 1);
     for external in ["http://", "https://", "xmlns", "<script", "url(", "src="] {
-        assert!(!page.contains(external), "{external}");
+        assert!(!outside.contains(external), "{external}");
     }
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(written["json"].as_str().unwrap()).unwrap()).unwrap();

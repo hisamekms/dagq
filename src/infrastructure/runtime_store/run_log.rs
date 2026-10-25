@@ -180,6 +180,28 @@ impl SqliteQueue {
         Ok(id)
     }
 
+    /// Record `events`, each an event of the queue itself, in one write
+    /// transaction: none is recorded unless all are; returns their ids.
+    pub fn record_queue_events(
+        &self,
+        events: &[(EventKind, serde_json::Value)],
+    ) -> Result<Vec<EventId>> {
+        for (kind, _) in events {
+            crate::domain::check_event_target(*kind, None, None)?;
+        }
+        let _read = events
+            .iter()
+            .map(|(kind, payload)| read_before(&self.conn, Closing::Queue(*kind, payload)))
+            .collect::<Result<Vec<_>>>()?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let ids = events
+            .iter()
+            .map(|(kind, payload)| queue_event(&tx, *kind, payload))
+            .collect::<Result<Vec<_>>>()?;
+        tx.commit()?;
+        Ok(ids)
+    }
+
     /// Record `inbox_nudged` with `payload` unless one with the same
     /// `absent_since` and `attempt` is recorded, in one write transaction
     /// (ADR-t1433-5 decision 1 (3)): `false` when another supervisor
@@ -1051,6 +1073,12 @@ impl EventStore for SqliteQueue {
     }
     fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId> {
         SqliteQueue::record_queue_event(self, kind, payload)
+    }
+    fn record_queue_events(
+        &self,
+        events: Vec<(EventKind, serde_json::Value)>,
+    ) -> Result<Vec<EventId>> {
+        SqliteQueue::record_queue_events(self, &events)
     }
     fn record_attributes_baseline(&self) -> Result<Option<(usize, usize)>> {
         SqliteQueue::record_attributes_baseline(self)

@@ -535,6 +535,7 @@ pub(super) const MODULES: &[ModuleContext] = &[
     module("src/application/install.rs", Host),
     module("src/application/update.rs", Host),
     module("src/application/queue_service.rs", Host),
+    module("src/application/queue_commands.rs", Host),
     module("src/application/podman_machine.rs", Host),
     module("src/application/container_image.rs", Host),
     module("src/application/queue_broker.rs", Host),

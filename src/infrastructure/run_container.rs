@@ -73,6 +73,53 @@ pub struct PodmanRunContainers {
     pub machine: Arc<dyn RunMachine>,
 }
 
+/// The runs' containers as a client that knows no queue directory (a
+/// client-mode `dagq`, which opens no queue) has them: none is made ready,
+/// run or removed, as their parts (the machine's lease, the image's
+/// record, the container's name) are the queue's. The work of a run in a
+/// container is read from its clone's facts alone, and a run whose facts
+/// would need a facts-only turn first is refused, where the host's `dagq`
+/// runs that turn.
+pub struct UnknownQueueContainers;
+
+impl UnknownQueueContainers {
+    const WHY: &str = "a client-mode dagq knows no queue directory, whose machine and image a \
+                       run's container needs: run the command with the host's dagq";
+}
+
+impl RunContainers for UnknownQueueContainers {
+    fn prepare(&self, run: &TaskRun) -> Result<PreparedRun> {
+        bail!(
+            "run {}'s container is not made ready: {}",
+            run.id(),
+            Self::WHY
+        )
+    }
+
+    fn prepare_run_dir(&self, run_dir: &Path, _credential: &Path) -> Result<PathBuf> {
+        bail!("{} is not made ready: {}", run_dir.display(), Self::WHY)
+    }
+
+    fn command(&self, args: &[String]) -> CommandSpec {
+        let mut command = CommandSpec::new("podman");
+        command.args(["--connection", MACHINE_NAME]).args(args);
+        command
+    }
+
+    fn remove(&self, run: &RunId) -> Result<()> {
+        bail!("run {}'s container is not removed: {}", run, Self::WHY)
+    }
+
+    fn facts_turn(&self, run: &TaskRun) -> Result<()> {
+        bail!(
+            "run {}'s facts are not of the end of its last turn, and its facts-only turn does \
+             not run: {}",
+            run.id(),
+            Self::WHY
+        )
+    }
+}
+
 impl PodmanRunContainers {
     /// The containers of the queue at `db`, bound to `main_checkout`,
     /// whose parts `machine` makes ready.

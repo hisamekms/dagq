@@ -50,6 +50,7 @@ use super::sqlite::SqliteQueue;
 use crate::application::actor_executor::ExecutorEvents;
 use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
+use crate::application::queue_commands::QueueCommand;
 use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
     Peer, QueueService, QueueServiceControl, ServiceAccess, ServiceBackend, ServiceProbe,
@@ -1310,7 +1311,7 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// socket or at the broker; `response_too_large`: the answer, which the
 /// service gave, is longer than [`MAX_ANSWER_BYTES`]; `no_credential`: the
 /// token's file does not read; `control_side_command`: the command is one of the control
-/// side's (`doctor`, `service status`, `planners`), which a person or the
+/// side's (`doctor`, `service status`), which a person or the
 /// inbox runs on the host; `no_use_case`: any other command that is none
 /// of the service's;
 /// `queue_named`: the command names a queue to open; `wrong_queue`: the
@@ -2045,6 +2046,13 @@ pub type ServiceWrites = Arc<
 /// the infrastructure does not shape the output itself (architecture L6).
 pub type ServiceDetail = fn(&crate::domain::TaskDetail, usize) -> Value;
 
+/// How the service runs one of the host's dialogue and operation commands
+/// ([`QueueCommand`]): as the command line runs it on the DB
+/// (`compose::run_command`), given by the composition root. It takes the
+/// request's queue, written as the principal's actor, and its DB.
+pub type ServiceCommands =
+    Arc<dyn Fn(&mut SqliteQueue, &Path, &QueueCommand) -> Result<Value> + Send + Sync>;
+
 /// How `dagq service serve` runs.
 #[derive(Clone)]
 pub struct ServeOptions {
@@ -2053,6 +2061,7 @@ pub struct ServeOptions {
     pub reads: ServiceReads,
     pub writes: ServiceWrites,
     pub detail: ServiceDetail,
+    pub commands: ServiceCommands,
     /// Set by SIGINT or SIGTERM: the service stops accepting and exits.
     pub stop: Arc<AtomicBool>,
     /// How often the loop looks for a connection or a stop.
@@ -2142,6 +2151,7 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
         reads: options.reads.clone(),
         writes: options.writes.clone(),
         detail: options.detail,
+        commands: options.commands.clone(),
     });
     let mut served = 0u64;
     let mut checked = Instant::now();
@@ -2307,6 +2317,7 @@ pub struct SqliteServiceBackend {
     pub reads: ServiceReads,
     pub writes: ServiceWrites,
     pub detail: ServiceDetail,
+    pub commands: ServiceCommands,
 }
 
 impl SqliteServiceBackend {
@@ -2321,6 +2332,7 @@ impl SqliteServiceBackend {
             reads: self.reads.clone(),
             writes: self.writes.clone(),
             detail: self.detail,
+            commands: self.commands.clone(),
             denials: Some(DenialWriter {
                 generators: self.generators.clone(),
                 actor: actor.clone(),
@@ -2374,6 +2386,7 @@ impl ServiceBackend for SqliteServiceBackend {
             reads: self.reads.clone(),
             writes: self.writes.clone(),
             detail: self.detail,
+            commands: self.commands.clone(),
             denials: None,
         }))
     }
@@ -2560,6 +2573,7 @@ impl InProcessCaller {
         reads: ServiceReads,
         writes: ServiceWrites,
         detail: ServiceDetail,
+        commands: ServiceCommands,
     ) -> Self {
         let queue_dir = queue_dir_of(db);
         Self {
@@ -2570,6 +2584,7 @@ impl InProcessCaller {
                 reads,
                 writes,
                 detail,
+                commands,
             },
             queue_dir,
             signed_in: SignedIn::default(),
@@ -2618,6 +2633,7 @@ struct ServiceSqlite {
     reads: ServiceReads,
     writes: ServiceWrites,
     detail: ServiceDetail,
+    commands: ServiceCommands,
     /// For a queue opened for a read: what records a refusal of the policy
     /// on a connection of its own that writes, since the read's does not.
     denials: Option<DenialWriter>,
@@ -2780,6 +2796,11 @@ impl ServiceQueue for ServiceSqlite {
     /// As the command line reads it ([`ServiceReads`]), without cmux.
     fn read(&mut self, read: &QueueRead) -> Result<Value> {
         (self.reads)(&mut self.queue, &self.db, read)
+    }
+
+    /// As the command line runs it ([`ServiceCommands`]).
+    fn command(&mut self, command: &QueueCommand) -> Result<Value> {
+        (self.commands)(&mut self.queue, &self.db, command)
     }
 
     fn session_owner(&self, session_id: &str) -> Result<Option<StepTarget>> {

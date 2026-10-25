@@ -398,6 +398,110 @@ fn a_release_whose_carried_head_cannot_be_kept_is_refused_and_changes_nothing() 
     assert_eq!(inherit_retries(&detail, &failed).len(), 1);
 }
 
+/// A release that ends its run through the queue service (ADR-t3102-3
+/// decision 5): the client reads the run's work, saves its uncommitted
+/// work as a commit and keeps the head with Git before it sends the
+/// release, and the service, whose Git logs each run, runs none; the
+/// release then carries that work over as the command line did on the DB.
+#[test]
+fn a_release_through_the_service_reads_and_keeps_the_work_with_the_client_s_git() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[escalate()]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let task = TaskId::new(1);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let failed = queue.show(task).unwrap().runs[0].clone();
+    assert_eq!(failed.status(), RunStatus::Failed);
+    let worktree = Path::new(failed.worktree_path().unwrap());
+    fs::write(worktree.join("notes.txt"), "notes\n").unwrap();
+    let head = git_out(worktree, &["rev-parse", "HEAD"]);
+    // As `invoke_with` runs the person's `dagq`: its host-wide settings
+    // beside the queue.
+    let config = db.parent().unwrap().join("config");
+    let git_log = crate::common::service::serve_logging_git(
+        &db,
+        &[("XDG_CONFIG_HOME", config.to_str().unwrap())],
+    );
+    assert_eq!(hold(&db, "1")["state"], "held");
+    fs::write(&git_log, "").unwrap();
+
+    let released = release(&db, "1", &[]);
+    assert_eq!(released["decision"], "retry_inherit", "{released}");
+    let saved = released["inherit"]["saved"].as_str().unwrap().to_owned();
+    assert_eq!(kept(&repo, &failed), saved);
+    assert_eq!(git_out(&repo, &["rev-parse", &format!("{saved}^")]), head);
+    assert_eq!(
+        fs::read_to_string(&git_log).unwrap(),
+        "",
+        "the service ran Git"
+    );
+    let detail = queue.show(task).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Ready);
+    assert_eq!(inherit_retries(&detail, &failed).len(), 1);
+}
+
+/// A client-mode `dagq` (`DAGQ_SERVICE_SOCKET` names the service, no
+/// `--db`), which knows no queue directory, releases a host run's hold
+/// and carries its work over as the host's `dagq` does: it reads and keeps
+/// the work with its own Git, and the service records the release as the
+/// user's.
+#[test]
+fn a_client_mode_release_carries_a_host_run_s_work_over_with_no_queue_path() {
+    use crate::common::{Bounded, WithoutActor, service::OwnedByTest};
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[escalate()]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let task = TaskId::new(1);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let failed = queue.show(task).unwrap().runs[0].clone();
+    let worktree = Path::new(failed.worktree_path().unwrap());
+    fs::write(worktree.join("notes.txt"), "notes\n").unwrap();
+    let head = git_out(worktree, &["rev-parse", "HEAD"]);
+    let config = db.parent().unwrap().join("config");
+    crate::common::service::serve_logging_git(
+        &db,
+        &[("XDG_CONFIG_HOME", config.to_str().unwrap())],
+    );
+    assert_eq!(hold(&db, "1")["state"], "held");
+    let socket = dagq::infrastructure::queue_service::socket_path(
+        fs::canonicalize(&db).unwrap().parent().unwrap(),
+    );
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .owned_by_test()
+        .current_dir(&repo)
+        .env("XDG_CONFIG_HOME", &config)
+        .env(dagq::domain::queue_service::SOCKET_ENV, &socket)
+        .args(["release", "1"])
+        .bounded_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let released: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(released["decision"], "retry_inherit", "{released}");
+    let saved = released["inherit"]["saved"].as_str().unwrap().to_owned();
+    assert_eq!(kept(&repo, &failed), saved);
+    assert_eq!(git_out(&repo, &["rev-parse", &format!("{saved}^")]), head);
+    let detail = queue.show(task).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Ready);
+    assert_eq!(inherit_retries(&detail, &failed).len(), 1);
+    let actors: Vec<Value> = crate::common::service::events(&db, "task_released")
+        .into_iter()
+        .map(|event| event["actor"]["role"].clone())
+        .collect();
+    assert_eq!(actors, [json!("user")], "{released}");
+}
+
 /// Acceptance (b) and (c): a release that ends the run carries over the
 /// latest work its worktree has, not the commit its review passed. A
 /// waiting run whose validated commit a commit made while it was held went

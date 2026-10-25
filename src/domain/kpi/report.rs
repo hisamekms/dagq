@@ -16,7 +16,7 @@ mod html;
 mod svg;
 
 pub use html::{index_html, render_html};
-pub use svg::{external_references, inline_svg};
+pub use svg::{IMAGE_PREFIX, checked_svg, image_source};
 
 /// A KPI's value in its unit as the report shows it; `—` for none.
 pub fn format_value(kpi: &str, value: Option<f64>) -> String {
@@ -83,8 +83,8 @@ pub struct FindingLine {
 }
 
 /// The near-term dependency diagram's section (ADR-0077 decision 7): the
-/// tasks drawn and whether their d2 source was made, and the inline SVG or
-/// why there is none. The JSON carries no SVG.
+/// tasks drawn and whether their d2 source was made, and the SVG the page
+/// shows as an image or why there is none. The JSON carries no SVG.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiagramSection {
     /// The IDs of the tasks the diagram selects, ascending.
@@ -94,16 +94,17 @@ pub struct DiagramSection {
     /// Why the page has no diagram; none when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// The SVG, fit to put inline ([`inline_svg`]); only in the page.
+    /// The SVG as written, checked well-formed ([`checked_svg`]), which
+    /// the page shows as an image ([`image_source`]); only in the page.
     #[serde(skip)]
     pub svg: Option<String>,
 }
 
 impl DiagramSection {
-    /// The diagram of `tasks` drawn as `svg` (d2's output), or the reason
-    /// the SVG cannot go inline.
+    /// The diagram of `tasks` drawn as `svg` (d2's output, or a client's),
+    /// or the reason the SVG is not kept.
     pub fn drawn(tasks: Vec<i64>, svg: &str) -> Self {
-        match inline_svg(svg) {
+        match checked_svg(svg) {
             Ok(svg) => Self {
                 tasks,
                 d2_source: true,

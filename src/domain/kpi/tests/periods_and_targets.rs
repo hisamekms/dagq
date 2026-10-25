@@ -312,3 +312,76 @@ fn a_goal_keeps_only_its_runs() {
     );
     assert_eq!(result.config.min_samples, config::DEFAULT_MIN_SAMPLES);
 }
+
+/// A report's landed commits are those of the periods its KPIs read: one
+/// landed after the oldest period's start and up to the latest's end is
+/// listed once however often it was recorded; one landed at that start or
+/// before, or after that end, is not, so a report of a past week lists
+/// none of what landed since; and an `at` that names no event lists none.
+#[test]
+fn a_reports_landed_commits_are_the_ones_of_the_periods_it_reads() {
+    let config = KpiConfig::merge(None, None);
+    let query = KpiQuery {
+        period: Period::Week,
+        last: 1,
+        ..KpiQuery::default()
+    };
+    let now = MONDAY + 2 * DAY;
+    let week = 7 * DAY;
+    let count = 1 + Period::Week.lookback().max(2 * config.breach_weeks);
+    let oldest = MONDAY - (count as i64 - 1) * week;
+    let mut queue = Queue::default();
+    for (run, commit, secs) in [
+        ("r-before", "old", oldest),
+        ("r-in", "kept", oldest + 1),
+        ("r-again", "kept", MONDAY + DAY),
+        ("r-now", "late", now - 1),
+    ] {
+        let run = format!("{:08x}-0000-4000-8000-{:012x}", run.len(), secs);
+        queue.push(
+            Some(1),
+            Some(&run),
+            "run_integrated",
+            json!({"commit": commit}),
+            secs,
+        );
+    }
+    queue.push(Some(1), None, "task_ready", json!({}), now - 2);
+    assert_eq!(
+        landed_in_periods(&queue.events, &query, now, JST, &config),
+        ["kept", "late"]
+    );
+    // The week before: its periods start a week earlier, so the one at
+    // this week's oldest start is its, and end where this week starts, so
+    // what landed this week ("late") is not.
+    let past = KpiQuery {
+        at: Some(crate::domain::stats::Cursor::Time((MONDAY - DAY) * 1000)),
+        ..query.clone()
+    };
+    assert_eq!(
+        landed_in_periods(&queue.events, &past, now, JST, &config),
+        ["kept", "old"]
+    );
+    let at_its_end = KpiQuery {
+        at: Some(crate::domain::stats::Cursor::Time(
+            (MONDAY - week + 1) * 1000,
+        )),
+        ..query.clone()
+    };
+    queue.push(
+        Some(1),
+        Some("0000000e-0000-4000-8000-000000000001"),
+        "run_integrated",
+        json!({"commit": "at-end"}),
+        MONDAY,
+    );
+    assert_eq!(
+        landed_in_periods(&queue.events, &at_its_end, now, JST, &config),
+        ["at-end", "kept", "old"]
+    );
+    let nowhere = KpiQuery {
+        at: Some(crate::domain::stats::Cursor::Event(EventId::new(0))),
+        ..query
+    };
+    assert!(landed_in_periods(&queue.events, &nowhere, now, JST, &config).is_empty());
+}

@@ -104,6 +104,8 @@ fn args(argv: &[String]) -> Vec<&str> {
 #[test]
 fn a_follow_up_reaches_a_live_headless_planner_as_its_next_turn_with_its_actor() {
     let (_dir, db) = queue();
+    // The queue service names the queue's files by its DB's own path.
+    let db = db.canonicalize().unwrap();
     let id = planner(
         &db,
         PlannerRoute::Headless,
@@ -172,6 +174,50 @@ fn a_follow_up_reaches_a_live_headless_planner_as_its_next_turn_with_its_actor()
         requested[0]["payload"]["what"],
         "follow-up request followup-1"
     );
+}
+
+/// A request's two records, `turn_requested` and
+/// `planner_request_handed`, are written in one transaction: when the
+/// second cannot be written, the command fails and neither is left; once it
+/// can, both are.
+#[test]
+fn a_request_whose_second_record_fails_leaves_neither() {
+    let (_dir, db) = queue();
+    let db = db.canonicalize().unwrap();
+    let id = planner(
+        &db,
+        PlannerRoute::Headless,
+        &live_handle(),
+        std::process::id(),
+    );
+    let counts = || {
+        (
+            events(&db, "turn_requested").len(),
+            events(&db, "planner_request_handed").len(),
+        )
+    };
+    let before = counts();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_handed BEFORE INSERT ON run_events
+             WHEN NEW.kind = 'planner_request_handed'
+             BEGIN SELECT RAISE(ABORT, 'record failed'); END",
+        )
+        .unwrap();
+    let error = refusal(
+        &[("DAGQ_ROLE", "inbox")],
+        &db,
+        &args(&request(id, "split the docs")),
+    );
+    assert!(error.to_string().contains("record failed"), "{error}");
+    assert_eq!(counts(), before);
+
+    connection
+        .execute_batch("DROP TRIGGER fail_handed")
+        .unwrap();
+    ok_as("inbox", &db, &args(&request(id, "split the docs")));
+    assert_eq!(counts(), (before.0 + 1, before.1 + 1));
 }
 
 #[test]
@@ -280,6 +326,8 @@ fn only_the_inbox_and_a_person_hand_a_request_and_other_roles_are_recorded() {
 #[test]
 fn a_headless_planner_has_no_screen_and_takes_no_keys_or_answer() {
     let (_dir, db) = queue();
+    // The queue service names the queue's files by its DB's own path.
+    let db = db.canonicalize().unwrap();
     let id = planner(
         &db,
         PlannerRoute::Headless,
@@ -326,6 +374,11 @@ fn request_with_stdin(db: &Path, planner: PlannerId, args: &[&str], stdin: &[u8]
     let mut child = Command::new(env!("CARGO_BIN_EXE_dagq"))
         .without_actor_env()
         .env("DAGQ_ROLE", "inbox")
+        .envs(common::service::host_client_env(
+            db,
+            &[("DAGQ_ROLE", "inbox")],
+            &["planner", "request"],
+        ))
         .arg("--db")
         .arg(db)
         .args(["planner", "request", &planner.to_string()])
@@ -344,6 +397,8 @@ fn request_with_stdin(db: &Path, planner: PlannerId, args: &[&str], stdin: &[u8]
 #[test]
 fn words_from_a_file_or_stdin_are_handed_as_text_gives_them() {
     let (dir, db) = queue();
+    // The queue service names the queue's files by its DB's own path.
+    let db = db.canonicalize().unwrap();
     let id = planner(
         &db,
         PlannerRoute::Headless,
@@ -481,9 +536,16 @@ fn an_ungranted_actor_is_refused_before_a_file_or_open_stdin_is_read() {
         .into_iter()
         .enumerate()
     {
+        // A planner of the runtime's, with its token: the service refuses
+        // it, and the client reads no words for it first.
         let child = Command::new(env!("CARGO_BIN_EXE_dagq"))
             .without_actor_env()
             .env("DAGQ_ROLE", "planner")
+            .envs(common::service::host_client_env(
+                &db,
+                &[("DAGQ_ROLE", "planner")],
+                &["planner", "request", "1"],
+            ))
             .arg("--db")
             .arg(&db)
             .args(["planner", "request", "1"])

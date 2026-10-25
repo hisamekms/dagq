@@ -55,11 +55,12 @@ pub use host::{
     QueueRelayControlPort, QueueRelayOptions, QueueServiceControlPort, QueueServiceOptions,
     ReleaseIndexPort, ReleaseUpdateJob, SccacheOptions, down, inbox, inbox_command, init_queue,
     install_restart_arguments, migrate_queue, queue_schema, queue_service_start,
-    queue_service_status, queue_service_stop, rebind, up,
+    queue_service_status, queue_service_stop, rebind, repair_rebound_worktrees,
+    repository_common_dir, repository_queue_dir, run_command, service_commands, trace_command, up,
 };
 pub use observation::{
     CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, ci_failures, doctor, events,
-    events_matching, graph_diagram, graph_svg_of, observe, observer_launch, queue_agents,
+    events_matching, graph_export_text, graph_svg_of, observe, observer_launch, queue_agents,
     read_queue, service_detail, service_reads, stats, status, status_for, throughput_review,
     throughput_review_launch, timeline, timeline_in, watch, watch_in, watch_through_service,
 };
@@ -113,6 +114,16 @@ pub(crate) fn run_containers(
     db: &Path,
     main_checkout: Option<PathBuf>,
 ) -> crate::infrastructure::run_container::PodmanRunContainers {
+    run_containers_keeping(db, main_checkout, None)
+}
+
+/// [`run_containers`] whose image records are kept in `kept` when given,
+/// for a process that opens no queue to send them to the queue service.
+pub(crate) fn run_containers_keeping(
+    db: &Path,
+    main_checkout: Option<PathBuf>,
+    kept: Option<std::sync::Arc<crate::application::container_image::KeptImageRecords>>,
+) -> crate::infrastructure::run_container::PodmanRunContainers {
     let podman = crate::infrastructure::podman_machine::PodmanCli::default();
     let host_wide = crate::infrastructure::kpi_config::host_wide_file();
     crate::infrastructure::run_container::PodmanRunContainers::of_queue(
@@ -125,6 +136,7 @@ pub(crate) fn run_containers(
             db: db.to_path_buf(),
             main_checkout,
             host_wide,
+            kept_records: kept,
         }),
     )
 }
@@ -161,8 +173,29 @@ pub(crate) fn verification_containers(
             db: db.to_path_buf(),
             main_checkout,
             host_wide,
+            kept_records: None,
         }),
     }
+}
+
+/// What the caller of the host's command `command` reads, and does with
+/// Git and programs, before it sends it, as none runs in the queue service
+/// (ADR-t3102-3 decision 5), asking `call` (the service, or [`run_command`]
+/// on the DB of the queue at `db`) what to read: `report`
+/// ([`observation::prepare_report`]) and `release`
+/// ([`host::prepare_release`]). Any other command as it is.
+pub fn prepare_command(
+    mut command: crate::application::queue_commands::QueueCommand,
+    db: Option<&Path>,
+    call: impl FnMut(&crate::application::queue_commands::QueueCommand) -> Result<serde_json::Value>,
+) -> Result<crate::application::queue_commands::QueueCommand> {
+    use crate::application::queue_commands::QueueCommand as C;
+    match &mut command {
+        C::Report(params) => observation::prepare_report(params, call)?,
+        C::Release(params) => host::prepare_release(params, db, call)?,
+        _ => {}
+    }
+    Ok(command)
 }
 
 /// The main checkout of the repository the queue is bound to; `None` for a

@@ -425,6 +425,27 @@ fn report_setup(
     now: i64,
     profiles: &crate::domain::toolchain::ProfileRegistry,
 ) -> Result<crate::application::report::ReportSetup> {
+    report_setup_with(
+        db,
+        checkout,
+        out,
+        host_wide,
+        now,
+        profiles,
+        area_reader(checkout)?,
+    )
+}
+
+/// [`report_setup`] with the landed runs' areas read by `areas`.
+fn report_setup_with(
+    db: &Path,
+    checkout: Option<&Path>,
+    out: Option<&Path>,
+    host_wide: Option<&Path>,
+    now: i64,
+    profiles: &crate::domain::toolchain::ProfileRegistry,
+    areas: crate::application::areas::AreaReader,
+) -> Result<crate::application::report::ReportSetup> {
     use crate::infrastructure::{kpi_config::load_host_kpi, report_config::load_host_report};
     let repository = match checkout {
         Some(checkout) => load_kpi_settings(checkout)?,
@@ -443,7 +464,7 @@ fn report_setup(
         keep: load_host_report(queue_dir, host_wide)?,
         build: crate::VERSION.to_owned(),
         diagram: d2_renderer(std::env::var_os("PATH")),
-        areas: area_reader(checkout)?,
+        areas,
         host_metrics: Some(host_metrics_reader(
             queue_dir.join(crate::domain::host_metrics::HOST_DIR),
         )),
@@ -465,6 +486,7 @@ fn area_reader(checkout: Option<&Path>) -> Result<crate::application::areas::Are
         changed: Arc::new(move |commits: &[String]| {
             GitRepository::inspect(&checkout)?.landed_changes(commits)
         }),
+        judged: None,
     })
 }
 
@@ -473,6 +495,26 @@ fn host_metrics_reader(dir: PathBuf) -> crate::application::report::HostMetrics 
     crate::application::report::HostMetrics(std::sync::Arc::new(move |from, until| {
         crate::infrastructure::host_metrics::summary(&dir, from, until)
     }))
+}
+
+/// `report`'s params as the queue service's client sends them
+/// ([`crate::application::report::prepare_request`]), from what `call`
+/// answers (the service, or `run_command` on the DB), with the host's Git
+/// for the main checkout and the landed commits' changes, and the host's d2
+/// and TALA for the diagram.
+pub(super) fn prepare_report(
+    params: &mut crate::application::queue_commands::ReportParams,
+    call: impl FnMut(&crate::application::queue_commands::QueueCommand) -> Result<Value>,
+) -> Result<()> {
+    crate::application::report::prepare_request(
+        params,
+        &crate::application::report::ReportClient {
+            main_checkout: &crate::infrastructure::adapters::main_checkout_of,
+            areas: &|checkout| area_reader(Some(checkout)),
+            diagram: &d2_renderer(std::env::var_os("PATH")),
+        },
+        call,
+    )
 }
 
 /// Draws the reports' dependency diagram with d2 and TALA on `path_var`
@@ -563,22 +605,14 @@ pub fn stats(db: &Path, query: &StatsQuery) -> Result<Value> {
     OneShot::system().stats(db, query)
 }
 
-/// The near-term dependency diagram of `graph --format d2|svg`
-/// (ADR-0077): its d2 source
-/// ([`crate::application::queue_reads::planning::graph_diagram`]), or the SVG the
-/// host's d2 draws from it, and the tasks it shows.
-pub fn graph_diagram(
-    queue: &SqliteQueue,
-    goal_id: Option<crate::domain::GoalId>,
-    format: &str,
-) -> Result<(String, Vec<TaskId>)> {
-    let (source, tasks) = crate::application::queue_reads::planning::graph_diagram(queue, goal_id)?;
-    let text = if format == "svg" {
-        render_svg(&source)?
+/// The text `graph --out` writes of the diagram's d2 `source`: the SVG
+/// the host's d2 draws from it for `svg`, else the source.
+pub fn graph_export_text(source: &str, format: &str) -> Result<String> {
+    if format == "svg" {
+        render_svg(source)
     } else {
-        source
-    };
-    Ok((text, tasks))
+        Ok(source.to_owned())
+    }
 }
 
 /// `graph --format svg` of a served queue: `answer`, the service's
@@ -1627,32 +1661,94 @@ impl OneShot {
         crate::application::kpi::improvements(queue, limit)
     }
 
-    /// `report` (ADR-0051 decision 21): the KPI report of the `period` that
-    /// holds `at` (now without; today's and this week's are partial),
-    /// made as the supervisor makes it and written under `out` (the
-    /// queue's `reports/` without), or with `print` only returned.
-    pub fn report_of(
+    /// `report_inputs` ([`crate::application::report::report_inputs`]) of
+    /// `queue`, with the `[kpi]` settings of the checkout it names and the
+    /// host's.
+    pub fn report_inputs_of(
         &self,
         queue: &SqliteQueue,
         db: &Path,
-        period: crate::domain::kpi::Period,
-        at: Option<crate::domain::stats::Cursor>,
-        out: Option<&Path>,
-        print: bool,
+        params: &crate::application::queue_commands::ReportInputsParams,
     ) -> Result<Value> {
         use crate::application::report;
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
-        let setup = report_setup(
+        let settings = |checkout: &Path| {
+            let setup = report_setup_with(
+                db,
+                Some(checkout),
+                None,
+                host_wide.as_deref(),
+                now,
+                self.profiles,
+                crate::application::areas::AreaReader::none(),
+            )?;
+            Ok((setup.host.utc_offset_secs, setup.config))
+        };
+        Ok(serde_json::to_value(report::report_inputs(
+            params,
+            queue.repository_binding()?,
+            || report::diagram_draft(queue),
+            &report::ReportInputsSources {
+                files: &LocalRunFiles,
+                settings: &settings,
+                events: &|| queue.all_events(),
+            },
+            now,
+        )?)?)
+    }
+
+    /// `report` (ADR-0051 decision 21): the KPI report of the `period` that
+    /// holds `at` (now without; today's and this week's are partial),
+    /// made as the supervisor makes it with what its caller read and drew
+    /// ([`prepare_report`]: the near-term diagram, the main checkout and
+    /// the landed commits' areas) and written under `out` (the queue's
+    /// `reports/` without), or with `print` only returned. No Git or
+    /// program runs: a checkout that is not the bound repository's is
+    /// refused.
+    pub fn report_of(
+        &self,
+        queue: &SqliteQueue,
+        db: &Path,
+        params: &crate::application::queue_commands::ReportParams,
+    ) -> Result<Value> {
+        use crate::application::report;
+        let period = params.period.parse().map_err(anyhow::Error::msg)?;
+        let at = params
+            .at
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(anyhow::Error::msg)?;
+        let diagram = params.diagram.clone().context(
+            "report is sent with what its caller read and drew from report_inputs' answer",
+        )?;
+        let checkout = params.checkout.as_deref();
+        if let Some(checkout) = checkout {
+            report::accept_checkout(
+                &LocalRunFiles,
+                checkout,
+                queue.repository_binding()?.as_deref(),
+            )?;
+        }
+        let now = self.generators.clock.now();
+        let host_wide = crate::infrastructure::kpi_config::host_wide_file();
+        let setup = report_setup_with(
             db,
-            bound_checkout(queue)?.as_deref(),
-            out,
+            checkout,
+            params.out.as_deref(),
             host_wide.as_deref(),
             now,
             self.profiles,
+            crate::application::areas::AreaReader::judged(
+                params
+                    .areas
+                    .clone()
+                    .map(|areas| areas.into_iter().collect()),
+            ),
         )?;
-        let made = report::make(queue, &setup, now, period, at)?;
-        if print {
+        let made = report::make_with(queue, &setup, now, period, at, diagram.into())?;
+        if params.print {
             return Ok(serde_json::to_value(made)?);
         }
         Ok(serde_json::to_value(report::write(

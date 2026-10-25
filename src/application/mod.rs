@@ -49,6 +49,7 @@ pub mod prompt;
 mod prompt_fit;
 pub mod push;
 pub mod queue_broker;
+pub mod queue_commands;
 pub mod queue_reads;
 pub mod queue_service;
 pub mod queue_writes;

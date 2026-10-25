@@ -1,0 +1,29 @@
+# 5.641s in the worker's stress (median of 5, load average ~10)
+[[test]]
+name = "cli_areas::a_report_through_the_service_reads_the_areas_with_the_client_s_git"
+reason = "境界（Git・プロセス）: queue service を起動し、hostのCLIのクライアントが main checkout の Git で着地した commit の file を読み、Git を走らせない service が report を作る配線の代表。checkout・areas・Git の失敗の既定の判断は application::report と application::areas の unit test"
+task = 3107
+
+# 5.757s in the worker's stress (median of 5, load average ~10)
+[[test]]
+name = "queue_binary::only_the_queues_binary_migrates_the_queue"
+reason = "境界（SQLite・プロセス）: 固定の binary の写しと開発中の binary を別のプロセスで走らせ、queue を作った binary だけが実の SQLite の schema を上げ、別の binary の migrate を断る経路"
+task = 3107
+
+# 5.97s to 7.29s (stress 5, median 6.71s, load average ~17)
+[[test]]
+name = "runtime_report::the_reports_carry_the_dependency_diagram_or_why_not"
+reason = "境界（supervisor・プロセス・file）: supervisor が owed の日次 report を書くとき、PATH の d2 と TALA の stub を別のプロセスで 1 度だけ走らせ、その SVG を page の唯一の画像として載せ、TALA が無ければ理由を書くことを実際の queue と file で確かめる。SVG の検査と page の作りは domain::kpi::report の unit test"
+task = 3107
+
+# 4.82s to 5.91s (stress 5, median 5.40s, load average ~17)
+[[test]]
+name = "runtime_task_release::a_client_mode_release_carries_a_host_run_s_work_over_with_no_queue_path"
+reason = "境界（CLI・queue service・SQLite・Git）: supervisor が needs_session にした host の run を、queue の path を知らないクライアントモードの dagq が別のプロセスの queue service に release し、自分の Git で成果を読んで refs/dagq/runs に残し、service が user の task_released を記録することを確かめる。読む・送る・誤りの勝ち方の判断は application::commands::holds の unit test"
+task = 3107
+
+# 5.19s to 5.78s (stress 5, median 5.36s, load average ~17)
+[[test]]
+name = "runtime_task_release::a_release_through_the_service_reads_and_keeps_the_work_with_the_client_s_git"
+reason = "境界（CLI・queue service・SQLite・Git）: supervisor が needs_session にした run の release を queue service 経由で打ち、クライアントの Git が成果を commit して残し、Git の呼び出しを記録する service は Git を走らせず、引き継ぎが DB のときと同じになることを確かめる。照合の判断は domain::task_hold と application::commands::holds の unit test"
+task = 3107

@@ -641,7 +641,27 @@ impl QueueRead {
             | UseCase::ProposalWithdraw
             | UseCase::RequestAdd
             | UseCase::RequestDecline
-            | UseCase::Mark => return Ok(None),
+            | UseCase::Mark
+            // The host's commands ([`crate::application::queue_commands`]).
+            | UseCase::Answer
+            | UseCase::AskClose
+            | UseCase::Hold
+            | UseCase::Release
+            | UseCase::ReleaseRead
+            | UseCase::ReleaseImages
+            | UseCase::ReplanRequest
+            | UseCase::Rebind
+            | UseCase::Recover
+            | UseCase::RunScreen
+            | UseCase::RunSend
+            | UseCase::RunLog
+            | UseCase::PlannerScreen
+            | UseCase::PlannerSend
+            | UseCase::PlannerLog
+            | UseCase::PlannerRequest
+            | UseCase::Report
+            | UseCase::ReportInputs
+            | UseCase::GraphExport => return Ok(None),
         };
         read.check()?;
         Ok(Some(read))

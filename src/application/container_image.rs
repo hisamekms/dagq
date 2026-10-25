@@ -49,6 +49,101 @@ pub trait ImageRecords {
     fn latest(&self) -> Result<Option<(RecordedKind, Value)>>;
 }
 
+/// An image record kept by the process that made it, for the queue to
+/// record later ([`Self::recorded`]), named by its kind
+/// ([`crate::domain::container_image::CONTAINER_IMAGE_KINDS`]): a failure's
+/// image (none when it could not be decided) and why, or the image a
+/// build made ready with what it built and removed. It carries no time:
+/// the queue stamps a failure with its own clock, so that no sender sets
+/// how long the failure holds the container
+/// ([`crate::domain::container_image::failure_holds`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum KeptImageRecord {
+    ContainerImageFailed {
+        image: Option<String>,
+        reason: String,
+    },
+    ContainerImageBuilt {
+        image: String,
+        built: Vec<String>,
+        removed: Vec<String>,
+    },
+}
+
+impl KeptImageRecord {
+    /// The record of `kind` with `payload` as [`prepare`] makes it, its
+    /// time left out.
+    fn of(kind: EventKind, payload: &Value) -> Result<Self> {
+        let mut fields = payload.clone();
+        let Some(map) = fields.as_object_mut() else {
+            anyhow::bail!("an image record's payload is no object: {payload}");
+        };
+        map.remove("at");
+        map.insert("kind".to_owned(), Value::from(kind.as_str()));
+        serde_json::from_value(fields).map_err(|error| {
+            anyhow::anyhow!("an image record of no known shape ({error}): {payload}")
+        })
+    }
+
+    /// The kind and payload the queue records at `now` (Unix seconds).
+    pub fn recorded(&self, now: i64) -> (EventKind, Value) {
+        match self {
+            Self::ContainerImageFailed { image, reason } => (
+                EventKind::ContainerImageFailed,
+                failure_payload(image.as_deref(), reason, now),
+            ),
+            Self::ContainerImageBuilt {
+                image,
+                built,
+                removed,
+            } => (
+                EventKind::ContainerImageBuilt,
+                built_payload(
+                    image,
+                    &built.iter().map(String::as_str).collect::<Vec<_>>(),
+                    removed,
+                ),
+            ),
+        }
+    }
+}
+
+/// The records of the images a process that opens no queue makes ready
+/// (a host's `dagq` whose command goes to the queue service), kept here
+/// until it sends them to the service ([`Self::take`]); reading them is
+/// not one of its uses.
+#[derive(Debug, Default)]
+pub struct KeptImageRecords(std::sync::Mutex<Vec<KeptImageRecord>>);
+
+impl KeptImageRecords {
+    /// The records kept so far, in the order they were made, and none
+    /// kept after.
+    pub fn take(&self) -> Vec<KeptImageRecord> {
+        std::mem::take(
+            &mut *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+impl ImageRecords for KeptImageRecords {
+    fn record(&self, kind: EventKind, payload: Value) -> Result<()> {
+        let record = KeptImageRecord::of(kind, &payload)?;
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(record);
+        Ok(())
+    }
+
+    fn latest(&self) -> Result<Option<(RecordedKind, Value)>> {
+        anyhow::bail!("the kept image records are sent to the queue, not read")
+    }
+}
+
 /// Make the image a container of the queue runs be there, at `now` (Unix
 /// seconds): decide the images, build the missing ones (the base, then the
 /// project's on it), and remove the old ones. A failure is recorded and
@@ -166,6 +261,49 @@ mod tests {
         BaseInputs, ClientSource, ContextFile, FAILURE_HOLD_SECS, ProjectImage,
     };
     use crate::domain::podman_machine::QueueKey;
+
+    /// The records kept by a process that opens no queue are taken once,
+    /// in the order made, and are not read; the queue records each as it
+    /// was made but a failure's time, which is the queue's when it records
+    /// it. A payload of another shape is not kept.
+    #[test]
+    fn kept_image_records_are_taken_once_in_order_and_not_read() {
+        let kept = KeptImageRecords::default();
+        kept.record(
+            EventKind::ContainerImageFailed,
+            failure_payload(Some("img:1"), "no client", 5),
+        )
+        .unwrap();
+        kept.record(
+            EventKind::ContainerImageBuilt,
+            built_payload("img:2", &["img:2"], &["img:1".to_owned()]),
+        )
+        .unwrap();
+        assert!(
+            kept.record(EventKind::ContainerImageFailed, serde_json::json!({"a": 1}))
+                .is_err()
+        );
+        assert!(kept.latest().is_err());
+        let recorded: Vec<(EventKind, Value)> = kept
+            .take()
+            .iter()
+            .map(|record| record.recorded(900))
+            .collect();
+        assert_eq!(
+            recorded,
+            [
+                (
+                    EventKind::ContainerImageFailed,
+                    failure_payload(Some("img:1"), "no client", 900)
+                ),
+                (
+                    EventKind::ContainerImageBuilt,
+                    built_payload("img:2", &["img:2"], &["img:1".to_owned()])
+                ),
+            ]
+        );
+        assert!(kept.take().is_empty());
+    }
 
     struct Specs(Result<Images, String>);
 

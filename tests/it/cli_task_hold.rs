@@ -230,7 +230,8 @@ fn only_a_person_and_the_inbox_hold_or_release() {
         ("DAGQ_TASK_ID", "1"),
         ("DAGQ_ACTOR_ID", run_id.as_str()),
     ];
-    let planner = [("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "3")];
+    // A planner of the runtime's, with its token.
+    let planner = [("DAGQ_ROLE", "planner")];
     for env in [&worker[..], &planner[..]] {
         for args in [
             &["hold", "1", "--reason", "why"][..],
