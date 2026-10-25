@@ -1622,41 +1622,67 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
 
 /// Unloads the LaunchAgent the test bootstrapped if it is still there when
 /// the test ends, so a failed assertion does not leave a supervisor
-/// restarting forever against a deleted queue.
+/// restarting forever against a deleted queue. The same unload is
+/// registered with [`common::on_timeout`], since a timeout's exit skips the
+/// drop and the sweep of abandoned fixtures does not look at launchd.
 struct AgentGuard {
     label: String,
     plist: PathBuf,
+    _on_timeout: Cleanup,
 }
 
 impl AgentGuard {
+    fn new(label: &str, plist: &Path) -> Self {
+        let (hook_label, hook_plist) = (label.to_owned(), plist.to_owned());
+        let on_timeout = common::on_timeout(
+            CLEANUP_LIMIT,
+            format!("boot out the LaunchAgent {label}"),
+            move || unload_agent(&hook_label, &hook_plist),
+        );
+        Self {
+            label: label.to_owned(),
+            plist: plist.to_owned(),
+            _on_timeout: on_timeout,
+        }
+    }
+
     fn loaded(&self) -> bool {
-        Command::new("launchctl")
-            .args(["print", &format!("gui/{}/{}", uid(), self.label)])
-            .bounded_output()
-            .unwrap()
-            .status
-            .success()
+        agent_loaded(&self.label)
     }
 }
 
 impl Drop for AgentGuard {
     fn drop(&mut self) {
-        if self.loaded() {
-            let output = Command::new("launchctl")
-                .args(["bootout", &format!("gui/{}/{}", uid(), self.label)])
-                .bounded_output()
-                .unwrap();
-            eprintln!(
-                "booted out {} ({}): {}",
-                self.label,
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        if self.plist.exists() {
-            let _ = fs::remove_file(&self.plist);
-            eprintln!("removed {}", self.plist.display());
-        }
+        unload_agent(&self.label, &self.plist);
+    }
+}
+
+fn agent_loaded(label: &str) -> bool {
+    Command::new("launchctl")
+        .args(["print", &format!("gui/{}/{label}", uid())])
+        .bounded_output()
+        .unwrap()
+        .status
+        .success()
+}
+
+/// Boot out the LaunchAgent `label` when launchd still has it, and remove
+/// its `plist`.
+fn unload_agent(label: &str, plist: &Path) {
+    if agent_loaded(label) {
+        let output = Command::new("launchctl")
+            .args(["bootout", &format!("gui/{}/{label}", uid())])
+            .bounded_output()
+            .unwrap();
+        eprintln!(
+            "booted out {label} ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if plist.exists() {
+        let _ = fs::remove_file(plist);
+        eprintln!("removed {}", plist.display());
     }
 }
 
@@ -1710,10 +1736,7 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
     let plist = PathBuf::from(located["launch_agent"].as_str().unwrap());
     assert!(plist.starts_with(&home));
     let log_dir = PathBuf::from(located["log_dir"].as_str().unwrap());
-    let agent = AgentGuard {
-        label: label.clone(),
-        plist: plist.clone(),
-    };
+    let agent = AgentGuard::new(&label, &plist);
 
     let up_args = [
         "up",
