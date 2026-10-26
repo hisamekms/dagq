@@ -206,6 +206,73 @@ fn a_supervisor_on_the_socket_reviews_and_lands_a_run_without_opening_the_queue(
     assert!(!credential.exists(), "{}", credential.display());
 }
 
+/// With `[ci_watch]` and a `[landing_verification]` command in place of
+/// the task's, the landing the supervisor asks of the integrator on the
+/// socket reads the CI watch's records the queue holds, as the
+/// integrator, before its verification: the read is the integrator's, so
+/// the landing moves main and records `run_integrated`, and its command
+/// is told the known failures.
+#[test]
+fn a_landing_on_the_socket_reads_the_ci_watch_as_the_integrator() {
+    use crate::runtime_support::{
+        IDLE_AGENT, TestReviewer, TestWorkspace, git, record_known_failure, supervise_options,
+        supervise_reviewed_with, verdict,
+    };
+    use dagq::{
+        application::TaskReads,
+        domain::{EventKind, TaskId, TaskStatus},
+        infrastructure::sqlite::SqliteQueue,
+    };
+    let (_fixture, repo, db) = fixture();
+    let listed = repo.parent().unwrap().join("known failures");
+    std::fs::write(
+        repo.join("dagq.toml"),
+        format!(
+            "[ci_watch]\nworkflow = \"ci.yml\"\n\n[landing_verification]\nreplaces = ['seed.txt']\ncommand = {}\n",
+            serde_json::json!(format!(
+                "test -f seed.txt && cp \"$DAGQ_CI_KNOWN_FAILURES\" {}",
+                common::shell_path(&listed)
+            ))
+        ),
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-q", "-m", "watch the CI"]);
+    let before = head(&repo);
+    record_known_failure(&db, &["dagq::it known::failure"]);
+    let _served = common::service::Served::start(&db);
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let options = dagq::compose::SuperviseOptions {
+        service_route: dagq::compose::ServiceRoute::Socket,
+        ..supervise_options(4, true)
+    };
+    let refused = refuse_opening(&db);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    drop(refused);
+    assert_eq!(outcome["errors"], serde_json::json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let integrated = detail
+        .events
+        .iter()
+        .find(|event| event.kind == EventKind::RunIntegrated)
+        .expect("run_integrated");
+    assert_eq!(integrated.actor.as_ref().unwrap().role, "integrator");
+    assert_ne!(head(&repo), before);
+    let list: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&listed).unwrap()).unwrap();
+    assert_eq!(
+        list["failures"][0]["name"], "dagq::it known::failure",
+        "{list}"
+    );
+}
+
 /// A job command the supervisor starts as its own (an observation)
 /// reaches the queue through the service with the supervisor's token,
 /// found from its registration, and opens none: its records are the

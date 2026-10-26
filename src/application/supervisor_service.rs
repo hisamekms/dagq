@@ -848,10 +848,12 @@ const INTEGRATOR_TASK_OPS: [&str; 4] = [
     "follow_up_depth",
 ];
 /// The integrator's operations on the queue as a whole: the reads its
-/// checks make and the container runtime's events of its verification.
-const INTEGRATOR_QUEUE_OPS: [&str; 3] = [
+/// checks make (the CI watch's records among them) and the container
+/// runtime's events of its verification.
+const INTEGRATOR_QUEUE_OPS: [&str; 4] = [
     "latest_events_of",
     "latest_queue_event",
+    "ci_watch_events",
     "record_queue_event",
 ];
 
@@ -859,7 +861,10 @@ const INTEGRATOR_QUEUE_OPS: [&str; 3] = [
 /// one of the landing's operations ([`INTEGRATOR_RUN_OPS`],
 /// [`INTEGRATOR_TASK_OPS`], [`INTEGRATOR_QUEUE_OPS`]) every argument of
 /// which that names a run or a task names its own (a task's none, which
-/// would be every task's, is not its own). Why not, otherwise.
+/// would be every task's, is not its own). The queue-wide reads name
+/// neither, so they are answered whole: the CI watch's records, from
+/// which its verification's known failures are read, among them. Why
+/// not, otherwise.
 pub(super) fn integrator_scope(
     op: &str,
     args: &[Value],

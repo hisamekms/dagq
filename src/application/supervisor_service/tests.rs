@@ -522,6 +522,28 @@ fn an_integrator_sends_only_the_landings_operations_on_its_own_run_and_task() {
     }
 }
 
+/// The known failures its verification is told are the integrator's to
+/// read: the CI watch's records, whole and naming no run or task, and the
+/// CI failures its own task fixes; those another task fixes are not.
+#[test]
+fn an_integrator_reads_the_ci_watch_and_its_own_tasks_ci_failures() {
+    use serde_json::json;
+    let run = RunId::new("11111111-1111-4111-8111-111111111111").unwrap();
+    let task = crate::domain::TaskId::new(5);
+    let scope = |op: &str, args: Value| integrator_scope(op, args.as_array().unwrap(), &run, task);
+    assert_eq!(scope("ci_watch_events", json!([])), Ok(()));
+    assert_eq!(scope("ci_failure_findings_of", json!([5])), Ok(()));
+    assert_eq!(scope("latest_queue_event", json!([["ci_checked"]])), Ok(()));
+    for (op, args) in [
+        ("ci_failure_findings_of", json!([6])),
+        ("ci_failure_findings_of", json!([null])),
+        ("record_ci_check", json!([{}])),
+    ] {
+        let refused = scope(op, args.clone()).unwrap_err();
+        assert!(refused.contains(op), "{refused}");
+    }
+}
+
 /// A supervisor answers an ask only as the runtime withdrawing it: as a
 /// person or the inbox it answers none.
 #[test]
