@@ -105,7 +105,7 @@ Claude/Codexで同じ状態機械を使う。
   `blocked`の後は問題の種類で進む（`ApplyRecovery`）: 書き込みの失敗やleaseのような待てば変わるものは毎回の計画の回が検査し直し（理由が変わったときだけ`replan_apply_rechecked`で残す）、無くなれば適用する。計画が成り立たないもの（版・子・始まった後続・循環）は子をdraftに戻し、操作を`parked`に戻して依頼を新しくし、そのplannerが新しい計画・継続・撤回を選ぶ。snapshotの食い違いは人に残す。
   `applying`で止まった操作は次の回が同じ手順で終える。適用済みの操作への2度目の適用は何も書かない。
   子のclaimは計画が名指した部分だけを渡す: snapshotのheadは固定したrefと照合してpromptで名指し（containerのcloneにはそのrefを渡す）、未commitの変更はmanifestと照合してrun dirの`replan-carry/`へ写す（未追跡の実行可能fileはその権限ごと。`run_inherited`）。
-  渡せなければ`replan_carry_failed`を残してprovisioningの失敗とし、snapshotとrefは消さない。holdの解除が今のmainから始め直させた（`retry_fresh`）子のその後のclaimには渡さない。子の成果は子のrunのreceipt・検証・review・e2e・着地だけを通る。
+  渡せなければ`replan_carry_failed`を残してprovisioningの失敗とし、snapshotとrefは消さない。holdの解除が今のmainから始め直させた（`retry_fresh`）子のその後のclaimには渡さず、引き継ぎがまだ続いていた子ではその解除が引き継ぎの終わり（`replan_carry_ended`）を記録する。子の成果は子のrunのreceipt・検証・review・e2e・着地だけを通る。
 - goal close: 一部（`replaced`は終わったtaskに数え、completedには数えない。置換先を再置換も辿った全てのtaskを、別のgoalへ移ったものも含めて読むので、それが全て終わるまでgoal reviewの起動もcloseも待つ（起動に要る`completed`は所属taskだけで数える）。定期taskの次の登録も同じく待つ。置換先の記録が空・欠落・循環の置換元は解決済みとせず、goal reviewの起動・achievedの適用・closeを拒み、定期taskのkeyを保ち、`status`のattention（`replacement_unresolved`）で人に見せる。goal reviewのjobには置換の系統・元条件・条件の対応を渡し、fingerprintはそれと計画・条件の版を持つので、起動の後に対応が変わればachievedを適用しない）。
 - 未実装: 診断（`pause_requested`へ進める判断）。
 

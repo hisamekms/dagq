@@ -118,7 +118,9 @@ impl Supervisor<'_> {
     /// one, what a child of an applied replacement takes of the replaced
     /// run's saved work ([`Self::replan_inheritance`]), handed over into
     /// `run_dir`; nothing at all after a release started the task afresh
-    /// (`retry_fresh`), the snapshot left as it is.
+    /// (`retry_fresh`), the snapshot left as it is and the end of a
+    /// handover still going recorded by that release
+    /// ([`crate::domain::task_hold::ReplanCarryEnded`]).
     fn inheritance(&mut self, run: &TaskRun, run_dir: &Path) -> Result<Option<Inheritance>> {
         use crate::domain::resume::{InheritedFrom, inherited_from};
         let runs = self.queue.show(run.task_id())?.runs;

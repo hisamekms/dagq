@@ -35,8 +35,9 @@ use crate::domain::EventKind;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AskId, CommitSha, DomainError, EventId, HoldId, Provider, RunEvent, RunId, RunStatus, TaskId,
-    TaskStatus, error::require, task_replan::GuardedStep, turn::RecordedTurn,
+    AskId, CommitSha, DomainError, EventId, HoldId, Provider, ReplanId, RunEvent, RunId, RunStatus,
+    TaskId, TaskStatus, error::require, replan_apply::ChildCarry, replan_plan::CarrySource,
+    task_replan::GuardedStep, turn::RecordedTurn,
 };
 
 /// An open hold of a task, as the queue keeps it.
@@ -122,6 +123,10 @@ pub struct ReleaseRecorded {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inherit: Option<ReleasedWork>,
+    /// The end of the handover of a replacement's saved work to the task
+    /// the release recorded ([`ReplanCarryEnded`]), when it ended one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replan_carry_ended: Option<ReplanCarryEnded>,
 }
 
 /// What a release chooses besides lifting the mark (ADR-t1879-1): the
@@ -291,6 +296,94 @@ pub fn new_run_reason(facts: ReleaseFacts, provider: Option<Provider>) -> String
         ),
         _ => "the hold was released and the run had no session to go on in".to_owned(),
     }
+}
+
+/// `replan_carry_ended`, which a release that ends a run for a new one
+/// from the current main (`retry_fresh`) records on that run, in its own
+/// transaction, when its task is a child of an applied replacement whose
+/// saved work was still handed to it ([`replan_carry_live`]): no later run
+/// is handed that work ([`super::resume::inherited_from`] stops at the
+/// release), so its end is a record, not a silent clean-up (ADR-t1521-2
+/// decision 2). The snapshot (`snapshot_id`) and its ref (`pinned_ref`)
+/// are kept, for a person to hand the work over by hand; `ended_run` is
+/// the run the release ended and `reason` says why in a person's words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplanCarryEnded {
+    pub operation_id: ReplanId,
+    pub snapshot_id: String,
+    pub pinned_ref: String,
+    pub carry: CarrySource,
+    pub ended_run: RunId,
+    pub reason: String,
+}
+
+impl ReplanCarryEnded {
+    /// The end of `carry`'s handover to `task` that the release of its
+    /// hold at `facts` choosing `provider` records as it ends `ended_run`
+    /// afresh, the reason after the release's own ([`new_run_reason`]).
+    pub fn new(
+        carry: &ChildCarry,
+        task: TaskId,
+        ended_run: RunId,
+        facts: ReleaseFacts,
+        provider: Option<Provider>,
+    ) -> Self {
+        let pinned_ref = super::replan_snapshot::pinned_ref(carry.operation);
+        let reason = format!(
+            "{}, so the next run starts from the current main and the work replan operation {} saved in snapshot {} is handed to task {task} no more; the snapshot and {pinned_ref} are kept to hand it over by hand",
+            new_run_reason(facts, provider),
+            carry.operation,
+            carry.snapshot_id,
+        );
+        Self {
+            operation_id: carry.operation,
+            snapshot_id: carry.snapshot_id.clone(),
+            pinned_ref,
+            carry: carry.carry,
+            ended_run,
+            reason,
+        }
+    }
+
+    /// The end `event` records; `None` for another kind or a payload that
+    /// does not restore.
+    pub fn of_event(event: &RunEvent) -> Option<Self> {
+        if event.kind != EventKind::ReplanCarryEnded {
+            return None;
+        }
+        serde_json::from_value(event.payload.clone()).ok()
+    }
+}
+
+/// Whether the handover of replacement `operation`'s saved work to a task
+/// still goes on, given the events of the task's runs newest first
+/// (`task_events`), read in the order [`super::resume::inherited_from`]
+/// reads them: a record of the handover ([`ChildCarry::handover_of`]
+/// `operation`) found before a release that ended a run afresh
+/// (`retry_fresh`), an end of it already recorded
+/// ([`ReplanCarryEnded::of_event`]), or a retry that carried a run's
+/// branch over ([`super::resume::is_inherit_retry`]: the later runs are
+/// handed that run's work instead, as `inherited_from` reads it). So a run
+/// started afresh, handed nothing, and released afresh again ends nothing
+/// a second time.
+pub fn replan_carry_live<'a>(
+    task_events: impl IntoIterator<Item = &'a RunEvent>,
+    operation: ReplanId,
+) -> bool {
+    for event in task_events {
+        let ended = ReplanCarryEnded::of_event(event)
+            .is_some_and(|ended| ended.operation_id == operation)
+            || Released::of_event(event)
+                .is_some_and(|released| released.decision == Some(ReleaseDecision::RetryFresh))
+            || super::resume::is_inherit_retry(event);
+        if ended {
+            return false;
+        }
+        if ChildCarry::handover_of(event) == Some(operation) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether the run's worker has had a session of its provider that the
@@ -1269,6 +1362,135 @@ mod tests {
             "payload": {}, "created_at": "t",
         }))
         .unwrap()
+    }
+
+    /// The handover of a replacement's saved work goes on while a record
+    /// of it (`run_inherited` or `replan_carry_failed` of the operation) is
+    /// found, newest first, before a fresh release, a retry that carried a
+    /// run's branch over or a recorded end;
+    /// another operation's records, an inheritance of a run and a release
+    /// that goes on or carries work over are passed by.
+    #[test]
+    fn a_replan_carry_is_live_until_a_fresh_release_or_its_recorded_end() {
+        let op = ReplanId::new(3);
+        let with = |kind: &str, payload: serde_json::Value| RunEvent {
+            payload,
+            ..event(0, kind)
+        };
+        let inherited = with("run_inherited", json!({"replan_operation_id": 3}));
+        let failed = with("replan_carry_failed", json!({"operation_id": 3}));
+        let other_op = with("run_inherited", json!({"replan_operation_id": 4}));
+        let retried = with("run_inherited", json!({"replan_operation_id": null}));
+        let fresh = with(
+            TASK_RELEASED,
+            json!({"hold_id": 1, "decision": "retry_fresh"}),
+        );
+        let resumed = with(TASK_RELEASED, json!({"hold_id": 1, "decision": "resume"}));
+        let inherit = with(
+            TASK_RELEASED,
+            json!({"hold_id": 1, "decision": "retry_inherit"}),
+        );
+        let end_of = |operation: i64| {
+            let carry = ChildCarry {
+                operation: ReplanId::new(operation),
+                ..child_carry()
+            };
+            let end = ReplanCarryEnded::new(
+                &carry,
+                TaskId::new(7),
+                RunId::new("r1").unwrap(),
+                facts(Some(RunStatus::Failed), false),
+                None,
+            );
+            with("replan_carry_ended", serde_json::to_value(end).unwrap())
+        };
+        let (ended, ended_other) = (end_of(3), end_of(4));
+        // An inheritance written before the operation was recorded.
+        let older = with("run_inherited", json!({"inherit_from_run": "r0"}));
+        let live = |events: &[&RunEvent]| replan_carry_live(events.iter().copied(), op);
+        assert!(live(&[&inherited]));
+        assert!(live(&[&failed]));
+        assert!(live(&[
+            &resumed,
+            &inherit,
+            &retried,
+            &ended_other,
+            &inherited
+        ]));
+        assert!(!live(&[]));
+        assert!(!live(&[&other_op, &retried, &older]));
+        assert!(!live(&[&fresh, &inherited]));
+        assert!(!live(&[&ended, &fresh, &failed]));
+        // A run started afresh and handed nothing, released afresh again,
+        // ends nothing a second time.
+        assert!(!live(&[&ended, &fresh, &inherited]));
+        assert!(!live(&[&resumed, &ended, &inherited]));
+        // A run's branch carried over since: its work goes on that way.
+        let carried = with(
+            "triage_finished",
+            json!({"action": "retry_inherit", "by": "user"}),
+        );
+        assert!(!live(&[&carried, &fresh, &inherited]));
+        assert!(!live(&[&carried, &inherited]));
+    }
+
+    fn child_carry() -> ChildCarry {
+        ChildCarry {
+            operation: ReplanId::new(3),
+            from_task: TaskId::new(1),
+            from_run: RunId::new("r0").unwrap(),
+            proposal: None,
+            snapshot_id: "snap-1".into(),
+            carry: CarrySource::SnapshotDiff,
+            order: Some(1),
+        }
+    }
+
+    /// The end a fresh release records names the operation, the snapshot
+    /// and its ref, the run it ended, and why in a person's words: the
+    /// release's own reason, then that the work goes to the task no more
+    /// and what is kept. It reads back as written.
+    #[test]
+    fn the_end_of_a_handover_says_why_and_what_is_kept() {
+        let end = ReplanCarryEnded::new(
+            &child_carry(),
+            TaskId::new(7),
+            RunId::new("r1").unwrap(),
+            facts(Some(RunStatus::Failed), false),
+            None,
+        );
+        assert_eq!(
+            (
+                end.operation_id,
+                end.snapshot_id.as_str(),
+                end.pinned_ref.as_str(),
+                end.carry,
+                end.ended_run.as_str()
+            ),
+            (
+                ReplanId::new(3),
+                "snap-1",
+                "refs/dagq/replans/3",
+                CarrySource::SnapshotDiff,
+                "r1"
+            )
+        );
+        assert_eq!(
+            end.reason,
+            "the hold was released and the run had stopped (failed), so the next run starts from the current main and the work replan operation 3 saved in snapshot snap-1 is handed to task 7 no more; the snapshot and refs/dagq/replans/3 are kept to hand it over by hand"
+        );
+        let recorded = RunEvent {
+            payload: serde_json::to_value(&end).unwrap(),
+            ..event(1, "replan_carry_ended")
+        };
+        assert_eq!(ReplanCarryEnded::of_event(&recorded), Some(end));
+        assert_eq!(
+            ReplanCarryEnded::of_event(&RunEvent {
+                payload: json!({"operation_id": 3}),
+                ..event(1, "replan_carry_ended")
+            }),
+            None
+        );
     }
 
     /// A release's read of the run's work stands only while the hold it

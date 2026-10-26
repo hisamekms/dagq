@@ -485,6 +485,7 @@ mod tests {
                 provider: None,
                 model: None,
                 inherit: None,
+                replan_carry_ended: None,
             })
         }
     }

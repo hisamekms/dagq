@@ -778,6 +778,8 @@ fn a_fresh_release_after_an_earlier_carry_over_starts_from_main_with_nothing_inh
     let released = release(&db, "1", &[]);
     assert_eq!(released["decision"], "retry_fresh", "{released}");
     assert!(released.get("inherit").is_none(), "{released}");
+    // No child of a replacement: no handover of saved work ends.
+    assert!(released.get("replan_carry_ended").is_none(), "{released}");
 
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     backend.join();

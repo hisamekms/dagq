@@ -341,6 +341,40 @@ pub struct ChildCarry {
     pub order: Option<u32>,
 }
 
+impl ChildCarry {
+    /// The operation whose saved work `event` says a child's run was
+    /// handed, or failed to be handed, as the execution context records it
+    /// at the claim: `run_inherited` naming a replacement's operation, or
+    /// `replan_carry_failed`. `None` for another kind, an inheritance of an
+    /// earlier run's branch (no operation, as events written before the
+    /// operation was recorded restore too), or a payload that does not
+    /// restore.
+    pub fn handover_of(event: &super::RunEvent) -> Option<ReplanId> {
+        use super::EventKind;
+        #[derive(Deserialize)]
+        struct Inherited {
+            #[serde(default)]
+            replan_operation_id: Option<ReplanId>,
+        }
+        #[derive(Deserialize)]
+        struct Failed {
+            operation_id: ReplanId,
+        }
+        let payload = event.payload.clone();
+        match event.kind.known()? {
+            EventKind::RunInherited => {
+                serde_json::from_value::<Inherited>(payload)
+                    .ok()?
+                    .replan_operation_id
+            }
+            EventKind::ReplanCarryFailed => serde_json::from_value::<Failed>(payload)
+                .ok()
+                .map(|failed| failed.operation_id),
+            _ => None,
+        }
+    }
+}
+
 /// What replaced a task of a goal, as goal review reads it (ADR-t1521-2
 /// decision 5): the applied operation, the task's acceptance items as the
 /// operation fixed them, the children, and how each item went to a child or

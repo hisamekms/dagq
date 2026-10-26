@@ -1,0 +1,14 @@
+# The items of task 3415 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 9.7s in a stress 5: three claims of the child, two failed runs with their recovery jobs, and two holds and releases through the CLI, each a supervise
+[[test]]
+name = "runtime_replan_carry::the_end_of_a_childs_handover_is_recorded_once"
+reason = "B 境界（守る境界）: 人の hold と release が CLI と queue service で SQLite の release の transaction に replan_carry_ended を 1 件だけ書き、2 度目の retry_fresh の release が書かず、その後の supervise の claim が何も渡さないことを確かめる（引き継ぎが続くかの判断は domain::task_hold の unit test）"
+task = 3415
+
+# 5.9s in a stress 5: the handed child's run in a supervise, then two holds and releases through the CLI
+[[test]]
+name = "runtime_replan_carry::a_child_released_to_go_on_or_to_carry_its_branch_over_records_no_end"
+reason = "B 境界（守る境界）: 引き継ぎを受けた子の run を人の hold と release（resume と retry_inherit）が CLI と queue service で SQLite に書き、replan_carry_ended を書かないことを events の読み取りで確かめる（どの release が終わりを記録するかの判断は domain::task_hold の unit test）"
+task = 3415

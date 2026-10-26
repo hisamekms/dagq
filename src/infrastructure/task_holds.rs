@@ -260,6 +260,15 @@ impl SqliteQueue {
             }),
             _ => None,
         };
+        // A fresh release that saved uncommitted work carries it over to
+        // the next run (the replacement's handed part among it): nothing
+        // ends.
+        let carry_ended = match (&latest, decision, &inherit) {
+            (Some(run), task_hold::ReleaseDecision::RetryFresh, None) => {
+                carry_ended(&tx, task_id, run.id(), facts, choice)?
+            }
+            _ => None,
+        };
         let session = match &choice.model {
             Some(model) => {
                 let events = match &latest {
@@ -297,6 +306,15 @@ impl SqliteQueue {
             EventKind::TaskReleased,
             serde_json::to_value(&record)?,
         )?;
+        if let (Some(run), Some(ended)) = (&latest, &carry_ended) {
+            event(
+                &tx,
+                task_id,
+                Some(run.id()),
+                EventKind::ReplanCarryEnded,
+                serde_json::to_value(ended)?,
+            )?;
+        }
         if let Some(provider) = choice.provider
             && provider != task.worker().provider
         {
@@ -387,6 +405,7 @@ impl SqliteQueue {
             provider: choice.provider,
             model: session.map(|session| session.model),
             inherit,
+            replan_carry_ended: carry_ended,
         })
     }
 
@@ -496,6 +515,38 @@ impl SqliteQueue {
             .query_map([], hold_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
+}
+
+/// The end of the handover of the saved work of the replacement `task`
+/// is a child of, which the release of its hold that ends `run` afresh
+/// (`retry_fresh`, at `facts` with `choice`) records
+/// ([`task_hold::ReplanCarryEnded`]); `None` for a task that is no child
+/// taking saved work, or whose handover never began or ended already
+/// ([`task_hold::replan_carry_live`]).
+fn carry_ended(
+    conn: &Connection,
+    task: TaskId,
+    run: &RunId,
+    facts: task_hold::ReleaseFacts,
+    choice: &task_hold::ReleaseChoice,
+) -> Result<Option<task_hold::ReplanCarryEnded>> {
+    let Some(carry) = super::replan_apply::child_carry(conn, task)? else {
+        return Ok(None);
+    };
+    let events: Vec<crate::domain::RunEvent> = conn
+        .prepare("SELECT * FROM run_events WHERE task_id=?1 ORDER BY id DESC")?
+        .query_map([task], super::sqlite::event_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    if !task_hold::replan_carry_live(&events, carry.operation) {
+        return Ok(None);
+    }
+    Ok(Some(task_hold::ReplanCarryEnded::new(
+        &carry,
+        task,
+        run.clone(),
+        facts,
+        choice.provider,
+    )))
 }
 
 /// Close, on `conn` inside the caller's transaction that moved `task` to

@@ -344,6 +344,7 @@ event_kinds! {
     ReplanApplied => "replan_applied",
     ReplanApplyRechecked => "replan_apply_rechecked",
     ReplanCarried => "replan_carried",
+    ReplanCarryEnded => "replan_carry_ended",
     ReplanCarryFailed => "replan_carry_failed",
     ReplanChildrenReleased => "replan_children_released",
     ReplanParked => "replan_parked",
@@ -1837,6 +1838,7 @@ mod tests {
             (EventKind::ReplanApplied, "replan_applied"),
             (EventKind::ReplanApplyRechecked, "replan_apply_rechecked"),
             (EventKind::ReplanCarried, "replan_carried"),
+            (EventKind::ReplanCarryEnded, "replan_carry_ended"),
             (EventKind::ReplanCarryFailed, "replan_carry_failed"),
             (
                 EventKind::ReplanChildrenReleased,

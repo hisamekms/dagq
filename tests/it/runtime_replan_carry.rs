@@ -333,6 +333,21 @@ fn a_child_released_to_start_afresh_is_handed_none_of_the_saved_work() {
     }
     let released = as_user(&db, &["release", &child]);
     assert_eq!(released["decision"], "retry_fresh", "{released}");
+    // The release records that the handover ends, with the snapshot and
+    // its ref kept for a person to hand over by hand.
+    let ended = &released["replan_carry_ended"];
+    assert_eq!(ended["operation_id"], json!(a.op), "{released}");
+    assert_eq!(ended["snapshot_id"], "snap-1", "{released}");
+    assert_eq!(ended["pinned_ref"], pinned_ref(a.op), "{released}");
+    assert_eq!(ended["carry"], "snapshot_diff", "{released}");
+    let failed_run = SqliteQueue::open(&db).unwrap().show(a.child).unwrap().runs[0]
+        .id()
+        .clone();
+    assert_eq!(ended["ended_run"], json!(failed_run), "{released}");
+    assert!(
+        ended["reason"].as_str().unwrap().contains("are kept"),
+        "{released}"
+    );
     let outcome = supervise_owned(&db, &repo, &backend);
     backend.join();
     assert!(
@@ -355,4 +370,188 @@ fn a_child_released_to_start_afresh_is_handed_none_of_the_saved_work() {
     assert!(!prompt.contains("Carried over from run"), "{prompt}");
     assert!(replans_dir(&db).join("snap-1/manifest.json").is_file());
     assert_eq!(git_out(&repo, &["rev-parse", &pinned_ref(a.op)]), a.head);
+    // The end is on the run the release ended, and `events` reads it.
+    assert_eq!(
+        run_events(&detail, &detail.runs[0], EventKind::ReplanCarryEnded).len(),
+        1
+    );
+    assert_eq!(carry_ends(&db, a.child).len(), 1);
+}
+
+/// `replan_carry_ended` of `task` as `dagq events` reads it.
+fn carry_ends(db: &Path, task: TaskId) -> Vec<Value> {
+    let read = as_user(
+        db,
+        &[
+            "events",
+            "--task",
+            &task.to_string(),
+            "--kind",
+            "replan_carry_ended",
+            "--full",
+        ],
+    );
+    read["events"].as_array().unwrap().clone()
+}
+
+/// A child whose run that was handed its part of the saved work is
+/// released afresh records the end of the handover once: its next run,
+/// started afresh and handed nothing, released afresh again, ends nothing
+/// a second time, and the run after it is still handed nothing.
+#[test]
+fn the_end_of_a_childs_handover_is_recorded_once() {
+    let (dir, repo, db) = fixture();
+    let a = applied(&db, &repo, "snapshot_diff", false);
+    let failing = |name: &str| {
+        let marker = shell_path(dir.path().join(name));
+        format!("if [ ! -f {marker} ]; then : > {marker}; exit 7; fi; ")
+    };
+    // The runs handed the work and started afresh fail with no commit.
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        &format!("{}{}{VALID_AGENT}", failing("first"), failing("second")),
+    );
+    let reviewer =
+        TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[escalate(), escalate()]);
+    let child = a.child.to_string();
+    let release_afresh = |reason: &str| {
+        as_user(&db, &["hold", &child, "--reason", reason]);
+        for _ in 0..3 {
+            let hold = SqliteQueue::open(&db).unwrap().task_hold(a.child).unwrap();
+            if hold.unwrap().state() == HoldState::Held {
+                break;
+            }
+            supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+        }
+        let released = as_user(&db, &["release", &child]);
+        assert_eq!(released["decision"], "retry_fresh", "{released}");
+        released
+    };
+    supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    let detail = SqliteQueue::open(&db).unwrap().show(a.child).unwrap();
+    assert_eq!(detail.runs.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(
+        run_events(&detail, &detail.runs[0], EventKind::RunInherited).len(),
+        1
+    );
+    let released = release_afresh("the run failed");
+    assert_eq!(
+        released["replan_carry_ended"]["ended_run"],
+        json!(detail.runs[0].id()),
+        "{released}"
+    );
+    supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    let detail = SqliteQueue::open(&db).unwrap().show(a.child).unwrap();
+    assert_eq!(detail.runs.len(), 2, "{:?}", event_kinds(&detail));
+    assert!(run_events(&detail, &detail.runs[1], EventKind::RunInherited).is_empty());
+    let released = release_afresh("the fresh run failed");
+    assert!(released.get("replan_carry_ended").is_none(), "{released}");
+    assert_eq!(carry_ends(&db, a.child).len(), 1);
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db).unwrap().show(a.child).unwrap();
+    assert_eq!(detail.runs.len(), 3, "{:?}", event_kinds(&detail));
+    let last = &detail.runs[2];
+    assert!(run_events(&detail, last, EventKind::RunInherited).is_empty());
+    assert!(!read_prompt(last).contains("Carried over from run"));
+    assert_eq!(carry_ends(&db, a.child).len(), 1);
+    assert!(replans_dir(&db).join("snap-1/manifest.json").is_file());
+    assert_eq!(git_out(&repo, &["rev-parse", &pinned_ref(a.op)]), a.head);
+}
+
+/// Hold the child and wait for the hold to settle, each pass a
+/// supervise with `reviewer`; then release it with `args`, which must go
+/// on as `decision`. What the release printed.
+fn hold_and_release(
+    db: &Path,
+    repo: &Path,
+    (backend, reviewer): (&TestWorkspace, &TestReviewer),
+    child: TaskId,
+    args: &[&str],
+    decision: &str,
+) -> Value {
+    let task = child.to_string();
+    as_user(db, &["hold", &task, "--reason", "a person looks"]);
+    for _ in 0..3 {
+        let hold = SqliteQueue::open(db).unwrap().task_hold(child).unwrap();
+        if hold.unwrap().state() == HoldState::Held {
+            break;
+        }
+        supervise_reviewed_owned(db, repo, backend, reviewer);
+    }
+    let released = as_user(db, &[&["release", &task][..], args].concat());
+    assert_eq!(released["decision"], decision, "{released}");
+    released
+}
+
+/// A child handed its part of the saved work whose run is released to go
+/// on in its session (`resume`), then to a new run that carries its
+/// branch over (`retry_inherit`, another provider), records no end of the
+/// handover: its work goes on.
+#[test]
+fn a_child_released_to_go_on_or_to_carry_its_branch_over_records_no_end() {
+    let (_dir, repo, db) = fixture();
+    let a = applied(&db, &repo, "snapshot_diff", false);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let reviewer = TestReviewer::new(&[]);
+    let outcome = supervise_owned(&db, &repo, &backend);
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db).unwrap().show(a.child).unwrap();
+    assert_eq!(detail.runs.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(
+        run_events(&detail, &detail.runs[0], EventKind::RunInherited).len(),
+        1
+    );
+    let both = (&backend, &reviewer);
+    let resumed = hold_and_release(&db, &repo, both, a.child, &[], "resume");
+    assert!(resumed.get("replan_carry_ended").is_none(), "{resumed}");
+    let carried = hold_and_release(
+        &db,
+        &repo,
+        both,
+        a.child,
+        &["--provider", "codex"],
+        "retry_inherit",
+    );
+    assert!(carried.get("replan_carry_ended").is_none(), "{carried}");
+    assert!(carry_ends(&db, a.child).is_empty());
+}
+
+/// A child that takes none of the saved work (`base`), released afresh
+/// after its run failed with no commit, records no end of a handover it
+/// never had.
+#[test]
+fn a_child_taking_none_of_the_saved_work_released_afresh_records_no_end() {
+    let (_dir, repo, db) = fixture();
+    let a = applied(&db, &repo, "base", false);
+    let backend = TestWorkspace::new(&db, false, "exit 7");
+    let reviewer = TestReviewer::new(&[]).with_triages(&[escalate()]);
+    supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    backend.join();
+    let detail = SqliteQueue::open(&db).unwrap().show(a.child).unwrap();
+    assert_eq!(detail.runs.len(), 1, "{:?}", event_kinds(&detail));
+    assert!(run_events(&detail, &detail.runs[0], EventKind::RunInherited).is_empty());
+    let released = hold_and_release(
+        &db,
+        &repo,
+        (&backend, &reviewer),
+        a.child,
+        &[],
+        "retry_fresh",
+    );
+    assert!(released.get("replan_carry_ended").is_none(), "{released}");
+    assert!(carry_ends(&db, a.child).is_empty());
+}
+
+/// A recovery job's script that leaves the run to a person.
+fn escalate() -> String {
+    recovery(json!({
+        "verdict": "escalate",
+        "confidence": "high",
+        "diagnosis": "a person decides",
+        "question": "Start afresh?",
+    }))
 }
