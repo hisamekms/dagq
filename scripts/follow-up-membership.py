@@ -179,6 +179,7 @@ def analyse(data, since, until):
                           and v['status'] not in ('completed', 'canceled')) for g in open_goals}
     only_follow = {g: ts for g, ts in remaining.items() if ts and all(t in origins for t in ts)}
     return {'since': since, 'until_exclusive': until, 'cohort_n': len(rows),
+            'evaluation': evaluate(all_events, events, rows, data['snapshot_started']),
             'first_review': {'n': len(reviewed), 'pass': sum(r['first_verdict'] == 'pass' for r in reviewed),
                              'unreviewed': len(rows) - len(reviewed)},
             'durations_seconds': {k: distribution([r[k] for r in rows if r[k] is not None])
@@ -192,6 +193,208 @@ def analyse(data, since, until):
             'one_remaining': {g: ts for g, ts in remaining.items() if len(ts) == 1},
             'only_follow_up_remaining': only_follow,
             'rows': rows, 'planner_sessions': sessions}
+
+
+# A revise reason that names membership; the matches are read by hand before use.
+MEMBERSHIP_WORDS = ('所属', 'membership', 'judge-follow-up', 'follow_up_judged',
+                    'out_of_scope', '範囲外', 'acceptance_items')
+TOKEN_PARTS = ('input', 'cache_read', 'cache_creation', 'output')
+PLAN_REVIEW_ENDS = ('plan_review_finished', 'plan_review_failed', 'plan_review_discarded')
+
+
+def token_sum(executions):
+    """Executions counted once by event id; one without tokens_source is unmeasured, not 0."""
+    out = {'executions': len(executions), 'measured': 0, 'by_provider': {}}
+    for e in executions:
+        p = e['payload']
+        if not p.get('tokens') or not p.get('tokens_source'):
+            continue
+        out['measured'] += 1
+        side = out['by_provider'].setdefault(e['provider'], dict.fromkeys(TOKEN_PARTS + ('total',), 0))
+        for part in TOKEN_PARTS:
+            side[part] += p['tokens'].get(part) or 0
+            side['total'] += p['tokens'].get(part) or 0
+    out['total'] = sum(v['total'] for v in out['by_provider'].values())
+    return out
+
+
+# Where an Execution falls against the adoption-to-first-ready span of the tasks it served.
+# An Execution serving several tasks takes the first of these that any of them gives it.
+BOUNDARIES = ('adopt_to_ready', 'crossing_adoption', 'crossing_ready', 'before_adoption',
+              'after_ready', 'unapproved_or_unadopted')
+
+
+def by_boundary(rows, at, planner_turns, review_runs, started, starts, draft_planners, revised):
+    """Metric (6): only the Executions inside a task's span count; the rest are shown apart."""
+    span = {r['task_id']: (stamp(at[r['adopt_event']]), stamp(at[r['ready_event']]))
+            for r in rows if r['adopt_to_ready'] is not None}
+    of_proposal = {}
+    for r in rows:
+        for p in r['proposal_ids']:
+            of_proposal.setdefault(p, set()).add(r['task_id'])
+    executions = []
+    for e in planner_turns:
+        p = e['payload']
+        tasks = set(draft_planners.get(p['planner_id'], ()))
+        for proposal in revised.get(p['planner_id'], ()):
+            tasks |= of_proposal.get(proposal, set())
+        begun = started.get((p['planner_id'], p.get('turn')), e)['created_at']
+        executions.append((e, 'planners', stamp(begun), tasks, False))
+    for e in review_runs:
+        p = e['payload']
+        start = starts.get(p.get('plan_review_id'))
+        begun = (stamp(start['created_at']) if start else
+                 dt.datetime.fromtimestamp(p['started_at'], dt.timezone.utc) if p.get('started_at')
+                 else stamp(e['created_at']))
+        executions.append((e, 'plan_reviews', begun, of_proposal.get(p.get('proposal_id'), set()), True))
+    out = {b: {'planners': [], 'plan_reviews': []} for b in BOUNDARIES}
+    for e, source, begun, tasks, review in executions:
+        ended, places = stamp(e['created_at']), []
+        for t in tasks:
+            if t not in span:
+                places.append('unapproved_or_unadopted')
+                continue
+            adopt, ready = span[t]
+            if begun < adopt <= ended:
+                places.append('crossing_adoption')
+            elif ended < adopt:
+                places.append('before_adoption')
+            elif begun >= ready:
+                places.append('after_ready')
+            elif ended <= ready or review:
+                # The review that approves writes its verdict just after ready; it is still in.
+                places.append('adopt_to_ready')
+            else:
+                places.append('crossing_ready')
+        place = min(places, key=BOUNDARIES.index) if places else 'unapproved_or_unadopted'
+        out[place][source].append(e)
+    return {b: {s: token_sum(v) for s, v in sources.items()} for b, sources in out.items()}
+
+
+def evaluate(all_events, events, rows, snapshot_started):
+    """Metrics (1) (4) (6) (7) (8) of the plan that need the membership records."""
+    by_id = {r['task_id']: r for r in rows}
+    submit_at = {r['task_id']: r['submit_event'] for r in rows}
+    judged, judgements = {}, {}
+    for e in all_events:
+        if e['kind'] != 'follow_up_judged':
+            continue
+        judgements.setdefault(e['payload']['id'], e)
+        if e['task_id'] in by_id and (submit_at[e['task_id']] is None or e['id'] < submit_at[e['task_id']]):
+            judged[e['task_id']] = e['payload']
+    reviews = {e['id']: e for e in events if e['kind'] == 'plan_review_finished'}
+    starts = {e['payload'].get('plan_review_id'): e for e in events if e['kind'] == 'plan_review_started'}
+    adopted = {}
+    for e in events:
+        if e['kind'] == 'follow_up_adopted' and e['task_id'] in by_id:
+            adopted.setdefault(e['task_id'], e['payload'])
+    bundles = {}
+    for e in events:
+        if e['kind'] == 'task_submitted':
+            bundles.setdefault(e['payload'].get('proposal_id'), set()).add(e['task_id'])
+    first_reviews, strata = {}, {}
+    for r in rows:
+        if r['first_verdict'] is None:
+            continue
+        review = reviews[r['review_events'][0]]
+        first_reviews.setdefault(review['payload']['proposal_id'], review)
+        launch = (starts.get(review['payload'].get('plan_review_id')) or {}).get('payload', {}).get('launch') or {}
+        members = len(bundles.get(review['payload']['proposal_id'], ()))
+        adoption = adopted.get(r['task_id']) or {}
+        for layer, value in (('judged_before_submit', r['task_id'] in judged),
+                             ('plan_review_provider', launch.get('provider')),
+                             ('bundle', 'single' if members == 1 else 'bundle'),
+                             ('adopted_by', adoption.get('by')),
+                             ('depth', adoption.get('depth'))):
+            cell = strata.setdefault(layer, {}).setdefault(str(value), {'n': 0, 'pass': 0})
+            cell['n'] += 1
+            cell['pass'] += r['first_verdict'] == 'pass'
+    membership_revises = sorted(
+        e['id'] for e in first_reviews.values() if e['payload'].get('verdict') == 'revise'
+        and any(w in reason for reason in e['payload'].get('reasons') or [] for w in MEMBERSHIP_WORDS))
+    # (1) leaves out a judgement without a source goal: there is no acceptance to judge by.
+    sourceless = sorted(t for t, p in judged.items() if p.get('source_goal_id') is None)
+    classified = [r for r in rows if r['first_verdict'] is not None and r['task_id'] in judged
+                  and r['task_id'] not in sourceless]
+    # A turn started before its planner's first submit is pre-submit work; a later turn of the
+    # same live planner (findings delivered to it) is revise work, as is a revise planner's turn.
+    draft_planners, revise_planners, first_submit, revised = {}, set(), {}, {}
+    proposals = {p for r in rows for p in r['proposal_ids']}
+    for e in events:
+        p = e['payload']
+        if e['kind'] == 'draft_planner_opened' and set(p.get('members') or [e['task_id']]) & set(by_id):
+            draft_planners.setdefault(p['planner_id'], set()).update(p.get('members') or [e['task_id']])
+        elif e['kind'] == 'plan_revise_sent' and p.get('proposal_id') in proposals:
+            revise_planners.add(p['planner_id'])
+            revised.setdefault(p['planner_id'], set()).add(p['proposal_id'])
+    for e in events:
+        actor = (e.get('actor') or {}).get('id') or ''
+        if e['kind'] == 'task_submitted' and actor.startswith('planner:') and actor[8:].isdigit():
+            planner = int(actor[8:])
+            if e['task_id'] in draft_planners.get(planner, ()):
+                first_submit.setdefault(planner, e['id'])
+    started = {(e['payload'].get('planner_id'), e['payload'].get('turn')): e for e in events
+               if e['kind'] == 'turn_started'}
+    pre_turns, revise_turns = [], []
+    for e in events:
+        p = e['payload']
+        if e['kind'] != 'turn_finished' or p.get('planner_id') is None:
+            continue
+        planner, run = p['planner_id'], {**e, 'provider': p.get('provider')}
+        if planner in draft_planners:
+            begun = started.get((planner, p.get('turn')), e)['id']
+            (pre_turns if planner not in first_submit or begun < first_submit[planner]
+             else revise_turns).append(run)
+        elif planner in revise_planners:
+            revise_turns.append(run)
+    ends = [e for e in events if e['kind'] in PLAN_REVIEW_ENDS and e['payload'].get('proposal_id') in proposals]
+    ended_sessions = {e['payload'].get('session_id') for e in ends}
+    # A takeover's stop of a job whose end is already written is not a second Execution.
+    stops = [e for e in events if e['kind'] == 'headless_job_stopped' and e['payload'].get('kind') == 'plan_review'
+             and e['payload'].get('proposal_id') in proposals
+             and e['payload'].get('session_id') not in ended_sessions]
+    review_runs = [{**e, 'provider': ((starts.get(e['payload'].get('plan_review_id')) or {}).get('payload', {})
+                                      .get('launch') or {}).get('provider') or e['payload'].get('provider')}
+                   for e in ends + stops]
+    submitted = sum(r['submit_event'] is not None for r in rows)
+    approved = [r for r in rows if r['ready_event'] is not None]
+    at = {e['id']: e['created_at'] for e in events}
+    ready_at = {r['task_id']: stamp(at[r['ready_event']]) for r in approved}
+    boundary = by_boundary(rows, at, pre_turns + revise_turns, review_runs, started, starts,
+                           draft_planners, revised)
+    corrections, wrong = [], set()
+    for e in all_events:
+        p = e['payload']
+        if (e['kind'] != 'follow_up_judged' or e['task_id'] not in by_id
+                or p.get('corrects') is None or e['task_id'] not in ready_at):
+            continue
+        if not dt.timedelta(0) <= stamp(e['created_at']) - ready_at[e['task_id']] <= dt.timedelta(days=30):
+            continue
+        before = judgements.get(p['corrects'])
+        changed = None if before is None else (
+            before['payload'].get('classification'), before['payload'].get('destination_goal_id')) != (
+            p.get('classification'), p.get('destination_goal_id'))
+        corrections.append({'event': e['id'], 'task_id': e['task_id'], 'corrects': p['corrects'],
+                            'classification_or_destination_changed': changed})
+        if changed:
+            wrong.add(e['task_id'])
+    observed_30d = sum(stamp(snapshot_started) - at >= dt.timedelta(days=30) for at in ready_at.values())
+    return {'judged_before_submit': len(judged), 'judged_without_source_goal': sourceless,
+            'classification_first_pass': {'n': len(classified),
+                                          'pass': sum(r['first_verdict'] == 'pass' for r in classified)},
+            'first_pass_by_proposal': {'n': len(first_reviews),
+                                       'pass': sum(e['payload'].get('verdict') == 'pass'
+                                                   for e in first_reviews.values())},
+            'first_pass_strata': strata,
+            'first_revise_naming_membership': membership_revises,
+            'tokens': {'pre_submit_planners': token_sum(pre_turns),
+                       'by_boundary': boundary,
+                       'submitted': submitted, 'approved': len(approved),
+                       'approved_with_adoption': sum(r['adopt_to_ready'] is not None for r in rows)},
+            'corrections_after_ready': {'events': corrections, 'wrong_tasks': sorted(wrong),
+                                        'approved': len(approved), 'observed_30_days': observed_30d},
+            'correct_goal_asks': sum(e['kind'] == 'ask_opened' and e['payload'].get('kind') == 'correct_goal'
+                                     for e in all_events)}
 
 
 def main():

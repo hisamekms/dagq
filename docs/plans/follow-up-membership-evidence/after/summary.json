@@ -1,0 +1,1145 @@
+{
+  "cohort": {
+    "since": "2026-10-05T00:00:00Z",
+    "until_exclusive": "2026-10-17T00:00:00Z",
+    "cohort_n": 446,
+    "evaluation": {
+      "judged_before_submit": 338,
+      "judged_without_source_goal": [],
+      "classification_first_pass": {
+        "n": 231,
+        "pass": 84
+      },
+      "first_pass_by_proposal": {
+        "n": 176,
+        "pass": 71
+      },
+      "first_pass_strata": {
+        "judged_before_submit": {
+          "True": {
+            "n": 231,
+            "pass": 84
+          },
+          "False": {
+            "n": 8,
+            "pass": 3
+          }
+        },
+        "plan_review_provider": {
+          "codex": {
+            "n": 203,
+            "pass": 67
+          },
+          "claude": {
+            "n": 36,
+            "pass": 20
+          }
+        },
+        "bundle": {
+          "single": {
+            "n": 130,
+            "pass": 59
+          },
+          "bundle": {
+            "n": 109,
+            "pass": 28
+          }
+        },
+        "adopted_by": {
+          "planner": {
+            "n": 220,
+            "pass": 81
+          },
+          "person": {
+            "n": 19,
+            "pass": 6
+          }
+        },
+        "depth": {
+          "1": {
+            "n": 185,
+            "pass": 64
+          },
+          "0": {
+            "n": 19,
+            "pass": 6
+          },
+          "2": {
+            "n": 35,
+            "pass": 17
+          }
+        }
+      },
+      "first_revise_naming_membership": [
+        100371,
+        116559,
+        121943,
+        125990,
+        129118,
+        129980,
+        133541,
+        137424,
+        186303,
+        205532
+      ],
+      "tokens": {
+        "pre_submit_planners": {
+          "executions": 294,
+          "measured": 180,
+          "by_provider": {
+            "claude": {
+              "input": 4084,
+              "cache_read": 108134944,
+              "cache_creation": 9562716,
+              "output": 953915,
+              "total": 118655659
+            }
+          },
+          "total": 118655659
+        },
+        "by_boundary": {
+          "adopt_to_ready": {
+            "planners": {
+              "executions": 126,
+              "measured": 84,
+              "by_provider": {
+                "claude": {
+                  "input": 1800,
+                  "cache_read": 41135701,
+                  "cache_creation": 3857015,
+                  "output": 431655,
+                  "total": 45426171
+                }
+              },
+              "total": 45426171
+            },
+            "plan_reviews": {
+              "executions": 315,
+              "measured": 204,
+              "by_provider": {
+                "codex": {
+                  "input": 23343152,
+                  "cache_read": 144296704,
+                  "cache_creation": 0,
+                  "output": 376787,
+                  "total": 168016643
+                },
+                "claude": {
+                  "input": 202,
+                  "cache_read": 8992612,
+                  "cache_creation": 3190099,
+                  "output": 52978,
+                  "total": 12235891
+                }
+              },
+              "total": 180252534
+            }
+          },
+          "crossing_adoption": {
+            "planners": {
+              "executions": 174,
+              "measured": 115,
+              "by_provider": {
+                "claude": {
+                  "input": 3092,
+                  "cache_read": 85445880,
+                  "cache_creation": 6716398,
+                  "output": 755542,
+                  "total": 92920912
+                }
+              },
+              "total": 92920912
+            },
+            "plan_reviews": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            }
+          },
+          "crossing_ready": {
+            "planners": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            },
+            "plan_reviews": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            }
+          },
+          "before_adoption": {
+            "planners": {
+              "executions": 17,
+              "measured": 7,
+              "by_provider": {
+                "claude": {
+                  "input": 192,
+                  "cache_read": 4944725,
+                  "cache_creation": 378889,
+                  "output": 48927,
+                  "total": 5372733
+                }
+              },
+              "total": 5372733
+            },
+            "plan_reviews": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            }
+          },
+          "after_ready": {
+            "planners": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            },
+            "plan_reviews": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            }
+          },
+          "unapproved_or_unadopted": {
+            "planners": {
+              "executions": 104,
+              "measured": 59,
+              "by_provider": {
+                "claude": {
+                  "input": 814,
+                  "cache_read": 18009713,
+                  "cache_creation": 2507357,
+                  "output": 151510,
+                  "total": 20669394
+                }
+              },
+              "total": 20669394
+            },
+            "plan_reviews": {
+              "executions": 1,
+              "measured": 1,
+              "by_provider": {
+                "codex": {
+                  "input": 91319,
+                  "cache_read": 403200,
+                  "cache_creation": 0,
+                  "output": 1577,
+                  "total": 496096
+                }
+              },
+              "total": 496096
+            }
+          }
+        },
+        "submitted": 239,
+        "approved": 236,
+        "approved_with_adoption": 236
+      },
+      "corrections_after_ready": {
+        "events": [],
+        "wrong_tasks": [],
+        "approved": 236,
+        "observed_30_days": 0
+      },
+      "correct_goal_asks": 0
+    },
+    "first_review": {
+      "n": 239,
+      "pass": 87,
+      "unreviewed": 207
+    },
+    "durations_seconds": {
+      "registered_to_submit": {
+        "n": 239,
+        "total": 560989.232,
+        "median": 130.002,
+        "p90": 802.387
+      },
+      "registered_to_first_verdict": {
+        "n": 239,
+        "total": 658474.373,
+        "median": 428.073,
+        "p90": 1905.784
+      },
+      "registered_to_ready": {
+        "n": 236,
+        "total": 844825.792,
+        "median": 629.859,
+        "p90": 4350.511
+      },
+      "adopt_to_ready": {
+        "n": 236,
+        "total": 284273.988,
+        "median": 458.66200000000003,
+        "p90": 2541.97
+      }
+    },
+    "approved_revise": {
+      "n": 236,
+      "total": 142,
+      "median": 1.0,
+      "p90": 1
+    },
+    "runtime_planner_seconds": {
+      "n": 448,
+      "total": 144215.273,
+      "median": 107.2505,
+      "p90": 323.725
+    },
+    "runtime_planner_unclosed": 0,
+    "snapshot_race_events": [],
+    "open_goals_n": 63,
+    "one_remaining": {
+      "113": [
+        1691
+      ],
+      "13": [
+        117
+      ],
+      "29": [
+        1585
+      ],
+      "37": [
+        1793
+      ],
+      "51": [
+        631
+      ],
+      "62": [
+        1784
+      ],
+      "65": [
+        962
+      ],
+      "76": [
+        1074
+      ],
+      "79": [
+        2009
+      ],
+      "97": [
+        1513
+      ],
+      "106": [
+        1796
+      ],
+      "109": [
+        940
+      ],
+      "115": [
+        1621
+      ],
+      "122": [
+        1724
+      ],
+      "142": [
+        1805
+      ],
+      "194": [
+        2510
+      ],
+      "157": [
+        2134
+      ],
+      "3": [
+        2135
+      ],
+      "31": [
+        654
+      ],
+      "32": [
+        711
+      ],
+      "34": [
+        796
+      ],
+      "54": [
+        697
+      ],
+      "66": [
+        1026
+      ],
+      "87": [
+        1403
+      ],
+      "111": [
+        2127
+      ],
+      "116": [
+        2119
+      ],
+      "145": [
+        2521
+      ],
+      "171": [
+        2198
+      ]
+    },
+    "only_follow_up_remaining": {
+      "29": [
+        1585
+      ],
+      "30": [
+        706,
+        751,
+        922,
+        1015
+      ],
+      "37": [
+        1793
+      ],
+      "51": [
+        631
+      ],
+      "56": [
+        1384,
+        1411
+      ],
+      "74": [
+        758,
+        1190
+      ],
+      "76": [
+        1074
+      ],
+      "106": [
+        1796
+      ],
+      "109": [
+        940
+      ],
+      "115": [
+        1621
+      ],
+      "122": [
+        1724
+      ],
+      "137": [
+        1342,
+        1382,
+        1385,
+        2136
+      ],
+      "142": [
+        1805
+      ],
+      "143": [
+        2303,
+        2304,
+        2305,
+        2401,
+        2411,
+        2412,
+        2422,
+        2425,
+        2427,
+        2471,
+        2540,
+        2551,
+        2563,
+        2566,
+        2584
+      ],
+      "194": [
+        2510
+      ],
+      "157": [
+        2134
+      ],
+      "31": [
+        654
+      ],
+      "32": [
+        711
+      ],
+      "34": [
+        796
+      ],
+      "40": [
+        661,
+        700,
+        1004,
+        1332
+      ],
+      "66": [
+        1026
+      ],
+      "111": [
+        2127
+      ],
+      "116": [
+        2119
+      ],
+      "132": [
+        784,
+        1260,
+        1324,
+        1326,
+        2449
+      ],
+      "140": [
+        643,
+        1807,
+        1808,
+        2083,
+        2137,
+        2138,
+        2520
+      ],
+      "153": [
+        2213,
+        2224
+      ],
+      "171": [
+        2198
+      ]
+    },
+    "inputs_sha256": "c67b0e3daf801bc1d24443ee1c343d992835b4d907bc76601a2c02677541cce4",
+    "snapshot_started": "2026-10-26T12:53:14.812Z",
+    "snapshot_ended": "2026-10-26T12:53:21.008Z"
+  },
+  "token_cohort": {
+    "since": "2026-10-09T00:00:00Z",
+    "until_exclusive": "2026-10-17T00:00:00Z",
+    "cohort_n": 252,
+    "evaluation": {
+      "judged_before_submit": 193,
+      "judged_without_source_goal": [],
+      "classification_first_pass": {
+        "n": 125,
+        "pass": 44
+      },
+      "first_pass_by_proposal": {
+        "n": 81,
+        "pass": 31
+      },
+      "first_pass_strata": {
+        "judged_before_submit": {
+          "True": {
+            "n": 125,
+            "pass": 44
+          }
+        },
+        "plan_review_provider": {
+          "codex": {
+            "n": 89,
+            "pass": 24
+          },
+          "claude": {
+            "n": 36,
+            "pass": 20
+          }
+        },
+        "bundle": {
+          "single": {
+            "n": 52,
+            "pass": 22
+          },
+          "bundle": {
+            "n": 73,
+            "pass": 22
+          }
+        },
+        "adopted_by": {
+          "planner": {
+            "n": 116,
+            "pass": 41
+          },
+          "person": {
+            "n": 9,
+            "pass": 3
+          }
+        },
+        "depth": {
+          "1": {
+            "n": 103,
+            "pass": 33
+          },
+          "0": {
+            "n": 9,
+            "pass": 3
+          },
+          "2": {
+            "n": 13,
+            "pass": 8
+          }
+        }
+      },
+      "first_revise_naming_membership": [
+        186303,
+        205532
+      ],
+      "tokens": {
+        "pre_submit_planners": {
+          "executions": 132,
+          "measured": 132,
+          "by_provider": {
+            "claude": {
+              "input": 2926,
+              "cache_read": 77888014,
+              "cache_creation": 6974278,
+              "output": 691099,
+              "total": 85556317
+            }
+          },
+          "total": 85556317
+        },
+        "by_boundary": {
+          "adopt_to_ready": {
+            "planners": {
+              "executions": 60,
+              "measured": 60,
+              "by_provider": {
+                "claude": {
+                  "input": 1264,
+                  "cache_read": 28566255,
+                  "cache_creation": 2675790,
+                  "output": 284455,
+                  "total": 31527764
+                }
+              },
+              "total": 31527764
+            },
+            "plan_reviews": {
+              "executions": 153,
+              "measured": 144,
+              "by_provider": {
+                "codex": {
+                  "input": 15257886,
+                  "cache_read": 92904960,
+                  "cache_creation": 0,
+                  "output": 239946,
+                  "total": 108402792
+                },
+                "claude": {
+                  "input": 202,
+                  "cache_read": 8992612,
+                  "cache_creation": 3190099,
+                  "output": 52978,
+                  "total": 12235891
+                }
+              },
+              "total": 120638683
+            }
+          },
+          "crossing_adoption": {
+            "planners": {
+              "executions": 80,
+              "measured": 80,
+              "by_provider": {
+                "claude": {
+                  "input": 2154,
+                  "cache_read": 60415804,
+                  "cache_creation": 4717154,
+                  "output": 538569,
+                  "total": 65673681
+                }
+              },
+              "total": 65673681
+            },
+            "plan_reviews": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            }
+          },
+          "crossing_ready": {
+            "planners": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            },
+            "plan_reviews": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            }
+          },
+          "before_adoption": {
+            "planners": {
+              "executions": 6,
+              "measured": 6,
+              "by_provider": {
+                "claude": {
+                  "input": 164,
+                  "cache_read": 4236354,
+                  "cache_creation": 326057,
+                  "output": 41113,
+                  "total": 4603688
+                }
+              },
+              "total": 4603688
+            },
+            "plan_reviews": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            }
+          },
+          "after_ready": {
+            "planners": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            },
+            "plan_reviews": {
+              "executions": 0,
+              "measured": 0,
+              "by_provider": {},
+              "total": 0
+            }
+          },
+          "unapproved_or_unadopted": {
+            "planners": {
+              "executions": 47,
+              "measured": 47,
+              "by_provider": {
+                "claude": {
+                  "input": 622,
+                  "cache_read": 13501230,
+                  "cache_creation": 1970995,
+                  "output": 113481,
+                  "total": 15586328
+                }
+              },
+              "total": 15586328
+            },
+            "plan_reviews": {
+              "executions": 1,
+              "measured": 1,
+              "by_provider": {
+                "codex": {
+                  "input": 91319,
+                  "cache_read": 403200,
+                  "cache_creation": 0,
+                  "output": 1577,
+                  "total": 496096
+                }
+              },
+              "total": 496096
+            }
+          }
+        },
+        "submitted": 125,
+        "approved": 124,
+        "approved_with_adoption": 124
+      },
+      "corrections_after_ready": {
+        "events": [],
+        "wrong_tasks": [],
+        "approved": 124,
+        "observed_30_days": 0
+      },
+      "correct_goal_asks": 0
+    },
+    "first_review": {
+      "n": 125,
+      "pass": 44,
+      "unreviewed": 127
+    },
+    "durations_seconds": {
+      "registered_to_submit": {
+        "n": 125,
+        "total": 193724.168,
+        "median": 148.897,
+        "p90": 439.636
+      },
+      "registered_to_first_verdict": {
+        "n": 125,
+        "total": 259444.89,
+        "median": 503.512,
+        "p90": 1835.351
+      },
+      "registered_to_ready": {
+        "n": 124,
+        "total": 408049.242,
+        "median": 729.1949999999999,
+        "p90": 5054.991
+      },
+      "adopt_to_ready": {
+        "n": 124,
+        "total": 214428.798,
+        "median": 553.9435,
+        "p90": 4185.942
+      }
+    },
+    "approved_revise": {
+      "n": 124,
+      "total": 69,
+      "median": 1.0,
+      "p90": 1
+    },
+    "runtime_planner_seconds": {
+      "n": 203,
+      "total": 41276.514,
+      "median": 136.903,
+      "p90": 342.758
+    },
+    "runtime_planner_unclosed": 0,
+    "snapshot_race_events": [],
+    "open_goals_n": 63,
+    "one_remaining": {
+      "113": [
+        1691
+      ],
+      "13": [
+        117
+      ],
+      "29": [
+        1585
+      ],
+      "37": [
+        1793
+      ],
+      "51": [
+        631
+      ],
+      "62": [
+        1784
+      ],
+      "65": [
+        962
+      ],
+      "76": [
+        1074
+      ],
+      "79": [
+        2009
+      ],
+      "97": [
+        1513
+      ],
+      "106": [
+        1796
+      ],
+      "109": [
+        940
+      ],
+      "115": [
+        1621
+      ],
+      "122": [
+        1724
+      ],
+      "142": [
+        1805
+      ],
+      "194": [
+        2510
+      ],
+      "157": [
+        2134
+      ],
+      "3": [
+        2135
+      ],
+      "31": [
+        654
+      ],
+      "32": [
+        711
+      ],
+      "34": [
+        796
+      ],
+      "54": [
+        697
+      ],
+      "66": [
+        1026
+      ],
+      "87": [
+        1403
+      ],
+      "111": [
+        2127
+      ],
+      "116": [
+        2119
+      ],
+      "145": [
+        2521
+      ],
+      "171": [
+        2198
+      ]
+    },
+    "only_follow_up_remaining": {
+      "29": [
+        1585
+      ],
+      "30": [
+        706,
+        751,
+        922,
+        1015
+      ],
+      "37": [
+        1793
+      ],
+      "51": [
+        631
+      ],
+      "56": [
+        1384,
+        1411
+      ],
+      "74": [
+        758,
+        1190
+      ],
+      "76": [
+        1074
+      ],
+      "106": [
+        1796
+      ],
+      "109": [
+        940
+      ],
+      "115": [
+        1621
+      ],
+      "122": [
+        1724
+      ],
+      "137": [
+        1342,
+        1382,
+        1385,
+        2136
+      ],
+      "142": [
+        1805
+      ],
+      "143": [
+        2303,
+        2304,
+        2305,
+        2401,
+        2411,
+        2412,
+        2422,
+        2425,
+        2427,
+        2471,
+        2540,
+        2551,
+        2563,
+        2566,
+        2584
+      ],
+      "194": [
+        2510
+      ],
+      "157": [
+        2134
+      ],
+      "31": [
+        654
+      ],
+      "32": [
+        711
+      ],
+      "34": [
+        796
+      ],
+      "40": [
+        661,
+        700,
+        1004,
+        1332
+      ],
+      "66": [
+        1026
+      ],
+      "111": [
+        2127
+      ],
+      "116": [
+        2119
+      ],
+      "132": [
+        784,
+        1260,
+        1324,
+        1326,
+        2449
+      ],
+      "140": [
+        643,
+        1807,
+        1808,
+        2083,
+        2137,
+        2138,
+        2520
+      ],
+      "153": [
+        2213,
+        2224
+      ],
+      "171": [
+        2198
+      ]
+    },
+    "inputs_sha256": "c67b0e3daf801bc1d24443ee1c343d992835b4d907bc76601a2c02677541cce4",
+    "snapshot_started": "2026-10-26T12:53:14.812Z",
+    "snapshot_ended": "2026-10-26T12:53:21.008Z"
+  },
+  "goals_at_snapshot": {
+    "open_goals_n": 36,
+    "one_remaining": {
+      "113": [
+        1691
+      ],
+      "13": [
+        117
+      ],
+      "29": [
+        1585
+      ],
+      "37": [
+        1793
+      ],
+      "62": [
+        1784
+      ],
+      "65": [
+        962
+      ],
+      "74": [
+        1190
+      ],
+      "76": [
+        1074
+      ],
+      "77": [
+        3478
+      ],
+      "79": [
+        2009
+      ],
+      "96": [
+        1499
+      ],
+      "97": [
+        1513
+      ],
+      "106": [
+        1796
+      ],
+      "109": [
+        940
+      ],
+      "115": [
+        1621
+      ],
+      "120": [
+        2903
+      ],
+      "122": [
+        1724
+      ],
+      "142": [
+        1805
+      ]
+    },
+    "only_follow_up_remaining": {
+      "29": [
+        1585
+      ],
+      "30": [
+        922,
+        1015
+      ],
+      "37": [
+        1793
+      ],
+      "56": [
+        1384,
+        3508
+      ],
+      "74": [
+        1190
+      ],
+      "76": [
+        1074
+      ],
+      "106": [
+        1796
+      ],
+      "109": [
+        940
+      ],
+      "115": [
+        1621
+      ],
+      "120": [
+        2903
+      ],
+      "122": [
+        1724
+      ],
+      "137": [
+        1382,
+        1385,
+        3501
+      ],
+      "222": [
+        3447,
+        3467
+      ],
+      "142": [
+        1805
+      ],
+      "143": [
+        2303,
+        2304,
+        2305,
+        2401,
+        2411,
+        2412,
+        2422,
+        2425,
+        2427,
+        2471,
+        2551,
+        2584,
+        3178,
+        3188,
+        3272,
+        3451
+      ]
+    },
+    "until_exclusive": "2026-10-26T12:53:14.812Z"
+  },
+  "first_revise_naming_membership_read": {
+    "membership": [
+      100371,
+      121943,
+      125990,
+      129118,
+      129980,
+      133541,
+      137424,
+      186303
+    ],
+    "not_membership": [
+      116559,
+      205532
+    ]
+  }
+}

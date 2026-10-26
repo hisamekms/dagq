@@ -47,6 +47,7 @@ tags:
 - [worker が受け入れ条件を根拠と照合する変更の前の、run の review の差し戻しの基準値と、前後比較の script](acceptance-check.md)（goal 90、task 1422。後の区間は task 1423 の暫定と task 1537）
 - [worker の問い（worker_question）の中身の分類と、ラベルの定義案](worker-question-topics.md)（goal 64、task 950）
 - [receipt の follow_up の種類と runtime の planner の判断の分類と、ラベルの定義案](follow-up-kinds.md)（goal 64、task 951）
+- [follow-up の所属判断の評価指標と導入前の基準値・導入後の評価](follow-up-membership.md)（goal 97、task 1511・1513）
 - [既存の open の goal に残る follow_up 由来の task と draft の所属の分類案](follow-up-membership-inventory.md)（goal 97、task 1512）
 - [既存の open・draft の goal のラベルと優先度の初期値の案と、high 以上の goal に残る task の後回しの判定の案](goal-priority-inventory.md)（goal 106、task 1642）
 - [task の cancel の理由の分類と、ラベルの定義案](cancel-reasons.md)（goal 64、task 952）
