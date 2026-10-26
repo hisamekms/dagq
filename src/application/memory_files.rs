@@ -154,6 +154,16 @@ impl RunFiles for MemoryFiles {
     fn remove_dir_all(&self, _: &Path) -> io::Result<()> {
         unimplemented!("no test removes a run directory")
     }
+    /// A directory with no file under it.
+    fn remove_empty_dir(&self, dir: &Path) -> io::Result<bool> {
+        let empty = !self
+            .files
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|path| path.starts_with(dir));
+        Ok(empty && self.dirs.lock().unwrap().remove(dir))
+    }
     fn append_line(&self, _: &Path, _: &str) -> io::Result<()> {
         unimplemented!("no test appends to a run file")
     }

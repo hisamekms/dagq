@@ -523,8 +523,8 @@ command = 'echo "base=$DAGQ_LANDING_BASE"; echo "list=$DAGQ_CI_KNOWN_FAILURES"; 
 /// landing does (ADR-t2740-1): the command gets the snapshot's head as its
 /// base, the known failures written to the run's directory and that the
 /// task fixes no CI failure; the other command runs as registered. On the
-/// host its `TMPDIR` is the run directory's `tmp`, over the one `[run.env]`
-/// names, and what it makes there stays in the run's directory.
+/// host its `TMPDIR` is the run's short directory outside `runs/`, over the
+/// one `[run.env]` names, and what it makes there stays there.
 #[test]
 fn a_snapshot_runs_the_landing_command_in_place_of_what_it_replaces() {
     let mut named = PathBuf::new();
@@ -556,11 +556,14 @@ fn a_snapshot_runs_the_landing_command_in_place_of_what_it_replaces() {
         "{replaced}"
     );
     assert!(replaced.contains("fix=0\n"), "{replaced}");
-    let tmp = run_dir.join("tmp");
+    let tmp = dagq::application::host_verification_tmp_path(detail.runs[0].id());
+    // The task goes on, so no cleanup removes it.
+    let _gone = RemoveOnDrop(tmp.clone());
     assert!(
         replaced.contains(&format!("tmp={}\n", tmp.display())),
         "{replaced}"
     );
+    assert!(!tmp.starts_with(&run_dir));
     assert!(tmp.join("fixture/data").is_file());
     assert!(!named.join("fixture").exists());
     let failures: Value = serde_json::from_str(&fs::read_to_string(&list).unwrap()).unwrap();

@@ -302,16 +302,34 @@ pub fn running(pid: u32) -> bool {
     !stat.trim().is_empty() && !stat.trim().starts_with('Z')
 }
 
+/// A directory outside the test's temporary ones, such as a run's
+/// verification `TMPDIR` in `/tmp`, removed when this is dropped, also when
+/// the test fails before the runtime removes it.
+#[must_use = "the directory is removed when this is dropped"]
+pub struct RemoveOnDrop(pub PathBuf);
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A queue with a ready task and its repository, in a directory of their
 /// own in `/tmp` ([`common::short_tempdir`]): the sweep's, the cleanup's
 /// and the retention's tests need the queue under no run directory and its
 /// runs' worktrees short enough to name their scratchpads.
 pub fn fixture() -> (Fixture, PathBuf, PathBuf) {
+    fixture_with_queue_in(Path::new(""))
+}
+
+/// [`fixture`] with the queue in `queue_dir`, relative to the fixture's
+/// directory (made), the repository staying beside it.
+pub fn fixture_with_queue_in(queue_dir: &Path) -> (Fixture, PathBuf, PathBuf) {
     let dir = common::short_tempdir();
     let repo = dir.path().join("repo's directory");
     fs::create_dir(&repo).unwrap();
     common::template::repository(&repo, "fixture\n");
-    let db = dir.path().join("queue's data.db");
+    fs::create_dir_all(dir.path().join(queue_dir)).unwrap();
+    let db = dir.path().join(queue_dir).join("queue's data.db");
     let mut queue = common::template::queue(&db);
     add_ready_task(&mut queue, "test task", &[]);
     let on_timeout = {

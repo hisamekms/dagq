@@ -357,9 +357,10 @@ fn unregistered_rejection(
 /// run's own worktree keeps the base its receipt names. On the host they
 /// run in the run's scratch worktree of `scratches`, the queue's
 /// `satisfied/`, made again with `head` checked out detached
-/// ([`fresh_satisfied_scratch`]), with the run directory's temporary
-/// files' directory as their `TMPDIR` ([`host_verification_tmpdir`]), as
-/// the landing's verification on the host. Set to the container (ADR-t2113-3
+/// ([`fresh_satisfied_scratch`]), with the run's short temporary files'
+/// directory outside the queue's `runs/` as their `TMPDIR`
+/// ([`host_verification_tmpdir`]), as the landing's verification on the
+/// host. Set to the container (ADR-t2113-3
 /// decision 1), they run as the landing's verification does: each in a
 /// container of its own on a clone of `head` made by `containers`, with a
 /// token of the snapshot's own and without the sccache wrapper, never on
@@ -453,7 +454,7 @@ pub fn verify_snapshot(
         bail!("{message}");
     }
     let mut env = verifier.run_env(run_dir)?;
-    host_verification_tmpdir(files, run_dir, &mut env)?;
+    let _tmp = host_verification_tmpdir(files, run.id(), &mut env)?;
     let landing_env = plan.landing_env(files, run_dir, run_dir, head)?;
     // The scratch worktree goes whatever the commands did.
     let ran = fresh_satisfied_scratch(repository, scratches, run.id(), head).and_then(|scratch| {
@@ -2339,6 +2340,8 @@ fn land(
             Err(message) => bail!("{message}"),
         }
     };
+    // The host's verification's `TMPDIR`, until the landing ends.
+    let _verification_tmp;
     let mut run_env = if commands.is_empty() {
         Vec::new()
     } else if in_container {
@@ -2355,7 +2358,7 @@ fn land(
             bail!("{message}");
         }
         let mut env = verifier.run_env(run_dir)?;
-        host_verification_tmpdir(files, run_dir, &mut env)?;
+        _verification_tmp = host_verification_tmpdir(files, run.id(), &mut env)?;
         if let Some((port, why)) = guard_verification(sccache, run_dir, &mut env) {
             super::sccache::record_wrapper_removed(
                 &*queue,
@@ -2989,28 +2992,56 @@ impl Drop for ContainerVerification<'_> {
 
 /// Set in `env`, the `[run.env]` of the landing's verification commands on
 /// the host (its flaky retry included) or of an `already_satisfied`
-/// snapshot's on the host ([`verify_snapshot`]), `TMPDIR` to the run
-/// directory's [`RUN_TMP_DIR`](super::RUN_TMP_DIR), over a `TMPDIR` the
-/// `[run.env]` names: what their tests make there (a queue's fixtures, a
-/// whole e2e workspace) goes with the run's leftovers once its task is
-/// over, and counts in the size of a recent run, instead of staying in the
-/// host's `$TMPDIR`. A container's verification is not given it: the container
-/// takes what it left when it goes. Neither is the landing recheck: it runs
-/// in a scratch worktree of the queue's that the runs it checks and main's
-/// own check share, so what it leaves is no one run's to remove.
-fn host_verification_tmpdir(
-    files: &dyn RunFiles,
-    run_dir: &Path,
+/// snapshot's on the host ([`verify_snapshot`]), `TMPDIR` to the run's
+/// [`host_verification_tmp_path`](super::host_verification_tmp_path), short
+/// and outside the queue's `runs/`, over a `TMPDIR` the `[run.env]` names:
+/// what their tests make there (a queue's fixtures, a whole e2e workspace)
+/// goes with the run's leftovers once its task is over, and counts in the
+/// size of a recent run, instead of staying in the host's `$TMPDIR`; and
+/// the sockets they make there fit in a socket path's length, and a test
+/// that looks above its temporary directory for a `runs/` does not find
+/// the run's, as the run directory's
+/// [`RUN_TMP_DIR`](super::RUN_TMP_DIR) gave them neither. A container's
+/// verification is not given it: the container takes what it left when it
+/// goes. Neither is the landing recheck: it runs in a scratch worktree of
+/// the queue's that the runs it checks and main's own check share, so what
+/// it leaves is no one run's to remove.
+///
+/// The directory goes as soon as the verification ends when nothing is
+/// left in it ([`VerificationTmp`]), so a verification that wrote nothing
+/// there leaves nothing in `/tmp` for the run's cleanup.
+fn host_verification_tmpdir<'a>(
+    files: &'a dyn RunFiles,
+    run: &RunId,
     env: &mut Vec<(String, String)>,
-) -> Result<()> {
-    let tmp = super::run_tmp_dir(files, run_dir)?;
-    let tmp = tmp
+) -> Result<VerificationTmp<'a>> {
+    let tmp = super::host_verification_tmp_dir(files, run)?;
+    let text = tmp
         .to_str()
-        .context("the run directory is not UTF-8")?
+        .context("the temporary files' directory is not UTF-8")?
         .to_owned();
     env.retain(|(key, _)| key != "TMPDIR");
-    env.push(("TMPDIR".to_owned(), tmp));
-    Ok(())
+    env.push(("TMPDIR".to_owned(), text));
+    Ok(VerificationTmp { files, dir: tmp })
+}
+
+/// The `TMPDIR` of a verification on the host ([`host_verification_tmpdir`]),
+/// removed when this drops, at the verification's end however it ends, if
+/// it is empty: what is in it waits for the run's cleanup, which counts it.
+struct VerificationTmp<'a> {
+    files: &'a dyn RunFiles,
+    dir: PathBuf,
+}
+
+impl Drop for VerificationTmp<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.files.remove_empty_dir(&self.dir) {
+            warn!(
+                "the verification's temporary files' directory {} could not be removed: {error:#}",
+                self.dir.display()
+            );
+        }
+    }
 }
 
 /// Put into `env`, the `[run.env]` of the verification commands, what the
@@ -4647,12 +4678,12 @@ mod tests {
         assert_eq!((passed.commands, passed.failure, ran.len()), (3, None, 3));
     }
 
-    /// On the host the snapshot's commands have the run directory's `tmp`,
-    /// made for them, as their `TMPDIR`, over the one `[run.env]` names, so
-    /// what their tests make there goes with the run's leftovers; the rest
-    /// of the `[run.env]` stays.
+    /// On the host the snapshot's commands have the run's short temporary
+    /// files' directory outside `runs/`, made for them, as their `TMPDIR`,
+    /// over the one `[run.env]` names, so what their tests make there goes
+    /// with the run's leftovers; the rest of the `[run.env]` stays.
     #[test]
-    fn a_snapshot_verification_on_the_host_keeps_its_temporary_files_in_the_run_directory() {
+    fn a_snapshot_verification_on_the_host_keeps_its_temporary_files_in_the_runs_short_directory() {
         let mut record = task_record(&[], &[]);
         record.verification_commands = vec!["first".into(), "second".into()];
         let task = Task::restore(record).unwrap();
@@ -4673,13 +4704,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!((verification.commands, verification.failure), (2, None));
-        let tmp = dir.join(super::super::RUN_TMP_DIR);
+        let tmp = super::super::host_verification_tmp_path(&RunId::new(RUN).unwrap());
         let expected = vec![
             ("CARGO_BUILD_JOBS".to_owned(), "4".to_owned()),
             ("TMPDIR".to_owned(), tmp.to_str().unwrap().to_owned()),
         ];
         assert_eq!(verifier.envs.into_inner(), [expected.clone(), expected]);
-        assert!(files.is_dir(&tmp));
+        // Nothing was written there: it went at the verification's end.
+        assert!(!files.is_dir(&tmp));
     }
 
     /// The containers and the tokens of a snapshot's verification in a
@@ -4941,7 +4973,7 @@ mod tests {
         let list = dir.join(landing_verification::KNOWN_FAILURES_FILE);
         let tmpdir = vec![(
             "TMPDIR".to_owned(),
-            dir.join(super::super::RUN_TMP_DIR)
+            super::super::host_verification_tmp_path(&RunId::new(RUN).unwrap())
                 .to_str()
                 .unwrap()
                 .to_owned(),
@@ -6511,20 +6543,75 @@ mod sccache_tests {
             .map(|(_, value)| value.as_str())
     }
 
-    /// The landing's verification on the host has the run directory's
-    /// `tmp`, made for it, as its `TMPDIR`, over the one `[run.env]` names;
-    /// the rest of the `[run.env]` stays.
+    /// The landing's verification on the host has the run's short
+    /// temporary files' directory, made for it, as its `TMPDIR`, over the
+    /// one `[run.env]` names; the rest of the `[run.env]` stays.
     #[test]
-    fn the_verification_on_the_host_keeps_its_temporary_files_in_the_run_directory() {
+    fn the_verification_on_the_host_keeps_its_temporary_files_in_the_runs_short_directory() {
         let files = crate::application::memory_files::MemoryFiles::default();
-        let run_dir = Path::new("/q/runs/r");
+        let run = RunId::new("7804dfef-4b2c-4c3a-98db-7353826b7849").unwrap();
         let mut env = run_env();
         env.push(("TMPDIR".to_owned(), "/tmp/person".to_owned()));
-        host_verification_tmpdir(&files, run_dir, &mut env).unwrap();
-        assert_eq!(get(&env, "TMPDIR"), Some("/q/runs/r/tmp"));
+        let tmp = host_verification_tmpdir(&files, &run, &mut env).unwrap();
+        assert_eq!(get(&env, "TMPDIR"), Some("/tmp/dagq-v-7804dfef4b2c"));
         assert_eq!(env.iter().filter(|(key, _)| key == "TMPDIR").count(), 1);
         assert_eq!(get(&env, "CARGO_BUILD_JOBS"), Some("4"));
-        assert!(files.is_dir(&run_dir.join(super::super::RUN_TMP_DIR)));
+        assert!(files.is_dir(Path::new("/tmp/dagq-v-7804dfef4b2c")));
+        drop(tmp);
+    }
+
+    /// At the verification's end its `TMPDIR` goes when nothing is left in
+    /// it, and stays, for the run's cleanup to count, when something is.
+    #[test]
+    fn the_verification_tmpdir_goes_at_its_end_only_when_empty() {
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let run = RunId::new("7804dfef-4b2c-4c3a-98db-7353826b7849").unwrap();
+        let dir = super::super::host_verification_tmp_path(&run);
+        drop(host_verification_tmpdir(&files, &run, &mut Vec::new()).unwrap());
+        assert!(!files.is_dir(&dir));
+        let tmp = host_verification_tmpdir(&files, &run, &mut Vec::new()).unwrap();
+        files.write(&dir.join("fixture"), b"x").unwrap();
+        drop(tmp);
+        assert!(files.is_dir(&dir));
+        assert!(files.is_file(&dir.join("fixture")));
+    }
+
+    /// However deep the queue's directory, the verification's `TMPDIR` is
+    /// as short, and nowhere under the queue's `runs/`: a socket its tests
+    /// make there fits in `SUN_LEN`, and a test looking above it for a
+    /// `runs/` finds none.
+    #[test]
+    fn the_verification_tmpdir_is_short_and_outside_runs_however_deep_the_queue() {
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let deep = format!("/{}/runs/r", ["deep"; 40].join("/"));
+        let run = RunId::new("2f1e0c3b-8a9d-4e7f-b6c5-d4e3f2a1b0c9").unwrap();
+        let mut env = vec![("TMPDIR".to_owned(), format!("{deep}/tmp"))];
+        let _tmp = host_verification_tmpdir(&files, &run, &mut env).unwrap();
+        let tmp = Path::new(get(&env, "TMPDIR").unwrap());
+        assert!(
+            tmp.as_os_str().len() <= "/tmp/dagq-v-".len() + 12,
+            "{tmp:?}"
+        );
+        assert!(!tmp.starts_with(&deep));
+        assert!(tmp.components().all(|part| part.as_os_str() != "runs"));
+        assert!(files.is_dir(tmp));
+    }
+
+    /// What stands in the place of the verification's `TMPDIR` (a file, a
+    /// link) is removed, not followed; a directory there is kept.
+    #[test]
+    fn the_verification_tmpdir_replaces_what_is_not_a_directory() {
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let run = RunId::new("run-with-a-file-there").unwrap();
+        let tmp = super::super::host_verification_tmp_path(&run);
+        assert_eq!(tmp, Path::new("/tmp/dagq-v-runwithafile"));
+        files.write(&tmp, b"x").unwrap();
+        let mut env = Vec::new();
+        let first = host_verification_tmpdir(&files, &run, &mut env).unwrap();
+        assert!(files.is_dir(&tmp));
+        let _again = host_verification_tmpdir(&files, &run, &mut env).unwrap();
+        assert!(files.is_dir(&tmp));
+        drop(first);
     }
 
     #[test]

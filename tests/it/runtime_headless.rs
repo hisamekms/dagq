@@ -225,16 +225,22 @@ esac"#
     assert!(position(&kinds, "run_waiting_ended") < position(&kinds, "ask_delivered"));
 }
 
-/// Task 3438: a Claude worker's turns, the first and the resumed one, and
-/// the landing's verification on the host have the run directory's `tmp`
-/// as their `TMPDIR` and write there; once the task is completed the
-/// cleanup removes it, recorded as `run_tmp_removed`, and the rest of the
+/// Task 3438: a Claude worker's turns, the first and the resumed one, have
+/// the run directory's `tmp` as their `TMPDIR` and write there, and the
+/// landing's verification on the host the run's short directory outside
+/// `runs/`; once the task is completed the cleanup removes both, recorded
+/// as one `run_tmp_removed` with their bytes together, and the rest of the
 /// run directory stays.
 #[test]
 fn a_claude_workers_turns_and_its_landings_verification_keep_their_temporary_files_in_the_run() {
+    let seen = common::short_tempdir();
+    let verify_log = seen.path().join("verify-tmpdir.log");
     let (dir, repo, db, backend) = headless_fixture_verified(
         &[],
-        r#"printf '%s\n' "$TMPDIR" > "$TMPDIR/../verify-tmpdir.log" && mkdir "$TMPDIR/fixture" && head -c 4096 /dev/zero > "$TMPDIR/fixture/data" && test -f seed.txt"#,
+        &format!(
+            r#"printf '%s\n' "$TMPDIR" > {} && mkdir "$TMPDIR/fixture" && head -c 4096 /dev/zero > "$TMPDIR/fixture/data" && test -f seed.txt"#,
+            common::shell_path(&verify_log)
+        ),
     );
     set_turns(
         dir.path(),
@@ -281,8 +287,12 @@ esac"#
         turns.lines().collect::<Vec<_>>(),
         [tmp_text.as_str(), tmp_text.as_str()]
     );
-    let verified = fs::read_to_string(run_dir.join("verify-tmpdir.log")).unwrap();
-    assert_eq!(verified.trim_end(), tmp_text);
+    let short = dagq::application::host_verification_tmp_path(run.id());
+    let _gone = RemoveOnDrop(short.clone());
+    let short_text = short.to_string_lossy().into_owned();
+    let verified = fs::read_to_string(&verify_log).unwrap();
+    assert_eq!(verified.trim_end(), short_text);
+    assert!(!short.starts_with(&run_dir) && short_text.len() <= 32);
 
     let sweeping = SuperviseOptions {
         sweep_interval: Duration::ZERO,
@@ -290,10 +300,11 @@ esac"#
     };
     supervise_with(&db, &repo, &backend, &sweeping).unwrap();
     assert!(!tmp.exists());
+    assert!(!short.exists());
     let detail = self::detail(&db);
     let removed = payloads(&detail, "run_tmp_removed");
     assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(removed[0]["paths"], json!([tmp_text]));
+    assert_eq!(removed[0]["paths"], json!([tmp_text, short_text]));
     // Both turns' files and the verification's fixture.
     assert!(
         removed[0]["bytes"].as_u64().unwrap() >= 2 * 8192 + 4096,
@@ -301,7 +312,6 @@ esac"#
     );
     assert_eq!(removed[0]["reason"], "task_completed");
     assert!(run_dir.join("receipt.json").is_file());
-    assert!(run_dir.join("verify-tmpdir.log").is_file());
 }
 
 /// Acceptance (2): a review's revise goes to the same session as a resume;

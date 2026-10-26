@@ -491,9 +491,9 @@ pub fn shell_path(path: impl AsRef<std::path::Path>) -> String {
 }
 
 /// A temporary directory in `/tmp`, not in `$TMPDIR`, for a fixture that
-/// must be short and under no `runs/` directory. The landing's
-/// verification on the host has its run directory's `tmp`
-/// (`<queue>/runs/<run>/tmp`) as its `TMPDIR`. Under it, a fixture's queue
+/// must be short and under no `runs/` directory. A worker's turns, the
+/// tests it runs in them included, have their run directory's `tmp`
+/// (`<queue>/runs/<run>/tmp`) as their `TMPDIR`. Under it, a fixture's queue
 /// is taken for a run directory's files (no link followed, no directory's
 /// time read). A socket's path there may pass the `sun_path` limit (104
 /// bytes on macOS), and the queue's socket then moves out of its

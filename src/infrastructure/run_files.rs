@@ -115,6 +115,43 @@ impl RunFiles for LocalRunFiles {
         let (parent, name) = Directory::parent(dir)?;
         parent.mkdir(name)
     }
+    fn create_private_dir(&self, dir: &Path) -> io::Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        match fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = fs::symlink_metadata(dir)?;
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        if !metadata.is_dir() || metadata.uid() != uid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} is not a directory of this user's", dir.display()),
+            ));
+        }
+        if metadata.mode() & 0o077 != 0 {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+    fn remove_empty_dir(&self, dir: &Path) -> io::Result<bool> {
+        match fs::remove_dir(dir) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                Ok(false)
+            }
+            // A link or a file there: not an empty directory.
+            Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
         if !in_run_dir(path) {
             return fs::write(path, contents);
@@ -532,6 +569,56 @@ mod tests {
                 .tree_size(&run.join("target"))
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    /// A private directory is made with mode 0700; one of this user's
+    /// already there is kept with its mode narrowed, and a link there is
+    /// refused, not followed.
+    #[test]
+    fn a_private_directory_is_this_users_alone_and_no_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let made = dir.path().join("made");
+        LocalRunFiles.create_private_dir(&made).unwrap();
+        assert_eq!(mode(&made), 0o700);
+        let open = dir.path().join("open");
+        fs::create_dir(&open).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        fs::write(open.join("kept"), "x").unwrap();
+        LocalRunFiles.create_private_dir(&open).unwrap();
+        assert_eq!(mode(&open), 0o700);
+        assert!(open.join("kept").is_file());
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&made, &linked).unwrap();
+        let error = LocalRunFiles.create_private_dir(&linked).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    /// Only an empty directory is removed; a full one, a file and nothing
+    /// are left.
+    #[test]
+    fn only_an_empty_directory_is_removed_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty");
+        let full = dir.path().join("full");
+        fs::create_dir(&empty).unwrap();
+        fs::create_dir_all(full.join("sub")).unwrap();
+        fs::write(dir.path().join("file"), "x").unwrap();
+        assert!(LocalRunFiles.remove_empty_dir(&empty).unwrap());
+        assert!(!empty.exists());
+        assert!(!LocalRunFiles.remove_empty_dir(&full).unwrap());
+        assert!(full.join("sub").is_dir());
+        assert!(
+            !LocalRunFiles
+                .remove_empty_dir(&dir.path().join("file"))
+                .unwrap()
+        );
+        assert!(
+            !LocalRunFiles
+                .remove_empty_dir(&dir.path().join("none"))
+                .unwrap()
         );
     }
 

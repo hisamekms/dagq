@@ -18,11 +18,40 @@ use std::{
 };
 
 /// The directory under a run's directory the runtime gives the run's
-/// worker turns (Claude's and Codex's, the first and the resumed ones) and
-/// the verification commands its landing or its `already_satisfied`
-/// snapshot runs on the host as their `TMPDIR` ([`run_tmp_dir`]), and
-/// removes with the run's leftovers once its task is over.
+/// worker turns (Claude's and Codex's, the first and the resumed ones) as
+/// their `TMPDIR` ([`run_tmp_dir`]), and removes with the run's leftovers
+/// once its task is over. The verification commands on the host have
+/// [`host_verification_tmp_path`] instead.
 pub const RUN_TMP_DIR: &str = "tmp";
+
+/// The directory the [`host_verification_tmp_path`] of every run is made
+/// in: short, and outside every queue.
+const HOST_VERIFICATION_TMP_ROOT: &str = "/tmp";
+
+/// How many of the run ID's letters and digits name its
+/// [`host_verification_tmp_path`]: of a UUID, 48 bits, which the runs of
+/// the host's other queues do not share.
+const HOST_VERIFICATION_TMP_ID_LEN: usize = 12;
+
+/// The `TMPDIR` of the verification commands the run's landing (its flaky
+/// retry included) or its `already_satisfied` snapshot runs on the host:
+/// `/tmp/dagq-v-` and the first letters and digits of the run ID, outside
+/// the queue's `runs/` and as short whatever the queue's path, removed
+/// with the run's leftovers once its task is over. What the tests make
+/// there must fit in a socket path's length (`SUN_LEN`), and a test that
+/// looks above its temporary directory for a `runs/` must not find the
+/// run's, which the run directory's [`RUN_TMP_DIR`] gave them neither.
+/// The `v-` keeps it apart from the other `/tmp/dagq-*` of the runtime
+/// (the queue service's sockets).
+pub fn host_verification_tmp_path(run: &RunId) -> PathBuf {
+    let id: String = run
+        .as_str()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(HOST_VERIFICATION_TMP_ID_LEN)
+        .collect();
+    Path::new(HOST_VERIFICATION_TMP_ROOT).join(format!("dagq-v-{id}"))
+}
 
 /// The run directory's [`RUN_TMP_DIR`], made a real directory to be a
 /// `TMPDIR`. What the worker may have put there in its place (a link, a
@@ -52,6 +81,26 @@ pub fn run_tmp_dir(files: &dyn RunFiles, run_dir: &Path) -> Result<PathBuf> {
     Ok(tmp)
 }
 
+/// The run's [`host_verification_tmp_path`], made this user's private
+/// directory ([`RunFiles::create_private_dir`]) to be a `TMPDIR`: what is
+/// there in its place (a link, a file) is removed, not followed, and a
+/// directory of another user's is refused, as `/tmp` is everyone's.
+pub fn host_verification_tmp_dir(files: &dyn RunFiles, run: &RunId) -> Result<PathBuf> {
+    let tmp = host_verification_tmp_path(run);
+    match files.entry_kind(&tmp) {
+        Ok(EntryKind::Dir) => {}
+        Ok(_) => files
+            .remove_file(&tmp)
+            .with_context(|| format!("remove {}", tmp.display()))?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("read {}", tmp.display())),
+    }
+    files
+        .create_private_dir(&tmp)
+        .with_context(|| format!("create {}", tmp.display()))?;
+    Ok(tmp)
+}
+
 /// The files of the runs (the run directory, its prompt, the receipt, the
 /// idle marker and `review.md`) and of the queue directory (`rebind`'s log
 /// and `repository` file) as the use cases read and write them. Errors are
@@ -61,6 +110,33 @@ pub trait RunFiles: Send + Sync {
     fn create_dir_all(&self, dir: &Path) -> io::Result<()>;
     /// Create `dir`, which must not exist yet.
     fn create_new_dir(&self, dir: &Path) -> io::Result<()>;
+    /// Make `dir`, whose parent exists, a directory only this user may
+    /// use (mode 0700): created so when missing, and, when there, kept
+    /// only if it is a directory (not a link) of this user's, its mode
+    /// narrowed. A store with no users or modes makes it a directory.
+    fn create_private_dir(&self, dir: &Path) -> io::Result<()> {
+        match self.create_new_dir(dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        match self.entry_kind(dir)? {
+            EntryKind::Dir => Ok(()),
+            _ => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
+        }
+    }
+    /// Remove `dir` when it is an empty directory; `Ok(false)` when it is
+    /// not empty or not there, which leaves it.
+    fn remove_empty_dir(&self, dir: &Path) -> io::Result<bool> {
+        match self.read_dir(dir) {
+            Ok(entries) if entries.is_empty() && self.is_dir(dir) => {
+                self.remove_dir_all(dir).map(|()| true)
+            }
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()>;
     /// Create the file `path` with `contents` only when nothing is there
     /// yet: an existing file or link (never followed) is an

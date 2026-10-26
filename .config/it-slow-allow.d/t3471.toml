@@ -1,0 +1,5 @@
+# 5.0s to 8.1s in the worker's stress
+[[test]]
+name = "runtime_integrate::the_landings_verification_of_a_deep_queue_has_a_short_tmpdir_outside_runs"
+reason = "境界（プロセス・Git）: 深い queue の run を worker の turn から着地まで実際に進め、host の検証のコマンドの process が受け取る TMPDIR と、その下に作るファイルを確かめる。path の決め方と置き換えの判断は integrate と ports::execution の unit test"
+task = 3471

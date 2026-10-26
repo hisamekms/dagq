@@ -470,8 +470,9 @@ fn build_outputs_that_cannot_be_removed_are_retried_by_the_sweep() {
 /// lease is swept as if nobody leased it: its wrapper left running is
 /// stopped and its worktree is a cleanup candidate. A lease a live supervisor holds still
 /// keeps the sweep away, from its Claude Code scratchpad (task 1100) and
-/// its run's `tmp` (task 1290) too, which go once the lease is stale as
-/// its task is completed.
+/// its run's `tmp` (task 1290) and its verification's short `TMPDIR` a
+/// supervisor that stopped while it ran left too, which go once the lease
+/// is stale as its task is completed.
 #[test]
 fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     let (_dir, repo, db) = fixture();
@@ -506,6 +507,12 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     fs::create_dir_all(tmp.join("target/debug")).unwrap();
     fs::write(tmp.join("target/debug/big"), vec![0u8; 16384]).unwrap();
     fs::write(run_dir.join("kept.log"), "log").unwrap();
+    // Nor the verification's short `TMPDIR` outside `runs/`, as a
+    // supervisor that stopped while the verification ran left it.
+    let short = dagq::application::host_verification_tmp_path(run.id());
+    let _gone = RemoveOnDrop(short.clone());
+    fs::create_dir_all(short.join("fixture")).unwrap();
+    fs::write(short.join("fixture/data"), vec![0u8; 4096]).unwrap();
     let sweeping = SuperviseOptions {
         scratchpad_roots: Some(vec![root.clone()]),
         ..sweeping_options()
@@ -532,6 +539,7 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     assert!(scratchpad.join("session/scratchpad/notes").is_file());
     assert!(payloads_of(&queue, &run, "scratchpad_removed").is_empty());
     assert!(tmp.join("target/debug/big").is_file());
+    assert!(short.join("fixture/data").is_file());
     assert_eq!(
         payloads_of(&queue, &run, "run_tmp_removed").len(),
         tmps_before
@@ -549,11 +557,15 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     // The run's `tmp` goes with the completed task, the rest of its run
     // directory stays.
     assert!(!tmp.exists());
+    assert!(!short.exists());
     let removed = payloads_of(&queue, &run, "run_tmp_removed")[tmps_before..].to_vec();
     assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(removed[0]["paths"], json!([tmp.to_string_lossy()]));
+    assert_eq!(
+        removed[0]["paths"],
+        json!([tmp.to_string_lossy(), short.to_string_lossy()])
+    );
     assert!(
-        removed[0]["bytes"].as_u64().unwrap() >= 16384,
+        removed[0]["bytes"].as_u64().unwrap() >= 16384 + 4096,
         "{removed:?}"
     );
     assert_eq!(removed[0]["by"], "supervisor");

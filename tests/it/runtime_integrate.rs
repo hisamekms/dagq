@@ -429,6 +429,54 @@ fn add_file_task(
     task.id()
 }
 
+/// The landing's verification on the host of a queue deep under a
+/// `runs/` has as its `TMPDIR` the run's short directory outside `runs/`,
+/// over the run directory's long one: a socket its tests make there fits
+/// in `SUN_LEN`, a test looking above it for a `runs/` finds none, and
+/// what the command makes there stays there for the run's cleanup.
+#[test]
+fn the_landings_verification_of_a_deep_queue_has_a_short_tmpdir_outside_runs() {
+    let deep = Path::new("runs/r").join(["a-deep-directory"; 8].join("/"));
+    let (dir, repo, db) = fixture_with_queue_in(&deep);
+    let seen = dir.path().join("verify-tmpdir.log");
+    let verify = format!(
+        r#"printf '%s\n' "$TMPDIR" > {} && mkdir "$TMPDIR/fixture" && : > "$TMPDIR/fixture/data" && test -f seed.txt"#,
+        shell_path(&seen)
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let task = add_file_task(&mut queue, &backend, "deep", "a.txt", "a", &[&verify]);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let run = queue.show(task).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let queue_dir = dir.path().join(&deep).canonicalize().unwrap();
+    assert!(run_dir.starts_with(&queue_dir), "{}", run_dir.display());
+    assert!(
+        run_dir.join("tmp").as_os_str().len() > 104,
+        "{}",
+        run_dir.display()
+    );
+    let short = dagq::application::host_verification_tmp_path(run.id());
+    let _gone = RemoveOnDrop(short.clone());
+
+    let outcome = runtime::integrate(&db, IntegrateTarget::Task(task), &repo, None).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    let tmpdir = fs::read_to_string(&seen).unwrap();
+    let tmpdir = Path::new(tmpdir.trim_end());
+    assert_eq!(tmpdir, short);
+    assert!(
+        tmpdir.as_os_str().len() <= "/tmp/dagq-v-".len() + 12,
+        "{tmpdir:?}"
+    );
+    assert!(!tmpdir.starts_with(dir.path()) && !tmpdir.starts_with(&queue_dir));
+    assert!(tmpdir.components().all(|part| part.as_os_str() != "runs"));
+    assert!(tmpdir.join("fixture/data").is_file());
+    assert!(!run_dir.join("tmp/fixture").exists());
+}
+
 #[test]
 fn review_writes_the_run_material_to_review_md_and_returns_only_its_size() {
     let (_dir, repo, db) = fixture();

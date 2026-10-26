@@ -28,9 +28,10 @@
 //!
 //! The job also removes what an ended run whose task is over left outside
 //! its worktree: the Claude Code scratchpad of its session (task 1100,
-//! [`scratchpad_dir_name`]), and the temporary files directory the runtime
-//! gave its worker's turns and its landing's verification on the host as
-//! their `TMPDIR` (task 1290, [`RUN_TMP_DIR`] in its run directory). The
+//! [`scratchpad_dir_name`]), and the temporary files directories the
+//! runtime gave its worker's turns ([`RUN_TMP_DIR`] in its run directory,
+//! task 1290) and its verification commands on the host (outside the
+//! queue's `runs/`, [`host_verification_tmp_path`]) as their `TMPDIR`. The
 //! rest of the run directory stays. Of every
 //! ended run it removes the scratch worktree an `already_satisfied`
 //! verification left in the queue's `satisfied/` (its supervisor died
@@ -61,6 +62,7 @@ use crate::application::update::{self, UpdatePaths};
 use crate::application::worktree_processes::{WORKTREE_STOP_POLLS, stop_worktree_processes};
 use crate::application::{
     EndedRunWorktree, HostOpsQueue, RUN_TMP_DIR, WorktreeAdmin, WorktreeCleanup,
+    host_verification_tmp_path,
 };
 use crate::domain::EventKind;
 use crate::domain::disk::{ProcessExecutable, worktree_executables};
@@ -793,12 +795,11 @@ enum Outcome {
         paths: Vec<String>,
         size: Size,
     },
-    /// The temporary files directory of a run whose task is over (task
-    /// 1290).
+    /// The temporary files directories of a run whose task is over ([`run_tmp_dirs`]).
     RunTmp {
         run_id: RunId,
         task_status: TaskStatus,
-        path: String,
+        paths: Vec<String>,
         size: Size,
     },
     Failed {
@@ -1189,15 +1190,15 @@ impl HostOpsState {
                 Outcome::RunTmp {
                     run_id,
                     task_status,
-                    path,
+                    paths,
                     size,
                 } => {
-                    info!(run_id = %run_id, "run {run_id}'s task is {}; removed its temporary files {path} ({size})", task_status.as_str());
+                    info!(run_id = %run_id, "run {run_id}'s task is {}; removed its temporary files {} ({size})", task_status.as_str(), paths.join(", "));
                     cleaned.add(&run_id, size.bytes);
                     env.queue.record_runtime_event(
                         &run_id,
                         EventKind::RunTmpRemoved,
-                        task_over_record(task_status, std::slice::from_ref(&path), &size),
+                        task_over_record(task_status, &paths, &size),
                     )
                 }
                 Outcome::Failed {
@@ -1525,20 +1526,28 @@ fn scratchpad_dirs(
         .unwrap_or_default()
 }
 
-/// The temporary files directory ([`RUN_TMP_DIR`]) of an ended run, in its
-/// run directory, once its task is over (task 1290): the `TMPDIR` the
-/// runtime gave its worker's turns (Claude's and Codex's) and its
-/// landing's verification on the host. A run whose task goes on keeps it,
-/// as a resume may go on in it; nothing else of the run directory goes.
+/// The temporary files directories of an ended run once its task is over:
+/// the [`RUN_TMP_DIR`] in its run directory, the `TMPDIR` the runtime gave
+/// its worker's turns (Claude's and Codex's), and its
+/// [`host_verification_tmp_path`] outside the queue's `runs/`, the one its
+/// landing's verification and its `already_satisfied` snapshot's had on
+/// the host, also when its supervisor stopped while they ran. A run whose
+/// task goes on keeps them, as a resume may go on in them and its landing
+/// may be verified again; nothing else of the run directory goes.
 /// The removal of the build outputs of a run left in the middle (one
 /// waiting for an answer, a landing or a resume, the cleanup for disk
-/// space included) leaves it too: what the worker keeps there (a
+/// space included) leaves them too: what the worker keeps there (a
 /// throwaway repository, a build outside the worktree) is what its next
 /// turn goes on with in the same session, which no look at the processes
 /// running now can tell from what nothing needs any more.
-fn run_tmp_dir(candidate: &EndedRunWorktree, runs_dir: &Path) -> Option<PathBuf> {
-    task_over(candidate.task_status)
-        .then(|| runs_dir.join(candidate.run_id.as_str()).join(RUN_TMP_DIR))
+fn run_tmp_dirs(candidate: &EndedRunWorktree, runs_dir: &Path) -> Vec<PathBuf> {
+    if !task_over(candidate.task_status) {
+        return Vec::new();
+    }
+    vec![
+        runs_dir.join(candidate.run_id.as_str()).join(RUN_TMP_DIR),
+        host_verification_tmp_path(&candidate.run_id),
+    ]
 }
 
 /// Measure the directory `dir` before it goes: `None` for no directory
@@ -1652,26 +1661,35 @@ fn remove_satisfied_scratch(
     }
 }
 
-/// Remove the [`run_tmp_dir`] of an ended run.
+/// Remove the [`run_tmp_dirs`] of an ended run. What was removed is
+/// pushed to `outcomes`, in one record whose size is theirs together, with
+/// a failure of the other.
 fn remove_run_tmp(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Vec<Outcome>) {
-    let Some(dir) = run_tmp_dir(candidate, &ports.runs_dir) else {
-        return;
-    };
-    let path = dir.to_string_lossy().into_owned();
-    match remove_tree(&*ports.files, &dir) {
-        Ok(Some(size)) => outcomes.push(Outcome::RunTmp {
+    let mut paths = Vec::new();
+    let mut size = Size::default();
+    for dir in run_tmp_dirs(candidate, &ports.runs_dir) {
+        let path = dir.to_string_lossy().into_owned();
+        match remove_tree(&*ports.files, &dir) {
+            Ok(Some(removed)) => {
+                paths.push(path);
+                size.add(removed);
+            }
+            Ok(None) => {}
+            Err(error) => outcomes.push(Outcome::Failed {
+                run_id: candidate.run_id.clone(),
+                what: "run tmp",
+                path,
+                error,
+            }),
+        }
+    }
+    if !paths.is_empty() {
+        outcomes.push(Outcome::RunTmp {
             run_id: candidate.run_id.clone(),
             task_status: candidate.task_status,
-            path,
+            paths,
             size,
-        }),
-        Ok(None) => {}
-        Err(error) => outcomes.push(Outcome::Failed {
-            run_id: candidate.run_id.clone(),
-            what: "run tmp",
-            path,
-            error,
-        }),
+        });
     }
 }
 
@@ -3449,7 +3467,8 @@ mod tests {
     }
 
     /// Task 1100 and task 1290: the scratchpads and the temporary files
-    /// directory of a run go once its task is over; a run whose task goes
+    /// directories of a run (its run directory's and its verification's on
+    /// the host) go once its task is over; a run whose task goes
     /// on keeps them, and a worktree outside the runs directory has no
     /// scratchpad looked for.
     #[test]
@@ -3468,7 +3487,7 @@ mod tests {
                 scratchpad_dirs(&going_on, runs, &roots).is_empty(),
                 "{status:?}"
             );
-            assert_eq!(run_tmp_dir(&going_on, runs), None, "{status:?}");
+            assert!(run_tmp_dirs(&going_on, runs).is_empty(), "{status:?}");
         }
         for status in [TaskStatus::Completed, TaskStatus::Canceled] {
             let over = candidate("r", status);
@@ -3477,8 +3496,11 @@ mod tests {
                 [roots[0].join(&name), roots[1].join(&name)]
             );
             assert_eq!(
-                run_tmp_dir(&over, runs),
-                Some(PathBuf::from("/runs/r").join(RUN_TMP_DIR))
+                run_tmp_dirs(&over, runs),
+                [
+                    PathBuf::from("/runs/r").join(RUN_TMP_DIR),
+                    PathBuf::from("/tmp/dagq-v-r")
+                ]
             );
             let elsewhere = EndedRunWorktree {
                 worktree: "/elsewhere/r/worktree".into(),

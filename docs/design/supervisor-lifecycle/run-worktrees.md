@@ -84,18 +84,24 @@ landing recheckは、hostで流すたびにscratchを作る前に、`recheck/`�
   - 消す条件は上のworktreeを消すのと同じ（slotに無く、生きているleaseが無く、taskが`completed` / `canceled`）で、worktreeがもう無くても、branchがもう無くても消す。
   - 何か消せば`scratchpad_removed`をrunに記録し、消せなければ`cleanup_failed`にして、次の掃除で再び試す。
 
-- **runの一時ファイルのdir**: runtimeは、runのworkerのturn（ClaudeとCodex、最初のturnとresumeのたび、新しいsessionへの切り替えを含む）と、hostで流す着地の検証のコマンド（flakyの流し直しを含む）と`already_satisfied`のsnapshotの検証のコマンド（scratchはqueueの`satisfied/`でもrunごとで、そのrunに属する。[Validation](validation.md#already_satisfiedの検証)）に、run_dirの下の`tmp`（`application::RUN_TMP_DIR`）を`TMPDIR`として渡す。
+- **runの一時ファイルのdir**: runtimeは、runのworkerのturn（ClaudeとCodex、最初のturnとresumeのたび、新しいsessionへの切り替えを含む）に、run_dirの下の`tmp`（`application::RUN_TMP_DIR`）を`TMPDIR`として渡す。
   渡す前にdirを作り、workerがその場所に置いたlinkやファイルは辿らずに作り直す（`application::run_tmp_dir`）。
   Codexでは、run_dirがsandboxの書いてよい場所なので（ADR-t813-3決定2）、このdirも書ける。
   元の`$TMPDIR`は`writable_roots`に足して書けるままにし、`/tmp`も既定のまま書ける（[Provider lifecycle](../provider-lifecycle.md)のCodexの節）。
   Claudeでは、turnがrun_dirを`--add-dir`で足すので、このdirも書ける。
+  hostで流す着地の検証のコマンド（flakyの流し直しを含む）と`already_satisfied`のsnapshotの検証のコマンド（scratchはqueueの`satisfied/`でもrunごとで、そのrunに属する。[Validation](validation.md#already_satisfiedの検証)）には、`runs/`の外の短いrunごとのdir（`/tmp/dagq-v-`とrun idの先頭の英数字。`application::host_verification_tmp_path`）を、`[run.env]`の`TMPDIR`に代えて同じく作り直して渡す。
+  `/tmp`は誰でも書けるので、このdirはこのuserだけのもの（mode 0700）にし、他のuserのdirやlinkは使わない。
+  検証が終わったとき空ならその場で消し、中身が残れば下の片付けが消して数える。
+  検証のtestが一時dirに作るsocketのpathが長さの上限（`SUN_LEN`）に収まり、一時dirの上に`runs/`を探すtestがrunのdirと取り違えないよう、queueのpathの深さに依らず短く`runs/`の下に無い場所にする。
   workerのpromptは、どちらのproviderでも、一時ファイル・使い捨てのrepository・worktreeの外に置くbuildの出力を`$TMPDIR`の下に置き`/tmp`や`/private/tmp`に直接置かないことを案内し、それ以外のbuildの場所はrepositoryの指示（AGENTS.mdかCLAUDE.md）に委ねる（このrepositoryの規則は[手元の検証](../../development/local-checks.md)の「workerの手元の検証」）。
   Claude Codeのscratchpadは`$TMPDIR`ではなくsystemの`/tmp`に置かれるので、上の項がこれまでどおり片付ける。
   - 渡さないもの: containerの検証（containerの後片付けが残したものを消す）、landing recheck（queueのscratchのworktreeで、確かめるrunとmainだけの確認が共有し、どのrunのものでもない）、着地の前のe2e（関門が1回ごとの`TMPDIR`を自分で作り、後で消す）、runtimeのplannerのturn（plannerのdirには片付けが無い）。
   - 終わっていないrunのビルド成果物の掃除（空き容量のための掃除を含む）は、このdirを消さない。
     次のturnが同じsessionでその中の使い捨てのrepositoryやbuildを使い続けうり、今動いているprocessを見てもそれを確かめられないためである。
-  - 消す条件はscratchpadと同じで、消すのは`<runs>/<run-id>/tmp`だけ（`run_tmp_dir`）。
-  - 何か消せば`run_tmp_removed`（`scratchpad_removed`と同じ形）をrunに記録し、消せなければ`cleanup_failed`にして、次の掃除で再び試す。
+  - 消す条件はscratchpadと同じで、消すのは`<runs>/<run-id>/tmp`と検証の短いdirだけ（`run_tmp_dirs`）。
+    検証の途中でsupervisorが止まって残った短いdirも、ここで消える。
+  - 何か消せば消したdirと合わせたbytesを1つの`run_tmp_removed`（`scratchpad_removed`と同じ形）でrunに記録し、直近のrunの大きさの見積もりに数える。
+    消せなければ`cleanup_failed`にして、次の掃除で再び試す。
   - runtimeが決めたdirの外にworkerが作ったものは対象外で、人かinboxが消す。
   - Codexのheadlessのjob（review・goal review・plan reviewなどを`[roles.<role>]`の`provider = "codex"`で動かすもの）は対象外にする: jobはread-onlyのsandbox（`JOB_SANDBOX`か、queue serviceに届くときはそれを広げたjobの権限）で動き、どこにも書けないので、一時ファイルのdirを渡しても使えず、残るものも無い。
     例外の`setup-review`の生成のjobは、runに属さず、`/tmp`と`$TMPDIR`を書けず自分の一時のworktreeだけに書けるsandboxで動き、その一時の場所はコマンドが成否に依らず消すので、これも対象外にする（[Setup review](setup-review.md)）。
