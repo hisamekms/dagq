@@ -58,7 +58,7 @@ F=2026-09-28T00:00:00Z      # 窓の始まり。毎週の読み方では 4 の F
 T=2026-10-02T11:30:00Z      # 窓の終わり（--until）
 for k in run_claimed provider_switched provider_waiting turn_started turn_finished turn_requested stall_nudged \
          recovery_requested auto_repaired run_waiting_started run_waiting_ended run_waiting_deferred run_waiting_ask_added \
-         session_exited wrapper_started wrapper_heartbeat_expired workspace_created workspace_closed \
+         session_exited session_reopen_failed wrapper_started wrapper_heartbeat_expired workspace_created workspace_closed \
          ask_opened ask_closed ask_delivered ask_delivery_failed task_edited; do
   dagq events --all --full --kind $k --since $F --until $T --limit 20000
 done | jq -s '[.[].events[]]' > ev.json
@@ -84,12 +84,13 @@ jq -c 'map(select(.kind == "run_claimed")) | group_by(.g) | map({g: .[0].g, runs
 
 | 出来事 | 取り方 |
 |---|---|
-| A1 待ちの最中の wrapper の死・session の終わり | `run_waiting_ended` の `payload.cause == "session_exited"` |
+| A1 待ちの最中の wrapper の死・session の終わり | `run_waiting_ended` の `payload.cause == "session_exited"`。開き直しの入った固定バイナリ（下の A7 の窓の始まり）からは、最初の session の待ちで receipt が無く閉じていない `worker_question` か `stalled` の ask を持つ run は wrapper を失っても A1 ではなく A7 の開き直しに出て、A1 に出るのは開き直しの上限を使い切った run と開き直しの対象の外の run だけ |
 | A2 待ちの外の wrapper の死 | `recovery_requested` の `alert == "interrupted"` で `last_error` に `heartbeat expired` を含むもの（resume の経路の文は `resumed session's wrapper heartbeat expired`）（`wrapper_heartbeat_expired` の event は 3 つの経路のうち一部でしか残らないので、`last_error` の文で数える） |
 | A3 答えの配送の失敗 | `ask_delivery_failed`。加えて、A1 で失った待ちの ask（終わった待ちの `run_waiting_started` の `ask_id` と、その待ちに `run_waiting_ask_added` で加わった ask）のうち、session を失った後に答えの turn（`turn_requested` の `what` が `answer of ask <id>`）も `ask_delivered` も無いまま閉じたもの（`closed_without_answer`）。まだ閉じていないものは `open` として次の週に読み直す |
 | A4 答えの二重送り | 同じ `answer of ask <id>` の `turn_requested` が同じ run に 2 件以上 |
 | A5 `turn_without_receipt` の stalled | `recovery_requested` の `alert == "stalled"` と `reason`（`turn_without_receipt`・`permission_denied`・`send_unconfirmed`）。`send_unconfirmed` は対話の送信の確認の判定が非対話に当たったもの |
 | A6 非対話の run にかかった復旧 job | `recovery_requested` の全て（`alert` ごと）。このうち A2・A5 と、生きている run の alert（`idle_process`・`long_background`・`stuck_exit`・`prompt_waiting`）を合わせ込み由来とし、`failed`・`resume_exhausted` は `last_error`・`reason` を読んで経路に依るものだけを数える |
+| A7 待ちの最中に wrapper を失った run の開き直し | 成功: `auto_repaired` の `payload.repair == "headless_session_reopened"` を `detail.cause`（`exited`・`died`・`not_registered`）・`conditions.attempt`・`conditions.lost_turn` の有無で。失敗: `session_reopen_failed` を `cause`（`open_failed`・`close_failed`・`registration_timeout`）で。上限を使い切った run: 開き直しの event の後に同じ run の `run_waiting_ended`（`cause == "session_exited"`）と `recovery_requested` が来たもの。`stats` の `auto_repairs.by_layer.runtime.by_repair.headless_session_reopened` が成功の数と合うことも見る |
 
 ```sh
 jq -c 'map(select(.kind == "run_waiting_ended")) | group_by(.g) | map({g: .[0].g, causes: (map(.payload.cause) | group_by(.) | map({(.[0]): length}) | add)})' tagged.json   # A1
@@ -120,6 +121,21 @@ jq -c 'map(select(.kind == "recovery_requested")) | group_by(.g)
        | map({g: .[0].g, alerts: (map("\(.payload.alert)/\(.payload.reason // "" | .[0:30])") | group_by(.) | map({(.[0]): length}) | add)})' tagged.json   # A5・A6
 # 経路に依らない failed を分けるために last_error の頭を読む
 jq -r 'map(select(.g != "claude-interactive" and .kind == "recovery_requested" and .payload.alert == "failed"))[] | "\(.g)\t\(.payload.last_error // "" | .[0:80])"' tagged.json
+# A7: 開き直しの成功（cause・attempt・lost_turn）、失敗（cause）、上限を使い切った run
+jq -c 'map(select(.kind == "auto_repaired" and .payload.repair == "headless_session_reopened")) | group_by(.g)
+       | map({g: .[0].g, n: length, runs: (map(.run_id) | unique | length),
+              cause: (map(.payload.detail.cause) | group_by(.) | map({(.[0]): length}) | add),
+              attempt: (map(.payload.conditions.attempt | tostring) | group_by(.) | map({(.[0]): length}) | add),
+              lost_turn: (map(select(.payload.conditions.lost_turn != null)) | length)})' tagged.json
+jq -c 'map(select(.kind == "session_reopen_failed")) | group_by(.g)
+       | map({g: .[0].g, n: length, cause: (map(.payload.cause) | group_by(.) | map({(.[0]): length}) | add)})' tagged.json
+jq -c '. as $ev
+  | map(select((.kind == "auto_repaired" and .payload.repair == "headless_session_reopened") or .kind == "session_reopen_failed"))
+  | group_by(.run_id) | map(.[0].run_id as $run | (map(.id) | max) as $last
+      | {g: .[0].g, run: $run, attempt_max: (map(.payload.conditions.attempt // .payload.attempt) | max),
+         exhausted: any($ev[]; .run_id == $run and .id > $last and .kind == "run_waiting_ended" and .payload.cause == "session_exited"),
+         recovery: [$ev[] | select(.run_id == $run and .id > $last and .kind == "recovery_requested") | .payload.alert] | unique})' tagged.json
+dagq stats --full --since $F --until $T | jq '.auto_repairs.by_layer.runtime.by_repair.headless_session_reopened // 0'   # A7 の成功の数と合う（stats は窓の中に終わった run で数えるので、窓をまたぐ run の分だけずれうる）
 ```
 
 ### 項目 B: 非対話のために待ち・止まり・配送・session の見張りを直した task の数
@@ -296,6 +312,61 @@ run の本数は「読んだ範囲と方法」の 4 群。Claude 対話は参考
 - Codex フォールバックの 85 個は、A2 の `interrupted` の run と `failed` の run の workspace に `workspace_closed` が無い。実際に cmux に残ったのか、閉じたが記録されなかったのかは event から分からない（「取れない項目」）
 - E2 から、今の非対話の wrapper は turn の間もほとんど生きていない（答え待ちの外では、receipt の後に終わり、revise・resume の turn で起動し直す）。ゼロベースの形の「turn ごとの wrapper」との差は、主に E1 の待ちの区間に出る
 
+### A7: 開き直し（窓は 2 の基準値と別）
+
+窓は、固定バイナリが開き直しの commit `112aecdf` を含む build に入れ替わった `update_installed`（event 64215、2026-10-02T14:50:20Z、commit `112aecdf` そのもの）から読んだ時点（2026-10-26T12:41Z）まで。固定バイナリ `0.4.0-dev+fb928779` の状態を変えないコマンドだけで読んだ。
+
+```sh
+# 窓の始まり: 112aecdf を祖先に持つ最初の update_installed
+dagq events --all --full --kind update_installed --limit 2000 | jq -r '.events | sort_by(.id)[] | "\(.id) \(.created_at) \(.payload.commit)"' \
+  | while read id at c; do git merge-base --is-ancestor 112aecdf $c 2>/dev/null && { echo "$id $at $c"; break; }; done
+F=2026-10-02T14:50:20Z
+for k in auto_repaired session_reopen_failed run_waiting_started run_waiting_ended wrapper_heartbeat_expired run_claimed; do
+  dagq events --all --full --kind $k --since $F --limit 20000 > $k.json
+done
+jq -c '[.events[] | select(.payload.repair == "headless_session_reopened")] | length' auto_repaired.json
+jq -c '[.events[].payload.cause] | group_by(.) | map({(.[0]): length}) | add' session_reopen_failed.json run_waiting_ended.json
+dagq stats --since $F | jq '.auto_repairs.by_layer.runtime.by_repair.headless_session_reopened // 0'
+```
+
+| 出来事 | 窓の中 |
+|---|---|
+| 開き直しの成功（`headless_session_reopened`） | 0（`auto_repaired` 997 件のどれでもない。`stats` の `by_repair` にも無く、event と合う） |
+| 開き直しの失敗（`session_reopen_failed`） | 0（queue の全期間でも 0） |
+| 上限を使い切って今の経路に渡った run | 0 |
+| 参考: 待ち | 27 run・34 回、全て `worker_question`、終わりは全て `answered`（`session_exited` 0）。待った時間は合計 447,256 秒、最大 44,438 秒 |
+| 参考: `wrapper_heartbeat_expired` | 7 件（4 run）。待ちの区間と重なったものは 0（run `493e949a` は待ちが 2026-10-24T01:51Z に 18 秒で終わった後の 13:31Z） |
+
+claim された 1,201 run は全て非対話で、待ちの最中に wrapper を失った run が無かった。標本が無いので、開き直しの働きと上限の良し悪しはこの窓では判定しない。
+
+#### wrapper の一斉の死と上限の比較
+
+開き直しの試みは、wrapper を失ったと分かった時点（exit の記録か、heartbeat の切れ）にすぐ 1 回目、2 回目から前の試みの `reopen_interval`（60 秒）後で、上限は続けて `REOPEN_ATTEMPTS`（3）回。各試みの wrapper は `registration_timeout`（45 秒）のうちに登録しなければ次の試みがその workspace を閉じる（`src/application/supervise/execution/reopen.rs`、`src/application/ports/host.rs` の `SessionWrappers` の既定で、adapter は上書きしない）。1 回目を t とすると試みは t・t+60・t+120 秒に始まり、最後の登録の待ちは t+165 秒に終わる。止まりが t+120 秒より前に終われば、どれかの試みが止まりの後に始まる。
+
+A2 の一斉の死のまとまりを event で読むと、cmux が答えなかった記録は無かった。
+
+| まとまり | wrapper の死（`runtime_error` の `wrapper_failed` の最初〜最後） | cmux の応答 |
+|---|---|---|
+| 2026-09-30T08:42Z | 08:41:41〜08:42:22（41 秒、5 run） | 前後の `workspace_created` は返り（08:42:14〜18）、`backend_call_failed` 0 |
+| 09:12〜09:14Z | 09:12:27〜09:13:47（80 秒、8 run） | 同じ（09:12:21〜09:13:43 に作れた）、0 |
+| 09:44Z | 09:43:56（2 run が同時） | 同じ、0 |
+| 10:14〜10:15Z | 10:14:06〜10:14:47（41 秒、5 run） | 同じ、0 |
+| 2026-10-01T14:28〜14:38Z | 死は 2026-09-30T13:32:07〜13:32:41（3 run の `run_recovered` の `orphaned`）。2026-10-01 の `recovery_requested` は、固定バイナリの入れ替え（`update_installed` 14:28:11・14:38:30）の引き継ぎの後に出たもの | 13:20〜14:00Z の `backend_call_failed` 0（13:44Z に supervisor が引き継ぎなしで起動し直した） |
+
+```sh
+dagq events --all --full --since 2026-09-30T08:00:00Z --until 2026-09-30T10:40:00Z --limit 20000 \
+  | jq -r '.events[] | select(.kind | IN("runtime_error", "recovery_requested", "workspace_created", "backend_call_failed"))
+           | "\(.created_at[11:19]) \(.kind) \(.run_id // "" | .[0:8]) \((.payload | tostring)[0:120])"'
+dagq events --all --full --kind backend_call_failed --since 2026-09-30T00:00:00Z --until 2026-10-01T16:00:00Z --limit 2000 \
+  | jq -r '.events[] | "\(.created_at[0:19]) \(.payload.op) \(.payload.attempt)/\(.payload.max_attempts) load \(.payload.load_avg | floor)"'
+```
+
+- 2026-09-30 の 4 つのまとまりは全て Codex のフォールバックの run（窓の claim 31 本が全て `codex`）で、作れた workspace の wrapper が約 5 秒で `wrapper_failed`（`Operation not permitted (os error 1)`）になり、30 秒後に heartbeat が切れた。そのとき長く動いていた wrapper も同じ時刻に死んだ。まとまりは約 30 分おき（30 分 46 秒・31 分 29 秒・30 分 10 秒）で、cmux の止まりではない。原因は event から取れない
+- cmux が答えなかったと event で見える区間は、まとまりとは別の時刻にある: 2026-09-30T01:04:39〜01:14:16（`capture` の `backend_timeout` が続いた約 10 分、load 20〜48）、05:52〜05:53Z（`listed_workspace_ids`、load 99〜165）、2026-10-01T14:39:46・14:40:05（`exists` の 3 回のうち 2 回、約 50〜85 秒）。どれでも wrapper の一斉の死は起きていない
+- 比べると、wrapper が死んだ区間は長くて 80 秒で、heartbeat の切れ（約 30 秒後）で 1 回目を始めると、2 回目（死の最初から約 90 秒後）はどのまとまりの後にも当たる。3 回・60 秒は 1 回の余りを持って覆う。cmux が答えなかった最長の約 10 分は t+120 秒を超えるので覆わない
+- ただし 2026-10-04T04:09Z から worker の wrapper は cmux の workspace を開かない（`workspace_id` が `background:` の、workspace なしの background の wrapper。[非対話のworker](../design/supervisor-lifecycle/headless-worker.md) の「workspaceなしのbackgroundのwrapper」）。`backend_call_failed` は 2026-10-10 以降 0、supervisor は launchd で動く。開き直しは cmux に頼らないので、cmux の止まりが上限を使い切らせる経路は今は無い
+- 上限は「turn を始めずに続けた試み」を数える（`attempts_in_a_row`）。2026-09-30 のように約 30 分おきに wrapper を殺すものがあると、待ちの run は開き直すたびに次のまとまりでまた失い、turn が無いので数が戻らず、2〜3 回のまとまり（約 1 時間）で上限を使い切る。窓の待ちは最大 12 時間あった
+
 ## 3. 判断の基準の案
 
 決めるのは人。以下は planner と人が毎週の見直しで使う案で、数値は 2 の基準値から置いた。
@@ -332,7 +403,8 @@ run の本数は「読んだ範囲と方法」の 4 群。Claude 対話は参考
 F=$(date -u -v-7d +%Y-%m-%dT00:00:00Z); T=$(date -u +%Y-%m-%dT00:00:00Z)   # macOS の date。区切りを固定するなら手で書く
 # 1. event を集め、群を付ける（1 の「event を集める」）
 # 2. 群ごとの claim の数（項目 C）と、経路を interactive にした edit
-# 3. 合わせ込み由来の出来事（項目 A の A1〜A6）。1 件でもあれば dagq events --run <run> --all --full で中身を読む
+# 3. 合わせ込み由来の出来事（項目 A の A1〜A7）。1 件でもあれば dagq events --run <run> --all --full で中身を読む
+#    A7 は開き直しの成功（cause・attempt・lost_turn）、失敗（cause）、上限を使い切った run を読み、stats の headless_session_reopened と合わせる
 # 4. 非対話のための見張りの修正 task（項目 B）。直近 14 日の窓でも数える（F を 14 日前にして git log だけ流し直す）
 # 5. max_waiting に当たった時間（項目 D）と、待つ間の資源（項目 E の E1〜E3）
 # 6. 3 の (1) の条件と、新しい実装が入っていれば (2) の段の条件に当たったかを表にする
