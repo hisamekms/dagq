@@ -357,7 +357,7 @@ C は review が差分の触っていない文書の食い違いを差し戻さ�
 - **差し戻しを減らす次の打ち手は要る。ただし文書ではない**: C の後（全体）の差し戻し 382 回のうち、ドキュメントを含むのは 127 回（33%）で、理由なし 107 回（28%）とドキュメント以外の理由だけ 148 回（39%）が 2/3 を占める。基準ではこの 2 つの和は 38 回（12%）だった。次の打ち手は理由なしの出どころと、ドキュメント以外の理由の内訳（`reason_codes` の code ごと）を調べることで、文書の削減をこれ以上増やすことではない。
 - **B・E・G（request 104、goal 193）の優先度と範囲**: 優先度は上げない（high のまま）。範囲も広げない。ドキュメントだけの差し戻しは 94 回（差し戻しの 25%、review あたり 0.13）・待ち 42.9 時間で残っていて、B・E・G を取り下げる理由にはならないが、差し戻しの多くは文書の外にあり、B・E・G を急いでも差し戻し全体と待ちは大きく減らない。goal 193 の着地 28 件は C の後（全体）の 2 日目に入っていて、B・E・G を含む後の値はこの区間から分けられない。
 - **docs_drift の follow_up**: review は C の後の 6.4 日で docs_drift の follow_up を 352 件（55 / 日）返し、runtime の planner の採用は 111 件（32%）で、51% が重複だった。C は差し戻しを follow_up に置き換えたが、その半分は planner が既にある task と重なると判じたもので、手間は draft の planner に移っている。重複を登録の前に畳むかは別の follow_up にする。
-- **理由の無い差し戻しの出どころを調べる要否**: 要る。`without_reasons` の割合は 20% 前後のまま下がらず、混ざり無し 29.2%・全体 28.0% に上がった（基準 4.0%）。件数も全体で 107 回と基準の 8 倍で、差し戻し / 日の A の前からの増え（+20.94）は、理由なしの +9.06（7.66→16.72 / 日、算術）とドキュメント以外の理由だけの +19.53 の増えから、ドキュメントを含むの -7.66 を引いたもので、理由なしは増えの 2 つの出どころの 1 つ。draft 2616 の材料として、この区間の理由なしの差し戻しを review の種類（AI・プログラム・subagent）と `route` の決め方ごとに分けて調べる。
+- **理由の無い差し戻しの出どころを調べる要否**: 要る。`without_reasons` の割合は 20% 前後のまま下がらず、混ざり無し 29.2%・全体 28.0% に上がった（基準 4.0%）。件数も全体で 107 回と基準の 8 倍で、差し戻し / 日の A の前からの増え（+20.94）は、理由なしの +9.06（7.66→16.72 / 日、算術）とドキュメント以外の理由だけの +19.53 の増えから、ドキュメントを含むの -7.66 を引いたもので、理由なしは増えの 2 つの出どころの 1 つ。この区間の理由なしの差し戻しを review の種類（AI・プログラム・subagent）と `route` の決め方ごとに分けた内訳は「C の後の理由なしの差し戻しの内訳」。
 
 ### C の後の docs_drift の follow_up の重複の内訳（2026-10-24 に読んだ値）
 
@@ -459,7 +459,7 @@ C は review が差分の触っていない文書の食い違いを差し戻さ�
 
 ### C の後のドキュメント以外の理由だけの差し戻しの内訳（2026-10-24 に読んだ値）
 
-「C の後」の「回数と比」のドキュメント以外の理由だけの差し戻し（C の後（全体）148 回・基準 25・A の前 23）を、理由の code・日・review の種類で分け、差し戻しを減らす次の打ち手の対象を決める。理由なしの差し戻し（107 回）の出どころは draft 2616 が持つので扱わない。
+「C の後」の「回数と比」のドキュメント以外の理由だけの差し戻し（C の後（全体）148 回・基準 25・A の前 23）を、理由の code・日・review の種類で分け、差し戻しを減らす次の打ち手の対象を決める。理由なしの差し戻し（107 回）の出どころは「C の後の理由なしの差し戻しの内訳」が持つので扱わない。
 
 #### 期間と入力
 
@@ -618,7 +618,7 @@ review の回（`attempt`）は、C の後（全体）で 1 回目 61・2 回目
 - **148 回の多くは、ドキュメント以外の指摘の全体が増えたのでなく、ドキュメントの理由が差し戻しから外れた結果**: ドキュメント以外の理由を含む差し戻し（併記との和）は review あたり 0.2962（基準）・0.2487（A の前）・0.2503（C の後）で A の前と変わらず、それを受けた run の割合は 39.0%・41.3%・31.7% と下がった。併記は review あたり 0.2601・0.1904・0.0456（180・75・33 件）と減り、その分が review あたりで「だけ」に移った。`design-consistency` の退役（A の前の中）と C（差分の触っていない文書の指摘を follow_up へ）がドキュメントの理由を外した。これは全体（code を合わせた）の値で、code ごとには `acceptance_unmet` が review あたり 0.109→0.169 に増え `test_gap` が 0.175→0.084 に減っていて、code の付け方の変化を含む（下の「交絡」）。差し戻し（全体）/ 日の A の前からの増えのうち、ドキュメント以外の理由の分は review の回数 / 日の増え（61.56→112.97）による。
 - **それでも待ちの多くはここにある**: C の後（全体）のドキュメント以外の理由だけの差し戻しの待ち（M7 (d) と同じ端）は 136 件で合計 209.0 時間（打ち切り 12 件、中央値 1311 秒）で、差し戻しの待ちの合計 312.1 時間の 67%（基準 22 件・10.5 時間、A の前 23 件・51.9 時間）。差し戻しの待ちを減らすなら、文書でなくこの中身を減らす。
 - **次の打ち手の対象（上位の code と review の種類）**: code は `acceptance_unmet`（event の 67.6%）と `code_defect`（56.1%）、次いで `test_gap`（32.4%）・`repo_rule_violation`（30.4%）。review の種類は、全体の review が単独で差し戻す「親だけ」57（38.5%、`primary_code` は `acceptance_unmet` 31・`code_defect` 15）と、`receipt-evidence` が `send_back` の 73（49.3%）・`test-rules` の 39（26.4%）。差し戻しの 59%（87）は 2 回目以降の review で、親だけでは 84%（48）。
-- **既にあるものが持つ分**: `receipt-evidence`・`test-rules` の指摘の上位の規則（手元の検証の `A-219`・`A-066`、stress の `A-071`・`A-223`、判断と境界の test の `A-262`、待ちの上限の `A-137`）は、区間の後の 2026-10-23（UTC、main の commit の時刻）に着地した task 3240（review のプログラムが通した verify を worker の手元の根拠に求めない、ADR-t3240-1）・3241（`scripts/check-local-gates.sh`）・3257（local-checks.md の receipt の前の test の規則の点検）・3258（`scripts/check-test-rules.sh` のプログラムの review）が減らす向きの打ち手で、新しい打ち手は足さず、着地の後に同じ内訳で数え直す（follow_up、`measurement`）。2 回目以降の差し戻しの回数の上限は task 2599・3033（ADR-t2599-1）が持ち、回数そのものは減らさない。理由なしの 107 回は draft 2616。
+- **既にあるものが持つ分**: `receipt-evidence`・`test-rules` の指摘の上位の規則（手元の検証の `A-219`・`A-066`、stress の `A-071`・`A-223`、判断と境界の test の `A-262`、待ちの上限の `A-137`）は、区間の後の 2026-10-23（UTC、main の commit の時刻）に着地した task 3240（review のプログラムが通した verify を worker の手元の根拠に求めない、ADR-t3240-1）・3241（`scripts/check-local-gates.sh`）・3257（local-checks.md の receipt の前の test の規則の点検）・3258（`scripts/check-test-rules.sh` のプログラムの review）が減らす向きの打ち手で、新しい打ち手は足さず、着地の後に同じ内訳で数え直す（follow_up、`measurement`）。2 回目以降の差し戻しの回数の上限は task 2599・3033（ADR-t2599-1）が持ち、回数そのものは減らさない。理由なしの 107 回は「C の後の理由なしの差し戻しの内訳」。
 - **新しく要るもの**: 全体の review の `acceptance_unmet`・`code_defect`（親だけで 2 回目以降が 84%）を減らす打ち手の形は、2 回目以降の指摘が前の回の review の見た差分に既にあった箇所（前の回の取りこぼし）か、前の回の直しが入れた箇所かで変わる（取りこぼしなら 1 回目に出し切らせる review の側、直しが入れたものなら worker の側）。今の入力では理由と差分の箇所を突き合わせられないので、それを数えて打ち手の形を決める task を follow_up にする（`measurement`）。goal 193（B・E・G）の範囲は広げない（文書の削減ではこの内訳は減らない）。
 - **交絡**: 増えた時期（10-17〜10-21）に理由の code を着地の判定に使う変更（2599・2684・2600・2601）と手元の検証の記録の変更（2588・2623〜2626）が着地していて、code の割合の変化（`acceptance_unmet` の増え・`test_gap` の減り）は code の付け方の変化を含む。打ち手の対象は 1 つの code でなく、`acceptance_unmet`・`code_defect`・`test_gap` を合わせた中身の指摘として読む。
 
@@ -681,8 +681,133 @@ review の回（`attempt`）は、C の後（全体）で 1 回目 61・2 回目
 - **打ち手は review の側（1 回目に出し切らせる）を主にし、worker の側は今は足さない**: 判じられた理由の 73%（22 / 30、R の 46.8%）が前の回の review の見た差分に既にあった箇所で、20 task に散る。混在の event は 1（2.1%）だが、判じられた理由を 2 つ以上持つ event がその 266921 の 1 つだけなので、2 つの区分が event ごとに分かれるかはこの数では言えず、打ち手の形は表 1 の割合で選ぶ。今の全体の review の prompt（`src/application/prompt/run_review.rs`）は reasons に指摘を 1 つずつ並べ、verdict を決める指摘を先に置くよう求めるが、差分の上の差し戻す指摘を 1 回で出し切り後の回に残さないことは求めていない。打ち手の形は、全体の review の prompt に、差分の上で今の回に差し戻す指摘を（verdict を決めるものだけでなく）全部返し、後の回に回さないことを求める指示を足すこと。前の回の review が verdict を返さずに止まった 3 件は prompt では減らない（review job のやり直しの側）。
 - **2 回目以降の review を前の回の直しの差分に絞る形は選ばない**: 取りこぼしには並行の上書きや記録の消失の `code_defect`（278783・279275・261139 など）が含まれ、絞ると欠陥を着地させる。2 回目以降の回数と上限の後の判定は task 2599・3033（ADR-t2599-1）が持ち、回数の上限と上限の後の人の承認を決めるが、2 回目以降の差し戻しの数は減らさない。
 - **worker の側**: 直しが入れた指摘は 8 件（R の 17.0%）で 6 task に寄り、worker の prompt の subagent review が既にある。新しい打ち手は足さず、review の側の着地の後の数え直しで割合が上がれば改めて決める。
-- **既にあるものが持つ分**: subagent（`receipt-evidence`・`test-rules`）の指摘は task 3240・3241・3257・3258、理由なしの差し戻しは draft 2616 が持ち、この 48 回（親だけ）とは重ならない。goal 193（B・E・G）の範囲は広げない。
+- **既にあるものが持つ分**: subagent（`receipt-evidence`・`test-rules`）の指摘は task 3240・3241・3257・3258、理由なしの差し戻しは「C の後の理由なしの差し戻しの内訳」が持ち、この 48 回（親だけ）とは重ならない。goal 193（B・E・G）の範囲は広げない。
 - 実装は follow_up にする（receipt の follow_up、category `improvement`）。効果は着地の後の同じ長さの区間で、同じ選び方・同じ数え方の表 1 の取りこぼしの件数と割合を数え直して確かめる。
+
+### C の後の理由なしの差し戻しの内訳（2026-10-26 に読んだ値）
+
+「C の後」の「回数と比」の理由なしの差し戻し（`without_reasons`、C の後（全体）107 回・28.0%、基準 13 回・4.0%）を、review の種類・`route` の決め方・verdict と payload の形・`attempt`・日で分け、`reasons` が空になる経路を src/ の review の verdict の組み立てと照らす。時間は測らない。
+
+#### 期間と入力
+
+- 期間は「C の後（全体）」[2026-10-16T14:10:16.350Z, 2026-10-22T23:46:16.350Z)。入力は「C の後」が M7 に使った `events-run-2026-10-16T14:10:16.350Z_2026-10-22T23:46:16.350Z-0.json`（1000）・`-1.json`（789）の 2 頁（「区分」の dir、新しく保存した file は無い）。
+- 基準からの増えの出どころを見るためだけに、基準の `events-run-2026-10-05T15:03:00Z_2026-10-12T00:38:00Z-0.json`（1000）・`-1.json`（742）の 2 頁と A の前の `events-run-2026-10-09T05:38:07.865Z_2026-10-15T15:14:07.865Z-0.json`（917）の 1 頁（「C の後」の表の同じ file）も読んだ。
+- 選び方: main の commit `59931db0dd57fdbd27633cb961a256571ba1f104`（`scripts/docs-metrics.py` の最後の変更は `69695d58a64c8d7cf596f31535d31abcf0b954a8` で、M7 (h) を足しただけで (a)〜(g) の関数は変えていない）の script の `load_events`・`send_back`・`doc_reasons` を worker の一回きりの `python3 -I` から読み込み、`[since, until)` の `review_finished` のうち `send_back` が差し戻しとし、`doc_reasons` の返す理由の列が空のものを選んだ。C の後（全体）は review 723・差し戻し 382・理由なし 107 で、M7 の `without_reasons`（107）に一致した。同じ選び方の基準 13・A の前 49・C の前 5・混ざり無し 19 も、「C の後」の表の M7 の値に一致した。
+- 数えた集計は repository に置いていない。
+
+#### review の種類ごと
+
+review の種類は `route.parent` と `route.agents[].destination` の `send_back` で分ける排他の区分（「C の後のドキュメント以外の理由だけの差し戻しの内訳」と同じ）。プログラムの review は `review_finished` を残さない（下の「経路」）ので行に出ない。
+
+| review の種類 | 理由なし（N = 107） | 参考: 差し戻し（全体、382） |
+| --- | --- | --- |
+| 親だけ | 0 | 94 |
+| subagent だけ | 107（100%） | 110 |
+| 両方 | 0 | 178 |
+| route なし | 0 | 0 |
+| 計 | 107 | 382 |
+
+subagent だけの差し戻し 110 のうち理由なしでない 3（213246・254098・268551）は、親の verdict が `concern` で `route.parent` が `land` のもので、M7 はその親の `reasons`（差し戻した理由ではない）を理由に数えている。
+
+`send_back` の subagent の組（排他、和は N）:
+
+| `send_back` の subagent | event |
+| --- | --- |
+| `receipt-evidence` | 78 |
+| `test-rules` | 11 |
+| `receipt-evidence`・`test-rules` | 10 |
+| `adr-rules` | 2 |
+| `receipt-evidence`・`security` | 2 |
+| `builtin:security` | 1 |
+| `config-rules`・`receipt-evidence` | 1 |
+| `adr-rules`・`receipt-evidence` | 1 |
+| `adr-rules`・`receipt-evidence`・`test-rules` | 1 |
+| 計 | 107 |
+
+subagent ごと（重複を許す）は `receipt-evidence` 93・`test-rules` 22・`adr-rules` 4・`security` 2・`builtin:security` 1・`config-rules` 1。
+
+#### route の決め方ごと
+
+107 event とも `route` を持ち（M7 の `by_route`）、`route` の欄は `destination`・`parent`・`parent_lighter`・`agents` の 4 つだけ。
+
+| `route` の決め方 | event |
+| --- | --- |
+| `destination` = `send_back`、`parent` = `land`、`parent_lighter` = true、`send_back` の agent 1 つ | 92 |
+| 同、`send_back` の agent 2 つ | 14 |
+| 同、`send_back` の agent 3 つ | 1 |
+| `parent` が `send_back` か `ask` のもの | 0 |
+| 計 | 107 |
+
+`agents[].escalated_because` は全て `null`（`concern` の判定で決まった agent は無い）。`send_back` の agent の 123 entry は全て `agents[]` の `verdict` が `revise`・`status` が `completed`。
+
+#### verdict と payload の形ごと
+
+| payload の形 | event |
+| --- | --- |
+| `verdict` = `pass`、`reasons` = `[]`、`reason_codes` = `[]`、`primary_code` = `null`、`follow_ups` 無し | 76 |
+| 同、`follow_ups` あり（全て code `docs_drift`、計 56 件） | 31 |
+| `reasons` が無い・`null`・配列でない | 0 |
+| `verdict` が `revise` か `concern` | 0 |
+| 計 | 107 |
+
+指摘は全て `agents[].reasons` にある: `send_back` の agent の `reasons` の和は 147（event あたり 1 が 73・2 が 28・3 が 6）で、`reasons` が空で `summary` だけの agent は 0。この 147 の文を M7 (c) の名指しで読むと、ドキュメントを含む 11 event・ドキュメントだけ 10 event になる（agent の `reason_codes` は規則の ID で `docs_drift` を持たないので、名指しだけ）。基準の 13 では 6・1、A の前の 49 では 21・11。
+
+#### attempt ごと
+
+| `attempt` | event |
+| --- | --- |
+| 1 | 44 |
+| 2 | 32 |
+| 3 | 14 |
+| 4〜5 | 11 |
+| 6 以上 | 6 |
+| 計 | 107 |
+
+3 回目以降の 31 のうち 23 は task 2599（run を通した自動の手直しの上限、2026-10-17T19:55Z の着地）の後の event で、上限の後の判定（下の「経路」）に回ったものを含みうる。どれが上限の後だったかは `revise_limit_judged` が入力に無いので分けられない。
+
+#### 日ごと（UTC）
+
+10-16 は 14:10Z から、10-22 は 23:46Z までの日。review と差し戻し（全体）は「C の後のドキュメント以外の理由だけの差し戻しの内訳」の「日ごと」と同じ値。
+
+| 日 | review | 差し戻し（全体） | 理由なし | 同 ÷ review | 同 ÷ 差し戻し |
+| --- | --- | --- | --- | --- | --- |
+| 2026-10-16 | 44 | 26 | 8 | 0.182 | 30.8% |
+| 2026-10-17 | 96 | 49 | 13 | 0.135 | 26.5% |
+| 2026-10-18 | 120 | 63 | 10 | 0.083 | 15.9% |
+| 2026-10-19 | 95 | 53 | 14 | 0.147 | 26.4% |
+| 2026-10-20 | 133 | 73 | 24 | 0.180 | 32.9% |
+| 2026-10-21 | 113 | 69 | 17 | 0.150 | 24.6% |
+| 2026-10-22 | 122 | 49 | 21 | 0.172 | 42.9% |
+| 計 | 723 | 382 | 107 | 0.148 | 28.0% |
+
+日ごとの振れはあるが、区間の頭から理由なしは review あたり 0.08〜0.18 にあり、C の後のある時期に増えたのではない。
+
+#### 経路（reasons が空になる理由）
+
+- **全体の review が `pass` で subagent が `revise` の review（107 / 107）**: run の review は全体の review の job と、paths で選ばれた subagent ごとの job を並列に流す。`src/application/supervise/execution/landing.rs` の `judge_review` は、`src/domain/review_jobs.rs` の `assemble`（全体の review の verdict に agents の結果を足すだけ）の verdict の `reasons`・`reason_codes`・`primary_code` を `review_finished` に書き、agents の結果は `agents` に、行き先は `src/domain/review_subagents.rs` の `route`（親と各 agent の行き先の最も重いもの）の `VerdictRoute::event_value` で `route` に書く。全体の review が `pass` で `reasons` を返さないと、`review_finished` の `reasons` は空で、差し戻した理由は `agents[].reasons` にだけある。
+- **worker には理由が届く**: 差し戻す先は `act_on_verdict` → `act_on_agents` で、`combined_verdict`（同じ file）が `src/domain/mod.rs` の `ReviewVerdict::sent_back_findings` で、`route.parent` が `route.destination` と同じときだけ親の `reasons` を、`route.deciding()` の agent の `reasons`（無ければ `summary`）を agent の名を付けて並べ、`send_revise` がそれを revise の依頼と `revise_requested` の `reasons` に載せる。理由なしの差し戻しは worker が理由なしで直されたのではなく、M7 (c) が `review_finished` の `reasons`（全体の review のものだけ）しか読まないことによる。
+- **review の上限の後の判定**: `send_revise` は上限を使い切った run を `past_revise_limit` → `judge_past_revise_limit` に回し、同じ `sent_back_findings` の理由で着地か `approve_landing` かを決める。`review_finished` はその前に `judge_review` が書くので、上限の後でも `reasons` の形は変わらず、空になる経路を足さない。ただし上限の後に着地した review も `route.destination` は `send_back` のままで、M7 (b) は差し戻しに数える。
+- **プログラムの review**: `go_on_with_programs`（`landing.rs`）は、プログラムが変更を拒んだとき `review_programs_finished` に理由を書いて `send_revise` で返し、`review_finished` を書かない。M7 の入力（`review_finished`）に入らないので、理由なしにもどの差し戻しにも数えない。
+- **全体の review が差し戻す経路**: 親だけ・両方の 272 はどれも `reasons` が 1 つ以上だった。`ReviewVerdict::sent_back_findings` は `reasons` の空の親の判定を `summary` で補うが、`review_finished` の `reasons` は補わないので、親が `revise` で `reasons` を返さなければ理由なしになりうる。この区間には 0 件。
+
+#### 基準からの増えの出どころ
+
+| 区間の部分 | review | 差し戻し | 理由なし | 同 ÷ 差し戻し |
+| --- | --- | --- | --- | --- |
+| 基準の task 1903 の着地の前 [2026-10-05T15:03:00Z, 2026-10-11T08:42:11.975Z) | 563 | 221 | 0 | 0.0% |
+| 基準の task 1903 の着地の後 [2026-10-11T08:42:11.975Z, 2026-10-12T00:38:00Z) | 129 | 100 | 13 | 13.0% |
+| A の前の task 1903 の着地の前 | 51 | 29 | 0 | 0.0% |
+| A の前の task 1903 の着地の後 | 343 | 219 | 49 | 22.4% |
+| C の後（全体） | 723 | 382 | 107 | 28.0% |
+
+task 1903（`run_integrated` の `created_at` 2026-10-11T08:42:11.975Z、commit `f5ab9aefd9558dc28463cbb68559db0659468fa5`）が、run の review を全体の review の job と subagent ごとの job に分けて並列に流し、最も重い行き先を機械で取る形にした。それより前は subagent が全体の review の job の中で動き、全体の review がその指摘を自分の `reasons` に入れて返していた（その仕組みは task 1904、commit `aae8adfecc72ae696f80686160a73cc4e53aab18` が消した）。基準の task 1903 の前の差し戻し 221 のうち、`send_back` の agent を持つ 190 は全て `route.parent` も `send_back` で、その `reasons` には agent の指摘を agent の名で名指す文（例 `(architecture-boundaries)`）のものもあった（25 event）。基準と A の前の理由なしは全て task 1903 の着地の後にあり、前には 0 件。基準の 4.0% は、6.4 日のうち最後の 0.66 日だけが今の形だった値。
+
+#### 判断
+
+- **増えの出どころ**: 理由なしの差し戻しは全て「全体の review が `pass`、subagent が `revise`」の review で、`reasons` が空なのは review の形（task 1903 の並列の job）と M7 (c) の読む欄の組み合わせによる。基準 4.0%→C の後 28.0% の増えは、基準の大半が task 1903 の前の形だったことと、subagent だけが差し戻す review の割合（差し戻しのうち、task 1903 の後の基準 15 / 100・A の前 58 / 219・C の後 110 / 382 の 15.0%・26.5%・28.8%）の増えによる。後者の理由は測っていないが、C（全体の review が差分の触っていない文書の指摘を差し戻さない）の後に全体の review が `pass` を返す review が増えた向きと合う。理由なしの中身は `receipt-evidence`（93 / 107）の手元の検証・stress・E2E の根拠の指摘が主で、そこは「C の後のドキュメント以外の理由だけの差し戻しの内訳」の「既にあるものが持つ分」（task 3240・3241・3257・3258）が減らす向き。
+- **runtime の直し: 不要**: worker には `sent_back_findings` で subagent の理由が届き、上限の後の判定も同じ理由を読む。`review_finished` は全体の review の `reasons` と `agents[].reasons` を分けて残していて、情報は欠けていない。
+- **M7 の定義の直し: 要る（follow_up）**: M7 (c) が `review_finished` の `reasons` だけを読むので、task 1903 の後の区間では subagent だけの差し戻しの理由を数えず（107 回）、`concern` で着地に回った親の `reasons` を差し戻した理由に数える（3 回）。この 107 だけを `agents[].reasons` で読み直すとドキュメントを含むは 11・だけは 10 増える（両方・親だけの差し戻しの読み直しで変わる分は数えていない）。定義を `sent_back_findings` と同じ組み立て（`route.parent` = `route.destination` のときだけ親の `reasons`、`route` で `send_back` の agent の `agents[].reasons`）に直し、基準・A の前・C の前・C の後の区間を同じ入力で流し直す。上限の後に着地した review を差し戻しに数えること（入力に `revise_limit_judged` が要る）と、プログラムの review の差し戻しを数えないことを定義に書くかも、そこで決める。
+- **次の打ち手の対象選び**: 理由なしは独立の出どころではなく subagent（主に `receipt-evidence`）の差し戻しなので、差し戻しを減らす打ち手の対象は「C の後のドキュメント以外の理由だけの差し戻しの内訳」の subagent の行に足して読む。理由なしだけを減らす runtime の打ち手は足さない。
 
 ## 区分
 
