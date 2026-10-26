@@ -1,0 +1,18 @@
+{
+ "window": [
+  "2026-09-26",
+  "2026-10-13T16:53:31Z"
+ ],
+ "claims": 1266,
+ "first_with_ready_at": {
+  "event": 141488,
+  "at": "2026-10-08T21:06:32.756Z"
+ },
+ "classes": {
+  "implementation": {
+   "n": 121,
+   "median_h": 2.5,
+   "p90_h": 47.5
+  }
+ }
+}

@@ -20,6 +20,7 @@ tags:
 - [着地の検証でcoverageの計測をやめたときの短縮の見積もり](coverage-at-landing.md)（task 967）
 - [dagq.tomlの[e2e] pathsでworkerのe2eを狭めた前後の、runtimeのrunのe2eの時間とworkの時間](e2e-narrowing-measurement.md)（goal 66、task 1026）
 - [dagq.tomlの[e2e] pathsでhostのe2eを最も多く起こすadapters.rsを、runが触れた箇所が境目か純粋かで数えたSpikeと、分けない結論](e2e-adapters-trigger-spike.md)（goal 139、task 3494）
+- [Spikeを含む計画の効果の指標（実装の着地までの総時間・前提の誤りによる手戻り・区分ごとのclaim待ち・plannerの枠の占有）の定義と、過去の前例からの基準値と比較の条件](spike-plan-baseline.md)（goal 96、task 1499）
 - [着地中にworkerのrunのCPUの優先度を下げたときの着地の検証の時間・workerの遅れ・loadの測定と、着地の枠を分ける効果の見積もり直し](landing-lane-cpu-share.md)（goal 65、task 961）
 - [新しいrunのworktreeに温まったtargetをAPFSのcloneで入れたときのbuildの短縮の見積もり](worktree-seed.md)（goal 65、task 968）
 - [build scriptのrerun-if-changedをworktreeに依らない形にしたときの、cloneしたtargetでのdagqのcrateのbuildの短縮の測定](build-script-rerun-paths.md)（goal 36、task 1359）

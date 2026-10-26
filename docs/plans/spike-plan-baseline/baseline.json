@@ -1,0 +1,2813 @@
+[
+ {
+  "key": "P1",
+  "goal": 51,
+  "spikes": [
+   553
+  ],
+  "why": "spike: の名の task。結果を読んで人の planner が goal 51 を作った",
+  "implementation": [
+   574,
+   575,
+   576,
+   578,
+   579,
+   580
+  ],
+  "others": [
+   631,
+   740,
+   741,
+   772,
+   944,
+   1754,
+   1780
+  ],
+  "start": "2026-09-26T09:29Z",
+  "first_spike_done": "2026-09-26T12:07Z",
+  "plan": {
+   "end": "2026-09-28T10:03Z",
+   "open": false,
+   "total_h": 48.6,
+   "wait_h": 0.0,
+   "without_wait_h": 48.5
+  },
+  "goal_span": {
+   "end": null,
+   "open": true,
+   "total_h": 723.7,
+   "wait_h": 16.7,
+   "without_wait_h": 707.0
+  },
+  "replan_gap_h": 0.1,
+  "with_spike": 0,
+  "after_spike": 6,
+  "claims_after_mark": 0,
+  "claims_total": 7,
+  "rework_tally": {
+   "F.plan_review.other": 1,
+   "F.run.other": 5,
+   "S+I.run.other": 1
+  },
+  "rework": [
+   {
+    "kind": "review_revise",
+    "id": 14327,
+    "primary": null,
+    "codes": [],
+    "text": "report・スクリプト・データ漏れの検査（check_no_leak）・receipt の結論の要点は受け入れ条件を満たしている。直すのは report の「限界」の手戻りの件数（21 → 18）が表・内訳と食い違っている 1 点だけ。 / docs/plans/spike-predictor-replay.md の「限界」で task に由来する手戻りを「21 件」としているが、同じ report の手戻りの表の見出し（77 件中 18 件）、原因の内訳（衝突+concern 5、衝突+検証の失敗 3、検証の失敗だけ 7、concern だけ 3 で合計 18）、evaluate.py の intrinsic の定義はどれも 18 件になる。21 件は衝突と kill だけの 3 件（kill だけ 2、衝突+kill 1）も数えた値に見える。「限界」の件数を 18 に直し、summary.json の intrinsic_n と合っているか確かめる。",
+    "premise": false,
+    "judged": "read",
+    "reading": "report の件数の食い違い",
+    "task": 553,
+    "role": "S",
+    "at": "2026-09-26T12:03Z"
+   },
+   {
+    "kind": "receipt_failed",
+    "id": 51005,
+    "codes": [],
+    "text": "Implemented task 631 in commit eb2ce0370d1a4216f2662021aca0edb2f813dd0a. Each submit records proposal_submitted with proposal_id, planner_id and opened_event_id in the submission transaction, including held retries without task transitions. planner_submission reads historical and explicit links and the selected session_closed model/effort; plan-quality adds planner_model/planner_effort without renaming or changing existing KPI strata. Selection is the last submission before each review starts (before ready for bypass); future resubmissions cannot rewrite prior review attribution. Updated provi",
+    "premise": false,
+    "judged": "read",
+    "reading": "Claude の停止で Codex の worker が代行した run で、sandbox が ps・e2e を拒んだ（計画の後の環境の変化で、計画の前提の誤りではない）",
+    "task": 631,
+    "role": "F",
+    "at": "2026-09-30T08:20Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 111442,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift",
+     "local_slip",
+     "repo_rule_violation"
+    ],
+    "text": "The code and tests meet the acceptance criteria. Each submit records proposal_submitted with the planner and its open span, the new planner_model= / planner_effort= strata use the last submit before review, missing spans go to unknown, and existing strata and KPI names are unchanged. It needs revise because two design docs that list what `submit` records, persistence.md and domain-model.md, were not updated for the new proposal_submitted event, and the receipt's search missed them. / docs/design/persistence.md is stale. Its `proposals` section (line 116) lists what `submit` in src/infrastructu",
+    "premise": false,
+    "judged": "code",
+    "task": 631,
+    "role": "F",
+    "at": "2026-10-06T04:29Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 111456,
+    "primary": "code_defect",
+    "codes": [
+     "code_defect",
+     "docs_drift",
+     "local_slip",
+     "test_gap"
+    ],
+    "text": "Task 631 adds proposal_submitted, the planner_model= and planner_effort= strata, tests and the design-doc updates, and leaves the existing strata and KPI names unchanged. The supervisor's queue-hold restart records a proposal_submitted with no planner, which overrides the real planner's span and moves restarted reviews into unknown. That needs a fix, a test for the restart path and an update to queue-hold.md. / A null-planner retry wipes out the real planner's attribution. record_submitter (src/infrastructure/proposals.rs) writes proposal_submitted on every submit, including the retry of a hel",
+    "premise": false,
+    "judged": "code",
+    "task": 631,
+    "role": "F",
+    "at": "2026-10-06T04:39Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 111472,
+    "primary": "docs_drift",
+    "codes": [
+     "code_defect",
+     "docs_drift",
+     "local_slip",
+     "test_gap"
+    ],
+    "text": "The planner attribution, the new strata, the tests and the six design documents meet the acceptance criteria, and seven of the eight review agents pass. Left to fix: the plugin kpi.md list of strata and three code comments are stale, and a same-transaction task_submitted can wrongly go through the legacy attribution path. / The plugin reference plugins/claude-dagq/skills/dagq/reference/kpi.md:17 still lists the plan.* strata as (`model=`, `effort=`, `origin=`, `follow_up_depth=`, `related=`, `revise_count=`). This task adds `planner_model=` and `planner_effort=` to every plan.* KPI (src/domain",
+    "premise": false,
+    "judged": "code",
+    "task": 631,
+    "role": "F",
+    "at": "2026-10-06T04:56Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1613,
+    "codes": [
+     "other",
+     "verification_rule"
+    ],
+    "text": "task 631 は src/（src/domain/plan_quality.rs・src/domain/kpi/window.rs と、proposal と planner の区間を結び付ける記録）と、plugin の plugins/claude-dagq/skills/dagq/reference/kpi.md を変える。しかし verification_commands が docs/development/task-registration.md の「推奨の組み合わせ」に足りない。次の 5 つを足すこと: 1) runtime の行が求める sh scripts/check-design-docs.sh と sh scripts/check-design-sentences.sh（docs/design/provider-lifecycle.md を変えるため）。2) src/ を変える task に求める sh scripts/check-layer-deps.sh と sh scripts/check-context-boundaries.sh。3) plugin の skill を変える行が求める cargo test --locked --test plugin（tests/plugin.rs が skill の大きさと参照を検査する）。4) llvm-cov ",
+    "premise": false,
+    "judged": "code",
+    "task": 631,
+    "role": "F",
+    "at": "2026-10-12T04:37Z"
+   },
+   {
+    "kind": "canceled_after_submit",
+    "id": 944,
+    "codes": [],
+    "text": "{\"from\": \"submitted\", \"to\": \"canceled\"}",
+    "premise": false,
+    "judged": "read",
+    "reading": "後の人の方針（goal 92 で対話の経路を廃止）で要らなくなった",
+    "task": 944,
+    "role": "F",
+    "at": "2026-10-02T17:09Z"
+   }
+  ],
+  "claims": [
+   {
+    "task": 553,
+    "cls": "spike",
+    "recorded_class": null,
+    "claimed": "2026-09-26T10:03Z",
+    "how": "derived",
+    "wait_h": 0.6,
+    "after_mark": false
+   },
+   {
+    "task": 574,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-26T13:35Z",
+    "how": "derived",
+    "wait_h": 0.9,
+    "after_mark": false
+   },
+   {
+    "task": 575,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-26T15:24Z",
+    "how": "derived",
+    "wait_h": 1.7,
+    "after_mark": false
+   },
+   {
+    "task": 576,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-27T01:49Z",
+    "how": "derived",
+    "wait_h": 4.1,
+    "after_mark": false
+   },
+   {
+    "task": 578,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-28T08:57Z",
+    "how": "derived",
+    "wait_h": 30.2,
+    "after_mark": false
+   },
+   {
+    "task": 579,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-26T14:57Z",
+    "how": "derived",
+    "wait_h": 0.0,
+    "after_mark": false
+   },
+   {
+    "task": 580,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-27T05:45Z",
+    "how": "derived",
+    "wait_h": 3.0,
+    "after_mark": false
+   }
+  ],
+  "planner": {
+   "count": 0,
+   "open_h": 0.0,
+   "active_h": 0.0,
+   "idle_h": 0.0
+  }
+ },
+ {
+  "key": "P2",
+  "goal": 57,
+  "spikes": [
+   812,
+   864
+  ],
+  "why": "使い捨ての repository で非対話の worker の未測定の点を確かめ、ADR と実装が依存した",
+  "implementation": [
+   813,
+   814,
+   815,
+   816,
+   817,
+   818,
+   819,
+   820,
+   821,
+   1153
+  ],
+  "others": [
+   848,
+   849,
+   852,
+   856,
+   857,
+   858,
+   860,
+   861,
+   862,
+   863,
+   865,
+   866,
+   890,
+   891,
+   892,
+   893,
+   898,
+   957,
+   958,
+   1102,
+   1103,
+   1104,
+   1108,
+   1132,
+   1154,
+   1155,
+   1174,
+   1175,
+   1176,
+   1178,
+   1179,
+   1184,
+   1185,
+   1186,
+   1187,
+   1199,
+   1200,
+   1201,
+   1202,
+   1203,
+   1205,
+   1211,
+   1212,
+   1213,
+   1214,
+   1227,
+   1263,
+   1264,
+   1354,
+   1594,
+   1758
+  ],
+  "start": "2026-09-27T13:23Z",
+  "first_spike_done": "2026-09-27T16:18Z",
+  "plan": {
+   "end": "2026-09-30T02:56Z",
+   "open": false,
+   "total_h": 61.6,
+   "wait_h": 9.0,
+   "without_wait_h": 52.5
+  },
+  "goal_span": {
+   "end": "2026-10-06T12:51Z",
+   "open": false,
+   "total_h": 215.5,
+   "wait_h": 68.5,
+   "without_wait_h": 147.0
+  },
+  "replan_gap_h": 2.5,
+  "with_spike": 8,
+  "after_spike": 2,
+  "claims_after_mark": 0,
+  "claims_total": 12,
+  "rework_tally": {
+   "F.plan_review.other": 1,
+   "F.plan_review.premise": 1,
+   "F.run.other": 13,
+   "F.run.premise": 1,
+   "S+I.plan_review.other": 1,
+   "S+I.run.other": 2,
+   "S+I.run.unknown": 1
+  },
+  "rework": [
+   {
+    "kind": "plan_review_revise",
+    "id": 284,
+    "codes": [],
+    "text": "Task 813 (ADR-t813-2) and task 818 contradict ADR-0047 decision 42 without resolving it. That decision is accepted, and task 361/437 already implement it: when Claude's login lapses or its usage limit is reached, the runtime opens one queue_hold ask per queue (authentication, or cost with subject usage_limit) and stops new claims and headless jobs for the whole queue (docs/design/supervisor-lifecycle/queue-hold.md). Under that rule a Claude usage limit stops the queue instead of switching to Codex, and task 818 sends an 'attention' when both providers are unusable, where decision 42 opens a qu",
+    "premise": false,
+    "judged": "read",
+    "reading": "accepted の決定との食い違い（plan review が着手の前に止めた）",
+    "task": 812,
+    "role": "S",
+    "at": "2026-09-27T13:36Z"
+   },
+   {
+    "kind": "worker_question",
+    "id": 155,
+    "codes": [],
+    "text": "",
+    "premise": null,
+    "judged": "read",
+    "reading": "問いの本文も topic も記録に無い",
+    "task": 816,
+    "role": "I",
+    "at": "2026-09-27T20:05Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 31619,
+    "primary": null,
+    "codes": [],
+    "text": "The fallback is broadly implemented and tested: switching at claim time, switching mid-turn, per-provider holds, the switch limit, records and design docs. But two paths fail the run: a launch failure while the other provider is unusable, and a Codex wall after the switches are used up. Acceptance (3) and ADR-t813-2 say such a run should wait instead, and Codex's hold uses fixed times instead of the reset time. A person needs to decide on these points. / Acceptance (3) and ADR-t813-2 decisions 2 and 6 contradict the code for a turn that fails with `launch` (the agent cannot be started) while t",
+    "premise": false,
+    "judged": "read",
+    "reading": "実装の欠け（受け入れ条件の経路の失敗）",
+    "task": 818,
+    "role": "I",
+    "at": "2026-09-28T01:06Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 31464,
+    "primary": null,
+    "codes": [],
+    "text": "The diff meets acceptance criteria (1)–(5). Claude and Codex headless turns record their tokens (Codex's thread total is turned into per-turn amounts) and their time on the session spans. The claim records the provider, route, codex_version and provider_version. stats and kpi gain provider, route and codex breakdowns without changing the existing ones, a Codex version change becomes a derived:codex_version mark, and tests and design docs cover all of it. Two code-layout slips remain for the worker to fix: a doc comment that ended up on the wrong function in headless_session.rs, and a test plac",
+    "premise": false,
+    "judged": "read",
+    "reading": "コードの配置の小さな漏れ",
+    "task": 819,
+    "role": "I",
+    "at": "2026-09-28T00:12Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 43546,
+    "primary": "local_slip",
+    "codes": [
+     "local_slip"
+    ],
+    "text": "The implementation meets all five acceptance criteria: the Codex worker's ask becomes a run-dir request, the supervisor opens it under the same policy, the answer comes back as the next resume, refusals are recorded, a request opens once even across a crash, other workers and roles are unchanged, and tests/it plus the design docs cover it. The only problem is a doc comment the edit misplaced in asks.rs, which needs moving back before landing. / src/infrastructure/asks.rs: the new helpers `request_taken` and `run_task` were inserted between `ask_event` and its doc comment. The old comment on `a",
+    "premise": false,
+    "judged": "code",
+    "task": 890,
+    "role": "F",
+    "at": "2026-09-29T14:33Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 43562,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "The implementation, the once-only handling, the authorization parity with the CLI and the tests/it coverage meet all five acceptance criteria. manual-smoke.md still says the Codex worker's `dagq ask` does not reach the queue, and the worker should fix that before landing. / docs/design/manual-smoke.md:146 still says the `dagq ask` inside the Codex worker's sandbox does not reach the queue yet, and tells the smoke not to ask the Codex task for an ask. Its reason is a link to the 'まだ無いもの' list in provider-lifecycle, and this diff removed that item from the list. The sentence now contradicts the ",
+    "premise": false,
+    "judged": "code",
+    "task": 890,
+    "role": "F",
+    "at": "2026-09-29T14:35Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 43596,
+    "primary": "adr_design_mismatch",
+    "codes": [
+     "adr_design_mismatch",
+     "code_defect",
+     "other",
+     "test_gap"
+    ],
+    "text": "Codex の worker の dagq ask を run dir への要求にする経路は受け入れ条件をおおむね満たし、tests/it と design もそろっています。ただし supervisor の取り込みが worker の置いた symlink を辿り、sandbox の外の *.json（~/.codex/auth.json や他の run の receipt.json など）を rename できるので、symlink と通常の file でない entry を拒むように直し、inbox への通知の assert も足す必要があります。 / supervisor の取り込み（src/application/supervise/ask_requests.rs の requests_dir・pending・take）は、run dir の `ask-requests` を symlink のまま辿ります。run dir は worker が書ける場所です。RunFiles の is_dir・read_dir・read・rename（src/infrastructure/run_files.rs）はどれも symlink を追います。そのため Codex の worker が sandbox の中で `ln -s ~/.codex \"$RUN_DIR/ask-reque",
+    "premise": false,
+    "judged": "code",
+    "task": 890,
+    "role": "F",
+    "at": "2026-09-29T14:44Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 41273,
+    "primary": "acceptance_ambiguous",
+    "codes": [
+     "acceptance_ambiguous",
+     "acceptance_unmet",
+     "code_defect",
+     "local_slip"
+    ],
+    "text": "Claims, resumes, revises and turns on Codex no longer record a Claude model; each Codex turn reads its model from the rollout without writing anything, and Codex claims stay out of the trial and the Claude strata, with tests and design updated. Runs that switch from Claude to Codex midway still count as Claude runs in the trial and the model= / claude= / group= strata. The task's description counts them as Codex runs, and deciding how to classify these mixed runs needs a person. / Runs that the ADR-t813-2 / task 818 fallback moves from Claude to Codex partway through still count as the claim's",
+    "premise": false,
+    "judged": "code",
+    "task": 892,
+    "role": "F",
+    "at": "2026-09-29T00:46Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 42818,
+    "primary": "local_slip",
+    "codes": [
+     "local_slip",
+     "other"
+    ],
+    "text": "The implementation meets the acceptance criteria. Codex claims and session events record model null with ladder_model and model_unknown, turns read the model read-only from the rollout, Codex runs stay out of the trial, and stats/kpi keep Codex runs out of the Claude strata while Claude runs are unchanged; it is covered by unit tests, the stub-codex tests/it tests and the design docs. One item the person asked to fix, the misplaced doc comment in the measures test, is still misplaced even though the receipt says it was fixed. / The receipt says item (4) from the person's send-back (the misplac",
+    "premise": false,
+    "judged": "code",
+    "task": 892,
+    "role": "F",
+    "at": "2026-09-29T03:58Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 47713,
+    "primary": "test_gap",
+    "codes": [
+     "acceptance_unmet",
+     "test_gap"
+    ],
+    "text": "The implementation, the interactive route left unchanged, the exactly-once exit request, the adopt handling and the docs all meet the criteria. Only the test that criterion (3) requires for the out-of-slot case of the stop answer is missing, and the worker can add it. / Acceptance (3) asks for integration tests of everything in (2), and (2) includes \"a run waiting outside its slot gets the stop only after it is back in one\". The only new test, runtime_headless::a_stop_answer_ends_the_headless_session_and_its_run_goes_to_recovery, never asserts that ordering. The receipt says so itself (\"The sl",
+    "premise": false,
+    "judged": "code",
+    "task": 1104,
+    "role": "F",
+    "at": "2026-09-29T23:35Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 49162,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_ambiguous",
+     "acceptance_unmet",
+     "other"
+    ],
+    "text": "The worker trusts the worktree via `-c` on the worker's exec and resume, which stops `codex exec` from rewriting `~/.codex/config.toml` with a project trust; tests, provider-lifecycle.md and manual-smoke.md are updated. It knowingly leaves the job's headless_command without the argument, against acceptance (2a), so a person should confirm that departure and the changed premise (nux is written only by the TUI). / Acceptance (2a) says the stopping argument must be passed to the worker's exec and resume and also to the job's headless_command. The worker passed `-c projects={\"<worktree>\"={trust_le",
+    "premise": true,
+    "judged": "read",
+    "reading": "計画が置いた前提（nux の書き込み）が実際と違い、受け入れ条件 (2a) から外れた",
+    "task": 1174,
+    "role": "F",
+    "at": "2026-09-30T03:05Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 492,
+    "codes": [
+     "acceptance_ambiguous",
+     "missing_dependency",
+     "wrong_premise"
+    ],
+    "text": "Acceptance (4) tells the worker to write the tests in the tests/it/runtime_stall*.rs files, using their headless stub-wrapper fixture. Those files have no headless fixture: runtime_stall.rs, runtime_stall_end.rs and runtime_stall_recovery.rs never mention headless. The headless stub-wrapper fixture, and task 1104's stalled-ask tests (the stop answer, and a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot), are in tests/it/runtime_headless.rs. As written, the criterion can be met only by building a second fixture, or read two ways by the worker and the review. Change (4) to name the fixt",
+    "premise": true,
+    "judged": "code",
+    "task": 1179,
+    "role": "F",
+    "at": "2026-09-29T23:57Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 48955,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "code_defect"
+    ],
+    "text": "The turn_without_receipt stalled ask, the reopen after `intervene`, the adopt handling, the moved fixtures and the new tests all meet the criteria. The headless long_background and idle_process asks still tell the person to answer `intervene`, even though that option was removed from them. / On headless runs, the stalled asks that recovery.rs opens when a recovery job escalates a long_background or idle_process alert now drop `intervene` from their options (recovery.rs:1564, 1706). Their question text was not changed, though. It still says \"Answer `wait` to leave the session alone, or `interve",
+    "premise": false,
+    "judged": "read",
+    "reading": "文言の残り",
+    "task": 1179,
+    "role": "F",
+    "at": "2026-09-30T02:43Z"
+   },
+   {
+    "kind": "receipt_failed",
+    "id": 49538,
+    "codes": [],
+    "text": "run dirのI/Oをagent_dir::Directoryの記述子に対する操作へ移した。run dirと直下のturns/brokerをlinkとして開かず、通常fileのみをO_NONBLOCKとfstatで確認して上限付きで読む。新規inodeの一時fileをrenameatで公開し、turn出力・検証log・review差分はそのfdに書く。idle/receipt/終了依頼、prompt・Claude設定、診断log、broker設定・後始末も監査して保護した。ask-requestsの取り込みpolicyは維持。designの未実装記述を置換。実装はclean headへcommit済みで、新規テストとstressは成功したが、既存のps/process検査とPodmanを要る検証がsandboxで拒否されたためfailedとして返す。sandbox外の検証executorで確認が必要。",
+    "premise": false,
+    "judged": "read",
+    "reading": "Claude の停止で Codex の worker が代行した run で、sandbox が ps・e2e を拒んだ（計画の後の環境の変化で、計画の前提の誤りではない）",
+    "task": 1184,
+    "role": "F",
+    "at": "2026-09-30T05:47Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 56289,
+    "primary": "code_defect",
+    "codes": [
+     "code_defect",
+     "test_gap"
+    ],
+    "text": "Inside the run dir the no-follow, regular-file-only, bounded I/O meets criteria (1) to (4), with tests and design updates. Outside the run dir, linked host files (install target, broker client, queue DB) are now refused or replaced rather than followed, a regression the worker can fix by applying the file-level checks only under runs/. / The no-follow handling on the last path component reaches past the run directory. The receipt and both design documents describe a boundary where links are refused only under the queue's runs/ and the host's paths are followed. The code applies that rule to di",
+    "premise": false,
+    "judged": "code",
+    "task": 1184,
+    "role": "F",
+    "at": "2026-10-01T18:57Z"
+   },
+   {
+    "kind": "receipt_failed",
+    "id": 49449,
+    "codes": [],
+    "text": "Implemented and committed test-only readiness synchronization for the outside-group timeout test and related limit/silence tests. Replaced the silence warm-up exec with a fresh readiness handshake and kept task 1058 thresholds. Result failed because this Codex sandbox denies ps and signals to detached test children: primary-test stress and the no-surviving-command acceptance could not be verified. No queue, runtime, host configuration or files outside tests/** were changed (apart from this authorized receipt).",
+    "premise": false,
+    "judged": "read",
+    "reading": "Claude の停止で Codex の worker が代行した run で、sandbox が ps・e2e を拒んだ（計画の後の環境の変化で、計画の前提の誤りではない）",
+    "task": 1186,
+    "role": "F",
+    "at": "2026-09-30T05:37Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 60199,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet"
+    ],
+    "text": "6 件の測定と条件の判定は記載されている。着地前に、既に決まった切り替え方針に合わせて文書と receipt の続け方を修正する必要がある。 / task 1200 の note 60084 には、人が条件 2 を待たずに既定を切り替えると決め、ADR と実装を task 1340 に登録済みとある。しかし文書の「続け方」は判断と task の計画を今後の作業とし、receipt の decision follow-up も同じ判断を再提案している。測定上は条件未達と記録したまま、人の決定と task 1340 を反映し、重複する follow-up を除いてほしい。",
+    "premise": false,
+    "judged": "read",
+    "reading": "人の決定を文書に反映していない",
+    "task": 1200,
+    "role": "F",
+    "at": "2026-10-02T03:26Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 86712,
+    "primary": "repo_rule_violation",
+    "codes": [
+     "docs_drift",
+     "local_slip",
+     "other",
+     "repo_rule_violation",
+     "test_gap"
+    ],
+    "text": "The change meets the acceptance: Codex headless worker, resume and revise spans record Claude-shaped work (or work: null with a reason code) and worktime.jsonl lines, stats and timeline include them, the integration and unit tests are there and the design docs are updated. However, the turn-assembly decisions in codex_breakdown are tested only through SQLite, git and wall-clock unit tests, against testing.md / ADR-t1410-1, and a few documents and comments are slightly stale. / This conflicts with the repository's test rule (docs/development/testing.md 「判断と境界のtest」, ADR-t1410-1), which runtime ",
+    "premise": false,
+    "judged": "code",
+    "task": 1354,
+    "role": "F",
+    "at": "2026-10-04T09:07Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 802,
+    "codes": [
+     "incomplete_spec"
+    ],
+    "text": "task 1594 の description と acceptance に、docs/design/domain-model.md の finish_session・end_session の表、非0終了の遷移・last_error・supervision_finished の説明と、docs/design/supervisor-lifecycle/supervise.md の手順8を更新することを追加する。これらは現在、wrapper の非0終了を receipt の有無に関係なく failed と説明しており、提案の変更で古くなる。各 path・節・更新理由を明記し、実際の状態と終了コードの記録に一致することを受け入れ条件に含める。task-registration.md の関連文書指定の規則に基づく修正であり、ask 362・377 でも人は同種の関連設計文書の更新漏れを send_back と判断している。",
+    "premise": false,
+    "judged": "code",
+    "task": 1594,
+    "role": "F",
+    "at": "2026-10-03T14:51Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 96449,
+    "primary": "local_slip",
+    "codes": [
+     "docs_drift",
+     "local_slip",
+     "repo_rule_violation"
+    ],
+    "text": "The implementation meets acceptance (1) to (4). The ADR amends ADR-t813-1 decision 9 and is indexed. The pure function domain::run::session_end_status has unit tests for each case and is called after the wrapper exit is seen, so the order no longer matters. A representative it test is added, and the named design docs match the implementation. Two new ADR links in domain-model.md lack the `../` prefix and are broken; that is a mechanical fix. / docs/design/domain-model.md line 200 (finish_session row) and line 372 (TaskRun.last_error table, 'receiptの無い非0終了' row) link to the new ADR as `adr/2026",
+    "premise": false,
+    "judged": "code",
+    "task": 1594,
+    "role": "F",
+    "at": "2026-10-04T17:49Z"
+   }
+  ],
+  "claims": [
+   {
+    "task": 812,
+    "cls": "spike",
+    "recorded_class": null,
+    "claimed": "2026-09-27T15:49Z",
+    "how": "derived",
+    "wait_h": 2.1,
+    "after_mark": false
+   },
+   {
+    "task": 864,
+    "cls": "spike",
+    "recorded_class": null,
+    "claimed": "2026-09-29T20:21Z",
+    "how": "derived",
+    "wait_h": 16.6,
+    "after_mark": false
+   },
+   {
+    "task": 813,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-27T16:50Z",
+    "how": "derived",
+    "wait_h": 0.5,
+    "after_mark": false
+   },
+   {
+    "task": 814,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-27T16:57Z",
+    "how": "derived",
+    "wait_h": 0.0,
+    "after_mark": false
+   },
+   {
+    "task": 815,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-27T18:06Z",
+    "how": "derived",
+    "wait_h": 0.0,
+    "after_mark": false
+   },
+   {
+    "task": 816,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-27T19:41Z",
+    "how": "derived",
+    "wait_h": 0.0,
+    "after_mark": false
+   },
+   {
+    "task": 817,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-27T19:48Z",
+    "how": "derived",
+    "wait_h": 0.1,
+    "after_mark": false
+   },
+   {
+    "task": 818,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-27T23:33Z",
+    "how": "derived",
+    "wait_h": 0.4,
+    "after_mark": false
+   },
+   {
+    "task": 819,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-27T23:33Z",
+    "how": "derived",
+    "wait_h": 0.4,
+    "after_mark": false
+   },
+   {
+    "task": 820,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-29T03:31Z",
+    "how": "derived",
+    "wait_h": 16.7,
+    "after_mark": false
+   },
+   {
+    "task": 821,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-29T17:45Z",
+    "how": "derived",
+    "wait_h": 14.0,
+    "after_mark": false
+   },
+   {
+    "task": 1153,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-30T02:41Z",
+    "how": "derived",
+    "wait_h": 3.6,
+    "after_mark": false
+   }
+  ],
+  "planner": {
+   "count": 1,
+   "open_h": 0.0,
+   "active_h": 0.0,
+   "idle_h": 0.0
+  }
+ },
+ {
+  "key": "P3",
+  "goal": 73,
+  "spikes": [
+   1061
+  ],
+  "why": "Codex の goal review job が読み取りだけの sandbox で動くかを確かめ、ADR と実装が依存した",
+  "implementation": [
+   1062,
+   1063,
+   1064,
+   1065,
+   1066,
+   1067,
+   1085
+  ],
+  "others": [
+   1086,
+   1087,
+   1091,
+   1094,
+   1095,
+   1101,
+   1110,
+   1114,
+   1115,
+   1123,
+   1124,
+   1133,
+   1287,
+   1764
+  ],
+  "start": "2026-09-28T23:53Z",
+  "first_spike_done": "2026-09-29T01:29Z",
+  "plan": {
+   "end": "2026-09-29T17:52Z",
+   "open": false,
+   "total_h": 18.0,
+   "wait_h": 1.1,
+   "without_wait_h": 16.9
+  },
+  "goal_span": {
+   "end": "2026-10-04T22:26Z",
+   "open": false,
+   "total_h": 142.5,
+   "wait_h": 40.7,
+   "without_wait_h": 101.8
+  },
+  "replan_gap_h": 0.0,
+  "with_spike": 6,
+  "after_spike": 1,
+  "claims_after_mark": 0,
+  "claims_total": 8,
+  "rework_tally": {
+   "F.plan_review.other": 1,
+   "F.run.other": 3,
+   "F.run.unknown": 1,
+   "S+I.plan_review.other": 1,
+   "S+I.plan_review.premise": 1,
+   "S+I.run.other": 1,
+   "S+I.run.premise": 1
+  },
+  "rework": [
+   {
+    "kind": "plan_review_revise",
+    "id": 434,
+    "codes": [
+     "acceptance_infeasible",
+     "adr_conflict",
+     "incomplete_spec",
+     "missing_dependency",
+     "operational_hazard",
+     "task_overlap",
+     "verification_rule",
+     "wrong_premise"
+    ],
+    "text": "task 1061: worker は使い捨ての queue を作れない。worker の role は queue.admin を持たず、`dagq init` は authorization_denied で拒まれる（docs/design/authorization.md の 145・162 行、run の settings の permissions.deny も同じ）。そのため「使い捨て repository に dagq init した queue を作り、goal と完了した task を置く」手順は実行できない。人は ask 195 で案 B（policy は変えず、planner は worker の acceptance に使い捨て queue の手操作を書かない。task 1052 が文書にする）を選んでいる。ask 188（task 983）では同じ理由で worker が止まり、inbox が代わりに打った。直し方: 使い捨て queue を作らずに測る形にする。例えば本番 queue の実在する goal（完了した task を持つもの）を対象にする。goal_review_prompt で prompt を組み立て、codex exec --sandbox read-only に渡し、中から `dagq show` / `goal show --ful",
+    "premise": true,
+    "judged": "code",
+    "task": 1061,
+    "role": "S",
+    "at": "2026-09-28T23:59Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 436,
+    "codes": [
+     "verification_rule"
+    ],
+    "text": "task 1062・1064・1065・1066 の --evidence e2e（required_evidence: [\"e2e\"]）を外す。一律に付けるのは今の AGENTS.md の規則に合わない。commit a494154（2026-09-28T23:59:58Z、この proposal を出し直す約 3 分前に着地）以降、AGENTS.md の「テストの制約」は runtime の task に --evidence e2e を付けないと定めている。e2e が要るかどうかは validating が run の差分と dagq.toml の [e2e] paths から決める。明示してよいのは、[e2e] paths の外でも実 cmux で確かめる必要があると planner が判断したときだけ。plan review の節も、付いているならその理由が description にあるかを見るよう求めている。この 4 本の description にその理由は無い（task は 23:51 に、古い規則のもとで作られた）。1064・1065 は actor の起動を変えるので、差分が [e2e] paths に触れれば runtime が e2e を求める。1062・1066（stats・kpi・記録の欄）は触れない見込みで、e2e を流すだけ無駄になる。直し方: 4",
+    "premise": false,
+    "judged": "code",
+    "task": 1061,
+    "role": "S",
+    "at": "2026-09-29T00:04Z"
+   },
+   {
+    "kind": "receipt_failed",
+    "id": 43476,
+    "codes": [],
+    "text": "固定バイナリが task 1065 をまだ含まない。~/.local/bin/dagq の build 識別子は 0.4.0-dev+005c3675（task 1065 の着地 338d7a5 の直前の commit）で、verify の 1 本目の gate（git merge-base --is-ancestor 338d7a5 005c367）が exit 1。task の指示どおり dagq.toml と actor-model.md は変えずに返す。自動更新（up --auto-update）か dagq install で固定バイナリが 338d7a5 以降になってから retry すれば、同じ内容（dagq.toml の [roles.goal_review] provider = \"codex\" とコメント、actor-model.md の記述の更新）で進められる。",
+    "premise": true,
+    "judged": "read",
+    "reading": "計画が置いた前提（固定バイナリが先行の task を含む）が claim の時点で成り立たなかった",
+    "task": 1067,
+    "role": "I",
+    "at": "2026-09-29T14:27Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 43051,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "The code, tests and headless-worker.md meet all five acceptance criteria: stop_turn lists the descendants before killing the group, every stop path goes through it, the three new tests cover timeout, exit request and a turn that ends by itself, and no existing Claude test was touched. One fix is left: the Codex section of provider-lifecycle.md still says stopping the group is enough. / docs/design/provider-lifecycle.md:193 (the Codex headless worker section, 呼び出し) still says 'process groupを分ける（SIGTERMで止めたcodexはcommandを残すので、groupごと止める）'. That implies stopping the turn's group also stops Codex's",
+    "premise": false,
+    "judged": "code",
+    "task": 1085,
+    "role": "I",
+    "at": "2026-09-29T09:16Z"
+   },
+   {
+    "kind": "receipt_failed",
+    "id": 49940,
+    "codes": [],
+    "text": "実装とコミットは完了したが、必須 E2E の2件が未通過なので failed。引き継いだ supervisor の rebuild_own_runs の先頭で、自分の token の未完了 plan/goal review を候補に依存せず interrupted（stopped for the supervisor handoff）で閉じ、read_before と既存 close 経路で session_closed を記録する。候補が残れば attempt を増やさず review を再開する。task 758 の begin_* の stale-owner 判定は変更せず、独立した token 限定の経路を追加した。関連74テスト・stress15回・fmt・clippyは通過。作業ツリーは clean。起動した検証コマンドは全て終了済み。",
+    "premise": null,
+    "judged": "read",
+    "reading": "必須の e2e が通らなかった理由が summary に無い",
+    "task": 1087,
+    "role": "F",
+    "at": "2026-09-30T06:48Z"
+   },
+   {
+    "kind": "receipt_failed",
+    "id": 50037,
+    "codes": [],
+    "text": "Implementation committed with a clean worktree, but result is failed because three required existing observer process-cleanup tests cannot pass under this worker sandbox, which denies ps. Observer and throughput review now write output.out/output.err via existing Streams::Files. Throughput parses only stdout through job_reply. Observer classifies stdout plus newline plus stderr through the AgentSignals supplied by composition, preserving Claude auth/usage holds without a direct Claude dependency. Launch arguments, result parsing and queue behavior are otherwise unchanged. History remains event",
+    "premise": false,
+    "judged": "read",
+    "reading": "Claude の停止で Codex の worker が代行した run で、sandbox が ps・e2e を拒んだ（計画の後の環境の変化で、計画の前提の誤りではない）",
+    "task": 1095,
+    "role": "F",
+    "at": "2026-09-30T06:57Z"
+   },
+   {
+    "kind": "receipt_failed",
+    "id": 50119,
+    "codes": [],
+    "text": "Added and committed the Codex goal review timeout regression test. Worktree is clean. Cannot report success because this worker sandbox denies ps, preventing validation of descendant termination; all stress iterations failed for that restriction. Runtime unchanged.",
+    "premise": false,
+    "judged": "read",
+    "reading": "Claude の停止で Codex の worker が代行した run で、sandbox が ps・e2e を拒んだ（計画の後の環境の変化で、計画の前提の誤りではない）",
+    "task": 1115,
+    "role": "F",
+    "at": "2026-09-30T07:02Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 461,
+    "codes": [
+     "acceptance_conflict",
+     "incomplete_spec"
+    ],
+    "text": "The acceptance says every `dagq ask` a stub runs under tests/ must pass --cmux with a fake executable (\"すべて\"). tests/e2e.rs:236 is the exception on purpose: its stub runs `ask` through the real cmux, and line 239 fails if the JSON lacks \"notified\": true. Read literally, the criterion would break that e2e, or make the worker change tests/e2e.rs, which is in dagq.toml's [e2e] paths. Narrow the scope to the stubs of the `it` binary (tests/it/**). Say that tests/e2e.rs keeps the real cmux because it checks the notification, and leave it unchanged.",
+    "premise": false,
+    "judged": "code",
+    "task": 1124,
+    "role": "F",
+    "at": "2026-09-29T16:50Z"
+   },
+   {
+    "kind": "canceled_after_submit",
+    "id": 1124,
+    "codes": [],
+    "text": "{\"duplicate_of\": 1128, \"from\": \"submitted\", \"to\": \"canceled\"}",
+    "premise": false,
+    "judged": "read",
+    "reading": "重複（duplicate_of 1128）",
+    "task": 1124,
+    "role": "F",
+    "at": "2026-09-29T17:20Z"
+   }
+  ],
+  "claims": [
+   {
+    "task": 1061,
+    "cls": "spike",
+    "recorded_class": null,
+    "claimed": "2026-09-29T01:17Z",
+    "how": "derived",
+    "wait_h": 1.2,
+    "after_mark": false
+   },
+   {
+    "task": 1062,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-29T01:17Z",
+    "how": "derived",
+    "wait_h": 1.2,
+    "after_mark": false
+   },
+   {
+    "task": 1063,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-29T02:34Z",
+    "how": "derived",
+    "wait_h": 1.1,
+    "after_mark": false
+   },
+   {
+    "task": 1064,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-29T02:40Z",
+    "how": "derived",
+    "wait_h": 0.0,
+    "after_mark": false
+   },
+   {
+    "task": 1065,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-29T13:33Z",
+    "how": "derived",
+    "wait_h": 0.3,
+    "after_mark": false
+   },
+   {
+    "task": 1066,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-29T03:03Z",
+    "how": "derived",
+    "wait_h": 1.3,
+    "after_mark": false
+   },
+   {
+    "task": 1067,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-29T14:27Z",
+    "how": "derived",
+    "wait_h": 0.0,
+    "after_mark": false
+   },
+   {
+    "task": 1085,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-09-29T09:03Z",
+    "how": "derived",
+    "wait_h": 7.5,
+    "after_mark": false
+   }
+  ],
+  "planner": {
+   "count": 4,
+   "open_h": 0.1,
+   "active_h": 0.1,
+   "idle_h": 0.0
+  }
+ },
+ {
+  "key": "P4",
+  "goal": 65,
+  "spikes": [
+   961,
+   968,
+   969
+  ],
+  "why": "spike で効果の見込みを測り、進めるかを決める（受け入れ条件が明示）",
+  "implementation": [],
+  "others": [
+   1353,
+   1355,
+   1365
+  ],
+  "start": "2026-10-01T23:28Z",
+  "first_spike_done": "2026-10-02T07:47Z",
+  "plan": {
+   "end": null,
+   "open": true,
+   "total_h": 589.7,
+   "wait_h": 1.3,
+   "without_wait_h": 588.4
+  },
+  "goal_span": {
+   "end": null,
+   "open": true,
+   "total_h": 589.7,
+   "wait_h": 1.3,
+   "without_wait_h": 588.4
+  },
+  "replan_gap_h": null,
+  "with_spike": 0,
+  "after_spike": 0,
+  "claims_after_mark": 0,
+  "claims_total": 3,
+  "rework_tally": {
+   "S+I.plan_review.premise": 1,
+   "S+I.run.other": 5
+  },
+  "rework": [
+   {
+    "kind": "plan_review_revise",
+    "id": 544,
+    "codes": [
+     "acceptance_conflict",
+     "incomplete_spec",
+     "stale_adr_reference",
+     "wrong_premise"
+    ],
+    "text": "task 962 の context には「961 の測定で進めると決めたときに submit する」とある。goal 65 の受け入れ条件も ADR を「進めると決めた場合」に限っており、961・968・969 の受け入れ条件はどれも「決定はしない」としている。ところが 962 は 961 への依存だけで同じ proposal に入っている。このままでは 961 が着地したら測定の結果に関係なく run が始まり、accepted の ADR（ADR-0071 決定 5 の amends）を書いて方針を決めてしまう。進めるかを決める人も手順も task のどこにも無い。直し方は 2 つのどちらか。(a) 962 を proposal から外して draft に戻し、961（と 969）の結果を見て進めると決めた後に出し直す。(b) 人がすでに進めると決めたのなら、その決定（日付・根拠）を 962 の context に書く。そのうえで、961 の結果が効果の小さいことを示したら failed で返すといった条件を acceptance に入れる。 / task 962 は 2026-09-28 の分析を前提に書かれていて、ADR-t1233-2（task 1239、accepted 2026-10-02）を扱っていない。この ADR で、review の pass と着地の間に ",
+    "premise": true,
+    "judged": "code",
+    "task": 961,
+    "role": "S",
+    "at": "2026-10-01T23:33Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 60605,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet"
+    ],
+    "text": "記録の集計と条件別の表はありますが、指定された複数周の比較は完了していません。測定を続ける環境、または結論の扱いを決める必要があります。 / タスクは条件を交互に複数周測るよう求めていますが、比較に使えたのは各条件1回だけです。2周目はディスク逼迫により打ち切られ、本番の着地も約17分控えられました。この状態で示した効果の幅（+27〜44%）を判断材料として受け入れるか、安全な環境で測り直すかは人の判断が必要です。",
+    "premise": false,
+    "judged": "read",
+    "reading": "ディスクの逼迫で 2 周目を打ち切った（host の一時的な状態）",
+    "task": 961,
+    "role": "S",
+    "at": "2026-10-02T05:48Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 61127,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet"
+    ],
+    "text": "測定と見積もり、安全性、言語に依らない見立ては記載されています。disk の結果を条件別の表にすれば受け入れ条件を満たします。 / docs/plans/worktree-seed.md には条件別の build 時間と clone 時間の表がありますが、disk の値は本文中の箇条書きだけです。受け入れ条件が求める条件ごとの disk の表を追加してください。",
+    "premise": false,
+    "judged": "read",
+    "reading": "表の欠け",
+    "task": 968,
+    "role": "S",
+    "at": "2026-10-02T07:59Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 61314,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet"
+    ],
+    "text": "待ちの分布、e2eを分けた集計、規模別の見積もりと方式の候補は記載されている。squash後に検証するtreeの指定を修正すれば、受け入れ条件を満たせる。 / docs/plans/landing-batching.md の5.2節は、runごとのsquash commitを順に積みながら「まとまりの先頭のtree」で検証するとしている。これでは後続runの変更が検証対象に入らず、まとめて検証する案にならない。積み終えたtreeで検証する記述に直す必要がある。",
+    "premise": false,
+    "judged": "read",
+    "reading": "分析の誤り",
+    "task": 969,
+    "role": "S",
+    "at": "2026-10-02T08:13Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 61361,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet"
+    ],
+    "text": "文書の構成と方式の候補は揃っているが、e2e 開始前の着地待ちを e2e 待ちに分類したため、中心となる測定値を修正する必要がある。 / docs/plans/landing-batching.md は、着地依頼から e2e 開始までを全て「e2e の待ち」として slot の順番待ちから除いている。しかし task 1215 の記録では、`landing_queued` が 06:10:57、`run_e2e_started` が 07:29:50 で、その間に `run_e2e_waiting` はない。文書自身も、この時間帯は着地 slot が空いていたと記している。この約4,733秒を e2e 待ちとしたため、要求された slot の順番待ちの分布と、それを到着時刻に使う待ちの見積もりがずれる。e2e の待ちとして除く区間をイベントに基づいて区切り、分布と模擬を再計算する必要がある。",
+    "premise": false,
+    "judged": "read",
+    "reading": "分析の誤り",
+    "task": 969,
+    "role": "S",
+    "at": "2026-10-02T08:15Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 61398,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet"
+    ],
+    "text": "必要な項目と変更範囲はそろっていますが、batchingの待ちの見積もりに、e2e未完了のrunを先に投入する誤りがあります。 / docs/plans/landing-batching.md の3.2節は、到着時刻を「landing_queued＋e2eの待ち・実行時間」として模擬しています。しかしe2e前の待ちがあるrunは、この時刻にはまだ検証を終えておらず、5.6節の「e2eを終えてからまとめる」という方式ではbatchに入れられません。例えばtask 1215は06:10に依頼され、e2e完了は07:36ですが、模擬では約06:17に到着します。実際にbatchへ入れられる時刻を使って待ちの見積もりを数え直してください。",
+    "premise": false,
+    "judged": "read",
+    "reading": "分析の誤り",
+    "task": 969,
+    "role": "S",
+    "at": "2026-10-02T08:29Z"
+   }
+  ],
+  "claims": [
+   {
+    "task": 961,
+    "cls": "spike",
+    "recorded_class": null,
+    "claimed": "2026-10-02T02:44Z",
+    "how": "derived",
+    "wait_h": 2.9,
+    "after_mark": false
+   },
+   {
+    "task": 968,
+    "cls": "spike",
+    "recorded_class": null,
+    "claimed": "2026-10-02T05:37Z",
+    "how": "derived",
+    "wait_h": 5.7,
+    "after_mark": false
+   },
+   {
+    "task": 969,
+    "cls": "spike",
+    "recorded_class": null,
+    "claimed": "2026-10-02T08:01Z",
+    "how": "derived",
+    "wait_h": 0.2,
+    "after_mark": false
+   }
+  ],
+  "planner": {
+   "count": 1,
+   "open_h": 0.0,
+   "active_h": 0.0,
+   "idle_h": 0.0
+  }
+ },
+ {
+  "key": "P5",
+  "goal": 77,
+  "spikes": [
+   1180,
+   3336,
+   3337,
+   3338,
+   3339
+  ],
+  "why": "Codex の対話の session の前提を測り、ADR が依存した",
+  "implementation": [
+   1181
+  ],
+  "others": [
+   3278,
+   3331,
+   3332,
+   3333,
+   3334,
+   3335,
+   3352,
+   3401,
+   3402,
+   3403,
+   3404,
+   3422,
+   3426,
+   3431,
+   3443,
+   3448,
+   3449,
+   3450,
+   3470,
+   3478
+  ],
+  "start": "2026-09-29T23:55Z",
+  "first_spike_done": "2026-10-24T00:41Z",
+  "plan": {
+   "end": "2026-10-24T17:26Z",
+   "open": false,
+   "total_h": 593.5,
+   "wait_h": 6.2,
+   "without_wait_h": 587.3
+  },
+  "goal_span": {
+   "end": null,
+   "open": true,
+   "total_h": 637.3,
+   "wait_h": 8.6,
+   "without_wait_h": 628.6
+  },
+  "replan_gap_h": 0.0,
+  "with_spike": 1,
+  "after_spike": 0,
+  "claims_after_mark": 6,
+  "claims_total": 6,
+  "rework_tally": {
+   "F.plan_review.other": 7,
+   "F.run.other": 5,
+   "S+I.plan_review.other": 1,
+   "S+I.plan_review.premise": 3,
+   "S+I.run.other": 7,
+   "S+I.run.premise": 1
+  },
+  "rework": [
+   {
+    "kind": "plan_review_revise",
+    "id": 491,
+    "codes": [
+     "acceptance_conflict",
+     "acceptance_infeasible",
+     "adr_conflict",
+     "wrong_premise"
+    ],
+    "text": "Task 1180 cannot do item 1 as written. The description has the worker run `dagq watch --role inbox` against the production queue, on the grounds that watch is read-only. But the worker's session and the Codex it starts inherit DAGQ_ROLE=worker, and the policy gives `queue.watch` only to user, inbox, planner, supervisor and observer. docs/design/authorization.md line 195 says worker, wrapper, integrator and the jobs are refused (tasks 1150 and 1151 are about recording that refusal). AGENTS.md also forbids removing DAGQ_ROLE to get around a refusal. Fix: in item 1, check Codex's background mecha",
+    "premise": true,
+    "judged": "code",
+    "task": 1180,
+    "role": "S",
+    "at": "2026-09-29T23:56Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1598,
+    "codes": [
+     "adr_conflict",
+     "stale_adr_reference",
+     "verification_rule",
+     "wrong_premise"
+    ],
+    "text": "The task contradicts ADR-t2159-1, which is accepted: dagq no longer calls or assumes cmux, the person opens the inbox with `dagq inbox` (decision 2), and `up` no longer opens the inbox (decision 3). Even so, the description and acceptance (3) send the manual smoke's checks to cmux: 'up が Codex の inbox を開く', 'Codex の inbox が dagq watch --role inbox を background で回して attention に気づく', '実 cmux の capture での画面の判定' and '後始末の cmux workspace-group delete'. The fix: write the smoke so that a person starts a Codex inbox with `dagq inbox` (or the start argument the ADR picks) in their own terminal against",
+    "premise": true,
+    "judged": "code",
+    "task": 1180,
+    "role": "S",
+    "at": "2026-10-12T04:12Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 314199,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "docs_drift"
+    ],
+    "text": "8項目の測定、plannerへの適用範囲、手動スモークと後始末の記録は揃っている。ただし CODEX_HOME の測定制約からの逸脱の扱いと、既に決定済みの inbox principal を未決としている記述を整理する必要がある。 / 項目8では CODEX_HOME=<scratch>/empty-codex-home を指定して未ログインを再現しているが、task の Context は「CODEX_HOME は変えない」と明示している。人の永続設定を変更していないこととは別に、測定プロセスの CODEX_HOME は変更されている。この測定を制約の例外として受け入れるかは判断が必要であり、制約内で確認した結果と区別して記録する必要がある。 / 「ADR（task 1181）で決めることの候補」5 は inbox の principal を AI actor と人のどちらとして認可するかを未決としているが、accepted の ADR-t3102-1 決定2〜4 は、user を親として inbox session に token を発行し、inbox の principal で認可・記録することを既に決めている。項目7と候補5で、この既決事項と未実装部分を区別し、後続ADRで決める問いを整理してほしい。",
+    "premise": true,
+    "judged": "read",
+    "reading": "task の制約（CODEX_HOME を変えない）のままでは未ログインを再現できなかった",
+    "task": 1180,
+    "role": "S",
+    "at": "2026-10-23T21:05Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 317030,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "測定結果・代替手段・手動スモークへの引き継ぎは概ね揃っていますが、planner の書き込み経路について現在の実装と食い違う結論があり、修正が必要です。文書検査は、リンク検査の一時ファイル生成を避けた同等の実行を含め、通過しました。 / docs/plans/codex-inbox-spike.md:469 は、planner の goal・task 登録が「queue service のユースケースとして送る今の経路にそのまま乗る」としていますが、現在の src/main.rs の client_request はこれらの登録を扱わず、host の planner は DB を直接開きます。docs/design/queue-service-host-cli.md「送る範囲」と ADR-t3102-2 決定6でも、これらの書き込みの service 経由化は移行の段4です。socket への到達の結果を適用できることと、登録用ユースケースが未実装であることを分け、planner への適用にも書き込みの service 経由化が必要だと修正してください。",
+    "premise": false,
+    "judged": "code",
+    "task": 1180,
+    "role": "S",
+    "at": "2026-10-24T00:35Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 317119,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "測定8項目、ADR候補、plannerへの適用範囲、設定の前後記録と後始末は揃っています。手動スモークでinboxに人用wrapperを使わせる箇所を修正してください。 / docs/development/manual-smoke.md の「Codex の inbox のスモーク」手順4は、inbox に `tq status --role inbox` を実行させています。しかし参照先で定義された tq は `env -u DAGQ_ROLE -u DAGQ_QUEUE ...` を含む人用 wrapper です。inbox の身元の環境を保つ guardrail と食い違い、実際の inbox の呼び出し経路を確認できません。人の terminal では tq を使い、inbox 内では手順1で設定した PATH の `dagq status --role inbox` を直接実行するよう修正してください。",
+    "premise": false,
+    "judged": "code",
+    "task": 1180,
+    "role": "S",
+    "at": "2026-10-24T00:38Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 2318,
+    "codes": [
+     "incomplete_spec",
+     "verification_rule"
+    ],
+    "text": "tasks 3336〜3339 の測定条件を docs/development/task-registration.md「plan reviewが当てはめる規則」に合わせて補ってください。時間と起動回数の上限はありますが、条件ごとの測定回数・比較の順序（交互に流すか）と、計算式が不要な理由が明記されていません。3336 は trust 指定と未指定 hook、3337 は列挙した各コマンド形、3338 は設定欄と上書き引数の有無、3339 は hook が使える場合と使えない場合について、測る条件・回数・結果表の列を定めてください。定性的な機能確認なので比率や時間差を計算せず、反復・交互実行を行わないのであれば、その理由を明記すれば足ります。既存の打ち切り上限と unresolved を成功とする扱いは維持してください。",
+    "premise": false,
+    "judged": "code",
+    "task": 3336,
+    "role": "S",
+    "at": "2026-10-24T17:43Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 330271,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "docs_drift"
+    ],
+    "text": "hookを限定したtrustが働くという観察は元ログと整合している。ただし、各回起動前の設定ファイルの測定が不足し、後続への推奨にも条件Bと矛盾する説明がある。 / 受け入れ条件(2)と測定方法(4)が求める各回の起動前の記録が不足している。文書と元の snap.log にあるのは before-all 1回と各回の終了後だけで、回2〜5の起動前の測定値はない。各回終了後の値が一致したことと、全回それぞれの前後を測ったことを区別し、不足する測定を補って結果表・判定・receiptを合わせる必要がある。 / 「後続の計画への推奨」の task 3334 にある「画面が出たら dagq の hook の hash が今の Codex と合っていないしるし」という説明は、同じ文書の条件Bの結果と食い違う。Bでは dagq の hash が合っていても project の未承認hookによって画面が出ている。画面の表示だけで不一致と判断せず、確認対象のhookを見分ける推奨に修正し、receiptの同じ説明も合わせる必要がある。",
+    "premise": false,
+    "judged": "read",
+    "reading": "測定の記録の不足",
+    "task": 3336,
+    "role": "S",
+    "at": "2026-10-24T18:55Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 330552,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "測定記録は条件A・B・Cと再現確認、設定ファイルの前後比較を備え、holdsの判定を支えている。ただし、後続計画の推奨がSessionStartの到達から他のhookのtrust状態まで推定しており、修正が必要。 / 「後続の計画への推奨」の3334にある「SessionStartが届いていれば、確認に残ったのはdagqが渡していないhook」という判定は成り立たない。trustはhookごとのkeyとhashで独立に決まるため、SessionStartのhashだけが合い、PreToolUse・Stop・SessionEndのいずれかが不一致でもSessionStartは届く。この手順ではdagqのguardrailや記録用hookの不稼働を見落とす。SessionStartの到達で確認できる範囲をそのhookに限定し、確認対象の一覧や各hookの状態を確認できるまでは他のdagq hookの不一致を除外しない手順に直すこと。receiptのsummary・spike_resultにも同じ推論があるため合わせて修正する。追加測定は必須ではない。",
+    "premise": false,
+    "judged": "code",
+    "task": 3336,
+    "role": "S",
+    "at": "2026-10-24T19:02Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 331420,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "回3・回5のログと結果表はholds判定を裏づけ、環境・設定の前後・receiptのspike_resultも揃っている。後続計画への推奨にある照合範囲とmanual-smokeの期待結果の矛盾を修正する必要がある。 / 「後続の計画への推奨」のholds節で、3331にはClaudeと同じ先頭だけの照合を推奨する一方、3334のmanual-smokeには包んだ形も拒まれることを要求している。「判定」の条件では、先頭だけの照合なら(b)〜(e)は通ると明記しており、この推奨同士を満たせない。3334の確認内容を3331で選ぶ照合範囲に対応づけ、包んだ形はその範囲に応じた結果を確認する記述に直すこと。測定で確認した広い照合と、実装に推奨する照合を区別すれば修正できる。",
+    "premise": false,
+    "judged": "code",
+    "task": 3337,
+    "role": "S",
+    "at": "2026-10-24T19:40Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1377,
+    "codes": [
+     "stale_adr_reference",
+     "verification_rule",
+     "wrong_premise"
+    ],
+    "text": "task 1181 の verify に sh scripts/check-doc-links.sh・sh scripts/check-doc-frontmatter.sh・sh scripts/check-design-docs.sh を追加する。docs/development/task-registration.md「plan reviewが当てはめる規則」は、docs/** を paths に含む ADR タスクにもこの3本を必須としている。既存の検査は残す。 / task 1181 の説明2と先に読む文書を、ADR-t1233-5 決定4・5と docs/design/queue-service.md に合わせる。ADR-t813-3 決定3の「run dirへの要求」は既に amends され、現在の Codex worker の dagq ask は queue service が principal で認可する経路である（src/infrastructure/codex.rs にも明記）。旧経路を比較候補に残すなら歴史的な案と明示し、現行の service 経由の方法も inbox の代行権限と比較して判断するよう直す。",
+    "premise": true,
+    "judged": "code",
+    "task": 1181,
+    "role": "I",
+    "at": "2026-10-08T12:39Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 324458,
+    "primary": "docs_drift",
+    "codes": [
+     "acceptance_unmet",
+     "docs_drift"
+    ],
+    "text": "決定とamendsの構成は揃っていますが、現在のservice経由化の状況と、個人設定を変更しない前提の記載に修正が必要です。ADR番号とfrontmatter日付の検査は通りました。 / Contextで「request addなどがまだDBを直接開く」、Consequencesでplannerの登録のservice経由化を未着地の前提としている点を修正してください。現在はsrc/main.rsのqueue_write/client_requestとapplication::queue_writesがrequest add・add・goal add・submitをserviceへ送り、docs/design/queue-service-host-cli.md「計画のユースケース」にも記載されています。spike測定時の状況と現在の状況を区別し、残っているanswer・ask close等を前提に実装順の理由を書いてください。 / 人のCodex設定を書き換えずにTUIを起動できるという前提の未確認事項が抜けています。spike「task 1174の結果と ~/.codex/config.toml」は、既存設定によって今回書かれなかっただけのtui.model_availability_nuxと、空の設定では実際に書かれたscreen_reader_detection_doneを報",
+    "premise": false,
+    "judged": "code",
+    "task": 1181,
+    "role": "I",
+    "at": "2026-10-24T10:31Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 328752,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "local_slip"
+    ],
+    "text": "主要な方針、amends、未確認事項、実装前のdesignへの反映は確認できました。決定ごとの測定根拠の対応づけと、内部参照番号の修正が必要です。 / 受け入れ条件(1)は各決定にspikeの該当項目を引くことを求めていますが、決定4（控えの扱い）と決定5（観測可能性）には対応するspike項目への参照がありません。既存ADRへの参照に加え、判断の根拠となる測定項目と、未確認の部分をそれぞれ対応づけてください。 / 決定1の「どちらで選んだかを起動の記録に残す（決定4）」は参照番号が誤っています。記録を定めるのは決定5なので、参照を直してください。",
+    "premise": false,
+    "judged": "read",
+    "reading": "根拠の対応づけと参照番号の誤り",
+    "task": 1181,
+    "role": "I",
+    "at": "2026-10-24T17:22Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 2317,
+    "codes": [
+     "incomplete_spec",
+     "missing_dependency",
+     "verification_rule"
+    ],
+    "text": "task 3333 に task 3332 への依存を追加してください。3333 は Codex の選択を解禁しますが、現状では 3332 より先に着地でき、実行ファイル・login の起動前確認と Claude 起動禁止時の扱いが未実装のままになります。ADR-t1181-1「実装の順」が解禁前に求める (b) には、3332 が担当する利用不可時の確認も含まれます。 / task 3331・3333 の実装前提の未確認部分を先に解決してください。docs/plans/codex-inbox-spike.md は、TUI が人の設定を書かなかった結果を既存の設定欄がある環境に限定し、空の設定では screen_reader_detection_done が書かれ、model_availability_nux の書き込みを止める引数も未確認としています。ADR-t1181-1 も token の sandbox 内への到達、自動 compaction 後の記録などを未確認としています。起動引数や入力 fixture の unit test だけではこれらの実挙動を保証できません。短いコード・公式資料の読み取りで解決するものは根拠を context に残し、実験が必要なものは execution_class=spike として先に提出してください。その結果を読む再計画まで依存する実装",
+    "premise": false,
+    "judged": "code",
+    "task": 3331,
+    "role": "F",
+    "at": "2026-10-24T17:34Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 2366,
+    "codes": [
+     "incomplete_spec"
+    ],
+    "text": "3332・3333のdescriptionに、主に触る実装ファイルを追記すること。task-registration.md「runtimeのtaskの主なファイル」は、pathsを宣言しないruntime taskにこの記載を求めている。3332はsrc/application/lifecycle.rsとproviderの選択・控えの判断を持つファイル、3333は同ファイル、src/domain/sessions.rs、src/infrastructure/sessions.rsと採用する集計・表示の入口などを、sourceに照らして具体的に名指すこと。現在のexpected_filesは過去のSpikeの証拠ファイルを推定しており、今回の実装範囲を示していない。pathsはruntime用の制限なしのままでよい。",
+    "premise": false,
+    "judged": "code",
+    "task": 3331,
+    "role": "F",
+    "at": "2026-10-25T00:19Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 341141,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "code_defect"
+    ],
+    "text": "設定エラー時のClaudeへのフォールバックと、人のconfig.tomlの欄の誤検出に修正が必要です。いずれも今回の受け入れ条件内で直せる実装上の欠けです。 / src/application/lifecycle.rs:2258は、エラー文に「[roles.inbox]」が含まれる場合だけ起動を拒みます。しかし、[roles.inbox] に provider = \"gemini\" を指定した場合、parse_configのエラーは「value of provider: unknown Provider: gemini」となり、この条件に入りません。その結果、設定を捨ててClaudeで起動し、受け入れ条件(2)の「実装の無いproviderは設定の誤り」を満たしません。inboxの設定エラーを構造的に識別して拒み、この入力で起動・記録しないテストを追加してください。receiptのfollow-upへ回せる項目ではありません。 / has_screen_reader_fieldは複数行文字列の状態を追わないため、例えば config.toml が developer_instructions = \"\"\"\\n[tui]\\nscreen_reader_detection_done = true\\n\"\"\" の場合、文字列内の例示を実際の設定と誤認してcheck_user_configが",
+    "premise": false,
+    "judged": "read",
+    "reading": "実装の欠け",
+    "task": 3331,
+    "role": "F",
+    "at": "2026-10-25T07:27Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 341327,
+    "primary": "code_defect",
+    "codes": [
+     "acceptance_unmet",
+     "code_defect"
+    ],
+    "text": "選択禁止、hook ごとの trust、guardrail、socket の配線と受け入れ条件の根拠は確認できました。人の設定の事前確認に、参照先のずれと有効な TOML キーの誤判定が残っています。 / user_config_file/check_this_user_config は相対パスの CODEX_HOME を呼び出し元の cwd で読みますが、inbox_command は main checkout を cwd にして Codex を起動します。別の worktree やサブディレクトリから CODEX_HOME=relative で呼ぶと、事前確認と Codex が読む config.toml が異なります。確認した側に欄があっても実際の設定には無く、選択の解禁後に自動の書き足しを防げません。確認と起動で同じ絶対パスを使うか、起動先の cwd を基準に確認し、このケースをテストしてください。現在の選択禁止は維持されていますが、受け入れ条件(6)の起動経路として修正が必要です。 / TomlScan::basic（400–427行）は引用符付きキーのエスケープを展開しません。例えば [\"\\u0074ui\"] の下に screen_reader_detection_done = true がある有効な TOML は、Codex には [tui] の設定として読まれます",
+    "premise": false,
+    "judged": "code",
+    "task": 3331,
+    "role": "F",
+    "at": "2026-10-25T07:39Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 341576,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "docs_drift"
+    ],
+    "text": "起動経路、hookごとの既知hash、guardrail、sandboxの配線、Codex選択の停止と検証記録を確認しました。designに残った引数・値の書き写しを修正する必要があります。 / 受け入れ条件(9)と文書の配置規則に反し、designへの新規追記にコードの綴りが残っています。up-down.md「dagq inbox」は起動引数の `--provider`・`--model` を、actor-model.md「provider」は `source` の具体値 `argument` を書き写しています。優先順位と境界の説明・コードへの入口は残し、具体的な綴りと値は定義のそばのdoc commentに寄せてください。",
+    "premise": false,
+    "judged": "read",
+    "reading": "design の書き写し",
+    "task": 3331,
+    "role": "F",
+    "at": "2026-10-25T07:48Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 345026,
+    "primary": "adr_design_mismatch",
+    "codes": [
+     "acceptance_unmet",
+     "adr_design_mismatch",
+     "docs_drift",
+     "repo_rule_violation"
+    ],
+    "text": "起動・区間・compaction の記録、provider 別集計、Codex 起動の解禁には実装とテストの根拠があります。ただし、compose の判断追加と design への記録フィールドの転記を修正する必要があります。 / src/compose/observation.rs の inbox_guardrail に、最新の起動と到達イベントの ID を比較して reached を決める判断が追加されています。これは docs/design/architecture.md の L7（compose は配線だけを持ち、判断を持たない）に反します。比較と記録の有無による判断を application の副作用のない関数へ移し、到達記録なし・起動以前・起動以後を unit test で確認してください。 / actor-model.md の「記録」に、inbox_opened の launch・source とその意味、hook ごとの key・hash、session_opened への転記先という記録フィールドの説明を追加しています。受け入れ条件 (6) と文書の配置規則は、記録の欄を design に置かず定義のそばの doc comment に置くよう求めています。design は起動と区間の関係・境界・欠けの読み方・実装への入口に絞り、欄の説明は既存の doc comme",
+    "premise": false,
+    "judged": "code",
+    "task": 3333,
+    "role": "F",
+    "at": "2026-10-25T13:20Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 2389,
+    "codes": [
+     "incomplete_spec"
+    ],
+    "text": "task 3403 は ADR-t1181-1 決定1を名指すため、task-registration.md「ADRを書くtask」の(a)に従い、description に「ADRを書かない。ADR-t1181-1 決定1を保ち、design の表現だけを直す。決定を変える必要が分かったら ask で止める」と明記してください。現状はリンクと優先順を残す指定だけで、登録時に必須のADRの扱いが確定していません。",
+    "premise": false,
+    "judged": "code",
+    "task": 3403,
+    "role": "F",
+    "at": "2026-10-25T07:53Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 2391,
+    "codes": [
+     "incomplete_spec",
+     "task_overlap",
+     "verification_rule"
+    ],
+    "text": "3404 の起動記録の変更は、ready の 3333 が description で求める「PreToolUse の hook を渡したことと実際に動いたことを分けて記録する」と部分重複しています。acceptance に無いことは作業範囲から外れた根拠になりません。記録の実装は 3333 に残し、3404 はその記録を読む judge・表示・互換性の検証と関連 design に絞ってください。「3333 が実装していれば不足だけ足す」という条件付きの重複も解消してください。 / 3405 は actor-model.md「provider」の変更を条件付きで含み、実際に同節は現在の片方向の model 検査を説明しています。対称の検査へ変える際の更新対象と理由を明記し、verify に sh scripts/check-frontmatter-dates.sh・sh scripts/check-doc-links.sh・sh scripts/check-doc-frontmatter.sh を追加してください。task-registration.md は docs の変更を挙げる runtime task にもこの 3 本を必須としています。 / 3404・3405 は現行 ADR の決定に触れますが、description に ADR の扱いが確定されていません。task-r",
+    "premise": false,
+    "judged": "code",
+    "task": 3404,
+    "role": "F",
+    "at": "2026-10-25T08:21Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 416409,
+    "primary": "test_gap",
+    "codes": [
+     "repo_rule_violation",
+     "test_gap"
+    ],
+    "text": "provider ごとの判定、hook を渡したことと到達記録の分離、旧形式の互換、design の変更は受け入れ条件に沿っています。ただし、SQLite を使う unit test と手元検証の不足・手順違反を修正する必要があります。 / src/compose/observation.rs の the_inbox_guardrail_shows_how_the_newest_open_was_guarded は、tempdir に SQLite ファイルを作るため、testing.md「判断と境界のtest」が禁じる unit test になっています。受け入れ条件(4)の表示の判断は副作用のない unit test で確かめ、SQLite を通す配線の確認は tests/it の代表1ケースへ移してください。 / 変更した unit test の stress が未実行です。receipt の「No tests/it changed, so no stress run」は local-checks.md「stress」と一致せず、レビュー資料でも stress は required です。追加・変更した unit test を --lib で規定の5周繰り返し、最終 tree で check-local-gates.sh を通してください。 / status・doctor の",
+    "premise": false,
+    "judged": "code",
+    "task": 3404,
+    "role": "F",
+    "at": "2026-10-25T22:32Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 2401,
+    "codes": [
+     "acceptance_ambiguous",
+     "acceptance_conflict",
+     "incomplete_spec"
+    ],
+    "text": "task 3422 の acceptance (2) と「When a provider cannot be used」の変更指示は、--no-claude の下では常に inbox が開かないとも読め、description 冒頭の「Codex を選べればそれで」と矛盾する。Codex が使えなければ開かず、Claude の起動禁止時は利用可能な Codex を選べれば開き、選べなければ開かず理由を出す、と条件を分けて揃えること。 / task 3422 は現行 ADR の provider 選択・利用不能時・控えの決定に触れるが、task-registration.md「ADRを書くtask」が求める ADR の扱いの宣言がない。description に「ADR は書かず、ADR-t1181-1 決定1・3・4・5を保つ」と明記すること。番号を plugin 本文に持ち込まない制約はそのまま保つ。",
+    "premise": false,
+    "judged": "code",
+    "task": 3422,
+    "role": "F",
+    "at": "2026-10-25T12:37Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 2402,
+    "codes": [
+     "lint_violation"
+    ],
+    "text": "task 3422 の完了済み task 3332 への依存を削除し、lint の depends_on_completed を解消すること。3332 の着地済み実装を照合する指示は残し、今後の着地が内容の前提になる task 3333 への依存は維持する。",
+    "premise": false,
+    "judged": "code",
+    "task": 3422,
+    "role": "F",
+    "at": "2026-10-25T12:42Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 2433,
+    "codes": [
+     "acceptance_conflict",
+     "verification_rule"
+    ],
+    "text": "3470 の description にある、plugin の対象節から docs/design/authorization.md と docs/design/supervisor-lifecycle/up-down.md へ案内する要求を削除してください。documents.md「pluginの汎用性」は repository 固有の design 文書への参照を禁じ、tests/plugin.rs の no_skill_carries_this_repository_s_rules も検査します。design は worker が読む根拠に留め、plugin に載せる案内先は dagq-inbox/reference/claude-and-codex.md にしてください。task-registration.md「文書の変更を求めるtask」5 に従う修正です。",
+    "premise": false,
+    "judged": "code",
+    "task": 3470,
+    "role": "F",
+    "at": "2026-10-25T22:46Z"
+   }
+  ],
+  "claims": [
+   {
+    "task": 1180,
+    "cls": "spike",
+    "recorded_class": "implementation",
+    "claimed": "2026-10-23T20:31Z",
+    "how": "recorded",
+    "wait_h": 245.3,
+    "after_mark": true
+   },
+   {
+    "task": 3336,
+    "cls": "spike",
+    "recorded_class": "spike",
+    "claimed": "2026-10-24T18:40Z",
+    "how": "recorded",
+    "wait_h": 0.9,
+    "after_mark": true
+   },
+   {
+    "task": 3337,
+    "cls": "spike",
+    "recorded_class": "spike",
+    "claimed": "2026-10-24T19:11Z",
+    "how": "recorded",
+    "wait_h": 0.0,
+    "after_mark": true
+   },
+   {
+    "task": 3338,
+    "cls": "spike",
+    "recorded_class": "spike",
+    "claimed": "2026-10-24T19:44Z",
+    "how": "recorded",
+    "wait_h": 1.9,
+    "after_mark": true
+   },
+   {
+    "task": 3339,
+    "cls": "spike",
+    "recorded_class": "spike",
+    "claimed": "2026-10-24T21:24Z",
+    "how": "recorded",
+    "wait_h": 2.3,
+    "after_mark": true
+   },
+   {
+    "task": 1181,
+    "cls": "implementation",
+    "recorded_class": "implementation",
+    "claimed": "2026-10-24T10:21Z",
+    "how": "recorded",
+    "wait_h": 9.7,
+    "after_mark": true
+   }
+  ],
+  "planner": {
+   "count": 7,
+   "open_h": 0.2,
+   "active_h": 0.2,
+   "idle_h": 0.0
+  }
+ },
+ {
+  "key": "P6",
+  "goal": 38,
+  "spikes": [
+   2170,
+   2171,
+   2280
+  ],
+  "why": "container の runtime の前提の確認（Spike）の手順と結果を記録し、実装の前提にした",
+  "implementation": [
+   2172,
+   2173,
+   2174,
+   2175,
+   2176,
+   2177,
+   2178,
+   2179,
+   2180,
+   2181,
+   2182,
+   2249,
+   2257,
+   2279,
+   3101,
+   3282
+  ],
+  "others": [
+   2255,
+   2403,
+   2404,
+   2405,
+   2406,
+   2421,
+   2423,
+   2424,
+   2470,
+   2480,
+   2541,
+   2542,
+   2543,
+   2544,
+   2545,
+   2547,
+   2548,
+   2549,
+   2550,
+   2564,
+   2565,
+   2583,
+   3164,
+   3165,
+   3166,
+   3167,
+   3170,
+   3231
+  ],
+  "start": "2026-10-08T12:28Z",
+  "first_spike_done": "2026-10-11T09:59Z",
+  "plan": {
+   "end": "2026-10-24T05:07Z",
+   "open": false,
+   "total_h": 376.7,
+   "wait_h": 33.4,
+   "without_wait_h": 343.3
+  },
+  "goal_span": {
+   "end": "2026-10-24T05:10Z",
+   "open": false,
+   "total_h": 376.7,
+   "wait_h": 35.0,
+   "without_wait_h": 341.7
+  },
+  "replan_gap_h": 2.9,
+  "with_spike": 11,
+  "after_spike": 5,
+  "claims_after_mark": 6,
+  "claims_total": 19,
+  "rework_tally": {
+   "F.plan_review.other": 2,
+   "F.run.other": 5,
+   "F.run.premise": 1,
+   "S+I.plan_review.other": 12,
+   "S+I.plan_review.premise": 3,
+   "S+I.run.other": 34,
+   "S+I.run.premise": 1
+  },
+  "rework": [
+   {
+    "kind": "plan_review_revise",
+    "id": 1376,
+    "codes": [
+     "acceptance_conflict",
+     "incomplete_spec",
+     "verification_rule",
+     "wrong_premise"
+    ],
+    "text": "2173 は停止中の専用 machine を自動で start する一方、2183 は machine を止めるだけで claim が控えられることを求めており、期待結果が両立しない。2183 の fail closed の手順を、machine の起動に失敗するなど実際に使えない状態を作る手順に直し、正常な停止状態からは自動で起動することを別に確認する。 / 2178 は dagq client の宛先を container 内の TCP port に向けるが、現在の src/infrastructure/queue_service.rs の Client は DAGQ_SERVICE_SOCKET の PathBuf と UnixStream 専用で、env の変更だけでは接続できない。2178 または独立した前提 task に、broker 経由の client transport・要求形式・設定の読み取りの実装を明記し、client から relay・broker・queue service まで認証付き要求が通る境界 test と、host の Unix socket 経路を保つ test を受け入れ条件に追加する。 / 2175 の goal 82、2180 の goal 89 への依存は、context が挙げる実装の前提より広い。queue service と to",
+    "premise": true,
+    "judged": "code",
+    "task": 2170,
+    "role": "S",
+    "at": "2026-10-08T12:37Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1379,
+    "codes": [
+     "acceptance_conflict",
+     "incomplete_spec"
+    ],
+    "text": "2171・2184・2185 は、記述では人の Spike の結果・スモークの結果・切り替えの印から10日の経過を待って draft に置く一方、再提出で全て submitted に戻っている。goal 38 の note 138187 はこの早期 claim を避けるため draft に戻したと記録しているが、再提出の task_status_changed（138334・138360・138362）がその待機を解除した。src/infrastructure/proposals.rs の approve は submitted を ready にし、revisit は draft の再検討にしか使われないため、現在の条件では外部の前提を待てない。この3件は draft と revisit を維持して今回の submitted の集合から外し、それぞれ実測結果と人の決定、スモークの成功記録、印から10日の経過を確認してから別途 submit すること。2170・2183 の着地だけでは実測・スモークの完了条件を満たさない。",
+    "premise": false,
+    "judged": "code",
+    "task": 2170,
+    "role": "S",
+    "at": "2026-10-08T12:50Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1381,
+    "codes": [
+     "adr_conflict"
+    ],
+    "text": "task 2175 の acceptance (6) と description は、HTTP の method・path・header・ServiceRequest/ServiceResponse の JSON・ServiceError の code を docs/design/queue-broker.md に書くことを要求する。accepted の ADR-t1942-1 決定1〜3と documents.md「design」は、欄や JSON の詳細を定義のそばの doc comment に置き、design には境界・不変条件・コードへの入口を置くと定めている。protocol の詳細は実装の型・定数・handler の doc comment に移し、acceptance (6) は design がその定義を案内し、integration test が同じ契約を確かめる形に直す。転送と認証の機能範囲は保つ。 / task 2172 の description は、新しい runtime 設定の key の名前と置き場を design に書くと指定している。ADR-t1942-1 決定1〜3と documents.md「design」に合わせ、設定の綴り・配置・値・既定値の詳細は設定定義の doc comment に置く指定へ直す。container-runtime.m",
+    "premise": false,
+    "judged": "code",
+    "task": 2170,
+    "role": "S",
+    "at": "2026-10-08T12:55Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1383,
+    "codes": [
+     "other",
+     "wrong_premise"
+    ],
+    "text": "2175 の goal 179 全体への依存を外し、context を現在の実装に合わせること。前提として挙げた resource broker の up・down・install・自動更新の扱いと CLI の名前は、task 2125 の着地 4cdd183b（run_integrated event 135365）で既に撤去され、該当する src にも残っていない。goal 179 に残る task 2126 は未使用の crate・workspace・配布手順の撤去で、独立した名前の queue broker を実装する前提ではない。これは不要な依存であり、ADR-t1985-1 と task-registration.md「依存の付け方」に従い、共有ファイルや名前の整理を待つための依存は残さない。",
+    "premise": true,
+    "judged": "code",
+    "task": 2170,
+    "role": "S",
+    "at": "2026-10-08T13:02Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 150595,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "code_defect",
+     "docs_drift",
+     "repo_rule_violation"
+    ],
+    "text": "4項目の構成・記録表・ADRの対応と、実環境では実行していない旨のreceiptは揃っています。ただし、token保存、既定接続の保護、testの合否判定などに修正が必要です。 / 受け入れ条件2は token の値をファイルに記録しないことを求めていますが、save-token.sh:18 は実 token を書き出し、手順書も保存ファイルを独自の例外にしています。0600でもこの条件は満たしません。人が入力した値を転送プロセスのメモリだけで扱うなど、ファイルに保存しない手順に直してください。 / machine.sh:30 の start は既定接続を変更しないことを保証していません。現行 Podman は対話実行で既定接続の変更を尋ね、承諾すると変更します。init 後の復元だけでは up・set の start を保護できません。対応版を明記して --update-connection=false を付けるなど、変更を防いでください。根拠: [Podman公式ドキュメント](https://docs.podman.io/en/latest/markdown/podman-machine-start.1.html#update-connection-u)。 / 手順書(c)は「どの組でも同じく落ちる」Linux の test を合否から除外しますが、再現する失敗だけではOS固",
+    "premise": false,
+    "judged": "read",
+    "reading": "手順書の安全の欠け",
+    "task": 2170,
+    "role": "S",
+    "at": "2026-10-11T09:39Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 150729,
+    "primary": "adr_design_mismatch",
+    "codes": [
+     "acceptance_unmet",
+     "adr_design_mismatch",
+     "code_defect",
+     "docs_drift",
+     "repo_rule_violation"
+    ],
+    "text": "4項目の構成、ADRへの対応、noteの書式、実機未実行のreceipt記載は揃っています。既定接続の保持とSSE切断時の測定に修正が必要なため、同じrunへ差し戻すことを推奨します。 / docs/plans/container-runtime-spike/machine.sh:69–72・86–92 は既定の接続を保持できません。Podman 6.1.2 は接続が無い場合、init の --update-connection=false にかかわらず最初の接続を既定にします。この script は変更後に停止するだけです。また machine rm は残った接続から既定を選び直しますが、down は変更を表示するだけで復元しません。例えば別の接続を既定にしていて podman-machine-default も存在すると、後片付けで既定が変わります。受け入れ条件2と ADR-t2113-1 決定4に反します。既定が無い場合は init 前に拒否し、削除時にも元の既定を保持してください。手順書52–57行と receipt の保持の主張も合わせて修正が必要です。[Podman 6.1.2 の接続処理](https://raw.githubusercontent.com/containers/podman/v6.1.2/pkg/machine/connection/connecti",
+    "premise": false,
+    "judged": "code",
+    "task": 2170,
+    "role": "S",
+    "at": "2026-10-11T09:50Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1485,
+    "codes": [
+     "acceptance_ambiguous",
+     "acceptance_conflict",
+     "adr_conflict",
+     "incomplete_spec"
+    ],
+    "text": "2173・2180・2182 は clone・run dir・socket・cache とは別に build 出力の named volume を container に mount するが、ADR-t2173-1 の amends 対象は ADR-t2114-3 決定4 の machine の volume の項だけになっている。accepted の ADR-t2113-3 決定1は container に見せる範囲を限定し、その後の amends が追加した例外も socket と cache である。2173 の ADR と受け入れ条件に ADR-t2113-3 決定1への amends と amended_by の更新を加え、worker・resume の run ごとの出力と verification ごとの出力を許す範囲を明記すること。request 96 の記録は実装方針を支持しており、新たな人の判断は不要。ask 729 でも、変更が直接触れる accepted の決定を amends 対象に補うため、人は send_back と答えた。 / 2177 が ADR に書く決定(6)と受け入れ条件には、利用上限を未確認のまま進める人の決定と、その後の確認方法が明記されていない。context と 2171 の plans への記録だけでなく、ADR-t2177-1にも",
+    "premise": false,
+    "judged": "code",
+    "task": 2171,
+    "role": "S",
+    "at": "2026-10-11T14:27Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1491,
+    "codes": [
+     "incomplete_spec",
+     "wrong_premise"
+    ],
+    "text": "2179 に、integrate より前の receipt 検証を独立 clone に対応させる変更を追加してください。src/application/integrate.rs:100 の check_receipt は clone の HEAD を読みますが、祖先判定と差分の取得は制御側 repository の objects を使います（src/infrastructure/adapters.rs:1524）。objects を共有せず bundle の取り込みを integrate 時だけにすると、新しい commit の receipt 検証が失敗します。検証前に安全に objects を取り込むか、隔離された場所で必要な事実を取得する経路を定め、独立 clone の新しい commit が receipt 検証・review・着地まで進む回帰テストを追加してください。既存の receipt の検査は保ってください。 / 2179 の安全対策を、bundle の fetch に加えて制御側が clone を読む経路にも広げてください。現在の read_worktree は GIT_OPTIONAL_LOCKS=0 を設定するだけで clone の設定を読み、receipt 検証の git status もこの経路です（src/infrastructure/adapters",
+    "premise": true,
+    "judged": "code",
+    "task": 2171,
+    "role": "S",
+    "at": "2026-10-11T14:51Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 2206,
+    "codes": [
+     "verification_rule"
+    ],
+    "text": "task 2280 の verification_commands に `sh scripts/check-design-sentences.sh` を追加すること。宣言 paths の `docs/**` は docs/design/ を含むため、docs/development/task-registration.md「plan reviewが当てはめる規則」は、この検査が欠ける task を revise と定めている。ask 1127 でも、人は同検査の違反を直してから着地するよう send_back と回答している。",
+    "premise": false,
+    "judged": "code",
+    "task": 2280,
+    "role": "S",
+    "at": "2026-10-23T04:03Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 150917,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "code_defect",
+     "docs_drift",
+     "repo_rule_violation",
+     "test_gap"
+    ],
+    "text": "設定の解析と新規claim・resume・verificationの基本的な拒否は実装されていますが、既存wrapperのturn起動にfail closedの抜けがあり、通知と文書にも修正が必要です。いずれも今回の範囲内で修正できます。 / 稼働中のhost workerをcontainerへ切り替えても、次のturnはhostで起動できます。src/application/supervise/session.rsの設定はwrapperの起動にだけ適用され、既存wrapperへの依頼はsupervise/headless.rs:45から直接書かれます。実際のturnを起動するheadless_session.rs:815のHostActorExecutorは既定のhostのままです。receiptとcontainer-runtime.mdの「切り替え前から動いていたrunの次のturnもhostでは起動しない」という説明は成立しません。実際のturn起動にも拒否を適用し、設定変更後の回答配送などをintegration testで確かめてください。 / 直接のintegrateによるcontainer拒否はinboxへ通知されません。integrate.rs:1449は理由をbailするだけで、container_runtime_unavailableを記録するのはsupervi",
+    "premise": false,
+    "judged": "read",
+    "reading": "実装の欠け（fail closed の抜け）",
+    "task": 2172,
+    "role": "I",
+    "at": "2026-10-11T10:00Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 151080,
+    "primary": "adr_design_mismatch",
+    "codes": [
+     "acceptance_unmet",
+     "adr_design_mismatch",
+     "code_defect",
+     "docs_drift",
+     "local_slip",
+     "repo_rule_violation",
+     "test_gap"
+    ],
+    "text": "通常の container 拒否経路は実装されていますが、設定の読み込み失敗時に既存 worker が host で起動する穴が残っています。静的レビューと fmt・diff の検査を行い、文書と検証根拠にも修正点を確認しました。 / src/application/headless_session.rs:830–840 は runtime 設定の読み込み失敗を警告だけで処理し、既定の host executor で turn を起動します。例えば host で開始した待機中の run に対し、worker を container に変更したファイルに別の設定エラーが含まれると、回答後の turn が host で実行されます。supervisor の拒否は既存 wrapper の起動を防ぎません。これは fail closed の境界に反します。読み込み失敗から host 起動へ進まないように修正し、このケースの integration test を追加してください。 / docs/design/supervisor-lifecycle/claim-defer.md:96 は worker の控えの終了理由を cleared / not_candidate だけと説明していますが、worker_step は reason_changed でも終了させます。109 行の stats",
+    "premise": false,
+    "judged": "code",
+    "task": 2172,
+    "role": "I",
+    "at": "2026-10-11T11:10Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 151169,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "docs_drift"
+    ],
+    "text": "runtime の拒否処理と対応するテストは確認できましたが、受け入れ条件6が求める文書との整合に修正が必要です。ファイルは変更していません。 / docs/design/supervisor-lifecycle/status.md:47 は actors の行が「今は全て host・advisory・false」と説明していますが、health::add_runtimes は container を設定した worker を container・sandbox・true として表示します。同じ段落の provider ごとの強制の説明も host に限定されていません。後段への runtimes の追記だけでは矛盾が解消されないため、既存の説明も修正してください。 / docs/design/supervisor-lifecycle/claim-defer.md:68–75 に古い判断の説明が残っています。「全workerに経路があるときは読まない」は container 設定時には成立せず、「表にそのworkerが入ったsupervisor」は container が使えない間も控えを解除しません。また70行目の理由一覧は provider の3種類のままで、receipt が述べる「worker_deferred への参照に置き換えた」変更もありません。解除条件を runti",
+    "premise": false,
+    "judged": "read",
+    "reading": "文書の照合の漏れ",
+    "task": 2172,
+    "role": "I",
+    "at": "2026-10-11T11:20Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 152391,
+    "primary": "repo_rule_violation",
+    "codes": [
+     "docs_drift",
+     "local_slip",
+     "repo_rule_violation"
+    ],
+    "text": "container の claim・resume・verification を控える実装と、その主要なテストを確認しました。文書の詳細の重複と doc comment の誤配置に、機械的に修正できる問題が残っています。 / docs/design/supervisor-lifecycle/claim-defer.md:101–102 の書き直した「記録」は、worker_deferred と worker_deferral_ended の payload の欄（reason、provider、worker_mode、message、supervisor、why、deferred_secs）を列挙しています。documents.md の design の規則は、event の欄を定義のそばの doc comment に置き、design には書き写さないと定めています。控えの開始・変更・終了の意味とコードへの入口を残し、欄の列挙を除いてください。 / src/application/integrate.rs:1699–1703 の guard_verification 用の doc comment が、新しく挿入した container_refusal に付いています。その結果、container_refusal が env に sccache guard を設定して port を返",
+    "premise": false,
+    "judged": "code",
+    "task": 2172,
+    "role": "I",
+    "at": "2026-10-11T13:46Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 152749,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "runtime の設定、起動の拒否、attention、status・doctor は受け入れ条件に対応しています。既存の resume・worker の設計文書に、新しい拒否境界を反映する修正が必要です。 / docs/design/supervisor-lifecycle/needs-session.md:46 の再開候補の説明と headless-worker.md の「経路の全体」「責務と境界」に、新しい fail closed の境界が未反映です。supervise/resume.rs:89 は使えない container または非対応 provider の run を候補から外し、headless_session.rs:832 は各 turn の前に設定を読み直して、container 指定や読み込み失敗なら起動せず wrapper を終了します。container-runtime.md の説明に加え、これらの経路を説明する既存文書にも条件と終了時の扱いを記載し、その地図へリンクしてください。識別子の欠落ではなく、再開・turn 起動の流れと拒否境界の記載漏れです。",
+    "premise": false,
+    "judged": "code",
+    "task": 2172,
+    "role": "I",
+    "at": "2026-10-11T14:16Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 152990,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "設定、起動拒否、attention、status/doctor の実装と関連テストの evidence に新たな阻害要因は見つかりませんでした。関連文書の境界の説明と、変更した文章の書き方に修正が必要です。 / docs/design/supervisor-lifecycle/supervise.md:66 の再開の保留条件と :68 の claim の説明が、container を使えない場合・Codex に届かない場合の候補除外を記載していません。resume_candidates と claimable が追加した fail-closed の境界を、この流れの説明にも反映し、container-runtime.md へ案内してください。needs-session.md と claim-defer.md の更新だけでは、この説明が取り残されています。 / 変更した文書にコードの書き写しと経緯が残っています。docs/design/supervisor-lifecycle/run-environment.md:86 は role・設定 key・値・flag を列挙し、claim-defer.md:68 は「task 814・818」を含みます。documents.md の design の規則に沿って、設定の詳細は定義の doc comment へ案内し、task 番号は取り除い",
+    "premise": false,
+    "judged": "code",
+    "task": 2172,
+    "role": "I",
+    "at": "2026-10-11T14:28Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 155362,
+    "primary": "repo_rule_violation",
+    "codes": [
+     "repo_rule_violation"
+    ],
+    "text": "fail closed の主要経路と受け入れ条件に対応するテストは確認できました。着地前に、設計文書の書き写しと commit メッセージの規則違反を修正してください。 / docs/design/supervisor-lifecycle/claim-defer.md:101,104 の追加行に、claim_deferred の payload の欄一覧（files、runs、max_secs、build、missing など）が残っています。docs/development/documents.md:72–74 は設計文書への event の欄の書き写しを禁じています。記録の意味と境界を残し、欄一覧は定義のそばの doc comment への案内に置き換えてください。 / commit 96dcb3df の接頭辞が refactor: ですが、docs/development/documents.md:183 が認める接頭辞は feat: / fix: / docs: / test: です。許可された接頭辞に直してください。",
+    "premise": false,
+    "judged": "code",
+    "task": 2172,
+    "role": "I",
+    "at": "2026-10-11T17:22Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 169936,
+    "primary": "local_slip",
+    "codes": [
+     "docs_drift",
+     "local_slip",
+     "other"
+    ],
+    "text": "The ADR, the domain/application/infrastructure split, the fake-podman integration tests (lock serialization, explicit dagq connection with the default restored, init volumes limited to runs/clones/verification, per-queue/run volume names) and the doc updates meet all eight criteria. MachineGate is only consulted for targets set to container, so host runs are unchanged. What remains is a heading slip and two follow-ups the receipt already records. / The ADR's H1 heading and filename slug say the machine mounts only 'run dir and the clone parent dir' (machineはrun dirとcloneの親のdirだけをmountし / machi",
+    "premise": false,
+    "judged": "code",
+    "task": 2173,
+    "role": "I",
+    "at": "2026-10-12T04:52Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 170104,
+    "primary": "local_slip",
+    "codes": [
+     "docs_drift",
+     "local_slip"
+    ],
+    "text": "The diff meets criteria 1–8: the ADR and both amended_by entries are there, the domain and application logic has unit tests, fake-podman ITs cover the lock, the connection, the init volumes and the per-queue volume names, the host.toml override and documented defaults are in place, MachineGate is wired, the real-podman test is #[ignore], and container-runtime.md and security.md agree. The one fix needed before landing is the new ADR's H1, which leaves out the verification clone's parent dir that its title and Decision 1 include. / The ADR's H1 heading in the new docs/adr/2026-10-12-t2173-1-…md",
+    "premise": false,
+    "judged": "code",
+    "task": 2173,
+    "role": "I",
+    "at": "2026-10-12T05:02Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 171395,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "The two-stage base and project image, tags decided by the inputs, files read from the main checkout, ImageGate and its failure records, and the dogfooding Containerfile all meet the criteria, with unit tests and fake-podman ITs. One thing needs fixing: run-environment.md's list of the only tables dagq.toml accepts is now stale because the diff adds [container.image]. / docs/design/supervisor-lifecycle/run-environment.md:32 still describes dagq.toml's format as having only the tables it lists, and says any other table is an error. This diff adds [container.image] to TABLES in src/infrastructure",
+    "premise": false,
+    "judged": "code",
+    "task": 2174,
+    "role": "I",
+    "at": "2026-10-12T06:13Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 159431,
+    "primary": "test_gap",
+    "codes": [
+     "acceptance_unmet",
+     "code_defect",
+     "docs_drift",
+     "repo_rule_violation",
+     "test_gap"
+    ],
+    "text": "引き継ぎの integration test、拒否イベントの帰属情報、要求された doc comment、共有記録の文書化に修正が必要です。いずれも現在の指示範囲内で修正できます。 / tests/it/queue_broker.rs:413 の引き継ぎテストは、旧 build を名乗る FakeBroker を supervisor に渡すだけで、install・自動更新・exec・SystemQueueBroker の入れ替えを通りません。up の別 build の置換も unit test のみです。受け入れ条件1が求める integration test として、各経路で新しいバイナリの broker に替わることを確かめてください。既存の lifecycle_install テストには broker の検証が追加されていません。 / src/infrastructure/queue_broker.rs:118–139 で HTTP 解析に失敗すると、application::queue_broker::QueueBroker::malformed（:189）が空の BrokerRequest を使い、run=null・destination=unknown を記録します。例えば CONNECT crates.io:443 に run header を付け、その後に Tra",
+    "premise": false,
+    "judged": "code",
+    "task": 2175,
+    "role": "I",
+    "at": "2026-10-11T19:43Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 160291,
+    "primary": "code_defect",
+    "codes": [
+     "code_defect",
+     "docs_drift",
+     "repo_rule_violation"
+    ],
+    "text": "Two mechanical fixes remain: prevent malformed-body errors from echoing sensitive input and remove the copied field list from the design document. The review was read-only; no files were changed. / src/application/queue_broker.rs:244–252 returns serde's raw parsing error in ServiceError.message. With a valid run token and a body such as {\"api_version\":\"secret-in-the-wrong-field\"}, serde quotes that value in the response. This contradicts docs/design/queue-broker.md:56 and the handler's promise that answers contain no token value. Return a message that does not quote input, and extend the exist",
+    "premise": false,
+    "judged": "code",
+    "task": 2175,
+    "role": "I",
+    "at": "2026-10-11T20:34Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 160402,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "docs_drift"
+    ],
+    "text": "The broker implementation and recorded test evidence cover the requested behavior, but queue-service.md retains a lifecycle promise contradicted by both the code and the receipt. Correct that documentation before landing. / docs/design/queue-service.md:174 promises that an old supervisor accepts the new service build launched after install replaces its executable, preventing repeated replacement before exec. The receipt's Follow-ups correctly identifies that this promise is false: src/infrastructure/queue_service.rs:1106 returns success only for found.current(), so launching the next build tim",
+    "premise": false,
+    "judged": "read",
+    "reading": "文書の照合の漏れ",
+    "task": 2175,
+    "role": "I",
+    "at": "2026-10-11T20:51Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 170744,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift",
+     "local_slip"
+    ],
+    "text": "The CONNECT allowlist is read only from the main checkout's dagq.toml, is empty by default, and refuses upstream git hosts and api.anthropic.com with a reason. The verification token is issued per verification, reaches only allowlisted hosts and is revoked when the verification ends. Unit and integration tests cover all four criteria, with no real network traffic, and the code holds no registry list; what remains are two small documentation wording notes. / docs/design/supervisor-lifecycle/run-environment.md:32 gives a closed list of the tables dagq.toml may have ('…だけを持ち', and any other table",
+    "premise": false,
+    "judged": "code",
+    "task": 2176,
+    "role": "I",
+    "at": "2026-10-12T05:43Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1587,
+    "codes": [
+     "verification_rule"
+    ],
+    "text": "Task 2177 changes the runtime (src/: queue broker, host.toml config, doctor, the classification of Claude's authentication failures) and docs/design (queue-broker.md, security.md). Its verify list is missing two checks that docs/development/task-registration.md \"推奨の組み合わせ\" requires for this kind of change. First, `sh scripts/check-design-sentences.sh` is in the runtime line and in the docs line. Second, `sh scripts/check-context-boundaries.sh` is required for any task that changes `src/`; it exists on main and CI runs it. Add both to verification_commands. A person answered the same finding on ",
+    "premise": false,
+    "judged": "code",
+    "task": 2177,
+    "role": "I",
+    "at": "2026-10-12T04:01Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1683,
+    "codes": [
+     "lint_violation"
+    ],
+    "text": "dagq lint depends_on_completed: task 2177 still depends on task 2171, which has already landed and is completed. Remove the dependency on 2171. Also update the context sentences that assume 2171 has not landed yet (\"2171 は Spike の結果が揃うまで draft で revisit を持つので、この task も draft に残し 2171 の revisit の planner がまとめて submit する\" and \"2171 への依存は ask 724 のとおり保つ\"). Say instead that the landing condition from ask 724 (the implementation lands after 2171) is already met because 2171 has landed, so the person's decision still holds after the dependency is removed. The description (6) wording \"2171 への依存は保つ\" s",
+    "premise": false,
+    "judged": "code",
+    "task": 2177,
+    "role": "I",
+    "at": "2026-10-12T06:20Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 172108,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "The ADR, the header swap, run-token checks, SSE pass-through, the credit-balance classification, the fail-closed gate and the doctor report all meet criteria 1–5, with fake-upstream tests for both credential kinds. One line in security.md still says the broker reaches only the queue service and the registry, which contradicts the new api.anthropic.com destination; it is a mechanical doc fix. / docs/design/security.md:165 still says the queue broker's destinations are only the queue service and the registry (「[queueのbroker](queue-broker.md)の宛ては今queue serviceとregistry。」). This diff makes api.ant",
+    "premise": false,
+    "judged": "code",
+    "task": 2177,
+    "role": "I",
+    "at": "2026-10-12T07:15Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 172177,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "docs_drift"
+    ],
+    "text": "The ADR, the broker's credential swap, SSE passthrough, refusals, the classification of balance and billing errors, the fail-closed gate and the doctor output all meet acceptance 1-5, with fake-upstream tests for both kinds. Two small mechanical doc fixes remain: the (a) row in the Spike doc's list of unmet prerequisites does not reference ADR-t2177-1, and the ContainerRuntime port's doc comment still calls the long-lived token unbuilt. / Acceptance 6 asks for the (a) row of docs/plans/container-runtime-spike.md to reference ADR-t2177-1. The only table row labelled (a) is in the list of unmet ",
+    "premise": false,
+    "judged": "read",
+    "reading": "文書の小さな直し",
+    "task": 2177,
+    "role": "I",
+    "at": "2026-10-12T07:22Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 172663,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "The diff meets acceptance criteria 1–6. The ADR has decisions (1)–(7) citing notes 152330/152336/152337 and the four rejected options. The fake-upstream integration test covers the header swap for both kinds, that no run token leaves, ordered SSE, untouched 401/429/credit answers sent once, and refusal of missing, other-run and revoked tokens. Fail-closed is covered by the gate and broker tests, doctor never shows the value, the 402/credit answers are classified as UsageLimit, and the docs agree with the code. The only finding is a stale 'relay not built' wording in a container_runtime.rs comm",
+    "premise": false,
+    "judged": "code",
+    "task": 2177,
+    "role": "I",
+    "at": "2026-10-12T07:59Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 171822,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "The diff meets acceptance criteria 1-9. It has the relay, the per-run socket volume with :z, the 0600 socket owned by uid 1000, the forwarder, the supervisor's watch with relay and machine restarts and the queue_relay_down attention, RelayGate in the gate chain, and the client's broker route. The unit tests, the fake-podman integration tests and the boundary integration test are in place, and the real-VM test is #[ignore]. One mechanical docs fix is left: the dagq skill's authority.md still says client-mode `locate` always answers with the socket. / plugins/claude-dagq/skills/dagq/reference/au",
+    "premise": false,
+    "judged": "code",
+    "task": 2178,
+    "role": "I",
+    "at": "2026-10-12T06:44Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1546,
+    "codes": [
+     "verification_rule"
+    ],
+    "text": "task 2179 の verification_commands に `sh scripts/check-context-boundaries.sh` と `sh scripts/check-design-sentences.sh` を追加する。src/ と docs/design/ を変更するため、docs/development/task-registration.md の「推奨の組み合わせ」と「plan reviewが当てはめる規則」が両方を必須としている。ask 766 でも、人は src/ を変更する task の context 境界検査の不足に send_back と答えている。",
+    "premise": false,
+    "judged": "code",
+    "task": 2179,
+    "role": "I",
+    "at": "2026-10-12T02:48Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1615,
+    "codes": [
+     "lint_violation"
+    ],
+    "text": "`dagq lint` reports depends_on_completed: task 2179 still depends on task 2171, which has already completed. The planner should remove the 2171 dependency and keep 2173 (in progress, the clone/mount prerequisite). Spike (b) passed (note 151589) and task 2171 landed without a fallback ADR for decision 4. The sentence 'if task 2171 has written an ADR that switches to the next-best form of decision 4, follow it' can therefore be cut, or changed to say the file:// clone form is settled. Nothing else in the plan needs to change. The bundle and state-file design, the landing worktree outside the mou",
+    "premise": false,
+    "judged": "code",
+    "task": 2179,
+    "role": "I",
+    "at": "2026-10-12T04:38Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 173708,
+    "primary": "acceptance_infeasible",
+    "codes": [
+     "acceptance_ambiguous",
+     "acceptance_infeasible",
+     "out_of_scope_change",
+     "test_gap"
+    ],
+    "text": "The ADR, the clone/bundle/state-file fact path, the guarded control-side git, the control-only landing worktree, the main bundle handoff, the symlink-safe cleanup and the documents all match the acceptance criteria, and integration tests cover them. The gaps are an owner-check test that cannot be built (a follow-up is filed), some per-path coverage that the shared run_git and refuse_clone choke points make up for, and doc trimming that follows the documents rules. / Acceptance criterion 5 asks for an integration test showing that a landing dir not owned by the control side is refused. The uid ",
+    "premise": true,
+    "judged": "code",
+    "task": 2179,
+    "role": "I",
+    "at": "2026-10-12T10:12Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1545,
+    "codes": [
+     "verification_rule"
+    ],
+    "text": "task 2180 の verification_commands に `sh scripts/check-context-boundaries.sh` と `sh scripts/check-design-sentences.sh` を追加する。docs/development/task-registration.md の「推奨の組み合わせ」「plan reviewが当てはめる規則」は、src/ を変更する task に前者を、design を変更しうる runtime task に後者を要求している。ask 766 でも、人は src/ の変更に対する context 境界検査の不足を補うため send_back と回答している。",
+    "premise": false,
+    "judged": "code",
+    "task": 2180,
+    "role": "I",
+    "at": "2026-10-12T02:45Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 176411,
+    "primary": "test_gap",
+    "codes": [
+     "acceptance_unmet",
+     "docs_drift",
+     "test_gap"
+    ],
+    "text": "The executor, the hardened podman args, the token handover via file, and the bundle and state handling inside the container are implemented and tested. But the recovery job's stop_processes and the adopt path remove the container without any test, against acceptance 4. roles.md and security.md still describe the container executor as missing and every actor as running on the host. / Acceptance 4 asks for integration tests showing that no container is left on each stop path. Only the stop after review has one, in tests/it/run_container.rs. The new container removal in the recovery job's stop_pr",
+    "premise": false,
+    "judged": "code",
+    "task": 2180,
+    "role": "I",
+    "at": "2026-10-12T14:37Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 176738,
+    "primary": "code_defect",
+    "codes": [
+     "acceptance_unmet",
+     "code_defect",
+     "other",
+     "test_gap"
+    ],
+    "text": "The executor, the hardened podman args, passing the token as a file, the bundle and state handling inside the container, the stop-path removals, the sandbox enforcement and the docs mostly meet the acceptance criteria, and the tests are thorough. But a container run's resume after a turn that failed before the model answered is broken, because the host-side session check does not look in container-home, and the worker deferred both that and machine release to follow-ups. / Some turns in the container cannot be resumed. The task asks that the first turn, a revise and a resume all run in the con",
+    "premise": false,
+    "judged": "code",
+    "task": 2180,
+    "role": "I",
+    "at": "2026-10-12T15:17Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 305989,
+    "primary": "code_defect",
+    "codes": [
+     "code_defect",
+     "docs_drift",
+     "repo_rule_violation"
+    ],
+    "text": "主な起動・失敗・cache境界のテストと根拠は揃っていますが、guard作成失敗時のevent欠落、unit testの実時間待ち、変更文書の矛盾を修正する必要があります。 / container_turn::sccache_env（162–172行）はguardの作成に失敗するとstderrだけに記録し、RUSTC_WRAPPERなしでagentを起動します。例えば前のturnがcontainer-home/dagq-rustc-wrapperをdirectoryとして残すとこの経路に入り、host側にはserver_startedだけが残り、sccache_wrapper_removedがありません。run-environment.md「sccacheのserver」が約束するguard作成失敗時のeventを記録し、この失敗経路をテストしてください。 / 追加されたunit test the_container_s_agent_is_refused_the_server_s_start_and_guarded_behind_the_gateは、1004行で100msの待ちを指定し、wait_for_gateのInstant::nowとthread::sleepを実行します。testing.md「判断と境界のtest」はunit testでsleep・実時間の時計を禁止していま",
+    "premise": false,
+    "judged": "code",
+    "task": 2181,
+    "role": "I",
+    "at": "2026-10-23T13:31Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 306308,
+    "primary": "adr_design_mismatch",
+    "codes": [
+     "acceptance_unmet",
+     "adr_design_mismatch",
+     "code_defect",
+     "docs_drift"
+    ],
+    "text": "通常の起動・失敗・非適用・verificationのテスト根拠はありますが、起動責務がADRから逸脱しています。加えて、host側の応答file読み取りと、応答失敗時の環境・eventの整合性に修正が必要です。 / ADR-t2114-4決定1はcontainer内serverの起動者をsupervisorだけに限定していますが、実装はsession wrapperのPodmanActorExecutor::spawnから起動します。receiptもこれを設計変更として認め、run-environment.mdにwrapperの例外を追加しています。ADR-t2257-1決定5が変えたのは任意機能にする条件であり、起動者の限定ではありません。指定どおりsupervisorの責務に戻す必要があり、この例外を採用するなら人の判断とADRのamendsが必要です。 / src/infrastructure/run_container.rs:322–324のsccache_ackは、symlink_metadataで通常fileを確認した後、別操作のFile::openでpathを辿ります。workerがその間にsccache-guardをsymlinkに置き換えると、host側がrun dir外のfileを読み、その内容を失敗理由としてeventに記録できます。FIFOへの置換なら期限の",
+    "premise": false,
+    "judged": "code",
+    "task": 2181,
+    "role": "I",
+    "at": "2026-10-23T13:51Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 307990,
+    "primary": "code_defect",
+    "codes": [
+     "code_defect",
+     "test_gap"
+    ],
+    "text": "通常経路の実装・検証記録と関連文書は受け入れ条件に対応していますが、turn交代時に次の依頼を消し、server起動とevent記録を失う競合の修正が必要です。 / src/application/run_container.rs の serve_sccache_request で、起動処理後の `if !same()?` が共有の sccache-request を無条件に削除しています。turn A の起動処理中にcontainerが終了し、turn Bのlauncherが新しいrequestを置いてからAの処理が戻ると、Bのrequestが消えます。launcherはrequestを再送せず、supervisorもrequestがある場合だけ応答するため、Bは180秒待ってserverを起動できないまま進み、そのwrapper除去eventも記録されません。交代後のrequestには触れないようにし、古い応答の完了前に次のturnが依頼を置くケースをtestで確認してください。",
+    "premise": false,
+    "judged": "code",
+    "task": 2181,
+    "role": "I",
+    "at": "2026-10-23T15:50Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 308325,
+    "primary": "code_defect",
+    "codes": [
+     "acceptance_unmet",
+     "code_defect",
+     "repo_rule_violation"
+    ],
+    "text": "基本の起動・失敗時の経路と文書の対応は確認できましたが、共有 gate が次の turn に混入する競合と、必須の手元検証の根拠不足が残っています。 / src/application/run_container.rs:697–701 の same() と gate の書き込みは排他になっていません。same() が旧 container を確認した直後に、その container が終了して次の turn が clear_sccache を済ませると、旧応答が共有の sccache-gate に started を書けます。次の launcher は自分の server の起動を待たずに agent を開始し、次の supervisor の処理も RequestStep::Record で未起動の server を起動済みとして記録します。gate も turn の token に結び付けるなど、旧応答が次の turn に作用しないようにしてください。既存の競合テストは same() より前の切り替えだけなので、確認後・書き込み前の切り替えも確かめる必要があります。 / 必須の手元検証の根拠が不足しています。資料では最終 tree に一致する記録が0件で、stress と it-test-time の両方が required です。receipt は一部の test の stre",
+    "premise": false,
+    "judged": "code",
+    "task": 2181,
+    "role": "I",
+    "at": "2026-10-23T16:17Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 315755,
+    "primary": "code_defect",
+    "codes": [
+     "acceptance_unmet",
+     "code_defect",
+     "test_gap"
+    ],
+    "text": "起動順序・turn間の分離・cacheのmount・verificationの除外と検証記録は確認できました。失敗時にimageから継承したRUSTC_WRAPPERが残る経路を修正する必要があります。 / src/infrastructure/container_turn.rs:105–109 はagentの環境に変数を追加するだけで、継承したRUSTC_WRAPPERを削除しません。container imageがENV RUSTC_WRAPPER=sccacheを持つ場合、server起動失敗・guard作成失敗時もそのwrapperがagentに残ります。拒否用SCCACHE_ERROR_LOGだけが追加されるため、cacheなしでcompilerを直接実行するという受け入れ条件3を満たさず、記録されたwrapper除去とも食い違います。ContainerServer::Refusedでも同様です。sccacheを管理するturnでは継承元のwrapperも確実に無効化し、image由来の環境変数がある失敗経路をテストしてください。現在のfake podmanは開始時にRUSTC_WRAPPERをunsetするため、この不具合を検出できません。",
+    "premise": false,
+    "judged": "code",
+    "task": 2181,
+    "role": "I",
+    "at": "2026-10-23T22:41Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 316908,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "code_defect"
+    ],
+    "text": "The normal startup, fallback, guard and verification paths have supporting tests and recorded checks. The supervisor's later configuration reread can nevertheless separate the server's settings from its container's environment and mounted cache, which needs fixing before landing. / Keep the server plan consistent with the configuration used to start its container. PodmanActorExecutor builds the container's mounts and agent environment from PreparedRun, but sccache_plan rereads main's dagq.toml when the supervisor later answers the request. If another landing changes SCCACHE_SERVER_PORT meanwhi",
+    "premise": false,
+    "judged": "read",
+    "reading": "実装の欠け",
+    "task": 2181,
+    "role": "I",
+    "at": "2026-10-24T00:32Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1585,
+    "codes": [
+     "verification_rule"
+    ],
+    "text": "task 2182 の verification_commands に、docs/development/task-registration.md の「推奨の組み合わせ」の runtime の行が求める 2 本、`sh scripts/check-design-sentences.sh` と `sh scripts/check-context-boundaries.sh` が無い。この task は docs/design の validation.md・integrate.md・run-environment.md・container-runtime.md・measurement.md を変えるので前者が要る（同じ文書の 171 行目の規則でも revise）。src/ を変えるので後者も要る（ask 766 で人が send_back した前例と同じ）。依存先 task 2180 は proposal 985 の差し戻しで、同じ 2 本を verify に足している。2182 にも同じ 2 本を足すこと。ADR を書くので `sh scripts/check-adr-numbers.sh` は残す。",
+    "premise": false,
+    "judged": "code",
+    "task": 2182,
+    "role": "I",
+    "at": "2026-10-12T03:58Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 186811,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "adr_design_mismatch",
+     "code_defect",
+     "repo_rule_violation",
+     "test_gap"
+    ],
+    "text": "container verificationの主要な経路とADRは実装されていますが、必須の片付けをfollow-upに残しており、wrapperの扱いとtest・commitの規則にも修正が必要です。既知のCI失敗は差し戻し理由にしていません。 / 受け入れ条件5の片付けが未完了です。src/infrastructure/run_container.rs:356 の finish は remove_verification_dir 経由で remove_dir_all を使い、検証コマンドが中身のある0555のdirを残すと削除に失敗します。ContainerVerification::drop は警告だけで着地を続けるため、verificationのdirが残ります。receiptもこの不具合をfollow-upにしていますが、受け入れ条件内の未達をfollow-upに回してsucceededにはできません。gitを使わずsymlinkを辿らない片付けを読み取り専用dirにも対応させ、そのintegration testとreceiptの根拠を追加してください。 / src/application/integrate.rs:2122–2124 の without_wrapper は、sccacheを名指していない場合もRUSTC_WRAPPERを無条件に削除します。ADR-t2",
+    "premise": false,
+    "judged": "read",
+    "reading": "受け入れ条件の片付けの未達を follow_up に回した",
+    "task": 2182,
+    "role": "I",
+    "at": "2026-10-14T03:25Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 192903,
+    "primary": "adr_design_mismatch",
+    "codes": [
+     "acceptance_unmet",
+     "adr_design_mismatch",
+     "code_defect",
+     "test_gap"
+    ],
+    "text": "container verification の主要な配線と文書は揃っていますが、clone 作成時の条件付き Git 設定に対する guard が不足しています。host で tracked コードが実行される経路を塞ぐ修正が必要です。 / [P1] src/infrastructure/adapters/run_clones.rs:546–566 の fill_verification_clone は、main で作った guard のまま clone を checkout しています。verification の gitdir や onbranch:verification に一致する条件付き include が新しい filter driver を定義している場合、その driver は main で列挙されず上書きされません。worker の .gitattributes がそれを選ぶと、reset --hard が tracked のスクリプトを host で実行できます。受け入れ条件5と ADR-t2179-1 決定8に反します。着地用 worktree と同様に、clone の実効設定に guard を拡張・検証してから checkout し、clone でのみ有効になる条件付き driver が実行されない integration test を追加してください。",
+    "premise": false,
+    "judged": "code",
+    "task": 2182,
+    "role": "I",
+    "at": "2026-10-15T05:42Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 193067,
+    "primary": "adr_design_mismatch",
+    "codes": [
+     "adr_design_mismatch",
+     "code_defect",
+     "test_gap"
+    ],
+    "text": "container verification の実装・ADR・受け入れ条件の根拠は概ね揃っていますが、host で材料を準備する経路に worker からの symlink による隔離の突破が残っています。修正と回帰 test が必要です。 / [P1] scripts/landing-it.sh:189 の host 側の cp が、worker の置いた symlink を辿ります。fresh_materials（src/infrastructure/run_container.rs:228–240）は材料を作り直しますが、その後も worker は mount 済みの run dir を書き換えられます。準備が GitHub の取得を待つ間などに verification-materials/it-coverage-map.json を host の任意のファイルへの symlink にすると、cp が host 権限でそのファイルを上書きします。verification container の読み取り専用 mount は、この準備中の書き込みを防ぎません。ADR-t2179-1 決定9の、run dir のファイルを symlink を辿らず読み書きする境界に反します。材料の親と宛先の差し替えにも耐える descriptor ベースの書き込みにし、準備中に symlink ",
+    "premise": false,
+    "judged": "code",
+    "task": 2182,
+    "role": "I",
+    "at": "2026-10-15T05:56Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 2181,
+    "codes": [
+     "verification_rule"
+    ],
+    "text": "Task 2249 must add `sh scripts/check-design-sentences.sh` to verification_commands. Its declared `docs/**` paths include docs/design/, and docs/development/task-registration.md explicitly requires both design checks for that scope, even when the primary target is operations.md. Alternatively, narrow the declared paths to the development document actually being changed.",
+    "premise": false,
+    "judged": "code",
+    "task": 2249,
+    "role": "I",
+    "at": "2026-10-22T22:19Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 297403,
+    "primary": "repo_rule_violation",
+    "codes": [
+     "docs_drift",
+     "repo_rule_violation"
+    ],
+    "text": "operations.mdは受け入れ条件の記載を満たし、src・runtimeの既定値にも変更はないが、Spike文書に追加した経緯の記述は修正が必要。receiptはverify全5本の成功を記録しており、レビューでの再実行は2本が成功、3本は環境の書き込み制限で実行できなかった。 / Spike (c)「記録の表」に追加した「人が 2026-10-23 に測り直しを飛ばした（request 145）」は、文書へのrequest番号・経緯の混入を禁じるレビュー規則に抵触する。request番号と判断の経緯を除き、再測定を行わず最小資源は未確認であるという現状と、operations.mdへの案内に直す。",
+    "premise": false,
+    "judged": "code",
+    "task": 2249,
+    "role": "I",
+    "at": "2026-10-22T23:01Z"
+   },
+   {
+    "kind": "worker_question",
+    "id": 737,
+    "codes": [
+     "adr_conflict"
+    ],
+    "text": "",
+    "premise": false,
+    "judged": "code",
+    "task": 2257,
+    "role": "I",
+    "at": "2026-10-11T17:12Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 161815,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "docs_drift"
+    ],
+    "text": "ADRと登録規則は要件を満たしていますが、hostで流すコマンドの設計文書に照合漏れがあります。verifyの4本は再実行で成功し、check-design-docs.shは読み取り専用環境で一時ディレクトリを作れず再確認できませんでした。 / docs/design/supervisor-lifecycle/landing-e2e.md:37–38に、dagqのsourceでなければ「runtimeの知るe2eが無いので流さずに着地へ進む」という制約が残っています。これは新ADR決定4の「runtimeはe2eを知らず、dagq.tomlが宣言したコマンドだけをhostで流す」という境界に合わず、受け入れ条件4の文書照合が未完了です。現行実装の説明を残す場合も、決定済みの未実装の形を明記して区別し、receiptの「e2eをhostに置く記述はdocs/designに無かった」という説明も修正してください。",
+    "premise": false,
+    "judged": "read",
+    "reading": "文書の照合の漏れ",
+    "task": 2257,
+    "role": "I",
+    "at": "2026-10-11T23:24Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 2264,
+    "codes": [
+     "incomplete_spec"
+    ],
+    "text": "task 3282 の description に ADR の扱いを確定してください。docs/development/task-registration.md「ADRを書くtask」「plan reviewが当てはめる規則」は、現行 ADR の決定範囲に入る変更について、ADR を書かない場合も保つ決定を番号で名指すことを求めています。この修正は container 内の server の起動と cache の信頼境界を扱いますが、description は ask の維持だけを指定しています。「ADR-t2257-1 決定5（ADR-t2114-4 決定1〜5の amends）を保ち、新しい ADR は書かず、起動時の計画の保持方法は design または doc comment に書く。決定の変更が必要なら ask で止める」と明記してください。",
+    "premise": false,
+    "judged": "code",
+    "task": 3282,
+    "role": "I",
+    "at": "2026-10-24T01:03Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 173493,
+    "primary": "docs_drift",
+    "codes": [
+     "docs_drift"
+    ],
+    "text": "The code, unit test and integration tests meet acceptance 1–3: PodmanUnreachable leads to RestartMachine, the machine is started again before the relays, the start_failed attention and gate are tested, and a hung podman is killed. The one fix needed is the design doc's new sentence, which says a hung machine cannot hold the supervisor's loop, but the restart's podman commands still have no time limit. / The sentence added to docs/design/container-runtime.md (「見張りのpodmanの呼び出しには時間の上限があり、超えたものは止めて繋がらないとして扱うので、固まったmachineがsupervisorのloopを止めない」) promises more than the code does. Only the look's com",
+    "premise": false,
+    "judged": "code",
+    "task": 2404,
+    "role": "F",
+    "at": "2026-10-12T10:03Z"
+   },
+   {
+    "kind": "worker_question",
+    "id": 804,
+    "codes": [
+     "acceptance_infeasible",
+     "out_of_scope_change"
+    ],
+    "text": "",
+    "premise": true,
+    "judged": "code",
+    "task": 2423,
+    "role": "F",
+    "at": "2026-10-12T19:21Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 206369,
+    "primary": "acceptance_unmet",
+    "codes": [
+     "acceptance_unmet",
+     "code_defect",
+     "docs_drift",
+     "test_gap"
+    ],
+    "text": "containerへの振り分けと起動前の拒否は実装されていますが、podman起動失敗時にrunをpark・holdする経路が残っています。受け入れ条件が扱いを明示しているため、同じrunでの修正を推奨します。 / src/application/supervise/recheck.rs:1074–1106 は、container起動の失敗をErrの場合だけContainerRefusedにします。podmanがcontainerを作れずexit 125を返す場合はOk(exit)から通常の失敗分類へ進み、unknownとしてrunをparkまたはholdします。commandが実行されていないのに、受け入れ条件3とADR-t2424-1決定2の「何も判定せず着地待ちを維持」に反します。receiptのfollow-upへ回せる事項ではありません。起動失敗をcommandの失敗と区別し、fake podmanが起動を拒否するintegration testで、印が無く、runがawaiting_integrationのままpark・holdされないことを確認してください。新ADRのConsequencesでこの扱いを未決としている箇所も決定2に合わせる必要があります。 / 変更したdocs/design/queue-broker.md「verificationのtoken」93–9",
+    "premise": false,
+    "judged": "read",
+    "reading": "実装の欠け",
+    "task": 2424,
+    "role": "F",
+    "at": "2026-10-16T17:17Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1736,
+    "codes": [
+     "incomplete_spec",
+     "other"
+    ],
+    "text": "task 2471 の out_of_scope 判定は妥当ですが、移動先を修正してください。goal 184 の受け入れ条件 (1)〜(3) は machine の停止を必要とせず、「本番切り替え前に直す価値がある」と task 2398 の judgement 413 だけでは所属の根拠になりません。dagq reference/register.md「A follow_up's membership」手順4は、受け入れ条件に不要な改善を同じテーマの受け皿より高い優先度の goal に入れないと定めています。judgement 470 を訂正し、task 2471 を enterprise の low の受け皿 goal 143 に移してください。goal 184 自体の優先度・受け入れ条件は変更せず、2398 への中身の前提の依存は維持してください。 / task 2470 の更新対象に docs/design/measurement.md「SSOTとビュー」の材料の行を加えてください。現在は Claude Code の transcript の置き場を ~/.claude と記載しています。この task は計測が読む共有の材料を container-home に拡張するため、documents.md「design」の共有記録の規則に従い、container の置き場と読む",
+    "premise": false,
+    "judged": "code",
+    "task": 2470,
+    "role": "F",
+    "at": "2026-10-14T02:12Z"
+   },
+   {
+    "kind": "review_concern",
+    "id": 187480,
+    "primary": "adr_conflict",
+    "codes": [
+     "acceptance_unmet",
+     "adr_conflict",
+     "docs_drift",
+     "repo_rule_violation",
+     "test_gap"
+    ],
+    "text": "session再開、container-homeへの読み取り切り替え、symlink対策は差分とtestで確認できます。トークン計測の受け入れ条件と既存の決定の衝突を解決し、文書・receipt・commitを修正するまで着地を見送ることを推奨します。 / 受け入れ条件2の「container-homeのtranscriptからトークン数を読み、記録する」は未達です。src/infrastructure/sessions.rsのclose_headlessは引き続きturn_finishedからtokensを取り、transcriptの解析はusage: falseです。追加ITもtranscriptにusageを置かず、modelとコマンドだけを検証しています。一方、docs/design/provider-lifecycle.md「非対話のworkerの区間」はトークン数をstreamから取ると定め、acceptedのADR-t1486-1決定4もExecutionの計測で実行側ファイルに頼る対象をCodexのrolloutだけに限定しています。実装は既存の決定を保っていますが、条件2と両立していません。条件を修正するか、計測の決定をamendするかの判断が必要です。 / docs/design/container-runtime.md「workerの実行」に追加した「区間のト",
+    "premise": false,
+    "judged": "code",
+    "task": 2470,
+    "role": "F",
+    "at": "2026-10-14T05:06Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 208074,
+    "primary": "repo_rule_violation",
+    "codes": [
+     "repo_rule_violation"
+    ],
+    "text": "実装・追加テスト・receipt の根拠・関連文書を照合し、受け入れ条件に対する実装上の不足は見つかりませんでした。run branch の commit メッセージに規則違反があるため、修正が必要です。 / run branch の commit e01c9727088e87c7151e59717753247a455627c9 が「runtime:」で始まり、本文も Co-Authored-By だけです。repository の commit 規則（docs/development/documents.md「commit」）に従い、feat: / fix: / docs: / test: の接頭辞と、何をなぜ変えたかを説明する本文に修正し、receipt の commit も更新してください。",
+    "premise": false,
+    "judged": "code",
+    "task": 2480,
+    "role": "F",
+    "at": "2026-10-16T21:06Z"
+   },
+   {
+    "kind": "plan_review_revise",
+    "id": 1805,
+    "codes": [
+     "acceptance_conflict"
+    ],
+    "text": "task 2551 の条件(1)は「slot に持つ run」と「lease の無い awaiting_integration」を同じ対象としており、矛盾しています。landing-recheck.md の「対象と起動」「見つかったとき」と recheck.rs::record_recheck_failure は、supervisor が lease を持って slot に保持する run と、lease の無い run を区別しています。既存の verification_container の拒否 test は後者を既に確認しています。条件(1)を、supervisor の lease と slot に保持された container run を対象とし、125 の拒否後も lease と slot を保ち、action=skipped が park_held_by_recheck による park を起こさないことを確かめる内容へ直してください。",
+    "premise": false,
+    "judged": "code",
+    "task": 2550,
+    "role": "F",
+    "at": "2026-10-16T18:07Z"
+   },
+   {
+    "kind": "review_revise",
+    "id": 208151,
+    "primary": "repo_rule_violation",
+    "codes": [
+     "repo_rule_violation"
+    ],
+    "text": "exit 125 を command の判定前に error として返す実装と fake podman の integration test は受け入れ条件に対応しています。commit の接頭辞に機械的に修正できる規則違反があります。 / run branch の commit 3ecc5452 は、許可された feat: / fix: / docs: / test: ではなく runtime: で始まっています。docs/development/documents.md「commit」と提示された repository 規則に従い、fix: などの接頭辞へ修正してください。",
+    "premise": false,
+    "judged": "code",
+    "task": 2550,
+    "role": "F",
+    "at": "2026-10-16T21:13Z"
+   }
+  ],
+  "claims": [
+   {
+    "task": 2170,
+    "cls": "spike",
+    "recorded_class": null,
+    "claimed": "2026-10-11T09:22Z",
+    "how": "recorded",
+    "wait_h": 68.3,
+    "after_mark": false
+   },
+   {
+    "task": 2171,
+    "cls": "spike",
+    "recorded_class": null,
+    "claimed": "2026-10-12T03:53Z",
+    "how": "recorded",
+    "wait_h": 4.4,
+    "after_mark": false
+   },
+   {
+    "task": 2280,
+    "cls": "spike",
+    "recorded_class": "implementation",
+    "claimed": "2026-10-23T05:09Z",
+    "how": "recorded",
+    "wait_h": 1.0,
+    "after_mark": true
+   },
+   {
+    "task": 2172,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-10-11T09:10Z",
+    "how": "recorded",
+    "wait_h": 68.1,
+    "after_mark": false
+   },
+   {
+    "task": 2173,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-10-12T04:06Z",
+    "how": "recorded",
+    "wait_h": 4.6,
+    "after_mark": false
+   },
+   {
+    "task": 2174,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-10-12T05:30Z",
+    "how": "recorded",
+    "wait_h": 0.1,
+    "after_mark": false
+   },
+   {
+    "task": 2175,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-10-11T18:43Z",
+    "how": "recorded",
+    "wait_h": 1.0,
+    "after_mark": false
+   },
+   {
+    "task": 2176,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-10-12T04:31Z",
+    "how": "recorded",
+    "wait_h": 3.6,
+    "after_mark": false
+   },
+   {
+    "task": 2177,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-10-12T06:24Z",
+    "how": "recorded",
+    "wait_h": 0.0,
+    "after_mark": false
+   },
+   {
+    "task": 2178,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-10-12T05:51Z",
+    "how": "recorded",
+    "wait_h": 0.4,
+    "after_mark": false
+   },
+   {
+    "task": 2179,
+    "cls": "implementation",
+    "recorded_class": "implementation",
+    "claimed": "2026-10-12T08:20Z",
+    "how": "recorded",
+    "wait_h": 2.0,
+    "after_mark": false
+   },
+   {
+    "task": 2180,
+    "cls": "implementation",
+    "recorded_class": "implementation",
+    "claimed": "2026-10-12T12:32Z",
+    "how": "recorded",
+    "wait_h": 1.4,
+    "after_mark": false
+   },
+   {
+    "task": 2181,
+    "cls": "implementation",
+    "recorded_class": "implementation",
+    "claimed": "2026-10-23T12:48Z",
+    "how": "recorded",
+    "wait_h": 1.8,
+    "after_mark": true
+   },
+   {
+    "task": 2182,
+    "cls": "implementation",
+    "recorded_class": "implementation",
+    "claimed": "2026-10-14T02:05Z",
+    "how": "recorded",
+    "wait_h": 0.0,
+    "after_mark": true
+   },
+   {
+    "task": 2249,
+    "cls": "implementation",
+    "recorded_class": "implementation",
+    "claimed": "2026-10-22T22:58Z",
+    "how": "recorded",
+    "wait_h": 0.5,
+    "after_mark": true
+   },
+   {
+    "task": 2257,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-10-11T17:01Z",
+    "how": "recorded",
+    "wait_h": 4.0,
+    "after_mark": false
+   },
+   {
+    "task": 2279,
+    "cls": "implementation",
+    "recorded_class": null,
+    "claimed": "2026-10-12T04:36Z",
+    "how": "recorded",
+    "wait_h": 5.1,
+    "after_mark": false
+   },
+   {
+    "task": 3101,
+    "cls": "implementation",
+    "recorded_class": "implementation",
+    "claimed": "2026-10-22T11:17Z",
+    "how": "recorded",
+    "wait_h": 0.2,
+    "after_mark": true
+   },
+   {
+    "task": 3282,
+    "cls": "implementation",
+    "recorded_class": "implementation",
+    "claimed": "2026-10-24T03:25Z",
+    "how": "recorded",
+    "wait_h": 1.4,
+    "after_mark": true
+   }
+  ],
+  "planner": {
+   "count": 26,
+   "open_h": 1.1,
+   "active_h": 0.7,
+   "idle_h": 0.4
+  }
+ }
+]
