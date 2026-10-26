@@ -133,7 +133,14 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
 - session wrapper（`session`・`planner-session`）はwrapperのprincipalで動く。
 
 それ以外のコマンドは`ActorContext::from_env`でactorを決める。
-そのactorが`user`・`inbox`・`planner`でserviceの答えるコマンドならqueue serviceへ送り、残りは`check_access`の判定の後にqueueを開く（[Queue service](../queue-service.md#クライアントモード)）。
+そのactorが`user`・`inbox`・`planner`でserviceの答えるコマンドならqueue serviceへ送る（[Queue service](../queue-service.md#クライアントモード)）。
+残りは`check_access`で判定し、通ったものだけが次へ進む。
+
+- envにsupervisorの登録（`SUPERVISOR_REGISTRATION_ENV`）があり、supervisorが自分のものとして起動した`observe`（`--history`・`--input`を除く）・`throughput-review`は、そのsupervisorのtokenで同じprincipalとしてserviceを通り、queueを開かない（[`supervise`](supervise.md#queue-serviceの経路)）。
+  envのactorがsupervisorでなければ止まる。
+  serviceでの認可はsupervisorの操作と同じ（[Authorization](../authorization.md#queue-serviceのユースケースservice側)）。
+- それ以外はqueueを開く。
+
 `ActorContext::from_env`の読み方は次のとおり。
 
 - `DAGQ_ROLE`が無いか空なら`user`（人）。host実行の互換のためで、助言的（advisory）でありsandboxではない（ADR-t728-1の決定6）。

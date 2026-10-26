@@ -77,7 +77,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 | | `request.record` / `request.decline` | `request add` / `request decline`（計画の依頼。ADR-t1394-1の決定3・6、[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)） |
 | | `replan.*` | `replan request` `replan propose` / runtimeの保留と置換（[再計画](../plans/task-replanning.md)） |
 | | `task.hold` | `hold` `release` |
-| | `screen.read` / `screen.send` | `run screen` `planner screen` `run log` `planner log` / `run send` `planner send`（sessionの画面を読む・送る。workerのrunには画面が無く、`run screen`はどのrunにも理由とturnのlogのCLI（`run log`）を示して拒み（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）、`run send`はどのrunにも拒む。backgroundのsessionのlogを読む（ADR-t1404-1決定6）。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)） |
+| | `screen.read` / `screen.send` | `run screen` `planner screen` `run log` `planner log` / `run send` `planner send`（sessionの画面を読む・送る。backgroundのsessionのlogを読む（ADR-t1404-1決定6）。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)） |
 | | `planner.request` | `planner request`（開いている非対話のruntimeのplannerへの続きの依頼を次のturnとして置く。[ADR-t1533-1](../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)、[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#続きの依頼と非対話のplannerのcli)）。plannerを閉じるCLIは無い |
 | eval | `eval.request` / `eval.request_held_out` / `eval.rerun` / `eval.read` / `eval.cases` | `agent eval`（dev / holdout・production / `--rerun`） / 読み取り / `agent cases` `agent decide`（[Agent eval](agent-eval.md)） |
 | schedulerの遷移 | `scheduler.supervise` | `supervise` |
@@ -315,12 +315,13 @@ host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユ
 ### queue serviceのユースケース（service側）
 
 queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、要求のtokenから決めたprincipalをactorにして、対話と記録のユースケースを上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue。CLIの`proposal list|show`と同じ）に、`watch_poll`を`queue.watch`に通す。
-findingの書き込みもCLIと同じpolicyで判定する（ADR-t1222-1決定2）。
-クライアントの名乗るroleは認可に使わずtokenのprincipalで判定し、tokenの無いuserはsocketのpeerで決める（[hostのCLI](queue-service-host-cli.md)）。
 拒否は同じ`authorization_denied`（拒まれたprincipalがactor）に残る。
-tokenを発行するのは制御側だけで、AI actorにtokenを作るコマンドは無い。
-読み取りは狭めず、executor-telemetryのほかの全roleがqueue全体を読める（ADR-t1233-5決定3）。
 queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがそのコマンドに求めるのと同じcapability（`ci failures`は`ci.read`、ほかは`queue.read`）を`Gate`で通して答える。
+
+supervisorの操作（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）は、登録を持つsupervisorに`scheduler.supervise`と操作ごとのcapability（`needs::supervisor_needs`）を`Gate`で通してから答える。
+人・inbox・plannerの計画の操作はCLIと同じcapabilityを求めてsupervisorには拒み、一覧に無い操作とintegratorだけの着地の終わりは拒む（default deny）。
+supervisorが起動する`observe`・`throughput-review`もそのtokenで同じ判定を受ける。
+着地のintegratorには`landing.land`を通し、着地の操作だけを、名指すrun・task・leaseをそのものに限って答え、ほかは書かずに拒む（`integrator_scope`）。
 
 ### ほかのコマンド（CLIの入口）
 
