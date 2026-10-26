@@ -290,8 +290,8 @@ run ごとの時間と token（秒。定義は 2 回目と同じ。turn の時�
 | 条件 | そろったか | 根拠 |
 |---|---|---|
 | 1. task 1179 の着地 | そろった | run `2f1f9628` が 2026-09-30T03:14Z に `integrated` |
-| 2a. `worker_question` の answer の turn | 非対話の Claude では起きなかった | 6 本（と同じ窓のほかの 4 本）に `ask_opened` が無い。判断を含む task として選んだ 1021（ask から inbox が見るまでの KPI）・1053（CI の失敗を issue にする）も worker は ask を出さずに決めた |
-| 2b. `needs_session` の resume | 非対話の Claude では起きなかった | 6 本とも `needs_session` 0・resume 0。integrate の検証は 1 回で通り、rebase の衝突も無かった |
+| 2a. `worker_question` の answer の turn | 3 回目の時点では非対話の Claude で起きなかった。既定の切り替えの後に通った | 3 回目: 6 本（と同じ窓のほかの 4 本）に `ask_opened` が無い。判断を含む task として選んだ 1021（ask から inbox が見るまでの KPI）・1053（CI の失敗を issue にする）も worker は ask を出さずに決めた。切り替えの後: 最初の 3 件（task 1546・1660・1944）の answer の turn がどれも `succeeded` で、run は着地した（「[切り替えの後の 2a・2b](#切り替えの後の-2a2b)」） |
+| 2b. `needs_session` の resume | 3 回目の時点では非対話の Claude で起きなかった。既定の切り替えの後に通った | 3 回目: 6 本とも `needs_session` 0・resume 0。integrate の検証は 1 回で通り、rebase の衝突も無かった。切り替えの後: 最初の 3 件（task 1272・1255・1318）の resolution request の turn がどれも `succeeded` で、run は着地した（「[切り替えの後の 2a・2b](#切り替えの後の-2a2b)」） |
 | 2c. L か `[e2e] paths` に触れる task | そろった | L の 1021（`62f3a648`、turn 4453 秒）と、`[e2e] paths` に触れる 1098（`fb9ba422`）・1021・1197（`c488e968`）が非対話の Claude で着地した。どれも着地の前の e2e が passed（`run_e2e_finished`）。1 turn が 4149 秒の 1098 でも途絶えの停止・turn の上限（14400 秒）にかからなかった |
 | 3. cost の記録 | そろった | task 1199（run `989a0924`、2026-09-30T03:31Z 着地）の後、revise の turn の `turn_finished` は `cost_usd` にその turn の値（1021: 0.34、1129: 0.60）、`session_cost_usd` に累計（4.88、5.03）を記録した。`stats` の `turns.by_provider.claude.tokens.cost_usd` は 4.88・5.03 で、2 回目の 1050 のような二重の数え上げは無い |
 
@@ -309,5 +309,32 @@ answer と resume の turn を送る runtime の側（`turn_requested`、session
 ### 続け方
 
 - **人の決定**: 2026-10-02 に人が、2a・2b を待たずに既定を非対話に切り替えると決めた（note 60084）。既定を切り替える ADR と実装は task 1340（goal 85）が行う。「切り替えるときに要る変更」はその task が扱う範囲の手がかりとして残す
-- **切り替えの後に確かめる**: 切り替えの後は経路を指定しない task が非対話の Claude で動くので、2a・2b は普通の run で起きる見込みが高い（同じ窓の対話の M・L の run（15 本）の `needs_session` は 1 run あたり 0.33、runtime を含む L は 0.83。`worker_question` は 2026-09-30 以降の ask 52 件のうち 2 件と稀）。task 1340 の着地の後、最初の `worker_question` の answer の turn と `needs_session` の resume の turn が非対話の Claude で成功したかを `turn_requested`（`answer of ask N`・`resolution request`）と `turn_finished` で確かめる。非対話の経路の問題が見つかったら、それを直す task にする
+- **切り替えの後に確かめる**: 切り替えの後は経路を指定しない task が非対話の Claude で動くので、2a・2b は普通の run で起きる見込みが高い（同じ窓の対話の M・L の run（15 本）の `needs_session` は 1 run あたり 0.33、runtime を含む L は 0.83。`worker_question` は 2026-09-30 以降の ask 52 件のうち 2 件と稀）。task 1340 の着地の後、最初の `worker_question` の answer の turn と `needs_session` の resume の turn が非対話の Claude で成功したかを `turn_requested`（`answer of ask N`・`resolution request`）と `turn_finished` で確かめる。非対話の経路の問題が見つかったら、それを直す task にする。結果: 2a・2b とも既定の切り替えの後の最初の 3 件が非対話の Claude で `succeeded` になり、同じ session の resume で続いて着地した。非対話の経路の問題は見つからなかった（「[切り替えの後の 2a・2b](#切り替えの後の-2a2b)」）
 - 次にこの文書に足すときは、同じ形（一覧・run ごとの時間・同じ窓の対話の run との層の比較・run ごとの問題・条件の表）で足す
+
+### 切り替えの後の 2a・2b
+
+既定を非対話に切り替えた task 1340 の着地（run `eecb5fa8` の `run_integrated`、event 61149、2026-10-02T08:00:54Z）の後に claim された run で、`turn_requested` が `answer of ask N`（2a）と `resolution request`（2b）の turn を古い順に最大 3 件ずつ読んだ。run の無い answer の turn（`run_id` が null。planner の ask の answer）は数えない。
+
+- 読んだ時点: 2026-10-26。固定バイナリ `~/.local/bin/dagq`（`0.4.0-dev+fb928779`）で、状態を変えないコマンドだけを使った
+- 対象: `run_claimed` の `provider` が `claude`、`worker_mode` が `headless` で、run の中に `provider_switched` が無い run。1340 の着地から 2a の 3 件目の answer の turn（2026-10-07T03:16Z）までの `run_claimed` は 347 本（Claude の非対話 292、claim の時に Codex に切り替えた run 52、`--interactive` を選んだ Claude の run 3）
+- 3 件の claim はどれも 1340 の commit（`c05e8644`）以降の固定バイナリで、`session_opened` の `route` は `headless`
+
+```sh
+dagq events --task 1340 --all --full --kind run_integrated              # 1340 の着地: event 61149、2026-10-02T08:00:54Z
+dagq events --all --full --kind turn_requested --since 2026-10-02T08:00:54Z --limit 1000   # 続きは --after <cursor>。what が answer of ask N・resolution request のものを古い順に
+dagq events --all --full --kind run_claimed --since 2026-10-02T08:00:54Z --until 2026-10-07T03:18:00Z --limit 5000   # 読んだ範囲の run の数を provider・worker_mode で数えた
+dagq events --run <run> --all --full --limit 2000                       # 下の run それぞれ。run_claimed・provider_switched・ask_opened・ask_answered・turn_requested・turn_started・turn_finished・run_integrated
+```
+
+| 流れ | task | run | `turn_requested` | 次の `turn_started`（`resume`・session） | `turn_finished` の `outcome` | その後 | 着地 |
+|---|---|---|---|---|---|---|---|
+| 2a | 1546 | `f298ee8f` | 79917（answer of ask 386、`worker_question`） | 79919（turn 2、`resume: true`、同じ session） | 79954 `succeeded`（commit と receipt を書いた） | revise の turn 3 が同じ session の resume で 79994 `succeeded` | `run_integrated` 80075（2026-10-03T23:52Z） |
+| 2a | 1660 | `b826f03c` | 98918（answer of ask 437） | 98921（turn 2、`resume: true`、同じ session） | 98928 `succeeded` | rebase の turn 3（98944）と revise の turn 4（98958）が同じ session で `succeeded` | `run_integrated` 98987（2026-10-04T23:50Z） |
+| 2a | 1944 | `83432f1b` | 118958（answer of ask 556） | 118960（turn 2、`resume: true`、同じ session） | 118973 `succeeded` | rebase の衝突の後の resolution request の turn 3 が同じ session で 119400 `succeeded` | `run_integrated` 119533（2026-10-07T03:45Z） |
+| 2b | 1272 | `33daa379` | 61431（resolution request、検証の失敗の後） | 61435（turn 2、`resume: true`、同じ session） | 61646 `succeeded`（落ちた test を直した） | — | `run_integrated` 61681（2026-10-02T09:38Z） |
+| 2b | 1255 | `33ee1eb3` | 62062（resolution request、rebase の衝突の後） | 62066（turn 2、`resume: true`、同じ session） | 62118 `succeeded`（rebase して receipt を書き直した） | — | `run_integrated` 62153（2026-10-02T10:52Z） |
+| 2b | 1318 | `6f7ea894` | 62187（resolution request、検証の失敗の後） | 62196（turn 2、`resume: true`、同じ session） | 62227 `succeeded` | 2 回目の resolution request（62549）の turn 3 も同じ session で 62602 `succeeded` | `run_integrated` 62719（2026-10-02T11:50Z） |
+
+- 2a・2b とも、answer と resolution の依頼の文を Claude の `--resume` の turn として渡す組み合わせが本番で通った。6 本とも turn の `failure` は null、`exit_code` は 0 で、非対話の経路の問題は見つからなかった
+- 除いた run（provider を切り替えた run）: 同じ期間の answer の turn のうち、task 1583（`6357a771`、claim の時に `usage_limit` で Codex に切り替え、event 81347）・1437（`3307f9a3`、turn 1 の `usage_limit` の後に Codex に切り替え、event 81230）・1216（`d9e44747`、claim の時に Codex に切り替え、event 103995）は Codex の turn なので上の表に入れていない。1583（answer の `turn_finished` 81513・81894）・1216（113425）の answer の turn は Codex の resume で `succeeded` になり、どちらも着地した（`run_integrated` 82097・117586）。1437 は answer の turn 4 が `stopped`（81955）になり、resolution request の resume で続いた
