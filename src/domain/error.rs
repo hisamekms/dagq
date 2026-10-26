@@ -181,6 +181,12 @@ pub enum DomainError {
         goal_id: GoalId,
         follow_ups: Vec<(TaskId, String)>,
     },
+    /// Replaced tasks of the goal whose replacement record is broken keep
+    /// it from closing as achieved (ADR-t1521-2 decision 5).
+    GoalReplacementsUnresolved {
+        goal_id: GoalId,
+        unresolved: Vec<super::replan_apply::UnresolvedReplacement>,
+    },
     /// The receipt text is not a completion receipt; `reason` is the parser's.
     MalformedReceipt {
         reason: String,
@@ -750,6 +756,18 @@ impl fmt::Display for DomainError {
                 blocking
                     .iter()
                     .map(|(status, n)| format!("{n} task(s) {}", status.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::GoalReplacementsUnresolved {
+                goal_id,
+                unresolved,
+            } => write!(
+                f,
+                "goal {goal_id} cannot be closed as achieved: replaced task(s) {}; their replacement is not resolved",
+                unresolved
+                    .iter()
+                    .map(|u| format!("{} ({})", u.task, u.fault))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),

@@ -39,6 +39,8 @@ execの[引き継ぎ](handoff.md)のあいだの回収と止め方は引き継�
    jobのpromptと出力はqueueの`goal-reviews/<行のID>/`に置く。
 2. **起動の条件**（`goal_review_candidates`、ID順の先頭を取る）: goalが`open`で閉じておらず、所属taskが1件以上あり、すべて`completed`か`canceled`か`replaced`で所属taskの`completed`が1件以上（`goal_review::tasks_done`。`draft` / `submitted`のtask、つまりruntimeのplannerの待ち・`keep_draft`で残ったdraft・閉じていない`planner_question`の対象は、これで除かれる）、元goalがこのgoalのfollow_up（所属は問わない）に所属の判断が済まないもの（[Follow-up membership judgements](../follow-up-membership.md)の「閉じる条件」、ADR-t1504-2決定8）が無く、goalのreviewが開いた`approve_goal`のaskで閉じていないものが無く、前回のgoal review（`interrupted`を除く最新の行）の後に入力が変わっている。
    `replaced`は終わったものに数えるが`completed`には数えず、置換先を再置換も辿った全てのtaskが所属を問わず終わるまで起動を待つ（[ADR-t1521-2](../../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)決定5）。
+   置換先の記録が空か、存在しないtaskを指すか、辿ると循環する置換元（再置換で辿った置換元を含む）は解決済みとせず（`replan_apply::unresolved_replacements`）、そのgoalは起動せず、achievedの適用と`goal close --verdict achieved`も拒み、定期taskのkeyも保つ。
+   その記録は手で直さないので、`status`（inbox）のattentionに`replacement_unresolved`（`goal review by hand`）としてその置換元のtaskで出て、作業を足しても起動しないので、人がgoalを`abandoned`で閉じる（続ける作業は別のgoalに足す）。
    out_of_scopeと判断して別のgoalへ移したfollow_upの未完了は起動を妨げない。
    follow_upの所属の判断だけで起動しないgoalのattention（`goal_follow_ups_unsettled`）は[Follow-up membership judgements](../follow-up-membership.md)の「閉じる条件」が持つ。
    入力は`goal_review::review_fingerprint`で比べ、同じなら起動しない。
@@ -101,7 +103,7 @@ execの[引き継ぎ](handoff.md)のあいだの回収と止め方は引き継�
      `provider`を書かないgoal reviewは、Claudeの壁ではaskに足され、`failed`で閉じる（askの`done`がrearmする）。
    - Codexのjobの`goal_review_failed`も、読めればsessionとmodelを持つ。
 7. **answer**（`goal_answers` → `decide_goal`、1トランザクション）: `GoalAnswer::parse`で`GOAL_OPTIONS`の答えを読む。
-   適用できるのは、goalが閉じておらず、`achieved`は所属taskがすべて終わりfollow_upの所属の判断が済んでいて（2の条件のうちこの2つだけ）、`abandoned`は`in_progress`が無く、`gaps`はreviewのverdictにgapがあるとき（`gaps: <text>`は人のtextを1件のgapにする）。
+   適用できるのは、goalが閉じておらず、`achieved`は所属taskがすべて終わり、follow_upの所属の判断が済み、置換先の記録が壊れた置換元が無く（2の条件のうちこの3つだけ）、`abandoned`は`in_progress`が無く、`gaps`はreviewのverdictにgapがあるとき（`gaps: <text>`は人のtextを1件のgapにする）。
    適用するとaskを閉じ、`goal_decided`を記録する。
    `achieved` / `abandoned`はgoalを閉じ、`gaps`は5と同じ手順でdraftを登録し、`keep_open`は何もしない（2の入力が同じなので、2の入力（所属task・acceptanceの版・follow_upとその判断）が変わるまで起動しない）。
    goalが先に閉じていたらaskを閉じ、`ask_closed`だけを記録する。

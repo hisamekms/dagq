@@ -2441,6 +2441,13 @@ pub(super) fn close_goal_in(
         verdict,
         &super::follow_up_membership::source_follow_ups(conn, goal_id)?,
     )?;
+    // A broken replacement record is never resolved (ADR-t1521-2
+    // decision 5): the replaced task's own work did not land.
+    goal::check_replacements(
+        goal_id,
+        verdict,
+        &super::replan_apply::goal_unresolved(conn, goal_id)?,
+    )?;
     // `closed_at IS NULL` only detects a concurrent close; the domain
     // decided whether this one may happen.
     let changed = conn.execute(

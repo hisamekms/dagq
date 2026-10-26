@@ -280,11 +280,99 @@ pub(super) fn replacement_tasks(
 }
 
 /// Whether replaced task `task` is not resolved yet: a task its
-/// replacements reach has not ended ([`replacement_tasks`]).
+/// replacements reach has not ended ([`replacement_tasks`]), or a record on
+/// the way is broken ([`unresolved_replacements`]).
 pub(super) fn replacement_open(conn: &Connection, task: TaskId) -> Result<bool> {
     Ok(replacement_tasks(conn, &[task])?
         .iter()
-        .any(|(_, status)| !status.is_terminal()))
+        .any(|(_, status)| !status.is_terminal())
+        || !unresolved_replacements(conn, &[task])?.is_empty())
+}
+
+/// The replaced tasks reached from replaced tasks `from` whose applied
+/// replacement record is empty, names a task that is not there or loops
+/// ([`replan_apply::unresolved_replacements`]), read on `conn`. The walk
+/// visits each task once, so it ends on a loop that the recursive query of
+/// [`replacement_tasks`] would only stop at.
+pub(super) fn unresolved_replacements(
+    conn: &Connection,
+    from: &[TaskId],
+) -> Result<Vec<replan_apply::UnresolvedReplacement>> {
+    if from.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut replacements: BTreeMap<TaskId, Vec<TaskId>> = BTreeMap::new();
+    let rows: Vec<(TaskId, TaskId)> = conn
+        .prepare(
+            "SELECT r.from_task_id, r.to_task_id FROM replan_replacements r
+             JOIN replan_operations o ON o.id=r.operation_id AND o.status='applied'
+             ORDER BY r.from_task_id, r.to_task_id",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (task, to) in rows {
+        replacements.entry(task).or_default().push(to);
+    }
+    let statuses: BTreeMap<TaskId, TaskStatus> = conn
+        .prepare(
+            "SELECT id, status FROM tasks
+             WHERE id IN (SELECT value FROM json_each(?1))
+                OR id IN (SELECT r.to_task_id FROM replan_replacements r
+                          JOIN replan_operations o ON o.id=r.operation_id
+                            AND o.status='applied')",
+        )?
+        .query_map([serde_json::to_string(from)?], |r| {
+            Ok((r.get(0)?, enum_col(r, "status")?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(replan_apply::unresolved_replacements(
+        from,
+        &replacements,
+        &statuses,
+    ))
+}
+
+/// [`unresolved_replacements`] from goal `goal`'s replaced tasks: while
+/// any is there, the goal neither starts a review nor closes as achieved.
+pub(super) fn goal_unresolved(
+    conn: &Connection,
+    goal: GoalId,
+) -> Result<Vec<replan_apply::UnresolvedReplacement>> {
+    let replaced: Vec<TaskId> = conn
+        .prepare("SELECT id FROM tasks WHERE goal_id=?1 AND status='replaced' ORDER BY id")?
+        .query_map([goal], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    unresolved_replacements(conn, &replaced)
+}
+
+/// [`unresolved_replacements`] from the replaced tasks of each open goal
+/// in one walk per goal (a loop is found once, where it closes), and from
+/// those with no goal, each with the goal it holds back, in goal and task
+/// order: what `status` shows a person, who decides the goal (it closes
+/// otherwise) since the record is not fixed by hand. A broken task two
+/// goals reach is shown for each.
+pub(super) fn open_unresolved(
+    conn: &Connection,
+) -> Result<Vec<(Option<GoalId>, replan_apply::UnresolvedReplacement)>> {
+    let replaced: Vec<(Option<GoalId>, TaskId)> = conn
+        .prepare(
+            "SELECT t.goal_id, t.id FROM tasks t LEFT JOIN goals g ON g.id=t.goal_id
+             WHERE t.status='replaced' AND (t.goal_id IS NULL OR g.closed_at IS NULL)
+             ORDER BY t.goal_id, t.id",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut by_goal: BTreeMap<Option<GoalId>, Vec<TaskId>> = BTreeMap::new();
+    for (goal, task) in replaced {
+        by_goal.entry(goal).or_default().push(task);
+    }
+    let mut found = Vec::new();
+    for (goal, roots) in by_goal {
+        for unresolved in unresolved_replacements(conn, &roots)? {
+            found.push((goal, unresolved));
+        }
+    }
+    Ok(found)
 }
 
 /// The tasks outside goal `goal` that its replaced tasks' replacements

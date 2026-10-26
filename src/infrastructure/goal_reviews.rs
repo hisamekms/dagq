@@ -47,15 +47,18 @@ fn goal_tasks(conn: &Connection, goal: GoalId) -> Result<Vec<(TaskId, TaskStatus
 /// What a review of the goal sees now (ADR-t1504-2 decision 8): its
 /// fingerprint (tasks, acceptance version, follow-ups and their
 /// judgements) and whether it may close as achieved — its tasks and the
-/// replacements outside it all ended, one of its own completed, and no
-/// follow-up of it unsettled.
+/// replacements outside it all ended, one of its own completed, no
+/// replacement record of it broken (ADR-t1521-2 decision 5,
+/// [`super::replan_apply::goal_unresolved`]) and no follow-up of it
+/// unsettled.
 fn review_input(conn: &Connection, goal: GoalId) -> Result<(String, bool)> {
     let own = own_tasks(conn, goal)?;
     let replacing = super::replan_apply::goal_replacing(conn, goal)?;
     let follow_ups = follow_up_membership::source_follow_ups(conn, goal)?;
     let version = follow_up_membership::acceptance_version(conn, goal)?;
     let closable = goal_review::tasks_done(&own, &replacing)
-        && follow_up::unsettled_follow_ups(&follow_ups).is_empty();
+        && follow_up::unsettled_follow_ups(&follow_ups).is_empty()
+        && super::replan_apply::goal_unresolved(conn, goal)?.is_empty();
     let tasks: Vec<(TaskId, TaskStatus)> = own.into_iter().chain(replacing).collect();
     let lineage = super::replan_apply::goal_replacements(conn, goal)?.lineage;
     Ok((
@@ -276,9 +279,11 @@ fn ask_review(conn: &Connection, ask: AskId) -> Result<Option<(i64, GoalId)>> {
 
 /// What the answer `text` of `ask` does when the supervisor applies it
 /// now: `None` when it is no option, the goal closed, or it cannot be
-/// applied (`achieved` with a task not ended or a follow-up whose
-/// membership is not settled, `abandoned` with one in
-/// progress, `gaps` with nothing to register).
+/// applied (`achieved` with a task not ended, a follow-up whose
+/// membership is not settled or a broken replacement record
+/// ([`super::replan_apply::goal_unresolved`]), `abandoned` with one in
+/// progress, `gaps` with nothing to register). Read when the answer is
+/// given too, so one that cannot be applied then is the inbox's.
 fn applicable(
     conn: &Connection,
     ask: &Ask,
@@ -303,15 +308,16 @@ fn applicable(
     }
     let tasks = goal_tasks(conn, goal)?;
     // Read only what the answer needs.
-    let follow_ups_settled = answer != GoalAnswer::Achieved
+    let settled = answer != GoalAnswer::Achieved
         || !tasks
             .iter()
             .all(|(_, status)| GoalVerdict::Achieved.allows(*status))
-        || follow_up::unsettled_follow_ups(&follow_up_membership::source_follow_ups(conn, goal)?)
-            .is_empty();
+        || (follow_up::unsettled_follow_ups(&follow_up_membership::source_follow_ups(conn, goal)?)
+            .is_empty()
+            && super::replan_apply::goal_unresolved(conn, goal)?.is_empty());
     let review_has_gaps =
         answer == GoalAnswer::Gaps(None) && !review_gaps(conn, review)?.is_empty();
-    let fits = answer.fits(&tasks, follow_ups_settled, review_has_gaps);
+    let fits = answer.fits(&tasks, settled, review_has_gaps);
     Ok(fits.then_some((answer, review, goal)))
 }
 
@@ -806,6 +812,17 @@ impl GoalReviewStore for SqliteQueue {
         goal: GoalId,
     ) -> Result<crate::domain::replan_apply::GoalReplacements> {
         super::replan_apply::goal_replacements(&self.conn, goal)
+    }
+
+    fn unresolved_replacements(
+        &self,
+    ) -> Result<
+        Vec<(
+            Option<GoalId>,
+            crate::domain::replan_apply::UnresolvedReplacement,
+        )>,
+    > {
+        super::replan_apply::open_unresolved(&self.conn)
     }
 
     fn goal_follow_ups(&self) -> Result<Vec<follow_up::GoalFollowUps>> {

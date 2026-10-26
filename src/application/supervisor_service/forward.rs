@@ -587,6 +587,17 @@ impl GoalReviewStore for SupervisorQueue {
         let local = self.local()?;
         GoalReviewStore::goal_replacements(&**local, goal)
     }
+    fn unresolved_replacements(
+        &self,
+    ) -> Result<
+        Vec<(
+            Option<GoalId>,
+            crate::domain::replan_apply::UnresolvedReplacement,
+        )>,
+    > {
+        let local = self.local()?;
+        GoalReviewStore::unresolved_replacements(&**local)
+    }
     #[allow(clippy::too_many_arguments)]
     fn begin_goal_review(
         &mut self,

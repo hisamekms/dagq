@@ -20,7 +20,8 @@
 //! old proposal and the replaced run's late receipt write nothing, a child
 //! claimed after the apply is handed the saved head, and a replaced task
 //! holds its goal and its recurring key until every task its replacement
-//! reaches has ended.
+//! reaches has ended, and while its record is empty, names a task that is
+//! not there or loops, which `status` shows.
 //! The backend and the stub reviewer are plan review's
 //! (`runtime_support::plan_review`).
 
@@ -2478,4 +2479,221 @@ fn a_replaced_recurring_task_holds_its_key_until_its_children_end() {
         queue(&p).register_recurring_draft(&item).unwrap(),
         RecurringOutcome::Registered { .. }
     ));
+}
+
+/// A replaced task whose replacement record is empty, names a task that is
+/// not there or loops is never resolved (ADR-t1521-2 decision 5): with its
+/// children landed, each way to break the record keeps the goal from a goal
+/// review's start, stales the achieved verdict of a review begun before it
+/// broke, refuses `goal close --verdict achieved`, holds the task's
+/// recurring key and stands in `status` (the inbox) on the replaced task;
+/// the walk ends on a loop. One apply serves every way: the record is
+/// broken and made whole again in turn, and whole, the replacement is
+/// resolved. An `achieved` answer to an `approve_goal` ask given after the
+/// record broke is left to the inbox.
+#[test]
+fn a_broken_replacement_record_holds_the_goal_and_its_key_and_is_shown() {
+    use dagq::application::{GoalReviewApply, GoalReviewStore};
+    use dagq::domain::{
+        actor_model::{ActorLaunch, ModelRole},
+        goal_review::{GoalReviewDecision, GoalReviewVerdict},
+        recurring::{RecurringDraft, RecurringOutcome},
+    };
+    let p = parked(0);
+    save_snapshot(&p);
+    sql(
+        &p,
+        &format!(
+            "INSERT INTO draft_origins(task_id, origin, material, created_at)
+             VALUES ({}, 'recurring', '{{\"key\":\"weekly\"}}', 0)",
+            p.task
+        ),
+    );
+    let item = RecurringDraft {
+        key: "weekly".into(),
+        interval_days: 1,
+        title: "chore: the weekly check".into(),
+        description: "d".into(),
+        acceptance: "it is checked".into(),
+        verification: vec!["cargo test".into()],
+        paths: vec!["src/**".into()],
+        evidence: Vec::new(),
+        goal: None,
+    };
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
+    let (api, docs, plan) = children(&p);
+    approved(&p, &backend, &reviewer, &[api, docs], &plan);
+    supervise(&p, &backend, &reviewer, 1);
+    assert_eq!(operation(&p).status, ReplanStatus::Applied);
+    for task in [api, docs, p.successor] {
+        sql(
+            &p,
+            &format!("UPDATE tasks SET status='completed' WHERE id={task}"),
+        );
+    }
+    let candidate = || {
+        queue(&p)
+            .goal_review_candidates()
+            .unwrap()
+            .contains(&p.goal)
+    };
+    let shown = || -> Vec<Value> {
+        dagq::runtime::status(&p.fx.db).unwrap()["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["kind"] == "replacement_unresolved")
+            .cloned()
+            .collect()
+    };
+    assert!(candidate());
+    assert!(shown().is_empty());
+    let op = p.op;
+    let task = p.task;
+    let missing = 999_999;
+    // The record broken, the task it is shown on, why, and the record
+    // made whole again.
+    let broken = [
+        (
+            format!(
+                "CREATE TABLE kept AS SELECT * FROM replan_replacements WHERE operation_id={op};
+                 DELETE FROM replan_replacements WHERE operation_id={op};"
+            ),
+            task,
+            "its replacement names no task".to_owned(),
+            "INSERT INTO replan_replacements SELECT * FROM kept; DROP TABLE kept;".to_owned(),
+        ),
+        (
+            format!("UPDATE replan_replacements SET to_task_id={missing} WHERE to_task_id={docs};"),
+            task,
+            format!("its replacement names task {missing}, which is not there"),
+            format!("UPDATE replan_replacements SET to_task_id={docs} WHERE to_task_id={missing};"),
+        ),
+        (
+            format!(
+                "UPDATE tasks SET status='replaced' WHERE id={api};
+                 INSERT INTO replan_replacements(operation_id, from_task_id, to_task_id)
+                 VALUES ({op}, {api}, {task});"
+            ),
+            api,
+            format!("its replacements loop back to task {task}"),
+            format!(
+                "DELETE FROM replan_replacements WHERE from_task_id={api};
+                 UPDATE tasks SET status='completed' WHERE id={api};"
+            ),
+        ),
+    ];
+    let token = LeaseToken::new("goal-review-owner");
+    for (break_it, on, why, restore) in broken {
+        // A review begun on the whole record, then the record broken.
+        let mut q = queue(&p);
+        let job = q
+            .begin_goal_review(
+                p.goal,
+                &token,
+                &p.fx.repo.join("goal-reviews"),
+                &p.fx.repo,
+                &ActorLaunch::default_of(ModelRole::GoalReview),
+                &|_| false,
+            )
+            .unwrap()
+            .unwrap();
+        sql(&p, &break_it);
+        assert!(!candidate(), "{why}");
+        let applied = q
+            .finish_goal_review(
+                &job,
+                &token,
+                &GoalReviewApply {
+                    verdict: GoalReviewVerdict::parse(r#"{"verdict":"achieved","summary":"done"}"#)
+                        .unwrap(),
+                    decision: GoalReviewDecision::Achieved,
+                    overridden: None,
+                    ask: None,
+                    duration_secs: 1,
+                    session: None,
+                    prompt_bytes: None,
+                },
+            )
+            .unwrap();
+        assert!(applied.stale, "{why}: {applied:?}");
+        assert!(!q.show_goal(p.goal).unwrap().goal.is_closed(), "{why}");
+        let error = q
+            .close_goal(p.goal, GoalVerdict::Achieved)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("cannot be closed as achieved") && error.contains(&why),
+            "{error}"
+        );
+        assert!(
+            q.begin_goal_review(
+                p.goal,
+                &token,
+                &p.fx.repo.join("goal-reviews"),
+                &p.fx.repo,
+                &ActorLaunch::default_of(ModelRole::GoalReview),
+                &|_| false,
+            )
+            .unwrap()
+            .is_none(),
+            "{why}"
+        );
+        drop(q);
+        assert_eq!(
+            queue(&p).register_recurring_draft(&item).unwrap(),
+            RecurringOutcome::Open { task_id: task },
+            "{why}"
+        );
+        let entries = shown();
+        assert_eq!(entries.len(), 1, "{why}: {entries:?}");
+        assert_eq!(entries[0]["task_id"], json!(on), "{why}");
+        assert_eq!(entries[0]["next"], "goal review by hand", "{why}");
+        let error = entries[0]["last_error"].as_str().unwrap();
+        assert!(
+            error.contains(&format!("goal {}", p.goal)) && error.contains(&why),
+            "{error}"
+        );
+        sql(&p, &restore);
+        assert!(candidate(), "{why}");
+        assert!(shown().is_empty(), "{why}");
+    }
+    // An `approve_goal` ask opened on the whole record, then the record
+    // broken: an `achieved` answer is not the runtime's to apply, so it is
+    // the inbox's (`runtime_delivers: false`), and nothing closes the goal.
+    let asking = StubReviewer::new(&[json!({"verdict": "ask", "summary": "close it?"})]);
+    supervise(&p, &backend, &asking, 1);
+    let ask = queue(&p)
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.kind == dagq::domain::AskKind::ApproveGoal && ask.closed_at.is_none())
+        .unwrap();
+    sql(
+        &p,
+        &format!("UPDATE replan_replacements SET to_task_id={missing} WHERE to_task_id={docs};"),
+    );
+    queue(&p).answer(ask.id, "achieved").unwrap();
+    let answered = events(&p, ask.task_id.unwrap(), "ask_answered");
+    assert_eq!(answered.last().unwrap()["runtime_delivers"], false);
+    assert!(
+        !queue(&p)
+            .goal_answers()
+            .unwrap()
+            .iter()
+            .any(|answer| answer.id == ask.id)
+    );
+    assert!(queue(&p).decide_goal(ask.id).unwrap().is_none());
+    assert!(queue(&p).read_ask(ask.id).unwrap().closed_at.is_none());
+    assert!(!queue(&p).show_goal(p.goal).unwrap().goal.is_closed());
+    sql(
+        &p,
+        &format!("UPDATE replan_replacements SET to_task_id={docs} WHERE to_task_id={missing};"),
+    );
+    assert!(matches!(
+        queue(&p).register_recurring_draft(&item).unwrap(),
+        RecurringOutcome::Registered { .. }
+    ));
+    queue(&p).close_goal(p.goal, GoalVerdict::Achieved).unwrap();
 }

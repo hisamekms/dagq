@@ -341,6 +341,27 @@ pub fn check_follow_ups(
     })
 }
 
+/// Whether the replaced tasks of goal `goal_id` let it close with
+/// `verdict` (ADR-t1521-2 decision 5): `achieved` needs none of them, nor
+/// a replaced task their replacements reach, with a broken record
+/// (`unresolved`, [`super::replan_apply::unresolved_replacements`]), which
+/// is never resolved; `abandoned` claims nothing and waits for none.
+pub fn check_replacements(
+    goal_id: GoalId,
+    verdict: GoalVerdict,
+    unresolved: &[super::replan_apply::UnresolvedReplacement],
+) -> Result<(), DomainError> {
+    if verdict != GoalVerdict::Achieved {
+        return Ok(());
+    }
+    require(unresolved.is_empty(), || {
+        DomainError::GoalReplacementsUnresolved {
+            goal_id,
+            unresolved: unresolved.to_vec(),
+        }
+    })
+}
+
 /// Close `goal` with `verdict` at `closed_at`, its tasks numbering `counts`
 /// by status. `replacing` is every task outside the goal that its replaced
 /// tasks' replacements reach, through re-replacements too
@@ -919,6 +940,25 @@ mod tests {
             ..unjudged
         };
         assert!(check_follow_ups(goal, GoalVerdict::Achieved, &[out_of_scope]).is_ok());
+    }
+
+    #[test]
+    fn only_achieved_waits_for_an_unresolved_replacement() {
+        use crate::domain::replan_apply::{ReplacementFault, UnresolvedReplacement};
+        let broken = UnresolvedReplacement {
+            task: crate::domain::TaskId::new(4),
+            fault: ReplacementFault::Empty,
+        };
+        let goal = GoalId::new(7);
+        assert_eq!(
+            check_replacements(goal, GoalVerdict::Achieved, &[broken])
+                .unwrap_err()
+                .to_string(),
+            "goal 7 cannot be closed as achieved: replaced task(s) 4 (its replacement \
+             names no task); their replacement is not resolved"
+        );
+        assert!(check_replacements(goal, GoalVerdict::Abandoned, &[broken]).is_ok());
+        assert!(check_replacements(goal, GoalVerdict::Achieved, &[]).is_ok());
     }
 
     #[test]

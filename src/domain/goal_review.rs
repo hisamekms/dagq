@@ -296,14 +296,16 @@ pub fn rearmable(goal: GoalId, open: Option<bool>) -> Result<(), String> {
 
 impl GoalAnswer {
     /// Whether the supervisor can apply the answer to an open goal whose
-    /// tasks are `tasks`: `achieved` needs every task ended and no
-    /// follow-up of the goal unsettled (`follow_ups_settled`), `abandoned`
+    /// tasks are `tasks`: `achieved` needs every task ended, and no
+    /// follow-up of the goal unsettled and no replacement record of it
+    /// broken (`settled`, ADR-t1504-2 decision 8, ADR-t1521-2 decision 5),
+    /// `abandoned`
     /// no task in progress, `gaps` without a text the review's gaps
     /// (`review_has_gaps`); `gaps: <what>` and `keep_open` always apply.
     pub fn fits(
         &self,
         tasks: &[(TaskId, TaskStatus)],
-        follow_ups_settled: bool,
+        settled: bool,
         review_has_gaps: bool,
     ) -> bool {
         match self {
@@ -311,7 +313,7 @@ impl GoalAnswer {
                 tasks
                     .iter()
                     .all(|(_, status)| GoalVerdict::Achieved.allows(*status))
-                    && follow_ups_settled
+                    && settled
             }
             Self::Abandoned => tasks
                 .iter()

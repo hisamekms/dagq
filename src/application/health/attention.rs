@@ -755,6 +755,31 @@ pub fn attention(
             next: AttentionNext::GoalReviewByHand,
         });
     }
+    // A replaced task whose replacement record is empty, names a task that
+    // is not there or loops is never resolved (ADR-t1521-2 decision 5): its
+    // goal neither starts a review nor closes as achieved, and a recurring
+    // key it holds stays held; a person decides the goal. It is shown on
+    // the broken replaced task, with the goal it holds back.
+    for (goal, unresolved) in queue.unresolved_replacements()? {
+        attention.push(Attention {
+            run_id: None,
+            task_id: Some(unresolved.task),
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "open".into(),
+            kind: crate::domain::replan_apply::REPLACEMENT_UNRESOLVED.into(),
+            last_error: Some(truncate_reason(&match goal {
+                Some(goal) => format!(
+                    "goal {goal}: replaced task {}: {}",
+                    unresolved.task, unresolved.fault
+                ),
+                None => format!("replaced task {}: {}", unresolved.task, unresolved.fault),
+            })),
+            last_error_code: None,
+            next: AttentionNext::GoalReviewByHand,
+        });
+    }
     // A goal whose own work is done but whose goal review waits for the
     // membership of its follow-ups nothing else shows waits for a planning
     // request the inbox records (task 1660, ADR-t1504-2 decision 8); it is

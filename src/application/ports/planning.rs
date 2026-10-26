@@ -928,7 +928,8 @@ pub trait GoalReviewStore {
     /// Open goals a goal review may take now, in ID order: at least one
     /// task, each completed, canceled or replaced with one completed (and
     /// every task a replaced one's replacement reaches ended, wherever it
-    /// belongs), no unclosed `approve_goal` ask, and tasks that changed
+    /// belongs, with no broken record on the way), no unclosed
+    /// `approve_goal` ask, and tasks that changed
     /// since the goal's last review (or a person rearmed it).
     fn goal_review_candidates(&self) -> Result<Vec<GoalId>>;
     /// What replaced the goal's replaced tasks (their lineage, mappings and
@@ -938,6 +939,19 @@ pub trait GoalReviewStore {
         &self,
         goal: GoalId,
     ) -> Result<crate::domain::replan_apply::GoalReplacements>;
+    /// Each replaced task whose goal is open, or that has none, with a
+    /// broken replacement record reached from it, with that goal
+    /// ([`crate::domain::replan_apply::unresolved_replacements`]): it holds
+    /// the goal's review and its close as achieved back for good, so it is
+    /// a person's to see.
+    fn unresolved_replacements(
+        &self,
+    ) -> Result<
+        Vec<(
+            Option<GoalId>,
+            crate::domain::replan_apply::UnresolvedReplacement,
+        )>,
+    >;
     /// Record the start of a goal review of `goal` by `token`, in the
     /// directory named by its row's ID under `goal_reviews_dir`
     /// (`goal_review_started`, with the session id it gives the job, the

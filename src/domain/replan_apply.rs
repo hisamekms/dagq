@@ -395,6 +395,115 @@ pub struct GoalReplacements {
     pub outside: Vec<TaskId>,
 }
 
+/// What `status` (the inbox) shows, on the replaced task, while
+/// [`unresolved_replacements`] finds its record unresolved.
+pub const REPLACEMENT_UNRESOLVED: &str = "replacement_unresolved";
+
+/// Why the applied replacements of a replaced task do not say what
+/// replaced it (ADR-t1521-2 decision 5, docs/plans/task-replanning.md,
+/// "goal reviewとgoal close"). The apply always writes at least one child
+/// and never a loop, so only a record broken by hand or by a later defect
+/// has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "fault", rename_all = "snake_case")]
+pub enum ReplacementFault {
+    /// No applied replacement names a task in its place.
+    Empty,
+    /// An applied replacement names task `to`, which is not there.
+    Missing { to: TaskId },
+    /// Following the replacements from it comes back to task `to`, which
+    /// the same walk is still following.
+    Cycle { to: TaskId },
+}
+
+impl std::fmt::Display for ReplacementFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("its replacement names no task"),
+            Self::Missing { to } => {
+                write!(f, "its replacement names task {to}, which is not there")
+            }
+            Self::Cycle { to } => write!(f, "its replacements loop back to task {to}"),
+        }
+    }
+}
+
+/// A replaced task whose record [`ReplacementFault`] says is broken: it is
+/// never resolved, so the goal of the replaced task it was reached from
+/// neither starts a goal review nor closes as achieved (a person closes it
+/// otherwise), and a recurring key it holds stays held, since nothing
+/// fixes the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct UnresolvedReplacement {
+    pub task: TaskId,
+    #[serde(flatten)]
+    pub fault: ReplacementFault,
+}
+
+/// The replaced tasks reached from `from` (replaced tasks), through the
+/// replacements of a replaced child too, whose record is broken, in task
+/// order. `replacements` is each task's applied replacements (the tasks in
+/// its place) and `statuses` each task that is there: a task with status
+/// `replaced` or in `from` needs one replacement, each replacement a task
+/// that is there and that the walk is not still following. The walk visits
+/// a task once, so a loop ends it.
+pub fn unresolved_replacements(
+    from: &[TaskId],
+    replacements: &BTreeMap<TaskId, Vec<TaskId>>,
+    statuses: &BTreeMap<TaskId, TaskStatus>,
+) -> Vec<UnresolvedReplacement> {
+    fn walk(
+        task: TaskId,
+        root: bool,
+        replacements: &BTreeMap<TaskId, Vec<TaskId>>,
+        statuses: &BTreeMap<TaskId, TaskStatus>,
+        path: &mut Vec<TaskId>,
+        visited: &mut BTreeSet<TaskId>,
+        found: &mut BTreeSet<UnresolvedReplacement>,
+    ) {
+        visited.insert(task);
+        path.push(task);
+        let children = replacements.get(&task).map(Vec::as_slice).unwrap_or(&[]);
+        if children.is_empty() && (root || statuses.get(&task) == Some(&TaskStatus::Replaced)) {
+            found.insert(UnresolvedReplacement {
+                task,
+                fault: ReplacementFault::Empty,
+            });
+        }
+        for &child in children {
+            let fault = if !statuses.contains_key(&child) {
+                Some(ReplacementFault::Missing { to: child })
+            } else if path.contains(&child) {
+                Some(ReplacementFault::Cycle { to: child })
+            } else {
+                None
+            };
+            if let Some(fault) = fault {
+                found.insert(UnresolvedReplacement { task, fault });
+            } else if !visited.contains(&child) {
+                walk(child, false, replacements, statuses, path, visited, found);
+            }
+        }
+        path.pop();
+    }
+    let mut visited = BTreeSet::new();
+    let mut found = BTreeSet::new();
+    for &task in from {
+        if !visited.contains(&task) {
+            walk(
+                task,
+                true,
+                replacements,
+                statuses,
+                &mut Vec::new(),
+                &mut visited,
+                &mut found,
+            );
+        }
+    }
+    found.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +851,114 @@ mod tests {
         assert!(
             problems.iter().any(|p| p.contains("goes with proposal")),
             "{problems:?}"
+        );
+    }
+
+    fn replaced_by(edges: &[(i64, i64)]) -> BTreeMap<TaskId, Vec<TaskId>> {
+        let mut map: BTreeMap<TaskId, Vec<TaskId>> = BTreeMap::new();
+        for &(from, to) in edges {
+            map.entry(id(from)).or_default().push(id(to));
+        }
+        map
+    }
+
+    fn there(tasks: &[(i64, TaskStatus)]) -> BTreeMap<TaskId, TaskStatus> {
+        tasks.iter().map(|&(n, status)| (id(n), status)).collect()
+    }
+
+    #[test]
+    fn a_replacement_whose_tasks_are_all_there_is_not_unresolved() {
+        let statuses = there(&[
+            (1, TaskStatus::Replaced),
+            (2, TaskStatus::Completed),
+            (3, TaskStatus::Replaced),
+            (4, TaskStatus::Ready),
+        ]);
+        let edges = replaced_by(&[(1, 2), (1, 3), (3, 4)]);
+        assert!(unresolved_replacements(&[id(1)], &edges, &statuses).is_empty());
+        assert!(unresolved_replacements(&[], &edges, &statuses).is_empty());
+    }
+
+    #[test]
+    fn an_empty_record_is_unresolved_on_the_replaced_task_and_on_a_replaced_child() {
+        let statuses = there(&[
+            (1, TaskStatus::Replaced),
+            (2, TaskStatus::Replaced),
+            (5, TaskStatus::Replaced),
+        ]);
+        let edges = replaced_by(&[(1, 2)]);
+        let empty = |n| UnresolvedReplacement {
+            task: id(n),
+            fault: ReplacementFault::Empty,
+        };
+        assert_eq!(
+            unresolved_replacements(&[id(1), id(5)], &edges, &statuses),
+            vec![empty(2), empty(5)]
+        );
+    }
+
+    #[test]
+    fn a_replacement_naming_a_task_not_there_is_unresolved() {
+        let statuses = there(&[(1, TaskStatus::Replaced), (2, TaskStatus::Completed)]);
+        let edges = replaced_by(&[(1, 2), (1, 9)]);
+        assert_eq!(
+            unresolved_replacements(&[id(1)], &edges, &statuses),
+            vec![UnresolvedReplacement {
+                task: id(1),
+                fault: ReplacementFault::Missing { to: id(9) },
+            }]
+        );
+    }
+
+    #[test]
+    fn a_loop_ends_the_walk_and_is_unresolved_where_it_closes() {
+        let statuses = there(&[
+            (1, TaskStatus::Replaced),
+            (2, TaskStatus::Replaced),
+            (3, TaskStatus::Replaced),
+        ]);
+        let edges = replaced_by(&[(1, 2), (2, 3), (3, 2)]);
+        let cycle = UnresolvedReplacement {
+            task: id(3),
+            fault: ReplacementFault::Cycle { to: id(2) },
+        };
+        assert_eq!(
+            unresolved_replacements(&[id(1)], &edges, &statuses),
+            vec![cycle]
+        );
+        // Starting inside the loop finds it too; a task reached twice
+        // without a loop (another root) is no loop.
+        let self_loop = replaced_by(&[(1, 1)]);
+        assert_eq!(
+            unresolved_replacements(&[id(1)], &self_loop, &statuses),
+            vec![UnresolvedReplacement {
+                task: id(1),
+                fault: ReplacementFault::Cycle { to: id(1) },
+            }]
+        );
+        let shared = replaced_by(&[(1, 3), (2, 3), (3, 4)]);
+        let statuses = there(&[
+            (1, TaskStatus::Replaced),
+            (2, TaskStatus::Replaced),
+            (3, TaskStatus::Replaced),
+            (4, TaskStatus::Completed),
+        ]);
+        assert!(unresolved_replacements(&[id(1), id(2)], &shared, &statuses).is_empty());
+    }
+
+    #[test]
+    fn a_fault_says_what_is_broken() {
+        assert_eq!(
+            ReplacementFault::Missing { to: id(9) }.to_string(),
+            "its replacement names task 9, which is not there"
+        );
+        assert_eq!(
+            serde_json::to_value(UnresolvedReplacement {
+                task: id(3),
+                fault: ReplacementFault::Cycle { to: id(2) },
+            })
+            .unwrap(),
+            serde_json::json!({"task": 3, "fault": "cycle", "to": 2})
         );
     }
 }
