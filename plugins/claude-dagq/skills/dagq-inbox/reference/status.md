@@ -7,6 +7,7 @@ Read this when what `status`, `watch` or `show` says, or what to do about an att
 What each part of the output holds: `"$DAGQ" status --help`. What to do with it:
 
 - No supervisor serves the queue, or the only one is stale (died or hangs): `up` on the person's word; orphaned runs go through the `dagq-recover` skill, one run at a time. A stale one whose process is still alive is not replaced: report it and let the person stop that process (`down --force` if it is the only one).
+- `status` fails as `unreachable` when the queue's service does not answer: the queue cannot be read, not that nothing waits. Handle it as `watch.md` says for a watch.
 - Count the runs holding a slot, waiting to land and waiting for a person from the counts `status` gives, never from the number of runs listed.
 - `inbox_guardrail` names the newest inbox's `provider`, where it was chosen (`source`) and the model asked for. The inbox opened without its guardrail (`guardrail` `false`), or a Codex inbox whose guardrail hook has not run (`guardrail_by` `pre_tool_use` with `reached` still `false` after shell commands ran: `claude-and-codex.md`): tell the person and, after your handoff, have them reopen it with `dagq inbox` (`dagq-recover`'s `reference/up-down.md`, "Open the inbox again"). A `claude` or `codex` typed again in the inbox's terminal has no guardrail whatever this says.
 - No watch runs: start the one of `watch.md`. When none ran for long, tell the person: asks opened meanwhile reached nobody.
@@ -55,7 +56,7 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
   - `log in to gh`: the person runs `gh auth login` in their own terminal; the inbox does not log in.
   - `fix dagq.toml`: the CI watch or the container runtime does not work as configured. The person fixes it, or on their word the inbox asks through a planning request for a task that changes the configuration.
   - `fix the push command`: the host's push command dropped a message; the person fixes the command or its service.
-  - `dagq service status`: the queue service stopped. Show `dagq service status` and the service's log; at the person's word, `dagq service start` (or `up`).
+  - `dagq service status`: the queue service was down and answers again (while it is down, `status` and `watch` fail as `unreachable` instead: `watch.md`). Show `dagq service status` and the service's log; if it is not running now, `dagq service start` (or `up`) at the person's word.
   - `read the queue broker's log and run up`: show the broker's log; at the person's word, `up`.
   - `look at the dagq podman machine's relays`: show `podman machine list` and the error; the person mends the machine.
   - `look at the dagq podman machine's memory`: a run's turn or verification has waited long for the machine's memory before its container starts. Show the error and `podman --connection dagq ps`; the person stops a container that does not end, or changes the machine's or the containers' memory in `host.toml`. The attention clears once the wait ends.

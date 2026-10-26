@@ -11,6 +11,7 @@ Read this when `up` or `down` returns something the `dagq-recover` skill (sectio
 - An `up` that reuses a live supervisor changes only its automatic updates. To change its other flags, `down --wait`, then `up` again.
 - `down` closes neither the inbox nor a planner. A workspace an earlier binary opened for a role is closed by the person in their own terminal without `DAGQ_ROLE`.
 - Warnings in the output: report them; nothing else failed.
+- Afterwards, `status` should answer and show the supervisor: an `unreachable` one means the queue's service still does not answer (`dagq service status` and `service.log`). Then the inbox starts its watch again from its last cursor.
 - A preflight that fails stops `up` with why and what to do: have the person install or log in (`gh auth login`) in their own terminal, or ask through a planning request for a task that changes the repository's configuration.
 
 ### Explicitly run without Claude
@@ -52,6 +53,7 @@ When `status` or `doctor` says the inbox's guardrail is off (`inbox_guardrail.gu
 - Plain `down` ends the day's work: the supervisor stops claiming, drains its runs and exits.
 - `--wait` blocks until it is gone. Use it when the next step needs that (changing flags, moving a supervisor of the retired mode, shutting down).
 - `--force` loses the active runs (handled afterwards with this skill): only on the person's explicit word.
+- Once no supervisor is left, `down` stops the queue's service too (at once with `--wait`, `--force` or no supervisor running; without `--wait`, when the last supervisor ends its drain). From then on `status` and `watch` fail as `unreachable`, with no outage record and no attention: that is the expected state, not a failure. The inbox tells the person once, does not restart its watch in a loop, and starts it again from the same cursor after `up`. To read or `recover` without a supervisor, start the service alone (`reference/doctor.md`).
 
 ## Logs
 

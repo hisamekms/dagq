@@ -19,11 +19,11 @@ This session holds no state. After a restart, compaction or `/clear` (never Code
 "$DAGQ" status --role inbox
 ```
 
-`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). An `inbox_guardrail` without its guardrail (`reference/status.md`): tell the person, write your handoff, and have them reopen the inbox (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
+`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). `unreachable` (`status`, `watch`): the service is down: tell the person, `up` on their word (`reference/watch.md`). An `inbox_guardrail` without its guardrail (`reference/status.md`): tell the person, write your handoff, and have them reopen the inbox (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
 
 ## 2. Watch in the background
 
-Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`, as it is: no shell loop around it (Codex has no background: `reference/watch.md`). It has no timeout and returns only with `events` or `supervisors_changed` (not `update_installed` or an hourly review alone: those come with the next); handle them (steps 3, 4), then restart it from its `cursor`. A non-zero exit is a failure: report it as `reference/watch.md` says. Keep exactly one watch; never poll `status` in a loop. When a hook says to start the watch (at the start, or blocking your turn's end), start it first: nothing else reaches this session. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
+Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`, as it is: no shell loop around it (Codex: `reference/watch.md`). It has no timeout and returns only with `events` or `supervisors_changed`; handle them (steps 3, 4), then restart it from its `cursor`. A non-zero exit is a failure: report it as `reference/watch.md` says. Keep exactly one watch; never poll `status` in a loop. When a hook says to start the watch (at the start, or at your turn's end), start it first: nothing else reaches this session. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
 
 ## 3. Show an ask and write the answer
 
@@ -59,7 +59,7 @@ Report each in a list (task, status, `next`, gist of `last_error`); act with `da
 - `report the update` (`update_installed`), `report the review`, `check the failed review`, `check the failed observer` (`observe_finished`): tell the person (`reference/watch.md`).
 - `stop sccache on the host; the supervisor starts it`, `install tool` (`run_env_program_missing`, `ci_watch_unavailable`), `log in to gh`, `fix dagq.toml` (`ci_watch_unavailable`, `ci_jobs_missing`, `container_runtime_unavailable`), `fix the push command` (`kpi_push_abandoned`), `check the e2e host` (`run_e2e_finished`): the person fixes it.
 - `stop the dead landing's processes` (`landing_release_stuck`): the person stops its pids.
-- `dagq service status` (`queue_service_down`): `service start` on the person's word.
+- `dagq service status` (`queue_service_down`): the service is back; tell the person.
 - `read the queue broker's log and run up` (`queue_broker_down`): `up` on the person's word.
 - `look at the dagq podman machine's relays` (`queue_relay_down`): the person.
 - `restart supervisor`: `up` (`supervisor_duplicate`: `down --wait` first); `stop the stale supervisor's process`: stop its `pid` (`dagq-recover` section 5).
