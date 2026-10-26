@@ -292,8 +292,6 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
   人とinboxとplannerも`install`と同じ権限で打てる（手順の再現と復旧）。
   `observe`（`observe.run`）もsupervisorが自分の環境で起動し、その中のagentだけがobserverになる
 
-host実行ではこれも助言的で、`DAGQ_ROLE`を外せば誰でもuserになる（ADR-t728-1の決定6）。
-
 ### 着地とpush（Integrator）
 
 着地（rebase・再検証・squash・mainの更新）とpushは`src/application/integrate.rs`の`Integrator`だけが行う（[ADR-t728-2](../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)）。
@@ -308,19 +306,18 @@ Integratorはrole `integrator`のactor（`integrator:<pid>`）で、`landing.lan
   reviewの`pass`は着地の必要条件で、この後のreceiptの再検査・rebase・検証コマンド・scopeの判定が落ちれば着地しない（ADR-t728-2の決定3）
 - **記録**: `Integrator::land`の間、queueのeventのactorはIntegrator（role `integrator`、id `integrator:<pid>`）で、`requested_by`は依頼者のactor id。
   依頼と記録を切り替える入口はport `EventStore::act_as`
-- **push**: `MainRemote::push_main`は`PushGrant`を引数に取り、`PushGrant`はIntegratorが`landing.push`を確かめてからしか作れない（fieldがmoduleの外から見えない）ので、`GitRepository`のpushはIntegratorの外から呼べない
+- **push**: `MainRemote::push_main`は`PushGrant`を引数に取り、`PushGrant`はIntegratorが`landing.push`を確かめてからしか作れないので、`GitRepository`のpushはIntegratorの外から呼べない
 
 host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユーザーで動き、この境界は論理的なもの（ADR-t728-2の決定4）。
 
 ### queue serviceのユースケース（service側）
 
-queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、要求のtokenから決めたprincipalをactorにして、対話と記録のユースケースを上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue。CLIの`proposal list|show`と同じ）に、`watch_poll`を`queue.watch`に通す。
+queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、要求のtokenから決めたprincipalをactorにして、対話と記録のユースケースを上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue）に、`watch_poll`を`queue.watch`に通す。
 拒否は同じ`authorization_denied`（拒まれたprincipalがactor）に残る。
 queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがそのコマンドに求めるのと同じcapability（`ci failures`は`ci.read`、ほかは`queue.read`）を`Gate`で通して答える。
 
 supervisorの操作（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）は、登録を持つsupervisorに`scheduler.supervise`と操作ごとのcapability（`needs::supervisor_needs`）を`Gate`で通してから答える。
 人・inbox・plannerの計画の操作はCLIと同じcapabilityを求めてsupervisorには拒み、一覧に無い操作とintegratorだけの着地の終わりは拒む（default deny）。
-supervisorが起動する`observe`・`throughput-review`もそのtokenで同じ判定を受ける。
 着地のintegratorには`landing.land`を通し、着地の操作だけを、名指すrun・task・leaseをそのものに限って答え、ほかは書かずに拒む（`integrator_scope`）。
 
 ### ほかのコマンド（CLIの入口）
@@ -333,6 +330,7 @@ supervisorが起動する`observe`・`throughput-review`もそのtokenで同じ�
 - 残り（3つのroleのserviceが答えないものと、ほかのrole）は`check_access`が（default deny）`requests`の全てで`StaticPolicy`に通す。
   拒んだときだけ`QueueDenials`で`authorization_denied`を呼び出し元をactorに記録する。
   通った読み取りはqueueを読み取り専用で開く（ADR-0073決定5・7・18）。
+  ただしsupervisorが登録をenvに渡し起動した`observe`（`--history`・`--input`を除く）・`throughput-review`は、通ればsupervisorのtokenでserviceを通り（判定は上の節）queueを開かない（[CLIでの解釈](supervisor-lifecycle/roles.md#cliでの解釈)）。
 
 ## Claudeのpermissions.deny（guardrail）
 
