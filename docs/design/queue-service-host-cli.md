@@ -92,8 +92,14 @@ Gitとprogramはserviceでなくクライアントがユースケースの外で
   sessionのprocessが終われば（pidを別のprocessが取っても）serviceが`session_ended`で断り、supervisorのsweepが消す（startが読めないときは残す。`session_token_ended`）。
 - plannerのtokenはplannerのturnを起動するとき、無いときだけ発行する（`HostActorExecutor`）。
   plannerが閉じた後はserviceが`target_ended`で断り、supervisorのsweepが消す（`planner_token_ended`）。
-- 発行は今は制御側がfileに直接書く。
-  親のprincipalの起動の権限と対象の前提をserviceが発行と同じtransactionで確かめる経路（ADR-t3102-1決定2）はまだ無い（ADR-t3105-1決定5）。
+- supervisorが自分で起動するworker・session wrapper・jobのtokenは、supervisorがserviceのユースケース`issue_token`で発行させる（`ServiceTokens`）。
+  serviceが発行するのはAI actorとsession wrapperのroleだけで、登録を対象に持つものは断る。
+  workerとrunのsession wrapperのtokenはそのrunのもので、serviceはrunのleaseが要求したsupervisorの登録のものであることを発行と同じtransactionで確かめ、違えば発行しない（`under_lease`）。
+- 着地のintegratorのtokenは、serviceが`begin_landing`でintegrationのslotを取るのと同じtransactionで発行し、slotが確定しなければ消す。
+- supervisor自身のtokenは、supervisorが起動のときに自分の登録とpidのprincipalでfileに直接書き、handoffの後のimageは前のimageが残したtokenのfileと記録があればそれを使い、無ければ同じ経路で発行し直す（`SignedIn`）。
+- inboxとplannerのtokenは、制御側のprocess（`dagq inbox`とplannerのsession wrapper）がfileに直接書く。
+  jobを起動するコマンド（`observe`など）が起動するjobのtokenと、runのsession wrapperがworkerのturnに渡すtokenのfileが無いときのものも、そのprocessが直接書く。
+  これらの直接の発行（supervisor自身のものも）では、親のprincipalの起動の権限と対象の前提をserviceが同じtransactionで確かめない（inboxとplannerはADR-t3102-1決定2に対するADR-t3105-1決定5の例外）。
 - hostのCLIの要求は`HOST_CLIENT_API_VERSION`からの版で送る。
   queueとsessionを読まない前の版のserviceは、tokenを読む前に`api_version_mismatch`で断る（[API versionと互換](queue-service.md#api-versionと互換)）。
   serviceを見る`hello`（`probe`とsupervisorの起動の確かめ）は`MIN_API_VERSION`で送るので（`request_version`）、前の版のserviceも届かないではなく別のbuildとして見え、supervisorが入れ替える。
