@@ -44,12 +44,18 @@ python3 scripts/docs-metrics.py --since <since> --until <until> --metrics m7 \
   `route` のある event は `verdict` によらず `route` で決める（`revise` でも `route` が `ask` なら差し戻しではない）。
   `verdict` が `concern` で `route` の無いものは差し戻しに数えず、件数を `concern_without_route` に出す。
   `route` で決まったものと `verdict` で決まったものの件数も別に出す。
-- **(c) ドキュメントの理由**: 差し戻しの `reasons`（理由の文の配列）の添字 i の理由は、`reason_codes[i]`（同じ添字の理由の code の配列）が配列で `docs_drift` を含むか、文 `reasons[i]` が次の path を名指せばドキュメントの理由。
+  上限の後に着地した review も `route.destination` は `send_back` なので差し戻しに数え、次の `review_started` が無いので (d) では打ち切りになる。
+  プログラムの review が変更を拒んだ差し戻しは `review_finished` を書かない（`review_programs_finished` だけ）ので、どの欄にも数えない。
+- **(c) ドキュメントの理由**: 差し戻しの理由は、`src/domain/mod.rs` の `ReviewVerdict::sent_back_findings` と同じ組み立てで読む。
+  - `route` の無い event: 親（`review_finished` の payload）の `reasons` と `reason_codes`。
+  - `route` のある event: `route.parent` が `route.destination` と同じときだけ親の `reasons` と `reason_codes` を読み、続けて `route.agents` で行き先が `route.destination` と同じ agent ごとに、payload の `agents[]` の同じ `agent` の `reasons`（空なら `summary` の 1 文）とその `reason_codes` を読む。`route.destination` が `land` なら agent を読まない。
+  - 親の `reasons` が空でも `summary` で補わない（その差し戻しは `without_reasons` に入る）。
+  - 読んだ理由の列ごとに、添字 i の理由は、`reason_codes[i]`（同じ添字の理由の code の配列）が配列で `docs_drift` を含むか、文 `reasons[i]` が次の path を名指せばドキュメントの理由。
   - 名指しの path: `docs/` の下の path、`plugins/` の下の `.md`、root の `AGENTS.md`・`README.md`。語の始まりで始まるもの（前が ASCII の英数字・`_`・`.`・`-`・`/` でない。日本語の文字は前後に接してよい。先頭の `./` は許す）だけで、`src/docs/...` や `foo/README.md` は名指しに数えない。
   - code の欠け: `reason_codes` が無いか配列でない event は、どの理由も code を持たないとして文の名指しだけで決める。`reason_codes` が `reasons` より短く添字 i の code が無い理由と、`reason_codes[i]` が配列でない理由も、文の名指しだけで決める。`reason_codes` が `reasons` より長いときの余りの code は理由に数えない。
-  - 形の崩れの件数: 差し戻しのうち `reason_codes` が無い（配列でない）event・`reasons` より短い event・長い event の数と、配列でない `reason_codes[i]` の理由の数を、それぞれ別の欄（`reason_codes`）に出す。
+  - 形の崩れの件数: 親の `reasons` を読んだ差し戻しのうち、親の `reason_codes` が無い（配列でない）event・`reasons` より短い event・長い event の数と、配列でない `reason_codes[i]` の理由の数を、それぞれ別の欄（`reason_codes`）に出す。agent の `reason_codes` は欠けていても数えない（多くの agent は `reason_codes` を持たない）。
   - ドキュメントを含む差し戻し（`docs_any`）: ドキュメントの理由を1つ以上持つ差し戻し。
-  - ドキュメントだけの差し戻し（`docs_only`）: 理由が1つ以上で、全部がドキュメントの理由の差し戻し。`reasons` が無いか空の差し戻しはどちらにも数えず、件数を `without_reasons` に出す。
+  - ドキュメントだけの差し戻し（`docs_only`）: 理由が1つ以上で、全部がドキュメントの理由の差し戻し。読んだ理由が 1 つも無い差し戻しはどちらにも数えず、件数を `without_reasons` に出す。
 - **(d) 差し戻しの待ち**: 差し戻しの `review_finished` の `created_at` から、同じ run の次の `review_started`（`created_at`、同じ時刻なら event ID の順で後のもの）の `created_at` まで。
   期間の中に次の `review_started` が無ければ期間の終わりで打ち切り、打ち切りの件数を `cut` に出して合計と中央値に含めない。
   全体・ドキュメントを含む・ドキュメントだけの3つについて、合計（秒と時間）・中央値（秒）・件数。
@@ -115,6 +121,7 @@ request 103（2026-10-12、人の dagq session の分析）が基準の区間に
 
 基準・A の前後・C の後の script の値は、measure の task が上の区間で script を流してここに書く。
 worker は本番の queue を読まないので、値は planner が保存した入力と script の出力から取る。
+「A の前後」から「C の後の理由なしの差し戻しの内訳」までの節は、親の `reasons` だけを読んでいた前の (c) の値で、今の (c) で同じ入力を流し直した値と前の値との差は「M7 (c) を直した後の値」が持つ。
 
 ### A の前後（2026-10-17 に読んだ値）
 
@@ -806,8 +813,64 @@ task 1903（`run_integrated` の `created_at` 2026-10-11T08:42:11.975Z、commit 
 
 - **増えの出どころ**: 理由なしの差し戻しは全て「全体の review が `pass`、subagent が `revise`」の review で、`reasons` が空なのは review の形（task 1903 の並列の job）と M7 (c) の読む欄の組み合わせによる。基準 4.0%→C の後 28.0% の増えは、基準の大半が task 1903 の前の形だったことと、subagent だけが差し戻す review の割合（差し戻しのうち、task 1903 の後の基準 15 / 100・A の前 58 / 219・C の後 110 / 382 の 15.0%・26.5%・28.8%）の増えによる。後者の理由は測っていないが、C（全体の review が差分の触っていない文書の指摘を差し戻さない）の後に全体の review が `pass` を返す review が増えた向きと合う。理由なしの中身は `receipt-evidence`（93 / 107）の手元の検証・stress・E2E の根拠の指摘が主で、そこは「C の後のドキュメント以外の理由だけの差し戻しの内訳」の「既にあるものが持つ分」（task 3240・3241・3257・3258）が減らす向き。
 - **runtime の直し: 不要**: worker には `sent_back_findings` で subagent の理由が届き、上限の後の判定も同じ理由を読む。`review_finished` は全体の review の `reasons` と `agents[].reasons` を分けて残していて、情報は欠けていない。
-- **M7 の定義の直し: 要る（follow_up）**: M7 (c) が `review_finished` の `reasons` だけを読むので、task 1903 の後の区間では subagent だけの差し戻しの理由を数えず（107 回）、`concern` で着地に回った親の `reasons` を差し戻した理由に数える（3 回）。この 107 だけを `agents[].reasons` で読み直すとドキュメントを含むは 11・だけは 10 増える（両方・親だけの差し戻しの読み直しで変わる分は数えていない）。定義を `sent_back_findings` と同じ組み立て（`route.parent` = `route.destination` のときだけ親の `reasons`、`route` で `send_back` の agent の `agents[].reasons`）に直し、基準・A の前・C の前・C の後の区間を同じ入力で流し直す。上限の後に着地した review を差し戻しに数えること（入力に `revise_limit_judged` が要る）と、プログラムの review の差し戻しを数えないことを定義に書くかも、そこで決める。
+- **M7 の定義の直し: 要る（直した）**: M7 (c) が `review_finished` の `reasons` だけを読むので、task 1903 の後の区間では subagent だけの差し戻しの理由を数えず（107 回）、`concern` で着地に回った親の `reasons` を差し戻した理由に数える（3 回）。定義を `sent_back_findings` と同じ組み立てに直し、5 区間を同じ入力で流し直した値は「M7 (c) を直した後の値」にある。理由なしは全区間で 0 になり、C の後（全体）はドキュメントを含むが 127→141、だけが 94→43 になった。
 - **次の打ち手の対象選び**: 理由なしは独立の出どころではなく subagent（主に `receipt-evidence`）の差し戻しなので、差し戻しを減らす打ち手の対象は「C の後のドキュメント以外の理由だけの差し戻しの内訳」の subagent の行に足して読む。理由なしだけを減らす runtime の打ち手は足さない。
+
+### M7 (c) を直した後の値（2026-10-26 に読んだ値）
+
+(c) を `ReviewVerdict::sent_back_findings` と同じ組み立て（上の「M7 の定義」の (c)）に直した script で、基準・A の前・C の前・C の後の 2 区間を同じ入力で流し直し、前の (c)（親の `reasons` だけ）の値と並べる。
+
+#### 期間と入力
+
+- 期間と入力は「C の後」の「期間と入力」の 5 区間と同じ file（「区分」の dir、新しく保存した file は無い）。`--ask-events` は渡していない。
+- 前の値はこの節の commit の親（base `54cd59984`）の `scripts/docs-metrics.py`、今の値はこの節と同じ commit の `scripts/docs-metrics.py` で、`python3 -I scripts/docs-metrics.py --since S --until U --metrics m7 --format json --stats stats-run-S_U.json --run-events events-run-S_U-*.json` を 1 回ずつ流した。前の値は「区分」の dir の `m7-S_U.json` と全ての欄で一致した。
+- (c) に拠らない欄（review・差し戻し（全体）・`by_route`・着地・差し戻し（全体）の待ち・worker の作業時間）は前の値と変わらない。`reason_codes` の形の崩れは全区間で 0 のまま。
+- 差は今 − 前で、比と割合は script の値からの算術。
+
+#### 回数
+
+| 指標 | 基準 | A の前 | C の前 | C の後（混ざり無し） | C の後（全体） |
+| --- | --- | --- | --- | --- | --- |
+| 差し戻し（全体） | 321 | 248 | 25 | 65 | 382 |
+| 理由なし（`without_reasons`）: 前 → 今（差） | 13 → 0（-13） | 49 → 0（-49） | 5 → 0（-5） | 19 → 0（-19） | 107 → 0（-107） |
+| ドキュメントを含む（`docs_any`）: 前 → 今（差） | 283 → 300（+17） | 176 → 207（+31） | 14 → 15（+1） | 30 → 33（+3） | 127 → 141（+14） |
+| ドキュメントだけ（`docs_only`）: 前 → 今（差） | 103 → 51（-52） | 101 → 60（-41） | 7 → 4（-3） | 20 → 11（-9） | 94 → 43（-51） |
+| ドキュメント以外の理由だけ: 前 → 今 | 25 → 21 | 23 → 41 | 6 → 10 | 16 → 32 | 148 → 241 |
+| ドキュメントを含む ÷ review（今） | 0.4335 | 0.5254 | 0.3947 | 0.2821 | 0.195 |
+| ドキュメントだけ ÷ review（今） | 0.0737 | 0.1523 | 0.1053 | 0.094 | 0.0595 |
+| ドキュメントを含む / 日（今） | 46.88 | 32.34 | 28.63 | 26.92 | 22.03 |
+| ドキュメントだけ / 日（今） | 7.97 | 9.38 | 7.63 | 8.97 | 6.72 |
+| ドキュメントを含む待ちの合計（時間、今、件数 / 打ち切り） | 108.0（280 / 20） | 218.6（199 / 8） | 6.2（15 / 0） | 17.8（32 / 1） | 88.2（131 / 10） |
+| ドキュメントだけの待ちの合計（時間、今、件数 / 打ち切り） | 5.8（46 / 5） | 36.6（54 / 6） | 1.5（4 / 0） | 1.9（10 / 1） | 13.1（35 / 8） |
+
+goal 193 の前後比較の S1・S2（[docs-slim.md](docs-slim.md) の「goal 193（B・E・G）の前後比較」）も同じ script で流し直し、理由なしは 75→0・98→0、ドキュメントを含むは 224→260・114→133、だけは 153→96・82→37 になった（表は docs-slim.md が持つ）。
+
+#### 変わった差し戻しの内訳
+
+差し戻しを `route` の形で分け、前と今の分類（理由なし・ドキュメントだけ・ドキュメントを含む（だけでない）・ドキュメント以外の理由だけ）が変わった event を数えた（worker の一回きりの `python3 -I` で両方の script の `doc_reasons` を読み込んだ集計。repository に置いていない）。
+
+| 変わり方 | 基準 | A の前 | C の前 | C の後（混ざり無し） | C の後（全体） |
+| --- | --- | --- | --- | --- | --- |
+| subagent だけが差し戻す（`route.parent` ≠ `route.destination`）: 理由なし → ドキュメントを含む（だけでない） / だけ / 以外だけ | 5 / 1 / 7 | 10 / 11 / 28 | 0 / 1 / 4 | 0 / 3 / 16 | 1 / 10 / 96 |
+| subagent だけが差し戻す: 親の理由での分類 → agent の理由での分類が変わったもの | 2 | 7 | 0 | 0 | 0 |
+| 親と subagent の両方が差し戻す: ドキュメントだけ → ドキュメントを含む（agent のドキュメント以外の理由が加わる） | 51 | 47 | 4 | 12 | 61 |
+| 親と subagent の両方が差し戻す: ドキュメント以外だけ → ドキュメントを含む（agent のドキュメントの理由が加わる） | 12 | 15 | 0 | 0 | 3 |
+
+- C の後（全体）の理由なし 107 の読み直し（ドキュメントを含む +11（だけでない 1・だけ 10）・だけ +10）は、「C の後の理由なしの差し戻しの内訳」の見込みと一致した。親が `concern` で着地に回った 3 event（213246・254098・268551）は、agent の理由で読んでも分類は変わらなかった。
+- ドキュメントだけが大きく減ったのは、親と subagent の両方が差し戻す review で、親の理由がドキュメントだけでも subagent（主に `receipt-evidence`・`test-rules`）のドキュメント以外の理由が加わるため。前の (c) はその subagent の理由を読まず、ドキュメントだけを多めに数えていた。
+- 基準の task 1903 の前の review では、親の `reasons` が subagent の指摘を名指すこともあった（「C の後の理由なしの差し戻しの内訳」の「基準からの増えの出どころ」）。今の (c) は `agents[].reasons` も読むので同じ指摘を 2 度読みうるが、数えるのは event ごとの分類なので回数は変わらない。
+
+#### 定義に書くかの判断（上限の後の着地・プログラムの review）
+
+- **上限の後に着地した差し戻し: 数える（定義の (b) に書いた）**。`route.destination` は review の判定で、上限の後に着地した review も同じ判定で差し戻しを返している。除くには入力に `revise_limit_judged` の kind が要り、保存した 5 区間の頁には無いので、除くと前の区間と同じ入力で比べられなくなる。待ちには入らない: 着地した run には次の `review_started` が無く (d) の打ち切りになる。大きさの上限は、差し戻しの後に `review_started` を挟まず同じ run の `run_integrated` が来た event（`approve_landing` で人が着地させたものを含む）で、基準 8・A の前 3・C の前 1・混ざり無し 2・C の後（全体）28（打ち切り 20・8・4・2・40 の内数）。
+- **プログラムの review の差し戻し: 数えない（定義の (b) に書いた）**。M7 は AI の review の判定（`review_finished`）を数える指標で、プログラムが拒んだ review は `review_programs_finished` だけを書く。プログラムには文書の検査（`check-doc-frontmatter`・`check-design-docs`・`check-design-sentences`・`check-doc-links` など、`dagq.toml` の `[review.programs.*]`）もあり、ドキュメントの差し戻しの一部は M7 の外にある。数えるには入力に `review_programs_finished` が要り、保存した頁に無いので、別に数える（follow_up）。
+
+#### 判断
+
+- **前の判断の向きは変わらない**: C の効果（混ざり無し ÷ C の前）はドキュメントを含むが review あたり 0.3947→0.2821（-29%）、だけが 0.1053→0.094（-11%）で、前の (c) の -30%・-7% と同じ向き。基準からの全体ではドキュメントを含むが review あたり 0.4335→0.195（-55%）。
+- **想定効果（ドキュメントだけ 6.4 日で 35〜55 回）は回数でなく比で読む**: 今の (c) では基準のドキュメントだけが 51 回で、想定の範囲は人の分析の基準 134 回からの見込みなので、C の後（全体）の 43 回を 35〜55 回と並べても意味が無い。基準からの比は 0.84（review あたり -19%）で、想定の比（134 回から 35〜55 回の 0.26〜0.41）に届かない、という「C の後」の結論は変わらない。
+- **差し戻しを減らす次の打ち手は文書ではない、も変わらない**: C の後（全体）の差し戻し 382 回のうち、ドキュメントを含むのは 141 回（37%）で、ドキュメント以外の理由だけが 241 回（63%）。理由なしの 107 回はほぼ全てがドキュメント以外の理由だけに移った（96 回）。「C の後のドキュメント以外の理由だけの差し戻しの内訳」の母数（148 回）は前の (c) のもので、この 96 回は含まず、その中身（主に `receipt-evidence`）は「C の後の理由なしの差し戻しの内訳」が持つ。
+- **ドキュメントの回数は下限ではなくなった**: 理由なしが全区間で 0 なので、「A の前後」「C の後」の「読み方の注意」が言う下限の読み方は今の (c) では要らない。ドキュメントだけは前の (c) より少なく、前の値は多めだった。
 
 ## 区分
 

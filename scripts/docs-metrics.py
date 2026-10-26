@@ -835,13 +835,10 @@ def names_doc(text):
     return isinstance(text, str) and DOC_PATH.search(text) is not None
 
 
-def doc_reasons(payload):
-    """For each reason of a review_finished, whether it is a docs reason, and
-    the shape of its `reason_codes`: missing (no list), shorter or longer than
+def coded_docs(reasons, codes):
+    """For each reason of one list, whether it is a docs reason, and the shape
+    of its `reason_codes`: missing (no list), shorter or longer than
     `reasons`, and how many of its items for a reason are no list."""
-    reasons = payload.get("reasons")
-    reasons = reasons if isinstance(reasons, list) else []
-    codes = payload.get("reason_codes")
     shape = {"missing": not isinstance(codes, list), "short": False, "long": False, "not_list": 0}
     if not isinstance(codes, list):
         codes = []
@@ -854,6 +851,36 @@ def doc_reasons(payload):
         if index < len(codes) and not isinstance(item, list):
             shape["not_list"] += 1
         docs.append((isinstance(item, list) and DOCS_DRIFT in item) or names_doc(text))
+    return docs, shape
+
+
+def doc_reasons(payload):
+    """For each reason a review_finished sends back, whether it is a docs
+    reason, and the shape of the review's own `reason_codes` when its reasons
+    are read. The reasons are put together as src/domain/mod.rs
+    ReviewVerdict::sent_back_findings does: without a `route`, the review's
+    `reasons`; with one, the review's `reasons` only when `route.parent` is
+    `route.destination`, then, unless the route lands, the `reasons` (the
+    `summary` when they are empty) of each agent of `agents` whose
+    `route.agents` entry goes where the route goes, read by its own
+    `reason_codes`. The review's empty `reasons` are not filled by its
+    `summary`."""
+    route = payload.get("route")
+    reasons = payload.get("reasons")
+    reasons = reasons if isinstance(reasons, list) else []
+    docs, shape = [], {"missing": False, "short": False, "long": False, "not_list": 0}
+    if not isinstance(route, dict) or route.get("parent") == route.get("destination"):
+        docs, shape = coded_docs(reasons, payload.get("reason_codes"))
+    if not isinstance(route, dict) or route.get("destination") == "land":
+        return docs, shape
+    deciding = {a.get("agent") for a in route.get("agents") or []
+                if isinstance(a, dict) and a.get("destination") == route.get("destination")}
+    for result in payload.get("agents") or []:
+        if not isinstance(result, dict) or result.get("agent") not in deciding:
+            continue
+        texts = result.get("reasons")
+        texts = texts if isinstance(texts, list) and texts else [result.get("summary")]
+        docs += coded_docs(texts, result.get("reason_codes"))[0]
     return docs, shape
 
 

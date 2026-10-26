@@ -391,7 +391,7 @@ def check_m7(base):
         if codes is not missing:
             payload["reason_codes"] = codes
         if route is not None:
-            payload["route"] = {"destination": route, "parent": verdict, "parent_lighter": False, "agents": []}
+            payload["route"] = {"destination": route, "parent": route, "parent_lighter": False, "agents": []}
         return {"id": id, "run_id": run, "kind": "review_finished", "created_at": at, "payload": payload}
 
     def plain(id, kind, run, at):
@@ -575,6 +575,53 @@ def check_m7_rules():
           ([], {"missing": False, "short": False, "long": True, "not_list": 0}))
     check("doc_reasons item not a list", docs({"reasons": ["x"], "reason_codes": [None]}),
           ([False], {"missing": False, "short": False, "long": False, "not_list": 1}))
+    def routed(parent, agents, reasons=(), codes=None):
+        payload = {"verdict": "pass", "reasons": list(reasons), "summary": "parent", "agents": [],
+                   "route": {"destination": "send_back", "parent": parent, "parent_lighter": parent != "send_back",
+                             "agents": []}}
+        if codes is not None:
+            payload["reason_codes"] = codes
+        for name, destination, result in agents:
+            payload["agents"].append({"agent": name, "summary": "s", **result})
+            payload["route"]["agents"].append({"agent": name, "destination": destination,
+                                               "escalated_because": None})
+        return payload
+
+    passing = ("security", "land", {"verdict": "pass", "reasons": ["docs/a.md is fine."]})
+    check("doc_reasons whole pass, agent revise with reasons",
+          docs(routed("land", [passing, ("receipt-evidence", "send_back",
+                                         {"verdict": "revise", "reasons": ["Fix src/x.rs.", "Update docs/b.md."],
+                                          "reason_codes": [["A-1"], ["A-2"]]})])),
+          ([False, True], {"missing": False, "short": False, "long": False, "not_list": 0}))
+    check("doc_reasons agent revise with its summary alone",
+          docs(routed("land", [passing, ("test-rules", "send_back",
+                                         {"verdict": "revise", "reasons": [], "summary": "See AGENTS.md."})])),
+          ([True], {"missing": False, "short": False, "long": False, "not_list": 0}))
+    check("doc_reasons agent codes read by index",
+          docs(routed("land", [("a", "send_back", {"verdict": "revise", "reasons": ["x", "y"],
+                                                     "reason_codes": [["docs_drift"]]})])),
+          ([True, False], {"missing": False, "short": False, "long": False, "not_list": 0}))
+    check("doc_reasons concern parent landing, agent sends back",
+          docs(routed("land", [("receipt-evidence", "send_back", {"verdict": "revise", "reasons": ["Fix src/x.rs."]})],
+                      reasons=["docs/c.md is unclear."], codes=[["docs_drift"]])),
+          ([False], {"missing": False, "short": False, "long": False, "not_list": 0}))
+    check("doc_reasons parent and agent both send back",
+          docs(routed("send_back", [passing, ("a", "send_back", {"verdict": "revise", "reasons": ["docs/d.md"]}),
+                                    ("b", "ask", {"verdict": "concern", "reasons": ["src/y.rs"]})],
+                      reasons=["Fix src/x.rs."], codes=[["code_defect"]])),
+          ([False, True], {"missing": False, "short": False, "long": False, "not_list": 0}))
+    check("doc_reasons parent revise without reasons, agents passing",
+          docs(routed("send_back", [passing], codes=[])),
+          ([], {"missing": False, "short": False, "long": False, "not_list": 0}))
+    check("doc_reasons landing route reads no agent",
+          docs({"reasons": [], "agents": [{"agent": "a", "reasons": ["docs/a.md"]}],
+                "route": {"destination": "land", "parent": "send_back",
+                          "agents": [{"agent": "a", "destination": "land"}]}}),
+          ([], {"missing": False, "short": False, "long": False, "not_list": 0}))
+    check("doc_reasons no route reads the review alone",
+          docs({"verdict": "revise", "reasons": ["Fix src/x.rs."], "reason_codes": [["code_defect"]],
+                "agents": [{"agent": "a", "verdict": "revise", "reasons": ["docs/a.md"]}]}),
+          ([False], {"missing": False, "short": False, "long": False, "not_list": 0}))
     send = module.send_back
     check("send_back route wins", (send({"verdict": "revise", "route": {"destination": "land"}}),
                                    send({"verdict": "pass", "route": {"destination": "send_back"}}),
