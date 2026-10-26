@@ -32,6 +32,10 @@ M7 (h) reads ask and worker events written as two files: two overlapping asks
 on one run, an ask covering part of a wait, one the runtime closed, one never
 answered, an answer without its ask_opened, blocked and planner_question asks,
 an ask without a run, a run whose span is not its work and one without a claim.
+M7's program send-backs read review_programs_finished events written as two
+files: a passed one, a rejected docs program, a rejected other program, failed
+ones with again true and false, the period's two ends, an event id in both
+files and another kind; and no input.
 """
 
 import importlib.util
@@ -47,9 +51,12 @@ SCRIPT = os.path.join(HERE, "docs-metrics.py")
 FIXTURES = os.path.join(HERE, "docs-metrics-fixtures")
 
 failures = []
+checked = 0
 
 
 def check(name, got, want):
+    global checked
+    checked += 1
     if got != want:
         failures.append(f"{name}: got {got!r}, want {want!r}")
 
@@ -555,6 +562,60 @@ def check_m7(base):
     return files
 
 
+def check_m7_programs(base, run_files):
+    def program(id, at, outcome, name, again=False):
+        return {"id": id, "run_id": "r1", "kind": "review_programs_finished", "created_at": at,
+                "payload": {"outcome": outcome, "program": name, "reason": None, "attempt": 1, "again": again,
+                            "error": "boom" if outcome == "failed" else None}}
+
+    first = [
+        program(1, "2026-10-01T00:00:00.000Z", "passed", "check-doc-links"),  # on the period's start
+        program(2, "2026-10-01T01:00:00.000Z", "rejected", "check-design-docs"),
+        program(3, "2026-10-01T02:00:00.000Z", "rejected", "check-commit-messages"),
+        # Failed: no send-back, counted only by again.
+        program(4, "2026-10-01T03:00:00.000Z", "failed", "check-doc-links", again=True),
+        program(5, "2026-10-01T04:00:00.000Z", "failed", "check-design-sentences", again=False),
+    ]
+    second = [
+        program(2, "2026-10-01T01:00:00.000Z", "rejected", "check-test-rules"),  # same id: the first one counts
+        program(6, "2026-10-02T23:59:59.999Z", "rejected", "check-doc-links"),
+        program(7, "2026-10-03T00:00:00.000Z", "rejected", "check-doc-links"),  # on the period's end
+        program(8, "2026-09-30T23:59:59.999Z", "rejected", "check-doc-links"),  # before the period
+        {"id": 9, "run_id": "r1", "kind": "review_started", "created_at": "2026-10-01T05:00:00.000Z",
+         "payload": {"outcome": "rejected", "program": "check-doc-links"}},
+    ]
+    files = []
+    for n, events in enumerate((first, second)):
+        files.append(os.path.join(base, f"events-programs-{n}.json"))
+        with open(files[-1], "w") as f:
+            json.dump({"cursor": 99, "events": events} if n == 0 else events, f)
+    period = ("--since", "2026-10-01", "--until", "2026-10-03", "--metrics", "m7")
+    out = run(*period, "--run-events", *run_files, "--program-events", *files)
+    plain = run(*period, "--run-events", *run_files)
+    if not (out and plain):
+        return
+    # M7's 7 send-backs, 5 with docs and 10 reviews, with the 3 rejected (2 docs): failed adds to neither.
+    check("m7 programs", out["m7_programs"], {
+        "days": 2.0,
+        "send_backs": {"all": 3, "docs": 2, "other": 1},
+        "per_day": {"send_backs": 1.5, "docs": 1.0},
+        "by_program": {"check-commit-messages": 1, "check-design-docs": 1, "check-doc-links": 1},
+        "failed": {"again": 1, "not_again": 1},
+        "with_m7": {"docs_share": 0.7, "docs_per_review": 0.5385},
+    })
+    check("m7 programs change no m7 field", out["m7"], plain["m7"])
+    check("m7 without program events", plain["m7_programs"], None)
+    alone = run(*period, "--program-events", *files)
+    if alone:
+        check("m7 programs without run events", (alone["m7"], alone["m7_programs"]["with_m7"],
+                                                alone["m7_programs"]["send_backs"]),
+              (None, None, {"all": 3, "docs": 2, "other": 1}))
+    md = subprocess.run([sys.executable, SCRIPT, *period, "--run-events", *run_files, "--program-events", *files],
+                        capture_output=True, text=True)
+    check("markdown has M7 programs", "## M7 program send-backs" in md.stdout
+          and "| 2 | 3 | 2 | 1 | 1.5 | 1 | 1 | 1 | 0.7 | 0.5385 |" in md.stdout, True)
+
+
 def check_m7_rules():
     spec = importlib.util.spec_from_file_location("docs_metrics", SCRIPT)
     module = importlib.util.module_from_spec(spec)
@@ -675,6 +736,7 @@ def main():
         reviews = check_m6(base) or []
         check_m7_rules()
         run_events = check_m7(base) or []
+        check_m7_programs(base, run_events)
         m7 = subprocess.run([sys.executable, SCRIPT, "--since", "2026-10-01", "--until", "2026-10-03",
                              "--metrics", "m7", "--run-events", *run_events], capture_output=True, text=True)
         check("markdown has M7", "## M7" in m7.stdout and "| docs_only | 2 | 0 | 2.5 | 4500 | 1.25 |" in m7.stdout,
@@ -708,7 +770,7 @@ def main():
         for f in failures:
             print("FAIL", f)
         sys.exit(1)
-    print("ok: docs-metrics.py passed every check")
+    print(f"ok: docs-metrics.py passed every check ({checked} checks)")
 
 
 if __name__ == "__main__":

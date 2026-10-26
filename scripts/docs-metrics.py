@@ -86,6 +86,15 @@ and the baseline are in docs/plans/docs-slim.md; the weekly procedure is in
     the index has no text), lowercased, takes the first kind one of whose
     keywords it contains, else `other`. Shares are over the primary docs_drift
     events.
+- M7 (in docs/plans/docs-reduction.md) from --run-events, and apart from it
+  the program reviews' send-backs from --program-events (`m7_programs`):
+  the review_programs_finished events, one per event id over every file, with
+  `created_at` in [since, until). A send-back is outcome rejected, counted in
+  all, per program and as docs (DOC_PROGRAMS) or other; outcome failed sends
+  no worker back and is counted only by `again`; passed is not counted.
+  Per day is the count over the period's days. With M7, `with_m7` adds the
+  rejected ones to M7's docs_any, send-backs and reviews (a rejected review
+  writes no review_finished).
 """
 
 import argparse
@@ -186,6 +195,18 @@ SEND_BACK = "send_back"
 ASK_OPENED, ASK_ANSWERED, ASK_CLOSED = "ask_opened", "ask_answered", "ask_closed"
 ASKS_NOT_HOLDING = ("blocked", "planner_question")
 RUN_CLAIMED, RECEIPT_OBSERVED = "run_claimed", "receipt_observed"
+# M7's program send-backs, counted apart from M7: review_programs_finished
+# (2026-10-26: review_programs_finished and review_programs_failed in
+# src/application/supervise/execution/landing.rs record `outcome` passed,
+# rejected (the worker is sent back with `reason`) or failed (the program
+# could not run; it runs `again` or the review fails, no send-back) and
+# `program`, the key of dagq.toml's [review.programs.*]).
+PROGRAMS_KIND = "review_programs_finished"
+# The programs that check documents (docs/, the root .md files) among
+# [review.programs.*]; any other name, a retired one too, is not a document's.
+# docs/plans/docs-reduction.md lists the same names.
+DOC_PROGRAMS = ("check-doc-frontmatter", "check-design-docs", "check-design-sentences", "check-doc-links",
+                "check-frontmatter-dates", "check-adr-numbers", "check-agents-md-size")
 # A path a reason names that makes it a docs reason: one under docs/, a .md
 # under plugins/, the root AGENTS.md or README.md. It starts a word: not after
 # a letter, digit, `_`, `.`, `-` or `/` (so not src/docs/ nor a/README.md);
@@ -1075,6 +1096,36 @@ def m7(paths, stats_path, since, until, ask_paths=()):
     }
 
 
+def m7_programs(paths, since, until, m7_out=None):
+    days = (until - since).total_seconds() / 86400
+    rejected, by_program, failed = {"all": 0, "docs": 0, "other": 0}, defaultdict(int), {"again": 0, "not_again": 0}
+    for event in load_events(paths):
+        at = event.get("created_at")
+        if event.get("kind") != PROGRAMS_KIND or not isinstance(at, str) or not since <= parse_time(at) < until:
+            continue
+        payload = event.get("payload") or {}
+        if payload.get("outcome") == "rejected":
+            program = payload.get("program")
+            rejected["all"] += 1
+            rejected["docs" if program in DOC_PROGRAMS else "other"] += 1
+            by_program[str(program)] += 1
+        elif payload.get("outcome") == "failed":
+            failed["again" if payload.get("again") is True else "not_again"] += 1
+    combined = None
+    if m7_out:
+        docs = m7_out["send_backs"]["docs_any"] + rejected["docs"]
+        combined = {"docs_share": ratio(docs, m7_out["send_backs"]["all"] + rejected["all"]),
+                    "docs_per_review": ratio(docs, m7_out["reviews"]["events"] + rejected["all"])}
+    return {
+        "days": round(days, 2),
+        "send_backs": rejected,
+        "per_day": {"send_backs": round(rejected["all"] / days, 2), "docs": round(rejected["docs"] / days, 2)},
+        "by_program": dict(sorted(by_program.items())),
+        "failed": failed,
+        "with_m7": combined,
+    }
+
+
 # --- output ---------------------------------------------------------------
 
 
@@ -1180,6 +1231,16 @@ def markdown(out):
             + "\n\nreason_codes of the send-backs\n\n"
             + table(["missing", "shorter than reasons", "longer than reasons", "items not a list"],
                     [[c["codes_missing"], c["codes_short"], c["codes_long"], c["code_items_not_list"]]]))
+    if out.get("m7_programs"):
+        m = out["m7_programs"]
+        s, f, w = m["send_backs"], m["failed"], m["with_m7"] or {}
+        parts.append("## M7 program send-backs (apart from M7)\n\n" + table(
+            ["days", "rejected", "docs", "other", "per day", "docs per day", "failed again", "failed not again",
+             "docs share with M7", "docs per review with M7"],
+            [[m["days"], s["all"], s["docs"], s["other"], m["per_day"]["send_backs"], m["per_day"]["docs"],
+              f["again"], f["not_again"], w.get("docs_share"), w.get("docs_per_review")]])
+            + "\n\nRejected per program\n\n"
+            + table(["program", "rejected"], [[name, n] for name, n in m["by_program"].items()]))
     return "\n\n".join(parts) + "\n"
 
 
@@ -1206,6 +1267,10 @@ def main():
                         help="files with the JSON of `dagq events --full --kind ask_opened --kind ask_answered "
                              "--kind ask_closed --kind run_claimed --kind receipt_observed` (M7 (h), not "
                              "narrowed to the period); an event id in several files counts once")
+    parser.add_argument("--program-events", nargs="+", action="extend", default=[],
+                        help="files with the JSON of `dagq events --full --kind review_programs_finished` "
+                             "(M7's program send-backs, counted apart from M7); an event id in several files "
+                             "counts once")
     parser.add_argument("--metrics", default="m1,m2,m3,m4,m5,m6,m7",
                         help="comma-separated metrics; M3, M4, M5, M6 and M7 also need their input")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
@@ -1221,7 +1286,8 @@ def main():
         sys.exit("docs-metrics: --since must be before --until")
     wanted = set(args.metrics.split(","))
     out = {"since": iso(since), "until": iso(until), "ref": args.ref,
-           "m1": None, "m2": None, "m3": None, "m4": None, "m5": None, "m6": None, "m7": None}
+           "m1": None, "m2": None, "m3": None, "m4": None, "m5": None, "m6": None, "m7": None,
+           "m7_programs": None}
     if "m1" in wanted:
         out["m1"] = m1(args.repo, args.ref, since, until)
     if "m2" in wanted:
@@ -1236,6 +1302,8 @@ def main():
         out["m6"] = m6(args.review_events, since, until)
     if "m7" in wanted and args.run_events:
         out["m7"] = m7(args.run_events, args.stats, since, until, args.ask_events)
+    if "m7" in wanted and args.program_events:
+        out["m7_programs"] = m7_programs(args.program_events, since, until, out["m7"])
     if args.format == "json":
         json.dump(out, sys.stdout, indent=2, ensure_ascii=False)
         print()

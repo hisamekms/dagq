@@ -34,6 +34,7 @@ python3 scripts/docs-metrics.py --since <since> --until <until> --metrics m7 \
 - `--stats` は M3 と同じ渡し方で、M7 は worker の作業時間だけをそこから読む。省くと `worker_work` は `null`。
 - `--ask-events` は (h) の入力で、渡し方は下の (h)。
 - `--run-events` を省くと M7 は `null`。script は queue を読まない。
+- `--program-events` はプログラムの review の差し戻しの入力（`dagq events --full --kind review_programs_finished` の頁、複数可）で、M7 と別の欄 `m7_programs` に出す。定義は「プログラムの review の差し戻し」。省くと `m7_programs` は `null` で、M7 の値は変わらない。
 
 ## M7 の定義
 
@@ -45,7 +46,7 @@ python3 scripts/docs-metrics.py --since <since> --until <until> --metrics m7 \
   `verdict` が `concern` で `route` の無いものは差し戻しに数えず、件数を `concern_without_route` に出す。
   `route` で決まったものと `verdict` で決まったものの件数も別に出す。
   上限の後に着地した review も `route.destination` は `send_back` なので差し戻しに数え、次の `review_started` が無いので (d) では打ち切りになる。
-  プログラムの review が変更を拒んだ差し戻しは `review_finished` を書かない（`review_programs_finished` だけ）ので、どの欄にも数えない。
+  プログラムの review が変更を拒んだ差し戻しは `review_finished` を書かない（`review_programs_finished` だけ）ので、どの欄にも数えない。別に数えた値は「プログラムの review の差し戻し」。
 - **(c) ドキュメントの理由**: 差し戻しの理由は、`src/domain/mod.rs` の `ReviewVerdict::sent_back_findings` と同じ組み立てで読む。
   - `route` の無い event: 親（`review_finished` の payload）の `reasons` と `reason_codes`。
   - `route` のある event: `route.parent` が `route.destination` と同じときだけ親の `reasons` と `reason_codes` を読み、続けて `route.agents` で行き先が `route.destination` と同じ agent ごとに、payload の `agents[]` の同じ `agent` の `reasons`（空なら `summary` の 1 文）とその `reason_codes` を読む。`route.destination` が `land` なら agent を読まない。
@@ -863,7 +864,7 @@ goal 193 の前後比較の S1・S2（[docs-slim.md](docs-slim.md) の「goal 19
 #### 定義に書くかの判断（上限の後の着地・プログラムの review）
 
 - **上限の後に着地した差し戻し: 数える（定義の (b) に書いた）**。`route.destination` は review の判定で、上限の後に着地した review も同じ判定で差し戻しを返している。除くには入力に `revise_limit_judged` の kind が要り、保存した 5 区間の頁には無いので、除くと前の区間と同じ入力で比べられなくなる。待ちには入らない: 着地した run には次の `review_started` が無く (d) の打ち切りになる。大きさの上限は、差し戻しの後に `review_started` を挟まず同じ run の `run_integrated` が来た event（`approve_landing` で人が着地させたものを含む）で、基準 8・A の前 3・C の前 1・混ざり無し 2・C の後（全体）28（打ち切り 20・8・4・2・40 の内数）。
-- **プログラムの review の差し戻し: 数えない（定義の (b) に書いた）**。M7 は AI の review の判定（`review_finished`）を数える指標で、プログラムが拒んだ review は `review_programs_finished` だけを書く。プログラムには文書の検査（`check-doc-frontmatter`・`check-design-docs`・`check-design-sentences`・`check-doc-links` など、`dagq.toml` の `[review.programs.*]`）もあり、ドキュメントの差し戻しの一部は M7 の外にある。数えるには入力に `review_programs_finished` が要り、保存した頁に無いので、別に数える（follow_up）。
+- **プログラムの review の差し戻し: 数えない（定義の (b) に書いた）**。M7 は AI の review の判定（`review_finished`）を数える指標で、プログラムが拒んだ review は `review_programs_finished` だけを書く。プログラムには文書の検査（`check-doc-frontmatter`・`check-design-docs`・`check-design-sentences`・`check-doc-links` など、`dagq.toml` の `[review.programs.*]`）もあり、ドキュメントの差し戻しの一部は M7 の外にある。数えるには入力に `review_programs_finished` が要り、保存した `events-run-*` の頁に無いので、別の入力で別に数えた（定義と値は「プログラムの review の差し戻し」）。
 
 #### 判断
 
@@ -872,10 +873,57 @@ goal 193 の前後比較の S1・S2（[docs-slim.md](docs-slim.md) の「goal 19
 - **差し戻しを減らす次の打ち手は文書ではない、も変わらない**: C の後（全体）の差し戻し 382 回のうち、ドキュメントを含むのは 141 回（37%）で、ドキュメント以外の理由だけが 241 回（63%）。理由なしの 107 回はほぼ全てがドキュメント以外の理由だけに移った（96 回）。「C の後のドキュメント以外の理由だけの差し戻しの内訳」の母数（148 回）は前の (c) のもので、この 96 回は含まず、その中身（主に `receipt-evidence`）は「C の後の理由なしの差し戻しの内訳」が持つ。
 - **ドキュメントの回数は下限ではなくなった**: 理由なしが全区間で 0 なので、「A の前後」「C の後」の「読み方の注意」が言う下限の読み方は今の (c) では要らない。ドキュメントだけは前の (c) より少なく、前の値は多めだった。
 
+### プログラムの review の差し戻し（2026-10-26 に読んだ値）
+
+M7 の外にあるプログラムの review の差し戻しを別に数え、M7 と足した文書の差し戻しの割合で、これまでの判断が変わるかを確かめる。
+
+#### 定義
+
+- 入力: `--program-events` の `review_programs_finished`。全てのファイルを通して event ID が同じものは1件で、`created_at` が `[since, until)` に入るものだけを数える。
+- 差し戻し: payload の `outcome` が `rejected` のもの。件数・1 日あたり（件数 ÷ ((until − since) の秒 ÷ 86400)）・`program` ごとの件数と、文書の program かどうかの内訳を出す。
+- 文書の program: `dagq.toml` の `[review.programs.*]` のうち、文書（`docs/` と root の `.md`・`AGENTS.md`）を検査するもの（`check-design-docs` は許可の一覧の `.config/design-docs-allow.toml` も paths に持つが、検査するのは design の文書）。`check-doc-frontmatter`・`check-design-docs`・`check-design-sentences`・`check-doc-links`・`check-frontmatter-dates`・`check-adr-numbers`・`check-agents-md-size` で、script の `DOC_PROGRAMS` が同じ名を持つ。それ以外（`check-commit-messages` と、保存した頁にだけ出る今の `dagq.toml` に無い `check-context-boundaries` など）は文書以外。
+- `rejected` と `failed` の区別: `failed` は program が動かなかった記録（`landing.rs` の `review_programs_failed`）で、再試行するか review の失敗に進み、worker を差し戻さない。差し戻しの件数・1 日あたり・program ごとの件数と下の割合のどれにも入れず、`again` の真偽ごとの件数だけを別の欄に出す。`passed` は数えない。
+- M7 の (b) との関係: プログラムが拒んだ review は `review_finished` を書かないので、M7 の差し戻しとこの差し戻しは重ならない。M7 と足して読むときは、文書の program の差し戻し（P_doc）を M7 の `send_backs.docs_any` に、program の差し戻しの全体（P_all）を M7 の `send_backs.all` と `reviews.events` に足す（script の `with_m7`）。
+  - 差し戻しに占める割合 = (`docs_any` + P_doc) ÷ (`send_backs.all` + P_all)
+  - review あたり = (`docs_any` + P_doc) ÷ (`reviews.events` + P_all)
+- program の差し戻しは理由が 1 つ（拒んだ program）なので、文書の program の差し戻しは M7 のドキュメントだけにも当たる。下の判断はそれも並べる。
+
+#### 期間と入力
+
+- 期間は「C の後」の「期間と入力」の 5 区間。M7 の入力は同じ file（`--ask-events` は渡していない）。
+- program の入力は、planner が 2026-10-26 に固定バイナリの `dagq events --full --kind review_programs_finished --since S --until U --limit 1000` で保存した「区分」の dir の `events-programs-S_U-0.json`（各区間 1 頁）。件数は基準 70・A の前 305・C の前 46・C の後（混ざり無し）127・C の後（全体）772。どの区間も `outcome` は `passed` と `rejected` だけで、`failed` は 0。
+- この節と同じ commit の `python3 -I scripts/docs-metrics.py --since S --until U --metrics m7 --format json --stats stats-run-S_U.json --run-events events-run-S_U-*.json --program-events events-programs-S_U-0.json` を各区間 1 回流した。決まった入力の数え上げなので、反復と交互の実行は当たらない。M7 の欄は「M7 (c) を直した後の値」の今の値と同じ。
+- 割合は script の `with_m7` で、M7 だけの割合は M7 の値からの算術。
+
+#### 値
+
+| 指標 | 基準 | A の前 | C の前 | C の後（混ざり無し） | C の後（全体） |
+| --- | --- | --- | --- | --- | --- |
+| program の差し戻し（P_all） | 3 | 33 | 0 | 2 | 15 |
+| うち文書の program（P_doc） | 3 | 32 | 0 | 0 | 7 |
+| うち文書以外 | 0 | 1 | 0 | 2 | 8 |
+| program の差し戻し / 日 | 0.47 | 5.16 | 0 | 1.63 | 2.34 |
+| 文書の program の差し戻し / 日 | 0.47 | 5.0 | 0 | 0 | 1.09 |
+| program ごと | `check-design-docs` 3 | `check-doc-links` 21・`check-design-sentences` 8・`check-design-docs` 3・`check-context-boundaries` 1 | — | `check-commit-messages` 2 | `check-design-sentences` 7・`check-context-boundaries` 6・`check-commit-messages` 2 |
+| `failed`（`again` 真 / 偽） | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| (i) 差し戻しに占める割合: M7 だけ（`docs_any` ÷ `all`） | 300/321 = 0.9346 | 207/248 = 0.8347 | 15/25 = 0.6 | 33/65 = 0.5077 | 141/382 = 0.3691 |
+| (i) 差し戻しに占める割合: M7 + program | 303/324 = 0.9352 | 239/281 = 0.8505 | 15/25 = 0.6 | 33/67 = 0.4925 | 148/397 = 0.3728 |
+| (ii) review あたり: M7 だけ（`per_review.docs_any`） | 300/692 = 0.4335 | 207/394 = 0.5254 | 15/38 = 0.3947 | 33/117 = 0.2821 | 141/723 = 0.195 |
+| (ii) review あたり: M7 + program | 303/695 = 0.436 | 239/427 = 0.5597 | 15/38 = 0.3947 | 33/119 = 0.2773 | 148/738 = 0.2005 |
+
+#### 判断
+
+- **これまでの判断は変わらない**。program の差し戻しは M7 の差し戻しの 0〜13%（A の前の 33 / 248 が最大）で、足しても割合の動きは小さい。
+- **C の効果の向き**: review あたり（M7 + program）は C の前 0.3947 → 混ざり無し 0.2773（-30%）で、M7 だけの -29% と同じ向き。基準 → C の後（全体）も 0.436 → 0.2005（-54%）で、M7 だけの -55% と同じ。
+- **差し戻しを減らす次の打ち手は文書ではない**: C の後（全体）の差し戻しに占める文書の割合は M7 だけの 37%（141/382）が M7 + program でも 37%（148/397）で、文書以外の理由だけの差し戻しが多いことは変わらない。
+- **想定効果（ドキュメントだけ）**: 文書の program の差し戻しを M7 のドキュメントだけに足すと、review あたりは基準 54/695 = 0.0777 → C の後（全体）50/738 = 0.0678（比 0.87）で、M7 だけの review あたりの比（0.0737 → 0.0595 の 0.81）と同じく想定の比 0.26〜0.41 に届かない（回数の比も M7 だけの 43/51 = 0.84 が 50/54 = 0.93）。
+- **A の前の山**: A の前の文書の program の差し戻し 32 回（1 日 5.0 回）のうち 21 回は `check-doc-links` で、C の後（全体）は `check-design-sentences` の 7 回だけ。文書の program の差し戻しは減ったが、M7 の文書の差し戻しの 5% 程度（C の後（全体）で 7 / 141）で、M7 だけで読んだ結論を動かさない。
+- [docs/design の4指標](docs-slim.md) の読み方は M7 だけの値に拠り、上の判断が変わらないので直さない。
+
 ## 区分
 
 - SSOT: queue の EventStore（run の event）。M7 は git の履歴も会話記録も読まない。
 - 入力: `dagq events --full` と `dagq stats --full` の JSON は EventStore から作り直せるビュー。EventStore の該当の期間の event が残る限り同じ入力を作り直せる。
 - 出力: script の JSON の `m7` と Markdown の表は、入力から `scripts/docs-metrics.py` で作り直せるビュー。
 - 人の分析の参考の値は材料で、取り方が残っていないので作り直せない。
-- 保存する JSON の置き場は [docs/design の4指標](docs-slim.md) の「保存」と同じ dir（`~/.local/share/dagq-hostmetrics/docs-slim/`）に、入力を `events-run-<since>_<until>-<頁>.json`、出力を `m7-<since>_<until>.json` として置く。
+- 保存する JSON の置き場は [docs/design の4指標](docs-slim.md) の「保存」と同じ dir（`~/.local/share/dagq-hostmetrics/docs-slim/`）に、入力を `events-run-<since>_<until>-<頁>.json`（プログラムの review の差し戻しは `events-programs-<since>_<until>-<頁>.json`）、出力を `m7-<since>_<until>.json` として置く。
