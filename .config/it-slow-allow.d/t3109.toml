@@ -1,0 +1,52 @@
+[[test]]
+name = "supervisor_service::a_supervisor_on_the_socket_reviews_and_lands_a_run_without_opening_the_queue"
+reason = "B 境界（守る境界）: a whole supervisor on the service's socket claims, validates, reviews and lands a run while its process refuses the queue's DB, so the landing's, the review's and the job's records cross the process boundary; each operation's dispatch and serde are unit-sized in supervisor_service::tests"
+task = 3109
+
+# 5.4s under stress (task 3109), class B
+[[test]]
+name = "plan_review::a_plan_verdict_the_service_did_not_take_is_held_and_applied_once"
+reason = "B 境界（supervisorの配線）: a whole supervisor runs a real plan review job and applies its verdict through the service over several passes, the first sending meeting a service out of reach and the second losing its answer (ADR-t3102-3 decision 5); what becomes of a verdict sent is supervise::planning::tests::a_verdict_the_service_did_not_answer_is_held_and_one_refused_fails_its_job"
+task = 3109
+
+# 4.9s under stress (task 3109), class B
+[[test]]
+name = "goal_review::a_goal_verdict_the_service_did_not_take_is_held_and_applied_once"
+reason = "B 境界（supervisorの配線）: the same for a whole supervisor's goal review job and its verdict over several passes (ADR-t3102-3 decision 5); the decision is the same unit test as the plan review's"
+task = 3109
+
+# 3.1-6.6s under stress at a load average of 10-14, 2.1s unloaded (task 3109), class B
+[[test]]
+name = "runtime_handoff::review_verdicts::verdicts_not_taken_before_the_exec_are_applied_by_the_next_process"
+reason = "B 境界（引き継ぎとsupervisorの配線）: a supervisor whose plan and goal review verdicts the service did not take hands off by exec, and the next process under the same registration applies each once without interrupting their rows (ADR-t3102-3 decision 5); it runs two supervisor processes and two real review jobs. The kept end's round trip is supervise::planning::plan_review::tests::a_kept_plan_review_end_comes_back_whole_to_the_supervisor_that_takes_it"
+task = 3109
+
+# 3.0-6.4s under stress at a load average of 10-14, 2.1s unloaded (task 3109), class B
+[[test]]
+name = "runtime_handoff::review_verdicts::failures_not_taken_before_the_supervisor_stopped_are_recorded_by_the_next"
+reason = "B 境界（復旧とsupervisorの配線）: a supervisor whose plan and goal review failures the service did not take stops with their rows unfinished, and the next supervisor takes the rows over and records each failure once without running the reviews again (ADR-t3102-3 decision 5); it runs two supervisors and two real review jobs. The kept end's round trip is supervise::planning::plan_review::tests::a_kept_plan_review_end_comes_back_whole_to_the_supervisor_that_takes_it"
+task = 3109
+
+# 3.0-6.3s under stress at a load average of 10-14, 2.4s unloaded (task 3109), class B
+[[test]]
+name = "runtime_handoff::review_verdicts::verdicts_not_taken_before_the_supervisor_stopped_are_applied_by_the_next"
+reason = "B 境界（復旧とsupervisorの配線）: the same for verdicts: the next supervisor takes over the stopped supervisor's unfinished rows and applies each kept verdict once (ADR-t3102-3 decision 5); two supervisors and two real review jobs, with the same unit test for the kept end"
+task = 3109
+
+# 8.0-13.2s under stress at a load average of 10-14 (task 3109), class B
+[[test]]
+name = "supervisor_service::a_once_supervisor_reads_a_run_again_only_once_the_queue_took_its_held_end"
+reason = "B 境界（supervisorの配線）: a whole --once supervisor through the service, whose run's e2e end the queue stays busy for, waits for the queue to take the held end before it reads the run again, so the e2e runs once and the run lands (ADR-t3102-3 decision 5); it runs a real e2e and landing. What becomes of a record the queue was busy for is application::supervisor_service::tests::a_results_record_the_queue_was_busy_for_is_held_and_told_as_still_held"
+task = 3109
+
+# 5.1-10.6s under stress at a load average of 10-14 (task 3109), class B
+[[test]]
+name = "supervisor_service::a_resumes_wait_for_its_held_provider_is_never_kept_and_is_recorded_once"
+reason = "B 境界（supervisorの配線）: a whole --once supervisor through the service takes a run a conflict parked while Claude is held, and its real resume path's provider_waiting the queue does not take is neither kept nor written, then recorded once (ADR-t3102-3 decision 5, ADR-t3255-1 decision 1); it lands one run and parks another to get there. Which records are never kept is application::supervisor_service::tests::a_runs_event_that_starts_something_or_is_found_again_is_never_kept"
+task = 3109
+
+# 2.9-5.6s under stress at a load average of 10-14 (task 3109), class B
+[[test]]
+name = "runtime_handoff::review_verdicts::verdicts_kept_by_a_supervisor_that_stopped_are_applied_by_one_running_beside_it"
+reason = "B 境界（復旧とsupervisorの配線）: a supervisor running beside one that stopped takes over the stopped one's unfinished review rows and applies each kept verdict once before it starts a review (ADR-t3102-3 decision 5); it runs two supervisors and two real review jobs. Which kept verdicts are taken, once and only from a gone keeper, is supervise::planning::tests::a_kept_verdict_is_taken_once_and_once_its_keeper_is_gone"
+task = 3109

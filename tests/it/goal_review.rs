@@ -188,6 +188,81 @@ fn an_achieved_goal_is_closed_with_its_evidence() {
     assert!(again.prompts().is_empty());
 }
 
+/// A goal review's verdict the queue service does not take is held, not
+/// its job's failure (ADR-t3102-3 decision 5): its first sending finds the
+/// service out of reach, and its second is applied but its answer lost;
+/// on a later pass its row is found finished, so it is not sent a third
+/// time, and it is applied once.
+#[test]
+fn a_goal_verdict_the_service_did_not_take_is_held_and_applied_once() {
+    let fx = fixture();
+    let (goal, _) = goal_done(&fx);
+    let reviewer = StubReviewer::new(&[json!({
+        "verdict": "achieved", "criteria": [], "summary": "both items landed",
+    })]);
+    let (wrap, sent) = crate::runtime_support::service::DropsThenLoses::wrap("finish_goal_review");
+    supervise_with(
+        &fx,
+        &PlanWorkspace::default(),
+        &reviewer,
+        &dagq::runtime::SuperviseOptions {
+            service_route: dagq::compose::ServiceRoute::InProcessThrough(wrap),
+            ..options(0, Duration::from_secs(3600))
+        },
+    );
+    assert_eq!(reviewer.prompts().len(), 1);
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    assert_eq!(
+        queue.show_goal(goal).unwrap().goal.verdict(),
+        Some(GoalVerdict::Achieved)
+    );
+    assert_eq!(
+        goal_events(&mut queue, goal, "goal_review_finished").len(),
+        1
+    );
+    assert_eq!(goal_events(&mut queue, goal, "goal_closed").len(), 1);
+    assert!(goal_events(&mut queue, goal, "goal_review_failed").is_empty());
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// A goal review's failure the queue service does not take is held as its
+/// verdict would be (ADR-t3102-3 decision 5), not dropped: its first
+/// sending finds the service out of reach, and its second is recorded but
+/// its answer lost; on a later pass its row is found finished. The failure
+/// is recorded once, the goal waits for a person, and the review does not
+/// run again.
+#[test]
+fn a_goal_review_failure_the_service_did_not_take_is_held_and_recorded_once() {
+    let fx = fixture();
+    let (goal, _) = goal_done(&fx);
+    let failing = StubReviewer::failing();
+    let (wrap, sent) = crate::runtime_support::service::DropsThenLoses::wrap("fail_goal_review");
+    supervise_with(
+        &fx,
+        &PlanWorkspace::default(),
+        &failing,
+        &dagq::runtime::SuperviseOptions {
+            service_route: dagq::compose::ServiceRoute::InProcessThrough(wrap),
+            ..options(0, Duration::from_secs(3600))
+        },
+    );
+    assert_eq!(failing.prompts().len(), 1);
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let failed = goal_events(&mut queue, goal, "goal_review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("model unavailable")
+    );
+    let holds = queue.goal_review_holds().unwrap();
+    assert_eq!(holds.len(), 1);
+    assert_eq!(holds[0].goal_id, goal);
+    assert!(queue.goal_review_candidates().unwrap().is_empty());
+}
+
 /// Without `[roles.goal_review]` the goal review starts as before (no
 /// model or effort given); `goal_review_started` records the launch with
 /// its provider and the session id the runtime gave the job, and the job's
@@ -719,8 +794,12 @@ fn handoff_reviews(keep_candidates: bool) {
     )
     .unwrap();
     let other = LeaseToken::new("another-supervisor");
-    queue.interrupt_goal_reviews_for_handoff(&other).unwrap();
-    queue.interrupt_plan_reviews_for_handoff(&other).unwrap();
+    queue
+        .interrupt_goal_reviews_for_handoff(&other, &[])
+        .unwrap();
+    queue
+        .interrupt_plan_reviews_for_handoff(&other, &[])
+        .unwrap();
     for table in ["goal_reviews", "plan_reviews"] {
         let count: i64 = conn
             .query_row(
@@ -782,8 +861,12 @@ fn handoff_reviews(keep_candidates: bool) {
         if keep_candidates { 2 } else { 0 }
     );
     // Cleanup is idempotent, including after the registration was removed.
-    queue.interrupt_goal_reviews_for_handoff(&token).unwrap();
-    queue.interrupt_plan_reviews_for_handoff(&token).unwrap();
+    queue
+        .interrupt_goal_reviews_for_handoff(&token, &[])
+        .unwrap();
+    queue
+        .interrupt_plan_reviews_for_handoff(&token, &[])
+        .unwrap();
     assert_eq!(
         events(&mut queue, goal_task, "session_closed").len(),
         if keep_candidates { 2 } else { 1 }

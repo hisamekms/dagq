@@ -46,7 +46,9 @@ observerの子プロセスはここに記録せず、時間切れとsupervisor�
   その前にケースに流すprogramは`program`のjobで、`kind`を`agent_eval_program`にし、runのreviewのprogramのjobと同じ時間の上限で動く。
 - jobの時間の上限（`Supervisor::job_timeout`）: runのreviewの段のjobは種類ごとの`[review.jobs]`の値（[Run environment](run-environment.md)）、無ければ`agent`はjobを動かすproviderの`AgentProvider::review_timeout`、`program`はreviewerのそれ。
   ほかのjob（復旧job・plan review・goal review）は`[review.jobs]`を読まず、reviewerの`review_timeout`。
-- jobの終わりで`ended_at`と`outcome`を書く: 自分で終わったjob（exitを読んだ）は`ended`、自分のsupervisorが止めたjob（timeout、見るのをやめたslot、handoffの前）は`stopped`。jobが終わる場所はqueueを持たないので、終わりは`JobEnds`に積み、次のpassの先頭（と、ループを抜けた直後）に書く。終わりを読む前に捨てられたjob（途中のerror、失敗したループ）は`Drop`で止めて`stopped`にするので、走ったまま見られなくなるjobは無い。
+- jobの終わりで`ended_at`と`outcome`を書く: 自分で終わったjob（exitを読んだ）は`ended`、自分のsupervisorが止めたjob（timeout、見るのをやめたslot、handoffの前）は`stopped`。
+  jobが終わる場所はqueueを持たないので、終わりは`JobEnds`に積み、次のpassの先頭（と、ループを抜けた直後）に書き、queue serviceに届かないかqueueが混んでいれば積んだまま次に書き直し、supervisorが終わるまで書けなければqueueの`service/held/`に残して次のsupervisorが引き継ぎの前に書く。
+  終わりを読む前に捨てられたjob（途中のerror、失敗したループ）は`Drop`で止めて`stopped`にするので、走ったまま見られなくなるjobは無い。
 - 終わりのeventを書かずに止めるjob（handoffの前、見るのをやめたslot、ループの終わりに残ったjob、`Drop`）は`HeadlessJob::abandon`で止め、その終わりを`JobEnds`に積む。
   agentは走ったので、書くときに出力を読み、`headless_job_stopped`をExecution（[Executionのトークン数](../execution-tokens.md#記録の形)）と共に下の引き継ぎと同じ置き場に記録する。
   止めた側の書く終わりのeventがExecutionを持つjob（見張りが止めた復旧のjob、timeout）は`HeadlessJob::stop`で止め、これを書かない。

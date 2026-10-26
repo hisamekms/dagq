@@ -878,7 +878,7 @@ pub struct RunDecision {
 }
 
 /// What the store writes for one settled run, in one transaction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CiCheckRecord {
     /// The event ID of the latest `ci_checked` the caller read (`None` for
     /// none): another supervisor's record since then takes the run.
@@ -897,7 +897,7 @@ pub struct CiCheckRecord {
 }
 
 /// What the store wrote.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CiCheckRecorded {
     pub event: super::EventId,
     pub finding: Option<super::FindingId>,

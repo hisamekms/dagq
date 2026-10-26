@@ -483,7 +483,7 @@ pub trait AskStore {
 /// Which asks [`AskStore::asks`] lists. By default the ones nobody closed;
 /// `all` adds the closed ones, `open` keeps only the unanswered ones, and
 /// `role` keeps those that wait for that role ([`Ask::waits_for`]).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct AskQuery {
     pub all: bool,
     pub open: bool,
@@ -565,6 +565,22 @@ pub trait EventStore {
     -> Result<()>;
     /// Record an event of the queue itself, on no task, goal or run.
     fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId>;
+    /// [`Self::record_runtime_event`] of a record that the queue takes now
+    /// or its caller fails on, never kept to be sent later (ADR-t3102-3
+    /// decision 5): one made before what it starts (the request written to
+    /// `turns/` after `revise_requested`, an exit after `exit_requested`),
+    /// so the caller goes on only once the queue took it, or one a pass
+    /// finds against the run's history (`provider_waiting`,
+    /// `run_phase_changed`), which the next pass finds again. A store that
+    /// writes at once records it as any other.
+    fn record_runtime_event_now(
+        &self,
+        id: &RunId,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        self.record_runtime_event(id, kind, payload)
+    }
     /// Record events of the queue itself in one transaction, none unless
     /// all; returns their ids. A store without transactions (a test's)
     /// records them one after another.
@@ -576,6 +592,20 @@ pub trait EventStore {
             .into_iter()
             .map(|(kind, payload)| self.record_queue_event(kind, payload))
             .collect()
+    }
+    /// Record `kind` with `payload` on run `run` (the queue's own event
+    /// when none) as the result's record `record` (ADR-t3102-3 decision 5),
+    /// in one write transaction: the event recorded before under `record`
+    /// is this one, and its id is answered with nothing written. A store
+    /// that cannot tell takes none.
+    fn record_event_once(
+        &self,
+        _run: Option<&RunId>,
+        _kind: EventKind,
+        _payload: serde_json::Value,
+        _record: &str,
+    ) -> Result<EventId> {
+        anyhow::bail!("this store takes no result's record")
     }
     /// Record the baseline of the attributes the measurement folds
     /// (`attributes_baseline`) for the tasks and goals whose records fold

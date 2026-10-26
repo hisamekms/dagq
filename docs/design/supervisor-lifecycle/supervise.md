@@ -124,14 +124,28 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 
 ## queue serviceの経路
 
-supervisorはqueue DBを開かずに、claim・lease・runの状態とevent・登録・判断に使う読み取り・tokenをqueue serviceのユースケースとして行う（[ADR-t3102-3](../../adr/2026-10-22-t3102-3-stage-5-outage-notice-and-use-cases-for-multi-step-control-operations.md)決定3〜5、principalは[ADR-t3102-1](../../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)）。
+supervisorはqueue DBを開かずに、claim・lease・runの状態とevent・登録・判断に使う読み取り・token・着地（integratorとして）とreviewとvalidationの記録・jobの起動と結果・計画と観測・askとattention・CIの見張り・引き継ぎの記録をqueue serviceのユースケースとして行う（[ADR-t3102-3](../../adr/2026-10-22-t3102-3-stage-5-outage-notice-and-use-cases-for-multi-step-control-operations.md)決定3〜5、principalは[ADR-t3102-1](../../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)）。
+DBを開くのはhostの負荷のsample・runの資源・ledgerの記帳・containerの部品の記録だけ（`compose::supervisor`）。
 
 - 入口は`application::supervisor_service`のmodule doc（serviceが答える操作、leaseのtokenの検査、actorの名指し、tokenの発行と失効）と`SupervisorQueue`、serviceの側は`answer`。
+- supervisorが起動する`observe`と`throughput-review`は、そのsupervisorのtokenで同じprincipalとしてserviceを通り、DBを開かない（`compose::observation`の`job_queues`）。
+  `stats`と`kpi`のGitの読み取りはCLIと同じくjobが行い、serviceはGitを起動しない（`infrastructure::job_reads`、[送る範囲](../queue-service-host-cli.md#送る範囲)）。
+  引き継ぎのexecはtokenを失効させずに残す（`ServiceCaller::take_back`）ので、execをまたいで記録できる。
+- 着地は`begin_landing`が発行したintegratorのprincipalで書き、serviceはそのrun・task・slotのleaseで着地の操作だけを答える（[integrate](integrate.md)）。
 - 約束: 1つの要求は1つのqueueの操作で、serviceは同じ操作を同じtransactionで行う（[SQLite persistence](../persistence.md#runtime-ownership)）。
   transactionを開く・閉じる操作や行を読み書きする操作は無い。
 - 約束: 届かない呼び出し（`ServiceUnreachable`）でDBを開いて代わりに行わない（fail closed）。
   起動のときは`reach_at_start`、passの途中は`Supervisor::run_loop`が扱い、その間は新しいclaimとjobを始めない。
-- 落とし穴: 書いた依頼の答えが届かなければserviceが行ったかどうか分からないので、送り直さず、serviceが答えた後のpassで自分のleaseのrunをslotと照合する（`execution::reconcile`のmodule doc）。
+- 約束: 結果の記録（`resend::RESENT_OPS`）はserviceが取るまで持って送り直し、queueは最初の送信の識別子ごとに1回だけ、記録した順に取る（`resend`のmodule docと`Resending`）。
+  何かを始める前のrunのeventと履歴から見つけ直すものは持たず（`EventStore::record_runtime_event_now`）、取られなければ呼び出し元の誤りにする。
+  ループの終わりまでに取られなければqueueの`service/held/`に残し、次のsupervisorが送る。
+  持った記録が残る間は、起動も各pass（`--once`も）もqueueを読む前にそれを送り、queueが混み続ける間は待つ（`Supervisor::drive`。止まるpassは待たず、書くものをその後ろに持つ）。
+  planとgoalのreviewの終わり（verdictと失敗）は`service/verdicts/`に残して同じく1回だけ記録し、reviewはやり直さない（`HeldPlanReview`・`HeldGoalReview`）。
+  去ったsupervisorが残したものは、走っているsupervisorも新しいreviewを始める前に引き取る（`take_kept_verdicts`）。
+- 落とし穴: 何かを始める前の記録（`revise_requested`など）と、passがqueueの履歴と比べて見つけるevent（`resend::OWN_RETRY_KINDS`、runの`provider_waiting`など）は持たない。
+  前者は取られてから先へ進み、後者は持てば次の読みに見えずに二重になるので、次のpassが見つけ直す。
+  例外はplannerのturnの`provider_waiting`で、結果として持つ: 見つけ直せば、間に人が答えたhold askを開き直すので（持った記録は各passが読む前に送る）。
+- 落とし穴: 書いた依頼の答えが届かなければserviceが行ったかどうか分からないので、上の結果の記録のほかは送り直さず、serviceが答えた後のpassで自分のleaseのrunをslotと照合する（`execution::reconcile`のmodule doc）。
 - serviceの不在の記録と知らせは[Queue service](../queue-service.md)の「落ちたときの知らせ」と`host_ops::queue_service`のmodule doc。
 - testのsupervisorは`ServiceRoute::InProcess`で、CLIの`supervise`は常にsocketを通る。
 

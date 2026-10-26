@@ -13,7 +13,7 @@
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
-use crate::domain::{EventKind, RecordedKind};
+use crate::domain::{EventId, EventKind, RecordedKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -91,6 +91,15 @@ pub const OWNER_PID_ENV: &str = "DAGQ_SERVICE_OWNER_PID";
 /// both it and [`SOCKET_ENV`] refuses every command and opens no queue
 /// (fail closed).
 pub const URL_ENV: &str = "DAGQ_SERVICE_URL";
+/// The variable that names, to a job command a supervisor starts as its
+/// own (`observe`, `throughput-review`), the registration of that
+/// supervisor (ADR-t3102-3 decision 3): with it the command opens no queue
+/// and reaches it through the service's socket as that supervisor's
+/// principal, with the token the supervisor signed in with, found from the
+/// registration ([`Principal::credential_key`]); the value is not a token.
+/// A supervisor whose service runs in its own process (a test's) leaves
+/// it out, and its commands open the queue.
+pub const SUPERVISOR_REGISTRATION_ENV: &str = "DAGQ_SUPERVISOR_REGISTRATION";
 /// The variables of a client-mode `dagq`.
 pub const CLIENT_ENV: [&str; 3] = [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV];
 /// The longest request line the service reads.
@@ -695,6 +704,17 @@ pub enum FailureKind {
     /// Another writer held the queue's lock past its wait: a passing
     /// condition the same write may try again.
     QueueBusy,
+    /// The landing of a supervisor asked to hand off was not begun
+    /// ([`crate::application::HandoffAsked`]).
+    HandoffAsked(Box<HandoffRefusal>),
+}
+
+/// The supervisor whose landing a handoff it was asked refused, and the
+/// binary it is asked to hand off to ([`FailureKind::HandoffAsked`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffRefusal {
+    pub supervisor: LeaseToken,
+    pub binary: String,
 }
 
 /// A supervisor's request ([`UseCase::Supervisor`]): the operation, its
@@ -711,6 +731,12 @@ pub struct SupervisorParams {
     pub acting: Option<Principal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_by: Option<String>,
+    /// The identity of a result's record (ADR-t3102-3 decision 5), given
+    /// at its first sending and kept by every sending of it, after a
+    /// restart too: the queue takes an event once per identity, and two
+    /// results alike are two records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<String>,
 }
 
 /// A refusal of the policy as the service answers it: the role, the
@@ -834,6 +860,14 @@ pub struct Principal {
     /// principal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionProcess>,
+    /// The `integration_started` event of the landing an integrator
+    /// principal's token was issued for, in the transaction that took its
+    /// slot ([`Self::of_landing`]): the service takes the integrator's
+    /// writes only while the queue holds that event, so a token whose
+    /// landing never committed writes nothing. `None` for every other
+    /// principal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<EventId>,
 }
 
 /// A session a token is bound to: the process of its agent, by its pid and
@@ -910,6 +944,7 @@ impl Principal {
             target: None,
             registration: None,
             session: None,
+            landing: None,
         }
     }
 
@@ -919,6 +954,39 @@ impl Principal {
         Self {
             registration: Some(registration.clone()),
             ..Self::of(&ActorContext::instance(ActorRole::Supervisor, pid))
+        }
+    }
+
+    /// The integrator of `run`'s landing, at the request of the supervisor
+    /// of process `pid` holding its integration slot under `lease`
+    /// (ADR-t3102-1 decision 2): its actor is the one the landing's events
+    /// record (`integrator:<pid>`), its one target the run, and its
+    /// registration the lease, which every lease it names has to be. The
+    /// run is its target, not its `run_id`, so the landing still records
+    /// as it after the run is integrated; the token is revoked as the
+    /// landing leaves `integrating` ([`Self::credential_key`]).
+    pub fn integrator(run: &RunId, lease: &LeaseToken, pid: u32) -> Self {
+        Self {
+            target: Some(StepTarget::run(run)),
+            registration: Some(lease.clone()),
+            ..Self::of(&ActorContext::instance(ActorRole::Integrator, pid))
+        }
+    }
+
+    /// This integrator principal as the one of the landing whose
+    /// `integration_started` is `event` ([`Self::landing`]).
+    pub fn of_landing(self, event: EventId) -> Self {
+        Self {
+            landing: Some(event),
+            ..self
+        }
+    }
+
+    /// The run an integrator principal lands ([`Self::integrator`]).
+    pub fn landing_run(&self) -> Option<RunId> {
+        match (self.role, &self.target) {
+            (ActorRole::Integrator, Some(target)) => target.run_id(),
+            _ => None,
         }
     }
 
@@ -936,6 +1004,7 @@ impl Principal {
             target: Some(target.clone()),
             registration: None,
             session: None,
+            landing: None,
         }
     }
 
@@ -953,6 +1022,7 @@ impl Principal {
             target: Some(target.clone()),
             registration: None,
             session: None,
+            landing: None,
         }
     }
 
@@ -963,9 +1033,10 @@ impl Principal {
     /// (ADR-t3102-1 decision 3), the session wrapper of one run (with its
     /// task) or one planner, the inbox of one session, and a planner whose
     /// one target is the planner its actor id names (ADR-t3102-1 decision
-    /// 3). No other principal has a target, a registration or a session.
-    /// The user takes no token (decision 1), and the rest of the control
-    /// side (the integrator) opens the DB itself until its stage.
+    /// 3), and the integrator of one run's landing, whose one target is
+    /// the run and whose registration is the slot's lease ([`Self::integrator`]).
+    /// No other principal has a target, a registration or a session. The
+    /// user takes no token (decision 1).
     pub fn check(&self) -> Result<(), DomainError> {
         let refuse = |value: String| {
             Err(DomainError::UnknownValue {
@@ -974,8 +1045,14 @@ impl Principal {
             })
         };
         if let Some(registration) = &self.registration {
-            return if self.role == ActorRole::Supervisor
-                && self.target.is_none()
+            let target = match (self.role, &self.target) {
+                (ActorRole::Supervisor, None) => true,
+                (ActorRole::Integrator, Some(target)) => {
+                    target.kind == super::session_step::TargetKind::Run && target.run_id().is_some()
+                }
+                _ => false,
+            };
+            return if target
                 && self.run_id.is_none()
                 && self.task_id.is_none()
                 && !registration.as_str().is_empty()
@@ -1044,8 +1121,12 @@ impl Principal {
     /// one process may run more than one supervisor (a test's does) under
     /// the one actor id its events record, or an inbox's session with it,
     /// so that the file a session was handed never holds the token of a
-    /// session opened after it (ADR-t3102-1 decision 2).
+    /// session opened after it (ADR-t3102-1 decision 2), or a landing
+    /// integrator's run with it, as one supervisor may land more than one.
     pub fn credential_key(&self) -> String {
+        if let Some(run) = self.landing_run() {
+            return format!("{}@{run}", self.actor_id);
+        }
         match (&self.registration, &self.session) {
             (Some(registration), _) => format!("{}@{}", self.actor_id, registration.as_str()),
             (None, Some(session)) => {
@@ -1121,6 +1202,23 @@ pub const fn run_holds_token(status: RunStatus) -> bool {
     )
 }
 
+/// Whether a supervisor may revoke the token kept under `key`
+/// ([`Principal::credential_key`]): never a supervisor's own sign-in,
+/// which only it gives back. Of the keys naming more than an actor id, a
+/// landing's integrator's and an inbox session's are the sweep's once its
+/// landing or its session ended (ADR-t3102-1 decision 2).
+pub fn supervisor_revokes(key: &str) -> bool {
+    if key.starts_with("supervisor:") {
+        return false;
+    }
+    match key.split_once('@') {
+        None => true,
+        Some((actor_id, _)) => {
+            actor_id.starts_with("integrator:") || actor_id == ActorRole::Inbox.as_str()
+        }
+    }
+}
+
 /// Whether the token of `principal` is an inbox's whose session ended:
 /// `alive` says whether a session's process still runs (its pid and its
 /// start). The service refuses such a token already; the supervisor's
@@ -1137,12 +1235,10 @@ pub fn session_token_ended(principal: &Principal, alive: impl Fn(&SessionProcess
 /// [`Principal::credential_key`], so that an inbox's is found in the file
 /// of its own session, and an inbox opened again since, whose key names
 /// another session, keeps its token. `None` for a supervisor's sign-in,
-/// which only that supervisor gives back.
+/// which only that supervisor gives back ([`supervisor_revokes`]).
 pub fn swept_token_key(principal: &Principal) -> Option<String> {
-    let supervisor = principal.role == ActorRole::Supervisor
-        || principal.registration.is_some()
-        || principal.actor_id.starts_with("supervisor:");
-    (!supervisor).then(|| principal.credential_key())
+    let key = principal.credential_key();
+    (principal.role != ActorRole::Supervisor && supervisor_revokes(&key)).then_some(key)
 }
 
 /// Whether the token of `principal` is a planner's or a planner's session
@@ -1245,6 +1341,20 @@ pub const OUTAGE_FILE: &str = "queue-service-outage.json";
 /// never write over each other's: the next watch of that role waits out
 /// the same outage rather than return it again (ADR-t3102-3 decision 2).
 pub const OUTAGE_TOLD_FILE: &str = "queue-service-outage-told";
+
+/// The directory, in the queue's service directory, of the records of
+/// results the service did not take while their callers ran: a supervisor
+/// that ended or execed and a job command that gave up keep them there,
+/// one file each, and the next supervisor sends them (ADR-t3102-3
+/// decision 5).
+pub const HELD_DIR: &str = "held";
+
+/// The directory, in the queue's service directory, of the verdicts of
+/// plan and goal reviews that ended which the queue did not take: the
+/// supervisor that reaped one keeps it there, one file each, until the
+/// queue takes it, and the next supervisor applies those of a process
+/// that ended or execed (ADR-t3102-3 decision 5).
+pub const VERDICTS_DIR: &str = "verdicts";
 
 /// What [`OUTAGE_FILE`] holds: since when (unix seconds) the supervisor
 /// found the service down, why (`reason`: `unreachable`, `start_failed`
@@ -1649,6 +1759,60 @@ mod tests {
     /// wrapper's as its events record it; any other target, or an actor,
     /// run or task its target does not match, is no principal.
     #[test]
+    fn an_integrator_principal_lands_one_run_under_one_lease() {
+        use crate::domain::session_step::TargetKind;
+        let run = RunId::new("r1").unwrap();
+        let lease = LeaseToken::new("slot");
+        let landing = Principal::integrator(&run, &lease, 9);
+        assert!(landing.check().is_ok());
+        assert_eq!(landing.landing_run(), Some(run.clone()));
+        // Its actor is the landing's events', and the run is its target, not
+        // the run its token would end with.
+        let actor = landing.actor();
+        assert_eq!(actor.actor_id(), "integrator:9");
+        assert_eq!(actor.run_id(), None);
+        assert_eq!(landing.credential_key(), "integrator:9@r1");
+        let mut no_lease = landing.clone();
+        no_lease.registration = None;
+        assert!(no_lease.check().is_err());
+        let mut on_planner = landing.clone();
+        on_planner.target = Some(StepTarget::of(TargetKind::Planner, 3));
+        assert!(on_planner.check().is_err());
+        let mut with_run = landing.clone();
+        with_run.run_id = Some(run);
+        assert!(with_run.check().is_err());
+        let mut as_supervisor = landing;
+        as_supervisor.role = ActorRole::Supervisor;
+        assert!(as_supervisor.check().is_err());
+    }
+
+    /// The sweep revokes an ended landing's integrator's and an ended inbox
+    /// session's tokens as it does a worker's, and never a supervisor's
+    /// sign-in nor a key of a form no principal has.
+    #[test]
+    fn a_supervisor_revokes_any_token_but_its_own_sign_in() {
+        let run = RunId::new("r1").unwrap();
+        let lease = LeaseToken::new("slot");
+        let inbox = Principal::inbox(SessionProcess {
+            pid: 42,
+            start: "Thu Oct 23 10:00:00 2026".to_owned(),
+        });
+        for principal in [
+            Principal::integrator(&run, &lease, 9),
+            inbox,
+            Principal::planner(7),
+        ] {
+            let key = principal.credential_key();
+            assert!(supervisor_revokes(&key), "{key}");
+        }
+        assert!(supervisor_revokes("worker:r1"));
+        let sign_in = Principal::supervisor(&lease, 9).credential_key();
+        assert!(!supervisor_revokes(&sign_in), "{sign_in}");
+        assert!(!supervisor_revokes("supervisor:9"));
+        assert!(!supervisor_revokes("worker:r1@slot"));
+    }
+
+    #[test]
     fn a_wrapper_principal_is_issued_for_one_run_or_one_planner() {
         use crate::domain::session_step::TargetKind;
         let run = RunId::new("r1").unwrap();
@@ -1825,6 +1989,13 @@ mod tests {
                 "{principal:?}"
             );
         }
+        // A landing's integrator's, by its run's key, once its landing ended.
+        let integrator =
+            Principal::integrator(&RunId::new("r1").unwrap(), &LeaseToken::new("lease"), 42);
+        assert_eq!(
+            swept_token_key(&integrator).as_deref(),
+            Some("integrator:42@r1")
+        );
         let supervisor = Principal::supervisor(&LeaseToken::new("lease"), 42);
         let named = Principal {
             actor_id: supervisor.actor_id.clone(),

@@ -10,6 +10,7 @@ pub mod background_wrappers;
 pub mod ci_watch;
 pub mod containers;
 pub mod headless;
+pub mod observer;
 pub mod plan_review;
 mod reviewer;
 pub use headless::{CODEX_HOME, Stand, set_codex_model};
@@ -743,9 +744,12 @@ impl SessionWrappers for TestWorkspace {
         env: &[(String, String)],
         log: &Path,
     ) -> Result<String> {
+        // The double stands for the wrapper's own process.
+        let _wrapper = dagq::infrastructure::sqlite::as_another_process();
         headless::launch_background(self, cwd, command, env, log)
     }
     fn stop_background(&self, workspace_id: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
+        let _wrapper = dagq::infrastructure::sqlite::as_another_process();
         ensure!(
             !self.close_times_out,
             "background wrapper stop failed: Command timed out"

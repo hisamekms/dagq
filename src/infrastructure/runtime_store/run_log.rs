@@ -202,6 +202,54 @@ impl SqliteQueue {
         Ok(ids)
     }
 
+    /// [`crate::application::EventStore::record_event_once`]: the event
+    /// `event_records` names under `record` is this one; otherwise the
+    /// event is written and named under `record` in the same transaction.
+    pub fn record_event_once(
+        &self,
+        run: Option<&RunId>,
+        kind: EventKind,
+        payload: serde_json::Value,
+        record: &str,
+    ) -> Result<EventId> {
+        if run.is_none() {
+            crate::domain::check_event_target(kind, None, None)?;
+        }
+        let closing = match run {
+            Some(id) => Closing::Event(id, kind, &payload),
+            None => Closing::Queue(kind, &payload),
+        };
+        let _read = read_before(&self.conn, closing)?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let found: Option<i64> = tx
+            .query_row(
+                "SELECT event_id FROM event_records WHERE record=?1",
+                [record],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = found {
+            return Ok(EventId::new(id));
+        }
+        let id = match run {
+            Some(id) => {
+                run_event(&tx, id, kind, payload)?;
+                EventId::new(tx.query_row(
+                    "SELECT max(id) FROM run_events WHERE run_id=?1 AND kind=?2",
+                    params![id.as_str(), kind.as_str()],
+                    |row| row.get(0),
+                )?)
+            }
+            None => queue_event(&tx, kind, &payload)?,
+        };
+        tx.execute(
+            "INSERT INTO event_records(record, event_id) VALUES (?1, ?2)",
+            params![record, id.as_i64()],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
     /// Record `inbox_nudged` with `payload` unless one with the same
     /// `absent_since` and `attempt` is recorded, in one write transaction
     /// (ADR-t1433-5 decision 1 (3)): `false` when another supervisor
@@ -1079,6 +1127,15 @@ impl EventStore for SqliteQueue {
         events: Vec<(EventKind, serde_json::Value)>,
     ) -> Result<Vec<EventId>> {
         SqliteQueue::record_queue_events(self, &events)
+    }
+    fn record_event_once(
+        &self,
+        run: Option<&RunId>,
+        kind: EventKind,
+        payload: serde_json::Value,
+        record: &str,
+    ) -> Result<EventId> {
+        SqliteQueue::record_event_once(self, run, kind, payload, record)
     }
     fn record_attributes_baseline(&self) -> Result<Option<(usize, usize)>> {
         SqliteQueue::record_attributes_baseline(self)

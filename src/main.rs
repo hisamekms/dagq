@@ -4803,6 +4803,20 @@ fn execute(cli: Cli) -> Result<Value> {
     if matches!(cli.command, Command::SessionEvent { .. }) && hook_kind.is_none() {
         return Ok(json!({"recorded": false, "reason": "not an inbox or planner session"}));
     }
+    // A job command a supervisor started as its own reaches the queue
+    // through the service and opens none (ADR-t3102-3 decision 3).
+    if matches!(
+        cli.command,
+        Command::Observe {
+            history: false,
+            input: None,
+            ..
+        } | Command::ThroughputReview { .. }
+    ) && env::var_os(dagq::domain::queue_service::SUPERVISOR_REGISTRATION_ENV)
+        .is_some_and(|registration| !registration.is_empty())
+    {
+        return job_command(cli.command, &db);
+    }
     // `watch` needs the live read-only file rather than a migrated snapshot.
     // `report` and `graph --out` write files but no queue state; `run log`
     // and `planner log` read a session's log, and `run screen` / `run send`
@@ -5470,158 +5484,12 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Review { id } => dagq::compose::review(&db, TaskId::new(id))?,
-        Command::Observe {
+        command @ (Command::Observe {
             history: false,
             input: None,
-            since,
-            dry_run,
-            daily,
-            timeout,
-            claude,
-            codex,
-            cmux: _,
-            launch,
-            codex_home,
-            switchable,
-            no_provider_fallback,
-            unavailable,
             ..
-        } => {
-            use dagq::application::observer::{ObserveMode, ObserveOptions};
-            use dagq::domain::{Provider, actor_model::ActorLaunch};
-            use dagq::infrastructure::{adapters::ClaudeCode, codex::Codex};
-            let launch: ActorLaunch = match launch {
-                Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
-                None => dagq::compose::observer_launch(&db)?,
-            };
-            // A dry run starts nothing, so it needs no executable; nor does
-            // an observation no provider can run, nor the provider it does
-            // not start. A Claude Code that cannot be resolved fails as
-            // before; a Codex one (gone since the supervisor found it) is
-            // kept as given, so the observation records its finish, whose
-            // start error says Codex cannot be used (task 1223).
-            let resolve = !dry_run && unavailable.is_none();
-            // With `[provider_fallback] jobs` off, a Claude that cannot be
-            // resolved is kept as given too, so that the observation
-            // records Claude's start error and waits for Claude
-            // (ADR-t1857-1).
-            let claude = if resolve && launch.provider == Provider::Claude {
-                if switchable && no_provider_fallback {
-                    dagq::infrastructure::adapters::claude_at_entry(&claude).unwrap_or_else(|error| {
-                        tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", claude.display());
-                        claude
-                    })
-                } else {
-                    dagq::infrastructure::adapters::claude_at_entry(&claude)?
-                }
-            } else {
-                claude
-            };
-            let claude = ClaudeCode { executable: claude };
-            let codex = Codex {
-                executable: if resolve && launch.provider == Provider::Codex {
-                    dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or_else(|error| {
-                        tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", codex.display());
-                        codex
-                    })
-                } else {
-                    codex
-                },
-                home: codex_home,
-            };
-            let (provider, signals): (
-                &dyn dagq::application::AgentProvider,
-                Option<&dyn dagq::application::AgentSignals>,
-            ) = match launch.provider {
-                Provider::Claude => (&claude, Some(&claude)),
-                Provider::Codex => (&codex, None),
-            };
-            dagq::compose::observe(
-                &db,
-                provider,
-                signals,
-                &ObserveOptions {
-                    mode: if daily {
-                        ObserveMode::Daily
-                    } else {
-                        ObserveMode::Hourly
-                    },
-                    since: since.map(EventId::new),
-                    dry_run,
-                    timeout: Duration::from_secs(timeout),
-                    dagq: env::current_exe()?,
-                    user_config: dagq::infrastructure::language::user_config_file(),
-                    prompt_limit: dagq::application::observer::PROMPT_LIMIT,
-                    launch: Some(launch),
-                    switchable,
-                    fallback: !no_provider_fallback,
-                    unavailable,
-                },
-            )?
         }
-        Command::ThroughputReview {
-            mode,
-            at,
-            utc_offset,
-            dry_run,
-            timeout,
-            claude,
-            codex,
-            launch,
-            codex_home,
-            switchable,
-            no_provider_fallback,
-            unavailable,
-        } => {
-            use dagq::domain::{Provider, actor_model::ActorLaunch};
-            use dagq::infrastructure::{adapters::ClaudeCode, codex::Codex};
-            let launch: ActorLaunch = match launch {
-                Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
-                None => dagq::compose::throughput_review_launch(&db)?,
-            };
-            // A dry run starts nothing, so it needs no executable; nor does a
-            // review no provider can run. One that cannot be resolved (gone
-            // since the supervisor found it) is kept as given: the review
-            // records its finish, whose start error says the provider
-            // cannot be used (task 1220), rather than this command failing
-            // with no record of the period.
-            let resolve = !dry_run && unavailable.is_none();
-            let resolved = |path: PathBuf, find: fn(&std::path::Path) -> Result<PathBuf>| {
-                if !resolve {
-                    return path;
-                }
-                find(&path).unwrap_or_else(|error| {
-                    tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", path.display());
-                    path
-                })
-            };
-            let provider: Box<dyn dagq::application::AgentProvider> = match launch.provider {
-                Provider::Claude => Box::new(ClaudeCode {
-                    executable: resolved(claude, dagq::infrastructure::adapters::claude_at_entry),
-                }),
-                Provider::Codex => Box::new(Codex {
-                    executable: resolved(codex, dagq::infrastructure::codex::codex_at_entry),
-                    home: codex_home,
-                }),
-            };
-            dagq::compose::throughput_review(
-                &db,
-                provider.as_ref(),
-                &dagq::application::throughput_review::ReviewOptions {
-                    mode: mode.parse()?,
-                    at,
-                    dry_run,
-                    timeout: Duration::from_secs(timeout),
-                    dagq: env::current_exe()?,
-                    user_config: dagq::infrastructure::language::user_config_file(),
-                    utc_offset,
-                    launch: Some(launch),
-                    switchable,
-                    fallback: !no_provider_fallback,
-                    unavailable,
-                },
-            )?
-        }
+        | Command::ThroughputReview { .. }) => job_command(command, &db)?,
         Command::Session { .. } | Command::PlannerSession { .. } => {
             unreachable!("a session wrapper opens no queue: session_wrapper runs it")
         }
@@ -6018,6 +5886,167 @@ fn main() -> ExitCode {
 mod emitted_text;
 #[cfg(test)]
 mod history_citation;
+
+/// `observe` and `throughput-review`: the job commands a supervisor starts
+/// as its own, which open no queue when it names its registration
+/// (`SUPERVISOR_REGISTRATION_ENV`, ADR-t3102-3 decision 3).
+fn job_command(command: Command, db: &Path) -> Result<Value> {
+    Ok(match command {
+        Command::Observe {
+            history: false,
+            input: None,
+            since,
+            dry_run,
+            daily,
+            timeout,
+            claude,
+            codex,
+            cmux: _,
+            launch,
+            codex_home,
+            switchable,
+            no_provider_fallback,
+            unavailable,
+            ..
+        } => {
+            use dagq::application::observer::{ObserveMode, ObserveOptions};
+            use dagq::domain::{Provider, actor_model::ActorLaunch};
+            use dagq::infrastructure::{adapters::ClaudeCode, codex::Codex};
+            let launch: ActorLaunch = match launch {
+                Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
+                None => dagq::compose::observer_launch(db)?,
+            };
+            // A dry run starts nothing, so it needs no executable; nor does
+            // an observation no provider can run, nor the provider it does
+            // not start. A Claude Code that cannot be resolved fails as
+            // before; a Codex one (gone since the supervisor found it) is
+            // kept as given, so the observation records its finish, whose
+            // start error says Codex cannot be used (task 1223).
+            let resolve = !dry_run && unavailable.is_none();
+            // With `[provider_fallback] jobs` off, a Claude that cannot be
+            // resolved is kept as given too, so that the observation
+            // records Claude's start error and waits for Claude
+            // (ADR-t1857-1).
+            let claude = if resolve && launch.provider == Provider::Claude {
+                if switchable && no_provider_fallback {
+                    dagq::infrastructure::adapters::claude_at_entry(&claude).unwrap_or_else(|error| {
+                    tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", claude.display());
+                    claude
+                })
+                } else {
+                    dagq::infrastructure::adapters::claude_at_entry(&claude)?
+                }
+            } else {
+                claude
+            };
+            let claude = ClaudeCode { executable: claude };
+            let codex = Codex {
+                executable: if resolve && launch.provider == Provider::Codex {
+                    dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or_else(|error| {
+                    tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", codex.display());
+                    codex
+                })
+                } else {
+                    codex
+                },
+                home: codex_home,
+            };
+            let (provider, signals): (
+                &dyn dagq::application::AgentProvider,
+                Option<&dyn dagq::application::AgentSignals>,
+            ) = match launch.provider {
+                Provider::Claude => (&claude, Some(&claude)),
+                Provider::Codex => (&codex, None),
+            };
+            dagq::compose::observe(
+                db,
+                provider,
+                signals,
+                &ObserveOptions {
+                    mode: if daily {
+                        ObserveMode::Daily
+                    } else {
+                        ObserveMode::Hourly
+                    },
+                    since: since.map(EventId::new),
+                    dry_run,
+                    timeout: Duration::from_secs(timeout),
+                    dagq: env::current_exe()?,
+                    user_config: dagq::infrastructure::language::user_config_file(),
+                    prompt_limit: dagq::application::observer::PROMPT_LIMIT,
+                    launch: Some(launch),
+                    switchable,
+                    fallback: !no_provider_fallback,
+                    unavailable,
+                },
+            )?
+        }
+        Command::ThroughputReview {
+            mode,
+            at,
+            utc_offset,
+            dry_run,
+            timeout,
+            claude,
+            codex,
+            launch,
+            codex_home,
+            switchable,
+            no_provider_fallback,
+            unavailable,
+        } => {
+            use dagq::domain::{Provider, actor_model::ActorLaunch};
+            use dagq::infrastructure::{adapters::ClaudeCode, codex::Codex};
+            let launch: ActorLaunch = match launch {
+                Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
+                None => dagq::compose::throughput_review_launch(db)?,
+            };
+            // A dry run starts nothing, so it needs no executable; nor does a
+            // review no provider can run. One that cannot be resolved (gone
+            // since the supervisor found it) is kept as given: the review
+            // records its finish, whose start error says the provider
+            // cannot be used (task 1220), rather than this command failing
+            // with no record of the period.
+            let resolve = !dry_run && unavailable.is_none();
+            let resolved = |path: PathBuf, find: fn(&std::path::Path) -> Result<PathBuf>| {
+                if !resolve {
+                    return path;
+                }
+                find(&path).unwrap_or_else(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", path.display());
+                path
+            })
+            };
+            let provider: Box<dyn dagq::application::AgentProvider> = match launch.provider {
+                Provider::Claude => Box::new(ClaudeCode {
+                    executable: resolved(claude, dagq::infrastructure::adapters::claude_at_entry),
+                }),
+                Provider::Codex => Box::new(Codex {
+                    executable: resolved(codex, dagq::infrastructure::codex::codex_at_entry),
+                    home: codex_home,
+                }),
+            };
+            dagq::compose::throughput_review(
+                db,
+                provider.as_ref(),
+                &dagq::application::throughput_review::ReviewOptions {
+                    mode: mode.parse()?,
+                    at,
+                    dry_run,
+                    timeout: Duration::from_secs(timeout),
+                    dagq: env::current_exe()?,
+                    user_config: dagq::infrastructure::language::user_config_file(),
+                    utc_offset,
+                    launch: Some(launch),
+                    switchable,
+                    fallback: !no_provider_fallback,
+                    unavailable,
+                },
+            )?
+        }
+        _ => unreachable!("a job command"),
+    })
+}
 
 #[cfg(test)]
 mod tests {

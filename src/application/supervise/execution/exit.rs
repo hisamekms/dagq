@@ -33,7 +33,7 @@ impl ExitWatch {
             return Ok(true);
         }
         if !self.requested {
-            sv.queue.record_runtime_event(
+            sv.queue.record_runtime_event_now(
                 run.id(),
                 EventKind::ExitRequested,
                 json!({"workspace_id": session.workspace}),

@@ -36,7 +36,7 @@ hostで動き、queue DBを開いてユースケース単位のAPIを、service�
 今の段（段(2)・(3)）: serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
 **worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。
 session wrapperとhookはwrapperのprincipalでserviceを通り（plannerとinboxのhookは例外、[クライアントモード](#クライアントモード)）、人・inbox・plannerのCLIは[hostのCLI](queue-service-host-cli.md)。
-supervisorはclaim・lease・runの状態とevent・tokenをserviceで行い、着地とjobの結果はDBを開く（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
+supervisorとそれが起動する`observe`・`throughput-review`はqueueの操作をserviceで行い、DBを開くのは一部の記録だけ（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
 例外はexecutorのsessionのstepだけで、制御側が対象ごとに発行するtelemetry専用のprincipalで[`telemetry_report`](#telemetry_report)を通る（[ADR-t1662-3](../adr/2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md)決定13）。
 
 名前: この文書の「broker」はqueueのbroker（[Queue broker](queue-broker.md)）のこと。
@@ -76,7 +76,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
 
 - 発行: 制御側だけが`queue_service::issue`で発行する。
   AI actorにtokenを作るコマンドは無い。
-  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）・登録を対象に持つsupervisor・session wrapper・inbox・plannerだけで、残りの制御側（integrator）は段(5)まで今のままDBを直接開く（`Principal::check`）。
+  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）・登録を対象に持つsupervisor・session wrapper・inbox・planner・着地のrunとleaseのintegratorだけで、人の`integrate`は段(5)まで今のままDBを直接開く（`Principal::check`）。
   同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）。
   発行するのはactorの起動の1か所（applicationのport `ServiceAccess`）:
   - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するときに、serviceにrunのleaseを確かめさせて発行する。
@@ -255,7 +255,7 @@ queueのDBが消えれば（使い捨てのqueueの片付け）自分で終わ�
   その後も一定の間隔で見て、同じように起動し直すか入れ替える。
   起動し直しの上限と、別のbuildの入れ替えとexecの前の起動の失敗の扱いは`application::supervise::host_ops::queue_service`のmodule doc。
   drainと引き継ぎの間は見ない（execはserviceを次のプロセスに残す）
-- serviceが居ない間、supervisorは新しいclaimと、queueのjob（plan review・goal review・observer・スループットの見直し）の起動を控える。
+- serviceが居ない間、supervisorは新しいclaimとqueueのjobの起動を控える。
   走っているrunとそのreview・復旧は止めない（ADR-t1233-4決定2）
 - `down`: supervisorが居なければserviceを止めて`queue_service_stopped`に残す（`application::lifecycle::down`）。
   drainを待たない`down`は、signalの前に`queue_service_stop_requested`を書き、drainを終えた最後のsupervisorが止める（`queue_service_stopped`）
@@ -294,7 +294,7 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 - containerの中からbrokerを通す`telemetry_report`（[Queue broker](queue-broker.md)の`TokenRefusal`）。
   containerのrunのstepはhostのwrapperが送る
 - 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、integrateのverificationの隔離
-- 段(5)の残り: supervisorの着地とjobの結果とhostのCLIが送らないもの（[送る範囲](queue-service-host-cli.md#送る範囲)）のservice経由化、親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
+- 段(5)の残り: hostのCLIが送らないもの（[送る範囲](queue-service-host-cli.md#送る範囲)。人の`integrate`も）とsupervisorに残るDBの記録のservice経由化、親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
 
 ## CIの見張り（ADR-t1920-1）
 

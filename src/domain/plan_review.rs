@@ -78,7 +78,7 @@ string_enum!(PlanConcernEscalation {
 
 /// What the runtime makes of a `concern` (ADR-t451-1 decision 4): the
 /// decision it applies itself, or why a person decides it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlanConcernDecision {
     pub recommendation: Option<PlanRecommendation>,
     pub confidence: Option<AskConfidence>,
@@ -225,6 +225,97 @@ impl From<PrintedPlanReviewVerdict> for PlanReviewVerdict {
     }
 }
 
+/// A verdict field of a value that crosses between processes as a whole
+/// (`#[serde(with = "crate::domain::plan_review::whole_verdict")]`): every
+/// field as it is held, not as the job prints it, which reads back the
+/// same verdict.
+pub mod whole_verdict {
+    use super::{
+        AskConfidence, AskId, PlanConcernReason, PlanRecommendation, PlanReviewAction,
+        PlanReviewDecision, PlanReviewVerdict, Reopen,
+    };
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct Whole {
+        verdict: PlanReviewDecision,
+        reasons: Vec<String>,
+        reason_codes: Vec<Vec<String>>,
+        summary: String,
+        actions: Vec<PlanReviewAction>,
+        reopen: Vec<Reopen>,
+        precedents: Vec<AskId>,
+        predictions: Option<serde_json::Value>,
+        recommendation: Option<PlanRecommendation>,
+        confidence: Option<AskConfidence>,
+        reason_category: Option<PlanConcernReason>,
+    }
+
+    pub fn serialize<S: Serializer>(
+        verdict: &PlanReviewVerdict,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let PlanReviewVerdict {
+            verdict,
+            reasons,
+            reason_codes,
+            summary,
+            actions,
+            reopen,
+            precedents,
+            predictions,
+            recommendation,
+            confidence,
+            reason_category,
+        } = verdict.clone();
+        Whole {
+            verdict,
+            reasons,
+            reason_codes,
+            summary,
+            actions,
+            reopen,
+            precedents,
+            predictions,
+            recommendation,
+            confidence,
+            reason_category,
+        }
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PlanReviewVerdict, D::Error> {
+        let Whole {
+            verdict,
+            reasons,
+            reason_codes,
+            summary,
+            actions,
+            reopen,
+            precedents,
+            predictions,
+            recommendation,
+            confidence,
+            reason_category,
+        } = Whole::deserialize(deserializer)?;
+        Ok(PlanReviewVerdict {
+            verdict,
+            reasons,
+            reason_codes,
+            summary,
+            actions,
+            reopen,
+            precedents,
+            predictions,
+            recommendation,
+            confidence,
+            reason_category,
+        })
+    }
+}
+
 impl PlanReviewVerdict {
     /// The codes `plan_review_finished` records for each reason,
     /// `unlabeled` for one without them.
@@ -346,7 +437,7 @@ impl PlanAnswer {
 }
 
 /// A proposal waiting for plan review, as the supervisor orders them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlanReviewCandidate {
     pub proposal_id: ProposalId,
     pub submitted_at: String,
@@ -372,7 +463,7 @@ pub fn next_to_review(candidates: &[PlanReviewCandidate]) -> Option<ProposalId> 
 /// What the runtime applies of a verdict (ADR-0041 decision 11, ADR-t451-1
 /// decision 4): its decision, why it is not the verdict's own when it is
 /// not, and what became of a `concern`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlanVerdictDecision {
     pub decision: PlanReviewDecision,
     /// Why the decision is not the verdict's own: a `revise` became a

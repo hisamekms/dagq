@@ -112,6 +112,23 @@ pub trait ServiceQueue:
         token: &crate::domain::LeaseToken,
         then: &mut dyn FnMut() -> Result<Value>,
     ) -> Result<Value>;
+    /// Take the integration slot of `run` for the supervisor of `token`
+    /// ([`super::RunTransitions::begin_integration`], or
+    /// [`super::RunTransitions::begin_integration_over_handoff`] when
+    /// `over_handoff`) and, in the same
+    /// transaction once the slot and its lease are taken, run `issue` with
+    /// the landing's `integration_started` event (the landing integrator's
+    /// token, ADR-t3102-3 decision 3, ADR-t3102-1 decision 2): nothing is
+    /// committed unless both are done. The run begun and what `issue`
+    /// answered.
+    fn begin_landing(
+        &mut self,
+        run: &RunId,
+        token: &crate::domain::LeaseToken,
+        main: &crate::domain::CommitSha,
+        over_handoff: bool,
+        issue: &mut dyn FnMut(crate::domain::EventId) -> Result<Value>,
+    ) -> Result<(crate::domain::TaskRun, Value)>;
     /// Do a session wrapper's `op`, authorized already
     /// ([`super::session::apply`]).
     fn session(&mut self, op: &super::session::SessionOp) -> Result<Value>;
@@ -178,6 +195,9 @@ pub trait ServiceBackend: Send + Sync {
     fn binding(&self) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Whether process `pid` of the host runs: whether a supervisor that
+    /// owns a record (an eval round, a case set) is still there.
+    fn alive(&self, pid: u32) -> bool;
 }
 
 /// The service's use cases on a backend.
@@ -530,6 +550,47 @@ pub(super) fn authorize_supervisor(
         }
         .into())
     }
+}
+
+/// Authorize the `capability` an operation of the authorized supervisor
+/// `actor` needs on top of `scheduler.supervise`, recording a refusal as
+/// [`authorize_supervisor`] does.
+pub(super) fn authorize_supervisor_needs(
+    queue: &mut dyn ServiceQueue,
+    actor: &ActorContext,
+    capability: Capability,
+) -> Result<()> {
+    let store = Store(queue);
+    let gate = Gate {
+        actor,
+        authorizer: &StaticPolicy,
+    };
+    gate.authorize(&store, capability, &Resource::Queue)?;
+    Ok(())
+}
+
+/// Check that the integrator `actor` may land `run`, recording a refusal
+/// as the supervisor's is ([`authorize_supervisor`]): the policy grants
+/// the integrator role [`Capability::Land`] (ADR-t728-2), and no other.
+pub(super) fn authorize_integrator(
+    queue: &mut dyn ServiceQueue,
+    actor: &ActorContext,
+    run: &RunId,
+) -> Result<()> {
+    let store = Store(queue);
+    let gate = Gate {
+        actor,
+        authorizer: &StaticPolicy,
+    };
+    gate.authorize(
+        &store,
+        Capability::Land,
+        &Resource::Run {
+            id: run.clone(),
+            task: None,
+        },
+    )?;
+    Ok(())
 }
 
 /// A request whose params do not read as the use case's.
@@ -1757,6 +1818,16 @@ mod tests {
         ) -> Result<Value> {
             unimplemented!("these tests send no supervisor's operation")
         }
+        fn begin_landing(
+            &mut self,
+            _: &RunId,
+            _: &crate::domain::LeaseToken,
+            _: &crate::domain::CommitSha,
+            _: bool,
+            _: &mut dyn FnMut(crate::domain::EventId) -> Result<Value>,
+        ) -> Result<(crate::domain::TaskRun, Value)> {
+            unimplemented!("these tests send no supervisor's operation")
+        }
         /// A session wrapper's operation is kept in the log as it came.
         fn session(&mut self, op: &crate::application::session::SessionOp) -> Result<Value> {
             self.log
@@ -1914,6 +1985,9 @@ mod tests {
         }
         fn session_alive(&self, session: &crate::domain::queue_service::SessionProcess) -> bool {
             session.pid == 7 && session.start == "then"
+        }
+        fn alive(&self, _: u32) -> bool {
+            false
         }
     }
 

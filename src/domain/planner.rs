@@ -65,7 +65,7 @@ pub struct PlannerSession {
 /// left for the planner that goes on from the answer (ADR-t1704-1
 /// decision 3): the queue's records, not its session, which is not
 /// resumed.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlannerHandover {
     pub planner_id: PlannerId,
     /// Its notes (`dagq note`), oldest first: each event's ID and text.

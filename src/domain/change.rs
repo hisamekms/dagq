@@ -72,7 +72,7 @@ impl fmt::Display for TaskChange {
 
 /// The repository's set of changes, `[tasks] changes` of `dagq.toml`, in
 /// the order written, each once.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChangeSet(Vec<TaskChange>);
 
 impl ChangeSet {

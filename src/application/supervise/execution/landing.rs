@@ -1967,7 +1967,7 @@ impl Supervisor<'_> {
             requested.extend(worker.fields_raised(provider, raise.as_ref()));
         }
         self.queue
-            .record_runtime_event(run.id(), EventKind::ReviseRequested, requested)?;
+            .record_runtime_event_now(run.id(), EventKind::ReviseRequested, requested)?;
         let _submission = match submit(
             self,
             run,

@@ -200,7 +200,7 @@ impl<T: RunLog + ?Sized> PhaseLog for T {
     }
 
     fn record_phase(&self, run: &RunId, change: &PhaseChange) -> Result<()> {
-        self.record_runtime_event(run, EventKind::RunPhaseChanged, change.payload())
+        self.record_runtime_event_now(run, EventKind::RunPhaseChanged, change.payload())
     }
 }
 
@@ -526,6 +526,8 @@ impl ClaimState {
             let payload = pre_claim::slots_full_payload(token, class, after, used, parallel);
             match log.record_queue_event(kind, payload) {
                 Ok(_) => true,
+                // Kept to be sent, it is recorded.
+                Err(error) if crate::application::supervisor_service::resend::kept(&error) => true,
                 Err(error) => {
                     warn!(error = %format_args!("{error:#}"), "could not record {kind} for the {} slots: {error:#}", class.as_str());
                     false

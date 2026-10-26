@@ -60,10 +60,10 @@ pub use host::{
 };
 pub use observation::{
     CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, call_stats_read, ci_failures,
-    doctor, events, events_matching, graph_export_text, graph_svg_of, observe, observer_launch,
-    queue_agents, read_queue, service_detail, service_reads, stats, status, status_for,
-    throughput_review, throughput_review_launch, timeline, timeline_in, watch, watch_in,
-    watch_through_service, write_report_files,
+    doctor, events, events_matching, graph_export_text, graph_svg_of, observe, observe_through,
+    observer_launch, queue_agents, read_queue, service_detail, service_reads, stats, status,
+    status_for, throughput_review, throughput_review_launch, throughput_review_through, timeline,
+    timeline_in, watch, watch_in, watch_through_service, write_report_files,
 };
 pub use planning::{
     PLANNER_TIMEOUT, PlannerEntry, planner_session, planner_session_with_provider, planners,

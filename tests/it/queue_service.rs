@@ -474,7 +474,11 @@ fn the_supervisor_records_the_outage_outside_the_queue_and_holds_its_claims() {
     // A binary that is not there: no service, nothing claimed, nothing
     // written to the queue, the outage beside it and sent once.
     let missing = repo.join("no-dagq");
+    // The supervisor's process never opens the queue: the outage goes to
+    // its file and `[push]`, and the rest through the service.
+    let refused = dagq::infrastructure::sqlite::refuse_opening(&db);
     let unreached = supervise_with(&db, &repo, &backend, &options(&missing, true)).unwrap();
+    drop(refused);
     assert_eq!(
         unreached["outcome"], "queue_service_unreachable",
         "{unreached}"
@@ -498,7 +502,9 @@ fn the_supervisor_records_the_outage_outside_the_queue_and_holds_its_claims() {
     // The tests' binary, with the service it starts stopping once this test
     // process is gone (task 1352).
     let dagq = common::service::owned_executable(db.parent().unwrap());
+    let refused = dagq::infrastructure::sqlite::refuse_opening(&db);
     let finished = supervise_with(&db, &repo, &backend, &options(&dagq, false)).unwrap();
+    drop(refused);
     assert_eq!(finished["outcome"], "finished", "{finished}");
     assert!(!outage.exists());
     let down = events(&db, "queue_service_down");
@@ -506,6 +512,16 @@ fn the_supervisor_records_the_outage_outside_the_queue_and_holds_its_claims() {
     assert_eq!(down[0]["payload"]["reason"], "start_failed");
     assert_eq!(down[0]["payload"]["since"], recorded["since"]);
     assert!(down[0]["payload"]["until"].as_i64() >= recorded["since"].as_i64());
+    // The inbox's watch reads it among the attention events.
+    let attention = ok(&db, &["events"]);
+    assert!(
+        attention["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["kind"] == "queue_service_down"),
+        "{attention}"
+    );
     let started = events(&db, "queue_service_started");
     assert_eq!(started.len(), 1);
     assert_eq!(started[0]["payload"]["by"], "supervisor");

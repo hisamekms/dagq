@@ -1453,7 +1453,7 @@ fn restart_clocks<T>(
 impl ResumeWatch {
     /// Record the exit request before writing its file, and stop live recovery.
     fn request_exit(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
-        sv.queue.record_runtime_event(
+        sv.queue.record_runtime_event_now(
             run.id(),
             EventKind::ExitRequested,
             json!({"workspace_id": self.workspace, "resume_attempt": self.attempt}),

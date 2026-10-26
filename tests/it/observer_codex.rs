@@ -6,8 +6,9 @@
 //! resolves and the finding's `blocked` ask through the queue service, as
 //! the observer, as Claude's does. Under `--no-claude` it still starts, and
 //! a Codex that cannot be used never moves it to Claude.
-use crate::runtime_observer::{observe, observe_options, queue_events};
+use crate::runtime_observer::{observe, queue_events};
 use crate::runtime_support;
+use crate::runtime_support::observer::observe_options;
 use dagq::application::observer::ObserveMode;
 use dagq::domain::{
     FindingTarget, NewFinding, Provider,

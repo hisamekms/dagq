@@ -92,7 +92,7 @@ pub struct Decision {
 }
 
 /// How a decided answer moves the run's task.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TaskMove {
     /// Back to `ready`.
     Ready,

@@ -15,7 +15,10 @@
 //! handed the path of. No token value is ever written to a log, an event
 //! or an error. `command-digest.key` (mode 0600, [`digest_key`]) is the key
 //! the executors digest their commands' words with; it is read by them
-//! alone and, like a token's value, never written anywhere else.
+//! alone and, like a token's value, never written anywhere else. `held/`
+//! keeps the records of results the service did not take, and `verdicts/`
+//! the review verdicts the queue did not take
+//! ([`super::held_records::HeldDir`]).
 //! `steps/<sha256 of the telemetry actor id>.json` ([`steps_path`]) is
 //! what a session wrapper kept of its target's steps to send again,
 //! naming that target, which the supervisor's sweep removes once the
@@ -243,6 +246,15 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// Now in Unix milliseconds.
+pub(crate) fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 pub(crate) fn unix_now() -> i64 {
@@ -696,7 +708,7 @@ pub fn sweep(queue_dir: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Res
             continue;
         }
         if let Err(error) = sweep_one(queue_dir, &path, &record.principal) {
-            let actor_id = &record.principal.actor_id;
+            let actor_id = record.principal.credential_key();
             warn!(error = %format_args!("{error:#}"), "the token of {actor_id} could not be revoked: {error:#}");
             continue;
         }
@@ -2481,6 +2493,10 @@ impl ServiceBackend for SqliteServiceBackend {
     fn principals(&self) -> Result<Vec<Principal>> {
         principals(&self.queue_dir)
     }
+
+    fn alive(&self, pid: u32) -> bool {
+        super::adapters::process_alive(pid)
+    }
 }
 
 // --- The supervisor's calls (goal 182's stage (5)) ---------------------------
@@ -2504,12 +2520,43 @@ impl SignedIn {
         Ok(())
     }
 
+    /// [`Self::sign_in`] of the image a handoff exec'd into: the token the
+    /// image before kept ([`Self::hand_over`]) when its file is there and
+    /// its record still issued, else one issued anew.
+    fn take_back(&self, queue_dir: &Path, registration: &LeaseToken, pid: u32) -> Result<()> {
+        let key = Principal::supervisor(registration, pid).credential_key();
+        let kept = read_token(&credential_path(queue_dir, &key))
+            .ok()
+            .filter(|value| record_path(queue_dir, value).is_file());
+        match kept {
+            Some(value) => {
+                *self.0.lock().expect("the sign-in lock") = Some((value, key));
+                Ok(())
+            }
+            None => self.sign_in(queue_dir, registration, pid),
+        }
+    }
+
+    /// Forget the token without revoking it, for the image this process
+    /// execs into to take back.
+    fn hand_over(&self) {
+        self.0.lock().expect("the sign-in lock").take();
+    }
+
     fn sign_out(&self, queue_dir: &Path) {
         if let Some((_, key)) = self.0.lock().expect("the sign-in lock").take()
             && let Err(error) = revoke(queue_dir, &key)
         {
             warn!("the supervisor's queue service token could not be revoked: {error:#}");
         }
+    }
+
+    /// Call with the token in `file`, issued to another principal by the
+    /// service, which this caller neither issued nor revokes.
+    fn adopt(&self, file: &Path) -> Result<()> {
+        let value = read_token(file)?;
+        *self.0.lock().expect("the sign-in lock") = Some((value, String::new()));
+        Ok(())
     }
 
     /// The token's value; `None` before the sign-in, when only `hello` is
@@ -2532,6 +2579,9 @@ pub struct SocketCaller {
     socket: PathBuf,
     timeout: Duration,
     signed_in: SignedIn,
+    /// The token is another process's (the supervisor that started this
+    /// job command): this one neither issues nor revokes it.
+    adopted: bool,
 }
 
 impl SocketCaller {
@@ -2543,7 +2593,27 @@ impl SocketCaller {
             queue_dir,
             timeout: SUPERVISOR_TIMEOUT,
             signed_in: SignedIn::default(),
+            adopted: false,
         }
+    }
+
+    /// The caller of a job command the supervisor of `registration`,
+    /// process `pid`, started as its own
+    /// ([`crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV`]): it
+    /// calls with the token that supervisor signed in with, which stays
+    /// that supervisor's to revoke.
+    pub fn adopt(db: &Path, registration: &LeaseToken, pid: u32) -> Result<Self> {
+        let caller = Self {
+            adopted: true,
+            ..Self::new(db)
+        };
+        let key = Principal::supervisor(registration, pid).credential_key();
+        let file = credential_path(&caller.queue_dir, &key);
+        let value = read_token(&file).with_context(|| {
+            format!("the token of supervisor {pid} ({registration}) could not be read")
+        })?;
+        *caller.signed_in.0.lock().expect("the sign-in lock") = Some((value, key));
+        Ok(caller)
     }
 }
 
@@ -2595,12 +2665,47 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
         supervisor_answer(use_case, response)
     }
 
+    fn with_token(
+        &self,
+        file: &Path,
+    ) -> Result<Arc<dyn crate::application::supervisor_service::ServiceCaller>> {
+        let caller = Self {
+            queue_dir: self.queue_dir.clone(),
+            socket: self.socket.clone(),
+            timeout: self.timeout,
+            signed_in: SignedIn::default(),
+            adopted: true,
+        };
+        caller.signed_in.adopt(file)?;
+        Ok(Arc::new(caller))
+    }
+
     fn sign_in(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
+        ensure!(
+            !self.adopted,
+            "a job command calls with its supervisor's token and signs in as none"
+        );
         self.signed_in.sign_in(&self.queue_dir, registration, pid)
     }
 
+    fn take_back(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
+        ensure!(
+            !self.adopted,
+            "a caller of another's token signs in as none"
+        );
+        self.signed_in.take_back(&self.queue_dir, registration, pid)
+    }
+
+    fn hand_over(&self) {
+        if !self.adopted {
+            self.signed_in.hand_over();
+        }
+    }
+
     fn sign_out(&self) {
-        self.signed_in.sign_out(&self.queue_dir);
+        if !self.adopted {
+            self.signed_in.sign_out(&self.queue_dir);
+        }
     }
 }
 
@@ -2610,8 +2715,11 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
 /// be, token and all.
 pub struct InProcessCaller {
     queue_dir: PathBuf,
-    backend: SqliteServiceBackend,
+    backend: Arc<SqliteServiceBackend>,
     signed_in: SignedIn,
+    /// The token is another principal's ([`Self::with_token`]): this
+    /// caller neither issues nor revokes it.
+    adopted: bool,
 }
 
 impl InProcessCaller {
@@ -2626,7 +2734,7 @@ impl InProcessCaller {
     ) -> Self {
         let queue_dir = queue_dir_of(db);
         Self {
-            backend: SqliteServiceBackend {
+            backend: Arc::new(SqliteServiceBackend {
                 db: db.to_path_buf(),
                 queue_dir: queue_dir.clone(),
                 generators,
@@ -2634,9 +2742,10 @@ impl InProcessCaller {
                 writes,
                 detail,
                 commands,
-            },
+            }),
             queue_dir,
             signed_in: SignedIn::default(),
+            adopted: false,
         }
     }
 }
@@ -2655,7 +2764,7 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
         // Through the request's text and the answer's, as on the socket.
         let request: ServiceRequest = serde_json::from_slice(&serde_json::to_vec(&request)?)?;
         let response = QueueService {
-            backend: &self.backend,
+            backend: &*self.backend,
             build: crate::VERSION,
             pid: std::process::id(),
         }
@@ -2666,12 +2775,46 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
         )
     }
 
+    fn with_token(
+        &self,
+        file: &Path,
+    ) -> Result<Arc<dyn crate::application::supervisor_service::ServiceCaller>> {
+        let caller = Self {
+            queue_dir: self.queue_dir.clone(),
+            backend: self.backend.clone(),
+            signed_in: SignedIn::default(),
+            adopted: true,
+        };
+        caller.signed_in.adopt(file)?;
+        Ok(Arc::new(caller))
+    }
+
     fn sign_in(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
+        ensure!(
+            !self.adopted,
+            "a caller of another's token signs in as none"
+        );
         self.signed_in.sign_in(&self.queue_dir, registration, pid)
     }
 
+    fn take_back(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
+        ensure!(
+            !self.adopted,
+            "a caller of another's token signs in as none"
+        );
+        self.signed_in.take_back(&self.queue_dir, registration, pid)
+    }
+
+    fn hand_over(&self) {
+        if !self.adopted {
+            self.signed_in.hand_over();
+        }
+    }
+
     fn sign_out(&self) {
-        self.signed_in.sign_out(&self.queue_dir);
+        if !self.adopted {
+            self.signed_in.sign_out(&self.queue_dir);
+        }
     }
 }
 
@@ -2925,6 +3068,18 @@ impl ServiceQueue for ServiceSqlite {
                 Err(error)
             }
         }
+    }
+
+    fn begin_landing(
+        &mut self,
+        run: &RunId,
+        token: &LeaseToken,
+        main: &crate::domain::CommitSha,
+        over_handoff: bool,
+        issue: &mut dyn FnMut(crate::domain::EventId) -> Result<Value>,
+    ) -> Result<(crate::domain::TaskRun, Value)> {
+        self.queue
+            .begin_integration_then(run, token, main, !over_handoff, issue)
     }
 
     fn session(&mut self, op: &crate::application::session::SessionOp) -> Result<Value> {

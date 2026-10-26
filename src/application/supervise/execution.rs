@@ -325,6 +325,13 @@ pub struct Layout {
     /// Variables the observer's process does not inherit (its role and
     /// actor).
     pub observer_env_remove: Vec<String>,
+    /// Whether the job commands it starts as its own (`observe`,
+    /// `throughput-review`) reach the queue through the service's socket
+    /// as this supervisor
+    /// ([`crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV`]):
+    /// the CLI's; a supervisor whose service runs in its own process
+    /// leaves them to open the queue.
+    pub jobs_through_service: bool,
     /// `planners/` of the queue, where the planners the runtime opens keep
     /// their files, and the plugin directory they load.
     pub planners_dir: PathBuf,
@@ -382,6 +389,7 @@ impl Layout {
             pid: 42,
             version: "0.0.0-test".into(),
             observer_env_remove: Vec::new(),
+            jobs_through_service: false,
             planners_dir: root.join("planners"),
             plugin_dir: Some("/plugin".into()),
             plan_reviews_dir: root.join("plan-reviews"),
@@ -517,6 +525,10 @@ pub struct Ports<'a> {
     /// `[kpi]`'s `max_improvement_proposals` of the main checkout's
     /// `dagq.toml` (ADR-0051 decision 25), read again each time.
     pub max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
+    /// Where the verdicts of plan and goal reviews that ended are kept
+    /// while the queue does not take them, for this supervisor and the
+    /// next (ADR-t3102-3 decision 5).
+    pub held_verdicts: Arc<dyn crate::application::supervisor_service::resend::HeldRecords>,
     /// `[conflicts]` of the main checkout's `dagq.toml` (`None` for no
     /// file), read again each pass (ADR-0080); `None` when the options
     /// set the thresholds, which are then never read again.
@@ -902,7 +914,7 @@ pub struct RunError {
 /// given, recorded as each run's `repo_path`.
 pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     // A supervisor that ends gives its principal's token back, whatever
-    // ended it; an exec keeps the process, whose next start signs in again.
+    // ended it, but for a handoff's exec, whose next image takes it back.
     struct SignedIn(Arc<dyn crate::application::supervisor_service::ServiceCaller>);
     impl Drop for SignedIn {
         fn drop(&mut self) {
@@ -957,12 +969,25 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         .handoff_token
         .clone()
         .unwrap_or_else(|| ports.generators.ids.lease_token());
+    // The image a handoff exec'd into takes back the token the one before
+    // kept first, so a start that goes no further still revokes it.
+    let handed = if settings.handoff_token.is_some() {
+        ports.service.take_back(&token, pid)?;
+        Some(SignedIn(ports.service.clone()))
+    } else {
+        None
+    };
     let mut started = None;
     if let Some(unreached) = super::host_ops::queue_service::reach_at_start(ports, &mut started)? {
         return Ok(unreached);
     }
-    ports.service.sign_in(&token, pid)?;
-    let _signed_in = SignedIn(ports.service.clone());
+    let _signed_in = match handed {
+        Some(signed_in) => signed_in,
+        None => {
+            ports.service.sign_in(&token, pid)?;
+            SignedIn(ports.service.clone())
+        }
+    };
     let mut queue = ports.queues.open()?;
     // A live supervisor of the other `--no-claude` policy is neither
     // reused nor taken over: this one refuses to start until a person
@@ -1093,6 +1118,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     .removing_containers(ports.run_containers.clone());
     let mut supervisor = Supervisor {
         no_claude: settings.no_claude,
+        service: ports.service.clone(),
         queue,
         queues: ports.queues.clone(),
         layout,
@@ -1142,6 +1168,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             .map(|port| port.children.clone())
             .unwrap_or_default(),
         jobs_swept: false,
+        held_left: false,
         queue_hold: None,
         hold_continue: HashMap::new(),
         unanswered: reconcile::Unanswered::default(),
@@ -1192,13 +1219,39 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         e2e: e2e::E2eWaits::new(ports.run_e2e.clone()),
 
         notice_failures: HashMap::new(),
-        planning: PlanningState::new(ports),
+        planning: PlanningState::new(ports, pid),
         observation: ObservationState::new(ports),
         host: HostOpsState::new(ports, settings),
     };
     if let Some(started) = started {
         supervisor.host.started_queue_service(started);
     }
+    // The records a previous supervisor kept go first, its jobs' ends among
+    // them, so a job it saw end is not taken over as gone, nor a run rebuilt
+    // without them (ADR-t3102-3 decision 5): while the queue stays busy for
+    // them, after a wait, which a stop or an owner gone ends; what the
+    // service does not answer waits for a pass, which sends it first.
+    supervisor.held_left = loop {
+        match supervisor.service.send_held() {
+            Ok(false)
+                if supervisor.service.holds_for_busy_queue()
+                    && !settings.stop.load(Ordering::SeqCst)
+                    && !handoff::owner_gone(settings.owner, |pid| {
+                        supervisor.processes.alive(pid)
+                    }) =>
+            {
+                info!(
+                    "the records kept for the queue service go first: this supervisor starts once the queue takes them"
+                );
+                thread::sleep(settings.idle_poll);
+            }
+            Ok(all) => break !all,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the records kept for the queue service wait for the first pass: {error:#}");
+                break true;
+            }
+        }
+    };
     // Before any job starts again: the jobs a gone supervisor left, and
     // after an exec those the previous binary of this process started.
     supervisor.tend_headless_jobs();
@@ -1221,8 +1274,21 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             error!(error = %format_args!("{error:#}"), "supervisor {} failed: {error:#}", supervisor.registration.token())
         }
     }
+    // The image this process execs into takes the token back, so a job
+    // command started with it goes on recording across the exec.
+    drop(supervisor);
+    if result
+        .as_ref()
+        .is_ok_and(|value| value["outcome"] == "handoff")
+    {
+        ports.service.hand_over();
+    }
     result
 }
+
+/// How many times the end of the loop sends the records it holds for a
+/// queue service that does not answer, a poll apart.
+const HELD_RECORD_TRIES: u32 = 15;
 
 /// A listing of this user's processes with the wall time it was taken.
 type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
@@ -1266,6 +1332,9 @@ type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 /// rule.
 struct Supervisor<'a> {
     no_claude: bool,
+    /// How the queues reach the service, which holds the records of results
+    /// it did not answer until the next pass sends them.
+    service: Arc<dyn crate::application::supervisor_service::ServiceCaller>,
     queue: Box<dyn Queue + Send>,
     /// A connection for each thread beside the loop.
     queues: Arc<dyn QueueOpener>,
@@ -1378,6 +1447,12 @@ struct Supervisor<'a> {
     /// Whether this process looked for the jobs a gone supervisor left,
     /// its own token's included (after an exec), already.
     jobs_swept: bool,
+    /// Whether records the queue service did not take are still kept, as
+    /// the last [`ServiceCaller::send_held`] said: a kept job's end among
+    /// them, no job is taken over as gone meanwhile.
+    ///
+    /// [`ServiceCaller::send_held`]: crate::application::supervisor_service::ServiceCaller::send_held
+    held_left: bool,
     /// The open authentication or usage-limit ask read at the top of this
     /// pass (task 437): no new run is claimed and no headless job starts
     /// while it holds.
@@ -2231,13 +2306,23 @@ impl Supervisor<'_> {
     /// end of their run did not revoke: a run that ended while no
     /// supervisor looked, by a cancel, or by another process; those of
     /// the planners and their wrappers whose planner ended
-    /// (`planner_token_ended`); and the inbox's whose session ended
-    /// (`session_token_ended`). A run or a
+    /// (`planner_token_ended`); the inbox's whose session ended
+    /// (`session_token_ended`); and the landings' integrators whose run
+    /// left `integrating` with no live landing on it. A run or a
     /// planner whose record does not read keeps its token.
     fn sweep_worker_tokens(&self) {
         use crate::domain::queue_service::{Principal, run_token_ended};
         let queue = &self.queue;
         let processes = &self.processes;
+        let landing: Vec<RunId> = self
+            .claim
+            .slots
+            .iter()
+            .filter(|slot| matches!(slot.phase, Phase::Landing(_)))
+            .map(|slot| slot.run.id().clone())
+            .collect();
+        let own_integrator =
+            ActorContext::instance(crate::domain::ActorRole::Integrator, self.layout.pid);
         let mut ended = |principal: &Principal| {
             // An inbox's ends with its session's process (ADR-t3102-1
             // decision 2): its pid gone, or another process's start on it.
@@ -2250,6 +2335,28 @@ impl Supervisor<'_> {
                             .session_start(session.pid)
                             .is_none_or(|start| start == session.start)
                 });
+            }
+            // A landing's integrator (ADR-t3102-1 decision 2): ended once
+            // its run left `integrating` and no landing of this process or
+            // of a live one is on it.
+            if let Some(run) = principal.landing_run() {
+                let landing_here = principal.actor_id == own_integrator.actor_id();
+                if landing_here && landing.contains(&run) {
+                    return false;
+                }
+                let gone = landing_here
+                    || principal
+                        .actor_id
+                        .strip_prefix("integrator:")
+                        .and_then(|pid| pid.parse::<u32>().ok())
+                        .is_none_or(|pid| !processes.alive(pid));
+                return gone
+                    && match queue.run(&run) {
+                        Ok(run) => run.status() != crate::domain::RunStatus::Integrating,
+                        Err(error) => error
+                            .downcast_ref::<crate::application::RunNotFound>()
+                            .is_some(),
+                    };
             }
             if let Some(ended) =
                 crate::domain::queue_service::planner_token_ended(principal, |id| {
@@ -2372,6 +2479,31 @@ impl Supervisor<'_> {
                 result => break result,
             }
         };
+        // The records held on the last pass go before the process ends or
+        // execs, for as long as a few looks at the service take (ADR-t3102-3
+        // decision 5), and for a supervisor whose owner is gone no longer
+        // than its grace; what is still held then stays kept beside the
+        // queue for the next supervisor.
+        let deadline = self.end_deadline(options.owner_gone_grace);
+        let clock = self.generators.clock.clone();
+        let left =
+            || deadline.map(|deadline| deadline.saturating_duration_since(clock.monotonic()));
+        let service = self.service.clone();
+        match handoff::send_within(
+            HELD_RECORD_TRIES,
+            options.idle_poll,
+            &left,
+            &mut thread::sleep,
+            &mut || matches!(service.send_held(), Ok(true)),
+        ) {
+            handoff::Sent::Taken => {}
+            handoff::Sent::NotTaken => {
+                warn!("the records the queue service did not take are kept for the next supervisor")
+            }
+            handoff::Sent::Late => warn!(
+                "the grace of a supervisor whose owner is gone is over: what it holds is not sent and stays kept for the next supervisor"
+            ),
+        }
         // The runs that ended on the last pass end their telemetry tokens
         // before the process goes; the process an exec hands the
         // registration to makes the revocations still held.
@@ -2379,7 +2511,6 @@ impl Supervisor<'_> {
         if self.registration.execs() {
             self.save_telemetry_retries();
         }
-        let deadline = self.end_deadline(options.owner_gone_grace);
         self.host
             .host_metrics_finish(deadline, &*self.generators.clock);
         self.on_observation(|observation, env| observation.ledger_finish(env, deadline));
@@ -2388,7 +2519,24 @@ impl Supervisor<'_> {
         // those a loop that failed leaves running: dropped only after this
         // last write, their ends would not be written.
         self.abandon_jobs();
-        self.write_job_ends();
+        // An end the service did not take, and the stops of the jobs just
+        // abandoned that it holds, are sent again for as long as the held
+        // records were, within the same deadline; then the ends are kept
+        // with them for the next supervisor, at once once it is over.
+        let sent = handoff::send_within(
+            HELD_RECORD_TRIES,
+            options.idle_poll,
+            &left,
+            &mut thread::sleep,
+            &mut || {
+                let written = self.write_job_ends();
+                let sent = matches!(service.send_held(), Ok(true));
+                written && sent
+            },
+        );
+        if sent != handoff::Sent::Taken {
+            self.keep_job_ends();
+        }
         // A loop that ended on an error lets the cleanup job end after its
         // current worktree (all candidates for disk space), recording its work.
         if result.is_err() {
@@ -2469,10 +2617,6 @@ impl Supervisor<'_> {
                 }
                 return Err(error);
             }
-            // First after a pass the queue service did not answer: what it
-            // did without its answer reaching this process (ADR-t3102-3
-            // decision 5).
-            self.reconcile_unanswered(options.stop.load(Ordering::SeqCst))?;
             // An owner gone stops this process like a stop request, with
             // its own reason, but waits for nobody's answer: its runs are
             // let go and the loop ends within the grace. Looked for in a
@@ -2489,7 +2633,31 @@ impl Supervisor<'_> {
                 self.registration.note_owner_gone(now);
                 options.stop.store(true, Ordering::SeqCst);
             }
+            // The records of results the service did not answer go first,
+            // in order (ADR-t3102-3 decision 5), before the pass reads the
+            // queue, so nothing it decides on misses them and nothing it
+            // writes goes ahead of them: while the service still does not
+            // answer, the pass is made again once host運用 looked at it, and
+            // while the queue stays busy for them, after a wait, a `--once`
+            // loop's too. A stop goes on without the wait, what it writes
+            // kept behind them, and an owner gone past its grace ends the
+            // loop: what is held is kept for the next supervisor.
+            self.held_left = !self.service.send_held()?;
+            if self.service.holds_for_busy_queue() && !options.stop.load(Ordering::SeqCst) {
+                if self.owner_gone_ends(options) {
+                    break;
+                }
+                info!(
+                    "the records kept for the queue service go first: the pass is made once the queue takes them"
+                );
+                thread::sleep(options.idle_poll);
+                continue;
+            }
             let stopping = options.stop.load(Ordering::SeqCst);
+            // First after a pass the queue service did not answer: what it
+            // did without its answer reaching this process (ADR-t3102-3
+            // decision 5), read with the results it held taken.
+            self.reconcile_unanswered(stopping)?;
             if stopping && !self.registration.stop_recorded() {
                 let runs = self.held_runs();
                 self.registration
@@ -2514,26 +2682,9 @@ impl Supervisor<'_> {
             let held = self.cleanup_held();
             self.on_host(|host, env| host.poll_cleanup(env, &held, ending));
             // After the cleanup was told to end: the loop's end joins it.
-            if let Some(since) = self.registration.owner_gone_since() {
+            if self.registration.owner_gone_since().is_some() {
                 self.let_go_for_owner();
-                let gone_for = self
-                    .generators
-                    .clock
-                    .monotonic()
-                    .saturating_duration_since(since);
-                if handoff::owner_gone_ends(
-                    gone_for,
-                    options.owner_gone_grace,
-                    self.claim.slots.len(),
-                ) {
-                    if !self.claim.slots.is_empty() {
-                        warn!(
-                            "supervisor {}: its owner is gone and {} run(s) still validate or land after {}s; their leases go stale with this process",
-                            self.registration.token(),
-                            self.claim.slots.len(),
-                            gone_for.as_secs()
-                        );
-                    }
+                if self.owner_gone_ends(options) {
                     break;
                 }
             }
@@ -2910,7 +3061,7 @@ impl Supervisor<'_> {
         let mut waits: Vec<&'static str> = [
             ("observation", self.observation.busy(once && !stopping)),
             ("release", self.host.release_running()),
-            ("planning", self.planning.busy()),
+            ("planning", self.planning.busy(stopping)),
             ("agent_eval", self.agent_eval_busy()),
             ("agent_cases", self.agent_cases_busy()),
             ("landing_recheck", self.landing.rechecks.running()),
@@ -5374,19 +5525,20 @@ mod tests {
         fn call(&self, _: crate::domain::queue_service::UseCase, _: Value) -> Result<Value> {
             Err((self.0)())
         }
+        fn with_token(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<Arc<dyn crate::application::supervisor_service::ServiceCaller>> {
+            anyhow::bail!("no landing here")
+        }
         fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
             Ok(())
         }
-        fn sign_out(&self) {}
-    }
-
-    /// No connection of the queue's own: the test uses none.
-    struct NoLocal;
-
-    impl QueueOpener for NoLocal {
-        fn open(&self) -> Result<Box<dyn Queue + Send>> {
-            anyhow::bail!("not opened")
+        fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+            Ok(())
         }
+        fn hand_over(&self) {}
+        fn sign_out(&self) {}
     }
 
     /// A count of the resumes the queue service did not answer is the
@@ -5395,11 +5547,10 @@ mod tests {
     #[test]
     fn resumes_unanswered_are_not_taken_as_used_up() {
         let exhausted = |answer: fn() -> anyhow::Error| {
-            let queue = crate::application::supervisor_service::SupervisorQueues {
-                service: Arc::new(Answers(answer)),
-                local: Arc::new(NoLocal),
-                actor: ActorContext::instance(crate::domain::actor::ActorRole::Supervisor, 1),
-            }
+            let queue = crate::application::supervisor_service::SupervisorQueues::new(
+                Arc::new(Answers(answer)),
+                ActorContext::instance(crate::domain::actor::ActorRole::Supervisor, 1),
+            )
             .open()
             .unwrap();
             resumes_exhausted(&*queue, &RunId::new("r1").unwrap(), ResumeConfig::default())

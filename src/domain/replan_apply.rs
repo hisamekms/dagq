@@ -118,7 +118,7 @@ pub struct ApplyState<'a> {
 /// What becomes of an operation held `blocked` by a refused apply
 /// (ADR-t1521-2 decision 2: the saved work is kept and the operation goes
 /// on to a fix, a continuation or a withdrawal), by what refused it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyRecovery {
     /// The queue may still change (the parked run's lease, a write that
@@ -307,7 +307,7 @@ pub fn apply_problems(state: &ApplyState<'_>) -> Vec<ApplyProblem> {
 }
 
 /// What an apply of an operation did.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplyOutcome {
     /// The replacement is in place: the operation as it is now.
     Applied(Box<ReplanOperation>),
@@ -381,7 +381,7 @@ impl ChildCarry {
 /// was deleted with its authority, with the versions the review's
 /// fingerprint compares. The replaced task's own run never landed: its
 /// items are met only through its children's landings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplacementLineage {
     pub operation: ReplanId,
     pub replaced_task: TaskId,
@@ -423,7 +423,7 @@ impl ReplacementLineage {
 /// The replacements of a goal's replaced tasks, through the replacements
 /// of their replaced children too ([`ReplacementLineage`]), and the tasks
 /// they reach outside the goal, which its review reads with its own.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalReplacements {
     pub lineage: Vec<ReplacementLineage>,
     pub outside: Vec<TaskId>,
@@ -438,7 +438,7 @@ pub const REPLACEMENT_UNRESOLVED: &str = "replacement_unresolved";
 /// "goal reviewとgoal close"). The apply always writes at least one child
 /// and never a loop, so only a record broken by hand or by a later defect
 /// has one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "fault", rename_all = "snake_case")]
 pub enum ReplacementFault {
     /// No applied replacement names a task in its place.
@@ -467,7 +467,7 @@ impl std::fmt::Display for ReplacementFault {
 /// neither starts a goal review nor closes as achieved (a person closes it
 /// otherwise), and a recurring key it holds stays held, since nothing
 /// fixes the record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct UnresolvedReplacement {
     pub task: TaskId,
     #[serde(flatten)]

@@ -89,6 +89,18 @@ impl JobEnds {
 /// The `headless_job_stopped` of `job`, stopped by `supervisor` with no
 /// event to end it, with the Execution its agent was so far
 /// (ADR-t1486-1): `session`, what its output named, or not measured.
+/// The supervisor's operation that records `headless_job_stopped` of
+/// `job` with `payload`, as its end is written ([`abandoned_end`]): on its
+/// run, or on the queue for a job with none.
+fn abandoned_record(job: &Abandoned, payload: serde_json::Value) -> serde_json::Value {
+    match &job.subject.run_id {
+        Some(run) => json!({"op": "record_runtime_event",
+            "args": [run, EventKind::HeadlessJobStopped, payload]}),
+        None => json!({"op": "record_queue_event",
+            "args": [EventKind::HeadlessJobStopped, payload]}),
+    }
+}
+
 pub(super) fn abandoned_end(
     job: &Abandoned,
     supervisor: &LeaseToken,
@@ -1483,6 +1495,13 @@ impl Supervisor<'_> {
     /// which an exec'd process knows nothing of.
     pub(super) fn tend_headless_jobs(&mut self) {
         self.write_job_ends();
+        if self.held_left {
+            // A kept end of one of them goes first (ADR-t3102-3 decision 5).
+            info!(
+                "the jobs of gone supervisors are taken over once the records kept for the queue service are sent"
+            );
+            return;
+        }
         let own = !self.jobs_swept;
         let orphans = match self
             .queue
@@ -1502,32 +1521,81 @@ impl Supervisor<'_> {
         }
     }
 
-    pub(super) fn write_job_ends(&mut self) {
+    /// Write the ends of this process's jobs: one the queue service did
+    /// not answer, or a queue busy past its wait, is kept and written again
+    /// on the next pass, and the queue ends a row once however often its
+    /// end comes (ADR-t3102-3 decision 5). Whether none was kept.
+    pub(super) fn write_job_ends(&mut self) -> bool {
         let (rows, abandoned) = self.job_ends.take();
         if !rows.is_empty() || !abandoned.is_empty() {
             // What their ends kept goes while their rows are open.
             self.resend_kept_steps();
         }
+        let mut written = true;
         for (id, outcome) in rows {
-            if let Err(error) = self.queue.end_headless_job(id, outcome) {
-                warn!(error = %format_args!("{error:#}"), "the end of headless job {id} could not be recorded: {error:#}");
+            match self.queue.end_headless_job(id, outcome) {
+                Err(error)
+                    if crate::application::supervisor_service::unreachable(&error)
+                        || crate::application::QueueBusy::is(&error) =>
+                {
+                    warn!(error = %format_args!("{error:#}"), "the end of headless job {id} is kept until the queue service answers: {error:#}");
+                    self.job_ends.push(id, outcome);
+                    written = false;
+                }
+                Err(error) => {
+                    warn!(error = %format_args!("{error:#}"), "the end of headless job {id} could not be recorded: {error:#}");
+                }
+                Ok(_) => {}
             }
         }
         for job in abandoned {
             self.write_abandoned(&job);
         }
+        written
+    }
+
+    /// Keep the ends not written yet with the records the queue service
+    /// did not take, for the next supervisor to send (ADR-t3102-3 decision
+    /// 5): the supervisor ends, and the queue ends each row once. The
+    /// `headless_job_stopped` of the jobs just abandoned is kept with them,
+    /// unsent, when the end of the loop gave up before it wrote them (an
+    /// owner gone past its grace).
+    pub(super) fn keep_job_ends(&mut self) {
+        use crate::domain::queue_service::UseCase;
+        let (rows, abandoned) = self.job_ends.take();
+        for (id, outcome) in rows {
+            let params = json!({"op": crate::application::supervisor_service::resend::JOB_END_OP, "args": [id, outcome]});
+            match self.service.keep(UseCase::Supervisor, params) {
+                Ok(()) => warn!("the end of headless job {id} is kept for the next supervisor"),
+                Err(error) => {
+                    warn!(error = %format_args!("{error:#}"), "the end of headless job {id} is lost as the supervisor ends: {error:#}");
+                }
+            }
+        }
+        for job in abandoned {
+            let params = abandoned_record(&job, self.abandoned_payload(&job));
+            if let Err(error) = self.service.keep(UseCase::Supervisor, params) {
+                warn!(error = %format_args!("{error:#}"), "the stopped headless {} job (attempt {}) is lost as the supervisor ends: {error:#}", job.subject.kind, job.subject.attempt);
+            }
+        }
+    }
+
+    /// The payload of `headless_job_stopped` of `job`, with the Execution
+    /// its output names ([`abandoned_end`]).
+    fn abandoned_payload(&self, job: &Abandoned) -> serde_json::Value {
+        let agent = self
+            .job_agent(job.subject.provider)
+            .unwrap_or(self.reviewer);
+        let stdout = self.files.read_to_string(&job.stdout).unwrap_or_default();
+        let session = agent.job_session(&stdout, job.started_at);
+        abandoned_end(job, self.registration.token(), session.as_ref())
     }
 
     /// Record `headless_job_stopped` for a job this process stopped with
     /// no event to end it, on its run, or on the queue for a job with
     /// none, with the Execution its output names ([`abandoned_end`]).
     fn write_abandoned(&mut self, job: &Abandoned) {
-        let agent = self
-            .job_agent(job.subject.provider)
-            .unwrap_or(self.reviewer);
-        let stdout = self.files.read_to_string(&job.stdout).unwrap_or_default();
-        let session = agent.job_session(&stdout, job.started_at);
-        let payload = abandoned_end(job, self.registration.token(), session.as_ref());
+        let payload = self.abandoned_payload(job);
         let recorded = match &job.subject.run_id {
             Some(run) => {
                 self.queue
@@ -2889,6 +2957,38 @@ mod tests {
             assert!(end.get("tokens_source").is_some(), "{end}");
             assert_eq!(end["tokens_reason"], "tokens_not_read");
         }
+    }
+
+    /// The `headless_job_stopped` of an abandoned job kept unsent, past an
+    /// owner's grace, is the supervisor's operation that records it: on its
+    /// run, or on the queue for a job with none, with its arguments as the
+    /// service reads them.
+    #[test]
+    fn an_abandoned_jobs_end_kept_unsent_is_the_record_the_service_reads() {
+        let payload = serde_json::json!({"kind": "review", "attempt": 1});
+        let run = RunId::new("r1").unwrap();
+        let on_run = Abandoned {
+            subject: JobSubject::run(headless_job::REVIEW, &run, 1),
+            stdout: PathBuf::from("/job/out"),
+            started_at: None,
+        };
+        let params = abandoned_record(&on_run, payload.clone());
+        assert_eq!(params["op"], "record_runtime_event");
+        let read: (RunId, EventKind, serde_json::Value) =
+            serde_json::from_value(params["args"].clone()).unwrap();
+        assert_eq!(read, (run, EventKind::HeadlessJobStopped, payload.clone()));
+        let on_queue = Abandoned {
+            subject: JobSubject {
+                run_id: None,
+                ..on_run.subject
+            },
+            ..on_run
+        };
+        let params = abandoned_record(&on_queue, payload.clone());
+        assert_eq!(params["op"], "record_queue_event");
+        let read: (EventKind, serde_json::Value) =
+            serde_json::from_value(params["args"].clone()).unwrap();
+        assert_eq!(read, (EventKind::HeadlessJobStopped, payload));
     }
 
     /// A clock stopped at a fixed time, its monotonic time at [`origin`].

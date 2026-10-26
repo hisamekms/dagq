@@ -184,7 +184,7 @@ impl ObservationState {
     /// Record `candidates_sampled` when `sample` differs from the sample
     /// this process recorded last, and on its first claim pass. A failure
     /// is logged: the sample is bookkeeping for `kpi`, and the next pass
-    /// tries again.
+    /// tries again (a record kept to be sent is no failure).
     pub(super) fn record_candidates(
         &mut self,
         env: &mut ObservationEnv<'_>,
@@ -193,8 +193,16 @@ impl ObservationState {
         let result = sample.and_then(|sample| {
             if let Some(mut payload) = sample.transition(self.candidates.as_ref()) {
                 payload["supervisor"] = json!(env.token);
-                env.queue
-                    .record_queue_event(EventKind::CandidatesSampled, payload)?;
+                // A record kept to be sent is this sample's.
+                match env
+                    .queue
+                    .record_queue_event(EventKind::CandidatesSampled, payload)
+                {
+                    Err(error) if !crate::application::supervisor_service::resend::kept(&error) => {
+                        return Err(error);
+                    }
+                    _ => {}
+                }
                 self.candidates = Some(sample);
             }
             Ok(())

@@ -23,6 +23,7 @@ use crate::{
     application::{
         AgentProvider, Verifier, health, lifecycle,
         stats::{self as statistics, StatsGitReads, StatsSources},
+        supervisor_service::{ServiceTokens, SupervisorQueues},
     },
     domain::{RunId, SessionRole, TaskId, stats::StatsQuery},
     infrastructure::{
@@ -555,14 +556,25 @@ pub fn call_stats_read(
     read: &crate::application::queue_reads::QueueRead,
     call: impl FnMut(&crate::application::queue_reads::QueueRead) -> Result<Value>,
 ) -> Result<Value> {
-    statistics::call_read(
-        read,
-        &statistics::StatsClient {
-            areas: &|checkout| area_reader(Some(checkout)),
-            history: &|checkout, since| GitRepository::inspect(checkout)?.main_history(since),
-        },
-        call,
-    )
+    statistics::call_read(read, &STATS_CLIENT, call)
+}
+
+/// The host's Git a client of `stats` and `kpi` reads with
+/// ([`statistics::StatsClient`]).
+const STATS_CLIENT: statistics::StatsClient<'static> = statistics::StatsClient {
+    areas: &client_areas,
+    history: &client_history,
+};
+
+fn client_areas(checkout: &Path) -> Result<crate::application::areas::AreaReader> {
+    area_reader(Some(checkout))
+}
+
+fn client_history(
+    checkout: &Path,
+    since: i64,
+) -> Result<crate::domain::stats::conflicts::MainHistory> {
+    GitRepository::inspect(checkout)?.main_history(since)
 }
 
 /// Summarizes the host's load records under `dir` (task 872).
@@ -887,6 +899,10 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
         self.one_shot
             .kpi_read(queue, self.db, query, self.git("kpi", git)?)
     }
+    fn observer_kpi(&self, queue: &SqliteQueue, git: Option<&StatsGitReads>) -> Result<Value> {
+        self.one_shot
+            .observer_kpi_read(queue, self.db, self.git("kpi", git)?)
+    }
     fn forecast(
         &self,
         queue: &SqliteQueue,
@@ -964,7 +980,9 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
 /// `observe`: one observation of the queue at `db`
 /// ([`crate::application::observer::observe`]) with the repository's reads,
 /// and the local host; no cmux (ADR-t1433-1). `signals` must belong to the
-/// provider that starts it.
+/// provider that starts it. Started by a supervisor as its own
+/// ([`crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV`]), it
+/// opens no queue and reaches it through the service as that supervisor.
 pub fn observe(
     db: &Path,
     provider: &dyn AgentProvider,
@@ -974,6 +992,9 @@ pub fn observe(
     let db = db
         .canonicalize()
         .context("queue must already be initialized")?;
+    if let Some(queues) = job_queues(&db)? {
+        return observe_through(&db, queues, provider, signals, options);
+    }
     let mut queue = SqliteQueue::open(&db)?;
     let generators = queue.generators().clone();
     let sources = ObserverReads {
@@ -987,7 +1008,7 @@ pub fn observe(
         options,
         &crate::application::observer::ObserverEnvironment {
             sources: &sources,
-            host: &crate::infrastructure::observer::LocalObserver,
+            host: &crate::infrastructure::observer::LocalObserver { events: None },
             generators: &generators,
             pid: std::process::id(),
             telemetry: Some(crate::application::telemetry_tokens::TargetTelemetry {
@@ -1001,6 +1022,133 @@ pub fn observe(
             }),
         },
     )
+}
+
+/// [`observe`] of the queue at `db` (canonical) through the supervisor's
+/// queue `queues`, opening none: the observation of a supervisor that
+/// started the command as its own.
+pub fn observe_through(
+    db: &Path,
+    queues: SupervisorQueues,
+    provider: &dyn AgentProvider,
+    signals: Option<&dyn crate::application::AgentSignals>,
+    options: &crate::application::observer::ObserveOptions,
+) -> Result<Value> {
+    let generators = clock::system();
+    let (mut queue, events) = (queues.queue(), queues.queue());
+    let tokens = job_tokens(queues);
+    crate::application::observer::observe(
+        &mut queue,
+        db,
+        provider,
+        signals,
+        options,
+        &crate::application::observer::ObserverEnvironment {
+            sources: &crate::infrastructure::job_reads::JobReads { git: &STATS_CLIENT },
+            host: &crate::infrastructure::observer::LocalObserver {
+                events: Some(&events),
+            },
+            generators: &generators,
+            pid: std::process::id(),
+            telemetry: Some(crate::application::telemetry_tokens::TargetTelemetry {
+                tokens: &tokens,
+                db,
+                lease: None,
+            }),
+            steps: Some(crate::application::step_report::CommandSteps {
+                files: &crate::infrastructure::run_files::LocalRunFiles,
+                sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
+            }),
+        },
+    )
+}
+
+/// [`throughput_review`] of the queue at `db` (canonical) through the
+/// supervisor's queue `queues`, opening none: the review of a supervisor
+/// that started the command as its own.
+pub fn throughput_review_through(
+    db: &Path,
+    queues: SupervisorQueues,
+    provider: &dyn AgentProvider,
+    options: &crate::application::throughput_review::ReviewOptions,
+) -> Result<Value> {
+    let generators = clock::system();
+    let (mut queue, events) = (queues.queue(), queues.queue());
+    let tokens = job_tokens(queues);
+    crate::application::throughput_review::review(
+        &mut queue,
+        db,
+        provider,
+        options,
+        &crate::application::throughput_review::ThroughputReviewEnvironment {
+            sources: &crate::infrastructure::job_reads::JobReads { git: &STATS_CLIENT },
+            host: &crate::infrastructure::throughput_review::LocalThroughputReview {
+                events: Some(&events),
+            },
+            generators: &generators,
+            signals: Some(&review_signals()),
+            telemetry: Some(crate::application::telemetry_tokens::TargetTelemetry {
+                tokens: &tokens,
+                db,
+                lease: None,
+            }),
+            steps: Some(crate::application::step_report::CommandSteps {
+                files: &crate::infrastructure::run_files::LocalRunFiles,
+                sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
+            }),
+        },
+    )
+}
+
+/// Claude Code's reading of the walls in a review's output, which starts
+/// nothing (task 438, ADR-t1857-1).
+fn review_signals() -> crate::infrastructure::adapters::ClaudeCode {
+    crate::infrastructure::adapters::ClaudeCode {
+        executable: PathBuf::from("claude"),
+    }
+}
+
+/// The queue of the supervisor that started this job command as its own
+/// ([`crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV`]), through
+/// the service with that supervisor's token; `None` for a command typed by
+/// hand or started by a supervisor whose service runs in its own process.
+fn job_queues(db: &Path) -> Result<Option<SupervisorQueues>> {
+    let Some(registration) =
+        std::env::var(crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV)
+            .ok()
+            .filter(|registration| !registration.is_empty())
+    else {
+        return Ok(None);
+    };
+    let actor = crate::domain::ActorContext::from_env(|name| std::env::var(name).ok())?;
+    let pid = crate::application::supervisor_service::job_command_pid(&actor)?;
+    let caller = crate::infrastructure::queue_service::SocketCaller::adopt(
+        db,
+        &crate::domain::LeaseToken::new(registration),
+        pid,
+    )?;
+    // Its results' records are sent again on its own thread until the
+    // service takes them, and past the wait kept for the supervisor to send
+    // (ADR-t3102-3 decision 5).
+    let caller = crate::application::supervisor_service::resend::Resending::new(
+        Arc::new(caller),
+        crate::application::supervisor_service::resend::Resend::Wait,
+        clock::system(),
+    )
+    .kept_in(Arc::new(crate::infrastructure::held_records::HeldDir::of(
+        db,
+    )));
+    Ok(Some(SupervisorQueues::new(Arc::new(caller), actor)))
+}
+
+/// The telemetry tokens of a job command's agent, issued and revoked
+/// through the service by the supervisor's queue `queues`.
+fn job_tokens(queues: SupervisorQueues) -> ServiceTokens {
+    ServiceTokens {
+        queues,
+        files: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
+        telemetry_files: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
+    }
 }
 
 /// The observer's reads that [`OneShot`] gives on the opened queue.
@@ -1035,6 +1183,10 @@ pub fn throughput_review(
     let db = db
         .canonicalize()
         .context("queue must already be initialized")?;
+    if let Some(queues) = job_queues(&db)? {
+        return throughput_review_through(&db, queues, provider, options);
+    }
+    let signals = review_signals();
     let mut queue = SqliteQueue::open(&db)?;
     let generators = queue.generators().clone();
     let sources = ThroughputReviewReads {
@@ -1047,13 +1199,9 @@ pub fn throughput_review(
         options,
         &crate::application::throughput_review::ThroughputReviewEnvironment {
             sources: &sources,
-            host: &crate::infrastructure::throughput_review::LocalThroughputReview,
+            host: &crate::infrastructure::throughput_review::LocalThroughputReview { events: None },
             generators: &generators,
-            // Claude Code's reading of the walls in a job's output, which
-            // starts nothing (task 438, ADR-t1857-1).
-            signals: Some(&crate::infrastructure::adapters::ClaudeCode {
-                executable: PathBuf::from("claude"),
-            }),
+            signals: Some(&signals),
             telemetry: Some(crate::application::telemetry_tokens::TargetTelemetry {
                 tokens: &crate::infrastructure::queue_service::SystemServiceAccess,
                 db: &db,
@@ -1815,18 +1963,32 @@ impl OneShot {
     /// them, with the open breaches' events
     /// ([`crate::domain::kpi::observe::observer_input`]).
     pub fn observer_kpi(&self, queue: &SqliteQueue, db: &Path) -> Result<serde_json::Value> {
+        self.observer_kpi_read(queue, db, None)
+    }
+
+    /// [`Self::observer_kpi`] with the landed commits' areas the queue
+    /// service's client read with Git (`git`), as [`Self::kpi_read`].
+    pub fn observer_kpi_read(
+        &self,
+        queue: &SqliteQueue,
+        db: &Path,
+        git: Option<&StatsGitReads>,
+    ) -> Result<serde_json::Value> {
         use crate::domain::kpi::{KpiQuery, Period, observe};
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
-        let setup = report_setup(
+        let part = GitPart::of(queue, git)?;
+        let setup = report_setup_with(
             db,
-            bound_checkout(queue)?.as_deref(),
+            part.checkout.as_deref(),
             host_wide.as_deref(),
             now,
             self.profiles,
+            part.areas()?,
         )?;
+        let fresh = part.fresh();
         let of = |period, last| {
-            crate::application::kpi::kpi(
+            crate::application::kpi::kpi_checked(
                 queue,
                 now,
                 setup.host,
@@ -1838,6 +2000,9 @@ impl OneShot {
                     ..KpiQuery::default()
                 },
                 setup.host_reader(),
+                fresh
+                    .as_ref()
+                    .map(|fresh| fresh as &statistics::EventsCheck<'_>),
             )
         };
         let (day, week) = (of(Period::Day, 7)?, of(Period::Week, 4)?);

@@ -27,14 +27,14 @@ plan reviewと同じくrun slotは使わず、loopの各passで進める（`goal
 `--once`のloopは走っているgoal reviewを待つ。
 drain中（`stop`、provisioningの失敗）は新しいgoal reviewを始めない（走っているjobとanswerの適用は続ける）。
 execの[引き継ぎ](handoff.md)のあいだの回収と止め方は引き継ぎの文書が持つ。
-止めたjobの未完了の行は、引き継いだsupervisorが最初のpassに入る前に、候補が無くても自分のtokenの分だけ`interrupted`で閉じ、他のtokenの行は触らない。
+止めたjobの未完了の行は、引き継いだsupervisorが最初のpassに入る前に、候補が無くても自分のtokenの分だけ`interrupted`で閉じ、他のtokenの行は触らない（queueが取らなかった終わり（verdictか失敗）を持っていれば、その行は閉じずにそれで終える。[Supervise](supervise.md#queue-serviceの経路)）。
 閉じるときはtranscriptをtransactionの前に`read_before`で読み、既存のclose経路で区間の`session_closed`を記録する。
 候補が残れば以後のpassでreviewをやり直し、`interrupted`はattemptに数えない。
 
 1. **記録**: jobは`goal_reviews`の1行。
    互換のmigrationは外部キーとunique indexを持てないので、同時に1つは`begin_goal_review`が`BEGIN IMMEDIATE`の中で生きているsupervisorの未完了の行が無いことを確かめてから行を書くことで守る（queue全体で1つ。plan reviewとは別に数える）。
    生きているsupervisorは、登録があり、heartbeatが`HEARTBEAT_TIMEOUT_SECS`より新しいか、古くてもpidが生きているもの（`domain::job_supervisor_lives`。sleepから戻った直後のhostでは全員のheartbeatが古いので、pidで見て待つ。自分と同じpidの登録（in-processのtest）はpidで生きているとしない。[headless jobの引き継ぎ](headless-job-processes.md#引き継ぎ)と同じ規則）。
-   生きていないsupervisorの未完了の行と、自分のtokenの未完了の行（execの前の自分の行）は`interrupted`で閉じる。
+   生きていないsupervisorの未完了の行と、自分のtokenの未完了の行（execの前の自分の行）は`interrupted`で閉じる（queueが取らなかった終わりが残る行は、その前に引き取ってそれで終える。[Supervise](supervise.md#queue-serviceの経路)）。
    eventはgoalに記録する（`run_events.goal_id`）。
    jobのpromptと出力はqueueの`goal-reviews/<行のID>/`に置く。
 2. **起動の条件**（`goal_review_candidates`、ID順の先頭を取る）: goalが`open`で閉じておらず、所属taskが1件以上あり、すべて`completed`か`canceled`か`replaced`で所属taskの`completed`が1件以上（`goal_review::tasks_done`。`draft` / `submitted`のtask、つまりruntimeのplannerの待ち・`keep_draft`で残ったdraft・閉じていない`planner_question`の対象は、これで除かれる）、元goalがこのgoalのfollow_up（所属は問わない）に所属の判断が済まないもの（[Follow-up membership judgements](../follow-up-membership.md)の「閉じる条件」、ADR-t1504-2決定8）が無く、goalのreviewが開いた`approve_goal`のaskで閉じていないものが無く、前回のgoal review（`interrupted`を除く最新の行）の後に入力が変わっている。

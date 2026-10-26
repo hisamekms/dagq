@@ -197,7 +197,8 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 
 queue service（[Queue service](queue-service.md)）もDBを開くプロセスの1つである。
 DBを直接開く他のプロセスとは、SQLiteのトランザクションとleaseの規則で並ぶ。
-serviceのファイル（socket・lock・`state.json`・token）はqueueのディレクトリの`service/`に置き、DBには置かない。
+serviceのファイルはqueueのディレクトリの`service/`に置き、DBには置かない。
+送り直される結果の記録のeventは最初の送信の識別子と`event_records`で結んで同じトランザクションで書き、識別子ごとに1つのeventにする（ADR-t3102-3決定5）。
 
 ## session steps
 
@@ -301,7 +302,7 @@ migrationを足すtaskの規則は[migrations.md](../development/migrations.md)�
   バイナリより新しくても下限以下なら動く。
   このため`INSERT`は必ず列を列挙し、行は列名で読む。
   claimのときに写したバイナリ（`runs/<id>/runner`）も互換のmigrationの後に動き続ける。
-- 読み取り専用のopen: DBを開く読み取り（hostのCLIの読み取りを答える[service](queue-service-host-cli.md)も）は読み取り専用の接続で開き、何も書かない（[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)決定18）。
+- 読み取り専用のopen: DBを開く読み取り（hostのCLIの読み取りを答える[service](queue-service-host-cli.md)も）は読み取り専用の接続で開き、何も書かない（ADR-0045決定18）。
   queueがバイナリより古ければメモリの複製をmigrateして読む。
   複製はsnapshotなので、`watch`はファイルを直接開き、古いschemaなら`dagq migrate`を促して終わる。
   複製はGitからcommit messageを埋めないので、その`search`はmessageの無い着地を見つけない。
@@ -325,7 +326,7 @@ migrationを足すtaskの規則は[migrations.md](../development/migrations.md)�
 
 ## 関連（related）
 
-`dagq related TASK`（[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)決定4）は表を足さず、既存の表と`search_index`を読む。
+`dagq related TASK`（ADR-0063決定4）は表を足さず、既存の表と`search_index`を読む。
 読むのは`src/infrastructure/related.rs`、手がかりの取り出しと点数と重みは`src/domain/related.rs`。
 
 - 点数は手がかりの重みの和で、多くのtaskが共有する手がかりほど割り引く（`rarity`）。

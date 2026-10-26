@@ -167,7 +167,7 @@ string_enum!(PlanProblemCode {
 
 /// One problem of a plan: its code, the task it is about (a child, a
 /// successor) when one, and why.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanProblem {
     pub code: PlanProblemCode,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -836,7 +836,7 @@ fn check_successors(
 /// A plan as the queue keeps it: its revision for the operation (1 and
 /// up, one per submit), the proposal it went with, its SHA-256, and when a
 /// pass found it applicable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanRevision {
     pub revision: i64,
     pub proposal_id: ProposalId,
@@ -846,7 +846,7 @@ pub struct PlanRevision {
 }
 
 /// A review that sent the parked run back, for its planner.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewFinding {
     /// The verdicts of the judgments that sent it back, `/`-joined.
     pub verdict: String,
@@ -856,7 +856,7 @@ pub struct ReviewFinding {
 }
 
 /// A task that waits for the task being replaced, for its planner.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SuccessorBrief {
     pub task_id: TaskId,
     pub status: TaskStatus,
@@ -867,7 +867,7 @@ pub struct SuccessorBrief {
 /// beside its snapshot: the turns of the parked run by what each was for,
 /// its reviews that did not pass, the successors of its task now, and the
 /// latest plan submitted with its problems now.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplanBrief {
     pub operation: ReplanOperation,
     pub turns: Vec<(String, usize)>,

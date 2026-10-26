@@ -79,7 +79,7 @@ pub struct LintViolation {
 }
 
 /// A task of the queue as the dependency rules see it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LintNode {
     pub status: TaskStatus,
     pub goal_id: Option<GoalId>,
@@ -91,9 +91,10 @@ pub struct LintNode {
 
 /// One read of the queue for [`lint`]: the tasks to check and, for the
 /// dependency rules, every task and the verdict of every goal.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LintInput {
     /// The tasks to check, in the order to report them.
+    #[serde(with = "crate::domain::task::whole_list")]
     pub targets: Vec<Task>,
     /// Every task of the queue.
     pub nodes: BTreeMap<TaskId, LintNode>,

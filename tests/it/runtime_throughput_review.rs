@@ -448,6 +448,89 @@ fn the_weekly_review_records_its_next_move_as_a_finding_marked_for_a_proposal() 
     assert_eq!(input["hourly"], Value::Null);
 }
 
+/// Started by a supervisor as its own, the weekly review reads the queue
+/// and records its finding through the service as that supervisor, and
+/// opens none.
+#[test]
+fn a_review_the_supervisor_started_records_its_finding_through_the_service() {
+    let (_dir, _repo, db) = fixture();
+    common::service::serve(&db);
+    let db = db.canonicalize().unwrap();
+    let job = crate::runtime_support::service::JobOfSupervisor::sign_in(&db);
+    let refused = dagq::infrastructure::sqlite::refuse_opening(&db);
+    let done = dagq::compose::throughput_review_through(
+        &db,
+        job.queues.clone(),
+        &ReviewProvider::new(REVIEWER),
+        &options(ReviewMode::Weekly),
+    )
+    .unwrap();
+    drop(refused);
+    assert_eq!(done["outcome"], "succeeded", "{done}");
+    let findings = SqliteQueue::open(&db)
+        .unwrap()
+        .findings(&dagq::domain::FindingQuery::default())
+        .unwrap();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].finding.subject, "weekly/2026-W39");
+    assert_eq!(findings[0].finding.recorded_by, "supervisor");
+    assert_eq!(done["finding_id"], json!(findings[0].finding.id));
+    let input: Value = serde_json::from_str(
+        &fs::read_to_string(PathBuf::from(done["dir"].as_str().unwrap()).join("input.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(input["landings"]["by_day"].as_array().unwrap().len(), 7);
+}
+
+/// A review the supervisor started goes on recording through the service
+/// across the supervisor's handoff: the image before the exec keeps its
+/// token and the image after takes it back, so the review's finding and
+/// finish are the supervisor's still; the token goes once the supervisor
+/// ends.
+#[test]
+fn a_review_the_supervisor_started_records_across_its_handoff() {
+    use dagq::application::supervisor_service::{ServiceCaller, SupervisorQueues, unreachable};
+    use dagq::infrastructure::queue_service::SocketCaller;
+    let (_dir, _repo, db) = fixture();
+    common::service::serve(&db);
+    let db = db.canonicalize().unwrap();
+    let (registration, pid) = (
+        dagq::domain::LeaseToken::new("supervisor-handing-off"),
+        std::process::id(),
+    );
+    let before = SocketCaller::new(&db);
+    before.sign_in(&registration, pid).unwrap();
+    let queues = SupervisorQueues::new(
+        std::sync::Arc::new(SocketCaller::adopt(&db, &registration, pid).unwrap()),
+        dagq::domain::ActorContext::instance(dagq::domain::ActorRole::Supervisor, pid),
+    );
+    before.hand_over();
+    drop(before);
+    let after = SocketCaller::new(&db);
+    after.take_back(&registration, pid).unwrap();
+    let refused = dagq::infrastructure::sqlite::refuse_opening(&db);
+    let done = dagq::compose::throughput_review_through(
+        &db,
+        queues.clone(),
+        &ReviewProvider::new(REVIEWER),
+        &options(ReviewMode::Weekly),
+    )
+    .unwrap();
+    assert_eq!(done["outcome"], "succeeded", "{done}");
+    after.sign_out();
+    let ended = dagq::application::RunReads::active_runs(&queues.queue()).unwrap_err();
+    assert!(!unreachable(&ended), "{ended:#}");
+    drop(refused);
+    let finished = queue_events(&db, "throughput_review_finished");
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    let findings = SqliteQueue::open(&db)
+        .unwrap()
+        .findings(&dagq::domain::FindingQuery::default())
+        .unwrap();
+    assert_eq!(findings[0].finding.recorded_by, "supervisor");
+}
+
 /// The inbox's attention events: the compact form `watch` reads.
 pub(crate) fn attentions(db: &Path) -> Vec<Value> {
     dagq::compose::events(db, EventId::new(0), 100, false).unwrap()["events"]

@@ -173,7 +173,7 @@ impl<Q: SupervisorReads + RunLog + ?Sized, R: ?Sized> PassEnv<'_, Q, R> {
     /// memory against its own latest record
     /// ([`claim_hold::OwnHold::transition`]); a queue that cannot be read
     /// or written is warned of and `false` returned, for the caller to try
-    /// again.
+    /// again, but for a record kept to be sent, which is recorded.
     pub(super) fn record_own_hold(
         &mut self,
         kinds: claim_hold::OwnHold,
@@ -191,11 +191,14 @@ impl<Q: SupervisorReads + RunLog + ?Sized, R: ?Sized> PassEnv<'_, Q, R> {
                 None => Ok(()),
             }
         });
-        if let Err(error) = recorded {
-            warn!(error = %format_args!("{error:#}"), "the hold {} could not be recorded: {error:#}", kinds.held.as_str());
-            return false;
+        match recorded {
+            // A record kept to be sent is recorded.
+            Err(error) if !crate::application::supervisor_service::resend::kept(&error) => {
+                warn!(error = %format_args!("{error:#}"), "the hold {} could not be recorded: {error:#}", kinds.held.as_str());
+                false
+            }
+            _ => true,
         }
-        true
     }
 }
 

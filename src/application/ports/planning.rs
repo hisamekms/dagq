@@ -171,7 +171,7 @@ pub enum DraftPlannerStart {
 }
 
 /// How [`DraftPlannerStore::open_finding_planner`] ended.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum FindingPlannerStart {
     /// A planner of the runtime's is recorded for the finding, its
     /// `attempt`-th since the finding was marked; the caller opens its
@@ -193,7 +193,7 @@ pub enum FindingPlannerStart {
 }
 
 /// How [`PlanRequestStore::open_request_planner`] ended.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RequestPlannerStart {
     /// A planner of the runtime's is recorded for the request, its
     /// `attempt`-th for it; the caller hands it the request and opens its
@@ -286,7 +286,7 @@ pub trait PlanRequestStore {
 }
 
 /// Where the answer of a `planner_question` goes (ADR-0041 decision 13).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PlannerAnswerRoute {
     /// Typed into the workspace of this planner of the runtime's, which
     /// works on the ask's task (its draft, or its proposal).
@@ -458,6 +458,7 @@ pub trait DraftPlannerStore: DraftPlannerReads {
 /// One entry of a run prepared for atomic registration: a receipt's,
 /// which integrate prepares, or a review's `follow_ups`', which the
 /// supervisor prepares once it judged the review (ADR-t2352-1).
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FollowUpRegistration {
     /// What makes it one of its run: an entry whose key is recorded
     /// already for the run is not registered again.
@@ -468,18 +469,18 @@ pub struct FollowUpRegistration {
     /// decision 11).
     pub membership_proposal: serde_json::Value,
     pub draft: Option<NewTask>,
-    pub skipped: Option<&'static str>,
+    pub skipped: Option<String>,
 }
 
 /// A planner of the runtime's that holds a place under
 /// `--runtime-planners` while a revise with no planner waits (task 884):
 /// its state and why the supervisor does not end it (`busy`, empty when it
 /// is about to be asked to exit).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct PlannerHold {
     pub planner_id: PlannerId,
     pub state: String,
-    pub busy: Vec<&'static str>,
+    pub busy: Vec<String>,
     pub proposal_id: Option<ProposalId>,
     pub draft_task_id: Option<TaskId>,
     pub finding_id: Option<FindingId>,
@@ -489,7 +490,7 @@ pub struct PlannerHold {
 /// A plan review job the queue recorded (ADR-0041 decision 11): the
 /// proposal it reviews, its attempt at that proposal, the first task of the
 /// proposal (where its events are recorded) and its directory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct PlanReviewJob {
     pub id: i64,
     pub proposal_id: ProposalId,
@@ -507,8 +508,9 @@ pub struct PlanReviewJob {
 /// is a `concern`, `overridden` saying why), the reasons a revise carries to
 /// the planner (the verdict's, then the precedents it named), and the
 /// `approve_plan` ask a concern opens.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlanReviewApply {
+    #[serde(with = "crate::domain::plan_review::whole_verdict")]
     pub verdict: PlanReviewVerdict,
     pub decision: PlanReviewDecision,
     pub overridden: Option<String>,
@@ -533,14 +535,14 @@ pub struct PlanReviewApply {
 /// ([`crate::domain::plan_review::refuse_replacement`]): what it becomes,
 /// and the `approve_plan` ask it opens past the revises, to which the
 /// transaction adds the plan's problems.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RefusedPass {
     pub decided: crate::domain::plan_review::PlanVerdictDecision,
     pub ask: Option<NewAsk>,
 }
 
 /// Why a plan review job failed (`plan_review_failed`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PlanReviewFailure {
     pub error: String,
     pub duration_secs: u64,
@@ -564,7 +566,7 @@ pub struct PlanReviewFailure {
 
 /// A ready task a verdict took back to submitted, with the proposal of its
 /// own a planner fixes it in (ADR-0041 decision 14).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ReopenedTask {
     pub task_id: TaskId,
     pub proposal_id: ProposalId,
@@ -572,7 +574,7 @@ pub struct ReopenedTask {
 
 /// What applying a verdict did. `stale`: nothing, because the job's row or
 /// its proposal moved on meanwhile (the job is finished as `interrupted`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PlanReviewApplied {
     pub stale: bool,
     pub reopened: Vec<ReopenedTask>,
@@ -585,7 +587,7 @@ pub struct PlanReviewApplied {
 /// stands: the reasons, when and to which planner they went (`None`: the
 /// supervisor still has to deliver them), and when the inbox was told the
 /// planner did not answer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RevisingProposal {
     pub proposal: Proposal,
     pub reasons: Vec<String>,
@@ -599,7 +601,7 @@ pub struct RevisingProposal {
 /// A proposal that waits for a person outside an ask: its plan review
 /// failed (`plan_review_failed`), or its planner did not answer a revise
 /// (`planner_unresponsive`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlanReviewHold {
     pub proposal_id: ProposalId,
     pub anchor: TaskId,
@@ -608,7 +610,7 @@ pub struct PlanReviewHold {
 }
 
 /// What a person's `approve_plan` answer did to the proposal.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlanDecided {
     pub proposal: Proposal,
     pub answer: String,
@@ -616,7 +618,7 @@ pub struct PlanDecided {
 
 /// How a revise waits for another request that replans its goal
 /// ([`PlanReviewStore::revise_goal_wait`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviseGoalWait {
     /// That request's planner is at work: [`PlanReviewStore::claim_revise`]
     /// refuses the revise meanwhile.
@@ -631,11 +633,16 @@ pub struct ReviseGoalWait {
 /// applies (each in one transaction), and the revises it delivers.
 pub trait PlanReviewStore {
     /// Close unfinished reviews stopped for an exec handoff, owned only by
-    /// `token`, including their session spans. Call before starting jobs.
-    /// Other tokens' rows are left alone; a proposal still a candidate is
-    /// reviewed again on a later pass, and an `interrupted` row is not
-    /// counted as an attempt.
-    fn interrupt_plan_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()>;
+    /// `token`, including their session spans, but those of `keep`, whose
+    /// verdicts the process before kept and this one applies (ADR-t3102-3
+    /// decision 5). Call before starting jobs. Other tokens' rows are left
+    /// alone; a proposal still a candidate is reviewed again on a later
+    /// pass, and an `interrupted` row is not counted as an attempt.
+    fn interrupt_plan_reviews_for_handoff(
+        &mut self,
+        token: &LeaseToken,
+        keep: &[i64],
+    ) -> Result<()>;
     /// Submitted proposals plan review may take now: not held, with a
     /// submitted task, and whether one of those has the interrupt priority.
     /// The order ([`crate::domain::next_to_review`]) only says which goes
@@ -662,6 +669,17 @@ pub trait PlanReviewStore {
         launch: &crate::domain::actor_model::ActorLaunch,
         supervisor_alive: &dyn Fn(u32) -> bool,
     ) -> Result<Option<PlanReviewJob>>;
+    /// Make `token` the owner of `job`'s unfinished row, so that it applies
+    /// the verdict a supervisor before it kept (ADR-t3102-3 decision 5),
+    /// when that owner is gone or is `token` itself
+    /// ([`crate::domain::headless_job::review_owner_gone`]; `alive` says
+    /// whether a registered owner's process lives): what it found.
+    fn take_over_plan_review(
+        &mut self,
+        job: &PlanReviewJob,
+        token: &LeaseToken,
+        alive: &dyn Fn(u32) -> bool,
+    ) -> Result<crate::domain::headless_job::ReviewTakeover>;
     /// Apply what the runtime made of the verdict and finish the job
     /// (`plan_review_finished`); an action the job may not take is an
     /// error, and nothing is applied.
@@ -826,7 +844,7 @@ pub trait PlanReviewStore {
 /// it reviews, its attempt at that goal, the goal's first task (where its
 /// `approve_goal` ask is), its directory, and how many `gaps` verdicts the
 /// goal got in a row before it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct GoalReviewJob {
     pub id: i64,
     pub goal_id: GoalId,
@@ -841,7 +859,7 @@ pub struct GoalReviewJob {
 }
 
 /// A finished goal review of a goal, for the next one's prompt.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct GoalReviewRecord {
     pub id: i64,
     pub attempt: usize,
@@ -854,7 +872,7 @@ pub struct GoalReviewRecord {
 /// the decision it acts on (a `gaps` past
 /// [`crate::domain::goal_review::MAX_GOAL_GAPS`] in a row is an `ask`,
 /// `overridden` saying why) and the `approve_goal` ask an `ask` opens.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GoalReviewApply {
     pub verdict: GoalReviewVerdict,
     pub decision: GoalReviewDecision,
@@ -870,7 +888,7 @@ pub struct GoalReviewApply {
 }
 
 /// Why a goal review job failed (`goal_review_failed`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GoalReviewFailure {
     pub error: String,
     pub duration_secs: u64,
@@ -891,7 +909,7 @@ pub struct GoalReviewFailure {
 
 /// What applying a goal review's verdict did. `stale`: nothing, because
 /// the job's row moved on or the goal's tasks changed meanwhile.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GoalReviewApplied {
     pub stale: bool,
     pub closed: bool,
@@ -902,7 +920,7 @@ pub struct GoalReviewApplied {
 
 /// A goal whose goal review failed and that waits for a person
 /// (`goal_review_failed`) until its tasks change or `goal review ID`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GoalReviewHold {
     pub goal_id: GoalId,
     pub anchor: Option<TaskId>,
@@ -910,7 +928,7 @@ pub struct GoalReviewHold {
 }
 
 /// What a person's `approve_goal` answer did to the goal.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GoalDecided {
     pub goal_id: GoalId,
     pub answer: String,
@@ -923,8 +941,14 @@ pub struct GoalDecided {
 /// applies (each in one transaction).
 pub trait GoalReviewStore {
     /// Close unfinished reviews stopped for an exec handoff, owned only by
-    /// `token`, including their session spans. Call before starting jobs.
-    fn interrupt_goal_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()>;
+    /// `token`, including their session spans, but those of `keep`, as
+    /// [`PlanReviewStore::interrupt_plan_reviews_for_handoff`] does. Call
+    /// before starting jobs.
+    fn interrupt_goal_reviews_for_handoff(
+        &mut self,
+        token: &LeaseToken,
+        keep: &[i64],
+    ) -> Result<()>;
     /// Open goals a goal review may take now, in ID order: at least one
     /// task, each completed, canceled or replaced with one completed (and
     /// every task a replaced one's replacement reaches ended, wherever it
@@ -971,6 +995,13 @@ pub trait GoalReviewStore {
     ) -> Result<Option<GoalReviewJob>>;
     /// The finished reviews of `goal`, oldest first.
     fn goal_reviews(&self, goal: GoalId) -> Result<Vec<GoalReviewRecord>>;
+    /// [`PlanReviewStore::take_over_plan_review`] of a goal review's row.
+    fn take_over_goal_review(
+        &mut self,
+        job: &GoalReviewJob,
+        token: &LeaseToken,
+        alive: &dyn Fn(u32) -> bool,
+    ) -> Result<crate::domain::headless_job::ReviewTakeover>;
     /// Apply the verdict in one transaction (`goal_review_finished`).
     fn finish_goal_review(
         &mut self,

@@ -107,7 +107,7 @@ impl Wall {
 /// A headless job a hold ask lists in its `affected` next to the runs
 /// (ADR-0047 decision 42, task 438): its entry names its kind and what it
 /// is about, and has a space, which no run ID has.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HoldJob {
     Review(RunId),
     Recovery(RunId),

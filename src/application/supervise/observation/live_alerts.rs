@@ -42,10 +42,15 @@ impl LiveAlertWatch {
             .recorder
             .observe(env.token.as_str(), now * 1000, observation);
         for (kind, payload) in records {
-            if let Err(error) = env.queue.record_queue_event(kind, payload) {
-                warn!(error = %format_args!("{error:#}"), "the record of the judgments of now could not be written: {error:#}");
-                self.recorder.reset();
-                return;
+            match env.queue.record_queue_event(kind, payload) {
+                // A record kept to be sent is written as far as the
+                // recorder goes.
+                Err(error) if !crate::application::supervisor_service::resend::kept(&error) => {
+                    warn!(error = %format_args!("{error:#}"), "the record of the judgments of now could not be written: {error:#}");
+                    self.recorder.reset();
+                    return;
+                }
+                _ => {}
             }
         }
     }

@@ -1032,6 +1032,18 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
             .is_some_and(|run| run.status() == RunStatus::Running)
     });
     assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    // The supervisor's token is kept for the process the exec runs, which
+    // takes it back, so a job started with it goes on; it goes with the
+    // supervisor's end.
+    let credential = dagq::infrastructure::queue_service::credential_path(
+        db.parent().unwrap(),
+        &dagq::domain::queue_service::Principal::supervisor(
+            &LeaseToken::new(&token),
+            std::process::id(),
+        )
+        .credential_key(),
+    );
+    let kept = fs::read_to_string(&credential).unwrap();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     assert_eq!(run.status(), RunStatus::Running);
@@ -1060,6 +1072,7 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
     assert_eq!(taken.token, token);
     assert_eq!(taken.pid, std::process::id());
     assert_eq!(taken.binary_version.as_deref(), Some(VERSION));
+    assert_eq!(fs::read_to_string(&credential).unwrap(), kept);
     fs::write(
         exit_request_path(run.run_dir().unwrap()).with_extension("go"),
         "",
@@ -1067,6 +1080,7 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
     .unwrap();
     let outcome = joined(next, "the supervisor after the handoff").unwrap();
     backend.join();
+    assert!(!credential.exists(), "{}", credential.display());
     assert_eq!(outcome["outcome"], "finished", "{outcome}");
     assert_eq!(outcome["errors"], json!([]));
     assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
@@ -1803,6 +1817,192 @@ mod review_verdicts {
         );
     }
 
+    /// The review verdicts kept beside the queue at `db`.
+    fn kept(db: &Path) -> usize {
+        use dagq::application::supervisor_service::resend::HeldRecords;
+        dagq::infrastructure::held_records::HeldDir::verdicts_of(db)
+            .kept()
+            .unwrap()
+            .len()
+    }
+
+    /// The ops that apply the reviews' verdicts.
+    const VERDICT_OPS: [&str; 2] = ["finish_plan_review", "finish_goal_review"];
+
+    /// A supervisor whose queue never takes a review's end through `ops`,
+    /// started once both reviews did, its jobs let go and their ends kept
+    /// beside the queue: its handle, and its stop.
+    fn verdicts_kept(
+        fx: &Fixture,
+        reviewer: &Arc<StubReviewer>,
+        (gate, ops): (&Path, &[&'static str]),
+        goal: GoalId,
+        task: TaskId,
+    ) -> (thread::JoinHandle<Value>, Arc<AtomicBool>) {
+        let (wrap, _) = crate::runtime_support::service::KeepsDown::wrap_all(ops);
+        let mut first = options(0, Duration::from_secs(3600));
+        first.once = false;
+        first.service_route = dagq::compose::ServiceRoute::InProcessThrough(wrap);
+        let stop = first.stop.clone();
+        let supervisor = spawn(fx, reviewer, first);
+        wait_until(&fx.db, crate::common::STEP_LIMIT, |queue| {
+            both_started(queue, goal, task)
+        });
+        std::fs::write(gate, "go").unwrap();
+        let started = Instant::now();
+        while kept(&fx.db) < 2 {
+            assert!(
+                started.elapsed() < crate::common::STEP_LIMIT,
+                "the review ends were never kept"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        (supervisor, stop)
+    }
+
+    /// The verdicts of a plan and a goal review the queue did not take
+    /// before their supervisor stopped stay kept beside the queue
+    /// (ADR-t3102-3 decision 5), their rows unfinished: the next
+    /// supervisor, under another registration, takes the rows over and
+    /// applies each verdict once, and neither review runs again.
+    #[test]
+    fn verdicts_not_taken_before_the_supervisor_stopped_are_applied_by_the_next() {
+        let fx = fixture();
+        let (goal, task, _) = candidates(&fx);
+        let gate = fx.db.with_extension("gate");
+        let reviewer = reviewer(&gate, 1);
+        let (supervisor, stop) = verdicts_kept(&fx, &reviewer, (&gate, &VERDICT_OPS), goal, task);
+        stop.store(true, Ordering::SeqCst);
+        let outcome = joined(supervisor, "the supervisor stopping");
+        assert_eq!(outcome["outcome"], "stopped", "{outcome}");
+        for table in ["plan_reviews", "goal_reviews"] {
+            assert_eq!(rows(&fx.db, table), vec![(None, None)], "{table}");
+        }
+        assert!(
+            SqliteQueue::open(&fx.db)
+                .unwrap()
+                .supervisors()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(kept(&fx.db), 2);
+        supervise_with(
+            &fx,
+            &PlanWorkspace::default(),
+            &reviewer,
+            &options(0, Duration::from_secs(3600)),
+        );
+        applied_once(&fx, &reviewer, goal, task);
+        assert_eq!(kept(&fx.db), 0);
+    }
+
+    /// The verdicts a supervisor kept when the queue did not take them are
+    /// applied by a supervisor that runs beside it, once it stopped, before
+    /// that one starts a review (ADR-t3102-3 decision 5): their rows are
+    /// taken over, not interrupted, and neither review runs again, though
+    /// the supervisor beside it started before they were kept.
+    #[test]
+    fn verdicts_kept_by_a_supervisor_that_stopped_are_applied_by_one_running_beside_it() {
+        let fx = fixture();
+        let (goal, task, _) = candidates(&fx);
+        let gate = fx.db.with_extension("gate");
+        let reviewer = reviewer(&gate, 2);
+        let (wrap, _) = crate::runtime_support::service::KeepsDown::wrap_all(&VERDICT_OPS);
+        let mut first = options(0, Duration::from_secs(3600));
+        first.once = false;
+        first.service_route = dagq::compose::ServiceRoute::InProcessThrough(wrap);
+        let stop_first = first.stop.clone();
+        let supervisor = spawn(&fx, &reviewer, first);
+        wait_until(&fx.db, crate::common::STEP_LIMIT, |queue| {
+            both_started(queue, goal, task)
+        });
+        let mut beside = options(0, Duration::from_secs(3600));
+        beside.once = false;
+        let (stop_beside, passes) = (beside.stop.clone(), beside.passes.clone());
+        let running = spawn(&fx, &reviewer, beside);
+        // Started, and looked at the kept ends, before any is kept.
+        crate::runtime_support::await_passes(&passes, 1);
+        std::fs::write(&gate, "go").unwrap();
+        let started = Instant::now();
+        while kept(&fx.db) < 2 {
+            assert!(
+                started.elapsed() < crate::common::STEP_LIMIT,
+                "the review ends were never kept"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        stop_first.store(true, Ordering::SeqCst);
+        let outcome = joined(supervisor, "the supervisor stopping");
+        assert_eq!(outcome["outcome"], "stopped", "{outcome}");
+        wait_until(&fx.db, crate::common::STEP_LIMIT, |queue| {
+            !events(queue, task, "plan_review_finished").is_empty()
+                && !goal_events(queue, goal, "goal_review_finished").is_empty()
+        });
+        stop_beside.store(true, Ordering::SeqCst);
+        let outcome = joined(running, "the supervisor beside it stopping");
+        assert_eq!(outcome["outcome"], "stopped", "{outcome}");
+        applied_once(&fx, &reviewer, goal, task);
+        assert_eq!(kept(&fx.db), 0);
+    }
+
+    /// The failures of a plan and a goal review the queue did not take
+    /// before their supervisor stopped are kept as verdicts are
+    /// (ADR-t3102-3 decision 5), their rows unfinished: the next supervisor
+    /// takes the rows over and records each failure once, both wait for a
+    /// person, and neither review runs again.
+    #[test]
+    fn failures_not_taken_before_the_supervisor_stopped_are_recorded_by_the_next() {
+        let fx = fixture();
+        let (goal, task, _) = candidates(&fx);
+        let gate = fx.db.with_extension("gate");
+        let reviewer = Arc::new(StubReviewer::failing().gated(&gate));
+        let ops = ["fail_plan_review", "fail_goal_review"];
+        let (supervisor, stop) = verdicts_kept(&fx, &reviewer, (&gate, &ops), goal, task);
+        stop.store(true, Ordering::SeqCst);
+        let outcome = joined(supervisor, "the supervisor stopping");
+        assert_eq!(outcome["outcome"], "stopped", "{outcome}");
+        for table in ["plan_reviews", "goal_reviews"] {
+            assert_eq!(rows(&fx.db, table), vec![(None, None)], "{table}");
+        }
+        assert_eq!(kept(&fx.db), 2);
+        supervise_with(
+            &fx,
+            &PlanWorkspace::default(),
+            &reviewer,
+            &options(0, Duration::from_secs(3600)),
+        );
+        let mut queue = SqliteQueue::open(&fx.db).unwrap();
+        assert_eq!(events(&mut queue, task, "plan_review_failed").len(), 1);
+        assert_eq!(goal_events(&mut queue, goal, "goal_review_failed").len(), 1);
+        assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
+        for table in ["plan_reviews", "goal_reviews"] {
+            let rows = rows(&fx.db, table);
+            assert_eq!(rows.len(), 1, "{table}: {rows:?}");
+            assert_eq!(rows[0].0.as_deref(), Some("failed"), "{table}: {rows:?}");
+        }
+        assert_eq!(reviewer.prompts().len(), 2);
+        assert_eq!(kept(&fx.db), 0);
+    }
+
+    /// The same across an exec: the verdicts the queue did not take before
+    /// the handoff are applied by the next process under the same
+    /// registration, their rows not interrupted by its start.
+    #[test]
+    fn verdicts_not_taken_before_the_exec_are_applied_by_the_next_process() {
+        let fx = fixture();
+        let (goal, task, _) = candidates(&fx);
+        let gate = fx.db.with_extension("gate");
+        let reviewer = reviewer(&gate, 1);
+        let (supervisor, _) = verdicts_kept(&fx, &reviewer, (&gate, &VERDICT_OPS), goal, task);
+        let token = request_handoff(&fx.db);
+        let outcome = joined(supervisor, "the supervisor handing off");
+        assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+        assert_eq!(kept(&fx.db), 2);
+        continue_after(&fx, &reviewer, token);
+        applied_once(&fx, &reviewer, goal, task);
+        assert_eq!(kept(&fx.db), 0);
+    }
+
     /// A plan and a goal review that end while the handoff waits (here for
     /// a host sample in progress) are reaped and applied in the wait; none
     /// starts again there nor in the next process.
@@ -1929,6 +2129,100 @@ mod review_verdicts {
         assert_eq!(
             goal_events(&mut queue, goal, "goal_review_finished").len(),
             1
+        );
+    }
+
+    /// The store's side of taking over a review's row (ADR-t3102-3
+    /// decision 5): the row moves to the new token only once its owner's
+    /// heartbeat is old and its process gone, a finished row is not taken,
+    /// and a handoff's interrupt leaves the row of a verdict held. Whether
+    /// an owner is gone is the unit test of `domain::headless_job`.
+    #[test]
+    fn a_reviews_row_is_taken_over_only_from_a_gone_supervisor_until_it_finishes() {
+        use dagq::application::PlanReviewStore;
+        use dagq::domain::headless_job::ReviewTakeover;
+        use dagq::domain::{PlannerOrigin, PlannerOwner, Submission};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("q.db");
+        let mut queue = SqliteQueue::init(&db).unwrap();
+        let task =
+            dagq::application::TaskStore::add(&mut queue, crate::common::queue::new_task("t"))
+                .unwrap()
+                .id();
+        let proposal = dagq::application::TaskStore::submit(
+            &mut queue,
+            Submission {
+                tasks: vec![task],
+                goals: Vec::new(),
+                proposal: None,
+                owner: PlannerOwner {
+                    origin: PlannerOrigin::Person,
+                    workspace_id: None,
+                },
+            },
+        )
+        .unwrap()
+        .id();
+        let (old, new) = (LeaseToken::new("old"), LeaseToken::new("new"));
+        let job = queue
+            .begin_plan_review(
+                proposal,
+                &old,
+                &dir.path().join("plan-reviews"),
+                Path::new("/repo"),
+                &dagq::domain::actor_model::ActorLaunch::default_of(
+                    dagq::domain::actor_model::ModelRole::PlanReview,
+                ),
+                &|_| false,
+            )
+            .unwrap()
+            .unwrap();
+        let conn = Connection::open(&db).unwrap();
+        let now: i64 = conn
+            .query_row("SELECT CAST(strftime('%s','now') AS INTEGER)", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        conn.execute(
+            "INSERT INTO supervisors(token, pid, parallel, heartbeat_at) VALUES ('old', 41, 1, ?1)",
+            [now],
+        )
+        .unwrap();
+        let owner = || -> String {
+            conn.query_row(
+                "SELECT supervisor_token FROM plan_reviews WHERE id=?1",
+                [job.id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let alive = |pid: u32| pid != 41;
+        assert_eq!(
+            queue.take_over_plan_review(&job, &new, &alive).unwrap(),
+            ReviewTakeover::OwnerRuns
+        );
+        assert_eq!(owner(), "old");
+        conn.execute(
+            "UPDATE supervisors SET heartbeat_at=?1 WHERE token='old'",
+            [now - dagq::domain::HEARTBEAT_TIMEOUT_SECS - 1],
+        )
+        .unwrap();
+        assert_eq!(
+            queue.take_over_plan_review(&job, &new, &alive).unwrap(),
+            ReviewTakeover::Taken
+        );
+        assert_eq!(owner(), "new");
+        queue
+            .interrupt_plan_reviews_for_handoff(&new, &[job.id])
+            .unwrap();
+        assert_eq!(
+            queue.take_over_plan_review(&job, &new, &|_| true).unwrap(),
+            ReviewTakeover::Taken
+        );
+        queue.interrupt_plan_reviews_for_handoff(&new, &[]).unwrap();
+        assert_eq!(
+            queue.take_over_plan_review(&job, &new, &|_| false).unwrap(),
+            ReviewTakeover::Finished
         );
     }
 }

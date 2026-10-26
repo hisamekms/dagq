@@ -267,6 +267,13 @@ impl ObservationState {
         // The observe command is the supervisor's; its agent is the
         // observer (ADR-t728-1 decision 4).
         command.envs(layout.supervisor_actor().env());
+        // It reaches the queue as this supervisor (ADR-t3102-3 decision 3).
+        if layout.jobs_through_service {
+            command.env(
+                crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV,
+                env.token.as_str(),
+            );
+        }
         if mode == ObserveMode::Daily {
             command.arg("--daily");
         }

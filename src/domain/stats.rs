@@ -133,7 +133,7 @@ pub const BACKEND_FAILURES: i64 = 2;
 /// or before it. Written as digits for an event id, `@` and unix
 /// seconds for a time, or an RFC 3339 time; bare digits are always an event
 /// id, so unix seconds take the `@`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Cursor {
     Event(EventId),
     /// Unix milliseconds.
@@ -231,7 +231,7 @@ pub fn rfc3339_millis(text: &str) -> Option<i64> {
 }
 
 /// What `stats` looks at.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct StatsQuery {
     /// Only runs that finished after this cursor (`--since`).
     pub since: Option<Cursor>,

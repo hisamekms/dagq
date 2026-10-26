@@ -279,6 +279,15 @@ impl ActorContext {
         self.task_id
     }
 
+    /// The pid of a supervisor's actor (`supervisor:<pid>`, the actor its
+    /// job commands run as); `None` for any other actor.
+    pub fn supervisor_pid(&self) -> Option<u32> {
+        if self.role != ActorRole::Supervisor {
+            return None;
+        }
+        self.actor_id.strip_prefix("supervisor:")?.parse().ok()
+    }
+
     /// The actor of a process from its environment (`env` reads one
     /// variable). No `DAGQ_ROLE`, or an empty one, is the user. A value
     /// that is not a role other than the user is an error, and so is an
@@ -379,6 +388,28 @@ pub fn with_actor(mut env: Vec<(String, String)>, actor: &ActorContext) -> Vec<(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    /// Only a supervisor's actor that names its pid has one.
+    #[test]
+    fn only_a_supervisors_actor_naming_its_pid_has_one() {
+        use super::{ActorContext, ActorRole};
+        assert_eq!(
+            ActorContext::instance(ActorRole::Supervisor, 4321).supervisor_pid(),
+            Some(4321)
+        );
+        assert_eq!(
+            ActorContext::new(ActorRole::Supervisor, "supervisor:x").supervisor_pid(),
+            None
+        );
+        assert_eq!(
+            ActorContext::new(ActorRole::Supervisor, "supervisor").supervisor_pid(),
+            None
+        );
+        assert_eq!(
+            ActorContext::new(ActorRole::Worker, "supervisor:4321").supervisor_pid(),
+            None
+        );
+    }
 
     use super::*;
 

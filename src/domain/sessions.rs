@@ -177,7 +177,7 @@ impl SpanRef {
 }
 
 /// A span that is open: its `session_opened` event and payload.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OpenSpan {
     pub opened_event_id: EventId,
     pub payload: Value,
@@ -616,7 +616,8 @@ pub const LAUNCH_ENV: &str = "DAGQ_LAUNCH";
 pub struct SessionHook {
     pub event: HookEvent,
     /// The span's kind, one of [`HOOK_KINDS`] ([`hook_kind`]).
-    pub kind: &'static str,
+    #[serde(deserialize_with = "super::interned::text")]
+    pub kind: super::interned::Text,
     pub session_id: String,
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,

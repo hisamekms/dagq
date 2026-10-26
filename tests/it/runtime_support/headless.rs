@@ -354,6 +354,8 @@ pub fn launch_background(
     let processes = backend.wrapper_processes.clone();
     let containers = backend.containers.clone();
     let worker = thread::spawn(move || {
+        // The double stands for the wrapper's own process.
+        let _wrapper = dagq::infrastructure::sqlite::as_another_process();
         if let Some(gate) = &gate {
             wait_for_file(gate);
         }

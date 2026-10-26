@@ -940,7 +940,7 @@ pub struct LeasedRun {
 /// `main_before`. `verification_skipped` is always false: every landing
 /// runs the verification commands (ADR-0023 decision 1); the field keeps the
 /// `run_integrated` payload's shape.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Landing {
     pub commit: CommitSha,
     pub source_commit: CommitSha,
@@ -1017,7 +1017,7 @@ pub use crate::domain::resume::Exhaustion;
 /// What a recovery round of a `failed` or `interrupted` run does to it
 /// (ADR-0047 decision 40), recorded as `triage_finished`'s `action`: the
 /// job's action once its preconditions held, or the ask it escalated to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TriageAction {
     /// The task goes back to `ready`; the next claim makes a new run.
     Retry,
@@ -1683,7 +1683,7 @@ pub trait RunRecovery {
 
 /// What became of a result a hold kept, once [`RunRecovery::settle_kept_result`]
 /// read it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum KeptOutcome {
     /// Its task is held again, or it was settled already: nothing changed.
     Untouched,

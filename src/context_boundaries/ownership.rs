@@ -358,6 +358,7 @@ pub(super) const TABLES: &[Table] = &[
     table("headless_jobs", Host),
     table("asks", Shared), // an ask is opened and applied by the context of its kind
     table("run_events", Shared), // each context writes its own kinds (src/domain/event_kind.rs)
+    table("event_records", Shared), // the identity of the result's record each event was written for
 ];
 
 #[rustfmt::skip]
@@ -672,6 +673,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/queue_service.rs", "ServiceAccess", Some(Host), Public(Only(&[Execution, Planning]))), // not classified by architecture.md; the supervisor issues a token at the claim and the resume, and a planner's wrapper's as it starts the wrapper
     outer_port("src/application/queue_service.rs", "TelemetryTokens", Some(Host), Public(Only(&[Execution]))), // not classified by architecture.md; the supervisor issues and revokes an executor's telemetry token per target
     outer_port("src/application/supervisor_service.rs", "ServiceCaller", Some(Host), Public(Only(&[Execution]))), // how the supervisor reaches its queue's service; it signs in before it registers (ADR-t3102-3)
+    outer_port("src/application/supervisor_service/resend.rs", "HeldRecords", Some(Host), Public(Only(&[Planning]))), // where the supervisor and a job command keep the results' records the service did not take, for the next supervisor to send, and 計画管理 the review verdicts the queue did not take (ADR-t3102-3)
     outer_port("src/application/setup_review.rs", "SetupReviewHost", Some(Execution), Internal), // the main checkout, the temporary place and the job of setup-review
     outer_port("src/application/setup_review.rs", "InitRepository", Some(Execution), Internal), // the main checkout, its dagq.toml and its files init proposes the toolchain profiles from
     outer_port("src/application/ci_watch.rs", "CiSource", Some(Observation), Internal),

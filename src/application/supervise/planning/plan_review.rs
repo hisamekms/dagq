@@ -9,8 +9,10 @@
 //! pass.
 
 use super::*;
+use super::{VerdictSent, verdict_sent};
 use crate::domain::EventKind;
 use crate::domain::actor_model::RoleModels;
+use crate::domain::headless_job::ReviewTakeover;
 use crate::domain::language::with_instruction;
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::{ActorContext, Ask, AskConfidence, PlannerId};
@@ -69,6 +71,58 @@ pub(in crate::application::supervise) struct PlanReviewWatch {
     pub(super) switchable: bool,
     /// What its prompt took, recorded when it ends (task 1561).
     pub(super) prompt_bytes: PromptBytes,
+}
+
+/// The end of a plan review, its verdict or its failure, held while the
+/// queue does not take it (ADR-t3102-3 decision 5): the job's process is
+/// gone, so what it gave is kept beside the queue and sent again, by this
+/// supervisor or the next, and the queue applies or records it once (a job
+/// no longer running takes nothing), so the review does not run again.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(in crate::application::supervise) struct HeldPlanReview {
+    job: PlanReviewJob,
+    end: PlanReviewEnd,
+    /// Its key where it is kept, once kept.
+    #[serde(skip)]
+    kept: Option<String>,
+}
+
+/// What a plan review that ended gives the queue.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum PlanReviewEnd {
+    /// Its verdict, applied as its job.
+    Verdict {
+        revise_count: u32,
+        /// Whole, its reason codes too, as it crosses to the service.
+        #[serde(with = "crate::domain::plan_review::whole_verdict")]
+        verdict: PlanReviewVerdict,
+        duration_secs: u64,
+        session: Option<crate::domain::headless_job::JobSession>,
+        prompt_bytes: PromptBytes,
+    },
+    /// Its failure, after which the proposal waits for a person
+    /// (`plan_review_failed`) or moves to the other provider.
+    Failed(PlanReviewFailure),
+}
+
+impl HeldPlanReview {
+    /// The row of its job.
+    pub(super) fn id(&self) -> i64 {
+        self.job.id
+    }
+
+    /// Its key where it is kept, once kept.
+    pub(super) fn kept_key(&self) -> Option<&str> {
+        self.kept.as_deref()
+    }
+
+    /// `held`, read back from where it is kept as `key`.
+    pub(super) fn kept(held: Self, key: String) -> Self {
+        Self {
+            kept: Some(key),
+            ..held
+        }
+    }
 }
 
 /// Where the next plan review goes (ADR-t1063-1 decisions 1, 4 and 5,
@@ -161,14 +215,28 @@ impl PlanningState {
     /// The first step of 計画管理 after a handoff's exec: the plan and goal
     /// reviews the process before stopped cannot produce a verdict, so
     /// their rows and spans under this token are closed, even when their
-    /// proposal or goal is no longer a candidate.
+    /// proposal or goal is no longer a candidate. The rows of the ends
+    /// held (verdicts and failures) are left for them to finish
+    /// (ADR-t3102-3 decision 5).
     pub(in crate::application::supervise) fn interrupt_for_handoff(
         &mut self,
         env: &mut PlanningEnv<'_>,
     ) -> Result<()> {
         let token = env.token;
-        env.queue.interrupt_plan_reviews_for_handoff(token)?;
-        env.queue.interrupt_goal_reviews_for_handoff(token)?;
+        let plans: Vec<i64> = self
+            .held_plan_reviews
+            .iter()
+            .map(HeldPlanReview::id)
+            .collect();
+        env.queue
+            .interrupt_plan_reviews_for_handoff(token, &plans)?;
+        let goals: Vec<i64> = self
+            .held_goal_reviews
+            .iter()
+            .map(super::goal_review::HeldGoalReview::id)
+            .collect();
+        env.queue
+            .interrupt_goal_reviews_for_handoff(token, &goals)?;
         Ok(())
     }
 
@@ -300,7 +368,13 @@ impl PlanningState {
 
     /// Start the plan review of the next candidate, when none runs.
     fn start_plan_review(&mut self, env: &mut PlanningEnv<'_>) -> Result<()> {
-        if self.plan_review.is_some() {
+        if self.plan_review.is_some() || !self.held_plan_reviews.is_empty() {
+            return Ok(());
+        }
+        // The end a supervisor gone since kept is applied first: the start
+        // below would interrupt its row, and the review would run again.
+        self.take_kept_verdicts(&**env.processes);
+        if !self.held_plan_reviews.is_empty() {
             return Ok(());
         }
         let Some(proposal_id) = next_to_review(&env.queue.plan_review_candidates()?) else {
@@ -713,6 +787,9 @@ impl PlanningState {
         &mut self,
         env: &mut PlanningEnv<'_>,
     ) -> Result<bool> {
+        if let Some(held) = self.held_plan_reviews.pop_front() {
+            return Ok(self.apply_held_plan_review(env, held));
+        }
         let Some(provider) = self.plan_review.as_ref().map(|w| w.headless.provider()) else {
             return Ok(false);
         };
@@ -739,18 +816,25 @@ impl PlanningState {
             .is_err()
             .then(|| env.jobs.job_failure(&**env.pass.files, &watch.headless));
         let applied = verdict.map_err(|error| anyhow!(error)).and_then(|verdict| {
-            let job = ActorContext::plan_review_job(watch.job.proposal_id, watch.job.attempt);
-            env.for_job(&job, |env| {
-                Self::apply_plan_verdict(
-                    env,
-                    &watch.job,
-                    watch.revise_count,
+            let held = HeldPlanReview {
+                job: watch.job.clone(),
+                end: PlanReviewEnd::Verdict {
+                    revise_count: watch.revise_count,
                     verdict,
                     duration_secs,
-                    session.clone(),
-                    &watch.prompt_bytes,
-                )
-            })
+                    session: session.clone(),
+                    prompt_bytes: watch.prompt_bytes.clone(),
+                },
+                kept: None,
+            };
+            match verdict_sent(Self::send_plan_end(env, &held)) {
+                VerdictSent::Applied => Ok(()),
+                VerdictSent::Held => {
+                    self.hold_plan_end(held);
+                    Ok(())
+                }
+                VerdictSent::Failed(error) => Err(anyhow!(error)),
+            }
         });
         if let Err(error) = applied {
             let error = format!("{error:#}");
@@ -785,6 +869,115 @@ impl PlanningState {
             );
         }
         Ok(true)
+    }
+
+    /// Hold `held`, which the queue did not take, to send it again on the
+    /// next pass, kept beside the queue for the next supervisor.
+    fn hold_plan_end(&mut self, held: HeldPlanReview) {
+        let what = match held.end {
+            PlanReviewEnd::Verdict { .. } => "verdict",
+            PlanReviewEnd::Failed(_) => "failure",
+        };
+        warn!(task_id = %held.job.anchor, "proposal {}: the plan review's {what} is held until the queue takes it", held.job.proposal_id);
+        let kept = self.keep_verdict(super::PLAN_VERDICT, &held);
+        self.held_plan_reviews
+            .push_back(HeldPlanReview { kept, ..held });
+    }
+
+    /// Send `held` again, its row taken over first from a supervisor gone
+    /// since it kept it ([`PlanReviewStore::take_over_plan_review`]): held
+    /// once more while the queue does not take it or its owner still runs,
+    /// let go when its row finished already, else applied or recorded, and
+    /// a verdict the queue refuses recorded as its job's failure. Whether
+    /// it left the hold.
+    fn apply_held_plan_review(&mut self, env: &mut PlanningEnv<'_>, held: HeldPlanReview) -> bool {
+        let (processes, token) = (env.processes.clone(), env.token);
+        let taken = env
+            .queue
+            .take_over_plan_review(&held.job, token, &|pid| processes.alive(pid));
+        let sent = match taken {
+            Ok(ReviewTakeover::Taken) => Self::send_plan_end(env, &held),
+            Ok(ReviewTakeover::OwnerRuns) => {
+                info!(task_id = %held.job.anchor, "proposal {}: the plan review's kept end waits for the supervisor that holds its row", held.job.proposal_id);
+                self.held_plan_reviews.push_front(held);
+                return false;
+            }
+            Ok(ReviewTakeover::Finished) => {
+                info!(task_id = %held.job.anchor, "proposal {}: the plan review's row finished already; its kept end is let go", held.job.proposal_id);
+                self.forget_verdict(held.kept.as_deref());
+                return true;
+            }
+            Err(error) => Err(error),
+        };
+        match verdict_sent(sent) {
+            VerdictSent::Applied => {
+                self.forget_verdict(held.kept.as_deref());
+                true
+            }
+            VerdictSent::Held => {
+                self.held_plan_reviews.push_front(held);
+                false
+            }
+            VerdictSent::Failed(error) => {
+                // The failure is sent, and kept if not taken, before the
+                // verdict's record goes, so that one of them is kept.
+                match held.end {
+                    PlanReviewEnd::Verdict {
+                        duration_secs,
+                        session,
+                        prompt_bytes,
+                        ..
+                    } => self.fail_plan_review(
+                        env,
+                        &held.job,
+                        &PlanReviewFailure {
+                            error,
+                            duration_secs,
+                            session,
+                            ran: true,
+                            unusable: None,
+                            prompt_bytes: Some(prompt_bytes),
+                        },
+                    ),
+                    PlanReviewEnd::Failed(_) => {
+                        warn!(task_id = %held.job.anchor, error = %error, "proposal {}: the plan review failure could not be recorded: {error}", held.job.proposal_id);
+                    }
+                }
+                self.forget_verdict(held.kept.as_deref());
+                true
+            }
+        }
+    }
+
+    /// Apply `held`'s verdict as its job, or record its failure.
+    fn send_plan_end(env: &mut PlanningEnv<'_>, held: &HeldPlanReview) -> Result<()> {
+        match &held.end {
+            PlanReviewEnd::Verdict {
+                revise_count,
+                verdict,
+                duration_secs,
+                session,
+                prompt_bytes,
+            } => {
+                let job = ActorContext::plan_review_job(held.job.proposal_id, held.job.attempt);
+                env.for_job(&job, |env| {
+                    Self::apply_plan_verdict(
+                        env,
+                        &held.job,
+                        *revise_count,
+                        verdict.clone(),
+                        *duration_secs,
+                        session.clone(),
+                        prompt_bytes,
+                    )
+                })
+            }
+            PlanReviewEnd::Failed(failure) => {
+                env.pass
+                    .queue
+                    .fail_plan_review(&held.job, env.pass.token, failure)
+            }
+        }
     }
 
     /// What the runtime makes of the verdict (a revise past
@@ -856,7 +1049,7 @@ impl PlanningState {
     /// Record the job's failure; the proposal waits for a person
     /// (`plan_review_failed`) and is not reviewed again by itself, unless
     /// its provider could not be used and it moves (ADR-t1063-1 decision
-    /// 4).
+    /// 4). A failure the queue does not take is held as a verdict is.
     fn fail_plan_review(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -874,12 +1067,17 @@ impl PlanningState {
             }
         }
         end_job_telemetry(env, TargetKind::PlanReview, job.id);
-        if let Err(recorded) = env
-            .pass
-            .queue
-            .fail_plan_review(job, env.pass.token, failure)
-        {
-            warn!(error = %format_args!("{recorded:#}"), "proposal {}: the plan review failure could not be recorded: {recorded:#}", job.proposal_id);
+        let held = HeldPlanReview {
+            job: job.clone(),
+            end: PlanReviewEnd::Failed(failure.clone()),
+            kept: None,
+        };
+        match verdict_sent(Self::send_plan_end(env, &held)) {
+            VerdictSent::Applied => {}
+            VerdictSent::Held => self.hold_plan_end(held),
+            VerdictSent::Failed(recorded) => {
+                warn!(error = %recorded, "proposal {}: the plan review failure could not be recorded: {recorded}", job.proposal_id);
+            }
         }
     }
 
@@ -1186,7 +1384,7 @@ impl PlanningState {
                     busy: self
                         .busy_reasons(env, view, &revising)?
                         .into_iter()
-                        .map(PlannerBusy::as_str)
+                        .map(|busy| busy.as_str().to_owned())
                         .collect(),
                     proposal_id: view.planner.proposal_id,
                     draft_task_id: view.planner.draft_task_id,
@@ -2474,6 +2672,99 @@ fn replacement_material(
 mod tests {
     use super::*;
     use crate::domain::MAX_PLAN_REVISES;
+
+    /// A plan review's end kept beside the queue comes back whole, with
+    /// its key, to the supervisor that takes it: its verdict with its
+    /// reason codes too, and its failure with its provider and prompt. The
+    /// process that kept it takes it after an exec, and the next one once
+    /// that process is gone; a live supervisor's is left to it.
+    #[test]
+    fn a_kept_plan_review_end_comes_back_whole_to_the_supervisor_that_takes_it() {
+        use super::super::{KeptVerdict, PLAN_VERDICT, kept_verdict, verdict_record};
+        use crate::domain::provider_switch::SwitchReason;
+        let job = PlanReviewJob {
+            id: 7,
+            proposal_id: ProposalId::new(3),
+            attempt: 2,
+            anchor: TaskId::new(5),
+            dir: PathBuf::from("/queue/plan-reviews/7"),
+            session_id: Some("session".into()),
+        };
+        let verdict = PlanReviewVerdict {
+            verdict: PlanReviewDecision::Revise,
+            reasons: vec!["split it".into()],
+            reason_codes: vec![vec!["scope".into()]],
+            summary: "too big".into(),
+            actions: Vec::new(),
+            reopen: Vec::new(),
+            precedents: Vec::new(),
+            predictions: None,
+            recommendation: None,
+            confidence: None,
+            reason_category: None,
+        };
+        let ends = [
+            PlanReviewEnd::Verdict {
+                revise_count: 1,
+                verdict: verdict.clone(),
+                duration_secs: 42,
+                session: None,
+                prompt_bytes: PromptBytes::default(),
+            },
+            PlanReviewEnd::Failed(PlanReviewFailure {
+                error: "exited 1".into(),
+                duration_secs: 42,
+                ran: true,
+                unusable: Some((crate::domain::Provider::Codex, SwitchReason::UsageLimit)),
+                prompt_bytes: Some(PromptBytes::default()),
+                ..PlanReviewFailure::default()
+            }),
+        ];
+        for end in ends {
+            let held = HeldPlanReview {
+                job: job.clone(),
+                end,
+                kept: None,
+            };
+            let record = crate::application::supervisor_service::resend::KeptRecord {
+                key: "kept-1".into(),
+                use_case: crate::domain::queue_service::UseCase::Supervisor,
+                params: verdict_record(PLAN_VERDICT, 10, &held).unwrap(),
+            };
+            for (pid, alive) in [(10, true), (11, false)] {
+                let KeptVerdict::Plan(back) = kept_verdict(&record, pid, |_| alive) else {
+                    panic!("supervisor {pid} does not take it");
+                };
+                assert_eq!(back.job, job);
+                assert_eq!(back.kept.as_deref(), Some("kept-1"));
+                match (&back.end, &held.end) {
+                    (
+                        PlanReviewEnd::Verdict {
+                            revise_count,
+                            verdict: back_verdict,
+                            duration_secs,
+                            ..
+                        },
+                        PlanReviewEnd::Verdict { .. },
+                    ) => {
+                        assert_eq!(*back_verdict, verdict);
+                        assert_eq!((*revise_count, *duration_secs), (1, 42));
+                    }
+                    (PlanReviewEnd::Failed(back), PlanReviewEnd::Failed(failure)) => {
+                        assert_eq!(back.error, failure.error);
+                        assert_eq!(back.unusable, failure.unusable);
+                        assert_eq!((back.duration_secs, back.ran), (42, true));
+                        assert!(back.prompt_bytes.is_some());
+                    }
+                    (back, held) => panic!("{back:?} came back for {held:?}"),
+                }
+            }
+            assert!(matches!(
+                kept_verdict(&record, 11, |pid| pid == 10),
+                KeptVerdict::Others
+            ));
+        }
+    }
 
     /// ADR-t1704-1 decision 1: a planner is ended for a person's answer
     /// only when its unanswered question is all that holds it, besides a

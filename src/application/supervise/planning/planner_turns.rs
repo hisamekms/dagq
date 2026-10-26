@@ -259,6 +259,10 @@ impl PlanningState {
                         None
                     }
                 };
+                // Kept as a result, though the next pass would find it
+                // missing: found again, the hold would be taken again, and
+                // a hold ask a person answered meanwhile opened again. What
+                // is kept goes before each pass reads the queue.
                 env.queue.record_queue_event(
                     EventKind::ProviderWaiting,
                     waiting_payload(id, turn, reason, message, ask_id),

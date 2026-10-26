@@ -614,6 +614,10 @@ impl LedgerWatch {
                 .record_queue_event(EventKind::LedgerBuildFailed, payload)
             {
                 Ok(_) => self.recorded = true,
+                // Kept to be sent, it is recorded.
+                Err(error) if crate::application::supervisor_service::resend::kept(&error) => {
+                    self.recorded = true
+                }
                 Err(error) => {
                     warn!(error = %format_args!("{error:#}"), "ledger_build_failed could not be recorded: {error:#}");
                 }

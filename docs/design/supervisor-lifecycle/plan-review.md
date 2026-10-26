@@ -100,6 +100,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - `approve_plan`のaskへの答え: `PlanReviewStore::decide_plan`と`domain::plan_review::PlanAnswer`、concernのaskはuse caseの`plan_ask`。
 - execの[引き継ぎ](handoff.md)の前後: `PlanningState::stop_for_handoff`・`interrupt_for_handoff`。
 - 約束: 引き継ぎを待つあいだに終わったjobのverdictは捨てずに適用し、新しいjobは始めない。
+- queueが取らなかった終わり（verdictか失敗）の行はexecの後も閉じず、引き継いだプロセスが残された終わりで終える（[Supervise](supervise.md#queue-serviceの経路)）。
 
 ## reviseの配送
 

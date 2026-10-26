@@ -14,7 +14,7 @@
 //! registered task of the key is neither `completed` nor `canceled`, no
 //! next one is registered.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{EvidenceCheck, GoalId, NewTask, TaskId};
@@ -25,7 +25,7 @@ pub const DAY_SECS: i64 = 86_400;
 /// One `[[recurring]]` table of `dagq.toml`: a permanent `key` unique in
 /// the file, the interval in whole days, and the material of the draft
 /// (each required but `goal`, the goal its draft is proposed to belong to).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecurringDraft {
     /// The permanent name of the proposal in the queue: its history and
     /// its overlap check go by it.
@@ -131,7 +131,7 @@ pub fn origin_material(item: &RecurringDraft, last: Option<(TaskId, i64)>) -> Va
 }
 
 /// What a supervisor's pass did with one `[[recurring]]` key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum RecurringOutcome {
     /// A draft was registered.

@@ -51,6 +51,8 @@ pub trait ObservationSources<Q: ?Sized> {
     /// `stats_inputs` ([`crate::application::stats::stats_inputs`]).
     fn stats_inputs(&self, queue: &Q) -> Result<Value>;
     fn kpi(&self, queue: &Q, query: &KpiQuery, git: Option<&StatsGitReads>) -> Result<Value>;
+    /// The observer's KPI input ([`crate::domain::kpi::observe::observer_input`]).
+    fn observer_kpi(&self, queue: &Q, git: Option<&StatsGitReads>) -> Result<Value>;
     fn forecast(&self, queue: &Q, query: &ForecastQuery) -> Result<Value>;
     /// The limit of the improvement proposals and the ones waiting
     /// (`findings`' `improvements`).
@@ -329,6 +331,9 @@ mod tests {
             unimplemented!()
         }
         fn kpi(&self, _: &Records, _: &KpiQuery, _: Option<&StatsGitReads>) -> Result<Value> {
+            unimplemented!()
+        }
+        fn observer_kpi(&self, _: &Records, _: Option<&StatsGitReads>) -> Result<Value> {
             unimplemented!()
         }
         fn forecast(&self, _: &Records, _: &ForecastQuery) -> Result<Value> {

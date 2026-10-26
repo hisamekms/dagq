@@ -16,7 +16,7 @@ use super::{
 /// What moves a task between statuses by hand or by plan review; only a
 /// claim marks it in progress, and only its run completes it: a landing, or
 /// a verified `already_satisfied` claim closed without one (ADR-t1818-1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TaskAction {
     /// A retry: an in-progress task whose runs all failed or were
     /// interrupted goes back to ready unchanged, which needs no plan review
@@ -883,6 +883,44 @@ impl From<Task> for TaskWire {
             created_at,
             updated_at,
         }
+    }
+}
+
+/// A task field of a value that crosses between processes as a whole
+/// (`#[serde(with = "crate::domain::task::whole")]`): as its [`TaskWire`],
+/// not the CLI's JSON.
+pub mod whole {
+    use super::{Task, TaskWire};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(task: &Task, serializer: S) -> Result<S::Ok, S::Error> {
+        TaskWire::from(task.clone()).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Task, D::Error> {
+        TaskWire::deserialize(deserializer).map(Task::from)
+    }
+}
+
+/// [`whole`] for a list of tasks.
+pub mod whole_list {
+    use super::{Task, TaskWire};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(tasks: &[Task], serializer: S) -> Result<S::Ok, S::Error> {
+        tasks
+            .iter()
+            .cloned()
+            .map(TaskWire::from)
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Task>, D::Error> {
+        Ok(Vec::<TaskWire>::deserialize(deserializer)?
+            .into_iter()
+            .map(Task::from)
+            .collect())
     }
 }
 

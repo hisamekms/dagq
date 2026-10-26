@@ -287,7 +287,7 @@ pub fn new_review_follow_ups(
 /// document's path and section ([`ReviewFollowUpKey`]), whichever review
 /// of the run (`attempt`) and job (`agent`, `None` for the whole review)
 /// found it first.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FollowUpKey {
     Receipt {
         index: usize,
@@ -993,7 +993,7 @@ pub fn check_destination_acceptance(
 
 /// A follow_up whose source goal is the goal a review or a close looks at
 /// (ADR-t1504-2 decision 8), wherever it belongs now.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SourceFollowUp {
     pub task: super::TaskId,
     pub status: super::TaskStatus,
@@ -1081,7 +1081,7 @@ pub const GOAL_FOLLOW_UPS_UNSETTLED: &str = "goal_follow_ups_unsettled";
 
 /// A source follow-up as that attention reads it, with what already shows
 /// or handles it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WaitingFollowUp {
     pub follow_up: SourceFollowUp,
     /// A planner of the runtime's is still to be opened for it or is open
@@ -1107,7 +1107,7 @@ impl WaitingFollowUp {
 
 /// An open goal with its tasks, the tasks outside it its replaced tasks'
 /// replacements reach, and the follow-ups whose source it is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GoalFollowUps {
     pub goal: super::GoalId,
     pub tasks: Vec<(super::TaskId, super::TaskStatus)>,

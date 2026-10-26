@@ -407,7 +407,7 @@ pub fn close(
 /// 421). It never completes, so its dependents are never claimed. The
 /// runtime tells the inbox and does not hold the dependents: removing the
 /// dependency, cancelling or taking the task up again is the plan's call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct StrandedDependency {
     pub task_id: TaskId,
     pub goal_id: GoalId,

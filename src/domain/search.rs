@@ -38,7 +38,7 @@ pub fn parse_status(value: &str) -> Result<String, DomainError> {
 /// What `search` looks for: `terms` as [`parse_terms`] reads them, kept to
 /// the given kinds and statuses (empty: all) and to one goal (its own
 /// document, its tasks and their notes and commits).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SearchQuery {
     pub terms: String,
     pub kinds: Vec<SearchKind>,

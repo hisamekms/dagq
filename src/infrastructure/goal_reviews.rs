@@ -339,7 +339,11 @@ pub(super) fn goal_answer_applies(conn: &Connection, ask: &Ask, text: &str) -> R
 }
 
 impl GoalReviewStore for SqliteQueue {
-    fn interrupt_goal_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()> {
+    fn interrupt_goal_reviews_for_handoff(
+        &mut self,
+        token: &LeaseToken,
+        keep: &[i64],
+    ) -> Result<()> {
         let now = self.generators.clock.now();
         // Read transcripts before taking the write lock, as in begin/finish.
         let _read = sessions::read_before(&self.conn, sessions::Closing::GoalReviews(None, false))?;
@@ -352,7 +356,7 @@ impl GoalReviewStore for SqliteQueue {
             )?
             .query_map([token], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        for id in unfinished {
+        for id in unfinished.into_iter().filter(|id| !keep.contains(id)) {
             finish_row(
                 &tx,
                 id,
@@ -479,6 +483,23 @@ impl GoalReviewStore for SqliteQueue {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn take_over_goal_review(
+        &mut self,
+        job: &GoalReviewJob,
+        token: &LeaseToken,
+        alive: &dyn Fn(u32) -> bool,
+    ) -> Result<crate::domain::headless_job::ReviewTakeover> {
+        let now = self.generators.clock.now();
+        super::plan_reviews::take_over_review(
+            &mut self.conn,
+            "goal_reviews",
+            job.id,
+            token,
+            now,
+            alive,
+        )
     }
 
     fn finish_goal_review(

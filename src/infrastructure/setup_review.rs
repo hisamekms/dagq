@@ -887,6 +887,7 @@ impl SetupReviewHost for LocalSetupReview<'_> {
         crate::infrastructure::observer::run_agent_in(
             self.provider,
             self.db,
+            None,
             WorkspaceAccess::Write(place.tree.clone()),
             &place.dir,
             prompt,

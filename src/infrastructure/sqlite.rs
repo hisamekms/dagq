@@ -114,6 +114,79 @@ pub struct LongHold {
     pub rows: usize,
 }
 
+/// The queues this process refuses to open ([`refuse_opening`]): none in
+/// production.
+static REFUSED: std::sync::LazyLock<std::sync::Mutex<Vec<PathBuf>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// While the guard lives, this process refuses to open the queue at `db`
+/// (a test's proof that a path of the control side reaches it only
+/// through the queue service, which runs in another process): every
+/// connection to it fails, whatever opened it.
+pub fn refuse_opening(db: &Path) -> RefuseOpening {
+    let db = db.canonicalize().unwrap_or_else(|_| db.to_path_buf());
+    REFUSED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(db.clone());
+    RefuseOpening(db)
+}
+
+/// The refusal of [`refuse_opening`], lifted when dropped.
+pub struct RefuseOpening(PathBuf);
+
+impl Drop for RefuseOpening {
+    fn drop(&mut self) {
+        let mut refused = REFUSED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(at) = refused.iter().position(|db| *db == self.0) {
+            refused.remove(at);
+        }
+    }
+}
+
+std::thread_local! {
+    /// How many [`AnotherProcess`] guards this thread holds.
+    static ANOTHER_PROCESS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// While the guard lives, this thread stands for another process (a
+/// test's double of a session wrapper) and opens a queue
+/// [`refuse_opening`] refuses to the rest of the process.
+pub fn as_another_process() -> AnotherProcess {
+    ANOTHER_PROCESS.with(|held| held.set(held.get() + 1));
+    AnotherProcess(std::marker::PhantomData)
+}
+
+/// The guard of [`as_another_process`], of the thread that took it.
+pub struct AnotherProcess(std::marker::PhantomData<*const ()>);
+
+impl Drop for AnotherProcess {
+    fn drop(&mut self) {
+        ANOTHER_PROCESS.with(|held| held.set(held.get().saturating_sub(1)));
+    }
+}
+
+fn ensure_not_refused(path: &Path) -> Result<()> {
+    if ANOTHER_PROCESS.with(std::cell::Cell::get) > 0 {
+        return Ok(());
+    }
+    let refused = REFUSED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if refused.is_empty() {
+        return Ok(());
+    }
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    anyhow::ensure!(
+        !refused.contains(&path),
+        "this process refuses to open the queue at {}",
+        path.display()
+    );
+    Ok(())
+}
+
 /// The [`LongHold`] of a transaction of `times` that held the lock longer
 /// than `threshold`; `None` for one within it or one that wrote nothing.
 pub fn long_hold(times: WriteTxTimes, threshold: Duration) -> Option<LongHold> {
@@ -706,6 +779,7 @@ impl SqliteQueue {
     }
 
     fn connect_with(path: &Path, flags: OpenFlags) -> Result<Self> {
+        ensure_not_refused(path)?;
         let conn = Connection::open_with_flags(path, flags)
             .with_context(|| format!("open queue at {} (use init to create it)", path.display()))?;
         conn.busy_timeout(crate::application::QUEUE_BUSY_TIMEOUT)?;

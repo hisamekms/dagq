@@ -5,7 +5,7 @@
 //! all, since the loop drives every context.
 
 use super::{
-    execution::{self, RunE2eOptions, review_in},
+    execution::{self, RunE2eOptions, review_on},
     host::{
         self, HostMetricsSettings, QueueBrokerOptions, QueueRelayOptions, QueueServiceOptions,
         ReleaseIndexPort, SccacheOptions,
@@ -34,7 +34,7 @@ use crate::{
         RunFiles, SessionWrappers,
         review::{self as reviewing},
         supervise::{self as supervisor, Layout, LoopSettings, Ports, UpdateSettings},
-        supervisor_service::{ServiceCaller, ServiceTokens, SupervisorQueues},
+        supervisor_service::{ServiceCaller, ServiceTokens, SupervisorPorts, SupervisorQueues},
     },
     domain::{
         Provider, SupervisorMode, TaskId,
@@ -761,8 +761,10 @@ pub fn supervise_with_reviewer(
         observer_env_remove: crate::domain::actor::ACTOR_ENV
             .into_iter()
             .chain(crate::domain::queue_service::CLIENT_ENV)
+            .chain([crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV])
             .map(str::to_owned)
             .collect(),
+        jobs_through_service: matches!(options.service_route, ServiceRoute::Socket),
         planners_dir: planners_dir(&db),
         plugin_dir: options
             .plugin_dir
@@ -780,10 +782,6 @@ pub fn supervise_with_reviewer(
         satisfied_dir: satisfied_dir(&db),
         replans_dir: replans_dir(&db),
         db: db.clone(),
-    };
-    let review_db = db.clone();
-    let review_material = move |task_id: TaskId, range: Option<&reviewing::ReviewRange>| {
-        review_in(&review_db, task_id, range)
     };
     let host_wide = options
         .host_config
@@ -841,9 +839,9 @@ pub fn supervise_with_reviewer(
             pid,
         )),
     };
-    // The claim, the leases, the runs and their events, and the tokens
-    // through the queue service (ADR-t3102-3 decisions 3 to 5); what it
-    // does not answer yet on the DB's own connection.
+    // Every operation of the supervisor's queue through the queue service
+    // (ADR-t3102-3 decisions 3 to 5); the host's load samples and the
+    // ledger still on the DB's own connection (`opener`).
     let in_process = || -> Arc<dyn ServiceCaller> {
         Arc::new(InProcessCaller::new(
             &db,
@@ -859,13 +857,34 @@ pub fn supervise_with_reviewer(
         ServiceRoute::InProcess => in_process(),
         ServiceRoute::InProcessThrough(layer) => (layer.0)(in_process()),
     };
-    let supervisor_queues = || SupervisorQueues {
-        service: service.clone(),
-        local: Arc::new(opener()),
-        actor: crate::domain::actor::ActorContext::instance(
+    // The records of results the service does not take are held and sent
+    // first on the next pass (ADR-t3102-3 decision 5), kept beside the
+    // queue so the next supervisor sends what this one did not; a landing's
+    // integrator sends its own again on its thread.
+    let service: Arc<dyn ServiceCaller> = Arc::new(
+        crate::application::supervisor_service::resend::Resending::new(
+            service,
+            crate::application::supervisor_service::resend::Resend::Hold,
+            generators.clone(),
+        )
+        .kept_in(Arc::new(crate::infrastructure::held_records::HeldDir::of(
+            &db,
+        ))),
+    );
+    // One set of queues, cloned: a landing's slot taken on one is the
+    // integrator's on the landing's own ([`SupervisorQueues::new`]).
+    let queues = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::actor::ActorContext::instance(
             crate::domain::actor::ActorRole::Supervisor,
             pid,
         ),
+    );
+    let supervisor_queues = || queues.clone();
+    // The review's material reads the task through the service too.
+    let review_queues = supervisor_queues();
+    let review_material = move |task_id: TaskId, range: Option<&reviewing::ReviewRange>| {
+        review_on(&mut review_queues.queue(), task_id, range)
     };
     let service_tokens = ServiceTokens {
         queues: supervisor_queues(),
@@ -926,16 +945,16 @@ pub fn supervise_with_reviewer(
     let ports = Ports {
         queues: Arc::new(supervisor_queues()),
         service: service.clone(),
-        observation_queues: Arc::new(SqlitePorts {
-            opener: opener(),
+        observation_queues: Arc::new(SupervisorPorts {
+            queues: supervisor_queues(),
             keep: |queue| -> Box<dyn ObservationQueue + Send> { Box::new(queue) },
         }),
-        host_queues: Arc::new(SqlitePorts {
-            opener: opener(),
+        host_queues: Arc::new(SupervisorPorts {
+            queues: supervisor_queues(),
             keep: |queue| -> Box<dyn HostOpsQueue + Send> { Box::new(queue) },
         }),
-        recording_queues: Arc::new(SqlitePorts {
-            opener: opener(),
+        recording_queues: Arc::new(SupervisorPorts {
+            queues: supervisor_queues(),
             keep: |queue| -> Box<dyn RecordingQueue + Send> { Box::new(queue) },
         }),
         verifier: Arc::new(ShellVerifier {
@@ -1041,6 +1060,9 @@ pub fn supervise_with_reviewer(
         },
         reports,
         max_improvement_proposals,
+        held_verdicts: Arc::new(crate::infrastructure::held_records::HeldDir::verdicts_of(
+            &db,
+        )),
         conflicts_file,
         supervisor_file,
         provider_fallback_file,

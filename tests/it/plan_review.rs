@@ -23,7 +23,7 @@ use dagq::{
         location::{plan_reviews_dir, planners_dir},
         sqlite::SqliteQueue,
     },
-    runtime,
+    runtime::{self, SuperviseOptions},
 };
 use rusqlite::Connection;
 use serde_json::{Value, json};
@@ -912,6 +912,174 @@ fn a_failed_plan_review_waits_for_a_person_and_is_not_retried() {
                 },
             })
             .is_err()
+    );
+}
+
+/// A plan review's verdict the queue service does not take is held, not
+/// its job's failure (ADR-t3102-3 decision 5): its first sending finds the
+/// service out of reach, and its second is applied but its answer lost;
+/// on a later pass its row is found finished, so it is not sent a third
+/// time, and it is applied once.
+#[test]
+fn a_plan_verdict_the_service_did_not_take_is_held_and_applied_once() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(&mut queue, "held", &[TaskId::new(1)], Priority::Normal);
+    let proposal = submit(&mut queue, &[task], None);
+    let reviewer =
+        StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "sound"})]);
+    let (wrap, sent) = crate::runtime_support::service::DropsThenLoses::wrap("finish_plan_review");
+    let outcome = supervise_with(
+        &fx,
+        &PlanWorkspace::default(),
+        &reviewer,
+        &SuperviseOptions {
+            service_route: dagq::compose::ServiceRoute::InProcessThrough(wrap),
+            ..options(1, Duration::from_secs(3600))
+        },
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(reviewer.prompts().len(), 1);
+    assert_eq!(status(&mut queue, task), TaskStatus::Ready);
+    assert_eq!(
+        queue.show_proposal(proposal).unwrap().status(),
+        ProposalStatus::Accepted
+    );
+    assert_eq!(events(&mut queue, task, "plan_review_finished").len(), 1);
+    assert!(events(&mut queue, task, "plan_review_failed").is_empty());
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// A plan review's failure the queue service does not take is held as its
+/// verdict would be (ADR-t3102-3 decision 5), not dropped: its first
+/// sending finds the service out of reach, and its second is recorded but
+/// its answer lost; on a later pass its row is found finished. The failure
+/// is recorded once, the proposal waits for a person, whom `status` tells,
+/// and the review does not run again.
+#[test]
+fn a_plan_review_failure_the_service_did_not_take_is_held_and_recorded_once() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(&mut queue, "unlucky", &[TaskId::new(1)], Priority::Normal);
+    let proposal = submit(&mut queue, &[task], None);
+    let reviewer = StubReviewer::failing();
+    let (wrap, sent) = crate::runtime_support::service::DropsThenLoses::wrap("fail_plan_review");
+    supervise_with(
+        &fx,
+        &PlanWorkspace::default(),
+        &reviewer,
+        &SuperviseOptions {
+            service_route: dagq::compose::ServiceRoute::InProcessThrough(wrap),
+            ..options(1, Duration::from_secs(3600))
+        },
+    );
+    assert_eq!(reviewer.prompts().len(), 1);
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
+    assert_eq!(proposal_column(&fx.db, proposal, "review_hold"), "failed");
+    let failed = events(&mut queue, task, "plan_review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    let status_now = runtime::status(&fx.db).unwrap();
+    assert!(
+        status_now["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["kind"] == "plan_review_failed" && a["task_id"] == json!(task)),
+        "{status_now}"
+    );
+}
+
+/// A job's end the queue service does not take is kept, not dropped
+/// (ADR-t3102-3 decision 5): its first writing finds the service out of
+/// reach, and its second is recorded but its answer lost; written once
+/// more on a later pass, its row is ended once, with the job's outcome.
+#[test]
+fn a_job_end_the_service_did_not_take_is_kept_and_recorded_once() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(&mut queue, "ended", &[TaskId::new(1)], Priority::Normal);
+    submit(&mut queue, &[task], None);
+    let reviewer =
+        StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "sound"})]);
+    let (wrap, sent) = crate::runtime_support::service::DropsThenLoses::wrap("end_headless_job");
+    let outcome = supervise_with(
+        &fx,
+        &PlanWorkspace::default(),
+        &reviewer,
+        &SuperviseOptions {
+            service_route: dagq::compose::ServiceRoute::InProcessThrough(wrap),
+            ..options(1, Duration::from_secs(3600))
+        },
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(status(&mut queue, task), TaskStatus::Ready);
+    let rows: Vec<(String, Option<i64>, Option<String>)> = Connection::open(&fx.db)
+        .unwrap()
+        .prepare("SELECT kind, ended_at, outcome FROM headless_jobs ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].0, "plan_review");
+    assert!(rows[0].1.is_some(), "{rows:?}");
+    assert!(rows[0].2.is_some(), "{rows:?}");
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+/// A job's end the queue service does not take for as long as its
+/// supervisor runs is kept beside the queue when the supervisor ends
+/// (ADR-t3102-3 decision 5), not lost: the next supervisor writes it on its
+/// first pass, before it takes over the jobs of gone supervisors, so the
+/// row ends with the job's own outcome.
+#[test]
+fn a_job_end_not_taken_before_its_supervisor_ended_is_written_by_the_next() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(
+        &mut queue,
+        "ended later",
+        &[TaskId::new(1)],
+        Priority::Normal,
+    );
+    submit(&mut queue, &[task], None);
+    let reviewer =
+        StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "sound"})]);
+    let (wrap, sent) = crate::runtime_support::service::KeepsDown::wrap("end_headless_job");
+    let outcome = supervise_with(
+        &fx,
+        &PlanWorkspace::default(),
+        &reviewer,
+        &SuperviseOptions {
+            service_route: dagq::compose::ServiceRoute::InProcessThrough(wrap),
+            ..options(1, Duration::from_secs(3600))
+        },
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(sent.load(std::sync::atomic::Ordering::SeqCst) > 1);
+    let rows = |db: &Path| -> Vec<(Option<i64>, Option<String>)> {
+        Connection::open(db)
+            .unwrap()
+            .prepare("SELECT ended_at, outcome FROM headless_jobs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(rows(&fx.db), [(None, None)]);
+    supervise(&fx, &PlanWorkspace::default(), &reviewer);
+    let ended = rows(&fx.db);
+    assert!(ended[0].0.is_some(), "{ended:?}");
+    assert_eq!(ended[0].1.as_deref(), Some("ended"));
+    use dagq::application::supervisor_service::resend::HeldRecords;
+    assert!(
+        dagq::infrastructure::held_records::HeldDir::of(&fx.db)
+            .kept()
+            .unwrap()
+            .is_empty()
     );
 }
 

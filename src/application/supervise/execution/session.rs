@@ -756,7 +756,7 @@ impl SessionWatch {
                     // The same single /exit a finished session gets,
                     // recorded before it is sent.
                     let timeout = sv.sessions.exit_timeout();
-                    sv.queue.record_runtime_event(
+                    sv.queue.record_runtime_event_now(
                         run.id(),
                         EventKind::ExitRequested,
                         json!({"workspace_id": self.workspace, "timeout_secs": timeout.as_secs()}),

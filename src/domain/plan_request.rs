@@ -128,7 +128,7 @@ impl NewPlanRequest {
 }
 
 /// A planning request as the queue records it. Times are Unix seconds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct PlanRequest {
     pub id: RequestId,
     pub text: String,

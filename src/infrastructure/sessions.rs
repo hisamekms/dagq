@@ -4217,8 +4217,12 @@ pub(super) mod tests {
             std::fs::write(project.join(format!("{session}.jsonl")), lines.join("\n")).unwrap();
         }
         let token = LeaseToken::new("handoff");
-        queue.interrupt_plan_reviews_for_handoff(&token).unwrap();
-        queue.interrupt_goal_reviews_for_handoff(&token).unwrap();
+        queue
+            .interrupt_plan_reviews_for_handoff(&token, &[])
+            .unwrap();
+        queue
+            .interrupt_goal_reviews_for_handoff(&token, &[])
+            .unwrap();
         let closed = of_kind(&queue, SESSION_CLOSED);
         assert_eq!(closed.len(), 2);
         for close in closed {

@@ -273,7 +273,7 @@ impl JobFailure {
 /// the provider named it by (Codex's thread), the model it ran on, and why
 /// none was read when it was not; and the tokens of the job, one
 /// Execution (ADR-t1486-1), for a provider whose output gives them.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JobSession {
     /// The provider named the session itself: `session_id`, `model` and
     /// `model_unknown` are recorded. A provider whose session the runtime
@@ -346,6 +346,49 @@ pub fn takeover(alive: bool, recorded: Option<&str>, now: Option<&str>) -> Takeo
     match (recorded, now) {
         (Some(recorded), Some(now)) if recorded == now => Takeover::Stop,
         _ => Takeover::NotTheJob,
+    }
+}
+
+/// What a supervisor found of the row of a plan or goal review whose
+/// verdict a supervisor before it kept, as it takes the row over to apply
+/// that verdict (ADR-t3102-3 decision 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewTakeover {
+    /// The row is this supervisor's now (or was already): the verdict is
+    /// applied as its own.
+    Taken,
+    /// Its owner still runs: the verdict is kept, and taken over again on
+    /// a later pass.
+    OwnerRuns,
+    /// The row finished (applied, failed or interrupted) or is not there:
+    /// the verdict has nothing left to apply.
+    Finished,
+}
+
+/// Whether the supervisor `owner` of an unfinished review's row is gone
+/// for `token`, the supervisor that takes the row over to apply the
+/// verdict the owner kept (ADR-t3102-3 decision 5): `token` itself (a
+/// process that exec'd), one not registered, or one whose heartbeat is
+/// older than [`super::HEARTBEAT_TIMEOUT_SECS`] while its process is gone
+/// too (a host just woken from sleep has every heartbeat old), as the
+/// other takeovers judge an owner. `registration` is the owner's
+/// heartbeat (unix seconds, `None` before its first) and whether its
+/// process lives, `None` when it is not registered; `now` is unix seconds.
+pub fn review_owner_gone(
+    owner: &str,
+    token: &str,
+    registration: Option<(Option<i64>, bool)>,
+    now: i64,
+) -> bool {
+    if owner == token {
+        return true;
+    }
+    match registration {
+        None => true,
+        Some((heartbeat, alive)) => {
+            !alive && heartbeat.is_none_or(|at| now - at > super::HEARTBEAT_TIMEOUT_SECS)
+        }
     }
 }
 
@@ -496,6 +539,38 @@ impl JobRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A review's row is taken over from its owner only once that owner is
+    /// gone: unregistered, or its process gone with its heartbeat older
+    /// than the timeout (exactly at it, it still runs); a process that
+    /// exec'd takes its own row.
+    #[test]
+    fn a_reviews_row_is_taken_over_only_from_an_owner_that_is_gone() {
+        let timeout = super::super::HEARTBEAT_TIMEOUT_SECS;
+        let now = 1_000;
+        assert!(review_owner_gone("a", "a", Some((Some(now), true)), now));
+        assert!(review_owner_gone("a", "b", None, now));
+        assert!(review_owner_gone("a", "b", Some((None, false)), now));
+        assert!(!review_owner_gone("a", "b", Some((Some(now), false)), now));
+        assert!(!review_owner_gone(
+            "a",
+            "b",
+            Some((Some(now - timeout), false)),
+            now
+        ));
+        assert!(review_owner_gone(
+            "a",
+            "b",
+            Some((Some(now - timeout - 1), false)),
+            now
+        ));
+        assert!(!review_owner_gone(
+            "a",
+            "b",
+            Some((Some(now - timeout - 1), true)),
+            now
+        ));
+    }
 
     fn process(pid: u32, ppid: u32) -> ProcessInfo {
         ProcessInfo {

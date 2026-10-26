@@ -6,7 +6,9 @@
 //! and tried again on a later pass.
 
 use super::*;
+use super::{VerdictSent, verdict_sent};
 use crate::domain::ActorContext;
+use crate::domain::headless_job::ReviewTakeover;
 use crate::{
     application::{
         GoalReviewApply, GoalReviewFailure, GoalReviewJob, job_start_failure,
@@ -44,6 +46,53 @@ pub(in crate::application::supervise) struct GoalReviewWatch {
     pub(super) switchable: bool,
     /// What its prompt takes (task 1571), recorded on its end.
     pub(super) prompt_bytes: PromptBytes,
+}
+
+/// The end of a goal review, its verdict or its failure, held while the
+/// queue does not take it (ADR-t3102-3 decision 5), as a plan review's is
+/// ([`super::plan_review::HeldPlanReview`]).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(in crate::application::supervise) struct HeldGoalReview {
+    job: GoalReviewJob,
+    end: GoalReviewEnd,
+    /// Its key where it is kept, once kept.
+    #[serde(skip)]
+    kept: Option<String>,
+}
+
+/// What a goal review that ended gives the queue.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum GoalReviewEnd {
+    /// Its verdict, applied as its job.
+    Verdict {
+        verdict: GoalReviewVerdict,
+        duration_secs: u64,
+        session: Option<JobSession>,
+        prompt_bytes: PromptBytes,
+    },
+    /// Its failure, after which the goal waits for a person
+    /// (`goal_review_failed`) or moves to the other provider.
+    Failed(GoalReviewFailure),
+}
+
+impl HeldGoalReview {
+    /// The row of its job.
+    pub(super) fn id(&self) -> i64 {
+        self.job.id
+    }
+
+    /// Its key where it is kept, once kept.
+    pub(super) fn kept_key(&self) -> Option<&str> {
+        self.kept.as_deref()
+    }
+
+    /// `held`, read back from where it is kept as `key`.
+    pub(super) fn kept(held: Self, key: String) -> Self {
+        Self {
+            kept: Some(key),
+            ..held
+        }
+    }
 }
 
 impl PlanningState {
@@ -94,7 +143,12 @@ impl PlanningState {
 
     /// Start the goal review of the first candidate, when none runs.
     fn start_goal_review(&mut self, env: &mut PlanningEnv<'_>) -> Result<()> {
-        if self.goal_review.is_some() {
+        if self.goal_review.is_some() || !self.held_goal_reviews.is_empty() {
+            return Ok(());
+        }
+        // As a plan review's: the end a supervisor gone since kept first.
+        self.take_kept_verdicts(&**env.processes);
+        if !self.held_goal_reviews.is_empty() {
             return Ok(());
         }
         let Some((launch, switchable)) = self.goal_review_route(env) else {
@@ -368,6 +422,9 @@ impl PlanningState {
         &mut self,
         env: &mut PlanningEnv<'_>,
     ) -> Result<bool> {
+        if let Some(held) = self.held_goal_reviews.pop_front() {
+            return Ok(self.apply_held_goal_review(env, held));
+        }
         let Some(provider) = self.goal_review.as_ref().map(|w| w.headless.provider()) else {
             return Ok(false);
         };
@@ -394,17 +451,24 @@ impl PlanningState {
             .is_err()
             .then(|| env.jobs.job_failure(&**env.pass.files, &watch.headless));
         let applied = verdict.map_err(|error| anyhow!(error)).and_then(|verdict| {
-            let job = ActorContext::goal_review_job(watch.job.goal_id, watch.job.attempt);
-            env.for_job(&job, |env| {
-                Self::apply_goal_verdict(
-                    env,
-                    &watch.job,
+            let held = HeldGoalReview {
+                job: watch.job.clone(),
+                end: GoalReviewEnd::Verdict {
                     verdict,
                     duration_secs,
-                    session.clone(),
-                    &watch.prompt_bytes,
-                )
-            })
+                    session: session.clone(),
+                    prompt_bytes: watch.prompt_bytes.clone(),
+                },
+                kept: None,
+            };
+            match verdict_sent(Self::send_goal_end(env, &held)) {
+                VerdictSent::Applied => Ok(()),
+                VerdictSent::Held => {
+                    self.hold_goal_end(held);
+                    Ok(())
+                }
+                VerdictSent::Failed(error) => Err(anyhow!(error)),
+            }
         });
         if let Err(error) = applied {
             let error = format!("{error:#}");
@@ -438,6 +502,117 @@ impl PlanningState {
             );
         }
         Ok(true)
+    }
+
+    /// Hold `held`, which the queue did not take, to send it again on the
+    /// next pass, kept beside the queue for the next supervisor.
+    fn hold_goal_end(&mut self, held: HeldGoalReview) {
+        let what = match held.end {
+            GoalReviewEnd::Verdict { .. } => "verdict",
+            GoalReviewEnd::Failed(_) => "failure",
+        };
+        warn!(
+            "goal {}: the goal review's {what} is held until the queue takes it",
+            held.job.goal_id
+        );
+        let kept = self.keep_verdict(super::GOAL_VERDICT, &held);
+        self.held_goal_reviews
+            .push_back(HeldGoalReview { kept, ..held });
+    }
+
+    /// Send `held` again, its row taken over first, as a plan review's
+    /// is (`apply_held_plan_review`). Whether it left the hold.
+    fn apply_held_goal_review(&mut self, env: &mut PlanningEnv<'_>, held: HeldGoalReview) -> bool {
+        let (processes, token) = (env.processes.clone(), env.token);
+        let taken = env
+            .queue
+            .take_over_goal_review(&held.job, token, &|pid| processes.alive(pid));
+        let sent = match taken {
+            Ok(ReviewTakeover::Taken) => Self::send_goal_end(env, &held),
+            Ok(ReviewTakeover::OwnerRuns) => {
+                info!(
+                    "goal {}: the goal review's kept end waits for the supervisor that holds its row",
+                    held.job.goal_id
+                );
+                self.held_goal_reviews.push_front(held);
+                return false;
+            }
+            Ok(ReviewTakeover::Finished) => {
+                info!(
+                    "goal {}: the goal review's row finished already; its kept end is let go",
+                    held.job.goal_id
+                );
+                self.forget_verdict(held.kept.as_deref());
+                return true;
+            }
+            Err(error) => Err(error),
+        };
+        match verdict_sent(sent) {
+            VerdictSent::Applied => {
+                self.forget_verdict(held.kept.as_deref());
+                true
+            }
+            VerdictSent::Held => {
+                self.held_goal_reviews.push_front(held);
+                false
+            }
+            VerdictSent::Failed(error) => {
+                // The failure is sent, and kept if not taken, before the
+                // verdict's record goes, so that one of them is kept.
+                match held.end {
+                    GoalReviewEnd::Verdict {
+                        duration_secs,
+                        session,
+                        prompt_bytes,
+                        ..
+                    } => self.fail_goal_review(
+                        env,
+                        &held.job,
+                        &GoalReviewFailure {
+                            error,
+                            duration_secs,
+                            session,
+                            unusable: None,
+                            prompt_bytes: Some(prompt_bytes),
+                        },
+                    ),
+                    GoalReviewEnd::Failed(_) => {
+                        warn!(error = %error, "goal {}: the goal review failure could not be recorded: {error}", held.job.goal_id);
+                    }
+                }
+                self.forget_verdict(held.kept.as_deref());
+                true
+            }
+        }
+    }
+
+    /// Apply `held`'s verdict as its job, or record its failure.
+    fn send_goal_end(env: &mut PlanningEnv<'_>, held: &HeldGoalReview) -> Result<()> {
+        match &held.end {
+            GoalReviewEnd::Verdict {
+                verdict,
+                duration_secs,
+                session,
+                prompt_bytes,
+            } => {
+                let job = ActorContext::goal_review_job(held.job.goal_id, held.job.attempt);
+                env.for_job(&job, |env| {
+                    Self::apply_goal_verdict(
+                        env,
+                        &held.job,
+                        verdict.clone(),
+                        *duration_secs,
+                        session.clone(),
+                        prompt_bytes,
+                    )
+                })
+            }
+            GoalReviewEnd::Failed(failure) => {
+                env.pass
+                    .queue
+                    .fail_goal_review(&held.job, env.pass.token, failure)
+            }
+        }
     }
 
     /// What the runtime makes of the verdict (a `gaps` past the limit in a
@@ -504,7 +679,8 @@ impl PlanningState {
     /// Record the job's failure; the goal waits for a person
     /// (`goal_review_failed`) and is not reviewed again by itself until its
     /// tasks change, unless its provider could not be used and it moves
-    /// (ADR-t1063-1 decision 4).
+    /// (ADR-t1063-1 decision 4). A failure the queue does not take is held
+    /// as a verdict is.
     fn fail_goal_review(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -522,12 +698,17 @@ impl PlanningState {
             }
         }
         end_job_telemetry(env, TargetKind::GoalReview, job.id);
-        if let Err(recorded) = env
-            .pass
-            .queue
-            .fail_goal_review(job, env.pass.token, failure)
-        {
-            warn!(error = %format_args!("{recorded:#}"), "goal {}: the goal review failure could not be recorded: {recorded:#}", job.goal_id);
+        let held = HeldGoalReview {
+            job: job.clone(),
+            end: GoalReviewEnd::Failed(failure.clone()),
+            kept: None,
+        };
+        match verdict_sent(Self::send_goal_end(env, &held)) {
+            VerdictSent::Applied => {}
+            VerdictSent::Held => self.hold_goal_end(held),
+            VerdictSent::Failed(recorded) => {
+                warn!(error = %recorded, "goal {}: the goal review failure could not be recorded: {recorded}", job.goal_id);
+            }
         }
     }
 
@@ -644,6 +825,71 @@ fn goal_options(verdict: &GoalReviewVerdict) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A goal review's end kept beside the queue, its verdict or its
+    /// failure, comes back to the supervisor that takes it, as a plan
+    /// review's does.
+    #[test]
+    fn a_kept_goal_review_end_comes_back_to_the_supervisor_that_takes_it() {
+        use super::super::{GOAL_VERDICT, KeptVerdict, kept_verdict, verdict_record};
+        let job = GoalReviewJob {
+            id: 4,
+            goal_id: GoalId::new(9),
+            attempt: 1,
+            anchor: crate::domain::TaskId::new(2),
+            dir: PathBuf::from("/queue/goal-reviews/4"),
+            gaps_in_a_row: 1,
+            session_id: None,
+        };
+        let gaps = GoalReviewVerdict::parse(
+            r#"{"verdict": "gaps", "gaps": [{"title": "add the test"}], "summary": "one gap"}"#,
+        )
+        .unwrap();
+        let ends = [
+            GoalReviewEnd::Verdict {
+                verdict: gaps.clone(),
+                duration_secs: 5,
+                session: None,
+                prompt_bytes: PromptBytes::default(),
+            },
+            GoalReviewEnd::Failed(GoalReviewFailure {
+                error: "timed out".into(),
+                duration_secs: 5,
+                ..GoalReviewFailure::default()
+            }),
+        ];
+        for end in ends {
+            let held = HeldGoalReview {
+                job: job.clone(),
+                end,
+                kept: None,
+            };
+            let record = crate::application::supervisor_service::resend::KeptRecord {
+                key: "kept-2".into(),
+                use_case: crate::domain::queue_service::UseCase::Supervisor,
+                params: verdict_record(GOAL_VERDICT, 20, &held).unwrap(),
+            };
+            let KeptVerdict::Goal(back) = kept_verdict(&record, 21, |_| false) else {
+                panic!("the next supervisor does not take it");
+            };
+            assert_eq!(back.job, job);
+            assert_eq!(back.kept.as_deref(), Some("kept-2"));
+            match (&back.end, &held.end) {
+                (GoalReviewEnd::Verdict { verdict, .. }, GoalReviewEnd::Verdict { .. }) => {
+                    assert_eq!(*verdict, gaps);
+                }
+                (GoalReviewEnd::Failed(back), GoalReviewEnd::Failed(failure)) => {
+                    assert_eq!(back.error, failure.error);
+                    assert_eq!(back.duration_secs, 5);
+                }
+                (back, held) => panic!("{back:?} came back for {held:?}"),
+            }
+            assert!(matches!(
+                kept_verdict(&record, 21, |_| true),
+                KeptVerdict::Others
+            ));
+        }
+    }
     use crate::domain::goal_review::{GoalCriterion, GoalGap};
     use crate::domain::headless_job::JobFailure;
 

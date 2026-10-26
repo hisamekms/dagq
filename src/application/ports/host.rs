@@ -350,10 +350,11 @@ pub trait ProcessControl {
 }
 
 /// A headless job whose process just started (task 443).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NewHeadlessJob {
     /// One of [`crate::domain::headless_job`]'s kinds.
-    pub kind: &'static str,
+    #[serde(deserialize_with = "crate::domain::interned::text")]
+    pub kind: crate::domain::interned::Text,
     /// What else tells the job (the recovery job's alert).
     pub label: Option<String>,
     pub run_id: Option<RunId>,
@@ -374,7 +375,7 @@ pub struct NewHeadlessJob {
 }
 
 /// An unfinished `headless_jobs` row of a supervisor that is gone.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HeadlessJobRecord {
     pub id: i64,
     pub kind: String,

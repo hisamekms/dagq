@@ -22,7 +22,7 @@ pub struct PlannerOwner {
 /// `dagq submit`: the tasks to bundle, the goals whose draft tasks join
 /// them, and the proposal to submit again after a revise (`None`: a new
 /// one).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Submission {
     pub tasks: Vec<TaskId>,
     pub goals: Vec<GoalId>,
@@ -72,7 +72,7 @@ pub struct ProposalRecord {
 /// Goals and tasks under plan review together. `Serialize` is the JSON the
 /// CLI prints; a proposal is built by [`Proposal::submit`] or
 /// [`Proposal::restore`] only.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Proposal {
     id: ProposalId,
     status: ProposalStatus,

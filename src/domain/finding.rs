@@ -46,7 +46,7 @@ impl Impact {
 
 /// What a finding is about: a run (and its task), a task, a goal, or the
 /// queue as a whole.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FindingTarget {
     Queue,
     Goal(GoalId),
@@ -67,7 +67,7 @@ impl FindingTarget {
 
 /// A finding as stored. `task_id` is also set for a run target (the run's
 /// task); the other IDs are set only for their own target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Finding {
     pub id: FindingId,
     pub kind: String,
@@ -153,7 +153,7 @@ impl FindingAttributes {
 }
 
 /// A finding to record: a new one, or an occurrence of an existing one.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NewFinding {
     /// A lowercase slug: stall, failure, wait, capacity, threshold,
     /// conflict_hotspot and whatever the observation needs.
@@ -242,7 +242,7 @@ pub struct FindingOutcome {
 
 /// One row of `findings`: the finding, the status of its proposal, its
 /// open asks and, with `--full`, its evidence events.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct FindingView {
     #[serde(flatten)]
     pub finding: Finding,
@@ -376,7 +376,7 @@ fn impact_order(a: (Impact, i64, i64, FindingId), b: (Impact, i64, i64, FindingI
 /// Which findings `findings` lists: the unsettled ones (`open`,
 /// `proposed`) unless `all` or `statuses` says otherwise, narrowed to
 /// `kinds` and a target.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FindingQuery {
     pub id: Option<FindingId>,
     pub all: bool,
@@ -419,7 +419,7 @@ pub const MAX_FINDING_PLANNERS: usize = super::MAX_DRAFT_PLANNERS;
 /// [`improvement_running`], and the planners of the runtime's opened for a
 /// finding still `open` (they may submit one), against `[kpi]`'s
 /// `max_improvement_proposals`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ImprovementLimit {
     pub running: usize,
     pub limit: usize,

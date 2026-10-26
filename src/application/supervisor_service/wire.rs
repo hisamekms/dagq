@@ -4,7 +4,7 @@
 //! `Serialize` is the CLI's and leaves out what the CLI does not show
 //! ([`crate::domain::task::TaskWire`], [`crate::domain::goal::GoalWire`]).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 
 use anyhow::Result;
@@ -67,6 +67,12 @@ whole!(
     EndedRunWorkspace,
     EndedRunWorktree,
     crate::domain::task_replan::ReplanOperation,
+    crate::domain::replan_plan::ReplanBrief,
+    crate::domain::replan_apply::ApplyOutcome,
+    crate::domain::replan_apply::ChildCarry,
+    crate::domain::replan_apply::GoalReplacements,
+    crate::domain::replan_apply::UnresolvedReplacement,
+    crate::application::ReviseGoalWait,
     crate::domain::task_replan::ReplanGuard,
     crate::domain::task_replan::Fence,
     crate::domain::replan_snapshot::RestoreStart,
@@ -76,8 +82,58 @@ whole!(
     crate::domain::queue_service::Principal,
     crate::domain::telemetry::HeldTelemetry,
     crate::domain::telemetry::TargetFacts,
+    crate::domain::headless_job::ReviewTakeover,
     crate::application::GraphInput,
     crate::domain::investigation::Investigations,
+    serde_json::Value,
+    crate::domain::GoalId,
+    crate::domain::ProposalId,
+    crate::domain::FindingId,
+    crate::domain::RequestId,
+    crate::domain::ProposalStatus,
+    crate::domain::FindingStatus,
+    crate::domain::DraftOrigin,
+    crate::domain::TaskChange,
+    crate::domain::ci_watch::CiCheckRecorded,
+    crate::domain::DraftBundleView,
+    crate::domain::follow_up::GoalFollowUps,
+    crate::domain::HoldOutcome,
+    crate::domain::AskOutcome,
+    crate::domain::ImprovementLimit,
+    crate::domain::sessions::OpenSpan,
+    crate::domain::plan_request::PlanRequest,
+    crate::domain::RegisteredFollowUp,
+    crate::domain::recurring::RecurringOutcome,
+    crate::domain::NotePage,
+    crate::domain::plan_review::PlanReviewCandidate,
+    crate::domain::PlannerHandover,
+    crate::domain::PlannerSession,
+    crate::domain::related::RelatedPage,
+    crate::domain::search::SearchPage,
+    crate::domain::Finding,
+    crate::domain::FindingView,
+    crate::domain::StrandedDependency,
+    crate::domain::lint::LintInput,
+    crate::domain::Proposal,
+    crate::application::KeptOutcome,
+    crate::application::HeadlessJobRecord,
+    crate::application::FindingPlannerStart,
+    crate::application::GoalDecided,
+    crate::application::GoalReviewApplied,
+    crate::application::GoalReviewHold,
+    crate::application::GoalReviewJob,
+    crate::application::GoalReviewRecord,
+    crate::application::PlanDecided,
+    crate::application::PlanReviewApplied,
+    crate::application::PlanReviewHold,
+    crate::application::PlanReviewJob,
+    crate::application::PlannerAnswerRoute,
+    crate::application::RequestPlannerStart,
+    crate::application::RevisingProposal,
+    crate::application::Landing,
+    crate::application::TaskPage,
+    crate::application::WrittenBy,
+    crate::domain::AskId,
 );
 
 impl Wire for Task {
@@ -303,5 +359,180 @@ where
         form.into_iter()
             .map(|(key, value)| Ok((K::from_form(key)?, V::from_form(value)?)))
             .collect()
+    }
+}
+
+impl<T> Wire for HashSet<T>
+where
+    T: Wire + Eq + Hash,
+    T::Form: Eq + Hash,
+{
+    type Form = Vec<T::Form>;
+    fn into_form(self) -> Self::Form {
+        self.into_iter().map(Wire::into_form).collect()
+    }
+    fn from_form(form: Self::Form) -> Result<Self> {
+        form.into_iter().map(T::from_form).collect()
+    }
+}
+
+impl<K, V> Wire for BTreeMap<K, V>
+where
+    K: Wire + Ord,
+    V: Wire,
+{
+    type Form = Vec<(K::Form, V::Form)>;
+    fn into_form(self) -> Self::Form {
+        self.into_iter()
+            .map(|(key, value)| (key.into_form(), value.into_form()))
+            .collect()
+    }
+    fn from_form(form: Self::Form) -> Result<Self> {
+        form.into_iter()
+            .map(|(key, value)| Ok((K::from_form(key)?, V::from_form(value)?)))
+            .collect()
+    }
+}
+
+/// A draft the runtime opens a planner for, as it crosses: the task whole.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct DraftTargetForm {
+    task: TaskWire,
+    origin: crate::domain::DraftOrigin,
+    material: serde_json::Value,
+    planners: usize,
+    revisit: Option<crate::domain::DraftRevisit>,
+}
+
+impl Wire for crate::domain::follow_up::DraftTarget {
+    type Form = DraftTargetForm;
+    fn into_form(self) -> DraftTargetForm {
+        DraftTargetForm {
+            task: self.task.into(),
+            origin: self.origin,
+            material: self.material,
+            planners: self.planners,
+            revisit: self.revisit,
+        }
+    }
+    fn from_form(form: DraftTargetForm) -> Result<Self> {
+        Ok(Self {
+            task: form.task.into(),
+            origin: form.origin,
+            material: form.material,
+            planners: form.planners,
+            revisit: form.revisit,
+        })
+    }
+}
+
+/// A goal's detail as it crosses: every part as its own JSON but the
+/// goal, whole.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct GoalDetailForm {
+    acceptance_version: i64,
+    follow_up_memberships: Vec<serde_json::Value>,
+    goal: GoalWire,
+    closed: bool,
+    tasks: Vec<crate::domain::GoalTask>,
+    dependents: Vec<crate::domain::GoalTask>,
+    events: Vec<RunEvent>,
+}
+
+impl Wire for crate::domain::GoalDetail {
+    type Form = GoalDetailForm;
+    fn into_form(self) -> GoalDetailForm {
+        let crate::domain::GoalDetail {
+            acceptance_version,
+            follow_up_memberships,
+            goal,
+            closed,
+            tasks,
+            dependents,
+            events,
+        } = self;
+        GoalDetailForm {
+            acceptance_version,
+            follow_up_memberships,
+            goal: goal.into(),
+            closed,
+            tasks,
+            dependents,
+            events,
+        }
+    }
+    fn from_form(form: GoalDetailForm) -> Result<Self> {
+        let GoalDetailForm {
+            acceptance_version,
+            follow_up_memberships,
+            goal,
+            closed,
+            tasks,
+            dependents,
+            events,
+        } = form;
+        Ok(Self {
+            acceptance_version,
+            follow_up_memberships,
+            goal: goal.into(),
+            closed,
+            tasks,
+            dependents,
+            events,
+        })
+    }
+}
+
+/// How the opening of a draft planner ended, as it crosses: each draft
+/// as [`DraftTargetForm`].
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum DraftPlannerStartForm {
+    Opened {
+        planner: Box<crate::domain::PlannerSession>,
+        key: crate::domain::BundleKey,
+        members: Vec<(DraftTargetForm, usize)>,
+        exhausted: Vec<TaskId>,
+    },
+    Exhausted {
+        drafts: Vec<TaskId>,
+    },
+    Skipped,
+}
+
+impl Wire for crate::application::DraftPlannerStart {
+    type Form = DraftPlannerStartForm;
+    fn into_form(self) -> DraftPlannerStartForm {
+        match self {
+            Self::Opened {
+                planner,
+                key,
+                members,
+                exhausted,
+            } => DraftPlannerStartForm::Opened {
+                planner,
+                key,
+                members: members.into_form(),
+                exhausted,
+            },
+            Self::Exhausted { drafts } => DraftPlannerStartForm::Exhausted { drafts },
+            Self::Skipped => DraftPlannerStartForm::Skipped,
+        }
+    }
+    fn from_form(form: DraftPlannerStartForm) -> Result<Self> {
+        Ok(match form {
+            DraftPlannerStartForm::Opened {
+                planner,
+                key,
+                members,
+                exhausted,
+            } => Self::Opened {
+                planner,
+                key,
+                members: Wire::from_form(members)?,
+                exhausted,
+            },
+            DraftPlannerStartForm::Exhausted { drafts } => Self::Exhausted { drafts },
+            DraftPlannerStartForm::Skipped => Self::Skipped,
+        })
     }
 }

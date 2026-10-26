@@ -84,6 +84,20 @@ pub fn kpi_checked(
     .map_err(|error| anyhow!(error))
 }
 
+/// [`improvements`] against `configured`, `[kpi]`'s
+/// `max_improvement_proposals` of the bound checkout's `dagq.toml`, or its
+/// default for a queue bound to none or a file without it (ADR-0051
+/// decision 25).
+pub fn improvements_of_setting(
+    store: &dyn super::DraftPlannerReads,
+    configured: Option<usize>,
+) -> Result<serde_json::Value> {
+    improvements(
+        store,
+        configured.unwrap_or(crate::domain::kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS),
+    )
+}
+
 /// The improvement proposals running against `limit`, `[kpi]`'s
 /// `max_improvement_proposals` (ADR-0051 decision 25), and when they
 /// reached it, the findings waiting for a planner because of it (none

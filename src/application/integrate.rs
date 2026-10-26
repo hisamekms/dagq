@@ -1505,7 +1505,7 @@ fn record_push_phase<Q: EventStore + ?Sized>(
     let (phase, cause) = run_phase::Phase::after_push(kind);
     let attempt = run_phase::last_recorded(&queue.run_events(run_id)?)
         .map_or(run_phase::Attempt::FIRST, |recorded| recorded.attempt);
-    queue.record_runtime_event(
+    queue.record_runtime_event_now(
         run_id,
         EventKind::RunPhaseChanged,
         run_phase::PhaseChange::new(phase, attempt, cause).payload(),
@@ -1546,7 +1546,7 @@ fn record_phase<Q: EventStore + ?Sized>(
             .and_then(|phase| run_phase::next_change(&events, phase, cause.as_str()))
         {
             Some(change) => {
-                queue.record_runtime_event(run_id, EventKind::RunPhaseChanged, change.payload())
+                queue.record_runtime_event_now(run_id, EventKind::RunPhaseChanged, change.payload())
             }
             None => Ok(()),
         }
@@ -1763,7 +1763,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                 category: crate::domain::follow_up_category(entry),
                 membership_proposal: crate::domain::follow_up_membership_proposal(entry),
                 draft,
-                skipped,
+                skipped: skipped.map(str::to_owned),
             }
         })
         .collect();

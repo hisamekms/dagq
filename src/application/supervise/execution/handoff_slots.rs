@@ -379,6 +379,33 @@ impl Supervisor<'_> {
         }
     }
 
+    /// Whether the loop of this process, whose owner is gone, ends now
+    /// ([`handoff::owner_gone_ends`]): its grace passed, or no slot keeps
+    /// it; the runs still in their slots then are warned of, their leases
+    /// going stale with this process.
+    pub(super) fn owner_gone_ends(&self, options: &LoopSettings) -> bool {
+        let Some(since) = self.registration.owner_gone_since() else {
+            return false;
+        };
+        let gone_for = self
+            .generators
+            .clock
+            .monotonic()
+            .saturating_duration_since(since);
+        if !handoff::owner_gone_ends(gone_for, options.owner_gone_grace, self.claim.slots.len()) {
+            return false;
+        }
+        if !self.claim.slots.is_empty() {
+            warn!(
+                "supervisor {}: its owner is gone and {} run(s) still validate or land after {}s; their leases go stale with this process",
+                self.registration.token(),
+                self.claim.slots.len(),
+                gone_for.as_secs()
+            );
+        }
+        true
+    }
+
     /// The first step after the exec: a slot for every run whose lease
     /// carries this process's token, rebuilt the way an adopted run's is
     /// (ADR-0039) or from its `handoff.json`. A `needs_session` run without

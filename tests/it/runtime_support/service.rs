@@ -131,3 +131,192 @@ pub fn token_snapshot(queue_dir: &Path, snapshots: &Path, name: &str) -> String 
         credentials = shell_path(service.join(queue_service::CREDENTIALS_DIR)),
     )
 }
+
+/// A supervisor of the queue at `db` signed in to its running service,
+/// and the queue a job command it started as its own reaches through the
+/// service with its token ([`queue_service::SocketCaller::adopt`]): the
+/// supervisor signs out when dropped.
+pub struct JobOfSupervisor {
+    pub queues: dagq::application::supervisor_service::SupervisorQueues,
+    supervisor: queue_service::SocketCaller,
+}
+
+impl JobOfSupervisor {
+    pub fn sign_in(db: &Path) -> Self {
+        use dagq::application::supervisor_service::ServiceCaller;
+        let pid = std::process::id();
+        let registration = dagq::domain::LeaseToken::new("supervisor-of-the-job");
+        let supervisor = queue_service::SocketCaller::new(db);
+        supervisor.sign_in(&registration, pid).unwrap();
+        let adopted = queue_service::SocketCaller::adopt(db, &registration, pid).unwrap();
+        Self {
+            queues: dagq::application::supervisor_service::SupervisorQueues::new(
+                std::sync::Arc::new(adopted),
+                dagq::domain::ActorContext::instance(dagq::domain::ActorRole::Supervisor, pid),
+            ),
+            supervisor,
+        }
+    }
+}
+
+impl Drop for JobOfSupervisor {
+    fn drop(&mut self) {
+        use dagq::application::supervisor_service::ServiceCaller;
+        self.supervisor.sign_out();
+    }
+}
+
+/// The supervisor's way to its service as the route gives it, but for the
+/// operation `op` (ADR-t3102-3 decision 5): its first request finds the
+/// service out of reach and is not sent, and its second is done and its
+/// answer lost on the way back; the later ones go through.
+pub struct DropsThenLoses {
+    inner: std::sync::Arc<dyn dagq::application::supervisor_service::ServiceCaller>,
+    op: &'static str,
+    sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DropsThenLoses {
+    /// The layer of the supervisor's in-process route in this double for
+    /// `op`, and how many requests of `op` it was given.
+    pub fn wrap(
+        op: &'static str,
+    ) -> (
+        dagq::compose::CallerLayer,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = sent.clone();
+        let wrap = dagq::compose::CallerLayer(std::sync::Arc::new(move |inner| {
+            std::sync::Arc::new(Self {
+                inner,
+                op,
+                sent: counted.clone(),
+            })
+        }));
+        (wrap, sent)
+    }
+}
+
+impl dagq::application::supervisor_service::ServiceCaller for DropsThenLoses {
+    fn call(
+        &self,
+        use_case: dagq::domain::queue_service::UseCase,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        use dagq::application::supervisor_service::ServiceUnreachable;
+        if params["op"] != self.op {
+            return self.inner.call(use_case, params);
+        }
+        match self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => Err(ServiceUnreachable::not_done("the service is down").into()),
+            1 => {
+                self.inner.call(use_case, params)?;
+                Err(ServiceUnreachable::maybe_done("the answer was lost").into())
+            }
+            _ => self.inner.call(use_case, params),
+        }
+    }
+    fn with_token(
+        &self,
+        file: &Path,
+    ) -> anyhow::Result<std::sync::Arc<dyn dagq::application::supervisor_service::ServiceCaller>>
+    {
+        self.inner.with_token(file)
+    }
+    fn sign_in(&self, registration: &dagq::domain::LeaseToken, pid: u32) -> anyhow::Result<()> {
+        self.inner.sign_in(registration, pid)
+    }
+    fn take_back(&self, registration: &dagq::domain::LeaseToken, pid: u32) -> anyhow::Result<()> {
+        self.inner.take_back(registration, pid)
+    }
+    fn hand_over(&self) {
+        self.inner.hand_over();
+    }
+    fn sign_out(&self) {
+        self.inner.sign_out();
+    }
+    fn send_held(&self) -> anyhow::Result<bool> {
+        self.inner.send_held()
+    }
+}
+
+/// The supervisor's caller that never gets its ops through: every request
+/// of one finds the service out of reach, however long the supervisor sends
+/// it again, as a service down for longer than the supervisor runs.
+pub struct KeepsDown {
+    inner: std::sync::Arc<dyn dagq::application::supervisor_service::ServiceCaller>,
+    ops: Vec<&'static str>,
+    sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl KeepsDown {
+    /// The layer of the supervisor's in-process route in this double for
+    /// `op`, and how many requests of `op` it was given.
+    pub fn wrap(
+        op: &'static str,
+    ) -> (
+        dagq::compose::CallerLayer,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        Self::wrap_all(&[op])
+    }
+
+    /// [`Self::wrap`] of each of `ops`, the requests of all counted.
+    pub fn wrap_all(
+        ops: &[&'static str],
+    ) -> (
+        dagq::compose::CallerLayer,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = sent.clone();
+        let ops = ops.to_vec();
+        let wrap = dagq::compose::CallerLayer(std::sync::Arc::new(move |inner| {
+            std::sync::Arc::new(Self {
+                inner,
+                ops: ops.clone(),
+                sent: counted.clone(),
+            })
+        }));
+        (wrap, sent)
+    }
+}
+
+impl dagq::application::supervisor_service::ServiceCaller for KeepsDown {
+    fn call(
+        &self,
+        use_case: dagq::domain::queue_service::UseCase,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        if !self.ops.iter().any(|op| params["op"] == *op) {
+            return self.inner.call(use_case, params);
+        }
+        self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(
+            dagq::application::supervisor_service::ServiceUnreachable::not_done(
+                "the service is down",
+            )
+            .into(),
+        )
+    }
+    fn with_token(
+        &self,
+        file: &Path,
+    ) -> anyhow::Result<std::sync::Arc<dyn dagq::application::supervisor_service::ServiceCaller>>
+    {
+        self.inner.with_token(file)
+    }
+    fn sign_in(&self, registration: &dagq::domain::LeaseToken, pid: u32) -> anyhow::Result<()> {
+        self.inner.sign_in(registration, pid)
+    }
+    fn take_back(&self, registration: &dagq::domain::LeaseToken, pid: u32) -> anyhow::Result<()> {
+        self.inner.take_back(registration, pid)
+    }
+    fn hand_over(&self) {
+        self.inner.hand_over();
+    }
+    fn sign_out(&self) {
+        self.inner.sign_out();
+    }
+}

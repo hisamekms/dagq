@@ -25,7 +25,7 @@ use anyhow::Result;
 /// What one role wrote in a window ([`ObserverLog::written_by`]): finding
 /// ids it recorded, updated and closed (resolved or dismissed), its
 /// asks' ids, and the findings it left without an ask.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WrittenBy {
     pub recorded: Vec<i64>,
     pub updated: Vec<i64>,

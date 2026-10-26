@@ -6,6 +6,7 @@
 //! an event needs a task or a goal.
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, LIVE_PLANNER_NOT_RAISED};
+use crate::domain::headless_job::{ReviewTakeover, review_owner_gone};
 use crate::domain::write_rules::check_at_least;
 use crate::domain::{LeaseToken, event_kind};
 use anyhow::{Context, Result, bail, ensure};
@@ -94,6 +95,47 @@ fn running(conn: &Connection, job: &PlanReviewJob, token: &LeaseToken) -> Result
         params![job.id, token],
         |r| r.get(0),
     )?)
+}
+
+/// Make `token` the owner of review `id`'s unfinished row of `table`
+/// (`plan_reviews` or `goal_reviews`) when its owner is gone or is `token`
+/// itself ([`review_owner_gone`]), in one transaction: what it found.
+pub(super) fn take_over_review(
+    conn: &mut Connection,
+    table: &'static str,
+    id: i64,
+    token: &LeaseToken,
+    now: i64,
+    alive: &dyn Fn(u32) -> bool,
+) -> Result<ReviewTakeover> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let owner: Option<String> = tx
+        .query_row(
+            &format!("SELECT supervisor_token FROM {table} WHERE id=?1 AND finished_at IS NULL"),
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(owner) = owner else {
+        return Ok(ReviewTakeover::Finished);
+    };
+    let registration = tx
+        .query_row(
+            "SELECT heartbeat_at, pid FROM supervisors WHERE token=?1",
+            [&owner],
+            |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, u32>(1)?)),
+        )
+        .optional()?
+        .map(|(heartbeat, pid)| (heartbeat, alive(pid)));
+    if !review_owner_gone(&owner, token.as_str(), registration, now) {
+        return Ok(ReviewTakeover::OwnerRuns);
+    }
+    tx.execute(
+        &format!("UPDATE {table} SET supervisor_token=?2 WHERE id=?1 AND finished_at IS NULL"),
+        params![id, token],
+    )?;
+    tx.commit()?;
+    Ok(ReviewTakeover::Taken)
 }
 
 fn finish_row(
@@ -456,7 +498,11 @@ impl SqliteQueue {
 }
 
 impl PlanReviewStore for SqliteQueue {
-    fn interrupt_plan_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()> {
+    fn interrupt_plan_reviews_for_handoff(
+        &mut self,
+        token: &LeaseToken,
+        keep: &[i64],
+    ) -> Result<()> {
         let now = self.generators.clock.now();
         // Read transcripts before taking the write lock, as in begin/finish.
         let _read = sessions::read_before(&self.conn, sessions::Closing::PlanReviews(None, false))?;
@@ -469,7 +515,7 @@ impl PlanReviewStore for SqliteQueue {
             )?
             .query_map([token], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        for id in unfinished {
+        for id in unfinished.into_iter().filter(|id| !keep.contains(id)) {
             finish_row(
                 &tx,
                 id,
@@ -486,6 +532,16 @@ impl PlanReviewStore for SqliteQueue {
 
     fn plan_review_candidates(&self) -> Result<Vec<PlanReviewCandidate>> {
         candidates(&self.conn)
+    }
+
+    fn take_over_plan_review(
+        &mut self,
+        job: &PlanReviewJob,
+        token: &LeaseToken,
+        alive: &dyn Fn(u32) -> bool,
+    ) -> Result<ReviewTakeover> {
+        let now = self.generators.clock.now();
+        take_over_review(&mut self.conn, "plan_reviews", job.id, token, now, alive)
     }
 
     fn begin_plan_review(

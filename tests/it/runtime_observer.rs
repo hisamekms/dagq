@@ -4,37 +4,8 @@ use dagq::domain::EventKind;
 use dagq::domain::headless_job::JobAccess;
 use dagq::infrastructure::adapters::ClaudeCode;
 
+use runtime_support::observer::{ObserverProvider, observe_options, queue_event_actors};
 use runtime_support::*;
-
-/// The observer's provider double: the headless job is a shell script in the
-/// observation's directory, with the environment `observe` gives the agent.
-struct ObserverProvider {
-    script: String,
-}
-
-impl AgentProvider for ObserverProvider {
-    fn preflight(&self) -> Result<()> {
-        Ok(())
-    }
-    fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
-        assert!(prompt.contains("You are the observer"), "{prompt}");
-        assert_eq!(access, JobAccess::QueueCli);
-        let mut command = CommandSpec::new("/bin/sh");
-        command.current_dir(cwd).arg("-c").arg(&self.script);
-        Ok(command)
-    }
-    /// The script's `$0`, which it writes to `mcp.txt` when asked to.
-    fn without_mcp(&self, command: &mut CommandSpec) {
-        command.option_args(["no-mcp"]);
-    }
-    /// `$MODEL`, which the script may write down (ADR-0079 decision 7).
-    fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
-        command.env("MODEL", format!("{model} {effort}"));
-    }
-    fn review_command(&self, _: &TaskRun, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
-        bail!("the observer reviews no run")
-    }
-}
 
 // The composition supplies the signals of the same provider that starts
 // the job. These shell doubles emit Claude's diagnostics.
@@ -56,24 +27,6 @@ pub(crate) fn observe(
     )
 }
 
-pub(crate) fn observe_options(
-    mode: dagq::application::observer::ObserveMode,
-) -> dagq::application::observer::ObserveOptions {
-    dagq::application::observer::ObserveOptions {
-        mode,
-        since: None,
-        dry_run: false,
-        timeout: Duration::from_secs(60),
-        dagq: PathBuf::from(env!("CARGO_BIN_EXE_dagq")),
-        user_config: None,
-        prompt_limit: dagq::application::observer::PROMPT_LIMIT,
-        launch: None,
-        switchable: false,
-        fallback: true,
-        unavailable: None,
-    }
-}
-
 pub(crate) fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
     Connection::open(db)
         .unwrap()
@@ -82,20 +35,6 @@ pub(crate) fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
         .query_map([kind], |r| r.get::<_, String>(0))
         .unwrap()
         .map(|p| serde_json::from_str(&p.unwrap()).unwrap())
-        .collect()
-}
-
-fn queue_event_actors(db: &Path, kind: &str) -> Vec<(String, String, Option<String>)> {
-    Connection::open(db)
-        .unwrap()
-        .prepare(
-            "SELECT actor_role, actor_id, requested_by
-             FROM run_events WHERE kind=?1 ORDER BY id",
-        )
-        .unwrap()
-        .query_map([kind], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .unwrap()
-        .map(Result::unwrap)
         .collect()
 }
 

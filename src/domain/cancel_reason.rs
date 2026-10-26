@@ -53,7 +53,7 @@ pub const UNRECORDED: &str = "unrecorded";
 const NEEDS_TARGET: [&str; 4] = [DUPLICATE, ALREADY_DONE, ABSORBED, RE_REGISTERED];
 
 /// The runtime's path that applies a cancel itself (ADR-t947-4 decision 3).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CancelPath {
     /// A plan review's `cancel_duplicate` action on this proposal: the
     /// reason comes from the named task's status, as for `--duplicate-of`.
@@ -65,7 +65,7 @@ pub enum CancelPath {
 }
 
 /// A cancel as asked for, before the store reads the task it names.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewCancel {
     pub reason: Option<String>,
     pub duplicate_of: Option<TaskId>,

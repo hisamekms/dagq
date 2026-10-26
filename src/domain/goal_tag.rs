@@ -77,7 +77,7 @@ pub fn check_distinct(tags: &[GoalTag]) -> Result<(), DomainError> {
 
 /// The repository's set of goal tags, `[goals] tags` of `dagq.toml`, in
 /// the order written, each once.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TagSet(Vec<GoalTag>);
 
 impl TagSet {

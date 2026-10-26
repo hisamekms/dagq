@@ -73,6 +73,34 @@ pub enum QueueRead {
     CiFailures(CiFailuresRead),
     Planners(PlannersRead),
     ServiceStatus(ServiceStatusRead),
+    /// A read of a job the supervisor started (an observation, a
+    /// throughput review): reached only through the supervisor's use case
+    /// ([`crate::application::supervisor_service`]), never read from a
+    /// request's params.
+    Job(JobRead),
+}
+
+/// What a job the supervisor started reads of the whole queue, as the
+/// queries the job makes, each with what the job read with Git for it as
+/// [`StatsRead::git`] (the service runs no Git).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
+pub enum JobRead {
+    Stats {
+        query: crate::domain::stats::StatsQuery,
+        git: Option<crate::application::stats::StatsGitReads>,
+    },
+    Kpi {
+        query: crate::domain::kpi::KpiQuery,
+        git: Option<crate::application::stats::StatsGitReads>,
+    },
+    /// The observer's KPI input: the day's and the week's with the
+    /// breaches still open.
+    ObserverKpi {
+        git: Option<crate::application::stats::StatsGitReads>,
+    },
+    /// The inputs the job reads Git with for the others
+    /// ([`QueueRead::StatsInputs`]).
+    StatsInputs,
 }
 
 /// `service status`' read: no option.
@@ -812,7 +840,8 @@ impl QueueRead {
             | Self::Replans(_)
             | Self::CiFailures(_)
             | Self::Planners(_)
-            | Self::ServiceStatus(_) => {}
+            | Self::ServiceStatus(_)
+            | Self::Job(_) => {}
         }
         Ok(())
     }
@@ -942,6 +971,10 @@ impl QueueRead {
                 json!({"observation": read.observation, "section": read.section,
                        "offset": read.offset, "limit": read.limit}),
             ),
+            Self::Job(read) => (
+                UseCase::Supervisor,
+                json!({"op": "job_read", "args": [read]}),
+            ),
         }
     }
 }
@@ -991,6 +1024,10 @@ where
         QueueRead::CiFailures(read) => sources.ci_failures(queue, read),
         QueueRead::Planners(read) => sources.planners(queue, read),
         QueueRead::ServiceStatus(_) => Ok(observation::service_status(queue)),
+        QueueRead::Job(JobRead::Stats { query, git }) => sources.stats(queue, query, git.as_ref()),
+        QueueRead::Job(JobRead::Kpi { query, git }) => sources.kpi(queue, query, git.as_ref()),
+        QueueRead::Job(JobRead::ObserverKpi { git }) => sources.observer_kpi(queue, git.as_ref()),
+        QueueRead::Job(JobRead::StatsInputs) => sources.stats_inputs(queue),
     }
 }
 

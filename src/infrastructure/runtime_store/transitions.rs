@@ -950,7 +950,8 @@ impl SqliteQueue {
         token: &LeaseToken,
         main: &CommitSha,
     ) -> Result<TaskRun> {
-        self.begin_integration_with(id, token, main, true)
+        self.begin_integration_then(id, token, main, true, |_| Ok(()))
+            .map(|(run, ())| run)
     }
 
     /// [`Self::begin_integration`] for a supervisor whose stop wins over
@@ -961,16 +962,26 @@ impl SqliteQueue {
         token: &LeaseToken,
         main: &CommitSha,
     ) -> Result<TaskRun> {
-        self.begin_integration_with(id, token, main, false)
+        self.begin_integration_then(id, token, main, false, |_| Ok(()))
+            .map(|(run, ())| run)
     }
 
-    fn begin_integration_with(
+    /// [`Self::begin_integration`], refused by a handoff the supervisor is
+    /// asked only when `refused_by_handoff`, that runs `then` in the same
+    /// transaction once the slot and its lease are taken, and commits only
+    /// when `then` succeeds: the landing's integrator token, issued only
+    /// while the slot's lease is held (ADR-t3102-3 decision 3, ADR-t3102-1
+    /// decision 2), given the `integration_started` event the landing
+    /// wrote. One that fails leaves the run, the slot and the lease as
+    /// they were. The run begun and what `then` gave.
+    pub fn begin_integration_then<T>(
         &mut self,
         id: &RunId,
         token: &LeaseToken,
         main: &CommitSha,
         refused_by_handoff: bool,
-    ) -> Result<TaskRun> {
+        then: impl FnOnce(crate::domain::EventId) -> Result<T>,
+    ) -> Result<(TaskRun, T)> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1045,8 +1056,14 @@ impl SqliteQueue {
             EventKind::IntegrationStarted,
             json!({"main": main, "previous_status": previous, "pid": holder_pid(&tx, token)?}),
         )?;
+        let started: i64 = tx.query_row(
+            "SELECT max(id) FROM run_events WHERE run_id=?1 AND kind='integration_started'",
+            [id],
+            |r| r.get(0),
+        )?;
+        let done = then(crate::domain::EventId::new(started))?;
         tx.commit()?;
-        Ok(run.relocated(&self.runs_dir))
+        Ok((run.relocated(&self.runs_dir), done))
     }
 
     /// Park an integrating run for a session: `needs_session` with the reason
@@ -1204,7 +1221,8 @@ impl SqliteQueue {
     /// Complete the task once its run landed on `main`: the run becomes
     /// `integrated` with the landed commit as `result_commit`, the task
     /// `completed`, and the slot and lease are released. The status
-    /// predicates make a repeated or concurrent completion fail without effect.
+    /// predicates make a concurrent completion fail without effect, and the
+    /// same landing sent again answers the record it made.
     pub fn finish_integration(
         &mut self,
         id: &RunId,
@@ -1215,6 +1233,15 @@ impl SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // The same landing sent again, its answer lost (ADR-t3102-3
+        // decision 5): recorded once, and answered as it was.
+        if let Some(landed) = stored_run(&tx, id)?
+            && landed.status() == RunStatus::Integrated
+            && landed.result_commit() == Some(&landing.commit)
+        {
+            let task = crate::infrastructure::sqlite::read_task(&tx, landed.task_id())?;
+            return Ok((task, landed.relocated(&self.runs_dir)));
+        }
         let at = self.generators.clock.system_time();
         renew_lease(&tx, id, token, unix_seconds(at))?;
         let run = apply(

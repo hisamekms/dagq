@@ -45,6 +45,7 @@ use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）�
   全slotが組み立て直せる状態になったら、`prepare_handoff`はobserverを止めた後、plan review / goal reviewのjobを1回pollし、終わっていれば回収してverdictを適用する（終わったjobのverdictを捨てて次のプロセスで同じattemptをやり直さない）。
   そのうえでobserverの子プロセスと、まだ走っているheadlessのreview / triage / plan review / goal reviewのjobを（その子孫ごと）止める（`headless_jobs`の行は`stopped`で閉じ、execの前に書く。[Headless job processes](headless-job-processes.md)）。
   plan review / goal reviewの行は同じtokenのまま未完了で残り、引き継いだプロセスが最初のpassに入る前に`interrupted`で閉じ、候補のままなら以後のpassで再びreviewする（[Plan review](plan-review.md)・[Goal review](goal-review.md)）。
+  回収した終わり（verdictか失敗）をqueueが取らなかった行は閉じず、引き継いだプロセスが残された終わりで終える（[Supervise](supervise.md#queue-serviceの経路)）。
   triageはleaseを返し、次のプロセスがtriageし直す。
   reviewはleaseを保ち、次のプロセスがreviewし直す。
   DBが持たない状態（resume中のsessionと、検証で`failed` / `needs_session`になって終了を待つrunのsession。欄は`handoff::Snapshot`）を、書いたsupervisorのtokenを添えて`runs/<id>/handoff.json`に書く（同じtokenの次のプロセスだけが読み、それ以外が残したfileは読まずに消す）。

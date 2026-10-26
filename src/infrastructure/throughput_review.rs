@@ -60,10 +60,14 @@ pub fn review_launch(checkout: Option<&Path>) -> ActorLaunch {
 
 /// The throughput review's host: the files under `<queue
 /// dir>/reports/reviews`, the bound checkout's configuration, the host's
-/// time zone and the agent's local process.
-pub struct LocalThroughputReview;
+/// time zone and the agent's local process, whose events go to `events`
+/// (the supervisor's queue through the service), else to the queue it
+/// names.
+pub struct LocalThroughputReview<'a> {
+    pub events: Option<&'a dyn crate::application::RunLog>,
+}
 
-impl ThroughputReviewHost for LocalThroughputReview {
+impl ThroughputReviewHost for LocalThroughputReview<'_> {
     fn utc_offset(&self, now: i64) -> i64 {
         crate::infrastructure::clock::local_utc_offset(now)
     }
@@ -93,6 +97,6 @@ impl ThroughputReviewHost for LocalThroughputReview {
         prompt: &str,
         agent: &HeadlessAgent<'_>,
     ) -> Result<Option<i32>> {
-        crate::infrastructure::observer::run_agent(provider, db, dir, prompt, agent)
+        crate::infrastructure::observer::run_agent(provider, db, self.events, dir, prompt, agent)
     }
 }

@@ -66,7 +66,9 @@ pub const UNKNOWN: &str = "unknown";
 const BASELINE_DAYS: usize = 7;
 
 /// The length of a period (decision 8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Period {
     /// The host's local day, from midnight.
     Day,
@@ -144,7 +146,9 @@ fn date(days: i64) -> String {
 }
 
 /// What a run's KPIs can be split by besides `all` (decision 6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Axis {
     /// The change the task declares (ADR-t980-1); `unknown` without one.
     Change,
@@ -264,7 +268,7 @@ pub const COMPARE_AXES: [Axis; 5] = [
 
 /// What `--compare` names (decision 14): a mark (its event id) or any
 /// time to split at, or two windows `A..B,C..D`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CompareSpec {
     At(Cursor),
     Windows([(Cursor, Cursor); 2]),
@@ -304,7 +308,7 @@ impl std::str::FromStr for CompareSpec {
 }
 
 /// What `kpi` looks at (decision 9).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KpiQuery {
     pub period: Period,
     /// How many periods to list, the latest last.

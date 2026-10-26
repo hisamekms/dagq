@@ -1273,6 +1273,7 @@ pub mod ids;
 pub mod inherit_by_hand;
 mod input;
 pub mod instructions;
+pub mod interned;
 pub mod investigation;
 pub mod kpi;
 pub mod landing_branch;
@@ -1507,9 +1508,10 @@ string_enum!(AnswerAuthority {
 
 /// Who writes an answer: `answered_by` as it always was, and the
 /// authority it carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Answerer {
-    pub by: &'static str,
+    #[serde(deserialize_with = "interned::text")]
+    pub by: interned::Text,
     pub authority: AnswerAuthority,
 }
 
@@ -1594,7 +1596,7 @@ impl Ask {
 
 /// An ask to register: `task_id` or `run_id` names what it is about (a run
 /// implies its task). Only a `blocked` ask may name neither.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NewAsk {
     pub kind: AskKind,
     pub task_id: Option<TaskId>,
@@ -1779,7 +1781,7 @@ pub fn check_ask_kind(
 /// (ADR-0047 decision 42): at most one `queue_hold` ask is open per
 /// reason and subject, and a run that hits the same wall joins its
 /// `affected` instead of opening another.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NewHold {
     /// `authentication` or `cost`.
     pub reason_category: AskReason,
@@ -1899,7 +1901,7 @@ pub const APPROVE_RELEASE_OPTIONS: &[&str] = &["install", "skip"];
 
 /// What [`NewHold`] did: opened the ask (`created`), added the run to the
 /// open one (`joined`), or found the run already in it (neither).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct HoldOutcome {
     #[serde(flatten)]
     pub ask: Ask,
@@ -1909,7 +1911,7 @@ pub struct HoldOutcome {
 
 /// What `ask` returns: the open ask of the same (task, run, kind) when one
 /// exists (`created: false`), or the one just registered.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AskOutcome {
     #[serde(flatten)]
     pub ask: Ask,
@@ -1923,7 +1925,7 @@ pub const OBSERVATION_KIND: &str = event_kind::OBSERVATION;
 pub const DEFAULT_NOTE_KIND: &str = "note";
 
 /// What a note is attached to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NoteTarget {
     Task(TaskId),
     Run(RunId),
@@ -1931,7 +1933,7 @@ pub enum NoteTarget {
 }
 
 /// A note to record as an `observation` run event.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NewNote {
     pub target: NoteTarget,
     pub text: String,
@@ -1972,7 +1974,7 @@ impl NewNote {
 /// Which notes `notes` lists: past `since` (oldest first), or the latest
 /// `limit` without it, narrowed to a goal (its own notes and those of its
 /// tasks and their runs) and/or a task (its own and its runs').
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct NoteQuery {
     pub goal_id: Option<GoalId>,
     pub task_id: Option<TaskId>,

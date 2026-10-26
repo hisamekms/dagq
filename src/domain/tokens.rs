@@ -18,7 +18,7 @@ pub const USAGE_UNSUPPORTED: &str = "usage_unsupported";
 
 /// The tokens of a span, per kind of token, and the messages they came
 /// from.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
     pub input: i64,
     pub output: i64,
@@ -89,7 +89,7 @@ impl TokenUsage {
 /// Where the tokens of an Execution (one `claude -p` / `codex exec` call:
 /// a headless turn or a headless job, ADR-t1486-1) were counted from: the
 /// `tokens_source` of its record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TokenSource {
     /// Claude's result's `modelUsage`: every model of the session, its
     /// subagents included, summed.
@@ -193,7 +193,7 @@ pub const CONTEXT_NOT_READ: &str = "context_not_read";
 /// not. `None` with a `reason` is not measured, told from a measured 0.
 /// The cuts of an interactive session (the inbox, a person's planner) are
 /// no Execution and measure none.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionContext {
     /// The largest input of one call (`peak_context`): Claude's
     /// `input_tokens` + `cache_read_input_tokens` +
@@ -208,7 +208,8 @@ pub struct ExecutionContext {
     /// rollout in the Execution's turns.
     pub compactions: Option<i64>,
     /// Why `peak` or `compactions` is not measured (`context_reason`).
-    pub reason: Option<&'static str>,
+    #[serde(default, deserialize_with = "super::interned::optional")]
+    pub reason: Option<super::interned::Text>,
 }
 
 impl Default for ExecutionContext {
@@ -276,7 +277,7 @@ pub fn claude_context_window(model: &str) -> Option<i64> {
 /// One model's tokens in an Execution (an entry of Claude's `modelUsage`):
 /// the same kinds as [`TokenUsage`], and the cost when the provider gave
 /// one.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelTokens {
     pub model: String,
     pub input: i64,
@@ -400,7 +401,7 @@ impl ModelTokens {
 /// The tokens of one Execution as its record carries them (ADR-t1486-1):
 /// the form every provider's turn and job is recorded in. A count of 0 is
 /// a measured 0; `tokens` `None` with a `reason` is not measured.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionTokens {
     /// Its tokens, every model and every subagent (child thread) of it
     /// together; `None` when they could not be counted.
@@ -413,7 +414,8 @@ pub struct ExecutionTokens {
     /// Why nothing was counted ([`NO_RESULT`], [`NO_USAGE`]), or why they
     /// were counted from a fallback that leaves some out
     /// ([`MODEL_USAGE_MISSING`]).
-    pub reason: Option<&'static str>,
+    #[serde(default, deserialize_with = "super::interned::optional")]
+    pub reason: Option<super::interned::Text>,
     /// The subagents (Claude's `subagent_stats.spawned`) or child threads
     /// the Execution started, when the provider says.
     pub children: Option<i64>,

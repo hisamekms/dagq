@@ -507,27 +507,34 @@ pub fn call_read(
     }
 }
 
-/// `read`, a `stats` or `kpi` its client sends to the queue service, with
-/// the [`StatsGitReads`] `client` reads in the main checkout the
-/// [`StatsInputs`] `call` answers to `stats_inputs` names: the areas of
-/// the landed commits (none without `[areas]` or a main checkout), and for
-/// a `stats` main's history since [`StatsInputs::history_since`] narrowed
-/// to the conflicted files, or why it was not read ([`NO_CHECKOUT`]
-/// without a main checkout, as on the DB). Params larger than a request
-/// takes are refused with their size, and nothing is sent. Any other read
-/// is left as it is, and nothing is asked.
+/// `read`, a `stats` or `kpi` its client sends to the queue service (a
+/// job's among them, [`super::queue_reads::JobRead`]), with the
+/// [`StatsGitReads`] `client` reads in the main checkout the
+/// [`StatsInputs`] `call` answers to `stats_inputs` (a job's to its own)
+/// names: the areas of the landed commits (none without `[areas]` or a
+/// main checkout), and for a `stats` main's history since
+/// [`StatsInputs::history_since`] narrowed to the conflicted files, or why
+/// it was not read ([`NO_CHECKOUT`] without a main checkout, as on the
+/// DB). Params larger than a request takes are refused with their size,
+/// and nothing is sent. Any other read is left as it is, and nothing is
+/// asked.
 pub fn prepare_read(
     read: &mut super::queue_reads::QueueRead,
     client: &StatsClient<'_>,
     call: impl FnOnce(&super::queue_reads::QueueRead) -> Result<serde_json::Value>,
 ) -> Result<()> {
-    use super::queue_reads::{QueueRead, StatsInputsRead};
-    if !matches!(read, QueueRead::Stats(_) | QueueRead::Kpi(_)) {
-        return Ok(());
-    }
+    use super::queue_reads::{JobRead, QueueRead, StatsInputsRead};
+    let (inputs_read, stats) = match read {
+        QueueRead::Stats(_) => (QueueRead::StatsInputs(StatsInputsRead::default()), true),
+        QueueRead::Kpi(_) => (QueueRead::StatsInputs(StatsInputsRead::default()), false),
+        QueueRead::Job(JobRead::Stats { .. }) => (QueueRead::Job(JobRead::StatsInputs), true),
+        QueueRead::Job(JobRead::Kpi { .. } | JobRead::ObserverKpi { .. }) => {
+            (QueueRead::Job(JobRead::StatsInputs), false)
+        }
+        _ => return Ok(()),
+    };
     let inputs: StatsInputs =
-        serde_json::from_value(call(&QueueRead::StatsInputs(StatsInputsRead::default()))?)
-            .context("the inputs of stats do not read")?;
+        serde_json::from_value(call(&inputs_read)?).context("the inputs of stats do not read")?;
     let checkout = inputs.checkout.as_deref();
     let areas = match checkout {
         Some(checkout) => (client.areas)(checkout)?.commit_areas(&inputs.landed),
@@ -551,9 +558,7 @@ pub fn prepare_read(
     });
     // `kpi` counts no conflict hotspot: main's history is read for `stats`
     // alone.
-    let since = inputs
-        .history_since
-        .filter(|_| matches!(read, QueueRead::Stats(_)));
+    let since = inputs.history_since.filter(|_| stats);
     let history = since.map(|since| match checkout {
         Some(checkout) => match read_history(&|since| (client.history)(checkout, since), since) {
             History::Read(history) => {
@@ -571,6 +576,11 @@ pub fn prepare_read(
     match read {
         QueueRead::Stats(stats) => stats.git = git,
         QueueRead::Kpi(kpi) => kpi.git = git,
+        QueueRead::Job(
+            JobRead::Stats { git: slot, .. }
+            | JobRead::Kpi { git: slot, .. }
+            | JobRead::ObserverKpi { git: slot },
+        ) => *slot = git,
         _ => {}
     }
     fit_request(
@@ -1423,6 +1433,54 @@ mod tests {
         let before = other.clone();
         prepare_read(&mut other, &client, |_| unreachable!()).unwrap();
         assert_eq!(other, before);
+    }
+
+    /// A job's `stats`, `kpi` and observer KPI are sent with the Git reads
+    /// made from the inputs its own `stats_inputs` names, as a command
+    /// line's are: main's history for `stats` alone, the areas for each.
+    #[test]
+    fn a_jobs_reads_carry_the_git_reads_made_from_its_own_inputs() {
+        use super::super::queue_reads::{JobRead, QueueRead};
+        let events = [landed(1, 1, "c1"), conflict(2, "a")];
+        let inputs = stats_inputs(Some(PathBuf::from("/repo")), &events);
+        let read = |_: &Path, _: i64| Ok(whole_history());
+        let client = client_of(&mapped, &read);
+        let prepared = |job: JobRead| {
+            let mut read = QueueRead::Job(job);
+            prepare_read(&mut read, &client, |asked| {
+                assert_eq!(asked, &QueueRead::Job(JobRead::StatsInputs));
+                Ok(serde_json::to_value(&inputs).unwrap())
+            })
+            .unwrap();
+            match read {
+                QueueRead::Job(
+                    JobRead::Stats { git, .. }
+                    | JobRead::Kpi { git, .. }
+                    | JobRead::ObserverKpi { git },
+                ) => git.unwrap(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let stats = prepared(JobRead::Stats {
+            query: StatsQuery::default(),
+            git: None,
+        });
+        assert!(stats.history.is_some());
+        stats.served(&inputs).unwrap().check(&events).unwrap();
+        for job in [
+            JobRead::Kpi {
+                query: crate::domain::kpi::KpiQuery::default(),
+                git: None,
+            },
+            JobRead::ObserverKpi { git: None },
+        ] {
+            let git = prepared(job);
+            assert_eq!(git.history, None, "kpi reads no main history");
+            assert!(git.areas.is_some());
+        }
+        let mut inputs_read = QueueRead::Job(JobRead::StatsInputs);
+        prepare_read(&mut inputs_read, &client, |_| unreachable!()).unwrap();
+        assert_eq!(inputs_read, QueueRead::Job(JobRead::StatsInputs));
     }
 
     /// Reads made for other inputs than the events give are refused: by

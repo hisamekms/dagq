@@ -4,7 +4,7 @@
 //! [`crate::application::observer`] and the throughput review.
 use crate::{
     application::{
-        AgentProvider, ProcessControl, Streams,
+        AgentProvider, ProcessControl, RunLog, Streams,
         actor_executor::{
             ActorExecutionSpec, ActorExecutor, ActorProgram, HeadlessProgram, HostActorExecutor,
             WorkspaceAccess,
@@ -117,9 +117,12 @@ pub fn read_input(
 /// it started, so no Bash child of the agent outlives it: an error).
 /// The exit code, or `None`
 /// when a signal ended it.
+/// The agent's events (where it was found again) go to `events`, else to
+/// the queue at `db`.
 pub fn run_agent(
     provider: &dyn AgentProvider,
     db: &Path,
+    events: Option<&dyn RunLog>,
     dir: &Path,
     prompt: &str,
     agent: &HeadlessAgent<'_>,
@@ -127,6 +130,7 @@ pub fn run_agent(
     run_agent_in(
         provider,
         db,
+        events,
         WorkspaceAccess::Scratch(dir.to_path_buf()),
         dir,
         prompt,
@@ -139,9 +143,11 @@ pub fn run_agent(
 /// of `setup-review` writes its temporary checkout) and its output in
 /// `dir`, stopped with what it started as at its timeout once `stop` says
 /// so (the person interrupted the command): an error either way.
+#[allow(clippy::too_many_arguments)]
 pub fn run_agent_in(
     provider: &dyn AgentProvider,
     db: &Path,
+    events: Option<&dyn RunLog>,
     workspace: WorkspaceAccess,
     dir: &Path,
     prompt: &str,
@@ -162,12 +168,16 @@ pub fn run_agent_in(
         .map_err(|_| anyhow::anyhow!("PATH is not UTF-8"))?;
     // Where an agent found again by its provider's name is recorded
     // (ADR-t2079-1); a queue that does not open leaves it to the log.
-    let events = crate::infrastructure::sqlite::SqliteQueue::open(db).ok();
+    let opened = match events {
+        Some(_) => None,
+        None => crate::infrastructure::sqlite::SqliteQueue::open(db).ok(),
+    };
+    let events = events.or_else(|| opened.as_ref().map(|queue| queue as &dyn RunLog));
     let mut executor = HostActorExecutor::new(db)
         .with_provider(provider)
         .with_spawner(&LocalSpawner)
         .with_queue_service(&crate::infrastructure::queue_service::SystemServiceAccess);
-    if let Some(events) = &events {
+    if let Some(events) = events {
         executor = executor.with_events(events);
     }
     let mut child = executor
@@ -184,7 +194,9 @@ pub fn run_agent_in(
                     session_id: agent.session_id,
                     launch: Some(agent.launch),
                     without_mcp: true,
-                    without_env: &[],
+                    // The supervisor's registration is the job command's,
+                    // not its agent's.
+                    without_env: &[crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV],
                     env: vec![("PATH".to_owned(), path)],
                     streams: Streams::Files {
                         stdout: &stdout,
@@ -225,10 +237,14 @@ pub fn run_agent_in(
 }
 
 /// The observer's host: the files under `<queue dir>/observer`, the bound
-/// checkout's configuration and the agent's local process.
-pub struct LocalObserver;
+/// checkout's configuration and the agent's local process, whose events
+/// go to `events` (the supervisor's queue through the service), else to
+/// the queue it names.
+pub struct LocalObserver<'a> {
+    pub events: Option<&'a dyn RunLog>,
+}
 
-impl ObserverHost for LocalObserver {
+impl ObserverHost for LocalObserver<'_> {
     fn read_cursor(&self, db: &Path) -> Result<Option<EventId>> {
         read_cursor(db)
     }
@@ -261,6 +277,6 @@ impl ObserverHost for LocalObserver {
         prompt: &str,
         agent: &HeadlessAgent<'_>,
     ) -> Result<Option<i32>> {
-        run_agent(provider, db, dir, prompt, agent)
+        run_agent(provider, db, self.events, dir, prompt, agent)
     }
 }

@@ -158,9 +158,12 @@ impl Supervisor<'_> {
         let Some((reason, blocked)) = self.provider_wait(run, &events, true) else {
             return Ok(false);
         };
+        // Found against the run's history: a record the queue did not take
+        // is found missing and made again by the next pass, never kept
+        // (`record_runtime_event_now`), so it is recorded once.
         if !crate::domain::resume::resume_wait_recorded(&events) {
             let from = run.actual_provider();
-            self.queue.record_runtime_event(
+            let recorded = self.queue.record_runtime_event_now(
                 run.id(),
                 EventKind::ProviderWaiting,
                 json!({
@@ -177,8 +180,15 @@ impl Supervisor<'_> {
                         .find(|hold| hold.provider == from)
                         .map(|hold| hold.retry_at),
                 }),
-            )?;
-            info!(run_id = %run.id(), "run {}: its next resume waits for a provider: {} cannot be used ({}) and the run cannot move to {} ({blocked})", run.id(), from.as_str(), reason.as_str(), from.other().as_str());
+            );
+            match recorded {
+                Ok(()) => {
+                    info!(run_id = %run.id(), "run {}: its next resume waits for a provider: {} cannot be used ({}) and the run cannot move to {} ({blocked})", run.id(), from.as_str(), reason.as_str(), from.other().as_str());
+                }
+                Err(error) => {
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the wait for a provider could not be recorded, and the next pass records it: {error:#}", run.id());
+                }
+            }
         }
         Ok(true)
     }
@@ -374,9 +384,11 @@ impl Supervisor<'_> {
             info!(run_id = %run.id(), "run {}: {} can be used again; the call of turn {turn} is made again", run.id(), from.as_str());
             return Ok(WallStep::Switched(self.files.now()));
         }
+        // Found against the run's history (`waiting_on`), as the resume's
+        // wait is: one the queue did not take is recorded by the next pass.
         if next == (WallMove::Wait { record: true }) {
             let blocked = switch_blocked(fallback, &events, self.provider_held(to));
-            self.queue.record_runtime_event(
+            let recorded = self.queue.record_runtime_event_now(
                 run.id(),
                 EventKind::ProviderWaiting,
                 json!({
@@ -391,8 +403,15 @@ impl Supervisor<'_> {
                         .find(|hold| hold.provider == from)
                         .map(|hold| hold.retry_at),
                 }),
-            )?;
-            info!(run_id = %run.id(), "run {} waits for a provider: {} cannot be used ({}) and the run cannot move to {} ({blocked})", run.id(), from.as_str(), reason.as_str(), to.as_str());
+            );
+            match recorded {
+                Ok(()) => {
+                    info!(run_id = %run.id(), "run {} waits for a provider: {} cannot be used ({}) and the run cannot move to {} ({blocked})", run.id(), from.as_str(), reason.as_str(), to.as_str());
+                }
+                Err(error) => {
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the wait for a provider could not be recorded, and the next pass records it: {error:#}", run.id());
+                }
+            }
         }
         // A person is asked when both providers cannot be used, and always
         // for Claude's login or usage limit (the Claude-only jobs wait too):

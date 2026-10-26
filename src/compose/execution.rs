@@ -462,13 +462,21 @@ pub fn review_in(
     task_id: TaskId,
     range: Option<&reviewing::ReviewRange>,
 ) -> Result<Value> {
-    let mut queue = SqliteQueue::open(db)?;
+    review_on(&mut SqliteQueue::open(db)?, task_id, range)
+}
+
+/// [`review_in`] on `queue`: the supervisor's, through the queue service.
+pub fn review_on(
+    queue: &mut dyn crate::application::TaskStore,
+    task_id: TaskId,
+    range: Option<&reviewing::ReviewRange>,
+) -> Result<Value> {
     let open_repository = |checkout: &Path| -> Result<Box<dyn Repository>> {
         Ok(Box::new(GitRepository::inspect(checkout)?))
     };
     reviewing::review(
         Review {
-            queue: &mut queue,
+            queue,
             files: &LocalRunFiles,
             open_repository: &open_repository,
             pid: std::process::id(),

@@ -15,7 +15,7 @@ use super::{DomainError, TaskId, require};
 /// `<prefix>[(<scope>)][!]: <subject>`: one of the prefixes, an optional
 /// non-empty scope in parentheses, an optional `!`, a `:`, whitespace and a
 /// subject that is not blank.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TitlePrefixes(Vec<String>);
 
 impl TitlePrefixes {

@@ -227,6 +227,13 @@ impl ObservationState {
         // The command is the supervisor's; its agent is the
         // throughput-review-job (ADR-t996-1 decision 4).
         command.envs(env.layout.supervisor_actor().env());
+        // It reaches the queue as this supervisor (ADR-t3102-3 decision 3).
+        if env.layout.jobs_through_service {
+            command.env(
+                crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV,
+                env.token.as_str(),
+            );
+        }
         match env.spawner.spawn(&command, Streams::Null) {
             Ok(child) => {
                 info!(

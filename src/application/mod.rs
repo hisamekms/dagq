@@ -91,7 +91,7 @@ use crate::domain::{
 };
 
 /// Which task statuses `list` returns.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum StatusFilter {
     /// Every status except the terminal ones (completed, canceled).
     #[default]
@@ -104,7 +104,7 @@ pub enum StatusFilter {
 
 /// Filter and page of a task listing. Filters combine with AND; tasks come
 /// newest first (ID descending).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskQuery {
     pub status: StatusFilter,
     pub goal_id: Option<GoalId>,
@@ -136,7 +136,7 @@ impl Default for TaskQuery {
 /// One page of tasks. `next` is the ID of the first task past this page,
 /// to pass as `before` for the following page, and null on the last one;
 /// `total` counts every task the filter matches, regardless of the page.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskPage {
     pub tasks: Vec<TaskListItem>,
     pub next: Option<TaskId>,
@@ -145,7 +145,7 @@ pub struct TaskPage {
 
 /// A task as `list` shows it: what the planner decides on, plus the
 /// long fields only with `full`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskListItem {
     pub id: TaskId,
     pub status: TaskStatus,
@@ -192,7 +192,7 @@ pub struct TaskListItem {
 /// An open replanning operation as `list` marks its task with: which,
 /// where it is, whether it holds the task from every ordinary step, and
 /// why it is there.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ListedReplan {
     pub operation: crate::domain::ReplanId,
     pub status: crate::domain::task_replan::ReplanStatus,
@@ -216,7 +216,7 @@ impl ListedReplan {
 
 /// An open hold as `list` marks its task with: which, where it stands,
 /// why, until when and by whom.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ListedHold {
     pub hold: crate::domain::HoldId,
     pub state: crate::domain::task_hold::HoldState,
@@ -237,13 +237,13 @@ impl ListedHold {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LatestRun {
     pub id: RunId,
     pub status: RunStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskListDetails {
     pub description: String,
     pub acceptance: String,

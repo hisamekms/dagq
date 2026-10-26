@@ -120,6 +120,49 @@ pub(in crate::application::supervise) fn job_wait(
     }
 }
 
+/// How [`send_within`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::application::supervise) enum Sent {
+    /// All was taken.
+    Taken,
+    /// Not all was taken after the tries, or before the deadline was over.
+    NotTaken,
+    /// The deadline was over before anything was sent.
+    Late,
+}
+
+/// Send what the end of the loop holds by `send` (whether all of it was
+/// taken) until it is, at most `tries` times `poll` apart, never past the
+/// deadline of a supervisor whose owner is gone: `left` is what is left of
+/// it now (none for every other end, which has no deadline), and nothing is
+/// sent, nor waited for, once it is over. `sleep` waits. What was not
+/// taken, or not sent, stays for its caller to keep.
+pub(in crate::application::supervise) fn send_within(
+    tries: u32,
+    poll: Duration,
+    left: &dyn Fn() -> Option<Duration>,
+    sleep: &mut dyn FnMut(Duration),
+    send: &mut dyn FnMut() -> bool,
+) -> Sent {
+    let over = || left().is_some_and(|left| left.is_zero());
+    if over() {
+        return Sent::Late;
+    }
+    for attempt in 1..=tries {
+        if send() {
+            return Sent::Taken;
+        }
+        if attempt == tries || over() {
+            break;
+        }
+        sleep(left().map_or(poll, |left| poll.min(left)));
+        if over() {
+            break;
+        }
+    }
+    Sent::NotTaken
+}
+
 /// Whether the process a supervisor stops with is gone
 /// ([`crate::domain::queue_service::OWNER_PID_ENV`], a test's pid), as
 /// `alive` finds it: never without an owner, which is every production
@@ -349,7 +392,7 @@ impl Registration {
     /// its slots hold: a handoff waiting for it fails at once instead of at
     /// its timeout, and the observer reads the stop behind the claims and
     /// resumes it holds. A failed write is only logged and tried again on
-    /// the next pass.
+    /// the next pass; one kept to be sent is recorded.
     pub(in crate::application::supervise) fn record_stop_request(
         &mut self,
         queue: &(impl SupervisorRegistry + RunLog + ?Sized),
@@ -368,16 +411,18 @@ impl Registration {
             "handoff_binary": handoff,
             "runs": runs,
         });
+        // A record kept to be sent is recorded: asked again on the next
+        // pass, the stop would be another.
         match queue.record_queue_event(EventKind::SupervisorDraining, payload) {
-            Ok(_) => {
+            Err(error) if !crate::application::supervisor_service::resend::kept(&error) => {
+                warn!(error = %format_args!("{error:#}"), "the supervisor's stop request could not be recorded: {error:#}");
+            }
+            _ => {
                 self.stop_recorded = true;
                 info!(
                     "supervisor {} asked to stop: it drains the runs in progress; a stop wins over any handoff",
                     self.token
                 );
-            }
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "the supervisor's stop request could not be recorded: {error:#}");
             }
         }
     }
@@ -552,6 +597,73 @@ mod tests {
         assert!(owner_gone(Some(42), |pid| pid != 42));
         assert_eq!(stop_reason(false), "stop_requested");
         assert_eq!(stop_reason(true), "owner_gone");
+    }
+
+    /// The end of the loop sends what it holds again a poll apart, at most
+    /// its tries, with no deadline; a supervisor whose owner is gone sends
+    /// and waits only within what is left of its grace (here shortened to
+    /// 500 ms, its sends taking 120 ms each), and sends nothing once it is
+    /// over, so it exits within it.
+    #[test]
+    fn the_end_of_a_loop_whose_owner_is_gone_sends_again_only_within_the_grace() {
+        use std::cell::Cell;
+        let poll = Duration::from_millis(200);
+        let (clock, sends) = (Cell::new(Duration::ZERO), Cell::new(0));
+        let mut sleep = |wait: Duration| clock.set(clock.get() + wait);
+        let mut refused = || {
+            sends.set(sends.get() + 1);
+            clock.set(clock.get() + Duration::from_millis(120));
+            false
+        };
+        // No deadline: every try, a poll apart.
+        assert_eq!(
+            send_within(15, poll, &|| None, &mut sleep, &mut refused),
+            Sent::NotTaken
+        );
+        assert_eq!(sends.get(), 15);
+        assert_eq!(clock.get(), 14 * poll + 15 * Duration::from_millis(120));
+        // Taken at the third: no more.
+        sends.set(0);
+        let mut third = || {
+            sends.set(sends.get() + 1);
+            sends.get() == 3
+        };
+        assert_eq!(
+            send_within(15, poll, &|| None, &mut sleep, &mut third),
+            Sent::Taken
+        );
+        assert_eq!(sends.get(), 3);
+
+        // The owner gone: within the 500 ms left of the grace.
+        let grace = Duration::from_millis(500);
+        let (start, waits) = (Duration::from_secs(10), Cell::new(Vec::new()));
+        clock.set(start);
+        sends.set(0);
+        let left = || Some(grace.saturating_sub(clock.get() - start));
+        let mut sleep = |wait: Duration| {
+            waits.set([waits.take(), vec![wait]].concat());
+            clock.set(clock.get() + wait);
+        };
+        let mut refused = || {
+            sends.set(sends.get() + 1);
+            clock.set(clock.get() + Duration::from_millis(120));
+            false
+        };
+        assert_eq!(
+            send_within(15, poll, &left, &mut sleep, &mut refused),
+            Sent::NotTaken
+        );
+        // 120 + 200 + 120 + 60 (what was left): the third send is not made.
+        assert_eq!(sends.get(), 2);
+        assert_eq!(waits.take(), [poll, Duration::from_millis(60)]);
+        assert_eq!(clock.get() - start, grace);
+        // Over before the end begins: nothing is sent.
+        sends.set(0);
+        assert_eq!(
+            send_within(15, poll, &|| Some(Duration::ZERO), &mut sleep, &mut refused),
+            Sent::Late
+        );
+        assert_eq!(sends.get(), 0);
     }
 
     /// A supervisor whose owner is gone ends as soon as it holds no run
