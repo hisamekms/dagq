@@ -722,3 +722,64 @@ fn a_refused_watch_with_no_queue_is_refused_unrecorded() {
     assert_eq!(error["denied"]["reason"], "not granted", "{error}");
     assert!(!db.exists());
 }
+
+/// ADR-t1504-2 decision 10: a planner's set-goal of a goal review's
+/// goal_gap draft out of its goal (to another goal or out of any goal) is
+/// refused and recorded as `authorization_denied` after the store's
+/// transaction rolled back; a person's move passes unrecorded, and the
+/// planner still cancels it as a duplicate or as done.
+#[test]
+fn a_planner_does_not_move_a_goal_gap_draft_out_of_its_goal() {
+    use dagq::domain::{DraftOrigin, TaskId};
+    let (_dir, db) = queue();
+    open_planners(&db, 5);
+    let me = planner("planner:1");
+    ok(&db, &["goal", "add", "reviewed"]);
+    ok(&db, &["goal", "add", "another"]);
+    let mut queue = dagq::infrastructure::sqlite::SqliteQueue::open(&db).unwrap();
+    for title in ["gap", "duplicate", "done", "found"] {
+        let id = ok(&db, &["add", title, "--goal", "1"])["id"]
+            .as_i64()
+            .unwrap();
+        if title != "found" {
+            queue
+                .record_draft_origin(TaskId::new(id), DraftOrigin::GoalGap, &json!({}))
+                .unwrap();
+        }
+    }
+    drop(queue);
+    for (to, args) in [
+        (json!(2), ["set-goal", "1", "2"]),
+        (json!(null), ["set-goal", "1", "--none"]),
+    ] {
+        let error = denied_as(&me, &db, &args);
+        let message = error["error"].as_str().unwrap();
+        assert!(message.contains("goal's acceptance needs it"), "{error}");
+        assert_eq!(ok(&db, &["show", "1"])["task"]["goal_id"], 1);
+        let recorded = denials(&db);
+        let last = recorded.last().unwrap();
+        assert_eq!(last["actor"]["role"], "planner");
+        assert_eq!(last["payload"]["role"], "planner");
+        assert_eq!(last["payload"]["capability"], "task.write");
+        assert_eq!(last["payload"]["reason"], "a goal review's goal_gap draft");
+        assert_eq!(last["payload"]["rule"], "goal_gap draft stays in its goal");
+        assert_eq!(
+            last["payload"]["resource"],
+            json!({"kind": "task", "id": 1, "status": "draft"})
+        );
+        assert_eq!(last["payload"]["from_goal_id"], 1);
+        assert_eq!(last["payload"]["to_goal_id"], to);
+    }
+    assert_eq!(denials(&db).len(), 2);
+    // A planner's set-goal of a draft of another origin, and to the goal
+    // it is in, passes.
+    allowed_as(&me, &db, &["set-goal", "4", "2"]);
+    allowed_as(&me, &db, &["set-goal", "1", "1"]);
+    allowed_as(&me, &db, &["cancel", "2", "--duplicate-of", "4"]);
+    allowed_as(&me, &db, &["cancel", "3", "--reason", "already done"]);
+    // A person moves it, and nothing is recorded.
+    ok(&db, &["set-goal", "1", "2"]);
+    ok_as("inbox", &db, &["set-goal", "1", "1"]);
+    assert_eq!(ok(&db, &["show", "1"])["task"]["goal_id"], 1);
+    assert_eq!(denials(&db).len(), 2);
+}

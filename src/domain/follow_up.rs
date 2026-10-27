@@ -1201,6 +1201,35 @@ pub fn membership_gap(facts: MembershipFacts) -> Option<MembershipGap> {
     }
 }
 
+/// Refuse a planner moving the `goal_gap` draft `task` (its `origin`)
+/// from the goal it is in, `from`, to another goal or out of any goal,
+/// `to` (ADR-t1504-2 decision 10): the goal review that found the gap made
+/// it that goal's. A draft in no goal (a person moved it out) has none to
+/// leave, and a person's move, the other actors' and the other origins'
+/// are not this rule's.
+pub fn check_goal_gap_move(
+    task: super::TaskId,
+    origin: Option<DraftOrigin>,
+    role: super::ActorRole,
+    from: Option<super::GoalId>,
+    to: Option<super::GoalId>,
+) -> Result<(), DomainError> {
+    match from {
+        Some(from)
+            if origin == Some(DraftOrigin::GoalGap)
+                && role == super::ActorRole::Planner
+                && Some(from) != to =>
+        {
+            Err(DomainError::GoalGapMoved {
+                task_id: task,
+                from,
+                to,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Whether recording `classification` for a follow-up whose source goal
 /// closed with `verdict` opens a `correct_goal` ask (ADR-t1504-2 decision
 /// 9): a required judgement after the goal closed as achieved says the
@@ -1314,7 +1343,53 @@ pub fn correction_question(
 #[cfg(test)]
 mod membership_tests {
     use super::*;
-    use crate::domain::GoalId;
+    use crate::domain::{ActorRole, GoalId, TaskId};
+
+    /// Only a planner's move of a goal_gap draft out of its goal is
+    /// refused (ADR-t1504-2 decision 10).
+    #[test]
+    fn a_planner_does_not_move_a_goal_gap_draft_out_of_its_goal() {
+        let (task, goal, other) = (TaskId::new(7), Some(GoalId::new(3)), Some(GoalId::new(4)));
+        let gap = Some(DraftOrigin::GoalGap);
+        for to in [other, None] {
+            assert_eq!(
+                check_goal_gap_move(task, gap, ActorRole::Planner, goal, to),
+                Err(DomainError::GoalGapMoved {
+                    task_id: task,
+                    from: GoalId::new(3),
+                    to
+                })
+            );
+        }
+        let refused = check_goal_gap_move(task, gap, ActorRole::Planner, goal, None)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("goal's acceptance needs it"), "{refused}");
+        assert!(refused.contains("of goal 3") && refused.contains("out of any goal"));
+        // Staying in its goal is no move, and one in no goal leaves none.
+        assert_eq!(
+            check_goal_gap_move(task, gap, ActorRole::Planner, goal, goal),
+            Ok(())
+        );
+        assert_eq!(
+            check_goal_gap_move(task, gap, ActorRole::Planner, None, other),
+            Ok(())
+        );
+        for role in [ActorRole::User, ActorRole::Inbox, ActorRole::Supervisor] {
+            assert_eq!(check_goal_gap_move(task, gap, role, goal, other), Ok(()));
+        }
+        for origin in [
+            None,
+            Some(DraftOrigin::FollowUp),
+            Some(DraftOrigin::Reopened),
+            Some(DraftOrigin::Recurring),
+        ] {
+            assert_eq!(
+                check_goal_gap_move(task, origin, ActorRole::Planner, goal, other),
+                Ok(())
+            );
+        }
+    }
     fn required() -> MembershipJudgement {
         MembershipJudgement {
             classification: MembershipClassification::Required,

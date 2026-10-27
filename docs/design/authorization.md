@@ -132,6 +132,7 @@ verdictはデータとしてsupervisorが読む。
 人の出どころの優先度はuserとinboxだけが変える。
 例外は`out_of_scope`の判断を記録するAIのactorの移動で、goalから継いだだけの値は移動先を継ぎ、taskに直接付いた値は残る（[ADR-t2373-1](../adr/2026-10-12-t2373-1-out-of-scope-follow-up-move-takes-the-destination-goals-priority.md)）。
 他のroleの`set-priority`・`goal edit`と依頼と違う優先度の`goal add`・`add`はstoreが同じtransactionで拒み、`authorization_denied`を記録し、`denied`の無い人の値を名指すerrorを返す。
+plannerが`goal_gap`のdraftを今のgoalの外へ移す`set-goal`も、storeが型のある拒否で返し、`Planning`がrollbackの後に記録する（[所属の判断](follow-up-membership.md)）。
 
 askのkindはroleごとに決まる（`opens_ask`）。
 observerの`ask --kind blocked --finding`は`ask.open`ではなく`finding.ask`で、finding（`Resource::Finding`）に対して判定する。
@@ -167,11 +168,10 @@ planner・worker・jobはこの権限を持たない。
 `edit`がtitle・description・acceptanceを空か空白だけにするのはどのroleにも許さず、storeが認可の後・transactionの前の空欄の検査で拒めばtaskも`task_edited`も変えない。
 `edit`のcapabilityは`Planning`がtransactionの外で読んだtaskの状態から選ぶので、`Planning`はその状態と所属のproposal（id・状態・持ち主）をstoreの`edit_task`に渡し、storeは同じtransactionで読んだものと照合する。
 食い違えば、taskも`task_edited`も変えずに変わったことを理由に拒む。
-taskの状態で認可する他のコマンド（`set-goal`・`set-paths`・`set-priority`・`revisit`・`draft`・`ready`・`cancel`・`dependency add` / `remove`）も同じく、認可に使ったものをstoreに渡し、storeは書く前に同じtransactionで照合して、食い違えばtask・依存・eventを変えずに拒む。
+taskの状態で認可する他のコマンドも同じく、認可に使ったものをstoreに渡し、storeは書く前に同じtransactionで照合して、食い違えばtask・依存・eventを変えずに拒む。
 照合が無いと当たる取り違えは`src/domain/authorization.rs`の`TaskAuthorization`のdoc commentが持つ。
 
 `judge-follow-up`は`follow_up.judge`をtask resourceで判定し、user・inbox・plannerだけに許す。
-taskの状態による制限は無く、submitted以降の訂正も記録できる（所属を動かすのはdraft/readyだけ。[所属の判断](follow-up-membership.md)）。
 
 `ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。
 worker・headlessのjob（一覧は`src/domain/actor.rs`の`ActorRole::is_headless_job`）・observer・wrapper・integrator・executor-telemetryは計画系を何もできない。

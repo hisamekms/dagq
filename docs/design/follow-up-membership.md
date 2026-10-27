@@ -53,6 +53,9 @@ taskを移さない。移動は`set_goal_in`の閉じたgoalと依存の循環�
 
 required/out_of_scopeの判断を持つtaskの`set-goal`は、最後の判断の所属先と
 違うgoal（`--none`も）へ移すのを拒み、訂正を促す。未判定の移動は判断にならない。
+goal_gapのdraftは所属の判断の対象でないが、runtimeのplannerの`set-goal`が今のgoalの外（別のgoalか`--none`）へ移すのは拒む（ADR-t1504-2決定10、domainの`follow_up::check_goal_gap_move`をstoreが同じtransactionで呼ぶ）。
+人（user・inbox）の移動とcancel（`--duplicate-of`を含む）は拒まない。
+拒否は`Planning`がtransactionのrollbackの後に`authorization_denied`として記録する（[Authorization](authorization.md)）。
 元のtask/run/goal、登録時の状態、provenanceと`follow_up_depth`はどの所属変更でも保つ。
 登録時に元goalが無い・閉じていた・不明、現在の所属goalが無い・閉じている、
 深さ`FOLLOW_UP_ASK_DEPTH`以上のいずれかなら、runtimeのplannerのsubmitは人のadoptなしに拒む（`proposals::submit`が`follow_up::adopt_needs_person`で検査）。

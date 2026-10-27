@@ -95,7 +95,28 @@ fn check_no_open_correction(conn: &Connection, task: TaskId) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn check_set_goal(conn: &Connection, task: TaskId, goal: Option<GoalId>) -> Result<()> {
+/// Refuse, in the open transaction, a move of `task` to `goal` by `role`
+/// that waits for a person's correction, that a decided membership
+/// judgement names another goal for, or that takes a `goal_gap` draft out
+/// of its goal as a planner ([`follow_up::check_goal_gap_move`], returned
+/// as the typed [`crate::domain::DomainError::GoalGapMoved`] for the
+/// caller to record).
+pub(super) fn check_set_goal(
+    conn: &Connection,
+    task: TaskId,
+    goal: Option<GoalId>,
+    role: crate::domain::ActorRole,
+) -> Result<()> {
+    let origin: Option<String> = conn
+        .query_row(
+            "SELECT origin FROM draft_origins WHERE task_id=?1",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let origin = origin.map(|o| o.parse::<DraftOrigin>()).transpose()?;
+    let from = read_task(conn, task)?.goal_id();
+    follow_up::check_goal_gap_move(task, origin, role, from, goal)?;
     check_no_open_correction(conn, task)?;
     if let Some(last) = judgements(conn, task)?.last()
         && last["classification"] != "undecided"

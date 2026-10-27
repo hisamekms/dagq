@@ -441,6 +441,9 @@ pub enum DenyReason {
     /// The change would change a priority a person set, which only a
     /// person changes ([`check_priority_change`]).
     PersonsPriority,
+    /// A planner moves a `goal_gap` draft out of its goal
+    /// ([`super::follow_up::check_goal_gap_move`]).
+    GoalGapDraft,
 }
 
 impl DenyReason {
@@ -452,6 +455,7 @@ impl DenyReason {
             Self::Resource => "not on this resource",
             Self::AskKind => "not of this kind",
             Self::PersonsPriority => "a person's priority",
+            Self::GoalGapDraft => "a goal review's goal_gap draft",
         }
     }
 }

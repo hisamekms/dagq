@@ -8,7 +8,7 @@
 //! [`crate::domain::StaticPolicy`]'s (`docs/design/authorization.md`).
 
 use anyhow::{Result, ensure};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tracing::warn;
 
 use std::path::{Path, PathBuf};
@@ -182,9 +182,32 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
             .judge_follow_up(task, judgement, self.actor.role().as_str())
     }
 
+    /// `set-goal`: the store refuses a planner's move of a `goal_gap`
+    /// draft out of its goal (ADR-t1504-2 decision 10), and the refusal is
+    /// recorded after the store's transaction rolled back, naming the rule
+    /// and both goals.
     pub fn set_goal(&mut self, task: TaskId, goal: Option<GoalId>) -> Result<Task> {
         let authorized = self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.set_goal(task, goal, authorized)
+        let resource = authorized.resource(task);
+        let result = self.store.set_goal(task, goal, authorized);
+        if let Err(error) = &result
+            && let Some(DomainError::GoalGapMoved { from, to, .. }) =
+                error.downcast_ref::<DomainError>()
+        {
+            let refusal = AuthorizationError {
+                role: self.actor.role(),
+                capability: Capability::TaskWrite,
+                reason: DenyReason::GoalGapDraft,
+            };
+            let mut payload = super::denial(&refusal, &resource);
+            payload["rule"] = json!("goal_gap draft stays in its goal");
+            payload["from_goal_id"] = json!(from);
+            payload["to_goal_id"] = json!(to);
+            if let Err(record) = self.store.record_denial(payload) {
+                warn!("could not record the refusal ({refusal}): {record:#}");
+            }
+        }
+        result
     }
 
     pub fn set_paths(&mut self, task: TaskId, paths: Vec<String>) -> Result<Task> {

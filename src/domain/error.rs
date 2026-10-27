@@ -465,6 +465,15 @@ pub enum DomainError {
         priority: super::Priority,
         role: super::ActorRole,
     },
+    /// A planner moves a `goal_gap` draft out of the goal it is in, to
+    /// another goal (`to`) or out of any goal (ADR-t1504-2 decision 10):
+    /// the goal review that found the gap made it the goal's, and only the
+    /// next goal review or a person's `approve_goal` decides otherwise.
+    GoalGapMoved {
+        task_id: super::TaskId,
+        from: super::GoalId,
+        to: Option<super::GoalId>,
+    },
     /// A `worker_question` without a topic code (ADR-t947-2 decision 1).
     AskWithoutTopic,
     /// A topic code on an ask that is not a `worker_question` (ADR-t947-2
@@ -975,6 +984,11 @@ impl fmt::Display for DomainError {
                 "a person set the priority of {holder} ({}): {} may not change it; only the user or the inbox, at a person's word, may (a doubt goes to a person)",
                 priority.as_str(),
                 role.as_str()
+            ),
+            Self::GoalGapMoved { task_id, from, to } => write!(
+                f,
+                "task {task_id} is a goal_gap draft of goal {from}: a planner does not move it {}: a goal review found that goal's acceptance needs it, and only the next goal review or a person's approve_goal decides it does not; cancel a duplicate or one already done instead",
+                to.map_or_else(|| "out of any goal".to_owned(), |goal| format!("to goal {goal}"))
             ),
             Self::TaskReplanning {
                 task_id,

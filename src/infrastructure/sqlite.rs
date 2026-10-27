@@ -1247,8 +1247,9 @@ impl SqliteQueue {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_authorized(&tx, task_id, authorized)?;
         super::replans::check_task_step(&tx, task_id, GuardedStep::Edit)?;
-        super::follow_up_membership::check_set_goal(&tx, task_id, goal_id)?;
-        let by = task::MovedBy::of(actor_role(&tx)?);
+        let role = actor_role(&tx)?;
+        super::follow_up_membership::check_set_goal(&tx, task_id, goal_id, role)?;
+        let by = task::MovedBy::of(role);
         let result = set_goal_in(
             &tx,
             task_id,
