@@ -519,3 +519,90 @@ fn only_the_parent_that_started_a_job_is_issued_its_executors_token() {
         "names no caller",
     );
 }
+
+/// The supervisor's `issue_telemetry` under no lease, which the job command
+/// a supervisor starts as its own asks through, issues the token of a
+/// target of no run only to the supervisor whose command started it
+/// (ADR-t3102-1 decision 2): another live supervisor naming it is refused
+/// and recorded, and takes nothing the starter is then refused over.
+#[test]
+fn a_supervisor_is_issued_no_telemetry_token_of_a_target_another_started() {
+    use dagq::domain::{ActorRole, EventKind, LeaseToken};
+    let queue = queue();
+    start(&queue);
+    let pid = std::process::id();
+    let (lease, other) = (LeaseToken::new("it-starter"), LeaseToken::new("it-other"));
+    let mut db = SqliteQueue::open(&queue.db).unwrap();
+    db.register_supervisor(&lease, pid, 1, "test").unwrap();
+    // Another supervisor, of another process, still there.
+    db.register_supervisor(&other, 1, 1, "test").unwrap();
+    // Supervisor A's observe and throughput-review commands, this process.
+    let db = db.with_actor(ActorContext::instance(ActorRole::Supervisor, pid));
+    let observed = db
+        .record_queue_event(
+            EventKind::ObserveStarted,
+            json!({"dir": "/o/1", "timeout_secs": 600, "pid": pid}),
+        )
+        .unwrap()
+        .as_i64();
+    let reviewed = db
+        .record_queue_event(
+            EventKind::ThroughputReviewStarted,
+            json!({"dir": "/r/1", "timeout_secs": 600, "pid": pid}),
+        )
+        .unwrap()
+        .as_i64();
+    drop(db);
+    let a = token(&queue, &Principal::supervisor(&lease, pid));
+    let b = token(&queue, &Principal::supervisor(&other, 1));
+    let issue = |token: &str, target: &StepTarget| {
+        call(
+            &queue,
+            Some(token),
+            UseCase::Supervisor,
+            json!({"op": "issue_telemetry", "args": [target, null, null]}),
+        )
+    };
+    for target in [
+        StepTarget::of(TargetKind::Observer, observed),
+        StepTarget::of(TargetKind::ThroughputReview, reviewed),
+    ] {
+        let before = events(&queue.db, "authorization_denied").len();
+        let refused = issue(&b, &target);
+        assert_eq!(
+            refused["error"]["code"], "authorization_denied",
+            "{refused}"
+        );
+        assert_eq!(
+            refused["error"]["denied"]["reason"], "not on this resource",
+            "{refused}"
+        );
+        let denied = events(&queue.db, "authorization_denied");
+        assert_eq!(denied.len() - before, 1, "{refused}");
+        let last = &denied[denied.len() - 1]["payload"];
+        assert_eq!(last["capability"], "token.issue", "{last}");
+        assert!(
+            last["why"]
+                .as_str()
+                .unwrap()
+                .contains("started by another caller"),
+            "{last}"
+        );
+        assert!(
+            SystemServiceAccess
+                .telemetry_credential(&queue.db, &target)
+                .is_none(),
+            "{target:?}"
+        );
+
+        let issued = issue(&a, &target);
+        assert_eq!(issued["ok"], true, "{issued}");
+        let file: std::path::PathBuf = serde_json::from_value(issued["result"].clone()).unwrap();
+        assert_eq!(
+            service::lookup(queue.dir(), &service::read_token(&file).unwrap())
+                .unwrap()
+                .unwrap(),
+            Principal::telemetry(&target, None)
+        );
+    }
+}

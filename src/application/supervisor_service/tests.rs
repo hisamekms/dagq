@@ -1494,3 +1494,68 @@ fn a_kept_record_is_told_from_one_lost_and_an_event_kept_is_recorded() {
     let error = lost.call(UseCase::Supervisor, draining()).unwrap_err();
     assert!(unreachable(&error) && !kept(&error), "{error:#}");
 }
+
+/// The issue's facts with every registration kept, no job's records, and
+/// `start` as the start of every target.
+struct Started(Option<crate::domain::queue_service::TargetStart>);
+
+impl super::super::queue_service::IssueFacts for Started {
+    fn registered(&self, _: &LeaseToken) -> bool {
+        true
+    }
+    fn job(
+        &self,
+        _: &crate::domain::queue_service::HeldToken,
+        _: Option<&crate::domain::queue_service::TokenIssuer>,
+    ) -> crate::domain::queue_service::JobState {
+        crate::domain::queue_service::JobState::MayRun
+    }
+    fn target_start(
+        &self,
+        _: &StepTarget,
+    ) -> Result<Option<crate::domain::queue_service::TargetStart>> {
+        Ok(self.0.clone())
+    }
+}
+
+/// The supervisor's `issue_telemetry` under no lease goes only to the
+/// command of this supervisor that started the target, asking from the
+/// process its start names (ADR-t3102-1 decision 2): another supervisor's
+/// start, another process's, a supervised job's row and a target with no
+/// start are refused, and under a lease the registration rules alone.
+#[test]
+fn a_supervisors_leaseless_telemetry_goes_only_to_the_command_that_started_it() {
+    use crate::domain::queue_service::TargetStart;
+    use crate::domain::session_step::TargetKind;
+    let lease = LeaseToken::new("a");
+    let a = Principal::supervisor(&lease, 7);
+    let b = Principal::supervisor(&LeaseToken::new("b"), 8);
+    let target = StepTarget::of(TargetKind::Observer, 3);
+    let by = |principal: &Principal, pid| {
+        Started(Some(TargetStart::Command {
+            actor: Some((principal.role, principal.actor_id.clone())),
+            pid: Some(pid),
+        }))
+    };
+    let refusal = |parent: &Principal, process, under: Option<&LeaseToken>, facts: &Started| {
+        leaseless_starter_refusal(parent, process, under, &target, facts).unwrap()
+    };
+    assert_eq!(refusal(&a, Some(40), None, &by(&a, 40)), None);
+    for (parent, process) in [(&b, Some(40)), (&a, Some(41)), (&a, None)] {
+        assert_eq!(
+            refusal(parent, process, None, &by(&a, 40)),
+            Some("the target was started by another caller"),
+            "{parent:?} {process:?}"
+        );
+    }
+    let row = Started(Some(TargetStart::Supervised {
+        supervisor: Some(LeaseToken::new("b")),
+    }));
+    assert!(refusal(&a, Some(40), None, &row).is_some());
+    assert_eq!(
+        refusal(&a, Some(40), None, &Started(None)),
+        Some("the queue has no record of the target's start")
+    );
+    // Under a lease, the registration it names rules alone.
+    assert_eq!(refusal(&b, Some(40), Some(&lease), &Started(None)), None);
+}

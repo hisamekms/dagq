@@ -662,9 +662,10 @@ impl std::error::Error for TelemetryHeld {}
 /// The target of an executor's telemetry token asked for was not started
 /// by the parent that asks, and why
 /// ([`crate::domain::queue_service::telemetry_starter_refusal`]), found in
-/// the issue's transaction ([`issue_token`]).
+/// the issue's transaction ([`issue_token`], and the supervisor's
+/// `issue_telemetry` under no lease).
 #[derive(Debug)]
-struct NotStarter(&'static str);
+pub(super) struct NotStarter(pub(super) &'static str);
 
 impl std::fmt::Display for NotStarter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

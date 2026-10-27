@@ -84,7 +84,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
   - plannerとそのwrapper: supervisorがplannerのwrapperを起動する前に
   - inbox: `dagq inbox`がuserとして
   - job: supervisorが起動のときに依頼し、jobのプロセスの終わりに失効させる。
-    jobのコマンド（`observe`など）が起動するもの（telemetryも）は呼び出し元のprincipalで依頼する（`issue_token`のtelemetryは開始を記録した親とプロセスだけ）
+    jobのコマンド（`observe`など）が起動するもの（telemetryも）は呼び出し元のprincipalで依頼する（telemetryは開始を記録した親とプロセスだけ）
   - integrator: 着地のslotを取る`begin_landing`と同じtransactionで、runのleaseの下に（supervisorは登録の生存も。人とinboxの`integrate`はそのコマンドが。[integrate](supervisor-lifecycle/integrate.md)）
   - wrapperは依頼せず、自分のactor idで引いたfileを使い、agentのturnにはworkerかplannerのもののpathを渡す（envとargvに値もpathも無い）
 - 失効: `queue_service::revoke`（`Principal::credential_key`）が値とprincipalの記録を消す。

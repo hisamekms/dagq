@@ -1244,13 +1244,13 @@ fn a_runs_tokens_are_issued_only_under_its_lease_by_a_live_registration() {
     ));
     refused_all(&owner_token, &owner, "expired");
     // The executor's telemetry of a target of no run, under the registration
-    // only: refused while it is expired, issued once it lives.
+    // it names: refused while it is expired, issued once it lives.
     let planner = StepTarget::of(TargetKind::Planner, 1);
     let planners = || {
         supervisor(
             &owner_token,
             "issue_telemetry",
-            json!([planner, null, null]),
+            json!([planner, null, owner]),
         )
     };
     let expired = planners();

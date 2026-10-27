@@ -1099,6 +1099,29 @@ fn reply<T: Wire>(result: Result<T>) -> Result<Value> {
     Ok(serde_json::to_value(result?.into_form())?)
 }
 
+/// Why the supervisor `principal`, asking from `process`, is refused under
+/// no lease (`issued_under` `None`) the telemetry token of `target`, a
+/// target of no run, as `facts` read its start in the issue's transaction
+/// ([`crate::domain::queue_service::telemetry_starter_refusal`]): only the
+/// target its own command started (ADR-t3102-1 decision 2). `None` under a
+/// lease, which the registration it names rules.
+fn leaseless_starter_refusal(
+    principal: &Principal,
+    process: Option<u32>,
+    issued_under: Option<&LeaseToken>,
+    target: &StepTarget,
+    facts: &dyn super::queue_service::IssueFacts,
+) -> Result<Option<&'static str>> {
+    if issued_under.is_some() {
+        return Ok(None);
+    }
+    Ok(crate::domain::queue_service::telemetry_starter_refusal(
+        principal,
+        process,
+        facts.target_start(target)?.as_ref(),
+    ))
+}
+
 /// The token operations ([`TOKEN_OPS`]) of `params` on `backend`'s files
 /// and `queue`.
 fn tokens(
@@ -1208,7 +1231,8 @@ fn tokens(
             // Under the run's lease and the registration live for a run's
             // target, the registration live for another's, each checked in
             // the issue's transaction (ADR-t3102-1 decision 2); a run's is
-            // never issued under no lease.
+            // never issued under no lease, another's under none only to the
+            // command of this supervisor that started it.
             let telemetry = Resource::Principal(ActorRole::ExecutorTelemetry);
             let held = match (&issued_under, target.run_id()) {
                 (Some(lease), Some(run)) => {
@@ -1252,6 +1276,18 @@ fn tokens(
             };
             let child = Principal::telemetry(&target, task);
             let issued = queue.issuing(&held, backend.now_ms(), &mut |facts| {
+                // Under no lease, only the target this supervisor's command
+                // started, as the queue records its start in the issue's
+                // transaction.
+                if let Some(why) = leaseless_starter_refusal(
+                    principal,
+                    process,
+                    issued_under.as_ref(),
+                    &target,
+                    facts,
+                )? {
+                    return Err(super::queue_service::NotStarter(why).into());
+                }
                 // Not over a target's another live supervisor asked for, as
                 // found in the issue's transaction.
                 let held = backend
@@ -1282,17 +1318,22 @@ fn tokens(
                             &why,
                         ))
                     }
-                    None => match error.downcast_ref::<super::queue_service::Replacing>() {
-                        Some(super::queue_service::Replacing(why)) => {
-                            Err(super::queue_service::refuse_recorded(
-                                queue,
-                                &principal.actor(),
-                                Capability::TokenIssue,
-                                &telemetry,
-                                crate::domain::authorization::DenyReason::Resource,
-                                why,
-                            ))
-                        }
+                    None => match error
+                        .downcast_ref::<super::queue_service::Replacing>()
+                        .map(|super::queue_service::Replacing(why)| *why)
+                        .or_else(|| {
+                            error
+                                .downcast_ref::<super::queue_service::NotStarter>()
+                                .map(|super::queue_service::NotStarter(why)| *why)
+                        }) {
+                        Some(why) => Err(super::queue_service::refuse_recorded(
+                            queue,
+                            &principal.actor(),
+                            Capability::TokenIssue,
+                            &telemetry,
+                            crate::domain::authorization::DenyReason::Resource,
+                            why,
+                        )),
                         None => Err(error),
                     },
                 },

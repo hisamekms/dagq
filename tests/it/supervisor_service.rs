@@ -284,6 +284,17 @@ fn a_job_command_of_the_supervisor_records_through_the_service() {
     let _served = common::service::Served::start(&db);
     let db = db.canonicalize().unwrap();
     let job = JobOfSupervisor::sign_in(&db);
+    // The supervisor kept as registered, under which its agent's telemetry
+    // token is issued.
+    dagq::infrastructure::sqlite::SqliteQueue::open(&db)
+        .unwrap()
+        .register_supervisor(
+            &LeaseToken::new("supervisor-of-the-job"),
+            std::process::id(),
+            1,
+            "test",
+        )
+        .unwrap();
     let refused = refuse_opening(&db);
     let outcome = dagq::compose::observe_through(
         &db,
@@ -320,6 +331,12 @@ fn a_job_command_of_the_supervisor_records_through_the_service() {
     assert_eq!(
         finished,
         [("supervisor".to_owned(), format!("supervisor:{pid}"), None)]
+    );
+    // Its agent's telemetry token is issued to the supervisor whose command
+    // started the observation (ADR-t3102-1 decision 2).
+    assert_eq!(
+        crate::runtime_support::observer::queue_event_actors(&db, "telemetry_token_issued").len(),
+        1
     );
 }
 
