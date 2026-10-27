@@ -1,0 +1,8 @@
+# The items of task 3447 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 10.3〜14.9s in a stress 5: the drain's passes 500 ms apart, so the landing fails before a pass reads the stop
+[[test]]
+name = "runtime_handoff::a_stop_over_a_handoff_before_its_next_pass_verifies_a_flaky_landing_once_more_itself"
+reason = "B 境界（supervisor の配線・プロセス）: handoff の drain のあいだの停止の印が、pass を待たずに走っている着地の thread へ届き、その着地が引き継がずに同じ supervisor でやり直されることを、実の停止の印・着地の thread・SQLite の queue で確かめる。pass の間を延ばすので時間がかかる。handoff の flag と停止の印の組み合わせの判断は integrate の unit test"
+task = 3447

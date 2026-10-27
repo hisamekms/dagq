@@ -559,10 +559,11 @@ fn a_stop_with_a_handoff_asked_mid_pass_lands_the_run_awaiting_the_slot() {
 /// again. The process that continues under the same token lands it anew
 /// without reviewing or resuming it. With `stop`, a stop asked after the
 /// handoff wins over it, and the drain verifies the landing once more in
-/// its own attempt and lands it, as one that does not drain. Which
-/// failures a handoff hands over, a host's too (ADR-t639-1), is the unit
-/// tests' of `integrate`.
-fn hands_over_a_landing_verified_again(stop: bool) {
+/// its own attempt and lands it, as one that does not drain, also when the
+/// verification fails before a pass read the stop. Which failures a
+/// handoff hands over, a host's too (ADR-t639-1), is the unit tests' of
+/// `integrate`.
+fn hands_over_a_landing_verified_again(stop: Option<StopOver>) {
     let (dir, repo, db) = fixture();
     let release = db.with_extension("release");
     let failed = db.with_extension("failed");
@@ -594,7 +595,16 @@ fn hands_over_a_landing_verified_again(stop: bool) {
         .unwrap();
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "ready to land")]));
-    let options = supervise_options(1, false);
+    let options = SuperviseOptions {
+        // A long tick between the drain's passes, so the verification
+        // fails before a pass reads the stop.
+        tick: if stop == Some(StopOver::BeforeAPass) {
+            Duration::from_millis(500)
+        } else {
+            TEST_TICK
+        },
+        ..supervise_options(1, false)
+    };
     let passes = options.passes.clone();
     let stopped = options.stop.clone();
     let supervisor = {
@@ -605,7 +615,9 @@ fn hands_over_a_landing_verified_again(stop: bool) {
             reviewer.clone(),
             options.clone(),
         );
-        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
+        thread::spawn(move || {
+            supervise_reviewed_owned_with(&db, &repo, &backend, &reviewer, &options)
+        })
     };
     wait_until(&db, crate::common::STEP_LIMIT, |queue| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"integration_started")
@@ -614,13 +626,20 @@ fn hands_over_a_landing_verified_again(stop: bool) {
     let mut queue = SqliteQueue::open(&db).unwrap();
     assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
     await_passes(&passes, SOME_PASSES);
-    if stop {
+    if let Some(over) = stop {
+        if over == StopOver::BeforeAPass {
+            // Past the pass in progress, which reads the stop after it is
+            // counted, and well within the tick that follows it.
+            thread::sleep(Duration::from_millis(100));
+        }
         stopped.store(true, Ordering::SeqCst);
-        await_passes(&passes, SOME_PASSES);
+        if over == StopOver::AfterPasses {
+            await_passes(&passes, SOME_PASSES);
+        }
     }
     std::fs::write(&release, "go").unwrap();
     let outcome = joined(supervisor, "the supervisor asked to hand off");
-    if stop {
+    if stop.is_some() {
         assert_ne!(outcome["outcome"], "handoff", "{outcome}");
         assert_eq!(outcome["errors"], json!([]), "{outcome}");
         let detail = queue.show(TaskId::new(1)).unwrap();
@@ -673,7 +692,7 @@ fn hands_over_a_landing_verified_again(stop: bool) {
         assert!(payloads(&detail, kind).is_empty(), "{kind}");
     }
 
-    let outcome = supervise_reviewed_with(
+    let outcome = supervise_reviewed_owned_with(
         &db,
         &repo,
         &backend,
@@ -700,14 +719,30 @@ fn hands_over_a_landing_verified_again(stop: bool) {
     assert_eq!(verifications[1]["exit_code"], 0);
 }
 
+/// When the stop of [`hands_over_a_landing_verified_again`] comes over
+/// its handoff.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopOver {
+    /// Read by some passes before the verification fails.
+    AfterPasses,
+    /// Just before the verification fails, read by the landing before
+    /// the next pass sets the handoff's flag (ADR-t3344-1 decision 3).
+    BeforeAPass,
+}
+
 #[test]
 fn a_handoff_hands_over_a_landing_whose_flaky_verification_would_be_done_again() {
-    hands_over_a_landing_verified_again(false);
+    hands_over_a_landing_verified_again(None);
 }
 
 #[test]
 fn a_stop_over_a_handoff_verifies_a_flaky_landing_once_more_itself() {
-    hands_over_a_landing_verified_again(true);
+    hands_over_a_landing_verified_again(Some(StopOver::AfterPasses));
+}
+
+#[test]
+fn a_stop_over_a_handoff_before_its_next_pass_verifies_a_flaky_landing_once_more_itself() {
+    hands_over_a_landing_verified_again(Some(StopOver::BeforeAPass));
 }
 
 /// A supervisor of the handoff's tests, given the `dagq` the test owns

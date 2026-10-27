@@ -1142,6 +1142,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         telemetry_sinks: ports.telemetry_sinks.clone(),
         unsent_steps: Arc::default(),
         handoff_drain: Arc::default(),
+        stop: settings.stop.clone(),
         telemetry_retries: telemetry_tokens::Retries::default(),
         telemetry_sessions: std::collections::HashSet::new(),
         pauses: ports.pauses.clone(),
@@ -1383,6 +1384,10 @@ struct Supervisor<'a> {
     /// (ADR-t3344-1): set on each pass, and read by a landing in progress
     /// before it verifies again, which hands the run over instead.
     handoff_drain: Arc<AtomicBool>,
+    /// The stop of [`LoopSettings::stop`], read by a landing in progress
+    /// with [`Self::handoff_drain`]: a stop that came after the pass set
+    /// the handoff's flag still wins (ADR-t3344-1 decision 3).
+    stop: Arc<AtomicBool>,
     /// The revocations of the runs' telemetry tokens this process could
     /// not make yet and no sweep would make for it: tried again on each
     /// sweep ([`Self::sweep_telemetry`]).

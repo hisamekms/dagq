@@ -730,11 +730,30 @@ pub struct Integration<'a> {
     /// sent again by the supervisor's sweeps. `None` sends none.
     pub steps: Option<super::step_report::LandingSteps>,
     /// Whether the supervisor that asked for the landing drains for a
-    /// handoff now (ADR-t3344-1): set, a verification that would be done
+    /// handoff now (ADR-t3344-1): when it does, a verification that would be done
     /// again (a host's failure or only flaky tests) is not, and the
     /// landing is handed over to wait for the slot again. `None` (a
     /// person's `integrate`) never hands over.
-    pub handing_off: Option<&'a std::sync::atomic::AtomicBool>,
+    pub handing_off: Option<HandoffDrain<'a>>,
+}
+
+/// What a landing reads, before it verifies again, to know whether the
+/// supervisor that asked for it drains for a handoff (ADR-t3344-1): its
+/// handoff's flag, set on each pass, and its stop, read as it is set, since
+/// a stop wins over a handoff (decision 3) without waiting for the pass.
+#[derive(Clone, Copy)]
+pub struct HandoffDrain<'a> {
+    pub handing_off: &'a std::sync::atomic::AtomicBool,
+    pub stop: &'a std::sync::atomic::AtomicBool,
+}
+
+impl HandoffDrain<'_> {
+    /// Whether the landing is handed over instead of verified again: the
+    /// handoff's flag set and no stop asked.
+    fn hands_over(self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.handing_off.load(SeqCst) && !self.stop.load(SeqCst)
+    }
 }
 
 /// The free disk space integrate checks before it retries a verification
@@ -2062,7 +2081,7 @@ fn land(
     verification_containers: &dyn super::run_container::VerificationContainers,
     clock: &dyn Clock,
     steps: Option<&super::step_report::SharedVerification>,
-    handing_off: Option<&std::sync::atomic::AtomicBool>,
+    handing_off: Option<HandoffDrain<'_>>,
     task: &Task,
     run: &TaskRun,
     landing_branch: &LandingBranch,
@@ -2620,8 +2639,8 @@ fn land(
 
 /// Whether the supervisor that asked for the landing drains for a
 /// handoff now ([`Integration::handing_off`]).
-fn drains_for_handoff(handing_off: Option<&std::sync::atomic::AtomicBool>) -> bool {
-    handing_off.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+fn drains_for_handoff(handing_off: Option<HandoffDrain<'_>>) -> bool {
+    handing_off.is_some_and(HandoffDrain::hands_over)
 }
 
 /// The verdict of a landing handed over instead of verified again
@@ -6357,14 +6376,35 @@ mod tests {
         assert!(killed.flaky_tests.is_empty());
     }
 
-    /// Only a supervisor that drains for a handoff hands a landing over
-    /// ([`Integration::handing_off`]): none, or one not set, verifies again.
+    /// Only a supervisor that drains for a handoff and is not asked to
+    /// stop hands a landing over ([`Integration::handing_off`]): none, one
+    /// not set, or one a stop came over (ADR-t3344-1 decision 3) verifies
+    /// again, the stop read as it is set, before the pass sets the flag.
     #[test]
-    fn only_a_set_handoff_flag_hands_a_landing_over() {
-        use std::sync::atomic::AtomicBool;
+    fn only_a_set_handoff_flag_with_no_stop_hands_a_landing_over() {
+        use std::sync::atomic::{AtomicBool, Ordering};
         assert!(!drains_for_handoff(None));
-        assert!(!drains_for_handoff(Some(&AtomicBool::new(false))));
-        assert!(drains_for_handoff(Some(&AtomicBool::new(true))));
+        for (handing_off, stop, hands_over) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let (handing_off, stop) = (AtomicBool::new(handing_off), AtomicBool::new(stop));
+            let drain = HandoffDrain {
+                handing_off: &handing_off,
+                stop: &stop,
+            };
+            assert_eq!(drains_for_handoff(Some(drain)), hands_over);
+        }
+        let (handing_off, stop) = (AtomicBool::new(true), AtomicBool::new(false));
+        let drain = HandoffDrain {
+            handing_off: &handing_off,
+            stop: &stop,
+        };
+        assert!(drains_for_handoff(Some(drain)));
+        stop.store(true, Ordering::SeqCst);
+        assert!(!drains_for_handoff(Some(drain)));
     }
 
     /// A person's `integrate` (task 638) refuses below the landing
