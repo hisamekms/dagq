@@ -1084,3 +1084,180 @@ fn a_reviews_command_sends_its_agents_steps_under_the_review() {
         command,
     );
 }
+
+/// The supervisor's processes, its `reap`s recorded in order.
+struct Reaps(Arc<Mutex<Vec<u32>>>);
+
+impl dagq::application::ProcessControl for Reaps {
+    fn alive(&self, pid: u32) -> bool {
+        dagq::infrastructure::adapters::SystemProcesses.alive(pid)
+    }
+    fn terminate(&self, pid: u32) -> Result<()> {
+        dagq::infrastructure::adapters::SystemProcesses.terminate(pid)
+    }
+    fn interrupt(&self, pid: u32) -> Result<()> {
+        dagq::infrastructure::adapters::SystemProcesses.interrupt(pid)
+    }
+    fn kill(&self, pid: u32) -> Result<()> {
+        dagq::infrastructure::adapters::SystemProcesses.kill(pid)
+    }
+    fn reap(&self, pid: u32) {
+        self.0.lock().unwrap().push(pid);
+        dagq::infrastructure::adapters::SystemProcesses.reap(pid);
+    }
+    fn list(&self) -> Result<Vec<dagq::domain::recovery::ProcessInfo>> {
+        dagq::infrastructure::adapters::SystemProcesses.list()
+    }
+    fn start_identity(&self, pid: u32) -> Option<String> {
+        dagq::infrastructure::adapters::SystemProcesses.start_identity(pid)
+    }
+    fn started_at(&self, pid: u32) -> Option<i64> {
+        dagq::infrastructure::adapters::SystemProcesses.started_at(pid)
+    }
+    fn descendants(&self, pid: u32) -> Vec<u32> {
+        dagq::infrastructure::adapters::SystemProcesses.descendants(pid)
+    }
+}
+
+/// The host's clock with its wall time moved on by what the test sets.
+struct WallAhead(Arc<AtomicI64>);
+
+impl Clock for WallAhead {
+    fn system_time(&self) -> SystemTime {
+        let ahead = u64::try_from(self.0.load(Ordering::SeqCst)).unwrap();
+        SystemTime::now() + Duration::from_millis(ahead)
+    }
+    fn monotonic(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+/// Record a finished review of the process `pid`, a child of `parent_pid`,
+/// at `at_ms` (unix milliseconds), of a period long reviewed.
+fn finish_of(db: &Path, pid: u32, parent_pid: u32, at_ms: i64) {
+    let payload = json!({"mode": "hourly", "period": "2000-01-01T00", "outcome": "succeeded",
+                         "pid": pid, "parent_pid": parent_pid});
+    Connection::open(db)
+        .unwrap()
+        .execute(
+            "INSERT INTO run_events(kind,payload,created_at) VALUES ('throughput_review_finished',?1,?2)",
+            [
+                payload.to_string(),
+                dagq::domain::transcript::millis_text(at_ms),
+            ],
+        )
+        .unwrap();
+}
+
+fn now_ms() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
+/// A supervisor that took over by an exec reaps once each review the
+/// process before left running and that finished from a minute before its
+/// first pass: by its pid, a child of this one. Not a review of another
+/// parent's, one that finished well before, nor the reviews it started
+/// itself, which it waits on; and nothing once `RUNNING_MS` passed since
+/// its first pass, nor ever without a handoff.
+#[test]
+fn a_supervisor_that_exec_d_reaps_each_review_handed_over_once() {
+    use dagq::domain::throughput_review::RUNNING_MS;
+    let (_dir, repo, db) = fixture();
+    let token = dagq::domain::LeaseToken::new("throughput-handoff");
+    let me = std::process::id();
+    {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        queue
+            .transition(TaskId::new(1), TaskAction::Cancel)
+            .unwrap();
+        queue
+            .register_supervisor(&token, me, 1, "previous")
+            .unwrap();
+    }
+    // Before the first pass: one handed over that finished just before the
+    // exec, one of another parent, and one of this pid long before.
+    let (handed, others, old, later, past_running) =
+        (4_000_001, 4_000_002, 4_000_003, 4_000_004, 4_000_005);
+    let start = now_ms();
+    finish_of(&db, handed, me, start - 30_000);
+    finish_of(&db, others, 1, start);
+    finish_of(&db, old, me, start - 5 * 60_000);
+    let reaps = Arc::new(Mutex::new(Vec::new()));
+    let ahead = Arc::new(AtomicI64::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut options = SuperviseOptions {
+        throughput_review: true,
+        utc_offset: utc,
+        handoff_token: Some(token),
+        processes: Some(runtime::ProcessesPort(Arc::new(Reaps(reaps.clone())))),
+        stop: stop.clone(),
+        ..supervise_options(1, false)
+    };
+    options.generators.clock = Arc::new(WallAhead(ahead.clone()));
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo) = (db.clone(), repo.clone());
+        thread::spawn(move || {
+            let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+            runtime::supervise(
+                &db,
+                &repo,
+                &backend,
+                &review_claude_stub(&db, false),
+                &common::service::owned_executable(db.parent().unwrap()),
+                &options,
+            )
+        })
+    };
+    let reaped = || reaps.lock().unwrap().clone();
+    wait_until(&db, Duration::from_secs(30), |_| reaped().contains(&handed));
+    // One that finishes after the first pass is reaped on a later one.
+    finish_of(&db, later, me, now_ms());
+    wait_until(&db, Duration::from_secs(30), |_| reaped().contains(&later));
+    // Its own reviews of each mode finish, each a child of this pid too
+    // (one more starts if an hour turned meanwhile).
+    let own_finished = || -> Option<Vec<u32>> {
+        let finished = queue_events(&db, "throughput_review_finished");
+        let mut own = Vec::new();
+        for mode in ReviewMode::ALL {
+            let started = queue_events(&db, "throughput_review_started")
+                .into_iter()
+                .find(|started| started["mode"] == mode.as_str())?;
+            let pid = started["pid"].clone();
+            finished
+                .iter()
+                .find(|finish| finish["pid"] == pid && finish["parent_pid"] == json!(me))?;
+            own.push(u32::try_from(pid.as_u64().unwrap()).unwrap());
+        }
+        Some(own)
+    };
+    wait_until(&db, Duration::from_secs(60), |_| own_finished().is_some());
+    let own = own_finished().unwrap();
+    await_passes(&passes, SOME_PASSES);
+    assert_eq!(reaped(), [handed, later], "own reviews: {own:?}");
+    // Past `RUNNING_MS` from its first pass it no longer looks.
+    ahead.store(RUNNING_MS + 60_000, Ordering::SeqCst);
+    finish_of(&db, past_running, me, now_ms() + RUNNING_MS + 60_000);
+    await_passes(&passes, SOME_PASSES);
+    stop.store(true, Ordering::SeqCst);
+    joined(supervisor, "the supervisor to stop").unwrap();
+    assert_eq!(reaped(), [handed, later]);
+
+    // A supervisor that did not take over by an exec reaps none.
+    finish_of(&db, 4_000_006, me, now_ms());
+    let fresh = Arc::new(Mutex::new(Vec::new()));
+    let options = SuperviseOptions {
+        utc_offset: utc,
+        processes: Some(runtime::ProcessesPort(Arc::new(Reaps(fresh.clone())))),
+        ..supervise_options(1, true)
+    };
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(*fresh.lock().unwrap(), Vec::<u32>::new());
+}
