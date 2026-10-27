@@ -4,7 +4,9 @@
 //! pass: a turn that failed at Claude's usage limit waits in the queue's
 //! hold and goes on with the same call, carrying the answer, once the hold
 //! is answered (and a request written during that turn waits behind the
-//! retry), a turn stopped at its limit tells the inbox, a planning
+//! retry), a turn whose agent did not start waits in Claude's own hold
+//! and goes on with the same call once it ends, a turn stopped at its
+//! limit tells the inbox, a planning
 //! request's planner ends in `proposed` and is closed at the end of its
 //! turns, a live one takes the next revise of its proposal as its next
 //! turn, and the sweep tells of a stopped turn of a planner it closes.
@@ -20,7 +22,8 @@ use crate::planner_headless::{diagnose_planner, headless_fixture, queue_events, 
 use dagq::application::{PlanRequestStore, TaskReads};
 use dagq::{
     domain::{
-        AskKind, DraftOrigin, PlannerId, PlannerRoute, Priority, RequestId, TaskId, TaskStatus,
+        AskKind, DraftOrigin, EventKind, PlannerId, PlannerRoute, Priority, RequestId, TaskId,
+        TaskStatus,
         plan_request::{NewPlanRequest, RequestStatus},
     },
     infrastructure::{location::planners_dir, sqlite::SqliteQueue},
@@ -222,6 +225,120 @@ say "turn $TURN""#,
     assert_eq!(closed.len(), 1, "{closed:?}");
     assert_eq!(closed[0]["code"], "runtime_exited");
     assert!(queue_events(&fx.db, "planner_unresponsive").is_empty());
+}
+
+/// Acceptance (task 1585): a headless planner whose first turn's agent did
+/// not start (no output at all) holds Claude itself, opening no hold ask,
+/// and records `provider_waiting` with its ID and no ask; while Claude is
+/// held it is neither ended nor followed by another planner for its draft,
+/// and once the hold ends the `provider retry` makes the call again, whose
+/// turn settles the draft, and the planner is closed.
+#[test]
+fn a_headless_planner_whose_agent_did_not_start_waits_in_claudes_hold_and_goes_on() {
+    let fx = headless_fixture(
+        r#""$DAGQ" --db "$DB" cancel 2 --reason not_worth >> "$RUN_DIR/cancel.log" 2>&1
+say "turn $TURN""#,
+    );
+    let stubs = fx.db.parent().unwrap();
+    fs::write(stubs.join("launch-fails"), "").unwrap();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    let draft = runtime_draft(
+        &mut queue,
+        "gap",
+        Some(goal),
+        DraftOrigin::FollowUp,
+        json!({"source_task_id": 1, "source_run_id": null, "index": 0}),
+    );
+    assert_eq!(draft, TaskId::new(2));
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::running();
+    supervise_until(
+        &fx,
+        &backend,
+        &reviewer,
+        || !queue_events(&fx.db, "provider_waiting").is_empty(),
+        || diagnose_planner(&fx.db),
+    );
+    for _ in 0..3 {
+        supervise_with(
+            &fx,
+            &backend,
+            &reviewer,
+            &options(1, Duration::from_secs(3600)),
+        );
+    }
+    let finished = queue_events(&fx.db, "turn_finished");
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert_eq!(finished[0]["failure"], "launch", "{finished:?}");
+    // Claude itself is held, and no hold ask is opened.
+    let held = queue_events(&fx.db, "provider_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["provider"], "claude");
+    assert_eq!(held[0]["reason"], "launch_failed");
+    assert!(
+        queue
+            .asks(Default::default())
+            .unwrap()
+            .iter()
+            .all(|ask| ask.kind != AskKind::QueueHold)
+    );
+    let waiting = queue_events(&fx.db, "provider_waiting");
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0]["planner_id"], 1);
+    assert_eq!(waiting[0]["turn"], 1);
+    assert_eq!(waiting[0]["reason"], "launch_failed");
+    assert_eq!(waiting[0].get("ask_id"), Some(&Value::Null), "{waiting:?}");
+    // Held: the planner waits, neither ended nor followed by another, and
+    // its call is not made again.
+    let turns = planners_dir(&fx.db).join("1").join("turns");
+    assert!(!turns.join("exit").exists(), "not ended");
+    assert!(
+        queue
+            .planner(PlannerId::new(1))
+            .unwrap()
+            .closed_at
+            .is_none()
+    );
+    assert_eq!(queue.planners(true).unwrap().len(), 1);
+    assert_eq!(queue_events(&fx.db, "turn_started").len(), 1);
+    assert!(queue_events(&fx.db, "planner_closed").is_empty());
+    assert_eq!(queue.show(draft).unwrap().task.status(), TaskStatus::Draft);
+
+    // Claude's hold ends (its time is up) and its agent starts again.
+    fs::remove_file(stubs.join("launch-fails")).unwrap();
+    queue
+        .record_queue_event(
+            EventKind::ProviderReleased,
+            json!({"provider": "claude", "reason": "launch_failed",
+                   "since": held[0]["since"], "why": "retry_due"}),
+        )
+        .unwrap();
+    supervise_until(
+        &fx,
+        &backend,
+        &reviewer,
+        || !queue_events(&fx.db, "planner_closed").is_empty(),
+        || diagnose_planner(&fx.db),
+    );
+    let started = queue_events(&fx.db, "turn_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started[1]["what"], "provider retry", "{started:?}");
+    let requests = taken(&fx.db, PlannerId::new(1));
+    let retry = requests.last().unwrap();
+    assert_eq!(retry["what"], "provider retry", "{requests:?}");
+    let prompt = retry["prompt"].as_str().unwrap();
+    assert!(prompt.contains("can be used again"), "{prompt}");
+    assert_eq!(
+        queue.show(draft).unwrap().task.status(),
+        TaskStatus::Canceled
+    );
+    assert_eq!(queue.planners(true).unwrap().len(), 1);
+    let closed = queue_events(&fx.db, "planner_closed");
+    assert_eq!(closed.len(), 1, "{closed:?}");
+    assert_eq!(closed[0]["planner_id"], 1);
+    assert_eq!(closed[0]["code"], "runtime_exited");
+    assert_eq!(queue_events(&fx.db, "provider_held").len(), 1, "held once");
 }
 
 /// Acceptance (ADR-t1394-2 decision 3): a headless planner's turn that runs

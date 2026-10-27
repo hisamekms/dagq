@@ -118,6 +118,8 @@ fn stub_script(path: &Path, script: String, db: &Path, test_pid: u32) {
 /// `$EXTRA`, fields the turn may add, such as a `modelUsage`),
 /// `denied` (three refusals), `fail TEXT` (an error result, exit 1),
 /// `commit MESSAGE`, `receipt COMMIT [RESULT] [EVIDENCE]`, `ask QUESTION`.
+/// While a file `launch-fails` is in `dir`, each call prints nothing, not
+/// even `system/init`, and exits 1: a turn whose agent did not start.
 pub fn headless_claude(dir: &Path, db: &Path) -> PathBuf {
     headless_claude_of(dir, db, std::process::id())
 }
@@ -145,6 +147,8 @@ done
 # The turn's prompt is its standard input, never an argument (kept whole,
 # trailing newlines included).
 PROMPT=$(cat; printf x); PROMPT=${{PROMPT%x}}
+# An agent that does not start: no output at all, not even its init.
+[ -e "${{0%/*}}/launch-fails" ] && exit 1
 printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","permissionMode":"%s"}}\n' "$SESSION" "${{PERMISSION_SAID:-$PERMISSION}}"
 {watchdog}
 {await_file}

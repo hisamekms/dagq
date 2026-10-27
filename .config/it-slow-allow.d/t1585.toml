@@ -1,0 +1,8 @@
+# The items of task 1585 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 7.7s (median of a stress run of 8): the planner's wrapper, its failed turn and its retry's turn, each over supervises
+[[test]]
+name = "planner_headless_turns::a_headless_planner_whose_agent_did_not_start_waits_in_claudes_hold_and_goes_on"
+reason = "B 境界（プロセス・supervisor の配線）: wrapper の turns/ に残った出力の無い turn（launch）を supervisor の tend_planner_walls が Claude の provider_held と ask の無い provider_waiting にし、控えが解けた回に provider retry を次の turn として書く配線の代表。壁の判断は application::supervise::planning::planner_turns の unit test"
+task = 1585
