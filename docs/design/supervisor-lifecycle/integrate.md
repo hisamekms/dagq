@@ -159,6 +159,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - recheckのerrorはwarnだけで着地を止めず（`recheck_pass`）、mainの動きを見るsupervisorは選ばず、drainやhandoffの間は生きているほかのsupervisorが確かめる。
 - recheckも同じ番を取り、関門の間は始めずに次のpassで見直す。
 - 着地待ちのrunが無ければ番もrecheckのlockも取らず、そのlockの下でだけbuild outputを消す空き容量の掃除（[queueのdirのビルドのキャッシュ](claim-hold.md#queueのdirのビルドのキャッシュ)）を妨げない（`look_before_lock`）。
+- 空き容量のための掃除のjobが着地slotを待つrunを予約している間はrecheckを始めずに次のpassで見直し、始めればjobに渡した着地slot待ちのrunをすべて外す（[終わっていないrunのビルド成果物](run-worktrees.md#終わっていないrunのビルド成果物)の「着地slotを待つrun」）。
 
 ## errorと復旧
 
