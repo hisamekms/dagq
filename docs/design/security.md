@@ -116,7 +116,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   sessionの持ち主はagentのsessionを起動する制御側だけが登録し（起動の前か、agentが名前を決めるsessionはそれを読んだ時点。[計測](measurement.md#送る口)の「sessionの登録」）、他の対象に登録済みのsessionは登録し直せず、agentとAI actorとserviceのユースケースは登録しない。
   読み取りを含めほかのユースケースは全て`authorization_denied`で拒まれる。
   runの対象のtokenはsupervisorだけが自分のleaseの下で発行し、runの終わりとleaseの喪失で失効させ、発行と失効は互いに排他にする（時点・やり直し・記録は[Queue service](queue-service.md#principalとtoken)と`application::telemetry_tokens`のmodule doc）。
-  runを持たない対象のtokenはagentを起動する制御側が発行して対象の終わりで失効させ、起動元が失効の前に落ちても、serviceが要求ごとに対象の終わりをqueueから読んで断る。
+  runを持たない対象のtokenはagentを起動する親のprincipalの依頼でqueue serviceの発行のユースケースが発行し（[Queue service](queue-service.md#principalとtoken)）、起動した制御側が対象の終わりで失効させ、起動元が失効の前に落ちても、serviceが要求ごとに対象の終わりをqueueから読んで断る。
   tokenのファイルはqueueの`service/`の下でagentのworktree・run dir・plannerとjobのdirの外にあり、executorは対象から場所を引く口を使い、agentのenvとargvには渡さない（hostでは助言的）
 - 予約のcapabilityは誰にも与えない。
   sandboxのbackendが強制するときの名前

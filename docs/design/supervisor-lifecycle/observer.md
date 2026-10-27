@@ -36,8 +36,7 @@ providerは`[roles.observer]`の`provider`で選び、書かなければClaude�
 Codexのobserverは、jobのdagqをクライアントモードにしてqueue service経由でfindingとfindingに紐づく`blocked`のaskを書き、Claudeのobserverも同じ経路にする（[ADR-t1222-1](../../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)、serviceの側のユースケースは[Queue service](../queue-service.md#ユースケース)）。
 serviceはobserverのprincipal（tokenのrole `observer`とjobのactor id）をactorにしてCLIと同じ`Dialogue`で書くので、findingのeventの`by`とaskの`asked_by`は`observer`、eventのactorはjobのactor idになり、拒否の`authorization_denied`もactorのroleが`observer`で残る。
 そのため下の0の「observer自身のeventを数えない」判定（`SqliteQueue::events_besides`）はCLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。
-providerによらずagentの`dagq`はserviceに送り、queueのDBを開かない。
-tokenはjobの起動ごとに`HostActorExecutor`が発行してそのfileのpathをenvで渡し、jobのprocessが終われば失効させる（4）。
+providerによらずjobの`dagq`はDBを開かず、tokenは起動ごとに`HostActorExecutor`がserviceに依頼し（[Queue service](../queue-service.md#principalとtoken)）、pathをenvで渡し、processの終わりで失効する（4）。
 Codexのsandboxに足すのはserviceのsocketへの到達だけ（下の「Codexで動かす」）。
 supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決定2）ので、agentの書き込みがserviceに届かないのは走っている間にserviceが落ちたときだけで、その件数とidは`observe_finished`に入らない（書かれていないので）。
 
