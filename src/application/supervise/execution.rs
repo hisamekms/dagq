@@ -2769,10 +2769,12 @@ impl Supervisor<'_> {
             // Every pass, draining or handing off too (task 516).
             let handing_off = self.registration.handing_off();
             let (host, generators) = (&mut self.host, &self.generators);
+            let (slots, queue) = (&self.claim.slots, &*self.queue);
             host.host_metrics_pass(
                 handing_off,
                 || generators.clock.now(),
                 self.generators.clock.monotonic(),
+                || waiting::held_worktrees(slots, queue),
             );
             // Before any job starts: none runs twice (task 443).
             self.tend_headless_jobs();

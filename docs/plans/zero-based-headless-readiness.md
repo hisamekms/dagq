@@ -204,9 +204,11 @@ jq -c --arg to $T '
 | E1 待ちの最中の wrapper・workspace の数と時間 | `run_waiting_started`→`run_waiting_ended` の区間（`waited_secs`）の数・合計・同時の最大。非対話の run は待つ間も wrapper と workspace を 1 つずつ持つ |
 | E2 turn を実行していない間の wrapper の時間 | run ごとに `wrapper_started`→`session_exited` の時間の合計から `turn_started`→`turn_finished` の時間の合計を引いたもの（ゼロベースの形では 0 になる） |
 | E3 workspace の数と寿命 | `workspace_created`→`workspace_closed` の組の寿命と、記録の上で閉じていない workspace の数 |
-| E4 待ちの run の worktree の target の大きさ | 取れない（「取れない項目」） |
+| E4 待ちの run の worktree の target の大きさ | host の記録の、待ちと着地待ちの run の target の合計（`held_target_bytes`）・種類ごとの合計と件数の最大と中央値（下の E4 のコマンド）。基準値は記録の開始後に読む |
 
 ```sh
+# E4: 待ちと着地待ちの run の target の合計（bytes）と件数の、窓の最大と中央値（host の記録、測った sample だけ）
+dagq stats --since <印> --full | jq '.host.metrics | with_entries(select(.key | test("^(held_target_bytes|waiting_|landing_)"))) | map_values(if . then {samples, max, median} else null end)'
 # E1: 終わった待ちの数と時間
 jq -c 'map(select(.kind == "run_waiting_ended")) | group_by(.g)
        | map({g: .[0].g, waits: length, waited_secs: (map(.payload.waited_secs) | sort), sum: (map(.payload.waited_secs) | add)})' tagged.json
@@ -306,7 +308,7 @@ run の本数は「読んだ範囲と方法」の 4 群。Claude 対話は参考
 | E1 待ちの区間 | 0 | 2 回、9,117 秒と 7,055 秒（合計 4.5 時間、wrapper・workspace を 2 つずつ抱えた） | 0 | 5 回、合計 29,780 秒（最大 11,366） |
 | E2 turn を実行していない wrapper の時間（閉じた run） | 27 run、wrapper 10.7 h のうち 0.9 h（9%）、run あたり中央値 94 秒・最大 550 秒 | 76 run、20.4 h のうち 1.2 h（6%）、中央値 4 秒・最大 2,259 秒 | 3 run、1%、最大 20 秒 | —（対話は session ＝ wrapper で turn を持たない） |
 | E3 workspace: 作った数、閉じた記録の無い数、閉じたものの寿命の合計 | 34 個、4 個、11 h | 140 個、85 個（82 run）、9 h | 6 個、1 個、1 h | 284 個、7 個、133 h |
-| E4 待ちの run の target の大きさ | 取れない | 取れない | 取れない | 取れない |
+| E4 待ちの run の target の大きさ | 記録の開始後に読む（host の記録は経路ごとに分けない） | 同左 | 同左 | 同左 |
 
 - Claude 非対話の閉じた記録の無い 4 個のうち 3 個は読んだ時点で走っている run のもの。1 個は着地した task 1255 の run `33ee1eb3`（rebase の衝突の resume の後に着地）のもので、閉じたのに記録が無いのか残ったのかは分からない
 - Codex フォールバックの 85 個は、A2 の `interrupted` の run と `failed` の run の workspace に `workspace_closed` が無い。実際に cmux に残ったのか、閉じたが記録されなかったのかは event から分からない（「取れない項目」）
@@ -416,7 +418,7 @@ F=$(date -u -v-7d +%Y-%m-%dT00:00:00Z); T=$(date -u +%Y-%m-%dT00:00:00Z)   # mac
 
 | 項目 | 取れない理由 | 要る記録 |
 |---|---|---|
-| E4 待ちの run の worktree の target の大きさ | run ごとの target の大きさを記録する event が無い（disk の空きの判定は直近の run の大きさを読むが、run ごとには残さない） | `run_waiting_started`・`run_waiting_ended`（と着地待ち）の時点の run の worktree の target の bytes、または host の記録（[host metrics](../design/supervisor-lifecycle/host-metrics.md)）に、待ちと着地待ちの run の target の合計 |
+| E4 待ちの run の worktree の target の大きさ | host の記録（[host metrics](../design/supervisor-lifecycle/host-metrics.md#待つrunのビルド成果物)）が待ちと着地待ちの run の target の合計と件数を残し、`dagq stats` の `host.metrics` が最大と中央値を出す（読み方は項目 E の E4 のコマンド）。基準値は記録の開始後に読む | — |
 | E3 非対話の workspace が実際に残ったか | `interrupted`・`failed` の非対話の run の workspace に `workspace_closed` が無く、cmux に残ったのか記録されなかったのか分からない | 非対話の run の workspace を閉じた・閉じられなかった経路の全てで `workspace_closed`（理由つき）を残す。後始末で見つけて閉じたものも |
 | A2 待ちの外の wrapper の死 | `wrapper_heartbeat_expired` は 3 つの経路（session・resume・exit）のうち一部でしか残らず、`recovery_requested` の `last_error` の文で数えるしかない | 3 つの経路のどれでも `wrapper_heartbeat_expired`（run・phase・待ちの最中か）を残す |
 | A1 待ちの最中に失った session の ask | `run_waiting_ended` の `cause: session_exited` が `ask_id: null` で、どの ask の答えを配れなかったかが event に無い | `run_waiting_ended` に待っていた ask の ID を残す |

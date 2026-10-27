@@ -235,6 +235,16 @@ fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
         "{stats}"
     );
     assert_eq!(stats["host"]["metrics"]["disk_free_pct"]["min"], 10.0);
+    // The build outputs of the runs that wait, measured off the loop in the
+    // first sample and not again within their interval (task 1382): no run
+    // waits, so 0 runs of 0 bytes, read as their max and median.
+    let held = &stats["host"]["metrics"]["held_target_bytes"];
+    assert_eq!(
+        (&held["samples"], &held["max"], &held["median"]),
+        (&json!(1), &json!(0.0), &json!(0.0)),
+        "{stats}"
+    );
+    assert_eq!(stats["host"]["metrics"]["landing_runs"]["max"], 0.0);
     let config = dir.path().join("config");
     fs::create_dir_all(&config).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));

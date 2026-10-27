@@ -64,6 +64,7 @@ fn port(db: &Path, take: fn(i64) -> HostSample, retention_days: u32) -> HostMetr
         retention_days,
         sample: Arc::new(take),
         utc_offset: |_| 0,
+        held_targets: None,
         files: Arc::new(HostMetricsDir(db.parent().unwrap().join("host"))),
         store: Arc::new(SqlitePorts {
             opener: SqliteOpener {

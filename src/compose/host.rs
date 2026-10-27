@@ -254,6 +254,9 @@ pub struct HostMetricsSettings {
     /// Reads the space of the filesystem of a path, put in each sample for
     /// the queue's `runs/` (task 1371); tests set it.
     pub disk: fn(&Path) -> Option<crate::domain::host_metrics::DiskSpace>,
+    /// How often the build outputs of the runs that wait are measured into
+    /// a sample (task 1382); tests set it.
+    pub held_targets_interval: Duration,
 }
 
 impl HostMetricsSettings {
@@ -264,6 +267,9 @@ impl HostMetricsSettings {
             retention_days,
             sample: crate::infrastructure::host_metrics::sample,
             disk: crate::infrastructure::adapters::disk_space,
+            held_targets_interval: Duration::from_secs(
+                crate::domain::host_metrics::DEFAULT_HELD_TARGETS_INTERVAL_SECS,
+            ),
         }
     }
 }
@@ -1084,7 +1090,8 @@ pub(super) fn release_port(
 /// `runs/`, else the queue's dir; the processes split by the profiles
 /// `checkout`'s `dagq.toml` declares, resolved against `profiles`
 /// ([`crate::infrastructure::run_env::toolchains_in_use`]), and in the
-/// common units as `environment` measures the node.
+/// common units as `environment` measures the node; the build outputs of
+/// the runs that wait are those same profiles' (task 1382).
 pub(super) fn host_metrics_port(
     db: &Path,
     checkout: &Path,
@@ -1098,12 +1105,24 @@ pub(super) fn host_metrics_port(
     let runs = runs_dir(db);
     let (take, disk) = (settings.sample, settings.disk);
     let checkout = checkout.to_path_buf();
+    let held_checkout = checkout.clone();
     crate::application::supervise::HostMetricsPort {
         interval: settings.interval,
         retention_days: settings.retention_days,
         sample: Arc::new(move |now| {
             let toolchains = crate::infrastructure::run_env::toolchains_in_use(&checkout, profiles);
             take(now, &toolchains).with_disk(disk(&runs).or_else(|| disk(&queue_dir)))
+        }),
+        held_targets: Some(crate::application::supervise::HeldTargetsPort {
+            interval: settings.held_targets_interval,
+            // A `dagq.toml` that does not read names no directory: unknown,
+            // not 0 bytes.
+            measure: Arc::new(move |worktree| {
+                let toolchains =
+                    crate::infrastructure::run_env::load_toolchains(&held_checkout, profiles)
+                        .ok()?;
+                crate::infrastructure::host_metrics::build_outputs_bytes(worktree, &toolchains)
+            }),
         }),
         utc_offset: clock::local_utc_offset,
         files: Arc::new(crate::infrastructure::host_metrics::HostMetricsDir(dir)),

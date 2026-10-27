@@ -102,7 +102,7 @@ pub use self::host_ops::broker_relay::QueueRelayPort;
 pub use self::host_ops::disk::CLEANUP_INTERVAL;
 pub use self::host_ops::handoff::OWNER_GONE_GRACE;
 pub use self::host_ops::handoff::SUPERVISOR_HANDED_OFF;
-pub use self::host_ops::host_metrics::HostMetricsPort;
+pub use self::host_ops::host_metrics::{HeldTargetsPort, HeldWorktrees, HostMetricsPort};
 pub use self::host_ops::queue_broker::QueueBrokerPort;
 pub use self::host_ops::queue_service::{
     QUEUE_SERVICE_INTERVAL, QUEUE_SERVICE_RESTART_WINDOW, QUEUE_SERVICE_RESTARTS,

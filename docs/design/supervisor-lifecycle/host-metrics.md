@@ -20,7 +20,7 @@ related:
 
 # hostの負荷の連続の記録
 
-supervisorが動いているあいだ、hostの負荷（load average・プロセスの種類ごとのCPUとメモリ・メモリ・swap・pageoutと、runのworktreeのファイルシステムの空き）を決まった間隔で取り、1回のsampleをqueue.dbのNodeSampleStore（`node_samples`）と、queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）の`host/metrics-YYYYMMDD.csv`の両方に書く。
+supervisorが動いているあいだ、hostの負荷（load average・プロセスの種類ごとのCPUとメモリ・メモリ・swap・pageoutと、runのworktreeのファイルシステムの空きと、待つrunのビルド成果物）を決まった間隔で取り、1回のsampleをqueue.dbのNodeSampleStore（`node_samples`）と、queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）の`host/metrics-YYYYMMDD.csv`の両方に書く。
 NodeSampleStoreが恒久の記録で、CSVは同じsampleから書く人が読む写し（[ADR-t1662-2](../../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)の決定5・7、[計測](../measurement.md#ssotとビュー)）。
 eventにはしない（連続の値でrun_eventsを膨らませない）。
 区間ごとのloadの平均・最大はrunのeventに載せる（[`stats`](commands.md)）ので、ここは連続の記録だけを持つ。
@@ -85,9 +85,30 @@ macOSの`%cpu`は減衰する平均なので瞬間の値ではない。
 - **列が増えた日**: 列を足す前のバイナリが始めた日のファイルに追記するときは、行の前にこのバイナリのheaderを1度だけ書く（`domain::host_metrics::needs_header`）。
   読み手は各行をその上にある最後のheaderで読むので、入れ替えた日の前半の行は古い列で、後半の行は新しい列で読める。
 
+## 待つrunのビルド成果物
+
+待つあいだworktreeを持ち続けるrunが、そのビルド成果物でどれだけdiskを抱えるかを読めるように（`max_waiting`を資源ごとに分けるかの材料。`build_outputs_removed`は消したrunの消した時点の大きさしか残さない）、行に待つrunのビルド成果物の大きさを記録する。
+
+- **対象**: 待ち（[人の答えを待つrun](waiting.md)のslotの外のrun。待ちと戻り待ちで、`--max-waiting`が数えるもの）と、着地待ち（`awaiting_integration`のrun。着地のslot・`approve_landing`の答え・`landing_held`の控えを待つ）のrunのうち、worktreeがhostにあるもの。
+  containerのrunはビルド成果物がmachineのvolumeにあるので数えない。
+  大きさはworktreeの直下の、宣言したprofileがbuildするディレクトリ（[run-worktrees](run-worktrees.md)の掃除が消すもの）のdisk上のbytesで、掃除が消すときと同じ数え方（linkはたどらない、無ければ0）
+- **形**: 待ちと着地待ちのそれぞれの件数とbytesと、両方のbytesの合計の列（列の意味は`domain::host_metrics::HeldTargets`のdoc comment）。
+  1件でも数えられなければその種類のbytesと合計は空のセルにし、件数は残す。
+  run_eventsのpayload（`run_waiting_started`・`run_waiting_ended`と着地待ちの始まり）には足さない: eventの時点で数えるとその記録がloopを待たせるか後から別のeventが要り、そのrunの1時点しか残らず、同じ時点で待つrunの合計（diskを抱える量）は複数のeventを突き合わせないと出ないため。
+  hostの行ならその時点の合計がそのまま読め、空きの列と同じ行で比べられる
+- **取り方**: 一覧はloopが読む（slotの待ちの印と`awaiting_integration`のrunの行。ディレクトリは読まない）。
+  数えるのはsampleのjobとは別の1本のthreadで、終わった後の次のsampleのjobがその値を自分の行に書く（数える時間がsampleを遅らせず、数える負荷がsampleに入らない）。
+  直近のrunのtargetは3〜10 GB・数万ファイルあり、既定で10分（`domain::host_metrics::DEFAULT_HELD_TARGETS_INTERVAL_SECS`）に1度だけ始め、走っている間は次を始めない。
+  書いた行の他は空のセルにする。
+  ストアが締め出したsample（近くに別のsampleがある）に渡した値は、次のjobが書く。
+  間隔は`dagq.toml`にもflagにも置かない（古い固定バイナリが読めない欄を足さない）。
+  runの一覧か`dagq.toml`のprofileが読めなければその回は数えない。
+  引き継ぎ（exec）とloopの終わりは数えている途中を待たず、その回の値は書かれない
+
 ## 読み口
 
 - [`stats`](commands.md)の`host`が窓の列ごとの要約とCPU秒を出し、要約の値は`domain::host_metrics`のdoc commentが持つ。
+- 待つrunのビルド成果物は`stats`の`host.metrics`の列ごとの要約（`max`・`median`など）で読み、要約は数えた行だけから作る。
 - [`kpi`](commands.md)の各期間の`health.disk`（`domain::host_metrics::DiskFree`）が、その期間の空きの最小値と中央値（bytesと%）を出す。
   日次・週次のレポートとスループットの見直しの入力もこれを読む
 - **CPU秒**（`cpu_secs`）: 各行の`cpu_total`（と`cpu_<kind>`）をcoreの数に直し、その行が代表する秒を掛けた合計で、代表する秒の決め方と欄は`domain::host_metrics::cpu_secs`のdoc commentが持つ。

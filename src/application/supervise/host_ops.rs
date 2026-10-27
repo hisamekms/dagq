@@ -199,9 +199,10 @@ impl HostOpsState {
         handing_off: bool,
         now: impl FnOnce() -> i64,
         at: Instant,
+        held: impl FnOnce() -> Option<host_metrics::HeldWorktrees>,
     ) {
         self.host_metrics
-            .pass(self.host_metrics_port.as_ref(), handing_off, now, at);
+            .pass(self.host_metrics_port.as_ref(), handing_off, now, at, held);
     }
 
     /// Join or leave the sample of the host's load at the end of the loop

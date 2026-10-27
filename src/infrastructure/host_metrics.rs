@@ -22,6 +22,25 @@ use crate::domain::host_metrics::{
 };
 use crate::domain::toolchain::Toolchains;
 
+/// The bytes on disk of the build outputs of the run worktree `worktree`
+/// (task 1382): of each directory the profiles in use build into under it
+/// ([`Toolchains::worktree_build_dirs`]), measured as the cleanup measures
+/// what it removes (none there and a link in its place count 0, no link is
+/// followed); `None` when one could not be measured.
+pub fn build_outputs_bytes(worktree: &Path, toolchains: &Toolchains) -> Option<u64> {
+    use crate::application::RunFiles;
+    toolchains
+        .worktree_build_dirs()
+        .into_iter()
+        .map(|dir| {
+            super::run_files::LocalRunFiles
+                .tree_size(&worktree.join(dir))
+                .map(Option::unwrap_or_default)
+        })
+        .sum::<std::io::Result<u64>>()
+        .ok()
+}
+
 /// How long each of the host's tools may run.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -290,6 +309,26 @@ pub fn summary(dir: &Path, from: i64, until: i64) -> HostSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_build_outputs_of_a_worktree_are_its_profiles_directories_on_disk() {
+        let worktree = tempfile::tempdir().unwrap();
+        let rust = Toolchains::this_repository();
+        // None built yet is 0 bytes, as is a worktree of no profile.
+        assert_eq!(build_outputs_bytes(worktree.path(), &rust), Some(0));
+        let target = worktree.path().join("target/debug");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("dagq"), vec![7u8; 64 * 1024]).unwrap();
+        fs::write(worktree.path().join("src.rs"), vec![7u8; 64 * 1024]).unwrap();
+        let bytes = build_outputs_bytes(worktree.path(), &rust).unwrap();
+        // The blocks the file takes, and its directories', not the
+        // worktree's other files.
+        assert!((64 * 1024..128 * 1024).contains(&bytes), "{bytes}");
+        assert_eq!(
+            build_outputs_bytes(worktree.path(), &Toolchains::none()),
+            Some(0)
+        );
+    }
 
     #[test]
     fn a_sample_of_this_host_has_the_load_and_the_processes() {

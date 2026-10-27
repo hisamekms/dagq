@@ -12,12 +12,18 @@
 //! or panicking job, or one of the two writes failing, is logged (once
 //! until a job succeeds again) and stops nothing, nor the other write;
 //! one job runs at a time, so a slow tool delays the next sample instead
-//! of piling them up.
+//! of piling them up. Every [`HeldTargetsPort::interval`] a thread of its
+//! own measures the build outputs of the runs that keep their worktree
+//! while they wait (task 1382), and the next sample job after it ended
+//! writes them in its row: the walk delays no sample and is in none's
+//! load.
 
 use super::*;
 use crate::application::{ExecutionEnvironment, HostMetricsFiles, NodeSampleStore};
 use crate::domain::environment::sample_stands_for;
-use crate::domain::host_metrics::{self, HOST_NODE, HostSample, SampleSource};
+use crate::domain::host_metrics::{
+    self, HOST_NODE, HeldTargets, HostSample, RunsTarget, SampleSource,
+};
 
 /// What the supervisor records the host's load with.
 #[derive(Clone)]
@@ -37,6 +43,65 @@ pub struct HostMetricsPort {
     /// The environment the runs execute in, whose measure of the node
     /// makes the sample's common units.
     pub environment: Arc<dyn ExecutionEnvironment>,
+    /// Measures the build outputs of the runs that wait; none measures
+    /// nothing.
+    pub held_targets: Option<HeldTargetsPort>,
+}
+
+/// What measures the build outputs of the runs that wait ([`HeldTargets`]).
+#[derive(Clone)]
+pub struct HeldTargetsPort {
+    /// How often they are measured into a sample
+    /// ([`host_metrics::DEFAULT_HELD_TARGETS_INTERVAL_SECS`]).
+    pub interval: Duration,
+    /// The bytes on disk of the build outputs of the worktree at a path;
+    /// `None` when they could not be measured.
+    pub measure: Arc<MeasureBuildOutputs>,
+}
+
+/// The bytes on disk of the build outputs of a worktree, `None` when they
+/// could not be measured.
+pub type MeasureBuildOutputs = dyn Fn(&Path) -> Option<u64> + Send + Sync;
+
+/// The worktrees on the host of the runs that wait, by kind, which the
+/// loop reads (its slots and the run rows, no walk) for the job to measure.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeldWorktrees {
+    /// Of the runs out of the slots ([`HeldTargets::waiting`]).
+    pub waiting: Vec<PathBuf>,
+    /// Of the `awaiting_integration` runs ([`HeldTargets::landing`]).
+    pub landing: Vec<PathBuf>,
+}
+
+impl HeldWorktrees {
+    /// The worktrees of `waiting` and of `landing`, each run once (a run
+    /// in both counts as waiting): only those on the host, as a run in a
+    /// container builds in a volume of its machine, not in its clone.
+    pub fn of<'a>(
+        waiting: impl IntoIterator<Item = &'a TaskRun>,
+        landing: impl IntoIterator<Item = &'a TaskRun>,
+    ) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        let mut on_host = |runs: &mut dyn Iterator<Item = &'a TaskRun>| -> Vec<PathBuf> {
+            runs.filter(|run| !run.in_container() && seen.insert(run.id().clone()))
+                .filter_map(|run| run.worktree_path().map(PathBuf::from))
+                .collect()
+        };
+        let waiting = on_host(&mut waiting.into_iter());
+        let landing = on_host(&mut landing.into_iter());
+        Self { waiting, landing }
+    }
+
+    /// Measure each worktree with `measure`.
+    fn measure(&self, measure: &MeasureBuildOutputs) -> HeldTargets {
+        let kind = |worktrees: &[PathBuf]| {
+            RunsTarget::of(worktrees.iter().map(|worktree| measure(worktree)))
+        };
+        HeldTargets {
+            waiting: kind(&self.waiting),
+            landing: kind(&self.landing),
+        }
+    }
 }
 
 /// What one job did ([`HostMetricsPort::record`]).
@@ -49,6 +114,9 @@ pub struct Recorded {
     pub imported: Option<usize>,
     /// What could not be written, each its own reason.
     pub failures: Vec<String>,
+    /// The measure of the runs that wait the job was given, when the store
+    /// kept its sample out (another sample near it): the next job writes it.
+    pub held_unwritten: Option<HeldTargets>,
 }
 
 impl HostMetricsPort {
@@ -64,7 +132,13 @@ impl HostMetricsPort {
     /// offset now, the day of the file it goes to, which the store keeps
     /// with it.
     pub fn record(&self, now: i64, import: bool) -> Recorded {
-        let sample = (self.sample)(now);
+        self.record_held(now, import, None)
+    }
+
+    /// [`Self::record`], with `held`, the build outputs of the runs that
+    /// wait as last measured, in its row.
+    pub fn record_held(&self, now: i64, import: bool, held: Option<&HeldTargets>) -> Recorded {
+        let sample = (self.sample)(now).with_held_targets(held);
         let offset = (self.utc_offset)(now);
         let today = host_metrics::local_day(sample.unix, offset);
         let mut recorded = Recorded::default();
@@ -120,6 +194,9 @@ impl HostMetricsPort {
                 .failures
                 .push(format!("write the CSV file: {error:#}")),
         }
+        if admitted == Some(false) {
+            recorded.held_unwritten = held.copied();
+        }
         recorded
     }
 }
@@ -161,6 +238,12 @@ fn import_files(
 pub(in crate::application::supervise) struct HostMetricsWatch {
     job: Option<thread::JoinHandle<Recorded>>,
     started: Option<Instant>,
+    /// When the last measure of the runs that wait started.
+    held_started: Option<Instant>,
+    /// The measure of the runs that wait running now.
+    measuring: Option<thread::JoinHandle<HeldTargets>>,
+    /// What the last measure gave, until a sample job writes it.
+    measured: Option<HeldTargets>,
     failing: bool,
     /// Whether this process imported the CSV files.
     imported: bool,
@@ -177,17 +260,37 @@ impl HostMetricsWatch {
     /// passed since the last one started, unless `handing_off`: a handoff
     /// waits for the job and none starts once it is asked for, so a slow
     /// sample cannot put the exec off. `now` reads the injected clock's unix
-    /// second, `at` its monotonic time.
+    /// second, `at` its monotonic time. Apart from the samples, once
+    /// [`HeldTargetsPort::interval`] passed since the last one started and
+    /// none runs, start a measure of the runs that wait in a thread of its
+    /// own, whose result the next sample job writes; `held` reads their
+    /// worktrees, only for a measure due, and `None` (they could not be
+    /// read) measures none that time. A handoff neither waits for a
+    /// measure nor starts one.
     pub(in crate::application::supervise) fn pass(
         &mut self,
         port: Option<&HostMetricsPort>,
         handing_off: bool,
         now: impl FnOnce() -> i64,
         at: Instant,
+        held: impl FnOnce() -> Option<HeldWorktrees>,
     ) {
         let Some(port) = port.cloned() else {
             return;
         };
+        if let Some(measuring) = self.measuring.take() {
+            if measuring.is_finished() {
+                match measuring.join() {
+                    Ok(measured) => self.measured = Some(measured),
+                    Err(_) => warn!("the measure of the runs that wait panicked"),
+                }
+            } else {
+                self.measuring = Some(measuring);
+            }
+        }
+        if !handing_off {
+            self.start_measure(&port, at, held);
+        }
         if let Some(job) = self.job.take() {
             if !job.is_finished() {
                 self.job = Some(job);
@@ -207,12 +310,41 @@ impl HostMetricsWatch {
         self.started = Some(at);
         let now = now();
         let import = !self.imported;
-        self.job = Some(spawn_traced(move || port.record(now, import)));
+        let held = self.measured.take();
+        self.job = Some(spawn_traced(move || {
+            port.record_held(now, import, held.as_ref())
+        }));
+    }
+
+    /// Start a measure of the runs that wait when one is due and none runs.
+    fn start_measure(
+        &mut self,
+        port: &HostMetricsPort,
+        at: Instant,
+        held: impl FnOnce() -> Option<HeldWorktrees>,
+    ) {
+        let Some(targets) = port.held_targets.clone() else {
+            return;
+        };
+        if self.measuring.is_some()
+            || !sample_due(
+                self.held_started
+                    .map(|started| at.saturating_duration_since(started)),
+                targets.interval,
+            )
+        {
+            return;
+        }
+        self.held_started = Some(at);
+        if let Some(worktrees) = held() {
+            self.measuring = Some(spawn_traced(move || worktrees.measure(&*targets.measure)));
+        }
     }
 
     /// Wait for the sample job still running, as the loop ends, until
     /// `deadline` on `clock` when one is given ([`super::finished_by`]);
-    /// one still running then is left, unrecorded.
+    /// one still running then is left, unrecorded, as is a measure of the
+    /// runs that wait.
     pub(in crate::application::supervise) fn finish(
         &mut self,
         deadline: Option<Instant>,
@@ -247,6 +379,10 @@ impl HostMetricsWatch {
 
     /// Take in what a job did; its failures in one line, if any.
     fn apply(&mut self, recorded: Recorded) -> Option<String> {
+        // A newer measure, ended meanwhile, goes in place of it.
+        if self.measured.is_none() {
+            self.measured = recorded.held_unwritten;
+        }
         for path in recorded.removed {
             info!(
                 "host metrics past their retention removed: {}",
@@ -533,11 +669,143 @@ mod tests {
             utc_offset: |_| 0,
             files,
             store: Arc::new(Store(store)),
+            held_targets: None,
         }
     }
 
-    /// The first pass samples, and the next one once the interval passed
-    /// since the last sample started: not 1 ms before.
+    fn run(id: &str, worktree: &str) -> TaskRun {
+        use crate::domain::{CommitSha, Provider, RunRecord, RunStatus};
+        TaskRun::restore(RunRecord {
+            id: RunId::new(id).unwrap(),
+            task_id: TaskId::new(7),
+            status: RunStatus::AwaitingIntegration,
+            requested_provider: Provider::Claude,
+            actual_provider: Provider::Claude,
+            worker_mode: crate::domain::worker::Worker::default_mode(Provider::Claude),
+            base_commit: CommitSha::parse("a".repeat(40), "base").unwrap(),
+            branch: None,
+            worktree_path: Some(worktree.to_owned()),
+            workspace_id: None,
+            receipt_path: None,
+            log_path: None,
+            result_commit: None,
+            repo_path: None,
+            run_dir: None,
+            last_error: None,
+            workspace_closed_at: None,
+            created_at: String::new(),
+        })
+        .unwrap()
+    }
+
+    /// The worktrees measured are those on the host, each run once: a run
+    /// in a container builds in its machine's volume, not in its clone.
+    /// A measure given to a sample the store keeps out comes back for the
+    /// next job; one written does not.
+    #[test]
+    fn a_measure_of_a_sample_kept_out_comes_back_for_the_next_job() {
+        let rows = Arc::new(Mutex::new(Rows::default()));
+        let port = port(Some(rows.clone()), Arc::new(Files::default()));
+        let held = HeldTargets {
+            waiting: RunsTarget::of([Some(7)]),
+            landing: RunsTarget::default(),
+        };
+        let written = port.record_held(NOW, false, Some(&held));
+        assert_eq!(written.held_unwritten, None);
+        let kept_out = port.record_held(NOW + 10, false, Some(&held));
+        assert_eq!(kept_out.held_unwritten, Some(held));
+        let mut watch = HostMetricsWatch::default();
+        assert_eq!(watch.apply(kept_out), None);
+        assert_eq!(watch.measured, Some(held));
+        assert_eq!(rows.lock().unwrap().sorted().len(), 1);
+    }
+
+    #[test]
+    fn the_worktrees_held_are_those_on_the_host_each_run_once() {
+        let waiting = run("w", "/q/runs/w/worktree");
+        let landing = run("l", "/q/runs/l/worktree");
+        let clone = run("c", "/q/clones/c");
+        let held = HeldWorktrees::of([&waiting], [&landing, &waiting, &clone]);
+        assert_eq!(
+            held,
+            HeldWorktrees {
+                waiting: vec![PathBuf::from("/q/runs/w/worktree")],
+                landing: vec![PathBuf::from("/q/runs/l/worktree")],
+            }
+        );
+    }
+
+    /// A measure of the runs that wait starts at the first pass and runs
+    /// beside the samples; the next sample job after it ended writes it in
+    /// its row, and the following ones do not. The next measure starts
+    /// once its own interval passed, and the loop's read of the worktrees
+    /// is made only for those. A run that could not be measured leaves its
+    /// kind's bytes and the total empty.
+    #[test]
+    fn the_runs_that_wait_are_measured_beside_the_samples_into_the_next_row() {
+        let rows = Arc::new(Mutex::new(Rows::default()));
+        let mut port = port(Some(rows.clone()), Arc::new(Files::default()));
+        port.held_targets = Some(HeldTargetsPort {
+            interval: Duration::from_secs(600),
+            measure: Arc::new(|worktree: &Path| match worktree.to_str() {
+                Some("/w") => Some(3_000),
+                Some("/l") => Some(500),
+                _ => None,
+            }),
+        });
+        let reads = std::cell::Cell::new(0);
+        let both = HeldWorktrees {
+            waiting: vec![PathBuf::from("/w")],
+            landing: vec![PathBuf::from("/l")],
+        };
+        let unmeasured = HeldWorktrees {
+            waiting: vec![PathBuf::from("/w"), PathBuf::from("/gone")],
+            landing: Vec::new(),
+        };
+        let mut watch = HostMetricsWatch::default();
+        let start = Instant::now();
+        for (secs, worktrees) in [
+            (0, &both),
+            (30, &both),
+            (60, &both),
+            (600, &unmeasured),
+            (630, &unmeasured),
+        ] {
+            watch.pass(
+                Some(&port),
+                false,
+                || NOW + i64::try_from(secs).unwrap(),
+                start + Duration::from_secs(secs),
+                || {
+                    reads.set(reads.get() + 1);
+                    Some(worktrees.clone())
+                },
+            );
+            let job = watch.job.take().expect("a sample job");
+            watch.reap(job);
+            while watch.measuring.as_ref().is_some_and(|m| !m.is_finished()) {
+                thread::yield_now();
+            }
+        }
+        assert_eq!(reads.get(), 2);
+        let samples = rows.lock().unwrap().sorted();
+        assert_eq!(samples.len(), 5);
+        let column = |sample: &HostSample, name| sample.values.get(name).copied();
+        assert_eq!(column(&samples[0], "waiting_runs"), None);
+        assert_eq!(column(&samples[1], "waiting_runs"), Some(1.0));
+        assert_eq!(column(&samples[1], "waiting_target_bytes"), Some(3_000.0));
+        assert_eq!(column(&samples[1], "landing_target_bytes"), Some(500.0));
+        assert_eq!(column(&samples[1], "held_target_bytes"), Some(3_500.0));
+        // The sample is taken as ever.
+        assert_eq!(column(&samples[1], "cpu_total"), Some(150.5));
+        assert_eq!(column(&samples[2], "held_target_bytes"), None);
+        assert_eq!(column(&samples[3], "waiting_runs"), None);
+        assert_eq!(column(&samples[4], "waiting_runs"), Some(2.0));
+        assert_eq!(column(&samples[4], "waiting_target_bytes"), None);
+        assert_eq!(column(&samples[4], "landing_target_bytes"), Some(0.0));
+        assert_eq!(column(&samples[4], "held_target_bytes"), None);
+    }
+
     #[test]
     fn a_sample_is_due_first_and_then_once_the_interval_passed() {
         let interval = Duration::from_secs(60);

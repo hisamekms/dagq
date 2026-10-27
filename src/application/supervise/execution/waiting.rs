@@ -17,6 +17,31 @@ use crate::domain::{
     },
 };
 
+/// The worktrees of the runs that keep one while they wait (task 1382):
+/// those `slots` holds out of the slots (waiting, or waiting to go back),
+/// and the `awaiting_integration` runs of `queue` (waiting for the landing
+/// slot, for the answer to `approve_landing`, or held by `landing_held`),
+/// for the host's sample to measure off the loop. `None` when the runs
+/// could not be read: that sample measures none.
+pub(super) fn held_worktrees(
+    slots: &stages::SlotTable,
+    queue: &(impl crate::application::RunReads + ?Sized),
+) -> Option<crate::application::supervise::HeldWorktrees> {
+    let landing = queue
+        .runs_with_status(RunStatus::AwaitingIntegration)
+        .inspect_err(|error| {
+            warn!(error = %format_args!("{error:#}"), "the runs awaiting integration could not be read for the host's sample: {error:#}");
+        })
+        .ok()?;
+    Some(crate::application::supervise::HeldWorktrees::of(
+        slots
+            .iter()
+            .filter(|slot| slot.out_of_slot())
+            .map(|slot| &slot.run),
+        &landing,
+    ))
+}
+
 /// The wait of one slot's run.
 pub(super) struct Waiting {
     /// The asks the wait holds, oldest first.

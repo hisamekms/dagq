@@ -24,6 +24,13 @@ pub const HOST_DIR: &str = "host";
 /// the retention, and `up` starts its supervisor with both defaults.
 pub const DEFAULT_INTERVAL_SECS: u64 = 30;
 
+/// How often by default the build outputs of the runs that wait are
+/// measured into a sample ([`HeldTargets`]): a run's `target/` holds
+/// gigabytes in tens of thousands of files, and walking every waiting
+/// run's at each sample would keep the job busy; the samples between
+/// leave the columns empty. Not a flag nor a setting of `dagq.toml`.
+pub const DEFAULT_HELD_TARGETS_INTERVAL_SECS: u64 = 600;
+
 /// How many local days of files are kept by default (`supervise
 /// --host-metrics-retention-days`): today's and the days before it.
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
@@ -44,8 +51,11 @@ pub const PROCESS_KINDS: [&str; 5] = ["cargo", "rustc", "claude", "dagq", "other
 /// per minute);
 /// `disk_*` are the space of the filesystem the run worktrees are on
 /// (task 1371): free for a process that is not root and the total, in
-/// bytes, and the share free in percent (empty when the total is 0).
-pub const COLUMNS: [&str; 25] = [
+/// bytes, and the share free in percent (empty when the total is 0);
+/// `waiting_*`, `landing_*` and `held_target_bytes` are the build outputs
+/// of the runs that keep their worktree while they wait ([`HeldTargets`]),
+/// in the samples they were measured for and empty in the others.
+pub const COLUMNS: [&str; 30] = [
     "time",
     "unix",
     "load1",
@@ -71,6 +81,11 @@ pub const COLUMNS: [&str; 25] = [
     "disk_free_bytes",
     "disk_total_bytes",
     "disk_free_pct",
+    "waiting_runs",
+    "waiting_target_bytes",
+    "landing_runs",
+    "landing_target_bytes",
+    "held_target_bytes",
 ];
 
 /// The cumulative column the summary reads as a rate.
@@ -154,6 +169,26 @@ impl HostSample {
         self
     }
 
+    /// The build outputs of the runs that wait ([`HeldTargets`]), when they
+    /// were measured for this sample: the runs of each kind, the bytes of
+    /// each kind unless a run of it could not be measured, and the bytes
+    /// of both together unless either is unknown.
+    pub fn with_held_targets(mut self, held: Option<&HeldTargets>) -> Self {
+        let Some(held) = held else {
+            return self;
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let float = |value: u64| value as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let runs = |runs: usize| runs as f64;
+        self.set("waiting_runs", Some(runs(held.waiting.runs)));
+        self.set("waiting_target_bytes", held.waiting.bytes.map(float));
+        self.set("landing_runs", Some(runs(held.landing.runs)));
+        self.set("landing_target_bytes", held.landing.bytes.map(float));
+        self.set("held_target_bytes", held.bytes().map(float));
+        self
+    }
+
     /// The row of a file: the host's local time at `utc_offset_secs`, then
     /// each column, empty when the sample has no value.
     pub fn row(&self, utc_offset_secs: i64) -> String {
@@ -217,6 +252,54 @@ pub fn header() -> String {
 pub struct DiskSpace {
     pub free_bytes: u64,
     pub total_bytes: u64,
+}
+
+/// The build outputs of the runs that keep their worktree on the host
+/// while they wait (task 1382), measured off the supervisor's loop every
+/// [`DEFAULT_HELD_TARGETS_INTERVAL_SECS`]: what a wait holds of the disk,
+/// which `build_outputs_removed` tells only of the runs whose outputs were
+/// removed, after the fact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HeldTargets {
+    /// The runs waiting outside the slots for a person, or to go back to
+    /// one (the runs `--max-waiting` counts).
+    pub waiting: RunsTarget,
+    /// The `awaiting_integration` runs: waiting for the landing slot, for
+    /// the answer to `approve_landing`, or held by `landing_held`.
+    pub landing: RunsTarget,
+}
+
+impl HeldTargets {
+    /// The bytes of both kinds; `None` when either is unknown.
+    pub fn bytes(&self) -> Option<u64> {
+        Some(self.waiting.bytes? + self.landing.bytes?)
+    }
+}
+
+/// The build outputs of the worktrees of some runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunsTarget {
+    pub runs: usize,
+    /// The bytes on disk of the build directories of their worktrees
+    /// ([`crate::domain::toolchain::Toolchains::worktree_build_dirs`]),
+    /// none there counting 0; `None` when one could not be measured.
+    pub bytes: Option<u64>,
+}
+
+impl RunsTarget {
+    /// The runs whose build outputs measured `measured` each (`None`: it
+    /// could not be measured).
+    pub fn of(measured: impl IntoIterator<Item = Option<u64>>) -> Self {
+        let mut target = Self {
+            runs: 0,
+            bytes: Some(0),
+        };
+        for bytes in measured {
+            target.runs += 1;
+            target.bytes = target.bytes.zip(bytes).map(|(sum, bytes)| sum + bytes);
+        }
+        target
+    }
 }
 
 /// Whether `line` is a header: its first cell is `time`.
@@ -1060,7 +1143,7 @@ garbage line
         assert_eq!(nearly_full.values["disk_free_bytes"], 300_000.0);
         assert_eq!(nearly_full.values["disk_free_pct"], 0.0);
         let row = nearly_full.row(0);
-        assert!(row.ends_with(",300000,107374182400,0"), "{row}");
+        assert!(row.ends_with(",300000,107374182400,0,,,,,"), "{row}");
         assert_eq!(
             parse_file(&format!("{}\n{row}\n", header()))[0],
             nearly_full
@@ -1087,6 +1170,61 @@ garbage line
         );
         // A window without the column has no disk.
         assert_eq!(DiskFree::of(&summarize(&[HostSample::new(5)], 0, 10)), None);
+    }
+
+    #[test]
+    fn the_held_targets_are_recorded_and_their_max_and_median_read() {
+        let gib = 1024 * 1024 * 1024;
+        let held = |unix: i64, waiting: &[Option<u64>], landing: &[Option<u64>]| {
+            HostSample::new(unix).with_held_targets(Some(&HeldTargets {
+                waiting: RunsTarget::of(waiting.iter().copied()),
+                landing: RunsTarget::of(landing.iter().copied()),
+            }))
+        };
+        let first = held(1000, &[Some(3 * gib), Some(5 * gib)], &[Some(10 * gib)]);
+        assert_eq!(first.values["waiting_runs"], 2.0);
+        assert_eq!(first.values["waiting_target_bytes"], 8_589_934_592.0);
+        assert_eq!(first.values["landing_runs"], 1.0);
+        assert_eq!(first.values["held_target_bytes"], 19_327_352_832.0);
+        // Read back by the header, to the byte.
+        let row = first.row(0);
+        assert!(
+            row.ends_with(",2,8589934592,1,10737418240,19327352832"),
+            "{row}"
+        );
+        assert_eq!(parse_file(&format!("{}\n{row}\n", header()))[0], first);
+        // No run waiting is 0 runs of 0 bytes, not an empty cell.
+        let none = held(1030, &[], &[]);
+        assert_eq!(none.values["held_target_bytes"], 0.0);
+        assert_eq!(none.values["waiting_runs"], 0.0);
+        // A run that could not be measured leaves its kind's bytes and the
+        // total empty, its runs counted.
+        let unknown = held(1060, &[Some(gib), None], &[Some(gib)]);
+        assert_eq!(unknown.values["waiting_runs"], 2.0);
+        assert_eq!(unknown.values.get("waiting_target_bytes"), None);
+        assert_eq!(unknown.values["landing_target_bytes"], 1_073_741_824.0);
+        assert_eq!(unknown.values.get("held_target_bytes"), None);
+        // A sample not measured for has none of the columns.
+        assert_eq!(
+            HostSample::new(0).with_held_targets(None),
+            HostSample::new(0)
+        );
+        // The summary reads the max and the median over the samples
+        // measured for, the others left out.
+        let samples = [
+            first,
+            none,
+            unknown,
+            HostSample::new(1090),
+            held(1120, &[Some(gib)], &[]),
+        ];
+        let summary = summarize(&samples, 0, 2000);
+        let total = summary.metrics["held_target_bytes"].unwrap();
+        assert_eq!(total.samples, 3);
+        assert_eq!(total.max, 19_327_352_832.0);
+        assert_eq!(total.median, 1_073_741_824.0);
+        let runs = summary.metrics["waiting_runs"].unwrap();
+        assert_eq!((runs.samples, runs.max), (4, 2.0));
     }
 
     #[test]
