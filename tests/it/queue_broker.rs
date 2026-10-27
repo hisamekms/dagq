@@ -1451,3 +1451,58 @@ fn the_broker_swaps_a_run_s_token_for_the_chosen_claude_credential_and_streams_t
     let _waiting = common::within(TIMEOUT, "the queue broker to stop once asked to");
     serving.join().unwrap();
 }
+
+/// The keychain the broker reads a `[claude_credential]`'s item from is
+/// macOS's `security` command (here a fake one, the host's keychain left
+/// alone): the service and the account are its arguments and the value only
+/// its output, asked for by the broker's read alone; an item it does not
+/// find is missing, and only macOS has the keychain.
+#[test]
+fn the_keychain_s_command_gets_the_item_by_its_arguments_and_gives_the_value_by_its_output() {
+    use dagq::infrastructure::claude_credential::{self as credential, Keychain};
+    use std::os::unix::fs::PermissionsExt;
+    let _test = common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("args.log");
+    let program = dir.path().join("security");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> {}\n\
+             [ \"$1 $2 $3 $4 $5\" = 'find-generic-password -s dagq-claude -a me' ] || exit 44\n\
+             [ \"$6\" = -w ] && echo sk-from-keychain\nexit 0\n",
+            common::shell_path(&log)
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let keychain = Keychain { program };
+    let host = dir.path().join("host.toml");
+    let table = |account: &str| {
+        std::fs::write(
+            &host,
+            format!(
+                "[claude_credential]\nkind = \"api_key\"\nkeychain_service = \"dagq-claude\"\nkeychain_account = \"{account}\"\n"
+            ),
+        )
+        .unwrap();
+    };
+    table("me");
+    let chosen = credential::read(dir.path(), None, Some(&keychain)).unwrap();
+    assert_eq!(chosen.secret, "sk-from-keychain");
+    let shown = credential::report(dir.path(), None, Some(&keychain));
+    assert_eq!(shown["usable"], true);
+    let args = std::fs::read_to_string(&log).unwrap();
+    assert!(!args.contains("sk-from-keychain"), "{args}");
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        [
+            "find-generic-password -s dagq-claude -a me -w",
+            "find-generic-password -s dagq-claude -a me",
+        ]
+    );
+    table("someone-else");
+    let missing = credential::read(dir.path(), None, Some(&keychain)).unwrap_err();
+    assert_eq!(missing.reason(), "missing");
+    assert_eq!(Keychain::of_host().is_some(), cfg!(target_os = "macos"));
+}

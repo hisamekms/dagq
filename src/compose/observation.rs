@@ -1754,6 +1754,11 @@ impl OneShot {
         report["claude_credential"] = crate::infrastructure::claude_credential::report(
             db.parent().unwrap_or(Path::new(".")),
             crate::infrastructure::kpi_config::host_wide_file().as_deref(),
+            crate::infrastructure::claude_credential::Keychain::of_host()
+                .as_ref()
+                .map(|keychain| {
+                    keychain as &dyn crate::infrastructure::claude_credential::KeychainLookup
+                }),
         );
         // What `graph --format svg` draws with (ADR-0077 decision 4).
         report["d2"] = serde_json::to_value(crate::infrastructure::d2::Tools::on(

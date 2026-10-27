@@ -40,7 +40,7 @@ A person can stop the move to the other provider in the repository's `dagq.toml`
 
 ## A container worker's Claude credential
 
-A container worker holds no Claude credential: the queue's broker supplies the one a person chose in the host's `host.toml` (never `dagq.toml`), a setup token (`claude setup-token`) or an API key (Anthropic Console), in a file only its owner reads; no container worker is claimed until then (`doctor`). Which to choose is the person's call, and the person issues it and writes its file; an agent never issues or reads it. Recommend an API key for an organization, a team, a shared host or work (Anthropic's terms do not expressly cover a proxy sending the subscription's token).
+A container worker holds no Claude credential: the queue's broker supplies the one a person chose in the host's `host.toml` (never `dagq.toml`), a setup token (`claude setup-token`) or an API key (Anthropic Console), in a file only its owner reads or, on macOS, an item of the keychain (not Claude Code's own login); no container worker is claimed until then (`doctor`). Which to choose is the person's call, and the person issues it and puts it in its file or keychain item; an agent never issues or reads it. Recommend an API key for an organization, a team, a shared host or work (Anthropic's terms do not expressly cover a proxy sending the subscription's token).
 
 ## A headless run by hand
 

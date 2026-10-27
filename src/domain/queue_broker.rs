@@ -551,8 +551,10 @@ impl std::fmt::Debug for ClaudeCredential {
 pub const CLAUDE_CREDENTIAL_GUIDANCE: &str = "choose the Claude credential of the queue broker in host.toml's \
 [claude_credential]: kind = \"setup_token\" (the long-lived token of `claude setup-token`; for your own \
 subscription used by you alone) or kind = \"api_key\" (an API key issued in the Anthropic Console, paid by \
-use; recommended for an organization, a team, a shared host or work), and file = the absolute path of a \
-file of mode 0600 that holds it, issued and put there by you";
+use; recommended for an organization, a team, a shared host or work), and where it is, issued and put \
+there by you: file = the absolute path of a file of mode 0600 that holds it, or, on macOS, \
+keychain_service and keychain_account = the generic password item of the keychain that holds it (not \
+Claude Code's own login)";
 
 /// Why the broker has no Claude credential to send with: a container's
 /// worker cannot be used meanwhile (ADR-t2177-1 decision 3). No message
@@ -563,15 +565,19 @@ pub enum ClaudeCredentialProblem {
     NotSelected,
     /// The `[claude_credential]` that chooses does not read: why.
     Invalid(String),
-    /// The chosen kind's file is not there.
+    /// The chosen kind's place (its file, or its keychain item) is not
+    /// there: the place.
     Missing(String),
     /// The file is not a regular file of mode 0600 (no access for the group
     /// or others): its path and mode.
     NotPrivate { file: String, mode: u32 },
-    /// The file holds nothing.
+    /// The place holds nothing: the place.
     Empty(String),
-    /// The file could not be read: why.
+    /// The place could not be read: why.
     Unreadable(String),
+    /// A keychain item is chosen on a host with no keychain dagq reads
+    /// (any OS but macOS): the item.
+    KeychainUnavailable(String),
 }
 
 impl ClaudeCredentialProblem {
@@ -584,6 +590,7 @@ impl ClaudeCredentialProblem {
             Self::NotPrivate { .. } => "not_private",
             Self::Empty(_) => "empty",
             Self::Unreadable(_) => "unreadable",
+            Self::KeychainUnavailable(_) => "keychain_unavailable",
         }
     }
 
@@ -595,15 +602,19 @@ impl ClaudeCredentialProblem {
                 "no Claude credential is chosen for the queue broker: {CLAUDE_CREDENTIAL_GUIDANCE}"
             ),
             Self::Invalid(why) => format!("host.toml's [claude_credential] does not read: {why}"),
-            Self::Missing(file) => {
-                format!("the chosen Claude credential's file {file} is not there")
+            Self::Missing(place) => {
+                format!("the chosen Claude credential's {place} is not there")
             }
             Self::NotPrivate { file, mode } => format!(
                 "the chosen Claude credential's file {file} is not a regular file of mode 0600 (mode {mode:04o}); \
                  make it readable by its owner only"
             ),
-            Self::Empty(file) => format!("the chosen Claude credential's file {file} is empty"),
+            Self::Empty(place) => format!("the chosen Claude credential's {place} is empty"),
             Self::Unreadable(why) => format!("the chosen Claude credential cannot be read: {why}"),
+            Self::KeychainUnavailable(item) => format!(
+                "the chosen Claude credential's {item} cannot be read: this host has no keychain \
+                 dagq reads (only macOS's); choose a file of mode 0600 instead"
+            ),
         }
     }
 }
@@ -1480,6 +1491,10 @@ mod tests {
             (
                 ClaudeCredentialProblem::Unreadable("x".into()),
                 "unreadable",
+            ),
+            (
+                ClaudeCredentialProblem::KeychainUnavailable("keychain item".into()),
+                "keychain_unavailable",
             ),
         ] {
             assert_eq!(problem.reason(), reason);

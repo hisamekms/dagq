@@ -510,6 +510,9 @@ pub struct SystemBrokerBackend {
     /// The host-wide `host.toml`, under the queue's
     /// ([`super::claude_credential::load`]).
     pub host_wide: Option<PathBuf>,
+    /// The keychain a `[claude_credential]` may name an item of: this
+    /// host's ([`super::claude_credential::Keychain::of_host`]).
+    pub keychain: Option<super::claude_credential::Keychain>,
 }
 
 impl SystemBrokerBackend {
@@ -593,7 +596,13 @@ impl BrokerBackend for SystemBrokerBackend {
     }
 
     fn claude_credential(&self) -> Result<ClaudeCredential, ClaudeCredentialProblem> {
-        super::claude_credential::read(&self.queue_dir, self.host_wide.as_deref())
+        super::claude_credential::read(
+            &self.queue_dir,
+            self.host_wide.as_deref(),
+            self.keychain
+                .as_ref()
+                .map(|keychain| keychain as &dyn super::claude_credential::KeychainLookup),
+        )
     }
 }
 
@@ -1066,6 +1075,7 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
         queue_dir: queue_dir.clone(),
         generators: options.generators.clone(),
         host_wide: options.host_wide.clone(),
+        keychain: super::claude_credential::Keychain::of_host(),
     });
     // What a verification killed before its end left behind goes before
     // the first request; a failure is recorded and the broker serves on.

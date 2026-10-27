@@ -1668,8 +1668,8 @@ enum Command {
     },
     /// Report every unfinished run and supervisor, one line's worth each, without changing state.
     /// Also reports the host's settings, among them the Claude credential host.toml chooses for
-    /// a container's worker (`claude_credential`: its kind, file, presence and mode, never its
-    /// value; with no kind chosen, which to choose: a long-lived token for one's own
+    /// a container's worker (`claude_credential`: its kind, its place (a file or, on macOS, a
+    /// keychain item), presence and a file's mode, never its value; with no kind chosen, which to choose: a long-lived token for one's own
     /// subscription used alone, an API key for an organization, a team, a shared host or work).
     /// `toolchains` shows the toolchain profiles dagq.toml declares and the paths each applies
     /// to (none while it declares none: then no language's knowledge reads the output), and

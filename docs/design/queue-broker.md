@@ -88,12 +88,14 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
 - 通すのはqueue serviceと同じworker（resumeを含む）のrun tokenで、要求が名指すrunのものだけ（verificationのtokenも拒む）。
 - 資格情報は`host.toml`（queueのものがhost全体のものを表ごと上書きする）で人が選んだ種類だけを要求のたびに読み、長期tokenは`Authorization`のbearer、API keyは`x-api-key`にして送る。
   要求の`Authorization`・`x-api-key`・runのheader・接続のheaderは送らないので、run tokenはbrokerの外へ出ない。
-  種類が選ばれていない・ファイルが無い・0600でない・空のときは送らず`unauthenticated`で拒み、理由と選び方を答えとeventに出す（値は出さない）。
+  置き場は0600のファイルか、macOSのkeychainの項目のどちらか1つで、keychainは`security`のコマンドで読み、値はその出力だけで受けて引数に出さない。
+  種類が選ばれていない・置き場が無いか2つある・ファイルか項目が無い・0600でない・空・keychainの無いOSで項目を選んだときは送らず`unauthenticated`で拒み、理由と選び方を答えとeventに出す（値は出さない）。
 - 応答はstatus・header・body（SSEのstreamを含む）を届いた順にそのまま返し、接続のheaderだけを`Connection: close`に替える。
   上流の認証の失敗・利用上限・残高の不足も素通しで、brokerは別の種類に切り替えない（分類と控えは実行側のClaudeのturnの読み取りが持つ）。
 - 落とし穴: 上流へは`curl`の子processで送り、資格情報はそのstdinのconfigで渡して引数に出さず、bodyはbrokerのdirの0600の一時ファイルに置いて送った後に消す。
   hostの`curl`が無いと`unreachable`で拒む。
-- containerを使えるかの判断（`ClaudeCredentialGate`）は中身を読まず、種類・ファイルの有無・権限だけを見て、workerの適用先だけを止める（verificationはClaudeを呼ばない）。
+- containerを使えるかの判断（`ClaudeCredentialGate`）は中身を読まず、種類・置き場の有無・ファイルの権限だけを見て、workerの適用先だけを止める（verificationはClaudeを呼ばない）。
+  keychainの項目が空なことはこの判断では分からず、brokerの読み取りで拒む。
   `doctor`の`claude_credential`も同じものだけを出す。
 
 ## verificationのtoken
@@ -136,5 +138,4 @@ queue serviceと同じ手順に乗せる（[Queue service](queue-service.md#起�
 
 ## まだ無いもの
 
-- Claudeの資格情報のkeychainからの読み取り（今はファイルだけ）。
 - `status`・`doctor`でのbrokerの見せ方と、人の手での起動・停止のコマンド。
