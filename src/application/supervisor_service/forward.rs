@@ -789,6 +789,28 @@ impl RunTransitions for SupervisorQueue {
     ) -> Result<TaskRun> {
         self.begin_landing(id, token, main, true)
     }
+    fn begin_e2e(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        self.remote(
+            "begin_e2e",
+            vec![to_value(id)?, to_value(token)?, payload, to_value(false)?],
+        )
+    }
+    fn begin_e2e_over_handoff(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        self.remote(
+            "begin_e2e",
+            vec![to_value(id)?, to_value(token)?, payload, to_value(true)?],
+        )
+    }
     fn defer_integration(
         &mut self,
         id: &RunId,

@@ -1026,7 +1026,7 @@ const E2E_AGENT: &str = "printf 'e2e\\n' > e2e.txt && git add e2e.txt; commit wo
 /// in its slot to land, as a headless worker's run is (its session exits as
 /// soon as its review passes, so nothing else holds it there).
 fn held_e2e(release: &Path) -> SuperviseOptions {
-    crate::runtime_e2e::e2e_options(format!(
+    e2e_options(format!(
         "{}; echo 'test result: ok. 1 passed; 0 failed'",
         crate::common::await_path(release)
     ))
@@ -1061,7 +1061,7 @@ fn has_event(db: &Path, task: i64, kind: &str) -> bool {
 #[test]
 fn a_run_held_in_its_slot_for_its_e2e_that_a_landing_conflicts_with_is_parked_before_it_lands() {
     let (dir, repo, db) = fixture();
-    crate::runtime_e2e::with_e2e_paths(&repo, "[\"e2e.txt\"]");
+    with_e2e_paths(&repo, "[\"e2e.txt\"]");
     add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
     let backend = Arc::new(TestWorkspace::new(&db, false, E2E_AGENT));
     backend.script_for(2, GATED_AGENT);
@@ -1170,7 +1170,7 @@ fn a_run_held_in_its_slot_for_its_e2e_that_a_landing_conflicts_with_is_parked_be
 #[test]
 fn another_supervisors_recheck_of_main_leaves_the_run_held_for_its_e2e_to_check() {
     let (dir, repo, db) = fixture();
-    crate::runtime_e2e::with_e2e_paths(&repo, "[\"e2e.txt\"]");
+    with_e2e_paths(&repo, "[\"e2e.txt\"]");
     let backend = Arc::new(TestWorkspace::new(&db, false, E2E_AGENT));
     backend.resume_script_for(1, RESOLVING_RESUME);
     let reviewer = Arc::new(TestReviewer::new(&[verdict(
@@ -1358,7 +1358,7 @@ fn assert_environmental_recheck(db: &Path, class: &str) {
 #[test]
 fn a_slot_run_with_a_killed_recheck_is_not_parked_before_landing() {
     let (dir, repo, db) = fixture();
-    crate::runtime_e2e::with_e2e_paths(&repo, "[\"e2e.txt\"]");
+    with_e2e_paths(&repo, "[\"e2e.txt\"]");
     let mut config = fs::read_to_string(repo.join("dagq.toml")).unwrap();
     config.push_str("\n[recheck]\ncommand = 'kill -TERM $$'\n");
     move_main(&repo, "dagq.toml", &config);

@@ -174,14 +174,6 @@ fn a_resume_or_integrate_without_the_required_evidence_does_not_land() {
     assert_eq!(parked.last().unwrap()["checks"], json!(["tests"]));
 }
 
-/// Write `[e2e] paths` of `dagq.toml` in the main checkout and commit it
-/// (ADR-t963-1 decision 2).
-fn with_e2e_paths(repo: &Path, globs: &str) {
-    fs::write(repo.join("dagq.toml"), format!("[e2e]\npaths = {globs}\n")).unwrap();
-    git(repo, &["add", "dagq.toml"]);
-    git(repo, &["commit", "-q", "-m", "e2e paths"]);
-}
-
 /// Whether a run needs the e2e is read from its diff against the `[e2e]
 /// paths` of the main checkout's `dagq.toml` (ADR-t963-1 decision 2) and
 /// recorded with its validation, but no receipt backs it: the runtime runs

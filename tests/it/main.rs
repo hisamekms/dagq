@@ -151,6 +151,7 @@ mod runtime_evidence;
 mod runtime_forecast;
 mod runtime_fresh_session;
 mod runtime_handoff;
+mod runtime_handoff_race;
 mod runtime_headless;
 mod runtime_headless_jobs;
 mod runtime_headless_reopen;

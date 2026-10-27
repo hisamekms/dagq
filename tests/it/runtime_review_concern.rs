@@ -2,7 +2,6 @@
 //! (ADR-t451-1 decision 3): a `high` one with no reason a person is needed
 //! lands or goes back to the session, anything else asks a person with the
 //! recommendation, and `concern_decided` records which.
-use crate::runtime_e2e::{e2e_options, stub_e2e, with_e2e_paths};
 use crate::runtime_review::revising_agent;
 use crate::{common, runtime_support};
 

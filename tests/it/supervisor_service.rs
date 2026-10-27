@@ -10,7 +10,7 @@
 //! ([`refuse_opening`]) while the service runs in another.
 
 use crate::common;
-use crate::runtime_support::fixture;
+use crate::runtime_support::{e2e_options, fixture, with_e2e_paths};
 use common::Bounded;
 
 use std::{
@@ -1052,7 +1052,7 @@ fn a_once_supervisor_reads_a_run_again_only_once_the_queue_took_its_held_end() {
     use dagq::application::TaskReads;
     use dagq::domain::{EventKind, RunStatus, TaskId};
     let (fixture, repo, db) = fixture();
-    crate::runtime_e2e::with_e2e_paths(&repo, "[\"change.txt\"]");
+    with_e2e_paths(&repo, "[\"change.txt\"]");
     let ran = fixture.path().join("e2e.ran");
     let e2e = format!(
         "echo ran >> {}; echo 'test result: ok. 1 passed; 0 failed'",
@@ -1063,7 +1063,7 @@ fn a_once_supervisor_reads_a_run_again_only_once_the_queue_took_its_held_end() {
     let (layer, busy) = BusyFor::layer(&["run_e2e_finished"], 3);
     let options = dagq::compose::SuperviseOptions {
         service_route: dagq::compose::ServiceRoute::InProcessThrough(layer),
-        ..crate::runtime_e2e::e2e_options(e2e)
+        ..e2e_options(e2e)
     };
     assert!(options.once);
     let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
@@ -1811,7 +1811,7 @@ fn an_e2e_whose_lease_look_went_unanswered_starts_once_and_its_result_is_kept() 
     use dagq::domain::{EventKind, RunStatus, TaskId};
 
     let (fixture, repo, db) = fixture();
-    crate::runtime_e2e::with_e2e_paths(&repo, "[\"change.txt\"]");
+    with_e2e_paths(&repo, "[\"change.txt\"]");
     let go = fixture.path().join("e2e.go");
     let ran = fixture.path().join("e2e.ran");
     let e2e = format!(

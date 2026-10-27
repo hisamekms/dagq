@@ -153,7 +153,8 @@ impl Supervisor<'_> {
             info!(run_id = %run.id(), "run {} needs the e2e, but the repository has no e2e the runtime knows; it lands without one", run.id());
             return Ok(None);
         };
-        // A handoff starts no e2e: the next process runs it.
+        // A handoff starts no e2e: the next process runs it. One asked
+        // after this pass read none is refused by the start's write below.
         if self.e2e_retry_pending(run) || self.registration.handing_off() {
             return Ok(Some(Phase::AwaitingE2e));
         }
@@ -194,17 +195,29 @@ impl Supervisor<'_> {
             git_env: crate::application::run_git::tree_env(&*self.repository, run, &worktree)?,
             ..port.settings.clone()
         };
-        self.queue.record_runtime_event(
-            run.id(),
-            EventKind::RunE2eStarted,
-            json!({
-                "attempt": due.attempt,
-                "commit": commit,
-                "requirement": due.requirement,
-                "log": settings.log,
-                "worktree": worktree,
-            }),
-        )?;
+        let started = json!({
+            "attempt": due.attempt,
+            "commit": commit,
+            "requirement": due.requirement,
+            "log": settings.log,
+            "worktree": worktree,
+        });
+        match self.begin_e2e(run.id(), started) {
+            Ok(()) => {}
+            // A handoff asked since this pass read none at its start: the
+            // same write refused the e2e (ADR-t3077-1 decision 1), and the
+            // run waits, its lease kept, for the next pass to drain for the
+            // request.
+            Err(error)
+                if error
+                    .downcast_ref::<crate::application::HandoffAsked>()
+                    .is_some() =>
+            {
+                info!(run_id = %run.id(), "run {} runs no e2e: its supervisor was asked to hand off", run.id());
+                return Ok(Some(Phase::AwaitingE2e));
+            }
+            Err(error) => return Err(error),
+        }
         info!(run_id = %run.id(), "run {} runs its e2e at {commit} before it lands (attempt {})", run.id(), due.attempt);
         // The e2e may not start the sccache server (ADR-t2086-1): a missing
         // one is started here, and the gate looks again and guards it.
@@ -249,6 +262,23 @@ impl Supervisor<'_> {
             started,
             steps,
         })))
+    }
+
+    /// Record the start of the e2e of `id` (`run_e2e_started`, with
+    /// `payload`) under this supervisor's token. While no stop is asked, a
+    /// handoff request refuses it in the same write
+    /// ([`crate::application::HandoffAsked`]), even one recorded after this
+    /// pass read none at its start (ADR-t3077-1 decision 1): the e2e is
+    /// not started, and the run waits for the next pass, which drains for
+    /// the request and hands it over. A stop wins over a handoff, and its
+    /// drain starts the e2e whatever request it holds.
+    fn begin_e2e(&mut self, id: &RunId, payload: serde_json::Value) -> Result<()> {
+        let token = self.registration.token().clone();
+        if self.registration.stopping() {
+            self.queue.begin_e2e_over_handoff(id, &token, payload)
+        } else {
+            self.queue.begin_e2e(id, &token, payload)
+        }
     }
 
     /// Record that the e2e of `run` could not run (`run_e2e_finished`,

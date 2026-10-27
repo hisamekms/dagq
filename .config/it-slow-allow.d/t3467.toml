@@ -1,0 +1,44 @@
+# The items of task 3467 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 5.5s in a stress: a supervise to the approve_landing ask, then the land answer's supervise that hands off
+[[test]]
+name = "runtime_handoff_race::a_handoff_asked_after_a_queued_run_was_leased_for_its_e2e_starts_no_e2e"
+reason = "B 境界（守る境界）: 人の land の答えで列に並んだ run を supervise が lease_for_e2e で slot に取った後、e2e の開始の write が SQLite の handoff の要求を同じ transaction で読んで断り、run を lease ごと引き継ぐ配線を確かめる（ask を開く supervise と引き継ぐ supervise の 2 回が要る。開始の write の判断は同じ module の store の test）"
+task = 3467
+
+# 5.6s in a stress: a supervise that is asked to hand off and to stop mid-pass, and whose stop's drain lands the run
+[[test]]
+name = "runtime_handoff_race::a_stop_with_a_handoff_asked_mid_pass_lands_the_run_awaiting_the_slot"
+reason = "B 境界（守る境界）: pass の途中で handoff の要求と停止が来た supervise の停止の drain が、SQLite の要求を残したまま begin_integration_over_handoff で着地を始め、実の Git に着地させる配線を確かめる（停止が引き継ぎに勝つ判断は host_ops::handoff の unit test）"
+task = 3467
+
+# 5.3s in a stress: awaiting_run_owned supervises a run to awaiting_integration before the store's writes
+[[test]]
+name = "runtime_handoff_race::a_supervisor_asked_to_hand_off_begins_no_landing_in_the_same_write"
+reason = "B 境界（守る境界）: SQLite の begin_integration の IMMEDIATE の write が supervisors の handoff の要求を同じ transaction で読んで断り、取り消しの後に着地を始めることを、supervise が作った実の awaiting_integration の run で確かめる（fixture の supervise が時間の大半）"
+task = 3467
+
+# 5.1s in a stress: a supervise to the run's landing slot, the hook's request, and the handoff
+[[test]]
+name = "runtime_handoff_race::a_handoff_asked_after_the_pass_read_none_starts_no_landing_of_that_pass"
+reason = "B 境界（守る境界）: pass が要求を読んだ後に hook が SQLite に記録した handoff の要求で、supervise の着地の開始が断られ、run を lease ごと引き継ぐ配線を確かめる（判断は store の同じ write の test）"
+task = 3467
+
+# 5.1s in a stress: a supervise to the run's slot before its e2e, the hook's request, and the handoff
+[[test]]
+name = "runtime_handoff_race::a_handoff_asked_after_the_pass_read_none_starts_no_e2e_of_that_pass"
+reason = "B 境界（守る境界）: pass が要求を読んだ後に hook が SQLite に記録した handoff の要求で、supervise の着地の前の e2e の開始が断られ、e2e のプロセスを起こさず run を lease ごと引き継ぐ配線を確かめる（判断は store の同じ write の test）"
+task = 3467
+
+# 8.1s in a stress: a supervise whose landing recheck of main is killed, then the run's e2e and its landing on Git (only its helper's path changed with this task)
+[[test]]
+name = "runtime_recheck::a_slot_run_with_a_killed_recheck_is_not_parked_before_landing"
+reason = "B 境界（守る境界）: 殺された着地の recheck の記録が supervise の slot の run を park させず、run が lease を持ったまま host の e2e を流して実の Git に着地する配線を確かめる（recheck の失敗の分類の判断は domain の unit test）"
+task = 3467
+
+# 5.2s in a stress: awaiting_run_owned supervises a run to awaiting_integration before the store's writes
+[[test]]
+name = "runtime_handoff_race::a_supervisor_asked_to_hand_off_starts_no_e2e_in_the_same_write"
+reason = "B 境界（守る境界）: SQLite の begin_e2e の IMMEDIATE の write が supervisors の handoff の要求を同じ transaction で読んで run_e2e_started を書かずに断り、停止が勝つ write と取り消しの後には書くことを、supervise が作った実の awaiting_integration の run で確かめる（fixture の supervise が時間の大半）"
+task = 3467

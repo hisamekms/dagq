@@ -513,6 +513,16 @@ pub(super) fn dispatch(
             own(&token)?;
             answer(RunRecovery::lease_for_review(&mut *store, &id, &token))
         }
+        "begin_e2e" => {
+            let (id, token, payload, over_handoff): (RunId, LeaseToken, serde_json::Value, bool) =
+                read(op, args)?;
+            own(&token)?;
+            answer(if over_handoff {
+                RunTransitions::begin_e2e_over_handoff(&mut *store, &id, &token, payload)
+            } else {
+                RunTransitions::begin_e2e(&mut *store, &id, &token, payload)
+            })
+        }
         "lease_for_e2e" => {
             let (id, token): (RunId, LeaseToken) = read(op, args)?;
             own(&token)?;

@@ -1236,7 +1236,7 @@ fn an_approved_run_resolved_by_its_resume_lands_the_resolved_head() {
         "await_message; resolve || exit 1; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     let ran = dir.path().join("ran");
-    let options = crate::runtime_e2e::e2e_options(format!(
+    let options = e2e_options(format!(
         "git rev-parse HEAD >> {}; echo 'test result: ok. 1 passed; 0 failed'",
         shell_join(&[ran.display().to_string()])
     ));

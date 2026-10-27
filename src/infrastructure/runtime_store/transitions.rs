@@ -966,6 +966,48 @@ impl SqliteQueue {
             .map(|(run, ())| run)
     }
 
+    /// Record `run_e2e_started` with `payload` for the e2e the run `id`
+    /// runs before it lands under the supervisor `token`. A supervisor
+    /// asked to hand off starts no e2e before a landing (ADR-t3077-1
+    /// decision 1): the request is read in the same write that would
+    /// record the start, so one recorded after the supervisor's pass read
+    /// none, before this write, still refuses it
+    /// ([`crate::application::HandoffAsked`]) and nothing is written.
+    pub fn begin_e2e(&mut self, id: &RunId, token: &LeaseToken, payload: Value) -> Result<()> {
+        self.begin_e2e_with(id, token, payload, true)
+    }
+
+    /// [`Self::begin_e2e`] for a supervisor whose stop wins over the
+    /// handoff it was asked: the request refuses nothing.
+    pub fn begin_e2e_over_handoff(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        payload: Value,
+    ) -> Result<()> {
+        self.begin_e2e_with(id, token, payload, false)
+    }
+
+    fn begin_e2e_with(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        payload: Value,
+        refused_by_handoff: bool,
+    ) -> Result<()> {
+        let kind = EventKind::RunE2eStarted;
+        let _read = read_before(&self.conn, Closing::Event(id, kind, &payload))?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if refused_by_handoff {
+            refuse_on_handoff(&tx, token)?;
+        }
+        run_event(&tx, id, kind, payload)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// [`Self::begin_integration`], refused by a handoff the supervisor is
     /// asked only when `refused_by_handoff`, that runs `then` in the same
     /// transaction once the slot and its lease are taken, and commits only
@@ -985,21 +1027,8 @@ impl SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if refused_by_handoff
-            && let Some(binary) = tx
-                .query_row(
-                    "SELECT handoff_binary FROM supervisors WHERE token=?1",
-                    [token],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .optional()?
-                .flatten()
-        {
-            return Err(crate::application::HandoffAsked {
-                supervisor: token.clone(),
-                binary,
-            }
-            .into());
+        if refused_by_handoff {
+            refuse_on_handoff(&tx, token)?;
         }
         let busy: Option<RunId> = tx
             .query_row(
@@ -1591,6 +1620,17 @@ impl RunTransitions for SqliteQueue {
     ) -> Result<TaskRun> {
         SqliteQueue::begin_integration_over_handoff(self, id, token, main)
     }
+    fn begin_e2e(&mut self, id: &RunId, token: &LeaseToken, payload: Value) -> Result<()> {
+        SqliteQueue::begin_e2e(self, id, token, payload)
+    }
+    fn begin_e2e_over_handoff(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        payload: Value,
+    ) -> Result<()> {
+        SqliteQueue::begin_e2e_over_handoff(self, id, token, payload)
+    }
     fn defer_integration(
         &mut self,
         id: &RunId,
@@ -1808,6 +1848,27 @@ fn abandon_payload(message: &str, lease_released: bool, session: Option<&Value>)
         payload["session"] = session.clone();
     }
     payload
+}
+
+/// Refuse, inside the caller's write, what the supervisor `token` would
+/// start while it is asked to hand off ([`crate::application::HandoffAsked`]).
+fn refuse_on_handoff(tx: &rusqlite::Transaction<'_>, token: &LeaseToken) -> Result<()> {
+    if let Some(binary) = tx
+        .query_row(
+            "SELECT handoff_binary FROM supervisors WHERE token=?1",
+            [token],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+    {
+        return Err(crate::application::HandoffAsked {
+            supervisor: token.clone(),
+            binary,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Whether run `id` has a lease row, stale or not.

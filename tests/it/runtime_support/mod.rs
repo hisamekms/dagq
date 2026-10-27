@@ -9,6 +9,8 @@ pub mod agent_eval;
 pub mod background_wrappers;
 pub mod ci_watch;
 pub mod containers;
+mod e2e;
+pub use e2e::*;
 pub mod headless;
 pub mod observer;
 pub mod plan_review;

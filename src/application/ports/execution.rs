@@ -1152,6 +1152,25 @@ pub trait RunTransitions {
         token: &LeaseToken,
         main: &CommitSha,
     ) -> Result<TaskRun>;
+    /// Record `run_e2e_started` with `payload` for the e2e `id` runs
+    /// before it lands under `token`; refused with [`HandoffAsked`], with
+    /// nothing written, while the supervisor `token` is asked to hand off
+    /// (ADR-t3077-1 decision 1), decided in the same write.
+    fn begin_e2e(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        payload: serde_json::Value,
+    ) -> Result<()>;
+    /// [`Self::begin_e2e`] for a supervisor whose stop wins over the
+    /// handoff it was asked: its drain starts the e2e whatever request it
+    /// holds.
+    fn begin_e2e_over_handoff(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        payload: serde_json::Value,
+    ) -> Result<()>;
     /// Leave the integrating run to a session (`needs_session`).
     fn defer_integration(
         &mut self,
@@ -1890,9 +1909,9 @@ impl fmt::Display for RunNotFound {
 
 impl std::error::Error for RunNotFound {}
 
-/// A landing the supervisor `supervisor` would begin was refused: it is
-/// asked to hand off to `binary` (ADR-t3077-1 decision 1), and nothing was
-/// written.
+/// A landing, or the e2e before it, the supervisor `supervisor` would
+/// begin was refused: it is asked to hand off to `binary` (ADR-t3077-1
+/// decision 1), and nothing was written.
 #[derive(Debug)]
 pub struct HandoffAsked {
     pub supervisor: LeaseToken,
