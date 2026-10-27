@@ -1355,6 +1355,9 @@ pub fn run_command(queue: &mut SqliteQueue, db: &Path, command: &QueueCommand) -
             queue,
             &SystemProcesses,
             &LocalRunFiles,
+            &crate::infrastructure::queue_broker::SystemVerificationTokens {
+                db: db.to_path_buf(),
+            },
             &*one_shot.generators.clock,
             &RunId::new(&params.run)?,
         )?,

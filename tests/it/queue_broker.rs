@@ -878,6 +878,207 @@ fn a_tunnel_opens_only_to_the_registries_of_the_main_checkout_s_dagq_toml() {
     assert_eq!(status, 401);
 }
 
+/// The payloads of the queue's `queue_broker_tokens_swept`, read on the DB.
+fn swept(db: &Path) -> Vec<Value> {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .prepare(
+            "SELECT payload FROM run_events WHERE kind = 'queue_broker_tokens_swept' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|payload| serde_json::from_str(&payload.unwrap()).unwrap())
+        .collect()
+}
+
+/// Bind `queue` to a main checkout whose `dagq.toml` names an echoing
+/// registry: the checkout's directory, kept while it lives, and the
+/// registry's `host:port` a `CONNECT` names.
+fn bound_to_a_registry(queue: &common::service::Queue) -> (tempfile::TempDir, String) {
+    let registry = echo_host();
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("main");
+    std::fs::create_dir(&main).unwrap();
+    git(&main, &["init", "-q", "--template=", "-b", "main"]);
+    git(&main, &["config", "user.name", "test"]);
+    git(&main, &["config", "user.email", "test@example.invalid"]);
+    std::fs::write(
+        main.join("dagq.toml"),
+        format!("[egress]\nregistries = [\"127.0.0.1:{registry}\"]\n"),
+    )
+    .unwrap();
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "-q", "-m", "seed"]);
+    let common_dir = dagq::infrastructure::adapters::git_common_dir(&main).unwrap();
+    SqliteQueue::open(&queue.db)
+        .unwrap()
+        .bind_repository(common_dir.to_str().unwrap())
+        .unwrap();
+    (dir, format!("127.0.0.1:{registry}"))
+}
+
+/// The `Proxy-Authorization` of `run` with `token`.
+fn basic(run: &str, token: &str) -> String {
+    format!("Basic {}", base64(&format!("{run}:{token}")))
+}
+
+/// `recover` of a run whose `integrate` was killed in its verification,
+/// while the broker runs and no supervisor does: the landing's token goes
+/// with the recovery, recorded with no value, and the broker refuses it
+/// from then on; the landing recheck's, which may still run on the run
+/// waiting to land again, stays.
+#[test]
+fn recover_revokes_the_token_of_the_verification_its_run_was_killed_in() {
+    let _test = common::test();
+    let queue = queue();
+    let run = queue.run.id().clone();
+    let dead = {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    };
+    let conn = rusqlite::Connection::open(&queue.db).unwrap();
+    conn.execute(
+        "UPDATE task_runs SET status='integrating' WHERE id=?1",
+        [run.as_str()],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM run_leases", []).unwrap();
+    conn.execute(
+        "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,'landing',?2,0)",
+        rusqlite::params![run.as_str(), dead],
+    )
+    .unwrap();
+    let issue = |of: TokenFor| {
+        let file = broker::issue_verification(queue.dir(), &run, of, 1).unwrap();
+        let token = service::read_token(&file).unwrap();
+        (file, token)
+    };
+    let (landing, landing_token) = issue(TokenFor::Landing);
+    let (recheck, recheck_token) = issue(TokenFor::Recheck);
+    let control =
+        SystemQueueBroker::new(&queue.db, &common::service::owned_executable(queue.dir()));
+    let _stop = Stop(control.clone());
+    let address = {
+        let _waiting = common::within(TIMEOUT * 2, "the queue broker to start");
+        control.start(TIMEOUT).unwrap().address.unwrap()
+    };
+    let (_main, target) = bound_to_a_registry(&queue);
+    // Before the recovery the landing's token still opens its tunnel.
+    let (status, tunnel) = connect(&address, &target, &basic(run.as_str(), &landing_token));
+    assert_eq!(status, 200);
+    echoes(tunnel.unwrap());
+
+    let recovered = ok(&queue.db, &["recover", run.as_str()]);
+    assert_eq!(recovered["outcome"], "recovered", "{recovered}");
+    assert_eq!(
+        recovered["run"]["status"], "awaiting_integration",
+        "{recovered}"
+    );
+    assert!(!landing.exists());
+    assert_eq!(
+        broker::verification_run(queue.dir(), &landing_token).unwrap(),
+        None
+    );
+    let (status, _) = connect(&address, &target, &basic(run.as_str(), &landing_token));
+    assert_eq!(status, 401);
+    assert!(recheck.exists());
+    let (status, tunnel) = connect(&address, &target, &basic(run.as_str(), &recheck_token));
+    assert_eq!(status, 200);
+    echoes(tunnel.unwrap());
+    let records = swept(&queue.db);
+    assert_eq!(
+        records,
+        [
+            json!({"by": "recover", "revoked": [{"run": run.as_str(), "for": "landing"}], "orphans": 0, "failures": []})
+        ]
+    );
+    assert!(!records[0].to_string().contains(&landing_token));
+}
+
+/// What a verification killed in its middle left in the broker's
+/// directory goes as the broker starts: the token of a run the queue does
+/// not hold and the one of a use its run's status runs no verification
+/// in are revoked, recorded with no value, and refused from then on; the
+/// landing token of the run that is `integrating` is kept and still opens
+/// its tunnel. A broker started again finds nothing more to sweep.
+#[test]
+fn the_broker_revokes_as_it_starts_the_tokens_no_verification_runs_with() {
+    let _test = common::test();
+    let queue = queue();
+    let run = queue.run.id().clone();
+    rusqlite::Connection::open(&queue.db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='integrating' WHERE id=?1",
+            [run.as_str()],
+        )
+        .unwrap();
+    let issue = |run: &RunId, of: TokenFor| {
+        let file = broker::issue_verification(queue.dir(), run, of, 1).unwrap();
+        let token = service::read_token(&file).unwrap();
+        (file, token)
+    };
+    let (landing, kept) = issue(&run, TokenFor::Landing);
+    let (snapshot, snapshot_token) = issue(&run, TokenFor::Snapshot);
+    let gone_run = RunId::new("gone-run").unwrap();
+    let (gone, gone_token) = issue(&gone_run, TokenFor::Landing);
+
+    let control =
+        SystemQueueBroker::new(&queue.db, &common::service::owned_executable(queue.dir()));
+    let _stop = Stop(control.clone());
+    let address = {
+        let _waiting = common::within(TIMEOUT * 2, "the queue broker to start");
+        control.start(TIMEOUT).unwrap().address.unwrap()
+    };
+    assert!(landing.exists());
+    assert_eq!(
+        broker::verification_run(queue.dir(), &kept).unwrap(),
+        Some(run.clone())
+    );
+    for (file, token) in [(&snapshot, &snapshot_token), (&gone, &gone_token)] {
+        assert!(!file.exists(), "{}", file.display());
+        assert_eq!(broker::verification_run(queue.dir(), token).unwrap(), None);
+    }
+    let records = swept(&queue.db);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["by"], "broker");
+    assert_eq!(records[0]["failures"], json!([]));
+    let mut revoked = records[0]["revoked"].as_array().unwrap().clone();
+    revoked.sort_by_key(|one| one["run"].as_str().unwrap().to_owned());
+    assert_eq!(
+        revoked,
+        [
+            json!({"run": run.as_str(), "for": "snapshot"}),
+            json!({"run": "gone-run", "for": "landing"})
+        ]
+    );
+    for token in [&kept, &snapshot_token, &gone_token] {
+        assert!(!records[0].to_string().contains(token.as_str()));
+    }
+
+    // The swept token is refused; the kept one still opens its tunnel.
+    let (_main, target) = bound_to_a_registry(&queue);
+    let (status, _) = connect(&address, &target, &basic("gone-run", &gone_token));
+    assert_eq!(status, 401);
+    let (status, _) = connect(&address, &target, &basic(run.as_str(), &snapshot_token));
+    assert_eq!(status, 401);
+    let (status, tunnel) = connect(&address, &target, &basic(run.as_str(), &kept));
+    assert_eq!(status, 200);
+    echoes(tunnel.unwrap());
+
+    // Started again, it finds nothing more and records nothing.
+    control.stop(TIMEOUT).unwrap();
+    {
+        let _waiting = common::within(TIMEOUT * 2, "the queue broker to start again");
+        control.start(TIMEOUT).unwrap();
+    }
+    assert_eq!(swept(&queue.db).len(), 1);
+    assert!(landing.exists());
+}
+
 /// One request the fake Claude API took: its request line, headers and
 /// body.
 #[derive(Debug, Clone)]

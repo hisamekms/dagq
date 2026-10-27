@@ -791,6 +791,16 @@ pub const QUEUE_BROKER_STOPPED: &str =
 /// broker once their drain ends.
 pub const QUEUE_BROKER_STOP_REQUESTED: &str =
     crate::domain::event_kind::EventKind::QueueBrokerStopRequested.as_str();
+/// The broker or a supervisor revoked the tokens of the verifications a
+/// killed `integrate` or supervisor left behind
+/// (`application::queue_broker::sweep_left_tokens`), or could not: `by`
+/// (`broker` or `supervisor` as it started or swept, `recovery` as the
+/// supervisor recovered a run, `recover` as a person's `recover` did),
+/// `revoked` (each one's `run` and what it was `for`),
+/// `orphans` (the halves of a token removed alone) and `failures`. Only a
+/// sweep that did or failed anything is recorded, and no token's value.
+pub const QUEUE_BROKER_TOKENS_SWEPT: &str =
+    crate::domain::event_kind::EventKind::QueueBrokerTokensSwept.as_str();
 /// The kinds whose latest says whether the attention stands.
 pub const QUEUE_BROKER_ATTENTION_KINDS: [&str; 4] = [
     QUEUE_BROKER_DOWN,

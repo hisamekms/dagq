@@ -229,11 +229,16 @@ pub(super) fn listed_runs(
 /// landing) keeps its
 /// status and loses the stale lease, so that it can be integrated (task
 /// 236). Never reruns, never deletes the worktree or workspace, leaves the
-/// task `in_progress`, and does not touch any other run.
+/// task `in_progress`, and does not touch any other run. The tokens its
+/// killed verification left behind are revoked
+/// ([`crate::application::queue_broker::LeftTokens`]), recorded as
+/// `queue_broker_tokens_swept` (`by` `recover`); a failure there is only
+/// recorded.
 pub fn recover(
     queue: &mut (impl RunCoordination + RunLog + RunRecovery + ?Sized),
     control: &dyn ProcessControl,
     files: &dyn RunFiles,
+    tokens: &dyn crate::application::queue_broker::VerificationTokens,
     clock: &dyn Clock,
     id: &RunId,
 ) -> Result<Value> {
@@ -255,7 +260,16 @@ pub fn recover(
         health.blockers.join("; ")
     );
     let report = json!({"run": health});
+    // The tokens its killed verification left go with it, but one a
+    // landing that began on it meanwhile issued.
+    let left = crate::application::queue_broker::LeftTokens::read(tokens, run.id(), run.status());
     let run = queue.recover_run(run.id(), processes.len(), report)?;
+    let revoked = left.revoke(tokens, run.status());
+    crate::application::queue_broker::note_token_sweep(&revoked, "recover", |payload| {
+        queue
+            .record_queue_event(crate::domain::EventKind::QueueBrokerTokensSwept, payload)
+            .map(drop)
+    });
     Ok(json!({"outcome": "recovered", "run": run}))
 }
 

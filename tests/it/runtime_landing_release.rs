@@ -150,15 +150,48 @@ fn phases_from_dead_landing(detail: &dagq::domain::TaskDetail) -> Vec<&str> {
 
 /// The dead landing of a passed run gives the slot back and lands again
 /// without a review or a person, and the other task's landing follows.
+/// The verification token the dead landing held goes when the run is
+/// released, and the one a verification of a run the queue does not hold
+/// left behind goes with the supervisor's first sweep: both files are
+/// gone, the broker knows neither token, and each is recorded once.
 #[test]
 fn a_passed_run_whose_landing_died_is_released_and_lands_again() {
+    use dagq::application::queue_broker::TokenFor;
+    use dagq::infrastructure::queue_broker::{issue_verification, verification_run};
     let (_dir, repo, db, run, backend) = dead_landing(Some("pass"));
     let mut queue = SqliteQueue::open(&db).unwrap();
+    let queue_dir = db.parent().unwrap();
+    let landing = issue_verification(queue_dir, run.id(), TokenFor::Landing, 1).unwrap();
+    let landing_token = std::fs::read_to_string(&landing).unwrap();
+    let gone_run = RunId::new("gone-run").unwrap();
+    let gone = issue_verification(queue_dir, &gone_run, TokenFor::Landing, 1).unwrap();
+    let gone_token = std::fs::read_to_string(&gone).unwrap();
     // Only task 2 is reviewed.
     let reviewer = TestReviewer::new(&[verdict_json("pass")]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    for (file, token) in [(&landing, &landing_token), (&gone, &gone_token)] {
+        assert!(!file.exists(), "{}", file.display());
+        assert_eq!(verification_run(queue_dir, token.trim()).unwrap(), None);
+    }
+    let swept: Vec<Value> = Connection::open(&db)
+        .unwrap()
+        .prepare(
+            "SELECT payload FROM run_events WHERE kind = 'queue_broker_tokens_swept' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|payload| serde_json::from_str(&payload.unwrap()).unwrap())
+        .collect();
+    assert_eq!(
+        swept,
+        [
+            json!({"by": "recovery", "revoked": [{"run": run.id().as_str(), "for": "landing"}], "orphans": 0, "failures": []}),
+            json!({"by": "supervisor", "revoked": [{"run": "gone-run", "for": "landing"}], "orphans": 0, "failures": []}),
+        ]
+    );
     assert_eq!(reviewer.prompts().len(), 1);
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(detail.runs.len(), 1);

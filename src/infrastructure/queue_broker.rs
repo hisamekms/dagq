@@ -10,7 +10,9 @@
 //! ([`forward_claude`], [`super::claude_credential`]), the client a caller speaks to it with ([`exchange`],
 //! [`call`], [`health`]), the tokens of `integrate`'s verifications
 //! ([`issue_verification`], [`revoke_verification`],
-//! [`SystemVerificationTokens`]) and the control `up`, `down` and the
+//! [`verification_issue`], [`revoke_verification_issue`],
+//! [`sweep_verifications`], [`SystemVerificationTokens`], all under one
+//! lock) and the control `up`, `down` and the
 //! supervisor start, look at and stop it with ([`SystemQueueBroker`],
 //! whose look is [`probe`]).
 //!
@@ -48,7 +50,7 @@ use super::sqlite::SqliteQueue;
 use crate::application::queue_broker::ClaudeForward;
 use crate::application::queue_broker::{
     BrokerAnswer, BrokerBackend, BrokerProbe, BrokerRequest, QueueBroker, QueueBrokerControl,
-    TokenFor, VerificationTokens,
+    TokenFor, TokenIssue, TokenSweep, VerificationTokens,
 };
 use crate::application::{EventStore, Generators, RunNotFound, RunReads};
 use crate::domain::queue_broker::{
@@ -654,6 +656,31 @@ fn verification_record_path(queue_dir: &Path, token: &str) -> PathBuf {
         .join(format!("{}.json", sha256_hex(token.as_bytes())))
 }
 
+/// The lock file in the broker's directory every issue, revocation and
+/// sweep of a verification token holds while it reads and changes the
+/// files: a sweep or a recovery that judged one issue of a run's token
+/// never removes another issued in between.
+const VERIFICATION_LOCK_FILE: &str = "verification.lock";
+
+/// [`VERIFICATION_LOCK_FILE`] of the queue at `queue_dir`, held until it
+/// is dropped, waiting while another process holds it.
+fn verification_lock(queue_dir: &Path) -> Result<fs::File> {
+    let dir = broker_dir(queue_dir);
+    private_dir(&dir)?;
+    let path = dir.join(VERIFICATION_LOCK_FILE);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("lock {}", path.display()))?;
+    Ok(file)
+}
+
 /// Issue the token of `run`'s verification for `of`, revoking the one it
 /// held for `of`: 32
 /// random bytes in hex, its value in the broker's
@@ -667,12 +694,12 @@ pub fn issue_verification(
     of: TokenFor,
     now: i64,
 ) -> Result<PathBuf> {
-    revoke_verification(queue_dir, run, of)?;
+    let _lock = verification_lock(queue_dir)?;
+    revoke_locked(queue_dir, run, of)?;
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes)
         .map_err(|error| anyhow::anyhow!("draw a token's random bytes: {error}"))?;
     let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    private_dir(&broker_dir(queue_dir))?;
     for dir in [VERIFICATION_TOKENS_DIR, VERIFICATION_CREDENTIALS_DIR] {
         private_dir(&broker_dir(queue_dir).join(dir))?;
     }
@@ -692,6 +719,43 @@ pub fn issue_verification(
 /// Revoke the token of `run`'s verification for `of`; whether there was
 /// one.
 pub fn revoke_verification(queue_dir: &Path, run: &RunId, of: TokenFor) -> Result<bool> {
+    let _lock = verification_lock(queue_dir)?;
+    revoke_locked(queue_dir, run, of)
+}
+
+/// The issue of `run`'s token for `of` now (the hash of its value, which
+/// names the token's record); `None` while it holds none.
+pub fn verification_issue(
+    queue_dir: &Path,
+    run: &RunId,
+    of: TokenFor,
+) -> Result<Option<TokenIssue>> {
+    let file = verification_credential_path(queue_dir, run, of);
+    match fs::read_to_string(&file) {
+        Ok(value) => Ok(Some(TokenIssue(sha256_hex(value.trim().as_bytes())))),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read {}", file.display())),
+    }
+}
+
+/// Revoke `run`'s token for `of` only while it is still `issue`, under
+/// the lock an issue holds: one issued again since is another
+/// verification's and stays. Whether it was revoked.
+pub fn revoke_verification_issue(
+    queue_dir: &Path,
+    run: &RunId,
+    of: TokenFor,
+    issue: &TokenIssue,
+) -> Result<bool> {
+    let _lock = verification_lock(queue_dir)?;
+    if verification_issue(queue_dir, run, of)?.as_ref() != Some(issue) {
+        return Ok(false);
+    }
+    revoke_locked(queue_dir, run, of)
+}
+
+/// [`revoke_verification`] under the lock its caller holds.
+fn revoke_locked(queue_dir: &Path, run: &RunId, of: TokenFor) -> Result<bool> {
     let file = verification_credential_path(queue_dir, run, of);
     let token = match fs::read_to_string(&file) {
         Ok(token) => token,
@@ -724,6 +788,190 @@ pub fn verification_run(queue_dir: &Path, token: &str) -> Result<Option<RunId>> 
     Ok(Some(record.run))
 }
 
+/// How long an issue may take to write both halves of a token: a half
+/// alone younger than this may be one an issue outside the lock (of a
+/// binary before it) is writing, and is left.
+const ISSUE_GRACE_SECS: i64 = 60;
+
+/// Revoke each verification token `keep` refuses, and remove the halves of
+/// a token left alone past [`ISSUE_GRACE_SECS`]: a record whose value is
+/// gone or that does not read, or a value with no record (which the broker
+/// never took). `keep` judges outside the lock, and only the issue it
+/// judged is revoked ([`revoke_verification_issue`]). A token whose record
+/// does not read within the grace, that `keep` fails on, or whose files do
+/// not read is kept and named in the failures; a file gone meanwhile is
+/// not. Idempotent: what is gone is not looked for again.
+pub fn sweep_verifications(
+    queue_dir: &Path,
+    now: i64,
+    keep: &mut dyn FnMut(&RunId, TokenFor) -> Result<bool>,
+) -> Result<TokenSweep> {
+    let mut sweep = TokenSweep::default();
+    let records = broker_dir(queue_dir).join(VERIFICATION_TOKENS_DIR);
+    for path in entries(&records, &mut sweep.failures) {
+        let Some(hash) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".json"))
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let record = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<VerificationRecord>(&bytes)
+                .map_err(|error| anyhow::Error::from(error).context("does not read")),
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                failed(&mut sweep, &format!("read {}", path.display()), error);
+                continue;
+            }
+        };
+        let record = match record {
+            Ok(record) => record,
+            Err(error) => {
+                // One that does not read past the grace is no token the
+                // broker could take: it goes, rather than fail every sweep.
+                match age_secs(&path, now) {
+                    Ok(age) if age >= ISSUE_GRACE_SECS => {
+                        remove_orphan(queue_dir, &path, || true, &mut sweep);
+                    }
+                    Ok(_) => sweep
+                        .failures
+                        .push(format!("the record {}: {error:#}", path.display())),
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => failed(&mut sweep, &format!("look at {}", path.display()), error),
+                }
+                continue;
+            }
+        };
+        // What it is for: the use whose value file holds its value.
+        let mut of = None;
+        let mut unread = false;
+        for each in TokenFor::ALL {
+            match verification_issue(queue_dir, &record.run, each) {
+                Ok(Some(issue)) if issue.0 == hash => of = Some(each),
+                Ok(_) => {}
+                Err(error) => {
+                    unread = true;
+                    sweep.failures.push(format!("{error:#}"));
+                }
+            }
+        }
+        if unread {
+            continue;
+        }
+        let Some(of) = of else {
+            // No issue after it writes a value of its hash: it stays alone.
+            if now - record.issued_at >= ISSUE_GRACE_SECS {
+                remove_orphan(queue_dir, &path, || true, &mut sweep);
+            }
+            continue;
+        };
+        let what =
+            |error: anyhow::Error| format!("run {}'s {} token: {error:#}", record.run, of.as_str());
+        match keep(&record.run, of) {
+            Ok(true) => {}
+            Ok(false) => {
+                match revoke_verification_issue(queue_dir, &record.run, of, &TokenIssue(hash)) {
+                    Ok(true) => sweep.revoked.push((record.run.clone(), of)),
+                    Ok(false) => {}
+                    Err(error) => sweep.failures.push(what(error)),
+                }
+            }
+            Err(error) => sweep.failures.push(what(error)),
+        }
+    }
+    let credentials = broker_dir(queue_dir).join(VERIFICATION_CREDENTIALS_DIR);
+    for path in entries(&credentials, &mut sweep.failures) {
+        let value = match fs::read_to_string(&path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                failed(&mut sweep, &format!("read {}", path.display()), error);
+                continue;
+            }
+        };
+        let record = verification_record_path(queue_dir, value.trim());
+        if record.exists() {
+            continue;
+        }
+        match age_secs(&path, now) {
+            Ok(age) if age >= ISSUE_GRACE_SECS => {
+                // Still the value it read, issued again into the same file
+                // or not, with still no record.
+                let alone =
+                    || fs::read_to_string(&path).is_ok_and(|now| now == value) && !record.exists();
+                remove_orphan(queue_dir, &path, alone, &mut sweep);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => failed(&mut sweep, &format!("look at {}", path.display()), error),
+        }
+    }
+    Ok(sweep)
+}
+
+/// Name in `sweep`'s failures what `doing` failed with.
+fn failed(sweep: &mut TokenSweep, doing: &str, error: std::io::Error) {
+    sweep.failures.push(format!("{doing}: {error}"));
+}
+
+/// How long ago at `now` the file at `path` was written.
+fn age_secs(path: &Path, now: i64) -> std::io::Result<i64> {
+    let modified = fs::metadata(path)?.modified()?;
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    Ok(now - i64::try_from(secs).unwrap_or(i64::MAX))
+}
+
+/// Remove a half of a token left alone, under the lock an issue holds and
+/// while `alone` still finds it so, counted in `sweep`.
+fn remove_orphan(
+    queue_dir: &Path,
+    path: &Path,
+    alone: impl FnOnce() -> bool,
+    sweep: &mut TokenSweep,
+) {
+    let removed = verification_lock(queue_dir).and_then(|_lock| {
+        if !alone() {
+            return Ok(false);
+        }
+        match fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+        }
+    });
+    match removed {
+        Ok(true) => sweep.orphans += 1,
+        Ok(false) => {}
+        Err(error) => sweep.failures.push(format!("{error:#}")),
+    }
+}
+
+/// The files in `dir`, none when it is not there; what does not read is
+/// named in `failures`.
+fn entries(dir: &Path, failures: &mut Vec<String>) -> Vec<PathBuf> {
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            failures.push(format!("read {}: {error}", dir.display()));
+            return Vec::new();
+        }
+    };
+    let mut paths = Vec::new();
+    for entry in read {
+        match entry {
+            Ok(entry) => paths.push(entry.path()),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => failures.push(format!("read {}: {error}", dir.display())),
+        }
+    }
+    paths
+}
+
 /// The tokens of the verifications of the queue at `db`, on this host.
 #[derive(Debug, Clone)]
 pub struct SystemVerificationTokens {
@@ -737,6 +985,18 @@ impl VerificationTokens for SystemVerificationTokens {
 
     fn revoke(&self, run: &RunId, of: TokenFor) -> Result<bool> {
         revoke_verification(&queue_dir_of(&self.db), run, of)
+    }
+
+    fn issued(&self, run: &RunId, of: TokenFor) -> Result<Option<TokenIssue>> {
+        verification_issue(&queue_dir_of(&self.db), run, of)
+    }
+
+    fn revoke_issued(&self, run: &RunId, of: TokenFor, issue: &TokenIssue) -> Result<bool> {
+        revoke_verification_issue(&queue_dir_of(&self.db), run, of, issue)
+    }
+
+    fn sweep(&self, keep: &mut dyn FnMut(&RunId, TokenFor) -> Result<bool>) -> Result<TokenSweep> {
+        sweep_verifications(&queue_dir_of(&self.db), unix_now(), keep)
     }
 }
 
@@ -806,6 +1066,22 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
         queue_dir: queue_dir.clone(),
         generators: options.generators.clone(),
         host_wide: options.host_wide.clone(),
+    });
+    // What a verification killed before its end left behind goes before
+    // the first request; a failure is recorded and the broker serves on.
+    let tokens = SystemVerificationTokens {
+        db: options.db.clone(),
+    };
+    let swept = crate::application::queue_broker::sweep_left_tokens(&tokens, &|run| {
+        backend.run_status(run)
+    });
+    crate::application::queue_broker::note_token_sweep(&swept, "broker", |payload| {
+        EventStore::record_queue_event(
+            &backend.queue()?,
+            EventKind::QueueBrokerTokensSwept,
+            payload,
+        )
+        .map(drop)
     });
     let mut served = 0u64;
     let mut checked = Instant::now();
@@ -1322,6 +1598,234 @@ impl QueueBrokerControl for SystemQueueBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mark the file at `path` written at second `at`, so a test judges
+    /// its age against a time it chose, never the clock.
+    fn written_at(path: &Path, at: i64) {
+        let at = std::time::UNIX_EPOCH + Duration::from_secs(u64::try_from(at).unwrap());
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    /// The tokens a killed verification left behind: the sweep revokes
+    /// those `keep` refuses (their value and record both go, so the broker
+    /// no longer knows them), keeps the rest, removes a half left alone
+    /// past the issue's grace and leaves a younger one, and a second sweep
+    /// finds nothing.
+    #[test]
+    fn the_sweep_revokes_the_refused_tokens_and_the_halves_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue_dir = dir.path();
+        let run = |id: &str| RunId::new(id).unwrap();
+        let value = |file: &Path| fs::read_to_string(file).unwrap();
+        let now = 1_000_000;
+        let kept = issue_verification(queue_dir, &run("landing"), TokenFor::Landing, now).unwrap();
+        let left = issue_verification(queue_dir, &run("ended"), TokenFor::Landing, now).unwrap();
+        let recheck =
+            issue_verification(queue_dir, &run("landing"), TokenFor::Recheck, now).unwrap();
+        let (kept_value, left_value, recheck_value) = (value(&kept), value(&left), value(&recheck));
+        // A value whose record is gone, and a record whose value is gone.
+        let alone = issue_verification(queue_dir, &run("alone"), TokenFor::Snapshot, now).unwrap();
+        fs::remove_file(verification_record_path(queue_dir, &value(&alone))).unwrap();
+        written_at(&alone, now);
+        let orphan = issue_verification(queue_dir, &run("orphan"), TokenFor::Landing, now).unwrap();
+        let orphan_value = value(&orphan);
+        fs::remove_file(&orphan).unwrap();
+        let mut asked = Vec::new();
+        let mut keep = |run: &RunId, of: TokenFor| {
+            asked.push((run.to_string(), of));
+            Ok(run.as_str() == "landing" && of == TokenFor::Landing)
+        };
+
+        // Within the grace the halves alone stay: they may be an issue's.
+        let sweep = sweep_verifications(queue_dir, now, &mut keep).unwrap();
+        let mut revoked = sweep.revoked.clone();
+        revoked.sort_by_key(|(run, _)| run.to_string());
+        assert_eq!(
+            revoked,
+            [
+                (run("ended"), TokenFor::Landing),
+                (run("landing"), TokenFor::Recheck)
+            ]
+        );
+        assert_eq!((sweep.orphans, sweep.failures.len()), (0, 0), "{sweep:?}");
+        assert_eq!(
+            verification_run(queue_dir, &kept_value).unwrap(),
+            Some(run("landing"))
+        );
+        assert!(kept.exists());
+        for (file, token) in [(&left, &left_value), (&recheck, &recheck_value)] {
+            assert!(!file.exists());
+            assert_eq!(verification_run(queue_dir, token).unwrap(), None);
+        }
+        assert!(alone.exists());
+        assert_eq!(
+            verification_run(queue_dir, &orphan_value).unwrap(),
+            Some(run("orphan"))
+        );
+
+        // Past it they go; a second sweep then finds nothing.
+        let later = now + ISSUE_GRACE_SECS + 1;
+        let sweep = sweep_verifications(queue_dir, later, &mut keep).unwrap();
+        assert!(sweep.revoked.is_empty());
+        assert_eq!((sweep.orphans, sweep.failures.len()), (2, 0), "{sweep:?}");
+        assert!(!alone.exists());
+        assert_eq!(verification_run(queue_dir, &orphan_value).unwrap(), None);
+        assert!(kept.exists());
+        let again = sweep_verifications(queue_dir, later, &mut keep).unwrap();
+        assert!(again.is_empty(), "{again:?}");
+        drop(keep);
+        assert!(
+            asked
+                .iter()
+                .all(|(run, _)| run != "alone" && run != "orphan")
+        );
+    }
+
+    /// A queue with no token, a record that does not read, and a `keep`
+    /// that fails: nothing is revoked on a doubt, and the doubts are named.
+    #[test]
+    fn the_sweep_keeps_what_it_cannot_judge_and_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue_dir = dir.path();
+        assert!(
+            sweep_verifications(queue_dir, 0, &mut |_, _| Ok(false))
+                .unwrap()
+                .is_empty()
+        );
+        let run = RunId::new("r1").unwrap();
+        let file = issue_verification(queue_dir, &run, TokenFor::Landing, 0).unwrap();
+        let sweep =
+            sweep_verifications(queue_dir, 0, &mut |_, _| Err(anyhow::anyhow!("locked"))).unwrap();
+        assert!(sweep.revoked.is_empty());
+        assert_eq!(sweep.failures.len(), 1);
+        assert!(sweep.failures[0].contains("locked"), "{sweep:?}");
+        assert!(file.exists());
+        let bad = broker_dir(queue_dir)
+            .join(VERIFICATION_TOKENS_DIR)
+            .join("bad.json");
+        fs::write(&bad, b"{").unwrap();
+        written_at(&bad, 0);
+        let sweep = sweep_verifications(queue_dir, 0, &mut |_, _| Ok(true)).unwrap();
+        assert_eq!(sweep.failures.len(), 1, "{sweep:?}");
+        assert!(bad.exists());
+        // Past the grace it is no token anyone could hold: it goes.
+        let later = ISSUE_GRACE_SECS + 1;
+        let sweep = sweep_verifications(queue_dir, later, &mut |_, _| Ok(true)).unwrap();
+        assert_eq!((sweep.orphans, sweep.failures.len()), (1, 0), "{sweep:?}");
+        assert!(!bad.exists());
+        assert!(file.exists());
+    }
+
+    /// A landing that begins on the run after the sweep judged its old
+    /// token, and issues it again before the sweep revokes: the issue
+    /// judged is the only one revoked, and the new token stays.
+    #[test]
+    fn the_sweep_revokes_only_the_issue_it_judged() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue_dir = dir.path();
+        let run = RunId::new("r1").unwrap();
+        let old = issue_verification(queue_dir, &run, TokenFor::Landing, 0).unwrap();
+        let old_value = fs::read_to_string(&old).unwrap();
+        let mut new_value = None;
+        let sweep = sweep_verifications(queue_dir, 0, &mut |run, of| {
+            let file = issue_verification(queue_dir, run, of, 0).unwrap();
+            new_value = Some(fs::read_to_string(file).unwrap());
+            Ok(false)
+        })
+        .unwrap();
+        assert!(sweep.is_empty(), "{sweep:?}");
+        let new_value = new_value.unwrap();
+        assert_ne!(new_value, old_value);
+        assert_eq!(
+            verification_run(queue_dir, &new_value).unwrap(),
+            Some(run.clone())
+        );
+        assert_eq!(verification_run(queue_dir, &old_value).unwrap(), None);
+        // Judged, it goes.
+        let sweep = sweep_verifications(queue_dir, 0, &mut |_, _| Ok(false)).unwrap();
+        assert_eq!(sweep.revoked, [(run.clone(), TokenFor::Landing)]);
+        assert_eq!(verification_run(queue_dir, &new_value).unwrap(), None);
+    }
+
+    /// A recovery's revocation of the issue it read before moving the run
+    /// leaves a token issued since, and revokes the one it read.
+    #[test]
+    fn a_revocation_of_an_issue_leaves_a_token_issued_since() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue_dir = dir.path();
+        let run = RunId::new("r1").unwrap();
+        assert_eq!(
+            verification_issue(queue_dir, &run, TokenFor::Landing).unwrap(),
+            None
+        );
+        issue_verification(queue_dir, &run, TokenFor::Landing, 0).unwrap();
+        let read = verification_issue(queue_dir, &run, TokenFor::Landing)
+            .unwrap()
+            .unwrap();
+        let again = issue_verification(queue_dir, &run, TokenFor::Landing, 0).unwrap();
+        let again_value = fs::read_to_string(&again).unwrap();
+        assert!(!revoke_verification_issue(queue_dir, &run, TokenFor::Landing, &read).unwrap());
+        assert_eq!(
+            verification_run(queue_dir, &again_value).unwrap(),
+            Some(run.clone())
+        );
+        let now = verification_issue(queue_dir, &run, TokenFor::Landing)
+            .unwrap()
+            .unwrap();
+        assert!(revoke_verification_issue(queue_dir, &run, TokenFor::Landing, &now).unwrap());
+        assert_eq!(verification_run(queue_dir, &again_value).unwrap(), None);
+        assert!(!revoke_verification_issue(queue_dir, &run, TokenFor::Landing, &now).unwrap());
+    }
+
+    /// Files that do not read are failures the sweep names, never a token
+    /// it revokes or a half it removes, and the sweep goes on: a value
+    /// file of another use of a token's run, a value file alone, and a
+    /// directory of the records that is no directory. A directory stands
+    /// for each unreadable file, so the test holds for any user.
+    #[test]
+    fn the_sweep_names_the_files_it_cannot_read_and_goes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue_dir = dir.path();
+        let run = RunId::new("r1").unwrap();
+        let landing = issue_verification(queue_dir, &run, TokenFor::Landing, 0).unwrap();
+        let landing_value = fs::read_to_string(&landing).unwrap();
+        fs::create_dir(verification_credential_path(
+            queue_dir,
+            &run,
+            TokenFor::Recheck,
+        ))
+        .unwrap();
+        let alone =
+            verification_credential_path(queue_dir, &RunId::new("r2").unwrap(), TokenFor::Landing);
+        fs::create_dir(&alone).unwrap();
+        let later = ISSUE_GRACE_SECS * 10;
+        let sweep = sweep_verifications(queue_dir, later, &mut |_, _| Ok(false)).unwrap();
+        assert!(sweep.revoked.is_empty(), "{sweep:?}");
+        assert_eq!(sweep.orphans, 0, "{sweep:?}");
+        // The run's recheck file once as its token's use is looked for and
+        // once among the values, the value alone once.
+        assert_eq!(sweep.failures.len(), 3, "{sweep:?}");
+        assert_eq!(
+            verification_run(queue_dir, &landing_value).unwrap(),
+            Some(run.clone())
+        );
+        assert!(alone.exists());
+
+        let other = tempfile::tempdir().unwrap();
+        fs::create_dir_all(broker_dir(other.path())).unwrap();
+        fs::write(broker_dir(other.path()).join(VERIFICATION_TOKENS_DIR), b"").unwrap();
+        let sweep = sweep_verifications(other.path(), later, &mut |_, _| Ok(false)).unwrap();
+        assert_eq!(sweep.failures.len(), 1, "{sweep:?}");
+        assert!(
+            sweep.failures[0].contains(VERIFICATION_TOKENS_DIR),
+            "{sweep:?}"
+        );
+    }
 
     #[test]
     fn a_request_reads_its_line_headers_and_body() {

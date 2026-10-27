@@ -323,6 +323,7 @@ event_kinds! {
     QueueBrokerStarted => "queue_broker_started",
     QueueBrokerStopRequested => "queue_broker_stop_requested",
     QueueBrokerStopped => "queue_broker_stopped",
+    QueueBrokerTokensSwept => "queue_broker_tokens_swept",
     QueueHoldApplied => "queue_hold_applied",
     QueueRelayDown => "queue_relay_down",
     QueueRelayRunning => "queue_relay_running",
@@ -805,6 +806,7 @@ impl EventKind {
                 | QueueBrokerStarted
                 | QueueBrokerStopRequested
                 | QueueBrokerStopped
+                | QueueBrokerTokensSwept
                 // The relays of the runs' containers (ADR-t2114-3) are the
                 // queue's too.
                 | QueueRelayDown
@@ -1811,6 +1813,10 @@ mod tests {
                 "queue_broker_stop_requested",
             ),
             (EventKind::QueueBrokerStopped, "queue_broker_stopped"),
+            (
+                EventKind::QueueBrokerTokensSwept,
+                "queue_broker_tokens_swept",
+            ),
             (EventKind::QueueHoldApplied, "queue_hold_applied"),
             (EventKind::QueueRelayDown, "queue_relay_down"),
             (EventKind::QueueRelayRunning, "queue_relay_running"),

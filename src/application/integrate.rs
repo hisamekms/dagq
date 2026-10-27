@@ -4746,6 +4746,27 @@ mod tests {
             self.note(format!("revoke {run} {of:?}"));
             Ok(true)
         }
+        fn issued(
+            &self,
+            _: &RunId,
+            _: super::super::queue_broker::TokenFor,
+        ) -> Result<Option<super::super::queue_broker::TokenIssue>> {
+            Ok(None)
+        }
+        fn revoke_issued(
+            &self,
+            _: &RunId,
+            _: super::super::queue_broker::TokenFor,
+            _: &super::super::queue_broker::TokenIssue,
+        ) -> Result<bool> {
+            Ok(false)
+        }
+        fn sweep(
+            &self,
+            _: &mut dyn FnMut(&RunId, super::super::queue_broker::TokenFor) -> Result<bool>,
+        ) -> Result<super::super::queue_broker::TokenSweep> {
+            Ok(Default::default())
+        }
     }
 
     impl super::super::run_container::VerificationContainers for NoContainers {

@@ -2274,6 +2274,7 @@ impl Supervisor<'_> {
         self.request_cleanup(None);
         self.on_planning(|planning, env| planning.sweep_planners(env));
         self.sweep_worker_tokens();
+        self.sweep_verification_tokens();
         let held = self.held_runs();
         // The sweep closes 実行と着地's asks and stalled detections of the
         // runs it stops, so it takes the loop's whole queue.
@@ -2283,6 +2284,63 @@ impl Supervisor<'_> {
         }
         host.remove_expired(&env);
         host.sweep_ended_sessions(&mut env, &held)
+    }
+
+    /// Revoke the tokens of the verifications no run runs now
+    /// ([`crate::application::queue_broker::sweep_left_tokens`]): those an
+    /// `integrate` or a supervisor killed in the middle of one left
+    /// behind, on the first pass and at each sweep after. A failure is
+    /// logged and recorded, and the sweep after takes it up again.
+    fn sweep_verification_tokens(&self) {
+        use crate::application::queue_broker::{note_token_sweep, sweep_left_tokens};
+        let queue = &self.queue;
+        let swept = sweep_left_tokens(&*self.verification_tokens, &|run| match queue.run(run) {
+            Ok(run) => Ok(Some(run.status())),
+            Err(error)
+                if error
+                    .downcast_ref::<crate::application::RunNotFound>()
+                    .is_some() =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        });
+        note_token_sweep(&swept, "supervisor", |payload| {
+            self.queue
+                .record_queue_event(EventKind::QueueBrokerTokensSwept, payload)
+                .map(drop)
+        });
+    }
+
+    /// The tokens of `run`'s verifications as issued now, read before a
+    /// recovery moves it from `previous`
+    /// ([`crate::application::queue_broker::LeftTokens`]).
+    pub(super) fn left_verification_tokens(
+        &self,
+        run: &RunId,
+        previous: RunStatus,
+    ) -> crate::application::queue_broker::LeftTokens {
+        crate::application::queue_broker::LeftTokens::read(
+            &*self.verification_tokens,
+            run,
+            previous,
+        )
+    }
+
+    /// Revoke the tokens `left` read whose verification does not run now
+    /// the run is `status`, recovered with none running; a failure is
+    /// logged and recorded, and the next sweep takes it up.
+    pub(super) fn revoke_left_verification_tokens(
+        &self,
+        left: crate::application::queue_broker::LeftTokens,
+        status: RunStatus,
+    ) {
+        let revoked = left.revoke(&*self.verification_tokens, status);
+        crate::application::queue_broker::note_token_sweep(&revoked, "recovery", |payload| {
+            self.queue
+                .record_queue_event(EventKind::QueueBrokerTokensSwept, payload)
+                .map(drop)
+        });
     }
 
     /// Revoke the queue service's tokens of `run`'s worker and its session

@@ -682,6 +682,9 @@ impl OneShot {
             &mut queue,
             &SystemProcesses,
             &LocalRunFiles,
+            &crate::infrastructure::queue_broker::SystemVerificationTokens {
+                db: db.to_path_buf(),
+            },
             &*self.generators.clock,
             id,
         )

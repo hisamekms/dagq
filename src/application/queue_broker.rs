@@ -11,7 +11,9 @@
 //! Claude credential `host.toml` chooses in the token's place
 //! (ADR-t2177-1); how `integrate` issues the
 //! token of each verification and revokes it at its end
-//! ([`VerificationTokens`], [`VerificationToken`]); and how the container
+//! ([`VerificationTokens`], [`VerificationToken`]), and how those a killed
+//! verification left behind are revoked ([`sweep_left_tokens`],
+//! [`LeftTokens`]); and how the container
 //! runtime cannot be used while the broker does not run ([`BrokerGate`]).
 //!
 //! The protocol's shapes are [`crate::domain::queue_broker`]'s.
@@ -158,6 +160,189 @@ pub enum TokenFor {
     Snapshot,
 }
 
+impl TokenFor {
+    pub const ALL: [Self; 3] = [Self::Landing, Self::Recheck, Self::Snapshot];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Landing => "landing",
+            Self::Recheck => "recheck",
+            Self::Snapshot => "snapshot",
+        }
+    }
+
+    /// Whether a verification for this may run while its run is `status`:
+    /// the landing's only while it is `integrating`, the recheck's while
+    /// it waits to land (or has just begun to land or was parked meanwhile),
+    /// the snapshot's while its claim is `validating`. A token kept past
+    /// these is one its verification left behind (its process was killed),
+    /// which [`sweep_left_tokens`] and [`LeftTokens`] revoke.
+    pub const fn verifies_while(self, status: RunStatus) -> bool {
+        match self {
+            Self::Landing => matches!(status, RunStatus::Integrating),
+            Self::Recheck => matches!(
+                status,
+                RunStatus::AwaitingIntegration | RunStatus::Integrating | RunStatus::NeedsSession
+            ),
+            Self::Snapshot => matches!(status, RunStatus::Validating),
+        }
+    }
+}
+
+/// One issue of a run's verification token: the hash of its value, which
+/// tells it from the one issued again for the same run and use, and gives
+/// nothing of the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenIssue(pub String);
+
+/// What a sweep of the verifications' tokens did ([`sweep_left_tokens`],
+/// [`LeftTokens::revoke`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenSweep {
+    /// The tokens revoked: their run and what they were for.
+    pub revoked: Vec<(RunId, TokenFor)>,
+    /// The halves of a token removed alone: a value with no record (the
+    /// broker never took it) or a record whose value is gone, past the
+    /// time an issue takes to write both.
+    pub orphans: usize,
+    /// What could not be read or revoked, kept for a later sweep.
+    pub failures: Vec<String>,
+}
+
+impl TokenSweep {
+    pub fn is_empty(&self) -> bool {
+        self.revoked.is_empty() && self.orphans == 0 && self.failures.is_empty()
+    }
+
+    /// The payload of `queue_broker_tokens_swept`
+    /// ([`crate::domain::queue_broker::QUEUE_BROKER_TOKENS_SWEPT`]).
+    pub fn payload(&self, by: &str) -> Value {
+        json!({
+            "by": by,
+            "revoked": self
+                .revoked
+                .iter()
+                .map(|(run, of)| json!({"run": run.as_str(), "for": of.as_str()}))
+                .collect::<Vec<_>>(),
+            "orphans": self.orphans,
+            "failures": self.failures,
+        })
+    }
+}
+
+/// Revoke the tokens of the verifications no run runs now, left by an
+/// `integrate` or a supervisor killed in the middle of one: a token whose
+/// run the queue does not hold, or holds in a status its verification
+/// does not run in ([`TokenFor::verifies_while`]). A run whose status
+/// does not read keeps its token. The broker and the supervisor call this
+/// as they start; it is idempotent, and what fails is in
+/// [`TokenSweep::failures`], never an error.
+pub fn sweep_left_tokens(
+    tokens: &dyn VerificationTokens,
+    status_of: &dyn Fn(&RunId) -> Result<Option<RunStatus>>,
+) -> TokenSweep {
+    let mut unread = Vec::new();
+    let swept = tokens.sweep(&mut |run, of| match status_of(run) {
+        Ok(status) => Ok(status.is_some_and(|status| of.verifies_while(status))),
+        Err(error) => {
+            unread.push(format!("run {run}'s status: {error:#}"));
+            Ok(true)
+        }
+    });
+    let mut sweep = swept.unwrap_or_else(|error| TokenSweep {
+        failures: vec![format!("{error:#}")],
+        ..TokenSweep::default()
+    });
+    sweep.failures.extend(unread);
+    sweep
+}
+
+/// The tokens of `run`'s verifications that could run while it is
+/// `previous`, as issued now: read before a recovery moves the run (the
+/// supervisor's or `recover`'s, its verification's process killed), so
+/// [`Self::revoke`] revokes those issues once it moved, and never one a
+/// landing that began on the run in between issued.
+#[derive(Debug, Clone)]
+pub struct LeftTokens {
+    run: RunId,
+    held: Vec<(TokenFor, TokenIssue)>,
+    failures: Vec<String>,
+}
+
+impl LeftTokens {
+    pub fn read(tokens: &dyn VerificationTokens, run: &RunId, previous: RunStatus) -> Self {
+        let mut left = Self {
+            run: run.clone(),
+            held: Vec::new(),
+            failures: Vec::new(),
+        };
+        for of in TokenFor::ALL {
+            if !of.verifies_while(previous) {
+                continue;
+            }
+            match tokens.issued(run, of) {
+                Ok(Some(issue)) => left.held.push((of, issue)),
+                Ok(None) => {}
+                Err(error) => left
+                    .failures
+                    .push(format!("run {run}'s {} token: {error:#}", of.as_str())),
+            }
+        }
+        left
+    }
+
+    /// Revoke the issues read of the uses whose verification does not run
+    /// now the run is `status`: their files go at once rather than at the
+    /// next sweep. Idempotent; what fails is in [`TokenSweep::failures`].
+    pub fn revoke(self, tokens: &dyn VerificationTokens, status: RunStatus) -> TokenSweep {
+        let mut sweep = TokenSweep {
+            failures: self.failures,
+            ..TokenSweep::default()
+        };
+        for (of, issue) in self.held {
+            if of.verifies_while(status) {
+                continue;
+            }
+            match tokens.revoke_issued(&self.run, of, &issue) {
+                Ok(true) => sweep.revoked.push((self.run.clone(), of)),
+                Ok(false) => {}
+                Err(error) => sweep.failures.push(format!(
+                    "run {}'s {} token: {error:#}",
+                    self.run,
+                    of.as_str()
+                )),
+            }
+        }
+        sweep
+    }
+}
+
+/// Log `sweep` by `by` and record it as `queue_broker_tokens_swept` with
+/// `record` when it did or failed anything; a record that fails is only
+/// logged, so nothing stops on it.
+pub fn note_token_sweep(sweep: &TokenSweep, by: &str, record: impl FnOnce(Value) -> Result<()>) {
+    if sweep.is_empty() {
+        return;
+    }
+    if sweep.failures.is_empty() {
+        tracing::info!(
+            by,
+            revoked = sweep.revoked.len(),
+            orphans = sweep.orphans,
+            "the verifications' tokens left behind were revoked"
+        );
+    } else {
+        warn!(
+            by,
+            failures = ?sweep.failures,
+            "the verifications' tokens left behind could not all be revoked"
+        );
+    }
+    if let Err(error) = record(sweep.payload(by)) {
+        warn!("queue_broker_tokens_swept could not be recorded: {error:#}");
+    }
+}
+
 /// How `integrate`, the landing recheck and the verification of a
 /// snapshot issue the token of a run's verification and revoke it (ADR-t2114-1 decision 2): the control
 /// side's only.
@@ -169,6 +354,15 @@ pub trait VerificationTokens: Send + Sync {
     /// Revoke the token of `run`'s verification for `of`; whether there
     /// was one.
     fn revoke(&self, run: &RunId, of: TokenFor) -> Result<bool>;
+    /// The issue of `run`'s token for `of` now; `None` while it holds none.
+    fn issued(&self, run: &RunId, of: TokenFor) -> Result<Option<TokenIssue>>;
+    /// Revoke `run`'s token for `of` only while it is still `issue`, never
+    /// one issued since: whether it was revoked.
+    fn revoke_issued(&self, run: &RunId, of: TokenFor, issue: &TokenIssue) -> Result<bool>;
+    /// Revoke every token `keep` refuses (its run and what it is for), and
+    /// remove the halves of a token left alone; a token `keep` fails on is
+    /// kept and named in the failures.
+    fn sweep(&self, keep: &mut dyn FnMut(&RunId, TokenFor) -> Result<bool>) -> Result<TokenSweep>;
 }
 
 /// The token of one verification of a run: issued by [`Self::issue`] and
@@ -1321,6 +1515,273 @@ mod tests {
             }
             Ok(true)
         }
+        fn issued(&self, _: &RunId, _: TokenFor) -> Result<Option<TokenIssue>> {
+            Ok(None)
+        }
+        fn revoke_issued(&self, _: &RunId, _: TokenFor, _: &TokenIssue) -> Result<bool> {
+            unreachable!()
+        }
+        fn sweep(&self, _: &mut dyn FnMut(&RunId, TokenFor) -> Result<bool>) -> Result<TokenSweep> {
+            Err(anyhow!("unreadable"))
+        }
+    }
+
+    /// The tokens left in the broker's directory: each one's run, what it
+    /// is for and its issue (one more each time one is issued); what a
+    /// sweep revoked goes, and a sweep that cannot read the directory
+    /// fails.
+    struct Left {
+        held: Mutex<Vec<(RunId, TokenFor, u32)>>,
+        issues: std::sync::atomic::AtomicU32,
+        unreadable: bool,
+        fail_revoke: bool,
+    }
+
+    impl Left {
+        fn new(held: &[(&str, TokenFor)]) -> Self {
+            Self {
+                held: Mutex::new(
+                    held.iter()
+                        .map(|(run, of)| (RunId::new(*run).unwrap(), *of, 0))
+                        .collect(),
+                ),
+                issues: std::sync::atomic::AtomicU32::new(1),
+                unreadable: false,
+                fail_revoke: false,
+            }
+        }
+
+        /// The run and the use of each token left.
+        fn left(&self) -> Vec<(RunId, TokenFor)> {
+            self.held
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(run, of, _)| (run.clone(), *of))
+                .collect()
+        }
+    }
+
+    impl VerificationTokens for Left {
+        fn issue(&self, run: &RunId, of: TokenFor) -> Result<PathBuf> {
+            let issue = self
+                .issues
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut held = self.held.lock().unwrap();
+            held.retain(|(held_run, held_of, _)| (held_run, *held_of) != (run, of));
+            held.push((run.clone(), of, issue));
+            Ok(PathBuf::from(format!("/tokens/{run}/{issue}")))
+        }
+        fn revoke(&self, run: &RunId, of: TokenFor) -> Result<bool> {
+            if self.fail_revoke {
+                return Err(anyhow!("read-only"));
+            }
+            let mut held = self.held.lock().unwrap();
+            let before = held.len();
+            held.retain(|(held_run, held_of, _)| (held_run, *held_of) != (run, of));
+            Ok(held.len() < before)
+        }
+        fn issued(&self, run: &RunId, of: TokenFor) -> Result<Option<TokenIssue>> {
+            Ok(self
+                .held
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(held_run, held_of, _)| (held_run, *held_of) == (run, of))
+                .map(|(_, _, issue)| TokenIssue(issue.to_string())))
+        }
+        fn revoke_issued(&self, run: &RunId, of: TokenFor, issue: &TokenIssue) -> Result<bool> {
+            if self.issued(run, of)?.as_ref() != Some(issue) {
+                return Ok(false);
+            }
+            self.revoke(run, of)
+        }
+        fn sweep(
+            &self,
+            keep: &mut dyn FnMut(&RunId, TokenFor) -> Result<bool>,
+        ) -> Result<TokenSweep> {
+            if self.unreadable {
+                return Err(anyhow!("unreadable"));
+            }
+            let mut sweep = TokenSweep::default();
+            for (run, of) in self.left() {
+                if !keep(&run, of)? && self.revoke(&run, of)? {
+                    sweep.revoked.push((run, of));
+                }
+            }
+            Ok(sweep)
+        }
+    }
+
+    #[test]
+    fn a_verification_runs_only_in_the_statuses_of_what_its_token_is_for() {
+        use RunStatus::*;
+        let held = |of: TokenFor| {
+            [
+                Claimed,
+                Starting,
+                Running,
+                Succeeded,
+                Validating,
+                AwaitingIntegration,
+                NeedsSession,
+                Integrating,
+                Integrated,
+                Failed,
+                Interrupted,
+                Replaced,
+            ]
+            .into_iter()
+            .filter(|status| of.verifies_while(*status))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(held(TokenFor::Landing), [Integrating]);
+        assert_eq!(
+            held(TokenFor::Recheck),
+            [AwaitingIntegration, NeedsSession, Integrating]
+        );
+        assert_eq!(held(TokenFor::Snapshot), [Validating]);
+    }
+
+    /// A token whose run is gone or rests where its verification does not
+    /// run is revoked, the one of a verification that runs is kept, and a
+    /// run whose status does not read keeps its token; a second sweep has
+    /// nothing to do.
+    #[test]
+    fn the_sweep_revokes_the_tokens_no_verification_runs_with_and_is_idempotent() {
+        let tokens = Left::new(&[
+            ("landing", TokenFor::Landing),
+            ("rested", TokenFor::Landing),
+            ("gone", TokenFor::Snapshot),
+            ("waiting", TokenFor::Recheck),
+            ("unread", TokenFor::Landing),
+        ]);
+        let status_of = |run: &RunId| match run.as_str() {
+            "landing" => Ok(Some(RunStatus::Integrating)),
+            "rested" => Ok(Some(RunStatus::AwaitingIntegration)),
+            "waiting" => Ok(Some(RunStatus::AwaitingIntegration)),
+            "unread" => Err(anyhow!("locked")),
+            _ => Ok(None),
+        };
+        let sweep = sweep_left_tokens(&tokens, &status_of);
+        let run = |id: &str| RunId::new(id).unwrap();
+        assert_eq!(
+            sweep.revoked,
+            [
+                (run("rested"), TokenFor::Landing),
+                (run("gone"), TokenFor::Snapshot)
+            ]
+        );
+        assert_eq!(sweep.failures.len(), 1, "{:?}", sweep.failures);
+        assert!(sweep.failures[0].contains("unread"));
+        assert_eq!(
+            tokens.left(),
+            [
+                (run("landing"), TokenFor::Landing),
+                (run("waiting"), TokenFor::Recheck),
+                (run("unread"), TokenFor::Landing)
+            ]
+        );
+        let again = sweep_left_tokens(&tokens, &|run| match run.as_str() {
+            "unread" => Ok(Some(RunStatus::Integrating)),
+            other => status_of(&RunId::new(other).unwrap()),
+        });
+        assert!(again.is_empty(), "{again:?}");
+        assert_eq!(
+            again.payload("broker"),
+            json!({"by": "broker", "revoked": [], "orphans": 0, "failures": []})
+        );
+        assert_eq!(
+            sweep.payload("supervisor")["revoked"],
+            json!([{"run": "rested", "for": "landing"}, {"run": "gone", "for": "snapshot"}])
+        );
+    }
+
+    /// A sweep that cannot read the tokens fails nothing: it is a failure to
+    /// log and record, and the start goes on.
+    #[test]
+    fn a_sweep_that_cannot_read_the_tokens_is_a_failure_not_an_error() {
+        let mut tokens = Left::new(&[("rested", TokenFor::Landing)]);
+        tokens.unreadable = true;
+        let sweep = sweep_left_tokens(&tokens, &|_| Ok(None));
+        assert!(sweep.revoked.is_empty());
+        assert_eq!(sweep.failures, ["unreadable"]);
+        assert_eq!(tokens.left().len(), 1);
+    }
+
+    /// A recovered run's tokens of the status it left go: the landing's of
+    /// an `integrating` run gone back to wait, the snapshot's of a
+    /// `validating` one interrupted, never another run's nor the recheck's
+    /// of a run that may still be rechecked; again, there is nothing to
+    /// revoke; a revocation that fails is a failure.
+    #[test]
+    fn a_recovered_run_s_tokens_of_the_status_it_left_are_revoked_once() {
+        use RunStatus::*;
+        let tokens = Left::new(&[
+            ("r1", TokenFor::Landing),
+            ("r1", TokenFor::Recheck),
+            ("r1", TokenFor::Snapshot),
+            ("r2", TokenFor::Landing),
+        ]);
+        let r1 = RunId::new("r1").unwrap();
+        let revoked =
+            LeftTokens::read(&tokens, &r1, Integrating).revoke(&tokens, AwaitingIntegration);
+        assert_eq!(revoked.revoked, [(r1.clone(), TokenFor::Landing)]);
+        assert!(
+            LeftTokens::read(&tokens, &r1, Integrating)
+                .revoke(&tokens, AwaitingIntegration)
+                .is_empty()
+        );
+        let revoked = LeftTokens::read(&tokens, &r1, Validating).revoke(&tokens, Interrupted);
+        assert_eq!(revoked.revoked, [(r1.clone(), TokenFor::Snapshot)]);
+        assert_eq!(tokens.left().len(), 2);
+        let mut failing = Left::new(&[("r1", TokenFor::Landing)]);
+        failing.fail_revoke = true;
+        let failed =
+            LeftTokens::read(&failing, &r1, Integrating).revoke(&failing, AwaitingIntegration);
+        assert!(failed.revoked.is_empty());
+        assert_eq!(failed.failures.len(), 1);
+        assert!(failed.failures[0].contains("read-only"));
+    }
+
+    /// A landing that began on the run between the read and the recovery's
+    /// revocation issued its token again: the issue read goes, the new one
+    /// stays for the verification that runs with it.
+    #[test]
+    fn a_token_issued_again_after_the_read_is_not_revoked_by_the_recovery() {
+        use RunStatus::*;
+        let tokens = Left::new(&[("r1", TokenFor::Landing)]);
+        let r1 = RunId::new("r1").unwrap();
+        let left = LeftTokens::read(&tokens, &r1, Integrating);
+        tokens.issue(&r1, TokenFor::Landing).unwrap();
+        let revoked = left.revoke(&tokens, AwaitingIntegration);
+        assert!(revoked.is_empty(), "{revoked:?}");
+        assert_eq!(tokens.left(), [(r1, TokenFor::Landing)]);
+    }
+
+    /// Only a sweep that did or failed something is recorded, and a record
+    /// that fails is only logged.
+    #[test]
+    fn a_sweep_is_recorded_only_when_it_did_or_failed_something() {
+        let recorded = Mutex::new(Vec::new());
+        note_token_sweep(&TokenSweep::default(), "broker", |payload| {
+            recorded.lock().unwrap().push(payload);
+            Ok(())
+        });
+        assert!(recorded.lock().unwrap().is_empty());
+        let failed = TokenSweep {
+            failures: vec!["unreadable".to_owned()],
+            ..TokenSweep::default()
+        };
+        note_token_sweep(&failed, "supervisor", |payload| {
+            recorded.lock().unwrap().push(payload);
+            Ok(())
+        });
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            [json!({"by": "supervisor", "revoked": [], "orphans": 0, "failures": ["unreadable"]})]
+        );
+        note_token_sweep(&failed, "broker", |_| Err(anyhow!("the queue is locked")));
     }
 
     #[test]

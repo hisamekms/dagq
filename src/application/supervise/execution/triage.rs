@@ -64,8 +64,10 @@ impl Supervisor<'_> {
                 continue;
             }
             let report = json!({"run": health, "by": "supervisor"});
+            let left = self.left_verification_tokens(run.id(), run.status());
             match self.queue.recover_run(run.id(), processes.len(), report) {
                 Ok(recovered) => {
+                    self.revoke_left_verification_tokens(left, recovered.status());
                     let whose = if leased {
                         "its supervisor died"
                     } else {
@@ -152,6 +154,7 @@ impl Supervisor<'_> {
             }
         };
         let report = json!({"run": health, "by": "supervisor"});
+        let left = self.left_verification_tokens(run.id(), RunStatus::Integrating);
         let recovered = match self.queue.recover_run(run.id(), processes.len(), report) {
             Ok(recovered) => recovered,
             Err(error) => {
@@ -159,6 +162,8 @@ impl Supervisor<'_> {
                 return Ok(());
             }
         };
+        // The token its killed landing's verification held goes with it.
+        self.revoke_left_verification_tokens(left, recovered.status());
         let events = self.queue.run_events(run.id())?;
         let history = RunHistory::from_events(&events);
         // Another supervisor released it first: its records stand.
