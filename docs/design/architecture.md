@@ -143,9 +143,9 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   `build.rs`と共有する`build_id`・`migration_numbers`はレイヤーの外のmoduleに数えず、共有の部品としてL1・L3が名指す例外の範囲で参照してよい。
   新しいmoduleをレイヤーの外に足さない。
   検査: 参照されないことはRustのtest（`src/context_boundaries/modules.rs`）、新しいmoduleを外に足さないことは全体のreview。
-- **L9** `src/compose/`の`supervisor`（ループ）以外のmodule（contextごと）は互いと`supervisor`を参照せず、`use super::*`も書かない。
+- **L9** `src/compose/`のmoduleのうち、contextをまたいで名指してよいもの（所有の表の`COMPOSE_LOOP`。supervisorのループと、人・inboxが打つ制御側のコマンド）以外のmodule（contextごと）は、互いと`COMPOSE_LOOP`のmoduleを参照せず、`use super::*`も書かない。
   共有の配線は`src/compose.rs`に置き、外からは`crate::compose`の再公開だけを参照する。
-  検査: contextのmoduleどうしと`supervisor`への参照と`use super::*`はRustのtest（`src/context_boundaries/modules.rs`）、`src/compose/`の外からの参照はコンパイラ（可視性。その下のmoduleがprivateであることは同じtestが確かめる）、共有の配線の置き場は全体のreview。
+  検査: contextのmoduleどうしと`COMPOSE_LOOP`のmoduleへの参照と`use super::*`はRustのtest（`src/context_boundaries/modules.rs`）、`src/compose/`の外からの参照はコンパイラ（可視性。その下のmoduleがprivateであることは同じtestが確かめる）、共有の配線の置き場は全体のreview。
 
 ### コンテキストの規則
 
@@ -199,7 +199,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 - L1・L3・L6・L8・L9・C5・C8と、L2の`anyhow`・`std::process`・`std::net`と、C7のうちportと`src/application/`のmoduleの記録は、`cargo test`が流すRustのtest（`src/context_boundaries/modules.rs`）が当てる。
   testは`src/lib.rs`から辿るmoduleのRustを構文で読み、`use`とpathをcrateの根からのmoduleのpathか外のcrateのpathに解き、再公開を定義のmoduleまで辿る（L2とC5は`#[cfg(test)]`の中を数えず、ほかは数える）。
   C5はtraitを名前でなく定義のmoduleのpathで識別し、C8は`src/application/ports/<context>.rs`の書いたpathを見る。
-  共有の部品を参照してよいレイヤー、`src/compose/`のループのmodule、portの公開先、C8の例外の組、今の違反は所有の表に置く。
+  共有の部品を参照してよいレイヤー、`src/compose/`のcontextでないmodule（`COMPOSE_LOOP`）、portの公開先、C8の例外の組、今の違反は所有の表に置く。
 - 所有の表`src/context_boundaries/ownership.rs`はRustのtestの側にあり、pathから導けない所有だけを持つ。
   tableの所有、storeのmoduleのcontext、境界をまたぐtransactionの関数、`src/application/`のmoduleのcontext、portとそのmethodの公開先、`ports/`の外のport、C1とL1・L2・L3・L6・L8・L9・C5・C8の今の違反を持つ。
 - C1・C7のtableとstoreのmoduleとtransaction・X1は、`cargo test`が流すRustのtest（`src/context_boundaries.rs`）が当てる。
