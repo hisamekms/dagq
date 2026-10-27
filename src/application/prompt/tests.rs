@@ -2214,6 +2214,95 @@ fn only_the_whole_review_lists_every_finding_that_sends_back_in_one_round() {
     assert!(!claim.contains("later round"), "{claim}");
 }
 
+/// The whole review lists the defects to look for and reads every file the
+/// diff changes before its verdict, once, right before the verdicts; plan
+/// review, the claim's review and the shared reason codes do not carry it,
+/// it hands nothing of an earlier round, and the digest covers it.
+#[test]
+fn only_the_whole_review_looks_for_the_listed_defects_in_every_changed_file() {
+    use crate::domain::satisfied::SnapshotVerification;
+    let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let review = review_prompt(&task, &run, "r", None, None).text;
+    assert_eq!(review.matches(REVIEW_DEFECTS).count(), 1, "{review}");
+    assert!(review.contains(&format!("{REVIEW_DEFECTS}{REVIEW_VERDICTS}")));
+    for part in [
+        "Before you decide the verdict, read every file the diff changes, one by one and each whole",
+        "concurrency and races",
+        "a stop and a restart",
+        "records and tokens an older version wrote",
+        "records written halfway or missing",
+        "permissions",
+        "the validation of input at a boundary",
+    ] {
+        assert_eq!(REVIEW_DEFECTS.matches(part).count(), 1, "{part}");
+    }
+    for word in ["previous", "earlier round", "last fix", "later round"] {
+        assert!(!REVIEW_DEFECTS.contains(word), "{word}");
+    }
+    let codes = reason_codes_section(review_reason::REVIEW_CODES, &run_review_codes_use());
+    assert!(!codes.contains("concurrency"));
+    assert!(
+        !reason_codes_section(review_reason::PLAN_REVIEW_CODES, PLAN_REVIEW_CODES_USE)
+            .contains("concurrency")
+    );
+
+    let plan = plan_case(1, 0).prompt().text;
+    assert!(!plan.contains(REVIEW_DEFECTS), "{plan}");
+    assert!(!plan.contains("concurrency and races"), "{plan}");
+
+    let receipt = Receipt::parse(
+        &json!({"run_id": RUN, "result": "already_satisfied", "commit": SHA,
+            "tests": {"status": "passed", "evidence_or_reason": "e"},
+            "e2e": {"status": "not_applicable", "evidence_or_reason": "r"},
+            "subagent_review": {"status": "not_applicable", "evidence_or_reason": "r"},
+            "summary": "the base meets it",
+            "base_checks": [{"command": "test -f seed.txt", "result": "passed"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let claim = claim_review_prompt(
+        &task_with_evidence(7, Vec::new()),
+        &run,
+        (Some(&receipt), "/runs/run/receipt.json"),
+        &SnapshotVerification {
+            head: CommitSha::try_from(SHA).unwrap(),
+            commands: 2,
+            failure: None,
+        },
+        Path::new("/q/satisfied/run"),
+        None,
+    )
+    .text;
+    assert!(!claim.contains(REVIEW_DEFECTS), "{claim}");
+    assert!(!claim.contains("concurrency and races"), "{claim}");
+
+    // The digest of the fixed sentences changes with this section.
+    let without = digest_of(&[
+        REVIEW_MATERIAL,
+        REVIEW_RULES_HEADER,
+        REVIEW_DOCS_CHECK,
+        REVIEW_ACCEPTANCE_HEADER,
+        REVIEW_VERDICTS,
+        CONCERN_RECOMMENDATION,
+        &codes,
+        REVIEW_ANSWER,
+    ]);
+    let with = digest_of(&[
+        REVIEW_MATERIAL,
+        REVIEW_RULES_HEADER,
+        REVIEW_DOCS_CHECK,
+        REVIEW_ACCEPTANCE_HEADER,
+        REVIEW_DEFECTS,
+        REVIEW_VERDICTS,
+        CONCERN_RECOMMENDATION,
+        &codes,
+        REVIEW_ANSWER,
+    ]);
+    assert_eq!(acceptance_digest(), with);
+    assert_ne!(acceptance_digest(), without);
+}
+
 /// ADR-t1428-1 decision 5 as ADR-t2352-1 amends it: the run's review reads the
 /// documents on the changed behavior against the diff and the summary,
 /// once, before the acceptance, sending back only for a document the diff

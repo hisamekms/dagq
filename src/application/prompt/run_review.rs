@@ -63,7 +63,8 @@ pub struct AcceptanceRules<'a> {
 /// What the headless reviewer is asked (ADR-0023 decision 2, ADR-0027
 /// decision 2 as ADR-t451-1 decision 3 amends it): where the material is,
 /// the project's rules for the whole review when the landing branch has
-/// them, the task's acceptance, the verdict schema, where `revise` ends
+/// them, the task's acceptance, the defects to look for in every changed
+/// file ([`REVIEW_DEFECTS`]), the verdict schema, where `revise` ends
 /// and `concern` begins, and how a concern is judged and when it reaches
 /// a person. It names no instructions file of the worktree to read: the
 /// project's rules are `rules` only (ADR-t2259-1 decision 6). The title,
@@ -124,6 +125,7 @@ pub fn review_prompt(
          {docs}\n\
          {acceptance_header}{acceptance}\n\n\
          {known}\
+         {defects}\
          {verdicts}\
          {concern}\
          {codes}\
@@ -133,6 +135,7 @@ pub fn review_prompt(
         material_says = REVIEW_MATERIAL,
         acceptance_header = REVIEW_ACCEPTANCE_HEADER,
         docs = REVIEW_DOCS_CHECK,
+        defects = REVIEW_DEFECTS,
         verdicts = REVIEW_VERDICTS,
         concern = CONCERN_RECOMMENDATION,
         codes = reason_codes_section(review_reason::REVIEW_CODES, &run_review_codes_use()),
@@ -143,23 +146,31 @@ pub fn review_prompt(
 
 /// The SHA-256 of the whole review's fixed sentences: what the material
 /// holds, the rules' header, the check of the documents, the acceptance's
-/// header, the verdicts, the concern's recommendation, the reason codes and
-/// the answer's schema, each after its length. With the build identifier
+/// header, the defects to look for, the verdicts, the concern's
+/// recommendation, the reason codes and the answer's schema, each after its
+/// length. With the build identifier
 /// and the rules file's digest, `review_job_started` records which
 /// `builtin:acceptance` judged (ADR-t2259-1 decision 9).
 pub fn acceptance_digest() -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    for part in [
+    let codes = reason_codes_section(review_reason::REVIEW_CODES, &run_review_codes_use());
+    digest_of(&[
         REVIEW_MATERIAL,
         REVIEW_RULES_HEADER,
         REVIEW_DOCS_CHECK,
         REVIEW_ACCEPTANCE_HEADER,
+        REVIEW_DEFECTS,
         REVIEW_VERDICTS,
         CONCERN_RECOMMENDATION,
-        &reason_codes_section(review_reason::REVIEW_CODES, &run_review_codes_use()),
+        &codes,
         REVIEW_ANSWER,
-    ] {
+    ])
+}
+
+/// The SHA-256 of `parts`, each after its length.
+pub(super) fn digest_of(parts: &[&str]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for part in parts {
         hasher.update((part.len() as u64).to_le_bytes());
         hasher.update(part.as_bytes());
     }
@@ -175,6 +186,24 @@ pub(super) const REVIEW_ACCEPTANCE_HEADER: &str = "Acceptance criteria of the ta
 /// What precedes the project's rules in the whole review's prompt.
 pub(super) const REVIEW_RULES_HEADER: &str =
     "The project's rules for this review, judge the diff by them as well";
+
+/// The defects the whole review looks for in the diff before it decides
+/// the verdict, and that it reads every file the diff changes, one by one
+/// and whole, not only where the summary points. The kinds are those a
+/// review most often left for a later round on a large diff, though they
+/// were there in the diff it had read: concurrency and races (writers at
+/// once, an overwrite, the order of writes); a stop and a restart (a
+/// resend, a deadline, the state after an adopt); records and tokens an
+/// older version wrote; a record written halfway (an event or an ask whose
+/// write fails partway, a record missing); permissions; and the validation
+/// of input at a boundary. The list names where to look, not a limit: a
+/// defect of another kind still sends the run back. It is a fixed sentence
+/// of the runtime, not the project's rules, with no limit of its own
+/// (only the whole prompt's [`RUN_REVIEW_PROMPT_LIMIT`]). It hands the
+/// review nothing of an earlier round (its findings or the diff of its
+/// fix) and narrows no round to the last fix. Only the whole review says
+/// so; plan review and the claim's review share none of it.
+pub(super) const REVIEW_DEFECTS: &str = "Before you decide the verdict, read every file the diff changes, one by one and each whole, not only where the summary points. In each, look for the defects that are reasons to send the run back, among them: concurrency and races (two writers at once, an overwrite, the order of writes); a stop and a restart (a resend, a deadline, the state after another process adopts the work); compatibility with records and tokens an older version wrote; records written halfway or missing (an event or an ask whose write fails partway); permissions; and the validation of input at a boundary. A defect of another kind is a reason as well.\n\n";
 
 /// The whole review's verdicts, where `revise` ends and `concern` begins,
 /// and that a run sent back hears every finding that sends it back in the
