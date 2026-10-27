@@ -12,11 +12,14 @@ The mode split: for each landing-it run, the median over its common IT of
 (its seconds / the IT's median before the switch), grouped by whether the run
 ended before or after LAUNCHD_AT (the supervisor's first start in launchd mode),
 also by band of the run's load_avg_mean; each run's ratio is in runs_after.
-Usage: python3 by_day.py EVENTS.json SWITCH_AT LAUNCHD_AT > by-day.json"""
+With PROCESSTYPE_AT (when the production plist got ProcessType Interactive),
+the launchd runs that ended at or after it are the mode launchd_interactive.
+Usage: python3 by_day.py EVENTS.json SWITCH_AT LAUNCHD_AT [PROCESSTYPE_AT] > by-day.json"""
 import json, math, re, sys
 from collections import defaultdict
 
 events, switch, launchd_at = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
+processtype_at = sys.argv[4] if len(sys.argv) > 4 else None
 PASS = re.compile(r'^\s*PASS[^\[]*\[\s*([\d.]+)s\]\s*\(\s*\d+/\d+\)\s+(\S+)\s+(\S+)')
 SUM = re.compile(r'^\s*Summary \[\s*([\d.]+)s\] (\d+) tests? run')
 
@@ -103,6 +106,8 @@ for d, w, t, load, summ, at in runs:
         continue
     r = [s / base[k] for k, s in t.items() if k in base and base[k] > 0]
     mode = 'in_cmux' if at < launchd_at else 'launchd'
+    if processtype_at and at >= processtype_at:
+        mode = 'launchd_interactive'
     split[mode]['ratio'].append(median(r))
     if load is not None:
         split[mode]['load'].append(load)
@@ -111,6 +116,8 @@ for d, w, t, load, summ, at in runs:
     split[f'{mode} load {band}']['ratio'].append(median(r))
     out_runs.append({'at': at, 'mode': mode, 'ratio': round(median(r), 3), 'load_avg_mean': load})
 out['mode_split'] = {'launchd_at': launchd_at}
+if processtype_at:
+    out['mode_split']['processtype_at'] = processtype_at
 for mode, v in sorted(split.items()):
     row = {'runs': len(v['ratio']), 'ratio_median': round(median(v['ratio']), 3), 'ratio_p90': round(p90(v['ratio']), 3)}
     if v['days']:

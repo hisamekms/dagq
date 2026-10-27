@@ -26,13 +26,14 @@ related:
 - **伸びは 2026-10-08T11:13Z と 11:42Z の間の 1 段で起き、その間に supervisor が in_cmux mode から launchd mode に替わった。**
   in_cmux の supervisor は 10:45:10Z に drain に入り、launchd mode の supervisor が 11:14:34Z に起動した（`supervisor_started` の `mode`）。
   in_cmux の supervisor の下の最後の検証（11:13Z に終わった run）までは前の窓に対する比が 1 前後で、launchd の下の最初の検証（11:42Z）から 1.9 前後になり、そのまま続いた。
-- **launchd の LaunchAgent の plist に `ProcessType` が無く、launchd はその job と子の process に軽い資源の制限（CPU と I/O の抑制）を掛ける**（`man launchd.plist` の `ProcessType`: 「If left unspecified, the system will apply light resource limits to the job, throttling its CPU usage and I/O bandwidth.」）。
-  今の host で、launchd の supervisor（pid 679）と、それが起動した worker の session・shell は優先度（`ps -o pri`）20 で、cmux の中の shell と Claude は 31 だった。検証の `sh scripts/landing-it.sh` と nextest と各 test は supervisor の子なので 20 で流れる。
+- **10-25 まで launchd の LaunchAgent の plist に `ProcessType` が無く、launchd はその job と子の process に軽い資源の制限（CPU と I/O の抑制）を掛ける**（`man launchd.plist` の `ProcessType`: 「If left unspecified, the system will apply light resource limits to the job, throttling its CPU usage and I/O bandwidth.」）。
+  2026-10-21 の host で、launchd の supervisor（pid 679）と、それが起動した worker の session・shell は優先度（`ps -o pri`）20 で、cmux の中の shell と Claude は 31 だった。検証の `sh scripts/landing-it.sh` と nextest と各 test は supervisor の子なので 20 で流れていた（10-25 に `ProcessType` Interactive が入ってからは 31）。
 - **記録での比較**: 同じ `landing-it.sh` の全部流した回を supervisor の mode で分けると、前の窓の llvm-cov の中央値に対する 1 本ごとの比の中央値は in_cmux の 60 回で 1.02、launchd の 221 回で 1.87。load の帯をそろえても差は残る（load の平均が 10 未満の回で 0.93 → 1.52、10〜13 で 1.02 → 1.74）。
 - **再現**: 変化の前後の commit（506d4050・0f0d3c76・53dffb94）の IT を同じ host で交互に各 4 周流しても、1 本あたりの秒の中央値は 6.42・6.46・6.41 秒で差が無かった。test の binary の差分（runtime や test の helper）は原因でない。
-  同じ binary を優先度 20（この run の経路の既定）と `taskpolicy -b`（優先度 4）で交互に各 3 周流すと、中央値は 4.31 → 15.48 秒（×3.6）になり、IT の秒は process の QoS に強く依る。31 で流す経路はこの run から作れず、31 と 20 の差の大きさは測っていない（下の「再現」）。
-- **結論**: 1 本あたりの伸びの原因は、supervisor が launchd mode で常駐するようになり、着地の検証が launchd の既定の制限（優先度 20 の帯）の下で流れるようになったことと見る。時刻が回の単位で一致し、load をそろえた mode の比較でも 1.6〜1.9 倍の差が残ることが根拠で、31 と 20 を同じ時に流した直接の比較は無い。
+  同じ binary を優先度 20（この run の経路の既定）と `taskpolicy -b`（優先度 4）で交互に各 3 周流すと、中央値は 4.31 → 15.48 秒（×3.6）になり、IT の秒は process の QoS に強く依る。31 で流す経路は再現の run から作れず、31 と 20 の差の大きさは、後で plist に `ProcessType` が入った後の記録で測った（下の「ProcessType Interactive の後」）。
+- **結論**: 1 本あたりの伸びの原因は、supervisor が launchd mode で常駐するようになったこと（同じ時に替わった supervisor の binary を含む）と見る。時刻が回の単位で一致し、load をそろえた mode の比較でも 1.5〜2.0 倍の差が残ることが根拠。その中の優先度 20 の帯は、下の測り直しで当たらなかった。
   寄与は伸び（×1.4〜1.9）の大部分で、残りは load（launchd の下でも load の帯で 1.52〜2.39 と動く）。着地の検証の切り替え（landing-it.sh）、10-08〜10-09 の runtime の test の binary の変更、nextest の並列度・profile、sccache・container は、記録か再現で当たらない。
+- **ProcessType Interactive の後（2026-10-25T14:38Z〜）の測り直しで、優先度の帯の説明は外れた。** 本番の plist に `ProcessType` Interactive が入った後、supervisor・nextest・IT の process は優先度 31 で流れているが、回の比の中央値は 1.84（19 回）で、`ProcessType` の無い launchd の 1.82（256 回）と変わらず、in_cmux の 1.02 に戻らない。load の帯をそろえても in_cmux の 1.54〜1.85 倍のまま。優先度 31 対 20 の効果は ×0.99（帯ごとに ×0.93〜1.10）で、無いと見る（下の「ProcessType Interactive の後」）。
 
 ## 窓と入力
 
@@ -138,14 +139,14 @@ related:
 - **(a) 着地の検証の切り替え（ec310498、10-07T10:27Z）: 当たらない。**
   切り替えの後、in_cmux の supervisor の下の landing-it の 60 回は比の中央値 1.02 で、llvm-cov の回と同じ速さだった。伸びは切り替えから 25 時間後に 1 段で起きた。
   並列度（`NEXTEST_TEST_THREADS` 6）・nextest の profile（default）・build の profile（`test`、unoptimized + debuginfo）・`[run.env]` はどちらの流し方でも同じ。違いは llvm-cov の計測の有無と、landing-it が workspace の lib・bin と `kind(test) - binary(e2e)` の filter で流すことだけで、計測を外したのに遅くなる向きの説明にならない。
-- **(b) 10-08〜10-09 の runtime の着地: 当たらない。**
+- **(b) 10-08〜10-09 の runtime の着地: test の binary の変更は当たらない（supervisor の binary の変化は分けていない）。**
   4cdd183b（resource broker の撤去、10-08T07:01Z）と c35ee27c（10-08T03:17Z）は段の前に入り、その後の回も比は 1 前後だった。cde598ae（in-cmux mode の廃止、10-08T10:09Z）も段の前に main に入り、その後の 3 回（ad333c85・8e24119c・506d4050 に rebase）は 0.84〜1.02 だった。26184a7b（10-08T22:17Z）と cccef3ef（10-08T23:57Z）は段の後に入り、前後で比の幅は変わっていない（10-08〜10-09 の launchd の下の回は 1.22〜2.38）。
-  段の直前と直後の main（506d4050・0f0d3c76）と次の着地（53dffb94）の IT を同じ host・同じ並列度で交互に流しても差は無かった（下の「再現」）。ただし再現で替えたのは test の binary だけで、検証を起動する supervisor の binary は替えていない。段のときは supervisor の binary も 8e24119c から 0f0d3c76 に替わり（11:21Z の `update_installed`）、cde598ae を含む。supervisor が検証の process を起動する仕方の変化は、ここでは mode（下の (d)）と分けていない。10-07〜10-09 に tests/common を変えた main の commit は、段の前の 860ac29e・c35ee27c・cde598ae（どれもその後の回の比は 1 前後）と、段の後の 10-09 の 2b19d29e・e4813469・5cfb3428（前後で比の幅は変わらない）で、段と重なるものは無い。
+  段の直前と直後の main（506d4050・0f0d3c76）と次の着地（53dffb94）の IT を同じ host・同じ並列度で交互に流しても差は無かった（下の「再現」）。ただし再現で替えたのは test の binary だけで、検証を起動する supervisor の binary は替えていない。段のときは supervisor の binary も 8e24119c から 0f0d3c76 に替わり（11:21Z の `update_installed`）、cde598ae を含む。supervisor が検証の process を起動する仕方の変化は、ここでは mode（下の (d)）と分けていない（優先度を戻しても差が残ったので、残る差の候補になった。「ProcessType Interactive の後」）。10-07〜10-09 に tests/common を変えた main の commit は、段の前の 860ac29e・c35ee27c・cde598ae（どれもその後の回の比は 1 前後）と、段の後の 10-09 の 2b19d29e・e4813469・5cfb3428（前後で比の幅は変わらない）で、段と重なるものは無い。
 - **(c) host の変化: launchd mode への移行（下の (d)）が当たり、sccache・container は当たらない。load は主因ではないが 2 番目の要因として効く。**
   sccache は build の段だけに効き、テストの秒を変えない。後の窓の検証のログは host の path（`/Users/…`）で流れ、container の verification ではない。load をそろえても mode の差は残り（「伸びの起きた時刻」の帯ごとの表）、load の低い 10-19（10.4）でも 474 本の値は 1.97 だった。一方 launchd の下でも load の帯で比は 1.52〜2.39 と動き、10-13・10-14 の高い値は load（21〜24）が上乗せしている。
 - **(d) 見つけた候補: supervisor が launchd mode で常駐するようになったこと（ADR-t1433-4、cde598ae）: 当たる。**
   in_cmux の supervisor は 10-08T10:45:10Z に `stop_requested` で drain に入り、launchd mode の supervisor が 11:14:34Z に起動し（`supervisor_started` の `mode`）、それ以降の `update_installed` の `supervisors` はどれも launchd だった。伸びの段はこの切り替わりと回の単位で一致する。
-  LaunchAgent の plist（`~/Library/LaunchAgents/com.dagq.77067154921b9014.plist`）には `ProcessType` も `Nice` も無く、launchd の既定では CPU と I/O が抑えられる。今の host では launchd の supervisor・その子の worker の session と shell の優先度が 20（macOS の QoS の utility の帯）、cmux の中の shell・Claude が 31（default の帯）で、検証の nextest と test の process は supervisor の子として 20 で流れる。10-07〜10-08 の in_cmux の supervisor の子が 31 だったことは当時は記録が無く、今の cmux の中の process から推した値。Apple Silicon では utility の帯の process は効率コアに寄せて置かれやすく、I/O も抑えられるので、CPU の優先度だけでなくコアの選ばれ方と I/O の抑制が遅さに効きうる（どれが効いたかは分けていない）。
+  LaunchAgent の plist（`~/Library/LaunchAgents/com.dagq.77067154921b9014.plist`）には `ProcessType` も `Nice` も無く、launchd の既定では CPU と I/O が抑えられる。今の host では launchd の supervisor・その子の worker の session と shell の優先度が 20（macOS の QoS の utility の帯）、cmux の中の shell・Claude が 31（default の帯）で、検証の nextest と test の process は supervisor の子として 20 で流れる。10-07〜10-08 の in_cmux の supervisor の子が 31 だったことは当時は記録が無く、今の cmux の中の process から推した値。Apple Silicon では utility の帯の process は効率コアに寄せて置かれやすく、I/O も抑えられるので、CPU の優先度だけでなくコアの選ばれ方と I/O の抑制が遅さに効きうる（どれが効いたかは分けていない）。10-25 に `ProcessType` Interactive を入れて優先度を 31 にした後も比は戻らず、優先度の帯の部分は当たらなかった（「ProcessType Interactive の後」）。mode の切り替わりが当たることは変わらない。
   `src` には優先度や QoS を設定する箇所（`ProcessType`・`taskpolicy`・`setpriority`）が無い。
 
 ## 再現
@@ -166,22 +167,50 @@ QoS（C を、この run の経路の既定の優先度 20 と `taskpolicy -b` �
 
 | 優先度 | 周 | nextest の壁時計（秒） | 1 本あたりの秒 中央値 | 同 p90 | `runtime_resume` 中央値 / p90 | `runtime_recheck` 中央値 / p90 | `runtime_handoff` 中央値 / p90 |
 |---|---|---|---|---|---|---|---|
-| 20（launchd の既定、今の検証と同じ） | 3 | 42.6・44.0・47.2 | 4.31 | 6.50 | 4.70 / 7.20 | 4.14 / 6.51 | 3.77 / 5.56 |
+| 20（launchd の既定、10-25 までの検証と同じ） | 3 | 42.6・44.0・47.2 | 4.31 | 6.50 | 4.70 / 7.20 | 4.14 / 6.51 | 3.77 / 5.56 |
 | 4（background） | 3 | 156.7・158.0・156.7 | 15.48 | 21.68 | 16.57 / 22.85 | 15.53 / 23.22 | 11.20 / 20.21 |
 
 - commit の 3 つは 1 本あたりの中央値が 6.41〜6.46 秒で並び、差は周ごとの揺れ（壁時計 62〜105 秒）より小さい。runtime・test の変更は伸びを作っていない。
 - B の 2 周目（104.6 秒）は 1 本が SLOW になった回で、その周の load は他と同じだった。
 - 優先度を 20 から 4 に下げると同じ binary が 3.6 倍遅い。同じ C を同じ優先度 20 で流した値は、commit の前後の周（load 6〜10）で 6.41 秒、QoS の周（load 2.5〜4.8）で 4.31 秒で、load の違いでも 1.5 倍動く。IT は sqlite・git・子の process の起動と待ちが中心で、CPU の割り当てと I/O の抑制に敏感だと分かる。
 - **流せなかったもの**: 優先度 31（in_cmux の supervisor の下と同じ帯）で流す経路はこの run から作れなかった。この run の session は launchd の supervisor の子で、`taskpolicy` は優先度を上げられず（`taskpolicy -t 0 -l 0` でも 20）、cmux の CLI は cmux の外の process を拒み（「cmux 内で起動されたプロセスのみ接続できます」）、別の LaunchAgent を載せることは host を変えるので worker がしない。
-  31 と 20 の差は、代わりに記録の mode ごとの比（in_cmux 1.02・launchd 1.87、同じ landing-it.sh の全部流した回、load の帯をそろえて 1.6〜2.0 倍）で見た。20 と 4 の比較は QoS に敏感なことを示すだけで、31 と 20 の差の大きさは示さない。
+  再現の時点では、31 と 20 の差を代わりに記録の mode ごとの比（in_cmux 1.02・launchd 1.87、同じ landing-it.sh の全部流した回、load の帯をそろえて 1.6〜2.0 倍）で見ていた。20 と 4 の比較は QoS に敏感なことを示すだけで、31 と 20 の差の大きさは示さない。mode の比は優先度の差を測るものではなく、優先度だけを替えた比は「ProcessType Interactive の後」の ×0.99。
+
+## ProcessType Interactive の後
+
+本番の LaunchAgent の plist（`~/Library/LaunchAgents/com.dagq.77067154921b9014.plist`）は更新時刻 2026-10-25T14:38:16Z から `ProcessType` に `Interactive` を持ち、同じ時刻 `2026-10-25T14:38:16.993Z` に launchd mode の supervisor が起動した（`supervisor_started`）。この時刻を 3 つ目の区切りとし、それ以降に終わった launchd の回を `launchd_interactive`、`2026-10-08T11:14:34.532Z` 以降でそれより前の回を `ProcessType` 無しの launchd とした（`by-day-processtype.json` の `mode_split`）。新しい窓の最初の回（14:49:26Z に終わり、`duration_secs` 518）は 14:40Z に始まっていて、全部の回が新しい supervisor の下で始まっている。
+読んだ時刻（2026-10-27T19:30Z ごろ）には、launchd の supervisor（`~/.local/bin/dagq`）・その子の `cargo-nextest`・IT の binary・worker の session の `ps -o pri` はどれも 31 だった（前の窓では 20）。
+
+入力の条件は「窓と入力」と同じ（`sh scripts/landing-it.sh` で PASS の IT（`::bin/` を除く binary id の test）が 500 本以上の回）。新しい窓の landing-it の回は 52 回で、そのうち IT を全部流した回は 19 回（残りの 33 回は IT を絞った回で、PASS の行は lib と bin の test を含めて 3,454〜3,911 行あるが IT は 5〜382 本）。PASS の行を IT に限らずに数えると絞った回も 500 を超えるので、PASS の行の数で数えた回数とは合わない（task の登録の時に数えられた 41 回はこの数え方の違いによると見る）。
+共通の IT は 1,137 本（前の窓と同じ数。`ProcessType` 無しの launchd の窓を 10-25 まで延ばしても変わらない）。
+
+| 窓 | supervisor の mode | 回数 | 最初〜最後の終わりの時刻（UTC） | 比の中央値 | p90 | load の平均の中央値 | 10 未満 | 10〜13 | 13〜16 | 16 以上 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| in_cmux | in_cmux（優先度 31 と推した帯） | 60 | 10-07T11:01:28Z〜10-08T11:13:00Z | 1.02 | 1.25 | 11.4 | 0.93（16） | 1.02（27） | 1.19（3） | 1.22（14） |
+| launchd、`ProcessType` 無し | launchd（優先度 20） | 256 | 10-08T11:42:54Z〜10-25T10:04:37Z | 1.82 | 2.51 | 13.2 | 1.49（41） | 1.74（82） | 1.87（49） | 2.37（84） |
+| launchd、`ProcessType` Interactive | launchd（優先度 31） | 19 | 10-25T14:49:26Z〜10-27T19:05:11Z | 1.84 | 2.28 | 13.5 | 1.54（3） | 1.88（5） | 1.83（5） | 2.15（6） |
+
+帯の列は load の平均の帯ごとの比の中央値で、括弧は回数。`ProcessType` 無しの launchd の値は、10-19 で切った前の表（221 回で 1.87）より 10-20〜10-25 の 35 回の分だけ多い。
+
+- **in_cmux の 1.02 に戻っていない。** 全部で 1.84 で、load の帯をそろえても in_cmux の帯の値の 1.54〜1.85 倍（10 未満 1.66 倍、10〜13 1.85 倍、13〜16 1.54 倍、16 以上 1.76 倍）。`ProcessType` 無しの launchd の 1.58〜1.94 倍と同じ幅にある。
+- **優先度 31 対 20（`ProcessType` 有り対無し）の効果の大きさ**: 無しの比 ÷ 有りの比（有りで何倍速くなったか）は全部で ×0.99、帯ごとに ×0.97（10 未満）・×0.93（10〜13）・×1.02（13〜16）・×1.10（16 以上）。帯ごとの回数が 3〜6 回と少なく、帯の間で向きもそろわないので、効果は 1 倍（無い）と見る。前の「再現」の 20 対 4（×3.6）のような大きさは無い。
+- `ProcessType` 無しの launchd の窓の中でも比は時期で動き、10-08〜10-12 の 98 回が 1.73、10-13〜10-19 の 123 回が 2.13（load の中央値 15.6）、10-20〜10-25 の 35 回が 1.56 だった（`runs_after` から数えた）。新しい窓の 1.84 は 10-20〜10-25 より高く、下がった向きの差は見えない。
+
+戻らないので、残る差の候補を記録から挙げる（ここでは新しい原因を調べていない）:
+
+- **段と同じ時に替わった supervisor の binary（0f0d3c76、cde598ae の in-cmux mode の廃止を含む）での、検証の process の起動の仕方の変化**。「候補ごとの当否」の (b) で mode と分けていなかったもので、優先度を戻しても差が残ったので、こちらの比重が上がる。
+- **優先度の帯の外の、launchd の job と cmux の中の process の違い**。今の検証の process は優先度 31 になったが、I/O の抑制の policy・コアの選ばれ方（効率コアへの寄せ）・launchd の job の他の属性が in_cmux の下と同じかは記録に無い（`ps -o pri` しか読んでいない）。
+- **共通の IT の中身の変化**。比の分母は 10-07 より前の中央値で、同じ名前の IT の本体や helper が 10-08 から 10-27 の間に重くなった分は比に乗る。段が 1 回の単位で起きたことの説明にはならないが、今の比の高さの一部でありうる。
+- **load**。新しい窓の load の平均の中央値は 13.5 で、どの窓でも load の帯で比が動く。帯をそろえても差が残るので主因ではない。
 
 ## 結論
 
-- **原因（最有力）**: 2026-10-08T11:14Z に supervisor が in_cmux mode から launchd mode に替わり、その子として流れる着地の検証の nextest と IT が、`ProcessType` の無い LaunchAgent への launchd の既定の制限（優先度 20 の帯、CPU と I/O の抑制、効率コアへの寄せ）の下で流れるようになったこと。
-  根拠は、段の時刻が mode の切り替わりと回の単位で一致すること、load の帯をそろえても launchd の回が in_cmux の回の 1.6〜2.0 倍なこと、test の binary を替えても差が無いこと、IT の秒が QoS に強く依ること。31 と 20 を同じ時に流した直接の比較は無く、同じ時に替わった supervisor の binary（0f0d3c76）の検証の起動の仕方の変化とは分けていない。
+- **原因**: 2026-10-08T11:14Z の、supervisor の in_cmux mode から launchd mode への切り替わり（同じ時に替わった supervisor の binary 0f0d3c76 を含む）。段の時刻が回の単位で一致し、load の帯をそろえても launchd の回が in_cmux の回の 1.5〜2.0 倍（`ProcessType` の有無を合わせて）で、test の binary を替えても差が無い。
+  その中の何が遅くしたかについて、`ProcessType` の無い LaunchAgent の優先度 20 の帯という説明は外れた。plist に `ProcessType` Interactive を入れて検証の process が優先度 31 になった後も比は 1.84 で、`ProcessType` 無しの 1.82 と変わらない（「ProcessType Interactive の後」）。
 - **寄与の見積もり**: load をそろえた mode の差（1.6〜2.0 倍）が、同じ IT の中央値の和の ×1.40 と 1 本ごとの比の中央値の 1.47（landing-it-alternatives の値）の大部分にあたる。残りは load で、launchd の下でも load の帯で 1.52〜2.39 倍と動く（10-13・10-14 の上乗せ）。着地の検証の切り替えと test の binary の変更の寄与は記録と再現の誤差の内（0 に近い）。
-- worker・review・resume の session と、そこで流す手元の検査も同じ supervisor の子なので、同じ制限を受けていると見込む（測っていない）。
-- **確かめきれていないこと**: 優先度 31 の下で今の IT を流した値（この run の経路から作れない）。次に測るものは、人の terminal（cmux の中、優先度 31）と launchd の子（20）で同じ archive を同じ時に交互に流す比較か、plist に `ProcessType` を足した後の着地の検証のログでの同じ比。
+- worker・review・resume の session と、そこで流す手元の検査も同じ supervisor の子なので、検証の遅さを作るものを同じように受けていると見込む（測っていない）。
+- **優先度 31 対 20 の効果**: `ProcessType` 有り対無しで ×0.99（load の帯ごとに ×0.93〜1.10）。効果は無いと見る。
+- **確かめきれていないこと**: 切り替わりの中の何が遅くしたか。候補は「ProcessType Interactive の後」の末尾に挙げた、同じ時に替わった supervisor の binary の検証の起動の仕方、優先度の外の launchd の job の属性（I/O の policy・コアの選ばれ方）、共通の IT の中身の変化。どれも記録では分けられず、分けるには同じ archive を人の terminal（cmux の中）と launchd の子で同じ時に交互に流す比較が要る。新しい窓は 19 回で、load の帯ごとに 3〜6 回しか無い。
 
 ## 限界
 
@@ -206,11 +235,14 @@ while s < t:
 json.dump(out, open('/dev/stdout', 'w'))
 PY
 python3 docs/plans/it-slowdown-2026-10-08/by_day.py EVENTS.json 2026-10-07T10:27:40.972Z 2026-10-08T11:14:34.532Z > docs/plans/it-slowdown-2026-10-08/by-day.json
+python3 docs/plans/it-slowdown-2026-10-08/by_day.py EVENTS.json 2026-10-07T10:27:40.972Z 2026-10-08T11:14:34.532Z 2026-10-25T14:38:16.993Z > docs/plans/it-slowdown-2026-10-08/by-day-processtype.json
 python3 docs/plans/it-slowdown-2026-10-08/rounds.py LOGDIR r A B C > docs/plans/it-slowdown-2026-10-08/repro-commits.json
 python3 docs/plans/it-slowdown-2026-10-08/rounds.py LOGDIR q u20 bg4 > docs/plans/it-slowdown-2026-10-08/repro-qos.json
 ```
 
-- `by_day.py`: ログから日ごとの 1 本あたりの秒・上位 10 module・回の比・mode と load の帯ごとの比 → `by-day.json`。
+- `by_day.py`: ログから日ごとの 1 本あたりの秒・上位 10 module・回の比・mode と load の帯ごとの比 → `by-day.json`。4 つ目の引数（`ProcessType` の時刻）を渡すと、それ以降の launchd の回を `launchd_interactive` に分ける → `by-day-processtype.json`。
+- `by-day-processtype.json` の材料の EVENTS.json は、上の python の `t` を `D.datetime(2026, 10, 29)` にして 2026-10-01〜10-29 を読んだもの（読んだ時刻は 2026-10-27T19:23Z〜19:25Z（UTC）、状態を変えないコマンド `events` だけを worker のクライアントモードで読んだ）。`by-day.json` は 10-20 で切った材料から作った値で、同じ材料を 10-20 で切って 3 引数で流すと `by-day.json` と同じ出力になる。plist の時刻は `stat -f %Sm` の更新時刻と `dagq events --full --kind supervisor_started --since 2026-10-25T00:00:00Z --until 2026-10-28T00:00:00Z` で、優先度は `ps -axo pid,ppid,pri,nice,comm` で読んだ。
+- 周回しない理由: 残ったログを 1 回読んで計算するだけで揺れの源が無いので、周回数は 1 回。
 - `rounds.py`: 再現の nextest のログ（`LOGDIR/<r|q><周>-<設定>.log`）から周ごとの壁時計と 1 本あたりの中央値・p90 → `repro-commits.json`・`repro-qos.json`。
 - `rounds.txt`: 再現の周ごとの開始時刻・load・nextest の Summary の行。
 - mode の切り替わりは `dagq events --full --kind supervisor_started --since 2026-10-08T10:45:00Z --until 2026-10-08T12:00:00Z`、回の rebase 先は同じ時間の `integration_started` の `main` で読んだ。
