@@ -25,6 +25,7 @@
 
 pub mod actor;
 pub mod attributes;
+pub mod cleanup;
 pub mod cli;
 pub mod install;
 pub mod lifecycle;
@@ -500,8 +501,12 @@ pub fn shell_path(path: impl AsRef<std::path::Path>) -> String {
 /// `service/`. A run's worktree there is too long to name its Claude Code
 /// scratchpad (200 characters at most).
 pub fn short_tempdir() -> tempfile::TempDir {
-    tempfile::tempdir_in("/tmp").unwrap()
+    tempfile::tempdir_in(SHORT_TEMP_ROOT).unwrap()
 }
+
+/// Where [`short_tempdir`] and [`cleanup::owned_short_temp_dir`] make their
+/// directories.
+pub const SHORT_TEMP_ROOT: &str = "/tmp";
 
 /// Set the permission bits of `path` to `mode`: a test makes a file or a
 /// directory of the queue unreadable or unwritable to inject a failure of

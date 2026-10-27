@@ -374,17 +374,28 @@ impl dagq::application::ContainerRuntime for MemoryGated {
 /// container, every part of which answers; the turns' agent runs `turn`
 /// (see [`fake_podman`]) when given. The backend starts each run's wrapper
 /// on a thread with the fake podman's containers, and the options give
-/// the supervisor the same. A timeout, whose `process::exit` skips the
-/// drop of `dir`, removes it ([`common::on_timeout`]), which ends a turn's
-/// wait of [`common::await_file`] too.
+/// the supervisor the same. Its drop ends the wrappers as [`Fixture`]'s
+/// does before `dir` goes. A timeout, whose `process::exit` skips the
+/// drop, removes it as [`Fixture`]'s does ([`remove_at_timeout`]), which
+/// ends a turn's wait of [`common::await_file`] too, and a kill leaves it
+/// to the sweep of a later fixture ([`common::cleanup::owned_temp_dir_in`]).
 pub struct ContainerQueue {
     pub dir: TempDir,
+    pub _owner: fs::File,
     pub repo: PathBuf,
     pub db: PathBuf,
     pub state: PathBuf,
     pub backend: Arc<TestWorkspace>,
     pub options: SuperviseOptions,
     pub _on_timeout: common::Cleanup,
+}
+
+impl Drop for ContainerQueue {
+    fn drop(&mut self) {
+        kill_stubs(&self.db);
+        end_wrappers(&self.db, common::STEP_LIMIT);
+        common::cleanup::remove_fixture_dir(self.dir.path());
+    }
 }
 
 impl ContainerQueue {
@@ -398,7 +409,7 @@ impl ContainerQueue {
     /// directory (its `bin` holds the container's programs) as its
     /// committed `dagq.toml`.
     pub fn configured(turn: Option<&str>, config: impl FnOnce(&Path) -> String) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let (dir, owner) = common::cleanup::owned_temp_dir();
         let (repo, db) = queue_fixture(dir.path());
         let state = dir.path().join("podman");
         fs::write(repo.join("dagq.toml"), config(&state)).unwrap();
@@ -415,17 +426,16 @@ impl ContainerQueue {
         options.container = Some(runtime::ContainerRuntimePort(Arc::new(Usable)));
         options.run_containers = Some(runtime::RunContainersPort(containers));
         let on_timeout = {
-            let path = dir.path().to_owned();
+            let (db, path) = (db.clone(), dir.path().to_owned());
             common::on_timeout(
                 Duration::from_secs(20),
                 format!("remove {}", path.display()),
-                move || {
-                    let _ = fs::remove_dir_all(path);
-                },
+                move || remove_at_timeout(&db, &path),
             )
         };
         Self {
             dir,
+            _owner: owner,
             repo,
             db,
             state,

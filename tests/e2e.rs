@@ -12,8 +12,6 @@
 //! other setting. It loads a LaunchAgent of its own under a disposable HOME
 //! and label, and fails, not skips, on a host where launchd cannot be used.
 use dagq::domain::EventKind;
-#[path = "e2e/cleanup.rs"]
-mod cleanup;
 mod common;
 #[path = "e2e/headless.rs"]
 mod headless;
@@ -25,7 +23,7 @@ mod output;
 mod stub;
 use output::reader;
 
-use cleanup::{claim_fixture_dir, sweep_abandoned_fixtures};
+use common::cleanup::{claim_fixture_dir, sweep_abandoned_fixtures};
 use common::service::OwnedByTest;
 use common::{Bounded, Cleanup, TestWait, WithoutActor};
 use dagq::application::ProcessControl;

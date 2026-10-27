@@ -353,11 +353,25 @@ pub fn launch_background(
     let inherited_env = backend.inherited_env.clone();
     let processes = backend.wrapper_processes.clone();
     let containers = backend.containers.clone();
+    // Held while the wrapper runs: the fixture's drop waits for it.
+    let running = wrapper_running(&db);
     let worker = thread::spawn(move || {
+        let _running = running;
         // The double stands for the wrapper's own process.
         let _wrapper = dagq::infrastructure::sqlite::as_another_process();
+        // One started after the drop counted the wrappers writes nothing.
+        ensure!(!fixture_dropped(&db), "the test's fixture is gone");
         if let Some(gate) = &gate {
-            wait_for_file(gate);
+            let waited = std::time::Instant::now();
+            while !gate.exists() {
+                ensure!(!fixture_dropped(&db), "the test's fixture is gone");
+                assert!(
+                    waited.elapsed() < crate::common::STEP_LIMIT,
+                    "{} never came",
+                    gate.display()
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
         }
         let spawner = ReadySpawner {
             inner: StubSpawner { db: db.clone() },

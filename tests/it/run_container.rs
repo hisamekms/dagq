@@ -2395,7 +2395,7 @@ fn an_adopted_run_s_container_is_removed_by_its_stop() {
     assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
     assert_eq!(queue.removals(&run), (2, 1));
     queue.none_left();
-    drop(queue.dir);
+    drop(queue);
 }
 
 /// Acceptance (1) on the real machine: the arguments of a turn's container

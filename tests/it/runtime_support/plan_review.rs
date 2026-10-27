@@ -31,6 +31,7 @@ use tempfile::TempDir;
 
 pub(crate) struct Fixture {
     _dir: TempDir,
+    _owner: fs::File,
     pub(crate) repo: PathBuf,
     pub(crate) db: PathBuf,
     pub(crate) claude: PathBuf,
@@ -41,7 +42,7 @@ pub(crate) struct Fixture {
 /// A repository with one commit on main, a queue next to it, and a draft
 /// task (1) every other task depends on, so none is ever claimed.
 pub(crate) fn fixture() -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
+    let (dir, owner) = common::cleanup::owned_temp_dir();
     let repo = dir.path().join("repo");
     fs::create_dir(&repo).unwrap();
     common::template::repository(&repo, "seed\n");
@@ -55,6 +56,7 @@ pub(crate) fn fixture() -> Fixture {
 
     Fixture {
         _dir: dir,
+        _owner: owner,
         _test: common::test(),
         repo,
         db,

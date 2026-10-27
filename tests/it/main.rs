@@ -235,6 +235,7 @@ mod verification_container;
 mod worker_escalation;
 mod worker_model;
 
+mod fixture_cleanup;
 mod fixture_templates;
 mod stub_templates;
 

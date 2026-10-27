@@ -133,14 +133,21 @@ macro_rules! watchdog {
 
 /// A test's directory with its repository and queue. Dropping it, when the
 /// test returns or panics, kills every stub agent started on its queue with
-/// all their children, so none outlives the test (task 317). The test is
+/// all their children, so none outlives the test (task 317), and waits for
+/// the session wrappers' threads on the queue ([`end_wrappers`]) before the
+/// directory is removed, so that none writes into it again. The test is
 /// timed while it is held (task 324), and a timeout, whose `process::exit`
 /// skips the drop, kills them and removes the directory through
-/// [`common::on_timeout`] (task 1580), which ends the shells' waits of
-/// [`common::await_file`] whose parent is not the test.
+/// [`common::on_timeout`] (task 1580, [`remove_at_timeout`]), which ends the
+/// shells' waits of [`common::await_file`] whose parent is not the test. A
+/// kill of the test process, which runs neither, leaves the directory to
+/// the sweep of a later fixture ([`common::cleanup::owned_temp_dir_in`]).
 pub struct Fixture {
     pub db: PathBuf,
     pub dir: TempDir,
+    /// How long the drop waits for the session wrappers ([`end_wrappers`]).
+    pub wrappers_limit: Duration,
+    pub _owner: fs::File,
     pub _test: common::Waiting,
     pub _on_timeout: common::Cleanup,
 }
@@ -154,8 +161,109 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         kill_stubs(&self.db);
+        end_wrappers(&self.db, self.wrappers_limit);
         common::service::unserve(&self.db);
+        common::cleanup::remove_fixture_dir(self.dir.path());
     }
+}
+
+/// The session wrappers' threads of [`headless::launch_background`] that
+/// still run, per queue: each holds a clone of its queue's token while it
+/// runs ([`wrapper_running`]).
+static WRAPPERS: LazyLock<Mutex<HashMap<PathBuf, Arc<()>>>> = LazyLock::new(Default::default);
+
+/// The token a session wrapper's thread on `db` holds while it runs.
+pub fn wrapper_running(db: &Path) -> Arc<()> {
+    WRAPPERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(db.into())
+        .or_default()
+        .clone()
+}
+
+/// How many session wrappers' threads on `db` still run.
+pub fn wrappers_running(db: &Path) -> usize {
+    WRAPPERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(db)
+        .map_or(0, |token| Arc::strong_count(token) - 1)
+}
+
+/// End the session wrappers' threads on `db` once its stubs are killed, and
+/// wait for them: a wrapper whose turn was killed records it and writes its
+/// idle marker, and one between turns takes the exit request written here.
+/// A wrapper's write into the run directory after the fixture's removal
+/// started would leave the directory with it, so this never returns with
+/// one running: past `limit` the test binary fails as at any wait past its
+/// limit ([`common::within`]), and the timeout's cleanup leaves the
+/// directory to the sweep ([`remove_at_timeout`]).
+pub fn end_wrappers(db: &Path, limit: Duration) {
+    request_exits(db);
+    let _waiting = common::within(
+        limit,
+        format!(
+            "the session wrappers on {} to end after the fixture's drop",
+            db.display()
+        ),
+    );
+    while wrappers_running(db) > 0 {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Write the exit request of every run of `db` (its `turns` made if it has
+/// none yet), which a session wrapper between turns takes. The run files'
+/// writes ([`LocalRunFiles`]) refuse a run or a `turns` that is a link and
+/// replace an `exit` that is one, so a link a test left in a run directory
+/// changes nothing out of the fixture.
+fn request_exits(db: &Path) {
+    use dagq::application::RunFiles;
+    if let Ok(runs) = fs::read_dir(db.with_file_name("runs")) {
+        for run in runs.flatten() {
+            let exit = dagq::domain::turn::exit_path(&run.path());
+            if LocalRunFiles.create_dir_all(exit.parent().unwrap()).is_ok() {
+                let _ = LocalRunFiles.write(&exit, b"");
+            }
+        }
+    }
+}
+
+/// How long the cleanup of a timeout gives the session wrappers to end
+/// ([`remove_at_timeout`]).
+const WRAPPERS_AT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The cleanup of the fixture of `db` in `dir` at a timeout, whose
+/// `process::exit` skips its drop: kill the stubs, ask the session wrappers
+/// to end, and remove the directory once none runs. A wrapper still running
+/// after [`WRAPPERS_AT_TIMEOUT`] ends with the process right after, and the
+/// directory, whose owner lock the exit frees, is left whole to the sweep of
+/// a later fixture: a removal the wrapper wrote into again would leave a part
+/// of it without its owner file. The shells' waits end with the test
+/// process then.
+pub fn remove_at_timeout(db: &Path, dir: &Path) {
+    kill_stubs(db);
+    request_exits(db);
+    let deadline = Instant::now() + WRAPPERS_AT_TIMEOUT;
+    while wrappers_running(db) > 0 {
+        if Instant::now() >= deadline {
+            eprintln!(
+                "{} session wrapper(s) on {} still run; {} is left to a later fixture's sweep",
+                wrappers_running(db),
+                db.display(),
+                dir.display()
+            );
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    common::cleanup::remove_fixture_dir(dir);
+}
+
+/// Whether the fixture of `db` was dropped ([`kill_stubs`]).
+pub fn fixture_dropped(db: &Path) -> bool {
+    matches!(stubs().get(db), Some(None))
 }
 
 /// The process groups of the stub agents started per queue; a queue whose
@@ -317,9 +425,10 @@ impl Drop for RemoveOnDrop {
 }
 
 /// A queue with a ready task and its repository, in a directory of their
-/// own in `/tmp` ([`common::short_tempdir`]): the sweep's, the cleanup's
-/// and the retention's tests need the queue under no run directory and its
-/// runs' worktrees short enough to name their scratchpads.
+/// own in `/tmp` ([`common::cleanup::owned_short_temp_dir`]): the sweep's,
+/// the cleanup's and the retention's tests need the queue under no run
+/// directory and its runs' worktrees short enough to name their
+/// scratchpads.
 pub fn fixture() -> (Fixture, PathBuf, PathBuf) {
     fixture_with_queue_in(Path::new(""))
 }
@@ -327,7 +436,7 @@ pub fn fixture() -> (Fixture, PathBuf, PathBuf) {
 /// [`fixture`] with the queue in `queue_dir`, relative to the fixture's
 /// directory (made), the repository staying beside it.
 pub fn fixture_with_queue_in(queue_dir: &Path) -> (Fixture, PathBuf, PathBuf) {
-    let dir = common::short_tempdir();
+    let (dir, owner) = common::cleanup::owned_short_temp_dir();
     let repo = dir.path().join("repo's directory");
     fs::create_dir(&repo).unwrap();
     common::template::repository(&repo, "fixture\n");
@@ -340,16 +449,15 @@ pub fn fixture_with_queue_in(queue_dir: &Path) -> (Fixture, PathBuf, PathBuf) {
         common::on_timeout(
             Duration::from_secs(20),
             format!("kill the stub agents of {} and remove it", db.display()),
-            move || {
-                kill_stubs(&db);
-                let _ = fs::remove_dir_all(path);
-            },
+            move || remove_at_timeout(&db, &path),
         )
     };
     (
         Fixture {
             db: db.clone(),
             dir,
+            wrappers_limit: common::STEP_LIMIT,
+            _owner: owner,
             _test: common::test(),
             _on_timeout: on_timeout,
         },

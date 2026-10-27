@@ -442,6 +442,7 @@ impl Drop for Served {
 /// A queue with one task claimed as run `run`.
 pub struct Queue {
     _dir: tempfile::TempDir,
+    _owner: std::fs::File,
     pub db: PathBuf,
     pub run: TaskRun,
 }
@@ -460,10 +461,11 @@ impl Drop for Queue {
 }
 
 /// A queue with a claimed run, in a directory of its own in `/tmp`
-/// ([`common::short_tempdir`]), so that its service's socket is in its
-/// `service/`, where a path that names the queue beside it finds it too.
+/// ([`common::cleanup::owned_short_temp_dir`]), so that its service's
+/// socket is in its `service/`, where a path that names the queue beside it
+/// finds it too.
 pub fn queue() -> Queue {
-    let dir = common::short_tempdir();
+    let (dir, owner) = common::cleanup::owned_short_temp_dir();
     let mut queue = common::template::queue(&dir.path().join("queue.db"));
     let task = queue.add(common::queue::new_task("served")).unwrap();
     queue
@@ -475,6 +477,7 @@ pub fn queue() -> Queue {
     Queue {
         db: dir.path().join("queue.db"),
         _dir: dir,
+        _owner: owner,
         run: *run,
     }
 }
