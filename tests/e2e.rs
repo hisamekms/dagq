@@ -19,8 +19,11 @@ mod common;
 mod headless;
 #[path = "e2e/other_repository.rs"]
 mod other_repository;
+#[path = "e2e/output.rs"]
+mod output;
 #[path = "e2e/stub.rs"]
 mod stub;
+use output::reader;
 
 use cleanup::{claim_fixture_dir, sweep_abandoned_fixtures};
 use common::service::OwnedByTest;
@@ -281,14 +284,6 @@ impl Drop for ChildGuard {
 fn joined<T>(handle: thread::JoinHandle<T>, what: &str) -> T {
     let _waiting = common::within(common::STEP_LIMIT, format!("{what} to return"));
     handle.join().unwrap()
-}
-
-fn reader(mut source: impl Read + Send + 'static) -> thread::JoinHandle<String> {
-    thread::spawn(move || {
-        let mut text = String::new();
-        source.read_to_string(&mut text).unwrap();
-        text
-    })
 }
 
 /// The directory name of every fixture's disposable repository, so what an
@@ -603,7 +598,7 @@ fn supervise_once(fixture: &Fixture, extra: &[&str], tasks: &[&str]) -> Pass {
             let _ = child.0.kill();
             let _ = child.0.wait();
             child.reaped();
-            let stderr = joined(stderr, "the supervisor's stderr reader");
+            let stderr = stderr.snapshot();
             panic!(
                 "supervise did not finish within {:?}; its stderr:\n{stderr}",
                 deadline - started
@@ -639,10 +634,14 @@ fn supervise_once(fixture: &Fixture, extra: &[&str], tasks: &[&str]) -> Pass {
     };
     let supervise_took = started.elapsed();
     fs::remove_file(&watching).unwrap();
-    let stdout = joined(stdout, "the supervisor's stdout reader");
-    let stderr = joined(stderr, "the supervisor's stderr reader");
+    assert!(
+        status.success(),
+        "supervise failed ({status}): {}",
+        stderr.snapshot()
+    );
+    let stdout = stdout.finish("the supervisor's stdout reader");
+    let stderr = stderr.finish("the supervisor's stderr reader");
     eprintln!("supervise finished in {supervise_took:?}\n{stderr}");
-    assert!(status.success(), "supervise failed ({status}): {stderr}");
     let outcome: Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(outcome["outcome"], "finished", "{outcome}");
     Pass {
@@ -1441,17 +1440,13 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     let victim_pid = victim.0.id();
     let started = Instant::now();
     let deadline = common::deadline_after(started, SUPERVISE_TIMEOUT);
-    let mut victim_stderr = Some(victim_stderr);
     let run = loop {
         let exited = victim.0.try_wait().unwrap().is_some();
         if exited || Instant::now() >= deadline {
             let _ = victim.0.kill();
             let _ = victim.0.wait();
             victim.reaped();
-            let log = joined(
-                victim_stderr.take().unwrap(),
-                "the supervisor's stderr reader",
-            );
+            let log = victim_stderr.snapshot();
             let runs = dagq(env, &["show", &task_id, "--full"])["runs"].clone();
             panic!(
                 "the worker did not start within {:?} (the supervisor exited: {exited}); runs: {runs}\nsupervisor stderr:\n{log}",
@@ -1466,7 +1461,6 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
         }
         thread::sleep(Duration::from_millis(200));
     };
-    let victim_stderr = victim_stderr.take().unwrap();
     let run_id = run["id"].as_str().unwrap().to_owned();
     let workspace = run["workspace_id"].as_str().unwrap().to_owned();
     fixture.wrappers.record(&workspace);
@@ -1477,10 +1471,7 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     victim.0.kill().unwrap();
     victim.0.wait().unwrap();
     victim.reaped();
-    eprintln!(
-        "killed supervisor stderr:\n{}",
-        joined(victim_stderr, "the killed supervisor's stderr reader")
-    );
+    eprintln!("killed supervisor stderr:\n{}", victim_stderr.snapshot());
     assert!(!pid_alive(victim_pid));
     // The worker finishes its receipt with no supervisor watching it.
     fs::write(Path::new(run["run_dir"].as_str().unwrap()).join("go"), "").unwrap();
@@ -1925,12 +1916,14 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     let run = loop {
         assert!(
             supervisor.0.try_wait().unwrap().is_none(),
-            "the supervisor exited before the worker started"
+            "the supervisor exited before the worker started; stderr:\n{}",
+            stderr.snapshot()
         );
         assert!(
             Instant::now() < start_deadline,
-            "the worker did not start within {:?}",
-            start_deadline - started
+            "the worker did not start within {:?}; supervisor stderr:\n{}",
+            start_deadline - started,
+            stderr.snapshot()
         );
         let detail = dagq(env, &["show", &task_id, "--full"]);
         if let Some(run) = detail["runs"].as_array().unwrap().last()
@@ -1967,7 +1960,11 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
         .to_owned();
     assert!(fixed.with_file_name("dagq.previous").is_file());
     // The same process, the same registration; the session goes on.
-    assert!(supervisor.0.try_wait().unwrap().is_none());
+    assert!(
+        supervisor.0.try_wait().unwrap().is_none(),
+        "the supervisor exited; stderr:\n{}",
+        stderr.snapshot()
+    );
     let status = dagq(env, &["status"]);
     let supervisors = status["supervisors"].as_array().unwrap();
     assert_eq!(supervisors.len(), 1, "{status}");
@@ -1979,11 +1976,10 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
 
     // Let the worker finish: the continued supervisor lands the run.
     fs::write(run_dir.join("go"), "").unwrap();
-    let mut stderr = Some(stderr);
     let landed = loop {
         if Instant::now() >= land_deadline {
             let _ = supervisor.0.kill();
-            let log = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
+            let log = stderr.snapshot();
             panic!("the run did not land; supervisor stderr:\n{log}");
         }
         let detail = dagq(env, &["show", &task_id, "--full"]);
@@ -2023,7 +2019,11 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     );
     assert_eq!(rolled["supervisors"][0]["pid"], pid, "{rolled}");
     assert_eq!(rolled["supervisors"][0]["token"], token.as_str());
-    assert!(supervisor.0.try_wait().unwrap().is_none());
+    assert!(
+        supervisor.0.try_wait().unwrap().is_none(),
+        "the supervisor exited; stderr:\n{}",
+        stderr.snapshot()
+    );
 
     // SIGINT drains the continued supervisor like any other.
     unsafe { libc::kill(pid as i32, libc::SIGINT) };
@@ -2033,12 +2033,20 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
             supervisor.reaped();
             break exit;
         }
-        assert!(Instant::now() < deadline, "the supervisor did not stop");
+        assert!(
+            Instant::now() < deadline,
+            "the supervisor did not stop; stderr:\n{}",
+            stderr.snapshot()
+        );
         thread::sleep(Duration::from_millis(200));
     };
-    let stderr = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
+    assert!(
+        exit.success(),
+        "{exit}\nsupervisor stderr:\n{}",
+        stderr.snapshot()
+    );
+    let stderr = stderr.finish("the supervisor's stderr reader");
     eprintln!("supervisor stderr:\n{stderr}");
-    assert!(exit.success(), "{exit}");
     assert_eq!(
         stderr
             .matches(&format!("supervisor {token} handed off: version {VERSION}"))
@@ -2125,12 +2133,14 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     let run = loop {
         assert!(
             supervisor.0.try_wait().unwrap().is_none(),
-            "the supervisor exited before the worker started"
+            "the supervisor exited before the worker started; stderr:\n{}",
+            stderr.snapshot()
         );
         assert!(
             Instant::now() < start_deadline,
-            "the worker did not start within {:?}",
-            start_deadline - started
+            "the worker did not start within {:?}; supervisor stderr:\n{}",
+            start_deadline - started,
+            stderr.snapshot()
         );
         let detail = dagq(env, &["show", &task_id, "--full"]);
         if let Some(run) = detail["runs"].as_array().unwrap().last()
@@ -2151,11 +2161,10 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     git(repo, &["add", "src/lib.rs"]);
     git(repo, &["commit", "-q", "-m", "runtime change"]);
     let landed = git(repo, &["rev-parse", "main"]).trim().to_owned();
-    let mut stderr = Some(stderr);
     while !installed(&landed) {
         if Instant::now() >= start_deadline {
             let _ = supervisor.0.kill();
-            let log = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
+            let log = stderr.snapshot();
             panic!(
                 "{landed} was not installed: {:?}\nsupervisor stderr:\n{log}",
                 updates()
@@ -2164,7 +2173,11 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
         thread::sleep(Duration::from_millis(300));
     }
     assert!(fixed.with_file_name("dagq.previous").is_file());
-    assert!(supervisor.0.try_wait().unwrap().is_none());
+    assert!(
+        supervisor.0.try_wait().unwrap().is_none(),
+        "the supervisor exited; stderr:\n{}",
+        stderr.snapshot()
+    );
     let status = dagq(env, &["status"]);
     assert_eq!(status["auto_update"]["state"], "installed", "{status}");
     assert_eq!(status["auto_update"]["commit"], landed.as_str(), "{status}");
@@ -2181,7 +2194,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     let detail = loop {
         if Instant::now() >= land_deadline {
             let _ = supervisor.0.kill();
-            let log = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
+            let log = stderr.snapshot();
             panic!("the run did not land; supervisor stderr:\n{log}");
         }
         let detail = dagq(env, &["show", &task_id, "--full"]);
@@ -2218,10 +2231,18 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
             supervisor.reaped();
             break exit;
         }
-        assert!(Instant::now() < deadline, "the supervisor did not stop");
+        assert!(
+            Instant::now() < deadline,
+            "the supervisor did not stop; stderr:\n{}",
+            stderr.snapshot()
+        );
         thread::sleep(Duration::from_millis(200));
     };
-    let stderr = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
-    assert!(exit.success(), "{exit}\n{stderr}");
+    assert!(
+        exit.success(),
+        "{exit}\nsupervisor stderr:\n{}",
+        stderr.snapshot()
+    );
+    let stderr = stderr.finish("the supervisor's stderr reader");
     assert!(!stderr.contains("could not exec"), "{stderr}");
 }
