@@ -735,6 +735,11 @@ pub struct Integration<'a> {
     /// landing is handed over to wait for the slot again. `None` (a
     /// person's `integrate`) never hands over.
     pub handing_off: Option<HandoffDrain<'a>>,
+    /// The build identifier of the binary that lands (the supervisor's
+    /// `binary_version`, or this binary's at a person's `integrate`),
+    /// recorded as the `build` of an `integration_error`: a supervisor of
+    /// another build takes the run up once (ADR-t3524-1).
+    pub build: &'a str,
 }
 
 /// What a landing reads, before it verifies again, to know whether the
@@ -874,7 +879,7 @@ impl Integrator {
         let previous = ctx.queue.act_as(self.actor.clone());
         let requested_by = ctx.queue.request_as(Some(&request.requester));
         let landed = self
-            .check(&mut *ctx.queue, request)
+            .check(&mut *ctx.queue, request, ctx.build)
             .and_then(|()| land_integrating(ctx, &grant, request));
         ctx.queue.restore_request(requested_by);
         if let Some(previous) = previous {
@@ -924,7 +929,12 @@ impl Integrator {
 
     /// Refuse `request` unless [`landing_refusal`] finds nothing wrong,
     /// giving its slot back (when the request still holds it).
-    fn check(&self, queue: &mut dyn Queue, request: &IntegrationRequest) -> Result<()> {
+    fn check(
+        &self,
+        queue: &mut dyn Queue,
+        request: &IntegrationRequest,
+        build: &str,
+    ) -> Result<()> {
         let run = queue.run(request.run.id())?;
         let holds = queue.holds_lease(run.id(), &request.token)?;
         let events = queue.run_events(run.id())?;
@@ -943,7 +953,7 @@ impl Integrator {
                 &request.token,
                 request.previous.as_str(),
                 &message,
-                &Reason::new(ReasonCode::Other),
+                &Reason::new(ReasonCode::Other).with("build", build),
             ) {
                 Ok(run) => record_landing_left(
                     &*queue,
@@ -1333,7 +1343,7 @@ fn land_integrating(
                 token,
                 previous.as_str(),
                 &message,
-                &reason_of_error(&error, ReasonCode::Other),
+                &reason_of_error(&error, ReasonCode::Other).with("build", ctx.build),
             ) {
                 Ok(run) => record_landing_left(
                     &*queue,
@@ -1579,8 +1589,9 @@ fn record_landing_left<Q: EventStore + ?Sized>(
     if requester.role() == ActorRole::Supervisor {
         return;
     }
+    // A person's landing: no supervisor's build takes it up again.
     record_phase(queue, run.id(), cause, |events| {
-        run_phase::Phase::after_landing(run.status(), events)
+        run_phase::Phase::after_landing(run.status(), events, None)
     });
 }
 

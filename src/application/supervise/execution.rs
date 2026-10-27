@@ -3969,6 +3969,7 @@ impl Supervisor<'_> {
                         &run,
                         slot.track.attempt(),
                         run.status().as_str(),
+                        Some(&self.layout.version),
                     );
                     // Main moved: the runs that wait to land are checked
                     // against it (ADR-0068 decision 1).
@@ -4339,7 +4340,15 @@ impl Supervisor<'_> {
         cause: &str,
     ) {
         match self.queue.run(id) {
-            Ok(run) => stages::record_rest(&*self.queue, &run, attempt, cause),
+            Ok(run) => {
+                stages::record_rest(
+                    &*self.queue,
+                    &run,
+                    attempt,
+                    cause,
+                    Some(&self.layout.version),
+                );
+            }
             Err(error) => {
                 warn!(run_id = %id, error = %format_args!("{error:#}"), "run {id}: could not record its phase: {error:#}");
             }

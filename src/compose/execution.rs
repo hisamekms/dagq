@@ -688,6 +688,7 @@ impl OneShot {
             steps: None,
             // No handoff drains a person's landing.
             handing_off: None,
+            build: crate::VERSION,
         };
         let integrator = Integrator::of_process(std::process::id());
         let Some(request) = integrator.approve(&mut integration, &requester, target, repo)? else {

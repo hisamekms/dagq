@@ -107,6 +107,11 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 - leaseも閉じていないaskも無く最後のreviewが着地を許す`awaiting_integration`のrunは、fill passがreviewをやり直さずに着地の列に戻す（`take_up_stranded_landings`、判定は`domain::stranded_landing`、[ADR-t3049-1](../../adr/2026-10-21-t3049-1-supervisor-takes-up-a-passed-run-left-awaiting-integration-without-lease-or-ask.md)）。
   review以降に人の判断を待つ理由（ask・`integration_held`・runtimeのerror・holdや再計画・cancelなど）のあるrunは人に残す（`domain::stranded_landing`の`Keep`）。
   leaseを作る`lease_stranded_landing`はadoptと別の経路で、判定をその時点のeventで検査し直す。
+- 例外: supervisorが始めた着地がcode `other`の`integration_error`でmainを動かす前に止まったrunは、errorが記録したbuildと違うbuildのsupervisorが1回拾い直す（`stranded_landing::build_retry`、[ADR-t3524-1](../../adr/2026-10-28-t3524-1-a-supervisor-of-another-build-takes-up-once-a-landing-an-error-stopped-before-main-moved.md)）。
+  上限はbuildごとに1回で、最後のreview以降の履歴にそのbuildのerrorか拾い直しがあれば拾わない（A→B→Aも拾わない）。
+  1つのerrorの拾い直しも1回で、最新のerrorの後にどのbuildかの拾い直しがあれば拾わない。
+  `lease_stranded_landing`はleaseを取るsupervisorの登録のbuildで判定し直し、拾い直しの記録に元のerrorと両方のbuildを残す。
+  そのrunの工程は記録するsupervisorのbuildで判定し、着地を止めたbuildでは人の答えを待つ工程になる。
 - 落とし穴: 人を待たせるために新しくleaseを返す経路は、その理由をreview以降のeventかqueueの状態に残さないと拾い直される。
 
 ## recoverとtriage

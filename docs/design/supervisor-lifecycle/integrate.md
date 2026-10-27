@@ -164,6 +164,8 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 ## errorと復旧
 
 - `main`が動く前のerrorはslotを返してrunを戻し`integrate`は非0で終わり（`abort_integration`）、動いた後の後始末・push・follow_upsの失敗は着地を変えず、完了の記録が失敗したときはerrorが着地のcommitを名指す。
+- `main`が動く前のerrorの記録は着地を動かしたバイナリのbuildを持ち、supervisorの着地がcode `other`で止まったrunは別のbuildのsupervisorがbuildごとに1回拾い直して着地をやり直す（[Supervise](supervise.md#leaseの解放)、ADR-t3524-1）。
+  変更が既にmainにあるrunの拾い直しはrebaseの後に何も残らず、空のrebaseとして着地を控えてsessionに戻す。
 - `integrate`のprocessが途中で死んだrunは`integrating`のまま残り、`doctor`が報告し、`recover`が着地待ちに戻す。
   `integrating`のrunが残る間は、着地もlanding recheckも始まらない。
 

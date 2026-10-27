@@ -185,7 +185,12 @@ impl SqliteQueue {
     /// that judged the same run finds the first one's lease, and one that
     /// judged it before another's landing held it for a person
     /// (`integration_held`) and gave it back finds that event, and each
-    /// takes nothing.
+    /// takes nothing. The judging build is `token`'s registration's
+    /// `binary_version`, as the supervisor judged with its own: a run whose
+    /// landing an error stopped is taken up once by each other build
+    /// ([`crate::domain::stranded_landing::build_retry`], ADR-t3524-1), and
+    /// one that build or another supervisor of it took up since is not; the
+    /// take-up records the error and both builds under `build_retry`.
     pub fn lease_stranded_landing(
         &mut self,
         id: &RunId,
@@ -218,12 +223,25 @@ impl SqliteQueue {
             task: task.parse()?,
         };
         let events = run_events_of(&tx, id)?;
-        if crate::domain::stranded_landing::judge(seen, &events)
+        let build: Option<String> = tx
+            .query_row(
+                "SELECT binary_version FROM supervisors WHERE token=?1",
+                [token],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let build = build.as_deref();
+        if crate::domain::stranded_landing::judge(seen, &events, build)
             != crate::domain::stranded_landing::Stranded::TakeUp
         {
             return Ok(None);
         }
-        if !lease_in(&tx, id, token, now, json!({"reason": "stranded_landing"}))? {
+        let mut payload = json!({"reason": "stranded_landing"});
+        if let Some(retry) = crate::domain::stranded_landing::build_retry(&events, build) {
+            payload[crate::domain::stranded_landing::BUILD_RETRY_KEY] = retry.record();
+        }
+        if !lease_in(&tx, id, token, now, payload)? {
             return Ok(None);
         }
         let run = stored_run(&tx, id)?.unwrap_or(run);

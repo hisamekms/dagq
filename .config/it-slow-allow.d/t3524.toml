@@ -1,0 +1,9 @@
+[[test]]
+name = "runtime_stranded_landing::a_landing_an_error_stopped_is_taken_up_by_another_build_and_lands"
+reason = "B 境界（supervisor の配線・Git の着地・SQLite のトランザクション）: 実際の supervisor の着地が main を動かす前に止まって build と依頼元を integration_error に残し、同じ build の supervisor が拾わず、lease のトランザクションが登録の build で判定し直して同じ build を拒み、別の build の supervisor の pass が review をやり直さずに着地させて拾い直しの記録を残すことを確かめる。拾うかの判断は domain::stranded_landing の unit test"
+task = 3524
+
+[[test]]
+name = "runtime_stranded_landing::a_run_whose_change_is_already_on_main_is_taken_up_once_and_ends_failed"
+reason = "B 境界（Git の rebase・supervisor の配線）: 変更が既に main にある run を別の build が拾い直すと、実際の rebase が空になって着地を控え、resume した session の失敗の receipt で failed になり、main が動かず同じ build で繰り返さないことを確かめる"
+task = 3524

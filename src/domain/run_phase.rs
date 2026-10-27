@@ -270,9 +270,9 @@ impl Phase {
     /// else for a slot or the container its verification is set to; and
     /// that a run whose hold's wait was recorded ([`Self::Held`]) and not
     /// released since is still in it; and that a run awaiting integration
-    /// a supervisor takes up again waits to go back to a slot
-    /// ([`Self::awaiting_at_rest`]).
-    pub fn resting(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
+    /// a supervisor of build `build` (the one that records it) takes up
+    /// again waits to go back to a slot ([`Self::awaiting_at_rest`]).
+    pub fn resting(status: RunStatus, events: &[RunEvent], build: Option<&str>) -> Option<Self> {
         if status.is_unfinished() && held_unreleased(events) {
             return Some(Self::Held);
         }
@@ -283,7 +283,7 @@ impl Phase {
                 Self::ClaimHeld
             });
         }
-        Self::awaiting_at_rest(status, events).or_else(|| {
+        Self::awaiting_at_rest(status, events, build).or_else(|| {
             Self::at_rest(
                 status,
                 RunHistory::from_events(events).queued_approval().is_some(),
@@ -294,11 +294,18 @@ impl Phase {
     /// The phase of a run awaiting integration that no lease holds and no
     /// `land` answer queued, when its events leave it to a supervisor to
     /// take up again ([`super::stranded_landing::kept`], ADR-t3049-1): it
-    /// waits to go back to a slot, not for a person.
-    fn awaiting_at_rest(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
+    /// waits to go back to a slot, not for a person. Judged with `build`,
+    /// the build of the supervisor that records it: one whose landing an
+    /// error stopped rests as a person's for the build that stopped it,
+    /// and a supervisor of another build takes it up (ADR-t3524-1).
+    fn awaiting_at_rest(
+        status: RunStatus,
+        events: &[RunEvent],
+        build: Option<&str>,
+    ) -> Option<Self> {
         (status == RunStatus::AwaitingIntegration
             && RunHistory::from_events(events).queued_approval().is_none()
-            && super::stranded_landing::kept(events).is_none())
+            && super::stranded_landing::kept(events, build).is_none())
         .then_some(Self::Returning)
     }
 }
@@ -323,13 +330,18 @@ impl Phase {
     /// leaves the run in, by the status it left the run in and the run's
     /// `events` (whether it is approved and queued to land): as
     /// [`Self::at_rest`], `None` for a run another process takes up; a run
-    /// whose hold settled as it came to rest is [`Self::Held`].
-    pub fn after_landing(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
+    /// whose hold settled as it came to rest is [`Self::Held`]. `build` is
+    /// the recording build, as for [`Self::resting`].
+    pub fn after_landing(
+        status: RunStatus,
+        events: &[RunEvent],
+        build: Option<&str>,
+    ) -> Option<Self> {
         if status.is_unfinished() && held_unreleased(events) {
             return Some(Self::Held);
         }
         let queued = RunHistory::from_events(events).queued_approval().is_some();
-        Self::awaiting_at_rest(status, events).or_else(|| Self::at_rest(status, queued))
+        Self::awaiting_at_rest(status, events, build).or_else(|| Self::at_rest(status, queued))
     }
 
     /// The phase a recovery (`run_recovered`, already among the run's
@@ -353,7 +365,7 @@ impl Phase {
             Some(RecoveredLanding::Review(_)) if status == RunStatus::AwaitingIntegration => {
                 Some(Self::Returning)
             }
-            _ => Self::awaiting_at_rest(status, events)
+            _ => Self::awaiting_at_rest(status, events, None)
                 .or_else(|| Self::at_rest(status, history.queued_approval().is_some())),
         }
     }
@@ -694,7 +706,8 @@ mod tests {
             json!({"ask_id": 3, "answer": "land"}),
         );
         let started = event(2, event_kind::INTEGRATION_STARTED, json!({}));
-        let after = |status| Phase::after_landing(status, &[approved.clone(), started.clone()]);
+        let after =
+            |status| Phase::after_landing(status, &[approved.clone(), started.clone()], None);
         assert_eq!(
             after(RunStatus::AwaitingIntegration),
             Some(Phase::LandingAnswer)
@@ -718,11 +731,11 @@ mod tests {
         ];
         let awaiting = RunStatus::AwaitingIntegration;
         assert_eq!(
-            Phase::resting(awaiting, &given_back),
+            Phase::resting(awaiting, &given_back, None),
             Some(Phase::Returning)
         );
         assert_eq!(
-            Phase::after_landing(awaiting, &given_back),
+            Phase::after_landing(awaiting, &given_back, None),
             Some(Phase::Returning)
         );
         assert_eq!(
@@ -736,10 +749,16 @@ mod tests {
             event_kind::ASK_OPENED,
             json!({"kind": "approve_landing", "asked_by": "supervisor", "ask_id": 9}),
         ));
-        assert_eq!(Phase::resting(awaiting, &asked), Some(Phase::LandingAnswer));
+        assert_eq!(
+            Phase::resting(awaiting, &asked, None),
+            Some(Phase::LandingAnswer)
+        );
         let mut held = given_back.clone();
         held.push(event(5, event_kind::INTEGRATION_HELD, json!({})));
-        assert_eq!(Phase::resting(awaiting, &held), Some(Phase::LandingAnswer));
+        assert_eq!(
+            Phase::resting(awaiting, &held, None),
+            Some(Phase::LandingAnswer)
+        );
         // A take-up that failed let go of it: it waits for a person.
         let mut given_up = given_back;
         given_up.push(event(
@@ -748,8 +767,46 @@ mod tests {
             json!({"message": "x", "lease_released": true}),
         ));
         assert_eq!(
-            Phase::resting(awaiting, &given_up),
+            Phase::resting(awaiting, &given_up, None),
             Some(Phase::LandingAnswer)
+        );
+    }
+
+    /// A passed run whose supervisor's landing an error stopped before main
+    /// moved (ADR-t3524-1) waits for a person as the build that stopped it
+    /// records it, and to go back to a slot as another build records it,
+    /// which takes it up.
+    #[test]
+    fn a_landing_an_error_stopped_rests_by_the_recording_build() {
+        let mut stopped = vec![
+            event(1, event_kind::REVIEW_FINISHED, json!({"verdict": "pass"})),
+            event(
+                2,
+                event_kind::INTEGRATION_ERROR,
+                json!({"code": "other", "build": "A", "status": "awaiting_integration"}),
+            ),
+        ];
+        stopped[1].actor = Some(crate::domain::EventActor {
+            role: "integrator".into(),
+            id: "integrator:1".into(),
+            requested_by: Some("supervisor:7".into()),
+        });
+        let awaiting = RunStatus::AwaitingIntegration;
+        assert_eq!(
+            Phase::resting(awaiting, &stopped, Some("A")),
+            Some(Phase::LandingAnswer)
+        );
+        assert_eq!(
+            Phase::resting(awaiting, &stopped, None),
+            Some(Phase::LandingAnswer)
+        );
+        assert_eq!(
+            Phase::resting(awaiting, &stopped, Some("B")),
+            Some(Phase::Returning)
+        );
+        assert_eq!(
+            Phase::after_landing(awaiting, &stopped, Some("B")),
+            Some(Phase::Returning)
         );
     }
 
@@ -764,10 +821,14 @@ mod tests {
         );
         let lease = event(2, event_kind::LEASE_RELEASED, json!({}));
         let released = event(3, event_kind::TASK_RELEASED, json!({"hold_id": 1}));
-        let resting = |events: &[RunEvent]| Phase::resting(RunStatus::NeedsSession, events);
+        let resting = |events: &[RunEvent]| Phase::resting(RunStatus::NeedsSession, events, None);
         assert_eq!(resting(&[held.clone(), lease.clone()]), Some(Phase::Held));
         assert_eq!(
-            Phase::resting(RunStatus::AwaitingIntegration, std::slice::from_ref(&held)),
+            Phase::resting(
+                RunStatus::AwaitingIntegration,
+                std::slice::from_ref(&held),
+                None
+            ),
             Some(Phase::Held)
         );
         assert_eq!(
@@ -778,7 +839,11 @@ mod tests {
         // its hold leaves it in the wait, not in the rest it would record.
         let recovered = event(4, event_kind::RUN_RECOVERED, json!({}));
         assert_eq!(
-            Phase::after_landing(RunStatus::AwaitingIntegration, std::slice::from_ref(&held)),
+            Phase::after_landing(
+                RunStatus::AwaitingIntegration,
+                std::slice::from_ref(&held),
+                None
+            ),
             Some(Phase::Held)
         );
         assert_eq!(
@@ -787,7 +852,7 @@ mod tests {
         );
         // An ended run is not held: its life ended.
         assert_eq!(
-            Phase::resting(RunStatus::Failed, std::slice::from_ref(&held)),
+            Phase::resting(RunStatus::Failed, std::slice::from_ref(&held), None),
             Some(Phase::Ended)
         );
         assert_eq!(
@@ -823,7 +888,7 @@ mod tests {
         let answered = event(5, event_kind::ASK_ANSWERED, json!({"ask_id": 9}));
         let resting = |events: &[&RunEvent]| {
             let events: Vec<RunEvent> = events.iter().map(|e| (*e).clone()).collect();
-            Phase::resting(RunStatus::Validating, &events)
+            Phase::resting(RunStatus::Validating, &events, None)
         };
         assert_eq!(resting(&[&accepted]), Some(Phase::ClaimHeld));
         assert_eq!(resting(&[&accepted, &snapshot]), None);
@@ -840,9 +905,16 @@ mod tests {
             event_kind::VALIDATION_FINISHED,
             json!({"status": "validating"}),
         );
-        assert_eq!(Phase::resting(RunStatus::Validating, &[validated]), None);
         assert_eq!(
-            Phase::resting(RunStatus::Succeeded, &[accepted.clone(), verified.clone()]),
+            Phase::resting(RunStatus::Validating, &[validated], None),
+            None
+        );
+        assert_eq!(
+            Phase::resting(
+                RunStatus::Succeeded,
+                &[accepted.clone(), verified.clone()],
+                None
+            ),
             Some(Phase::Ended)
         );
     }

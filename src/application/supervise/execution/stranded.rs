@@ -2,7 +2,8 @@
 //! though their last review lets them land (ADR-t3049-1): a supervisor
 //! that stopped gave the lease back as the run waited for its landing.
 //! The fill pass takes each up again, as [`crate::domain::stranded_landing`]
-//! judges, and puts it back in its landing's line without a second review.
+//! judges with this supervisor's build, and puts it back in its landing's
+//! line without a second review.
 
 use super::*;
 use crate::domain::stranded_landing::{self, Seen, Stranded};
@@ -36,7 +37,8 @@ impl Supervisor<'_> {
                 continue;
             }
             let events = self.queue.run_events(run.id())?;
-            if stranded_landing::kept(&events).is_some() {
+            let build = Some(self.layout.version.as_str());
+            if stranded_landing::kept(&events, build).is_some() {
                 continue;
             }
             let seen = Seen {
@@ -46,7 +48,7 @@ impl Supervisor<'_> {
                 fenced: self.queue.turn_fence(run.task_id())?.is_some(),
                 task: self.queue.show(run.task_id())?.task.status(),
             };
-            if stranded_landing::judge(seen, &events) != Stranded::TakeUp {
+            if stranded_landing::judge(seen, &events, build) != Stranded::TakeUp {
                 continue;
             }
             // Not while the cleanup job clears the run's build outputs.

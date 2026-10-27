@@ -6,6 +6,8 @@ status: accepted
 created: 2026-10-21
 updated: 2026-10-21
 accepted_on: 2026-10-21
+amended_by:
+  - adr-t3524-1
 amends:
   - adr-0054 decision 12
 owners:

@@ -816,7 +816,7 @@ fn leave_held_phase(conn: &Connection, run: &RunId) -> Result<()> {
         conn.query_row("SELECT status FROM task_runs WHERE id=?1", [run], |r| {
             r.get(0)
         })?;
-    let change = run_phase::Phase::resting(status.parse()?, &events)
+    let change = run_phase::Phase::resting(status.parse()?, &events, None)
         .and_then(|phase| run_phase::next_change(&events, phase, EventKind::TaskReleased.as_str()));
     record_phase(conn, run, change)
 }

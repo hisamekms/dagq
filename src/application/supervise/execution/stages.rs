@@ -387,15 +387,17 @@ impl PhaseTrack {
 /// Record the phase a run is in that no slot holds (or whose slot is let
 /// go), from its status and events: `attempt` is its slot's, `None` the
 /// one last recorded. Nothing is recorded for a run on its way or landed
-/// ([`run_phase::Phase::resting`]), nor when it repeats the last record.
+/// ([`run_phase::Phase::resting`], judged with `build`, the recording
+/// supervisor's), nor when it repeats the last record.
 pub(super) fn record_rest<L: PhaseLog + ?Sized>(
     log: &L,
     run: &TaskRun,
     attempt: Option<Attempt>,
     cause: &str,
+    build: Option<&str>,
 ) {
     let recorded = log.phase_events(run.id()).and_then(|events| {
-        let Some(phase) = run_phase::Phase::resting(run.status(), &events) else {
+        let Some(phase) = run_phase::Phase::resting(run.status(), &events, build) else {
             return Ok(());
         };
         let last = run_phase::last_recorded(&events);
@@ -1127,7 +1129,7 @@ mod tests {
         /// The slot is let go with the run at rest in `status`.
         fn rests(&mut self, status: RunStatus, cause: &str) {
             let run = with_status(&self.slot, status);
-            record_rest(&self.records, &run, self.slot.track.attempt(), cause);
+            record_rest(&self.records, &run, self.slot.track.attempt(), cause, None);
         }
     }
 
@@ -1264,7 +1266,7 @@ mod tests {
             json!({"via": "approve", "ask_id": 3}),
         );
         let run = with_status(&flow.slot, RunStatus::AwaitingIntegration);
-        record_rest(&flow.records, &run, None, "integration_approved");
+        record_rest(&flow.records, &run, None, "integration_approved", None);
         // The landing's own slot.
         flow.slot = Slot::new(run, Phase::Landing(None));
         let id = flow.slot.run.id().clone();

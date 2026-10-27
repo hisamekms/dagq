@@ -365,7 +365,13 @@ impl Supervisor<'_> {
             return Ok(());
         };
         warn!(run_id = %failed.id(), task_id = %failed.task_id(), "run {} of task {} used up its resumes; it is failed and goes to the recovery job (resume_exhausted)", failed.id(), failed.task_id());
-        stages::record_rest(&*self.queue, &failed, None, "resume_exhausted");
+        stages::record_rest(
+            &*self.queue,
+            &failed,
+            None,
+            "resume_exhausted",
+            Some(&self.layout.version),
+        );
         close_ended_landing_asks(&mut *self.queue, Some(failed.task_id()));
         close_open_workspaces(
             &mut *self.queue,

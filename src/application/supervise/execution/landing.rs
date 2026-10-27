@@ -121,6 +121,7 @@ impl Supervisor<'_> {
         let processes = self.processes.clone();
         let files = self.files.clone();
         let pid = self.layout.pid;
+        let build = self.layout.version.clone();
         let common_dir = path_text(&self.layout.common_dir)?;
         let push = RunHistory::from_events(&self.queue.run_events(run.id())?).landing_pushes();
         let generators = self.generators.clone();
@@ -178,6 +179,7 @@ impl Supervisor<'_> {
                         handing_off: &handing_off,
                         stop: &stop,
                     }),
+                    build: &build,
                 },
                 &request,
             )

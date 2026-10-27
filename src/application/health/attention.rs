@@ -1109,7 +1109,8 @@ pub(super) fn is_draft(queue: &(impl TaskReads + ?Sized), task: TaskId) -> Resul
 /// recovered to be reviewed, or a `retry_review` answer, queues its
 /// review; and one the supervisor takes up again
 /// ([`crate::domain::stranded_landing::judge`], ADR-t3049-1) is queued to
-/// land as well. `None` when it waits for a person.
+/// land as well, judged with this binary's build, the supervisors' when
+/// both are the installed one. `None` when it waits for a person.
 fn runtime_wait(
     events: &[RunEvent],
     seen: crate::domain::stranded_landing::Seen,
@@ -1122,7 +1123,7 @@ fn runtime_wait(
         Some((event_kind::RUN_RECOVERED, AttentionNext::Reviewing))
     } else if history.queued_review_retry().is_some() {
         Some((event_kind::REVIEW_RETRY_QUEUED, AttentionNext::Reviewing))
-    } else if judge(seen, events) == Stranded::TakeUp {
+    } else if judge(seen, events, Some(crate::VERSION)) == Stranded::TakeUp {
         Some((event_kind::LEASE_RELEASED, AttentionNext::QueuedToLand))
     } else {
         None
