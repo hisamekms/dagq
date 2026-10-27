@@ -457,7 +457,6 @@ fn report_out_through_the_service_is_written_by_the_client() {
     assert_eq!(written["period"], "day", "{written}");
     assert_eq!(written["label"], "2026-09-23", "{written}");
     assert_eq!(written["partial"], false, "{written}");
-    let out = out.canonicalize().unwrap();
     assert_eq!(written["json"], json!(out.join("daily/2026-09-23.json")));
     assert_eq!(written["html"], json!(out.join("daily/2026-09-23.html")));
     assert_eq!(written["index"], json!(out.join("index.html")));
