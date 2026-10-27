@@ -527,9 +527,10 @@ pub trait EventStore {
         ))
     }
     /// The latest `limit` events of the e2e gates, newest first: the
-    /// automatic update's (`update_e2e_passed`, `update_failed`) and the
-    /// runtime's e2e of the runs (`run_e2e_finished`, `run_e2e_failed`,
-    /// ADR-t1233-2 decision 5), for a marked test failing in a row.
+    /// automatic update's (`update_e2e_passed`, `update_failed`),
+    /// `install`'s (`install_e2e_finished`) and the runtime's e2e of the
+    /// runs (`run_e2e_finished`, `run_e2e_failed`, ADR-t1233-2 decision 5),
+    /// for a marked test failing in a row.
     fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
         self.update_events(limit)
     }

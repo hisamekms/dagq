@@ -233,6 +233,7 @@ event_kinds! {
     InboxWatcherAbsent => "inbox_watcher_absent",
     InboxWatcherReturned => "inbox_watcher_returned",
     InputNotReady => "input_not_ready",
+    InstallE2eFinished => "install_e2e_finished",
     IntegrationApproved => "integration_approved",
     IntegrationDeferred => "integration_deferred",
     IntegrationError => "integration_error",
@@ -781,6 +782,9 @@ impl EventKind {
                 | UpdateAnswered
                 | UpdateRetry
                 | UpdateDropped
+                // The e2e gate of a person's `dagq install` of a checkout
+                // (ADR-t1165-1 decision 4).
+                | InstallE2eFinished
                 // A supervisor's look for a new release (ADR-t618-1
                 // decision 2).
                 | ReleaseChecked
@@ -1696,6 +1700,7 @@ mod tests {
             (EventKind::InboxWatcherAbsent, "inbox_watcher_absent"),
             (EventKind::InboxWatcherReturned, "inbox_watcher_returned"),
             (EventKind::InputNotReady, "input_not_ready"),
+            (EventKind::InstallE2eFinished, "install_e2e_finished"),
             (EventKind::IntegrationApproved, "integration_approved"),
             (EventKind::IntegrationDeferred, "integration_deferred"),
             (EventKind::IntegrationError, "integration_error"),

@@ -59,7 +59,7 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
      promptはflakyなtestの読み方も持つ: statsの`failed_tests.flaky_candidates`（[stats](commands.md)）の各testを、その`integrate`のeventを根拠に`flaky_test`のfindingとして記録し、同じ根拠を持つfindingは記録し直さない。
      workerのsessionだけで落ちたtestは作業中なのでfindingにしない。
      候補から消え、windowの`failed_tests.tests`でも`integrate`で落ちていないtestの`flaky_test`のfindingは`finding resolve`してよい。
-     自動更新のe2eの関門のtestも同じくflakyなtestとして読み（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)決定4、欄は[自動更新](auto-update.md)の`e2e.tests`）、windowの関門で繰り返し落ちた（流し直しで通ったもの・印で通したものを含む。回数はpromptの文面）testを、その関門のeventを根拠に`flaky_test`のfindingとして記録する。
+     自動更新・`install`のe2eの関門のtestも同じくflakyなtestとして読み（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)決定4、欄は[自動更新](auto-update.md)の`e2e.tests`）、windowの関門で繰り返し落ちた（流し直しや印で通したものを含む。回数はpromptの文面）testを、その関門のeventを根拠に`flaky_test`のfindingとして記録する。
      安定化のtaskが要るもの（繰り返し落ちる、関門を落とした・続けて落ちている、印が付いたまま）には`--propose`を付け、runtimeのplannerが`search` / `related`で既存のtask（印のtaskもその1つ）を確かめて重複させない。
      同じ根拠のfindingは記録し直さない。
      数えるのはstatsのwindowの中だけなので、繰り返しの失敗は主に日次の観察の窓で見える。

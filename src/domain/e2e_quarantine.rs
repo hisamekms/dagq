@@ -355,7 +355,8 @@ fn date(text: &str) -> Option<i64> {
 
 /// How many gates right before this one (`history`, newest first) `test`
 /// failed its rerun in, in a row: the automatic update's and `install`'s
-/// gates and the runtime's e2e of the runs alike (ADR-t1233-2 decision 5). A gate that passed without a rerun, or
+/// gates (`install_e2e_finished`) and the runtime's e2e of the runs alike
+/// (ADR-t1233-2 decision 5). A gate that passed without a rerun, or
 /// whose rerun `test` passed or was not in, ends the row; one that told
 /// nothing of its tests (it or its rerun ran past its timeout or could not
 /// start, or an older runtime recorded no rerun) is passed over.
@@ -363,12 +364,15 @@ fn date(text: &str) -> Option<i64> {
 pub fn failures_in_a_row<'a>(history: impl IntoIterator<Item = &'a RunEvent>, test: &str) -> usize {
     let mut count = 0;
     for event in history {
-        let run_passed =
-            event.kind == EventKind::RunE2eFinished && event.payload["outcome"] == "passed";
-        let passed = event.kind == EventKind::UpdateE2ePassed || run_passed;
+        let outcome_passed = (event.kind == EventKind::RunE2eFinished
+            || event.kind == EventKind::InstallE2eFinished)
+            && event.payload["outcome"] == "passed";
+        let passed = event.kind == EventKind::UpdateE2ePassed || outcome_passed;
         let gate = passed
             || (event.kind == EventKind::UpdateFailed && event.payload["stage"] == "e2e")
-            || event.kind == EventKind::RunE2eFailed;
+            || event.kind == EventKind::RunE2eFailed
+            || (event.kind == EventKind::InstallE2eFinished
+                && event.payload["outcome"] == "failed");
         if !gate {
             continue;
         }
@@ -571,5 +575,44 @@ name = \"b\"\nreason = \"x\\ty\"\ntask = 3\nuntil = \"2024-02-29\"\n";
         ];
         assert_eq!(failures_in_a_row(&history, "b"), 3);
         assert_eq!(failures_in_a_row(&history, "c"), 0);
+    }
+
+    /// `install`'s gate (`install_e2e_finished`) counts with the others:
+    /// a failed one whose rerun the test failed adds to the row, a passed
+    /// one without a rerun ends it.
+    #[test]
+    fn the_install_gate_counts_with_the_gates() {
+        let event = |kind: &str, payload: Value| RunEvent {
+            id: super::super::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        use super::super::INSTALL_E2E_FINISHED;
+        let history = [
+            event(
+                INSTALL_E2E_FINISHED,
+                json!({"outcome": "failed", "rerun": {"failed": ["b"]}}),
+            ),
+            event(
+                UPDATE_FAILED,
+                json!({"stage": "e2e", "rerun": {"failed": ["b"]}}),
+            ),
+            event(
+                INSTALL_E2E_FINISHED,
+                json!({"outcome": "passed", "rerun": {"failed": ["b"]}}),
+            ),
+            event(INSTALL_E2E_FINISHED, json!({"outcome": "passed"})),
+            event(
+                INSTALL_E2E_FINISHED,
+                json!({"outcome": "failed", "rerun": {"failed": ["b"]}}),
+            ),
+        ];
+        assert_eq!(failures_in_a_row(&history, "b"), 3);
+        assert_eq!(failures_in_a_row(&history[3..], "b"), 0);
     }
 }

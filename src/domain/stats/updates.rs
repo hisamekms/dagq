@@ -45,7 +45,9 @@ pub struct UpdateStats {
 }
 
 /// How the e2e gate of the automatic update went in a window: the
-/// `update_e2e_passed` and the `update_failed` at the `e2e` stage.
+/// `update_e2e_passed` and the `update_failed` at the `e2e` stage; and
+/// apart from it `install`'s gate (`install_e2e_finished`, [`Self::install`]),
+/// whose tests count with the update's in [`Self::tests`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct E2eGateStats {
     pub passed: i64,
@@ -56,11 +58,25 @@ pub struct E2eGateStats {
     /// The seconds of the e2e that ran (`secs`), summed and the longest.
     pub secs_total: i64,
     pub secs_max: i64,
-    /// Each e2e test the gates of the window saw fail, or that the latest
-    /// gate's `.config/e2e-quarantine.toml` marks, by name (ADR-t1165-1
-    /// decision 4, task 1166).
+    /// Each e2e test the gates of the window (the automatic update's and
+    /// `install`'s) saw fail, or that the latest gate's
+    /// `.config/e2e-quarantine.toml` marks, by name (ADR-t1165-1 decision
+    /// 4).
     pub tests: BTreeMap<String, E2eTestStats>,
+    /// The gates of a person's `dagq install` of a checkout by `outcome`.
+    pub install: E2eInstallGateStats,
 }
+
+/// How `install`'s e2e gates went in a window (`install_e2e_finished`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct E2eInstallGateStats {
+    pub passed: i64,
+    pub failed: i64,
+}
+
+/// The gate a test's failure came from in [`E2eTestStats::by_gate`]: the
+/// automatic update's; `install`'s is [`crate::domain::INSTALL_GATE`].
+pub const UPDATE_GATE: &str = "update";
 
 /// How one e2e test fared in the gates of a window.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -83,6 +99,8 @@ pub struct E2eTestStats {
     /// The gate events it failed in, the newest first, at most
     /// [`TEST_EVENT_IDS`].
     pub event_ids: Vec<EventId>,
+    /// Its `failed` by the gate it failed in ([`UPDATE_GATE`] or `install`).
+    pub by_gate: BTreeMap<String, i64>,
     /// Whether the window's latest gate read a mark for it, and the task
     /// that mark names.
     pub marked: bool,
@@ -102,8 +120,8 @@ fn names<'a>(value: &'a Value, key: &str) -> Vec<&'a str> {
 }
 
 impl E2eGateStats {
-    /// Count the tests of one gate event (`update_e2e_passed`, or
-    /// `update_failed` at the `e2e` stage).
+    /// Count the tests of one gate event (`update_e2e_passed`,
+    /// `update_failed` at the `e2e` stage, or `install_e2e_finished`).
     fn add_tests(&mut self, event: &RunEvent) {
         let payload = &event.payload;
         let rerun = payload.get("rerun").filter(|rerun| rerun.is_object());
@@ -117,10 +135,18 @@ impl E2eGateStats {
             rerun.is_some_and(|rerun| rerun["timed_out"] != true && rerun.get("error").is_none());
         let flaky = names(payload, "flaky");
         let quarantined = names(payload, "quarantined");
-        let gate_failed = event.kind == EventKind::UpdateFailed;
+        let install = event.kind == EventKind::InstallE2eFinished;
+        let gate_failed =
+            event.kind == EventKind::UpdateFailed || (install && payload["outcome"] == "failed");
+        let gate = if install {
+            super::super::INSTALL_GATE
+        } else {
+            UPDATE_GATE
+        };
         for name in failed {
             let test = self.tests.entry(name.to_owned()).or_default();
             test.failed += 1;
+            *test.by_gate.entry(gate.to_owned()).or_default() += 1;
             test.event_ids.insert(0, event.id);
             test.event_ids.truncate(TEST_EVENT_IDS);
             let held = rerun_told && quarantined.contains(&name);
@@ -191,8 +217,10 @@ pub fn plugin_only(event: &RunEvent) -> bool {
         .unwrap_or(false)
 }
 
-/// Count the `update_*` events with `after < id <= upto`. They belong to no
-/// task, so they count only when `counts` accepts no task (no `--goal`).
+/// Count the `update_*` events with `after < id <= upto`, and with them
+/// the `install_e2e_finished` of `install`'s gates (not among
+/// [`UpdateStats::count`] and `by_kind`). They belong to no task, so they
+/// count only when `counts` accepts no task (no `--goal`).
 pub fn updates(
     events: &[RunEvent],
     after: EventId,
@@ -204,9 +232,19 @@ pub fn updates(
     for event in events.iter().filter(|event| {
         event.id > after
             && event.id <= upto
-            && event.kind.is_in(UPDATE_EVENT_KINDS)
+            && (event.kind.is_in(UPDATE_EVENT_KINDS) || event.kind == EventKind::InstallE2eFinished)
             && counts(event.task_id)
     }) {
+        if event.kind == EventKind::InstallE2eFinished {
+            if event.payload["outcome"] == "passed" {
+                stats.e2e.install.passed += 1;
+            } else {
+                stats.e2e.install.failed += 1;
+            }
+            stats.e2e.add_tests(event);
+            gates.push(event);
+            continue;
+        }
         stats.count += 1;
         let plugin_only = event.kind == EventKind::UpdateInstalled && plugin_only(event);
         let install = event.kind == EventKind::UpdateFailed && by_install(event);
@@ -365,6 +403,7 @@ mod tests {
                 secs_total: 2170,
                 secs_max: 1800,
                 tests: BTreeMap::new(),
+                install: E2eInstallGateStats::default(),
             }
         );
         assert_eq!(stats.failed_by_stage["e2e"], 3);
@@ -443,12 +482,14 @@ mod tests {
         let tests = &stats.e2e.tests;
         assert_eq!(tests.keys().collect::<Vec<_>>(), ["a", "b", "c", "d"]);
         let ids = |ids: &[i64]| ids.iter().map(|id| EventId::new(*id)).collect::<Vec<_>>();
+        let update = |n: i64| BTreeMap::from([(UPDATE_GATE.to_owned(), n)]);
         assert_eq!(
             tests["a"],
             E2eTestStats {
                 failed: 2,
                 passed_on_rerun: 2,
                 event_ids: ids(&[2, 1]),
+                by_gate: update(2),
                 ..Default::default()
             }
         );
@@ -461,6 +502,7 @@ mod tests {
                 // Gate 5 told nothing and 4 did not rerun: 3 and 2 count.
                 failures_in_a_row: 2,
                 event_ids: ids(&[5, 3, 2]),
+                by_gate: update(3),
                 marked: true,
                 mark_task: Some(1120),
                 ..Default::default()
@@ -473,6 +515,7 @@ mod tests {
                 failed_gate: 2,
                 failures_in_a_row: 1,
                 event_ids: ids(&[4, 3]),
+                by_gate: update(2),
                 ..Default::default()
             }
         );
@@ -502,5 +545,80 @@ mod tests {
         let later = updates(&events, EventId::new(3), EventId::new(4), |_| true);
         assert_eq!(later.e2e.tests.keys().collect::<Vec<_>>(), ["c"]);
         assert!(!later.e2e.tests["c"].marked);
+    }
+
+    /// `install`'s gates (`install_e2e_finished`) count apart by outcome
+    /// and their tests with the automatic update's, named by gate: a flaky
+    /// test, one held by its mark, one that failed the gate and the
+    /// failures in a row across both gates. They are no `update_*` step.
+    #[test]
+    fn counts_the_install_gate_with_the_update_gate_by_test() {
+        let events = [
+            event(
+                1,
+                "update_failed",
+                json!({"stage": "e2e", "failed_tests": ["b"], "flaky": [], "quarantined": ["b"],
+                    "rerun": {"tests": ["b"], "failed": ["b"]}}),
+            ),
+            event(
+                2,
+                "install_e2e_finished",
+                json!({"outcome": "passed", "gate": "install", "flaky": ["a"],
+                    "quarantined": ["b"], "rerun": {"tests": ["a", "b"], "failed": ["b"]},
+                    "quarantine": {"marks": [{"name": "b", "task": 1120}]}}),
+            ),
+            event(
+                3,
+                "install_e2e_finished",
+                json!({"outcome": "failed", "gate": "install", "failed_tests": ["b", "c"],
+                    "flaky": [], "quarantined": ["b"],
+                    "rerun": {"tests": ["b", "c"], "failed": ["b", "c"]},
+                    "quarantine": {"marks": [{"name": "b", "task": 1120}]}}),
+            ),
+        ];
+        let stats = updates(&events, EventId::new(0), EventId::new(3), |_| true);
+        assert_eq!(stats.count, 1);
+        assert!(!stats.by_kind.contains_key("install_e2e_finished"));
+        assert_eq!(
+            stats.e2e.install,
+            E2eInstallGateStats {
+                passed: 1,
+                failed: 1
+            }
+        );
+        assert_eq!((stats.e2e.passed, stats.e2e.failed), (0, 1));
+        let tests = &stats.e2e.tests;
+        let ids = |ids: &[i64]| ids.iter().map(|id| EventId::new(*id)).collect::<Vec<_>>();
+        assert_eq!(
+            tests["a"],
+            E2eTestStats {
+                failed: 1,
+                passed_on_rerun: 1,
+                event_ids: ids(&[2]),
+                by_gate: BTreeMap::from([("install".into(), 1)]),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            tests["b"],
+            E2eTestStats {
+                failed: 3,
+                quarantined: 3,
+                failures_in_a_row: 3,
+                event_ids: ids(&[3, 2, 1]),
+                by_gate: BTreeMap::from([("install".into(), 2), (UPDATE_GATE.into(), 1)]),
+                marked: true,
+                mark_task: Some(1120),
+                ..Default::default()
+            }
+        );
+        assert_eq!(tests["c"].failed_gate, 1);
+        assert_eq!(tests["c"].by_gate, BTreeMap::from([("install".into(), 1)]));
+
+        // Not for a goal, as the update's steps.
+        let goal = updates(&events, EventId::new(0), EventId::new(3), |task| {
+            task.is_some()
+        });
+        assert_eq!(goal, UpdateStats::default());
     }
 }

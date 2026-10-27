@@ -98,7 +98,7 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
        流し直しでも落ちたtestが全て効いている印を持てば関門は通り、そのtestは印で通した（quarantined）とする。
        印の無いtestが1つでも流し直しで落ちれば落ちる。
        効かない印は、期限を過ぎた印、印が上限を超えるファイルの全部の印、印の付いたtestが今回を含めて決まった回数続けて流し直しでも落ちた印で、読めないファイルでは印を1つも効かせない（`e2e_quarantine`のdoc comment）。
-       続けての失敗は、queueの関門のeventを新しい方から見て数え、runtimeがrunに流すe2eの結果も関門として合わせて数える（ADR-t1233-2決定5、数え方は`e2e_quarantine::failures_in_a_row`のdoc comment）。
+       続けての失敗は、queueの関門のeventを新しい方から見て数え、人の`install`の関門（`install_e2e_finished`、[`install`](install.md#install)の1）とruntimeがrunに流すe2eの結果も関門として合わせて数える（ADR-t1233-2決定5、読むeventは`RunLog::e2e_gate_events`、数え方は`e2e_quarantine::failures_in_a_row`のdoc comment）。
        印の有無に依らず数えるので、関門を落とした後もそのtestが流し直しで通るまで落ち続ける。
        判定は`application::e2e_verdict::judge`で、自動更新のjobと`install`と、runtimeがrunに流すe2eが共有する（runのe2eが印を読むcommitと外す印は[着地の前のe2e](integrate.md#着地の前のe2e)）。
        落ちたときの`error`と`update_failed`のaskの問いには、落ちたtest、流し直しでも落ちたtest、flaky・quarantinedのtest、印が効かなかったtestとその理由とファイルの理由、1回目と流し直しのlogのpathが載る。
@@ -152,6 +152,7 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
   - `stats`の`updates`は`asks`と同じ窓の`update_*`を数え、欄と数え方の意味は`domain::stats::updates`のdoc commentが持つ。
     pluginだけのjobの`update_installed`はバイナリを入れ替えていないので、バイナリの入れ替えとは分けて数える。
     人の`dagq install`の失敗（[`install`](install.md#install)の7）はjobのものと分けて数える。
+    関門のtestごとの数には人の`install`の関門（`install_e2e_finished`）も入り、testごとにどの関門で落ちたか（自動更新か`install`か）を分け、`install`の関門の回数は自動更新の関門の回数と分けて数える。
     関門のtestごとの続けての失敗は関門の印と同じ規則（`e2e_quarantine::failures_in_a_row`）で数える。
 - **inboxに知らせる**: 失敗と非互換のビルドは、task・runの無い専用のkindのask（`update_failed` / `approve_update`）で知らせる（askは`ask_opened`を書くのでinboxの`watch`が起きる）。
   同じkindの開いたaskは古いビルドのものなので、新しいaskを開く前に`superseded`と答えて閉じる（`open_update_ask`）。

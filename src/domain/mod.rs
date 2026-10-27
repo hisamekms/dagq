@@ -2850,6 +2850,20 @@ pub const UPDATE_RETRY: &str = crate::domain::event_kind::EventKind::UpdateRetry
 /// `retry`) that no job followed, and will not (`ask_id`, `answer`,
 /// `release`, `plugin_only`, `reason`).
 pub const UPDATE_DROPPED: &str = crate::domain::event_kind::EventKind::UpdateDropped.as_str();
+/// The e2e gate of a person's `dagq install` of a checkout of dagq's
+/// source ran (ADR-t1165-1 decision 4): `outcome` `passed` or `failed`,
+/// `gate` `install`, the build's `version` and `binary`, `checkout`,
+/// `secs`, `timed_out`, `cleanup`, `log`, and
+/// the gate's fields the automatic update's gate events carry
+/// (`failed_tests`, `flaky`, `quarantined`, `rerun`, `quarantine`); a
+/// failed one has `error`. No step of a job: the automatic update's state
+/// does not read it, while a marked test's failures in a row and `stats`'
+/// count of the gates' tests do.
+pub const INSTALL_E2E_FINISHED: &str =
+    crate::domain::event_kind::EventKind::InstallE2eFinished.as_str();
+/// The `gate` of [`INSTALL_E2E_FINISHED`], and the gate `stats` names a
+/// test's failures in `install`'s gate by.
+pub const INSTALL_GATE: &str = "install";
 
 /// Every step of the automatic update, each with `commit` (the main commit
 /// it is about) in its payload but for the answers.

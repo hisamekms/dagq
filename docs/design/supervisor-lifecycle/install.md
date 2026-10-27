@@ -35,6 +35,11 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
      関門を飛ばすのは人が明示したときだけ。
      binary file（自動更新の`approve_update`の`staged`のbinaryはjobの関門を通ったもの）・戻し・リリースとdagqのソースでないcheckoutは関門を持たない。
      関門を流すかはCLIが`E2eGate`で決め、結果の`e2e`の形と印の続けての失敗の数え方は`E2eGate`と`E2eOutcome::report`のdoc commentが持つ。
+     関門を流したときは、通っても落ちても（始められないときも）queueに`install_e2e_finished`のqueue eventを1件書く（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)決定4。欄は`domain::INSTALL_E2E_FINISHED`のdoc comment）。
+     jobの段ではないので自動更新の状態・`retry`・askには関わらず、印の続けての失敗（[Auto-update](auto-update.md#auto-update)の印）と`stats`の関門のtestごとの数と、それを読むobserverの`flaky_test`のfindingに自動更新の関門と並んで入る。
+     queueが無い・開けない・書けないときは書かずに`install`を進め、通ったときの結果の`e2e`にその理由が載る。
+     関門を飛ばしたときと関門を持たない元では書かない。
+     mainでないcheckout（作業中のbranchなど）の関門も同じく数えるので、その失敗は自動更新とruntimeがrunに流すe2eの印の続けての失敗に入り、`stats`の`marked`は窓の最新の関門のcheckoutの印を映す。
    - **期間限定で外したケース**（[ADR-t1582-1](../../adr/2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md)）: 外したケースは登録に無いので結果の`e2e`には出ない。
      終了条件はADRと[testの制約](../../development/testing.md#e2e)が持つ。
    - **queueの`update/target`**: `install`がこれを使うのはリリースの`cargo install`だけで、その間だけqueueの`update/lock`を待って取る（下の「リリースから」）。
@@ -76,7 +81,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
      askの`superseded`は同じ側の開いたaskだけを閉じるので、前の手動の`install`のaskは閉じ、自動更新・リリースのjobのaskとは互いに閉じ合わない（`open_update_ask`）。
      問いは手動の`dagq install`であること、段、error、binaryと各supervisorの状態、人が手で打つ次の手（同じ`install`のやり直し、戻し、`down --force`と`up`）と、答えを適用するものが居ないことを書く。
      CLIは結果の代わりにこの`update_failed`のpayloadをstdoutに出し、`update::InstallFailed`のerrorをstderrに出して失敗で終わる。
-     5の前の失敗（ビルド・e2e・確認・schema・置き換え）はerrorだけで、inboxには知らせない。
+     5の前の失敗（ビルド・e2e・確認・schema・置き換え）はerrorだけで、inboxには知らせない（e2eの関門は1の`install_e2e_finished`を書くが、askは開かない）。
    - **自動更新と取り違えない**（`update::step_install`）: 人の`install`が書いた`update_failed`はjobの段ではない。
      `status`の`auto_update`、`retry`の判定、jobの最新の段はこれを読まず、`update_restored`も書かない。
      `stats`の`updates`での数え方は`domain::stats::updates`が持つ。

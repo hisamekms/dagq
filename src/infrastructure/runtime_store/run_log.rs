@@ -81,6 +81,7 @@ impl SqliteQueue {
             crate::domain::UPDATE_FAILED,
             RUN_E2E_FINISHED,
             RUN_E2E_FAILED,
+            crate::domain::INSTALL_E2E_FINISHED,
         ];
         Ok(self
             .conn

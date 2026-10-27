@@ -210,6 +210,119 @@ fn install_of_a_checkout_replaces_nothing_unless_its_e2e_passes() {
     assert!(binary.calls().iter().all(|c| !c.starts_with("e2e")));
 }
 
+/// `install`'s e2e gate records `install_e2e_finished` in the queue
+/// whether it passes or fails (ADR-t1165-1 decision 4), with its tests,
+/// marks, logs, build and gate, and the gate events count it: a marked test
+/// that failed its rerun in install's gates in a row stops being let
+/// through. `--skip-e2e`, a gate that does not apply and a missing queue
+/// record nothing, and the install goes on.
+#[test]
+fn install_records_its_e2e_gate_in_the_queue_and_counts_it_for_the_marks() {
+    use dagq::application::install::Source;
+    let fixture = fixture();
+    let processes = FakeProcesses::default();
+    let no_down = || -> Result<Value> { panic!("no drain") };
+    let checkout = || install_options(Source::Checkout("/src/dagq".into()));
+    let queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let gates = || queue.e2e_gate_events(500).unwrap();
+
+    let failing = FakeBinaries::new(&[], true);
+    *failing.e2e.lock().unwrap() = Some(E2eOutcome {
+        failed_tests: vec!["e2e::lands".into()],
+        secs: 40,
+        ..Default::default()
+    });
+    install_with(&fixture, &failing, &processes, &no_down, &checkout()).unwrap_err();
+    let events = gates();
+    assert_eq!(events.len(), 1, "{events:?}");
+    let failed = &events[0];
+    assert_eq!(failed.kind, EventKind::InstallE2eFinished);
+    assert_eq!(failed.run_id, None);
+    let payload = &failed.payload;
+    assert_eq!(payload["outcome"], "failed", "{payload}");
+    assert_eq!(payload["gate"], "install", "{payload}");
+    assert_eq!(payload["failed_tests"], json!(["e2e::lands"]), "{payload}");
+    assert_eq!(payload["log"], "/queue/e2e.log", "{payload}");
+    assert_eq!(payload["checkout"], "/src/dagq", "{payload}");
+    assert_eq!(payload["version"], VERSION, "{payload}");
+    assert_eq!(payload["secs"], 40, "{payload}");
+    assert!(
+        payload["error"]
+            .as_str()
+            .unwrap()
+            .contains("the e2e failed: e2e::lands"),
+        "{payload}"
+    );
+
+    // A flaky and a quarantined test pass, named with the rerun and the
+    // marks; the report names the event.
+    let marks = [("e2e::b", "2999-12-31")];
+    let rerun = FakeBinaries::new(&[], true);
+    *rerun.e2e.lock().unwrap() = Some(e2e_rerun(&["e2e::a", "e2e::b"], &["e2e::b"], &marks));
+    let report = install_with(&fixture, &rerun, &processes, &no_down, &checkout()).unwrap();
+    let events = gates();
+    assert_eq!(events.len(), 2, "{events:?}");
+    let passed = &events[0];
+    assert_eq!(report["e2e"]["event_id"], json!(passed.id), "{report}");
+    let payload = &passed.payload;
+    assert_eq!(payload["outcome"], "passed", "{payload}");
+    assert_eq!(payload["gate"], "install", "{payload}");
+    assert_eq!(payload["flaky"], json!(["e2e::a"]), "{payload}");
+    assert_eq!(payload["quarantined"], json!(["e2e::b"]), "{payload}");
+    assert_eq!(payload["rerun"]["failed"], json!(["e2e::b"]), "{payload}");
+    assert_eq!(payload["rerun"]["log"], "/queue/e2e.rerun.log", "{payload}");
+    assert_eq!(
+        payload["quarantine"]["marks"][0]["name"], "e2e::b",
+        "{payload}"
+    );
+    assert_eq!(payload["log"], "/queue/e2e.log", "{payload}");
+
+    // Another install gate fails e2e::b's rerun under its mark: the third
+    // in a row no longer lets it through.
+    let again = FakeBinaries::new(&[], true);
+    *again.e2e.lock().unwrap() = Some(e2e_rerun(&["e2e::b"], &["e2e::b"], &marks));
+    install_with(&fixture, &again, &processes, &no_down, &checkout()).unwrap();
+    let third = FakeBinaries::new(&[], true);
+    *third.e2e.lock().unwrap() = Some(e2e_rerun(&["e2e::b"], &["e2e::b"], &marks));
+    let error = format!(
+        "{:#}",
+        install_with(&fixture, &third, &processes, &no_down, &checkout()).unwrap_err()
+    );
+    assert!(error.contains("e2e::b"), "{error}");
+    assert!(third.calls().iter().all(|c| !c.starts_with("replace")));
+    let events = gates();
+    assert_eq!(events.len(), 4, "{events:?}");
+    assert_eq!(events[0].payload["outcome"], "failed");
+    assert_eq!(
+        events[0].payload["quarantine"]["ignored"][0]["reason"], "failed_in_a_row",
+        "{:?}",
+        events[0].payload
+    );
+
+    // Skipped, not applicable, no queue: no event.
+    let mut skip = checkout();
+    skip.e2e = E2eGate::Skip;
+    let skipped = FakeBinaries::new(&[], true);
+    install_with(&fixture, &skipped, &processes, &no_down, &skip).unwrap();
+    let mut none = checkout();
+    none.e2e = E2eGate::NotApplicable;
+    install_with(&fixture, &skipped, &processes, &no_down, &none).unwrap();
+    let missing = fixture.location.db.with_file_name("missing.db");
+    let report = install_at(
+        Some(&missing),
+        &FakeBinaries::new(&[], true),
+        &processes,
+        &no_down,
+        &checkout(),
+    )
+    .unwrap();
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert_eq!(report["e2e"]["status"], "passed", "{report}");
+    assert!(report["e2e"].get("event_id").is_none(), "{report}");
+    assert_eq!(report["e2e"]["event_error"], "no queue", "{report}");
+    assert_eq!(gates().len(), 4);
+}
+
 /// [`Binaries`] for the automatic update's job: the build leaves a real
 /// file (or fails), everything under `old` (the fixed binary and its
 /// `.previous`) is the old build `0.0.1`, anything else this build.

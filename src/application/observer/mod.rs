@@ -959,9 +959,9 @@ pub fn observer_prompt(
            A finding that already holds those events is not recorded again.\n\
          - A test that failed only in the worker's own sessions (`integrate_runs` below `flaky_runs`) is its work in progress, not a flaky test: no finding.\n\
          - When a `flaky_test` finding's test is no longer a candidate and the window's `failed_tests.tests` shows no `integrate` failure of it, you may resolve the finding.\n\
-         - stats' `updates.e2e.tests` counts, per e2e test of the automatic update's e2e gate (the gate reruns failed e2e tests once by name, and a test under a mark of `.config/e2e-quarantine.toml` that fails its rerun too is only recorded), \
-           `failed` (the gates it failed in), `passed_on_rerun` (flaky), `quarantined` (let through by its mark), `failed_gate` (it failed the gate), `failures_in_a_row` (the latest gates it failed the rerun of in a row; a mark stops holding at 3), \
-           `event_ids` (those gates' `update_e2e_passed` / `update_failed` events, the newest first), `marked` and `mark_task` (the task its mark names).\n\
+         - stats' `updates.e2e.tests` counts, per e2e test of the e2e gates of the automatic update and `install` (a gate reruns failed e2e tests once by name, and a test under a mark of `.config/e2e-quarantine.toml` that fails its rerun too is only recorded), \
+           `failed` (the gates it failed in), `by_gate` (`update` / `install`), `passed_on_rerun` (flaky), `quarantined` (let through by its mark), `failed_gate` (it failed the gate), `failures_in_a_row` (the latest gates it failed the rerun of in a row; a mark stops holding at 3), \
+           `event_ids` (those gates' events, the newest first), `marked` and `mark_task` (the task its mark names).\n\
          - Record each e2e test with a `failed` of 2 or more (passed on the rerun or let through by its mark included) as a finding of kind `flaky_test` on the queue with the test's name as the subject and its `event_ids` as the evidence, \
            and add `--propose` when it needs a task to make it stable (it fails again and again, `failed_gate` or `failures_in_a_row` is above 0, or its mark stands): \
            the runtime's planner checks the existing tasks with `search` / `related` (a `mark_task` is one) before it adds one. A finding that already holds those events is not recorded again. \
@@ -1326,6 +1326,8 @@ mod tests {
             "failed only in the worker's own sessions",
             "you may resolve the finding",
             "`updates.e2e.tests`",
+            "the e2e gates of the automatic update and `install`",
+            "`by_gate` (`update` / `install`)",
             "`passed_on_rerun` (flaky), `quarantined` (let through by its mark), `failed_gate` (it failed the gate), `failures_in_a_row`",
             "Record each e2e test with a `failed` of 2 or more (passed on the rerun or let through by its mark included) as a finding of kind `flaky_test` on the queue",
             "its `event_ids` as the evidence",
@@ -1334,6 +1336,47 @@ mod tests {
         ] {
             assert!(prompt.contains(text), "the prompt lacks {text:?}");
         }
+    }
+
+    /// The counts of `install`'s e2e gate reach the observer with the
+    /// automatic update's: stats' `updates.e2e` carries them, by gate.
+    #[test]
+    fn the_install_gates_tests_reach_the_prompt() {
+        let events = [RunEvent {
+            id: EventId::new(7),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: crate::domain::INSTALL_E2E_FINISHED.into(),
+            payload: json!({"outcome": "passed", "gate": "install", "flaky": ["e2e::x"],
+                "quarantined": [], "rerun": {"tests": ["e2e::x"], "failed": []}}),
+            created_at: String::new(),
+            actor: None,
+        }];
+        let updates = crate::domain::stats::updates::updates(
+            &events,
+            EventId::new(0),
+            EventId::new(7),
+            |_| true,
+        );
+        let prompt = observer_prompt(
+            ObserveMode::Hourly,
+            "dagq",
+            None,
+            "1791005872",
+            &json!({"stats": {"updates": updates}}),
+            PROMPT_LIMIT,
+        )
+        .unwrap()
+        .text;
+        assert!(
+            prompt.contains(r#""e2e::x":{"by_gate":{"install":1}"#),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(r#""install":{"failed":0,"passed":1}"#),
+            "{prompt}"
+        );
     }
 
     /// ADR-t451-1 decision 2: a wait or leave-it reading stays on the

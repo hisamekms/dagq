@@ -176,6 +176,23 @@ pub fn install_with(
     down: &dyn Fn() -> Result<Value>,
     options: &dagq::application::install::InstallOptions,
 ) -> Result<Value> {
+    install_at(
+        Some(&fixture.location.db),
+        binaries,
+        processes,
+        down,
+        options,
+    )
+}
+
+/// [`install_with`] of the queue at `db`, or of none.
+pub fn install_at(
+    db: Option<&Path>,
+    binaries: &FakeBinaries,
+    processes: &FakeProcesses,
+    down: &dyn Fn() -> Result<Value>,
+    options: &dagq::application::install::InstallOptions,
+) -> Result<Value> {
     let queues = |db: &Path| -> std::sync::Arc<dyn dagq::application::QueueOpener> {
         std::sync::Arc::new(dagq::infrastructure::runtime_store::SqliteOpener {
             db: db.to_owned(),
@@ -192,7 +209,7 @@ pub fn install_with(
             queues: &queues,
             down,
         },
-        Some(&fixture.location.db),
+        db,
         options,
     )
 }

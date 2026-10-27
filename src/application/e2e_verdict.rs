@@ -7,8 +7,9 @@
 //! passes with them named `quarantined`. Anything else fails, with why.
 //!
 //! Whether a marked test failed its rerun in the gates right before this
-//! one is read from their `update_e2e_passed` and `update_failed` (`stage:
-//! e2e`) events: the `failed` of their `rerun`.
+//! one is read from their events ([`crate::application::EventStore::e2e_gate_events`]:
+//! the automatic update's, `install`'s and the runtime's e2e of the runs):
+//! the `failed` of their `rerun`.
 
 use serde_json::{Value, json};
 
@@ -33,8 +34,9 @@ pub struct E2eVerdict {
     pub quarantined: Vec<String>,
     /// Why it did not pass, for an error and a question.
     pub failure: Option<String>,
-    /// What the gate's events (`update_e2e_passed`, and `update_failed` of
-    /// `stage: e2e`, ADR-t1165-1 decision 4) and `install`'s report add:
+    /// What the gate's events (`update_e2e_passed`, `update_failed` of
+    /// `stage: e2e` and `install_e2e_finished`, ADR-t1165-1 decision 4) and
+    /// `install`'s report add:
     /// `flaky` and `quarantined` (as above; `quarantined` also when the gate
     /// fails); `rerun` when the failed tests were rerun (`tests`, `failed`,
     /// `timed_out`, `secs`, `log` the rerun's log, `cleanup`, and `error`
@@ -47,7 +49,7 @@ pub struct E2eVerdict {
 }
 
 /// Judge `outcome` of the gate run with `settings` at the unix second
-/// `now`; `history` is the queue's update events, newest first (the
+/// `now`; `history` is the queue's e2e gate events, newest first (the
 /// gates before this one).
 pub fn judge(
     outcome: &E2eOutcome,

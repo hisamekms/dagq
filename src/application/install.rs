@@ -13,8 +13,9 @@
 //!
 //! It reads the queue's schema through the new binary (`migrate --check`)
 //! before it opens the queue itself (apart from a best-effort read of the
-//! e2e gate's history, whose failure is ignored), so it works whether the queue is older
-//! or newer than this binary.
+//! e2e gate's history and write of its `install_e2e_finished`, whose
+//! failure is ignored), so it works whether the queue is older or newer
+//! than this binary.
 //!
 //! The binaries are built, run and moved through [`Binaries`], the queue
 //! is read through [`QueueOpener`]; [`crate::compose`] builds the adapters.
@@ -284,10 +285,12 @@ pub enum E2eGate {
     NotApplicable,
     /// A person skipped it (`--skip-e2e`): `{"status": "skipped"}`.
     Skip,
-    /// Run it; the report's `e2e` is [`E2eOutcome::report`]'s. The gate
-    /// writes no event of its own, so the failures in a row of a marked
-    /// test are counted, when there is a queue, from its events of the
-    /// automatic update's gates and of the runtime's e2e of the runs.
+    /// Run it; the report's `e2e` is [`E2eOutcome::report`]'s. When there
+    /// is a queue, the gate records `install_e2e_finished` whether it
+    /// passes or fails, and counts a marked test's failures in a row from
+    /// the queue's e2e gate events, its own of earlier installs among them
+    /// ([`super::EventStore::e2e_gate_events`]). The report's `e2e` names
+    /// that event (`event_id`) or why none was written (`event_error`).
     Run(E2eSettings),
 }
 
@@ -413,44 +416,7 @@ pub fn install(
             e2e = match &options.e2e {
                 E2eGate::NotApplicable => json!({"status": "not_applicable"}),
                 E2eGate::Skip => json!({"status": "skipped"}),
-                E2eGate::Run(settings) => {
-                    // The build's own target (`<target>/release/dagq`): the
-                    // e2e is not given the shell's `CARGO_TARGET_DIR`, so it
-                    // is named for it to build no second time.
-                    let target_dir = built.parent().and_then(Path::parent);
-                    let outcome = binaries.e2e(checkout, target_dir, settings).with_context(
-                        || {
-                            format!(
-                                "the e2e of {} could not start, so nothing was replaced (a person \
-may pass --skip-e2e to install without it)",
-                                checkout.display()
-                            )
-                        },
-                    )?;
-                    // The automatic update's gates before this one, for a
-                    // marked test failing in a row (ADR-t1165-1); a queue
-                    // that cannot be read has none.
-                    let history = db
-                        .filter(|db| files.is_file(db))
-                        .and_then(|db| (ports.queues)(db).open().ok())
-                        .and_then(|queue| queue.e2e_gate_events(super::e2e_verdict::HISTORY).ok())
-                        .unwrap_or_default();
-                    let verdict =
-                        super::e2e_verdict::judge(&outcome, settings, &history, ports.clock.now());
-                    if let Some(failure) = &verdict.failure {
-                        bail!(
-                            "{failure}: nothing was replaced (a person may pass --skip-e2e to \
-install without it)"
-                        );
-                    }
-                    let mut report = outcome.report(settings);
-                    if let (Some(report), Some(fields)) =
-                        (report.as_object_mut(), verdict.fields.as_object())
-                    {
-                        report.extend(fields.clone());
-                    }
-                    report
-                }
+                E2eGate::Run(settings) => e2e_gate(ports, db, checkout, &built, settings)?,
             };
             built
         }
@@ -628,6 +594,100 @@ every supervisor",
             .into())
         }
     }
+}
+
+/// Run the e2e gate of `built`, the build of `checkout` (ADR-t963-1
+/// decision 1, ADR-t1165-1): the report's `e2e` when it passes, else the
+/// error that replaces nothing. Either way, when the queue at `db` opens,
+/// one `install_e2e_finished` records it (ADR-t1165-1 decision 4) beside
+/// the automatic update's gates; the report's `e2e` names the event
+/// (`event_id`) or why none was written (`event_error`).
+fn e2e_gate<Q: HostOpsQueue + ?Sized>(
+    ports: &Ports<'_, Q>,
+    db: Option<&Path>,
+    checkout: &Path,
+    built: &Path,
+    settings: &E2eSettings,
+) -> Result<Value> {
+    // The build's own target (`<target>/release/dagq`): the e2e is not
+    // given the shell's `CARGO_TARGET_DIR`, so it is named for it to build
+    // no second time.
+    let target_dir = built.parent().and_then(Path::parent);
+    let ran = ports.binaries.e2e(checkout, target_dir, settings);
+    // The gates before this one, for a marked test failing in a row
+    // (ADR-t1165-1); a queue that cannot be read has none and gets no
+    // event.
+    let queue = match db.filter(|db| ports.files.is_file(db)) {
+        None => Err(anyhow::anyhow!("no queue")),
+        Some(db) => (ports.queues)(db).open(),
+    };
+    let mut event = json!({
+        "gate": crate::domain::INSTALL_GATE,
+        "checkout": checkout,
+        "binary": built,
+        "version": ports.binaries.version(built).ok(),
+        "log": settings.log,
+    });
+    let record = |event: Value| -> std::result::Result<crate::domain::EventId, String> {
+        let queue = queue.as_ref().map_err(|error| format!("{error:#}"))?;
+        queue
+            .record_queue_event(crate::domain::EventKind::InstallE2eFinished, event)
+            .map_err(|error| format!("{error:#}"))
+    };
+    let warn = |recorded: std::result::Result<crate::domain::EventId, String>| {
+        if let Err(error) = recorded {
+            tracing::warn!("the install's e2e gate was not recorded: {error}");
+        }
+    };
+    let outcome = match ran {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let error = error.context(format!(
+                "the e2e of {} could not start, so nothing was replaced (a person may pass \
+--skip-e2e to install without it)",
+                checkout.display()
+            ));
+            event["outcome"] = json!("failed");
+            event["error"] = json!(format!("{error:#}"));
+            warn(record(event));
+            return Err(error);
+        }
+    };
+    let history = queue
+        .as_ref()
+        .ok()
+        .and_then(|queue| queue.e2e_gate_events(super::e2e_verdict::HISTORY).ok())
+        .unwrap_or_default();
+    let verdict = super::e2e_verdict::judge(&outcome, settings, &history, ports.clock.now());
+    for (key, value) in [
+        ("secs", json!(outcome.secs)),
+        ("timed_out", json!(outcome.timed_out)),
+        ("failed_tests", json!(outcome.failed_tests)),
+        ("cleanup", outcome.cleanup.clone()),
+    ] {
+        event[key] = value;
+    }
+    if let (Some(event), Some(fields)) = (event.as_object_mut(), verdict.fields.as_object()) {
+        event.extend(fields.clone());
+    }
+    if let Some(failure) = &verdict.failure {
+        event["outcome"] = json!("failed");
+        event["error"] = json!(failure);
+        warn(record(event));
+        bail!(
+            "{failure}: nothing was replaced (a person may pass --skip-e2e to install without it)"
+        );
+    }
+    event["outcome"] = json!("passed");
+    let mut report = outcome.report(settings);
+    if let (Some(report), Some(fields)) = (report.as_object_mut(), verdict.fields.as_object()) {
+        report.extend(fields.clone());
+    }
+    match record(event) {
+        Ok(id) => report["event_id"] = json!(id),
+        Err(error) => report["event_error"] = json!(error),
+    }
+    Ok(report)
 }
 
 /// The error of an install that put the new binary in place and handed
