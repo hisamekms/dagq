@@ -261,7 +261,7 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
 - **集める口**: executorはagentの出力を`StepReader`で、検証は流したコマンドからstepを作り、30秒ごとと終わりに送り、送れなくても結果を変えない（送り直しと置き場は`step_report`）。
 - **TelemetrySink**: portで、今のアダプタはqueue serviceの`telemetry_report`（[Queue service](queue-service.md#telemetry_report)）。
 - **principal**: role `executor-telemetry`。
-  agentを起動する制御側が対象ごとに発行・失効させ、agentには渡さない（時点・記録・場所は[Queue service](queue-service.md#principalとtoken)）。
+  制御側の依頼でserviceが対象ごとに発行し、制御側が失効させ、agentに渡さない（詳細は[Queue service](queue-service.md#principalとtoken)）。
 - **所属**: runの対象のstepはrunの行に畳み、runを持たない対象のstepはSessionStepStoreに持ってsessionの行で読む。
 - **sessionの登録**: 制御側がsessionを起動の前に、agentが名前を決めるsession（Codexのthread）は出力で読んだ時点で対象に登録する（経路は`application::telemetry_tokens`のmodule doc）。
 - **差し替える口**: 送る口・環境と資源の口（[実行環境と資源](measurement-environment.md)、適合testも）。

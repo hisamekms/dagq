@@ -30,12 +30,14 @@
 //! telemetry, so nothing here changes a run's outcome: a failure is logged.
 //!
 //! A target of no run (ADR-t1662-3 decisions 10 and 11) is issued its
-//! token by the control side that starts its agent, through
-//! [`TargetTelemetry`]: the supervisor as it opens a planner of the
-//! runtime's and as it starts a plan review, a goal review or an eval job,
-//! and the observation's and the throughput review's own commands once
-//! their start is recorded. A plan or goal review's and a command's are
-//! revoked by the one that issued them at the target's end (the job's, the
+//! token by the queue service, at the request of the control side that
+//! starts its agent (ADR-t3102-1 decision 2, docs/design/queue-service.md
+//! "principalとtoken"), through [`TargetTelemetry`]: the supervisor as it
+//! opens a planner of the runtime's and as it starts a plan review, a goal
+//! review or an eval job, and the observation's and the throughput
+//! review's own commands once their start is recorded. A plan or goal
+//! review's and a command's are revoked by the one that asked for them at
+//! the target's end (the job's, the
 //! command's finish, or a launch that closed its planner), and the
 //! supervisor's sweep revokes the tokens of
 //! the targets the queue says ended or whose runner is gone

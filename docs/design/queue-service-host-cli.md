@@ -99,7 +99,7 @@ stepの形はsupervisorの操作と同じ名前と引数（`ControlParams`）で
   tokenは着地が`integrating`を出たときに呼び出し元が失効させ、serviceは別のtaskのrun、続いている着地、supervisorの着地のものは失効させない
 - telemetry: agentと検証のsessionの登録、runを持たない対象のtokenの発行と失効（leaseなし）、対象の事実もstepで送る。
   対象はコマンド自身のものだけ（着地するrun、呼び出し元が始めを記録した観測とスループットの見直し。`control::own_target`）
-  agentのjobのtokenは今どおり呼び出し元がfileで発行する
+  agentのjobのtokenは呼び出し元のprincipalの依頼でqueue serviceの`issue_token`が発行する（[Queue service](queue-service.md#principalとtoken)）
 - 結果の記録（eventと着地）は、serviceが取るまでこのプロセスが期限なく送り直し、同じ記録はidentityで1回だけ取る（`control::resending`）。
   呼び出し元のprincipalで送れるのはこのプロセスだけなので、supervisorのjobのコマンドと違い、期限の後に記録を残して終わることはしない
   記録でないstepが届かないときは新しいstepを始めず、DBを開かずに`unreachable`で終わる
