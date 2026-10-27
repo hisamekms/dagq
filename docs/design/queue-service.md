@@ -31,7 +31,7 @@ related:
 # Queue service
 
 hostで動き、queue DBを開いてユースケース単位のAPIを、service側で認可して提供するプロセス。
-決定の理由は[ADR-t1233-1](../adr/2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md)（制御側と実行側の分け方・serviceとAPIと認可・unix socket・段）、[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)（起動・停止の責任・落ちたときの知らせ方・tokenによるprincipalの認証）、[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md)（読み取りの範囲）。
+決定の理由は[ADR-t1233-1](../adr/2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md)（制御側と実行側・APIと認可・段）、[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)（起動・停止・tokenの認証）、[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md)（読み取りの範囲）。
 
 今の段（段(2)・(3)）: serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
 **worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。
@@ -49,7 +49,7 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 | ファイル | 中身 |
 | --- | --- |
 | `queue.sock` | unix socket。pathが長すぎるqueueで`/tmp`の下に置くときは、そのdirがlinkでないことを確かめる。どの呼び出し元もqueueのディレクトリから同じpathを求める（`socket_path`） |
-| `lock` | serviceが生きている間`flock`の排他で持ち、2つ目のserviceは取れずに止まる。見る側（status・supervisor）は共有で試し、取れれば「居ない」と判定する（見る側どうしは互いを妨げない）。止めるときにsignalを送るのは、`hello`が答えたpidか、記録のpidが今このqueueの`service serve`を動かしている（`ps`で確かめる）ときだけ |
+| `lock` | serviceが生きている間`flock`の排他で持ち、2つ目のserviceは取れずに止まる。見る側（status・supervisor）は共有で試し、取れれば「居ない」と判定する。止めるときにsignalを送るのは、`hello`が答えたpidか、記録のpidが今このqueueの`service serve`を動かしている（`ps`で確かめる）ときだけ |
 | `state.json` | 動いているserviceの記録。止まるときに消す |
 | `service.log` | `up`・supervisor・`service start`が起動したserviceのstdoutとstderr |
 | `tokens/<値のsha256>.json` | tokenのprincipalと発行の時刻 |
@@ -106,8 +106,9 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
 
 `src/application/queue_service.rs`の`QueueService::handle`が、versionの検査、宛てのqueueの検査、tokenの検査、ユースケースの順に行う。
 認可はCLIと同じapplicationの境界（`Dialogue`・`Gate`と`StaticPolicy`）を、principalのactorでservice側で通す。
-拒否はCLIと同じ`authorization_denied`（拒まれたprincipalがactor）に記録し、`authorization_denied`のcodeで返す。
+`Gate`・`StaticPolicy`の拒否はCLIと同じ`authorization_denied`（拒まれたprincipalがactor）に記録し、`authorization_denied`のcodeで返す。
 そのerrorはeventと同じrole・capability・reasonを`denied`に持ち（`ServiceDenial`）、知らない欄を読み飛ばす古いクライアントはcodeとmessageだけを読むので、API versionを上げない。
+storeが返す型付きの拒否（人の優先度と、goal_gapのdraftを元のgoalの外へ移す`set_goal`（ADR-t1504-2決定10））は、`Planning`がrollbackの後に`authorization_denied`を記録するが、応答は`failed`のcodeで`denied`を持たない（`respond`）。
 codeの意味は`ServiceErrorCode`のdoc comment。
 
 paramsはそのコマンドのoption、答えはそのコマンドの出力（paramsの形は`src/application/queue_service.rs`の各params型）。
@@ -134,7 +135,7 @@ paramsはそのコマンドのoption、答えはそのコマンドの出力（pa
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（capabilityは`finding.ask`）で送る。
 findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、eventの書き手は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。
-そのため`observe_finished`の件数と、observer自身のeventを数えない判定（[Observer](supervisor-lifecycle/observer.md)の0、`SqliteQueue::events_besides`）は、CLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。
+そのため`observe_finished`の件数とobserver自身のeventを数えない判定は、CLIで書いたときと同じに成り立つ（[Observer](supervisor-lifecycle/observer.md)、ADR-t1222-1決定4）。
 
 ### telemetry_report
 
@@ -147,7 +148,7 @@ paramsの形は`domain::telemetry::TelemetryReport`（1つのsessionの、1つ�
   知らない欄は、上の段でもstepとsampleの中でも捨てて受ける。
   前の版のserviceが一部だけ読んではいけない変更は版を上げ、他の欄と並ぶ欄を足すだけなら上げない
 - 1回の上限: executorは30秒ごとにまとめて送る（`REPORT_INTERVAL_SECS`）。
-  上限はparamsのJSONとしての大きさ（`MAX_REPORT_BYTES`）で、要求の1行の上限から要求の残りの欄の分を引いたものなので、文字のescapeで膨らんでも上限の内の要求は1行に収まる。
+  上限はparamsのJSONとしての大きさ（`MAX_REPORT_BYTES`、要求の1行に収まる理由はそのdoc comment）。
   ほかにstepとsampleの数・idと名前の長さ・コマンドのshapeの大きさにも上限があり（値は`domain::telemetry`の定数）、超えたものは何も記録せず`bad_request`で断る。
   溜まったstep（serviceが答えなかった後など）は何回かに分けて送る
 - 認可: `telemetry.report`を、paramsが名指す対象と、そのsessionを制御側が登録した対象（`Resource::Telemetry`）でprincipalに通す。
