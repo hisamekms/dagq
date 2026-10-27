@@ -133,6 +133,7 @@ ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`で
 - 消した後: workerの次のturnがsccacheでビルドし直して続く。
   workerのpromptには消したことを書かない: ビルドの成果物はいつ作り直してもよく、cargoが無いものを作り直すので、workerが知らなくても手順は変わらない。
 - 触れないもの: turnかcommandが動いているrun、slotに居るrun（着地・validating・review、待ちから戻るのを待つrunも）、対話の経路のrun。
+  slotで着地slotを待つrunは、同じ受け渡しで別に渡す（[Run worktrees](run-worktrees.md#終わっていないrunのビルド成果物)の「着地slotを待つrun」）。
 
 ## 登録と見せ方
 

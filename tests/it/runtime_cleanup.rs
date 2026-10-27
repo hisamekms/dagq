@@ -2712,3 +2712,208 @@ fn a_waiting_runs_build_outputs_go_for_room_and_its_answer_waits_for_the_cleanup
             .is_file()
     );
 }
+
+/// A worker that builds and commits, Git ignoring `target/` as the
+/// repositories that build do: its run waits for the landing slot with
+/// build outputs and a clean worktree.
+const BUILDING_PASSING_AGENT: &str = r#"
+mkdir -p "$(git rev-parse --git-common-dir)/info"
+printf 'target/\n' >> "$(git rev-parse --git-common-dir)/info/exclude"
+mkdir -p target/debug; head -c 65536 /dev/zero > target/debug/big
+commit work; receipt "$(git rev-parse HEAD)"
+"#;
+
+/// The runs directories whose free space reads as plenty again.
+static LANDING_AMPLE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Short while a run's worktree in the runs directory holds the worker's
+/// build outputs (`target/debug/big`), unless the directory is in
+/// [`LANDING_AMPLE`].
+fn short_while_built(runs_dir: &Path) -> Option<u64> {
+    let built = fs::read_dir(runs_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|run| fs::read_dir(run.path()).into_iter().flatten().flatten())
+        .any(|entry| {
+            entry.file_name().to_string_lossy().starts_with("worktree")
+                && entry.path().join("target/debug/big").exists()
+        });
+    let ample = LANDING_AMPLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|dir| fs::canonicalize(dir).ok() == fs::canonicalize(runs_dir).ok());
+    Some(if built && !ample { 1 } else { 4 * GIB })
+}
+
+/// A supervisor whose run, reviewed and passed, waits for the landing slot
+/// while the disk is short of room, and whose cleanup for room holds at
+/// the measure of that run's build outputs.
+struct LandingHeld {
+    db: PathBuf,
+    files: GatedFiles,
+    stop: Arc<AtomicBool>,
+    passes: Arc<std::sync::atomic::AtomicU64>,
+    supervisor: thread::JoinHandle<Value>,
+    backend: Arc<TestWorkspace>,
+    run: TaskRun,
+    target: PathBuf,
+    marker: PathBuf,
+}
+
+fn landing_held_by_the_cleanup(repo: &Path, db: &Path) -> LandingHeld {
+    declare_rust_profile(repo);
+    let marker = db.parent().unwrap().join("verified.txt");
+    Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [json!([format!(
+                "if [ -e target/debug/big ]; then echo kept; else echo rebuilt; fi > {}; mkdir -p target/debug; head -c 4096 /dev/zero > target/debug/rebuilt; test -f seed.txt",
+                shell_path(&marker)
+            )])
+            .to_string()],
+        )
+        .unwrap();
+    let backend = Arc::new(TestWorkspace::new(db, false, BUILDING_PASSING_AGENT));
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let files = GatedFiles::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = files.options(SuperviseOptions {
+        stop: stop.clone(),
+        disk: Some(DiskConfig {
+            min_free_bytes: Some(GIB),
+            ..DiskConfig::default()
+        }),
+        free_space: short_while_built,
+        disk_cleanup_interval: Duration::from_millis(200),
+        ..supervise_options(1, false)
+    });
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.to_owned(), repo.to_owned(), backend.clone());
+        thread::spawn(move || {
+            supervise_reviewed_owned_with(&db, &repo, &backend, &reviewer, &options)
+        })
+    };
+    let held = files.held();
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let target = Path::new(run.worktree_path().unwrap()).join("target");
+    assert_eq!(held, target);
+    assert_eq!(payloads_of(&queue, &run, "landing_queued").len(), 1);
+    assert!(queue.run_lease(run.id()).unwrap().is_some());
+    LandingHeld {
+        db: db.to_owned(),
+        files,
+        stop,
+        passes,
+        supervisor,
+        backend,
+        run,
+        target,
+        marker,
+    }
+}
+
+impl LandingHeld {
+    /// Open the gate, wait for `done`, stop the supervisor; its outcome.
+    fn finish(self, done: impl FnMut(&mut SqliteQueue) -> bool) -> Value {
+        self.files.open();
+        wait_until(&self.db, Duration::from_secs(60), done);
+        self.stop.store(true, Ordering::SeqCst);
+        let outcome = joined(self.supervisor, "the supervisor to finish");
+        self.backend.join();
+        outcome
+    }
+}
+
+/// A run the supervisor leases whose review passed waits for the landing
+/// slot while the disk is short of what a landing needs, and loses its
+/// build outputs in a cleanup for room: `build_outputs_removed`
+/// (`reason: disk_space`) on the run, its bytes and the run in
+/// `auto_repaired` (`disk_cleanup`); its sources and receipt stay. While
+/// the job has the run reserved its landing does not begin, though the
+/// disk reads plenty again; once the job passed it, it lands, its
+/// verification building again. Which runs are offered (a landing, an
+/// e2e, a review, a resume or a recheck running, a drain) and which the
+/// job reaches (a turn running, something running in the worktree, one
+/// moved on meanwhile, a recheck started, an ordinary cleanup) are the
+/// unit tests' of `supervise::execution` and `supervise::cleanup`.
+#[test]
+fn a_runs_build_outputs_go_for_room_while_it_waits_for_the_landing_slot() {
+    let (_dir, repo, db) = fixture();
+    let held = landing_held_by_the_cleanup(&repo, &db);
+    let (run, target, marker) = (held.run.clone(), held.target.clone(), held.marker.clone());
+    let queue = SqliteQueue::open(&db).unwrap();
+    // Plenty of room now, but the job has the run reserved: no landing.
+    let runs_dir = target.ancestors().nth(3).unwrap().to_owned();
+    LANDING_AMPLE.lock().unwrap().push(runs_dir);
+    await_passes(&held.passes, SOME_PASSES);
+    assert!(payloads_of(&queue, &run, "integration_started").is_empty());
+    assert_eq!(
+        queue.run(run.id()).unwrap().status(),
+        RunStatus::AwaitingIntegration
+    );
+    assert!(target.join("debug/big").is_file());
+
+    let outcome =
+        held.finish(|queue| queue.run(run.id()).unwrap().status() == RunStatus::Integrated);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "rebuilt\n");
+    let removed = payloads_of(&queue, &run, "build_outputs_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    let bytes = removed[0]["bytes"].as_u64().unwrap();
+    assert!(bytes >= 65536, "{bytes}");
+    assert_eq!(
+        removed[0],
+        json!({"paths": [target.to_string_lossy()], "bytes": bytes, "by": "supervisor", "reason": "disk_space"})
+    );
+    let repaired: Vec<Value> = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == EventKind::AutoRepaired && e.payload["repair"] == "disk_cleanup")
+        .map(|e| e.payload)
+        .collect();
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0]["bytes"].as_u64(), Some(bytes));
+    assert_eq!(repaired[0]["detail"]["runs"], json!([run.id().as_str()]));
+}
+
+/// A person holds the task of a run whose build outputs a cleanup for
+/// room removes while it waits for the landing slot: the hold's park
+/// waits, the run keeping its lease, until the job passed the run; then
+/// it is parked.
+#[test]
+fn a_hold_parks_a_run_waiting_for_the_landing_slot_only_once_the_cleanup_passed_it() {
+    let (_dir, repo, db) = fixture();
+    let held = landing_held_by_the_cleanup(&repo, &db);
+    let run = held.run.clone();
+    let queue = SqliteQueue::open(&db).unwrap();
+    let output = common::cli::invoke_with(&[], &db, &["hold", "1", "--reason", "replanning"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parked = |queue: &SqliteQueue| {
+        queue
+            .all_events()
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == EventKind::HoldParked)
+    };
+    await_passes(&held.passes, SOME_PASSES);
+    assert!(!parked(&queue));
+    assert!(queue.run_lease(run.id()).unwrap().is_some());
+    assert!(held.target.join("debug/big").is_file());
+
+    let outcome = held.finish(|queue| {
+        parked(queue) && !payloads_of(queue, &run, "build_outputs_removed").is_empty()
+    });
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    assert!(payloads_of(&queue, &run, "integration_started").is_empty());
+}

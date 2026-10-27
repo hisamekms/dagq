@@ -998,6 +998,11 @@ pub enum WorktreeCleanup {
     /// returns it, the supervisor offers it to a cleanup for disk space
     /// alone, which removes its build outputs while the wait holds still.
     Waiting(AskId),
+    /// A run the supervisor itself leases that waits in its slot for the
+    /// landing slot, with nothing running for it: no listing of the queue
+    /// returns it, the supervisor offers it to a cleanup for disk space
+    /// alone, which removes its build outputs while its landing waits.
+    Landing,
 }
 
 /// A `needs_session` run as the supervisor judges it for a resume.

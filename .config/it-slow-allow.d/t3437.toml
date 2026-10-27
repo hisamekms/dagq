@@ -1,0 +1,14 @@
+# The items of task 3437 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 3.7〜8.0s in stresses of 5, 11.6〜12.7s under a heavier load of other runs: a run claimed, reviewed and queued, held by the cleanup for room, then landed
+[[test]]
+name = "runtime_cleanup::a_runs_build_outputs_go_for_room_while_it_waits_for_the_landing_slot"
+reason = "B 境界（supervisor の配線・プロセス・SQLite・Git）: 実 supervisor の slot で lease を持って着地 slot を待つ run を、空き容量のための掃除の job が予約して target を消し、そのあいだ空きが戻っても着地が始まらず、通り過ぎた後に着地の検証がビルドし直して実の git に着地することを、build_outputs_removed と auto_repaired の SQLite の event で確かめる。渡すか・候補か・予約の判断は supervise::execution と supervise::cleanup の unit test"
+task = 3437
+
+# 3.8〜7.7s in stresses of 5, 10.6〜11.6s under a heavier load of other runs: the same run held by the cleanup, then its task held by a person
+[[test]]
+name = "runtime_cleanup::a_hold_parks_a_run_waiting_for_the_landing_slot_only_once_the_cleanup_passed_it"
+reason = "B 境界（supervisor の配線・CLI・SQLite）: 人が CLI の hold を打った task の run が掃除の job に予約されている間、supervise のループの hold の park が lease を持ったまま待ち、job が通り過ぎた後に park して lease を返すことを、実の supervise のループと SQLite の queue で確かめる。予約と withdraw の判断は supervise::cleanup の unit test"
+task = 3437

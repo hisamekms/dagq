@@ -546,8 +546,21 @@ impl Supervisor<'_> {
         }
         self.landing.rechecks.locked_out = false;
         if self.landing.rechecks.running.is_none() && !self.registration.draining() {
+            // Not while a cleanup for room removes the build outputs of a
+            // run waiting for the landing slot, and the job takes none of
+            // them once one starts: the lock is held until it started.
+            let cleaning = self.host.cleanup().cleaning();
+            let mut guard = cleanup::lock_cleaning(&cleaning);
+            if guard.landing_reached() {
+                return applied;
+            }
             let due = std::mem::take(&mut self.landing.rechecks.due);
-            match self.try_recheck(due) {
+            let started = self.try_recheck(due);
+            if matches!(started, Ok(Start::Started)) {
+                guard.withdraw_all();
+            }
+            drop(guard);
+            match started {
                 Ok(Start::Started | Start::Nothing) => {}
                 // A landing in progress, or another supervisor's recheck:
                 // the landing's recheck stays due for the next pass.

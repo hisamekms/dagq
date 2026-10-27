@@ -1654,6 +1654,15 @@ enum Phase {
     SatisfiedReview(satisfied_review::ClaimReviewWatch),
 }
 
+/// Whether a slot's run in `phase` is offered to a cleanup for disk space
+/// as one waiting for the landing slot: only in `AwaitingSlot`, in its
+/// slot, whose landing, e2e, review, resume and session are not running
+/// (each a phase of its own), while no landing recheck runs (`recheck`)
+/// and the process does not drain (`draining`).
+fn offered_for_room(phase: &Phase, out_of_slot: bool, recheck: bool, draining: bool) -> bool {
+    matches!(phase, Phase::AwaitingSlot) && !out_of_slot && !recheck && !draining
+}
+
 impl Phase {
     /// Whether this phase holds work in flight that a rebuild from the
     /// queue would start again (a validation, an e2e, a verification, a
@@ -2243,12 +2252,43 @@ impl Supervisor<'_> {
     }
 
     /// The runs the slots hold, which a cleanup leaves alone, but for the
-    /// waiting ones it may take for disk space ([`Self::waiting_worktrees`]).
+    /// waiting ones and those waiting for the landing slot it may take for
+    /// disk space ([`Self::waiting_worktrees`], [`Self::landing_worktrees`]).
     fn cleanup_held(&self) -> cleanup::Held {
         cleanup::Held {
             runs: self.held_runs(),
             waiting: self.waiting_worktrees(),
+            landing: self.landing_worktrees(),
         }
+    }
+
+    /// The runs in the slots that wait for the landing slot
+    /// (`AwaitingSlot`), which a cleanup for disk space may take the build
+    /// outputs of ([`cleanup::LandingRun`]): none while a landing recheck
+    /// runs or this process drains (a stop or a handoff lands or hands
+    /// them over as before). The landing queue keeps no order of its own:
+    /// each pass looks at the slots in turn, and the first of them that
+    /// finds the landing slot free lands. So the last slot is the last to
+    /// land, and they are offered from the last slot to the first.
+    fn landing_worktrees(&self) -> Vec<cleanup::LandingRun> {
+        let recheck = self.landing.rechecks.running();
+        let draining = self.registration.draining();
+        let mut landing: Vec<cleanup::LandingRun> = self
+            .claim
+            .slots
+            .iter()
+            .filter(|slot| offered_for_room(&slot.phase, slot.out_of_slot(), recheck, draining))
+            .filter_map(|slot| {
+                Some(cleanup::LandingRun {
+                    run_id: slot.run.id().clone(),
+                    task_id: slot.run.task_id(),
+                    worktree: slot.run.worktree_path()?.to_owned(),
+                    branch: slot.run.branch().map(str::to_owned),
+                })
+            })
+            .collect();
+        landing.reverse();
+        landing
     }
 
     /// The sweep of what ended runs left, when host運用's
@@ -4477,6 +4517,159 @@ impl Supervisor<'_> {
         );
         Ok(Step::Continue)
     }
+    /// A look at a run in its slot waiting for the landing slot, its park
+    /// included ([`Self::park_step`]): not while a cleanup for disk space
+    /// has it reserved, removing its build outputs; it lands once the job
+    /// passed it, building them again. The lock is held until the look is
+    /// done, so the job reserves no run this look moves on (a landing, an
+    /// e2e, a park or the lease handed back), and a run moved on is no
+    /// longer the job's to take ([`cleanup::Cleaning::withdraw`]).
+    fn step_landing_wait(&mut self, slot: &mut Slot) -> Result<Step> {
+        let cleaning = self.host.cleanup().cleaning();
+        let mut guard = cleanup::lock_cleaning(&cleaning);
+        if guard.reserved(slot.run.id()) {
+            return Ok(Step::Continue);
+        }
+        let step = match self.park_step(slot) {
+            Ok(Some(step)) => Ok(step),
+            Ok(None) => self.step_awaiting_slot(slot),
+            Err(error) => Err(error),
+        };
+        if !matches!(
+            (&step, &slot.phase),
+            (Ok(Step::Continue), Phase::AwaitingSlot)
+        ) {
+            guard.withdraw(slot.run.id());
+        }
+        step
+    }
+
+    /// A look at a run in its slot waiting for the landing slot: it lands,
+    /// runs its e2e first, is parked, or waits.
+    fn step_awaiting_slot(&mut self, slot: &mut Slot) -> Result<Step> {
+        // Judged again on each look: only the landing of another run
+        // keeps it in the landing queue (ADR-t1591-1).
+        slot.landing_turn = false;
+        slot.blocked_by = None;
+        // Its verification would fail on the missing program, an
+        // unreadable CI, an unresolved landing branch or short disk:
+        // the run stays awaiting integration, leased, and the
+        // integration slot stays free. A supervisor that stops
+        // gives the lease back for a hold that does not end by
+        // itself, leaving the run awaiting integration for a
+        // supervisor that does not drain to take up again
+        // (ADR-t3049-1); one that hands off keeps it, and hands the
+        // run over leased (ADR-t3048-1,
+        // [`crate::domain::landing_hold::judge`]).
+        match self.landing_hold() {
+            crate::domain::landing_hold::LandingHold::Proceed => {}
+            crate::domain::landing_hold::LandingHold::Wait => return Ok(Step::Continue),
+            crate::domain::landing_hold::LandingHold::HandBack(why) => {
+                warn!(run_id = %slot.run.id(), "run {} is left awaiting integration: {why} and this supervisor stops", slot.run.id());
+                self.queue
+                    .release_lease(slot.run.id(), self.registration.token())?;
+                return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
+            }
+        }
+        // An e2e that could not run waits to be tried again; a
+        // supervisor that stops cannot wait for it, and leaves the
+        // run awaiting integration as above (one that hands off
+        // leaves it to the next process, `AwaitingE2e`).
+        if self.registration.draining()
+            && !self.registration.handing_off()
+            && self.e2e_retry_pending(&slot.run)
+        {
+            warn!(run_id = %slot.run.id(), "run {} is left awaiting integration: its e2e could not run and this supervisor stops", slot.run.id());
+            self.queue
+                .release_lease(slot.run.id(), self.registration.token())?;
+            return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
+        }
+        // The e2e a passed run needs runs before it lands
+        // (ADR-t1233-2), whatever the integration slot; a head the
+        // landing recheck found not landing is parked first, as
+        // below, rather than tested.
+        if self.e2e_due(&slot.run)?.is_some() {
+            let current = self.queue.run(slot.run.id())?;
+            let main = self.repository.main_head()?;
+            if let Some(parked) = self.park_held_by_recheck(&current, &main)? {
+                return Ok(Step::Done(Box::new(parked)));
+            }
+        }
+        if let Some(phase) = self.e2e_before_landing(&slot.run)? {
+            slot.transition(phase, "e2e_due", &*self.queue);
+            return Ok(Step::Continue);
+        }
+        if let Some(landing) = self.queue.runs_with_status(RunStatus::Integrating)?.first() {
+            // Reviewed and its e2e done, it waits only for its
+            // landing turn (ADR-t1591-1).
+            slot.landing_turn = true;
+            slot.blocked_by = Some(landing.id().clone());
+            return Ok(Step::Continue);
+        }
+        let current = self.queue.run(slot.run.id())?;
+        let previous = current.status();
+        let main = self.repository.main_head()?;
+        // A head the landing recheck found not landing on this main
+        // is parked for a resume instead (ADR-0068 decision 3).
+        if let Some(parked) = self.park_held_by_recheck(&current, &main)? {
+            return Ok(Step::Done(Box::new(parked)));
+        }
+        // A run whose task is being replanned or held does not
+        // land (ADR-t1521-2 decision 1, ADR-t1879-1): the park
+        // above takes it out of its slot; a fence that came since
+        // that look is the next look's.
+        if self.queue.turn_fence(current.task_id())?.is_some() {
+            return Ok(Step::Continue);
+        }
+        // Its verification takes turns with the automatic update's
+        // build and e2e (ADR-t2719-1): only looked at here, the
+        // landing takes the turn itself before its commands.
+        if self.landing_waits_its_turn(&current)? {
+            slot.landing_turn = true;
+            return Ok(Step::Continue);
+        }
+        let run = match self.begin_landing(slot.run.id(), &main) {
+            Ok(run) => run,
+            // Unanswered, it may have taken the slot for this run:
+            // the reconciliation reads what the queue holds.
+            Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                return Err(error);
+            }
+            // A handoff asked since this pass read none at its
+            // start: the same write refused the landing
+            // (ADR-t3077-1 decision 1), and the run waits, its
+            // lease kept, for the next pass to drain for the
+            // request.
+            Err(error)
+                if error
+                    .downcast_ref::<crate::application::HandoffAsked>()
+                    .is_some() =>
+            {
+                info!(run_id = %slot.run.id(), "run {} does not land: its supervisor was asked to hand off", slot.run.id());
+                return Ok(Step::Continue);
+            }
+            // An `integrate` took the slot since the check: try again later.
+            Err(_)
+                if let Some(landing) =
+                    self.queue.runs_with_status(RunStatus::Integrating)?.first() =>
+            {
+                slot.landing_turn = true;
+                slot.blocked_by = Some(landing.id().clone());
+                return Ok(Step::Continue);
+            }
+            Err(error) => return Err(error),
+        };
+        info!(run_id = %run.id(), "run {} lands onto main {main} ({})", run.id(), previous.as_str());
+        let landing = Phase::Landing(Some(self.spawn_landing(run.clone(), previous, main)?));
+        slot.run = run;
+        slot.transition(
+            landing,
+            EventKind::IntegrationStarted.as_str(),
+            &*self.queue,
+        );
+        Ok(Step::Continue)
+    }
+
     fn step(&mut self, slot: &mut Slot) -> Result<Step> {
         // A landing releases the lease itself when it ends, so it is joined
         // before the lease is checked.
@@ -4527,7 +4720,13 @@ impl Supervisor<'_> {
             .queue
             .holds_lease(slot.run.id(), self.registration.token())?
         {
+            // Another holds it now: a cleanup for room no longer takes it.
+            cleanup::lock_cleaning(&self.host.cleanup().cleaning()).withdraw(slot.run.id());
             return Ok(Step::Disowned);
+        }
+        // Its park too waits for a cleanup for room that has it reserved.
+        if matches!(slot.phase, Phase::AwaitingSlot) {
+            return self.step_landing_wait(slot);
         }
         // A run whose task is being replanned or held goes no further than
         // its park (ADR-t1521-2 decision 1, ADR-t1879-1 decision 7): no
@@ -4554,129 +4753,7 @@ impl Supervisor<'_> {
                 self.finish_resumed_session(slot, attempt, &workspace, verdict, rewritten)
             }
             Phase::AwaitingSlot => {
-                // Judged again on each look: only the landing of another run
-                // keeps it in the landing queue (ADR-t1591-1).
-                slot.landing_turn = false;
-                slot.blocked_by = None;
-                // Its verification would fail on the missing program, an
-                // unreadable CI, an unresolved landing branch or short disk:
-                // the run stays awaiting integration, leased, and the
-                // integration slot stays free. A supervisor that stops
-                // gives the lease back for a hold that does not end by
-                // itself, leaving the run awaiting integration for a
-                // supervisor that does not drain to take up again
-                // (ADR-t3049-1); one that hands off keeps it, and hands the
-                // run over leased (ADR-t3048-1,
-                // [`crate::domain::landing_hold::judge`]).
-                match self.landing_hold() {
-                    crate::domain::landing_hold::LandingHold::Proceed => {}
-                    crate::domain::landing_hold::LandingHold::Wait => return Ok(Step::Continue),
-                    crate::domain::landing_hold::LandingHold::HandBack(why) => {
-                        warn!(run_id = %slot.run.id(), "run {} is left awaiting integration: {why} and this supervisor stops", slot.run.id());
-                        self.queue
-                            .release_lease(slot.run.id(), self.registration.token())?;
-                        return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
-                    }
-                }
-                // An e2e that could not run waits to be tried again; a
-                // supervisor that stops cannot wait for it, and leaves the
-                // run awaiting integration as above (one that hands off
-                // leaves it to the next process, `AwaitingE2e`).
-                if self.registration.draining()
-                    && !self.registration.handing_off()
-                    && self.e2e_retry_pending(&slot.run)
-                {
-                    warn!(run_id = %slot.run.id(), "run {} is left awaiting integration: its e2e could not run and this supervisor stops", slot.run.id());
-                    self.queue
-                        .release_lease(slot.run.id(), self.registration.token())?;
-                    return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
-                }
-                // The e2e a passed run needs runs before it lands
-                // (ADR-t1233-2), whatever the integration slot; a head the
-                // landing recheck found not landing is parked first, as
-                // below, rather than tested.
-                if self.e2e_due(&slot.run)?.is_some() {
-                    let current = self.queue.run(slot.run.id())?;
-                    let main = self.repository.main_head()?;
-                    if let Some(parked) = self.park_held_by_recheck(&current, &main)? {
-                        return Ok(Step::Done(Box::new(parked)));
-                    }
-                }
-                if let Some(phase) = self.e2e_before_landing(&slot.run)? {
-                    slot.transition(phase, "e2e_due", &*self.queue);
-                    return Ok(Step::Continue);
-                }
-                if let Some(landing) = self.queue.runs_with_status(RunStatus::Integrating)?.first()
-                {
-                    // Reviewed and its e2e done, it waits only for its
-                    // landing turn (ADR-t1591-1).
-                    slot.landing_turn = true;
-                    slot.blocked_by = Some(landing.id().clone());
-                    return Ok(Step::Continue);
-                }
-                let current = self.queue.run(slot.run.id())?;
-                let previous = current.status();
-                let main = self.repository.main_head()?;
-                // A head the landing recheck found not landing on this main
-                // is parked for a resume instead (ADR-0068 decision 3).
-                if let Some(parked) = self.park_held_by_recheck(&current, &main)? {
-                    return Ok(Step::Done(Box::new(parked)));
-                }
-                // A run whose task is being replanned or held does not
-                // land (ADR-t1521-2 decision 1, ADR-t1879-1): the park
-                // above takes it out of its slot; a fence that came since
-                // that look is the next look's.
-                if self.queue.turn_fence(current.task_id())?.is_some() {
-                    return Ok(Step::Continue);
-                }
-                // Its verification takes turns with the automatic update's
-                // build and e2e (ADR-t2719-1): only looked at here, the
-                // landing takes the turn itself before its commands.
-                if self.landing_waits_its_turn(&current)? {
-                    slot.landing_turn = true;
-                    return Ok(Step::Continue);
-                }
-                let run = match self.begin_landing(slot.run.id(), &main) {
-                    Ok(run) => run,
-                    // Unanswered, it may have taken the slot for this run:
-                    // the reconciliation reads what the queue holds.
-                    Err(error) if crate::application::supervisor_service::unreachable(&error) => {
-                        return Err(error);
-                    }
-                    // A handoff asked since this pass read none at its
-                    // start: the same write refused the landing
-                    // (ADR-t3077-1 decision 1), and the run waits, its
-                    // lease kept, for the next pass to drain for the
-                    // request.
-                    Err(error)
-                        if error
-                            .downcast_ref::<crate::application::HandoffAsked>()
-                            .is_some() =>
-                    {
-                        info!(run_id = %slot.run.id(), "run {} does not land: its supervisor was asked to hand off", slot.run.id());
-                        return Ok(Step::Continue);
-                    }
-                    // An `integrate` took the slot since the check: try again later.
-                    Err(_)
-                        if let Some(landing) =
-                            self.queue.runs_with_status(RunStatus::Integrating)?.first() =>
-                    {
-                        slot.landing_turn = true;
-                        slot.blocked_by = Some(landing.id().clone());
-                        return Ok(Step::Continue);
-                    }
-                    Err(error) => return Err(error),
-                };
-                info!(run_id = %run.id(), "run {} lands onto main {main} ({})", run.id(), previous.as_str());
-                let landing =
-                    Phase::Landing(Some(self.spawn_landing(run.clone(), previous, main)?));
-                slot.run = run;
-                slot.transition(
-                    landing,
-                    EventKind::IntegrationStarted.as_str(),
-                    &*self.queue,
-                );
-                Ok(Step::Continue)
+                unreachable!("a run waiting for the landing slot is looked at before its park")
             }
             Phase::AgentEval(watch) => {
                 let run = self.queue.run(slot.run.id())?;
@@ -5549,6 +5626,30 @@ mod tests {
 
     use super::*;
     use crate::domain::{EventFilter, actor::ActorContext};
+
+    /// Only a run in `AwaitingSlot`, in its slot, is offered to a cleanup
+    /// for disk space, and none while a landing recheck runs or the
+    /// process drains: one landing, running or waiting for its e2e,
+    /// validating or with its review held is not.
+    #[test]
+    fn only_a_run_idle_in_awaiting_slot_is_offered_for_room() {
+        assert!(offered_for_room(&Phase::AwaitingSlot, false, false, false));
+        assert!(!offered_for_room(&Phase::AwaitingSlot, true, false, false));
+        assert!(!offered_for_room(&Phase::AwaitingSlot, false, true, false));
+        assert!(!offered_for_room(&Phase::AwaitingSlot, false, false, true));
+        for phase in [
+            Phase::Landing(None),
+            Phase::AwaitingE2e,
+            Phase::Validating(None, None),
+            Phase::ReviewHeld {
+                session: None,
+                retried: false,
+                providers: Vec::new(),
+            },
+        ] {
+            assert!(!offered_for_room(&phase, false, false, false));
+        }
+    }
 
     /// A `--once` call logs why it goes on to another pass only when the
     /// reason changed since the pass it last logged.

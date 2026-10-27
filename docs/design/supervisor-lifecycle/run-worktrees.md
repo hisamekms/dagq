@@ -65,10 +65,23 @@ landing recheckは、hostで流すたびにscratchを作る前に、`recheck/`�
 - **それ以外**（`Idle`）: すぐ使われうるので通常は残し、空き容量のための掃除（[claimを控える](claim-hold.md)の「判定と掃除」）のjobのときだけ消して、そのjobの`auto_repaired`に数える。
 - 消さないもの: leaseかslotを持つrun（作業中・validating・review・resume・integrate・着地の前のe2e）。
   ただしADR-0071の待ちのrun（leaseとsessionを持ったまま答えを待つ）のうちturnの終わったものは、空き容量のための掃除だけが、leaseを持つsupervisorから受け取ってビルド成果物を消す（[人の答えを待つrun](waiting.md)の「空き容量のための掃除」）。
+  着地slotを待つrunのうち何も動いていないものも、空き容量のための掃除だけが同じように受け取って消す（下の「着地slotを待つrun」）。
   worktree・branch・commit・receipt・run_dir・未commitの変更（ソース）は残し、`runner`も消さない（下の`runner`の項は終わったrunだけ）。
 - 消している最中: jobが通り過ぎるまでrunは予約され、loopはleaseを取る前に予約のlockを取り、予約されたrunはその周回は取らない（下の「loopの外で掃除する」）。
   消した後に着地やresumeが始まれば、検証とworkerがsccacheでビルドし直して進む。
   人が打つ`integrate`はこの予約を見ない。
+- **着地slotを待つrun**（`WorktreeCleanup::Landing`）: reviewを通って（handoffでleaseごと引き継いだものも）leaseを持ったまま自分のslotで着地slotを待つrunである。
+  渡し方と消す前の確かめ直し（statusが同じで、最後のturnのagentもworktreeで動くprocessも無い）は[人の答えを待つrun](waiting.md)の「空き容量のための掃除」と同じで、違いだけをここに書く。
+  - 渡し方（`Supervisor::landing_worktrees`）: slotが`AwaitingSlot`のrunだけを渡し、着地・着地の前のe2e・review・resume・sessionはそれぞれ別のphaseなので渡らない。
+    landing recheckが走っている間とdrain（止めるものもhandoffも）の間は渡さない。
+    掃除が終わると、jobはまだ来ていないrunに手を付けず、その後に始める残りのjobも受け取らない。
+  - 選び方（`cleanup::landing_candidate`）: turnが動いているか頼まれたrunは候補にしない。
+  - 順: 着地の列は自分の順を持たず、各周回でslotを順に見て着地slotが空いていると最初に見たrunが着地するので、最後のslotから先頭のslotへの順に渡し、jobは他の候補の後に通る。
+  - 予約: 着地slotを待つrunは、jobがそのrunに来たときに、loopがまだ進めていなければ予約する（`Cleaning::reach`）。
+    loopはそのrunを見る間（holdと再計画のparkも）は予約のlockを持ち、着地・e2e・parkへ進めたかleaseを返したら渡したrunから外す（`Cleaning::withdraw`）。
+    landing recheckは、jobが着地slot待ちのrunを予約している間は始まらず、始まれば渡したrunをすべて外す。
+    先に消した他のrunで空きが戻り、jobが来る前に着地が始まったrunのビルド成果物は残る。
+    予約されたrunはその周回は着地もe2eもparkも始めず、jobが通り過ぎた後に着地が始まれば、検証がsccacheでビルドし直して進む。
 
 - **runの`runner`**: 上のどちらでも、同じjobがrun_dirの`runner`（claimとresumeのたびに写すバイナリの写し）を消し、消してよい理由と失敗のやり直しは`remove_run_runner`が持つ。
   worktreeの有無を問わず、run_dirの他のfile（`receipt.json`・検証のlogなど）は残す。

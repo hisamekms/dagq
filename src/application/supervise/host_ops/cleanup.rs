@@ -48,6 +48,14 @@
 //! ([`WorktreeCleanup::Waiting`]): the slots offer them ([`Held`]), and
 //! their waits hold still while the job has them reserved, so no answer is
 //! delivered and no turn starts in a worktree being cleaned.
+//! It takes too those of the runs the supervisor leases that wait in its
+//! slots for the landing slot, with nothing running for them
+//! ([`WorktreeCleanup::Landing`]): the slots offer them back to front of
+//! the landing queue ([`Held::landing`]), and the job passes them last.
+//! Such a run is reserved only once the job reaches it, and only while
+//! the loop has not moved it on since ([`Cleaning::withdraw`]): one whose
+//! landing began meanwhile keeps its build outputs, and one reserved does
+//! not begin to land until the job passed it; its landing builds again.
 //!
 //! A cleanup for disk space, and the rest of one, also clears the build
 //! caches of the queue's directory ([`build_caches`]): the target
@@ -82,11 +90,25 @@ pub(in crate::application::supervise) struct DiskRequest {
 }
 
 /// What the slots hold, which a cleanup leaves alone (`runs`), but for
-/// the runs of `waiting` a cleanup for disk space may take.
+/// the runs of `waiting` and `landing` a cleanup for disk space may take.
 #[derive(Debug, Default)]
 pub(in crate::application::supervise) struct Held {
     pub(in crate::application::supervise) runs: Vec<RunId>,
     pub(in crate::application::supervise) waiting: Vec<WaitingRun>,
+    /// The runs waiting for the landing slot, the last to land first.
+    pub(in crate::application::supervise) landing: Vec<LandingRun>,
+}
+
+/// A run the supervisor leases that waits in its slot for the landing
+/// slot, with no landing, e2e or recheck running for it, as its slot
+/// holds it: what a cleanup for disk space needs to take its build
+/// outputs ([`landing_candidate`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::application::supervise) struct LandingRun {
+    pub(in crate::application::supervise) run_id: RunId,
+    pub(in crate::application::supervise) task_id: TaskId,
+    pub(in crate::application::supervise) worktree: String,
+    pub(in crate::application::supervise) branch: Option<String>,
 }
 
 /// A run the supervisor leases that waits outside its slots for a
@@ -116,7 +138,8 @@ struct Request {
     /// The build outputs of the runs nobody works on that wait for no
     /// answer ([`WorktreeCleanup::Idle`]), and of the runs the slots offer
     /// that wait for an answer with no turn running
-    /// ([`WorktreeCleanup::Waiting`]), go too (for disk space).
+    /// ([`WorktreeCleanup::Waiting`]) or for the landing slot
+    /// ([`WorktreeCleanup::Landing`]), go too (for disk space).
     idle: bool,
     /// The [`build_caches`] are cleared too (for disk space).
     caches: bool,
@@ -238,10 +261,13 @@ impl CleanupWatch {
         true
     }
     /// End the cleanup (see [`HostOpsState::end_cleanup`]): take no more
-    /// requests, let an ordinary job stop after its current worktree, and
-    /// keep only the [`ending_rest`] of what waits.
+    /// requests, let an ordinary job stop after its current worktree, keep
+    /// only the [`ending_rest`] of what waits, and withdraw the runs
+    /// waiting for the landing slot the job has not reached, which the
+    /// drain lands or hands over as before ([`Cleaning::withdraw`]).
     fn end(&mut self) {
         self.ending = true;
+        lock_cleaning(&self.cleaning).withdraw_all();
         if !self
             .job
             .as_ref()
@@ -261,6 +287,13 @@ impl CleanupWatch {
         self.ending = false;
         self.stop.store(false, Ordering::SeqCst);
         true
+    }
+    /// Whether a job for `request` takes the runs waiting for the landing
+    /// slot: a cleanup for disk space alone, and not once the cleanup
+    /// ended ([`Self::end`]), whose drain lands or hands them over as
+    /// before; the rest of a cleanup for room started then passes them by.
+    const fn takes_landing(&self, request: &Request) -> bool {
+        request.idle && !self.ending
     }
     /// Whether the failure to clean `path` is recorded: once per process,
     /// and only logged when it fails again.
@@ -353,9 +386,13 @@ fn add_disk_request(
 
 /// Whether only a cleanup for disk space removes what a candidate left:
 /// the build outputs of a run nobody works on that waits for no answer, or
-/// of one this supervisor leases that waits outside its slots.
+/// of one this supervisor leases that waits outside its slots or for the
+/// landing slot.
 const fn for_room_only(cleanup: WorktreeCleanup) -> bool {
-    matches!(cleanup, WorktreeCleanup::Idle | WorktreeCleanup::Waiting(_))
+    matches!(
+        cleanup,
+        WorktreeCleanup::Idle | WorktreeCleanup::Waiting(_) | WorktreeCleanup::Landing
+    )
 }
 
 fn task_over(status: TaskStatus) -> bool {
@@ -383,6 +420,10 @@ fn build_outputs_record(
         WorktreeCleanup::Waiting(ask) => (
             BUILD_OUTPUTS_DISK_SPACE,
             format!(", waiting outside its slot for the answer to ask {ask}, for disk space"),
+        ),
+        WorktreeCleanup::Landing => (
+            BUILD_OUTPUTS_DISK_SPACE,
+            ", waiting for the landing slot, for disk space".to_owned(),
         ),
     };
     let mut payload =
@@ -462,6 +503,13 @@ fn failed_record(what: &str, path: &str, error: &anyhow::Error) -> (String, Valu
 pub(in crate::application::supervise) struct Cleaning {
     /// The runs the job picked and has not passed yet.
     reserved: Vec<RunId>,
+    /// The runs waiting for the landing slot the job picked and has not
+    /// reached yet ([`WorktreeCleanup::Landing`]): reserved only once it
+    /// reaches one the loop has not withdrawn ([`Self::withdraw`]).
+    offered: Vec<RunId>,
+    /// The runs of `offered` the job reached and reserved, until it
+    /// passed them.
+    reached: Vec<RunId>,
     /// The runs a job found nothing left to clean of ([`nothing_left`]),
     /// as the queue listed them then (task 1586). A sweep leaves them out
     /// of its candidates while the queue lists them the same, no slot
@@ -485,6 +533,45 @@ impl Cleaning {
         }
         self.settled.remove(run);
         true
+    }
+    /// The loop moves `run`, which waited for the landing slot, on (its
+    /// landing, its e2e, a park or the lease handed back): the job no
+    /// longer takes it. The loop holds the lock from its look at the run
+    /// until it moved it, so the job reserves no run being moved on.
+    pub(in crate::application::supervise) fn withdraw(&mut self, run: &RunId) {
+        self.offered.retain(|offered| offered != run);
+    }
+    /// Whether the job may go on to `candidate` now, under the lock: one
+    /// waiting for the landing slot only while it is still offered, which
+    /// reserves it; any other was reserved when the job picked it.
+    fn reach(&mut self, candidate: &EndedRunWorktree) -> bool {
+        if candidate.cleanup != WorktreeCleanup::Landing {
+            return true;
+        }
+        let offered = self.offered.contains(&candidate.run_id);
+        self.withdraw(&candidate.run_id);
+        if offered {
+            self.reserved.push(candidate.run_id.clone());
+            self.reached.push(candidate.run_id.clone());
+        }
+        offered
+    }
+    /// The job removes the build outputs of a run waiting for the landing
+    /// slot now: a landing recheck does not start meanwhile.
+    pub(in crate::application::supervise) fn landing_reached(&self) -> bool {
+        !self.reached.is_empty()
+    }
+    /// A landing recheck started: the job takes none of the runs waiting
+    /// for the landing slot it has not reached ([`Self::withdraw`]).
+    pub(in crate::application::supervise) fn withdraw_all(&mut self) {
+        self.offered.clear();
+    }
+    /// The job ended, having passed its candidates or not: none of them
+    /// is reserved, offered or reached any longer.
+    fn release(&mut self) {
+        self.reserved.clear();
+        self.offered.clear();
+        self.reached.clear();
     }
 }
 
@@ -569,6 +656,11 @@ fn waiting_candidate(
 /// the latest is `turn_finished`. One requested and not started, or
 /// started and not finished (its wrapper may have died in it), is not.
 fn turn_idle(events: &[RunEvent]) -> bool {
+    latest_turn_event(events).is_some_and(|event| event.kind == EventKind::TurnFinished)
+}
+
+/// The latest of a run's turn events, by id.
+fn latest_turn_event(events: &[RunEvent]) -> Option<&RunEvent> {
     events
         .iter()
         .filter(|event| {
@@ -578,7 +670,30 @@ fn turn_idle(events: &[RunEvent]) -> bool {
             )
         })
         .max_by_key(|event| event.id)
-        .is_some_and(|event| event.kind == EventKind::TurnFinished)
+}
+
+/// The candidate a run waiting for the landing slot is to a cleanup for
+/// disk space ([`WorktreeCleanup::Landing`]), `status` as the queue holds
+/// it now: unless a turn of it runs or is about to ([`turn_idle`]; a run
+/// with no turn yet has none running). Its task goes on, as the run is
+/// leased.
+fn landing_candidate(
+    run: &LandingRun,
+    status: RunStatus,
+    events: &[RunEvent],
+) -> Option<EndedRunWorktree> {
+    if latest_turn_event(events).is_some() && !turn_idle(events) {
+        return None;
+    }
+    Some(EndedRunWorktree {
+        run_id: run.run_id.clone(),
+        task_id: run.task_id,
+        status,
+        task_status: TaskStatus::InProgress,
+        worktree: run.worktree.clone(),
+        branch: run.branch.clone(),
+        cleanup: WorktreeCleanup::Landing,
+    })
 }
 
 /// Whether something runs for a waiting run in its `worktree`, besides
@@ -856,8 +971,8 @@ struct JobPorts {
     runs_dir: PathBuf,
     repo_root: PathBuf,
     cleaning: Arc<Mutex<Cleaning>>,
-    /// The session's processes of each waiting candidate, as its events
-    /// named them when it was picked ([`session_pids`]).
+    /// The session's processes of each waiting or landing candidate, as
+    /// its events named them when it was picked ([`session_pids`]).
     waiting: HashMap<RunId, SessionPids>,
     stop: Arc<AtomicBool>,
     prune: bool,
@@ -966,9 +1081,9 @@ impl HostOpsState {
             warn!("the cleanup of ended runs' worktrees panicked");
             Vec::new()
         });
-        // Whatever the job left reserved (it could not open the queue, or
-        // panicked) is free again.
-        lock_cleaning(&self.cleanup.cleaning).reserved.clear();
+        // Whatever the job left reserved, offered or reached (it could not
+        // open the queue, or panicked) is free again.
+        lock_cleaning(&self.cleanup.cleaning).release();
         self.cleanup.deferred = false;
         let cleaned = self.record_cleanup(env, outcomes);
         if let Some(disk) = for_room(job.disk, job.counted) {
@@ -1027,7 +1142,13 @@ impl HostOpsState {
     /// picked here, on the loop, less the runs a slot holds. A cleanup for
     /// disk space also takes the waiting runs the slots offer whose turn
     /// is over ([`waiting_candidate`]); the job reserves them as any other,
-    /// which holds their waits still until it passed them.
+    /// which holds their waits still until it passed them. It takes last
+    /// the runs the slots offer that wait for the landing slot
+    /// ([`landing_candidate`]), in the order offered, the last to land
+    /// first: each is reserved only once the job reaches it
+    /// ([`Cleaning::reach`]), so the run nearest its landing is the last
+    /// to lose its build outputs, and keeps them when the room the others
+    /// made lets it land first.
     fn start_cleanup(&mut self, env: &mut HostEnv<'_>, held: &Held) {
         if self.cleanup.job.is_some() || self.cleanup.pending.is_empty() {
             return;
@@ -1051,6 +1172,19 @@ impl HostOpsState {
         } else {
             (Vec::new(), HashMap::new())
         };
+        let (landing, landing_pids): (Vec<_>, Vec<_>) = if self.cleanup.takes_landing(&request) {
+            landing_candidates(&*env.queue, &held.landing)
+                .into_iter()
+                .map(|(candidate, pids)| {
+                    let run = candidate.run_id.clone();
+                    (candidate, (run, pids))
+                })
+                .unzip()
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let mut waiting_pids = waiting_pids;
+        waiting_pids.extend(landing_pids);
         let mut cleaning = lock_cleaning(&self.cleanup.cleaning);
         // The waiting runs first: their waits hold still until the job
         // passed them, so an answer waits for theirs alone.
@@ -1061,10 +1195,14 @@ impl HostOpsState {
             |run| held.runs.contains(run),
             &mut cleaning.settled,
         ));
+        cleaning.reserved = candidates.iter().map(|w| w.run_id.clone()).collect();
+        cleaning.offered = landing.iter().map(|w| w.run_id.clone()).collect();
+        candidates.extend(landing);
         if candidates.is_empty() && !request.prune {
+            cleaning.reserved.clear();
+            cleaning.offered.clear();
             return;
         }
-        cleaning.reserved = candidates.iter().map(|w| w.run_id.clone()).collect();
         drop(cleaning);
         let ports = JobPorts {
             files: env.files.clone(),
@@ -1266,7 +1404,9 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
         &ports.stop,
         candidates,
         |candidate| match candidate.cleanup {
-            WorktreeCleanup::Waiting(_) => still_waiting(&*queue, ports, candidate),
+            WorktreeCleanup::Waiting(_) | WorktreeCleanup::Landing => {
+                still_waiting(&*queue, ports, candidate)
+            }
             _ => queue.ended_run_worktree(&candidate.run_id),
         },
         |candidate, outcomes| {
@@ -1294,9 +1434,11 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
 /// Pass each candidate in turn: under the lock, read it again
 /// (`recheck`, that run alone) and clean it (`clean`, whether nothing is
 /// left of it) only while the queue lists it as it was picked: nobody
-/// leased it since, and neither it nor its task moved on. A run passed
-/// with nothing left is settled under the same lock it is released in,
-/// so a lease the loop takes after it unsettles it.
+/// leased it since, and neither it nor its task moved on. A run waiting
+/// for the landing slot is reserved there, if the loop still offers it
+/// ([`Cleaning::reach`]). A run passed with nothing left is settled
+/// under the same lock it is released in, so a lease the loop takes after
+/// it unsettles it.
 fn pass_candidates(
     cleaning: &Mutex<Cleaning>,
     stop: &AtomicBool,
@@ -1310,7 +1452,10 @@ fn pass_candidates(
             break;
         }
         let still = {
-            let _cleaning = lock_cleaning(cleaning);
+            let mut cleaning = lock_cleaning(cleaning);
+            if !cleaning.reach(&candidate) {
+                continue;
+            }
             match recheck(&candidate) {
                 Ok(now) => now.as_ref() == Some(&candidate),
                 Err(error) => {
@@ -1322,11 +1467,12 @@ fn pass_candidates(
         let settled = still && clean(&candidate, &mut outcomes);
         let mut cleaning = lock_cleaning(cleaning);
         cleaning.reserved.retain(|run| *run != candidate.run_id);
+        cleaning.reached.retain(|run| *run != candidate.run_id);
         if settled {
             cleaning.settled.insert(candidate.run_id.clone(), candidate);
         }
     }
-    lock_cleaning(cleaning).reserved.clear();
+    lock_cleaning(cleaning).release();
     outcomes
 }
 
@@ -1361,6 +1507,28 @@ fn waiting_candidates(
         .collect()
 }
 
+/// The runs of `landing` a cleanup for disk space takes
+/// ([`landing_candidate`]), in their order, read on the loop: a run whose
+/// status or events cannot be read is left for the next cleanup.
+fn landing_candidates(
+    queue: &(dyn HostOpsQueue + Send),
+    landing: &[LandingRun],
+) -> Vec<(EndedRunWorktree, SessionPids)> {
+    landing
+        .iter()
+        .filter_map(|run| {
+            let read = queue
+                .run(&run.run_id)
+                .and_then(|now| Ok((now.status(), queue.run_events(&run.run_id)?)))
+                .inspect_err(|error| warn!(run_id = %run.run_id, error = %format_args!("{error:#}"), "run {}: whether a turn of it runs could not be read for the cleanup for disk space: {error:#}", run.run_id))
+                .ok()?;
+            let (status, events) = read;
+            let candidate = landing_candidate(run, status, &events)?;
+            Some((candidate, session_pids(&events)))
+        })
+        .collect()
+}
+
 /// The processes of a waiting run's session: the pid of its wrapper (the
 /// latest `wrapper_started`) and of the agent of its last turn (the latest
 /// `turn_started`).
@@ -1388,12 +1556,13 @@ fn session_pids(events: &[RunEvent]) -> SessionPids {
     }
 }
 
-/// A waiting candidate as the job finds it again under the lock: its
-/// status is the same, the agent of its last turn is gone, and nothing
-/// else runs for it ([`worktree_busy`]). The loop delivers no answer and
-/// starts no turn while the job has it reserved, so it stays so while its
-/// build outputs go. The lease is the loop's: this live process keeps
-/// heartbeating it, so no other supervisor takes the run meanwhile.
+/// A waiting or landing candidate as the job finds it again under the
+/// lock: its status is the same, the agent of its last turn is gone, and
+/// nothing else runs for it ([`worktree_busy`]). The loop delivers no
+/// answer, starts no turn and begins no landing or e2e while the job has
+/// it reserved, so it stays so while its build outputs go. The lease is
+/// the loop's: this live process keeps heartbeating it, so no other
+/// supervisor takes the run meanwhile.
 fn still_waiting(
     queue: &(dyn HostOpsQueue + Send),
     ports: &JobPorts,
@@ -1424,7 +1593,7 @@ fn still_waiting(
             _ => true,
         };
     if busy {
-        info!(run_id = %run, "run {run} waits for an answer, but something runs for it: its build outputs stay");
+        info!(run_id = %run, "run {run} waits, but something runs for it: its build outputs stay");
         return Ok(None);
     }
     Ok(Some(candidate.clone()))
@@ -3811,6 +3980,206 @@ mod tests {
         );
         assert_eq!(seen, [true]);
         assert!(!lock_cleaning(&cleaning).reserved(&run));
+    }
+
+    /// A run waiting for the landing slot is a candidate of a cleanup for
+    /// room unless a turn of it runs or was asked for; its task goes on,
+    /// so only its build outputs go, its runner stays, an ordinary cleanup
+    /// does not take it, and its removal is recorded for disk space.
+    #[test]
+    fn a_landing_run_is_a_candidate_for_room_only_while_no_turn_runs() {
+        let run = LandingRun {
+            run_id: RunId::new("l".to_owned()).unwrap(),
+            task_id: TaskId::new(4),
+            worktree: "/runs/l/worktree".to_owned(),
+            branch: Some("refs/heads/dagq/l".to_owned()),
+        };
+        use event_kind::{TURN_FINISHED as F, TURN_REQUESTED as Q, TURN_STARTED as S};
+        for (events, picked) in [
+            (vec![], true),
+            (vec![(1, Q)], false),
+            (vec![(1, Q), (2, S)], false),
+            (vec![(1, Q), (2, S), (3, F)], true),
+            (vec![(1, Q), (2, S), (3, F), (4, Q)], false),
+        ] {
+            let events: Vec<RunEvent> = events
+                .into_iter()
+                .map(|(id, kind)| turn_event(id, kind))
+                .collect();
+            let candidate = landing_candidate(&run, RunStatus::AwaitingIntegration, &events);
+            assert_eq!(candidate.is_some(), picked, "{events:?}");
+            if let Some(candidate) = candidate {
+                assert_eq!(
+                    candidate,
+                    EndedRunWorktree {
+                        run_id: run.run_id.clone(),
+                        task_id: TaskId::new(4),
+                        status: RunStatus::AwaitingIntegration,
+                        task_status: TaskStatus::InProgress,
+                        worktree: run.worktree.clone(),
+                        branch: run.branch.clone(),
+                        cleanup: WorktreeCleanup::Landing,
+                    }
+                );
+                assert!(for_room_only(candidate.cleanup));
+                assert!(!runner_goes(candidate.cleanup));
+                let mut ordinary = Request::default();
+                ordinary.add(None, None);
+                assert!(!ordinary.wants(&candidate));
+            }
+        }
+        let (why, payload) = build_outputs_record(
+            WorktreeCleanup::Landing,
+            &["/runs/l/worktree/target".to_owned()],
+            &Size::of(3),
+        );
+        assert_eq!(why, ", waiting for the landing slot, for disk space");
+        assert_eq!(
+            payload,
+            json!({"paths": ["/runs/l/worktree/target"], "bytes": 3, "by": "supervisor", "reason": "disk_space"})
+        );
+    }
+
+    /// The job reserves a run waiting for the landing slot only once it
+    /// reaches it, and only while the loop still offers it: one the loop
+    /// moved on meanwhile (its landing began) is passed untouched, and the
+    /// one reached is reserved while it is cleaned, not after. Neither is
+    /// reserved before the job reaches it.
+    #[test]
+    fn a_landing_run_is_reserved_only_once_reached_and_still_offered() {
+        let landing = |run: &str| EndedRunWorktree {
+            cleanup: WorktreeCleanup::Landing,
+            status: RunStatus::AwaitingIntegration,
+            ..candidate(run, TaskStatus::InProgress)
+        };
+        let (back, front) = (landing("back"), landing("front"));
+        let cleaning = Mutex::new(Cleaning {
+            offered: vec![back.run_id.clone(), front.run_id.clone()],
+            ..Cleaning::default()
+        });
+        let stop = AtomicBool::new(false);
+        let mut seen = Vec::new();
+        pass_candidates(
+            &cleaning,
+            &stop,
+            vec![back.clone(), front.clone()],
+            |picked| Ok(Some(picked.clone())),
+            |picked, _| {
+                let mut cleaning = lock_cleaning(&cleaning);
+                seen.push((
+                    picked.run_id.clone(),
+                    cleaning.reserved(&back.run_id),
+                    cleaning.reserved(&front.run_id),
+                ));
+                assert!(cleaning.landing_reached());
+                // The front run's landing begins while the job cleans the
+                // back one.
+                cleaning.withdraw(&front.run_id);
+                false
+            },
+        );
+        assert_eq!(seen, [(back.run_id.clone(), true, false)]);
+        let cleaning = lock_cleaning(&cleaning);
+        assert!(!cleaning.reserved(&back.run_id) && !cleaning.reserved(&front.run_id));
+        assert!(cleaning.offered.is_empty());
+        assert!(!cleaning.landing_reached());
+    }
+
+    /// A landing recheck that starts after the job was offered runs
+    /// waiting for the landing slot withdraws those it has not reached:
+    /// the job passes them untouched. One reached and reserved holds the
+    /// recheck back until the job passed it.
+    #[test]
+    fn a_landing_recheck_and_the_removal_of_a_landing_runs_outputs_exclude_each_other() {
+        let landing = |run: &str| EndedRunWorktree {
+            cleanup: WorktreeCleanup::Landing,
+            ..candidate(run, TaskStatus::InProgress)
+        };
+        let (first, second) = (landing("first"), landing("second"));
+        let cleaning = Mutex::new(Cleaning {
+            offered: vec![first.run_id.clone(), second.run_id.clone()],
+            ..Cleaning::default()
+        });
+        assert!(!lock_cleaning(&cleaning).landing_reached());
+        let stop = AtomicBool::new(false);
+        let mut reached = Vec::new();
+        pass_candidates(
+            &cleaning,
+            &stop,
+            vec![first.clone()],
+            |picked| Ok(Some(picked.clone())),
+            |_, _| {
+                // The recheck waits while its outputs go.
+                reached.push(lock_cleaning(&cleaning).landing_reached());
+                false
+            },
+        );
+        assert_eq!(reached, [true]);
+        let mut cleaning = lock_cleaning(&cleaning);
+        assert!(!cleaning.landing_reached());
+        // The recheck starts: the second one, not reached yet, is passed.
+        cleaning.withdraw_all();
+        assert!(!cleaning.reach(&second));
+        assert!(!cleaning.reserved(&second.run_id));
+    }
+
+    /// A stop or a handoff withdraws the runs waiting for the landing slot
+    /// a job for room has not reached: the job, which goes on to its last
+    /// candidate, passes them untouched, and the drain lands or hands them
+    /// over. The rest of a cleanup for room started after takes none of
+    /// them; once a withdrawn handoff takes requests again, one does.
+    #[test]
+    fn ending_the_cleanup_withdraws_the_landing_runs_not_reached() {
+        let landing = EndedRunWorktree {
+            cleanup: WorktreeCleanup::Landing,
+            ..candidate("l", TaskStatus::InProgress)
+        };
+        let for_room = Request {
+            idle: true,
+            ..Request::default()
+        };
+        let mut watch = CleanupWatch::default();
+        assert!(watch.takes_landing(&for_room));
+        assert!(!watch.takes_landing(&Request::default()));
+        lock_cleaning(&watch.cleaning)
+            .offered
+            .push(landing.run_id.clone());
+        watch.end();
+        assert!(!watch.takes_landing(&for_room));
+        {
+            let mut cleaning = lock_cleaning(&watch.cleaning);
+            assert!(!cleaning.reach(&landing));
+            assert!(!cleaning.reserved(&landing.run_id));
+        }
+        assert!(watch.resume());
+        assert!(watch.takes_landing(&for_room));
+    }
+
+    /// A job that ended before it passed its candidates (it panicked
+    /// cleaning a run waiting for the landing slot) leaves none reserved,
+    /// offered or reached: the run lands and a landing recheck starts
+    /// again.
+    #[test]
+    fn a_job_ended_midway_leaves_no_landing_run_reached() {
+        let landing = EndedRunWorktree {
+            cleanup: WorktreeCleanup::Landing,
+            ..candidate("l", TaskStatus::InProgress)
+        };
+        let other = RunId::new("o").unwrap();
+        let mut cleaning = Cleaning {
+            offered: vec![landing.run_id.clone(), other.clone()],
+            ..Cleaning::default()
+        };
+        assert!(cleaning.reach(&landing));
+        assert!(cleaning.landing_reached());
+        cleaning.release();
+        assert!(!cleaning.landing_reached());
+        assert!(!cleaning.reserved(&landing.run_id));
+        assert!(cleaning.offered.is_empty());
+        assert!(!cleaning.reach(&EndedRunWorktree {
+            run_id: other,
+            ..landing
+        }));
     }
 
     /// An ended run of task `task` whose task is `task_status`.

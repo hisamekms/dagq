@@ -126,7 +126,7 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
   `[run.env]`のprogramが無いときと着地のbranchが解決しないときは、掃除を待たずにleaseを返す。
 - handoffはどの保留でもleaseを返さず、runをleaseごと次のprocessに渡す（[Handoff](handoff.md)、[ADR-t3048-1](../../adr/2026-10-21-t3048-1-handoff-hands-over-held-landings-leased.md)）。
   handoffを初めて読んだ周回では、runを進める前に掃除をdrainの扱いにして読み直す（`end_cleanup_for_handoff`）。
-- 人の答えを待つrunのうちturnが終わり何も動いていないものは、空き容量の掃除だけがビルド成果物を消す（[人の答えを待つrun](waiting.md)）。
+- 人の答えを待つrunと着地slotを待つrunのうち何も動いていないものは、空き容量の掃除だけがビルド成果物を消す（[waiting](waiting.md)、着地slot待ちは上のRun worktrees）。
 
 ### queueのdirのビルドのキャッシュ
 
