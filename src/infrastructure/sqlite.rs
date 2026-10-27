@@ -2207,6 +2207,12 @@ pub(crate) fn tag_busy(error: anyhow::Error) -> anyhow::Error {
 /// write): its origin is recorded once, and a task of a request a person
 /// gave a priority takes that priority as a person's own unless its goal
 /// already has it (ADR-t1975-1 decisions 2 and 5).
+///
+/// `task_created` carries the worker it is registered with: `provider` and
+/// `worker_mode` resolved, and `provider_named` and `worker_mode_named`,
+/// whether the registrant named each (`add --provider`, `--headless`, or
+/// the same fields of a draft) or left it to the default, which a task
+/// follows when the default changes (ADR-t1340-1).
 pub(super) fn insert_task(
     tx: &Connection,
     mut new: NewTask,
@@ -2231,6 +2237,7 @@ pub(super) fn insert_task(
             .map(|goal| (goal.priority(), goal.priority_by())),
     )?;
     new.priority = priority;
+    let (provider_named, worker_mode_named) = (new.provider.is_some(), new.worker_mode.is_some());
     let task = Task::new(TaskId::new(next_id(tx, "tasks")?), new, now.to_owned())?;
     let id = task.id();
     tx.execute(
@@ -2261,7 +2268,9 @@ pub(super) fn insert_task(
             "change": task.change().map(TaskChange::as_str),
             "execution_class": task.execution_class().as_str(),
             "priority": task.own_priority(),
-            "priority_by": priority_by.map(PriorityBy::as_str)}),
+            "priority_by": priority_by.map(PriorityBy::as_str),
+            "provider": task.worker().provider.as_str(), "provider_named": provider_named,
+            "worker_mode": task.worker().mode.as_str(), "worker_mode_named": worker_mode_named}),
     )?;
     // Inserted after the task, which is in its goal already, so the
     // cycle checks see the goal's wait for it (ADR-0038).

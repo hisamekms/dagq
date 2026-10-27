@@ -10,7 +10,7 @@ use dagq::{
         dependency_graph,
     },
     domain::{
-        ClaimOutcome, EvidenceCheck, GoalId, Priority, PrioritySource, TaskAction,
+        ClaimOutcome, EvidenceCheck, GoalId, Priority, PrioritySource, Provider, TaskAction,
         TaskAuthorization, TaskEdit, TaskId, TaskStatus, cancel_reason::NewCancel,
     },
     infrastructure::sqlite::SqliteQueue,
@@ -520,6 +520,34 @@ fn clearing_an_own_priority_records_the_change_of_its_source() {
             serde_json::json!({"from": "normal", "to": "normal", "from_source": "goal",
                 "to_source": "task", "own": "normal", "own_by": "human"}),
         ]
+    );
+}
+
+/// `task_created` carries the worker the task is registered with, resolved,
+/// and whether the registrant named its provider and its mode: a provider
+/// named without a mode takes the mode its default gives (ADR-t1340-1).
+#[test]
+fn task_created_records_the_worker_and_whether_each_part_was_named() {
+    let (_dir, mut queue) = fixture();
+    let mut spec = new_task("codex by name");
+    spec.provider = Some(Provider::Codex);
+    spec.worker_mode = None;
+    let task = queue.add(spec).unwrap().id();
+    let events = queue.show(task).unwrap().events;
+    let created = events
+        .iter()
+        .find(|e| e.kind == EventKind::TaskCreated)
+        .unwrap();
+    let worker = [
+        "provider",
+        "provider_named",
+        "worker_mode",
+        "worker_mode_named",
+    ]
+    .map(|field| created.payload[field].clone());
+    assert_eq!(
+        serde_json::Value::from(worker.to_vec()),
+        serde_json::json!(["codex", true, "headless", false])
     );
 }
 

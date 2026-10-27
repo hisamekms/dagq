@@ -59,7 +59,7 @@ T=2026-10-02T11:30:00Z      # 窓の終わり（--until）
 for k in run_claimed provider_switched provider_waiting turn_started turn_finished turn_requested stall_nudged \
          recovery_requested auto_repaired run_waiting_started run_waiting_ended run_waiting_deferred run_waiting_ask_added \
          session_exited session_reopen_failed wrapper_started wrapper_heartbeat_expired workspace_created workspace_closed \
-         ask_opened ask_closed ask_delivered ask_delivery_failed task_edited; do
+         ask_opened ask_closed ask_delivered ask_delivery_failed task_created task_edited; do
   dagq events --all --full --kind $k --since $F --until $T --limit 20000
 done | jq -s '[.[].events[]]' > ev.json
 jq -c 'group_by(.kind) | map({(.[0].kind): length}) | add' ev.json   # どの kind も --limit に届いていないことを確かめる
@@ -162,16 +162,18 @@ jq -r -R -s --slurpfile s stats.json 'split("\n") | map(select(length > 0) | spl
 ```sh
 jq -c 'map(select(.kind == "run_claimed")) | group_by(.g) | map({g: .[0].g, runs: length})' tagged.json
 jq -c 'map(select(.kind == "run_claimed")) | group_by(.created_at[0:10]) | map({day: .[0].created_at[0:10], by: (group_by(.g) | map({(.[0].g): length}) | add)})' tagged.json
+# 登録の時点の経路と provider（明示したものと既定に従うもの）
+jq -c 'map(select(.kind == "task_created" and .payload.worker_mode? != null))
+       | group_by([.payload.provider, .payload.provider_named, .payload.worker_mode, .payload.worker_mode_named])
+       | map({provider: .[0].payload.provider, provider_named: .[0].payload.provider_named,
+              worker_mode: .[0].payload.worker_mode, worker_mode_named: .[0].payload.worker_mode_named,
+              tasks: length, by: (group_by(.actor.role) | map({(.[0].actor.role): length}) | add)})' ev.json
 # 経路を明示して変えた edit（to が interactive のものが --interactive）
 jq -c 'map(select(.kind == "task_edited" and (.payload.to.worker_mode? // null) != null))
        | map({at: .created_at, task: .task_id, from: .payload.from.worker_mode, to: .payload.to.worker_mode, actor: .actor.role})' ev.json
-# 今 interactive を持つ task（ready・draft・submitted）。理由は各 task の context を読む
-# list は 1 ページ（--limit）ごとに {tasks, next, total} を返す。next が null になるまで --before で続ける
-dagq list --status draft,submitted,ready --limit 500 | jq -r '.tasks[] | select(.worker_mode == "interactive") | .id' \
-  | while read id; do dagq show $id | jq -c '.task | {id, status, worker_mode, context: (.context // "" | .[0:200])}'; done
 ```
 
-`add --interactive` で登録した task は `task_created` の event に経路が残らない（`payload` は `goal_id` だけ）ので、`add` の時点の明示は event から数えられない。今の task の `worker_mode` を `list` と `show` で読む（上の最後のコマンド）か、claim の `run_claimed` の `worker_mode` で数える。理由は `context` の自由な文で、分類のコードは無い（「取れない項目」）。
+`task_created` の `payload` は登録の時点の `provider` と `worker_mode`（既定を当てはめた値）と、それぞれを明示したか（`provider_named`・`worker_mode_named`）を持つ。明示の無い task は既定が変われば従う（ADR-t1340-1）ので、`*_named` が `false` の行は「既定に従う」と読む。これらを持たない `task_created`（記録より前の binary が作った task）は上の数から外れるので、その task は今の `worker_mode` を `list` と `show` で読むか、claim の `run_claimed` の `worker_mode` で数える。`add` と `edit` は `--interactive` を拒む（ADR-t1433-2）ので、今の binary の `task_created` の明示した経路は `headless` だけで、`--interactive` の数と理由は数えるものが無い。
 
 ### 項目 D: 待ちの上限（`max_waiting`）に当たって何も動かずに slot を塞いだ時間
 
@@ -422,6 +424,5 @@ F=$(date -u -v-7d +%Y-%m-%dT00:00:00Z); T=$(date -u +%Y-%m-%dT00:00:00Z)   # mac
 | E3 非対話の workspace が実際に残ったか | `interrupted`・`failed` の非対話の run の workspace に `workspace_closed` が無く、cmux に残ったのか記録されなかったのか分からない | 非対話の run の workspace を閉じた・閉じられなかった経路の全てで `workspace_closed`（理由つき）を残す。後始末で見つけて閉じたものも |
 | A2 待ちの外の wrapper の死 | `wrapper_heartbeat_expired` は 3 つの経路（session・resume・exit）のうち一部でしか残らず、`recovery_requested` の `last_error` の文で数えるしかない | 3 つの経路のどれでも `wrapper_heartbeat_expired`（run・phase・待ちの最中か）を残す |
 | A1 待ちの最中に失った session の ask | `run_waiting_ended` の `cause: session_exited` が `ask_id: null` で、どの ask の答えを配れなかったかが event に無い | `run_waiting_ended` に待っていた ask の ID を残す |
-| C `add --interactive` の数と理由 | `task_created` に経路が無く、理由は `context` の自由な文 | `task_created` に `provider`・`worker_mode`（明示か既定か）を残し、`--interactive` に理由の分類（画面を見たい・割り込みたい・非対話の不具合の回避など）を付ける |
 
 計装の task は receipt の `follow_ups` に出した。
