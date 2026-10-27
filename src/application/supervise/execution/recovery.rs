@@ -20,6 +20,7 @@ use crate::domain::recovery::{
     sort_job_options, without_label,
 };
 use crate::domain::run::{RecoveryRecord, restore_payload};
+use crate::domain::stats::timestamp_millis;
 
 /// The actions a recovery job may choose for an `idle_process` alert;
 /// `send_instruction` holds only while the session is idle at its prompt.
@@ -1185,15 +1186,7 @@ fn spawn_live(
     let screen = { turns_excerpt(sv, run) };
     let listed = own_processes(sv, run).map_err(|error| format!("{error:#}"));
     let (status, head, receipt) = git_facts(sv, run)?;
-    let mut history = repair_history(sv, run)?;
-    history.extend(
-        detail
-            .events
-            .iter()
-            .filter(|event| event.kind == EventKind::TaskEdited)
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()?,
-    );
+    let history = repair_history(sv, run, &detail.events)?;
     let material = RecoveryMaterial {
         alert,
         ended: None,
@@ -1308,20 +1301,45 @@ pub(super) fn git_facts(
     Ok((status, head, receipt))
 }
 
-/// The run's earlier recovery verdicts and automatic repairs.
-pub(super) fn repair_history(sv: &Supervisor<'_>, run: &TaskRun) -> Result<Vec<Value>> {
-    Ok(sv
-        .queue
-        .run_events(run.id())?
+/// The run's earlier recovery verdicts and automatic repairs, with the
+/// edits among `task_events` (the task's events), for a recovery job's
+/// prompt: see [`ordered_history`].
+pub(super) fn repair_history(
+    sv: &Supervisor<'_>,
+    run: &TaskRun,
+    task_events: &[RunEvent],
+) -> Result<Vec<Value>> {
+    ordered_history(&sv.queue.run_events(run.id())?, task_events)
+}
+
+/// The `recovery_finished` and `auto_repaired` events among `run_events`
+/// and the `task_edited` among `task_events`, oldest first by when they
+/// were recorded and by the event's id at the same time, so a job reads
+/// whether a fix to the task (its verify) came before or after a verdict
+/// (ADR-t883-1). A repair is compacted; an edit keeps its whole payload.
+fn ordered_history(run_events: &[RunEvent], task_events: &[RunEvent]) -> Result<Vec<Value>> {
+    let repairs = run_events.iter().filter(|e| {
+        matches!(
+            e.kind.known(),
+            Some(EventKind::RecoveryFinished | EventKind::AutoRepaired)
+        )
+    });
+    let edits = task_events
         .iter()
-        .filter(|e| {
-            matches!(
-                e.kind.known(),
-                Some(EventKind::RecoveryFinished | EventKind::AutoRepaired)
-            )
+        .filter(|e| e.kind == EventKind::TaskEdited);
+    let mut events: Vec<&RunEvent> = repairs.chain(edits).collect();
+    events.sort_by_key(|e| (timestamp_millis(&e.created_at), e.id));
+    events
+        .into_iter()
+        .map(|e| {
+            if e.kind == EventKind::TaskEdited {
+                serde_json::to_value(e)
+            } else {
+                Ok(crate::application::health::compact_event(e))
+            }
         })
-        .map(crate::application::health::compact_event)
-        .collect())
+        .collect::<Result<_, _>>()
+        .map_err(Into::into)
 }
 
 /// Write `prompt` next to the run and start the headless job in `dir`,
@@ -2385,5 +2403,71 @@ mod tests {
         // none is counted as left out.
         let (installs, unread) = installs_since_claim(&fake, &run, &[], 1).unwrap();
         assert_eq!((installs.len(), unread), (3, 0));
+    }
+
+    /// A recovery job's history puts the task's edits among the run's
+    /// verdicts and repairs by when each was recorded, the event's id
+    /// breaking a tie: an edit after a verdict reads after it, one before
+    /// reads before it, whichever list it came from (ADR-t883-1).
+    #[test]
+    fn the_history_orders_verdicts_repairs_and_edits_by_time_then_id() {
+        let run = test_run(RunStatus::Failed, None);
+        let event = |id: i64, kind: &str, at: &str| RunEvent {
+            id: EventId::new(id),
+            task_id: Some(TaskId::new(1)),
+            goal_id: None,
+            run_id: (kind != "task_edited").then(|| run.id().clone()),
+            kind: kind.into(),
+            payload: json!({}),
+            created_at: at.to_owned(),
+            actor: None,
+        };
+        let kinds_ids = |history: Vec<Value>| -> Vec<(String, i64)> {
+            history
+                .iter()
+                .map(|e| {
+                    (
+                        e["kind"].as_str().unwrap().to_owned(),
+                        e["id"].as_i64().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let run_events = [
+            event(10, "recovery_finished", "2026-10-26T10:00:00.000Z"),
+            event(11, "worker_started", "2026-10-26T10:00:01.000Z"),
+            event(12, "auto_repaired", "2026-10-26T10:05:00.000Z"),
+        ];
+        // An edit after the verdict, one between it and the repair and one
+        // at the repair's time with a larger id.
+        let after = [
+            event(20, "task_edited", "2026-10-26T10:01:00.000Z"),
+            event(13, "task_edited", "2026-10-26T10:05:00.000Z"),
+            event(9, "note_added", "2026-10-26T09:00:00.000Z"),
+        ];
+        assert_eq!(
+            kinds_ids(ordered_history(&run_events, &after).unwrap()),
+            [
+                ("recovery_finished".to_owned(), 10),
+                ("task_edited".to_owned(), 20),
+                ("auto_repaired".to_owned(), 12),
+                ("task_edited".to_owned(), 13),
+            ]
+        );
+        // An edit before the verdict, and one at its time with a smaller
+        // id, come before it.
+        let before = [
+            event(30, "task_edited", "2026-10-26T09:59:59.999Z"),
+            event(8, "task_edited", "2026-10-26T10:00:00.000Z"),
+        ];
+        assert_eq!(
+            kinds_ids(ordered_history(&run_events, &before).unwrap()),
+            [
+                ("task_edited".to_owned(), 30),
+                ("task_edited".to_owned(), 8),
+                ("recovery_finished".to_owned(), 10),
+                ("auto_repaired".to_owned(), 12),
+            ]
+        );
     }
 }

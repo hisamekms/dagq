@@ -660,15 +660,7 @@ impl Supervisor<'_> {
             _ => Err("the run has no worktree".to_owned()),
         };
         let (status, head, receipt) = git_facts(self, run)?;
-        let mut history = repair_history(self, run)?;
-        history.extend(
-            detail
-                .events
-                .iter()
-                .filter(|event| event.kind == EventKind::TaskEdited)
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        let history = repair_history(self, run, &detail.events)?;
         let workspace = run.workspace_id().unwrap_or("none").to_owned();
         let binary = super::recovery::binary_facts_of(self, run, &detail)?;
         let material = RecoveryMaterial {
