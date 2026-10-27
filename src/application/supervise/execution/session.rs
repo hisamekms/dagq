@@ -752,6 +752,7 @@ impl SessionWatch {
                 wrapper,
                 &self.workspace,
                 &mut self.silent,
+                PulseSite::in_slot(WaitPhase::Session),
                 "wrapper heartbeat expired; session may still be alive",
             )?;
             match pulse {

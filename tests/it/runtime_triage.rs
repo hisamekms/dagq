@@ -1240,6 +1240,13 @@ fn an_awaiting_run_whose_supervisor_and_wrapper_died_is_adopted_reviewed_and_lan
     assert!(!kinds.contains(&"run_recovered"), "{kinds:?}");
     assert!(!kinds.contains(&"runtime_error"), "{kinds:?}");
     assert!(!kinds.contains(&"exit_requested"), "{kinds:?}");
+    // The dead wrapper's silence is recorded once, by the exit before the
+    // landing (task 1384).
+    let expired = payloads(&detail, "wrapper_heartbeat_expired");
+    assert_eq!(expired.len(), 1, "{expired:?}");
+    assert_eq!(expired[0]["process_alive"], false);
+    assert_eq!(expired[0]["phase"], "exit");
+    assert_eq!(expired[0]["waiting"], false);
     assert_eq!(
         payloads(&detail, "review_started")[0]["session_live"],
         false

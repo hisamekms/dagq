@@ -84,9 +84,9 @@ jq -c 'map(select(.kind == "run_claimed")) | group_by(.g) | map({g: .[0].g, runs
 
 | 出来事 | 取り方 |
 |---|---|
-| A1 待ちの最中の wrapper の死・session の終わり | `run_waiting_ended` の `payload.cause == "session_exited"`。開き直しの入った固定バイナリ（下の A7 の窓の始まり）からは、最初の session の待ちで receipt が無く閉じていない `worker_question` か `stalled` の ask を持つ run は wrapper を失っても A1 ではなく A7 の開き直しに出て、A1 に出るのは開き直しの上限を使い切った run と開き直しの対象の外の run だけ |
-| A2 待ちの外の wrapper の死 | `recovery_requested` の `alert == "interrupted"` で `last_error` に `heartbeat expired` を含むもの（resume の経路の文は `resumed session's wrapper heartbeat expired`）（`wrapper_heartbeat_expired` の event は 3 つの経路のうち一部でしか残らないので、`last_error` の文で数える） |
-| A3 答えの配送の失敗 | `ask_delivery_failed`。加えて、A1 で失った待ちの ask（終わった待ちの `run_waiting_started` の `ask_id` と、その待ちに `run_waiting_ask_added` で加わった ask）のうち、session を失った後に答えの turn（`turn_requested` の `what` が `answer of ask <id>`）も `ask_delivered` も無いまま閉じたもの（`closed_without_answer`）。まだ閉じていないものは `open` として次の週に読み直す |
+| A1 待ちの最中の wrapper の死・session の終わり | `run_waiting_ended` の `payload.cause == "session_exited"`（失った待ちの ask は `payload.ask_ids`）。開き直しの入った固定バイナリ（下の A7 の窓の始まり）からは、最初の session の待ちで receipt が無く閉じていない `worker_question` か `stalled` の ask を持つ run は wrapper を失っても A1 ではなく A7 の開き直しに出て、A1 に出るのは開き直しの上限を使い切った run と開き直しの対象の外の run だけ。wrapper が終わりを記録せずに死んだものは、開き直したかどうかに依らず `wrapper_heartbeat_expired` の `payload.waiting == true` かつ `payload.process_alive == false` でも分かる |
+| A2 待ちの外の wrapper の死 | `wrapper_heartbeat_expired` の `payload.waiting == false` かつ `payload.process_alive == false`（沈黙ごとに 1 件。`payload.phase` が見つけた watch）。この記録より前の期間は、`recovery_requested` の `alert == "interrupted"` で `last_error` に `heartbeat expired` を含むもの（resume の経路の文は `resumed session's wrapper heartbeat expired`）で数える |
+| A3 答えの配送の失敗 | `ask_delivery_failed`。加えて、A1 で失った待ちの ask（`session_exited` の `run_waiting_ended` の `payload.ask_ids`）のうち、session を失った後に答えの turn（`turn_requested` の `what` が `answer of ask <id>`）も `ask_delivered` も無いまま閉じたもの（`closed_without_answer`）。まだ閉じていないものは `open` として次の週に読み直す。`ask_ids` の無い前の期間の記録は、終わった待ちの `run_waiting_started` の `ask_id` と、その待ちに `run_waiting_ask_added` で加わった ask から組み立てる |
 | A4 答えの二重送り | 同じ `answer of ask <id>` の `turn_requested` が同じ run に 2 件以上 |
 | A5 `turn_without_receipt` の stalled | `recovery_requested` の `alert == "stalled"` と `reason`（`turn_without_receipt`・`permission_denied`・`send_unconfirmed`）。`send_unconfirmed` は対話の送信の確認の判定が非対話に当たったもの |
 | A6 非対話の run にかかった復旧 job | `recovery_requested` の全て（`alert` ごと）。このうち A2・A5 と、生きている run の alert（`idle_process`・`long_background`・`stuck_exit`・`prompt_waiting`）を合わせ込み由来とし、`failed`・`resume_exhausted` は `last_error`・`reason` を読んで経路に依るものだけを数える |
@@ -94,8 +94,12 @@ jq -c 'map(select(.kind == "run_claimed")) | group_by(.g) | map({g: .[0].g, runs
 
 ```sh
 jq -c 'map(select(.kind == "run_waiting_ended")) | group_by(.g) | map({g: .[0].g, causes: (map(.payload.cause) | group_by(.) | map({(.[0]): length}) | add)})' tagged.json   # A1
+jq -c 'map(select(.kind == "wrapper_heartbeat_expired" and .payload.process_alive == false))
+       | group_by([.g, .payload.waiting]) | map({g: .[0].g, waiting: .[0].payload.waiting, n: length, runs: (map(.run_id) | unique | length),
+           phases: (map(.payload.phase) | group_by(.) | map({(.[0]): length}) | add), at: (map(.created_at[0:13]) | group_by(.) | map({(.[0]): length}) | add)})' tagged.json   # A2（waiting: false）と A1 の死んだ wrapper（waiting: true）
+# A2 の記録より前の期間（wrapper_heartbeat_expired に process_alive の無いもの）は last_error の文で数える
 jq -c 'map(select(.kind == "recovery_requested" and .payload.alert == "interrupted" and ((.payload.last_error // "") | test("heartbeat expired"))))
-       | group_by(.g) | map({g: .[0].g, n: length, runs: (map(.run_id) | unique | length), at: (map(.created_at[0:13]) | group_by(.) | map({(.[0]): length}) | add)})' tagged.json   # A2
+       | group_by(.g) | map({g: .[0].g, n: length, runs: (map(.run_id) | unique | length), at: (map(.created_at[0:13]) | group_by(.) | map({(.[0]): length}) | add)})' tagged.json   # A2（前の期間）
 jq -c 'map(select(.kind == "ask_delivery_failed")) | group_by(.g) | map({g: .[0].g, n: length})' tagged.json   # A3（ask_delivery_failed）
 # A3: 待ちの最中に session を失った ask の行方。答えの turn と close は窓の後に来ることがあるので、読む時点までを集める
 for k in turn_requested ask_delivered ask_closed; do
@@ -105,9 +109,9 @@ jq -c --slurpfile late late.json '
   . as $ev
   | map(select(.kind == "run_waiting_ended" and .payload.cause == "session_exited")) | map(
       .run_id as $run | .g as $g | .created_at as $lost | .id as $end_id
-      # 終わった待ちの始まり（同じ run の、終わりより前の最後の run_waiting_started）と、その間に加わった ask
-      | ([$ev[] | select(.kind == "run_waiting_started" and .run_id == $run and .id < $end_id)] | max_by(.id)) as $start
-      | ([$start.payload.ask_id] + [$ev[] | select(.kind == "run_waiting_ask_added" and .run_id == $run and .id > $start.id and .id < $end_id) | .payload.ask_id])[]
+      # 待ちが持っていた ask。ask_ids の無い前の期間は、終わった待ちの始まり（同じ run の、終わりより前の最後の run_waiting_started）とその間に加わった ask から組み立てる
+      | (.payload.ask_ids // (([$ev[] | select(.kind == "run_waiting_started" and .run_id == $run and .id < $end_id)] | max_by(.id)) as $start
+          | [$start.payload.ask_id] + [$ev[] | select(.kind == "run_waiting_ask_added" and .run_id == $run and .id > $start.id and .id < $end_id) | .payload.ask_id]))[]
       | . as $ask
       | ([$late[0][] | select(.run_id == $run and .created_at >= $lost
            and ((.kind == "turn_requested" and .payload.what == "answer of ask \($ask)") or (.kind == "ask_delivered" and .payload.ask_id == $ask)))] | min_by(.created_at)) as $sent
@@ -422,7 +426,7 @@ F=$(date -u -v-7d +%Y-%m-%dT00:00:00Z); T=$(date -u +%Y-%m-%dT00:00:00Z)   # mac
 |---|---|---|
 | E4 待ちの run の worktree の target の大きさ | host の記録（[host metrics](../design/supervisor-lifecycle/host-metrics.md#待つrunのビルド成果物)）が待ちと着地待ちの run の target の合計と件数を残し、`dagq stats` の `host.metrics` が最大と中央値を出す（読み方は項目 E の E4 のコマンド）。基準値は記録の開始後に読む | — |
 | E3 非対話の workspace が実際に残ったか | `interrupted`・`failed` の非対話の run の workspace に `workspace_closed` が無く、cmux に残ったのか記録されなかったのか分からない | 非対話の run の workspace を閉じた・閉じられなかった経路の全てで `workspace_closed`（理由つき）を残す。後始末で見つけて閉じたものも |
-| A2 待ちの外の wrapper の死 | `wrapper_heartbeat_expired` は 3 つの経路（session・resume・exit）のうち一部でしか残らず、`recovery_requested` の `last_error` の文で数えるしかない | 3 つの経路のどれでも `wrapper_heartbeat_expired`（run・phase・待ちの最中か）を残す |
-| A1 待ちの最中に失った session の ask | `run_waiting_ended` の `cause: session_exited` が `ask_id: null` で、どの ask の答えを配れなかったかが event に無い | `run_waiting_ended` に待っていた ask の ID を残す |
+| A2 待ちの外の wrapper の死 | 記録の入る前の期間だけ取れない（`wrapper_heartbeat_expired` が process の生きていた沈黙にしか残らず、`recovery_requested` の `last_error` の文で数える）。今は process の生死・phase・待ちの最中かを持つ `wrapper_heartbeat_expired` から数える（項目 A の A2） | — |
+| A1 待ちの最中に失った session の ask | 記録の入る前の期間だけ取れない（`run_waiting_ended` の `cause: session_exited` が `ask_id: null` で、待ちの始まりと加わった ask から組み立てる）。今は `run_waiting_ended` の `ask_ids` から数える（項目 A の A1・A3） | — |
 
 計装の task は receipt の `follow_ups` に出した。

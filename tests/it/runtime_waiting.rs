@@ -1,6 +1,7 @@
 //! Runtime tests: runs that wait for a person outside the slots (ADR-0062).
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use runtime_support::*;
@@ -326,19 +327,33 @@ await_exit
     let ended = events_of(&db, run.id(), "run_waiting_ended");
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0]["cause"], "wrapper_silent");
+    assert_eq!(ended[0]["ask_id"], Value::Null);
+    let question = open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).unwrap();
+    assert_eq!(ended[0]["ask_ids"], json!([question]));
     let regained = events_of(&db, run.id(), "run_slot_regained");
     assert_eq!(regained.len(), 1);
-    assert_eq!(regained[0]["slot_wait_secs"], 0);
+    // At once: the end and the regain read the clock in whole seconds, so
+    // a second may turn between them.
+    assert!(
+        regained[0]["slot_wait_secs"].as_i64().unwrap() <= 1,
+        "{regained:?}"
+    );
     let expired = events_of(&db, run.id(), "wrapper_heartbeat_expired");
     assert_eq!(expired.len(), 1, "{expired:?}");
     assert_eq!(expired[0]["pid"], silent.id());
+    assert_eq!(expired[0]["process_alive"], true);
+    assert_eq!(expired[0]["phase"], "session");
+    assert_eq!(expired[0]["waiting"], true);
     let kinds = kinds_of(&db, 1);
     let at = |kind: &str| kinds.iter().position(|k| k == kind).unwrap();
     assert!(at("run_slot_regained") < at("exit_requested"), "{kinds:?}");
-    // The wrapper dies without recording its exit: the run is given up.
+    // The wrapper dies without recording its exit: the run is given up,
+    // and the same silence is not recorded again (task 1384).
     silent.kill().unwrap();
     silent.wait().unwrap();
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    let expired = events_of(&db, run.id(), "wrapper_heartbeat_expired");
+    assert_eq!(expired.len(), 1, "{expired:?}");
     assert_eq!(outcome["errors"][0]["run_id"], json!(run.id()), "{outcome}");
     assert!(
         outcome["errors"][0]["message"]
@@ -347,6 +362,46 @@ await_exit
             .contains("wrapper heartbeat expired"),
         "{outcome}"
     );
+}
+
+/// A worker's first session whose wrapper dies without recording its exit
+/// while the run is in its slot (task 1384): the silence is recorded once
+/// as `wrapper_heartbeat_expired` of a dead process outside a wait, and the
+/// run is given up as before.
+#[test]
+fn a_wrapper_that_dies_in_its_slot_is_recorded_before_the_run_is_given_up() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(
+        &db,
+        false,
+        r#"
+idle
+await_exit
+"#,
+    ));
+    let supervisor = supervise_in_thread(&db, &repo, &backend, supervise_options(1, true));
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        run_of(queue, 1).is_some_and(|run| {
+            queue
+                .processes(run.id())
+                .unwrap()
+                .iter()
+                .any(|p| p.role == "wrapper")
+        })
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = run_of(&mut queue, 1).unwrap();
+    let dead = dead_pid();
+    stop_wrapper_heartbeat(&db, &run, dead);
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    assert_eq!(outcome["errors"][0]["run_id"], json!(run.id()), "{outcome}");
+    let expired = events_of(&db, run.id(), "wrapper_heartbeat_expired");
+    assert_eq!(expired.len(), 1, "{expired:?}");
+    assert_eq!(expired[0]["pid"], dead);
+    assert_eq!(expired[0]["process_alive"], false);
+    assert_eq!(expired[0]["phase"], "session");
+    assert_eq!(expired[0]["waiting"], false);
+    assert!(events_of(&db, run.id(), "exit_requested").is_empty());
 }
 
 /// Bring the run's wrapper row back to its own pid with a fresh heartbeat
@@ -436,7 +491,12 @@ esac
         .unwrap()
         .execute_batch("DROP TRIGGER heartbeat_back")
         .unwrap();
-    stop_wrapper_heartbeat(&db, &run, silent.id());
+    // A silence is its pid with its last heartbeat: the test's second one
+    // is told apart by a pid of its own, as a heartbeat that came back
+    // would by its time.
+    let mut second_silent = common::KillOnDrop::new(sleeper(), "the second silent wrapper");
+    let second_pid = second_silent.child().id();
+    stop_wrapper_heartbeat(&db, &run, second_pid);
     wait_until(&db, Duration::from_secs(30), |_| {
         !events_of(&db, run.id(), "exit_requested").is_empty()
     });
@@ -446,10 +506,149 @@ esac
     assert_eq!(ended.len(), 2);
     assert_eq!(ended[1]["cause"], "wrapper_silent");
     // The wrapper dies without recording its exit: the run is given up.
+    drop(second_silent);
     silent.kill().unwrap();
     silent.wait().unwrap();
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     assert_eq!(outcome["errors"][0]["run_id"], json!(run.id()), "{outcome}");
+}
+
+/// Open the `stalled` ask of `run` as its stall's escalation does: a wait
+/// of its first session holds it beside the `worker_question` (one open
+/// ask of a kind per run). The run's markers are set back to the second
+/// `question` was opened in first: a wait takes a marker newer than its
+/// start (no later than the second after the question's) for a session
+/// that moved, and the turn that asked may write its marker after a wait
+/// that started at once.
+fn ask_stalled(db: &Path, run: &TaskRun, question: AskId) -> AskId {
+    // The turn that asked ends with its idle marker.
+    let idle = run.idle_marker_path().unwrap();
+    wait_until(db, common::STEP_LIMIT, |_| idle.is_file());
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let asked = UNIX_EPOCH
+        + Duration::from_secs(u64::try_from(queue.read_ask(question).unwrap().created_at).unwrap());
+    let dir = Path::new(run.run_dir().unwrap());
+    for marker in [
+        run.idle_marker_path().unwrap(),
+        dir.join(dagq::application::stats::PROMPT_SUBMIT_MARKER),
+    ] {
+        if marker.is_file() {
+            fs::File::options()
+                .write(true)
+                .open(&marker)
+                .unwrap()
+                .set_modified(asked)
+                .unwrap();
+        }
+    }
+    queue
+        .ask(dagq::domain::NewAsk {
+            recommendation: None,
+            confidence: None,
+            topics: Vec::new(),
+            kind: AskKind::Stalled,
+            task_id: Some(run.task_id()),
+            run_id: Some(run.id().clone()),
+            question: "the session is idle without a receipt".into(),
+            options: vec!["wait".into(), "intervene".into()],
+            asked_by: "supervisor".into(),
+            reason_category: dagq::domain::AskReason::RecoveryFailed,
+            finding_id: None,
+            request_id: None,
+        })
+        .unwrap()
+        .ask
+        .id
+}
+
+/// A wait that holds the question it started on and the `stalled` ask
+/// that joined it (`run_waiting_ask_added`) ends with both in `ask_ids`
+/// (task 1384), and its `ask_id` / `ask_kind` stay those of the answered
+/// question that ended it.
+#[test]
+fn a_wait_ends_with_every_ask_it_held_and_the_one_that_ended_it() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, ASKING_AGENT));
+    let supervisor = supervise_in_thread(&db, &repo, &backend, supervise_options(4, true));
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        run_of(queue, 1)
+            .is_some_and(|run| !events_of(&db, run.id(), "run_waiting_started").is_empty())
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = run_of(&mut queue, 1).unwrap();
+    let question = open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).unwrap();
+    let stalled = ask_stalled(&db, &run, question);
+    assert_ne!(stalled, question);
+    wait_until(&db, Duration::from_secs(30), |_| {
+        !events_of(&db, run.id(), "run_waiting_ask_added").is_empty()
+    });
+    let added = events_of(&db, run.id(), "run_waiting_ask_added");
+    assert_eq!(added[0]["ask_id"], json!(stalled), "{added:?}");
+    queue.answer(question, "blue").unwrap();
+    wait_until(&db, Duration::from_secs(30), |_| {
+        !events_of(&db, run.id(), "run_waiting_ended").is_empty()
+    });
+    let ended = events_of(&db, run.id(), "run_waiting_ended");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(ended[0]["cause"], "answered");
+    assert_eq!(ended[0]["ask_id"], json!(question));
+    assert_eq!(ended[0]["ask_kind"], "worker_question");
+    assert_eq!(ended[0]["ask_ids"], json!([question, stalled]));
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(events_of(&db, run.id(), "run_waiting_ended").len(), 1);
+}
+
+/// A run adopted while its events show a wait it cannot keep (no room for
+/// a wait: `max_waiting` 0) ends that wait as `phase_changed` with every
+/// ask it held, the question it started on and the `stalled` ask that
+/// joined it, in `ask_ids` (task 1384); no ask ended it, so `ask_id` /
+/// `ask_kind` stay null.
+#[test]
+fn a_wait_ended_by_its_adoption_keeps_every_ask_it_held() {
+    let (_dir, repo, db) = fixture();
+    let config = repo.join("dagq.toml");
+    let mut toml = fs::read_to_string(&config).unwrap_or_default();
+    toml.push_str("\n[supervisor]\nmax_waiting = 0\n");
+    fs::write(&config, toml).unwrap();
+    let backend = Arc::new(TestWorkspace::new(&db, false, ASKING_AGENT));
+    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        open_ask_of(queue, &run, AskKind::WorkerQuestion).is_some()
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let question = open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).unwrap();
+    let stalled = ask_stalled(&db, &run, question);
+    // What the dead supervisor recorded of the wait.
+    for (kind, payload) in [
+        (
+            EventKind::RunWaitingStarted,
+            json!({"ask_id": question, "ask_kind": "worker_question", "phase": "session",
+                   "status": "running", "waiting": 1, "limit": 4}),
+        ),
+        (
+            EventKind::RunWaitingAskAdded,
+            json!({"ask_id": stalled, "ask_kind": "stalled"}),
+        ),
+    ] {
+        queue.record_runtime_event(run.id(), kind, payload).unwrap();
+    }
+    age_lease(&db, &run, 31);
+    let supervisor = supervise_in_thread(&db, &repo, &backend, supervise_options(1, true));
+    wait_until(&db, common::STEP_LIMIT, |_| {
+        !events_of(&db, run.id(), "run_waiting_ended").is_empty()
+    });
+    let ended = events_of(&db, run.id(), "run_waiting_ended");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(ended[0]["cause"], "phase_changed");
+    assert_eq!(ended[0]["ask_id"], Value::Null);
+    assert_eq!(ended[0]["ask_kind"], Value::Null);
+    assert_eq!(ended[0]["ask_ids"], json!([question, stalled]));
+    queue.answer(question, "blue").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
 }
 
 /// A landing run holds its supervisor's slot as the supervisor counts it

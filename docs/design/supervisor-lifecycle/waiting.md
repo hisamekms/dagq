@@ -46,11 +46,11 @@ use caseは`src/application/supervise/execution/waiting.rs`、イベントから
   上限に達していれば`run_waiting_deferred`をaskごとに1回だけ記録し、slotに居たまま今のphaseで進む（上限が空けば次のtickで待ちに移る）。
 - **見張り**（`watch_waiting`。待ちのslotでは`step`を呼ばない）: sessionに何も送らず、runのstatusも変えない。
   1. leaseが自分のtokenでなければ、他のslotと同じく退く（DBには書かない。引き継いだ側がイベントから待ちを組み立てる）。
-  2. wrapperが終了を記録したか、heartbeatが切れてpidも死んでいれば、非対話（`headless`）の`Session`の待ちで、receiptが無く閉じていない`worker_question`か`stalled`のaskがあるrunは、先にruntimeがsessionをbackgroundのwrapperで開き直し（runはworkspaceを開かない。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）、開き直したか、次の試みか失ったwrapperのturnの終わり（turnの上限まで）を待つあいだは待ちを続ける（条件・上限・間隔は[非対話のworker](headless-worker.md#待ちの最中に失ったsessionの開き直し)）。
+  2. wrapperが終了を記録したか、heartbeatが切れてpidも死んでいれば（死んでいれば、開き直しの前にその沈黙を`wrapper_heartbeat_expired`で1回記録する。[黙ったwrapper](headless-worker.md#黙ったwrapper)）、非対話（`headless`）の`Session`の待ちで、receiptが無く閉じていない`worker_question`か`stalled`のaskがあるrunは、先にruntimeがsessionをbackgroundのwrapperで開き直し（runはworkspaceを開かない。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）、開き直したか、次の試みか失ったwrapperのturnの終わり（turnの上限まで）を待つあいだは待ちを続ける（条件・上限・間隔は[非対話のworker](headless-worker.md#待ちの最中に失ったsessionの開き直し)）。
      開き直さないとき（条件に当たらない、上限を超えた）は、過去に開いた`stuck_exit`のaskが残っていればその場で閉じ（`Session`なら`stalled`も`ended`で閉じる）、`session_exited`で終える（`Revise` / `Resume`はslotに戻ったtickで段が今のとおりsessionの終わりを扱う。開き直しがprocessの行を消した後に上限を超えた`Session`は、slotの`SessionWatch`が失ったwrapperのexit codeで`finish_lost_session`を呼んで`failed`にする）。
      `worker_question`のaskは閉じない。
      wrapperが黙っていれば（pidは生きている）`wrapper_heartbeat_expired`を記録し、slotで終了を依頼するか段を終えるため`wrapper_silent`で終える。
-     `Revise`の沈黙はその後の`ExitWatch`に引き継ぎ、`wrapper_heartbeat_expired`を2度記録しない。
+     同じ沈黙はslotに戻った段（`Revise`の段とその後の`ExitWatch`も）が2度記録しない。
      slotに戻ったときheartbeatが戻っていれば（終了を依頼する前）、段は黙った印を消して続き、その後のaskで再び待ちに入れ、次の沈黙は`wrapper_heartbeat_expired`を改めて記録する（[黙ったwrapper](headless-worker.md#黙ったwrapper)）。
   3. runがqueue_holdに入っていれば`queue_hold`で終える。
   4. 待ちのあいだに開いた表のaskを`run_waiting_ask_added`で足す。
@@ -65,6 +65,8 @@ use caseは`src/application/supervise/execution/waiting.rs`、イベントから
   6. `stalled`を持つ`Session`のrunでreceiptが無ければ、`StallWatch::poll_quiet`でそのaskを追う（`wait`の答えでaskを閉じて計時をやり直し、閾値を過ぎたら次の`stalled`のaskを開く。促しは送らない）。
   7. `stalled`を持つrunで、idle markerかreceiptが基準の時刻より新しければ`session_moved`で終える。
 - **終わり**（`end_wait`）: `run_waiting_ended`を記録し、持っていたaskを`consumed`に足す。
+  `ask_id`・`ask_kind`は待ちを終えたask（`answered`と`session_moved`のもの）で、ほかのcauseでは空になる。
+  `ask_ids`は待ちが持っていた全てのask（始めたaskと`run_waiting_ask_added`で加えたもの）で、どのcauseでも残る（組み立て直しで終える`phase_changed`も）。
   `answered`と`session_exited`は戻り待ちになり、それ以外（`session_moved` / `queue_hold` / `wrapper_silent` / `phase_changed`。過去の記録の`dialog_cleared`も）はその場でslotに戻す。
 - **戻す**（`return_waiting_runs`）: `drive`のループの毎回、引き継ぎの判定と`fill_slots`より前に（claimを止めていても、drain中も）、戻り待ちのrunを終わった順に、`used_slots()`が並列の上限未満のあいだslotへ戻し、`run_slot_regained`を記録する。
   戻ったrunは今のphaseのとおり進む（`worker_question`なら答えを次のturnの依頼として届ける）。

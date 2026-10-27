@@ -1,7 +1,9 @@
 //! Runtime tests (task 1372): a headless run's session lost while it waits
 //! for an answer is opened again and the wait goes on, within a bound of
 //! attempts; and a `worker_question` closed without its answer is told to
-//! the worker in place of the nudge, once.
+//! the worker in place of the nudge, once. A wrapper that died without
+//! recording its exit is recorded once as `wrapper_heartbeat_expired`
+//! (task 1384).
 use crate::common;
 use crate::runtime_support;
 use dagq::domain::EventKind;
@@ -139,7 +141,7 @@ fn a_session_that_cannot_be_opened_again_goes_to_its_recovery_job() {
     let backend = Arc::new(backend);
     let (_reviewer, supervisor) =
         supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
-    let (run, _ask) = waiting_run(&db);
+    let (run, ask) = waiting_run(&db);
     end_wrapper(&db, &run);
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     backend.join();
@@ -159,6 +161,10 @@ fn a_session_that_cannot_be_opened_again_goes_to_its_recovery_job() {
     assert!(failed.iter().all(|p| p["cause"] == "registration_timeout"));
     let ended = payloads(&detail, "run_waiting_ended");
     assert_eq!(ended.last().unwrap()["cause"], "session_exited");
+    // The wait that ended without an answer still names the ask it held,
+    // while its ask_id stays that of an ask that ended it (task 1384).
+    assert_eq!(ended.last().unwrap()["ask_id"], Value::Null);
+    assert_eq!(ended.last().unwrap()["ask_ids"], json!([ask.id]));
     let requested = payloads(&detail, "recovery_requested");
     assert!(
         requested.iter().any(|p| p["alert"] == "failed"),
@@ -446,5 +452,166 @@ fn a_turn_outliving_its_lost_wrapper_past_its_limit_goes_to_recovery() {
     assert!(
         requested.iter().any(|p| p["alert"] == "failed"),
         "{requested:?}"
+    );
+}
+
+/// Make the run's wrapper one that died without recording its exit: its
+/// row names a dead pid (the real wrapper's heartbeats no longer match
+/// it) with its heartbeat expired; that pid. A heartbeat already past its
+/// pid check still writes `heartbeat_at`, so the heartbeat is expired only
+/// once such a write has landed.
+fn kill_wrapper(db: &Path, run: &TaskRun) -> u32 {
+    let dead = dead_pid();
+    let raw = Connection::open(db).unwrap();
+    raw.execute(
+        "UPDATE run_processes SET pid=?2 WHERE run_id=?1 AND role='wrapper'",
+        rusqlite::params![run.id(), dead],
+    )
+    .unwrap();
+    // How long a heartbeat in flight takes to write: fixed, whatever the
+    // test tick.
+    thread::sleep(Duration::from_millis(200));
+    raw.execute(
+        "UPDATE run_processes SET heartbeat_at=0 WHERE run_id=?1 AND role='wrapper'",
+        [run.id()],
+    )
+    .unwrap();
+    dead
+}
+
+/// End the run's wrapper, but leave its row as that of a wrapper that died
+/// without recording its exit (a dead pid, its heartbeat expired), so no
+/// wrapper of the lost session takes a turn after it; that pid. Undone by
+/// dropping the trigger `lost_exit`.
+fn end_wrapper_unrecorded(db: &Path, run: &TaskRun) -> u32 {
+    let dead = dead_pid();
+    Connection::open(db)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TRIGGER lost_exit AFTER UPDATE OF exited_at ON run_processes
+             WHEN NEW.run_id = '{run}' AND NEW.role = 'wrapper' AND NEW.exited_at IS NOT NULL
+             BEGIN
+               UPDATE run_processes SET exited_at = NULL, exit_code = NULL, pid = {dead}, heartbeat_at = 0
+               WHERE rowid = NEW.rowid;
+             END;",
+            run = run.id()
+        ))
+        .unwrap();
+    end_wrapper(db, run);
+    dead
+}
+
+/// Task 1384: a wrapper that dies without recording its exit while the run
+/// waits has its silence recorded once as `wrapper_heartbeat_expired` of a
+/// dead process, in the session's wait, before the session is opened
+/// again; the wait's end carries the asks it held.
+#[test]
+fn a_wrapper_dead_during_a_wait_is_recorded_once_before_its_session_is_reopened() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(dir.path(), &asking_turns());
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(backend);
+    let (_reviewer, supervisor) =
+        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
+    let (run, ask) = waiting_run(&db);
+    let pid = end_wrapper_unrecorded(&db, &run);
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !reopens(&queue.show(TASK).unwrap()).is_empty()
+    });
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch("DROP TRIGGER lost_exit")
+        .unwrap();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .answer(ask.id, "change.txt")
+        .unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = detail(&db);
+    assert_landed_run(&detail.runs[0], &repo, &base);
+    let expired = payloads(&detail, "wrapper_heartbeat_expired");
+    assert_eq!(expired.len(), 1, "{expired:?}");
+    assert_eq!(expired[0]["pid"], pid);
+    assert_eq!(expired[0]["process_alive"], false);
+    assert_eq!(expired[0]["phase"], "session");
+    assert_eq!(expired[0]["waiting"], true);
+    assert_eq!(expired[0]["code"], "heartbeat_lost");
+    let kinds: Vec<_> = detail.events.iter().map(|e| e.kind.as_str()).collect();
+    let at = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
+    assert!(
+        at("wrapper_heartbeat_expired") < at("auto_repaired"),
+        "{kinds:?}"
+    );
+    let ended = payloads(&detail, "run_waiting_ended");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(ended[0]["cause"], "answered");
+    assert_eq!(ended[0]["ask_id"], json!(ask.id));
+    assert_eq!(ended[0]["ask_ids"], json!([ask.id]));
+}
+
+/// Task 1384: a wrapper that dies without recording its exit while its
+/// session revises in the run's slot has its silence recorded once by the
+/// revise's watch, as a dead process's outside a wait; the revise ends
+/// and a person is asked, as before.
+#[test]
+fn a_wrapper_dead_during_a_revise_is_recorded_once_by_the_revise() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"case "$MODE" in
+start) {FINISH} ;;
+resume) sleep 30; say slept ;;
+esac"#
+        ),
+    );
+    let reviewer = TestReviewer::new(&[verdict("revise", &["name the file"], "almost")]);
+    let killer = {
+        let db = db.clone();
+        thread::spawn(move || {
+            wait_until(&db, common::STEP_LIMIT, |queue| {
+                payloads(&queue.show(TASK).unwrap(), "turn_started").len() == 2
+            });
+            let run = detail(&db).runs[0].clone();
+            let lost = background_session(&run);
+            kill_wrapper(&db, &run);
+            lost
+        })
+    };
+    let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+    let outcome = runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &claude_stub(&db),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &supervise_options(4, true),
+    )
+    .unwrap();
+    let lost = joined(killer, "the wrapper to be lost");
+    // The real wrapper the queue forgot fails to record its exit.
+    backend.join_but(Some(&lost));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = detail(&db);
+    let expired = payloads(&detail, "wrapper_heartbeat_expired");
+    assert_eq!(expired.len(), 1, "{expired:?}");
+    assert_eq!(expired[0]["process_alive"], false);
+    assert_eq!(expired[0]["phase"], "revise");
+    assert_eq!(expired[0]["waiting"], false);
+    let asks = SqliteQueue::open(&db)
+        .unwrap()
+        .asks(AskQuery::default())
+        .unwrap();
+    let landing = asks
+        .iter()
+        .find(|ask| ask.kind == AskKind::ApproveLanding)
+        .expect("a person is asked");
+    assert!(
+        landing.question.contains("died without recording its exit"),
+        "{}",
+        landing.question
     );
 }

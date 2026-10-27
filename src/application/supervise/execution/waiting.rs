@@ -57,6 +57,13 @@ pub(super) struct Waiting {
     pub(super) ended: Option<(i64, WaitCause)>,
 }
 
+/// The ids of the asks `waiting` holds, the one it started on and those
+/// that joined it, oldest first: `run_waiting_ended` carries them whatever
+/// ended the wait, besides the ask that ended it.
+fn held_ask_ids(waiting: &Waiting) -> Vec<AskId> {
+    waiting.asks.iter().map(|(id, _)| *id).collect()
+}
+
 impl Slot {
     pub(super) fn new(run: TaskRun, phase: Phase) -> Self {
         Self {
@@ -364,9 +371,15 @@ impl Supervisor<'_> {
         let processes = self.queue.processes(run.id())?;
         let now = self.generators.clock.now();
         let wrapper = processes.iter().find(|p| p.role == "wrapper");
-        let Some(wrapper) =
-            wrapper.filter(|w| w.exited_at.is_none() && !wrapper_dead(self, w, now))
-        else {
+        let dead = wrapper.filter(|w| w.exited_at.is_none() && wrapper_dead(self, w, now));
+        if let Some(dead) = dead {
+            let site = PulseSite {
+                phase,
+                waiting: true,
+            };
+            note_heartbeat_expired(self, &run, dead, &workspace, site, false)?;
+        }
+        let Some(wrapper) = wrapper.filter(|w| w.exited_at.is_none() && dead.is_none()) else {
             // A headless session lost while it waits is opened again, and
             // the wait goes on (task 1372). Given up, a session whose
             // processes an attempt forgot is ended back in its slot as one
@@ -405,6 +418,10 @@ impl Supervisor<'_> {
             &wrapper,
             &workspace,
             silent,
+            PulseSite {
+                phase,
+                waiting: true,
+            },
             "wrapper heartbeat expired; session may still be alive",
         )?;
         match pulse {
@@ -575,6 +592,7 @@ impl Supervisor<'_> {
             json!({
                 "ask_id": ask.as_ref().map(|(id, _)| id),
                 "ask_kind": ask.as_ref().map(|(_, kind)| kind),
+                "ask_ids": held_ask_ids(waiting),
                 "cause": cause.as_str(),
                 "waited_secs": now - waiting.started_at,
             }),
@@ -702,6 +720,7 @@ impl Supervisor<'_> {
                 json!({
                     "ask_id": null,
                     "ask_kind": null,
+                    "ask_ids": held_ask_ids(&waiting),
                     "cause": WaitCause::PhaseChanged.as_str(),
                     "waited_secs": now - waiting.started_at,
                 }),

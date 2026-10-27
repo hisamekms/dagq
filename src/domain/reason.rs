@@ -53,7 +53,7 @@ reason_codes! {
     SessionExitCode => "session_exit_code": "the session exited with a non-zero code of its own (1-127)",
     SessionKilled => "session_killed": "the session was ended by a signal (exit code 128, which the wrapper reports for a signal, or 128+N such as 143 for SIGTERM)",
     ExitTimeout => "exit_timeout": "the session did not exit within the exit timeout of /exit",
-    HeartbeatLost => "heartbeat_lost": "the session wrapper stopped its heartbeat while its process lived on",
+    HeartbeatLost => "heartbeat_lost": "the session wrapper stopped its heartbeat (its process lived on or was gone without recording its exit)",
     WrapperFailed => "wrapper_failed": "the session wrapper could not run the agent",
     LeaseLost => "lease_lost": "the supervisor's heartbeat failed, so it could not keep its leases",
     ReceiptMissing => "receipt_missing": "no receipt was written",

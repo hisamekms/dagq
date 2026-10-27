@@ -1659,6 +1659,7 @@ impl ResumeWatch {
             wrapper,
             &self.workspace,
             &mut self.silent,
+            PulseSite::in_slot(WaitPhase::Resume),
             "resumed session's wrapper heartbeat expired; session may still be alive",
         )?;
         if matches!(pulse, WrapperPulse::Exited) {

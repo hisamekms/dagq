@@ -709,6 +709,11 @@ impl TestWorkspace {
     /// A wrapper's error comes with the queue's events, which tell what the
     /// supervisor did to the run meanwhile (task 1274).
     pub fn join(&self) {
+        self.join_but(None);
+    }
+    /// [`Self::join`], but the wrapper of the workspace `lost` (one a test
+    /// made the queue forget) is only waited for: its error is expected.
+    pub fn join_but(&self, lost: Option<&str>) {
         let workers: Vec<_> = self
             .sessions
             .lock()
@@ -721,7 +726,9 @@ impl TestWorkspace {
                 worker,
                 format!("the session wrapper of {id} to return (its stub agent to exit)"),
             );
-            if let Err(error) = returned {
+            if let Err(error) = returned
+                && lost != Some(id.as_str())
+            {
                 print_queue_events(&self.db);
                 panic!("the session wrapper of {id} failed: {error:#}");
             }

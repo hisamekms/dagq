@@ -495,14 +495,16 @@ impl ReviseWatch {
             )));
         };
         if sv.generators.clock.now() - wrapper.heartbeat_at > HEARTBEAT_TIMEOUT_SECS {
+            let alive = sv.wrapper_lives(wrapper);
+            let site = PulseSite::in_slot(WaitPhase::Revise);
+            note_heartbeat_expired(sv, run, wrapper, &self.session.workspace, site, alive)?;
             // A session that died will not rewrite it either (task 236).
-            if !sv.wrapper_lives(wrapper) {
+            if !alive {
                 return Ok(Some(ReviseOutcome::Ended(
                     "died without recording its exit".to_owned(),
                 )));
             }
-            // The exit that follows records `wrapper_heartbeat_expired` and
-            // sends the /exit.
+            // The exit that follows sends the /exit.
             return Ok(Some(ReviseOutcome::Ended(
                 "went silent (its wrapper stopped heartbeating while its process lives on)"
                     .to_owned(),

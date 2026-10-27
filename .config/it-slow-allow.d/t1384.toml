@@ -1,0 +1,56 @@
+# The items of task 1384 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 5.9s in a stress 5: three reopen attempts of a lost headless session, each waiting for its registration, then the recovery job
+[[test]]
+name = "runtime_headless_reopen::a_session_that_cannot_be_opened_again_goes_to_its_recovery_job"
+reason = "B 境界（守る境界）: 待ちの最中に失った非対話の session を supervise が background の wrapper で開き直す試みを登録の時間切れまで 3 回重ね、SQLite の run_waiting_ended（session_exited と ask_ids）と復旧 job に至る配線を確かめる（試みの数と間隔の判断は reopen.rs の unit test）"
+task = 1384
+
+# 5.8s in a stress 5: a headless worker asks, its wrapper dies without recording its exit, the session is opened again, takes the answer and lands
+[[test]]
+name = "runtime_headless_reopen::a_wrapper_dead_during_a_wait_is_recorded_once_before_its_session_is_reopened"
+reason = "B 境界（守る境界）: 終わりを記録せずに死んだ wrapper の行（SQLite の run_processes）を待ちの見張りが沈黙として 1 回だけ記録し、開き直した session が答えの turn を取って着地するまでを supervise のループで確かめる（沈黙の同一の判断は execution::exit の unit test）"
+task = 1384
+
+# 5.2s in a stress 5: a headless worker's run reviewed, its revise turn running when its wrapper dies, then the exit and the person's ask
+[[test]]
+name = "runtime_headless_reopen::a_wrapper_dead_during_a_revise_is_recorded_once_by_the_revise"
+reason = "B 境界（守る境界）: revise の turn の最中に終わりを記録せずに死んだ wrapper の行（SQLite の run_processes）を revise の watch が沈黙として 1 回だけ記録し、その後の ExitWatch が重ねて記録せずに人への ask に至る配線を supervise のループで確かめる（沈黙の同一の判断は execution::exit の unit test）"
+task = 1384
+
+# 5.1s in a stress 5: two silences of a waiting session's wrapper, the first coming back, each with its wait, answer turn and exit request
+[[test]]
+name = "runtime_waiting::a_wrapper_heartbeat_that_comes_back_lets_the_run_wait_again"
+reason = "B 境界（守る境界）: 待ちの最中に黙った wrapper の heartbeat が戻ると supervise が印を消して待ちを続け、次の沈黙を SQLite に改めて記録して終了を依頼する配線を、待ち・答えの turn・slot への戻りの 2 回の通しで確かめる（沈黙の同一の判断は execution::exit の unit test）"
+task = 1384
+
+# 6.2s in a stress 5 on a loaded host: the adoption of a run whose supervisor and wrapper died, its review, the exit and the landing on Git
+[[test]]
+name = "runtime_triage::an_awaiting_run_whose_supervisor_and_wrapper_died_is_adopted_reviewed_and_landed"
+reason = "B 境界（守る境界）: 死んだ supervisor と wrapper の残した run を次の supervise が adopt し、review・終了の見張り（死んだ wrapper の沈黙を SQLite に 1 回記録する）・実の Git への着地まで通ることを確かめる（沈黙の同一の判断は execution::exit の unit test）"
+task = 1384
+
+# 5.1s in a stress 5 on a loaded host: a waiting session's wrapper goes silent, the run goes back for its /exit, then the wrapper dies
+[[test]]
+name = "runtime_waiting::a_wrapper_that_goes_silent_during_a_wait_sends_the_run_back_for_its_exit"
+reason = "B 境界（守る境界）: 待ちの最中に黙った wrapper を supervise が SQLite に記録して slot に戻し終了を依頼し、その後に死んでも同じ沈黙を重ねて記録せずに run を手放す配線を確かめる（沈黙の同一の判断は execution::exit の unit test）"
+task = 1384
+
+# 5.5s in a stress 5: a first session's question waits outside the slot, a stalled ask joins it, the answer ends it and the run lands
+[[test]]
+name = "runtime_waiting::a_wait_ends_with_every_ask_it_held_and_the_one_that_ended_it"
+reason = "B 境界（守る境界）: 待ちの最中に SQLite に開いた stalled の ask を supervise の待ちの見張りが run_waiting_ask_added で加え、答えで終えた run_waiting_ended が待ちの持つ全ての ask と終えた ask を残し、slot に戻った run が着地するまでを確かめる"
+task = 1384
+
+# 8.3s in a stress 5 on a loaded host: a run under a dead supervisor asks, its wait is recorded, a supervisor with no room for a wait adopts it and the run lands
+[[test]]
+name = "runtime_waiting::a_wait_ended_by_its_adoption_keeps_every_ask_it_held"
+reason = "B 境界（復旧と adopt）: 死んだ supervisor の残した待ちを SQLite の event から組み立て直し、待ちの余地の無い adopt が phase_changed で終える run_waiting_ended に待ちの持つ全ての ask を残し、slot に戻った run が着地するまでを確かめる（組み立て直しの判断は domain::waiting の unit test）"
+task = 1384
+
+# 5.2s in a stress 5 on a loaded host: a first session whose wrapper row dies in its slot, until the supervisor gives the run up
+[[test]]
+name = "runtime_waiting::a_wrapper_that_dies_in_its_slot_is_recorded_before_the_run_is_given_up"
+reason = "B 境界（守る境界）: slot の中の session の wrapper の行（SQLite の run_processes）が終わりを記録せずに死んだとき、supervise が沈黙を 1 回記録して run を手放す配線を確かめる（沈黙の同一の判断は execution::exit の unit test）"
+task = 1384

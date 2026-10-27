@@ -187,8 +187,8 @@ run dirのI/Oの約束と落とし穴（`agent_dir`のmodule docと`agent_dir::i
 
 ### 黙ったwrapper<a id="黙ったwrapper"></a>
 
-- heartbeatが古くてもwrapperが生きていればkillせず、沈黙ごとに1回記録して終了の依頼を書き、heartbeatが戻れば印を消す（`wrapper_pulse`）。
-- 終了の記録の無いまま居なくなっていれば失ったsessionとして復旧し、生死は記録したhandleで判じる（下の「識別と生死」）。
+- 沈黙は生死とwatchに依らず1回記録し（`note_heartbeat_expired`）、生きていればkillせず終了の依頼を書き、heartbeatが戻れば印を消す（`wrapper_pulse`）。
+- 終了を記録せず居なくなれば失ったsessionとして復旧し、生死は記録したhandleで判じる（下の「識別と生死」）。
 - wrapperは終わりの記録を再試行し、その合計の待ちはsupervisorが黙ったとみなすまでの時間に収める（`EXIT_RECORD_ATTEMPTS`）。
 - 落とし穴: wrapperのheartbeatと記録の時刻は実時計で書かれるので、wrapperの居る`supervise`のtestで固定時刻の`Clock`を使うと生死を誤る（`wrapper_pulse`のdoc comment）。
 
