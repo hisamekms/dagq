@@ -197,6 +197,9 @@ pub struct LocalSetupReview<'a> {
     /// The `dagq` binary; its directory goes first on the job's PATH.
     dagq: &'a Path,
     timeout: Duration,
+    /// Where the job's agent's events go (the queue through the service);
+    /// `None` records them on the queue at `db`.
+    events: Option<&'a dyn crate::application::RunLog>,
     /// The tree of each place as it was made, by the place's id: what the
     /// job's changes are told from.
     baselines: RefCell<BTreeMap<String, Snapshot>>,
@@ -218,8 +221,17 @@ impl<'a> LocalSetupReview<'a> {
             launch,
             dagq,
             timeout,
+            events: None,
             baselines: RefCell::new(BTreeMap::new()),
         }
+    }
+
+    /// This host with its job's agent's events recorded on `events`
+    /// rather than on the queue at `db`.
+    #[must_use]
+    pub fn with_events(mut self, events: &'a dyn crate::application::RunLog) -> Self {
+        self.events = Some(events);
+        self
     }
 }
 
@@ -887,7 +899,7 @@ impl SetupReviewHost for LocalSetupReview<'_> {
         crate::infrastructure::observer::run_agent_in(
             self.provider,
             self.db,
-            None,
+            self.events,
             WorkspaceAccess::Write(place.tree.clone()),
             &place.dir,
             prompt,

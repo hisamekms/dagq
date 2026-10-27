@@ -111,7 +111,7 @@ Codexのinboxは起動の引数だけで開き、何も書かない（[ADR-t1181
   TUIが自分で書き足す欄は、引数で止められるものは止め、止められないものはexecの前に人のfileを読むだけで確かめ、欠けていれば開かない。
 - 境界: sandboxはどこも書かせず、queue serviceのsocketへの接続だけを足す（`Codex::reach_queue_service`、jobと同じprofile。[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。
   inboxの`dagq`はinboxのtokenとともにserviceへ送り、serviceがinboxのprincipalで認可する。
-  queueのdirとDBはsandboxから書けないので、DBを開く制御側のコマンド（`up`・`integrate`など）はCodexのinboxからは動かず、人が自分のterminalで打つ。
+  queueのdirとDBはsandboxから書けないので、それを書く制御側のコマンド（`up`・`integrate`など）はCodexのinboxからは動かず、人が自分のterminalで打つ。
   hookはsandboxの外のhostで動き、queueはinboxの身元の`dagq`で読む。
 
 ## Claude sessionの区間

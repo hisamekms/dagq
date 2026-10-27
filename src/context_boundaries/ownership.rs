@@ -468,8 +468,10 @@ pub(super) const SHARED_MODULES: &[SharedModule] = &[
 ];
 
 /// The modules of `src/compose/` that are not a context module (L9): the
-/// supervisor loop's, which may name the contexts.
-pub(super) const COMPOSE_LOOP: &[&str] = &["supervisor"];
+/// supervisor loop's and the control-side commands' a person or the inbox
+/// runs through the queue service (each a landing, a review or a job of
+/// the contexts), which may name the contexts.
+pub(super) const COMPOSE_LOOP: &[&str] = &["supervisor", "control"];
 
 #[rustfmt::skip]
 pub(super) const MODULES_ALLOWED: &[ModuleAllowed] = &[

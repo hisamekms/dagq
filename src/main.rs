@@ -4164,6 +4164,9 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
         }
         return Ok(located);
     }
+    if let Some(control) = control_call(&cli.command) {
+        return control_command(client.clone(), control, cli.command.clone());
+    }
     let Some((use_case, params)) = client_request(&cli.command)? else {
         return Err(ClientFailure::new(
             "no_use_case",
@@ -4176,10 +4179,111 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
     call_service(client, None, &cli.command, use_case, params)
 }
 
+/// The control-side command `command` is when it runs through the queue
+/// service ([`dagq::domain::queue_service::UseCase::Control`]): `integrate`,
+/// `review`, `observe` (but its reads, `--history` and `--input`, which
+/// are use cases of their own), `throughput-review` and `setup-review`,
+/// as this process's steps.
+fn control_call(command: &Command) -> Option<dagq::domain::queue_service::ControlCall> {
+    use dagq::domain::queue_service::{ControlCall, ControlCommand};
+    let call = |command, task: Option<i64>, yes| ControlCall {
+        command,
+        task: task.map(TaskId::new),
+        yes,
+        pid: std::process::id(),
+    };
+    Some(match command {
+        Command::Integrate { id, next, .. } => {
+            call(ControlCommand::Integrate, id.filter(|_| !next), false)
+        }
+        Command::Review { id } => call(ControlCommand::Review, Some(*id), false),
+        Command::Observe {
+            history: false,
+            input: None,
+            ..
+        } => call(ControlCommand::Observe, None, false),
+        Command::ThroughputReview { .. } => call(ControlCommand::ThroughputReview, None, false),
+        Command::SetupReview { yes, .. } => call(ControlCommand::SetupReview, None, *yes),
+        _ => return None,
+    })
+}
+
+/// Run the control-side command `command` ([`control_call`]) through the
+/// service `client` reaches, as the principal of its token (none for the
+/// user): its Git, its verification and its agent run here, and each
+/// operation of the queue it makes is one step the service answers
+/// (ADR-t3102-3 decision 5). No queue is opened, and a service that does
+/// not answer ends it with that error (fail closed).
+fn control_command(
+    client: dagq::infrastructure::queue_service::Client,
+    control: dagq::domain::queue_service::ControlCall,
+    command: Command,
+) -> Result<Value> {
+    let cwd = env::current_dir().context("working directory is unavailable")?;
+    let queues = dagq::compose::control_queues(client, control)?;
+    match command {
+        Command::Integrate {
+            id,
+            next,
+            repo,
+            no_push,
+        } => {
+            use dagq::{
+                application::integrate::IntegrateTarget, infrastructure::adapters::GitRepository,
+            };
+            let target = match (id, next) {
+                (Some(id), false) => IntegrateTarget::Task(TaskId::new(id)),
+                _ => IntegrateTarget::Next,
+            };
+            let repo = repo.unwrap_or(cwd);
+            let remote = if no_push {
+                None
+            } else {
+                Some(GitRepository::inspect(&repo)?)
+            };
+            queues.integrate(
+                target,
+                &repo,
+                remote
+                    .as_ref()
+                    .map(|r| r as &dyn dagq::application::MainRemote),
+            )
+        }
+        Command::Review { id } => queues.review(TaskId::new(id)),
+        command @ (Command::Observe { .. } | Command::ThroughputReview { .. }) => {
+            let db = queues.db.clone();
+            job_command(command, &db, Some(&queues))
+        }
+        Command::SetupReview {
+            yes,
+            timeout,
+            claude,
+            codex,
+            codex_home,
+        } => {
+            use dagq::application::setup_review::Approval;
+            queues.setup_review(
+                &cwd,
+                &dagq::compose::SetupReviewOptions {
+                    claude,
+                    codex,
+                    codex_home,
+                    timeout: Duration::from_secs(timeout),
+                    approval: if yes { Approval::Given } else { Approval::Ask },
+                    dagq: env::current_exe()?,
+                    profiles: &dagq::domain::toolchain::BUILTIN,
+                },
+            )
+        }
+        _ => unreachable!("a control-side command"),
+    }
+}
+
 /// Whether the host `dagq` of a
 /// [`host_client_role`](dagq::domain::queue_service::host_client_role)
 /// sends `command` to the service of a served queue: a command the service
-/// answers ([`client_request`]), `watch`, whose looks it answers, and
+/// answers ([`client_request`]), a control-side command whose steps it
+/// answers ([`control_call`]), `watch`, whose looks it answers, and
 /// `service status`, whose attention it reads.
 /// `planner request` and `rebind` are ones, told here without reading the
 /// words or the checkout's Git, which are read once, as it is sent.
@@ -4202,6 +4306,7 @@ fn host_routed(command: &Command) -> Result<bool> {
                 command: PlannerCommand::Request { .. }
             }
     ) || request_add
+        || control_call(command).is_some()
         || client_request(command)?.is_some())
 }
 
@@ -4274,6 +4379,9 @@ fn host_client(
         })
         .request();
         return dagq::compose::graph_svg_of(client.call(use_case, params)?);
+    }
+    if let Some(control) = control_call(command) {
+        return control_command(client, control, command.clone());
     }
     let (use_case, params) =
         client_request(command)?.context("the command is none of the service's use cases")?;
@@ -4476,7 +4584,9 @@ fn execute(cli: Cli) -> Result<Value> {
         // `rebind` records what it did in its own log as the command line
         // did (ADR-0033 decision 2), from the service's answer.
         let rebind = matches!(cli.command, Command::Rebind { .. });
-        if rebind {
+        // The landing's and the jobs' processes keep their logs in the
+        // queue's `logs/`, as on the DB (ADR-0033).
+        if rebind || control_call(&cli.command).is_some() {
             install_telemetry(&cli.command, &location);
         }
         let result = host_client(
@@ -4815,7 +4925,7 @@ fn execute(cli: Cli) -> Result<Value> {
     ) && env::var_os(dagq::domain::queue_service::SUPERVISOR_REGISTRATION_ENV)
         .is_some_and(|registration| !registration.is_empty())
     {
-        return job_command(cli.command, &db);
+        return job_command(cli.command, &db, None);
     }
     // `watch` needs the live read-only file rather than a migrated snapshot.
     // `report` and `graph --out` write files but no queue state; `run log`
@@ -5489,7 +5599,7 @@ fn execute(cli: Cli) -> Result<Value> {
             input: None,
             ..
         }
-        | Command::ThroughputReview { .. }) => job_command(command, &db)?,
+        | Command::ThroughputReview { .. }) => job_command(command, &db, None)?,
         Command::Session { .. } | Command::PlannerSession { .. } => {
             unreachable!("a session wrapper opens no queue: session_wrapper runs it")
         }
@@ -5890,7 +6000,11 @@ mod history_citation;
 /// `observe` and `throughput-review`: the job commands a supervisor starts
 /// as its own, which open no queue when it names its registration
 /// (`SUPERVISOR_REGISTRATION_ENV`, ADR-t3102-3 decision 3).
-fn job_command(command: Command, db: &Path) -> Result<Value> {
+fn job_command(
+    command: Command,
+    db: &Path,
+    control: Option<&dagq::compose::ControlQueues>,
+) -> Result<Value> {
     Ok(match command {
         Command::Observe {
             history: false,
@@ -5914,7 +6028,10 @@ fn job_command(command: Command, db: &Path) -> Result<Value> {
             use dagq::infrastructure::{adapters::ClaudeCode, codex::Codex};
             let launch: ActorLaunch = match launch {
                 Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
-                None => dagq::compose::observer_launch(db)?,
+                None => match control {
+                    Some(control) => control.observer_launch()?,
+                    None => dagq::compose::observer_launch(db)?,
+                },
             };
             // A dry run starts nothing, so it needs no executable; nor does
             // an observation no provider can run, nor the provider it does
@@ -5958,28 +6075,27 @@ fn job_command(command: Command, db: &Path) -> Result<Value> {
                 Provider::Claude => (&claude, Some(&claude)),
                 Provider::Codex => (&codex, None),
             };
-            dagq::compose::observe(
-                db,
-                provider,
-                signals,
-                &ObserveOptions {
-                    mode: if daily {
-                        ObserveMode::Daily
-                    } else {
-                        ObserveMode::Hourly
-                    },
-                    since: since.map(EventId::new),
-                    dry_run,
-                    timeout: Duration::from_secs(timeout),
-                    dagq: env::current_exe()?,
-                    user_config: dagq::infrastructure::language::user_config_file(),
-                    prompt_limit: dagq::application::observer::PROMPT_LIMIT,
-                    launch: Some(launch),
-                    switchable,
-                    fallback: !no_provider_fallback,
-                    unavailable,
+            let options = ObserveOptions {
+                mode: if daily {
+                    ObserveMode::Daily
+                } else {
+                    ObserveMode::Hourly
                 },
-            )?
+                since: since.map(EventId::new),
+                dry_run,
+                timeout: Duration::from_secs(timeout),
+                dagq: env::current_exe()?,
+                user_config: dagq::infrastructure::language::user_config_file(),
+                prompt_limit: dagq::application::observer::PROMPT_LIMIT,
+                launch: Some(launch),
+                switchable,
+                fallback: !no_provider_fallback,
+                unavailable,
+            };
+            match control {
+                Some(control) => control.observe(provider, signals, &options)?,
+                None => dagq::compose::observe(db, provider, signals, &options)?,
+            }
         }
         Command::ThroughputReview {
             mode,
@@ -5999,7 +6115,10 @@ fn job_command(command: Command, db: &Path) -> Result<Value> {
             use dagq::infrastructure::{adapters::ClaudeCode, codex::Codex};
             let launch: ActorLaunch = match launch {
                 Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
-                None => dagq::compose::throughput_review_launch(db)?,
+                None => match control {
+                    Some(control) => control.throughput_review_launch()?,
+                    None => dagq::compose::throughput_review_launch(db)?,
+                },
             };
             // A dry run starts nothing, so it needs no executable; nor does a
             // review no provider can run. One that cannot be resolved (gone
@@ -6026,23 +6145,23 @@ fn job_command(command: Command, db: &Path) -> Result<Value> {
                     home: codex_home,
                 }),
             };
-            dagq::compose::throughput_review(
-                db,
-                provider.as_ref(),
-                &dagq::application::throughput_review::ReviewOptions {
-                    mode: mode.parse()?,
-                    at,
-                    dry_run,
-                    timeout: Duration::from_secs(timeout),
-                    dagq: env::current_exe()?,
-                    user_config: dagq::infrastructure::language::user_config_file(),
-                    utc_offset,
-                    launch: Some(launch),
-                    switchable,
-                    fallback: !no_provider_fallback,
-                    unavailable,
-                },
-            )?
+            let options = dagq::application::throughput_review::ReviewOptions {
+                mode: mode.parse()?,
+                at,
+                dry_run,
+                timeout: Duration::from_secs(timeout),
+                dagq: env::current_exe()?,
+                user_config: dagq::infrastructure::language::user_config_file(),
+                utc_offset,
+                launch: Some(launch),
+                switchable,
+                fallback: !no_provider_fallback,
+                unavailable,
+            };
+            match control {
+                Some(control) => control.throughput_review(provider.as_ref(), &options)?,
+                None => dagq::compose::throughput_review(db, provider.as_ref(), &options)?,
+            }
         }
         _ => unreachable!("a job command"),
     })
@@ -6428,11 +6547,6 @@ mod tests {
             ("service start", CONTROL),
             ("service stop", CONTROL),
             ("queue-broker serve", CONTROL),
-            ("integrate", CONTROL),
-            ("review", CONTROL),
-            ("observe", CONTROL),
-            ("throughput-review", CONTROL),
-            ("setup-review", CONTROL),
             ("migrate", DIAGNOSIS),
             ("doctor", DIAGNOSIS),
         ];
@@ -6600,6 +6714,26 @@ mod tests {
             let cli = Cli::try_parse_from(argv).unwrap();
             assert!(host_routed(&cli.command).unwrap(), "{argv:?}");
         }
+        // The control side's commands a person or the inbox runs send their
+        // steps, and none is a use case of its own.
+        for argv in [
+            &["dagq", "integrate", "1"][..],
+            &["dagq", "integrate", "--next"],
+            &["dagq", "review", "1"],
+            &["dagq", "observe"],
+            &["dagq", "throughput-review"],
+            &["dagq", "setup-review", "--yes"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert!(host_routed(&cli.command).unwrap(), "{argv:?}");
+            assert!(control_call(&cli.command).is_some(), "{argv:?}");
+            assert!(client_request(&cli.command).unwrap().is_none(), "{argv:?}");
+            assert_eq!(
+                UseCase::of_command(&argv[1..]),
+                Some(UseCase::Control),
+                "{argv:?}"
+            );
+        }
         // The form that carries a run's branch over is sent as its own use
         // case.
         let cli =
@@ -6610,6 +6744,57 @@ mod tests {
                 .unwrap()
                 .map(|(use_case, _)| use_case),
             Some(UseCase::ReadyInherit)
+        );
+    }
+
+    /// A control-side command's steps name what its command line names,
+    /// as the command line authorizes it on the DB: the task of
+    /// `integrate ID` (none for `--next`) and of `review ID`, `setup-review
+    /// --yes`, and this process, the landing's integrator.
+    #[test]
+    fn a_control_side_command_names_its_task_its_approval_and_its_process() {
+        use dagq::domain::queue_service::{ControlCall, ControlCommand};
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let outcome = std::panic::catch_unwind(|| {
+                    [
+                        &["dagq", "integrate", "4"][..],
+                        &["dagq", "integrate", "--next"],
+                        &["dagq", "review", "5"],
+                        &["dagq", "setup-review", "--yes"],
+                        &["dagq", "observe", "--dry-run"],
+                    ]
+                    .map(|argv| control_call(&Cli::try_parse_from(argv).unwrap().command))
+                });
+                let _ = done.send(outcome);
+            })
+            .unwrap();
+        let calls = match finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the command lines were not read within 60 seconds")
+        {
+            Ok(calls) => calls,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        let call = |command, task: Option<i64>, yes| {
+            Some(ControlCall {
+                command,
+                task: task.map(TaskId::new),
+                yes,
+                pid: std::process::id(),
+            })
+        };
+        assert_eq!(
+            calls,
+            [
+                call(ControlCommand::Integrate, Some(4), false),
+                call(ControlCommand::Integrate, None, false),
+                call(ControlCommand::Review, Some(5), false),
+                call(ControlCommand::SetupReview, None, true),
+                call(ControlCommand::Observe, None, false),
+            ]
         );
     }
 

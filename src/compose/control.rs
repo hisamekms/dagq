@@ -1,0 +1,247 @@
+//! The control-side commands a person or the inbox runs on the host
+//! (`integrate`, `review`, `observe`, `throughput-review`, `setup-review`)
+//! through the queue service (goal 182's stage (5)): the command runs here,
+//! with its Git, its verification and its agent's process (ADR-t3102-3
+//! decision 5), and each operation of the queue it makes is a step of its
+//! command the service answers in one transaction as the caller's principal
+//! ([`crate::application::supervisor_service::control`]). The process opens
+//! no queue, and a service that does not answer ends the command with that
+//! error (fail closed).
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use serde_json::{Value, json};
+
+use super::OneShot;
+use crate::application::integrate::IntegrateTarget;
+use crate::application::supervisor_service::{
+    ServiceCaller, ServiceTokens, SupervisorQueues,
+    control::{self, CONTROL_QUEUE},
+};
+use crate::application::{
+    AgentProvider, AgentSignals, EventStore, MainRemote, QueueOpener, SupervisorReads,
+};
+use crate::domain::actor_model::ActorLaunch;
+use crate::domain::queue_service::{ControlCall, UseCase};
+use crate::domain::{ActorContext, ActorRole, TaskId};
+use crate::infrastructure::clock;
+use crate::infrastructure::queue_service::{Client, ControlCaller, SystemServiceAccess};
+
+/// The queue of a control-side command through the queue service: each
+/// operation a step of the command, as the principal of the client's token
+/// (none for the user), whose actor the service named.
+pub struct ControlQueues {
+    pub queues: SupervisorQueues,
+    /// The queue's DB the service serves: where its runs', tokens' and
+    /// logs' files are, which the command reads and writes itself.
+    pub db: PathBuf,
+    /// The process of the command, the integrator's of its landing.
+    pid: u32,
+}
+
+/// The queues of `control`'s steps through `client`: the service names the
+/// queue it serves and the principal's actor first, so a principal the
+/// command is not for is refused before anything is done. The records of
+/// the results the command made are sent again until the service takes
+/// them, for as long as it takes ([`control::resending`]).
+pub fn control_queues(client: Client, control: ControlCall) -> Result<ControlQueues> {
+    let caller: Arc<dyn ServiceCaller> = Arc::new(ControlCaller::new(client, control)?);
+    let begun = caller.call(UseCase::Supervisor, json!({"op": CONTROL_QUEUE}))?;
+    let db: PathBuf = serde_json::from_value(begun["db"].clone())
+        .context("the queue service's answer names no queue")?;
+    let role: ActorRole = serde_json::from_value(begun["role"].clone())
+        .context("the queue service's answer names no role")?;
+    let actor_id = begun["actor_id"]
+        .as_str()
+        .context("the queue service's answer names no actor")?;
+    let caller = control::resending(caller, clock::system());
+    Ok(ControlQueues {
+        queues: SupervisorQueues::new(Arc::new(caller), ActorContext::new(role, actor_id)),
+        db,
+        pid: control.pid,
+    })
+}
+
+impl ControlQueues {
+    /// The tokens of the telemetry of the command's agent or
+    /// verification, issued and revoked by the service, their files read
+    /// where they are.
+    fn tokens(&self) -> ServiceTokens {
+        ServiceTokens {
+            queues: self.queues.clone(),
+            files: Arc::new(SystemServiceAccess),
+            telemetry_files: Arc::new(SystemServiceAccess),
+        }
+    }
+
+    /// The records a landing's container verification reads and makes on
+    /// the service's queue ([`ServiceRecords`]).
+    fn records(&self) -> ServiceRecords {
+        ServiceRecords {
+            queues: self.queues.clone(),
+            db: self.db.clone(),
+        }
+    }
+
+    /// The main checkout of the repository the queue is bound to, `None`
+    /// for one bound to none or whose checkout cannot be found.
+    fn checkout(&self) -> Result<Option<PathBuf>> {
+        Ok(SupervisorReads::repository_binding(&self.queues.queue())?
+            .and_then(|common_dir| super::main_checkout_of(Path::new(&common_dir)).ok()))
+    }
+
+    /// `integrate`: [`OneShot::integrate`] on the service's queue, the
+    /// landing's lease kept alive and its records made as the integrator
+    /// whose token the service issued as its slot was taken.
+    pub fn integrate(
+        &self,
+        target: IntegrateTarget,
+        repo: &Path,
+        remote: Option<&dyn MainRemote>,
+    ) -> Result<Value> {
+        let mut queue = self.queues.queue();
+        let heartbeat = |_: &crate::application::integrate::IntegrationRequest| {
+            let integrator = ActorContext::instance(ActorRole::Integrator, self.pid);
+            match self
+                .queues
+                .landing_token()
+                .map(|file| self.queues.service.with_token(&file))
+            {
+                Some(Ok(caller)) => {
+                    Arc::new(SupervisorQueues::new(caller, integrator)) as Arc<dyn QueueOpener>
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(
+                        "the integrator's token could not be read for its heartbeat: {error:#}"
+                    );
+                    Arc::new(self.queues.clone())
+                }
+                None => Arc::new(self.queues.clone()),
+            }
+        };
+        OneShot::system().integrate_on(
+            &mut queue,
+            &self.queues.actor,
+            &self.db,
+            target,
+            repo,
+            remote,
+            &heartbeat,
+            &self.tokens(),
+            Some(&super::ContainerRecords {
+                relays: Arc::new(self.records()),
+                images: Arc::new(self.records()),
+                owner_runs: Some(Arc::new(self.records())),
+            }),
+        )
+    }
+
+    /// `review`: [`super::execution::review_on`] the service's queue.
+    pub fn review(&self, task: TaskId) -> Result<Value> {
+        super::execution::review_on(&mut self.queues.queue(), task, None)
+    }
+
+    /// What the observer starts with: `[roles.observer]` of the bound
+    /// checkout's `dagq.toml` ([`super::observer_launch`]).
+    pub fn observer_launch(&self) -> Result<ActorLaunch> {
+        Ok(crate::infrastructure::observer::observer_launch(
+            self.checkout()?.as_deref(),
+        ))
+    }
+
+    /// What the throughput review starts with
+    /// ([`super::throughput_review_launch`]).
+    pub fn throughput_review_launch(&self) -> Result<ActorLaunch> {
+        Ok(crate::infrastructure::throughput_review::review_launch(
+            self.checkout()?.as_deref(),
+        ))
+    }
+
+    /// `observe`: [`super::observe_through`] the service's queue.
+    pub fn observe(
+        &self,
+        provider: &dyn AgentProvider,
+        signals: Option<&dyn AgentSignals>,
+        options: &crate::application::observer::ObserveOptions,
+    ) -> Result<Value> {
+        super::observation::observe_with(
+            &self.db,
+            self.queues.clone(),
+            self.tokens(),
+            provider,
+            signals,
+            options,
+        )
+    }
+
+    /// `throughput-review`: [`super::throughput_review_through`] the
+    /// service's queue.
+    pub fn throughput_review(
+        &self,
+        provider: &dyn AgentProvider,
+        options: &crate::application::throughput_review::ReviewOptions,
+    ) -> Result<Value> {
+        super::observation::throughput_review_with(
+            &self.db,
+            self.queues.clone(),
+            self.tokens(),
+            provider,
+            options,
+        )
+    }
+
+    /// `setup-review` in `cwd` ([`super::setup_review`]), its job's agent's
+    /// events recorded through the service.
+    pub fn setup_review(&self, cwd: &Path, options: &super::SetupReviewOptions) -> Result<Value> {
+        let events = self.queues.queue();
+        super::execution::setup_review_on(&self.db, cwd, options, Some(&events))
+    }
+}
+
+/// The records of the relays and the image a landing's container
+/// verification reads and makes, on the queue service's queue at `db`:
+/// the relays' attention the supervisor recorded, the image's builds and
+/// failures, recorded as the command's principal, and the runs of that
+/// queue that own users of the dagq machine (another queue's are not
+/// reached: unknown, their users kept).
+struct ServiceRecords {
+    queues: SupervisorQueues,
+    db: PathBuf,
+}
+
+impl ServiceRecords {
+    /// Whether `db` names the queue the service serves.
+    fn serves(&self, db: &Path) -> bool {
+        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        canonical(db) == canonical(&self.db)
+    }
+}
+
+impl crate::application::broker_relay::RelayRecords for ServiceRecords {
+    fn down(&self) -> Result<Option<String>> {
+        crate::application::broker_relay::down_message(&self.queues.queue())
+    }
+}
+
+impl crate::infrastructure::podman_machine::OwnerRuns for ServiceRecords {
+    fn run(&self, db: &Path, run: &str) -> Option<crate::domain::broker_relay::RelayRun> {
+        self.serves(db)
+            .then(|| crate::infrastructure::podman_machine::relay_run_in(&self.queues.queue(), run))
+    }
+}
+
+impl crate::application::container_image::ImageRecords for ServiceRecords {
+    fn record(&self, kind: crate::domain::EventKind, payload: Value) -> Result<()> {
+        EventStore::record_queue_event(&self.queues.queue(), kind, payload).map(drop)
+    }
+
+    fn latest(&self) -> Result<Option<(crate::domain::RecordedKind, Value)>> {
+        Ok(EventStore::latest_queue_event(
+            &self.queues.queue(),
+            &crate::domain::container_image::CONTAINER_IMAGE_KINDS,
+        )?
+        .map(|event| (event.kind, event.payload)))
+    }
+}

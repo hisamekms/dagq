@@ -230,6 +230,7 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::AgentDecide
         | UseCase::TelemetryReport
         | UseCase::Supervisor
+        | UseCase::Control
         | UseCase::SessionRun
         | UseCase::SessionRecord
         | UseCase::Add
@@ -390,6 +391,16 @@ string_enum!(UseCase {
     // (`scheduler.supervise`), and every lease it names is the one the
     // principal was issued for. No command line goes to it.
     Supervisor => "supervisor",
+    // A step of a control-side command a person or the inbox runs on the
+    // host (`integrate`, `review`, `observe`, `throughput-review`,
+    // `setup-review`): one of the queue's operations as a supervisor's
+    // ([`ControlParams`]), each in one transaction, for the command's
+    // principal once the command's operation is authorized for it, and
+    // only the operations that command makes. The landing's slot is taken
+    // with the integrator's token issued in the same transaction, and the
+    // landing goes on with that token as a supervisor's does. Git and the
+    // programs stay with the client (ADR-t3102-3 decision 5).
+    Control => "control",
     // A session wrapper's operations on its own target, a run or a
     // planner (ADR-t3102-1 decision 4, ADR-t3102-3 decision 3), each the
     // one transaction it was on the DB: its registration, heartbeats,
@@ -493,10 +504,11 @@ string_enum!(UseCase {
 impl UseCase {
     /// The use case a `dagq` command line goes to through the service:
     /// `words` are its arguments after the global options, the subcommand
-    /// first. `None` for a command the service does not answer (the
-    /// control side's, `watch`, whose looks only the host's `dagq` sends as
-    /// [`Self::WatchPoll`], `observe` without `--history` or `--input`,
-    /// `locate`, `doctor`, ...).
+    /// first; a control-side command that sends its steps as
+    /// [`Self::Control`] goes to that. `None` for a command the service does
+    /// not answer (the rest of the control side's, `watch`, whose looks
+    /// only the host's `dagq` sends as [`Self::WatchPoll`], `locate`,
+    /// `doctor`, ...).
     pub fn of_command(words: &[&str]) -> Option<Self> {
         let has = |flag: &str| {
             words
@@ -585,6 +597,9 @@ impl UseCase {
             ("request", Some("add")) => Self::RequestAdd,
             ("request", Some("decline")) => Self::RequestDecline,
             ("mark", _) => Self::Mark,
+            ("integrate" | "review" | "observe" | "throughput-review" | "setup-review", _) => {
+                Self::Control
+            }
             _ => return None,
         })
     }
@@ -737,6 +752,45 @@ pub struct SupervisorParams {
     /// results alike are two records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<String>,
+}
+
+// The control side's commands a person or the inbox runs on the host
+// ([`UseCase::Control`]): the use case each goes to through the service,
+// whose operations of the queue the command sends by their names.
+string_enum!(ControlCommand {
+    Integrate => "integrate",
+    Review => "review",
+    Observe => "observe",
+    ThroughputReview => "throughput_review",
+    SetupReview => "setup_review",
+});
+
+/// The command a request of [`UseCase::Control`] is a step of, as its
+/// command line names it: the task `integrate ID` and `review ID` name
+/// (`integrate --next` names none), `setup-review --yes`, and the process
+/// of the command, whose landing's integrator is `integrator:<pid>` as the
+/// command line's on the DB is. The service authorizes the command's
+/// operation for the principal at each step, as the command line authorizes
+/// it before it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlCall {
+    pub command: ControlCommand,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskId>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub yes: bool,
+    pub pid: u32,
+}
+
+/// A step of a control-side command ([`UseCase::Control`]): the command
+/// and one operation of the queue, named and given as a supervisor's is
+/// ([`SupervisorParams`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlParams {
+    pub control: ControlCall,
+    pub call: SupervisorParams,
 }
 
 /// A refusal of the policy as the service answers it: the role, the
@@ -2162,6 +2216,13 @@ mod tests {
                 "ready_inherit",
             ),
             (&["ready", "3"], "ready"),
+            (&["integrate", "3"], "control"),
+            (&["integrate", "--next"], "control"),
+            (&["review", "3"], "control"),
+            (&["observe"], "control"),
+            (&["observe", "--daily"], "control"),
+            (&["throughput-review"], "control"),
+            (&["setup-review", "--yes"], "control"),
         ] {
             assert_eq!(
                 UseCase::of_command(words).map(UseCase::as_str),
@@ -2174,14 +2235,12 @@ mod tests {
             &["watch"],
             &["locate"],
             &["doctor"],
-            &["observe"],
-            &["observe", "--daily"],
             &["run", "close-workspaces"],
             &["goal"],
             &["finding"],
             &["dependency"],
             &["request"],
-            &["integrate"],
+            &["supervise"],
         ] {
             assert_eq!(UseCase::of_command(words), None, "{words:?}");
         }

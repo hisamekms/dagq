@@ -37,6 +37,7 @@
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
+pub mod control;
 mod dispatch;
 mod forward;
 mod needs;
@@ -393,6 +394,16 @@ impl SupervisorQueues {
         }
     }
 
+    /// The file of the token of the integrator whose landing's slot one of
+    /// these queues took, until the landing ends.
+    pub fn landing_token(&self) -> Option<std::path::PathBuf> {
+        self.landing
+            .lock()
+            .expect("the landing lock")
+            .as_ref()
+            .map(|(_, file)| file.clone())
+    }
+
     /// One queue of the supervisor's, through the service.
     pub fn queue(&self) -> SupervisorQueue {
         SupervisorQueue {
@@ -745,36 +756,8 @@ pub fn answer(
         queue
             .supervisor_store()
             .restore_request(params.requested_by.clone());
-        // The slot and the integrator's token in one transaction: the
-        // token is issued once the slot's lease is taken, and the slot is
-        // committed only with it (ADR-t3102-3 decision 3, ADR-t3102-1
-        // decision 2), so no landing begins that cannot record.
-        // The token names the landing's `integration_started`, so a token
-        // whose landing did not commit writes nothing ([`integrator`]).
         let landing = Principal::integrator(&run, &token, pid.unwrap_or_default());
-        let mut issued = false;
-        let begun = queue.begin_landing(&run, &token, &main, over_handoff, &mut |started| {
-            let file = backend
-                .access()
-                .issue(backend.db(), &landing.clone().of_landing(started))?;
-            issued = true;
-            reply(Ok(file))
-        });
-        return match begun {
-            Ok((run, file)) => Ok(serde_json::json!({"run": reply(Ok(run))?, "integrator": file})),
-            Err(error) => {
-                // A token issued before a commit that failed is of no
-                // landing: it goes too.
-                if issued
-                    && let Err(back) = backend
-                        .access()
-                        .revoke(backend.db(), &landing.credential_key())
-                {
-                    tracing::warn!(run_id = %run, "run {run}: the integrator's token of a landing that did not begin could not be revoked: {back:#}");
-                }
-                Err(error)
-            }
-        };
+        return begin_landing(backend, &mut *queue, &landing, &main, over_handoff, None);
     }
     if params.op == END_LANDING {
         let (run,): (crate::domain::RunId,) = read(&params.op, Value::Array(params.args))?;
@@ -798,6 +781,50 @@ pub fn answer(
         &params.op,
         Value::Array(params.args),
     )
+}
+
+/// Take the integration slot of the run `landing` (an integrator
+/// principal, [`Principal::integrator`]) lands under its lease on `main`,
+/// and issue its token: the run begun and the file of the token. The slot
+/// and the token in one transaction: the token is issued once the slot's
+/// lease is taken, and the slot is committed only with it (ADR-t3102-3
+/// decision 3, ADR-t3102-1 decision 2), so no landing begins that cannot
+/// record. The token names the landing's `integration_started`, so a token
+/// whose landing did not commit writes nothing ([`integrator`]).
+fn begin_landing(
+    backend: &dyn ServiceBackend,
+    queue: &mut dyn ServiceQueue,
+    landing: &Principal,
+    main: &crate::domain::CommitSha,
+    over_handoff: bool,
+    holder: Option<u32>,
+) -> Result<Value> {
+    let (Some(run), Some(token)) = (landing.landing_run(), landing.registration.clone()) else {
+        return Err(BadOperation(format!("{} lands no run", landing.actor_id)).into());
+    };
+    let mut issued = false;
+    let begun = queue.begin_landing(&run, &token, main, over_handoff, holder, &mut |started| {
+        let file = backend
+            .access()
+            .issue(backend.db(), &landing.clone().of_landing(started))?;
+        issued = true;
+        reply(Ok(file))
+    });
+    match begun {
+        Ok((run, file)) => Ok(serde_json::json!({"run": reply(Ok(run))?, "integrator": file})),
+        Err(error) => {
+            // A token issued before a commit that failed is of no
+            // landing: it goes too.
+            if issued
+                && let Err(back) = backend
+                    .access()
+                    .revoke(backend.db(), &landing.credential_key())
+            {
+                tracing::warn!(run_id = %run, "run {run}: the integrator's token of a landing that did not begin could not be revoked: {back:#}");
+            }
+            Err(error)
+        }
+    }
 }
 
 /// The identity of the result's record `params` send, when the queue takes
@@ -848,13 +875,16 @@ const INTEGRATOR_TASK_OPS: [&str; 4] = [
     "follow_up_depth",
 ];
 /// The integrator's operations on the queue as a whole: the reads its
-/// checks make (the CI watch's records among them) and the container
-/// runtime's events of its verification.
-const INTEGRATOR_QUEUE_OPS: [&str; 4] = [
+/// checks make (the CI watch's records among them), the container
+/// runtime's events of its verification, and the heartbeat of its lease
+/// (a person's landing keeps its own slot's lease alive; a supervisor's
+/// is its registration's).
+const INTEGRATOR_QUEUE_OPS: [&str; 5] = [
     "latest_events_of",
     "latest_queue_event",
     "ci_watch_events",
     "record_queue_event",
+    "heartbeat",
 ];
 
 /// Whether the integrator of `run`, of `task`, may send `op` with `args`:

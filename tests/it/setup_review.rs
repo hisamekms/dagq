@@ -209,7 +209,8 @@ fn init_recommends_the_settings_and_only_a_person_and_the_inbox_set_up_the_revie
 
     let agent = fixture.agent("claude-generate", GENERATE);
     for env in [
-        vec![("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "planner:1")],
+        // A planner open on the queue, whose token its `dagq` sends.
+        vec![("DAGQ_ROLE", "planner")],
         vec![
             ("DAGQ_ROLE", "worker"),
             ("DAGQ_ACTOR_ID", "worker:r1"),

@@ -1050,19 +1050,6 @@ fn begin(
             None => return Ok(None),
         },
     };
-    // A run the supervisor holds (its review, ADR-0027, or its resume) is
-    // not approved by a call that cannot land it.
-    if let Some(lease) = queue.run_lease(run.id())?
-        && !heartbeat_stale(
-            ctx.processes.alive(lease.pid),
-            ctx.clock.now() - lease.heartbeat_at,
-        )
-    {
-        bail!(
-            "run {} is held by the supervisor (its review or resume is in progress); see show for its review_finished / resume_finished events",
-            run.id()
-        );
-    }
     StaticPolicy.authorize(
         requester,
         Capability::IntegrationRequest,
@@ -1076,14 +1063,14 @@ fn begin(
     }
     // The call is the approval to land (ADR-0016 decision 5): a run it
     // parks as `needs_session` is landed by the supervisor once a resumed
-    // session resolved it (ADR-0019 decision 1).
-    if !RunHistory::from_events(&queue.run_events(run.id())?).approved() {
-        queue.record_runtime_event(
-            run.id(),
-            EventKind::IntegrationApproved,
-            json!({"status": run.status().as_str(), "pid": ctx.pid, "push": ctx.remote.is_some()}),
-        )?;
-    }
+    // session resolved it (ADR-0019 decision 1). Its prerequisites are
+    // checked again in the approval's own write ([`approvable`]).
+    let (processes, clock) = (ctx.processes, ctx.clock);
+    queue.approve_integration(
+        run.id(),
+        json!({"status": run.status().as_str(), "pid": ctx.pid, "push": ctx.remote.is_some()}),
+        &|lease| !heartbeat_stale(processes.alive(lease.pid), clock.now() - lease.heartbeat_at),
+    )?;
     let previous = run.status();
     let token = ctx.ids.lease_token();
     let main = ctx.repository.main_head()?;
@@ -1100,6 +1087,52 @@ fn begin(
         main,
         token,
     }))
+}
+
+/// Whether the approval to land run `id` of `payload` is recorded now,
+/// read on `queue` in the approval's own write
+/// ([`RunTransitions::approve_integration`]): `false` for a run approved
+/// already. Refused is a run whose status is not the one `payload` names
+/// (it changed since the caller read it), one that awaits neither
+/// integration nor a session, and one a lease `held` says is held (the
+/// supervisor's review, ADR-0027, or its resume): a call that cannot land
+/// it does not approve it.
+pub fn approvable(
+    queue: &(impl super::RunReads + super::CoordinationReads + EventStore + ?Sized),
+    id: &RunId,
+    payload: &Value,
+    held: &dyn Fn(&crate::domain::RunLease) -> bool,
+) -> Result<bool> {
+    let status = super::RunReads::run(queue, id)?.status();
+    let leased = super::CoordinationReads::run_lease(queue, id)?.is_some_and(|lease| held(&lease));
+    let approved = RunHistory::from_events(&EventStore::run_events(queue, id)?).approved();
+    approval_due(id, status, payload["status"].as_str(), leased, approved)
+}
+
+/// [`approvable`]'s decision on what it read of run `id`: its `status`,
+/// the status the caller read it in (`read_in`), whether a live lease
+/// holds it (`held`) and whether it was `approved` already.
+fn approval_due(
+    id: &RunId,
+    status: RunStatus,
+    read_in: Option<&str>,
+    held: bool,
+    approved: bool,
+) -> Result<bool> {
+    ensure!(
+        matches!(
+            status,
+            RunStatus::AwaitingIntegration | RunStatus::NeedsSession
+        ) && read_in == Some(status.as_str()),
+        "run {id} is {}: only a run awaiting integration or a session, as it was read, is approved to land",
+        status.as_str()
+    );
+    if held {
+        bail!(
+            "run {id} is held by the supervisor (its review or resume is in progress); see show for its review_finished / resume_finished events"
+        );
+    }
+    Ok(!approved)
 }
 
 /// Refuse to land `run` while the free disk space is below what a
@@ -3983,6 +4016,49 @@ mod tests {
     const BASE: &str = "1111111111111111111111111111111111111111";
     const HEAD: &str = "2222222222222222222222222222222222222222";
     const RUN: &str = "00000000-0000-4000-8000-000000000001";
+
+    /// The approval to land is recorded once, of a run awaiting
+    /// integration or a session in the status its caller read it in and
+    /// held by no live lease; any other is refused.
+    #[test]
+    fn a_run_is_approved_to_land_only_as_it_was_read_and_held_by_none() {
+        let id = RunId::new(RUN).unwrap();
+        let due = |status: RunStatus, read_in: Option<&str>, held, approved| {
+            approval_due(&id, status, read_in, held, approved)
+        };
+        for status in [RunStatus::AwaitingIntegration, RunStatus::NeedsSession] {
+            let read_in = Some(status.as_str());
+            assert!(due(status, read_in, false, false).unwrap(), "{status:?}");
+            // Approved already: nothing more is recorded.
+            assert!(!due(status, read_in, false, true).unwrap(), "{status:?}");
+            let held = due(status, read_in, true, false).unwrap_err();
+            assert!(
+                held.to_string().contains("is held by the supervisor"),
+                "{held:#}"
+            );
+        }
+        // Changed since it was read, or read in no status.
+        for read_in in [Some("awaiting_integration"), None] {
+            let changed = due(RunStatus::NeedsSession, read_in, false, false).unwrap_err();
+            assert!(
+                changed.to_string().contains("as it was read"),
+                "{changed:#}"
+            );
+        }
+        for status in [
+            RunStatus::Integrating,
+            RunStatus::Integrated,
+            RunStatus::Running,
+        ] {
+            let refused = due(status, Some(status.as_str()), false, false).unwrap_err();
+            assert!(
+                refused
+                    .to_string()
+                    .contains("only a run awaiting integration"),
+                "{status:?}: {refused:#}"
+            );
+        }
+    }
 
     /// The landing stops processes under and removes only the run's own
     /// `<run dir>/worktree-<run id>` (or `<run dir>/worktree` of a run made

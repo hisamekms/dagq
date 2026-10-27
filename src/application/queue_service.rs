@@ -119,14 +119,17 @@ pub trait ServiceQueue:
     /// transaction once the slot and its lease are taken, run `issue` with
     /// the landing's `integration_started` event (the landing integrator's
     /// token, ADR-t3102-3 decision 3, ADR-t3102-1 decision 2): nothing is
-    /// committed unless both are done. The run begun and what `issue`
-    /// answered.
+    /// committed unless both are done. The lease and the event name the
+    /// process `holder` when given (a person's or the inbox's `integrate`,
+    /// whose command lands in its own process), else the supervisor of
+    /// `token`. The run begun and what `issue` answered.
     fn begin_landing(
         &mut self,
         run: &RunId,
         token: &crate::domain::LeaseToken,
         main: &crate::domain::CommitSha,
         over_handoff: bool,
+        holder: Option<u32>,
         issue: &mut dyn FnMut(crate::domain::EventId) -> Result<Value>,
     ) -> Result<(crate::domain::TaskRun, Value)>;
     /// Do a session wrapper's `op`, authorized already
@@ -288,6 +291,13 @@ impl QueueService<'_> {
             }
         }
         let actor = principal.actor();
+        if request.use_case == UseCase::Control {
+            return respond(super::supervisor_service::control::answer(
+                self.backend,
+                &principal,
+                &request.params,
+            ));
+        }
         if connection == Connection::Supervisor {
             return respond(super::supervisor_service::answer(
                 self.backend,
@@ -473,7 +483,7 @@ enum Connection {
 
 fn connection(use_case: UseCase, params: &Value) -> Connection {
     match use_case {
-        UseCase::Supervisor => Connection::Supervisor,
+        UseCase::Supervisor | UseCase::Control => Connection::Supervisor,
         UseCase::WatchPoll => Connection::Watch,
         UseCase::Show
         | UseCase::ProposalList
@@ -567,6 +577,17 @@ pub(super) fn authorize_supervisor_needs(
     };
     gate.authorize(&store, capability, &Resource::Queue)?;
     Ok(())
+}
+
+/// Authorize the runtime operation `operation` of a control-side command
+/// for `actor`, as the command line authorizes it before it runs,
+/// recording a refusal.
+pub(super) fn authorize_operation(
+    queue: &mut dyn ServiceQueue,
+    actor: &ActorContext,
+    operation: &super::commands::operations::Operation,
+) -> Result<()> {
+    super::commands::operations::authorize(actor, &StaticPolicy, &Store(queue), operation)
 }
 
 /// Check that the integrator `actor` may land `run`, recording a refusal
@@ -911,7 +932,9 @@ fn run(
     }
     match use_case {
         UseCase::Hello => unreachable!("hello is answered before a principal"),
-        UseCase::Supervisor => unreachable!("a supervisor's request is answered apart"),
+        UseCase::Supervisor | UseCase::Control => {
+            unreachable!("a supervisor's and a control-side command's requests are answered apart")
+        }
         UseCase::List
         | UseCase::Candidates
         | UseCase::Graph
@@ -1824,6 +1847,7 @@ mod tests {
             _: &crate::domain::LeaseToken,
             _: &crate::domain::CommitSha,
             _: bool,
+            _: Option<u32>,
             _: &mut dyn FnMut(crate::domain::EventId) -> Result<Value>,
         ) -> Result<(crate::domain::TaskRun, Value)> {
             unimplemented!("these tests send no supervisor's operation")

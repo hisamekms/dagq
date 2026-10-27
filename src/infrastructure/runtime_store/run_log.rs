@@ -147,6 +147,27 @@ impl SqliteQueue {
         Ok(())
     }
 
+    /// [`Self::record_runtime_event`] once `check`, run in the same write
+    /// transaction before the event, answers `true`: `false` records
+    /// nothing, and a check that fails records nothing and fails. Whether
+    /// it recorded.
+    pub fn record_runtime_event_if(
+        &self,
+        id: &RunId,
+        kind: EventKind,
+        payload: serde_json::Value,
+        check: &mut dyn FnMut() -> Result<bool>,
+    ) -> Result<bool> {
+        let _read = read_before(&self.conn, Closing::Event(id, kind, &payload))?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        if !check()? {
+            return Ok(false);
+        }
+        run_event(&tx, id, kind, payload)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Record `backend_call_failed`: on `run` (its id) when the call was for
     /// one, otherwise with neither a task nor a run.
     pub fn record_backend_failure(

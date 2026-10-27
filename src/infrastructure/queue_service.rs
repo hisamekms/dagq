@@ -2818,6 +2818,156 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
     }
 }
 
+/// The caller of a control-side command a person or the inbox runs on the
+/// host (`integrate`, `review`, `observe`, `throughput-review`,
+/// `setup-review`, [`UseCase::Control`]): each operation of its queue goes
+/// to the service on `client`'s socket as a step of `control`, as the
+/// principal of `client`'s token (none for the user), and the landing's
+/// integrator calls with the token the service issued as the landing's
+/// slot was taken ([`Self::with_token`]). A service that does not answer
+/// is [`crate::application::supervisor_service::ServiceUnreachable`] in a
+/// [`ClientFailure`] that says what to do next: the queue is never opened
+/// instead (fail closed).
+pub struct ControlCaller {
+    client: Client,
+    socket: PathBuf,
+    control: crate::domain::queue_service::ControlCall,
+}
+
+impl ControlCaller {
+    /// The caller of `control`'s steps through `client`, the host's
+    /// `dagq` or a client-mode one on the host's socket; a client through
+    /// the queue broker (a run's container) runs no control-side command.
+    pub fn new(
+        client: Client,
+        control: crate::domain::queue_service::ControlCall,
+    ) -> Result<Self, ClientFailure> {
+        let ClientRoute::Socket(socket) = &client.route else {
+            return Err(ClientFailure::new(
+                "control_side_command",
+                "a control-side command runs on the host, and a client-mode dagq through the \
+                 queue broker sends none of its steps",
+            ));
+        };
+        Ok(Self {
+            socket: socket.clone(),
+            client,
+            control,
+        })
+    }
+}
+
+/// The service's `response` to a step of a control-side command as its
+/// result: a refusal of the policy, a token or a queue as the client's
+/// [`ClientFailure`] (printed as the other host commands' are), a failure
+/// the queue's operation tells apart as the queue's own error
+/// ([`crate::application::supervisor_service::service_error`]), and any
+/// other failure as the message the queue's operation failed with, as the
+/// command line on the DB would have.
+fn control_answer(response: ServiceResponse) -> Result<Value> {
+    if !crate::domain::queue_service::understands(&response) {
+        return answer_of(response);
+    }
+    match (response.ok, response.result, response.error) {
+        (true, result, _) => Ok(result.unwrap_or(Value::Null)),
+        (_, _, Some(error)) if error.code == ServiceErrorCode::Failed => {
+            if error.kind.is_some() {
+                Err(crate::application::supervisor_service::service_error(
+                    &error,
+                ))
+            } else {
+                Err(anyhow::anyhow!(error.message))
+            }
+        }
+        (_, _, Some(error)) => Err(ClientFailure {
+            denied: error
+                .denied
+                .filter(|_| error.code == ServiceErrorCode::AuthorizationDenied),
+            ..ClientFailure::new(error.code.as_str(), error.message)
+        }
+        .into()),
+        _ => Err(ClientFailure::new("failed", "the queue service answered nothing").into()),
+    }
+}
+
+impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        ensure!(
+            use_case == UseCase::Supervisor,
+            "a control-side command sends the queue's operations only, not {}",
+            use_case.as_str()
+        );
+        let step = serde_json::from_value(params)
+            .context("a control-side command's step does not read")?;
+        let params = serde_json::to_value(crate::domain::queue_service::ControlParams {
+            control: self.control,
+            call: step,
+        })?;
+        self.client.check_destination()?;
+        let token = match &self.client.credential {
+            Some(file) => Some(
+                read_token(file)
+                    .map_err(|error| ClientFailure::new("no_credential", format!("{error:#}")))?,
+            ),
+            None => None,
+        };
+        let request = ServiceRequest {
+            api_version: API_VERSION,
+            env_role: self.client.env_role.clone().filter(|_| token.is_none()),
+            token,
+            queue: self.client.queue.clone(),
+            binding: self.client.binding.clone(),
+            use_case: UseCase::Control,
+            params,
+        };
+        let response = call(&self.socket, &request, CLIENT_TIMEOUT).map_err(|error| {
+            use crate::application::supervisor_service::ServiceUnreachable;
+            let failure = self.client.not_answered(&error, UseCase::Control);
+            if error.downcast_ref::<AnswerPastLimit>().is_some() {
+                return anyhow::Error::new(failure);
+            }
+            let lost = if error.downcast_ref::<NotConnected>().is_some() {
+                // Nothing was sent: the service did not do it.
+                ServiceUnreachable::not_done(format!("{error:#}"))
+            } else {
+                ServiceUnreachable::maybe_done(format!("{error:#}"))
+            };
+            anyhow::Error::new(lost).context(failure)
+        })?;
+        control_answer(response)
+    }
+
+    fn with_token(
+        &self,
+        file: &Path,
+    ) -> Result<Arc<dyn crate::application::supervisor_service::ServiceCaller>> {
+        let caller = SocketCaller {
+            queue_dir: self
+                .socket
+                .parent()
+                .map_or_else(PathBuf::new, Path::to_path_buf),
+            socket: self.socket.clone(),
+            timeout: SUPERVISOR_TIMEOUT,
+            signed_in: SignedIn::default(),
+            adopted: true,
+        };
+        caller.signed_in.adopt(file)?;
+        Ok(Arc::new(caller))
+    }
+
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        bail!("a control-side command signs in as none: it calls as its caller")
+    }
+
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        bail!("a control-side command signs in as none: it calls as its caller")
+    }
+
+    fn hand_over(&self) {}
+
+    fn sign_out(&self) {}
+}
+
 /// One request's queue.
 struct ServiceSqlite {
     queue: SqliteQueue,
@@ -3076,10 +3226,11 @@ impl ServiceQueue for ServiceSqlite {
         token: &LeaseToken,
         main: &crate::domain::CommitSha,
         over_handoff: bool,
+        holder: Option<u32>,
         issue: &mut dyn FnMut(crate::domain::EventId) -> Result<Value>,
     ) -> Result<(crate::domain::TaskRun, Value)> {
         self.queue
-            .begin_integration_then(run, token, main, !over_handoff, issue)
+            .begin_integration_then(run, token, main, !over_handoff, holder, issue)
     }
 
     fn session(&mut self, op: &crate::application::session::SessionOp) -> Result<Value> {
@@ -3371,6 +3522,75 @@ mod supervisor_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A control-side command's step reads the service's answer as the
+    /// command line on the DB would have failed: a failure of the queue's
+    /// operation as its own message, one the caller tells apart as the
+    /// queue's error, and a refusal of the policy, a token or a queue as the
+    /// client's, with what was refused.
+    #[test]
+    fn a_control_step_reads_a_failure_as_the_queue_s_own_and_a_refusal_as_the_client_s() {
+        use crate::domain::AuthorizationError;
+        use crate::domain::authorization::{Capability, DenyReason};
+        use crate::domain::queue_service::FailureKind;
+        assert_eq!(
+            control_answer(ServiceResponse::success(json!({"run": "r1"}))).unwrap(),
+            json!({"run": "r1"})
+        );
+        let failed = control_answer(ServiceResponse::failure(
+            ServiceErrorCode::Failed,
+            "task 9 not found",
+        ))
+        .unwrap_err();
+        assert_eq!(format!("{failed:#}"), "task 9 not found");
+        assert!(failed.downcast_ref::<ClientFailure>().is_none());
+        let mut busy = ServiceResponse::failure(ServiceErrorCode::Failed, "database is locked");
+        busy.error.as_mut().unwrap().kind = Some(FailureKind::QueueBusy);
+        assert!(crate::application::QueueBusy::is(
+            &control_answer(busy).unwrap_err()
+        ));
+        let denied = control_answer(ServiceResponse::denied(&AuthorizationError {
+            role: ActorRole::Worker,
+            capability: Capability::IntegrationRequest,
+            reason: DenyReason::NotGranted,
+        }))
+        .unwrap_err();
+        let failure = denied.downcast_ref::<ClientFailure>().unwrap();
+        assert_eq!(failure.code, "authorization_denied");
+        assert_eq!(
+            failure.denied.as_ref().unwrap().capability,
+            "landing.request"
+        );
+        let unknown = control_answer(ServiceResponse::failure(
+            ServiceErrorCode::Unauthenticated,
+            "the token is not one the control side issued",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            unknown.downcast_ref::<ClientFailure>().unwrap().code,
+            "unauthenticated"
+        );
+    }
+
+    /// A client-mode `dagq` through the queue broker (a run's container)
+    /// sends no step of a control-side command.
+    #[test]
+    fn a_control_side_command_is_sent_on_the_host_s_socket_only() {
+        use crate::domain::queue_service::{ControlCall, ControlCommand, URL_ENV};
+        let call = ControlCall {
+            command: ControlCommand::Integrate,
+            task: None,
+            yes: false,
+            pid: 1,
+        };
+        let broker = Client::from_env(env_of(&[(URL_ENV, "http://127.0.0.1:9")]))
+            .unwrap()
+            .unwrap();
+        let refused = ControlCaller::new(broker, call).err().unwrap();
+        assert_eq!(refused.code, "control_side_command");
+        let socket = Client::host(Path::new("/q/queue.db"), None, env_of(&[]));
+        assert!(ControlCaller::new(socket, call).is_ok());
+    }
 
     fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let pairs: Vec<(String, String)> = pairs

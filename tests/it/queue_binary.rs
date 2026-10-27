@@ -92,13 +92,10 @@ fn only_the_queues_binary_migrates_the_queue() {
         let error = error_of(&run(binary, &db, &["migrate"]));
         assert!(error.contains("is not the queue's binary"), "{error}");
         assert!(error.contains(&fixed.display().to_string()), "{error}");
-        // `integrate`, a control-side process, opens the DB itself to write
-        // (ADR-t3102-2 decision 6 (5)).
+        // `integrate` sends its steps to the queue's service and opens no
+        // DB, so with no service it neither migrates nor reads the queue.
         let error = error_of(&run(binary, &db, &["integrate", "1"]));
-        assert!(
-            error.contains("run `dagq migrate` with the queue's binary"),
-            "{error}"
-        );
+        assert!(error.contains("unreachable"), "{error}");
         assert_eq!(user_version(&db), 23);
         // Reading the schema is not refused.
         let check = run(binary, &db, &["migrate", "--check"]);

@@ -58,7 +58,7 @@ impl Fixture {
     }
 
     /// `dagq --db <queue> args` in the repository as `env`'s actor (the
-    /// user without).
+    /// user without), reaching the queue's service.
     pub fn command(&self, env: &[(&str, &str)], args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
         command
@@ -69,6 +69,9 @@ impl Fixture {
             .arg("--db")
             .arg(&self.db)
             .args(args);
+        // `setup-review` sends its steps to the queue service, as the
+        // command line does (ADR-t3102-2 decision 6).
+        super::cli::reach(&mut command, &self.db, args);
         command
     }
 

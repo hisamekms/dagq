@@ -1000,6 +1000,7 @@ pub fn supervise_with_reviewer(
                 Arc::new(crate::compose::verification_containers(
                     &db,
                     Some(main_checkout.clone()),
+                    None,
                 ))
                     as Arc<dyn crate::application::run_container::VerificationContainers>
             },

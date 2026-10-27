@@ -1137,6 +1137,20 @@ pub trait RunTransitions {
     /// Take the single integration slot for `id` under `token`; refused
     /// with [`HandoffAsked`] while the supervisor `token` is asked to hand
     /// off (ADR-t3077-1 decision 1), decided in the same write.
+    /// Record the approval to land run `id` (`integration_approved` with
+    /// `payload`, which names the status it was approved in) in one write
+    /// transaction that first finds the run still in that status, awaiting
+    /// integration or a session, held by no lease `held` says is held, and
+    /// approved by nothing yet ([`crate::application::integrate::approvable`]):
+    /// a run approved already records nothing (`false`), and any other is
+    /// refused. The queue service decides `held` of its own processes and
+    /// clock: its client sends none.
+    fn approve_integration(
+        &mut self,
+        id: &RunId,
+        payload: serde_json::Value,
+        held: &dyn Fn(&crate::domain::RunLease) -> bool,
+    ) -> Result<bool>;
     fn begin_integration(
         &mut self,
         id: &RunId,

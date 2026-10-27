@@ -522,6 +522,52 @@ impl OneShot {
         // The requester is who this process acts as (ADR-t728-2 decision 2):
         // a person, or the inbox at a person's word.
         let requester = queue.actor();
+        let opener: Arc<dyn crate::application::QueueOpener> = Arc::new(SqliteOpener {
+            db: db.clone(),
+            generators: self.generators.clone(),
+            actor: None,
+        });
+        self.integrate_on(
+            &mut queue,
+            &requester,
+            &db,
+            target,
+            repo,
+            remote,
+            &|_| opener.clone(),
+            &crate::infrastructure::queue_service::SystemServiceAccess,
+            None,
+        )
+    }
+
+    /// [`Self::integrate`] on `queue` of the queue at `db` (canonical), at
+    /// `requester`'s request: the lease of its integration slot kept alive
+    /// through the queues `heartbeat` opens for the request, and its
+    /// verification's steps registered through `tokens`. A person's or the
+    /// inbox's `integrate` through the queue service lands on the service's
+    /// queue as the integrator whose token the slot was taken with
+    /// ([`crate::compose::ControlQueues`]), the records of its container
+    /// verification's relays and image made on `records`: on the queue at
+    /// `db` without.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn integrate_on(
+        &self,
+        queue: &mut dyn crate::application::Queue,
+        requester: &crate::domain::ActorContext,
+        db: &Path,
+        target: IntegrateTarget,
+        repo: &Path,
+        remote: Option<&dyn MainRemote>,
+        heartbeat: &dyn Fn(
+            &crate::application::integrate::IntegrationRequest,
+        ) -> Arc<dyn crate::application::QueueOpener>,
+        tokens: &dyn crate::application::queue_service::TelemetryTokens,
+        records: Option<&crate::compose::ContainerRecords>,
+    ) -> Result<Value> {
+        let db = db.to_path_buf();
+        let requester = requester.clone();
+        let container_records =
+            crate::compose::ContainerRecords::or_queue(records, &db, &requester);
         let repository = GitRepository::inspect(repo)?;
         let main_checkout = repository.checkout()?.to_path_buf();
         let common_dir = path_text(&repository.common_dir)?;
@@ -556,7 +602,7 @@ impl OneShot {
             )
         };
         let mut integration = Integration {
-            queue: &mut queue,
+            queue,
             repository: &repository,
             verifier: &verifier,
             // The queue broker, the Claude credential, the runs' relays, the
@@ -570,9 +616,7 @@ impl OneShot {
                 )),
                 // The supervisor's record of the relays.
                 container: crate::application::broker_relay::RelayGate {
-                    records: Arc::new(crate::infrastructure::broker_relay::QueueRelayHealth {
-                        db: db.clone(),
-                    }),
+                    records: container_records.relays,
                     // Only looked at: the worker's Claude credential.
                     container:
                         crate::infrastructure::claude_credential::ClaudeCredentialGate::of_queue(
@@ -591,7 +635,8 @@ impl OneShot {
                                             .and_then(Path::parent)
                                             .unwrap_or(Path::new(".")),
                                         crate::infrastructure::kpi_config::host_wide_file(),
-                                    ),
+                                    )
+                                    .with_owner_runs(container_records.owner_runs.clone()),
                                 ),
                                 // Only looked at: a container's start builds it.
                                 container: crate::application::container_image::ImageGate {
@@ -601,12 +646,7 @@ impl OneShot {
                                             db.parent().unwrap_or(Path::new(".")),
                                         ),
                                     ),
-                                    records: Arc::new(
-                                        crate::infrastructure::container_image::QueueImageRecords {
-                                            db: db.clone(),
-                                            actor: Some(requester.clone()),
-                                        },
-                                    ),
+                                    records: container_records.images,
                                     now: {
                                         let clock = self.generators.clock.clone();
                                         Arc::new(move || clock.now())
@@ -638,6 +678,7 @@ impl OneShot {
             verification_containers: &crate::compose::verification_containers(
                 &db,
                 Some(main_checkout.clone()),
+                records,
             ),
             // A person's landing waits for the automatic update's build and
             // e2e as the supervisor's does (ADR-t2719-1).
@@ -653,11 +694,7 @@ impl OneShot {
             return Ok(serde_json::to_value(IntegrationOutcome::NoRunAwaiting)?);
         };
         let heartbeat = Heartbeat::start(
-            Arc::new(SqliteOpener {
-                db: db.clone(),
-                generators: self.generators.clone(),
-                actor: None,
-            }),
+            heartbeat(&request),
             request.token.clone(),
             supervisor::HeartbeatPolicy::leases(supervisor::HEARTBEAT_INTERVAL),
         );
@@ -665,7 +702,7 @@ impl OneShot {
             &mut integration,
             &request,
             crate::application::integrate::LandingTelemetry {
-                tokens: &crate::infrastructure::queue_service::SystemServiceAccess,
+                tokens,
                 sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
                 db: &db,
                 clock: self.generators.clock.clone(),
@@ -753,6 +790,17 @@ pub struct SetupReviewOptions {
 /// on the provider of `[roles.setup_review]` of the main checkout's
 /// `dagq.toml`, Claude without.
 pub fn setup_review(db: &Path, cwd: &Path, options: &SetupReviewOptions) -> Result<Value> {
+    setup_review_on(db, cwd, options, None)
+}
+
+/// [`setup_review`] with its job's agent's events recorded on `events`
+/// (the queue through the service) when given.
+pub(crate) fn setup_review_on(
+    db: &Path,
+    cwd: &Path,
+    options: &SetupReviewOptions,
+    events: Option<&dyn crate::application::RunLog>,
+) -> Result<Value> {
     use crate::{
         domain::Provider,
         infrastructure::setup_review::{Interrupt, LocalSetupReview, setup_launch},
@@ -778,15 +826,19 @@ pub fn setup_review(db: &Path, cwd: &Path, options: &SetupReviewOptions) -> Resu
             home: options.codex_home.clone(),
         }),
     };
+    let host = LocalSetupReview::new(
+        db,
+        cwd,
+        provider.as_ref(),
+        &launch,
+        &options.dagq,
+        options.timeout,
+    );
     crate::application::setup_review::setup_review(
-        &LocalSetupReview::new(
-            db,
-            cwd,
-            provider.as_ref(),
-            &launch,
-            &options.dagq,
-            options.timeout,
-        ),
+        &match events {
+            Some(events) => host.with_events(events),
+            None => host,
+        },
         options.approval,
         options.profiles,
     )

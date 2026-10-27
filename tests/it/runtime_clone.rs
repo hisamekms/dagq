@@ -2125,9 +2125,10 @@ fn configure_drivers(repo: &Path, dir: &Path, mark: &Path) -> PathBuf {
 }
 
 /// `dagq integrate` of `task` in another process whose global git
-/// configuration is `global`.
+/// configuration is `global`, through the queue's service.
 fn integrate_with_global(db: &Path, repo: &Path, task: TaskId, global: &Path) -> Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command
         .without_actor_env()
         .owned_by_test()
         .env("GIT_CONFIG_GLOBAL", global)
@@ -2135,9 +2136,10 @@ fn integrate_with_global(db: &Path, repo: &Path, task: TaskId, global: &Path) ->
         .arg(db)
         .args(["integrate", &task.to_string(), "--no-push", "--repo"])
         .arg(repo)
-        .current_dir(repo)
-        .bounded_output()
-        .unwrap();
+        .current_dir(repo);
+    // Its steps go to the queue's service, which runs no Git.
+    crate::common::cli::reach(&mut command, db, &["integrate"]);
+    let output = command.bounded_output().unwrap();
     serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
         panic!(
             "integrate: {}{}",

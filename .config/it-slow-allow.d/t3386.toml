@@ -1,0 +1,50 @@
+# The items of task 3386 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 10.0s in a stress: two supervises to a run awaiting integration, a landing on the DB and one through the CLI and the queue service
+[[test]]
+name = "host_control::a_persons_integrate_lands_through_the_service_as_on_the_db_and_the_service_runs_no_git"
+reason = "B 境界（守る境界）: 人の integrate の CLI が queue service の control の step で着地し、DB を開く着地と同じ outcome と event の actor（承認は呼び出し元、着地は integrator と requested_by）を残し、service が Git を走らせないことを、実の Git の着地と SQLite の queue で比べて確かめる（step の範囲の判断は application::supervisor_service::control の unit test）"
+task = 3386
+
+# 7.5s in a stress: a supervise to a run awaiting integration, then the inbox's review, two dry runs and a landing in client mode
+[[test]]
+name = "host_control::the_inbox_reviews_observes_and_lands_in_client_mode"
+reason = "B 境界（守る境界）: inbox の client mode の dagq（socket と token、queue の path 無し）が review・observe・throughput-review・integrate を service の step で行い、着地が inbox の依頼の integrator として実の Git と SQLite に残ることを確かめる"
+task = 3386
+
+# 6.9s in a stress: two queues' services, an observation and a throughput review each with a stub agent, by the user and the inbox
+[[test]]
+name = "host_control::an_observation_and_a_throughput_review_record_as_their_caller"
+reason = "B 境界（守る境界）: 人と inbox が打つ observe と throughput-review が stub の agent の process を起動し、始めと終わりの event と telemetry の token の発行と失効を service の step で呼び出し元として SQLite に残すことを確かめる"
+task = 3386
+
+# 6.2s in a stress: a supervise to a run awaiting integration, a live lease on it, then a refused landing on the DB and one through the service
+[[test]]
+name = "host_control::a_held_run_is_approved_by_no_integrate_and_records_no_approval"
+reason = "B 境界（守る境界）: 生きた lease が持つ run の着地の承認を、DB の経路と service の approve_integration の step がどちらも記録の write transaction の中で断り、integration_approved を残さないことを、実の SQLite の queue で確かめる（承認の判断は application::integrate の unit test）"
+task = 3386
+
+# 7.7s alone: a supervise to a run awaiting integration, the steps of a landing through the service under a dead command's pid, then a supervise that releases and lands it
+[[test]]
+name = "host_control::a_landing_whose_command_died_is_released_by_the_next_pass"
+reason = "B 境界（守る境界）: 人の integrate の着地の lease と integration_started が service ではなくコマンドの pid を名指し、そのコマンドが死んだ着地を次の supervisor の pass が回収してもう一度着地させることを、実の service の process・Git・SQLite で確かめる（回収の判断は domain::landing_release の unit test）"
+task = 3386
+
+# 5.6s (median of four, a host load of 24 on 8 CPUs; 3.5 to 4.8s in earlier runs): three queues' services, an observation by the user and the inbox whose stub agent finds its login run out, and one on the DB
+[[test]]
+name = "host_control::an_observation_at_a_login_that_ran_out_holds_as_on_the_db"
+reason = "B 境界（守る境界）: 人と inbox の observe が service の step で stub の agent の process を起動し、login の切れた壁で認証の ask を observer の job として開き auth_required を呼び出し元として残すことを、DB を開く observe と同じ形で実の SQLite に確かめる"
+task = 3386
+
+# 5.2s (median of four, a host load of 24 on 8 CPUs; under 5s in earlier runs): a service, the setup-review job's stub agent run by the user, by the inbox in client mode and by the command on the DB in a child process
+[[test]]
+name = "host_control::the_inbox_sets_up_the_review_in_client_mode_as_the_user_does"
+reason = "B 境界（守る境界）: 人の host の dagq と inbox の client mode の dagq が service を通して setup-review の job の process を起動し、生成した設定を DB を開くコマンドと同じに見せ、どれも queue を変えないことを実の SQLite と子 process で確かめる"
+task = 3386
+
+# 7.1s (median of five): a supervise to a run awaiting integration, then a landing's steps of another task refused and its own task's begun, deferred by its integrator and ended through the service
+[[test]]
+name = "host_control::a_landing_of_another_tasks_run_is_neither_begun_nor_ended"
+reason = "B 境界（守る境界）: 人の integrate の承認・着地の開始・終了の step を、別の task を名指すコマンドから service が断り、run の状態・lease・event・integrator の token の file が変わらないことを、実の service の process と SQLite の queue で確かめる（task の照合の判断は application::supervisor_service::control の of_named_task）"
+task = 3386

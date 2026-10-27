@@ -39,12 +39,14 @@ use crate::{
     },
 };
 
+mod control;
 mod execution;
 mod host;
 mod observation;
 mod planning;
 mod supervisor;
 
+pub use control::{ControlQueues, control_queues};
 pub use execution::{
     RunE2eOptions, SetupReviewOptions, ended_run_material, init_recommended, integrate, recover,
     review, review_in, session, session_in_background, session_in_background_as,
@@ -137,17 +139,56 @@ pub(crate) fn run_containers_keeping(
             db: db.to_path_buf(),
             main_checkout,
             host_wide,
-            kept_records: kept,
+            kept_records: kept.map(|kept| kept as _),
+            owner_runs: None,
         }),
     )
 }
 
+/// Where a landing's container verification records its relays' and its
+/// image's state, and reads the runs that own users of the dagq machine,
+/// when its process opens no queue: the queue service's queue
+/// ([`ControlQueues`]).
+#[derive(Clone)]
+pub(crate) struct ContainerRecords {
+    pub relays: std::sync::Arc<dyn crate::application::broker_relay::RelayRecords>,
+    pub images: std::sync::Arc<dyn crate::application::container_image::ImageRecords + Send + Sync>,
+    /// `None` reads each owner's queue's DB.
+    pub owner_runs: Option<std::sync::Arc<dyn crate::infrastructure::podman_machine::OwnerRuns>>,
+}
+
+impl ContainerRecords {
+    /// `records`, else the records of the queue at `db`, the image's made
+    /// as `actor`.
+    pub(crate) fn or_queue(
+        records: Option<&Self>,
+        db: &Path,
+        actor: &crate::domain::ActorContext,
+    ) -> Self {
+        records.cloned().unwrap_or_else(|| Self {
+            relays: std::sync::Arc::new(crate::infrastructure::broker_relay::QueueRelayHealth {
+                db: db.to_path_buf(),
+            }),
+            images: std::sync::Arc::new(
+                crate::infrastructure::container_image::QueueImageRecords {
+                    db: db.to_path_buf(),
+                    actor: Some(actor.clone()),
+                },
+            ),
+            owner_runs: None,
+        })
+    }
+}
+
 /// The verifications' containers of the queue at `db`, whose parts the
 /// host's context makes ready as it does a worker's
-/// ([`run_containers`]).
+/// ([`run_containers`]), the image's records made and the machine's
+/// users' runs read through `records` when given (the queue service's, for
+/// a process that opens no queue), else on the queue at `db`.
 pub(crate) fn verification_containers(
     db: &Path,
     main_checkout: Option<PathBuf>,
+    records: Option<&ContainerRecords>,
 ) -> crate::infrastructure::run_container::PodmanVerificationContainers {
     let podman = crate::infrastructure::podman_machine::PodmanCli::default();
     let host_wide = crate::infrastructure::kpi_config::host_wide_file();
@@ -161,7 +202,8 @@ pub(crate) fn verification_containers(
             db: db.to_path_buf(),
             main_checkout,
             host_wide,
-            kept_records: None,
+            kept_records: records.map(|records| records.images.clone()),
+            owner_runs: records.and_then(|records| records.owner_runs.clone()),
         }),
         memory_poll: std::time::Duration::from_secs(crate::domain::machine_memory::POLL_SECS),
     }

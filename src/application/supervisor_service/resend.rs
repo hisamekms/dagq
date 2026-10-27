@@ -259,6 +259,11 @@ impl Waits {
         ..Self::DEFAULT
     };
 
+    /// A person's or the inbox's control-side command's: its records are
+    /// its caller's, which no supervisor sends as that caller, so they are
+    /// sent again for as long as it takes, as a landing's are.
+    pub const CONTROL: Self = Self::LANDING;
+
     /// What a caller does after it sent a record again `tries` times,
     /// `elapsed` after its first sending: wait `first` doubled at each try
     /// up to `longest` and send again, until `limit` passed; then keep it.

@@ -16,7 +16,7 @@ use serde_json::Value;
 
 /// The operations that only read the queue, the tokens' principals and the
 /// telemetry's targets.
-const READS: &[&str] = &[
+pub(super) const READS: &[&str] = &[
     "candidates",
     "build_waits",
     "predecessors",

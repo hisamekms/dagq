@@ -582,9 +582,32 @@ pub fn host_volumes(data_root: &Path, queue_dir: &Path) -> Vec<PathBuf> {
 
 /// The host-wide lock and users of the machine, in `dir`
 /// (`<data home>/dagq/machine`).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HostMachineUsers {
     pub dir: PathBuf,
+    /// How the runs that own users are read when the process opens no
+    /// queue ([`OwnerRuns`]); on each owner's queue's DB without.
+    pub runs: Option<std::sync::Arc<dyn OwnerRuns>>,
+}
+
+impl std::fmt::Debug for HostMachineUsers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostMachineUsers")
+            .field("dir", &self.dir)
+            .field("runs", &self.runs.is_some())
+            .finish()
+    }
+}
+
+/// How a process that opens no queue (a person's `integrate` through the
+/// queue service) reads the runs that own users of the machine: the runs
+/// of the queue it is a client of, through that queue's service. A run of
+/// a queue it does not reach is unknown, and its user stays counted and
+/// kept ([`lease_held`]): no queue's DB is opened.
+pub trait OwnerRuns: Send + Sync {
+    /// The run `run` of the queue at `db` as its service answers
+    /// ([`relay_run_in`]); `None` for a queue this reader does not reach.
+    fn run(&self, db: &Path, run: &str) -> Option<RelayRun>;
 }
 
 impl HostMachineUsers {
@@ -667,7 +690,7 @@ impl MachineUsers for HostMachineUsers {
         let mut queues = Queues::new();
         for entry in entries.flatten() {
             let seen = match fs::read_to_string(entry.path()) {
-                Ok(text) => owner_seen(&text, &mut queues),
+                Ok(text) => owner_seen(&text, &mut queues, self.runs.as_deref()),
                 // Left between the listing and the read.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(_) => OwnerSeen::Unreadable,
@@ -781,7 +804,7 @@ impl MachineReservations for HostMachineUsers {
     }
 
     fn owner_held(&self, owner: &LeaseOwner) -> bool {
-        lease_held(seen_of(owner, &mut Queues::new()))
+        lease_held(seen_of(owner, &mut Queues::new(), self.runs.as_deref()))
     }
 
     fn process_alive(&self, pid: u32) -> bool {
@@ -795,7 +818,7 @@ type Queues = std::collections::HashMap<PathBuf, Option<super::sqlite::SqliteQue
 
 /// What is seen now of the owner a user's record `text` names: a bare pid
 /// is a process (the record of a binary from before the owners).
-fn owner_seen(text: &str, queues: &mut Queues) -> OwnerSeen {
+fn owner_seen(text: &str, queues: &mut Queues, runs: Option<&dyn OwnerRuns>) -> OwnerSeen {
     let owner = serde_json::from_str(text).ok().or_else(|| {
         text.trim()
             .parse()
@@ -803,18 +826,22 @@ fn owner_seen(text: &str, queues: &mut Queues) -> OwnerSeen {
             .map(|pid| LeaseOwner::Process { pid })
     });
     match owner {
-        Some(owner) => seen_of(&owner, queues),
+        Some(owner) => seen_of(&owner, queues, runs),
         None => OwnerSeen::Unreadable,
     }
 }
 
-/// What is seen now of `owner`.
-fn seen_of(owner: &LeaseOwner, queues: &mut Queues) -> OwnerSeen {
+/// What is seen now of `owner`: a run through `runs` when given (a queue
+/// it does not reach unknown), else on its queue's DB.
+fn seen_of(owner: &LeaseOwner, queues: &mut Queues, runs: Option<&dyn OwnerRuns>) -> OwnerSeen {
     match owner {
         LeaseOwner::Process { pid } => OwnerSeen::Process {
             alive: super::adapters::process_alive(*pid),
         },
-        LeaseOwner::Run { db, run } => OwnerSeen::Run(run_in_queue(db, run, queues)),
+        LeaseOwner::Run { db, run } => OwnerSeen::Run(match runs {
+            Some(runs) => runs.run(db, run).unwrap_or(RelayRun::Unknown),
+            None => run_in_queue(db, run, queues),
+        }),
     }
 }
 
@@ -840,6 +867,13 @@ fn run_in_queue(db: &Path, run: &str, queues: &mut Queues) -> RelayRun {
     let Some(queue) = opened else {
         return RelayRun::Unknown;
     };
+    relay_run_in(queue, run)
+}
+
+/// The run `run` as `queue` knows it: found among the runs whose task is
+/// in progress, else found alone, else missing; unknown when it cannot be
+/// read (why is logged).
+pub fn relay_run_in(queue: &(impl crate::application::RunReads + ?Sized), run: &str) -> RelayRun {
     let read = (|| {
         if let Some(found) = queue
             .latest_runs_in_progress()?
@@ -999,6 +1033,7 @@ impl QueueMachine {
             podman,
             users: HostMachineUsers {
                 dir: data_root.join(MACHINE_DIR_NAME),
+                runs: None,
             },
             resources: load_machine_resources(host_wide).0,
             required: MachineMounts::of_queue(queue_dir),
@@ -1230,6 +1265,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let users = HostMachineUsers {
             dir: dir.path().to_path_buf(),
+            runs: None,
         };
         let me = LeaseOwner::Process {
             pid: std::process::id(),
@@ -1316,6 +1352,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let users = HostMachineUsers {
             dir: dir.path().to_path_buf(),
+            runs: None,
         };
         let me = LeaseOwner::Process {
             pid: std::process::id(),
@@ -1366,12 +1403,74 @@ mod tests {
         }));
     }
 
+    /// Runs that own users and are read through the queue service: the
+    /// queue it serves answers, and another queue is unknown.
+    struct ServedRuns {
+        db: PathBuf,
+        run: RelayRun,
+    }
+
+    impl OwnerRuns for ServedRuns {
+        fn run(&self, db: &Path, _run: &str) -> Option<RelayRun> {
+            (db == self.db).then_some(self.run)
+        }
+    }
+
+    /// A process that opens no queue reads the runs that own users through
+    /// the service it is a client of, never on a queue's DB (here a file
+    /// no SQLite opens, which would read as unknown): the served queue's
+    /// run that is over leaves, and another queue's, which it does not
+    /// reach, stays counted.
+    #[test]
+    fn the_users_runs_are_read_through_the_service_and_no_queue_is_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let served = dir.path().join("served").join("queue.db");
+        let other = dir.path().join("other").join("queue.db");
+        for db in [&served, &other] {
+            fs::create_dir_all(db.parent().unwrap()).unwrap();
+            fs::write(db, "not a queue").unwrap();
+        }
+        let users = HostMachineUsers {
+            dir: dir.path().join("machine"),
+            runs: Some(std::sync::Arc::new(ServedRuns {
+                db: served.clone(),
+                run: RelayRun::Missing,
+            })),
+        };
+        for (user, db) in [("r1", &served), ("r2", &other)] {
+            users
+                .join(
+                    user,
+                    &LeaseOwner::Run {
+                        db: db.clone(),
+                        run: user.into(),
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(users.count().unwrap(), 1);
+        let left: Vec<_> = fs::read_dir(users.users())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["r2"]);
+        assert!(users.owner_held(&LeaseOwner::Run {
+            db: other.clone(),
+            run: "r2".into(),
+        }));
+        assert!(!users.owner_held(&LeaseOwner::Run {
+            db: served,
+            run: "r1".into(),
+        }));
+    }
+
     #[test]
     fn a_run_whose_queue_cannot_be_looked_at_stays_counted() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let users = HostMachineUsers {
             dir: dir.path().join("machine"),
+            runs: None,
         };
         let shut = dir.path().join("shut");
         fs::create_dir(&shut).unwrap();
@@ -1399,7 +1498,7 @@ mod tests {
 /// (`CheckoutImages`), the run's relay towards the queue's broker
 /// (`PodmanRelays`), the run's build output volume and the queue's worker
 /// cache volumes ([`QueueVolumes`]).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QueueRunMachine {
     pub podman: PodmanCli,
     pub db: PathBuf,
@@ -1408,10 +1507,28 @@ pub struct QueueRunMachine {
     pub main_checkout: Option<PathBuf>,
     /// The host-wide `host.toml`: the machine's resources.
     pub host_wide: Option<PathBuf>,
-    /// Where the image's records go when the process opens no queue (a
-    /// command of the host's `dagq` the queue service runs): kept for it
-    /// to send; on the queue at `db` without.
-    pub kept_records: Option<std::sync::Arc<crate::application::container_image::KeptImageRecords>>,
+    /// Where the image's records go when the process opens no queue: kept
+    /// for it to send (a command of the host's `dagq` the queue service
+    /// runs), or sent to the queue service as they are made (a person's
+    /// `integrate` through the service); on the queue at `db` without.
+    pub kept_records:
+        Option<std::sync::Arc<dyn crate::application::container_image::ImageRecords + Send + Sync>>,
+    /// How the runs that own users of the machine are read when the
+    /// process opens no queue ([`HostMachineUsers::runs`]).
+    pub owner_runs: Option<std::sync::Arc<dyn OwnerRuns>>,
+}
+
+impl std::fmt::Debug for QueueRunMachine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueueRunMachine")
+            .field("podman", &self.podman)
+            .field("db", &self.db)
+            .field("main_checkout", &self.main_checkout)
+            .field("host_wide", &self.host_wide)
+            .field("kept_records", &self.kept_records.is_some())
+            .field("owner_runs", &self.owner_runs.is_some())
+            .finish()
+    }
 }
 
 impl crate::application::podman_machine::RunMachine for QueueRunMachine {
@@ -1447,12 +1564,13 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
             .context("the queue is bound to no checkout, whose dagq.toml decides the image")?;
         let queue_dir = super::queue_service::queue_dir_of(&self.db);
         let data_root = queue_dir.parent().unwrap_or(Path::new("."));
-        let machine = QueueMachine::new(
+        let mut machine = QueueMachine::new(
             self.podman.clone(),
             data_root,
             &queue_dir,
             self.host_wide.as_deref(),
         );
+        machine.users.runs.clone_from(&self.owner_runs);
         // Absolute: another process, whatever its cwd, reads the queue.
         let owner = LeaseOwner::Run {
             db: fs::canonicalize(&self.db).unwrap_or_else(|_| self.db.clone()),
@@ -1562,6 +1680,7 @@ impl QueueRunMachine {
         (
             HostMachineUsers {
                 dir: data_root.join(MACHINE_DIR_NAME),
+                runs: self.owner_runs.clone(),
             },
             PodmanCliWithin {
                 podman: self.podman.clone(),
@@ -1607,9 +1726,17 @@ impl HostMemoryRoom {
             podman: PodmanCli::default(),
             users: HostMachineUsers {
                 dir: data_root.join(MACHINE_DIR_NAME),
+                runs: None,
             },
             host_wide,
         }
+    }
+
+    /// This room with the runs that own users of the machine read through
+    /// `runs` when given ([`HostMachineUsers::runs`]).
+    pub fn with_owner_runs(mut self, runs: Option<std::sync::Arc<dyn OwnerRuns>>) -> Self {
+        self.users.runs = runs;
+        self
     }
 }
 

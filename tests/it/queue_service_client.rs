@@ -379,14 +379,19 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
         let output = client(&queue, &socket, Some(&worker), "worker", &args);
         assert_eq!(refused(&output), "authorization_denied", "{args:?}");
     }
-    for args in [
-        vec!["watch", "--timeout", "1"],
-        vec!["init"],
-        vec!["observe"],
-        vec!["integrate", task.as_str()],
-    ] {
+    for args in [vec!["watch", "--timeout", "1"], vec!["init"]] {
         let output = client(&queue, &socket, Some(&worker), "worker", &args);
         assert_eq!(refused(&output), "no_use_case", "{args:?}");
+    }
+    // The control side's commands a person or the inbox runs send their
+    // steps, which the service refuses a worker at the first.
+    for args in [
+        vec!["observe"],
+        vec!["integrate", task.as_str()],
+        vec!["review", task.as_str()],
+    ] {
+        let output = client(&queue, &socket, Some(&worker), "worker", &args);
+        assert_eq!(refused(&output), "authorization_denied", "{args:?}");
     }
     // The host's dialogue and exports are use cases, which the service
     // refuses a worker (ADR-t3102-2 decision 6 (4)).

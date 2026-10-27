@@ -950,7 +950,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         main: &CommitSha,
     ) -> Result<TaskRun> {
-        self.begin_integration_then(id, token, main, true, |_| Ok(()))
+        self.begin_integration_then(id, token, main, true, None, |_| Ok(()))
             .map(|(run, ())| run)
     }
 
@@ -962,7 +962,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         main: &CommitSha,
     ) -> Result<TaskRun> {
-        self.begin_integration_then(id, token, main, false, |_| Ok(()))
+        self.begin_integration_then(id, token, main, false, None, |_| Ok(()))
             .map(|(run, ())| run)
     }
 
@@ -1015,13 +1015,19 @@ impl SqliteQueue {
     /// while the slot's lease is held (ADR-t3102-3 decision 3, ADR-t3102-1
     /// decision 2), given the `integration_started` event the landing
     /// wrote. One that fails leaves the run, the slot and the lease as
-    /// they were. The run begun and what `then` gave.
+    /// they were. The lease and `integration_started` name the process
+    /// `holder` when given (the command of a person's `integrate` through
+    /// the queue service, which lands in its own process: a landing whose
+    /// command died is released as a dead supervisor's is), else the
+    /// holder of `token` ([`holder_pid`]). The run begun and what `then`
+    /// gave.
     pub fn begin_integration_then<T>(
         &mut self,
         id: &RunId,
         token: &LeaseToken,
         main: &CommitSha,
         refused_by_handoff: bool,
+        holder: Option<u32>,
         then: impl FnOnce(crate::domain::EventId) -> Result<T>,
     ) -> Result<(TaskRun, T)> {
         let tx = self
@@ -1070,12 +1076,16 @@ impl SqliteQueue {
         // A supervisor landing a run it resumed or reviewed already holds
         // its lease under the same token; any other lease means someone
         // owns the run.
+        let pid = match holder {
+            Some(pid) => pid,
+            None => holder_pid(&tx, token)?,
+        };
         ensure!(
             tx.execute(
                 "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)
                  ON CONFLICT(run_id) DO UPDATE SET pid=excluded.pid,heartbeat_at=excluded.heartbeat_at
                  WHERE run_leases.token=excluded.token",
-                params![id, token, holder_pid(&tx, token)?, self.generators.clock.now()],
+                params![id, token, pid, self.generators.clock.now()],
             )? == 1,
             "run is still leased"
         );
@@ -1083,7 +1093,7 @@ impl SqliteQueue {
             &tx,
             id,
             EventKind::IntegrationStarted,
-            json!({"main": main, "previous_status": previous, "pid": holder_pid(&tx, token)?}),
+            json!({"main": main, "previous_status": previous, "pid": pid}),
         )?;
         let started: i64 = tx.query_row(
             "SELECT max(id) FROM run_events WHERE run_id=?1 AND kind='integration_started'",
@@ -1603,6 +1613,18 @@ impl RunTransitions for SqliteQueue {
         session: Option<&Value>,
     ) -> Result<TaskRun> {
         SqliteQueue::abandon_run(self, id, token, message, reason, session)
+    }
+    fn approve_integration(
+        &mut self,
+        id: &RunId,
+        payload: serde_json::Value,
+        held: &dyn Fn(&crate::domain::RunLease) -> bool,
+    ) -> Result<bool> {
+        let queue: &SqliteQueue = self;
+        let check = payload.clone();
+        queue.record_runtime_event_if(id, EventKind::IntegrationApproved, payload, &mut || {
+            crate::application::integrate::approvable(queue, id, &check, held)
+        })
     }
     fn begin_integration(
         &mut self,

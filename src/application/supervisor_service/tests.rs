@@ -904,6 +904,79 @@ fn a_waiting_caller_sends_a_busy_record_again_and_keeps_it_past_its_limit() {
     assert_eq!(service.took.lock().unwrap().len(), 2);
 }
 
+/// A service that does not answer the first `down` calls, and keeps
+/// every call sent to it.
+#[derive(Default)]
+struct DownFirst {
+    down: std::sync::atomic::AtomicUsize,
+    sent: std::sync::Mutex<Vec<Value>>,
+}
+
+impl ServiceCaller for DownFirst {
+    fn call(&self, _: UseCase, params: Value) -> Result<Value> {
+        use std::sync::atomic::Ordering;
+        self.sent.lock().unwrap().push(params);
+        if self
+            .down
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(ServiceUnreachable::not_done("down").into());
+        }
+        Ok(Value::Null)
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+}
+
+/// A person's or the inbox's control-side command sends the record of a
+/// result it made (its observation's end) again past the limit a job
+/// command keeps one at, under the identity of its first sending, until
+/// the service takes it: a service down that long loses nothing of it.
+#[test]
+fn a_control_commands_record_is_sent_until_taken_past_a_job_commands_limit() {
+    let service = Arc::new(DownFirst::default());
+    service
+        .down
+        .store(1000, std::sync::atomic::Ordering::SeqCst);
+    let clock = Arc::new(Stepped::default());
+    let moved = clock.clone();
+    let generators = crate::application::Generators {
+        clock: clock.clone(),
+        ids: Arc::new(Counted::default()),
+    };
+    let caller =
+        control::resending(service.clone(), generators).pausing_with(Arc::new(move |pause| {
+            *moved.0.lock().unwrap() += pause;
+        }));
+    let finished =
+        serde_json::json!({"op": "record_queue_event", "args": ["observe_finished", {}]});
+    caller.call(UseCase::Supervisor, finished).unwrap();
+    assert!(
+        *clock.0.lock().unwrap() > 2 * resend::Waits::DEFAULT.limit,
+        "{:?}",
+        clock.0.lock().unwrap()
+    );
+    let sent = service.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1001);
+    assert!(sent[0]["record"].is_string(), "{:?}", sent[0]);
+    assert!(
+        sent.iter()
+            .all(|params| params["record"] == sent[0]["record"])
+    );
+}
+
 /// Two results alike are two records, each with its own identity, held
 /// and sent as two; a record whose answer was lost is sent again under the
 /// identity of its first sending, so the queue takes it once; and a

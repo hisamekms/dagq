@@ -773,6 +773,14 @@ impl RunTransitions for SupervisorQueue {
             ],
         )
     }
+    fn approve_integration(
+        &mut self,
+        id: &RunId,
+        payload: serde_json::Value,
+        _held: &dyn Fn(&crate::domain::RunLease) -> bool,
+    ) -> Result<bool> {
+        self.remote("approve_integration", vec![to_value(id)?, payload])
+    }
     fn begin_integration(
         &mut self,
         id: &RunId,

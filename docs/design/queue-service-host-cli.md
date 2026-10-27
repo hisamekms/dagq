@@ -24,9 +24,9 @@ related:
 
 ## 送る範囲
 
-- 宛ての環境が無い`dagq`のうちuser・inbox・plannerのもの（`host_client_role`）は、serviceが答えるコマンド（`client_request`）と`watch`の各回の見る（`watch_poll`）をそのsocketへ送り、DBを開かない。
+- 宛ての環境が無い`dagq`のうちuser・inbox・plannerのもの（`host_client_role`）は、serviceが答えるコマンド（`client_request`）と`watch`の各回の見る（`watch_poll`）と制御側のコマンドのstep（`control_call`、下の「制御側のコマンド」）をそのsocketへ送り、DBを開かない。
   serviceが一度も動いていないqueueも同じで、DBが無ければ送る前に`no queue at`で終わる（ADR-t3105-1決定3）。
-- 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、wrapperとhookの経路（決定6の(3)）、制御側のプロセス（`supervise`・`up`・`integrate`・`review`・`observe`など。(5)）と`migrate`・`doctor`（(6)）。
+- 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、wrapperとhookの経路（決定6の(3)）、制御側のプロセス（`supervise`・`up`・`down`・`install`・`inbox`・`service start`など。(5)）と`migrate`・`doctor`（(6)）。
   CLIの全ての葉は送るものかこの例外のどれかに当たり、どちらでもない葉は無い（unit testが全ての葉を数えて確かめる）。
   1つのコマンドの中で経路を混ぜない。
 - repositoryのqueueの束縛は、CLIが解決したrepositoryを要求に載せ（`ServiceRequest::binding`）、serviceが答える前に照らす。
@@ -78,6 +78,32 @@ Gitとprogramはserviceでなくクライアントがユースケースの外で
   checkoutのGitのcommon dirと、クライアントのdata homeがそのrepositoryに与えるqueueのdir（`move_to`の先）はクライアントが読んで送り、答えが挙げるrunのworktreeはクライアントがGitで直す。
   生きているsupervisorが居ると拒まれ、`down`はserviceも止めるので、`up`でなく`service start`でserviceだけを起こしてから打つ（手順はpluginの`dagq`の`reference/locate.md`）
 
+## 制御側のコマンド
+
+人とinboxがhostで打つ`integrate`・`review`・`observe`（`--history`と`--input`は読み取り）・`throughput-review`・`setup-review`は、自分のプロセスでGit・検証・agentを走らせ、queueの操作を1つずつそのコマンドのstepとして`control`のユースケースで送る（ADR-t3102-3決定3〜5）。
+hostの`dagq`（`--db`）もクライアントモード（socketとtoken）も同じ経路で、brokerを通る宛てからは送らない（`ControlCaller`）。
+stepの形はsupervisorの操作と同じ名前と引数（`ControlParams`）で、serviceの側は`application::supervisor_service::control`。
+
+- 認可: serviceは各stepで、そのコマンドのoperationをCLIと同じcapabilityでprincipalに通し、断りを記録する（`control::operation`）。
+  CLIと同じく、断られるprincipalは最初のstep（queueとactorを聞く`control_queue`）で断られ、何も始まらない
+- 範囲: 答えるのは`queue.read`の読み取りと、そのコマンドが自分で書く記録だけで、eventはコマンドごとの種類に限る（`control::scope`）。
+  runのeventは着地するtask（`--next`ではどのtaskでも）の着地を待つか着地中のrunだけで、`requested_by`は名乗れない。
+  eventのactorは呼び出し元のprincipalで、CLIがDBで書くのと同じ
+- 着地の承認: `integration_approved`は自分のstep（`approve_integration`）だけで書き、serviceはrunの状態が呼び出し元の読んだまま着地かsessionを待つこと、生きたleaseが持たないこと（serviceのプロセスと時計で見る）、承認がまだ無いことを、記録と同じwrite transactionで確かめる（ADR-t3102-3決定4）。
+  承認済みのrunには何も書かない
+- コンテナの検証: 着地の検証が読むrelayの注意と、作るimageの記録もstepで送り、eventは呼び出し元のもの。
+  dagq machineを共有する利用者のrunは、そのqueueのものをserviceで読み、届かない他のqueueのものは分からないものとして数えたまま残し、どのqueueのDBも開かない（`podman_machine::OwnerRuns`）
+- 観測の壁: `observe`のagentが認証切れか利用上限で止まったときのqueue_holdのask（observerのjobで、runなし）もstepで開くか加わり、`auth_required`・`usage_limited`は呼び出し元のeventになる（`control::own_hold`）
+- 着地: 呼び出し元は自分で作ったleaseでslotを取り、serviceはrunがコマンドの名指すtaskのものであること、そのleaseを持つrunとsupervisorが無いことを確かめ、slotと着地のintegratorのtoken（`integrator:<pid>`、pidはコマンドのプロセス）を同じtransactionで発行する（ADR-t3102-1決定2）。
+  着地の残りとleaseのheartbeatはそのtokenでintegratorとして送り、eventはintegratorのもので`requested_by`が呼び出し元。
+  tokenは着地が`integrating`を出たときに呼び出し元が失効させ、serviceは別のtaskのrun、続いている着地、supervisorの着地のものは失効させない
+- telemetry: agentと検証のsessionの登録、runを持たない対象のtokenの発行と失効（leaseなし）、対象の事実もstepで送る。
+  対象はコマンド自身のものだけ（着地するrun、呼び出し元が始めを記録した観測とスループットの見直し。`control::own_target`）
+  agentのjobのtokenは今どおり呼び出し元がfileで発行する
+- 結果の記録（eventと着地）は、serviceが取るまでこのプロセスが期限なく送り直し、同じ記録はidentityで1回だけ取る（`control::resending`）。
+  呼び出し元のprincipalで送れるのはこのプロセスだけなので、supervisorのjobのコマンドと違い、期限の後に記録を残して終わることはしない
+  記録でないstepが届かないときは新しいstepを始めず、DBを開かずに`unreachable`で終わる
+
 ## principal
 
 - userはtokenを持たない。
@@ -95,7 +121,7 @@ Gitとprogramはserviceでなくクライアントがユースケースの外で
 - supervisorが自分で起動するworker・session wrapper・jobのtokenは、supervisorがserviceのユースケース`issue_token`で発行させる（`ServiceTokens`）。
   serviceが発行するのはAI actorとsession wrapperのroleだけで、登録を対象に持つものは断る。
   workerとrunのsession wrapperのtokenはそのrunのもので、serviceはrunのleaseが要求したsupervisorの登録のものであることを発行と同じtransactionで確かめ、違えば発行しない（`under_lease`）。
-- 着地のintegratorのtokenは、serviceが`begin_landing`でintegrationのslotを取るのと同じtransactionで発行し、slotが確定しなければ消す。
+- 着地のintegratorのtokenは、serviceが`begin_landing`でintegrationのslotを取るのと同じtransactionで発行し、slotが確定しなければ消す（人とinboxの`integrate`は上の「制御側のコマンド」）。
 - supervisor自身のtokenは、supervisorが起動のときに自分の登録とpidのprincipalでfileに直接書き、handoffの後のimageは前のimageが残したtokenのfileと記録があればそれを使い、無ければ同じ経路で発行し直す（`SignedIn`）。
 - inboxとplannerのtokenは、制御側のprocess（`dagq inbox`とplannerのsession wrapper）がfileに直接書く。
   jobを起動するコマンド（`observe`など）が起動するjobのtokenと、runのsession wrapperがworkerのturnに渡すtokenのfileが無いときのものも、そのprocessが直接書く。

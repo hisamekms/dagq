@@ -671,6 +671,7 @@ impl QueueRead {
             | UseCase::AgentSet
             | UseCase::TelemetryReport
             | UseCase::Supervisor
+            | UseCase::Control
             | UseCase::SessionRun
             | UseCase::SessionRecord
             | UseCase::Add

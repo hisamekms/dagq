@@ -76,7 +76,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
 
 - 発行: 制御側だけが`queue_service::issue`で発行する。
   AI actorにtokenを作るコマンドは無い。
-  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）・登録を対象に持つsupervisor・session wrapper・inbox・planner・着地のrunとleaseのintegratorだけで、人の`integrate`は段(5)まで今のままDBを直接開く（`Principal::check`）。
+  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）・登録を対象に持つsupervisor・session wrapper・inbox・planner・着地のrunとleaseのintegratorだけ（`Principal::check`）。
   同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）。
   発行するのはactorの起動の1か所（applicationのport `ServiceAccess`）:
   - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するときに、serviceにrunのleaseを確かめさせて発行する。
@@ -132,6 +132,7 @@ paramsはそのコマンドのoption、答えはそのコマンドの出力（pa
 | 読み取り | そのコマンド | CLIと同じcapability。[読み取りのユースケース](#読み取りのユースケース) |
 | 計画の書き込みと`mark` | 同名のコマンド | CLIと同じ。[hostのCLI](queue-service-host-cli.md#計画のユースケース) |
 | 対話と操作 | `answer`・`report`など | CLIと同じ。[hostのCLI](queue-service-host-cli.md#対話と操作) |
+| `control` | 人とinboxの`integrate`・`observe`など | CLIと同じ。[hostのCLI](queue-service-host-cli.md#制御側のコマンド) |
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（capabilityは`finding.ask`）で送る。
 findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、eventの書き手は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。
@@ -153,7 +154,7 @@ paramsの形は`domain::telemetry::TelemetryReport`（1つのsessionの、1つ�
   溜まったstep（serviceが答えなかった後など）は何回かに分けて送る
 - 認可: `telemetry.report`を、paramsが名指す対象と、そのsessionを制御側が登録した対象（`Resource::Telemetry`）でprincipalに通す。
   持つのはexecutor-telemetryだけで、tokenの対象と違う対象（他のrun・他のplanner・他のjob）と、tokenの対象に登録されていないsession（未登録も）は`authorization_denied`（記録は他のユースケースと同じ）。
-  sessionの持ち主は制御側が`SessionOwners::register_session`でDBに直接登録し（時点は[計測](measurement.md#送る口)）、serviceのユースケースからは登録できないので、別の対象のtokenが他の対象のsessionを先に取れない
+  sessionの持ち主は制御側だけが登録し（supervisorと人とinboxの`control`は自身の対象を`register_telemetry_session`で。時点は[計測](measurement.md#送る口)）、`telemetry.report`のtokenは登録できず他の対象のsessionを取れない
   agentのtoken（worker・各job・observer・planner）では、自分のrunの対象でも、paramsを読む前に`authorization_denied`
 - 書き込み: 受けたstepとsampleを受けた時刻とともに書き（`SessionStepStore::record_steps`、`SessionResourceStore::record_resources`の順）、答えはそれぞれの足した数と既に持っていた数。
   間で失敗すればstepだけが残り、送り直しは同じstepを足さない。
@@ -212,8 +213,8 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
 - 宛ての種類（`ClientRoute`）: hostのworkerとjobはserviceのsocketへ、containerのrunはqueueのbroker（containerの中の転送、[Container runtime](container-runtime.md#brokerへの経路)）へ[Queue broker](queue-broker.md#入口)の要求の形で送る。
   envの意味は`domain::queue_service`の定数のdoc comment
 - 両方があれば設定の誤りとして全てのコマンドを断る
-- 宛ての環境が無いhostの`user`・`inbox`・`planner`の`dagq`も、serviceの答えるコマンドは解決したqueueのserviceへ送り（ADR-t3102-2決定5・6(2)、ADR-t3105-1決定3）、届かなければDBを開くことに戻らない。
-  DBを自分で開くのはserviceを通らない残りのコマンドだけで、`check_access`の後に開く（分岐の順は[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）
+- 宛ての環境が無いhostの`user`・`inbox`・`planner`の`dagq`が送るものは[hostのCLI](queue-service-host-cli.md#送る範囲)で、届かなければDBを開くことに戻らない。
+  DBを自分で開くのは送らない残りのコマンドだけで、`check_access`の後に開く（分岐の順は[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）
 - コマンドを引数のとおりに読んで（clapの検査はそのまま）、ユースケースとparamsに写す（`client_request`）。
 - tokenはcredentialのfileから読み、要求ごとに送る。
   答えの`result`をCLIと同じに出す
@@ -295,7 +296,7 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 - containerの中からbrokerを通す`telemetry_report`（[Queue broker](queue-broker.md)の`TokenRefusal`）。
   containerのrunのstepはhostのwrapperが送る
 - 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、integrateのverificationの隔離
-- 段(5)の残り: hostのCLIが送らないもの（[送る範囲](queue-service-host-cli.md#送る範囲)。人の`integrate`も）とsupervisorに残るDBの記録のservice経由化、親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
+- 段(5)の残り: hostのCLIが送らないもの（[送る範囲](queue-service-host-cli.md#送る範囲)）とsupervisorに残るDBの記録のservice経由化、親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
 
 ## CIの見張り（ADR-t1920-1）
 

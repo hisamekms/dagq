@@ -1034,9 +1034,23 @@ pub fn observe_through(
     signals: Option<&dyn crate::application::AgentSignals>,
     options: &crate::application::observer::ObserveOptions,
 ) -> Result<Value> {
+    let tokens = job_tokens(queues.clone());
+    observe_with(db, queues, tokens, provider, signals, options)
+}
+
+/// [`observe_through`] with its agent's telemetry's tokens `tokens`: a
+/// supervisor's ([`job_tokens`]), or the caller's of a control-side command
+/// ([`super::ControlQueues`]).
+pub(super) fn observe_with(
+    db: &Path,
+    queues: SupervisorQueues,
+    tokens: ServiceTokens,
+    provider: &dyn AgentProvider,
+    signals: Option<&dyn crate::application::AgentSignals>,
+    options: &crate::application::observer::ObserveOptions,
+) -> Result<Value> {
     let generators = clock::system();
     let (mut queue, events) = (queues.queue(), queues.queue());
-    let tokens = job_tokens(queues);
     crate::application::observer::observe(
         &mut queue,
         db,
@@ -1072,9 +1086,21 @@ pub fn throughput_review_through(
     provider: &dyn AgentProvider,
     options: &crate::application::throughput_review::ReviewOptions,
 ) -> Result<Value> {
+    let tokens = job_tokens(queues.clone());
+    throughput_review_with(db, queues, tokens, provider, options)
+}
+
+/// [`throughput_review_through`] with its agent's telemetry's tokens
+/// `tokens` ([`observe_with`]).
+pub(super) fn throughput_review_with(
+    db: &Path,
+    queues: SupervisorQueues,
+    tokens: ServiceTokens,
+    provider: &dyn AgentProvider,
+    options: &crate::application::throughput_review::ReviewOptions,
+) -> Result<Value> {
     let generators = clock::system();
     let (mut queue, events) = (queues.queue(), queues.queue());
-    let tokens = job_tokens(queues);
     crate::application::throughput_review::review(
         &mut queue,
         db,
