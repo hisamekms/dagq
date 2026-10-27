@@ -157,6 +157,7 @@ mod runtime_headless;
 mod runtime_headless_jobs;
 mod runtime_headless_reopen;
 mod runtime_headless_stall;
+mod runtime_headless_turn_inputs;
 mod runtime_heartbeat;
 mod runtime_heavy_turns;
 mod runtime_host_metrics;

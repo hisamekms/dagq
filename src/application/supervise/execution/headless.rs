@@ -336,6 +336,21 @@ pub(super) fn between_turns(sv: &Supervisor<'_>, idle_marker: &Path, events: &[R
         .is_none_or(|started| mark.turn >= started)
 }
 
+/// Whether a turn the headless session of `run` was sent has not ended
+/// yet ([`turn::turn_awaited`]), whose idle marker is at `idle_marker`:
+/// read from its `turns/` and its events, so a supervisor that took the run
+/// over judges as the one that wrote the request.
+pub(super) fn turn_awaited(sv: &Supervisor<'_>, run: &TaskRun, idle_marker: &Path) -> Result<bool> {
+    let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+    let listed = listed_requests(&*sv.files, run_dir)?;
+    let events = sv.queue.run_events(run.id())?;
+    Ok(turn::turn_awaited(
+        &listed,
+        &events,
+        last_turn(&*sv.files, idle_marker).as_ref(),
+    ))
+}
+
 /// What the recovery job of a headless session reads instead of its
 /// screen: its last turns, as recorded.
 pub(super) fn turns_excerpt(sv: &Supervisor<'_>, run: &TaskRun) -> String {

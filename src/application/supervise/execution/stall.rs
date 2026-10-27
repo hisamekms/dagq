@@ -109,6 +109,9 @@ struct IdleSeen {
     /// A login hold (ADR-0047 decision 42), or an answered hold whose text
     /// to go on is not typed yet, holds the session.
     held: bool,
+    /// A turn the session was sent has not ended ([`turn_awaited`]): the
+    /// marker is the previous turn's, even one written after the request.
+    turn_awaited: bool,
 }
 
 /// What the watch does with an idle session ([`StallWatch::idle_step`]).
@@ -1231,15 +1234,20 @@ impl StallWatch {
                 .is_some_and(|receipt| sv.files.is_file(Path::new(receipt))),
             question_open: false,
             held: false,
+            turn_awaited: false,
         };
-        // The question and the hold are read only when they could stop the
-        // step: they only ever make it nothing.
+        // The question, the hold and the turn awaited are read only when
+        // they could stop the step: they only ever make it nothing.
         let mut step = self.idle_step(&seen, recovery.is_some());
         if step != IdleStep::Nothing {
             seen.question_open = sv.queue.has_unclosed_worker_question(run.id())?;
             if !seen.question_open {
                 seen.held =
                     sv.queue.hold_unclosed(run.id())? || sv.hold_continue.contains_key(run.id());
+            }
+            // Read last: the requests and the run's events cost the most.
+            if !seen.question_open && !seen.held {
+                seen.turn_awaited = turn_awaited(sv, run, idle_marker)?;
             }
             step = self.idle_step(&seen, recovery.is_some());
         }
@@ -1267,7 +1275,8 @@ impl StallWatch {
     /// `seen`, when no `stalled` ask is followed: nothing while the
     /// receipt is written, the session has not ended a turn since the last
     /// text it was sent or since a person stepped in, it waits on its
-    /// question or a hold holds it. Out of its slot (`in_slot` false)
+    /// question, a hold holds it or a turn it was sent has not ended (its
+    /// marker, however new, is the turn's before). Out of its slot (`in_slot` false)
     /// nothing is typed and no job starts: a stall before its nudge, or
     /// one for a recovery job, waits for the slot, and after a person's
     /// `wait` the ask follows the session's next turn. In its slot the
@@ -1277,6 +1286,7 @@ impl StallWatch {
             || !self.ended_after_inputs(seen.modified)
             || seen.question_open
             || seen.held
+            || seen.turn_awaited
         {
             return IdleStep::Nothing;
         }
@@ -2535,13 +2545,15 @@ mod tests {
             receipt_written: false,
             question_open: false,
             held: false,
+            turn_awaited: false,
         }
     }
 
     /// Task 1558, moved from `runtime_stall::a_worker_idle_at_its_question_is_not_nudged`:
     /// a session idle at its own question, with its receipt written, held
-    /// by a hold, or not idle since the last text it was sent (a marker
-    /// of the same millisecond) is left alone; in its slot its turn is
+    /// by a hold, awaiting a turn it was sent (task 1015), or not idle
+    /// since the last text it was sent (a marker of the same millisecond)
+    /// is left alone; in its slot its turn is
     /// judged.
     #[test]
     fn an_idle_session_is_judged_only_past_its_inputs_question_receipt_and_hold() {
@@ -2558,6 +2570,10 @@ mod tests {
                 ..idle
             },
             IdleSeen { held: true, ..idle },
+            IdleSeen {
+                turn_awaited: true,
+                ..idle
+            },
         ] {
             assert_eq!(watch.idle_step(&waiting, true), IdleStep::Nothing);
             assert_eq!(watch.idle_step(&waiting, false), IdleStep::Nothing);

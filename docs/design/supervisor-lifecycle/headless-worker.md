@@ -178,7 +178,7 @@ run dirのI/Oの約束と落とし穴（`agent_dir`のmodule docと`agent_dir::i
 
 ## receiptとsessionの終わり
 
-- idle markerは最後の入力より新しいときだけturnの終わりを示し（`screen_idle::last_input`）、画面からの推定（[ADR-t803-1](../../adr/2026-09-27-t803-1-infer-idle-from-the-screen-when-the-idle-marker-is-missing-or-stale.md)、superseded）の記録は読めるまま新しくは書かれない。
+- idle markerは最後の入力より新しいときだけturnの終わりを示し（stallは依頼のturnも待つ）、画面からの推定（[ADR-t803-1](../../adr/2026-09-27-t803-1-infer-idle-from-the-screen-when-the-idle-marker-is-missing-or-stale.md)、superseded）の記録は読めるまま新しくは書かれない。
 - verdictが終了を求めるときは、終了の依頼を記録してから`turns/exit`に書く（`ExitWatch::poll`）。
   終わった後はwrapperの残りをhandleで止める（`stop_run_session`、[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定3）。
   backgroundより前にworkspaceで開いたsessionのIDは閉じず、人に任せる。

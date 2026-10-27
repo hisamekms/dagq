@@ -488,6 +488,44 @@ pub fn answers_not_started(listed: &[ListedRequest], started: &[u64]) -> Vec<(u6
     answers
 }
 
+/// Whether a turn the headless session was sent has not ended yet, from
+/// the requests `listed` in its `turns/`, the run's `events` and the turn
+/// its idle marker names (`mark`): a request waits, or was taken and no
+/// turn started from it or from a later one, or a turn started after the
+/// one the marker names. Until that turn ends, the marker is the previous
+/// turn's and no idle of the session, however it compares in time with
+/// what was sent: a request written while a turn ran is older than that
+/// turn's marker. The wrapper takes requests in order, so a taken one
+/// numbered below a started request's never runs; nor does one dropped
+/// with an earlier session.
+pub fn turn_awaited(
+    listed: &[ListedRequest],
+    events: &[RunEvent],
+    mark: Option<&TurnMark>,
+) -> bool {
+    let started = || {
+        events
+            .iter()
+            .filter(|event| event.kind == EventKind::TurnStarted)
+    };
+    let last_turn = started()
+        .filter_map(|event| event.payload["turn"].as_u64())
+        .max();
+    if mark
+        .zip(last_turn)
+        .is_some_and(|(mark, last)| mark.turn < last)
+    {
+        return true;
+    }
+    let last_request = started()
+        .filter_map(|event| event.payload["request"].as_u64())
+        .max();
+    listed
+        .iter()
+        .filter(|listed| listed.state != RequestState::Dropped)
+        .any(|listed| last_request.is_none_or(|started| listed.request.seq > started))
+}
+
 /// A request found in a session's `turns/`, with its state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedRequest {
@@ -1225,6 +1263,89 @@ mod tests {
             [(3, 8, "prompt 3".to_owned()), (5, 9, "prompt 5".to_owned())]
         );
         assert!(answers_not_started(&requests, &[2, 3, 5]).is_empty());
+    }
+
+    /// Whatever the supervisor sent (an answer, the hold's `continue`, a
+    /// nudge, a closed question's notice, a `stalled` ask's instruction, a
+    /// recovery job's instruction, a provider's retry or switch), the
+    /// session's marker is no idle from the request until a turn taken
+    /// from it, or a later one, ends.
+    #[test]
+    fn a_requested_turn_is_awaited_from_its_request_until_it_ends() {
+        let started = |turn: u64, request: Option<u64>| RunEvent {
+            id: crate::domain::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: TURN_STARTED.into(),
+            payload: json!({"turn": turn, "request": request}),
+            created_at: String::new(),
+            actor: None,
+        };
+        let mark = |turn: u64| TurnMark {
+            turn,
+            outcome: TurnOutcome::Succeeded,
+            failure: None,
+            permission_denials: 0,
+        };
+        let listed = |seq: u64, state: RequestState, what: &str| ListedRequest {
+            state,
+            request: TurnRequest {
+                seq,
+                what: what.to_owned(),
+                prompt: format!("prompt {seq}"),
+            },
+        };
+        for what in [
+            answer_what(7).as_str(),
+            "continue",
+            "nudge",
+            "notice of a closed question",
+            "answer of the stalled ask 9",
+            "recovery instruction",
+            PROVIDER_RETRY,
+            "provider switch",
+            "stale receipt nudge",
+        ] {
+            // Turn 1 (the task's prompt) ended; request 1 was written, as
+            // it ran or after.
+            let first = [started(1, None)];
+            let waiting = [listed(1, RequestState::Pending, what)];
+            assert!(turn_awaited(&waiting, &first, Some(&mark(1))), "{what}");
+            // Taken, its turn not yet started.
+            let taken = [listed(1, RequestState::Taken, what)];
+            assert!(turn_awaited(&taken, &first, Some(&mark(1))), "{what}");
+            // Its turn runs: the marker is still turn 1's.
+            let running = [started(1, None), started(2, Some(1))];
+            assert!(turn_awaited(&taken, &running, Some(&mark(1))), "{what}");
+            // Its turn ended.
+            assert!(!turn_awaited(&taken, &running, Some(&mark(2))), "{what}");
+            // A request behind it waits for its own turn.
+            let behind = [
+                listed(1, RequestState::Taken, what),
+                listed(2, RequestState::Pending, what),
+            ];
+            assert!(turn_awaited(&behind, &running, Some(&mark(2))), "{what}");
+        }
+        // Nothing requested: the marker of the last turn is its idle.
+        assert!(!turn_awaited(&[], &[started(1, None)], Some(&mark(1))));
+        // Dropped with an earlier session, or taken below a request whose
+        // turn started (it never runs): not awaited.
+        let stale = [
+            listed(1, RequestState::Dropped, "nudge"),
+            listed(2, RequestState::Taken, "nudge"),
+            listed(3, RequestState::Taken, "continue"),
+        ];
+        let later = [started(1, None), started(2, Some(3))];
+        assert!(!turn_awaited(&stale, &later, Some(&mark(2))));
+        // A marker no headless turn wrote names no turn: only the requests
+        // count.
+        assert!(!turn_awaited(&stale, &later, None));
+        assert!(turn_awaited(
+            &[listed(4, RequestState::Pending, "nudge")],
+            &later,
+            None
+        ));
     }
 
     #[test]

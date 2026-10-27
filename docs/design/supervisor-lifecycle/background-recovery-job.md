@@ -140,6 +140,9 @@ turnの後の扱いの詳細は[非対話のworker](headless-worker.md#turnの�
   resumeは解消依頼のturnの後にreceiptを、reviseは差し戻しのturnの後に書き直しを判定する。
 - turnの終わりが決まるので閾値を待たずに促し、促しの上限を使い切ったら`stalled`の復旧jobにする。
   権限拒否が上限に達したら促さずに復旧jobにする。
+- supervisorが次のturnの依頼を書いてから、そのturnが終わるまでは、idle markerは前のturnのもので、今のidleと数えない（`turn::turn_awaited`）。
+  何を送ったか（答え・控えの`continue`・促し・`stalled`のaskへの指示・復旧jobの指示など）によらず、促し・`stalled`のask・復旧jobに進まない。
+  落とし穴: turnの最中に書いた依頼は、そのturnが後で書くmarkerより古いので、時刻の比較だけでは待てない。
 - `stalled`のaskの選択肢は`intervene`の代わりに`stop`を持ち、questionは答える前にturnの記録を読むことを書く。
   答えごとの扱いは`stall.rs`の`AskStep`が持つ。
 - 答えずに閉じた質問（`closed_undelivered`）は、閉じたことを伝える文を次のturnとして1回だけ届ける。
@@ -211,6 +214,7 @@ turnの後の扱いの詳細は[非対話のworker](headless-worker.md#turnの�
 - adoptはstalledのreasonごとのwaitの再確認の時刻とturnの依頼の履歴を読み、同じ依頼を二重に届けない。
   検知の結末の判断もrun_eventsの記録から組み立て直す。
   waitはworkerの最初のsessionならrunの全eventから、引き継いだrevise・conflict・resumeの段ならその段の錨より後の`recovery_finished`だけから組み立て、前の段のwaitを持ち込まない。
+  依頼したturnの終わりの待ちは`turns/`とrun_eventsから判じるので、依頼とturnの終わりの間に引き継いでも同じに待つ。
 - `idle_process`のCPUの観測はメモリだけなので、最初の標本から数え直す。
 - 前のsupervisorが走らせていたjobは引き継がず、記録済みのpidと開始時刻でその子を片付けてから新しいjobを立てる。
   handoffもjobを止めてから引き継ぐ。

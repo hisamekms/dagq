@@ -1,0 +1,50 @@
+# The items of task 1015 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 9.4s: a wrapper process's three turns, its nudges and its landing in one supervise
+[[test]]
+name = "runtime_headless_turn_inputs::a_nudges_turn_is_awaited_and_the_next_nudge_follows_its_end"
+reason = "B 境界（守る境界）: 実の session wrapper が促しの依頼を turn として走らせているあいだ、supervise の StallWatch が前の turn の idle marker で二度目の促し・stalled の ask・復旧 job に進まず、その turn の終わりで次の促しに進むことを、wrapper のプロセスと SQLite の event と turns/ の配線で確かめる（判断は domain::turn と execution::stall の unit test）"
+task = 1015
+
+# 9.9s: a wrapper process, a hold ask answered during its turn and its landing in one supervise
+[[test]]
+name = "runtime_headless_turn_inputs::a_continue_written_during_a_turn_is_awaited_until_its_turn_ends"
+reason = "B 境界（守る境界）: 控えの ask の done で turn の最中に書いた continue の依頼が、その turn が後で書く idle marker より古くても、依頼の turn が終わるまで促されないことを、wrapper のプロセス・SQLite の控えの ask・supervise の配線で確かめる（判断は domain::turn の unit test）"
+task = 1015
+
+# 10.0s: the same on a Codex wrapper process
+[[test]]
+name = "runtime_headless_turn_inputs::a_continue_written_during_a_codex_turn_is_awaited_until_its_turn_ends"
+reason = "B 境界（守る境界）: 同じ待ちが Codex の非対話の wrapper のプロセスでも成り立つことを、provider ごとの turn の記録と idle marker の配線で確かめる（判断は domain::turn の unit test）"
+task = 1015
+
+# 7.3s: a wrapper process, a worker_question and its answer during another turn, and its landing
+[[test]]
+name = "runtime_headless_turn_inputs::an_answer_written_during_a_turn_is_sent_once_and_awaited_until_its_turn_ends"
+reason = "B 境界（守る境界）: 待ち（slot の外）から戻った run の答えが走っている turn の後の依頼として 1 回だけ書かれ、その答えの turn が終わるまで促されないことを、wrapper のプロセス・SQLite の ask と配送・supervise の配線で確かめる（判断は domain::turn の unit test）"
+task = 1015
+
+# 12.7s: two nudges, two recovery jobs, two stalled asks and the landing in one supervise
+[[test]]
+name = "runtime_headless_turn_inputs::a_stalled_asks_instruction_is_awaited_and_the_next_job_follows_its_end"
+reason = "B 境界（守る境界）: 復旧 job が上げた stalled の ask の指示の turn のあいだ、次の復旧 job も ask も起きず、その turn の終わりで次の復旧 job と ask に進むことを、復旧 job と SQLite の ask と wrapper のプロセスの配線で確かめる（判断は domain::turn と execution::stall の unit test）"
+task = 1015
+
+# 11.9s: two nudges, two recovery jobs whose instructions are turns, and the landing
+[[test]]
+name = "runtime_headless_turn_inputs::a_recovery_instruction_is_awaited_and_the_next_job_follows_its_end"
+reason = "B 境界（守る境界）: 復旧 job の send_instruction の turn のあいだ次の復旧 job も ask も起きず、その turn の終わりで次の復旧 job に進むことを、復旧 job と wrapper のプロセスの配線で確かめる（判断は domain::turn の unit test）"
+task = 1015
+
+# 8.5s: a wrapper under a dead supervisor, its adopter and the landing
+[[test]]
+name = "runtime_headless_turn_inputs::an_adopter_awaits_the_turn_of_a_continue_written_during_a_turn"
+reason = "B 境界（守る境界）: 死んだ supervisor が turn の最中に書いた continue の依頼を、引き継いだ supervisor が turns/ と SQLite の event から読み、依頼の turn が終わるまで促さないことを adopt の配線で確かめる（判断は domain::turn の unit test）"
+task = 1015
+
+# 7.2s: a wrapper under a dead supervisor, its answered question, its adopter and the landing
+[[test]]
+name = "runtime_headless_turn_inputs::an_adopter_awaits_the_turn_of_an_answer_written_during_a_turn"
+reason = "B 境界（守る境界）: 死んだ supervisor が turn の最中に配送した答えの依頼を、依頼の turn が走っている最中に引き継いだ supervisor が読み、その turn が終わるまで促さず、答えを二度書かないことを adopt の配線で確かめる（判断は domain::turn の unit test）"
+task = 1015
