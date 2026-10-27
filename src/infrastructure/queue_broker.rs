@@ -49,8 +49,8 @@ use super::queue_service::{
 use super::sqlite::SqliteQueue;
 use crate::application::queue_broker::ClaudeForward;
 use crate::application::queue_broker::{
-    BrokerAnswer, BrokerBackend, BrokerProbe, BrokerRequest, QueueBroker, QueueBrokerControl,
-    TokenFor, TokenIssue, TokenSweep, VerificationTokens,
+    BrokerAnswer, BrokerBackend, BrokerProbe, BrokerRequest, DenialRecords, QueueBroker,
+    QueueBrokerControl, TokenFor, TokenIssue, TokenSweep, VerificationTokens,
 };
 use crate::application::{EventStore, Generators, RunNotFound, RunReads};
 use crate::domain::queue_broker::{
@@ -1083,12 +1083,14 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
         )
         .map(drop)
     });
+    let denials = Arc::new(DenialRecords::new(options.generators.clock.clone()));
     let mut served = 0u64;
     let mut checked = Instant::now();
     let outcome = loop {
         if options.stop.load(Ordering::SeqCst) {
             break "stopped";
         }
+        denials.flush(&*backend);
         if checked.elapsed() >= QUEUE_CHECK {
             checked = Instant::now();
             if !options.db.is_file() {
@@ -1102,13 +1104,14 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
             Ok((stream, _)) => {
                 served += 1;
                 let backend = backend.clone();
+                let denials = denials.clone();
                 let build = options.build.clone();
                 let claude = ClaudeUpstream {
                     url: options.claude_api.clone(),
                     scratch: dir.clone(),
                 };
                 thread::spawn(move || {
-                    if let Err(error) = answer(stream, &*backend, &build, pid, &claude) {
+                    if let Err(error) = answer(stream, &*backend, &denials, &build, pid, &claude) {
                         warn!("a queue broker connection failed: {error:#}");
                     }
                 });
@@ -1121,6 +1124,7 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
             }
         }
     };
+    denials.flush(&*backend);
     if BrokerRecord::read(&queue_dir).is_some_and(|record| record.pid == pid) {
         let _ = fs::remove_file(dir.join(STATE_FILE));
     }
@@ -1133,6 +1137,7 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
 fn answer(
     stream: TcpStream,
     backend: &dyn BrokerBackend,
+    denials: &DenialRecords,
     build: &str,
     pid: u32,
     claude: &ClaudeUpstream,
@@ -1142,6 +1147,7 @@ fn answer(
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let broker = QueueBroker {
         backend,
+        denials,
         build,
         pid,
     };

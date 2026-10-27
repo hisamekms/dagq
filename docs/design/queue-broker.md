@@ -64,10 +64,20 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
 - principal: 通した要求はbodyのtokenの欄を検証したrun tokenで埋めてserviceのunix socketへ送るので、serviceはそのrunのprincipalで認可して書く。
   brokerはqueueのユースケースを自分で答えず、serviceに届かなければ`unreachable`で返し、DBを開いて代わりに答えない。
 - 素通し: serviceの答えは長さで切らず、書かれたとおりに返す。
-- 拒否を残すこと: 拒んだ要求は全てqueueのevent `queue_broker_denied`にrunと宛てを残す（欄は`domain::queue_broker::QUEUE_BROKER_DENIED`のdoc comment）。
+- 拒否を残すこと: 拒んだ要求はqueueのevent `queue_broker_denied`にrunと宛てを残す（欄は`domain::queue_broker::QUEUE_BROKER_DENIED`のdoc comment）。
   HTTPとして読めない要求も、読めたところまでのrunと宛てで残す（`infrastructure::queue_broker::read_request`）。
   何も送らずに閉じた接続は要求ではなく、残さない。
   actorはbroker自身（制御側の一部）で、tokenの値と、要求の中身を引くserdeの文言はevent・log・errorにも答えにも書かない。
+- 拒否の記録の量: runとhostはclientが決める値なので、記録の件数とbrokerのmemoryは`domain::queue_broker::DenialLimiter`で窓ごとに絞る（上限と窓はその隣の定数）。
+  run・宛て・code・reason・tokenのrunの同じ拒否は、窓ごとに上限の件数まで1件ずつ残し、超えた分はeventを書かずに数える。
+  reasonとtokenのrunも同じものだけを束ねるので、同じrunと宛ての安い拒否（tokenの無い要求など）を繰り返しても、別のreasonや別のrunのtokenを使った拒否の記録は埋まらない。
+  窓を持つ組の数には、tokenのrunの有るものと無いものの別に上限があり、有る側はtokenのrunごとにも上限がある。
+  上限の後の新しい組の拒否は組ごとに残さず、codeとtokenのrunごとの溢れとして数える。
+  tokenのrunは制御側が発行したtokenから引くので、tokenの無い要求でも、1つのtokenを持つcontainerでも、有る側を埋めきれない。
+  落とし穴: 無い側は作ったrunやhostで埋められ、埋まっている間の新しい組の拒否はcodeごとの件数だけになる（記録の量を抑える代わりの限界）。
+  数えた件数は、窓の終わりにbrokerが待ちの合間（と停止の前）に書く1件のevent（同じkind）か、組の窓の後の最初の記録のどちらか先の1件に残す。
+  答え（status・code・文言）は上限の外でも変わらず、絞るのは記録だけ。
+  落とし穴: brokerが窓の途中で止まるか、件数のeventを書けないと、その件数は残らない。
 - 1つのqueueに1つ: 生きている間lockを持ち、2つ目の`queue-broker serve`は止まる。
   見る側はlockとhealthのpathへの問い合わせで、生死とbuildを判定する（queue serviceと同じ形）。
 
@@ -128,4 +138,3 @@ queue serviceと同じ手順に乗せる（[Queue service](queue-service.md#起�
 
 - Claudeの資格情報のkeychainからの読み取り（今はファイルだけ）。
 - `status`・`doctor`でのbrokerの見せ方と、人の手での起動・停止のコマンド。
-- 拒否の記録の量の上限。

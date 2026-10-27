@@ -53,8 +53,9 @@
 //! - `GET` [`HEALTH_PATH`] answers the broker's build and pid without a
 //!   token: `up`, `down` and the supervisor look at the broker with it.
 //!
-//! Every refusal is the queue event [`QUEUE_BROKER_DENIED`] with the run
-//! and the destination; no token's value is in a record or an error.
+//! A refusal is the queue event [`QUEUE_BROKER_DENIED`] with the run and
+//! the destination, or, past the limits of [`DenialLimiter`], a count on
+//! a later one; no token's value is in a record or an error.
 //!
 //! The token of a verification is issued by the control side for each of
 //! `integrate`'s verifications and revoked at its end; its value is in
@@ -767,8 +768,192 @@ pub fn watch_step(
 /// read), `bad_body`, `malformed`, or the error of a service or a tunnel's
 /// host that did not answer or of a token that could not be read) and the
 /// `code`; and `token_run`, the token's run, when that is another.
+/// `suppressed` counts the refusals of the same [`DenialKey`] not recorded
+/// in a window that reached [`DENIALS_PER_WINDOW`] ([`DenialLimiter`]): on
+/// the key's next record, or, at the window's end, on an event of its own
+/// with only the key's fields and `suppressed`. An event with `overflow`
+/// true and only `code`, `token_run` (when the refusals had one) and
+/// `suppressed` counts the refusals of new keys not recorded once their
+/// pool held [`DENIAL_KEYS_PER_POOL`] keys, or their token's run
+/// [`DENIAL_KEYS_PER_TOKEN_RUN`].
 pub const QUEUE_BROKER_DENIED: &str =
     crate::domain::event_kind::EventKind::QueueBrokerDenied.as_str();
+
+/// How many refusals of one [`DenialKey`] the broker records in a
+/// [`DENIAL_WINDOW`]; the rest of the window's are counted, not recorded
+/// ([`DenialLimiter`]).
+pub const DENIALS_PER_WINDOW: u32 = 10;
+/// The window [`DENIALS_PER_WINDOW`] counts in, from the first refusal of
+/// its key.
+pub const DENIAL_WINDOW: Duration = Duration::from_secs(60);
+/// How many keys of each pool (with a `token_run`, without) hold a window
+/// at once: a refusal of a new key past it is counted in an overflow of
+/// its code (and token run), so values the client chooses (the run
+/// header, the host) bound neither the broker's memory nor the events of
+/// a window.
+pub const DENIAL_KEYS_PER_POOL: usize = 32;
+/// How many keys of one `token_run` hold a window at once, so the holder
+/// of one token cannot fill the pool of those with a token run alone.
+pub const DENIAL_KEYS_PER_TOKEN_RUN: usize = 4;
+
+/// The refusals a window counts together: those of one `run` (none when
+/// the request named none), one `destination` ([`Destination::name`]),
+/// one `code`, one `reason` and one `token_run`, so refusals of one kind
+/// never use up the records of another.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DenialKey {
+    pub run: Option<String>,
+    pub destination: String,
+    pub code: &'static str,
+    pub reason: String,
+    pub token_run: Option<String>,
+}
+
+impl DenialKey {
+    /// The pool of the key: a `token_run` is the run of a token the
+    /// control side issued, not a value the client makes up, so refusals
+    /// without one cannot fill the pool of those with one.
+    fn with_token_run(&self) -> bool {
+        self.token_run.is_some()
+    }
+}
+
+/// Whether a refusal is recorded ([`DenialLimiter::admit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenialStep {
+    /// Record it, with the `suppressed` refusals of the same key's last
+    /// window whose count no record carries yet (0 for none).
+    Record { suppressed: u64 },
+    /// The window's records, or the pool's keys, reached the limit: count
+    /// it only.
+    Suppress,
+}
+
+/// A count of refusals not recorded whose window ended
+/// ([`DenialLimiter::ended`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DenialCount {
+    /// Of one key past [`DENIALS_PER_WINDOW`].
+    Key(DenialKey, u64),
+    /// Of new keys of a `code` and a `token_run` past
+    /// [`DENIAL_KEYS_PER_POOL`] or [`DENIAL_KEYS_PER_TOKEN_RUN`].
+    Overflow {
+        code: &'static str,
+        token_run: Option<String>,
+        suppressed: u64,
+    },
+}
+
+/// The windows of the refusals the broker recorded, so a container that
+/// asks again and again for what is refused does not grow the queue's
+/// events without bound: a key records up to a limit in a window, and
+/// counts the rest; a pool, and a token run in it, holds up to a limit of
+/// keys, and counts the refusals of the others in an overflow of their
+/// code and token run (bounded: the codes are few, and a token run is of
+/// a token the control side issued). A count is recorded once, at
+/// its window's end ([`Self::ended`]) or, for a key, with its next
+/// record, whichever comes first. Time is a monotonic offset handed in as
+/// a value.
+#[derive(Debug, Default)]
+pub struct DenialLimiter {
+    windows: std::collections::HashMap<DenialKey, DenialWindow>,
+    /// The overflows, by code and token run.
+    overflow: std::collections::HashMap<(&'static str, Option<String>), DenialWindow>,
+}
+
+#[derive(Debug)]
+struct DenialWindow {
+    opened: Duration,
+    recorded: u32,
+    suppressed: u64,
+}
+
+impl DenialLimiter {
+    /// Whether the refusal of `key` at `now` is recorded, with at most
+    /// `limit` records of a key, `keys` keys of a pool and `per_token_run`
+    /// keys of a token run in a `window`.
+    pub fn admit(
+        &mut self,
+        key: DenialKey,
+        now: Duration,
+        limit: u32,
+        (keys, per_token_run): (usize, usize),
+        window: Duration,
+    ) -> DenialStep {
+        let open = DenialWindow {
+            opened: now,
+            recorded: 1,
+            suppressed: 0,
+        };
+        let Some(current) = self.windows.get_mut(&key) else {
+            let pool = key.with_token_run();
+            let held = self
+                .windows
+                .keys()
+                .filter(|held| held.with_token_run() == pool)
+                .count();
+            let of_token_run = || {
+                self.windows
+                    .keys()
+                    .filter(|held| held.token_run == key.token_run)
+                    .count()
+            };
+            if held >= keys || (pool && of_token_run() >= per_token_run) {
+                self.overflow
+                    .entry((key.code, key.token_run))
+                    .or_insert(DenialWindow {
+                        opened: now,
+                        recorded: 0,
+                        suppressed: 0,
+                    })
+                    .suppressed += 1;
+                return DenialStep::Suppress;
+            }
+            self.windows.insert(key, open);
+            return DenialStep::Record { suppressed: 0 };
+        };
+        if !in_window(now.saturating_sub(current.opened), window) {
+            let suppressed = current.suppressed;
+            *current = open;
+            return DenialStep::Record { suppressed };
+        }
+        if current.recorded < limit {
+            current.recorded += 1;
+            DenialStep::Record { suppressed: 0 }
+        } else {
+            current.suppressed += 1;
+            DenialStep::Suppress
+        }
+    }
+
+    /// Forget the windows that ended by `now`: the counts of their
+    /// refusals no record carries yet.
+    pub fn ended(&mut self, now: Duration, window: Duration) -> Vec<DenialCount> {
+        let mut counts = Vec::new();
+        self.windows.retain(|key, current| {
+            if in_window(now.saturating_sub(current.opened), window) {
+                return true;
+            }
+            if current.suppressed > 0 {
+                counts.push(DenialCount::Key(key.clone(), current.suppressed));
+            }
+            false
+        });
+        self.overflow.retain(|(code, token_run), open| {
+            if in_window(now.saturating_sub(open.opened), window) {
+                return true;
+            }
+            counts.push(DenialCount::Overflow {
+                code,
+                token_run: token_run.clone(),
+                suppressed: open.suppressed,
+            });
+            false
+        });
+        counts
+    }
+}
+
 /// The supervisor could not keep the broker running: the inbox's attention
 /// (`reason`: `start_failed` or `restart_limit`, `message`, and the
 /// `supervisor`'s token) until the broker runs again. Meanwhile the
@@ -1300,5 +1485,135 @@ mod tests {
             assert_eq!(problem.reason(), reason);
             assert!(!problem.message().is_empty());
         }
+    }
+
+    fn denial(run: &str, reason: &str, token_run: Option<&str>) -> DenialKey {
+        DenialKey {
+            run: Some(run.to_owned()),
+            destination: "queue_service".to_owned(),
+            code: "unauthenticated",
+            reason: reason.to_owned(),
+            token_run: token_run.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn denials_past_the_limit_are_counted_and_the_count_is_recorded_once() {
+        let key = |run: &str| denial(run, "missing_token", None);
+        let window = Duration::from_secs(60);
+        let second = Duration::from_secs(1);
+        let mut limiter = DenialLimiter::default();
+        let steps: Vec<_> = (0..5)
+            .map(|at| limiter.admit(key("r1"), at * second, 3, (8, 8), window))
+            .collect();
+        let record = DenialStep::Record { suppressed: 0 };
+        assert_eq!(
+            steps,
+            [
+                record,
+                record,
+                record,
+                DenialStep::Suppress,
+                DenialStep::Suppress
+            ]
+        );
+        // Another run's window is its own, and so is another reason's or
+        // another token run's under the same run and code.
+        assert_eq!(
+            limiter.admit(key("r2"), 5 * second, 3, (8, 8), window),
+            record
+        );
+        for other in [
+            denial("r1", "unknown_token", None),
+            denial("r1", "other_run", Some("r2")),
+        ] {
+            assert_eq!(limiter.admit(other, 5 * second, 3, (8, 8), window), record);
+        }
+        // The next record after the window's end carries the count, once.
+        assert_eq!(
+            limiter.admit(key("r1"), window, 3, (8, 8), window),
+            DenialStep::Record { suppressed: 2 }
+        );
+        assert_eq!(
+            limiter.admit(key("r1"), window + second, 3, (8, 8), window),
+            record
+        );
+        assert!(limiter.ended(window + second, window).is_empty());
+
+        // Or the window's end hands it over, and forgets the window.
+        let mut limiter = DenialLimiter::default();
+        for at in 0..4 {
+            limiter.admit(key("r1"), at * second, 3, (8, 8), window);
+        }
+        limiter.admit(key("r2"), Duration::ZERO, 3, (8, 8), window);
+        assert!(limiter.ended(window - second, window).is_empty());
+        assert_eq!(
+            limiter.ended(window, window),
+            [DenialCount::Key(key("r1"), 1)]
+        );
+        assert!(limiter.windows.is_empty());
+        assert_eq!(limiter.admit(key("r1"), window, 3, (8, 8), window), record);
+    }
+
+    #[test]
+    fn new_keys_past_a_full_pool_are_counted_in_its_overflow() {
+        let window = Duration::from_secs(60);
+        let mut limiter = DenialLimiter::default();
+        let record = DenialStep::Record { suppressed: 0 };
+        let caps = (3, 2);
+        // Made-up runs fill the pool without a token run...
+        for run in ["a", "b", "c"] {
+            let key = denial(run, "missing_token", None);
+            assert_eq!(limiter.admit(key, Duration::ZERO, 3, caps, window), record);
+        }
+        for run in ["d", "e", "f"] {
+            let key = denial(run, "missing_token", None);
+            assert_eq!(
+                limiter.admit(key, Duration::ZERO, 3, caps, window),
+                DenialStep::Suppress
+            );
+        }
+        // ...but not the pool of those with a token run; there one token's
+        // run fills only its own share, and leaves room to another's.
+        for run in ["x", "y"] {
+            let key = denial(run, "other_run", Some("r2"));
+            assert_eq!(limiter.admit(key, Duration::ZERO, 3, caps, window), record);
+        }
+        let past = denial("z", "other_run", Some("r2"));
+        assert_eq!(
+            limiter.admit(past, Duration::ZERO, 3, caps, window),
+            DenialStep::Suppress
+        );
+        let another = denial("x", "other_run", Some("r3"));
+        assert_eq!(
+            limiter.admit(another, Duration::ZERO, 3, caps, window),
+            record
+        );
+        // A held key records on.
+        let held = denial("a", "missing_token", None);
+        assert_eq!(limiter.admit(held, Duration::ZERO, 3, caps, window), record);
+        assert_eq!(limiter.windows.len(), 6);
+        let mut ended = limiter.ended(window, window);
+        ended.retain(|count| matches!(count, DenialCount::Overflow { .. }));
+        ended.sort_by_key(|count| format!("{count:?}"));
+        assert_eq!(
+            ended,
+            [
+                DenialCount::Overflow {
+                    code: "unauthenticated",
+                    token_run: None,
+                    suppressed: 3
+                },
+                DenialCount::Overflow {
+                    code: "unauthenticated",
+                    token_run: Some("r2".to_owned()),
+                    suppressed: 1
+                },
+            ]
+        );
+        assert!(limiter.ended(window, window).is_empty());
+        // The pool has room again.
+        let key = denial("d", "missing_token", None);
+        assert_eq!(limiter.admit(key, window, 3, caps, window), record);
     }
 }

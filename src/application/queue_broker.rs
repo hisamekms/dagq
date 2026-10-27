@@ -21,20 +21,22 @@
 //! [Queue broker]: ../../docs/design/queue-broker.md
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use tracing::warn;
 
+use super::ports::Clock;
 use crate::domain::RunId;
 use crate::domain::RunStatus;
 use crate::domain::container_runtime::{Availability, RuntimeTarget};
 use crate::domain::queue_broker::{
-    BEARER, ClaudeCredential, ClaudeCredentialProblem, Destination, Egress, Refusal, SERVICE_NAME,
-    TokenRefusal, basic_credentials, claude_headers, judge_run_token, judge_tunnel,
-    judge_verification_token,
+    BEARER, ClaudeCredential, ClaudeCredentialProblem, DENIAL_KEYS_PER_POOL,
+    DENIAL_KEYS_PER_TOKEN_RUN, DENIAL_WINDOW, DENIALS_PER_WINDOW, DenialCount, DenialKey,
+    DenialLimiter, DenialStep, Destination, Egress, Refusal, SERVICE_NAME, TokenRefusal,
+    basic_credentials, claude_headers, judge_run_token, judge_tunnel, judge_verification_token,
 };
 use crate::domain::queue_service::{
     Principal, ServiceErrorCode, ServiceRequest, ServiceResponse, ServiceState,
@@ -461,9 +463,91 @@ impl std::fmt::Debug for ClaudeForward {
     }
 }
 
+/// What the broker keeps of the refusals it recorded, across its
+/// connections: each refusal goes through [`DenialLimiter`] with
+/// [`DENIALS_PER_WINDOW`], [`DENIAL_KEYS_PER_POOL`],
+/// [`DENIAL_KEYS_PER_TOKEN_RUN`] and [`DENIAL_WINDOW`], timed on `clock`.
+pub struct DenialRecords {
+    clock: Arc<dyn Clock>,
+    origin: Instant,
+    limiter: Mutex<DenialLimiter>,
+}
+
+impl DenialRecords {
+    pub fn new(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            origin: clock.monotonic(),
+            clock,
+            limiter: Mutex::new(DenialLimiter::default()),
+        }
+    }
+
+    fn admit(&self, key: DenialKey) -> DenialStep {
+        let now = self.clock.since(self.origin);
+        self.limiter().admit(
+            key,
+            now,
+            DENIALS_PER_WINDOW,
+            (DENIAL_KEYS_PER_POOL, DENIAL_KEYS_PER_TOKEN_RUN),
+            DENIAL_WINDOW,
+        )
+    }
+
+    /// Record on `backend` the count of the refusals not recorded in each
+    /// window that has ended: the broker calls it as it waits for
+    /// connections.
+    pub fn flush(&self, backend: &dyn BrokerBackend) {
+        let now = self.clock.since(self.origin);
+        let ended = self.limiter().ended(now, DENIAL_WINDOW);
+        for count in ended {
+            let payload = match count {
+                DenialCount::Key(key, suppressed) => {
+                    let mut payload = json!({
+                        "run": key.run,
+                        "destination": key.destination,
+                        "code": key.code,
+                        "reason": key.reason,
+                        "suppressed": suppressed,
+                    });
+                    if let Some(token_run) = key.token_run {
+                        payload["token_run"] = json!(token_run);
+                    }
+                    payload
+                }
+                DenialCount::Overflow {
+                    code,
+                    token_run,
+                    suppressed,
+                } => {
+                    let mut payload = json!({
+                        "overflow": true,
+                        "code": code,
+                        "suppressed": suppressed,
+                    });
+                    if let Some(token_run) = token_run {
+                        payload["token_run"] = json!(token_run);
+                    }
+                    payload
+                }
+            };
+            if let Err(error) = backend.record_denied(payload) {
+                warn!("could not record the count of refusals not recorded: {error:#}");
+            }
+        }
+    }
+
+    fn limiter(&self) -> std::sync::MutexGuard<'_, DenialLimiter> {
+        self.limiter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// The broker's use cases on a backend.
 pub struct QueueBroker<'a> {
     pub backend: &'a dyn BrokerBackend,
+    /// The refusals recorded so far, shared by the broker's connections.
+    pub denials: &'a DenialRecords,
     /// The broker's build, which its health names.
     pub build: &'a str,
     /// The broker's process.
@@ -780,11 +864,23 @@ impl QueueBroker<'_> {
         if let Some(token_run) = &token_run {
             payload["token_run"] = json!(token_run);
         }
-        if let Err(error) = self.backend.record_denied(payload) {
-            warn!(
-                "could not record the refused request ({}): {error:#}",
-                refusal.reason
-            );
+        let key = DenialKey {
+            run: run.map(str::to_owned),
+            destination: destination.name().to_owned(),
+            code: refusal.code.as_str(),
+            reason: refusal.reason.clone(),
+            token_run: token_run.as_ref().map(ToString::to_string),
+        };
+        if let DenialStep::Record { suppressed } = self.denials.admit(key) {
+            if suppressed > 0 {
+                payload["suppressed"] = json!(suppressed);
+            }
+            if let Err(error) = self.backend.record_denied(payload) {
+                warn!(
+                    "could not record the refused request ({}): {error:#}",
+                    refusal.reason
+                );
+            }
         }
         let message = message.map_or_else(
             || match refusal.code {
@@ -995,6 +1091,22 @@ mod tests {
         }
     }
 
+    /// A clock whose monotonic time moves only when a test moves it.
+    struct Stepped(Mutex<Instant>);
+
+    impl Clock for Stepped {
+        fn system_time(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH
+        }
+        fn monotonic(&self) -> Instant {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    fn denials() -> DenialRecords {
+        DenialRecords::new(Arc::new(Stepped(Mutex::new(Instant::now()))))
+    }
+
     fn body() -> Vec<u8> {
         serde_json::to_vec(&json!({
             "api_version": API_VERSION,
@@ -1020,6 +1132,7 @@ mod tests {
     fn handle(backend: &Backend, request: &BrokerRequest) -> (u16, Value) {
         let answer = QueueBroker {
             backend,
+            denials: &denials(),
             build: "b1",
             pid: 7,
         }
@@ -1091,6 +1204,7 @@ mod tests {
             let backend = with_credential(Some(RunStatus::Running), kind);
             let answer = QueueBroker {
                 backend: &backend,
+                denials: &denials(),
                 build: "b1",
                 pid: 7,
             }
@@ -1166,6 +1280,7 @@ mod tests {
         ] {
             let answer = QueueBroker {
                 backend: &backend,
+                denials: &denials(),
                 build: "b1",
                 pid: 7,
             }
@@ -1193,6 +1308,7 @@ mod tests {
         let backend = with_credential(Some(RunStatus::Running), SetupToken);
         let broker = QueueBroker {
             backend: &backend,
+            denials: &denials(),
             build: "b1",
             pid: 7,
         };
@@ -1204,6 +1320,110 @@ mod tests {
         let denied = backend.denied.lock().unwrap();
         assert_eq!(denied[0]["code"], "unreachable");
         assert_eq!(denied[0]["destination"], "api.anthropic.com");
+    }
+
+    #[test]
+    fn refusals_past_the_limit_are_answered_but_only_counted() {
+        let backend = Backend::new(Some(RunStatus::Running));
+        let start = Instant::now();
+        let clock = Arc::new(Stepped(Mutex::new(start)));
+        let denials = DenialRecords::new(clock.clone());
+        let broker = QueueBroker {
+            backend: &backend,
+            denials: &denials,
+            build: "b1",
+            pid: 7,
+        };
+        let outside = |run: &str| BrokerRequest {
+            method: "GET".into(),
+            target: "http://example.com/".into(),
+            host: Some("example.com".into()),
+            run: Some(run.into()),
+            ..BrokerRequest::default()
+        };
+        let limit = DENIALS_PER_WINDOW as usize;
+        let first = broker.handle(&outside("r1"));
+        assert_eq!(first.status, 403);
+        let body: Value = serde_json::from_slice(&first.body).unwrap();
+        assert_eq!(body["error"]["code"], "forbidden_destination", "{body}");
+        for _ in 1..limit + 3 {
+            assert_eq!(broker.handle(&outside("r1")), first);
+        }
+        // Another run's refusals are not held back by r1's.
+        broker.handle(&outside("r2"));
+        {
+            let denied = backend.denied.lock().unwrap();
+            assert_eq!(denied.len(), limit + 1);
+            assert!(denied.iter().all(|event| event.get("suppressed").is_none()));
+            assert_eq!(denied[limit - 1]["run"], "r1");
+            assert_eq!(denied[limit - 1]["destination"], "example.com");
+        }
+        // Inside the window nothing is flushed; at its end the count is.
+        denials.flush(&backend);
+        assert_eq!(backend.denied.lock().unwrap().len(), limit + 1);
+        *clock.0.lock().unwrap() = start + DENIAL_WINDOW;
+        denials.flush(&backend);
+        denials.flush(&backend);
+        {
+            let denied = backend.denied.lock().unwrap();
+            assert_eq!(denied.len(), limit + 2);
+            assert_eq!(
+                denied[limit + 1],
+                json!({
+                    "run": "r1",
+                    "destination": "example.com",
+                    "code": "forbidden_destination",
+                    "reason": "not_allowed",
+                    "suppressed": 3,
+                })
+            );
+        }
+        // A new window records again, the count already recorded.
+        broker.handle(&outside("r1"));
+        let denied = backend.denied.lock().unwrap();
+        assert_eq!(denied.len(), limit + 3);
+        assert!(denied[limit + 2].get("suppressed").is_none());
+        assert_eq!(denied[limit + 2]["reason"], "not_allowed");
+    }
+
+    #[test]
+    fn the_count_rides_on_the_next_record_when_no_flush_came() {
+        let backend = Backend::new(Some(RunStatus::Running));
+        let start = Instant::now();
+        let clock = Arc::new(Stepped(Mutex::new(start)));
+        let denials = DenialRecords::new(clock.clone());
+        let broker = QueueBroker {
+            backend: &backend,
+            denials: &denials,
+            build: "b1",
+            pid: 7,
+        };
+        let limit = DENIALS_PER_WINDOW as usize;
+        for _ in 0..=limit {
+            broker.handle(&queue_request(None, Some("r1")));
+        }
+        // Cheap refusals do not use up the records of another reason or of
+        // another run's token under the same run and code.
+        for _ in 0..limit {
+            broker.handle(&queue_request(None, Some("r2")));
+        }
+        broker.handle(&queue_request(Some("nope"), Some("r1")));
+        broker.handle(&queue_request(Some("good"), Some("r2")));
+        {
+            let denied = backend.denied.lock().unwrap();
+            assert_eq!(denied.len(), 2 * limit + 2);
+            assert_eq!(denied[2 * limit]["reason"], "unknown_token");
+            assert_eq!(denied[2 * limit + 1]["token_run"], "r1");
+            assert_eq!(denied[2 * limit + 1]["run"], "r2");
+        }
+        *clock.0.lock().unwrap() = start + DENIAL_WINDOW;
+        broker.handle(&queue_request(None, Some("r1")));
+        let denied = backend.denied.lock().unwrap();
+        assert_eq!(denied.len(), 2 * limit + 3);
+        let last = denied.last().unwrap();
+        assert_eq!(last["suppressed"], 1);
+        assert_eq!(last["reason"], "missing_token");
+        assert_eq!(last["run"], "r1");
     }
 
     #[test]
@@ -1330,6 +1550,7 @@ mod tests {
         };
         let broker = QueueBroker {
             backend: &backend,
+            denials: &denials(),
             build: "b1",
             pid: 7,
         };
@@ -1421,6 +1642,7 @@ mod tests {
         for token in [BASIC_GOOD, BASIC_VERIFY] {
             let answer = QueueBroker {
                 backend: &ended,
+                denials: &denials(),
                 build: "b1",
                 pid: 7,
             }
@@ -1852,6 +2074,7 @@ mod tests {
         assert_eq!((status, &body["error"]["code"]), (500, &json!("failed")));
         let broker = QueueBroker {
             backend: &backend,
+            denials: &denials(),
             build: "b1",
             pid: 7,
         };
