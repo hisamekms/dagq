@@ -187,7 +187,6 @@ draftに再検討の時刻を1つ持たせ、時刻が来たらruntimeのplanner
 壁で失敗したturnだけでは読み終えたとせず、wrapperが次に取る`provider retry`のturn（そのanswerを載せる）が壁で失敗せずに終わるまで追う。
 依頼の記録が無いanswerは、claimしたものはclaimの秒より後の、初期promptで運んだものは開いた時刻より古くないidle markerで読み終えたとする（`answer_taken`）。
 また、最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わってClaudeを待つplanner（`busy`の`provider_wall`）は終わらせず、控えが解けて続きの`provider retry`のturnが終わるまでanswerを置かない（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。
-残りの予定は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
 
 - **draftの行き先**: 4の`draft_planner_exhausted`のattentionと5の`keep_draft`で残したdraftの行き先は、inboxの参照付きの依頼か人の自分のterminalとする（4と5）。
   再検討の時刻を付けたdraftは、これと並んでその時刻にruntimeのplannerの対象に戻る（[再検討の時刻](#再検討の時刻)）。

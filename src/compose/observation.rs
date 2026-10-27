@@ -1542,6 +1542,26 @@ fn push_target(db: &Path, binding: Option<&Path>) -> crate::application::push::P
     }
 }
 
+/// `status`'s `requests` ([`health::requests`]): the `open` planning requests with the planner
+/// of the runtime's open for each and its asks, and which of them wait for a planner to open.
+fn open_requests(queue: &SqliteQueue) -> Result<Value> {
+    let waiting: Vec<_> = queue
+        .planner_requests()?
+        .into_iter()
+        .map(|request| request.id)
+        .collect();
+    let open = queue
+        .plan_requests(false)?
+        .into_iter()
+        .map(|request| {
+            let planner = queue.request_planner(request.id)?;
+            let asks = queue.request_asks(request.id)?;
+            Ok((request, planner, asks))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(health::requests(&open, &waiting))
+}
+
 impl OneShot {
     /// `status --role`: see [`health::status`], measured to these
     /// generators' now.
@@ -1628,6 +1648,7 @@ impl OneShot {
             status["inbox_guardrail"] = inbox_guardrail(queue)?;
             status["inbox_watcher"] = self.inbox_watcher(db);
             status["queue_service"] = queue_service_view(db, Some(queue));
+            status["requests"] = open_requests(queue)?;
         }
         Ok(status)
     }

@@ -1384,7 +1384,7 @@ enum Command {
         /// Task whose run awaits integration or comes back from a session.
         id: i64,
     },
-    /// List supervisors, unfinished runs, what waits for a person (attention), the open asks, the held tasks and the event cursor, without changing anything.
+    /// List supervisors, unfinished runs, what waits for a person (attention), the open asks, the held tasks, the open planning requests (not for a planner) and the event cursor, without changing anything.
     /// The cursor is read before the state, so `watch --after <cursor>` misses no change after it
     /// (it may repeat one).
     Status {

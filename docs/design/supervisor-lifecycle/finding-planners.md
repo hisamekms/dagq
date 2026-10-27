@@ -112,7 +112,6 @@ findingのplannerも、[Draft planners](draft-planners.md#推奨が出せればp
 人が開くplannerは無く、`dagq plan`は何も開かずにinboxへの計画の依頼の案内を付けて拒む（ADR-t1394-1）。
 人が開いたplannerの閉じていない行は、supervisorが閉じた行として扱い（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5。[`plan` / `planners`](plan-planners.md)の「人のplannerの終わり」）、その持ち主のdraftへのanswerは新しいruntimeのplannerが受ける。
 非対話の経路（ADR-t1394-2の決定1・2・3・5）では、answerは次のturnの依頼として届き、読み終えたかとClaudeを待つplannerの扱いは[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「状態」と「使えないとき」が持つ。
-残りの予定は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
 
 - 9の「runtimeのplannerが一度も立っていないfindingのanswerは人」は、人が開いたplannerの質問だけに当たる。
   findingを決める経路は、inboxがそのfindingを参照にした計画の依頼を記録し、依頼のplannerが`submit --finding`か`finding dismiss`で決めるものになる。

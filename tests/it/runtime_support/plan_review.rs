@@ -427,6 +427,21 @@ pub(crate) fn supervise_owned(
     backend: &PlanWorkspace,
     reviewer: &StubReviewer,
 ) -> Value {
+    supervise_owned_with(
+        fx,
+        backend,
+        reviewer,
+        &options(1, Duration::from_secs(3600)),
+    )
+}
+
+/// [`supervise_owned`] with `options`.
+pub(crate) fn supervise_owned_with(
+    fx: &Fixture,
+    backend: &PlanWorkspace,
+    reviewer: &StubReviewer,
+    options: &SuperviseOptions,
+) -> Value {
     let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
     runtime::supervise_with_reviewer(
         &fx.db,
@@ -435,7 +450,7 @@ pub(crate) fn supervise_owned(
         &fx.claude,
         reviewer,
         &common::service::owned_executable(fx.db.parent().unwrap()),
-        &options(1, Duration::from_secs(3600)),
+        options,
     )
     .unwrap()
 }

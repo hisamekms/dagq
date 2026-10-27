@@ -642,8 +642,9 @@ pub struct StatusSections {
     /// and a planner carry (ADR-t616-2).
     pub language: bool,
     /// What the inbox watches: `inbox_guardrail` (ADR-t1228-2 decision 4),
-    /// `inbox_watcher` (ADR-t906-1) and `queue_service` (ADR-t1233-4); a
-    /// planner's `status` has none of them.
+    /// `inbox_watcher` (ADR-t906-1), `queue_service` (ADR-t1233-4) and
+    /// the open planning requests ([`requests`]); a planner's `status` has
+    /// none of them: it is not who tells a person a request waits.
     pub inbox: bool,
 }
 
@@ -742,6 +743,67 @@ pub fn held_tasks(
         })
         .collect::<Vec<_>>();
     (Value::Array(listed), attention)
+}
+
+/// How many characters of a request's words `status`'s `requests` shows.
+const REQUEST_TEXT_CHARS: usize = 120;
+
+/// `status`'s `requests` for the inbox (ADR-t1394-1): each `open` planning
+/// request, oldest first, as `open` gives them with the planner of the
+/// runtime's open for it and the asks about it, so a person sees the ones
+/// no planner has taken, such as while the supervisor runs `--no-claude`.
+/// Its words are cut, not summarized, to [`REQUEST_TEXT_CHARS`]
+/// characters. `planner_questions` are the unanswered `planner_question`s
+/// about it. `waiting_for` is why it is still open: `planner` while an
+/// open planner of the runtime's works on it, `answer` while one of
+/// `planner_questions` waits for a person, `planner_start` while it is one
+/// the supervisor opens a planner for (`waiting` holds it: no slot, or
+/// planners do not start), and `held` otherwise: it waits for an answered
+/// question to be carried to a planner, for the answer to a question about
+/// a draft its planner left, for another planner (one replanning the same
+/// goal or holding a draft it names) or for its replanning operation's
+/// snapshot, as `waiting`'s rule tells.
+pub fn requests(
+    open: &[(
+        crate::domain::plan_request::PlanRequest,
+        Option<crate::domain::PlannerId>,
+        Vec<crate::domain::Ask>,
+    )],
+    waiting: &[crate::domain::RequestId],
+) -> Value {
+    open.iter()
+        .map(|(request, planner, asks)| {
+            let questions: Vec<AskId> = asks
+                .iter()
+                .filter(|ask| {
+                    ask.kind == AskKind::PlannerQuestion
+                        && ask.closed_at.is_none()
+                        && ask.answered_at.is_none()
+                })
+                .map(|ask| ask.id)
+                .collect();
+            let waiting_for = if planner.is_some() {
+                "planner"
+            } else if !questions.is_empty() {
+                "answer"
+            } else if waiting.contains(&request.id) {
+                "planner_start"
+            } else {
+                "held"
+            };
+            json!({
+                "id": request.id,
+                "text": truncate(&request.text, REQUEST_TEXT_CHARS)
+                    .unwrap_or_else(|| request.text.clone()),
+                "priority": request.priority,
+                "requested_by": request.requested_by,
+                "created_at": request.created_at,
+                "planner_id": planner,
+                "planner_questions": questions,
+                "waiting_for": waiting_for,
+            })
+        })
+        .collect()
 }
 
 /// `status`'s and `doctor`'s `replans`: the open replanning operations

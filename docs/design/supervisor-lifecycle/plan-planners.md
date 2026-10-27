@@ -115,6 +115,9 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 5. **`planner_question`**: 依頼のaskを開けるのはその依頼の閉じていないruntimeのplanner自身だけである（[Authorization](../authorization.md#対話と記録のコマンドapplication)）。
    answerの行き先は`plan_requests.rs`の`route_of`、配送は`request_planner.rs`が持つ。
 6. **終わりと時間切れ**: 上の[runtimeのplannerの経路](#runtimeのplannerの経路)に従う。
+7. **人に見せる**: `--no-claude`の間などplannerが立たないあいだも、inboxの`status`（`--role`なしを含む）が`open`の依頼を古い順に、閉じていないplannerと`planner_question`から待っている理由を添えて出す（ADR-t1394-1のConsequences）。
+   plannerの`status`には出さない。
+   欄の意味は`application::health::requests`のdoc commentが持つ。
 
 ### Spikeの再計画の依頼<a id="spikeの再計画の依頼"></a>
 
@@ -125,10 +128,6 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 - 頼んだ人が居ないので、attentionにするのは`request_planner_exhausted`だけである（`domain::event_attention`）。
 - goalのSpikeの周期の数え方と上限（`[goals] max_spike_cycles`）でのruntimeのplannerのsubmitの拒みは`domain::investigation::spike_submit`が持つ（[ADR-t2414-1](../../adr/2026-10-19-t2414-1-spike-cycles-count-each-replanning-round-even-inside-one-investigation.md)、[claimを控える](claim-hold.md#調査中の計画の上限)）。
   拒まれたplannerは人に上げ、runtimeは未解決を理由にSpikeを延長も連鎖もしない。
-
-## 予定: inboxからの依頼と非対話のplanner<a id="予定-inboxからの依頼と非対話のplanner"></a>
-
-- `status`のinbox向けの欄にplannerを待っている`open`の依頼を出すのは未実装で、今は`dagq requests`で読む（ADR-t1394-1のConsequences）。
 
 ## taskの再計画の依頼
 

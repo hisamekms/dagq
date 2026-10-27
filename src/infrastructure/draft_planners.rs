@@ -2658,7 +2658,6 @@ mod tests {
     /// draft a planner of the runtime's works on waits for that one to end.
     #[test]
     fn a_request_and_a_revisit_never_plan_one_draft_at_once() {
-        use crate::application::PlanRequestStore;
         use crate::domain::plan_request::{NewPlanRequest, RequestRef};
         let dir = tempfile::tempdir().unwrap();
         let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();

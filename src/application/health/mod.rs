@@ -113,6 +113,82 @@ mod tests {
         assert_eq!(configured["inbox"]["source"], "dagq.toml");
     }
 
+    /// `requests` lists the open requests in the order given with their
+    /// words cut, and tells why each is still open: an open planner first,
+    /// then an unanswered `planner_question` (a closed or answered one or
+    /// another kind of ask does not count), then whether a planner opens
+    /// for it.
+    #[test]
+    fn requests_tell_why_each_open_request_waits() {
+        use crate::domain::{PlannerId, RequestId, plan_request::PlanRequest};
+        let request = |id: i64, text: &str| -> PlanRequest {
+            serde_json::from_value(json!({
+                "id": id, "text": text, "note": null, "refs": [], "priority": null,
+                "requested_by": "inbox", "requested_by_id": "inbox", "status": "open",
+                "status_reason": null, "proposals": [], "planners": 0,
+                "created_at": 100 + id, "updated_at": 100 + id,
+            }))
+            .unwrap()
+        };
+        let ask = |id: i64, kind: &str, closed_at: Option<i64>| -> crate::domain::Ask {
+            serde_json::from_value(json!({
+                "id": id, "kind": kind, "task_id": null, "run_id": null, "question": "q",
+                "options": [], "answer": null, "asked_by": "planner",
+                "reason_category": "scope", "created_at": 1, "answered_at": null,
+                "closed_at": closed_at,
+            }))
+            .unwrap()
+        };
+        let long = "x".repeat(200);
+        let answered = crate::domain::Ask {
+            answered_at: Some(6),
+            ..ask(5, "planner_question", None)
+        };
+        let open = vec![
+            (request(1, "working"), Some(PlannerId::new(7)), vec![]),
+            (
+                request(2, "asked"),
+                None,
+                vec![
+                    ask(1, "planner_question", Some(5)),
+                    ask(2, "planner_question", None),
+                ],
+            ),
+            (
+                request(3, &long),
+                None,
+                vec![ask(3, "planner_question", Some(5)), ask(4, "blocked", None)],
+            ),
+            (request(4, "held"), None, vec![answered]),
+        ];
+        let listed = requests(&open, &[RequestId::new(3)]);
+        let of = |field: &str| -> Vec<Value> {
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r[field].clone())
+                .collect()
+        };
+        assert_eq!(of("id"), [json!(1), json!(2), json!(3), json!(4)]);
+        assert_eq!(
+            of("waiting_for"),
+            ["planner", "answer", "planner_start", "held"]
+        );
+        assert_eq!(
+            of("planner_id"),
+            [json!(7), json!(null), json!(null), json!(null)]
+        );
+        assert_eq!(
+            of("planner_questions"),
+            [json!([]), json!([2]), json!([]), json!([])]
+        );
+        assert_eq!(listed[0]["requested_by"], "inbox");
+        assert_eq!(listed[0]["created_at"], 101);
+        assert_eq!(listed[2]["text"], format!("{}…", "x".repeat(120)));
+        assert_eq!(requests(&[], &[]), json!([]));
+    }
+
     #[test]
     fn status_sections_follow_the_role() {
         let of = |role| {

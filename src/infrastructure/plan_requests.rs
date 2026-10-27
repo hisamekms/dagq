@@ -219,6 +219,28 @@ impl SqliteQueue {
             .collect()
     }
 
+    /// The `open` requests waiting for a planner of the runtime's
+    /// ([`TARGETS`]), oldest first.
+    pub fn planner_requests(&self) -> Result<Vec<PlanRequest>> {
+        let ids: Vec<RequestId> = self
+            .conn
+            .prepare(&format!("{TARGETS} ORDER BY r.id"))?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        ids.into_iter()
+            .map(|id| read_request(&self.conn, id))
+            .collect()
+    }
+
+    /// The asks about `request`, oldest first: its planners' questions.
+    pub fn request_asks(&self, request: RequestId) -> Result<Vec<Ask>> {
+        Ok(self
+            .conn
+            .prepare("SELECT * FROM asks WHERE request_id=?1 ORDER BY id")?
+            .query_map([request], ask_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The planner of the runtime's open for `request`, if any: the one
     /// that may decline it.
     pub fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>> {
@@ -288,14 +310,7 @@ impl SqliteQueue {
 
 impl PlanRequestStore for SqliteQueue {
     fn planner_requests(&self) -> Result<Vec<PlanRequest>> {
-        let ids: Vec<RequestId> = self
-            .conn
-            .prepare(&format!("{TARGETS} ORDER BY r.id"))?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        ids.into_iter()
-            .map(|id| read_request(&self.conn, id))
-            .collect()
+        SqliteQueue::planner_requests(self)
     }
 
     fn open_request_planner(
@@ -385,11 +400,7 @@ impl PlanRequestStore for SqliteQueue {
     }
 
     fn request_asks(&self, request: RequestId) -> Result<Vec<Ask>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM asks WHERE request_id=?1 ORDER BY id")?
-            .query_map([request], ask_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        SqliteQueue::request_asks(self, request)
     }
 
     fn event_by_id(&self, id: EventId) -> Result<Option<RunEvent>> {

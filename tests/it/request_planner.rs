@@ -10,7 +10,7 @@
 use crate::common::cli::{invoke_as, invoke_with, ok_as};
 use crate::plan_review::{
     PlanWorkspace, StubReviewer, fixture, open_goal, options, planner_prompt, supervise,
-    supervise_with,
+    supervise_owned, supervise_owned_with, supervise_with,
 };
 use crate::runtime_support::planner_turns::{
     block_next_request, exit_requested, idle, turn_requests,
@@ -1080,4 +1080,118 @@ fn an_ask_or_an_event_alone_leads_the_prompt_to_its_goal() {
             "{reference}\n{prompt}"
         );
     }
+}
+
+/// The ids and `waiting_for` of the requests `status` lists for `role`.
+fn status_requests(db: &Path, role: Option<&str>) -> Vec<(i64, String)> {
+    let status = match role {
+        Some(role) => ok_as(role, db, &["status", "--role", role]),
+        None => crate::common::cli::ok(db, &["status"]),
+    };
+    status["requests"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no requests: {status}"))
+        .iter()
+        .map(|request| {
+            (
+                request["id"].as_i64().unwrap(),
+                request["waiting_for"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn status_shows_the_inbox_the_open_requests_a_planner_has_not_taken() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    assert!(status_requests(&fx.db, Some("inbox")).is_empty());
+
+    // Recorded while the supervisor runs --no-claude, no planner opens for
+    // them: the inbox's status lists them, oldest first, as waiting for one.
+    let recorded = ok_as(
+        "inbox",
+        &fx.db,
+        &[
+            "request",
+            "add",
+            "--text",
+            "plan the first",
+            "--priority",
+            "high",
+        ],
+    );
+    let first = RequestId::new(recorded["id"].as_i64().unwrap());
+    let rest: Vec<RequestId> = ["the second", "the third", "the fourth"]
+        .into_iter()
+        .map(|text| record(&mut queue, text))
+        .collect();
+    let all: Vec<i64> = std::iter::once(first)
+        .chain(rest.iter().copied())
+        .map(RequestId::as_i64)
+        .collect();
+    let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
+    let backend = PlanWorkspace::default();
+    supervise_owned_with(
+        &fx,
+        &backend,
+        &reviewer,
+        &dagq::runtime::SuperviseOptions {
+            no_claude: true,
+            ..options(3, Duration::from_secs(3600))
+        },
+    );
+    assert!(queue.planners(false).unwrap().is_empty());
+    assert!(backend.launched().is_empty());
+    let waiting: Vec<(i64, String)> = all
+        .iter()
+        .map(|id| (*id, "planner_start".to_owned()))
+        .collect();
+    assert_eq!(status_requests(&fx.db, Some("inbox")), waiting);
+    assert_eq!(status_requests(&fx.db, None), waiting);
+    let shown = &ok_as("inbox", &fx.db, &["status", "--role", "inbox"])["requests"][0];
+    assert_eq!(shown["text"], "plan the first");
+    assert_eq!(shown["priority"], "high");
+    assert_eq!(shown["requested_by"], "inbox");
+    assert_eq!(shown["created_at"], recorded["created_at"]);
+
+    // With Claude, the oldest gets the one planner and the rest wait.
+    supervise_owned(&fx, &backend, &reviewer);
+    let opened = request_planner(&queue, first).expect("a planner for the oldest");
+    let mut expected = waiting.clone();
+    expected[0].1 = "planner".into();
+    assert_eq!(status_requests(&fx.db, Some("inbox")), expected);
+
+    // Proposed, declined and exhausted requests are not listed.
+    let handle = queue
+        .planners(false)
+        .unwrap()
+        .into_iter()
+        .find(|planner| planner.id == opened)
+        .unwrap()
+        .workspace_id
+        .unwrap();
+    let task = draft(&mut queue, goal, "plan the first");
+    submit_from(&mut queue, &handle, task);
+    queue
+        .decline_request(rest[0], "nothing to plan", "planner", None)
+        .unwrap();
+    while let RequestPlannerStart::Opened { planner, .. } =
+        queue.open_request_planner(rest[1], None).unwrap()
+    {
+        exit(&queue, planner.id);
+        queue.close_planner(planner.id, None).unwrap();
+    }
+    assert_eq!(
+        queue.plan_request(rest[1]).unwrap().status,
+        RequestStatus::Exhausted
+    );
+    assert_eq!(
+        status_requests(&fx.db, Some("inbox")),
+        [(rest[2].as_i64(), "planner_start".to_owned())]
+    );
+    // A planner's status does not carry them.
+    let planner = ok_as("planner", &fx.db, &["status", "--role", "planner"]);
+    assert!(planner.get("requests").is_none(), "{planner}");
 }
