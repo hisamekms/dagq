@@ -1324,8 +1324,9 @@ fn a_runs_tokens_are_issued_only_under_its_lease_by_a_live_registration() {
 /// target is open and holds no token yet. Refused as
 /// `authorization_denied`, recorded and leaving no token: a target that
 /// ended, one of a run or of a job no command starts (the user's), a
-/// caller that starts no executor (a worker), and a target whose executor
-/// holds its token already (its job's, which the issue would revoke).
+/// caller that starts no executor (a worker), a target another caller's
+/// command started, and a target whose executor holds its token already
+/// (its job's, which the issue would revoke).
 #[test]
 fn a_commands_job_telemetry_token_is_issued_at_its_callers_request() {
     use dagq::domain::session_step::{StepTarget, TargetKind};
@@ -1333,23 +1334,27 @@ fn a_commands_job_telemetry_token_is_issued_at_its_callers_request() {
     let queue = queue();
     start(&queue);
     let lease = LeaseToken::new("it-observing");
+    let pid = std::process::id();
     let mut db = SqliteQueue::open(&queue.db).unwrap();
-    db.register_supervisor(&lease, std::process::id(), 1, "test")
-        .unwrap();
-    let observation = |dir: &str| {
+    db.register_supervisor(&lease, pid, 1, "test").unwrap();
+    // Each started by a command of this process, as its caller.
+    let observation = |db: SqliteQueue, by: ActorContext, dir: &str| {
+        let db = db.with_actor(by);
         let id = db
             .record_queue_event(
                 EventKind::ObserveStarted,
-                json!({"dir": dir, "timeout_secs": 600}),
+                json!({"dir": dir, "timeout_secs": 600, "pid": pid}),
             )
             .unwrap();
-        StepTarget::of(TargetKind::Observer, id.as_i64())
+        (db, StepTarget::of(TargetKind::Observer, id.as_i64()))
     };
-    let (open, by_supervisor, ended) = (
-        observation("/o/1"),
-        observation("/o/2"),
-        observation("/o/3"),
+    let (db, open) = observation(db, ActorContext::user(), "/o/1");
+    let (db, by_supervisor) = observation(
+        db,
+        ActorContext::instance(dagq::domain::ActorRole::Supervisor, pid),
+        "/o/2",
     );
+    let (db, ended) = observation(db, ActorContext::user(), "/o/3");
     db.record_queue_event(EventKind::ObserveFinished, json!({"dir": "/o/3"}))
         .unwrap();
     drop(db);
@@ -1404,9 +1409,17 @@ fn a_commands_job_telemetry_token_is_issued_at_its_callers_request() {
             "not of a job a command starts",
         ),
         (Some(worker.as_str()), telemetry(&open), "not granted", ""),
-        // The job's executor holds it: no other caller takes it over.
+        // A command of another caller's started it.
         (
             None,
+            telemetry(&by_supervisor),
+            "not on this resource",
+            "started by another caller",
+        ),
+        // The job's executor holds it: its own caller asking again does
+        // not take it over.
+        (
+            Some(supervisor.as_str()),
             telemetry(&by_supervisor),
             "not on this resource",
             "holds its token already",
@@ -1445,8 +1458,9 @@ fn a_commands_job_telemetry_token_is_issued_at_its_callers_request() {
     );
 }
 
-/// Two callers that ask at once for the token of the same command's job's
-/// executor, which holds none yet: the service looks at what the target
+/// Two requests at once of the caller whose command started a job for
+/// the token of that job's executor, which holds none yet (a caller that
+/// did not start it is refused before): the service looks at what the target
 /// holds in the transaction that issues it, so one of them is issued and
 /// the other is refused as `authorization_denied` and recorded, and the
 /// token issued is the one that holds (no later issue revoked it).
@@ -1456,12 +1470,14 @@ fn of_two_callers_asking_at_once_for_a_jobs_executor_token_one_is_issued() {
     use dagq::domain::session_step::{StepTarget, TargetKind};
     let queue = queue();
     start(&queue);
-    let db = SqliteQueue::open(&queue.db).unwrap();
+    let db = SqliteQueue::open(&queue.db)
+        .unwrap()
+        .with_actor(ActorContext::user());
     for round in 0..5 {
         let id = db
             .record_queue_event(
                 EventKind::ObserveStarted,
-                json!({"dir": format!("/o/{round}"), "timeout_secs": 600}),
+                json!({"dir": format!("/o/{round}"), "timeout_secs": 600, "pid": std::process::id()}),
             )
             .unwrap();
         let telemetry =

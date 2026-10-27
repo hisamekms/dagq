@@ -315,7 +315,7 @@ host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユ
 
 queue service（ADR-t1233-1決定4）は、要求のtokenから決めたprincipalをactorにして、対話と記録のユースケースを上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue）に、`watch_poll`を`queue.watch`に通す。
 拒否は同じ`authorization_denied`（拒まれたprincipalがactor）に残る。
-`issue_token`（ADR-t3102-1決定2）は、親（user・supervisor・inbox）の起動の権限を`starts`で、対象の前提を`issue_held`で発行と同じtransactionで確かめ、外れた依頼は断る。
+`issue_token`（ADR-t3102-1決定2）は、親（user・supervisor・inbox）の起動の権限を`starts`で、対象の前提を`issue_held`で（runを持たない対象のtelemetryは開始の記録の親とプロセスとの一致も）発行と同じtransactionで確かめ、外れた依頼は断る。
 queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがそのコマンドに求めるのと同じcapability（`ci failures`は`ci.read`、ほかは`queue.read`）を`Gate`で通して答える。
 
 supervisorの操作（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）は、登録を持つsupervisorに`scheduler.supervise`と操作ごとのcapability（`needs::supervisor_needs`）を`Gate`で通してから答える。

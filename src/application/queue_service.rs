@@ -74,6 +74,13 @@ pub trait IssueFacts {
         held: &crate::domain::queue_service::HeldToken,
         starting: Option<&crate::domain::queue_service::TokenIssuer>,
     ) -> crate::domain::queue_service::JobState;
+    /// Who started `target`, a target of no run, as the queue records its
+    /// start ([`crate::domain::queue_service::TargetStart`]); `None` for a
+    /// target with no such record.
+    fn target_start(
+        &self,
+        target: &crate::domain::session_step::StepTarget,
+    ) -> Result<Option<crate::domain::queue_service::TargetStart>>;
 }
 
 /// The queue as one use case of the service reads and changes it, written
@@ -652,6 +659,21 @@ impl std::fmt::Display for TelemetryHeld {
 
 impl std::error::Error for TelemetryHeld {}
 
+/// The target of an executor's telemetry token asked for was not started
+/// by the parent that asks, and why
+/// ([`crate::domain::queue_service::telemetry_starter_refusal`]), found in
+/// the issue's transaction ([`issue_token`]).
+#[derive(Debug)]
+struct NotStarter(&'static str);
+
+impl std::fmt::Display for NotStarter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for NotStarter {}
+
 /// The token the key asked for holds already, which the issue may not
 /// replace, and why ([`crate::domain::queue_service::reissue`]),
 /// found in the issue's transaction.
@@ -703,7 +725,10 @@ fn issue_token_of(
 /// outside any worktree and run directory, and whether it is the one held
 /// already ([`Issued`]). An executor's telemetry token
 /// of a run's target is `issue_telemetry`'s, under the run's lease, and is
-/// refused here.
+/// refused here; one of a target of no run is issued only to the parent
+/// that started it, asking from the process its start names, as read in
+/// the issue's transaction
+/// ([`crate::domain::queue_service::telemetry_starter_refusal`]).
 pub(super) fn issue_token(
     backend: &dyn ServiceBackend,
     queue: &mut dyn ServiceQueue,
@@ -752,6 +777,16 @@ pub(super) fn issue_token(
     let issued = store.0.issuing(&held, backend.now_ms(), &mut |facts| {
         let file = match (&child.target, telemetry) {
             (Some(target), true) => {
+                // Only at the request of the parent that started the
+                // target, asking from the process its start names, as the
+                // queue records the start in this transaction.
+                if let Some(why) = crate::domain::queue_service::telemetry_starter_refusal(
+                    parent,
+                    process,
+                    facts.target_start(target)?.as_ref(),
+                ) {
+                    return Err(NotStarter(why).into());
+                }
                 // A command's job is issued its executor's token once, as it
                 // starts: one its target holds already is that job's, which
                 // no other caller takes over (the issue would revoke it).
@@ -809,6 +844,16 @@ pub(super) fn issue_token(
     let Err(error) = issued else {
         return issued;
     };
+    if let Some(NotStarter(why)) = error.downcast_ref::<NotStarter>() {
+        return Err(refuse_recorded(
+            store.0,
+            &actor,
+            Capability::TokenIssue,
+            &resource,
+            crate::domain::authorization::DenyReason::Resource,
+            why,
+        ));
+    }
     if error.downcast_ref::<TelemetryHeld>().is_some() {
         return Err(refuse_recorded(
             store.0,
@@ -2461,6 +2506,12 @@ mod tests {
             _: Option<&crate::domain::queue_service::TokenIssuer>,
         ) -> crate::domain::queue_service::JobState {
             crate::domain::queue_service::JobState::MayRun
+        }
+        fn target_start(
+            &self,
+            _: &crate::domain::session_step::StepTarget,
+        ) -> Result<Option<crate::domain::queue_service::TargetStart>> {
+            Ok(None)
         }
     }
 

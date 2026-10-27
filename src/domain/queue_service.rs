@@ -1925,6 +1925,61 @@ pub fn telemetry_issue_refusal(parent: ActorRole, child: &Principal) -> Option<&
     }
 }
 
+/// Who started a target of no run, as the queue records its start: what
+/// the issue of its executor's telemetry token is matched against
+/// ([`telemetry_starter_refusal`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetStart {
+    /// A command's start (`observe_started`, `throughput_review_started`):
+    /// the actor that recorded it (its role and actor id, `None` for one
+    /// the queue does not know) and the process its payload names (the
+    /// command's own, `None` for a start that names none).
+    Command {
+        actor: Option<(ActorRole, String)>,
+        pid: Option<u32>,
+    },
+    /// A job the supervisor runs from its row (a plan review, a goal
+    /// review, an eval job): the registration of the supervisor that
+    /// claimed it, `None` for a row that names none.
+    Supervised { supervisor: Option<LeaseToken> },
+}
+
+/// Why `parent`, asking from the process `process` (the connection's),
+/// is refused the telemetry token of a target of no run whose start the
+/// queue records as `start` (`None`: no record of it), read in the
+/// issue's transaction (ADR-t3102-1 decision 2: only the parent that
+/// started the job asks for its executor's token). A command's start is
+/// its parent's when the actor that recorded it is the parent's (its role
+/// and actor id) and the process it names is the one asking: a person's
+/// or the inbox's command, or a supervisor's, is told from another
+/// command of the same principal by its process. A supervised job's row is
+/// its parent's when it names that supervisor's registration. `None` when
+/// the start is the parent's.
+pub fn telemetry_starter_refusal(
+    parent: &Principal,
+    process: Option<u32>,
+    start: Option<&TargetStart>,
+) -> Option<&'static str> {
+    let Some(start) = start else {
+        return Some("the queue has no record of the target's start");
+    };
+    let own = match start {
+        TargetStart::Command { actor: None, .. } | TargetStart::Command { pid: None, .. } => {
+            return Some("the target's start names no caller that started it");
+        }
+        TargetStart::Command {
+            actor: Some((role, actor_id)),
+            pid,
+        } => *role == parent.role && *actor_id == parent.actor_id && *pid == process,
+        TargetStart::Supervised { supervisor } => {
+            parent.role == ActorRole::Supervisor
+                && supervisor.is_some()
+                && *supervisor == parent.registration
+        }
+    };
+    (!own).then_some("the target was started by another caller")
+}
+
 /// The actor id of the session wrapper of `target`, as its events record
 /// it: `wrapper:<run>` for a run's, `wrapper:planner:<id>` for a
 /// planner's.
@@ -3160,6 +3215,79 @@ mod tests {
             telemetry_issue_refusal(ActorRole::Supervisor, &plan_review),
             None
         );
+    }
+
+    /// The telemetry token of a target of no run goes only to the parent
+    /// that started it (ADR-t3102-1 decision 2): a command's start to the
+    /// principal that recorded it asking from the process it names, a
+    /// supervised job's row to the supervisor whose registration it names.
+    /// Another principal, another process of the same one, a start that
+    /// names no caller and a target with no start are refused.
+    #[test]
+    fn a_targets_telemetry_token_goes_only_to_the_parent_that_started_it() {
+        let lease = LeaseToken::new("l");
+        let supervisor = Principal::supervisor(&lease, 7);
+        let another = Principal::supervisor(&LeaseToken::new("m"), 8);
+        let (user, inbox) = (
+            Principal::user(),
+            Principal::inbox(SessionProcess {
+                pid: 9,
+                start: "s".into(),
+            }),
+        );
+        let started = |by: &Principal, pid| TargetStart::Command {
+            actor: Some((by.role, by.actor_id.clone())),
+            pid: Some(pid),
+        };
+        let own = |parent: &Principal, process, start: &TargetStart| {
+            telemetry_starter_refusal(parent, process, Some(start)).is_none()
+        };
+        for starter in [&user, &inbox, &supervisor] {
+            let start = started(starter, 40);
+            assert!(own(starter, Some(40), &start), "{starter:?}");
+            // Another command of the same principal, or none read.
+            assert!(!own(starter, Some(41), &start), "{starter:?}");
+            assert!(!own(starter, None, &start), "{starter:?}");
+            for other in [&user, &inbox, &supervisor, &another] {
+                if other != starter {
+                    assert!(!own(other, Some(40), &start), "{other:?} {starter:?}");
+                }
+            }
+        }
+        for unnamed in [
+            TargetStart::Command {
+                actor: None,
+                pid: Some(40),
+            },
+            TargetStart::Command {
+                actor: Some((ActorRole::User, "user".into())),
+                pid: None,
+            },
+        ] {
+            assert!(
+                telemetry_starter_refusal(&user, Some(40), Some(&unnamed))
+                    .unwrap()
+                    .contains("names no caller")
+            );
+        }
+        assert!(
+            telemetry_starter_refusal(&user, Some(40), None)
+                .unwrap()
+                .contains("no record")
+        );
+
+        let row = TargetStart::Supervised {
+            supervisor: Some(lease.clone()),
+        };
+        assert!(own(&supervisor, Some(1), &row));
+        for other in [&another, &user, &inbox] {
+            assert!(!own(other, Some(1), &row), "{other:?}");
+        }
+        assert!(!own(
+            &supervisor,
+            Some(1),
+            &TargetStart::Supervised { supervisor: None }
+        ));
     }
 
     #[test]

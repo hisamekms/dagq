@@ -6,7 +6,9 @@
 //! reaches no other use case; another target's steps, a session registered
 //! to no target or to another, an agent's token, a version the service
 //! does not read, a report past its bounds and a revoked token are
-//! refused, and the largest report within its bounds is recorded.
+//! refused, and the largest report within its bounds is recorded. The
+//! token of a target of no run is issued only to the parent that started
+//! it.
 
 use crate::common;
 use common::service::{call, events, queue, start, token};
@@ -402,4 +404,118 @@ fn the_largest_report_is_recorded_and_one_byte_more_is_refused() {
     );
     assert_eq!(refused["error"]["code"], "bad_request", "{refused}");
     assert_eq!(held(&queue.db, &target).len(), steps);
+}
+
+/// The token of the executor of a job a command started (an observation,
+/// a throughput review) goes only to the parent that started it, asking
+/// from the process its start names (ADR-t3102-1 decision 2), as the
+/// issue's transaction reads the start. The user, the inbox and another
+/// supervisor naming the observation a supervisor's command started are
+/// refused as `authorization_denied` (on the resource), recorded and
+/// taking no token, so that supervisor's own request is then issued, not
+/// refused as held already. The person's command of another process, and
+/// a start that names no process, are refused too.
+#[test]
+fn only_the_parent_that_started_a_job_is_issued_its_executors_token() {
+    use dagq::domain::queue_service::SessionProcess;
+    use dagq::domain::{ActorRole, EventKind, LeaseToken};
+    let queue = queue();
+    start(&queue);
+    let pid = std::process::id();
+    let (lease, other) = (LeaseToken::new("it-started"), LeaseToken::new("it-other"));
+    let mut db = SqliteQueue::open(&queue.db).unwrap();
+    db.register_supervisor(&lease, pid, 1, "test").unwrap();
+    // Another supervisor, of another process.
+    db.register_supervisor(&other, 1, 1, "test").unwrap();
+    let started = |db: SqliteQueue, by: ActorContext, kind, payload: Value| {
+        let db = db.with_actor(by);
+        let id = db.record_queue_event(kind, payload).unwrap().as_i64();
+        (db, id)
+    };
+    let supervisor_actor = ActorContext::instance(ActorRole::Supervisor, pid);
+    // The supervisor's observe command, this process.
+    let (db, observed) = started(
+        db,
+        supervisor_actor,
+        EventKind::ObserveStarted,
+        json!({"dir": "/o/1", "timeout_secs": 600, "pid": pid}),
+    );
+    // The person's throughput-review command of another process, and one
+    // whose start names none.
+    let (db, elsewhere) = started(
+        db,
+        ActorContext::user(),
+        EventKind::ThroughputReviewStarted,
+        json!({"dir": "/r/1", "timeout_secs": 600, "pid": 1}),
+    );
+    let (db, unnamed) = started(
+        db,
+        ActorContext::user(),
+        EventKind::ThroughputReviewStarted,
+        json!({"dir": "/r/2", "timeout_secs": 600}),
+    );
+    drop(db);
+    let observed = StepTarget::of(TargetKind::Observer, observed);
+    let supervisor = token(&queue, &Principal::supervisor(&lease, pid));
+    let another = token(&queue, &Principal::supervisor(&other, 1));
+    let inbox = token(
+        &queue,
+        &Principal::inbox(SessionProcess {
+            pid,
+            start: dagq::infrastructure::adapters::session_start(pid).unwrap(),
+        }),
+    );
+    let issue = |token: Option<&str>, target: &StepTarget| {
+        call(
+            &queue,
+            token,
+            UseCase::IssueToken,
+            json!({"principal": Principal::telemetry(target, None)}),
+        )
+    };
+    let refused = |token: Option<&str>, target: &StepTarget, why: &str| {
+        let before = events(&queue.db, "authorization_denied").len();
+        let answer = issue(token, target);
+        assert_eq!(answer["error"]["code"], "authorization_denied", "{answer}");
+        assert_eq!(
+            answer["error"]["denied"]["reason"], "not on this resource",
+            "{answer}"
+        );
+        let denied = events(&queue.db, "authorization_denied");
+        assert_eq!(denied.len() - before, 1, "{answer}");
+        let last = &denied[denied.len() - 1]["payload"];
+        assert_eq!(last["capability"], "token.issue", "{last}");
+        assert!(last["why"].as_str().unwrap().contains(why), "{last}");
+        assert!(
+            SystemServiceAccess
+                .telemetry_credential(&queue.db, target)
+                .is_none(),
+            "{target:?}"
+        );
+    };
+
+    for caller in [None, Some(inbox.as_str()), Some(another.as_str())] {
+        refused(caller, &observed, "started by another caller");
+    }
+    let issued = issue(Some(&supervisor), &observed);
+    assert_eq!(issued["ok"], true, "{issued}");
+    let file: std::path::PathBuf =
+        serde_json::from_value(issued["result"]["file"].clone()).unwrap();
+    assert_eq!(
+        service::lookup(queue.dir(), &service::read_token(&file).unwrap())
+            .unwrap()
+            .unwrap(),
+        Principal::telemetry(&observed, None)
+    );
+
+    refused(
+        None,
+        &StepTarget::of(TargetKind::ThroughputReview, elsewhere),
+        "started by another caller",
+    );
+    refused(
+        None,
+        &StepTarget::of(TargetKind::ThroughputReview, unnamed),
+        "names no caller",
+    );
 }

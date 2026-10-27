@@ -3543,6 +3543,13 @@ impl crate::application::queue_service::IssueFacts for IssueQueue<'_> {
             )),
         }
     }
+
+    fn target_start(
+        &self,
+        target: &StepTarget,
+    ) -> Result<Option<crate::domain::queue_service::TargetStart>> {
+        self.queue.target_start(target)
+    }
 }
 
 /// This user's processes as

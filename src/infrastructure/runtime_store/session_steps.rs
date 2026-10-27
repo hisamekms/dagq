@@ -542,6 +542,71 @@ impl SqliteQueue {
         }
     }
 
+    /// Who started `target`, a target of no run
+    /// ([`crate::domain::queue_service::TargetStart`]): a command's start
+    /// event's actor and the `pid` of its payload, a supervised job's row's
+    /// `supervisor_token`. `None` for a target with no such record: a run's,
+    /// a planner's, and one the queue does not have.
+    pub fn target_start(
+        &self,
+        target: &StepTarget,
+    ) -> Result<Option<crate::domain::queue_service::TargetStart>> {
+        use crate::domain::queue_service::TargetStart;
+        let Ok(id) = target.id.parse::<i64>() else {
+            return Ok(None);
+        };
+        let command = |started: EventKind| -> Result<Option<TargetStart>> {
+            let row = self
+                .conn
+                .query_row(
+                    "SELECT actor_role, actor_id, json_extract(payload, '$.pid')
+                     FROM run_events WHERE id = ?1 AND kind = ?2",
+                    params![id, started.as_str()],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            Ok(row.map(|(role, actor_id, pid)| TargetStart::Command {
+                actor: role
+                    .and_then(|role| role.parse::<crate::domain::ActorRole>().ok())
+                    .zip(actor_id),
+                pid: pid.and_then(|pid| u32::try_from(pid).ok()),
+            }))
+        };
+        let row = |table: &str, only: &str| -> Result<Option<TargetStart>> {
+            let supervisor = self
+                .conn
+                .query_row(
+                    &format!("SELECT supervisor_token FROM {table} r WHERE r.id = ?1{only}"),
+                    [id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            Ok(supervisor.map(|supervisor| TargetStart::Supervised {
+                supervisor: supervisor.map(LeaseToken::new),
+            }))
+        };
+        match target.kind {
+            TargetKind::Run | TargetKind::Planner => Ok(None),
+            TargetKind::PlanReview => row("plan_reviews", ""),
+            TargetKind::GoalReview => row("goal_reviews", ""),
+            TargetKind::EvalJob => row(
+                "headless_jobs",
+                &format!(
+                    " AND r.run_id IS NULL AND r.kind = '{}'",
+                    crate::domain::headless_job::AGENT_EVAL
+                ),
+            ),
+            TargetKind::ThroughputReview => command(EventKind::ThroughputReviewStarted),
+            TargetKind::Observer => command(EventKind::ObserveStarted),
+        }
+    }
+
     /// What the queue holds of each record of a job's
     /// ([`crate::domain::queue_service::JobRecords`]), read as
     /// [`Self::telemetry_target`] reads a target of no run, with whose it
