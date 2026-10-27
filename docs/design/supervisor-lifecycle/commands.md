@@ -70,8 +70,8 @@ related:
 ## 表示とreviewのコマンドをまたぐ約束
 
 - `status`・`doctor`・`events`・`watch`と`review`はqueueを読むだけで、どれもqueueの状態もeventも変えない。
-  人・inbox・plannerの`status`・`events`・`watch`はDBを開かずqueue serviceを通り、serviceが読み取り専用の接続で答える。
-  制御側として残る`doctor`と`review`はqueue serviceを通らず、CLIがDBを開いて読む（`doctor`は読み取り専用で開く）（[hostのCLI](../queue-service-host-cli.md#送る範囲)）。
+  人・inbox・plannerの`status`・`events`・`watch`と`review`はDBを開かずqueue serviceを通る（`review`は制御側のコマンドのstepとして送る）。
+  制御側として残る`doctor`だけがqueue serviceを通らず、CLIがDBを読み取り専用で開いて読む（[hostのCLI](../queue-service-host-cli.md#送る範囲)）。
   `watch --role inbox`が書くwatcherの生存の記録はqueueの外のファイルに置く。
 - serviceに届かないとき、`status`と`watch`は待たずに`unreachable`（errorの`queue_service.code`）で終わり、errorの文が次の手を言い、supervisorが記録した停止を添える（そのroleの`watch`が返した後の同じ停止は除く）。
   watchを回し直す側はそれを中身として扱い、`dagq service status`で理由を見て、同じcursorからwatchを張り直す。
