@@ -283,7 +283,7 @@ live worker alert (stalled, idle_process)
 ### コマンドとlog
 
 - [コマンドをまたぐ約束](supervisor-lifecycle/commands.md)（計測の`stats`・`kpi`・`mark`・`marks`・`report`・`timeline`と、`status`・`events`・`watch`・`doctor`・`review`・processのlogをまたぐ約束と、各コマンドのコードの入口）
-- [hostの負荷の連続の記録](supervisor-lifecycle/host-metrics.md)（supervisorがload average・プロセスの種類ごとのCPUとメモリ・メモリ・swap・pageout・ディスクの空きをqueue.dbのNodeSampleStoreと人が読む写しの`<queue dir>/host/metrics-YYYYMMDD.csv`に書き、保持の日数を過ぎた行とファイルを消す。`stats`の`host`が窓の要約を出す。外部のsamplerを止める手順）
+- [hostの負荷の連続の記録](supervisor-lifecycle/host-metrics.md)（supervisorがload average・プロセスの種類ごとのCPUとメモリ・メモリ・swap・pageout・ディスクの空き・待ちと着地待ちのrunのビルド成果物の合計と件数をqueue.dbのNodeSampleStoreと人が読む写しの`<queue dir>/host/metrics-YYYYMMDD.csv`に書き、保持の日数を過ぎた行とファイルを消す。`stats`の`host`が窓の要約を出す。外部のsamplerを止める手順）
   保持の期間のCSVは一度だけNodeSampleStoreに取り込む。
 - [KPIのpush](supervisor-lifecycle/push.md)（レポートの後に目標割れの始まりと解消を記録し、host.tomlの`[push]`のコマンドのstdinに日次・週次のまとめと目標割れの即時通知を渡す。失敗の再試行とinboxのattention。ADR-0051の決定18・22・23）
 

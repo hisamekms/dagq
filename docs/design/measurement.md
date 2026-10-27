@@ -47,7 +47,7 @@ SSOTは消えてはいけない正本、ビューはSSOTから作り直せるも
 | StateStore | 今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど） | SSOT | queue.dbの状態の表 |
 | EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・今の判定の記録・queueの出来事・mainの履歴・[task/goal/findingの属性](attribute-records.md)・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
 | SessionStepStore | sessionのstep・中から測った資源と、対象と持ち主。`(session_id, seq)`で重複を除き、抜けを残す | SSOT | queue.dbの`session_steps`ほか |
-| NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き・共通の単位） | SSOT | queue.dbの`node_samples`（hostのCSVは写しで、保持の期間の分を一度取り込む。[hostの負荷](supervisor-lifecycle/host-metrics.md)） |
+| NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ディスクの空き・待ちと着地待ちのrunのビルド成果物の合計と件数・共通の単位） | SSOT | queue.dbの`node_samples`（hostのCSVは写し。[hostの負荷](supervisor-lifecycle/host-metrics.md)） |
 | RunResourceStore | runの資源を外から測った窓 | SSOT | queue.dbの`run_resources` |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | queue.dbの`ledger_rows` |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
