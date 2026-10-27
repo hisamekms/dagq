@@ -1,4 +1,4 @@
-"""Before/after measurement of goal 120 (tasks 1715-1719, 1729) for it-reduction.md (task 1720); Python stdlib.
+"""Before/after measurement of goal 120 (tasks 1715-1719, 1729, 2448) for it-reduction.md (tasks 1720, 2903); Python stdlib.
 
 Reads the landing verification logs under --runs-dir, the host metrics CSVs given by
 --metrics and the worktree's `git log`. It does not open the queue, does not
@@ -17,7 +17,7 @@ per log, and (f) does not count a test as removed or added for an interval that 
     --runs-dir ~/.local/share/dagq/77067154921b9014/runs \
     --metrics ~/.local/share/dagq-hostmetrics/metrics.csv \
               ~/.local/share/dagq/77067154921b9014/host/metrics-2026*.csv \
-    --until 2026-10-20T12:00:00+09:00 --out-dir docs/plans/it-reduction/goal-120
+    --until 2026-10-27T09:00:00+09:00 --out-dir docs/plans/it-reduction/goal-120
 
 --until (optional) leaves out logs written after it, so a later run reads the same logs.
 """
@@ -34,7 +34,7 @@ from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo('Asia/Tokyo')
 
-# Landings of tasks 1715-1719 and 1729 (`git log --grep 'Dagq-Task: <ID>'`).
+# Landings of tasks 1715-1719, 1729 and 2448 (`git log --grep 'Dagq-Task: <ID>'`); after starts at the last of them.
 LANDINGS = {
     '1715': '63e3bfa09198eecbeb1da79deb52973dd7e1927f',
     '1717': '8b7b696db5b1dde3097d07f011d8a1cfe540b98c',
@@ -42,6 +42,7 @@ LANDINGS = {
     '1716': 'f7183e607bc32e2b909fa16a1d123b0d8e83d420',
     '1729': '3f0c9069359acff733d4e6ec9944f753198fbf73',
     '1719': 'f9b2ff448303409114b57507f2fb9522e349f822',
+    '2448': 'b0669f0ddc726d3ba4fea2e912bb93e1d64e81da',
 }
 # Landings of goal 100's 1552-1558 (`git log --grep 'Dagq-Task: <ID>'`), listed by the interval they fall in.
 GOAL100 = {
@@ -223,9 +224,10 @@ def landings(since, until):
     """main's landings between two times: their count, goal 100's 1552-1558 and the goal 92 subjects among them."""
     log = subprocess.check_output(['git', 'log', '--first-parent', 'main', f'--since={int(since)}', f'--until={int(until)}',
                                    '--format=%h %ct %s'], text=True).splitlines()
-    g100 = {v: k for k, v in GOAL100.items()}
     rows = [l.split(' ', 2) for l in log]
-    return dict(n=len(rows), goal100=[f"{g100[h]} {h}" for h, _, _ in rows if h in g100],
+    # git's short hash grows with the repository, so a landing is matched by the prefix GOAL100 keeps.
+    g100 = [(h, k) for h, _, _ in rows for k, v in GOAL100.items() if h.startswith(v)]
+    return dict(n=len(rows), goal100=[f"{k} {h}" for h, k in g100],
                 goal92=[f"{h} {datetime.fromtimestamp(int(t), TZ).isoformat(timespec='minutes')} {s[:60]}"
                         for h, t, s in rows if GOAL92_WORDS.search(s)])
 
@@ -290,8 +292,8 @@ def main():
         print(name, json.dumps(stats(rs, cuts, mask if name in ('before', 'after_all') else frozenset()), ensure_ascii=False))
         if rs:
             print('landings', name, json.dumps(landings(rs[0]['end'] - rs[0]['stage'], rs[-1]['end']), ensure_ascii=False))
-    if after_all:
-        print('landings between', json.dumps(landings(before[-1]['end'], after_all[0]['end']), ensure_ascii=False))
+    if after:
+        print('landings between', json.dumps(landings(before[-1]['end'], after[0]['end']), ensure_ascii=False))
     print('after the last landing', len([r for r in rows if r['end'] > last]), 'logs,',
           len([r for r in full if r['end'] > last]), f'leave out at most {LEFT_OUT_MAX}')
     for name in ('after', 'after_all'):

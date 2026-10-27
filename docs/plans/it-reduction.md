@@ -321,14 +321,15 @@ module ごとの差の和は 1709 +13.467、1710 −33.334、1711 −48.396、17
 
 ## goal 120 の前後
 
-goal 120 の task 1715〜1719・1729 の着地の前後で、本番の着地の検証の log から test 段と `dagq::it` を比べる（task 1720、request 20 の人の方針 5）。
+goal 120 の task 1715〜1719・1729・2448 の着地の前後で、本番の着地の検証の log から test 段と `dagq::it` を比べる（task 1720 が置き、task 2903 が後の区間を 20 本で測り直した。request 20 の人の方針 5）。
 
-**暫定（後の区間は 8 本）。** 最後の着地（task 1719、2026-10-13 03:34）の後の着地の検証の log は `--until` の時点で 114 本あるが、全部の IT を流し、main で落ちている test として外したもの（`landing-it: left out, ...`）が 10 本以下の log は最初の 8 本（10-13 04:41〜10-14 11:04）だけで、20 本そろわない。2026-10-14 12:19 の log から後はどれも 276〜345 本の IT を外しており、`dagq::it` の本数と合計が同じ量でなくなるので後の区間に入れない。参考に、外した本数を問わない最初の 20 本（「後 20 本」）を並べ、両方の区間のどれかの log が外した 294 本を除いて数えた値も置く。後の区間 20 本での測り直しは follow_up に出した。
+**後の区間は 20 本。** 前の区間は 1720 と同じ 20 本。後の区間は goal 120 の最後の着地（task 2448、b0669f0d、2026-10-20 03:28）の後の着地の検証の log のうち、全部の IT を流し、main で落ちている test として外したもの（`landing-it: left out, ...`）が 10 本以下で、test 段の間に load の標本がある最初の 20 本（10-22 10:47〜10-26 06:24）。2448 の後の 10-20 04:30〜23:55 の 15 本は 343〜350 本の IT を外しており、`dagq::it` の本数と合計が同じ量でないので入れない。1720 の暫定の値（1719 の後の 8 本）はこの 20 本で置き換え、参考として表に残す。
 
-- **前 20 本 → 後 8 本で、test 段（Summary）の中央値は 673.2 秒 → 827.5 秒（+154.3 秒、短縮率 −22.9%）、log ごとの test の時間の合計の中央値は 3,999.4 → 4,957.0 秒（−23.9%）、log ごとの dagq::it は 1,094.5 本・3,724.8 秒 → 1,196.5 本・4,711.0 秒（−26.5%）で、どれも増えた。**
-- **request 20 のとき（coverage の関門、直近 10 本）からの累計は、test の時間の合計が 3,194 → 4,957.0 秒（+1,763.0、−55.2%）、dagq::it の log ごとの本数が 1,186 → 1,196.5 本（+10.5）、log ごとの dagq::it の合計の中央値が 3,029 → 4,711.0 秒（+1,682.0、−55.5%）。** 関門は coverage の計測を持つ `cargo llvm-cov nextest` から `[landing_verification]`（ADR-t1925-1）の `cargo nextest run` に替わっており、同じ統計量でも同じ関門の値ではない。
-- **このうち移し替えの見積もり（対象の module で消えた test − 足された test）は −38 本・−167.7 秒（前の test ごとの中央値の dagq::it の合計の 4.7%）。** 対象の外の dagq::it は +144 本・+641.1 秒（container・clone・claim の class・already_satisfied などの新しい機能の test）、前後の両方にある 1,027 本の遅れは +650.6 秒で、dagq::it の増えはこの 2 つが大半を占める。
-- 後の区間の load1 の平均の中央値は 20.43 で、前の 12.18 より高い（最大の中央値は 15.55 → 28.92）。前の区間の間に goal 100 の状態の分割（1552・1553・1554・1556）が、前と後のあいだに 1555 と goal 92 の着地が入り、main の着地は前と後のあいだだけで 112 本ある。どれも観測であり、移し替えが test 段を何秒変えたかの因果とは言わない。
+- **前 20 本 → 後 20 本で、test 段（Summary）の中央値は 673.2 秒 → 1,142.9 秒（+469.7 秒、短縮率 −69.8%）、log ごとの test の時間の合計の中央値は 3,999.4 → 6,824.1 秒（−70.6%）、log ごとの dagq::it は 1,094.5 本・3,724.8 秒 → 1,611.5 本・6,600.1 秒（−77.2%）で、どれも増えた。**
+- **request 20 のとき（coverage の関門、直近 10 本）からの累計は、(b) test の時間の合計の中央値が 3,194 → 6,824.1 秒（+3,630.1、−113.7%）、(c1) log ごとの dagq::it の本数の中央値が 1,186 → 1,611.5 本（+425.5）、(c2) log ごとの dagq::it の合計の中央値が 3,029 → 6,600.1 秒（+3,571.1、−117.9%）。** 関門は coverage の計測を持つ `cargo llvm-cov nextest` から `[landing_verification]`（ADR-t1925-1）の `cargo nextest run` に替わっており、同じ統計量でも同じ関門の値ではない。(c3) は前と後の比較にだけ使う。
+- **このうち移し替えの見積もり（対象の module で足された test − 消えた test）は、消えた 51 本・237.2 秒と足された 52 本・389.5 秒で +1 本・+152.3 秒。** 2448 が 1 本にまとめた `runtime_waiting_stages` の旧 2 本（前の区間で 36.0 秒）は後の区間の log が main で落ちている test として名前を挙げているので消えたに数えず、数えると消えた 53 本・273.2 秒で −1 本・+116.3 秒。対象の module でも、移し替えで消えた秒より、その後に足された test（`runtime_recheck` 12 本・114.2 秒、`runtime_handoff` 14 本・96.9 秒、`runtime_landing_answers` 8 本・92.4 秒）の秒が大きい。
+- 対象の外の dagq::it は +609 本・+2,161.0 秒（`runtime_replan_park`・`runtime_already_satisfied`・`runtime_task_release`・`run_container` などの新しい機能の test）、前後の両方にある 1,012 本の遅れは +519.1 秒で、dagq::it の増えはこの 2 つが大半を占める。
+- load1 の平均の中央値は前 12.18・後 13.10 で近いが、前と後のあいだに main の着地が 424 本（goal 100 の 1555 と goal 92 の着地を含む）あり、前の区間の後に dagq::it が 706 本・2,608.6 秒足されている。どれも観測であり、移し替えが test 段を何秒変えたかの因果とは言わない。
 
 ### 手順
 
@@ -339,13 +340,14 @@ python3 docs/plans/it-reduction/measure_goal120.py \
   --runs-dir ~/.local/share/dagq/77067154921b9014/runs \
   --metrics ~/.local/share/dagq-hostmetrics/metrics.csv \
             ~/.local/share/dagq/77067154921b9014/host/metrics-2026*.csv \
-  --until 2026-10-20T12:00:00+09:00 --out-dir docs/plans/it-reduction/goal-120
+  --until 2026-10-27T09:00:00+09:00 --out-dir docs/plans/it-reduction/goal-120
 ```
 
-- goal 120 の着地（10-09〜10-13）の前後の関門は、ec310498（2026-10-07 19:27）から後の `[landing_verification]`（unit test 全件と `scripts/landing-it.sh` が選んだ IT の `cargo nextest run`）だけなので、ec310498 より後の log だけを読み、前後の両方をこの関門で比べる。
+- goal 120 の着地（10-09〜10-20）の前後の関門は、ec310498（2026-10-07 19:27）から後の `[landing_verification]`（unit test 全件と `scripts/landing-it.sh` が選んだ IT の `cargo nextest run`）だけなので、ec310498 より後の log だけを読み、前後の両方をこの関門で比べる。
 - `*/integrate-*-verify-*.log` のうち `Summary [` を含むものを mtime で並べ、ANSI の色を除いて PASS・FLKY-FL・FLAKY の行の秒を採る。TRY・SLOW・SKIP と最終の FAIL は時間に足さない。最終の FAIL は、FAIL か TRY n FAIL の行があり PASS・FLKY-FL・FLAKY の行が無い test（measure_goal119.py と同じ）。
 - log ごとに、採った件数＋最終の FAIL の件数が Summary の `N tests run` と一致し、PASS の件数が passed − FLAKY と一致することを確かめ、合わない log は理由つきで除く。
-- `landing-it: every IT runs:` の行の無い log（IT を絞った log）は dagq::it の一部しか流さないので除く。main で落ちている test として外した数が 10 本を超える log は、前と後の区間に入れず「後 20 本」にだけ入れる。消えた・足された test（(f)）は、もう片方の区間のどれかの log が外した test を数えない。
+- `landing-it: every IT runs:` の行の無い log（IT を絞った log）は dagq::it の一部しか流さないので除く。main で落ちている test として外した数が 10 本を超える log は前と後の区間に入れない（script は外した本数を問わない最初の 20 本も `after_all` として出すが、この節は使わない）。消えた・足された test（(f)）は、もう片方の区間のどれかの log が外した test を数えない。
+- 後の区間は `LANDINGS` の最後の着地（2448）の後から数える。`--until` は Python の `datetime.fromisoformat` が読む形で、`Z` ではなく `+09:00` で渡す。
 - load は load1 の、mtime − Summary 〜 mtime の平均と最大。`~/.local/share/dagq-hostmetrics/metrics.csv` は 2026-10-03 で止まっているので、queue の dir の `host/metrics-YYYYMMDD.csv`（supervisor が書く CSV。queue.db は開かない）も `--metrics` に渡す。
 - 区間の境目は着地の commit の時刻（worktree の `git log --grep 'Dagq-Task: <ID>'`）。並列数は dagq.toml の `NEXTEST_TEST_THREADS` の履歴（`git log -G NEXTEST_TEST_THREADS -- dagq.toml`。6 は 40f693f2 から変わっていない）を test 段の開始の時刻に当てる。`scripts/landing-it.sh` も `NEXTEST_TEST_THREADS` を nextest に渡す。
 - 重なる着地は `git log --first-parent main` を区間の最初の log の test 段の開始から最後の log の mtime で区切って数え、goal 100 の 1552〜1558 は着地の commit で、goal 92 の着地は queue を読まないので commit の題の `cmux`・`goal 92` で拾う（近似）。
@@ -360,10 +362,10 @@ python3 docs/plans/it-reduction/measure_goal120.py \
 | 区間 | log の本数 | mtime（JST） | 含む goal 120 の着地 | 並列数 | 区間の間の main の着地 |
 | --- | ---: | --- | --- | ---: | ---: |
 | 前 | 20 | 2026-10-08 17:17:21 〜 10-09 01:55:06 | なし。ただし最後の 1 本は task 1715 の着地 63e3bfa0 自身の関門で、1715 の変更を含む木を流している | 6 | 25 |
-| 後 | 8 | 2026-10-13 04:41:32 〜 10-14 11:04:52 | 6 本すべて | 6 | 20 |
-| 後 20 本（参考） | 20 | 2026-10-13 04:41:32 〜 10-16 10:20:52 | 6 本すべて | 6 | 49 |
+| 後 | 20 | 2026-10-22 10:47:20 〜 10-26 06:24:16 | 7 本すべて | 6 | 211 |
+| 後（1720 の暫定、参考） | 8 | 2026-10-13 04:41:32 〜 10-14 11:04:52 | 2448 を除く 6 本 | 6 | 20 |
 
-goal 120 の着地: 1715 が 63e3bfa0（2026-10-09 01:55:18）、1717 が 8b7b696d（10-09 04:36:28）、1718 が 26b01f91（10-09 17:47:59）、1716 が f7183e60（10-11 15:59:39）、1729 が 3f0c9069（10-12 08:56:33）、1719 が f9b2ff44（10-13 03:34:16）。前の区間の最後の log と後の区間の最初の log のあいだの main の着地は 112 本。
+goal 120 の着地: 1715 が 63e3bfa0（2026-10-09 01:55:18）、1717 が 8b7b696d（10-09 04:36:28）、1718 が 26b01f91（10-09 17:47:59）、1716 が f7183e60（10-11 15:59:39）、1729 が 3f0c9069（10-12 08:56:33）、1719 が f9b2ff44（10-13 03:34:16）、2448 が b0669f0d（10-20 03:28:13）。前の区間の最後の log と後の区間の最初の log のあいだの main の着地は 424 本。
 
 重なる goal 100・goal 92 の着地:
 
@@ -371,10 +373,10 @@ goal 120 の着地: 1715 が 63e3bfa0（2026-10-09 01:55:18）、1717 が 8b7b69
 | --- | --- | --- |
 | 前の区間より前 | 1557 64c8a2d9（10-06 21:07）・1558 2762e010（10-07 17:54） | |
 | 前の区間の間 | 1552 0f0d3c76（10-08 20:14）・1554 c4ca3e74（22:12）・1553 2ebafe76（22:56）・1556 37f10088（23:30） | cde598ae（10-08 19:09、in-cmux mode の廃止）・506d4050（19:52、plugin の記述） |
-| 前と後のあいだ | 1555 b456c08f（10-09 15:06） | 4cbef4c0（10-09 02:24、goal 92 の測定）・bd734da9（07:17、ADR）・e4813469（16:50、`dagq inbox`）・388d1d1e（10-13 00:42、通知を [push] へ）・89b6f5d2（01:45、e2e から cmux を外す）・f9b2ff44（03:34、task 1719 自身） |
-| 後の区間の間 | | fc30c9a1（10-14 01:29、docs） |
+| 前と後のあいだ | 1555 b456c08f（10-09 15:06） | 4cbef4c0（10-09 02:24、goal 92 の測定）・bd734da9（07:17、ADR）・e4813469（16:50、`dagq inbox`）・388d1d1e（10-13 00:42、通知を [push] へ）・89b6f5d2（01:45、e2e から cmux を外す）・f9b2ff44（03:34、task 1719 自身）・fc30c9a1（10-14 01:29、docs）・71c4e259（10-19 11:31、CLI の `--cmux` を無視する引数に）・347aca73（16:41、plugin・AGENTS.md・README）・441ab4da（16:52、dagq.toml の `[headless]`）・b39b1502（17:17、docs の cmux の記述） |
+| 後の区間の間 | | |
 
-前の区間の 20 本のうち 10-08 20:14 より後の 13 本は goal 100 の 1552 の後の木で、前の区間は goal 100 の状態の分割の前と後を混ぜている。1555 と goal 92 の着地は前と後のあいだに入るので、その効果は goal 120 の移し替えと分けられない。goal 120 の task 2448（runtime_waiting_stages、10-20 03:28 に着地）はどちらの区間よりも後なので、この比較に入らない。
+前の区間の 20 本のうち 10-08 20:14 より後の 13 本は goal 100 の 1552 の後の木で、前の区間は goal 100 の状態の分割の前と後を混ぜている。1555 と goal 92 の着地は前と後のあいだに入るので、その効果は goal 120 の移し替えと分けられない。前と後のあいだの 424 本には、上の 2 つの goal のほかに新しい機能の IT を足した着地が多く入る（(f)）。
 
 ### (a)〜(d)・(g) 区間ごとの値
 
@@ -382,71 +384,75 @@ goal 120 の着地: 1715 が 63e3bfa0（2026-10-09 01:55:18）、1717 が 8b7b69
 | --- | ---: | --- | ---: | --- | --- | ---: | ---: | --- | --- | --- |
 | request 20 のとき（参考、coverage の関門、直近 10 本） | 10 | — | 6 | 範囲だけ 400〜640 | 3,194 | 1,186 | 3,029 | 明細の 1,192 本・2,884.5（別の時点） | 1,509・97 | — |
 | 前 | 20 | 10-08 17:17 〜 10-09 01:55 | 6 | 673.2（369.5〜872.5） | 3,999.4（2,160.9〜5,156.6） | 1,094.5 | 3,724.8 | 1,110・3,580.1 | 1,815・187.6 | 12.18（6.84〜24.46）・15.55 |
-| 後（暫定） | 8 | 10-13 04:41 〜 10-14 11:04 | 6 | 827.5（442.1〜1,049.5） | 4,957.0（2,646.6〜6,283.7） | 1,196.5 | 4,711.0 | 1,216・4,704.1 | 2,357・223.5 | 20.43（12.05〜44.64）・28.92 |
-| 差（後 − 前） | | | | +154.3（−22.9%） | +957.6（−23.9%） | +102 | +986.2（−26.5%） | +106 本・+1,124.0（−31.4%） | +542 本・+35.9 | |
-| 差（後 − request 20 のとき、累計） | | | | — | +1,763.0（−55.2%） | +10.5 | +1,682.0（−55.5%） | 比べない | +848 本・+126.5 | |
-| 後 20 本（参考、IT を外した log を含む） | 20 | 10-13 04:41 〜 10-16 10:20 | 6 | 573.1（442.1〜1,049.5） | 3,422.2（2,646.6〜6,283.7） | 954 | 3,147.8 | 1,249・5,181.5 | 2,395.5・255.6 | 20.29（12.05〜44.64）・26.94 |
+| 後 | 20 | 10-22 10:47 〜 10-26 06:24 | 6 | 1,142.9（868.3〜1,306.9） | 6,824.1（5,195.8〜7,818.6） | 1,611.5 | 6,600.1 | 1,718・6,376.3 | 3,226.5・212.0 | 13.10（9.95〜17.66）・18.60 |
+| 差（後 − 前） | | | | +469.7（−69.8%） | +2,824.7（−70.6%） | +517 | +2,875.3（−77.2%） | +608 本・+2,796.2（−78.1%） | +1,411.5 本・+24.4 | |
+| 差（後 − request 20 のとき、累計） | | | | — | +3,630.1（−113.7%） | +425.5 | +3,571.1（−117.9%） | 比べない | +1,717.5 本・+115.0 | |
+| 後（1720 の暫定、参考） | 8 | 10-13 04:41 〜 10-14 11:04 | 6 | 827.5（442.1〜1,049.5） | 4,957.0（2,646.6〜6,283.7） | 1,196.5 | 4,711.0 | 1,216・4,704.1 | 2,357・223.5 | 20.43（12.05〜44.64）・28.92 |
 
-括弧の % は短縮率（1 − 後 ÷ 前）。(c3) は前と後の比較にだけ使い、request 20 の 3,029 秒（log ごとの合計の中央値）とは比べない。後 20 本の (a)(b)(c1)(c2) は 12 本が 276〜292 本の IT を外した値なので、前と同じ量ではない。前と後 20 本のどれかの log が外した 294 本を両方から除いて数えると、log ごとの test の時間の合計の中央値は 2,293.1 → 3,041.6 秒（+748.5、−32.6%）、log ごとの dagq::it は 852 本・1,984.9 秒 → 937.5 本・2,746.5 秒（+761.6、−38.4%）。test 段の本数（Summary の tests run の中央値）は前 3,109、後 3,583.5、後 20 本 3,397.5。flaky は前 5・後 0、最終の FAIL は前に 1 本（10-08 23:50）。
+括弧の % は短縮率（1 − 後 ÷ 前）。(c3) は前と後の比較にだけ使い、request 20 の 3,029 秒（log ごとの合計の中央値）とは比べない。1720 の暫定の行は `--until 2026-10-20T12:00:00+09:00` で読んだ値で、そのときの累計は (b) +1,763.0、(c1) +10.5、(c2) +1,682.0 だった。test 段の本数（Summary の tests run の中央値）は前 3,109、後 4,876。後の区間の log が main で落ちている test として外した本数は 14 本が 0、1 本が 1、4 本が 3、1 本が 7。flaky は前 5・後 3、最終の FAIL は前に 1 本（10-08 23:50）、後に 4 本の log で計 7 本。
 
 ### (e) 対象の module
 
-test ごとの中央値の本数と合計（秒）。対象の module の全体で、前 137 本・895.1 秒、後 99 本・817.0 秒（−78.1 秒・8.7%）。`runtime_broker` は 4cdd183b（10-08 16:01、resource broker を外した着地）で tests/it から消えており、どちらの区間にも無い。
+test ごとの中央値の本数と合計（秒）。対象の module の全体で、前 137 本・895.1 秒、後 136 本・1,078.0 秒（+182.9 秒、短縮率 −20.4%）。`runtime_broker` は 4cdd183b（10-08 16:01、resource broker を外した着地）で tests/it から消えており、どちらの区間にも無い。
 
 | module | task | 前 本 | 前 秒 | 後 本 | 後 秒 | 差 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `runtime_cleanup` | 1715 | 20 | 283.5 | 17 | 202.7 | −80.8 |
-| `runtime_landing_release` | 1716 | 11 | 73.2 | 10 | 72.7 | −0.5 |
-| `runtime_recheck` | 1716 | 16 | 113.3 | 13 | 130.9 | +17.6 |
-| `runtime_release` | 1716 | 19 | 17.3 | 7 | 11.0 | −6.3 |
+| `runtime_cleanup` | 1715 | 20 | 283.5 | 21 | 211.0 | −72.5 |
+| `runtime_landing_release` | 1716 | 11 | 73.2 | 11 | 80.6 | +7.4 |
+| `runtime_recheck` | 1716 | 16 | 113.3 | 22 | 226.8 | +113.5 |
+| `runtime_release` | 1716 | 19 | 17.3 | 7 | 11.3 | −6.0 |
 | `runtime_broker` | — | 0 | 0 | 0 | 0 | 0 |
-| `runtime_disk` | 1717 | 7 | 34.8 | 4 | 24.3 | −10.5 |
-| `runtime_review_questions` | 1718 | 7 | 31.7 | 6 | 35.9 | +4.2 |
-| `runtime_evidence` | 1718 | 9 | 46.2 | 6 | 40.7 | −5.5 |
-| `runtime_landing_answers` | 1718 | 4 | 28.7 | 2 | 22.5 | −6.2 |
-| `runtime_stale_receipt` | 1718 | 7 | 44.6 | 5 | 48.9 | +4.3 |
-| `runtime_handoff` | 1719 | 20 | 116.3 | 17 | 120.3 | +4.0 |
-| `runtime_waiting` | 1719 | 9 | 45.3 | 5 | 32.5 | −12.8 |
-| `runtime_waiting_stages` | 1719 | 4 | 57.0 | 4 | 71.2 | +14.2 |
-| `runtime_heartbeat` | 1729 | 4 | 3.1 | 3 | 3.4 | +0.3 |
+| `runtime_disk` | 1717 | 7 | 34.8 | 6 | 35.7 | +0.9 |
+| `runtime_review_questions` | 1718 | 7 | 31.7 | 2 | 15.3 | −16.4 |
+| `runtime_evidence` | 1718 | 9 | 46.2 | 6 | 40.4 | −5.8 |
+| `runtime_landing_answers` | 1718 | 4 | 28.7 | 10 | 116.6 | +87.9 |
+| `runtime_stale_receipt` | 1718 | 7 | 44.6 | 4 | 34.3 | −10.3 |
+| `runtime_handoff` | 1719 | 20 | 116.3 | 31 | 217.5 | +101.2 |
+| `runtime_waiting` | 1719 | 9 | 45.3 | 6 | 33.0 | −12.3 |
+| `runtime_waiting_stages` | 1719・2448 | 4 | 57.0 | 4 | 51.7 | −5.3 |
+| `runtime_heartbeat` | 1729 | 4 | 3.1 | 6 | 3.7 | +0.6 |
 
-秒の増えた module の値は、前後の両方にある test の秒の増え（対象の module の両方にある 91 本で 683.9 → 773.5 秒。後の区間は load1 も高いが、原因とは言わない）と、足された test（`runtime_recheck` の 3 本など、下の (f)）を含む。前の区間の `runtime_cleanup` の 20 本は、最後の 1 本の log（task 1715 自身の関門で、1715 の変更を含む）にだけある 1715 の新しい名前を含む（ほかの 19 本の log は 19 本）。
+秒の増えた module の値は、前後の両方にある test の秒の増え（対象の module の両方にある 84 本で 621.8 → 688.6 秒）と、足された test（`runtime_recheck` の 12 本・`runtime_handoff` の 14 本・`runtime_landing_answers` の 8 本など、下の (f)）を含む。`runtime_waiting_stages` の後の 4 本は、2448 の後の 3 本に、2448 の後の着地が足した 1 本を加えたもの。前の区間の `runtime_cleanup` の 20 本は、最後の 1 本の log（task 1715 自身の関門で、1715 の変更を含む）にだけある 1715 の新しい名前を含む（ほかの 19 本の log は 19 本）。
 
 ### (f) 前と後のあいだに消えた・足された dagq::it の test
 
-前の区間にあり後に無い名前（消えた）と、後にあり前に無い名前（足された）。秒は、消えたものは前の、足されたものは後の test ごとの中央値の和。名前を変えた test は消えたと足されたの両方に入る。
+前の区間にあり後に無い名前（消えた）と、後にあり前に無い名前（足された）。秒は、消えたものは前の、足されたものは後の test ごとの中央値の和。名前を変えた test は消えたと足されたの両方に入る。もう片方の区間のどれかの log が main で落ちている test として外した名前は数えない。
 
 | 範囲 | 消えた | 足された | 差 |
 | --- | --- | --- | --- |
-| 対象の module | 46 本・211.2 | 8 本・43.5 | −38 本・−167.7 |
-| 対象の外の module | 37 本・46.4 | 181 本・687.5 | +144 本・+641.1 |
-| dagq::it の計 | 83 本・257.5 | 189 本・731.0 | +106 本・+473.5 |
-| 両方にある dagq::it（前 → 後の秒） | 1,027 本: 3,322.5 → 3,973.1（+650.6） | | |
+| 対象の module | 51 本・237.2 | 52 本・389.5 | +1 本・+152.3 |
+| 対象の外の module | 45 本・58.2 | 654 本・2,219.2 | +609 本・+2,161.0 |
+| dagq::it の計 | 96 本・295.4 | 706 本・2,608.6 | +610 本・+2,313.2 |
+| 両方にある dagq::it（前 → 後の秒） | 1,012 本: 3,248.6 → 3,767.7（+519.1） | | |
+| 外した名前のため数えない | `runtime_waiting_stages` の 2 本・36.0（前の秒） | | |
 
 対象の module ごと（本・秒）:
 
 | module | 消えた | 足された |
 | --- | --- | --- |
-| `runtime_recheck` | 6・34.4 | 3・19.0 |
-| `runtime_landing_release` | 4・31.4 | 3・11.6 |
-| `runtime_cleanup` | 4・28.2 | 1・6.4 |
-| `runtime_handoff` | 3・24.6 | — |
-| `runtime_waiting` | 4・22.5 | — |
-| `runtime_disk` | 4・20.8 | 1・6.6 |
-| `runtime_landing_answers` | 2・13.0 | — |
-| `runtime_stale_receipt` | 2・12.0 | — |
+| `runtime_recheck` | 6・34.4 | 12・114.2 |
+| `runtime_landing_release` | 4・31.4 | 4・16.9 |
+| `runtime_cleanup` | 4・28.2 | 5・21.1 |
+| `runtime_handoff` | 3・24.6 | 14・96.9 |
+| `runtime_waiting` | 4・22.5 | 1・2.6 |
+| `runtime_review_questions` | 5・22.0 | — |
+| `runtime_disk` | 4・20.8 | 3・17.7 |
+| `runtime_stale_receipt` | 3・20.5 | — |
+| `runtime_landing_answers` | 2・13.0 | 8・92.4 |
 | `runtime_evidence` | 3・10.3 | — |
 | `runtime_release` | 12・9.5 | — |
-| `runtime_review_questions` | 1・4.4 | — |
-| `runtime_heartbeat` | 1・0.0 | — |
+| `runtime_heartbeat` | 1・0.0 | 3・1.9 |
+| `runtime_waiting_stages` | —（2448 の旧 2 本・36.0 は数えない） | 2・25.7 |
 
-対象の外で足された（増え直し・新しい機能）秒の大きい module は `review_subagents` 13 本・75.7、`runtime_claim_class` 10・69.7、`runtime_clone` 15・55.9、`run_container` 8・53.3、`runtime_already_satisfied` 6・51.5、`broker_relay` 10・36.0、`runtime_spike_replan` 4・32.1、`runtime_container` 5・26.6、`runtime_toolchains` 4・22.3。消えたのは `review_subagents` 6・26.4、`runtime_review` 2・9.9、`lifecycle_up` 12・3.7、`lifecycle_cmux` 5・2.9 など（goal 92 の cmux の廃止を含む）。dagq::it の外では、resource broker の crate の test（`dagq-broker` ほか）が消え、lib の test が 599 本足された。全部の module の値はスクリプトの `diff` の行が出す。
+`runtime_waiting_stages` の旧 2 本（`a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer`・`a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped`）は 2448 が 1 本にまとめて tests/it から消えたが、後の区間の log の `landing-it: left out` がその名前を挙げているので、script は消えたに数えない。
 
-移し替えの効果の見積もりは、対象の module の「消えた − 足された」の −167.7 秒。(c3) の差はそれと対象の外の差と両方にある test の変化の和になる（−167.7 + 641.1 + 650.6 = +1,124.0）。
+対象の外で足された（新しい機能）秒の大きい module は `runtime_replan_park` 31 本・244.3、`runtime_already_satisfied` 23・124.5、`runtime_task_release` 16・118.1、`runtime_review_revise_limit` 9・97.7、`runtime_task_hold_park` 12・91.2、`run_container` 30・89.7、`review_subagents` 15・83.6、`runtime_claim_class` 12・79.1、`replan_planning` 25・78.1、`runtime_fresh_session` 8・75.5、`runtime_clone` 30・64.0。消えたのは `review_subagents` 6・26.4、`runtime_review` 2・9.9、`runtime_headless_stall` 1・6.0、`lifecycle_up` 12・3.7、`plan_review` 1・3.5、`lifecycle_cmux` 5・2.9 など（goal 92 の cmux の廃止を含む）。dagq::it の外では、resource broker の crate の test（`dagq-broker` ほか）が消え、lib の test が 1,796 本足され 214 本消えた。全部の module の値はスクリプトの `diff after` の行が出す。
+
+移し替えの効果の見積もりは、対象の module の「足された − 消えた」の +152.3 秒（旧 2 本を数えると +116.3 秒）。(c3) の差は、それと対象の外の差と両方にある test の変化の和から、数えない旧 2 本の 36.0 秒を引いたものになる（152.3 + 2,161.0 + 519.1 − 36.0 = 2,796.4。(c3) の +2,796.2 との 0.2 秒は丸め）。
 
 ### 各 task の交互 3 回の A/B
 
-1715〜1719・1729 の receipt の summary（着地の commit の本文。`git log --grep 'Dagq-Task: <ID>'`、run は Dagq-Run の trailer）の表を写した。どれも NEXTEST_TEST_THREADS=6 で、対象の module だけの `cargo nextest run --locked --test it -E ...` を base と変更後で交互に各 3 回、`--no-run` の後に流した中央値。test の時間の合計は、その回の PASS・FLKY-FL・FLAKY の行の秒の和（対象の module だけを流すので module の合計と同じ）。task の行が 1 回の nextest で、複数の module を流した task は module の行に module ごとの合計の中央値を置く（Summary は module に割らない）。どの task にも Summary と合計の値があり、欠けは無い。
+1715〜1719・1729・2448 の receipt の summary（着地の commit の本文。`git log --grep 'Dagq-Task: <ID>'`、run は Dagq-Run の trailer）の表を写した。どれも NEXTEST_TEST_THREADS=6 で、対象の module だけの nextest を base と変更後で交互に各 3 回流した中央値（1715〜1719・1729 は `--no-run` の後の `cargo nextest run --locked --test it -E ...`、2448 は base 7b5b4452 と変更後の archive の `cargo nextest run --archive-file ... -E 'test(/^runtime_waiting_stages::/)'`）。test の時間の合計は、その回の PASS・FLKY-FL・FLAKY の行の秒の和（対象の module だけを流すので module の合計と同じ）。task の行が 1 回の nextest で、複数の module を流した task は module の行に module ごとの合計の中央値を置く（Summary は module に割らない）。2448 の receipt は module の Summary（nextest の壁時計）と各回の load1 を記録し、module の test の時間の合計を記録していないので、合計の列は欠け。ほかの task には Summary と合計の値があり、欠けは無い。
 
 | task | module | Summary base | Summary 変更後 | 差 | 短縮率 | 合計 base | 合計 変更後 | 差 | 短縮率 | load1（receipt の記録） |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -466,8 +472,9 @@ test ごとの中央値の本数と合計（秒）。対象の module の全体�
 | 1719 | `runtime_waiting` | | | | | 66.5 | 35.3 | −31.2 | 46.9% | |
 | 1719 | `runtime_waiting_stages` | | | | | 70.0 | 68.3 | −1.7 | 2.4% | |
 | 1729 | `runtime_heartbeat` | 1.821 | 1.836 | +0.015 | −0.8% | 3.825 | 3.575 | −0.250 | 6.5% | 2.3〜3.6 |
+| 2448 | `runtime_waiting_stages` | 16.790 | 13.313 | −3.477 | 20.7% | 欠け | 欠け | 欠け | 欠け | 3.41〜4.55 |
 
-task ごとの合計の差の和は −348.401 秒（中央値の差の和で、同じ回の値の和ではない）。1716・1719 の Summary の中央値は receipt の各回の値から取った（38.297・27.603・61.215・51.263）。`runtime_broker` を移した task は無い。1729 の差は 3 回の幅（Summary 1.206〜2.065 秒）に収まり、receipt は原因を言わないとしている。どの receipt も load の違いを原因と言っていない。
+task ごとの合計の差の和は、合計のある 1715〜1719・1729 で −348.401 秒（中央値の差の和で、同じ回の値の和ではない）。2448 は合計が無いので和に入れない。2448 の receipt は、まとめた resume の 2 本の中央値が 15.332 + 16.686 = 32.0 秒から新しい 1 本の 8.553 秒になったこと（test ごとの値で、module の合計ではない）と、module の壁時計は残した revise の test（約 13 秒）が律速することを書いている。1716・1719 の Summary の中央値は receipt の各回の値から取った（38.297・27.603・61.215・51.263）。`runtime_broker` を移した task は無い。1729 の差は 3 回の幅（Summary 1.206〜2.065 秒）に収まり、receipt は原因を言わないとしている。どの receipt も load の違いを原因と言っていない。
 
 各 task の receipt の件数（`grep -c '#\[test\]'` の base → 変更後。A/B とは別の測定）:
 
@@ -486,21 +493,23 @@ task ごとの合計の差の和は −348.401 秒（中央値の差の和で、
 | 1719 | `tests/it/runtime_waiting.rs` | 9 | 5 | −4 |
 | 1719 | `tests/it/runtime_waiting_stages.rs` | 4 | 4 | 0 |
 | 1729 | `tests/it/runtime_heartbeat.rs` | 4 | 3 | −1 |
+| 2448 | `tests/it/runtime_waiting_stages.rs` | 4 | 3 | −1 |
 
-本番の関門の log の module ごとの前後の本数と秒は上の (e) の表（区間の test ごとの中央値で、receipt の件数と base の時点が違うので本数が合わない module がある。例えば `runtime_recheck` は前の区間の後に 3 本が足されている）。
+2448 の行は、着地の commit の本文の「旧 R・旧 D の 2 本 → 新 1 本」と「runtime_waiting_stages:: 3 passed」から読んだ（base 7b5b4452 の 4 本）。本番の関門の log の module ごとの前後の本数と秒は上の (e) の表（区間の test ごとの中央値で、receipt の件数と base の時点が違うので本数が合わない module がある。例えば `runtime_recheck` は前の区間の後に足された test を含む）。
 
 ### Summary との照合
 
-着地の検証の log（Summary を持ち、ec310498 より後で、`--until` の前のもの）307 本のうち、253 本が照合を通り、54 本を除いた（excluded.csv）。
+着地の検証の log（Summary を持ち、ec310498 より後で、`--until` の前のもの）537 本のうち、280 本が照合を通り、257 本を除いた（excluded.csv）。
 
-| 理由 | 本数 | うち前の区間の期間 | うち最後の着地から後の区間の最後の log まで |
+| 理由 | 本数 | うち前の区間の期間 | うち 2448 の着地から後の区間の最後の log まで |
 | --- | ---: | ---: | ---: |
-| no metrics in the test stage（test 段の間に load の標本が無い。host の CSV の欠け） | 33 | 4 | 1 |
-| narrowed IT（`every IT runs` の行が無い、IT を絞った log） | 20 | 2 | 1 |
-| canceled（`N/M tests run`、途中で止まった関門） | 1 | 0 | 0 |
+| narrowed IT（`every IT runs` の行が無い、IT を絞った log） | 215 | 2 | 193 |
+| no metrics in the test stage（test 段の間に load の標本が無い。host の CSV の欠け） | 39 | 4 | 8 |
+| canceled（`N/M tests run`、途中で止まった関門） | 2 | 0 | 1 |
+| 採った件数＋最終の FAIL の件数が `N tests run` と合わない（5,122 + 18 ≠ 5,141、10-26 02:55 の 4acaefdf） | 1 | 0 | 1 |
 
-採った件数＋最終の FAIL の件数が `N tests run` と合わない log と、PASS の件数が passed − FLAKY と合わない log は 0 本。照合を通った 253 本のうち、最後の着地の後の 114 本の 106 本は 10 本より多くの IT を外しており、後の区間に入らない（後 20 本には 12 本が入る）。
+PASS の件数が passed − FLAKY と合わない log は 0 本。照合を通った 280 本のうち、2448 の着地の後の 38 本の 15 本（10-20 04:30〜23:55）は 343〜350 本の IT を外しており後の区間に入らず、外す数が 10 本以下の 23 本（10-22 10:47 から）の最初の 20 本が後の区間。2448 の後の log の大半は IT を絞った log で、照合を通った全部の IT を流す log は 7 日で 38 本だった（照合で除いた 10 本を含めると 48 本）。
 
 ### 測り直し
 
-後の区間は 8 本で暫定。main で落ちている test を外す数が 10 本以下に戻った後の 20 本で、同じ手順で測り直す（follow_up）。この節の値は `--until 2026-10-20T12:00:00+09:00` で読んだもの。
+この節の値は `--until 2026-10-27T09:00:00+09:00` で読んだもの。1720 の暫定の後の区間（8 本）は `--until 2026-10-20T12:00:00+09:00` で読んだ値で、上の表に参考として残した。
