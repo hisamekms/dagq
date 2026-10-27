@@ -35,10 +35,10 @@ use crate::{
         command_rules::CommandClassifier,
         fresh_session,
         sessions::{
-            GOAL_REVIEW, HEADLESS_ROUTE, HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW,
-            REVIEW, RUN_SESSION, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS,
-            Scope, SessionHook, SpanChange, SpanContext, changes, hook_changes, hook_mark,
-            queue_span_kind, scope,
+            self, GOAL_REVIEW, HEADLESS_ROUTE, HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan,
+            PLAN_REVIEW, REVIEW, RUN_SESSION, RUNTIME_PLANNER, ReviseEvent, SESSION_CLOSED,
+            SESSION_OPENED, SESSION_TURNS, Scope, SessionHook, SpanChange, SpanContext, changes,
+            hook_changes, hook_mark, queue_span_kind, scope,
         },
         stats::rfc3339_millis,
         tokens::{self, ModelUse, SpanTokens, TokenUsage},
@@ -643,7 +643,7 @@ pub(super) fn follow(
                 "c.task_id=?1 AND c.run_id=?2",
                 params![task_id, run_id],
             )?,
-            run_context(conn, run_id)?,
+            run_context(conn, run_id, kind)?,
         ),
         (Scope::Proposal, Some(task_id), None) => {
             let proposal = payload["proposal_id"].as_i64();
@@ -2197,7 +2197,7 @@ fn open_spans_sql(opened: &str, closed: &str) -> String {
     )
 }
 
-fn run_context(conn: &Connection, run_id: &RunId) -> Result<SpanContext> {
+fn run_context(conn: &Connection, run_id: &RunId, kind: EventKind) -> Result<SpanContext> {
     let run = conn
         .query_row(
             "SELECT worktree_path, run_dir, workspace_id, worker_mode, actual_provider
@@ -2217,6 +2217,11 @@ fn run_context(conn: &Connection, run_id: &RunId) -> Result<SpanContext> {
         workspace_id,
         resumes: count(event_kind::RESUME_STARTED)?,
         revises: count(event_kind::REVISE_REQUESTED)? - count(event_kind::REVISE_UNSENT)?,
+        revise_attempt: if kind == EventKind::ReviseUnsent {
+            revise_attempt(conn, run_id)?
+        } else {
+            None
+        },
         goal_ids: Vec::new(),
         route,
         provider,
@@ -2224,6 +2229,37 @@ fn run_context(conn: &Connection, run_id: &RunId) -> Result<SpanContext> {
         proposal_id: None,
         session: renewed_session(conn, run_id)?,
     })
+}
+
+/// The run's `revise_requested` and `revise_unsent`, in order.
+const REVISE_EVENTS_SQL: &str = "SELECT kind, payload FROM run_events
+       WHERE run_id=?1 AND kind IN (?2, ?3) ORDER BY id";
+
+/// [`SpanContext::revise_attempt`] of run `run_id`
+/// ([`sessions::revise_attempt`] of its revise requests and withdrawals).
+fn revise_attempt(conn: &Connection, run_id: &RunId) -> Result<Option<i64>> {
+    let mut statement = conn.prepare_cached(REVISE_EVENTS_SQL)?;
+    let events = statement
+        .query_map(
+            params![
+                run_id,
+                event_kind::REVISE_REQUESTED,
+                event_kind::REVISE_UNSENT
+            ],
+            |r| {
+                let payload: Value = json_col(r, "payload")?;
+                let attempt = payload["attempt"].as_i64();
+                Ok(
+                    if r.get::<_, String>("kind")? == event_kind::REVISE_REQUESTED {
+                        ReviseEvent::Requested(attempt)
+                    } else {
+                        ReviseEvent::Unsent(attempt)
+                    },
+                )
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(sessions::revise_attempt(&events))
 }
 
 /// The run's last session boundary (a `session_renewed` or a

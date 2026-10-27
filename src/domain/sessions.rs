@@ -195,6 +195,36 @@ impl OpenSpan {
     }
 }
 
+/// A run's `revise_requested` or `revise_unsent`, with its payload's
+/// `attempt` (`None` on an older event).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviseEvent {
+    Requested(Option<i64>),
+    Unsent(Option<i64>),
+}
+
+/// [`SpanContext::revise_attempt`] of a run whose revise requests and
+/// withdrawals are `events`, oldest first: each withdrawal takes back the
+/// last request of its attempt not yet withdrawn, or the last one standing
+/// when it has no attempt or none standing has it.
+pub fn revise_attempt(events: &[ReviseEvent]) -> Option<i64> {
+    let mut requests = Vec::new();
+    for event in events {
+        match *event {
+            ReviseEvent::Requested(attempt) => requests.push(attempt),
+            ReviseEvent::Unsent(attempt) => {
+                let withdrawn = attempt
+                    .and_then(|_| requests.iter().rposition(|request| *request == attempt))
+                    .or(requests.len().checked_sub(1));
+                if let Some(index) = withdrawn {
+                    requests.remove(index);
+                }
+            }
+        }
+    }
+    requests.pop().flatten()
+}
+
 /// What the runtime knows of the run or proposal an event is about, beyond
 /// the event itself.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -210,6 +240,11 @@ pub struct SpanContext {
     /// The `revise_requested` events the run has, this one's included, but
     /// those a `revise_unsent` withdrew.
     pub revises: i64,
+    /// The `attempt` of the run's last `revise_requested` a `revise_unsent`
+    /// did not withdraw (run-wide, withdrawn requests counted), which the
+    /// revise a `revise_unsent` reopens carries. `None` when that request
+    /// has no attempt (an older event): [`Self::revises`] stands in.
+    pub revise_attempt: Option<i64>,
     /// The goals of the proposal's tasks (a plan review's), ascending, or
     /// the goal a goal review is of.
     pub goal_ids: Vec<i64>,
@@ -340,7 +375,7 @@ pub fn changes(
                 "session_id": session_id,
                 "cwd": context.worktree,
                 "transcript_path": null,
-                "attempt": context.revises,
+                "attempt": payload["attempt"].as_i64().unwrap_or(context.revises),
                 "workspace_id": text("workspace_id"),
                 "route": context.route,
                 "provider": context.provider,
@@ -354,7 +389,7 @@ pub fn changes(
             let mut changes = close(&[REVISE], NEXT_SPAN);
             let reopened = open.iter().rev().find(|span| span.kind() == REVISE);
             let (span, attempt) = if context.revises > 0 {
-                (REVISE, context.revises)
+                (REVISE, context.revise_attempt.unwrap_or(context.revises))
             } else if context.resumes > 0 {
                 (RESUME, context.resumes)
             } else {
@@ -1179,6 +1214,124 @@ mod tests {
         assert_eq!(payload["kind"], REVISE);
         assert_eq!(payload["attempt"], 1);
         assert_eq!(payload["workspace_id"], json!(null));
+    }
+
+    /// A revise's span carries its `revise_requested`'s attempt (run-wide,
+    /// withdrawn requests counted), not the count of requests standing; a
+    /// withdrawn one's reopens the last standing request's, and a request
+    /// without an attempt (an older event) falls back to the count.
+    #[test]
+    fn revise_spans_carry_the_attempt_of_their_request() {
+        let worker = span(1, json!({"kind": WORKER, "session_id": "run-1"}));
+        let first = changes(
+            EventKind::ReviseRequested,
+            &json!({"attempt": 1}),
+            &[worker],
+            &SpanContext {
+                revises: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(opened(&first[1])["attempt"], 1);
+        let second = changes(
+            EventKind::ReviseRequested,
+            &json!({"attempt": 2}),
+            &[span(2, opened(&first[1]).clone())],
+            &SpanContext {
+                revises: 2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(opened(&second[1])["attempt"], 2);
+        let reopened = changes(
+            EventKind::ReviseUnsent,
+            &json!({}),
+            &[span(3, opened(&second[1]).clone())],
+            &SpanContext {
+                revises: 1,
+                revise_attempt: Some(1),
+                ..Default::default()
+            },
+        );
+        assert_eq!(opened(&reopened[1])["kind"], REVISE);
+        assert_eq!(opened(&reopened[1])["attempt"], 1);
+        // The last request standing names its attempt, not the count.
+        let standing = SpanContext {
+            revises: 2,
+            revise_attempt: Some(3),
+            ..Default::default()
+        };
+        let later = changes(EventKind::ReviseUnsent, &json!({}), &[], &standing);
+        assert_eq!(opened(&later[0])["attempt"], 3);
+        // Two requests stand, but this one is the run's third.
+        let third = changes(
+            EventKind::ReviseRequested,
+            &json!({"attempt": 3}),
+            &[span(4, opened(&reopened[1]).clone())],
+            &SpanContext {
+                revises: 2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(opened(&third[1])["attempt"], 3);
+
+        let legacy = SpanContext {
+            revises: 2,
+            ..Default::default()
+        };
+        let requested = changes(EventKind::ReviseRequested, &json!({}), &[], &legacy);
+        assert_eq!(opened(&requested[0])["attempt"], 2);
+        let reopened = changes(EventKind::ReviseUnsent, &json!({}), &[], &legacy);
+        assert_eq!(opened(&reopened[0])["attempt"], 2);
+    }
+
+    /// A withdrawal takes back the last request of its attempt, else (no
+    /// attempt, or none standing has it) the last one standing; what stands
+    /// last names the attempt, unless it has none or nothing stands.
+    #[test]
+    fn revise_attempt_is_the_last_request_left_standing() {
+        use ReviseEvent::{Requested, Unsent};
+        let cases: [(&[ReviseEvent], Option<i64>); 8] = [
+            (&[], None),
+            (&[Requested(Some(1))], Some(1)),
+            // revise → revise_unsent → revise: the run's second.
+            (
+                &[Requested(Some(1)), Unsent(Some(1)), Requested(Some(2))],
+                Some(2),
+            ),
+            (
+                &[
+                    Requested(Some(1)),
+                    Requested(Some(2)),
+                    Unsent(Some(2)),
+                    Requested(Some(3)),
+                    Requested(Some(4)),
+                    Unsent(Some(4)),
+                ],
+                Some(3),
+            ),
+            // Its own attempt even when it is not the last request.
+            (
+                &[Requested(Some(1)), Requested(Some(2)), Unsent(Some(1))],
+                Some(2),
+            ),
+            (
+                &[Requested(Some(1)), Requested(Some(2)), Unsent(None)],
+                Some(1),
+            ),
+            (
+                &[Requested(Some(1)), Requested(Some(2)), Unsent(Some(9))],
+                Some(1),
+            ),
+            (
+                &[Requested(None), Requested(Some(2)), Unsent(Some(2))],
+                None,
+            ),
+        ];
+        for (events, attempt) in cases {
+            assert_eq!(revise_attempt(events), attempt, "{events:?}");
+        }
+        assert_eq!(revise_attempt(&[Requested(Some(1)), Unsent(Some(1))]), None);
     }
 
     /// After a `session_renewed` the run's own spans open with the new
