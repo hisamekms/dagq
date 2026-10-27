@@ -1191,9 +1191,37 @@ fn a_handoff_without_its_state_during_a_resume_still_watches_the_session() {
 /// `auto_repaired` (`repair: resume_adopted`, `handoff: false`).
 #[test]
 fn a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter() {
+    adopted_resume(&[]);
+}
+
+/// The same adopted resume of a run whose first session's `stalled`
+/// recovery job answered `wait` until an hour on: the wait is that
+/// session's, not the resume's, and the resume reaches its receipt and
+/// lands as before with no recovery job of its own.
+#[test]
+fn an_adopted_resume_after_a_stalled_wait_of_the_first_session_lands() {
+    let detail = adopted_resume(&earlier_stalled_wait());
+    assert_eq!(payloads(&detail, "recovery_requested").len(), 1);
+    assert_eq!(payloads(&detail, "recovery_finished").len(), 1);
+}
+
+/// [`a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter`]
+/// with `earlier` recorded once the run is parked; the landed task's detail.
+fn adopted_resume(earlier: &[(&'static str, Value)]) -> dagq::domain::TaskDetail {
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let (run, _) = parked_conflict(&repo, &db, &backend);
+    let queue = SqliteQueue::open(&db).unwrap();
+    for (kind, payload) in earlier {
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::from_name(kind).unwrap(),
+                payload.clone(),
+            )
+            .unwrap();
+    }
+    drop(queue);
     backend.resume_script_for(
         2,
         "await_message; await_file \"$EXIT.go\"; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
@@ -1277,6 +1305,7 @@ fn a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter() {
     let finished = payloads(&detail, "resume_finished");
     assert_eq!(finished.len(), 1);
     assert_eq!(finished[0]["outcome"], "resolved");
+    detail
 }
 
 /// A handoff that finds a leased run it has nothing to rebuild from (a

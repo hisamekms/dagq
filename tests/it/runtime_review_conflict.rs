@@ -312,6 +312,23 @@ fn an_adopted_headless_run_with_a_pending_conflict_request_waits_without_sending
 /// (task 1437).
 #[test]
 fn an_adopted_headless_run_with_a_pending_revise_waits_without_sending_it_again() {
+    adopted_pending_revise(&[]);
+}
+
+/// The same adopted revise whose first session's `stalled` recovery job
+/// answered `wait` until an hour on, before the revise: the wait is the
+/// earlier session's, not the revise's, and the revise lands as before
+/// with no recovery job of its own.
+#[test]
+fn an_adopted_revise_after_a_stalled_wait_of_the_first_session_lands() {
+    let detail = adopted_pending_revise(&earlier_stalled_wait());
+    assert_eq!(payloads(&detail, "recovery_requested").len(), 1);
+    assert_eq!(payloads(&detail, "recovery_finished").len(), 1);
+}
+
+/// [`an_adopted_headless_run_with_a_pending_revise_waits_without_sending_it_again`]
+/// with `earlier` recorded before the validation; the landed run's detail.
+fn adopted_pending_revise(earlier: &[(&'static str, Value)]) -> dagq::domain::TaskDetail {
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = TestWorkspace::new(&db, false, &crate::runtime_review::revising_agent(1));
@@ -322,7 +339,8 @@ fn an_adopted_headless_run_with_a_pending_revise_waits_without_sending_it_again(
         &backend,
         &reviewer,
         |_, sent_at| {
-            vec![
+            let mut events = earlier.to_vec();
+            events.extend([
                 (
                     "validation_finished",
                     json!({"status": "awaiting_integration"}),
@@ -336,7 +354,8 @@ fn an_adopted_headless_run_with_a_pending_revise_waits_without_sending_it_again(
                     "revise_requested",
                     json!({"attempt": 1, "reasons": ["add a line"], "sent_at": sent_at}),
                 ),
-            ]
+            ]);
+            events
         },
         || "dagq: the supervisor's review asks for changes (revise 1 of 2).".to_owned(),
         true,
@@ -353,6 +372,7 @@ fn an_adopted_headless_run_with_a_pending_revise_waits_without_sending_it_again(
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
     assert_eq!(reviewer.prompts().len(), 1);
     assert_exit_sent(&backend, &run, 1);
+    detail
 }
 
 /// A headless run whose supervisor stopped after it recorded its second

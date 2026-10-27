@@ -267,7 +267,7 @@ impl Supervisor<'_> {
                     answer_start: None,
                     stall: Box::new(StallWatch::adopt(&*self.queue, run)?),
                     stale: adopted_stale_nudge(&*self.queue, run, SESSION_PHASE, None)?,
-                    recovery: RecoveryWatch::adopt(&*self.queue, run)?,
+                    recovery: RecoveryWatch::adopt(&*self.queue, run, None)?,
                     input_at: None,
                     answered_at: None,
                     asks_from: 0,

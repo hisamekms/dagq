@@ -2059,6 +2059,25 @@ pub fn payloads<'a>(detail: &'a dagq::domain::TaskDetail, kind: &str) -> Vec<&'a
         .collect()
 }
 
+/// The events of a `stalled` recovery job (`turn_without_receipt`) of an
+/// earlier session that answered `wait` until an hour on: a `wait` an
+/// adopted revise, conflict or resume does not carry over.
+pub fn earlier_stalled_wait() -> Vec<(&'static str, Value)> {
+    let recheck_at = SystemTime::now() + Duration::from_secs(3600);
+    let recheck_at_ms =
+        i64::try_from(recheck_at.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
+    vec![
+        (
+            "recovery_requested",
+            json!({"alert": "stalled", "reason": "turn_without_receipt", "attempt": 1, "idle_secs": 0, "nudges": 2}),
+        ),
+        (
+            "recovery_finished",
+            json!({"alert": "stalled", "reason": "turn_without_receipt", "attempt": 1, "verdict": "repair", "confidence": "high", "applied": ["wait"], "escalated": false, "outcome": "applied", "recheck_at_ms": recheck_at_ms}),
+        ),
+    ]
+}
+
 pub const IDLE_AGENT: &str = "commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
 
 /// Provision and start a run under `token` exactly as `supervise` does

@@ -686,13 +686,16 @@ impl SessionWatch {
         })
     }
 
+    /// Rebuild the recovery of an adopted revise, conflict or resume from
+    /// the jobs recorded after its `anchor` (task 742): an earlier
+    /// session's `wait` does not hold for this one.
     pub(super) fn adopt(
         &mut self,
         queue: &dyn Queue,
         run: &TaskRun,
-        _anchor: EventId,
+        anchor: EventId,
     ) -> Result<()> {
-        self.recovery = RecoveryWatch::adopt(queue, run)?;
+        self.recovery = RecoveryWatch::adopt(queue, run, Some(anchor))?;
         Ok(())
     }
 

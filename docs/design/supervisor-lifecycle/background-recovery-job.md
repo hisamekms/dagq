@@ -210,6 +210,7 @@ turnの後の扱いの詳細は[非対話のworker](headless-worker.md#turnの�
 
 - adoptはstalledのreasonごとのwaitの再確認の時刻とturnの依頼の履歴を読み、同じ依頼を二重に届けない。
   検知の結末の判断もrun_eventsの記録から組み立て直す。
+  waitはworkerの最初のsessionならrunの全eventから、引き継いだrevise・conflict・resumeの段ならその段の錨より後の`recovery_finished`だけから組み立て、前の段のwaitを持ち込まない。
 - `idle_process`のCPUの観測はメモリだけなので、最初の標本から数え直す。
 - 前のsupervisorが走らせていたjobは引き継がず、記録済みのpidと開始時刻でその子を片付けてから新しいjobを立てる。
   handoffもjobを止めてから引き継ぐ。

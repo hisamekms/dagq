@@ -470,15 +470,23 @@ impl Supervisor<'_> {
 
 impl RecoveryWatch {
     /// Rebuild the watch of an adopted run from its events, so a marker
-    /// already handed to a job is not handed again.
-    pub(super) fn adopt(queue: &dyn Queue, run: &TaskRun) -> Result<Self> {
-        let events = queue.run_events(run.id())?;
+    /// already handed to a job is not handed again. `after` is the anchor
+    /// of an adopted revise, conflict or resume: only the jobs that ended
+    /// after it, during that phase, carry over, not an earlier session's
+    /// (task 742). The worker's own session passes `None` and rebuilds from
+    /// all of the run's events.
+    pub(super) fn adopt(queue: &dyn Queue, run: &TaskRun, after: Option<EventId>) -> Result<Self> {
+        Ok(Self::from_events(&queue.run_events(run.id())?, after))
+    }
+
+    /// [`Self::adopt`] from the run's `events`.
+    fn from_events(events: &[RunEvent], after: Option<EventId>) -> Self {
         let mut watch = Self::default();
         // The `wait` a `stalled` job answered holds for the adopter too, so
         // it starts no job before the wait is over.
         for reason in IDLE_REASONS {
             let finished = events.iter().rfind(|e| {
-                e.kind == EventKind::RecoveryFinished && {
+                after.is_none_or(|after| e.id > after) && e.kind == EventKind::RecoveryFinished && {
                     let record = restore_payload::<RecoveryRecord>(&e.payload);
                     record.alert == Some(RecoveryAlert::Stalled.as_str())
                         && record.reason == Some(reason)
@@ -491,7 +499,7 @@ impl RecoveryWatch {
                 watch.held.push((RecoveryAlert::Stalled, Some(reason), at));
             }
         }
-        Ok(watch)
+        watch
     }
 
     /// Stop a job still running: the session ended or the run moved on.
@@ -1955,6 +1963,59 @@ mod tests {
         assert!(fresh(Duration::ZERO, interval));
         assert!(fresh(interval - ms, interval));
         assert!(!fresh(interval, interval));
+    }
+
+    /// An adopted watch keeps the `wait` of each `stalled` reason's last
+    /// job until its recheck. An adopted revise, conflict or resume
+    /// (`after` its anchor) keeps only the waits of jobs that ended after
+    /// the anchor; the worker's own session (`None`) keeps those of the
+    /// whole run (task 742).
+    #[test]
+    fn an_adopted_watch_holds_the_waits_recorded_after_its_anchor() {
+        use crate::domain::recovery::{PERMISSION_DENIED, TURN_WITHOUT_RECEIPT};
+        let finished = |id: i64, reason: &str, recheck_at_ms: i64| RunEvent {
+            id: EventId::new(id),
+            task_id: Some(TaskId::new(1)),
+            goal_id: None,
+            run_id: None,
+            kind: EventKind::RecoveryFinished.into(),
+            payload: json!({
+                "alert": "stalled", "reason": reason, "attempt": 1,
+                "outcome": "applied", "recheck_at_ms": recheck_at_ms,
+            }),
+            created_at: format!("t{id}"),
+            actor: None,
+        };
+        let events = [
+            finished(1, TURN_WITHOUT_RECEIPT, 9_000),
+            finished(2, PERMISSION_DENIED, 9_500),
+            finished(4, TURN_WITHOUT_RECEIPT, 8_000),
+        ];
+        let held = |after| RecoveryWatch::from_events(&events, after).held;
+        assert_eq!(
+            held(None),
+            [
+                (
+                    RecoveryAlert::Stalled,
+                    Some(TURN_WITHOUT_RECEIPT),
+                    at_millis(8_000)
+                ),
+                (
+                    RecoveryAlert::Stalled,
+                    Some(PERMISSION_DENIED),
+                    at_millis(9_500)
+                ),
+            ]
+        );
+        assert_eq!(
+            held(Some(EventId::new(3))),
+            [(
+                RecoveryAlert::Stalled,
+                Some(TURN_WITHOUT_RECEIPT),
+                at_millis(8_000)
+            )]
+        );
+        assert!(held(Some(EventId::new(4))).is_empty());
     }
 
     fn verdict(json: Value) -> RecoveryVerdict {
