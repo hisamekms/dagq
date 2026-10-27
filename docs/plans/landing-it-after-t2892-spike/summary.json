@@ -1,0 +1,162 @@
+{
+ "windows": {
+  "before": [
+   "2026-10-13T02:12:03.000Z",
+   "2026-10-20T02:12:03.000Z"
+  ],
+  "after": [
+   "2026-10-20T02:12:03.000Z",
+   "2026-10-27T02:12:03.000Z"
+  ]
+ },
+ "before": {
+  "attempts": 139,
+  "log_missing": 0,
+  "log_unknown": 2,
+  "read": 137,
+  "full": {
+   "n": 128,
+   "duration_median": 707.7705000000001,
+   "duration_p90": 1211.363,
+   "build_median": 185.35000000000002,
+   "build_p90": 460.2,
+   "nextest_median": 510.192,
+   "nextest_p90": 658.282,
+   "verify_total_median": 807.45,
+   "verify_total_p90": 1590.4
+  },
+  "full_share": 0.934,
+  "reasons": {
+   "not_in_tree": 34,
+   "threshold": 83,
+   "common": 17
+  },
+  "reasons_only": {
+   "not_in_tree": 28,
+   "threshold": 83,
+   "common not_in_tree": 6,
+   "common": 11
+  },
+  "passed": {
+   "n": 121,
+   "duration_median": 652.455,
+   "duration_p90": 1025.335,
+   "build_median": 167.2,
+   "build_p90": 423.4,
+   "nextest_median": 499.372,
+   "nextest_p90": 652.78,
+   "verify_total_median": 778.0,
+   "verify_total_p90": 1368.7
+  },
+  "all": {
+   "n": 139,
+   "duration_median": 689.581,
+   "duration_p90": 1213.618,
+   "build_median": 171.2,
+   "build_p90": 456.0,
+   "nextest_median": 501.748,
+   "nextest_p90": 655.542,
+   "verify_total_median": 805.9,
+   "verify_total_p90": 1705.9
+  },
+  "narrowed": {
+   "n": 9,
+   "duration_median": 242.221,
+   "duration_p90": 699.958,
+   "build_median": 157.2,
+   "build_p90": 301.2,
+   "nextest_median": 55.953,
+   "nextest_p90": 455.168,
+   "verify_total_median": 302.1,
+   "verify_total_p90": 1263.7
+  },
+  "narrowed_left_broad_runs": 0,
+  "narrowed_left_not_in_tree_runs": 0
+ },
+ "after": {
+  "attempts": 230,
+  "log_missing": 0,
+  "log_unknown": 0,
+  "read": 230,
+  "full": {
+   "n": 36,
+   "duration_median": 1194.1565,
+   "duration_p90": 1523.246,
+   "build_median": 108.0,
+   "build_p90": 238.0,
+   "nextest_median": 1098.432,
+   "nextest_p90": 1268.739,
+   "verify_total_median": 1254.9499999999998,
+   "verify_total_p90": 1634.9
+  },
+  "full_share": 0.157,
+  "reasons": {
+   "common": 33,
+   "threshold": 3
+  },
+  "reasons_only": {
+   "common": 33,
+   "threshold": 3
+  },
+  "passed": {
+   "n": 212,
+   "duration_median": 217.60500000000002,
+   "duration_p90": 643.073,
+   "build_median": 102.1,
+   "build_p90": 221.2,
+   "nextest_median": 89.4545,
+   "nextest_p90": 542.754,
+   "verify_total_median": 296.35,
+   "verify_total_p90": 723.6
+  },
+  "all": {
+   "n": 230,
+   "duration_median": 232.9395,
+   "duration_p90": 1093.033,
+   "build_median": 103.6,
+   "build_p90": 221.2,
+   "nextest_median": 93.08,
+   "nextest_p90": 978.257,
+   "verify_total_median": 309.75,
+   "verify_total_p90": 1157.6
+  },
+  "narrowed": {
+   "n": 194,
+   "duration_median": 195.715,
+   "duration_p90": 367.618,
+   "build_median": 103.1,
+   "build_p90": 221.2,
+   "nextest_median": 82.9725,
+   "nextest_p90": 191.805,
+   "verify_total_median": 259.5,
+   "verify_total_p90": 521.3
+  },
+  "narrowed_left_broad_runs": 158,
+  "narrowed_left_not_in_tree_runs": 31
+ },
+ "ci": {
+  "runs": 338,
+  "runs_with_result": {
+   "macos": 159,
+   "linux": 165
+  },
+  "newly_red": 23,
+  "verdicts": {
+   "excluded_known_failure": 4,
+   "miss": 11,
+   "ran": 8
+  },
+  "tests": {
+   "dagq::it::planner_headless::a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer": 6,
+   "dagq::it::planner_headless::a_headless_request_planner_ends_while_its_question_waits_and_the_answer_opens_one_that_declines": 5,
+   "dagq::it::runtime_integrate::moved_queue_directory_resolves_run_paths_and_lands_awaiting_runs": 2,
+   "dagq::it::runtime_sweep::a_live_supervisor_prunes_the_registration_a_dead_one_left_behind": 2,
+   "dagq::it::runtime_cleanup::a_process_running_from_an_ended_runs_worktree_is_stopped_before_it_goes": 2,
+   "dagq::it::run_container::the_supervisor_starts_the_sccache_server_of_a_turn_s_container_on_its_pass": 2,
+   "dagq::it::cli_kpi::report_out_through_the_service_is_written_by_the_client": 1,
+   "dagq::it::runtime_headless::a_later_turn_is_the_runs_agent_and_its_helper_no_idle_process": 1,
+   "dagq::it::location::move_the_queue_directory_then_rebind": 1,
+   "dagq::it::location::rebind_with_db_then_move_the_queue_directory": 1
+  }
+ }
+}
