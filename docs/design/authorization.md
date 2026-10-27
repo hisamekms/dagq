@@ -42,7 +42,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
   supervisorの引き継ぎはexecの前にheadlessのjobを止めるが（[Handoff](supervisor-lifecycle/handoff.md)、[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、それは検証と着地の進行中のslotを進め終えた区切りなので、それまでjobは走り続ける。
   引き継ぎを受けなかったsupervisorのjobと、supervisorが死んで起動し直すまでに残ったjob（引き継ぐsupervisorが止める）は、終わるか止められるまで走る
 - これは新しい弱点ではなく、host実行が助言的（advisory）であることの既知の限界の一例として受け入れる。
-  どのプロセスも`DAGQ_ROLE`を偽れる（ADR-t728-1の決定6）ので、古いバイナリに新しいroleを教えるコードは足さない
+  `DAGQ_ROLE`は偽れるので、古いバイナリに新しいroleを教えるコードは足さない
 - 気になるときは、戻す前に`down --wait`でjobを終わらせるか、戻した後に走っているjobを止める
 
 ## Capability
@@ -90,6 +90,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 | 着地 | `landing.request` | `integrate`（Integratorへの依頼。ADR-t728-2） |
 | | `landing.land` / `landing.push` | Integratorの内側 |
 | 計測 | `telemetry.report` | CLIには無い（queue serviceの`telemetry_report`） |
+| 発行 | `token.issue` | CLIには無い（queue serviceの`issue_token`） |
 | 予約 | `reserved.filesystem_read` `reserved.filesystem_write` `reserved.network` `reserved.secret_read` | 後の段（sandbox）。この段では誰にも与えない |
 
 CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`requests`で、matchに既定の枝を置かないので、コマンドを足すと写しを書くまでcompileが通らない。
@@ -120,8 +121,8 @@ roleの名前だけでactorを名指さないplannerのidは、どのproposalの
 | plan-review-job・goal-review-job・throughput-review-job | 読み取りだけ | throughput-review-jobは[スループットの見直し](supervisor-lifecycle/throughput-review.md)（ADR-t996-1） |
 | setup-review-job | 読み取りだけ | なし（[setup-review](supervisor-lifecycle/setup-review.md)） |
 | observer | 読み取り・`queue.watch`・`ci.read`・`finding.record`・`finding.resolve`・`finding.ask`・`eval.read` | `finding.resolve`と`finding.ask`はfindingだけ |
-| supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`eval.read`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request`・`replan.park`・`replan.apply` | なし。`queue.admin`は自動更新が新しいバイナリで`install`と同じ確認（`migrate --check`・`migrate`・使い捨てのqueueの`init`）をするため。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
-| wrapper | 読み取り・`session.run`・`session.record` | 自分のrunかplanner（tokenのprincipalのactor id）だけ。queue serviceの`session_run`・`session_record`で判定する（[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)決定4） |
+| supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`eval.read`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request`・`replan.park`・`replan.apply`・`token.issue` | なし。`queue.admin`は自動更新が新しいバイナリで`install`と同じ確認（`migrate --check`・`migrate`・使い捨てのqueueの`init`）をするため。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
+| wrapper | 読み取り・`session.run`・`session.record` | 自分のrunかplanner（tokenのprincipalのactor id）だけ（ADR-t3102-1決定4） |
 | integrator | 読み取り・`landing.land`・`landing.push` | なし |
 | executor-telemetry | `telemetry.report`だけ | tokenの対象に制御側が登録したsessionだけ |
 
@@ -300,20 +301,21 @@ Integratorはrole `integrator`のactor（`integrator:<pid>`）で、`landing.lan
 
 - **依頼**: supervisorの着地のthreadと、人（とinboxの代行）の`integrate`は`IntegrationRequest`を作り、`Integrator::land`に渡す。
   `integrate`は`Integrator::approve`がrunを選び、依頼者が`landing.request`を持つことを確かめてから（持たなければ何も記録せずに拒む）`integration_approved`を依頼者として記録し、slotを取って依頼を返す。
-  supervisorはslotを自分で取り（`integration_started`はsupervisorの記録）、依頼者は`supervisor:<pid>`
-- **Integratorの検査**（`landing_refusal`）: 依頼者が`StaticPolicy`でそのrunに`landing.request`を持つこと（user・inbox・supervisor）、runが`integrating`で依頼のtokenがleaseを持つこと、runが承認済み（`integration_approved`）か、最新のreviewが`pass`かその後に収束した`revise_limit_judged`があること（`RunHistory::landable`）。
+  supervisorのslotはserviceの`begin_landing`が取り（依頼者は`supervisor:<pid>`）、同じtransactionでintegratorのtokenを発行する
+- **Integratorの検査**（`landing_refusal`）: 依頼者が`StaticPolicy`でそのrunに`landing.request`を持つこと、runが`integrating`で依頼のtokenがleaseを持つこと、runが承認済み（`integration_approved`）か、最新のreviewが`pass`かその後に収束した`revise_limit_judged`があること（`RunHistory::landable`）。
   どれかが欠ければ着地せず、slotを持っていれば`abort_integration`で返して（`integration_error`）errorにする。
   reviewの`pass`は着地の必要条件で、この後のreceiptの再検査・rebase・検証コマンド・scopeの判定が落ちれば着地しない（ADR-t728-2の決定3）
-- **記録**: `Integrator::land`の間、queueのeventのactorはIntegrator（role `integrator`、id `integrator:<pid>`）で、`requested_by`は依頼者のactor id。
-  依頼と記録を切り替える入口はport `EventStore::act_as`
+- **記録**: `Integrator::land`の間、queueのeventのactorはIntegratorで、`requested_by`は依頼者のactor id。
+  切り替えの入口は`EventStore::act_as`
 - **push**: `MainRemote::push_main`は`PushGrant`を引数に取り、`PushGrant`はIntegratorが`landing.push`を確かめてからしか作れないので、`GitRepository`のpushはIntegratorの外から呼べない
 
 host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユーザーで動き、この境界は論理的なもの（ADR-t728-2の決定4）。
 
 ### queue serviceのユースケース（service側）
 
-queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、要求のtokenから決めたprincipalをactorにして、対話と記録のユースケースを上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue）に、`watch_poll`を`queue.watch`に通す。
+queue service（ADR-t1233-1決定4）は、要求のtokenから決めたprincipalをactorにして、対話と記録のユースケースを上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue）に、`watch_poll`を`queue.watch`に通す。
 拒否は同じ`authorization_denied`（拒まれたprincipalがactor）に残る。
+`issue_token`（ADR-t3102-1決定2）は、親（user・supervisor・inbox）の起動の権限を`starts`で、対象の前提を`issue_held`で発行と同じtransactionで確かめ、外れた依頼は断る。
 queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがそのコマンドに求めるのと同じcapability（`ci failures`は`ci.read`、ほかは`queue.read`）を`Gate`で通して答える。
 
 supervisorの操作（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）は、登録を持つsupervisorに`scheduler.supervise`と操作ごとのcapability（`needs::supervisor_needs`）を`Gate`で通してから答える。

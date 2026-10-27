@@ -1337,6 +1337,9 @@ fn joined(supervisor: thread::JoinHandle<Result<Value>>) -> Result<Value> {
 #[test]
 fn a_failing_supervisor_leaves_no_observer_process() {
     let (_dir, repo, db) = fixture();
+    // The command the supervisor starts asks the queue's service for its
+    // job's token.
+    common::service::serve(&db);
     let (supervisor, agent, child) = supervisor_observing(&db, &repo);
     // The heartbeat fails from now on: the loop ends on an error.
     Connection::open(&db)
@@ -1363,6 +1366,9 @@ fn a_failing_supervisor_leaves_no_observer_process() {
 #[test]
 fn a_handoff_leaves_no_observer_process() {
     let (_dir, repo, db) = fixture();
+    // The command the supervisor starts asks the queue's service for its
+    // job's token.
+    common::service::serve(&db);
     let (supervisor, agent, child) = supervisor_observing(&db, &repo);
     let queue = SqliteQueue::open(&db).unwrap();
     let token = queue.supervisors().unwrap()[0].token.clone();
@@ -1422,6 +1428,8 @@ fn observer_uses_the_supplied_providers_failure_signals() {
     let provider = ObserverProvider {
         script: "printf 'provider stdout'; printf 'provider stderr' >&2; exit 1".into(),
     };
+    // The job's token is issued by the queue's service.
+    common::service::serve(&db);
     let done = dagq::compose::observe(
         &db,
         &provider,

@@ -540,6 +540,12 @@ impl ReviseWatch {
         // (nor after a request to fix the receipt), and its time runs from
         // there.
         let receipt = Path::new(run.receipt_path().context("missing receipt path")?);
+        // The idle marker is read before the questions: a session asks
+        // before it stops, so a stop this read sees has its question seen
+        // below, never as idle without one, however fast the turn after an
+        // answer typed above asked and stopped.
+        let idle_marker = run.idle_marker_path()?;
+        let idle = sv.session_idle(&idle_marker)?;
         if sv
             .queue
             .has_unclosed_worker_question_since(run.id(), self.holds_questions_from())?
@@ -589,12 +595,10 @@ impl ReviseWatch {
             self.live.input_at = Some(UNIX_EPOCH + Duration::from_secs(closed.max(0) as u64));
             self.sent = sv.generators.clock.monotonic();
         }
-        // The idle marker is read before the receipt: a receipt rewritten
-        // after this read is judged at the next poll, never as idle without
-        // it. A marker from before the last request is not this turn's.
+        // The idle marker was read above, before the receipt: a receipt
+        // rewritten after that read is judged at the next poll, never as idle
+        // without it. A marker from before the last request is not this turn's.
         let input_at = self.live.input_at.unwrap_or(self.sent_at);
-        let idle_marker = run.idle_marker_path()?;
-        let idle = sv.session_idle(&idle_marker)?;
         // Only an idle marker newer than the queued request ends the revise.
         let idle = idle.filter(|idle| idle_ends_turn(idle, input_at));
         let rewritten = self.rewritten(sv, receipt);

@@ -495,6 +495,9 @@ fn marking_claude(db: &Path) -> PathBuf {
 }
 
 fn supervise_no_claude(db: &Path, repo: &Path, codex: &Path) -> Value {
+    // The command the supervisor starts asks the queue's service for its
+    // job's token.
+    crate::common::service::serve(db);
     SqliteQueue::open(db)
         .unwrap()
         .transition(TaskId::new(1), TaskAction::Cancel)
@@ -601,6 +604,9 @@ fn with_the_fallback_off_a_codex_review_at_its_limit_waits_and_retries_codex() {
         .transition(TaskId::new(1), TaskAction::Cancel)
         .unwrap();
     let codex = stub_codex(&db, "limit");
+    // The command the supervisor starts asks the queue's service for its
+    // job's token.
+    crate::common::service::serve(&db);
     let supervise = |db: &Path| {
         let backend = TestWorkspace::new(db, false, VALID_AGENT);
         let options = SuperviseOptions {

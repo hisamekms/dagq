@@ -418,6 +418,21 @@ impl SessionOwners for SqliteQueue {
     }
 }
 
+/// A supervised job's row as a target of no run's facts are read: `Ended`
+/// once it finished (`ended`), else the registration of the supervisor
+/// that runs it (its `pid` and its heartbeat's `age`), none once it is gone.
+fn supervised_job(ended: Option<i64>, pid: Option<i64>, age: Option<i64>) -> TargetFacts {
+    match ended {
+        Some(_) => TargetFacts::Ended,
+        None => TargetFacts::SupervisedJob {
+            supervisor: pid.zip(age).map(|(pid, age_secs)| Beat {
+                pid: u32::try_from(pid).unwrap_or_default(),
+                age_secs,
+            }),
+        },
+    }
+}
+
 impl SqliteQueue {
     /// What the queue holds of `target`, a target of no run, for whether its
     /// telemetry token still holds ([`crate::domain::telemetry::TargetFacts`]):
@@ -451,15 +466,9 @@ impl SqliteQueue {
                     },
                 )
                 .optional()?;
-            Ok(match row {
-                Some((None, pid, age)) => TargetFacts::SupervisedJob {
-                    supervisor: pid.zip(age).map(|(pid, age_secs)| Beat {
-                        pid: u32::try_from(pid).unwrap_or_default(),
-                        age_secs,
-                    }),
-                },
-                _ => TargetFacts::Ended,
-            })
+            Ok(row.map_or(TargetFacts::Ended, |(ended, pid, age)| {
+                supervised_job(ended, pid, age)
+            }))
         };
         let command = |started: EventKind, finished: EventKind| -> Result<TargetFacts> {
             let row = self
@@ -530,6 +539,111 @@ impl SqliteQueue {
                 EventKind::ThroughputReviewFinished,
             ),
             TargetKind::Observer => command(EventKind::ObserveStarted, EventKind::ObserveFinished),
+        }
+    }
+
+    /// What the queue holds of each record of a job's
+    /// ([`crate::domain::queue_service::JobRecords`]), read as
+    /// [`Self::telemetry_target`] reads a target of no run, with whose it
+    /// is: a plan or goal review attempt's rows and a run's job's
+    /// `headless_jobs` rows (its finish and its supervisor's registration),
+    /// and the command starts of a mode's period or of an observation
+    /// (with the process they name). Empty for a job the queue has no
+    /// record of.
+    pub fn job_facts(
+        &self,
+        records: &crate::domain::queue_service::JobRecords,
+    ) -> Result<Vec<crate::domain::queue_service::JobRecord>> {
+        use crate::domain::queue_service::{JobRecord, JobRecords, RowLabel};
+        // Each record's id and whose it is: a row's registration, a
+        // start's process.
+        type Whose = (i64, Option<String>, Option<i64>);
+        let rows = |sql: &str, values: &[&dyn rusqlite::ToSql]| -> Result<Vec<Whose>> {
+            let mut statement = self.conn.prepare(sql)?;
+            let rows = statement
+                .query_map(values, |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        };
+        let of = |kind: TargetKind, rows: Vec<Whose>| -> Result<Vec<JobRecord>> {
+            rows.into_iter()
+                .map(|(id, supervisor, pid)| {
+                    Ok(JobRecord {
+                        facts: self.telemetry_target(&StepTarget::of(kind, id))?,
+                        supervisor: supervisor.map(LeaseToken::new),
+                        pid: pid.and_then(|pid| u32::try_from(pid).ok()),
+                    })
+                })
+                .collect()
+        };
+        let started = "SELECT id, NULL, json_extract(payload, '$.pid') FROM run_events
+                       WHERE kind = ?1";
+        match records {
+            JobRecords::PlanReview { proposal, attempt } => of(
+                TargetKind::PlanReview,
+                rows(
+                    "SELECT id, supervisor_token, NULL FROM plan_reviews
+                     WHERE proposal_id = ?1 AND attempt = ?2",
+                    params![proposal, attempt],
+                )?,
+            ),
+            JobRecords::GoalReview { goal, attempt } => of(
+                TargetKind::GoalReview,
+                rows(
+                    "SELECT id, supervisor_token, NULL FROM goal_reviews
+                     WHERE goal_id = ?1 AND attempt = ?2",
+                    params![goal, attempt],
+                )?,
+            ),
+            JobRecords::ThroughputReview { mode, period } => of(
+                TargetKind::ThroughputReview,
+                rows(
+                    &format!(
+                        "{started} AND json_extract(payload, '$.mode') = ?2
+                           AND json_extract(payload, '$.period') = ?3"
+                    ),
+                    params![EventKind::ThroughputReviewStarted.as_str(), mode, period],
+                )?,
+            ),
+            JobRecords::Observation { session_id } => of(
+                TargetKind::Observer,
+                rows(
+                    &format!("{started} AND json_extract(payload, '$.session_id') = ?2"),
+                    params![EventKind::ObserveStarted.as_str(), session_id],
+                )?,
+            ),
+            JobRecords::RunJob {
+                kinds,
+                run,
+                label,
+                attempt,
+            } => {
+                let (operator, label) = match label {
+                    RowLabel::Is(label) => ("IS", label.as_str()),
+                    RowLabel::Not(label) => ("IS NOT", *label),
+                };
+                let mut records = Vec::new();
+                for kind in *kinds {
+                    let mut statement = self.conn.prepare(&format!(
+                        "SELECT r.ended_at, s.pid, unixepoch() - s.heartbeat_at, r.supervisor_token
+                         FROM headless_jobs r
+                         LEFT JOIN supervisors s ON s.token = r.supervisor_token
+                         WHERE r.kind = ?1 AND r.run_id = ?2 AND r.attempt = ?3
+                           AND r.label {operator} ?4"
+                    ))?;
+                    let rows = statement
+                        .query_map(params![kind, run, attempt, label], |row| {
+                            Ok(JobRecord {
+                                facts: supervised_job(row.get(0)?, row.get(1)?, row.get(2)?),
+                                supervisor: Some(LeaseToken::new(row.get::<_, String>(3)?)),
+                                pid: None,
+                            })
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    records.extend(rows);
+                }
+                Ok(records)
+            }
         }
     }
 }

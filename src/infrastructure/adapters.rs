@@ -355,6 +355,12 @@ pub fn process_started_at(pid: u32) -> Option<i64> {
     Some(i64::try_from(now).ok()? - age)
 }
 
+/// This user's processes as one `ps` lists them, with their parents, ages
+/// and command lines, and no working directory read.
+pub fn user_processes() -> Result<Vec<ProcessInfo>> {
+    Ok(parse_ps(&user_ps_listing()?))
+}
+
 /// `ps -U <uid> -o pid=,ppid=,etime=,time=,command=` for this user's
 /// processes, as the bytes `ps` printed: a command line need not be UTF-8
 /// (task 1794), so [`parse_ps`] reads them, not [`output`].

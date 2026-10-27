@@ -270,7 +270,8 @@ esac
 /// waits) is recorded waiting for a person, in its slot, from the pass
 /// that finds each question, and back in its revise once the answer
 /// came, however often it asks: each `waiting` follows its `ask_opened`
-/// with no other phase between them.
+/// with no other phase between them but the move back from the earlier
+/// question's answer, when one pass finds both.
 #[test]
 fn a_revise_asking_in_its_slot_is_recorded_waiting_from_each_question() {
     let (_dir, repo, db) = fixture();
@@ -320,11 +321,17 @@ fn a_revise_asking_in_its_slot_is_recorded_waiting_from_each_question() {
             continue;
         }
         asked += 1;
-        let (at, payload) = events[index..]
+        let mut after = events[index..]
             .iter()
-            .find(|e| e.kind == EventKind::RunPhaseChanged)
-            .map(|e| (timestamp_millis(&e.created_at).unwrap(), &e.payload))
-            .expect("a phase after the question");
+            .filter(|e| e.kind == EventKind::RunPhaseChanged);
+        let mut next = after.next().expect("a phase after the question");
+        // A pass that finds the earlier question answered and this one
+        // asked records both moves after this question: back to the
+        // revise, then into this wait.
+        if asked > 1 && next.payload["cause"] == "ask_answered" {
+            next = after.next().expect("a wait after the move back");
+        }
+        let (at, payload) = (timestamp_millis(&next.created_at).unwrap(), &next.payload);
         assert_eq!(payload["phase"], "waiting", "{payload}");
         assert_eq!(payload["blocker"], "human");
         assert_eq!(payload["holds"], "worker_slot");

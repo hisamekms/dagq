@@ -781,6 +781,7 @@ pub fn supervise_with_reviewer(
         review_programs_dir: review_programs_dir(&db),
         satisfied_dir: satisfied_dir(&db),
         replans_dir: replans_dir(&db),
+        service_credential: std::sync::OnceLock::new(),
         db: db.clone(),
     };
     let host_wide = options

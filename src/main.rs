@@ -4602,6 +4602,19 @@ fn execute(cli: Cli) -> Result<Value> {
     }
     check_access(&actor, &cli.command, cli.db.as_deref())?;
     dagq::infrastructure::event_actor::set_process_actor(event_actor(&actor, &cli.command));
+    // A command that starts a job asks the queue service for its token as
+    // its caller (ADR-t3102-1 decision 2).
+    dagq::infrastructure::queue_service::set_command_caller(
+        dagq::infrastructure::queue_service::CommandCaller {
+            credential: env::var(dagq::domain::queue_service::CREDENTIAL_FILE_ENV)
+                .ok()
+                .filter(|file| !file.trim().is_empty())
+                .map(PathBuf::from),
+            role: env::var(dagq::domain::actor::ROLE_ENV)
+                .ok()
+                .filter(|role| !role.trim().is_empty()),
+        },
+    );
     let cwd = env::current_dir().context("working directory is unavailable")?;
     let location = QueueLocation::resolve(cli.db.as_deref(), &cwd)?;
     let db = location.db.clone();

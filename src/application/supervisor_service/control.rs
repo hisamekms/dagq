@@ -239,13 +239,18 @@ pub fn answer(
             // The lease and `integration_started` name the command's
             // process, which lands: one that dies leaves a landing the
             // supervisor releases.
+            let issuer = crate::domain::queue_service::TokenIssuer::of(
+                principal,
+                backend.process_of(control.pid),
+            );
             return super::begin_landing(
                 backend,
                 &mut *queue,
                 &landing,
                 &main,
                 false,
-                Some(control.pid),
+                super::LandingBy::Command { pid: control.pid },
+                &issuer,
             );
         }
         END_LANDING => {
@@ -278,11 +283,13 @@ pub fn answer(
                 return Err(anyhow::Error::new(NotOwnLease));
             }
             own_target(queue.supervisor_store(), &control, &actor, &target)?;
-            return reply(
-                backend
-                    .telemetry()
-                    .issue_telemetry(backend.db(), &target, task, None),
+            // The token keeps the command that asked for it, as every token
+            // the service issues at a parent's request.
+            let issuer = crate::domain::queue_service::TokenIssuer::of(
+                principal,
+                backend.process_of(control.pid),
             );
+            return reply(backend.issue_telemetry_as(&target, task, None, &issuer));
         }
         "revoke_telemetry" => {
             let (target, under): (StepTarget, Option<LeaseToken>) = read(op, args)?;

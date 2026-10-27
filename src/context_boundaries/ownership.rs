@@ -652,6 +652,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/install.rs", "Binaries", Some(Host), Internal),
     outer_port("src/application/install.rs", "ReleaseInstaller", Some(Host), Internal),
     outer_port("src/application/queue_service.rs", "ServiceQueue", Some(Host), Internal),
+    outer_port("src/application/queue_service.rs", "IssueFacts", Some(Host), Internal), // what a token's issue reads in its transaction (the registrations, a job's records); the queue service's store gives it
     outer_port("src/application/queue_service.rs", "ServiceBackend", Some(Host), Internal),
     outer_port("src/application/queue_service.rs", "QueueServiceControl", Some(Host), Internal),
     outer_port("src/application/queue_service.rs", "ServiceStatusSource", Some(Host), Internal), // where the host's service status looks, outside the DB

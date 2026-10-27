@@ -579,6 +579,20 @@ pub fn session_owner(db: &Path, session: &str) -> Option<String> {
         .map(|owner| format!("{}:{}", owner.target.kind.as_str(), owner.target.id))
 }
 
+/// Issue the worker's token of `run` of the queue at `db`, as the
+/// supervisor has the service issue it under the run's lease before it
+/// starts the run's wrapper (ADR-t3102-1 decision 2): a test that plays the
+/// supervisor and starts the wrapper itself, which hands the token to its
+/// agent and issues none.
+pub fn worker_token(db: &Path, run: &TaskRun) {
+    service::issue(
+        db.parent().unwrap(),
+        &Principal::worker(run.id(), run.task_id()),
+        1,
+    )
+    .unwrap();
+}
+
 /// Serve the queue at `db` and issue the token of the session wrapper of
 /// `target` (of `task`, a run's), as the supervisor does before it starts
 /// the wrapper (ADR-t3102-1 decisions 2 and 4): a test that starts a

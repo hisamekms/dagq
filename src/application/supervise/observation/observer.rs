@@ -274,6 +274,14 @@ impl ObservationState {
                 env.token.as_str(),
             );
         }
+        // It asks the queue service for its job's token as the supervisor
+        // (ADR-t3102-1 decision 2).
+        if let Some(file) = layout.service_credential.get() {
+            command.env(
+                crate::domain::queue_service::CREDENTIAL_FILE_ENV,
+                file.to_string_lossy().as_ref(),
+            );
+        }
         if mode == ObserveMode::Daily {
             command.arg("--daily");
         }

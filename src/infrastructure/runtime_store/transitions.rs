@@ -1015,24 +1015,53 @@ impl SqliteQueue {
     /// while the slot's lease is held (ADR-t3102-3 decision 3, ADR-t3102-1
     /// decision 2), given the `integration_started` event the landing
     /// wrote. One that fails leaves the run, the slot and the lease as
-    /// they were. The lease and `integration_started` name the process
-    /// `holder` when given (the command of a person's `integrate` through
-    /// the queue service, which lands in its own process: a landing whose
+    /// they were. The lease and `integration_started` name the command's
+    /// process when `holder` is one (a person's `integrate` through the
+    /// queue service, which lands in its own process: a landing whose
     /// command died is released as a dead supervisor's is), else the
-    /// holder of `token` ([`holder_pid`]). The run begun and what `then`
-    /// gave.
+    /// holder of `token` ([`holder_pid`]). A supervisor `holder` is to be
+    /// live at its time, as the integrator's token is issued at its
+    /// request. A registration not live, and a lease of the run under
+    /// another token, are [`crate::application::queue_service::NotHeld`].
+    /// The run begun and what `then` gave.
     pub fn begin_integration_then<T>(
         &mut self,
         id: &RunId,
         token: &LeaseToken,
         main: &CommitSha,
         refused_by_handoff: bool,
-        holder: Option<u32>,
+        holder: Option<crate::application::queue_service::SlotHolder>,
         then: impl FnOnce(crate::domain::EventId) -> Result<T>,
     ) -> Result<(TaskRun, T)> {
+        use crate::application::queue_service::{NotHeld, SlotHolder};
+        let (command, registered_at) = match holder {
+            Some(SlotHolder::Command { pid }) => (Some(pid), None),
+            Some(SlotHolder::Supervisor { now }) => (None, Some(now)),
+            None => (None, None),
+        };
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(now) = registered_at {
+            let heartbeat_at: Option<i64> = tx
+                .query_row(
+                    "SELECT heartbeat_at FROM supervisors WHERE token=?1",
+                    [token],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let facts = crate::domain::queue_service::HeldFacts {
+                registration_expired: heartbeat_at
+                    .map(|at| now - at > crate::domain::HEARTBEAT_TIMEOUT_SECS),
+                ..Default::default()
+            };
+            if let Some(why) = crate::domain::queue_service::not_held(
+                &crate::domain::queue_service::IssueHeld::Registered(token.clone()),
+                &facts,
+            ) {
+                return Err(NotHeld(why).into());
+            }
+        }
         if refused_by_handoff {
             refuse_on_handoff(&tx, token)?;
         }
@@ -1076,19 +1105,19 @@ impl SqliteQueue {
         // A supervisor landing a run it resumed or reviewed already holds
         // its lease under the same token; any other lease means someone
         // owns the run.
-        let pid = match holder {
+        let pid = match command {
             Some(pid) => pid,
             None => holder_pid(&tx, token)?,
         };
-        ensure!(
-            tx.execute(
-                "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)
-                 ON CONFLICT(run_id) DO UPDATE SET pid=excluded.pid,heartbeat_at=excluded.heartbeat_at
-                 WHERE run_leases.token=excluded.token",
-                params![id, token, pid, self.generators.clock.now()],
-            )? == 1,
-            "run is still leased"
-        );
+        if tx.execute(
+            "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(run_id) DO UPDATE SET pid=excluded.pid,heartbeat_at=excluded.heartbeat_at
+             WHERE run_leases.token=excluded.token",
+            params![id, token, pid, self.generators.clock.now()],
+        )? != 1
+        {
+            return Err(NotHeld("run is still leased".to_owned()).into());
+        }
         run_event(
             &tx,
             id,

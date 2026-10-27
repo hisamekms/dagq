@@ -236,6 +236,9 @@ impl dagq::application::supervisor_service::ServiceCaller for DropsThenLoses {
     fn sign_out(&self) {
         self.inner.sign_out();
     }
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.inner.credential()
+    }
     fn send_held(&self) -> anyhow::Result<bool> {
         self.inner.send_held()
     }
@@ -318,5 +321,8 @@ impl dagq::application::supervisor_service::ServiceCaller for KeepsDown {
     }
     fn sign_out(&self) {
         self.inner.sign_out();
+    }
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.inner.credential()
     }
 }

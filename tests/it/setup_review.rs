@@ -224,18 +224,33 @@ fn init_recommends_the_settings_and_only_a_person_and_the_inbox_set_up_the_revie
         assert_eq!(error["denied"]["capability"], "review.setup", "{env:?}");
         assert_eq!(error["denied"]["reason"], "not granted", "{env:?}");
     }
+    // The inbox as `dagq inbox` opens it, with its session's token, which
+    // asks the queue's service for the job's.
+    let pid = std::process::id();
+    let token = dagq::infrastructure::queue_service::issue(
+        fixture.db.parent().unwrap(),
+        &dagq::domain::queue_service::Principal::inbox(
+            dagq::domain::queue_service::SessionProcess {
+                pid,
+                start: dagq::infrastructure::adapters::session_start(pid).unwrap(),
+            },
+        ),
+        1,
+    )
+    .unwrap()
+    .file;
+    let token = token.to_str().unwrap();
+    let inbox_env = [
+        ("DAGQ_ROLE", "inbox"),
+        ("DAGQ_ACTOR_ID", "inbox"),
+        (dagq::domain::queue_service::CREDENTIAL_FILE_ENV, token),
+    ];
     // Approving beforehand is a person's own: the inbox is refused it.
-    let error = fixture.error(
-        &[("DAGQ_ROLE", "inbox"), ("DAGQ_ACTOR_ID", "inbox")],
-        &["setup-review", "--yes", "--claude", &agent],
-    );
+    let error = fixture.error(&inbox_env, &["setup-review", "--yes", "--claude", &agent]);
     assert_eq!(error["denied"]["capability"], "review.setup_approve");
     assert_eq!(error["denied"]["reason"], "not granted");
     assert!(!fixture.repo.join(".dagq").exists());
-    let inbox = fixture.ok(
-        &[("DAGQ_ROLE", "inbox"), ("DAGQ_ACTOR_ID", "inbox")],
-        &["setup-review", "--claude", &agent],
-    );
+    let inbox = fixture.ok(&inbox_env, &["setup-review", "--claude", &agent]);
     assert_eq!(inbox["approved"], false, "{inbox}");
     assert_eq!(inbox["updated"], false);
 }

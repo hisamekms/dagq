@@ -43,8 +43,8 @@ pub(super) fn dispatch_once(
 
 /// Run the operation `op` with `args` on `store` at `now` (seconds): its
 /// result as the service answers it.
-pub(super) fn dispatch(
-    store: &mut dyn SupervisorStore,
+pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
+    store: &mut S,
     own: &dyn Fn(&LeaseToken) -> Result<()>,
     alive: &dyn Fn(u32) -> bool,
     now: i64,

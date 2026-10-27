@@ -1,8 +1,8 @@
 //! The supervisor's queue through the queue service ([Queue service],
 //! ADR-t3102-3 decisions 3 to 5, goal 182's stage (5)): the claim, the
 //! leases, the runs' transitions with their events, the registration, the
-//! reads the supervisor decides on and the tokens of the workers and the
-//! executors' telemetry are each one use case of the service, done in one
+//! reads the supervisor decides on and the tokens of the principals it
+//! starts are each one use case of the service, done in one
 //! transaction on its side as the supervisor's principal (ADR-t3102-1
 //! decisions 2 and 3); nothing of one is split across round trips.
 //!
@@ -22,14 +22,17 @@
 //! waits for the service instead ([`unreachable`]).
 //!
 //! The supervisor's token is issued after the hello and before the
-//! registration ([`ServiceCaller::sign_in`]), and revoked when the loop
-//! ends, but kept across a handoff's exec for the image that takes it
-//! back ([`ServiceCaller::take_back`]), so the `observe` and
-//! `throughput-review` it started record across the exec; until the
-//! service issues tokens at a parent principal's request
-//! (ADR-t3102-1 decision 2) the supervisor writes it in the service's
-//! directory itself. Its actor id is `supervisor:<pid>`, its events'
-//! actor. The events name another actor only when the landing writes as
+//! registration ([`ServiceCaller::sign_in`]) by the service, at the
+//! request of the user (the socket's peer) as its parent (ADR-t3102-1
+//! decision 2), and revoked when the loop ends, but kept across a
+//! handoff's exec for the image that takes it back
+//! ([`ServiceCaller::take_back`]), so the `observe` and
+//! `throughput-review` it started record across the exec. The tokens of
+//! the principals the supervisor starts ([`TOKEN_OPS`]) are issued by the
+//! service at the supervisor's request, in the transaction that checks
+//! what the supervisor holds of their target, and the integrator's with
+//! the landing slot (`begin_landing`). Its actor id is
+//! `supervisor:<pid>`, its events' actor. The events name another actor only when the landing writes as
 //! the integrator and when a job's verdict is applied (`requested_by`),
 //! and only an actor of the control side. A principal without
 //! `scheduler.supervise` is refused with `authorization_denied`, and the
@@ -92,7 +95,9 @@ pub trait ServiceCaller: Send + Sync {
     fn sign_in(&self, registration: &LeaseToken, pid: u32) -> Result<()>;
     /// Become again the supervisor of `registration`, process `pid`, as the
     /// image a handoff exec'd into: the token the image before kept
-    /// ([`Self::hand_over`]) while it is still issued, else a new one.
+    /// ([`Self::hand_over`]) while it is still issued. With none,
+    /// [`Self::credential`] stays `None`, and [`Self::sign_in`] asks for a
+    /// new one once the service answers.
     fn take_back(&self, registration: &LeaseToken, pid: u32) -> Result<()>;
     /// Keep the principal's token for the image this process execs into (a
     /// handoff): it is not revoked, so a job command that calls with it
@@ -100,6 +105,11 @@ pub trait ServiceCaller: Send + Sync {
     fn hand_over(&self);
     /// Give the principal's token back, at the supervisor's end.
     fn sign_out(&self);
+    /// The file of the token this caller signed in with, which a command
+    /// the supervisor starts is given to ask the service for its job's
+    /// token as the supervisor (ADR-t3102-1 decision 2); `None` before the
+    /// sign-in. A caller that wraps another is to answer the other's.
+    fn credential(&self) -> Option<std::path::PathBuf>;
     /// Send the records of results this caller held while the service did
     /// not take them ([`resend::Resend::Hold`]), oldest first: whether none
     /// is still held (`false` when the queue stayed busy), or an error, the
@@ -689,11 +699,13 @@ fn jobs(queue: &mut dyn ServiceQueue, params: &SupervisorParams) -> Result<Value
 /// checked (and a refusal recorded) first, then the operation runs on a
 /// queue written as the principal's actor, or as the actor the request
 /// names when it is one of the control side's (the landing's integrator),
-/// with the request's `requested_by`.
+/// with the request's `requested_by`. `process` is the one that asked,
+/// which a token it asks for is kept with ([`tokens`]).
 pub fn answer(
     backend: &dyn ServiceBackend,
     principal: &Principal,
     params: &Value,
+    process: Option<u32>,
 ) -> Result<Value> {
     if principal.role == ActorRole::Integrator {
         return integrator(backend, principal, params);
@@ -722,7 +734,14 @@ pub fn answer(
         }
     };
     if TOKEN_OPS.contains(&params.op.as_str()) {
-        return tokens(backend, &mut *queue, &registration, &params);
+        return tokens(
+            backend,
+            &mut *queue,
+            principal,
+            &registration,
+            &params,
+            process,
+        );
     }
     if JOB_OPS.contains(&params.op.as_str()) {
         return jobs(&mut *queue, &params);
@@ -752,12 +771,34 @@ pub fn answer(
             crate::domain::CommitSha,
             bool,
         ) = read(&params.op, Value::Array(params.args.clone()))?;
-        own(&token)?;
+        // Under no lease but its registration: refused and recorded, as
+        // the integrator's token would be issued under it (ADR-t3102-1
+        // decision 2).
+        own_lease(
+            &mut *queue,
+            principal,
+            &registration,
+            &token,
+            Capability::IntegrationRequest,
+            &crate::domain::Resource::run(run.clone()),
+        )?;
         queue
             .supervisor_store()
             .restore_request(params.requested_by.clone());
         let landing = Principal::integrator(&run, &token, pid.unwrap_or_default());
-        return begin_landing(backend, &mut *queue, &landing, &main, over_handoff, None);
+        let issuer = crate::domain::queue_service::TokenIssuer::of(
+            principal,
+            process.and_then(|pid| backend.process_of(pid)),
+        );
+        return begin_landing(
+            backend,
+            &mut *queue,
+            &landing,
+            &main,
+            over_handoff,
+            LandingBy::Supervisor { now, actor: &actor },
+            &issuer,
+        );
     }
     if params.op == END_LANDING {
         let (run,): (crate::domain::RunId,) = read(&params.op, Value::Array(params.args))?;
@@ -783,30 +824,50 @@ pub fn answer(
     )
 }
 
+/// Who takes a landing's slot ([`begin_landing`]).
+enum LandingBy<'a> {
+    /// A supervisor under its registration, which is to be live at `now`
+    /// (seconds): the run's lease another's, or the registration not live,
+    /// found in the slot's transaction, is refused and recorded as
+    /// `actor`'s.
+    Supervisor { now: i64, actor: &'a ActorContext },
+    /// The command of a person's or the inbox's `integrate`, process
+    /// `pid`, which lands in its own process and names it in the lease.
+    Command { pid: u32 },
+}
+
 /// Take the integration slot of the run `landing` (an integrator
 /// principal, [`Principal::integrator`]) lands under its lease on `main`,
 /// and issue its token: the run begun and the file of the token. The slot
 /// and the token in one transaction: the token is issued once the slot's
-/// lease is taken, and the slot is committed only with it (ADR-t3102-3
-/// decision 3, ADR-t3102-1 decision 2), so no landing begins that cannot
-/// record. The token names the landing's `integration_started`, so a token
-/// whose landing did not commit writes nothing ([`integrator`]).
+/// lease is taken (and, by a supervisor, its registration found live), and
+/// the slot is committed only with it (ADR-t3102-3 decision 3, ADR-t3102-1
+/// decision 2), so no landing begins that cannot record, and a supervisor
+/// that lost the run's lease is issued none. The token names the landing's
+/// `integration_started`, so a token whose landing did not commit writes
+/// nothing ([`integrator`]); it keeps `issuer`, the principal that asked,
+/// as every token the service issues at a parent's request.
 fn begin_landing(
     backend: &dyn ServiceBackend,
     queue: &mut dyn ServiceQueue,
     landing: &Principal,
     main: &crate::domain::CommitSha,
     over_handoff: bool,
-    holder: Option<u32>,
+    by: LandingBy<'_>,
+    issuer: &crate::domain::queue_service::TokenIssuer,
 ) -> Result<Value> {
     let (Some(run), Some(token)) = (landing.landing_run(), landing.registration.clone()) else {
         return Err(BadOperation(format!("{} lands no run", landing.actor_id)).into());
     };
+    let holder = match &by {
+        LandingBy::Supervisor { now, .. } => {
+            super::queue_service::SlotHolder::Supervisor { now: *now }
+        }
+        LandingBy::Command { pid } => super::queue_service::SlotHolder::Command { pid: *pid },
+    };
     let mut issued = false;
     let begun = queue.begin_landing(&run, &token, main, over_handoff, holder, &mut |started| {
-        let file = backend
-            .access()
-            .issue(backend.db(), &landing.clone().of_landing(started))?;
+        let file = backend.issue_as(&landing.clone().of_landing(started), issuer)?;
         issued = true;
         reply(Ok(file))
     });
@@ -822,7 +883,20 @@ fn begin_landing(
             {
                 tracing::warn!(run_id = %run, "run {run}: the integrator's token of a landing that did not begin could not be revoked: {back:#}");
             }
-            Err(error)
+            match (error.downcast_ref::<super::queue_service::NotHeld>(), by) {
+                (Some(not_held), LandingBy::Supervisor { actor, .. }) => {
+                    let why = not_held.0.clone();
+                    Err(super::queue_service::refuse_recorded(
+                        &mut *queue,
+                        actor,
+                        Capability::TokenIssue,
+                        &crate::domain::Resource::Principal(ActorRole::Integrator),
+                        crate::domain::authorization::DenyReason::NotHeld,
+                        &why,
+                    ))
+                }
+                _ => Err(error),
+            }
         }
     }
 }
@@ -1030,46 +1104,28 @@ fn reply<T: Wire>(result: Result<T>) -> Result<Value> {
 fn tokens(
     backend: &dyn ServiceBackend,
     queue: &mut dyn ServiceQueue,
+    principal: &Principal,
     registration: &LeaseToken,
     params: &SupervisorParams,
+    process: Option<u32>,
 ) -> Result<Value> {
-    let own = |token: &LeaseToken| {
-        if token == registration {
-            Ok(())
-        } else {
-            Err(anyhow::Error::new(NotOwnLease))
-        }
+    use super::queue_service::parent_there;
+    use crate::domain::queue_service::{
+        IssueHeld, Reissue, TokenIssuer, is_job, job_token_ended, reissue, revoke_refusal,
     };
+    use crate::domain::{Capability, Resource};
+    let issuer = TokenIssuer::of(principal, process.and_then(|pid| backend.process_of(pid)));
     let op = params.op.as_str();
     let args = Value::Array(params.args.clone());
     let db = backend.db();
     match op {
         "issue_token" => {
-            let (principal,): (Principal,) = read(op, args)?;
-            principal.check()?;
-            // An AI actor's and a session wrapper's only: a supervisor's
-            // token is its own sign-in, and an executor's telemetry token
-            // is `issue_telemetry`'s.
-            if principal.registration.is_some()
-                || (principal.role.trust() != crate::domain::TrustLevel::UntrustedAgent
-                    && principal.role != ActorRole::Wrapper)
-            {
-                return Err(BadOperation(format!(
-                    "a supervisor issues no token of role {} here",
-                    principal.role.as_str()
-                ))
-                .into());
-            }
-            // A worker's token, and its run's wrapper's, is the run's,
-            // issued only under its lease.
-            match (&principal.run_id, principal.role) {
-                (Some(run), ActorRole::Worker | ActorRole::Wrapper) => {
-                    queue.under_lease(run, registration, &mut || {
-                        reply(backend.access().issue(db, &principal))
-                    })
-                }
-                _ => reply(backend.access().issue(db, &principal)),
-            }
+            // The issue use case's, with this supervisor as the parent: a
+            // worker's and its run's wrapper's under the run's lease, a
+            // planner's and its wrapper's while it is open, a job's while
+            // the registration lives (ADR-t3102-1 decision 2).
+            let (child,): (Principal,) = read(op, args)?;
+            super::queue_service::issue_token(backend, queue, principal, &child, process)
         }
         "revoke_token" => {
             let (actor_id,): (String,) = read(op, args)?;
@@ -1082,7 +1138,28 @@ fn tokens(
                     BadOperation(format!("a supervisor revokes no token of {actor_id}")).into(),
                 );
             }
-            reply(backend.access().revoke(db, &actor_id))
+            // Never another parent's job or planner while that parent is
+            // there, nor a job's whose parent cannot be judged before its
+            // job is taken as ended (its records tell so, or with none, no
+            // process that may have asked for it runs), which the issue
+            // would then take over ([`revoke_refusal`]): in a write
+            // transaction, as the issue's, so neither misses the other.
+            let mut role = None;
+            let revoked = queue.issuing(&IssueHeld::Nothing, backend.now_ms(), &mut |facts| {
+                if let Some(held) = backend.held(&actor_id)? {
+                    role = Some(held.principal.role);
+                    if let Some(why) =
+                        revoke_refusal(&held, &issuer.parent, parent_there(backend, facts), || {
+                            facts.job(&held, None)
+                        })
+                    {
+                        return Err(super::queue_service::Replacing(why).into());
+                    }
+                }
+                reply(backend.access().revoke(db, &actor_id))
+            });
+            let resource = role.map_or(Resource::Queue, Resource::Principal);
+            recorded(queue, principal, &resource, revoked)
         }
         "revoke_principal" => {
             let (principal,): (Principal,) = read(op, args)?;
@@ -1093,51 +1170,159 @@ fn tokens(
                 ))
                 .into());
             };
-            // Only a token held for that very principal, and an inbox's only
-            // once its session ended: never a live session's on request.
-            let held = backend.principals()?.contains(&principal);
-            let ended = principal
-                .session
-                .as_ref()
-                .is_none_or(|session| !backend.session_alive(session));
-            if !(held && ended) {
-                return reply(Ok(false));
-            }
-            reply(backend.access().revoke(db, &key))
+            // Only the token its file holds now, that very principal's, an
+            // inbox's only once its session is known to have ended, a job's
+            // once the process that asked for it ended (one whose parent
+            // cannot be judged, once its job is taken as ended), and never
+            // another parent's that is there: never a live session's or
+            // job's on request. In a write transaction, as the issue's, so a
+            // token issued again meanwhile is not the one revoked.
+            queue.issuing(&IssueHeld::Nothing, backend.now_ms(), &mut |facts| {
+                let there = parent_there(backend, facts);
+                let Some(held) = backend
+                    .held(&key)?
+                    .filter(|held| held.principal == principal)
+                else {
+                    return reply(Ok(false));
+                };
+                // Its job's state read once, which both judgements take.
+                let state = std::cell::OnceCell::new();
+                let job = || state.get_or_init(|| facts.job(&held, None)).clone();
+                let ended = principal
+                    .session
+                    .as_ref()
+                    .is_none_or(|session| backend.session_ended(session))
+                    && (!is_job(principal.role)
+                        || job_token_ended(held.issued_by.as_ref(), there, job))
+                    && revoke_refusal(&held, &issuer.parent, there, job).is_none();
+                if !ended {
+                    return reply(Ok(false));
+                }
+                reply(backend.access().revoke(db, &key))
+            })
         }
         "token_principals" => reply(backend.principals()),
         "issue_telemetry" => {
             let (target, task, issued_under): (StepTarget, Option<TaskId>, Option<LeaseToken>) =
                 read(op, args)?;
-            match (&issued_under, target.run_id()) {
+            // Under the run's lease and the registration live for a run's
+            // target, the registration live for another's, each checked in
+            // the issue's transaction (ADR-t3102-1 decision 2); a run's is
+            // never issued under no lease.
+            let telemetry = Resource::Principal(ActorRole::ExecutorTelemetry);
+            let held = match (&issued_under, target.run_id()) {
                 (Some(lease), Some(run)) => {
-                    own(lease)?;
-                    queue.under_lease(&run, lease, &mut || {
-                        reply(
-                            backend
-                                .telemetry()
-                                .issue_telemetry(db, &target, task, Some(lease)),
-                        )
-                    })
+                    own_lease(
+                        queue,
+                        principal,
+                        registration,
+                        lease,
+                        Capability::TokenIssue,
+                        &telemetry,
+                    )?;
+                    crate::domain::queue_service::IssueHeld::Lease {
+                        run,
+                        lease: lease.clone(),
+                    }
                 }
                 (Some(lease), None) => {
-                    own(lease)?;
-                    reply(
-                        backend
-                            .telemetry()
-                            .issue_telemetry(db, &target, task, Some(lease)),
-                    )
+                    own_lease(
+                        queue,
+                        principal,
+                        registration,
+                        lease,
+                        Capability::TokenIssue,
+                        &telemetry,
+                    )?;
+                    crate::domain::queue_service::IssueHeld::Registered(lease.clone())
                 }
-                (None, _) => reply(backend.telemetry().issue_telemetry(db, &target, task, None)),
+                (None, Some(_)) => {
+                    return Err(super::queue_service::refuse_recorded(
+                        queue,
+                        &principal.actor(),
+                        Capability::TokenIssue,
+                        &telemetry,
+                        crate::domain::authorization::DenyReason::NotHeld,
+                        "a run's executor's telemetry token is issued under the run's lease",
+                    ));
+                }
+                (None, None) => {
+                    crate::domain::queue_service::IssueHeld::Registered(registration.clone())
+                }
+            };
+            let child = Principal::telemetry(&target, task);
+            let issued = queue.issuing(&held, backend.now_ms(), &mut |facts| {
+                // Not over a target's another live supervisor asked for, as
+                // found in the issue's transaction.
+                let held = backend
+                    .held(&child.credential_key())?
+                    .map(|held| held.issued_by);
+                if let Reissue::Refused(why) = reissue(
+                    &child,
+                    &issuer,
+                    held.as_ref(),
+                    parent_there(backend, facts),
+                    // Of no job: never asked.
+                    || crate::domain::queue_service::JobState::MayRun,
+                ) {
+                    return Err(super::queue_service::Replacing(why).into());
+                }
+                reply(backend.issue_telemetry_as(&target, task, issued_under.as_ref(), &issuer))
+            });
+            match issued {
+                Err(error) => match error.downcast_ref::<super::queue_service::NotHeld>() {
+                    Some(not_held) => {
+                        let why = not_held.0.clone();
+                        Err(super::queue_service::refuse_recorded(
+                            queue,
+                            &principal.actor(),
+                            Capability::TokenIssue,
+                            &telemetry,
+                            crate::domain::authorization::DenyReason::NotHeld,
+                            &why,
+                        ))
+                    }
+                    None => match error.downcast_ref::<super::queue_service::Replacing>() {
+                        Some(super::queue_service::Replacing(why)) => {
+                            Err(super::queue_service::refuse_recorded(
+                                queue,
+                                &principal.actor(),
+                                Capability::TokenIssue,
+                                &telemetry,
+                                crate::domain::authorization::DenyReason::Resource,
+                                why,
+                            ))
+                        }
+                        None => Err(error),
+                    },
+                },
+                issued => issued,
             }
         }
         "revoke_telemetry" => {
             let (target, issued_under): (StepTarget, Option<LeaseToken>) = read(op, args)?;
-            reply(
-                backend
-                    .telemetry()
-                    .revoke_telemetry(db, &target, issued_under.as_ref()),
-            )
+            // A run's as its lease rules them (a lease lost included); a
+            // target of no run's never another live parent's, whatever
+            // lease it names ([`revoke_refusal`]).
+            let telemetry = Resource::Principal(ActorRole::ExecutorTelemetry);
+            let key = Principal::telemetry(&target, None).credential_key();
+            let revoked = queue.issuing(&IssueHeld::Nothing, backend.now_ms(), &mut |facts| {
+                if let Some(held) = backend.held(&key)?
+                    && let Some(why) =
+                        revoke_refusal(&held, &issuer.parent, parent_there(backend, facts), || {
+                            // Of no job: never asked.
+                            crate::domain::queue_service::JobState::MayRun
+                        })
+                {
+                    return Err(super::queue_service::Replacing(why).into());
+                }
+                reply(
+                    backend
+                        .telemetry()
+                        .revoke_telemetry(db, &target, issued_under.as_ref()),
+                )
+            });
+            recorded(queue, principal, &telemetry, revoked)
         }
         "held_telemetry" => reply(backend.telemetry().held_telemetry(db)),
         "target_facts" => {
@@ -1150,6 +1335,56 @@ fn tokens(
         }
         _ => unreachable!("a token operation"),
     }
+}
+
+/// `result` of `principal`'s token operation on `resource`, a refusal of
+/// [`super::queue_service::Replacing`] recorded as `authorization_denied`.
+fn recorded(
+    queue: &mut dyn ServiceQueue,
+    principal: &Principal,
+    resource: &crate::domain::Resource,
+    result: Result<Value>,
+) -> Result<Value> {
+    let Err(error) = result else {
+        return result;
+    };
+    match error.downcast_ref::<super::queue_service::Replacing>() {
+        Some(super::queue_service::Replacing(why)) => Err(super::queue_service::refuse_recorded(
+            queue,
+            &principal.actor(),
+            crate::domain::Capability::TokenIssue,
+            resource,
+            crate::domain::authorization::DenyReason::Resource,
+            why,
+        )),
+        None => Err(error),
+    }
+}
+
+/// Refuse the token operation of `principal`, whose registration is
+/// `registration`, that names `lease` when that is another's: what it asks
+/// for would be issued under a lease it does not hold (ADR-t3102-1
+/// decision 2), `authorization_denied` of `capability` on `resource`,
+/// recorded.
+fn own_lease(
+    queue: &mut dyn ServiceQueue,
+    principal: &Principal,
+    registration: &LeaseToken,
+    lease: &LeaseToken,
+    capability: crate::domain::Capability,
+    resource: &crate::domain::Resource,
+) -> Result<()> {
+    if lease == registration {
+        return Ok(());
+    }
+    Err(super::queue_service::refuse_recorded(
+        queue,
+        &principal.actor(),
+        capability,
+        resource,
+        crate::domain::authorization::DenyReason::NotHeld,
+        &NotOwnLease.to_string(),
+    ))
 }
 
 /// The tokens of the workers and of the executors' telemetry, issued and
@@ -1202,7 +1437,11 @@ impl super::queue_service::ServiceAccess for ServiceTokens {
     fn socket(&self, db: &std::path::Path) -> std::path::PathBuf {
         self.files.socket(db)
     }
-    fn issue(&self, _db: &std::path::Path, principal: &Principal) -> Result<std::path::PathBuf> {
+    fn issue(
+        &self,
+        _db: &std::path::Path,
+        principal: &Principal,
+    ) -> Result<super::queue_service::Issued> {
         self.queue()
             .remote("issue_token", vec![to_value(principal)?])
     }

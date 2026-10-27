@@ -119,7 +119,7 @@ fn the_supervisors_operations_reach_the_queue_only_through_the_service() {
         telemetry_files: Arc::new(SystemServiceAccess),
     };
     let worker = Principal::worker(run.id(), run.task_id());
-    let file = tokens.issue(&db, &worker).unwrap();
+    let file = tokens.issue(&db, &worker).unwrap().file;
     assert!(file.is_file());
     assert!(tokens.revoke(&db, &worker.actor_id).unwrap());
 
@@ -444,6 +444,9 @@ impl ServiceCaller for LosesOneAnswer {
     fn sign_out(&self) {
         self.inner.sign_out();
     }
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.inner.credential()
+    }
 }
 
 /// The calls of the supervisor, as the service gives them, but the first
@@ -483,6 +486,9 @@ impl ServiceCaller for BusyOnce {
     }
     fn sign_out(&self) {
         self.inner.sign_out();
+    }
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.inner.credential()
     }
 }
 
@@ -554,6 +560,9 @@ impl ServiceCaller for BusyFor {
     }
     fn sign_out(&self) {
         self.inner.sign_out();
+    }
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.inner.credential()
     }
 }
 
@@ -956,6 +965,9 @@ impl ServiceCaller for DrainingBusy {
     }
     fn sign_out(&self) {
         self.inner.sign_out();
+    }
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.inner.credential()
     }
 }
 
@@ -1563,6 +1575,9 @@ impl ServiceCaller for LosingAnswers {
     }
     fn sign_out(&self) {
         self.inner.sign_out();
+    }
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.inner.credential()
     }
 }
 

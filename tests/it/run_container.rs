@@ -75,6 +75,8 @@ fn claim_in_container(db: &Path, repo: &Path, lease: &str) -> (TaskRun, LeaseTok
         .unwrap()
         .create_clone(&run, None)
         .unwrap();
+    // The worker's token, which the supervisor has issued at the claim.
+    crate::common::service::worker_token(db, &run);
     (run, token)
 }
 

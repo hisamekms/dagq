@@ -671,7 +671,7 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
         // is issued only when there is none.
         let credential = match self.service.credential(self.queue, actor.actor_id()) {
             Some(file) => file,
-            None => self.service.issue(self.queue, &Principal::of(&actor))?,
+            None => self.service.issue(self.queue, &Principal::of(&actor))?.file,
         };
         let token = self
             .containers

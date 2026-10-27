@@ -56,7 +56,7 @@ use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::queue_commands::QueueCommand;
 use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
-    Peer, QueueService, QueueServiceControl, ServiceAccess, ServiceBackend, ServiceProbe,
+    Issued, Peer, QueueService, QueueServiceControl, ServiceAccess, ServiceBackend, ServiceProbe,
     ServiceQueue, TelemetryTokens,
 };
 use crate::application::session::{AgentStart, ReasonParams, SessionOp, WrapperStore};
@@ -66,10 +66,10 @@ use crate::application::{
 };
 use crate::domain::queue_service::wrapper_actor_id;
 use crate::domain::queue_service::{
-    API_VERSION, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OUTAGE_FILE,
+    API_VERSION, HeldToken, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OUTAGE_FILE,
     OUTAGE_TOLD_FILE, OWNER_PID_ENV, Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, STEPS_DIR,
     ServiceDenial, ServiceErrorCode, ServiceOutage, ServiceRequest, ServiceResponse, ServiceState,
-    UseCase,
+    SessionProcess, TokenIssuer, UseCase,
 };
 use crate::domain::session_step::StepTarget;
 use crate::domain::sessions::SessionHook;
@@ -304,6 +304,10 @@ struct TokenRecord {
     /// issued under; none for an agent's token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     issued_under: Option<LeaseToken>,
+    /// Who asked for it, when the service issued it at a parent's request
+    /// (ADR-t3102-1 decision 2); none for one issued before it kept that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issued_by: Option<TokenIssuer>,
 }
 
 /// A token the control side issued: the file its value is in, for the
@@ -408,7 +412,41 @@ fn record_path(queue_dir: &Path, token: &str) -> PathBuf {
 /// so of two issued at once only the later holds. Only the control side
 /// calls this; no command of an AI actor's does (ADR-t1233-4 decision 4).
 pub fn issue(queue_dir: &Path, principal: &Principal, now: i64) -> Result<IssuedToken> {
-    write_token(queue_dir, principal, None, now)
+    write_token(queue_dir, principal, None, None, now)
+}
+
+/// [`issue`] at the request of `issuer`, kept with the token for the
+/// next issue over it to be judged by
+/// ([`crate::domain::queue_service::reissue`]).
+pub fn issue_by(
+    queue_dir: &Path,
+    principal: &Principal,
+    issuer: &TokenIssuer,
+    now: i64,
+) -> Result<IssuedToken> {
+    write_token(queue_dir, principal, None, Some(issuer), now)
+}
+
+/// The token the file of `key` ([`Principal::credential_key`]) holds, its
+/// principal and who asked for it; `None` for no token.
+pub fn held(queue_dir: &Path, key: &str) -> Result<Option<HeldToken>> {
+    let file = credential_path(queue_dir, key);
+    let token = match fs::read_to_string(&file) {
+        Ok(token) => token,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", file.display())),
+    };
+    let bytes = match fs::read(record_path(queue_dir, token.trim())) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read a token's record"),
+    };
+    let record: TokenRecord = serde_json::from_slice(&bytes).context("a token's record")?;
+    Ok(Some(HeldToken {
+        principal: record.principal,
+        issued_by: record.issued_by,
+        issued_at: record.issued_at,
+    }))
 }
 
 /// An exclusive `flock` on the queue's [`TELEMETRY_LOCK_FILE`], held while
@@ -461,15 +499,30 @@ pub fn issue_under(
     issued_under: Option<&LeaseToken>,
     now: i64,
 ) -> Result<IssuedToken> {
-    revoke_under(lock, queue_dir, &principal.actor_id, None)?;
-    write_token(queue_dir, principal, issued_under, now)
+    issue_under_by(lock, queue_dir, principal, issued_under, None, now)
 }
 
-/// Write a token for `principal` issued under `issued_under` ([`issue`]).
+/// [`issue_under`] at the request of `issuer`, kept with the token
+/// ([`issue_by`]).
+pub fn issue_under_by(
+    lock: &TelemetryLock,
+    queue_dir: &Path,
+    principal: &Principal,
+    issued_under: Option<&LeaseToken>,
+    issuer: Option<&TokenIssuer>,
+    now: i64,
+) -> Result<IssuedToken> {
+    revoke_under(lock, queue_dir, &principal.actor_id, None)?;
+    write_token(queue_dir, principal, issued_under, issuer, now)
+}
+
+/// Write a token for `principal` issued under `issued_under` at the
+/// request of `issued_by` ([`issue`]).
 fn write_token(
     queue_dir: &Path,
     principal: &Principal,
     issued_under: Option<&LeaseToken>,
+    issued_by: Option<&TokenIssuer>,
     now: i64,
 ) -> Result<IssuedToken> {
     principal.check().map_err(anyhow::Error::msg)?;
@@ -497,6 +550,7 @@ fn write_token(
         principal: principal.clone(),
         issued_at: now,
         issued_under: issued_under.cloned(),
+        issued_by: issued_by.cloned(),
     };
     // The value first: a token whose record is not written yet is no
     // token, and one whose value is written can always be revoked.
@@ -683,11 +737,14 @@ pub fn revoke_under(
 }
 
 /// Revoke every token whose principal `ended` says has ended (a worker's
-/// whose run ended, found by the supervisor's sweep): its record, and its
-/// value when the actor's file still holds that token (a token issued again
-/// since the look, as another supervisor's resume does, is left); the
-/// actor ids of those revoked. A record that does not read is left for a
-/// person to look at, and one that cannot be removed for the next sweep.
+/// whose run ended, found by the supervisor's sweep), a job's only once
+/// the process that asked for it ended too
+/// ([`crate::domain::queue_service::job_token_ended`]): its
+/// record, and its value when the actor's file still holds that token (a
+/// token issued again since the look, as another supervisor's resume
+/// does, is left); the actor ids of those revoked. A record that does not
+/// read is left for a person to look at, and one that cannot be removed
+/// for the next sweep.
 pub fn sweep(queue_dir: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Result<Vec<String>> {
     let dir = service_dir(queue_dir).join(TOKENS_DIR);
     let entries = match fs::read_dir(&dir) {
@@ -704,7 +761,18 @@ pub fn sweep(queue_dir: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Res
         let Ok(record) = serde_json::from_slice::<TokenRecord>(&bytes) else {
             continue;
         };
-        if !ended(&record.principal) {
+        if !ended(&record.principal)
+            || (crate::domain::queue_service::is_job(record.principal.role)
+                && !crate::domain::queue_service::job_token_ended(
+                    record.issued_by.as_ref(),
+                    // No registration nor job's record is read here: a
+                    // registration is taken as kept, so the token waits
+                    // for the process that asked to end, and one whose
+                    // parent cannot be judged is kept.
+                    |issuer| issuer.there(|process| !process_ended(process), |_| true),
+                    || crate::domain::queue_service::JobState::MayRun,
+                ))
+        {
             continue;
         }
         if let Err(error) = sweep_one(queue_dir, &path, &record.principal) {
@@ -718,6 +786,39 @@ pub fn sweep(queue_dir: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Res
         }
     }
     Ok(revoked)
+}
+
+/// Whether the process of `session` still runs: its pid lives and the
+/// system prints the same start for it ([`SessionProcess::runs`]).
+fn process_alive(session: &SessionProcess) -> bool {
+    let (alive, start) = read_process(session.pid);
+    session.runs(alive, start.as_deref())
+}
+
+/// Whether the process of `session` is known to have ended: its pid is
+/// gone or the system prints another start for it, not when its start
+/// cannot be read ([`SessionProcess::ended`]).
+fn process_ended(session: &SessionProcess) -> bool {
+    let (alive, start) = read_process(session.pid);
+    session.ended(alive, start.as_deref())
+}
+
+/// Whether `pid` lives, and the start the system prints for it while it
+/// does (`None` when that cannot be read).
+fn read_process(pid: u32) -> (bool, Option<String>) {
+    use crate::application::ProcessControl;
+    let processes = super::adapters::SystemProcesses;
+    let alive = processes.alive(pid);
+    (alive, alive.then(|| processes.session_start(pid)).flatten())
+}
+
+/// The process `pid` as a session is read: its pid and the start the
+/// system prints for it; `None` when that cannot be read.
+fn process_of(pid: u32) -> Option<SessionProcess> {
+    use crate::application::ProcessControl;
+    super::adapters::SystemProcesses
+        .session_start(pid)
+        .map(|start| SessionProcess { pid, start })
 }
 
 /// Remove the token's record at `record`, and the value `principal`'s file
@@ -781,8 +882,10 @@ impl ServiceAccess for SystemServiceAccess {
         socket_path(&queue_dir_of(db))
     }
 
-    fn issue(&self, db: &Path, principal: &Principal) -> Result<PathBuf> {
-        Ok(issue(&queue_dir_of(db), principal, unix_now())?.file)
+    fn issue(&self, db: &Path, principal: &Principal) -> Result<Issued> {
+        Ok(Issued::new(
+            issue(&queue_dir_of(db), principal, unix_now())?.file,
+        ))
     }
 
     fn credential(&self, db: &Path, actor_id: &str) -> Option<PathBuf> {
@@ -810,6 +913,227 @@ impl ServiceAccess for SystemServiceAccess {
             actor_id: actor_id.to_owned(),
             revoked: false,
         })
+    }
+}
+
+/// Who runs this process's command, as the queue service is to take it
+/// when the command asks for a job's token ([`RequestedServiceAccess::of_caller`]):
+/// the token's file and the role its environment names.
+#[derive(Debug, Clone, Default)]
+pub struct CommandCaller {
+    pub credential: Option<PathBuf>,
+    pub role: Option<String>,
+}
+
+static COMMAND_CALLER: std::sync::OnceLock<CommandCaller> = std::sync::OnceLock::new();
+
+/// Name the caller of this process's command, read once from its
+/// environment where it starts; only the first call counts, and a process
+/// that names none (a test that runs a command in its own process) is the
+/// user's.
+pub fn set_command_caller(caller: CommandCaller) {
+    let _ = COMMAND_CALLER.set(caller);
+}
+
+/// The [`ServiceAccess`] of a command run on the host to start an actor
+/// (`dagq inbox`, the commands that start a job): a token is issued by the
+/// queue's service at the request of the caller's principal, the user as a
+/// peer of its socket with no token (ADR-t3102-1 decisions 1 and 2), and
+/// never written here. A request whose caller's
+/// environment names a role carries it, and the service refuses it, as it
+/// never takes such a caller for the user. A service that does not answer
+/// is a failure that says so (fail closed). The rest is the files'
+/// ([`SystemServiceAccess`]).
+pub struct RequestedServiceAccess {
+    client: Client,
+}
+
+impl RequestedServiceAccess {
+    /// The access to the service of the queue at `db` of a command that
+    /// starts a job at its caller's word (`observe`, `throughput-review`,
+    /// `setup-review`): the caller's principal is the one
+    /// [`set_command_caller`] named (the token's file its environment
+    /// names, the supervisor's or the inbox's, and its role), or with none
+    /// the user's.
+    pub fn of_caller(db: &Path) -> Self {
+        let caller = COMMAND_CALLER.get();
+        Self {
+            client: Client::host(db, None, |name| {
+                let caller = caller?;
+                match name {
+                    crate::domain::queue_service::CREDENTIAL_FILE_ENV => caller
+                        .credential
+                        .as_ref()
+                        .map(|file| file.to_string_lossy().into_owned()),
+                    crate::domain::actor::ROLE_ENV => caller.role.clone(),
+                    _ => None,
+                }
+            }),
+        }
+    }
+
+    /// The user's access to the service of the queue at `db`, from a
+    /// caller whose environment names `role` (`DAGQ_ROLE`).
+    pub fn user(db: &Path, role: Option<&str>) -> Self {
+        Self {
+            client: Client::host(db, None, |name| {
+                (name == crate::domain::actor::ROLE_ENV)
+                    .then(|| role.map(str::to_owned))
+                    .flatten()
+            }),
+        }
+    }
+}
+
+impl ServiceAccess for RequestedServiceAccess {
+    fn socket(&self, db: &Path) -> PathBuf {
+        SystemServiceAccess.socket(db)
+    }
+
+    fn issue(&self, _db: &Path, principal: &Principal) -> Result<Issued> {
+        let issued = self
+            .client
+            .call(UseCase::IssueToken, json!({"principal": principal}))?;
+        serde_json::from_value(issued).context("the queue service's answer to an issue")
+    }
+
+    fn credential(&self, db: &Path, actor_id: &str) -> Option<PathBuf> {
+        SystemServiceAccess.credential(db, actor_id)
+    }
+
+    fn revoke(&self, db: &Path, actor_id: &str) -> Result<bool> {
+        SystemServiceAccess.revoke(db, actor_id)
+    }
+
+    fn sweep(&self, db: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Result<Vec<String>> {
+        SystemServiceAccess.sweep(db, ended)
+    }
+
+    fn revoke_on_exit(
+        &self,
+        db: &Path,
+        actor_id: &str,
+        child: Box<dyn Spawned>,
+    ) -> Box<dyn Spawned> {
+        SystemServiceAccess.revoke_on_exit(db, actor_id, child)
+    }
+}
+
+/// The [`TelemetryTokens`] of a command that starts a job at its caller's
+/// word (`observe`, `throughput-review`): the token of the job's
+/// executor's telemetry is issued by the queue's service at the request of
+/// the caller's principal ([`RequestedServiceAccess::of_caller`],
+/// ADR-t3102-1 decision 2) and never written here. The rest is the files'
+/// and the queue's, as [`SystemServiceAccess`]'s.
+pub struct RequestedTelemetryTokens {
+    access: RequestedServiceAccess,
+}
+
+impl RequestedTelemetryTokens {
+    /// Those of the command's caller on the service of the queue at `db`.
+    pub fn of_caller(db: &Path) -> Self {
+        Self {
+            access: RequestedServiceAccess::of_caller(db),
+        }
+    }
+}
+
+impl TelemetryTokens for RequestedTelemetryTokens {
+    fn issue_telemetry(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        task: Option<TaskId>,
+        issued_under: Option<&LeaseToken>,
+    ) -> Result<PathBuf> {
+        ensure!(
+            issued_under.is_none(),
+            "a command's job's executor's telemetry is issued under no lease"
+        );
+        Ok(self
+            .access
+            .issue(db, &Principal::telemetry(target, task))?
+            .file)
+    }
+
+    fn revoke_telemetry(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        issued_under: Option<&LeaseToken>,
+    ) -> Result<bool> {
+        SystemServiceAccess.revoke_telemetry(db, target, issued_under)
+    }
+
+    fn telemetry_credential(&self, db: &Path, target: &StepTarget) -> Option<PathBuf> {
+        SystemServiceAccess.telemetry_credential(db, target)
+    }
+
+    fn target_facts(&self, db: &Path, target: &StepTarget) -> Result<TargetFacts> {
+        SystemServiceAccess.target_facts(db, target)
+    }
+
+    fn register_telemetry_session(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        session_id: &str,
+    ) -> Result<()> {
+        SystemServiceAccess.register_telemetry_session(db, target, session_id)
+    }
+
+    fn kept_steps(&self, db: &Path) -> Result<Vec<KeptStepsFile>> {
+        SystemServiceAccess.kept_steps(db)
+    }
+
+    fn forget_steps(&self, db: &Path, file: &Path) -> Result<()> {
+        SystemServiceAccess.forget_steps(db, file)
+    }
+
+    fn held_telemetry(&self, db: &Path) -> Result<Vec<HeldTelemetry>> {
+        SystemServiceAccess.held_telemetry(db)
+    }
+}
+
+/// The [`ServiceAccess`] of a session wrapper: it hands its agent the
+/// token its parent had issued (the supervisor's, at the claim, the resume
+/// and the planner's open) and issues none, as it starts no principal
+/// (ADR-t3102-1 decision 2).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HandedServiceAccess;
+
+impl ServiceAccess for HandedServiceAccess {
+    fn socket(&self, db: &Path) -> PathBuf {
+        SystemServiceAccess.socket(db)
+    }
+
+    fn issue(&self, _db: &Path, principal: &Principal) -> Result<Issued> {
+        bail!(
+            "no token of {} was issued for it: a session wrapper issues none, and the supervisor \
+             that starts it issues its agent's",
+            principal.actor_id
+        )
+    }
+
+    fn credential(&self, db: &Path, actor_id: &str) -> Option<PathBuf> {
+        SystemServiceAccess.credential(db, actor_id)
+    }
+
+    fn revoke(&self, db: &Path, actor_id: &str) -> Result<bool> {
+        SystemServiceAccess.revoke(db, actor_id)
+    }
+
+    fn sweep(&self, db: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Result<Vec<String>> {
+        SystemServiceAccess.sweep(db, ended)
+    }
+
+    fn revoke_on_exit(
+        &self,
+        db: &Path,
+        actor_id: &str,
+        child: Box<dyn Spawned>,
+    ) -> Box<dyn Spawned> {
+        SystemServiceAccess.revoke_on_exit(db, actor_id, child)
     }
 }
 
@@ -2298,7 +2622,7 @@ fn answer(stream: UnixStream, backend: &dyn ServiceBackend, pid: u32) -> Result<
                     build: crate::VERSION,
                     pid,
                 }
-                .handle_from(&request, peer_of(&stream))
+                .handle_from_process(&request, peer_of(&stream), peer_pid(&stream))
             }
             Err(error) => ServiceResponse::failure(
                 ServiceErrorCode::BadRequest,
@@ -2319,6 +2643,56 @@ fn peer_of(stream: &UnixStream) -> Peer {
         Some(uid) if uid == unsafe { libc::geteuid() } => Peer::Owner,
         _ => Peer::Other,
     }
+}
+
+/// The process at the other end of `stream`, by the credentials the OS
+/// gave the connection: the one that asked, which a token it asks for is
+/// kept with (ADR-t3102-1 decision 2); `None` when it cannot be read.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_pid(stream: &UnixStream) -> Option<u32> {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).ok()?;
+    // SAFETY: the buffer and its length are this frame's, of the size
+    // SO_PEERCRED writes.
+    let read = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut credentials).cast(),
+            &raw mut len,
+        )
+    };
+    (read == 0)
+        .then(|| u32::try_from(credentials.pid).ok())
+        .flatten()
+}
+
+#[cfg(target_vendor = "apple")]
+fn peer_pid(stream: &UnixStream) -> Option<u32> {
+    let mut pid: libc::pid_t = 0;
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::pid_t>()).ok()?;
+    // SAFETY: the buffer and its length are this frame's, of the size
+    // LOCAL_PEERPID writes.
+    let read = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &raw mut len,
+        )
+    };
+    (read == 0).then(|| u32::try_from(pid).ok()).flatten()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn peer_pid(_: &UnixStream) -> Option<u32> {
+    None
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -2431,10 +2805,43 @@ impl ServiceBackend for SqliteServiceBackend {
     }
 
     fn session_alive(&self, session: &crate::domain::queue_service::SessionProcess) -> bool {
-        use crate::application::ProcessControl;
-        let processes = super::adapters::SystemProcesses;
-        processes.alive(session.pid)
-            && processes.session_start(session.pid).as_deref() == Some(session.start.as_str())
+        process_alive(session)
+    }
+
+    fn session_ended(&self, session: &crate::domain::queue_service::SessionProcess) -> bool {
+        process_ended(session)
+    }
+
+    fn process_of(&self, pid: u32) -> Option<SessionProcess> {
+        process_of(pid)
+    }
+
+    fn issue_as(&self, principal: &Principal, issuer: &TokenIssuer) -> Result<PathBuf> {
+        Ok(issue_by(&self.queue_dir, principal, issuer, unix_now())?.file)
+    }
+
+    fn held(&self, key: &str) -> Result<Option<HeldToken>> {
+        held(&self.queue_dir, key)
+    }
+
+    fn issue_telemetry_as(
+        &self,
+        target: &StepTarget,
+        task: Option<TaskId>,
+        issued_under: Option<&LeaseToken>,
+        issuer: &TokenIssuer,
+    ) -> Result<PathBuf> {
+        let principal = Principal::telemetry(target, task);
+        let lock = TelemetryLock::take(&self.queue_dir)?;
+        Ok(issue_under_by(
+            &lock,
+            &self.queue_dir,
+            &principal,
+            issued_under,
+            Some(issuer),
+            unix_now(),
+        )?
+        .file)
     }
 
     fn open(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
@@ -2509,31 +2916,60 @@ pub const SUPERVISOR_TIMEOUT: Duration = Duration::from_secs(120);
 /// from the file the issue wrote, and the key it is kept under
 /// ([`Principal::credential_key`]), for the revocation.
 #[derive(Default)]
-struct SignedIn(std::sync::Mutex<Option<(String, String)>>);
+struct SignedIn(std::sync::Mutex<Option<Held>>);
+
+/// A token a caller holds: its value, the key it is kept under
+/// ([`Principal::credential_key`]) and its file.
+struct Held {
+    value: String,
+    key: String,
+    file: PathBuf,
+}
 
 impl SignedIn {
-    fn sign_in(&self, queue_dir: &Path, registration: &LeaseToken, pid: u32) -> Result<()> {
+    /// Sign in as the supervisor of `registration`, process `pid`, with the
+    /// token the service issues at the user's request through `call`
+    /// (ADR-t3102-1 decision 2: the user starts the supervisor), the
+    /// request carrying no token.
+    fn sign_in(
+        &self,
+        registration: &LeaseToken,
+        pid: u32,
+        call: impl FnOnce(&ServiceRequest) -> Result<Value>,
+    ) -> Result<()> {
         let principal = Principal::supervisor(registration, pid);
-        let issued = issue(queue_dir, &principal, unix_now())?;
-        let value = read_token(&issued.file)?;
-        *self.0.lock().expect("the sign-in lock") = Some((value, principal.credential_key()));
+        let request = ServiceRequest {
+            api_version: crate::domain::queue_service::request_version(UseCase::IssueToken),
+            token: None,
+            env_role: None,
+            queue: None,
+            binding: None,
+            use_case: UseCase::IssueToken,
+            params: json!({"principal": principal}),
+        };
+        let Issued { file, .. } = serde_json::from_value(call(&request)?)
+            .context("the queue service's answer to the supervisor's issue")?;
+        let value = read_token(&file)?;
+        *self.0.lock().expect("the sign-in lock") = Some(Held {
+            value,
+            key: principal.credential_key(),
+            file,
+        });
         Ok(())
     }
 
-    /// [`Self::sign_in`] of the image a handoff exec'd into: the token the
-    /// image before kept ([`Self::hand_over`]) when its file is there and
-    /// its record still issued, else one issued anew.
-    fn take_back(&self, queue_dir: &Path, registration: &LeaseToken, pid: u32) -> Result<()> {
+    /// Take back, as the image a handoff exec'd into, the token the image
+    /// before kept ([`Self::hand_over`]) when its file is there and its
+    /// record still issued; nothing else, so a token that is gone is asked
+    /// for by [`Self::sign_in`] once the service answers.
+    fn take_back(&self, queue_dir: &Path, registration: &LeaseToken, pid: u32) {
         let key = Principal::supervisor(registration, pid).credential_key();
-        let kept = read_token(&credential_path(queue_dir, &key))
+        let file = credential_path(queue_dir, &key);
+        let kept = read_token(&file)
             .ok()
             .filter(|value| record_path(queue_dir, value).is_file());
-        match kept {
-            Some(value) => {
-                *self.0.lock().expect("the sign-in lock") = Some((value, key));
-                Ok(())
-            }
-            None => self.sign_in(queue_dir, registration, pid),
+        if let Some(value) = kept {
+            *self.0.lock().expect("the sign-in lock") = Some(Held { value, key, file });
         }
     }
 
@@ -2543,8 +2979,16 @@ impl SignedIn {
         self.0.lock().expect("the sign-in lock").take();
     }
 
+    fn file(&self) -> Option<PathBuf> {
+        self.0
+            .lock()
+            .expect("the sign-in lock")
+            .as_ref()
+            .map(|held| held.file.clone())
+    }
+
     fn sign_out(&self, queue_dir: &Path) {
-        if let Some((_, key)) = self.0.lock().expect("the sign-in lock").take()
+        if let Some(Held { key, .. }) = self.0.lock().expect("the sign-in lock").take()
             && let Err(error) = revoke(queue_dir, &key)
         {
             warn!("the supervisor's queue service token could not be revoked: {error:#}");
@@ -2555,7 +2999,11 @@ impl SignedIn {
     /// service, which this caller neither issued nor revokes.
     fn adopt(&self, file: &Path) -> Result<()> {
         let value = read_token(file)?;
-        *self.0.lock().expect("the sign-in lock") = Some((value, String::new()));
+        *self.0.lock().expect("the sign-in lock") = Some(Held {
+            value,
+            key: String::new(),
+            file: file.to_path_buf(),
+        });
         Ok(())
     }
 
@@ -2566,7 +3014,7 @@ impl SignedIn {
             .lock()
             .expect("the sign-in lock")
             .as_ref()
-            .map(|(value, _)| value.clone())
+            .map(|held| held.value.clone())
     }
 }
 
@@ -2612,8 +3060,23 @@ impl SocketCaller {
         let value = read_token(&file).with_context(|| {
             format!("the token of supervisor {pid} ({registration}) could not be read")
         })?;
-        *caller.signed_in.0.lock().expect("the sign-in lock") = Some((value, key));
+        *caller.signed_in.0.lock().expect("the sign-in lock") = Some(Held { value, key, file });
         Ok(caller)
+    }
+
+    /// `request`, which carries no token, answered on the socket as the
+    /// user's, a peer of the service's own OS user (ADR-t3102-1 decision
+    /// 1): the supervisor's issue at its parent's request.
+    fn as_user(&self, request: &ServiceRequest) -> Result<Value> {
+        let response = call(&self.socket, request, self.timeout).map_err(|error| {
+            use crate::application::supervisor_service::ServiceUnreachable;
+            if error.downcast_ref::<NotConnected>().is_some() {
+                anyhow::Error::new(ServiceUnreachable::not_done(format!("{error:#}")))
+            } else {
+                anyhow::Error::new(ServiceUnreachable::maybe_done(format!("{error:#}")))
+            }
+        })?;
+        supervisor_answer(request.use_case, response)
     }
 }
 
@@ -2680,12 +3143,15 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
         Ok(Arc::new(caller))
     }
 
+    /// The user's request of the service for the supervisor's token, on
+    /// the socket as a peer of the service's own OS user.
     fn sign_in(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
         ensure!(
             !self.adopted,
             "a job command calls with its supervisor's token and signs in as none"
         );
-        self.signed_in.sign_in(&self.queue_dir, registration, pid)
+        self.signed_in
+            .sign_in(registration, pid, |request| self.as_user(request))
     }
 
     fn take_back(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
@@ -2693,7 +3159,8 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
             !self.adopted,
             "a caller of another's token signs in as none"
         );
-        self.signed_in.take_back(&self.queue_dir, registration, pid)
+        self.signed_in.take_back(&self.queue_dir, registration, pid);
+        Ok(())
     }
 
     fn hand_over(&self) {
@@ -2706,6 +3173,10 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
         if !self.adopted {
             self.signed_in.sign_out(&self.queue_dir);
         }
+    }
+
+    fn credential(&self) -> Option<PathBuf> {
+        self.signed_in.file()
     }
 }
 
@@ -2750,6 +3221,26 @@ impl InProcessCaller {
     }
 }
 
+impl InProcessCaller {
+    /// `request`, which carries no token, answered in this process as the
+    /// user's, a peer of the service's own OS user (ADR-t3102-1 decision
+    /// 1): the supervisor's issue at its parent's request.
+    fn as_user(&self, request: &ServiceRequest) -> Result<Value> {
+        // Through the request's text and the answer's, as on the socket.
+        let request: ServiceRequest = serde_json::from_slice(&serde_json::to_vec(request)?)?;
+        let response = QueueService {
+            backend: &*self.backend,
+            build: crate::VERSION,
+            pid: std::process::id(),
+        }
+        .handle_from_process(&request, Peer::Owner, Some(std::process::id()));
+        supervisor_answer(
+            request.use_case,
+            serde_json::from_slice(&serde_json::to_vec(&response)?)?,
+        )
+    }
+}
+
 impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
     fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
         let request = ServiceRequest {
@@ -2768,7 +3259,7 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
             build: crate::VERSION,
             pid: std::process::id(),
         }
-        .handle(&request);
+        .handle_from_process(&request, Peer::Other, Some(std::process::id()));
         supervisor_answer(
             use_case,
             serde_json::from_slice(&serde_json::to_vec(&response)?)?,
@@ -2789,12 +3280,15 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
         Ok(Arc::new(caller))
     }
 
+    /// The user's request for the supervisor's token, answered as from a
+    /// peer of the service's own OS user: this process is one.
     fn sign_in(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
         ensure!(
             !self.adopted,
             "a caller of another's token signs in as none"
         );
-        self.signed_in.sign_in(&self.queue_dir, registration, pid)
+        self.signed_in
+            .sign_in(registration, pid, |request| self.as_user(request))
     }
 
     fn take_back(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
@@ -2802,7 +3296,8 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
             !self.adopted,
             "a caller of another's token signs in as none"
         );
-        self.signed_in.take_back(&self.queue_dir, registration, pid)
+        self.signed_in.take_back(&self.queue_dir, registration, pid);
+        Ok(())
     }
 
     fn hand_over(&self) {
@@ -2815,6 +3310,10 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
         if !self.adopted {
             self.signed_in.sign_out(&self.queue_dir);
         }
+    }
+
+    fn credential(&self) -> Option<PathBuf> {
+        self.signed_in.file()
     }
 }
 
@@ -2966,6 +3465,12 @@ impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
     fn hand_over(&self) {}
 
     fn sign_out(&self) {}
+
+    /// Its caller's token (none for the user, whom the service knows by
+    /// the socket's peer).
+    fn credential(&self) -> Option<PathBuf> {
+        self.client.credential.clone()
+    }
 }
 
 /// One request's queue.
@@ -2988,7 +3493,130 @@ struct DenialWriter {
     actor: ActorContext,
 }
 
+/// What the issue's transaction reads of `queue` for a token held already
+/// ([`crate::application::queue_service::IssueFacts`]): the supervisors'
+/// registrations, and a job's records, whose processes the host is asked
+/// about at `now_ms`.
+struct IssueQueue<'a> {
+    queue: &'a SqliteQueue,
+    registrations: Vec<crate::domain::SupervisorRegistration>,
+    now_ms: i64,
+}
+
+impl crate::application::queue_service::IssueFacts for IssueQueue<'_> {
+    fn registered(&self, token: &LeaseToken) -> bool {
+        self.registrations
+            .iter()
+            .any(|registration| registration.token == *token)
+    }
+
+    fn job(
+        &self,
+        held: &crate::domain::queue_service::HeldToken,
+        starting: Option<&crate::domain::queue_service::TokenIssuer>,
+    ) -> crate::domain::queue_service::JobState {
+        use crate::application::ProcessControl;
+        use crate::domain::queue_service::{JobState, job_records_ended, job_records_of};
+        let principal = &held.principal;
+        let alive = |pid| super::adapters::SystemProcesses.alive(pid);
+        // A job of a kind the queue keeps no record of has none.
+        let records = match job_records_of(principal).map(|records| self.queue.job_facts(&records))
+        {
+            None => Vec::new(),
+            Some(Ok(records)) => records,
+            Some(Err(error)) => {
+                warn!(error = %format_args!("{error:#}"), "the records of the job of {} could not be read; its token is kept: {error:#}", principal.actor_id);
+                return JobState::MayRun;
+            }
+        };
+        match job_records_ended(&records, starting, self.now_ms, &alive) {
+            Some(true) => JobState::Ended,
+            Some(false) => JobState::MayRun,
+            None => JobState::Unrecorded(crate::domain::queue_service::may_have_asked(
+                principal.role,
+                held.issued_by.as_ref().map(|issuer| issuer.parent.as_str()),
+                held.issued_at,
+                &self.registrations,
+                &alive,
+                &host_processes,
+                std::process::id(),
+            )),
+        }
+    }
+}
+
+/// This user's processes as
+/// [`crate::domain::queue_service::may_have_asked`] takes them, from one
+/// `ps` listing: their command lines and when they started, from their
+/// ages; `None` when they cannot be listed.
+fn host_processes() -> Option<Vec<crate::domain::queue_service::HostProcess>> {
+    let listed = match super::adapters::user_processes() {
+        Ok(listed) => listed,
+        Err(error) => {
+            warn!(error = %format_args!("{error:#}"), "the host's processes could not be listed: {error:#}");
+            return None;
+        }
+    };
+    let now = unix_now();
+    Some(
+        listed
+            .into_iter()
+            .map(|process| crate::domain::queue_service::HostProcess {
+                pid: process.pid,
+                command: process.command,
+                started_at: i64::try_from(process.elapsed_secs)
+                    .ok()
+                    .map(|age| now - age),
+            })
+            .collect(),
+    )
+}
+
 impl ServiceSqlite {
+    /// Why `held` is not held at `now` (seconds), from the facts read in
+    /// the issue's transaction, `registrations` the supervisors'; `None`
+    /// when it is ([`ServiceQueue::issuing`],
+    /// [`crate::domain::queue_service::not_held`]).
+    fn unheld(
+        &self,
+        held: &crate::domain::queue_service::IssueHeld,
+        now: i64,
+        registrations: &[crate::domain::SupervisorRegistration],
+    ) -> Result<Option<String>> {
+        use crate::domain::queue_service::{HeldFacts, IssueHeld, not_held};
+        use crate::domain::supervisor_prune::heartbeat_expired;
+        let mut facts = HeldFacts::default();
+        let lease = match held {
+            IssueHeld::Lease { run, lease } => {
+                facts.leased = self.queue.holds_lease(run, lease)?;
+                Some(lease)
+            }
+            IssueHeld::OpenPlanner { planner, lease } => {
+                let target =
+                    StepTarget::of(crate::domain::session_step::TargetKind::Planner, *planner);
+                facts.planner_open =
+                    self.queue.telemetry_target(&target)? == TargetFacts::OpenPlanner;
+                Some(lease)
+            }
+            IssueHeld::Registered(lease) => Some(lease),
+            IssueHeld::OpenTarget {
+                target,
+                registration,
+            } => {
+                facts.target_open = self.queue.telemetry_target(target)? != TargetFacts::Ended;
+                registration.as_ref()
+            }
+            IssueHeld::Nothing | IssueHeld::Registration(_) => None,
+        };
+        if let Some(lease) = lease {
+            facts.registration_expired = registrations
+                .iter()
+                .find(|registration| registration.token == *lease)
+                .map(|registration| heartbeat_expired(registration, now));
+        }
+        Ok(not_held(held, &facts))
+    }
+
     fn dialogue(&mut self) -> DialogueQueue<'_> {
         DialogueQueue {
             queue: &mut self.queue,
@@ -3191,23 +3819,27 @@ impl ServiceQueue for ServiceSqlite {
         &mut self.queue
     }
 
-    fn under_lease(
+    fn issuing(
         &mut self,
-        run: &RunId,
-        token: &LeaseToken,
-        then: &mut dyn FnMut() -> Result<Value>,
+        held: &crate::domain::queue_service::IssueHeld,
+        now_ms: i64,
+        then: &mut dyn FnMut(&dyn crate::application::queue_service::IssueFacts) -> Result<Value>,
     ) -> Result<Value> {
         let conn = &self.queue.conn;
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(anyhow::Error::from)
             .map_err(super::sqlite::tag_busy)?;
-        let result = match self.queue.holds_lease(run, token) {
-            Ok(true) => then(),
-            Ok(false) => Err(anyhow::anyhow!(
-                "run {run} is not leased to the supervisor that asked: nothing is issued under its lease"
-            )),
-            Err(error) => Err(error),
-        };
+        let registrations = crate::application::SupervisorReads::supervisors(&self.queue);
+        let result = registrations.and_then(|registrations| {
+            match self.unheld(held, now_ms / 1000, &registrations)? {
+                None => then(&IssueQueue {
+                    queue: &self.queue,
+                    registrations,
+                    now_ms,
+                }),
+                Some(why) => Err(crate::application::queue_service::NotHeld(why).into()),
+            }
+        });
         match result {
             Ok(value) => {
                 conn.execute_batch("COMMIT")?;
@@ -3226,11 +3858,11 @@ impl ServiceQueue for ServiceSqlite {
         token: &LeaseToken,
         main: &crate::domain::CommitSha,
         over_handoff: bool,
-        holder: Option<u32>,
+        holder: crate::application::queue_service::SlotHolder,
         issue: &mut dyn FnMut(crate::domain::EventId) -> Result<Value>,
     ) -> Result<(crate::domain::TaskRun, Value)> {
         self.queue
-            .begin_integration_then(run, token, main, !over_handoff, holder, issue)
+            .begin_integration_then(run, token, main, !over_handoff, Some(holder), issue)
     }
 
     fn session(&mut self, op: &crate::application::session::SessionOp) -> Result<Value> {
@@ -4173,6 +4805,33 @@ mod tests {
         }
     }
 
+    /// The image a handoff exec'd into takes back only the supervisor's
+    /// token the image before kept and still issued: one that is gone (its
+    /// file or its record) is left for the sign-in, which asks the service
+    /// once it answers, so nothing is asked of a service not reached yet.
+    #[test]
+    fn a_handoff_takes_back_only_a_kept_token_and_asks_for_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let registration = LeaseToken::new("handed");
+        let principal = Principal::supervisor(&registration, 7);
+        let taken = |signed_in: &SignedIn| {
+            signed_in.take_back(dir.path(), &registration, 7);
+            signed_in.file()
+        };
+        // None kept: nothing taken.
+        assert_eq!(taken(&SignedIn::default()), None);
+        let issued = issue(dir.path(), &principal, 1).unwrap();
+        let signed_in = SignedIn::default();
+        assert_eq!(taken(&signed_in), Some(issued.file.clone()));
+        assert_eq!(
+            signed_in.token().as_deref(),
+            Some(read_token(&issued.file).unwrap().as_str())
+        );
+        // Its record gone (revoked): its file is not taken back.
+        fs::remove_file(record_path(dir.path(), &read_token(&issued.file).unwrap())).unwrap();
+        assert_eq!(taken(&SignedIn::default()), None);
+    }
+
     #[test]
     fn a_sweep_revokes_the_tokens_it_is_told_ended_and_keeps_the_rest() {
         let dir = tempfile::tempdir().unwrap();
@@ -4190,6 +4849,7 @@ mod tests {
             principal: ended.clone(),
             issued_at: 0,
             issued_under: None,
+            issued_by: None,
         };
         write_private(
             &record_path(dir.path(), &orphan),
@@ -4210,6 +4870,7 @@ mod tests {
                 principal: old.clone(),
                 issued_at: 0,
                 issued_under: None,
+                issued_by: None,
             })
             .unwrap(),
         )

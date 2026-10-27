@@ -2165,7 +2165,8 @@ pub fn record_background_start(
 }
 
 /// Claim the next task under `token` and provision its run as `supervise`
-/// does but for its session: plan, run directory, prompt and worktree.
+/// does but for its session: plan, run directory, prompt and worktree, and
+/// the worker's token, which the run's wrapper hands its agent.
 pub fn provision_under(repo: &Path, db: &Path, token: &str) -> TaskRun {
     use dagq::{
         domain::ClaimOutcome,
@@ -2224,6 +2225,7 @@ pub fn provision_under(repo: &Path, db: &Path, token: &str) -> TaskRun {
     )
     .unwrap();
     repository.create_worktree(&run).unwrap();
+    crate::common::service::worker_token(db, &run);
     run
 }
 

@@ -79,6 +79,7 @@ whole!(
     crate::domain::task_hold::TaskHold,
     crate::domain::task_hold::HoldGuard,
     std::path::PathBuf,
+    crate::application::queue_service::Issued,
     crate::domain::queue_service::Principal,
     crate::domain::telemetry::HeldTelemetry,
     crate::domain::telemetry::TargetFacts,

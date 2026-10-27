@@ -2138,8 +2138,8 @@ pub struct InboxPorts<'a> {
     pub queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener<dyn RunLog + Send>>,
     pub inspect_repository: &'a dyn Fn(&Path) -> Result<RepositoryPaths>,
     pub resolve_language: &'a ResolveLanguage,
-    /// Issues the inbox's token for the queue service, which its `dagq`
-    /// takes on a served queue (ADR-t3102-1 decision 2).
+    /// Asks the queue service for the inbox's token, which its `dagq`
+    /// takes (ADR-t3102-1 decision 2).
     pub queue_service: &'a dyn super::queue_service::ServiceAccess,
     /// The process `dagq inbox` runs in, whose place the inbox's agent
     /// takes: the session its token is bound to. `None` when its start
@@ -2413,11 +2413,11 @@ pub fn inbox(
     let queue = (ports.queues)(&db).open()?;
     // The inbox's token, bound to this process, which the agent's takes
     // the place of (ADR-t3102-1 decisions 2 and 3), in a file of this
-    // session's: issuing it revokes the one an earlier inbox held and
-    // empties the file that inbox was handed, and it ends with this
-    // session. It is written to its file here, as a worker's is, until
-    // the service issues it and checks the parent and the session in its
-    // transaction (ADR-t3105-1 decision 5).
+    // session's: the service issues it at this person's request (the
+    // user starts the inbox, ADR-t3102-1 decision 2), which revokes the one
+    // an earlier inbox held and empties the file that inbox was handed,
+    // and it ends with this session. A service that does not answer opens
+    // no inbox, whose `dagq` would reach none either.
     let session = ports.session.clone().context(
         "the start of this process could not be read, so the inbox's token cannot be bound to \
          its session; the inbox was not opened",
@@ -2430,7 +2430,8 @@ pub fn inbox(
         )
         .map_err(|error| {
             anyhow::anyhow!("issue the inbox's token: {error:#}; the inbox was not opened")
-        })?;
+        })?
+        .file;
     let mut command = HostActorExecutor::new(&db)
         .with_provider(agent)
         .spawn(ActorExecutionSpec::new(

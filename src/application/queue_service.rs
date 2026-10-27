@@ -31,8 +31,8 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use serde::Deserialize;
+use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::warn;
 
@@ -54,6 +54,27 @@ use crate::domain::{
     NewAsk, NewFinding, NewNote, NoteTarget, PlannerId, ProposalId, RequestId, Resource, RunEvent,
     RunId, RunStatus, SessionRole, StaticPolicy, TaskId,
 };
+
+/// What the issue's transaction reads of the queue for a token held
+/// already ([`ServiceQueue::issuing`], ADR-t3102-1 decision 2).
+pub trait IssueFacts {
+    /// Whether the supervisor's registration `token` is kept, which tells
+    /// whether a supervisor kept as a token's parent is still there
+    /// ([`crate::domain::queue_service::TokenIssuer::there`]).
+    fn registered(&self, token: &crate::domain::LeaseToken) -> bool;
+    /// What the queue's records of the job `held` is of tell
+    /// ([`crate::domain::queue_service::job_records_ended`]), the record of
+    /// the start `starting` asks for left out while it runs, and with none,
+    /// the processes that may have asked for that token, by when it was
+    /// issued and the parent kept with it, and may still run
+    /// ([`crate::domain::queue_service::may_have_asked`]): `MayRun` when
+    /// the records cannot be read.
+    fn job(
+        &self,
+        held: &crate::domain::queue_service::HeldToken,
+        starting: Option<&crate::domain::queue_service::TokenIssuer>,
+    ) -> crate::domain::queue_service::JobState;
+}
 
 /// The queue as one use case of the service reads and changes it, written
 /// as the principal's actor.
@@ -102,15 +123,17 @@ pub trait ServiceQueue:
     /// The queue's operations a supervisor's request runs
     /// ([`super::supervisor_service::answer`]).
     fn supervisor_store(&mut self) -> &mut dyn super::supervisor_service::SupervisorStore;
-    /// Run `then` in one write transaction that finds `run` leased to
-    /// `token` first, and refuses (running nothing) when it is not: a
-    /// token issued under a run's lease is issued only while the lease is
-    /// held.
-    fn under_lease(
+    /// Run `then`, the issue of a token, in one write transaction that
+    /// finds `held` held first at `now_ms` (ADR-t3102-1 decision 2), and
+    /// refuse with [`NotHeld`] (running nothing) when it is not: a lease
+    /// lost, a registration whose heartbeat expired, a planner closed or a
+    /// run ended. `then` is given what that transaction reads of a token
+    /// held already ([`IssueFacts`]).
+    fn issuing(
         &mut self,
-        run: &RunId,
-        token: &crate::domain::LeaseToken,
-        then: &mut dyn FnMut() -> Result<Value>,
+        held: &crate::domain::queue_service::IssueHeld,
+        now_ms: i64,
+        then: &mut dyn FnMut(&dyn IssueFacts) -> Result<Value>,
     ) -> Result<Value>;
     /// Take the integration slot of `run` for the supervisor of `token`
     /// ([`super::RunTransitions::begin_integration`], or
@@ -119,17 +142,17 @@ pub trait ServiceQueue:
     /// transaction once the slot and its lease are taken, run `issue` with
     /// the landing's `integration_started` event (the landing integrator's
     /// token, ADR-t3102-3 decision 3, ADR-t3102-1 decision 2): nothing is
-    /// committed unless both are done. The lease and the event name the
-    /// process `holder` when given (a person's or the inbox's `integrate`,
-    /// whose command lands in its own process), else the supervisor of
-    /// `token`. The run begun and what `issue` answered.
+    /// committed unless both are done. The run's lease another holds, or
+    /// a supervisor's registration not live, is [`NotHeld`], found in that
+    /// transaction ([`SlotHolder`]). The run begun and what `issue`
+    /// answered.
     fn begin_landing(
         &mut self,
         run: &RunId,
         token: &crate::domain::LeaseToken,
         main: &crate::domain::CommitSha,
         over_handoff: bool,
-        holder: Option<u32>,
+        holder: SlotHolder,
         issue: &mut dyn FnMut(crate::domain::EventId) -> Result<Value>,
     ) -> Result<(crate::domain::TaskRun, Value)>;
     /// Do a session wrapper's `op`, authorized already
@@ -191,8 +214,36 @@ pub trait ServiceBackend: Send + Sync {
     /// serves: the same file, compared by its path and never opened.
     fn serves(&self, db: &std::path::Path) -> bool;
     /// Whether the process of `session` still runs: its pid lives and the
-    /// system prints the same start for it.
+    /// system prints the same start for it
+    /// ([`crate::domain::queue_service::SessionProcess::runs`]).
     fn session_alive(&self, session: &crate::domain::queue_service::SessionProcess) -> bool;
+    /// Whether the process of `session` is known to have ended: its pid is
+    /// gone or the system prints another start for it, not when its start
+    /// cannot be read
+    /// ([`crate::domain::queue_service::SessionProcess::ended`]).
+    fn session_ended(&self, session: &crate::domain::queue_service::SessionProcess) -> bool;
+    /// The process `pid` as a session is read (its start), `None` when
+    /// that cannot be read.
+    fn process_of(&self, pid: u32) -> Option<crate::domain::queue_service::SessionProcess>;
+    /// Issue `principal`'s token as [`ServiceAccess::issue`] does, keeping
+    /// `issuer` with it (ADR-t3102-1 decision 2).
+    fn issue_as(
+        &self,
+        principal: &Principal,
+        issuer: &crate::domain::queue_service::TokenIssuer,
+    ) -> Result<std::path::PathBuf>;
+    /// The token the file of `key` ([`Principal::credential_key`]) holds,
+    /// its principal and who asked for it; `None` for no token.
+    fn held(&self, key: &str) -> Result<Option<crate::domain::queue_service::HeldToken>>;
+    /// [`TelemetryTokens::issue_telemetry`], keeping `issuer` with the
+    /// token.
+    fn issue_telemetry_as(
+        &self,
+        target: &crate::domain::session_step::StepTarget,
+        task: Option<TaskId>,
+        issued_under: Option<&crate::domain::LeaseToken>,
+        issuer: &crate::domain::queue_service::TokenIssuer,
+    ) -> Result<std::path::PathBuf>;
     /// The Git common directory the queue is bound to, `None` for one
     /// bound to none.
     fn binding(&self) -> Result<Option<String>> {
@@ -228,9 +279,21 @@ impl QueueService<'_> {
         self.handle_from(request, Peer::Other)
     }
 
-    /// Answer `request` from `peer`. An error never leaves without its
-    /// code, and no response names the token.
+    /// Answer `request` from `peer`, whose process is not known.
     pub fn handle_from(&self, request: &ServiceRequest, peer: Peer) -> ServiceResponse {
+        self.handle_from_process(request, peer, None)
+    }
+
+    /// Answer `request` from `peer`, from the process `process` when the
+    /// connection tells it: the one that asked, which a token it asks for
+    /// is kept with. An error never leaves without its code, and no
+    /// response names the token.
+    pub fn handle_from_process(
+        &self,
+        request: &ServiceRequest,
+        peer: Peer,
+        process: Option<u32>,
+    ) -> ServiceResponse {
         if !answers(request.api_version) {
             return ServiceResponse::failure(
                 ServiceErrorCode::ApiVersionMismatch,
@@ -303,6 +366,15 @@ impl QueueService<'_> {
                 self.backend,
                 &principal,
                 &request.params,
+                process,
+            ));
+        }
+        if request.use_case == UseCase::IssueToken {
+            return respond(issue_token_of(
+                self.backend,
+                &principal,
+                &request.params,
+                process,
             ));
         }
         // The queue the token's run or target was read on, when it was,
@@ -509,7 +581,15 @@ fn respond(result: Result<Value>) -> ServiceResponse {
     match result {
         Ok(value) => ServiceResponse::success(value),
         Err(error) => match error.downcast_ref::<AuthorizationError>() {
-            Some(refused) => ServiceResponse::denied(refused),
+            Some(refused) => {
+                let mut response = ServiceResponse::denied(refused);
+                if let (Some(because), Some(failure)) =
+                    (error.downcast_ref::<RefusedBecause>(), &mut response.error)
+                {
+                    failure.message = format!("{}: {because}", failure.message);
+                }
+                response
+            }
             None if error.downcast_ref::<BadParams>().is_some()
                 || error.downcast_ref::<BadRead>().is_some()
                 || error.downcast_ref::<BadWrite>().is_some()
@@ -529,6 +609,295 @@ fn respond(result: Result<Value>) -> ServiceResponse {
                 response
             }
         },
+    }
+}
+
+/// Who takes a landing's slot under its lease token
+/// ([`ServiceQueue::begin_landing`]).
+#[derive(Clone, Copy, Debug)]
+pub enum SlotHolder {
+    /// The supervisor the token is the registration of, which is to be
+    /// live at `now` (unix seconds); the lease and the event name its
+    /// process.
+    Supervisor { now: i64 },
+    /// Process `pid`, the command of a person's or the inbox's
+    /// `integrate`, which lands in its own process and is named in the
+    /// lease and the event.
+    Command { pid: u32 },
+}
+
+/// What a token is to be issued under is not held
+/// ([`ServiceQueue::issuing`]): why, as the refusal's record keeps it.
+#[derive(Debug)]
+pub struct NotHeld(pub String);
+
+impl std::fmt::Display for NotHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotHeld {}
+
+/// The target of an executor's telemetry token asked for holds one
+/// already, found in the issue's transaction ([`issue_token`]).
+#[derive(Debug)]
+struct TelemetryHeld;
+
+impl std::fmt::Display for TelemetryHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the target's executor holds its token already")
+    }
+}
+
+impl std::error::Error for TelemetryHeld {}
+
+/// The token the key asked for holds already, which the issue may not
+/// replace, and why ([`crate::domain::queue_service::reissue`]),
+/// found in the issue's transaction.
+#[derive(Debug)]
+pub(super) struct Replacing(pub(super) &'static str);
+
+impl std::fmt::Display for Replacing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Replacing {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IssueTokenParams {
+    principal: Principal,
+}
+
+/// The issue use case (`issue_token`, ADR-t3102-1 decision 2): the token
+/// of `raw`'s principal, asked for by `parent`, the principal of the
+/// request ([`issue_token`]).
+fn issue_token_of(
+    backend: &dyn ServiceBackend,
+    parent: &Principal,
+    raw: &Value,
+    process: Option<u32>,
+) -> Result<Value> {
+    let p: IssueTokenParams = params(UseCase::IssueToken, raw)?;
+    let mut queue = backend.open(&parent.actor())?;
+    issue_token(backend, &mut *queue, parent, &p.principal, process)
+}
+
+/// Issue the token of `child` at `parent`'s request (ADR-t3102-1 decision
+/// 2): `token.issue` on a principal of `child`'s role is asked of the
+/// policy for `parent` ([`crate::domain::authorization::starts`]), then
+/// what the token is issued under
+/// ([`crate::domain::queue_service::issue_held`]) is checked in the
+/// transaction that writes it, with the token the child's key holds
+/// already: the parent and the process that asked for that one, kept with
+/// it, decide whether this one may replace it
+/// ([`crate::domain::queue_service::reissue`]; a job's only at its
+/// own parent's request once that process ended, the same one handed to
+/// that parent again while it runs). A refusal of any is
+/// `authorization_denied`, recorded with the role asked for (and why it is
+/// not held). The token keeps `parent` and its `process` (the one that
+/// asked, the connection's). The answer is the file the value is in,
+/// outside any worktree and run directory, and whether it is the one held
+/// already ([`Issued`]). An executor's telemetry token
+/// of a run's target is `issue_telemetry`'s, under the run's lease, and is
+/// refused here.
+pub(super) fn issue_token(
+    backend: &dyn ServiceBackend,
+    queue: &mut dyn ServiceQueue,
+    parent: &Principal,
+    child: &Principal,
+    process: Option<u32>,
+) -> Result<Value> {
+    child
+        .check()
+        .map_err(|error| BadParams(format!("issue_token's principal: {error}")))?;
+    if !child.names_itself() {
+        return Err(BadParams(format!(
+            "issue_token's principal: the actor id {} is not one of a {}",
+            child.actor_id,
+            child.role.as_str()
+        ))
+        .into());
+    }
+    let actor = parent.actor();
+    let resource = Resource::Principal(child.role);
+    let store = Store(queue);
+    Gate {
+        actor: &actor,
+        authorizer: &StaticPolicy,
+    }
+    .authorize(&store, Capability::TokenIssue, &resource)?;
+    let telemetry = child.role == ActorRole::ExecutorTelemetry;
+    if telemetry
+        && let Some(why) = crate::domain::queue_service::telemetry_issue_refusal(parent.role, child)
+    {
+        return Err(refuse_recorded(
+            store.0,
+            &actor,
+            Capability::TokenIssue,
+            &resource,
+            crate::domain::authorization::DenyReason::Resource,
+            why,
+        ));
+    }
+    let db = backend.db();
+    let held = crate::domain::queue_service::issue_held(parent, child);
+    let issuer = crate::domain::queue_service::TokenIssuer::of(
+        parent,
+        process.and_then(|pid| backend.process_of(pid)),
+    );
+    let issued = store.0.issuing(&held, backend.now_ms(), &mut |facts| {
+        let file = match (&child.target, telemetry) {
+            (Some(target), true) => {
+                // A command's job is issued its executor's token once, as it
+                // starts: one its target holds already is that job's, which
+                // no other caller takes over (the issue would revoke it).
+                // Looked at in the issue's write transaction, which one
+                // request at a time holds, so of two asking at once for the
+                // same target only the first is issued.
+                if backend
+                    .telemetry()
+                    .telemetry_credential(db, target)
+                    .is_some()
+                {
+                    return Err(TelemetryHeld.into());
+                }
+                // An executor's under the telemetry's own lock as well,
+                // revoking every one its target held (ADR-t1662-3 decision
+                // 11).
+                Issued::new(backend.issue_telemetry_as(target, child.task_id, None, &issuer)?)
+            }
+            _ => {
+                // Over the token its key holds only as its parent and its
+                // process allow, looked at in the issue's write
+                // transaction too: of two asking at once, the second finds
+                // the first's.
+                use crate::domain::queue_service::{Reissue, reissue};
+                let key = child.credential_key();
+                let held = backend.held(&key)?;
+                let kept = held.as_ref().map(|held| held.issued_by.clone());
+                match reissue(
+                    child,
+                    &issuer,
+                    kept.as_ref(),
+                    parent_there(backend, facts),
+                    // Asked only over a token held.
+                    || {
+                        held.as_ref()
+                            .map_or(crate::domain::queue_service::JobState::MayRun, |held| {
+                                facts.job(held, Some(&issuer))
+                            })
+                    },
+                ) {
+                    Reissue::Issue => Issued::new(backend.issue_as(child, &issuer)?),
+                    Reissue::Held => Issued {
+                        file: backend
+                            .access()
+                            .credential(db, &key)
+                            .ok_or_else(|| anyhow!("the token held for {key} has no file"))?,
+                        held: true,
+                    },
+                    Reissue::Refused(why) => return Err(Replacing(why).into()),
+                }
+            }
+        };
+        Ok(serde_json::to_value(file)?)
+    });
+    let Err(error) = issued else {
+        return issued;
+    };
+    if error.downcast_ref::<TelemetryHeld>().is_some() {
+        return Err(refuse_recorded(
+            store.0,
+            &actor,
+            Capability::TokenIssue,
+            &resource,
+            crate::domain::authorization::DenyReason::Resource,
+            "the target's executor holds its token already",
+        ));
+    }
+    if let Some(Replacing(why)) = error.downcast_ref::<Replacing>() {
+        return Err(refuse_recorded(
+            store.0,
+            &actor,
+            Capability::TokenIssue,
+            &resource,
+            crate::domain::authorization::DenyReason::Resource,
+            why,
+        ));
+    }
+    let Some(not_held) = error.downcast_ref::<NotHeld>() else {
+        return Err(error);
+    };
+    let why = not_held.0.clone();
+    Err(refuse_recorded(
+        store.0,
+        &actor,
+        Capability::TokenIssue,
+        &resource,
+        crate::domain::authorization::DenyReason::NotHeld,
+        &why,
+    ))
+}
+
+/// Whether the parent kept with a token is still there
+/// ([`crate::domain::queue_service::TokenIssuer::there`]): its process as
+/// `backend` reads it, and a supervisor's registration as `facts`, read in
+/// the issue's transaction, tell ([`ServiceQueue::issuing`]).
+pub(super) fn parent_there<'a>(
+    backend: &'a dyn ServiceBackend,
+    facts: &'a dyn IssueFacts,
+) -> impl Fn(&crate::domain::queue_service::TokenIssuer) -> bool + Copy + 'a {
+    move |kept| {
+        kept.there(
+            |process| !backend.session_ended(process),
+            |registration| facts.registered(registration),
+        )
+    }
+}
+
+/// Refuse `actor`'s `capability` on `resource` for `reason`, which the
+/// policy alone does not see (`why`: a precondition of the queue the
+/// request does not hold): recorded as `authorization_denied` with the
+/// why (`not_held` for [`crate::domain::authorization::DenyReason::NotHeld`],
+/// else `why`), the error the service answers it with.
+pub(super) fn refuse_recorded(
+    queue: &mut dyn ServiceQueue,
+    actor: &ActorContext,
+    capability: Capability,
+    resource: &Resource,
+    reason: crate::domain::authorization::DenyReason,
+    why: &str,
+) -> anyhow::Error {
+    let refused = AuthorizationError {
+        role: actor.role(),
+        capability,
+        reason,
+    };
+    let mut payload = super::commands::denial(&refused, resource);
+    let key = if reason == crate::domain::authorization::DenyReason::NotHeld {
+        "not_held"
+    } else {
+        "why"
+    };
+    payload[key] = json!(why);
+    if let Err(record) = Store(queue).record_denial(payload) {
+        warn!("could not record the refusal ({refused}): {record:#}");
+    }
+    anyhow::Error::new(refused).context(RefusedBecause(why.to_owned()))
+}
+
+/// Why a refusal of [`refuse_recorded`] was made, which its answer says
+/// after the refusal ([`respond`]).
+#[derive(Debug)]
+struct RefusedBecause(String);
+
+impl std::fmt::Display for RefusedBecause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -935,6 +1304,7 @@ fn run(
         UseCase::Supervisor | UseCase::Control => {
             unreachable!("a supervisor's and a control-side command's requests are answered apart")
         }
+        UseCase::IssueToken => unreachable!("an issue is answered apart"),
         UseCase::List
         | UseCase::Candidates
         | UseCase::Graph
@@ -1350,6 +1720,26 @@ pub trait QueueServiceControl: Send + Sync {
     fn stop(&self, timeout: Duration) -> Result<Option<u32>>;
 }
 
+/// The answer to a token's issue ([`ServiceAccess::issue`]): the file its
+/// value is in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Issued {
+    pub file: std::path::PathBuf,
+    /// Whether the token is the one its key held already, handed over
+    /// again ([`crate::domain::queue_service::Reissue::Held`]): another
+    /// start's of the same job's actor and parent, which gives it back at
+    /// its own end, so a start handed it gives back nothing when it does
+    /// not start.
+    pub held: bool,
+}
+
+impl Issued {
+    /// A token this request issued.
+    pub fn new(file: std::path::PathBuf) -> Self {
+        Self { file, held: false }
+    }
+}
+
 /// What the control side gives an actor whose `dagq` runs in client mode
 /// (goal 82's stage (3), ADR-t1233-4 decision 4): the socket of the queue
 /// at `db`, and the file of a token for the actor's principal. Only the
@@ -1360,9 +1750,9 @@ pub trait QueueServiceControl: Send + Sync {
 pub trait ServiceAccess: Send + Sync {
     /// The socket of the service of the queue at `db`.
     fn socket(&self, db: &std::path::Path) -> std::path::PathBuf;
-    /// Issue a token for `principal` (the one its actor held is revoked);
-    /// the file holding it.
-    fn issue(&self, db: &std::path::Path, principal: &Principal) -> Result<std::path::PathBuf>;
+    /// Issue a token for `principal` (the one its actor held is revoked),
+    /// or be handed the one held already ([`Issued::held`]).
+    fn issue(&self, db: &std::path::Path, principal: &Principal) -> Result<Issued>;
     /// The file of the token `actor_id` holds, `None` when it holds none.
     fn credential(&self, db: &std::path::Path, actor_id: &str) -> Option<std::path::PathBuf>;
     /// Revoke the token `actor_id` holds (a worker's whose run ended):
@@ -1833,13 +2223,13 @@ mod tests {
         ) -> &mut dyn crate::application::supervisor_service::SupervisorStore {
             unimplemented!("these tests send no supervisor's operation")
         }
-        fn under_lease(
+        fn issuing(
             &mut self,
-            _: &RunId,
-            _: &crate::domain::LeaseToken,
-            _: &mut dyn FnMut() -> Result<Value>,
+            _: &crate::domain::queue_service::IssueHeld,
+            _: i64,
+            _: &mut dyn FnMut(&dyn IssueFacts) -> Result<Value>,
         ) -> Result<Value> {
-            unimplemented!("these tests send no supervisor's operation")
+            unimplemented!("these tests issue no token")
         }
         fn begin_landing(
             &mut self,
@@ -1847,7 +2237,7 @@ mod tests {
             _: &crate::domain::LeaseToken,
             _: &crate::domain::CommitSha,
             _: bool,
-            _: Option<u32>,
+            _: SlotHolder,
             _: &mut dyn FnMut(crate::domain::EventId) -> Result<Value>,
         ) -> Result<(crate::domain::TaskRun, Value)> {
             unimplemented!("these tests send no supervisor's operation")
@@ -1942,6 +2332,12 @@ mod tests {
                     pid: 7,
                     start: "earlier".into(),
                 })),
+                // A session whose process lives and whose start cannot be
+                // read.
+                "inbox-unread" => Some(Principal::inbox(SessionProcess {
+                    pid: 8,
+                    start: "then".into(),
+                })),
                 // A record no issue makes: an inbox of no session.
                 "inbox-unbound" => {
                     Some(Principal::of(&ActorContext::new(ActorRole::Inbox, "inbox")))
@@ -2013,6 +2409,33 @@ mod tests {
         fn alive(&self, _: u32) -> bool {
             false
         }
+        fn session_ended(&self, session: &crate::domain::queue_service::SessionProcess) -> bool {
+            // Pid 8 lives, and its start cannot be read.
+            session.pid != 8 && !self.session_alive(session)
+        }
+        fn process_of(&self, _: u32) -> Option<crate::domain::queue_service::SessionProcess> {
+            None
+        }
+        fn issue_as(
+            &self,
+            principal: &Principal,
+            _: &crate::domain::queue_service::TokenIssuer,
+        ) -> Result<std::path::PathBuf> {
+            Ok(self.access().issue(self.db(), principal)?.file)
+        }
+        fn held(&self, _: &str) -> Result<Option<crate::domain::queue_service::HeldToken>> {
+            Ok(None)
+        }
+        fn issue_telemetry_as(
+            &self,
+            target: &crate::domain::session_step::StepTarget,
+            task: Option<TaskId>,
+            issued_under: Option<&crate::domain::LeaseToken>,
+            _: &crate::domain::queue_service::TokenIssuer,
+        ) -> Result<std::path::PathBuf> {
+            self.telemetry()
+                .issue_telemetry(self.db(), target, task, issued_under)
+        }
     }
 
     fn backend(status: RunStatus) -> Backend {
@@ -2022,6 +2445,80 @@ mod tests {
             older: false,
             opened: Mutex::default(),
         }
+    }
+
+    /// The issue's facts with every registration kept and no job's
+    /// records.
+    struct Kept;
+
+    impl IssueFacts for Kept {
+        fn registered(&self, _: &crate::domain::LeaseToken) -> bool {
+            true
+        }
+        fn job(
+            &self,
+            _: &crate::domain::queue_service::HeldToken,
+            _: Option<&crate::domain::queue_service::TokenIssuer>,
+        ) -> crate::domain::queue_service::JobState {
+            crate::domain::queue_service::JobState::MayRun
+        }
+    }
+
+    /// A parent kept with a token is gone only once its process is known
+    /// to have ended (ADR-t3102-1 decision 2): one whose pid lives and
+    /// whose start cannot be read is still there, so another parent
+    /// neither takes over nor revokes what it asked for.
+    #[test]
+    fn a_parent_whose_start_cannot_be_read_is_still_there() {
+        use crate::domain::queue_service::{
+            HeldToken, JobState, Reissue, TokenIssuer, reissue, revoke_refusal,
+        };
+        let backend = backend(RunStatus::Running);
+        let there = parent_there(&backend, &Kept);
+        let inbox = |pid, start: &str| {
+            Principal::inbox(SessionProcess {
+                pid,
+                start: start.into(),
+            })
+        };
+        let kept = |pid, start: &str| {
+            TokenIssuer::of(
+                &inbox(pid, start),
+                Some(SessionProcess {
+                    pid,
+                    start: start.into(),
+                }),
+            )
+        };
+        let asking = TokenIssuer::of(&Principal::user(), None);
+        let planner = Principal::planner(3);
+        // Pid 8 lives with a start that cannot be read; pid 9 is gone.
+        let unread = kept(8, "then");
+        assert!(there(&unread));
+        assert!(matches!(
+            reissue(
+                &planner,
+                &asking,
+                Some(&Some(unread.clone())),
+                there,
+                || JobState::MayRun
+            ),
+            Reissue::Refused(_)
+        ));
+        let held = HeldToken {
+            principal: planner.clone(),
+            issued_by: Some(unread),
+            issued_at: 0,
+        };
+        assert!(revoke_refusal(&held, &asking.parent, there, || JobState::MayRun).is_some());
+        let gone = kept(9, "then");
+        assert!(!there(&gone));
+        assert_eq!(
+            reissue(&planner, &asking, Some(&Some(gone)), there, || {
+                JobState::MayRun
+            }),
+            Reissue::Issue
+        );
     }
 
     fn request(token: Option<&str>, use_case: UseCase, params: Value) -> ServiceRequest {
@@ -2615,14 +3112,18 @@ mod tests {
         }
         // A session whose process ended (or another took its pid) ends its
         // inbox's token, which says to open the inbox again.
-        let response = service.handle_from(&named("/q/queue.db", Some("inbox-ended")), Peer::Owner);
-        let error = response.error.unwrap();
-        assert_eq!(error.code, ServiceErrorCode::Unauthenticated);
-        assert!(error.message.contains("dagq inbox"), "{}", error.message);
-        assert_eq!(
-            backend.log.lock().unwrap().pop().unwrap(),
-            json!({"use_case": "show", "reason": "session_ended"})
-        );
+        // So does one whose start cannot be read: the token is taken only
+        // while its session is known to run.
+        for token in ["inbox-ended", "inbox-unread"] {
+            let response = service.handle_from(&named("/q/queue.db", Some(token)), Peer::Owner);
+            let error = response.error.unwrap();
+            assert_eq!(error.code, ServiceErrorCode::Unauthenticated, "{token}");
+            assert!(error.message.contains("dagq inbox"), "{}", error.message);
+            assert_eq!(
+                backend.log.lock().unwrap().pop().unwrap(),
+                json!({"use_case": "show", "reason": "session_ended"})
+            );
+        }
         let unbound =
             service.handle_from(&named("/q/queue.db", Some("inbox-unbound")), Peer::Owner);
         assert_eq!(code(&unbound), Some(ServiceErrorCode::Unauthenticated));

@@ -720,7 +720,10 @@ impl OneShot {
                 resolve_language: &|checkout, user_config| {
                     crate::infrastructure::language::resolve_language(Some(checkout), user_config)
                 },
-                queue_service: &crate::infrastructure::queue_service::SystemServiceAccess,
+                queue_service: &crate::infrastructure::queue_service::RequestedServiceAccess::user(
+                    &location.db,
+                    environment.role.as_deref(),
+                ),
                 session: {
                     use crate::application::ProcessControl;
                     let pid = std::process::id();

@@ -80,6 +80,9 @@ impl ServiceCaller for AnswersLost {
     }
     fn hand_over(&self) {}
     fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// A read whose answer was lost did nothing; a write whose answer was lost
@@ -189,6 +192,9 @@ impl ServiceCaller for MaxLoadService {
     }
     fn hand_over(&self) {}
     fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// A source the service refuses as arguments it does not read (the
@@ -397,6 +403,9 @@ impl ServiceCaller for PagedEvents {
     }
     fn hand_over(&self) {}
     fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// The whole log is read a page at a time up to the newest event when the
@@ -622,6 +631,9 @@ impl ServiceCaller for Answering {
     }
     fn hand_over(&self) {}
     fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// The supervisor's loop holds a result's record the service did not
@@ -816,6 +828,9 @@ impl ServiceCaller for BusyFirst {
     }
     fn hand_over(&self) {}
     fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// The one monotonic time the tests start from, read once for the
@@ -938,6 +953,9 @@ impl ServiceCaller for DownFirst {
     }
     fn hand_over(&self) {}
     fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// A person's or the inbox's control-side command sends the record of a
@@ -1058,6 +1076,9 @@ impl ServiceCaller for LosesFirstAnswer {
     }
     fn hand_over(&self) {}
     fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// A job's end kept at the supervisor's end is sent with the held
@@ -1242,6 +1263,9 @@ impl ServiceCaller for Tokens {
     }
     fn hand_over(&self) {}
     fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// A token the service does not revoke leaves the ended ones after it to

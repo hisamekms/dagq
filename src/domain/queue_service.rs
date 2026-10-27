@@ -233,6 +233,7 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::Control
         | UseCase::SessionRun
         | UseCase::SessionRecord
+        | UseCase::IssueToken
         | UseCase::Add
         | UseCase::Edit
         | UseCase::Submit
@@ -413,6 +414,15 @@ string_enum!(UseCase {
     // wrapper's principal (and the inbox's, on the queue) holds
     // `session.record`; no command line goes to it.
     SessionRecord => "session_record",
+    // The issue of the token of a principal the caller starts
+    // (ADR-t3102-1 decision 2): the user's of a supervisor or of the
+    // inbox, a command's of a job. The parent is the caller's principal, which [`super::authorization::starts`]
+    // judges with `token.issue`, and what the token is issued under
+    // ([`IssueHeld`]) is checked in the transaction that issues it; the
+    // answer is the file its value is in. The supervisor asks for its
+    // children's as the `issue_token` operation of [`Self::Supervisor`],
+    // which issues them the same way. No command line goes to it.
+    IssueToken => "issue_token",
     // The planning commands a person, the inbox or a planner runs
     // (ADR-t3102-3 decision 3), each as the command of its name changes
     // the queue and prints it, authorized by the application for the
@@ -935,6 +945,25 @@ pub struct SessionProcess {
     pub start: String,
 }
 
+impl SessionProcess {
+    /// Whether this process still runs, `alive` saying whether its pid does
+    /// and `start` the start the system prints for it (`None` when that
+    /// cannot be read): its pid lives and prints the same start. A token
+    /// bound to the session is taken only then.
+    pub fn runs(&self, alive: bool, start: Option<&str>) -> bool {
+        alive && start == Some(self.start.as_str())
+    }
+
+    /// Whether this process is known to have ended, `alive` and `start` as
+    /// [`Self::runs`] takes them: its pid is gone, or another process took
+    /// it (another start is printed). A live pid whose start cannot be read
+    /// has not, since what ended lets another parent take its tokens over
+    /// or revoke them.
+    pub fn ended(&self, alive: bool, start: Option<&str>) -> bool {
+        !alive || start.is_some_and(|start| start != self.start)
+    }
+}
+
 impl Principal {
     /// The worker (or its resume) of `run` on `task`.
     pub fn worker(run: &RunId, task: TaskId) -> Self {
@@ -1170,6 +1199,37 @@ impl Principal {
         }
     }
 
+    /// Whether its actor id is the one its role and run name, as the
+    /// actors' constructors make it: `<role>:<instance>`, a worker's
+    /// `<role>:<run>`, a principal's of another run `<role>:<run>:...`,
+    /// the inbox's `inbox`, and one of a target its target's. An issue of
+    /// one that names another (an observer named `planner:5`) would revoke
+    /// and take the file of that other principal's token, so the issue use
+    /// case refuses it.
+    pub fn names_itself(&self) -> bool {
+        // One of a target has the actor id of its target ([`Self::check`]).
+        if self.target.is_some() {
+            return true;
+        }
+        let role = self.role.as_str();
+        let Some(instance) = self
+            .actor_id
+            .strip_prefix(role)
+            .and_then(|rest| rest.strip_prefix(':'))
+        else {
+            return self.role == ActorRole::Inbox && self.actor_id == role;
+        };
+        match (self.role, &self.run_id) {
+            (ActorRole::Inbox, _) => false,
+            (ActorRole::Worker, Some(run)) => instance == run.as_str(),
+            (ActorRole::Worker, None) => false,
+            (_, Some(run)) => instance
+                .strip_prefix(run.as_str())
+                .is_some_and(|rest| rest.starts_with(':')),
+            (_, None) => !instance.is_empty(),
+        }
+    }
+
     /// The name its token is kept under, which a new issue for it
     /// replaces: its actor id, and a supervisor's registration with it, as
     /// one process may run more than one supervisor (a test's does) under
@@ -1197,6 +1257,671 @@ impl Principal {
             (Some(run), Some(task)) => actor.with_run(run.clone(), task),
             _ => actor,
         }
+    }
+}
+
+/// What the issue of a token is checked under, in the transaction that
+/// issues it (ADR-t3102-1 decision 2): what its parent holds of its
+/// target, as [`issue_held`] reads it from the two principals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueHeld {
+    /// Nothing of the queue: the inbox of a session the user opens, or a
+    /// job a command of the user's or the inbox's starts.
+    Nothing,
+    /// A supervisor's own registration, which it registers, or resumes after
+    /// the exec of a handoff (its heartbeat expired meanwhile or not), with
+    /// the token next: nothing of the queue is held yet, and every lease and
+    /// child's token it asks for after is checked against the registration.
+    Registration(LeaseToken),
+    /// The run leased to the supervisor's registration, and that
+    /// registration live: a worker's and its wrapper's.
+    Lease { run: RunId, lease: LeaseToken },
+    /// The planner open and the supervisor's registration live: a
+    /// planner's and its wrapper's.
+    OpenPlanner { planner: i64, lease: LeaseToken },
+    /// The supervisor's registration live: a job's, on a run or not.
+    Registered(LeaseToken),
+    /// The target of no run not ended, and the registration of the
+    /// supervisor that asked live when it is one: the telemetry of the
+    /// executor of a job a command starts.
+    OpenTarget {
+        target: StepTarget,
+        registration: Option<LeaseToken>,
+    },
+}
+
+/// What the token of `child` asked for by `parent` is issued under
+/// ([`IssueHeld`]), once [`super::authorization::starts`] allowed it.
+pub fn issue_held(parent: &Principal, child: &Principal) -> IssueHeld {
+    let planner = child
+        .target
+        .as_ref()
+        .filter(|target| target.kind == super::session_step::TargetKind::Planner)
+        .and_then(|target| target.id.parse().ok());
+    if child.role == ActorRole::ExecutorTelemetry
+        && let Some(target) = &child.target
+    {
+        return IssueHeld::OpenTarget {
+            target: target.clone(),
+            registration: parent.registration.clone(),
+        };
+    }
+    match (&parent.registration, &child.registration) {
+        (_, Some(registration)) => IssueHeld::Registration(registration.clone()),
+        (Some(lease), None) => match (&child.run_id, planner) {
+            (Some(run), _) if matches!(child.role, ActorRole::Worker | ActorRole::Wrapper) => {
+                IssueHeld::Lease {
+                    run: run.clone(),
+                    lease: lease.clone(),
+                }
+            }
+            (None, Some(planner)) => IssueHeld::OpenPlanner {
+                planner,
+                lease: lease.clone(),
+            },
+            _ => IssueHeld::Registered(lease.clone()),
+        },
+        (None, None) => IssueHeld::Nothing,
+    }
+}
+
+/// What the queue says, in the issue's transaction, of what [`IssueHeld`]
+/// names: the registration of its lease (`None`: not in the queue) and
+/// whether its heartbeat expired, whether the run is leased to it, whether
+/// the planner is open, and whether the target has not ended. Only what
+/// the variant needs is read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HeldFacts {
+    pub registration_expired: Option<bool>,
+    pub leased: bool,
+    pub planner_open: bool,
+    pub target_open: bool,
+}
+
+/// Why `held` is not held, as `facts` read it; `None` when it is, and the
+/// token is issued in the same transaction.
+pub fn not_held(held: &IssueHeld, facts: &HeldFacts) -> Option<String> {
+    let live = || match facts.registration_expired {
+        None => Some("the supervisor that asked is not registered".to_owned()),
+        Some(true) => Some("the registration of the supervisor that asked has expired".to_owned()),
+        Some(false) => None,
+    };
+    match held {
+        IssueHeld::Nothing | IssueHeld::Registration(_) => None,
+        IssueHeld::Lease { run, .. } => live().or_else(|| {
+            (!facts.leased).then(|| format!("run {run} is not leased to the supervisor that asked"))
+        }),
+        IssueHeld::OpenPlanner { planner, .. } => live()
+            .or_else(|| (!facts.planner_open).then(|| format!("planner {planner} is not open"))),
+        IssueHeld::Registered(_) => live(),
+        IssueHeld::OpenTarget {
+            target,
+            registration,
+        } => registration.as_ref().and_then(|_| live()).or_else(|| {
+            (!facts.target_open).then(|| {
+                format!(
+                    "the {} {} has ended or is not in the queue",
+                    target.kind.as_str(),
+                    target.id
+                )
+            })
+        }),
+    }
+}
+
+/// Who asked for a token, kept with it (ADR-t3102-1 decision 2): the
+/// parent, by its [`Principal::credential_key`] (`user` for the person on
+/// the service's socket), and the process that asked (the connection's),
+/// which starts the child, waits for it and gives its token back at its
+/// end: a command's own process for the job it starts, the supervisor's
+/// for its jobs, so a job lives while that process does. `None` when the
+/// service could not read that process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenIssuer {
+    pub parent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<SessionProcess>,
+    /// A supervisor parent's registration, which goes as that supervisor
+    /// stops or is pruned; `None` for another parent, and for one kept
+    /// before the service kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration: Option<LeaseToken>,
+}
+
+impl TokenIssuer {
+    /// `parent` asking from `process`.
+    pub fn of(parent: &Principal, process: Option<SessionProcess>) -> Self {
+        Self {
+            parent: parent.credential_key(),
+            process,
+            registration: parent
+                .registration
+                .clone()
+                .filter(|_| parent.role == ActorRole::Supervisor),
+        }
+    }
+
+    /// Whether the parent that asked may still be there: the process that
+    /// asked may still run (`alive` says whether a process may, that is
+    /// has not ended as [`SessionProcess::ended`] tells; one not read is
+    /// taken to), and a supervisor's registration is still kept
+    /// (`registered` says whether one is). A supervisor whose registration
+    /// went has stopped, whatever still runs in the process that asked:
+    /// what it started is taken as ended with it, as the sweep of the
+    /// targets of no run takes a job whose supervisor is gone.
+    pub fn there(
+        &self,
+        alive: impl Fn(&SessionProcess) -> bool,
+        registered: impl Fn(&LeaseToken) -> bool,
+    ) -> bool {
+        self.process.as_ref().is_none_or(alive) && self.registration.as_ref().is_none_or(registered)
+    }
+
+    /// Whether what is kept tells whether the parent is there: its process
+    /// or its registration. Neither is kept when the service could not
+    /// read the process of a parent with no registration.
+    fn judged(&self) -> bool {
+        self.process.is_some() || self.registration.is_some()
+    }
+}
+
+/// A token a key holds: its principal, who asked for it (`None` for one
+/// issued before the service kept that) and when it was issued (unix
+/// seconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldToken {
+    pub principal: Principal,
+    pub issued_by: Option<TokenIssuer>,
+    pub issued_at: i64,
+}
+
+/// What the queue and the host tell of the job of a token whose parent
+/// cannot be judged ([`reissue`], [`revoke_refusal`], [`job_token_ended`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobState {
+    /// Its records tell that it ended ([`job_records_ended`]).
+    Ended,
+    /// They tell that it may still run.
+    MayRun,
+    /// The queue keeps no record of it (it keeps none of its kind, or none
+    /// but the asking parent's own start: a parent that stopped after the
+    /// token and before its record), so the processes that may have asked
+    /// for its token tell ([`may_have_asked`]).
+    Unrecorded(MayHaveAsked),
+}
+
+/// The processes that may have asked for a token whose parent cannot be
+/// judged and that may still run ([`may_have_asked`]): its job, which the
+/// queue keeps no record of, ran under one of them if under any.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MayHaveAsked {
+    /// The credential keys of the supervisors registered by its issue
+    /// whose registration is kept and whose process runs.
+    pub supervisors: Vec<String>,
+    /// Whether a `dagq` process of a command that may start the job (a
+    /// person's or the inbox's) may still run: one that started by its
+    /// issue and runs, none of those supervisors nor the service.
+    pub command: bool,
+}
+
+impl JobState {
+    /// Whether the job is taken as ended: its records tell so, or no
+    /// process that may have asked for its token may still run (the
+    /// parent that asked is gone, as a judged one's end is taken).
+    pub fn ended(&self) -> bool {
+        match self {
+            Self::Ended => true,
+            Self::MayRun => false,
+            Self::Unrecorded(asked) => asked.supervisors.is_empty() && !asked.command,
+        }
+    }
+
+    /// Whether `parent` (its credential key) alone may have asked for it:
+    /// its job, if it still runs, is that parent's.
+    fn only_of(&self, parent: &str) -> bool {
+        matches!(self, Self::Unrecorded(asked)
+            if !asked.command && asked.supervisors.len() == 1 && asked.supervisors[0] == parent)
+    }
+
+    /// Why a token of this job is neither replaced nor revoked while it is
+    /// not [`Self::ended`].
+    fn refusal(&self) -> &'static str {
+        match self {
+            Self::Unrecorded(_) => {
+                "the job's token was kept with no parent that can be judged, the queue keeps no \
+                 record of its job, and a process that may have asked for it still runs"
+            }
+            _ => UNJUDGED_JOB,
+        }
+    }
+}
+
+/// A process of the host as [`may_have_asked`] takes it: its command line
+/// (`ps`'s `command`, its arguments), and when it started (unix seconds,
+/// `None` when that cannot be read).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostProcess {
+    pub pid: u32,
+    pub command: String,
+    pub started_at: Option<i64>,
+}
+
+/// Who starts a job of `role` in this code: whether a supervisor does, and
+/// the `dagq` subcommands a person's or the inbox's command starts one
+/// with (an observation and a throughput review on the supervisor's timer
+/// too, a setup review only by its command). What [`may_have_asked`]
+/// counts as a process that may have asked for such a job's token; a new
+/// way to start a job is to be added here.
+fn job_starters(role: ActorRole) -> (bool, &'static [&'static str]) {
+    match role {
+        ActorRole::Observer => (true, &["observe"]),
+        ActorRole::ThroughputReviewJob => (true, &["throughput-review"]),
+        ActorRole::SetupReviewJob => (false, &["setup-review"]),
+        _ => (true, &[]),
+    }
+}
+
+/// Whether `command`, a process's command line, runs a `dagq` (by its
+/// name, the fixed binary's `dagq.previous` an install leaves too) with one
+/// of `subcommands` among its arguments.
+fn runs_dagq_with(command: &str, subcommands: &[&str]) -> bool {
+    let mut words = command.split_whitespace();
+    words.by_ref().any(|word| {
+        let name = word.rsplit('/').next().unwrap_or(word);
+        name == "dagq" || name.starts_with("dagq.")
+    }) && words.any(|word| subcommands.contains(&word))
+}
+
+/// The processes that may have asked for the token of `role` issued at
+/// `issued_at` (unix seconds) whose parent cannot be judged and that may
+/// still run (ADR-t3102-1 decision 2), `kept` the parent's credential key
+/// kept with it (`None` for none kept, by an older binary):
+///
+/// - The supervisors in `registrations` whose process `alive` says runs:
+///   with no parent kept, those registered by then, for a job a supervisor
+///   starts ([`job_starters`]); with a supervisor kept, that one; with
+///   another parent kept, none.
+/// - Unless a supervisor is kept, whether one of the host's `processes`
+///   (`None` when they cannot be listed, asked for only then) runs a
+///   `dagq` subcommand that starts the job and started by then, other
+///   than those supervisors' and `own` (the service's).
+///
+/// A second's slack is given to each time, as the host reads a start up to
+/// a second late. Another queue's command is not told apart from this
+/// queue's, so it keeps such a token while it runs.
+pub fn may_have_asked(
+    role: ActorRole,
+    kept: Option<&str>,
+    issued_at: i64,
+    registrations: &[super::SupervisorRegistration],
+    alive: &dyn Fn(u32) -> bool,
+    processes: &dyn Fn() -> Option<Vec<HostProcess>>,
+    own: u32,
+) -> MayHaveAsked {
+    let by_then = |started: i64| started <= issued_at + 1;
+    let (by_supervisor, subcommands) = job_starters(role);
+    let key = |registration: &super::SupervisorRegistration| {
+        Principal::supervisor(&registration.token, registration.pid).credential_key()
+    };
+    let supervisor_kept = kept.is_some_and(|kept| kept.starts_with("supervisor:"));
+    let supervisors: Vec<&super::SupervisorRegistration> = registrations
+        .iter()
+        .filter(|registration| {
+            alive(registration.pid)
+                && match kept {
+                    None => by_supervisor && by_then(registration.started_at),
+                    Some(kept) => kept == key(registration),
+                }
+        })
+        .collect();
+    let command = !supervisor_kept
+        && !subcommands.is_empty()
+        && processes().is_none_or(|processes| {
+            processes.iter().any(|process| {
+                process.pid != own
+                    && !supervisors
+                        .iter()
+                        .any(|registration| registration.pid == process.pid)
+                    && runs_dagq_with(&process.command, subcommands)
+                    && process.started_at.is_none_or(by_then)
+            })
+        });
+    MayHaveAsked {
+        supervisors: supervisors.into_iter().map(key).collect(),
+        command,
+    }
+}
+
+/// Whether `role` is a job's: an agent a parent starts for one piece of
+/// work, as a child of the process that asked for its token.
+pub fn is_job(role: ActorRole) -> bool {
+    matches!(
+        role,
+        ActorRole::Observer
+            | ActorRole::ReviewJob
+            | ActorRole::RecoveryJob
+            | ActorRole::PlanReviewJob
+            | ActorRole::GoalReviewJob
+            | ActorRole::ThroughputReviewJob
+            | ActorRole::SetupReviewJob
+    )
+}
+
+/// Whether `principal`'s token is one a parent keeps for a target it
+/// started that another may take over once that parent is gone: a
+/// planner's, its wrapper's, and the executor's telemetry of a target of
+/// no run.
+fn taken_over(principal: &Principal) -> bool {
+    use super::session_step::TargetKind;
+    let target = principal.target.as_ref();
+    match principal.role {
+        ActorRole::Planner => true,
+        ActorRole::Wrapper => target.is_some_and(|target| target.kind == TargetKind::Planner),
+        ActorRole::ExecutorTelemetry => target.is_some_and(|target| target.run_id().is_none()),
+        _ => false,
+    }
+}
+
+/// What the issue of a token does with the one its key holds already
+/// ([`reissue`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reissue {
+    /// A new token, which replaces the one held, if any.
+    Issue,
+    /// The one held, handed over again: its own parent asks for it again
+    /// while the process that asked for it runs (the jobs of one attempt
+    /// that share an actor, a start tried again).
+    Held,
+    /// Refused, and why.
+    Refused(&'static str),
+}
+
+/// What the issue of `child`'s token at the request of `issuer` does with
+/// the one its key holds (`held`: `None` for no token, else the issuer kept
+/// with it, `None` for one kept with none), `there` saying whether the
+/// parent kept with a token is still there ([`TokenIssuer::there`]) and
+/// `job` what the queue and the host tell of `child`'s job ([`JobState`])
+/// (ADR-t3102-1 decision 2):
+///
+/// - A job's is replaced only at the request of the parent that asked for
+///   it, once that parent is gone (the process that asked ended): the job
+///   ran under it; while it is there, that parent is handed the same token
+///   again. One of another parent's is never replaced (a parent starts
+///   only its own jobs). One whose parent cannot be judged (kept with no
+///   parent, by a binary before the service kept them, or with neither
+///   its process nor a registration) is replaced once its job is taken as
+///   ended ([`JobState::ended`]: its records tell so, or with none, no
+///   process that may have asked for it still runs), and not before; the
+///   one supervisor that alone may have asked for it is handed it again.
+/// - A planner's, its wrapper's and the executor's telemetry of a target
+///   of no run are not issued over one another parent asked for while
+///   that parent is there; one whose parent is gone is (a supervisor
+///   taking a planner over from one gone).
+/// - Any other principal's replaces the one it holds by its own rule: a
+///   run's under the run's lease, an inbox's for its new session, a
+///   supervisor's for its registration.
+pub fn reissue(
+    child: &Principal,
+    issuer: &TokenIssuer,
+    held: Option<&Option<TokenIssuer>>,
+    there: impl Fn(&TokenIssuer) -> bool,
+    job: impl Fn() -> JobState,
+) -> Reissue {
+    let Some(held) = held else {
+        return Reissue::Issue;
+    };
+    if is_job(child.role) {
+        return match held {
+            Some(held) if !held.judged() => unjudged(&job(), issuer),
+            None => unjudged(&job(), issuer),
+            Some(held) if held.parent != issuer.parent => {
+                Reissue::Refused("the job's token is another parent's, which alone replaces it")
+            }
+            Some(held) if there(held) => Reissue::Held,
+            Some(_) => Reissue::Issue,
+        };
+    }
+    match held {
+        Some(held) if taken_over(child) && held.parent != issuer.parent && there(held) => {
+            Reissue::Refused("its token is another parent's, which is still there")
+        }
+        _ => Reissue::Issue,
+    }
+}
+
+/// Why a job's token whose parent cannot be judged is neither replaced nor
+/// revoked while the queue does not tell that its job ended.
+const UNJUDGED_JOB: &str = "the job's token was kept with no parent that can be judged, and the \
+                            queue does not tell that its job ended";
+
+/// [`reissue`] over a job's token whose parent cannot be judged, at the
+/// request of `issuer`: replaced once `job` is taken as ended, handed again
+/// to the one supervisor that alone may have asked for it.
+fn unjudged(job: &JobState, issuer: &TokenIssuer) -> Reissue {
+    if job.ended() {
+        Reissue::Issue
+    } else if job.only_of(&issuer.parent) {
+        Reissue::Held
+    } else {
+        Reissue::Refused(job.refusal())
+    }
+}
+
+/// Why `parent` (its credential key) may not revoke `held`, `None` when it
+/// may: a job's, a planner's, its wrapper's and the executor's telemetry
+/// of a target of no run that another parent asked for is that parent's
+/// to give back while it is there (`there`, [`TokenIssuer::there`];
+/// ADR-t3102-1 decision 2), as the revocation would let the issue take it
+/// over. A job's whose parent cannot be judged, kept with no parent at all
+/// included, is no other caller's to give back than the parent kept with
+/// it and the one supervisor that alone may have asked for it, and is
+/// taken as there until its job is taken as ended (`job`,
+/// [`JobState::ended`]), as [`reissue`] takes it.
+pub fn revoke_refusal(
+    held: &HeldToken,
+    parent: &str,
+    there: impl Fn(&TokenIssuer) -> bool,
+    job: impl Fn() -> JobState,
+) -> Option<&'static str> {
+    let is_job = is_job(held.principal.role);
+    let judged = held.issued_by.as_ref().is_some_and(TokenIssuer::judged);
+    match &held.issued_by {
+        Some(issuer) if issuer.parent == parent => None,
+        _ if is_job && !judged => {
+            let job = job();
+            (!job.ended() && !job.only_of(parent)).then(|| job.refusal())
+        }
+        Some(issuer) => ((is_job || taken_over(&held.principal)) && there(issuer))
+            .then_some("the token is another parent's, which is still there"),
+        None => None,
+    }
+}
+
+/// Whether a job's token kept with `issued_by` is left over: the parent
+/// that asked for it, under whose process its job ran, is gone (`there`,
+/// [`TokenIssuer::there`]). One whose parent cannot be judged (kept with
+/// no issuer, or with neither its process nor a registration) is left
+/// over once its job is taken as ended (`job`, [`JobState::ended`]).
+pub fn job_token_ended(
+    issued_by: Option<&TokenIssuer>,
+    there: impl Fn(&TokenIssuer) -> bool,
+    job: impl Fn() -> JobState,
+) -> bool {
+    match issued_by {
+        Some(issuer) if issuer.judged() => !there(issuer),
+        _ => job().ended(),
+    }
+}
+
+/// The queue's records of the job a token is of ([`job_records_of`]): the
+/// rows and starts its parent records as it runs it, which tell its end
+/// whoever asked for its token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobRecords {
+    /// The `plan_reviews` rows of a proposal's attempt.
+    PlanReview { proposal: i64, attempt: i64 },
+    /// The `goal_reviews` rows of a goal's attempt.
+    GoalReview { goal: i64, attempt: i64 },
+    /// The `headless_jobs` rows of a run's job of one of `kinds`, of
+    /// `attempt`, whose label `label` takes.
+    RunJob {
+        kinds: &'static [&'static str],
+        run: String,
+        label: RowLabel,
+        attempt: i64,
+    },
+    /// The `throughput_review_started` of a mode's period.
+    ThroughputReview { mode: String, period: String },
+    /// The `observe_started` of the session the observation named ahead
+    /// (its actor's instance; a Codex observation names none).
+    Observation { session_id: String },
+}
+
+/// Which labels of a run's job's `headless_jobs` rows are its
+/// ([`JobRecords::RunJob`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowLabel {
+    /// Only this label: a recovery job's alert, the judgment of an
+    /// `already_satisfied` claim.
+    Is(String),
+    /// Any but this one: a run review's rows (its agent's and its
+    /// programs'), but the judgment of a claim, a job of its own actor.
+    Not(&'static str),
+}
+
+/// One record of a job's ([`JobRecords`]) as the queue holds it: its facts
+/// as a target of no run's are read, and whose it is: the registration of
+/// the supervisor that runs its row, or the process its command's start
+/// names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobRecord {
+    pub facts: super::telemetry::TargetFacts,
+    pub supervisor: Option<LeaseToken>,
+    pub pid: Option<u32>,
+}
+
+/// The queue's records of the job `principal` is of, by its role and its
+/// actor id ([`crate::domain::ActorContext`]'s job actors); `None` for a
+/// principal of no job, and for a job the queue keeps no record of (a
+/// setup review's, an eval's agent job).
+pub fn job_records_of(principal: &Principal) -> Option<JobRecords> {
+    use super::headless_job::{RECOVERY, REVIEW, REVIEW_PROGRAM, SATISFIED_REVIEW_LABEL};
+    let instance = principal
+        .actor_id
+        .strip_prefix(principal.role.as_str())?
+        .strip_prefix(':')?;
+    let pair = |text: &str| -> Option<(i64, i64)> {
+        let (first, second) = text.split_once(':')?;
+        Some((first.parse().ok()?, second.parse().ok()?))
+    };
+    match principal.role {
+        ActorRole::PlanReviewJob => {
+            pair(instance).map(|(proposal, attempt)| JobRecords::PlanReview { proposal, attempt })
+        }
+        ActorRole::GoalReviewJob => {
+            pair(instance).map(|(goal, attempt)| JobRecords::GoalReview { goal, attempt })
+        }
+        ActorRole::ReviewJob => {
+            let (run, attempt) = instance.split_once(':')?;
+            let run = RunId::new(run).ok()?.as_str().to_owned();
+            // The judgment of an `already_satisfied` claim
+            // (`satisfied-<attempt>`), else a run review's attempt.
+            Some(match attempt.strip_prefix("satisfied-") {
+                Some(attempt) => JobRecords::RunJob {
+                    kinds: &[REVIEW],
+                    run,
+                    label: RowLabel::Is(SATISFIED_REVIEW_LABEL.to_owned()),
+                    attempt: attempt.parse().ok()?,
+                },
+                None => JobRecords::RunJob {
+                    kinds: &[REVIEW, REVIEW_PROGRAM],
+                    run,
+                    label: RowLabel::Not(SATISFIED_REVIEW_LABEL),
+                    attempt: attempt.parse().ok()?,
+                },
+            })
+        }
+        ActorRole::RecoveryJob => {
+            let (run, rest) = instance.split_once(':')?;
+            let (alert, attempt) = rest.rsplit_once(':')?;
+            Some(JobRecords::RunJob {
+                kinds: &[RECOVERY],
+                run: RunId::new(run).ok()?.as_str().to_owned(),
+                label: RowLabel::Is(alert.to_owned()),
+                attempt: attempt.parse().ok()?,
+            })
+        }
+        ActorRole::ThroughputReviewJob => {
+            let (mode, period) = instance.split_once(':')?;
+            Some(JobRecords::ThroughputReview {
+                mode: mode.to_owned(),
+                period: period.to_owned(),
+            })
+        }
+        ActorRole::Observer => Some(JobRecords::Observation {
+            session_id: instance.to_owned(),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether the queue's records of a job (`records`, of its
+/// [`JobRecords`]) tell that it ended at `now_ms`, `alive` saying whether
+/// a process runs: each ended as a target of no run's does
+/// ([`super::telemetry::target_token_due`]: its row finished or its
+/// supervisor gone, its command's finish recorded or its process gone or
+/// past the time it ends by). `None` with no record: they tell nothing
+/// ([`JobState::Unrecorded`]). `starting` is the parent asking to start the
+/// job again, whose own record of that start (the row its registration
+/// claimed, the start its command's process recorded) is left out while it
+/// runs: it is the start that asks, not the job left.
+pub fn job_records_ended(
+    records: &[JobRecord],
+    starting: Option<&TokenIssuer>,
+    now_ms: i64,
+    alive: &dyn Fn(u32) -> bool,
+) -> Option<bool> {
+    use super::session_step::TargetKind;
+    let ended = |record: &JobRecord| {
+        super::telemetry::target_token_due(TargetKind::PlanReview, &record.facts, now_ms, alive)
+            .is_some()
+    };
+    let asking = |record: &JobRecord| {
+        starting.is_some_and(|asking| {
+            (record.supervisor.is_some() && record.supervisor == asking.registration)
+                || (record.pid.is_some()
+                    && record.pid == asking.process.as_ref().map(|process| process.pid))
+        })
+    };
+    let left: Vec<&JobRecord> = records
+        .iter()
+        .filter(|record| !(asking(record) && !ended(record)))
+        .collect();
+    (!left.is_empty()).then(|| left.into_iter().all(ended))
+}
+
+/// Why `parent`'s request for the telemetry token of `child`, an
+/// executor's, is refused, once [`super::authorization::starts`] allowed
+/// the role: a target of a run is the supervisor's `issue_telemetry`
+/// under the run's lease, and the user and the inbox ask only for the
+/// executor of the job a command of theirs starts (an observation, a
+/// throughput review).
+pub fn telemetry_issue_refusal(parent: ActorRole, child: &Principal) -> Option<&'static str> {
+    use super::session_step::TargetKind;
+    let target = child.target.as_ref()?;
+    if target.run_id().is_some() {
+        return Some("a run's executor's telemetry token is issued under the run's lease");
+    }
+    match parent {
+        ActorRole::Supervisor => None,
+        _ if matches!(
+            target.kind,
+            TargetKind::Observer | TargetKind::ThroughputReview
+        ) =>
+        {
+            None
+        }
+        _ => Some("the target is not of a job a command starts"),
     }
 }
 
@@ -1460,6 +2185,982 @@ pub fn attention_stands(latest: Option<&RecordedKind>) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// What a token is issued under follows its parent and its target: a
+    /// supervisor's registration, a run's lease for its worker and wrapper,
+    /// the planner open for its own and its wrapper's, the registration
+    /// live for a job, and nothing for what the user and the inbox ask for.
+    #[test]
+    fn a_token_is_issued_under_what_its_parent_holds_of_its_target() {
+        use super::super::session_step::TargetKind;
+        let (lease, run) = (LeaseToken::new("l"), RunId::new("r1").unwrap());
+        let supervisor = Principal::supervisor(&lease, 7);
+        let user = Principal::user();
+        assert_eq!(
+            issue_held(&user, &Principal::supervisor(&LeaseToken::new("n"), 8)),
+            IssueHeld::Registration(LeaseToken::new("n"))
+        );
+        let leased = IssueHeld::Lease {
+            run: run.clone(),
+            lease: lease.clone(),
+        };
+        for child in [
+            Principal::worker(&run, TaskId::new(1)),
+            Principal::wrapper(&StepTarget::run(&run), Some(TaskId::new(1))),
+        ] {
+            assert_eq!(issue_held(&supervisor, &child), leased, "{child:?}");
+        }
+        for child in [
+            Principal::planner(3),
+            Principal::wrapper(&StepTarget::of(TargetKind::Planner, 3), None),
+        ] {
+            assert_eq!(
+                issue_held(&supervisor, &child),
+                IssueHeld::OpenPlanner {
+                    planner: 3,
+                    lease: lease.clone()
+                }
+            );
+        }
+        for child in [
+            Principal::of(&ActorContext::review_job(&run, 1)),
+            Principal::of(&ActorContext::plan_review_job(4, 1)),
+        ] {
+            assert_eq!(
+                issue_held(&supervisor, &child),
+                IssueHeld::Registered(lease.clone())
+            );
+        }
+        assert_eq!(
+            issue_held(&user, &Principal::of(&ActorContext::setup_review_job("s"))),
+            IssueHeld::Nothing
+        );
+        let inbox = Principal::inbox(SessionProcess {
+            pid: 1,
+            start: "s".into(),
+        });
+        assert_eq!(issue_held(&user, &inbox), IssueHeld::Nothing);
+        // Each names itself; one named as another principal does not.
+        for child in [
+            Principal::worker(&run, TaskId::new(1)),
+            Principal::wrapper(&StepTarget::run(&run), Some(TaskId::new(1))),
+            Principal::planner(3),
+            Principal::supervisor(&lease, 7),
+            Principal::of(&ActorContext::review_job(&run, 1)),
+            Principal::of(&ActorContext::recovery_job(&run, "a", 1)),
+            Principal::of(&ActorContext::plan_review_job(4, 1)),
+            Principal::of(&ActorContext::instance(ActorRole::Observer, "s1")),
+            inbox.clone(),
+        ] {
+            assert!(child.names_itself(), "{child:?}");
+        }
+        let named = |role, id: &str| Principal::of(&ActorContext::new(role, id.to_owned()));
+        for other in [
+            named(ActorRole::Observer, "planner:5"),
+            named(ActorRole::Observer, "observer:"),
+            named(ActorRole::Inbox, "inbox:1"),
+        ] {
+            assert!(!other.names_itself(), "{other:?}");
+        }
+        let mut stray = Principal::worker(&run, TaskId::new(1));
+        stray.actor_id = "worker:r2".into();
+        assert!(!stray.names_itself());
+    }
+
+    /// A job's token is replaced only at the request of the parent that
+    /// asked for it, once the process that asked has ended, and handed to
+    /// it again while that process runs; another parent's, or one kept
+    /// with no parent, never. A planner's, its wrapper's and the telemetry
+    /// of a target of no run are not issued over, nor revoked from,
+    /// another parent whose process runs; a run's, an inbox's and a
+    /// supervisor's replace theirs by their own rules.
+    #[test]
+    fn a_jobs_token_is_replaced_only_by_its_parent_once_its_process_ended() {
+        use super::super::session_step::TargetKind;
+        let process = |start: &str| SessionProcess {
+            pid: 7,
+            start: start.into(),
+        };
+        let alive = |issuer: &TokenIssuer| issuer.there(|session| session.start == "now", |_| true);
+        let supervisor = Principal::supervisor(&LeaseToken::new("a"), 7);
+        let other = Principal::supervisor(&LeaseToken::new("b"), 8);
+        let inbox = Principal::inbox(process("now"));
+        let asking = |parent: &Principal| TokenIssuer::of(parent, Some(process("now")));
+        let kept =
+            |parent: &Principal, start: &str| Some(TokenIssuer::of(parent, Some(process(start))));
+        let job = Principal::of(&ActorContext::throughput_review_job("hourly", "h"));
+        assert_eq!(
+            reissue(&job, &asking(&inbox), None, alive, || JobState::MayRun),
+            Reissue::Issue
+        );
+        let refused = |reissued: Reissue| matches!(reissued, Reissue::Refused(_));
+        for (by, held, want) in [
+            (&inbox, kept(&supervisor, "now"), "refused"),
+            (&inbox, kept(&supervisor, "gone"), "refused"),
+            (&inbox, None, "refused"),
+            (&supervisor, None, "refused"),
+            (&supervisor, kept(&supervisor, "now"), "held"),
+            (
+                &supervisor,
+                Some(TokenIssuer::of(&supervisor, None)),
+                "held",
+            ),
+            (&supervisor, kept(&supervisor, "gone"), "issue"),
+        ] {
+            let reissued = reissue(&job, &asking(by), Some(&held), alive, || JobState::MayRun);
+            let got = match reissued {
+                Reissue::Issue => "issue",
+                Reissue::Held => "held",
+                Reissue::Refused(_) => "refused",
+            };
+            assert_eq!(got, want, "{by:?} over {held:?}");
+        }
+        let planner = StepTarget::of(TargetKind::Planner, 4);
+        for child in [
+            Principal::planner(4),
+            Principal::wrapper(&planner, None),
+            Principal::telemetry(&planner, None),
+        ] {
+            let over = |by: &Principal, held: Option<TokenIssuer>| {
+                reissue(&child, &asking(by), Some(&held), alive, || JobState::MayRun)
+            };
+            assert!(refused(over(&other, kept(&supervisor, "now"))));
+            assert_eq!(over(&other, kept(&supervisor, "gone")), Reissue::Issue);
+            assert_eq!(over(&supervisor, kept(&supervisor, "now")), Reissue::Issue);
+            assert_eq!(over(&other, None), Reissue::Issue);
+        }
+        let run = RunId::new("r1").unwrap();
+        for child in [
+            Principal::worker(&run, TaskId::new(1)),
+            Principal::wrapper(&StepTarget::run(&run), Some(TaskId::new(1))),
+            Principal::telemetry(&StepTarget::run(&run), Some(TaskId::new(1))),
+            Principal::inbox(process("now")),
+            supervisor.clone(),
+        ] {
+            assert_eq!(
+                reissue(
+                    &child,
+                    &asking(&other),
+                    Some(&kept(&supervisor, "now")),
+                    alive,
+                    || JobState::MayRun
+                ),
+                Reissue::Issue,
+                "{child:?}"
+            );
+        }
+        // Revoked by its own parent, or once that parent's process ended;
+        // a run's by anyone, as before.
+        let held = |principal: &Principal, start: &str| HeldToken {
+            principal: principal.clone(),
+            issued_by: kept(&supervisor, start),
+            issued_at: 0,
+        };
+        let mine = supervisor.credential_key();
+        let theirs = other.credential_key();
+        for principal in [
+            job.clone(),
+            Principal::planner(4),
+            Principal::telemetry(&planner, None),
+        ] {
+            assert!(
+                revoke_refusal(&held(&principal, "now"), &theirs, alive, || {
+                    JobState::MayRun
+                })
+                .is_some()
+            );
+            assert_eq!(
+                revoke_refusal(&held(&principal, "now"), &mine, alive, || JobState::MayRun),
+                None
+            );
+            assert_eq!(
+                revoke_refusal(&held(&principal, "gone"), &theirs, alive, || {
+                    JobState::MayRun
+                }),
+                None
+            );
+        }
+        for of_run in [
+            Principal::worker(&run, TaskId::new(1)),
+            Principal::telemetry(&StepTarget::run(&run), Some(TaskId::new(1))),
+        ] {
+            assert_eq!(
+                revoke_refusal(&held(&of_run, "now"), &theirs, alive, || JobState::MayRun),
+                None
+            );
+        }
+        // Left over once the process that asked ended; kept with none, kept.
+        assert!(job_token_ended(
+            kept(&supervisor, "gone").as_ref(),
+            alive,
+            || JobState::MayRun
+        ));
+        assert!(!job_token_ended(
+            kept(&supervisor, "now").as_ref(),
+            alive,
+            || JobState::MayRun
+        ));
+        assert!(!job_token_ended(
+            Some(&TokenIssuer::of(&supervisor, None)),
+            alive,
+            || JobState::MayRun
+        ));
+        assert!(!job_token_ended(None, alive, || JobState::MayRun));
+    }
+
+    /// A session's process runs only while its pid lives with the same
+    /// start, and has ended only once its pid is gone or another start is
+    /// printed for it: a live pid whose start cannot be read neither runs
+    /// (its token is not taken) nor has ended (its parent is still there).
+    #[test]
+    fn a_process_whose_start_cannot_be_read_neither_runs_nor_has_ended() {
+        let process = SessionProcess {
+            pid: 7,
+            start: "now".into(),
+        };
+        assert!(process.runs(true, Some("now")));
+        assert!(!process.ended(true, Some("now")));
+        for start in [Some("now"), Some("then"), None] {
+            assert!(!process.runs(false, start));
+            assert!(process.ended(false, start));
+        }
+        assert!(!process.runs(true, Some("then")));
+        assert!(process.ended(true, Some("then")));
+        assert!(!process.runs(true, None));
+        assert!(!process.ended(true, None));
+        // A parent asking from it is there while it has not ended.
+        let issuer = TokenIssuer::of(
+            &Principal::supervisor(&LeaseToken::new("a"), 7),
+            Some(process.clone()),
+        );
+        assert!(issuer.there(|kept| !kept.ended(true, None), |_| true));
+        assert!(!issuer.there(|kept| !kept.ended(true, Some("then")), |_| true));
+    }
+
+    /// A job's token whose parent cannot be judged and whose job the queue
+    /// keeps no record of (a supervisor that stopped after its token and
+    /// before its row, a setup review's) is protected while a process that
+    /// may have asked for it may still run (ADR-t3102-1 decision 2): a
+    /// supervisor registered by its issue whose process runs, for a job a
+    /// supervisor starts, or a `dagq` of a subcommand that starts the job
+    /// and started by then. Once none may, it
+    /// is replaced, revoked and swept; the one supervisor that alone may
+    /// have asked for it is handed it again and may give it back.
+    #[test]
+    fn a_job_token_of_no_record_goes_once_no_process_that_may_have_asked_runs() {
+        let registration =
+            |token: &str, pid: u32, started_at: i64| super::super::SupervisorRegistration {
+                token: LeaseToken::new(token),
+                pid,
+                parallel: 1,
+                started_at,
+                heartbeat_at: started_at,
+                mode: None,
+                workspace_id: None,
+                handoff_accepted: false,
+                handoff_binary: None,
+                auto_update: false,
+                max_waiting: None,
+                parallel_source: None,
+                max_waiting_source: None,
+                runtime_planners: None,
+                runtime_planners_source: None,
+                claim_spacing: None,
+                claim_spacing_source: None,
+                max_spikes: None,
+                max_spikes_source: None,
+                class_aging: None,
+                class_aging_source: None,
+                max_load: None,
+                max_load_source: None,
+                providers: None,
+                binary_version: None,
+            };
+        // Old (pid 1) registered by the issue at 100; new (pid 2) after it;
+        // gone (pid 3) by then, its process ended.
+        let registrations = [
+            registration("old", 1, 50),
+            registration("new", 2, 200),
+            registration("gone", 3, 50),
+        ];
+        let alive = |pid: u32| pid != 3;
+        let old = Principal::supervisor(&LeaseToken::new("old"), 1).credential_key();
+        let new = Principal::supervisor(&LeaseToken::new("new"), 2).credential_key();
+        let asked = |role, kept: Option<&str>, processes: Vec<HostProcess>| {
+            may_have_asked(
+                role,
+                kept,
+                100,
+                &registrations,
+                &alive,
+                &|| Some(processes.clone()),
+                9,
+            )
+        };
+        assert_eq!(
+            asked(ActorRole::RecoveryJob, None, Vec::new()),
+            MayHaveAsked {
+                supervisors: vec![old.clone()],
+                command: false
+            }
+        );
+        // A job no command starts: no process of the host is asked.
+        let unlisted = || -> Option<Vec<HostProcess>> { panic!("no command starts it") };
+        assert_eq!(
+            may_have_asked(ActorRole::ReviewJob, None, 100, &[], &alive, &unlisted, 9),
+            MayHaveAsked::default()
+        );
+        // A setup review, which only its command starts: no supervisor
+        // counts, and of the host's processes a `dagq setup-review` that
+        // started by then and runs, the renamed fixed binary's too, never a
+        // resident `dagq` (the broker, the service, a supervisor) nor the
+        // service's own.
+        let process = |pid: u32, command: &str, started_at: Option<i64>| HostProcess {
+            pid,
+            command: command.into(),
+            started_at,
+        };
+        let setup = |processes| asked(ActorRole::SetupReviewJob, None, processes).command;
+        assert_eq!(
+            asked(ActorRole::SetupReviewJob, None, Vec::new()),
+            MayHaveAsked::default()
+        );
+        for command in [
+            "/Users/u/.local/bin/dagq setup-review --db q.db",
+            "/Users/u/.local/bin/dagq.previous setup-review",
+            "dagq --db q.db setup-review",
+        ] {
+            assert!(setup(vec![process(4, command, Some(90))]), "{command}");
+            assert!(setup(vec![process(4, command, None)]), "{command}");
+            assert!(!setup(vec![process(4, command, Some(150))]), "{command}");
+            assert!(!setup(vec![process(9, command, Some(90))]), "{command}");
+        }
+        for command in [
+            "/Users/u/.local/bin/dagq queue-broker --db q.db",
+            "dagq service serve",
+            "dagq supervise",
+            "dagq observe",
+            "vim setup-review.md",
+        ] {
+            assert!(!setup(vec![process(4, command, Some(90))]), "{command}");
+        }
+        assert!(
+            may_have_asked(
+                ActorRole::SetupReviewJob,
+                None,
+                100,
+                &[],
+                &alive,
+                &|| None,
+                9
+            )
+            .command
+        );
+        // An observation, which a supervisor's timer starts too: the
+        // supervisors registered by then, whose own `dagq observe` is not a
+        // command's.
+        assert_eq!(
+            asked(
+                ActorRole::Observer,
+                None,
+                vec![
+                    process(1, "dagq observe", Some(40)),
+                    process(5, "dagq supervise", Some(40))
+                ]
+            ),
+            MayHaveAsked {
+                supervisors: vec![old.clone()],
+                command: false
+            }
+        );
+        // A parent kept with it whose process was not read: a supervisor is
+        // judged by its own registration alone, another parent by the
+        // commands alone.
+        assert_eq!(
+            may_have_asked(
+                ActorRole::ThroughputReviewJob,
+                Some(&new),
+                100,
+                &registrations,
+                &alive,
+                &unlisted,
+                9
+            ),
+            MayHaveAsked {
+                supervisors: vec![new.clone()],
+                command: false
+            }
+        );
+        let gone = Principal::supervisor(&LeaseToken::new("gone"), 3).credential_key();
+        assert_eq!(
+            may_have_asked(
+                ActorRole::ThroughputReviewJob,
+                Some(&gone),
+                100,
+                &registrations,
+                &alive,
+                &unlisted,
+                9
+            ),
+            MayHaveAsked::default()
+        );
+        assert_eq!(
+            asked(
+                ActorRole::ThroughputReviewJob,
+                Some("user"),
+                vec![process(4, "dagq throughput-review run", Some(90))]
+            ),
+            MayHaveAsked {
+                supervisors: Vec::new(),
+                command: true
+            }
+        );
+
+        let job = Principal::of(&ActorContext::recovery_job(
+            &RunId::new("r").unwrap(),
+            "idle",
+            1,
+        ));
+        let asking = |parent: &str| TokenIssuer {
+            parent: parent.to_owned(),
+            process: None,
+            registration: None,
+        };
+        let there = |_: &TokenIssuer| true;
+        let unrecorded = |supervisors: Vec<String>, command: bool| {
+            JobState::Unrecorded(MayHaveAsked {
+                supervisors,
+                command,
+            })
+        };
+        let held = HeldToken {
+            principal: job.clone(),
+            issued_by: None,
+            issued_at: 100,
+        };
+        // Another supervisor, or a command, may still run it: kept.
+        for state in [
+            unrecorded(vec![old.clone()], false),
+            unrecorded(Vec::new(), true),
+        ] {
+            assert!(matches!(
+                reissue(&job, &asking(&new), Some(&None), there, || state.clone()),
+                Reissue::Refused(why) if why.contains("no record of its job")
+            ));
+            assert!(revoke_refusal(&held, &new, there, || state.clone()).is_some());
+            assert!(!job_token_ended(None, there, || state.clone()));
+        }
+        // None may: replaced, revoked and swept.
+        let ended = unrecorded(Vec::new(), false);
+        assert_eq!(
+            reissue(&job, &asking(&new), Some(&None), there, || ended.clone()),
+            Reissue::Issue
+        );
+        assert_eq!(revoke_refusal(&held, &new, there, || ended.clone()), None);
+        assert!(job_token_ended(None, there, || ended.clone()));
+        // The one that alone may have: handed it again, and gives it back,
+        // which another is refused; it is not swept while that one runs.
+        let alone = unrecorded(vec![old.clone()], false);
+        assert_eq!(
+            reissue(&job, &asking(&old), Some(&None), there, || alone.clone()),
+            Reissue::Held
+        );
+        assert_eq!(revoke_refusal(&held, &old, there, || alone.clone()), None);
+        assert!(revoke_refusal(&held, &new, there, || alone.clone()).is_some());
+        assert!(!job_token_ended(None, there, || alone.clone()));
+        // Records that tell it may run keep it whoever asks.
+        assert!(matches!(
+            reissue(&job, &asking(&old), Some(&None), there, || JobState::MayRun),
+            Reissue::Refused(_)
+        ));
+    }
+
+    /// A job's token whose parent cannot be judged (kept with no parent, or
+    /// with neither its process nor a registration) is replaced, by any
+    /// parent that may ask for it, and swept once the queue's records tell
+    /// that its job ended, and not before. A token whose parent is judged
+    /// keeps its parent's rule whatever the records say.
+    #[test]
+    fn a_job_token_of_no_parent_judged_goes_once_its_jobs_records_tell_it_ended() {
+        let job = Principal::of(&ActorContext::throughput_review_job("hourly", "h"));
+        let supervisor = Principal::supervisor(&LeaseToken::new("a"), 7);
+        let other = Principal::supervisor(&LeaseToken::new("b"), 8);
+        let process = |start: &str| SessionProcess {
+            pid: 7,
+            start: start.into(),
+        };
+        let asking = TokenIssuer::of(&other, Some(process("now")));
+        let there = |issuer: &TokenIssuer| issuer.there(|_| true, |_| true);
+        let unread = TokenIssuer::of(&Principal::inbox(process("now")), None);
+        for held in [None, Some(unread.clone())] {
+            assert!(matches!(
+                reissue(&job, &asking, Some(&held), there, || JobState::MayRun),
+                Reissue::Refused(why) if why.contains("no parent that can be judged")
+            ));
+            assert_eq!(
+                reissue(&job, &asking, Some(&held), there, || JobState::Ended),
+                Reissue::Issue
+            );
+            assert!(!job_token_ended(held.as_ref(), there, || JobState::MayRun));
+            assert!(job_token_ended(held.as_ref(), there, || JobState::Ended));
+        }
+        // Its revocation by another parent, kept with no parent included, as
+        // long as the records do not tell its job ended: else a revocation
+        // would let the issue take it over.
+        let theirs = other.credential_key();
+        for issued_by in [None, Some(unread.clone())] {
+            let held = HeldToken {
+                principal: job.clone(),
+                issued_by,
+                issued_at: 0,
+            };
+            assert!(revoke_refusal(&held, &theirs, there, || JobState::MayRun).is_some());
+            assert_eq!(
+                revoke_refusal(&held, &theirs, there, || JobState::Ended),
+                None
+            );
+        }
+        // Given back by the parent kept with it, though not judged; another
+        // principal's kept with no parent goes by its own rule.
+        let unread_held = HeldToken {
+            principal: job.clone(),
+            issued_by: Some(unread.clone()),
+            issued_at: 0,
+        };
+        assert_eq!(
+            revoke_refusal(&unread_held, &unread.parent, there, || JobState::MayRun),
+            None
+        );
+        let planner_held = HeldToken {
+            principal: Principal::planner(4),
+            issued_by: None,
+            issued_at: 0,
+        };
+        assert_eq!(
+            revoke_refusal(&planner_held, &theirs, there, || JobState::MayRun),
+            None
+        );
+        // A supervisor's whose process was not read is judged by its
+        // registration.
+        let registered = Some(TokenIssuer::of(&supervisor, None));
+        assert!(matches!(
+            reissue(&job, &asking, Some(&registered), there, || JobState::Ended),
+            Reissue::Refused(why) if why.contains("another parent's")
+        ));
+        assert!(!job_token_ended(registered.as_ref(), there, || {
+            JobState::Ended
+        }));
+        let gone = |issuer: &TokenIssuer| issuer.there(|_| true, |_| false);
+        assert!(job_token_ended(registered.as_ref(), gone, || {
+            JobState::MayRun
+        }));
+    }
+
+    /// The records of a job are named by its role and actor id; a job the
+    /// queue keeps none of, and a principal of no job, name none.
+    #[test]
+    fn a_jobs_records_are_named_by_its_role_and_actor_id() {
+        use super::super::headless_job::{
+            RECOVERY, REVIEW, REVIEW_PROGRAM, SATISFIED_REVIEW_LABEL,
+        };
+        let run = RunId::new("r1").unwrap();
+        let of = |actor: ActorContext| job_records_of(&Principal::of(&actor));
+        assert_eq!(
+            of(ActorContext::plan_review_job(4, 2)),
+            Some(JobRecords::PlanReview {
+                proposal: 4,
+                attempt: 2
+            })
+        );
+        assert_eq!(
+            of(ActorContext::goal_review_job(5, 1)),
+            Some(JobRecords::GoalReview {
+                goal: 5,
+                attempt: 1
+            })
+        );
+        assert_eq!(
+            of(ActorContext::review_job(&run, 3)),
+            Some(JobRecords::RunJob {
+                kinds: &[REVIEW, REVIEW_PROGRAM],
+                run: "r1".into(),
+                label: RowLabel::Not(SATISFIED_REVIEW_LABEL),
+                attempt: 3
+            })
+        );
+        assert_eq!(
+            of(ActorContext::recovery_job(&run, "idle:long", 2)),
+            Some(JobRecords::RunJob {
+                kinds: &[RECOVERY],
+                run: "r1".into(),
+                label: RowLabel::Is("idle:long".into()),
+                attempt: 2
+            })
+        );
+        assert_eq!(
+            of(ActorContext::throughput_review_job(
+                "hourly",
+                "2026-10-25T10:00"
+            )),
+            Some(JobRecords::ThroughputReview {
+                mode: "hourly".into(),
+                period: "2026-10-25T10:00".into()
+            })
+        );
+        assert_eq!(
+            of(ActorContext::instance(ActorRole::Observer, "u1")),
+            Some(JobRecords::Observation {
+                session_id: "u1".into()
+            })
+        );
+        assert_eq!(
+            of(ActorContext::review_job(&run, "satisfied-2")),
+            Some(JobRecords::RunJob {
+                kinds: &[REVIEW],
+                run: "r1".into(),
+                label: RowLabel::Is(SATISFIED_REVIEW_LABEL.into()),
+                attempt: 2
+            })
+        );
+        assert_eq!(of(ActorContext::agent_eval_job("e", 0, 1)), None);
+        assert_eq!(of(ActorContext::setup_review_job("p")), None);
+        assert_eq!(of(ActorContext::worker(&run, TaskId::new(1))), None);
+    }
+
+    /// A job's records tell that it ended only when there is one and each
+    /// ended: its row finished or its supervisor gone, its command's finish
+    /// recorded, its process gone or past the time it ends by. The record
+    /// of the start that asks (the row its registration claimed, the start
+    /// its process recorded) is left out while it runs, and only then.
+    #[test]
+    fn a_jobs_records_tell_its_end_only_when_each_ended() {
+        use super::super::telemetry::{Beat, TargetFacts};
+        let alive = |pid: u32| pid == 1 || pid == 7;
+        let record = |facts: TargetFacts| JobRecord {
+            facts,
+            supervisor: None,
+            pid: None,
+        };
+        let running = TargetFacts::SupervisedJob {
+            supervisor: Some(Beat {
+                pid: 1,
+                age_secs: 0,
+            }),
+        };
+        let command = |pid: u32, ends_by_ms: i64| JobRecord {
+            pid: Some(pid),
+            ..record(TargetFacts::StartedCommand {
+                ends_by_ms,
+                pid: Some(pid),
+            })
+        };
+        let ended =
+            |records: &[JobRecord]| job_records_ended(records, None, 1_000, &alive) == Some(true);
+        // With no record they tell nothing; with one that runs, that it may.
+        assert_eq!(job_records_ended(&[], None, 1_000, &alive), None);
+        assert_eq!(
+            job_records_ended(&[command(1, 2_000)], None, 1_000, &alive),
+            Some(false)
+        );
+        assert!(ended(&[record(TargetFacts::Ended)]));
+        assert!(!ended(&[
+            record(TargetFacts::Ended),
+            record(running.clone())
+        ]));
+        assert!(ended(&[record(TargetFacts::SupervisedJob {
+            supervisor: None
+        })]));
+        assert!(!ended(&[command(1, 2_000)]));
+        assert!(ended(&[command(2, 2_000)]));
+        assert!(ended(&[command(1, 500)]));
+
+        // Asked again by the command of process 7, whose own start runs,
+        // and by the supervisor of registration `a`, whose row it claimed.
+        let command_asks = TokenIssuer::of(
+            &Principal::inbox(SessionProcess {
+                pid: 7,
+                start: "now".into(),
+            }),
+            Some(SessionProcess {
+                pid: 7,
+                start: "now".into(),
+            }),
+        );
+        let supervisor_asks =
+            TokenIssuer::of(&Principal::supervisor(&LeaseToken::new("a"), 9), None);
+        let claimed = |token: &str| JobRecord {
+            supervisor: Some(LeaseToken::new(token)),
+            ..record(running.clone())
+        };
+        let again = |records: &[JobRecord], asking: &TokenIssuer| {
+            job_records_ended(records, Some(asking), 1_000, &alive) == Some(true)
+        };
+        assert!(again(
+            &[command(2, 2_000), command(7, 2_000)],
+            &command_asks
+        ));
+        assert!(!again(
+            &[command(1, 2_000), command(7, 2_000)],
+            &command_asks
+        ));
+        // Its own start alone: no record of the job left, nothing told.
+        assert_eq!(
+            job_records_ended(&[command(7, 2_000)], Some(&command_asks), 1_000, &alive),
+            None
+        );
+        assert!(!ended(&[command(2, 2_000), command(7, 2_000)]));
+        assert!(again(
+            &[record(TargetFacts::Ended), claimed("a")],
+            &supervisor_asks
+        ));
+        assert!(!again(
+            &[record(TargetFacts::Ended), claimed("b")],
+            &supervisor_asks
+        ));
+    }
+
+    /// A supervisor whose registration went (it stopped, or was pruned)
+    /// is gone though its process runs on: what only a parent there keeps
+    /// from another (a planner's, the telemetry of a target of no run, a
+    /// job's revocation and its sweep) is no longer kept. Another parent
+    /// still never replaces a job's, and a parent kept with no
+    /// registration is judged by its process alone.
+    #[test]
+    fn a_supervisor_whose_registration_went_is_gone_though_its_process_runs() {
+        use super::super::session_step::TargetKind;
+        let process = SessionProcess {
+            pid: 7,
+            start: "now".into(),
+        };
+        let stopped = Principal::supervisor(&LeaseToken::new("stopped"), 7);
+        let live = Principal::supervisor(&LeaseToken::new("live"), 7);
+        let there = |issuer: &TokenIssuer| {
+            issuer.there(|_| true, |registration| registration.as_str() != "stopped")
+        };
+        let kept = |parent: &Principal| TokenIssuer::of(parent, Some(process.clone()));
+        assert_eq!(
+            kept(&stopped).registration,
+            Some(LeaseToken::new("stopped"))
+        );
+        assert!(!there(&kept(&stopped)));
+        assert!(there(&kept(&live)));
+        assert!(there(&kept(&Principal::inbox(process.clone()))));
+        let planner = StepTarget::of(TargetKind::Planner, 4);
+        for child in [
+            Principal::planner(4),
+            Principal::wrapper(&planner, None),
+            Principal::telemetry(&planner, None),
+        ] {
+            assert_eq!(
+                reissue(
+                    &child,
+                    &kept(&live),
+                    Some(&Some(kept(&stopped))),
+                    there,
+                    || JobState::MayRun
+                ),
+                Reissue::Issue
+            );
+            let held = HeldToken {
+                principal: child.clone(),
+                issued_by: Some(kept(&stopped)),
+                issued_at: 0,
+            };
+            assert_eq!(
+                revoke_refusal(&held, &live.credential_key(), there, || JobState::MayRun),
+                None
+            );
+        }
+        let job = Principal::of(&ActorContext::throughput_review_job("hourly", "h"));
+        assert!(matches!(
+            reissue(
+                &job,
+                &kept(&live),
+                Some(&Some(kept(&stopped))),
+                there,
+                || JobState::MayRun
+            ),
+            Reissue::Refused(_)
+        ));
+        let held = |issuer: TokenIssuer| HeldToken {
+            principal: job.clone(),
+            issued_by: Some(issuer),
+            issued_at: 0,
+        };
+        assert_eq!(
+            revoke_refusal(&held(kept(&stopped)), &live.credential_key(), there, || {
+                JobState::MayRun
+            }),
+            None
+        );
+        assert!(
+            revoke_refusal(&held(kept(&live)), &stopped.credential_key(), there, || {
+                JobState::MayRun
+            })
+            .is_some()
+        );
+        assert!(job_token_ended(Some(&kept(&stopped)), there, || {
+            JobState::MayRun
+        }));
+        assert!(!job_token_ended(Some(&kept(&live)), there, || {
+            JobState::MayRun
+        }));
+        // One kept with no registration (the inbox's, or a supervisor's
+        // kept before the registration was) by its process alone.
+        let ended = SessionProcess {
+            pid: 7,
+            start: "gone".into(),
+        };
+        let by_process =
+            |issuer: &TokenIssuer| issuer.there(|session| session.start == "now", |_| false);
+        let unregistered = TokenIssuer {
+            registration: None,
+            ..kept(&stopped)
+        };
+        assert!(by_process(&unregistered));
+        assert!(!by_process(&TokenIssuer {
+            process: Some(ended.clone()),
+            ..unregistered.clone()
+        }));
+        assert!(job_token_ended(
+            Some(&TokenIssuer::of(
+                &Principal::inbox(process.clone()),
+                Some(ended)
+            )),
+            by_process,
+            || JobState::MayRun
+        ));
+    }
+
+    /// Whether what a token is issued under is held, from the queue's
+    /// facts read in the issue's transaction: a lease lost, a registration
+    /// gone or expired, a planner closed each refuse it, and what needs
+    /// nothing of the queue never is.
+    #[test]
+    fn what_a_token_is_issued_under_is_held_or_says_why_not() {
+        let (lease, run) = (LeaseToken::new("l"), RunId::new("r1").unwrap());
+        let live = HeldFacts {
+            registration_expired: Some(false),
+            leased: true,
+            planner_open: true,
+            target_open: true,
+        };
+        let leased = IssueHeld::Lease {
+            run: run.clone(),
+            lease: lease.clone(),
+        };
+        let planner = IssueHeld::OpenPlanner {
+            planner: 3,
+            lease: lease.clone(),
+        };
+        let registered = IssueHeld::Registered(lease.clone());
+        for held in [
+            &IssueHeld::Nothing,
+            &IssueHeld::Registration(lease.clone()),
+            &leased,
+            &planner,
+            &registered,
+        ] {
+            assert_eq!(not_held(held, &live), None, "{held:?}");
+        }
+        // A supervisor's own registration needs nothing, gone or expired
+        // (the exec of a handoff resumes it).
+        assert_eq!(
+            not_held(
+                &IssueHeld::Registration(lease.clone()),
+                &HeldFacts::default()
+            ),
+            None
+        );
+        let lost = HeldFacts {
+            leased: false,
+            ..live
+        };
+        assert!(not_held(&leased, &lost).unwrap().contains("not leased"));
+        let gone = HeldFacts {
+            registration_expired: None,
+            ..live
+        };
+        let expired = HeldFacts {
+            registration_expired: Some(true),
+            ..live
+        };
+        // A run's lease, a planner and a job's each need the registration
+        // live (ADR-t3102-1 decision 2): a lease left by a registration
+        // gone or expired issues nothing.
+        for held in [&leased, &planner, &registered] {
+            assert!(not_held(held, &gone).unwrap().contains("not registered"));
+            assert!(not_held(held, &expired).unwrap().contains("expired"));
+        }
+        let closed = HeldFacts {
+            planner_open: false,
+            ..live
+        };
+        assert!(not_held(&planner, &closed).unwrap().contains("not open"));
+        assert_eq!(not_held(&registered, &closed), None);
+    }
+
+    /// An executor's telemetry token is issued under its target open, and
+    /// the registration of the supervisor that asked live when one asked;
+    /// the user and the inbox ask only for an observation's and a
+    /// throughput review's, and nobody here for a run's.
+    #[test]
+    fn a_telemetry_token_is_issued_under_its_target_open() {
+        use super::super::session_step::TargetKind;
+        let observer = StepTarget::of(TargetKind::Observer, 4);
+        let child = Principal::telemetry(&observer, None);
+        let lease = LeaseToken::new("l");
+        let supervisor = Principal::supervisor(&lease, 7);
+        assert_eq!(
+            issue_held(&supervisor, &child),
+            IssueHeld::OpenTarget {
+                target: observer.clone(),
+                registration: Some(lease.clone()),
+            }
+        );
+        let by_user = issue_held(&Principal::user(), &child);
+        assert_eq!(
+            by_user,
+            IssueHeld::OpenTarget {
+                target: observer,
+                registration: None,
+            }
+        );
+        let open = HeldFacts {
+            target_open: true,
+            ..HeldFacts::default()
+        };
+        assert_eq!(not_held(&by_user, &open), None);
+        assert!(
+            not_held(&by_user, &HeldFacts::default())
+                .unwrap()
+                .contains("has ended")
+        );
+        // The supervisor's needs its registration too.
+        let held = issue_held(&supervisor, &child);
+        assert!(not_held(&held, &open).unwrap().contains("not registered"));
+        let live = HeldFacts {
+            registration_expired: Some(false),
+            ..open
+        };
+        assert_eq!(not_held(&held, &live), None);
+
+        for role in [ActorRole::User, ActorRole::Inbox, ActorRole::Supervisor] {
+            assert_eq!(telemetry_issue_refusal(role, &child), None, "{role:?}");
+            let review =
+                Principal::telemetry(&StepTarget::of(TargetKind::ThroughputReview, 2), None);
+            assert_eq!(telemetry_issue_refusal(role, &review), None, "{role:?}");
+            let run = RunId::new("r1").unwrap();
+            let of_run = Principal::telemetry(&StepTarget::run(&run), Some(TaskId::new(1)));
+            assert!(telemetry_issue_refusal(role, &of_run).is_some(), "{role:?}");
+        }
+        let plan_review = Principal::telemetry(&StepTarget::of(TargetKind::PlanReview, 2), None);
+        assert!(telemetry_issue_refusal(ActorRole::User, &plan_review).is_some());
+        assert_eq!(
+            telemetry_issue_refusal(ActorRole::Supervisor, &plan_review),
+            None
+        );
+    }
 
     #[test]
     fn a_too_large_answer_says_its_size_the_limit_and_how_to_narrow_its_read() {

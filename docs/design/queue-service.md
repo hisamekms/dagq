@@ -74,24 +74,25 @@ transactionはserviceの中で完結し、クライアントとの往復で分�
 
 serviceは呼び出しのprincipal（`Principal`）をtokenから決め（tokenの無い人は[hostのCLI](queue-service-host-cli.md#principal)）、クライアントが名乗るrole（`DAGQ_ROLE`）は認可に使わない（ADR-t1233-1決定4、ADR-t1233-4決定4）。
 
-- 発行: 制御側だけが`queue_service::issue`で発行する。
-  AI actorにtokenを作るコマンドは無い。
-  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）・登録を対象に持つsupervisor・session wrapper・inbox・planner・着地のrunとleaseのintegratorだけ（`Principal::check`）。
-  同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）。
-  発行するのはactorの起動の1か所（applicationのport `ServiceAccess`）:
-  - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するときに、serviceにrunのleaseを確かめさせて発行する。
-    wrapperの環境には入れず、session wrapperがagentのturnを起動するときにそのfileのpathを渡す。
-  - wrapperのtoken: 制御側がrunかplannerのwrapperを起動するときに、その対象のrole `wrapper`のprincipalに発行する。
-    wrapperはfileを自分のactor idから引くので、envとargvに値もpathも無い
-  - jobのtoken: supervisorかjobを起動するコマンドが起動のときに発行し、jobのプロセスが終わったときに失効させる（`ServiceAccess::revoke_on_exit`）
-  - inboxとplannerのtoken: [hostのCLI](queue-service-host-cli.md#principal)
+- 発行: serviceのユースケース`issue_token`（supervisorは`supervisor`の同名のop）が、子を起動する親のprincipalの依頼で発行し、値のfileのpathを返す（ADR-t3102-1決定2）。
+  親になれるroleと、発行と同じtransactionで確かめる前提は[Authorization](authorization.md#queue-serviceのユースケースservice側)が持つ。
+  tokenを発行してservice dirに書くのはserviceだけで、AI actorにtokenを作るコマンドは無い。
+  同じ対象に発行し直すと前のtokenは失効する（jobとplannerは依頼した親が居る間は別の親に出さない。規則は`reissue`のdoc comment）。
+  依頼はactorの起動で（`ServiceAccess`）:
+  - supervisor: 登録の前にuser（socketのpeer）として
+  - workerとrunのwrapper: supervisorがclaimとresumeでrunのleaseの下に
+  - plannerとそのwrapper: supervisorがplannerのwrapperを起動する前に
+  - inbox: `dagq inbox`がuserとして
+  - job: supervisorが起動のときに依頼し、jobのプロセスの終わりに失効させる。
+    jobのコマンド（`observe`など）が起動するもの（telemetryも）は呼び出し元のprincipalで依頼する
+  - integrator: 着地のslotを取る`begin_landing`と同じtransactionで、runのleaseの下に（supervisorは登録の生存も。人とinboxの`integrate`はそのコマンドが。[integrate](supervisor-lifecycle/integrate.md)）
+  - wrapperは依頼せず、自分のactor idで引いたfileを使い、agentのturnにはworkerかplannerのもののpathを渡す（envとargvに値もpathも無い）
 - 失効: `queue_service::revoke`（`Principal::credential_key`）が値とprincipalの記録を消す。
-  inboxのtokenはsessionの終わりと開き直しで、plannerとそのwrapperのものはplannerを閉じたときに失効し（ADR-t3102-1決定2）、serviceは消える前でも断る。
-  sweepはtokenを置く名前で消すので、開き直したinboxのものは残る（`swept_token_key`）。
-  加えてserviceは、principalがrunを名指すtokenを、そのrunが終わったときに断る（runの終わりで失効。`run_holds_token`）。
+  inboxのtokenはsessionの終わりと開き直しで、plannerとそのwrapperのものはplannerを閉じたときに失効し、serviceは消える前でも断る。
+  加えてserviceは、principalがrunを名指すtokenを、そのrunが終わったときに断る（`run_holds_token`）。
   workerのtokenは、supervisorがrunの終わり（slotのrunが着地・failed・interruptedで休むとき）に`ServiceAccess::revoke`で消す。
-  そこで消さなかったもの（cancelやsupervisorが居ない間に終わったrunなど）は、supervisorが起動の最初のpassと終わったrunのsweepのたびに`ServiceAccess::sweep`で消す（`run_token_ended`。wrapperのtokenも）。
-  resumeを待つrun（`needs_session`）はtokenを保つので消さず、resumeは今までどおり発行し直す
+  そこで消さなかったものは、supervisorが起動の最初のpassと終わったrunのsweepのたびに`ServiceAccess::sweep`で消す（判定は`sweep_worker_tokens`）。
+  resumeを待つrun（`needs_session`）はtokenを保つので消さず、resumeは発行し直す
 - executorのtelemetryのprincipal（ADR-t1662-3決定9〜11・13）: role `executor-telemetry`で、対象を1つだけ持つ（runの対象は`run_id`、runを持たない対象は種類とid。`domain::session_step::StepTarget`）。
   actor idは対象から作り、runの対象のtokenはworkerのものと同じくrunの終わりで断る。
   発行と失効の口は制御側だけが呼ぶapplicationのport `TelemetryTokens`で、AI actorのコマンドからは呼べない。
@@ -273,7 +274,7 @@ attentionの次の手は`dagq service status`。
 人はそれと`service.log`を見て、`up`か`service start`を打ち直す。
 生きているsupervisorも居ないときは`restart supervisor`が出る。
 
-`status`と`watch`は届かないとき記録をDBを開かずに読んで添え、`watch`はroleごとに1回だけ返してserviceが戻るか新しい記録まで待つ（[hostのCLI](queue-service-host-cli.md#届かないとき)）。
+`status`と`watch`は届かないとき記録をDBを開かずに読んで添える（返し方は[hostのCLI](queue-service-host-cli.md#届かないとき)）。
 
 ## statusとdoctor
 
@@ -296,7 +297,7 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 - containerの中からbrokerを通す`telemetry_report`（[Queue broker](queue-broker.md)の`TokenRefusal`）。
   containerのrunのstepはhostのwrapperが送る
 - 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、integrateのverificationの隔離
-- 段(5)の残り: hostのCLIが送らないもの（[送る範囲](queue-service-host-cli.md#送る範囲)）とsupervisorに残るDBの記録のservice経由化、親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
+- 段(5)の残り: hostのCLIが送らないもの（[送る範囲](queue-service-host-cli.md#送る範囲)。人の`integrate`も）とsupervisorに残るDBの記録のservice経由化（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
 
 ## CIの見張り（ADR-t1920-1）
 

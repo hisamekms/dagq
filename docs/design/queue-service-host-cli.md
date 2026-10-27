@@ -113,19 +113,13 @@ stepの形はsupervisorの操作と同じ名前と引数（`ControlParams`）で
 - inboxとplannerは環境が名指すtokenのfileで送る（queueのpathも残す）。
   fileがそのqueueの`service/credentials/`に無ければ（`--db`が別のqueueを名指すなど）、tokenを送らずに`wrong_queue`で終わる（`issued_by`）。
   fileはserviceのdirに置くので、sessionが続くかぎり自動更新とserviceの起動し直しをまたいで使える。
-- inboxのtokenは`dagq inbox`が、agentに場所を譲る自分のprocess（pidと、環境のzoneに依らずUTCで読むstart）をsessionとして発行する（`Principal::inbox`）。
+- inboxのtokenは`dagq inbox`がuserとしてserviceに依頼し、agentに場所を譲る自分のprocess（pidと、環境のzoneに依らずUTCで読むstart）をsessionとする（`Principal::inbox`、`RequestedServiceAccess`）。
+  serviceが答えなければinboxを開かない。
   fileはsessionごとに別で（`credential_path_of`）、開き直しの発行がqueueのlockの下で前のsessionのtokenとfileを消してから書くので（同時に開いても残るのは1つ）、前のsessionのCLIは新しいtokenを読めず`no_credential`で終わる。
   sessionのprocessが終われば（pidを別のprocessが取っても）serviceが`session_ended`で断り、supervisorのsweepが消す（startが読めないときは残す。`session_token_ended`）。
-- plannerのtokenはplannerのturnを起動するとき、無いときだけ発行する（`HostActorExecutor`）。
+- plannerのtokenは、supervisorがplannerのwrapperを起動する前にserviceに依頼し、wrapperはturnにそのfileを渡すだけで発行を依頼しない（`HostActorExecutor`）。
   plannerが閉じた後はserviceが`target_ended`で断り、supervisorのsweepが消す（`planner_token_ended`）。
-- supervisorが自分で起動するworker・session wrapper・jobのtokenは、supervisorがserviceのユースケース`issue_token`で発行させる（`ServiceTokens`）。
-  serviceが発行するのはAI actorとsession wrapperのroleだけで、登録を対象に持つものは断る。
-  workerとrunのsession wrapperのtokenはそのrunのもので、serviceはrunのleaseが要求したsupervisorの登録のものであることを発行と同じtransactionで確かめ、違えば発行しない（`under_lease`）。
-- 着地のintegratorのtokenは、serviceが`begin_landing`でintegrationのslotを取るのと同じtransactionで発行し、slotが確定しなければ消す（人とinboxの`integrate`は上の「制御側のコマンド」）。
-- supervisor自身のtokenは、supervisorが起動のときに自分の登録とpidのprincipalでfileに直接書き、handoffの後のimageは前のimageが残したtokenのfileと記録があればそれを使い、無ければ同じ経路で発行し直す（`SignedIn`）。
-- inboxとplannerのtokenは、制御側のprocess（`dagq inbox`とplannerのsession wrapper）がfileに直接書く。
-  jobを起動するコマンド（`observe`など）が起動するjobのtokenと、runのsession wrapperがworkerのturnに渡すtokenのfileが無いときのものも、そのprocessが直接書く。
-  これらの直接の発行（supervisor自身のものも）では、親のprincipalの起動の権限と対象の前提をserviceが同じtransactionで確かめない（inboxとplannerはADR-t3102-1決定2に対するADR-t3105-1決定5の例外）。
+- 発行はserviceの`issue_token`が、親の権限と対象の前提を発行と同じtransactionで確かめて行う（ADR-t3102-1決定2、[Queue service](queue-service.md#principalとtoken)）。
 - hostのCLIの要求は`HOST_CLIENT_API_VERSION`からの版で送る。
   queueとsessionを読まない前の版のserviceは、tokenを読む前に`api_version_mismatch`で断る（[API versionと互換](queue-service.md#api-versionと互換)）。
   serviceを見る`hello`（`probe`とsupervisorの起動の確かめ）は`MIN_API_VERSION`で送るので（`request_version`）、前の版のserviceも届かないではなく別のbuildとして見え、supervisorが入れ替える。

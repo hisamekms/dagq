@@ -5,7 +5,6 @@
 use super::*;
 use crate::application::TaskStore;
 use crate::domain::NewTask;
-use crate::domain::session_step::TargetKind;
 
 const RUN: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -150,83 +149,6 @@ fn a_supervisor_writes_a_run_only_under_the_lease_its_principal_holds() {
         created[0].actor.as_ref().map(|actor| actor.id.as_str()),
         Some("supervisor:7")
     );
-}
-
-/// A worker's token is issued only by the supervisor that holds its run's
-/// lease, in the transaction that finds the lease: one that does not is
-/// refused and leaves no token, and no supervisor issues another's.
-#[test]
-fn a_workers_token_is_issued_only_under_its_runs_lease() {
-    let (owner, other) = (LeaseToken::new("owner"), LeaseToken::new("other"));
-    let (_dir, backend) = claimed(&owner);
-    let worker = Principal::worker(&RunId::new(RUN).unwrap(), crate::domain::TaskId::new(1));
-    let other_token = token_of(&backend, &Principal::supervisor(&other, 8));
-    let refusal = call(&backend, &other_token, "issue_token", json!([worker]));
-    assert!(refused(&refusal).contains("not leased"), "{refusal:?}");
-    assert!(
-        principals(&backend.queue_dir)
-            .unwrap()
-            .iter()
-            .all(|principal| principal.role != ActorRole::Worker)
-    );
-
-    let owner_token = token_of(&backend, &Principal::supervisor(&owner, 7));
-    // Nor a token of another supervisor's registration, which would write
-    // under its leases.
-    let another = call(
-        &backend,
-        &owner_token,
-        "issue_token",
-        json!([Principal::supervisor(&other, 9)]),
-    );
-    refused(&another);
-    let issued = call(&backend, &owner_token, "issue_token", json!([worker]));
-    assert!(issued.ok, "{issued:?}");
-    let file: PathBuf = serde_json::from_value(issued.result.unwrap()).unwrap();
-    assert_eq!(file, credential_path(&backend.queue_dir, &worker.actor_id));
-    assert!(
-        lookup(&backend.queue_dir, &read_token(&file).unwrap())
-            .unwrap()
-            .is_some_and(|principal| principal == worker)
-    );
-}
-
-/// A session wrapper's token is issued as its target's is: a run's only by
-/// the supervisor that holds the run's lease, a planner's by the
-/// supervisor that starts it; no other trusted principal's is.
-#[test]
-fn a_wrappers_token_is_issued_as_its_targets() {
-    let (owner, other) = (LeaseToken::new("owner"), LeaseToken::new("other"));
-    let (_dir, backend) = claimed(&owner);
-    let run = StepTarget::run(&RunId::new(RUN).unwrap());
-    let wrapper = Principal::wrapper(&run, Some(crate::domain::TaskId::new(1)));
-    let other_token = token_of(&backend, &Principal::supervisor(&other, 8));
-    let refusal = call(&backend, &other_token, "issue_token", json!([wrapper]));
-    assert!(refused(&refusal).contains("not leased"), "{refusal:?}");
-
-    let owner_token = token_of(&backend, &Principal::supervisor(&owner, 7));
-    let issued = call(&backend, &owner_token, "issue_token", json!([wrapper]));
-    assert!(issued.ok, "{issued:?}");
-    let file: PathBuf = serde_json::from_value(issued.result.unwrap()).unwrap();
-    assert!(
-        lookup(&backend.queue_dir, &read_token(&file).unwrap())
-            .unwrap()
-            .is_some_and(|principal| principal == wrapper)
-    );
-    let planner = Principal::wrapper(&StepTarget::of(TargetKind::Planner, 3), None);
-    let issued = call(&backend, &owner_token, "issue_token", json!([planner]));
-    assert!(issued.ok, "{issued:?}");
-
-    let integrator = Principal::of(&crate::domain::ActorContext::new(
-        ActorRole::Integrator,
-        "integrator:1",
-    ));
-    refused(&call(
-        &backend,
-        &owner_token,
-        "issue_token",
-        json!([integrator]),
-    ));
 }
 
 /// A supervisor prunes its own registration, and another's only once its

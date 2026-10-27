@@ -1000,6 +1000,7 @@ pub fn observe(
     let sources = ObserverReads {
         one_shot: OneShot::new(generators.clone()),
     };
+    let telemetry = crate::infrastructure::queue_service::RequestedTelemetryTokens::of_caller(&db);
     crate::application::observer::observe(
         &mut queue,
         &db,
@@ -1011,8 +1012,10 @@ pub fn observe(
             host: &crate::infrastructure::observer::LocalObserver { events: None },
             generators: &generators,
             pid: std::process::id(),
+            // The executor's token is issued by the queue's service at
+            // the request of the command's caller (ADR-t3102-1 decision 2).
             telemetry: Some(crate::application::telemetry_tokens::TargetTelemetry {
-                tokens: &crate::infrastructure::queue_service::SystemServiceAccess,
+                tokens: &telemetry,
                 db: &db,
                 lease: None,
             }),
@@ -1218,6 +1221,7 @@ pub fn throughput_review(
     let sources = ThroughputReviewReads {
         one_shot: OneShot::new(generators.clone()),
     };
+    let telemetry = crate::infrastructure::queue_service::RequestedTelemetryTokens::of_caller(&db);
     crate::application::throughput_review::review(
         &mut queue,
         &db,
@@ -1228,8 +1232,10 @@ pub fn throughput_review(
             host: &crate::infrastructure::throughput_review::LocalThroughputReview { events: None },
             generators: &generators,
             signals: Some(&signals),
+            // The executor's token is issued by the queue's service at
+            // the request of the command's caller (ADR-t3102-1 decision 2).
             telemetry: Some(crate::application::telemetry_tokens::TargetTelemetry {
-                tokens: &crate::infrastructure::queue_service::SystemServiceAccess,
+                tokens: &telemetry,
                 db: &db,
                 lease: None,
             }),

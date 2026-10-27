@@ -39,6 +39,13 @@ pub struct Fixture {
     pub db: PathBuf,
 }
 
+impl Drop for Fixture {
+    /// No service outlives its test.
+    fn drop(&mut self) {
+        super::service::unserve(&self.db);
+    }
+}
+
 impl Fixture {
     pub fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -54,6 +61,9 @@ impl Fixture {
         let db = dir.path().join("queue").join("queue.db");
         let fixture = Self { dir, repo, db };
         fixture.ok(&[], &["init"]);
+        // The job's token is issued by the queue's service at the
+        // caller's request, so `setup-review` needs it running.
+        super::service::serve(&fixture.db);
         fixture
     }
 

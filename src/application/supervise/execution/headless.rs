@@ -339,10 +339,18 @@ pub(super) fn between_turns(sv: &Supervisor<'_>, idle_marker: &Path, events: &[R
 /// Whether a turn the headless session of `run` was sent has not ended
 /// yet ([`turn::turn_awaited`]), whose idle marker is at `idle_marker`:
 /// read from its `turns/` and its events, so a supervisor that took the run
-/// over judges as the one that wrote the request.
+/// over judges as the one that wrote the request. A request that cannot be
+/// read (not a regular file) is the wrapper's to refuse on its error path:
+/// it is logged and awaits no turn, so the supervisor's pass goes on.
 pub(super) fn turn_awaited(sv: &Supervisor<'_>, run: &TaskRun, idle_marker: &Path) -> Result<bool> {
     let run_dir = Path::new(run.run_dir().context("missing run directory")?);
-    let listed = listed_requests(&*sv.files, run_dir)?;
+    let listed = match listed_requests(&*sv.files, run_dir) {
+        Ok(listed) => listed,
+        Err(error) => {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the requests of {} cannot be read; no turn is taken as awaited: {error:#}", run.id());
+            return Ok(false);
+        }
+    };
     let events = sv.queue.run_events(run.id())?;
     Ok(turn::turn_awaited(
         &listed,

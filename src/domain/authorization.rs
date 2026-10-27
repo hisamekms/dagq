@@ -121,6 +121,10 @@ string_enum!(Capability {
     // (`telemetry_report`, ADR-t1662-3 decision 9): the executor's
     // telemetry principal's one capability, and no other role's.
     TelemetryReport => "telemetry.report",
+    // Asking the queue service to issue the token of a principal this one
+    // starts (`issue_token`, ADR-t3102-1 decision 2): which child a parent
+    // may ask for is [`starts`].
+    TokenIssue => "token.issue",
     // Reserved for a later stage (sandboxed execution): no role has them.
     FilesystemRead => "reserved.filesystem_read",
     FilesystemWrite => "reserved.filesystem_write",
@@ -129,7 +133,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 64] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -189,6 +193,7 @@ impl Capability {
         Self::Land,
         Self::Push,
         Self::TelemetryReport,
+        Self::TokenIssue,
         Self::FilesystemRead,
         Self::FilesystemWrite,
         Self::NetworkAccess,
@@ -277,6 +282,9 @@ pub enum Resource {
         target: super::session_step::StepTarget,
         owner: Option<super::session_step::StepTarget>,
     },
+    /// The principal of `role` a token is asked to be issued for
+    /// ([`C::TokenIssue`]).
+    Principal(ActorRole),
     /// A resource the caller named but could not read (such as a malformed
     /// run id): no owner can match it.
     Unresolved,
@@ -422,6 +430,7 @@ impl Resource {
                 "kind": "telemetry", "target": target.kind.as_str(), "id": target.id,
                 "owner": owner.as_ref().map(|owner| format!("{}:{}", owner.kind.as_str(), owner.id)),
             }),
+            Self::Principal(role) => json!({"kind": "principal", "role": role.as_str()}),
             Self::Unresolved => json!({"kind": "unresolved"}),
         }
     }
@@ -444,6 +453,10 @@ pub enum DenyReason {
     /// A planner moves a `goal_gap` draft out of its goal
     /// ([`super::follow_up::check_goal_gap_move`]).
     GoalGapDraft,
+    /// What a token is issued under is not held: the run's lease, the
+    /// supervisor's registration, or the planner open
+    /// ([`super::queue_service::IssueHeld`]).
+    NotHeld,
 }
 
 impl DenyReason {
@@ -456,6 +469,7 @@ impl DenyReason {
             Self::AskKind => "not of this kind",
             Self::PersonsPriority => "a person's priority",
             Self::GoalGapDraft => "a goal review's goal_gap draft",
+            Self::NotHeld => "what it is issued under is not held",
         }
     }
 }
@@ -588,6 +602,7 @@ const INBOX: &[Capability] = &[
     C::BinaryInstall,
     C::QueueAdmin,
     C::IntegrationRequest,
+    C::TokenIssue,
 ];
 
 /// The number of [`USER`]'s capabilities: the inbox's and one more.
@@ -715,6 +730,7 @@ const SUPERVISOR: &[Capability] = &[
     C::IntegrationRequest,
     C::ReplanPark,
     C::ReplanApply,
+    C::TokenIssue,
 ];
 
 /// The session wrapper and its hook: its own run's or planner's session
@@ -766,6 +782,9 @@ pub fn opens_ask(role: ActorRole, kind: &AskKind) -> bool {
 
 /// The resource rules on top of the allowlist.
 fn resource_permits(actor: &ActorContext, capability: Capability, resource: &Resource) -> bool {
+    if capability == C::TokenIssue {
+        return matches!(resource, Resource::Principal(child) if starts(actor.role(), *child));
+    }
     match actor.role() {
         ActorRole::Worker => capability == C::QueueRead || worker_owns(actor, resource),
         ActorRole::Planner => planner_permits(actor, capability, resource),
@@ -794,6 +813,46 @@ fn wrapper_owns(actor: &ActorContext, resource: &Resource) -> bool {
         _ => return false,
     };
     actor.actor_id() == super::queue_service::wrapper_actor_id(&target)
+}
+
+/// Whether a principal of role `parent` may ask the queue service for the
+/// token of a principal of role `child` it starts (`issue_token`,
+/// ADR-t3102-1 decision 2, default deny): the user starts the supervisor
+/// and the inbox; the supervisor its runs' workers and session wrappers,
+/// the planners and their wrappers, the executors' telemetry and its jobs;
+/// the user and the inbox the job a command of theirs starts (`observe`,
+/// `setup-review`), only one whose capabilities are all the parent's, as
+/// the answer hands the parent the token's file (ADR-t728-1 decision 5),
+/// and that job's executor's telemetry, whose one capability reaches only
+/// its target, the job's (which
+/// [`super::queue_service::telemetry_issue_refusal`] checks). No
+/// parent asks for the integrator's here: it is issued inside the
+/// supervisor's operation that takes the landing slot (`begin_landing`),
+/// under the run's lease. No principal is started by itself.
+pub fn starts(parent: ActorRole, child: ActorRole) -> bool {
+    use ActorRole as R;
+    let within = || {
+        grants(child)
+            .iter()
+            .all(|capability| grants(parent).contains(capability))
+    };
+    match child {
+        R::Supervisor | R::Inbox => parent == R::User,
+        R::Worker | R::Wrapper | R::Planner | R::ReviewJob | R::RecoveryJob => {
+            parent == R::Supervisor
+        }
+        R::ExecutorTelemetry => matches!(parent, R::Supervisor | R::User | R::Inbox),
+        R::Observer
+        | R::PlanReviewJob
+        | R::GoalReviewJob
+        | R::ThroughputReviewJob
+        | R::SetupReviewJob => match parent {
+            R::Supervisor => true,
+            R::User | R::Inbox => within(),
+            _ => false,
+        },
+        R::Integrator | R::User => false,
+    }
 }
 
 /// The telemetry principal's own target: the one its actor id names
@@ -1066,6 +1125,74 @@ mod tests {
                 assert!(!allowed(&job, capability, &resource), "{capability:?}");
             }
         }
+    }
+
+    /// ADR-t3102-1 decision 2's table: only the user, the inbox and the
+    /// supervisor ask for a token (`token.issue`), each for the children it
+    /// starts; a command's job only within the asker's capabilities, and
+    /// its executor's telemetry; the integrator's never (the landing's use
+    /// case issues it); every other asked for is refused on its resource.
+    #[test]
+    fn a_token_is_asked_for_only_by_the_parent_of_its_role() {
+        use ActorRole as R;
+        let parents = |child: R| -> Vec<&str> {
+            let mut parents: Vec<&str> = R::ALL
+                .into_iter()
+                .filter(|parent| {
+                    allowed(&role(*parent), C::TokenIssue, &Resource::Principal(child))
+                })
+                .map(R::as_str)
+                .collect();
+            parents.sort_unstable();
+            parents
+        };
+        assert_eq!(parents(R::Supervisor), [R::User.as_str()]);
+        assert_eq!(parents(R::Inbox), [R::User.as_str()]);
+        // A review's or a triage's verdict is not the user's or the inbox's
+        // to submit, so neither is handed its job's token.
+        for child in [
+            R::Worker,
+            R::Wrapper,
+            R::Planner,
+            R::ReviewJob,
+            R::RecoveryJob,
+        ] {
+            assert_eq!(parents(child), [R::Supervisor.as_str()], "{child:?}");
+        }
+        let mut anyone = [R::User.as_str(), R::Inbox.as_str(), R::Supervisor.as_str()];
+        anyone.sort_unstable();
+        for child in [
+            R::Observer,
+            R::PlanReviewJob,
+            R::SetupReviewJob,
+            R::ExecutorTelemetry,
+        ] {
+            assert_eq!(parents(child), anyone, "{child:?}");
+        }
+        assert!(parents(R::Integrator).is_empty());
+        assert!(parents(R::User).is_empty());
+        let refused = StaticPolicy
+            .authorize(
+                &role(R::Supervisor),
+                C::TokenIssue,
+                &Resource::Principal(R::Inbox),
+            )
+            .unwrap_err();
+        assert_eq!(refused.reason, DenyReason::Resource);
+        let refused = StaticPolicy
+            .authorize(
+                &role(R::Worker),
+                C::TokenIssue,
+                &Resource::Principal(R::Wrapper),
+            )
+            .unwrap_err();
+        assert_eq!(refused.reason, DenyReason::NotGranted);
+        // Not on a resource that names no principal.
+        assert!(!allowed(&role(R::User), C::TokenIssue, &Resource::Queue));
+        assert_eq!(
+            Resource::Principal(R::Worker).record(),
+            serde_json::json!({"kind": "principal", "role": "worker"})
+        );
     }
 
     #[test]

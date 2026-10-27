@@ -430,7 +430,7 @@ fn run_session_as(
             provider,
             other,
             spawner,
-            queue_service: &crate::infrastructure::queue_service::SystemServiceAccess,
+            queue_service: &crate::infrastructure::queue_service::HandedServiceAccess,
             processes,
             files: &LocalRunFiles,
             pid,

@@ -137,6 +137,7 @@ fn opened(fixture: &Fixture) -> Option<Value> {
 #[test]
 fn dagq_inbox_starts_the_inbox_agent_in_this_terminal_and_records_its_open() {
     let fixture = fixture();
+    let _served = common::service::Served::start(&fixture.location.db);
     let stub = stub_claude(&fixture);
     let db = fixture.location.db.canonicalize().unwrap();
     let status = || dagq::compose::status_for(&db, Some(SessionRole::Inbox)).unwrap();
@@ -161,8 +162,13 @@ fn dagq_inbox_starts_the_inbox_agent_in_this_terminal_and_records_its_open() {
     // 3), outside the repository, as the service and the supervisor read
     // the process's start.
     let credential = PathBuf::from(started(&stub, "credential").unwrap());
+    // Written by the service, which names its queue's directory as it was
+    // started with it.
     assert!(
-        credential.starts_with(db.parent().unwrap().join("service")),
+        credential
+            .canonicalize()
+            .unwrap()
+            .starts_with(db.parent().unwrap().join("service")),
         "{credential:?}"
     );
     let token = dagq::infrastructure::queue_service::read_token(&credential).unwrap();
@@ -292,6 +298,8 @@ fn dagq_inbox_inside_an_inbox_opens_nothing_whatever_the_queue() {
 #[test]
 fn a_codex_inbox_opens_once_the_persons_settings_hold_and_records_its_launch() {
     let fixture = fixture();
+    // The inbox it opens asks the queue's service for its token.
+    let _served = common::service::Served::start(&fixture.location.db);
     let stub = stub_claude(&fixture);
     let plugin_dir = fixture.options.plugin_dir.clone().unwrap();
     let plugin_dir = plugin_dir.to_str().unwrap();
@@ -554,6 +562,8 @@ fn status_and_doctor_judge_a_codex_inbox_by_the_hooks_it_was_given() {
 #[test]
 fn a_dagq_toml_that_cannot_be_read_still_opens_the_default_inbox() {
     let fixture = fixture();
+    // The inbox it opens asks the queue's service for its token.
+    let _served = common::service::Served::start(&fixture.location.db);
     let stub = stub_claude(&fixture);
     let plugin_dir = fixture.options.plugin_dir.clone().unwrap();
     let toml = fixture.repo.join("dagq.toml");
@@ -577,6 +587,7 @@ fn a_dagq_toml_that_cannot_be_read_still_opens_the_default_inbox() {
 #[test]
 fn dagq_inbox_without_the_enabled_plugin_stops_with_the_way_to_install_it() {
     let fixture = fixture();
+    let _served = common::service::Served::start(&fixture.location.db);
     let stub = stub_claude(&fixture);
     let plugins = |listed: &str| {
         let mut path = stub.as_os_str().to_owned();
@@ -613,6 +624,7 @@ fn dagq_inbox_without_the_enabled_plugin_stops_with_the_way_to_install_it() {
 #[test]
 fn the_inbox_prompt_carries_the_language_and_a_wrong_one_opens_nothing() {
     let mut fixture = fixture();
+    let _served = common::service::Served::start(&fixture.location.db);
     let config = fixture._dir.path().join("config.toml");
     fs::write(&config, "[language]\ntag = 'ja_JP'\n").unwrap();
     fixture.environment.user_config = Some(config.clone());
@@ -649,4 +661,36 @@ fn the_inbox_prompt_carries_the_language_and_a_wrong_one_opens_nothing() {
     assert!(prompt.contains("You are the inbox of"), "{prompt}");
     assert!(prompt.contains("BCP 47 tag `ja`"), "{prompt}");
     assert_eq!(opened(&fixture).unwrap()["guardrail"], true);
+}
+
+/// The inbox's token is issued by the queue's service at the user's
+/// request (ADR-t3102-1 decision 2), never written by `dagq inbox`: with no
+/// service answering, the inbox is not opened, nothing is started or
+/// recorded, and no token is left.
+#[test]
+fn dagq_inbox_asks_the_service_for_its_token_and_opens_nothing_without_one() {
+    let fixture = fixture();
+    let stub = stub_claude(&fixture);
+    let plugin_dir = fixture.options.plugin_dir.clone().unwrap();
+    let message = error_of(&inbox(
+        &fixture,
+        &stub,
+        &[],
+        &["--plugin-dir", plugin_dir.to_str().unwrap()],
+    ));
+    assert!(
+        message.contains("issue the inbox's token")
+            && message.contains("unreachable")
+            && message.ends_with("the inbox was not opened"),
+        "{message}"
+    );
+    assert_eq!(started(&stub, "argv"), None);
+    assert_eq!(opened(&fixture), None);
+    let queue_dir = fixture.location.db.parent().unwrap();
+    let credentials =
+        dagq::infrastructure::queue_service::service_dir(queue_dir).join("credentials");
+    assert!(
+        fs::read_dir(&credentials).map_or(true, |mut files| files.next().is_none()),
+        "{credentials:?}"
+    );
 }

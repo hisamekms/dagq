@@ -120,7 +120,7 @@ fn planner_session_on(
             pid: std::process::id(),
             clock: &crate::infrastructure::clock::SystemClock,
             telemetry: &crate::infrastructure::queue_service::SystemServiceAccess,
-            queue_service: Some(&crate::infrastructure::queue_service::SystemServiceAccess),
+            queue_service: Some(&crate::infrastructure::queue_service::HandedServiceAccess),
         },
         id,
         &planner::planner_dir(&planners_dir(db), id),

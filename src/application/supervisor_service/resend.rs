@@ -619,6 +619,10 @@ impl ServiceCaller for Resending {
         self.inner.sign_out();
     }
 
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.inner.credential()
+    }
+
     /// One the service refuses now is not held any longer: what it says is
     /// logged, as a record that failed is, and a kept one that is no
     /// result's record ([`kept_op`]) is let go unsent. A queue busy past

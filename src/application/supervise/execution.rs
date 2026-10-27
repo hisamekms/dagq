@@ -358,6 +358,12 @@ pub struct Layout {
     /// `replans/` of the queue: the snapshot of each run parked for a
     /// replanning, outside what its worker can write (ADR-t1521-2).
     pub replans_dir: PathBuf,
+    /// The file of the supervisor principal's token once it signed in
+    /// ([`crate::application::supervisor_service::ServiceCaller::credential`]):
+    /// the commands it starts (`observe`, `throughput-review`) are given it
+    /// to ask the queue service for their jobs' tokens as the supervisor
+    /// (ADR-t3102-1 decision 2).
+    pub service_credential: std::sync::OnceLock<PathBuf>,
 }
 
 impl Layout {
@@ -399,6 +405,7 @@ impl Layout {
             review_programs_dir: root.join("review-programs"),
             satisfied_dir: root.join("satisfied"),
             replans_dir: root.join("replans"),
+            service_credential: std::sync::OnceLock::new(),
         }
     }
 }
@@ -981,13 +988,18 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     if let Some(unreached) = super::host_ops::queue_service::reach_at_start(ports, &mut started)? {
         return Ok(unreached);
     }
+    // A token the image before kept that is gone is asked for anew, as a
+    // first start's is, once the service answers.
     let _signed_in = match handed {
-        Some(signed_in) => signed_in,
-        None => {
+        Some(signed_in) if ports.service.credential().is_some() => signed_in,
+        handed => {
             ports.service.sign_in(&token, pid)?;
-            SignedIn(ports.service.clone())
+            handed.unwrap_or_else(|| SignedIn(ports.service.clone()))
         }
     };
+    if let Some(file) = ports.service.credential() {
+        let _ = layout.service_credential.set(file);
+    }
     let mut queue = ports.queues.open()?;
     // A live supervisor of the other `--no-claude` policy is neither
     // reused nor taken over: this one refuses to start until a person
@@ -2410,9 +2422,11 @@ impl Supervisor<'_> {
     /// supervisor looked, by a cancel, or by another process; those of
     /// the planners and their wrappers whose planner ended
     /// (`planner_token_ended`); the inbox's whose session ended
-    /// (`session_token_ended`); and the landings' integrators whose run
-    /// left `integrating` with no live landing on it. A run or a
-    /// planner whose record does not read keeps its token.
+    /// (`session_token_ended`); the landings' integrators whose run left
+    /// `integrating` with no live landing on it; and the jobs' whose process
+    /// that asked for them ended, which the service reads from each token's
+    /// record (`job_token_ended`). A run or a planner whose record does not
+    /// read keeps its token.
     fn sweep_worker_tokens(&self) {
         use crate::domain::queue_service::{Principal, run_token_ended};
         let queue = &self.queue;
@@ -2467,6 +2481,11 @@ impl Supervisor<'_> {
                 })
             {
                 return ended;
+            }
+            // A job's is offered, and the service revokes it only once the
+            // process that asked for it ended (ADR-t3102-1 decision 2).
+            if crate::domain::queue_service::is_job(principal.role) {
+                return true;
             }
             let Some(run) = &principal.run_id else {
                 return false;
@@ -5714,6 +5733,9 @@ mod tests {
         }
         fn hand_over(&self) {}
         fn sign_out(&self) {}
+        fn credential(&self) -> Option<std::path::PathBuf> {
+            None
+        }
     }
 
     /// A count of the resumes the queue service did not answer is the

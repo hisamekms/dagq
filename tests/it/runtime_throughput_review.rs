@@ -849,6 +849,9 @@ fn review_outcomes(db: &Path) -> Vec<(String, String)> {
 #[test]
 fn the_supervisor_starts_each_review_due_once_without_a_run_slot() {
     let (_dir, repo, db) = fixture();
+    // The command the supervisor starts asks the queue's service for its
+    // job's token.
+    common::service::serve(&db);
     SqliteQueue::open(&db)
         .unwrap()
         .transition(TaskId::new(1), TaskAction::Cancel)
@@ -934,6 +937,9 @@ fn the_supervisor_starts_each_review_due_once_without_a_run_slot() {
 #[test]
 fn a_failing_review_stops_no_claim_nor_landing() {
     let (_dir, repo, db) = fixture();
+    // The command the supervisor starts asks the queue's service for its
+    // job's token.
+    common::service::serve(&db);
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
     let options = SuperviseOptions {

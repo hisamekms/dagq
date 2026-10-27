@@ -672,36 +672,49 @@ impl<'a> HostActorExecutor<'a> {
 
     /// What the agent of `actor`, a [`client_role`], is given for its
     /// `dagq` to run in client mode (ADR-t1233-1 decision 7, ADR-t1233-4
-    /// decision 4): the service's socket and the file of its token. `issue`
-    /// issues a new token (a job's, at its start); otherwise the one the
-    /// supervisor issued at the claim or the resume is handed over, and
-    /// one is issued only when there is none (a wrapper started without
-    /// the claim's). The socket is returned for the provider to let its
-    /// sandbox reach it. The caller also drops `DAGQ_QUEUE` from the
+    /// decision 4): the service's socket and the file of its token, and
+    /// whether this call issued that token. `issue` asks for one (a job's,
+    /// at its start), which the service may answer with the one held
+    /// already ([`super::queue_service::Issued::held`]); otherwise the one the supervisor issued
+    /// at the claim or the resume is handed over, and one is asked of
+    /// [`ServiceAccess::issue`] only when there is none, which a session
+    /// wrapper's access refuses. The socket is returned for the provider to
+    /// let its sandbox reach it. The caller also drops `DAGQ_QUEUE` from the
     /// agent's environment (a worker's turn included), so its `dagq` never
     /// opens the queue's file.
-    fn client_env(
-        &self,
-        actor: &ActorContext,
-        issue: bool,
-    ) -> Result<(PathBuf, Vec<(String, String)>)> {
+    fn client_env(&self, actor: &ActorContext, issue: bool) -> Result<ClientEnv> {
         let service = self.service()?;
         let existing = if issue {
             None
         } else {
             service.credential(self.queue, actor.actor_id())
         };
-        let credential = match existing {
-            Some(file) => file,
-            None => service.issue(self.queue, &Principal::of(actor))?,
+        let (credential, issued) = match existing {
+            Some(file) => (file, false),
+            None => {
+                let issued = service.issue(self.queue, &Principal::of(actor))?;
+                (issued.file, !issued.held)
+            }
         };
         let socket = service.socket(self.queue);
         let env = vec![
             (SOCKET_ENV.to_owned(), path_text(&socket)?),
             (CREDENTIAL_FILE_ENV.to_owned(), path_text(&credential)?),
         ];
-        Ok((socket, env))
+        Ok(ClientEnv {
+            socket,
+            env,
+            issued,
+        })
     }
+}
+
+/// What [`HostActorExecutor::client_env`] gives an agent, and whether it
+/// issued the token.
+struct ClientEnv {
+    socket: PathBuf,
+    env: Vec<(String, String)>,
+    issued: bool,
 }
 
 impl HostActorExecutor<'_> {
@@ -711,15 +724,12 @@ impl HostActorExecutor<'_> {
     /// let its sandbox reach it, and the variable that names the file of a
     /// token for its principal; the queue's path is kept for the commands
     /// the service does not answer yet. The one the planner holds is handed
-    /// over, and one is issued only when there is none. `None` for an executor given no service, or an actor
-    /// that takes no token (the inbox's is issued by `dagq inbox` for its
+    /// over: the one the supervisor had issued as it started the planner's
+    /// wrapper ([`ActorProgram::PlannerSession`]), or, with none, one asked
+    /// of [`ServiceAccess::issue`], which a wrapper's access refuses.
+    /// `None` for an executor given no service, or an actor that takes no
+    /// token (the inbox's is issued at `dagq inbox`'s request for its
     /// session, [`crate::application::lifecycle::inbox`]).
-    ///
-    /// The token is written to its file here through
-    /// [`ServiceAccess::issue`], as a worker's is: the service does not yet
-    /// check, in the transaction that issues it, that the parent may start
-    /// the planner and that the planner is open (ADR-t3102-1 decision 2).
-    /// It does until the service issues it (ADR-t3105-1 decision 5).
     fn host_client_env(&self, actor: &ActorContext) -> Result<Option<(PathBuf, (String, String))>> {
         let (Some(service), Some(principal)) = (
             self.service.filter(|_| host_client_role(actor.role())),
@@ -729,9 +739,12 @@ impl HostActorExecutor<'_> {
         };
         let credential = match service.credential(self.queue, actor.actor_id()) {
             Some(file) => file,
-            None => service
-                .issue(self.queue, &principal)
-                .with_context(|| format!("issue {}'s token", actor.actor_id()))?,
+            None => {
+                service
+                    .issue(self.queue, &principal)
+                    .with_context(|| format!("issue {}'s token", actor.actor_id()))?
+                    .file
+            }
         };
         Ok(Some((
             service.socket(self.queue),
@@ -797,12 +810,16 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 // finds the file by its own actor, and neither the value
                 // nor the path is in the environment or the command line
                 // the agent inherits.
-                service
-                    .issue(
-                        self.queue,
-                        &Principal::wrapper(&StepTarget::run(run.id()), Some(run.task_id())),
-                    )
-                    .context("issue the session wrapper's token for the queue service")?;
+                if let Err(error) = service.issue(
+                    self.queue,
+                    &Principal::wrapper(&StepTarget::run(run.id()), Some(run.task_id())),
+                ) {
+                    // The worker's is given back: it starts no wrapper.
+                    let _ = service.revoke(self.queue, &Principal::of(&actor).credential_key());
+                    return Err(
+                        error.context("issue the session wrapper's token for the queue service")
+                    );
+                }
                 let mut env = actor_env(self.queue, &actor, None, None)?;
                 env.extend(run_env);
                 // In the run's worktree, which the worker writes.
@@ -838,8 +855,12 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 log,
             } => {
                 // The planner's wrapper's token (ADR-t3102-1 decisions 2 and
-                // 4), handed to it as a run's wrapper's is.
-                self.service()?
+                // 4), handed to it as a run's wrapper's is, and the
+                // planner's own, which the wrapper hands its turns: both
+                // issued at this executor's parent's request while the
+                // planner is open.
+                let service = self.service()?;
+                service
                     .issue(
                         self.queue,
                         &Principal::wrapper(
@@ -848,6 +869,17 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         ),
                     )
                     .context("issue the planner's session wrapper's token for the queue service")?;
+                if let Err(error) =
+                    service.issue(self.queue, &Principal::planner(planner.1.as_i64()))
+                {
+                    // The wrapper's is given back: it starts no wrapper.
+                    let wrapper = Principal::wrapper(
+                        &StepTarget::of(TargetKind::Planner, planner.1.as_i64()),
+                        None,
+                    );
+                    let _ = service.revoke(self.queue, &wrapper.actor_id);
+                    return Err(error.context("issue the planner's token for the queue service"));
+                }
                 let env = actor_env(self.queue, &actor, Some(planner), launch)?;
                 Ok(ActorHandle::Workspace(
                     self.sessions()?
@@ -900,7 +932,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     // The worker's `dagq` goes to the queue service, never
                     // to the queue's path, which a workspace an older
                     // binary opened may still name (goal 82's stage (3)).
-                    let (socket, env) = self.client_env(&actor, false)?;
+                    let ClientEnv { socket, env, .. } = self.client_env(&actor, false)?;
                     command.env_remove(QUEUE_ENV).envs(env);
                     provider.reach_queue_service(&mut command, &socket);
                 } else {
@@ -977,8 +1009,19 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 // A job's `dagq` goes to the queue service with a token of
                 // its own, which ends with it (goal 82's stage (3)).
                 let client = client_role(actor.role());
+                // Whether this start was issued its token, as the service's
+                // answer tells, which it gives back when its agent does not
+                // start: one handed over again, held already by another job
+                // of the same actor and parent, is that job's, which gives
+                // it back at its own end.
+                let mut issued = false;
                 if client {
-                    let (socket, env) = self.client_env(&actor, true)?;
+                    let ClientEnv {
+                        socket,
+                        env,
+                        issued: fresh,
+                    } = self.client_env(&actor, true)?;
+                    issued = fresh;
                     command.env_remove(QUEUE_ENV);
                     provider.reach_queue_service(&mut command, &socket);
                     actor_env.extend(env);
@@ -987,7 +1030,20 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 for name in without_env {
                     command.env_remove(name);
                 }
-                let child = self.spawn_agent(provider, &actor, &mut command, streams)?;
+                let child = match self.spawn_agent(provider, &actor, &mut command, streams) {
+                    Ok(child) => child,
+                    Err(error) => {
+                        // No job runs under it: left, another parent's start
+                        // of the same actor would be refused a token.
+                        if issued
+                            && let Err(revoke) =
+                                self.service()?.revoke(self.queue, actor.actor_id())
+                        {
+                            tracing::warn!(actor_id = actor.actor_id(), error = %format_args!("{revoke:#}"), "the token of {} could not be given back after its agent did not start; the sweep removes it: {revoke:#}", actor.actor_id());
+                        }
+                        return Err(error);
+                    }
+                };
                 let child = if client {
                     self.service()?
                         .revoke_on_exit(self.queue, actor.actor_id(), child)
@@ -1018,6 +1074,7 @@ pub fn command_line(command: &CommandSpec) -> Result<String> {
 mod tests {
     use super::*;
     use crate::application::Exit;
+    use crate::application::queue_service::Issued;
     use crate::domain::{CommitSha, NewTask, Task, task};
     use std::sync::Mutex;
 
@@ -1063,6 +1120,16 @@ mod tests {
         issued: Mutex<Vec<String>>,
         /// The actors whose token a job's end revokes, in order.
         revoked: Mutex<Vec<String>>,
+        /// The actor whose issue the service refuses.
+        refuse: Option<&'static str>,
+        /// The tokens given back, by the name each is kept under.
+        given_back: Mutex<Vec<String>>,
+        /// Whether no agent can be started (its executable is not there).
+        unstartable: bool,
+        /// Whether the service answers an issue with the token held
+        /// already: another start's of the same actor and parent, issued
+        /// it after this one found none.
+        handed: bool,
     }
 
     /// The queue service's socket and token files at fixed paths under
@@ -1071,9 +1138,16 @@ mod tests {
         fn socket(&self, _: &Path) -> PathBuf {
             "/q/service/queue.sock".into()
         }
-        fn issue(&self, _: &Path, principal: &Principal) -> Result<PathBuf> {
+        fn issue(&self, _: &Path, principal: &Principal) -> Result<Issued> {
+            if self.refuse == Some(principal.actor_id.as_str()) {
+                bail!("authorization_denied: {}", principal.actor_id);
+            }
+            let file = format!("/q/service/credentials/{}", principal.actor_id).into();
+            if self.handed {
+                return Ok(Issued { file, held: true });
+            }
             self.issued.lock().unwrap().push(principal.actor_id.clone());
-            Ok(format!("/q/service/credentials/{}", principal.actor_id).into())
+            Ok(Issued::new(file))
         }
         fn credential(&self, _: &Path, actor_id: &str) -> Option<PathBuf> {
             self.issued
@@ -1083,8 +1157,9 @@ mod tests {
                 .any(|issued| issued == actor_id)
                 .then(|| format!("/q/service/credentials/{actor_id}").into())
         }
-        fn revoke(&self, _: &Path, _: &str) -> Result<bool> {
-            Ok(false)
+        fn revoke(&self, _: &Path, key: &str) -> Result<bool> {
+            self.given_back.lock().unwrap().push(key.to_owned());
+            Ok(true)
         }
         fn sweep(&self, _: &Path, _: &mut dyn FnMut(&Principal) -> bool) -> Result<Vec<String>> {
             Ok(Vec::new())
@@ -1187,6 +1262,9 @@ mod tests {
 
     impl Spawner for Fake {
         fn spawn(&self, command: &CommandSpec, _: Streams<'_>) -> Result<Box<dyn Spawned>> {
+            if self.unstartable {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotFound).into());
+            }
             self.spawned.lock().unwrap().push(command.clone());
             Ok(Box::new(Child))
         }
@@ -1677,10 +1755,74 @@ mod tests {
                 ("DAGQ_PLANNER_ID", "4"),
             ])
         );
-        // Its wrapper's token is issued as it starts, and named nowhere in
-        // what the wrapper and its agent are given.
-        assert_eq!(*fake.issued.lock().unwrap(), ["wrapper:planner:4"]);
+        // Its wrapper's token and the planner's are issued as it starts,
+        // and named nowhere in what the wrapper and its agent are given.
+        assert_eq!(
+            *fake.issued.lock().unwrap(),
+            ["wrapper:planner:4", "planner:4"]
+        );
         assert!(!made[0].1.contains("credentials"));
+    }
+
+    /// A wrapper is started only with both of its start's tokens: when the
+    /// service refuses the second, the first (the worker's, or the
+    /// planner's wrapper's) is given back and nothing starts.
+    #[test]
+    fn a_start_whose_second_token_is_refused_gives_the_first_back_and_starts_nothing() {
+        let run = claimed_run("r1");
+        let worker = Fake {
+            refuse: Some("wrapper:r1"),
+            ..Fake::default()
+        };
+        let refused = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_sessions(&worker)
+            .with_queue_service(&worker)
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::worker(run.id(), run.task_id()),
+                WorkspaceAccess::Write("/w".into()),
+                ActorProgram::RunSession {
+                    run: &run,
+                    wrapper: "wrapper --background".into(),
+                    run_env: Vec::new(),
+                    log: Path::new("/r/session.log"),
+                },
+            ))
+            .err()
+            .unwrap();
+        assert!(
+            format!("{refused:#}").contains("session wrapper's token"),
+            "{refused:#}"
+        );
+        assert_eq!(*worker.issued.lock().unwrap(), ["worker:r1"]);
+        assert_eq!(*worker.given_back.lock().unwrap(), ["worker:r1"]);
+        assert!(worker.workspaces.lock().unwrap().is_empty());
+
+        let planner = Fake {
+            refuse: Some("planner:4"),
+            ..Fake::default()
+        };
+        let refused = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_sessions(&planner)
+            .with_queue_service(&planner)
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::instance(ActorRole::Planner, 4),
+                WorkspaceAccess::Write("/repo".into()),
+                ActorProgram::PlannerSession {
+                    cwd: Path::new("/repo"),
+                    wrapper: "planner-session --headless --background".into(),
+                    planner: (PlannerOrigin::Runtime, PlannerId::new(4)),
+                    launch: None,
+                    log: Path::new("/q/planners/4/session.log"),
+                },
+            ))
+            .err()
+            .unwrap();
+        assert!(
+            format!("{refused:#}").contains("planner's token"),
+            "{refused:#}"
+        );
+        assert_eq!(*planner.given_back.lock().unwrap(), ["wrapper:planner:4"]);
+        assert!(planner.workspaces.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1718,6 +1860,56 @@ mod tests {
         // Nothing was started.
         assert!(fake.spawned.lock().unwrap().is_empty());
         assert!(fake.workspaces.lock().unwrap().is_empty());
+    }
+
+    /// A job whose agent does not start, started by `fake`.
+    fn start_unstartable(fake: &Fake) {
+        let dir = Path::new("/q/job");
+        HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_provider(fake)
+            .with_spawner(fake)
+            .with_queue_service(fake)
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::instance(ActorRole::Observer, "s1"),
+                WorkspaceAccess::Scratch(dir.into()),
+                job(dir),
+            ))
+            .err()
+            .unwrap();
+    }
+
+    /// A job whose agent does not start gives back the token its start
+    /// issued, so another parent may start its actor.
+    #[test]
+    fn a_job_that_does_not_start_gives_back_only_the_token_its_start_issued() {
+        let fake = Fake {
+            unstartable: true,
+            ..Fake::default()
+        };
+        start_unstartable(&fake);
+        assert_eq!(*fake.issued.lock().unwrap(), ["observer:s1"]);
+        assert_eq!(*fake.given_back.lock().unwrap(), ["observer:s1"]);
+        assert!(fake.revoked.lock().unwrap().is_empty());
+    }
+
+    /// Two starts of one job's actor and parent at once both find no token
+    /// held; the other asks first, is issued it and runs. This one, asking
+    /// next, is handed that token as held, then does not start: it gives
+    /// back nothing, and the running job keeps its token.
+    #[test]
+    fn a_job_that_does_not_start_gives_back_no_token_the_service_handed_it_as_held() {
+        let fake = Fake {
+            unstartable: true,
+            handed: true,
+            ..Fake::default()
+        };
+        assert!(
+            fake.credential(Path::new("/q/queue.db"), "observer:s1")
+                .is_none()
+        );
+        start_unstartable(&fake);
+        assert!(fake.given_back.lock().unwrap().is_empty());
+        assert!(fake.revoked.lock().unwrap().is_empty());
     }
 
     #[test]

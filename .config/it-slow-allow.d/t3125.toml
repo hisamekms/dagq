@@ -1,0 +1,17 @@
+# 5.692s in the worker's stress
+[[test]]
+name = "runtime_throughput_review::a_failing_review_stops_no_claim_nor_landing"
+reason = "境界（プロセス・supervisor の配線）: supervisor が起動するスループットの見直しの job のプロセスが service の発行した token で落ちても、同じ supervisor の claim と着地（integrator の principal での slot）が止まらない配線の代表"
+task = 3125
+
+# 5.045s (median of 5) in the worker's stress
+[[test]]
+name = "throughput_review_codex::with_the_fallback_off_a_codex_review_at_its_limit_waits_and_retries_codex"
+reason = "境界（プロセス・supervisor の配線）: supervisor の 3 回の pass が Codex のスループットの見直しの job のプロセスを起動し、その job の token を queue service が発行し、Codex の hold の間は何も起動せず、hold が明けて同じ期間を Codex でやり直す配線の代表。fallback の判断は unit test が持つ"
+task = 3125
+
+# 6.070s (median of 5) in the worker's stress
+[[test]]
+name = "runtime_throughput_review::the_supervisor_starts_each_review_due_once_without_a_run_slot"
+reason = "境界（プロセス・supervisor の配線）: supervisor の pass がスループットの見直しの job のプロセスを期間ごとに 1 回起動し、その job の token を queue service が発行し、run の slot を使わない配線の代表。期限と期間の判断は unit test が持つ"
+task = 3125

@@ -173,10 +173,13 @@ pub fn run_agent_in(
         None => crate::infrastructure::sqlite::SqliteQueue::open(db).ok(),
     };
     let events = events.or_else(|| opened.as_ref().map(|queue| queue as &dyn RunLog));
+    // The job's token is issued by the queue's service at the request of
+    // the command's caller (ADR-t3102-1 decision 2).
+    let service = crate::infrastructure::queue_service::RequestedServiceAccess::of_caller(db);
     let mut executor = HostActorExecutor::new(db)
         .with_provider(provider)
         .with_spawner(&LocalSpawner)
-        .with_queue_service(&crate::infrastructure::queue_service::SystemServiceAccess);
+        .with_queue_service(&service);
     if let Some(events) = events {
         executor = executor.with_events(events);
     }
