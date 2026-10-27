@@ -61,6 +61,70 @@ fn run_with_events(db: &Path, events: &[(&str, serde_json::Value, &str)]) -> Str
     run.id().as_str().to_owned()
 }
 
+/// A running run whose supervisor died (its lease's holder is gone) keeps
+/// its worker's answer the runtime's through `answer` and `status`: the
+/// supervisor that adopts the run delivers it.
+#[test]
+fn a_running_runs_answer_under_a_dead_lease_is_the_runtimes_in_answer_and_status() {
+    let (_dir, db) = queue();
+    ok(&db, &["add", "first"]);
+    let run = "11111111-1111-4111-8111-111111111111";
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit,worktree_path,workspace_id,run_dir)
+         VALUES (?1,1,'running','claude','claude','0000000000000000000000000000000000000000','/wt','W','/run')",
+        [run],
+    )
+    .unwrap();
+    // Above any pid macOS or Linux assigns, so never alive.
+    conn.execute(
+        "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,'sup',?2,unixepoch())",
+        rusqlite::params![run, i32::MAX],
+    )
+    .unwrap();
+    let ask = ok(
+        &db,
+        &[
+            "ask",
+            "--kind",
+            "worker_question",
+            "--because",
+            "scope",
+            "--topic",
+            "task_overlap",
+            "--run",
+            run,
+            "--question",
+            "Which line?",
+        ],
+    );
+    let ask_id = ask["id"].as_i64().unwrap();
+    ok(
+        &db,
+        &["answer", &ask_id.to_string(), "--text", "the second"],
+    );
+    let answered = ok(
+        &db,
+        &["events", "--all", "--full", "--kind", "ask_answered"],
+    );
+    assert_eq!(answered["events"][0]["payload"]["runtime_delivers"], true);
+    let status = ok(&db, &["status"]);
+    let attention = status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["ask_id"] == ask_id)
+        .unwrap();
+    assert_eq!(attention["kind"], "ask_answered", "{attention}");
+    assert!(
+        attention["next"]
+            .as_str()
+            .unwrap()
+            .starts_with("delivering"),
+        "{attention}"
+    );
+}
+
 #[test]
 fn events_and_watch_read_past_a_cursor() {
     let (_dir, db) = queue();

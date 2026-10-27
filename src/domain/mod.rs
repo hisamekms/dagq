@@ -1016,7 +1016,8 @@ pub fn resume_in_progress(events: &[RunEvent]) -> bool {
 /// ([`resume_in_progress`]). While a live session fixes a request, only the
 /// answer of an ask created (`ask_created_at`, unix seconds) since the
 /// request was sent is the supervisor's; an older one is the inbox's (task
-/// 582). The caller checks that a supervisor leases it.
+/// 582). For a run not running, the caller checks that a supervisor leases
+/// it; a running run's answer waits for the supervisor that adopts it.
 pub fn session_takes_answers(status: RunStatus, events: &[RunEvent], ask_created_at: i64) -> bool {
     status == RunStatus::Running
         || (status == RunStatus::AwaitingIntegration

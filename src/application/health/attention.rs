@@ -821,44 +821,16 @@ pub fn attention(
         } else if ask.kind == AskKind::WorkerQuestion
             && let Some(run_id) = ask.run_id.as_ref()
         {
-            // The supervisor holding a running worker's lease types the
-            // answer into its terminal, also while it revises (task 238); a
-            // failed send, a run no longer running or one nobody supervises
-            // leaves it to the inbox.
-            let failed = queue.run_events(run_id)?.iter().any(|e| {
-                e.kind == EventKind::AskDeliveryFailed
-                    && e.payload
-                        .get("ask_id")
-                        .and_then(Value::as_i64)
-                        .map(AskId::new)
-                        == Some(ask.id)
-            });
-            if failed {
-                (
-                    "answered",
-                    event_kind::ASK_DELIVERY_FAILED,
-                    AttentionNext::DeliverAnswer { ask_id: ask.id },
-                )
-            } else if session_takes_answers(
+            let (kind, next) = worker_answer_attention(
+                ask.id,
+                ask.created_at,
                 queue.run(run_id)?.status(),
                 &queue.run_events(run_id)?,
-                ask.created_at,
-            ) && queue
-                .run_lease(run_id)?
-                .is_some_and(|lease| !lease_is_stale(&lease, now, control))
-            {
-                (
-                    "answered",
-                    event_kind::ASK_ANSWERED,
-                    AttentionNext::DeliveringAnswer { ask_id: ask.id },
-                )
-            } else {
-                (
-                    "answered",
-                    event_kind::ASK_ANSWERED,
-                    AttentionNext::DeliverAnswer { ask_id: ask.id },
-                )
-            }
+                queue.run_lease(run_id)?.as_ref(),
+                now,
+                control,
+            );
+            ("answered", kind, next)
         } else if ask.kind == AskKind::Decide
             && ask.asked_by == TRIAGE_ASKER
             && let Some(run_id) = ask.run_id.as_ref()
@@ -1044,6 +1016,52 @@ pub fn attention(
     Ok(attention)
 }
 
+/// The attention kind and next step of the answered `worker_question`
+/// `ask_id`, created at `ask_created_at` (unix seconds), of a run in
+/// `status` with `events`, whose lease, if any, is `lease` at `now`.
+/// A running worker's answer is the runtime's with or without a live lease,
+/// as `answer` records it: the supervisor that adopts the run delivers it,
+/// so sending it by hand would deliver it twice. A revise or resume session
+/// takes it only under a live lease (task 584); a failed send is the
+/// inbox's in either case.
+fn worker_answer_attention(
+    ask_id: AskId,
+    ask_created_at: i64,
+    status: RunStatus,
+    events: &[RunEvent],
+    lease: Option<&RunLease>,
+    now: i64,
+    control: &dyn ProcessControl,
+) -> (&'static str, AttentionNext) {
+    let failed = events.iter().any(|e| {
+        e.kind == EventKind::AskDeliveryFailed
+            && e.payload
+                .get("ask_id")
+                .and_then(Value::as_i64)
+                .map(AskId::new)
+                == Some(ask_id)
+    });
+    if failed {
+        (
+            event_kind::ASK_DELIVERY_FAILED,
+            AttentionNext::DeliverAnswer { ask_id },
+        )
+    } else if status == RunStatus::Running
+        || (session_takes_answers(status, events, ask_created_at)
+            && lease.is_some_and(|lease| !lease_is_stale(lease, now, control)))
+    {
+        (
+            event_kind::ASK_ANSWERED,
+            AttentionNext::DeliveringAnswer { ask_id },
+        )
+    } else {
+        (
+            event_kind::ASK_ANSWERED,
+            AttentionNext::DeliverAnswer { ask_id },
+        )
+    }
+}
+
 /// The standing row of the landing recheck's command failing on main's
 /// tree alone (ADR-t2141-1), given the latest of
 /// [`crate::domain::recheck::LANDING_RECHECK_MAIN_KINDS`] on the queue
@@ -1128,6 +1146,81 @@ mod tests {
             created_at: String::new(),
             actor: None,
         }
+    }
+
+    /// Pid 1 is alive, every other pid is dead.
+    struct OnlyOne;
+
+    impl ProcessControl for OnlyOne {
+        fn alive(&self, pid: u32) -> bool {
+            pid == 1
+        }
+        fn terminate(&self, _: u32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn interrupt(&self, _: u32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn kill(&self, _: u32) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A running run's answer is the runtime's to deliver with no lease, a
+    /// dead holder's or a silent one's, as `answer` records it, unless its
+    /// send failed; a revising run's needs a lease that is not stale.
+    #[test]
+    fn a_running_runs_answer_is_the_runtimes_whatever_its_lease() {
+        let now = 1_000;
+        let ask = AskId::new(7);
+        let lease = |pid, heartbeat_at| RunLease {
+            run_id: RunId::new("r").unwrap(),
+            token: LeaseToken::new("a"),
+            pid,
+            heartbeat_at,
+        };
+        let fresh = lease(1, now);
+        let dead = lease(2, now);
+        let silent = lease(1, now - HEARTBEAT_TIMEOUT_SECS - 1);
+        let revise = event(1, EventKind::ReviseRequested, json!({"sent_at": 0}));
+        let failed = event(2, EventKind::AskDeliveryFailed, json!({"ask_id": 7}));
+        let other_failed = event(2, EventKind::AskDeliveryFailed, json!({"ask_id": 8}));
+        let delivering = (
+            event_kind::ASK_ANSWERED,
+            AttentionNext::DeliveringAnswer { ask_id: ask },
+        );
+        let to_send = (
+            event_kind::ASK_ANSWERED,
+            AttentionNext::DeliverAnswer { ask_id: ask },
+        );
+        let judge = |status, events: &[RunEvent], lease: Option<&RunLease>| {
+            worker_answer_attention(ask, now, status, events, lease, now, &OnlyOne)
+        };
+        let running = RunStatus::Running;
+        for held in [None, Some(&fresh), Some(&dead), Some(&silent)] {
+            assert_eq!(judge(running, &[], held), delivering, "{held:?}");
+            assert_eq!(
+                judge(running, std::slice::from_ref(&other_failed), held),
+                delivering,
+                "{held:?}"
+            );
+            assert_eq!(
+                judge(running, std::slice::from_ref(&failed), held),
+                (
+                    event_kind::ASK_DELIVERY_FAILED,
+                    AttentionNext::DeliverAnswer { ask_id: ask }
+                ),
+                "{held:?}"
+            );
+        }
+        let awaiting = RunStatus::AwaitingIntegration;
+        let revising = [revise];
+        assert_eq!(judge(awaiting, &revising, Some(&fresh)), delivering);
+        assert_eq!(judge(awaiting, &revising, Some(&dead)), to_send);
+        assert_eq!(judge(awaiting, &revising, Some(&silent)), to_send);
+        assert_eq!(judge(awaiting, &revising, None), to_send);
+        assert_eq!(judge(awaiting, &[], Some(&fresh)), to_send);
+        assert_eq!(judge(RunStatus::Failed, &[], Some(&fresh)), to_send);
     }
 
     /// The latest of the recheck's main kinds being a failure keeps one
