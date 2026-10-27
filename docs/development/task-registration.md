@@ -1,7 +1,7 @@
 ---
 id: development-task-registration
 type: development
-title: このrepositoryのtaskの登録（verify・paths・evidence・change・titleの選び方、固定バイナリを待つ宣言、依存の付け方、Spikeのtask、負荷の下で落ちるtestを直すtask、ADRを書くtask、ADRがリンクする文書を消すtask、runtimeの汎用性、文書の変更を求めるtask、plan reviewが当てはめる規則）
+title: このrepositoryのtaskの登録（verify・paths・evidence・change・titleの選び方、固定バイナリを待つ宣言、依存の付け方、taskの大きさと分け方、Spikeのtask、負荷の下で落ちるtestを直すtask、ADRを書くtask、ADRがリンクする文書を消すtask、runtimeの汎用性、文書の変更を求めるtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
 owners:
@@ -29,6 +29,7 @@ related:
   - development-migrations
   - plan-local-checks-history
   - development-documents
+  - plan-review-rounds-resume-spike
 ---
 
 # このrepositoryのtaskの登録
@@ -148,6 +149,18 @@ goal の優先度を正本にし、task は個別の指定が無ければ所属�
 - 依存を付けるときは、noteかtaskのcontextに種類（中身の前提か衝突回避か）と理由を書く（決定2）。
 - 人に聞く（`planner_question`、`--because scope`）のは、(a) 中身の前提の依存で、(b) その依存で低い優先度のgoalのtaskが効く優先度を継いで上がり、(c) 順番の変更・taskのgoalへの取り込み・分割などplannerの手で解けない、の全部を満たすときだけにする。問いは「低いgoalのtaskを（優先度ごと）前に出すか、高いgoalが待つか」にする。どれかを満たさなければ自分で決めて進め、理由をnoteかcontextに残す（決定3）。
 
+## taskの大きさと分け方
+
+reviewが3回以上になるrunは差分の大きいtaskに偏り、そのうち詳細に調べた30 runでは、reviewの取りこぼし（前の回に出せた指摘が後の回に出る）が差分の特に大きいrunに集まった（[review の回と resume のスパイク](../plans/review-rounds-resume-spike.md)の「表 C（H3）」と「run ごとの表」）。そこで、登録するplannerはtaskごとに差分の大きさを予想し、目安を超えるtaskは分けるか、分けない理由を書く。
+
+- 目安: 予想する差分（testと文書を含む追加＋削除の行数）が約650行か、変えるfileが約12を超えるtask。reviewが3回以上のrunの差分の中央値が653行・12 fileで、2回以下のrunの129.5行・2 fileの約5倍・6倍だった。この値は最後の回の差分で回の間の直しを含むが、最初の回の差分でも464行・9 fileで、2回以下のrunの3.6倍・4.5倍だった。
+- 大きく超える目安: 予想が2,500行を超えるtask。詳細調査の30 runの取りこぼし22件のうち17件が、差分が2,500行を超える11 runのうちの7 runに集まった。
+- 予想は、runtimeのtaskはdescriptionに書く主に触るfile（上の「runtimeのtaskの主なファイル」）、docs・configのtaskは`--paths`とdescriptionが名指す文書・設定から、足す・変える振る舞いの数と合わせて立てる。
+- 受け入れ条件の項目数は目安にしない。同じ表 Cで、項目数の中央値の比（3回以上 ÷ 2回以下）は0.29（「1. 2.」や「(a)」の番号も数えると1.25）で、偏りは差分の行数とfile数にだけ出た。
+- 分け方: 一つ一つが単独で着地でき、着地した時点でmainのtestと検証が通る単位に分ける（例: 型と保存の層を先に、それを使う判断と表示を後に。仕組みを先に、設定と文書の切り替えを後に）。後の単位が先の単位の中身を前提にするときだけ、上の「依存の付け方」のとおり中身の前提の依存を付け、種類と理由をnoteかcontextに書く。受け入れ条件も単位ごとに分け、各taskが自分の条件だけで着地できるようにする。
+- 分けないとき: 一つのtaskにし、予想する大きさと分けない理由をtaskのcontextに書く。目安を超え2,500行以下の予想なら、理由は分けても単位ごとのreviewが軽くならない（変更が一つの流れに収まり、単位に分けると説明と検証が重なる）などでよい。2,500行を超える予想では、途中の状態ではmainの検証が通らない、同じ不変条件を一度に変えないと壊れる、のように単独で着地できる単位に分けられない理由に限る。
+- plan reviewの扱いは下の「plan reviewが当てはめる規則」の大きさの行が持つ。
+
 ## Spikeのtask
 
 前提の抽出・短い読み取りの範囲・Spikeの形と登録・submitの後に終わること・再計画の汎用の手順はpluginの`dagq`の`reference/spike.md`が持ち、決定は[ADR-t1487-1](../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)が持つ。ここはこのrepositoryで何を重要な前提とし、何で解き、どこに証拠を置き、どう登録するかだけを持つ。
@@ -225,5 +238,6 @@ descriptionかacceptanceが文書の変更を求めるtaskは、登録の時に�
 - 負荷の下で落ちるtestのtaskが上の「負荷の下で落ちるtestを直すtask」を満たすこと。acceptanceかdescriptionが高い負荷の下での再現を求めるtaskは`revise`にする（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)決定(d)）。ただし人がapprove_planのaskにreadyと答えて認めたtask（ask 323のtask 1360・1361、ask 304のtask 1344）は例外として保ち、`revise`にしない。plan reviewは自分で新しい例外を作らない（決定(e)）。
 - 優先度と所属は由来で分けて見る（[ADR-t1971-1](../adr/2026-10-07-t1971-1-plan-review-keeps-human-origin-priority-and-membership-and-ai-tasks-inherit-goal-priority.md)）。由来はproposal単位でなく、runtimeがgoal・taskの作成時に記録した由来で見る（[ADR-t1975-1](../adr/2026-10-08-t1975-1-runtime-records-origin-and-person-set-priority-and-ai-actors-cannot-change-it.md)決定5〜7。由来が`unknown`の既存の行は人間由来と同じく扱う）。人間由来のtaskとgoalの優先度と所属は自分で変えず（`lower_priority`を付けない）、疑いがあれば`concern`にする。由来を問わず、人の出どころ（`human`）の優先度（taskの個別の指定と、taskが継ぐgoalの優先度）はactionで変えず（付けても適用されず記録だけが残る）、疑いがあれば`concern`にする（同決定3）。人の言葉に優先度の無い新しいgoalにplannerが付けた段は下のAI由来のgoalと同じ目安で見てよいが、外れていれば`revise`にする。
 - AI由来のtask・goalでは次を見る。taskには個別の優先度を置かずgoalから継がせる（`lower_priority`は値を置かず個別の指定を外す形で効き、passでruntimeも外す）。継いだ優先度が高すぎると見えるときは、下の所属かgoalの優先度の問題として扱う。新しいgoalの優先度が上の「goal の優先度とラベル」の段の目安から外れていれば`revise`にする（goalの優先度は自分で変えない）。既存のgoalに入れたtask（元goalのあるfollow_upは下の行による）は、そのgoalの受け入れ条件の達成に関係するかを見て、関係なければ`revise`にし、新しいgoalかgoalの無い単独のtaskにさせる（後回しの受け皿は上と同じ）。
+- taskの大きさは上の「taskの大きさと分け方」のとおり見る。目安を超えると予想できるtask（runtimeのtaskはdescriptionの主に触るfileが約12を超える、docs・configのtaskは`--paths`とdescriptionが名指す文書・設定が約12を超える、独立に着地できる変更を複数束ねている、など）で、contextに予想する大きさと分けない理由が無ければ`revise`にし、分けるか理由を書かせる。理由があれば、それが同じ節の「分けないとき」に当たるか（2,500行を超えると予想できるものは単独で着地できる単位に分けられない理由か）だけを見て、大きさだけを理由に`revise`にしない。受け入れ条件の項目数を大きさの根拠にしない。
 - 依存は上の「依存の付け方」のとおり中身の前提に限る。優先度が下がる向き（高いgoalのtask → 低いgoalのtask）の依存は理由を見て、同じファイルの衝突を避けるためだけなら`revise`にし、種類と理由がnoteにもcontextにも無いときも`revise`にする。同じファイルやhotspotを触ることだけを理由に`add_dependency`を足さない（[ADR-t1985-1](../adr/2026-10-07-t1985-1-dependencies-only-for-content-prerequisites-and-conflicts-left-to-claim-deferral.md)決定4・6）。
 - 元goalのあるfollow_upのdraftは、plannerの所属の判断（分類・acceptanceの項目・理由・証拠・所属先・判定時の版）を起点に検査する。手順と判定の基準はpluginの`dagq`の`reference/register.md`の「A follow_up's membership」、決定は[ADR-t1504-1](../adr/2026-10-04-t1504-1-follow-ups-belong-to-the-goal-whose-acceptance-needs-them.md)と[ADR-t1504-2](../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)が持つ。疑わしいときにこのrepositoryで読む周辺の証拠は、元のrunのreceipt（`dagq events --full --run R --kind integration_receipt`）、元のtaskの差分（commit）、元goalのacceptanceの他の項目とdoc、名指されたADRと`docs/design/`の節。直せる対応づけの誤りは`revise`、follow_upを外すためにacceptanceを弱めたものは`concern`にする。
