@@ -488,6 +488,83 @@ fn a_container_run_lands_from_its_bundle_through_its_landing_worktree() {
     assert!(!git_out(&repo, &["worktree", "list"]).contains("landing"));
 }
 
+/// The facts of a container run are read again only when its bundle or
+/// state file changed, and a poll takes a bundle or state file cut short
+/// (its executor still writing it) as no change yet, then reads the new
+/// head once the whole file is in place.
+#[test]
+fn a_container_runs_facts_are_reused_until_its_files_change_and_a_poll_waits_for_a_whole_file() {
+    let (_fixture, repo, db) = fixture();
+    let run = claim_in_container(&db, &repo, TaskId::new(1));
+    let repository = GitRepository::inspect(&repo).unwrap();
+    let read = || {
+        let (facts, reused) = repository.clone_facts_reused(&run.run).unwrap().unwrap();
+        (facts.head.as_str().to_owned(), reused)
+    };
+    let first = commit(&run, &[("feature.txt", "feature\n")], "feature");
+    turn_end(&run);
+    assert_eq!(read(), (first.clone(), false));
+    assert_eq!(read(), (first.clone(), true));
+    assert_eq!(
+        run_git::polled_head(&repository, &run.run)
+            .unwrap()
+            .map(|head| head.as_str().to_owned()),
+        Some(first.clone())
+    );
+
+    // The run branch moved by another writer is read again from the files.
+    git_out(
+        &repo,
+        &[
+            "update-ref",
+            &format!("refs/heads/{}", run.branch()),
+            &run.base,
+        ],
+    );
+    assert_eq!(read(), (first.clone(), false));
+    assert_eq!(git_out(&repo, &["rev-parse", &run.branch()]), first);
+
+    // A new turn's files are read again.
+    let second = commit(&run, &[("feature.txt", "more\n")], "more");
+    turn_end(&run);
+    assert_eq!(read(), (second.clone(), false));
+    assert_eq!(read(), (second.clone(), true));
+
+    // A bundle cut short, then a state file that is not whole: a poll sees
+    // no change, while the strict read refuses it.
+    let third = commit(&run, &[("feature.txt", "third\n")], "third");
+    turn_end(&run);
+    let bundle = run.run_dir.join(run_clone::RUN_BUNDLE_FILE);
+    let whole = fs::read(&bundle).unwrap();
+    fs::write(&bundle, &whole[..whole.len() / 2]).unwrap();
+    assert_eq!(run_git::polled_head(&repository, &run.run).unwrap(), None);
+    assert_eq!(
+        run_git::polled_session_head(&repository, &run.run).unwrap(),
+        None
+    );
+    assert!(run_git::head(&repository, &run.run).is_err());
+    assert_eq!(git_out(&repo, &["rev-parse", &run.branch()]), second);
+    fs::write(&bundle, &whole).unwrap();
+    let state = run.run_dir.join(run_clone::RUN_STATE_FILE);
+    fs::write(&state, r#"{"branch": "refs/heads/da"#).unwrap();
+    assert_eq!(run_git::polled_head(&repository, &run.run).unwrap(), None);
+    assert_eq!(
+        run_git::polled_session_head(&repository, &run.run).unwrap(),
+        None
+    );
+    // Whole again, the new head is read.
+    turn_end(&run);
+    assert_eq!(
+        run_git::polled_session_head(&repository, &run.run).unwrap(),
+        Some(run_git::SessionHead {
+            head: sha(&third),
+            clean: true,
+            last_turn: true,
+        })
+    );
+    assert_eq!(read(), (third, true));
+}
+
 /// AC 3: the receipt's checks hold for a container run as for a host one,
 /// and a bundle or state file that cannot be used sends the run back to
 /// its session, never read from the clone instead.

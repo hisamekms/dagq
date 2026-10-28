@@ -42,6 +42,15 @@ fn facts(repository: &dyn Repository, run: &TaskRun) -> Result<CloneFacts> {
     }
 }
 
+/// The facts of a run in a container as a poll reads them: `None` while
+/// its bundle or state file cannot be read (one its executor is still
+/// writing, or one cut short), which the poll takes as no change yet and
+/// reads again next time. What checks a receipt reads them with [`facts`]
+/// instead, to which such a file is an error.
+fn polled_facts(repository: &dyn Repository, run: &TaskRun) -> Result<Option<CloneFacts>> {
+    Ok(repository.clone_facts(run)?.ok())
+}
+
 /// The head of the run's branch: its worktree's `HEAD` on the host; for a
 /// run in a container, the run branch imported from its bundle.
 pub fn head(repository: &dyn Repository, run: &TaskRun) -> Result<CommitSha> {
@@ -49,6 +58,16 @@ pub fn head(repository: &dyn Repository, run: &TaskRun) -> Result<CommitSha> {
         Ok(facts(repository, run)?.head)
     } else {
         repository.head(worktree(run)?)
+    }
+}
+
+/// [`head`] for a poll: `None` while the facts of a run in a container
+/// cannot be read yet ([`polled_facts`]).
+pub fn polled_head(repository: &dyn Repository, run: &TaskRun) -> Result<Option<CommitSha>> {
+    if run.in_container() {
+        Ok(polled_facts(repository, run)?.map(|facts| facts.head))
+    } else {
+        repository.head(worktree(run)?).map(Some)
     }
 }
 
@@ -222,22 +241,41 @@ pub fn status(repository: &dyn Repository, run: &TaskRun) -> Result<String> {
 /// The head and whether the workplace is clean ([`SessionHead`]).
 pub fn session_head(repository: &dyn Repository, run: &TaskRun) -> Result<SessionHead> {
     if run.in_container() {
-        let CloneFacts { head, state } = facts(repository, run)?;
-        let clean =
-            state.status.trim().is_empty() && !state.rebase_in_progress && state.head() == head;
-        Ok(SessionHead {
-            head,
-            clean,
-            last_turn: state.of_the_last_turn(),
-        })
+        Ok(session_head_of(facts(repository, run)?))
     } else {
-        let worktree = worktree(run)?;
-        Ok(SessionHead {
-            head: repository.head(worktree)?,
-            clean: repository.status(worktree)?.trim().is_empty(),
-            last_turn: true,
-        })
+        host_session_head(repository, run)
     }
+}
+
+/// [`session_head`] for a poll: `None` while the facts of a run in a
+/// container cannot be read yet ([`polled_facts`]).
+pub fn polled_session_head(
+    repository: &dyn Repository,
+    run: &TaskRun,
+) -> Result<Option<SessionHead>> {
+    if run.in_container() {
+        Ok(polled_facts(repository, run)?.map(session_head_of))
+    } else {
+        host_session_head(repository, run).map(Some)
+    }
+}
+
+fn session_head_of(CloneFacts { head, state }: CloneFacts) -> SessionHead {
+    let clean = state.status.trim().is_empty() && !state.rebase_in_progress && state.head() == head;
+    SessionHead {
+        head,
+        clean,
+        last_turn: state.of_the_last_turn(),
+    }
+}
+
+fn host_session_head(repository: &dyn Repository, run: &TaskRun) -> Result<SessionHead> {
+    let worktree = worktree(run)?;
+    Ok(SessionHead {
+        head: repository.head(worktree)?,
+        clean: repository.status(worktree)?.trim().is_empty(),
+        last_turn: true,
+    })
 }
 
 /// Whether a rebase is in progress where the run works.

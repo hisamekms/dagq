@@ -1016,7 +1016,9 @@ impl SessionWatch {
     /// HEAD is seen away from the run's base commit: with `agent_started` it
     /// measures how long a session takes to start working (`stats`'s
     /// `startup`). The time is when this poll saw it, at most a tick late.
-    /// A HEAD that cannot be read is noted and checked again next poll.
+    /// A HEAD that cannot be read is noted and checked again next poll; a
+    /// container run's bundle or state file not readable yet is no change
+    /// ([`polled_head`](crate::application::run_git::polled_head)).
     pub(super) fn watch_first_commit(
         &mut self,
         sv: &mut Supervisor<'_>,
@@ -1028,8 +1030,9 @@ impl SessionWatch {
         if run.worktree_path().is_none() {
             return Ok(());
         }
-        let head = match crate::application::run_git::head(&*sv.repository, run) {
-            Ok(head) => head,
+        let head = match crate::application::run_git::polled_head(&*sv.repository, run) {
+            Ok(Some(head)) => head,
+            Ok(None) => return Ok(()),
             Err(error) => {
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "HEAD of {} could not be read for its first commit: {error:#}", run.id());
                 return Ok(());

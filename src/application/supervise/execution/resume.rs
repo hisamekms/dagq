@@ -1757,7 +1757,19 @@ impl ResumeWatch {
         // worktree: a receipt rewritten after this read is judged
         // at the next poll, never as idle without it.
         let idle = sv.session_idle(&self.idle_marker)?;
-        let run_git::SessionHead { head, clean, .. } = run_git::session_head(&*sv.repository, run)?;
+        // A bundle or state file of a container run that cannot be read yet
+        // (its executor still writing it) is no change: judged at the next
+        // poll, with only the request's clock looked at now.
+        let Some(run_git::SessionHead { head, clean, .. }) =
+            run_git::polled_session_head(&*sv.repository, run)?
+        else {
+            if let Some(why) = self.deadline(sv) {
+                self.settle_stale(sv, run)?;
+                self.request_exit(sv, run)?;
+                info!(run_id = %run.id(), "resumed session of {} {why} (its facts not read yet); exit requested", run.id());
+            }
+            return Ok(None);
+        };
         // Resolved (or failed) and idle after the receipt; or idle
         // after the request with no such receipt, which a session
         // that could not resolve it (or stopped at a question)
@@ -1824,20 +1836,7 @@ impl ResumeWatch {
             ResumeOutcome::Unresolved => None,
             _ => idle_after_receipt.then_some("rewrote its receipt and went idle"),
         }
-        .or_else(|| {
-            // The request's clock, restarted by the inputs above.
-            let (sent, _) = self.message_sent?;
-            // A request to rewrite a stale receipt gets its own timeout.
-            let stale_waits = self
-                .stale
-                .is_some_and(|n| !n.settled && !n.waited_out(&*sv.files, sv.sessions));
-            resume_deadline(
-                sv.generators.clock.monotonic(),
-                sent,
-                sv.sessions.resume_timeout(),
-                stale_waits,
-            )
-        });
+        .or_else(|| self.deadline(sv));
         if let Some(why) = why {
             self.settle_stale(sv, run)?;
             // Ask once, the way a person would; never kill the session.
@@ -1845,6 +1844,22 @@ impl ResumeWatch {
             info!(run_id = %run.id(), "resumed session of {} {why} (head {head}); exit requested", run.id());
         }
         Ok(None)
+    }
+
+    /// Why the session is to be asked to exit by the request's clock,
+    /// restarted by the inputs a poll saw ([`resume_deadline`]).
+    fn deadline(&self, sv: &Supervisor<'_>) -> Option<&'static str> {
+        let (sent, _) = self.message_sent?;
+        // A request to rewrite a stale receipt gets its own timeout.
+        let stale_waits = self
+            .stale
+            .is_some_and(|n| !n.settled && !n.waited_out(&*sv.files, sv.sessions));
+        resume_deadline(
+            sv.generators.clock.monotonic(),
+            sent,
+            sv.sessions.resume_timeout(),
+            stale_waits,
+        )
     }
 }
 

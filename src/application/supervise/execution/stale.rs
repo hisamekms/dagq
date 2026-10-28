@@ -54,7 +54,11 @@ pub(super) fn stale_receipt(sv: &Supervisor<'_>, run: &TaskRun) -> Option<StaleR
     let base = run.base_commit();
     let read = std::cell::OnceCell::new();
     let read = || {
-        read.get_or_init(|| crate::application::run_git::session_head(&*sv.repository, run).ok())
+        read.get_or_init(|| {
+            crate::application::run_git::polled_session_head(&*sv.repository, run)
+                .ok()
+                .flatten()
+        })
     };
     stale_receipt_of(
         &receipt,

@@ -11,6 +11,7 @@
 //! symlink.
 
 use std::{
+    collections::HashMap,
     ffi::{CStr, CString},
     fs::{DirBuilder, OpenOptions},
     io::Write,
@@ -215,14 +216,37 @@ fn names_in(dir: BorrowedFd<'_>) -> io::Result<Vec<CString>> {
     Ok(names)
 }
 
-/// The bytes of the run directory's file at `path`, opened without
-/// following a symlink and only when it is a regular file of at most
-/// [`RUN_FILE_LIMIT`] bytes (ADR-t2179-1 decision 9); `Ok(None)` when
-/// nothing is there, `Err(why)` otherwise.
-fn read_run_file(path: &Path) -> std::result::Result<Option<Vec<u8>>, String> {
-    let name = path
-        .file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+/// What tells one version of a run directory's file from another without
+/// reading it: its inode and size and the times its content and its inode
+/// last changed. The container's executor renames each file into place
+/// (a new inode), and a write in place moves the times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Stamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl Stamp {
+    fn of(meta: &fs::Metadata) -> Self {
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+            mtime: (meta.mtime(), meta.mtime_nsec()),
+            ctime: (meta.ctime(), meta.ctime_nsec()),
+        }
+    }
+}
+
+/// The run directory's file at `path`, opened without following a symlink
+/// and only when it is a regular file of at most [`RUN_FILE_LIMIT`] bytes
+/// (ADR-t2179-1 decision 9), with the [`Stamp`] of what was opened;
+/// `Ok(None)` when nothing is there, `Err(why)` otherwise.
+fn open_run_file(path: &Path) -> std::result::Result<Option<(fs::File, Stamp)>, String> {
+    let name = run_file_name(path);
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -246,11 +270,140 @@ fn read_run_file(path: &Path) -> std::result::Result<Option<Vec<u8>>, String> {
             "{name} of the run is larger than {RUN_FILE_LIMIT} bytes"
         ));
     }
+    Ok(Some((file, Stamp::of(&meta))))
+}
+
+fn run_file_name(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+}
+
+/// The bytes of `file`, opened by [`open_run_file`] at `path`, up to
+/// [`RUN_FILE_LIMIT`].
+fn read_opened(path: &Path, file: fs::File) -> std::result::Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     file.take(RUN_FILE_LIMIT + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("{name} of the run cannot be read: {error}"))?;
-    Ok(Some(bytes))
+        .map_err(|error| format!("{} of the run cannot be read: {error}", run_file_name(path)))?;
+    Ok(bytes)
+}
+
+/// The bytes of the run directory's file at `path`, opened as
+/// [`open_run_file`] opens it; `Ok(None)` when nothing is there, `Err(why)`
+/// otherwise.
+fn read_run_file(path: &Path) -> std::result::Result<Option<Vec<u8>>, String> {
+    match open_run_file(path)? {
+        Some((file, _)) => read_opened(path, file).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// What [`FactsCache`] keys a run's facts by: the run's base commit and the
+/// [`Stamp`] of its state file and of its bundle (`None` while it has none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FactsKey {
+    base: CommitSha,
+    state: Stamp,
+    bundle: Option<Stamp>,
+}
+
+/// The facts last read of each container run, by its run branch: while its
+/// state file and bundle are the very files read then ([`FactsKey`]), the
+/// facts are those again, and neither the bundle is copied and read nor the
+/// guard made again, while the control side's run branch is still at their
+/// head. Only facts that were read whole are kept; the run branch's are
+/// forgotten as its clone is made and as it is removed.
+#[derive(Default)]
+pub(super) struct FactsCache {
+    entries: Mutex<HashMap<String, (FactsKey, CloneFacts)>>,
+}
+
+impl FactsCache {
+    fn get(&self, branch: &str, key: &FactsKey) -> Option<CloneFacts> {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries
+            .get(branch)
+            .filter(|(kept, _)| kept == key)
+            .map(|(_, facts)| facts.clone())
+    }
+
+    fn put(&self, branch: &str, key: FactsKey, facts: CloneFacts) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.insert(branch.to_owned(), (key, facts));
+    }
+
+    fn forget(&self, branch: &str) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.remove(branch);
+    }
+
+    /// The facts of `branch` kept under `key`, with `true`, while the
+    /// control side's run branch is still at their head (`current`, read
+    /// only then): another writer (a clone made again) moved it otherwise.
+    /// Else what `read` reads (the copy of the bundle, its heads and import,
+    /// and the guard made for them), with `false`, kept under `key` when
+    /// read whole: `read` runs only then.
+    fn reused_or_read(
+        &self,
+        branch: &str,
+        key: Option<FactsKey>,
+        current: impl FnOnce() -> Result<Option<CommitSha>>,
+        read: impl FnOnce() -> Result<std::result::Result<CloneFacts, String>>,
+    ) -> Result<std::result::Result<(CloneFacts, bool), String>> {
+        if let Some(facts) = key.as_ref().and_then(|key| self.get(branch, key))
+            && current()?.as_ref() == Some(&facts.head)
+        {
+            return Ok(Ok((facts, true)));
+        }
+        let facts = match read()? {
+            Ok(facts) => facts,
+            Err(why) => return Ok(Err(why)),
+        };
+        if let Some(key) = key {
+            self.put(branch, key, facts.clone());
+        }
+        Ok(Ok((facts, false)))
+    }
+}
+
+/// The state file and the bundle of a run directory, opened by
+/// [`open_run_file`] and not read yet ([`open_facts`]).
+struct OpenedFacts {
+    state_path: PathBuf,
+    state: (fs::File, Stamp),
+    bundle_path: PathBuf,
+    bundle: std::result::Result<Option<(fs::File, Stamp)>, String>,
+}
+
+impl OpenedFacts {
+    /// What the facts read from these files are kept by, for a run on
+    /// `base`; `None` for a bundle that cannot be opened, whose facts are
+    /// not kept.
+    fn key(&self, base: &CommitSha) -> Option<FactsKey> {
+        let bundle = self.bundle.as_ref().ok()?;
+        Some(FactsKey {
+            base: base.clone(),
+            state: self.state.1,
+            bundle: bundle.as_ref().map(|(_, stamp)| *stamp),
+        })
+    }
+}
+
+/// The state file and the bundle of `run_dir`, opened; `Err(why)` when the
+/// state file is missing or cannot be opened.
+fn open_facts(run_dir: &Path) -> std::result::Result<OpenedFacts, String> {
+    let state_path = run_dir.join(RUN_STATE_FILE);
+    let state = open_run_file(&state_path)?.ok_or_else(|| {
+        format!("the run's state file ({RUN_STATE_FILE}) is missing from its directory")
+    })?;
+    let bundle_path = run_dir.join(RUN_BUNDLE_FILE);
+    let bundle = open_run_file(&bundle_path);
+    Ok(OpenedFacts {
+        state_path,
+        state,
+        bundle_path,
+        bundle,
+    })
 }
 
 /// Write `bytes` as the run directory's file at `path`: made new beside it
@@ -440,6 +593,9 @@ impl GitRepository {
                 run.id()
             );
             remove_entry(clone)?;
+        }
+        if let Some(branch) = run.branch() {
+            self.facts.forget(branch);
         }
         let made = guarded.fill_clone(run, clone, carried);
         if made.is_err()
@@ -638,29 +794,61 @@ impl GitRepository {
 
     /// See [`Repository::clone_facts`].
     pub fn clone_facts(&self, run: &TaskRun) -> Result<std::result::Result<CloneFacts, String>> {
+        Ok(self.clone_facts_reused(run)?.map(|(facts, _)| facts))
+    }
+
+    /// [`Self::clone_facts`], with whether the facts are the last read's,
+    /// used again since neither the state file nor the bundle changed
+    /// ([`FactsCache`]).
+    pub fn clone_facts_reused(
+        &self,
+        run: &TaskRun,
+    ) -> Result<std::result::Result<(CloneFacts, bool), String>> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let branch = run.branch().context("missing branch")?;
-        let state = match read_run_file(&run_dir.join(RUN_STATE_FILE)) {
-            Ok(Some(bytes)) => match RunState::parse(&String::from_utf8_lossy(&bytes)) {
-                Ok(state) => state,
-                Err(why) => return Ok(Err(why)),
-            },
-            Ok(None) => {
-                return Ok(Err(format!(
-                    "the run's state file ({RUN_STATE_FILE}) is missing from its directory"
-                )));
-            }
+        let opened = match open_facts(run_dir) {
+            Ok(opened) => opened,
+            Err(why) => return Ok(Err(why)),
+        };
+        let reference = format!("refs/heads/{branch}");
+        self.facts.reused_or_read(
+            branch,
+            opened.key(run.base_commit()),
+            || self.ref_exists(&reference),
+            || self.read_facts(run, branch, &reference, opened),
+        )
+    }
+
+    /// The facts of `run` read whole from its `opened` files: the bundle
+    /// copied out of the worker's reach, its one run branch checked and
+    /// imported into the control side's `reference` with the guarded git.
+    fn read_facts(
+        &self,
+        run: &TaskRun,
+        branch: &str,
+        reference: &str,
+        opened: OpenedFacts,
+    ) -> Result<std::result::Result<CloneFacts, String>> {
+        let OpenedFacts {
+            state_path,
+            state: (state_file, _),
+            bundle_path,
+            bundle,
+        } = opened;
+        let state = match read_opened(&state_path, state_file)
+            .and_then(|bytes| RunState::parse(&String::from_utf8_lossy(&bytes)))
+        {
+            Ok(state) => state,
             Err(why) => return Ok(Err(why)),
         };
         let guarded = self.guarded_repository()?;
-        let reference = format!("refs/heads/{branch}");
-        match read_run_file(&run_dir.join(RUN_BUNDLE_FILE)) {
+        match bundle {
             // No bundle is a run branch with no commit of its own, which the
             // state must say too.
             Ok(None) if state.head() == *run.base_commit() => {
                 output(guarded.git_root().args([
                     "update-ref",
-                    &reference,
+                    reference,
                     run.base_commit().as_str(),
                 ]))?;
             }
@@ -671,7 +859,11 @@ impl GitRepository {
                 )));
             }
             Err(why) => return Ok(Err(why)),
-            Ok(Some(bytes)) => {
+            Ok(Some((file, _))) => {
+                let bytes = match read_opened(&bundle_path, file) {
+                    Ok(bytes) => bytes,
+                    Err(why) => return Ok(Err(why)),
+                };
                 let scratch = Scratch::new(&bytes)?;
                 let (status, heads, stderr) = capture(
                     guarded
@@ -690,7 +882,7 @@ impl GitRepository {
                     Ok(head) => head,
                     Err(why) => return Ok(Err(why)),
                 };
-                if guarded.ref_exists(&reference)?.as_ref() != Some(&head) {
+                if guarded.ref_exists(reference)?.as_ref() != Some(&head) {
                     let (status, stdout, stderr) = capture(
                         guarded
                             .git_root()
@@ -717,7 +909,7 @@ impl GitRepository {
                 }
             }
         }
-        match guarded.ref_exists(&reference)? {
+        match guarded.ref_exists(reference)? {
             Some(head) => Ok(Ok(CloneFacts { head, state })),
             None => Ok(Err(format!(
                 "the control side has no run branch {branch} to import into"
@@ -918,6 +1110,7 @@ impl GitRepository {
         let (Some(landing), Some(run_dir)) = (landing_of(clone), run_dir_of(clone)) else {
             bail!("{} is no run's clone", clone.display());
         };
+        self.facts.forget(branch);
         let guarded = self.guarded_repository();
         self.remove_landing_at(guarded.as_ref().ok(), &landing)?;
         remove_entry(clone)?;
@@ -994,6 +1187,126 @@ mod tests {
         std::os::unix::fs::symlink(&kept, &link).unwrap();
         remove_entry(&link).unwrap();
         assert!(kept.join("a").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The facts of a run are used again only while its base, its state
+    /// file and its bundle are the very ones read: another inode, size or
+    /// time, a bundle that came or went, or another base reads them again,
+    /// and a removed run branch's facts are gone.
+    #[test]
+    fn a_runs_facts_are_used_again_only_while_its_files_are_the_ones_read() {
+        let stamp = |ino, len, mtime| Stamp {
+            dev: 1,
+            ino,
+            len,
+            mtime: (mtime, 0),
+            ctime: (mtime, 0),
+        };
+        let commit = |c: char| CommitSha::parse(c.to_string().repeat(40), "head").unwrap();
+        let key = |base, state, bundle| FactsKey {
+            base: commit(base),
+            state,
+            bundle,
+        };
+        let facts = CloneFacts {
+            head: commit('b'),
+            state: RunState::parse(&format!(r#"{{"branch":null,"head":"{}"}}"#, "b".repeat(40)))
+                .unwrap(),
+        };
+        let cache = FactsCache::default();
+        let read = key('a', stamp(1, 10, 100), Some(stamp(2, 20, 100)));
+        assert_eq!(cache.get("dagq/r1", &read), None);
+        cache.put("dagq/r1", read.clone(), facts.clone());
+        assert_eq!(cache.get("dagq/r1", &read), Some(facts.clone()));
+        assert_eq!(cache.get("dagq/r2", &read), None);
+        for changed in [
+            key('a', stamp(3, 10, 100), Some(stamp(2, 20, 100))),
+            key('a', stamp(1, 11, 100), Some(stamp(2, 20, 100))),
+            key('a', stamp(1, 10, 101), Some(stamp(2, 20, 100))),
+            key('a', stamp(1, 10, 100), Some(stamp(4, 20, 100))),
+            key('a', stamp(1, 10, 100), Some(stamp(2, 21, 100))),
+            key('a', stamp(1, 10, 100), Some(stamp(2, 20, 101))),
+            key('a', stamp(1, 10, 100), None),
+            key('c', stamp(1, 10, 100), Some(stamp(2, 20, 100))),
+        ] {
+            assert_eq!(cache.get("dagq/r1", &changed), None, "{changed:?}");
+        }
+        cache.forget("dagq/r1");
+        assert_eq!(cache.get("dagq/r1", &read), None);
+    }
+
+    /// The path [`GitRepository::clone_facts_reused`] takes: the files of a
+    /// run directory opened ([`open_facts`]) and the read of the bundle
+    /// (here a fake that counts in place of the copy, `list-heads` and the
+    /// guard made again) run again only when the bundle or the state file
+    /// was replaced or written to, the run branch moved, or the last read
+    /// did not read them whole.
+    #[test]
+    fn the_bundle_is_read_again_only_when_a_runs_files_or_branch_changed() {
+        let dir = std::env::temp_dir().join(format!("dagq-run-facts-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let commit = |c: char| CommitSha::parse(c.to_string().repeat(40), "head").unwrap();
+        let state_text = format!(r#"{{"branch":null,"head":"{}"}}"#, "b".repeat(40));
+        fs::write(dir.join(RUN_STATE_FILE), &state_text).unwrap();
+        fs::write(dir.join(RUN_BUNDLE_FILE), b"bundle").unwrap();
+        let facts = CloneFacts {
+            head: commit('b'),
+            state: RunState::parse(&state_text).unwrap(),
+        };
+        let cache = FactsCache::default();
+        let reads = std::cell::Cell::new(0);
+        let branch_at = std::cell::RefCell::new(Some(commit('b')));
+        let read_whole = std::cell::Cell::new(true);
+        let poll = || {
+            let opened = open_facts(&dir).unwrap();
+            cache
+                .reused_or_read(
+                    "dagq/r1",
+                    opened.key(&commit('a')),
+                    || Ok(branch_at.borrow().clone()),
+                    || {
+                        reads.set(reads.get() + 1);
+                        Ok(if read_whole.get() {
+                            Ok(facts.clone())
+                        } else {
+                            Err("the run bundle cannot be imported".to_owned())
+                        })
+                    },
+                )
+                .unwrap()
+                .map(|(facts, reused)| {
+                    assert_eq!(facts.head, commit('b'));
+                    reused
+                })
+        };
+        assert_eq!(poll(), Ok(false));
+        assert_eq!((poll(), poll(), reads.get()), (Ok(true), Ok(true), 1));
+        // A bundle renamed into place, as the executor writes it.
+        let tmp = dir.join("bundle.tmp");
+        fs::write(&tmp, b"bundle").unwrap();
+        fs::rename(&tmp, dir.join(RUN_BUNDLE_FILE)).unwrap();
+        assert_eq!((poll(), poll(), reads.get()), (Ok(false), Ok(true), 2));
+        // A bundle and a state file written in place to another size.
+        fs::write(dir.join(RUN_BUNDLE_FILE), b"a longer bundle").unwrap();
+        assert_eq!((poll(), poll(), reads.get()), (Ok(false), Ok(true), 3));
+        fs::write(dir.join(RUN_STATE_FILE), format!("{state_text}\n")).unwrap();
+        assert_eq!((poll(), poll(), reads.get()), (Ok(false), Ok(true), 4));
+        // The control side's run branch moved by another writer.
+        *branch_at.borrow_mut() = Some(commit('a'));
+        assert_eq!((poll(), reads.get()), (Ok(false), 5));
+        *branch_at.borrow_mut() = Some(commit('b'));
+        assert_eq!((poll(), reads.get()), (Ok(true), 5));
+        // A read that failed is not kept: the next poll reads again.
+        fs::write(dir.join(RUN_BUNDLE_FILE), b"cut").unwrap();
+        read_whole.set(false);
+        assert!(poll().is_err());
+        read_whole.set(true);
+        assert_eq!((poll(), poll(), reads.get()), (Ok(false), Ok(true), 7));
+        // A bundle that cannot be opened is read every time, never kept.
+        fs::remove_file(dir.join(RUN_BUNDLE_FILE)).unwrap();
+        fs::create_dir(dir.join(RUN_BUNDLE_FILE)).unwrap();
+        assert_eq!((poll(), poll(), reads.get()), (Ok(false), Ok(false), 9));
         fs::remove_dir_all(&dir).unwrap();
     }
 

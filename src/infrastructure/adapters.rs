@@ -1487,6 +1487,9 @@ pub struct GitRepository {
     /// container run's commits ([`Repository::guarded`], ADR-t2179-1
     /// decision 8); `None` runs git as the repository is configured.
     guard: Option<std::sync::Arc<run_clones::Guard>>,
+    /// The facts last read of each container run, shared by every copy of
+    /// this repository ([`run_clones::FactsCache`]).
+    facts: std::sync::Arc<run_clones::FactsCache>,
 }
 
 impl GitRepository {
@@ -1510,6 +1513,7 @@ impl GitRepository {
             checkout,
             git,
             guard: None,
+            facts: Default::default(),
         })
     }
 
@@ -4907,6 +4911,7 @@ mod tests {
             checkout: Ok("/repo".into()),
             git: "/unused/git".into(),
             guard: None,
+            facts: Default::default(),
         };
         let primary = Path::new("/primary checkout");
         let worktree = Path::new("/runs/run/worktree");
