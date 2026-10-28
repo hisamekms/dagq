@@ -802,21 +802,27 @@ fn a_landing_whose_command_died_is_released_by_the_next_pass() {
     // The service lives on: the landing is released for its command's
     // death, not the service's.
     let _service = Served::start(&db);
-    let pid = crate::runtime_support::dead_pid();
-    let step = |op: &str, args: Value| {
-        let response = integrate_step(&db, 1, pid, op, args);
-        assert_eq!(response["ok"], true, "{op}: {response}");
-    };
-    // The steps of `integrate` the command sent before it died: its
-    // approval and its slot.
-    step(
-        "approve_integration",
-        json!([run.id(), {"status": "awaiting_integration", "pid": pid, "push": false}]),
+    // The steps of `integrate` the command sent from its own process
+    // before it died: its approval and its slot.
+    let (answers, pid) = integrate_steps_from_child(
+        &db,
+        1,
+        None,
+        &[
+            (
+                "approve_integration",
+                json!([run.id(), {"status": "awaiting_integration", "pid": OWN_PID, "push": false}]),
+            ),
+            (
+                "begin_landing",
+                json!([run.id(), "landing-of-a-dead-command", main_of(&repo), false]),
+            ),
+        ],
     );
-    step(
-        "begin_landing",
-        json!([run.id(), "landing-of-a-dead-command", main_of(&repo), false]),
-    );
+    for answer in &answers {
+        assert_eq!(answer["ok"], true, "{answers:?}");
+    }
+    assert!(!crate::runtime_support::pid_alive(pid));
     assert_eq!(landing_pids(&db, &run), (json!(pid), Some(pid), json!(pid)));
     // Its heartbeat stopped with it.
     rusqlite::Connection::open(&db)
@@ -838,6 +844,183 @@ fn a_landing_whose_command_died_is_released_by_the_next_pass() {
     assert_eq!(released.len(), 1, "{events:?}");
     assert_eq!(released[0]["detail"]["then"], "land", "{released:?}");
     assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Integrated);
+}
+
+/// A landing is begun and ended only by the command whose process sends
+/// its steps: another command of the same user, in another process,
+/// naming the first's process is refused both, recorded as
+/// `authorization_denied`, and the first's slot, lease and integrator
+/// token stay.
+#[test]
+fn a_command_naming_another_commands_process_neither_begins_nor_ends_its_landing() {
+    let (_fixture, repo, db, run) = awaiting();
+    let _service = Served::start(&db);
+    let pid = std::process::id();
+    let main = main_of(&repo);
+    let landings = || {
+        service::principals(db.parent().unwrap())
+            .unwrap()
+            .iter()
+            .filter(|principal| principal.landing_run().as_ref() == Some(run.id()))
+            .count()
+    };
+    let leased = || -> Option<u32> {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT pid FROM run_leases WHERE run_id=?1",
+                [run.id().as_str()],
+                |row| row.get(0),
+            )
+            .ok()
+    };
+    let denials = || {
+        SqliteQueue::open(&db)
+            .unwrap()
+            .all_events()
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind.as_str() == "authorization_denied")
+            .map(|event| event.payload)
+            .collect::<Vec<_>>()
+    };
+    let refused = |op: &str, args: Value| {
+        let before = denials().len();
+        let (answers, _) = integrate_steps_from_child(&db, 1, Some(pid), &[(op, args)]);
+        let answer = &answers[0];
+        assert_eq!(answer["ok"], false, "{op}: {answer}");
+        assert_eq!(
+            answer["error"]["code"], "authorization_denied",
+            "{op}: {answer}"
+        );
+        let denied = denials();
+        assert_eq!(denied.len() - before, 1, "{op}: {denied:?}");
+        let last = &denied[denied.len() - 1];
+        assert_eq!(last["role"], "user", "{last}");
+        assert!(
+            last["why"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("process {pid}")),
+            "{last}"
+        );
+    };
+    let ok = |op: &str, args: Value| {
+        let answer = integrate_step(&db, 1, pid, op, args);
+        assert_eq!(answer["ok"], true, "{op}: {answer}");
+        answer["result"].clone()
+    };
+    ok(
+        "approve_integration",
+        json!([run.id(), {"status": "awaiting_integration", "pid": pid, "push": false}]),
+    );
+    // The other command takes no slot under this one's process.
+    refused(
+        "begin_landing",
+        json!([run.id(), "landing-of-another-command", main, false]),
+    );
+    assert_eq!((leased(), landings()), (None, 0));
+
+    // This command's own landing, deferred to a session: the run left
+    // `integrating` with the landing's token, which the other command's
+    // end naming this process does not revoke.
+    let begun = ok(
+        "begin_landing",
+        json!([run.id(), "landing-of-this-command", main, false]),
+    );
+    assert_eq!(leased(), Some(pid));
+    let token = service::read_token(Path::new(begun["integrator"].as_str().unwrap())).unwrap();
+    let deferred = service::call(
+        &service::socket_path(db.parent().unwrap()),
+        &dagq::domain::queue_service::ServiceRequest {
+            api_version: dagq::domain::queue_service::API_VERSION,
+            token: Some(token),
+            env_role: None,
+            queue: None,
+            binding: None,
+            use_case: UseCase::Supervisor,
+            params: json!({"op": "defer_integration", "args": [run.id(), "landing-of-this-command", "a test", {}]}),
+        },
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(deferred.ok, "{deferred:?}");
+    refused("end_landing", json!([run.id()]));
+    assert_eq!(landings(), 1);
+    ok("end_landing", json!([run.id()]));
+    assert_eq!(landings(), 0);
+}
+
+/// Where [`integrate_step_child_process`] reads the steps to send: the
+/// queue's DB, the task, the process its command names (its own when
+/// empty) and the steps, one a line.
+const INTEGRATE_STEPS_FOR: &str = "DAGQ_TEST_INTEGRATE_STEPS_FOR";
+
+/// What a step's arguments sent by [`integrate_steps_from_child`] name
+/// for the pid of the process that sends it.
+const OWN_PID: &str = "own-pid";
+
+/// The steps `steps` (each an operation and its arguments, in which
+/// [`OWN_PID`] stands for the sending process's pid) of the user's `dagq
+/// integrate <task>`, sent in order from another process of this test
+/// binary ([`integrate_step_child_process`]), which names `pid` as its
+/// command's process (its own when `None`) and has exited when this
+/// returns: their answers and that process's pid.
+fn integrate_steps_from_child(
+    db: &Path,
+    task: i64,
+    pid: Option<u32>,
+    steps: &[(&str, Value)],
+) -> (Vec<Value>, u32) {
+    let named = pid.map(|pid| pid.to_string()).unwrap_or_default();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "host_control::integrate_step_child_process",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(
+            INTEGRATE_STEPS_FOR,
+            format!("{}\n{task}\n{named}\n{}", db.display(), json!(steps)),
+        )
+        .bounded_output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find_map(|line| line.split_once("integrate-steps: ").map(|(_, sent)| sent))
+        .unwrap_or_else(|| panic!("{stdout}{}", String::from_utf8_lossy(&output.stderr)));
+    let (child, answers) = line.split_once(' ').unwrap();
+    (
+        serde_json::from_str(answers).unwrap(),
+        child.parse().unwrap(),
+    )
+}
+
+/// Not a test of its own: the other process of
+/// [`integrate_steps_from_child`], which sends the steps it is asked to
+/// and prints its own pid and their answers, and does nothing otherwise.
+#[test]
+fn integrate_step_child_process() {
+    let Ok(asked) = std::env::var(INTEGRATE_STEPS_FOR) else {
+        return;
+    };
+    let [db, task, named, steps] =
+        <[&str; 4]>::try_from(asked.lines().collect::<Vec<_>>()).unwrap();
+    let own = std::process::id();
+    let pid = if named.is_empty() {
+        own
+    } else {
+        named.parse().unwrap()
+    };
+    let steps = steps.replace(&json!(OWN_PID).to_string(), &own.to_string());
+    let steps: Vec<(String, Value)> = serde_json::from_str(&steps).unwrap();
+    let answers: Vec<Value> = steps
+        .into_iter()
+        .map(|(op, args)| integrate_step(Path::new(db), task.parse().unwrap(), pid, &op, args))
+        .collect();
+    println!("integrate-steps: {own} {}", json!(answers));
 }
 
 /// The step `op` with `args` of the user's `dagq integrate <task>` of

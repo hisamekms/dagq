@@ -15,7 +15,12 @@
 //! slot under: a new one, which no run and no supervisor holds, with which
 //! the landing's integrator token is issued in the same transaction
 //! (ADR-t3102-1 decision 2), the landing then going on with that token
-//! ([`super::answer`]'s integrator) as a supervisor's landing does. The
+//! ([`super::answer`]'s integrator) as a supervisor's landing does. A
+//! landing is begun and ended only by the process the command's steps
+//! name as its own, as the connection confirms it: a step naming another
+//! command's process, or one whose connection tells none, takes no slot,
+//! is issued no token and revokes none, and is refused as
+//! `authorization_denied`, recorded. The
 //! events are the principal's own, the landing's the integrator's at its
 //! request.
 
@@ -226,6 +231,9 @@ pub fn answer(
                 )
                 .into());
             }
+            // Only the command's own process, as the connection confirms
+            // it, takes a slot under its pid (a refusal recorded).
+            let pid = landing_process(&mut *queue, &actor, &control, process, &run)?;
             let store = queue.supervisor_store();
             of_named_task(store, &control, &run)?;
             // A lease the caller makes for its landing: none another holds.
@@ -237,27 +245,28 @@ pub fn answer(
                 return Err(anyhow::Error::new(NotOwnLease));
             }
             store.restore_request(None);
-            let landing = Principal::integrator(&run, &token, control.pid);
+            let landing = Principal::integrator(&run, &token, pid);
             // The lease and `integration_started` name the command's
             // process, which lands: one that dies leaves a landing the
             // supervisor releases.
-            let issuer = crate::domain::queue_service::TokenIssuer::of(
-                principal,
-                backend.process_of(control.pid),
-            );
+            let issuer =
+                crate::domain::queue_service::TokenIssuer::of(principal, backend.process_of(pid));
             return super::begin_landing(
                 backend,
                 &mut *queue,
                 &landing,
                 &main,
                 false,
-                super::LandingBy::Command { pid: control.pid },
+                super::LandingBy::Command { pid },
                 &issuer,
             );
         }
         END_LANDING => {
             let (run,): (RunId,) = read(op, args)?;
-            let key = landing_key(&run, control.pid);
+            // Only the landing the command's own process began: one naming
+            // another command's process ends none of its landings.
+            let pid = landing_process(&mut *queue, &actor, &control, process, &run)?;
+            let key = landing_key(&run, pid);
             let store = queue.supervisor_store();
             of_named_task(store, &control, &run)?;
             // Only the token of a landing that left `integrating`, and never
@@ -452,6 +461,48 @@ fn own_target(
     }
 }
 
+/// Why a landing's step that names `named` as its command's process is
+/// not of that process as the connection tells it (`connection`, `None`
+/// when it cannot be read; [`ControlCall::process`]), if it is not: the
+/// slot, its lease, the integrator's token and that token's end are only
+/// of the process that lands (ADR-t3102-1 decision 2).
+fn landing_refusal(named: &ControlCall, connection: Option<u32>) -> Option<String> {
+    match (named.process(connection), connection) {
+        (Some(_), _) => None,
+        (None, Some(connection)) => Some(format!(
+            "the landing's step names process {} but comes from process {connection}",
+            named.pid
+        )),
+        (None, None) => Some(format!(
+            "the landing's step names process {} and its connection tells none",
+            named.pid
+        )),
+    }
+}
+
+/// The pid of the process `control`'s landing of `run` is of: its own as
+/// the connection `connection` confirms it, or a refusal recorded as
+/// `authorization_denied` of `actor` ([`landing_refusal`]).
+fn landing_process(
+    queue: &mut dyn super::super::queue_service::ServiceQueue,
+    actor: &crate::domain::ActorContext,
+    control: &ControlCall,
+    connection: Option<u32>,
+    run: &RunId,
+) -> Result<u32> {
+    match landing_refusal(control, connection) {
+        None => Ok(control.pid),
+        Some(why) => Err(super::super::queue_service::refuse_recorded(
+            queue,
+            actor,
+            Capability::TokenIssue,
+            &crate::domain::Resource::Principal(crate::domain::ActorRole::Integrator),
+            crate::domain::authorization::DenyReason::Resource,
+            &format!("run {run}: {why}"),
+        )),
+    }
+}
+
 /// The key of the token of the integrator of `run`'s landing a command of
 /// process `pid` began ([`Principal::credential_key`]).
 fn landing_key(run: &RunId, pid: u32) -> String {
@@ -599,6 +650,16 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_landing_is_only_of_the_process_the_connection_confirms() {
+        let named = call(ControlCommand::Integrate);
+        assert_eq!(landing_refusal(&named, Some(7)), None);
+        // Another command's pid named from this connection, and a
+        // connection that tells no process, are refused.
+        assert!(landing_refusal(&named, Some(8)).is_some_and(|why| why.contains("process 8")));
+        assert!(landing_refusal(&named, None).is_some());
     }
 
     #[test]

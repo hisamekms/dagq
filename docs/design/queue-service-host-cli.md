@@ -102,6 +102,7 @@ stepの形はsupervisorの操作と同じ名前と引数（`ControlParams`）で
 - 着地: 呼び出し元は自分で作ったleaseでslotを取り、serviceはrunがコマンドの名指すtaskのものであること、そのleaseを持つrunとsupervisorが無いことを確かめ、slotと着地のintegratorのtoken（`integrator:<pid>`、pidはコマンドのプロセス）を同じtransactionで発行する（ADR-t3102-1決定2）。
   着地の残りとleaseのheartbeatはそのtokenでintegratorとして送り、eventはintegratorのもので`requested_by`が呼び出し元。
   tokenは着地が`integrating`を出たときに呼び出し元が失効させ、serviceは別のtaskのrun、続いている着地、supervisorの着地のものは失効させない
+  slotとtokenの発行と失効は、stepの名乗るコマンドのプロセスが接続のpeerと同じときだけ受け、別のプロセスを名乗るか接続がプロセスを伝えないstepは、何も作らず失効させずに`authorization_denied`として断って記録する
 - telemetry: agentと検証のsessionの登録、runを持たない対象のtokenの発行と失効（leaseなし）、対象の事実もstepで送る。
   対象はコマンド自身のものだけ（着地するrun、呼び出し元が始めを記録した観測とスループットの見直し。`control::own_target`）
   agentのjobのtokenは呼び出し元のprincipalの依頼でqueue serviceの`issue_token`が発行する（[Queue service](queue-service.md#principalとtoken)）

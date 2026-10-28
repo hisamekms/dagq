@@ -66,7 +66,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
   tokenはその着地の`integration_started`を名指し、serviceはqueueがそのeventを持つときだけintegratorの書き込みを受けるので、commitに至らずに残ったtokenは何も書けず、片付けで失効する（着地が`integrating`を出た後の記録は受ける）。
   mainを進めることとpushは、記録のユースケースの間でIntegratorが行う。
   その後のintegratorの記録はserviceに届くまで着地のthreadで送り直し、queueは同じ記録を1回だけ取る（ADR-t3102-3決定5、[`supervise`](supervise.md#queue-serviceの経路)）。
-  人とinboxの`integrate`も同じ形で、slotは自分で作ったleaseで取り、そのintegratorは`integrator:<pid>`（コマンドのプロセス）で、依頼者が失効させる（[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
+  人とinboxの`integrate`も同じ形で、slotは自分で作ったleaseで取り、そのintegratorは`integrator:<pid>`（接続で確かめたコマンドのプロセス）で、依頼者がそのプロセスから失効させる（[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
 - validationの`check_receipt`も同じfileにあり、着地のreceiptの検査と判定を共有する（[Validation](validation.md#validation)）。
 - 結果の意味は`IntegrationOutcome`のdoc commentが持つ。
 - e2eは`application::supervise::execution::e2e`、recheckは`application::supervise::execution::recheck`と`domain::recheck`、landing branchは`domain::landing_branch`が持つ。
