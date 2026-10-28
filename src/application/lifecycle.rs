@@ -2909,10 +2909,10 @@ impl LaunchAgentSpec {
     /// moves between `Background` and `Interactive` on activity over XPC
     /// connections, which the supervisor has none of, so it would stay
     /// limited; `Interactive` runs with the limits of an app, none.
-    /// docs/plans/it-slowdown-2026-10-08.md measured the landing's IT under
-    /// the agent without it at about 1.6 to 2.0 times the seconds per test
-    /// of the same load in a person's terminal (children at priority 20
-    /// beside 31).
+    /// The measurement did not show the effect: the section "ProcessType
+    /// Interactive の後" of docs/plans/it-slowdown-2026-10-08.md found the
+    /// effect of priority 31 against 20 on the landing's IT to be x0.99,
+    /// none.
     pub fn xml(&self) -> String {
         let mut xml = String::from(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
