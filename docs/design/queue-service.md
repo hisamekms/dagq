@@ -48,7 +48,7 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 
 | ファイル | 中身 |
 | --- | --- |
-| `queue.sock` | unix socket。pathが長すぎるqueueで`/tmp`の下に置くときは、そのdirがlinkでないことを確かめる。どの呼び出し元もqueueのディレクトリから同じpathを求める（`socket_path`） |
+| `queue.sock` | unix socket。pathが長すぎるqueueで`/tmp`の下に置くときは、そのdirがlinkでないことを確かめる。どの呼び出し元もqueueのディレクトリの実pathから同じpathを求める（`socket_path`） |
 | `lock` | serviceが生きている間`flock`の排他で持ち、2つ目のserviceは取れずに止まる。見る側（status・supervisor）は共有で試し、取れれば「居ない」と判定する。止めるときにsignalを送るのは、`hello`が答えたpidか、記録のpidが今このqueueの`service serve`を動かしている（`ps`で確かめる）ときだけ |
 | `state.json` | 動いているserviceの記録。止まるときに消す |
 | `service.log` | `up`・supervisor・`service start`が起動したserviceのstdoutとstderr |
@@ -234,7 +234,7 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
 - workerとjobのpromptとskillのコマンド（`dagq ask`・`dagq show`など）は変えない。
   observerとスループットの見直しのpromptは、`dagq --db <db>`ではなく`dagq`を名指す（promptはagentの引数なので、DBのpathを含めない）
 - session wrapper（`session`・`planner-session`）は継いだ環境のactorでなくwrapperのtokenで送り、DBを開かず（containerのrunのturnの準備を除く）、届かなければそのerrorで終わる。
-  plannerのhook（`session-event`）は報告をwrapperに渡し、inboxのhookはinboxとしてDBを開く
+  plannerのhook（`session-event`）は報告をwrapperに渡し、inboxのhookはinboxのtokenで送る
 
 ### Codexのsandboxからの到達（ADR-t1233-5決定4）
 

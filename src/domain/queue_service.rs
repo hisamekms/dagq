@@ -271,6 +271,7 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::Control
         | UseCase::SessionRun
         | UseCase::SessionRecord
+        | UseCase::DenialRecord
         | UseCase::IssueToken
         | UseCase::RevokeToken
         | UseCase::Add
@@ -456,6 +457,11 @@ string_enum!(UseCase {
     // wrapper's principal (and the inbox's, on the queue) holds
     // `session.record`; no command line goes to it.
     SessionRecord => "session_record",
+    // The record of a refusal the host's `dagq` made itself before it ran
+    // a command the service does not answer, as `authorization_denied` of
+    // the caller's principal: only of its own role, never another actor's.
+    // The command line sends it on its own refusal; no command goes to it.
+    DenialRecord => "denial_record",
     // The issue of the token of a principal the caller starts
     // (ADR-t3102-1 decision 2): the user's of a supervisor or of the
     // inbox, a command's of a job. The parent is the caller's principal, which [`super::authorization::starts`]

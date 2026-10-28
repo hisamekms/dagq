@@ -271,8 +271,8 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
   `plan`は権限の判定を通っても誰が打っても何も開かず、inboxへの依頼の案内（`PLAN_REFUSED`）で失敗する
 - `session`・`planner-session`は環境のactorで判定せず、wrapperのprincipalでserviceが判定する（[Queue service](queue-service.md#クライアントモード)）。
   `session-event`はplannerのspanならwrapperに渡してqueueに触れず、runのspanは無く、inboxのspanはinboxとuserだけが記録できる（workerとplannerは`session.record`を持たない）
-- 拒否は`authorization_denied`として、拒まれた呼び出し元をactorにしてqueueに記録する（`src/infrastructure/denials.rs`の`QueueDenials`が、判定の後でだけqueueを開く）。
-  queueが無い・このバイナリが開けない（`init`の前、`migrate`の前）ときは記録できず、拒否は拒否のまま返す。
+- 拒否は`authorization_denied`として、拒まれた呼び出し元のprincipalでserviceが記録する（`ServiceDenials`。CLIはqueueを開かない。[hostのCLI](queue-service-host-cli.md#送る範囲)）。
+  queueが無い・serviceが答えないときは記録できず、拒否は拒否のまま返す。
   errorの形は計画系と同じ
 - sessionへの操作は上の`run` / `planner`のCLIで行う。
   Codexのinboxは同じ趣旨（dagqのCLIを通す）をPreToolUseのhookで持つ（[ADR-t2159-1](../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定5）。
@@ -328,7 +328,7 @@ supervisorの操作（containerの部品とNodeSampleStoreの記録と読みを�
 - 宛ての環境の無いuser・inbox・plannerはserviceが答える読み取り・`watch`・`status`・`report`・`graph --out`をserviceへ送り、serviceがprincipalで認可する（読み取りは上の節、後の2つは`Gate`の`queue.export`）。
   CLIはDBを開かず、届かなくても開かない（[hostのCLI](queue-service-host-cli.md)）。
 - 残り（3つのroleのserviceが答えないものと、ほかのrole）は`check_access`が（default deny）`requests`の全てで`StaticPolicy`に通す。
-  拒んだときだけ`QueueDenials`で`authorization_denied`を呼び出し元をactorに記録する。
+  拒んだときだけ`ServiceDenials`でserviceが呼び出し元のprincipalの`authorization_denied`に記録する。
   通った読み取りはqueueを読み取り専用で開く（ADR-0073決定5・7・18）。
   ただしsupervisorが登録をenvに渡し起動した`observe`（`--history`・`--input`を除く）・`throughput-review`は、通ればsupervisorのtokenでserviceを通り（判定は上の節）queueを開かない（[CLIでの解釈](supervisor-lifecycle/roles.md#cliでの解釈)）。
 

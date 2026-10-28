@@ -108,18 +108,21 @@ pub fn service_dir(queue_dir: &Path) -> PathBuf {
     queue_dir.join(SERVICE_DIR)
 }
 
-/// `<queue dir>/service/queue.sock`.
 /// `<queue dir>/service/queue.sock`, or, when that path is longer than a
 /// unix socket takes (a queue under a long temporary directory),
 /// `/tmp/dagq-<uid>/<hash of the queue dir>.sock` in a directory of this
-/// user's with mode 0700. Every caller computes the same path from the
-/// queue's directory.
+/// user's with mode 0700. Both are named from the queue directory's real
+/// path (as given when it is not there), so every caller computes the
+/// same path however it names the directory: the service from `--db` as
+/// given, a host client from the DB it resolved, an inbox's hook from its
+/// token's file (a link, or macOS's `/var` and `/tmp`, can put one form
+/// under the length a socket takes and the other over it).
 pub fn socket_path(queue_dir: &Path) -> PathBuf {
-    let socket = service_dir(queue_dir).join(SOCKET_FILE);
+    let real = fs::canonicalize(queue_dir).unwrap_or_else(|_| queue_dir.to_path_buf());
+    let socket = service_dir(&real).join(SOCKET_FILE);
     if socket.as_os_str().len() <= MAX_SOCKET_PATH {
         return socket;
     }
-    let real = fs::canonicalize(queue_dir).unwrap_or_else(|_| queue_dir.to_path_buf());
     let hash = sha256_hex(real.as_os_str().as_encoded_bytes());
     short_socket_dir().join(format!("{}.sock", &hash[..16]))
 }
@@ -1858,6 +1861,37 @@ impl Client {
         }))
     }
 
+    /// The host `dagq` that goes by the token in `file` alone (an inbox's
+    /// hook, ADR-t3102-1 decision 4): the service of the queue whose
+    /// `service/credentials/` holds the file, which knows the token, with
+    /// no queue path or binding to compare, since the token names its
+    /// queue; `None` for a file in no queue's credentials.
+    pub fn of_credential(file: &Path) -> Option<Self> {
+        Some(Self {
+            route: ClientRoute::Socket(socket_path(&Self::credential_queue_dir(file)?)),
+            credential: Some(file.to_path_buf()),
+            env_role: None,
+            next: NEXT_HOST,
+            queue: None,
+            binding: None,
+        })
+    }
+
+    /// The real directory of the queue whose `service/credentials/` holds
+    /// the token's `file` ([`Self::of_credential`]); `None` for a file in
+    /// no queue's credentials.
+    pub fn credential_queue_dir(file: &Path) -> Option<PathBuf> {
+        // The socket is named from the queue's real directory.
+        let credentials = fs::canonicalize(file.parent()?).ok()?;
+        let service = credentials.parent()?;
+        if credentials.file_name()? != CREDENTIALS_DIR
+            || service.file_name()? != crate::domain::queue_service::SERVICE_DIR
+        {
+            return None;
+        }
+        service.parent().map(Path::to_path_buf)
+    }
+
     /// The host `dagq` of an actor of a
     /// [`host_client_role`](crate::domain::queue_service::host_client_role)
     /// on the queue at `db` (ADR-t3102-2 decision 5), run in the repository
@@ -2701,7 +2735,8 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
     let dir = service_dir(&queue_dir);
     private_dir(&dir)?;
     let socket = socket_path(&queue_dir);
-    if !socket.starts_with(&dir) {
+    // The socket is named from the queue's real directory.
+    if !socket.starts_with(fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
         prepare_socket_dir(&socket)?;
     }
     ensure!(
@@ -4656,6 +4691,28 @@ mod supervisor_tests;
 mod tests {
     use super::*;
 
+    /// An inbox's hook finds the service by the token's file alone: that of
+    /// the queue whose credentials hold it, naming no queue to compare; a
+    /// file in no queue's credentials finds none.
+    #[test]
+    fn a_credential_names_the_service_of_its_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue_dir = fs::canonicalize(dir.path()).unwrap();
+        let file = credential_path(&queue_dir, "inbox");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "t").unwrap();
+        let client = Client::of_credential(&file).unwrap();
+        assert!(
+            matches!(&client.route, ClientRoute::Socket(socket) if *socket == socket_path(&queue_dir))
+        );
+        assert_eq!(client.credential.as_deref(), Some(file.as_path()));
+        assert!(client.queue.is_none() && client.binding.is_none() && client.env_role.is_none());
+        let elsewhere = queue_dir.join("token");
+        fs::write(&elsewhere, "t").unwrap();
+        assert!(Client::of_credential(&elsewhere).is_none());
+        assert!(Client::of_credential(&queue_dir.join("missing/credentials/x")).is_none());
+    }
+
     /// A control-side command's step reads the service's answer as the
     /// command line on the DB would have failed: a failure of the queue's
     /// operation as its own message, one the caller tells apart as the
@@ -5420,6 +5477,33 @@ mod tests {
         assert!(socket.starts_with(short_socket_dir()));
         assert_eq!(socket, socket_path(&deep));
         assert_ne!(socket, socket_path(&dir.path().join("e".repeat(120))));
+    }
+
+    /// A queue directory named through a link is given the socket of its
+    /// real path, whichever form is short enough for a socket: the
+    /// service's `--db` and a client's resolved DB or token's file meet on
+    /// one socket.
+    #[test]
+    fn a_queue_named_through_a_link_gets_its_real_directory_s_socket() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let base = fs::canonicalize(dir.path()).unwrap();
+        // The real directory is too deep for its own socket; the link to
+        // it is not.
+        let real = base.join("r".repeat(100));
+        fs::create_dir(&real).unwrap();
+        let link = base.join("l");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(service_dir(&link).join(SOCKET_FILE).as_os_str().len() <= MAX_SOCKET_PATH);
+        let socket = socket_path(&real);
+        assert!(socket.starts_with(short_socket_dir()), "{socket:?}");
+        assert_eq!(socket_path(&link), socket);
+        // And the other way: a short real directory behind a deep link.
+        let short = base.join("s");
+        fs::create_dir(&short).unwrap();
+        let deep = base.join("d".repeat(100));
+        std::os::unix::fs::symlink(&short, &deep).unwrap();
+        assert_eq!(socket_path(&deep), short.join("service/queue.sock"));
+        assert_eq!(socket_path(&deep), socket_path(&short));
     }
 
     /// `up` keeps a service of its build that found nothing pending when

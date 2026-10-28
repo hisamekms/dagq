@@ -674,6 +674,7 @@ impl QueueRead {
             | UseCase::Control
             | UseCase::SessionRun
             | UseCase::SessionRecord
+            | UseCase::DenialRecord
             | UseCase::IssueToken
             | UseCase::RevokeToken
             | UseCase::Add

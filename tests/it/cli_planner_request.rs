@@ -311,10 +311,20 @@ fn only_the_inbox_and_a_person_hand_a_request_and_other_roles_are_recorded() {
         assert_eq!(error["denied"]["capability"], "planner.request", "{env:?}");
         assert_eq!(error["denied"]["reason"], "not granted");
     }
+    // The planner's request reaches the service with its token, which
+    // records the refusal as the planner's; the others' refusals are sent
+    // to it with no token, and recorded as unauthenticated.
     let denied = events(&db, "authorization_denied");
-    assert_eq!(denied.len(), actors.len());
+    assert_eq!(denied.len(), 1);
     assert_eq!(denied[0]["actor"]["role"], "planner");
     assert_eq!(denied[0]["payload"]["capability"], "planner.request");
+    let unauthenticated = events(&db, "queue_service_unauthenticated");
+    assert_eq!(unauthenticated.len(), actors.len() - 1);
+    assert!(
+        unauthenticated
+            .iter()
+            .all(|event| event["payload"]["use_case"] == "denial_record")
+    );
     assert!(events(&db, "planner_request_handed").is_empty());
     assert!(
         !planners_dir(&db).join(&own).join("requests").exists(),

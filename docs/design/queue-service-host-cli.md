@@ -27,8 +27,13 @@ related:
 - 宛ての環境が無い`dagq`のうちuser・inbox・plannerのもの（`host_client_role`）は、serviceが答えるコマンド（`client_request`）と`watch`の各回の見る（`watch_poll`）と制御側のコマンドのstep（`control_call`、下の「制御側のコマンド」）をそのsocketへ送り、DBを開かない。
   serviceが一度も動いていないqueueも同じで、DBが無ければ送る前に`no queue at`で終わる（ADR-t3105-1決定3）。
 - 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、wrapperとhookの経路（決定6の(3)）、制御側のプロセス（`supervise`・`up`・`down`・`install`・`inbox`・`service start`など。(5)）と`migrate`・`doctor`（(6)）。
+  hookのうちinboxの`session-event`は、spanをinboxのtokenで自分で`session_record`に送り、DBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
   CLIの全ての葉は送るものかこの例外のどれかに当たり、どちらでもない葉は無い（unit testが全ての葉を数えて確かめる）。
   1つのコマンドの中で経路を混ぜない。
+- 送らないコマンドでもCLIが自分で拒んだもの（`check_access`とruntimeの操作の判定）は、その拒否だけを`denial_record`で呼び出し元のprincipal（tokenか、socketのpeerのuser）として送り、serviceがそのprincipalの`authorization_denied`に記録する（`infrastructure::denials::ServiceDenials`）。
+  serviceは自分のroleと違うroleの拒否を`authorization_denied`で断り、そのroleが持つcapabilityを`not granted`とする拒否と、resourceの記録の形でないものは記録しない。
+  tokenが無くroleを名乗る呼び出しはserviceが`queue_service_unauthenticated`に残す。
+  短い待ちの内に届かないか、DBが無ければ記録せずに拒否を返し、DBを開かない。
 - repositoryのqueueの束縛は、CLIが解決したrepositoryを要求に載せ（`ServiceRequest::binding`）、serviceが答える前に照らす。
   serviceは読み取り（tokenのrunとtargetの確かめを含む）を読み取り専用の接続で（floorの内側の古いschemaはmemoryの写しで）、`watch_poll`を今のqueueの読み取り専用の接続で答え、policyの断りは書ける別の接続で残す（`ServiceBackend::open_read`・`open_watch`）。
 - 宛てのqueue: socketは解決したDB（linkはその先）のdirのserviceのもので、要求はそのDBの絶対pathを持つ（`ServiceRequest::queue`）。

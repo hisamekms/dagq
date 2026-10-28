@@ -33,6 +33,18 @@ fn failed_past_authorization(env: &[(&str, &str)], db: &Path, args: &[&str]) -> 
     error
 }
 
+/// How many refusals the queue's service recorded as unauthenticated: an
+/// actor the environment names with no token.
+fn unauthenticated_denials(db: &Path) -> usize {
+    common::service::events(db, "queue_service_unauthenticated")
+        .iter()
+        .filter(|event| {
+            event["payload"]["use_case"] == "denial_record"
+                && event["payload"]["reason"] == "missing_token"
+        })
+        .count()
+}
+
 fn denials(db: &Path) -> Vec<Value> {
     ok(
         db,
@@ -103,18 +115,13 @@ fn workers_jobs_and_the_observer_land_recover_and_run_the_service_not_at_all() {
     assert_eq!(error["error"], "reviewer may not change queue state");
     refused += 3;
 
-    // Each refusal is on the queue, as the refused actor, before the
-    // operation did anything: the task is as it was and no supervisor
-    // came up.
-    let recorded = denials(&db);
-    assert_eq!(recorded.len(), refused);
-    assert_eq!(recorded[0]["actor"]["role"], "worker");
-    assert_eq!(recorded[0]["actor"]["id"], "worker:r1");
-    assert_eq!(recorded[0]["payload"]["capability"], "landing.request");
-    assert_eq!(
-        recorded[0]["payload"]["resource"],
-        serde_json::json!({"kind": "task", "id": 1, "status": null})
-    );
+    // Each refusal reached the queue's service before the operation did
+    // anything; the actors named with no token are recorded by the service
+    // as unauthenticated, none as `authorization_denied` (cli_denials has
+    // the refusals of a principal): the task is as it was and no
+    // supervisor came up.
+    assert!(denials(&db).is_empty());
+    assert_eq!(unauthenticated_denials(&db), refused);
     assert_eq!(ok(&db, &["show", "1"])["task"], before);
     assert!(
         ok(&db, &["status"])["supervisors"]
@@ -127,6 +134,7 @@ fn workers_jobs_and_the_observer_land_recover_and_run_the_service_not_at_all() {
 #[test]
 fn a_worker_neither_runs_nor_records_a_session() {
     let (_dir, db) = queue();
+    let _served = common::service::Served::start(&db);
     // Its session is its wrapper's to record (ADR-t3102-1 decision 4): a
     // hook of the worker's own run is refused it too.
     for args in [
@@ -140,15 +148,10 @@ fn a_worker_neither_runs_nor_records_a_session() {
             "{args:?}"
         );
     }
-    // A worker that names its session an inbox's would record the inbox's
-    // span: the queue's, not its run's.
-    let mut as_inbox = WORKER.to_vec();
-    as_inbox.push(("DAGQ_SESSION_KIND", "inbox"));
-    let error = denied_as(&as_inbox, &db, &["session-event", "open", "--run", "r1"]);
-    assert_eq!(error["denied"]["capability"], "session.record");
-    let recorded = denials(&db);
-    assert_eq!(recorded.len(), 4);
-    assert_eq!(recorded[0]["actor"]["id"], "worker:r1");
+    // A worker that names its session an inbox's sends the span to the
+    // service, which refuses it (cli_session_event).
+    assert!(denials(&db).is_empty());
+    assert_eq!(unauthenticated_denials(&db), 3);
     // A wrapper runs as the wrapper's principal whatever its environment
     // names, and reaches the queue only through its service: with no
     // token issued, `session` and `planner-session` end without opening
@@ -184,7 +187,7 @@ fn a_worker_neither_runs_nor_records_a_session() {
             "{args:?}: {error}"
         );
     }
-    assert_eq!(denials(&db).len(), 4);
+    assert!(denials(&db).is_empty());
 }
 
 #[test]
@@ -199,7 +202,21 @@ fn the_user_the_inbox_and_the_planner_keep_their_operations() {
         .id
         .to_string();
     let actor = format!("planner:{id}");
-    let planner = [("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", actor.as_str())];
+    let file = dagq::infrastructure::queue_service::issue(
+        db.parent().unwrap(),
+        &dagq::domain::queue_service::Principal::planner(id.parse().unwrap()),
+        1,
+    )
+    .unwrap()
+    .file;
+    let planner = [
+        ("DAGQ_ROLE", "planner"),
+        ("DAGQ_ACTOR_ID", actor.as_str()),
+        (
+            dagq::domain::queue_service::CREDENTIAL_FILE_ENV,
+            file.to_str().unwrap(),
+        ),
+    ];
     let inbox = [("DAGQ_ROLE", "inbox")];
     // `down` with no supervisor and `migrate --check` succeed.
     for env in [&[][..], &inbox[..], &planner[..]] {
@@ -221,7 +238,9 @@ fn the_user_the_inbox_and_the_planner_keep_their_operations() {
         failed_past_authorization(env, &db, &["review", "7"]);
     }
     // The planner lands, recovers and supervises nothing (ADR-t728-1
-    // decision 7).
+    // decision 7): each refusal is recorded by the queue's service, which
+    // `down` stopped, as the planner's.
+    ok(&db, &["list"]);
     for (args, capability) in [
         (&["integrate", "1"][..], "landing.request"),
         (&["recover", "r1"], "run.recover"),
@@ -234,10 +253,16 @@ fn the_user_the_inbox_and_the_planner_keep_their_operations() {
     }
     // A planner's span is its wrapper's to record (ADR-t3102-1 decision
     // 4): its hook leaves the report for it, and is refused nothing; the
-    // inbox's hook records its own span, past the authorizer.
+    // inbox's hook sends its own span to the service (here with no token).
     let mut own = planner.to_vec();
     own.push(("DAGQ_PLANNER_ID", id.as_str()));
     failed_past_authorization(&own, &db, &["session-event", "open"]);
     failed_past_authorization(&inbox, &db, &["session-event", "open"]);
-    assert_eq!(denials(&db).len(), 5);
+    let recorded = denials(&db);
+    assert_eq!(recorded.len(), 5);
+    assert!(
+        recorded
+            .iter()
+            .all(|event| event["actor"]["id"] == actor.as_str())
+    );
 }

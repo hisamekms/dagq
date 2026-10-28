@@ -3013,8 +3013,9 @@ fn authorized_in_application(command: &Command) -> bool {
 /// integrator reads but does not watch or export, and the observer and the
 /// supervisor's headless jobs (ADR-0027, each job by its own role and the
 /// legacy `reviewer` as a review job) keep their limits (ADR-0044
-/// decision 4). A refusal is recorded as `authorization_denied` on the
-/// queue `db` names, opened only then (task 1151). `request add` also uses
+/// decision 4). A refusal is sent to the service of the queue `db` names,
+/// which records it as `authorization_denied` of the caller's principal
+/// ([`CommandDenials`]); the queue is not opened. `request add` also uses
 /// this check before reading its input; Requests::record still authorizes
 /// before recording. A command allowed opens
 /// nothing here, and reads keep the queue read-only (ADR-0073 decisions 5,
@@ -3036,7 +3037,7 @@ fn check_access(actor: &ActorContext, command: &Command, db: Option<&Path>) -> R
         actor,
         authorizer: &StaticPolicy,
     };
-    let log = CommandDenials { db, actor };
+    let log = CommandDenials { db };
     for (capability, resource) in requests(command) {
         gate.authorize(&log, capability, &resource)?;
     }
@@ -3044,21 +3045,28 @@ fn check_access(actor: &ActorContext, command: &Command, db: Option<&Path>) -> R
 }
 
 /// The queue a refused command names (`--db` or the repository of the
-/// working directory), resolved only to record the refusal; with no queue
-/// there, or one this binary cannot open, the refusal goes unrecorded and
-/// is still a refusal.
+/// working directory), resolved only to send the refusal to its service
+/// as the caller's principal
+/// ([`dagq::infrastructure::denials::ServiceDenials`]); with no queue
+/// there, or no service that answers, the refusal goes unrecorded and is
+/// still a refusal. The queue is not opened.
 struct CommandDenials<'a> {
     db: Option<&'a Path>,
-    actor: &'a ActorContext,
 }
 
 impl dagq::application::commands::DenialLog for CommandDenials<'_> {
     fn record_denial(&self, payload: Value) -> Result<()> {
         let cwd = env::current_dir().context("working directory is unavailable")?;
         let location = QueueLocation::resolve(self.db, &cwd)?;
-        dagq::infrastructure::denials::QueueDenials {
+        let binding = location
+            .git_common_dir
+            .as_deref()
+            .map(path_text)
+            .transpose()?;
+        dagq::infrastructure::denials::ServiceDenials {
             db: &location.db,
-            actor: self.actor,
+            binding: binding.as_deref(),
+            env: &|name| env::var(name).ok(),
         }
         .record_denial(payload)
     }
@@ -4540,16 +4548,21 @@ fn execute(cli: Cli) -> Result<Value> {
         return client_mode(&client, &cli);
     }
     // A planner's hook leaves its report for the planner's wrapper, which
-    // records it as its own principal (ADR-t3102-1 decision 4): the hook
-    // opens no queue and reaches no service. A client-mode `dagq` (an
-    // agent's) was refused above and leaves none.
+    // records it as its own principal, and an inbox's hook records its
+    // span through the queue service as the inbox (ADR-t3102-1 decision
+    // 4): neither opens the queue. A client-mode `dagq` (an agent's) was
+    // refused above and leaves none.
     let hook_kind = match &cli.command {
         Command::SessionEvent { event, .. } => {
             let kind = session_hook_kind();
-            if kind.is_some_and(|kind| kind != dagq::domain::sessions::INBOX)
+            if let Some(kind) = kind
                 && let Some(hook) = read_session_hook(event)?
             {
-                return spool_planner_hook(cli.db.as_deref(), &hook);
+                return if kind == dagq::domain::sessions::INBOX {
+                    record_inbox_hook(cli.db.as_deref(), &hook)
+                } else {
+                    spool_planner_hook(cli.db.as_deref(), &hook)
+                };
             }
             kind
         }
@@ -4629,14 +4642,14 @@ fn execute(cli: Cli) -> Result<Value> {
     let location = QueueLocation::resolve(cli.db.as_deref(), &cwd)?;
     let db = location.db.clone();
     // The runtime operations are authorized before they do anything; a
-    // refusal is recorded on the queue if there is one (task 734).
+    // refusal is sent to the queue's service, which records it, if there
+    // is one (task 734).
     if let Some(operation) = operation(&cli.command, |name| env::var(name).ok()) {
         dagq::application::commands::operations::authorize(
             &actor,
             &StaticPolicy,
-            &dagq::infrastructure::denials::QueueDenials {
-                db: &location.db,
-                actor: &actor,
+            &CommandDenials {
+                db: cli.db.as_deref(),
             },
             &operation,
         )?;
@@ -5639,11 +5652,9 @@ fn execute(cli: Cli) -> Result<Value> {
         Command::Session { .. } | Command::PlannerSession { .. } => {
             unreachable!("a session wrapper opens no queue: session_wrapper runs it")
         }
-        // An inbox's hook records as the inbox (ADR-t3102-1 decision 4).
-        Command::SessionEvent { event, .. } => match read_session_hook(&event)? {
-            Some(hook) => dagq::application::SessionRegistry::record_session_hook(&queue, &hook)?,
-            None => json!({"recorded": false, "reason": "not an inbox or planner session"}),
-        },
+        Command::SessionEvent { .. } => {
+            unreachable!("a session's hook opens no queue: it returned above")
+        }
     })
 }
 
@@ -5703,6 +5714,61 @@ fn spool_planner_hook(
         &stamp,
     )?;
     Ok(json!({"recorded": false, "relayed_by": "wrapper", "planner_id": id, "report": report}))
+}
+
+/// How long an inbox's hook waits for the service to record its span: a
+/// hook holds up its session's start and end while it waits.
+const HOOK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Record an inbox's hook's report `hook` through the queue service, as
+/// the principal of the inbox's token (ADR-t3102-1 decision 4): the span
+/// as the service records it. With no queue named, the hook goes to the
+/// service of the queue whose credentials hold the token `dagq inbox`
+/// handed it, needing no queue path. With a queue named (`--db`), or no
+/// such token, it goes as the inbox's other commands do, naming the DB,
+/// which the service refuses as `wrong_queue` when it is not its own file
+/// (another DB beside its own too); one with no token is refused there.
+/// The queue is not opened, a service that does not answer within
+/// [`HOOK_TIMEOUT`] is a failure that says so, and the token of an inbox
+/// whose session ended is refused as `session_ended`.
+fn record_inbox_hook(
+    db: Option<&Path>,
+    hook: &dagq::domain::sessions::SessionHook,
+) -> Result<Value> {
+    use dagq::infrastructure::queue_service::Client;
+    let credential = env::var_os(dagq::domain::queue_service::CREDENTIAL_FILE_ENV)
+        .filter(|file| !file.is_empty())
+        .map(PathBuf::from);
+    // A queue named (`--db`) goes with the request, which the service
+    // compares with its own DB file as the inbox's other commands' (another
+    // DB, even beside its own, is `wrong_queue`); only a hook that names
+    // none goes by its token's file alone.
+    let by_token = credential
+        .as_deref()
+        .filter(|_| db.is_none())
+        .and_then(Client::of_credential);
+    let client = match by_token {
+        Some(client) => client,
+        None => {
+            let cwd = env::current_dir().context("working directory is unavailable")?;
+            let location = QueueLocation::resolve(db, &cwd)?;
+            anyhow::ensure!(
+                location.db.is_file(),
+                "no queue at {} (use init to create it)",
+                location.db.display()
+            );
+            let db = std::fs::canonicalize(&location.db).unwrap_or_else(|_| location.db.clone());
+            let common_dir = location
+                .git_common_dir
+                .as_deref()
+                .map(path_text)
+                .transpose()?;
+            Client::host(&db, common_dir.as_deref(), |name| env::var(name).ok())
+        }
+    };
+    let op = dagq::application::session::SessionOp::Hook { hook: hook.clone() };
+    let answer = client.call_within(op.use_case(), serde_json::to_value(&op)?, HOOK_TIMEOUT)?;
+    Ok(answer["value"].clone())
 }
 
 /// `session` and `planner-session`: the wrapper of a run or a planner,
@@ -6571,7 +6637,8 @@ mod tests {
             ),
             (
                 "session-event",
-                "a session's hook: ADR-t3102-2 decision 6 (3)",
+                "a session's hook: an inbox's sends its span to the service itself, a \
+                 planner's leaves it to its wrapper (ADR-t3102-1 decision 4)",
             ),
             ("supervise", CONTROL),
             ("up", CONTROL),

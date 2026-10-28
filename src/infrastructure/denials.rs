@@ -1,31 +1,45 @@
-//! Where the runtime operations record what they refused
-//! ([`crate::application::commands::operations`]): the queue at a path,
-//! opened only to write the refusal as the refused actor. The operations
-//! open no queue before they are authorized (`init` and `migrate` may find
-//! none, or one this binary cannot open); a refusal then goes unrecorded
-//! and is still a refusal.
+//! Where the host's `dagq` records what it refused itself
+//! ([`crate::application::commands::Gate`],
+//! [`crate::application::commands::operations`]): the queue service of
+//! the queue at a path, sent the refusal as the caller's principal (its
+//! token, or the user as the socket's peer), which records it only as its
+//! own (`denial_record`). The queue is never opened for it. A caller the
+//! service does not authenticate (an actor named with no token) is
+//! recorded by the service as unauthenticated; a service that does not
+//! answer, or no queue there, leaves the refusal unrecorded, and it is
+//! still a refusal.
 
-use crate::domain::EventKind;
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use anyhow::{Result, ensure};
 use serde_json::Value;
 
-use super::sqlite::SqliteQueue;
-use crate::application::EventStore;
+use super::queue_service::Client;
 use crate::application::commands::DenialLog;
-use crate::domain::ActorContext;
+use crate::domain::queue_service::UseCase;
 
-/// The queue at `db`, written as `actor`.
-pub struct QueueDenials<'a> {
+/// How long a refusal waits for the service to take its record: a refusal
+/// is returned at once whether it is recorded or not, and a service that
+/// does not answer within it leaves it unrecorded.
+const RECORD_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The service of the queue at `db`, bound to the repository whose Git
+/// common directory is `binding` for a repository queue, as the principal
+/// `env` names.
+pub struct ServiceDenials<'a> {
     pub db: &'a Path,
-    pub actor: &'a ActorContext,
+    pub binding: Option<&'a str>,
+    pub env: &'a dyn Fn(&str) -> Option<String>,
 }
 
-impl DenialLog for QueueDenials<'_> {
+impl DenialLog for ServiceDenials<'_> {
     fn record_denial(&self, payload: Value) -> Result<()> {
         ensure!(self.db.is_file(), "no queue at {}", self.db.display());
-        let queue = SqliteQueue::open(self.db)?.with_actor(self.actor.clone());
-        EventStore::record_queue_event(&queue, EventKind::AuthorizationDenied, payload).map(drop)
+        // The DB a link names is its target's: its directory's service
+        // serves it.
+        let db = std::fs::canonicalize(self.db).unwrap_or_else(|_| self.db.to_path_buf());
+        Client::host(&db, self.binding, self.env)
+            .call_within(UseCase::DenialRecord, payload, RECORD_TIMEOUT)
+            .map(drop)
     }
 }

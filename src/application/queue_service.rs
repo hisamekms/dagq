@@ -1410,6 +1410,122 @@ struct AgentResultParams {
     id: i64,
 }
 
+/// `denial_record`'s params: the `authorization_denied` payload of a
+/// refusal the host's `dagq` made itself
+/// ([`super::commands::DenialLog`]).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DenialParams {
+    event: String,
+    role: String,
+    capability: String,
+    reason: String,
+    resource: Value,
+}
+
+/// The [`crate::domain::authorization::DenyReason`] named `name`. The
+/// match on the reasons fails to compile when one is added and not listed.
+fn deny_reason(name: &str) -> Option<crate::domain::authorization::DenyReason> {
+    use crate::domain::authorization::DenyReason as R;
+    const ALL: [R; 7] = [
+        R::NotGranted,
+        R::Reserved,
+        R::Resource,
+        R::AskKind,
+        R::PersonsPriority,
+        R::GoalGapDraft,
+        R::NotHeld,
+    ];
+    const fn listed(reason: R) -> usize {
+        match reason {
+            R::NotGranted => 0,
+            R::Reserved => 1,
+            R::Resource => 2,
+            R::AskKind => 3,
+            R::PersonsPriority => 4,
+            R::GoalGapDraft => 5,
+            R::NotHeld => 6,
+        }
+    }
+    ALL.into_iter()
+        .find(|reason| listed(*reason) < ALL.len() && reason.as_str() == name)
+}
+
+/// The most bytes of a refusal's resource `denial_record` records.
+const DENIAL_RESOURCE_BYTES: usize = 1024;
+
+/// Whether `resource` has the shape of a resource's record
+/// ([`Resource::record`]): an object with a `kind`, whose values are
+/// scalars or objects of scalars, within [`DENIAL_RESOURCE_BYTES`]. A
+/// caller records no free text of its own in the queue this way.
+fn resource_record_shape(resource: &Value) -> bool {
+    let scalar = |value: &Value| match value {
+        Value::String(text) => text.len() <= 256,
+        Value::Null | Value::Bool(_) | Value::Number(_) => true,
+        _ => false,
+    };
+    let Some(fields) = resource.as_object() else {
+        return false;
+    };
+    resource["kind"].is_string()
+        && fields.values().all(|value| {
+            scalar(value)
+                || value
+                    .as_object()
+                    .is_some_and(|inner| inner.values().all(scalar))
+        })
+        && serde_json::to_vec(resource).is_ok_and(|bytes| bytes.len() <= DENIAL_RESOURCE_BYTES)
+}
+
+/// Record the refusal `p` the host's `dagq` of `actor` made itself, as
+/// `actor`: a refusal of the caller's own role only. One that names
+/// another role is refused as `authorization_denied` (and that refusal
+/// recorded), one the policy would not make (a capability the role holds
+/// named as not granted) is not recorded, and neither is one whose
+/// capability, reason or resource does not read.
+fn record_own_denial(
+    queue: &mut dyn ServiceQueue,
+    actor: &ActorContext,
+    p: &DenialParams,
+) -> Result<Value> {
+    use crate::domain::authorization::DenyReason;
+    let bad = |what: &str| -> anyhow::Error { BadParams(format!("denial_record's {what}")).into() };
+    if p.event != crate::domain::event_kind::AUTHORIZATION_DENIED {
+        return Err(bad("event: not authorization_denied"));
+    }
+    let capability: Capability = p
+        .capability
+        .parse()
+        .map_err(|_| bad("capability: unknown"))?;
+    let reason = deny_reason(&p.reason).ok_or_else(|| bad("reason: unknown"))?;
+    if !resource_record_shape(&p.resource) {
+        return Err(bad("resource: not the shape of a resource's record"));
+    }
+    if p.role != actor.role().as_str() {
+        return Err(refuse_recorded(
+            queue,
+            actor,
+            capability,
+            &Resource::Unresolved,
+            DenyReason::Resource,
+            "a refusal of another role than the caller's is not recorded",
+        ));
+    }
+    if reason == DenyReason::NotGranted
+        && crate::domain::authorization::grants(actor.role()).contains(&capability)
+    {
+        return Err(bad("reason: the caller's role holds the capability"));
+    }
+    queue.record_denial(json!({
+        "event": p.event,
+        "role": actor.role(),
+        "capability": capability,
+        "reason": reason.as_str(),
+        "resource": p.resource,
+    }))?;
+    Ok(json!({"recorded": true}))
+}
+
 /// Authorize reading the whole queue: every role reads it in goal 82
 /// (ADR-t1233-5 decision 3), and the policy is still asked, on the
 /// service's side, as it would be for a narrower one.
@@ -1615,6 +1731,10 @@ fn run(
             let (capability, resource) = op.request();
             gate.authorize(&store, capability, &resource)?;
             store.0.session(&op)
+        }
+        UseCase::DenialRecord => {
+            let p: DenialParams = params(use_case, raw)?;
+            record_own_denial(store.0, actor, &p)
         }
         UseCase::WatchPoll => {
             let p: WatchPollParams = params(use_case, raw)?;
@@ -3869,6 +3989,62 @@ mod tests {
             &json!({"op": "drop_queue", "run": "r1"}),
         );
         assert_eq!(code(&unknown), Some(ServiceErrorCode::BadRequest));
+        assert!(backend.log.lock().unwrap().is_empty());
+    }
+
+    /// `denial_record` records a refusal only as the caller's own: one of
+    /// another role is refused (and that refusal recorded as the caller's),
+    /// one the policy would not make and one that does not read are bad
+    /// requests, recorded nowhere.
+    #[test]
+    fn a_principal_records_only_its_own_refusal() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let denial = |role: &str, capability: &str, reason: &str| {
+            json!({"event": "authorization_denied", "role": role, "capability": capability,
+                   "reason": reason, "resource": {"kind": "queue"}})
+        };
+        let send =
+            |params: Value| service.handle(&request(Some("worker"), UseCase::DenialRecord, params));
+        let own = send(denial("worker", "queue.watch", "not granted"));
+        assert!(own.ok, "{own:?}");
+        let recorded = backend.log.lock().unwrap().pop().unwrap();
+        assert_eq!(
+            recorded,
+            denial("worker", "queue.watch", "not granted"),
+            "{recorded}"
+        );
+        let crossed = send(denial("observer", "queue.watch", "not granted"));
+        assert_eq!(code(&crossed), Some(ServiceErrorCode::AuthorizationDenied));
+        let recorded = backend.log.lock().unwrap().pop().unwrap();
+        assert_eq!(recorded["role"], "worker");
+        assert_eq!(recorded["capability"], "queue.watch");
+        assert_eq!(recorded["reason"], "not on this resource");
+        for params in [
+            denial("worker", "queue.read", "not granted"),
+            denial("worker", "queue.watch", "because"),
+            denial("worker", "queue.everything", "not granted"),
+            json!({"event": "note", "role": "worker", "capability": "queue.watch",
+                   "reason": "not granted", "resource": {"kind": "queue"}}),
+            json!({"event": "authorization_denied", "role": "worker",
+                   "capability": "queue.watch", "reason": "not granted", "resource": {}}),
+            json!({"event": "authorization_denied", "role": "worker",
+                   "capability": "queue.watch", "reason": "not granted",
+                   "resource": {"kind": "queue", "text": "x".repeat(2000)}}),
+            json!({"event": "authorization_denied", "role": "worker",
+                   "capability": "queue.watch", "reason": "not granted",
+                   "resource": {"kind": "queue", "list": [1, 2]}}),
+        ] {
+            assert_eq!(
+                code(&send(params.clone())),
+                Some(ServiceErrorCode::BadRequest),
+                "{params}"
+            );
+        }
         assert!(backend.log.lock().unwrap().is_empty());
     }
 

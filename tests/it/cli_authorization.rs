@@ -678,15 +678,16 @@ fn a_worker_is_refused_watch_and_export_and_each_refusal_is_recorded() {
         allowed_as(&worker, &db, args);
     }
     assert_eq!(event_count(&db), written);
-    let recorded = denials(&db);
-    assert_eq!(recorded.len() - before, refused.len(), "{recorded:?}");
-    for (event, capability) in recorded[before..].iter().zip(&refused) {
-        assert_eq!(event["actor"]["role"], "worker", "{event}");
-        assert_eq!(event["actor"]["id"], "worker:r1", "{event}");
-        assert_eq!(event["payload"]["role"], "worker", "{event}");
-        assert_eq!(event["payload"]["capability"], *capability, "{event}");
-        assert_eq!(event["payload"]["reason"], "not granted", "{event}");
-        assert_eq!(event["payload"]["resource"]["kind"], "queue", "{event}");
+    // Each refusal went to the queue's service, which takes a worker named
+    // with no token for no principal: recorded as unauthenticated, never as
+    // the worker's `authorization_denied` (cli_denials has the refusals of
+    // a principal).
+    assert_eq!(denials(&db).len(), before);
+    let unauthenticated = common::service::events(&db, "queue_service_unauthenticated");
+    assert_eq!(unauthenticated.len(), refused.len(), "{unauthenticated:?}");
+    for event in &unauthenticated {
+        assert_eq!(event["payload"]["use_case"], "denial_record", "{event}");
+        assert_eq!(event["payload"]["reason"], "missing_token", "{event}");
     }
     let events = event_count(&db);
     assert!(!Path::new(graph).exists());
