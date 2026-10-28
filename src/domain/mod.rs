@@ -1311,6 +1311,7 @@ pub mod recurring;
 pub mod related;
 pub mod release_update;
 pub mod replan_apply;
+pub mod replan_detect;
 pub mod replan_plan;
 pub mod replan_snapshot;
 pub mod resume;

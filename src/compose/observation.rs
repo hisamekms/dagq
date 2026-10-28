@@ -687,6 +687,14 @@ fn doctor_ci_watch(queue: &SqliteQueue) -> Result<Option<Value>> {
     )
 }
 
+/// `status`'s and `doctor`'s `replans` ([`health::replans_report`]) of the
+/// queue under `[replan]` of the bound main checkout.
+fn replans_view(queue: &SqliteQueue) -> Result<Value> {
+    let config = bound_checkout(queue)?
+        .map(|checkout| crate::infrastructure::run_env::load_replan(&checkout));
+    health::replans_report(queue, &health::ReplanConfigRead::of(config))
+}
+
 /// `status`'s, `stats`' and `doctor`'s `recurring` ([`health::recurring`])
 /// of the `dagq.toml` of the bound main checkout and the queue's history;
 /// none for a queue bound to no checkout.
@@ -1630,7 +1638,7 @@ impl OneShot {
         if let Some(toolchains) = bound_toolchains(queue, self.profiles)? {
             status["toolchains"] = toolchains;
         }
-        status["replans"] = health::replans(&queue.open_replans()?);
+        status["replans"] = replans_view(queue)?;
         if let Some(recurring) = recurring_view(queue)? {
             status["recurring"] = recurring;
         }
@@ -1738,7 +1746,7 @@ impl OneShot {
                 }
                 add_sccache_diagnostics(&queue, db, true, &mut report)?;
                 report["roles"] = doctor_roles(&queue);
-                report["replans"] = health::replans(&queue.open_replans()?);
+                report["replans"] = replans_view(&queue)?;
                 if let Some(toolchains) = bound_toolchains(&queue, self.profiles)? {
                     report["toolchains"] = toolchains;
                 }

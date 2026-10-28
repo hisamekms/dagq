@@ -187,6 +187,33 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             let (run,): (RunId,) = read(op, args)?;
             answer(RunTransitions::replans_of_run(&*store, &run))
         }
+        "open_replan_operations" => answer(RunTransitions::open_replan_operations(&*store)),
+        "replan_lineage" => {
+            let (task,): (TaskId,) = read(op, args)?;
+            answer(RunTransitions::replan_lineage(&*store, task))
+        }
+        "ask_replan_diagnosis" => {
+            let (ask, replan, reason, run, payload, premise): (
+                NewAsk,
+                (crate::domain::ReplanId, i64),
+                String,
+                RunId,
+                Value,
+                Option<crate::domain::task_replan::DiagnosisPremise>,
+            ) = read(op, args)?;
+            answer(RunTransitions::ask_replan_diagnosis(
+                &mut *store,
+                &ask,
+                replan,
+                &reason,
+                &run,
+                (payload, premise.as_ref()),
+            ))
+        }
+        "detect_replan" => {
+            let (new, by_id): (crate::domain::task_replan::NewReplan, String) = read(op, args)?;
+            answer(RunTransitions::detect_replan(&mut *store, &new, &by_id))
+        }
         "move_replan" => {
             let (id, generation, step): (
                 crate::domain::ReplanId,

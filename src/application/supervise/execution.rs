@@ -53,6 +53,7 @@ pub(super) mod recheck;
 mod reconcile;
 mod recovery;
 mod reopen;
+mod replan_diagnosis;
 mod replan_park;
 mod resume;
 mod revise;
@@ -551,6 +552,10 @@ pub struct Ports<'a> {
     /// `[fresh_session]` of the main checkout's `dagq.toml` (`None` for no
     /// file), read again each pass (ADR-t2080-1); `None` reads nothing.
     pub fresh_session_file: Option<FreshSessionFile>,
+    /// `[replan]` of the main checkout's `dagq.toml` (`None` for no file,
+    /// which detects and diagnoses nothing), read again each pass; `None`
+    /// reads nothing.
+    pub replan_file: Option<ReplanFile>,
     /// `[[recurring]]` of the main checkout's `dagq.toml` (ADR-0072
     /// decision 1), read again each pass; `None` registers no recurring
     /// draft.
@@ -620,6 +625,11 @@ pub type ProviderFallbackFile =
 /// (ADR-t2080-1).
 pub type FreshSessionFile =
     Arc<dyn Fn() -> Result<Option<crate::domain::fresh_session::FreshSessionConfig>> + Send + Sync>;
+
+/// Reads `[replan]` of the main checkout's `dagq.toml`
+/// (docs/plans/task-replanning.md).
+pub type ReplanFile =
+    Arc<dyn Fn() -> Result<Option<crate::domain::replan_detect::ReplanConfig>> + Send + Sync>;
 
 /// Reads `[[recurring]]` of the main checkout's `dagq.toml` (ADR-0072).
 pub type RecurringFile =
@@ -1166,6 +1176,11 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         review_jobs: settings.review_jobs,
         fresh_session_file: ports.fresh_session_file.clone(),
         fresh_session_error: None,
+        replan: crate::domain::replan_detect::ReplanConfig::default(),
+        replan_file: ports.replan_file.clone(),
+        replan_error: None,
+        replan_seen: (None, HashMap::new()),
+        replan_diagnosis: None,
         finished: Vec::new(),
         errors: Vec::new(),
         last_turns: None,
@@ -1428,6 +1443,22 @@ struct Supervisor<'a> {
     /// The error the last read of `[fresh_session]` failed with, warned of
     /// once until it changes or a read succeeds.
     fresh_session_error: Option<String>,
+    /// `[replan]` as last read: whether the runtime detects candidates
+    /// and diagnoses the replanning operations, and its limits.
+    replan: crate::domain::replan_detect::ReplanConfig,
+    /// Reads `[replan]` again each pass; `None` keeps `replan`.
+    replan_file: Option<ReplanFile>,
+    /// The error the last read of `[replan]` failed with, warned of once.
+    replan_error: Option<String>,
+    /// Per task, the newest of its events the detection counts that it
+    /// looked at, under the `[replan]` it read then: a task is looked at
+    /// again only once a newer one comes, or the settings change.
+    replan_seen: (
+        Option<crate::domain::replan_detect::ReplanConfig>,
+        HashMap<TaskId, EventId>,
+    ),
+    /// The diagnosis job running now (one at a time, queue-wide).
+    replan_diagnosis: Option<Box<replan_diagnosis::DiagnosisJob>>,
     /// The runs that came to rest in this process's slots (a step ended
     /// them in a status the loop no longer drives); the result's `runs`.
     finished: Vec<TaskRun>,
@@ -3116,7 +3147,17 @@ impl Supervisor<'_> {
             // while Claude is held (ADR-t1063-1 decision 5). One in progress
             // is followed.
             let starting = !stopping && self.claim.claiming && self.host.service_up();
-            let mut progressed = self.on_planning(|planning, env| {
+            // Outside the run slots: the detection of a long-running task
+            // and the read-only diagnosis of the replanning operations,
+            // which only continues, parks or asks; a job that runs is
+            // reaped on every pass, a new one started only by a supervisor
+            // at work.
+            let diagnosed = self.replan_diagnosis_pass(starting).unwrap_or_else(|error| {
+                warn!(error = %format_args!("{error:#}"), "the replanning diagnosis pass failed: {error:#}");
+                false
+            });
+            let mut progressed = diagnosed;
+            progressed |= self.on_planning(|planning, env| {
                 let reviewed = planning.plan_review_pass(env, options, starting);
                 planning.goal_review_pass(env, starting) | reviewed
             });
@@ -3192,6 +3233,7 @@ impl Supervisor<'_> {
             ("cleanup_for_disk", self.host.cleanup().for_disk()),
             ("cleanup_deferred", self.host.cleanup().deferred()),
             ("recheck_applied", rechecked),
+            ("replan_diagnosis", self.diagnosis_running()),
         ]
         .into_iter()
         .filter_map(|(name, waits)| waits.then_some(name))

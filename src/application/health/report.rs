@@ -806,21 +806,133 @@ pub fn requests(
         .collect()
 }
 
+/// `[replan]` of the bound main checkout as `status` and `doctor` read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplanConfigRead {
+    /// No main checkout is bound to the queue: nothing is detected.
+    NoCheckout,
+    /// The settings read, the defaults when the file or the table is not
+    /// there: the ones a supervisor reading the same file uses.
+    Read(crate::domain::replan_detect::ReplanConfig),
+    /// The file cannot be read or parsed: a supervisor keeps the settings
+    /// it read last, which `status` cannot know, so no window is shown.
+    Unreadable(String),
+}
+
+impl ReplanConfigRead {
+    /// From the read of the bound main checkout's `dagq.toml` (`None`
+    /// without a checkout): no file or no table is the defaults.
+    pub fn of(read: Option<Result<Option<crate::domain::replan_detect::ReplanConfig>>>) -> Self {
+        match read {
+            None => Self::NoCheckout,
+            Some(Ok(read)) => Self::Read(read.unwrap_or_default()),
+            Some(Err(error)) => Self::Unreadable(format!("{error:#}")),
+        }
+    }
+}
+
+/// The queue's reads of the replanning `status` and `doctor` show.
+pub trait ReplanSource {
+    /// The open operations, oldest first, with their task's status.
+    fn open_replans(
+        &self,
+    ) -> Result<Vec<(crate::domain::task_replan::ReplanOperation, TaskStatus)>>;
+    /// Every operation, closed ones included.
+    fn replan_operations(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>>;
+    fn task_events(&self, task: TaskId) -> Result<Vec<crate::domain::RunEvent>>;
+    /// The operations of `task`'s lineage.
+    fn replan_lineage(
+        &self,
+        task: TaskId,
+    ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>>;
+}
+
+/// `status`'s and `doctor`'s `replans` from `source` under `config`
+/// ([`replans`]): each task of an open operation once, with its turns by
+/// cause, its window of reviews as the detection reads it under the
+/// settings read (none when they cannot be read) and its lineage's parks.
+pub fn replans_report(source: &impl ReplanSource, config: &ReplanConfigRead) -> Result<Value> {
+    use crate::domain::replan_detect;
+    let open = source.open_replans()?;
+    let all = source.replan_operations()?;
+    let settings = match config {
+        ReplanConfigRead::NoCheckout => Some(replan_detect::ReplanConfig::default()),
+        ReplanConfigRead::Read(read) => Some(*read),
+        ReplanConfigRead::Unreadable(_) => None,
+    };
+    let mut tasks: Vec<ReplanTask> = Vec::new();
+    for (op, _) in &open {
+        if tasks.iter().any(|task| task.task == op.task_id) {
+            continue;
+        }
+        let events = source.task_events(op.task_id)?;
+        let lineage = source.replan_lineage(op.task_id)?;
+        let own: Vec<_> = lineage
+            .iter()
+            .filter(|other| other.task_id == op.task_id)
+            .cloned()
+            .collect();
+        tasks.push(ReplanTask {
+            task: op.task_id,
+            turns: replan_detect::count_turns(&events),
+            window: settings.map(|settings| replan_detect::window(&settings, &events, &own)),
+            auto_parks: replan_detect::auto_parks(&lineage),
+        });
+    }
+    Ok(replans(
+        &open,
+        &ReplanReads {
+            all: &all,
+            tasks: &tasks,
+            config,
+        },
+    ))
+}
+
+/// The task of an open operation as `status` shows it: its turns by
+/// cause, its window of reviews (none when `[replan]` cannot be read) and
+/// the parks a diagnosis made in its lineage without a person.
+pub struct ReplanTask {
+    pub task: TaskId,
+    pub turns: crate::domain::replan_detect::TaskTurns,
+    pub window: Option<crate::domain::replan_detect::Window>,
+    pub auto_parks: usize,
+}
+
+/// What `status` and `doctor` read of the replanning beside its open
+/// operations: every operation, the task of each open one and `[replan]`
+/// of the bound main checkout as read.
+pub struct ReplanReads<'a> {
+    pub all: &'a [crate::domain::task_replan::ReplanOperation],
+    pub tasks: &'a [ReplanTask],
+    pub config: &'a ReplanConfigRead,
+}
+
 /// `status`'s and `doctor`'s `replans`: the open replanning operations
 /// (ADR-t1521-2), oldest first, each with its task's status now, where it
-/// is and why (its last move's reason, else its request's), how many
-/// guard their task, and the ones whose task ended while they stayed
-/// open or that are `blocked` (`problems`), which only the runtime's
-/// outcome closes or moves on.
+/// is and why (its last move's reason, else its request's), its diagnosis,
+/// its task's turns by cause and its window of reviews as the detection
+/// reads them (how many reviews did not pass against the threshold, the
+/// threshold after a diagnosis that went on being the continuation's
+/// limit), how many guard their task, and the ones whose task ended while
+/// they stayed open or that are `blocked` (`problems`), which only the
+/// runtime's outcome closes or moves on; then `[replan]` as read
+/// (`detection`) and every operation counted (`counts`): by status, by
+/// origin, by the diagnosis's choice and who decided it, by its primary
+/// cause, how many were fenced for a replanning, and the tasks each
+/// applied one was replaced by.
 pub fn replans(
     open: &[(
         crate::domain::task_replan::ReplanOperation,
         crate::domain::TaskStatus,
     )],
+    reads: &ReplanReads<'_>,
 ) -> Value {
+    use crate::domain::task_replan::ReplanStatus;
     let listed: Vec<Value> = open
         .iter()
         .map(|(op, task_status)| {
+            let task = reads.tasks.iter().find(|task| task.task == op.task_id);
             json!({
                 "id": op.id,
                 "task_id": op.task_id,
@@ -834,6 +946,10 @@ pub fn replans(
                 "request_id": op.request_id,
                 "snapshot_id": op.snapshot_id,
                 "updated_at": op.updated_at,
+                "diagnosis": op.diagnosis,
+                "turns": task.map(|task| &task.turns.total),
+                "window": task.and_then(|task| task.window.as_ref()),
+                "lineage_auto_parks": task.map(|task| task.auto_parks),
             })
         })
         .collect();
@@ -848,18 +964,70 @@ pub fn replans(
     // A blocked operation waits for whoever fixes the step it failed at.
     problems.extend(
         open.iter()
-            .filter(|(op, _)| op.status == crate::domain::task_replan::ReplanStatus::Blocked)
+            .filter(|(op, _)| op.status == ReplanStatus::Blocked)
             .map(|(op, _)| {
                 json!({"id": op.id, "task_id": op.task_id, "run_id": op.run_id,
                        "problem": "blocked", "return_phase": op.return_phase,
                        "reason": truncate_reason(op.status_reason.as_deref().unwrap_or(&op.reason))})
             }),
     );
-    json!({
+    let mut counts =
+        std::collections::BTreeMap::<&str, std::collections::BTreeMap<String, usize>>::new();
+    let mut count = |what: &'static str, key: &str| {
+        *counts
+            .entry(what)
+            .or_default()
+            .entry(key.to_owned())
+            .or_default() += 1;
+    };
+    let mut fenced = 0;
+    let mut replaced_by = Vec::new();
+    for op in reads.all {
+        count("by_status", op.status.as_str());
+        count("by_origin", op.origin.as_str());
+        if let Some(choice) = op.diagnosis.choice {
+            count("by_choice", choice.as_str());
+        }
+        if let Some(by) = &op.diagnosis.decided_by {
+            count("by_decider", by);
+        }
+        if let Some(cause) = op.diagnosis.causes.first() {
+            count("by_primary_cause", cause.as_str());
+        }
+        let past_fence = op.status.guards()
+            || matches!(
+                op.status,
+                ReplanStatus::Applied | ReplanStatus::ContinuingAfterPark | ReplanStatus::Withdrawn
+            );
+        fenced += usize::from(past_fence);
+        if !op.replaced_by.is_empty() {
+            replaced_by.push(json!({"operation_id": op.id, "task_id": op.task_id,
+                                    "replaced_by": op.replaced_by}));
+        }
+    }
+    let mut counts: serde_json::Map<String, Value> = counts
+        .into_iter()
+        .map(|(what, by)| (what.to_owned(), json!(by)))
+        .collect();
+    counts.insert("operations".into(), json!(reads.all.len()));
+    counts.insert("fenced".into(), json!(fenced));
+    counts.insert("replaced_by".into(), Value::Array(replaced_by));
+    let mut report = json!({
         "open": listed,
         "guarding": open.iter().filter(|(op, _)| op.status.guards()).count(),
         "problems": problems,
-    })
+        "detection": match reads.config {
+            ReplanConfigRead::Read(read) => json!(read),
+            ReplanConfigRead::NoCheckout | ReplanConfigRead::Unreadable(_) => Value::Null,
+        },
+        "counts": counts,
+    });
+    if let ReplanConfigRead::Unreadable(error) = reads.config {
+        report["detection_error"] = json!(format!(
+            "[replan] of dagq.toml cannot be read ({error}): a supervisor keeps the settings it read last, which are not shown"
+        ));
+    }
+    report
 }
 
 /// `status`'s, `stats`' and `doctor`'s `recurring` (ADR-0072) of `read`,

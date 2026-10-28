@@ -693,6 +693,13 @@ pub fn supervise_with_reviewer(
         Arc::new(move || load_fresh_session(&checkout))
             as crate::application::supervise::FreshSessionFile
     });
+    // `[replan]`, read each pass: no file or no table detects and
+    // diagnoses nothing.
+    let replan_file = Some({
+        let checkout = main_checkout.clone();
+        Arc::new(move || crate::infrastructure::run_env::load_replan(&checkout))
+            as crate::application::supervise::ReplanFile
+    });
     // `[[recurring]]` (ADR-0072), read each pass that tends the planners.
     let recurring_file = Some({
         let checkout = main_checkout.clone();
@@ -1069,6 +1076,7 @@ pub fn supervise_with_reviewer(
         supervisor_file,
         provider_fallback_file,
         fresh_session_file,
+        replan_file,
         recurring_file,
         forecasts,
         agent_watch: options.agent_watch,

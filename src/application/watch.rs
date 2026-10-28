@@ -261,6 +261,10 @@ pub fn timeline_in(
         "actual_provider": task_run.actual_provider(),
         "worker_mode": task_run.worker_mode(),
         "provider_switches": timeline::provider_switches(&events),
+        // The run's turns by cause and reviews, as the runtime's detection
+        // counts them, and the steps of its replanning.
+        "turns": crate::domain::replan_detect::count_turns(&events).total,
+        "replans": timeline::replan_steps(&events),
         "gap_secs": gap_secs,
         "events": shown_events.iter().map(|event| shown(event, full)).collect::<Vec<_>>(),
         "gaps": gaps,

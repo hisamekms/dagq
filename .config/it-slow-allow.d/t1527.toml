@@ -1,0 +1,38 @@
+# The items of task 1527 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 9.1s in a stress run: three reviews of a worker, the diagnosis job and a second supervise
+[[test]]
+name = "runtime_replan_diagnosis::a_task_whose_reviews_keep_failing_is_diagnosed_once_and_goes_on"
+reason = "B 境界（守る境界）: 既定の閾値の 3 回の非 pass の review が supervise のループで候補を開き、診断の job（復旧 job の経路）の verdict を SQLite の queue に適用し、2 回目の supervise（再起動）が同じ窓を検知も診断もしないこと、CLI の数え方が検知と同じことを確かめる（窓と判定の case は domain::replan_detect の unit test）"
+task = 1527
+
+# 5.8s in a stress run: one review, the diagnosis job, then the park and the planner of its request
+[[test]]
+name = "runtime_replan_diagnosis::a_diagnosed_replanning_parks_the_run_and_closes_the_reviews_ask"
+reason = "B 境界（守る境界）: 診断の replan が supervise のループで操作を柵へ進め、同じ transaction の依頼から既存の保留が snapshot を保存して approve_landing を閉じ、依頼の planner まで進むことを確かめる（判定は domain::replan_detect の unit test）"
+task = 1527
+
+# 9.1s in a stress run: one review, a diagnosis job that moves the run's HEAD, a second job, the ask, the answer and a second supervise
+[[test]]
+name = "runtime_replan_diagnosis::an_unsure_diagnosis_asks_a_person_whose_replan_parks_the_run"
+reason = "B 境界（守る境界）: job の間に run の worktree の HEAD（Git）が動いた verdict から supervise のループが ask を開かずに破棄して次の job で診断し直すことと、確信度の低い診断が task の decide の ask を開き、CLI の answer を 2 回目の supervise が人の判断として適用して保留まで進めることを、同じ fixture の SQLite の queue の記録で確かめる（判定は domain::replan_detect の unit test、ask の transaction の前提の検査は task_replanning の IT）"
+task = 1527
+
+# 5.9s in a stress run: one review and three diagnosis jobs that print no verdict
+[[test]]
+name = "runtime_replan_diagnosis::a_diagnosis_that_never_gives_a_verdict_asks_a_person_after_its_attempts"
+reason = "B 境界（守る境界）: verdict の無い診断の job が supervise のループで回ごとに次の試行として始め直され、上限の後に人への ask になることを、job のプロセスと SQLite の queue の記録で確かめる"
+task = 1527
+
+# 5.1s in a stress run: one review and the diagnosis job
+[[test]]
+name = "runtime_replan_diagnosis::a_replanning_only_for_external_causes_goes_on"
+reason = "B 境界（守る境界）: 外因だけの診断の replan を supervise のループが継続として SQLite の操作に書くことを、job の verdict から確かめる（判定の case は domain::replan_detect の unit test）"
+task = 1527
+
+# 7.4s in a run: one review with the detection off, then a supervise with it on over a run with no run directory
+[[test]]
+name = "runtime_replan_diagnosis::a_run_without_a_run_directory_is_not_diagnosed_in_the_main_checkout"
+reason = "B 境界（守る境界）: dagq.toml の enabled = false を supervise のループが読んで検知も診断の job もせず review の ask を人に残すことと、有効にした後に run dir の無い run の操作に診断の job を始めず、main checkout に prompt・出力を書かず provider を起動せずに人への ask にすることを、同じ fixture の作業の場所と job のプロセスと SQLite の queue の記録で確かめる（無効と場所の判定は domain::replan_detect の unit test）"
+task = 1527

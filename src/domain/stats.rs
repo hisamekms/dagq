@@ -81,6 +81,7 @@ pub mod planner_routes;
 pub mod predictions;
 pub mod providers;
 pub mod recommendations;
+pub mod replans;
 pub mod retries;
 pub mod review_reasons;
 pub mod routes;
@@ -733,6 +734,12 @@ pub struct Stats {
     /// The workers moved to the other provider (`provider_switched`,
     /// ADR-t813-2) in the same window as `asks`, and Codex's holds.
     pub provider_switches: providers::ProviderSwitchStats,
+    /// The replanning of long-running tasks in the same window as `asks`
+    /// (docs/plans/task-replanning.md): the turns by cause and the reviews
+    /// as the runtime's detection counts them, the operations opened by
+    /// origin, the diagnoses and what became of them, and the moves of the
+    /// operations. With `--goal`, only that goal's.
+    pub replans: replans::ReplanStats,
     /// The headless jobs other than the worker's (goal 73) that ended in
     /// the same window as `asks`, per kind: how many, how many failed, how
     /// long they took and their verdicts, per provider and per model too.
@@ -1214,6 +1221,7 @@ pub fn stats(
     );
     let auto_repairs = auto_repairs::auto_repairs(events, window_start, window_last, counts);
     let provider_switches = providers::provider_switches(events, window_start, window_last, counts);
+    let replans = replans::replans(events, window_start, window_last, counts);
     // A goal review is the goal's event, with no task.
     let jobs = jobs::jobs(events, window_start, window_last, |event| {
         match (event.task_id, event.goal_id) {
@@ -1436,6 +1444,7 @@ pub fn stats(
         claim_deferrals,
         auto_repairs,
         provider_switches,
+        replans,
         jobs,
         updates,
         draft_flow,

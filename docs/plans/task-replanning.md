@@ -107,7 +107,34 @@ Claude/Codexで同じ状態機械を使う。
   子のclaimは計画が名指した部分だけを渡す: snapshotのheadは固定したrefと照合してpromptで名指し（containerのcloneにはそのrefを渡す）、未commitの変更はmanifestと照合してrun dirの`replan-carry/`へ写す（未追跡の実行可能fileはその権限ごと。`run_inherited`）。
   渡せなければ`replan_carry_failed`を残してprovisioningの失敗とし、snapshotとrefは消さない。holdの解除が今のmainから始め直させた（`retry_fresh`）子のその後のclaimには渡さず、引き継ぎがまだ続いていた子ではその解除が引き継ぎの終わり（`replan_carry_ended`）を記録する。子の成果は子のrunのreceipt・検証・review・e2e・着地だけを通る。
 - goal close: 一部（`replaced`は終わったtaskに数え、completedには数えない。置換先を再置換も辿った全てのtaskを、別のgoalへ移ったものも含めて読むので、それが全て終わるまでgoal reviewの起動もcloseも待つ（起動に要る`completed`は所属taskだけで数える）。定期taskの次の登録も同じく待つ。置換先の記録が空・欠落・循環の置換元は解決済みとせず、goal reviewの起動・achievedの適用・closeを拒み、定期taskのkeyを保ち、`status`のattention（`replacement_unresolved`）で人に見せる。goal reviewのjobには置換の系統・元条件・条件の対応を渡し、fingerprintはそれと計画・条件の版を持つので、起動の後に対応が変わればachievedを適用しない）。
-- 未実装: 診断（`pause_requested`へ進める判断）。
+- 検知と診断: 済み（`src/domain/replan_detect.rs`、`src/application/supervise/execution/replan_diagnosis.rs`）。
+  `dagq.toml`の`[replan]`が`enabled = true`のときだけ動く（keyと既定値は`ReplanConfig`のdoc comment）。
+  表が無い・無効なら検知も診断もせず、人とworkerが開いた操作は`candidate`のまま待つ。
+  この表を知らない古いバイナリは表を拒むので、queueを動かす固定バイナリが読めるまで`dagq.toml`に足さない。
+  schemaは変えず、診断はoperationの`diagnosis`に読んだ窓の終わり・未達の項目数・決めた者を足して持ち、それを知らない読み手は読み飛ばす。
+  検知は進行中のtaskの最新runについて、下の「回数・抑制・上限と観測」の窓を数える。
+  窓はrunとproviderを跨いでtaskで数え、最後のpassと前の診断が読んだeventの後から始まる。
+  閾値に届くか、窓に非passがある上で既存の上限の出口（reviewの`revise_limit`、resumeの使い切り）が来れば、`runtime`の操作を1つ開き、開いた操作のあるtaskには開かない。
+  操作は起点を問わず一度に1つずつ、run slotの外で`diagnosing`へ進み、復旧jobの経路で読み取りだけの診断jobが動く（runのturnは止めない）。
+  jobはrunのrun dirの下だけで動き、run dirの無いrunには準備中か準備の前に中断したなら待ち、それ以外は始めずに人へのaskにする（main checkoutには書かない）。
+  jobの試行とaskはそれぞれ操作を新しい版で`diagnosing`へ取り直してから始めるので、同じ版を読んだ2つのsupervisorの片方だけが取れ、前の版のjobの結果もaskの答えも適用されない。
+  askはその取り直しと、askを操作に結ぶ`replan_diagnosed`と同じtransactionで書く。
+  作業中のrunのjobはturnの合間（依頼したturnも走るturnも無いとき）にだけ始め、止まっているrunのjobは待たせない。
+  合間はturnのeventに加えてsessionの`turns/`の依頼とidle markerで読む（走るturnの間に書いた依頼のeventはそのturnの終わりより前に残るため）。
+  jobには条件・原因別のturn・窓の非passのreviewの指摘・衝突やe2eや失敗したturn・前の診断・receiptを渡す。
+  verdictはその時の操作の版と状態、taskとrunの今を確かめ直してから`decide`で適用する。
+  適用の移動とverdictからのaskは同じtransactionで前提を確かめ直す。jobの開始の後に次のどれかがあれば適用もaskもせず診断し直す: runの状態の変化、review・turn・receiptの到着、taskの条件の変更、着地の開始、人の依頼の合流（人の依頼でないと読んだ判断のとき）。
+  runのHEADは移動とaskの直前に、jobの開始時に読んだものと比べる（queueのtransactionの外なので、turnのeventの無いcommitがその間に入る隙は残る）。
+  自動の保留は系統の上限も同じtransactionで数え直し、超えるなら人へのaskにする。
+  継続は`continuing`、作業単位の原因の再計画は`pause_requested`（その後は上の保留の経路）にする。外因だけの再計画は継続の判断とし、継続と同じ確かめを通す。
+  確信度の低いもの・系統の自動の保留の上限・未達の項目数か進展の無い継続・残作業が2回続けて減らない継続・人の依頼への継続・jobの3回の失敗は、taskについての`decide`のask（`continue`か`replan`）にする。
+  人の答えはその者の判断として記録して同じ移動をする。
+  人の依頼でない操作を診断が柵へ進めると、同じtransactionでplannerへの依頼を記録する。
+  着地したrunの操作は閉じ、着地中のrunは待ってから診断し直す。
+  動いていたjobのsupervisorがいなければ（exec後の同じprocessも）次の試行として始め直す。
+  `status`・`doctor`の`replans`は、`dagq.toml`が読めなければ設定と窓を出さずにその誤りを出す（supervisorは前に読めた設定で動き続ける）。開いた操作ごとに診断・taskの原因別のturn・窓（閾値は継続の後の上限を含む）・系統の自動の保留の数を出す。
+  全体では状態・起点・選択・決めた者・主因ごとの数と、柵を越えた数と置換先を出す。
+  `timeline`はrunの原因別のturnと再計画の段を、`stats`は窓の原因別のturn・開いた操作・診断・askの理由・移動を出し、数え方は検知と同じ関数による。
 
 ## 入口と診断
 

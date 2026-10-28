@@ -1846,3 +1846,369 @@ fn no_second_operation_of_a_task_is_fenced_and_a_request_leaves_one() {
         assert_eq!(open[0]["id"], later);
     }
 }
+
+/// Each diagnosis job, and each ask of one, claims its operation under a
+/// new generation: of two supervisors that read the operation alike only
+/// one claims it, and one restarted claims it from what it reads again.
+/// The move that applies a diagnosis checks its premise in its own
+/// transaction: a review, a turn or a receipt after the last event it
+/// read, the run's landing begun or an edit of the task refuses it; a
+/// premise that holds lets it through.
+#[test]
+fn a_diagnosis_is_claimed_once_and_applied_only_on_its_premise() {
+    use dagq::domain::task_replan::{Diagnosis, DiagnosisPremise};
+    let (_dir, db) = queue();
+    let (mut queue, a, _, run) = claimed(&db);
+    let opened = ok(
+        &db,
+        &args(&request(&run, "the review keeps sending it back")),
+    );
+    let id = ReplanId::new(opened["operation"]["id"].as_i64().unwrap());
+    let read = queue.replan_operation(id).unwrap().generation;
+    let claim = |queue: &mut SqliteQueue, generation: i64| {
+        queue.move_replan(
+            id,
+            generation,
+            &ReplanMove {
+                to: ReplanStatus::Diagnosing,
+                reason: "its diagnosis starts".into(),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+        )
+    };
+    let first = claim(&mut queue, read).unwrap();
+    assert_eq!(first.generation, read + 1);
+    assert!(
+        claim(&mut queue, read).is_err(),
+        "a second supervisor's claim of the same read"
+    );
+    let claimed = claim(&mut queue, first.generation).unwrap();
+    assert_eq!(claimed.generation, read + 2);
+
+    let conn = Connection::open(&db).unwrap();
+    let newest = |conn: &Connection| -> i64 {
+        conn.query_row(
+            "SELECT MAX(id) FROM run_events WHERE task_id=?1",
+            [a.as_i64()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let status = queue.show(a).unwrap().runs[0].status();
+    let diagnosed = |read_until: i64| ReplanMove {
+        to: ReplanStatus::Continuing,
+        reason: "diagnosed: it goes on".into(),
+        snapshot_id: None,
+        diagnosis: Some(Diagnosis {
+            premise: Some(DiagnosisPremise {
+                run_status: status,
+                read_until: Some(dagq::domain::EventId::new(read_until)),
+                head: None,
+                manual: None,
+                max_auto_parks: None,
+            }),
+            ..Diagnosis::default()
+        }),
+    };
+    let refused = |queue: &mut SqliteQueue, read_until: i64, why: &str| {
+        let error = queue
+            .move_replan(id, claimed.generation, &diagnosed(read_until))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(why), "{error:#}");
+        assert_eq!(
+            queue.replan_operation(id).unwrap().status,
+            ReplanStatus::Diagnosing
+        );
+    };
+
+    // A review came while it was diagnosed.
+    let read_until = newest(&conn);
+    queue
+        .record_runtime_event(&run, EventKind::ReviewFinished, json!({"verdict": "pass"}))
+        .unwrap();
+    refused(&mut queue, read_until, "review_finished event");
+
+    // A turn ended, or a receipt came, while it was diagnosed.
+    for (kind, name) in [
+        (EventKind::TurnFinished, "turn_finished event"),
+        (EventKind::ReceiptObserved, "receipt_observed event"),
+    ] {
+        let read_until = newest(&conn);
+        queue.record_runtime_event(&run, kind, json!({})).unwrap();
+        refused(&mut queue, read_until, name);
+    }
+
+    // The landing began before the move was written.
+    let read_until = newest(&conn);
+    conn.execute(
+        "UPDATE task_runs SET status='integrating' WHERE id=?1",
+        [run.as_str()],
+    )
+    .unwrap();
+    refused(&mut queue, read_until, "integrating");
+    conn.execute(
+        "UPDATE task_runs SET status=?1 WHERE id=?2",
+        [status.as_str(), run.as_str()],
+    )
+    .unwrap();
+
+    // The task's conditions changed.
+    conn.execute(
+        "UPDATE tasks SET acceptance=acceptance || '\nmore' WHERE id=?1",
+        [a.as_i64()],
+    )
+    .unwrap();
+    refused(&mut queue, read_until, "was edited");
+    conn.execute(
+        "UPDATE tasks SET acceptance='the API behaves\nthe operations are documented' WHERE id=?1",
+        [a.as_i64()],
+    )
+    .unwrap();
+
+    let moved = queue
+        .move_replan(id, claimed.generation, &diagnosed(read_until))
+        .unwrap();
+    assert_eq!(moved.status, ReplanStatus::Continuing);
+}
+
+/// The ask of a diagnosis, the operation claimed again for it and the
+/// `replan_diagnosed` that ties them are written in one transaction, or
+/// none of them when another claim came first. A move from the diagnosis
+/// is refused when a person's request joined an operation the decision
+/// read as no person's, and a park without a person when the lineage's
+/// parks reached the limit since the decision read them.
+#[test]
+fn a_diagnosis_asks_atomically_and_applies_only_under_its_request_and_park_limit() {
+    use dagq::domain::task_replan::{Diagnosis, DiagnosisChoice, DiagnosisPremise};
+    use dagq::domain::{AskKind, AskReason, NewAsk};
+    let (_dir, db) = queue();
+    let (mut queue, a, _, run) = claimed(&db);
+    let detect = |queue: &mut SqliteQueue| {
+        queue
+            .record_replan(
+                &NewReplan {
+                    run: run.clone(),
+                    reason: "the reviews keep failing".into(),
+                    evidence: Vec::new(),
+                },
+                ReplanOrigin::Runtime,
+                "supervisor",
+                "supervisor",
+            )
+            .unwrap()
+            .operation
+    };
+    let step = |to: ReplanStatus, premise: Option<DiagnosisPremise>| ReplanMove {
+        to,
+        reason: format!("diagnosed: {}", to.as_str()),
+        snapshot_id: None,
+        diagnosis: Some(Diagnosis {
+            choice: Some(if to == ReplanStatus::Continuing {
+                DiagnosisChoice::Continue
+            } else {
+                DiagnosisChoice::Replan
+            }),
+            decided_by: Some("runtime".into()),
+            premise,
+            ..Diagnosis::default()
+        }),
+    };
+    let status = queue.show(a).unwrap().runs[0].status();
+    let premise = |manual: bool, max_auto_parks: Option<usize>| DiagnosisPremise {
+        run_status: status,
+        read_until: None,
+        head: None,
+        manual: Some(manual),
+        max_auto_parks,
+    };
+    let claim = |queue: &mut SqliteQueue, id: ReplanId, generation: i64| {
+        queue
+            .move_replan(
+                id,
+                generation,
+                &ReplanMove {
+                    to: ReplanStatus::Diagnosing,
+                    reason: "its diagnosis starts".into(),
+                    snapshot_id: None,
+                    diagnosis: None,
+                },
+            )
+            .unwrap()
+            .generation
+    };
+
+    // One park of the lineage without a person, which ends withdrawn.
+    let first = detect(&mut queue);
+    let generation = claim(&mut queue, first.id, first.generation);
+    let generation = queue
+        .move_replan(
+            first.id,
+            generation,
+            &step(ReplanStatus::PauseRequested, None),
+        )
+        .unwrap()
+        .generation;
+    let generation = park(&mut queue, first.id, generation, ReplanStatus::Blocked);
+    park(&mut queue, first.id, generation, ReplanStatus::Withdrawn);
+
+    let second = detect(&mut queue);
+    assert_ne!(second.id, first.id);
+    let read = claim(&mut queue, second.id, second.generation);
+
+    // The ask and its event in one transaction, under a new claim.
+    let ask = NewAsk {
+        kind: AskKind::Decide,
+        task_id: Some(a),
+        run_id: None,
+        question: "continue or replan?".into(),
+        options: vec!["continue".into(), "replan".into()],
+        asked_by: "replan-diagnosis".into(),
+        reason_category: AskReason::Scope,
+        topics: Vec::new(),
+        recommendation: None,
+        confidence: None,
+        finding_id: None,
+        request_id: None,
+    };
+    let asks = |queue: &SqliteQueue| queue.asks(Default::default()).unwrap().len();
+    let before = asks(&queue);
+    // Only the diagnosis's own decide ask about the task opens here.
+    for other in [
+        NewAsk {
+            asked_by: "someone".into(),
+            ..ask.clone()
+        },
+        NewAsk {
+            kind: AskKind::Blocked,
+            ..ask.clone()
+        },
+    ] {
+        assert!(
+            queue
+                .ask_replan_diagnosis(
+                    &other,
+                    (second.id, read),
+                    "a person is asked",
+                    &run,
+                    (json!({"operation_id": second.id}), None),
+                )
+                .is_err()
+        );
+    }
+    assert_eq!(asks(&queue), before);
+    // The ask of a job's verdict checks the job's premise in its
+    // transaction: a turn requested or a receipt seen after the last event
+    // the job read makes the verdict stale, and nothing is written (the
+    // supervisor records it as discarded and diagnoses again).
+    let newest = || -> i64 {
+        Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT MAX(id) FROM run_events WHERE task_id=?1",
+                [a.as_i64()],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    for (kind, name) in [
+        (EventKind::TurnRequested, "turn_requested event"),
+        (EventKind::ReceiptObserved, "receipt_observed event"),
+    ] {
+        let read_until = newest();
+        queue.record_runtime_event(&run, kind, json!({})).unwrap();
+        let stale = DiagnosisPremise {
+            read_until: Some(dagq::domain::EventId::new(read_until)),
+            ..premise(false, None)
+        };
+        let error = queue
+            .ask_replan_diagnosis(
+                &ask,
+                (second.id, read),
+                "a person is asked",
+                &run,
+                (json!({"operation_id": second.id}), Some(&stale)),
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(name), "{error:#}");
+        assert_eq!(asks(&queue), before);
+        assert_eq!(queue.replan_operation(second.id).unwrap().generation, read);
+    }
+    let (outcome, asked) = queue
+        .ask_replan_diagnosis(
+            &ask,
+            (second.id, read),
+            "a person is asked",
+            &run,
+            (json!({"operation_id": second.id}), None),
+        )
+        .unwrap();
+    assert_eq!(asked.generation, read + 1);
+    assert_eq!(asks(&queue), before + 1);
+    let diagnosed: Vec<Value> = queue
+        .show(a)
+        .unwrap()
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::ReplanDiagnosed)
+        .map(|e| e.payload.clone())
+        .collect();
+    assert_eq!(diagnosed.len(), 1);
+    assert_eq!(diagnosed[0]["ask_id"], json!(outcome.ask.id));
+    assert_eq!(diagnosed[0]["generation"], asked.generation);
+    assert_eq!(diagnosed[0]["outcome"], "ask");
+    // A claim read before it writes nothing at all.
+    assert!(
+        queue
+            .ask_replan_diagnosis(
+                &ask,
+                (second.id, read),
+                "a person is asked",
+                &run,
+                (json!({"operation_id": second.id}), None),
+            )
+            .is_err()
+    );
+    assert_eq!(asks(&queue), before + 1);
+    let generation = asked.generation;
+
+    // A person's request joins after the decision read the operation.
+    let joined = ok(&db, &args(&request(&run, "split it, please")));
+    assert_eq!(joined["operation"]["id"], json!(second.id));
+    let error = queue
+        .move_replan(
+            second.id,
+            generation,
+            &step(ReplanStatus::Continuing, Some(premise(false, None))),
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("a person's request joined"),
+        "{error:#}"
+    );
+
+    // The lineage's one park reached a limit of one since it was read.
+    let error = queue
+        .move_replan(
+            second.id,
+            generation,
+            &step(ReplanStatus::PauseRequested, Some(premise(true, Some(1)))),
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("parks without a person are used up (1 of 1)"),
+        "{error:#}"
+    );
+    assert_eq!(
+        queue.replan_operation(second.id).unwrap().status,
+        ReplanStatus::Diagnosing
+    );
+    let moved = queue
+        .move_replan(
+            second.id,
+            generation,
+            &step(ReplanStatus::PauseRequested, Some(premise(true, Some(2)))),
+        )
+        .unwrap();
+    assert_eq!(moved.status, ReplanStatus::PauseRequested);
+}

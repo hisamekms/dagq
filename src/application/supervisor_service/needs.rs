@@ -42,6 +42,8 @@ pub(super) const READS: &[&str] = &[
     "latest_run_of",
     "parking_replans",
     "replans_of_run",
+    "open_replan_operations",
+    "replan_lineage",
     "runs_leased_by_others",
     "runs_leased_by",
     "unclosed_run_asks",
@@ -336,7 +338,10 @@ const OTHERS: &[(C, &[&str])] = &[
         ],
     ),
     // A run parked to be replanned and its replacement (ADR-t1521-2).
-    (C::ReplanPark, &["lease_for_park"]),
+    (
+        C::ReplanPark,
+        &["lease_for_park", "detect_replan", "ask_replan_diagnosis"],
+    ),
     (
         C::ReplanApply,
         &[

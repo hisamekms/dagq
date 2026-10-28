@@ -1009,6 +1009,48 @@ impl RunTransitions for SupervisorQueue {
     ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
         self.remote("replans_of_run", vec![to_value(run)?])
     }
+    fn open_replan_operations(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        self.remote("open_replan_operations", vec![])
+    }
+    fn replan_lineage(
+        &self,
+        task: crate::domain::TaskId,
+    ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        self.remote("replan_lineage", vec![to_value(task)?])
+    }
+    fn detect_replan(
+        &mut self,
+        new: &crate::domain::task_replan::NewReplan,
+        by_id: &str,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        self.remote("detect_replan", vec![to_value(new)?, to_value(by_id)?])
+    }
+    fn ask_replan_diagnosis(
+        &mut self,
+        ask: &crate::domain::NewAsk,
+        op: (crate::domain::ReplanId, i64),
+        reason: &str,
+        run: &RunId,
+        (payload, premise): (
+            serde_json::Value,
+            Option<&crate::domain::task_replan::DiagnosisPremise>,
+        ),
+    ) -> Result<(
+        crate::domain::AskOutcome,
+        crate::domain::task_replan::ReplanOperation,
+    )> {
+        self.remote(
+            "ask_replan_diagnosis",
+            vec![
+                to_value(ask)?,
+                to_value(op)?,
+                to_value(reason)?,
+                to_value(run)?,
+                payload,
+                to_value(premise)?,
+            ],
+        )
+    }
     #[allow(clippy::too_many_arguments)]
     fn move_replan(
         &mut self,

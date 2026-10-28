@@ -204,7 +204,7 @@ pub fn undone(error: &anyhow::Error) -> bool {
 /// The operations of [`dispatch`] that only read the queue: one the
 /// service did not answer did nothing ([`undone`]). An operation not here
 /// is taken as one that writes.
-const READ_OPS: [&str; 59] = [
+const READ_OPS: [&str; 61] = [
     "candidates",
     "build_waits",
     "predecessors",
@@ -230,6 +230,8 @@ const READ_OPS: [&str; 59] = [
     "latest_run_of",
     "parking_replans",
     "replans_of_run",
+    "open_replan_operations",
+    "replan_lineage",
     "runs_leased_by_others",
     "runs_leased_by",
     "unclosed_run_asks",

@@ -680,6 +680,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/setup_review.rs", "SetupReviewHost", Some(Execution), Internal), // the main checkout, the temporary place and the job of setup-review
     outer_port("src/application/setup_review.rs", "InitRepository", Some(Execution), Internal), // the main checkout, its dagq.toml and its files init proposes the toolchain profiles from
     outer_port("src/application/ci_watch.rs", "CiSource", Some(Observation), Internal),
+    outer_port("src/application/health/report.rs", "ReplanSource", Some(Observation), Internal), // the replanning status and doctor read, implemented by SqliteQueue
     outer_port("src/application/throughput_review.rs", "ThroughputReviewSources", Some(Observation), Internal),
     outer_port("src/application/throughput_review.rs", "ThroughputReviewHost", Some(Observation), Internal),
     outer_port("src/application/observer/mod.rs", "ObserverSources", Some(Observation), Internal),

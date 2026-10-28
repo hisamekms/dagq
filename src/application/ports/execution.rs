@@ -1309,6 +1309,44 @@ pub trait RunTransitions {
     /// The open operations whose run the trusted runtime parks now
     /// ([`crate::domain::task_replan::ReplanStatus::parks`]), oldest first.
     fn parking_replans(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>>;
+    /// Every open replanning operation, oldest first: the ones the
+    /// runtime's diagnosis takes up (`candidate`, `diagnosing`) among them.
+    fn open_replan_operations(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>>;
+    /// Every replanning operation of `task`'s lineage, oldest first: the
+    /// task, the tasks it replaced and the tasks that replaced it, and
+    /// theirs (`replan_replacements`).
+    fn replan_lineage(
+        &self,
+        task: crate::domain::TaskId,
+    ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>>;
+    /// Record the runtime's detection `new` as the supervisor `by_id`: a
+    /// new `candidate` of origin `runtime` on its run, or the task's open
+    /// operation it joins ([`crate::application::commands::replans::ReplanStore::record_replan`]).
+    fn detect_replan(
+        &mut self,
+        new: &crate::domain::task_replan::NewReplan,
+        by_id: &str,
+    ) -> Result<crate::domain::task_replan::ReplanOperation>;
+    /// Open `ask` for the diagnosis of operation `op` (read under its
+    /// generation) and record its `replan_diagnosed` on `run` with
+    /// `payload`, the operation claimed again for `reason`, all in one
+    /// transaction, once the `premise` of the diagnosis job whose verdict
+    /// the ask carries still holds in it; the ask the queue opened or gave,
+    /// and the operation.
+    fn ask_replan_diagnosis(
+        &mut self,
+        ask: &crate::domain::NewAsk,
+        op: (crate::domain::ReplanId, i64),
+        reason: &str,
+        run: &RunId,
+        written: (
+            serde_json::Value,
+            Option<&crate::domain::task_replan::DiagnosisPremise>,
+        ),
+    ) -> Result<(
+        crate::domain::AskOutcome,
+        crate::domain::task_replan::ReplanOperation,
+    )>;
     /// Every replanning operation on run `run`, oldest first.
     fn replans_of_run(
         &self,

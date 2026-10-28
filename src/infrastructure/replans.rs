@@ -26,6 +26,7 @@ use super::sqlite::{
 use crate::domain::event_kind::EventKind;
 use crate::domain::plan_request::{RequestRef, RequestStatus};
 use crate::domain::plan_review::PlanReviewAction;
+use crate::domain::replan_detect;
 use crate::domain::replan_plan::{
     self, DeletionAuthority, PlanContext, PlanProblem, PlanProblemCode, PlanRevision, PlanTask,
     ReplacementPlan, ReplanBrief, ReviewFinding, SuccessorBrief,
@@ -217,6 +218,72 @@ impl SqliteQueue {
         Ok(moved)
     }
 
+    /// Open `ask` for the diagnosis of operation `id`, read under
+    /// `generation`, and record its `replan_diagnosed` on `run` with
+    /// `payload`, in one transaction: the operation is claimed again
+    /// (`diagnosing` under a new generation, for `reason`) so that the ask
+    /// owns it, and the event names the ask (or the open ask of the task
+    /// the queue gave instead) and that generation
+    /// ([`replan_detect::asked_payload`]). An operation moved on since, or
+    /// a `premise` of the diagnosis job the ask carries the verdict of that
+    /// no longer holds ([`check_premise`], read in the same transaction),
+    /// refuses it, and then neither the ask nor the event is written.
+    pub fn ask_replan_diagnosis(
+        &mut self,
+        ask: &crate::domain::NewAsk,
+        (id, generation): (ReplanId, i64),
+        reason: &str,
+        run: &RunId,
+        (payload, premise): (serde_json::Value, Option<&task_replan::DiagnosisPremise>),
+    ) -> Result<(crate::domain::AskOutcome, ReplanOperation)> {
+        let mut payload = payload;
+        ask.validate()?;
+        let op = read_operation(&self.conn, id)?;
+        // This path opens the diagnosis's own ask only: a `decide` about the
+        // operation's task, holding no run, finding or request.
+        ensure!(
+            ask.kind == crate::domain::AskKind::Decide
+                && ask.asked_by == replan_detect::DIAGNOSIS_ASKER
+                && ask.task_id == Some(op.task_id)
+                && ask.run_id.is_none()
+                && ask.finding_id.is_none()
+                && ask.request_id.is_none(),
+            "replan operation {id}: only its diagnosis's decide ask about task {} opens here",
+            op.task_id
+        );
+        let now = self.generators.clock.now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(premise) = premise {
+            let read = read_operation(&tx, id)?;
+            check_premise(&tx, &read, ReplanStatus::Diagnosing, premise)?;
+        }
+        let claimed = move_in(
+            &tx,
+            id,
+            generation,
+            &ReplanMove {
+                to: ReplanStatus::Diagnosing,
+                reason: reason.to_owned(),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+            now,
+        )?;
+        let outcome = super::asks::insert_ask(&tx, ask)?;
+        replan_detect::asked_payload(&mut payload, &outcome.ask, claimed.generation);
+        event(
+            &tx,
+            claimed.task_id,
+            Some(run),
+            EventKind::ReplanDiagnosed,
+            payload,
+        )?;
+        tx.commit()?;
+        Ok((outcome, claimed))
+    }
+
     /// Add `mappings` to operation `id`'s condition mappings in one write
     /// transaction ([`write_mappings`]), and the operation as it is then.
     pub fn record_replan_mappings(
@@ -253,6 +320,14 @@ impl SqliteQueue {
         ops.into_iter()
             .map(|op| with_outcome(&self.conn, op))
             .collect()
+    }
+
+    /// Every operation of `task`'s lineage, oldest first, with its
+    /// outcome: the operations of the task, of the tasks it replaced (up to
+    /// the first) and of every task that replaced one of them, and theirs,
+    /// along `replan_replacements`. A loop in the records is followed once.
+    pub fn replan_lineage(&self, task: TaskId) -> Result<Vec<ReplanOperation>> {
+        lineage_in(&self.conn, task)
     }
 
     /// The operation that guards `task` now, if any.
@@ -347,6 +422,13 @@ pub(super) fn move_in_as(
     } else {
         task_replan::check_move(&op, generation, step)?;
     }
+    if let Some(premise) = step
+        .diagnosis
+        .as_ref()
+        .and_then(|made| made.premise.as_ref())
+    {
+        check_premise(conn, &op, step.to, premise)?;
+    }
     // An operation diagnosed, fenced or reopened (a restore that failed)
     // must be the task's one open operation.
     if task_replan::needs_task_alone(op.status, step.to) {
@@ -430,9 +512,36 @@ pub(super) fn move_in_as(
         }
         _ => None,
     };
+    // A diagnosis that fences an operation no person asked for (the
+    // runtime's detection, a worker's proposal) records the planning
+    // request its planner is opened for once the snapshot is saved, in
+    // the same transaction: the request of a person's is recorded with it.
+    let recorded = match (op.request_id, &step.diagnosis) {
+        (None, Some(made)) if step.to == ReplanStatus::PauseRequested => {
+            let new = NewReplan {
+                run: op.run_id.clone(),
+                reason: format!(
+                    "{}; diagnosed: {}",
+                    op.reason,
+                    made.summary.as_deref().unwrap_or(&step.reason)
+                ),
+                evidence: diagnosis.evidence.clone(),
+            };
+            let request = record_request(conn, &op, &new, "supervisor", &op.requested_by_id, now)?;
+            conn.execute(
+                "UPDATE replan_operations SET request_id=?1 WHERE id=?2",
+                params![request, id],
+            )?;
+            Some(request)
+        }
+        _ => None,
+    };
     let mut payload = json!({"operation_id": id, "from": op.status, "to": step.to,
                              "reason": step.reason, "generation": next,
                              "snapshot_id": step.snapshot_id});
+    if let Some(request) = recorded {
+        payload["request_recorded"] = json!(request);
+    }
     if let Some(request) = declined {
         payload["request_declined"] = json!(request);
     }
@@ -447,6 +556,160 @@ pub(super) fn move_in_as(
         payload,
     )?;
     read_operation(conn, id)
+}
+
+/// [`SqliteQueue::replan_lineage`] on `conn`, inside the caller's
+/// transaction when it holds one.
+pub(crate) fn lineage_in(conn: &Connection, task: TaskId) -> Result<Vec<ReplanOperation>> {
+    let mut root = task;
+    let mut seen = std::collections::BTreeSet::from([task]);
+    while let Some(from) = conn
+        .query_row(
+            "SELECT from_task_id FROM replan_replacements WHERE to_task_id=?1 LIMIT 1",
+            [root],
+            |r| r.get::<_, TaskId>(0),
+        )
+        .optional()?
+    {
+        if !seen.insert(from) {
+            break;
+        }
+        root = from;
+    }
+    let mut tasks = vec![root];
+    let mut at = 0;
+    while let Some(&from) = tasks.get(at) {
+        at += 1;
+        let mut children =
+            conn.prepare("SELECT to_task_id FROM replan_replacements WHERE from_task_id=?1")?;
+        for child in children.query_map([from], |r| r.get::<_, TaskId>(0))? {
+            let child = child?;
+            if !tasks.contains(&child) {
+                tasks.push(child);
+            }
+        }
+    }
+    let mut ops = Vec::new();
+    for task in tasks {
+        let of_task: Vec<ReplanOperation> = conn
+            .prepare("SELECT * FROM replan_operations WHERE task_id=?1 ORDER BY id")?
+            .query_map([task], operation_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        ops.extend(of_task);
+    }
+    ops.sort_by_key(|op| op.id);
+    ops.into_iter().map(|op| with_outcome(conn, op)).collect()
+}
+
+/// Refuse the move, or the ask, of a diagnosis whose premise
+/// ([`task_replan::DiagnosisPremise`]) no longer holds, read in the write's
+/// own transaction: a landing that
+/// began, a review, a turn or a receipt that came, an edit of the task or
+/// another run since the diagnosis job started, a person's request that
+/// joined an operation the decision read as no person's, or another park
+/// of the lineage that used up its limit wins over the decision.
+fn check_premise(
+    conn: &Connection,
+    op: &ReplanOperation,
+    to: ReplanStatus,
+    premise: &task_replan::DiagnosisPremise,
+) -> Result<()> {
+    let stale = |why: String| {
+        anyhow::anyhow!(
+            "the diagnosis of replan operation {} no longer holds: {why}",
+            op.id
+        )
+    };
+    let task = read_task(conn, op.task_id)?;
+    if task.status() != TaskStatus::InProgress {
+        return Err(stale(format!(
+            "task {} is {}",
+            op.task_id,
+            task.status().as_str()
+        )));
+    }
+    let latest: Option<(RunId, String)> = conn
+        .query_row(
+            "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            [op.task_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let landing = [
+        RunStatus::Integrating,
+        RunStatus::Integrated,
+        RunStatus::Succeeded,
+    ];
+    match latest {
+        Some((run, status))
+            if run == op.run_id
+                && status == premise.run_status.as_str()
+                && !landing.iter().any(|landing| landing.as_str() == status) => {}
+        Some((run, status)) => {
+            return Err(stale(format!(
+                "run {run} is {status}, and the diagnosis read run {} {}",
+                op.run_id,
+                premise.run_status.as_str()
+            )));
+        }
+        None => return Err(stale(format!("task {} has no run", op.task_id))),
+    }
+    if let Some(window_end) = premise.read_until {
+        let kinds = replan_detect::PROGRESS.map(EventKind::as_str);
+        let progress: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT id, kind FROM run_events WHERE task_id=?1 AND id>?2
+                 AND kind IN (?3, ?4, ?5, ?6, ?7, ?8) ORDER BY id LIMIT 1",
+                params![
+                    op.task_id, window_end, kinds[0], kinds[1], kinds[2], kinds[3], kinds[4],
+                    kinds[5]
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((id, kind)) = progress {
+            return Err(stale(format!(
+                "{kind} event {id} came after the last event it read ({window_end})"
+            )));
+        }
+    }
+    if premise.manual == Some(false) {
+        let joined: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM run_events WHERE task_id=?1 AND kind=?2
+                 AND json_extract(payload,'$.operation_id')=?3
+                 AND json_extract(payload,'$.origin')=?4 LIMIT 1",
+                params![
+                    op.task_id,
+                    EventKind::ReplanRequested.as_str(),
+                    op.id,
+                    ReplanOrigin::Manual.as_str()
+                ],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if op.origin == ReplanOrigin::Manual || joined.is_some() {
+            return Err(stale(
+                "a person's request joined the operation since it was decided".to_owned(),
+            ));
+        }
+    }
+    if let Some(limit) = premise.max_auto_parks
+        && to == ReplanStatus::PauseRequested
+    {
+        let parks = replan_detect::auto_parks(&lineage_in(conn, op.task_id)?);
+        if parks >= limit {
+            return Err(stale(format!(
+                "the lineage's parks without a person are used up ({parks} of {limit})"
+            )));
+        }
+    }
+    let mut now = conditions_of(conn, op.task_id)?;
+    now.successors.clone_from(&op.conditions.successors);
+    if now.version() != op.task_version {
+        return Err(stale(format!("task {} was edited", op.task_id)));
+    }
+    Ok(())
 }
 
 /// Add `mappings` to operation `id`'s condition mappings on `conn` inside

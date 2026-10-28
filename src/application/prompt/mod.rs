@@ -40,6 +40,7 @@ use crate::domain::{
 mod known_failures;
 mod plan_review;
 mod planners;
+mod replan_diagnosis;
 mod requests;
 mod run_review;
 mod satisfied_review;
@@ -49,6 +50,7 @@ mod worker;
 pub use known_failures::*;
 pub use plan_review::*;
 pub use planners::*;
+pub use replan_diagnosis::*;
 pub use requests::*;
 pub use run_review::*;
 pub use satisfied_review::*;

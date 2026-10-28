@@ -182,7 +182,9 @@ impl ReplanStatus {
         use ReplanStatus as S;
         match self {
             S::Candidate => &[S::Diagnosing, S::Continuing, S::PauseRequested],
-            S::Diagnosing => &[S::Continuing, S::PauseRequested, S::Blocked],
+            // `diagnosing` again: each diagnosis job, and each ask of one,
+            // claims the operation under a new generation.
+            S::Diagnosing => &[S::Diagnosing, S::Continuing, S::PauseRequested, S::Blocked],
             // `continuing` before the park: the run landed first, its
             // landing begun before the fence (the operation is not needed).
             S::PauseRequested => &[S::Quiescing, S::Snapshotting, S::Continuing, S::Blocked],
@@ -484,11 +486,68 @@ pub struct Diagnosis {
     pub confidence: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_check: Option<String>,
+    /// The last event of the task the diagnosis read: the runtime's next
+    /// detection counts only the reviews after it
+    /// ([`super::replan_detect::window`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_end: Option<EventId>,
+    /// How many acceptance items the diagnosis found unmet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<usize>,
+    /// Who moved the operation on from the diagnosis: the runtime applying
+    /// it, or a person answering its ask
+    /// ([`super::replan_detect::DECIDED_BY_RUNTIME`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    /// Why, in the diagnosis's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// What the runtime's application of a diagnosis rests on, which the
+    /// move from `diagnosing` checks again in its own transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub premise: Option<DiagnosisPremise>,
+}
+
+/// What a decision on a diagnosis read, which the move that applies it
+/// checks again in its own transaction: the status of the run then and,
+/// for a diagnosis job's verdict, the last event of the task it read, the
+/// run's HEAD, whether a person had asked for the replanning and the
+/// lineage's limit of parks without a person. The move is refused once
+/// the run's status changed, a review, a turn or a receipt of the task
+/// came after `read_until`, the task's conditions changed from the
+/// operation's, the task left `in_progress` or another run took it over,
+/// a person's request joined an operation the decision read as no
+/// person's, or a park would go past `max_auto_parks`; a run that is
+/// landing or landed refuses it whatever was read. The HEAD, which no
+/// transaction of the queue reads, is compared by the runtime just before
+/// the move ([`Self::head_moved`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosisPremise {
+    pub run_status: RunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_until: Option<EventId>,
+    /// The run's HEAD as the job started, when its worktree could be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// Whether the decision took the operation as a person's request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual: Option<bool>,
+    /// For a park without a person, the lineage's limit of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_auto_parks: Option<usize>,
+}
+
+impl DiagnosisPremise {
+    /// Whether the run's HEAD `now` is another than the one the job read
+    /// (a HEAD read neither time, or only now, is not compared).
+    pub fn head_moved(&self, now: Option<&str>) -> bool {
+        matches!((self.head.as_deref(), now), (Some(read), Some(now)) if read != now)
+    }
 }
 
 /// A request or a proposal of an operation on `run`: why, with the events
 /// it rests on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewReplan {
     pub run: RunId,
     pub reason: String,
@@ -686,7 +745,9 @@ pub fn check_mappings(
 /// more at the pause's fence, so the writes under the earlier one (a
 /// receipt, a turn, a landing begun before) are refused.
 pub const fn generation_after(from: ReplanStatus, to: ReplanStatus, generation: i64) -> i64 {
-    if matches!(to, ReplanStatus::PauseRequested) && !from.guards() {
+    if (matches!(to, ReplanStatus::PauseRequested) && !from.guards())
+        || matches!(to, ReplanStatus::Diagnosing)
+    {
         generation + 1
     } else {
         generation
@@ -1259,6 +1320,16 @@ mod tests {
             generation_after(ReplanStatus::PauseRequested, ReplanStatus::Quiescing, 2),
             2
         );
+        // Each claim of a diagnosis raises it, so two never claim at once.
+        assert_eq!(
+            generation_after(ReplanStatus::Candidate, ReplanStatus::Diagnosing, 1),
+            2
+        );
+        assert_eq!(
+            generation_after(ReplanStatus::Diagnosing, ReplanStatus::Diagnosing, 2),
+            3
+        );
+        assert!(ReplanStatus::Diagnosing.can_move_to(ReplanStatus::Diagnosing));
         let parked = op(ReplanStatus::Parked);
         assert_eq!(parked.guard().map(|guard| guard.operation), Some(parked.id));
         assert!(op(ReplanStatus::Candidate).guard().is_none());

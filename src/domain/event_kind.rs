@@ -350,6 +350,9 @@ event_kinds! {
     ReplanCarryEnded => "replan_carry_ended",
     ReplanCarryFailed => "replan_carry_failed",
     ReplanChildrenReleased => "replan_children_released",
+    ReplanDiagnosed => "replan_diagnosed",
+    ReplanDiagnosisFailed => "replan_diagnosis_failed",
+    ReplanDiagnosisStarted => "replan_diagnosis_started",
     ReplanParked => "replan_parked",
     ReplanPlanApproved => "replan_plan_approved",
     ReplanPlanSubmitted => "replan_plan_submitted",
@@ -1867,6 +1870,12 @@ mod tests {
             (
                 EventKind::ReplanChildrenReleased,
                 "replan_children_released",
+            ),
+            (EventKind::ReplanDiagnosed, "replan_diagnosed"),
+            (EventKind::ReplanDiagnosisFailed, "replan_diagnosis_failed"),
+            (
+                EventKind::ReplanDiagnosisStarted,
+                "replan_diagnosis_started",
             ),
             (EventKind::ReplanParked, "replan_parked"),
             (EventKind::ReplanPlanApproved, "replan_plan_approved"),

@@ -850,6 +850,19 @@ pub fn attention(
                 event_kind::ASK_ANSWERED,
                 AttentionNext::ApplyingAnswer { ask_id: ask.id },
             )
+        } else if ask.kind == AskKind::Decide
+            && ask.asked_by == crate::domain::replan_detect::DIAGNOSIS_ASKER
+            && ask.answer.as_deref().is_some_and(|answer| {
+                crate::domain::recovery::chosen_option(&ask.options, answer).is_some()
+            })
+        {
+            // The supervisor goes on with the task or parks it for the
+            // replanning, as the answer to its diagnosis chose.
+            (
+                "answered",
+                event_kind::ASK_ANSWERED,
+                AttentionNext::ApplyingAnswer { ask_id: ask.id },
+            )
         } else if ask.kind == AskKind::UpdateFailed
             && ask
                 .answer

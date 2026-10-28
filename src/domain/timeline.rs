@@ -70,6 +70,43 @@ pub fn provider_switches(events: &[RunEvent]) -> Vec<Value> {
         .collect()
 }
 
+/// The steps of the replanning of the run (docs/plans/task-replanning.md),
+/// oldest first: the operations opened on it (`replan_requested`, with
+/// their origin), their diagnosis jobs and what the runtime made of each
+/// (`replan_diagnosis_started`, `replan_diagnosed` with its outcome,
+/// `replan_diagnosis_failed`), and their moves (`replan_status_changed`),
+/// each with its event, time and operation.
+pub fn replan_steps(events: &[RunEvent]) -> Vec<Value> {
+    const FIELDS: [&str; 9] = [
+        "origin", "attempt", "outcome", "why", "ask_id", "from", "to", "reason", "error",
+    ];
+    events
+        .iter()
+        .filter(|e| {
+            e.kind.is_in(&[
+                EventKind::ReplanRequested,
+                EventKind::ReplanDiagnosisStarted,
+                EventKind::ReplanDiagnosed,
+                EventKind::ReplanDiagnosisFailed,
+                EventKind::ReplanStatusChanged,
+            ])
+        })
+        .map(|e| {
+            let mut step = serde_json::Map::new();
+            step.insert("event_id".into(), serde_json::json!(e.id));
+            step.insert("at".into(), serde_json::json!(e.created_at));
+            step.insert("kind".into(), serde_json::json!(e.kind.as_str()));
+            step.insert("operation_id".into(), e.payload["operation_id"].clone());
+            for field in FIELDS {
+                if let Some(value) = e.payload.get(field).filter(|v| !v.is_null()) {
+                    step.insert(field.into(), value.clone());
+                }
+            }
+            Value::Object(step)
+        })
+        .collect()
+}
+
 /// The default shortest gap `timeline` reports, in seconds.
 pub const DEFAULT_GAP_SECS: i64 = 300;
 
@@ -407,6 +444,52 @@ mod tests {
         assert_eq!(ids, [1, 2, 3]);
         assert_eq!(all[1].kind, EventKind::UpdateInstalled);
         assert_eq!(merged(&run, &[]).len(), 2);
+    }
+
+    /// The replanning's steps of the run, each with its operation and what
+    /// its event says of it; other events are left out.
+    #[test]
+    fn the_replanning_steps_of_a_run_are_listed_in_order() {
+        let run = events(&[
+            (
+                "replan_requested",
+                json!({"operation_id": 4, "origin": "runtime", "created": true}),
+                "10:00:00.000",
+            ),
+            (
+                "turn_started",
+                json!({"what": "revise request"}),
+                "10:00:01.000",
+            ),
+            (
+                "replan_diagnosis_started",
+                json!({"operation_id": 4, "attempt": 1}),
+                "10:00:02.000",
+            ),
+            (
+                "replan_diagnosed",
+                json!({"operation_id": 4, "attempt": 1, "outcome": "ask", "why": "low_confidence",
+                       "ask_id": 9, "verdict": {"choice": "replan"}}),
+                "10:00:03.000",
+            ),
+            (
+                "replan_status_changed",
+                json!({"operation_id": 4, "from": "diagnosing", "to": "pause_requested",
+                       "reason": "a person chose replan in ask 9"}),
+                "10:00:04.000",
+            ),
+        ]);
+        let steps = replan_steps(&run);
+        assert_eq!(steps.len(), 4);
+        assert_eq!(
+            steps[0],
+            json!({"event_id": 1, "at": "2026-09-24T10:00:00.000Z", "kind": "replan_requested",
+                   "operation_id": 4, "origin": "runtime"})
+        );
+        assert_eq!(steps[2]["outcome"], "ask");
+        assert_eq!(steps[2]["why"], "low_confidence");
+        assert!(steps[2].get("verdict").is_none());
+        assert_eq!(steps[3]["to"], "pause_requested");
     }
 
     #[test]

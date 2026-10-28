@@ -1553,6 +1553,45 @@ impl RunTransitions for SqliteQueue {
     ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
         SqliteQueue::replans_of_run(self, run)
     }
+    fn open_replan_operations(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        SqliteQueue::replan_operations(self, false)
+    }
+    fn replan_lineage(
+        &self,
+        task: crate::domain::TaskId,
+    ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        SqliteQueue::replan_lineage(self, task)
+    }
+    fn detect_replan(
+        &mut self,
+        new: &crate::domain::task_replan::NewReplan,
+        by_id: &str,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        Ok(SqliteQueue::record_replan(
+            self,
+            new,
+            crate::domain::task_replan::ReplanOrigin::Runtime,
+            "supervisor",
+            by_id,
+        )?
+        .operation)
+    }
+    fn ask_replan_diagnosis(
+        &mut self,
+        ask: &crate::domain::NewAsk,
+        op: (crate::domain::ReplanId, i64),
+        reason: &str,
+        run: &RunId,
+        written: (
+            serde_json::Value,
+            Option<&crate::domain::task_replan::DiagnosisPremise>,
+        ),
+    ) -> Result<(
+        crate::domain::AskOutcome,
+        crate::domain::task_replan::ReplanOperation,
+    )> {
+        SqliteQueue::ask_replan_diagnosis(self, ask, op, reason, run, written)
+    }
     fn move_replan(
         &mut self,
         id: crate::domain::ReplanId,

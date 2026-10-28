@@ -98,6 +98,7 @@ use crate::{
         provider_switch::ProviderFallback,
         queue_broker::RegistryHost,
         recheck::RecheckConfig,
+        replan_detect::ReplanConfig,
         resume::ResumeConfig,
         retention::RetentionConfig,
         review_builtins::{self, BuiltinAgent, BuiltinSetting},
@@ -236,6 +237,12 @@ const PROVIDER_FALLBACK_TABLE: &str = "provider_fallback";
 /// resume starts a new session (ADR-t2080-1); its key is on
 /// [`FreshSessionConfig`].
 const FRESH_SESSION_TABLE: &str = "fresh_session";
+/// `[replan]`: whether the runtime detects a long-running task and
+/// diagnoses the replanning operations, and its limits
+/// (docs/plans/task-replanning.md); its keys, defaults and meaning are on
+/// [`ReplanConfig`]. A binary older than this table refuses it, so a
+/// repository adds it only once the binary that runs its queue reads it.
+const REPLAN_TABLE: &str = "replan";
 /// `[review.jobs]`: the timeout of each kind of job of a run's review
 /// (ADR-t1895-1 decision 1) and how many agent jobs of the reviews run at
 /// once; its keys are on [`ReviewJobs`].
@@ -469,7 +476,7 @@ const LOCAL_GATE_PATHS: &str = "paths";
 const LOCAL_GATE_KIND: &str = "kind";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 31] = [
+const TABLES: [&str; 32] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -489,6 +496,7 @@ const TABLES: [&str; 31] = [
     HEADLESS_TABLE,
     PROVIDER_FALLBACK_TABLE,
     FRESH_SESSION_TABLE,
+    REPLAN_TABLE,
     REVIEW_JOBS_TABLE,
     REVIEW_TABLE,
     REVIEW_CODE_TABLE,
@@ -619,6 +627,9 @@ pub struct Config {
     pub provider_fallback: ProviderFallback,
     /// `[fresh_session]` (ADR-t2080-1); no key starts no new session.
     pub fresh_session: FreshSessionConfig,
+    /// `[replan]`, each key's default where unset; without the table the
+    /// runtime detects and diagnoses nothing.
+    pub replan: ReplanConfig,
     /// `[review.jobs]` (ADR-t1895-1 decision 1); a kind without its key
     /// keeps the provider's review timeout, and no `concurrency` keeps
     /// its default.
@@ -719,6 +730,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut light_changes: Option<(Vec<TaskChange>, usize)> = None;
     let mut fallback_keys: Vec<String> = Vec::new();
     let mut fresh_session_keys: Vec<String> = Vec::new();
+    let mut replan_keys: Vec<String> = Vec::new();
     let mut review_jobs_keys: Vec<String> = Vec::new();
     // `[ci_watch]`'s header line and the keys read, the table checked once
     // the file is read whole (its `workflow` is required).
@@ -1633,6 +1645,30 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 config.fresh_session.peak_context_above =
                     Some(u64::try_from(tokens).with_context(with)?);
                 fresh_session_keys.push(key.to_owned());
+            }
+            Some(REPLAN_TABLE) => {
+                ensure!(
+                    ReplanConfig::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REPLAN_TABLE}]; the keys are {}",
+                    ReplanConfig::KEYS.join(", ")
+                );
+                ensure!(
+                    !replan_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let count = |what| -> Result<usize> {
+                    usize::try_from(parse_positive(rest.trim(), what).with_context(with)?)
+                        .with_context(with)
+                };
+                let replan = &mut config.replan;
+                match key {
+                    "enabled" => replan.enabled = parse_bool(rest.trim()).with_context(with)?,
+                    "non_pass_reviews" => replan.non_pass_reviews = count("number of reviews")?,
+                    "continue_reviews" => replan.continue_reviews = count("number of reviews")?,
+                    _ => replan.max_auto_parks = count("number of parks")?,
+                }
+                replan_keys.push(key.to_owned());
             }
             Some(EVAL_TABLE) => {
                 ensure!(
@@ -2821,6 +2857,21 @@ pub fn load_fresh_session(root: &Path) -> Result<Option<FreshSessionConfig>> {
         parse_config(&text)
             .with_context(|| format!("parse {}", path.display()))?
             .fresh_session,
+    ))
+}
+
+/// `[replan]` of the `dagq.toml` in `root`, `None` when there is no
+/// file; no table keeps the runtime's detection and diagnosis off, and a
+/// key not set keeps its default ([`ReplanConfig`]).
+pub fn load_replan(root: &Path) -> Result<Option<ReplanConfig>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        parse_config(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .replan,
     ))
 }
 
@@ -6544,6 +6595,137 @@ LITERAL = 'no \n escapes # here'
         )
         .unwrap();
         assert!(load_fresh_session(dir.path()).is_err());
+    }
+
+    /// `[replan]` turns the runtime's detection and diagnosis on with
+    /// `enabled = true` and sets its limits, each a whole number above 0
+    /// with its default where unset; without the table (or with `enabled =
+    /// false`) it is off, the limits read as their defaults. The table
+    /// knows no other key and takes each key once.
+    #[test]
+    fn parses_the_replan_table_and_leaves_it_off_without_it() {
+        let replan = |text: &str| parse_config(text).unwrap().replan;
+        let off = ReplanConfig::default();
+        assert!(!off.enabled);
+        assert_eq!(
+            (
+                off.non_pass_reviews,
+                off.continue_reviews,
+                off.max_auto_parks
+            ),
+            (3, 2, 3)
+        );
+        assert_eq!(replan(""), off);
+        assert_eq!(
+            replan(
+                "[replan]
+"
+            ),
+            off
+        );
+        assert_eq!(
+            replan(
+                "[replan]
+enabled = false
+"
+            ),
+            off
+        );
+        assert_eq!(
+            replan(
+                "[replan]
+enabled = true # detect
+"
+            ),
+            ReplanConfig {
+                enabled: true,
+                ..off
+            }
+        );
+        assert_eq!(
+            replan(
+                "[replan]
+enabled = true
+non_pass_reviews = 4
+continue_reviews = 1
+max_auto_parks = 2
+"
+            ),
+            ReplanConfig {
+                enabled: true,
+                non_pass_reviews: 4,
+                continue_reviews: 1,
+                max_auto_parks: 2,
+            }
+        );
+        for (text, expected) in [
+            (
+                "[replan]
+enabled = yes
+",
+                "dagq.toml:2: value of enabled: expected true or false, not yes",
+            ),
+            (
+                "[replan]
+non_pass_reviews = 0
+",
+                "dagq.toml:2: value of non_pass_reviews: must be a positive number of reviews, not 0",
+            ),
+            (
+                "[replan]
+continue_reviews = 1.5
+",
+                "dagq.toml:2: value of continue_reviews: expected a whole number of reviews, not 1.5",
+            ),
+            (
+                "[replan]
+max_auto_parks = -1
+",
+                "dagq.toml:2: value of max_auto_parks: must be a positive number of parks, not -1",
+            ),
+            (
+                "[replan]
+turns = 12
+",
+                "dagq.toml:2: unknown key turns in [replan]; the keys are enabled, non_pass_reviews, continue_reviews, max_auto_parks",
+            ),
+            (
+                "[replan]
+enabled = true
+enabled = false
+",
+                "dagq.toml:3: enabled is defined twice",
+            ),
+            (
+                "[replan]
+[replan]
+",
+                "dagq.toml:2: [replan] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_replan(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[replan]
+enabled = true
+",
+        )
+        .unwrap();
+        assert!(load_replan(dir.path()).unwrap().unwrap().enabled);
+    }
+
+    /// This repository's own `dagq.toml` reads, and leaves the runtime's
+    /// detection off: it adds no `[replan]` until the fixed binary that
+    /// runs its queue reads the table.
+    #[test]
+    fn the_repositorys_own_config_leaves_the_replan_detection_off() {
+        let text = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(CONFIG_FILE_NAME))
+            .unwrap();
+        assert_eq!(parse_config(&text).unwrap().replan, ReplanConfig::default());
     }
 
     /// `[supervisor] light_changes` names changes of `[tasks] changes`,

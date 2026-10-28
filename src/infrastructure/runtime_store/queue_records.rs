@@ -1,4 +1,6 @@
-//! Reports, KPI breaches and forecasts ([`QueueRecords`]).
+//! Reports, KPI breaches and forecasts ([`QueueRecords`]), and the
+//! replanning `status` and `doctor` read
+//! ([`crate::application::health::ReplanSource`]).
 
 use super::*;
 
@@ -145,5 +147,30 @@ impl QueueRecords for SqliteQueue {
     }
     fn ci_failure_fix_tasks(&self) -> Result<std::collections::BTreeMap<i64, Vec<TaskId>>> {
         SqliteQueue::ci_failure_fix_tasks(self)
+    }
+}
+
+impl crate::application::health::ReplanSource for SqliteQueue {
+    fn open_replans(
+        &self,
+    ) -> Result<
+        Vec<(
+            crate::domain::task_replan::ReplanOperation,
+            crate::domain::TaskStatus,
+        )>,
+    > {
+        Self::open_replans(self)
+    }
+    fn replan_operations(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        Self::replan_operations(self, true)
+    }
+    fn task_events(&self, task: TaskId) -> Result<Vec<RunEvent>> {
+        Self::task_events(self, task)
+    }
+    fn replan_lineage(
+        &self,
+        task: TaskId,
+    ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        Self::replan_lineage(self, task)
     }
 }

@@ -299,6 +299,15 @@ impl SqliteQueue {
                     && crate::domain::recovery::chosen_option(&ask.options, text).is_some()
             );
         }
+        if ask.kind == AskKind::Decide
+            && ask.asked_by == crate::domain::replan_detect::DIAGNOSIS_ASKER
+        {
+            // The supervisor goes on with the task or parks it for the
+            // replanning, as the option chosen says; any other answer is a
+            // person's to read.
+            payload["runtime_delivers"] =
+                json!(crate::domain::recovery::chosen_option(&ask.options, text).is_some());
+        }
         if ask.kind == AskKind::PlannerQuestion {
             // The supervisor types it into the workspace of the runtime's
             // planner that works on its task, or opens one for a draft that

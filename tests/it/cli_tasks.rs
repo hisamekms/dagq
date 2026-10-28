@@ -228,6 +228,12 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
                 "opens": true,
             });
         }
+        // No replanning yet, and a queue bound to no repository reads no
+        // `[replan]`: nothing is detected (docs/plans/task-replanning.md).
+        expected["replans"] = serde_json::json!({
+            "open": [], "guarding": 0, "problems": [], "detection": null,
+            "counts": {"operations": 0, "fenced": 0, "replaced_by": []},
+        });
         // Only the fields named here are compared, so a field another
         // feature adds to `doctor` or `status` does not rewrite this test;
         // that feature's own tests check its values.
