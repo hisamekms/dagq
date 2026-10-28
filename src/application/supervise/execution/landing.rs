@@ -3357,8 +3357,12 @@ fn failed_review_question(
 }
 
 /// The verdict a review whose agents decide where it goes (`route`)
-/// applies: the reasons of every judgment that goes there, an agent's
-/// prefixed with its name (the verdict's own when `parent_decides`), as a
+/// applies: the reasons of every judgment that goes with it
+/// ([`ReviewVerdict::sent_back_findings`]), an agent's prefixed with its
+/// name: the verdict's own when its judgment goes there, and also when it
+/// sends the run back lighter than an agent's that asks a person, so the
+/// ask shows and a person's `send_back` resumes the session with the
+/// review's own reasons too (ADR-t1453-1 decision 7); never a `pass`'s. As a
 /// `revise` when it goes back and a `concern` when it asks. Its concern
 /// fields are those that make a person needed: a `discard` when any
 /// judgment that asks gives one, else a `scope`; no recommendation, which
@@ -4253,6 +4257,71 @@ mod tests {
             )
         );
         assert!(!question.contains("recommends"), "{question}");
+    }
+
+    /// A review whose own `revise` was lighter than a subagent's `concern`
+    /// asking a person shows the review's own reasons beside the
+    /// subagent's in its `approve_landing` ask, and a person's `send_back`,
+    /// with a reason or without, resumes the session with both
+    /// (ADR-t1453-1 decision 7). Where it goes and why stay the
+    /// subagent's.
+    #[test]
+    fn a_lighter_revise_beside_an_asking_concern_keeps_its_reasons() {
+        let finished = json!({"verdict": "revise",
+            "reasons": [
+                {"text": "the guard is missing", "codes": ["code_defect"]},
+                {"text": "criterion 2 is unmet", "codes": ["acceptance_unmet"]},
+            ],
+            "summary": "fix it",
+            "agents": [
+                {"agent": "builtin:security", "status": "completed", "verdict": "concern",
+                    "reasons": ["the token leaks"], "summary": "s",
+                    "recommendation": "send_back", "confidence": "low"},
+                {"agent": "design", "status": "completed", "verdict": "pass",
+                    "reasons": [], "summary": "ok"},
+            ],
+            "route": {"destination": "ask", "parent": "send_back"}});
+        let expected = [
+            "the guard is missing",
+            "criterion 2 is unmet",
+            "builtin:security: the token leaks",
+        ];
+        let recorded = verdict(finished.clone());
+        let route = recorded.route(true);
+        assert_eq!(route.destination, Destination::Ask);
+        assert_eq!(route.parent, Destination::SendBack);
+        let parent_decides = route.parent == route.destination;
+        let combined = combined_verdict(&recorded, &route, parent_decides);
+        assert_eq!(combined.verdict, ReviewDecision::Concern);
+        assert_eq!(combined.reasons, expected);
+        assert_eq!(
+            combined.reason_codes,
+            [
+                vec!["code_defect".to_owned()],
+                vec!["acceptance_unmet".to_owned()],
+                vec!["unlabeled".to_owned()],
+            ]
+        );
+        assert_eq!(
+            agents_escalation(&recorded, &route, parent_decides),
+            "a person decides: the subagent builtin:security returned concern recommending send_back (low confidence); the review's own verdict revise was lighter"
+        );
+        let findings = review_findings(&finished).unwrap();
+        assert_eq!(findings, expected);
+        assert_eq!(
+            sent_back_reason(AskId::new(7), None, &findings),
+            format!(
+                "the review's findings were sent back by ask 7: {}",
+                expected.join("; ")
+            )
+        );
+        assert_eq!(
+            sent_back_reason(AskId::new(7), Some("fix all of them"), &findings),
+            format!(
+                "a person sent the run back in ask 7: fix all of them; the review's findings: {}",
+                expected.join("; ")
+            )
+        );
     }
 
     /// What a review whose agents decide where it goes applies and asks

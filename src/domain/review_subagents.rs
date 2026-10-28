@@ -620,6 +620,17 @@ impl VerdictRoute {
             .collect()
     }
 
+    /// Whether the parent's own judgment is among those the run goes with
+    /// (ADR-t1453-1 decision 7, the reasons of every judgment that asked to
+    /// send the run back go with it): when it goes where the route does,
+    /// or when both are heavier than landing, as a parent's `revise` that
+    /// was lighter than an agent's `concern` asking a person. A parent that
+    /// lands while its agents do not is not.
+    pub fn parent_goes_with(&self) -> bool {
+        self.parent == self.destination
+            || (self.parent > Destination::Land && self.destination > Destination::Land)
+    }
+
     /// Whether the parent's aggregate was lighter than an agent's judgment.
     pub fn parent_lighter(&self) -> bool {
         self.parent < self.destination

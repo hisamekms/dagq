@@ -606,9 +606,10 @@ fn deciding_route(
 /// its `approve_landing` ask showed them: when it recorded a route that its
 /// agents' judgments decide (ADR-t1453-1 decision 7), each deciding
 /// agent's under its name and the verdict's own only when its judgment
-/// went there too; else the verdict's reasons, or its summary when it gave
-/// none ([`ReviewVerdict::sent_back_findings`]). `None` when the payload is
-/// no verdict.
+/// went with it (a lighter `revise` too, never a `pass`); else the
+/// verdict's reasons, or its summary when it gave none
+/// ([`ReviewVerdict::sent_back_findings`]). `None` when the payload is no
+/// verdict.
 pub fn review_findings(payload: &Value) -> Option<Vec<String>> {
     let verdict = review_verdict(payload).ok()?;
     let route = deciding_route(payload, &verdict);
@@ -626,7 +627,7 @@ pub fn review_findings(payload: &Value) -> Option<Vec<String>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SentBackReview {
     /// The verdicts of the judgments that sent it back, each once: the
-    /// review's own when its judgment went where the route went, then each
+    /// review's own when its judgment went with the route, then each
     /// deciding agent's.
     pub verdicts: Vec<crate::domain::ReviewDecision>,
     /// Its findings ([`review_findings`]).
@@ -651,7 +652,7 @@ pub fn review_sent_back(payload: &Value) -> Option<SentBackReview> {
     let mut verdicts = Vec::new();
     if route
         .as_ref()
-        .is_none_or(|route| route.parent == route.destination)
+        .is_none_or(crate::domain::review_subagents::VerdictRoute::parent_goes_with)
     {
         verdicts.push(verdict.verdict);
     }

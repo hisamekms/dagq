@@ -621,9 +621,13 @@ impl ReviewVerdict {
     }
 
     /// The reasons this verdict sends the run back with, as the judgment
-    /// past the revise limit reads them (ADR-t2599-1): the verdict's own
-    /// when there is no `route` or its own judgment goes where the route
-    /// does, then those of each agent whose judgment decides the route
+    /// past the revise limit reads them (ADR-t2599-1), the
+    /// `approve_landing` ask shows them and a person's `send_back` resumes
+    /// the session with them: the verdict's own when there is no `route`
+    /// or its own judgment goes with the route
+    /// ([`review_subagents::VerdictRoute::parent_goes_with`], also a
+    /// `revise` lighter than an agent's judgment that asks a person, never
+    /// a `pass`), then those of each agent whose judgment decides the route
     /// ([`review_subagents::VerdictRoute::deciding`]), under the agent's
     /// name, marked when the agent is of the security role. A judgment
     /// that sends the run back with no reason gives its summary,
@@ -634,7 +638,7 @@ impl ReviewVerdict {
         route: Option<&review_subagents::VerdictRoute>,
     ) -> Vec<review_reason::Finding> {
         let mut findings = Vec::new();
-        if route.is_none_or(|route| route.parent == route.destination) {
+        if route.is_none_or(review_subagents::VerdictRoute::parent_goes_with) {
             let texts = if self.reasons.is_empty() {
                 vec![self.summary.clone()]
             } else {

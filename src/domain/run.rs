@@ -1650,5 +1650,24 @@ mod tests {
             })
         );
         assert_eq!(review_sent_back(&serde_json::json!({"verdict": 3})), None);
+        // A review's own revise lighter than an agent's concern asking a
+        // person goes with it, its reasons first.
+        let lighter = serde_json::json!({"verdict": "revise", "reasons": ["fix the guard"], "summary": "s",
+            "agents": [
+                {"agent": "builtin:security", "status": "completed", "verdict": "concern",
+                    "reasons": ["the token leaks"], "summary": "s",
+                    "recommendation": "send_back", "confidence": "low"},
+            ],
+            "route": {"destination": "ask", "parent": "send_back"}});
+        assert_eq!(
+            review_sent_back(&lighter),
+            Some(SentBackReview {
+                verdicts: vec![ReviewDecision::Revise, ReviewDecision::Concern],
+                findings: vec![
+                    "fix the guard".into(),
+                    "builtin:security: the token leaks".into()
+                ],
+            })
+        );
     }
 }
