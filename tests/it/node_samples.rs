@@ -173,6 +173,119 @@ fn the_store_keeps_one_row_per_node_and_second_and_its_retention() {
     assert!(rows(&queue).last().unwrap().id > last);
 }
 
+/// More rows and more files' marks past the retention than one
+/// transaction holds: the retention removes them a bounded number at a
+/// time, the rows before the marks, so one stopped part way (a row or a
+/// mark it cannot remove) has removed the batches before it, and the next
+/// finishes the rest; the rows and marks of the days kept stay. After it,
+/// a retention of the same day removes nothing and takes no write lock: it
+/// runs while another connection holds that lock.
+#[test]
+fn the_retention_removes_by_batches_resumes_and_then_writes_nothing() {
+    use dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION as BATCH;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    let queue = SqliteQueue::init(&db).unwrap();
+    let day = NOW / DAY;
+    let old: Vec<HostSample> = (0..i64::try_from(BATCH * 2 + 50).unwrap())
+        .map(|n| full(NOW - DAY + n * 5))
+        .collect();
+    let kept: Vec<HostSample> = (0..10).map(|n| full(NOW + n * 5)).collect();
+    let old_files: Vec<String> = (0..BATCH + 50)
+        .map(|n| format!("metrics-old-{n:04}.csv"))
+        .collect();
+    queue
+        .import_node_samples(HOST_NODE, &old_files[0], day - 1, &old, 900)
+        .unwrap();
+    for file in &old_files[1..] {
+        queue
+            .import_node_samples(HOST_NODE, file, day - 1, &[], 10)
+            .unwrap();
+    }
+    queue
+        .import_node_samples(HOST_NODE, "metrics-new.csv", day, &kept, 300)
+        .unwrap();
+    let marks = |queue: &SqliteQueue| queue.imported_files(HOST_NODE).unwrap().len();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER stop BEFORE DELETE ON node_samples WHEN old.unix = {}
+         BEGIN SELECT RAISE(ABORT, 'stopped'); END",
+        old[BATCH + 5].unix
+    ))
+    .unwrap();
+    let error = queue.remove_node_samples(day).unwrap_err();
+    assert!(format!("{error:#}").contains("stopped"), "{error:#}");
+    assert_eq!(rows(&queue).len(), old.len() + kept.len() - BATCH);
+    assert_eq!(marks(&queue), old_files.len() + 1);
+    // The next retention's last batch of rows also removes the first
+    // marks; the stop is in a later batch of marks.
+    let first_marks = BATCH * 2 - (old.len() - BATCH);
+    conn.execute_batch(&format!(
+        "DROP TRIGGER stop;
+         CREATE TRIGGER stop BEFORE DELETE ON node_sample_imports WHEN old.file = '{}'
+         BEGIN SELECT RAISE(ABORT, 'stopped'); END",
+        old_files[first_marks + 5]
+    ))
+    .unwrap();
+    let error = queue.remove_node_samples(day).unwrap_err();
+    assert!(format!("{error:#}").contains("stopped"), "{error:#}");
+    assert_eq!(rows(&queue).len(), kept.len());
+    assert_eq!(marks(&queue), old_files.len() - first_marks + 1);
+    conn.execute_batch("DROP TRIGGER stop").unwrap();
+    assert_eq!(queue.remove_node_samples(day).unwrap(), 0);
+    assert_eq!(
+        rows(&queue)
+            .iter()
+            .map(|row| row.sample.clone())
+            .collect::<Vec<_>>(),
+        kept
+    );
+    assert_eq!(
+        queue.imported_files(HOST_NODE).unwrap(),
+        [("metrics-new.csv".to_owned(), 300)].into()
+    );
+
+    queue.set_busy_timeout(Duration::ZERO).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert_eq!(queue.remove_node_samples(day).unwrap(), 0);
+    conn.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(rows(&queue).len(), kept.len());
+}
+
+/// While the retention removes many rows, another connection's heartbeat
+/// gets the write lock between two of its transactions, within its busy
+/// wait: it sees some rows removed and some not yet.
+#[test]
+fn a_heartbeat_writes_while_the_retention_runs() {
+    use crate::common::{self, queue::*};
+    use dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION as BATCH;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    let day = NOW / DAY;
+    let old: Vec<HostSample> = (0..i64::try_from(BATCH * 4 + 10).unwrap())
+        .map(|n| full(NOW - DAY + n * 5))
+        .collect();
+    SqliteQueue::init(&db)
+        .unwrap()
+        .import_node_samples(HOST_NODE, "metrics-old.csv", day - 1, &old, 900)
+        .unwrap();
+    beats(&db);
+    let total = i64::try_from(old.len()).unwrap();
+    let heart = heart(&db);
+    let job = {
+        let db = db.clone();
+        std::thread::spawn(move || SqliteQueue::open(&db).unwrap().remove_node_samples(day))
+    };
+    let samples = "SELECT count(*) FROM node_samples";
+    until_committed(&db, samples, Some(total));
+    let (written, took, seen) = beat(&heart, &format!("SELECT ({samples})"));
+    let _waiting = common::within(common::STEP_LIMIT, "the retention of the samples");
+    assert_eq!(job.join().unwrap().unwrap(), old.len());
+    assert!(written, "the heartbeat was not written in {took:?}");
+    assert!(took < dagq::application::QUEUE_BUSY_TIMEOUT, "{took:?}");
+    assert!(0 < seen && seen < total, "{seen} of {total}");
+}
+
 /// Two supervisors of a queue sampling 10 s apart write one row to the
 /// store and the file, and one 30 s later a row to each; the store keeps
 /// the retention's local days, and every day with zero days.

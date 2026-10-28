@@ -185,19 +185,59 @@ impl NodeSampleStore for SqliteQueue {
             .collect()
     }
 
+    /// Read the rows and the files' import marks past the retention with no
+    /// lock, then remove them [`ROWS_PER_TRANSACTION`] a transaction
+    /// ([`in_batches`]), the rows before the marks: with none to remove
+    /// (the day's retention already ran, by another process too) nothing
+    /// is written and no write lock taken. Each batch judges its rows and
+    /// marks again under its lock, and a retention stopped between batches
+    /// is finished by the next.
     fn remove_node_samples(&self, before_day: i64) -> Result<usize> {
-        // Immediate: its first DELETE is the long one, and a deferred
-        // transaction's hold starts after its first write.
-        let tx = self.write_tx("node_samples_retention", TransactionBehavior::Immediate)?;
-        let removed = tx.execute(
-            "DELETE FROM node_samples WHERE local_day < ?1",
-            [before_day],
-        )?;
-        tx.execute(
-            "DELETE FROM node_sample_imports WHERE day < ?1",
-            [before_day],
-        )?;
-        tx.commit()?;
+        let mut removals: Vec<Removal> = self
+            .conn
+            .prepare("SELECT id FROM node_samples WHERE local_day < ?1 ORDER BY id")?
+            .query_map([before_day], |row| Ok(Removal::Sample(row.get(0)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        removals.extend(
+            self.conn
+                .prepare(
+                    "SELECT node_id, file FROM node_sample_imports WHERE day < ?1
+                     ORDER BY node_id, file",
+                )?
+                .query_map([before_day], |row| {
+                    Ok(Removal::Mark(row.get(0)?, row.get(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+        if removals.is_empty() {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        in_batches(self, "node_samples_retention", &removals, |tx, batch, _| {
+            for removal in batch {
+                match removal {
+                    Removal::Sample(id) => {
+                        let rows = tx
+                            .prepare_cached(
+                                "DELETE FROM node_samples WHERE id=?1 AND local_day < ?2",
+                            )?
+                            .execute(params![id, before_day])?;
+                        tx.wrote(rows);
+                        removed += rows;
+                    }
+                    Removal::Mark(node, file) => {
+                        let rows = tx
+                            .prepare_cached(
+                                "DELETE FROM node_sample_imports
+                                 WHERE node_id=?1 AND file=?2 AND day < ?3",
+                            )?
+                            .execute(params![node, file, before_day])?;
+                        tx.wrote(rows);
+                    }
+                }
+            }
+            Ok(())
+        })?;
         Ok(removed)
     }
 
@@ -211,6 +251,13 @@ impl NodeSampleStore for SqliteQueue {
     fn node_samples_after(&self, after: i64) -> Result<Vec<NodeSample>> {
         self.read_node_samples("id > ?1 ORDER BY id", params![after])
     }
+}
+
+/// A row of `node_samples` (its id) or a file's import mark (its node and
+/// file) the retention removes.
+enum Removal {
+    Sample(i64),
+    Mark(String, String),
 }
 
 impl SqliteQueue {
