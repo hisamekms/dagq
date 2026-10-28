@@ -588,14 +588,18 @@ impl SqliteQueue {
         Self::migrate(path, alive, now).map(Some)
     }
 
-    /// `dagq migrate`: applies the migrations this binary knows and the
-    /// queue lacks, with `user_version` and the floor in one transaction.
+    /// Apply the migrations this binary knows and the queue lacks, with
+    /// `user_version` and the floor in one transaction: what `dagq migrate`
+    /// and a service a replacement starts apply (ADR-t3102-2 decision 2).
     /// Before a breaking migration it refuses a queue in use — a
     /// registration of a live supervisor, an unfinished run, a live wrapper
-    /// (liveness per `alive`; `None` skips the check, for tests and tools
-    /// that know the queue is idle) — because their binaries could not open
-    /// the queue afterwards, and copies the database to `backups/` next to
-    /// it (ADR-0045 decisions 8, 9). `now` (UNIX seconds) names the copy.
+    /// ([`queue_users`], liveness per `alive`; `None` skips the check, for
+    /// tests and tools that know the queue is idle) — because their binaries
+    /// could not open the queue afterwards, and copies the database to
+    /// `backups/` next to it (ADR-0045 decisions 8, 9): the check, the copy
+    /// and the migrations under the one write lock of the transaction, so
+    /// no claim or registration comes between them. `now` (UNIX seconds)
+    /// names the copy.
     pub fn migrate(
         path: impl AsRef<Path>,
         alive: Option<&dyn Fn(u32) -> bool>,
@@ -608,38 +612,18 @@ impl SqliteQueue {
             .context("queue is not initialized; use init first")?;
         state.check_floor()?;
         let pending = pending_migrations(state.version);
-        let breaking = pending.iter().any(|m| !m.compatible);
-        let mut backup = None;
-        if breaking {
-            if let Some(alive) = alive {
-                ensure_idle(&queue.conn, alive, &pending)?;
-            }
-            let dir = path
-                .canonicalize()
-                .unwrap_or_else(|_| path.to_path_buf())
-                .with_file_name("backups");
-            std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-            // A rerun within the same second keeps the earlier copy.
-            let copy = (0..)
-                .map(|n| {
-                    let suffix = if n == 0 {
-                        String::new()
-                    } else {
-                        format!("-{n}")
-                    };
-                    dir.join(format!("queue-{}-{now}{suffix}.sqlite3", state.version))
-                })
-                .find(|copy| !copy.exists())
-                .expect("an unused backup name");
-            queue
-                .conn
-                .execute("VACUUM INTO ?1", [path_text(&copy)?])
-                .with_context(|| format!("back up the queue to {}", copy.display()))?;
-            backup = Some(copy);
-        }
-        if !pending.is_empty() {
-            queue.apply(state.version, alive.filter(|_| breaking))?;
-        }
+        let backup = if pending.is_empty() {
+            None
+        } else {
+            queue.apply(
+                state.version,
+                Some(&BreakingGuard {
+                    alive,
+                    db: path,
+                    now,
+                }),
+            )?
+        };
         let after = queue
             .state()?
             .context("queue is not initialized; use init first")?;
@@ -651,6 +635,25 @@ impl SqliteQueue {
             applied: pending,
             backup,
         })
+    }
+
+    /// Refuse, reading the queue at `path` alone, the breaking migrations
+    /// this binary would apply to it while it is in use ([`queue_users`]):
+    /// the look before a replacement's service takes over, which
+    /// [`Self::migrate`] repeats in its transaction.
+    pub fn refuse_breaking_in_use(path: &Path, alive: &dyn Fn(u32) -> bool) -> Result<()> {
+        let queue = Self::connect_with(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let state = queue
+            .state()?
+            .context("queue is not initialized; use init first")?;
+        let pending = pending_migrations(state.version);
+        if pending.iter().all(|m| m.compatible) {
+            return Ok(());
+        }
+        refuse_in_use(&queue_use(&queue.conn)?, alive, &pending)
     }
 
     /// The queue reading the time and creating IDs through `generators`
@@ -839,34 +842,43 @@ impl SqliteQueue {
         Ok(Some(QueueSchema { version, floor }))
     }
 
-    fn apply(&mut self, from: i64, alive: Option<&dyn Fn(u32) -> bool>) -> Result<()> {
+    /// Apply the migrations after `from` in one transaction; before a
+    /// breaking one, what `guard` asks for in the same transaction: the
+    /// copy it took, if any.
+    fn apply(&mut self, from: i64, guard: Option<&BreakingGuard>) -> Result<Option<PathBuf>> {
         // Table rebuilds drop and rename tables that other rows reference, so
         // enforcement is off during migration (a no-op inside a transaction)
         // and integrity is checked explicitly before commit.
         self.conn.pragma_update(None, "foreign_keys", false)?;
-        let result = self.apply_migrations(from, alive);
+        let result = self.apply_migrations(from, guard);
         self.conn.pragma_update(None, "foreign_keys", true)?;
         result
     }
 
-    fn apply_migrations(&mut self, from: i64, alive: Option<&dyn Fn(u32) -> bool>) -> Result<()> {
+    fn apply_migrations(
+        &mut self,
+        from: i64,
+        guard: Option<&BreakingGuard>,
+    ) -> Result<Option<PathBuf>> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if from == 0 && version != 0 {
             // Another `init` created the queue first; the caller checks it.
-            return Ok(());
+            return Ok(None);
         }
         ensure!(
             version == from,
             "queue schema changed from {from} to {version} while migrating; run migrate again"
         );
         let pending = pending_migrations(version);
-        // Checked again under the write lock: a claim may have slipped in
-        // since the first look.
-        if let Some(alive) = alive {
-            ensure_idle(&tx, alive, &pending)?;
+        let mut backup = None;
+        if let Some(guard) = guard.filter(|_| pending.iter().any(|m| !m.compatible)) {
+            if let Some(alive) = guard.alive {
+                refuse_in_use(&queue_use(&tx)?, alive, &pending)?;
+            }
+            backup = Some(back_up(guard.db, version, guard.now)?);
         }
         for (index, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
             tx.execute_batch(migration)
@@ -888,8 +900,52 @@ impl SqliteQueue {
             "queue migration would break {violations} foreign key references"
         );
         tx.commit()?;
-        Ok(())
+        Ok(backup)
     }
+}
+
+/// What [`SqliteQueue::migrate`] does before a breaking migration, in the
+/// transaction that applies it.
+struct BreakingGuard<'a> {
+    /// Liveness of the queue's users; `None` checks none.
+    alive: Option<&'a dyn Fn(u32) -> bool>,
+    /// The queue's database, copied first.
+    db: &'a Path,
+    /// What names the copy.
+    now: i64,
+}
+
+/// Copy the queue at `db`, at schema `version`, to `backups/` next to it,
+/// through a connection of its own: called while the migrating transaction
+/// holds the write lock and has written nothing, so the copy is the queue
+/// the check judged.
+fn back_up(db: &Path, version: i64, now: i64) -> Result<PathBuf> {
+    let dir = db
+        .canonicalize()
+        .unwrap_or_else(|_| db.to_path_buf())
+        .with_file_name("backups");
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    // A rerun within the same second keeps the earlier copy.
+    let copy = (0..)
+        .map(|n| {
+            let suffix = if n == 0 {
+                String::new()
+            } else {
+                format!("-{n}")
+            };
+            dir.join(format!("queue-{version}-{now}{suffix}.sqlite3"))
+        })
+        .find(|copy| !copy.exists())
+        .expect("an unused backup name");
+    let reader = Connection::open_with_flags(
+        db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("open {} to back it up", db.display()))?;
+    reader
+        .execute("VACUUM INTO ?1", [path_text(&copy)?])
+        .with_context(|| format!("back up the queue to {}", copy.display()))?;
+    Ok(copy)
 }
 
 /// A queue's schema as its header and floor table record it.
@@ -969,6 +1025,16 @@ impl SchemaState {
         self.floor > self.binary_schema_version
     }
 
+    /// Refuse the queue when its floor refuses this binary, with the error
+    /// [`SqliteQueue::open`] gives.
+    pub fn check_floor(&self) -> Result<()> {
+        QueueSchema {
+            version: self.schema_version,
+            floor: self.floor,
+        }
+        .check_floor()
+    }
+
     /// Refuse the pending migrations when any of them is breaking (ADR-0045
     /// decisions 5, 15): a supervisor or run of the older binary could not
     /// open the queue afterwards, so `up` and `install` apply only
@@ -1039,30 +1105,40 @@ fn has_table(conn: &Connection, name: &str) -> Result<bool> {
 /// uses the queue: a registered supervisor whose PID is alive, an unfinished
 /// run, a wrapper whose PID is alive (ADR-0045 decision 8). Reads only what
 /// every schema since the tables were added has, so it runs on the old schema.
-fn ensure_idle(
-    conn: &Connection,
-    alive: &dyn Fn(u32) -> bool,
-    pending: &[SchemaMigration],
-) -> Result<()> {
-    let mut users = Vec::new();
+/// What uses a queue as a breaking migration judges it: the registered
+/// supervisors (token, pid), the runs not finished (id, status) and the
+/// wrappers not exited (run, pid).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct QueueUse {
+    supervisors: Vec<(String, i64)>,
+    runs: Vec<(String, String)>,
+    wrappers: Vec<(String, i64)>,
+}
+
+/// The statuses of a run whose wrapper or supervisor uses the queue.
+const RUNS_IN_USE: [&str; 5] = [
+    "claimed",
+    "starting",
+    "running",
+    "validating",
+    "integrating",
+];
+
+fn queue_use(conn: &Connection) -> Result<QueueUse> {
+    let mut found = QueueUse::default();
     if has_table(conn, "supervisors")? {
         let mut rows = conn.prepare("SELECT token, pid FROM supervisors ORDER BY token")?;
-        for row in rows.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
-            let (token, pid) = row?;
-            if u32::try_from(pid).is_ok_and(alive) {
-                users.push(format!("supervisor {token} (pid {pid})"));
-            }
+        for row in rows.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            found.supervisors.push(row?);
         }
     }
     if has_table(conn, "task_runs")? {
-        let mut rows = conn.prepare(
-            "SELECT id, status FROM task_runs
-             WHERE status IN ('claimed','starting','running','validating','integrating')
-             ORDER BY rowid",
-        )?;
-        for row in rows.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-            let (id, status) = row?;
-            users.push(format!("run {id} ({status})"));
+        let mut rows = conn.prepare(&format!(
+            "SELECT id, status FROM task_runs WHERE status IN ({}) ORDER BY rowid",
+            RUNS_IN_USE.map(|status| format!("'{status}'")).join(",")
+        ))?;
+        for row in rows.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            found.runs.push(row?);
         }
     }
     if has_table(conn, "run_processes")? {
@@ -1070,13 +1146,44 @@ fn ensure_idle(
             "SELECT run_id, pid FROM run_processes
              WHERE role='wrapper' AND exited_at IS NULL ORDER BY run_id",
         )?;
-        for row in rows.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
-            let (run, pid) = row?;
-            if u32::try_from(pid).is_ok_and(alive) {
-                users.push(format!("wrapper of run {run} (pid {pid})"));
-            }
+        for row in rows.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            found.wrappers.push(row?);
         }
     }
+    Ok(found)
+}
+
+/// Who of `found` uses the queue, liveness per `alive`: a supervisor or a
+/// wrapper whose process lives, and every run not finished (its wrapper
+/// may be on another host's view of the pids).
+fn queue_users(found: &QueueUse, alive: &dyn Fn(u32) -> bool) -> Vec<String> {
+    let lives = |pid: i64| u32::try_from(pid).is_ok_and(alive);
+    let supervisors = found
+        .supervisors
+        .iter()
+        .filter(|(_, pid)| lives(*pid))
+        .map(|(token, pid)| format!("supervisor {token} (pid {pid})"));
+    let runs = found
+        .runs
+        .iter()
+        .filter(|(_, status)| RUNS_IN_USE.contains(&status.as_str()))
+        .map(|(id, status)| format!("run {id} ({status})"));
+    let wrappers = found
+        .wrappers
+        .iter()
+        .filter(|(_, pid)| lives(*pid))
+        .map(|(run, pid)| format!("wrapper of run {run} (pid {pid})"));
+    supervisors.chain(runs).chain(wrappers).collect()
+}
+
+/// Refuse the breaking ones of `pending` while [`queue_users`] finds the
+/// queue in use.
+fn refuse_in_use(
+    found: &QueueUse,
+    alive: &dyn Fn(u32) -> bool,
+    pending: &[SchemaMigration],
+) -> Result<()> {
+    let users = queue_users(found, alive);
     if users.is_empty() {
         return Ok(());
     }
@@ -3955,6 +4062,55 @@ mod schema_state_tests {
             SqliteQueue::migrate_compatible(&path, None, 0).unwrap(),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod queue_use_tests {
+    use super::*;
+
+    /// A breaking migration judges the queue in use by a supervisor or a
+    /// wrapper whose process lives and by every run not finished; a dead
+    /// process and a finished run use it no longer.
+    #[test]
+    fn the_queue_is_in_use_by_live_processes_and_unfinished_runs() {
+        let alive = |pid: u32| pid == 7;
+        assert!(queue_users(&QueueUse::default(), &alive).is_empty());
+        let found = QueueUse {
+            supervisors: vec![("live".into(), 7), ("gone".into(), 8)],
+            runs: vec![
+                ("r1".into(), "running".into()),
+                ("r2".into(), "merged".into()),
+            ],
+            wrappers: vec![("r1".into(), 7), ("r3".into(), -1)],
+        };
+        assert_eq!(
+            queue_users(&found, &alive),
+            [
+                "supervisor live (pid 7)",
+                "run r1 (running)",
+                "wrapper of run r1 (pid 7)",
+            ]
+        );
+        let idle = QueueUse {
+            supervisors: vec![("gone".into(), 8)],
+            runs: vec![("r2".into(), "merged".into())],
+            wrappers: vec![("r1".into(), 9)],
+        };
+        assert!(queue_users(&idle, &alive).is_empty());
+        let pending = [
+            SchemaMigration {
+                version: 40,
+                compatible: true,
+            },
+            SchemaMigration {
+                version: 41,
+                compatible: false,
+            },
+        ];
+        let error = format!("{:#}", refuse_in_use(&found, &alive, &pending).unwrap_err());
+        assert!(error.contains("breaking migration(s) 41 while"), "{error}");
+        assert!(refuse_in_use(&idle, &alive, &pending).is_ok());
     }
 }
 

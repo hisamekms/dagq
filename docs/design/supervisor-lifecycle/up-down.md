@@ -79,9 +79,11 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
    - **buildの違うsupervisorの入れ替え**（[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10・12・15・16）: 登録の`binary_version`は`supervise`プロセス自身が書いた自分のbuild識別子で、`up`はliveな登録のどれか1つでも自分のbuild識別子と違えば（nullを含む。package versionが同じでもcommitやdirtyが違えば違う）入れ替える。
      liveな登録が全部引き継ぎを受けられるなら**引き継ぎ**、そうでなければ**drain**で入れ替える。
      launchd modeの登録は、LaunchAgentの`ProgramArguments`の先頭が`up`自身の絶対pathで、`ProcessType`が`up`の書く値のときだけ引き継ぐ（execはplistもlaunchdがprocessに当てる制限も変えないので、pathの違うagentはlaunchdの次の再起動で前のbinaryに戻り、`ProcessType`の無いagentは制限の下で流れ続ける。そのときはdrainし、`up`がplistを書き直してlaunchdが読み直す。判定は`agent_takes_handoff`のdoc comment）。
-     - **migrate**: `up`はまずqueueの未適用のmigrationを数え、全部が互換なら適用して結果に載せる。
-       未適用のものがあって`up`がqueueのbinaryでなければ（[persistence](../persistence.md#database-setup-and-migrations)）、何も適用も起動もせずにerrorで止まる。
-       非互換が1つでもあれば、何も起動もsignalもせず、`down --wait` → `dagq migrate` → `up`、または`dagq install --allow-breaking`を案内するerrorで止まる。
+     - **migrate**: `up`はDBを開く前に自分のqueue serviceを入れ替えの口で起動し（[Queue service](../queue-service.md)の「入れ替えの口」）、そのserviceが受け付けの前に未適用の互換のmigrationを適用して、`up`はそれを結果に載せる。
+       `up`のプロセスはmigrateしない。
+       未適用のものがあって`up`がqueueのbinaryでなければ（[persistence](../persistence.md#database-setup-and-migrations)）、serviceは何も適用せず受け付けず、`up`は何も起動もせずにerrorで止まる。
+       非互換が1つでもあれば、serviceは動いているserviceにも触れずに終わり、`up`は何も起動もsignalもせず、`down --wait` → `dagq migrate` → `up`、または`dagq install --allow-breaking`を案内するerrorで止まる。
+       queueのfloorが`up`のbuildを拒むときも、未適用のものの有無にかかわらず、serviceは動いているserviceに触れずに終わり、`up`は何も起動もせずにerrorで止まる。
        互換のmigrationの後も、古いbinaryのsupervisorとrunのwrapperはfloor以上なのでそのまま動く（[persistence](../persistence.md#database-setup-and-migrations)）。
      - **引き継ぎ**（[Handoff](handoff.md#handoff)）: liveな登録それぞれに`up`自身の絶対pathへのexecを頼み、各登録が同じpidのまま`up`のbuild識別子で戻るのを待つ（`lifecycle::hand_off`）。
        何もsignalせず、LaunchAgentに触らず、走っているrunのsessionもleaseもそのまま。

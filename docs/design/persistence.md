@@ -295,7 +295,7 @@ migrationを足すtaskの規則は[migrations.md](../development/migrations.md)�
 - schemaの版は適用したmigrationの数（`PRAGMA user_version`）で、`migrations/`の`NNNN_<name>.sql`を置くだけで`build.rs`が一覧に足す（[ADR-0067](../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)）。
 - リリース済みのmigrationは中身も名前も変えない（[ADR-t614-2](../adr/2026-09-27-t614-2-released-migrations-are-immutable.md)、検査は`scripts/check-migration-numbers.sh`）。
 - queueを開いただけではmigrateしない。
-  migrationを適用するのは空のファイルへの`init`・`dagq migrate`・[`up`](supervisor-lifecycle/up-down.md)の互換のmigration・[install](supervisor-lifecycle/install.md#install)と[自動更新](supervisor-lifecycle/auto-update.md#auto-update)のmigrateで（[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)）、既存のqueueへはqueueが記録したbinaryと`install`がgrantしたbuildだけで、記録の無いqueueには`install`が書くまでどのbinaryも適用できる（ADR-t3102-2、`queue_binary.rs`）。
+  migrationを適用するのは空のファイルへの`init`・`dagq migrate`・[`up`](supervisor-lifecycle/up-down.md)と[install](supervisor-lifecycle/install.md#install)と[自動更新](supervisor-lifecycle/auto-update.md#auto-update)が入れ替えの口で起動したqueue service（受け付けの前）で（[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)）、既存のqueueへはqueueが記録したbinaryと`install`がgrantしたbuildだけで、記録の無いqueueには`install`が書くまでどのbinaryも適用できる（ADR-t3102-2、`queue_binary.rs`）。
 - 互換の宣言: 各migrationは先頭行で`compatible`か`breaking`を宣言し、互換と言える文の範囲は`schema.rs`のunit testが検査する。
   下限（`schema_floor`）は最後に適用した非互換のmigrationの版である。
 - open: 下限がバイナリより新しければ止まり、`user_version`がバイナリより古ければ`dagq migrate`を案内して止まる。
@@ -306,7 +306,7 @@ migrationを足すtaskの規則は[migrations.md](../development/migrations.md)�
   queueがバイナリより古ければメモリの複製をmigrateして読む。
   複製はsnapshotなので、`watch`はファイルを直接開き、古いschemaなら`dagq migrate`を促して終わる。
   複製はGitからcommit messageを埋めないので、その`search`はmessageの無い着地を見つけない。
-- `dagq migrate`: 非互換のmigrationが残っていれば、使用中のsupervisor・run・wrapperが1つでもあると何も適用せずに挙げて止まり、通れば`backups/`に複製してから適用する。
+- 非互換のmigration: 使用中のsupervisor・run・wrapperの判定と`backups/`への複製と適用を1つのtransactionで行い、使用中なら何も適用せずに挙げて止まる。
 - 表の作り直し: 全ての列を列挙してrowidと`sqlite_sequence`も写し（消した行のIDを再び払い出さない）、`foreign_keys`はrunnerがトランザクションの外でOFFにしてcommitの前に`pragma_foreign_key_check`を確かめる。
   `run_events`を作り直すときは、actorの列・検索のtrigger・`run_events`のindexも作り直す。
 - 落とし穴: `run_events`の式のindex（`events_by_opened_event`）は、queryが同じ式を書きaffinityの掛からない値（bindした値か`+o.id`）と比べるときだけ引かれる。

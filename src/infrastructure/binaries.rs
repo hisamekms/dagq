@@ -1,5 +1,6 @@
 //! [`Binaries`] on this machine: `cargo build --release --locked -p dagq`
-//! in a checkout, a binary run as a child process for its version, a throwaway queue and its migrations,
+//! in a checkout, a binary run as a child process for its version, a throwaway queue and the
+//! queue's service started as a replacement's,
 //! and the replacement of a file by a rename in its directory (ADR-0045
 //! decisions 11, 12).
 
@@ -21,6 +22,11 @@ use crate::application::install::{
 };
 
 pub struct LocalBinaries;
+
+/// How long the service an `install` starts may take to tell how its start
+/// goes; once it does, a service applying migrations is waited for as long
+/// as it lives.
+const REPLACEMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What a build of dagq's checkout builds: dagq alone.
 pub const BUILD_ARGS: [&str; 5] = ["build", "--release", "--locked", "-p", "dagq"];
@@ -162,9 +168,23 @@ impl Binaries for LocalBinaries {
         })
     }
 
-    fn migrate(&self, binary: &Path, db: &Path) -> Result<Value> {
+    fn serve(&self, binary: &Path, db: &Path, breaking: bool) -> Result<Value> {
+        use crate::application::queue_service::QueueServiceControl;
         let _grant = queue_binary::Grant::to(db, binary)?;
-        json_output(binary, &["--db", text(db)?, "migrate"])
+        let replaced = crate::infrastructure::queue_service::SystemQueueService::new(db, binary)
+            .replace(breaking, false, REPLACEMENT_TIMEOUT)?;
+        Ok(replaced.migrated.unwrap_or(Value::Null))
+    }
+
+    fn hold_service(&self, db: &Path) -> Result<crate::application::queue_service::ServiceHold> {
+        use crate::application::queue_service::QueueServiceControl;
+        crate::infrastructure::queue_service::SystemQueueService::new(db, Path::new("dagq")).hold()
+    }
+
+    fn service_runs(&self, db: &Path) -> bool {
+        let queue_dir = crate::infrastructure::queue_service::queue_dir_of(db);
+        crate::infrastructure::queue_service::probe(&queue_dir).state
+            == crate::domain::queue_service::ServiceState::Running
     }
 
     fn adopt(&self, db: &Path, target: &Path) -> Result<()> {

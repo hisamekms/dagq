@@ -117,6 +117,38 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
     }
 }
 
+/// Have `up` of `fixture` start the queue's service as the command line's
+/// `up` does, from the tests' binary with the service stopping once the
+/// test is gone ([`super::service::owned_executable`]): the service that
+/// applies the migrations `up` brings (ADR-t3102-2 decision 2). It is
+/// stopped when the guard goes.
+pub fn serve_on_up(fixture: &mut Fixture) -> StopService {
+    fixture.options.queue_service = true;
+    fixture.environment.current_exe =
+        super::service::owned_executable(fixture.location.db.parent().unwrap());
+    StopService(fixture.location.db.clone())
+}
+
+/// Stops the service of the queue at its path when it goes.
+pub struct StopService(pub PathBuf);
+
+impl StopService {
+    pub fn stop(&self) {
+        use dagq::application::queue_service::QueueServiceControl;
+        let _ = dagq::infrastructure::queue_service::SystemQueueService::new(
+            &self.0,
+            Path::new("dagq"),
+        )
+        .stop(Duration::from_secs(10));
+    }
+}
+
+impl Drop for StopService {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// Have the fixture's `claude` print `listed` for `plugin list --json`.
 pub fn list_plugins(fixture: &Fixture, listed: &str) {
     let mut path = fixture.options.claude.clone().into_os_string();

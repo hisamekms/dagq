@@ -1,9 +1,12 @@
 //! `dagq install`: a person's way to replace the fixed binary and the
 //! queue's supervisor with it, without waiting for the sessions (ADR-0045
-//! decisions 11–14). The new binary is built (or given), checked, the
-//! queue's compatible migrations applied with it, and put in place of the
-//! old one by a rename that keeps the old one as `<name>.previous`; then
-//! every live supervisor that takes a handoff is asked to exec it. The old
+//! decisions 11–14). The new binary is built (or given), checked, its
+//! queue service started as a replacement's, which applies the queue's
+//! compatible migrations before it accepts (ADR-t3102-2 decision 2), and
+//! put in place of the old one by a rename that keeps the old one as
+//! `<name>.previous`; then every live supervisor that takes a handoff is
+//! asked to exec it, and the service is started again from the binary in
+//! place. The old
 //! binary goes back only when none of them took it; when some did, it stays
 //! and the ones that did not are named in a [`KeptBinary`] error
 //! (ADR-t632-1). A build
@@ -12,7 +15,7 @@
 //! `<name>.previous`.
 //!
 //! It reads the queue's schema through the new binary (`migrate --check`)
-//! before it opens the queue itself (apart from a best-effort read of the
+//! and applies no migration itself, before it opens the queue itself (apart from a best-effort read of the
 //! e2e gate's history and write of its `install_e2e_finished`, whose
 //! failure is ignored), so it works whether the queue is older or newer
 //! than this binary.
@@ -63,10 +66,28 @@ pub trait Binaries {
     fn takes_handoff(&self, binary: &Path) -> bool;
     /// `binary --db <db> migrate --check`.
     fn schema(&self, binary: &Path, db: &Path) -> Result<SchemaCheck>;
-    /// `binary --db <db> migrate`, its report, with `binary` let change the
-    /// queue's schema for it though it is not yet the queue's binary
-    /// (ADR-t3102-2 decision 3).
-    fn migrate(&self, binary: &Path, db: &Path) -> Result<Value>;
+    /// Start `binary`'s service of the queue at `db` as a replacement's
+    /// (ADR-t3102-2 decision 2), taking over from the one running whatever
+    /// its build: it
+    /// applies the migrations of its build before it accepts, the breaking
+    /// ones too with `breaking` (after the drain, on a queue nothing uses),
+    /// with `binary` let change the queue's schema though it is not yet the
+    /// queue's binary (decision 3). What it applied, `migrate`'s report
+    /// (`null` when nothing was pending); a service that refuses applies
+    /// nothing, and leaves the running one as it was when it refused before
+    /// it took over ([`super::queue_service::QueueServiceControl::replace`]).
+    fn serve(&self, binary: &Path, db: &Path, breaking: bool) -> Result<Value>;
+    /// Hold the queue's service at `db` against the supervisors' watch
+    /// until the hold is dropped ([`super::queue_service::QueueServiceControl::hold`]).
+    fn hold_service(&self, db: &Path) -> Result<super::queue_service::ServiceHold> {
+        let _ = db;
+        Ok(super::queue_service::ServiceHold::none())
+    }
+    /// Whether a service of the queue at `db` answers now.
+    fn service_runs(&self, db: &Path) -> bool {
+        let _ = db;
+        false
+    }
     /// Name `target` the binary that changes the schema of the queue at
     /// `db` (ADR-t3102-2 decision 3).
     fn adopt(&self, db: &Path, target: &Path) -> Result<()> {
@@ -489,10 +510,19 @@ the supervisor (waits for its runs), migrates with a backup and starts it again"
 open the queue again; nothing was replaced. The queue as it was before that migration is in the \
 backups/ directory next to it"
     );
+    // The service the new build starts is held from the supervisors of the
+    // build before until they are handed over and its binary is in place.
+    let _hold = if schema.pending.is_empty() {
+        None
+    } else {
+        Some(binaries.hold_service(db)?)
+    };
+    // Before the queue is opened: this binary may be the new build, which
+    // opens it only migrated.
     let migrated = if schema.pending.is_empty() {
         Value::Null
     } else {
-        binaries.migrate(&source, db)?
+        binaries.serve(&source, db, false)?
     };
     let queue = (ports.queues)(db).open()?;
     let live = live_supervisors(ports.clock, ports.processes, &*queue)?;
@@ -550,8 +580,12 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
         }
     };
     binaries.adopt(db, target)?;
+    // The service that migrated runs from the build before it was put in
+    // place: the one of the binary in place takes over.
+    let service =
+        (!schema.pending.is_empty() && !in_place).then(|| serve_in_place(binaries, target, db));
     let failure = handoff_failures(&handed);
-    let report = json!({
+    let mut report = json!({
         "outcome": if failure.is_some() { "partially_handed_off" } else { "installed" },
         "target": target,
         "version": version,
@@ -573,6 +607,9 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
             }))
             .collect::<Vec<_>>(),
     });
+    if let Some(service) = service {
+        report["queue_service"] = service;
+    }
     match failure {
         None => Ok(report),
         Some(error) => {
@@ -812,10 +849,13 @@ impl HandoffFailed {
 }
 
 /// The drain of ADR-0045 decision 14: stop the live supervisors and wait
-/// for their runs (`down --wait`), migrate with the new binary (which
-/// backs the queue up first), replace the binary, and start the supervisor
-/// again with the new binary's `up`, in the mode and with the parallelism
-/// the drained one had.
+/// for their runs (`down --wait`), start the new binary's service as a
+/// replacement's that may apply breaking migrations (ADR-t3102-2 decision
+/// 2: it judges the queue unused, backs it up and migrates it in one
+/// transaction before it accepts, and a queue still in use is refused and
+/// nothing replaced), replace the binary, start the service again from it,
+/// and start the supervisor again with the new binary's `up`, in the mode
+/// and with the parallelism the drained one had.
 ///
 /// The started supervisor's `up` carries over the drained ones' values, so
 /// no second `up` is needed after the drain: `--auto-update` when any of
@@ -847,7 +887,7 @@ fn install_breaking(
     } else {
         (ports.down)()?
     };
-    let migrated = binaries.migrate(source, db).with_context(|| {
+    let migrated = binaries.serve(source, db, true).with_context(|| {
         format!(
             "the supervisor was drained but {version} could not migrate the queue; nothing was \
 replaced, and `up` starts the old binary again"
@@ -855,6 +895,7 @@ replaced, and `up` starts the old binary again"
     })?;
     binaries.replace(source, &options.target)?;
     binaries.adopt(db, &options.target)?;
+    let service = (source != options.target).then(|| serve_in_place(binaries, &options.target, db));
     let started = match live.first() {
         None => Value::Null,
         Some(drained) => {
@@ -867,7 +908,7 @@ again"
             })?
         }
     };
-    Ok(json!({
+    let mut report = json!({
         "outcome": "installed",
         "target": options.target,
         "version": version,
@@ -876,7 +917,42 @@ again"
         "migrated": migrated,
         "drained": drained,
         "up": started,
-    }))
+    });
+    if let Some(service) = service {
+        report["queue_service"] = service;
+    }
+    Ok(report)
+}
+
+/// Start the service of the binary put in place at `target` for the queue
+/// at `db`, taking over from the one the build migrated with: what the
+/// report says of it ([`in_place_report`]). It fails nothing, as the binary
+/// is in place and the queue migrated.
+fn serve_in_place(binaries: &dyn Binaries, target: &Path, db: &Path) -> Value {
+    match binaries.serve(target, db, false) {
+        Ok(_) => in_place_report(None, true),
+        Err(error) => in_place_report(Some(format!("{error:#}")), binaries.service_runs(db)),
+    }
+}
+
+/// What the report says of the start of the service of the binary put in
+/// place: `failed`, why it failed (`None` when it started), and whether a
+/// service of the queue answers after (`runs`). A start may fail after it
+/// stopped the service there, leaving none.
+fn in_place_report(failed: Option<String>, runs: bool) -> Value {
+    match failed {
+        None => json!({"outcome": "replaced"}),
+        Some(error) if runs => json!({
+            "outcome": "kept",
+            "error": error,
+            "next": "a service of the queue still answers; `up` starts the one in place",
+        }),
+        Some(error) => json!({
+            "outcome": "stopped",
+            "error": error,
+            "next": "no service of the queue answers: a supervisor's watch starts it again, else run `up`",
+        }),
+    }
 }
 
 /// The arguments of the `up` that starts the supervisors in `live` again
@@ -1143,6 +1219,23 @@ mod tests {
                 &[]
             ),
             [&base[..], &["--max-load", "4"]].concat()
+        );
+    }
+
+    /// The report of the service of the binary put in place: started, or
+    /// failed with a service still answering (kept) or with none left
+    /// (stopped, its start having stopped the one there).
+    #[test]
+    fn the_report_says_whether_a_service_answers_after_the_one_in_place_failed() {
+        assert_eq!(in_place_report(None, false), json!({"outcome": "replaced"}));
+        let kept = in_place_report(Some("no answer".into()), true);
+        assert_eq!(kept["outcome"], "kept");
+        assert_eq!(kept["error"], "no answer");
+        let stopped = in_place_report(Some("no answer".into()), false);
+        assert_eq!(stopped["outcome"], "stopped");
+        assert!(
+            stopped["next"].as_str().unwrap().contains("run `up`"),
+            "{stopped}"
         );
     }
 

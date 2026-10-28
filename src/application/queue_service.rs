@@ -1887,6 +1887,69 @@ pub trait QueueServiceControl: Send + Sync {
     fn start(&self, timeout: Duration) -> Result<ServiceProbe>;
     /// Stop the service; `None` when none ran.
     fn stop(&self, timeout: Duration) -> Result<Option<u32>>;
+    /// Start the service of this binary as a replacement's
+    /// ([`crate::domain::queue_service::ServiceStart::Replacement`], the
+    /// breaking migrations too with `breaking`, ADR-t3102-2 decision 2),
+    /// unless `reuse` lets one of this build that answers on a queue it
+    /// found with nothing pending stay. The started service takes over
+    /// from the one running only once it found it may apply what is
+    /// pending, and applies it before it accepts; one that refuses then
+    /// (not the queue's binary, a breaking migration not allowed, a queue in
+    /// use) leaves the running one as it was and accepts nothing. One that
+    /// fails after it took over (the queue found in use again in the
+    /// migration's transaction, the migration itself) leaves none running.
+    /// Replacements of one queue start their services one at a time.
+    fn replace(&self, breaking: bool, reuse: bool, timeout: Duration) -> Result<Replaced>;
+    /// Hold the service against the supervisors' watch while a replacement
+    /// puts its build in place and hands the supervisors over to it
+    /// (ADR-t3102-2 decision 2): a supervisor of the build before would
+    /// otherwise replace the service of the build after, the one that
+    /// migrated, before the handoff reaches it. Let go when dropped, or
+    /// when the holding process ends; each hold holds until it is let go,
+    /// whatever other holds end meanwhile. A supervisor of a build before
+    /// the hold knows none, and the replacement goes through it all the
+    /// same (the service applied the migrations before it accepted).
+    fn hold(&self) -> Result<ServiceHold> {
+        Ok(ServiceHold::none())
+    }
+    /// Whether a live replacement holds the service ([`Self::hold`]).
+    fn held(&self) -> bool {
+        false
+    }
+}
+
+/// A replacement's hold on the queue's service
+/// ([`QueueServiceControl::hold`]), let go when dropped.
+pub struct ServiceHold {
+    _guard: Option<Box<dyn std::any::Any + Send>>,
+}
+
+impl ServiceHold {
+    /// A hold that holds nothing.
+    pub fn none() -> Self {
+        Self { _guard: None }
+    }
+
+    /// The hold `guard` keeps until it is dropped.
+    pub fn new(guard: Box<dyn std::any::Any + Send>) -> Self {
+        Self {
+            _guard: Some(guard),
+        }
+    }
+}
+
+/// What [`QueueServiceControl::replace`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replaced {
+    /// The service of this build that answers now.
+    pub service: ServiceProbe,
+    /// Whether that is the one that ran already.
+    pub reused: bool,
+    /// The one the started service took over from.
+    pub replaced: Option<ServiceProbe>,
+    /// What the started service applied before it accepted (`migrate`'s
+    /// report); `None` when nothing was pending or none started.
+    pub migrated: Option<Value>,
 }
 
 /// The answer to a token's issue ([`ServiceAccess::issue`]): the file its
@@ -2037,6 +2100,28 @@ pub fn ensure(control: &dyn QueueServiceControl, timeout: Duration) -> Result<Va
         "outcome": if replaced.is_some() { "replaced" } else { "started" },
         "service": started,
         "replaced": replaced,
+    }))
+}
+
+/// `up`'s step (ADR-t1233-4 decision 1) for a replacement (ADR-t3102-2
+/// decision 2): the service of this build by
+/// [`QueueServiceControl::replace`], reported as [`ensure`] reports it with
+/// what the started service applied (`migrated`). A service that does not
+/// start stops `up`.
+pub fn ensure_replaced(control: &dyn QueueServiceControl, timeout: Duration) -> Result<Value> {
+    let replaced = control
+        .replace(false, true, timeout)
+        .context("the queue service did not start")?;
+    let outcome = match (&replaced.replaced, replaced.reused) {
+        (_, true) => "reused",
+        (Some(_), false) => "replaced",
+        (None, false) => "started",
+    };
+    Ok(json!({
+        "outcome": outcome,
+        "service": replaced.service,
+        "replaced": replaced.replaced,
+        "migrated": replaced.migrated,
     }))
 }
 
@@ -4418,6 +4503,28 @@ mod tests {
         fn stop(&self, _: Duration) -> Result<Option<u32>> {
             Ok(None)
         }
+        fn replace(&self, _: bool, _: bool, _: Duration) -> Result<Replaced> {
+            *self.started.lock().unwrap() += 1;
+            Ok(Replaced {
+                service: self.found.clone(),
+                reused: false,
+                replaced: None,
+                migrated: Some(json!({"applied": [{"version": 9}]})),
+            })
+        }
+    }
+
+    /// `up` reports what the service a replacement started applied.
+    #[test]
+    fn up_reports_what_the_replacing_service_applied() {
+        let control = Control {
+            found: probe(ServiceState::Running, Some(true)),
+            started: Mutex::new(0),
+        };
+        let report = ensure_replaced(&control, Duration::from_secs(1)).unwrap();
+        assert_eq!(report["outcome"], "started");
+        assert_eq!(report["migrated"]["applied"][0]["version"], 9);
+        assert_eq!(*control.started.lock().unwrap(), 1);
     }
 
     fn probe(state: ServiceState, build_matches: Option<bool>) -> ServiceProbe {

@@ -72,8 +72,9 @@ fn install_migrates_replaces_and_hands_over_and_restores_on_a_failed_handoff() {
             "build /src/dagq",
             "e2e /src/dagq",
             "probe /src/dagq/target/release/dagq",
-            "migrate /src/dagq/target/release/dagq",
+            "serve /src/dagq/target/release/dagq",
             "replace /src/dagq/target/release/dagq /opt/bin/dagq",
+            "serve /opt/bin/dagq",
         ]
     );
 
@@ -117,6 +118,38 @@ fn install_migrates_replaces_and_hands_over_and_restores_on_a_failed_handoff() {
         ]
     );
     drop(queue);
+}
+
+/// The service of the binary put in place that does not start fails no
+/// `install` (the binary is in place and the queue migrated), and the
+/// report says what the queue's service is after: here none answers.
+#[test]
+fn install_reports_whether_a_service_answers_after_the_one_in_place_failed() {
+    use dagq::application::install::Source;
+    let fixture = fixture();
+    let processes = FakeProcesses::default();
+    let no_down = || -> Result<Value> { panic!("no drain for compatible migrations") };
+    let binaries = FakeBinaries::new(&[(27, true)], false);
+    *binaries.serve_fails_for.lock().unwrap() = Some("/opt/bin/dagq".into());
+    let report = install_with(
+        &fixture,
+        &binaries,
+        &processes,
+        &no_down,
+        &install_options(Source::Binary("/built/dagq".into())),
+    )
+    .unwrap();
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert_eq!(report["queue_service"]["outcome"], "stopped", "{report}");
+    assert_eq!(
+        binaries.calls(),
+        [
+            "probe /built/dagq",
+            "serve /built/dagq",
+            "replace /built/dagq /opt/bin/dagq",
+            "serve /opt/bin/dagq",
+        ]
+    );
 }
 
 /// `install` of a checkout runs its e2e first (ADR-t963-1 decision 1): one
@@ -414,8 +447,8 @@ impl dagq::application::install::Binaries for UpdateBinaries {
             opens: self.pending.is_empty(),
         })
     }
-    fn migrate(&self, _: &Path, _: &Path) -> Result<Value> {
-        self.note("migrate".into());
+    fn serve(&self, _: &Path, _: &Path, _: bool) -> Result<Value> {
+        self.note("serve".into());
         Ok(json!({"applied": self.pending.len()}))
     }
     fn replace(&self, _: &Path, target: &Path) -> Result<()> {
@@ -709,8 +742,9 @@ fn the_update_job_installs_watches_restores_and_asks() {
                 dir.join("queue-dir/update/checkout").display(),
                 dir.join("queue-dir/update/target").display()
             ),
-            "migrate".to_owned(),
+            "serve".to_owned(),
             format!("replace {}", target.display()),
+            "serve".to_owned(),
         ]
     );
     let kinds = |queue: &SqliteQueue| {
@@ -841,7 +875,7 @@ fn the_update_job_replaces_nothing_unless_the_build_passes_its_e2e() {
             binaries
                 .calls()
                 .iter()
-                .all(|c| !c.starts_with("replace") && c != "migrate"),
+                .all(|c| !c.starts_with("replace") && c != "serve"),
             "{:?}",
             binaries.calls()
         );
@@ -2276,8 +2310,9 @@ fn the_release_job_installs_a_release_like_a_build_and_asks_on_a_failure() {
     assert_eq!(
         binaries.calls(),
         [
-            "migrate".to_owned(),
-            format!("replace {}", target.display())
+            "serve".to_owned(),
+            format!("replace {}", target.display()),
+            "serve".to_owned(),
         ]
     );
     assert_eq!(release_steps(&queue), ["update_installed", "update_built"]);

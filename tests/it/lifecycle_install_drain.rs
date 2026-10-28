@@ -23,7 +23,8 @@ use std::{fs, sync::Mutex, thread, time::Duration};
 
 /// A build with a breaking migration is refused without `--allow-breaking`
 /// and replaces nothing; with it, the supervisor is drained, the queue
-/// migrated, the binary replaced and `up` run with the drained supervisor's
+/// migrated by the new build's service (one that refuses replaces
+/// nothing), the binary replaced and `up` run with the drained supervisor's
 /// parallelism, automatic update, wait limit and load threshold, without
 /// `--in-cmux` though the drained one was registered in that retired mode:
 /// it starts under launchd (ADR-t1433-4). A rollback past a breaking
@@ -58,6 +59,27 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
 
     let mut options = install_options(Source::Binary("/built/dagq".into()));
     options.allow_breaking = true;
+    // The new build's service finds the queue still in use after the
+    // drain: it applies nothing, and nothing is replaced or started.
+    let refused = FakeBinaries::new(&[(27, true), (28, false)], false);
+    *refused.serve_refuses.lock().unwrap() =
+        Some("migrate refuses breaking migration(s) 28 while the queue is in use".into());
+    let error = format!(
+        "{:#}",
+        install_with(&fixture, &refused, &processes, &down, &options).unwrap_err()
+    );
+    assert!(
+        error.contains("could not migrate the queue; nothing was replaced"),
+        "{error}"
+    );
+    assert!(error.contains("while the queue is in use"), "{error}");
+    assert_eq!(
+        refused.calls(),
+        ["probe /built/dagq", "serve /built/dagq breaking"]
+    );
+    assert_eq!(*drained.lock().unwrap(), 1);
+    *drained.lock().unwrap() = 0;
+
     let report = install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
     assert_eq!(*drained.lock().unwrap(), 1);
     assert_eq!(report["drained"]["outcome"], "stopped", "{report}");
@@ -65,8 +87,9 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     assert_eq!(
         binaries.calls()[2..],
         [
-            "migrate /built/dagq",
+            "serve /built/dagq breaking",
             "replace /built/dagq /opt/bin/dagq",
+            "serve /opt/bin/dagq",
             "run /opt/bin/dagq",
         ]
     );
@@ -367,8 +390,9 @@ fn install_drain_unloads_a_stray_agent_and_waits_for_its_supervisor() {
     assert_eq!(
         binaries.calls()[1..],
         [
-            "migrate /built/dagq",
+            "serve /built/dagq breaking",
             "replace /built/dagq /opt/bin/dagq",
+            "serve /opt/bin/dagq",
             "run /opt/bin/dagq",
         ]
     );

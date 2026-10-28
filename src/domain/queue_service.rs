@@ -79,6 +79,44 @@ pub const CREDENTIAL_FILE_ENV: &str = "DAGQ_SERVICE_CREDENTIAL_FILE";
 /// `process::exit`, a SIGKILL) and with its queue's directory left behind
 /// (task 1352). Nothing in production sets it.
 pub const OWNER_PID_ENV: &str = "DAGQ_SERVICE_OWNER_PID";
+/// Who starts the queue's service, which decides the migrations it applies
+/// before it accepts (ADR-t3102-2 decision 2): only a service a replacement
+/// starts applies any, and a service opened by hand or started again by the
+/// supervisor's watch applies none (ADR-0073 decision 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceStart {
+    /// `up`, `install`, the automatic update or the release update starting
+    /// the service of the build it puts in place; `breaking` after the
+    /// drain of an `install --allow-breaking`.
+    Replacement { breaking: bool },
+    /// `dagq service start`.
+    ByHand,
+    /// The supervisor's watch, starting a service that stopped again.
+    Restart,
+}
+
+/// The migrations of its build a service applies before it accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartMigrations {
+    None,
+    /// Those every one of which is compatible; a breaking one refuses the
+    /// start.
+    Compatible,
+    /// Every one, a breaking one only on a queue no supervisor, run or
+    /// wrapper uses.
+    Breaking,
+}
+
+impl ServiceStart {
+    pub fn migrations(self) -> StartMigrations {
+        match self {
+            Self::Replacement { breaking: false } => StartMigrations::Compatible,
+            Self::Replacement { breaking: true } => StartMigrations::Breaking,
+            Self::ByHand | Self::Restart => StartMigrations::None,
+        }
+    }
+}
+
 /// The variable that names the queue broker a client-mode `dagq` in a
 /// run's container sends its commands to instead of a socket
 /// (ADR-t2114-3 decision 3): `http://<host>:<port>`, the forwarder's
@@ -2366,6 +2404,20 @@ pub fn attention_stands(latest: Option<&RecordedKind>) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_a_replacement_s_service_applies_migrations() {
+        assert_eq!(
+            ServiceStart::Replacement { breaking: false }.migrations(),
+            StartMigrations::Compatible
+        );
+        assert_eq!(
+            ServiceStart::Replacement { breaking: true }.migrations(),
+            StartMigrations::Breaking
+        );
+        assert_eq!(ServiceStart::ByHand.migrations(), StartMigrations::None);
+        assert_eq!(ServiceStart::Restart.migrations(), StartMigrations::None);
+    }
 
     /// What a token is issued under follows its parent and its target: a
     /// supervisor's registration, a run's lease for its worker and wrapper,

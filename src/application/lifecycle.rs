@@ -492,37 +492,47 @@ pub fn up(
             .canonicalize(dir)
             .with_context(|| format!("plugin directory {}", dir.display()))?;
     }
-    let queue = (ports.queues)(&db).open()?;
-    let queue = &*queue;
     // The queue's service before the supervisor, of this binary's build
-    // (ADR-t1233-4 decision 1): one that does not start stops `up`.
+    // (ADR-t1233-4 decision 1), started as a replacement's: it applies the
+    // compatible migrations of its build before it accepts, and refuses a
+    // breaking one (ADR-t3102-2 decision 2). `up` opens the queue only
+    // after, so it applies none itself. One that does not start stops `up`.
+    // Held until `up` returns, so that the watch of a supervisor of the
+    // build before does not replace it before the handoff.
+    let mut _hold = None;
     let queue_service = if options.queue_service {
         let control = (ports.queue_service)(&db, &environment.current_exe);
-        let report =
-            crate::application::queue_service::ensure(&*control, QUEUE_SERVICE_START_TIMEOUT)
-                .map_err(|error| {
-                    anyhow::anyhow!(
-                        "{error:#}; up stopped before it started or reused a supervisor"
-                    )
-                })?;
-        if report["outcome"] != "reused" {
-            queue.record_queue_event(
-                crate::domain::EventKind::QueueServiceStarted,
-                json!({
-                    "by": "up",
-                    "pid": report["service"]["pid"],
-                    "build": report["service"]["build"],
-                    "api_version": report["service"]["api_version"],
-                    "socket": report["service"]["socket"],
-                    "restart": false,
-                    "replaced": report["replaced"],
-                }),
-            )?;
-        }
-        Some(report)
+        _hold = Some(control.hold()?);
+        Some(
+            crate::application::queue_service::ensure_replaced(
+                &*control,
+                QUEUE_SERVICE_START_TIMEOUT,
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("{error:#}; up stopped before it started or reused a supervisor")
+            })?,
+        )
     } else {
         None
     };
+    let queue = (ports.queues)(&db).open()?;
+    let queue = &*queue;
+    if let Some(report) = &queue_service
+        && report["outcome"] != "reused"
+    {
+        queue.record_queue_event(
+            crate::domain::EventKind::QueueServiceStarted,
+            json!({
+                "by": "up",
+                "pid": report["service"]["pid"],
+                "build": report["service"]["build"],
+                "api_version": report["service"]["api_version"],
+                "socket": report["service"]["socket"],
+                "restart": false,
+                "replaced": report["replaced"],
+            }),
+        )?;
+    }
     // The queue's broker too, of this binary's build (ADR-t2114-1
     // decision 1): one that does not start stops `up`.
     let queue_broker = if options.queue_broker {
@@ -643,6 +653,9 @@ pub fn up(
     if run_env.config {
         report["run_env"] = serde_json::to_value(&run_env)?;
     }
+    report["migrated"] = queue_service
+        .as_ref()
+        .map_or(Value::Null, |service| service["migrated"].clone());
     if let Some(queue_service) = queue_service {
         report["queue_service"] = queue_service;
     }

@@ -669,6 +669,8 @@ struct FakeService {
     /// The build a start leaves answering; `None` dies at once.
     starts_as: Option<String>,
     starts: std::sync::atomic::AtomicU32,
+    /// Whether a replacement holds the service.
+    held: std::sync::atomic::AtomicBool,
 }
 
 impl FakeService {
@@ -713,6 +715,17 @@ impl dagq::application::queue_service::QueueServiceControl for FakeService {
     }
     fn stop(&self, _: Duration) -> anyhow::Result<Option<u32>> {
         Ok(self.running.lock().unwrap().take().map(|_| 4242))
+    }
+    fn replace(
+        &self,
+        _: bool,
+        _: bool,
+        _: Duration,
+    ) -> anyhow::Result<dagq::application::queue_service::Replaced> {
+        unreachable!("the supervisor's watch starts no replacement")
+    }
+    fn held(&self) -> bool {
+        self.held.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -774,6 +787,48 @@ fn a_service_of_another_build_is_replaced_once_and_then_accepted() {
     assert_eq!(started[0]["payload"]["replaced"]["build"], "0.0.1-old");
     assert_eq!(started[0]["payload"]["restart"], false);
     assert!(events(&db, "queue_service_down").is_empty());
+}
+
+/// The service of the build an `install` or `up` puts in place, which
+/// migrated the queue, runs before the supervisor of the build before is
+/// handed over: that supervisor's watch leaves it alone while the
+/// replacement holds it, and replaces it only once the hold is let go
+/// (ADR-t3102-2 decision 2). Each hold is a file beside the queue that names
+/// the replacement's live process, so holds that overlap hold until the
+/// last is let go.
+#[test]
+fn the_watch_leaves_a_service_a_replacement_holds_alone() {
+    use dagq::application::queue_service::QueueServiceControl;
+    let (_fixture, repo, db) = idle_queue();
+    let fake = std::sync::Arc::new(FakeService {
+        running: std::sync::Mutex::new(Some("9.9.9-next".to_owned())),
+        starts_as: Some(dagq::VERSION.to_owned()),
+        held: std::sync::atomic::AtomicBool::new(true),
+        ..FakeService::default()
+    });
+    let supervisor = Running::start(&db, &repo, Path::new("/unused"), Some(fake.clone()));
+    supervisor.passes(2);
+    assert_eq!(fake.starts(), 0);
+    assert!(events(&db, "queue_service_started").is_empty());
+    assert!(events(&db, "queue_service_down").is_empty());
+    fake.held.store(false, std::sync::atomic::Ordering::SeqCst);
+    supervisor.passes(2);
+    supervisor.drain();
+    assert_eq!(fake.starts(), 1);
+
+    // Two replacements' holds overlap: the one that ends first leaves the
+    // other's.
+    let control = SystemQueueService::new(&db, Path::new("dagq"));
+    assert!(!control.held());
+    let install = control.hold().unwrap();
+    let up = SystemQueueService::new(&db, Path::new("dagq"))
+        .hold()
+        .unwrap();
+    assert!(control.held());
+    drop(up);
+    assert!(control.held());
+    drop(install);
+    assert!(!control.held());
 }
 
 /// Only when [`a_service_stops_once_the_test_process_that_started_it_is_gone`]

@@ -1,14 +1,15 @@
 //! The binary that changes a queue's schema (ADR-t3102-2 decisions 2 and
 //! 3): a queue names one binary by its path in [`RECORD_FILE`] next to its
 //! database, and only the binary at that path applies the migrations the
-//! queue lacks (`migrate`, and the compatible ones `up` applies). `init`
+//! queue lacks (`migrate`, and the ones the queue service a replacement
+//! starts applies before it accepts). `init`
 //! names the binary that created the queue, so a throwaway queue is its
 //! creator's; `install` (and the automatic update, which runs it) names the
 //! path it put the binary at. The build is not compared: queues of several
 //! repositories share one fixed binary, and an `install` for one of them
-//! replaces it for all. The new build `install` migrates the queue with
-//! before it is in place is let through by a [`Grant`] naming it, held by
-//! the install's process for that one `migrate`. Any other binary, a
+//! replaces it for all. The new build whose service `install` has migrate
+//! the queue before the build is in place is let through by a [`Grant`]
+//! naming it, held by the install's process for that one start. Any other binary, a
 //! development build or a run's `runner` copy, is refused before it
 //! changes anything; reading the schema (`migrate --check`) and opening the
 //! queue are not judged here. A queue with no record yet takes any binary
@@ -24,8 +25,8 @@ use serde::{Deserialize, Serialize};
 
 /// The record of the queue's binary, in the database's directory.
 pub const RECORD_FILE: &str = "queue-binary.json";
-/// The grant of one `migrate` to the build `install` puts in place, in the
-/// database's directory while that `migrate` runs.
+/// The grant of the migrations to the build `install` puts in place, in
+/// the database's directory while its service starts.
 pub const GRANT_FILE: &str = "queue-binary-grant.json";
 
 /// The binary a queue names.

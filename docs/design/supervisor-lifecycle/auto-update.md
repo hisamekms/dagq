@@ -112,7 +112,7 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
        [Release update](release-update.md)のjobはリリースのバイナリなので関門を持たない。
   2. **非互換のmigration**: 新しいbinaryに非互換のmigrationがあれば、`install`と同じ確認をして`<queue dir>/update/staged/dagq`にcopyし、`approve_update`のask（下記）を開いて`update_awaiting_approval`で終わる。
      何も置き換えない。
-  3. **入れ替え**: それ以外は`install::install`（`Source::Binary`、drainはしない）を呼ぶ: 確認、互換のmigration（ビルドしたbinaryに許した1回の`migrate`）、renameでの差し替え（`.previous`を残す）とqueueのbinaryの記録、このqueueのliveなsupervisorへの引き継ぎの要求と、同じpidとtokenで戻るまでの待ち。
+  3. **入れ替え**: それ以外は`install::install`（`Source::Binary`、drainはしない）を呼ぶ: 確認、互換のmigration（ビルドしたbinaryのserviceを入れ替えの口で起動し、受け付けの前に適用させる。許しはその起動の間だけ）、renameでの差し替え（`.previous`を残す）とqueueのbinaryの記録、このqueueのliveなsupervisorへの引き継ぎの要求と、同じpidとtokenで戻るまでの待ち。
      tokenの登録が消えても、同じpidが引き継ぎを頼んだ後に新しいbuild識別子で登録し直していれば、その新しいtokenで戻ったとする（`lifecycle::successor`。pidが再利用されて残った古い行は後継とみなさない）。
      execしたプロセスが死ねばheartbeatが止まった時点で失敗。
      停止要求でdrainに入ったsupervisorは上限を待たずに失敗にし、要求を取り消す（[Handoff](handoff.md#handoff)）。
@@ -176,8 +176,9 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
     どちらもinboxが閉じる。
 - **待ちの見直し**: 引き継いだsupervisorは、execした新しいprocessの最初のpassで、`wait_for_build`のtaskの待ち（[claimを控える](claim-hold.md#依存先の着地を含むbuildを待つtask)、ADR-t1632-1）を自分の新しいbuild識別子で判定し直し、依存先の着地を含めばclaimする（含むかの答えはprocessの中だけでcacheするので、引き継ぎの後は空から読む）。
   `update_installed`そのものは待ちを変えない: 待ちを決めるのは固定バイナリのfileではなくsupervisorの走っているbuildで、引き継いだsupervisorのbuildはそのfileと同じになる。
-- **queue serviceとqueueのbroker**: 3の引き継ぎはどちらも止めず、引き継いだsupervisorが前のbuildのものを1回だけ入れ替える。
-  queue serviceは登録とsign inの前に入れ替えて最初の見張りで記録し、brokerは最初の見張りで入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
+- **queue serviceとqueueのbroker**: 3の引き継ぎはどちらも止めない。
+  未適用のmigrationがあれば、queue serviceは3の`install::install`が引き継ぎの前に入れ替えて後に置いたbinaryのものへ替える（[install](install.md#install)）。
+  無ければ引き継いだsupervisorが前のbuildのものを1回だけ入れ替え、queue serviceは登録とsign inの前に入れ替えて最初の見張りで記録し、brokerは最初の見張りで入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
 - **status**: `status`は結果を作ったprocessのbuild識別子と、自動更新（liveな登録のどれかが有効か、最新の段）と、登録ごとの設定と今のbuild識別子を出す。
   `status`はqueue serviceが作るので（人・inbox・plannerは[hostのCLI](../queue-service-host-cli.md#送る範囲)、実行側は[クライアントモード](../queue-service.md#クライアントモード)）、出るのは打った`dagq`ではなくserviceのbuild識別子になる。
   `state`の値の意味と、人の`dagq install`の`update_failed`を数えないことは`application::update::status`のdoc commentが持つ。

@@ -631,8 +631,6 @@ impl OneShot {
         let claude = ClaudeCode {
             executable: options.claude.clone(),
         };
-        let migrated =
-            self.migrate_compatible(&location.db, &environment.current_exe, processes)?;
         let queues = |db: &Path| self.lifecycle_queues(db);
         let result = lifecycle::up(
             &self.lifecycle_ports(launchd, processes, &queues),
@@ -641,37 +639,9 @@ impl OneShot {
             repo,
             environment,
             options,
-        )
-        .map_err(|mut error| {
-            // A handoff some supervisors failed reports the whole of `up`.
-            if let Some(partial) = error.downcast_mut::<lifecycle::PartialHandoff>() {
-                partial.report["migrated"] = serde_json::to_value(&migrated).unwrap_or(Value::Null);
-            }
-            error
-        })
-        .and_then(|mut value| {
-            value["migrated"] = serde_json::to_value(&migrated)?;
-            Ok(value)
-        });
+        );
         trace_command("up", &result);
         result
-    }
-
-    /// [`SqliteQueue::migrate_compatible`] of the queue at `db` on these
-    /// generators' now, with the live processes judged by `processes`, when
-    /// the binary at `executable` is the one changing its schema
-    /// ([`queue_binary`]).
-    pub fn migrate_compatible(
-        &self,
-        db: &Path,
-        executable: &Path,
-        processes: &dyn ProcessControl,
-    ) -> Result<Option<crate::infrastructure::sqlite::MigrationReport>> {
-        if db.is_file() {
-            check_schema_changer(db, executable)?;
-        }
-        let alive = |pid| processes.alive(pid);
-        SqliteQueue::migrate_compatible(db, Some(&alive), self.generators.clock.now())
     }
 
     /// `down`: see [`lifecycle::down`].

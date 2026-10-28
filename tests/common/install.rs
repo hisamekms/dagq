@@ -24,6 +24,14 @@ pub struct FakeBinaries {
     pub up: Mutex<Vec<Vec<String>>>,
     /// How the e2e of a checkout goes: passes unless set.
     pub e2e: Mutex<Option<E2eOutcome>>,
+    /// Why the service a replacement starts refuses to migrate: it
+    /// migrates unless set.
+    pub serve_refuses: Mutex<Option<String>>,
+    /// The binary whose service fails to start, after the one there was
+    /// stopped or not ([`Self::service_runs`]).
+    pub serve_fails_for: Mutex<Option<PathBuf>>,
+    /// Whether a service of the queue answers after a failed start.
+    pub service_runs: std::sync::atomic::AtomicBool,
 }
 
 impl FakeBinaries {
@@ -44,6 +52,9 @@ impl FakeBinaries {
             calls: Mutex::default(),
             up: Mutex::default(),
             e2e: Mutex::default(),
+            serve_refuses: Mutex::default(),
+            serve_fails_for: Mutex::default(),
+            service_runs: std::sync::atomic::AtomicBool::new(false),
         }
     }
     pub fn calls(&self) -> Vec<String> {
@@ -134,9 +145,19 @@ impl dagq::application::install::Binaries for FakeBinaries {
     fn schema(&self, _: &Path, _: &Path) -> Result<dagq::application::install::SchemaCheck> {
         Ok(self.schema.clone())
     }
-    fn migrate(&self, binary: &Path, _: &Path) -> Result<Value> {
-        self.note(format!("migrate {}", binary.display()));
+    fn serve(&self, binary: &Path, _: &Path, breaking: bool) -> Result<Value> {
+        let breaking = if breaking { " breaking" } else { "" };
+        self.note(format!("serve {}{breaking}", binary.display()));
+        if let Some(error) = self.serve_refuses.lock().unwrap().clone() {
+            anyhow::bail!(error);
+        }
+        if self.serve_fails_for.lock().unwrap().as_deref() == Some(binary) {
+            anyhow::bail!("the queue service did not answer");
+        }
         Ok(json!({"applied": self.schema.pending.len()}))
+    }
+    fn service_runs(&self, _: &Path) -> bool {
+        self.service_runs.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn replace(&self, source: &Path, target: &Path) -> Result<()> {
         self.note(format!("replace {} {}", source.display(), target.display()));

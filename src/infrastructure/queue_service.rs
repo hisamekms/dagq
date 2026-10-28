@@ -49,6 +49,7 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use super::dialogue::DialogueQueue;
+use super::queue_binary;
 use super::sqlite::SqliteQueue;
 use crate::application::actor_executor::ExecutorEvents;
 use crate::application::commands::DenialLog;
@@ -56,8 +57,8 @@ use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::queue_commands::QueueCommand;
 use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
-    Issued, Peer, QueueService, QueueServiceControl, ServiceAccess, ServiceBackend, ServiceProbe,
-    ServiceQueue, TelemetryTokens,
+    Issued, Peer, QueueService, QueueServiceControl, Replaced, ServiceAccess, ServiceBackend,
+    ServiceProbe, ServiceQueue, TelemetryTokens,
 };
 use crate::application::session::{AgentStart, ReasonParams, SessionOp, WrapperStore};
 use crate::application::{
@@ -68,8 +69,8 @@ use crate::domain::queue_service::wrapper_actor_id;
 use crate::domain::queue_service::{
     API_VERSION, HeldToken, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OUTAGE_FILE,
     OUTAGE_TOLD_FILE, OWNER_PID_ENV, Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, STEPS_DIR,
-    ServiceDenial, ServiceErrorCode, ServiceOutage, ServiceRequest, ServiceResponse, ServiceState,
-    SessionProcess, TokenIssuer, UseCase,
+    ServiceDenial, ServiceErrorCode, ServiceOutage, ServiceRequest, ServiceResponse, ServiceStart,
+    ServiceState, SessionProcess, StartMigrations, TokenIssuer, UseCase,
 };
 use crate::domain::session_step::StepTarget;
 use crate::domain::sessions::SessionHook;
@@ -2362,6 +2363,10 @@ pub struct ServiceRecord {
     pub api_version: u32,
     pub socket: PathBuf,
     pub started_at: i64,
+    /// Whether its build knew migrations the queue lacked once it started:
+    /// a replacement starts a service that applies them.
+    #[serde(default)]
+    pub pending: bool,
 }
 
 impl ServiceRecord {
@@ -2473,6 +2478,173 @@ pub struct ServeOptions {
     /// None in production, where the service runs until it is stopped or
     /// its queue goes.
     pub owner: Option<u32>,
+    /// Who started it, which decides the migrations it applies before it
+    /// accepts (ADR-t3102-2 decision 2).
+    pub start: ServiceStart,
+    /// Where a replacement's service tells its starter how its start goes
+    /// ([`ReplacementState`]); none for any other start.
+    pub report: Option<PathBuf>,
+    /// The binary it runs from: the queue's binary, or the one an
+    /// `install` grants, applies migrations ([`queue_binary`]).
+    pub executable: PathBuf,
+}
+
+/// How the start of a replacement's service goes, as it tells its starter
+/// in [`ServeOptions::report`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReplacementState {
+    /// It may apply what is pending and waits for the queue's lock, which
+    /// the service running holds until its starter stops it; then it
+    /// applies them.
+    TakingOver { pid: u32 },
+    /// It applied what was pending (`migrate`'s report, `None` when
+    /// nothing was) and accepts.
+    Accepting { pid: u32, migrated: Option<Value> },
+    /// It applied nothing, accepts nothing and ends.
+    Refused { pid: u32, error: String },
+}
+
+/// The directory in the service's directory holding a file for each hold
+/// of a replacement ([`QueueServiceControl::hold`]), each naming its
+/// process: one hold that ends leaves the others'.
+const HOLDS_DIR: &str = "holds";
+
+/// The lock a replacement holds while it starts its service: two
+/// replacements of one queue take over one after the other.
+const REPLACING_LOCK: &str = "replacing.lock";
+
+/// The process the hold file at `file` names.
+fn held_by(file: &Path) -> Option<u32> {
+    let value: Value = serde_json::from_slice(&fs::read(file).ok()?).ok()?;
+    value["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+}
+
+/// The processes the hold files in `dir` name.
+fn holders(dir: &Path) -> Vec<(PathBuf, Option<u32>)> {
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+                .map(|path| {
+                    let pid = held_by(&path);
+                    (path, pid)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A hold file of this process's, removed when dropped.
+struct HoldFile(PathBuf);
+
+impl Drop for HoldFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Whether a replacement's service `pid` that told it accepts is through
+/// its start, given what a look finds now (`alive`, whether it lives): its
+/// migrations were applied before it accepted, so it is when a service
+/// answers, it or another, and when it is gone. A supervisor of the build
+/// before knows no hold ([`QueueServiceControl::hold`]): its watch may
+/// replace that service as soon as it answers.
+pub(crate) fn accepted_start_over(alive: bool, look: &ServiceProbe) -> bool {
+    !alive || (look.state == ServiceState::Running && look.pid.is_some())
+}
+
+/// The service in the way of a replacement's service `pid` taking over,
+/// as a look finds it: one that answers with another pid, or one that holds
+/// the lock without answering whose recorded pid runs `service serve` for
+/// the queue (`serves`). That is the one it takes over from, and as well
+/// one the watch of a supervisor of the build before started meanwhile.
+pub(crate) fn in_the_way(
+    look: &ServiceProbe,
+    pid: u32,
+    serves: impl Fn(u32) -> bool,
+) -> Option<u32> {
+    match look.state {
+        ServiceState::Stopped => None,
+        ServiceState::Running => look.pid,
+        ServiceState::Unreachable => look.pid.filter(|other| serves(*other)),
+    }
+    .filter(|other| *other != pid)
+}
+
+/// How long a replacement's service waits for the service it takes over
+/// from to let the queue's lock go.
+const TAKE_OVER_WAIT: Duration = Duration::from_secs(30);
+
+/// Whether the service started with `migrations` may take over the queue
+/// at `db` and apply what it lacks, judged before it takes over: not when
+/// the queue's floor refuses this build, pending or not, since it could not
+/// use the queue once it took over; only the queue's binary
+/// ([`queue_binary`], `executable`'s) applies any, and a breaking one only
+/// when `migrations` lets it and nothing uses the queue. A refusal here
+/// leaves the running service as it was. What fails after it took over
+/// (the lock not let go, the queue found in use again in the migration's
+/// transaction, the migration itself) leaves no service until a
+/// supervisor's watch, `up` or `service start` starts one again.
+fn judge_start(db: &Path, executable: &Path, migrations: StartMigrations) -> Result<()> {
+    if migrations == StartMigrations::None {
+        return Ok(());
+    }
+    let state = SqliteQueue::schema(db)?;
+    state.check_floor()?;
+    if state.pending.is_empty() {
+        return Ok(());
+    }
+    queue_binary::check(
+        db,
+        executable,
+        &crate::infrastructure::adapters::process_alive,
+    )?;
+    if migrations == StartMigrations::Compatible {
+        state.refuse_breaking()?;
+    }
+    // Judged again in the migration's transaction; a queue in use found
+    // now leaves the running service as it was.
+    if migrations == StartMigrations::Breaking {
+        SqliteQueue::refuse_breaking_in_use(db, &crate::infrastructure::adapters::process_alive)?;
+    }
+    Ok(())
+}
+
+/// Apply `migrations` to the queue at `db` while the service holds its
+/// lock and before it accepts, at `now`: the compatible ones as
+/// [`SqliteQueue::migrate_compatible`], or every one as
+/// [`SqliteQueue::migrate`], which judges the queue in use, copies it and
+/// applies them in one transaction.
+fn apply_start_migrations(
+    db: &Path,
+    migrations: StartMigrations,
+    now: i64,
+) -> Result<Option<super::sqlite::MigrationReport>> {
+    let alive = crate::infrastructure::adapters::process_alive;
+    match migrations {
+        StartMigrations::None => Ok(None),
+        StartMigrations::Compatible => SqliteQueue::migrate_compatible(db, Some(&alive), now),
+        StartMigrations::Breaking => {
+            if SqliteQueue::schema(db)?.pending.is_empty() {
+                return Ok(None);
+            }
+            SqliteQueue::migrate(db, Some(&alive), now).map(Some)
+        }
+    }
+}
+
+/// Whether a replacement that may reuse the service running starts one:
+/// unless the one that answers (`found`) is of this build and found
+/// nothing pending when it started (`record`, its own).
+pub(crate) fn replacement_due(found: &ServiceProbe, record: Option<&ServiceRecord>) -> bool {
+    !record
+        .filter(|record| found.current() && found.pid == Some(record.pid))
+        .is_some_and(|record| !record.pending)
 }
 
 /// The owner [`OWNER_PID_ENV`] names in `env`, if it names a pid.
@@ -2496,6 +2668,17 @@ pub(crate) fn owner_gone(owner: Option<u32>) -> bool {
 /// owner does (`owner`, a test's process): take
 /// the queue's lock (a second service of the queue is refused), bind the
 /// socket, record itself, and answer each connection on its own thread.
+///
+/// A replacement's service ([`ServeOptions::start`], ADR-t3102-2 decision
+/// 2) first judges whether it may take over and apply what the queue lacks
+/// ([`judge_start`]: a floor that admits its build, the queue's binary, no
+/// breaking migration unless after a drain) and, when it may not, ends
+/// touching nothing; else it
+/// waits for its starter to stop the running service, takes the lock and
+/// applies them ([`apply_start_migrations`]) before it binds, telling each
+/// step in [`ServeOptions::report`]. Any service records whether its build
+/// found migrations pending once it held the lock, which decides whether
+/// `up` keeps it ([`replacement_due`]).
 pub fn serve(options: &ServeOptions) -> Result<Value> {
     let queue_dir = queue_dir_of(&options.db);
     ensure!(options.db.is_file(), "no queue at {}", options.db.display());
@@ -2510,22 +2693,52 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
         "the queue service's socket path {} is longer than {MAX_SOCKET_PATH} bytes",
         socket.display()
     );
-    // A service starting while a look holds the lock for an instant waits
-    // a little; one that another service holds is refused.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let lock = loop {
-        if let Some(lock) = Lock::try_take(&dir.join(LOCK_FILE), true, libc::LOCK_EX)? {
-            break lock;
+    let pid = std::process::id();
+    let tell = |state: &ReplacementState| -> Result<()> {
+        match &options.report {
+            Some(file) => write_private(file, &serde_json::to_vec(state)?),
+            None => Ok(()),
         }
-        if Instant::now() >= deadline {
-            let pid = ServiceRecord::read(&queue_dir).map(|record| record.pid);
-            bail!(
-                "a queue service already runs for this queue (pid {})",
-                pid.map_or_else(|| "unknown".to_owned(), |pid| pid.to_string())
+    };
+    let migrations = options.start.migrations();
+    // A replacement's service applies its build's migrations before it
+    // accepts; what refuses them leaves the running service as it was.
+    let taken = (|| {
+        judge_start(&options.db, &options.executable, migrations)?;
+        let wait = if migrations == StartMigrations::None {
+            Duration::from_secs(2)
+        } else {
+            tell(&ReplacementState::TakingOver { pid })?;
+            TAKE_OVER_WAIT
+        };
+        let lock = take_lock(&dir, &queue_dir, wait)?;
+        let migrated =
+            apply_start_migrations(&options.db, migrations, options.generators.clock.now())?;
+        if let Some(migrated) = &migrated {
+            // Said in the line's text: the service's log has the message
+            // only.
+            info!(
+                pid,
+                "the queue service (pid {pid}) applied the migrations of its build before it \
+accepts: schema {} to {}",
+                migrated.previous_version,
+                migrated.schema_version
             );
         }
-        thread::sleep(Duration::from_millis(50));
+        Ok::<_, anyhow::Error>((lock, migrated))
+    })();
+    let (lock, migrated) = match taken {
+        Ok(taken) => taken,
+        Err(error) => {
+            let _ = tell(&ReplacementState::Refused {
+                pid,
+                error: format!("{error:#}"),
+            });
+            return Err(error);
+        }
     };
+    // What a later replacement reads: a queue its build would migrate.
+    let pending = SqliteQueue::schema(&options.db).is_ok_and(|state| !state.pending.is_empty());
     match fs::remove_file(&socket) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -2537,15 +2750,19 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
         UnixListener::bind(&socket).with_context(|| format!("bind {}", socket.display()))?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
-    let pid = std::process::id();
     let record = ServiceRecord {
         pid,
         build: crate::VERSION.to_owned(),
         api_version: API_VERSION,
         socket: socket.clone(),
         started_at: unix_now(),
+        pending,
     };
     write_private(&dir.join(STATE_FILE), &serde_json::to_vec(&record)?)?;
+    tell(&ReplacementState::Accepting {
+        pid,
+        migrated: migrated.map(serde_json::to_value).transpose()?,
+    })?;
     info!(pid, socket = %socket.display(), "the queue service listens");
     let backend = Arc::new(SqliteServiceBackend {
         db: options.db.clone(),
@@ -2620,6 +2837,27 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
     info!(pid, outcome, "the queue service stopped: {outcome}");
     drop(lock);
     Ok(json!({"outcome": outcome, "pid": pid, "served": served}))
+}
+
+/// Take the queue's lock in the service's `dir`, waiting up to `wait`: a
+/// service starting while a look holds it for an instant waits a little,
+/// and a replacement's service waits for the one it takes over from to
+/// stop; one that another service holds past it is refused.
+fn take_lock(dir: &Path, queue_dir: &Path, wait: Duration) -> Result<Lock> {
+    let deadline = Instant::now() + wait;
+    loop {
+        if let Some(lock) = Lock::try_take(&dir.join(LOCK_FILE), true, libc::LOCK_EX)? {
+            return Ok(lock);
+        }
+        if Instant::now() >= deadline {
+            let pid = ServiceRecord::read(queue_dir).map(|record| record.pid);
+            bail!(
+                "a queue service already runs for this queue (pid {})",
+                pid.map_or_else(|| "unknown".to_owned(), |pid| pid.to_string())
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Wait up to `poll` for a connection to `listener`, returning as soon as
@@ -4098,19 +4336,10 @@ pub(crate) fn runs_for(pid: u32, command_words: &str, db: &Path) -> bool {
         && command.contains(&*db.to_string_lossy())
 }
 
-impl QueueServiceControl for SystemQueueService {
-    fn probe(&self) -> ServiceProbe {
-        probe(&self.queue_dir())
-    }
-
-    fn start(&self, timeout: Duration) -> Result<ServiceProbe> {
-        let found = self.probe();
-        if found.current() {
-            return Ok(found);
-        }
-        if found.state != ServiceState::Stopped {
-            self.stop(timeout)?;
-        }
+impl SystemQueueService {
+    /// Start `dagq service serve` with `arguments` from the binary,
+    /// detached, its output appended to the service's log: the log's path.
+    fn spawn(&self, arguments: &[&std::ffi::OsStr]) -> Result<PathBuf> {
         ensure!(
             self.executable.is_file(),
             "no binary at {} to start the queue service with",
@@ -4130,6 +4359,7 @@ impl QueueServiceControl for SystemQueueService {
             .arg("--db")
             .arg(&self.db)
             .args(["service", "serve"])
+            .args(arguments)
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
@@ -4144,6 +4374,113 @@ impl QueueServiceControl for SystemQueueService {
         }
         spawn_detached(&mut command)
             .with_context(|| format!("start {}", self.executable.display()))?;
+        Ok(log_file)
+    }
+
+    /// Follow the start of the replacement's service that tells its start
+    /// in `report`, stopping the services in its way once it takes over
+    /// ([`in_the_way`]: `found`, the one running, and any started meanwhile):
+    /// what it did, or why it refused. A service that applies migrations is
+    /// waited for as long as it lives; one that never tells, `timeout`.
+    fn follow_replacement(
+        &self,
+        report: &Path,
+        found: ServiceProbe,
+        timeout: Duration,
+        log_file: &Path,
+    ) -> Result<Replaced> {
+        let queue_dir = self.queue_dir();
+        let deadline = Instant::now() + timeout;
+        // The services signalled to make way, and when: one that does not
+        // stop within the grace is killed, as `stop` kills it.
+        let mut signalled: Vec<(u32, Instant)> = Vec::new();
+        let grace = timeout.min(TAKE_OVER_WAIT / 2);
+        let mut accepted: Option<Instant> = None;
+        let read = || {
+            fs::read(report)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<ReplacementState>(&bytes).ok())
+        };
+        loop {
+            match read() {
+                Some(ReplacementState::Refused { error, .. }) => bail!("{error}"),
+                Some(ReplacementState::Accepting { pid, migrated }) => {
+                    // The started service runs the build it was started
+                    // from, which may not be this process's (an `install`):
+                    // it is told by its pid.
+                    let service = probe(&queue_dir);
+                    let alive = crate::infrastructure::adapters::process_alive(pid);
+                    if accepted_start_over(alive, &service) {
+                        return Ok(Replaced {
+                            service,
+                            reused: false,
+                            replaced: (found.state != ServiceState::Stopped).then_some(found),
+                            migrated,
+                        });
+                    }
+                    let since = *accepted.get_or_insert_with(Instant::now);
+                    ensure!(
+                        since.elapsed() < timeout,
+                        "the queue service (pid {pid}) did not answer within {}s ({}); see {}",
+                        timeout.as_secs(),
+                        service.state.as_str(),
+                        log_file.display()
+                    );
+                }
+                Some(ReplacementState::TakingOver { pid }) => {
+                    let look = probe(&queue_dir);
+                    if let Some(other) = in_the_way(&look, pid, |other| serves(other, &self.db)) {
+                        match signalled.iter().find(|(signalled, _)| *signalled == other) {
+                            None => {
+                                signal(other, libc::SIGTERM);
+                                signalled.push((other, Instant::now()));
+                            }
+                            Some((_, at)) if at.elapsed() >= grace => {
+                                if serves(other, &self.db) {
+                                    signal(other, libc::SIGKILL);
+                                }
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                    if !crate::infrastructure::adapters::process_alive(pid) {
+                        // Its last word may have come after the read.
+                        if let Some(ReplacementState::Refused { error, .. }) = read() {
+                            bail!("{error}");
+                        }
+                        bail!(
+                            "the queue service (pid {pid}) ended before it accepted; see {}",
+                            log_file.display()
+                        );
+                    }
+                }
+                None => ensure!(
+                    Instant::now() < deadline,
+                    "the queue service did not answer within {}s; see {}",
+                    timeout.as_secs(),
+                    log_file.display()
+                ),
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl QueueServiceControl for SystemQueueService {
+    fn probe(&self) -> ServiceProbe {
+        probe(&self.queue_dir())
+    }
+
+    fn start(&self, timeout: Duration) -> Result<ServiceProbe> {
+        let found = self.probe();
+        if found.current() {
+            return Ok(found);
+        }
+        if found.state != ServiceState::Stopped {
+            self.stop(timeout)?;
+        }
+        let queue_dir = self.queue_dir();
+        let log_file = self.spawn(&[])?;
         let deadline = Instant::now() + timeout;
         loop {
             // Any service of this build that answers will do: another
@@ -4162,6 +4499,71 @@ impl QueueServiceControl for SystemQueueService {
             }
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    fn hold(&self) -> Result<crate::application::queue_service::ServiceHold> {
+        let dir = service_dir(&self.queue_dir()).join(HOLDS_DIR);
+        private_dir(&service_dir(&self.queue_dir()))?;
+        private_dir(&dir)?;
+        // The holds of processes that ended without letting go hold nothing.
+        for (file, pid) in holders(&dir) {
+            if !pid.is_some_and(crate::infrastructure::adapters::process_alive) {
+                let _ = fs::remove_file(file);
+            }
+        }
+        let pid = std::process::id();
+        let file = dir.join(format!("{pid}-{}.json", uuid::Uuid::new_v4()));
+        write_private(&file, &serde_json::to_vec(&json!({"pid": pid}))?)?;
+        Ok(crate::application::queue_service::ServiceHold::new(
+            Box::new(HoldFile(file)),
+        ))
+    }
+
+    fn held(&self) -> bool {
+        holders(&service_dir(&self.queue_dir()).join(HOLDS_DIR))
+            .into_iter()
+            .any(|(_, pid)| pid.is_some_and(crate::infrastructure::adapters::process_alive))
+    }
+
+    fn replace(&self, breaking: bool, reuse: bool, timeout: Duration) -> Result<Replaced> {
+        let queue_dir = self.queue_dir();
+        let dir = service_dir(&queue_dir);
+        private_dir(&dir)?;
+        let deadline = Instant::now() + timeout;
+        let _replacing = loop {
+            if let Some(lock) = Lock::try_take(&dir.join(REPLACING_LOCK), true, libc::LOCK_EX)? {
+                break lock;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "another replacement starts the queue's service now; nothing was started, try \
+again once it ends"
+            );
+            thread::sleep(Duration::from_millis(50));
+        };
+        let found = self.probe();
+        if reuse && !replacement_due(&found, ServiceRecord::read(&queue_dir).as_ref()) {
+            return Ok(Replaced {
+                service: found,
+                reused: true,
+                replaced: None,
+                migrated: None,
+            });
+        }
+        let report = service_dir(&queue_dir).join(format!(
+            "replacement-{}-{}.json",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut arguments = vec![std::ffi::OsStr::new("--replacement"), report.as_os_str()];
+        if breaking {
+            arguments.push(std::ffi::OsStr::new("--breaking"));
+        }
+        let result = self
+            .spawn(&arguments)
+            .and_then(|log_file| self.follow_replacement(&report, found, timeout, &log_file));
+        let _ = fs::remove_file(&report);
+        result
     }
 
     fn stop(&self, timeout: Duration) -> Result<Option<u32>> {
@@ -4994,6 +5396,110 @@ mod tests {
         assert_ne!(socket, socket_path(&dir.path().join("e".repeat(120))));
     }
 
+    /// `up` keeps a service of its build that found nothing pending when
+    /// it started; any other, or one that found migrations pending (started
+    /// by hand or by the supervisor's watch, which apply none), is replaced
+    /// by one that applies them.
+    #[test]
+    fn a_replacement_keeps_only_a_current_service_that_found_nothing_pending() {
+        let found = |state: ServiceState, build_matches: bool| ServiceProbe {
+            state,
+            socket: "/q/service/queue.sock".into(),
+            pid: Some(7),
+            build: None,
+            api_version: None,
+            min_api_version: None,
+            build_matches: Some(build_matches),
+            started_at: None,
+            error: None,
+        };
+        let record = |pid: u32, pending: bool| ServiceRecord {
+            pid,
+            build: crate::VERSION.into(),
+            api_version: API_VERSION,
+            socket: "/q/service/queue.sock".into(),
+            started_at: 0,
+            pending,
+        };
+        let current = found(ServiceState::Running, true);
+        assert!(!replacement_due(&current, Some(&record(7, false))));
+        assert!(replacement_due(&current, Some(&record(7, true))));
+        // A record of another process, or none: what it found is unknown.
+        assert!(replacement_due(&current, Some(&record(8, false))));
+        assert!(replacement_due(&current, None));
+        for other in [
+            found(ServiceState::Running, false),
+            found(ServiceState::Unreachable, true),
+            found(ServiceState::Stopped, true),
+        ] {
+            assert!(replacement_due(&other, Some(&record(7, false))));
+        }
+    }
+
+    /// A replacement's service that accepted is through its start when a
+    /// service answers or it is gone, though the watch of a supervisor of
+    /// the build before replaced it at once; while it takes over, the
+    /// service that answers with another pid is in its way, and one that
+    /// holds the lock without answering only when its pid serves the queue.
+    #[test]
+    fn a_replacement_makes_way_and_is_through_once_its_service_accepted() {
+        let look = |state: ServiceState, pid: Option<u32>| ServiceProbe {
+            state,
+            socket: "/q/service/queue.sock".into(),
+            pid,
+            build: None,
+            api_version: None,
+            min_api_version: None,
+            build_matches: None,
+            started_at: None,
+            error: None,
+        };
+        let new = 7;
+        assert!(accepted_start_over(
+            true,
+            &look(ServiceState::Running, Some(new))
+        ));
+        // Replaced by the watch of a supervisor of the build before.
+        assert!(accepted_start_over(
+            true,
+            &look(ServiceState::Running, Some(8))
+        ));
+        assert!(accepted_start_over(
+            false,
+            &look(ServiceState::Stopped, None)
+        ));
+        assert!(!accepted_start_over(
+            true,
+            &look(ServiceState::Unreachable, None)
+        ));
+        assert!(!accepted_start_over(
+            true,
+            &look(ServiceState::Stopped, None)
+        ));
+
+        let serves = |pid: u32| pid == 9;
+        assert_eq!(
+            in_the_way(&look(ServiceState::Running, Some(8)), new, serves),
+            Some(8)
+        );
+        assert_eq!(
+            in_the_way(&look(ServiceState::Running, Some(new)), new, serves),
+            None
+        );
+        assert_eq!(
+            in_the_way(&look(ServiceState::Unreachable, Some(9)), new, serves),
+            Some(9)
+        );
+        assert_eq!(
+            in_the_way(&look(ServiceState::Unreachable, Some(8)), new, serves),
+            None
+        );
+        assert_eq!(
+            in_the_way(&look(ServiceState::Stopped, Some(8)), new, serves),
+            None
+        );
+    }
+
     #[test]
     fn a_queue_with_no_service_looks_stopped() {
         let dir = tempfile::tempdir().unwrap();
@@ -5010,6 +5516,7 @@ mod tests {
             api_version: 1,
             socket: socket_path(dir.path()),
             started_at: 0,
+            pending: false,
         };
         write_private(
             &service_dir(dir.path()).join(STATE_FILE),

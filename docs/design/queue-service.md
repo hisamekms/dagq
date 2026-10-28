@@ -246,26 +246,26 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
 ## 起動と停止（ADR-t1233-4決定1・2）
 
 serviceは`dagq --db <db> service serve`で、固定バイナリ（`up`かsupervisorを動かしているもの）から起動する。
-起動するときはactorを名指すenvを外し、`setsid`で起動元のsessionから離し、もう1度forkして起動元の子でなくし（execで入れ替わるsupervisorにzombieを残さない）、`service.log`に出力を足す。
-起動したものは、このbuildのserviceが答えれば（競った別の起動元のものでも）成功とする。
+起動するときはactorを名指すenvを外し、起動元の子でないprocessにし（`SystemQueueService`）、`service.log`に出力を足す。
 `SIGINT`・`SIGTERM`で受け付けを止めて終わる。
-queueのDBが消えれば（使い捨てのqueueの片付け）自分で終わる。
-起動元のenvがownerのpidを名指していれば（testだけ。`domain::queue_service::OWNER_PID_ENV`）、そのprocessが居なくなってからも終わる。
+queueのDBが消えるか、testのownerのprocessが居なくなっても終わる（`serve`）。
 
-- `up`: preflightの後、supervisorより先に`application::queue_service::ensure`を打つ。
+- `up`: preflightの後、DBを開く前に入れ替えの口で起動する（`queue_service::ensure_replaced`）。
   起動できなければ`up`はsupervisorを起動せずに止まる。
   結果は`up`の出力の`queue_service`で、起動か入れ替えはevent `queue_service_started`に残す
 - supervisor: CLIのsupervisor（`--once`も）は登録とsign inの前に、居ないか別のbuild（`install`や自動更新の前のバイナリ）のserviceを起動か入れ替えし、最初の見張りで`queue_service_started`に残す（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
   その後も一定の間隔で見て、同じように起動し直すか入れ替える。
-  起動し直しの上限と、別のbuildの入れ替えとexecの前の起動の失敗の扱いは`application::supervise::host_ops::queue_service`のmodule doc。
-  drainと引き継ぎの間は見ない（execはserviceを次のプロセスに残す）
+  起動し直しの上限、drainと引き継ぎと入れ替えの最中に見ないことは`application::supervise::host_ops::queue_service`のmodule doc
 - serviceが居ない間、supervisorは新しいclaimとqueueのjobの起動を控える。
   走っているrunとそのreview・復旧は止めない（ADR-t1233-4決定2）
 - `down`: supervisorが居なければserviceを止めて`queue_service_stopped`に残す（`application::lifecycle::down`）。
   drainを待たない`down`は、signalの前に`queue_service_stop_requested`を書き、drainを終えた最後のsupervisorが止める（`queue_service_stopped`）
-- `install`と`install --allow-breaking`: `install`のdrain（`down --wait`）の後の`up`が新しいバイナリで起動する。
-  drainしない引き継ぎでは上のsupervisorが入れ替える
+- `install`（自動更新とrelease-updateも）: 未適用のmigrationがあれば差し替えの前に新しいbuildのserviceを入れ替えの口で起動し、引き継ぎの後に置いたバイナリのものに替える。
+  無ければ引き継いだsupervisorが替える
 - 人の手: `dagq service start`（`service.lifecycle`。`ensure`と同じ）・`dagq service stop`（supervisorが動いていれば次の見張りで起動し直す）・`dagq service status`（`queue.read`）
+
+migrationを適用するのは入れ替えの口で起動したserviceだけで、受け付けの前に適用する（ADR-t3102-2決定2。順は`serve`のdoc comment）。
+引き継ぐ前の拒否は動いているserviceを残し、引き継いだ後の使用中の再検査か適用の失敗はserviceを残さず、見張りか`up`が起動し直す。
 
 ## 落ちたときの知らせ（ADR-t3102-3決定1・2）
 

@@ -24,6 +24,9 @@
 //! followed by `queue_service_started` or `queue_service_running`, so the
 //! attention ends with it.
 //!
+//! A service a replacement (`up`, `install`) holds while it puts its build
+//! in place is left alone (ADR-t3102-2 decision 2).
+//!
 //! A draining or handing-off supervisor does not look: an exec leaves the
 //! service to the next process, which replaces it when its build changed.
 //! At the end of a drain `down` asked for (`queue_service_stop_requested`
@@ -154,6 +157,11 @@ impl HostOpsState {
             self.queue_service.up = true;
             self.queue_service.seen = true;
             return true;
+        }
+        // A replacement putting another build in place holds the service
+        // until it has handed the supervisors over: it is left alone.
+        if port.control.held() {
+            return self.queue_service.up;
         }
         // A service of another build that answers is replaced, and the
         // replacement is not counted as a restart.

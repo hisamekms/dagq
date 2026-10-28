@@ -8,6 +8,7 @@ use dagq::domain::LeaseToken;
 
 use common::lifecycle::*;
 
+use common::{Bounded, WithoutActor};
 use dagq::{
     VERSION,
     application::TaskStore,
@@ -17,7 +18,7 @@ use dagq::{
 };
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::{fs, path::Path, thread, time::Duration};
+use std::{fs, path::Path, process::Command, thread, time::Duration};
 
 /// Rewrite the version a registration recorded, standing in for a
 /// supervisor of another build (`Some`) or one that registered before the
@@ -1219,20 +1220,27 @@ fn queue_at_schema(db: &Path, version: usize) {
     .unwrap();
 }
 
-/// `up` applies the queue's pending migrations first only when every one
-/// of them is compatible (ADR-0045 decision 15), and refuses a breaking one
-/// with the way to it, before it starts or touches anything. A migration
-/// after 0031 is breaking, so a queue before it is refused even when the
-/// migration it lacks first (0031) is compatible.
+/// `up`'s service applies the queue's pending migrations first only when
+/// every one of them is compatible (ADR-0045 decision 15, ADR-t3102-2
+/// decision 2), and refuses a breaking one with the way to it, before `up`
+/// starts or touches anything and with no service left accepting. A
+/// migration after 0031 is breaking, so a queue before it is refused even
+/// when the migration it lacks first (0031) is compatible.
 #[test]
 fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
-    let fixture = fixture();
+    let mut fixture = fixture();
+    let _service = serve_on_up(&mut fixture);
     let db = &fixture.location.db;
     // The queue as the binary before the handoff columns left it.
     queue_at_schema(db, 30);
     let launchd = FakeLaunchd::new(db);
     let processes = FakeProcesses::default();
     let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
+    assert_eq!(
+        dagq::infrastructure::queue_service::probe(db.parent().unwrap()).state,
+        dagq::domain::queue_service::ServiceState::Stopped
+    );
+    assert!(launchd.installs.lock().unwrap().is_empty());
     // The breaking ones after 0031, however many came since (ADR-0067
     // decision 4).
     let breaking: Vec<String> = dagq::infrastructure::schema::MIGRATIONS
@@ -1277,7 +1285,8 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
         .collect();
     // A fresh queue at the schema before it, so the supervisor started
     // above has no registration left to reuse.
-    let fixture = common::lifecycle::fixture();
+    let mut fixture = common::lifecycle::fixture();
+    let service = serve_on_up(&mut fixture);
     let db = &fixture.location.db;
     let launchd = FakeLaunchd::new(db);
     let processes = FakeProcesses::default();
@@ -1304,6 +1313,9 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
         assert_eq!(report["supervisor"]["auto_update"], false, "{report}");
     }
 
+    // The service that migrated it found nothing pending: the next `up`'s
+    // is started anew only for a queue it would migrate.
+    service.stop();
     Connection::open(db)
         .unwrap()
         .execute_batch("PRAGMA user_version = 24;")
@@ -1311,4 +1323,150 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
     let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(error.contains("breaking migration(s) 25"), "{error}");
     assert!(error.contains("install --allow-breaking"), "{error}");
+}
+
+/// The queue at its last breaking migration, with what came after (all
+/// compatible) pending: what `up` and an automatic update find. Whether
+/// any is pending.
+fn queue_at_last_breaking(db: &Path) -> bool {
+    let migrations = dagq::infrastructure::schema::MIGRATIONS;
+    let last_breaking = (1..=migrations.len())
+        .rev()
+        .find(|&version| !dagq::infrastructure::schema::is_compatible(migrations[version - 1]))
+        .unwrap();
+    queue_at_schema(db, last_breaking);
+    last_breaking < migrations.len()
+}
+
+fn user_version(db: &Path) -> i64 {
+    Connection::open(db)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap()
+}
+
+/// The compatible migrations `up` brings are applied by the queue's
+/// service it starts, before that service accepts, and not by `up`'s own
+/// process: the service's log names its pid (ADR-t3102-2 decision 2).
+#[test]
+fn up_s_service_applies_the_compatible_migrations_before_it_accepts() {
+    let mut fixture = fixture();
+    let _service = serve_on_up(&mut fixture);
+    let db = fixture.location.db.clone();
+    if !queue_at_last_breaking(&db) {
+        return;
+    }
+    let launchd = FakeLaunchd::new(&db);
+    let processes = FakeProcesses::default();
+    let report = up(&fixture, &launchd, &processes);
+    assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
+    assert_eq!(
+        report["migrated"]["schema_version"],
+        SqliteQueue::SCHEMA_VERSION,
+        "{report}"
+    );
+    assert_eq!(report["queue_service"]["outcome"], "started", "{report}");
+    assert_eq!(user_version(&db), SqliteQueue::SCHEMA_VERSION);
+    let pid = report["queue_service"]["service"]["pid"].as_u64().unwrap();
+    assert_ne!(pid, u64::from(std::process::id()));
+    let log = fs::read_to_string(dagq::infrastructure::queue_service::log_path(
+        db.parent().unwrap(),
+    ))
+    .unwrap();
+    let applied = log
+        .lines()
+        .find(|line| line.contains("applied the migrations of its build"))
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!(applied.contains(&format!("(pid {pid})")), "{applied}");
+    // Migrated, the service is reused by the next `up`.
+    let again = up(&fixture, &launchd, &processes);
+    assert_eq!(again["queue_service"]["outcome"], "reused", "{again}");
+    assert_eq!(again["migrated"], Value::Null, "{again}");
+}
+
+/// A service started by hand applies no migration (ADR-0073 decision 5):
+/// `service start` on a queue its build would migrate refuses before it
+/// starts one, and the start it runs (the supervisor's watch's too) starts
+/// a service that leaves the schema as it was. The next `up` replaces that
+/// service with one that applies them.
+#[test]
+fn a_service_started_by_hand_applies_no_migration_and_up_replaces_it() {
+    use dagq::application::queue_service::QueueServiceControl;
+    let mut fixture = fixture();
+    let _service = serve_on_up(&mut fixture);
+    let db = fixture.location.db.clone();
+    if !queue_at_last_breaking(&db) {
+        return;
+    }
+    let before = user_version(&db);
+    let output = Command::new(&fixture.environment.current_exe)
+        .without_actor_env()
+        .arg("--db")
+        .arg(&db)
+        .args(["service", "start"])
+        .bounded_output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && error.contains("run `dagq migrate`"),
+        "{error}"
+    );
+    assert_eq!(user_version(&db), before);
+    let started = dagq::infrastructure::queue_service::SystemQueueService::new(
+        &db,
+        &fixture.environment.current_exe,
+    )
+    .start(Duration::from_secs(10))
+    .unwrap();
+    assert!(started.current(), "{started:?}");
+    assert_eq!(user_version(&db), before);
+    let launchd = FakeLaunchd::new(&db);
+    let processes = FakeProcesses::default();
+    let report = up(&fixture, &launchd, &processes);
+    assert_eq!(report["queue_service"]["outcome"], "replaced", "{report}");
+    assert_eq!(
+        report["migrated"]["schema_version"],
+        SqliteQueue::SCHEMA_VERSION,
+        "{report}"
+    );
+    assert_eq!(user_version(&db), SqliteQueue::SCHEMA_VERSION);
+}
+
+/// A queue whose floor refuses `up`'s build, raised by a newer build while
+/// a service it would replace runs: `up`'s service ends before it takes
+/// over, pending migrations or not, so the service running keeps its pid
+/// and answers, and `up` stops with the floor's error before it starts
+/// anything (ADR-t3102-2 decision 2).
+#[test]
+fn up_refused_by_the_queue_s_floor_leaves_the_running_service() {
+    use dagq::application::queue_service::QueueServiceControl;
+    use dagq::domain::queue_service::ServiceState;
+    let mut fixture = fixture();
+    let _service = serve_on_up(&mut fixture);
+    let db = fixture.location.db.clone();
+    // A service that found a migration pending: `up` would replace it.
+    queue_at_schema(&db, dagq::infrastructure::schema::MIGRATIONS.len() - 1);
+    let running = dagq::infrastructure::queue_service::SystemQueueService::new(
+        &db,
+        &fixture.environment.current_exe,
+    )
+    .start(Duration::from_secs(10))
+    .unwrap();
+    assert!(running.current(), "{running:?}");
+    let newer = SqliteQueue::SCHEMA_VERSION + 1;
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch(&format!(
+            "UPDATE schema_floor SET floor = {newer}; PRAGMA user_version = {newer};"
+        ))
+        .unwrap();
+    let launchd = FakeLaunchd::new(&db);
+    let processes = FakeProcesses::default();
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
+    assert!(error.contains("install a newer dagq"), "{error}");
+    let found = dagq::infrastructure::queue_service::probe(db.parent().unwrap());
+    assert_eq!(found.state, ServiceState::Running, "{found:?}");
+    assert_eq!(found.pid, running.pid, "{found:?}");
+    assert!(launchd.installs.lock().unwrap().is_empty());
+    assert_eq!(user_version(&db), newer);
 }

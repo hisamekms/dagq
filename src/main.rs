@@ -2111,6 +2111,16 @@ enum ServiceCommand {
     Serve {
         #[command(flatten)]
         cmux: RetiredCmux,
+        /// Start as the service of a replacement (`up`, `install`, the automatic update):
+        /// take over from the running service and apply this build's compatible migrations
+        /// before accepting, telling how the start goes in this file. Without it the service
+        /// applies none.
+        #[arg(long, value_name = "FILE", hide = true)]
+        replacement: Option<PathBuf>,
+        /// With --replacement, after a drain: apply the breaking migrations too, unless a
+        /// supervisor, a run or a wrapper uses the queue.
+        #[arg(long, requires = "replacement", hide = true)]
+        breaking: bool,
     },
 }
 
@@ -4885,7 +4895,11 @@ fn execute(cli: Cli) -> Result<Value> {
                 dagq::compose::queue_service_start(&db, &env::current_exe()?)
             }
             ServiceCommand::Stop => dagq::compose::queue_service_stop(&db),
-            ServiceCommand::Serve { cmux: _ } => dagq::infrastructure::queue_service::serve(
+            ServiceCommand::Serve {
+                cmux: _,
+                replacement,
+                breaking,
+            } => dagq::infrastructure::queue_service::serve(
                 &dagq::infrastructure::queue_service::ServeOptions {
                     db: db.clone(),
                     generators: generators.clone(),
@@ -4898,6 +4912,15 @@ fn execute(cli: Cli) -> Result<Value> {
                     owner: dagq::infrastructure::queue_service::owner_from_env(|name| {
                         env::var(name).ok()
                     }),
+                    // `service start` and the supervisor's watch apply no
+                    // migration; only a replacement's start does.
+                    start: if replacement.is_some() {
+                        dagq::domain::queue_service::ServiceStart::Replacement { breaking }
+                    } else {
+                        dagq::domain::queue_service::ServiceStart::ByHand
+                    },
+                    report: replacement,
+                    executable: env::current_exe()?,
                 },
             ),
         };
