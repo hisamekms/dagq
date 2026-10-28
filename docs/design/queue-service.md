@@ -233,7 +233,7 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
   pluginの`--resolve`が最初に打ち、dagq skillはDBが無いと分かったときだけ`init`を言うので、workerとjobが`init`を試みない
 - workerとjobのpromptとskillのコマンド（`dagq ask`・`dagq show`など）は変えない。
   observerとスループットの見直しのpromptは、`dagq --db <db>`ではなく`dagq`を名指す（promptはagentの引数なので、DBのpathを含めない）
-- session wrapper（`session`・`planner-session`）は継いだ環境のactorでなくwrapperのtokenで送り、DBを開かず（containerのrunのturnの準備を除く）、届かなければそのerrorで終わる。
+- session wrapper（`session`・`planner-session`）は継いだ環境のactorでなくwrapperのtokenで送り、DBを開かず、届かなければそのerrorで終わる。
   plannerのhook（`session-event`）は報告をwrapperに渡し、inboxのhookはinboxのtokenで送る
 
 ### Codexのsandboxからの到達（ADR-t1233-5決定4）

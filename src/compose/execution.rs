@@ -118,13 +118,12 @@ pub fn ended_run_material(
 /// resuming (ADR-0019) instead of starting the worker. A wrapper the run
 /// refuses ends and leaves any workspace it runs in alone. Started in the
 /// background (`background`, ADR-t1404-1), it needs no terminal and has no
-/// workspace of its own ([`wrapper_entry`]). It opens no queue itself (the
-/// dagq machine's parts a run in a clone readies before its turns still
-/// read and record on the queue): it reads and records through the queue
-/// service as the wrapper's principal,
-/// whose token the supervisor issued before it started the wrapper
-/// (ADR-t3102-1 decision 4), and a service it cannot reach ends it with
-/// that error.
+/// workspace of its own ([`wrapper_entry`]). It opens no queue itself,
+/// for the dagq machine's parts a run in a clone readies before its turns
+/// neither ([`crate::compose::WrapperContainerRecords`]): it reads and
+/// records through the queue service as the wrapper's principal, whose
+/// token the supervisor issued before it started the wrapper (ADR-t3102-1
+/// decision 4), and a service it cannot reach ends it with that error.
 #[allow(clippy::too_many_arguments)]
 pub fn session(
     db: &Path,
@@ -171,8 +170,13 @@ pub fn session(
     // SIGTERM in the background, unless the wrapper stops it (ADR-t813-1
     // decision 3, ADR-t1404-1 decision 3).
     crate::infrastructure::process::stop_groups_on_exit_signals();
+    let records = std::sync::Arc::new(crate::compose::WrapperContainerRecords::new(
+        queue.clone(),
+        db,
+    ));
     run_session(
         &mut queue,
+        records,
         db,
         id,
         token,
@@ -317,7 +321,7 @@ pub fn session_in_background_with_containers(
         pid,
         processes,
         None,
-        Some(containers),
+        Some(TurnContainers::Given(containers)),
     )
 }
 
@@ -336,6 +340,7 @@ fn wrapper_queue(db: &Path, id: &RunId) -> Result<SqliteQueue> {
 #[allow(clippy::too_many_arguments)]
 fn run_session(
     queue: &mut dyn WrapperStore,
+    records: std::sync::Arc<crate::compose::WrapperContainerRecords>,
     db: &Path,
     id: &RunId,
     token: &LeaseToken,
@@ -360,8 +365,18 @@ fn run_session(
         std::process::id(),
         &SystemProcesses,
         std::env::current_exe().ok().as_deref(),
-        None,
+        Some(TurnContainers::Records(records)),
     )
+}
+
+/// What a wrapper's turns in a clone run in: the dagq machine's
+/// containers whose parts' records go through `Records` (the wrapper's
+/// principal's, the process opening no queue), or a test's `Given` ones.
+/// Without either, a test's wrapper in a thread makes them on the queue
+/// at its `db` itself.
+enum TurnContainers<'a> {
+    Records(std::sync::Arc<crate::compose::WrapperContainerRecords>),
+    Given(&'a dyn crate::application::run_container::RunContainers),
 }
 
 /// [`run_session`] as the wrapper `pid`, on `queue`.
@@ -380,7 +395,7 @@ fn run_session_as(
     pid: u32,
     processes: &dyn ProcessControl,
     dagq: Option<&Path>,
-    containers: Option<&dyn crate::application::run_container::RunContainers>,
+    containers: Option<TurnContainers<'_>>,
 ) -> Result<Value> {
     // The wrapper only looks at the server and makes the guard of its
     // turns (ADR-t2086-1); the supervisor starts the server.
@@ -404,9 +419,20 @@ fn run_session_as(
             .cloned()),
         Err(error) => Err(anyhow::anyhow!("{error:#}")),
     };
-    let machine_containers =
-        crate::compose::run_containers(db, checkout.as_ref().ok().cloned().flatten());
-    let containers = containers.unwrap_or(&machine_containers);
+    let bound_checkout = checkout.as_ref().ok().cloned().flatten();
+    let machine_containers;
+    let containers: &dyn crate::application::run_container::RunContainers = match containers {
+        Some(TurnContainers::Given(given)) => given,
+        Some(TurnContainers::Records(records)) => {
+            machine_containers =
+                crate::compose::run_containers_of_wrapper(db, bound_checkout, records);
+            &machine_containers
+        }
+        None => {
+            machine_containers = crate::compose::run_containers(db, bound_checkout);
+            &machine_containers
+        }
+    };
     // The tests a turn's commands name as failed are read with the
     // profiles of the same `dagq.toml`, read again before each turn.
     let main_checkout = match bound_main {

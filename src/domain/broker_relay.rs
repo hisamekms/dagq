@@ -211,7 +211,8 @@ pub struct RelaySeen {
 }
 
 /// What the queue says of the run a relay is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum RelayRun {
     /// The queue could not be read.
     Unknown,

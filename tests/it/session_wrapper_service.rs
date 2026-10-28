@@ -258,7 +258,8 @@ fn a_planners_hook_leaves_its_report_for_its_wrapper() {
 }
 
 /// Acceptance (3), through the service: the worker's token is refused the
-/// wrapper's use cases on its own run, recorded as `authorization_denied`,
+/// wrapper's use cases on its own run (the records and reads of its turn's
+/// container's parts among them), recorded as `authorization_denied`,
 /// while the wrapper's token is answered.
 #[test]
 fn the_workers_token_is_refused_the_wrappers_use_cases() {
@@ -273,9 +274,15 @@ fn the_workers_token_is_refused_the_wrappers_use_cases() {
     let heartbeat = json!({"op": "heartbeat_wrapper", "run": run.id(), "pid": 1});
     let record = json!({"op": "runtime_event", "run": run.id(), "kind": "turn_started",
                         "payload": {"by": "test"}});
+    let owner = json!({"kind": "run", "id": run.id()});
+    let image = json!({"op": "image_event", "owner": owner, "kind": "container_image_built",
+                       "payload": {"reference": "localhost/q:ab"}});
+    let machine_user = json!({"op": "machine_user_run", "owner": owner, "run": run.id()});
     for (use_case, params, capability) in [
         (UseCase::SessionRun, &heartbeat, "session.run"),
         (UseCase::SessionRecord, &record, "session.record"),
+        (UseCase::SessionRecord, &image, "session.record"),
+        (UseCase::SessionRun, &machine_user, "session.run"),
     ] {
         let refused = call(&queue, Some(&worker), use_case, params.clone());
         assert_eq!(
@@ -286,7 +293,7 @@ fn the_workers_token_is_refused_the_wrappers_use_cases() {
         assert_eq!(refused["error"]["denied"]["capability"], capability);
     }
     let denied = events(&queue.db, "authorization_denied");
-    assert_eq!(denied.len(), 2, "{denied:?}");
+    assert_eq!(denied.len(), 4, "{denied:?}");
     assert!(
         denied
             .iter()
@@ -322,4 +329,65 @@ fn the_workers_token_is_refused_the_wrappers_use_cases() {
         ServiceErrorCode::AuthorizationDenied.as_str(),
         "{refused}"
     );
+}
+
+/// The records and reads of the container's parts a run's wrapper readies
+/// for its turn (the image's builds and failures, the runs that own users
+/// of the dagq machine) go through the service as the wrapper's, while its
+/// process refuses to open the queue; another queue's runs are not
+/// reached, and the image's last record is not the wrapper's to read.
+/// Once the service stops, a record fails as out of reach and a run reads
+/// as unknown, still without opening the queue.
+#[test]
+fn a_runs_wrapper_readies_its_containers_parts_through_the_service_alone() {
+    use dagq::application::container_image::ImageRecords;
+    use dagq::compose::WrapperContainerRecords;
+    use dagq::domain::broker_relay::RelayRun;
+    use dagq::infrastructure::{podman_machine::OwnerRuns, queue_service::ServiceWrapperStore};
+    let queue = queue();
+    let run = queue.run.clone();
+    start(&queue);
+    let target = StepTarget::run(run.id());
+    token(&queue, &Principal::wrapper(&target, Some(run.task_id())));
+    let refused = dagq::infrastructure::sqlite::refuse_opening(&queue.db);
+    let records =
+        WrapperContainerRecords::new(ServiceWrapperStore::of_queue(&queue.db, target), &queue.db);
+
+    records
+        .record(
+            EventKind::ContainerImageBuilt,
+            json!({"reference": "localhost/dagq-q:ab"}),
+        )
+        .unwrap();
+    assert!(records.latest().is_err());
+    assert_eq!(
+        records.run(&queue.db, run.id().as_str()),
+        Some(RelayRun::Found {
+            status: run.status(),
+            task_in_progress: true,
+        })
+    );
+    assert_eq!(
+        records.run(&queue.db, "no-such-run"),
+        Some(RelayRun::Missing)
+    );
+    assert_eq!(
+        records.run(&queue.dir().join("other").join("queue.db"), "r2"),
+        None
+    );
+
+    common::cli::ok(&queue.db, &["service", "stop"]);
+    let error = records
+        .record(EventKind::ContainerImageFailed, json!({}))
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("queue service"), "{error:#}");
+    assert_eq!(
+        records.run(&queue.db, run.id().as_str()),
+        Some(RelayRun::Unknown)
+    );
+    drop(refused);
+    let built = events(&queue.db, "container_image_built");
+    assert_eq!(built.len(), 1, "{built:?}");
+    assert_eq!(built[0]["actor"]["id"], format!("wrapper:{}", run.id()));
+    assert!(events(&queue.db, "container_image_failed").is_empty());
 }

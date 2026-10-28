@@ -599,8 +599,8 @@ impl std::fmt::Debug for HostMachineUsers {
     }
 }
 
-/// How a process that opens no queue (the supervisor, a person's
-/// `integrate` through the queue service) reads the runs that own users of
+/// How a process that opens no queue (the supervisor, a run's session
+/// wrapper, a person's `integrate` through the queue service) reads the runs that own users of
 /// the machine: the runs of the queue it is a client of, through that
 /// queue's service. A run of a queue it does not reach is unknown, and its
 /// user stays counted and kept ([`lease_held`]), unless that queue's
@@ -875,44 +875,7 @@ fn run_in_queue(db: &Path, run: &str, queues: &mut Queues) -> RelayRun {
     relay_run_in(queue, run)
 }
 
-/// The run `run` as `queue` knows it: found among the runs whose task is
-/// in progress, else found alone, else missing; unknown when it cannot be
-/// read (why is logged).
-pub fn relay_run_in(queue: &(impl crate::application::RunReads + ?Sized), run: &str) -> RelayRun {
-    let read = (|| {
-        if let Some(found) = queue
-            .latest_runs_in_progress()?
-            .into_iter()
-            .find(|found| found.id().as_str() == run)
-        {
-            return Ok(RelayRun::Found {
-                status: found.status(),
-                task_in_progress: true,
-            });
-        }
-        let Ok(id) = crate::domain::RunId::new(run) else {
-            return Ok(RelayRun::Missing);
-        };
-        match queue.run(&id) {
-            Ok(found) => Ok(RelayRun::Found {
-                status: found.status(),
-                task_in_progress: false,
-            }),
-            Err(error)
-                if error
-                    .downcast_ref::<crate::application::RunNotFound>()
-                    .is_some() =>
-            {
-                Ok(RelayRun::Missing)
-            }
-            Err(error) => Err(error),
-        }
-    })();
-    read.unwrap_or_else(|error: anyhow::Error| {
-        tracing::warn!(run, error = %format_args!("{error:#}"), "the run of a user of the podman machine could not be read: {error:#}");
-        RelayRun::Unknown
-    })
-}
+pub use crate::application::broker_relay::relay_run_in;
 
 /// The named volumes of one queue inside the dagq machine.
 #[derive(Debug, Clone)]
@@ -1519,8 +1482,9 @@ pub struct QueueRunMachine {
     pub host_wide: Option<PathBuf>,
     /// Where the image's records go when the process opens no queue: kept
     /// for it to send (a command of the host's `dagq` the queue service
-    /// runs), or sent to the queue service as they are made (a person's
-    /// `integrate` through the service); on the queue at `db` without.
+    /// runs), or sent to the queue service as they are made (a run's
+    /// session wrapper, a person's `integrate` through the service); on the
+    /// queue at `db` without.
     pub kept_records:
         Option<std::sync::Arc<dyn crate::application::container_image::ImageRecords + Send + Sync>>,
     /// How the runs that own users of the machine are read when the

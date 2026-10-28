@@ -26,8 +26,8 @@ related:
 
 - 宛ての環境が無い`dagq`のうちuser・inbox・plannerのもの（`host_client_role`）は、serviceが答えるコマンド（`client_request`）と`watch`の各回の見る（`watch_poll`）と制御側のコマンドのstep（`control_call`、下の「制御側のコマンド」）をそのsocketへ送り、DBを開かない。
   serviceが一度も動いていないqueueも同じで、DBが無ければ送る前に`no queue at`で終わる（ADR-t3105-1決定3）。
-- 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、wrapperとhookの経路（決定6の(3)）、制御側のプロセス（`supervise`・`up`・`down`・`install`・`inbox`・`service start`など。(5)）と`migrate`・`doctor`（(6)）。
-  hookのうちinboxの`session-event`は、spanをinboxのtokenで自分で`session_record`に送り、DBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
+- 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、制御側のプロセス（`supervise`・`up`・`down`・`install`・`inbox`・`service start`など。(5)）と`migrate`・`doctor`（(6)）。
+  wrapperとhookの経路（決定6の(3)）は`client_request`でなく、wrapperはwrapperのtokenで（runのturnのcontainerの準備を含む）、inboxの`session-event`はspanをinboxのtokenで自分で`session_record`に送り、DBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
   CLIの全ての葉は送るものかこの例外のどれかに当たり、どちらでもない葉は無い（unit testが全ての葉を数えて確かめる）。
   1つのコマンドの中で経路を混ぜない。
 - 送らないコマンドでもCLIが自分で拒んだもの（`check_access`とruntimeの操作の判定）は、その拒否だけを`denial_record`で呼び出し元のprincipal（tokenか、socketのpeerのuser）として送り、serviceがそのprincipalの`authorization_denied`に記録する（`infrastructure::denials::ServiceDenials`）。

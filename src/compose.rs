@@ -250,9 +250,14 @@ impl ServiceContainerRecords {
 
     /// Whether `db` names the queue the service serves.
     fn serves(&self, db: &Path) -> bool {
-        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        canonical(db) == canonical(&self.db)
+        same_queue(db, &self.db)
     }
+}
+
+/// Whether `db` and `served` name the same queue.
+fn same_queue(db: &Path, served: &Path) -> bool {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    canonical(db) == canonical(served)
 }
 
 impl crate::application::broker_relay::RelayRecords for ServiceContainerRecords {
@@ -281,6 +286,63 @@ impl crate::application::container_image::ImageRecords for ServiceContainerRecor
         )?
         .map(|event| (event.kind, event.payload)))
     }
+}
+
+/// The records of the container's parts a run's session wrapper readies
+/// for its turns, on the queue at `db` through its service as the
+/// wrapper's principal (`store`'s token): the image's builds and failures
+/// it records, and the runs of that queue that own users of the dagq
+/// machine it reads (another queue's are not reached). Each is one
+/// operation of the wrapper's ([`crate::application::session::SessionOp`]),
+/// which the service allows the wrapper of its own run alone; no queue's
+/// DB is opened. A service that does not answer leaves a record unmade
+/// (the image's preparation warns of it) and a run unknown, kept as a user
+/// of the machine (fail closed). The image's last record, which only the
+/// supervisor's and a landing's gates read, is not read here.
+pub struct WrapperContainerRecords {
+    store: crate::infrastructure::queue_service::ServiceWrapperStore,
+    db: PathBuf,
+}
+
+impl WrapperContainerRecords {
+    /// The records of the queue at `db` its wrapper's `store` reaches.
+    pub fn new(
+        store: crate::infrastructure::queue_service::ServiceWrapperStore,
+        db: &Path,
+    ) -> Self {
+        Self {
+            store,
+            db: db.to_path_buf(),
+        }
+    }
+}
+
+impl crate::infrastructure::podman_machine::OwnerRuns for WrapperContainerRecords {
+    fn run(&self, db: &Path, run: &str) -> Option<crate::domain::broker_relay::RelayRun> {
+        same_queue(db, &self.db)
+            .then(|| crate::application::session::WrapperStore::machine_user_run(&self.store, run))
+    }
+}
+
+impl crate::application::container_image::ImageRecords for WrapperContainerRecords {
+    fn record(&self, kind: crate::domain::EventKind, payload: Value) -> Result<()> {
+        self.store.record_image_event(kind, payload)
+    }
+
+    fn latest(&self) -> Result<Option<(crate::domain::RecordedKind, Value)>> {
+        anyhow::bail!("a session wrapper does not read the container image's last record")
+    }
+}
+
+/// The containers of the runs of the queue at `db` as a run's session
+/// wrapper readies them for its turns ([`run_containers`]), the image's
+/// records made and the machine's users' runs read through `records`.
+pub(crate) fn run_containers_of_wrapper(
+    db: &Path,
+    main_checkout: Option<PathBuf>,
+    records: std::sync::Arc<WrapperContainerRecords>,
+) -> crate::infrastructure::run_container::PodmanRunContainers {
+    run_containers_on(db, main_checkout, Some(records.clone()), Some(records))
 }
 
 /// The verifications' containers of the queue at `db`, whose parts the

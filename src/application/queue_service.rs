@@ -1730,6 +1730,15 @@ fn run(
             }
             let (capability, resource) = op.request();
             gate.authorize(&store, capability, &resource)?;
+            if !op.permits(actor) {
+                let error = crate::domain::AuthorizationError {
+                    role: actor.role(),
+                    capability,
+                    reason: crate::domain::authorization::DenyReason::Resource,
+                };
+                super::commands::record(&store, &error, &resource);
+                return Err(error.into());
+            }
             store.0.session(&op)
         }
         UseCase::DenialRecord => {
@@ -3889,7 +3898,10 @@ mod tests {
     /// ADR-t3102-1 decision 4: a session wrapper's operations reach the
     /// queue as the wrapper's principal, on its own run or planner only;
     /// the worker's token (and a planner's, and a job's) is refused them
-    /// and the refusal recorded as `authorization_denied`; an operation
+    /// and the refusal recorded as `authorization_denied`, and the records
+    /// and reads of a run's turn's container's parts are refused to any
+    /// but that run's wrapper (the inbox's and the supervisor's, a
+    /// planner's wrapper's on its planner) the same way; an operation
     /// under the other use case is a bad request.
     #[test]
     fn only_the_wrapper_runs_and_records_its_own_session() {
@@ -3904,6 +3916,20 @@ mod tests {
         let hook = json!({"op": "hook", "hook": {
             "event": {"hook": "start", "source": "startup"}, "kind": "runtime_planner",
             "session_id": "s1", "planner_id": 3}});
+        // The records and reads of the container's parts a run's turn
+        // readies are its own wrapper's alone.
+        let image = |run: &str| {
+            json!({"op": "image_event", "owner": {"kind": "run", "id": run},
+            "kind": "container_image_built", "payload": {"reference": "localhost/q:ab"}})
+        };
+        let machine_user = |run: &str| {
+            json!({"op": "machine_user_run",
+            "owner": {"kind": "run", "id": run}, "run": "r9"})
+        };
+        let of_planner = |mut op: Value| {
+            op["owner"] = json!({"kind": "planner", "id": "3"});
+            op
+        };
         let send = |token, use_case, params: &Value| {
             service.handle(&request(Some(token), use_case, params.clone()))
         };
@@ -3921,6 +3947,8 @@ mod tests {
                 UseCase::SessionRun,
                 json!({"op": "planner_exited", "planner": 3, "wrapper_pid": 7, "exit_code": 0}),
             ),
+            ("wrapper", UseCase::SessionRecord, image("r1")),
+            ("wrapper", UseCase::SessionRun, machine_user("r1")),
         ] {
             let response = send(token, use_case, &params);
             assert!(response.ok, "{token} {params}: {response:?}");
@@ -3971,6 +3999,81 @@ mod tests {
                 json!({"op": "heartbeat_planner", "planner": 4, "wrapper_pid": 7}),
                 "session.run",
             ),
+            (
+                "worker",
+                UseCase::SessionRecord,
+                image("r1"),
+                "session.record",
+            ),
+            (
+                "worker",
+                UseCase::SessionRun,
+                machine_user("r1"),
+                "session.run",
+            ),
+            (
+                "review",
+                UseCase::SessionRecord,
+                image("r1"),
+                "session.record",
+            ),
+            (
+                "review",
+                UseCase::SessionRun,
+                machine_user("r1"),
+                "session.run",
+            ),
+            (
+                "planner",
+                UseCase::SessionRun,
+                machine_user("r1"),
+                "session.run",
+            ),
+            (
+                "wrapper",
+                UseCase::SessionRecord,
+                image("r2"),
+                "session.record",
+            ),
+            (
+                "wrapper",
+                UseCase::SessionRun,
+                machine_user("r2"),
+                "session.run",
+            ),
+            // The inbox and the supervisor hold both capabilities on any
+            // run, and a planner's wrapper its own planner: none readies a
+            // run's turn's container.
+            (
+                "inbox",
+                UseCase::SessionRecord,
+                image("r1"),
+                "session.record",
+            ),
+            (
+                "inbox",
+                UseCase::SessionRun,
+                machine_user("r1"),
+                "session.run",
+            ),
+            (
+                "supervisor",
+                UseCase::SessionRun,
+                machine_user("r1"),
+                "session.run",
+            ),
+            (
+                "wrapper-planner",
+                UseCase::SessionRecord,
+                of_planner(image("r1")),
+                "session.record",
+            ),
+            (
+                "wrapper-planner",
+                UseCase::SessionRun,
+                of_planner(machine_user("r1")),
+                "session.run",
+            ),
         ] {
             let refused = send(token, use_case, &params);
             assert_eq!(
@@ -3982,6 +4085,8 @@ mod tests {
             assert_eq!(denial["capability"], capability, "{token} {params}");
         }
         let crossed = send("wrapper", UseCase::SessionRecord, &heartbeat("r1"));
+        assert_eq!(code(&crossed), Some(ServiceErrorCode::BadRequest));
+        let crossed = send("wrapper", UseCase::SessionRecord, &machine_user("r1"));
         assert_eq!(code(&crossed), Some(ServiceErrorCode::BadRequest));
         let unknown = send(
             "wrapper",

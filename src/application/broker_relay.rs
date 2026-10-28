@@ -19,7 +19,7 @@ use anyhow::{Context, Result, ensure};
 use super::EventStore;
 use super::queue_broker::QueueBrokerControl;
 use crate::domain::broker_relay::{
-    QUEUE_RELAY_ATTENTION_KINDS, RelaySeen, RelaySpec, address_port, attention_stands,
+    QUEUE_RELAY_ATTENTION_KINDS, RelayRun, RelaySeen, RelaySpec, address_port, attention_stands,
 };
 use crate::domain::container_runtime::{Availability, RuntimeTarget};
 use crate::domain::queue_service::ServiceState;
@@ -139,6 +139,41 @@ impl<C: super::ContainerRuntime> super::ContainerRuntime for RelayGate<C> {
     fn memory_wait(&self) -> Option<String> {
         self.container.memory_wait()
     }
+}
+
+/// The run `run` as `queue` knows it: found among the runs whose task is
+/// in progress, else found alone, else missing; unknown when it cannot be
+/// read (why is logged).
+pub fn relay_run_in(queue: &(impl super::RunReads + ?Sized), run: &str) -> RelayRun {
+    let read = (|| {
+        if let Some(found) = queue
+            .latest_runs_in_progress()?
+            .into_iter()
+            .find(|found| found.id().as_str() == run)
+        {
+            return Ok(RelayRun::Found {
+                status: found.status(),
+                task_in_progress: true,
+            });
+        }
+        let Ok(id) = crate::domain::RunId::new(run) else {
+            return Ok(RelayRun::Missing);
+        };
+        match queue.run(&id) {
+            Ok(found) => Ok(RelayRun::Found {
+                status: found.status(),
+                task_in_progress: false,
+            }),
+            Err(error) if error.downcast_ref::<super::RunNotFound>().is_some() => {
+                Ok(RelayRun::Missing)
+            }
+            Err(error) => Err(error),
+        }
+    })();
+    read.unwrap_or_else(|error: anyhow::Error| {
+        tracing::warn!(run, error = %format_args!("{error:#}"), "the run of a user of the podman machine could not be read: {error:#}");
+        RelayRun::Unknown
+    })
 }
 
 #[cfg(test)]

@@ -345,6 +345,10 @@ pub trait WrapperStore {
     /// Record what a planner's hook reported, as the hook did on the queue
     /// ([`super::SessionRegistry::record_session_hook`]).
     fn record_session_hook(&self, hook: &SessionHook) -> Result<Value>;
+    /// The run `run` of this queue, which owns a user of the dagq machine,
+    /// as [`super::broker_relay::relay_run_in`] reads it: unknown when it
+    /// cannot be read.
+    fn machine_user_run(&self, run: &str) -> crate::domain::broker_relay::RelayRun;
     /// The store as the executor's record of a relocated agent takes it.
     fn as_events(&self) -> &dyn super::actor_executor::ExecutorEvents;
 }
@@ -417,6 +421,9 @@ impl<T: Queue> WrapperStore for T {
     }
     fn record_session_hook(&self, hook: &SessionHook) -> Result<Value> {
         super::SessionRegistry::record_session_hook(self, hook)
+    }
+    fn machine_user_run(&self, run: &str) -> crate::domain::broker_relay::RelayRun {
+        super::broker_relay::relay_run_in(self, run)
     }
     fn as_events(&self) -> &dyn super::actor_executor::ExecutorEvents {
         self
@@ -524,23 +531,41 @@ pub enum SessionOp {
     Hook {
         hook: SessionHook,
     },
+    /// A record of the container image a run's wrapper made ready for the
+    /// turn of `owner` (a build, or why it failed): an event of the queue
+    /// of one of [`crate::domain::container_image::CONTAINER_IMAGE_KINDS`].
+    ImageEvent {
+        owner: StepTarget,
+        kind: String,
+        payload: Value,
+    },
+    /// The run `run` that owns a user of the dagq machine, which the
+    /// wrapper of `owner` reads before it makes the machine run for its
+    /// turn ([`WrapperStore::machine_user_run`]).
+    MachineUserRun {
+        owner: StepTarget,
+        run: String,
+    },
 }
 
 impl SessionOp {
     /// The use case that carries the operation.
     pub const fn use_case(&self) -> UseCase {
         match self {
-            Self::RuntimeEvent { .. } | Self::QueueEvent { .. } | Self::Hook { .. } => {
-                UseCase::SessionRecord
-            }
+            Self::RuntimeEvent { .. }
+            | Self::QueueEvent { .. }
+            | Self::Hook { .. }
+            | Self::ImageEvent { .. } => UseCase::SessionRecord,
             _ => UseCase::SessionRun,
         }
     }
 
     /// What the policy is asked for the operation: a read of the queue,
-    /// `session.run` on the run or the planner of the session's lifecycle,
-    /// or `session.record` on that of a record (a hook's of the inbox, on
-    /// the queue).
+    /// `session.run` on the run or the planner of the session's lifecycle
+    /// (and of the read of a user of the dagq machine its turn's container
+    /// readies), or `session.record` on that of a record (a hook's of the
+    /// inbox, on the queue): the container's parts only the wrapper's
+    /// principal reads and records, for its own run.
     pub fn request(&self) -> (Capability, Resource) {
         let on_target = |target: &StepTarget| match target.kind {
             TargetKind::Run => target.run_id().map_or(Resource::Unresolved, Resource::run),
@@ -572,7 +597,10 @@ impl SessionOp {
             Self::RuntimeEvent { run, .. } => {
                 (Capability::SessionRecord, Resource::run(run.clone()))
             }
-            Self::QueueEvent { owner, .. } => (Capability::SessionRecord, on_target(owner)),
+            Self::QueueEvent { owner, .. } | Self::ImageEvent { owner, .. } => {
+                (Capability::SessionRecord, on_target(owner))
+            }
+            Self::MachineUserRun { owner, .. } => (Capability::SessionRun, on_target(owner)),
             Self::Hook { hook } => (
                 Capability::SessionRecord,
                 match (hook.kind, hook.planner_id) {
@@ -581,6 +609,23 @@ impl SessionOp {
                     (_, None) => Resource::Unresolved,
                 },
             ),
+        }
+    }
+}
+
+impl SessionOp {
+    /// Whether `actor`, already allowed what [`Self::request`] names, may
+    /// do the operation: the records and reads of the container's parts a
+    /// run's turn readies ([`Self::ImageEvent`], [`Self::MachineUserRun`])
+    /// are the wrapper's of that run alone, not a planner's wrapper's nor
+    /// another principal's that holds `session.run` or `session.record`
+    /// (the inbox's, the user's); every other operation is the policy's.
+    pub fn permits(&self, actor: &crate::domain::ActorContext) -> bool {
+        match self {
+            Self::ImageEvent { owner, .. } | Self::MachineUserRun { owner, .. } => {
+                actor.role() == crate::domain::ActorRole::Wrapper && owner.kind == TargetKind::Run
+            }
+            _ => true,
         }
     }
 }
@@ -700,6 +745,16 @@ pub fn apply(store: &mut dyn WrapperStore, op: &SessionOp) -> Result<Value> {
             Value::Null
         }
         SessionOp::Hook { hook } => store.record_session_hook(hook)?,
+        SessionOp::ImageEvent { kind, payload, .. } => {
+            ensure!(
+                crate::domain::container_image::CONTAINER_IMAGE_KINDS.contains(&kind.as_str()),
+                "a session wrapper records of the container's parts only its image's \
+                 builds and failures, not {kind:?}"
+            );
+            store.record_queue_event(event_kind(kind)?, payload.clone())?;
+            Value::Null
+        }
+        SessionOp::MachineUserRun { run, .. } => serde_json::to_value(store.machine_user_run(run))?,
     };
     Ok(json!({ "value": value }))
 }
@@ -881,8 +936,9 @@ mod tests {
         fn record_runtime_event(&self, _: &RunId, _: EventKind, _: Value) -> Result<()> {
             unreachable!()
         }
-        fn record_queue_event(&self, _: EventKind, _: Value) -> Result<()> {
-            unreachable!()
+        fn record_queue_event(&self, kind: EventKind, _: Value) -> Result<()> {
+            self.recorded.borrow_mut().push(kind.as_str().to_owned());
+            Ok(())
         }
         fn record_session_hook(&self, hook: &SessionHook) -> Result<Value> {
             if self.fail == Some(hook.session_id.as_str()) {
@@ -893,6 +949,9 @@ mod tests {
         }
         fn as_events(&self) -> &dyn crate::application::actor_executor::ExecutorEvents {
             unreachable!()
+        }
+        fn machine_user_run(&self, _: &str) -> crate::domain::broker_relay::RelayRun {
+            crate::domain::broker_relay::RelayRun::Missing
         }
     }
 
@@ -1030,6 +1089,23 @@ mod tests {
                 UseCase::SessionRecord,
                 (Capability::SessionRecord, planner.clone()),
             ),
+            (
+                SessionOp::ImageEvent {
+                    owner: StepTarget::run(&run),
+                    kind: "container_image_failed".into(),
+                    payload: json!({}),
+                },
+                UseCase::SessionRecord,
+                (Capability::SessionRecord, Resource::run(run.clone())),
+            ),
+            (
+                SessionOp::MachineUserRun {
+                    owner: StepTarget::run(&run),
+                    run: "r9".into(),
+                },
+                UseCase::SessionRun,
+                (Capability::SessionRun, Resource::run(run.clone())),
+            ),
         ] {
             assert_eq!(op.use_case(), use_case, "{op:?}");
             assert_eq!(op.request(), request, "{op:?}");
@@ -1080,6 +1156,42 @@ mod tests {
         }
         let answer = apply(&mut store, &SessionOp::Hook { hook: hook("s") }).unwrap();
         assert_eq!(answer, json!({"value": {}}));
+        // Of the container's parts, a wrapper records its image's builds
+        // and failures alone, and reads the run of a user of the machine.
+        let image = |kind: &str| SessionOp::ImageEvent {
+            owner: StepTarget::run(&run),
+            kind: kind.into(),
+            payload: json!({}),
+        };
+        assert!(apply(&mut store, &image("queue_relay_down")).is_err());
+        assert_eq!(
+            apply(&mut store, &image("container_image_built")).unwrap(),
+            json!({"value": null})
+        );
+        assert_eq!(
+            store.recorded.borrow().as_slice(),
+            ["s", "container_image_built"]
+        );
+        let read = SessionOp::MachineUserRun {
+            owner: StepTarget::run(&run),
+            run: "r9".into(),
+        };
+        assert_eq!(
+            apply(&mut store, &read).unwrap(),
+            json!({"value": {"state": "missing"}})
+        );
+        // Only a run's wrapper does them, on a run.
+        let wrapper =
+            crate::domain::ActorContext::instance(crate::domain::ActorRole::Wrapper, &run);
+        let inbox = crate::domain::ActorContext::instance(crate::domain::ActorRole::Inbox, 1);
+        let on_planner = SessionOp::MachineUserRun {
+            owner: StepTarget::of(TargetKind::Planner, 3),
+            run: "r9".into(),
+        };
+        assert!(read.permits(&wrapper) && image("container_image_built").permits(&wrapper));
+        assert!(!read.permits(&inbox) && !image("container_image_built").permits(&inbox));
+        assert!(!on_planner.permits(&wrapper));
+        assert!(SessionOp::Run { run: run.clone() }.permits(&inbox));
     }
 
     #[test]

@@ -269,7 +269,7 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
 - plannerの`service.lifecycle`・`service.install`・`queue.admin`・`planner.open`は、ADR-t728-1の決定7のとおり許す。
   plannerはruntimeだけが立て、人が頼む相手ではないので（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)）、`up`・`down`・`inbox`・`install`は使わない（打つのはinboxか人の`DAGQ_ROLE`の無いterminal。[Roles](supervisor-lifecycle/roles.md)）。
   `plan`は権限の判定を通っても誰が打っても何も開かず、inboxへの依頼の案内（`PLAN_REFUSED`）で失敗する
-- `session`・`planner-session`は環境のactorで判定せず、wrapperのprincipalでserviceが判定する（[Queue service](queue-service.md#クライアントモード)）。
+- `session`・`planner-session`はwrapperのprincipalで判定する（下の節）
   `session-event`はplannerのspanならwrapperに渡してqueueに触れず、runのspanは無く、inboxのspanはinboxとuserだけが記録できる（workerとplannerは`session.record`を持たない）
 - 拒否は`authorization_denied`として、拒まれた呼び出し元のprincipalでserviceが記録する（`ServiceDenials`。CLIはqueueを開かない。[hostのCLI](queue-service-host-cli.md#送る範囲)）。
   queueが無い・serviceが答えないときは記録できず、拒否は拒否のまま返す。
@@ -319,6 +319,7 @@ queue全体の読み取りのユースケース（一覧は[Queue service](queue
 supervisorの操作（containerの部品とNodeSampleStoreの記録と読みを含む。[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）は、登録を持つsupervisorにだけ`scheduler.supervise`と操作ごとのcapability（`needs::supervisor_needs`）を`Gate`で通してから答える。
 人・inbox・plannerの計画の操作はCLIと同じcapabilityを求めてsupervisorには拒み、一覧に無い操作とintegratorだけの着地の終わりは拒む（default deny）。
 着地のintegratorには`landing.land`を通し、着地の操作だけを、名指すrun・task・leaseをそのものに限って答え、ほかは書かずに拒む（`integrator_scope`）。
+wrapperには`session.run`・`session.record`を自分のrunかplannerに、containerの準備はrunのものだけに通す。
 
 ### ほかのコマンド（CLIの入口）
 

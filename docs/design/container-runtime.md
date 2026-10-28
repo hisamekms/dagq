@@ -114,7 +114,7 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
 ## image
 
 containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すprojectのContainerfileの2段である（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定2）。
-判断は`domain::container_image`、use caseは`application::container_image`、podmanのコマンドとmainのcheckoutの読み取りは`infrastructure::container_image`が持ち、queueの記録はsupervisorではqueue serviceを通る（fail closed）。
+判断は`domain::container_image`、use caseは`application::container_image`、podmanのコマンドとmainのcheckoutの読み取りは`infrastructure::container_image`が持ち、queueの記録はsupervisorとwrapperではqueue serviceを通る（fail closed）。
 
 - base: Containerfileは`src/infrastructure/container_image/base.Containerfile`に置き、binaryに埋め込む。
   Claude Code・Linuxのdagqのclient・非rootのuserだけを持ち、言語の道具を残さない。

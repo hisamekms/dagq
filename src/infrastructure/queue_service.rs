@@ -2246,6 +2246,17 @@ impl ServiceWrapperStore {
     fn done(&self, op: &SessionOp) -> Result<()> {
         self.call(op).map(drop)
     }
+
+    /// Record a build of the container image the wrapper's turn readies,
+    /// or why it failed ([`SessionOp::ImageEvent`]), as an event of the
+    /// queue the service records as the wrapper's.
+    pub fn record_image_event(&self, kind: EventKind, payload: Value) -> Result<()> {
+        self.done(&SessionOp::ImageEvent {
+            owner: self.target.clone(),
+            kind: kind.as_str().to_owned(),
+            payload,
+        })
+    }
 }
 
 impl WrapperStore for ServiceWrapperStore {
@@ -2383,6 +2394,18 @@ impl WrapperStore for ServiceWrapperStore {
     }
     fn record_session_hook(&self, hook: &SessionHook) -> Result<Value> {
         self.call(&SessionOp::Hook { hook: hook.clone() })
+    }
+    /// Unknown, as a queue that cannot be read, when the service does not
+    /// answer (why is logged): the wrapper opens no queue in its place.
+    fn machine_user_run(&self, run: &str) -> crate::domain::broker_relay::RelayRun {
+        self.read(&SessionOp::MachineUserRun {
+            owner: self.target.clone(),
+            run: run.to_owned(),
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!(run, error = %format_args!("{error:#}"), "the run of a user of the podman machine could not be read: {error:#}");
+            crate::domain::broker_relay::RelayRun::Unknown
+        })
     }
     fn as_events(&self) -> &dyn ExecutorEvents {
         self
