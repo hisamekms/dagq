@@ -1592,6 +1592,18 @@ impl RunTransitions for SqliteQueue {
     )> {
         SqliteQueue::ask_replan_diagnosis(self, ask, op, reason, run, written)
     }
+    fn running_diagnosis_owners(&self) -> Result<Vec<u32>> {
+        SqliteQueue::running_diagnosis_owners(self)
+    }
+    fn start_replan_diagnosis(
+        &mut self,
+        op: (crate::domain::ReplanId, i64),
+        reason: &str,
+        run: &RunId,
+        started: (serde_json::Value, u32, &[u32]),
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        SqliteQueue::start_replan_diagnosis(self, op, reason, run, started)
+    }
     fn move_replan(
         &mut self,
         id: crate::domain::ReplanId,

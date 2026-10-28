@@ -883,6 +883,14 @@ pub struct PlanningPayload {
     pub window_end: Option<EventId>,
     /// `replan_diagnosis_started`: the supervisor that runs the job.
     pub supervisor_pid: Option<u32>,
+    /// `replan_diagnosed` and `replan_diagnosis_failed` of a job: the
+    /// generation its start claimed the operation under, which ties the
+    /// end to that start (an ask's record or another attempt's names
+    /// another one, or none).
+    pub started_generation: Option<i64>,
+    /// The job's attempt, which ties an older binary's end, which names no
+    /// generation, to its start.
+    pub attempt: Option<usize>,
     /// `replan_diagnosed`: the job's verdict.
     pub verdict: Option<DiagnosisVerdict>,
 }
@@ -890,7 +898,12 @@ pub struct PlanningPayload {
 impl PlanningPayload {
     /// `event`'s payload, each field read on its own.
     pub fn of(event: &RunEvent) -> Self {
-        let field = |key: &str| event.payload.get(key).cloned().unwrap_or(Value::Null);
+        Self::from_value(&event.payload)
+    }
+
+    /// The fields of `payload`, each read on its own.
+    pub fn from_value(payload: &Value) -> Self {
+        let field = |key: &str| payload.get(key).cloned().unwrap_or(Value::Null);
         fn typed<T: serde::de::DeserializeOwned>(value: Value) -> Option<T> {
             serde_json::from_value(value).ok()
         }
@@ -901,6 +914,8 @@ impl PlanningPayload {
             generation: typed(field("generation")),
             window_end: typed(field("window_end")),
             supervisor_pid: typed(field("supervisor_pid")),
+            started_generation: typed(field("started_generation")),
+            attempt: typed(field("attempt")),
             verdict: typed(field("verdict")),
         }
     }
@@ -909,6 +924,103 @@ impl PlanningPayload {
     pub fn is_of(&self, op: super::ReplanId) -> bool {
         self.operation_id == Some(op)
     }
+}
+
+/// A diagnosis job that runs: its operation, the generation its start
+/// claimed it under and the supervisor that owns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunningJob {
+    pub operation: super::ReplanId,
+    pub generation: i64,
+    pub owner: u32,
+}
+
+/// A planning event read as a record of a diagnosis job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobRecord {
+    /// `replan_diagnosis_started`.
+    Started(PlanningPayload),
+    /// The end of a job: every `replan_diagnosis_failed` (the job did not
+    /// start, or gave no verdict), and a `replan_diagnosed` of the job's
+    /// verdict (applied, discarded or asked about).
+    Ended(PlanningPayload),
+}
+
+impl JobRecord {
+    /// Event `kind` with `payload` as a record of a job, `None` for one that
+    /// is none: a `replan_diagnosed` of an ask without a verdict ends no
+    /// job. A `replan_diagnosed` is a job's end when it names its start's
+    /// generation or, written by an older binary that named none, when it
+    /// carries the job's verdict or its duration, which an ask's own
+    /// record never does.
+    pub fn of(kind: EventKind, payload: &Value) -> Option<Self> {
+        let read = PlanningPayload::from_value(payload);
+        match kind {
+            EventKind::ReplanDiagnosisStarted => Some(Self::Started(read)),
+            EventKind::ReplanDiagnosisFailed => Some(Self::Ended(read)),
+            EventKind::ReplanDiagnosed
+                if read.started_generation.is_some()
+                    || payload.get("verdict").is_some_and(|v| !v.is_null())
+                    || payload.get("duration_secs").is_some() =>
+            {
+                Some(Self::Ended(read))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl PlanningPayload {
+    /// Whether this end of a job of its operation ends `start`, a start of
+    /// the same operation before it: the one whose generation it names, or,
+    /// for an older binary's end that names none, the one of its attempt,
+    /// or, naming neither, any.
+    pub fn ends(&self, start: &PlanningPayload) -> bool {
+        match (self.started_generation, self.attempt) {
+            (Some(generation), _) => start.generation == Some(generation),
+            (None, Some(attempt)) => start.attempt == Some(attempt),
+            (None, None) => true,
+        }
+    }
+}
+
+/// The diagnosis jobs that run now, queue-wide, from the records of every
+/// operation's jobs in their order ([`JobRecord`]): each owner's latest
+/// start that no end of a job tied to it came after
+/// ([`PlanningPayload::ends`]), its owner not among `gone` (ended, or the
+/// caller itself, which runs none). A supervisor runs one job at a time,
+/// so its later start ends its earlier one. A job runs on whatever its
+/// operation does meanwhile (a later claim, a new run that takes the
+/// operation over, its close) until its end is recorded; a start that
+/// names no owner or generation has none to wait for.
+pub fn running_jobs(records: &[JobRecord], gone: &[u32]) -> Vec<RunningJob> {
+    let mut by_owner: BTreeMap<u32, (RunningJob, &PlanningPayload)> = BTreeMap::new();
+    for record in records {
+        match record {
+            JobRecord::Started(read) => {
+                if let (Some(operation), Some(owner), Some(generation)) =
+                    (read.operation_id, read.supervisor_pid, read.generation)
+                {
+                    let job = RunningJob {
+                        operation,
+                        generation,
+                        owner,
+                    };
+                    by_owner.insert(owner, (job, read));
+                }
+            }
+            JobRecord::Ended(end) => {
+                by_owner.retain(|_, (job, start)| {
+                    end.operation_id != Some(job.operation) || !end.ends(start)
+                });
+            }
+        }
+    }
+    by_owner
+        .into_values()
+        .map(|(job, _)| job)
+        .filter(|job| !gone.contains(&job.owner))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1786,5 +1898,83 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_diagnosis_job_runs_until_an_end_tied_to_its_start() {
+        let record = |kind: EventKind, payload: Value| JobRecord::of(kind, &payload);
+        let started = |op: i64, generation: i64, owner: u32| {
+            record(
+                EventKind::ReplanDiagnosisStarted,
+                json!({"operation_id": op, "attempt": generation, "generation": generation,
+                       "supervisor_pid": owner}),
+            )
+            .unwrap()
+        };
+        let failed = |payload: Value| record(EventKind::ReplanDiagnosisFailed, payload).unwrap();
+        let job = |op: i64, generation: i64, owner: u32| RunningJob {
+            operation: ReplanId::new(op),
+            generation,
+            owner,
+        };
+        // An ask's own record, of a verdict-less ask whatever binary wrote
+        // it, is no job's end; other events are no job's records.
+        for ask in [
+            json!({"operation_id": 1, "attempt": 2, "window_end": 9, "outcome": "ask",
+                   "ask_id": 4, "generation": 3}),
+            json!({"operation_id": 1, "attempt": 2, "window_end": 9, "outcome": "discarded"}),
+        ] {
+            assert_eq!(record(EventKind::ReplanDiagnosed, ask), None);
+        }
+        assert_eq!(
+            record(EventKind::ReplanRequested, json!({"operation_id": 1})),
+            None
+        );
+        // A start runs, whatever claims its operation meanwhile, until its
+        // own end: another attempt's, or another operation's, ends it not.
+        let records = vec![
+            started(1, 2, 10),
+            failed(json!({"operation_id": 1, "started_generation": 1})),
+            failed(json!({"operation_id": 1, "attempt": 1})),
+            failed(json!({"operation_id": 2, "started_generation": 2})),
+        ];
+        assert_eq!(running_jobs(&records, &[]), [job(1, 2, 10)]);
+        assert_eq!(running_jobs(&records, &[11]), [job(1, 2, 10)]);
+        // Its owner gone, or the caller itself.
+        assert!(running_jobs(&records, &[10]).is_empty());
+        // Its end: one that names its generation, one of an older binary
+        // of its attempt (a failure, or the verdict of the job, applied or
+        // asked about), or one that names neither.
+        for end in [
+            failed(json!({"operation_id": 1, "started_generation": 2})),
+            failed(json!({"operation_id": 1, "attempt": 2, "error": "the job could not start"})),
+            record(
+                EventKind::ReplanDiagnosed,
+                json!({"operation_id": 1, "attempt": 2, "verdict": {"choice": "continue"},
+                       "duration_secs": 3, "outcome": "ask", "ask_id": 4, "generation": 3}),
+            )
+            .unwrap(),
+            record(
+                EventKind::ReplanDiagnosed,
+                json!({"operation_id": 1, "attempt": 2, "duration_secs": 3,
+                       "outcome": "discarded"}),
+            )
+            .unwrap(),
+            failed(json!({"operation_id": 1})),
+        ] {
+            let mut ended = records.clone();
+            ended.push(end.clone());
+            assert!(running_jobs(&ended, &[]).is_empty(), "{end:?}");
+        }
+        // An owner's later start ends its earlier one; owners apart.
+        let records = vec![started(1, 2, 10), started(2, 5, 10), started(3, 1, 11)];
+        assert_eq!(running_jobs(&records, &[]), [job(2, 5, 10), job(3, 1, 11)]);
+        // No owner named: none to wait for.
+        let ownerless = record(
+            EventKind::ReplanDiagnosisStarted,
+            json!({"operation_id": 1, "generation": 2}),
+        )
+        .unwrap();
+        assert!(running_jobs(&[ownerless], &[]).is_empty());
     }
 }

@@ -1082,6 +1082,28 @@ impl RunTransitions for SupervisorQueue {
             ],
         )
     }
+    fn running_diagnosis_owners(&self) -> Result<Vec<u32>> {
+        self.remote("running_diagnosis_owners", vec![])
+    }
+    fn start_replan_diagnosis(
+        &mut self,
+        op: (crate::domain::ReplanId, i64),
+        reason: &str,
+        run: &RunId,
+        (payload, owner, gone): (serde_json::Value, u32, &[u32]),
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        self.remote(
+            "start_replan_diagnosis",
+            vec![
+                to_value(op)?,
+                to_value(reason)?,
+                to_value(run)?,
+                payload,
+                to_value(owner)?,
+                to_value(gone)?,
+            ],
+        )
+    }
     #[allow(clippy::too_many_arguments)]
     fn move_replan(
         &mut self,

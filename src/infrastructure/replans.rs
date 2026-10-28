@@ -284,6 +284,74 @@ impl SqliteQueue {
         Ok((outcome, claimed))
     }
 
+    /// Start a diagnosis job of operation `id`, read under `generation`, on
+    /// `run` for supervisor `owner`, in one transaction: the operation is
+    /// claimed (`diagnosing` under a new generation, for `reason`) and its
+    /// `replan_diagnosis_started` is written with `payload`, that
+    /// generation and `owner`, once no diagnosis job of any operation runs
+    /// in the queue ([`running_diagnoses`], read in the same transaction,
+    /// with the supervisors in `gone` taken as running none): a job runs
+    /// until the end tied to its start is recorded, whatever its operation
+    /// does meanwhile. Of two
+    /// supervisors that start one at once, the second is refused here and
+    /// writes nothing.
+    pub fn start_replan_diagnosis(
+        &mut self,
+        (id, generation): (ReplanId, i64),
+        reason: &str,
+        run: &RunId,
+        (payload, owner, gone): (serde_json::Value, u32, &[u32]),
+    ) -> Result<ReplanOperation> {
+        let mut payload = payload;
+        let now = self.generators.clock.now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let running = running_diagnoses(&tx, gone)?;
+        ensure!(
+            running.is_empty(),
+            "replan operation {id}: the diagnosis of replan operation {} runs, and one runs at a time in the queue",
+            running
+                .iter()
+                .map(|job| job.operation.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let claimed = move_in(
+            &tx,
+            id,
+            generation,
+            &ReplanMove {
+                to: ReplanStatus::Diagnosing,
+                reason: reason.to_owned(),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+            now,
+        )?;
+        payload["operation_id"] = json!(claimed.id);
+        payload["generation"] = json!(claimed.generation);
+        payload["supervisor_pid"] = json!(owner);
+        event(
+            &tx,
+            claimed.task_id,
+            Some(run),
+            EventKind::ReplanDiagnosisStarted,
+            payload,
+        )?;
+        tx.commit()?;
+        Ok(claimed)
+    }
+
+    /// The supervisors that own a diagnosis job that runs now, queue-wide
+    /// ([`running_diagnoses`]), whose liveness the next start is told of.
+    pub fn running_diagnosis_owners(&self) -> Result<Vec<u32>> {
+        Ok(running_diagnoses(&self.conn, &[])?
+            .into_iter()
+            .map(|job| job.owner)
+            .collect())
+    }
+
     /// Add `mappings` to operation `id`'s condition mappings in one write
     /// transaction ([`write_mappings`]), and the operation as it is then.
     pub fn record_replan_mappings(
@@ -618,6 +686,34 @@ fn check_not_held(conn: &Connection, op: &ReplanOperation) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The diagnosis jobs that run now, queue-wide, on `conn` (inside the
+/// caller's transaction when it has one), read from the records of every
+/// operation's jobs ([`replan_detect::running_jobs`]), the supervisors in
+/// `gone` taken as running none.
+fn running_diagnoses(conn: &Connection, gone: &[u32]) -> Result<Vec<replan_detect::RunningJob>> {
+    let records: Vec<(String, String)> = conn
+        .prepare("SELECT kind, payload FROM run_events WHERE kind IN (?1, ?2, ?3) ORDER BY id")?
+        .query_map(
+            params![
+                EventKind::ReplanDiagnosisStarted.as_str(),
+                EventKind::ReplanDiagnosed.as_str(),
+                EventKind::ReplanDiagnosisFailed.as_str(),
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut read = Vec::new();
+    for (kind, payload) in records {
+        let Some(kind) = EventKind::from_name(&kind) else {
+            continue;
+        };
+        let payload: serde_json::Value = serde_json::from_str(&payload)?;
+        read.extend(replan_detect::JobRecord::of(kind, &payload));
+    }
+    let records = read;
+    Ok(replan_detect::running_jobs(&records, gone))
 }
 
 /// Refuse the move, or the ask, of a diagnosis whose premise

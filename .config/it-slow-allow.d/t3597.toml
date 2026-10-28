@@ -1,0 +1,20 @@
+# The items of task 3597 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 6.0s: a review's supervise, a supervise held by another owner's job and the supervise that takes it over
+[[test]]
+name = "runtime_replan_diagnosis::a_diagnosis_another_supervisor_runs_is_left_to_it_and_taken_over_once_it_is_gone"
+reason = "B 境界（守る境界）: 生きている別の supervisor のプロセスが持つ診断 job を queue の開始の transaction が数えて provider を起動させず、そのプロセスが消えた後に次の supervise が操作を取り直して次の試行で診断することを、プロセスの生死・SQLite の開始の記録・supervise の配線で確かめる（判断は domain::replan_detect の unit test）"
+task = 3597
+
+# 8.7s: a review's supervise and a supervise whose start the queue's transaction refuses, under the stress's load
+[[test]]
+name = "runtime_replan_diagnosis::a_start_the_queues_transaction_refuses_starts_no_provider"
+reason = "B 境界（守る境界）: 生きている別の supervisor のプロセスが別の操作の診断 job を持つあいだ、実の supervise の開始を queue の transaction が拒み、provider を起動せず operation の claim も開始の記録も増やさないことを、プロセスの生死・SQLite の transaction・supervise の配線で確かめる（判断は domain::replan_detect の unit test）"
+task = 3597
+
+# 7.5s: a review's supervise with a diagnosis job that does not start and the next attempt, under the stress's load
+[[test]]
+name = "runtime_replan_diagnosis::a_diagnosis_job_that_does_not_start_ends_failed_and_the_next_attempt_diagnoses"
+reason = "B 境界（守る境界）: 開始を記録した後に provider のプロセスが起動しない診断 job が、その開始に結んだ失敗で終わって queue を空け、次の試行が取り直して診断することを、provider の起動の失敗・SQLite の記録・supervise の配線で確かめる（判断は domain::replan_detect の unit test）"
+task = 3597

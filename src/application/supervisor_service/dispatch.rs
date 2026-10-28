@@ -210,6 +210,24 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 (payload, premise.as_ref()),
             ))
         }
+        "running_diagnosis_owners" => answer(RunTransitions::running_diagnosis_owners(&*store)),
+        "start_replan_diagnosis" => {
+            let (replan, reason, run, payload, owner, gone): (
+                (crate::domain::ReplanId, i64),
+                String,
+                RunId,
+                Value,
+                u32,
+                Vec<u32>,
+            ) = read(op, args)?;
+            answer(RunTransitions::start_replan_diagnosis(
+                &mut *store,
+                replan,
+                &reason,
+                &run,
+                (payload, owner, &gone),
+            ))
+        }
         "detect_replan" => {
             let (new, by_id): (crate::domain::task_replan::NewReplan, String) = read(op, args)?;
             answer(RunTransitions::detect_replan(&mut *store, &new, &by_id))

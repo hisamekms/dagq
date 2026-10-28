@@ -708,6 +708,202 @@ fn an_answer_to_the_diagnosis_of_a_held_task_is_applied_after_the_release() {
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
 }
 
+/// Acceptance (two supervisors, an owner gone): a diagnosis job another
+/// supervisor alive started is left to it, so no second job starts in the
+/// queue; once that supervisor is gone, the next one claims the operation
+/// again and its job, the next attempt, gives the verdict, the job of the
+/// supervisor that is gone counted as no failure.
+#[test]
+fn a_diagnosis_another_supervisor_runs_is_left_to_it_and_taken_over_once_it_is_gone() {
+    let (_dir, repo, db, backend, _off) = one_review(false, &[]);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].id().clone();
+    let op = queue
+        .record_replan(
+            &dagq::domain::task_replan::NewReplan {
+                run: run.clone(),
+                reason: "the reviews keep failing".into(),
+                evidence: Vec::new(),
+            },
+            ReplanOrigin::Runtime,
+            "supervisor",
+            "supervisor",
+        )
+        .unwrap()
+        .operation;
+    let mut other = crate::common::KillOnDrop::new(
+        std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .unwrap(),
+        "the other supervisor's stand-in",
+    );
+    let claimed = queue
+        .start_replan_diagnosis(
+            (op.id, op.generation),
+            "its diagnosis 1 starts",
+            &run,
+            (json!({"attempt": 1}), other.child().id(), &[]),
+        )
+        .unwrap();
+    enable_replan(&repo, "non_pass_reviews = 1\n");
+    let reviewer = TestReviewer::new(&[asking_concern()]).with_triages(&[diagnosis(
+        "continue",
+        &["local_defect"],
+        "high",
+    )]);
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(reviewer.triage_prompts().is_empty(), "no second job");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(payloads(&detail, "replan_diagnosis_started").len(), 1);
+    let held = operation(&db);
+    assert_eq!(
+        (held.status, held.generation),
+        (ReplanStatus::Diagnosing, claimed.generation)
+    );
+
+    drop(other);
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(reviewer.triage_prompts().len(), 1);
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let started = payloads(&detail, "replan_diagnosis_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started[1]["attempt"], 2);
+    assert_eq!(started[1]["generation"], claimed.generation + 1);
+    assert!(payloads(&detail, "replan_diagnosis_failed").is_empty());
+    let diagnosed = payloads(&detail, "replan_diagnosed");
+    assert_eq!(diagnosed.len(), 1, "{diagnosed:?}");
+    assert_eq!(diagnosed[0]["outcome"], "continue", "{}", diagnosed[0]);
+    assert_eq!(operation(&db).status, ReplanStatus::Continuing);
+}
+
+/// Acceptance (one job queue-wide, the provider once): while a supervisor
+/// alive runs the diagnosis job of another operation, closed since (the
+/// run went on without it), a supervisor's check of its own operation lets
+/// the start go on, and the queue's transaction of the start refuses it:
+/// no provider starts, the operation is not claimed and no start of it is
+/// recorded.
+#[test]
+fn a_start_the_queues_transaction_refuses_starts_no_provider() {
+    use dagq::domain::task_replan::{NewReplan, ReplanMove};
+    let (_dir, repo, db, backend, _off) = one_review(false, &[]);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].id().clone();
+    let new = NewReplan {
+        run: run.clone(),
+        reason: "the reviews keep failing".into(),
+        evidence: Vec::new(),
+    };
+    let first = queue
+        .record_replan(&new, ReplanOrigin::Runtime, "supervisor", "supervisor")
+        .unwrap()
+        .operation;
+    let mut other = crate::common::KillOnDrop::new(
+        std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .unwrap(),
+        "the other supervisor's stand-in",
+    );
+    let owner = other.child().id();
+    let claimed = queue
+        .start_replan_diagnosis(
+            (first.id, first.generation),
+            "its diagnosis 1 starts",
+            &run,
+            (json!({"attempt": 1}), owner, &[]),
+        )
+        .unwrap();
+    queue
+        .move_replan(
+            first.id,
+            claimed.generation,
+            &ReplanMove {
+                to: ReplanStatus::Continuing,
+                reason: "the run went on during its diagnosis".into(),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+        )
+        .unwrap();
+    let second = queue
+        .record_replan(&new, ReplanOrigin::Runtime, "supervisor", "supervisor")
+        .unwrap()
+        .operation;
+    assert_ne!(second.id, first.id);
+    enable_replan(&repo, "non_pass_reviews = 1\n");
+    let reviewer = TestReviewer::new(&[asking_concern()]).with_triages(&[diagnosis(
+        "continue",
+        &["local_defect"],
+        "high",
+    )]);
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(reviewer.triage_prompts().is_empty(), "no provider started");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let started = payloads(&detail, "replan_diagnosis_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["operation_id"], first.id.as_i64());
+    let unclaimed = queue.replan_operation(second.id).unwrap();
+    assert_eq!(
+        (unclaimed.status, unclaimed.generation),
+        (ReplanStatus::Candidate, second.generation)
+    );
+    assert_eq!(queue.running_diagnosis_owners().unwrap(), [owner]);
+    drop(other);
+}
+
+/// Acceptance (a start that fails): a diagnosis job whose provider's
+/// process does not start after its start was recorded ends as failed,
+/// tied to that start, so no job holds the queue; the next pass claims the
+/// operation again and its job, the next attempt, gives the verdict, the
+/// provider started once and one failure counted.
+#[test]
+fn a_diagnosis_job_that_does_not_start_ends_failed_and_the_next_attempt_diagnoses() {
+    let (_dir, _repo, db, _backend, reviewer) = one_review(
+        true,
+        &[
+            UNSTARTABLE_JOB.to_owned(),
+            diagnosis("continue", &["local_defect"], "high"),
+        ],
+    );
+    assert_eq!(reviewer.triage_prompts().len(), 1, "one provider started");
+    let queue = SqliteQueue::open(&db).unwrap();
+    let events = queue.task_events(TaskId::new(1)).unwrap();
+    let of = |kind: &str| -> Vec<&Value> {
+        events
+            .iter()
+            .filter(|e| e.kind.as_str() == kind)
+            .map(|e| &e.payload)
+            .collect()
+    };
+    let started = of("replan_diagnosis_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(
+        (started[0]["attempt"].clone(), started[1]["attempt"].clone()),
+        (json!(1), json!(2))
+    );
+    let failed = of("replan_diagnosis_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["started_generation"], started[0]["generation"]);
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("the diagnosis job could not start"),
+        "{}",
+        failed[0]
+    );
+    let diagnosed = of("replan_diagnosed");
+    assert_eq!(diagnosed.len(), 1, "{diagnosed:?}");
+    assert_eq!(diagnosed[0]["outcome"], "continue", "{}", diagnosed[0]);
+    assert_eq!(diagnosed[0]["started_generation"], started[1]["generation"]);
+    assert!(queue.running_diagnosis_owners().unwrap().is_empty());
+    assert_eq!(operation(&db).status, ReplanStatus::Continuing);
+}
+
 fn common_ok(db: &Path, args: &[&str]) -> Value {
     crate::common::cli::ok(db, args)
 }

@@ -115,9 +115,11 @@ Claude/Codexで同じ状態機械を使う。
   検知は進行中のtaskの最新runについて、下の「回数・抑制・上限と観測」の窓を数える。
   窓はrunとproviderを跨いでtaskで数え、最後のpassと前の診断が読んだeventの後から始まる。
   閾値に届くか、窓に非passがある上で既存の上限の出口（reviewの`revise_limit`、resumeの使い切り）が来れば、`runtime`の操作を1つ開き、開いた操作のあるtaskには開かない。
-  操作は起点を問わず一度に1つずつ、run slotの外で`diagnosing`へ進み、復旧jobの経路で読み取りだけの診断jobが動く（runのturnは止めない）。
+  操作は起点を問わず、queue全体で一度に1つずつ、run slotの外で`diagnosing`へ進み、復旧jobの経路で読み取りだけの診断jobが動く（runのturnは止めない）。
+  queue全体の1件はsupervisorのprocessの中の状態でなくqueueのtransactionで守る。jobの開始は、操作の取り直し、queue全体で走っているjobの数え直し、jobを持つsupervisor（そのpid）と取り直した版を名指す`replan_diagnosis_started`を1つのIMMEDIATEのtransactionで書き、走っているjobがあれば何も書かずに拒む。providerはそのtransactionが確定した後にだけ起動するので、同じqueueを見る2つのsupervisorが同じ操作か別の操作を同時に始めようとしても、確定してproviderを起動するのは1つだけになる。
+  走っているjobとは、supervisorごとの最後の開始で、その開始に結んだ終わり（開始の版を名指す`replan_diagnosed`か`replan_diagnosis_failed`）がまだ無く、持ち主のsupervisorが生きているもの。jobはその終わりが記録されるまで、操作が後の版へ取り直されても（ask、新しいrunの引き継ぎ）閉じても走っていると数え、別の試行の終わりや、verdictを持たないaskの記録では終わらない。開始の版を名指さない古いバイナリの終わりは、`replan_diagnosis_failed`と、jobのverdictか所要時間を持つ`replan_diagnosed`を、その試行の番号の開始の終わりと読む。supervisorは一度に1つのjobしか持たないので、同じ持ち主の後の開始は前の開始を終わらせる。持ち主を名指さない開始は走っていると数えない。生死はsupervisorが開始の前にqueueの記録の持ち主ごとに確かめてtransactionに渡し、自分（execの前の同じprocessを含む。今はjobを持たない）と生きていない持ち主の開始を走っていないものとする。
   jobはrunのrun dirの下だけで動き、run dirの無いrunには準備中か準備の前に中断したなら待ち、それ以外は始めずに人へのaskにする（main checkoutには書かない）。
-  jobの試行とaskはそれぞれ操作を新しい版で`diagnosing`へ取り直してから始めるので、同じ版を読んだ2つのsupervisorの片方だけが取れ、前の版のjobの結果もaskの答えも適用されない。
+  jobの試行とaskはそれぞれ操作を新しい版で`diagnosing`へ取り直してから始めるので、同じ版を読んだ2つのsupervisorの片方だけが取れ、前の版のjobの結果もaskの答えも適用されない。jobではその取り直しが上の開始のtransactionの中にある。
   askはその取り直しと、askを操作に結ぶ`replan_diagnosed`と同じtransactionで書く。
   作業中のrunのjobはturnの合間（依頼したturnも走るturnも無いとき）にだけ始め、止まっているrunのjobは待たせない。
   合間はturnのeventに加えてsessionの`turns/`の依頼とidle markerで読む（走るturnの間に書いた依頼のeventはそのturnの終わりより前に残るため）。
@@ -135,7 +137,9 @@ Claude/Codexで同じ状態機械を使う。
   jobとaskのための取り直しと、verdictと答えの移動とaskの前提はholdを含み、同じtransactionでholdが開いていれば拒む。
   hold中に出たverdictは、jobが読んだもの（版・runの状態・HEAD・読んだeventの終わり）とともに記録に保持し、操作はその版の`diagnosing`のまま残す。人の答えはaskに答えたまま閉じずに残す。
   解除の後の最初のpassは、保持したverdictを同じ前提の再検査を通して適用し、前提が崩れていれば捨てて診断し直す。保持を確定する記録はどの保持かを名指し、前の版の遅れた記録は今の版の保持を無効にしない。答えも解除の後に今の経路で適用する。
-  動いていたjobのsupervisorがいなければ（exec後の同じprocessも）次の試行として始め直す。
+  動いていたjobのsupervisorがいなければ（exec後の同じprocessも）、次のsupervisorが操作を新しい版で取り直して次の試行として始め直す。
+  開始を記録した後にjobが始まらなければ（promptの書き込みかproviderの起動の失敗）、`replan_diagnosis_failed`で終わらせ、次のpassが次の試行を始める。
+  試行の番号はその操作の開始の数に1を足したもので、人へのaskにするjobの3回の失敗はverdictの無い`replan_diagnosis_failed`だけを数える。持ち主のsupervisorが消えて終わりの記録の無い開始と、runが動いて捨てたverdictは失敗に数えない。
   `status`・`doctor`の`replans`は、`dagq.toml`が読めなければ設定と窓を出さずにその誤りを出す（supervisorは前に読めた設定で動き続ける）。開いた操作ごとに診断・taskの原因別のturn・窓（閾値は継続の後の上限を含む）・系統の自動の保留の数を出す。
   全体では状態・起点・選択・決めた者・主因ごとの数と、柵を越えた数と置換先を出す。
   `timeline`はrunの原因別のturnと再計画の段を、`stats`は窓の原因別のturn・開いた操作・診断・askの理由・移動を出し、数え方は検知と同じ関数による。

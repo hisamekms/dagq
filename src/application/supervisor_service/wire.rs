@@ -48,6 +48,7 @@ whole!(
     (),
     bool,
     usize,
+    u32,
     u64,
     i64,
     String,

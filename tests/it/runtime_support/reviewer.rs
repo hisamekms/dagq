@@ -111,6 +111,10 @@ impl AgentProvider for TestReviewer {
             !triages.is_empty(),
             "the test reviewer has no recovery job left"
         );
+        if triages[0] == UNSTARTABLE_JOB {
+            triages.remove(0);
+            anyhow::bail!("the test reviewer cannot start this recovery job");
+        }
         if let Some((db, stands)) = &self.leave_running {
             let stand = Stand::start()?;
             let updated = Connection::open(db)?.execute(
@@ -202,6 +206,10 @@ impl AgentProvider for TestReviewer {
 /// A reviewer script whose review cannot start: `review_command` fails, so
 /// no job runs and writes `review-N.out` / `.err`.
 pub const UNSTARTABLE_REVIEW: &str = "<unstartable review>";
+
+/// A recovery job's script whose job cannot start: `headless_command`
+/// fails, so no provider's process starts.
+pub const UNSTARTABLE_JOB: &str = "<unstartable job>";
 
 /// A script of an agent job of a run's review: `agent`'s one completed
 /// result of `decision` for `reasons`.

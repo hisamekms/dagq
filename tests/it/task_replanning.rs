@@ -2264,3 +2264,255 @@ fn a_diagnosis_asks_atomically_and_applies_only_under_its_request_and_park_limit
         .unwrap();
     assert_eq!(moved.status, ReplanStatus::PauseRequested);
 }
+
+/// Two supervisors on their own connections that start a diagnosis job
+/// at once, of one operation or of two tasks' operations, start one job
+/// queue-wide: the claim, the queue-wide count of the jobs that run and
+/// the `replan_diagnosis_started` that names the owner are one
+/// transaction, and the other start writes nothing. A job runs until the
+/// end tied to its start, whatever claims its operation meanwhile: a job
+/// whose start ended in a failure, or whose owner is gone, leaves the
+/// queue to the next start, and a start read before another claim is
+/// refused by its generation.
+#[test]
+fn a_diagnosis_starts_once_queue_wide_and_is_taken_over_after_its_start() {
+    use dagq::domain::task_replan::ReplanOperation;
+    use std::sync::{Arc, Barrier};
+    let (_dir, db) = queue();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let tasks: Vec<TaskId> = ["A", "B"]
+        .into_iter()
+        .map(|title| queue.add(new_task(title)).unwrap().id())
+        .collect();
+    let mut runs = Vec::new();
+    for task in &tasks {
+        queue.transition(*task, TaskAction::BypassReview).unwrap();
+    }
+    for _ in &tasks {
+        let ClaimOutcome::Claimed { run } = queue.claim(&base()).unwrap() else {
+            panic!("claim")
+        };
+        runs.push(run.id().clone());
+    }
+    let ops: Vec<ReplanOperation> = runs
+        .iter()
+        .map(|run| {
+            queue
+                .record_replan(
+                    &NewReplan {
+                        run: run.clone(),
+                        reason: "the reviews keep failing".into(),
+                        evidence: Vec::new(),
+                    },
+                    ReplanOrigin::Runtime,
+                    "supervisor",
+                    "supervisor",
+                )
+                .unwrap()
+                .operation
+        })
+        .collect();
+    let started = |queue: &SqliteQueue, task: TaskId| -> Vec<Value> {
+        queue
+            .task_events(task)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == EventKind::ReplanDiagnosisStarted)
+            .map(|e| e.payload.clone())
+            .collect()
+    };
+    // Each supervisor `owner` starts `starts[owner]` at once.
+    let race = |starts: [(ReplanId, i64, RunId); 2]| {
+        let barrier = Arc::new(Barrier::new(2));
+        let racers: Vec<_> = starts
+            .into_iter()
+            .zip([101_u32, 102])
+            .map(|((id, generation, run), owner)| {
+                let barrier = barrier.clone();
+                let mut queue = SqliteQueue::open(&db).unwrap();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    queue.start_replan_diagnosis(
+                        (id, generation),
+                        "its diagnosis 1 starts",
+                        &run,
+                        (json!({"attempt": 1}), owner, &[]),
+                    )
+                })
+            })
+            .collect();
+        let _waiting = crate::common::within(crate::common::STEP_LIMIT, "the two starts to return");
+        racers
+            .into_iter()
+            .map(|racer| racer.join().unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    let ended = |queue: &mut SqliteQueue, op: &ReplanOperation, run: &RunId| {
+        queue
+            .record_runtime_event(
+                run,
+                EventKind::ReplanDiagnosisFailed,
+                json!({"operation_id": op.id, "started_generation": op.generation,
+                       "error": "the job could not start"}),
+            )
+            .unwrap();
+    };
+    let won = |outcomes: Vec<anyhow::Result<ReplanOperation>>| {
+        assert_eq!(
+            outcomes.iter().filter(|o| o.is_ok()).count(),
+            1,
+            "{outcomes:?}"
+        );
+        for lost in outcomes.iter().filter_map(|o| o.as_ref().err()) {
+            let lost = format!("{lost:#}");
+            assert!(
+                lost.contains("one runs at a time in the queue") || lost.contains("generation"),
+                "{lost}"
+            );
+        }
+        outcomes.into_iter().find_map(Result::ok).unwrap()
+    };
+    let owner_of = |queue: &SqliteQueue, task: TaskId| -> u32 {
+        let records = started(queue, task);
+        let last = records.last().unwrap();
+        last["supervisor_pid"].as_u64().unwrap().try_into().unwrap()
+    };
+
+    // Two tasks' operations raced: one job queue-wide, the other's
+    // operation untouched.
+    let (a, b) = (&ops[0], &ops[1]);
+    let first = won(race([
+        (a.id, a.generation, runs[0].clone()),
+        (b.id, b.generation, runs[1].clone()),
+    ]));
+    assert_eq!(first.status, ReplanStatus::Diagnosing);
+    let (winner, loser) = if first.id == a.id { (0, 1) } else { (1, 0) };
+    assert_eq!(started(&queue, tasks[winner]).len(), 1);
+    assert!(started(&queue, tasks[loser]).is_empty());
+    let other = queue.replan_operation(ops[loser].id).unwrap();
+    assert_eq!(other.generation, ops[loser].generation);
+    assert_eq!(other.status, ReplanStatus::Candidate);
+    let records = started(&queue, tasks[winner]);
+    assert_eq!(records[0]["generation"], first.generation);
+    let owner = owner_of(&queue, tasks[winner]);
+    assert!([101, 102].contains(&owner));
+
+    // Its owner gone (or a supervisor that runs no job of its own), the
+    // other task's job is the queue's one.
+    let next = queue
+        .start_replan_diagnosis(
+            (other.id, other.generation),
+            "its diagnosis 1 starts",
+            &runs[loser],
+            (json!({"attempt": 1}), 103, &[owner]),
+        )
+        .unwrap();
+    assert_eq!(next.generation, other.generation + 1);
+    assert_eq!(owner_of(&queue, tasks[loser]), 103);
+
+    // A start that failed ends its job; one operation raced by two
+    // supervisors then: one claim and one start under one owner.
+    ended(&mut queue, &next, &runs[loser]);
+    ended(&mut queue, &first, &runs[winner]);
+    let again = won(race([
+        (first.id, first.generation, runs[winner].clone()),
+        (first.id, first.generation, runs[winner].clone()),
+    ]));
+    assert_eq!(again.generation, first.generation + 1);
+    let records = started(&queue, tasks[winner]);
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records[1]["generation"], again.generation);
+    // A start read before that claim is refused by its generation.
+    assert!(
+        queue
+            .start_replan_diagnosis(
+                (first.id, first.generation),
+                "its diagnosis 2 starts",
+                &runs[winner],
+                (json!({"attempt": 2}), 104, &[101, 102]),
+            )
+            .is_err()
+    );
+    assert_eq!(started(&queue, tasks[winner]).len(), 2);
+
+    // A later claim of the operation (an ask's, or a new run's that takes
+    // it over) leaves its job running until that job's own end; a record
+    // of another attempt, or an ask's that names no start, ends it not.
+    let asked = queue
+        .move_replan(
+            again.id,
+            again.generation,
+            &ReplanMove {
+                to: ReplanStatus::Diagnosing,
+                reason: "a person is asked".into(),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+        )
+        .unwrap();
+    for record in [
+        json!({"operation_id": again.id, "generation": asked.generation, "outcome": "discarded"}),
+        json!({"operation_id": again.id, "started_generation": first.generation,
+               "outcome": "discarded"}),
+    ] {
+        queue
+            .record_runtime_event(&runs[winner], EventKind::ReplanDiagnosed, record)
+            .unwrap();
+    }
+    let owner = owner_of(&queue, tasks[winner]);
+    assert_eq!(queue.running_diagnosis_owners().unwrap(), [owner]);
+    let error = queue
+        .start_replan_diagnosis(
+            (next.id, next.generation),
+            "its diagnosis 2 starts",
+            &runs[loser],
+            (json!({"attempt": 2}), 105, &[]),
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("one runs at a time in the queue"),
+        "{error:#}"
+    );
+    // Its own end lets the next start in.
+    ended(&mut queue, &again, &runs[winner]);
+    assert!(queue.running_diagnosis_owners().unwrap().is_empty());
+    let after = queue
+        .start_replan_diagnosis(
+            (next.id, next.generation),
+            "its diagnosis 2 starts",
+            &runs[loser],
+            (json!({"attempt": 2}), 105, &[]),
+        )
+        .unwrap();
+    assert_eq!(after.generation, next.generation + 1);
+
+    // An older binary's records name no start's generation in their ends:
+    // its job's failure or verdict ends the start of its attempt, and its
+    // ask's own record without a verdict ends none.
+    let legacy = |queue: &mut SqliteQueue, kind: EventKind, payload: Value| {
+        queue
+            .record_runtime_event(&runs[loser], kind, payload)
+            .unwrap();
+    };
+    ended(&mut queue, &after, &runs[loser]);
+    legacy(
+        &mut queue,
+        EventKind::ReplanDiagnosisStarted,
+        json!({"operation_id": after.id, "attempt": 3, "generation": after.generation,
+               "supervisor_pid": 106}),
+    );
+    legacy(
+        &mut queue,
+        EventKind::ReplanDiagnosed,
+        json!({"operation_id": after.id, "attempt": 3, "window_end": 1, "outcome": "ask"}),
+    );
+    assert_eq!(queue.running_diagnosis_owners().unwrap(), [106]);
+    legacy(
+        &mut queue,
+        EventKind::ReplanDiagnosed,
+        json!({"operation_id": after.id, "attempt": 3, "verdict": {"choice": "continue"},
+               "duration_secs": 4, "outcome": "continue"}),
+    );
+    assert!(queue.running_diagnosis_owners().unwrap().is_empty());
+}

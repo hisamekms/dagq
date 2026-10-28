@@ -12,7 +12,10 @@
 //!   request, a worker's proposal, the detection), goes from `candidate` to
 //!   `diagnosing` and its read-only diagnosis job starts on the recovery
 //!   job's route, outside the run slots. The run goes on meanwhile: the
-//!   diagnosis stops no turn.
+//!   diagnosis stops no turn. The claim, the queue-wide count of the jobs
+//!   that run and the job's start, naming this supervisor as its owner,
+//!   are one transaction of the queue, and the provider starts only after
+//!   it: of supervisors that start at once, one does.
 //! - the job's verdict is checked again before it is applied: the
 //!   operation still `diagnosing` under the generation the job started on,
 //!   the task still in progress with the run its latest, not landing. Then
@@ -41,7 +44,7 @@ use super::*;
 use crate::application::prompt::{DiagnosisMaterial, TRIAGE_ACCESS, replan_diagnosis_prompt};
 use crate::domain::replan_detect::{
     self, AskWhy, DECIDED_BY_PERSON, DECIDED_BY_RUNTIME, DIAGNOSIS_ASKER, DIAGNOSIS_OPTIONS,
-    DecideFacts, Decided, Detection, DiagnosisVerdict, JobPlace, MAX_DIAGNOSIS_ATTEMPTS,
+    DecideFacts, Decided, Detection, DiagnosisVerdict, JobPlace, JobRecord, MAX_DIAGNOSIS_ATTEMPTS,
     PlanningPayload,
 };
 use crate::domain::task_hold::HoldGuard;
@@ -270,11 +273,16 @@ impl Supervisor<'_> {
         let Some(last) = started.last() else {
             return InFlight::Next(1, failed);
         };
+        // Its end is tied to it: an ask's own record, or another attempt's
+        // end, ends it not.
+        let start = PlanningPayload::of(last);
         let ended = events.iter().any(|e| {
             e.id > last.id
-                && e.kind
-                    .is_in(&[EventKind::ReplanDiagnosed, EventKind::ReplanDiagnosisFailed])
                 && of_operation(e, op)
+                && matches!(
+                    e.kind.known().and_then(|kind| JobRecord::of(kind, &e.payload)),
+                    Some(JobRecord::Ended(end)) if end.ends(&start)
+                )
         });
         let pid = PlanningPayload::of(last).supervisor_pid;
         let elsewhere = pid.is_some_and(|pid| pid != self.layout.pid && self.processes.alive(pid));
@@ -344,6 +352,7 @@ impl Supervisor<'_> {
         if self.replan_diagnosis.is_some() {
             return Ok(false);
         }
+        let gone = self.diagnosis_owners_gone()?;
         for op in self.queue.open_replan_operations()? {
             if !matches!(
                 op.status,
@@ -351,7 +360,7 @@ impl Supervisor<'_> {
             ) {
                 continue;
             }
-            match self.try_start_diagnosis(&op) {
+            match self.try_start_diagnosis(&op, &gone) {
                 Ok(true) => return Ok(true),
                 Ok(false) => {}
                 Err(error) => {
@@ -362,9 +371,25 @@ impl Supervisor<'_> {
         Ok(false)
     }
 
-    /// Start `op`'s diagnosis job if it is due; whether one started (or a
-    /// person was asked instead), so that no other starts in this pass.
-    fn try_start_diagnosis(&mut self, op: &ReplanOperation) -> Result<bool> {
+    /// The supervisors that own a diagnosis job the queue records as
+    /// running and that run none: this one, which runs none now (a job of
+    /// it before an exec is gone), and each that is not alive. The queue's
+    /// transaction of a start counts the jobs of the others
+    /// ([`crate::application::RunTransitions::start_replan_diagnosis`]).
+    fn diagnosis_owners_gone(&self) -> Result<Vec<u32>> {
+        let mut gone = vec![self.layout.pid];
+        for owner in self.queue.running_diagnosis_owners()? {
+            if owner != self.layout.pid && !self.processes.alive(owner) {
+                gone.push(owner);
+            }
+        }
+        Ok(gone)
+    }
+
+    /// Start `op`'s diagnosis job if it is due, the supervisors in `gone`
+    /// taken as running none; whether one started (or a person was asked
+    /// instead), so that no other starts in this pass.
+    fn try_start_diagnosis(&mut self, op: &ReplanOperation, gone: &[u32]) -> Result<bool> {
         let detail = self.queue.show(op.task_id)?;
         if detail.task.status() != TaskStatus::InProgress {
             let reason = format!(
@@ -484,15 +509,6 @@ impl Supervisor<'_> {
             return Ok(false);
         }
         let head = self.run_head(&run);
-        // The claim of this attempt: diagnosing under a new generation, so
-        // that of two supervisors that read the operation alike only one
-        // starts it, and a job or an ask of an earlier generation applies
-        // nothing.
-        let op = match self.claim_diagnosis(op, &format!("its diagnosis {attempt} starts")) {
-            Some(op) => op,
-            None => return Ok(false),
-        };
-        let op = op.clone();
         let lineage = self.queue.replan_lineage(op.task_id)?;
         let earlier_ops: Vec<ReplanOperation> = lineage
             .iter()
@@ -553,7 +569,7 @@ impl Supervisor<'_> {
                 )
             });
         let prompt = replan_diagnosis_prompt(&DiagnosisMaterial {
-            operation: &op,
+            operation: op,
             task: &detail.task,
             run: &run,
             attempt,
@@ -564,34 +580,58 @@ impl Supervisor<'_> {
             earlier: &earlier,
             receipt: receipt.as_deref(),
         });
-        self.files
-            .create_dir_all(&dir)
-            .with_context(|| format!("create {}", dir.display()))?;
+        let evidence = op.diagnosis.evidence.clone();
+        // The claim of this attempt and its start, in one transaction of
+        // the queue: diagnosing under a new generation, owned by this
+        // supervisor, once no other diagnosis job runs queue-wide. Of two
+        // supervisors that read the queue alike only one starts a job, and
+        // a job or an ask of an earlier generation applies nothing.
+        let reason = format!("its diagnosis {attempt} starts");
+        let started = json!({"attempt": attempt, "window_end": window_end,
+                             "evidence": evidence, "origin": op.origin,
+                             "launch": launch.to_value(), "prompt_bytes": prompt.bytes});
+        let op = match self.queue.start_replan_diagnosis(
+            (op.id, op.generation),
+            &reason,
+            run.id(),
+            (started, self.layout.pid, gone),
+        ) {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                info!(task_id = %op.task_id, "replan operation {} is not claimed ({reason}): {error:#}", op.id);
+                return Ok(false);
+            }
+        };
         // Named by the claim's generation: no two jobs share their files.
         let stem = format!("operation-{}-{}", op.id, op.generation);
-        self.files.write(
-            &dir.join(format!("{stem}.prompt.txt")),
-            prompt.text.as_bytes(),
-        )?;
-        let evidence = op.diagnosis.evidence.clone();
-        self.queue.record_runtime_event(
-            run.id(),
-            EventKind::ReplanDiagnosisStarted,
-            json!({"operation_id": op.id, "attempt": attempt, "generation": op.generation,
-                   "window_end": window_end, "evidence": evidence, "origin": op.origin,
-                   "launch": launch.to_value(), "prompt_bytes": prompt.bytes,
-                   "supervisor_pid": self.layout.pid}),
-        )?;
         let stdout = dir.join(format!("{stem}.out"));
         let stderr = dir.join(format!("{stem}.err"));
-        match self.spawn_diagnosis(
-            run.id(),
-            &dir,
-            attempt,
-            &prompt.text,
-            &launch,
-            (stdout, stderr),
-        ) {
+        // A job that does not start after its start was recorded ends it as
+        // failed, so the next pass starts the next attempt (a supervisor
+        // stopped here leaves the start to the next one: see
+        // `diagnosis_in_flight`).
+        let written = self
+            .files
+            .create_dir_all(&dir)
+            .with_context(|| format!("create {}", dir.display()))
+            .and_then(|()| {
+                let path = dir.join(format!("{stem}.prompt.txt"));
+                self.files
+                    .write(&path, prompt.text.as_bytes())
+                    .with_context(|| format!("write {}", path.display()))
+            });
+        let spawned = written.map_err(|error| (error, false)).and_then(|()| {
+            self.spawn_diagnosis(
+                run.id(),
+                &dir,
+                attempt,
+                &prompt.text,
+                &launch,
+                (stdout, stderr),
+            )
+            .map_err(|error| (error, true))
+        });
+        match spawned {
             Ok(job) => {
                 info!(run_id = %run.id(), task_id = %op.task_id, "replan operation {}: diagnosis job {attempt} started on {}", op.id, launch.provider.as_str());
                 self.replan_diagnosis = Some(Box::new(DiagnosisJob {
@@ -610,12 +650,15 @@ impl Supervisor<'_> {
                     job,
                 }));
             }
-            Err(failed) => {
+            Err((failed, spawning)) => {
                 let error = format!("the diagnosis job could not start: {failed:#}");
-                let unusable =
-                    self.recovery_start_failed(run.id(), &launch, &failed, &error, switchable);
-                let mut payload =
-                    json!({"operation_id": op.id, "attempt": attempt, "error": error});
+                let unusable = if spawning {
+                    self.recovery_start_failed(run.id(), &launch, &failed, &error, switchable)
+                } else {
+                    None
+                };
+                let mut payload = json!({"operation_id": op.id, "attempt": attempt,
+                                         "started_generation": op.generation, "error": error});
                 if let Some((provider, reason)) = unusable {
                     payload["provider_unusable"] = json!({"provider": provider, "reason": reason});
                 }
@@ -717,6 +760,7 @@ impl Supervisor<'_> {
             Err(error) => {
                 let job = &job.read;
                 let mut payload = json!({"operation_id": job.operation, "attempt": job.attempt,
+                                         "started_generation": job.generation,
                                          "error": error, "duration_secs": duration_secs});
                 end.record(&mut payload);
                 self.queue.record_runtime_event(
@@ -730,6 +774,7 @@ impl Supervisor<'_> {
             Ok(verdict) => {
                 let job = &job.read;
                 let mut payload = json!({"operation_id": job.operation, "attempt": job.attempt,
+                                         "started_generation": job.generation,
                                          "verdict": verdict, "window_end": job.window_end,
                                          "duration_secs": duration_secs});
                 end.record(&mut payload);
@@ -1098,28 +1143,6 @@ impl Supervisor<'_> {
         crate::application::run_git::head(&*self.repository, run)
             .ok()
             .map(|head| head.to_string())
-    }
-
-    /// Claim `op` (`candidate`, or `diagnosing` under the generation it was
-    /// read at) for a diagnosis job or an ask: `diagnosing` under a new
-    /// generation, or none when another supervisor claimed it first.
-    fn claim_diagnosis(&mut self, op: &ReplanOperation, reason: &str) -> Option<ReplanOperation> {
-        match self.queue.move_replan(
-            op.id,
-            op.generation,
-            &ReplanMove {
-                to: ReplanStatus::Diagnosing,
-                reason: reason.to_owned(),
-                snapshot_id: None,
-                diagnosis: None,
-            },
-        ) {
-            Ok(claimed) => Some(claimed),
-            Err(error) => {
-                info!(task_id = %op.task_id, "replan operation {} is not claimed ({reason}): {error:#}", op.id);
-                None
-            }
-        }
     }
 
     /// Ask a person what to do with `op` (still `diagnosing`) for `why`,
