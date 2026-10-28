@@ -173,6 +173,8 @@ askとanswerが持つ書き手の欄とは別で、それらの値は変えな�
   抜けるときは（適用が失敗しても）入る前の値に戻すので、`for_job`が入れ子になっても内側を抜けた後の外側のeventは外側のjobの`requested_by`を持ち、外側を抜けると元の値（ふつうは無し）に戻る（Integratorの着地も同じく依頼者を入る前の値に戻す）。
   生きているrunのrecovery jobのverdictが適用されずにescalateするとき（`escalate`・confidence lowの`repair`・適用の時点で前提を満たさない`repair`）も、そのescalationの`recovery_finished`と開く ask（`stalled`）の`ask_opened`は`Supervisor::for_escalation`の中で書かれ、`requested_by`にjobのactor id（`recovery-job:<run>:<alert>:<attempt>`）を持つ（`Escalation::requester`）。
   jobの失敗と、alertのjobを使い切ったとき（`UsedUp`）のescalationはjobの依頼ではないので`requested_by`を持たない。
+  再計画の診断jobのverdictの適用（継続・保留・人へのaskと、前提が古く捨てたものを含む`replan_diagnosed`）も`for_job`の中で書かれ、`requested_by`に診断jobのactor id（`recovery-job:<run>:replan_diagnosis:<attempt>`）を持つ。
+  jobの失敗と、jobを使い切って人に聞くaskと、人の回答の適用は他のaskの回答の適用と同じくsupervisorのeventで、`requested_by`を持たない。
   review passの後の着地のeventは上のとおりIntegratorのactorで、`requested_by`が依頼したsupervisor。
 - 読み方: `RunEvent.actor`で、migrationより前の行と古いバイナリが書いた行は`None`（JSONでは`actor`の欄が無い）。
   secretやpromptの全文は入れない（入るのはroleとidだけ）。

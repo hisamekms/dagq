@@ -742,7 +742,20 @@ impl Supervisor<'_> {
     /// record it as `replan_diagnosed` (`payload` with the outcome). A
     /// verdict that reaches a held task, or that the queue refused for a
     /// hold that came meanwhile, is kept instead ([`Self::keep_diagnosis`]).
+    /// Every event written meanwhile, a discarded verdict's included, has
+    /// the job as its `requested_by` ([`Self::for_job`]).
     fn apply_diagnosis(
+        &mut self,
+        job: &DiagnosisRead,
+        verdict: &DiagnosisVerdict,
+        payload: Value,
+    ) -> Result<()> {
+        let requester = ActorContext::recovery_job(&job.run, DIAGNOSIS_LABEL, job.attempt);
+        self.for_job(&requester, |sv| sv.apply_verdict(job, verdict, payload))
+    }
+
+    /// [`Self::apply_diagnosis`] with the job recorded as the requester.
+    fn apply_verdict(
         &mut self,
         job: &DiagnosisRead,
         verdict: &DiagnosisVerdict,

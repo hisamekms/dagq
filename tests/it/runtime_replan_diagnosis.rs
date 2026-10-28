@@ -100,6 +100,50 @@ fn ids_of(detail: &dagq::domain::TaskDetail, kind: &str) -> Vec<i64> {
         .collect()
 }
 
+/// The events of the queue as `events --full` shows them, with their
+/// actors.
+fn events_full(db: &Path) -> Vec<Value> {
+    common_ok(
+        db,
+        &[
+            "events", "--after", "0", "--all", "--full", "--limit", "10000",
+        ],
+    )["events"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// The actor id of diagnosis job `attempt` of `run`.
+fn diagnosis_job(run: &RunId, attempt: u64) -> String {
+    format!("recovery-job:{run}:replan_diagnosis:{attempt}")
+}
+
+/// What the supervisor wrote applying the verdict of diagnosis job `job`:
+/// each event's kind and, for a `replan_status_changed`, the status it
+/// moved to. Every one of them, and every `replan_diagnosed` of its
+/// attempt, is the supervisor's with the job as `requested_by`.
+fn applied_for(events: &[Value], job: &str, attempt: u64) -> Vec<String> {
+    for event in events
+        .iter()
+        .filter(|e| e["kind"] == "replan_diagnosed" && e["payload"]["attempt"] == json!(attempt))
+    {
+        assert_eq!(event["actor"]["requested_by"], json!(job), "{event}");
+    }
+    events
+        .iter()
+        .filter(|e| e["actor"]["requested_by"] == json!(job))
+        .map(|e| {
+            assert_eq!(e["actor"]["role"], "supervisor", "{e}");
+            let kind = e["kind"].as_str().unwrap();
+            match e["payload"]["to"].as_str() {
+                Some(to) if kind == "replan_status_changed" => format!("{kind} {to}"),
+                _ => kind.to_owned(),
+            }
+        })
+        .collect()
+}
+
 /// Acceptance (the threshold reached, the window's evidence, the existing
 /// review limit kept, a restart): the third review that did not pass makes
 /// the task a candidate of origin `runtime` on those reviews, its
@@ -137,6 +181,12 @@ fn a_task_whose_reviews_keep_failing_is_diagnosed_once_and_goes_on() {
     let diagnosed = payloads(&detail, "replan_diagnosed");
     assert_eq!(diagnosed.len(), 1);
     assert_eq!(diagnosed[0]["outcome"], "continue", "{}", diagnosed[0]);
+    // The verdict is applied as the supervisor's at the job's request.
+    let job = diagnosis_job(detail.runs[0].id(), 1);
+    assert_eq!(
+        applied_for(&events_full(&db), &job, 1),
+        ["replan_status_changed continuing", "replan_diagnosed"]
+    );
     // The job read the window's findings and the turns by cause.
     let prompts = reviewer.triage_prompts();
     assert_eq!(prompts.len(), 1);
@@ -217,6 +267,15 @@ fn a_diagnosed_replanning_parks_the_run_and_closes_the_reviews_ask() {
     assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
     let diagnosed = payloads(&detail, "replan_diagnosed");
     assert_eq!(diagnosed[0]["outcome"], "park", "{}", diagnosed[0]);
+    let job = diagnosis_job(detail.runs[0].id(), 1);
+    assert_eq!(
+        applied_for(&events_full(&db), &job, 1),
+        [
+            "request_recorded",
+            "replan_status_changed pause_requested",
+            "replan_diagnosed"
+        ]
+    );
     assert!(queue.asks(Default::default()).unwrap().is_empty());
     let status = common_ok(&db, &["status"]);
     let open = &status["replans"]["open"][0];
@@ -242,6 +301,40 @@ fn a_diagnosed_replanning_parks_the_run_and_closes_the_reviews_ask() {
         assert_eq!(replans["open"][0]["window"], Value::Null, "{command}");
         assert_eq!(replans["open"][0]["turns"]["non_pass"], 1, "{command}");
     }
+}
+
+/// Acceptance (the event's actor of an `ask` verdict): a diagnosis job
+/// that chooses `ask` itself opens the person's `decide` ask, and the
+/// claim, the ask and its `replan_diagnosed` are the supervisor's at the
+/// job's request.
+#[test]
+fn a_diagnosis_that_asks_opens_the_ask_at_its_jobs_request() {
+    let (_dir, _repo, db, _backend, _reviewer) =
+        one_review(true, &[diagnosis("ask", &["oversized_unit"], "high")]);
+    let op = operation(&db);
+    assert_eq!(op.status, ReplanStatus::Diagnosing, "{op:?}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let diagnosed = payloads(&detail, "replan_diagnosed");
+    assert_eq!(diagnosed.len(), 1, "{diagnosed:?}");
+    assert_eq!(diagnosed[0]["outcome"], "ask", "{diagnosed:?}");
+    let asked: Vec<_> = queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .filter(|ask| ask.asked_by == replan_detect::DIAGNOSIS_ASKER)
+        .collect();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].recommendation, None);
+    let job = diagnosis_job(detail.runs[0].id(), 1);
+    assert_eq!(
+        applied_for(&events_full(&db), &job, 1),
+        [
+            "replan_status_changed diagnosing",
+            "ask_opened",
+            "replan_diagnosed"
+        ]
+    );
 }
 
 /// Acceptance (external causes are not split): a replanning only for
@@ -301,6 +394,22 @@ fn an_unsure_diagnosis_asks_a_person_whose_replan_parks_the_run() {
     );
     assert!(diagnosed[0]["ask_id"].is_null(), "{diagnosed:?}");
     assert_eq!(diagnosed[1]["outcome"], "ask", "{diagnosed:?}");
+    // The stale verdict's record and the ask, with the claim it makes, are
+    // written at the request of the job that gave each.
+    let run = detail.runs[0].id().clone();
+    let events = events_full(&db);
+    assert_eq!(
+        applied_for(&events, &diagnosis_job(&run, 1), 1),
+        ["replan_diagnosed"]
+    );
+    assert_eq!(
+        applied_for(&events, &diagnosis_job(&run, 2), 2),
+        [
+            "replan_status_changed diagnosing",
+            "ask_opened",
+            "replan_diagnosed"
+        ]
+    );
     let asked: Vec<_> = queue
         .asks(Default::default())
         .unwrap()
@@ -332,6 +441,15 @@ fn an_unsure_diagnosis_asks_a_person_whose_replan_parks_the_run() {
         Some(replan_detect::DECIDED_BY_PERSON)
     );
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    // The answer is applied as any other answer is: the supervisor's,
+    // asked by no job.
+    let events = events_full(&db);
+    let moved = events
+        .iter()
+        .find(|e| e["kind"] == "replan_status_changed" && e["payload"]["to"] == "pause_requested")
+        .unwrap();
+    assert_eq!(moved["actor"]["role"], "supervisor", "{moved}");
+    assert_eq!(moved["actor"]["requested_by"], Value::Null, "{moved}");
     let detail = queue.show(TaskId::new(1)).unwrap();
     let answered = payloads(&detail, "ask_answered");
     assert!(
