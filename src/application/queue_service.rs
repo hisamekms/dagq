@@ -366,6 +366,7 @@ impl QueueService<'_> {
                 self.backend,
                 &principal,
                 &request.params,
+                process,
             ));
         }
         if connection == Connection::Supervisor {
@@ -646,34 +647,22 @@ impl std::fmt::Display for NotHeld {
 
 impl std::error::Error for NotHeld {}
 
-/// The target of an executor's telemetry token asked for holds one
-/// already, found in the issue's transaction ([`issue_token`]).
-#[derive(Debug)]
-struct TelemetryHeld;
-
-impl std::fmt::Display for TelemetryHeld {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the target's executor holds its token already")
-    }
-}
-
-impl std::error::Error for TelemetryHeld {}
-
-/// The target of an executor's telemetry token asked for was not started
-/// by the parent that asks, and why
-/// ([`crate::domain::queue_service::telemetry_starter_refusal`]), found in
+/// The executor's telemetry token of a target asked for is not issued:
+/// the target was not started by the parent that asks, or holds one
+/// already, and why
+/// ([`crate::domain::queue_service::telemetry_target_refusal`]), found in
 /// the issue's transaction ([`issue_token`], and the supervisor's
-/// `issue_telemetry` under no lease).
+/// `issue_telemetry` under no lease, which checks the start only).
 #[derive(Debug)]
-pub(super) struct NotStarter(pub(super) &'static str);
+pub(super) struct TelemetryRefused(pub(super) &'static str);
 
-impl std::fmt::Display for NotStarter {
+impl std::fmt::Display for TelemetryRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0)
     }
 }
 
-impl std::error::Error for NotStarter {}
+impl std::error::Error for TelemetryRefused {}
 
 /// The token the key asked for holds already, which the issue may not
 /// replace, and why ([`crate::domain::queue_service::reissue`]),
@@ -727,9 +716,9 @@ fn issue_token_of(
 /// already ([`Issued`]). An executor's telemetry token
 /// of a run's target is `issue_telemetry`'s, under the run's lease, and is
 /// refused here; one of a target of no run is issued only to the parent
-/// that started it, asking from the process its start names, as read in
-/// the issue's transaction
-/// ([`crate::domain::queue_service::telemetry_starter_refusal`]).
+/// that started it, asking from the process its start names, and only
+/// while the target holds none, as read in the issue's transaction
+/// ([`crate::domain::queue_service::telemetry_target_refusal`]).
 pub(super) fn issue_token(
     backend: &dyn ServiceBackend,
     queue: &mut dyn ServiceQueue,
@@ -780,26 +769,22 @@ pub(super) fn issue_token(
             (Some(target), true) => {
                 // Only at the request of the parent that started the
                 // target, asking from the process its start names, as the
-                // queue records the start in this transaction.
-                if let Some(why) = crate::domain::queue_service::telemetry_starter_refusal(
+                // queue records the start in this transaction; and once, as
+                // the job starts: one its target holds already is that
+                // job's, which no other caller takes over (the issue would
+                // revoke it). Looked at in the issue's write transaction,
+                // which one request at a time holds, so of two asking at
+                // once for the same target only the first is issued.
+                if let Some(why) = crate::domain::queue_service::telemetry_target_refusal(
                     parent,
                     process,
                     facts.target_start(target)?.as_ref(),
+                    backend
+                        .telemetry()
+                        .telemetry_credential(db, target)
+                        .is_some(),
                 ) {
-                    return Err(NotStarter(why).into());
-                }
-                // A command's job is issued its executor's token once, as it
-                // starts: one its target holds already is that job's, which
-                // no other caller takes over (the issue would revoke it).
-                // Looked at in the issue's write transaction, which one
-                // request at a time holds, so of two asking at once for the
-                // same target only the first is issued.
-                if backend
-                    .telemetry()
-                    .telemetry_credential(db, target)
-                    .is_some()
-                {
-                    return Err(TelemetryHeld.into());
+                    return Err(TelemetryRefused(why).into());
                 }
                 // An executor's under the telemetry's own lock as well,
                 // revoking every one its target held (ADR-t1662-3 decision
@@ -845,7 +830,7 @@ pub(super) fn issue_token(
     let Err(error) = issued else {
         return issued;
     };
-    if let Some(NotStarter(why)) = error.downcast_ref::<NotStarter>() {
+    if let Some(TelemetryRefused(why)) = error.downcast_ref::<TelemetryRefused>() {
         return Err(refuse_recorded(
             store.0,
             &actor,
@@ -853,16 +838,6 @@ pub(super) fn issue_token(
             &resource,
             crate::domain::authorization::DenyReason::Resource,
             why,
-        ));
-    }
-    if error.downcast_ref::<TelemetryHeld>().is_some() {
-        return Err(refuse_recorded(
-            store.0,
-            &actor,
-            Capability::TokenIssue,
-            &resource,
-            crate::domain::authorization::DenyReason::Resource,
-            "the target's executor holds its token already",
         ));
     }
     if let Some(Replacing(why)) = error.downcast_ref::<Replacing>() {

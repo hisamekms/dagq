@@ -606,3 +606,101 @@ fn a_supervisor_is_issued_no_telemetry_token_of_a_target_another_started() {
         );
     }
 }
+
+/// A control-side command's `issue_telemetry` step issues its job's
+/// executor's token as `issue_token` does (ADR-t3102-1 decision 2), the
+/// command's process the connection's: of two commands of the same
+/// principal (the user, the inbox), the one whose process the
+/// observation's start does not name is refused as `authorization_denied`,
+/// recorded, whether its step names its own process or the starter's,
+/// and the starting command's token stays; neither that command asking
+/// again nor a start that names no process is issued one.
+#[test]
+fn another_command_of_the_starting_principal_does_not_replace_its_executors_token() {
+    use dagq::domain::EventKind;
+    use dagq::domain::queue_service::{ControlCall, ControlCommand, SessionProcess};
+    let queue = queue();
+    start(&queue);
+    // This process, which every step here comes from; the other command's
+    // process is pid 1's.
+    let (pid, other) = (std::process::id(), 1);
+    let inbox = Principal::inbox(SessionProcess {
+        pid,
+        start: dagq::infrastructure::adapters::session_start(pid).unwrap(),
+    });
+    let inbox_token = token(&queue, &inbox);
+    for (principal, token) in [
+        (Principal::user(), None),
+        (inbox, Some(inbox_token.as_str())),
+    ] {
+        let db = SqliteQueue::open(&queue.db)
+            .unwrap()
+            .with_actor(principal.actor());
+        let start = |payload: Value| {
+            let id = db
+                .record_queue_event(EventKind::ObserveStarted, payload)
+                .unwrap()
+                .as_i64();
+            StepTarget::of(TargetKind::Observer, id)
+        };
+        let observed = start(json!({"dir": "/o/1", "timeout_secs": 600, "pid": pid}));
+        let elsewhere = start(json!({"dir": "/o/2", "timeout_secs": 600, "pid": other}));
+        let unnamed = start(json!({"dir": "/o/3", "timeout_secs": 600}));
+        drop(db);
+        let issue = |command_pid: u32, target: &StepTarget| {
+            let control = ControlCall {
+                command: ControlCommand::Observe,
+                task: None,
+                yes: false,
+                pid: command_pid,
+            };
+            call(
+                &queue,
+                token,
+                UseCase::Control,
+                json!({"control": control, "call": {"op": "issue_telemetry", "args": [target, null, null]}}),
+            )
+        };
+        let refused = |command_pid: u32, target: &StepTarget, why: &str| {
+            let before = events(&queue.db, "authorization_denied").len();
+            let answer = issue(command_pid, target);
+            assert_eq!(answer["error"]["code"], "authorization_denied", "{answer}");
+            let denied = events(&queue.db, "authorization_denied");
+            assert_eq!(denied.len() - before, 1, "{answer}");
+            let last = &denied[denied.len() - 1]["payload"];
+            assert_eq!(last["capability"], "token.issue", "{last}");
+            assert!(last["why"].as_str().unwrap().contains(why), "{last}");
+        };
+        let none_held = |target: &StepTarget| {
+            assert!(
+                SystemServiceAccess
+                    .telemetry_credential(&queue.db, target)
+                    .is_none(),
+                "{target:?}"
+            );
+        };
+
+        // The other command's observation: this process is refused it,
+        // naming its own process or the starter's, and takes no token.
+        refused(pid, &elsewhere, "started by another caller");
+        refused(other, &elsewhere, "started by another caller");
+        none_held(&elsewhere);
+
+        let issued = issue(pid, &observed);
+        assert_eq!(issued["ok"], true, "{principal:?}: {issued}");
+        let file: std::path::PathBuf = serde_json::from_value(issued["result"].clone()).unwrap();
+        let held = || {
+            service::lookup(queue.dir(), &service::read_token(&file).unwrap())
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(held(), Principal::telemetry(&observed, None));
+        // Another command's step on this one's observation, and the
+        // starting command asking again.
+        refused(other, &observed, "started by another caller");
+        refused(pid, &observed, "holds its token already");
+        assert_eq!(held(), Principal::telemetry(&observed, None));
+        refused(pid, &unnamed, "names no caller");
+        none_held(&unnamed);
+    }
+}

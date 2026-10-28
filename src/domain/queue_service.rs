@@ -793,6 +793,17 @@ pub struct ControlCall {
     pub pid: u32,
 }
 
+impl ControlCall {
+    /// The command's process as the connection `connection` (the one the
+    /// OS names, `None` when it cannot be read) confirms it: its `pid` only
+    /// when the step comes from that process, so a step that names another
+    /// command's process asks as no process (ADR-t3102-1 decision 2: the
+    /// parent that started a job is its process).
+    pub fn process(&self, connection: Option<u32>) -> Option<u32> {
+        connection.filter(|pid| *pid == self.pid)
+    }
+}
+
 /// A step of a control-side command ([`UseCase::Control`]): the command
 /// and one operation of the queue, named and given as a supervisor's is
 /// ([`SupervisorParams`]).
@@ -1978,6 +1989,22 @@ pub fn telemetry_starter_refusal(
         }
     };
     (!own).then_some("the target was started by another caller")
+}
+
+/// Why the telemetry token of a target of no run is not issued to
+/// `parent` asking from `process`, read in the issue's transaction: a
+/// start that is not the parent's ([`telemetry_starter_refusal`]), or a
+/// token the target holds already (`held`), the job's, which no request
+/// replaces, its own starter's asking again included (the issue would
+/// revoke it). `None` when it is issued.
+pub fn telemetry_target_refusal(
+    parent: &Principal,
+    process: Option<u32>,
+    start: Option<&TargetStart>,
+    held: bool,
+) -> Option<&'static str> {
+    telemetry_starter_refusal(parent, process, start)
+        .or_else(|| held.then_some("the target's executor holds its token already"))
 }
 
 /// The actor id of the session wrapper of `target`, as its events record
@@ -3288,6 +3315,46 @@ mod tests {
             Some(1),
             &TargetStart::Supervised { supervisor: None }
         ));
+
+        // A command's step asks from its process only as the connection
+        // names it: one naming another command's process asks as none,
+        // which no start names.
+        let call = |pid| ControlCall {
+            command: ControlCommand::Observe,
+            task: None,
+            yes: false,
+            pid,
+        };
+        assert_eq!(call(40).process(Some(40)), Some(40));
+        assert_eq!(call(40).process(Some(41)), None);
+        assert_eq!(call(40).process(None), None);
+        let start = started(&user, 40);
+        assert!(own(&user, call(40).process(Some(40)), &start));
+        assert!(!own(&user, call(40).process(Some(41)), &start));
+
+        // A token the target holds already is replaced by none: neither
+        // another command of the same principal nor its starter asking
+        // again; one not the starter's is refused as such first.
+        for starter in [&user, &inbox] {
+            let start = started(starter, 40);
+            assert_eq!(
+                telemetry_target_refusal(starter, Some(40), Some(&start), false),
+                None
+            );
+            assert!(
+                telemetry_target_refusal(starter, Some(40), Some(&start), true)
+                    .unwrap()
+                    .contains("holds its token already")
+            );
+            for held in [false, true] {
+                assert!(
+                    telemetry_target_refusal(starter, Some(41), Some(&start), held)
+                        .unwrap()
+                        .contains("another caller"),
+                    "{starter:?} {held}"
+                );
+            }
+        }
     }
 
     #[test]

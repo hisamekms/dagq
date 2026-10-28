@@ -180,11 +180,13 @@ fn own_hold(command: ControlCommand, args: &[Value]) -> bool {
 }
 
 /// Answer the step `params` of the control-side command of `principal` on
-/// `backend` (see the module's documentation).
+/// `backend` (see the module's documentation), sent from the process
+/// `process` when the connection tells it.
 pub fn answer(
     backend: &dyn ServiceBackend,
     principal: &Principal,
     params: &Value,
+    process: Option<u32>,
 ) -> Result<Value> {
     let actor = principal.actor();
     let params: ControlParams = serde_json::from_value(params.clone())
@@ -283,13 +285,21 @@ pub fn answer(
                 return Err(anyhow::Error::new(NotOwnLease));
             }
             own_target(queue.supervisor_store(), &control, &actor, &target)?;
-            // The token keeps the command that asked for it, as every token
-            // the service issues at a parent's request.
-            let issuer = crate::domain::queue_service::TokenIssuer::of(
+            // Issued as `issue_token` issues it at a parent's request: only
+            // to the command whose process the start names, that process
+            // the connection's (a step naming another's asks as none), and
+            // only while the target holds none, read in the issue's
+            // transaction (a refusal recorded); the token keeps the command
+            // that asked.
+            let issued = super::super::queue_service::issue_token(
+                backend,
+                &mut *queue,
                 principal,
-                backend.process_of(control.pid),
-            );
-            return reply(backend.issue_telemetry_as(&target, task, None, &issuer));
+                &Principal::telemetry(&target, task),
+                control.process(process),
+            )?;
+            let issued: super::super::queue_service::Issued = serde_json::from_value(issued)?;
+            return reply(Ok(issued.file));
         }
         "revoke_telemetry" => {
             let (target, under): (StepTarget, Option<LeaseToken>) = read(op, args)?;

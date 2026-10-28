@@ -117,7 +117,8 @@ pub struct TargetTelemetry<'a> {
 
 impl TargetTelemetry<'_> {
     /// Issue the token of `target`, a target of no run, as its agent is
-    /// started, revoking any it held, and record it on the queue
+    /// started (a command's only while the target holds none, the
+    /// supervisor's revoking any it held), and record it on the queue
     /// (`telemetry_token_issued`) once it was issued. The file its executor
     /// reads it from; `None` when it could not be issued: the target goes
     /// on without telemetry, as its outcome does not hang on it.

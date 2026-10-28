@@ -1286,7 +1286,7 @@ fn tokens(
                     &target,
                     facts,
                 )? {
-                    return Err(super::queue_service::NotStarter(why).into());
+                    return Err(super::queue_service::TelemetryRefused(why).into());
                 }
                 // Not over a target's another live supervisor asked for, as
                 // found in the issue's transaction.
@@ -1323,8 +1323,8 @@ fn tokens(
                         .map(|super::queue_service::Replacing(why)| *why)
                         .or_else(|| {
                             error
-                                .downcast_ref::<super::queue_service::NotStarter>()
-                                .map(|super::queue_service::NotStarter(why)| *why)
+                                .downcast_ref::<super::queue_service::TelemetryRefused>()
+                                .map(|super::queue_service::TelemetryRefused(why)| *why)
                         }) {
                         Some(why) => Err(super::queue_service::refuse_recorded(
                             queue,
