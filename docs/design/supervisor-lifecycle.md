@@ -109,6 +109,12 @@ a run whose resumes are used up is failed with its resume_exhausted alert)
                    its provider could not be used (provider_unusable, a role that names its
                    provider) → the next round on the other provider,
                    or on the same one once its hold ends ([provider_fallback] jobs = false)
+long-running task (its non-pass reviews past the [replan] window,
+  or a revise / resume limit reached on them)
+  → read-only diagnosis job on the recovery job's route, outside the run slots
+    (the run's turns go on) → continue, or replan (the run parked for the replanning);
+    undecided → a decide ask on the task (asked_by replan-diagnosis, continue / replan),
+    applied by the supervisor once it checked the premise again
 live worker alert (stalled, idle_process)
   → the same recovery job in the session's slot → repair applied, or the alert's ask;
     a failed job → the alert's ask too (reason_category recovery_failed, ADR-t609-1);

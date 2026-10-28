@@ -18,7 +18,7 @@ related:
 終わった run の復旧 job は failed / interrupted / resume_exhausted を扱い、生きている worker の stalled と非対話の idle_process は [生きているsessionの復旧job](background-recovery-job.md) が扱う。
 
 1. **自動recover**: fill passごとに、`integrating`以外でlease行の無いactive runについて`doctor`と同じ判定（`run_health`）を行い、`blockers`が空なら`interrupted`にする。
-   taskは`ready`にしない（再実行は復旧jobに委ねる。ADR-0003・ADR-0007の「孤児runは自動再実行しない」は維持し、ADR-0012の「wrapperが死んだrunの`recover`は手動」を`recover`の実行だけ自動に改める）。
+   taskは`ready`にしない（再実行は復旧jobに委ね、孤児runを自動で再実行しない）。
    staleなleaseを持つrunは、leaseのpidが死んでいて、adoptの対象（wrapperが生きているか終了を記録した`running` / `validating`、`resume_skipped`の後のrun、`awaiting_integration`）でなければ対象にする（supervisorとwrapperが両方死んだrun）。
    leaseのpidが生きている（heartbeatが止まったまま生きているsupervisor）runは対象外。
 2. **alert**: `in_progress`のtaskの最新runで`failed` / `interrupted`のもののうち、最後の`resume_started`より後に`triage_finished`も`triage_failed`も無いもの、または最後のラウンドが`wait`でその`recheck_at`を過ぎたもの（`domain::triage_state`が`Pending` / `Waiting`）。
@@ -35,8 +35,7 @@ related:
    `triage_started`の`launch`のproviderのheadlessのコマンドをそのdirectoryで、`DAGQ_ROLE=recovery-job`（CLIはreviewと同じく読み取りだけを許す。[Roles](roles.md#actors)）と、queue serviceのsocketとjobのtokenのfile付き（`DAGQ_QUEUE`は渡さない。[Queue service](../queue-service.md#クライアントモード)）で起動し、stdout / stderrを`recovery-<alert>-<attempt>.out` / `.err`に書く（promptと一緒に、promptの固定バイナリの節の全体（claim以後の入れ替えの全てと、読む上限を超えて読まなかった件数）を`recovery-<alert>-<attempt>.binary.json`に書く）。
    timeoutはreviewと同じ。
    上限の件数に達していれば、行き先が待つあいだも、jobを起動せずに`begin_triage`（`recovery_requested`なし）の後すぐ6のescalateにする（`triage_started`の`launch`は行き先のもの、待つあいだは役割のもの）。
-   例外は、最後のラウンドの後の人の回答が`edit the task's --verify, then retry_inherit`で、runの最初のeventより後にtaskのverifyを変えた`task_edited`があるときで、上限に達していてもjobをもう1回起動する（ADR-t883-1。直したverifyをjobが読んで`retry_inherit`を選べるように）。
-   jobを起動するので、行き先が待つあいだは他のラウンドと同じく待つ。
+   例外は、最後のラウンドの後の人の回答が`edit the task's --verify, then retry_inherit`で、runの最初のeventより後にtaskのverifyを変えた`task_edited`があるときで、上限に達していてもjobをもう1回起動する（ADR-t883-1。直したverifyをjobが読んで`retry_inherit`を選べるように。次のrunの`integrate`はtaskの今のverifyを流す）。
    その`recovery_requested`は上限を超えた通し番号になる。
    editの無い回答は他のoptionと同じで、上限に達していればすぐescalateになり、同じ選択肢のaskがまた開く（人が直して答えるまで進まない）。
 4. **prompt**（`prompt::recovery_prompt`。決定39の入力）: 載せる資料はこの関数のdoc commentが持つ。
@@ -100,21 +99,28 @@ related:
    ラウンドとresumeの使い切りと9の適用の後に、runが`failed`かtaskが終わっていれば閉じていない`approve_landing`を閉じる（[Review](review.md#review-supervisor)の6）。
 8. **jobの失敗**: 起動できない、非0終了、timeout、stdoutにverdictが無い、適用中のerrorは`triage_failed`（使えなかったproviderなら`provider_unusable`）と`recovery_finished`を記録してleaseを解放し、runはそのままにする。
    `triage_failed`はattentionで、人の指示でinboxのsessionか人の`DAGQ_ROLE`の無いterminalから`ready` / cancelなどを打つ（plannerは`ready`を拒まれる）。
-   supervisorは同じrunをもう一度ラウンドにかけない（resumeされれば別。providerが使えずに失敗したjobの`provider_unusable`の付いた`triage_failed`は例外で、attentionにせず次のラウンドを行き先のproviderで始める。[Codexで動かす](#codexで動かす)）。
+   supervisorは同じrunをもう一度ラウンドにかけない（resumeされれば別。`provider_unusable`の付いた`triage_failed`は[Codexで動かす](#codexで動かす)の例外）。
 9. **askの回答**: fill passごとに、`asked_by: supervisor`の`decide`のaskで回答済み・未closeのもののうち、回答がaskのoptionsにある`retry` / `resume` / `cancel`のどれかで、runが`failed` / `interrupted`でleaseが無いものを`decide_triage`で1トランザクションで適用する（runがtaskの最新runで、askが回答済みかつ未closeであることを中で再検査するので、2つのsupervisorが同じ回答を二重に適用しない。staleなleaseの行は同じトランザクションで消すので、止まっていたラウンドのsupervisorが起きてもleaseを更新して書けない。[ADR-0039](../../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)の決定7）。
    `retry`はtaskを`ready`（人の判断なので、commitのあるrunでもよい）、`resume`はrunを`needs_session`（`last_error`は直近の`triage_finished`の`reason`に人がresumeを選んだことを添えたもの）、`cancel`はtaskを`canceled`にし、askを閉じ、`triage_decided`を記録する。
    taskが既に`in_progress`でないか、より新しいrunがあれば（人が`ready`を打ったなど）適用するものが無いのでaskを閉じるだけにする。
-   `resume`は5の`resume`と同じ再検査（runがtaskの最新のrunで、taskが`completed` / `canceled`でない）を適用のトランザクションでもう一度行い、その間に人がcancelしたか後のrunが始まっていれば適用せず、askは開いたまま次のfill passで上の通り閉じる。
+   `resume`は5の`resume`と同じ再検査を適用のトランザクションでもう一度行い、崩れていれば適用せず、askは開いたまま次のfill passで上の通り閉じる。
    jobの足したoptionは、6の印を外した文だけの回答でもそのoptionとして扱う（`domain::recovery::chosen_option`）。
    回答がjobの足したoptionかruntimeの足した`edit the task's --verify, then retry_inherit`（askのoptionsにあり`retry` / `resume` / `cancel`でないもの）なら、何も動かさずにaskを閉じ、`triage_decided`を記録する。
    `triage_state`はこれを`Pending`と読むので、次のfill passで同じalertのラウンドがもう一度始まり（alertの回数に数える）、promptのalertの事実でjobが人の選んだもの（6の印は外す）を読む。
-   verifyのoptionの回答は、verifyを直す`task_edited`が先にあれば3の例外で使い切りの後でもラウンドを持ち、jobはpromptでtaskの今のverifyとその`task_edited`を読んで`retry_inherit`を選べる。
-   次のrunの`integrate`はtaskの今のverifyを流す。
    optionsに無い自由な回答は人が読む。
    ただしoptionsのどれとも一致せず、runtimeの操作の名前だけ（復旧jobの操作と`retry` / `resume` / `cancel`。前後の空白・大小・引用符は無視する）の回答は、`answer`が何も書かずに断り、askは開いたまま残る。
    書けば誰も適用しない自由な回答として閉じ、答え直せないため。
    断りのmessageはその名前を含むoptionの原文（そのまま答えればruntimeか復旧jobに渡る）と、`retry_inherit`なら下の人の手での引き継ぎを示す。
    `answer`はこの条件（optionsのどれか）のaskの回答をruntimeが運ぶものとして記録し、attentionにしない。
+
+## 再計画の診断
+
+長期化したtaskの再計画の操作は、同じ復旧jobの経路で読み取りだけ（`TRIAGE_ACCESS`）の診断job（label `replan_diagnosis`）を受ける。
+jobはrun slotの外で動き、runのturnは止めない。
+runtimeが決めないもの（確信度が低い、自動の保留の上限、進展の無い継続、jobの試行の使い切りなど）は、6の復旧jobのaskと違いrunでなくtaskについての`decide`のaskにする（`asked_by: replan-diagnosis`、optionsは`continue` / `replan`）。
+答えはsupervisor（trusted runtime）が適用する。
+操作がaskを作った版のまま`diagnosing`で、taskが進行中でrunがその最新のまま着地していないことを確かめ直し、`continue`なら継続、`replan`なら正式な再計画の保留へ進める（着地中のrunは待つ）。
+検知・診断と前提の詳細は[taskの再計画](../../plans/task-replanning.md)の「実装の状態」が持つ。
 
 ## 人の手での引き継ぎ
 
@@ -165,11 +171,9 @@ jobは状態を変えず読むだけ（`TRIAGE_ACCESS`）で、verdictはClaude�
 - **読み取り**: verdictはCodexの最終の`agent_message`のtext（`AgentProvider::job_reply`）から読む。
   threadはjobの出力から、modelはそのthreadのrolloutから読み（`AgentProvider::job_session`）、`triage_finished` / `triage_failed`と`recovery_finished`に書き、ラウンドの区間の`session_closed`もそれを取る。
 - **失敗**: 非0終了・timeout・読めないverdictは、Claudeのjobと同じ8の失敗（`triage_failed`のattention）にし、Claudeに回さない。
-  providerが使えずに失敗したjob（ログイン・使用量の上限・agentが起動しない。`JobFailure::switch_reason`）は、役割がproviderを書いていれば（ADR-t1063-1の決定4）そのproviderを控え（`provider_held`。Claudeの壁はqueueのhold askにも加わる）、`triage_failed`に`provider_unusable`を書く。
+  providerが使えずに失敗したjob（ログイン・使用量の上限・agentが起動しない。`JobFailure::switch_reason`）は、役割がproviderを書いていれば（ADR-t1063-1の決定4）そのproviderを控え（`provider_held`。Claudeの壁だけが[queueのhold ask](queue-hold.md)にも加わる）、`triage_failed`に`provider_unusable`を書く。
   この`triage_failed`は人のものではない: 復旧の判定はこれを`Pending`と読み（attentionにもしない）、次のpassで同じrunの次のラウンドが行き先のproviderで始まる（控えの間はもう一方。`jobs = false`なら控えの間は始めず、解けた後に同じproviderで）。
   そのラウンドは新しい`recovery_requested`を持つのでalertの回数に数える。
-  Claudeを使わない運転で残るproviderが無ければ、次のラウンドは上の行き先のとおりjobを起動せずに理由付きの8の失敗（attention）になる。
-  queueのhold askに加わるのはClaudeのjobの壁だけ（[Queue hold](queue-hold.md)）。
   時間の上限ではjobとCodexが走らせた子孫（別のprocess groupのものも）をpidで止める。
 
 ## taskのhold

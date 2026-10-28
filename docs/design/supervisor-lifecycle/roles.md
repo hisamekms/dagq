@@ -66,7 +66,7 @@ runtimeが起動するAI actorは全て、環境にroleとactor idを持つ。
 | inbox | 人のterminalの`dagq inbox` | |
 | supervisor（前のbinaryが登録したin-cmuxのもの） | 前のbinaryのin-cmux mode（新しくは起動しない） | |
 | review job | runのreview | |
-| recovery job | 終わったrunと生きているrunの復旧 | |
+| recovery job | 終わったrunと生きているrunの復旧 | 同じjobの経路で、長期化したtaskの読み取りだけの再計画の診断（label `replan_diagnosis`、triageの権限）も走る（[Triage](triage.md#再計画の診断)） |
 | plan review job | proposalのplan review | |
 | goal review job | goalのgoal review | |
 | throughput review job | 毎時・日次・週次のスループットの見直し | 読むだけ。結論はsupervisorの`throughput-review`コマンドが保存しinboxに知らせる（[スループットの見直し](throughput-review.md)） |
