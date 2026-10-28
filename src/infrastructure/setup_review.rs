@@ -197,8 +197,8 @@ pub struct LocalSetupReview<'a> {
     /// The `dagq` binary; its directory goes first on the job's PATH.
     dagq: &'a Path,
     timeout: Duration,
-    /// Where the job's agent's events go (the queue through the service);
-    /// `None` records them on the queue at `db`.
+    /// Where the job's agent's events go (the queue through the service,
+    /// or the command's own queue); `None` leaves them to the log.
     events: Option<&'a dyn crate::application::RunLog>,
     /// The tree of each place as it was made, by the place's id: what the
     /// job's changes are told from.
@@ -226,8 +226,7 @@ impl<'a> LocalSetupReview<'a> {
         }
     }
 
-    /// This host with its job's agent's events recorded on `events`
-    /// rather than on the queue at `db`.
+    /// This host with its job's agent's events recorded on `events`.
     #[must_use]
     pub fn with_events(mut self, events: &'a dyn crate::application::RunLog) -> Self {
         self.events = Some(events);

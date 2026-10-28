@@ -2371,3 +2371,96 @@ fn a_supervisor_is_refused_the_integrators_end_of_a_landing() {
     assert_eq!(state(), before);
     caller.sign_out();
 }
+
+/// The records of the container's parts a supervisor makes and reads (the
+/// image's builds, the relays' attention, the runs that own users of the
+/// dagq machine) go through the service as the supervisor's, while its
+/// process refuses to open the queue; another queue's runs are not
+/// reached. Once the service stops, each fails as out of reach (a run
+/// reads as unknown), still without opening the queue.
+#[test]
+fn the_supervisors_container_records_go_through_the_service_alone() {
+    use dagq::application::{broker_relay::RelayRecords, container_image::ImageRecords};
+    use dagq::compose::ServiceContainerRecords;
+    use dagq::domain::{EventKind, broker_relay::RelayRun};
+    use dagq::infrastructure::podman_machine::OwnerRuns;
+    use serde_json::json;
+    let (fixture, repo, db) = fixture();
+    let served = common::service::Served::start(&db);
+    let pid = 4243;
+    let caller: Arc<dyn ServiceCaller> = Arc::new(SocketCaller::new(&db));
+    let queues = SupervisorQueues::new(
+        caller.clone(),
+        ActorContext::instance(ActorRole::Supervisor, pid),
+    );
+    let token = LeaseToken::new("supervisor-of-containers");
+    caller.sign_in(&token, pid).unwrap();
+    let mut queue = queues.open().unwrap();
+    let limits = SlotLimits::resolve(SlotFlags::default(), &SupervisorConfig::default());
+    queue
+        .register_supervisor(&token, pid, limits, &[], "0.0.0-test")
+        .unwrap();
+    let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&head(&repo), &token).unwrap()
+    else {
+        panic!("no task was claimed");
+    };
+    let refused = refuse_opening(&db);
+    let records = ServiceContainerRecords::new(queues.clone(), &db);
+
+    assert_eq!(records.latest().unwrap(), None);
+    records
+        .record(
+            EventKind::ContainerImageBuilt,
+            json!({"reference": "localhost/dagq-q:ab"}),
+        )
+        .unwrap();
+    let (kind, payload) = records.latest().unwrap().unwrap();
+    assert!(kind == EventKind::ContainerImageBuilt, "{kind:?}");
+    assert_eq!(payload["reference"], "localhost/dagq-q:ab");
+    assert_eq!(records.down().unwrap(), None);
+    queue
+        .record_queue_event(
+            EventKind::QueueRelayDown,
+            json!({"message": "the relay of r1 is down"}),
+        )
+        .unwrap();
+    assert_eq!(
+        records.down().unwrap().as_deref(),
+        Some("the relay of r1 is down")
+    );
+    assert_eq!(
+        records.run(&db, run.id().as_str()),
+        Some(RelayRun::Found {
+            status: run.status(),
+            task_in_progress: true,
+        })
+    );
+    let other = fixture.path().join("other").join("queue.db");
+    assert_eq!(records.run(&other, "r2"), None);
+
+    drop(served);
+    for error in [
+        records.latest().unwrap_err(),
+        records.down().unwrap_err(),
+        records
+            .record(EventKind::ContainerImageFailed, json!({}))
+            .unwrap_err(),
+    ] {
+        assert!(unreachable(&error), "{error:#}");
+    }
+    assert_eq!(records.run(&db, run.id().as_str()), Some(RelayRun::Unknown));
+    drop(refused);
+    let built: Vec<_> = dagq::infrastructure::sqlite::SqliteQueue::open(&db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ContainerImageBuilt)
+        .collect();
+    assert_eq!(built.len(), 1);
+    assert_eq!(
+        built[0].actor.as_ref().map(|actor| actor.id.as_str()),
+        Some("supervisor:4243")
+    );
+    caller.sign_out();
+}

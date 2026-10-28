@@ -276,6 +276,17 @@ impl PodmanRelays {
         }
     }
 
+    /// These relays with the runs that own users of the machine read
+    /// through `runs` when given ([`super::podman_machine::HostMachineUsers::runs`]).
+    #[must_use]
+    pub fn with_owner_runs(
+        mut self,
+        runs: Option<std::sync::Arc<dyn super::podman_machine::OwnerRuns>>,
+    ) -> Self {
+        self.machine.users.runs = runs;
+        self
+    }
+
     fn key(&self) -> Result<QueueKey> {
         let name = self
             .queue_dir

@@ -62,7 +62,7 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
   supervisorはtaskの検証のコマンドの有無を見ず、全ての着地を待たせる。
   `integrate`自身も検証のコマンドの前に確かめ（`integrate::verification_runtime`）、どのコマンドもhostで流さずにrunを元のstatusへ戻す。
   `already_satisfied`のsnapshotの検証も使えない間は始めずに待ち（[Validation](supervisor-lifecycle/validation.md#already_satisfiedの検証)）、hostで流さない。
-- 知らせ: supervisorと、拒んだ`integrate`が、答えがqueueの最新の記録と違うとき（待つ適用先か理由が変わったときを含む、`ContainerCheck::transition`）に`container_runtime_unavailable` / `container_runtime_available`を記録し、前者はinbox宛てのattentionになる。
+- 知らせ: supervisorと、拒んだ`integrate`が、答えがqueueの最新の記録と違うとき（待つ適用先か理由が変わったときを含む）に`container_runtime_unavailable` / `container_runtime_available`を記録し、前者はinbox宛てのattentionになる。
   supervisorを通さない`integrate`だけでもinboxに届く。
   人は部品が揃うのを待つか、runtimeをhostに戻すtaskを頼む。
 - 直接の起動: hostのexecutor（`HostActorExecutor`・reviewのprogramのjob）は`ExecutorBackend::Container`に置いたactorを起動せず、`ensure_implemented`が拒み、containerはwrapperと`integrate`だけが下の2節で起動する。
@@ -95,7 +95,7 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
   turnの予約はturnのcontainerに結び、verificationの予約は最初のコマンドの前から片付けまで持つ。
   新しいclaimは控え（[claimを控える](supervisor-lifecycle/claim-hold.md#workerを動かせないtask)）、次のturnはwrapperが、verificationは`integrate`が待ち、待ちはrunのevent（[計測](measurement.md#区間とタグ)）と`status`に出る。
   着地の再確認とfacts-onlyのturnも同じく予約し、wrapperは待つ間も終了の依頼と柵を読み、当たればturnを始めずに終わる。
-- hostのmount: initのvolumeは各queueのrun dir・cloneの親のdir・verificationのcloneの親のdirだけで（`MachineMounts`）、hostの`$HOME`・workerのcache・buildの出力・着地用のworktreeのdirを含めない。
+- hostのmount: initのvolumeは各queueのrun dir・cloneの親のdir・verificationのcloneの親のdirだけで、hostの`$HOME`・workerのcache・buildの出力・着地用のworktreeのdirを含めない。
   各dirはmachineの中の同じpathにmountする。
   macOSのremoteのPodmanのbind mountのsourceはmachineの側のpathなので、containerに見せるhostのdirはmachineにmountしてある必要がある。
   queueのrun dir・runのclone・verificationのcloneはこの3つのdirの下に置き、着地用のworktreeはどの下にも置かない。
@@ -114,13 +114,13 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
 ## image
 
 containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すprojectのContainerfileの2段である（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定2）。
-判断は`domain::container_image`、use caseは`application::container_image`、podmanのコマンド・mainのcheckoutの読み取り・queueの記録は`infrastructure::container_image`が持つ。
+判断は`domain::container_image`、use caseは`application::container_image`、podmanのコマンドとmainのcheckoutの読み取りは`infrastructure::container_image`が持ち、queueの記録はsupervisorではqueue serviceを通る（fail closed）。
 
 - base: Containerfileは`src/infrastructure/container_image/base.Containerfile`に置き、binaryに埋め込む。
   Claude Code・Linuxのdagqのclient・非rootのuserだけを持ち、言語の道具を残さない。
   Claude Codeの版はruntimeが固定し（`CLAUDE_CODE_VERSION`）、新しい版はdagqの版と一緒に来る。
 - client: installしたdagqと同じ版を、dagqのsourceからdagq専用のmachineの中でbuildし、baseに残さないstageで作ってbinaryだけを移す。
-  releaseはcrates.ioのsource、開発版はbuild識別子が名指すcommitをdagqのrepositoryからcloneして取り、作ったclientの`--version`がinstallしたdagqのbuild識別子と同じでなければbuildを落とす（`client_source`）。
+  releaseはcrates.ioのsource、開発版はbuild識別子が名指すcommitをdagqのrepositoryからcloneして取り、作ったclientの`--version`がinstallしたdagqのbuild識別子と同じでなければbuildを落とす。
   dagqのrepositoryにpushされていないcommitは取れず、baseのbuildが落ちる。
   hostにdagqのcheckoutは要らない。
   未commitの変更を含むbuildとcommitを知らないbuildは同じ版のsourceが無いので、入手できないとしてcontainerを使えないと答える。

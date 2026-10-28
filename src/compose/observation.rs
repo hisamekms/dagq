@@ -1004,6 +1004,8 @@ pub fn observe(
         return observe_through(&db, queues, provider, signals, options);
     }
     let mut queue = SqliteQueue::open(&db)?;
+    // The agent's events go to this command's own queue, as its records do.
+    let events = SqliteQueue::open(&db)?;
     let generators = queue.generators().clone();
     let sources = ObserverReads {
         one_shot: OneShot::new(generators.clone()),
@@ -1017,7 +1019,9 @@ pub fn observe(
         options,
         &crate::application::observer::ObserverEnvironment {
             sources: &sources,
-            host: &crate::infrastructure::observer::LocalObserver { events: None },
+            host: &crate::infrastructure::observer::LocalObserver {
+                events: Some(&events),
+            },
             generators: &generators,
             pid: std::process::id(),
             // The executor's token is issued by the queue's service at
@@ -1225,6 +1229,8 @@ pub fn throughput_review(
     }
     let signals = review_signals();
     let mut queue = SqliteQueue::open(&db)?;
+    // The agent's events go to this command's own queue, as its records do.
+    let events = SqliteQueue::open(&db)?;
     let generators = queue.generators().clone();
     let sources = ThroughputReviewReads {
         one_shot: OneShot::new(generators.clone()),
@@ -1237,7 +1243,9 @@ pub fn throughput_review(
         options,
         &crate::application::throughput_review::ThroughputReviewEnvironment {
             sources: &sources,
-            host: &crate::infrastructure::throughput_review::LocalThroughputReview { events: None },
+            host: &crate::infrastructure::throughput_review::LocalThroughputReview {
+                events: Some(&events),
+            },
             generators: &generators,
             signals: Some(&signals),
             // The executor's token is issued by the queue's service at

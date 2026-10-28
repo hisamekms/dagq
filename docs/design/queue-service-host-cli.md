@@ -92,7 +92,7 @@ stepの形はsupervisorの操作と同じ名前と引数（`ControlParams`）で
 - 着地の承認: `integration_approved`は自分のstep（`approve_integration`）だけで書き、serviceはrunの状態が呼び出し元の読んだまま着地かsessionを待つこと、生きたleaseが持たないこと（serviceのプロセスと時計で見る）、承認がまだ無いことを、記録と同じwrite transactionで確かめる（ADR-t3102-3決定4）。
   承認済みのrunには何も書かない
 - コンテナの検証: 着地の検証が読むrelayの注意と、作るimageの記録もstepで送り、eventは呼び出し元のもの。
-  dagq machineを共有する利用者のrunは、そのqueueのものをserviceで読み、届かない他のqueueのものは分からないものとして数えたまま残し、どのqueueのDBも開かない（`podman_machine::OwnerRuns`）
+  dagq machineを共有する利用者のrunは、そのqueueのものをserviceで読み、届かない他のqueueのものは分からないものとして数えたまま残し（DBのfileが無いqueueのものは無いrunとして数えない）、どのqueueのDBも開かない（`podman_machine::OwnerRuns`）
 - 観測の壁: `observe`のagentが認証切れか利用上限で止まったときのqueue_holdのask（observerのjobで、runなし）もstepで開くか加わり、`auth_required`・`usage_limited`は呼び出し元のeventになる（`control::own_hold`）
 - 着地: 呼び出し元は自分で作ったleaseでslotを取り、serviceはrunがコマンドの名指すtaskのものであること、そのleaseを持つrunとsupervisorが無いことを確かめ、slotと着地のintegratorのtoken（`integrator:<pid>`、pidはコマンドのプロセス）を同じtransactionで発行する（ADR-t3102-1決定2）。
   着地の残りとleaseのheartbeatはそのtokenでintegratorとして送り、eventはintegratorのもので`requested_by`が呼び出し元。

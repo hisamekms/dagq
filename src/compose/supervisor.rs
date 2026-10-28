@@ -950,6 +950,9 @@ pub fn supervise_with_reviewer(
         )
     });
     let host_programs = review_program_host(&repository, runner, std::env::vars_os())?;
+    // The container's parts record and read on the queue through the
+    // service as the supervisor, opening no DB for them.
+    let container_records = super::ContainerRecords::of_service(supervisor_queues(), &db);
     let ports = Ports {
         queues: Arc::new(supervisor_queues()),
         service: service.clone(),
@@ -984,18 +987,16 @@ pub fn supervise_with_reviewer(
                     &db,
                     &main_checkout,
                     generators.clock.clone(),
-                    Some(crate::domain::actor::ActorContext::instance(
-                        crate::domain::actor::ActorRole::Supervisor,
-                        pid,
-                    )),
+                    &container_records,
                 ),
             }),
         },
         run_containers: options.run_containers.as_ref().map_or_else(
             || {
-                Arc::new(crate::compose::run_containers(
+                Arc::new(crate::compose::run_containers_with(
                     &db,
                     Some(main_checkout.clone()),
+                    &container_records,
                 )) as Arc<dyn crate::application::run_container::RunContainers>
             },
             |port| port.0.clone(),
@@ -1008,7 +1009,7 @@ pub fn supervise_with_reviewer(
                 Arc::new(crate::compose::verification_containers(
                     &db,
                     Some(main_checkout.clone()),
-                    None,
+                    Some(&container_records),
                 ))
                     as Arc<dyn crate::application::run_container::VerificationContainers>
             },
@@ -1098,6 +1099,7 @@ pub fn supervise_with_reviewer(
                 &db,
                 settings,
                 host::queue_broker_control(&db, options.queue_broker.as_ref()),
+                container_records.owner_runs.clone(),
             )
         }),
         run_e2e,

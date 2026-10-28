@@ -20,9 +20,7 @@ use crate::application::supervisor_service::{
     ServiceCaller, ServiceTokens, SupervisorQueues,
     control::{self, CONTROL_QUEUE},
 };
-use crate::application::{
-    AgentProvider, AgentSignals, EventStore, MainRemote, QueueOpener, SupervisorReads,
-};
+use crate::application::{AgentProvider, AgentSignals, MainRemote, QueueOpener, SupervisorReads};
 use crate::domain::actor_model::ActorLaunch;
 use crate::domain::queue_service::{ControlCall, UseCase};
 use crate::domain::{ActorContext, ActorRole, TaskId};
@@ -77,12 +75,9 @@ impl ControlQueues {
     }
 
     /// The records a landing's container verification reads and makes on
-    /// the service's queue ([`ServiceRecords`]).
-    fn records(&self) -> ServiceRecords {
-        ServiceRecords {
-            queues: self.queues.clone(),
-            db: self.db.clone(),
-        }
+    /// the service's queue ([`super::ContainerRecords::of_service`]).
+    fn records(&self) -> super::ContainerRecords {
+        super::ContainerRecords::of_service(self.queues.clone(), &self.db)
     }
 
     /// The main checkout of the repository the queue is bound to, `None`
@@ -130,11 +125,7 @@ impl ControlQueues {
             remote,
             &heartbeat,
             &self.tokens(),
-            Some(&super::ContainerRecords {
-                relays: Arc::new(self.records()),
-                images: Arc::new(self.records()),
-                owner_runs: Some(Arc::new(self.records())),
-            }),
+            Some(&self.records()),
         )
     }
 
@@ -197,51 +188,5 @@ impl ControlQueues {
     pub fn setup_review(&self, cwd: &Path, options: &super::SetupReviewOptions) -> Result<Value> {
         let events = self.queues.queue();
         super::execution::setup_review_on(&self.db, cwd, options, Some(&events))
-    }
-}
-
-/// The records of the relays and the image a landing's container
-/// verification reads and makes, on the queue service's queue at `db`:
-/// the relays' attention the supervisor recorded, the image's builds and
-/// failures, recorded as the command's principal, and the runs of that
-/// queue that own users of the dagq machine (another queue's are not
-/// reached: unknown, their users kept).
-struct ServiceRecords {
-    queues: SupervisorQueues,
-    db: PathBuf,
-}
-
-impl ServiceRecords {
-    /// Whether `db` names the queue the service serves.
-    fn serves(&self, db: &Path) -> bool {
-        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        canonical(db) == canonical(&self.db)
-    }
-}
-
-impl crate::application::broker_relay::RelayRecords for ServiceRecords {
-    fn down(&self) -> Result<Option<String>> {
-        crate::application::broker_relay::down_message(&self.queues.queue())
-    }
-}
-
-impl crate::infrastructure::podman_machine::OwnerRuns for ServiceRecords {
-    fn run(&self, db: &Path, run: &str) -> Option<crate::domain::broker_relay::RelayRun> {
-        self.serves(db)
-            .then(|| crate::infrastructure::podman_machine::relay_run_in(&self.queues.queue(), run))
-    }
-}
-
-impl crate::application::container_image::ImageRecords for ServiceRecords {
-    fn record(&self, kind: crate::domain::EventKind, payload: Value) -> Result<()> {
-        EventStore::record_queue_event(&self.queues.queue(), kind, payload).map(drop)
-    }
-
-    fn latest(&self) -> Result<Option<(crate::domain::RecordedKind, Value)>> {
-        Ok(EventStore::latest_queue_event(
-            &self.queues.queue(),
-            &crate::domain::container_image::CONTAINER_IMAGE_KINDS,
-        )?
-        .map(|event| (event.kind, event.payload)))
     }
 }

@@ -117,8 +117,9 @@ pub fn read_input(
 /// it started, so no Bash child of the agent outlives it: an error).
 /// The exit code, or `None`
 /// when a signal ended it.
-/// The agent's events (where it was found again) go to `events`, else to
-/// the queue at `db`.
+/// The agent's events (where it was found again) go to `events` (the
+/// queue through its service, or the caller's own queue); with none they
+/// are left to the log, and no queue's DB is opened here.
 pub fn run_agent(
     provider: &dyn AgentProvider,
     db: &Path,
@@ -167,12 +168,8 @@ pub fn run_agent_in(
         .into_string()
         .map_err(|_| anyhow::anyhow!("PATH is not UTF-8"))?;
     // Where an agent found again by its provider's name is recorded
-    // (ADR-t2079-1); a queue that does not open leaves it to the log.
-    let opened = match events {
-        Some(_) => None,
-        None => crate::infrastructure::sqlite::SqliteQueue::open(db).ok(),
-    };
-    let events = events.or_else(|| opened.as_ref().map(|queue| queue as &dyn RunLog));
+    // (ADR-t2079-1): on `events` only, never on a queue opened here, so a
+    // service that does not answer leaves it to the log (fail closed).
     // The job's token is issued by the queue's service at the request of
     // the command's caller (ADR-t3102-1 decision 2).
     let service = crate::infrastructure::queue_service::RequestedServiceAccess::of_caller(db);
@@ -241,8 +238,8 @@ pub fn run_agent_in(
 
 /// The observer's host: the files under `<queue dir>/observer`, the bound
 /// checkout's configuration and the agent's local process, whose events
-/// go to `events` (the supervisor's queue through the service), else to
-/// the queue it names.
+/// go to `events` (the supervisor's queue through the service, or the
+/// command's own queue), else to the log.
 pub struct LocalObserver<'a> {
     pub events: Option<&'a dyn RunLog>,
 }

@@ -302,11 +302,10 @@ Integratorはrole `integrator`のactor（`integrator:<pid>`）で、`landing.lan
 - **依頼**: supervisorの着地のthreadと、人（とinboxの代行）の`integrate`は`IntegrationRequest`を作り、`Integrator::land`に渡す。
   `integrate`は`Integrator::approve`がrunを選び、依頼者が`landing.request`を持つことを確かめてから（持たなければ何も記録せずに拒む）`integration_approved`を依頼者として記録し、slotを取って依頼を返す。
   supervisorのslotはserviceの`begin_landing`が取り（依頼者は`supervisor:<pid>`）、同じtransactionでintegratorのtokenを発行する
-- **Integratorの検査**（`landing_refusal`）: 依頼者が`StaticPolicy`でそのrunに`landing.request`を持つこと、runが`integrating`で依頼のtokenがleaseを持つこと、runが承認済み（`integration_approved`）か、最新のreviewが`pass`かその後に収束した`revise_limit_judged`があること（`RunHistory::landable`）。
+- **Integratorの検査**（`landing_refusal`）: 依頼者が`StaticPolicy`でそのrunに`landing.request`を持つこと、runが`integrating`で依頼のtokenがleaseを持つこと、runが承認済み（`integration_approved`）か、最新のreviewが`pass`かその後に収束した`revise_limit_judged`があること。
   どれかが欠ければ着地せず、slotを持っていれば`abort_integration`で返して（`integration_error`）errorにする。
   reviewの`pass`は着地の必要条件で、この後のreceiptの再検査・rebase・検証コマンド・scopeの判定が落ちれば着地しない（ADR-t728-2の決定3）
-- **記録**: `Integrator::land`の間、queueのeventのactorはIntegratorで、`requested_by`は依頼者のactor id。
-  切り替えの入口は`EventStore::act_as`
+- **記録**: `Integrator::land`の間、queueのeventのactorはIntegratorで、`requested_by`は依頼者のactor id
 - **push**: `MainRemote::push_main`は`PushGrant`を引数に取り、`PushGrant`はIntegratorが`landing.push`を確かめてからしか作れないので、`GitRepository`のpushはIntegratorの外から呼べない
 
 host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユーザーで動き、この境界は論理的なもの（ADR-t728-2の決定4）。
@@ -318,7 +317,7 @@ queue service（ADR-t1233-1決定4）は、要求のtokenから決めたprincipa
 `issue_token`（ADR-t3102-1決定2）は、親（user・supervisor・inbox）の起動の権限を`starts`で、対象の前提を`issue_held`で（runを持たない対象のtelemetryは開始の親とプロセスとの一致と未発行も）発行と同じtransactionで確かめ、外れた依頼は断る。
 queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがそのコマンドに求めるのと同じcapability（`ci failures`は`ci.read`、ほかは`queue.read`）を`Gate`で通して答える。
 
-supervisorの操作（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）は、登録を持つsupervisorに`scheduler.supervise`と操作ごとのcapability（`needs::supervisor_needs`）を`Gate`で通してから答える。
+supervisorの操作（containerの部品の記録と読みを含む。[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）は、登録を持つsupervisorにだけ`scheduler.supervise`と操作ごとのcapability（`needs::supervisor_needs`）を`Gate`で通してから答える。
 人・inbox・plannerの計画の操作はCLIと同じcapabilityを求めてsupervisorには拒み、一覧に無い操作とintegratorだけの着地の終わりは拒む（default deny）。
 着地のintegratorには`landing.land`を通し、着地の操作だけを、名指すrun・task・leaseをそのものに限って答え、ほかは書かずに拒む（`integrator_scope`）。
 

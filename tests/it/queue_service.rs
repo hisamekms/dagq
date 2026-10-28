@@ -2267,3 +2267,80 @@ fn another_supervisor_revokes_no_live_supervisors_telemetry_of_a_target_of_no_ru
     assert_eq!(taken["ok"], true, "{taken}");
     assert_eq!(events(&queue.db, "authorization_denied").len(), before);
 }
+
+/// The supervisor's records of the container's parts (the image's builds
+/// and failures, the relays' attention, the runs that own users of the
+/// dagq machine) are operations of its use case on the service's side:
+/// its principal is answered, and any other (a worker, a review job, the
+/// user) is refused with `authorization_denied`, and nothing is written.
+#[test]
+fn the_container_parts_records_are_answered_to_the_supervisor_alone() {
+    use dagq::domain::LeaseToken;
+    let queue = queue();
+    start(&queue);
+    let lease = LeaseToken::new("it-containers");
+    SqliteQueue::open(&queue.db)
+        .unwrap()
+        .register_supervisor(&lease, std::process::id(), 1, "test")
+        .unwrap();
+    let supervisor = token(&queue, &Principal::supervisor(&lease, std::process::id()));
+    let ops = [
+        (
+            "record_queue_event",
+            json!(["container_image_built", {"reference": "localhost/dagq-q:ab"}]),
+        ),
+        (
+            "latest_queue_event",
+            json!([["container_image_built", "container_image_failed"]]),
+        ),
+        (
+            "latest_queue_event",
+            json!([["queue_relay_down", "queue_relay_running"]]),
+        ),
+        ("latest_runs_in_progress", json!([])),
+        ("run", json!([queue.run.id()])),
+    ];
+    let op = |token: Option<&str>, op: &str, args: &Value| {
+        call(
+            &queue,
+            token,
+            UseCase::Supervisor,
+            json!({"op": op, "args": args}),
+        )
+    };
+    let worker = token(
+        &queue,
+        &Principal::worker(queue.run.id(), queue.run.task_id()),
+    );
+    let review = token(
+        &queue,
+        &Principal::of(&ActorContext::review_job(queue.run.id(), 1)),
+    );
+    for other in [Some(worker.as_str()), Some(&review), None] {
+        for (name, args) in &ops {
+            let refused = op(other, name, args);
+            assert_eq!(
+                refused["error"]["code"], "authorization_denied",
+                "{name}: {refused}"
+            );
+        }
+    }
+    assert!(events(&queue.db, "container_image_built").is_empty());
+    let denials = events(&queue.db, "authorization_denied");
+    // The worker's and the review job's refusals, each as its actor.
+    assert_eq!(denials.len(), 2 * ops.len(), "{denials:?}");
+    assert!(
+        denials
+            .iter()
+            .all(|denial| denial["payload"]["capability"] == "scheduler.supervise"),
+        "{denials:?}"
+    );
+
+    for (name, args) in &ops {
+        let answered = op(Some(&supervisor), name, args);
+        assert_eq!(answered["ok"], true, "{name}: {answered}");
+    }
+    let built = events(&queue.db, "container_image_built");
+    assert_eq!(built.len(), 1, "{built:?}");
+    assert_eq!(built[0]["actor"]["role"], "supervisor", "{built:?}");
+}

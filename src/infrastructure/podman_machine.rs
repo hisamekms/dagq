@@ -599,11 +599,12 @@ impl std::fmt::Debug for HostMachineUsers {
     }
 }
 
-/// How a process that opens no queue (a person's `integrate` through the
-/// queue service) reads the runs that own users of the machine: the runs
-/// of the queue it is a client of, through that queue's service. A run of
-/// a queue it does not reach is unknown, and its user stays counted and
-/// kept ([`lease_held`]): no queue's DB is opened.
+/// How a process that opens no queue (the supervisor, a person's
+/// `integrate` through the queue service) reads the runs that own users of
+/// the machine: the runs of the queue it is a client of, through that
+/// queue's service. A run of a queue it does not reach is unknown, and its
+/// user stays counted and kept ([`lease_held`]), unless that queue's
+/// database is gone (no such run): no queue's DB is opened.
 pub trait OwnerRuns: Send + Sync {
     /// The run `run` of the queue at `db` as its service answers
     /// ([`relay_run_in`]); `None` for a queue this reader does not reach.
@@ -832,14 +833,18 @@ fn owner_seen(text: &str, queues: &mut Queues, runs: Option<&dyn OwnerRuns>) -> 
 }
 
 /// What is seen now of `owner`: a run through `runs` when given (a queue
-/// it does not reach unknown), else on its queue's DB.
+/// it does not reach unknown, unless its database is gone), else on its
+/// queue's DB.
 fn seen_of(owner: &LeaseOwner, queues: &mut Queues, runs: Option<&dyn OwnerRuns>) -> OwnerSeen {
     match owner {
         LeaseOwner::Process { pid } => OwnerSeen::Process {
             alive: super::adapters::process_alive(*pid),
         },
         LeaseOwner::Run { db, run } => OwnerSeen::Run(match runs {
-            Some(runs) => runs.run(db, run).unwrap_or(RelayRun::Unknown),
+            Some(runs) => runs.run(db, run).unwrap_or_else(|| match db.try_exists() {
+                Ok(false) => RelayRun::Missing,
+                _ => RelayRun::Unknown,
+            }),
             None => run_in_queue(db, run, queues),
         }),
     }
@@ -1419,13 +1424,14 @@ mod tests {
     /// A process that opens no queue reads the runs that own users through
     /// the service it is a client of, never on a queue's DB (here a file
     /// no SQLite opens, which would read as unknown): the served queue's
-    /// run that is over leaves, and another queue's, which it does not
-    /// reach, stays counted.
+    /// run that is over leaves, another queue's, which it does not reach,
+    /// stays counted, and one of a queue whose database is gone leaves.
     #[test]
     fn the_users_runs_are_read_through_the_service_and_no_queue_is_opened() {
         let dir = tempfile::tempdir().unwrap();
         let served = dir.path().join("served").join("queue.db");
         let other = dir.path().join("other").join("queue.db");
+        let gone = dir.path().join("gone").join("queue.db");
         for db in [&served, &other] {
             fs::create_dir_all(db.parent().unwrap()).unwrap();
             fs::write(db, "not a queue").unwrap();
@@ -1437,7 +1443,7 @@ mod tests {
                 run: RelayRun::Missing,
             })),
         };
-        for (user, db) in [("r1", &served), ("r2", &other)] {
+        for (user, db) in [("r1", &served), ("r2", &other), ("r3", &gone)] {
             users
                 .join(
                     user,
@@ -1461,6 +1467,10 @@ mod tests {
         assert!(!users.owner_held(&LeaseOwner::Run {
             db: served,
             run: "r1".into(),
+        }));
+        assert!(!users.owner_held(&LeaseOwner::Run {
+            db: gone,
+            run: "r3".into(),
         }));
     }
 
@@ -1538,7 +1548,8 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
             self.podman.clone(),
             &self.db,
             self.host_wide.as_deref(),
-        );
+        )
+        .with_owner_runs(self.owner_runs.clone());
         if !relays.is_open(run)? {
             crate::application::broker_relay::open(
                 &relays,

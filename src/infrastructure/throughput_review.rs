@@ -61,8 +61,8 @@ pub fn review_launch(checkout: Option<&Path>) -> ActorLaunch {
 /// The throughput review's host: the files under `<queue
 /// dir>/reports/reviews`, the bound checkout's configuration, the host's
 /// time zone and the agent's local process, whose events go to `events`
-/// (the supervisor's queue through the service), else to the queue it
-/// names.
+/// (the supervisor's queue through the service, or the command's own
+/// queue), else to the log.
 pub struct LocalThroughputReview<'a> {
     pub events: Option<&'a dyn crate::application::RunLog>,
 }

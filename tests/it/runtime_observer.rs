@@ -1872,3 +1872,76 @@ fn an_observations_command_sends_its_agents_steps_under_the_observation() {
         command,
     );
 }
+
+/// The observer's agent with nowhere given to record its events (the
+/// service out of reach for them) is still run, found again by its
+/// provider's name, and that is left to the log: the queue's DB is never
+/// opened to record it instead (fail closed).
+#[test]
+fn an_observers_agent_with_no_events_records_nothing_on_the_queue() {
+    use dagq::application::observer::HeadlessAgent;
+    use dagq::domain::{
+        ActorContext, ActorRole,
+        actor_model::{ActorLaunch, ModelRole},
+    };
+
+    /// The observer's provider whose executable is gone, found again as
+    /// `/bin/sh` by its name.
+    struct Moved;
+
+    impl AgentProvider for Moved {
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn relocated_executable(&self) -> Option<PathBuf> {
+            Some("/bin/sh".into())
+        }
+        fn headless_command(&self, cwd: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
+            let mut command = CommandSpec::new("/gone/observer");
+            command.current_dir(cwd).arg("-c").arg("echo observed");
+            Ok(command)
+        }
+        fn review_command(
+            &self,
+            _: &TaskRun,
+            _: &Path,
+            _: &str,
+            _: JobAccess,
+        ) -> Result<CommandSpec> {
+            bail!("the observer reviews no run")
+        }
+    }
+
+    let (_fixture, _repo, db) = fixture();
+    common::service::serve(&db);
+    let observation = db.parent().unwrap().join("observation");
+    std::fs::create_dir_all(&observation).unwrap();
+    let launch = ActorLaunch::default_of(ModelRole::Observer);
+    let dagq = PathBuf::from(env!("CARGO_BIN_EXE_dagq"));
+    let code = dagq::infrastructure::observer::run_agent(
+        &Moved,
+        &db,
+        None,
+        &observation,
+        "You are the observer",
+        &HeadlessAgent {
+            actor: ActorContext::instance(ActorRole::Observer, "s1"),
+            session_id: None,
+            launch: &launch,
+            dagq: &dagq,
+            timeout: Duration::from_secs(30),
+            what: "the observer",
+            access: JobAccess::QueueCli,
+        },
+    )
+    .unwrap();
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        std::fs::read_to_string(observation.join("output.out")).unwrap(),
+        "observed\n"
+    );
+    assert!(
+        queue_event_actors(&db, "provider_executable_relocated").is_empty(),
+        "the queue's DB was opened to record the agent found again"
+    );
+}

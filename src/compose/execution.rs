@@ -791,7 +791,17 @@ pub struct SetupReviewOptions {
 /// on the provider of `[roles.setup_review]` of the main checkout's
 /// `dagq.toml`, Claude without.
 pub fn setup_review(db: &Path, cwd: &Path, options: &SetupReviewOptions) -> Result<Value> {
-    setup_review_on(db, cwd, options, None)
+    // The job's agent's events go to the queue this command opens; one that
+    // does not open leaves them to the log.
+    let events = SqliteQueue::open(db).ok();
+    setup_review_on(
+        db,
+        cwd,
+        options,
+        events
+            .as_ref()
+            .map(|queue| queue as &dyn crate::application::RunLog),
+    )
 }
 
 /// [`setup_review`] with its job's agent's events recorded on `events`

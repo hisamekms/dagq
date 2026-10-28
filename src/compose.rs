@@ -127,6 +127,33 @@ pub(crate) fn run_containers_keeping(
     main_checkout: Option<PathBuf>,
     kept: Option<std::sync::Arc<crate::application::container_image::KeptImageRecords>>,
 ) -> crate::infrastructure::run_container::PodmanRunContainers {
+    run_containers_on(db, main_checkout, kept.map(|kept| kept as _), None)
+}
+
+/// [`run_containers`] whose image's records are made and the machine's
+/// users' runs read through `records` (the queue service's, for the
+/// supervisor, which opens no queue for them).
+pub(crate) fn run_containers_with(
+    db: &Path,
+    main_checkout: Option<PathBuf>,
+    records: &ContainerRecords,
+) -> crate::infrastructure::run_container::PodmanRunContainers {
+    run_containers_on(
+        db,
+        main_checkout,
+        Some(records.images.clone()),
+        records.owner_runs.clone(),
+    )
+}
+
+fn run_containers_on(
+    db: &Path,
+    main_checkout: Option<PathBuf>,
+    images: Option<
+        std::sync::Arc<dyn crate::application::container_image::ImageRecords + Send + Sync>,
+    >,
+    owner_runs: Option<std::sync::Arc<dyn crate::infrastructure::podman_machine::OwnerRuns>>,
+) -> crate::infrastructure::run_container::PodmanRunContainers {
     let podman = crate::infrastructure::podman_machine::PodmanCli::default();
     let host_wide = crate::infrastructure::kpi_config::host_wide_file();
     crate::infrastructure::run_container::PodmanRunContainers::of_queue(
@@ -139,16 +166,16 @@ pub(crate) fn run_containers_keeping(
             db: db.to_path_buf(),
             main_checkout,
             host_wide,
-            kept_records: kept.map(|kept| kept as _),
-            owner_runs: None,
+            kept_records: images,
+            owner_runs,
         }),
     )
 }
 
-/// Where a landing's container verification records its relays' and its
-/// image's state, and reads the runs that own users of the dagq machine,
-/// when its process opens no queue: the queue service's queue
-/// ([`ControlQueues`]).
+/// Where the container's parts record their state and read the runs that
+/// own users of the dagq machine: the queue service's queue when the
+/// process opens no queue (the supervisor's, and a person's landing through
+/// [`ControlQueues`]), else the queue's DB ([`Self::or_queue`]).
 #[derive(Clone)]
 pub(crate) struct ContainerRecords {
     pub relays: std::sync::Arc<dyn crate::application::broker_relay::RelayRecords>,
@@ -158,6 +185,21 @@ pub(crate) struct ContainerRecords {
 }
 
 impl ContainerRecords {
+    /// The records on the queue at `db` through its service, as the
+    /// principal of `queues` ([`ServiceContainerRecords`]): no queue's DB
+    /// is opened, and a service that does not answer is an error.
+    pub(crate) fn of_service(
+        queues: crate::application::supervisor_service::SupervisorQueues,
+        db: &Path,
+    ) -> Self {
+        let records = std::sync::Arc::new(ServiceContainerRecords::new(queues, db));
+        Self {
+            relays: records.clone(),
+            images: records.clone(),
+            owner_runs: Some(records),
+        }
+    }
+
     /// `records`, else the records of the queue at `db`, the image's made
     /// as `actor`.
     pub(crate) fn or_queue(
@@ -177,6 +219,67 @@ impl ContainerRecords {
             ),
             owner_runs: None,
         })
+    }
+}
+
+/// The records of the container's parts on the queue at `db` through its
+/// service, as the principal of `queues` (the supervisor, or the caller of
+/// a control-side command): the relays' attention the supervisor recorded,
+/// the image's builds and failures, and the runs of that queue that own
+/// users of the dagq machine (another queue's are not reached). Each is one
+/// operation of the service's, answered on its side as that principal
+/// (`record_queue_event`, `latest_queue_event`, `latest_runs_in_progress`,
+/// `run`); no queue's DB is opened, and a service that does not answer is
+/// an error (fail closed).
+pub struct ServiceContainerRecords {
+    queues: crate::application::supervisor_service::SupervisorQueues,
+    db: PathBuf,
+}
+
+impl ServiceContainerRecords {
+    /// The records of the queue at `db`, which `queues`' service serves.
+    pub fn new(
+        queues: crate::application::supervisor_service::SupervisorQueues,
+        db: &Path,
+    ) -> Self {
+        Self {
+            queues,
+            db: db.to_path_buf(),
+        }
+    }
+
+    /// Whether `db` names the queue the service serves.
+    fn serves(&self, db: &Path) -> bool {
+        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        canonical(db) == canonical(&self.db)
+    }
+}
+
+impl crate::application::broker_relay::RelayRecords for ServiceContainerRecords {
+    fn down(&self) -> Result<Option<String>> {
+        crate::application::broker_relay::down_message(&self.queues.queue())
+    }
+}
+
+impl crate::infrastructure::podman_machine::OwnerRuns for ServiceContainerRecords {
+    fn run(&self, db: &Path, run: &str) -> Option<crate::domain::broker_relay::RelayRun> {
+        self.serves(db)
+            .then(|| crate::infrastructure::podman_machine::relay_run_in(&self.queues.queue(), run))
+    }
+}
+
+impl crate::application::container_image::ImageRecords for ServiceContainerRecords {
+    fn record(&self, kind: crate::domain::EventKind, payload: Value) -> Result<()> {
+        crate::application::EventStore::record_queue_event(&self.queues.queue(), kind, payload)
+            .map(drop)
+    }
+
+    fn latest(&self) -> Result<Option<(crate::domain::RecordedKind, Value)>> {
+        Ok(crate::application::EventStore::latest_queue_event(
+            &self.queues.queue(),
+            &crate::domain::container_image::CONTAINER_IMAGE_KINDS,
+        )?
+        .map(|event| (event.kind, event.payload)))
     }
 }
 
