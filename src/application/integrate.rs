@@ -1171,7 +1171,8 @@ fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId) -> Result<()
 }
 
 /// Why a person's `integrate` refuses to land `run` while the disk is
-/// `short`.
+/// `short`: what is free, what is needed, the recent run size and where
+/// to free room, in the words of the inbox's disk ask.
 fn disk_refusal(run: &RunId, short: DiskShort) -> String {
     let largest = short
         .largest_build

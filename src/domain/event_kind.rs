@@ -54,8 +54,8 @@
 //!   CI watch's `ci_*` and the record of main's history `main_*`.
 //! - host operation: `supervisor_*`, `update_*`, `release_check*`,
 //!   `queue_service_*`, `queue_broker_*`, `container_image_*`, `sccache_*`, `inbox_*`, the cleanup's
-//!   `build_outputs_removed`, `build_cache_removed`, `scratchpad_removed`
-//!   and `run_tmp_removed`,
+//!   `build_outputs_removed`, `incremental_sessions_removed`,
+//!   `build_cache_removed`, `scratchpad_removed` and `run_tmp_removed`,
 //!   `backend_call_failed`, `headless_job_stopped` and
 //!   `provider_executable_relocated` (named in full: the start of an AI
 //!   actor, `application::actor_executor`, writes it, though `provider_*`
@@ -232,6 +232,7 @@ event_kinds! {
     InboxOpened => "inbox_opened",
     InboxWatcherAbsent => "inbox_watcher_absent",
     InboxWatcherReturned => "inbox_watcher_returned",
+    IncrementalSessionsRemoved => "incremental_sessions_removed",
     InputNotReady => "input_not_ready",
     InstallE2eFinished => "install_e2e_finished",
     IntegrationApproved => "integration_approved",
@@ -1114,6 +1115,14 @@ pub const INBOX_OPENED: &str = EventKind::InboxOpened.as_str();
 /// A nudge of the inbox an older supervisor could not type or notify
 /// (ADR-t906-1); read only.
 pub const INBOX_NUDGE_FAILED: &str = EventKind::InboxNudgeFailed.as_str();
+/// The supervisor removed, from a build directory of the worktree of a
+/// run left in the middle that builds nothing now, the caches a profile
+/// names as no build reading them any more (`paths`, the directories they
+/// were in, `entries`, how many went, `bytes`, `by`, `reason`, with the
+/// `ask_id` of a run waiting for an answer). Unlike
+/// `build_outputs_removed`, its `bytes` are no measure of what a run
+/// builds ([`super::disk::run_size`]).
+pub const INCREMENTAL_SESSIONS_REMOVED: &str = EventKind::IncrementalSessionsRemoved.as_str();
 /// The supervisor judged the inbox's watcher absent after it was alive, or
 /// first (task 1021): once per change of its state.
 pub const INBOX_WATCHER_ABSENT: &str = EventKind::InboxWatcherAbsent.as_str();
@@ -1699,6 +1708,10 @@ mod tests {
             (EventKind::InboxGuardrailReached, "inbox_guardrail_reached"),
             (EventKind::InboxWatcherAbsent, "inbox_watcher_absent"),
             (EventKind::InboxWatcherReturned, "inbox_watcher_returned"),
+            (
+                EventKind::IncrementalSessionsRemoved,
+                "incremental_sessions_removed",
+            ),
             (EventKind::InputNotReady, "input_not_ready"),
             (EventKind::InstallE2eFinished, "install_e2e_finished"),
             (EventKind::IntegrationApproved, "integration_approved"),

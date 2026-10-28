@@ -202,6 +202,23 @@ pub trait ToolchainProfile: Sync {
     /// in one. Empty for tools that build nothing there.
     fn worktree_build_dirs(&self) -> &'static [&'static str];
 
+    /// What of `build_dir`, one of [`Self::worktree_build_dirs`] in a run's
+    /// worktree, the cleanup may remove while no build runs there: the
+    /// caches the tools' next build does not read, the build that wrote
+    /// them having been followed by a later one ([`StaleEntries`]). The
+    /// profile reads the directories under it by `read_dir`, which gives
+    /// the names of the entries of a directory (none for one that is not
+    /// there or not a directory), and touches nothing itself. None by
+    /// default.
+    fn stale_build_entries(
+        &self,
+        build_dir: &Path,
+        read_dir: &dyn Fn(&Path) -> Vec<String>,
+    ) -> Vec<StaleEntries> {
+        let _ = (build_dir, read_dir);
+        Vec::new()
+    }
+
     /// The settings the profile recommends a repository that uses it
     /// (ADR-t2268-1 decision 7): proposals `dagq init` and `dagq
     /// setup-review` show ([`recommend`]), never values the runtime uses
@@ -215,6 +232,16 @@ pub trait ToolchainProfile: Sync {
     /// language's, or one whose every line its tools build as a test): a
     /// changed line there counts as a test's.
     fn test_lines(&self, path: &str, text: &str) -> Option<Vec<TestLines>>;
+}
+
+/// Entries of one directory a profile names as stale
+/// ([`ToolchainProfile::stale_build_entries`]): `remove`, the names of
+/// entries directly under `dir` (directories or files), to remove, and
+/// nothing else of `dir`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleEntries {
+    pub dir: std::path::PathBuf,
+    pub remove: Vec<String>,
 }
 
 /// Lines of a file in a test ([`ToolchainProfile::test_lines`]).
@@ -577,6 +604,29 @@ impl Toolchains {
         dirs
     }
 
+    /// What of `build_dir`, the build directory `name` of
+    /// [`Self::worktree_build_dirs`] in a run's worktree, is stale: what
+    /// every declared profile that names `name` returns
+    /// ([`ToolchainProfile::stale_build_entries`]), each profile once, and
+    /// none while no profile is declared.
+    pub fn stale_build_entries(
+        &self,
+        name: &str,
+        build_dir: &Path,
+        read_dir: &dyn Fn(&Path) -> Vec<String>,
+    ) -> Vec<StaleEntries> {
+        let mut asked: Vec<&str> = Vec::new();
+        let mut stale = Vec::new();
+        for profile in self.profiles() {
+            if asked.contains(&profile.name()) || !profile.worktree_build_dirs().contains(&name) {
+                continue;
+            }
+            asked.push(profile.name());
+            stale.extend(profile.stale_build_entries(build_dir, read_dir));
+        }
+        stale
+    }
+
     /// The runs of a command the runtime runs over a tree of the
     /// repository, each the build outputs it builds into: those of the
     /// declarations whose paths match a file of the tree (a declaration
@@ -756,6 +806,53 @@ mod tests {
         assert_eq!(
             both.worktree_build_dirs(),
             ["target", "llvm-cov-target", "fake-out", "fake-cache"]
+        );
+    }
+
+    /// The stale entries of a worktree's build directory are those of the
+    /// declared profiles that name the directory, each profile once, the
+    /// Rust profile's alone here: the fake profile names none, as no
+    /// profile does by default, and no declaration names none.
+    #[test]
+    fn the_stale_build_entries_are_the_declared_profiles_that_name_the_directory() {
+        let target = Path::new("/w/target");
+        let read_dir = |dir: &Path| -> Vec<String> {
+            let names: &[&str] = match dir.to_str().unwrap() {
+                "/w/target" => &["debug"],
+                "/w/target/debug/incremental" => &["dagq-1"],
+                "/w/target/debug/incremental/dagq-1" => &["s-a-r-x", "s-a-r.lock", "s-b-r-y"],
+                "/w/fake-out" => &["debug"],
+                _ => &[],
+            };
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let stale = vec![StaleEntries {
+            dir: target.join("debug/incremental/dagq-1"),
+            remove: vec!["s-a-r-x".to_owned(), "s-a-r.lock".to_owned()],
+        }];
+        let both = Toolchains::resolve(
+            &fake::REGISTRY,
+            &[
+                declaration("core", "rust", &["src/**"]),
+                declaration("web", "fake", &[]),
+                declaration("tools", "rust", &[]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(both.stale_build_entries("target", target, &read_dir), stale);
+        assert!(
+            both.stale_build_entries("fake-out", Path::new("/w/fake-out"), &read_dir)
+                .is_empty()
+        );
+        assert!(
+            fake::FAKE
+                .stale_build_entries(Path::new("/w/fake-out"), &read_dir)
+                .is_empty()
+        );
+        assert!(
+            Toolchains::none()
+                .stale_build_entries("target", target, &read_dir)
+                .is_empty()
         );
     }
 

@@ -191,7 +191,10 @@ pub struct DiskNeeds {
 /// over (a landed run's build goes with its whole worktree), so the two
 /// seldom fall on the same run. A `build_outputs_removed` counts whatever
 /// its `reason`, of an unfinished run too. `None` without either; events
-/// of other kinds or without `bytes` are left out.
+/// of other kinds or without `bytes` are left out, the
+/// `incremental_sessions_removed` of a part of a run's build outputs
+/// among them: a run's next build writes that part again, and the rest of
+/// what it built stayed, so its bytes are no run's size.
 pub fn run_size(events: &[RunEvent]) -> Option<u64> {
     let mut largest: [Option<u64>; RUN_SIZE_EVENTS.len()] = [None; RUN_SIZE_EVENTS.len()];
     for event in events {
@@ -343,6 +346,24 @@ mod tests {
             run_size(&[event(RUN_TMP_REMOVED, Some(A), Some(3))]),
             Some(3)
         );
+    }
+
+    /// The old incremental sessions removed of a run that builds nothing
+    /// now are a part of its build outputs: no run's size, beside a build
+    /// or alone, however large.
+    #[test]
+    fn the_incremental_sessions_removed_are_no_run_size() {
+        const A: &str = "00000000-0000-4000-8000-00000000000a";
+        let sessions = super::super::event_kind::INCREMENTAL_SESSIONS_REMOVED;
+        assert!(!RUN_SIZE_EVENTS.iter().any(|kind| kind.as_str() == sessions));
+        assert_eq!(
+            run_size(&[
+                event(BUILD_OUTPUTS_REMOVED, Some(A), Some(500)),
+                event(sessions, Some(A), Some(9_000)),
+            ]),
+            Some(500)
+        );
+        assert_eq!(run_size(&[event(sessions, Some(A), Some(9_000))]), None);
     }
 
     #[test]

@@ -101,7 +101,7 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 ### 閾値
 
 - 閾値は`domain::disk::DiskConfig::needs`が、直近のrunの大きさ（`domain::disk::run_size`）にclaimと着地のそれぞれの係数を掛けて決め、下限を設定の最小の空きにする。
-- 直近のrunの大きさは新しいrunと着地の検証がdiskに新しく書く量の見積もりで、runごとに増えない共有のキャッシュ（下の「queueのdirのビルドのキャッシュ」）は数えない。
+- 直近のrunの大きさは新しいrunと着地の検証がdiskに新しく書く量の見積もりで、runごとに増えない共有のキャッシュ（下の「queueのdirのビルドのキャッシュ」）と、古いincrementalのsessionの削除（`incremental_sessions_removed`）は数えない。
   runの一時ファイルのdirが別のファイルシステムにあっても区別しない。
 - 記録も最小の空きも無いときと、空き（`statvfs(3)`の一般のprocessが使える量）が読めないときは確かめず、控えない。
 - `[disk]`はsupervisorの起動時にmain checkoutの作業ファイルから読み（[Run environment](run-environment.md)）、読めなければwarnを出して既定値で動く。
@@ -142,7 +142,6 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 - 人が打つ`dagq integrate`は、`application::integrate::begin`がleaseを確かめた後、承認を記録してslotを取る前に、supervisorと同じ着地の閾値で確かめる。
   `[disk]`はcommandのたびにmain checkoutの`dagq.toml`から読む。
 - 足りなければ人が目の前にいるので控えて待たずに断り、承認もrunの状態もleaseも変えず、eventもaskも記録しない。
-  エラーは空き・必要量・直近のrunの大きさと掃除の手がかりを、inboxのaskと同じ言い方で書く。
 - supervisorの着地はこの確かめをせず、上の「判定と掃除」の控えを使う。
 
 ### 検証がディスク満杯で落ちたとき

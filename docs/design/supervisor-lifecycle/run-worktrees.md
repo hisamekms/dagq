@@ -82,6 +82,16 @@ landing recheckは、hostで流すたびにscratchを作る前に、`recheck/`�
     landing recheckは、jobが着地slot待ちのrunを予約している間は始まらず、始まれば渡したrunをすべて外す。
     先に消した他のrunで空きが戻り、jobが来る前に着地が始まったrunのビルド成果物は残る。
     予約されたrunはその周回は着地もe2eもparkも始めず、jobが通り過ぎた後に着地が始まれば、検証がsccacheでビルドし直して進む。
+- **buildの止まっているrunの古いincrementalのsession**: 上の`Idle`のrunと、slotが渡す待ちのrun（turnの終わったもの）と着地slotを待つrun（何も動いていないもの）は、空きの多少によらず、全runを見直す掃除の回（`sweep_ended_runs`）のjobが、profileが古いと名指すcacheだけを消す（`remove_stale_entries`）。
+  - 消すもの: Rustのprofileでは、crateごとのincrementalのdirの、最新の完了済みsessionより古い完了済みsessionと対のlockで、規則と残すものは[Toolchain profiles](../toolchain-profiles.md#buildの出力の置き場)が持つ。
+  - 選び方と予約は空き容量のための掃除と同じで、jobが通り過ぎるまで着地・resume・答えの届けは始まらない。
+    rustcのlockを取らないので、作業中・validating・review・着地の検証・e2eの最中のrunには触れない。
+  - 次のbuildの終わりにrustcが1つ前のsessionを残して元の大きさに戻るので、空くのはbuildの止まっている間（答え待ち・着地slot待ち）だけである。
+    jobは消したrunを、選ばれたときのまま（leaseもturnも無く同じ状態）の間だけ次の周回から外し（`leave_pruned`、プロセスの中だけで覚える）、buildしうる変化の後の周回でまた消す。
+  - 記録は`incremental_sessions_removed`で、bytesはentryのあったdirを消す前と後に測った差である（sessionの間でrustcがfileをhard linkで共有するため）。
+    runの大きさの見積もりには数えない（[claimを控える](claim-hold.md#閾値)）。
+  - 読めないdir・消せないentry・Gitに問えないdirは`cleanup_failed`にして残りを続け、消せた分も記録し、そのrunを外さず次の周回で再び試す。
+  - 空き容量のための掃除は、これらのrunのビルド成果物を丸ごと消す。
 
 - **runの`runner`**: 上のどちらでも、同じjobがrun_dirの`runner`（claimとresumeのたびに写すバイナリの写し）を消し、消してよい理由と失敗のやり直しは`remove_run_runner`が持つ。
   worktreeの有無を問わず、run_dirの他のfile（`receipt.json`・検証のlogなど）は残す。

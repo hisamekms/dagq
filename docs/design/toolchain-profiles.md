@@ -96,6 +96,12 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
 - 自動更新のsource buildはdagq自身の事情なので、宣言に依らずRustのprofileの出力を使う（[Auto-update](supervisor-lifecycle/auto-update.md)）。
 - runのworktreeの掃除（[Run worktrees](supervisor-lifecycle/run-worktrees.md)）が消すworktree直下のdirの名前もprofileだけが返し（`ToolchainProfile::worktree_build_dirs`）、掃除はlanding recheckと同じ解決の結果に入っているprofileの名前を宣言のpathsに依らず全て消す（理由は`Toolchains::worktree_build_dirs`のdoc comment）。
   当たるprofileが無いときと、`dagq.toml`が読めない・誤りのときは消さない。
+- buildの止まっているrunのworktreeから、そのdirの中で次のbuildが読まない古いcacheだけを消すとき（[Run worktrees](supervisor-lifecycle/run-worktrees.md#終わっていないrunのビルド成果物)）、何が古いかもprofileだけが返す（`ToolchainProfile::stale_build_entries`、`StaleEntries`）。
+  runtimeはprofileに渡した読み取りの関数でdirの名前を読ませ、返されたentryを消して測るだけで、名前の規則を持たない。
+  既定は何も返さず、Rust以外のprofileは何も消させない。
+  Rustのprofileは`<profile>/incremental/<crate>-<hash>/`ごとに、`-working`で終わらないsessionのdir（`s-<T>-<R>-<SVH>`）を名前の`<T>`（固定長の36進なので文字列の順が時刻の順）で並べ、最新の1つより古いものと対のlock（`s-<T>-<R>.lock`）を返す。
+  作業中のsession、それと同じ`s-<T>-<R>`のlock、dirの無いlockは、rustcの後片付けに任せて返さない。
+  規則はrustcの`compiler/rustc_incremental/src/persist/fs.rs`のもので、版で分けない（確かめた版と根拠は`domain::toolchain::rust::incremental`のdoc comment）。
 - workerと`integrate`のbuildの出力の置き場は`[run.env]`のprojectの値で、profileは関わらない。
 
 ## 推奨の設定

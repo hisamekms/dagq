@@ -86,6 +86,8 @@
 //! `CARGO_TARGET_DIR` names, `target` under the runtime's directory of
 //! the command (`<queue dir>/recheck/target` for the landing recheck,
 //! `<queue dir>/update/target` for the automatic update's build).
+//! What of a worktree's target no build reads any more is the sessions of
+//! rustc's incremental compilation ([`incremental`]).
 //!
 //! The lines in a test ([`ToolchainProfile::test_lines`]) are those of the
 //! items a test's attribute is put on ([`test_lines`]'s doc) in a `.rs`
@@ -98,12 +100,14 @@
 //! a test's, so a change of its helpers alone changes no test function.
 use super::{
     BuildOutput, JunitTestName, Recommendation, RecommendedHost, RecommendedImage,
-    RecommendedProgram, TestLines, ToolCodeClass, ToolHostClass, ToolProcess, ToolchainProfile,
+    RecommendedProgram, StaleEntries, TestLines, ToolCodeClass, ToolHostClass, ToolProcess,
+    ToolchainProfile,
 };
 use crate::domain::command_rules::CommandRule;
 use crate::domain::command_shape::{Runs, SubcommandList, VariableList};
 use crate::domain::verify_failure::test_name;
 
+mod incremental;
 mod test_lines;
 
 /// cargo's target directory: see the module's doc.
@@ -555,6 +559,17 @@ impl ToolchainProfile for Rust {
 
     fn worktree_build_dirs(&self) -> &'static [&'static str] {
         WORKTREE_BUILD_DIRS
+    }
+
+    /// The finished sessions of rustc's incremental compilation older than
+    /// the newest one of each crate, with their locks ([`incremental`]'s
+    /// doc, which names the rustc versions read).
+    fn stale_build_entries(
+        &self,
+        build_dir: &std::path::Path,
+        read_dir: &dyn Fn(&std::path::Path) -> Vec<String>,
+    ) -> Vec<StaleEntries> {
+        incremental::stale_entries(build_dir, read_dir)
     }
 
     fn recommendation(&self) -> Recommendation {

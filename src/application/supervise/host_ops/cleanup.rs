@@ -57,6 +57,16 @@
 //! landing began meanwhile keeps its build outputs, and one reserved does
 //! not begin to land until the job passed it; its landing builds again.
 //!
+//! Whatever the free space, the sweep of every run takes those same runs
+//! (nobody's that waits for no answer, and the waiting and landing ones the
+//! slots offer) for their stale caches alone ([`remove_stale_entries`]):
+//! what the declared profiles name that no build reads any more, rustc's
+//! older incremental sessions. They are reserved, checked again and held
+//! still the same way, so nothing builds in them meanwhile. A run's next
+//! build leaves such caches again, so a run whose stale caches went is
+//! left out of the sweeps only until it may have built again
+//! ([`leave_pruned`]).
+//!
 //! A cleanup for disk space, and the rest of one, also clears the build
 //! caches of the queue's directory ([`build_caches`]): the target
 //! directory of the automatic update and the build output of each
@@ -139,7 +149,9 @@ struct Request {
     /// answer ([`WorktreeCleanup::Idle`]), and of the runs the slots offer
     /// that wait for an answer with no turn running
     /// ([`WorktreeCleanup::Waiting`]) or for the landing slot
-    /// ([`WorktreeCleanup::Landing`]), go too (for disk space).
+    /// ([`WorktreeCleanup::Landing`]), go too (for disk space). Without it,
+    /// a request for every run (`all`) takes those runs for their stale
+    /// caches alone ([`remove_stale_entries`]).
     idle: bool,
     /// The [`build_caches`] are cleared too (for disk space).
     caches: bool,
@@ -170,9 +182,19 @@ impl Request {
     const fn is_empty(&self) -> bool {
         !self.all && self.tasks.is_empty()
     }
+    /// Whether the job takes `candidate`: a request for every run takes
+    /// every one, a run whose build outputs only a cleanup for room
+    /// removes for its stale caches alone unless for room
+    /// ([`Self::takes_held`]); one for some tasks takes theirs, but those.
     fn wants(&self, candidate: &EndedRunWorktree) -> bool {
-        (self.all || self.tasks.contains(&candidate.task_id))
-            && (self.idle || !for_room_only(candidate.cleanup))
+        self.takes_held()
+            || (self.tasks.contains(&candidate.task_id) && !for_room_only(candidate.cleanup))
+    }
+    /// Whether the job takes the runs a slot offers ([`Held`]): those of a
+    /// cleanup for room and of a request for every run, the sweep's, the
+    /// latter for their stale caches alone.
+    const fn takes_held(&self) -> bool {
+        self.idle || self.all
     }
 }
 
@@ -289,11 +311,13 @@ impl CleanupWatch {
         true
     }
     /// Whether a job for `request` takes the runs waiting for the landing
-    /// slot: a cleanup for disk space alone, and not once the cleanup
-    /// ended ([`Self::end`]), whose drain lands or hands them over as
-    /// before; the rest of a cleanup for room started then passes them by.
+    /// slot: a cleanup for disk space and the sweep of every run (for the
+    /// stale caches alone, [`Request::takes_held`]), and not once the
+    /// cleanup ended ([`Self::end`]), whose drain lands or hands them over
+    /// as before; the rest of a cleanup for room started then passes them
+    /// by.
     const fn takes_landing(&self, request: &Request) -> bool {
-        request.idle && !self.ending
+        request.takes_held() && !self.ending
     }
     /// Whether the failure to clean `path` is recorded: once per process,
     /// and only logged when it fails again.
@@ -435,6 +459,39 @@ fn build_outputs_record(
     (why, payload)
 }
 
+/// The suffix of the log message and the payload of
+/// `incremental_sessions_removed` ([`Outcome::StaleEntries`]): `reason`
+/// says what the run waits for, as no build runs in it meanwhile (`idle`,
+/// `awaiting_answer` with its `ask_id`, `awaiting_landing_slot`). Unlike
+/// `build_outputs_removed`, the run's size is not read from it
+/// ([`crate::domain::disk::run_size`]): the rest of its build outputs
+/// stay, and its next build writes these again.
+fn stale_entries_record(
+    cleanup: WorktreeCleanup,
+    paths: &[String],
+    entries: usize,
+    size: &Size,
+) -> (String, Value) {
+    let (reason, why) = match cleanup {
+        WorktreeCleanup::Ended => (BUILD_OUTPUTS_RUN_ENDED, String::new()),
+        WorktreeCleanup::Idle => (STALE_ENTRIES_IDLE, String::new()),
+        WorktreeCleanup::AwaitingAnswer(ask) | WorktreeCleanup::Waiting(ask) => (
+            BUILD_OUTPUTS_AWAITING_ANSWER,
+            format!(", waiting for the answer to ask {ask}"),
+        ),
+        WorktreeCleanup::Landing => (
+            STALE_ENTRIES_LANDING_SLOT,
+            ", waiting for the landing slot".to_owned(),
+        ),
+    };
+    let mut payload = json!({"paths": paths, "entries": entries, "bytes": size.bytes, "by": "supervisor", "reason": reason});
+    if let WorktreeCleanup::AwaitingAnswer(ask) | WorktreeCleanup::Waiting(ask) = cleanup {
+        payload["ask_id"] = json!(ask);
+    }
+    size.mark(&mut payload);
+    (why, payload)
+}
+
 /// How a worktree went ([`Outcome::Worktree`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Removed {
@@ -490,7 +547,8 @@ fn task_over_record(task_status: TaskStatus, paths: &[String], size: &Size) -> V
 }
 
 /// The message and the payload of `cleanup_failed` for `what` (`worktree`,
-/// `scratchpad`, `run tmp` or `satisfied scratch`) at `path`.
+/// `scratchpad`, `run tmp`, `satisfied scratch` or `stale cache`) at
+/// `path`.
 fn failed_record(what: &str, path: &str, error: &anyhow::Error) -> (String, Value) {
     let message = format!("{what} {path} could not be cleaned: {error:#}");
     let payload = reason_of_error(error, ReasonCode::Other)
@@ -515,6 +573,20 @@ pub(in crate::application::supervise) struct Cleaning {
     /// of its candidates while the queue lists them the same, no slot
     /// holds them and the loop has not leased them since.
     settled: HashMap<RunId, EndedRunWorktree>,
+    /// The runs a job removed the stale caches of
+    /// ([`remove_stale_entries`]), as they were then: a sweep leaves them
+    /// out while they are offered or listed the same and the loop has not
+    /// leased them since ([`leave_pruned`]), as nothing built in them.
+    pruned: HashMap<RunId, PrunedAs>,
+}
+
+/// A run as a job found it when it removed its stale caches
+/// ([`Cleaning::pruned`]): the candidate, and the latest of its turn
+/// events then, for one the supervisor leases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrunedAs {
+    worktree: EndedRunWorktree,
+    turn: Option<EventId>,
 }
 
 impl Cleaning {
@@ -526,20 +598,24 @@ impl Cleaning {
     }
     /// The loop is about to lease `run`: `false` while the job has it
     /// reserved, which the loop leaves for a later pass. Otherwise the run
-    /// is no longer settled, as it may get a worktree again.
+    /// is no longer settled, as it may get a worktree again, nor pruned, as
+    /// it may build again.
     pub(in crate::application::supervise) fn may_lease(&mut self, run: &RunId) -> bool {
         if self.reserved.contains(run) {
             return false;
         }
         self.settled.remove(run);
+        self.pruned.remove(run);
         true
     }
     /// The loop moves `run`, which waited for the landing slot, on (its
     /// landing, its e2e, a park or the lease handed back): the job no
     /// longer takes it. The loop holds the lock from its look at the run
-    /// until it moved it, so the job reserves no run being moved on.
+    /// until it moved it, so the job reserves no run being moved on. It
+    /// is no longer pruned either, as what it moved on to may build.
     pub(in crate::application::supervise) fn withdraw(&mut self, run: &RunId) {
         self.offered.retain(|offered| offered != run);
+        self.pruned.remove(run);
     }
     /// Whether the job may go on to `candidate` now, under the lock: one
     /// waiting for the landing slot only while it is still offered, which
@@ -591,7 +667,8 @@ struct Left {
     /// the list.
     branch: Option<bool>,
     /// Something of the run could not be cleaned: its worktree or branch,
-    /// its runner, a scratchpad or its temporary files directory.
+    /// its runner, a scratchpad, its temporary files directory or a stale
+    /// cache.
     failed: bool,
 }
 
@@ -626,6 +703,36 @@ fn pick_candidates(
         .filter(|w| !in_slot(&w.run_id))
         .filter(|w| !settled.contains_key(&w.run_id))
         .collect()
+}
+
+/// Leave out of an ordinary job's `candidates` the runs whose stale
+/// caches a job removed while they are as they were then
+/// ([`Cleaning::pruned`]; `turn` gives a candidate's latest turn event),
+/// and forget a pruned run no longer among them as it was: it was leased,
+/// a turn of it ran, or it moved on, so it may have built again and is a
+/// candidate on the next sweep it is back. Only the runs whose build
+/// outputs only a cleanup for room removes are pruned ones.
+fn leave_pruned(
+    pruned: &mut HashMap<RunId, PrunedAs>,
+    candidates: [&mut Vec<EndedRunWorktree>; 2],
+    turn: impl Fn(&RunId) -> Option<EventId>,
+) {
+    let now = |candidate: &EndedRunWorktree| PrunedAs {
+        worktree: candidate.clone(),
+        turn: turn(&candidate.run_id),
+    };
+    let listed: HashMap<RunId, PrunedAs> = candidates
+        .iter()
+        .flat_map(|list| list.iter())
+        .filter(|candidate| for_room_only(candidate.cleanup))
+        .map(|candidate| (candidate.run_id.clone(), now(candidate)))
+        .collect();
+    pruned.retain(|run, then| listed.get(run) == Some(then));
+    for list in candidates {
+        list.retain(|candidate| {
+            !for_room_only(candidate.cleanup) || !pruned.contains_key(&candidate.run_id)
+        });
+    }
 }
 
 /// The candidate a waiting run is to a cleanup for disk space
@@ -879,6 +986,17 @@ enum Outcome {
         paths: Vec<String>,
         size: Size,
     },
+    /// The stale caches of a run that builds nothing now
+    /// ([`remove_stale_entries`]): the directories they were in, how many
+    /// entries went, and what that freed.
+    StaleEntries {
+        run_id: RunId,
+        status: RunStatus,
+        cleanup: WorktreeCleanup,
+        paths: Vec<String>,
+        entries: usize,
+        size: Size,
+    },
     /// The worktree and branch of a run whose task is over; `missing` when
     /// the directory was already gone and only the branch went, `repaired`
     /// when `git worktree repair` had to point the worktree at the
@@ -919,7 +1037,8 @@ enum Outcome {
     },
     Failed {
         run_id: RunId,
-        /// `worktree`, `scratchpad`, `run tmp` or `satisfied scratch`.
+        /// `worktree`, `scratchpad`, `run tmp`, `satisfied scratch` or
+        /// `stale cache`.
         what: &'static str,
         path: String,
         error: anyhow::Error,
@@ -943,6 +1062,12 @@ const BUILD_OUTPUTS_AWAITING_ANSWER: &str = "awaiting_answer";
 /// The run waits for nobody's answer, and the free disk space ran short
 /// ([`WorktreeCleanup::Idle`]).
 const BUILD_OUTPUTS_DISK_SPACE: &str = "disk_space";
+/// `incremental_sessions_removed`'s `reason`: the run waits for no
+/// answer, with no lease ([`WorktreeCleanup::Idle`]).
+const STALE_ENTRIES_IDLE: &str = "idle";
+/// The run waits in its slot for the landing slot
+/// ([`WorktreeCleanup::Landing`]).
+const STALE_ENTRIES_LANDING_SLOT: &str = "awaiting_landing_slot";
 
 /// The longest name Claude Code gives a project's directory whole; it
 /// shortens a longer one with a hash, which is not looked for.
@@ -976,6 +1101,10 @@ struct JobPorts {
     waiting: HashMap<RunId, SessionPids>,
     stop: Arc<AtomicBool>,
     prune: bool,
+    /// For room ([`Request::idle`]): the runs whose build outputs only a
+    /// cleanup for room removes lose them whole; otherwise only their
+    /// stale caches ([`remove_stale_entries`]).
+    room: bool,
     /// Where Claude Code keeps the sessions' scratchpads (task 1100).
     scratchpad_roots: Vec<PathBuf>,
     /// The queue's `satisfied/`, of the runs' `already_satisfied`
@@ -1033,6 +1162,12 @@ impl HostOpsState {
     /// a cleanup for disk space (`reason: disk_space`). A cleanup for disk
     /// space takes the build outputs of the waiting runs `held` offers too
     /// (`reason: disk_space`, with the `ask_id` the wait holds).
+    ///
+    /// Not for room, a request for every run takes those runs, and the
+    /// waiting runs and those waiting for the landing slot `held` offers,
+    /// for their stale caches alone ([`remove_stale_entries`]), recorded as
+    /// `incremental_sessions_removed` ([`stale_entries_record`]) when any
+    /// went.
     ///
     /// `bytes` is what the removed files took on disk. A directory that
     /// cannot be measured goes all the same: its bytes are not counted,
@@ -1140,15 +1275,19 @@ impl HostOpsState {
     }
     /// Start a job for what waits, unless one runs: the candidates are
     /// picked here, on the loop, less the runs a slot holds. A cleanup for
-    /// disk space also takes the waiting runs the slots offer whose turn
-    /// is over ([`waiting_candidate`]); the job reserves them as any other,
+    /// disk space, and the sweep of every run for their stale caches alone
+    /// ([`Request::takes_held`]), also take the waiting runs the slots
+    /// offer whose turn is over ([`waiting_candidate`]); the job reserves
+    /// them as any other,
     /// which holds their waits still until it passed them. It takes last
     /// the runs the slots offer that wait for the landing slot
     /// ([`landing_candidate`]), in the order offered, the last to land
     /// first: each is reserved only once the job reaches it
     /// ([`Cleaning::reach`]), so the run nearest its landing is the last
     /// to lose its build outputs, and keeps them when the room the others
-    /// made lets it land first.
+    /// made lets it land first. Not for room, the job leaves out the runs
+    /// whose stale caches went while nothing could have built in them
+    /// since ([`leave_pruned`]).
     fn start_cleanup(&mut self, env: &mut HostEnv<'_>, held: &Held) {
         if self.cleanup.job.is_some() || self.cleanup.pending.is_empty() {
             return;
@@ -1161,7 +1300,7 @@ impl HostOpsState {
                 return;
             }
         };
-        let (waiting, waiting_pids): (Vec<_>, HashMap<_, _>) = if request.idle {
+        let (waiting, waiting_pids): (Vec<_>, HashMap<_, _>) = if request.takes_held() {
             waiting_candidates(&*env.queue, &held.waiting)
                 .into_iter()
                 .map(|(candidate, pids)| {
@@ -1172,7 +1311,8 @@ impl HostOpsState {
         } else {
             (Vec::new(), HashMap::new())
         };
-        let (landing, landing_pids): (Vec<_>, Vec<_>) = if self.cleanup.takes_landing(&request) {
+        let (mut landing, landing_pids): (Vec<_>, Vec<_>) = if self.cleanup.takes_landing(&request)
+        {
             landing_candidates(&*env.queue, &held.landing)
                 .into_iter()
                 .map(|(candidate, pids)| {
@@ -1195,6 +1335,19 @@ impl HostOpsState {
             |run| held.runs.contains(run),
             &mut cleaning.settled,
         ));
+        // The sweep of every run alone: a request for some tasks takes none
+        // of the pruned runs, so it would forget them all.
+        if request.all && !request.idle {
+            // The runs whose stale caches alone go first, so the job holds
+            // their leases back only that short while, not while it removes
+            // the ended runs' worktrees.
+            candidates.sort_by_key(|candidate| !for_room_only(candidate.cleanup));
+            leave_pruned(
+                &mut cleaning.pruned,
+                [&mut candidates, &mut landing],
+                |run| waiting_pids.get(run).and_then(|pids| pids.turn),
+            );
+        }
         cleaning.reserved = candidates.iter().map(|w| w.run_id.clone()).collect();
         cleaning.offered = landing.iter().map(|w| w.run_id.clone()).collect();
         candidates.extend(landing);
@@ -1221,6 +1374,7 @@ impl HostOpsState {
                 self.cleanup.stop.clone()
             },
             prune: request.prune,
+            room: request.idle,
             scratchpad_roots: (self.scratchpad_roots)(),
             satisfied_dir: env.layout.satisfied_dir.clone(),
             caches: env
@@ -1261,6 +1415,23 @@ impl HostOpsState {
                     cleaned.add(&run_id, size.bytes);
                     env.queue
                         .record_runtime_event(&run_id, EventKind::BuildOutputsRemoved, payload)
+                }
+                Outcome::StaleEntries {
+                    run_id,
+                    status,
+                    cleanup,
+                    paths,
+                    entries,
+                    size,
+                } => {
+                    let (why, payload) = stale_entries_record(cleanup, &paths, entries, &size);
+                    info!(run_id = %run_id, "run {run_id} is {}{why} and builds nothing; removed {entries} stale cache entries of its worktree ({size})", status.as_str());
+                    cleaned.add(&run_id, size.bytes);
+                    env.queue.record_runtime_event(
+                        &run_id,
+                        EventKind::IncrementalSessionsRemoved,
+                        payload,
+                    )
                 }
                 Outcome::Worktree {
                     run_id,
@@ -1531,11 +1702,13 @@ fn landing_candidates(
 
 /// The processes of a waiting run's session: the pid of its wrapper (the
 /// latest `wrapper_started`) and of the agent of its last turn (the latest
-/// `turn_started`).
+/// `turn_started`); and its latest turn event, which tells whether a turn
+/// ran since its stale caches went ([`PrunedAs`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct SessionPids {
     wrapper: Option<u32>,
     agent: Option<u32>,
+    turn: Option<EventId>,
 }
 
 /// The [`SessionPids`] a run's `events` name. The loop reopens no session
@@ -1553,6 +1726,7 @@ fn session_pids(events: &[RunEvent]) -> SessionPids {
     SessionPids {
         wrapper: latest(EventKind::WrapperStarted),
         agent: latest(EventKind::TurnStarted),
+        turn: latest_turn_event(events).map(|event| event.id),
     }
 }
 
@@ -1572,7 +1746,7 @@ fn still_waiting(
     if queue.run(run)?.status() != candidate.status {
         return Ok(None);
     }
-    let SessionPids { wrapper, agent } = ports.waiting.get(run).copied().unwrap_or_default();
+    let SessionPids { wrapper, agent, .. } = ports.waiting.get(run).copied().unwrap_or_default();
     let worktree = Path::new(&candidate.worktree);
     let resolved = ports
         .files
@@ -1611,20 +1785,39 @@ fn clean_candidate(
 ) -> bool {
     let first = outcomes.len();
     let runner = !runner_goes(candidate.cleanup) || remove_run_runner(ports, candidate);
-    match clean_worktree(ports, candidate, branches, pruned) {
-        Ok(Some(outcome)) => outcomes.push(outcome),
-        Ok(None) => {}
-        Err(error) => outcomes.push(Outcome::Failed {
-            run_id: candidate.run_id.clone(),
-            what: "worktree",
-            path: candidate.worktree.clone(),
-            error,
-        }),
+    if stale_only(ports.room, candidate.cleanup) {
+        clean_stale(ports, candidate, outcomes);
+    } else {
+        match clean_worktree(ports, candidate, branches, pruned) {
+            Ok(Some(outcome)) => outcomes.push(outcome),
+            Ok(None) => {}
+            Err(error) => outcomes.push(Outcome::Failed {
+                run_id: candidate.run_id.clone(),
+                what: "worktree",
+                path: candidate.worktree.clone(),
+                error,
+            }),
+        }
     }
     remove_scratchpads(ports, candidate, outcomes);
     remove_run_tmp(ports, candidate, outcomes);
     remove_satisfied_scratch(ports, candidate, outcomes);
     let mine = &outcomes[first..];
+    let failed = !runner || mine.iter().any(|o| matches!(o, Outcome::Failed { .. }));
+    // One that failed is not pruned: the next sweep tries it again.
+    if stale_only(ports.room, candidate.cleanup) && !failed {
+        // Under the reservation: a lease the loop takes after it forgets it.
+        lock_cleaning(&ports.cleaning).pruned.insert(
+            candidate.run_id.clone(),
+            PrunedAs {
+                worktree: candidate.clone(),
+                turn: ports
+                    .waiting
+                    .get(&candidate.run_id)
+                    .and_then(|pids| pids.turn),
+            },
+        );
+    }
     let branch = if mine.iter().any(|o| matches!(o, Outcome::Worktree { .. })) {
         Some(false)
     } else {
@@ -1640,9 +1833,16 @@ fn clean_candidate(
         Left {
             worktree: ports.files.is_dir(Path::new(&candidate.worktree)),
             branch,
-            failed: !runner || mine.iter().any(|o| matches!(o, Outcome::Failed { .. })),
+            failed,
         },
     )
+}
+
+/// Whether a job removes only the stale caches of a candidate's worktree
+/// ([`remove_stale_entries`]): a run whose build outputs only a cleanup
+/// for room removes, in a job not for room.
+const fn stale_only(room: bool, cleanup: WorktreeCleanup) -> bool {
+    !room && for_room_only(cleanup)
 }
 
 /// Whether the job removes a candidate's runner: only an ended run's
@@ -1946,10 +2146,8 @@ fn clean_worktree(
             size, false, removal, branch, stopped, unlisted,
         )));
     }
-    let (paths, size) =
-        remove_build_outputs(&*ports.files, worktree, &ports.toolchains, &|name| {
-            ports.repository.tracks(worktree, name)
-        })?;
+    let tracks = |name: &str| ports.repository.tracks(worktree, name);
+    let (paths, size) = remove_build_outputs(&*ports.files, worktree, &ports.toolchains, &tracks)?;
     if paths.is_empty() {
         return Ok(None);
     }
@@ -1990,6 +2188,165 @@ fn remove_build_outputs(
         size.add(measured);
     }
     Ok((paths, size))
+}
+
+/// Remove the stale caches of a candidate's worktree
+/// ([`remove_stale_entries`]), a run's own under the runs directory and
+/// not a clone (whose build outputs are elsewhere): what went, and each
+/// failure on its own, are pushed to `outcomes`.
+fn clean_stale(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Vec<Outcome>) {
+    let worktree = Path::new(&candidate.worktree);
+    if crate::domain::run_clone::is_clone_path(worktree)
+        || !safe_worktree(worktree, &ports.runs_dir, &ports.repo_root)
+        || !ports.files.is_dir(worktree)
+    {
+        return;
+    }
+    let removal = remove_stale_entries(&*ports.files, worktree, &ports.toolchains, &|name| {
+        ports.repository.tracks(worktree, name)
+    });
+    if removal.entries > 0 {
+        outcomes.push(Outcome::StaleEntries {
+            run_id: candidate.run_id.clone(),
+            status: candidate.status,
+            cleanup: candidate.cleanup,
+            paths: removal.paths,
+            entries: removal.entries,
+            size: removal.size,
+        });
+    }
+    outcomes.extend(
+        removal
+            .failed
+            .into_iter()
+            .map(|(path, error)| Outcome::Failed {
+                run_id: candidate.run_id.clone(),
+                what: "stale cache",
+                path,
+                error,
+            }),
+    );
+}
+
+/// What [`remove_stale_entries`] did: the directories entries went from,
+/// how many went and what that freed, and what failed, each with its path.
+#[derive(Debug, Default)]
+struct StaleRemoval {
+    paths: Vec<String>,
+    entries: usize,
+    size: Size,
+    failed: Vec<(String, anyhow::Error)>,
+}
+
+/// Remove what the declared profiles name stale in the build directories
+/// of `worktree` ([`Toolchains::stale_build_entries`]), a run that builds
+/// nothing now: rustc's incremental sessions no build reads any more. A
+/// build directory that is not one (a link included) or that Git tracks a
+/// file in (`tracks`) is left, and so is anything a profile does not
+/// name; no link is followed. Each directory is measured before and after,
+/// as what went shares files with what stayed (rustc links the files of a
+/// session into the next one), so the sizes of the entries would count
+/// those files that stay.
+///
+/// A directory that is not there or is no directory (a link) has nothing;
+/// one that cannot be read, an entry that cannot be removed, and a build directory
+/// Git cannot be asked about are failures, which leave the rest to go and
+/// are returned beside what went: a failure is no "nothing stale", so the
+/// run is tried again ([`clean_candidate`]).
+fn remove_stale_entries(
+    files: &dyn RunFiles,
+    worktree: &Path,
+    toolchains: &Toolchains,
+    tracks: &dyn Fn(&str) -> Result<bool>,
+) -> StaleRemoval {
+    use crate::application::EntryKind;
+    // Not there, or no directory: a link the port opens without following
+    // it fails with ELOOP on macOS and ENOTDIR on Linux.
+    let gone = |error: &std::io::Error| {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        ) || error.raw_os_error() == Some(libc::ELOOP)
+    };
+    let failed = std::cell::RefCell::new(Vec::new());
+    let fail = |path: &Path, what: &str, error: anyhow::Error| {
+        let path = path.to_string_lossy().into_owned();
+        let error = error.context(format!("{what} {path}"));
+        failed.borrow_mut().push((path, error));
+    };
+    // Whether `dir` is a directory: `None` once that could not be read.
+    let is_dir = |dir: &Path| match files.entry_kind(dir) {
+        Ok(kind) => Some(kind == EntryKind::Dir),
+        Err(error) if gone(&error) => Some(false),
+        Err(error) => {
+            fail(dir, "read", error.into());
+            None
+        }
+    };
+    let read_dir = |dir: &Path| -> Vec<String> {
+        if is_dir(dir) != Some(true) {
+            return Vec::new();
+        }
+        match files.read_dir(dir) {
+            Ok(entries) => entries
+                .iter()
+                .filter_map(|entry| entry.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect(),
+            Err(error) if gone(&error) => Vec::new(),
+            Err(error) => {
+                fail(dir, "read", error.into());
+                Vec::new()
+            }
+        }
+    };
+    let measure = |dir: &Path| match files.tree_size(dir) {
+        Ok(size) => Ok(size.unwrap_or(0)),
+        Err(error) => Err(format!("measure {}: {error}", dir.display())),
+    };
+    let mut removal = StaleRemoval::default();
+    for name in toolchains.worktree_build_dirs() {
+        let build_dir = worktree.join(name);
+        if is_dir(&build_dir) != Some(true) {
+            continue;
+        }
+        match tracks(name) {
+            Ok(false) => {}
+            Ok(true) => continue,
+            Err(error) => {
+                fail(&build_dir, "ask Git whether it tracks a file in", error);
+                continue;
+            }
+        }
+        for stale in toolchains.stale_build_entries(name, &build_dir, &read_dir) {
+            let before = measure(&stale.dir);
+            let mut removed = 0;
+            for entry in &stale.remove {
+                let path = stale.dir.join(entry);
+                let result = match files.entry_kind(&path) {
+                    Ok(EntryKind::Dir) => files.remove_dir_all(&path),
+                    Ok(_) => files.remove_file(&path),
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(()) => removed += 1,
+                    Err(error) if gone(&error) => {}
+                    Err(error) => fail(&path, "remove", error.into()),
+                }
+            }
+            if removed == 0 {
+                continue;
+            }
+            removal.size.add(match (before, measure(&stale.dir)) {
+                (Ok(before), Ok(after)) => Size::of(before.saturating_sub(after)),
+                (Err(why), _) | (_, Err(why)) => Size::unmeasured(why),
+            });
+            removal.paths.push(stale.dir.to_string_lossy().into_owned());
+            removal.entries += removed;
+        }
+    }
+    removal.failed = failed.into_inner();
+    removal
 }
 
 /// Whether the run's task is over and its worktree is the run's own under
@@ -2689,6 +3046,7 @@ mod tests {
             waiting: HashMap::new(),
             stop: Arc::default(),
             prune: false,
+            room: false,
             scratchpad_roots: vec![PathBuf::from("/claude/projects")],
             satisfied_dir: PathBuf::from("/q/satisfied"),
             caches: None,
@@ -3057,8 +3415,11 @@ mod tests {
         );
     }
 
+    /// A request for some tasks takes theirs but the runs whose build
+    /// outputs only a cleanup for room removes; a request for every run
+    /// takes those too, for their stale caches alone unless for room.
     #[test]
-    fn cleanup_requests_merge_tasks_and_all_without_selecting_idle_runs() {
+    fn cleanup_requests_merge_tasks_and_all_and_take_idle_runs_whole_only_for_room() {
         let mut request = Request::default();
         assert!(request.is_empty());
         request.add(Some(TaskId::new(1)), None);
@@ -3091,8 +3452,9 @@ mod tests {
         request.add(None, None);
         assert!(request.all);
         assert!(request.wants(&other));
-        assert!(!request.wants(&idle));
-        assert!(!request.wants(&waiting));
+        assert!(request.wants(&idle));
+        assert!(request.wants(&waiting));
+        assert!(request.takes_held() && !request.idle);
         assert!(!request.prune);
         assert!(request.disk.is_none());
         request.add(Some(TaskId::new(1)), Some(DISK));
@@ -3949,6 +4311,7 @@ mod tests {
             SessionPids {
                 wrapper: Some(12),
                 agent: Some(13),
+                turn: Some(EventId::new(5)),
             }
         );
     }
@@ -4023,9 +4386,9 @@ mod tests {
                 );
                 assert!(for_room_only(candidate.cleanup));
                 assert!(!runner_goes(candidate.cleanup));
-                let mut ordinary = Request::default();
-                ordinary.add(None, None);
-                assert!(!ordinary.wants(&candidate));
+                let mut task = Request::default();
+                task.add(Some(TaskId::new(4)), None);
+                assert!(!task.wants(&candidate));
             }
         }
         let (why, payload) = build_outputs_record(
@@ -4141,11 +4504,15 @@ mod tests {
         let mut watch = CleanupWatch::default();
         assert!(watch.takes_landing(&for_room));
         assert!(!watch.takes_landing(&Request::default()));
+        let mut sweep = Request::default();
+        sweep.add(None, None);
+        assert!(watch.takes_landing(&sweep));
         lock_cleaning(&watch.cleaning)
             .offered
             .push(landing.run_id.clone());
         watch.end();
         assert!(!watch.takes_landing(&for_room));
+        assert!(!watch.takes_landing(&sweep));
         {
             let mut cleaning = lock_cleaning(&watch.cleaning);
             assert!(!cleaning.reach(&landing));
@@ -4180,6 +4547,444 @@ mod tests {
             run_id: other,
             ..landing
         }));
+    }
+
+    /// A job not for room removes only the stale caches of the runs whose
+    /// build outputs only a cleanup for room removes (nobody's run waiting
+    /// for no answer, a waiting run the slots offer, one waiting for the
+    /// landing slot), and a job for room their build outputs whole; an
+    /// ended run, and one waiting with no lease for an answer, lose them
+    /// whole on any job, so they have no stale caches to lose apart.
+    #[test]
+    fn only_a_job_not_for_room_removes_the_stale_caches_of_a_run_left_in_the_middle_alone() {
+        let ask = AskId::new(7);
+        for cleanup in [
+            WorktreeCleanup::Idle,
+            WorktreeCleanup::Waiting(ask),
+            WorktreeCleanup::Landing,
+        ] {
+            assert!(stale_only(false, cleanup), "{cleanup:?}");
+            assert!(!stale_only(true, cleanup), "{cleanup:?}");
+        }
+        for cleanup in [WorktreeCleanup::Ended, WorktreeCleanup::AwaitingAnswer(ask)] {
+            assert!(!stale_only(false, cleanup) && !stale_only(true, cleanup));
+        }
+    }
+
+    /// `incremental_sessions_removed` names the directories, how many
+    /// entries went, their bytes and what the run waits for, with the ask
+    /// of a run waiting for an answer.
+    #[test]
+    fn the_stale_caches_removed_are_recorded_with_what_the_run_waits_for() {
+        let paths = ["/runs/r/worktree/target/debug/incremental/dagq-1".to_owned()];
+        let record = |cleanup| stale_entries_record(cleanup, &paths, 4, &Size::of(9));
+        let payload = |reason: &str| json!({"paths": paths, "entries": 4, "bytes": 9, "by": "supervisor", "reason": reason});
+        assert_eq!(
+            record(WorktreeCleanup::Idle),
+            (String::new(), payload("idle"))
+        );
+        assert_eq!(
+            record(WorktreeCleanup::Landing),
+            (
+                ", waiting for the landing slot".to_owned(),
+                payload("awaiting_landing_slot")
+            )
+        );
+        let mut waiting = payload("awaiting_answer");
+        waiting["ask_id"] = json!(8);
+        assert_eq!(
+            record(WorktreeCleanup::Waiting(AskId::new(8))),
+            (", waiting for the answer to ask 8".to_owned(), waiting)
+        );
+        let (_, unmeasured) = stale_entries_record(
+            WorktreeCleanup::Idle,
+            &paths,
+            1,
+            &Size::unmeasured("measure: busy".to_owned()),
+        );
+        assert_eq!(unmeasured["unmeasured"], json!(["measure: busy"]));
+    }
+
+    /// A run whose stale caches a job removed is left out of the next
+    /// jobs not for room while it is listed or offered as it was then;
+    /// once it is not (a lease hid it, a turn of it ran, it moved on) it is
+    /// forgotten, and a candidate again once back, so its next build's
+    /// stale caches go too. The loop's lease, and its moving a run waiting
+    /// for the landing slot on, forget it. Other candidates
+    /// are never left out.
+    #[test]
+    fn a_pruned_run_is_left_out_only_until_it_may_have_built_again() {
+        let idle = EndedRunWorktree {
+            cleanup: WorktreeCleanup::Idle,
+            status: RunStatus::NeedsSession,
+            ..candidate("idle", TaskStatus::InProgress)
+        };
+        let landing = EndedRunWorktree {
+            cleanup: WorktreeCleanup::Landing,
+            status: RunStatus::AwaitingIntegration,
+            ..candidate("landing", TaskStatus::InProgress)
+        };
+        let ended = candidate("ended", TaskStatus::InProgress);
+        let turn =
+            |id: i64| move |run: &RunId| (run.as_str() == "landing").then_some(EventId::new(id));
+        let pruned_as = |worktree: &EndedRunWorktree, turn: Option<i64>| PrunedAs {
+            worktree: worktree.clone(),
+            turn: turn.map(EventId::new),
+        };
+        let mut pruned = HashMap::from([
+            (idle.run_id.clone(), pruned_as(&idle, None)),
+            (landing.run_id.clone(), pruned_as(&landing, Some(3))),
+            (ended.run_id.clone(), pruned_as(&ended, None)),
+        ]);
+        let run = |list: &[EndedRunWorktree]| -> Vec<String> {
+            list.iter().map(|w| w.run_id.as_str().to_owned()).collect()
+        };
+        // As they were: the pruned left out, the ended run kept.
+        let (mut listed, mut offered) = (vec![idle.clone(), ended.clone()], vec![landing.clone()]);
+        leave_pruned(&mut pruned, [&mut listed, &mut offered], turn(3));
+        assert_eq!(
+            (run(&listed), run(&offered)),
+            (vec!["ended".to_owned()], vec![])
+        );
+        assert_eq!(pruned.len(), 2);
+        // A turn of the landing run ran, and the idle run is not listed
+        // (leased): both forgotten, the landing one a candidate now.
+        let (mut listed, mut offered) = (vec![ended.clone()], vec![landing.clone()]);
+        leave_pruned(&mut pruned, [&mut listed, &mut offered], turn(9));
+        assert_eq!(run(&offered), ["landing"]);
+        assert!(pruned.is_empty());
+        // Back as it was: a candidate again.
+        let (mut listed, mut offered) = (vec![idle.clone()], Vec::new());
+        leave_pruned(&mut pruned, [&mut listed, &mut offered], turn(9));
+        assert_eq!(run(&listed), ["idle"]);
+        // The loop's lease forgets a pruned run.
+        let mut cleaning = Cleaning {
+            pruned: HashMap::from([(idle.run_id.clone(), pruned_as(&idle, None))]),
+            ..Cleaning::default()
+        };
+        assert!(cleaning.may_lease(&idle.run_id));
+        assert!(cleaning.pruned.is_empty());
+        // The loop moving a run waiting for the landing slot on (its e2e,
+        // which builds in its worktree) forgets it.
+        cleaning
+            .pruned
+            .insert(landing.run_id.clone(), pruned_as(&landing, Some(3)));
+        cleaning.withdraw(&landing.run_id);
+        assert!(cleaning.pruned.is_empty());
+    }
+
+    /// A tree of directories in memory: the names each directory lists,
+    /// or the error reading it fails with; a name no directory is a file.
+    /// Removing a path under `stuck` fails, the rest goes. A path in
+    /// `links` is a link, which the port does not follow: ELOOP, as on
+    /// macOS. Each name measures 100 bytes.
+    #[derive(Default)]
+    struct TreeFiles {
+        dirs: Mutex<HashMap<PathBuf, std::result::Result<Vec<String>, std::io::ErrorKind>>>,
+        stuck: Mutex<Vec<PathBuf>>,
+        links: Vec<PathBuf>,
+    }
+
+    impl TreeFiles {
+        fn with(dirs: &[(&str, &[&str])]) -> Self {
+            let files = Self::default();
+            for (dir, names) in dirs {
+                files.list(dir, Ok(names));
+            }
+            files
+        }
+        fn list(&self, dir: &str, names: std::result::Result<&[&str], std::io::ErrorKind>) {
+            let names = names.map(|names| names.iter().map(|name| (*name).to_owned()).collect());
+            self.dirs.lock().unwrap().insert(PathBuf::from(dir), names);
+        }
+        fn listed(&self, dir: &str) -> Vec<String> {
+            self.dirs.lock().unwrap()[Path::new(dir)].clone().unwrap()
+        }
+        fn remove(&self, path: &Path) -> std::io::Result<()> {
+            if self.stuck.lock().unwrap().iter().any(|stuck| stuck == path) {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            let mut dirs = self.dirs.lock().unwrap();
+            dirs.retain(|dir, _| !dir.starts_with(path));
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if let Some(Ok(names)) = dirs.get_mut(path.parent().unwrap()) {
+                names.retain(|listed| *listed != name);
+            }
+            Ok(())
+        }
+    }
+
+    impl RunFiles for TreeFiles {
+        fn create_dir_all(&self, _: &Path) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn create_new_dir(&self, _: &Path) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn write(&self, _: &Path, _: &[u8]) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn copy(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn read(&self, _: &Path) -> std::io::Result<Vec<u8>> {
+            unimplemented!()
+        }
+        fn read_to_string(&self, _: &Path) -> std::io::Result<String> {
+            unimplemented!()
+        }
+        fn modified(&self, _: &Path) -> std::io::Result<std::time::SystemTime> {
+            unimplemented!()
+        }
+        fn read_stamped(&self, _: &Path) -> Result<Option<(std::time::SystemTime, Vec<u8>)>> {
+            unimplemented!()
+        }
+        fn is_file(&self, _: &Path) -> bool {
+            unimplemented!()
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            self.dirs.lock().unwrap().contains_key(path)
+        }
+        fn exists(&self, _: &Path) -> bool {
+            unimplemented!()
+        }
+        fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+            match self.dirs.lock().unwrap().get(dir) {
+                Some(Ok(names)) => Ok(names.iter().map(|name| dir.join(name)).collect()),
+                Some(Err(kind)) => Err(std::io::Error::from(*kind)),
+                None => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            }
+        }
+        fn rename(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.remove(path)
+        }
+        fn tree_size(&self, dir: &Path) -> std::io::Result<Option<u64>> {
+            let dirs = self.dirs.lock().unwrap();
+            let names: usize = dirs
+                .iter()
+                .filter(|(listed, _)| listed.starts_with(dir))
+                .map(|(_, names)| names.as_ref().map_or(0, Vec::len))
+                .sum();
+            Ok(dirs.contains_key(dir).then_some(100 * names as u64))
+        }
+        fn entry_kind(&self, path: &Path) -> std::io::Result<EntryKind> {
+            if path
+                .ancestors()
+                .any(|up| self.links.iter().any(|link| link == up))
+            {
+                return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
+            }
+            let dirs = self.dirs.lock().unwrap();
+            if dirs.contains_key(path) {
+                return Ok(EntryKind::Dir);
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            match dirs.get(path.parent().unwrap()) {
+                Some(Ok(names)) if names.contains(&name) => Ok(EntryKind::File),
+                Some(Err(kind)) => Err(std::io::Error::from(*kind)),
+                _ => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            }
+        }
+        fn remove_dir_all(&self, dir: &Path) -> std::io::Result<()> {
+            self.remove(dir)
+        }
+        fn append_line(&self, _: &Path, _: &str) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+            Ok(path.to_path_buf())
+        }
+        fn write_fenced(&self, _: &Path, _: &str, _: &str, _: &Path) -> Result<()> {
+            unimplemented!()
+        }
+        fn now(&self) -> std::time::SystemTime {
+            unimplemented!()
+        }
+    }
+
+    const INCREMENTAL: &str = "/runs/idle/worktree/target/debug/incremental";
+
+    /// A worktree whose `target` has two crates of incremental sessions,
+    /// each with a finished session older than its newest.
+    fn two_crates() -> TreeFiles {
+        TreeFiles::with(&[
+            ("/runs/idle/worktree", &["target"]),
+            ("/runs/idle/worktree/target", &["debug"]),
+            ("/runs/idle/worktree/target/debug", &["incremental"]),
+            (INCREMENTAL, &["a-1", "b-2"]),
+            (
+                "/runs/idle/worktree/target/debug/incremental/a-1",
+                &["s-00a-r-x", "s-00a-r.lock", "s-00b-r-y", "s-00b-r.lock"],
+            ),
+            (
+                "/runs/idle/worktree/target/debug/incremental/a-1/s-00a-r-x",
+                &["q"],
+            ),
+            (
+                "/runs/idle/worktree/target/debug/incremental/a-1/s-00b-r-y",
+                &["q"],
+            ),
+            (
+                "/runs/idle/worktree/target/debug/incremental/b-2",
+                &["s-00a-r-x", "s-00a-r.lock", "s-00b-r-y", "s-00b-r.lock"],
+            ),
+            (
+                "/runs/idle/worktree/target/debug/incremental/b-2/s-00a-r-x",
+                &["q"],
+            ),
+            (
+                "/runs/idle/worktree/target/debug/incremental/b-2/s-00b-r-y",
+                &["q"],
+            ),
+        ])
+    }
+
+    /// A removal that fails after another went returns what went (its
+    /// entries and the bytes measured before and after) beside the
+    /// failure, and goes on with the rest: the lock of the crate whose
+    /// session could not go still goes.
+    #[test]
+    fn the_stale_caches_that_went_are_kept_beside_a_removal_that_failed() {
+        let files = two_crates();
+        let stuck = Path::new(INCREMENTAL).join("b-2/s-00a-r-x");
+        files.stuck.lock().unwrap().push(stuck.clone());
+        let removal = remove_stale_entries(
+            &files,
+            Path::new("/runs/idle/worktree"),
+            &Toolchains::this_repository(),
+            &|_| Ok(false),
+        );
+        assert_eq!(
+            removal.paths,
+            [format!("{INCREMENTAL}/a-1"), format!("{INCREMENTAL}/b-2")]
+        );
+        assert_eq!(removal.entries, 3);
+        // a-1 lost a session (a name and its file) and a lock, b-2 a lock.
+        assert_eq!(removal.size, Size::of(300 + 100));
+        assert_eq!(
+            files.listed(&format!("{INCREMENTAL}/a-1")),
+            ["s-00b-r-y", "s-00b-r.lock"]
+        );
+        assert_eq!(
+            files.listed(&format!("{INCREMENTAL}/b-2")),
+            ["s-00a-r-x", "s-00b-r-y", "s-00b-r.lock"]
+        );
+        let failed: Vec<(&str, String)> = removal
+            .failed
+            .iter()
+            .map(|(path, error)| (path.as_str(), format!("{error:#}")))
+            .collect();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0, stuck.to_string_lossy());
+        assert!(failed[0].1.starts_with("remove "), "{failed:?}");
+    }
+
+    /// A directory that cannot be read is a failure, not a directory with
+    /// nothing stale: the crates it hides are not reached. One that is not
+    /// there, or a link in a directory's place, is nothing, and the others
+    /// lose theirs.
+    #[test]
+    fn a_directory_that_cannot_be_read_is_a_failure_not_nothing_stale() {
+        let files = two_crates();
+        files.list(INCREMENTAL, Err(std::io::ErrorKind::PermissionDenied));
+        let removal = remove_stale_entries(
+            &files,
+            Path::new("/runs/idle/worktree"),
+            &Toolchains::this_repository(),
+            &|_| Ok(false),
+        );
+        assert_eq!(removal.entries, 0);
+        assert_eq!(removal.failed.len(), 1);
+        assert_eq!(removal.failed[0].0, INCREMENTAL);
+        // A Git that cannot be asked is a failure too.
+        let removal = remove_stale_entries(
+            &two_crates(),
+            Path::new("/runs/idle/worktree"),
+            &Toolchains::this_repository(),
+            &|_| Err(anyhow::anyhow!("git failed")),
+        );
+        assert_eq!(removal.entries, 0);
+        assert_eq!(removal.failed.len(), 1);
+        // No incremental directory: nothing, and no failure.
+        let none = TreeFiles::with(&[
+            ("/runs/idle/worktree", &["target"]),
+            ("/runs/idle/worktree/target", &["debug"]),
+            ("/runs/idle/worktree/target/debug", &["deps"]),
+            ("/runs/idle/worktree/target/debug/deps", &[]),
+        ]);
+        let removal = remove_stale_entries(
+            &none,
+            Path::new("/runs/idle/worktree"),
+            &Toolchains::this_repository(),
+            &|_| Ok(false),
+        );
+        assert_eq!((removal.entries, removal.failed.len()), (0, 0));
+        // A link beside the profiles' directories: nothing, and the
+        // crates of the others lose theirs.
+        let linked = TreeFiles {
+            links: vec![PathBuf::from("/runs/idle/worktree/target/elsewhere")],
+            ..two_crates()
+        };
+        linked.list("/runs/idle/worktree/target", Ok(&["debug", "elsewhere"]));
+        let removal = remove_stale_entries(
+            &linked,
+            Path::new("/runs/idle/worktree"),
+            &Toolchains::this_repository(),
+            &|_| Ok(false),
+        );
+        assert_eq!((removal.entries, removal.failed.len()), (4, 0));
+    }
+
+    /// A run whose stale caches could not all be read or removed records
+    /// `cleanup_failed` and is not pruned, so the next sweep tries it
+    /// again; once they can be, they go and it is pruned.
+    #[test]
+    fn a_run_whose_stale_caches_failed_is_tried_again_on_the_next_sweep() {
+        let files = Arc::new(two_crates());
+        files.list(INCREMENTAL, Err(std::io::ErrorKind::PermissionDenied));
+        let repository = Arc::new(Removing::default());
+        let ports = JobPorts {
+            files: files.clone(),
+            ..job_ports(CacheFiles::default(), &repository)
+        };
+        let idle = EndedRunWorktree {
+            cleanup: WorktreeCleanup::Idle,
+            status: RunStatus::NeedsSession,
+            ..candidate("idle", TaskStatus::InProgress)
+        };
+        let pass = || {
+            let mut outcomes = Vec::new();
+            clean_candidate(&ports, &idle, &mut None, &mut false, &mut outcomes);
+            outcomes
+        };
+        let outcomes = pass();
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [Outcome::Failed { what: "stale cache", path, .. }] if path == INCREMENTAL
+            ),
+            "{}",
+            outcomes.len()
+        );
+        assert!(lock_cleaning(&ports.cleaning).pruned.is_empty());
+        files.list(INCREMENTAL, Ok(&["a-1", "b-2"]));
+        let outcomes = pass();
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [Outcome::StaleEntries { entries: 4, .. }]
+            ),
+            "{}",
+            outcomes.len()
+        );
+        assert!(
+            lock_cleaning(&ports.cleaning)
+                .pruned
+                .contains_key(&idle.run_id)
+        );
     }
 
     /// An ended run of task `task` whose task is `task_status`.

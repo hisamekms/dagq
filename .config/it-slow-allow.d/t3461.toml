@@ -1,0 +1,8 @@
+# The items of task 3461 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 9.5s to 12.2s in a stress 5: the review that leaves the run waiting, then a supervise sweeping until its session's build and end
+[[test]]
+name = "runtime_cleanup_incremental::a_run_that_builds_nothing_loses_its_older_incremental_sessions_after_each_build"
+reason = "B 境界（守る境界）: 掃除の job が SQLite の一覧の run の worktree の実の filesystem から rustc の古い incremental の session と lock を消し、incremental_sessions_removed を SQLite に書くこと、生きている session の間は触れず終われば次の周回でまた消すことを通しで確かめる（その時間の大半は run を答え待ちにする review。消す対象の判断は domain::toolchain::rust::incremental、選ぶ run と外す期間は supervise::cleanup の unit test）"
+task = 3461

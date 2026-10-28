@@ -140,6 +140,7 @@ mod runtime_claim_hold;
 mod runtime_claim_spacing;
 mod runtime_claim_worker;
 mod runtime_cleanup;
+mod runtime_cleanup_incremental;
 mod runtime_client_mode;
 mod runtime_clone;
 mod runtime_codex;
