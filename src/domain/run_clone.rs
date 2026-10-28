@@ -253,6 +253,38 @@ pub fn bundle_head(list_heads: &str, branch: &str) -> Result<CommitSha, String> 
         .map_err(|_| format!("the run bundle names no commit: {line:?}"))
 }
 
+/// What the control side reads of the landing directory ([`LANDING_DIR`])
+/// that holds a run's landing worktree, without following a symlink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandingDirFacts {
+    pub is_symlink: bool,
+    pub is_dir: bool,
+    pub uid: u32,
+    /// The permission bits (`st_mode`).
+    pub mode: u32,
+}
+
+/// Why no landing worktree is made in the landing directory `dir`: `Err`
+/// unless it is a directory, not a symlink, owned by the control side's
+/// effective user `own_uid` and writable by neither its group nor others
+/// (the control side's only, ADR-t2179-1 decision 5). The run is held with
+/// the reason.
+pub fn landing_dir_check(facts: &LandingDirFacts, own_uid: u32, dir: &Path) -> Result<(), String> {
+    if facts.is_symlink || !facts.is_dir {
+        return Err(format!(
+            "{} is a symlink or no directory, so no landing worktree is made in it",
+            dir.display()
+        ));
+    }
+    if facts.uid != own_uid || facts.mode & 0o022 != 0 {
+        return Err(format!(
+            "{} is not the control side's alone (another owner, or writable by its group or others), so no landing worktree is made in it",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
 /// The driver keys whose program a tracked `.gitattributes` can choose by
 /// naming the driver: a filter's clean, smudge and process, a diff's
 /// textconv and command, a merge's driver.
@@ -571,5 +603,64 @@ filter.lfs.process\n\0filter.lfs.required\nfalse\0filter.lfs.process\ngit-lfs fi
                 ("GIT_CONFIG_VALUE_0".to_owned(), NO_HOOKS.to_owned()),
             ]
         );
+    }
+
+    fn landing_dir(uid: u32, mode: u32) -> LandingDirFacts {
+        LandingDirFacts {
+            is_symlink: false,
+            is_dir: true,
+            uid,
+            mode,
+        }
+    }
+
+    #[test]
+    fn a_landing_directory_of_another_owner_is_refused() {
+        let dir = Path::new("/q/landing");
+        let why = landing_dir_check(&landing_dir(1001, 0o40700), 501, dir).unwrap_err();
+        assert!(why.contains("another owner"), "{why}");
+        assert!(why.contains("/q/landing"), "{why}");
+    }
+
+    #[test]
+    fn a_landing_directory_is_taken_only_as_the_control_sides_own_directory() {
+        let dir = Path::new("/q/landing");
+        assert_eq!(
+            landing_dir_check(&landing_dir(501, 0o40700), 501, dir),
+            Ok(())
+        );
+        assert_eq!(
+            landing_dir_check(&landing_dir(501, 0o40755), 501, dir),
+            Ok(())
+        );
+        for mode in [0o40770, 0o40707, 0o40720, 0o40702, 0o40777] {
+            let why = landing_dir_check(&landing_dir(501, mode), 501, dir).unwrap_err();
+            assert!(
+                why.contains("writable by its group or others"),
+                "{mode:o}: {why}"
+            );
+        }
+        let symlink = LandingDirFacts {
+            is_symlink: true,
+            is_dir: false,
+            ..landing_dir(501, 0o120700)
+        };
+        let file = LandingDirFacts {
+            is_dir: false,
+            ..landing_dir(501, 0o100600)
+        };
+        // What it is is judged before whose it is.
+        let foreign_symlink = LandingDirFacts {
+            uid: 1001,
+            mode: 0o120777,
+            ..symlink
+        };
+        for facts in [symlink, file, foreign_symlink] {
+            let why = landing_dir_check(&facts, 501, dir).unwrap_err();
+            assert!(
+                why.contains("a symlink or no directory"),
+                "{facts:?}: {why}"
+            );
+        }
     }
 }

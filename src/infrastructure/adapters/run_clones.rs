@@ -25,9 +25,9 @@ use super::*;
 use crate::application::CloneFacts;
 use crate::domain::clone_work::{RESTORE_RESULT_FILE, RUN_RESTORE_FILE, RUN_WORK_FILE};
 use crate::domain::run_clone::{
-    CLONE_MAIN_REF, GuardDoesNotHold, MAIN_BUNDLE_FILE, RUN_BUNDLE_FILE, RUN_FILE_LIMIT,
-    RUN_STATE_FILE, RunState, bundle_head, guard_env, guard_holds, guard_overrides, is_clone_path,
-    landing_of, run_dir_of,
+    CLONE_MAIN_REF, GuardDoesNotHold, LandingDirFacts, MAIN_BUNDLE_FILE, RUN_BUNDLE_FILE,
+    RUN_FILE_LIMIT, RUN_STATE_FILE, RunState, bundle_head, guard_env, guard_holds, guard_overrides,
+    is_clone_path, landing_dir_check, landing_of, run_dir_of,
 };
 
 /// How long a fetch of a run's bundle or a bundle of main may take.
@@ -938,20 +938,19 @@ impl GitRepository {
                 .mode(0o700)
                 .create(landing_dir)
                 .with_context(|| format!("create {}", landing_dir.display()))?,
-            Some(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
-                return Ok(Err(format!(
-                    "{} is a symlink or no directory, so no landing worktree is made in it",
-                    landing_dir.display()
-                )));
+            Some(meta) => {
+                let facts = LandingDirFacts {
+                    is_symlink: meta.file_type().is_symlink(),
+                    is_dir: meta.is_dir(),
+                    uid: meta.uid(),
+                    mode: meta.mode(),
+                };
+                // SAFETY: geteuid reads the process's own effective user ID.
+                let own_uid = unsafe { libc::geteuid() };
+                if let Err(why) = landing_dir_check(&facts, own_uid, landing_dir) {
+                    return Ok(Err(why));
+                }
             }
-            // SAFETY: geteuid reads the process's own effective user ID.
-            Some(meta) if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 => {
-                return Ok(Err(format!(
-                    "{} is not the control side's alone (another owner, or writable by its group or others), so no landing worktree is made in it",
-                    landing_dir.display()
-                )));
-            }
-            Some(_) => (),
         }
         let guarded = self.guarded_repository()?;
         let registered = guarded
