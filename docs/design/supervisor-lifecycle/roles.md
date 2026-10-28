@@ -139,7 +139,8 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
 - envにsupervisorの登録（`SUPERVISOR_REGISTRATION_ENV`）があり、supervisorが自分のものとして起動した`observe`（`--history`・`--input`を除く）・`throughput-review`は、そのsupervisorのtokenで同じprincipalとしてserviceを通り、queueを開かない（[`supervise`](supervise.md#queue-serviceの経路)）。
   envのactorがsupervisorでなければ止まる。
   serviceでの認可はsupervisorの操作と同じ（[Authorization](../authorization.md#queue-serviceのユースケースservice側)）。
-- それ以外はqueueを開く。
+- `queue-broker serve`は`service.lifecycle`の認可を通った後、brokerのプロセスとしてqueueを開かず、自分の要求をtokenもactorの環境も持たない`user`としてserviceに送る（[Queue broker](../queue-broker.md#起動と停止)）。
+- それ以外（上の2つに当たらないもの）はqueueを開く。
 
 `ActorContext::from_env`の読み方は次のとおり。
 
