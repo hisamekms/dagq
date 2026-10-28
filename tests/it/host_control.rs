@@ -32,6 +32,7 @@ use dagq::{
         UseCase,
     },
     domain::session_step::TargetKind,
+    domain::{ClaimOutcome, CommitSha, LeaseToken},
     infrastructure::{adapters::SystemProcesses, queue_service as service},
 };
 use serde_json::{Value, json};
@@ -49,6 +50,36 @@ fn awaiting() -> (Fixture, PathBuf, PathBuf, TaskRun) {
         .unwrap()
         .runs[0]
         .clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    (fixture, repo, db, run)
+}
+
+/// [`awaiting`] without the supervisor's pass that makes it: task 1's run,
+/// claimed and set to await integration on the DB, with no lease, no
+/// worktree and no receipt, for a test of the service's landing steps that
+/// lands nothing.
+fn claimed_awaiting() -> (Fixture, PathBuf, PathBuf, TaskRun) {
+    let (fixture, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let base = CommitSha::parse(main_of(&repo), "base commit").unwrap();
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor(&base, &LeaseToken::new("claimed-awaiting"))
+        .unwrap()
+    else {
+        panic!("task 1 is not claimed")
+    };
+    let raw = rusqlite::Connection::open(&db).unwrap();
+    raw.execute(
+        "UPDATE task_runs SET status='awaiting_integration' WHERE id=?1",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    raw.execute(
+        "DELETE FROM run_leases WHERE run_id=?1",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    let run = queue.run(run.id()).unwrap();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
     (fixture, repo, db, run)
 }
@@ -850,10 +881,14 @@ fn a_landing_whose_command_died_is_released_by_the_next_pass() {
 /// its steps: another command of the same user, in another process,
 /// naming the first's process is refused both, recorded as
 /// `authorization_denied`, and the first's slot, lease and integrator
-/// token stay.
+/// token stay. This is the boundary of the connection's peer pid, the
+/// service's socket and the queue's records, on a run made to await
+/// integration on the DB ([`claimed_awaiting`]) since the steps land
+/// nothing; which pid named from which connection is refused is
+/// `control::tests::a_landing_is_only_of_the_process_the_connection_confirms`'s.
 #[test]
 fn a_command_naming_another_commands_process_neither_begins_nor_ends_its_landing() {
-    let (_fixture, repo, db, run) = awaiting();
+    let (_fixture, repo, db, run) = claimed_awaiting();
     let _service = Served::start(&db);
     let pid = std::process::id();
     let main = main_of(&repo);
