@@ -165,9 +165,11 @@ fn the_hosts_load_is_recorded_and_read_only_through_the_service() {
 
 /// The record and the reads of the host's load samples are the supervisor
 /// principal's alone: a worker, a review job, a landing's integrator and the
-/// user are refused each of them as `authorization_denied`, the refusals of
-/// the principals with a token recorded (the integrator's by the policy's
-/// `scheduler.supervise`, which it does not hold), and nothing is written.
+/// user are refused each of them as `authorization_denied`, each refusal
+/// recorded with the refused principal as its actor (the integrator's by
+/// the policy's `scheduler.supervise`, which it does not hold; the user's,
+/// which the policy grants it, for holding no supervisor's registration),
+/// and nothing is written.
 #[test]
 fn only_a_supervisor_records_and_reads_the_hosts_load_samples() {
     use common::service::{call, queue, start, token};
@@ -228,18 +230,28 @@ fn only_a_supervisor_records_and_reads_the_hosts_load_samples() {
                 refused["error"]["code"], "authorization_denied",
                 "{op}: {refused}"
             );
+            assert_eq!(
+                refused["error"]["denied"]["capability"], "scheduler.supervise",
+                "{op}: {refused}"
+            );
         }
     }
     let denials = common::service::events(&queue.db, "authorization_denied");
-    // Each refusal of a principal with a token is recorded as its own.
-    assert_eq!(denials.len() - before, 3 * ops.len());
-    assert!(
-        denials[before..]
+    // Each refusal is recorded as the refused principal's own.
+    assert_eq!(denials.len() - before, who.len() * ops.len());
+    for role in ["integrator", "user"] {
+        let of_role = denials[before..]
             .iter()
-            .filter(|denial| denial["actor"]["role"] == "integrator")
-            .all(|denial| denial["payload"]["capability"] == "scheduler.supervise"),
-        "{denials:?}"
-    );
+            .filter(|denial| denial["actor"]["role"] == role)
+            .collect::<Vec<_>>();
+        assert_eq!(of_role.len(), ops.len(), "{role}: {denials:?}");
+        assert!(
+            of_role
+                .iter()
+                .all(|denial| denial["payload"]["capability"] == "scheduler.supervise"),
+            "{role}: {denials:?}"
+        );
+    }
     use dagq::application::NodeSampleStore;
     let direct = dagq::infrastructure::sqlite::SqliteQueue::open(&queue.db).unwrap();
     assert!(direct.node_samples_after(0).unwrap().is_empty());
@@ -249,8 +261,10 @@ fn only_a_supervisor_records_and_reads_the_hosts_load_samples() {
 /// The record and the reads of the runs' resources are the supervisor
 /// principal's alone, as the host's load samples are: a worker, a review
 /// job, a landing's integrator and the user are refused each of them as
-/// `authorization_denied`, the refusals of the principals with a token
-/// recorded (the integrator's by the policy's `scheduler.supervise`). The
+/// `authorization_denied`, each refusal recorded with the refused
+/// principal as its actor (the integrator's by the policy's
+/// `scheduler.supervise`, the user's for holding no supervisor's
+/// registration). The
 /// user and the inbox are refused them as the steps of a control-side
 /// command too, though they hold `queue.read`, each refusal recorded, and
 /// nothing is written. The supervisor's own records and reads are the
@@ -304,21 +318,27 @@ fn only_a_supervisor_records_and_reads_the_runs_resources() {
                 refused["error"]["code"], "authorization_denied",
                 "{op}: {refused}"
             );
+            assert_eq!(
+                refused["error"]["denied"]["capability"], "scheduler.supervise",
+                "{op}: {refused}"
+            );
         }
     }
     let denials = common::service::events(&queue.db, "authorization_denied");
-    assert_eq!(denials.len() - before, 3 * ops.len());
-    let integrators: Vec<_> = denials[before..]
-        .iter()
-        .filter(|denial| denial["actor"]["role"] == "integrator")
-        .collect();
-    assert_eq!(integrators.len(), ops.len(), "{denials:?}");
-    assert!(
-        integrators
+    assert_eq!(denials.len() - before, who.len() * ops.len());
+    for role in ["integrator", "user"] {
+        let of_role: Vec<_> = denials[before..]
             .iter()
-            .all(|denial| denial["payload"]["capability"] == "scheduler.supervise"),
-        "{denials:?}"
-    );
+            .filter(|denial| denial["actor"]["role"] == role)
+            .collect();
+        assert_eq!(of_role.len(), ops.len(), "{role}: {denials:?}");
+        assert!(
+            of_role
+                .iter()
+                .all(|denial| denial["payload"]["capability"] == "scheduler.supervise"),
+            "{role}: {denials:?}"
+        );
+    }
 
     use dagq::domain::queue_service::{ControlCall, ControlCommand, SessionProcess};
     let pid = std::process::id();

@@ -2327,7 +2327,8 @@ fn another_supervisor_revokes_no_live_supervisors_telemetry_of_a_target_of_no_ru
 /// and failures, the relays' attention, the runs that own users of the
 /// dagq machine) are operations of its use case on the service's side:
 /// its principal is answered, and any other (a worker, a review job, the
-/// user) is refused with `authorization_denied`, and nothing is written.
+/// user) is refused with `authorization_denied`, the refusal recorded,
+/// and nothing is written.
 #[test]
 fn the_container_parts_records_are_answered_to_the_supervisor_alone() {
     use dagq::domain::LeaseToken;
@@ -2382,8 +2383,17 @@ fn the_container_parts_records_are_answered_to_the_supervisor_alone() {
     }
     assert!(events(&queue.db, "container_image_built").is_empty());
     let denials = events(&queue.db, "authorization_denied");
-    // The worker's and the review job's refusals, each as its actor.
-    assert_eq!(denials.len(), 2 * ops.len(), "{denials:?}");
+    // The worker's, the review job's and the user's refusals, each as its
+    // actor.
+    assert_eq!(denials.len(), 3 * ops.len(), "{denials:?}");
+    assert_eq!(
+        denials
+            .iter()
+            .filter(|denial| denial["actor"]["role"] == "user")
+            .count(),
+        ops.len(),
+        "{denials:?}"
+    );
     assert!(
         denials
             .iter()

@@ -1095,14 +1095,17 @@ pub(super) fn authorize_supervisor(
         Ok(())
     } else {
         gate.authorize(&store, Capability::Supervise, &Resource::Unresolved)?;
-        // The policy grants a supervisor `scheduler.supervise` on every
-        // resource: one with no registration is refused all the same.
-        Err(AuthorizationError {
-            role: actor.role(),
-            capability: Capability::Supervise,
-            reason: crate::domain::authorization::DenyReason::NotGranted,
-        }
-        .into())
+        // The policy grants a supervisor (and the user) `scheduler.supervise`
+        // on every resource: one with no registration is refused all the
+        // same, and the refusal recorded as the policy's is.
+        Err(refuse_recorded(
+            store.0,
+            actor,
+            Capability::Supervise,
+            &Resource::Unresolved,
+            crate::domain::authorization::DenyReason::NotGranted,
+            "the principal holds no supervisor's registration",
+        ))
     }
 }
 
@@ -4982,5 +4985,53 @@ mod tests {
             assert_eq!(*control.started.lock().unwrap(), starts);
             assert_eq!(report["service"]["state"], "running");
         }
+    }
+
+    /// A principal the policy grants `scheduler.supervise` that holds no
+    /// supervisor's registration (the user, a supervisor of none) is
+    /// refused as `authorization_denied`, the refusal recorded once as the
+    /// policy's is; one that holds it is answered, recording nothing.
+    #[test]
+    fn a_supervisor_request_of_no_registration_is_refused_and_recorded() {
+        let unregistered = [
+            ActorContext::user(),
+            ActorContext::instance(ActorRole::Supervisor, 7),
+        ];
+        for actor in unregistered {
+            let mut queue = Queue {
+                status: RunStatus::Running,
+                log: Default::default(),
+                denials: RefCell::default(),
+            };
+            let error = authorize_supervisor(&mut queue, &actor, false).unwrap_err();
+            let refused = error.downcast_ref::<AuthorizationError>().unwrap();
+            assert_eq!(refused.role, actor.role());
+            assert_eq!(refused.capability, Capability::Supervise);
+            assert_eq!(
+                refused.reason,
+                crate::domain::authorization::DenyReason::NotGranted
+            );
+            let response = respond(Err(error));
+            let failure = response.error.unwrap();
+            assert_eq!(failure.code, ServiceErrorCode::AuthorizationDenied);
+            assert!(failure.denied.is_some());
+            let denials = queue.denials.borrow();
+            assert_eq!(denials.len(), 1, "{denials:?}");
+            assert_eq!(denials[0]["capability"], "scheduler.supervise");
+            assert_eq!(denials[0]["reason"], "not granted");
+            assert_eq!(denials[0]["role"], json!(actor.role()));
+            assert_eq!(
+                denials[0]["why"],
+                "the principal holds no supervisor's registration"
+            );
+        }
+        let mut queue = Queue {
+            status: RunStatus::Running,
+            log: Default::default(),
+            denials: RefCell::default(),
+        };
+        let supervisor = ActorContext::instance(ActorRole::Supervisor, 7);
+        authorize_supervisor(&mut queue, &supervisor, true).unwrap();
+        assert!(queue.denials.borrow().is_empty());
     }
 }
