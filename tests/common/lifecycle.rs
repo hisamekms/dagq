@@ -43,6 +43,9 @@ pub fn git(repo: &Path, args: &[&str]) {
 /// Disposable repository, queue, home and stub `claude`, all under one temp dir.
 pub struct Fixture {
     pub _dir: TempDir,
+    /// The owner lock of `_dir` ([`super::cleanup::owned_temp_dir`]), held
+    /// until the directory is gone.
+    pub _owner: fs::File,
     pub repo: PathBuf,
     pub location: QueueLocation,
     pub environment: UpEnvironment,
@@ -52,7 +55,7 @@ pub struct Fixture {
 }
 
 pub fn fixture() -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
+    let (dir, owner) = super::cleanup::owned_temp_dir();
     let repo = dir.path().join("my repo");
     fs::create_dir(&repo).unwrap();
     super::template::repository(&repo, "fixture\n");
@@ -114,6 +117,7 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
             poll: Duration::from_millis(20),
         },
         _dir: dir,
+        _owner: owner,
     }
 }
 

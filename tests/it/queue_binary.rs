@@ -67,7 +67,7 @@ fn old_queue(db: &Path, version: usize) {
 
 #[test]
 fn only_the_queues_binary_migrates_the_queue() {
-    let dir = tempfile::tempdir().unwrap();
+    let (dir, _owner) = common::cleanup::owned_temp_dir();
     let fixed = copy_of_dagq(&dir.path().join("bin").join("dagq"));
     let development = Path::new(env!("CARGO_BIN_EXE_dagq"));
     let db = dir.path().join("queue").join("queue.db");
@@ -119,7 +119,7 @@ fn only_the_queues_binary_migrates_the_queue() {
 /// names it (at the path it replaced) the queue's binary.
 #[test]
 fn install_lets_its_new_build_migrate_and_names_it_the_queues_binary() {
-    let dir = tempfile::tempdir().unwrap();
+    let (dir, _owner) = common::cleanup::owned_temp_dir();
     let fixed = copy_of_dagq(&dir.path().join("bin").join("dagq"));
     let next = copy_of_dagq(&dir.path().join("update/target/release/dagq"));
     let db = dir.path().join("queue").join("queue.db");
