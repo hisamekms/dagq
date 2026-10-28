@@ -11,8 +11,9 @@
 //! a principal the command is not for is refused at its first step; then
 //! only the reads of the queue (`queue.read`) and the records that command
 //! makes are answered, and a record only of the kinds that command
-//! records. The runs' resources, the supervisor's measure, are no
-//! command's: their reads and record are refused as
+//! records. The runs' resources and the host's load samples, the
+//! supervisor's measures, are no command's: their reads and records are
+//! refused as
 //! `authorization_denied`, recorded. The caller names no lease but the
 //! one it takes the integration slot under: a new one, which no run and
 //! no supervisor holds, with which the landing's integrator token is
@@ -145,8 +146,8 @@ fn recorded_kinds(command: ControlCommand) -> (&'static [EventKind], &'static [E
 /// Why `command` does not send `op` with `args`, if it does not: the
 /// reads of the queue are every command's, and the rest are the steps
 /// its own records and its landing make ([`recorded_kinds`]). The runs'
-/// resources, read or recorded, [`answer`] refuses before this as no
-/// command's.
+/// resources and the host's load samples, read or recorded, [`answer`]
+/// refuses before this as no command's.
 pub fn scope(command: ControlCommand, op: &str, args: &[Value]) -> Result<(), String> {
     let kind = |index: usize| serde_json::from_value::<EventKind>(args.get(index)?.clone()).ok();
     let (queue_kinds, run_kinds) = recorded_kinds(command);
@@ -205,9 +206,17 @@ pub fn answer(
     let mut queue = backend.open(&actor)?;
     super::super::queue_service::authorize_operation(&mut *queue, &actor, &operation(&control)?)?;
     let op = call.op.as_str();
-    // The runs' resources are the supervisor's measure: no command reads
-    // or records them, the refusal recorded, whatever its principal holds.
-    if super::RUN_RESOURCE_OPS.contains(&op) {
+    // The runs' resources and the host's load samples are the supervisor's
+    // measures: no command reads or records them, the refusal recorded,
+    // whatever its principal holds.
+    let measure = if super::RUN_RESOURCE_OPS.contains(&op) {
+        Some("the runs' resources")
+    } else if super::NODE_SAMPLE_OPS.contains(&op) {
+        Some("the host's load samples")
+    } else {
+        None
+    };
+    if let Some(measure) = measure {
         return Err(super::super::queue_service::refuse_recorded(
             &mut *queue,
             &actor,
@@ -215,7 +224,7 @@ pub fn answer(
             &crate::domain::Resource::Queue,
             crate::domain::authorization::DenyReason::Resource,
             &format!(
-                "dagq {} does not {op}: the runs' resources are the supervisor's",
+                "dagq {} does not {op}: {measure} are the supervisor's",
                 control.command.as_str().replace('_', "-")
             ),
         ));

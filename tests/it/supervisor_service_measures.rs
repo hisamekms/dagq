@@ -168,8 +168,10 @@ fn the_hosts_load_is_recorded_and_read_only_through_the_service() {
 /// user are refused each of them as `authorization_denied`, each refusal
 /// recorded with the refused principal as its actor (the integrator's by
 /// the policy's `scheduler.supervise`, which it does not hold; the user's,
-/// which the policy grants it, for holding no supervisor's registration),
-/// and nothing is written.
+/// which the policy grants it, for holding no supervisor's registration).
+/// The user and the inbox are refused them as the steps of a control-side
+/// command too, though they hold `queue.read`, each refusal recorded, and
+/// nothing is written.
 #[test]
 fn only_a_supervisor_records_and_reads_the_hosts_load_samples() {
     use common::service::{call, queue, start, token};
@@ -252,6 +254,63 @@ fn only_a_supervisor_records_and_reads_the_hosts_load_samples() {
             "{role}: {denials:?}"
         );
     }
+
+    // No control-side command reads or records them either, whatever its
+    // principal holds (the user's `queue.read` and `scheduler.supervise`).
+    use dagq::domain::queue_service::{ControlCall, ControlCommand, SessionProcess};
+    let pid = std::process::id();
+    let inbox = Principal::inbox(SessionProcess {
+        pid,
+        start: dagq::infrastructure::adapters::session_start(pid).unwrap(),
+    });
+    let inbox = token(&queue, &inbox);
+    let before = common::service::events(&queue.db, "authorization_denied").len();
+    let commands = [
+        (ControlCommand::Observe, None),
+        (ControlCommand::Review, Some(queue.run.task_id())),
+    ];
+    for who in [None, Some(inbox.as_str())] {
+        for (command, task) in commands {
+            let control = ControlCall {
+                command,
+                task,
+                yes: false,
+                pid,
+            };
+            for (op, args) in &ops {
+                let refused = call(
+                    &queue,
+                    who,
+                    UseCase::Control,
+                    json!({"control": control, "call": {"op": op, "args": args}}),
+                );
+                assert_eq!(
+                    refused["error"]["code"], "authorization_denied",
+                    "{command:?} {op}: {refused}"
+                );
+            }
+        }
+    }
+    let denials = common::service::events(&queue.db, "authorization_denied");
+    assert_eq!(denials.len() - before, 2 * commands.len() * ops.len());
+    for role in ["inbox", "user"] {
+        assert_eq!(
+            denials[before..]
+                .iter()
+                .filter(|denial| denial["actor"]["role"] == role)
+                .count(),
+            commands.len() * ops.len(),
+            "{role}: {denials:?}"
+        );
+    }
+    assert!(
+        denials[before..].iter().all(|denial| {
+            denial["payload"]["why"]
+                .as_str()
+                .is_some_and(|why| why.contains("the host's load samples are the supervisor's"))
+        }),
+        "{denials:?}"
+    );
     use dagq::application::NodeSampleStore;
     let direct = dagq::infrastructure::sqlite::SqliteQueue::open(&queue.db).unwrap();
     assert!(direct.node_samples_after(0).unwrap().is_empty());

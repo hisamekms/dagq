@@ -743,7 +743,9 @@ pub fn sign_out(caller: &dyn ServiceCaller) {
 }
 
 /// The operations of the host's load samples (the NodeSampleStore's): the
-/// supervisor principal's only.
+/// supervisor principal's only, refused to a landing's integrator by the
+/// policy (it has no `scheduler.supervise`) and to a control-side command
+/// whatever its principal holds ([`control::answer`]).
 const NODE_SAMPLE_OPS: [&str; 6] = [
     "record_node_sample",
     "import_node_sample_part",
