@@ -39,7 +39,6 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   下の各表でも（中を読まない`[language]`を除く）、知らないkey・keyの重複・型や範囲の合わない値は行番号付きのエラーにする。
   旧バイナリは知らない表とkeyを含む`dagq.toml`全体を読めなくなり本番のqueueのrunがすべて止まるので、下の表とkeyは固定バイナリが読めるようになってから足す。
 - 読むのはrepositoryのmain checkout（下の「main checkoutの決め方」）の作業ファイルで、run worktreeのものではない。
-  `integrate`をどのworktreeから呼んでも同じファイルを読む。
   検証コマンドが1件も無ければ読まない。
 - 渡し先: (a) `provision`がworkerのsession wrapperをbackgroundで起動するとき、`DAGQ_ROLE`ほかのworkerの変数の後ろにwrapperのprocessのenvとして足す（ADR-0026の仕組みを[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定3でprocessのenvと読む）。
   worktreeを作る前に読むので、壊れた`dagq.toml`はprovisioningの失敗になり、wrapperは起動せずsupervisorはclaimを止める。
@@ -52,7 +51,6 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   resumeのsessionはworkerのsessionの続きで、ADR-0049の決定3の渡し先の「workerのworkspace」に含まれると読む。
   値はresumeの試行を始める前に読み、landing branchと同じく読めなければ試行を使わずrunは`needs_session`のまま（landing branchの読み込みが同じfileを先に検査するので、壊れた`dagq.toml`はそこで止まる）。
   `[run.env]`が名指すプログラムが見つからない間は、claimと同じくresumeも始めない（下の「`[run.env]`が名指すプログラムの検査」。始めるとsessionのcargoがすべて失敗して試行を使うため）。
-  resumeの時点のmain checkoutの`dagq.toml`を読むので、workerの起動の後に変えた値はresumeのsessionで効く。
 - `dagq.toml`はrepositoryにcommitされ、値はworkerのwrapperとturnのprocessのenvに渡るので、secretは入れない。
 - この repositoryの`[run.env]`の値と理由、置かないものとsccacheの入れ方の規則は`dagq.toml`の`[run.env]`のコメント、`.config/nextest.toml`に並列度を書かない理由はその冒頭のコメント、その補足とほかのhostのツールの入れ方は[運用の開発文書](../../development/operations.md)の「`[run.env]`とtestの並列度の置き場」と「hostのツール」が持つ。
 - cargo-nextestは`[run.env]`が名指すプログラムではないので下の検査の対象ではなく、無いhostでは着地の検証の失敗になる（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)の決定8）。
@@ -69,7 +67,6 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 
 - `[resume]`は`needs_session`のrunの衝突だけの試行の上限で、keyと既定、設定にしない上限は`domain::resume::ResumeConfig`が持つ（[Needs session](needs-session.md)の「試行の数え方」、ADR-0047の決定24）。
   supervisorが起動時に読み（`SuperviseOptions::resume`で上書きできる）、読めなければ既定値で動く。
-  起動の後の変更はsupervisorを起動し直すまで効かない。
 
 - `[retention]`は終わったplanner・plan review・observationのdirを残す日数`days`と`backups/`の数`backups`で、意味は`RetentionConfig`（ADR-t697-1）。
 
@@ -78,7 +75,6 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   - **優先順**: flagの明示 > `[supervisor]` > 既定で、keyごとのflagの有無は`domain::slot_limits`のdoc commentが持つ。
     `up`はflagを明示されたときだけ`supervise`の引数に渡し、明示が無ければ焼き込まない（[`up` / `down`](up-down.md)）ので、`up`で起動したsupervisorもこの順で決まる。
   - **効くとき**: supervisorが起動時（引き継ぎのexecの後も）に読み、続けてループの各passで`[conflicts]`の読み直しの後に読み直す（[`supervise`](supervise.md)）。
-    flagで与えた値はflagのまま使う。
     読み直した値が使っている値と違えば、そのpassから新しいclaimと待ちとplannerを立てる判定とclaimの間隔に使い、登録の値と出どころを書き換え、queue event `supervisor_config_changed`を記録する（`light_changes`だけが変わったときも記録し、登録は書き換えない）。
     main checkoutに着地した変更は`up`し直さずに効く。
     下げた値を超えて走っているrunと待っているrunと開いているruntimeのplannerはそのまま続き、下回るまで新しいclaimと待ちとplannerが控えられる。
@@ -94,6 +90,9 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[fresh_session]`は`peak_context_above`（意味は`domain::fresh_session::FreshSessionConfig`）だけを持つ（[ADR-t2080-1](../../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)、振る舞いは[Provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）。
   keyが無ければ新しいsessionを始めない。
   値とkeyの誤り、読む時と読めないときの扱い（読み手は`load_fresh_session`）は`[provider_fallback]`と同じ。
+- `[replan]`は長期化したtaskの検知と再計画の診断の設定で、表が無いか`enabled = true`でなければ無効で何も検知・診断しない（keyと既定は`ReplanConfig`のdoc comment、流れは[taskの再計画](../../plans/task-replanning.md)）。
+  supervisorが各passにmain checkoutから読む。
+  旧バイナリは知らない表で`dagq.toml`全体を読めなくなるので、固定バイナリが読めるようになってから足す。
 - `[eval]`と`[eval.providers.<provider>]`はagentのevalの上限・閾値・費用の見込みと採用した定義の見張りの時期で、keyと既定値は`EvalConfig`・`ProviderCost`のdoc comment、使い方は[agentのeval](../agent-eval.md)が持つ。
 - `[review.jobs]`はrunのreviewの段のjobの種類ごとの時間の上限と、reviewのagentのjobの同時実行の上限で（ADR-t1895-1決定1。keyと既定値は`ReviewJobs`のdoc comment）。
   他のjobに効かず（evalのケースのprogramのjobはreviewの段に数える）、無いkeyは今の上限（[Headless job processes](headless-job-processes.md#記録)）。
@@ -139,8 +138,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   役割・key・値と読み込みが拒むものは、`domain::actor_model`のdoc commentが持つ。
   読み込みの入口は`Verifier::role_models`で、読む時点と、読めないときと表の無いときの起動は[Actor model](actor-model.md)が持つ。
   runtimeのplannerの古い経路の欄は受け付けて無視し、runtimeのplannerは常に非対話で動く（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)の決定3）。
-  この repositoryの節の一覧と経緯は[Actor model](actor-model.md#役割とrolesrole)。
-  旧バイナリは表ごと拒み、その役割をCodexで動かす実装を持たないバイナリはCodexを拒むので、各節は固定バイナリがその役割の実装の着地commitを含むことを切り替えのverifyの関門で確かめてから足す。
+  その役割をCodexで動かす実装を持たないバイナリはCodexを拒むので、各節は固定バイナリがその役割の実装の着地commitを含むことを切り替えのverifyの関門で確かめてから足す。
 - workerとintegrateのverificationを動かす場所の設定は、綴りと値を`RuntimeConfig`のdoc commentが、読み込みの入口と流れを[Container runtime](../container-runtime.md)が持つ。
 - `[container.image]`はimageに足すprojectのContainerfileと入力を名指し、keyの綴りと意味は`ProjectImage`のdoc commentが、buildと読む場所は[Container runtime](../container-runtime.md#image)が、案は[profile](../toolchain-profiles.md#推奨の設定)が持つ。
 
