@@ -63,6 +63,7 @@
 
 - `reasons`に入れる文書の指摘は、差分が変えた文書が差分と食い違うこと（差分が入れた書き写しと経緯を含む）と、差分（コード・設定）が文書の述べる不変条件・約束・境界と食い違うことだけ。taskが名指したかに依らない。
 - 差分が触っていない文書の古い記述（前から古いもの、変えた挙動の説明が無いか古いこと）は差し戻さず、verdictの`follow_ups`に文書のpath・節・理由で返す。`follow_ups`だけでは`revise`にしない。
+- 差分が触っていない既存のADRの本文のリンクとfrontmatterの`related`が削除した文書（`scripts/check-doc-links.sh`のADRの例外が扱う、冒頭の削除した文書の一覧と`docs/journal/`）を指していても、`follow_ups`にも`reasons`にも入れない。ADRはappend-onlyで、それらを直さないのが規則（documents.md「ADR」のappend-onlyの箇条と、append-onlyのADRがリンクする文書を消すときの箇条）。差分が足した・変えたADRの参照が実在しない文書を指すことは指摘する。
 - 照合する文書は、taskが名指す文書と、変えた挙動を説明する`docs/design/`・`docs/development/`・pluginの`SKILL.md`と`reference/`・AGENTS.md・ADRの索引、検査を列挙する節。役割と権限の差分はその説明を持つ文書を全て（`docs/design/`のoverview.mdの用語集・authorization.md・`supervisor-lifecycle/roles.md`など）。
 - `summary`の探した名前が差分の変える名前（コマンド・flag・設定のkey・役割・path）を覆うか確かめ、足りなければ探し直す。`summary`の書く更新したpath・節が差分と合うことも確かめる。文書の差分があることだけで正しいとせず、文書を直さない理由も確かめる。
 - 差分が変えた`docs/design/`の文書が流れ・境界・不変条件・約束の変わりに合い、変える必要のない文書に差分が無いこと。変えた名前・欄・既定値が`docs/design/`に無いことだけでは`docs_drift`にしない（意味は定義のそばのdoc commentが持つ）。
