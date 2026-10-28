@@ -93,6 +93,7 @@ stepの形はsupervisorの操作と同じ名前と引数（`ControlParams`）で
   CLIと同じく、断られるprincipalは最初のstep（queueとactorを聞く`control_queue`）で断られ、何も始まらない
 - 範囲: 答えるのは`queue.read`の読み取りと、そのコマンドが自分で書く記録だけで、eventはコマンドごとの種類に限る（`control::scope`）。
   runのeventは着地するtask（`--next`ではどのtaskでも）の着地を待つか着地中のrunだけで、`requested_by`は名乗れない。
+  runの資源の読みと記録はsupervisorだけのもので、どのコマンドにも`authorization_denied`で断り、断りを記録する。
   eventのactorは呼び出し元のprincipalで、CLIがDBで書くのと同じ
 - 着地の承認: `integration_approved`は自分のstep（`approve_integration`）だけで書き、serviceはrunの状態が呼び出し元の読んだまま着地かsessionを待つこと、生きたleaseが持たないこと（serviceのプロセスと時計で見る）、承認がまだ無いことを、記録と同じwrite transactionで確かめる（ADR-t3102-3決定4）。
   承認済みのrunには何も書かない

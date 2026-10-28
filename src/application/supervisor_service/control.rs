@@ -11,10 +11,13 @@
 //! a principal the command is not for is refused at its first step; then
 //! only the reads of the queue (`queue.read`) and the records that command
 //! makes are answered, and a record only of the kinds that command
-//! records. The caller names no lease but the one it takes the integration
-//! slot under: a new one, which no run and no supervisor holds, with which
-//! the landing's integrator token is issued in the same transaction
-//! (ADR-t3102-1 decision 2), the landing then going on with that token
+//! records. The runs' resources, the supervisor's measure, are no
+//! command's: their reads and record are refused as
+//! `authorization_denied`, recorded. The caller names no lease but the
+//! one it takes the integration slot under: a new one, which no run and
+//! no supervisor holds, with which the landing's integrator token is
+//! issued in the same transaction (ADR-t3102-1 decision 2), the landing
+//! then going on with that token
 //! ([`super::answer`]'s integrator) as a supervisor's landing does. A
 //! landing is begun and ended only by the process the command's steps
 //! name as its own, as the connection confirms it: a step naming another
@@ -141,7 +144,9 @@ fn recorded_kinds(command: ControlCommand) -> (&'static [EventKind], &'static [E
 
 /// Why `command` does not send `op` with `args`, if it does not: the
 /// reads of the queue are every command's, and the rest are the steps
-/// its own records and its landing make ([`recorded_kinds`]).
+/// its own records and its landing make ([`recorded_kinds`]). The runs'
+/// resources, read or recorded, [`answer`] refuses before this as no
+/// command's.
 pub fn scope(command: ControlCommand, op: &str, args: &[Value]) -> Result<(), String> {
     let kind = |index: usize| serde_json::from_value::<EventKind>(args.get(index)?.clone()).ok();
     let (queue_kinds, run_kinds) = recorded_kinds(command);
@@ -200,6 +205,21 @@ pub fn answer(
     let mut queue = backend.open(&actor)?;
     super::super::queue_service::authorize_operation(&mut *queue, &actor, &operation(&control)?)?;
     let op = call.op.as_str();
+    // The runs' resources are the supervisor's measure: no command reads
+    // or records them, the refusal recorded, whatever its principal holds.
+    if super::RUN_RESOURCE_OPS.contains(&op) {
+        return Err(super::super::queue_service::refuse_recorded(
+            &mut *queue,
+            &actor,
+            Capability::Supervise,
+            &crate::domain::Resource::Queue,
+            crate::domain::authorization::DenyReason::Resource,
+            &format!(
+                "dagq {} does not {op}: the runs' resources are the supervisor's",
+                control.command.as_str().replace('_', "-")
+            ),
+        ));
+    }
     scope(control.command, op, &call.args).map_err(BadOperation)?;
     // The caller's records are its own: no other actor and no requester
     // (its landing's go with the integrator's token, at its request).

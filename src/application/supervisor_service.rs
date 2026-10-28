@@ -10,7 +10,8 @@
 //! and the integrator it lands with work on: every operation of the queue
 //! (the claim and the runs', the landing's, the review's and the
 //! validation's records, the jobs' starts and verdicts, the planning, the
-//! observation, the asks and the attention, the host's records) goes to
+//! observation, the runs' resources it measures, the asks and the
+//! attention, the host's records) goes to
 //! the service by its name ([`SupervisorParams::op`]), and the supervisor
 //! opens no DB. On the service's side ([`answer`]) each operation is the
 //! queue's own, so its lease rule and its transaction are the queue's, and
@@ -57,7 +58,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::queue_service::{ServiceBackend, ServiceQueue};
-use super::{ObserverLog, Queue, QueueBusy, QueueOpener, RunNotFound, RunReads};
+use super::{ObserverLog, Queue, QueueBusy, QueueOpener, RunNotFound, RunReads, RunResourceStore};
 use crate::domain::authorization::Capability;
 use crate::domain::queue_service::{
     FailureKind, Principal, ServiceError, SupervisorParams, UseCase,
@@ -205,7 +206,7 @@ pub fn undone(error: &anyhow::Error) -> bool {
 /// The operations of [`dispatch`] that only read the queue: one the
 /// service did not answer did nothing ([`undone`]). An operation not here
 /// is taken as one that writes.
-const READ_OPS: [&str; 64] = [
+const READ_OPS: [&str; 67] = [
     "candidates",
     "build_waits",
     "predecessors",
@@ -270,6 +271,9 @@ const READ_OPS: [&str; 64] = [
     "imported_files",
     "node_samples",
     "node_samples_after",
+    "run_resources",
+    "run_resources_after",
+    "open_attachments",
 ];
 
 thread_local! {
@@ -627,10 +631,15 @@ fn to_value(value: impl serde::Serialize) -> Result<Value> {
 }
 
 /// The queue the service runs a supervisor's operations on: the whole
-/// queue, each operation of it answered by [`dispatch`].
-pub trait SupervisorStore: Queue + ObserverLog + super::NodeSampleStore {}
+/// queue, the observer's log, the host's load samples and the runs'
+/// resources the supervisor measures, each operation of it answered by
+/// [`dispatch`].
+pub trait SupervisorStore: Queue + ObserverLog + super::NodeSampleStore + RunResourceStore {}
 
-impl<T: Queue + ObserverLog + super::NodeSampleStore + ?Sized> SupervisorStore for T {}
+impl<T: Queue + ObserverLog + super::NodeSampleStore + RunResourceStore + ?Sized> SupervisorStore
+    for T
+{
+}
 
 /// A supervisor's operation whose arguments do not read as the
 /// operation's, or one the service does not know.
@@ -742,6 +751,18 @@ const NODE_SAMPLE_OPS: [&str; 6] = [
     "remove_node_samples",
     "node_samples",
     "node_samples_after",
+];
+
+/// The operations of the runs' resources the supervisor measures (the
+/// RunResourceStore's): the supervisor principal's only, refused to a
+/// landing's integrator by the policy (it has no `scheduler.supervise`)
+/// and to a control-side command whatever its principal holds
+/// ([`control::answer`]).
+const RUN_RESOURCE_OPS: [&str; 4] = [
+    "record_run_resource",
+    "run_resources",
+    "run_resources_after",
+    "open_attachments",
 ];
 
 /// The operations of the jobs the supervisor starts as commands of its
@@ -1182,10 +1203,11 @@ fn integrator(
     if params.acting.is_some() {
         return Err(BadOperation(format!("the integrator writes as itself, not {op}")).into());
     }
-    // The host's load samples are the supervisor's records: the integrator
-    // is refused them by the policy (it has no `scheduler.supervise`), and
-    // the refusal recorded, as any other principal is.
-    if NODE_SAMPLE_OPS.contains(&op) {
+    // The host's load samples and the runs' resources are the supervisor's
+    // records: the integrator is refused them by the policy (it has no
+    // `scheduler.supervise`), and the refusal recorded, as any other
+    // principal is.
+    if NODE_SAMPLE_OPS.contains(&op) || RUN_RESOURCE_OPS.contains(&op) {
         super::queue_service::authorize_supervisor_needs(
             &mut *queue,
             &actor,

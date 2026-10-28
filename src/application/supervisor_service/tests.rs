@@ -1750,6 +1750,219 @@ fn the_samples_are_read_in_pages_within_the_answers_limit() {
     assert_eq!(queue.node_samples_after(25_000).unwrap(), []);
 }
 
+/// The run whose windows [`PagedResources`] holds.
+const MEASURED_RUN: &str = "11111111-1111-4111-8111-111111111111";
+
+/// A service whose run [`MEASURED_RUN`] holds `count` windows of its
+/// resources under attachment 5, a second each from id 1, none of them its
+/// last, which answers a page of more than `largest` of them as past its
+/// limit. It answers the measure's other reads of the run (its attachment,
+/// no process, no attachment left open) and keeps the windows written.
+struct PagedResources {
+    count: i64,
+    largest: usize,
+    asked: std::sync::Mutex<Vec<usize>>,
+    written: std::sync::Mutex<Vec<crate::domain::environment::RunResource>>,
+}
+
+impl PagedResources {
+    fn window(id: i64) -> Value {
+        serde_json::to_value(crate::domain::environment::RunResource {
+            id,
+            run_id: MEASURED_RUN.into(),
+            attachment: 5,
+            node_id: "host".into(),
+            from_ms: (id - 1) * 1000,
+            until_ms: id * 1000,
+            resources: crate::domain::environment::Resources::default(),
+            last: false,
+        })
+        .unwrap()
+    }
+}
+
+impl ServiceCaller for PagedResources {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(use_case, UseCase::Supervisor);
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        let arg = |index: usize| params.args[index].as_i64().unwrap();
+        let (after, page) = match params.op.as_str() {
+            "run_resources" => {
+                assert_eq!(params.args[0], MEASURED_RUN);
+                (arg(1), arg(2))
+            }
+            "run_resources_after" => (arg(0), arg(1)),
+            "run_events" => {
+                return Ok(
+                    serde_json::json!([{"id": 5, "task_id": null, "goal_id": null,
+                    "run_id": MEASURED_RUN, "kind": "environment_attached", "payload": {},
+                    "created_at": "2026-10-28T00:00:00.000Z"}]),
+                );
+            }
+            "processes" | "open_attachments" => return Ok(serde_json::json!([])),
+            "record_run_resource" => {
+                let row = serde_json::from_value(params.args[0].clone())?;
+                self.written.lock().unwrap().push(row);
+                return Ok(serde_json::json!(self.count + 1));
+            }
+            op => panic!("no {op} here"),
+        };
+        let page = usize::try_from(page).unwrap();
+        self.asked.lock().unwrap().push(page);
+        if page > self.largest {
+            return Err(service_error(&ServiceError {
+                code: ServiceErrorCode::ResponseTooLarge,
+                message: "too large".into(),
+                denied: None,
+                kind: None,
+            }));
+        }
+        Ok(Value::Array(
+            (after + 1..=self.count)
+                .take(page)
+                .map(PagedResources::window)
+                .collect(),
+        ))
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// The environment of a run that spent nothing in each window it is asked
+/// of.
+struct SpendsNothing;
+
+impl crate::application::ExecutionEnvironment for SpendsNothing {
+    fn attached(&self) -> crate::domain::environment::EnvironmentAttached {
+        crate::domain::environment::EnvironmentAttached {
+            env_kind: crate::domain::environment::EnvKind::Host,
+            node_id: "host".into(),
+            image_digest: None,
+            cpu_limit: None,
+            mem_limit: None,
+            arch: "test".into(),
+        }
+    }
+    fn measures_from_outside(&self) -> bool {
+        true
+    }
+    fn waits(&self) -> &'static [crate::domain::environment::EnvironmentWait] {
+        &[]
+    }
+    fn measure_runs(
+        &self,
+        runs: &[crate::domain::environment::RunProcesses],
+    ) -> Result<Vec<(RunId, crate::domain::environment::Resources)>> {
+        Ok(runs
+            .iter()
+            .map(|run| {
+                (
+                    run.run.clone(),
+                    crate::domain::environment::Resources::default(),
+                )
+            })
+            .collect())
+    }
+    fn forget_run(&self, _: &RunId) {}
+    fn node_resources(
+        &self,
+        _: &crate::domain::host_metrics::HostSample,
+        _: std::time::Duration,
+    ) -> crate::domain::environment::Resources {
+        crate::domain::environment::Resources::default()
+    }
+}
+
+/// A run's windows, and those the ledger reads after its cursor, come a
+/// page at a time, each after the last one's id, a page past the answer's
+/// limit asked again at half its size, and the ledger's read no more than
+/// it asks for. So a pass of the measure takes a run whose write got no
+/// answer up again from the end of a history longer than one answer holds.
+#[test]
+fn a_runs_windows_past_the_answers_limit_are_read_in_pages() {
+    use crate::application::RunResourceStore;
+    use crate::application::supervise::{Track, measure_pass};
+    let service = Arc::new(PagedResources {
+        count: 25_000,
+        largest: 6000,
+        asked: std::sync::Mutex::default(),
+        written: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        ActorContext::instance(ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let run = RunId::new(MEASURED_RUN).unwrap();
+    let ids = |windows: Vec<crate::domain::environment::RunResource>| {
+        windows.iter().map(|window| window.id).collect::<Vec<_>>()
+    };
+    let asked = || std::mem::take(&mut *service.asked.lock().unwrap());
+    assert_eq!(
+        ids(queue.run_resources(&run).unwrap()),
+        (1..=25_000).collect::<Vec<_>>()
+    );
+    let pages = asked();
+    assert_eq!(&pages[..2], [10_000, 5000]);
+    assert!(pages[2..].iter().all(|page| *page == 5000), "{pages:?}");
+    assert_eq!(
+        ids(queue.run_resources_after(100, 12_000).unwrap()),
+        (101..=12_100).collect::<Vec<_>>()
+    );
+    assert_eq!(asked(), [10_000, 5000, 5000, 2000]);
+    assert_eq!(queue.run_resources_after(25_000, 10).unwrap(), []);
+
+    let mut tracked = std::collections::BTreeMap::from([(
+        MEASURED_RUN.to_owned(),
+        Track {
+            attachment: 5,
+            since_ms: 1000,
+            unsure: true,
+        },
+    )]);
+    let measured = measure_pass(
+        &queue,
+        &SpendsNothing,
+        &crate::domain::environment::RunChildren::default(),
+        &mut tracked,
+        std::slice::from_ref(&run),
+        30_000_000,
+        &|_| true,
+    );
+    assert_eq!(
+        (measured.windows, measured.closed, measured.failure),
+        (1, 0, None)
+    );
+    let written = service.written.lock().unwrap();
+    assert_eq!(
+        written
+            .iter()
+            .map(|window| (window.from_ms, window.until_ms, window.last))
+            .collect::<Vec<_>>(),
+        [(25_000_000, 30_000_000, false)]
+    );
+    assert_eq!(
+        tracked[MEASURED_RUN],
+        Track {
+            attachment: 5,
+            since_ms: 30_000_000,
+            unsure: false,
+        }
+    );
+}
+
 /// A sample crosses as its second and the value of each column the store
 /// keeps, a missing one missing still; one of another number of columns
 /// does not read.

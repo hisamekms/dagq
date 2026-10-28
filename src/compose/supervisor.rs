@@ -848,9 +848,9 @@ pub fn supervise_with_reviewer(
         )),
     };
     // Every operation of the supervisor's queue through the queue service
-    // (ADR-t3102-3 decisions 3 to 5), the host's load samples included; the
-    // measure of the runs' resources and the ledger still on the DB's own
-    // connection (`opener`).
+    // (ADR-t3102-3 decisions 3 to 5), the host's load samples and the
+    // measure of the runs' resources included; the ledger still on the DB's
+    // own connection (`opener`).
     let in_process = || -> Arc<dyn ServiceCaller> {
         Arc::new(InProcessCaller::new(
             &db,
@@ -925,8 +925,8 @@ pub fn supervise_with_reviewer(
         observation::resources_port(
             settings,
             Arc::clone(&environment),
-            Arc::new(SqlitePorts {
-                opener: opener(),
+            Arc::new(SupervisorPorts {
+                queues: supervisor_queues(),
                 keep: |queue| -> Box<dyn crate::application::ResourceQueue + Send> {
                     Box::new(queue)
                 },

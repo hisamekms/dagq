@@ -137,6 +137,7 @@ whole!(
     crate::application::TaskPage,
     crate::application::WrittenBy,
     crate::domain::AskId,
+    crate::domain::environment::RunResource,
 );
 
 impl Wire for Task {

@@ -25,6 +25,10 @@ const EVENTS_PAGE: usize = 2000;
 /// for a page past the answer's limit.
 const SAMPLES_PAGE: usize = 10_000;
 
+/// How many windows of the runs' resources a read asks for at a time,
+/// halved for a page past the answer's limit.
+const RESOURCES_PAGE: usize = 10_000;
+
 /// How many bytes of samples one request of a file's import holds at most:
 /// half the request's limit, which leaves the rest of the request room.
 const SAMPLES_REQUEST_BYTES: usize = crate::domain::queue_service::MAX_REQUEST_BYTES / 2;
@@ -2701,7 +2705,7 @@ impl NodeSampleStore for SupervisorQueue {
         // One row per node and second, in the order they were taken: the
         // next page begins at the second after the last row's.
         let mut from = from;
-        self.sample_pages(|page| {
+        pages(SAMPLES_PAGE, usize::MAX, |page| {
             let read: Vec<crate::domain::host_metrics::NodeSample> = self.remote(
                 "node_samples",
                 vec![
@@ -2722,7 +2726,7 @@ impl NodeSampleStore for SupervisorQueue {
         after: i64,
     ) -> Result<Vec<crate::domain::host_metrics::NodeSample>> {
         let mut after = after;
-        self.sample_pages(|page| {
+        pages(SAMPLES_PAGE, usize::MAX, |page| {
             let read: Vec<crate::domain::host_metrics::NodeSample> = self.remote(
                 "node_samples_after",
                 vec![to_value(after)?, to_value(page)?],
@@ -2756,29 +2760,74 @@ impl SupervisorQueue {
             ],
         )
     }
+}
 
-    /// The rows of the NodeSampleStore `read` gives a page of at most the
-    /// size it is given at a time, each from where the one before ended,
-    /// until a page is not full: a page past the answer's limit is asked
-    /// again at half the size.
-    fn sample_pages(
-        &self,
-        mut read: impl FnMut(usize) -> Result<Vec<crate::domain::host_metrics::NodeSample>>,
-    ) -> Result<Vec<crate::domain::host_metrics::NodeSample>> {
-        let (mut rows, mut page) = (Vec::new(), SAMPLES_PAGE);
-        loop {
-            let got = match read(page) {
-                Err(error) if page > 1 && super::too_large(&error) => {
-                    page /= 2;
-                    continue;
-                }
-                got => got?,
-            };
-            let full = got.len() == page;
-            rows.extend(got);
-            if !full {
-                return Ok(rows);
+/// The rows `read` gives a page of at most the size it is given at a time
+/// (`first` at first), each from where the one before ended, until a page
+/// is not full or `limit` rows came: a page past the answer's limit is
+/// asked again at half the size.
+fn pages<T>(
+    first: usize,
+    limit: usize,
+    mut read: impl FnMut(usize) -> Result<Vec<T>>,
+) -> Result<Vec<T>> {
+    let (mut rows, mut page) = (Vec::new(), first);
+    while rows.len() < limit {
+        let size = page.min(limit - rows.len());
+        let got = match read(size) {
+            Err(error) if size > 1 && super::too_large(&error) => {
+                page = size / 2;
+                continue;
             }
+            got => got?,
+        };
+        let full = got.len() == size;
+        rows.extend(got);
+        if !full {
+            break;
         }
+    }
+    Ok(rows)
+}
+
+// The reads in pages, each after the last window of the page before (the
+// windows' ids grow in the order they were recorded): a run's history and
+// the ledger's read may be longer than one answer holds.
+impl RunResourceStore for SupervisorQueue {
+    fn record_run_resource(&self, row: &crate::domain::environment::RunResource) -> Result<i64> {
+        self.remote("record_run_resource", vec![to_value(row)?])
+    }
+    fn run_resources(&self, run: &RunId) -> Result<Vec<crate::domain::environment::RunResource>> {
+        let mut after = 0;
+        pages(RESOURCES_PAGE, usize::MAX, |page| {
+            let read: Vec<crate::domain::environment::RunResource> = self.remote(
+                "run_resources",
+                vec![to_value(run)?, to_value(after)?, to_value(page)?],
+            )?;
+            if let Some(last) = read.last() {
+                after = last.id;
+            }
+            Ok(read)
+        })
+    }
+    fn run_resources_after(
+        &self,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::environment::RunResource>> {
+        let mut after = after;
+        pages(RESOURCES_PAGE, limit, |page| {
+            let read: Vec<crate::domain::environment::RunResource> = self.remote(
+                "run_resources_after",
+                vec![to_value(after)?, to_value(page)?],
+            )?;
+            if let Some(last) = read.last() {
+                after = last.id;
+            }
+            Ok(read)
+        })
+    }
+    fn open_attachments(&self) -> Result<Vec<(RunId, i64)>> {
+        self.remote("open_attachments", vec![])
     }
 }

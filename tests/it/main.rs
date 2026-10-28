@@ -227,6 +227,7 @@ mod setup_review_profiles;
 mod shell_leftovers;
 mod source_repository;
 mod supervisor_service;
+mod supervisor_service_measures;
 mod supervisor_without_cmux;
 mod task_replanning;
 mod telemetry_conformance;

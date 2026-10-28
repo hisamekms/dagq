@@ -45,6 +45,9 @@ pub struct ResourcesPort {
 pub struct Track {
     pub attachment: i64,
     pub since_ms: i64,
+    /// A write of its window got no answer, so it may have been done: the
+    /// next pass goes on from the windows it finds stored ([`settle`]).
+    pub unsure: bool,
 }
 
 /// What one pass did.
@@ -102,6 +105,7 @@ fn pass(
     measured: &mut Measured,
 ) -> Result<()> {
     let node = environment.attached().node_id;
+    settle(store, environment, tracked, held)?;
     let mut now_held = BTreeMap::new();
     for run in held {
         let events = store.run_events(run)?;
@@ -118,7 +122,8 @@ fn pass(
         if let Some(track) = tracked.get(run.as_str())
             && track.attachment != attachment
         {
-            close(store, &node, run, *track, Resources::default(), now_ms)?;
+            let closed = close(store, &node, run, *track, Resources::default(), now_ms);
+            unsure_unless_written(tracked, run, closed)?;
             measured.closed += 1;
             tracked.remove(run.as_str());
         }
@@ -128,21 +133,13 @@ fn pass(
                 // Taken up again (its measure lost, or back in the slots):
                 // from the end of the last window of the attachment, and
                 // not at all once that attachment was closed.
-                let earlier: Vec<RunResource> = store
-                    .run_resources(run)?
-                    .into_iter()
-                    .filter(|window| window.attachment == attachment)
-                    .collect();
-                if earlier.iter().any(|window| window.last) {
+                let Some(since) = stored_until(store, run, attachment, since)? else {
                     continue;
-                }
-                let since = earlier
-                    .iter()
-                    .map(|window| window.until_ms)
-                    .fold(since, i64::max);
+                };
                 let track = Track {
                     attachment,
                     since_ms: since.min(now_ms),
+                    unsure: false,
                 };
                 tracked.insert(run.to_string(), track);
                 track
@@ -177,14 +174,17 @@ fn pass(
         let Some(resources) = spent.get(run.as_str()) else {
             continue;
         };
-        store.record_run_resource(&window(
-            &node,
-            run,
-            *track,
-            resources.clone(),
-            now_ms,
-            false,
-        ))?;
+        let written = store
+            .record_run_resource(&window(
+                &node,
+                run,
+                *track,
+                resources.clone(),
+                now_ms,
+                false,
+            ))
+            .map(drop);
+        unsure_unless_written(tracked, run, written)?;
         measured.windows += 1;
         if let Some(track) = tracked.get_mut(run.as_str()) {
             track.since_ms = now_ms;
@@ -192,7 +192,8 @@ fn pass(
     }
     for (run, track) in left {
         let resources = spent.get(run.as_str()).cloned().unwrap_or_default();
-        close(store, &node, &run, track, resources, now_ms)?;
+        let closed = close(store, &node, &run, track, resources, now_ms);
+        unsure_unless_written(tracked, &run, closed)?;
         measured.closed += 1;
         tracked.remove(run.as_str());
         environment.forget_run(&run);
@@ -211,11 +212,90 @@ fn pass(
         let track = Track {
             attachment,
             since_ms: now_ms,
+            unsure: false,
         };
         close(store, &node, &run, track, Resources::default(), now_ms)?;
         measured.closed += 1;
     }
     Ok(())
+}
+
+/// Take up again the runs of `tracked` a write of whose got no answer
+/// ([`Track::unsure`]), as the windows stored say: one whose attachment's
+/// last window is stored was closed, and is tracked no more (nor kept by
+/// `environment` once it left `held`); another goes on from the end of the
+/// windows stored, so the next window overlaps none written.
+fn settle(
+    store: &dyn ResourceQueue,
+    environment: &dyn ExecutionEnvironment,
+    tracked: &mut BTreeMap<String, Track>,
+    held: &[RunId],
+) -> Result<()> {
+    let unsure: Vec<(RunId, Track)> = tracked
+        .iter()
+        .filter(|(_, track)| track.unsure)
+        .filter_map(|(run, track)| Some((RunId::new(run).ok()?, *track)))
+        .collect();
+    for (run, track) in unsure {
+        match stored_until(store, &run, track.attachment, track.since_ms)? {
+            Some(since_ms) => {
+                tracked.insert(
+                    run.to_string(),
+                    Track {
+                        since_ms,
+                        unsure: false,
+                        ..track
+                    },
+                );
+            }
+            None => {
+                tracked.remove(run.as_str());
+                if !held.contains(&run) {
+                    environment.forget_run(&run);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// When `run`'s windows stored under `attachment` end, from `since` (unix
+/// ms) on; none once one of them is its last.
+fn stored_until(
+    store: &dyn ResourceQueue,
+    run: &RunId,
+    attachment: i64,
+    since: i64,
+) -> Result<Option<i64>> {
+    let earlier: Vec<RunResource> = store
+        .run_resources(run)?
+        .into_iter()
+        .filter(|window| window.attachment == attachment)
+        .collect();
+    if earlier.iter().any(|window| window.last) {
+        return Ok(None);
+    }
+    Ok(Some(
+        earlier
+            .iter()
+            .map(|window| window.until_ms)
+            .fold(since, i64::max),
+    ))
+}
+
+/// `written`, a write of `run`'s window: when it got no answer it may have
+/// been done, so `run`'s track is marked for the next pass to settle.
+fn unsure_unless_written(
+    tracked: &mut BTreeMap<String, Track>,
+    run: &RunId,
+    written: Result<()>,
+) -> Result<()> {
+    if written.is_err()
+        && let Some(track) = tracked.get_mut(run.as_str())
+    {
+        track.unsure = true;
+    }
+    written
 }
 
 /// The pids of `run`'s processes: those it registered that have not

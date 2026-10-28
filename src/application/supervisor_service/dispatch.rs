@@ -2228,6 +2228,27 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                     .map(|rows| rows.into_iter().take(page).collect::<Vec<_>>()),
             )
         }
+        "record_run_resource" => {
+            let (row,): (crate::domain::environment::RunResource,) = read(op, args)?;
+            answer(RunResourceStore::record_run_resource(&*store, &row))
+        }
+        // A page of the read: at most `page` windows of it recorded after
+        // the window `after` (their id), the caller asking for the next
+        // from where it ended.
+        "run_resources" => {
+            let (run, after, page): (RunId, i64, usize) = read(op, args)?;
+            answer(RunResourceStore::run_resources(&*store, &run).map(|rows| {
+                rows.into_iter()
+                    .filter(|row| row.id > after)
+                    .take(page)
+                    .collect::<Vec<_>>()
+            }))
+        }
+        "run_resources_after" => {
+            let (after, limit): (i64, usize) = read(op, args)?;
+            answer(RunResourceStore::run_resources_after(&*store, after, limit))
+        }
+        "open_attachments" => answer(RunResourceStore::open_attachments(&*store)),
         _ => Err(BadOperation(format!(
             "the queue service has no supervisor operation {op}"
         ))

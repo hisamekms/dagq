@@ -75,6 +75,16 @@ pub fn sha(commit: &str) -> CommitSha {
     CommitSha::try_from(commit).unwrap()
 }
 
+/// The commit `repo`'s HEAD names.
+pub fn head_commit(repo: &Path) -> CommitSha {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo)
+        .bounded_output()
+        .unwrap();
+    CommitSha::parse(String::from_utf8(out.stdout).unwrap().trim(), "head").unwrap()
+}
+
 pub fn git(repo: &Path, args: &[&str]) {
     let result = Command::new(git_executable().expect("git executable"))
         .arg("-C")
@@ -602,6 +612,7 @@ mod lost_lease;
 pub use lost_lease::*;
 mod receipt_seen_late;
 pub use receipt_seen_late::ReceiptSeenLate;
+pub mod losing_answers;
 pub mod planner_prompt_bytes;
 pub mod planner_turns;
 pub mod service;
