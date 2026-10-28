@@ -175,7 +175,8 @@ runtimeのplanner（全て非対話）の区間はturnから記録する（[ADR-
   sessionが動くterminalは問わず、前のbinaryが区間に記録したworkspace IDは読まない。
   同じIDのresume・compactや別kindの区間には影響しない。
 - Codexのinboxは`dagq codex-inbox-hook`が同じ記録とcompactionの印を書き、trustされず動かなければ区間が無い（[provider-lifecycle](provider-lifecycle.md#inboxの区間)）。
-- 失敗してもsessionを止めない: 何も出力せず（`SessionStart`のstdoutはcontextに入るので）、`dagq`が無い・実行できない、queueが開けない、入力にsession_idが無い、記録に失敗した、のどれでもexit 0する。記録のCLIは区間のeventだけを書き、run・proposal・plannerの状態を変えない。
+- 失敗してもsessionを止めない: 何も出力せず（`SessionStart`のstdoutはcontextに入る）、`dagq`が動かない、serviceに届かない、tokenが無いか拒まれた（`session_ended`も）、session_idが無い、記録の失敗のどれもexit 0する。
+  区間のeventだけを書き、run・proposal・plannerの状態を変えない。
 
 ### launcher
 

@@ -129,7 +129,7 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
 - relayとreview program: queueを開かずに動く。
 - 宛ての環境（serviceのsocketかqueueのbroker）があればクライアントモード（`client_mode`）で、tokenのprincipalをserviceが認可する（[Queue service](../queue-service.md#クライアントモード)）。
 - plannerのhook（`session-event`）は報告をwrapperに渡す（spool）。
-  inboxのhookはこの分岐に入らず、下の経路でinboxとして判定されてqueueを開き、eventはinboxのsessionのwrapperのactorで書く（[eventのactor](#eventのactor)）。
+  inboxのhookは`dagq inbox`が発行を受けたinboxのtokenで区間を`session_record`へ送り、queueを開かない（tokenのprincipalをserviceが認可し、eventはそのprincipalで書く。[eventのactor](#eventのactor)）。
 - session wrapper（`session`・`planner-session`）はwrapperのprincipalで動く。
 
 それ以外のコマンドは`ActorContext::from_env`でactorを決める。
@@ -150,7 +150,7 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
 - 計画系のコマンドは全てのroleについてapplicationの層が判定し、拒んだ試みを`authorization_denied`に記録する（[Authorization](../authorization.md#計画系のコマンドapplication)）。
   対話と記録のコマンドと、runtimeの操作系のコマンド（[Authorization](../authorization.md#runtimeの操作系のコマンドapplication)）も同じ。
   runtimeのwrapperとhookは継いだworkerやplannerの環境のactorでなく、wrapperのprincipalでqueue serviceを通るので、workerとplannerはsessionを記録する権限を持たない（[Queue service](../queue-service.md#クライアントモード)）。
-  例外はinboxのhookで、上の分岐のとおりinboxとして判定されてqueueを開き、eventのactorだけがinboxのsessionのwrapperになる（[eventのactor](#eventのactor)）。
+  例外はinboxのhookで、上の分岐のとおり環境のactorを読まずにinboxのtokenでserviceを通る。
 - headlessのjobは読み取りだけの制限を受け、状態を変えるコマンドは拒まれる。
   判定は`StaticPolicy`（[Authorization](../authorization.md)）で、どのjobにもCLIの書き込みを与えない。
 
@@ -165,6 +165,7 @@ askとanswerが持つ書き手の欄とは別で、それらの値は変えな�
   `SqliteQueue::with_actor`で接続ごとに変えられる。
 - プロセスのactorは呼び出し元の`ActorContext`（`DAGQ_ROLE`が無ければ`user`）。
   例外は制御側のプロセス（`supervise`、runとplannerのsession wrapper、session hook）で、eventはsessionのactorでなくsupervisorかwrapperのactorになる（`main.rs`の`event_actor`）。
+  inboxのhookのeventは、hookのプロセスでなくserviceがtokenのinboxのprincipalで書くので、wrapperのactorにならない。
   supervisorが起動する`observe`と`auto-update`には`supervisor:<pid>`の環境を渡すので、そのeventもsupervisorになる（observerのagentはobserverのactorのまま）。
 - 着地（rebase・検証・squash・mainの更新・push）のeventはactorがIntegratorで、`requested_by`が依頼者。
   依頼と`integration_started`の記録の主は[Authorization](../authorization.md#着地とpushintegrator)と`IntegrationRequest`のdoc commentが持つ。
