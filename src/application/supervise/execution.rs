@@ -434,10 +434,15 @@ pub enum PausePoint {
     /// request written, the clone made again), before the restore's lease
     /// is given back for the resume.
     RestoreHanded,
+    /// The supervisor's end, once its registration is removed, before it
+    /// stops the queue's broker and service after a `down`'s drain and
+    /// gives its token back: of no run.
+    Deregistered,
 }
 
-/// What a supervisor calls at each [`PausePoint`] with the run's ID.
-pub type Pauses = Arc<dyn Fn(PausePoint, &RunId) + Send + Sync>;
+/// What a supervisor calls at each [`PausePoint`] with the run's ID, `None`
+/// at a point of no run.
+pub type Pauses = Arc<dyn Fn(PausePoint, Option<&RunId>) + Send + Sync>;
 
 /// The ports the supervisor works through, and where it works.
 pub struct Ports<'a> {
@@ -930,12 +935,14 @@ pub struct RunError {
 /// the heartbeat. Its runs' worktrees are made from the checkout it was
 /// given, recorded as each run's `repo_path`.
 pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
-    // A supervisor that ends gives its principal's token back, whatever
-    // ended it, but for a handoff's exec, whose next image takes it back.
+    // A supervisor that ends gives its principal's token back through the
+    // service, whatever ended it, but for a handoff's exec, whose next image
+    // takes it back (ADR-t3102-1 decision 2). Through the caller the loop
+    // uses, as every other request of the supervisor.
     struct SignedIn(Arc<dyn crate::application::supervisor_service::ServiceCaller>);
     impl Drop for SignedIn {
         fn drop(&mut self) {
-            self.0.sign_out();
+            crate::application::supervisor_service::sign_out(&*self.0);
         }
     }
 
@@ -2454,10 +2461,13 @@ impl Supervisor<'_> {
     /// the planners and their wrappers whose planner ended
     /// (`planner_token_ended`); the inbox's whose session ended
     /// (`session_token_ended`); the landings' integrators whose run left
-    /// `integrating` with no live landing on it; and the jobs' whose process
+    /// `integrating` with no live landing on it; the jobs' whose process
     /// that asked for them ended, which the service reads from each token's
-    /// record (`job_token_ended`). A run or a planner whose record does not
-    /// read keeps its token.
+    /// record (`job_token_ended`); and the supervisors' whose registration
+    /// is gone, which the service revokes once the process that asked for
+    /// it ended too (`supervisor_token_ended`). A run or a planner whose
+    /// record does not read keeps its token, and so does every supervisor's
+    /// when the registrations do not read.
     fn sweep_worker_tokens(&self) {
         use crate::domain::queue_service::{Principal, run_token_ended};
         let queue = &self.queue;
@@ -2471,7 +2481,23 @@ impl Supervisor<'_> {
             .collect();
         let own_integrator =
             ActorContext::instance(crate::domain::ActorRole::Integrator, self.layout.pid);
+        let registered: Option<Vec<LeaseToken>> = queue.supervisors().ok().map(|registrations| {
+            registrations
+                .into_iter()
+                .map(|registration| registration.token)
+                .collect()
+        });
         let mut ended = |principal: &Principal| {
+            // A supervisor's sign-in of a registration that ended
+            // (ADR-t3102-1 decision 2): pruned by its stop, by `up`, `down`
+            // or a sweep that could not revoke it.
+            if principal.role == crate::domain::ActorRole::Supervisor {
+                return principal.registration.as_ref().is_some_and(|token| {
+                    registered
+                        .as_ref()
+                        .is_some_and(|registered| !registered.contains(token))
+                });
+            }
             // An inbox's ends with its session's process (ADR-t3102-1
             // decision 2): its pid gone, or another process's start on it.
             // A start that does not read keeps the token, as a run whose
@@ -2706,10 +2732,19 @@ impl Supervisor<'_> {
                 observation.stop_throughput_review(env, "with the supervisor");
             });
         }
-        if self
-            .registration
-            .deregister(&*self.queue, &self.layout.version, result.is_ok())
-        {
+        // Its token goes with the registration (ADR-t3102-1 decision 2):
+        // the service is asked to revoke it as it stops before the
+        // registration goes, since a `down --wait` that sees it gone may
+        // stop the service before this process's last requests, as this
+        // supervisor does after a `down`'s drain; one that keeps running
+        // takes it back at this process's end.
+        if self.registration.deregister(
+            &*self.queue,
+            &self.layout.version,
+            result.is_ok(),
+            &mut || crate::application::supervisor_service::sign_out_at_stop(&*service),
+        ) {
+            self.pause_at_end(PausePoint::Deregistered);
             // After the deregistration, so the last of the supervisors a
             // `down` stops sees no other one left.
             if result.is_ok() && options.stop.load(Ordering::SeqCst) {

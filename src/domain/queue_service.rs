@@ -234,6 +234,7 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::SessionRun
         | UseCase::SessionRecord
         | UseCase::IssueToken
+        | UseCase::RevokeToken
         | UseCase::Add
         | UseCase::Edit
         | UseCase::Submit
@@ -423,6 +424,13 @@ string_enum!(UseCase {
     // children's as the `issue_token` operation of [`Self::Supervisor`],
     // which issues them the same way. No command line goes to it.
     IssueToken => "issue_token",
+    // The revocation of a supervisor's token once its registration ended
+    // (ADR-t3102-1 decision 2), at the request of `up` or `down` after they
+    // pruned it, for a caller that may run them (`service.lifecycle`),
+    // judged in the transaction that revokes it
+    // ([`registration_end_refusal`]). The answer is whether one was
+    // revoked. No command line goes to it.
+    RevokeToken => "revoke_token",
     // The planning commands a person, the inbox or a planner runs
     // (ADR-t3102-3 decision 3), each as the command of its name changes
     // the queue and prints it, authorized by the application for the
@@ -2095,11 +2103,102 @@ pub fn session_token_ended(principal: &Principal, alive: impl Fn(&SessionProcess
 /// token of `principal` by once it ended (ADR-t3102-1 decision 2): its
 /// [`Principal::credential_key`], so that an inbox's is found in the file
 /// of its own session, and an inbox opened again since, whose key names
-/// another session, keeps its token. `None` for a supervisor's sign-in,
-/// which only that supervisor gives back ([`supervisor_revokes`]).
+/// another session, keeps its token. A supervisor's sign-in goes by it
+/// too, but only once its registration ended
+/// ([`supervisor_token_ended`]); `None` for a key no principal the sweep
+/// revokes has ([`supervisor_revokes`]).
 pub fn swept_token_key(principal: &Principal) -> Option<String> {
     let key = principal.credential_key();
-    (principal.role != ActorRole::Supervisor && supervisor_revokes(&key)).then_some(key)
+    let signed_in = principal.role == ActorRole::Supervisor && principal.registration.is_some();
+    (signed_in || (principal.role != ActorRole::Supervisor && supervisor_revokes(&key)))
+        .then_some(key)
+}
+
+/// Whether the supervisor that prunes the registration `pruning` revokes
+/// the token of the registration `pruned` with the prune (ADR-t3102-1
+/// decision 2, the end of a registration): another's, left behind, whose
+/// process can no longer give it back. Its own it asks the service to
+/// revoke as its process ends, after the last of its requests (the stop of
+/// the queue service after a `down`'s drain reads the queue after its
+/// registration went; `sign_out` of the application's supervisor
+/// service); an exec of a handoff prunes none, and keeps the token for the
+/// next image.
+pub fn revoked_with_prune(pruning: &LeaseToken, pruned: &LeaseToken) -> bool {
+    pruning != pruned
+}
+
+/// Why `held`, a supervisor's sign-in, may not be revoked at the request
+/// of `up` or `down` (the `revoke_token` use case, ADR-t3102-1 decision 2),
+/// `None` when it may: only once its registration is no longer kept
+/// (`registered`), which they ask for after they pruned it. A supervisor
+/// signs in before it registers, and its registration is not kept yet in
+/// between either; `up` and `down` name only the registrations they pruned,
+/// whose lease token a registration not written yet would not be known by.
+/// Any other principal's token is refused: it goes by its own end
+/// ([`swept_token_key`]).
+pub fn registration_end_refusal(
+    held: &HeldToken,
+    registered: impl Fn(&LeaseToken) -> bool,
+) -> Option<&'static str> {
+    let Some(registration) = held
+        .principal
+        .registration
+        .as_ref()
+        .filter(|_| held.principal.role == ActorRole::Supervisor)
+    else {
+        return Some("only a supervisor's token is revoked at its registration's end");
+    };
+    registered(registration).then_some("the supervisor's registration is still kept")
+}
+
+/// Whether `held`, a supervisor's sign-in, is left over from a
+/// registration that ended (ADR-t3102-1 decision 2): the registration is
+/// no longer kept (`registered`), pruned by its stop, by `up` or `down`, or
+/// by another supervisor's sweep, and the process that asked for it has
+/// ended (`ended`, [`SessionProcess::ended`]). The registration is checked
+/// as well as the process because the token is issued before the
+/// registration is written; the process because an exec of a handoff keeps
+/// both. One kept with no process that asked (an older binary's, whose
+/// supervisor signed itself in, or one whose asking process's start did
+/// not read) goes by the supervisor's own process, the pid its principal
+/// names, which had started by the issue (`started_by_ended` with that pid
+/// and [`HeldToken::issued_at`], [`started_by_ended`]); one that names no
+/// pid is kept. `None` for any other principal's.
+pub fn supervisor_token_ended(
+    held: &HeldToken,
+    registered: impl Fn(&LeaseToken) -> bool,
+    ended: impl Fn(&SessionProcess) -> bool,
+    started_by_ended: impl Fn(u32, i64) -> bool,
+) -> Option<bool> {
+    let registration = held
+        .principal
+        .registration
+        .as_ref()
+        .filter(|_| held.principal.role == ActorRole::Supervisor)?;
+    let asked = held
+        .issued_by
+        .as_ref()
+        .and_then(|issuer| issuer.process.as_ref());
+    let process_ended = match asked {
+        Some(process) => ended(process),
+        None => held
+            .principal
+            .actor_id
+            .strip_prefix("supervisor:")
+            .and_then(|pid| pid.parse().ok())
+            .is_some_and(|pid| started_by_ended(pid, held.issued_at)),
+    };
+    Some(!registered(registration) && process_ended)
+}
+
+/// Whether the process on a pid that had started by `by` (unix seconds) is
+/// known to have ended, `alive` saying whether the pid lives and
+/// `started_at` when the process on it started (`None` when that cannot be
+/// read): the pid is gone, or the process on it started after then, another
+/// one. A second's slack is given, as the host reads a start up to a second
+/// late; a live pid whose start cannot be read has not ended.
+pub fn started_by_ended(alive: bool, started_at: Option<i64>, by: i64) -> bool {
+    !alive || started_at.is_some_and(|started| started > by + 1)
 }
 
 /// Whether the token of `principal` is a planner's or a planner's session
@@ -3917,9 +4016,10 @@ mod tests {
 
     /// The sweep revokes an ended token by its key: an inbox's by its
     /// session's, so an inbox opened again keeps its own; a planner's and
-    /// a worker's by their actor ids; never a supervisor's sign-in.
+    /// a worker's by their actor ids; a supervisor's sign-in by its
+    /// registration's, and never a key that only names a supervisor.
     #[test]
-    fn the_sweep_revokes_by_the_key_of_the_session_and_never_a_supervisor_s() {
+    fn the_sweep_revokes_by_the_key_of_the_session_and_of_the_registration() {
         let session = |pid| SessionProcess {
             pid,
             start: "Thu Oct 23 10:00:00 2026".to_owned(),
@@ -3947,13 +4047,145 @@ mod tests {
             Some("integrator:42@r1")
         );
         let supervisor = Principal::supervisor(&LeaseToken::new("lease"), 42);
+        assert_eq!(
+            swept_token_key(&supervisor).as_deref(),
+            Some("supervisor:42@lease")
+        );
         let named = Principal {
             actor_id: supervisor.actor_id.clone(),
             ..Principal::inbox(session(7))
         };
-        for refused in [supervisor.clone(), named] {
+        let unregistered = Principal {
+            registration: None,
+            ..supervisor.clone()
+        };
+        for refused in [unregistered, named] {
             assert_eq!(swept_token_key(&refused), None, "{refused:?}");
         }
+    }
+
+    /// A supervisor's sign-in is revoked at `up`'s or `down`'s request
+    /// only once its registration is no longer kept; never another
+    /// principal's.
+    #[test]
+    fn a_supervisor_s_token_is_revoked_on_request_only_once_its_registration_is_gone() {
+        let held = |principal: Principal| HeldToken {
+            principal,
+            issued_by: None,
+            issued_at: 0,
+        };
+        let signed_in = held(Principal::supervisor(&LeaseToken::new("lease"), 42));
+        assert_eq!(registration_end_refusal(&signed_in, |_| false), None);
+        assert!(registration_end_refusal(&signed_in, |_| true).is_some());
+        let worker = held(Principal::worker(
+            &RunId::new("r1").unwrap(),
+            TaskId::new(1),
+        ));
+        assert!(registration_end_refusal(&worker, |_| false).is_some());
+    }
+
+    /// A process that had started by a time ended once its pid is gone or
+    /// another started on it after then, past a second's slack; a live pid
+    /// whose start does not read has not.
+    #[test]
+    fn a_process_started_by_a_time_ends_with_its_pid_or_another_start_on_it() {
+        assert!(started_by_ended(false, None, 100));
+        assert!(started_by_ended(true, Some(102), 100));
+        assert!(!started_by_ended(true, Some(101), 100));
+        assert!(!started_by_ended(true, Some(50), 100));
+        assert!(!started_by_ended(true, None, 100));
+    }
+
+    /// A supervisor revokes with a prune the token of another's
+    /// registration, left behind, and leaves its own for its process's end.
+    #[test]
+    fn a_prune_revokes_another_registration_s_token_and_not_the_pruning_one_s() {
+        let (own, left) = (LeaseToken::new("own"), LeaseToken::new("left"));
+        assert!(revoked_with_prune(&own, &left));
+        assert!(!revoked_with_prune(&own, &own));
+    }
+
+    /// A supervisor's sign-in is left over only once its registration is no
+    /// longer kept and the process that asked for it ended: not before the
+    /// registration is written (the process runs), and not across an exec
+    /// of a handoff (both are kept). One kept with no process that asked
+    /// goes by the supervisor's own pid and the issue's time. Any other
+    /// principal's is not judged.
+    #[test]
+    fn a_supervisor_s_token_ends_with_its_registration_and_its_process() {
+        let lease = LeaseToken::new("lease");
+        let process = SessionProcess {
+            pid: 42,
+            start: "Thu Oct 23 10:00:00 2026".to_owned(),
+        };
+        let held = |principal: Principal, process: Option<SessionProcess>| HeldToken {
+            principal,
+            issued_by: Some(TokenIssuer {
+                parent: "user".to_owned(),
+                process,
+                registration: None,
+            }),
+            issued_at: 0,
+        };
+        let signed_in = held(Principal::supervisor(&lease, 42), Some(process.clone()));
+        // The asking process's end is `ended`; the supervisor's own pid's,
+        // which only a token with no asking process is judged by, never.
+        let judge = |held: &HeldToken, registered: bool, ended: bool| {
+            supervisor_token_ended(held, |_| registered, |_| ended, |_, _| unreachable!())
+        };
+        // Pruned by any path, its process gone or another on its pid.
+        assert_eq!(judge(&signed_in, false, true), Some(true));
+        // Signed in before it registers, or an exec of a handoff.
+        assert_eq!(judge(&signed_in, false, false), Some(false));
+        assert_eq!(judge(&signed_in, true, false), Some(false));
+        // Registered still, whatever its process.
+        assert_eq!(judge(&signed_in, true, true), Some(false));
+        // No asking process kept (an older binary's): the supervisor's own
+        // pid, by the issue's time, tells.
+        let older = HeldToken {
+            principal: Principal::supervisor(&lease, 42),
+            issued_by: None,
+            issued_at: 100,
+        };
+        let unknown = HeldToken {
+            issued_at: 100,
+            ..held(Principal::supervisor(&lease, 42), None)
+        };
+        for unasked in [older, unknown] {
+            let judge = |registered: bool, ended: bool| {
+                supervisor_token_ended(
+                    &unasked,
+                    |_| registered,
+                    |_| unreachable!(),
+                    |pid, by| {
+                        assert_eq!((pid, by), (42, 100));
+                        ended
+                    },
+                )
+            };
+            assert_eq!(judge(false, true), Some(true));
+            // Its supervisor still starting, or registered still.
+            assert_eq!(judge(false, false), Some(false));
+            assert_eq!(judge(true, true), Some(false));
+        }
+        // One that names no pid is kept.
+        let unnamed = HeldToken {
+            principal: Principal {
+                actor_id: "supervisor".to_owned(),
+                ..Principal::supervisor(&lease, 42)
+            },
+            issued_by: None,
+            issued_at: 100,
+        };
+        assert_eq!(
+            supervisor_token_ended(&unnamed, |_| false, |_| true, |_, _| true),
+            Some(false)
+        );
+        let worker = held(
+            Principal::worker(&RunId::new("r1").unwrap(), TaskId::new(1)),
+            Some(process),
+        );
+        assert_eq!(judge(&worker, false, true), None);
     }
 
     #[test]

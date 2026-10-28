@@ -1041,6 +1041,10 @@ impl OneShot {
                     db, executable,
                 ))
             },
+            revoke_ended: &|db, principal| {
+                crate::infrastructure::queue_service::RequestedServiceAccess::of_caller(db)
+                    .revoke_ended(principal)
+            },
         }
     }
 }

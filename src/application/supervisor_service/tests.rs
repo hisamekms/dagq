@@ -1559,3 +1559,86 @@ fn a_supervisors_leaseless_telemetry_goes_only_to_the_command_that_started_it() 
     // Under a lease, the registration it names rules alone.
     assert_eq!(refusal(&b, Some(40), Some(&lease), &Started(None)), None);
 }
+
+/// A caller signed in with a token, or none, that records the operations
+/// it is asked for and fails them all when `down`.
+struct SignedInCaller {
+    held: std::sync::Mutex<bool>,
+    down: bool,
+    ops: std::sync::Mutex<Vec<String>>,
+}
+
+impl SignedInCaller {
+    fn new(held: bool, down: bool) -> Self {
+        Self {
+            held: std::sync::Mutex::new(held),
+            down,
+            ops: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl ServiceCaller for SignedInCaller {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(use_case, UseCase::Supervisor);
+        self.ops
+            .lock()
+            .unwrap()
+            .push(params["op"].as_str().unwrap().to_owned());
+        if self.down {
+            return Err(ServiceUnreachable::not_done("the service is down").into());
+        }
+        Ok(Value::Bool(true))
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        anyhow::bail!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {
+        *self.held.lock().unwrap() = false;
+    }
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.held
+            .lock()
+            .unwrap()
+            .then(|| std::path::PathBuf::from("token"))
+    }
+}
+
+/// A supervisor that ends asks the service to revoke its token and then
+/// forgets it, whether the service took the request or not (one it did
+/// not is the sweep's); one that holds none (handed over for an exec, or
+/// never signed in) asks for nothing.
+#[test]
+fn a_supervisor_signs_out_through_the_service_only_with_a_token() {
+    for down in [false, true] {
+        let caller = SignedInCaller::new(true, down);
+        sign_out(&caller);
+        assert_eq!(*caller.ops.lock().unwrap(), [SIGN_OUT], "down: {down}");
+        assert_eq!(caller.credential(), None);
+    }
+    let handed = SignedInCaller::new(true, false);
+    handed.hand_over();
+    sign_out(&handed);
+    assert!(handed.ops.lock().unwrap().is_empty());
+}
+
+/// The supervisor that stops the service asks it first to revoke its token
+/// as it stops, and keeps the token for the record of the stop; one that
+/// holds none asks for nothing.
+#[test]
+fn a_supervisor_asks_the_service_to_revoke_its_token_as_it_stops() {
+    let caller = SignedInCaller::new(true, false);
+    sign_out_at_stop(&caller);
+    assert_eq!(*caller.ops.lock().unwrap(), [SIGN_OUT_AT_STOP]);
+    assert!(caller.credential().is_some());
+    let none = SignedInCaller::new(false, false);
+    sign_out_at_stop(&none);
+    assert!(none.ops.lock().unwrap().is_empty());
+}

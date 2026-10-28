@@ -2344,3 +2344,502 @@ fn the_container_parts_records_are_answered_to_the_supervisor_alone() {
     assert_eq!(built.len(), 1, "{built:?}");
     assert_eq!(built[0]["actor"]["role"], "supervisor", "{built:?}");
 }
+
+/// The answer of the queue's service at `queue_dir` to a `show` with
+/// `token`, from this test's process.
+fn show_with(queue_dir: &Path, token: &str) -> Value {
+    let response = service::call(
+        &service::socket_path(queue_dir),
+        &ServiceRequest {
+            api_version: API_VERSION,
+            token: Some(token.to_owned()),
+            env_role: None,
+            queue: None,
+            binding: None,
+            use_case: UseCase::Show,
+            params: json!({"id": 1}),
+        },
+        TIMEOUT,
+    )
+    .unwrap();
+    serde_json::to_value(response).unwrap()
+}
+
+/// The token of a supervisor's registration goes with the registration's
+/// end (ADR-t3102-1 decision 2): one a live supervisor's sweep prunes as
+/// left behind (its process gone, its heartbeat expired) at the prune, and
+/// the supervisor's own as it stops. Each is refused by the service after
+/// (`unauthenticated`, `unknown_token`) and its file is gone, while the
+/// live supervisor's token holds until its stop. The service revokes the
+/// stopping one's at its `sign_out` request: a supervisor whose request
+/// never reaches the service keeps its token, which its process does not
+/// remove itself.
+#[test]
+fn a_supervisors_token_goes_with_the_end_of_its_registration() {
+    use dagq::application::supervisor_service::ServiceCaller;
+    use dagq::domain::{HEARTBEAT_TIMEOUT_SECS, LeaseToken};
+
+    let (_fixture, repo, db) = idle_queue();
+    let dagq = common::service::owned_executable(db.parent().unwrap());
+    let queue_dir = db.parent().unwrap().to_path_buf();
+    let credential = |token: &str, pid: u32| {
+        service::credential_path(
+            &queue_dir,
+            &Principal::supervisor(&LeaseToken::new(token), pid).credential_key(),
+        )
+    };
+    let refused = |token: &str| {
+        let answer = show_with(&queue_dir, token);
+        assert_eq!(answer["error"]["code"], "unauthenticated", "{answer}");
+    };
+    let supervisor = Running::with_options(
+        &db,
+        &repo,
+        dagq::compose::SuperviseOptions {
+            queue_service: Some(dagq::compose::QueueServiceOptions {
+                executable: dagq.clone(),
+                interval: Duration::ZERO,
+                start_timeout: TIMEOUT,
+                control: None,
+            }),
+            sweep_interval: Duration::ZERO,
+            ..crate::runtime_support::supervise_options(1, false)
+        },
+    );
+    let own = supervisor_token(&db);
+    let own_file = credential(&own, std::process::id());
+    let own_token = service::read_token(&own_file).unwrap();
+
+    // A supervisor that signed in as the user's and registered, and whose
+    // process is gone without pruning its registration.
+    let (left, dead) = ("left-behind", common::lifecycle::dead_pid());
+    service::SocketCaller::new(&db)
+        .sign_in(&LeaseToken::new(left), dead)
+        .unwrap();
+    let left_file = credential(left, dead);
+    let left_token = service::read_token(&left_file).unwrap();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .register_supervisor(&LeaseToken::new(left), dead, 1, dagq::VERSION)
+        .unwrap();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE supervisors SET heartbeat_at=?1 WHERE token=?2",
+            rusqlite::params![
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+                    - HEARTBEAT_TIMEOUT_SECS
+                    - 60,
+                left
+            ],
+        )
+        .unwrap();
+    {
+        let _waiting = common::within(TIMEOUT * 3, "the left registration to be pruned");
+        while left_file.exists()
+            || SqliteQueue::open(&db)
+                .unwrap()
+                .supervisors()
+                .unwrap()
+                .iter()
+                .any(|registration| registration.token == left)
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    refused(&left_token);
+    // The live one's holds through its sweeps.
+    supervisor.passes(2);
+    assert!(own_file.exists());
+    let answer = show_with(&queue_dir, &own_token);
+    assert_ne!(answer["error"]["code"], "unauthenticated", "{answer}");
+
+    supervisor.drain();
+    assert!(!own_file.exists(), "{}", own_file.display());
+    refused(&own_token);
+    let reasons: Vec<Value> = events(&db, "queue_service_unauthenticated")
+        .iter()
+        .map(|event| event["payload"]["reason"].clone())
+        .collect();
+    assert_eq!(reasons, [json!("unknown_token"), json!("unknown_token")]);
+
+    let (unsent, sign_outs) = crate::runtime_support::service::KeepsDown::wrap("sign_out");
+    let supervisor = Running::with_options(
+        &db,
+        &repo,
+        dagq::compose::SuperviseOptions {
+            service_route: dagq::compose::ServiceRoute::InProcessThrough(unsent),
+            ..crate::runtime_support::supervise_options(1, false)
+        },
+    );
+    let kept = supervisor_token(&db);
+    supervisor.passes(1);
+    let kept_file = credential(&kept, std::process::id());
+    let kept_token = service::read_token(&kept_file).unwrap();
+    supervisor.drain();
+    assert_eq!(sign_outs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(kept_file.exists(), "{}", kept_file.display());
+    let answer = show_with(&queue_dir, &kept_token);
+    assert_ne!(answer["error"]["code"], "unauthenticated", "{answer}");
+}
+
+/// `up` and `down` revoke, through the service's `revoke_token` use case,
+/// the token of each registration they prune (ADR-t3102-1 decision 2): a
+/// supervisor that signed in, registered and died without giving it back.
+/// The service refuses the token after (`unauthenticated`,
+/// `unknown_token`) and its file is gone.
+#[test]
+fn up_and_down_revoke_the_tokens_of_the_registrations_they_prune() {
+    use dagq::application::supervisor_service::ServiceCaller;
+    use dagq::domain::LeaseToken;
+
+    let mut fixture = common::lifecycle::fixture();
+    fixture.options.queue_service = true;
+    fixture.environment.current_exe =
+        common::service::owned_executable(fixture.location.db.parent().unwrap());
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    let db = fixture.location.db.clone();
+    let queue_dir = db.parent().unwrap().to_path_buf();
+    struct Down(PathBuf);
+    impl Drop for Down {
+        fn drop(&mut self) {
+            let _ = invoke(&self.0, &["service", "stop"]);
+        }
+    }
+    let _down = Down(db.clone());
+    let first = common::lifecycle::up(&fixture, &launchd, &processes);
+    assert_eq!(first["queue_service"]["outcome"], "started", "{first}");
+    // A supervisor that signed in as the user's, registered and died.
+    let died = |token: &str| {
+        let pid = common::lifecycle::dead_pid();
+        processes.dead.lock().unwrap().insert(pid);
+        service::SocketCaller::new(&db)
+            .sign_in(&LeaseToken::new(token), pid)
+            .unwrap();
+        SqliteQueue::open(&db)
+            .unwrap()
+            .register_supervisor(&LeaseToken::new(token), pid, 1, dagq::VERSION)
+            .unwrap();
+        let file = service::credential_path(
+            &queue_dir,
+            &Principal::supervisor(&LeaseToken::new(token), pid).credential_key(),
+        );
+        let value = service::read_token(&file).unwrap();
+        (file, value)
+    };
+    let refused = |token: &str| {
+        let answer = show_with(&queue_dir, token);
+        assert_eq!(answer["error"]["code"], "unauthenticated", "{answer}");
+    };
+
+    let (up_file, up_token) = died("pruned-by-up");
+    let again = common::lifecycle::up(&fixture, &launchd, &processes);
+    assert_eq!(
+        again["pruned_supervisors"][0]["token"], "pruned-by-up",
+        "{again}"
+    );
+    assert!(!up_file.exists(), "{}", up_file.display());
+    refused(&up_token);
+
+    // `down --force` prunes before it stops the service, which is started
+    // again to be asked.
+    let (down_file, down_token) = died("pruned-by-down");
+    let forced = common::lifecycle::down(&fixture, &launchd, &processes, false, true);
+    assert_eq!(forced["queue_service"]["outcome"], "stopped", "{forced}");
+    assert!(!down_file.exists(), "{}", down_file.display());
+    common::service::serve(&db);
+    refused(&down_token);
+    let reasons: Vec<Value> = events(&db, "queue_service_unauthenticated")
+        .iter()
+        .map(|event| event["payload"]["reason"].clone())
+        .collect();
+    assert_eq!(reasons, [json!("unknown_token"), json!("unknown_token")]);
+}
+
+/// The service revokes as it starts a supervisor's token left over from a
+/// registration that ended, as one is when the supervisor stopped the
+/// service itself at the end of a `down`'s drain and so could not give it
+/// back (ADR-t3102-1 decision 2): its file is gone and the service refuses
+/// it. One whose registration is kept, and one of a supervisor not
+/// registered yet whose process runs, stay.
+#[test]
+fn the_service_revokes_at_its_start_the_tokens_of_ended_registrations() {
+    use dagq::application::ProcessControl;
+    use dagq::domain::LeaseToken;
+    use dagq::domain::queue_service::{SessionProcess, TokenIssuer};
+
+    let queue = queue();
+    let queue_dir = queue.dir().to_path_buf();
+    let dead = common::lifecycle::dead_pid();
+    let own = std::process::id();
+    let process = |pid: u32| SessionProcess {
+        pid,
+        start: dagq::infrastructure::adapters::SystemProcesses
+            .session_start(pid)
+            .unwrap_or_else(|| "Thu Oct 23 10:00:00 2026".to_owned()),
+    };
+    let signed_in = |token: &str, pid: u32, asked: SessionProcess| {
+        let issuer = TokenIssuer {
+            parent: "user".to_owned(),
+            process: Some(asked),
+            registration: None,
+        };
+        let principal = Principal::supervisor(&LeaseToken::new(token), pid);
+        let file = service::issue_by(&queue_dir, &principal, &issuer, 1)
+            .unwrap()
+            .file;
+        let value = service::read_token(&file).unwrap();
+        (file, value)
+    };
+    let (ended_file, ended) = signed_in("ended", dead, process(dead));
+    let (kept_file, kept) = signed_in("kept", dead, process(dead));
+    SqliteQueue::open(&queue.db)
+        .unwrap()
+        .register_supervisor(&LeaseToken::new("kept"), dead, 1, dagq::VERSION)
+        .unwrap();
+    let (starting_file, starting) = signed_in("starting", own, process(own));
+
+    start(&queue);
+    assert!(!ended_file.exists(), "{}", ended_file.display());
+    let answer = show_with(&queue_dir, &ended);
+    assert_eq!(answer["error"]["code"], "unauthenticated", "{answer}");
+    for (file, token) in [(&kept_file, &kept), (&starting_file, &starting)] {
+        assert!(file.exists(), "{}", file.display());
+        let answer = show_with(&queue_dir, token);
+        assert_ne!(answer["error"]["code"], "unauthenticated", "{answer}");
+    }
+}
+
+/// A supervisor's token an older binary left, kept with no process that
+/// asked for it (ADR-t3102-1 decision 2), goes by the supervisor's own
+/// process, the pid its principal names: once its registration is gone and
+/// that pid is gone, or another process started on it after the issue, the
+/// service's start revokes it, and a live supervisor's sweep revokes one
+/// left while the service runs. One whose supervisor still starts (its pid
+/// runs since before the issue, not registered yet) and one whose
+/// registration is kept stay.
+#[test]
+fn a_supervisors_token_an_older_binary_left_goes_once_its_registration_and_process_ended() {
+    use dagq::domain::LeaseToken;
+
+    let queue = queue();
+    let queue_dir = queue.dir().to_path_buf();
+    let dead = common::lifecycle::dead_pid();
+    let own = std::process::id();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    // Issued as an older binary issued it: no process that asked is kept.
+    let older = |token: &str, pid: u32, issued_at: i64| {
+        let principal = Principal::supervisor(&LeaseToken::new(token), pid);
+        let file = service::issue(&queue_dir, &principal, issued_at)
+            .unwrap()
+            .file;
+        let value = service::read_token(&file).unwrap();
+        (principal, file, value)
+    };
+    let refused = |file: &Path, value: &str| {
+        assert!(!file.exists(), "{}", file.display());
+        let answer = show_with(&queue_dir, value);
+        assert_eq!(answer["error"]["code"], "unauthenticated", "{answer}");
+    };
+    let held = |file: &Path, value: &str| {
+        assert!(file.exists(), "{}", file.display());
+        let answer = show_with(&queue_dir, value);
+        assert_ne!(answer["error"]["code"], "unauthenticated", "{answer}");
+    };
+    let (_, gone_file, gone) = older("gone", dead, now);
+    // Its pid is this test's now, which started after the issue.
+    let (_, reused_file, reused) = older("reused", own, 1);
+    let (starting_principal, starting_file, starting) = older("starting", own, now);
+    let (_, kept_file, kept) = older("kept", dead, now);
+    let sweeper = LeaseToken::new("sweeper");
+    let mut db = SqliteQueue::open(&queue.db).unwrap();
+    db.register_supervisor(&LeaseToken::new("kept"), dead, 1, dagq::VERSION)
+        .unwrap();
+    db.register_supervisor(&sweeper, own, 1, dagq::VERSION)
+        .unwrap();
+    drop(db);
+
+    start(&queue);
+    refused(&gone_file, &gone);
+    refused(&reused_file, &reused);
+    held(&kept_file, &kept);
+    held(&starting_file, &starting);
+
+    let supervisor = token(&queue, &Principal::supervisor(&sweeper, own));
+    let revoke = |principal: &Principal| {
+        call(
+            &queue,
+            Some(&supervisor),
+            UseCase::Supervisor,
+            json!({"op": "revoke_principal", "args": [principal]}),
+        )
+    };
+    let (swept_principal, swept_file, swept) = older("swept", dead, now);
+    assert_eq!(revoke(&swept_principal)["result"], true);
+    refused(&swept_file, &swept);
+    assert_eq!(revoke(&starting_principal)["result"], false);
+    held(&starting_file, &starting);
+}
+
+/// The supervisor a `down` asks to stop the service at the end of its drain
+/// has the service revoke its token as it stops (ADR-t3102-1 decision 2):
+/// once the drain is over, before any service starts again, its file is
+/// gone and no record authenticates it, and a service started again
+/// refuses it. The supervisor is on the service's socket, as `up` starts
+/// one.
+#[test]
+fn the_supervisor_that_stops_the_service_after_down_leaves_no_token() {
+    use dagq::domain::LeaseToken;
+    use dagq::domain::queue_service::ServiceState::Stopped;
+
+    let (_fixture, repo, db) = idle_queue();
+    let dagq = common::service::owned_executable(db.parent().unwrap());
+    let queue_dir = db.parent().unwrap().to_path_buf();
+    struct Down(PathBuf);
+    impl Drop for Down {
+        fn drop(&mut self) {
+            let _ = invoke(&self.0, &["service", "stop"]);
+        }
+    }
+    let _down = Down(db.clone());
+    let supervisor = Running::with_options(
+        &db,
+        &repo,
+        dagq::compose::SuperviseOptions {
+            queue_service: Some(dagq::compose::QueueServiceOptions {
+                executable: dagq.clone(),
+                interval: Duration::ZERO,
+                start_timeout: TIMEOUT,
+                control: None,
+            }),
+            service_route: dagq::compose::ServiceRoute::Socket,
+            ..crate::runtime_support::supervise_options(1, false)
+        },
+    );
+    let token = supervisor_token(&db);
+    supervisor.passes(2);
+    let file = service::credential_path(
+        &queue_dir,
+        &Principal::supervisor(&LeaseToken::new(&token), std::process::id()).credential_key(),
+    );
+    let value = service::read_token(&file).unwrap();
+    request_stop(&db, &[&token]);
+    supervisor.drain();
+    assert_eq!(service::probe(&queue_dir).state, Stopped);
+    assert!(!file.exists(), "{}", file.display());
+    assert_eq!(service::lookup(&queue_dir, &value).unwrap(), None);
+
+    common::service::serve(&db);
+    let answer = show_with(&queue_dir, &value);
+    assert_eq!(answer["error"]["code"], "unauthenticated", "{answer}");
+}
+
+/// A `down --wait` that stops the service as soon as the supervisor's
+/// registration is gone, before the supervisor's own stop of it and its
+/// sign-out, leaves no token either (ADR-t3102-1 decision 2): the
+/// supervisor asked the service to revoke it as it stops before it removed
+/// the registration. Once `down` returns, while the supervisor is still held
+/// right after its deregistration, the file is gone and no record
+/// authenticates it; a service started again refuses it.
+#[test]
+fn a_down_wait_that_stops_the_service_once_the_registration_is_gone_leaves_no_token() {
+    use crate::runtime_support::headless::{pause_once, wait_for_file};
+    use dagq::domain::LeaseToken;
+    use dagq::domain::queue_service::ServiceState::Stopped;
+
+    let (_fixture, repo, db) = idle_queue();
+    let dagq = common::service::owned_executable(db.parent().unwrap());
+    let queue_dir = db.parent().unwrap().to_path_buf();
+    struct Down(PathBuf);
+    impl Drop for Down {
+        fn drop(&mut self) {
+            let _ = invoke(&self.0, &["service", "stop"]);
+        }
+    }
+    let _down = Down(db.clone());
+    let (deregistered, go) = (queue_dir.join("deregistered"), queue_dir.join("go"));
+    let options = dagq::compose::SuperviseOptions {
+        queue_service: Some(dagq::compose::QueueServiceOptions {
+            executable: dagq.clone(),
+            interval: Duration::ZERO,
+            start_timeout: TIMEOUT,
+            control: None,
+        }),
+        service_route: dagq::compose::ServiceRoute::Socket,
+        pauses: Some(pause_once(
+            dagq::runtime::PausePoint::Deregistered,
+            deregistered.clone(),
+            go.clone(),
+        )),
+        ..crate::runtime_support::supervise_options(1, false)
+    };
+    let stop = options.stop.clone();
+    let supervisor = Running::with_options(&db, &repo, options);
+    // A failure lets the held supervisor go on before it is waited for.
+    struct Go(PathBuf);
+    impl Drop for Go {
+        fn drop(&mut self) {
+            let _ = fs::write(&self.0, "");
+        }
+    }
+    let release = Go(go);
+    let token = supervisor_token(&db);
+    supervisor.passes(2);
+    let file = service::credential_path(
+        &queue_dir,
+        &Principal::supervisor(&LeaseToken::new(&token), std::process::id()).credential_key(),
+    );
+    let value = service::read_token(&file).unwrap();
+
+    let location =
+        dagq::infrastructure::location::QueueLocation::explicit_in(&db, &queue_dir.join("home"));
+    let launchd = FakeLaunchd::new(&db);
+    let processes = FakeProcesses::default();
+    let report = std::thread::scope(|scope| {
+        let down = scope.spawn(|| {
+            dagq::lifecycle::down(
+                &location,
+                &launchd,
+                &processes,
+                &dagq::lifecycle::DownOptions {
+                    wait: true,
+                    force: false,
+                    poll: Duration::from_millis(20),
+                },
+            )
+            .unwrap()
+        });
+        // The supervisor drains once `down` asked it to stop the service
+        // and signalled it, and is held right after its deregistration.
+        {
+            let _waiting = common::within(TIMEOUT * 3, "down to ask for the service's stop");
+            while events(&db, "queue_service_stop_requested").is_empty() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        wait_for_file(&deregistered);
+        let _waiting = common::within(TIMEOUT * 3, "down --wait to return");
+        down.join().unwrap()
+    });
+    assert_eq!(report["queue_service"]["outcome"], "stopped", "{report}");
+    assert_eq!(service::probe(&queue_dir).state, Stopped);
+    assert!(!file.exists(), "{}", file.display());
+    assert_eq!(service::lookup(&queue_dir, &value).unwrap(), None);
+
+    drop(release);
+    supervisor.drain();
+    common::service::serve(&db);
+    let answer = show_with(&queue_dir, &value);
+    assert_eq!(answer["error"]["code"], "unauthenticated", "{answer}");
+}

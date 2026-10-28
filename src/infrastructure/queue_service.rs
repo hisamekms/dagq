@@ -742,9 +742,9 @@ pub fn revoke_under(
 /// ([`crate::domain::queue_service::job_token_ended`]): its
 /// record, and its value when the actor's file still holds that token (a
 /// token issued again since the look, as another supervisor's resume
-/// does, is left); the actor ids of those revoked. A record that does not
-/// read is left for a person to look at, and one that cannot be removed
-/// for the next sweep.
+/// does, is left), never a supervisor's sign-in; the actor ids of those
+/// revoked. A record that does not read is left for a person to look at,
+/// and one that cannot be removed for the next sweep.
 pub fn sweep(queue_dir: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Result<Vec<String>> {
     let dir = service_dir(queue_dir).join(TOKENS_DIR);
     let entries = match fs::read_dir(&dir) {
@@ -761,7 +761,11 @@ pub fn sweep(queue_dir: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Res
         let Ok(record) = serde_json::from_slice::<TokenRecord>(&bytes) else {
             continue;
         };
-        if !ended(&record.principal)
+        // A supervisor's sign-in is the service's to judge, which reads its
+        // registration in the transaction that revokes it: one swept here
+        // could be of a supervisor not registered yet.
+        if record.principal.role == crate::domain::ActorRole::Supervisor
+            || !ended(&record.principal)
             || (crate::domain::queue_service::is_job(record.principal.role)
                 && !crate::domain::queue_service::job_token_ended(
                     record.issued_by.as_ref(),
@@ -951,7 +955,8 @@ pub struct RequestedServiceAccess {
 impl RequestedServiceAccess {
     /// The access to the service of the queue at `db` of a command that
     /// starts a job at its caller's word (`observe`, `throughput-review`,
-    /// `setup-review`): the caller's principal is the one
+    /// `setup-review`), or that ends a supervisor's registration (`up`,
+    /// `down`): the caller's principal is the one
     /// [`set_command_caller`] named (the token's file its environment
     /// names, the supervisor's or the inbox's, and its role), or with none
     /// the user's.
@@ -982,6 +987,19 @@ impl RequestedServiceAccess {
                     .flatten()
             }),
         }
+    }
+}
+
+impl RequestedServiceAccess {
+    /// Ask the service to revoke the token of `principal`, a supervisor's
+    /// sign-in whose registration ended (the `revoke_token` use case):
+    /// whether one was revoked. A service that does not answer is a
+    /// failure that says so; the queue's files are never touched here.
+    pub fn revoke_ended(&self, principal: &Principal) -> Result<bool> {
+        let revoked = self
+            .client
+            .call(UseCase::RevokeToken, json!({"principal": principal}))?;
+        serde_json::from_value(revoked).context("the queue service's answer to a revocation")
     }
 }
 
@@ -2537,7 +2555,15 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
         writes: options.writes.clone(),
         detail: options.detail,
         commands: options.commands.clone(),
+        at_stop: Some(AtStop::default()),
     });
+    match crate::application::queue_service::revoke_ended_sign_ins(&*backend) {
+        Ok(revoked) if !revoked.is_empty() => {
+            info!("revoked the tokens of supervisors whose registration ended: {revoked:?}");
+        }
+        Ok(_) => {}
+        Err(error) => warn!("the supervisors' tokens could not be swept: {error:#}"),
+    }
     let mut served = 0u64;
     let mut checked = Instant::now();
     let outcome = loop {
@@ -2573,6 +2599,16 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
             }
         }
     };
+    // The tokens asked to go as it stops go before the lock is let go, so a
+    // supervisor that waits for the stop finds them gone.
+    let revoked = backend
+        .at_stop
+        .as_ref()
+        .map(|at_stop| at_stop.revoke_all(&queue_dir))
+        .unwrap_or_default();
+    if !revoked.is_empty() {
+        info!("revoked as the queue service stops: {revoked:?}");
+    }
     // What this process put in place goes; a record another wrote stays.
     if ServiceRecord::read(&queue_dir).is_some_and(|record| record.pid == pid) {
         let _ = fs::remove_file(dir.join(STATE_FILE));
@@ -2753,6 +2789,36 @@ pub struct SqliteServiceBackend {
     pub writes: ServiceWrites,
     pub detail: ServiceDetail,
     pub commands: ServiceCommands,
+    /// The keys of the tokens to revoke as the service stops
+    /// ([`ServiceBackend::revoke_at_stop`]), which [`serve`] revokes before
+    /// it exits; `None` for a backend that never stops on its own (a
+    /// supervisor's in-process one), which keeps none.
+    pub at_stop: Option<AtStop>,
+}
+
+/// The keys ([`Principal::credential_key`]) of the tokens a service
+/// revokes as it stops, before it exits.
+#[derive(Debug, Default)]
+pub struct AtStop(std::sync::Mutex<Vec<String>>);
+
+impl AtStop {
+    /// Revoke every token kept to go at the stop, in the queue at
+    /// `queue_dir`: the keys revoked. One that cannot be revoked is logged,
+    /// and left to the sweep of the service's next start.
+    fn revoke_all(&self, queue_dir: &Path) -> Vec<String> {
+        let keys = std::mem::take(&mut *self.0.lock().expect("the stop's tokens lock"));
+        keys.into_iter()
+            .filter(|key| match revoke(queue_dir, key) {
+                Ok(revoked) => revoked,
+                Err(error) => {
+                    warn!(
+                        "the token of {key} could not be revoked as the service stops: {error:#}"
+                    );
+                    false
+                }
+            })
+            .collect()
+    }
 }
 
 impl SqliteServiceBackend {
@@ -2816,12 +2882,26 @@ impl ServiceBackend for SqliteServiceBackend {
         process_of(pid)
     }
 
+    fn started_by_ended(&self, pid: u32, by: i64) -> bool {
+        let alive = super::adapters::process_alive(pid);
+        let started_at = alive
+            .then(|| super::adapters::process_started_at(pid))
+            .flatten();
+        crate::domain::queue_service::started_by_ended(alive, started_at, by)
+    }
+
     fn issue_as(&self, principal: &Principal, issuer: &TokenIssuer) -> Result<PathBuf> {
         Ok(issue_by(&self.queue_dir, principal, issuer, unix_now())?.file)
     }
 
     fn held(&self, key: &str) -> Result<Option<HeldToken>> {
         held(&self.queue_dir, key)
+    }
+
+    fn revoke_at_stop(&self, key: String) {
+        if let Some(at_stop) = &self.at_stop {
+            at_stop.0.lock().expect("the stop's tokens lock").push(key);
+        }
     }
 
     fn issue_telemetry_as(
@@ -2913,16 +2993,14 @@ impl ServiceBackend for SqliteServiceBackend {
 pub const SUPERVISOR_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The supervisor principal's token, once it signed in: its value, read
-/// from the file the issue wrote, and the key it is kept under
-/// ([`Principal::credential_key`]), for the revocation.
+/// from the file the issue wrote. The service revokes it at the
+/// supervisor's end ([`crate::application::supervisor_service::sign_out`]).
 #[derive(Default)]
 struct SignedIn(std::sync::Mutex<Option<Held>>);
 
-/// A token a caller holds: its value, the key it is kept under
-/// ([`Principal::credential_key`]) and its file.
+/// A token a caller holds: its value and its file.
 struct Held {
     value: String,
-    key: String,
     file: PathBuf,
 }
 
@@ -2950,11 +3028,7 @@ impl SignedIn {
         let Issued { file, .. } = serde_json::from_value(call(&request)?)
             .context("the queue service's answer to the supervisor's issue")?;
         let value = read_token(&file)?;
-        *self.0.lock().expect("the sign-in lock") = Some(Held {
-            value,
-            key: principal.credential_key(),
-            file,
-        });
+        *self.0.lock().expect("the sign-in lock") = Some(Held { value, file });
         Ok(())
     }
 
@@ -2969,12 +3043,12 @@ impl SignedIn {
             .ok()
             .filter(|value| record_path(queue_dir, value).is_file());
         if let Some(value) = kept {
-            *self.0.lock().expect("the sign-in lock") = Some(Held { value, key, file });
+            *self.0.lock().expect("the sign-in lock") = Some(Held { value, file });
         }
     }
 
-    /// Forget the token without revoking it, for the image this process
-    /// execs into to take back.
+    /// Forget the token without revoking it: for the image this process
+    /// execs into to take back, or once the service revoked it.
     fn hand_over(&self) {
         self.0.lock().expect("the sign-in lock").take();
     }
@@ -2987,21 +3061,12 @@ impl SignedIn {
             .map(|held| held.file.clone())
     }
 
-    fn sign_out(&self, queue_dir: &Path) {
-        if let Some(Held { key, .. }) = self.0.lock().expect("the sign-in lock").take()
-            && let Err(error) = revoke(queue_dir, &key)
-        {
-            warn!("the supervisor's queue service token could not be revoked: {error:#}");
-        }
-    }
-
     /// Call with the token in `file`, issued to another principal by the
     /// service, which this caller neither issued nor revokes.
     fn adopt(&self, file: &Path) -> Result<()> {
         let value = read_token(file)?;
         *self.0.lock().expect("the sign-in lock") = Some(Held {
             value,
-            key: String::new(),
             file: file.to_path_buf(),
         });
         Ok(())
@@ -3060,7 +3125,7 @@ impl SocketCaller {
         let value = read_token(&file).with_context(|| {
             format!("the token of supervisor {pid} ({registration}) could not be read")
         })?;
-        *caller.signed_in.0.lock().expect("the sign-in lock") = Some(Held { value, key, file });
+        *caller.signed_in.0.lock().expect("the sign-in lock") = Some(Held { value, file });
         Ok(caller)
     }
 
@@ -3171,7 +3236,7 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
 
     fn sign_out(&self) {
         if !self.adopted {
-            self.signed_in.sign_out(&self.queue_dir);
+            crate::application::supervisor_service::sign_out(self);
         }
     }
 
@@ -3213,6 +3278,7 @@ impl InProcessCaller {
                 writes,
                 detail,
                 commands,
+                at_stop: None,
             }),
             queue_dir,
             signed_in: SignedIn::default(),
@@ -3308,7 +3374,7 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
 
     fn sign_out(&self) {
         if !self.adopted {
-            self.signed_in.sign_out(&self.queue_dir);
+            crate::application::supervisor_service::sign_out(self);
         }
     }
 

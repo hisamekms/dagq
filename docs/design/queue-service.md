@@ -77,7 +77,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
 - 発行: serviceのユースケース`issue_token`（supervisorは`supervisor`の同名のop）が、子を起動する親のprincipalの依頼で発行し、値のfileのpathを返す（ADR-t3102-1決定2）。
   親になれるroleと、発行と同じtransactionで確かめる前提は[Authorization](authorization.md#queue-serviceのユースケースservice側)が持つ。
   tokenを発行してservice dirに書くのはserviceだけで、AI actorにtokenを作るコマンドは無い。
-  同じ対象に発行し直すと前のtokenは失効する（jobとplannerは依頼した親が居る間は別の親に出さない。規則は`reissue`のdoc comment）。
+  同じ対象に発行し直すと前のtokenは失効する（親が居る間のjobとplannerの規則は`reissue`のdoc comment）。
   依頼はactorの起動で（`ServiceAccess`）:
   - supervisor: 登録の前にuser（socketのpeer）として
   - workerとrunのwrapper: supervisorがclaimとresumeでrunのleaseの下に
@@ -87,11 +87,12 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
     jobのコマンド（`observe`など）が起動するもの（telemetryも）は呼び出し元のprincipalで依頼する（telemetryは開始の親とプロセスだけ、`issue_token`と`control`は未発行のみ）
   - integrator: 着地のslotを取る`begin_landing`と同じtransactionで、runのleaseの下に（supervisorは登録の生存も。人とinboxの`integrate`はそのコマンドが。[integrate](supervisor-lifecycle/integrate.md)）
   - wrapperは依頼せず、自分のactor idで引いたfileを使い、agentのturnにはworkerかplannerのもののpathを渡す（envとargvに値もpathも無い）
-- 失効: `queue_service::revoke`（`Principal::credential_key`）が値とprincipalの記録を消す。
+- 失効: `queue_service::revoke`（`Principal::credential_key`）が値と記録を消す。
   inboxのtokenはsessionの終わりと開き直しで、plannerとそのwrapperのものはplannerを閉じたときに失効し、serviceは消える前でも断る。
+  supervisorのtokenは登録の終わり（execは除く）にserviceが消す。
   加えてserviceは、principalがrunを名指すtokenを、そのrunが終わったときに断る（`run_holds_token`）。
   workerのtokenは、supervisorがrunの終わり（slotのrunが着地・failed・interruptedで休むとき）に`ServiceAccess::revoke`で消す。
-  そこで消さなかったものは、supervisorが起動の最初のpassと終わったrunのsweepのたびに`ServiceAccess::sweep`で消す（判定は`sweep_worker_tokens`）。
+  そこで消さなかったものは、supervisorが起動の最初のpassと終わったrunのsweepのたびに`ServiceAccess::sweep`で消す（`sweep_worker_tokens`）。
   resumeを待つrun（`needs_session`）はtokenを保つので消さず、resumeは発行し直す
 - executorのtelemetryのprincipal（ADR-t1662-3決定9〜11・13）: role `executor-telemetry`で、対象を1つだけ持つ（runの対象は`run_id`、runを持たない対象は種類とid。`domain::session_step::StepTarget`）。
   actor idは対象から作り、runの対象のtokenはworkerのものと同じくrunの終わりで断る。
@@ -101,7 +102,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
 - 断り: 認証できない要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（tokenの値は書かない）に残す（理由は`QueueService::authenticate`のdoc comment）。
 - hostの呼び出し元に渡すenvはsocketのpathとtokenのfileのpathで、containerのrunにはsocketの代わりにbrokerのURLを渡す（[クライアントモード](#クライアントモード)、`domain::queue_service::CLIENT_ENV`）。
   envの名前の落とし穴は`CREDENTIAL_FILE_ENV`のdoc comment
-- host構成では同じユーザーのプロセスが他のrunのtokenのfileもDBも読めるので、tokenは誤りを止めて記録を正しくするためのもので、security boundaryではない（ADR-t1233-4決定5、[Security](security.md#host実行は助言的advisory)）
+- host構成では同じユーザーのプロセスが他のrunのtokenのfileもDBも読めるので、tokenは誤りを止めるもので、security boundaryではない（ADR-t1233-4決定5、[Security](security.md#host実行は助言的advisory)）
 
 ## ユースケース
 

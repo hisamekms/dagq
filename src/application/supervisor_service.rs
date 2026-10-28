@@ -103,7 +103,8 @@ pub trait ServiceCaller: Send + Sync {
     /// handoff): it is not revoked, so a job command that calls with it
     /// goes on across the exec, and this caller calls with none.
     fn hand_over(&self);
-    /// Give the principal's token back, at the supervisor's end.
+    /// Give the principal's token back, at the supervisor's end, through
+    /// the service ([`sign_out`]).
     fn sign_out(&self);
     /// The file of the token this caller signed in with, which a command
     /// the supervisor starts is given to ask the service for its job's
@@ -656,7 +657,9 @@ impl std::error::Error for NotOwnLease {}
 /// The operations on the tokens of the principals the supervisor starts
 /// (ADR-t3102-1 decision 2): each is done by the service, a worker's and a
 /// run's executor's under the run's lease checked in the same transaction.
-const TOKEN_OPS: [&str; 9] = [
+const TOKEN_OPS: [&str; 11] = [
+    SIGN_OUT,
+    SIGN_OUT_AT_STOP,
     "issue_token",
     "revoke_token",
     "revoke_principal",
@@ -667,6 +670,65 @@ const TOKEN_OPS: [&str; 9] = [
     "target_facts",
     "register_telemetry_session",
 ];
+
+/// The operation of a supervisor that stops: the service revokes the token
+/// the request carries, its own sign-in (ADR-t3102-1 decision 2, the end
+/// of its registration), at the end of the process, after its last request
+/// ([`sign_out`]).
+pub const SIGN_OUT: &str = "sign_out";
+
+/// The operation of a supervisor whose registration ends, sent before it
+/// removes it: the service revokes the token the request carries as it
+/// stops, before it exits ([`ServiceBackend::revoke_at_stop`]). Once the
+/// registration is gone, a `down --wait` may stop the service, and so does
+/// the supervisor itself after a `down`'s drain, before the supervisor's
+/// last requests: the token goes with the service all the same, and the
+/// supervisor's record of its own stop is still made with it.
+pub const SIGN_OUT_AT_STOP: &str = "sign_out_at_stop";
+
+/// Ask the service, before the supervisor removes its registration, to
+/// revoke the token `caller` signed in with as it stops
+/// ([`SIGN_OUT_AT_STOP`]). One that holds none asks for nothing; one the
+/// service did not take is given back at the supervisor's end
+/// ([`sign_out`]) or swept.
+pub fn sign_out_at_stop(caller: &dyn ServiceCaller) {
+    if caller.credential().is_none() {
+        return;
+    }
+    let params = serde_json::json!({"op": SIGN_OUT_AT_STOP, "args": []});
+    if let Err(error) = caller.call(crate::domain::queue_service::UseCase::Supervisor, params) {
+        tracing::warn!(
+            "the queue service was not asked to revoke the supervisor's token as it stops: \
+             {error:#}"
+        );
+    }
+}
+
+/// Give the token `caller` signed in with back at the supervisor's end,
+/// through the service ([`SIGN_OUT`]), and forget it. A caller that holds
+/// none (it signed in as none, or handed its token over for an exec) asks
+/// for nothing. A supervisor whose service stopped once its registration
+/// was gone (`down --wait`, or itself after a `down`'s drain) finds none:
+/// the service revoked its token as it stopped ([`SIGN_OUT_AT_STOP`]). Any
+/// other one the service did not take
+/// is revoked by the service's next start or a supervisor's sweep once the
+/// registration is gone and this process has ended
+/// ([`crate::domain::queue_service::supervisor_token_ended`]); this
+/// process never removes it itself.
+pub fn sign_out(caller: &dyn ServiceCaller) {
+    if caller.credential().is_none() {
+        return;
+    }
+    let params = serde_json::json!({"op": SIGN_OUT, "args": []});
+    if let Err(error) = caller.call(crate::domain::queue_service::UseCase::Supervisor, params) {
+        tracing::warn!(
+            "the supervisor's sign-out did not reach the queue service: {error:#}; a token the \
+             service was asked to revoke as it stopped is gone, and any other is revoked by the \
+             service's next start or a supervisor's sweep"
+        );
+    }
+    caller.hand_over();
+}
 
 /// The operations of the jobs the supervisor starts as commands of its
 /// own (an observation, a throughput review), which reach the queue as
@@ -816,14 +878,56 @@ pub fn answer(
     if let Some(record) = once_record(&params) {
         return dispatch::dispatch_once(store, &params.op, Value::Array(params.args), &record);
     }
-    dispatch::dispatch(
+    let pruned = left_behind(&*store, &registration, &params);
+    let answered = dispatch::dispatch(
         store,
         &own,
         &alive,
         now,
         &params.op,
         Value::Array(params.args),
-    )
+    )?;
+    if let Some(pruned) = pruned.filter(|_| answered == Value::Bool(true)) {
+        revoke_pruned(backend, &pruned);
+    }
+    Ok(answered)
+}
+
+/// The registration of another supervisor that `params`, a
+/// `prune_supervisor` of the supervisor of `registration`, names: the one
+/// whose token the prune revokes once it removed it
+/// ([`revoked_with_prune`](crate::domain::queue_service::revoked_with_prune)).
+/// `None` for any other operation, the supervisor's own registration, and
+/// one not kept.
+fn left_behind(
+    store: &dyn SupervisorStore,
+    registration: &LeaseToken,
+    params: &SupervisorParams,
+) -> Option<crate::domain::SupervisorRegistration> {
+    if params.op != "prune_supervisor" {
+        return None;
+    }
+    let pruned: LeaseToken = serde_json::from_value(params.args.first()?.clone()).ok()?;
+    if !crate::domain::queue_service::revoked_with_prune(registration, &pruned) {
+        return None;
+    }
+    super::SupervisorReads::supervisors(store)
+        .ok()?
+        .into_iter()
+        .find(|kept| kept.token == pruned)
+}
+
+/// Revoke the token of `pruned`, a registration that ended (ADR-t3102-1
+/// decision 2): its value, record and file. One that cannot be revoked is
+/// logged, and the sweep revokes it later
+/// ([`supervisor_token_ended`](crate::domain::queue_service::supervisor_token_ended)).
+fn revoke_pruned(backend: &dyn ServiceBackend, pruned: &crate::domain::SupervisorRegistration) {
+    let key = Principal::supervisor(&pruned.token, pruned.pid).credential_key();
+    if let Err(error) = backend.access().revoke(backend.db(), &key) {
+        tracing::warn!(
+            "the token of the pruned registration {key} could not be revoked: {error:#}"
+        );
+    }
 }
 
 /// Who takes a landing's slot ([`begin_landing`]).
@@ -1144,6 +1248,14 @@ fn tokens(
     let args = Value::Array(params.args.clone());
     let db = backend.db();
     match op {
+        SIGN_OUT => {
+            // Its own token only, the one the request carries.
+            reply(backend.access().revoke(db, &principal.credential_key()))
+        }
+        SIGN_OUT_AT_STOP => {
+            backend.revoke_at_stop(principal.credential_key());
+            reply(Ok(true))
+        }
         "issue_token" => {
             // The issue use case's, with this supervisor as the parent: a
             // worker's and its run's wrapper's under the run's lease, a
@@ -1195,8 +1307,9 @@ fn tokens(
                 ))
                 .into());
             };
-            // Only the token its file holds now, that very principal's, an
-            // inbox's only once its session is known to have ended, a job's
+            // Only the token its file holds now, that very principal's, a
+            // supervisor's only once its registration and its process ended,
+            // an inbox's only once its session is known to have ended, a job's
             // once the process that asked for it ended (one whose parent
             // cannot be judged, once its job is taken as ended), and never
             // another parent's that is there: never a live session's or
@@ -1213,13 +1326,21 @@ fn tokens(
                 // Its job's state read once, which both judgements take.
                 let state = std::cell::OnceCell::new();
                 let job = || state.get_or_init(|| facts.job(&held, None)).clone();
-                let ended = principal
-                    .session
-                    .as_ref()
-                    .is_none_or(|session| backend.session_ended(session))
-                    && (!is_job(principal.role)
-                        || job_token_ended(held.issued_by.as_ref(), there, job))
-                    && revoke_refusal(&held, &issuer.parent, there, job).is_none();
+                // A supervisor's sign-in once its registration ended, as
+                // read in this transaction, and its process with it.
+                let signed_in =
+                    super::queue_service::supervisor_ended(backend, &held, |registration| {
+                        facts.registered(registration)
+                    });
+                let ended = signed_in.unwrap_or_else(|| {
+                    principal
+                        .session
+                        .as_ref()
+                        .is_none_or(|session| backend.session_ended(session))
+                        && (!is_job(principal.role)
+                            || job_token_ended(held.issued_by.as_ref(), there, job))
+                        && revoke_refusal(&held, &issuer.parent, there, job).is_none()
+                });
                 if !ended {
                     return reply(Ok(false));
                 }

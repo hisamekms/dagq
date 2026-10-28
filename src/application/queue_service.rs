@@ -232,6 +232,11 @@ pub trait ServiceBackend: Send + Sync {
     /// The process `pid` as a session is read (its start), `None` when
     /// that cannot be read.
     fn process_of(&self, pid: u32) -> Option<crate::domain::queue_service::SessionProcess>;
+    /// Whether the process on `pid`, which had started by `by` (unix
+    /// seconds), is known to have ended: its pid is gone, or a process that
+    /// started after then is on it
+    /// ([`crate::domain::queue_service::started_by_ended`]).
+    fn started_by_ended(&self, pid: u32, by: i64) -> bool;
     /// Issue `principal`'s token as [`ServiceAccess::issue`] does, keeping
     /// `issuer` with it (ADR-t3102-1 decision 2).
     fn issue_as(
@@ -242,6 +247,13 @@ pub trait ServiceBackend: Send + Sync {
     /// The token the file of `key` ([`Principal::credential_key`]) holds,
     /// its principal and who asked for it; `None` for no token.
     fn held(&self, key: &str) -> Result<Option<crate::domain::queue_service::HeldToken>>;
+    /// Revoke the token of `key` as this service stops, before it exits: a
+    /// supervisor's whose registration ends, which a `down --wait` or the
+    /// supervisor itself may stop the service after, before its last
+    /// requests (ADR-t3102-1 decision 2). A backend that never stops on its
+    /// own (a supervisor's in-process one) keeps none, and the supervisor
+    /// gives its token back at its end instead.
+    fn revoke_at_stop(&self, _key: String) {}
     /// [`TelemetryTokens::issue_telemetry`], keeping `issuer` with the
     /// token.
     fn issue_telemetry_as(
@@ -384,6 +396,9 @@ impl QueueService<'_> {
                 &request.params,
                 process,
             ));
+        }
+        if request.use_case == UseCase::RevokeToken {
+            return respond(revoke_token_of(self.backend, &principal, &request.params));
         }
         // The queue the token's run or target was read on, when it was,
         // is the use case's: it is opened once.
@@ -696,6 +711,137 @@ fn issue_token_of(
     let p: IssueTokenParams = params(UseCase::IssueToken, raw)?;
     let mut queue = backend.open(&parent.actor())?;
     issue_token(backend, &mut *queue, parent, &p.principal, process)
+}
+
+/// Revoke, as the service starts, the supervisors' sign-ins left over from
+/// registrations that ended (ADR-t3102-1 decision 2): one a supervisor
+/// could not give back because the service it asked to revoke it as it
+/// stopped was killed first, one an older binary left, and any other no
+/// prune and no sweep revoked. Each is judged in a write transaction as the
+/// sweep's is ([`supervisor_ended`]: its registration not kept and the
+/// process that asked for it ended); while no service runs, no token
+/// authenticates anything. The keys revoked; one that cannot be judged or
+/// revoked is logged and left.
+pub fn revoke_ended_sign_ins(backend: &dyn ServiceBackend) -> Result<Vec<String>> {
+    let mut revoked = Vec::new();
+    let signed_in = backend.principals()?.into_iter().filter(|principal| {
+        principal.role == ActorRole::Supervisor && principal.registration.is_some()
+    });
+    for principal in signed_in {
+        let key = principal.credential_key();
+        // Only a token whose asking process ended is judged in a write
+        // transaction, as if its registration were gone: a live
+        // supervisor's goes by without the queue's lock, so a busy queue
+        // holds no start back for it.
+        let asked_ended = backend
+            .held(&key)
+            .ok()
+            .flatten()
+            .is_some_and(|held| supervisor_ended(backend, &held, |_| false) == Some(true));
+        if !asked_ended {
+            continue;
+        }
+        let done = backend.open(&principal.actor()).and_then(|mut queue| {
+            queue.issuing(
+                &crate::domain::queue_service::IssueHeld::Nothing,
+                backend.now_ms(),
+                &mut |facts| {
+                    let Some(held) = backend
+                        .held(&key)?
+                        .filter(|held| held.principal == principal)
+                    else {
+                        return Ok(json!(false));
+                    };
+                    let ended = supervisor_ended(backend, &held, |registration| {
+                        facts.registered(registration)
+                    });
+                    if ended != Some(true) {
+                        return Ok(json!(false));
+                    }
+                    Ok(json!(backend.access().revoke(backend.db(), &key)?))
+                },
+            )
+        });
+        match done {
+            Ok(Value::Bool(true)) => revoked.push(key),
+            Ok(_) => {}
+            Err(error) => warn!("the token of {key} could not be judged or revoked: {error:#}"),
+        }
+    }
+    Ok(revoked)
+}
+
+/// Whether `held`, a supervisor's sign-in, is left over from a
+/// registration that ended
+/// ([`crate::domain::queue_service::supervisor_token_ended`]), its
+/// registration as `registered` reads it and the processes as `backend`
+/// does; `None` for any other principal's.
+pub(super) fn supervisor_ended(
+    backend: &dyn ServiceBackend,
+    held: &crate::domain::queue_service::HeldToken,
+    registered: impl Fn(&crate::domain::LeaseToken) -> bool,
+) -> Option<bool> {
+    crate::domain::queue_service::supervisor_token_ended(
+        held,
+        registered,
+        |process| backend.session_ended(process),
+        |pid, by| backend.started_by_ended(pid, by),
+    )
+}
+
+/// The revocation use case (`revoke_token`, ADR-t3102-1 decision 2): the
+/// token of `raw`'s principal, a supervisor's sign-in, revoked at the
+/// request of `caller`, the principal of the request, once `up` or `down`
+/// pruned its registration: the caller is to hold what `down` asks of the
+/// policy (the user's, and the inbox's that runs it for the user;
+/// [`authorize_operation`]). Then, in a write transaction as the issue's,
+/// the token the principal's key holds is revoked only when it is that
+/// principal's and its registration is no longer kept
+/// ([`crate::domain::queue_service::registration_end_refusal`]), a refusal
+/// recorded as `authorization_denied`. The answer is whether one was
+/// revoked: its value, record and file.
+fn revoke_token_of(backend: &dyn ServiceBackend, caller: &Principal, raw: &Value) -> Result<Value> {
+    let p: IssueTokenParams = params(UseCase::RevokeToken, raw)?;
+    let child = p.principal;
+    let actor = caller.actor();
+    let mut queue = backend.open(&actor)?;
+    let down = super::commands::operations::Operation::Down;
+    let (capability, _) = down.request();
+    authorize_operation(&mut *queue, &actor, &down)?;
+    let resource = Resource::Principal(child.role);
+    let store = Store(&mut *queue);
+    let key = child.credential_key();
+    let revoked = store.0.issuing(
+        &crate::domain::queue_service::IssueHeld::Nothing,
+        backend.now_ms(),
+        &mut |facts| {
+            let Some(held) = backend.held(&key)?.filter(|held| held.principal == child) else {
+                return Ok(json!(false));
+            };
+            if let Some(why) =
+                crate::domain::queue_service::registration_end_refusal(&held, |token| {
+                    facts.registered(token)
+                })
+            {
+                return Err(Replacing(why).into());
+            }
+            Ok(json!(backend.access().revoke(backend.db(), &key)?))
+        },
+    );
+    match revoked {
+        Err(error) => match error.downcast_ref::<Replacing>() {
+            Some(Replacing(why)) => Err(refuse_recorded(
+                store.0,
+                &actor,
+                capability,
+                &resource,
+                crate::domain::authorization::DenyReason::Resource,
+                why,
+            )),
+            None => Err(error),
+        },
+        revoked => revoked,
+    }
 }
 
 /// Issue the token of `child` at `parent`'s request (ADR-t3102-1 decision
@@ -1325,7 +1471,9 @@ fn run(
         UseCase::Supervisor | UseCase::Control => {
             unreachable!("a supervisor's and a control-side command's requests are answered apart")
         }
-        UseCase::IssueToken => unreachable!("an issue is answered apart"),
+        UseCase::IssueToken | UseCase::RevokeToken => {
+            unreachable!("an issue and a revocation are answered apart")
+        }
         UseCase::List
         | UseCase::Candidates
         | UseCase::Graph
@@ -2440,6 +2588,9 @@ mod tests {
         }
         fn process_of(&self, _: u32) -> Option<crate::domain::queue_service::SessionProcess> {
             None
+        }
+        fn started_by_ended(&self, pid: u32, _: i64) -> bool {
+            pid != 8
         }
         fn issue_as(
             &self,

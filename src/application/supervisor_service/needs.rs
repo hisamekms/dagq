@@ -305,6 +305,8 @@ const SUPERVISE: &[&str] = &[
     "settle_eval_round",
     "take_up_eval_round",
     "take_case_set",
+    "sign_out",
+    "sign_out_at_stop",
     "issue_token",
     "revoke_token",
     "revoke_principal",

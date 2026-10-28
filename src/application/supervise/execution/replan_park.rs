@@ -490,7 +490,14 @@ impl Supervisor<'_> {
     /// ([`Ports::pauses`]); nothing outside the tests.
     pub(super) fn pause_at(&self, point: PausePoint, run: &RunId) {
         if let Some(pauses) = &self.pauses {
-            pauses(point, run);
+            pauses(point, Some(run));
+        }
+    }
+
+    /// [`Self::pause_at`] a point of no run, at the supervisor's end.
+    pub(super) fn pause_at_end(&self, point: PausePoint) {
+        if let Some(pauses) = &self.pauses {
+            pauses(point, None);
         }
     }
 

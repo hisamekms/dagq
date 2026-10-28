@@ -433,16 +433,20 @@ impl Registration {
     /// error) in one transaction (ADR-t1662-1 decision 6). A record that
     /// fails keeps the row, which goes stale for the next `up` or `down` to
     /// prune. Whether the loop ended so; an exec, or a lost heartbeat,
-    /// keeps the registration.
+    /// keeps the registration. `before_removal` runs once the registration
+    /// is to go, before it goes: what has to be in place before another
+    /// process can see it gone.
     pub(in crate::application::supervise) fn deregister(
         &mut self,
         queue: &(impl SupervisorRegistry + ?Sized),
         version: &str,
         ok: bool,
+        before_removal: &mut dyn FnMut(),
     ) -> bool {
         if self.exec.is_some() || self.heartbeat.check().is_err() {
             return false;
         }
+        before_removal();
         // The mark of the stop; an exec leaves it to the next process's
         // handoff mark.
         let mut stopped = json!({

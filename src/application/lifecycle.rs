@@ -304,7 +304,17 @@ pub struct Ports<'a> {
     /// `queue_broker(db, executable)`: the control of the queue's broker,
     /// started from `executable` (ADR-t2114-1 decision 1).
     pub queue_broker: &'a QueueBrokerControls,
+    /// `revoke_ended(db, principal)`: ask the service of the queue at `db`,
+    /// as the caller's principal, to revoke the token of `principal`, a
+    /// supervisor whose registration `up` or `down` pruned (the
+    /// `revoke_token` use case): whether one was revoked
+    /// ([`prune_and_revoke`]).
+    pub revoke_ended: &'a RevokeEnded,
 }
+
+/// How `up` and `down` revoke a pruned registration's token: see
+/// [`Ports::revoke_ended`].
+pub type RevokeEnded = dyn Fn(&Path, &crate::domain::queue_service::Principal) -> Result<bool>;
 
 /// How `up` and `down` reach the queue's broker: see
 /// [`Ports::queue_broker`].
@@ -536,6 +546,7 @@ pub fn up(
         clock: ports.clock,
         environment,
         options,
+        revoke_ended: ports.revoke_ended,
     };
 
     let mut pruned = Vec::new();
@@ -549,12 +560,12 @@ pub fn up(
     let mut listing = None;
     for registration in queue.supervisors()? {
         if !processes.alive(registration.pid) {
-            prune_supervisor(queue, &registration)?;
+            prune_and_revoke(queue, ports.revoke_ended, &db, &registration)?;
             pruned.push(json!({"token": registration.token, "pid": registration.pid}));
             continue;
         }
         if pid_taken_over(&registration, processes, now, &mut listing) {
-            prune_supervisor(queue, &registration)?;
+            prune_and_revoke(queue, ports.revoke_ended, &db, &registration)?;
             pruned.push(json!({
                 "token": registration.token,
                 "pid": registration.pid,
@@ -725,6 +736,7 @@ struct Up<'a, Q: ?Sized> {
     clock: &'a dyn Clock,
     environment: &'a UpEnvironment,
     options: &'a UpOptions,
+    revoke_ended: &'a RevokeEnded,
 }
 
 /// The actor of the session `role` has a single instance of (the inbox):
@@ -836,6 +848,8 @@ fn drain_supervisors(
         queue,
         processes,
         options,
+        db,
+        revoke_ended,
         ..
     } = *up;
     // `--no-wait` promised not to sit through a drain. The runs were the
@@ -877,7 +891,7 @@ once `status` shows it gone",
         .collect();
     for registration in draining {
         if surviving.contains(&registration.token) {
-            prune_supervisor(queue, registration)?;
+            prune_and_revoke(queue, revoke_ended, db, registration)?;
         }
     }
     Ok(())
@@ -1973,6 +1987,33 @@ pub(crate) fn prune_supervisor(
     Ok(())
 }
 
+/// [`prune_supervisor`] by `up` or `down`, then the revocation of the
+/// token of the registration it pruned, which the service of the queue at
+/// `db` does at their request (`revoke_ended`, the `revoke_token` use case;
+/// ADR-t3102-1 decision 2: a token goes with its registration's end). The
+/// process of a registration `up` or `down` prunes cannot give it back
+/// itself. A revocation that fails (the service down, as after a `down`)
+/// is logged and leaves the token to a live supervisor's sweep, which the
+/// service judges by the registration gone
+/// ([`crate::domain::queue_service::supervisor_token_ended`]).
+fn prune_and_revoke(
+    queue: &(impl SupervisorRegistry + ?Sized),
+    revoke_ended: &RevokeEnded,
+    db: &Path,
+    registration: &SupervisorRegistration,
+) -> Result<()> {
+    prune_supervisor(queue, registration)?;
+    let principal =
+        crate::domain::queue_service::Principal::supervisor(&registration.token, registration.pid);
+    if let Err(error) = revoke_ended(db, &principal) {
+        tracing::warn!(
+            "the token of the pruned registration {} could not be revoked: {error:#}",
+            principal.credential_key()
+        );
+    }
+    Ok(())
+}
+
 /// Whether the pid of a registration that stopped heartbeating now belongs
 /// to another process ([`supervisor_prune::pid_taken_over`]). `listing`
 /// caches this user's processes across registrations; when they cannot be
@@ -2585,7 +2626,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         if !processes.alive(registration.pid) {
             dead.push(registration.clone());
         } else if pid_taken_over(registration, processes, now, &mut listing) {
-            prune_supervisor(queue, registration)?;
+            prune_and_revoke(queue, ports.revoke_ended, &location.db, registration)?;
             pruned.push(json!({
                 "token": registration.token,
                 "pid": registration.pid,
@@ -2696,7 +2737,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     if live.is_empty() {
         if options.force {
             for registration in &dead {
-                prune_supervisor(queue, registration)?;
+                prune_and_revoke(queue, ports.revoke_ended, &location.db, registration)?;
                 pruned.push(json!({"token": registration.token, "pid": registration.pid}));
             }
         }
@@ -2725,11 +2766,11 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     if options.force {
         for registration in &live {
             processes.kill(registration.pid)?;
-            prune_supervisor(queue, registration)?;
+            prune_and_revoke(queue, ports.revoke_ended, &location.db, registration)?;
         }
         // The dead ones go too.
         for registration in &dead {
-            prune_supervisor(queue, registration)?;
+            prune_and_revoke(queue, ports.revoke_ended, &location.db, registration)?;
             pruned.push(json!({"token": registration.token, "pid": registration.pid}));
         }
         let mut report = json!({
