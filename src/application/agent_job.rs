@@ -31,9 +31,10 @@ use std::path::Path;
 
 use super::prompt::{
     AGENT_JOB_DEFINITION_BYTES, AGENT_JOB_INSTRUCTIONS_BYTES, AGENT_JOB_MATERIAL_BYTES,
-    AGENT_JOB_PROMPT_LIMIT, FittedPrompt,
+    AGENT_JOB_PROMPT_LIMIT, FittedPrompt, landing_answers_section,
 };
 use super::prompt_fit::{Fit, Keep};
+use super::review::PersonAnswers;
 use super::{AgentJobLaunch, AgentReads};
 use crate::domain::language::Language;
 use crate::domain::review_subagents::AgentTools;
@@ -64,6 +65,11 @@ pub struct AgentJob<'a> {
     /// run's review's agent `None`, whose launch is then as it was. The
     /// prompt does not change with it.
     pub reads: Option<&'a AgentReads>,
+    /// A run's review's agent: a person's answers to the run's
+    /// `approve_landing` asks, the same section the whole review carries
+    /// ([`super::prompt::landing_answers_section`]); `None` without any
+    /// and for a case's job.
+    pub answers: Option<&'a PersonAnswers>,
 }
 
 /// A definition past the agent job's limit (ADR-t1869-1): no prompt is
@@ -171,6 +177,10 @@ pub fn build(job: &AgentJob<'_>) -> Result<BuiltAgentJob, DefinitionOverLimit> {
         }
         None => String::new(),
     };
+    let answers = job
+        .answers
+        .and_then(|answers| landing_answers_section(&mut fit, answers, &material_path))
+        .unwrap_or_default();
     let instructions = fit.text(
         "instructions",
         &format!(
@@ -195,7 +205,7 @@ pub fn build(job: &AgentJob<'_>) -> Result<BuiltAgentJob, DefinitionOverLimit> {
         &read,
     );
     let text = format!(
-        "{instructions}\n{material}\nThe definition of `{agent}`:\n<definition>\n{definition}\n</definition>\n\n{rules}{answer}",
+        "{instructions}\n{material}\nThe definition of `{agent}`:\n<definition>\n{definition}\n</definition>\n\n{rules}{answers}{answer}",
         agent = job.agent,
         definition = job.definition,
     );
@@ -247,6 +257,7 @@ mod tests {
             dir: &paths.dir,
             language: None,
             reads: None,
+            answers: None,
         }
     }
 

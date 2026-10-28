@@ -1418,6 +1418,7 @@ impl Supervisor<'_> {
                 dir: &dir,
                 language: language.as_ref(),
                 reads: Some(&reads),
+                answers: None,
             })?;
             self.files
                 .write(&dir.join("prompt.txt"), built.prompt.text.as_bytes())?;

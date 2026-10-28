@@ -502,6 +502,7 @@ fn a_run_rebased_onto_a_main_that_moved_on_is_reviewed_from_their_merge_base() {
         dir: &job_dir,
         language: None,
         reads: None,
+        answers: None,
     })
     .unwrap();
     let prompt = &built.prompt.text;
@@ -2193,4 +2194,87 @@ fn a_review_whose_agent_waits_for_its_provider_is_parked_without_starting_it() {
     // Codex is back.
     assert_eq!(payloads(&detail, "review_job_started").len(), 2);
     assert!(payloads(&detail, "review_finished").is_empty());
+}
+
+/// A person's answer to the run's `approve_landing` ask reaches the next
+/// round's review across the queue: review.md, the whole review's prompt
+/// and the agent's job carry it, with the ask and the round that opened
+/// it, and the rule on the concerns it accepted once; the first round,
+/// which no person had answered, carries none of it.
+#[test]
+fn a_persons_landing_answer_reaches_the_next_rounds_review_and_its_agents() {
+    const ACCEPTED: &str = "A person already decided the concerns these answers accept";
+    let (_dir, repo, db) = fixture();
+    commit_on_main(&repo, CONFIG, Some(MAIN_DEFINITION));
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[
+        verdict(
+            "concern",
+            &["adds a permission the task did not name"],
+            "scope",
+        ),
+        verdict("pass", &[], "fixed"),
+    ])
+    .with_review_agents(&[("design", vec![agent_says("design", "pass", &[])])]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    let answer = "send_back: the added permission is as designed; narrow the change";
+    queue.answer(asks[0].id, answer).unwrap();
+    backend.resume_script_for(
+        1,
+        "await_message; printf 'narrowed\\n' > change.txt; unlocked git commit -q -am narrowed; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let line = format!("- ask {}, after review 1: {answer}\n", asks[0].id);
+
+    let whole = reviewer.prompts();
+    assert_eq!(whole.len(), 2);
+    assert!(
+        !whole[0].contains(&line) && !whole[0].contains(ACCEPTED),
+        "{}",
+        whole[0]
+    );
+    assert_eq!(whole[1].matches(&line).count(), 1, "{}", whole[1]);
+    assert_eq!(whole[1].matches(ACCEPTED).count(), 1, "{}", whole[1]);
+
+    let run_dir = detail.runs[0].run_dir().unwrap();
+    let material = PathBuf::from(format!("{run_dir}/review.md"));
+    let agents: Vec<String> = reviewer
+        .launches()
+        .into_iter()
+        .filter(|launch| launch.material == material)
+        .map(|launch| launch.prompt)
+        .collect();
+    assert_eq!(agents.len(), 2, "{agents:?}");
+    assert!(
+        !agents[0].contains(&line) && !agents[0].contains(ACCEPTED),
+        "{}",
+        agents[0]
+    );
+    assert_eq!(agents[1].matches(&line).count(), 1, "{}", agents[1]);
+    assert_eq!(agents[1].matches(ACCEPTED).count(), 1, "{}", agents[1]);
+    assert_eq!(
+        fs::read_to_string(format!("{run_dir}/review-2-agents/design/prompt.txt")).unwrap(),
+        agents[1]
+    );
+
+    // review.md is the last round's: it carries the answer before the
+    // commits, and none of the first round's findings.
+    let material = fs::read_to_string(&material).unwrap();
+    let section = material
+        .split("## A person's answers to this run's landing asks")
+        .nth(1)
+        .and_then(|rest| rest.split("## Commits").next())
+        .unwrap_or_else(|| panic!("no answers in {material}"));
+    assert!(section.contains(&line), "{section}");
+    assert!(
+        !section.contains("adds a permission the task did not name"),
+        "{section}"
+    );
 }

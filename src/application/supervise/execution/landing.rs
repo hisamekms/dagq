@@ -10,7 +10,7 @@ use crate::application::job_start_failure;
 use crate::application::prompt::{AcceptanceRules, PromptBytes, REVIEW_ACCESS};
 use crate::application::review::{
     ReviewRange, SnapshotAgent, SubagentSnapshot, acceptance_record, acceptance_rules,
-    review_code_paths, review_range_at, review_revise_limit, snapshot_subagents,
+    landing_answers, review_code_paths, review_range_at, review_revise_limit, snapshot_subagents,
 };
 use crate::application::review_programs::{self, ProgramSnapshot, snapshot_programs};
 use crate::application::run_git;
@@ -1491,7 +1491,11 @@ impl Supervisor<'_> {
             .as_str()
             .context("review wrote no path")?
             .to_owned();
-        let task = self.queue.show(run.task_id())?.task;
+        let detail = self.queue.show(run.task_id())?;
+        // A person's answers to the run's approve_landing asks, read as
+        // review.md reads them, for the whole review and each agent.
+        let answers = landing_answers(run.id(), &detail.events, &detail.asks);
+        let task = detail.task;
         let language = self.verifier.language();
         // The whole review's job only: it decides whether to send the run
         // back (ADR-t1920-1 decision 5).
@@ -1524,6 +1528,7 @@ impl Supervisor<'_> {
                 text: &rules.text,
                 whole_at: &whole_at,
             }),
+            &answers,
         )
         .with_language(language.as_ref());
         self.files.write(
@@ -1559,6 +1564,7 @@ impl Supervisor<'_> {
                 language: language.as_ref(),
                 // A run's review's agent reads as its sandbox lets it.
                 reads: None,
+                answers: Some(&answers),
             })
             .with_context(|| format!("the job of the agent {}", agent.name))?;
             self.files

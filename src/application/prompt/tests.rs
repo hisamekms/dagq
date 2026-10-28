@@ -1,5 +1,6 @@
 use super::*;
 use crate::application::memory_files::MemoryFiles;
+use crate::application::review::{LANDING_ANSWERS_INTRO, PersonAnswer, PersonAnswers};
 use crate::domain::local_checks::LocalChecks;
 use crate::domain::worker::WorkerMode;
 use crate::domain::{
@@ -1185,6 +1186,7 @@ fn prompts_take_the_rules_from_the_repository_in_order() {
         "/r/review.md",
         None,
         None,
+        &PersonAnswers::default(),
     )
     .text;
     let order = "in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, ";
@@ -2008,6 +2010,7 @@ fn every_worker_text_that_writes_a_receipt_maps_the_acceptance_once() {
         "r",
         None,
         None,
+        &PersonAnswers::default(),
     )
     .text;
     assert!(!review.contains(ACCEPTANCE_MAP) && !review.contains(ACCEPTANCE_REMAP));
@@ -2158,6 +2161,7 @@ fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
         "r",
         None,
         None,
+        &PersonAnswers::default(),
     )
     .text;
     assert!(!review.contains(DOCS_CHECK));
@@ -2173,7 +2177,7 @@ fn only_the_whole_review_lists_every_finding_that_sends_back_in_one_round() {
     const ONE_ROUND: &str = "For revise or concern, list in reasons, in this round, every finding of the diff that is a reason to send the run back: do not leave one for a later round.";
     let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
     let run = run_on(Provider::Claude, WorkerMode::Headless);
-    let review = review_prompt(&task, &run, "r", None, None).text;
+    let review = review_prompt(&task, &run, "r", None, None, &PersonAnswers::default()).text;
     assert_eq!(review.matches(ONE_ROUND).count(), 1, "{review}");
     assert!(REVIEW_VERDICTS.contains(ONE_ROUND));
     // No narrowing of a later round to the last fix's diff.
@@ -2223,7 +2227,7 @@ fn only_the_whole_review_looks_for_the_listed_defects_in_every_changed_file() {
     use crate::domain::satisfied::SnapshotVerification;
     let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
     let run = run_on(Provider::Claude, WorkerMode::Headless);
-    let review = review_prompt(&task, &run, "r", None, None).text;
+    let review = review_prompt(&task, &run, "r", None, None, &PersonAnswers::default()).text;
     assert_eq!(review.matches(REVIEW_DEFECTS).count(), 1, "{review}");
     assert!(review.contains(&format!("{REVIEW_DEFECTS}{REVIEW_VERDICTS}")));
     for part in [
@@ -2287,6 +2291,8 @@ fn only_the_whole_review_looks_for_the_listed_defects_in_every_changed_file() {
         CONCERN_RECOMMENDATION,
         &codes,
         REVIEW_ANSWER,
+        LANDING_ANSWERS_INTRO,
+        ACCEPTED_CONCERNS,
     ]);
     let with = digest_of(&[
         REVIEW_MATERIAL,
@@ -2298,9 +2304,168 @@ fn only_the_whole_review_looks_for_the_listed_defects_in_every_changed_file() {
         CONCERN_RECOMMENDATION,
         &codes,
         REVIEW_ANSWER,
+        LANDING_ANSWERS_INTRO,
+        ACCEPTED_CONCERNS,
     ]);
     assert_eq!(acceptance_digest(), with);
     assert_ne!(acceptance_digest(), without);
+}
+
+/// A run's review, the whole one and each agent's job, carries a person's
+/// answers to the run's `approve_landing` asks with the rule on the
+/// concerns they accepted, once, and nothing of them without an answer;
+/// plan review and the claim's review carry none of it, and the whole
+/// review's digest covers it.
+#[test]
+fn a_runs_review_reads_a_persons_landing_answers_and_does_not_ask_again() {
+    use crate::application::agent_job::{AgentJob, build};
+    use crate::domain::review_subagents::{AgentRole, AgentTools};
+    use crate::domain::satisfied::SnapshotVerification;
+    let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let answers = PersonAnswers {
+        answers: vec![PersonAnswer {
+            ask: crate::domain::AskId::new(893),
+            round: Some(5),
+            answer: "send_back: the added permissions are as designed".into(),
+        }],
+        older: 0,
+    };
+    let line = "- ask 893, after review 5: send_back: the added permissions are as designed\n";
+    for part in [
+        "Do not raise such a concern again, as scope or otherwise, while the diff since the answer does not widen what was accepted",
+        "new permission, write target, outside connection",
+        "name it in summary as accepted by the person",
+        "make only the widened part the concern",
+        "goes to a person as before",
+    ] {
+        assert_eq!(ACCEPTED_CONCERNS.matches(part).count(), 1, "{part}");
+    }
+    let review = review_prompt(&task, &run, "/runs/r/review.md", None, None, &answers);
+    let section = format!("{LANDING_ANSWERS_INTRO}\n{line}\n{ACCEPTED_CONCERNS}");
+    assert_eq!(review.text.matches(&section).count(), 1, "{}", review.text);
+    assert_eq!(review.text.matches(ACCEPTED_CONCERNS).count(), 1);
+    assert!(review.bytes.sections["landing_answers"] > 0);
+    within(&review, RUN_REVIEW_PROMPT_LIMIT);
+    let none = review_prompt(
+        &task,
+        &run,
+        "/runs/r/review.md",
+        None,
+        None,
+        &PersonAnswers::default(),
+    );
+    assert!(!none.text.contains(ACCEPTED_CONCERNS), "{}", none.text);
+    assert!(!none.text.contains(LANDING_ANSWERS_INTRO), "{}", none.text);
+    assert!(!none.bytes.sections.contains_key("landing_answers"));
+    assert_eq!(review.text.replace(&section, ""), none.text);
+
+    let definition = "---\ndescription: checks security\ntools: [read]\n---\nCheck it.\n";
+    let tools = AgentTools::declared(AgentRole::Review, definition).unwrap();
+    let agent = |answers: Option<&PersonAnswers>| {
+        build(&AgentJob {
+            agent: "security",
+            definition,
+            tools: &tools,
+            rules: None,
+            base: SHA,
+            head: SHA,
+            material: Path::new("/runs/r/review.md"),
+            cwd: Path::new("/runs/r/worktree"),
+            dir: Path::new("/runs/r/review-1-agents/security"),
+            language: None,
+            reads: None,
+            answers,
+        })
+        .unwrap()
+        .prompt
+    };
+    let with = agent(Some(&answers));
+    assert_eq!(with.text.matches(&section).count(), 1, "{}", with.text);
+    assert_eq!(with.text.matches(ACCEPTED_CONCERNS).count(), 1);
+    within(&with, AGENT_JOB_PROMPT_LIMIT);
+    for without in [agent(None), agent(Some(&PersonAnswers::default()))] {
+        assert!(
+            !without.text.contains(ACCEPTED_CONCERNS),
+            "{}",
+            without.text
+        );
+        assert!(
+            !without.text.contains(LANDING_ANSWERS_INTRO),
+            "{}",
+            without.text
+        );
+    }
+
+    let plan = plan_case(1, 0).prompt().text;
+    assert!(!plan.contains(ACCEPTED_CONCERNS), "{plan}");
+    let receipt = Receipt::parse(
+        &json!({"run_id": RUN, "result": "already_satisfied", "commit": SHA,
+            "tests": {"status": "passed", "evidence_or_reason": "e"},
+            "e2e": {"status": "not_applicable", "evidence_or_reason": "r"},
+            "subagent_review": {"status": "not_applicable", "evidence_or_reason": "r"},
+            "summary": "the base meets it",
+            "base_checks": [{"command": "test -f seed.txt", "result": "passed"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let claim = claim_review_prompt(
+        &task_with_evidence(7, Vec::new()),
+        &run,
+        (Some(&receipt), "/runs/run/receipt.json"),
+        &SnapshotVerification {
+            head: CommitSha::try_from(SHA).unwrap(),
+            commands: 2,
+            failure: None,
+        },
+        Path::new("/q/satisfied/run"),
+        None,
+    )
+    .text;
+    assert!(!claim.contains(ACCEPTED_CONCERNS), "{claim}");
+    assert!(!claim.contains(LANDING_ANSWERS_INTRO), "{claim}");
+}
+
+/// The answers a run's review is handed stay within their limit in the
+/// whole review's prompt at the largest input, the acceptance and the
+/// rules at their limits too.
+#[test]
+fn a_persons_landing_answers_at_their_limits_stay_within_the_review_prompt() {
+    let long = "y".repeat(crate::application::review::LANDING_ANSWER_BYTES * 3);
+    let answers = PersonAnswers {
+        answers: (0..crate::application::review::LANDING_ANSWERS as i64)
+            .map(|id| PersonAnswer {
+                ask: crate::domain::AskId::new(id),
+                round: Some(9),
+                answer: long.clone(),
+            })
+            .collect(),
+        older: 4,
+    };
+    let rules_text = "r".repeat(RUN_REVIEW_RULES_BYTES * 2);
+    let fitted = review_prompt(
+        &big_task(7, 100_000),
+        &run_on(Provider::Claude, WorkerMode::Headless),
+        "/runs/run/review.md",
+        None,
+        Some(AcceptanceRules {
+            path: ".dagq/review/builtin-acceptance.md",
+            commit: SHA,
+            text: &rules_text,
+            whole_at: "/runs/run/review-1-builtin-acceptance.md",
+        }),
+        &answers,
+    );
+    within(&fitted, RUN_REVIEW_PROMPT_LIMIT);
+    assert!(
+        fitted.bytes.sections["landing_answers"]
+            <= LANDING_ANSWERS_PROMPT_BYTES
+                + ACCEPTED_CONCERNS.len()
+                + LANDING_ANSWERS_INTRO.len()
+                + 8
+    );
+    assert_eq!(fitted.bytes.omitted.get("landing_answers"), Some(&4));
+    assert_eq!(fitted.text.matches(ACCEPTED_CONCERNS).count(), 1);
 }
 
 /// ADR-t1428-1 decision 5 as ADR-t2352-1 amends it: the run's review reads the
@@ -2318,6 +2483,7 @@ fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
         "r",
         None,
         None,
+        &PersonAnswers::default(),
     )
     .text;
     assert_eq!(review.matches(REVIEW_DOCS_CHECK).count(), 1, "{review}");
@@ -2400,7 +2566,7 @@ fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
 fn the_review_prompt_takes_the_projects_rules_from_the_landing_branch_only() {
     let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
     let run = run_on(Provider::Claude, WorkerMode::Headless);
-    let without = review_prompt(&task, &run, "r", None, None).text;
+    let without = review_prompt(&task, &run, "r", None, None, &PersonAnswers::default()).text;
     let material = "Read the worktree if you need more. Do not change any file.\n";
     assert!(
         without.contains(&format!("{material}{REVIEW_DOCS_CHECK}")),
@@ -2412,7 +2578,15 @@ fn the_review_prompt_takes_the_projects_rules_from_the_landing_branch_only() {
         text: "Check the changelog.\n",
         whole_at: "/runs/r/review-1-builtin-acceptance.md",
     };
-    let with = review_prompt(&task, &run, "r", None, Some(rules)).text;
+    let with = review_prompt(
+        &task,
+        &run,
+        "r",
+        None,
+        Some(rules),
+        &PersonAnswers::default(),
+    )
+    .text;
     assert!(
         with.contains(&format!(
             "{material}{REVIEW_RULES_HEADER} (.dagq/review/builtin-acceptance.md on the landing branch's commit abc123):\nCheck the changelog.\n{REVIEW_DOCS_CHECK}"
@@ -2449,6 +2623,7 @@ fn the_review_prompt_takes_the_projects_rules_from_the_landing_branch_only() {
             text: &long,
             ..rules
         }),
+        &PersonAnswers::default(),
     );
     within(&cut, RUN_REVIEW_PROMPT_LIMIT);
     assert!(
@@ -3836,6 +4011,7 @@ fn a_run_review_prompt_of_a_huge_acceptance_stays_within_its_limits() {
         "/runs/run/review.md",
         None,
         None,
+        &PersonAnswers::default(),
     );
     within(&fitted, RUN_REVIEW_PROMPT_LIMIT);
     let bytes = &fitted.bytes;
@@ -3859,6 +4035,7 @@ fn a_run_review_prompt_of_a_huge_acceptance_stays_within_its_limits() {
         "r",
         None,
         None,
+        &PersonAnswers::default(),
     );
     assert!(
         small.bytes.omitted.is_empty() && small.bytes.over_limit.is_none(),
@@ -7549,7 +7726,14 @@ fn the_whole_review_carries_the_known_failures_and_an_agents_job_does_not() {
     let task = task_with_evidence(9, Vec::new());
     let run = run_on(Provider::Claude, WorkerMode::Headless);
     let list = known(&[("other", 2, Some(12))], &["mine"]);
-    let review = review_prompt(&task, &run, "/runs/r/review.md", Some(&list), None);
+    let review = review_prompt(
+        &task,
+        &run,
+        "/runs/r/review.md",
+        Some(&list),
+        None,
+        &PersonAnswers::default(),
+    );
     for line in [
         "This task fixes these tests, which fail already on the landing branch's CI: judge whether the diff makes them pass:\n- mine (CI run: https://ci/runs/9)\n",
         "- other (CI run: https://ci/runs/2; fixed by task 12)\n",
@@ -7559,7 +7743,14 @@ fn the_whole_review_carries_the_known_failures_and_an_agents_job_does_not() {
     }
     assert!(review.bytes.sections["known_failures"] > 0);
     within(&review, RUN_REVIEW_PROMPT_LIMIT);
-    let without = review_prompt(&task, &run, "/runs/r/review.md", None, None);
+    let without = review_prompt(
+        &task,
+        &run,
+        "/runs/r/review.md",
+        None,
+        None,
+        &PersonAnswers::default(),
+    );
     assert!(!without.text.contains("fail already"), "{}", without.text);
     let definition = "---\ndescription: checks the design\ntools: [read]\n---\nCheck it.\n";
     let tools = AgentTools::declared(AgentRole::Review, definition).unwrap();
@@ -7575,6 +7766,7 @@ fn the_whole_review_carries_the_known_failures_and_an_agents_job_does_not() {
         dir: Path::new("/runs/r/review-1-agents/design"),
         language: None,
         reads: None,
+        answers: None,
     })
     .unwrap();
     assert!(!agent.prompt.text.contains("fail already"));
@@ -7672,6 +7864,7 @@ fn a_thousand_known_failures_stay_within_each_prompts_limit_and_name_their_file(
         "/runs/r/review.md",
         Some(&list),
         None,
+        &PersonAnswers::default(),
     );
     check(&review, RUN_REVIEW_PROMPT_LIMIT);
     let over = review.bytes.over_limit.clone().unwrap();
@@ -7710,6 +7903,7 @@ fn the_others_tests_left_out_whole_still_get_their_instruction() {
         "/runs/r/review.md",
         Some(&list),
         None,
+        &PersonAnswers::default(),
     );
     for (fitted, instruction) in [(&worker, DO_NOT_FIX), (&review, DO_NOT_SEND_BACK)] {
         let text = &fitted.text;
@@ -7739,6 +7933,7 @@ fn only_the_run_review_is_told_its_codes_land_the_run_past_the_limit() {
         "r",
         None,
         None,
+        &PersonAnswers::default(),
     )
     .text;
     assert!(!review.contains(STATISTICS), "{review}");

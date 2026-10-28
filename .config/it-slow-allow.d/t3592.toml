@@ -1,0 +1,5 @@
+# 7.719s in the worker's stress
+[[test]]
+name = "review_subagents::a_persons_landing_answer_reaches_the_next_rounds_review_and_its_agents"
+reason = "B 境界（守る境界）: the supervisor's wiring from a person's answer in the SQLite queue to the next round's review.md, whole review prompt and agent job"
+task = 3592

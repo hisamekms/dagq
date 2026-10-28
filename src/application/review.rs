@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use super::EntryKind;
 use super::{
     Repository, RunFiles, TaskStore, fenced, integrate::integrate_logs, or_none, path_text,
+    prompt_fit,
 };
 use crate::domain::local_checks::{self, LocalChecks};
 use crate::domain::local_gates::{Change, GateConfig};
@@ -17,7 +18,8 @@ use crate::domain::review_reason::CodePaths;
 use crate::domain::review_subagents::{self, AgentRole, AgentTools, ReviewAgents};
 use crate::domain::setup_review::SETUP_COMMAND;
 use crate::domain::{
-    CommitSha, Goal, Provider, Receipt, ReviseLimit, RunStatus, Task, TaskId, TaskRun,
+    AnswerAuthority, Ask, AskId, AskKind, CommitSha, EventKind, Goal, Provider, Receipt,
+    ReviseLimit, RunEvent, RunId, RunStatus, Task, TaskId, TaskRun,
 };
 use sha2::{Digest, Sha256};
 
@@ -74,6 +76,7 @@ pub fn review(ports: Review<'_>, task_id: TaskId, range: Option<&ReviewRange>) -
                 detail.task.status().as_str()
             )
         })?;
+    let answers = landing_answers(run.id(), &detail.events, &detail.asks);
     let task = detail.task;
     let goal = match task.goal_id() {
         Some(goal_id) => Some(queue.show_goal(goal_id)?.goal),
@@ -121,6 +124,7 @@ pub fn review(ports: Review<'_>, task_id: TaskId, range: Option<&ReviewRange>) -
         &log,
         &stat,
         checks.as_deref(),
+        &answers,
     );
     let path = run_dir.join("review.md");
     let temporary = run_dir.join(format!(".review.md.{pid}.tmp"));
@@ -146,6 +150,141 @@ pub fn review(ports: Review<'_>, task_id: TaskId, range: Option<&ReviewRange>) -
         "insertions": numbers.insertions,
         "deletions": numbers.deletions,
     }))
+}
+
+/// The newest answers of the run's `approve_landing` asks a run's review
+/// is handed ([`landing_answers`]); the older ones are counted, not shown.
+pub const LANDING_ANSWERS: usize = 5;
+/// The bytes of one answer's text a run's review is handed: cut from its
+/// end past this, saying the rest is in no file the review can read (the
+/// ask is the queue's, which a review job does not read).
+pub const LANDING_ANSWER_BYTES: usize = 1_400;
+
+/// A person's answer to an `approve_landing` ask of the run under review:
+/// the ask, the review round that opened it, and the text the person
+/// wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonAnswer {
+    pub ask: AskId,
+    /// The `attempt` of the run's last `review_started` before the ask
+    /// opened; `None` when the events have none.
+    pub round: Option<u64>,
+    pub answer: String,
+}
+
+/// The answers of a person (the user, or the inbox at a person's word) to
+/// the run's `approve_landing` asks, oldest first, the newest
+/// [`LANDING_ANSWERS`] of them, and how many older ones were left out:
+/// what a run's review is handed of an earlier round, a person's judgement
+/// only, never an earlier review's findings or the diff of its fix.
+/// `events` and `asks` are the task's ([`crate::domain::TaskDetail`]); the
+/// asks handed are those of the run's `ask_opened` of kind
+/// `approve_landing`. An ask with no answer yet,
+/// or one the runtime answered itself (closing a stale ask or one of a run
+/// that ended), hands nothing.
+pub fn landing_answers(run: &RunId, events: &[RunEvent], asks: &[Ask]) -> PersonAnswers {
+    let mut answers = Vec::new();
+    for (id, round) in landing_asks(run, events) {
+        let ask = asks
+            .iter()
+            .find(|ask| ask.id == id && ask.run_id.as_ref() == Some(run));
+        if let Some(answer) = ask.and_then(person_answer) {
+            answers.push(PersonAnswer {
+                ask: id,
+                round,
+                answer,
+            });
+        }
+    }
+    let older = answers.len().saturating_sub(LANDING_ANSWERS);
+    answers.drain(..older);
+    PersonAnswers { answers, older }
+}
+
+/// What precedes the answers in review.md.
+pub const LANDING_ANSWERS_INTRO: &str = "A person answered these approve_landing asks of this run, oldest first. They are a person's judgement on an earlier round, not an earlier review's findings.";
+
+/// What [`landing_answers`] hands a run's review.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PersonAnswers {
+    pub answers: Vec<PersonAnswer>,
+    /// The older answers left out past [`LANDING_ANSWERS`].
+    pub older: usize,
+}
+
+impl PersonAnswers {
+    /// One line per answer, oldest first, each answer's text cut to
+    /// [`LANDING_ANSWER_BYTES`] (its own lines then indented under it), and
+    /// a line on the older ones left out;
+    /// `None` without any answer, so nothing is added to the material of a
+    /// run no person answered.
+    pub fn lines(&self) -> Option<String> {
+        if self.answers.is_empty() {
+            return None;
+        }
+        let mut lines = String::new();
+        if self.older > 0 {
+            lines.push_str(&format!("({} older answer(s) left out)\n", self.older));
+        }
+        for answer in &self.answers {
+            let (text, _) = prompt_fit::cut_part(
+                answer.answer.trim(),
+                LANDING_ANSWER_BYTES,
+                prompt_fit::Keep::Start,
+                prompt_fit::NOT_READABLE,
+            );
+            let round = answer
+                .round
+                .map_or_else(String::new, |round| format!(", after review {round}"));
+            lines.push_str(&format!(
+                "- ask {}{round}: {}\n",
+                answer.ask,
+                text.replace('\n', "\n  ")
+            ));
+        }
+        Some(lines)
+    }
+}
+
+/// The run's `approve_landing` asks in the order they opened, each with
+/// the `attempt` of the run's last `review_started` before it.
+fn landing_asks(run: &RunId, events: &[RunEvent]) -> Vec<(AskId, Option<u64>)> {
+    let mut round = None;
+    let mut asks = Vec::new();
+    let mut ordered: Vec<&RunEvent> = events
+        .iter()
+        .filter(|e| e.run_id.as_ref() == Some(run))
+        .collect();
+    ordered.sort_by_key(|e| e.id);
+    for event in ordered {
+        if event.kind == EventKind::ReviewStarted {
+            round = event.payload["attempt"].as_u64().or(round);
+        } else if event.kind == EventKind::AskOpened
+            && event.payload["kind"].as_str() == Some(AskKind::ApproveLanding.as_str())
+            && let Some(id) = event.payload["ask_id"].as_i64()
+        {
+            let id = AskId::new(id);
+            if !asks.iter().any(|(known, _)| *known == id) {
+                asks.push((id, round));
+            }
+        }
+    }
+    asks
+}
+
+/// The text of `ask`'s answer when a person gave it: answered, by an
+/// authority other than the runtime's, with some text.
+fn person_answer(ask: &Ask) -> Option<String> {
+    if ask.answer_authority == Some(AnswerAuthority::Runtime)
+        || ask.answered_by.as_deref() == Some(crate::domain::ANSWERED_BY_RUNTIME)
+    {
+        return None;
+    }
+    ask.answer
+        .as_deref()
+        .map(str::trim)
+        .filter(|answer| !answer.is_empty())
+        .map(str::to_owned)
 }
 
 /// The range `<base>...<head>` a review of `run` reads (see [`review`]):
@@ -868,6 +1007,7 @@ fn review_markdown(
     log: &str,
     stat: &str,
     local_checks: Option<&str>,
+    answers: &PersonAnswers,
 ) -> String {
     let mut out = format!(
         "# Review of task {id}: {title}\n\n\
@@ -938,6 +1078,11 @@ fn review_markdown(
     out.push_str(&format!("\n### Follow-ups\n\n{follow_ups}\n"));
     if let Some(section) = local_checks {
         out.push_str(section);
+    }
+    if let Some(lines) = answers.lines() {
+        out.push_str(&format!(
+            "\n## A person's answers to this run's landing asks\n\n{LANDING_ANSWERS_INTRO}\n\n{lines}"
+        ));
     }
     out.push_str(&format!(
         "\n## Commits\n\n`git log --oneline {base}..{head}`\n\n{log}\n\
@@ -1041,7 +1186,206 @@ mod tests {
             "",
             "",
             None,
+            &PersonAnswers::default(),
         )
+    }
+
+    /// An event of the run `run` (`None` for another run's).
+    fn run_event(id: i64, run: Option<&str>, kind: &str, payload: Value) -> RunEvent {
+        RunEvent {
+            id: crate::domain::EventId::new(id),
+            task_id: Some(TaskId::new(7)),
+            goal_id: None,
+            run_id: run.map(|run| RunId::new(run).unwrap()),
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    fn landing_opened(id: i64, ask: i64) -> RunEvent {
+        run_event(
+            id,
+            Some(RUN),
+            "ask_opened",
+            json!({"ask_id": ask, "kind": "approve_landing"}),
+        )
+    }
+
+    /// The ask `id` of the run, answered `answer` by `by` with
+    /// `authority`, or open without an answer.
+    fn answered(id: i64, answer: Option<&str>, by: &str, authority: &str) -> Ask {
+        serde_json::from_value(json!({
+            "id": id, "kind": "approve_landing", "task_id": 7, "run_id": RUN,
+            "question": "q", "options": ["land", "send_back", "cancel"],
+            "answer": answer, "asked_by": "supervisor", "reason_category": "scope",
+            "created_at": 0, "answered_at": answer.map(|_| 1), "closed_at": null,
+            "answered_by": answer.map(|_| by),
+            "answer_authority": answer.map(|_| authority),
+        }))
+        .unwrap()
+    }
+
+    /// A run's review is handed the answers a person (the user or the
+    /// inbox at a person's word) gave to the run's own `approve_landing`
+    /// asks, each with the review round that opened it, oldest first; an
+    /// open ask, one the runtime answered itself, another kind and another
+    /// run's ask hand nothing.
+    #[test]
+    fn a_review_is_handed_only_a_persons_answers_to_its_runs_landing_asks() {
+        const OTHER: &str = "00000000-0000-4000-8000-000000000002";
+        let events = vec![
+            run_event(1, Some(RUN), "review_started", json!({"attempt": 1})),
+            landing_opened(2, 10),
+            run_event(3, Some(RUN), "review_started", json!({"attempt": 2})),
+            run_event(
+                4,
+                Some(RUN),
+                "ask_opened",
+                json!({"ask_id": 11, "kind": "worker_question"}),
+            ),
+            landing_opened(5, 12),
+            landing_opened(6, 13),
+            run_event(
+                7,
+                Some(OTHER),
+                "ask_opened",
+                json!({"ask_id": 14, "kind": "approve_landing"}),
+            ),
+            run_event(8, Some(RUN), "review_started", json!({"attempt": 3})),
+            landing_opened(9, 15),
+            landing_opened(10, 16),
+        ];
+        let mut other = answered(14, Some("land"), "person", "user");
+        other.run_id = Some(RunId::new(OTHER).unwrap());
+        // A person's answer the runtime closed later is still a person's.
+        let mut closed = answered(15, Some("land"), "inbox", "delegated");
+        closed.closed_at = Some(2);
+        let asks = vec![
+            answered(
+                10,
+                Some("send_back: the new permission is as designed"),
+                "person",
+                "user",
+            ),
+            answered(12, Some("superseded"), "runtime", "runtime"),
+            answered(13, None, "", ""),
+            other,
+            closed,
+            answered(16, Some("   "), "person", "user"),
+        ];
+        let answers = landing_answers(&RunId::new(RUN).unwrap(), &events, &asks);
+        assert_eq!(
+            answers,
+            PersonAnswers {
+                answers: vec![
+                    PersonAnswer {
+                        ask: AskId::new(10),
+                        round: Some(1),
+                        answer: "send_back: the new permission is as designed".into(),
+                    },
+                    PersonAnswer {
+                        ask: AskId::new(15),
+                        round: Some(3),
+                        answer: "land".into(),
+                    },
+                ],
+                older: 0,
+            }
+        );
+        assert_eq!(
+            answers.lines().unwrap(),
+            "- ask 10, after review 1: send_back: the new permission is as designed\n\
+             - ask 15, after review 3: land\n"
+        );
+        // A run no person answered hands nothing: no lines, no section.
+        let none = landing_answers(&RunId::new(RUN).unwrap(), &events[..1], &asks);
+        assert_eq!(none, PersonAnswers::default());
+        assert_eq!(none.lines(), None);
+    }
+
+    /// The newest [`LANDING_ANSWERS`] answers are handed, the older ones
+    /// counted, and each answer is held to [`LANDING_ANSWER_BYTES`], naming
+    /// the ask that holds it whole; an answer without a round says none.
+    #[test]
+    fn the_answers_a_review_is_handed_are_held_to_their_limits() {
+        let count = LANDING_ANSWERS as i64 + 2;
+        let events: Vec<RunEvent> = (1..=count).map(|ask| landing_opened(ask, ask)).collect();
+        let long = "x".repeat(LANDING_ANSWER_BYTES * 2);
+        let asks: Vec<Ask> = (1..=count)
+            .map(|id| {
+                let text = if id == count {
+                    long.clone()
+                } else {
+                    format!("answer {id}")
+                };
+                answered(id, Some(&text), "person", "user")
+            })
+            .collect();
+        let answers = landing_answers(&RunId::new(RUN).unwrap(), &events, &asks);
+        assert_eq!(answers.older, 2);
+        let asks: Vec<i64> = answers.answers.iter().map(|a| a.ask.as_i64()).collect();
+        assert_eq!(asks, (3..=count).collect::<Vec<_>>());
+        let lines = answers.lines().unwrap();
+        assert!(
+            lines.starts_with("(2 older answer(s) left out)\n- ask 3: answer 3\n"),
+            "{lines}"
+        );
+        assert!(!lines.contains(&long), "{lines}");
+        assert!(lines.contains(prompt_fit::NOT_READABLE), "{lines}");
+        let last = lines.lines().last().unwrap();
+        assert!(last.len() < LANDING_ANSWER_BYTES + 200, "{}", last.len());
+    }
+
+    /// review.md carries a person's answers before the commits, with what
+    /// they are, and nothing of them for a run no person answered.
+    #[test]
+    fn the_review_material_carries_a_persons_landing_answers_or_nothing() {
+        let receipt = Receipt::parse(
+            &json!({
+                "run_id": RUN, "result": "succeeded", "commit": SHA,
+                "tests": {"status": "passed", "evidence_or_reason": "ok"},
+                "e2e": {"status": "not_applicable", "evidence_or_reason": "none"},
+                "subagent_review": {"status": "not_applicable", "evidence_or_reason": "none"},
+                "summary": "done",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let answers = PersonAnswers {
+            answers: vec![PersonAnswer {
+                ask: AskId::new(893),
+                round: Some(5),
+                answer: "send_back: the new write target is as designed".into(),
+            }],
+            older: 0,
+        };
+        let markdown = |answers: &PersonAnswers| {
+            review_markdown(
+                &MemoryFiles::default(),
+                &task(""),
+                &run(),
+                None,
+                &receipt,
+                SHA,
+                SHA,
+                "",
+                "",
+                None,
+                answers,
+            )
+        };
+        let with = markdown(&answers);
+        let section = format!(
+            "\n## A person's answers to this run's landing asks\n\n{LANDING_ANSWERS_INTRO}\n\n\
+             - ask 893, after review 5: send_back: the new write target is as designed\n\n## Commits"
+        );
+        assert_eq!(with.matches(&section).count(), 1, "{with}");
+        let without = markdown(&PersonAnswers::default());
+        assert!(!without.contains("landing asks"), "{without}");
+        assert!(!without.contains(LANDING_ANSWERS_INTRO), "{without}");
+        assert_eq!(with.replace(&section, "\n## Commits"), without);
     }
 
     /// Task 1429 (ADR-t1428-1): the material carries the task's context,
@@ -1639,6 +1983,7 @@ mod tests {
             "/runs/r/review.md",
             None,
             None,
+            &PersonAnswers::default(),
         )
         .text;
         assert!(!prompt.contains("subagent"), "{prompt}");

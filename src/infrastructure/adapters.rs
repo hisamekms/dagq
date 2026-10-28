@@ -6495,6 +6495,7 @@ mod tests {
                 dir: &job_dir,
                 language: None,
                 reads: None,
+                answers: None,
             })
             .unwrap();
             let args: Vec<String> = claude

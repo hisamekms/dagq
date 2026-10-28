@@ -523,6 +523,7 @@ impl Supervisor<'_> {
             dir: &run_dir,
             language: language.as_ref(),
             reads: Some(&reads),
+            answers: None,
         })?;
         self.files
             .write(&run_dir.join("prompt.txt"), built.prompt.text.as_bytes())?;

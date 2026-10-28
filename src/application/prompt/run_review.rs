@@ -2,6 +2,7 @@
 //! (execution and landing).
 
 use super::*;
+use crate::application::review::{LANDING_ANSWERS_INTRO, PersonAnswers};
 use crate::domain::{EventId, EventKind};
 
 /// The bytes the whole run review prompt takes at most, the language's
@@ -9,7 +10,17 @@ use crate::domain::{EventId, EventKind};
 /// it took 6,385 bytes at the median, 10,218 at p90 and 18,535 at most.
 /// The section on the tests that fail already on the landing branch's CI
 /// (ADR-t1920-1 decision 5) adds its own [`KNOWN_FAILURES_LIMIT`].
-pub const RUN_REVIEW_PROMPT_LIMIT: usize = 32_000 + KNOWN_FAILURES_LIMIT;
+/// A person's answers to the run's `approve_landing` asks add their own
+/// [`LANDING_ANSWERS_PROMPT_BYTES`] with [`ACCEPTED_CONCERNS`].
+pub const RUN_REVIEW_PROMPT_LIMIT: usize =
+    32_000 + KNOWN_FAILURES_LIMIT + LANDING_ANSWERS_PROMPT_BYTES + ACCEPTED_CONCERNS.len();
+
+/// The bytes of a person's answers to the run's `approve_landing` asks in
+/// a run review's prompt and in its agents' ([`landing_answers_section`]):
+/// [`crate::application::review::LANDING_ANSWERS`] answers of
+/// [`crate::application::review::LANDING_ANSWER_BYTES`] each with their
+/// lines fit within it; past it the rest is cut, naming review.md.
+pub const LANDING_ANSWERS_PROMPT_BYTES: usize = 8_000;
 
 /// The bytes of the task's title and of its acceptance (1,544 at most in
 /// production) in the review prompt.
@@ -23,7 +34,11 @@ pub const RUN_REVIEW_ACCEPTANCE_BYTES: usize = 8_000;
 /// and that of an agent of a run's review are the same job and share it.
 /// The run review's own limit, which the definitions are far within (8
 /// review agents of at most 2,529 bytes, 9,382 together).
-pub const AGENT_JOB_PROMPT_LIMIT: usize = 32_000;
+/// A run's review's agent adds the person's answers to the run's
+/// `approve_landing` asks ([`LANDING_ANSWERS_PROMPT_BYTES`] with
+/// [`ACCEPTED_CONCERNS`]); an eval's job has none.
+pub const AGENT_JOB_PROMPT_LIMIT: usize =
+    32_000 + LANDING_ANSWERS_PROMPT_BYTES + ACCEPTED_CONCERNS.len();
 /// The bytes of the definition in an agent job's prompt at most. A
 /// definition is never cut (ADR-t1869-1): one past this is an error of the
 /// job's assembly, and no job starts for it. Over six times today's
@@ -74,13 +89,17 @@ pub struct AcceptanceRules<'a> {
 /// decision 3). `known_failures`, the tests that fail already on the
 /// landing branch's CI, is a section of this whole review's job only,
 /// which decides whether to send the run back (ADR-t1920-1 decision 5);
-/// an agent's job does not carry it.
+/// an agent's job does not carry it. `answers`, a person's answers to the
+/// run's `approve_landing` asks, go after the acceptance with
+/// [`ACCEPTED_CONCERNS`] ([`landing_answers_section`]), as in each agent's
+/// job; without any, nothing is added.
 pub fn review_prompt(
     task: &Task,
     run: &TaskRun,
     review_path: &str,
     known_failures: Option<&KnownFailures>,
     rules: Option<AcceptanceRules<'_>>,
+    answers: &PersonAnswers,
 ) -> FittedPrompt {
     let mut fit = Fit::new(RUN_REVIEW_PROMPT_LIMIT);
     let material = format!("read it whole in the review material at {review_path}");
@@ -114,6 +133,7 @@ pub fn review_prompt(
         &format!("{material}, its section Acceptance"),
     );
     fit.section("acceptance", &acceptance);
+    let answers = landing_answers_section(&mut fit, answers, review_path).unwrap_or_default();
     let mut known = known_failures_section(&mut fit, known_failures, Reader::Review);
     if !known.is_empty() {
         known.push('\n');
@@ -124,6 +144,7 @@ pub fn review_prompt(
          {rules}\
          {docs}\n\
          {acceptance_header}{acceptance}\n\n\
+         {answers}\
          {known}\
          {defects}\
          {verdicts}\
@@ -163,7 +184,44 @@ pub fn acceptance_digest() -> String {
         CONCERN_RECOMMENDATION,
         &codes,
         REVIEW_ANSWER,
+        LANDING_ANSWERS_INTRO,
+        ACCEPTED_CONCERNS,
     ])
+}
+
+/// How a run's review, the whole one and each agent's job, reads a
+/// person's answers to the run's `approve_landing` asks: a concern the
+/// person accepted is not raised again as `scope` while the diff since the
+/// answer does not widen what was accepted; only what widens it is a
+/// concern, and every other judgement of scope still goes to a person
+/// (ADR-t451-1 decisions 1 and 3 kept). The runtime does not match the
+/// concerns' text itself: the review judges whether it is the same concern
+/// and whether its reach grew. Plan review and the claim's review share
+/// none of it.
+pub(super) const ACCEPTED_CONCERNS: &str = "A person already decided the concerns these answers accept (as designed, or acceptable within the task). Do not raise such a concern again, as scope or otherwise, while the diff since the answer does not widen what was accepted (it adds no new permission, write target, outside connection or other reach beyond it): name it in summary as accepted by the person, with the ask's id. When the diff widens it, make only the widened part the concern. Any other concern, and any judgement of scope the answers do not settle, goes to a person as before.\n\n";
+
+/// The section on a person's answers to the run's `approve_landing` asks
+/// ([`PersonAnswers::lines`], held to [`LANDING_ANSWERS_PROMPT_BYTES`]
+/// the rest named in review.md at `review_path`) with
+/// [`ACCEPTED_CONCERNS`]; `None` without any answer. The whole review and
+/// each agent's job of a run's review carry the same section.
+pub(crate) fn landing_answers_section(
+    fit: &mut Fit,
+    answers: &PersonAnswers,
+    review_path: &str,
+) -> Option<String> {
+    let lines = answers.lines()?;
+    fit.omit("landing_answers", answers.older);
+    let lines = fit.text(
+        "landing_answers",
+        lines.trim_end(),
+        LANDING_ANSWERS_PROMPT_BYTES,
+        Keep::Start,
+        &format!("read them in the review material at {review_path}"),
+    );
+    let section = format!("{LANDING_ANSWERS_INTRO}\n{lines}\n\n{ACCEPTED_CONCERNS}");
+    fit.section("landing_answers", &section);
+    Some(section)
 }
 
 /// The SHA-256 of `parts`, each after its length.
