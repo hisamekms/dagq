@@ -106,7 +106,8 @@ workerのrunは全て非対話（turnごとに別のprocess）で、この文書
 
 ## 列の外の結果と回答の適用
 
-次の3つは候補の列の外で動き、holdの前に始まったものの結果がhold中に届く。
+候補の列の外で動き、holdの前に始まったものの結果がhold中に届くのは、次の復旧jobの3つと、下の再計画の診断job。
+この節の残す・適用・捨てるの記録は復旧jobの3つのもの。
 
 - 終わったrunの復旧jobの`decide`のaskへの回答の適用（`triage::apply_triage_answers`）
 - 終わったrunの復旧jobのverdictの適用（`triage::act_on_recovery`）
@@ -120,6 +121,14 @@ hold中のtaskに対しては、どれも進行（taskをreadyに戻す、runを
   taskとrunの版（taskのstatusとholdの外の変更、runのstatus、そのrunの進行を変えるeventの最後のID）が残したときと同じで、解除が続け方を変えていなければ、今の適用の経路（前提の再検査を含む）で適用し`hold_result_applied`を記録する。
   変わっていれば、または解除が新しいrunかproviderの変更を選んだときは、古いものとして捨て`hold_result_discarded`（理由つき）を記録し、askは理由を付けて閉じる。
 - supervisorが配送か適用をする回答（`worker_question`、`stalled`への`stop`か指示の文、`approve_landing`など）も、hold中は配送と適用をせずに残し、解除の後に同じ規則で扱う。
+
+再計画の診断job（[ADR-t1879-1](../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)決定6）も、holdの後ろに置く。保持は上の`hold_result_*`を書かず、再計画の記録で持つ。
+
+- hold中のtaskには診断jobを始めず、`decide`のaskも開かない。
+- hold中に出たverdictは操作を進めず、`replan_diagnosed`（outcome `held`）にjobが読んだものとともに保持し、操作は`diagnosing`のまま残す。
+  `decide`のaskへの回答は、答えたまま閉じないaskに残す。
+- 解除の後の最初のpassで、保持したverdictと回答を前提の再検査を通して適用し、前提が崩れていればverdictを捨てて診断し直す。
+- 詳細は[task-replanning](task-replanning.md)の「実装の状態」の「検知と診断」が持つ。
 
 ## 安全な待ちと解除の順序
 
