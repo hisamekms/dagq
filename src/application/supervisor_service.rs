@@ -44,6 +44,7 @@
 pub mod control;
 mod dispatch;
 mod forward;
+pub mod large;
 mod needs;
 pub mod resend;
 mod wire;
@@ -206,7 +207,7 @@ pub fn undone(error: &anyhow::Error) -> bool {
 /// The operations of [`dispatch`] that only read the queue: one the
 /// service did not answer did nothing ([`undone`]). An operation not here
 /// is taken as one that writes.
-const READ_OPS: [&str; 67] = [
+const READ_OPS: [&str; 78] = [
     "candidates",
     "build_waits",
     "predecessors",
@@ -274,6 +275,17 @@ const READ_OPS: [&str; 67] = [
     "run_resources",
     "run_resources_after",
     "open_attachments",
+    "ledger_row",
+    "ledger_rows",
+    "steps_after",
+    "target_steps",
+    "target_resources",
+    "resources_after",
+    "session_owner",
+    "ledger_row_part",
+    "ledger_row_keys",
+    "run_events_after",
+    "task_events_after",
 ];
 
 thread_local! {
@@ -631,13 +643,17 @@ fn to_value(value: impl serde::Serialize) -> Result<Value> {
 }
 
 /// The queue the service runs a supervisor's operations on: the whole
-/// queue, the observer's log, the host's load samples and the runs'
-/// resources the supervisor measures, each operation of it answered by
-/// [`dispatch`].
-pub trait SupervisorStore: Queue + ObserverLog + super::NodeSampleStore + RunResourceStore {}
+/// queue, the observer's log, the host's load samples, the runs'
+/// resources the supervisor measures and what builds the ledger reads and
+/// writes, each operation of it answered by [`dispatch`].
+pub trait SupervisorStore:
+    Queue + ObserverLog + super::NodeSampleStore + RunResourceStore + super::LedgerQueue
+{
+}
 
-impl<T: Queue + ObserverLog + super::NodeSampleStore + RunResourceStore + ?Sized> SupervisorStore
-    for T
+impl<
+    T: Queue + ObserverLog + super::NodeSampleStore + RunResourceStore + super::LedgerQueue + ?Sized,
+> SupervisorStore for T
 {
 }
 
@@ -765,6 +781,28 @@ const RUN_RESOURCE_OPS: [&str; 4] = [
     "run_resources",
     "run_resources_after",
     "open_attachments",
+];
+
+/// The operations of what builds the ledger (the LedgerStore's, and the
+/// reads and the retention of the sessions' steps, samples and owners it
+/// folds): the supervisor principal's only, refused to a landing's
+/// integrator by the policy and to a control-side command whatever its
+/// principal holds ([`control::answer`]), as [`RUN_RESOURCE_OPS`].
+const LEDGER_OPS: [&str; 14] = [
+    "ledger_row",
+    "ledger_rows",
+    "ledger_row_part",
+    "ledger_row_keys",
+    "write_ledger_row_over",
+    "stage_ledger_row",
+    "write_staged_ledger_row_over",
+    "remove_node_rows",
+    "steps_after",
+    "target_steps",
+    "remove_steps",
+    "target_resources",
+    "resources_after",
+    "session_owner",
 ];
 
 /// The operations of the jobs the supervisor starts as commands of its
@@ -1065,9 +1103,10 @@ const END_LANDING: &str = "end_landing";
 /// The integrator's operations on its run, the run their first argument
 /// (ADR-t3102-3 decision 3's landing): its reads, its events, the ends of
 /// its landing, its follow-ups and the asks it closes.
-const INTEGRATOR_RUN_OPS: [&str; 16] = [
+const INTEGRATOR_RUN_OPS: [&str; 17] = [
     "run",
     "run_events",
+    "run_events_after",
     "holds_lease",
     "run_lease",
     "record_runtime_event",
@@ -1205,11 +1244,11 @@ fn integrator(
     if params.acting.is_some() {
         return Err(BadOperation(format!("the integrator writes as itself, not {op}")).into());
     }
-    // The host's load samples and the runs' resources are the supervisor's
-    // records: the integrator is refused them by the policy (it has no
-    // `scheduler.supervise`), and the refusal recorded, as any other
-    // principal is.
-    if NODE_SAMPLE_OPS.contains(&op) || RUN_RESOURCE_OPS.contains(&op) {
+    // The host's load samples, the runs' resources and the ledger's are the
+    // supervisor's records: the integrator is refused them by the policy
+    // (it has no `scheduler.supervise`), and the refusal recorded, as any
+    // other principal is.
+    if NODE_SAMPLE_OPS.contains(&op) || RUN_RESOURCE_OPS.contains(&op) || LEDGER_OPS.contains(&op) {
         super::queue_service::authorize_supervisor_needs(
             &mut *queue,
             &actor,

@@ -2359,11 +2359,23 @@ impl EventStore for SupervisorQueue {
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
         self.remote("latest_task_events", vec![to_value(kinds)?])
     }
+    // A history past one answer whole is read in pages, each after the
+    // last event of the page before.
     fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
-        self.remote("run_events", vec![to_value(id)?])
+        match self.remote("run_events", vec![to_value(id)?]) {
+            Err(error) if super::too_large(&error) => {
+                self.events_in_pages("run_events_after", to_value(id)?)
+            }
+            read => read,
+        }
     }
     fn task_events(&self, task: TaskId) -> Result<Vec<RunEvent>> {
-        self.remote("task_events", vec![to_value(task)?])
+        match self.remote("task_events", vec![to_value(task)?]) {
+            Err(error) if super::too_large(&error) => {
+                self.events_in_pages("task_events_after", to_value(task)?)
+            }
+            read => read,
+        }
     }
     fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
         self.remote("has_run_event", vec![to_value(id)?, to_value(kind)?])
@@ -2468,6 +2480,9 @@ impl EventStore for SupervisorQueue {
             ],
         )
     }
+    // In pages, each after the last event of the page before, a page past
+    // the answer's limit asked again at half the size: the ledger's builder
+    // reads thousands at a time.
     fn events_between(
         &self,
         after: EventId,
@@ -2475,15 +2490,22 @@ impl EventStore for SupervisorQueue {
         filter: &EventFilter,
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
-        self.remote(
-            "events_between",
-            vec![
-                to_value(after)?,
-                to_value(upto)?,
-                to_value(filter)?,
-                to_value(limit)?,
-            ],
-        )
+        let mut after = after;
+        pages(limit, limit, |page| {
+            let read: Vec<RunEvent> = self.remote(
+                "events_between",
+                vec![
+                    to_value(after)?,
+                    to_value(upto)?,
+                    to_value(filter)?,
+                    to_value(page)?,
+                ],
+            )?;
+            if let Some(last) = read.last() {
+                after = last.id;
+            }
+            Ok(read)
+        })
     }
 }
 
@@ -2829,5 +2851,303 @@ impl RunResourceStore for SupervisorQueue {
     }
     fn open_attachments(&self) -> Result<Vec<(RunId, i64)>> {
         self.remote("open_attachments", vec![])
+    }
+}
+
+impl SupervisorQueue {
+    /// The events `op` reads of `of` (a run or a task), a page at a time.
+    fn events_in_pages(&self, op: &str, of: serde_json::Value) -> Result<Vec<RunEvent>> {
+        let mut after = EventId::new(0);
+        pages(EVENTS_PAGE, usize::MAX, |page| {
+            let read: Vec<RunEvent> =
+                self.remote(op, vec![of.clone(), to_value(after)?, to_value(page)?])?;
+            if let Some(last) = read.last() {
+                after = last.id;
+            }
+            Ok(read)
+        })
+    }
+}
+
+/// How many ledger rows a read asks for at a time, halved for a page past
+/// the answer's limit: a run's row holds its events.
+const LEDGER_ROWS_PAGE: usize = 100;
+
+/// How many bytes of a ledger row one write sends whole at most, half the
+/// request's limit; a longer one crosses in parts.
+const LEDGER_ROW_REQUEST_BYTES: usize = crate::domain::queue_service::MAX_REQUEST_BYTES / 2;
+
+/// How many session steps or samples a read asks for at a time, halved for
+/// a page past the answer's limit.
+const STEPS_PAGE: usize = 10_000;
+
+/// Why the supervisor's side does not send `op`: no one of the supervisor
+/// sends it (what builds the ledger only reads the steps, the samples and
+/// the owners, and writes each row over the one it read), so the service
+/// has no such operation of the supervisor's, and it is refused here, not
+/// done on the DB (fail closed).
+fn not_sent(op: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "the supervisor does not {op} through the queue service: it is no operation of its use case"
+    )
+}
+
+// What builds the ledger reads and writes: the reads in pages, each after
+// the last of the page before, and a write over a row read naming that row
+// by its fingerprint, so a request holds one row.
+impl LedgerStore for SupervisorQueue {
+    fn write_ledger_row(&self, _: &crate::domain::ledger::LedgerRow) -> Result<bool> {
+        Err(not_sent("write_ledger_row"))
+    }
+    // A row too long for a request whole crosses in parts
+    // ([`super::large`]).
+    fn write_ledger_row_over(
+        &self,
+        row: &crate::domain::ledger::LedgerRow,
+        read: Option<&crate::domain::ledger::LedgerRow>,
+    ) -> Result<Option<bool>> {
+        let read = to_value(read.map(crate::domain::ledger::LedgerRow::fingerprint))?;
+        let text = serde_json::to_string(row)?;
+        if text.len() <= LEDGER_ROW_REQUEST_BYTES {
+            return self.remote("write_ledger_row_over", vec![to_value(row)?, read]);
+        }
+        let digest = super::large::digest(&text);
+        let parts = super::large::split(&text, super::large::WRITE_PART_BYTES);
+        for (index, part) in parts.iter().enumerate() {
+            let () = self.remote(
+                "stage_ledger_row",
+                vec![
+                    to_value(&digest)?,
+                    to_value(index)?,
+                    to_value(parts.len())?,
+                    to_value(part)?,
+                ],
+            )?;
+        }
+        self.remote(
+            "write_staged_ledger_row_over",
+            vec![to_value(&digest)?, read],
+        )
+    }
+    // A row past one answer whole is read in parts.
+    fn ledger_row(
+        &self,
+        kind: crate::domain::ledger::LedgerKind,
+        key: &str,
+    ) -> Result<Option<crate::domain::ledger::LedgerRow>> {
+        match self.remote("ledger_row", vec![to_value(kind)?, to_value(key)?]) {
+            Err(error) if super::too_large(&error) => self.ledger_row_in_parts(kind, key),
+            read => read,
+        }
+    }
+    // In pages after the last key of the page before, a page past the
+    // answer's limit asked again at a quarter of its size, and a row past
+    // it alone read in parts (the pages after it of the first size again).
+    fn ledger_rows(
+        &self,
+        kind: crate::domain::ledger::LedgerKind,
+    ) -> Result<Vec<crate::domain::ledger::LedgerRow>> {
+        let (mut rows, mut after, mut page) = (Vec::new(), None::<String>, LEDGER_ROWS_PAGE);
+        loop {
+            let read: Vec<crate::domain::ledger::LedgerRow> = match self.remote(
+                "ledger_rows",
+                vec![to_value(kind)?, to_value(&after)?, to_value(page)?],
+            ) {
+                Err(error) if super::too_large(&error) && page > 1 => {
+                    page = (page / 4).max(1);
+                    continue;
+                }
+                Err(error) if super::too_large(&error) => {
+                    let keys: Vec<String> = self.remote(
+                        "ledger_row_keys",
+                        vec![to_value(kind)?, to_value(&after)?, to_value(1)?],
+                    )?;
+                    let Some(key) = keys.into_iter().next() else {
+                        return Ok(rows);
+                    };
+                    rows.extend(self.ledger_row_in_parts(kind, &key)?);
+                    after = Some(key);
+                    page = LEDGER_ROWS_PAGE;
+                    continue;
+                }
+                read => read?,
+            };
+            let full = read.len() == page;
+            if let Some(last) = read.last() {
+                after = Some(last.key.clone());
+            }
+            rows.extend(read);
+            if !full {
+                return Ok(rows);
+            }
+        }
+    }
+    fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
+        self.remote("remove_node_rows", vec![to_value(before_day)?])
+    }
+}
+
+/// How many times a read of a row in parts starts again while another
+/// writer writes the row between its parts.
+const ROW_PART_TRIES: usize = 3;
+
+impl SupervisorQueue {
+    /// The row of `kind` and `key` read a part of its text at a time
+    /// ([`super::large`]), all of the same row (another writer's row
+    /// between them starts the read again); `None` for no row.
+    fn ledger_row_in_parts(
+        &self,
+        kind: crate::domain::ledger::LedgerKind,
+        key: &str,
+    ) -> Result<Option<crate::domain::ledger::LedgerRow>> {
+        'read: for _ in 0..ROW_PART_TRIES {
+            let (mut text, mut fingerprint, mut offset) = (String::new(), None::<String>, 0);
+            loop {
+                let part: Option<super::large::RowPart> = self.remote(
+                    "ledger_row_part",
+                    vec![
+                        to_value(kind)?,
+                        to_value(key)?,
+                        to_value(offset)?,
+                        to_value(super::large::READ_PART_BYTES)?,
+                    ],
+                )?;
+                let Some(part) = part else {
+                    return Ok(None);
+                };
+                if fingerprint
+                    .as_ref()
+                    .is_some_and(|read| *read != part.fingerprint)
+                {
+                    continue 'read;
+                }
+                anyhow::ensure!(
+                    part.next > offset || part.next == part.total,
+                    "the queue service's part of the row {key} does not go on"
+                );
+                text.push_str(&part.part);
+                offset = part.next;
+                let done = offset >= part.total;
+                fingerprint = Some(part.fingerprint);
+                if done {
+                    break;
+                }
+            }
+            anyhow::ensure!(
+                fingerprint.as_deref() == Some(super::large::digest(&text).as_str()),
+                "the parts of the row {key} are not of its fingerprint"
+            );
+            return Ok(Some(serde_json::from_str(&text)?));
+        }
+        anyhow::bail!("the row {key} was written again while it was read, {ROW_PART_TRIES} times")
+    }
+}
+
+impl SessionStepStore for SupervisorQueue {
+    fn record_steps(
+        &self,
+        _: &crate::domain::session_step::StepTarget,
+        _: &str,
+        _: &[crate::domain::session_step::Step],
+        _: i64,
+    ) -> Result<crate::domain::session_step::StepsRecorded> {
+        Err(not_sent("record_steps"))
+    }
+    fn session_gaps(&self, _: &str) -> Result<Vec<crate::domain::session_step::SeqRange>> {
+        Err(not_sent("session_gaps"))
+    }
+    fn steps_after(
+        &self,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::session_step::SessionStep>> {
+        let mut after = after;
+        pages(STEPS_PAGE, limit, |page| {
+            let read: Vec<crate::domain::session_step::SessionStep> =
+                self.remote("steps_after", vec![to_value(after)?, to_value(page)?])?;
+            if let Some(last) = read.last() {
+                after = last.id;
+            }
+            Ok(read)
+        })
+    }
+    fn target_steps(
+        &self,
+        target: &crate::domain::session_step::StepTarget,
+    ) -> Result<Vec<crate::domain::session_step::SessionStep>> {
+        let mut after = 0;
+        pages(STEPS_PAGE, usize::MAX, |page| {
+            let read: Vec<crate::domain::session_step::SessionStep> = self.remote(
+                "target_steps",
+                vec![to_value(target)?, to_value(after)?, to_value(page)?],
+            )?;
+            if let Some(last) = read.last() {
+                after = last.id;
+            }
+            Ok(read)
+        })
+    }
+    fn remove_steps(&self, before: i64) -> Result<usize> {
+        self.remote("remove_steps", vec![to_value(before)?])
+    }
+}
+
+impl SessionResourceStore for SupervisorQueue {
+    fn record_resources(
+        &self,
+        _: &crate::domain::session_step::StepTarget,
+        _: &str,
+        _: &[crate::domain::session_step::ResourceSample],
+        _: i64,
+    ) -> Result<crate::domain::session_step::StepsRecorded> {
+        Err(not_sent("record_resources"))
+    }
+    fn target_resources(
+        &self,
+        target: &crate::domain::session_step::StepTarget,
+    ) -> Result<Vec<crate::domain::session_step::SessionResource>> {
+        let mut after = 0;
+        pages(STEPS_PAGE, usize::MAX, |page| {
+            let read: Vec<crate::domain::session_step::SessionResource> = self.remote(
+                "target_resources",
+                vec![to_value(target)?, to_value(after)?, to_value(page)?],
+            )?;
+            if let Some(last) = read.last() {
+                after = last.id;
+            }
+            Ok(read)
+        })
+    }
+    fn resources_after(
+        &self,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::session_step::SessionResource>> {
+        let mut after = after;
+        pages(STEPS_PAGE, limit, |page| {
+            let read: Vec<crate::domain::session_step::SessionResource> =
+                self.remote("resources_after", vec![to_value(after)?, to_value(page)?])?;
+            if let Some(last) = read.last() {
+                after = last.id;
+            }
+            Ok(read)
+        })
+    }
+}
+
+impl SessionOwners for SupervisorQueue {
+    fn register_session(
+        &self,
+        _: &crate::domain::session_step::StepTarget,
+        _: &str,
+        _: i64,
+    ) -> Result<()> {
+        Err(not_sent("register_session"))
+    }
+    fn session_owner(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::domain::session_step::SessionOwner>> {
+        self.remote("session_owner", vec![to_value(session_id)?])
     }
 }

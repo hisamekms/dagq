@@ -2065,3 +2065,274 @@ fn a_files_import_goes_in_parts_and_the_last_marks_it() {
         [(0, serde_json::json!({"bytes": 0, "rows": 0}))]
     );
 }
+
+/// The service of a queue whose ledger holds `rows` run rows (keys
+/// `r00001`…) and `events` events, answering a page of at most
+/// `largest_rows` rows or `largest` events and refusing a larger one as
+/// past the answer's limit.
+struct PagedLedger {
+    rows: usize,
+    events: i64,
+    largest: usize,
+    largest_rows: usize,
+    asked: std::sync::Mutex<Vec<(String, usize)>>,
+}
+
+impl PagedLedger {
+    fn row(key: usize) -> Value {
+        serde_json::json!({
+            "kind": "run", "key": format!("r{key:05}"), "task_id": null, "ledger_v": 6,
+            "built_at": "2030-01-01T00:00:00.000Z", "inputs_from": 0,
+            "inputs_through": {"events": 0}, "is_final": false, "started_at": null,
+            "ended_at": null, "outcome": null,
+            "totals": crate::domain::ledger::Totals::default(), "intervals": [],
+            "attributes": {}, "after_claim": null, "detail": {}, "legacy": null,
+            "subject": null, "records": [],
+        })
+    }
+
+    fn event(id: i64) -> Value {
+        serde_json::json!({"id": id, "task_id": null, "goal_id": null, "run_id": null,
+            "kind": "queue_service_started", "payload": {},
+            "created_at": "2026-10-28T00:00:00.000Z"})
+    }
+}
+
+impl ServiceCaller for PagedLedger {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(use_case, UseCase::Supervisor);
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        let page = |index: usize| usize::try_from(params.args[index].as_u64().unwrap()).unwrap();
+        let (page, answer): (usize, Box<dyn Fn(usize) -> Vec<Value>>) = match params.op.as_str() {
+            "ledger_rows" => {
+                assert_eq!(params.args[0], "run");
+                let after = params.args[1]
+                    .as_str()
+                    .map_or(0, |key| key[1..].parse::<usize>().unwrap());
+                let rows = self.rows;
+                (
+                    page(2),
+                    Box::new(move |page| {
+                        (after + 1..=rows)
+                            .take(page)
+                            .map(PagedLedger::row)
+                            .collect()
+                    }),
+                )
+            }
+            "events_between" => {
+                let (after, upto) = (
+                    params.args[0].as_i64().unwrap(),
+                    params.args[1].as_i64().unwrap().min(self.events),
+                );
+                (
+                    page(3),
+                    Box::new(move |page| {
+                        (after + 1..=upto)
+                            .take(page)
+                            .map(PagedLedger::event)
+                            .collect()
+                    }),
+                )
+            }
+            op => panic!("no {op} here"),
+        };
+        self.asked.lock().unwrap().push((params.op.clone(), page));
+        let largest = if params.op == "ledger_rows" {
+            self.largest_rows
+        } else {
+            self.largest
+        };
+        if page > largest {
+            return Err(service_error(&ServiceError {
+                code: ServiceErrorCode::ResponseTooLarge,
+                message: "too large".into(),
+                denied: None,
+                kind: None,
+            }));
+        }
+        Ok(Value::Array(answer(page)))
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// What builds the ledger reads the rows of a kind and the events a page
+/// at a time, each after the last of the page before, a page past the
+/// answer's limit asked again smaller (the rows' at a quarter, the
+/// events' at half), the events no more than
+/// the builder asks for: so a ledger and a read of events longer than one
+/// answer holds are read whole.
+#[test]
+fn the_ledgers_rows_and_events_past_the_answers_limit_are_read_in_pages() {
+    use crate::application::LedgerStore;
+    use crate::domain::EventId;
+    use crate::domain::ledger::LedgerKind;
+    let service = Arc::new(PagedLedger {
+        rows: 2_500,
+        events: 12_000,
+        largest: 600,
+        largest_rows: 60,
+        asked: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        ActorContext::instance(ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let asked = || {
+        std::mem::take(&mut *service.asked.lock().unwrap())
+            .into_iter()
+            .map(|(_, page)| page)
+            .collect::<Vec<_>>()
+    };
+    let rows = queue.ledger_rows(LedgerKind::Run).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
+        (1..=2_500)
+            .map(|key| format!("r{key:05}"))
+            .collect::<Vec<_>>()
+    );
+    let pages = asked();
+    assert_eq!(pages.len(), 102, "{pages:?}");
+    assert_eq!(pages[0], 100);
+    assert!(pages[1..].iter().all(|page| *page == 25), "{pages:?}");
+    let events = queue
+        .events_between(
+            EventId::new(100),
+            EventId::new(i64::MAX),
+            &crate::domain::EventFilter::default(),
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.id.as_i64())
+            .collect::<Vec<_>>(),
+        (101..=1_100).collect::<Vec<_>>()
+    );
+    assert_eq!(asked(), [1000, 500, 500]);
+    // One page the answer holds is one read, as before.
+    let events = queue
+        .events_between(
+            EventId::new(11_900),
+            EventId::new(i64::MAX),
+            &crate::domain::EventFilter::default(),
+            500,
+        )
+        .unwrap();
+    assert_eq!(events.len(), 100);
+    assert_eq!(asked(), [500]);
+}
+
+/// The service of one ledger row past an answer whole, answering its text
+/// a few bytes a part, whose row another writer replaces with `then` once
+/// the first part of `first` was read.
+struct RowInParts {
+    first: crate::domain::ledger::LedgerRow,
+    then: crate::domain::ledger::LedgerRow,
+    parts: std::sync::Mutex<usize>,
+}
+
+impl ServiceCaller for RowInParts {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(use_case, UseCase::Supervisor);
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        match params.op.as_str() {
+            "ledger_row" | "ledger_rows" => Err(service_error(&ServiceError {
+                code: ServiceErrorCode::ResponseTooLarge,
+                message: "too large".into(),
+                denied: None,
+                kind: None,
+            })),
+            "ledger_row_keys" => {
+                let after = params.args[1].as_str().map(str::to_owned);
+                Ok(serde_json::json!(if after.is_none() {
+                    vec![self.first.key.clone()]
+                } else {
+                    Vec::new()
+                }))
+            }
+            "ledger_row_part" => {
+                let mut parts = self.parts.lock().unwrap();
+                *parts += 1;
+                let row = if *parts == 1 { &self.first } else { &self.then };
+                let text = serde_json::to_string(row)?;
+                let offset = usize::try_from(params.args[2].as_u64().unwrap()).unwrap();
+                Ok(serde_json::to_value(super::large::part_at(
+                    &text,
+                    super::large::digest(&text),
+                    offset,
+                    40,
+                )?)?)
+            }
+            op => panic!("no {op} here"),
+        }
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// A row past one answer is read in parts, alone and as the one row of a
+/// page past it: a part of another row than the parts before it (another
+/// writer wrote it between them) starts the read again, which gives the
+/// row as the queue holds it last.
+#[test]
+fn a_row_past_an_answer_is_read_in_parts_again_once_another_writer_wrote_it() {
+    use crate::application::LedgerStore;
+    use crate::domain::ledger::{LedgerKind, LedgerRow};
+    let row = |built_at: &str| -> LedgerRow {
+        let mut row = PagedLedger::row(1);
+        row["built_at"] = built_at.into();
+        row["detail"] = serde_json::json!({"pad": "é".repeat(100)});
+        serde_json::from_value(row).unwrap()
+    };
+    let (first, then) = (
+        row("2030-01-01T00:00:00.000Z"),
+        row("2030-01-02T00:00:00.000Z"),
+    );
+    let queue = |service: Arc<RowInParts>| {
+        SupervisorQueues::new(service, ActorContext::instance(ActorRole::Supervisor, 7)).queue()
+    };
+    let service = Arc::new(RowInParts {
+        first: first.clone(),
+        then: then.clone(),
+        parts: std::sync::Mutex::default(),
+    });
+    let read = queue(service.clone())
+        .ledger_row(LedgerKind::Run, &first.key)
+        .unwrap();
+    assert_eq!(read, Some(then.clone()));
+    assert!(*service.parts.lock().unwrap() > 2);
+    let service = Arc::new(RowInParts {
+        first: first.clone(),
+        then: then.clone(),
+        parts: std::sync::Mutex::default(),
+    });
+    assert_eq!(queue(service).ledger_rows(LedgerKind::Run).unwrap(), [then]);
+}

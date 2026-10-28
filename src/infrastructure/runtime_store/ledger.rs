@@ -171,6 +171,21 @@ impl LedgerStore for SqliteQueue {
         rows.map(|row| row?).collect()
     }
 
+    fn ledger_rows_after(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        let mut statement = self.conn.prepare(
+            "SELECT * FROM ledger_rows WHERE kind=?1 AND (?2 IS NULL OR key > ?2)
+             ORDER BY key LIMIT ?3",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement.query_map(params![kind.as_str(), after, limit], ledger_row)?;
+        rows.map(|row| row?).collect()
+    }
+
     /// Read the node rows with no lock, then write only those the
     /// retention changes, [`ROWS_PER_TRANSACTION`] a transaction
     /// ([`in_batches`]): with none to change (the day's retention already

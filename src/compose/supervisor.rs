@@ -61,7 +61,6 @@ use crate::{
             load_supervisor_config,
         },
         run_files::LocalRunFiles,
-        runtime_store::{SqliteOpener, SqlitePorts},
         transcripts::ClaudeTranscripts,
     },
 };
@@ -838,19 +837,9 @@ pub fn supervise_with_reviewer(
     let ci_watch = options.ci_watch.as_ref().map(|settings| {
         observation::ci_watch_port(&db, &main_checkout, settings, options.profiles)
     });
-    // The supervisor's own transitions (ADR-t728-1 decision 4).
-    let opener = || SqliteOpener {
-        db: db.clone(),
-        generators: generators.clone(),
-        actor: Some(crate::domain::actor::ActorContext::instance(
-            crate::domain::actor::ActorRole::Supervisor,
-            pid,
-        )),
-    };
     // Every operation of the supervisor's queue through the queue service
-    // (ADR-t3102-3 decisions 3 to 5), the host's load samples and the
-    // measure of the runs' resources included; the ledger still on the DB's
-    // own connection (`opener`).
+    // (ADR-t3102-3 decisions 3 to 5), the host's load samples, the measure
+    // of the runs' resources and the ledger's builder included.
     let in_process = || -> Arc<dyn ServiceCaller> {
         Arc::new(InProcessCaller::new(
             &db,
@@ -941,8 +930,8 @@ pub fn supervise_with_reviewer(
                 .host_metrics
                 .as_ref()
                 .map(|metrics| metrics.retention_days),
-            Arc::new(SqlitePorts {
-                opener: opener(),
+            Arc::new(SupervisorPorts {
+                queues: supervisor_queues(),
                 keep: |queue| -> Box<dyn crate::application::LedgerQueue + Send> {
                     Box::new(queue)
                 },

@@ -108,6 +108,21 @@ pub trait LedgerStore {
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
     /// Every row of `kind`, by key.
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>>;
+    /// At most `limit` rows of `kind` after the key `after` (`None`: from
+    /// the first), by key: a page of [`Self::ledger_rows`].
+    fn ledger_rows_after(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        Ok(self
+            .ledger_rows(kind)?
+            .into_iter()
+            .filter(|row| after.is_none_or(|after| row.key.as_str() > after))
+            .take(limit)
+            .collect())
+    }
     /// The retention of the node rows, by the same local day as
     /// [`NodeSampleStore::remove_node_samples`]: drop from each the samples
     /// of a day before `before_day` and remove a row left with none

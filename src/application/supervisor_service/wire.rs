@@ -138,6 +138,11 @@ whole!(
     crate::application::WrittenBy,
     crate::domain::AskId,
     crate::domain::environment::RunResource,
+    crate::domain::ledger::LedgerRow,
+    crate::domain::session_step::SessionStep,
+    crate::domain::session_step::SessionResource,
+    crate::domain::session_step::SessionOwner,
+    super::large::RowPart,
 );
 
 impl Wire for Task {

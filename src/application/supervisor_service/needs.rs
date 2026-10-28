@@ -178,14 +178,25 @@ pub(super) const READS: &[&str] = &[
     "imported_files",
     "node_samples",
     "node_samples_after",
+    "ledger_row",
+    "ledger_rows",
+    "steps_after",
+    "target_steps",
+    "target_resources",
+    "resources_after",
+    "session_owner",
+    "ledger_row_part",
+    "ledger_row_keys",
+    "run_events_after",
+    "task_events_after",
 ];
 
 /// The scheduler's own transitions and records (`scheduler.supervise`):
 /// the claim, the leases and the runs', the registration and the handoff,
 /// the sessions' and the jobs' records, the plan and goal reviews it runs
 /// and applies, the planners' routes, the observation's and the reports'
-/// records, the host's load samples, the eval's rounds and the tokens it
-/// issues.
+/// records, the host's load samples, the ledger's rows and retention, the
+/// eval's rounds and the tokens it issues.
 const SUPERVISE: &[&str] = &[
     "claim_for_supervisor",
     "claim_for_supervisor_holding",
@@ -324,6 +335,11 @@ const SUPERVISE: &[&str] = &[
     "record_node_sample",
     "import_node_sample_part",
     "remove_node_samples",
+    "write_ledger_row_over",
+    "remove_node_rows",
+    "remove_steps",
+    "stage_ledger_row",
+    "write_staged_ledger_row_over",
 ];
 
 /// The operations of one capability other than `scheduler.supervise`.

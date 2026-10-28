@@ -238,8 +238,9 @@ fn name(value: impl Serialize) -> String {
 /// One row of the ledger: what every kind has (its key, the version of
 /// its fold, how far into its inputs it was folded, the marks of settled
 /// and legacy, its times and sums, its records) and what its kind adds
-/// (`detail`, `subject`). The columns of `ledger_rows` are its fields.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// (`detail`, `subject`). The columns of `ledger_rows` are its fields,
+/// and its JSON is all of it, as it crosses the queue service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerRow {
     /// `run`, `task`, `session`, `queue` or `node`.
     pub kind: LedgerKind,
@@ -294,6 +295,15 @@ pub struct LedgerRow {
 impl LedgerRow {
     pub fn is_legacy(&self) -> bool {
         self.legacy.is_some()
+    }
+
+    /// The digest of its JSON: two rows read of the same stored one have
+    /// the same, so a write over a row read names the row by it, not
+    /// whole.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        format!("{:x}", Sha256::digest(bytes))
     }
 
     fn new(kind: LedgerKind, key: String, task_id: Option<TaskId>, built_at: &str) -> Self {

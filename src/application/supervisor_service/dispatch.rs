@@ -2249,11 +2249,167 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             answer(RunResourceStore::run_resources_after(&*store, after, limit))
         }
         "open_attachments" => answer(RunResourceStore::open_attachments(&*store)),
+        "ledger_row" => {
+            let (kind, key): (crate::domain::ledger::LedgerKind, String) = read(op, args)?;
+            answer(LedgerStore::ledger_row(&*store, kind, &key))
+        }
+        // A page of the rows of `kind`, by key: at most `page` after the
+        // key `after` (none: from the first).
+        "ledger_rows" => {
+            let (kind, after, page): (crate::domain::ledger::LedgerKind, Option<String>, usize) =
+                read(op, args)?;
+            answer(LedgerStore::ledger_rows_after(
+                &*store,
+                kind,
+                after.as_deref(),
+                page,
+            ))
+        }
+        // The row read is named by its fingerprint: one the store holds
+        // now of another is another writer's, and nothing is written; the
+        // store writes only over the one held, under its write lock.
+        "write_ledger_row_over" => {
+            let (row, read_row): (crate::domain::ledger::LedgerRow, Option<String>) =
+                read(op, args)?;
+            answer(write_over(&*store, &row, read_row.as_deref()))
+        }
+        // A row past one request whole: its text's parts held first, then
+        // the write over the row read as one sent whole
+        // ([`super::large`]).
+        "stage_ledger_row" => {
+            let (digest, index, count, part): (String, usize, usize, String) = read(op, args)?;
+            answer(super::large::stage(&digest, index, count, part, now))
+        }
+        "write_staged_ledger_row_over" => {
+            let (digest, read_row): (String, Option<String>) = read(op, args)?;
+            let row: crate::domain::ledger::LedgerRow =
+                serde_json::from_str(&super::large::take(&digest)?).map_err(|error| {
+                    BadOperation(format!("the row staged does not read: {error}"))
+                })?;
+            answer(write_over(&*store, &row, read_row.as_deref()))
+        }
+        // A part of the text of a row past one answer whole, from `offset`
+        // ([`super::large`]); none for no row.
+        "ledger_row_part" => {
+            let (kind, key, offset, bytes): (
+                crate::domain::ledger::LedgerKind,
+                String,
+                usize,
+                usize,
+            ) = read(op, args)?;
+            let part = LedgerStore::ledger_row(&*store, kind, &key)?
+                .map(|row| {
+                    let text = serde_json::to_string(&row)?;
+                    super::large::part_at(&text, super::large::digest(&text), offset, bytes)
+                })
+                .transpose();
+            answer(part)
+        }
+        // The keys of at most `limit` rows of `kind` after the key `after`:
+        // the next row read in parts when one page of it is past an answer.
+        "ledger_row_keys" => {
+            let (kind, after, limit): (crate::domain::ledger::LedgerKind, Option<String>, usize) =
+                read(op, args)?;
+            answer(
+                LedgerStore::ledger_rows_after(&*store, kind, after.as_deref(), limit)
+                    .map(|rows| rows.into_iter().map(|row| row.key).collect::<Vec<_>>()),
+            )
+        }
+        // A page of a run's or a task's events after the event `after`: the
+        // read of a history past one answer whole.
+        "run_events_after" => {
+            let (id, after, page): (RunId, EventId, usize) = read(op, args)?;
+            answer(EventStore::run_events(&*store, &id).map(|events| {
+                events
+                    .into_iter()
+                    .filter(|event| event.id > after)
+                    .take(page)
+                    .collect::<Vec<_>>()
+            }))
+        }
+        "task_events_after" => {
+            let (task, after, page): (TaskId, EventId, usize) = read(op, args)?;
+            answer(EventStore::task_events(&*store, task).map(|events| {
+                events
+                    .into_iter()
+                    .filter(|event| event.id > after)
+                    .take(page)
+                    .collect::<Vec<_>>()
+            }))
+        }
+        "remove_node_rows" => {
+            let (before_day,): (i64,) = read(op, args)?;
+            answer(LedgerStore::remove_node_rows(&*store, before_day))
+        }
+        "steps_after" => {
+            let (after, limit): (i64, usize) = read(op, args)?;
+            answer(SessionStepStore::steps_after(&*store, after, limit))
+        }
+        // A page of the read, as `run_resources`'s.
+        "target_steps" => {
+            let (target, after, page): (crate::domain::session_step::StepTarget, i64, usize) =
+                read(op, args)?;
+            answer(
+                SessionStepStore::target_steps(&*store, &target).map(|steps| {
+                    steps
+                        .into_iter()
+                        .filter(|step| step.id > after)
+                        .take(page)
+                        .collect::<Vec<_>>()
+                }),
+            )
+        }
+        "remove_steps" => {
+            let (before,): (i64,) = read(op, args)?;
+            answer(SessionStepStore::remove_steps(&*store, before))
+        }
+        "target_resources" => {
+            let (target, after, page): (crate::domain::session_step::StepTarget, i64, usize) =
+                read(op, args)?;
+            answer(
+                SessionResourceStore::target_resources(&*store, &target).map(|samples| {
+                    samples
+                        .into_iter()
+                        .filter(|sample| sample.id > after)
+                        .take(page)
+                        .collect::<Vec<_>>()
+                }),
+            )
+        }
+        "resources_after" => {
+            let (after, limit): (i64, usize) = read(op, args)?;
+            answer(SessionResourceStore::resources_after(&*store, after, limit))
+        }
+        "session_owner" => {
+            let (session_id,): (String,) = read(op, args)?;
+            answer(SessionOwners::session_owner(&*store, &session_id))
+        }
         _ => Err(BadOperation(format!(
             "the queue service has no supervisor operation {op}"
         ))
         .into()),
     }
+}
+
+/// Write `row` over the row the store holds of its kind and key while
+/// that one's fingerprint is `read` (`None`: no row), as
+/// [`LedgerStore::write_ledger_row_over`] does over the row itself: `None`,
+/// nothing written, when another writer wrote it since it was read.
+fn write_over<S: SupervisorStore + ?Sized>(
+    store: &S,
+    row: &crate::domain::ledger::LedgerRow,
+    read: Option<&str>,
+) -> Result<Option<bool>> {
+    let held = LedgerStore::ledger_row(store, row.kind, &row.key)?;
+    if held
+        .as_ref()
+        .map(crate::domain::ledger::LedgerRow::fingerprint)
+        .as_deref()
+        != read
+    {
+        return Ok(None);
+    }
+    LedgerStore::write_ledger_row_over(store, row, held.as_ref())
 }
 
 /// The arguments of `set_max_load`: the token, the threshold and its

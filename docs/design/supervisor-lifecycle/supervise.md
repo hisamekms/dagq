@@ -129,8 +129,8 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 
 ## queue serviceの経路
 
-supervisorはqueue DBを開かずに、claim・lease・runの状態とevent・登録・判断に使う読み取り・token・着地（integratorとして）とreviewとvalidationの記録・jobの起動と結果・計画と観測・askとattention・CIの見張り・引き継ぎの記録・containerの部品の記録と読み（imageのbuildと失敗・relayのattention・dagq machineの利用者のrun）・hostの負荷のsampleとrunの資源の記録と読み取りをqueue serviceのユースケースとして行う（[ADR-t3102-3](../../adr/2026-10-22-t3102-3-stage-5-outage-notice-and-use-cases-for-multi-step-control-operations.md)決定3〜5、principalは[ADR-t3102-1](../../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)）。
-DBを開くのはledgerの記帳だけ（`compose::supervisor`）。
+supervisorはqueue DBを開かずに、claim・lease・runの状態とevent・登録・判断に使う読み取り・token・着地（integratorとして）とreviewとvalidationの記録・jobの起動と結果・計画と観測・askとattention・CIの見張り・引き継ぎの記録・containerの部品の記録と読み（imageのbuildと失敗・relayのattention・dagq machineの利用者のrun）・hostの負荷のsampleとrunの資源の記録と読み取り・ledgerの記帳（行の読み書きと保持、それが読むsessionのstepと資源と持ち主）をqueue serviceのユースケースとして行う（[ADR-t3102-3](../../adr/2026-10-22-t3102-3-stage-5-outage-notice-and-use-cases-for-multi-step-control-operations.md)決定3〜5、principalは[ADR-t3102-1](../../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)）。
+supervisorはこれらのためにもqueue DBを開かない（`compose::supervisor`）。
 
 - 入口は`application::supervisor_service`のmodule doc（serviceが答える操作、leaseのtokenの検査、actorの名指し、tokenの発行と失効）と`SupervisorQueue`、serviceの側は`answer`。
 - supervisorが起動する`observe`と`throughput-review`は、そのsupervisorのtokenで同じprincipalとしてserviceを通り、DBを開かない（`compose::observation`の`job_queues`）。

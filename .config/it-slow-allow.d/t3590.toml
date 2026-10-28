@@ -1,0 +1,5 @@
+# 約38s in the worker's run (debug build)
+[[test]]
+name = "supervisor_service_ledger::what_builds_the_ledger_crosses_the_services_limits_in_parts"
+reason = "境界（プロセス）: queue service のプロセスが socket で持つ要求（1 MiB）と答え（16 MiB）の上限を越える台帳の行と event を、台帳を作る係が分けて書き読む経路の代表。越える量は上限で決まり、debug build では往復ごとの直列化に時間がかかる。分け方の判断（part の境目・digest・保持の期限）は large.rs の unit test が持つ"
+task = 3590
