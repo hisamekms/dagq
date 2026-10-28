@@ -90,7 +90,7 @@ landing recheckは、hostで流すたびにscratchを作る前に、`recheck/`�
     jobは消したrunを、選ばれたときのまま（leaseもturnも無く同じ状態）の間だけ次の周回から外し（`leave_pruned`、プロセスの中だけで覚える）、buildしうる変化の後の周回でまた消す。
   - 記録は`incremental_sessions_removed`で、bytesはentryのあったdirを消す前と後に測った差である（sessionの間でrustcがfileをhard linkで共有するため）。
     runの大きさの見積もりには数えない（[claimを控える](claim-hold.md#閾値)）。
-  - 読めないdir・消せないentry・Gitに問えないdirは`cleanup_failed`にして残りを続け、消せた分も記録し、そのrunを外さず次の周回で再び試す。
+  - 読めないdir・消せないentry・Gitに問えないdirは`cleanup_failed`にして残りを続け、途中で消えた分も記録し、そのrunを外さず次の周回で再び試す。
   - 空き容量のための掃除は、これらのrunのビルド成果物を丸ごと消す。
 
 - **runの`runner`**: 上のどちらでも、同じjobがrun_dirの`runner`（claimとresumeのたびに写すバイナリの写し）を消し、消してよい理由と失敗のやり直しは`remove_run_runner`が持つ。

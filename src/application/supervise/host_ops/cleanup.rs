@@ -2205,7 +2205,7 @@ fn clean_stale(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Ve
     let removal = remove_stale_entries(&*ports.files, worktree, &ports.toolchains, &|name| {
         ports.repository.tracks(worktree, name)
     });
-    if removal.entries > 0 {
+    if !removal.paths.is_empty() {
         outcomes.push(Outcome::StaleEntries {
             run_id: candidate.run_id.clone(),
             status: candidate.status,
@@ -2228,8 +2228,9 @@ fn clean_stale(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Ve
     );
 }
 
-/// What [`remove_stale_entries`] did: the directories entries went from,
-/// how many went and what that freed, and what failed, each with its path.
+/// What [`remove_stale_entries`] did: the directories something went
+/// from, how many entries went whole and what went freed (also from an
+/// entry that failed halfway), and what failed, each with its path.
 #[derive(Debug, Default)]
 struct StaleRemoval {
     paths: Vec<String>,
@@ -2246,7 +2247,11 @@ struct StaleRemoval {
 /// name; no link is followed. Each directory is measured before and after,
 /// as what went shares files with what stayed (rustc links the files of a
 /// session into the next one), so the sizes of the entries would count
-/// those files that stay.
+/// those files that stay. A directory is returned when an entry went or
+/// when it freed bytes (or could not be measured), as an entry that fails
+/// halfway (a session's directory losing some of its files) frees what
+/// went from it, which no later sweep finds again; one that lost nothing
+/// is not.
 ///
 /// A directory that is not there or is no directory (a link) has nothing;
 /// one that cannot be read, an entry that cannot be removed, and a build directory
@@ -2334,13 +2339,14 @@ fn remove_stale_entries(
                     Err(error) => fail(&path, "remove", error.into()),
                 }
             }
-            if removed == 0 {
-                continue;
-            }
-            removal.size.add(match (before, measure(&stale.dir)) {
+            let freed = match (before, measure(&stale.dir)) {
                 (Ok(before), Ok(after)) => Size::of(before.saturating_sub(after)),
                 (Err(why), _) | (_, Err(why)) => Size::unmeasured(why),
-            });
+            };
+            if removed == 0 && freed == Size::default() {
+                continue;
+            }
+            removal.size.add(freed);
             removal.paths.push(stale.dir.to_string_lossy().into_owned());
             removal.entries += removed;
         }
@@ -4675,13 +4681,15 @@ mod tests {
 
     /// A tree of directories in memory: the names each directory lists,
     /// or the error reading it fails with; a name no directory is a file.
-    /// Removing a path under `stuck` fails, the rest goes. A path in
+    /// Removing a path under `stuck` fails, the rest goes; removing one
+    /// under `halfway` takes what is in it and then fails. A path in
     /// `links` is a link, which the port does not follow: ELOOP, as on
     /// macOS. Each name measures 100 bytes.
     #[derive(Default)]
     struct TreeFiles {
         dirs: Mutex<HashMap<PathBuf, std::result::Result<Vec<String>, std::io::ErrorKind>>>,
         stuck: Mutex<Vec<PathBuf>>,
+        halfway: Mutex<Vec<PathBuf>>,
         links: Vec<PathBuf>,
     }
 
@@ -4705,6 +4713,11 @@ mod tests {
                 return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
             }
             let mut dirs = self.dirs.lock().unwrap();
+            if self.halfway.lock().unwrap().iter().any(|half| half == path) {
+                dirs.retain(|dir, _| dir == path || !dir.starts_with(path));
+                dirs.insert(path.to_path_buf(), Ok(Vec::new()));
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
             dirs.retain(|dir, _| !dir.starts_with(path));
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             if let Some(Ok(names)) = dirs.get_mut(path.parent().unwrap()) {
@@ -4880,6 +4893,115 @@ mod tests {
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].0, stuck.to_string_lossy());
         assert!(failed[0].1.starts_with("remove "), "{failed:?}");
+    }
+
+    /// A session whose directory loses its files and then fails to go
+    /// frees bytes no later sweep finds: they are recorded although no
+    /// entry of its crate went whole, whether it has no lock or its lock
+    /// fails to go too, and each failure is returned beside them; a crate
+    /// that lost nothing is not named.
+    #[test]
+    fn the_bytes_of_a_session_that_went_halfway_are_recorded_beside_its_failure() {
+        let session = Path::new(INCREMENTAL).join("b-2/s-00a-r-x");
+        let lock = Path::new(INCREMENTAL).join("b-2/s-00a-r.lock");
+        for with_lock in [false, true] {
+            let files = two_crates();
+            // a-1 has nothing to remove: its session and lock are stuck.
+            files.stuck.lock().unwrap().extend([
+                Path::new(INCREMENTAL).join("a-1/s-00a-r-x"),
+                Path::new(INCREMENTAL).join("a-1/s-00a-r.lock"),
+            ]);
+            files.halfway.lock().unwrap().push(session.clone());
+            if with_lock {
+                files.stuck.lock().unwrap().push(lock.clone());
+            } else {
+                files.list(
+                    &format!("{INCREMENTAL}/b-2"),
+                    Ok(&["s-00a-r-x", "s-00b-r-y", "s-00b-r.lock"]),
+                );
+            }
+            let removal = remove_stale_entries(
+                &files,
+                Path::new("/runs/idle/worktree"),
+                &Toolchains::this_repository(),
+                &|_| Ok(false),
+            );
+            assert_eq!(removal.paths, [format!("{INCREMENTAL}/b-2")], "{with_lock}");
+            assert_eq!(removal.entries, 0);
+            // The file the session's directory held.
+            assert_eq!(removal.size, Size::of(100));
+            let mut failed: Vec<&str> = removal.failed.iter().map(|(p, _)| p.as_str()).collect();
+            failed.sort_unstable();
+            let mut expected = vec![
+                format!("{INCREMENTAL}/a-1/s-00a-r-x"),
+                format!("{INCREMENTAL}/a-1/s-00a-r.lock"),
+                session.to_string_lossy().into_owned(),
+            ];
+            if with_lock {
+                expected.push(lock.to_string_lossy().into_owned());
+            }
+            expected.sort_unstable();
+            assert_eq!(failed, expected);
+        }
+    }
+
+    /// A run whose stale caches went only halfway records what that freed
+    /// as `incremental_sessions_removed` with no entry, and the failure as
+    /// `cleanup_failed` apart; one that lost nothing records the failure
+    /// alone.
+    #[test]
+    fn a_run_whose_stale_caches_went_halfway_records_the_bytes_and_the_failure() {
+        let pass = |halfway: bool| {
+            let files = Arc::new(two_crates());
+            files.list(INCREMENTAL, Ok(&["b-2"]));
+            files.list(
+                &format!("{INCREMENTAL}/b-2"),
+                Ok(&["s-00a-r-x", "s-00b-r-y", "s-00b-r.lock"]),
+            );
+            let session = Path::new(INCREMENTAL).join("b-2/s-00a-r-x");
+            if halfway {
+                files.halfway.lock().unwrap().push(session);
+            } else {
+                files.stuck.lock().unwrap().push(session);
+            }
+            let repository = Arc::new(Removing::default());
+            let ports = JobPorts {
+                files,
+                ..job_ports(CacheFiles::default(), &repository)
+            };
+            let idle = EndedRunWorktree {
+                cleanup: WorktreeCleanup::Idle,
+                status: RunStatus::NeedsSession,
+                ..candidate("idle", TaskStatus::InProgress)
+            };
+            let mut outcomes = Vec::new();
+            clean_candidate(&ports, &idle, &mut None, &mut false, &mut outcomes);
+            outcomes
+        };
+        let outcomes = pass(true);
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [
+                    Outcome::StaleEntries { entries: 0, size, .. },
+                    Outcome::Failed { what: "stale cache", .. },
+                ] if *size == Size::of(100)
+            ),
+            "{}",
+            outcomes.len()
+        );
+        let outcomes = pass(false);
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [Outcome::Failed {
+                    what: "stale cache",
+                    ..
+                }]
+            ),
+            "{}",
+            outcomes.len()
+        );
     }
 
     /// A directory that cannot be read is a failure, not a directory with
