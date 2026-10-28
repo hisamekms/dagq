@@ -4,7 +4,7 @@
 //! of the CSV files the retention keeps. The decisions (the half interval,
 //! the retention's days, the order of the import) are the unit tests of
 //! `application::supervise::host_metrics` and `domain::host_metrics`.
-use dagq::domain::environment::Resources;
+use dagq::domain::environment::{NodeRate, Resources};
 use dagq::{
     application::{NodeSampleStore, supervise::HostMetricsPort},
     domain::host_metrics::{
@@ -102,7 +102,7 @@ fn the_store_keeps_one_row_per_node_and_second_and_its_retention() {
                 node,
                 day,
                 sample,
-                &|_| Resources::default(),
+                &NodeRate::default(),
                 SampleSource::Sampled,
                 apart,
             )
@@ -186,7 +186,7 @@ fn two_supervisors_write_one_row_to_the_store_and_the_file() {
             HOST_NODE,
             NOW / DAY - 3,
             &busy(NOW - 3 * DAY),
-            &|_| Resources::default(),
+            &NodeRate::default(),
             SampleSource::Sampled,
             0,
         )
@@ -210,7 +210,7 @@ fn two_supervisors_write_one_row_to_the_store_and_the_file() {
             HOST_NODE,
             NOW / DAY - 3,
             &busy(NOW - 3 * DAY),
-            &|_| Resources::default(),
+            &NodeRate::default(),
             SampleSource::Sampled,
             0,
         )
@@ -276,7 +276,7 @@ fn the_kept_files_are_imported_once_and_summarize_as_the_files() {
             HOST_NODE,
             NOW / DAY,
             &busy(NOW - 30),
-            &|_| Resources::default(),
+            &NodeRate::default(),
             SampleSource::Sampled,
             15,
         )
@@ -459,7 +459,7 @@ fn a_files_import_commits_by_batches_and_the_next_adds_the_rest() {
                 HOST_NODE,
                 day,
                 sampled,
-                &|_| Resources::default(),
+                &NodeRate::default(),
                 SampleSource::Sampled,
                 0
             )
@@ -588,7 +588,7 @@ fn the_common_units_go_in_the_same_row_and_leave_the_hosts_values_as_they_were()
                     HOST_NODE,
                     NOW / DAY,
                     &busy(at).as_written(),
-                    &|_| Resources::default(),
+                    &NodeRate::default(),
                     SampleSource::Sampled,
                     15,
                 )
@@ -651,28 +651,31 @@ fn a_sample_stands_for_the_time_since_the_nodes_row_before_it() {
     let dir = tempfile::tempdir().unwrap();
     let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
     let day = NOW / DAY;
-    let before = |at: i64| {
-        let seen = std::cell::Cell::new(None);
+    // A core busy all along: its CPU seconds are the seconds it stands for.
+    let rate = NodeRate {
+        per_second: Resources {
+            cpu_seconds: Some(1.0),
+            ..Resources::default()
+        },
+        interval: Duration::from_secs(30),
+    };
+    let stands_for = |at: i64| {
         let written = queue
-            .record_node_sample(
-                HOST_NODE,
-                day,
-                &busy(at),
-                &|previous| {
-                    seen.set(Some(previous));
-                    Resources::default()
-                },
-                SampleSource::Sampled,
-                15,
-            )
+            .record_node_sample(HOST_NODE, day, &busy(at), &rate, SampleSource::Sampled, 15)
             .unwrap();
         assert!(written, "{at}");
-        seen.get().unwrap()
+        rows(&queue)
+            .into_iter()
+            .find(|row| row.sample.unix == at)
+            .and_then(|row| row.resources.cpu_seconds)
+            .unwrap()
     };
-    assert_eq!(before(NOW), None);
-    assert_eq!(before(NOW + 40), Some(NOW));
-    assert_eq!(before(NOW + 20), Some(NOW + 20));
-    assert_eq!(before(NOW + 70), Some(NOW + 40));
+    // The first stands for the interval, the next for the time since the
+    // row before; one written after a later row for none.
+    assert_eq!(stands_for(NOW), 30.0);
+    assert_eq!(stands_for(NOW + 40), 40.0);
+    assert_eq!(stands_for(NOW + 20), 0.0);
+    assert_eq!(stands_for(NOW + 70), 30.0);
 }
 
 /// The summary of the CSV files over `[from, until]`, as `stats` reads it.

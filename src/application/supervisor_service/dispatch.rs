@@ -2166,6 +2166,68 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             let (limit,): (usize,) = read(op, args)?;
             answer(ObserverLog::observations(&*store, limit))
         }
+        "record_node_sample" => {
+            let (node, day, sample, resources, source, apart_secs): (
+                String,
+                i64,
+                super::wire::HostSampleForm,
+                crate::domain::environment::NodeRate,
+                crate::domain::host_metrics::SampleSource,
+                i64,
+            ) = read(op, args)?;
+            answer(NodeSampleStore::record_node_sample(
+                &*store,
+                node.as_str(),
+                day,
+                &super::Wire::from_form(sample)?,
+                &resources,
+                source,
+                apart_secs,
+            ))
+        }
+        "import_node_sample_part" => {
+            let (node, file, day, samples, mark): (
+                String,
+                String,
+                i64,
+                Vec<super::wire::HostSampleForm>,
+                Option<crate::domain::host_metrics::ImportMark>,
+            ) = read(op, args)?;
+            let samples: Vec<crate::domain::host_metrics::HostSample> =
+                super::Wire::from_form(samples)?;
+            answer(NodeSampleStore::import_node_sample_part(
+                &*store,
+                node.as_str(),
+                file.as_str(),
+                day,
+                &samples,
+                mark,
+            ))
+        }
+        "imported_files" => {
+            let (node,): (String,) = read(op, args)?;
+            answer(NodeSampleStore::imported_files(&*store, node.as_str()))
+        }
+        "remove_node_samples" => {
+            let (before_day,): (i64,) = read(op, args)?;
+            answer(NodeSampleStore::remove_node_samples(&*store, before_day))
+        }
+        // A page of the read: at most `page` rows of it, the caller asking
+        // for the next from where it ended.
+        "node_samples" => {
+            let (node, from, until, page): (String, i64, i64, usize) = read(op, args)?;
+            answer(
+                NodeSampleStore::node_samples(&*store, node.as_str(), from, until)
+                    .map(|rows| rows.into_iter().take(page).collect::<Vec<_>>()),
+            )
+        }
+        "node_samples_after" => {
+            let (after, page): (i64, usize) = read(op, args)?;
+            answer(
+                NodeSampleStore::node_samples_after(&*store, after)
+                    .map(|rows| rows.into_iter().take(page).collect::<Vec<_>>()),
+            )
+        }
         _ => Err(BadOperation(format!(
             "the queue service has no supervisor operation {op}"
         ))

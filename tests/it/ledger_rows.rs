@@ -9,7 +9,7 @@
 use crate::common;
 
 use dagq::application::{EventStore, LedgerStore, NodeSampleStore};
-use dagq::domain::environment::Resources;
+use dagq::domain::environment::NodeRate;
 use dagq::domain::host_metrics::{HOST_NODE, HostSample, SampleSource, summarize};
 use dagq::domain::ledger::{
     self, LEDGER_V, LedgerKind, LedgerRow,
@@ -82,7 +82,7 @@ fn record(queue: &impl NodeSampleStore, day: i64, secs: i64) {
                 HOST_NODE,
                 day,
                 &host_sample(secs),
-                &|_| Resources::default(),
+                &NodeRate::default(),
                 SampleSource::Sampled,
                 0
             )

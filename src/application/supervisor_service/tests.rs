@@ -1642,3 +1642,213 @@ fn a_supervisor_asks_the_service_to_revoke_its_token_as_it_stops() {
     sign_out_at_stop(&none);
     assert!(none.ops.lock().unwrap().is_empty());
 }
+
+/// A service whose NodeSampleStore holds `count` rows of the host, one a
+/// second from `id` 1 at second 1001, which answers a page of more than
+/// `largest` of them as past its limit.
+struct PagedSamples {
+    count: i64,
+    largest: usize,
+    asked: std::sync::Mutex<Vec<usize>>,
+}
+
+impl PagedSamples {
+    fn row(id: i64) -> Value {
+        let mut sample = crate::domain::host_metrics::HostSample::new(1000 + id);
+        sample.set("load1", Some(1.5));
+        let row = crate::domain::host_metrics::NodeSample {
+            id,
+            node_id: crate::domain::host_metrics::HOST_NODE.into(),
+            local_day: 0,
+            source: crate::domain::host_metrics::SampleSource::Sampled,
+            sample,
+            resources: crate::domain::environment::Resources::default(),
+        };
+        serde_json::to_value(row.into_form()).unwrap()
+    }
+}
+
+impl ServiceCaller for PagedSamples {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(use_case, UseCase::Supervisor);
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        let (first, last, page) = match params.op.as_str() {
+            "node_samples_after" => (
+                params.args[0].as_i64().unwrap() + 1,
+                self.count,
+                params.args[1].as_u64().unwrap(),
+            ),
+            "node_samples" => (
+                (params.args[1].as_i64().unwrap() - 1000).max(1),
+                (params.args[2].as_i64().unwrap() - 1000).min(self.count),
+                params.args[3].as_u64().unwrap(),
+            ),
+            op => panic!("no {op} here"),
+        };
+        let page = usize::try_from(page).unwrap();
+        self.asked.lock().unwrap().push(page);
+        if page > self.largest {
+            return Err(service_error(&ServiceError {
+                code: ServiceErrorCode::ResponseTooLarge,
+                message: "too large".into(),
+                denied: None,
+                kind: None,
+            }));
+        }
+        Ok(Value::Array(
+            (first..=last).take(page).map(PagedSamples::row).collect(),
+        ))
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// The reads of the host's load samples come a page at a time, each from
+/// where the one before ended (the id after the cursor, the second after
+/// the last row's), a page past the answer's limit asked again at half
+/// its size: the rows come back once each, in order, with their values.
+#[test]
+fn the_samples_are_read_in_pages_within_the_answers_limit() {
+    use crate::application::NodeSampleStore;
+    use crate::domain::host_metrics::HOST_NODE;
+    let service = Arc::new(PagedSamples {
+        count: 25_000,
+        largest: 6000,
+        asked: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        ActorContext::instance(ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let after = queue.node_samples_after(0).unwrap();
+    assert_eq!(
+        after.iter().map(|row| row.id).collect::<Vec<_>>(),
+        (1..=25_000).collect::<Vec<_>>()
+    );
+    assert_eq!(after[0].sample.values.get("load1"), Some(&1.5));
+    let asked = std::mem::take(&mut *service.asked.lock().unwrap());
+    assert_eq!(&asked[..2], [10_000, 5000]);
+    assert!(asked[2..].iter().all(|page| *page == 5000), "{asked:?}");
+    let taken = queue.node_samples(HOST_NODE, 1101, 13_000).unwrap();
+    assert_eq!(
+        taken.iter().map(|row| row.sample.unix).collect::<Vec<_>>(),
+        (1101..=13_000).collect::<Vec<_>>()
+    );
+    assert_eq!(queue.node_samples_after(25_000).unwrap(), []);
+}
+
+/// A sample crosses as its second and the value of each column the store
+/// keeps, a missing one missing still; one of another number of columns
+/// does not read.
+#[test]
+fn a_host_sample_crosses_by_the_stores_columns() {
+    use crate::domain::host_metrics::{HostSample, value_columns};
+    let mut sample = HostSample::new(1_700_000_000);
+    sample.set("cpu_total", Some(150.25));
+    sample.set("disk_free_bytes", Some(3.0 * f64::from(1u32 << 30)));
+    let form = serde_json::to_value(sample.clone().into_form()).unwrap();
+    assert_eq!(form[1].as_array().unwrap().len(), value_columns().len());
+    let back: HostSample = Wire::from_form(serde_json::from_value(form).unwrap()).unwrap();
+    assert_eq!(back, sample);
+    let short = serde_json::from_value(serde_json::json!([1, [1.0]])).unwrap();
+    assert!(<HostSample as Wire>::from_form(short).is_err());
+}
+
+/// Items go in consecutive parts within the budget, one larger than it in
+/// a part of its own, and none in one empty part.
+#[test]
+fn items_go_in_parts_within_the_budget() {
+    let items = ["aaaa", "bb", "cccccccccc", "d", "e"];
+    // Each item's JSON and a comma: 7, 5, 13, 4, 4 bytes.
+    let parts = super::forward::parts_within(&items, 12).unwrap();
+    assert_eq!(parts, [&items[..2], &items[2..3], &items[3..]]);
+    assert_eq!(
+        super::forward::parts_within::<&str>(&[], 12).unwrap(),
+        [&[] as &[&str]]
+    );
+}
+
+/// A service that keeps the parts of the imports it is sent.
+#[derive(Default)]
+struct ImportParts(std::sync::Mutex<Vec<(usize, Value)>>);
+
+impl ServiceCaller for ImportParts {
+    fn call(&self, _: UseCase, params: Value) -> Result<Value> {
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        assert_eq!(params.op, "import_node_sample_part");
+        let samples = params.args[3].as_array().unwrap().len();
+        self.0
+            .lock()
+            .unwrap()
+            .push((samples, params.args[4].clone()));
+        Ok(serde_json::json!(samples))
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// A file's import goes in parts each within half the request's limit,
+/// every row once in order, and only the last marks the file, with its
+/// bytes and every row of it; a file of none is one part that marks it.
+#[test]
+fn a_files_import_goes_in_parts_and_the_last_marks_it() {
+    use crate::application::NodeSampleStore;
+    use crate::domain::host_metrics::{HostSample, value_columns};
+    let service = Arc::new(ImportParts::default());
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        ActorContext::instance(ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let samples: Vec<HostSample> = (0..3000)
+        .map(|unix| {
+            let mut sample = HostSample::new(unix);
+            for column in value_columns() {
+                sample.set(column, Some(1_234_567_890_123.25));
+            }
+            sample
+        })
+        .collect();
+    let added = queue
+        .import_node_samples("host", "metrics-x.csv", 1, &samples, 900)
+        .unwrap();
+    assert_eq!(added, 3000);
+    let parts = std::mem::take(&mut *service.0.lock().unwrap());
+    assert!(parts.len() > 2, "{}", parts.len());
+    assert_eq!(parts.iter().map(|(rows, _)| rows).sum::<usize>(), 3000);
+    let (last, rest) = parts.split_last().unwrap();
+    assert!(rest.iter().all(|(_, mark)| mark.is_null()), "{rest:?}");
+    assert_eq!(last.1, serde_json::json!({"bytes": 900, "rows": 3000}));
+    queue
+        .import_node_samples("host", "metrics-y.csv", 1, &[], 0)
+        .unwrap();
+    assert_eq!(
+        *service.0.lock().unwrap(),
+        [(0, serde_json::json!({"bytes": 0, "rows": 0}))]
+    );
+}

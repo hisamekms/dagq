@@ -248,19 +248,19 @@ impl NodeSampleStore for Memory {
         node: &str,
         day: i64,
         sample: &HostSample,
-        resources: &dyn Fn(Option<i64>) -> Resources,
+        resources: &crate::domain::environment::NodeRate,
         source: SampleSource,
         apart_secs: i64,
     ) -> Result<bool> {
         unreachable!()
     }
-    fn import_node_samples(
+    fn import_node_sample_part(
         &self,
         node: &str,
         file: &str,
         day: i64,
         samples: &[HostSample],
-        bytes: u64,
+        mark: Option<crate::domain::host_metrics::ImportMark>,
     ) -> Result<usize> {
         unreachable!()
     }

@@ -5,7 +5,7 @@
 
 #![allow(clippy::wildcard_imports)]
 
-use super::{SupervisorQueue, to_value};
+use super::{SupervisorQueue, Wire, to_value};
 use crate::application::*;
 use crate::domain::*;
 use anyhow::Result;
@@ -20,6 +20,33 @@ use crate::domain::search::{SearchPage, SearchQuery};
 /// How many events [`EventStore::all_events`] asks for at a time, halved
 /// for a page past the answer's limit.
 const EVENTS_PAGE: usize = 2000;
+
+/// How many rows of the NodeSampleStore a read asks for at a time, halved
+/// for a page past the answer's limit.
+const SAMPLES_PAGE: usize = 10_000;
+
+/// How many bytes of samples one request of a file's import holds at most:
+/// half the request's limit, which leaves the rest of the request room.
+const SAMPLES_REQUEST_BYTES: usize = crate::domain::queue_service::MAX_REQUEST_BYTES / 2;
+
+/// `items` in consecutive parts whose JSON is at most `budget` bytes each
+/// (an item larger than it a part of its own), and one empty part for
+/// none.
+pub(super) fn parts_within<T: serde::Serialize>(items: &[T], budget: usize) -> Result<Vec<&[T]>> {
+    let mut parts = Vec::new();
+    let (mut start, mut size) = (0, 0);
+    for (index, item) in items.iter().enumerate() {
+        // The item and the comma before it.
+        let bytes = serde_json::to_vec(item)?.len() + 1;
+        if index > start && size + bytes > budget {
+            parts.push(&items[start..index]);
+            (start, size) = (index, 0);
+        }
+        size += bytes;
+    }
+    parts.push(&items[start..]);
+    Ok(parts)
+}
 
 impl TaskReads for SupervisorQueue {
     fn list(&self, query: &TaskQuery) -> Result<TaskPage> {
@@ -2592,5 +2619,166 @@ impl ObserverLog for SupervisorQueue {
     }
     fn observations(&self, limit: usize) -> Result<Vec<(RunEvent, Option<RunEvent>)>> {
         self.remote("observations", vec![to_value(limit)?])
+    }
+}
+
+// The samples cross in their compact form (`super::wire::HostSampleForm`),
+// and the reads in pages: each page is the store's read from where the
+// page before ended, so rows that came in since are read too, as by a
+// later read.
+impl NodeSampleStore for SupervisorQueue {
+    // The common units are made on the service's side, in the write that
+    // reads the node's row before the sample.
+    fn record_node_sample(
+        &self,
+        node: &str,
+        day: i64,
+        sample: &crate::domain::host_metrics::HostSample,
+        resources: &crate::domain::environment::NodeRate,
+        source: crate::domain::host_metrics::SampleSource,
+        apart_secs: i64,
+    ) -> Result<bool> {
+        self.remote(
+            "record_node_sample",
+            vec![
+                to_value(node)?,
+                to_value(day)?,
+                to_value(sample.clone().into_form())?,
+                to_value(resources)?,
+                to_value(source)?,
+                to_value(apart_secs)?,
+            ],
+        )
+    }
+    // A file's samples go in parts that each fit in a request, the mark
+    // with the last only.
+    fn import_node_samples(
+        &self,
+        node: &str,
+        file: &str,
+        day: i64,
+        samples: &[crate::domain::host_metrics::HostSample],
+        bytes: u64,
+    ) -> Result<usize> {
+        let forms: Vec<super::wire::HostSampleForm> =
+            samples.iter().cloned().map(Wire::into_form).collect();
+        let parts = parts_within(&forms, SAMPLES_REQUEST_BYTES)?;
+        let mark = crate::domain::host_metrics::ImportMark {
+            bytes,
+            rows: samples.len(),
+        };
+        let mut added = 0;
+        for (index, part) in parts.iter().enumerate() {
+            let last = index + 1 == parts.len();
+            added += self.import_part(node, file, day, part, last.then_some(mark))?;
+        }
+        Ok(added)
+    }
+    fn import_node_sample_part(
+        &self,
+        node: &str,
+        file: &str,
+        day: i64,
+        samples: &[crate::domain::host_metrics::HostSample],
+        mark: Option<crate::domain::host_metrics::ImportMark>,
+    ) -> Result<usize> {
+        let forms: Vec<super::wire::HostSampleForm> =
+            samples.iter().cloned().map(Wire::into_form).collect();
+        self.import_part(node, file, day, &forms, mark)
+    }
+    fn imported_files(&self, node: &str) -> Result<std::collections::BTreeMap<String, u64>> {
+        self.remote("imported_files", vec![to_value(node)?])
+    }
+    fn remove_node_samples(&self, before_day: i64) -> Result<usize> {
+        self.remote("remove_node_samples", vec![to_value(before_day)?])
+    }
+    fn node_samples(
+        &self,
+        node: &str,
+        from: i64,
+        until: i64,
+    ) -> Result<Vec<crate::domain::host_metrics::NodeSample>> {
+        // One row per node and second, in the order they were taken: the
+        // next page begins at the second after the last row's.
+        let mut from = from;
+        self.sample_pages(|page| {
+            let read: Vec<crate::domain::host_metrics::NodeSample> = self.remote(
+                "node_samples",
+                vec![
+                    to_value(node)?,
+                    to_value(from)?,
+                    to_value(until)?,
+                    to_value(page)?,
+                ],
+            )?;
+            if let Some(last) = read.last() {
+                from = last.sample.unix.saturating_add(1);
+            }
+            Ok(read)
+        })
+    }
+    fn node_samples_after(
+        &self,
+        after: i64,
+    ) -> Result<Vec<crate::domain::host_metrics::NodeSample>> {
+        let mut after = after;
+        self.sample_pages(|page| {
+            let read: Vec<crate::domain::host_metrics::NodeSample> = self.remote(
+                "node_samples_after",
+                vec![to_value(after)?, to_value(page)?],
+            )?;
+            if let Some(last) = read.last() {
+                after = last.id;
+            }
+            Ok(read)
+        })
+    }
+}
+
+impl SupervisorQueue {
+    /// One request of [`NodeSampleStore::import_node_sample_part`].
+    fn import_part(
+        &self,
+        node: &str,
+        file: &str,
+        day: i64,
+        samples: &[super::wire::HostSampleForm],
+        mark: Option<crate::domain::host_metrics::ImportMark>,
+    ) -> Result<usize> {
+        self.remote(
+            "import_node_sample_part",
+            vec![
+                to_value(node)?,
+                to_value(file)?,
+                to_value(day)?,
+                to_value(samples)?,
+                to_value(mark)?,
+            ],
+        )
+    }
+
+    /// The rows of the NodeSampleStore `read` gives a page of at most the
+    /// size it is given at a time, each from where the one before ended,
+    /// until a page is not full: a page past the answer's limit is asked
+    /// again at half the size.
+    fn sample_pages(
+        &self,
+        mut read: impl FnMut(usize) -> Result<Vec<crate::domain::host_metrics::NodeSample>>,
+    ) -> Result<Vec<crate::domain::host_metrics::NodeSample>> {
+        let (mut rows, mut page) = (Vec::new(), SAMPLES_PAGE);
+        loop {
+            let got = match read(page) {
+                Err(error) if page > 1 && super::too_large(&error) => {
+                    page /= 2;
+                    continue;
+                }
+                got => got?,
+            };
+            let full = got.len() == page;
+            rows.extend(got);
+            if !full {
+                return Ok(rows);
+            }
+        }
     }
 }

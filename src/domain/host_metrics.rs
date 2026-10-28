@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::toolchain::{ToolProcess, Toolchains};
 
@@ -619,7 +619,7 @@ pub fn value_columns() -> &'static [&'static str] {
 }
 
 /// Where a row of the NodeSampleStore came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SampleSource {
     /// The supervisor sampled the node.
@@ -643,6 +643,14 @@ impl SampleSource {
             _ => None,
         }
     }
+}
+
+/// The mark of a CSV file imported into the NodeSampleStore: the bytes of
+/// it read and the rows it had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportMark {
+    pub bytes: u64,
+    pub rows: usize,
 }
 
 /// A row of the NodeSampleStore, one per node and unix second.

@@ -316,7 +316,7 @@ queue service（ADR-t1233-1決定4）は、要求のtokenから決めたprincipa
 `issue_token`（ADR-t3102-1決定2）は、親（user・supervisor・inbox）の起動の権限を`starts`で、対象の前提を`issue_held`で（runを持たない対象のtelemetryは開始の親とプロセスとの一致と未発行も）発行と同じtransactionで確かめ、外れた依頼は断る。
 queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがそのコマンドに求めるのと同じcapability（`ci failures`は`ci.read`、ほかは`queue.read`）を`Gate`で通して答える。
 
-supervisorの操作（containerの部品の記録と読みを含む。[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）は、登録を持つsupervisorにだけ`scheduler.supervise`と操作ごとのcapability（`needs::supervisor_needs`）を`Gate`で通してから答える。
+supervisorの操作（containerの部品とNodeSampleStoreの記録と読みを含む。[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）は、登録を持つsupervisorにだけ`scheduler.supervise`と操作ごとのcapability（`needs::supervisor_needs`）を`Gate`で通してから答える。
 人・inbox・plannerの計画の操作はCLIと同じcapabilityを求めてsupervisorには拒み、一覧に無い操作とintegratorだけの着地の終わりは拒む（default deny）。
 着地のintegratorには`landing.land`を通し、着地の操作だけを、名指すrun・task・leaseをそのものに限って答え、ほかは書かずに拒む（`integrator_scope`）。
 

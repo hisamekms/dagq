@@ -9,7 +9,7 @@ use super::shared::{AskStore, EventStore};
 use crate::domain::environment::{
     EnvironmentAttached, EnvironmentWait, Resources, RunProcesses, RunResource,
 };
-use crate::domain::host_metrics::{HostSample, NodeSample, SampleSource};
+use crate::domain::host_metrics::{HostSample, ImportMark, NodeSample, SampleSource};
 use crate::domain::ledger::{
     LedgerKind, LedgerRow,
     window::{LedgerWindow, WindowQuery},
@@ -142,7 +142,7 @@ pub trait NodeSampleStore {
     /// `resources` makes the common units from the second of the node's
     /// row before the sample (`None` for its first), read in the same
     /// write, so the time the sample stands for is the time since that row
-    /// ([`crate::domain::environment::sample_stands_for`]); a sample
+    /// ([`crate::domain::environment::NodeRate::over`]); a sample
     /// written after a later row of `node` gets its own second, so it
     /// stands for no time the later row counted.
     fn record_node_sample(
@@ -150,7 +150,7 @@ pub trait NodeSampleStore {
         node: &str,
         day: i64,
         sample: &HostSample,
-        resources: &dyn Fn(Option<i64>) -> Resources,
+        resources: &crate::domain::environment::NodeRate,
         source: SampleSource,
         apart_secs: i64,
     ) -> Result<bool>;
@@ -170,6 +170,25 @@ pub trait NodeSampleStore {
         day: i64,
         samples: &[HostSample],
         bytes: u64,
+    ) -> Result<usize> {
+        let mark = ImportMark {
+            bytes,
+            rows: samples.len(),
+        };
+        self.import_node_sample_part(node, file, day, samples, Some(mark))
+    }
+    /// [`Self::import_node_samples`] of a part of the samples of `file`,
+    /// marking the file with `mark` (the bytes read and the file's rows)
+    /// only when given: an import sent in parts gives it with its last, so
+    /// one stopped part way leaves the file's mark as it was, and the next
+    /// import reads the file again whole and adds the rest, none twice.
+    fn import_node_sample_part(
+        &self,
+        node: &str,
+        file: &str,
+        day: i64,
+        samples: &[HostSample],
+        mark: Option<ImportMark>,
     ) -> Result<usize>;
     /// The CSV files of `node` marked imported, each with the bytes read.
     fn imported_files(&self, node: &str) -> Result<std::collections::BTreeMap<String, u64>>;
@@ -295,7 +314,10 @@ pub trait ExecutionEnvironment: Send + Sync {
     /// Forget what it kept of `run` between its measures.
     fn forget_run(&self, run: &RunId);
     /// The node's resources over `interval` from one `sample` of the
-    /// host's load pass, in the common units.
+    /// host's load pass, in the common units: the time spent (the CPU and
+    /// the throttled seconds) in proportion to `interval` and the rest not
+    /// depending on it, which the store's measure of one second relies on
+    /// ([`crate::domain::environment::NodeRate`]).
     fn node_resources(&self, sample: &HostSample, interval: std::time::Duration) -> Resources;
 }
 

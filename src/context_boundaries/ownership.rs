@@ -714,6 +714,7 @@ pub(super) const METHODS: &[Method] = &[
     method("QueueRecords", "ci_failure_fix_tasks", All),
     method("NodeSampleStore", "record_node_sample", Only(&[Host])), // the record of the host's load
     method("NodeSampleStore", "import_node_samples", Only(&[Host])), // the import of the CSV files
+    method("NodeSampleStore", "import_node_sample_part", Only(&[Host])), // the import of a CSV file in parts
     method("NodeSampleStore", "imported_files", Only(&[Host])), // the import reads its marks
     method("NodeSampleStore", "remove_node_samples", Only(&[Host])), // the retention
     method("SupervisorRegistry", "register_supervisor", Only(&[Execution])), // the loop

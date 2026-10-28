@@ -205,7 +205,7 @@ pub fn undone(error: &anyhow::Error) -> bool {
 /// The operations of [`dispatch`] that only read the queue: one the
 /// service did not answer did nothing ([`undone`]). An operation not here
 /// is taken as one that writes.
-const READ_OPS: [&str; 61] = [
+const READ_OPS: [&str; 64] = [
     "candidates",
     "build_waits",
     "predecessors",
@@ -267,6 +267,9 @@ const READ_OPS: [&str; 61] = [
     "token_principals",
     "held_telemetry",
     "target_facts",
+    "imported_files",
+    "node_samples",
+    "node_samples_after",
 ];
 
 thread_local! {
@@ -625,9 +628,9 @@ fn to_value(value: impl serde::Serialize) -> Result<Value> {
 
 /// The queue the service runs a supervisor's operations on: the whole
 /// queue, each operation of it answered by [`dispatch`].
-pub trait SupervisorStore: Queue + ObserverLog {}
+pub trait SupervisorStore: Queue + ObserverLog + super::NodeSampleStore {}
 
-impl<T: Queue + ObserverLog + ?Sized> SupervisorStore for T {}
+impl<T: Queue + ObserverLog + super::NodeSampleStore + ?Sized> SupervisorStore for T {}
 
 /// A supervisor's operation whose arguments do not read as the
 /// operation's, or one the service does not know.
@@ -729,6 +732,17 @@ pub fn sign_out(caller: &dyn ServiceCaller) {
     }
     caller.hand_over();
 }
+
+/// The operations of the host's load samples (the NodeSampleStore's): the
+/// supervisor principal's only.
+const NODE_SAMPLE_OPS: [&str; 6] = [
+    "record_node_sample",
+    "import_node_sample_part",
+    "imported_files",
+    "remove_node_samples",
+    "node_samples",
+    "node_samples_after",
+];
 
 /// The operations of the jobs the supervisor starts as commands of its
 /// own (an observation, a throughput review), which reach the queue as
@@ -1167,6 +1181,16 @@ fn integrator(
     let op = params.op.as_str();
     if params.acting.is_some() {
         return Err(BadOperation(format!("the integrator writes as itself, not {op}")).into());
+    }
+    // The host's load samples are the supervisor's records: the integrator
+    // is refused them by the policy (it has no `scheduler.supervise`), and
+    // the refusal recorded, as any other principal is.
+    if NODE_SAMPLE_OPS.contains(&op) {
+        super::queue_service::authorize_supervisor_needs(
+            &mut *queue,
+            &actor,
+            Capability::Supervise,
+        )?;
     }
     let store = queue.supervisor_store();
     let task = RunReads::run(&*store, &run)?.task_id();

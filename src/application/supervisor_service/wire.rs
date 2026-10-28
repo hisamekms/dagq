@@ -15,6 +15,7 @@ use crate::application::{
     EndedRunWorkspace, EndedRunWorktree, HeartbeatWrite, LeasedRun, ResumeCandidate,
 };
 use crate::domain::goal::GoalWire;
+use crate::domain::host_metrics::{HostSample, NodeSample, SampleSource, value_columns};
 use crate::domain::task::TaskWire;
 use crate::domain::{
     Ask, ClaimOutcome, EventId, Goal, GoalPredecessor, GoalSummary, Landing, Predecessor, RunEvent,
@@ -47,6 +48,7 @@ whole!(
     (),
     bool,
     usize,
+    u64,
     i64,
     String,
     EventId,
@@ -310,6 +312,74 @@ impl Wire for GoalPredecessor {
                 .into_iter()
                 .map(Predecessor::from_form)
                 .collect::<Result<_>>()?,
+        })
+    }
+}
+
+/// A sample of a node's load as it crosses: its second and its value of
+/// each column the NodeSampleStore keeps, in their order
+/// ([`value_columns`]), a value missing as null. The columns' names stay
+/// out, so a day's samples cross in about the bytes of its CSV file; a
+/// column the store does not keep does not cross, as the store drops it.
+#[derive(Serialize, serde::Deserialize)]
+pub struct HostSampleForm(i64, Vec<Option<f64>>);
+
+impl Wire for HostSample {
+    type Form = HostSampleForm;
+    fn into_form(self) -> HostSampleForm {
+        let values = value_columns()
+            .iter()
+            .map(|column| self.values.get(column).copied())
+            .collect();
+        HostSampleForm(self.unix, values)
+    }
+    fn from_form(HostSampleForm(unix, values): HostSampleForm) -> Result<Self> {
+        anyhow::ensure!(
+            values.len() == value_columns().len(),
+            "a sample of {} columns is not one of the store's {}",
+            values.len(),
+            value_columns().len()
+        );
+        let mut sample = HostSample::new(unix);
+        for (column, value) in value_columns().iter().zip(values) {
+            sample.set(column, value);
+        }
+        Ok(sample)
+    }
+}
+
+/// A row of the NodeSampleStore as it crosses, its sample as
+/// [`HostSampleForm`].
+#[derive(Serialize, serde::Deserialize)]
+pub struct NodeSampleForm {
+    id: i64,
+    node_id: String,
+    local_day: i64,
+    source: SampleSource,
+    sample: HostSampleForm,
+    resources: crate::domain::environment::Resources,
+}
+
+impl Wire for NodeSample {
+    type Form = NodeSampleForm;
+    fn into_form(self) -> NodeSampleForm {
+        NodeSampleForm {
+            id: self.id,
+            node_id: self.node_id,
+            local_day: self.local_day,
+            source: self.source,
+            sample: self.sample.into_form(),
+            resources: self.resources,
+        }
+    }
+    fn from_form(form: NodeSampleForm) -> Result<Self> {
+        Ok(Self {
+            id: form.id,
+            node_id: form.node_id,
+            local_day: form.local_day,
+            source: form.source,
+            sample: HostSample::from_form(form.sample)?,
+            resources: form.resources,
         })
     }
 }

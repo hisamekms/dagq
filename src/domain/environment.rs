@@ -202,6 +202,35 @@ pub fn sample_stands_for(
     })
 }
 
+/// A sample of a node's load in the common units, before the store knows
+/// the time it stands for: the environment's measure of it over one second
+/// (`per_second`) and how often the node is sampled (`interval`). The
+/// store reads the node's row before the sample in the write that admits
+/// it and makes the units with [`Self::over`], so the rule crosses to the
+/// queue service whole. It holds because the time spent (the CPU and the
+/// throttled seconds) is in proportion to the time measured over and the
+/// rest does not depend on it, as every environment's measure of the node
+/// is (`ExecutionEnvironment::node_resources`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodeRate {
+    pub per_second: Resources,
+    pub interval: std::time::Duration,
+}
+
+impl NodeRate {
+    /// The sample at `unix` in the common units over the time since the
+    /// node's row before it at `previous` ([`sample_stands_for`]).
+    pub fn over(&self, previous: Option<i64>, unix: i64) -> Resources {
+        let secs = sample_stands_for(previous, unix, self.interval).as_secs_f64();
+        let spent = |per_second: Option<f64>| per_second.map(|value| value * secs);
+        Resources {
+            cpu_seconds: spent(self.per_second.cpu_seconds),
+            throttled_seconds: spent(self.per_second.throttled_seconds),
+            ..self.per_second.clone()
+        }
+    }
+}
+
 /// The CPU pressure of `/proc/pressure/cpu`'s text: its `some` line's
 /// `avg10`.
 pub fn cpu_pressure(text: &str) -> Option<f64> {

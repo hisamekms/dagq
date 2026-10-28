@@ -3,8 +3,10 @@
 
 use super::*;
 use crate::application::NodeSampleStore;
-use crate::domain::environment::Resources;
-use crate::domain::host_metrics::{HostSample, NodeSample, SampleSource, value_columns};
+use crate::domain::environment::{NodeRate, Resources};
+use crate::domain::host_metrics::{
+    HostSample, ImportMark, NodeSample, SampleSource, value_columns,
+};
 
 /// The columns of the sample in the common units, in the order [`values`]
 /// gives them after the sample's.
@@ -82,7 +84,7 @@ impl NodeSampleStore for SqliteQueue {
         node: &str,
         day: i64,
         sample: &HostSample,
-        resources: &dyn Fn(Option<i64>) -> Resources,
+        resources: &NodeRate,
         source: SampleSource,
         apart_secs: i64,
     ) -> Result<bool> {
@@ -104,7 +106,7 @@ impl NodeSampleStore for SqliteQueue {
                 node,
                 day,
                 sample,
-                &resources(previous),
+                &resources.over(previous, sample.unix),
                 source,
                 apart_secs,
             )),
@@ -113,13 +115,13 @@ impl NodeSampleStore for SqliteQueue {
         Ok(written == 1)
     }
 
-    fn import_node_samples(
+    fn import_node_sample_part(
         &self,
         node: &str,
         file: &str,
         day: i64,
         samples: &[HostSample],
-        bytes: u64,
+        mark: Option<ImportMark>,
     ) -> Result<usize> {
         let mut added = 0;
         in_batches(
@@ -146,7 +148,7 @@ impl NodeSampleStore for SqliteQueue {
                 // shorter than the file), so the next import reads it again
                 // whole, and its rows committed already are kept out by
                 // their second.
-                if last {
+                if last && let Some(mark) = mark {
                     tx.execute(
                     "INSERT INTO node_sample_imports(node_id,file,day,bytes,rows,imported_at)
                      VALUES (?1,?2,?3,?4,?5,?6)
@@ -156,8 +158,8 @@ impl NodeSampleStore for SqliteQueue {
                         node,
                         file,
                         day,
-                        i64::try_from(bytes)?,
-                        i64::try_from(samples.len())?,
+                        i64::try_from(mark.bytes)?,
+                        i64::try_from(mark.rows)?,
                         self.generators.clock.now()
                     ],
                 )?;

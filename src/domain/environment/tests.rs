@@ -431,3 +431,39 @@ fn the_trees_of_several_roots_count_each_process_once() {
         (Some(15.0), Some(4096))
     );
 }
+
+/// A sample made of the measure of one second is, over the time it stands
+/// for, what the measure over that time is: the CPU and the throttled
+/// seconds in proportion, the rest as measured; the first for the interval,
+/// one after a gap for at most twice it, one before the row it follows for
+/// none.
+#[test]
+fn a_nodes_rate_over_the_time_a_sample_stands_for_is_its_measure_over_it() {
+    let mut sample = HostSample::new(1000);
+    sample.set("cpu_total", Some(150.5));
+    sample.set("mem_used_mb", Some(1024.0));
+    sample.set("load1", Some(3.5));
+    let rate = NodeRate {
+        per_second: Resources {
+            throttled_seconds: Some(0.25),
+            ..host_node_resources(&sample, 1.0, Some(8.0), Some(1.25))
+        },
+        interval: std::time::Duration::from_secs(30),
+    };
+    for (previous, secs) in [
+        (None, 30.0),
+        (Some(960), 40.0),
+        (Some(0), 60.0),
+        (Some(1000), 0.0),
+    ] {
+        assert_eq!(
+            rate.over(previous, 1000),
+            Resources {
+                throttled_seconds: Some(0.25 * secs),
+                ..host_node_resources(&sample, secs, Some(8.0), Some(1.25))
+            },
+            "{previous:?}"
+        );
+    }
+    assert!(NodeRate::default().over(None, 1000).is_empty());
+}

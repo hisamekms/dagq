@@ -20,7 +20,7 @@
 
 use super::*;
 use crate::application::{ExecutionEnvironment, HostMetricsFiles, NodeSampleStore};
-use crate::domain::environment::sample_stands_for;
+use crate::domain::environment::NodeRate;
 use crate::domain::host_metrics::{
     self, HOST_NODE, HeldTargets, HostSample, RunsTarget, SampleSource,
 };
@@ -158,11 +158,11 @@ impl HostMetricsPort {
                     HOST_NODE,
                     today,
                     &sample.as_written(),
-                    &|previous| {
-                        self.environment.node_resources(
-                            &sample,
-                            sample_stands_for(previous, sample.unix, self.interval),
-                        )
+                    &NodeRate {
+                        per_second: self
+                            .environment
+                            .node_resources(&sample, Duration::from_secs(1)),
+                        interval: self.interval,
                     },
                     SampleSource::Sampled,
                     host_metrics::apart_secs(self.interval),
@@ -491,7 +491,7 @@ mod tests {
             _node: &str,
             day: i64,
             sample: &HostSample,
-            resources: &dyn Fn(Option<i64>) -> Resources,
+            resources: &NodeRate,
             source: SampleSource,
             apart_secs: i64,
         ) -> Result<bool> {
@@ -509,18 +509,19 @@ mod tests {
                     .filter(|unix| *unix < sample.unix)
                     .max();
                 rows.put(source, day, sample.clone());
-                rows.resources.insert(sample.unix, resources(previous));
+                rows.resources
+                    .insert(sample.unix, resources.over(previous, sample.unix));
             }
             Ok(!near)
         }
 
-        fn import_node_samples(
+        fn import_node_sample_part(
             &self,
             _node: &str,
             file: &str,
             day: i64,
             samples: &[HostSample],
-            bytes: u64,
+            mark: Option<crate::domain::host_metrics::ImportMark>,
         ) -> Result<usize> {
             let mut rows = self.0.lock().unwrap();
             let mut added = 0;
@@ -530,7 +531,9 @@ mod tests {
                     added += 1;
                 }
             }
-            rows.imported.insert(file.to_owned(), bytes);
+            if let Some(mark) = mark {
+                rows.imported.insert(file.to_owned(), mark.bytes);
+            }
             Ok(added)
         }
 

@@ -172,13 +172,17 @@ pub(super) const READS: &[&str] = &[
     "held_telemetry",
     "target_facts",
     "job_read",
+    "imported_files",
+    "node_samples",
+    "node_samples_after",
 ];
 
 /// The scheduler's own transitions and records (`scheduler.supervise`):
 /// the claim, the leases and the runs', the registration and the handoff,
 /// the sessions' and the jobs' records, the plan and goal reviews it runs
 /// and applies, the planners' routes, the observation's and the reports'
-/// records, the eval's rounds and the tokens it issues.
+/// records, the host's load samples, the eval's rounds and the tokens it
+/// issues.
 const SUPERVISE: &[&str] = &[
     "claim_for_supervisor",
     "claim_for_supervisor_holding",
@@ -313,6 +317,9 @@ const SUPERVISE: &[&str] = &[
     "issue_telemetry",
     "revoke_telemetry",
     "register_telemetry_session",
+    "record_node_sample",
+    "import_node_sample_part",
+    "remove_node_samples",
 ];
 
 /// The operations of one capability other than `scheduler.supervise`.
