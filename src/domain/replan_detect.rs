@@ -828,6 +828,45 @@ pub fn asked_payload(payload: &mut Value, asked: &super::Ask, generation: i64) {
     }
 }
 
+/// `replan_diagnosed`'s `outcome` of a verdict its task's hold kept
+/// instead of applying (ADR-t1879-1 decision 6): the operation stays
+/// `diagnosing` under the job's generation, and the verdict is applied,
+/// its premise checked again, once the hold is released.
+pub const HELD_OUTCOME: &str = "held";
+
+/// The key of a `replan_diagnosed` that settles a verdict a hold kept: the
+/// id of the [`HELD_OUTCOME`] record it applied, discarded or kept again.
+/// Only a record naming it settles it, so a late record of an earlier
+/// generation (a supervisor that applied an older kept verdict after it
+/// was replaced) leaves the current one to apply.
+pub const KEPT_ID: &str = "kept_id";
+
+/// The verdict a hold kept for operation `op`, still `diagnosing` under
+/// `generation`, that is neither applied nor discarded yet: of `events`
+/// (its task's), the op's last [`HELD_OUTCOME`] record under that
+/// generation, unless a later `replan_diagnosed` of the op names it in
+/// [`KEPT_ID`]. A claim since (a job or an ask) moved the generation on.
+pub fn kept_verdict(
+    events: &[RunEvent],
+    op: super::ReplanId,
+    generation: i64,
+) -> Option<&RunEvent> {
+    let diagnosed =
+        |e: &&RunEvent| e.kind == EventKind::ReplanDiagnosed && PlanningPayload::of(e).is_of(op);
+    let kept = events.iter().filter(diagnosed).rfind(|e| {
+        e.payload["outcome"] == HELD_OUTCOME
+            && PlanningPayload::of(e).generation == Some(generation)
+    })?;
+    let settled = events.iter().filter(diagnosed).any(|e| {
+        e.id > kept.id
+            && e.payload
+                .get(KEPT_ID)
+                .and_then(|id| serde_json::from_value::<EventId>(id.clone()).ok())
+                == Some(kept.id)
+    });
+    (!settled).then_some(kept)
+}
+
 /// The fields of a planning event's payload (`replan_requested`,
 /// `replan_diagnosis_started`, `replan_diagnosis_failed`,
 /// `replan_diagnosed`) the diagnosis decides on, restored typed: a field
@@ -894,6 +933,126 @@ mod tests {
             created_at: String::new(),
             actor: None,
         }
+    }
+
+    /// A verdict kept for its task's hold is the operation's to apply
+    /// while it is the op's last kept record under the generation it was
+    /// kept at and no later record of the op names it; a claim since (a
+    /// new generation) or another operation's records leave none of it.
+    #[test]
+    fn a_kept_verdict_is_the_operations_last_record_under_its_generation() {
+        let op = ReplanId::new(3);
+        let kept = |id: i64, generation: i64| {
+            event(
+                id,
+                "r1",
+                "replan_diagnosed",
+                json!({"operation_id": 3, "outcome": HELD_OUTCOME, "generation": generation}),
+            )
+        };
+        let settling = |id: i64, outcome: &str, kept: i64| {
+            event(
+                id,
+                "r1",
+                "replan_diagnosed",
+                json!({"operation_id": 3, "outcome": outcome, KEPT_ID: kept}),
+            )
+        };
+        let started = event(
+            1,
+            "r1",
+            "replan_diagnosis_started",
+            json!({"operation_id": 3}),
+        );
+        let events = vec![started.clone(), kept(2, 4)];
+        assert_eq!(
+            kept_verdict(&events, op, 4).map(|e| e.id),
+            Some(EventId::new(2))
+        );
+        assert!(kept_verdict(&events, op, 5).is_none(), "claimed since");
+        assert!(kept_verdict(&events, ReplanId::new(9), 4).is_none());
+        let other = event(
+            3,
+            "r1",
+            "replan_diagnosed",
+            json!({"operation_id": 9, "outcome": "continue", KEPT_ID: 2}),
+        );
+        assert!(
+            kept_verdict(&[started.clone(), kept(2, 4), other], op, 4).is_some(),
+            "another op's records"
+        );
+        for outcome in ["continue", "park", "discarded", "ask"] {
+            let applied = settling(3, outcome, 2);
+            assert!(
+                kept_verdict(&[started.clone(), kept(2, 4), applied], op, 4).is_none(),
+                "{outcome}"
+            );
+        }
+        // Kept again (a hold came back before the apply): the new record is
+        // the one to apply, the old one settled by it.
+        let again = event(
+            3,
+            "r1",
+            "replan_diagnosed",
+            json!({"operation_id": 3, "outcome": HELD_OUTCOME, "generation": 4, KEPT_ID: 2}),
+        );
+        assert_eq!(
+            kept_verdict(&[started, kept(2, 4), again], op, 4).map(|e| e.id),
+            Some(EventId::new(3))
+        );
+    }
+
+    /// The write order of two supervisors: B discards the verdict kept at
+    /// generation 4, diagnoses again under 5 and keeps that verdict for a
+    /// new hold; then A, which read the generation-4 record before, writes
+    /// its late discard of it. The generation-5 verdict is still the one
+    /// to apply, not hidden by that last record.
+    #[test]
+    fn a_late_record_of_an_earlier_generation_leaves_the_current_kept_verdict() {
+        let op = ReplanId::new(3);
+        let events = vec![
+            event(
+                1,
+                "r1",
+                "replan_diagnosis_started",
+                json!({"operation_id": 3, "generation": 4}),
+            ),
+            event(
+                2,
+                "r1",
+                "replan_diagnosed",
+                json!({"operation_id": 3, "outcome": HELD_OUTCOME, "generation": 4}),
+            ),
+            event(
+                3,
+                "r1",
+                "replan_diagnosed",
+                json!({"operation_id": 3, "outcome": "discarded", KEPT_ID: 2}),
+            ),
+            event(
+                4,
+                "r1",
+                "replan_diagnosis_started",
+                json!({"operation_id": 3, "generation": 5}),
+            ),
+            event(
+                5,
+                "r1",
+                "replan_diagnosed",
+                json!({"operation_id": 3, "outcome": HELD_OUTCOME, "generation": 5}),
+            ),
+            event(
+                6,
+                "r1",
+                "replan_diagnosed",
+                json!({"operation_id": 3, "outcome": "discarded", KEPT_ID: 2}),
+            ),
+        ];
+        assert_eq!(
+            kept_verdict(&events, op, 5).map(|e| e.id),
+            Some(EventId::new(5))
+        );
+        assert!(kept_verdict(&events, op, 4).is_none());
     }
 
     fn review(id: i64, run_id: &str, verdict: &str) -> RunEvent {

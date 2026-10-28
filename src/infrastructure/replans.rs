@@ -428,6 +428,8 @@ pub(super) fn move_in_as(
         .and_then(|made| made.premise.as_ref())
     {
         check_premise(conn, &op, step.to, premise)?;
+    } else if step.to == ReplanStatus::Diagnosing {
+        check_not_held(conn, &op)?;
     }
     // An operation diagnosed, fenced or reopened (a restore that failed)
     // must be the task's one open operation.
@@ -601,11 +603,28 @@ pub(crate) fn lineage_in(conn: &Connection, task: TaskId) -> Result<Vec<ReplanOp
     ops.into_iter().map(|op| with_outcome(conn, op)).collect()
 }
 
+/// Refuse the claim of `op` for a diagnosis job or its ask, and the move
+/// or the ask of a verdict or a person's answer, while `op`'s task is held
+/// (ADR-t1879-1 decision 6), read in the write's own transaction: a hold
+/// that commits first wins, and the supervisor keeps the verdict or the
+/// answer until the release.
+fn check_not_held(conn: &Connection, op: &ReplanOperation) -> Result<()> {
+    if let Some(hold) = super::task_holds::guard_of(conn, op.task_id)? {
+        anyhow::bail!(
+            "replan operation {}: task {} is held (hold {}), so its diagnosis waits for the release",
+            op.id,
+            op.task_id,
+            hold.hold
+        );
+    }
+    Ok(())
+}
+
 /// Refuse the move, or the ask, of a diagnosis whose premise
 /// ([`task_replan::DiagnosisPremise`]) no longer holds, read in the write's
-/// own transaction: a landing that
-/// began, a review, a turn or a receipt that came, an edit of the task or
-/// another run since the diagnosis job started, a person's request that
+/// own transaction: a hold open on the task ([`check_not_held`]), a landing
+/// that began, a review, a turn or a receipt that came, an edit of the task
+/// or another run since the diagnosis job started, a person's request that
 /// joined an operation the decision read as no person's, or another park
 /// of the lineage that used up its limit wins over the decision.
 fn check_premise(
@@ -614,6 +633,7 @@ fn check_premise(
     to: ReplanStatus,
     premise: &task_replan::DiagnosisPremise,
 ) -> Result<()> {
+    check_not_held(conn, op)?;
     let stale = |why: String| {
         anyhow::anyhow!(
             "the diagnosis of replan operation {} no longer holds: {why}",

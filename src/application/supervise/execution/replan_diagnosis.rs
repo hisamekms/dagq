@@ -26,6 +26,16 @@
 //! `continuing`; one that is landing waits, and the diagnosis is taken up
 //! again if it comes back. A job of a supervisor that is gone (or of this
 //! one before an exec) is started again from the queue's records.
+//!
+//! A task's hold comes before the diagnosis's start and the apply of its
+//! results (ADR-t1879-1 decision 6): no job starts, no ask opens and no
+//! verdict or answer moves the operation while the task is held, the
+//! queue refusing each in its transaction ([`DiagnosisPremise`] includes
+//! the hold). A verdict that reaches a held task is kept as
+//! `replan_diagnosed` ([`replan_detect::HELD_OUTCOME`]) with what it read,
+//! and an answer stays on its ask; once the hold is released, the next
+//! pass applies each on the same path, its premise checked again, and a
+//! verdict whose premise no longer holds is discarded and diagnosed again.
 
 use super::*;
 use crate::application::prompt::{DiagnosisMaterial, TRIAGE_ACCESS, replan_diagnosis_prompt};
@@ -34,9 +44,10 @@ use crate::domain::replan_detect::{
     DecideFacts, Decided, Detection, DiagnosisVerdict, JobPlace, MAX_DIAGNOSIS_ATTEMPTS,
     PlanningPayload,
 };
+use crate::domain::task_hold::HoldGuard;
 use crate::domain::task_replan::{
-    Diagnosis, DiagnosisChoice, DiagnosisPremise, NewReplan, ReplanMove, ReplanOperation,
-    ReplanOrigin, ReplanStatus,
+    Diagnosis, DiagnosisChoice, DiagnosisPremise, GuardedStep, NewReplan, ReplanMove,
+    ReplanOperation, ReplanOrigin, ReplanStatus,
 };
 use crate::domain::{Ask, AskConfidence, ReplanId};
 
@@ -53,20 +64,28 @@ pub(super) const DIAGNOSIS_LABEL: &str = "replan_diagnosis";
 
 /// The diagnosis job running now: one at a time, queue-wide.
 pub(super) struct DiagnosisJob {
+    read: DiagnosisRead,
+    switchable: bool,
+    job: HeadlessJob,
+}
+
+/// What a diagnosis job read as it started, which its verdict rests on:
+/// kept with the verdict (`read` of its `replan_diagnosed`) when a hold
+/// keeps it, so that the release applies it on the same premise.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct DiagnosisRead {
     operation: ReplanId,
     task: TaskId,
     run: RunId,
     /// The generation its claim moved the operation to.
     generation: i64,
     attempt: usize,
-    /// The run's status as it started, which its verdict rests on.
+    /// The run's status as it started.
     run_status: RunStatus,
     /// The run's HEAD as it started, when its worktree could be read.
     head: Option<String>,
     window_end: EventId,
     evidence: Vec<EventId>,
-    switchable: bool,
-    job: HeadlessJob,
 }
 
 /// Where a diagnosis job of an operation stands, from the queue's records.
@@ -84,7 +103,7 @@ fn of_operation(event: &RunEvent, op: ReplanId) -> bool {
     PlanningPayload::of(event).is_of(op)
 }
 
-impl DiagnosisJob {
+impl DiagnosisRead {
     /// What its verdict rests on: the run and its HEAD as it started and
     /// the events it read, `manual` whether the decision took the
     /// operation as a person's request and, for a park without a person,
@@ -144,6 +163,12 @@ impl Supervisor<'_> {
             Ok(applied) => done |= applied,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the answers to the diagnoses could not all be applied: {error:#}");
+            }
+        }
+        match self.apply_kept_diagnoses() {
+            Ok(applied) => done |= applied,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the verdicts kept for holds could not all be applied: {error:#}");
             }
         }
         if starting && self.replan.enabled {
@@ -362,10 +387,19 @@ impl Supervisor<'_> {
             self.close_undiagnosed(op, &format!("run {} landed before its diagnosis", run.id()))?;
             return Ok(false);
         }
+        // A held task gets no job and no ask until it is released; the
+        // claim below reads the hold again in its transaction.
+        if self.held_out(op.task_id, Some(run.id()), GuardedStep::Recover)? {
+            return Ok(false);
+        }
         if !self.diagnosis_asks(op.task_id, Some(op.id))?.is_empty() {
             return Ok(false);
         }
         let events = self.queue.task_events(op.task_id)?;
+        // A verdict a hold kept is applied, not diagnosed again.
+        if replan_detect::kept_verdict(&events, op.id, op.generation).is_some() {
+            return Ok(false);
+        }
         let (attempt, failed) = match self.diagnosis_in_flight(op.id, &events) {
             InFlight::Elsewhere => return Ok(false),
             InFlight::Next(attempt, failed) => (attempt, failed),
@@ -561,15 +595,17 @@ impl Supervisor<'_> {
             Ok(job) => {
                 info!(run_id = %run.id(), task_id = %op.task_id, "replan operation {}: diagnosis job {attempt} started on {}", op.id, launch.provider.as_str());
                 self.replan_diagnosis = Some(Box::new(DiagnosisJob {
-                    operation: op.id,
-                    task: op.task_id,
-                    run: run.id().clone(),
-                    generation: op.generation,
-                    attempt,
-                    run_status: run.status(),
-                    head,
-                    window_end,
-                    evidence,
+                    read: DiagnosisRead {
+                        operation: op.id,
+                        task: op.task_id,
+                        run: run.id().clone(),
+                        generation: op.generation,
+                        attempt,
+                        run_status: run.status(),
+                        head,
+                        window_end,
+                        evidence,
+                    },
                     switchable,
                     job,
                 }));
@@ -671,7 +707,7 @@ impl Supervisor<'_> {
         let duration_secs = job.job.elapsed().as_secs();
         let outcome = output.and_then(|stdout| DiagnosisVerdict::parse(&stdout));
         let end = self.recovery_job_end(
-            &job.run,
+            &job.read.run,
             &job.job,
             agent,
             job.switchable,
@@ -679,6 +715,7 @@ impl Supervisor<'_> {
         );
         match outcome {
             Err(error) => {
+                let job = &job.read;
                 let mut payload = json!({"operation_id": job.operation, "attempt": job.attempt,
                                          "error": error, "duration_secs": duration_secs});
                 end.record(&mut payload);
@@ -691,20 +728,23 @@ impl Supervisor<'_> {
                 Ok(true)
             }
             Ok(verdict) => {
+                let job = &job.read;
                 let mut payload = json!({"operation_id": job.operation, "attempt": job.attempt,
                                          "verdict": verdict, "window_end": job.window_end,
                                          "duration_secs": duration_secs});
                 end.record(&mut payload);
-                self.apply_diagnosis(&job, &verdict, payload).map(|()| true)
+                self.apply_diagnosis(job, &verdict, payload).map(|()| true)
             }
         }
     }
 
     /// Apply `verdict` of `job`, checked again against the queue now, and
-    /// record it as `replan_diagnosed` (`payload` with the outcome).
+    /// record it as `replan_diagnosed` (`payload` with the outcome). A
+    /// verdict that reaches a held task, or that the queue refused for a
+    /// hold that came meanwhile, is kept instead ([`Self::keep_diagnosis`]).
     fn apply_diagnosis(
         &mut self,
-        job: &DiagnosisJob,
+        job: &DiagnosisRead,
         verdict: &DiagnosisVerdict,
         mut payload: Value,
     ) -> Result<()> {
@@ -740,6 +780,8 @@ impl Supervisor<'_> {
                 .record_runtime_event(&job.run, EventKind::ReplanDiagnosed, payload)?;
             return self
                 .close_undiagnosed(&op, "the run landed or the task ended during its diagnosis");
+        } else if let Some(hold) = self.queue.hold_guard(op.task_id)? {
+            return self.keep_diagnosis(job, hold, payload);
         } else if latest
             .is_none_or(|run| *run.id() != op.run_id || run.status() == RunStatus::Integrating)
         {
@@ -788,7 +830,12 @@ impl Supervisor<'_> {
                             payload["outcome"] = json!("continue");
                             payload["reason"] = json!(reason);
                         }
-                        Err(error) => discarded(&mut payload, format!("{error:#}")),
+                        Err(error) => {
+                            if let Some(hold) = self.queue.hold_guard(op.task_id)? {
+                                return self.keep_diagnosis(job, hold, payload);
+                            }
+                            discarded(&mut payload, format!("{error:#}"));
+                        }
                     }
                 }
                 Decided::Park(reason) => {
@@ -813,6 +860,9 @@ impl Supervisor<'_> {
                             payload["reason"] = json!(reason);
                         }
                         Err(error) => {
+                            if let Some(hold) = self.queue.hold_guard(op.task_id)? {
+                                return self.keep_diagnosis(job, hold, payload);
+                            }
                             let lineage = self.queue.replan_lineage(op.task_id)?;
                             if replan_detect::auto_parks(&lineage) >= self.replan.max_auto_parks {
                                 let op = lineage
@@ -825,10 +875,7 @@ impl Supervisor<'_> {
                                     &op,
                                     &run,
                                     job.attempt,
-                                    (
-                                        Some((verdict, payload, job.premise(manual, None))),
-                                        job.window_end,
-                                    ),
+                                    (Some((verdict, payload, job, manual)), job.window_end),
                                     AskWhy::ParkLimit,
                                     Some(DiagnosisChoice::Replan),
                                 );
@@ -847,10 +894,7 @@ impl Supervisor<'_> {
                         &op,
                         &run,
                         job.attempt,
-                        (
-                            Some((verdict, payload, job.premise(manual, None))),
-                            job.window_end,
-                        ),
+                        (Some((verdict, payload, job, manual)), job.window_end),
                         why,
                         recommendation,
                     );
@@ -860,6 +904,77 @@ impl Supervisor<'_> {
         info!(run_id = %job.run, "replan operation {}: diagnosis {} {}: {}", job.operation, job.attempt, payload["outcome"].as_str().unwrap_or_default(), payload["reason"].as_str().unwrap_or_default());
         self.queue
             .record_runtime_event(&job.run, EventKind::ReplanDiagnosed, payload)
+    }
+
+    /// Keep the verdict of `job` (in `payload`) while its task is held by
+    /// `hold`: recorded as `replan_diagnosed` of [`replan_detect::HELD_OUTCOME`]
+    /// under the job's generation, with what the job read, and the
+    /// operation left `diagnosing` for [`Self::apply_kept_diagnoses`].
+    fn keep_diagnosis(
+        &mut self,
+        job: &DiagnosisRead,
+        hold: HoldGuard,
+        mut payload: Value,
+    ) -> Result<()> {
+        let reason = format!(
+            "task {} is held (hold {}): the verdict is kept until the release",
+            job.task, hold.hold
+        );
+        payload["outcome"] = json!(replan_detect::HELD_OUTCOME);
+        payload["reason"] = json!(reason);
+        payload["hold_id"] = json!(hold.hold);
+        payload["generation"] = json!(job.generation);
+        payload["read"] = json!(job);
+        info!(run_id = %job.run, task_id = %job.task, "replan operation {}: diagnosis {}: {reason}", job.operation, job.attempt);
+        self.queue
+            .record_runtime_event(&job.run, EventKind::ReplanDiagnosed, payload)
+    }
+
+    /// Apply each verdict a hold kept ([`replan_detect::kept_verdict`])
+    /// once its task is held no more, as [`Self::apply_diagnosis`] would
+    /// have: its premise is checked again, and a verdict that no longer
+    /// holds is discarded, after which the next pass diagnoses the
+    /// operation again. Whether one was applied or discarded.
+    fn apply_kept_diagnoses(&mut self) -> Result<bool> {
+        let mut settled = false;
+        for op in self.queue.open_replan_operations()? {
+            if op.status != ReplanStatus::Diagnosing || self.queue.hold_guard(op.task_id)?.is_some()
+            {
+                continue;
+            }
+            let events = self.queue.task_events(op.task_id)?;
+            let Some(kept) = replan_detect::kept_verdict(&events, op.id, op.generation) else {
+                continue;
+            };
+            let mut payload = kept.payload.clone();
+            payload[replan_detect::KEPT_ID] = json!(kept.id);
+            let read = serde_json::from_value::<DiagnosisRead>(payload["read"].clone());
+            let verdict = PlanningPayload::of(kept).verdict;
+            if let Some(fields) = payload.as_object_mut() {
+                for key in ["read", "hold_id", "generation", "why"] {
+                    fields.remove(key);
+                }
+            }
+            let done = match (read, verdict) {
+                (Ok(read), Some(verdict)) => self.apply_diagnosis(&read, &verdict, payload),
+                _ => {
+                    // A record this binary cannot read is diagnosed again.
+                    payload["outcome"] = json!("discarded");
+                    payload["reason"] = json!("the verdict kept for the hold cannot be read");
+                    let run = kept.run_id.clone().unwrap_or_else(|| op.run_id.clone());
+                    self.queue
+                        .record_runtime_event(&run, EventKind::ReplanDiagnosed, payload)
+                }
+            };
+            // One operation that fails leaves the others' kept verdicts due.
+            match done {
+                Ok(()) => settled = true,
+                Err(error) => {
+                    warn!(task_id = %op.task_id, error = %format_args!("{error:#}"), "the verdict kept for replan operation {} could not be applied: {error:#}", op.id);
+                }
+            }
+        }
+        Ok(settled)
     }
 
     /// [`Self::move_diagnosed`] of a diagnosis job's verdict, once the
@@ -1006,20 +1121,21 @@ impl Supervisor<'_> {
         run: &TaskRun,
         attempt: usize,
         (verdict, window_end): (
-            Option<(&DiagnosisVerdict, Value, DiagnosisPremise)>,
+            Option<(&DiagnosisVerdict, Value, &DiagnosisRead, bool)>,
             EventId,
         ),
         why: AskWhy,
         recommendation: Option<DiagnosisChoice>,
     ) -> Result<()> {
-        let (verdict, mut payload, premise) = match verdict {
-            Some((verdict, payload, premise)) => (Some(verdict), payload, Some(premise)),
+        let (verdict, mut payload, job) = match verdict {
+            Some((verdict, payload, job, manual)) => (Some(verdict), payload, Some((job, manual))),
             None => (
                 None,
                 json!({"operation_id": op.id, "attempt": attempt, "window_end": window_end}),
                 None,
             ),
         };
+        let premise = job.map(|(job, manual)| job.premise(manual, None));
         let said = verdict.map_or_else(
             || "No diagnosis job gave a verdict.".to_owned(),
             |verdict| {
@@ -1110,6 +1226,13 @@ impl Supervisor<'_> {
         let ask = match asked {
             Ok((outcome, _)) => outcome.ask,
             Err(error) => {
+                // A hold that came meanwhile keeps the verdict for the
+                // release; with no verdict, the release starts a job.
+                if let Some((job, _)) = job
+                    && let Some(hold) = self.queue.hold_guard(op.task_id)?
+                {
+                    return self.keep_diagnosis(job, hold, payload);
+                }
                 payload["outcome"] = json!("discarded");
                 payload["reason"] = json!(format!("{error:#}"));
                 info!(task_id = %op.task_id, "replan operation {}: no ask: {error:#}", op.id);
@@ -1195,6 +1318,11 @@ impl Supervisor<'_> {
             // The landing owns a run that is landing: answered once it is
             // back or closed once it landed.
             if run.status() == RunStatus::Integrating {
+                continue;
+            }
+            // A held task's answer stays on its ask, applied once the hold
+            // is released (the move reads the hold again).
+            if self.held_out(task, Some(run.id()), GuardedStep::Recover)? {
                 continue;
             }
             let window_end = asked.window_end;

@@ -1852,8 +1852,9 @@ fn no_second_operation_of_a_task_is_fenced_and_a_request_leaves_one() {
 /// one claims it, and one restarted claims it from what it reads again.
 /// The move that applies a diagnosis checks its premise in its own
 /// transaction: a review, a turn or a receipt after the last event it
-/// read, the run's landing begun or an edit of the task refuses it; a
-/// premise that holds lets it through.
+/// read, the run's landing begun, an edit of the task or a hold open on
+/// it refuses it (a hold also refuses the claim); a premise that holds
+/// lets it through.
 #[test]
 fn a_diagnosis_is_claimed_once_and_applied_only_on_its_premise() {
     use dagq::domain::task_replan::{Diagnosis, DiagnosisPremise};
@@ -1966,6 +1967,23 @@ fn a_diagnosis_is_claimed_once_and_applied_only_on_its_premise() {
     )
     .unwrap();
 
+    // The task was held: the move of the verdict and a new claim are
+    // refused in their transactions until the hold is released.
+    conn.execute(
+        "INSERT INTO task_holds(task_id, reason, by_role, by_id, created_at, settled_at)
+         VALUES (?1, 'the login expired', 'user', 'user', 0, 0)",
+        [a.as_i64()],
+    )
+    .unwrap();
+    refused(&mut queue, read_until, "is held (hold");
+    let error = claim(&mut queue, claimed.generation).unwrap_err();
+    assert!(format!("{error:#}").contains("is held"), "{error:#}");
+    conn.execute(
+        "UPDATE task_holds SET released_at=1 WHERE task_id=?1",
+        [a.as_i64()],
+    )
+    .unwrap();
+
     let moved = queue
         .move_replan(id, claimed.generation, &diagnosed(read_until))
         .unwrap();
@@ -1974,7 +1992,7 @@ fn a_diagnosis_is_claimed_once_and_applied_only_on_its_premise() {
 
 /// The ask of a diagnosis, the operation claimed again for it and the
 /// `replan_diagnosed` that ties them are written in one transaction, or
-/// none of them when another claim came first. A move from the diagnosis
+/// none of them when another claim came first or the task is held. A move from the diagnosis
 /// is refused when a person's request joined an operation the decision
 /// read as no person's, and a park without a person when the lineage's
 /// parks reached the limit since the decision read them.
@@ -2134,6 +2152,40 @@ fn a_diagnosis_asks_atomically_and_applies_only_under_its_request_and_park_limit
         assert_eq!(asks(&queue), before);
         assert_eq!(queue.replan_operation(second.id).unwrap().generation, read);
     }
+    // A hold open on the task refuses the ask, with a verdict's premise
+    // or without one, and nothing is written until it is released.
+    let holds = Connection::open(&db).unwrap();
+    holds
+        .execute(
+            "INSERT INTO task_holds(task_id, reason, by_role, by_id, created_at, settled_at)
+             VALUES (?1, 'the login expired', 'user', 'user', 0, 0)",
+            [a.as_i64()],
+        )
+        .unwrap();
+    let fresh = DiagnosisPremise {
+        read_until: Some(dagq::domain::EventId::new(newest())),
+        ..premise(false, None)
+    };
+    for premise in [Some(&fresh), None] {
+        let error = queue
+            .ask_replan_diagnosis(
+                &ask,
+                (second.id, read),
+                "a person is asked",
+                &run,
+                (json!({"operation_id": second.id}), premise),
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("is held"), "{error:#}");
+        assert_eq!(asks(&queue), before);
+        assert_eq!(queue.replan_operation(second.id).unwrap().generation, read);
+    }
+    holds
+        .execute(
+            "UPDATE task_holds SET released_at=1 WHERE task_id=?1",
+            [a.as_i64()],
+        )
+        .unwrap();
     let (outcome, asked) = queue
         .ask_replan_diagnosis(
             &ask,

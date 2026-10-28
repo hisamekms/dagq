@@ -1,0 +1,20 @@
+# The items of task 3596 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 9.5s: two supervises (held, then released) with the review job and a diagnosis job
+[[test]]
+name = "runtime_replan_diagnosis::a_held_task_gets_no_diagnosis_job_until_its_release"
+reason = "B 境界（守る境界）: CLI の hold が開いた task に supervise が診断 job を起動せず（provider を呼ばず replan_diagnosis_started も ask も書かない）、hold_deferred を残し、release の後の supervise が診断することを、SQLite の hold と supervisor の配線で確かめる（判断は domain::replan_detect の unit test）"
+task = 3596
+
+# 8.8s: a diagnosis job whose script holds the task in SQLite, then a supervise after the release
+[[test]]
+name = "runtime_replan_diagnosis::a_verdict_reaching_a_task_held_meanwhile_is_kept_and_applied_after_the_release"
+reason = "B 境界（守る境界）: 診断 job の最中に SQLite に入った hold で verdict が適用も ask もされず replan_diagnosed（held）に保持され、release の後の別の supervisor が前提を再検査して適用することを、job のプロセス・SQLite・supervisor の再起動の配線で確かめる（判断は domain::replan_detect::kept_verdict の unit test）"
+task = 3596
+
+# 8.0s: the diagnosis's ask answered under a hold, then a supervise after the release
+[[test]]
+name = "runtime_replan_diagnosis::an_answer_to_the_diagnosis_of_a_held_task_is_applied_after_the_release"
+reason = "B 境界（守る境界）: hold 中に答えた診断の decide の ask が適用されず閉じないまま残り、release の後の supervise が人の判断として適用することを、SQLite の ask と hold と supervisor の配線で確かめる"
+task = 3596

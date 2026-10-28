@@ -421,6 +421,175 @@ fn a_run_without_a_run_directory_is_not_diagnosed_in_the_main_checkout() {
     );
 }
 
+/// `dagq hold` or `dagq release` of task 1 as a person at a plain
+/// terminal.
+fn as_person(db: &Path, args: &[&str]) {
+    let output = crate::common::cli::invoke_with(&[], db, args);
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The outcomes of the task's `replan_diagnosed`, in order.
+fn outcomes(db: &Path) -> Vec<String> {
+    let detail = SqliteQueue::open(db).unwrap().show(TaskId::new(1)).unwrap();
+    payloads(&detail, "replan_diagnosed")
+        .iter()
+        .map(|p| p["outcome"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// Acceptance (the hold before the start): a task held before its
+/// diagnosis gets no job: no provider runs, no `replan_diagnosis_started`
+/// is written and no ask opens, the hold recorded as what keeps it. Once
+/// it is released, the next supervisor diagnoses it.
+#[test]
+fn a_held_task_gets_no_diagnosis_job_until_its_release() {
+    let (_dir, repo, db, backend, _off) = one_review(false, &[]);
+    as_person(&db, &["hold", "1", "--reason", "the login expired"]);
+    enable_replan(&repo, "non_pass_reviews = 1\n");
+    let reviewer = TestReviewer::new(&[asking_concern()]).with_triages(&[diagnosis(
+        "continue",
+        &["local_defect"],
+        "high",
+    )]);
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(reviewer.triage_prompts().is_empty(), "no job started");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert!(payloads(&detail, "replan_diagnosis_started").is_empty());
+    assert_eq!(operation(&db).status, ReplanStatus::Candidate);
+    assert!(
+        queue
+            .asks(Default::default())
+            .unwrap()
+            .iter()
+            .all(|ask| ask.asked_by != replan_detect::DIAGNOSIS_ASKER)
+    );
+    let deferred = payloads(&detail, "hold_deferred");
+    assert!(
+        deferred.iter().any(|d| d["step"] == "recover"),
+        "{deferred:?}"
+    );
+
+    as_person(&db, &["release", "1"]);
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(reviewer.triage_prompts().len(), 1);
+    assert_eq!(operation(&db).status, ReplanStatus::Continuing);
+    assert_eq!(outcomes(&db), ["continue"]);
+}
+
+/// Acceptance (a hold after the start): a task held while its diagnosis
+/// job runs (the job's script holds it under the store, as
+/// `runtime_task_hold::the_supervisor_keeps_a_verdict_whose_task_was_held_while_the_job_ran`
+/// does) gets the verdict kept, neither applied nor asked about: the
+/// operation stays diagnosing. Once the hold is released, the verdict is
+/// applied on its premise checked again (the run rested meanwhile), and no
+/// second job runs.
+#[test]
+fn a_verdict_reaching_a_task_held_meanwhile_is_kept_and_applied_after_the_release() {
+    let (_dir, repo, db, backend, _off) = one_review(false, &[]);
+    enable_replan(&repo, "non_pass_reviews = 1\n");
+    let hold_now = format!(
+        "sqlite3 -cmd '.timeout 5000' {} {} || exit 97",
+        shell_path(&db),
+        dagq::infrastructure::adapters::shell_quote(
+            "INSERT INTO task_holds(task_id, reason, by_role, by_id, created_at, settled_at)
+             VALUES (1, 'held while the diagnosis ran', 'user', 'user', 0, 0);"
+        )
+    );
+    let job = format!(
+        "{hold_now} && {}",
+        diagnosis("continue", &["local_defect"], "high")
+    );
+    let reviewer = TestReviewer::new(&[asking_concern()]).with_triages(&[job]);
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let op = operation(&db);
+    assert_eq!(op.status, ReplanStatus::Diagnosing, "{op:?}");
+    assert_eq!(op.diagnosis.choice, None, "nothing applied");
+    assert_eq!(outcomes(&db), [replan_detect::HELD_OUTCOME]);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kept = detail
+        .events
+        .iter()
+        .find(|e| e.kind.as_str() == "replan_diagnosed")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        kept.payload["verdict"]["choice"], "continue",
+        "{}",
+        kept.payload
+    );
+    assert_eq!(
+        kept.payload["generation"], op.generation,
+        "{}",
+        kept.payload
+    );
+    assert!(
+        queue
+            .asks(Default::default())
+            .unwrap()
+            .iter()
+            .all(|ask| ask.asked_by != replan_detect::DIAGNOSIS_ASKER)
+    );
+
+    as_person(&db, &["release", "1"]);
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let op = operation(&db);
+    assert_eq!(op.status, ReplanStatus::Continuing, "{op:?}");
+    assert_eq!(op.diagnosis.choice, Some(DiagnosisChoice::Continue));
+    assert_eq!(outcomes(&db), [replan_detect::HELD_OUTCOME, "continue"]);
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let applied = &payloads(&detail, "replan_diagnosed")[1];
+    assert_eq!(applied["kept_id"], kept.id.as_i64(), "{applied}");
+    assert_eq!(payloads(&detail, "replan_diagnosis_started").len(), 1);
+}
+
+/// Acceptance (a person's answer under a hold): the answer to the
+/// diagnosis's `decide` ask given while the task is held is not applied:
+/// the ask stays answered and open, the operation diagnosing. Once the
+/// hold is released, the answer is applied as the person's decision.
+#[test]
+fn an_answer_to_the_diagnosis_of_a_held_task_is_applied_after_the_release() {
+    let unsure = diagnosis("replan", &["oversized_unit"], "low");
+    let (_dir, repo, db, backend, reviewer) = one_review(true, &[unsure]);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.asked_by == replan_detect::DIAGNOSIS_ASKER)
+        .expect("the diagnosis's ask");
+    as_person(&db, &["hold", "1", "--reason", "the login expired"]);
+    queue.answer(ask.id, "continue").unwrap();
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(operation(&db).status, ReplanStatus::Diagnosing);
+    let read = queue.read_ask(ask.id).unwrap();
+    assert!(
+        read.answered_at.is_some() && read.closed_at.is_none(),
+        "{read:?}"
+    );
+
+    as_person(&db, &["release", "1"]);
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let op = operation(&db);
+    assert_eq!(op.status, ReplanStatus::Continuing, "{op:?}");
+    assert_eq!(
+        op.diagnosis.decided_by.as_deref(),
+        Some(replan_detect::DECIDED_BY_PERSON)
+    );
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+}
+
 fn common_ok(db: &Path, args: &[&str]) -> Value {
     crate::common::cli::ok(db, args)
 }

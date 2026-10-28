@@ -131,6 +131,10 @@ Claude/Codexで同じ状態機械を使う。
   人の答えはその者の判断として記録して同じ移動をする。
   人の依頼でない操作を診断が柵へ進めると、同じtransactionでplannerへの依頼を記録する。
   着地したrunの操作は閉じ、着地中のrunは待ってから診断し直す。
+  taskの[hold](task-hold.md)は診断の開始と結果の適用に先立つ（[ADR-t1879-1](../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)決定6）。hold中のtaskには診断jobを始めずaskも開かず、verdictも人の答えも操作を進めない。
+  jobとaskのための取り直しと、verdictと答えの移動とaskの前提はholdを含み、同じtransactionでholdが開いていれば拒む。
+  hold中に出たverdictは、jobが読んだもの（版・runの状態・HEAD・読んだeventの終わり）とともに記録に保持し、操作はその版の`diagnosing`のまま残す。人の答えはaskに答えたまま閉じずに残す。
+  解除の後の最初のpassは、保持したverdictを同じ前提の再検査を通して適用し、前提が崩れていれば捨てて診断し直す。保持を確定する記録はどの保持かを名指し、前の版の遅れた記録は今の版の保持を無効にしない。答えも解除の後に今の経路で適用する。
   動いていたjobのsupervisorがいなければ（exec後の同じprocessも）次の試行として始め直す。
   `status`・`doctor`の`replans`は、`dagq.toml`が読めなければ設定と窓を出さずにその誤りを出す（supervisorは前に読めた設定で動き続ける）。開いた操作ごとに診断・taskの原因別のturn・窓（閾値は継続の後の上限を含む）・系統の自動の保留の数を出す。
   全体では状態・起点・選択・決めた者・主因ごとの数と、柵を越えた数と置換先を出す。
