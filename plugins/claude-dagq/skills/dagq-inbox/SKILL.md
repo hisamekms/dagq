@@ -11,7 +11,7 @@ Roles: the **supervisor** lands runs and runs the headless jobs (review, plan re
 
 Only what needs a person comes here. The runtime fixes known cases itself (`auto_repaired`: a resume, a stale receipt), and the recovery job what it can of the rest (failed runs, stalled turns, idle processes). An ask opens only when they could not, and every ask says why a person is needed (`reason_category`: `scope`, `discard`, `authentication`, `cost`, `recovery_failed`). Do none of their work by hand.
 
-This session holds no state. After a restart, compaction or `/clear` (never Codex's `/new`), start again from step 1 (the SessionStart hook prints `status --role inbox`). Write for the person in the language your prompt or the status's `language.instruction` names (`dagq` skill, section 5).
+This session holds no state. After a restart, compaction or `/clear` (never Codex's `/new`), start again from step 1 (the SessionStart hook prints `status --role inbox`). Write for the person in the language the `dagq` skill's section 5 names.
 
 ## 1. Read what waits
 
@@ -23,7 +23,7 @@ This session holds no state. After a restart, compaction or `/clear` (never Code
 
 ## 2. Watch in the background
 
-Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`, as it is: no shell loop around it (Codex: `reference/watch.md`). It has no timeout and returns only with `events` or `supervisors_changed`; handle them (steps 3, 4), then restart it from its `cursor`. A non-zero exit is a failure: report it as `reference/watch.md` says. Keep exactly one watch; never poll `status` in a loop. When a hook says to start the watch (at the start, or at your turn's end), start it first: nothing else reaches this session. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
+Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`, as it is: no shell loop around it (Codex: `reference/watch.md`). It has no timeout and returns only with `events` or `supervisors_changed`; handle them (steps 3, 4), then restart it from its `cursor`. A non-zero exit is a failure: report it as `reference/watch.md` says. Keep exactly one watch; never poll `status` in a loop. When a hook says to start the watch, start it first: nothing else reaches this session. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
 
 ## 3. Show an ask and write the answer
 
@@ -65,9 +65,10 @@ Report each in a list (task, status, `next`, gist of `last_error`); act with `da
 - `restart supervisor`: `up` (`supervisor_duplicate`: `down --wait` first); `stop the stale supervisor's process`: stop its `pid` (`dagq-recover` section 5).
 - `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`.
 - `recover run`, `exit the session`: `dagq-recover`.
+- A replanning (`replans`, `replan request` on the person's word): `skills/dagq-recover/reference/replan-held.md`.
 
 ## Where your authority ends
 
 Yourself: `status`, `watch`, `asks`, `show`, `goal list` (goal order: `reference/status.md`), `answer` with the person's own words, and `ask close` after an answer was carried out. Only when the person says so: what `dagq-recover` describes (`up` / `down` / `install`, `integrate` after a review by hand, `recover`, a retry `ready`, `ready --bypass-review`, `cancel`). Reach sessions only with `answer`, `run log` / `planner log` and `planner request`. Never answer on the person's behalf, never pick a default, and never `add` or `goal add`: registering work is a runtime planner's, reached by `request add` on the person's word; `goal close` only on the person's word (a finished goal is its goal review's).
 
-What you do is recorded as the inbox's, apart from the person's own: events carry actor `inbox`, answers `authority: delegated` (the person's own are `user`). A `!` command in this terminal counts as yours; if the person wants it recorded as theirs, they type it in a terminal without `DAGQ_ROLE`. `skills/dagq/reference/authority.md`.
+What you do is recorded as the inbox's, apart from the person's own: events carry actor `inbox`, answers `authority: delegated` (the person's own are `user`). A `!` command here counts as yours; the person's own goes in a terminal without `DAGQ_ROLE`. `skills/dagq/reference/authority.md`.

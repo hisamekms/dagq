@@ -32,6 +32,7 @@ runtime の worker の prompt が名指す「worker の部分」。作業の場�
 
 - receipt の前: [local-checks.md](docs/development/local-checks.md)（手元の検証・test の範囲・stress・e2e を流さないこと・受け入れ条件の対応づけ・ask にしないもの）と [documents.md](docs/development/documents.md)（文書の照合・commit）
 - 変更の範囲に応じて下の「変更の範囲ごと」
+- 長引く自分の run の分割の提案（`replan propose`）: dagq skill の `reference/replan.md`
 - `dagq` の拒否（`no_use_case`・`authorization_denied`）: dagq skill の `reference/authority.md`（仕組みは [Queue service](docs/design/queue-service.md#クライアントモード)）
 
 ### planner

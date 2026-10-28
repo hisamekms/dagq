@@ -5,7 +5,7 @@ Read this to make a task wait while something in the way of its run is removed (
 ## When to hold
 
 - The task's plan is right, but its run cannot get on now: hold it instead of answering a `stalled` ask with `stop` (which ends the session and hands the run to its recovery job), instead of moving the task back to `draft` (refused once it is `in_progress`, and it loses plan review's pass), and instead of canceling it.
-- A hold is not a replanning: a run whose plan is wrong goes to the runtime's replanning (`replan request --run RUN`, `replan --help`), not to a hold.
+- A hold is not a replanning: a run whose plan is wrong goes to the runtime's replanning (`replan request --run RUN`, `reference/replan-held.md`), not to a hold.
 - A hold names one task. To keep the whole queue from claiming, or to wait for a login or a usage limit, use the queue's own waits (`down`, the `queue_hold` ask), not a hold on many tasks.
 
 ## Hold

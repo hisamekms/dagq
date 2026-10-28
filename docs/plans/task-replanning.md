@@ -135,6 +135,9 @@ Claude/Codexで同じ状態機械を使う。
   `status`・`doctor`の`replans`は、`dagq.toml`が読めなければ設定と窓を出さずにその誤りを出す（supervisorは前に読めた設定で動き続ける）。開いた操作ごとに診断・taskの原因別のturn・窓（閾値は継続の後の上限を含む）・系統の自動の保留の数を出す。
   全体では状態・起点・選択・決めた者・主因ごとの数と、柵を越えた数と置換先を出す。
   `timeline`はrunの原因別のturnと再計画の段を、`stats`は窓の原因別のturn・開いた操作・診断・askの理由・移動を出し、数え方は検知と同じ関数による。
+- pluginの手順: 済み（dagq skillの`reference/replan.md`がフローと役割ごとのコマンド・条件の対応・分割の例を、dagq-recover skillの`reference/replan-held.md`が保留の読み方・人の判断・`blocked`の扱いを持つ）。
+  `withdrawn`へ進める経路と、適用以外の`blocked`（保存・復元の失敗、継続なしの却下・使い切り・置換proposalの取り下げ）を先へ進めるコマンドはまだ無い。
+  pluginはそれらを手順として書かず、操作は`blocked`のまま成果を保持し、人に理由を見せるだけとする。
 
 ## 入口と診断
 

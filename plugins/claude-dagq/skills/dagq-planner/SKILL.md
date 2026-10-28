@@ -17,7 +17,7 @@ Decide what you can recommend and go on, asking no one: adopting or dropping a f
 
 ## 1. A request: plan it or decline it
 
-Your prompt holds the person's words. Look for work that covers it first (`search`, `related`, `goal list`, the source). Then one of:
+Look first for work that covers the person's words (`search`, `related`, `goal list`, the source). Then one of:
 
 - **Plan it**: the `dagq` skill's section 2 and `register.md`, "For a planner". Then:
 
@@ -38,7 +38,7 @@ First list the unconfirmed premises that would change the plan; settle those a s
 
 ## 2. When plan review sends it back (revise)
 
-"Plan review sent proposal N back" arrives with reasons. Fix them, `lint --proposal N`, `"$DAGQ" submit --proposal N` (a replan's replacement proposal: fix its plan too and add `--replacement <plan.json>`); on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. Details: `register.md`, "A revise".
+"Plan review sent proposal N back" arrives with reasons. Fix them, `lint --proposal N`, `"$DAGQ" submit --proposal N` (a replacement: also its plan, `--replacement <plan.json>`; `skills/dagq/reference/replan.md`); on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. Details: `register.md`, "A revise".
 
 ## 3. A draft or a finding you were opened for
 

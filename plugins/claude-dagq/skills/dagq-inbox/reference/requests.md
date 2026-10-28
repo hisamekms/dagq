@@ -30,6 +30,8 @@ A runtime planner takes each open request while a supervisor runs (none without 
 
 The runtime records a request itself when a Spike task (an investigation of a premise) completes, for a new planner to decide the next step. Its proposal and its decline reach you as news only; tell the person when they follow that goal. Only `exhausted`, or a `planner_question`, needs them. A `ready` Spike the repository's Spike caps hold back is waiting, not stuck.
 
+A replanning of a running task is not a request the inbox adds: on the person's word it is `replan request --run RUN`, which records its own request, whose planner waits for the run's saved work (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/replan-held.md`). When that request is declined without continuing the run, or exhausted, the operation stays `blocked`: a new request in other words does not move it.
+
 ## Tell the person the outcome
 
 `watch` brings each outcome; `status` does not list them.
