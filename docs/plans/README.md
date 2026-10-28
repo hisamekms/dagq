@@ -37,6 +37,7 @@ tags:
 - [docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）と docs だけの衝突の種類（M5）の定義と基準値](docs-slim.md)（goal 159、task 1946・1966）
 - [design 文書の削減（A・C）の前後比較に使う run の review の差し戻しの指標（M7）の定義と、比べる区間・参考の値・想定効果](docs-reduction.md)（goal 194）
 - [review の 3 回目以降まで進む run で後の回の指摘が前の回に出なかった理由（取りこぼし・直しが入れた・task の大きさ・範囲の外）の判定と、人の send_back の後の resume の結末](review-rounds-resume-spike.md)（goal 227）
+- [人の send_back・review の差し戻しの後の resume が resume_timeout で receipt 無しに終わる原因（検証の流し直し・fresh_session の切り替え・background の待ち・その他）の判定](resume-timeout-spike.md)（goal 228）
 - [過去の着地の差分に IT の対応表を当てた、絞った IT の時間と見逃しの測定と、全部流す閾値・共通のファイル・表の古さの上限](landing-it-selection.md)（goal 157、task 1924）
 - [着地の検証を unit test 全件と絞った IT に切り替えた前後 7 日の verify・landing_queue・着地の数・main が赤だった時間・修正 task・事故・他人の壊れによる resume と ask の比較](landing-verify-switch.md)（goal 157、task 1929）
 - [上限を入れた後の本番のobserverのpromptのbyte数と節ごとの大きさ、上限を見直すかの結論](observer-prompt-size.md)（task 1575）
