@@ -771,8 +771,9 @@ pub fn watch_step(
     }
 }
 
-/// The broker refused a request: a queue event, written by the broker on
-/// the DB, with the `run` the request named (null without one; a
+/// The broker refused a request: a queue event the broker records through
+/// the queue service's `broker_record` as the user (its actor is the
+/// user's, and the payload names the broker by [`stamped`]), with the `run` the request named (null without one; a
 /// `CONNECT`'s from its proxy credentials), the `destination`
 /// ([`Destination::name`]), the `method`, the `reason` (a [`TokenRefusal`],
 /// a [`TunnelRefusal`], `egress_unreadable` (the registries could not be
@@ -997,6 +998,66 @@ pub const QUEUE_BROKER_STOP_REQUESTED: &str =
 /// sweep that did or failed anything is recorded, and no token's value.
 pub const QUEUE_BROKER_TOKENS_SWEPT: &str =
     crate::domain::event_kind::EventKind::QueueBrokerTokensSwept.as_str();
+
+/// The params of the queue service's `broker_run_status`: the run a token
+/// names, as the request named it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerRunStatusParams {
+    pub run: String,
+}
+
+/// The answer of `broker_run_status`: the run's status, `None` for a run
+/// the queue does not hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerRunStatus {
+    pub status: Option<RunStatus>,
+}
+
+/// The answer of `broker_binding`: the Git common directory the queue is
+/// bound to, `None` for a queue bound to none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerBinding {
+    pub binding: Option<String>,
+}
+
+/// The params of `broker_record`: one of the events
+/// [`broker_records`] lets through, and its payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerRecordParams {
+    pub kind: EventKind,
+    pub payload: serde_json::Value,
+}
+
+/// Whether `broker_record` records `kind`: only [`QUEUE_BROKER_DENIED`]
+/// and [`QUEUE_BROKER_TOKENS_SWEPT`].
+pub const fn broker_records(kind: EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::QueueBrokerDenied | EventKind::QueueBrokerTokensSwept
+    )
+}
+
+/// `payload` with the broker that records it, `broker`: its `pid` and
+/// `build`. Its records' actor is the user's, so the payload tells one
+/// broker's from another's. A payload that is no object is kept under
+/// `payload`.
+pub fn stamped(payload: serde_json::Value, pid: u32, build: &str) -> serde_json::Value {
+    let mut payload = match payload {
+        serde_json::Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("payload".to_owned(), other);
+            map
+        }
+    };
+    payload.insert(
+        "broker".to_owned(),
+        serde_json::json!({"pid": pid, "build": build}),
+    );
+    serde_json::Value::Object(payload)
+}
 /// The kinds whose latest says whether the attention stands.
 pub const QUEUE_BROKER_ATTENTION_KINDS: [&str; 4] = [
     QUEUE_BROKER_DOWN,
@@ -1630,5 +1691,39 @@ mod tests {
         // The pool has room again.
         let key = denial("d", "missing_token", None);
         assert_eq!(limiter.admit(key, window, 3, caps, window), record);
+    }
+
+    #[test]
+    fn a_broker_s_record_is_only_of_its_refusals_and_its_sweeps_and_names_it() {
+        for &kind in EventKind::ALL {
+            assert_eq!(
+                broker_records(kind),
+                matches!(
+                    kind,
+                    EventKind::QueueBrokerDenied | EventKind::QueueBrokerTokensSwept
+                ),
+                "{kind:?}"
+            );
+        }
+        let payload = stamped(serde_json::json!({"run": "r1"}), 42, "0.1.0");
+        assert_eq!(
+            payload,
+            serde_json::json!({"run": "r1", "broker": {"pid": 42, "build": "0.1.0"}})
+        );
+        assert_eq!(
+            stamped(serde_json::json!(null), 7, "b"),
+            serde_json::json!({"payload": null, "broker": {"pid": 7, "build": "b"}})
+        );
+        let params: BrokerRecordParams = serde_json::from_value(serde_json::json!({
+            "kind": "queue_broker_denied", "payload": {}
+        }))
+        .unwrap();
+        assert_eq!(params.kind, EventKind::QueueBrokerDenied);
+        assert!(
+            serde_json::from_value::<BrokerRunStatusParams>(
+                serde_json::json!({"run": "r1", "more": 1})
+            )
+            .is_err()
+        );
     }
 }

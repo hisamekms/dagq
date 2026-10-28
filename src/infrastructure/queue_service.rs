@@ -1881,6 +1881,22 @@ impl Client {
         }
     }
 
+    /// The queue broker's own client of the service of the queue at
+    /// `queue_dir` (docs/design/queue-broker.md): the host's socket with no
+    /// token, no role and no queue named, so the service takes it for the
+    /// user (ADR-t3102-1 decision 1), whatever the broker's environment
+    /// holds.
+    pub fn broker(queue_dir: &Path) -> Self {
+        Self {
+            route: ClientRoute::Socket(socket_path(queue_dir)),
+            credential: None,
+            env_role: None,
+            next: NEXT_CONTROL_SIDE,
+            queue: None,
+            binding: None,
+        }
+    }
+
     /// `use_case` with `params` done by the service as the principal of
     /// the token: its result, or a [`ClientFailure`]. A service (or a
     /// broker) that does not answer is a failure; the client never opens
@@ -4062,6 +4078,16 @@ impl ServiceQueue for ServiceSqlite {
             Err(error) if error.downcast_ref::<RunNotFound>().is_some() => Ok(None),
             Err(error) => Err(error),
         }
+    }
+    fn repository_binding(&self) -> Result<Option<String>> {
+        self.queue.repository_binding()
+    }
+    fn record_broker_event(
+        &self,
+        kind: EventKind,
+        payload: Value,
+    ) -> Result<crate::domain::EventId> {
+        EventStore::record_queue_event(&self.queue, kind, payload)
     }
     fn proposals(&self, all: bool) -> Result<Value> {
         Ok(json!({"proposals": TaskReads::proposals(&self.queue, all)?}))

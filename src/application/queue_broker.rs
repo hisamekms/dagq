@@ -123,11 +123,27 @@ pub fn started_payload(by: &str, report: &Value) -> Value {
 }
 
 /// What the broker runs a request on.
+/// The queue service did not answer a read of the broker's own
+/// ([`BrokerBackend::run_status`]): the request is refused `unreachable`,
+/// as one the broker passed on that got no answer, and the broker opens no
+/// queue in its place.
+#[derive(Debug)]
+pub struct ServiceUnanswered;
+
+impl std::fmt::Display for ServiceUnanswered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the queue service did not answer")
+    }
+}
+
+impl std::error::Error for ServiceUnanswered {}
+
 pub trait BrokerBackend: Send + Sync {
     /// The principal `token` was issued for; `None` for a token the
     /// control side did not issue or has revoked.
     fn principal(&self, token: &str) -> Result<Option<Principal>>;
     /// The status of run `id`; `None` for a run the queue does not hold.
+    /// An error with [`ServiceUnanswered`] when the service did not answer.
     fn run_status(&self, id: &RunId) -> Result<Option<RunStatus>>;
     /// Send `line` (one request of the queue service, ending in a newline)
     /// to the service and read its whole answer, whatever its length.
@@ -748,9 +764,15 @@ impl QueueBroker<'_> {
             .ok_or_else(|| token_refused(TokenRefusal::MissingRun))?;
         let status_of = |own: &RunId| {
             self.backend.run_status(own).map_err(|error| {
-                Refused::from(failed(format!(
-                    "the token's run could not be read: {error:#}"
-                )))
+                let reason = format!("the token's run could not be read: {error:#}");
+                Refused::from(if error.downcast_ref::<ServiceUnanswered>().is_some() {
+                    Refusal {
+                        code: ServiceErrorCode::Unreachable,
+                        reason,
+                    }
+                } else {
+                    failed(reason)
+                })
             })
         };
         let with_token_run = |own: Option<&RunId>, refusal: TokenRefusal| Refused {
@@ -1029,6 +1051,8 @@ mod tests {
     struct Backend {
         status: Option<RunStatus>,
         reachable: bool,
+        /// Whether the service answers the read of a run's status.
+        answers_run: bool,
         egress: Option<Egress>,
         credential: Result<ClaudeCredential, ClaudeCredentialProblem>,
         forwarded: Mutex<Vec<Value>>,
@@ -1040,6 +1064,7 @@ mod tests {
             Self {
                 status,
                 reachable: true,
+                answers_run: true,
                 egress: Some(Egress::default()),
                 credential: Err(ClaudeCredentialProblem::NotSelected),
                 forwarded: Mutex::new(Vec::new()),
@@ -1062,6 +1087,9 @@ mod tests {
             })
         }
         fn run_status(&self, _: &RunId) -> Result<Option<RunStatus>> {
+            if !self.answers_run {
+                return Err(anyhow!("no service").context(ServiceUnanswered));
+            }
             Ok(self.status)
         }
         fn forward(&self, line: &[u8]) -> Result<Vec<u8>> {
@@ -2072,6 +2100,19 @@ mod tests {
         assert_eq!(backend.denied.lock().unwrap()[0]["code"], "unreachable");
         let (status, body) = handle(&backend, &queue_request(Some("broken"), Some("r1")));
         assert_eq!((status, &body["error"]["code"]), (500, &json!("failed")));
+        // A run's status the service does not answer is refused as the
+        // service's silence, and nothing is passed on.
+        let backend = Backend {
+            answers_run: false,
+            ..Backend::new(Some(RunStatus::Running))
+        };
+        let (status, body) = handle(&backend, &queue_request(Some("good"), Some("r1")));
+        assert_eq!(
+            (status, &body["error"]["code"]),
+            (502, &json!("unreachable"))
+        );
+        assert!(backend.forwarded.lock().unwrap().is_empty());
+        assert_eq!(backend.denied.lock().unwrap()[0]["code"], "unreachable");
         let broker = QueueBroker {
             backend: &backend,
             denials: &denials(),

@@ -125,6 +125,11 @@ string_enum!(Capability {
     // starts (`issue_token`, ADR-t3102-1 decision 2): which child a parent
     // may ask for is [`starts`].
     TokenIssue => "token.issue",
+    // Recording what the queue broker refused and the verifications'
+    // tokens it or a supervisor swept (`broker_record`): the user's, which
+    // the broker is on the host's socket, and the supervisor's, never an
+    // AI actor's.
+    QueueBrokerRecord => "queue_broker.record",
     // Reserved for a later stage (sandboxed execution): no role has them.
     FilesystemRead => "reserved.filesystem_read",
     FilesystemWrite => "reserved.filesystem_write",
@@ -133,7 +138,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 64] = [
+    pub const ALL: [Self; 65] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -194,6 +199,7 @@ impl Capability {
         Self::Push,
         Self::TelemetryReport,
         Self::TokenIssue,
+        Self::QueueBrokerRecord,
         Self::FilesystemRead,
         Self::FilesystemWrite,
         Self::NetworkAccess,
@@ -605,11 +611,12 @@ const INBOX: &[Capability] = &[
     C::TokenIssue,
 ];
 
-/// The number of [`USER`]'s capabilities: the inbox's and one more.
-const USER_LEN: usize = INBOX.len() + 1;
+/// The number of [`USER`]'s capabilities: the inbox's and two more.
+const USER_LEN: usize = INBOX.len() + 2;
 
-/// [`INBOX`]'s capabilities and the approval of `setup-review`'s changes
-/// beforehand ([`C::ReviewSetupApprove`]).
+/// [`INBOX`]'s capabilities, the approval of `setup-review`'s changes
+/// beforehand ([`C::ReviewSetupApprove`]) and the queue broker's records
+/// ([`C::QueueBrokerRecord`]).
 const USER_CAPABILITIES: [Capability; USER_LEN] = {
     let mut all = [C::ReviewSetupApprove; USER_LEN];
     let mut at = 0;
@@ -617,11 +624,14 @@ const USER_CAPABILITIES: [Capability; USER_LEN] = {
         all[at] = INBOX[at];
         at += 1;
     }
+    all[at + 1] = C::QueueBrokerRecord;
     all
 };
 
-/// What a person at a plain terminal may do: the inbox's, and approving
-/// `setup-review`'s changes beforehand (`--yes`), which only a person does.
+/// What a person at a plain terminal may do: the inbox's, approving
+/// `setup-review`'s changes beforehand (`--yes`), which only a person does,
+/// and the queue broker's records, which the broker sends as the user
+/// (ADR-t3102-1 decision 1) and no AI actor does.
 const USER: &[Capability] = &USER_CAPABILITIES;
 
 /// The planner's authority as it is (ADR-t728-1 decision 7): goals, tasks
@@ -702,7 +712,9 @@ const OBSERVER: &[Capability] = &[
 /// `install` does (task 734). It runs the eval's rounds that were asked
 /// for (`scheduler.supervise`) and reads them, and asks for none itself
 /// (ADR-t1728-1 decision 6). It alone parks a run to replan it and
-/// applies the replacement (ADR-t1521-2 decisions 1 and 5).
+/// applies the replacement (ADR-t1521-2 decisions 1 and 5). It may record
+/// the verifications' tokens it swept through the service as the broker
+/// does (`queue_broker.record`).
 const SUPERVISOR: &[Capability] = &[
     C::QueueRead,
     C::QueueWatch,
@@ -731,6 +743,7 @@ const SUPERVISOR: &[Capability] = &[
     C::ReplanPark,
     C::ReplanApply,
     C::TokenIssue,
+    C::QueueBrokerRecord,
 ];
 
 /// The session wrapper and its hook: its own run's or planner's session
@@ -1109,6 +1122,7 @@ mod tests {
         }
         let mut inbox = grants(ActorRole::Inbox).to_vec();
         inbox.push(C::ReviewSetupApprove);
+        inbox.push(C::QueueBrokerRecord);
         assert_eq!(inbox, grants(ActorRole::User));
         assert_eq!(grants(ActorRole::SetupReviewJob), [C::QueueRead]);
         let job = ActorContext::setup_review_job("s1");

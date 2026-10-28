@@ -58,7 +58,8 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
   通した`CONNECT`はtunnelになり、byteを両向きに写す（`infrastructure::queue_broker::tunnel`）。
 - tokenの検証: queue serviceへの要求で通すのは、制御側がworker（resumeを含む）のrunに発行したrun token（[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)決定4のtoken）で、要求が名指すrunのものだけ。
   tokenが無い・発行していないか失効した・jobのtokenかrunを持たない・別のrunの・runが終わったかqueueに無い要求は`unauthenticated`で拒む。
-  tokenはqueue serviceと同じ記録（`queue_service::lookup`）で引き、runの状態はqueueを読む。
+  tokenはqueue serviceと同じ記録（`queue_service::lookup`）で引き、runの状態はqueue serviceのユースケース（`broker_run_status`）で読む。
+  serviceに届かず読めなければ、その要求は拒む（fail closed）。
   `CONNECT`はそれに加えて、そのrunのverificationのtoken（下の節）も通す。
   package managerはtokenをproxyのURLから送るので、`CONNECT`のrunとtokenはproxyの認証からも受ける（headerの形は`domain::queue_broker`のmodule doc）。
 - principal: 通した要求はbodyのtokenの欄を検証したrun tokenで埋めてserviceのunix socketへ送るので、serviceはそのrunのprincipalで認可して書く。
@@ -67,7 +68,8 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
 - 拒否を残すこと: 拒んだ要求はqueueのevent `queue_broker_denied`にrunと宛てを残す（欄は`domain::queue_broker::QUEUE_BROKER_DENIED`のdoc comment）。
   HTTPとして読めない要求も、読めたところまでのrunと宛てで残す（`infrastructure::queue_broker::read_request`）。
   何も送らずに閉じた接続は要求ではなく、残さない。
-  actorはbroker自身（制御側の一部）で、tokenの値と、要求の中身を引くserdeの文言はevent・log・errorにも答えにも書かない。
+  記録はqueue serviceのユースケース（`broker_record`）を通り、actorはuser（下の「起動と停止」）で、どのbrokerの記録かはpayloadのbrokerのpidとbuildが示す（`domain::queue_broker::stamped`）。
+  tokenの値と、要求の中身を引くserdeの文言はevent・log・errorにも答えにも書かない。
 - 拒否の記録の量: runとhostはclientが決める値なので、記録の件数とbrokerのmemoryは`domain::queue_broker::DenialLimiter`で窓ごとに絞る（上限と窓はその隣の定数）。
   run・宛て・code・reason・tokenのrunの同じ拒否は、窓ごとに上限の件数まで1件ずつ残し、超えた分はeventを書かずに数える。
   reasonとtokenのrunも同じものだけを束ねるので、同じrunと宛ての安い拒否（tokenの無い要求など）を繰り返しても、別のreasonや別のrunのtokenを使った拒否の記録は埋まらない。
@@ -125,6 +127,10 @@ queue serviceと同じ手順に乗せる（[Queue service](queue-service.md#起�
   `install`のdrainの後は`up`が新しいバイナリで起動する。
 - 起動するのは`up`かsupervisorを動かしているバイナリ自身で、actorのenvとクライアントモードのenvを外し、起動元から切り離す。
   本番では固定バイナリだけが`up`とsupervisorを動かすので、開発中のバイナリは本番のbrokerを起動しない（`status`・`doctor`などの読み取りはbrokerを起動しない）。
+- brokerのプロセスはqueueのDBを開かない。
+  自分の要求（runの状態・queueが結びついたrepository・拒否とtokenの片付けの記録）は、actorの環境もtokenも無く、serviceと同じOSのユーザーとしてhostのserviceのsocketへ送るので、serviceはuserとして答える（[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)決定1、入口は`infrastructure::queue_service::Client::broker`）。
+  転送するcontainerの要求は検証したrun tokenを付けたものだけで、自分の要求と混ぜない。
+  serviceに届かなければ、記録できない拒否と片付けはwarnのログに残すだけで、DBを開いて代わりに書かない。
 
 ## 見張りと知らせ
 

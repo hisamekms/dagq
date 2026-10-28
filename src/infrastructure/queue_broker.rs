@@ -43,24 +43,29 @@ use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use super::queue_service::{
-    AnswerPastLimit, Lock, lock_file_held, lookup, owner_gone, private_dir, queue_dir_of, runs_for,
-    sha256_hex, signal, socket_path, spawn_detached, unix_now, write_private,
+    AnswerPastLimit, Client, ClientFailure, Lock, lock_file_held, lookup, owner_gone, private_dir,
+    queue_dir_of, runs_for, sha256_hex, signal, socket_path, spawn_detached, unix_now,
+    write_private,
 };
-use super::sqlite::SqliteQueue;
+use crate::application::Generators;
 use crate::application::queue_broker::ClaudeForward;
 use crate::application::queue_broker::{
     BrokerAnswer, BrokerBackend, BrokerProbe, BrokerRequest, DenialRecords, QueueBroker,
-    QueueBrokerControl, TokenFor, TokenIssue, TokenSweep, VerificationTokens,
+    QueueBrokerControl, ServiceUnanswered, TokenFor, TokenIssue, TokenSweep, VerificationTokens,
 };
-use crate::application::{EventStore, Generators, RunNotFound, RunReads};
 use crate::domain::queue_broker::{
     AUTHORIZATION_HEADER, BEARER, BROKER_DIR, CLAUDE_PATH, ClaudeCredential,
     ClaudeCredentialProblem, Egress, HEALTH_PATH, LOCK_FILE, LOG_FILE, MAX_BODY_BYTES,
     MAX_CLAUDE_BODY_BYTES, PROXY_AUTHORIZATION_HEADER, QUEUE_PATH, RUN_HEADER, STATE_FILE,
     VERIFICATION_CREDENTIALS_DIR, VERIFICATION_TOKENS_DIR, git_remote_host,
 };
-use crate::domain::queue_service::{MAX_ANSWER_BYTES, Principal, ServiceRequest, ServiceState};
-use crate::domain::{ActorContext, ActorRole, EventKind, RunId, RunStatus};
+use crate::domain::queue_broker::{
+    BrokerBinding, BrokerRecordParams, BrokerRunStatus, BrokerRunStatusParams, stamped,
+};
+use crate::domain::queue_service::{
+    MAX_ANSWER_BYTES, Principal, ServiceRequest, ServiceState, UseCase,
+};
+use crate::domain::{EventKind, RunId, RunStatus};
 
 /// How long a look waits for the broker's health.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -69,6 +74,14 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the broker waits for the queue service's answer: as long as a
 /// client-mode `dagq` waits for it.
 const SERVICE_TIMEOUT: Duration = super::queue_service::CLIENT_TIMEOUT;
+/// How long the broker waits for the queue service's answer to a request
+/// of its own (a run's status, the binding, a record): one connection's
+/// thread, the sweep's or the counts' waits this long at most, never the
+/// loop that takes connections.
+const OWN_SERVICE_TIMEOUT: Duration = IO_TIMEOUT;
+/// How long a stopping broker waits for its last counts of refusals to be
+/// recorded.
+const FINAL_FLUSH_WAIT: Duration = Duration::from_secs(2);
 /// How long the broker waits to reach a tunnel's host.
 const TUNNEL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a tunnel stays open with no byte either way.
@@ -502,11 +515,17 @@ fn health_answer(status: u16, body: &[u8]) -> Result<Value> {
 // --- The broker -----------------------------------------------------------------
 
 /// What the broker runs its requests on, on this host: the queue service's
-/// tokens of the queue, the queue's runs, and the service's socket.
+/// tokens of the queue, and the service's socket, which it passes a run's
+/// requests on to and sends its own to as the user ([`Client::broker`]).
+/// It holds no queue's path and opens no queue: a service that does not
+/// answer is a run it cannot read (the request is refused) or a record it
+/// only logs.
 pub struct SystemBrokerBackend {
-    pub db: PathBuf,
     pub queue_dir: PathBuf,
-    pub generators: Generators,
+    /// The broker's process and build, which its records name
+    /// ([`stamped`]): their actor is the user's.
+    pub pid: u32,
+    pub build: String,
     /// The host-wide `host.toml`, under the queue's
     /// ([`super::claude_credential::load`]).
     pub host_wide: Option<PathBuf>,
@@ -516,19 +535,24 @@ pub struct SystemBrokerBackend {
 }
 
 impl SystemBrokerBackend {
-    /// The broker itself, as the records name it: a part of the control
-    /// side.
-    fn own_actor() -> ActorContext {
-        ActorContext::instance(
-            ActorRole::Supervisor,
-            format_args!("queue-broker:{}", std::process::id()),
-        )
+    /// `use_case` with `params` done by the queue service for the broker.
+    fn call<T: serde::de::DeserializeOwned>(&self, use_case: UseCase, params: Value) -> Result<T> {
+        let answer =
+            Client::broker(&self.queue_dir).call_within(use_case, params, OWN_SERVICE_TIMEOUT)?;
+        serde_json::from_value(answer)
+            .with_context(|| format!("the queue service's answer to {}", use_case.as_str()))
     }
 
-    fn queue(&self) -> Result<SqliteQueue> {
-        Ok(SqliteQueue::open(&self.db)?
-            .with_generators(self.generators.clone())
-            .with_actor(Self::own_actor()))
+    /// Record the queue event `kind` with `payload`, naming the broker.
+    fn record(&self, kind: EventKind, payload: Value) -> Result<()> {
+        self.call::<Value>(
+            UseCase::BrokerRecord,
+            serde_json::to_value(BrokerRecordParams {
+                kind,
+                payload: stamped(payload, self.pid, &self.build),
+            })?,
+        )
+        .map(drop)
     }
 }
 
@@ -538,11 +562,24 @@ impl BrokerBackend for SystemBrokerBackend {
     }
 
     fn run_status(&self, id: &RunId) -> Result<Option<RunStatus>> {
-        match RunReads::run(&self.queue()?, id) {
-            Ok(run) => Ok(Some(run.status())),
-            Err(error) if error.downcast_ref::<RunNotFound>().is_some() => Ok(None),
-            Err(error) => Err(error),
-        }
+        let read: BrokerRunStatus = self
+            .call(
+                UseCase::BrokerRunStatus,
+                serde_json::to_value(BrokerRunStatusParams {
+                    run: id.as_str().to_owned(),
+                })?,
+            )
+            .map_err(|error| {
+                let unanswered = error
+                    .downcast_ref::<ClientFailure>()
+                    .is_some_and(|failure| failure.code == "unreachable");
+                if unanswered {
+                    error.context(ServiceUnanswered)
+                } else {
+                    error
+                }
+            })?;
+        Ok(read.status)
     }
 
     /// The service's answer as it wrote it, whatever its length: the
@@ -566,8 +603,7 @@ impl BrokerBackend for SystemBrokerBackend {
     }
 
     fn record_denied(&self, payload: Value) -> Result<()> {
-        EventStore::record_queue_event(&self.queue()?, EventKind::QueueBrokerDenied, payload)
-            .map(drop)
+        self.record(EventKind::QueueBrokerDenied, payload)
     }
 
     /// Read again for each tunnel, so a landing that changes the
@@ -575,7 +611,8 @@ impl BrokerBackend for SystemBrokerBackend {
     /// main checkout of the repository the queue is bound to, and the hosts
     /// of its remotes. A queue bound to none reaches no registry.
     fn egress(&self) -> Result<Egress> {
-        let Some(common_dir) = self.queue()?.repository_binding()? else {
+        let bound: BrokerBinding = self.call(UseCase::BrokerBinding, json!({}))?;
+        let Some(common_dir) = bound.binding else {
             return Ok(Egress::default());
         };
         let checkout = super::adapters::main_checkout_of(Path::new(&common_dir))?;
@@ -1071,36 +1108,53 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
     write_private(&dir.join(STATE_FILE), &serde_json::to_vec(&record)?)?;
     info!(pid, %address, "the queue broker listens");
     let backend = Arc::new(SystemBrokerBackend {
-        db: options.db.clone(),
         queue_dir: queue_dir.clone(),
-        generators: options.generators.clone(),
+        pid,
+        build: options.build.clone(),
         host_wide: options.host_wide.clone(),
         keychain: super::claude_credential::Keychain::of_host(),
     });
-    // What a verification killed before its end left behind goes before
-    // the first request; a failure is recorded and the broker serves on.
-    let tokens = SystemVerificationTokens {
-        db: options.db.clone(),
-    };
-    let swept = crate::application::queue_broker::sweep_left_tokens(&tokens, &|run| {
-        backend.run_status(run)
-    });
-    crate::application::queue_broker::note_token_sweep(&swept, "broker", |payload| {
-        EventStore::record_queue_event(
-            &backend.queue()?,
-            EventKind::QueueBrokerTokensSwept,
-            payload,
-        )
-        .map(drop)
-    });
+    // The sweep and the counts of refusals wait on the queue service, which
+    // may take a connection and never answer: they run beside the loop, so
+    // the health, a stop and the looks at the queue and the owner never
+    // wait on them. What a verification killed before its end left behind
+    // goes as the broker starts; a failure is recorded and the broker
+    // serves on.
+    {
+        let backend = backend.clone();
+        let tokens = SystemVerificationTokens {
+            db: options.db.clone(),
+        };
+        thread::spawn(move || {
+            let swept = crate::application::queue_broker::sweep_left_tokens(&tokens, &|run| {
+                backend.run_status(run)
+            });
+            crate::application::queue_broker::note_token_sweep(&swept, "broker", |payload| {
+                backend.record(EventKind::QueueBrokerTokensSwept, payload)
+            });
+        });
+    }
     let denials = Arc::new(DenialRecords::new(options.generators.clock.clone()));
+    let flushing = Arc::new(AtomicBool::new(true));
+    let (flushed_tx, flushed) = std::sync::mpsc::channel();
+    {
+        let (backend, denials, flushing) = (backend.clone(), denials.clone(), flushing.clone());
+        let poll = options.poll;
+        thread::spawn(move || {
+            while flushing.load(Ordering::SeqCst) {
+                denials.flush(&*backend);
+                thread::sleep(poll);
+            }
+            denials.flush(&*backend);
+            let _ = flushed_tx.send(());
+        });
+    }
     let mut served = 0u64;
     let mut checked = Instant::now();
     let outcome = loop {
         if options.stop.load(Ordering::SeqCst) {
             break "stopped";
         }
-        denials.flush(&*backend);
         if checked.elapsed() >= QUEUE_CHECK {
             checked = Instant::now();
             if !options.db.is_file() {
@@ -1134,7 +1188,15 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
             }
         }
     };
-    denials.flush(&*backend);
+    // The last counts, waited on only for a while: a service that does
+    // not answer does not hold the stop.
+    flushing.store(false, Ordering::SeqCst);
+    if flushed.recv_timeout(FINAL_FLUSH_WAIT).is_err() {
+        warn!(
+            "the last counts of refusals not recorded were not recorded within {}s",
+            FINAL_FLUSH_WAIT.as_secs()
+        );
+    }
     if BrokerRecord::read(&queue_dir).is_some_and(|record| record.pid == pid) {
         let _ = fs::remove_file(dir.join(STATE_FILE));
     }

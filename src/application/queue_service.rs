@@ -96,6 +96,12 @@ pub trait ServiceQueue:
     fn show(&mut self, id: TaskId, full: bool, events: usize) -> Result<Value>;
     /// The status of run `id`; `None` for a run the queue does not know.
     fn run_status(&self, id: &RunId) -> Result<Option<RunStatus>>;
+    /// The Git common directory the queue is bound to, `None` for one
+    /// bound to none (`broker_binding`).
+    fn repository_binding(&self) -> Result<Option<String>>;
+    /// Record the queue broker's queue event `kind` with `payload`
+    /// (`broker_record`), written as the principal's actor.
+    fn record_broker_event(&self, kind: EventKind, payload: Value) -> Result<EventId>;
     /// The proposals as `dagq proposal list` prints them: the submitted
     /// and revising ones, or with `all` every one.
     fn proposals(&self, all: bool) -> Result<Value>;
@@ -586,7 +592,9 @@ fn connection(use_case: UseCase, params: &Value) -> Connection {
         | UseCase::AgentResults
         | UseCase::AgentResult
         | UseCase::AgentSets
-        | UseCase::AgentSet => Connection::Read,
+        | UseCase::AgentSet
+        | UseCase::BrokerRunStatus
+        | UseCase::BrokerBinding => Connection::Read,
         _ if matches!(QueueRead::parse(use_case, params), Ok(Some(_))) => Connection::Read,
         _ if matches!(QueueCommand::parse(use_case, params), Ok(Some(command)) if command.reads_only()) => {
             Connection::Read
@@ -1202,6 +1210,11 @@ struct AskParams {
     request_id: Option<i64>,
 }
 
+/// The params of a use case that takes none.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoParams {}
+
 /// `show`'s params: those of `dagq show`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1760,6 +1773,39 @@ fn run(
                     evidence: p.evidence.into_iter().map(EventId::new).collect(),
                 })?;
             Ok(serde_json::to_value(recorded)?)
+        }
+        UseCase::BrokerRunStatus => {
+            let p: crate::domain::queue_broker::BrokerRunStatusParams = params(use_case, raw)?;
+            let run = RunId::new(p.run).map_err(|error| BadParams(error.to_string()))?;
+            authorize_read(&store, actor, &Resource::Queue)?;
+            let status = store.0.run_status(&run)?;
+            Ok(serde_json::to_value(
+                crate::domain::queue_broker::BrokerRunStatus { status },
+            )?)
+        }
+        UseCase::BrokerBinding => {
+            let _: NoParams = params(use_case, raw)?;
+            authorize_read(&store, actor, &Resource::Queue)?;
+            let binding = store.0.repository_binding()?;
+            Ok(serde_json::to_value(
+                crate::domain::queue_broker::BrokerBinding { binding },
+            )?)
+        }
+        UseCase::BrokerRecord => {
+            // The policy first, so an AI actor's is refused and recorded
+            // whatever it names; then only the broker's two kinds.
+            gate.authorize(&store, Capability::QueueBrokerRecord, &Resource::Queue)?;
+            let p: crate::domain::queue_broker::BrokerRecordParams = params(use_case, raw)?;
+            if !crate::domain::queue_broker::broker_records(p.kind) {
+                return Err(BadParams(format!(
+                    "broker_record records queue_broker_denied and queue_broker_tokens_swept, \
+                     not {}",
+                    p.kind.as_str()
+                ))
+                .into());
+            }
+            let id = store.0.record_broker_event(p.kind, p.payload)?;
+            Ok(json!({"recorded": id.as_i64()}))
         }
         UseCase::FindingResolve | UseCase::FindingDismiss => {
             let p: FindingStatusParams = params(use_case, raw)?;
@@ -2420,6 +2466,14 @@ mod tests {
         fn run_status(&self, id: &RunId) -> Result<Option<RunStatus>> {
             Ok((id.as_str() == "r1").then_some(self.status))
         }
+        fn repository_binding(&self) -> Result<Option<String>> {
+            Ok(Some("/repo/.git".to_owned()))
+        }
+        fn record_broker_event(&self, kind: EventKind, payload: Value) -> Result<EventId> {
+            let mut log = self.log.lock().unwrap();
+            log.push(json!({"broker_event": kind.as_str(), "payload": payload}));
+            Ok(EventId::new(i64::try_from(log.len()).unwrap()))
+        }
         fn proposals(&self, all: bool) -> Result<Value> {
             Ok(json!({"proposals": [], "all": all}))
         }
@@ -2625,6 +2679,10 @@ mod tests {
                 "wrapper-planner" => Some(Principal::wrapper(
                     &StepTarget::of(crate::domain::session_step::TargetKind::Planner, 3),
                     None,
+                )),
+                "supervisor" => Some(Principal::supervisor(
+                    &crate::domain::LeaseToken::new("registration"),
+                    1,
                 )),
                 "broken" => return Err(anyhow!("unreadable")),
                 _ => None,
@@ -2965,6 +3023,91 @@ mod tests {
         let mut older = request(Some("worker"), UseCase::Show, json!({"id": 1}));
         older.api_version = MIN_API_VERSION;
         assert!(service.handle(&older).ok);
+    }
+
+    /// The broker's own requests, sent as the user with no token: the
+    /// run's status, the queue's binding, and the record of only its two
+    /// kinds, which the supervisor may record too and no AI actor may.
+    #[test]
+    fn the_broker_reads_and_records_as_the_user_and_no_ai_actor_records_for_it() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let user =
+            |use_case, params| service.handle_from(&request(None, use_case, params), Peer::Owner);
+        let status = user(UseCase::BrokerRunStatus, json!({"run": "r1"}));
+        assert_eq!(
+            status.result,
+            Some(json!({"status": "running"})),
+            "{status:?}"
+        );
+        let missing = user(UseCase::BrokerRunStatus, json!({"run": "r9"}));
+        assert_eq!(missing.result, Some(json!({"status": null})));
+        let binding = user(UseCase::BrokerBinding, json!({}));
+        assert_eq!(binding.result, Some(json!({"binding": "/repo/.git"})));
+        assert_eq!(
+            code(&user(UseCase::BrokerBinding, json!({"more": 1}))),
+            Some(ServiceErrorCode::BadRequest)
+        );
+        backend.log.lock().unwrap().clear();
+
+        let record =
+            |kind: &str| json!({"kind": kind, "payload": {"broker": {"pid": 42, "build": "b"}}});
+        for kind in ["queue_broker_denied", "queue_broker_tokens_swept"] {
+            let response = user(UseCase::BrokerRecord, record(kind));
+            assert!(response.ok, "{response:?}");
+            let recorded = backend.log.lock().unwrap().pop().unwrap();
+            assert_eq!(recorded["broker_event"], kind);
+            assert_eq!(recorded["payload"]["broker"]["pid"], 42);
+        }
+        // Another kind is no record of the broker's.
+        let other = user(UseCase::BrokerRecord, record("queue_broker_down"));
+        assert_eq!(code(&other), Some(ServiceErrorCode::BadRequest));
+        assert!(backend.log.lock().unwrap().is_empty());
+        // The supervisor records its sweeps the same way.
+        let supervisor = service.handle(&request(
+            Some("supervisor"),
+            UseCase::BrokerRecord,
+            record("queue_broker_tokens_swept"),
+        ));
+        assert!(supervisor.ok, "{supervisor:?}");
+        backend.log.lock().unwrap().clear();
+        // An AI actor's is refused as `authorization_denied`, recorded, and
+        // writes nothing of the broker's.
+        for token in [
+            "worker",
+            "review",
+            "recovery",
+            "observer",
+            "plan-review",
+            "planner",
+            "inbox",
+            "wrapper",
+        ] {
+            let response = service.handle(&request(
+                Some(token),
+                UseCase::BrokerRecord,
+                record("queue_broker_denied"),
+            ));
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{token}"
+            );
+            let log = std::mem::take(&mut *backend.log.lock().unwrap());
+            assert!(
+                log.iter().all(|entry| entry.get("broker_event").is_none()),
+                "{token}: {log:?}"
+            );
+            assert!(
+                log.iter()
+                    .any(|entry| entry.to_string().contains("queue_broker.record")),
+                "{token}: {log:?}"
+            );
+        }
     }
 
     #[test]

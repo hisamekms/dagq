@@ -68,6 +68,18 @@ fn denied(db: &Path) -> Vec<Value> {
         .collect()
 }
 
+/// The actor's role and id of each of the queue's events of `kind`.
+fn actors(db: &Path, kind: &str) -> Vec<(String, String)> {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .prepare("SELECT actor_role, actor_id FROM run_events WHERE kind = ?1 ORDER BY id")
+        .unwrap()
+        .query_map([kind], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
 /// The build the broker of the binary before an `install` names.
 const OLD_BUILD: &str = "0.0.1-old";
 
@@ -225,6 +237,7 @@ fn the_broker_passes_a_run_s_own_requests_to_the_service_and_refuses_the_rest() 
         assert_eq!(last["reason"], reason);
         assert_eq!(last["destination"], "queue_service");
         assert_eq!(last["run"], json!(named));
+        assert_eq!(last["broker"]["pid"], json!(started.pid.unwrap()));
         assert!(!records.iter().any(|event| event.to_string().contains(&own)));
     }
     // The destinations not built yet, and any other, with the run's token.
@@ -290,6 +303,15 @@ fn the_broker_passes_a_run_s_own_requests_to_the_service_and_refuses_the_rest() 
     .unwrap();
     assert_eq!(status, 200);
     assert_eq!(denied(&queue.db).len(), before);
+    // Every refusal is the user's record, as the broker sends it.
+    let recorded = actors(&queue.db, "queue_broker_denied");
+    assert!(!recorded.is_empty());
+    assert!(
+        recorded
+            .iter()
+            .all(|(role, id)| (role.as_str(), id.as_str()) == ("user", "user")),
+        "{recorded:?}"
+    );
 
     // A service that does not answer is the broker's `unreachable`, and the
     // broker opens no queue in its place.
@@ -301,6 +323,260 @@ fn the_broker_passes_a_run_s_own_requests_to_the_service_and_refuses_the_rest() 
         response(&body).error.unwrap().code,
         ServiceErrorCode::Unreachable
     );
+}
+
+/// The broker's backend is given no queue's path: it reads a run's status
+/// and the queue's binding and records its refusals through the service,
+/// as the user and naming itself; with the service stopped, a run's request
+/// is refused `unreachable` before anything is passed on, its refusal is
+/// not recorded, and the queue is not opened in the service's place.
+#[test]
+fn the_broker_reads_and_records_through_the_service_and_opens_no_queue() {
+    use dagq::application::queue_broker::{
+        BrokerBackend, BrokerRequest, DenialRecords, QueueBroker,
+    };
+    let _test = common::test();
+    let queue = queue();
+    start(&queue);
+    let backend = broker::SystemBrokerBackend {
+        queue_dir: queue.dir().to_path_buf(),
+        pid: 4242,
+        build: "it-build".to_owned(),
+        host_wide: None,
+        keychain: None,
+    };
+    let run = queue.run.id().clone();
+    let status = dagq::application::RunReads::run(&SqliteQueue::open(&queue.db).unwrap(), &run)
+        .unwrap()
+        .status();
+    assert_eq!(backend.run_status(&run).unwrap(), Some(status));
+    assert_eq!(
+        backend
+            .run_status(&RunId::new("ghost-run").unwrap())
+            .unwrap(),
+        None
+    );
+    // Bound to none, no registry; bound, its main checkout's.
+    assert!(backend.egress().unwrap().registries.is_empty());
+    let (_main, _target) = bound_to_a_registry(&queue);
+    assert_eq!(backend.egress().unwrap().registries.len(), 1);
+    backend
+        .record_denied(json!({"run": "r", "reason": "missing_token"}))
+        .unwrap();
+    let last = denied(&queue.db).pop().unwrap();
+    assert_eq!(
+        last,
+        json!({"run": "r", "reason": "missing_token", "broker": {"pid": 4242, "build": "it-build"}})
+    );
+    assert_eq!(
+        actors(&queue.db, "queue_broker_denied"),
+        [("user".to_owned(), "user".to_owned())]
+    );
+
+    // With the service stopped nothing is read or recorded, and a run's
+    // own request is refused before it is passed on.
+    ok(&queue.db, &["service", "stop"]);
+    assert!(backend.run_status(&run).is_err());
+    assert!(backend.egress().is_err());
+    assert!(backend.record_denied(json!({"run": "r"})).is_err());
+    let own = token(&queue, &Principal::worker(&run, queue.run.task_id()));
+    let denials = DenialRecords::new(dagq::infrastructure::clock::system().clock);
+    let answer = QueueBroker {
+        backend: &backend,
+        denials: &denials,
+        build: "it-build",
+        pid: 4242,
+    }
+    .handle(&BrokerRequest {
+        method: "POST".into(),
+        target: dagq::domain::queue_broker::QUEUE_PATH.into(),
+        host: Some("127.0.0.1".into()),
+        authorization: Some(format!("{BEARER}{own}")),
+        run: Some(run.as_str().into()),
+        body: serde_json::to_vec(&request(UseCase::Show, json!({"id": 1}))).unwrap(),
+        ..BrokerRequest::default()
+    });
+    assert_eq!(answer.status, 502);
+    assert_eq!(
+        response(&answer.body).error.unwrap().code,
+        ServiceErrorCode::Unreachable
+    );
+    assert_eq!(denied(&queue.db).len(), 1);
+}
+
+/// A queue service at the queue's socket that takes every connection and
+/// never answers, counting them; it closes them all when it goes.
+struct Silent {
+    taken: Arc<AtomicU32>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Silent {
+    fn at(queue_dir: &Path) -> Self {
+        let socket = service::socket_path(queue_dir);
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let taken = Arc::new(AtomicU32::new(0));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread = {
+            let (taken, stop) = (taken.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut held = Vec::new();
+                while !stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            held.push(stream);
+                            taken.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                }
+            })
+        };
+        Self {
+            taken,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// Wait until it took `count` connections.
+    fn wait_for(&self, count: u32, what: &str) {
+        let _waiting = common::within(TIMEOUT, what);
+        while self.taken.load(Ordering::SeqCst) < count {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for Silent {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _waiting = common::within(common::STEP_LIMIT, "the silent service's thread to end");
+            let _ = thread.join();
+        }
+    }
+}
+
+/// A clock whose monotonic time moves only when a test moves it.
+struct Stepped {
+    origin: std::time::Instant,
+    ahead: Mutex<Duration>,
+}
+
+impl dagq::application::Clock for Stepped {
+    fn system_time(&self) -> std::time::SystemTime {
+        std::time::SystemTime::now()
+    }
+    fn monotonic(&self) -> std::time::Instant {
+        self.origin + *self.ahead.lock().unwrap()
+    }
+}
+
+/// A service that takes the broker's own requests and never answers holds
+/// neither the broker's health nor its stop: the sweep as it starts, the
+/// refusals recorded on their connections and the counts of a window that
+/// ended all wait on it beside the loop that takes connections.
+#[test]
+fn a_service_that_never_answers_the_broker_holds_neither_its_health_nor_its_stop() {
+    let _test = common::test();
+    let queue = queue();
+    let silent = Silent::at(queue.dir());
+    // A token the sweep reads a run for.
+    broker::issue_verification(
+        queue.dir(),
+        &RunId::new("gone-run").unwrap(),
+        TokenFor::Landing,
+        1,
+    )
+    .unwrap();
+    let clock = Arc::new(Stepped {
+        origin: std::time::Instant::now(),
+        ahead: Mutex::new(Duration::ZERO),
+    });
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done_tx, done) = std::sync::mpsc::channel();
+    {
+        let options = broker::BrokerServeOptions {
+            db: queue.db.clone(),
+            generators: dagq::application::Generators {
+                clock: clock.clone(),
+                ids: dagq::infrastructure::clock::system().ids,
+            },
+            stop: stop.clone(),
+            poll: Duration::from_millis(20),
+            owner: None,
+            build: "silent-test".to_owned(),
+            claude_api: dagq::domain::queue_broker::CLAUDE_API_URL.to_owned(),
+            host_wide: None,
+        };
+        std::thread::spawn(move || {
+            let _ = done_tx.send(broker::serve(&options).map_err(|error| format!("{error:#}")));
+        });
+    }
+    let address = {
+        let _waiting = common::within(TIMEOUT, "the queue broker to listen");
+        loop {
+            if let Some(record) = broker::BrokerRecord::read(queue.dir()) {
+                break record.address;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    silent.wait_for(1, "the sweep to ask the service");
+    let quick = Duration::from_secs(2);
+    assert_eq!(
+        broker::health(&address, quick).unwrap()["build"],
+        "silent-test"
+    );
+
+    // The refusals of one key past the window's limit: the recorded ones
+    // wait on the service on their connections, and the one past it is
+    // counted and answered at once.
+    let limit = dagq::domain::queue_broker::DENIALS_PER_WINDOW;
+    let show = request(UseCase::Show, json!({"id": 1}));
+    let refusals: Vec<_> = (0..=limit)
+        .map(|_| {
+            let (address, show) = (address.clone(), show.clone());
+            std::thread::spawn(move || {
+                broker::call(
+                    &address,
+                    None,
+                    Some("some-run"),
+                    &show,
+                    Duration::from_secs(1),
+                )
+                .ok()
+                .map(|(status, _)| status)
+            })
+        })
+        .collect();
+    let answered: Vec<_> = {
+        let _waiting = common::within(common::STEP_LIMIT, "the refused requests to return");
+        refusals
+            .into_iter()
+            .filter_map(|refusal| refusal.join().unwrap())
+            .collect()
+    };
+    assert_eq!(answered, [401]);
+    silent.wait_for(1 + limit, "the refusals to be sent to the service");
+    // The window ends: its count waits on the service too.
+    *clock.ahead.lock().unwrap() = dagq::domain::queue_broker::DENIAL_WINDOW * 2;
+    silent.wait_for(2 + limit, "the count to be sent to the service");
+    assert_eq!(
+        broker::health(&address, quick).unwrap()["build"],
+        "silent-test"
+    );
+    stop.store(true, Ordering::SeqCst);
+    let stopped = done
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the broker to stop while the service holds its requests")
+        .unwrap();
+    assert_eq!(stopped["outcome"], "stopped");
+    drop(silent);
 }
 
 /// A queue with no broker looks stopped, and so does one whose record and
@@ -719,6 +995,18 @@ fn echoes(mut tunnel: std::net::TcpStream) {
 fn a_tunnel_opens_only_to_the_registries_of_the_main_checkout_s_dagq_toml() {
     let _test = common::test();
     let queue = queue();
+    // The run is landing, so its landing's and its recheck's tokens are
+    // both of a verification that runs now: the broker's sweep, whenever it
+    // runs, keeps them.
+    rusqlite::Connection::open(&queue.db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='integrating' WHERE id=?1",
+            [queue.run.id().as_str()],
+        )
+        .unwrap();
+    // The broker reads the queue's binding through the service.
+    start(&queue);
     let control =
         SystemQueueBroker::new(&queue.db, &common::service::owned_executable(queue.dir()));
     let _stop = Stop(control.clone());
@@ -958,6 +1246,11 @@ fn recover_revokes_the_token_of_the_verification_its_run_was_killed_in() {
     };
     let (landing, landing_token) = issue(TokenFor::Landing);
     let (recheck, recheck_token) = issue(TokenFor::Recheck);
+    // A snapshot's token, of no verification of a landing run: the broker's
+    // sweep as it starts revokes it, and its record says the sweep is done
+    // before the recovery changes the run.
+    let (snapshot, _) = issue(TokenFor::Snapshot);
+    start(&queue);
     let control =
         SystemQueueBroker::new(&queue.db, &common::service::owned_executable(queue.dir()));
     let _stop = Stop(control.clone());
@@ -965,6 +1258,14 @@ fn recover_revokes_the_token_of_the_verification_its_run_was_killed_in() {
         let _waiting = common::within(TIMEOUT * 2, "the queue broker to start");
         control.start(TIMEOUT).unwrap().address.unwrap()
     };
+    {
+        let _waiting = common::within(TIMEOUT, "the broker's sweep to be recorded");
+        while swept(&queue.db).is_empty() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    assert!(!snapshot.exists());
+    assert!(landing.exists() && recheck.exists());
     let (_main, target) = bound_to_a_registry(&queue);
     // Before the recovery the landing's token still opens its tunnel.
     let (status, tunnel) = connect(&address, &target, &basic(run.as_str(), &landing_token));
@@ -989,13 +1290,17 @@ fn recover_revokes_the_token_of_the_verification_its_run_was_killed_in() {
     assert_eq!(status, 200);
     echoes(tunnel.unwrap());
     let records = swept(&queue.db);
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records[0]["by"], "broker");
     assert_eq!(
-        records,
-        [
-            json!({"by": "recover", "revoked": [{"run": run.as_str(), "for": "landing"}], "orphans": 0, "failures": []})
-        ]
+        records[0]["revoked"],
+        json!([{"run": run.as_str(), "for": "snapshot"}])
     );
-    assert!(!records[0].to_string().contains(&landing_token));
+    assert_eq!(
+        records[1],
+        json!({"by": "recover", "revoked": [{"run": run.as_str(), "for": "landing"}], "orphans": 0, "failures": []})
+    );
+    assert!(!records[1].to_string().contains(&landing_token));
 }
 
 /// What a verification killed in its middle left in the broker's
@@ -1025,6 +1330,8 @@ fn the_broker_revokes_as_it_starts_the_tokens_no_verification_runs_with() {
     let (snapshot, snapshot_token) = issue(&run, TokenFor::Snapshot);
     let gone_run = RunId::new("gone-run").unwrap();
     let (gone, gone_token) = issue(&gone_run, TokenFor::Landing);
+    // The broker reads the runs and records its sweep through the service.
+    start(&queue);
 
     let control =
         SystemQueueBroker::new(&queue.db, &common::service::owned_executable(queue.dir()));
@@ -1033,6 +1340,14 @@ fn the_broker_revokes_as_it_starts_the_tokens_no_verification_runs_with() {
         let _waiting = common::within(TIMEOUT * 2, "the queue broker to start");
         control.start(TIMEOUT).unwrap().address.unwrap()
     };
+    // The sweep runs beside the loop that takes connections: its record
+    // says it is done.
+    {
+        let _waiting = common::within(TIMEOUT, "the broker's sweep to be recorded");
+        while swept(&queue.db).is_empty() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
     assert!(landing.exists());
     assert_eq!(
         broker::verification_run(queue.dir(), &kept).unwrap(),
@@ -1046,6 +1361,16 @@ fn the_broker_revokes_as_it_starts_the_tokens_no_verification_runs_with() {
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(records[0]["by"], "broker");
     assert_eq!(records[0]["failures"], json!([]));
+    // Recorded as the user, naming the broker that swept.
+    assert_eq!(
+        records[0]["broker"]["pid"],
+        json!(control.probe().pid.unwrap())
+    );
+    assert_eq!(records[0]["broker"]["build"], dagq::VERSION);
+    assert_eq!(
+        actors(&queue.db, "queue_broker_tokens_swept"),
+        [("user".to_owned(), "user".to_owned())]
+    );
     let mut revoked = records[0]["revoked"].as_array().unwrap().clone();
     revoked.sort_by_key(|one| one["run"].as_str().unwrap().to_owned());
     assert_eq!(

@@ -297,6 +297,9 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::Mark => {
             "narrow the read with the options of its command (dagq <command> --help)"
         }
+        UseCase::BrokerRunStatus | UseCase::BrokerBinding | UseCase::BrokerRecord => {
+            "its answer is of one run or one record, and nothing narrows it"
+        }
     }
 }
 
@@ -555,6 +558,18 @@ string_enum!(UseCase {
     // for a run's facts-only turn as it chose the head. No command line
     // goes to it alone.
     ReadyInheritImages => "ready_inherit_images",
+    // The queue broker's own requests (docs/design/queue-broker.md): the
+    // status of the run a token names, the repository the queue is bound
+    // to, whose `dagq.toml` names the registries a tunnel may reach, and
+    // the record of a refusal or of a sweep of the verifications' tokens.
+    // The broker sends them on the host's socket with no token and no
+    // actor's environment, as the user (ADR-t3102-1 decision 1), and opens
+    // no queue; the record is only `queue_broker_denied` and
+    // `queue_broker_tokens_swept`, and only the user's and a supervisor's
+    // (`queue_broker.record`). No command line goes to them.
+    BrokerRunStatus => "broker_run_status",
+    BrokerBinding => "broker_binding",
+    BrokerRecord => "broker_record",
 });
 
 impl UseCase {

@@ -720,7 +720,10 @@ impl QueueRead {
             | UseCase::PlannerRequest
             | UseCase::Report
             | UseCase::ReportInputs
-            | UseCase::GraphExport => return Ok(None),
+            | UseCase::GraphExport
+            | UseCase::BrokerRunStatus
+            | UseCase::BrokerBinding
+            | UseCase::BrokerRecord => return Ok(None),
         };
         read.check()?;
         Ok(Some(read))

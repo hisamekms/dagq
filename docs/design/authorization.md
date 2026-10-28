@@ -91,6 +91,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 | | `landing.land` / `landing.push` | Integratorの内側 |
 | 計測 | `telemetry.report` | CLIには無い（queue serviceの`telemetry_report`） |
 | 発行 | `token.issue` | CLIには無い（queue serviceの`issue_token`） |
+| brokerの記録 | `queue_broker.record` | CLIには無い（queue serviceの`broker_record`） |
 | 予約 | `reserved.filesystem_read` `reserved.filesystem_write` `reserved.network` `reserved.secret_read` | 後の段（sandbox）。この段では誰にも与えない |
 
 CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`requests`で、matchに既定の枝を置かないので、コマンドを足すと写しを書くまでcompileが通らない。
@@ -113,7 +114,7 @@ roleの名前だけでactorを名指さないplannerのidは、どのproposalの
 | role | 許すcapability | resourceの規則 |
 | --- | --- | --- |
 | user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report`を除く全て | なし |
-| inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`は持たない | なし。人自身の操作との区別は記録が持つ |
+| inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`と`queue_broker.record`は持たない | なし。人自身の操作との区別は記録が持つ |
 | planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくもの（`ask --request ID`）はその依頼の閉じていないruntimeのplannerのactor idが自分のときだけ（`request.decline`と同じ規則。plannerが分からなければ拒む）。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）で、`revising`のproposalのtaskは持ち主だけ（不明なら拒む）。`revisit`（draftの再検討の時刻、`task.write`）はdraftだけで（storeがどのroleにも求める）、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。`follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
 | worker | 読み取り・`ask.open`・`note.write`・`replan.propose`・`eval.request`・`eval.read` | evalと`replan.propose`は自分のrunの分だけ。読み取り以外は自分のrun（`DAGQ_RUN_ID`）・そのtask（`DAGQ_TASK_ID`）・自分のrunのaskだけ。開けるaskは`worker_question`だけで、`--run`なら自分のrun、`--task`だけなら自分のtask（`DAGQ_RUN_ID`の無いworkerは何も持たない） |
 | review-job | 読み取り・`review.submit` | `review.submit`は自分のrunだけ |
@@ -121,14 +122,12 @@ roleの名前だけでactorを名指さないplannerのidは、どのproposalの
 | plan-review-job・goal-review-job・throughput-review-job | 読み取りだけ | throughput-review-jobは[スループットの見直し](supervisor-lifecycle/throughput-review.md)（ADR-t996-1） |
 | setup-review-job | 読み取りだけ | なし（[setup-review](supervisor-lifecycle/setup-review.md)） |
 | observer | 読み取り・`queue.watch`・`ci.read`・`finding.record`・`finding.resolve`・`finding.ask`・`eval.read` | `finding.resolve`と`finding.ask`はfindingだけ |
-| supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`eval.read`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request`・`replan.park`・`replan.apply`・`token.issue` | なし。`queue.admin`は自動更新が新しいバイナリで`install`と同じ確認（`migrate --check`・`migrate`・使い捨てのqueueの`init`）をするため。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
+| supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`eval.read`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request`・`replan.park`・`replan.apply`・`token.issue`・`queue_broker.record` | なし。`queue.admin`は自動更新が新しいバイナリで`install`と同じ確認（`migrate --check`・`migrate`・使い捨てのqueueの`init`）をするため。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
 | wrapper | 読み取り・`session.run`・`session.record` | 自分のrunかplanner（tokenのprincipalのactor id）だけ（ADR-t3102-1決定4） |
 | integrator | 読み取り・`landing.land`・`landing.push` | なし |
 | executor-telemetry | `telemetry.report`だけ | tokenの対象に制御側が登録したsessionだけ |
 
 旧値の`DAGQ_ROLE=reviewer`はreview-jobとして読む（[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）。
-jobの環境には`DAGQ_RUN_ID`が無いので、`review.submit`・`triage.submit`は持ち主が分からず拒まれる。
-verdictはデータとしてsupervisorが読む。
 
 人の出どころの優先度はuserとinboxだけが変える。
 例外は`out_of_scope`の判断を記録するAIのactorの移動で、goalから継いだだけの値は移動先を継ぎ、taskに直接付いた値は残る（[ADR-t2373-1](../adr/2026-10-12-t2373-1-out-of-scope-follow-up-move-takes-the-destination-goals-priority.md)）。
