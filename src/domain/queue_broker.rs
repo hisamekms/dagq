@@ -117,6 +117,161 @@ pub const CLAUDE_API_URL: &str = "https://api.anthropic.com";
 /// The longest body of a Claude API request the broker reads: the API's own
 /// limit of a request.
 pub const MAX_CLAUDE_BODY_BYTES: usize = 32 * 1024 * 1024;
+/// What the broker holds for its clients: host values a person may set
+/// in `host.toml` (`infrastructure::queue_broker_limits`), each a positive
+/// whole number. Every run and the queue service's traffic share the one
+/// broker, so these bound what any client, a container's untrusted code
+/// among them, can make it hold, and what one run's connections can take
+/// from the others'.
+///
+/// A connection waits for its request's head among the broker's waiting
+/// connections with no thread of its own, for up to [`HEAD_TIMEOUT`]; the
+/// broker's loop reads a head that came (and answers the health), one of
+/// a few workers ([`HEAD_WORKERS`]) checks its token, never waiting on
+/// the client; only a request whose token passed is then served on its
+/// own thread, as one of its run's connections and of the broker's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrokerLimits {
+    /// The most bytes of a request the broker takes before it has checked
+    /// its run token: its head (request line and headers) must end within
+    /// them (at most 1 MiB), and no byte of its body is read before the
+    /// token passes (a refused request's body is thrown away as it comes,
+    /// never held).
+    /// Default 64 KiB: the heads of the Claude API's, a package manager's
+    /// and the queue service's requests are a few KiB, and a connection
+    /// without a valid token holds no more than this.
+    pub unchecked_bytes: usize,
+    /// The most connections the broker holds with no thread at once in
+    /// each of the ways it holds them ([`HeldKind`]): waiting for their
+    /// head, their head read and waiting for a worker, and throwing away a
+    /// body answered unread (a refused request's, or the health's). Past it, the oldest of that way is closed
+    /// ([`past_most`]), so connections that send nothing cannot close one
+    /// whose head came, nor refused ones those still waiting. Default 512:
+    /// a held connection holds a socket and at most its head, and the
+    /// broker's clients send their head as they connect, so it is far past
+    /// what they need at once (the broker also takes no more than an eighth
+    /// of its open files for each way).
+    pub max_waiting: usize,
+    /// The most connections one run is served on at once, counted by the
+    /// run its token passed for; one more of that run is closed unanswered
+    /// and the other runs' are served as before. Default 64: a run's Claude
+    /// API streams, its package manager's parallel downloads and its queue
+    /// service requests stay well within it.
+    pub max_connections_per_run: usize,
+    /// The most connections the broker serves on threads at once, of all
+    /// runs together, more than [`Self::max_connections_per_run`] so that
+    /// one run alone never fills it; one more is closed unanswered.
+    /// Default 256: a few runs at their most
+    /// at once fit, one run alone takes no more than a quarter of it, and
+    /// the threads of all stay a small part of a host's.
+    pub max_connections: usize,
+}
+
+impl Default for BrokerLimits {
+    fn default() -> Self {
+        Self {
+            unchecked_bytes: 64 * 1024,
+            max_waiting: 512,
+            max_connections_per_run: 64,
+            max_connections: 256,
+        }
+    }
+}
+
+/// One of the ways the broker holds a connection with no thread, each
+/// bounded by [`BrokerLimits::max_waiting`] apart from the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldKind {
+    /// Waiting for its request's head.
+    Waiting,
+    /// Its head read, waiting for a head worker.
+    Ready,
+    /// Answered without its body read, throwing the body away.
+    Discard,
+}
+
+/// Which of the held connections (`held`, oldest first, by the way each is
+/// held) to close so that no way holds more than `most`: the oldest of each
+/// way past it, oldest first. Closing is decided after every connection was
+/// looked at, so a new one whose head came is held as [`HeldKind::Ready`]
+/// by then and never closed for the connections that only wait.
+pub fn past_most(held: &[HeldKind], most: usize) -> Vec<usize> {
+    let count = |kind: HeldKind| held.iter().filter(|one| **one == kind).count();
+    let mut over = [HeldKind::Waiting, HeldKind::Ready, HeldKind::Discard]
+        .map(|kind| (kind, count(kind).saturating_sub(most)));
+    held.iter()
+        .enumerate()
+        .filter_map(|(at, kind)| {
+            let (_, left) = over.iter_mut().find(|(of, _)| of == kind)?;
+            (*left > 0).then(|| {
+                *left -= 1;
+                at
+            })
+        })
+        .collect()
+}
+
+/// How long a connection may wait for its request's head to end: 10 s.
+/// The broker's clients send it as they connect; one that has not by then
+/// is closed (or, having sent part of it, refused as it was read).
+pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// How many workers check the tokens of the heads the broker's loop read:
+/// a worker never waits on a client, only on the queue service (the run's
+/// status, a refusal's record), so each takes a moment while the service
+/// answers, and a head waits among the held connections while every
+/// worker is busy.
+pub const HEAD_WORKERS: usize = 16;
+
+/// Where the head in `peeked` ends: just past its first blank line, a
+/// line of nothing but `\r` before its `\n`, as the broker's reading of a
+/// head's lines takes one (`\r\n\r\n`, `\n\n`, `\n\r\n`).
+pub fn head_end(peeked: &[u8]) -> Option<usize> {
+    let mut start = 0;
+    for (at, byte) in peeked.iter().enumerate() {
+        if *byte == b'\n' {
+            if peeked[start..at].iter().all(|byte| *byte == b'\r') && start > 0 {
+                return Some(at + 1);
+            }
+            start = at + 1;
+        }
+    }
+    None
+}
+
+/// What to do next with a connection waiting for its head, given how long
+/// it has `waited`, what is in its socket (`peeked`, at most
+/// [`BrokerLimits::unchecked_bytes`] of it looked at) and whether the
+/// client `closed` its side with nothing sent (a socket's peek cannot tell
+/// a close after part of a head, which waits for [`HEAD_TIMEOUT`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadStep {
+    /// Go on waiting.
+    Wait,
+    /// The head has come, or as much as the broker takes of one: read it.
+    Read,
+    /// Nothing came: close it, recording nothing (no request was made).
+    Close,
+}
+
+/// [`HeadStep`] of a waiting connection: read once its head ends (a blank
+/// line) or `unchecked` bytes came without one, or once it waited
+/// [`HEAD_TIMEOUT`] with part of a head sent (read as it is, the refusal
+/// of a request that does not read); close one that sent nothing by then
+/// or closed.
+pub fn head_step(waited: Duration, peeked: &[u8], closed: bool, unchecked: usize) -> HeadStep {
+    if head_end(peeked).is_some() || peeked.len() >= unchecked {
+        return HeadStep::Read;
+    }
+    if !closed && waited < HEAD_TIMEOUT {
+        return HeadStep::Wait;
+    }
+    if peeked.is_empty() {
+        HeadStep::Close
+    } else {
+        HeadStep::Read
+    }
+}
+
 /// The header (case-insensitive) an API key goes in.
 pub const API_KEY_HEADER: &str = "x-api-key";
 /// The directory under [`BROKER_DIR`] that holds each verification token's
@@ -1725,5 +1880,61 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_waiting_connection_is_read_once_its_head_ends_and_closed_when_it_sent_nothing() {
+        let soon = Duration::from_millis(5);
+        let head = b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n";
+        for (waited, peeked, closed, step) in [
+            (soon, &head[..], false, HeadStep::Read),
+            (soon, &b"GET / HTTP/1.1\n\n"[..], false, HeadStep::Read),
+            (soon, &head[..20], false, HeadStep::Wait),
+            (soon, &b""[..], false, HeadStep::Wait),
+            (soon, &b"x".repeat(64)[..], false, HeadStep::Read),
+            (soon, &b""[..], true, HeadStep::Close),
+            (HEAD_TIMEOUT, &b""[..], true, HeadStep::Close),
+            (HEAD_TIMEOUT, &head[..20], false, HeadStep::Read),
+            (HEAD_TIMEOUT, &b""[..], false, HeadStep::Close),
+        ] {
+            assert_eq!(
+                head_step(waited, peeked, closed, 64),
+                step,
+                "{waited:?} {:?} {closed}",
+                String::from_utf8_lossy(peeked)
+            );
+        }
+    }
+
+    #[test]
+    fn a_head_ends_just_past_its_first_blank_line() {
+        assert_eq!(head_end(b"GET / HTTP/1.1\r\nA: b\r\n\r\nbody"), Some(24));
+        assert_eq!(head_end(b"GET / HTTP/1.1\n\nx\r\n\r\n"), Some(16));
+        assert_eq!(head_end(b"GET / HTTP/1.1\r\nA: b\r\n"), None);
+        assert_eq!(head_end(b"GET / HTTP/1.1\nA: b\n\r\nbody"), Some(22));
+        assert_eq!(head_end(b"\r\nGET / HTTP/1.1\r\n\r\n"), Some(20));
+        assert_eq!(head_end(b""), None);
+    }
+
+    #[test]
+    fn each_way_of_holding_closes_its_own_oldest_past_its_most() {
+        use HeldKind::{Discard, Ready, Waiting};
+        for (held, most, closed) in [
+            // A head that came is not closed for an idle one that came
+            // after it, nor a waiting one for refused ones handed back.
+            (&[Ready, Waiting][..], 1, vec![]),
+            (&[Waiting, Discard][..], 1, vec![]),
+            (&[Waiting, Waiting][..], 1, vec![0]),
+            (
+                &[Waiting, Ready, Waiting, Discard, Discard][..],
+                1,
+                vec![0, 3],
+            ),
+            (&[Ready, Ready, Ready, Waiting][..], 1, vec![0, 1]),
+            (&[Discard, Waiting, Discard, Discard][..], 2, vec![0]),
+            (&[][..], 1, vec![]),
+        ] {
+            assert_eq!(past_most(held, most), closed, "{held:?} {most}");
+        }
     }
 }

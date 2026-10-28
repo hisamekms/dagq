@@ -33,7 +33,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -50,14 +50,15 @@ use super::queue_service::{
 use crate::application::Generators;
 use crate::application::queue_broker::ClaudeForward;
 use crate::application::queue_broker::{
-    BrokerAnswer, BrokerBackend, BrokerProbe, BrokerRequest, DenialRecords, QueueBroker,
+    Admission, BrokerAnswer, BrokerBackend, BrokerProbe, BrokerRequest, DenialRecords, QueueBroker,
     QueueBrokerControl, ServiceUnanswered, TokenFor, TokenIssue, TokenSweep, VerificationTokens,
 };
 use crate::domain::queue_broker::{
-    AUTHORIZATION_HEADER, BEARER, BROKER_DIR, CLAUDE_PATH, ClaudeCredential,
-    ClaudeCredentialProblem, Egress, HEALTH_PATH, LOCK_FILE, LOG_FILE, MAX_BODY_BYTES,
-    MAX_CLAUDE_BODY_BYTES, PROXY_AUTHORIZATION_HEADER, QUEUE_PATH, RUN_HEADER, STATE_FILE,
-    VERIFICATION_CREDENTIALS_DIR, VERIFICATION_TOKENS_DIR, git_remote_host,
+    AUTHORIZATION_HEADER, BEARER, BROKER_DIR, BrokerLimits, CLAUDE_PATH, ClaudeCredential,
+    ClaudeCredentialProblem, Destination, Egress, HEAD_TIMEOUT, HEAD_WORKERS, HEALTH_PATH,
+    HeadStep, HeldKind, LOCK_FILE, LOG_FILE, MAX_BODY_BYTES, MAX_CLAUDE_BODY_BYTES,
+    PROXY_AUTHORIZATION_HEADER, QUEUE_PATH, RUN_HEADER, STATE_FILE, VERIFICATION_CREDENTIALS_DIR,
+    VERIFICATION_TOKENS_DIR, git_remote_host, head_end, head_step, past_most,
 };
 use crate::domain::queue_broker::{
     BrokerBinding, BrokerRecordParams, BrokerRunStatus, BrokerRunStatusParams, stamped,
@@ -79,9 +80,6 @@ const SERVICE_TIMEOUT: Duration = super::queue_service::CLIENT_TIMEOUT;
 /// thread, the sweep's or the counts' waits this long at most, never the
 /// loop that takes connections.
 const OWN_SERVICE_TIMEOUT: Duration = IO_TIMEOUT;
-/// How long a stopping broker waits for its last counts of refusals to be
-/// recorded.
-const FINAL_FLUSH_WAIT: Duration = Duration::from_secs(2);
 /// How long the broker waits to reach a tunnel's host.
 const TUNNEL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a tunnel stays open with no byte either way.
@@ -147,6 +145,16 @@ fn lock_held(queue_dir: &Path) -> bool {
 pub fn read_request(
     reader: &mut impl BufRead,
 ) -> Result<BrokerRequest, (Box<BrokerRequest>, anyhow::Error)> {
+    let (mut request, length) = read_head(reader)?;
+    read_body(reader, &mut request, length)?;
+    Ok(request)
+}
+
+/// The head of [`read_request`]: the request line and headers, and the
+/// length of the body that follows them, unread.
+pub fn read_head(
+    reader: &mut impl BufRead,
+) -> Result<(BrokerRequest, usize), (Box<BrokerRequest>, anyhow::Error)> {
     let mut request = BrokerRequest::default();
     // A header the broker refuses does not stop the read: the run and the
     // host that follow it are still read, for the refusal's record.
@@ -190,15 +198,7 @@ pub fn read_request(
             if let Some(problem) = problem {
                 fail!(problem);
             }
-            let mut body = Vec::new();
-            if let Err(error) = reader.take(length as u64).read_to_end(&mut body) {
-                fail!(error.into());
-            }
-            if body.len() != length {
-                fail!(anyhow::anyhow!("the body ends before its length"));
-            }
-            request.body = body;
-            return Ok(request);
+            return Ok((request, length));
         }
         let Some((name, value)) = line.split_once(':') else {
             problem.get_or_insert_with(|| anyhow::anyhow!("a header does not read"));
@@ -238,6 +238,28 @@ pub fn read_request(
     fail!(anyhow::anyhow!(
         "the request has more than {MAX_HEADERS} headers"
     ))
+}
+
+/// The body of `length` bytes that follows `request`'s head, into it.
+pub fn read_body(
+    reader: &mut impl BufRead,
+    request: &mut BrokerRequest,
+    length: usize,
+) -> Result<(), (Box<BrokerRequest>, anyhow::Error)> {
+    let mut body = Vec::new();
+    let read = reader
+        .take(length as u64)
+        .read_to_end(&mut body)
+        .map_err(anyhow::Error::from)
+        .and_then(|_| {
+            ensure!(body.len() == length, "the body ends before its length");
+            Ok(())
+        });
+    if let Err(error) = read {
+        return Err((Box::new(std::mem::take(request)), error));
+    }
+    request.body = body;
+    Ok(())
 }
 
 fn read_line(reader: &mut impl BufRead) -> Result<String> {
@@ -1072,13 +1094,275 @@ pub struct BrokerServeOptions {
     pub host_wide: Option<PathBuf>,
 }
 
+/// The connections the broker serves on threads at once: up to a most
+/// for each run, counted by the run its token passed for, and up to a most
+/// for the whole broker; none is taken past either.
+#[derive(Debug, Clone)]
+pub struct RunSlots {
+    open: Arc<std::sync::Mutex<OpenSlots>>,
+    most_per_run: usize,
+    most: usize,
+}
+
+#[derive(Debug, Default)]
+struct OpenSlots {
+    /// Each run with a connection open, and whether one more of it was
+    /// refused since it last took one; a run with none open is not kept.
+    runs: std::collections::HashMap<String, (usize, bool)>,
+    total: usize,
+    /// Whether one was refused for the broker's most since one was last
+    /// taken.
+    refused: bool,
+}
+
+/// Why [`RunSlots::take`] gave no slot, and whether it is the first such
+/// refusal since one was last taken (the one to warn of).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotRefusal {
+    /// The run holds its most.
+    Run { first: bool },
+    /// The broker holds its most, of all runs together.
+    Broker { first: bool },
+}
+
+/// One connection's hold on [`RunSlots`], given back when it goes.
+#[derive(Debug)]
+pub struct RunSlot {
+    slots: RunSlots,
+    run: String,
+}
+
+impl RunSlots {
+    pub fn new(most_per_run: usize, most: usize) -> Self {
+        Self {
+            open: Arc::default(),
+            most_per_run,
+            most,
+        }
+    }
+
+    /// A slot for one more connection of `run`, or why not.
+    pub fn take(&self, run: &str) -> Result<RunSlot, SlotRefusal> {
+        let mut open = self.open.lock().unwrap_or_else(|error| error.into_inner());
+        let open = &mut *open;
+        if let Some((count, refused)) = open.runs.get_mut(run)
+            && *count >= self.most_per_run
+        {
+            return Err(SlotRefusal::Run {
+                first: !std::mem::replace(refused, true),
+            });
+        }
+        if open.total >= self.most {
+            return Err(SlotRefusal::Broker {
+                first: !std::mem::replace(&mut open.refused, true),
+            });
+        }
+        let (count, refused) = open.runs.entry(run.to_owned()).or_default();
+        *count += 1;
+        *refused = false;
+        open.total += 1;
+        open.refused = false;
+        Ok(RunSlot {
+            slots: self.clone(),
+            run: run.to_owned(),
+        })
+    }
+}
+
+impl Drop for RunSlot {
+    fn drop(&mut self) {
+        let mut open = self
+            .slots
+            .open
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        open.total = open.total.saturating_sub(1);
+        if let Some((count, _)) = open.runs.get_mut(&self.run) {
+            *count -= 1;
+            // The run's last slot given back, the run is forgotten: a run
+            // that ended has no next connection to clear it.
+            if *count == 0 {
+                open.runs.remove(&self.run);
+            }
+        }
+    }
+}
+
+/// How long a stopping broker waits in all for its head workers, for the
+/// connections it serves on threads once it has shut their sockets, and
+/// for its last counts of refusals: what they record is written before it
+/// lets its lock go, and a stop is not held past this by one that waits
+/// on the queue service or the Claude API.
+const STOP_WAIT: Duration = Duration::from_secs(3);
+/// The part of [`STOP_WAIT`] kept for the last counts of refusals: a
+/// connection's thread that does not end (a Claude API stream or a tunnel
+/// with nothing to send) does not leave them no time.
+const FINAL_FLUSH_WAIT: Duration = Duration::from_secs(1);
+
+/// A connection's thread among [`Served::threads`], taken out when the
+/// thread ends however it ends.
+struct Running {
+    shared: Arc<Served>,
+    id: u64,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.shared
+            .threads
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.id);
+    }
+}
+
+/// Shut the sockets of the connections the broker serves on threads, and
+/// wait up to `deadline` for their threads to end.
+fn end_connections(shared: &Served, deadline: Instant) {
+    for stream in shared
+        .threads
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .values()
+    {
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+    while Instant::now() < deadline
+        && !shared
+            .threads
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// How often the broker looks at the connections it holds while it holds
+/// any.
+const HELD_POLL: Duration = Duration::from_millis(5);
+/// How long the broker goes on throwing away the body of a request it
+/// answered without reading it.
+const DISCARD_TIMEOUT: Duration = Duration::from_secs(2);
+/// The most of a body the broker throws away from one connection at each
+/// look.
+const DISCARD_STEP: usize = 256 * 1024;
+/// The most connections the broker accepts at each look: one that keeps
+/// connecting does not hold the loop from the connections it holds and
+/// from its stop.
+const ACCEPT_BATCH: usize = 64;
+/// The most open files the broker asks for (`RLIMIT_NOFILE`): macOS's
+/// own most for a process.
+const OPEN_FILES: u64 = 10_240;
+
+/// A request's head as the broker's loop read it, with its body's length,
+/// or what was read of one that does not read.
+type Head = Result<(BrokerRequest, usize), (Box<BrokerRequest>, anyhow::Error)>;
+
+/// A connection the broker holds with no thread.
+struct Held {
+    stream: TcpStream,
+    since: Instant,
+    holding: Holding,
+}
+
+enum Holding {
+    /// Waiting for its head; `seen` bytes of it were in the socket at the
+    /// last look.
+    Waiting { seen: usize },
+    /// Its head read, waiting for a head worker.
+    Ready(Head),
+    /// Answered without its body read: throwing away the `left` bytes of
+    /// it still to come.
+    Discard { left: usize },
+}
+
+impl Holding {
+    fn kind(&self) -> HeldKind {
+        match self {
+            Holding::Waiting { .. } => HeldKind::Waiting,
+            Holding::Ready(_) => HeldKind::Ready,
+            Holding::Discard { .. } => HeldKind::Discard,
+        }
+    }
+}
+
+/// What the head workers and the connections' threads share.
+struct Served {
+    backend: Arc<SystemBrokerBackend>,
+    /// The refusals recorded so far, shared by the broker's connections.
+    denials: Arc<DenialRecords>,
+    build: String,
+    pid: u32,
+    claude: ClaudeUpstream,
+    limits: BrokerLimits,
+    runs: RunSlots,
+    /// The connections handed back to throw away their bodies.
+    discard: std::sync::mpsc::Sender<(TcpStream, usize)>,
+    /// The connections served on threads now, by an id of each: their
+    /// sockets, for a stopping broker to shut.
+    threads: std::sync::Mutex<std::collections::HashMap<u64, TcpStream>>,
+    next_thread: AtomicU64,
+    served: AtomicU64,
+    /// The connections closed for a run's most and for the broker's.
+    turned_away: [AtomicU64; 2],
+}
+
+impl Served {
+    fn broker(&self) -> QueueBroker<'_> {
+        QueueBroker {
+            backend: &*self.backend,
+            denials: &self.denials,
+            build: &self.build,
+            pid: self.pid,
+        }
+    }
+}
+
+/// Raise the broker's open files to their hard most (up to
+/// [`OPEN_FILES`]): the files it may open now.
+fn open_files() -> u64 {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a valid `rlimit` the call writes.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return 256;
+    }
+    let wanted = limit.rlim_max.min(OPEN_FILES);
+    if limit.rlim_cur < wanted {
+        let raised = libc::rlimit {
+            rlim_cur: wanted,
+            rlim_max: limit.rlim_max,
+        };
+        // SAFETY: `raised` is a valid `rlimit` the call reads.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
+            return wanted;
+        }
+    }
+    limit.rlim_cur
+}
+
 /// Run the queue's broker until `stop` is set, its queue goes or its owner
-/// does: take the queue's broker lock (a second broker of the queue is
-/// refused), listen on a port of `127.0.0.1`, record itself with that
-/// address, and answer each connection on its own thread.
+/// does: read its limits from `host.toml` ([`super::queue_broker_limits`];
+/// a wrong one keeps it from starting), take the queue's broker lock (a
+/// second broker of the queue is refused), listen on a port of
+/// `127.0.0.1`, record itself with that address, and answer each
+/// connection as [`BrokerLimits`] says: held with no thread until its
+/// head comes and read by this loop, the token checked by one of
+/// [`HEAD_WORKERS`] (the health answered here), and a request whose token
+/// passed served on its own thread, up to
+/// [`BrokerLimits::max_connections_per_run`] of its run and
+/// [`BrokerLimits::max_connections`] of all at once. Stopping, it waits
+/// up to [`STOP_WAIT`] in all for its head workers, for the threads of the
+/// connections it serves once it has shut their sockets
+/// ([`end_connections`]), then for its last counts of refusals.
 pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
     let queue_dir = queue_dir_of(&options.db);
     ensure!(options.db.is_file(), "no queue at {}", options.db.display());
+    let limits = super::queue_broker_limits::load(&queue_dir, options.host_wide.as_deref())
+        .context("read the queue broker's limits")?;
     let dir = broker_dir(&queue_dir);
     private_dir(&dir)?;
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -1149,7 +1433,67 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
             let _ = flushed_tx.send(());
         });
     }
-    let mut served = 0u64;
+    let open_files = open_files();
+    // Each way of holding takes no more than an eighth of the files.
+    let most_held = limits.max_waiting.min((open_files / 8) as usize).max(1);
+    let (discard, discarded) = std::sync::mpsc::channel();
+    let (heads, head_jobs) = std::sync::mpsc::sync_channel::<(TcpStream, Head)>(HEAD_WORKERS);
+    let head_jobs = Arc::new(std::sync::Mutex::new(head_jobs));
+    let shared = Arc::new(Served {
+        denials,
+        backend,
+        build: options.build.clone(),
+        pid,
+        claude: ClaudeUpstream {
+            url: options.claude_api.clone(),
+            scratch: dir.clone(),
+        },
+        limits,
+        runs: RunSlots::new(limits.max_connections_per_run, limits.max_connections),
+        discard,
+        threads: std::sync::Mutex::default(),
+        next_thread: AtomicU64::new(0),
+        served: AtomicU64::new(0),
+        turned_away: [AtomicU64::new(0), AtomicU64::new(0)],
+    });
+    // Each worker holds a sender it never sends on: once every one has
+    // ended, `workers_gone` is disconnected.
+    let (working, workers_gone) = std::sync::mpsc::channel::<()>();
+    for _ in 0..HEAD_WORKERS {
+        let (jobs, shared, working) = (head_jobs.clone(), shared.clone(), working.clone());
+        thread::Builder::new()
+            .name("queue-broker-head".to_owned())
+            .spawn(move || {
+                let _working = working;
+                loop {
+                    let job = jobs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .recv();
+                    let Ok((stream, head)) = job else { break };
+                    // A worker outlives a request that panics: the loop
+                    // keeps every worker it started.
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        take_head(stream, head, &shared)
+                    })) {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => warn!("a queue broker connection failed: {error:#}"),
+                        Err(_) => warn!("a queue broker connection panicked"),
+                    }
+                }
+            })
+            .map_err(|error| {
+                flushing.store(false, Ordering::SeqCst);
+                let _ = fs::remove_file(dir.join(STATE_FILE));
+                anyhow::Error::new(error).context("start the queue broker's head workers")
+            })?;
+    }
+    drop(working);
+    let mut held: std::collections::VecDeque<Held> = std::collections::VecDeque::new();
+    let mut peek = vec![0u8; limits.unchecked_bytes];
+    let mut scratch = vec![0u8; 64 * 1024];
+    let mut evicted = [0u64; 3];
+    let mut full = [false; 3];
     let mut checked = Instant::now();
     let outcome = loop {
         if options.stop.load(Ordering::SeqCst) {
@@ -1164,37 +1508,185 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
                 break "owner_gone";
             }
         }
-        match listener.accept() {
-            Ok((stream, _)) => {
-                served += 1;
-                let backend = backend.clone();
-                let denials = denials.clone();
-                let build = options.build.clone();
-                let claude = ClaudeUpstream {
-                    url: options.claude_api.clone(),
-                    scratch: dir.clone(),
-                };
-                thread::spawn(move || {
-                    if let Err(error) = answer(stream, &*backend, &denials, &build, pid, &claude) {
-                        warn!("a queue broker connection failed: {error:#}");
+        let mut accepted = 0;
+        while accepted < ACCEPT_BATCH {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    accepted += 1;
+                    if stream.set_nonblocking(true).is_err() {
+                        continue;
                     }
-                });
-            }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => thread::sleep(options.poll),
-            Err(error) if error.kind() == ErrorKind::Interrupted => {}
-            Err(error) => {
-                warn!("the queue broker could not accept: {error}");
-                thread::sleep(options.poll);
+                    held.push_back(Held {
+                        stream,
+                        since: Instant::now(),
+                        holding: Holding::Waiting { seen: 0 },
+                    });
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) => {
+                    warn!("the queue broker could not accept: {error}");
+                    break;
+                }
             }
         }
+        while let Ok((stream, left)) = discarded.try_recv() {
+            if stream.set_nonblocking(true).is_ok() {
+                held.push_back(Held {
+                    stream,
+                    since: Instant::now(),
+                    holding: Holding::Discard { left },
+                });
+            }
+        }
+        // Every held connection, the ones just accepted among them, is
+        // looked at before any is closed for the most: a head that came
+        // goes to a worker now, or is held as one waiting for a worker.
+        let mut kept = std::collections::VecDeque::with_capacity(held.len());
+        for mut one in held.drain(..) {
+            let waited = one.since.elapsed();
+            let head = match one.holding {
+                Holding::Discard { left } => {
+                    if let Some(left) = throw_away(&one.stream, left, &mut scratch)
+                        && waited < DISCARD_TIMEOUT
+                    {
+                        one.holding = Holding::Discard { left };
+                        kept.push_back(one);
+                    }
+                    continue;
+                }
+                Holding::Ready(head) => head,
+                Holding::Waiting { seen } => {
+                    let (peeked, closed) = match one.stream.peek(&mut peek) {
+                        Ok(read) => (read, read == 0),
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                ErrorKind::WouldBlock | ErrorKind::Interrupted
+                            ) =>
+                        {
+                            (0, false)
+                        }
+                        Err(_) => continue,
+                    };
+                    // No new line: no look again at what was there.
+                    if !closed
+                        && waited < HEAD_TIMEOUT
+                        && peeked < limits.unchecked_bytes
+                        && !peek[seen.min(peeked)..peeked].contains(&b'\n')
+                    {
+                        one.holding = Holding::Waiting { seen: peeked };
+                        kept.push_back(one);
+                        continue;
+                    }
+                    match head_step(waited, &peek[..peeked], closed, limits.unchecked_bytes) {
+                        HeadStep::Wait => {
+                            one.holding = Holding::Waiting { seen: peeked };
+                            kept.push_back(one);
+                            continue;
+                        }
+                        // A connection closed before it sent anything (a
+                        // look whether the port is open) is no request,
+                        // and nothing is recorded of it.
+                        HeadStep::Close => continue,
+                        HeadStep::Read => {
+                            let end = head_end(&peek[..peeked]).unwrap_or(peeked);
+                            let Some(bytes) = take_bytes(&one.stream, end) else {
+                                continue;
+                            };
+                            let head = read_head(&mut &bytes[..]);
+                            if let Ok((request, length)) = &head
+                                && Destination::of(
+                                    &request.method,
+                                    &request.target,
+                                    request.host.as_deref(),
+                                ) == Destination::Health
+                            {
+                                // The health needs no worker: a look at the
+                                // broker is answered however busy they are.
+                                let _ = write_answer(
+                                    &mut &one.stream,
+                                    &shared.broker().handle(request),
+                                );
+                                let _ = one.stream.shutdown(Shutdown::Write);
+                                if *length > 0 {
+                                    one.holding = Holding::Discard { left: *length };
+                                    kept.push_back(one);
+                                }
+                                continue;
+                            }
+                            head
+                        }
+                    }
+                }
+            };
+            match heads.try_send((one.stream, head)) {
+                Ok(()) | Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
+                Err(std::sync::mpsc::TrySendError::Full((stream, head))) => {
+                    one.stream = stream;
+                    one.holding = Holding::Ready(head);
+                    kept.push_back(one);
+                }
+            }
+        }
+        held = kept;
+        // Past the most of a way, the oldest of that way goes. One warning
+        // for each time a way fills.
+        let kinds: Vec<HeldKind> = held.iter().map(|one| one.holding.kind()).collect();
+        let closing = past_most(&kinds, most_held);
+        let mut filled = [false; 3];
+        for at in closing.into_iter().rev() {
+            filled[kinds[at] as usize] = true;
+            evicted[kinds[at] as usize] += 1;
+            held.remove(at);
+        }
+        for (way, filled) in filled.into_iter().enumerate() {
+            if filled && !full[way] {
+                warn!(
+                    most = most_held,
+                    way = ["waiting", "ready", "discard"][way],
+                    "the queue broker holds its most connections of one way with no thread: \
+                     it closes the oldest of that way as new ones come"
+                );
+            }
+            full[way] = filled;
+        }
+        // One that may have more connections waiting to be accepted looks
+        // again at once.
+        if accepted < ACCEPT_BATCH {
+            thread::sleep(if held.is_empty() && accepted == 0 {
+                options.poll
+            } else {
+                HELD_POLL.min(options.poll)
+            });
+        }
     };
-    // The last counts, waited on only for a while: a service that does
-    // not answer does not hold the stop.
-    flushing.store(false, Ordering::SeqCst);
-    if flushed.recv_timeout(FINAL_FLUSH_WAIT).is_err() {
+    // The workers end with the request each has, the connections' threads
+    // once their sockets are shut, then the last counts are recorded: what
+    // they record is written before the broker says it stopped, waited on
+    // only up to the one deadline, so a queue service that does not answer
+    // does not hold the stop.
+    let deadline = Instant::now() + STOP_WAIT;
+    let ended_by = deadline - FINAL_FLUSH_WAIT;
+    drop(heads);
+    if workers_gone
+        .recv_timeout(ended_by.saturating_duration_since(Instant::now()))
+        .is_err_and(|error| error == std::sync::mpsc::RecvTimeoutError::Timeout)
+    {
         warn!(
-            "the last counts of refusals not recorded were not recorded within {}s",
-            FINAL_FLUSH_WAIT.as_secs()
+            "the queue broker's head workers did not end within {}s of its stop",
+            (STOP_WAIT - FINAL_FLUSH_WAIT).as_secs()
+        );
+    }
+    end_connections(&shared, ended_by);
+    flushing.store(false, Ordering::SeqCst);
+    if flushed
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .is_err()
+    {
+        warn!(
+            "the last counts of refusals not recorded were not recorded within {}s of the stop",
+            STOP_WAIT.as_secs()
         );
     }
     if BrokerRecord::read(&queue_dir).is_some_and(|record| record.pid == pid) {
@@ -1202,50 +1694,179 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
     }
     info!(pid, outcome, "the queue broker stopped: {outcome}");
     drop(lock);
-    Ok(json!({"outcome": outcome, "pid": pid, "served": served}))
+    Ok(json!({
+        "outcome": outcome,
+        "pid": pid,
+        "served": shared.served.load(Ordering::SeqCst),
+        "turned_away": {
+            "run": shared.turned_away[0].load(Ordering::SeqCst),
+            "broker": shared.turned_away[1].load(Ordering::SeqCst),
+        },
+        "evicted": {
+            "waiting": evicted[HeldKind::Waiting as usize],
+            "ready": evicted[HeldKind::Ready as usize],
+            "discard": evicted[HeldKind::Discard as usize],
+        },
+    }))
 }
 
-/// Read one request from `stream`, answer it, and close.
-fn answer(
-    stream: TcpStream,
-    backend: &dyn BrokerBackend,
-    denials: &DenialRecords,
-    build: &str,
-    pid: u32,
-    claude: &ClaudeUpstream,
-) -> Result<()> {
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    let broker = QueueBroker {
-        backend,
-        denials,
-        build,
-        pid,
-    };
-    let mut reader = BufReader::new(stream.try_clone()?);
-    // A connection closed before it sent anything (a look whether the port
-    // is open) is no request, and nothing is recorded of it.
-    if reader.fill_buf()?.is_empty() {
-        return Ok(());
-    }
-    let (request, answer) = match read_request(&mut reader) {
-        Ok(request) => {
-            let answer = broker.handle(&request);
-            (request, answer)
+/// Read the `count` bytes in `stream`'s socket (a peek saw them): `None`
+/// when they are not all there.
+fn take_bytes(mut stream: &TcpStream, count: usize) -> Option<Vec<u8>> {
+    let mut bytes = vec![0u8; count];
+    let mut at = 0;
+    while at < count {
+        match stream.read(&mut bytes[at..]) {
+            Ok(0) => return None,
+            Ok(read) => at += read,
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return None,
         }
+    }
+    Some(bytes)
+}
+
+/// Throw away what came of a body with `left` bytes to come, up to
+/// [`DISCARD_STEP`] of it: the bytes still to come, or `None` when it
+/// ended or its client went.
+fn throw_away(mut stream: &TcpStream, mut left: usize, scratch: &mut [u8]) -> Option<usize> {
+    let mut thrown = 0;
+    while left > 0 && thrown < DISCARD_STEP {
+        let most = left.min(scratch.len());
+        match stream.read(&mut scratch[..most]) {
+            Ok(0) => return None,
+            Ok(read) => {
+                left -= read;
+                thrown += read;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Some(left),
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    (left > 0).then_some(left)
+}
+
+/// A head worker's part of a connection whose `head` the loop read: ask
+/// [`QueueBroker::admit`] of it, never waiting on the client. A request
+/// it answers is answered and its body thrown away as it comes, never
+/// read; one whose token passed is served on its own thread
+/// ([`serve_admitted`]) while its run holds fewer than
+/// [`BrokerLimits::max_connections_per_run`] and the broker fewer than
+/// [`BrokerLimits::max_connections`], and is closed otherwise.
+fn take_head(stream: TcpStream, head: Head, shared: &Arc<Served>) -> Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    let broker = shared.broker();
+    let (request, length) = match head {
+        Ok(head) => head,
+        Err((read, error)) => {
+            write_answer(
+                &mut &stream,
+                &broker.malformed(&read, &format!("{error:#}")),
+            )?;
+            hand_back(shared, stream, shared.limits.unchecked_bytes);
+            return Ok(());
+        }
+    };
+    let run = match broker.admit(&request) {
+        Admission::Answer(answer) => {
+            write_answer(&mut &stream, &answer)?;
+            hand_back(shared, stream, length);
+            return Ok(());
+        }
+        Admission::Run(run) => run,
+    };
+    let slot = match shared.runs.take(&run) {
+        Ok(slot) => slot,
+        Err(SlotRefusal::Run { first }) => {
+            shared.turned_away[0].fetch_add(1, Ordering::SeqCst);
+            if first {
+                warn!(
+                    run = %run,
+                    most = shared.limits.max_connections_per_run,
+                    "the queue broker serves the most connections of a run at once: \
+                     it closes new ones of that run until one ends"
+                );
+            }
+            return Ok(());
+        }
+        Err(SlotRefusal::Broker { first }) => {
+            shared.turned_away[1].fetch_add(1, Ordering::SeqCst);
+            if first {
+                warn!(
+                    most = shared.limits.max_connections,
+                    "the queue broker serves its most connections at once: \
+                     it closes new ones until one ends"
+                );
+            }
+            return Ok(());
+        }
+    };
+    shared.served.fetch_add(1, Ordering::SeqCst);
+    let id = shared.next_thread.fetch_add(1, Ordering::SeqCst);
+    shared
+        .threads
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(id, stream.try_clone()?);
+    let running = Running {
+        shared: shared.clone(),
+        id,
+    };
+    // A thread that does not start closes the connection, its slot given
+    // back and its socket taken out with it.
+    thread::Builder::new()
+        .name("queue-broker-connection".to_owned())
+        .spawn(move || {
+            let (_slot, running) = (slot, running);
+            if let Err(error) = serve_admitted(stream, request, length, &running.shared) {
+                warn!("a queue broker connection failed: {error:#}");
+            }
+        })
+        .context("start a queue broker connection's thread")?;
+    Ok(())
+}
+
+/// Hand `stream`, answered, back to the broker's loop to throw away the
+/// `left` bytes of its body that may still come: closing with them unread
+/// would reset the connection, and a client still sending them could lose
+/// the answer.
+fn hand_back(shared: &Served, stream: TcpStream, left: usize) {
+    let _ = stream.shutdown(Shutdown::Write);
+    if left > 0 {
+        let _ = shared.discard.send((stream, left));
+    }
+}
+
+/// Serve `request` of a run whose token passed, its head read: read its
+/// body of `length` bytes, answer it, and close.
+fn serve_admitted(
+    stream: TcpStream,
+    mut request: BrokerRequest,
+    length: usize,
+    shared: &Served,
+) -> Result<()> {
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let broker = shared.broker();
+    let answer = match read_body(&mut reader, &mut request, length) {
+        Ok(()) => broker.handle(&request),
         Err((read, error)) => {
             let answer = broker.malformed(&read, &format!("{error:#}"));
-            (*read, answer)
+            request = *read;
+            answer
         }
     };
     match (&answer.tunnel, &answer.claude) {
         (Some((host, port)), _) => tunnel(&stream, &reader, host, *port, |error| {
             broker.tunnel_failed(&request, &error)
         }),
-        (None, Some(forward)) => forward_claude(&stream, claude, forward, &request.body, |error| {
-            broker.claude_failed(&request, &error)
-        }),
+        (None, Some(forward)) => {
+            forward_claude(&stream, &shared.claude, forward, &request.body, |error| {
+                broker.claude_failed(&request, &error)
+            })
+        }
         (None, None) => Ok(write_answer(&mut &stream, &answer)?),
     }
 }
@@ -1918,6 +2539,101 @@ mod tests {
         let connect = read_request(&mut &b"CONNECT crates.io:443 HTTP/1.1\r\n\r\n"[..]).unwrap();
         assert_eq!(connect.target, "crates.io:443");
         assert!(connect.body.is_empty());
+    }
+
+    #[test]
+    fn a_head_is_read_without_its_body_which_is_read_after_it() {
+        let raw = b"POST /anthropic/v1/messages HTTP/1.1\r\nContent-Length: 4\r\n\r\nbodyrest";
+        let mut reader = &raw[..];
+        let (mut request, length) = read_head(&mut reader).unwrap();
+        assert_eq!(
+            (request.target.as_str(), length),
+            ("/anthropic/v1/messages", 4)
+        );
+        assert!(request.body.is_empty());
+        assert_eq!(reader, b"bodyrest");
+        read_body(&mut reader, &mut request, length).unwrap();
+        assert_eq!(request.body, b"body");
+        let mut short = &b"ab"[..];
+        let (read, error) = read_body(&mut short, &mut request, 4).unwrap_err();
+        assert_eq!(read.target, "/anthropic/v1/messages");
+        assert!(
+            format!("{error:#}").contains("before its length"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_run_s_slots_are_taken_up_to_its_most_apart_from_the_other_runs() {
+        let slots = RunSlots::new(2, 10);
+        let first = slots.take("r1").unwrap();
+        let second = slots.take("r1").unwrap();
+        // Its first refusal since it filled is told apart from the next.
+        assert_eq!(
+            slots.take("r1").unwrap_err(),
+            SlotRefusal::Run { first: true }
+        );
+        assert_eq!(
+            slots.clone().take("r1").unwrap_err(),
+            SlotRefusal::Run { first: false }
+        );
+        let other = slots.take("r2").unwrap();
+        drop(first);
+        let third = slots.take("r1").unwrap();
+        assert_eq!(
+            slots.take("r1").unwrap_err(),
+            SlotRefusal::Run { first: true }
+        );
+        drop((second, third, other));
+        assert!(slots.open.lock().unwrap().runs.is_empty());
+        assert_eq!(slots.open.lock().unwrap().total, 0);
+    }
+
+    /// A run refused at its most and then closing every connection is
+    /// forgotten with its last one: a run that ended leaves nothing.
+    #[test]
+    fn a_run_refused_at_its_most_is_forgotten_with_its_last_slot() {
+        let slots = RunSlots::new(1, 10);
+        let only = slots.take("r1").unwrap();
+        assert_eq!(
+            slots.take("r1").unwrap_err(),
+            SlotRefusal::Run { first: true }
+        );
+        drop(only);
+        assert!(slots.open.lock().unwrap().runs.is_empty());
+        assert!(slots.take("r1").is_ok());
+    }
+
+    /// Runs each within their own most are refused together at the
+    /// broker's, and taken again once one of them gives one back.
+    #[test]
+    fn runs_together_are_refused_at_the_broker_s_most() {
+        let slots = RunSlots::new(2, 3);
+        let held = [
+            slots.take("r1").unwrap(),
+            slots.take("r2").unwrap(),
+            slots.take("r3").unwrap(),
+        ];
+        assert_eq!(
+            slots.take("r4").unwrap_err(),
+            SlotRefusal::Broker { first: true }
+        );
+        assert_eq!(
+            slots.take("r1").unwrap_err(),
+            SlotRefusal::Broker { first: false }
+        );
+        // The run's own most is told first.
+        let [first, second, third] = held;
+        drop(second);
+        let again = slots.take("r1").unwrap();
+        assert_eq!(
+            slots.take("r1").unwrap_err(),
+            SlotRefusal::Run { first: true }
+        );
+        drop((first, third, again));
+        let open = slots.open.lock().unwrap();
+        assert!(open.runs.is_empty());
+        assert_eq!(open.total, 0);
     }
 
     #[test]

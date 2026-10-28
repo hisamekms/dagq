@@ -38,6 +38,7 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
   clientはこの型と定数に従い、ここに書き写さない。
 - 1つの要求の判断（宛先・run tokenの検証・serviceへの転送・tunnelを開くか・拒否の記録）は`application::queue_broker::QueueBroker::handle`、tokenとtunnelの宛ての判定は`domain::queue_broker`。
 - registryのallowlistの設定の綴り・置き場・意味・既定は`infrastructure::run_env::EGRESS_REGISTRIES`のdoc comment、1つのhostの書き方は`domain::queue_broker::RegistryHost`が持つ。
+- tokenを確かめる前に読む大きさ・headを待つ接続の数・runごとと全体の同時の接続数の上限の`host.toml`の表の綴り・置き場は`infrastructure::queue_broker_limits`のmodule doc、意味・既定・根拠は`domain::queue_broker::BrokerLimits`のdoc commentが持つ。
 - Claudeの資格情報の`host.toml`の表の綴り・置き場・意味は`infrastructure::claude_credential`のmodule doc、上流へ送って応答を流すところは`infrastructure::queue_broker::forward_claude`が持つ。
 - brokerのプロセスがHTTPを読み書きしてserviceのsocketへ転送するところと、`up`・`down`・supervisorが起動・停止・生死を見る口は`infrastructure::queue_broker`のmodule docから辿る。
   clientの要求の送り方はそのmoduleの送る側の関数が、上の形のまま持つ。
@@ -80,6 +81,17 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
   数えた件数は、窓の終わりにbrokerが待ちの合間（と停止の前）に書く1件のevent（同じkind）か、組の窓の後の最初の記録のどちらか先の1件に残す。
   答え（status・code・文言）は上限の外でも変わらず、絞るのは記録だけ。
   落とし穴: brokerが窓の途中で止まるか、件数のeventを書けないと、その件数は残らない。
+- 信頼しないclientに持たされる量: brokerはhostの1プロセスで全runとqueue serviceへの転送を受け持つので、containerの中のコードが接続とbodyでbrokerのmemoryとthreadを押し上げられず、1つのrunの接続がほかのrunとqueue serviceへの要求を締め出せないようにする（段の分け方は`domain::queue_broker::BrokerLimits`のdoc comment）。
+  接続はheadが届くまでthreadを持たずにbrokerの1つのloopで待つ。
+  loopはthreadを持たない接続を、headを待つもの・workerを待つもの・読まずに答えた要求のbodyを読み捨てるものに分けて、それぞれ上限まで持ち、超えるとその中で一番古いものから閉じる（`domain::queue_broker::past_most`）。
+  閉じるのは受けたばかりの接続も含めて全部を見た後なので、何も送らない接続はheadの届いた要求を閉じさせられず、拒んだ要求はheadを待つ接続を閉じさせられない。
+  headが届いた要求は、そのloopがheadを読み（healthはそこで答える）、clientを待たない数の決まったworkerがtoken（`CONNECT`はallowlistも）を確かめ、bodyは確かめた後にだけ読む（`application::queue_broker::QueueBroker::admit`）。
+  確かめられない要求はbodyを持たずに（届いた分は短い間だけ読み捨てる）、bodyまで読んだときと同じ答えと記録で拒む。
+  tokenが通った要求だけがthreadで扱われ、tokenが通ったrunごとと、全runを合わせたbroker全体とで同時の数を数え、threadを立てる前に両方の上限を当てる。
+  runの上限は全体の上限より小さくなければならないので、1つのrunだけで全体を埋めることはない。
+  上限に達したrunの次の接続と、全体が上限の間の新しい接続は答えずに閉じ、記録しない（brokerのlogに満ちたことを残す）。
+  runを名乗るだけではほかのrunの数に入らない。
+  上限の値はhostの資源の値なので`host.toml`が与え、不正な値ではbrokerは起動しない。
 - 1つのqueueに1つ: 生きている間lockを持ち、2つ目の`queue-broker serve`は止まる。
   見る側はlockとhealthのpathへの問い合わせで、生死とbuildを判定する（queue serviceと同じ形）。
 
@@ -121,6 +133,8 @@ queue serviceと同じ手順に乗せる（[Queue service](queue-service.md#起�
 
 - `up`: serviceの後、supervisorより先に`application::queue_broker::ensure`を打つ（このbuildが答えればreuse、居なければ起動、別のbuildか答えないものは入れ替え）。
   起動できなければsupervisorを起動せずに止まる。
+- 止まるとき: brokerは、workerの終わり、threadで扱っている接続のsocketを閉じた後のそのthreadの終わり、最後の拒否の件数の記録を、合わせて1つの上限まで待ってからlockを放す（`infrastructure::queue_broker::serve`）。
+  queue serviceかClaude APIの答えを待っているworkerとthreadは、上限を過ぎれば待たない。
 - `down`: supervisorの後に、serviceより先に止める。
   drainを待たない`down`は`queue_broker_stop_requested`で、drainを終えた最後のsupervisorに止めさせる。
 - `install`と自動更新: execの引き継ぎの後の新しいバイナリのsupervisorの最初の見張りが、別のbuildのbrokerを1回だけ入れ替え、入れ替えて動いたbuildはそのまま受け入れる。

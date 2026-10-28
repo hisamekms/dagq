@@ -54,6 +54,7 @@ mod proposals;
 pub mod push;
 pub mod queue_binary;
 pub mod queue_broker;
+pub mod queue_broker_limits;
 pub mod queue_service;
 pub mod recurring_config;
 pub mod recurring_drafts;

@@ -1831,3 +1831,466 @@ fn the_keychain_s_command_gets_the_item_by_its_arguments_and_gives_the_value_by_
     assert_eq!(missing.reason(), "missing");
     assert_eq!(Keychain::of_host().is_some(), cfg!(target_os = "macos"));
 }
+
+/// With the limits of the queue's `host.toml`: a request without its run's
+/// live token is refused from its head, its long body never read (when
+/// none is sent, a broker that waited for it would not answer; when it is,
+/// the client still gets the answer), with the same answer and record as
+/// ever, while one with the token is read and passed whatever its length;
+/// connections that send nothing, more than the broker holds, keep out
+/// neither the queue service's requests nor the health; and a run at its
+/// most connections has its next one closed unanswered while another run
+/// is served, and is served again once one of its own ends.
+#[test]
+fn the_broker_checks_a_token_before_a_body_and_bounds_connections_by_their_run() {
+    use std::io::{Read, Write};
+    let _test = common::test();
+    let queue = queue();
+    let other = another_run(&queue);
+    start(&queue);
+    std::fs::write(
+        queue.dir().join("host.toml"),
+        "[queue_broker]\nunchecked_bytes = 4096\nmax_waiting = 4\nmax_connections_per_run = 1\n",
+    )
+    .unwrap();
+    let (serving, address) = Serving::start(&queue, "limits-test");
+    let run = queue.run.id().clone();
+    let own = token(&queue, &Principal::worker(&run, queue.run.task_id()));
+    let others = token(&queue, &Principal::worker(other.id(), other.task_id()));
+    let post = |target: &str, bearer: Option<&str>, named: &str| {
+        let authorization = bearer.map_or_else(String::new, |token| {
+            format!("\r\nAuthorization: {BEARER}{token}")
+        });
+        format!("POST {target} HTTP/1.1{authorization}\r\n{RUN_HEADER}: {named}")
+    };
+
+    for (target, bearer, length, send, reason, destination) in [
+        (
+            "/anthropic/v1/messages",
+            None,
+            30 * 1024 * 1024,
+            false,
+            "missing_token",
+            "api.anthropic.com",
+        ),
+        (
+            "/queue",
+            Some("not-a-token"),
+            512 * 1024,
+            true,
+            "unknown_token",
+            "queue_service",
+        ),
+    ] {
+        let mut stream = std::net::TcpStream::connect(&address).unwrap();
+        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+        write!(
+            stream,
+            "{}\r\nHost: {address}\r\nContent-Length: {length}\r\n\r\n",
+            post(target, bearer, run.as_str())
+        )
+        .unwrap();
+        if send {
+            // Written while the broker answers; it may already be closed.
+            let _ = stream.write_all(&vec![b'x'; length]);
+        }
+        let (status, answer) = answered(stream);
+        assert_eq!(status, 401, "{answer}");
+        assert!(answer.contains("\"unauthenticated\""), "{answer}");
+        let record = denied(&queue.db).last().cloned().unwrap();
+        assert_eq!(
+            (&record["reason"], &record["destination"], &record["code"]),
+            (
+                &json!(reason),
+                &json!(destination),
+                &json!("unauthenticated")
+            ),
+            "{record}"
+        );
+        assert_eq!(record["run"], json!(run.as_str()));
+    }
+    let note = |token: &str, named: &RunId, task: TaskId| {
+        let note = request(
+            UseCase::Note,
+            json!({"task": task.as_i64(), "text": "x".repeat(8192)}),
+        );
+        // A connection closed unanswered (its run at its most) is `None`.
+        broker::call(&address, Some(token), Some(named.as_str()), &note, TIMEOUT)
+            .ok()
+            .map(|(status, body)| (status, response(&body).ok))
+    };
+    assert_eq!(note(&own, &run, queue.run.task_id()), Some((200, true)));
+    let refused = denied(&queue.db).len();
+
+    // More connections that send nothing than the broker holds: the oldest
+    // go as new ones come, and a request that sends its head at once is
+    // answered.
+    let idle: Vec<_> = (0..8)
+        .map(|_| std::net::TcpStream::connect(&address).unwrap())
+        .collect();
+    assert_eq!(
+        note(&others, other.id(), other.task_id()),
+        Some((200, true))
+    );
+    broker::health(&address, TIMEOUT).unwrap();
+
+    // The run at its most: a request whose body never comes holds its one
+    // connection, the next of the run is closed with no answer, the other
+    // run is served, and the run is again once its connection ends. The
+    // holding one is tried again until it is the one that holds.
+    let head = |length: usize| {
+        format!(
+            "{}\r\nHost: {address}\r\nContent-Length: {length}\r\n\r\n",
+            post("/queue", Some(&own), run.as_str())
+        )
+    };
+    let held = {
+        let _waiting = common::within(TIMEOUT * 2, "the run's next connection to be closed");
+        loop {
+            let mut held = std::net::TcpStream::connect(&address).unwrap();
+            held.write_all(head(10).as_bytes()).unwrap();
+            held.set_read_timeout(Some(Duration::from_millis(300)))
+                .unwrap();
+            let mut byte = [0u8; 1];
+            if !matches!(held.peek(&mut byte), Err(error) if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )) {
+                continue;
+            }
+            let mut next = std::net::TcpStream::connect(&address).unwrap();
+            next.set_read_timeout(Some(TIMEOUT)).unwrap();
+            next.write_all(format!("{}{{}}", head(2)).as_bytes())
+                .unwrap();
+            let mut read = Vec::new();
+            match next.read_to_end(&mut read) {
+                Ok(_) if read.is_empty() => break held,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break held,
+                // Served: `held` did not hold the run's connection yet.
+                _ => {}
+            }
+        }
+    };
+    assert_eq!(
+        note(&others, other.id(), other.task_id()),
+        Some((200, true))
+    );
+    drop((held, idle));
+    {
+        let _waiting = common::within(TIMEOUT, "the run's slot to be given back");
+        while note(&own, &run, queue.run.task_id()) != Some((200, true)) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    // The connections closed past the most and the idle ones are not
+    // requests and record nothing; a held one ended before its body, and a
+    // served next one (a try again) sent no queue service request.
+    let after: Vec<_> = denied(&queue.db).split_off(refused);
+    assert!(
+        after.iter().all(|record| {
+            (record["reason"] == "malformed" || record["reason"] == "bad_body")
+                && record["destination"] == "queue_service"
+                && record["run"] == json!(run.as_str())
+        }),
+        "{after:?}"
+    );
+
+    let outcome = serving.stopped();
+    assert!(
+        outcome["turned_away"]["run"].as_u64().unwrap() >= 1,
+        "{outcome}"
+    );
+    assert!(
+        outcome["evicted"]["waiting"].as_u64().unwrap() >= 1,
+        "{outcome}"
+    );
+}
+
+/// A second running run of `queue`, beside its own.
+fn another_run(queue: &common::service::Queue) -> dagq::domain::TaskRun {
+    use dagq::application::TaskStore;
+    let mut store = SqliteQueue::open(&queue.db).unwrap();
+    let task = store.add(common::queue::new_task("another")).unwrap();
+    store
+        .transition(task.id(), dagq::domain::TaskAction::BypassReview)
+        .unwrap();
+    let dagq::domain::ClaimOutcome::Claimed { run } = store.claim(&common::queue::base()).unwrap()
+    else {
+        panic!("nothing claimed");
+    };
+    *run
+}
+
+/// The broker `serve` runs on a thread of the test for a queue: when it
+/// goes (the test passed or panicked), it is asked to stop and waited for
+/// within a limit, so nothing of it writes to the queue's directory after
+/// it. Held after the queue, it goes before it.
+struct Serving {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<Value>>,
+}
+
+impl Serving {
+    /// The broker of `queue` with the limits of its `host.toml`, naming
+    /// `build`, and the address it listens on.
+    fn start(queue: &common::service::Queue, build: &str) -> (Self, String) {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let options = broker::BrokerServeOptions {
+            db: queue.db.clone(),
+            generators: dagq::infrastructure::clock::system(),
+            stop: stop.clone(),
+            poll: Duration::from_millis(20),
+            owner: None,
+            build: build.to_owned(),
+            claude_api: "http://127.0.0.1:9".to_owned(),
+            host_wide: None,
+        };
+        let serving = Self {
+            stop,
+            thread: Some(std::thread::spawn(move || broker::serve(&options).unwrap())),
+        };
+        let _waiting = common::within(TIMEOUT, "the queue broker to listen");
+        loop {
+            if let Some(record) = broker::BrokerRecord::read(queue.dir()) {
+                break (serving, record.address);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Stop the broker: what its `serve` answered.
+    fn stopped(mut self) -> Value {
+        self.end().expect("the queue broker's serve failed")
+    }
+
+    fn end(&mut self) -> Option<Value> {
+        self.stop.store(true, Ordering::SeqCst);
+        let thread = self.thread.take()?;
+        let _waiting = common::within(TIMEOUT, "the queue broker to stop once asked to");
+        thread.join().ok()
+    }
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        let _ = self.end();
+    }
+}
+
+/// Each way the broker holds a connection with no thread is bounded apart.
+/// With `max_waiting = 1`, an idle connection that comes just after a
+/// request whose head came does not close that request (looked at in the
+/// same pass, it goes to a worker), nor one that came just before it. With
+/// `max_waiting = 2`, refused requests whose bodies are being thrown away
+/// go past the most of their own way only, closing the oldest of them,
+/// while an idle one waiting beside them is still held and answers its
+/// health once it sends it. With `max_connections = 2` and one for each
+/// run, a third run within its own most is closed unanswered while two
+/// other runs hold the broker's two connections, and served once one of
+/// them ends.
+#[test]
+fn the_broker_bounds_each_way_it_holds_connections_apart() {
+    use std::io::{Read, Write};
+    let _test = common::test();
+    let queue = queue();
+    let other = another_run(&queue);
+    let third = another_run(&queue);
+    start(&queue);
+    std::fs::write(
+        queue.dir().join("host.toml"),
+        "[queue_broker]\nmax_waiting = 1\n",
+    )
+    .unwrap();
+    let (serving, address) = Serving::start(&queue, "held-test");
+    let run = queue.run.id().clone();
+    let own = token(&queue, &Principal::worker(&run, queue.run.task_id()));
+    let note = serde_json::to_vec(&request(
+        UseCase::Note,
+        json!({"task": queue.run.task_id().as_i64(), "text": "held"}),
+    ))
+    .unwrap();
+    let connect = || {
+        let stream = std::net::TcpStream::connect(&address).unwrap();
+        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+        stream
+    };
+    let send_note = || {
+        let mut stream = connect();
+        write!(
+            stream,
+            "POST /queue HTTP/1.1\r\nHost: {address}\r\nAuthorization: {BEARER}{own}\r\n{RUN_HEADER}: {run}\r\nContent-Length: {}\r\n\r\n",
+            note.len()
+        )
+        .unwrap();
+        stream.write_all(&note).unwrap();
+        stream
+    };
+    for idle_first in [false, true, false, true, false] {
+        let before = idle_first.then(connect);
+        let sent = send_note();
+        let after = (!idle_first).then(connect);
+        let (status, answer) = answered(sent);
+        assert_eq!(status, 200, "idle first {idle_first}: {answer}");
+        drop((before, after));
+    }
+
+    let first_outcome = serving.stopped();
+    assert_eq!(first_outcome["evicted"]["ready"], 0, "{first_outcome}");
+
+    // An idle one waits while three refused requests, their bodies never
+    // coming, are thrown away past the most of their way. One of them not
+    // looked at yet waits beside the idle one within the most.
+    std::fs::write(
+        queue.dir().join("host.toml"),
+        "[queue_broker]\nmax_waiting = 2\n",
+    )
+    .unwrap();
+    let (serving, address) = Serving::start(&queue, "held-test");
+    let connect = || {
+        let stream = std::net::TcpStream::connect(&address).unwrap();
+        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+        stream
+    };
+    let mut idle = connect();
+    let refused = || {
+        let mut stream = connect();
+        write!(
+            stream,
+            "POST /queue HTTP/1.1\r\nHost: {address}\r\nAuthorization: {BEARER}not-a-token\r\n{RUN_HEADER}: {run}\r\nContent-Length: 1048576\r\n\r\n0123456789abcdef"
+        )
+        .unwrap();
+        // The answer ends with the broker's end of writes; the client's own
+        // end stays open, so the body is still to come.
+        let mut answer = String::new();
+        stream
+            .try_clone()
+            .unwrap()
+            .read_to_string(&mut answer)
+            .unwrap();
+        assert!(answer.starts_with("HTTP/1.1 401 "), "{answer}");
+        stream
+    };
+    let mut thrown = [refused(), refused(), refused()];
+    // One of them is closed for the most of its way: a write to it fails
+    // once the broker has let it go (one it still holds takes the bytes).
+    {
+        let _waiting = common::within(TIMEOUT, "a body past the most of its way to be closed");
+        'closed: loop {
+            for stream in &mut thrown {
+                if stream
+                    .write_all(b"x")
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
+                    break 'closed;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    write!(
+        idle,
+        "GET {HEALTH_PATH} HTTP/1.1\r\nHost: {address}\r\n\r\n"
+    )
+    .unwrap();
+    let mut answer = String::new();
+    idle.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+    assert!(answer.contains("held-test"), "{answer}");
+    drop((thrown, idle));
+
+    let outcome = serving.stopped();
+    assert!(
+        outcome["evicted"]["discard"].as_u64().unwrap() >= 1,
+        "{outcome}"
+    );
+    assert_eq!(outcome["evicted"]["ready"], 0, "{outcome}");
+
+    // The broker's two connections held by two runs whose bodies never
+    // come: a third run, holding none of its own, is closed unanswered, and
+    // served once one of them ends. The holding ones are tried again until
+    // they are the ones that hold.
+    std::fs::write(
+        queue.dir().join("host.toml"),
+        "[queue_broker]\nmax_connections_per_run = 1\nmax_connections = 2\n",
+    )
+    .unwrap();
+    let (serving, address) = Serving::start(&queue, "held-test");
+    let others = token(&queue, &Principal::worker(other.id(), other.task_id()));
+    let thirds = token(&queue, &Principal::worker(third.id(), third.task_id()));
+    let third_note = serde_json::to_vec(&request(
+        UseCase::Note,
+        json!({"task": third.task_id().as_i64(), "text": "held"}),
+    ))
+    .unwrap();
+    let sent_by_third = || {
+        let mut stream = std::net::TcpStream::connect(&address).unwrap();
+        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+        write!(
+            stream,
+            "POST /queue HTTP/1.1\r\nHost: {address}\r\nAuthorization: {BEARER}{thirds}\r\n{RUN_HEADER}: {}\r\nContent-Length: {}\r\n\r\n",
+            third.id(),
+            third_note.len()
+        )
+        .unwrap();
+        stream.write_all(&third_note).unwrap();
+        stream
+    };
+    // A connection of `run` whose body never comes, while the broker has
+    // neither answered nor closed it.
+    let hold = |token: &str, run: &str| {
+        let mut holding = std::net::TcpStream::connect(&address).unwrap();
+        write!(
+            holding,
+            "POST /queue HTTP/1.1\r\nHost: {address}\r\nAuthorization: {BEARER}{token}\r\n{RUN_HEADER}: {run}\r\nContent-Length: 10\r\n\r\n"
+        )
+        .unwrap();
+        holding
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        matches!(holding.peek(&mut byte), Err(error) if matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ))
+        .then_some(holding)
+    };
+    let holding = {
+        let _waiting = common::within(TIMEOUT * 2, "the third run's connection to be closed");
+        loop {
+            let (Some(own_holding), Some(other_holding)) =
+                (hold(&own, run.as_str()), hold(&others, other.id().as_str()))
+            else {
+                continue;
+            };
+            let mut next = sent_by_third();
+            let mut read = Vec::new();
+            match next.read_to_end(&mut read) {
+                Ok(_) if read.is_empty() => break (own_holding, other_holding),
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                    break (own_holding, other_holding);
+                }
+                // Served: the two did not hold the broker's two yet.
+                _ => {}
+            }
+        }
+    };
+    drop(holding.0);
+    {
+        let _waiting = common::within(TIMEOUT, "the broker's connection to be given back");
+        loop {
+            let mut stream = sent_by_third();
+            let mut answer = Vec::new();
+            if stream.read_to_end(&mut answer).is_ok() && answer.starts_with(b"HTTP/1.1 200 ") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    drop(holding.1);
+    let outcome = serving.stopped();
+    assert!(
+        outcome["turned_away"]["broker"].as_u64().unwrap() >= 1,
+        "{outcome}"
+    );
+}

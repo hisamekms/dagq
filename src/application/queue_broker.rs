@@ -626,6 +626,47 @@ impl QueueBroker<'_> {
         }
     }
 
+    /// Look at `request`'s head before its body is read: the answer
+    /// [`Self::handle`] would give it whatever its body (a refusal,
+    /// recorded as that one would be, or the health, which reads no body),
+    /// or, when its token (and a tunnel's host) passes, the run the token
+    /// is of. The broker asks this of every request before it reads its
+    /// body or holds it as the run's, so a request without a valid token
+    /// never makes it hold a body and never counts as another run's.
+    pub fn admit(&self, request: &BrokerRequest) -> Admission {
+        let destination =
+            Destination::of(&request.method, &request.target, request.host.as_deref());
+        let (run, refused) = match destination {
+            Destination::Health | Destination::Outside(_) => {
+                return Admission::Answer(self.handle(request));
+            }
+            Destination::QueueService | Destination::ClaudeApi { .. } => (
+                request.run.clone(),
+                self.check_token(
+                    request.authorization.as_deref().and_then(bearer),
+                    request.run.as_deref(),
+                    false,
+                )
+                .err(),
+            ),
+            Destination::Tunnel { ref host, port } => {
+                let (token, run) = tunnel_credentials(request);
+                let refused = self
+                    .open_tunnel(host, port, token.as_deref(), run.as_deref())
+                    .err();
+                (run, refused)
+            }
+        };
+        match refused {
+            Some(refused) => {
+                Admission::Answer(self.refused(request, run.as_deref(), &destination, refused))
+            }
+            // A token that passes names its run: `check_token` refuses one
+            // without.
+            None => Admission::Run(run.unwrap_or_default()),
+        }
+    }
+
     /// Check the run token of a request for the Claude API (a worker's of
     /// the run it names; never a verification's) and take the Claude
     /// credential `host.toml` chooses: what to send on, or why not. A
@@ -929,6 +970,16 @@ impl QueueBroker<'_> {
                 .unwrap_or(Value::Null),
         )
     }
+}
+
+/// What [`QueueBroker::admit`] says of a request's head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admission {
+    /// Answer it with this, its body unread.
+    Answer(BrokerAnswer),
+    /// Its token passed for this run: read its body and handle it, held as
+    /// one of the run's connections.
+    Run(String),
 }
 
 /// Why [`QueueBroker::pass_on`] did not pass a request on: the refusal,
@@ -1511,6 +1562,117 @@ mod tests {
                 assert!(denied[0].get("token_run").is_none());
             }
         }
+    }
+
+    /// What `admit` says of a request before its body is read: the very
+    /// refusal and record `handle` makes of it, or nothing while its token
+    /// (and a tunnel's host) passes.
+    #[test]
+    fn a_head_is_refused_before_its_body_as_the_whole_request_would_be() {
+        let tunnel = |token: &str, host: &str| BrokerRequest {
+            method: "CONNECT".into(),
+            target: format!("{host}:443"),
+            proxy_authorization: Some(format!("Bearer {token}")),
+            run: Some("r1".into()),
+            ..BrokerRequest::default()
+        };
+        let listed = Egress {
+            registries: vec!["crates.io".parse().unwrap()],
+            ..Egress::default()
+        };
+        let refused = [
+            queue_request(None, Some("r1")),
+            queue_request(Some("revoked"), Some("r1")),
+            queue_request(Some("good"), Some("r2")),
+            queue_request(Some("verify"), Some("r1")),
+            claude_request(None, Some("r1")),
+            claude_request(Some("good"), Some("r2")),
+            claude_request(Some("revoked"), Some("r1")),
+            tunnel("good", "example.com"),
+            tunnel("revoked", "crates.io"),
+            BrokerRequest {
+                method: "GET".into(),
+                target: "/anything".into(),
+                host: Some("example.com".into()),
+                ..BrokerRequest::default()
+            },
+        ];
+        for request in &refused {
+            let (early, whole) = (
+                Backend {
+                    egress: Some(listed.clone()),
+                    ..Backend::new(Some(RunStatus::Running))
+                },
+                Backend {
+                    egress: Some(listed.clone()),
+                    ..Backend::new(Some(RunStatus::Running))
+                },
+            );
+            let (early_records, whole_records) = (denials(), denials());
+            let broker = |backend, denials| QueueBroker {
+                backend,
+                denials,
+                build: "b1",
+                pid: 7,
+            };
+            let admitted = broker(&early, &early_records).admit(request);
+            assert_eq!(
+                admitted,
+                Admission::Answer(broker(&whole, &whole_records).handle(request)),
+                "{request:?}"
+            );
+            assert_eq!(
+                *early.denied.lock().unwrap(),
+                *whole.denied.lock().unwrap(),
+                "{request:?}"
+            );
+            assert_eq!(early.denied.lock().unwrap().len(), 1);
+        }
+        // The health is answered as ever, with nothing recorded.
+        let health = BrokerRequest {
+            method: "GET".into(),
+            target: crate::domain::queue_broker::HEALTH_PATH.into(),
+            ..BrokerRequest::default()
+        };
+        let backend = Backend::new(Some(RunStatus::Running));
+        let records = denials();
+        let broker = QueueBroker {
+            backend: &backend,
+            denials: &records,
+            build: "b1",
+            pid: 7,
+        };
+        assert_eq!(
+            broker.admit(&health),
+            Admission::Answer(broker.handle(&health))
+        );
+        assert!(backend.denied.lock().unwrap().is_empty());
+        // Its own live token or a listed tunnel: the run whose connection
+        // it is, nothing recorded or sent yet.
+        let backend = Backend {
+            egress: Some(listed),
+            ..with_credential(Some(RunStatus::Running), ClaudeCredentialKind::ApiKey)
+        };
+        let records = denials();
+        let broker = QueueBroker {
+            backend: &backend,
+            denials: &records,
+            build: "b1",
+            pid: 7,
+        };
+        for request in [
+            queue_request(Some("good"), Some("r1")),
+            claude_request(Some("good"), Some("r1")),
+            tunnel("verify", "crates.io"),
+        ] {
+            assert_eq!(
+                broker.admit(&request),
+                Admission::Run("r1".to_owned()),
+                "{request:?}"
+            );
+        }
+        assert!(backend.denied.lock().unwrap().is_empty());
+        assert!(backend.forwarded.lock().unwrap().is_empty());
     }
 
     #[test]
