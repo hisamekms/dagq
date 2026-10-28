@@ -31,6 +31,9 @@ pub(crate) struct ResumeRequest {
     /// `answers`), which the request names as where the session reads them
     /// all; `None` when there is none.
     pub answers_file: Option<String>,
+    /// The resume timeout in seconds (`[timeouts]`): how long after the
+    /// request the supervisor waits for the receipt to be rewritten.
+    pub resume_timeout: u64,
 }
 
 /// The bytes a resolution request (`resume_request`) takes at most, the
@@ -109,12 +112,42 @@ pub(crate) enum ResumeKind {
 }
 
 impl ResumeKind {
+    /// Whether the run may have come back for a verification that failed
+    /// (a landing's or a recheck's command, the e2e) or came back for
+    /// evidence missing from the receipt, so the request lets the session
+    /// run what failed or what is missing, and does not hold it to the
+    /// checks its fixes touch. A landing's or a recheck's reason may be a
+    /// conflict alone, which the kind does not tell apart.
+    pub(crate) const fn reruns_what_failed(self) -> bool {
+        matches!(
+            self,
+            Self::Landing | Self::Recheck | Self::E2e | Self::EvidenceMissing
+        )
+    }
+
     /// Whether the run was parked at a turn's end (a replanning or a hold),
     /// so the answers its session had been sent and had not taken are
     /// carried to the resumed one.
     pub(crate) const fn parked_at_fence(self) -> bool {
         matches!(self, Self::Replan | Self::Hold)
     }
+}
+
+/// How a resumed or revised session runs its checks: once, on the final
+/// tree after the fixes are committed, and again only for what a later fix
+/// touches, so the checks fit in the resume timeout.
+const CHECKS_ONCE: &str = "Commit all your fixes first, then run the checks once on the final tree; if you change anything after that, run again only the checks that change touches.";
+
+/// What a session resumed or revised for anything but a failed
+/// verification runs: the checks its fixes touch, never the whole suite.
+const CHECKS_TOUCHED: &str = "This request does not come from a failed verification: run only the checks that bear on what you fixed, not the whole test suite.";
+
+/// The line of a resume or revise request on the resume timeout, as the
+/// handoff of a new session says it.
+fn resume_timeout_line(resume_timeout: u64) -> String {
+    format!(
+        "The supervisor stops this session unless you rewrite the receipt within {resume_timeout} seconds of this request (the resume timeout)."
+    )
 }
 
 /// The section of a resolution request on the tasks landed on `branch`
@@ -323,7 +356,12 @@ pub(crate) fn resume_request(
         lines.push(known.trim_end().to_owned());
     }
     lines.push("Steps:".to_owned());
-    let checks = local_checks(&verify);
+    let local = local_checks(&verify);
+    let checks = if request.kind.reruns_what_failed() {
+        format!("{local} {CHECKS_ONCE}")
+    } else {
+        format!("{local} {CHECKS_ONCE} {CHECKS_TOUCHED}")
+    };
     if request.kind == ResumeKind::EvidenceMissing {
         lines.push(
             "1. Run the checks the reason names as missing and write their evidence into the receipt; write the spike_result fields it names as missing, as the task's prompt describes them."
@@ -389,12 +427,20 @@ pub(crate) fn resume_request(
             }
             _ => "",
         };
-        lines.push(format!("2. {checks}{reproduce} Commit the result."));
+        lines.push(format!(
+            "2. Commit the result. {local} {CHECKS_ONCE}{reproduce}{}",
+            if request.kind.reruns_what_failed() {
+                String::new()
+            } else {
+                format!(" {CHECKS_TOUCHED}")
+            }
+        ));
     }
     lines.push("3. Keep the worktree clean.".to_owned());
     lines.push(format!("4. {}", route.stop()));
     lines.push(format!(
-        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it. {ACCEPTANCE_REMAP} {FOLLOW_UP_PROPOSAL_AGAIN}"
+        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it. {ACCEPTANCE_REMAP} {FOLLOW_UP_PROPOSAL_AGAIN} {}",
+        resume_timeout_line(request.resume_timeout)
     ));
     lines.push(
         "6. If the change is no longer needed, write the receipt with result failed and the reason in summary."
@@ -570,7 +616,8 @@ pub(crate) fn closed_question_notice(
 /// The fixed request the supervisor types into the live session for a
 /// `revise` verdict (ADR-0027 decision 2), one instruction per line; the
 /// backend sends it as one line. It names the revise `number` of the run's
-/// `limit` (the latest review attempt's, ADR-t3033-1).
+/// `limit` (the latest review attempt's, ADR-t3033-1), and the
+/// `resume_timeout` in seconds the supervisor waits for the receipt.
 ///
 /// Held to [`REVISE_REQUEST_LIMIT`] (ADR-t2072-1): the findings, as one
 /// section, are cut to [`REVISE_FINDINGS_BYTES`] and point at
@@ -583,6 +630,7 @@ pub(crate) fn revise_request(
     (number, limit): (usize, ReviseLimit),
     reasons: &[String],
     findings_file: Option<&str>,
+    resume_timeout: u64,
 ) -> Result<FittedPrompt> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let mut fit = Fit::new(REVISE_REQUEST_LIMIT);
@@ -605,7 +653,7 @@ pub(crate) fn revise_request(
         NOT_READABLE,
     );
     fit.section("verify", &verify);
-    let checks = local_checks(&verify);
+    let checks = format!("{} {CHECKS_ONCE} {CHECKS_TOUCHED}", local_checks(&verify));
     let route = Route::of(run);
     let mut lines = route.opening(format!(
         "dagq: the supervisor's review of run {} (task {}) asks for changes (revise {number} of {limit} of the run).",
@@ -622,7 +670,8 @@ pub(crate) fn revise_request(
     lines.push("3. Keep the worktree clean.".to_owned());
     lines.push(format!("4. {}", route.stop()));
     lines.push(format!(
-        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it. {ACCEPTANCE_REMAP} {FOLLOW_UP_PROPOSAL_AGAIN}"
+        "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it. {ACCEPTANCE_REMAP} {FOLLOW_UP_PROPOSAL_AGAIN} {}",
+        resume_timeout_line(resume_timeout)
     ));
     lines.push(format!("6. {}", route.done(run)));
     Ok(fit.finish(lines.join("\n")))

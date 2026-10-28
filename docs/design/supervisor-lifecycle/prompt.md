@@ -95,7 +95,11 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
   - 要るevidence: `domain::required_of`。
 - verification commandsは「integrateがrebase後に1回流す」という見出しで見せ、直後の`local_checks`の一文が、worktreeで流すのはrepositoryの指示がworkerに求める検証だと言う。
   指示が何も求めないときだけverification commandsを流す。
-  resume・reviseの依頼も同じ一文を持ち、検証が落ちて戻ったresume（integrateのrebase後、着地の枝での再確認、e2e）はその落ちたものの再現を許す。
+  resume・reviseの依頼も同じ一文を持ち、続けて直しを全部commitしてから最終のtreeで検証を1回だけ流し、その後に直したらその直しに関係する検査だけを流し直すよう言う。
+  検証が落ちて戻ったresume（integrateのrebase後、着地の枝での再確認、e2e）はその落ちたものの再現を許し、足りないevidenceのresumeは足りない検査を流させる。
+  integrateと着地の枝での再確認のresumeは理由が衝突だけでも同じ依頼で、理由が落ちたコマンドのときだけ再現を許す。
+  それ以外のresume（人のsend_back・triage・precheckなど）とreviseは、直しに関係する検査だけを流し全体のtest suiteを流さないよう言う。
+  receiptを書き直す手順は、設定のresume timeoutの秒数の内に書き直さなければsupervisorがsessionを止めることを、引き継ぎのpromptと同じ文で言う。
   検証の正は同じcommitに対するintegrateの1回である（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定1）。
   このrepositoryでworkerが流すものは[手元の検証](../../development/local-checks.md)が持つ。
 - taskに`paths`があれば、宣言の外が要るときはaskにせず`failed`のreceiptに要るpathを書くよう言う（[ADR-0029](../../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)決定5）。

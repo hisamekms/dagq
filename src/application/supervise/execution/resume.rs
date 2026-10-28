@@ -191,6 +191,7 @@ impl Supervisor<'_> {
             known_failures: self.request_known_failures(&run, &format!("resume-{attempt}")),
             carried_answers,
             answers_file: answers_file(&run, &format!("resume-{attempt}")),
+            resume_timeout: self.sessions.resume_timeout().as_secs(),
         };
         match self.start_resume(&run, attempt, &request, run_env) {
             Ok(watch) => {

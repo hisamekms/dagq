@@ -79,7 +79,7 @@ runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料�
 
 - 記録と判定で示せること（流したコマンド・exit status・stressの周回と結果・時間の関門の結果・変えたtestが無いので関門を省いたこと）は、receiptの`tests`のevidenceに書かない。
 - evidenceには記録で示せないことだけを書く: testの範囲を選んだ理由と着地の検証・CIに任せた範囲、流したtestの件数（記録の項目に無く、ログの本文はreviewに渡らない）、流せなかった理由、許可の一覧に足した項目の名前と理由。
-- 検証はcommitの後に流すか、木を止めて流してそのtreeのままcommitする。commitの後に1行でも直せば、記録はそのcommitの根拠にならないので流し直す。1回の実行の間に木を変えた記録も根拠にならない。
+- 検証はcommitの後に流すか、木を止めて流してそのtreeのままcommitする。commitの後に1行でも直せば、記録はそのcommitの根拠にならないので流し直す。流し直すのはその直しに関係するtestと`sh scripts/check-local-gates.sh`が名指す関門だけで、全体ではない（例外は「resumeでの再現」の、落ちた検証の再現）。1回の実行の間に木を変えた記録も根拠にならない。
 - receiptの前に、commitしたtreeで`sh scripts/check-local-gates.sh --base <runのbase commit>`を流す。scriptは記録のdirと差分から、runtimeが要るとするstressと時間の関門のうち、そのtreeに一致するexit 0の記録が無いものを名指す（数え方はruntimeより多く要るとする側に倒れ、名指し方はscriptの冒頭）。
   exit 1なら、名指されたstressと関門を最終treeで流してもう一度当てる。testを名指せないfile（`tests/it`のhelperや`#[cfg(test)]`の`#[test]`でない行だけの変更）は、そのfileを使う変えたtestか、そのgateの対象のtestを選んで流す。流せないときはその理由をevidenceに書く。
 - 記録はworkerが書けるadvisoryなもので、着地の安全は今どおり`integrate`の検証が持つ。workerが手元でstressと時間の関門を流す規則（[ADR-t920-1](../adr/2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md)、[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）は変わらない。
@@ -105,6 +105,7 @@ runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料�
 
 - 手元で`cargo llvm-cov`（`cargo llvm-cov nextest`を含む）や全体のtestを流してよいのは、`integrate`の検証が落ちてresumeされたrunが、その落ちたコマンドを手元で流して再現するときだけ。coverageの関門が置き換わったtaskで再現するのは、置き換えの後の着地の検証のコマンド（`sh scripts/landing-it.sh`。`DAGQ_LANDING_BASE`にrebase先のmainのcommitを渡さなければITを全部流し、`DAGQ_CI_KNOWN_FAILURES`を渡さなければ既に落ちているtestも流れて落ちる）で、llvm-covではない（ADR-t1925-1決定6）。再現のコマンドも「cargoの出力」の形で流し（`sh scripts/cargo-brief.sh sh scripts/landing-it.sh`など）、落ちたtestの出力はログを狭く読む。
 - rebaseの衝突・migrationの番号・receiptの催促など、検証の失敗以外の理由のresumeと、reviewの差し戻し（revise）はこの例外に当たらず、上の関係するtestだけを流す。
+- どのresumeとreviseでも、直しを全部commitしてから最終のtreeで検証を1回だけ流す。その後に直したときの流し直しは、直した所に関係するtestと、`sh scripts/check-local-gates.sh`が名指すstressと時間の関門に限り、全体を流し直さない（上の例外の再現は除く）。
 
 ## e2eを流さない
 

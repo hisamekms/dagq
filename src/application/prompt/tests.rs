@@ -324,6 +324,7 @@ fn the_worker_and_resume_prompts_leave_the_e2e_to_the_runtime() {
         known_failures: None,
         carried_answers: Vec::new(),
         answers_file: None,
+        resume_timeout: 3600,
     };
     for worker in [&own_run, &codex] {
         let resumed = resume_request(&open, worker, &request, &[]).unwrap().text;
@@ -438,6 +439,7 @@ fn worker_and_resume_prompts_name_no_cargo_build_or_e2e_specifics() {
             known_failures: None,
             carried_answers: Vec::new(),
             answers_file: None,
+            resume_timeout: 3600,
         };
         let resumed = resume_request(&open, &worker, &request, &[]).unwrap().text;
         for step in [
@@ -447,6 +449,129 @@ fn worker_and_resume_prompts_name_no_cargo_build_or_e2e_specifics() {
         ] {
             assert!(resumed.contains(step), "{step}: {resumed}");
         }
+    }
+}
+
+const CHECKS_ONCE_LINE: &str = "Commit all your fixes first, then run the checks once on the final tree; if you change anything after that, run again only the checks that change touches.";
+const CHECKS_TOUCHED_LINE: &str =
+    "run only the checks that bear on what you fixed, not the whole test suite.";
+
+/// A resume for anything but a failed verification and a revise ask the
+/// session to commit its fixes before it runs the checks once on the final
+/// tree, to run only the checks its fixes touch, and say the resume
+/// timeout the configuration gives, in words that name no language or
+/// tool.
+#[test]
+fn a_resume_not_from_a_failed_verification_and_a_revise_run_the_checks_their_fixes_touch_once() {
+    let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+    let worker = run(7, RunStatus::NeedsSession, None);
+    let resume = |kind, resume_timeout| {
+        let request = ResumeRequest {
+            main: CommitSha::try_from(SHA).unwrap(),
+            branch: "main".into(),
+            reason: "why".into(),
+            kind,
+            reason_file: None,
+            known_failures: None,
+            carried_answers: Vec::new(),
+            answers_file: None,
+            resume_timeout,
+        };
+        resume_request(&task, &worker, &request, &[]).unwrap().text
+    };
+    let revise = |resume_timeout| {
+        revise_request(
+            &task,
+            &worker,
+            (1, ReviseLimit::default()),
+            &["fix it".into()],
+            None,
+            resume_timeout,
+        )
+        .unwrap()
+        .text
+    };
+    let mut texts = [
+        ResumeKind::SentBack,
+        ResumeKind::Triage,
+        ResumeKind::Precheck,
+        ResumeKind::ScopeViolation,
+        ResumeKind::SessionGone,
+        ResumeKind::Replan,
+        ResumeKind::Hold,
+    ]
+    .into_iter()
+    .flat_map(|kind| [(1234, resume(kind, 1234)), (3600, resume(kind, 3600))])
+    .collect::<Vec<_>>();
+    texts.push((1234, revise(1234)));
+    texts.push((3600, revise(3600)));
+    for (seconds, text) in &texts {
+        let steps = &text[text.find("Steps:").unwrap()..];
+        assert!(steps.contains(CHECKS_ONCE_LINE), "{text}");
+        assert!(steps.contains(CHECKS_TOUCHED_LINE), "{text}");
+        assert!(
+            text.contains(&format!(
+                "The supervisor stops this session unless you rewrite the receipt within {seconds} seconds of this request (the resume timeout)."
+            )),
+            "{text}"
+        );
+        let other = if *seconds == 1234 { 3600 } else { 1234 };
+        assert!(!text.contains(&format!("within {other} seconds")), "{text}");
+        let lower = text.to_lowercase();
+        for tool in ["cargo", "nextest", "llvm-cov", "check-local-gates"] {
+            assert!(!lower.contains(tool), "{tool}: {text}");
+        }
+    }
+}
+
+/// A resume for a failed verification keeps letting the session run what
+/// failed, and does not hold it to the checks its fixes touch; it still
+/// commits before the checks and is told the resume timeout.
+#[test]
+fn a_resume_from_a_failed_verification_may_reproduce_the_failure() {
+    let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+    let worker = run(7, RunStatus::NeedsSession, None);
+    for (kind, reproduce) in [
+        (
+            ResumeKind::Landing,
+            "you may also run that command in the worktree to reproduce and fix the failure",
+        ),
+        (
+            ResumeKind::Recheck,
+            "run that command in the worktree after the rebase to reproduce and fix the failure",
+        ),
+        (
+            ResumeKind::E2e,
+            "You may run a failed test by name to reproduce it",
+        ),
+        (
+            ResumeKind::EvidenceMissing,
+            "Run the checks the reason names as missing",
+        ),
+    ] {
+        let request = ResumeRequest {
+            main: CommitSha::try_from(SHA).unwrap(),
+            branch: "main".into(),
+            reason: "why".into(),
+            kind,
+            reason_file: None,
+            known_failures: None,
+            carried_answers: Vec::new(),
+            answers_file: None,
+            resume_timeout: 900,
+        };
+        let text = resume_request(&task, &worker, &request, &[]).unwrap().text;
+        assert!(text.contains(reproduce), "{kind:?}: {text}");
+        assert!(text.contains(CHECKS_ONCE_LINE), "{kind:?}: {text}");
+        assert!(
+            !text.contains("not the whole test suite"),
+            "{kind:?}: {text}"
+        );
+        assert!(!text.contains("does not come from a failed verification"));
+        assert!(
+            text.contains("within 900 seconds of this request"),
+            "{text}"
+        );
     }
 }
 
@@ -483,6 +608,7 @@ fn a_container_runs_resume_names_the_clones_main_ref() {
             known_failures: None,
             carried_answers: Vec::new(),
             answers_file: None,
+            resume_timeout: 3600,
         };
         let text = resume_request(&task, &container, &request, &[])
             .unwrap()
@@ -663,6 +789,7 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
             known_failures: None,
             carried_answers: Vec::new(),
             answers_file: None,
+            resume_timeout: 3600,
         };
         let text = resume_request(&verified, &own_run, &request, &[])
             .unwrap()
@@ -683,6 +810,7 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
         (1, ReviseLimit::default()),
         &["fix it".into()],
         None,
+        3600,
     )
     .unwrap()
     .text;
@@ -1830,6 +1958,7 @@ fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
             known_failures: None,
             carried_answers: Vec::new(),
             answers_file: None,
+            resume_timeout: 3600,
         };
         texts.push(resume_request(task, run, &request, &[]).unwrap().text);
     }
@@ -1840,6 +1969,7 @@ fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
             (1, ReviseLimit::default()),
             &["fix it".into()],
             None,
+            3600,
         )
         .unwrap()
         .text,
@@ -6537,6 +6667,7 @@ fn a_resume_after_a_hold_goes_on_where_the_run_stopped_with_its_answers() {
         known_failures: None,
         carried_answers: vec!["answer to ask 4: use the staging host".into()],
         answers_file: None,
+        resume_timeout: 3600,
     };
     let text = resume_request(&task, &run, &request, &[]).unwrap().text;
     for part in [
@@ -6569,6 +6700,7 @@ fn carried_answers_past_their_budget_are_cut_and_named_whole_in_their_file() {
         known_failures: None,
         carried_answers: answers,
         answers_file: Some(file.into()),
+        resume_timeout: 3600,
     };
     let large: Vec<String> = (1..=6)
         .map(|n| format!("answer to ask {n}: {}", "答".repeat(2_700)))
@@ -6636,6 +6768,7 @@ fn a_resolution_request_stays_within_its_limit_with_the_largest_input() {
                 known_failures: None,
                 carried_answers: vec!["答".repeat(100_000), "答".repeat(100_000)],
                 answers_file: Some("/runs/run/resume-1-answers.txt".into()),
+                resume_timeout: 3600,
             };
             let fitted = resume_request(&task, &run, &request, &landed).unwrap();
             let text = &fitted.text;
@@ -6687,6 +6820,7 @@ fn a_resolution_request_stays_within_its_limit_with_the_largest_input() {
         known_failures: None,
         carried_answers: Vec::new(),
         answers_file: None,
+        resume_timeout: 3600,
     };
     let run = run_on(Provider::Claude, WorkerMode::Headless);
     let text = resume_request(&task, &run, &request, &[]).unwrap().text;
@@ -6715,6 +6849,7 @@ fn within_its_limits_a_next_turn_message_carries_its_texts_whole() {
                 known_failures: None,
                 carried_answers: Vec::new(),
                 answers_file: None,
+                resume_timeout: 3600,
             };
             let fitted = resume_request(&task, &run, &request, &[]).unwrap();
             assert!(fitted.text.contains(&format!("\nReason: {reason}\n")));
@@ -6862,7 +6997,7 @@ fn a_revise_request_names_its_number_of_the_runs_limit() {
             "(revise 3 of 4 of the run).",
         ),
     ] {
-        let text = revise_request(&task, &run, (number, limit), &["fix it".into()], None)
+        let text = revise_request(&task, &run, (number, limit), &["fix it".into()], None, 3600)
             .unwrap()
             .text;
         assert!(text.contains(says), "{text}");
@@ -6887,6 +7022,7 @@ fn within_its_limits_a_revise_request_carries_its_findings_whole() {
             (1, ReviseLimit::default()),
             &reasons,
             Some("/runs/run/f.txt"),
+            3600,
         )
         .unwrap();
         let findings = reasons
@@ -6894,7 +7030,7 @@ fn within_its_limits_a_revise_request_carries_its_findings_whole() {
             .map(|reason| format!("- {reason}\n"))
             .collect::<String>();
         let steps = format!(
-            "Findings:\n{findings}Steps:\n1. Fix the findings in this worktree and commit.\n2. {}\n3. Keep the worktree clean.\n4. {HEADLESS_STOP}\n5. Rewrite the receipt at /runs/run/receipt.json with the new head commit",
+            "Findings:\n{findings}Steps:\n1. Fix the findings in this worktree and commit.\n2. {} {CHECKS_ONCE_LINE} This request does not come from a failed verification: {CHECKS_TOUCHED_LINE}\n3. Keep the worktree clean.\n4. {HEADLESS_STOP}\n5. Rewrite the receipt at /runs/run/receipt.json with the new head commit",
             local_checks(r#"["make gate"]"#)
         );
         assert!(fitted.text.contains(&steps), "{}", fitted.text);
@@ -6939,6 +7075,7 @@ fn a_revise_request_stays_within_its_limit_with_the_largest_input() {
                 (2, ReviseLimit::default()),
                 reasons,
                 Some(file),
+                3600,
             )
             .unwrap();
             let text = &fitted.text;
@@ -6971,7 +7108,7 @@ fn a_revise_request_stays_within_its_limit_with_the_largest_input() {
     }
     // Without a file to point at, the cut findings are in no file.
     let run = run_on(Provider::Claude, WorkerMode::Headless);
-    let text = revise_request(&task, &run, (1, ReviseLimit::default()), &huge, None)
+    let text = revise_request(&task, &run, (1, ReviseLimit::default()), &huge, None, 3600)
         .unwrap()
         .text;
     assert!(
@@ -7024,6 +7161,7 @@ fn prompt_bytes_are_read_back_as_written() {
         (1, ReviseLimit::default()),
         &["x".repeat(50_000)],
         None,
+        3600,
     )
     .unwrap()
     .bytes;
@@ -7260,6 +7398,7 @@ fn a_revises_handoff_carries_the_findings_once() {
         (1, ReviseLimit::default()),
         &[format!("- {finding}")],
         None,
+        3600,
     )
     .unwrap();
     let text = handoff_text(&run, &bare_handoff(&request.text)).text;
@@ -7679,6 +7818,7 @@ fn the_worker_prompt_and_its_requests_carry_the_known_failures_only_when_there_a
                 known_failures: list.clone(),
                 carried_answers: Vec::new(),
                 answers_file: None,
+                resume_timeout: 3600,
             };
             let text = resume_request(&task, &run, &request, &[]).unwrap().text;
             for line in lines {
@@ -7852,6 +7992,7 @@ fn a_thousand_known_failures_stay_within_each_prompts_limit_and_name_their_file(
             known_failures: Some(list.clone()),
             carried_answers: Vec::new(),
             answers_file: None,
+            resume_timeout: 3600,
         };
         let fitted = resume_request(&big, &run, &request, &landed).unwrap();
         check(&fitted, RESUME_REQUEST_LIMIT);
