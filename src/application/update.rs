@@ -1146,6 +1146,9 @@ fn settle(
                         if stopping(failed) {
                             entry["stopping"] = json!(true);
                         }
+                        if !failed["stale_heartbeat_secs"].is_null() {
+                            entry["stale_heartbeat_secs"] = failed["stale_heartbeat_secs"].clone();
+                        }
                         supervisors.push(entry);
                     }
                     let mut details = json!({
@@ -1224,6 +1227,17 @@ fn settle(
         });
         if watched.stopping {
             entry["stopping"] = json!(true);
+        }
+        // How stale its heartbeat looked while the handoff waited for it.
+        if let Some(secs) = report["supervisors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|handed| handed["pid"] == watched.pid)
+            .map(|handed| &handed["stale_heartbeat_secs"])
+            .filter(|secs| !secs.is_null())
+        {
+            entry["stale_heartbeat_secs"] = secs.clone();
         }
         if watched.error.is_some() {
             let before = registered_before(registered, &watched.token, watched.pid);

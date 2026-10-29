@@ -1144,6 +1144,11 @@ pub(crate) enum Afterwards {
     /// Stop heartbeating while asked, the process living on (hung in the
     /// exec of the new binary); it dies once terminated.
     Hang,
+    /// Fall a minute behind on its heartbeat while asked, the process
+    /// living on (a drain that holds the heartbeat back), over several of
+    /// the wait's looks; then take the handoff under the new build and
+    /// heartbeat on.
+    LateThenBack,
     /// Die while asked, before taking the handoff.
     DieBeforeTaking,
     /// Take the handoff under the new build, then stop heartbeating, the
@@ -1206,6 +1211,17 @@ pub(crate) fn take_as(
                 )
                 .unwrap();
             return;
+        }
+        Afterwards::LateThenBack => {
+            rusqlite::Connection::open(&fixture.location.db)
+                .unwrap()
+                .execute(
+                    "UPDATE supervisors SET heartbeat_at = unixepoch() - 60 WHERE token = ?1",
+                    [token],
+                )
+                .unwrap();
+            // The wait looks at it (and its pid) a few times while it is late.
+            until_watched(processes, pid);
         }
         Afterwards::DieBeforeTaking => {
             processes.dead.lock().unwrap().insert(pid);
@@ -1283,6 +1299,15 @@ fn update_two_steps(
     auto: Afterwards,
     other: Afterwards,
 ) -> (Value, Vec<String>, Vec<String>, PathBuf, Option<Value>) {
+    update_two_within(auto, other, Duration::from_secs(5))
+}
+
+/// [`update_two_steps`] with the handoff waiting up to `handoff_timeout`.
+fn update_two_within(
+    auto: Afterwards,
+    other: Afterwards,
+    handoff_timeout: Duration,
+) -> (Value, Vec<String>, Vec<String>, PathBuf, Option<Value>) {
     let fixture = fixture();
     let mut queue = auto_supervisor(&fixture);
     queue
@@ -1316,7 +1341,14 @@ fn update_two_steps(
             }
         });
         let _done = Done(&done);
-        run_update_job(&fixture, &binaries, &processes, &restarted)
+        run_update_job_with_handoff_timeout(
+            &fixture,
+            &binaries,
+            &processes,
+            &restarted,
+            handoff_timeout,
+            &dagq::infrastructure::clock::SystemClock,
+        )
     });
     let restarted = restarted.lock().unwrap().clone();
     let failed = queue
@@ -1579,8 +1611,13 @@ fn the_update_job_keeps_the_binary_when_only_some_take_the_handoff() {
 /// started again, and each one's outcome is in the `update_failed` ask.
 #[test]
 fn the_update_job_brings_back_every_supervisor_when_none_takes_the_handoff() {
-    let (report, calls, mut restarted, target) =
-        update_two(Afterwards::Hang, Afterwards::DieBeforeTaking);
+    // Its pid lives, so its stale heartbeat is waited out to the handoff's
+    // timeout, not failed at once.
+    let (report, calls, mut restarted, target, _) = update_two_within(
+        Afterwards::Hang,
+        Afterwards::DieBeforeTaking,
+        Duration::from_secs(1),
+    );
     assert_eq!(report["outcome"], "failed", "{report}");
     assert_eq!(report["stage"], "install", "{report}");
     assert_eq!(report["kept"], false, "{report}");
@@ -1600,7 +1637,11 @@ fn the_update_job_brings_back_every_supervisor_when_none_takes_the_handoff() {
         auto["error"]
             .as_str()
             .unwrap()
-            .contains("stopped heartbeating"),
+            .contains("did not take the handoff to"),
+        "{report}"
+    );
+    assert!(
+        auto["stale_heartbeat_secs"].as_i64().unwrap() > 30,
         "{report}"
     );
     assert_eq!(auto["supervisor"]["state"], "restarted", "{report}");
@@ -1611,6 +1652,36 @@ fn the_update_job_brings_back_every_supervisor_when_none_takes_the_handoff() {
     assert_eq!(other["supervisor"]["state"], "restarted", "{report}");
     assert_eq!(other["supervisor"]["stopped"], false, "{report}");
     assert!(report["ask_id"].as_i64().is_some(), "{report}");
+}
+
+/// A supervisor whose pid lives on while its heartbeat falls past the
+/// timeout during the handoff's wait is waited for, not failed: once it
+/// takes the handoff under the new build the binary stays, nothing is put
+/// back or started again, and `update_installed` says how stale its
+/// heartbeat looked.
+#[test]
+fn the_update_job_waits_for_a_live_supervisor_whose_heartbeat_falls_behind() {
+    let (report, calls, restarted, _, failed) =
+        update_two_steps(Afterwards::LateThenBack, Afterwards::Heartbeat);
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert_eq!(failed, None);
+    assert!(calls.iter().all(|c| !c.starts_with("restore")), "{calls:?}");
+    assert!(restarted.is_empty(), "{restarted:?}");
+    let supervisors = report["supervisors"].as_array().unwrap();
+    let auto = supervisors
+        .iter()
+        .find(|s| s["previous_token"] == "auto")
+        .unwrap();
+    assert_eq!(auto["error"], Value::Null, "{report}");
+    assert!(
+        auto["stale_heartbeat_secs"].as_i64().unwrap() >= 60,
+        "{report}"
+    );
+    let other = supervisors
+        .iter()
+        .find(|s| s["previous_token"] == "other")
+        .unwrap();
+    assert_eq!(other["stale_heartbeat_secs"], Value::Null, "{report}");
 }
 
 /// An install that fails before any handoff (here its replace) brings back

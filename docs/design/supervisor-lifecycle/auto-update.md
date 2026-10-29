@@ -114,7 +114,8 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
      何も置き換えない。
   3. **入れ替え**: それ以外は`install::install`（`Source::Binary`、drainはしない）を呼ぶ: 確認、互換のmigration（ビルドしたbinaryのserviceを入れ替えの口で起動し、受け付けの前に適用させる。許しはその起動の間だけ）、renameでの差し替え（`.previous`を残す）とqueueのbinaryの記録、このqueueのliveなsupervisorへの引き継ぎの要求と、同じpidとtokenで戻るまでの待ち。
      tokenの登録が消えても、同じpidが引き継ぎを頼んだ後に新しいbuild識別子で登録し直していれば、その新しいtokenで戻ったとする（`lifecycle::successor`。pidが再利用されて残った古い行は後継とみなさない）。
-     execしたプロセスが死ねばheartbeatが止まった時点で失敗。
+     要求を持つか受けて登録し直す前のsupervisorは、pidが死んだ時点で失敗にし、pidが生きている間はheartbeatが`HEARTBEAT_TIMEOUT_SECS`より古く見えても失敗にせず上限まで待つ（drainやqueueの書き込みの詰まりでheartbeatが一時的に遅れても、取り消し・戻し・起動し直しにしない）。
+     待ちのあいだに見えた最も古いheartbeatの秒数は、そのsupervisorの`update_installed`と`update_failed`の`supervisors`の要素の`stale_heartbeat_secs`に残る（`lifecycle::Handed`）。
      停止要求でdrainに入ったsupervisorは上限を待たずに失敗にし、要求を取り消す（[Handoff](handoff.md#handoff)）。
      上限の直後にsupervisorがexec直前に要求を受け取れば取り消しが要求を見つけないので、`lifecycle::HANDOFF_GRACE`の猶予のあいだ見直し、新しいbuild識別子で戻れば引き継いだとして4で見張る（[`up` / `down`](up-down.md)の引き継ぎ）。
      引き継ぎは最初の失敗で止まらず全員の結果を待つ。

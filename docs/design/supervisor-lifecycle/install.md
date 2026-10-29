@@ -61,6 +61,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    戻したときの窓は`Source::Rollback`のdoc commentと[Authorization](../authorization.md#固定バイナリを戻したときの窓)が持つ。
 5. **引き継ぎ**: liveな登録のうち引き継ぎを受けられるものに`<to>`をexecさせ（`lifecycle::hand_off`）、受けられないものは`not_handed_off`（`up`でdrainする）に載せる。
    停止要求でdrainに入ったsupervisorは上限を待たずにその場で失敗にし、要求を取り消す（[Handoff](handoff.md#handoff)）。
+   pidが死んだsupervisorも上限を待たずに失敗にし、pidが生きている間はheartbeatが古く見えても失敗にせず上限まで待つ（判定は`lifecycle::hand_off`のdoc comment、古く見えた秒数は`Handed::report`の要素）。
    上限の直後に要求を受け取ったsupervisorの扱いは`lifecycle::hand_off`のdoc commentと[`up` / `down`](up-down.md)の引き継ぎが持つ。
    `hand_off`は最初の失敗で止まらず、引き継がせた全員の成功か失敗を待つ（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）。
    fileは全員で1つなので、**全員が失敗したときだけ**`<to>.previous`を`<to>`に戻し（`restore`）、`install::HandoffFailed`のerrorで止まる。

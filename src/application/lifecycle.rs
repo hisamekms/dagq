@@ -1392,6 +1392,12 @@ pub struct Handed {
     /// It did not take the handoff because it drains for a stop request
     /// (its `supervisor_draining`, task 1277): a stop wins over the handoff.
     pub stopping: bool,
+    /// The oldest heartbeat, in seconds, its registration showed while the
+    /// handoff waited for it with its pid alive, when that was past
+    /// [`HEARTBEAT_TIMEOUT_SECS`]: such a supervisor is waited for, not
+    /// failed, so this is what is left of the stale look. Reported as
+    /// `stale_heartbeat_secs`.
+    pub stale_heartbeat_secs: Option<i64>,
 }
 
 impl Handed {
@@ -1414,7 +1420,23 @@ impl Handed {
         if self.stopping {
             value["stopping"] = json!(true);
         }
+        if let Some(secs) = self.stale_heartbeat_secs {
+            value["stale_heartbeat_secs"] = json!(secs);
+        }
         value
+    }
+
+    /// Keep `look`'s heartbeat age when it is the oldest past
+    /// [`HEARTBEAT_TIMEOUT_SECS`] the wait has seen.
+    fn note(&mut self, look: &Result<Look>) {
+        if let Ok(Look::Waiting { heartbeat_age }) = look
+            && *heartbeat_age > HEARTBEAT_TIMEOUT_SECS
+        {
+            self.stale_heartbeat_secs = Some(
+                self.stale_heartbeat_secs
+                    .map_or(*heartbeat_age, |secs| secs.max(*heartbeat_age)),
+            );
+        }
     }
 }
 
@@ -1435,14 +1457,18 @@ pub const HANDOFF_GRACE: Duration = Duration::from_secs(30);
 /// Ask each supervisor in `live` to exec `binary` (ADR-0045 decision 10)
 /// and wait until each of them has either taken its registration back
 /// under `version`, with the same pid, or failed to, within one `timeout`
-/// for them all. A supervisor fails when it cannot take a handoff, stops
-/// heartbeating before it did (an exec'd binary that failed to start),
+/// for them all. A supervisor fails when it cannot take a handoff, its pid
+/// is gone before it did (an exec'd binary that failed to start),
 /// deregistered without its pid registering again under `version` (which
 /// takes its place, under its new token), came back under another build (an
 /// exec that failed, after which the old binary goes on) or is still asked
-/// at the timeout. Only a registration with a fresh heartbeat counts as
-/// back, so a process that died just after it took its registration back
-/// is not a success. One failing does not stop the wait for the others
+/// at the timeout. While its pid lives it is waited for however old its
+/// heartbeat looks (a drain or a busy queue can hold the heartbeat back
+/// past [`HEARTBEAT_TIMEOUT_SECS`] for a while): only the timeout ends
+/// that wait, and the oldest heartbeat seen is kept as
+/// [`Handed::stale_heartbeat_secs`]. Only a registration with a fresh
+/// heartbeat counts as back, so a process that died just after it took
+/// its registration back is not a success. One failing does not stop the wait for the others
 /// (ADR-t632-1): the result names what became of each, and the request of
 /// each one that failed is withdrawn, since a request left behind would
 /// have the supervisor exec that path later, after the caller put another
@@ -1546,6 +1572,7 @@ run `up`",
                 now: None,
                 error,
                 stopping: false,
+                stale_heartbeat_secs: None,
             },
             false,
         ));
@@ -1562,7 +1589,7 @@ run `up`",
             .iter_mut()
             .filter(|(h, _)| h.now.is_none() && h.error.is_none())
         {
-            match look_at_handoff(
+            let look = look_at_handoff(
                 registrations,
                 &handed.registration,
                 processes,
@@ -1570,17 +1597,19 @@ run `up`",
                 asked_at,
                 binary_text,
                 version,
-            ) {
-                Ok(Some(token)) => handed.now = Some(token),
+            );
+            handed.note(&look);
+            match look {
+                Ok(Look::Back(token)) => handed.now = Some(token),
                 // A stop wins over the handoff, also when its drain ended
                 // (deregistered) before this look.
-                Ok(None) if stops.before.contains(&handed.registration.token) => {
+                Ok(Look::Waiting { .. }) if stops.before.contains(&handed.registration.token) => {
                     stopped_instead(handed, binary_text);
                 }
                 Err(_) if stops.after.contains(&handed.registration.token) => {
                     stopped_instead(handed, binary_text);
                 }
-                Ok(None) if expired => {
+                Ok(Look::Waiting { .. }) if expired => {
                     handed.error = Some(format!(
                         "supervisor {} (pid {}) did not take the handoff to {binary_text} within \
 {}s; it still finishes its validation or landing in progress, so check `status` again",
@@ -1590,7 +1619,7 @@ run `up`",
                     ));
                     *timed_out = true;
                 }
-                Ok(None) => {}
+                Ok(Look::Waiting { .. }) => {}
                 Err(error) => handed.error = Some(format!("{error:#}")),
             }
         }
@@ -1625,8 +1654,8 @@ fn stopping_supervisors(queue: &(impl RunLog + ?Sized)) -> Result<HashSet<LeaseT
 /// (task 1277). A supervisor still asked in the registrations is stopping
 /// only by the stops read `before` them: one that registered again under
 /// the new build and was stopped after that read took the handoff. One
-/// that failed (deregistered, no longer heartbeating) is stopping by the
-/// stops read `after` them too: a supervisor records its stop before its
+/// that failed (deregistered, its pid gone) is stopping by the stops read
+/// `after` them too: a supervisor records its stop before its
 /// drain ends and it deregisters, so one gone from the registrations
 /// after a stop the first read missed shows it in the second.
 struct Stops {
@@ -1667,8 +1696,8 @@ deregisters, then `up` starts it with the binary in place",
 /// Look again, for up to `grace`, at the supervisors of `handed` at
 /// `pending` that took their request just as the wait ran out: one that
 /// registers again under `version` (its token, or its pid's successor)
-/// took the handoff; one back under another build or no longer
-/// heartbeating, or not back by then, did not, and its error says it took
+/// took the handoff; one back under another build or whose pid is gone,
+/// or not back by then, did not, and its error says it took
 /// the request.
 #[allow(clippy::too_many_arguments)]
 fn look_again(
@@ -1708,7 +1737,7 @@ fn look_again(
                 asked_at,
             )
             .is_some();
-            let error = match look_at_handoff(
+            let look = look_at_handoff(
                 registrations,
                 registration,
                 processes,
@@ -1716,15 +1745,18 @@ fn look_again(
                 asked_at,
                 binary_text,
                 version,
-            ) {
-                Ok(Some(token)) => {
+            );
+            one.note(&look);
+            let registration = &one.registration;
+            let error = match look {
+                Ok(Look::Back(token)) => {
                     one.now = Some(token);
                     one.error = None;
                     return false;
                 }
                 // A stop wins over the handoff: it drains under its old
                 // binary and will not come back under this one.
-                Ok(None) if stops.before.contains(&registration.token) => {
+                Ok(Look::Waiting { .. }) if stops.before.contains(&registration.token) => {
                     stopped_instead(one, binary_text);
                     return false;
                 }
@@ -1792,10 +1824,26 @@ pub(crate) fn registered_again(
     registration.pid == pid && registration.started_at >= since
 }
 
-/// One look at `registration`'s handoff: the token it serves under once it
-/// took it, `None` while it is still asked, an error when it cannot take
-/// it any more. It is back only when the registration it serves under
-/// heartbeats freshly under `version` with the same pid.
+/// One look at a supervisor's handoff that did not fail.
+#[derive(Debug, PartialEq, Eq)]
+enum Look {
+    /// Still asked, or between its exec and its registration under the new
+    /// build, with its pid alive and its registration's heartbeat this many
+    /// seconds old (past [`HEARTBEAT_TIMEOUT_SECS`] too: only the handoff's
+    /// timeout ends the wait for a live pid).
+    Waiting { heartbeat_age: i64 },
+    /// Back under the new build, serving under this token.
+    Back(LeaseToken),
+}
+
+/// One look at `registration`'s handoff: [`Look::Back`] once it took it,
+/// [`Look::Waiting`] while it is still asked or exec'ing and its pid lives,
+/// an error when it cannot take it any more (its pid gone, its row gone
+/// without a successor, or back under another build). A heartbeat that is
+/// late while it waits is no failure: a drain in progress or a queue
+/// whose writes are held back delays it with the process still there. It
+/// is back only when the registration it serves under heartbeats freshly
+/// under `version` with the same pid.
 fn look_at_handoff(
     registrations: &[SupervisorRegistration],
     registration: &SupervisorRegistration,
@@ -1804,7 +1852,7 @@ fn look_at_handoff(
     asked_at: i64,
     binary_text: &str,
     version: &str,
-) -> Result<Option<LeaseToken>> {
+) -> Result<Look> {
     let name = format!(
         "supervisor {} (pid {})",
         registration.token, registration.pid
@@ -1820,13 +1868,16 @@ fn look_at_handoff(
     ) else {
         bail!("{name} deregistered instead of taking the handoff to {binary_text}");
     };
+    let waiting = Look::Waiting {
+        heartbeat_age: now - current.heartbeat_at,
+    };
     if current.handoff_binary.is_some() {
         ensure!(
-            fresh(current, processes, now),
-            "{name} stopped heartbeating before it took the handoff to {binary_text}; see its log, \
-then `down --force` and `up`"
+            processes.alive(current.pid),
+            "{name} stopped (its pid is gone) before it took the handoff to {binary_text}; see its \
+log, then `down --force` and `up`"
         );
-        return Ok(None);
+        return Ok(waiting);
     }
     // Taken just before its exec (task 824): `resume_registration` accepts
     // handoffs again once the exec'd binary, or the old one after a failed
@@ -1834,11 +1885,11 @@ then `down --force` and `up`"
     // is a registration after the exec, whatever it accepts yet.
     if current.token == registration.token && !current.handoff_accepted {
         ensure!(
-            fresh(current, processes, now),
+            processes.alive(current.pid),
             "{name} took the handoff to {binary_text} but stopped before it registered again; see \
 its log, then `down --force` and `up`"
         );
-        return Ok(None);
+        return Ok(waiting);
     }
     ensure!(
         current.pid == registration.pid
@@ -1849,7 +1900,7 @@ and it goes on with its binary; see its log",
         current.binary_version.as_deref().unwrap_or("(unrecorded)"),
         current.pid
     );
-    Ok(Some(current.token.clone()))
+    Ok(Look::Back(current.token.clone()))
 }
 
 /// Write and load the LaunchAgent, the one way `up` starts a supervisor:
@@ -3479,6 +3530,86 @@ mod tests {
         );
         assert_eq!(stops.now, 7);
         assert_eq!(stops.registrations.len(), 1);
+    }
+
+    /// A look at a supervisor asked to hand off, or exec'ing, waits while
+    /// its pid lives however old its heartbeat is, and fails at once when
+    /// its pid is gone or its row is gone without a successor; a successor
+    /// under the new build is back, one under another build is not. The
+    /// handoff keeps the oldest heartbeat past the timeout it waited for.
+    #[test]
+    fn a_handoff_waits_for_a_live_pid_whatever_its_heartbeat_and_fails_on_a_dead_one() {
+        struct Alive(u32);
+        impl ProcessControl for Alive {
+            fn alive(&self, pid: u32) -> bool {
+                pid == self.0
+            }
+            fn terminate(&self, _: u32) -> Result<()> {
+                Ok(())
+            }
+            fn interrupt(&self, _: u32) -> Result<()> {
+                Ok(())
+            }
+            fn kill(&self, _: u32) -> Result<()> {
+                Ok(())
+            }
+        }
+        const NOW: i64 = 1_000;
+        let asked = registration("t", 7, NOW);
+        let look = |row: SupervisorRegistration, alive: u32| {
+            look_at_handoff(&[row], &asked, &Alive(alive), NOW, 0, "/bin/dagq", VERSION)
+        };
+        let requested = |heartbeat_at| SupervisorRegistration {
+            handoff_binary: Some("/bin/dagq".into()),
+            ..registration("t", 7, heartbeat_at)
+        };
+        let taken = |heartbeat_at| SupervisorRegistration {
+            handoff_accepted: false,
+            ..registration("t", 7, heartbeat_at)
+        };
+        let stale = NOW - HEARTBEAT_TIMEOUT_SECS - 90;
+        for row in [requested(NOW), requested(stale), taken(NOW), taken(stale)] {
+            let heartbeat_age = NOW - row.heartbeat_at;
+            assert_eq!(look(row, 7).unwrap(), Look::Waiting { heartbeat_age });
+        }
+        let error = format!("{:#}", look(requested(NOW), 8).unwrap_err());
+        assert!(
+            error.contains("stopped (its pid is gone) before it took"),
+            "{error}"
+        );
+        let error = format!("{:#}", look(taken(NOW), 8).unwrap_err());
+        assert!(
+            error.contains("stopped before it registered again"),
+            "{error}"
+        );
+        let error = format!("{:#}", look(registration("u", 9, NOW), 7).unwrap_err());
+        assert!(error.contains("deregistered instead"), "{error}");
+        assert_eq!(
+            look(registration("t", 7, NOW), 7).unwrap(),
+            Look::Back(LeaseToken::new("t"))
+        );
+        let other = SupervisorRegistration {
+            binary_version: Some("0.0.1".into()),
+            ..registration("t", 7, NOW)
+        };
+        let error = format!("{:#}", look(other, 7).unwrap_err());
+        assert!(error.contains("came back as 0.0.1"), "{error}");
+
+        let mut handed = Handed {
+            registration: asked.clone(),
+            now: None,
+            error: None,
+            stopping: false,
+            stale_heartbeat_secs: None,
+        };
+        handed.note(&Ok(Look::Waiting {
+            heartbeat_age: HEARTBEAT_TIMEOUT_SECS,
+        }));
+        assert_eq!(handed.stale_heartbeat_secs, None);
+        handed.note(&Ok(Look::Waiting { heartbeat_age: 90 }));
+        handed.note(&Ok(Look::Waiting { heartbeat_age: 40 }));
+        assert_eq!(handed.stale_heartbeat_secs, Some(90));
+        assert_eq!(handed.report()["stale_heartbeat_secs"], 90);
     }
 
     fn registration(token: &str, pid: u32, heartbeat_at: i64) -> SupervisorRegistration {

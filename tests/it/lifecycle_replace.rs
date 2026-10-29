@@ -747,6 +747,24 @@ fn up_reports_a_handoff_that_did_not_happen() {
         .request_handoff(&LeaseToken::new("old"), "/opt/bin/dagq")
         .unwrap();
     let registration = queue.supervisors().unwrap().remove(0);
+    // Its pid lives: a stale heartbeat is waited out to the timeout and
+    // reported, not failed at once.
+    let handed = lifecycle::hand_off(
+        &queue,
+        &processes,
+        &dagq::infrastructure::clock::SystemClock,
+        std::slice::from_ref(&registration),
+        Path::new("/opt/bin/dagq"),
+        VERSION,
+        Duration::from_millis(200),
+        Duration::from_millis(20),
+    )
+    .unwrap();
+    let error = handed[0].error.as_deref().unwrap();
+    assert!(error.contains("did not take the handoff"), "{error}");
+    assert!(handed[0].stale_heartbeat_secs.unwrap() >= 60, "{handed:?}");
+    // Its pid gone, it fails at once.
+    processes.dead.lock().unwrap().insert(registration.pid);
     let handed = lifecycle::hand_off(
         &queue,
         &processes,
@@ -759,7 +777,7 @@ fn up_reports_a_handoff_that_did_not_happen() {
     )
     .unwrap();
     let error = handed[0].error.as_deref().unwrap();
-    assert!(error.contains("stopped heartbeating"), "{error}");
+    assert!(error.contains("its pid is gone"), "{error}");
     queue
         .deregister_supervisor(&LeaseToken::new("old"))
         .unwrap();

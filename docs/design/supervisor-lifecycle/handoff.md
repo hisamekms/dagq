@@ -65,7 +65,7 @@ use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）�
 - **停止要求の記録と引き継ぎの待ち**: supervisorは停止要求（SIGINT/SIGTERM。どこから来ても）に最初に気づいたpassで、queueのevent `supervisor_draining`をプロセスごとに1回だけ記録する（書けなければlogに残して次のpassで書き直す）。
   停止要求は引き継ぎに勝つので、drainを続けてexecしない。
   `hand_off`の待ちは各`poll`で最新の`supervisor_draining`を読み、待っているsupervisorがまだ引き継いでいないのにそのtokenの`supervisor_draining`があれば、上限を待たずにそのsupervisorを失敗にし、要求を`cancel_handoff`で取り消す（要求の前の記録も同じく、その停止はexecせずに終わる。drainを終えて登録が消えた後も同じ）。
-  1回の見直しは停止の記録・登録・停止の記録の順に読む（`Stops::around`）: まだ要求を持つsupervisorは登録より前に読んだ停止だけで停止中とし（新しいbuildで戻った直後に止められたsupervisorを停止中と取り違えない）、登録が消えた・heartbeatが古くなったsupervisorは登録の後に読んだ停止でも停止中とする（supervisorは登録を消す前に停止を記録するので、2つの読み取りのあいだに停止して登録を消したsupervisorも停止中と分かる）。
+  1回の見直しは停止の記録・登録・停止の記録の順に読む（`Stops::around`）: まだ要求を持つsupervisorは登録より前に読んだ停止だけで停止中とし（新しいbuildで戻った直後に止められたsupervisorを停止中と取り違えない）、登録が消えた・pidが止まったsupervisorは登録の後に読んだ停止でも停止中とする（pidが生きてheartbeatが古いだけのsupervisorは失敗にならず、まだ要求を持つsupervisorと同じく待つ）（supervisorは登録を消す前に停止を記録するので、2つの読み取りのあいだに停止して登録を消したsupervisorも停止中と分かる）。
   この失敗は`Handed`の`stopping`がtrueになり、`Handed::report`の要素に`stopping: true`が付く。
   停止中による失敗も、全員の失敗で前のbinaryに戻し一部なら新しいbinaryを残す規則（ADR-t632-1）と同じaskの形に従う。
   上限切れのerrorに「検証や着地がまだ進行中」と添えるのは、停止中でないsupervisorだけにする。
