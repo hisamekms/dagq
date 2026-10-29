@@ -1,0 +1,20 @@
+# The items of task 2551 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 8.1s: a review, a waiting run, main moved and a recheck in the fake podman's container in two supervises
+[[test]]
+name = "verification_container::a_waiting_run_whose_recheck_command_fails_in_its_container_is_parked_for_a_resume"
+reason = "B 境界（守る境界）: container の中で落ちた landing recheck の command が、lease の無い run を park_rechecked で needs_session に移し action=resumed を記録することを、podman の起動・SQLite の event と park・supervise の配線で確かめる（container を作る前の拒否の判定は supervise::recheck の unit test）"
+task = 2551
+
+# 9.8s: a review, the run held in its slot for its e2e, main moved, a recheck refused by podman and the landing in one supervise
+[[test]]
+name = "verification_container::a_run_held_in_its_slot_whose_recheck_container_does_not_start_lands_unparked"
+reason = "B 境界（守る境界）: supervisor が slot に持つ container の run の recheck で podman が container を起動しない（125）とき、action=skipped の記録が lease と slot を外さず、着地の park_held_by_recheck が park しないことを、slot・lease・SQLite の event・着地の配線で確かめる（拒否の判定は supervise::recheck の unit test）"
+task = 2551
+
+# 13.0s: the same with a command failing in the container, the park when it would land, its resume and the landing
+[[test]]
+name = "verification_container::a_run_held_in_its_slot_whose_recheck_command_fails_in_its_container_is_parked_before_it_lands"
+reason = "B 境界（守る境界）: slot に持つ container の run の recheck の command が container の中で落ちたとき action=held で記録され、着地の park_held_by_recheck が needs_session に park して resume に渡し、resume の後の head が着地することを、slot・lease・SQLite の event・resume と着地の配線で確かめる（held_against の判定は domain::recheck の unit test）"
+task = 2551

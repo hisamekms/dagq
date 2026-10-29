@@ -1033,6 +1033,18 @@ fn rechecked_in_a_container(
     config: &str,
     container: Arc<dyn dagq::application::ContainerRuntime + Send + Sync>,
 ) -> (TaskRun, usize) {
+    let (run, before, outcome) = rechecked_in_a_container_with(queue, config, container);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    (run, before)
+}
+
+/// [`rechecked_in_a_container`], with the outcome of the supervisor that
+/// rechecked, whose errors the caller judges.
+fn rechecked_in_a_container_with(
+    queue: &VerifyQueue,
+    config: &str,
+    container: Arc<dyn dagq::application::ContainerRuntime + Send + Sync>,
+) -> (TaskRun, usize, Value) {
     queue.set_config(config);
     let first = add_task(&queue.db, &[]);
     let backend = TestWorkspace::new(&queue.db, false, IDLE_AGENT);
@@ -1042,7 +1054,7 @@ fn rechecked_in_a_container(
     );
     let reviewer = TestReviewer::new(&[verdict("concern", &["a person should look"], "unsure")]);
     let outcome =
-        supervise_reviewed_with(&queue.db, &queue.repo, &backend, &reviewer, &queue.options);
+        supervise_reviewed_owned_with(&queue.db, &queue.repo, &backend, &reviewer, &queue.options);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let waiting = SqliteQueue::open(&queue.db)
         .unwrap()
@@ -1065,8 +1077,8 @@ fn rechecked_in_a_container(
     git(&queue.repo, &["commit", "-qm", "main moves"]);
     let mut options = queue.options.clone();
     options.container = Some(runtime::ContainerRuntimePort(container));
-    let outcome = supervise_reviewed_with(&queue.db, &queue.repo, &backend, &reviewer, &options);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let outcome =
+        supervise_reviewed_owned_with(&queue.db, &queue.repo, &backend, &reviewer, &options);
     let waiting = SqliteQueue::open(&queue.db)
         .unwrap()
         .show(first)
@@ -1074,7 +1086,7 @@ fn rechecked_in_a_container(
         .runs[0]
         .clone();
     assert!(waiting.in_container());
-    (waiting, before)
+    (waiting, before, outcome)
 }
 
 /// The landing recheck's command of a run in a container runs in a
@@ -1272,6 +1284,263 @@ fn a_waiting_run_in_a_container_whose_recheck_container_does_not_start_is_not_ju
         "{}",
         ask.question
     );
+}
+
+/// The landing recheck's command of a run in a container that ran in its
+/// container and failed there (an exit other than podman's 125) failed
+/// the check, as on the host: the run nobody leases is parked for a
+/// resume (`needs_session`, `action: resumed`) without waiting for its
+/// asks. A run in a container has no check of main alone. Its resume
+/// then fails here, its clone being only a path the test stored.
+#[test]
+fn a_waiting_run_whose_recheck_command_fails_in_its_container_is_parked_for_a_resume() {
+    let _test = crate::common::test();
+    let queue = VerifyQueue::new();
+    let mark = queue.dir.path().join("ran");
+    let command = format!(": > {}; exit 3", shell_path(&mark));
+    let (waiting, before, outcome) = rechecked_in_a_container_with(
+        &queue,
+        &format!(
+            "[roles.verification]\nruntime = \"container\"\n[recheck]\ncommand = {}\n",
+            toml_string(&command)
+        ),
+        Arc::new(Usable),
+    );
+    let errors = outcome["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1, "{outcome}");
+    assert_eq!(errors[0]["run_id"], waiting.id().as_str());
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not be resumed"),
+        "{outcome}"
+    );
+    // It ran in its container (the fake's on the host), once.
+    let all = runs(&queue.state);
+    assert_eq!(all.len(), before + 1, "{all:?}");
+    assert!(all.last().unwrap().join(" ").contains(&command));
+    assert!(mark.exists());
+    assert!(!recheck_scratch(&queue.queue_dir().join("recheck")).exists());
+    let found = events_of(&queue.db, waiting.id(), "landing_recheck_failed");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["action"], "resumed");
+    assert_eq!(found[0]["code"], "verification_failed");
+    assert_eq!(found[0]["exit_code"], 3);
+    assert_eq!(found[0]["command"], command.as_str());
+    assert!(found[0].get("container_refused").is_none(), "{}", found[0]);
+    assert!(found[0].get("main_failed").is_none(), "{}", found[0]);
+    assert_eq!(found[0]["status"], "needs_session");
+    let counts = &runtime::status(&queue.db).unwrap()["landing_recheck"];
+    assert_eq!(counts["check_failed"], 1, "{counts}");
+    assert_eq!(counts["resumed"], 1);
+    assert_eq!(counts["environment"], 0);
+}
+
+/// A worker that adds `e2e.txt`, which `[e2e] paths` names, with its change:
+/// its run passes its review and then waits in its slot for its e2e before
+/// it lands.
+const E2E_AGENT: &str = "printf 'e2e\\n' > e2e.txt && git add e2e.txt; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
+
+/// With `command` as the `[recheck] command` of a verification in the
+/// container, task 1's run passes its review and waits in this
+/// supervisor's slot for its e2e, holding its lease; there it is made a
+/// run in a container (its stored workplace a clone's path), main moves
+/// outside dagq and the recheck checks it in a container. Once that is
+/// recorded (`checked` is called with the run, still held), its workplace
+/// is put back so it lands from its worktree on the host, its e2e passes,
+/// and the supervisor returns. The run, and the count of `podman run`
+/// before the recheck.
+fn rechecked_in_a_container_in_its_slot(
+    queue: &VerifyQueue,
+    command: &str,
+    backend: TestWorkspace,
+    checked: impl FnOnce(&TaskRun),
+) -> (TaskRun, usize) {
+    queue.set_config(&format!(
+        "[roles.verification]\nruntime = \"container\"\n[recheck]\ncommand = {}\n\
+         [e2e]\npaths = [\"e2e.txt\"]\n",
+        toml_string(command)
+    ));
+    let task = add_task(&queue.db, &[]);
+    let backend = Arc::new(backend);
+    let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]));
+    let release = queue.dir.path().join("e2e-release");
+    let mut options = queue.options.clone();
+    options.run_e2e = runtime::RunE2eOptions {
+        command: Some(format!(
+            "{}; echo 'test result: ok. 1 passed; 0 failed'",
+            crate::common::await_path(&release)
+        )),
+        ..Default::default()
+    };
+    // The `dagq` the test owns, so a service the supervisor starts stops
+    // once the test's process is gone.
+    let dagq = crate::common::service::owned_executable(&queue.queue_dir());
+    let supervisor = {
+        let (db, repo, backend, reviewer) = (
+            queue.db.clone(),
+            queue.repo.clone(),
+            backend.clone(),
+            reviewer.clone(),
+        );
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                &dagq,
+                &options,
+            )
+        })
+    };
+    let run_of = || {
+        SqliteQueue::open(&queue.db)
+            .unwrap()
+            .show(task)
+            .unwrap()
+            .runs
+            .first()
+            .cloned()
+    };
+    let has =
+        |kind: &str| run_of().is_some_and(|run| !events_of(&queue.db, run.id(), kind).is_empty());
+    wait_until(&queue.db, Duration::from_secs(60), |_| {
+        has("run_e2e_started")
+    });
+    let held = run_of().unwrap();
+    let worktree = held.worktree_path().unwrap().to_owned();
+    let clone = queue.queue_dir().join("clones").join(held.id().as_str());
+    let set_workplace = |path: &str| {
+        Connection::open(&queue.db)
+            .unwrap()
+            .execute(
+                "UPDATE task_runs SET worktree_path=?1 WHERE id=?2",
+                [path, held.id().as_str()],
+            )
+            .unwrap();
+    };
+    set_workplace(&clone.display().to_string());
+    assert!(run_of().unwrap().in_container());
+    let before = runs(&queue.state).len();
+    fs::write(queue.repo.join("other.txt"), "unrelated change\n").unwrap();
+    git(&queue.repo, &["add", "other.txt"]);
+    git(&queue.repo, &["commit", "-qm", "main moves"]);
+    let main = git_out(&queue.repo, &["rev-parse", "main"]);
+    // The recheck of that main is recorded whole: its finding, then its
+    // counts.
+    wait_until(&queue.db, Duration::from_secs(60), |_| {
+        has("landing_recheck_failed")
+            && runtime::status(&queue.db).unwrap()["landing_recheck"]["main"] == main.as_str()
+    });
+    assert!(!has("run_e2e_finished"));
+    let run = run_of().unwrap();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    let lease = SqliteQueue::open(&queue.db)
+        .unwrap()
+        .run_lease(run.id())
+        .unwrap();
+    assert!(lease.is_some(), "the supervisor keeps its lease");
+    checked(&run);
+    set_workplace(&worktree);
+    fs::write(&release, "").unwrap();
+    let outcome = joined(supervisor, "the supervisor to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    (run_of().unwrap(), before)
+}
+
+/// When podman starts no container (125) for the landing recheck of a run
+/// in a container that this supervisor holds in its slot to land, the
+/// finding judges nothing (`action: skipped`, the refusal recorded), and
+/// the run keeps its lease and slot: the landing does not park it on that
+/// finding (no `needs_session`, no `held`, no repeated finding, no
+/// resume), and it lands.
+#[test]
+fn a_run_held_in_its_slot_whose_recheck_container_does_not_start_lands_unparked() {
+    let _test = crate::common::test();
+    let queue = VerifyQueue::new();
+    fs::write(queue.state.join("refuse-run"), "").unwrap();
+    let mark = queue.dir.path().join("ran");
+    let command = format!(": > {}", shell_path(&mark));
+    let backend = TestWorkspace::new(&queue.db, false, E2E_AGENT);
+    let (run, before) = rechecked_in_a_container_in_its_slot(&queue, &command, backend, |run| {
+        let found = events_of(&queue.db, run.id(), "landing_recheck_failed");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0]["action"], "skipped");
+        assert_eq!(found[0]["status"], "awaiting_integration");
+        assert_eq!(found[0]["command"], command.as_str());
+        let refused = found[0]["container_refused"].as_str().unwrap();
+        assert!(
+            refused.starts_with("podman did not start the container"),
+            "{refused}"
+        );
+        let counts = &runtime::status(&queue.db).unwrap()["landing_recheck"];
+        assert_eq!(counts["environment"], 1, "{counts}");
+        assert_eq!(counts["held"], 0);
+        assert_eq!(counts["resumed"], 0);
+    });
+    // podman was asked, and the command ran neither there nor on the host.
+    let all = runs(&queue.state);
+    assert_eq!(all.len(), before + 1, "{all:?}");
+    assert!(all.last().unwrap().join(" ").contains(&command));
+    assert!(!mark.exists());
+    assert_eq!(run.status(), RunStatus::Integrated);
+    assert!(events_of(&queue.db, run.id(), "resume_started").is_empty());
+    assert!(
+        !events_of(&queue.db, run.id(), "lease_released")
+            .iter()
+            .any(|event| event["reason"] == "landing_recheck_failed")
+    );
+    let found = events_of(&queue.db, run.id(), "landing_recheck_failed");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+/// When the landing recheck's command of a run in a container that this
+/// supervisor holds in its slot to land fails in its container (an exit
+/// other than 125), it failed the check as on the host: the finding is
+/// recorded `held`, and when the run would land it is parked instead
+/// (`needs_session`, `repeat: true`) and resumed; the resumed head lands.
+#[test]
+fn a_run_held_in_its_slot_whose_recheck_command_fails_in_its_container_is_parked_before_it_lands() {
+    let _test = crate::common::test();
+    let queue = VerifyQueue::new();
+    let command = "test -f fix.txt || exit 3";
+    let backend = TestWorkspace::new(&queue.db, false, E2E_AGENT);
+    backend.resume_script_for(
+        1,
+        "await_message; printf 'fix\\n' > fix.txt; unlocked git add fix.txt; unlocked git commit -q -m fix; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    let (run, before) = rechecked_in_a_container_in_its_slot(&queue, command, backend, |run| {
+        let found = events_of(&queue.db, run.id(), "landing_recheck_failed");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0]["action"], "held");
+        assert_eq!(found[0]["code"], "verification_failed");
+        assert_eq!(found[0]["exit_code"], 3);
+        assert!(found[0].get("container_refused").is_none(), "{}", found[0]);
+        assert!(events_of(&queue.db, run.id(), "resume_started").is_empty());
+        let counts = &runtime::status(&queue.db).unwrap()["landing_recheck"];
+        assert_eq!(counts["held"], 1, "{counts}");
+        assert_eq!(counts["check_failed"], 1);
+        assert_eq!(counts["environment"], 0);
+    });
+    let all = runs(&queue.state);
+    assert!(all.len() > before, "{all:?}");
+    assert!(all[before].join(" ").contains(command));
+    let found = events_of(&queue.db, run.id(), "landing_recheck_failed");
+    assert_eq!(found.len(), 2, "{found:?}");
+    let (held, parked) = (&found[0], &found[1]);
+    assert_eq!(parked["action"], "resumed");
+    assert_eq!(parked["repeat"], true);
+    assert_eq!(parked["status"], "needs_session");
+    assert_eq!(parked["head"], held["head"]);
+    assert_eq!(parked["main"], held["main"]);
+    assert_eq!(parked["reason"], held["reason"]);
+    assert_eq!(events_of(&queue.db, run.id(), "resume_started").len(), 1);
+    assert_eq!(run.status(), RunStatus::Integrated);
+    assert!(queue.repo.join("fix.txt").exists());
 }
 
 /// The agent of a task whose base already meets it: no commit, and an
