@@ -1085,13 +1085,18 @@ fn a_job_end_not_taken_before_its_supervisor_ended_is_written_by_the_next() {
 
 /// The supervisor's calls in this double, but the end of every headless
 /// job, which the service does not take; once one was refused, the
-/// heartbeat is refused too, and a call that comes 100 ms after the first
-/// refusal or later waits 3 s and then finds the service out of reach: a
-/// slow service whose calls the end's deadline has to cut.
+/// heartbeat is refused too, and from the first refusal of the heartbeat
+/// no call reaches the service: each waits 3 s and then finds the service
+/// out of reach, a slow service whose calls the end's deadline has to cut
+/// (it is read again while a call waits, so one that began before the
+/// deadline was set is cut too). Why the heartbeat stopped is recorded
+/// only after its refusal, so it never reaches the queue directly. Each
+/// call's op and when it came are logged for the assertions' messages.
 struct LostAfterJobEnd {
     inner: std::sync::Arc<dyn dagq::application::supervisor_service::ServiceCaller>,
     refused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     lost: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<(std::time::Instant, String)>>>,
 }
 
 impl LostAfterJobEnd {
@@ -1113,6 +1118,10 @@ impl dagq::application::supervisor_service::ServiceCaller for LostAfterJobEnd {
                 .into(),
             )
         };
+        self.calls.lock().unwrap().push((
+            std::time::Instant::now(),
+            params["op"].as_str().unwrap_or_default().to_owned(),
+        ));
         if params["op"] == "heartbeat" && self.refused.load(Ordering::SeqCst) {
             self.lost
                 .lock()
@@ -1120,10 +1129,7 @@ impl dagq::application::supervisor_service::ServiceCaller for LostAfterJobEnd {
                 .get_or_insert_with(std::time::Instant::now);
             anyhow::bail!("heartbeat refused by the test");
         }
-        // From when the end's deadline is set (the heartbeat's thread sets
-        // it as it stops on the refusal).
-        let lost = *self.lost.lock().unwrap();
-        if lost.is_some_and(|at| at.elapsed() >= Duration::from_millis(100)) {
+        if self.lost.lock().unwrap().is_some() {
             std::thread::sleep(Self::SLOW);
             return down();
         }
@@ -1174,16 +1180,19 @@ fn a_supervisor_whose_heartbeat_stopped_keeps_a_job_end_for_the_next_within_its_
     let reviewer =
         StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "sound"})]);
     let lost = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let wrap = {
-        let (refused, lost) = (
+        let (refused, lost, calls) = (
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lost.clone(),
+            calls.clone(),
         );
         dagq::compose::CallerLayer(std::sync::Arc::new(move |inner| {
             std::sync::Arc::new(LostAfterJobEnd {
                 inner,
                 refused: refused.clone(),
                 lost: lost.clone(),
+                calls: calls.clone(),
             })
         }))
     };
@@ -1227,8 +1236,49 @@ fn a_supervisor_whose_heartbeat_stopped_keeps_a_job_end_for_the_next_within_its_
             .collect()
     };
     let held = kept();
-    assert!(held.iter().any(|op| op == "end_headless_job"), "{held:?}");
-    assert!(held.iter().any(|op| op == "record_queue_event"), "{held:?}");
+    // What was kept, whether the reason reached the queue, and the
+    // supervisor's calls from the first job's end, each in ms from the
+    // heartbeat's refusal, to tell a failure's order.
+    let why = || {
+        let refused = lost.lock().unwrap().expect("the heartbeat refused");
+        let calls = calls.lock().unwrap().clone();
+        let from = calls
+            .iter()
+            .position(|(_, op)| op == "end_headless_job")
+            .unwrap_or_default();
+        let calls: Vec<_> = calls[from..]
+            .iter()
+            .map(|(at, op)| {
+                let ms = if *at >= refused {
+                    i128::try_from(at.duration_since(refused).as_millis()).unwrap_or(i128::MAX)
+                } else {
+                    -i128::try_from(refused.duration_since(*at).as_millis()).unwrap_or(i128::MAX)
+                };
+                format!("{ms}ms {op}")
+            })
+            .collect();
+        let written = queue
+            .latest_event_of(dagq::domain::EventKind::SupervisorHeartbeatFailed.as_str())
+            .unwrap()
+            .is_some();
+        format!(
+            "held {held:?}, supervisor_heartbeat_failed on the queue: {written}, calls {calls:?}"
+        )
+    };
+    assert!(held.iter().any(|op| op == "end_headless_job"), "{}", why());
+    assert!(
+        held.iter().any(|op| op == "record_queue_event"),
+        "{}",
+        why()
+    );
+    assert!(
+        queue
+            .latest_event_of(dagq::domain::EventKind::SupervisorHeartbeatFailed.as_str())
+            .unwrap()
+            .is_none(),
+        "{}",
+        why()
+    );
     let rows = || -> Vec<(Option<i64>, Option<String>)> {
         Connection::open(&fx.db)
             .unwrap()
