@@ -311,15 +311,17 @@ host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユ
 
 ### queue serviceのユースケース（service側）
 
-queue service（ADR-t1233-1決定4）は、要求のtokenから決めたprincipalをactorにして、対話と記録のユースケースを上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue）に、`watch_poll`を`queue.watch`に通す。
+queue service（ADR-t1233-1決定4）は、tokenのprincipalをactorにして、対話と記録のユースケースを上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue）に、`watch_poll`を`queue.watch`に通す。
 拒否は同じ`authorization_denied`（拒まれたprincipalがactor）に残る。
-`issue_token`（ADR-t3102-1決定2）は、親（user・supervisor・inbox）の起動の権限を`starts`で、対象の前提を`issue_held`で（runを持たない対象のtelemetryは開始の親とプロセスとの一致と未発行も）発行と同じtransactionで確かめ、外れた依頼は断る。
-queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがそのコマンドに求めるのと同じcapability（`ci failures`は`ci.read`、ほかは`queue.read`）を`Gate`で通して答える。
+`issue_token`（ADR-t3102-1決定2）は、親（user・supervisor・inbox）の起動の権限を`starts`で、対象の前提を`issue_held`で発行と同じtransactionで確かめ、外れた依頼は断る。
+queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIと同じcapability（`ci failures`は`ci.read`、ほかは`queue.read`）を`Gate`で通して答える。
 
 supervisorの操作（containerの部品・NodeSampleStore・runの資源・台帳も。[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）は、登録を持つsupervisorにだけ`scheduler.supervise`と操作ごとのcapability（`needs::supervisor_needs`）を`Gate`で通してから答える。
 人・inbox・plannerの計画の操作はCLIと同じcapabilityを求めてsupervisorには拒み、一覧に無い操作とintegratorだけの着地の終わりは拒む（default deny）。
 着地のintegratorには`landing.land`を通し、着地の操作だけを、名指すrun・task・leaseをそのものに限って答え、ほかは書かずに拒む（`integrator_scope`）。
 wrapperには`session.run`・`session.record`を自分のrunかplannerに、containerの準備はrunのものだけに通す。
+
+制御側のコマンド（`control`）の各stepは、CLIと同じcapability（`up`・`down`・`inbox`・`service start|stop`は`service.lifecycle`）で通し断りを記録する（[制御側のコマンド](queue-service-host-cli.md#制御側のコマンド)）。
 
 ### ほかのコマンド（CLIの入口）
 
@@ -327,11 +329,11 @@ wrapperには`session.run`・`session.record`を自分のrunかplannerに、cont
 
 - 宛ての環境のあるworker・job・observerはserviceのユースケースだけを送り、ほかはCLIが拒みDBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
 - 宛ての環境の無いuser・inbox・plannerはserviceが答える読み取り・`watch`・`status`・`report`・`graph --out`をserviceへ送り、serviceがprincipalで認可する（読み取りは上の節、後の2つは`Gate`の`queue.export`）。
-  CLIはDBを開かず、届かなくても開かない（[hostのCLI](queue-service-host-cli.md)）。
+  CLIは届かなくてもDBを開かない（[hostのCLI](queue-service-host-cli.md)）。
 - 残り（3つのroleのserviceが答えないものと、ほかのrole）は`check_access`が（default deny）`requests`の全てで`StaticPolicy`に通す。
   拒んだときだけ`ServiceDenials`でserviceが呼び出し元のprincipalの`authorization_denied`に記録する。
   通った読み取りはqueueを読み取り専用で開く（ADR-0073決定5・7・18）。
-  ただしsupervisorが登録をenvに渡し起動した`observe`（`--history`・`--input`を除く）・`throughput-review`は、通ればsupervisorのtokenでserviceを通り（判定は上の節）queueを開かない（[CLIでの解釈](supervisor-lifecycle/roles.md#cliでの解釈)）。
+  ただしsupervisorが起動した`observe`・`throughput-review`はsupervisorのtokenでserviceを通る（[CLIでの解釈](supervisor-lifecycle/roles.md#cliでの解釈)）。
 
 ## Claudeのpermissions.deny（guardrail）
 
