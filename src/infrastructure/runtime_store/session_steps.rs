@@ -156,17 +156,38 @@ fn removed(conn: &Connection, session_id: &str) -> rusqlite::Result<Vec<SeqRange
     Ok(ranges)
 }
 
-/// The first steps due of a session (`?1`, received before `?2`, at most
-/// `?3`), in the order of the session's index `(session_id, seq)`.
-const DUE_STEPS: &str = "SELECT seq FROM session_steps
-     WHERE session_id=?1 AND received_at < ?2 ORDER BY seq LIMIT ?3";
+/// The next rows of a session (`?1`) past seq `?2`, at most `?4`, in the
+/// order of its index `(session_id, seq)`, each with whether it was received
+/// before `?3`: the retention walks a session by these with no lock, each
+/// read going past no more rows than its limit.
+const WALK_STEPS: &str = "SELECT seq, received_at < ?3 FROM session_steps
+     WHERE session_id=?1 AND seq > ?2 ORDER BY seq LIMIT ?4";
 
-/// Remove the first samples due of a session (`?1`, received before `?2`,
-/// at most `?3`), chosen in the order of the session's index
-/// `(session_id, seq)`: a batch reads up to its last, not the whole session.
-const REMOVE_DUE_RESOURCES: &str = "DELETE FROM session_resources WHERE id IN (
-     SELECT id FROM session_resources
-     WHERE session_id=?1 AND received_at < ?2 ORDER BY seq LIMIT ?3)";
+/// The next samples of a session as [`WALK_STEPS`] walks its steps, each
+/// with its `id`.
+const WALK_RESOURCES: &str = "SELECT seq, id, received_at < ?3 FROM session_resources
+     WHERE session_id=?1 AND seq > ?2 ORDER BY seq LIMIT ?4";
+
+/// Whether the step of a session (`?1`) at seq `?2` is there and was
+/// received before `?3`, found by its key: a candidate read again under
+/// the lock.
+const STEP_DUE: &str = "SELECT 1 FROM session_steps
+     WHERE session_id=?1 AND seq=?2 AND received_at < ?3";
+
+/// Remove the step of a session (`?1`) at seq `?2`, found by its key.
+const REMOVE_STEP: &str = "DELETE FROM session_steps WHERE session_id=?1 AND seq=?2";
+
+/// The first steps of a session (`?1`), at most `?2`, to count whether it
+/// has more than a batch's candidates: the read stops at its limit.
+const STEPS_UP_TO: &str = "SELECT seq FROM session_steps WHERE session_id=?1 LIMIT ?2";
+
+/// Remove every step of a session (`?1`), run only once [`STEPS_UP_TO`]
+/// found no more than the batch's candidates.
+const REMOVE_SESSION_STEPS: &str = "DELETE FROM session_steps WHERE session_id=?1";
+
+/// Remove the sample `?1` if it was received before `?2`, found by its
+/// primary key.
+const REMOVE_DUE_RESOURCE: &str = "DELETE FROM session_resources WHERE id=?1 AND received_at < ?2";
 
 /// Join the removed seqs `?3..=?4` of a session (`?1`) to its range that
 /// ends at `?2` (`?3 - 1`), found by the primary key as the last one that
@@ -182,15 +203,49 @@ const REMOVE_VOID_RANGES: &str = "DELETE FROM session_step_removed WHERE rowid I
      ORDER BY from_seq LIMIT ?3)";
 
 /// The statements a batch of the retention reads a session's rows by under
-/// its lock, each with the index the migrations leave that it searches in
-/// its order (its boundary on a real queue.db is `tests/it/session_steps.rs`).
-pub const RETENTION_BATCH_READS: [(&str, &str); 4] = [
-    (DUE_STEPS, "sqlite_autoindex_session_steps_1"),
-    (REMOVE_DUE_RESOURCES, "sqlite_autoindex_session_resources_1"),
-    (EXTEND_REMOVED, "sqlite_autoindex_session_step_removed_1"),
+/// its lock, each with the search the migrations' indexes give it. Each
+/// finds a row by its key, stops at its limit, or goes past only rows it
+/// takes, so a batch reads about as many rows as it removes, not the rows
+/// a session keeps (its boundary on a real queue.db is
+/// `tests/it/session_steps.rs`).
+pub const RETENTION_BATCH_READS: [(&str, &str); 7] = [
+    (
+        STEP_DUE,
+        "sqlite_autoindex_session_steps_1 (session_id=? AND seq=?)",
+    ),
+    (
+        REMOVE_STEP,
+        "sqlite_autoindex_session_steps_1 (session_id=? AND seq=?)",
+    ),
+    (
+        STEPS_UP_TO,
+        "sqlite_autoindex_session_steps_1 (session_id=?)",
+    ),
+    (
+        REMOVE_SESSION_STEPS,
+        "sqlite_autoindex_session_steps_1 (session_id=?)",
+    ),
+    (REMOVE_DUE_RESOURCE, "INTEGER PRIMARY KEY (rowid=?)"),
+    (
+        EXTEND_REMOVED,
+        "sqlite_autoindex_session_step_removed_1 (session_id=? AND from_seq<?)",
+    ),
     (
         REMOVE_VOID_RANGES,
-        "sqlite_autoindex_session_step_removed_1",
+        "sqlite_autoindex_session_step_removed_1 (session_id=? AND from_seq>?)",
+    ),
+];
+
+/// The statements the retention walks a session's rows by with no lock,
+/// each with the search it makes in the session's index.
+pub const RETENTION_CANDIDATE_READS: [(&str, &str); 2] = [
+    (
+        WALK_STEPS,
+        "sqlite_autoindex_session_steps_1 (session_id=? AND seq>?)",
+    ),
+    (
+        WALK_RESOURCES,
+        "sqlite_autoindex_session_resources_1 (session_id=? AND seq>?)",
     ),
 ];
 
@@ -213,6 +268,97 @@ fn record_removed(
         "INSERT INTO session_step_removed(session_id, from_seq, to_seq) VALUES (?1, ?2, ?3)",
         params![session_id, range.from, range.to],
     )?)
+}
+
+/// The rows of a session the retention may remove, read with no lock: the
+/// steps and samples received before its time found so far, in the order
+/// of their seqs, and how far the walk of each went. A batch reads each
+/// again under its lock by its key and takes it off; a row another writer
+/// adds meanwhile is received after that time, so the candidates of a
+/// walk that went to the end are every row of the session due.
+#[derive(Default)]
+struct Candidates {
+    /// The seqs of the steps due not yet taken.
+    steps: Vec<i64>,
+    /// The last seq of a step walked.
+    steps_from: Option<i64>,
+    /// Whether the walk of the steps went to the end.
+    steps_walked: bool,
+    /// The ids of the samples due not yet taken.
+    samples: Vec<i64>,
+    /// The last seq of a sample walked.
+    samples_from: Option<i64>,
+    /// Whether the walk of the samples went to the end.
+    samples_walked: bool,
+}
+
+/// Walk `table`'s rows of `session_id` by `walk` ([`WALK_STEPS`] or
+/// [`WALK_RESOURCES`]) past `from`, a read of at most
+/// [`ROWS_PER_TRANSACTION`] rows at a time with no lock, until `due` holds
+/// as many or the walk goes to the end: whether it did.
+fn walk_due(
+    conn: &Connection,
+    walk: &str,
+    session_id: &str,
+    before: i64,
+    from: &mut Option<i64>,
+    due: &mut Vec<i64>,
+) -> Result<bool> {
+    let limit = i64::try_from(ROWS_PER_TRANSACTION)?;
+    let mut statement = conn.prepare_cached(walk)?;
+    // The row's seq, its key (its seq again for a step, its id for a
+    // sample) and whether it is due.
+    let due_at = statement.column_count() - 1;
+    while due.len() < ROWS_PER_TRANSACTION {
+        let rows: Vec<(i64, i64, bool)> = statement
+            .query_map(
+                params![session_id, from.unwrap_or(i64::MIN), before, limit],
+                |row| Ok((row.get(0)?, row.get(due_at - 1)?, row.get(due_at)?)),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        if let Some(&(seq, ..)) = rows.last() {
+            *from = Some(seq);
+        }
+        due.extend(rows.iter().filter(|row| row.2).map(|row| row.1));
+        if rows.len() < ROWS_PER_TRANSACTION {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+impl Candidates {
+    /// Walk on, with no lock, until each kind holds as many candidates as a
+    /// transaction removes or its walk goes to the end.
+    fn fill(&mut self, conn: &Connection, session_id: &str, before: i64) -> Result<()> {
+        if !self.steps_walked {
+            self.steps_walked = walk_due(
+                conn,
+                WALK_STEPS,
+                session_id,
+                before,
+                &mut self.steps_from,
+                &mut self.steps,
+            )?;
+        }
+        if !self.samples_walked {
+            self.samples_walked = walk_due(
+                conn,
+                WALK_RESOURCES,
+                session_id,
+                before,
+                &mut self.samples_from,
+                &mut self.samples,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// About how many rows of a transaction they take: a step and its range
+    /// row, a sample, and the owner.
+    fn rows(&self) -> usize {
+        self.steps.len() * 2 + self.samples.len() + 1
+    }
 }
 
 /// What [`remove_session_rows`] did to a session in one transaction.
@@ -258,10 +404,13 @@ fn remove_void(
 }
 
 /// Write or remove at most `budget` rows of `session_id` received before
-/// `before`, reading them under the caller's lock: the ranges a
-/// transaction before voided ([`remove_void`]), the steps in the order of
-/// their seqs, then the samples, then the owner registered before
-/// `before` of a session left with none.
+/// `before`, of those `candidates` found with no lock, each read again
+/// under the caller's lock by its key: the ranges a transaction before
+/// voided ([`remove_void`]), the steps in the order of their seqs, then
+/// the samples, then the owner registered before `before` of a session
+/// left with none. What it reads under the lock goes past only the rows it
+/// takes and those it stops at ([`RETENTION_BATCH_READS`]), not the rows
+/// the session keeps.
 ///
 /// Every state it commits reads, to this binary, as the session did before
 /// the retention or as removed whole (its gaps, the seqs a step sent again
@@ -278,6 +427,7 @@ fn remove_session_rows(
     session_id: &str,
     before: i64,
     budget: usize,
+    candidates: &mut Candidates,
 ) -> Result<SessionRemoved> {
     let left = |rows: usize| budget.saturating_sub(rows);
     let mut rows = 0;
@@ -296,36 +446,46 @@ fn remove_session_rows(
     if voided && !remove_void(tx, session_id, budget, &mut rows)? {
         return Ok(not_done(steps, rows));
     }
+    // The first candidates the transaction has room for, those still due.
+    let taken = candidates.steps.len().min(left(rows));
     let read: Vec<i64> = {
-        let mut statement = tx.prepare_cached(DUE_STEPS)?;
-        statement
-            .query_map(
-                params![session_id, before, i64::try_from(left(rows))?],
-                |row| row.get(0),
-            )?
-            .collect::<rusqlite::Result<_>>()?
+        let mut statement = tx.prepare_cached(STEP_DUE)?;
+        let mut read = Vec::with_capacity(taken);
+        for seq in candidates.steps.drain(..taken) {
+            if statement.exists(params![session_id, seq, before])? {
+                read.push(seq);
+            }
+        }
+        read
     };
-    // A full read may leave steps due; one that is not holds all of them,
-    // so the walk for a step kept goes past no more than those.
-    let all_due = read.len() < left(rows);
+    // A read that is not full and leaves no candidate of a walk that went
+    // to the end holds every step due, so the count for a step kept goes
+    // past no more than those.
+    let all_due = candidates.steps_walked && candidates.steps.is_empty() && read.len() < left(rows);
     let whole: Option<bool> = if all_due {
-        tx.query_row(
-            "SELECT CASE WHEN EXISTS(
-                 SELECT 1 FROM session_steps WHERE session_id=?1 AND received_at >= ?2)
-             THEN NULL ELSE EXISTS(SELECT 1 FROM session_step_removed WHERE session_id=?1) END",
-            params![session_id, before],
-            |row| row.get(0),
-        )?
+        let held = tx
+            .prepare_cached(STEPS_UP_TO)?
+            .query_map(params![session_id, i64::try_from(read.len() + 1)?], |_| {
+                Ok(())
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .len();
+        if held == read.len() {
+            Some(tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_step_removed WHERE session_id=?1)",
+                [session_id],
+                |row| row.get(0),
+            )?)
+        } else {
+            None
+        }
     } else {
         None
     };
     if let Some(ranged) = whole {
         // Removed whole: its last steps go with the row that voids its
         // ranges, which fits as the read was not full.
-        steps = tx.execute(
-            "DELETE FROM session_steps WHERE session_id=?1",
-            [session_id],
-        )?;
+        steps = tx.execute(REMOVE_SESSION_STEPS, [session_id])?;
         rows += steps;
         if ranged {
             rows += tx.execute(
@@ -338,18 +498,19 @@ fn remove_session_rows(
             }
         }
     } else {
-        let seqs = &read[..removed_within(&read, left(rows))];
-        if let Some(&last) = seqs.last() {
-            for range in ranges(seqs.iter().copied()) {
-                rows += record_removed(tx, session_id, range)?;
-            }
-            steps = tx.execute(
-                "DELETE FROM session_steps WHERE session_id=?1 AND received_at < ?2 AND seq <= ?3",
-                params![session_id, before, last],
-            )?;
-            rows += steps;
+        let fits = removed_within(&read, left(rows));
+        let seqs = &read[..fits];
+        for range in ranges(seqs.iter().copied()) {
+            rows += record_removed(tx, session_id, range)?;
         }
-        if !all_due || seqs.len() < read.len() {
+        for &seq in seqs {
+            steps += tx.execute(REMOVE_STEP, params![session_id, seq])?;
+        }
+        rows += steps;
+        // The steps due it had no room for are the next transaction's
+        // first candidates.
+        candidates.steps.splice(..0, read[fits..].iter().copied());
+        if !all_due || fits < read.len() {
             return Ok(not_done(steps, rows));
         }
     }
@@ -357,13 +518,14 @@ fn remove_session_rows(
     if limit == 0 {
         return Ok(not_done(steps, rows));
     }
-    let samples = tx.execute(
-        REMOVE_DUE_RESOURCES,
-        params![session_id, before, i64::try_from(limit)?],
-    )?;
+    let taken = candidates.samples.len().min(limit);
+    let mut samples = 0;
+    for id in candidates.samples.drain(..taken) {
+        samples += tx.execute(REMOVE_DUE_RESOURCE, params![id, before])?;
+    }
     rows += samples;
-    // A full removal may leave samples due.
-    if samples == limit {
+    // A full take may leave samples due.
+    if taken == limit || !candidates.samples_walked {
         return Ok(not_done(steps, rows));
     }
     // The samples left room for one more row.
@@ -484,8 +646,11 @@ impl SessionStepStore for SqliteQueue {
     /// Read with no lock which sessions have a row due, then remove their
     /// rows by transactions of at most [`ROWS_PER_TRANSACTION`] rows and
     /// sessions, [`PAUSE_BETWEEN_TRANSACTIONS`] apart with no lock held: with
-    /// none due no write lock is taken. Each transaction reads its session's
-    /// rows again under its lock ([`remove_session_rows`]), so a step another
+    /// none due no write lock is taken. Before each transaction, with no
+    /// lock, it walks the sessions the transaction may reach for the rows
+    /// due ([`Candidates`]), so the walk past the rows a session keeps is
+    /// not under the lock. Each transaction reads those rows again under its
+    /// lock by their keys ([`remove_session_rows`]), so a step another
     /// writer added between two is kept and not counted as removed, and a
     /// retention stopped between two is finished by the next.
     fn remove_steps(&self, before: i64) -> Result<usize> {
@@ -506,17 +671,29 @@ impl SessionStepStore for SqliteQueue {
                 .query_map(params![before, VOID_FROM], |row| row.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
+        let mut candidates: Vec<Option<Candidates>> = Vec::new();
+        candidates.resize_with(sessions.len(), || None);
         let (mut next, mut removed, mut first) = (0, 0, true);
         while next < sessions.len() {
             if !first {
                 std::thread::sleep(PAUSE_BETWEEN_TRANSACTIONS);
             }
             first = false;
+            // The sessions the transaction may reach, walked with no lock.
+            let mut reach = next;
+            let mut planned = 0;
+            while reach < sessions.len() && planned < ROWS_PER_TRANSACTION {
+                let session = candidates[reach].get_or_insert_with(Candidates::default);
+                session.fill(&self.conn, &sessions[reach], before)?;
+                planned += session.rows();
+                reach += 1;
+            }
             let tx = self.write_tx("session_steps_retention", TransactionBehavior::Immediate)?;
             let mut budget = ROWS_PER_TRANSACTION;
             let mut steps = 0;
-            while budget > 0 && next < sessions.len() {
-                let session = remove_session_rows(&tx, &sessions[next], before, budget)?;
+            while budget > 0 && next < reach {
+                let walked = candidates[next].get_or_insert_with(Candidates::default);
+                let session = remove_session_rows(&tx, &sessions[next], before, budget, walked)?;
                 steps += session.steps;
                 // A session that is not done goes on in the next
                 // transaction; one that removes nothing still takes a
@@ -526,6 +703,7 @@ impl SessionStepStore for SqliteQueue {
                     break;
                 }
                 budget = budget.saturating_sub(session.rows.max(1));
+                candidates[next] = None;
                 next += 1;
             }
             tx.commit()?;
@@ -946,5 +1124,90 @@ impl SqliteQueue {
                 Ok(records)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::sqlite::WriteTx;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const BEFORE: i64 = 1_000;
+
+    /// The VM steps the transactions of the retention of one session take
+    /// under their lock, on the tables of the migrations: `kept` steps and
+    /// samples received after [`BEFORE`] at its first seqs, then 300 steps
+    /// and 50 samples due. With the steps they remove.
+    fn steps_under_the_lock(kept: i64) -> (u64, usize) {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../../../migrations/0082_session_steps.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!(
+            "../../../migrations/0083_session_owners_and_resources.sql"
+        ))
+        .unwrap();
+        conn.execute(
+            "WITH RECURSIVE n(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM n WHERE seq < ?1 + 300)
+             INSERT INTO session_steps(target_kind, target_id, session_id, seq, kind,
+                 offset_ms, duration_ms, received_at)
+             SELECT 'run', 'r', 's', seq, 'tool', 0, 0, CASE WHEN seq > ?1 THEN 1 ELSE 2000 END
+             FROM n",
+            [kept],
+        )
+        .unwrap();
+        conn.execute(
+            "WITH RECURSIVE n(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM n WHERE seq < ?1 + 50)
+             INSERT INTO session_resources(target_kind, target_id, session_id, seq,
+                 offset_ms, duration_ms, received_at)
+             SELECT 'run', 'r', 's', seq, 0, 0, CASE WHEN seq > ?1 THEN 1 ELSE 2000 END
+             FROM n",
+            [kept],
+        )
+        .unwrap();
+        let counted = Arc::new(AtomicU64::new(0));
+        let mut candidates = Candidates::default();
+        let (mut removed, mut done) = (0, false);
+        while !done {
+            candidates.fill(&conn, "s", BEFORE).unwrap();
+            let count = counted.clone();
+            conn.progress_handler(
+                1,
+                Some(move || {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .unwrap();
+            let tx = WriteTx::begin(
+                &conn,
+                "t",
+                TransactionBehavior::Immediate,
+                std::time::Duration::MAX,
+            )
+            .unwrap();
+            let session =
+                remove_session_rows(&tx, "s", BEFORE, ROWS_PER_TRANSACTION, &mut candidates)
+                    .unwrap();
+            tx.commit().unwrap();
+            conn.progress_handler(1, None::<fn() -> bool>).unwrap();
+            removed += session.steps;
+            done = session.done;
+        }
+        (counted.load(Ordering::Relaxed), removed)
+    }
+
+    /// A batch reads under its lock the rows it removes, found by their
+    /// keys, not the rows the session keeps before them: a session that
+    /// keeps a thousand times more rows at its first seqs takes as many VM
+    /// steps under the lock.
+    #[test]
+    fn a_retention_batch_reads_under_its_lock_no_row_its_session_keeps() {
+        let (few, removed) = steps_under_the_lock(10);
+        assert_eq!(removed, 300);
+        let (many, removed) = steps_under_the_lock(10_000);
+        assert_eq!(removed, 300);
+        assert!(many <= few + few / 10, "{many} VM steps against {few}");
     }
 }

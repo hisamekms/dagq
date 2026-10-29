@@ -48,7 +48,7 @@ pub use crate::application::{
     TRIAGE_ASKER, TriageAction, Validation, WorktreeCleanup,
 };
 pub use crate::domain::{HEARTBEAT_TIMEOUT_SECS, RunPlan};
-pub use session_steps::RETENTION_BATCH_READS;
+pub use session_steps::{RETENTION_BATCH_READS, RETENTION_CANDIDATE_READS};
 
 pub use crate::application::WrittenBy;
 
