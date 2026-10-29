@@ -38,7 +38,7 @@ pub mod inbox_watchers;
 mod investigations;
 pub mod job_reads;
 pub mod kpi_config;
-mod kpi_push;
+pub mod kpi_push;
 pub mod language;
 pub mod launchd;
 pub mod location;

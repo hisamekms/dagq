@@ -288,13 +288,12 @@ $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.l
 ## Database setup and migrations
 
 入口は`src/infrastructure/schema.rs`（`MIGRATIONS`と互換の判定）と`src/infrastructure/sqlite.rs`の`SqliteQueue`。
-migrationを足すtaskの規則は[migrations.md](../development/migrations.md)が持つ。
+migrationを足すtaskの規則（リリース済みは変えない）は[migrations.md](../development/migrations.md)が持つ。
 
 - `init`だけがDBを作る（cwdのqueueなら`queue_repository`も束縛する）。
   通常の操作は存在しないDBを暗黙に作らない。
 - `application_id`でdagqのDBを見分け、他のアプリのDBは書き換えずに拒む。
 - schemaの版は適用したmigrationの数（`PRAGMA user_version`）で、`migrations/`の`NNNN_<name>.sql`を置くだけで`build.rs`が一覧に足す（[ADR-0067](../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)）。
-- リリース済みのmigrationは中身も名前も変えない（[ADR-t614-2](../adr/2026-09-27-t614-2-released-migrations-are-immutable.md)、検査は`scripts/check-migration-numbers.sh`）。
 - queueを開いただけではmigrateしない。
   migrationを適用するのは空のファイルへの`init`・`dagq migrate`・[`up`](supervisor-lifecycle/up-down.md)と[install](supervisor-lifecycle/install.md#install)と[自動更新](supervisor-lifecycle/auto-update.md#auto-update)が入れ替えの口で起動したqueue service（受け付けの前）で（[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)）、既存のqueueへはqueueが記録したbinaryと`install`がgrantしたbuildだけで、記録の無いqueueには`install`が書くまでどのbinaryも適用できる（ADR-t3102-2、`queue_binary.rs`）。
 - 互換の宣言: 各migrationは先頭行で`compatible`か`breaking`を宣言し、互換と言える文の範囲は`schema.rs`のunit testが検査する。
@@ -310,8 +309,8 @@ migrationを足すtaskの規則は[migrations.md](../development/migrations.md)�
 - 非互換のmigration: 使用中のsupervisor・run・wrapperの判定と`backups/`への複製と適用を1つのtransactionで行い、使用中なら何も適用せずに挙げて止まる。
 - 表の作り直し: 全ての列を列挙してrowidと`sqlite_sequence`も写し（消した行のIDを再び払い出さない）、`foreign_keys`はrunnerがトランザクションの外でOFFにしてcommitの前に`pragma_foreign_key_check`を確かめる。
   `run_events`を作り直すときは、actorの列・検索のtrigger・`run_events`のindexも作り直す。
-- 落とし穴: `run_events`の式のindex（`events_by_opened_event`）は、queryが同じ式を書きaffinityの掛からない値（bindした値か`+o.id`）と比べるときだけ引かれる。
-  `run_id IS NULL`で絞る問いは`+run_id`と書いて`events_by_run`で全部のqueueのeventを辿らない。
+- 落とし穴: `run_events`の式のindex（`events_by_opened_event`）の式の列は、queryが同じ式でaffinityの掛からない値（bindした値か`+o.id`）と比べるときだけ使われ、先頭列の`kind`だけでも選ばれうる。
+  `run_id IS NULL`は`+run_id`と書いて`events_by_run`を避けるが、`goal_id IS NULL`も絞ると`events_by_goal`を辿りうるので、lockの下は`INDEXED BY events_by_kind`（か3列とも`+`）で固定する。
 
 ## 全文検索（search）
 

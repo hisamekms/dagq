@@ -4,7 +4,9 @@
 //! a goal), each candidate statement's query plan, VM steps, full-scan
 //! steps, sorts and time, and `record_kpi_breach`'s time on its read-only
 //! path and on a new start. The test keeps a small `n`; the Spike's sizes
-//! are given to [`run`] in its place (its doc comment).
+//! are given to [`run`] in its place (its doc comment). The statements
+//! the queue runs ([`BREACH_EVENTS`], [`LATEST_PUSH_ATTENTION`]) are held
+//! to `events_by_kind` and to steps that do not grow with those events.
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -13,6 +15,7 @@ use serde_json::{Value, json};
 
 use dagq::domain::EventKind;
 use dagq::domain::kpi::push::{KPI_BREACH_KINDS, KPI_PUSH_ATTENTION_KINDS};
+use dagq::infrastructure::kpi_push::{BREACH_EVENTS, LATEST_PUSH_ATTENTION};
 use dagq::infrastructure::sqlite::SqliteQueue;
 
 use crate::common;
@@ -390,5 +393,45 @@ fn the_breach_reads_are_measured_at_a_small_size() {
             _ => 1,
         };
         assert_eq!(*count, expected, "{name}");
+    }
+}
+
+/// The queue's breach and attention reads go by `events_by_kind`, and
+/// their VM steps stay flat when events without a run of other kinds (and
+/// as many with a run, a task and a goal) are added: under the write lock
+/// they read the events of their two kinds, not every event without a
+/// goal.
+#[test]
+fn the_queue_breach_reads_go_by_kind_and_do_not_grow_with_other_events() {
+    let (dir, _owner) = common::cleanup::owned_temp_dir();
+    let (small, large) = (template(dir.path(), 0), template(dir.path(), 2_000));
+    let (small, large) = (
+        Connection::open(&small).unwrap(),
+        Connection::open(&large).unwrap(),
+    );
+    for (sql, binds, rows) in [
+        (BREACH_EVENTS, KPI_BREACH_KINDS, BREACHES),
+        (LATEST_PUSH_ATTENTION, KPI_PUSH_ATTENTION_KINDS, 1),
+    ] {
+        let (before, after) = (read(&small, sql, binds), read(&large, sql, binds));
+        for read in [&before, &after] {
+            assert!(read.plan.contains("events_by_kind"), "{}", read.plan);
+            for other in [
+                "events_by_goal",
+                "events_by_run",
+                "events_by_task",
+                "SCAN run_events",
+            ] {
+                assert!(!read.plan.contains(other), "{}", read.plan);
+            }
+            assert_eq!(read.rows, rows, "{sql}");
+        }
+        let ratio = f64::from(after.vm) / f64::from(before.vm);
+        assert!(
+            ratio < 2.0,
+            "{sql}: VmStep {} -> {} ({ratio})",
+            before.vm,
+            after.vm
+        );
     }
 }

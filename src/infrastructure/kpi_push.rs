@@ -3,6 +3,14 @@
 //! state and writes in one `BEGIN IMMEDIATE`, so of two supervisors that
 //! judged the same breach one records it, and a breach's immediate push is
 //! counted against the day's limit once.
+//!
+//! The breach and attention events have no run, task or goal, and the
+//! write lock is held while they are read, so the reads name
+//! `events_by_kind`: left to the planner without `sqlite_stat1`,
+//! `goal_id IS NULL` picks `events_by_goal` and walks every event without
+//! a goal, and `+run_id` alone does not change that. Naming the index keeps
+//! the read to the events of the two kinds whatever statistics or new
+//! indexes the queue gets, and a lost index fails the prepare.
 use anyhow::{Result, bail};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
@@ -13,12 +21,20 @@ use crate::domain::kpi::push::{
 };
 use crate::domain::{EventId, EventKind, RecordedKind};
 
+/// The breach events, oldest first, bound to [`KPI_BREACH_KINDS`].
+pub const BREACH_EVENTS: &str = "SELECT id, kind, payload FROM run_events INDEXED BY events_by_kind
+   WHERE kind IN (?1, ?2) AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
+   ORDER BY id";
+
+/// The kind of the latest push attention event, bound to
+/// [`KPI_PUSH_ATTENTION_KINDS`].
+pub const LATEST_PUSH_ATTENTION: &str = "SELECT kind FROM run_events INDEXED BY events_by_kind
+   WHERE kind IN (?1, ?2) AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
+   ORDER BY id DESC LIMIT 1";
+
 /// Every breach event, oldest first: (id, kind, payload).
 fn breach_events(tx: &rusqlite::Connection) -> Result<Vec<(EventId, RecordedKind, Value)>> {
-    let mut statement = tx.prepare(
-        "SELECT id, kind, payload FROM run_events WHERE kind IN (?1, ?2)
-           AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL ORDER BY id",
-    )?;
+    let mut statement = tx.prepare(BREACH_EVENTS)?;
     let rows = statement.query_map(params![KPI_BREACH_KINDS[0], KPI_BREACH_KINDS[1]], |r| {
         Ok((
             EventId::new(r.get(0)?),
@@ -41,17 +57,34 @@ fn breach_events(tx: &rusqlite::Connection) -> Result<Vec<(EventId, RecordedKind
 /// The breaches started and not resolved: the latest event of each
 /// period, KPI and stratum when it is a start, with its id.
 fn open_in(conn: &rusqlite::Connection) -> Result<Vec<(EventId, Value)>> {
+    Ok(open_among(breach_events(conn)?))
+}
+
+/// [`open_in`] over `events`, the breach events oldest first.
+fn open_among(events: Vec<(EventId, RecordedKind, Value)>) -> Vec<(EventId, Value)> {
     let mut latest: Vec<(EventId, RecordedKind, Value)> = Vec::new();
-    for (id, kind, payload) in breach_events(conn)? {
+    for (id, kind, payload) in events {
         let key = breach_key(&payload);
         latest.retain(|(_, _, kept)| breach_key(kept) != key);
         latest.push((id, kind, payload));
     }
-    Ok(latest
+    latest
         .into_iter()
         .filter(|(_, kind, _)| *kind == EventKind::KpiBreachStarted)
         .map(|(id, _, payload)| (id, payload))
-        .collect())
+        .collect()
+}
+
+/// The starts among `events` marked `pushed` on the local `day`.
+fn pushed_on(events: &[(EventId, RecordedKind, Value)], day: i64) -> usize {
+    events
+        .iter()
+        .filter(|(_, kind, event)| {
+            *kind == EventKind::KpiBreachStarted
+                && event.get("pushed") == Some(&Value::Bool(true))
+                && event.get("day").and_then(Value::as_i64) == Some(day)
+        })
+        .count()
 }
 
 impl SqliteQueue {
@@ -79,6 +112,11 @@ impl SqliteQueue {
     /// day are counted in the same transaction, the day's and the week's
     /// breaches together.
     ///
+    /// Under the write lock the breach events are read once
+    /// ([`BREACH_EVENTS`], only the breach events by `events_by_kind`), and both
+    /// whether the breach is open and the day's pushed starts come from
+    /// that read.
+    ///
     /// Each `period` is a breach of its own: the same KPI and stratum in
     /// breach for both the day and the week are two starts, each up for an
     /// immediate push within the day's limit, since the day's streak and
@@ -94,7 +132,9 @@ impl SqliteQueue {
         }
         let tx = self.write_tx("record_kpi_breach", TransactionBehavior::Immediate)?;
         let key = breach_key(&payload);
-        let open = open_in(&tx)?
+        let events = breach_events(&tx)?;
+        let pushed_today = push_day.map(|(day, _)| pushed_on(&events, day));
+        let open = open_among(events)
             .iter()
             .any(|(_, open)| breach_key(open) == key);
         if open == (kind == EventKind::KpiBreachStarted) {
@@ -102,19 +142,9 @@ impl SqliteQueue {
             return Ok(None);
         }
         if kind == EventKind::KpiBreachStarted {
-            let pushed = push_day.is_some_and(|(day, limit)| {
-                let today = breach_events(&tx).map_or(0, |events| {
-                    events
-                        .iter()
-                        .filter(|(_, kind, event)| {
-                            *kind == EventKind::KpiBreachStarted
-                                && event.get("pushed") == Some(&Value::Bool(true))
-                                && event.get("day").and_then(Value::as_i64) == Some(day)
-                        })
-                        .count()
-                });
-                today < limit
-            });
+            let pushed = push_day
+                .zip(pushed_today)
+                .is_some_and(|((_, limit), today)| today < limit);
             payload["pushed"] = json!(pushed);
             payload["day"] = json!(push_day.map(|(day, _)| day));
         }
@@ -134,9 +164,7 @@ impl SqliteQueue {
         let tx = self.write_tx("record_kpi_push_abandoned", TransactionBehavior::Immediate)?;
         let latest: Option<String> = tx
             .query_row(
-                "SELECT kind FROM run_events WHERE kind IN (?1, ?2)
-                   AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-                 ORDER BY id DESC LIMIT 1",
+                LATEST_PUSH_ATTENTION,
                 params![KPI_PUSH_ATTENTION_KINDS[0], KPI_PUSH_ATTENTION_KINDS[1]],
                 |r| r.get(0),
             )

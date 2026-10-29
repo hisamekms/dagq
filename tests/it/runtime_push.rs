@@ -412,3 +412,49 @@ fn a_breach_is_recorded_once_per_start() {
     assert!(queue.record_kpi_push_abandoned(json!({"n": 1})).unwrap());
     assert!(!queue.record_kpi_push_abandoned(json!({"n": 2})).unwrap());
 }
+
+/// Two connections that record the same start at once record it once,
+/// and the day's limit counts it once.
+#[test]
+fn two_connections_record_the_same_breach_once() {
+    let (_dir, _repo, db) = fixture();
+    let breach = json!({"period": "week", "kpi": "landings", "stratum": "all"});
+    let barrier = std::sync::Barrier::new(2);
+    let recorded: Vec<Option<serde_json::Value>> = {
+        let _waiting = crate::common::within(
+            crate::common::STEP_LIMIT,
+            "both connections to record the breach",
+        );
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let (db, breach, barrier) = (&db, breach.clone(), &barrier);
+                    scope.spawn(move || {
+                        let queue = SqliteQueue::open(db).unwrap();
+                        {
+                            let _waiting = crate::common::within(
+                                crate::common::STEP_LIMIT,
+                                "the other connection to open",
+                            );
+                            barrier.wait();
+                        }
+                        queue
+                            .record_kpi_breach(EventKind::KpiBreachStarted, breach, Some((10, 2)))
+                            .unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        })
+    };
+    assert_eq!(recorded.iter().flatten().count(), 1, "{recorded:?}");
+    let queue = SqliteQueue::open(&db).unwrap();
+    assert_eq!(events_of(&db, "kpi_breach_started").len(), 1);
+    // One push counted of the day's two: the next breach is pushed too.
+    let other = json!({"period": "day", "kpi": "auto_repairs", "stratum": "all"});
+    let next = queue
+        .record_kpi_breach(EventKind::KpiBreachStarted, other, Some((10, 2)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(next["pushed"], true);
+}
