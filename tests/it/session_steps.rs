@@ -491,3 +491,491 @@ fn a_sessions_owner_and_samples_are_one_targets_and_the_retention_removes_them()
     // Nothing more is due.
     assert_eq!(queue.remove_steps(retained_since(now_ms)).unwrap(), 0);
 }
+
+/// What `sql` (a count) reads in the queue at `db`.
+fn count(db: &std::path::Path, sql: &str) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(sql, [], |r| r.get(0))
+        .unwrap()
+}
+
+/// The seqs `session_step_removed` keeps of `session`, one by one: each
+/// once, whatever transactions recorded them.
+fn removed_seqs(db: &std::path::Path, session: &str) -> Vec<i64> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut statement = conn
+        .prepare("SELECT from_seq, to_seq FROM session_step_removed WHERE session_id=?1")
+        .unwrap();
+    let mut seqs: Vec<i64> = statement
+        .query_map([session], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })
+        .unwrap()
+        .flat_map(|range| {
+            let (from, to) = range.unwrap();
+            from..=to
+        })
+        .collect();
+    seqs.sort_unstable();
+    seqs
+}
+
+fn upto(last: i64) -> Vec<i64> {
+    (1..=last).collect()
+}
+
+/// The rows each retention transaction wrote, by the WARN a queue opened
+/// with no threshold ([`SqliteQueue::with_write_hold_warn`]) gives of every
+/// write transaction as it ends, on the thread that sets it.
+#[derive(Clone, Default)]
+struct RetentionRows(std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
+
+impl RetentionRows {
+    fn rows(&self) -> Vec<u64> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RetentionRows {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        #[derive(Default)]
+        struct Fields {
+            transaction: String,
+            rows: Option<u64>,
+        }
+        impl tracing::field::Visit for Fields {
+            fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                if field.name() == "rows" {
+                    self.rows = Some(value);
+                }
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "transaction" {
+                    self.transaction = value.to_owned();
+                }
+            }
+            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        if fields.transaction == "session_steps_retention" {
+            self.0
+                .lock()
+                .unwrap()
+                .push(fields.rows.expect("a long hold's WARN has rows"));
+        }
+    }
+}
+
+/// Watch the retention transactions of `queue` (opened with no threshold)
+/// on this thread, until the guard drops.
+fn retention_rows() -> (RetentionRows, tracing::subscriber::DefaultGuard) {
+    use tracing_subscriber::layer::SubscriberExt;
+    let rows = RetentionRows::default();
+    let guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(rows.clone()));
+    (rows, guard)
+}
+
+/// More rows due than one transaction holds: the retention commits them a
+/// bounded number at a time, so one stopped part way has removed the
+/// batches before it with their seqs, and the next finishes the rest. A
+/// step another connection adds between the two to a session being
+/// removed is kept and its seq not counted as removed; the session that
+/// keeps it keeps every seq removed of it, recorded once. After it a
+/// retention of the same day takes no write lock.
+#[test]
+fn the_steps_retention_commits_by_batches_resumes_and_keeps_a_step_added_between() {
+    use dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION as BATCH;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    let queue = SqliteQueue::init(&db).unwrap();
+    let target = run_target();
+    let now_ms = NOW * 1000;
+    let old = now_ms - RETENTION_MS - DAY_MS;
+    let new = now_ms - DAY_MS;
+    let before = retained_since(now_ms);
+    let last = i64::try_from(BATCH).unwrap() + 20;
+    queue
+        .record_steps(&target, "a-kept", &steps(&upto(last)), old)
+        .unwrap();
+    queue
+        .record_steps(&target, "a-kept", &steps(&[last + 1]), new)
+        .unwrap();
+    queue.register_session(&target, "b-whole", old).unwrap();
+    queue
+        .record_steps(&target, "b-whole", &steps(&upto(50)), old)
+        .unwrap();
+    queue
+        .record_resources(&target, "b-whole", &[ResourceSample::new(1, 0, 1)], old)
+        .unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER stop BEFORE DELETE ON session_steps
+         WHEN old.session_id = 'a-kept' AND old.seq = {}
+         BEGIN SELECT RAISE(ABORT, 'stopped'); END",
+        last - 5
+    ))
+    .unwrap();
+    let error = queue.remove_steps(before).unwrap_err();
+    assert!(format!("{error:#}").contains("stopped"), "{error:#}");
+    // The first batch went with its seqs (its range row counts in it);
+    // the rest is as it was.
+    let first = i64::try_from(BATCH).unwrap() - 1;
+    assert_eq!(removed_seqs(&db, "a-kept"), upto(first));
+    assert_eq!(queue.session_gaps("a-kept").unwrap(), vec![]);
+    assert_eq!(queue.target_steps(&target).unwrap().len(), 21 + 1 + 50);
+    assert!(queue.session_owner("b-whole").unwrap().is_some());
+
+    // Another connection adds a step to each session in between.
+    let other = SqliteQueue::open(&db).unwrap();
+    other
+        .record_steps(&target, "a-kept", &steps(&[last + 10]), now_ms)
+        .unwrap();
+    other
+        .record_steps(&target, "b-whole", &steps(&[60]), now_ms)
+        .unwrap();
+    conn.execute_batch("DROP TRIGGER stop").unwrap();
+    assert_eq!(queue.remove_steps(before).unwrap(), 21 + 50);
+    let kept = queue.target_steps(&target).unwrap();
+    assert_eq!(
+        seqs(&kept),
+        [("a-kept", last + 1), ("a-kept", last + 10), ("b-whole", 60)]
+            .map(|(session, seq)| (session.to_owned(), seq))
+    );
+    assert_eq!(removed_seqs(&db, "a-kept"), upto(last));
+    assert_eq!(removed_seqs(&db, "b-whole"), upto(50));
+    assert_eq!(
+        queue.session_gaps("a-kept").unwrap(),
+        vec![SeqRange {
+            from: last + 2,
+            to: last + 9
+        }]
+    );
+    assert_eq!(
+        queue.session_gaps("b-whole").unwrap(),
+        vec![SeqRange { from: 51, to: 59 }]
+    );
+    assert_eq!(queue.target_resources(&target).unwrap(), vec![]);
+    assert!(queue.session_owner("b-whole").unwrap().is_some());
+    assert_eq!(
+        queue
+            .record_steps(&target, "a-kept", &steps(&[1, last - 5]), now_ms)
+            .unwrap(),
+        StepsRecorded {
+            added: 0,
+            duplicates: 2
+        }
+    );
+
+    queue.set_busy_timeout(std::time::Duration::ZERO).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert_eq!(queue.remove_steps(before).unwrap(), 0);
+    conn.execute_batch("ROLLBACK").unwrap();
+}
+
+/// While the retention removes a session's many steps, another
+/// connection's heartbeat gets the write lock between two of its
+/// transactions, within its busy wait: it sees some steps removed and some
+/// not yet. The session, its sample and its owner all go, with no seq
+/// kept of it.
+#[test]
+fn a_heartbeat_writes_while_the_steps_retention_runs() {
+    use crate::common::queue::{beat, beats, heart, until_committed};
+    use dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION as BATCH;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    let queue = SqliteQueue::init(&db).unwrap();
+    let target = run_target();
+    let now_ms = NOW * 1000;
+    let old = now_ms - RETENTION_MS - DAY_MS;
+    let total = BATCH * 4 + 10;
+    queue.register_session(&target, "s", old).unwrap();
+    queue
+        .record_steps(
+            &target,
+            "s",
+            &steps(&upto(i64::try_from(total).unwrap())),
+            old,
+        )
+        .unwrap();
+    queue
+        .record_resources(&target, "s", &[ResourceSample::new(1, 0, 1)], old)
+        .unwrap();
+    beats(&db);
+    let rows = "SELECT count(*) FROM session_steps";
+    let heart = heart(&db);
+    let job = {
+        let db = db.clone();
+        std::thread::spawn(move || {
+            SqliteQueue::open(&db)
+                .unwrap()
+                .remove_steps(retained_since(now_ms))
+        })
+    };
+    let all = i64::try_from(total).unwrap();
+    until_committed(&db, rows, Some(all));
+    let (written, took, seen) = beat(&heart, &format!("SELECT ({rows})"));
+    let _waiting = crate::common::within(crate::common::STEP_LIMIT, "the steps' retention");
+    assert_eq!(job.join().unwrap().unwrap(), total);
+    assert!(written, "the heartbeat was not written in {took:?}");
+    assert!(took < dagq::application::QUEUE_BUSY_TIMEOUT, "{took:?}");
+    assert!(0 < seen && seen < all, "{seen} of {all}");
+    assert_eq!(count(&db, rows), 0);
+    assert_eq!(count(&db, "SELECT count(*) FROM session_step_removed"), 0);
+    assert_eq!(queue.target_resources(&target).unwrap(), vec![]);
+    assert_eq!(queue.session_owner("s").unwrap(), None);
+}
+
+/// Every transaction of the retention writes at most so many rows, the
+/// range rows it writes and the ranges it removes among them: steps of
+/// seqs apart take a range row each, so a transaction removes half as many
+/// of them. A session that keeps no step loses its last steps in the
+/// transaction whose one row voids all its ranges, which then go a bounded
+/// number a transaction, the first of them with it. A retention stopped among them leaves the
+/// session read as removed whole: a step another connection adds then
+/// starts it anew (a seq removed before is a new step, the seqs below are
+/// gaps), and the next retention removes the void ranges and keeps it.
+#[test]
+fn the_steps_retention_bounds_each_transaction_and_voids_a_sessions_ranges_at_once() {
+    use dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION as BATCH;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    let queue = SqliteQueue::init(&db)
+        .unwrap()
+        .with_write_hold_warn(std::time::Duration::ZERO);
+    let target = run_target();
+    let now_ms = NOW * 1000;
+    let old = now_ms - RETENTION_MS - DAY_MS;
+    let before = retained_since(now_ms);
+    let half = BATCH / 2;
+    let odd: Vec<i64> = (0..i64::try_from(half * 3).unwrap())
+        .map(|index| index * 2 + 1)
+        .collect();
+    for session in ["s", "t"] {
+        queue.register_session(&target, session, old).unwrap();
+        queue
+            .record_steps(&target, session, &steps(&odd), old)
+            .unwrap();
+    }
+    let (written, _watching) = retention_rows();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    // Stops the first transaction that removes a step past the first ones
+    // it fits.
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER stop BEFORE DELETE ON session_steps
+         WHEN old.session_id = 's' AND old.seq = {}
+         BEGIN SELECT RAISE(ABORT, 'stopped'); END",
+        odd[half]
+    ))
+    .unwrap();
+    assert!(queue.remove_steps(before).is_err());
+    assert_eq!(removed_seqs(&db, "s"), odd[..half]);
+    let evens: Vec<SeqRange> = (1..i64::try_from(half * 3).unwrap())
+        .map(|index| SeqRange {
+            from: index * 2,
+            to: index * 2,
+        })
+        .collect();
+    assert_eq!(queue.session_gaps("s").unwrap(), evens);
+    conn.execute_batch("DROP TRIGGER stop").unwrap();
+    // Stops the removal of the void ranges once half of them would be gone.
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER stop BEFORE DELETE ON session_step_removed
+         WHEN (SELECT count(*) FROM session_step_removed WHERE from_seq > 0) <= {half}
+         BEGIN SELECT RAISE(ABORT, 'stopped'); END"
+    ))
+    .unwrap();
+    assert!(queue.remove_steps(before).is_err());
+    let count_of = |session: &str| {
+        count(
+            &db,
+            &format!("SELECT count(*) FROM session_steps WHERE session_id='{session}'"),
+        )
+    };
+    assert_eq!(count_of("s"), 0);
+    // Ranges are left, void: the session reads as removed whole. The row
+    // that voids them holds no seq, so a binary that does not know it
+    // reads only the ranges left.
+    assert!(
+        count(
+            &db,
+            "SELECT count(*) FROM session_step_removed WHERE from_seq > 0"
+        ) > 0
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM session_step_removed WHERE from_seq < 1 AND to_seq < from_seq"
+        ),
+        1
+    );
+    assert_eq!(queue.session_gaps("s").unwrap(), vec![]);
+    assert!(queue.session_owner("s").unwrap().is_some());
+
+    let other = SqliteQueue::open(&db).unwrap();
+    assert_eq!(
+        other
+            .record_steps(&target, "s", &steps(&[4, odd[0]]), now_ms)
+            .unwrap(),
+        StepsRecorded {
+            added: 2,
+            duplicates: 0
+        }
+    );
+    conn.execute_batch("DROP TRIGGER stop").unwrap();
+    assert_eq!(queue.remove_steps(before).unwrap(), half * 3);
+    // The session started anew keeps its new steps and its owner, and no
+    // seq of before.
+    assert_eq!(count(&db, "SELECT count(*) FROM session_step_removed"), 0);
+    let kept = queue.target_steps(&target).unwrap();
+    assert_eq!(seqs(&kept), [4, odd[0]].map(|seq| ("s".to_owned(), seq)));
+    assert_eq!(
+        queue.session_gaps("s").unwrap(),
+        vec![SeqRange { from: 2, to: 3 }]
+    );
+    assert!(queue.session_owner("s").unwrap().is_some());
+    // The other went whole, its ranges more than a transaction holds.
+    assert_eq!(count_of("t"), 0);
+    assert_eq!(queue.session_owner("t").unwrap(), None);
+    // Nothing more is due.
+    assert_eq!(queue.remove_steps(before).unwrap(), 0);
+    let rows = written.rows();
+    assert!(rows.len() > 6, "{rows:?}");
+    assert!(
+        rows.iter()
+            .all(|&rows| rows <= u64::try_from(BATCH).unwrap()),
+        "{rows:?}"
+    );
+}
+
+/// A transaction that removes as many samples as it has rows left does not
+/// know whether more are due: the owner of a session of as many old
+/// samples as a transaction holds goes in the next.
+#[test]
+fn the_steps_retention_leaves_an_owner_past_a_full_transaction_to_the_next() {
+    use dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION as BATCH;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    let queue = SqliteQueue::init(&db).unwrap();
+    let target = run_target();
+    let now_ms = NOW * 1000;
+    let old = now_ms - RETENTION_MS - DAY_MS;
+    let before = retained_since(now_ms);
+    queue.register_session(&target, "s", old).unwrap();
+    let samples: Vec<ResourceSample> = (1..=i64::try_from(BATCH).unwrap())
+        .map(|seq| ResourceSample::new(seq, 0, 1))
+        .collect();
+    queue.record_resources(&target, "s", &samples, old).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER stop BEFORE DELETE ON session_owners
+         BEGIN SELECT RAISE(ABORT, 'stopped'); END",
+    )
+    .unwrap();
+    assert!(queue.remove_steps(before).is_err());
+    // The samples' transaction committed without the owner.
+    assert_eq!(count(&db, "SELECT count(*) FROM session_resources"), 0);
+    assert!(queue.session_owner("s").unwrap().is_some());
+    conn.execute_batch("DROP TRIGGER stop").unwrap();
+    assert_eq!(queue.remove_steps(before).unwrap(), 0);
+    assert_eq!(queue.session_owner("s").unwrap(), None);
+}
+
+/// A session removed whole in a transaction another session began loses
+/// its last steps there with the row that voids its ranges, and as many of
+/// them as are left of that transaction; the rest go in the next, and the
+/// first commits within the bound.
+#[test]
+fn a_session_removed_whole_goes_on_from_what_is_left_of_a_transaction() {
+    use dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION as BATCH;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    let queue = SqliteQueue::init(&db)
+        .unwrap()
+        .with_write_hold_warn(std::time::Duration::ZERO);
+    let target = run_target();
+    let now_ms = NOW * 1000;
+    let older = now_ms - RETENTION_MS - 3 * DAY_MS;
+    let old = now_ms - RETENTION_MS - DAY_MS;
+    let odd: Vec<i64> = (0..20).map(|index| index * 2 + 1).collect();
+    queue
+        .record_steps(&target, "b", &steps(&odd), older)
+        .unwrap();
+    queue
+        .record_steps(&target, "b", &steps(&(41..=50).collect::<Vec<_>>()), old)
+        .unwrap();
+    // An earlier retention left "b" 20 ranges and 10 steps.
+    assert_eq!(queue.remove_steps(older + 1).unwrap(), 20);
+    assert_eq!(removed_seqs(&db, "b"), odd);
+    // "a" leaves 25 rows of the transaction: the 10 steps, the row that
+    // voids the ranges and 14 of them.
+    let samples: Vec<ResourceSample> = (1..=i64::try_from(BATCH).unwrap() - 25)
+        .map(|seq| ResourceSample::new(seq, 0, 1))
+        .collect();
+    queue.record_resources(&target, "a", &samples, old).unwrap();
+    let (written, _watching) = retention_rows();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER stop BEFORE DELETE ON session_step_removed
+         WHEN (SELECT count(*) FROM session_step_removed WHERE from_seq > 0) <= 6
+         BEGIN SELECT RAISE(ABORT, 'stopped'); END",
+    )
+    .unwrap();
+    let before = retained_since(now_ms);
+    assert!(queue.remove_steps(before).is_err());
+    assert_eq!(count(&db, "SELECT count(*) FROM session_resources"), 0);
+    assert_eq!(count(&db, "SELECT count(*) FROM session_steps"), 0);
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM session_step_removed WHERE from_seq > 0"
+        ),
+        6
+    );
+    assert_eq!(queue.session_gaps("b").unwrap(), vec![]);
+    assert_eq!(written.rows()[0], u64::try_from(BATCH).unwrap());
+    conn.execute_batch("DROP TRIGGER stop").unwrap();
+    assert_eq!(queue.remove_steps(before).unwrap(), 0);
+    assert_eq!(count(&db, "SELECT count(*) FROM session_step_removed"), 0);
+    assert!(
+        written
+            .rows()
+            .iter()
+            .all(|&rows| rows <= u64::try_from(BATCH).unwrap())
+    );
+}
+
+/// A batch of the retention reads its session's rows by the index the
+/// migrations leave on queue.db, in its order: no walk of a table and no
+/// sort of the session's rows, so a batch under the lock reads up to its
+/// last row, not the whole session.
+#[test]
+fn a_retention_batch_reads_its_sessions_rows_in_the_order_of_their_index() {
+    use dagq::infrastructure::runtime_store::RETENTION_BATCH_READS;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    SqliteQueue::init(&db).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    for (sql, index) in RETENTION_BATCH_READS {
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let nulls = vec![rusqlite::types::Null; statement.parameter_count()];
+        let steps: Vec<String> = statement
+            .query_map(rusqlite::params_from_iter(nulls), |r| r.get("detail"))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            steps
+                .iter()
+                .any(|line| line.contains(&format!("INDEX {index} (session_id=?"))),
+            "{steps:#?}"
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|line| line.contains("TEMP B-TREE") || line.starts_with("SCAN")),
+            "{steps:#?}"
+        );
+    }
+}

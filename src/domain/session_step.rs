@@ -402,6 +402,21 @@ pub fn ranges(seqs: impl IntoIterator<Item = i64>) -> Vec<SeqRange> {
     ranges
 }
 
+/// How many of the ascending, distinct `seqs` the retention removes within
+/// `budget` rows: the first ones whose rows, one per step and one per run
+/// of consecutive seqs (the range it records of them), add up to no more.
+pub fn removed_within(seqs: &[i64], budget: usize) -> usize {
+    let mut rows = 0;
+    for (index, &seq) in seqs.iter().enumerate() {
+        let joins = index > 0 && seqs[index - 1].checked_add(1) == Some(seq);
+        rows += if joins { 1 } else { 2 };
+        if rows > budget {
+            return index;
+        }
+    }
+    seqs.len()
+}
+
 /// The gaps of a session: each run of seqs from [`FIRST_SEQ`] to the
 /// largest one `covered` holds that no range of it holds. `covered` is the
 /// steps held and the seqs the retention removed, so a removed step is no
@@ -431,6 +446,26 @@ mod tests {
 
     fn held(seqs: &[i64]) -> Vec<SeqRange> {
         ranges(seqs.iter().copied())
+    }
+
+    /// A step costs its row and, when it starts a run, the run's range row.
+    #[test]
+    fn the_steps_removed_within_a_budget_count_a_range_row_for_each_run() {
+        assert_eq!(removed_within(&[1, 2, 3], 0), 0);
+        assert_eq!(removed_within(&[1, 2, 3], 1), 0);
+        assert_eq!(removed_within(&[1, 2, 3], 2), 1);
+        // Consecutive: one range row for the run.
+        assert_eq!(removed_within(&[1, 2, 3], 3), 2);
+        assert_eq!(removed_within(&[1, 2, 3], 4), 3);
+        assert_eq!(removed_within(&[1, 2, 3], 100), 3);
+        // Apart: a range row each; the budget just reached takes the step.
+        assert_eq!(removed_within(&[1, 3, 5], 4), 2);
+        assert_eq!(removed_within(&[1, 3, 5], 5), 2);
+        assert_eq!(removed_within(&[1, 3, 5], 6), 3);
+        assert_eq!(removed_within(&[1, 2, 5, 6], 5), 3);
+        assert_eq!(removed_within(&[1, 2, 5, 6], 6), 4);
+        assert_eq!(removed_within(&[], 0), 0);
+        assert_eq!(removed_within(&[i64::MAX - 1, i64::MAX], 3), 2);
     }
 
     #[test]

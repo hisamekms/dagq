@@ -7,7 +7,7 @@ use super::*;
 use crate::application::{SessionOwners, SessionResourceStore, SessionStepStore};
 use crate::domain::session_step::{
     self, ResourceSample, SeqRange, SessionOwner, SessionResource, SessionStep, Step, StepError,
-    StepKind, StepTarget, StepsRecorded, TargetKind, gaps, ranges,
+    StepKind, StepTarget, StepsRecorded, TargetKind, gaps, ranges, removed_within,
 };
 use crate::domain::telemetry::{Beat, TargetFacts};
 
@@ -123,19 +123,261 @@ fn of_another_target(
     )
 }
 
-/// The seqs of `session_id` the retention removed.
+/// The `from_seq` of the row of `session_step_removed` that voids the other
+/// rows of its session. The retention writes it with the last steps of a
+/// session that keeps none, so its ranges go at once for this binary's
+/// readers however many transactions their rows take to go, and a step
+/// that comes in meanwhile starts the session anew. Below
+/// [`session_step::FIRST_SEQ`] and with `to_seq` below it, it holds no
+/// seq, so a binary that does not know it reads it as nothing; such a
+/// binary reads the ranges left of a removal stopped part way as still
+/// removed seqs until this binary's retention removes them (its own
+/// removes them only while the session has no step, and only when a row
+/// is due).
+const VOID_FROM: i64 = session_step::FIRST_SEQ - 1;
+
+/// The seqs of `session_id` the retention removed: none once they are void
+/// ([`VOID_FROM`]).
 fn removed(conn: &Connection, session_id: &str) -> rusqlite::Result<Vec<SeqRange>> {
     let mut statement = conn.prepare_cached(
         "SELECT from_seq, to_seq FROM session_step_removed WHERE session_id=?1 ORDER BY from_seq",
     )?;
-    statement
+    let ranges = statement
         .query_map([session_id], |row| {
             Ok(SeqRange {
                 from: row.get(0)?,
                 to: row.get(1)?,
             })
         })?
-        .collect()
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if ranges.first().is_some_and(|range| range.from == VOID_FROM) {
+        return Ok(Vec::new());
+    }
+    Ok(ranges)
+}
+
+/// The first steps due of a session (`?1`, received before `?2`, at most
+/// `?3`), in the order of the session's index `(session_id, seq)`.
+const DUE_STEPS: &str = "SELECT seq FROM session_steps
+     WHERE session_id=?1 AND received_at < ?2 ORDER BY seq LIMIT ?3";
+
+/// Remove the first samples due of a session (`?1`, received before `?2`,
+/// at most `?3`), chosen in the order of the session's index
+/// `(session_id, seq)`: a batch reads up to its last, not the whole session.
+const REMOVE_DUE_RESOURCES: &str = "DELETE FROM session_resources WHERE id IN (
+     SELECT id FROM session_resources
+     WHERE session_id=?1 AND received_at < ?2 ORDER BY seq LIMIT ?3)";
+
+/// Join the removed seqs `?3..=?4` of a session (`?1`) to its range that
+/// ends at `?2` (`?3 - 1`), found by the primary key as the last one that
+/// starts below.
+const EXTEND_REMOVED: &str = "UPDATE session_step_removed SET to_seq=?4
+     WHERE session_id=?1 AND to_seq=?2 AND from_seq=(
+         SELECT max(from_seq) FROM session_step_removed WHERE session_id=?1 AND from_seq < ?3)";
+
+/// Remove the first void ranges of a session (`?1`, those past the row at
+/// `?2` that voids them, at most `?3`), in the order of its primary key.
+const REMOVE_VOID_RANGES: &str = "DELETE FROM session_step_removed WHERE rowid IN (
+     SELECT rowid FROM session_step_removed WHERE session_id=?1 AND from_seq > ?2
+     ORDER BY from_seq LIMIT ?3)";
+
+/// The statements a batch of the retention reads a session's rows by under
+/// its lock, each with the index the migrations leave that it searches in
+/// its order (its boundary on a real queue.db is `tests/it/session_steps.rs`).
+pub const RETENTION_BATCH_READS: [(&str, &str); 4] = [
+    (DUE_STEPS, "sqlite_autoindex_session_steps_1"),
+    (REMOVE_DUE_RESOURCES, "sqlite_autoindex_session_resources_1"),
+    (EXTEND_REMOVED, "sqlite_autoindex_session_step_removed_1"),
+    (
+        REMOVE_VOID_RANGES,
+        "sqlite_autoindex_session_step_removed_1",
+    ),
+];
+
+/// Record `range` of `session_id` as removed, joined to the range that ends
+/// just below it if there is one, so that a run of consecutive seqs removed
+/// over batches and days stays one row: one row written either way.
+fn record_removed(
+    tx: &crate::infrastructure::sqlite::WriteTx<'_>,
+    session_id: &str,
+    range: SeqRange,
+) -> Result<usize> {
+    let joined = tx.execute(
+        EXTEND_REMOVED,
+        params![session_id, range.from - 1, range.from, range.to],
+    )?;
+    if joined > 0 {
+        return Ok(joined);
+    }
+    Ok(tx.execute(
+        "INSERT INTO session_step_removed(session_id, from_seq, to_seq) VALUES (?1, ?2, ?3)",
+        params![session_id, range.from, range.to],
+    )?)
+}
+
+/// What [`remove_session_rows`] did to a session in one transaction.
+struct SessionRemoved {
+    /// The steps it removed.
+    steps: usize,
+    /// The rows it wrote or removed, of every table.
+    rows: usize,
+    /// Whether the session has no row left to remove; when not, it goes on
+    /// in the next transaction.
+    done: bool,
+}
+
+/// Remove at most `budget` of the void ranges of `session_id` (those the
+/// row at [`VOID_FROM`] voids), then that row once none is left and the
+/// budget has room: whether it is gone. `rows` counts what it removed.
+fn remove_void(
+    tx: &crate::infrastructure::sqlite::WriteTx<'_>,
+    session_id: &str,
+    budget: usize,
+    rows: &mut usize,
+) -> Result<bool> {
+    let limit = budget.saturating_sub(*rows);
+    if limit > 0 {
+        *rows += tx.execute(
+            REMOVE_VOID_RANGES,
+            params![session_id, VOID_FROM, i64::try_from(limit)?],
+        )?;
+    }
+    let left: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_step_removed WHERE session_id=?1 AND from_seq > ?2)",
+        params![session_id, VOID_FROM],
+        |row| row.get(0),
+    )?;
+    if left || *rows >= budget {
+        return Ok(false);
+    }
+    *rows += tx.execute(
+        "DELETE FROM session_step_removed WHERE session_id=?1 AND from_seq=?2",
+        params![session_id, VOID_FROM],
+    )?;
+    Ok(true)
+}
+
+/// Write or remove at most `budget` rows of `session_id` received before
+/// `before`, reading them under the caller's lock: the ranges a
+/// transaction before voided ([`remove_void`]), the steps in the order of
+/// their seqs, then the samples, then the owner registered before
+/// `before` of a session left with none.
+///
+/// Every state it commits reads, to this binary, as the session did before
+/// the retention or as removed whole (its gaps, the seqs a step sent again
+/// duplicates, its target). A removed seq of a session that keeps a step
+/// goes to `session_step_removed` with it (a range row counts in `budget`,
+/// [`removed_within`]), so a retention stopped part way leaves it no gap
+/// and none counted twice, and a step that comes in meanwhile finds the
+/// session as it was. A session that keeps no step loses its last steps
+/// in the transaction that voids its ranges ([`VOID_FROM`]), which then go
+/// a bounded number a transaction; a step that comes in meanwhile starts
+/// the session anew.
+fn remove_session_rows(
+    tx: &crate::infrastructure::sqlite::WriteTx<'_>,
+    session_id: &str,
+    before: i64,
+    budget: usize,
+) -> Result<SessionRemoved> {
+    let left = |rows: usize| budget.saturating_sub(rows);
+    let mut rows = 0;
+    let mut steps = 0;
+    let not_done = |steps, rows| SessionRemoved {
+        steps,
+        rows,
+        done: false,
+    };
+    let voided: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_step_removed WHERE session_id=?1 AND from_seq=?2)",
+        params![session_id, VOID_FROM],
+        |row| row.get(0),
+    )?;
+    // The ranges voided before go first: a range written now is not void.
+    if voided && !remove_void(tx, session_id, budget, &mut rows)? {
+        return Ok(not_done(steps, rows));
+    }
+    let read: Vec<i64> = {
+        let mut statement = tx.prepare_cached(DUE_STEPS)?;
+        statement
+            .query_map(
+                params![session_id, before, i64::try_from(left(rows))?],
+                |row| row.get(0),
+            )?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    // A full read may leave steps due; one that is not holds all of them,
+    // so the walk for a step kept goes past no more than those.
+    let all_due = read.len() < left(rows);
+    let whole: Option<bool> = if all_due {
+        tx.query_row(
+            "SELECT CASE WHEN EXISTS(
+                 SELECT 1 FROM session_steps WHERE session_id=?1 AND received_at >= ?2)
+             THEN NULL ELSE EXISTS(SELECT 1 FROM session_step_removed WHERE session_id=?1) END",
+            params![session_id, before],
+            |row| row.get(0),
+        )?
+    } else {
+        None
+    };
+    if let Some(ranged) = whole {
+        // Removed whole: its last steps go with the row that voids its
+        // ranges, which fits as the read was not full.
+        steps = tx.execute(
+            "DELETE FROM session_steps WHERE session_id=?1",
+            [session_id],
+        )?;
+        rows += steps;
+        if ranged {
+            rows += tx.execute(
+                "INSERT INTO session_step_removed(session_id, from_seq, to_seq)
+                 VALUES (?1, ?2, ?3)",
+                params![session_id, VOID_FROM, VOID_FROM - 1],
+            )?;
+            if !remove_void(tx, session_id, budget, &mut rows)? {
+                return Ok(not_done(steps, rows));
+            }
+        }
+    } else {
+        let seqs = &read[..removed_within(&read, left(rows))];
+        if let Some(&last) = seqs.last() {
+            for range in ranges(seqs.iter().copied()) {
+                rows += record_removed(tx, session_id, range)?;
+            }
+            steps = tx.execute(
+                "DELETE FROM session_steps WHERE session_id=?1 AND received_at < ?2 AND seq <= ?3",
+                params![session_id, before, last],
+            )?;
+            rows += steps;
+        }
+        if !all_due || seqs.len() < read.len() {
+            return Ok(not_done(steps, rows));
+        }
+    }
+    let limit = left(rows);
+    if limit == 0 {
+        return Ok(not_done(steps, rows));
+    }
+    let samples = tx.execute(
+        REMOVE_DUE_RESOURCES,
+        params![session_id, before, i64::try_from(limit)?],
+    )?;
+    rows += samples;
+    // A full removal may leave samples due.
+    if samples == limit {
+        return Ok(not_done(steps, rows));
+    }
+    // The samples left room for one more row.
+    rows += tx.execute(
+        "DELETE FROM session_owners WHERE session_id=?1 AND registered_at < ?2
+             AND NOT EXISTS(SELECT 1 FROM session_steps WHERE session_id=?1)
+             AND NOT EXISTS(SELECT 1 FROM session_resources WHERE session_id=?1)",
+        params![session_id, before],
+    )?;
+    Ok(SessionRemoved {
+        steps,
+        rows,
+        done: true,
+    })
 }
 
 impl SqliteQueue {
@@ -239,62 +481,56 @@ impl SessionStepStore for SqliteQueue {
         )
     }
 
+    /// Read with no lock which sessions have a row due, then remove their
+    /// rows by transactions of at most [`ROWS_PER_TRANSACTION`] rows and
+    /// sessions, [`PAUSE_BETWEEN_TRANSACTIONS`] apart with no lock held: with
+    /// none due no write lock is taken. Each transaction reads its session's
+    /// rows again under its lock ([`remove_session_rows`]), so a step another
+    /// writer added between two is kept and not counted as removed, and a
+    /// retention stopped between two is finished by the next.
     fn remove_steps(&self, before: i64) -> Result<usize> {
-        // With none due no write lock is taken.
-        let due: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_steps WHERE received_at < ?1)
-                 OR EXISTS(SELECT 1 FROM session_resources WHERE received_at < ?1)
-                 OR EXISTS(SELECT 1 FROM session_owners WHERE registered_at < ?1)",
-            [before],
-            |row| row.get(0),
-        )?;
-        if !due {
-            return Ok(0);
-        }
-        let tx = self.write_tx("session_steps_retention", TransactionBehavior::Immediate)?;
-        // The removed seqs of the sessions that keep a step: those of a
-        // session removed whole are not kept.
-        let kept: Vec<(String, i64)> = {
-            let mut statement = tx.prepare(
-                "SELECT old.session_id, old.seq FROM session_steps old
-                 WHERE old.received_at < ?1 AND EXISTS(
-                     SELECT 1 FROM session_steps new
-                     WHERE new.session_id=old.session_id AND new.received_at >= ?1)
-                 ORDER BY old.session_id, old.seq",
+        let sessions: Vec<String> = {
+            let mut statement = self.conn.prepare(
+                "SELECT session_id FROM session_steps WHERE received_at < ?1
+                 UNION SELECT session_id FROM session_resources WHERE received_at < ?1
+                 UNION SELECT session_id FROM session_owners o WHERE registered_at < ?1
+                     AND NOT EXISTS(SELECT 1 FROM session_steps s
+                                    WHERE s.session_id=o.session_id AND s.received_at >= ?1)
+                     AND NOT EXISTS(SELECT 1 FROM session_resources r
+                                    WHERE r.session_id=o.session_id AND r.received_at >= ?1)
+                 UNION SELECT session_id FROM session_step_removed d WHERE from_seq=?2
+                     OR NOT EXISTS(SELECT 1 FROM session_steps s WHERE s.session_id=d.session_id)
+                 ORDER BY 1",
             )?;
             statement
-                .query_map([before], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .query_map(params![before, VOID_FROM], |row| row.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
-        for session in kept.chunk_by(|a, b| a.0 == b.0) {
-            for range in ranges(session.iter().map(|(_, seq)| *seq)) {
-                tx.execute(
-                    "INSERT INTO session_step_removed(session_id, from_seq, to_seq)
-                     VALUES (?1, ?2, ?3)",
-                    params![session[0].0, range.from, range.to],
-                )?;
+        let (mut next, mut removed, mut first) = (0, 0, true);
+        while next < sessions.len() {
+            if !first {
+                std::thread::sleep(PAUSE_BETWEEN_TRANSACTIONS);
             }
+            first = false;
+            let tx = self.write_tx("session_steps_retention", TransactionBehavior::Immediate)?;
+            let mut budget = ROWS_PER_TRANSACTION;
+            let mut steps = 0;
+            while budget > 0 && next < sessions.len() {
+                let session = remove_session_rows(&tx, &sessions[next], before, budget)?;
+                steps += session.steps;
+                // A session that is not done goes on in the next
+                // transaction; one that removes nothing still takes a
+                // place, so a transaction goes through at most so many
+                // sessions too.
+                if !session.done {
+                    break;
+                }
+                budget = budget.saturating_sub(session.rows.max(1));
+                next += 1;
+            }
+            tx.commit()?;
+            removed += steps;
         }
-        let removed = tx.execute("DELETE FROM session_steps WHERE received_at < ?1", [before])?;
-        tx.execute(
-            "DELETE FROM session_resources WHERE received_at < ?1",
-            [before],
-        )?;
-        tx.execute(
-            "DELETE FROM session_owners WHERE registered_at < ?1
-                 AND NOT EXISTS(SELECT 1 FROM session_steps s
-                                WHERE s.session_id=session_owners.session_id)
-                 AND NOT EXISTS(SELECT 1 FROM session_resources r
-                                WHERE r.session_id=session_owners.session_id)",
-            [before],
-        )?;
-        tx.execute(
-            "DELETE FROM session_step_removed WHERE NOT EXISTS(
-                 SELECT 1 FROM session_steps
-                 WHERE session_steps.session_id=session_step_removed.session_id)",
-            [],
-        )?;
-        tx.commit()?;
         Ok(removed)
     }
 }

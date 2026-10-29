@@ -206,15 +206,15 @@ serviceのファイルはqueueのディレクトリの`service/`に置き、DB�
 入口は`runtime_store/session_steps.rs`、型は`domain::session_step`。
 
 - `(session_id, seq)`をUNIQUEにし、同じstepを2度受けても1行で、先に受けた中身を保つ。
-- 1つのsessionのstepは1つの対象のもので、別の対象の名で届いた同じsessionのstepは呼び出しごと拒む。
 - seqの抜けは埋めず、読むときに1から最大のseqまでのうち、持つstepにも保持で消したseqにも無い区間として数える。
 - `id`はAUTOINCREMENTで、保持で消えた行の番号を使い直さないので、受けた順のidのカーソルは保持の後も成り立つ。
-- 保持は台帳を作る係の周回が行い、受けてから90日を過ぎたstepを1行ずつ消す。
-- stepの残るsessionは消したseqを連続する区間ごとに`session_step_removed`に持ち、それを抜けと数えず、届き直しても足さない（stepの残らないsessionの行は消す）。
-- stepはseqの順に届くとは限らないので、消したseqより小さい届いていないseqは抜けのまま残り、届けば足す。
+- 保持は台帳を作る係の周回が、受けてから90日を過ぎたstepを行数に上限のあるトランザクションに分けて消す（`remove_steps`）。
+- stepの残るsessionは消したseqを連続する区間ごとに`session_step_removed`に持ち、それを抜けと数えず、届き直しても足さない。
+  stepの残らないsessionは最後のstepと同じトランザクションの1行の印で区間を一度に無効にし、分けて消す。
+  旧い版は、止まった削除の残りをこの版の保持が消すまで有効に読む。
 - `session_resources`はexecutorが中から測った資源のsampleを、stepと同じく`(session_id, seq)`ごとに1行で持ち、保持もstepと同じに消す。
 - `session_owners`は制御側が登録したsessionの対象を持つ（時点は[計測](measurement.md#送る口)）。
-  登録・step・sampleのどれかが別の対象のsessionは、登録もstepもsampleも拒む。
+  登録・step・sampleのどれかが別の対象のsessionは、登録もstepもsampleも呼び出しごと拒む。
   保持は、登録が90日より前でstepもsampleも残らないsessionの行を消す。
 
 ## runの資源
