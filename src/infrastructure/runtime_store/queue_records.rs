@@ -37,7 +37,7 @@ impl SqliteQueue {
         ) else {
             bail!("report_written needs a period and a label");
         };
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_report_written", TransactionBehavior::Immediate)?;
         let recorded: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
                AND json_extract(payload,'$.period')=?2 AND json_extract(payload,'$.label')=?3)",

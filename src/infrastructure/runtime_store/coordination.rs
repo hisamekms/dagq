@@ -38,10 +38,8 @@ impl SqliteQueue {
     /// [`crate::application::QueueBusy`] (task 1119).
     pub fn heartbeat(&mut self, token: &LeaseToken) -> Result<HeartbeatWrite> {
         let now = self.generators.clock.now();
-        let mut write = || -> Result<HeartbeatWrite> {
-            let tx = self
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let write = || -> Result<HeartbeatWrite> {
+            let tx = self.write_tx("heartbeat", TransactionBehavior::Immediate)?;
             let registered = refresh_registration(&tx, token, now)?;
             let leases = tx.execute(
                 "UPDATE run_leases SET heartbeat_at=?2 WHERE token=?1",
@@ -98,9 +96,7 @@ impl SqliteQueue {
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
         ensure!(parallel >= 1, "parallel must be at least 1");
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("supervisor_register", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         tx.execute(
             "INSERT INTO supervisors(token,pid,parallel,binary_version,started_at,heartbeat_at)
@@ -168,7 +164,7 @@ impl SqliteQueue {
         stopped: &dyn Fn(&SupervisorRegistration) -> Value,
     ) -> Result<bool> {
         crate::domain::check_event_target(kind, None, None)?;
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("prune_supervisor", TransactionBehavior::Immediate)?;
         let Some(registration) = tx
             .query_row(
                 "SELECT * FROM supervisors WHERE token=?1",
@@ -283,9 +279,7 @@ impl SqliteQueue {
         setup: Option<(SlotLimits, &[ProviderCheck])>,
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("supervisor_resume", TransactionBehavior::Immediate)?;
         ensure!(
             tx.execute(
                 "UPDATE supervisors SET binary_version=?3, heartbeat_at=?4, handoff_accepted=1,
@@ -377,9 +371,7 @@ impl SqliteQueue {
     /// drains or hands off a run it cannot keep. The run's `supervisor_token`
     /// stays as a record.
     pub fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("release_lease", TransactionBehavior::Immediate)?;
         ensure!(
             tx.execute(
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
@@ -411,9 +403,7 @@ impl SqliteQueue {
     /// queue resolved from the working directory. A queue already bound to
     /// another repository is refused; rebinding is never implicit.
     pub fn bind_repository(&mut self, common_dir: &str) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("bind_repository", TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT OR IGNORE INTO queue_repository(singleton, git_common_dir) VALUES (1,?1)",
             [common_dir],
@@ -435,9 +425,7 @@ impl SqliteQueue {
     /// the previous binding. Only the explicit `rebind` command calls this
     /// (ADR-0020); `init` and `supervise` go through `bind_repository`.
     pub fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("rebind_repository", TransactionBehavior::Immediate)?;
         let previous: Option<String> = tx
             .query_row(
                 "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
@@ -520,9 +508,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         pid: u32,
     ) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("register_resume_wrapper", TransactionBehavior::Immediate)?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         // A running run's lost session opened again (task 1372) starts the
         // same way: its wrapper waits for the supervisor's request.
@@ -549,9 +535,7 @@ impl SqliteQueue {
     ) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::AgentStarted]))?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("register_resume_agent", TransactionBehavior::Immediate)?;
         assert_wrapper(&tx, id, wrapper_pid)?;
         tx.execute(
             "INSERT INTO run_processes(run_id,role,pid) VALUES (?1,'agent',?2)",
@@ -579,9 +563,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         lost: Option<u32>,
     ) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("clear_lost_session", TransactionBehavior::Immediate)?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let allowed =
             supervised_run(&tx, id, token)?.is_some_and(|run| run::check_reopenable(&run).is_ok());
@@ -615,9 +597,7 @@ impl SqliteQueue {
         attempt: u64,
         repaired: Value,
     ) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("session_reopened", TransactionBehavior::Immediate)?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         apply(
             &tx,
@@ -639,9 +619,7 @@ impl SqliteQueue {
     }
 
     pub fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("register_wrapper", TransactionBehavior::Immediate)?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let allowed = supervised_run(&tx, id, token)?
             .is_some_and(|run| run::check_ready_for_wrapper(&run).is_ok());
@@ -659,9 +637,7 @@ impl SqliteQueue {
     pub fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::AgentStarted]))?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("register_agent", TransactionBehavior::Immediate)?;
         assert_wrapper(&tx, id, wrapper_pid)?;
         tx.execute(
             "INSERT INTO run_processes(run_id,role,pid) VALUES (?1,'agent',?2)",
@@ -696,9 +672,7 @@ impl SqliteQueue {
         wrapper_pid: u32,
         agent_pid: u32,
     ) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("register_turn_agent", TransactionBehavior::Immediate)?;
         assert_wrapper(&tx, id, wrapper_pid)?;
         let changed = tx.execute(
             "UPDATE run_processes SET pid=?2,heartbeat_at=?3
@@ -723,9 +697,7 @@ impl SqliteQueue {
     pub fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::SessionExited]))?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("wrapper_exited", TransactionBehavior::Immediate)?;
         assert_wrapper(&tx, id, pid)?;
         tx.execute(
             "UPDATE run_processes SET exited_at=?3,exit_code=?2,heartbeat_at=?3

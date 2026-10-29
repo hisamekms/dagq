@@ -31,15 +31,14 @@ impl SqliteQueue {
     /// inside the write. Idempotent: after it the records agree.
     pub fn record_attributes_baseline(&self) -> Result<Option<(usize, usize)>> {
         {
-            let read =
-                rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+            let read = self.write_tx("attributes_baseline_read", TransactionBehavior::Deferred)?;
             let (tasks, goals) = differing(&read)?;
             read.commit()?;
             if tasks.is_empty() && goals.is_empty() {
                 return Ok(None);
             }
         }
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("attributes_baseline_write", TransactionBehavior::Immediate)?;
         let (tasks, goals) = differing(&tx)?;
         if tasks.is_empty() && goals.is_empty() {
             return Ok(None);
@@ -78,15 +77,14 @@ impl SqliteQueue {
     /// inside the write. Idempotent: after it the records agree.
     pub fn record_findings_baseline(&self) -> Result<Option<usize>> {
         {
-            let read =
-                rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+            let read = self.write_tx("findings_baseline_read", TransactionBehavior::Deferred)?;
             let differ = differing_findings(&read)?;
             read.commit()?;
             if differ.is_empty() {
                 return Ok(None);
             }
         }
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("findings_baseline_write", TransactionBehavior::Immediate)?;
         let differ = differing_findings(&tx)?;
         if differ.is_empty() {
             return Ok(None);

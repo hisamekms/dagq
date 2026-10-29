@@ -7,7 +7,7 @@ use dagq::application::supervise::{Heartbeat, HeartbeatPolicy};
 use dagq::application::{NodeSampleStore, Queue, QueueOpener};
 use dagq::domain::host_metrics::{HOST_NODE, HostSample};
 use dagq::domain::{EventKind, LeaseToken};
-use dagq::infrastructure::sqlite::{SqliteQueue, WriteTx};
+use dagq::infrastructure::sqlite::{SqliteQueue, WRITE_HOLD_WARN, WriteTx};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -559,6 +559,156 @@ fn a_queue_s_deferred_hold_with_no_row_changed_is_recorded_as_an_event() {
         assert_eq!(payload["role"], "user", "{payload}");
         assert_eq!(payload["pid"], std::process::id(), "{payload}");
     }
+}
+
+/// A queue's immediate transaction of a runtime transition, past the
+/// threshold, warns and is recorded as `queue_write_held_long` with its
+/// name, hold, role and pid, also when it fails and rolls back; the error
+/// it returns is its own.
+#[test]
+fn a_runtime_transition_that_held_the_lock_long_is_recorded_as_an_event() {
+    let _test = common::test();
+    let (_dir, db, _queue) = registered();
+    let holds = LongHolds::default();
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(holds.clone()));
+    let mut queue = SqliteQueue::open(&db)
+        .unwrap()
+        .with_write_hold_warn(Duration::ZERO);
+    let error = queue
+        .record_runtime_error(
+            &dagq::domain::RunId::new("missing").unwrap(),
+            "no such run",
+            &dagq::domain::ReasonCode::Other.into(),
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("run does not exist"),
+        "{error:#}"
+    );
+    assert_eq!(
+        holds.named("record_runtime_error").len(),
+        1,
+        "{:?}",
+        holds.0
+    );
+    let recorded = held_long(&db);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    let payload = &recorded[0];
+    assert_eq!(payload["transaction"], "record_runtime_error", "{payload}");
+    assert!(payload["held_ms"].is_u64(), "{payload}");
+    assert_eq!(payload["role"], "user", "{payload}");
+    assert_eq!(payload["pid"], std::process::id(), "{payload}");
+}
+
+/// The rows of `t` on `conn`, in order.
+fn rows(conn: &Connection) -> Vec<i64> {
+    let mut statement = conn.prepare("SELECT x FROM t ORDER BY x").unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// A [`WriteTx`] ended by [`WriteTx::finish`] ends as its transaction's
+/// drop behavior says, a rollback: what it wrote does not stay, finish
+/// returns `Ok`, and its hold of the lock past the threshold is recorded.
+#[test]
+fn a_finished_write_tx_rolls_back_and_its_long_hold_is_recorded() {
+    let _test = common::test();
+    let (_dir, db, _queue) = registered();
+    let queue = SqliteQueue::open(&db)
+        .unwrap()
+        .with_write_hold_warn(Duration::ZERO);
+    let floor = || -> i64 {
+        Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT floor FROM schema_floor", [], |r| r.get(0))
+            .unwrap()
+    };
+    let before = floor();
+    let tx = queue
+        .write_tx("finished", TransactionBehavior::Deferred)
+        .unwrap();
+    let deref: &Transaction<'_> = &tx;
+    assert_eq!(
+        deref
+            .execute("UPDATE schema_floor SET floor = floor + 1", [])
+            .unwrap(),
+        1
+    );
+    tx.finish().unwrap();
+    assert_eq!(floor(), before, "the write rolled back");
+    let names: Vec<String> = held_long(&db)
+        .iter()
+        .map(|payload| payload["transaction"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(names, ["finished"]);
+}
+
+/// What a [`WriteTx`] wrote before a savepoint and in a committed one
+/// stays after its commit; only a savepoint dropped without its commit
+/// rolls back.
+#[test]
+fn a_write_tx_savepoint_rolls_back_only_its_own_writes() {
+    let _test = common::test();
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE t(x)").unwrap();
+    let mut tx = WriteTx::begin(
+        &conn,
+        "savepoints",
+        TransactionBehavior::Immediate,
+        WRITE_HOLD_WARN,
+    )
+    .unwrap();
+    tx.execute("INSERT INTO t VALUES (1)", []).unwrap();
+    {
+        let savepoint = tx.savepoint().unwrap();
+        savepoint.execute("INSERT INTO t VALUES (2)", []).unwrap();
+        savepoint.commit().unwrap();
+    }
+    {
+        let savepoint = tx.savepoint().unwrap();
+        savepoint.execute("INSERT INTO t VALUES (3)", []).unwrap();
+    }
+    tx.commit().unwrap();
+    assert_eq!(rows(&conn), [1, 2]);
+}
+
+/// A deferred [`WriteTx`] that wrote only in a savepoint held the write
+/// lock: past the threshold it is recorded, committed or rolled back
+/// savepoint alike.
+#[test]
+fn a_deferred_write_tx_that_wrote_only_in_a_savepoint_is_recorded() {
+    let _test = common::test();
+    let (_dir, db, _queue) = registered();
+    let queue = SqliteQueue::open(&db)
+        .unwrap()
+        .with_write_hold_warn(Duration::ZERO);
+    let write = "UPDATE tasks SET title = title WHERE id = -1";
+    let mut tx = queue
+        .write_tx("savepoint_committed", TransactionBehavior::Deferred)
+        .unwrap();
+    {
+        let savepoint = tx.savepoint().unwrap();
+        savepoint.execute(write, []).unwrap();
+        savepoint.commit().unwrap();
+    }
+    tx.commit().unwrap();
+    let mut tx = queue
+        .write_tx("savepoint_dropped", TransactionBehavior::Deferred)
+        .unwrap();
+    {
+        let savepoint = tx.savepoint().unwrap();
+        savepoint.execute(write, []).unwrap();
+    }
+    tx.commit().unwrap();
+    let names: Vec<String> = held_long(&db)
+        .iter()
+        .map(|payload| payload["transaction"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(names, ["savepoint_committed", "savepoint_dropped"]);
 }
 
 /// A long hold whose record fails (a connection with no queue's events)

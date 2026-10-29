@@ -99,9 +99,7 @@ impl SqliteQueue {
         pid: u32,
         wrapper: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("adopt_run", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         let lease = tx
             .query_row(
@@ -196,9 +194,7 @@ impl SqliteQueue {
         id: &RunId,
         token: &LeaseToken,
     ) -> Result<Option<TaskRun>> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("lease_stranded_landing", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         let Some(run) =
             stored_run(&tx, id)?.filter(|run| run.status() == RunStatus::AwaitingIntegration)
@@ -280,9 +276,7 @@ impl SqliteQueue {
         op: crate::domain::ReplanId,
         generation: i64,
     ) -> Result<Option<TaskRun>> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("lease_for_park", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         let operation = crate::infrastructure::replans::read_operation(&tx, op)?;
         if operation.run_id != *id
@@ -337,9 +331,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         hold: crate::domain::HoldId,
     ) -> Result<Option<TaskRun>> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("lease_for_hold_park", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         let Some(run) = stored_run(&tx, id)?.filter(|run| {
             matches!(
@@ -397,9 +389,7 @@ impl SqliteQueue {
         op: crate::domain::ReplanId,
         generation: i64,
     ) -> Result<RestoreStart> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("begin_restore", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         let operation = crate::infrastructure::replans::read_operation(&tx, op)?;
         if operation.run_id != *id
@@ -454,9 +444,7 @@ impl SqliteQueue {
         if matches!(recorded, Ok(true)) {
             return recorded;
         }
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("finish_restore", TransactionBehavior::Immediate)?;
         if tx.execute(
             "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
             params![id, token],
@@ -487,9 +475,7 @@ impl SqliteQueue {
         generation: i64,
         restored: std::result::Result<serde_json::Value, String>,
     ) -> Result<bool> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_clone_restore", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         if renew_lease(&tx, id, token, now).is_err() || restored_by(&tx, id, op)? {
             return Ok(false);
@@ -514,9 +500,7 @@ impl SqliteQueue {
         generation: i64,
         restored: std::result::Result<serde_json::Value, String>,
     ) -> Result<bool> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_restore", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         if renew_lease(&tx, id, token, now).is_err() {
             return Ok(false);
@@ -607,9 +591,7 @@ impl SqliteQueue {
         status: RunStatus,
         guarded: Option<GuardedStep>,
     ) -> Result<Option<TaskRun>> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("lease_unheld", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         let Some(run) = stored_run(&tx, id)?.filter(|run| run.status() == status) else {
             return Ok(None);
@@ -642,9 +624,7 @@ impl SqliteQueue {
     ) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::RunRecovered]))?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("recover_run", TransactionBehavior::Immediate)?;
         let fresh: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1 AND heartbeat_at >= ?2-?3)",
             params![id, self.generators.clock.now(), HEARTBEAT_TIMEOUT_SECS],
@@ -744,9 +724,7 @@ impl SqliteQueue {
         reason: Option<&str>,
         config: resume::ResumeConfig,
     ) -> Result<Option<(TaskRun, usize)>> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("begin_resume", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         let Some(run) = stored_run(&tx, id)?.filter(|run| run::check_resumable(run).is_ok()) else {
             return Ok(None);
@@ -830,9 +808,7 @@ impl SqliteQueue {
         main: &CommitSha,
         approved: bool,
     ) -> Result<Option<TaskRun>> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("skip_resume", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         // No session starts: the earlier session's rows stay as they are.
         if replanning(&tx, id, GuardedStep::Resume)? {
@@ -909,9 +885,7 @@ impl SqliteQueue {
         keep_lease: bool,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("end_resume", TransactionBehavior::Immediate)?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         if let Some(head) = landing {
             apply(
@@ -1005,9 +979,7 @@ impl SqliteQueue {
     ) -> Result<Option<(TaskRun, usize)>> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::TriageStarted]))?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("begin_triage", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         let run = tx
             .query_row(
@@ -1096,9 +1068,7 @@ impl SqliteQueue {
             .chain(also.iter().map(|(kind, _)| *kind))
             .collect();
         let _read = read_before(&self.conn, Closing::Run(id, &kinds))?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("finish_triage", TransactionBehavior::Immediate)?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = tx.query_row(
             "SELECT * FROM task_runs WHERE id=?1",
@@ -1168,9 +1138,7 @@ impl SqliteQueue {
     ) -> Result<Option<TaskRun>> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::TriageFinished]))?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("exhaust_resumes", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         let run = tx
             .query_row(
@@ -1257,9 +1225,7 @@ impl SqliteQueue {
         answer: &str,
         reason: &str,
     ) -> Result<TaskRun> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("decide_triage", TransactionBehavior::Immediate)?;
         let result = decide_triage_in(
             &tx,
             refusals(&self.runs_dir, &self.generators),
@@ -1291,9 +1257,7 @@ impl SqliteQueue {
         step: GuardedStep,
         supervisor: &LeaseToken,
     ) -> Result<bool> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("note_hold_deferred", TransactionBehavior::Immediate)?;
         let noted: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind=?2
                AND json_extract(payload,'$.hold_id')=?3 AND json_extract(payload,'$.step')=?4)",
@@ -1328,9 +1292,7 @@ impl SqliteQueue {
         answer: &str,
         reason: &str,
     ) -> Result<bool> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("keep_triage_answer", TransactionBehavior::Immediate)?;
         let task = task_of(&tx, id)?;
         let Some(hold) = crate::infrastructure::task_holds::guard_of(&tx, task)? else {
             return Ok(false);
@@ -1353,9 +1315,7 @@ impl SqliteQueue {
     /// Keep a recovery job's verdict on a live session while its task is
     /// held (see [`RunRecovery::keep_live_verdict`]).
     pub fn keep_live_verdict(&mut self, id: &RunId, verdict: serde_json::Value) -> Result<bool> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("keep_live_verdict", TransactionBehavior::Immediate)?;
         let task = task_of(&tx, id)?;
         let Some(hold) = crate::infrastructure::task_holds::guard_of(&tx, task)? else {
             return Ok(false);
@@ -1413,9 +1373,7 @@ impl SqliteQueue {
     /// ([`crate::infrastructure::asks::discard_by_runtime`]). A discarded result
     /// leaves the run as if none came: its next recovery round is due.
     pub fn settle_kept_result(&mut self, kept: EventId) -> Result<KeptOutcome> {
-        let mut tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut tx = self.write_tx("settle_kept_result", TransactionBehavior::Immediate)?;
         let Some(event) = tx
             .query_row(
                 "SELECT * FROM run_events WHERE id=?1 AND kind=?2",
@@ -1556,9 +1514,7 @@ impl SqliteQueue {
             )?),
             None => None,
         };
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("inherit_by_hand", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         let task = read_task(&tx, task_id)?;
         crate::domain::task::check_status_authorized(&task, request.authorized)?;

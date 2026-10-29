@@ -52,7 +52,7 @@ impl SqliteQueue {
     pub fn installs_after(&self, after: EventId, limit: usize) -> Result<(Vec<RunEvent>, usize)> {
         let kind = crate::domain::UPDATE_INSTALLED;
         // One read snapshot keeps the installs and their count consistent.
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx("installs_after", TransactionBehavior::Deferred)?;
         let total: i64 = tx.query_row(
             &format!("SELECT COUNT(*) {INSTALLS_AFTER}"),
             params![kind, after],
@@ -142,7 +142,7 @@ impl SqliteQueue {
         // connection leaves no transaction open and the closes' lines are
         // known rolled back.
         let _read = read_before(&self.conn, Closing::Event(id, kind, &payload))?;
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_runtime_event", TransactionBehavior::Immediate)?;
         run_event(&tx, id, kind, payload)?;
         tx.commit()?;
         Ok(())
@@ -160,7 +160,7 @@ impl SqliteQueue {
         check: &mut dyn FnMut() -> Result<bool>,
     ) -> Result<bool> {
         let _read = read_before(&self.conn, Closing::Event(id, kind, &payload))?;
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_runtime_event_if", TransactionBehavior::Immediate)?;
         if !check()? {
             return Ok(false);
         }
@@ -196,7 +196,7 @@ impl SqliteQueue {
         // (the schema, to prepare the insert) got SQLITE_BUSY at once, past
         // the busy timeout, when another supervisor wrote at the same time.
         let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_queue_event", TransactionBehavior::Immediate)?;
         let id = queue_event(&tx, kind, &payload)?;
         tx.commit()?;
         Ok(id)
@@ -215,7 +215,7 @@ impl SqliteQueue {
             .iter()
             .map(|(kind, payload)| read_before(&self.conn, Closing::Queue(*kind, payload)))
             .collect::<Result<Vec<_>>>()?;
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_queue_events", TransactionBehavior::Immediate)?;
         let ids = events
             .iter()
             .map(|(kind, payload)| queue_event(&tx, *kind, payload))
@@ -242,7 +242,7 @@ impl SqliteQueue {
             None => Closing::Queue(kind, &payload),
         };
         let _read = read_before(&self.conn, closing)?;
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_event_once", TransactionBehavior::Immediate)?;
         let found: Option<i64> = tx
             .query_row(
                 "SELECT event_id FROM event_records WHERE record=?1",
@@ -280,7 +280,7 @@ impl SqliteQueue {
         let kind = EventKind::InboxNudged;
         crate::domain::check_event_target(kind, None, None)?;
         let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("claim_inbox_nudge", TransactionBehavior::Immediate)?;
         let claimed: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_events
              WHERE kind=?1 AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
@@ -322,7 +322,10 @@ impl SqliteQueue {
         );
         crate::domain::check_event_target(kind, None, None)?;
         let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx(
+            "record_inbox_watcher_change",
+            TransactionBehavior::Immediate,
+        )?;
         let latest: Option<(String, Option<i64>)> = tx
             .query_row(
                 "SELECT kind, json_extract(payload,'$.at') FROM run_events
