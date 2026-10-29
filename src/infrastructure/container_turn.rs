@@ -48,7 +48,7 @@ use crate::domain::run_clone::{
     self, CLONE_MAIN_REF, MAIN_BUNDLE_FILE, RUN_BUNDLE_FILE, RUN_STATE_FILE, RunState, StateFound,
     TurnStart,
 };
-use crate::domain::run_container::{TOKEN_FILE, turn_env, verification_env};
+use crate::domain::run_container::{TOKEN_FILE, turn_env, verification_env, verification_exit};
 use crate::domain::sccache::{
     CONTAINER_GATE_VAR, CONTAINER_TURN_VAR, ContainerGate, GUARD_PROGRAM_VAR, GateStep,
     WRAPPER_VAR, container_agent_env, container_guard, container_request, gate_step,
@@ -278,8 +278,10 @@ pub struct VerifyOptions {
 /// [`RUN_ID_ENV`] names (read with `env`), and run it in the current
 /// directory (the verification's clone). Its output is the command's, and
 /// so is its exit code (128 and the signal's number for a command killed
-/// by one). An error before the command starts (no run, no token) runs no
-/// command.
+/// by one), but for the command's own 125, which ends it with
+/// [`verification_exit`]'s code and the original said on stderr: the
+/// control side reads `podman run`'s 125 as podman's failure. An error
+/// before the command starts (no run, no token) runs no command.
 ///
 /// [Container runtime]: ../../docs/design/container-runtime.md
 pub fn run_verification(
@@ -316,10 +318,15 @@ pub fn run_verification(
         let _ = forwarder.join();
     }
     let status = status?;
-    Ok(status
+    let code = status
         .code()
         .or_else(|| status.signal().map(|signal| 128 + signal))
-        .unwrap_or(1))
+        .unwrap_or(1);
+    let (code, note) = verification_exit(code);
+    if let Some(note) = note {
+        eprintln!("{note}");
+    }
+    Ok(code)
 }
 
 /// The forwarder on the container's loopback, on a thread until `stop`;

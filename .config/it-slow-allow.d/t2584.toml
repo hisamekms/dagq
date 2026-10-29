@@ -1,0 +1,9 @@
+[[test]]
+name = "verification_container::a_verification_command_exiting_125_in_its_container_fails_as_the_command"
+reason = "B 境界（supervisor の配線・プロセス）: supervisor の着地が fake の podman を通して実の dagq relay verify で command 自身の 125 を流し、integrate の失敗にならず verification_command と verification_failed の integration_deferred が残って needs_session になることを確かめる。付け替えの判断は domain::run_container の unit test"
+task = 2584
+
+[[test]]
+name = "verification_container::a_waiting_run_whose_recheck_command_exits_125_in_its_container_is_judged"
+reason = "B 境界（supervisor の配線・プロセス）: container の run の landing recheck の command 自身の 125 が fake の podman と実の dagq relay verify を通って container_refused にならず check の失敗として resumed と判定されることを supervisor を通して確かめる。付け替えの判断は domain::run_container の unit test"
+task = 2584

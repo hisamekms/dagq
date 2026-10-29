@@ -815,6 +815,37 @@ fn relay_verify_runs_the_command_with_the_token_in_its_proxies_and_exits_with_it
     assert!(!seen.exists());
 }
 
+/// The command's own 125 ends `dagq relay verify` with a failure that is
+/// not podman's 125, the original said on stderr; its output is still the
+/// command's.
+#[test]
+fn relay_verify_does_not_pass_on_the_command_s_own_125_as_podman_s() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let token = dir.path().join("token");
+    fs::write(&token, "tok\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .env("DAGQ_RUN_ID", "r1")
+        .args(["relay", "verify", "--token-file"])
+        .arg(&token)
+        .args(["--", "sh", "-c", "echo out; exit 125"])
+        .current_dir(dir.path())
+        .bounded_output()
+        .unwrap();
+    let code = output.status.code().unwrap();
+    assert_ne!(code, 0, "{output:?}");
+    assert!(
+        !dagq::domain::run_container::podman_failed(Some(code)),
+        "{output:?}"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "out\n");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("exited with 125"),
+        "{output:?}"
+    );
+}
+
 /// Where [`verification_clone_child_process`] reads what to make.
 const CLONE_FOR: &str = "DAGQ_TEST_VERIFICATION_CLONE_FOR";
 
@@ -1543,6 +1574,40 @@ fn a_run_held_in_its_slot_whose_recheck_command_fails_in_its_container_is_parked
     assert!(queue.repo.join("fix.txt").exists());
 }
 
+/// A landing recheck's command that runs in its container and exits 125
+/// itself is judged as the command's failure, not refused as a container
+/// podman did not start.
+#[test]
+fn a_waiting_run_whose_recheck_command_exits_125_in_its_container_is_judged() {
+    let _test = crate::common::test();
+    let queue = VerifyQueue::new();
+    let (waiting, _, outcome) = rechecked_in_a_container_with(
+        &queue,
+        "[roles.verification]\nruntime = \"container\"\n[recheck]\ncommand = \"exit 125\"\n",
+        Arc::new(Usable),
+    );
+    let found = events_of(&queue.db, waiting.id(), "landing_recheck_failed");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["command"], "exit 125");
+    assert_eq!(found[0]["code"], "verification_failed");
+    assert_eq!(found[0]["action"], "resumed", "{found:?}");
+    assert!(found[0]["container_refused"].is_null(), "{found:?}");
+    let counts = &runtime::status(&queue.db).unwrap()["landing_recheck"];
+    assert_eq!(counts["environment"], 0, "{counts}");
+    assert_eq!(counts["check_failed"], 1, "{counts}");
+    // The resume it asked for finds no clone, which the test's run of a
+    // worker in a container never made: the only error.
+    let errors = outcome["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1, "{outcome}");
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not be resumed"),
+        "{outcome}"
+    );
+}
+
 /// The agent of a task whose base already meets it: no commit, and an
 /// `already_satisfied` receipt naming the base with the check it ran there.
 const SATISFIED_AGENT: &str = r#"printf '{"run_id":"%s","result":"already_satisfied","commit":"%s","tests":{"status":"passed","evidence_or_reason":"test -f seed.txt on the base"},"e2e":{"status":"not_applicable","evidence_or_reason":"the runtime runs it"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"no change to review"},"summary":"the base meets it","base_checks":[{"command":"test -f seed.txt","result":"passed"}]}' "$RUN_ID" "$(git rev-parse HEAD)" > "$RECEIPT.tmp"; mv "$RECEIPT.tmp" "$RECEIPT""#;
@@ -1844,6 +1909,47 @@ fn a_verification_whose_container_podman_does_not_start_fails_the_landing_judgin
             .count(),
         0
     );
+}
+
+/// A landing's verification command that runs in its container and exits
+/// 125 itself fails as the command, as any other failing command does: it
+/// is recorded as the verification's command and the run goes back to a
+/// session, with no error of integrate's.
+#[test]
+fn a_verification_command_exiting_125_in_its_container_fails_as_the_command() {
+    let _test = crate::common::test();
+    let queue = VerifyQueue::new();
+    queue.set_config("[roles.verification]\nruntime = \"container\"\n");
+    let task = add_task(&queue.db, &["exit 125".to_owned()]);
+    let backend = TestWorkspace::new(&queue.db, false, VALID_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]);
+    let outcome =
+        supervise_reviewed_owned_with(&queue.db, &queue.repo, &backend, &reviewer, &queue.options);
+    assert!(
+        !outcome["errors"]
+            .to_string()
+            .contains("podman did not start"),
+        "{outcome}"
+    );
+    assert_eq!(runs(&queue.state).len(), 1);
+    let detail = SqliteQueue::open(&queue.db).unwrap().show(task).unwrap();
+    assert_eq!(
+        detail.runs.last().unwrap().status(),
+        RunStatus::NeedsSession,
+        "{outcome}"
+    );
+    assert!(
+        payloads(&detail, "integration_error").is_empty(),
+        "{outcome}"
+    );
+    let verifications = payloads(&detail, "verification_command");
+    assert_eq!(verifications.len(), 1, "{verifications:?}");
+    let code = verifications[0]["exit_code"].as_i64().unwrap();
+    assert_ne!(code, 0);
+    assert_ne!(code, 125);
+    let deferred = payloads(&detail, "integration_deferred");
+    assert_eq!(deferred.len(), 1, "{deferred:?}");
+    assert_eq!(deferred[0]["code"], "verification_failed");
 }
 
 /// Acceptance (f) of task 3391 (ADR-t3163-1 decision 4): a landing whose

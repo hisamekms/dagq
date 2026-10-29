@@ -109,6 +109,29 @@ pub const fn podman_failed(code: Option<i32>) -> bool {
     matches!(code, Some(PODMAN_ERROR_EXIT))
 }
 
+/// The exit code `dagq relay verify` gives in place of a verification
+/// command's own [`PODMAN_ERROR_EXIT`]: a failure of the command's that
+/// [`podman_failed`] does not read as podman's.
+pub const COMMAND_PODMAN_ERROR_EXIT: i32 = 1;
+
+/// The exit code `dagq relay verify` ends with for its command's `code`,
+/// and what it says on stderr when that is not `code`: the command's own
+/// [`PODMAN_ERROR_EXIT`] becomes [`COMMAND_PODMAN_ERROR_EXIT`], since
+/// `podman run` passes the container's exit on and the control side would
+/// take it for podman's failure; every other code is the command's.
+pub fn verification_exit(code: i32) -> (i32, Option<String>) {
+    if code == PODMAN_ERROR_EXIT {
+        (
+            COMMAND_PODMAN_ERROR_EXIT,
+            Some(format!(
+                "dagq: the verification command exited with {PODMAN_ERROR_EXIT}, the code podman gives for its own failure; exiting with {COMMAND_PODMAN_ERROR_EXIT} so that it counts as the command's failure"
+            )),
+        )
+    } else {
+        (code, None)
+    }
+}
+
 /// The limits of each run's container (ADR-t2257-1 decision 6), from the
 /// `[container]` table of the host-wide `host.toml` (`memory_mib`, `cpus`,
 /// `pids`); a key left out keeps its default. The memory limit is also
@@ -600,6 +623,20 @@ mod tests {
         assert!(podman_failed(Some(PODMAN_ERROR_EXIT)));
         for code in [Some(0), Some(1), Some(101), Some(126), Some(127), None] {
             assert!(!podman_failed(code), "{code:?}");
+        }
+    }
+
+    /// A verification command's own 125 leaves `dagq relay verify` with a
+    /// failure podman's 125 is not, the original said; any other code,
+    /// success and a signal's among them, is passed on unchanged.
+    #[test]
+    fn a_verification_command_s_own_podman_error_exit_is_not_podman_s() {
+        let (code, note) = verification_exit(PODMAN_ERROR_EXIT);
+        assert_ne!(code, 0);
+        assert!(!podman_failed(Some(code)));
+        assert!(note.unwrap().contains("exited with 125"));
+        for code in [0, 1, 3, 101, 124, 126, 127, 137] {
+            assert_eq!(verification_exit(code), (code, None));
         }
     }
     use std::path::PathBuf;
