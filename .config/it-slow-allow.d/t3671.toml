@@ -1,0 +1,8 @@
+# The items of task 3671 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 6.6s: a Codex wrapper process that does not start twice, the hold ask's done, the switch to Claude and its landing in one supervise
+[[test]]
+name = "runtime_provider_switch::a_codex_that_does_not_start_while_claude_is_held_waits_in_the_hold_ask"
+reason = "B 境界（守る境界）: Claude の控えの ask が開いているあいだ起動しない Codex の run が失敗せず ask に入って待ち、done の continue の turn も起動しないとき Codex を控え直して同じ worktree の Claude の新しい session に移って着地することを、wrapper のプロセス・SQLite の控えの ask と provider の event・supervise の配線で確かめる（判断は domain::provider_switch と execution::provider の unit test）"
+task = 3671

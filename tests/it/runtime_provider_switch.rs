@@ -89,8 +89,21 @@ fn supervise_thread(
     codex: Option<&Path>,
     verdicts: &[String],
 ) -> thread::JoinHandle<Result<Value>> {
+    supervise_thread_pausing(db, repo, backend, codex, verdicts, None)
+}
+
+/// [`supervise_thread`] with the supervisor paused at `pauses`.
+fn supervise_thread_pausing(
+    db: &Path,
+    repo: &Path,
+    backend: Arc<TestWorkspace>,
+    codex: Option<&Path>,
+    verdicts: &[String],
+    pauses: Option<runtime::PausesPort>,
+) -> thread::JoinHandle<Result<Value>> {
     let reviewer = TestReviewer::new(verdicts);
     let mut options = supervise_options(4, true);
+    options.pauses = pauses;
     if let Some(codex) = codex {
         options.codex = codex.to_owned();
     }
@@ -121,6 +134,97 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
         .filter(|event| event.kind.as_str() == kind)
         .map(|event| event.payload)
         .collect()
+}
+
+/// The queue's provider events (`provider_held`, `provider_released`,
+/// `provider_switched`, `provider_waiting`) and its runs' status, read
+/// only, so a cleanup may read them while the supervisor still writes.
+fn provider_record(db: &Path) -> String {
+    let read = || -> rusqlite::Result<Vec<String>> {
+        let connection =
+            Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_secs(2))?;
+        let mut lines: Vec<String> = connection
+            .prepare(
+                "SELECT id, run_id, kind, payload FROM run_events
+                 WHERE kind IN ('provider_held', 'provider_released',
+                                'provider_switched', 'provider_waiting')
+                 ORDER BY id",
+            )?
+            .query_map([], |r| {
+                Ok(format!(
+                    "  event {} run {:?} {} {}",
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        lines.extend(
+            connection
+                .prepare("SELECT id, status FROM task_runs ORDER BY rowid")?
+                .query_map([], |r| {
+                    Ok(format!(
+                        "  run {} {}",
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+        Ok(lines)
+    };
+    match read() {
+        Ok(lines) => format!(
+            "the provider events and runs of the queue {}:\n{}\n",
+            db.display(),
+            lines.join("\n")
+        ),
+        Err(error) => format!(
+            "the provider events of the queue {} could not be read: {error}\n",
+            db.display()
+        ),
+    }
+}
+
+/// Write [`provider_record`] to the process's stderr, past the test's
+/// capture of its output, as [`print_queue_events`] does.
+fn print_provider_record(db: &Path) {
+    use std::io::Write as _;
+    let _ = std::io::stderr()
+        .lock()
+        .write_all(provider_record(db).as_bytes());
+}
+
+/// Prints [`provider_record`] when the test fails: on a panic as it is
+/// dropped, and before the exit of a wait past its limit, which drops
+/// nothing.
+struct ProviderRecordOnFailure {
+    db: PathBuf,
+    _timeout: common::Cleanup,
+}
+
+impl ProviderRecordOnFailure {
+    fn new(db: &Path) -> Self {
+        let printed = db.to_owned();
+        Self {
+            db: db.to_owned(),
+            _timeout: common::on_timeout(
+                Duration::from_secs(10),
+                "print the provider events and runs of the queue",
+                move || print_provider_record(&printed),
+            ),
+        }
+    }
+}
+
+impl Drop for ProviderRecordOnFailure {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            print_provider_record(&self.db);
+        }
+    }
 }
 
 /// The open hold asks.
@@ -505,21 +609,44 @@ fn with_neither_provider_a_task_waits_until_one_can_take_it() {
 /// usage-limit ask open) cannot move its run: the run is not failed but
 /// waits (`provider_waiting`), in the hold ask with its session kept.
 /// `done` ends both holds and has the session go on; Codex fails to start
-/// again, and now the run moves to Claude and lands.
+/// again, and now the run moves to Claude and lands. The supervisor is
+/// paused once `done`'s continue is written until that turn has failed, so
+/// its `turn_requested` is recorded after the turn's end, as a slow record
+/// is: that late record of the turn's own request does not answer the
+/// turn (`provider_switch::request_answering`).
 #[test]
 fn a_codex_that_does_not_start_while_claude_is_held_waits_in_the_hold_ask() {
     let (dir, repo, db, mut backend, codex) = switch_fixture(Provider::Codex, true);
+    let _record = ProviderRecordOnFailure::new(&db);
     backend.codex = None;
     set_turns(dir.path(), FINISH);
     open_hold_ask(&db, AskReason::Cost, Some(USAGE_LIMIT_SUBJECT));
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(backend);
-    let supervisor = supervise_thread(
+    let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pauses = {
+        let (db, paused) = (db.clone(), paused.clone());
+        runtime::PausesPort(Arc::new(move |at, _run| {
+            if at == runtime::PausePoint::RequestWritten
+                && !paused.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                wait_until(&db, common::STEP_LIMIT, |queue| {
+                    queue.show(TASK).is_ok_and(|detail| {
+                        payloads(&detail, "turn_finished")
+                            .iter()
+                            .any(|p| p["turn"] == 2)
+                    })
+                });
+            }
+        }))
+    };
+    let supervisor = supervise_thread_pausing(
         &db,
         &repo,
         backend.clone(),
         codex.as_deref(),
         &[verdict("pass", &[], "fine")],
+        Some(pauses),
     );
     let run_id = || {
         detail(&db, TASK)
@@ -547,10 +674,25 @@ fn a_codex_that_does_not_start_while_claude_is_held_waits_in_the_hold_ask() {
         .answer(ask.id, "done")
         .unwrap();
     finished(&db, &backend, supervisor);
+    let record = provider_record(&db);
     let detail = detail(&db, TASK);
     let run = &detail.runs[0];
     assert_landed_run(run, &repo, &base);
-    assert_eq!(run.actual_provider(), Provider::Claude);
+    assert_eq!(run.actual_provider(), Provider::Claude, "{record}");
+    // The late record: the continue that turn 2 took was recorded after
+    // turn 2 ended.
+    assert!(paused.load(std::sync::atomic::Ordering::SeqCst));
+    let at = |kind: &str, matches: &dyn Fn(&Value) -> bool| {
+        detail
+            .events
+            .iter()
+            .position(|e| e.kind.as_str() == kind && matches(&e.payload))
+            .unwrap_or_else(|| panic!("no {kind}: {record}"))
+    };
+    assert!(
+        at("turn_finished", &|p| p["turn"] == 2) < at("turn_requested", &|p| p["seq"] == 1),
+        "{record}"
+    );
     assert_eq!(
         switches(&detail),
         [(
@@ -558,18 +700,24 @@ fn a_codex_that_does_not_start_while_claude_is_held_waits_in_the_hold_ask() {
             json!("claude"),
             json!("launch_failed"),
             json!("resume")
-        )]
+        )],
+        "{record}"
     );
     let released = queue_events(&db, "provider_released");
-    assert!(released.iter().any(|r| r["why"] == "done"), "{released:?}");
+    assert!(released.iter().any(|r| r["why"] == "done"), "{record}");
     // The wrapper's agent that did not start is the turn's `launch`, which
-    // holds Codex (`launch_failed`) without an ask of its own.
+    // holds Codex (`launch_failed`) without an ask of its own; turn 2's
+    // failure holds it again.
     let turns = payloads(&detail, "turn_finished");
     assert_eq!(turns[0]["outcome"], "failed", "{turns:?}");
     assert_eq!(turns[0]["failure"], "launch");
     let held = queue_events(&db, "provider_held");
-    assert_eq!(held[0]["provider"], "codex", "{held:?}");
-    assert_eq!(held[0]["reason"], "launch_failed", "{held:?}");
+    assert_eq!(held[0]["provider"], "codex", "{record}");
+    assert_eq!(held[0]["reason"], "launch_failed", "{record}");
+    assert!(
+        held.iter().filter(|h| h["provider"] == "codex").count() >= 2,
+        "{record}"
+    );
 }
 
 /// Explicit policy is tested with a missing Claude binary, not a fake login/limit.

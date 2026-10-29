@@ -425,6 +425,10 @@ pub enum PausePoint {
     /// The delivery of an answer, before it is written as the session's
     /// next turn.
     AnswerSend,
+    /// A request of a headless session, once written to its `turns/` and
+    /// before `turn_requested` records it: the session may take it, and
+    /// its turn end, before the record.
+    RequestWritten,
     /// A resume, once its session's earlier requests were set aside,
     /// before its wrapper starts.
     ResumeLaunch,

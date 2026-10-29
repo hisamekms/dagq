@@ -64,6 +64,7 @@ pub(super) fn request_turn(
         return Err(TurnFenced(format!("{what} withheld: {}", fence.describe())).into());
     }
     let seq = write_request(&*sv.files, run_dir, text, what)?;
+    sv.pause_at(super::PausePoint::RequestWritten, run.id());
     // Written: a record that fails is only noted, as for a typed text.
     let mut payload = json!({"seq": seq, "what": what, "workspace_id": workspace});
     if let Some(bytes) = bytes {

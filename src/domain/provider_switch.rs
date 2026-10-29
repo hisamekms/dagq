@@ -168,6 +168,135 @@ pub fn switch_of_turn(events: &[RunEvent], turn: u64) -> Option<&RunEvent> {
         .find(|e| e.kind == EventKind::ProviderSwitched && e.payload["turn"] == turn)
 }
 
+/// The request that answers the failed turn whose `turn_finished` is
+/// `events[finished_at]` (a retry, the hold's continue): a
+/// `turn_requested` recorded after it, other than the request the turn
+/// took itself (`taken`, none for the task's prompt). The supervisor
+/// records a request only once it is written, so the session may take it,
+/// start its turn and fail before the record: that late record names the
+/// turn's own request (its number not past `taken`) and answers nothing.
+pub fn request_answering(
+    events: &[RunEvent],
+    finished_at: usize,
+    taken: Option<u64>,
+) -> Option<&RunEvent> {
+    events[finished_at..].iter().find(|e| {
+        e.kind == EventKind::TurnRequested
+            && !taken.is_some_and(|taken| e.payload["seq"].as_u64().is_some_and(|s| s <= taken))
+    })
+}
+
+/// A look at the run's last turn, which failed with `failure` on `from`,
+/// read from the run's events alone ([`wall_look`]).
+#[derive(Debug)]
+pub enum WallLook<'a> {
+    /// No turn of the run ended yet.
+    NoTurn,
+    /// The turn is answered already: by the switch made in its place, or by
+    /// a request after it ([`request_answering`]).
+    Answered(&'a RunEvent),
+    /// The turn failed otherwise than at its provider's wall.
+    NotAWall,
+    /// The turn at its provider's wall, to judge.
+    AtWall(WallTurn),
+}
+
+/// A turn at its provider's wall ([`WallLook::AtWall`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WallTurn {
+    pub turn: u64,
+    pub reason: SwitchReason,
+    /// The request the turn took (none for the task's prompt), and what it
+    /// was: the call a switch makes again ([`Self::phase`]).
+    pub request: Option<u64>,
+    pub what: String,
+    pub message: String,
+    /// Whether no look waited on the turn yet (no `provider_waiting`).
+    pub first_look: bool,
+    /// Whether this look holds the provider ([`ProviderHold`]): on the
+    /// first look, but for Claude's login or usage limit, which the hold
+    /// ask holds instead ([`claude_wall`]).
+    pub holds_provider: bool,
+    /// Whether the run has a switch left ([`may_switch`]).
+    pub may_switch: bool,
+}
+
+impl WallTurn {
+    /// What the run does on this look ([`wall_move`]), with the fallback
+    /// on (`fallback`), the other provider usable (`other_usable`, with a
+    /// switch left), its own provider held once this look held it
+    /// (`own_held`) and a hold ask holding the run (`hold_unclosed`).
+    pub fn next(
+        &self,
+        fallback: bool,
+        other_usable: bool,
+        own_held: bool,
+        hold_unclosed: bool,
+    ) -> WallMove {
+        wall_move(
+            fallback,
+            self.may_switch,
+            other_usable,
+            self.first_look,
+            own_held,
+            hold_unclosed,
+        )
+    }
+
+    /// The phase of the call a switch makes in place of the turn.
+    pub fn phase(&self) -> SwitchPhase {
+        SwitchPhase::of_request(self.request, &self.what)
+    }
+}
+
+/// The look at the run's last turn, which failed with `failure` on `from`
+/// (ADR-t813-2): answered already (switched, or a request after it), no
+/// provider's wall, or at one, with what its `turn_started` and
+/// `turn_finished` say. A late `turn_requested` of the request the turn
+/// took is no answer ([`request_answering`]), so such a turn is at its
+/// wall and judged as one recorded in time is.
+pub fn wall_look(events: &[RunEvent], failure: TurnFailure, from: Provider) -> WallLook<'_> {
+    let Some((finished_at, finished)) = events
+        .iter()
+        .enumerate()
+        .rfind(|(_, e)| e.kind == EventKind::TurnFinished)
+    else {
+        return WallLook::NoTurn;
+    };
+    let turn = finished.payload["turn"].as_u64().unwrap_or(0);
+    if let Some(switched) = switch_of_turn(events, turn) {
+        return WallLook::Answered(switched);
+    }
+    let started = events
+        .iter()
+        .rfind(|e| e.kind == EventKind::TurnStarted && e.payload["turn"] == turn)
+        .map(|e| &e.payload);
+    let request = started.and_then(|p| p["request"].as_u64());
+    if let Some(requested) = request_answering(events, finished_at, request) {
+        return WallLook::Answered(requested);
+    }
+    let Some(reason) = SwitchReason::of_failure(failure) else {
+        return WallLook::NotAWall;
+    };
+    let first_look = !waiting_on(events, turn);
+    WallLook::AtWall(WallTurn {
+        turn,
+        reason,
+        request,
+        what: started
+            .and_then(|p| p["what"].as_str())
+            .unwrap_or("")
+            .to_owned(),
+        message: finished.payload["message"]
+            .as_str()
+            .unwrap_or("no message")
+            .to_owned(),
+        first_look,
+        holds_provider: first_look && !claude_wall(from, reason),
+        may_switch: may_switch(events),
+    })
+}
+
 /// Whether the run already waits for a provider after turn `turn`
 /// (`provider_waiting`).
 pub fn waiting_on(events: &[RunEvent], turn: u64) -> bool {
@@ -1248,5 +1377,126 @@ mod tests {
         assert_eq!(payload["phase"], "answer");
         assert_eq!(payload["turn"], 3);
         assert_eq!(payload["count"], 1);
+    }
+
+    #[test]
+    fn only_a_request_past_the_one_the_failed_turn_took_answers_it() {
+        let finished = |turn: u64| event(event_kind::TURN_FINISHED, json!({"turn": turn}));
+        let requested = |seq: u64| event(event_kind::TURN_REQUESTED, json!({"seq": seq}));
+        // The session took request 1 (the hold's continue), and turn 2 failed
+        // before the supervisor recorded writing it: its late record is the
+        // turn's own request, not an answer, so the run is judged again.
+        let late = [finished(1), requested(1), finished(2), requested(1)];
+        assert!(request_answering(&late, 2, Some(1)).is_none());
+        // A request written after the turn (a retry) answers it, whether
+        // recorded in time or not.
+        let retried = [finished(2), requested(1), requested(2)];
+        assert_eq!(
+            request_answering(&retried, 0, Some(1)).unwrap().payload["seq"],
+            2
+        );
+        // A turn of the task's prompt took no request: any later one
+        // answers it, as does one recorded without its number.
+        let first = [finished(1), requested(1)];
+        assert!(request_answering(&first, 0, None).is_some());
+        let unnumbered = [finished(2), event(event_kind::TURN_REQUESTED, json!({}))];
+        assert!(request_answering(&unnumbered, 0, Some(1)).is_some());
+        // None after the turn: unanswered.
+        assert!(request_answering(&[requested(1), finished(2)], 1, Some(1)).is_none());
+    }
+
+    /// The order CI met: `done`'s continue (request 1) taken, its turn 2
+    /// failed to start, and only then its `turn_requested` recorded. The
+    /// late record answers nothing: the look holds Codex again and, with
+    /// Claude's hold ended by `done`, moves the run to Claude for the
+    /// continue, as when the record came in time. Once the switch is
+    /// recorded the turn is answered, the run's worker is in a new session
+    /// on Claude, and a turn of it that succeeds goes on to its receipt.
+    #[test]
+    fn a_late_record_of_the_continue_moves_the_run_to_claude_and_it_goes_on() {
+        use crate::domain::turn::TurnOutcome;
+        let started = |turn: u64, request: Value, what: &str| {
+            event(
+                event_kind::TURN_STARTED,
+                json!({"turn": turn, "request": request, "what": what, "provider": "codex"}),
+            )
+        };
+        let failed = |turn: u64| {
+            event(
+                event_kind::TURN_FINISHED,
+                json!({"turn": turn, "outcome": "failed", "failure": "launch", "message": "launch agent: No such file or directory"}),
+            )
+        };
+        let requested = event(
+            event_kind::TURN_REQUESTED,
+            json!({"seq": 1, "what": "continue"}),
+        );
+        let first = [
+            started(1, Value::Null, "the task's prompt"),
+            failed(1),
+            event(
+                event_kind::PROVIDER_WAITING,
+                json!({"turn": 1, "provider": "codex", "reason": "launch_failed", "other": "claude"}),
+            ),
+        ];
+        let mut late = first.to_vec();
+        late.extend([
+            started(2, json!(1), "continue"),
+            failed(2),
+            requested.clone(),
+            event(event_kind::HOLD_CONTINUE_SENT, json!({"ask_id": 1})),
+        ]);
+        let mut in_time = first.to_vec();
+        in_time.extend([
+            requested,
+            event(event_kind::HOLD_CONTINUE_SENT, json!({"ask_id": 1})),
+            started(2, json!(1), "continue"),
+            failed(2),
+        ]);
+        let look = |events| match wall_look(events, TurnFailure::Launch, Provider::Codex) {
+            WallLook::AtWall(at) => at,
+            other => panic!("not at the wall: {other:?}"),
+        };
+        let at = look(&late);
+        assert_eq!(
+            at,
+            WallTurn {
+                turn: 2,
+                reason: SwitchReason::LaunchFailed,
+                request: Some(1),
+                what: "continue".into(),
+                message: "launch agent: No such file or directory".into(),
+                first_look: true,
+                holds_provider: true,
+                may_switch: true,
+            }
+        );
+        assert_eq!(look(&in_time), at);
+        // Codex held again by this look, Claude usable once `done` ended
+        // its hold: the run moves, for the continue.
+        assert_eq!(at.next(true, true, true, false), WallMove::Switch);
+        assert_eq!(at.phase(), SwitchPhase::Resume);
+        late.push(event(
+            event_kind::PROVIDER_SWITCHED,
+            switched_payload(
+                Provider::Codex,
+                Worker {
+                    provider: Provider::Claude,
+                    mode: WorkerMode::Headless,
+                },
+                at.reason,
+                at.phase(),
+                Some(at.turn),
+                1,
+                Some(&at.message),
+            ),
+        ));
+        assert!(matches!(
+            wall_look(&late, TurnFailure::Launch, Provider::Claude),
+            WallLook::Answered(e) if e.kind == EventKind::ProviderSwitched
+        ));
+        assert_eq!(session_starts(&late), 1);
+        assert!(since_session_start(&late).is_empty());
+        assert!(TurnOutcome::Succeeded.goes_on(None));
     }
 }

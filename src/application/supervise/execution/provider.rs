@@ -26,7 +26,7 @@ use crate::domain::{
     },
     claim_hold::QueueHold,
     provider_switch::{
-        self, MAX_PROVIDER_SWITCHES, ProviderHold, SwitchPhase, SwitchReason, WallMove,
+        self, MAX_PROVIDER_SWITCHES, ProviderHold, SwitchPhase, SwitchReason, WallLook, WallMove,
         WorkerRoute, switched_payload,
     },
     throughput_review::{HELD_FINISHES, finishes_to_hold},
@@ -296,47 +296,24 @@ impl Supervisor<'_> {
         // The slot's copy may predate an earlier switch.
         let run = &self.queue.run(run.id())?;
         let events = self.queue.run_events(run.id())?;
-        let Some((finished_at, finished)) = events
-            .iter()
-            .enumerate()
-            .rfind(|(_, e)| e.kind == EventKind::TurnFinished)
-            .map(|(at, e)| (at, e.payload.clone()))
-        else {
-            return Ok(WallStep::Held);
-        };
-        let turn = finished["turn"].as_u64().unwrap_or(0);
-        if let Some(switched) = provider_switch::switch_of_turn(&events, turn) {
-            return Ok(WallStep::Switched(recorded_at(switched)));
-        }
-        // A request after the turn (a retry, the hold's continue) answers it.
-        if let Some(requested) = events[finished_at..]
-            .iter()
-            .find(|e| e.kind == EventKind::TurnRequested)
-        {
-            return Ok(WallStep::Switched(recorded_at(requested)));
-        }
-        let Some(reason) = SwitchReason::of_failure(failure) else {
-            return Ok(WallStep::Held);
-        };
         let from = run.actual_provider();
-        let message = finished["message"].as_str().unwrap_or("no message");
+        let at = match provider_switch::wall_look(&events, failure, from) {
+            WallLook::NoTurn | WallLook::NotAWall => return Ok(WallStep::Held),
+            WallLook::Answered(event) => return Ok(WallStep::Switched(recorded_at(event))),
+            WallLook::AtWall(at) => at,
+        };
+        let (turn, reason, request) = (at.turn, at.reason, at.request);
+        let message = at.message.as_str();
         let claude_wall = provider_switch::claude_wall(from, reason);
-        let first_look = !provider_switch::waiting_on(&events, turn);
-        if first_look && !claude_wall {
+        let first_look = at.first_look;
+        if at.holds_provider {
             self.hold_provider(from, reason, Some(run.id()), message)?;
         }
         let to = from.other();
-        let started = events
-            .iter()
-            .rfind(|e| e.kind == EventKind::TurnStarted && e.payload["turn"] == turn)
-            .map(|e| e.payload.clone())
-            .unwrap_or_default();
-        let request = started["request"].as_u64();
         // The call the failed turn made, to make again.
         let undelivered = request.and_then(|seq| self.taken_request(run, seq));
         let fallback = self.provider.fallback.workers;
-        let may_switch = provider_switch::may_switch(&events);
-        let other_usable = may_switch && self.headless_usable(to);
+        let other_usable = at.may_switch && self.headless_usable(to);
         let own_held = self.provider_held(from).is_some();
         // The hold ask is read only when the run does not move and its own
         // provider is free again.
@@ -344,16 +321,9 @@ impl Supervisor<'_> {
             && !first_look
             && !own_held
             && self.queue.hold_unclosed(run.id())?;
-        let next = provider_switch::wall_move(
-            fallback,
-            may_switch,
-            other_usable,
-            first_look,
-            own_held,
-            hold_unclosed,
-        );
+        let next = at.next(fallback, other_usable, own_held, hold_unclosed);
         if next == WallMove::Switch {
-            let phase = SwitchPhase::of_request(request, started["what"].as_str().unwrap_or(""));
+            let phase = at.phase();
             let text = switch_text(run, from, to, reason, message, undelivered.as_ref());
             self.switch(
                 run,
