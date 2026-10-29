@@ -244,6 +244,60 @@ jobs:
       - name: Remove the target's tmp restored from the cache
         run: rm -rf target/tmp target/llvm-cov-target/tmp
 
+      # The macos-14 runner's disk can run out under cargo llvm-cov nextest
+      # (the instrumented build, each test's copies of the runtime binary in
+      # the temporary directories, the profraw files): tests then fail with
+      # "No space left on device" or "database or disk is full". So before
+      # the tests this step deletes what the image ships and dagq's build and
+      # tests never use: the Xcode apps other than the selected one (cargo
+      # links with the selected Xcode's toolchain, so that one stays), the
+      # simulator runtimes (iOS, watchOS, tvOS, visionOS; no test starts a
+      # simulator) and the Android SDK. Each deletion is best effort: one that
+      # fails or finds nothing does not fail the job, nor does the step
+      # failing or hanging past its time limit (simctl talks to the simulator
+      # service, and each Xcode app takes minutes to delete). The free space
+      # (df -h) and the sizes of TMPDIR and target/llvm-cov-target go to the
+      # log before and after, and the disk report after the tests shows them
+      # again.
+      - name: Free disk space for the tests
+        timeout-minutes: 20
+        continue-on-error: true
+        shell: bash
+        run: |
+          report() {
+            echo "--- disk: $1"
+            df -h
+            tmp="${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR)}"
+            du -sh "$tmp" "$RUNNER_TEMP" target/llvm-cov-target 2>/dev/null || true
+          }
+          report "before freeing space"
+          start=$SECONDS
+          # Without the selected Xcode's path no Xcode app is removed.
+          selected="$(cd "$(xcode-select -p)/../.." && pwd -P)" || selected=""
+          echo "selected Xcode: ${selected:-unknown} (kept)"
+          for app in /Applications/Xcode*.app; do
+            [ -n "$selected" ] && [ -e "$app" ] || continue
+            if [ -L "$app" ] || [ "$(cd "$app" && pwd -P)" = "$selected" ]; then
+              continue
+            fi
+            echo "removing $app"
+            sudo rm -rf "$app" || true
+          done
+          echo "removing the simulator runtimes"
+          xcrun simctl runtime delete all || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          # Only the image's fixed SDK location, never a path an environment
+          # variable gives (ANDROID_HOME and the like), and only when its
+          # canonical path is that location (no symlink to elsewhere); the
+          # runner user owns it, so no sudo.
+          sdk=/Users/runner/Library/Android/sdk
+          if [ -d "$sdk" ] && [ ! -L "$sdk" ] && [ "$(cd "$sdk" && pwd -P)" = "$sdk" ]; then
+            echo "removing $sdk"
+            rm -rf "$sdk" || true
+          fi
+          echo "freeing space took $((SECONDS - start))s"
+          report "after freeing space"
+
       - name: cargo fmt
         run: cargo fmt --all --check
 
@@ -340,6 +394,23 @@ jobs:
             exit 1
           fi
           cargo llvm-cov report --locked --workspace --fail-under-lines 80
+
+      # The disk after the tests, failed or not: the free space (df -h) and
+      # the sizes of TMPDIR, RUNNER_TEMP, target/llvm-cov-target and its tmp
+      # (the tests' CARGO_TARGET_TMPDIR) and profraw files, so that a run that
+      # ran out of space shows which of them grew. Its own failure never fails
+      # CI.
+      - name: Disk after the tests
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          df -h
+          tmp="${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR)}"
+          du -sh "$tmp" "$RUNNER_TEMP" target/llvm-cov-target target/llvm-cov-target/tmp 2>/dev/null || true
+          echo "profraw: $(find target/llvm-cov-target -maxdepth 1 -name '*.profraw' 2>/dev/null | wc -l | tr -d ' ') files, $(find target/llvm-cov-target -maxdepth 1 -name '*.profraw' -exec du -ck {} + 2>/dev/null | awk '/total$/ {t += $1} END {print t + 0}') KiB"
+          echo "largest entries in $tmp:"
+          du -sk "$tmp"/* 2>/dev/null | sort -rn | head -n 10 || true
 
       # The tests' results for the CI watch, which reads the failed tests'
       # names from the artifacts named nextest-junit-* (ADR-t1920-1,
