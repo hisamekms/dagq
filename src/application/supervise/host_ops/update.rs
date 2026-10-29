@@ -165,36 +165,9 @@ impl HostOpsState {
         if self.update.job.is_some() {
             return Ok(());
         }
-        let updates = env.queue.update_events(JOB_LOOK_BACK)?;
-        if let Some(step) = latest_job_step(&updates) {
-            // A job this process started before it exec'd is its child
-            // with no other reaper: collect it once it ended.
-            if let Some(pid) = job_pid(step) {
-                env.processes.reap(pid);
-            }
-            if in_progress(step, &**env.processes) {
-                return Ok(());
-            }
-        }
-        // Of the automatic update's jobs only: the release update's is the
-        // release pass's to report.
-        if let Some(step) = latest_job_step_of(&updates, false)
-            && step.kind.is_in(JOB_STEPS)
-        {
-            if let Some(pid) = job_pid(step) {
-                env.processes.reap(pid);
-            }
-            if !in_progress(step, &**env.processes) {
-                // The job may have recorded how it ended and exited after
-                // the events were read: only a step still its latest once
-                // its process is known gone tells it was interrupted.
-                let again = env.queue.update_events(JOB_LOOK_BACK)?;
-                if !still_latest_step(step, &again, false) {
-                    return Ok(());
-                }
-                return self.job_interrupted(env, step);
-            }
-        }
+        let Some(updates) = look_at_job(&mut *env.queue, &**env.processes, env.token)? else {
+            return Ok(());
+        };
         let head = env.repository.main_head()?.to_string();
         let first = self
             .update
@@ -236,41 +209,6 @@ impl HostOpsState {
             info!("automatic update: main's {head} builds nothing: {why}");
             self.update.passed = Some(head.to_owned());
         }
-    }
-
-    /// A job that died before it recorded how it ended (killed, a reboot):
-    /// record `update_failed` for its commit and ask the inbox, so the
-    /// update is neither lost nor retried on its own.
-    fn job_interrupted(&mut self, env: &mut HostEnv<'_>, step: &RunEvent) -> Result<()> {
-        let commit = step_commit(step).unwrap_or_default().to_owned();
-        let question = format!(
-            "The automatic update's job for main's {} (pid {}) ended without recording how, at \
-its {}; nothing tells whether the binary was replaced. Its logs are in the queue's logs/ \
-directory. Answer `retry` to build main's head again at the supervisor's next check, or `skip` \
-to wait for the next landing that changes the runtime.",
-            &commit[..commit.len().min(12)],
-            job_pid(step).unwrap_or_default(),
-            step.kind
-        );
-        let ask = env.queue.open_update_ask(
-            AskKind::UpdateFailed,
-            &question,
-            UPDATE_FAILED_OPTIONS,
-            UPDATE_ASKER,
-            None,
-            Value::Null,
-        )?;
-        record(
-            &*env.queue,
-            EventKind::UpdateFailed,
-            step_commit(step),
-            json!({"stage": "interrupted", "after": step.kind, "ask_id": ask.id, "supervisor": env.token}),
-        )?;
-        warn!(
-            "automatic update: the job for {commit} was interrupted; ask {} opened",
-            ask.id
-        );
-        Ok(())
     }
 
     /// Close the answered `update_failed` asks: `retry` asks the next look
@@ -362,6 +300,90 @@ to wait for the next landing that changes the runtime.",
         self.update.job = Some(job);
         Ok(())
     }
+}
+
+/// The update events a look at the automatic update's jobs reads, newest
+/// first, or `None` when the look ends at its job: the latest job step of
+/// any update is of a job still working, or the automatic update's latest
+/// is of a job found gone. That job is reported interrupted
+/// ([`job_interrupted`]) only when its step is still the latest in the
+/// events read again after its pid was looked at. Each job's pid is reaped
+/// just before it is looked at.
+fn look_at_job(
+    queue: &mut (dyn HostOpsQueue + Send),
+    processes: &dyn ProcessControl,
+    token: &LeaseToken,
+) -> Result<Option<Vec<RunEvent>>> {
+    let updates = queue.update_events(JOB_LOOK_BACK)?;
+    if let Some(step) = latest_job_step(&updates) {
+        // A job this process started before it exec'd is its child
+        // with no other reaper: collect it once it ended.
+        if let Some(pid) = job_pid(step) {
+            processes.reap(pid);
+        }
+        if in_progress(step, processes) {
+            return Ok(None);
+        }
+    }
+    // Of the automatic update's jobs only: the release update's is the
+    // release pass's to report.
+    if let Some(step) = latest_job_step_of(&updates, false)
+        && step.kind.is_in(JOB_STEPS)
+    {
+        if let Some(pid) = job_pid(step) {
+            processes.reap(pid);
+        }
+        if !in_progress(step, processes) {
+            // The job may have recorded how it ended and exited after
+            // the events were read: only a step still its latest once
+            // its process is known gone tells it was interrupted.
+            let again = queue.update_events(JOB_LOOK_BACK)?;
+            if still_latest_step(step, &again, false) {
+                job_interrupted(queue, token, step)?;
+            }
+            return Ok(None);
+        }
+    }
+    Ok(Some(updates))
+}
+
+/// A job that died before it recorded how it ended (killed, a reboot):
+/// record `update_failed` for its commit and ask the inbox, so the
+/// update is neither lost nor retried on its own.
+fn job_interrupted(
+    queue: &mut (dyn HostOpsQueue + Send),
+    token: &LeaseToken,
+    step: &RunEvent,
+) -> Result<()> {
+    let commit = step_commit(step).unwrap_or_default().to_owned();
+    let question = format!(
+        "The automatic update's job for main's {} (pid {}) ended without recording how, at \
+its {}; nothing tells whether the binary was replaced. Its logs are in the queue's logs/ \
+directory. Answer `retry` to build main's head again at the supervisor's next check, or `skip` \
+to wait for the next landing that changes the runtime.",
+        &commit[..commit.len().min(12)],
+        job_pid(step).unwrap_or_default(),
+        step.kind
+    );
+    let ask = queue.open_update_ask(
+        AskKind::UpdateFailed,
+        &question,
+        UPDATE_FAILED_OPTIONS,
+        UPDATE_ASKER,
+        None,
+        Value::Null,
+    )?;
+    record(
+        &*queue,
+        EventKind::UpdateFailed,
+        step_commit(step),
+        json!({"stage": "interrupted", "after": step.kind, "ask_id": ask.id, "supervisor": token}),
+    )?;
+    warn!(
+        "automatic update: the job for {commit} was interrupted; ask {} opened",
+        ask.id
+    );
+    Ok(())
 }
 
 /// The command of the automatic update's job for main's `head`, started by
@@ -543,6 +565,45 @@ mod tests {
         let mut again = vec![event(7, UPDATE_INSTALLED, release)];
         again.extend(read.iter().cloned());
         assert!(!still_latest_step(&started, &again, true));
+    }
+
+    /// A look at the automatic update's jobs reads the events again once
+    /// it found the job's pid gone: a job whose `update_e2e_passed` was
+    /// read while it worked, and which recorded how it ended and exited
+    /// before its pid was looked at, is not reported; one whose
+    /// `update_e2e_passed` is still its latest step after that look is
+    /// reported interrupted, with an `update_failed` ask.
+    #[test]
+    fn a_look_at_the_job_reads_the_events_again_after_its_pid() {
+        use super::super::job_fakes::JobQueue;
+        use crate::domain::{UPDATE_E2E_PASSED, UPDATE_FAILED, UPDATE_INSTALLED, UPDATE_STARTED};
+        let token = LeaseToken::new("token-1");
+        let job = json!({"pid": 7, "commit": "abc"});
+        let read = vec![
+            event(2, UPDATE_E2E_PASSED, job.clone()),
+            event(1, UPDATE_STARTED, job.clone()),
+        ];
+        for end in [UPDATE_INSTALLED, UPDATE_FAILED] {
+            let mut after = vec![event(3, end, job.clone())];
+            after.extend(read.iter().cloned());
+            let (mut queue, processes) = JobQueue::new(read.clone(), after);
+            let look = look_at_job(&mut queue, &processes, &token).unwrap();
+            assert!(look.is_none(), "{end}");
+            assert_eq!(*queue.recorded.lock().unwrap(), [], "{end}");
+            assert_eq!(*queue.asks.lock().unwrap(), [], "{end}");
+        }
+        let (mut queue, processes) = JobQueue::new(read.clone(), read);
+        let look = look_at_job(&mut queue, &processes, &token).unwrap();
+        assert!(look.is_none());
+        let recorded = queue.recorded.lock().unwrap();
+        let [(kind, payload)] = &recorded[..] else {
+            panic!("{recorded:?}");
+        };
+        assert_eq!(kind, UPDATE_FAILED);
+        assert_eq!(payload["stage"], "interrupted");
+        assert_eq!(payload["after"], UPDATE_E2E_PASSED);
+        assert_eq!(payload["commit"], "abc");
+        assert_eq!(*queue.asks.lock().unwrap(), [AskKind::UpdateFailed]);
     }
 
     /// The automatic update looks on the first pass and at its interval

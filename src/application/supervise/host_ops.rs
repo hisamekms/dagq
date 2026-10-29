@@ -12,6 +12,8 @@ pub(super) mod disk;
 pub(super) mod handoff;
 pub(super) mod host_metrics;
 pub(super) mod inbox_nudge;
+#[cfg(test)]
+mod job_fakes;
 pub(super) mod queue_broker;
 pub(super) mod queue_service;
 pub(super) mod release;

@@ -172,28 +172,10 @@ impl HostOpsState {
         if self.release.install.is_some() {
             return Ok(());
         }
-        let updates = env.queue.update_events(UPDATE_HISTORY)?;
-        // Each job's pid is reaped just before it is looked at.
-        let working = |step: &RunEvent| {
-            if let Some(pid) = job_pid(step) {
-                env.processes.reap(pid);
-            }
-            in_progress(step, &**env.processes)
+        let Some(updates) = look_at_release_job(&mut *env.queue, &**env.processes, env.token)?
+        else {
+            return Ok(());
         };
-        match job_look(&updates, working) {
-            JobLook::Running => return Ok(()),
-            JobLook::Interrupted(step, version) => {
-                // The job may have recorded how it ended and exited after
-                // the events were read: only a step still its latest once
-                // its process is known gone tells it was interrupted.
-                let again = env.queue.update_events(UPDATE_HISTORY)?;
-                if !super::update::still_latest_step(step, &again, true) {
-                    return Ok(());
-                }
-                return self.release_job_interrupted(env, step, version);
-            }
-            JobLook::None => {}
-        }
         let checked = env.queue.latest_queue_event(&[RELEASE_CHECKED])?;
         let read = |key: &str| {
             checked
@@ -342,7 +324,7 @@ impl HostOpsState {
         current: &str,
     ) -> Result<()> {
         let ask = release_ask(version, current, &env.layout.runner);
-        let ask = open(env, ask)?;
+        let ask = open(&mut *env.queue, ask)?;
         info!(ask_id = %ask.id, "release update: {version} is out; ask {} opened", ask.id);
         Ok(())
     }
@@ -356,31 +338,8 @@ impl HostOpsState {
         version: &str,
         plugin: &str,
     ) -> Result<()> {
-        let ask = open(env, plugin_ask(version, plugin))?;
+        let ask = open(&mut *env.queue, plugin_ask(version, plugin))?;
         info!(ask_id = %ask.id, "release update: the plugin {plugin} is older than {version}; ask {} opened", ask.id);
-        Ok(())
-    }
-
-    /// A job of a release that died before it recorded how it ended:
-    /// record `update_failed` for it and ask the inbox, so it is neither
-    /// lost nor tried again on its own.
-    fn release_job_interrupted(
-        &mut self,
-        env: &mut HostEnv<'_>,
-        step: &RunEvent,
-        version: &str,
-    ) -> Result<()> {
-        let ask = open(env, interrupted_ask(step, version))?;
-        record(
-            &*env.queue,
-            EventKind::UpdateFailed,
-            None,
-            interrupted_failure(step, version, ask.id, env.token),
-        )?;
-        warn!(
-            "release update: the job for {version} was interrupted; ask {} opened",
-            ask.id
-        );
         Ok(())
     }
 
@@ -480,6 +439,62 @@ fn job_look<'a>(updates: &'a [RunEvent], in_progress: impl Fn(&RunEvent) -> bool
     }
 }
 
+/// The update events a look at the release update's jobs reads, newest
+/// first, or `None` when the look ends at a job: [`JobLook::Running`], or
+/// [`JobLook::Interrupted`], reported ([`release_job_interrupted`]) only
+/// when its step is still the latest in the events read again after its
+/// pid was looked at. Each job's pid is reaped just before it is looked at.
+fn look_at_release_job(
+    queue: &mut (dyn HostOpsQueue + Send),
+    processes: &dyn ProcessControl,
+    token: &LeaseToken,
+) -> Result<Option<Vec<RunEvent>>> {
+    let updates = queue.update_events(UPDATE_HISTORY)?;
+    let working = |step: &RunEvent| {
+        if let Some(pid) = job_pid(step) {
+            processes.reap(pid);
+        }
+        in_progress(step, processes)
+    };
+    match job_look(&updates, working) {
+        JobLook::Running => Ok(None),
+        JobLook::Interrupted(step, version) => {
+            // The job may have recorded how it ended and exited after
+            // the events were read: only a step still its latest once
+            // its process is known gone tells it was interrupted.
+            let again = queue.update_events(UPDATE_HISTORY)?;
+            if super::update::still_latest_step(step, &again, true) {
+                release_job_interrupted(queue, token, step, version)?;
+            }
+            Ok(None)
+        }
+        JobLook::None => Ok(Some(updates)),
+    }
+}
+
+/// A job of a release that died before it recorded how it ended:
+/// record `update_failed` for it and ask the inbox, so it is neither
+/// lost nor tried again on its own.
+fn release_job_interrupted(
+    queue: &mut (dyn HostOpsQueue + Send),
+    token: &LeaseToken,
+    step: &RunEvent,
+    version: &str,
+) -> Result<()> {
+    let ask = open(queue, interrupted_ask(step, version))?;
+    record(
+        &*queue,
+        EventKind::UpdateFailed,
+        None,
+        interrupted_failure(step, version, ask.id, token),
+    )?;
+    warn!(
+        "release update: the job for {version} was interrupted; ask {} opened",
+        ask.id
+    );
+    Ok(())
+}
+
 /// An ask of the release update, as [`RunLog::open_update_ask`] opens it.
 #[derive(Debug, PartialEq)]
 struct UpdateAsk {
@@ -491,8 +506,8 @@ struct UpdateAsk {
 }
 
 /// Open `ask` as the release update's.
-fn open(env: &mut HostEnv<'_>, ask: UpdateAsk) -> Result<crate::domain::Ask> {
-    env.queue.open_update_ask(
+fn open(queue: &mut (dyn HostOpsQueue + Send), ask: UpdateAsk) -> Result<crate::domain::Ask> {
+    queue.open_update_ask(
         ask.kind,
         &ask.question,
         ask.options,
@@ -753,6 +768,47 @@ mod tests {
             JobLook::Running => Some(("running", "")),
             JobLook::None => None,
         }
+    }
+
+    /// A look at the release update's jobs reads the events again once it
+    /// found the job's pid gone: a release's job whose `update_started`
+    /// was read while it worked, and which recorded how it ended and
+    /// exited before its pid was looked at, is not reported; one whose
+    /// `update_started` is still its latest step after that look is
+    /// reported interrupted, with an `update_failed` ask.
+    #[test]
+    fn a_look_at_the_release_job_reads_the_events_again_after_its_pid() {
+        use super::super::job_fakes::JobQueue;
+        use crate::application::update::UPDATE_INSTALLED;
+        let token = LeaseToken::new("token-1");
+        let read = vec![RunEvent {
+            id: EventId::new(2),
+            ..started(9)
+        }];
+        for end in [UPDATE_INSTALLED, UPDATE_FAILED] {
+            let ended = RunEvent {
+                id: EventId::new(3),
+                ..step(end, read[0].payload.clone())
+            };
+            let after = [vec![ended], read.clone()].concat();
+            let (mut queue, processes) = JobQueue::new(read.clone(), after);
+            let look = look_at_release_job(&mut queue, &processes, &token).unwrap();
+            assert!(look.is_none(), "{end}");
+            assert_eq!(*queue.recorded.lock().unwrap(), [], "{end}");
+            assert_eq!(*queue.asks.lock().unwrap(), [], "{end}");
+        }
+        let (mut queue, processes) = JobQueue::new(read.clone(), read);
+        let look = look_at_release_job(&mut queue, &processes, &token).unwrap();
+        assert!(look.is_none());
+        let recorded = queue.recorded.lock().unwrap();
+        let [(kind, payload)] = &recorded[..] else {
+            panic!("{recorded:?}");
+        };
+        assert_eq!(kind, UPDATE_FAILED);
+        assert_eq!(payload["stage"], "interrupted");
+        assert_eq!(payload["after"], UPDATE_STARTED);
+        assert_eq!(payload["release"], "0.4.0");
+        assert_eq!(*queue.asks.lock().unwrap(), [AskKind::UpdateFailed]);
     }
 
     /// A release's job that died without recording how it ended is
