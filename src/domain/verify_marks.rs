@@ -138,26 +138,55 @@ impl LinePattern {
 
     /// Whether `line` (trimmed) has the shape, and the text in `{test}`'s
     /// place, the shortest that fits.
+    ///
+    /// Each wildcard (`*` or `{test}`) takes the least it can: the text
+    /// after it is placed where it first comes, and the last text is held
+    /// to the line's end. Placing each text at its first place leaves the
+    /// most room for the rest, so this finds a match whenever one exists,
+    /// and the one where every wildcard, in order, is the shortest; each
+    /// text is searched once, so the time is linear in the line.
     fn matches<'a>(&self, line: &'a str) -> Option<Option<&'a str>> {
-        fn walk<'a>(pieces: &[Piece], line: &'a str) -> Option<Option<&'a str>> {
-            let Some((first, rest)) = pieces.split_first() else {
-                return line.is_empty().then_some(None);
-            };
-            match first {
-                Piece::Text(text) => walk(rest, line.strip_prefix(text.as_str())?),
-                Piece::Any | Piece::Test => line
-                    .char_indices()
-                    .map(|(at, _)| at)
-                    .chain([line.len()])
-                    .find_map(|at| {
-                        walk(rest, &line[at..]).map(|inner| match first {
-                            Piece::Test => Some(&line[..at]),
-                            _ => inner,
-                        })
-                    }),
+        let mut pieces = self.pieces.as_slice();
+        // The text before the first wildcard starts the line.
+        let mut at = 0;
+        if let Some((Piece::Text(text), rest)) = pieces.split_first() {
+            line.strip_prefix(text.as_str())?;
+            at = text.len();
+            pieces = rest;
+        }
+        let Some((last, middle)) = pieces.split_last() else {
+            return (at == line.len()).then_some(None);
+        };
+        // The text after the last wildcard ends the line, after `at`.
+        let end = match last {
+            Piece::Text(text) => {
+                let end = line.len().checked_sub(text.len())?;
+                (end >= at && line.ends_with(text.as_str())).then_some(end)?
+            }
+            Piece::Any | Piece::Test => line.len(),
+        };
+        let mut test = None;
+        let mut test_from = None;
+        for piece in middle {
+            match piece {
+                Piece::Text(text) => {
+                    let found = at + line[at..end].find(text.as_str())?;
+                    if let Some(from) = test_from.take() {
+                        test = Some(&line[from..found]);
+                    }
+                    at = found + text.len();
+                }
+                Piece::Test => test_from = Some(at),
+                Piece::Any => {}
             }
         }
-        walk(&self.pieces, line)
+        if *last == Piece::Test {
+            test_from = Some(at);
+        }
+        if let Some(from) = test_from {
+            test = Some(&line[from..end]);
+        }
+        Some(test)
     }
 }
 
@@ -237,6 +266,86 @@ mod tests {
         let tail = pattern("abort*");
         assert_eq!(tail.matches("abort: x"), Some(None));
         assert_eq!(tail.matches("x abort"), None);
+    }
+
+    /// The match tried at every place of every wildcard, shortest first:
+    /// the meaning [`LinePattern::matches`] keeps, for small lines only.
+    fn every_place<'a>(pieces: &[Piece], line: &'a str) -> Option<Option<&'a str>> {
+        let Some((first, rest)) = pieces.split_first() else {
+            return line.is_empty().then_some(None);
+        };
+        match first {
+            Piece::Text(text) => every_place(rest, line.strip_prefix(text.as_str())?),
+            Piece::Any | Piece::Test => line
+                .char_indices()
+                .map(|(at, _)| at)
+                .chain([line.len()])
+                .find_map(|at| {
+                    every_place(rest, &line[at..]).map(|inner| match first {
+                        Piece::Test => Some(&line[..at]),
+                        _ => inner,
+                    })
+                }),
+        }
+    }
+
+    #[test]
+    fn a_pattern_matches_as_trying_every_place_would() {
+        let sources = [
+            "a",
+            "ab",
+            "a*",
+            "*a",
+            "*a*",
+            "a*b",
+            "a*a",
+            "ab*ab",
+            "a{test}b",
+            "{test}a",
+            "a{test}",
+            "*a{test}b*",
+            "a*b{test}a*",
+            "*ab*b{test}b",
+            "b{test}a*a*b",
+            "*a*b*a*",
+        ];
+        // Every line of up to 6 letters from `a`, `b` and `é`.
+        let mut lines = vec![String::new()];
+        let mut last = vec![String::new()];
+        for _ in 0..6 {
+            last = last
+                .iter()
+                .flat_map(|line| ['a', 'b', 'é'].map(|c| format!("{line}{c}")))
+                .collect();
+            lines.extend(last.iter().cloned());
+        }
+        for source in sources {
+            let pattern = pattern(source);
+            for line in &lines {
+                assert_eq!(
+                    pattern.matches(line),
+                    every_place(&pattern.pieces, line),
+                    "{source:?} on {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn many_wildcards_on_a_long_near_line_end_at_once() {
+        // Trying every place of each of the 5 wildcards would take about
+        // n^5 steps on these lines; the match reads each line a few times.
+        let n = 50_000;
+        let many = pattern("start * x * x * {test} y * x * end");
+        let near = format!("start {} end", " x".repeat(n));
+        assert_eq!(many.matches(&near), None);
+        let near_end = format!("start {} x y x en", " x".repeat(n));
+        assert_eq!(many.matches(&near_end), None);
+        // The wildcards before `{test}` take the first ` x ` they can.
+        let line = format!("start {} a::b y q x q end", " x".repeat(n));
+        let test = many.matches(&line).flatten().unwrap();
+        assert_eq!(test, &line[15..line.find(" y ").unwrap()]);
+        assert!(test.ends_with("x x a::b"));
     }
 
     #[test]
