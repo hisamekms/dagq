@@ -82,8 +82,8 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
     ファイルが無いか読めない・値が誤っているときは使っている値のまま続ける（起動時に読めなければ既定値で起動する。どちらもlogにwarnを出す）。
     ただし誤った`dagq.toml`は`[repository]`などの読み手も止めるので、claimと着地も止まる。
   - **見え方**: `status`と`doctor`は各値とその出どころを出す（欄は`domain::views`のdoc comment）。
-  - 起動し直すときの引き継ぎ: `install --allow-breaking`のdrainと自動更新の見張りが`up`で起動し直すときに渡すflagは`SupervisorRegistration::flag_arguments`のdoc commentが持つ。
-    引き継ぎのexecは元のargvのまま続くので、`--parallel N`などのflagを付けて起動したsupervisorは入れ替わっても`flag`のままで、`[supervisor]`に従わせるには`down --wait`の後にflagなしの`up`で起動し直す。
+  - 起動し直す`up`: `install --allow-breaking`のdrain（`install::restart_arguments`）と`install`の見張りの戻し（`SupervisorRegistration::flag_arguments`）が打ち、updateのjobは打たない（[Auto-update](auto-update.md)の5）。
+    引き継ぎのexecは元のargvのまま続くので、flagを付けて起動したsupervisorは入れ替わっても`flag`のままで、`[supervisor]`に従わせるには`down --wait`の後にflagなしで`up`する。
 - `[provider_fallback]`は使えないproviderからもう一方への切り替えを止める設定で（[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)。`domain::provider_switch::ProviderFallback`）、`workers`と`jobs`を受け付ける。
   振る舞いと優先順位は[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)の「切り替えを止める設定」。
   読み手は`compose::supervisor`で、supervisorが起動時に読み（読めなければ既定で起動する）、各passで`[supervisor]`の後に読み直す（再起動なしで効く。ファイルが無いときは黙って、読めない・値が誤っているときはerrorごとに1回logにwarnを出して、使っている値のまま続ける）。
