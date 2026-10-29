@@ -1,7 +1,7 @@
 ---
 id: development-task-registration
 type: development
-title: このrepositoryのtaskの登録（verify・paths・evidence・change・titleの選び方、固定バイナリを待つ宣言、依存の付け方、taskの大きさと分け方、Spikeのtask、負荷の下で落ちるtestを直すtask、ADRを書くtask、ADRがリンクする文書を消すtask、runtimeの汎用性、文書の変更を求めるtask、plan reviewが当てはめる規則）
+title: このrepositoryのtaskの登録（verify・paths・evidence・change・titleの選び方、固定バイナリを待つ宣言、依存の付け方、taskの大きさと分け方、Spikeのtask、負荷の下で落ちるtestを直すtask、ADRを書くtask、reviewのプログラムが読む形を変えるtask、ADRがリンクする文書を消すtask、runtimeの汎用性、文書の変更を求めるtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
 owners:
@@ -190,11 +190,18 @@ reviewが3回以上になるrunは差分の大きいtaskに偏り、そのうち
   - 「必要ならADRを書く」のようにworkerに選ばせる書き方と、既存のADRの本文（Consequencesを含む）を直す選択肢は書かない（ADRがappend-onlyであることは[文書の規則](documents.md)の「ADR」）。決定を変える必要が実装中に分かったら、workerはaskで止める、と添える。
 - 決定と実装が明らかなものは、ADRと実装を1 taskにする（[ADR-t598-1](../adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)決定12）。
 
+## reviewのプログラムが読む形を変えるtask
+
+- runのプログラムのreviewは、runのcommitでなくlanding branch（main）の今のcommitから`[review.programs.<name>]`とそのscriptを読んで流す（[プログラムのreview](../design/supervisor-lifecycle/review-programs.md)の「読む元・流す場所・env・結果」のsnapshot）。
+  このため、programのscriptが読む設定・一覧（`.config/`など）や、scriptが前提にするコードの形を消す・変えるtaskは、同じrunでscriptを直してもreviewではmainの旧いscriptが動き、新しいtreeが落ちる。
+- そのようなtaskを登録するときは、旧い形と新しい形の両方を通すprogramの変更（またはprogramの退役）を先のtaskにし、形を変えるtaskをそれに`--depends-on`で依存させる（中身の前提の依存。先の変更が既にmainにあれば要らない）。
+- 先のtaskが両方の形を通せないときは、旧い形を残したまま新しい形を足す互換のtask、新しい形を読むprogramの更新（または退役）のtask、旧い形を消すtaskの3つに分ける。
+  旧い形を消すtaskはprogramの更新（または退役）のtaskに`--depends-on`で依存させ、互換のtaskへの依存だけで代えない（互換のtaskの着地はmainのscriptを変えないため）。
+
 ## ADRがリンクする文書を消すtask
 
-- append-onlyのADRがリンクする文書を消すtaskを登録するときは、`scripts/check-doc-links.sh`の削除した文書の一覧にその文書のpathと移管先を移行中の行として足すconfigのtaskを別に登録し、消すtaskをそれに`--depends-on`で依存させる（その行が既にmainにあれば要らない。中身の前提の依存。行の意味は[文書の規則](documents.md)の「ADR」と「frontmatter」）。
-- runのプログラムのreviewはmain（landing branch）のscriptを読むので、消すtaskのcommitで足した行はそのreviewで効かず、ADRからのリンクが切れとして落ちる。
-  移行中の行はpathに文書が在っても通るので、先に着地させてよい。
+- append-onlyのADRがリンクする文書を消すtaskは、上の「reviewのプログラムが読む形を変えるtask」の一例として、`scripts/check-doc-links.sh`の削除した文書の一覧にその文書のpathと移管先を移行中の行として足すconfigのtaskを先に登録し、消すtaskをそれに`--depends-on`で依存させる（行の意味は[文書の規則](documents.md)の「ADR」と「frontmatter」）。
+  移行中の行はpathに文書が在っても通るので、両方の形を通す先のtaskとして先に着地させてよい。
 
 ## runtimeの汎用性
 
@@ -228,7 +235,10 @@ descriptionかacceptanceが文書の変更を求めるtaskは、登録の時に�
 - `docs/design/`を変えうるtask（`--paths`に`docs/**`か`docs/design/`に当たるglobを含むtask、`--paths`なしのruntimeのtask、descriptionやacceptanceが`docs/design/`の文書の変更を挙げるtask）のverifyに`sh scripts/check-design-docs.sh`か`sh scripts/check-design-sentences.sh`が無ければ`revise`にする（上の「推奨の組み合わせ」のdocsだけ・ADR・pluginの文書・runtimeの行）。configだけのtaskには求めない。
 - 測定のtask（changeが`measure`のtaskと、受け入れ条件に測定を含むtask）は、周回数（と交互に流すか）、表の列、値の計算式（何を何で割るか、待ちを引くときの区間）、証拠の所在（文書の節・CSV・script・コマンドと時刻の区切り）をacceptanceかdescriptionに書くこと（測定の形に当たらない項目、例えば1回だけ読む測定の周回数は、当たらない理由を書く）。条件の範囲を「同じ形のもの」で広げるtaskは、範囲を決めるgrepか一覧を書くこと。欠けていれば`revise`（workerはこれらを根拠に受け入れ条件の各項目を対応づける。[ADR-t1420-1](../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
 - ADRの索引（`docs/adr/INDEX.md`、無ければ`sh scripts/adr-index.sh`で作る。[文書の規則](documents.md)の「ADR」）と、taskが名指すADRと`docs/design/`の文書を読み、`accepted`のADRの決定と矛盾するtaskは`concern`にする（`superseded`なら`superseded_by`を辿る）。
-- ADRがリンクする文書を消すtaskが、上の「ADRがリンクする文書を消すtask」のとおり移行中の行を足す先行のtaskに依存していること（その行が既にmainにあれば要らない）。欠けていれば`revise`にする。
+- `dagq.toml`の`[review.programs.<name>]`のscriptが読むpath（設定・一覧）やscriptが前提にするコードの形を消す・変えるtaskが、上の「reviewのプログラムが読む形を変えるtask」のとおり、その形を通すprogramの変更（または退役）のtaskに`--depends-on`で依存していること（その変更が既にmainにあれば要らない）。
+  旧い形を消すtaskが互換のtaskにだけ依存し、programの更新（または退役）に依存していなければ、それも欠けとみる。
+  ADRがリンクする文書を消すtaskの移行中の行を足すtaskは、両方の形を通すprogramの変更に当たる。
+  欠けていれば`revise`にする。
 - taskのtitleが上の「taskのtitle」の接頭辞で始まり、changeに合うこと。外れていれば`revise`にする。
 - ADRを書くtaskが上の「ADRを書くtask」を満たすこと（IDとファイル名の形、`check-adr-numbers.sh`のverify、置き換えか`amends`か）。足りなければ`revise`。
 - 現行のADRの決定に触れるtaskが、上の「ADRを書くtask」のとおりADRの扱い（(a)保つ決定を名指して書かない、か(b)書く）をdescriptionに確定していること。workerに選ばせる・既存のADRの本文（Consequencesを含む）の変更を許す・`superseded`のADRを今の決定として引く、のどれかに当たれば`revise`にする。
