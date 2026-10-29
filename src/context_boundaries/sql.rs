@@ -115,6 +115,17 @@ fn is_word(tokens: &[Token], at: usize, word: &str) -> bool {
         .is_some_and(|t| t.kind == Kind::Word && t.text == word)
 }
 
+/// Whether a statement of `sql` is a `BEGIN` or a `SAVEPOINT` (which
+/// begins a transaction when none is open): its first word, after
+/// comments, at the start or after a `;` outside a name or a value.
+pub(super) fn begins_transaction(sql: &str) -> bool {
+    let tokens = tokens(sql);
+    (0..tokens.len()).any(|at| {
+        let start = at == 0 || (tokens[at - 1].kind == Kind::Punct && tokens[at - 1].text == ";");
+        start && (is_word(&tokens, at, "begin") || is_word(&tokens, at, "savepoint"))
+    })
+}
+
 /// The table name at `at` (after a schema and a dot or not) and the index
 /// after it; `values` also takes a value in single quotes, which SQLite may
 /// take for a name.

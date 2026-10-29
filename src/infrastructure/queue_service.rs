@@ -4339,9 +4339,9 @@ impl ServiceQueue for ServiceSqlite {
         now_ms: i64,
         then: &mut dyn FnMut(&dyn crate::application::queue_service::IssueFacts) -> Result<Value>,
     ) -> Result<Value> {
-        let conn = &self.queue.conn;
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .map_err(anyhow::Error::from)
+        let tx = self
+            .queue
+            .write_tx("issuing", rusqlite::TransactionBehavior::Immediate)
             .map_err(super::sqlite::tag_busy)?;
         let registrations = crate::application::SupervisorReads::supervisors(&self.queue);
         let result = registrations.and_then(|registrations| {
@@ -4354,16 +4354,10 @@ impl ServiceQueue for ServiceSqlite {
                 Some(why) => Err(crate::application::queue_service::NotHeld(why).into()),
             }
         });
-        match result {
-            Ok(value) => {
-                conn.execute_batch("COMMIT")?;
-                Ok(value)
-            }
-            Err(error) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(error)
-            }
-        }
+        // An error drops the transaction, which rolls it back.
+        let value = result?;
+        tx.commit()?;
+        Ok(value)
     }
 
     fn begin_landing(

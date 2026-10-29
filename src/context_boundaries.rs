@@ -27,6 +27,8 @@
 //! The rules L1, L2, L3, L6, L8, L9, C5 and C8 on the module references,
 //! and C7 for the records of the ports and of the modules of
 //! `src/application/`, are checked by [`modules`] with the same table.
+//! That every transaction of the queue DB begins as a `WriteTx` is checked
+//! by [`write_tx`].
 //!
 //! This is test code of the library (a `#[cfg(test)]` module of
 //! `src/lib.rs`, run by `cargo test --lib`), outside the library's layers,
@@ -39,6 +41,7 @@ mod ownership;
 mod port_fixtures;
 mod source;
 mod sql;
+mod write_tx;
 
 use ownership::{Allowed, Context, Fix, Store, Table, Transaction};
 use std::collections::{BTreeMap, BTreeSet};

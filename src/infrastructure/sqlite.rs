@@ -312,7 +312,7 @@ impl<'c> WriteTx<'c> {
     /// transaction it derefs to took it) had it from a time not known.
     pub fn execute<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         let unlocked = self.locked.get().is_none() && !self.holds_write_lock();
-        let rows = self.transaction().execute(sql, params)?;
+        let rows = self.inner().execute(sql, params)?;
         if unlocked {
             self.locked.set(Some(std::time::Instant::now()));
         }
@@ -390,7 +390,7 @@ impl<'c> WriteTx<'c> {
         })
     }
 
-    fn transaction(&self) -> &rusqlite::Transaction<'c> {
+    fn inner(&self) -> &rusqlite::Transaction<'c> {
         self.tx
             .as_ref()
             .expect("a write transaction is open until it ends")
@@ -400,7 +400,7 @@ impl<'c> WriteTx<'c> {
 impl<'c> std::ops::Deref for WriteTx<'c> {
     type Target = rusqlite::Transaction<'c>;
     fn deref(&self) -> &Self::Target {
-        self.transaction()
+        self.inner()
     }
 }
 
