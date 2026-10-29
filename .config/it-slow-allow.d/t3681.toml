@@ -1,0 +1,8 @@
+# The items of task 3681 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# about 15s: a headless worker asks, its wrapper is lost while a turn outlives it, and the supervisor waits out the turn's limit of 10s before the recovery job
+[[test]]
+name = "runtime_headless_reopen::a_turn_outliving_its_lost_wrapper_past_its_limit_goes_to_recovery"
+reason = "B 境界（守る境界）: 待ちの最中に wrapper を失った非対話の run の turn が limit を越えたら、supervise が開き直さずに run を failed にして復旧 job（recovery_requested）に回す配線を、本物の process と SQLite で確かめる。limit は最初の turn が負荷の下でも ask に届く長さで、待つのはその limit（判断は reopen.rs の unit test）"
+task = 3681

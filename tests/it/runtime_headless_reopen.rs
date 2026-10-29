@@ -426,23 +426,32 @@ fn a_session_lost_in_the_middle_of_a_turn_is_opened_again_once_the_turn_ended() 
 #[test]
 fn a_turn_outliving_its_lost_wrapper_past_its_limit_goes_to_recovery() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
+    // A wait that times out prints the supervisor's last decision of the
+    // reopen (the turn waited for, a session opened again, the ages and the
+    // limit), its records and the run's processes, besides the events.
+    let (_log, _subscriber, _printed) = SupervisorLog::start(&db);
     set_turns(dir.path(), &asking_turns());
     let backend = Arc::new(backend);
+    // The limit bounds the first turn as well, which asks through a `dagq`
+    // process of its own: on a loaded host 3s stopped it before it asked,
+    // and the test waited for a wait that never came. The lost turn (a
+    // `sleep 60`) outlives 10s by far.
     let (_reviewer, supervisor) = supervise_thread(
         &db,
         &repo,
         backend.clone(),
-        dagq::domain::stall::StallConfig::default().with_millis("turn_limit_secs", 3000),
+        dagq::domain::stall::StallConfig::default().with_millis("turn_limit_secs", 10_000),
         &[],
     );
     let (run, _ask) = waiting_run(&db);
     let mut turn = sleeper();
     lose_wrapper_mid_turn(&db, &run, turn.id());
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    // A supervisor that does not return prints the queue's events and
+    // unclosed asks and the threads' stacks: where it waited is read from
+    // the failure.
+    finished(&db, &backend, supervisor);
     turn.kill().unwrap();
     turn.wait().unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let detail = detail(&db);
     assert_eq!(detail.runs[0].status(), RunStatus::Failed);
     assert!(reopens(&detail).is_empty());

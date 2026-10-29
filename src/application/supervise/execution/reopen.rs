@@ -49,7 +49,8 @@ pub(super) struct ReopenWatch {
     /// ended by its watch as one that exited.
     gave_up: bool,
     /// Since when the lost wrapper's turn outlived it: the session is
-    /// opened again once that turn ended, within the turn's limit.
+    /// opened again once a look within the turn's limit finds that turn
+    /// ended ([`turn_outlived`]).
     agent_since: Option<Instant>,
 }
 
@@ -69,6 +70,24 @@ impl ReopenWatch {
     /// wrapper row holds one: the lost wrapper's, else 1 (it died).
     pub(super) fn lost_exit(&self) -> Option<i32> {
         self.gave_up.then_some(self.exit_code.unwrap_or(1))
+    }
+
+    /// What the watch waits for at `now`, as ages: the debug record of a
+    /// reopen's decision, from which a wait that never ends is read.
+    pub(super) fn describe(&self, now: Instant) -> String {
+        let age = |at: Option<Instant>| {
+            at.map_or_else(
+                || "never".to_owned(),
+                |at| format!("{}ms ago", now.saturating_duration_since(at).as_millis()),
+            )
+        };
+        format!(
+            "workspace opened {}, last attempt {}, turn seen outliving its wrapper {}, gave up {}",
+            age(self.opened),
+            age(self.last_attempt),
+            age(self.agent_since),
+            self.gave_up
+        )
     }
 }
 
@@ -127,14 +146,26 @@ pub(super) fn awaits_registration(
     !lost && !passed(now, opened, timeout)
 }
 
-/// What the reopen does at `now` with a turn that has outlived its lost
-/// wrapper since `since`: it waits for the turn to end within the turn's
-/// `limit` (as the wrapper would have), and gives the session up at it.
-pub(super) fn turn_outlived(now: Instant, since: Instant, limit: Duration) -> Reopen {
-    if passed(now, since, limit) {
-        Reopen::GiveUp
-    } else {
-        Reopen::Waiting
+/// What the reopen does at `now` with the lost wrapper's turn, which
+/// this process first saw outlive the wrapper at `since` (`None`: not
+/// seen) and which runs at `now` when `alive`: it waits for the turn to end
+/// within the turn's `limit` (as the wrapper would have), and gives the
+/// session up at it. A turn seen outliving its wrapper that is found ended
+/// only past the limit is given up as well: a look past the limit that
+/// finds the turn ended cannot tell whether it ended within it, and a late
+/// look (a slow pass under load) must not open the session again after a
+/// turn that may have run past it. `None`: no turn outlives the wrapper
+/// within the limit, and the session may be opened again.
+pub(super) fn turn_outlived(
+    now: Instant,
+    since: Option<Instant>,
+    alive: bool,
+    limit: Duration,
+) -> Option<Reopen> {
+    match since {
+        Some(since) if passed(now, since, limit) => Some(Reopen::GiveUp),
+        _ if alive => Some(Reopen::Waiting),
+        _ => None,
     }
 }
 
@@ -183,6 +214,14 @@ impl Supervisor<'_> {
             return Ok(Reopen::Waiting);
         }
         let outcome = self.reopen_or_not(&run, watch, processes, lost)?;
+        // Each pass's decision: a wait that never ends (a session opened
+        // again that waits for an answer, a turn waited for) is read from
+        // the last one.
+        let now = self.generators.clock.monotonic();
+        if let Some(reopen) = self.resume.reopens.get(run.id()) {
+            let limit = self.stall.threshold("turn_limit_secs").unwrap_or_default();
+            tracing::debug!(run_id = %run.id(), "reopen of run {}: {outcome:?}; {}, turn limit {}ms", run.id(), reopen.describe(now), limit.as_millis());
+        }
         if let Reopen::GiveUp = outcome {
             if lost.is_none() {
                 // The workspace of an attempt whose wrapper never
@@ -234,25 +273,31 @@ impl Supervisor<'_> {
         }
         // A turn that outlived its wrapper still works in the worktree (a
         // wrapper lost in the middle of a turn): no second session beside
-        // it. The session is opened again once the turn ended, which the
-        // turn's limit bounds as the wrapper would have; past it, the run
-        // goes to its recovery job, which may stop the turn's processes.
+        // it. The session is opened again once the turn ended within the
+        // turn's limit, as the wrapper would have bounded it; past it (the
+        // turn still running, or found ended only then), the run goes to its
+        // recovery job, which may stop the turn's processes.
         let reopen = self.resume.reopens.entry(run.id().clone()).or_default();
-        if let Some(agent) = processes
+        let agent = processes
             .iter()
-            .find(|p| p.role == "agent" && self.processes.alive(p.pid))
+            .find(|p| p.role == "agent" && self.processes.alive(p.pid));
+        let limit = self.stall.threshold("turn_limit_secs").unwrap_or_default();
+        if let Some(agent) = agent
+            && reopen.agent_since.is_none()
         {
-            let limit = self.stall.threshold("turn_limit_secs").unwrap_or_default();
-            let since = match reopen.agent_since {
-                Some(since) => since,
-                None => {
-                    info!(run_id = %run.id(), "run {} lost its wrapper while its turn (pid {}) still runs; waiting for the turn to end before opening the session again", run.id(), agent.pid);
-                    *reopen.agent_since.insert(now)
-                }
-            };
-            let outcome = turn_outlived(now, since, limit);
+            info!(run_id = %run.id(), "run {} lost its wrapper while its turn (pid {}) still runs; waiting for the turn to end before opening the session again", run.id(), agent.pid);
+            reopen.agent_since = Some(now);
+        }
+        if let Some(outcome) = turn_outlived(now, reopen.agent_since, agent.is_some(), limit) {
             if let Reopen::GiveUp = outcome {
-                warn!(run_id = %run.id(), "the turn (pid {}) of run {} outlived its lost wrapper past the turn's limit; giving the session up", agent.pid, run.id());
+                match agent {
+                    Some(agent) => {
+                        warn!(run_id = %run.id(), "the turn (pid {}) of run {} outlived its lost wrapper past the turn's limit; giving the session up", agent.pid, run.id())
+                    }
+                    None => {
+                        warn!(run_id = %run.id(), "the turn of run {} that outlived its lost wrapper was found ended only past the turn's limit; giving the session up", run.id())
+                    }
+                }
             }
             return Ok(outcome);
         }
@@ -558,11 +603,56 @@ mod tests {
         let since = Instant::now();
         let limit = Duration::from_secs(3600);
         assert_eq!(
-            turn_outlived(since + limit - MS, since, limit),
-            Reopen::Waiting
+            turn_outlived(since + limit - MS, Some(since), true, limit),
+            Some(Reopen::Waiting)
         );
-        assert_eq!(turn_outlived(since + limit, since, limit), Reopen::GiveUp);
-        assert_eq!(turn_outlived(since, since, Duration::ZERO), Reopen::GiveUp);
+        assert_eq!(
+            turn_outlived(since + limit, Some(since), true, limit),
+            Some(Reopen::GiveUp)
+        );
+        assert_eq!(
+            turn_outlived(since, Some(since), true, Duration::ZERO),
+            Some(Reopen::GiveUp)
+        );
+    }
+
+    /// A turn seen outliving its wrapper that is found ended before the
+    /// limit lets the session be opened again; found ended only at a look
+    /// past the limit (a pass that came late), it is given up, not reopened
+    /// beside a turn that may have run past it. A turn never seen running
+    /// lets the session be opened again.
+    #[test]
+    fn a_turn_found_ended_only_past_the_limit_is_given_up() {
+        let since = Instant::now();
+        let limit = Duration::from_secs(3);
+        assert_eq!(
+            turn_outlived(since + limit - MS, Some(since), false, limit),
+            None
+        );
+        assert_eq!(
+            turn_outlived(since + limit, Some(since), false, limit),
+            Some(Reopen::GiveUp)
+        );
+        assert_eq!(
+            turn_outlived(since + Duration::from_secs(60), Some(since), false, limit),
+            Some(Reopen::GiveUp)
+        );
+        assert_eq!(turn_outlived(since, None, false, limit), None);
+    }
+
+    /// The decision's record names each wait by its age, and `never` for
+    /// one that did not start.
+    #[test]
+    fn a_reopen_watch_is_described_by_the_ages_of_its_waits() {
+        let now = Instant::now();
+        let watch = ReopenWatch {
+            agent_since: Some(now - Duration::from_millis(1500)),
+            ..ReopenWatch::default()
+        };
+        assert_eq!(
+            watch.describe(now),
+            "workspace opened never, last attempt never, turn seen outliving its wrapper 1500ms ago, gave up false"
+        );
     }
 
     /// The first attempt does not wait; the next waits for the reopen

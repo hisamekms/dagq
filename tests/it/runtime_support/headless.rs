@@ -130,7 +130,11 @@ fn supervise_thread_counted_in(
             backend.clone(),
             reviewer.clone(),
         );
+        // The test's subscriber, if any, sees the supervisor's records too
+        // ([`SupervisorLog`]).
+        let dispatch = tracing::dispatcher::get_default(|d| d.clone());
         thread::spawn(move || {
+            let _dispatch = tracing::dispatcher::set_default(&dispatch);
             runtime::supervise_with_reviewer(
                 &db,
                 &repo,
@@ -563,5 +567,131 @@ pub fn wait_for_file(path: &Path) {
             path.display()
         );
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The supervisor's records of a test, kept for a timeout: every info and
+/// warning of `supervise` (cap [`SupervisorLog::KEPT`]), and the last of its
+/// debug records of each pass's decisions (as the reopen's), each with the
+/// milliseconds since the log started.
+#[derive(Clone)]
+pub struct SupervisorLog {
+    started: Instant,
+    lines: Arc<Mutex<(Vec<String>, Vec<String>)>>,
+}
+
+impl SupervisorLog {
+    /// How many info and warning records are kept, and how many debug ones.
+    const KEPT: usize = 200;
+    const DECISIONS: usize = 5;
+
+    /// A log on this thread's subscriber (which [`supervise_thread`]'s
+    /// supervisor inherits) for as long as the guard is held, and a hook
+    /// that prints it with the run's state if a wait of the test times out.
+    pub fn start(db: &Path) -> (Self, tracing::subscriber::DefaultGuard, common::Cleanup) {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let log = SupervisorLog {
+            started: Instant::now(),
+            lines: Arc::default(),
+        };
+        let guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(log.clone()));
+        let (printed, db) = (log.clone(), db.to_owned());
+        let hook = common::on_timeout(
+            Duration::from_secs(10),
+            "print the supervisor's records and the run's state",
+            move || printed.print(&db),
+        );
+        (log, guard, hook)
+    }
+
+    fn print(&self, db: &Path) {
+        use std::io::Write as _;
+        let (kept, decisions) = self.lines.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut out = String::from("  the supervisor's records (ms since the test's start):\n");
+        for line in kept.iter().chain(&decisions) {
+            out.push_str(&format!("    {line}\n"));
+        }
+        out.push_str(&format!("  the run's state:\n{}", run_state(db)));
+        let _ = std::io::stderr().write_all(out.as_bytes());
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SupervisorLog {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let meta = event.metadata();
+        if !meta.target().starts_with("dagq::application::supervise") {
+            return;
+        }
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        let line = format!(
+            "{} {} {}",
+            self.started.elapsed().as_millis(),
+            meta.level(),
+            message.0
+        );
+        let mut lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+        let (kept, limit) = if *meta.level() <= tracing::Level::INFO {
+            (&mut lines.0, Self::KEPT)
+        } else {
+            (&mut lines.1, Self::DECISIONS)
+        };
+        if kept.len() == limit {
+            kept.remove(0);
+        }
+        kept.push(line);
+    }
+}
+
+/// The runs' status and their process rows, read only, for a timeout.
+fn run_state(db: &Path) -> String {
+    let read = || -> rusqlite::Result<Vec<String>> {
+        let connection =
+            Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_secs(2))?;
+        let mut lines: Vec<String> = connection
+            .prepare("SELECT id, status FROM task_runs")?
+            .query_map([], |row| {
+                Ok(format!(
+                    "    run {} {}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        lines.extend(
+            connection
+                .prepare("SELECT role, pid, exited_at, exit_code, heartbeat_at FROM run_processes")?
+                .query_map([], |row| {
+                    let pid: i64 = row.get(1)?;
+                    Ok(format!(
+                        "    process {} pid {pid} ({}) exited_at {:?} exit_code {:?} heartbeat_at {:?}",
+                        row.get::<_, String>(0)?,
+                        if dagq::infrastructure::adapters::process_alive(pid as u32) {
+                            "alive"
+                        } else {
+                            "gone"
+                        },
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+        Ok(lines)
+    };
+    match read() {
+        Ok(lines) => lines.join("\n") + "\n",
+        Err(error) => format!("    could not be read: {error}\n"),
     }
 }
