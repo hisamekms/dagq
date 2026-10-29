@@ -67,6 +67,7 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
   - `release or keep the hold of task N`: the hold's reminder time (`--until`) passed, or it has been on long. Tell the person the task, its reason and how long it has waited; on their word `release` it (`dagq-recover`'s `reference/hold.md`), or keep it: nothing to do.
 - Notices (they do not stay in `status`; tell the person):
   - `report the update`: the supervisor updated dagq by itself, or only the plugin. Tell the person the version and what the notice says, and that sessions reopened after it load the updated plugin. Nothing to do; a failed update is an ask instead.
+  - `report the supervisor's end`: a supervisor ended because its heartbeat stopped (`supervisor_heartbeat_failed`). Tell the person its `cause` (`busy`: the queue stayed locked; `unreachable`: the service did not answer; `registration_gone`; `failed`), its `failures` and `secs`. launchd starts it again; one that stays stale is the `supervisor_stale` attention above, whose `last_error` gives the same reason.
   - `report the review`, `check the failed review`: `watch.md`, "The throughput review's notice".
   - `check the failed observer`: `watch.md`, "The observer's failure notice".
 

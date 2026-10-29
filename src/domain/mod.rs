@@ -2540,6 +2540,12 @@ pub enum AttentionNext {
     /// (`update_installed`, ADR-0073 decision 17): a notice the inbox
     /// passes on to the person, who acts on nothing.
     ReportUpdate,
+    /// A supervisor ended because its heartbeat stopped
+    /// (`supervisor_heartbeat_failed`): a notice the inbox passes on with
+    /// its `cause` (`busy` for a queue that stayed locked), its `failures`
+    /// and `secs`, while launchd starts it again; one not started again is
+    /// a stale or missing supervisor's attention.
+    ReportSupervisorEnd,
     /// A throughput review of the supervisor's reached its conclusion
     /// (`throughput_review_reported`, ADR-t996-1 decision 3): a notice the
     /// inbox shows the person, who acts on nothing. Only a daily or weekly
@@ -2728,6 +2734,7 @@ impl fmt::Display for AttentionNext {
             Self::LogInToGh => f.write_str("log in to gh"),
             Self::FixDagqToml => f.write_str("fix dagq.toml"),
             Self::ReportUpdate => f.write_str("report the update"),
+            Self::ReportSupervisorEnd => f.write_str("report the supervisor's end"),
             Self::ReportReview => f.write_str("report the review"),
             Self::CheckReview => f.write_str("check the failed review"),
             Self::CheckObserver => f.write_str("check the failed observer"),
@@ -2800,6 +2807,9 @@ pub const ATTENTION_KINDS: &[&str] = &[
     ci_watch::CI_JOBS_MISSING,
     sccache::RESTART_FAILED,
     UPDATE_INSTALLED,
+    // A supervisor that ended on its heartbeat, told with why (a queue
+    // that stayed busy, or another failure).
+    event_kind::SUPERVISOR_HEARTBEAT_FAILED,
     event_kind::THROUGHPUT_REVIEW_REPORTED,
     event_kind::THROUGHPUT_REVIEW_FINISHED,
     event_kind::OBSERVE_FINISHED,
@@ -3130,6 +3140,7 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
         // The failure and the breaking build of the automatic update reach
         // the inbox as their asks; only the replaced binary is a notice.
         (Some(EventKind::UpdateInstalled), _) => Some(AttentionNext::ReportUpdate),
+        (Some(EventKind::SupervisorHeartbeatFailed), _) => Some(AttentionNext::ReportSupervisorEnd),
         // A throughput review's conclusion is a notice too (ADR-t996-1),
         // but for a quiet hour's (ADR-t1172-1 decision 3).
         (Some(EventKind::ThroughputReviewReported), _) => {
@@ -3464,6 +3475,21 @@ impl SupervisorPulse {
 /// under the PID of a live one (a handoff's old row) is that live process:
 /// nobody stops it, so it is no attention.
 pub fn supervisor_attention(pulses: &[SupervisorPulse]) -> Vec<Attention> {
+    supervisor_attention_with(pulses, &[])
+}
+
+/// [`supervisor_attention`] with why each stale supervisor's heartbeat
+/// stopped, where `failures`, the latest `supervisor_heartbeat_failed` of
+/// the supervisors of `pulses`, has its supervisor's (by its token, never
+/// by its PID, which two registrations may share): `last_error` says its
+/// cause, how many writes failed over how long and the last error
+/// ([`heartbeat_failure_note`]), and the code is `lease_lost`. One whose
+/// heartbeat stopped with no record of why (a process killed or hung) is
+/// left as it was.
+pub fn supervisor_attention_with(
+    pulses: &[SupervisorPulse],
+    failures: &[RunEvent],
+) -> Vec<Attention> {
     let attention = |pid, status: &str, kind: &str, next| Attention {
         run_id: None,
         task_id: None,
@@ -3502,9 +3528,40 @@ pub fn supervisor_attention(pulses: &[SupervisorPulse]) -> Vec<Attention> {
                 (true, true) => ("stale", AttentionNext::StopStaleSupervisor),
                 (false, true) => ("dead", AttentionNext::PruningSupervisor),
             };
-            attention(Some(pulse.pid), status, "supervisor_stale", next)
+            let mut entry = attention(Some(pulse.pid), status, "supervisor_stale", next);
+            if let Some(failure) = failures.iter().find(|event| {
+                event.kind == EventKind::SupervisorHeartbeatFailed
+                    && supervisor_life::supervisor_of(event) == Some(pulse.token.as_str())
+            }) {
+                entry.last_error = Some(heartbeat_failure_note(&failure.payload));
+                entry.last_error_code = Some(ReasonCode::LeaseLost);
+            }
+            entry
         })
         .collect()
+}
+
+/// What a `supervisor_heartbeat_failed`'s `payload` says, in one line:
+/// its cause, how many writes failed over how many seconds, and the last
+/// error.
+pub fn heartbeat_failure_note(payload: &serde_json::Value) -> String {
+    let cause = payload
+        .get("cause")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("failed");
+    let failures = payload
+        .get("failures")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let secs = payload
+        .get("secs")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    let error = payload
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    format!("heartbeat stopped ({cause}): {failures} writes failed over {secs:.1}s: {error}")
 }
 
 #[cfg(test)]
@@ -4635,6 +4692,11 @@ mod attention_tests {
                 Some(ReportUpdate),
             ),
             (
+                "supervisor_heartbeat_failed",
+                json!({"supervisor": "sv", "cause": "busy", "failures": 4, "secs": 27.0}),
+                Some(ReportSupervisorEnd),
+            ),
+            (
                 "throughput_review_reported",
                 json!({"mode": "weekly", "period": "2026-W39", "conclusion": ["x"]}),
                 Some(ReportReview),
@@ -4833,6 +4895,10 @@ mod attention_tests {
         assert_eq!(FixDagqToml.to_string(), "fix dagq.toml");
         assert_eq!(CheckE2e.to_string(), "check the e2e host");
         assert_eq!(ReportUpdate.to_string(), "report the update");
+        assert_eq!(
+            ReportSupervisorEnd.to_string(),
+            "report the supervisor's end"
+        );
         assert_eq!(ReportReview.to_string(), "report the review");
         assert_eq!(ReportRequest.to_string(), "report the request's proposal");
         assert_eq!(RephraseRequest.to_string(), "rephrase or drop the request");
@@ -5330,6 +5396,61 @@ mod attention_tests {
                 "run_id": null, "task_id": null, "status": "stopped", "kind": "supervisor_stopped",
                 "last_error": null, "next": "restart supervisor",
             })
+        );
+    }
+
+    /// A stale supervisor whose heartbeat stopped on a queue that stayed
+    /// busy shows why: the cause, the writes that failed over how long and
+    /// the last error, with `lease_lost`. Another's record, or none, leaves
+    /// a stale supervisor's attention as it was, also when the two
+    /// registrations share a PID (a handoff's old row beside one that went
+    /// silent): the reason goes by the token.
+    #[test]
+    fn a_stale_supervisor_shows_why_its_heartbeat_stopped() {
+        let pulse = |token: &str, pid| SupervisorPulse {
+            token: LeaseToken::new(token),
+            pid,
+            alive: false,
+            stale: true,
+        };
+        let failed = |id, supervisor: &str, cause: &str| RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: EventKind::SupervisorHeartbeatFailed.into(),
+            payload: json!({
+                "supervisor": supervisor, "cause": cause, "failures": 4, "secs": 27.0,
+                "error": "4 heartbeat writes failed over 28.1s since the last one written: database is locked",
+            }),
+            created_at: "2026-10-28T01:19:25Z".into(),
+            actor: None,
+        };
+        let note = "heartbeat stopped (busy): 4 writes failed over 27.0s: 4 heartbeat writes failed over 28.1s since the last one written: database is locked";
+        let records = [failed(1, "busy", "busy"), failed(2, "other", "failed")];
+        for pulses in [
+            [pulse("busy", 8), pulse("killed", 9)],
+            // The same PID: the one with no record shows none.
+            [pulse("busy", 8), pulse("killed", 8)],
+            [pulse("killed", 8), pulse("busy", 8)],
+        ] {
+            let attention = supervisor_attention_with(&pulses, &records);
+            assert_eq!(attention.len(), 2, "{attention:?}");
+            for (pulse, entry) in pulses.iter().zip(&attention) {
+                assert_eq!(entry.pid, Some(pulse.pid));
+                if pulse.token.as_str() == "busy" {
+                    assert_eq!(entry.last_error.as_deref(), Some(note), "{pulses:?}");
+                    assert_eq!(entry.last_error_code, Some(ReasonCode::LeaseLost));
+                } else {
+                    assert_eq!(entry.last_error, None, "{pulses:?}");
+                    assert_eq!(entry.last_error_code, None);
+                }
+            }
+        }
+        // With no record, as without the failures.
+        assert_eq!(
+            supervisor_attention_with(&[pulse("busy", 8)], &[]),
+            supervisor_attention(&[pulse("busy", 8)])
         );
     }
 }

@@ -58,6 +58,11 @@ pub(in crate::application::supervise) struct Registration {
     /// record, and lets its runs go instead of draining them
     /// ([`owner_gone_ends`]).
     owner_gone: Option<Instant>,
+    /// Whether the loop found its heartbeat stopped (the leases lost, or
+    /// about to go stale): why is recorded once, and the end of its loop
+    /// waits no longer than [`LEASE_LOST_GRACE`] from when the heartbeat
+    /// stopped.
+    lease_lost: bool,
 }
 
 /// How long a supervisor whose owner is gone may still wait, from the
@@ -92,6 +97,32 @@ pub(in crate::application::supervise) fn owner_gone_left(
     grace.saturating_sub(gone_for)
 }
 
+/// How long the end of the loop of a supervisor whose heartbeat stopped
+/// may still wait, from the pass that found it stopped to its exit: for
+/// the records held and the jobs' ends, which are kept beside the queue
+/// for the next supervisor when they are not sent by then, and for the
+/// jobs the end of its loop joins (the cleanup, the ledger, the host's
+/// sample), which are left. Its leases are another's to take from then
+/// (ADR-t3102-3 decision 5): nothing it waits for keeps a run, and the
+/// sooner it ends, the sooner its supervisor is started again. The agents'
+/// turns of its runs are not stopped: the runs stay for the next
+/// supervisor to adopt. Tests shorten it
+/// ([`super::LoopSettings::lease_lost_grace`]).
+pub const LEASE_LOST_GRACE: Duration = Duration::from_secs(10);
+
+/// When the end of the loop stops waiting: the earlier of the deadline of
+/// an owner gone and that of a heartbeat stopped, when both are; none when
+/// neither is, as every other end waits for its jobs to finish.
+pub(in crate::application::supervise) fn end_at(
+    owner_gone: Option<Instant>,
+    lease_lost: Option<Instant>,
+) -> Option<Instant> {
+    match (owner_gone, lease_lost) {
+        (Some(owner), Some(lease)) => Some(owner.min(lease)),
+        (owner, lease) => owner.or(lease),
+    }
+}
+
 /// What the end of the loop does next with a job it waits for
 /// ([`job_wait`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +137,8 @@ pub(in crate::application::supervise) enum JobWait {
 
 /// [`JobWait`] of a job that `finished` or not, with `left` the time from
 /// now to its deadline (zero once it is over; none waits until the job
-/// finishes: every end but that of a supervisor whose owner is gone).
+/// finishes: every end but that of a supervisor whose owner is gone or
+/// whose heartbeat stopped, [`end_at`]).
 pub(in crate::application::supervise) fn job_wait(
     finished: bool,
     left: Option<Duration>,
@@ -133,8 +165,9 @@ pub(in crate::application::supervise) enum Sent {
 
 /// Send what the end of the loop holds by `send` (whether all of it was
 /// taken) until it is, at most `tries` times `poll` apart, never past the
-/// deadline of a supervisor whose owner is gone: `left` is what is left of
-/// it now (none for every other end, which has no deadline), and nothing is
+/// deadline of a supervisor whose owner is gone or whose heartbeat stopped
+/// ([`end_at`]): `left` is what is left of it now (none for every other
+/// end, which has no deadline), and nothing is
 /// sent, nor waited for, once it is over. `sleep` waits. What was not
 /// taken, or not sent, stays for its caller to keep.
 pub(in crate::application::supervise) fn send_within(
@@ -280,6 +313,7 @@ impl Registration {
             stopping: false,
             stop_recorded: false,
             owner_gone: None,
+            lease_lost: false,
         }
     }
 
@@ -291,6 +325,27 @@ impl Registration {
     /// Whether the heartbeat still holds the registration and the leases.
     pub(in crate::application::supervise) fn check_heartbeat(&self) -> Result<()> {
         self.heartbeat.check()
+    }
+
+    /// Stop the heartbeat for good, at the end of the loop: no failure comes
+    /// after this, so a look at it then is the last one
+    /// ([`Self::check_heartbeat`]). The registration and the leases stay
+    /// as they are until [`Self::deregister`] or the exec.
+    pub(in crate::application::supervise) fn stop_heartbeat(&mut self) {
+        self.heartbeat.stop();
+    }
+
+    /// Why the heartbeat stopped, if it did.
+    pub(in crate::application::supervise) fn heartbeat_failure(&self) -> Option<HeartbeatFailure> {
+        self.heartbeat.failure()
+    }
+
+    /// The loop found its heartbeat stopped: whether this is the first
+    /// look that did.
+    pub(in crate::application::supervise) const fn note_lease_lost(&mut self) -> bool {
+        let first = !self.lease_lost;
+        self.lease_lost = true;
+        first
     }
 
     /// The binary a handoff asked this process to exec, if one did.
@@ -689,6 +744,58 @@ mod tests {
         assert_eq!(owner_gone_left(grace - ms, grace), ms);
         assert_eq!(owner_gone_left(grace, grace), Duration::ZERO);
         assert_eq!(owner_gone_left(grace + ms, grace), Duration::ZERO);
+    }
+
+    /// The end of the loop stops waiting at the earlier of the deadlines
+    /// of an owner gone and a heartbeat stopped; with neither, it has no
+    /// deadline. A heartbeat's grace is shorter than an owner's.
+    #[test]
+    fn the_end_waits_until_the_earlier_of_its_deadlines() {
+        assert!(LEASE_LOST_GRACE < OWNER_GONE_GRACE);
+        let start = Instant::now();
+        let (early, late) = (start + LEASE_LOST_GRACE, start + OWNER_GONE_GRACE);
+        assert_eq!(end_at(None, None), None);
+        assert_eq!(end_at(Some(late), None), Some(late));
+        assert_eq!(end_at(None, Some(early)), Some(early));
+        assert_eq!(end_at(Some(late), Some(early)), Some(early));
+        assert_eq!(end_at(Some(early), Some(late)), Some(early));
+    }
+
+    /// Records the queue does not take within the lease's grace are sent
+    /// no longer than its clock lets: past it nothing is sent and what is
+    /// held stays for its caller to keep for the next supervisor.
+    #[test]
+    fn records_not_taken_within_the_leases_grace_stay_held() {
+        let poll = Duration::from_secs(2);
+        // A clock the sleeps move, from when the heartbeat stopped.
+        let start = Instant::now();
+        let now = std::cell::Cell::new(start);
+        let left = || {
+            end_at(None, Some(start + LEASE_LOST_GRACE))
+                .map(|at| at.saturating_duration_since(now.get()))
+        };
+        let (mut sends, mut slept) = (0, Vec::new());
+        let sent = send_within(
+            100,
+            poll,
+            &left,
+            &mut |wait| {
+                slept.push(wait);
+                now.set(now.get() + wait);
+            },
+            &mut || {
+                sends += 1;
+                false
+            },
+        );
+        assert_eq!(sent, Sent::NotTaken);
+        // 10 s of grace, 2 s apart: five waits, and no send past it.
+        assert_eq!(sends, 5);
+        assert_eq!(slept.iter().sum::<Duration>(), LEASE_LOST_GRACE);
+        assert_eq!(
+            send_within(100, poll, &left, &mut |_| {}, &mut || unreachable!()),
+            Sent::Late
+        );
     }
 
     /// The end of the loop joins a job that finished, looks again at one

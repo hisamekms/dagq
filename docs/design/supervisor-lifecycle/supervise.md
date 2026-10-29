@@ -64,6 +64,8 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 - 起動の順は`supervise`のdoc comment、引き継ぎのexecで登録を取り戻してslotを組み立て直すことは[Handoff](handoff.md#handoff)と`handoff.rs`のmodule docが持つ。
 - heartbeatは`Heartbeat`と`HeartbeatPolicy`で、登録と全leaseを1つの書き込みで更新し、leaseがstaleになる前に自分から退く理由はそのdoc commentにある。
 - heartbeatが止まったsupervisorはleaseと登録を残して終わり、staleになった後に他のsupervisorが引き継ぐ。
+  止まった理由（queueの詰まり・serviceに届かない・登録が消えた・ほかの失敗）は`supervisor_heartbeat_failed`に残り、中身は`HeartbeatFailure`のdoc commentが持つ。
+  inboxの`watch`はこれをattentionとして返し、`status`はstaleな登録のattentionに同じ理由をtokenで対応づけて添える（`supervisor_attention_with`）。
 - slotの上限は`SlotLimits::resolve`。
 
 ## passの始め
@@ -124,6 +126,13 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 ## ループの終わり
 
 - 終わり方は`supervise`・`LoopSettings::owner`・`Supervisor::run_loop`のdoc comment、signalは`install_stop_signal`（1回目でdrain、2回目で即終了）。
+- ループの終わりの待ちに上限があるのは、ownerの居なくなったsupervisorとheartbeatの止まったsupervisorだけである（`EndBy`）。
+  heartbeatの上限はheartbeatが止まった時に決まり、ループがほかの理由で終わった後に止まっても同じく効く（`EndDeadline`）。
+  heartbeatの止まったsupervisorは、上限をqueue serviceへの呼び出しとstepの報告の1つずつにも当て、止まる前に始めて答えを待っているものにも当てる（`EndBound`・`EndBoundSinks`）。
+  ループの終わりは最後にheartbeatを止めてから止まった理由を確かめるので、終わり際に止まったheartbeatの理由も記録に残る。
+  上限までに送れなかった記録とjobの終わりはqueueのそばに残り、次のsupervisorが送る。
+  走っているrunのsessionのturnは止めず、runは次のsupervisorが引き継ぐ。
+  headlessのjobは止めて終わりを記録し、次のsupervisorが立て直す（[Headless jobのプロセス](headless-job-processes.md#引き継ぎ)）。
 - 登録を消すのは自分のループの終わり、`up`・`down`の掃除、生きているsupervisorによる死んだ登録の片付けだけで、どれも同じtransactionで`supervisor_stopped`を書く。
   `status` / `doctor` / `recover` / `integrate`は消さない（[Persistence](../persistence.md#runtime-ownership)、[`up` / `down`](up-down.md#up--down)）。
 

@@ -207,6 +207,15 @@ fn busy_writes_that_would_let_the_leases_go_stale_stop_the_supervisor() {
     assert!(error.contains("preserving runs for inspection"), "{error}");
     assert!(error.contains("heartbeat writes failed over"), "{error}");
     assert!(error.contains("database is locked"), "{error}");
+    // Why it stopped, as the loop records it: the queue stayed busy.
+    let failure = heartbeat.failure().unwrap();
+    assert_eq!(failure.cause, "busy", "{failure:?}");
+    assert!(failure.failures >= 1, "{failure:?}");
+    assert!(failure.secs > 0.0, "{failure:?}");
+    assert!(failure.error.contains("database is locked"), "{failure:?}");
+    let payload = failure.payload(&LeaseToken::new("sv"));
+    assert_eq!(payload["supervisor"], "sv", "{payload}");
+    assert_eq!(payload["cause"], "busy", "{payload}");
     // Nothing was recorded as retried: the heartbeat stopped.
     assert!(
         queue
@@ -238,6 +247,7 @@ fn a_registration_gone_from_the_queue_stops_the_supervisor() {
     });
     let error = format!("{:#}", heartbeat.check().unwrap_err());
     assert!(error.contains("registration is gone"), "{error}");
+    assert_eq!(heartbeat.failure().unwrap().cause, "registration_gone");
     leases.check().unwrap();
 }
 
@@ -577,4 +587,61 @@ fn a_failed_record_of_a_long_hold_leaves_the_transaction_as_it_was() {
         .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 1);
+}
+
+/// A supervisor that ended on a heartbeat a busy queue stopped is told
+/// apart from any other end where the inbox reads: `watch` returns its
+/// `supervisor_heartbeat_failed` with the cause, the failures and the
+/// seconds and its `next`, and `status` gives its stale registration's
+/// attention the same reason with `lease_lost`.
+#[test]
+fn status_and_watch_tell_a_supervisor_that_ended_on_a_busy_queue() {
+    use crate::common::cli::ok;
+    let _test = common::test();
+    let (_dir, db, queue) = registered();
+    // Stale: its last heartbeat is long past.
+    Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE supervisors SET heartbeat_at=0", [])
+        .unwrap();
+    queue
+        .record_queue_event(
+            EventKind::SupervisorHeartbeatFailed,
+            serde_json::json!({
+                "supervisor": "sv", "cause": "busy", "failures": 4, "secs": 27.0,
+                "error": "4 heartbeat writes failed over 28.1s since the last one written: database is locked",
+            }),
+        )
+        .unwrap();
+    let watched = ok(&db, &["watch", "--after", "0", "--timeout", "1"]);
+    let told: Vec<&serde_json::Value> = watched["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "supervisor_heartbeat_failed")
+        .collect();
+    assert_eq!(told.len(), 1, "{watched:#}");
+    assert_eq!(told[0]["supervisor"], "sv", "{watched:#}");
+    assert_eq!(told[0]["cause"], "busy", "{watched:#}");
+    assert_eq!(told[0]["failures"], 4, "{watched:#}");
+    assert_eq!(told[0]["secs"], 27.0, "{watched:#}");
+    assert_eq!(
+        told[0]["next"], "report the supervisor's end",
+        "{watched:#}"
+    );
+    let status = ok(&db, &["status"]);
+    let stale: Vec<&serde_json::Value> = status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["kind"] == "supervisor_stale")
+        .collect();
+    assert_eq!(stale.len(), 1, "{status:#}");
+    let reason = stale[0]["last_error"].as_str().unwrap();
+    assert!(
+        reason.starts_with("heartbeat stopped (busy): 4 writes failed over 27.0s: "),
+        "{reason}"
+    );
+    assert!(reason.contains("database is locked"), "{reason}");
+    assert_eq!(stale[0]["last_error_code"], "lease_lost", "{status:#}");
 }

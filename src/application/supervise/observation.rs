@@ -110,11 +110,7 @@ impl ObservationState {
 
     /// Join or leave the measure of the runs' resources at the end of the
     /// loop ([`resources::ResourcesWatch::finish`]).
-    pub(super) fn resources_finish(
-        &mut self,
-        env: &mut ObservationEnv<'_>,
-        deadline: Option<Instant>,
-    ) {
+    pub(super) fn resources_finish(&mut self, env: &mut ObservationEnv<'_>, deadline: &EndBy) {
         self.resources.finish(env, deadline);
     }
 
@@ -125,11 +121,7 @@ impl ObservationState {
 
     /// Join or leave the ledger's build at the end of the loop
     /// ([`ledger::LedgerWatch::finish`]).
-    pub(super) fn ledger_finish(
-        &mut self,
-        env: &mut ObservationEnv<'_>,
-        deadline: Option<Instant>,
-    ) {
+    pub(super) fn ledger_finish(&mut self, env: &mut ObservationEnv<'_>, deadline: &EndBy) {
         self.ledger.finish(env, deadline);
     }
 

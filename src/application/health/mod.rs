@@ -31,7 +31,7 @@ use crate::domain::{
     run_progress::{Lease, Progress},
     session_takes_answers,
     slot_limits::SettingSource,
-    supervisor_attention,
+    supervisor_attention_with,
     waiting::{WaitCount, WaitState},
 };
 

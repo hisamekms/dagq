@@ -186,13 +186,14 @@ impl Life {
 }
 
 /// The kinds of event of a supervisor's own life and settings.
-pub const KINDS: [EventKind; 7] = [
+pub const KINDS: [EventKind; 8] = [
     EventKind::SupervisorStarted,
     EventKind::SupervisorAlive,
     EventKind::SupervisorStopped,
     EventKind::SupervisorDraining,
     EventKind::SupervisorHandedOff,
     EventKind::SupervisorHeartbeatRetried,
+    EventKind::SupervisorHeartbeatFailed,
     EventKind::SupervisorConfigChanged,
 ];
 

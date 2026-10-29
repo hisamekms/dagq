@@ -100,8 +100,8 @@ use self::execution::{background, claim_defer, headless, provider, recheck};
 use self::host_ops::HostOpsState;
 pub use self::host_ops::broker_relay::QueueRelayPort;
 pub use self::host_ops::disk::CLEANUP_INTERVAL;
-pub use self::host_ops::handoff::OWNER_GONE_GRACE;
 pub use self::host_ops::handoff::SUPERVISOR_HANDED_OFF;
+pub use self::host_ops::handoff::{LEASE_LOST_GRACE, OWNER_GONE_GRACE};
 pub use self::host_ops::host_metrics::{HeldTargetsPort, HeldWorktrees, HostMetricsPort};
 pub use self::host_ops::queue_broker::QueueBrokerPort;
 pub use self::host_ops::queue_service::{

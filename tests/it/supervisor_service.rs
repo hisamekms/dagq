@@ -937,12 +937,14 @@ fn a_resumes_wait_for_its_held_provider_is_never_kept_and_is_recorded_once() {
     assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
 }
 
-/// The supervisor's calls in this double, but every `supervisor_draining`
-/// the queue stays busy for: a supervisor whose owner is gone keeps the
-/// record of its stop, and holds it to its end.
+/// The supervisor's calls in this double, but every queue event of `kind`
+/// (`supervisor_draining` unless said) the queue stays busy for: a
+/// supervisor whose owner is gone keeps the record of its stop, and one
+/// whose heartbeat stopped the record of why, and holds it to its end.
 struct DrainingBusy {
     inner: Arc<dyn ServiceCaller>,
     refused: Arc<std::sync::atomic::AtomicUsize>,
+    kind: &'static str,
 }
 
 impl ServiceCaller for DrainingBusy {
@@ -951,7 +953,7 @@ impl ServiceCaller for DrainingBusy {
         use_case: dagq::domain::queue_service::UseCase,
         params: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        if params["op"] == "record_queue_event" && params["args"][0] == "supervisor_draining" {
+        if params["op"] == "record_queue_event" && params["args"][0] == self.kind {
             self.refused.fetch_add(1, Ordering::SeqCst);
             return Err(anyhow::anyhow!("locked").context(dagq::application::QueueBusy));
         }
@@ -1018,6 +1020,7 @@ fn a_supervisor_whose_owner_is_gone_sends_what_it_holds_only_within_its_grace() 
             Arc::new(DrainingBusy {
                 inner,
                 refused: refused.clone(),
+                kind: "supervisor_draining",
             }) as Arc<dyn ServiceCaller>
         }))
     };
@@ -1057,6 +1060,554 @@ fn a_supervisor_whose_owner_is_gone_sends_what_it_holds_only_within_its_grace() 
             .iter()
             .any(|kept| kept.params["args"][0] == "supervisor_draining"),
         "the stop's record is not kept for the next supervisor"
+    );
+}
+
+/// A supervisor whose heartbeat stopped exits within the lease's grace,
+/// shortened here to 500 ms, while the queue stays busy for the record of
+/// why: the end of its loop sends what it holds again only within the
+/// grace, not its tries a poll (here 1 s) apart, which would take half a
+/// minute, and leaves the record kept beside the queue, which the next
+/// supervisor sends (ADR-t3102-3 decision 5). The record names the
+/// supervisor and its cause, which a busy queue's is told from.
+#[test]
+fn a_supervisor_whose_heartbeat_stopped_ends_within_the_leases_grace_and_keeps_what_it_holds() {
+    use crate::runtime_support::{
+        IDLE_AGENT, TestWorkspace, await_passes, joined, supervise_options, supervise_with,
+    };
+    use dagq::application::supervisor_service::resend::HeldRecords;
+    use dagq::domain::EventKind;
+    use dagq::infrastructure::held_records::HeldDir;
+    use dagq::infrastructure::sqlite::SqliteQueue;
+    use std::time::{Duration, Instant};
+    let (_fixture, repo, db) = fixture();
+    // Claude held: neither supervisor claims anything.
+    SqliteQueue::open(&db)
+        .unwrap()
+        .hold(dagq::domain::NewHold {
+            reason_category: dagq::domain::AskReason::Cost,
+            subject: Some(dagq::domain::queue_hold::USAGE_LIMIT_SUBJECT.to_owned()),
+            run_id: None,
+            job: None,
+            question: "the usage limit".into(),
+            options: dagq::domain::HOLD_OPTIONS
+                .iter()
+                .map(|o| (*o).to_owned())
+                .collect(),
+            asked_by: "supervisor".into(),
+        })
+        .unwrap();
+    let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let layer = {
+        let refused = refused.clone();
+        dagq::compose::CallerLayer(Arc::new(move |inner| {
+            Arc::new(DrainingBusy {
+                inner,
+                refused: refused.clone(),
+                kind: "supervisor_heartbeat_failed",
+            }) as Arc<dyn ServiceCaller>
+        }))
+    };
+    let options = dagq::compose::SuperviseOptions {
+        lease_lost_grace: Duration::from_millis(500),
+        idle_poll: Duration::from_millis(500),
+        heartbeat_interval: Duration::from_millis(50),
+        service_route: dagq::compose::ServiceRoute::InProcessThrough(layer),
+        ..supervise_options(1, false)
+    };
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, options) = (db.clone(), repo.clone(), options.clone());
+        std::thread::spawn(move || {
+            let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+            supervise_with(&db, &repo, &backend, &options)
+        })
+    };
+    await_passes(&passes, 1);
+    // The heartbeat fails from now on: the loop ends on an error.
+    let refuse = "CREATE TRIGGER fail_heartbeat BEFORE UPDATE ON supervisors
+         BEGIN SELECT RAISE(ABORT, 'heartbeat refused by the test'); END;";
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(refuse)
+        .unwrap();
+    let failed = Instant::now();
+    let error = joined(supervisor, "the supervisor whose heartbeat stopped").unwrap_err();
+    let took = failed.elapsed();
+    assert!(
+        format!("{error:#}").contains("heartbeat failed"),
+        "{error:#}"
+    );
+    // Why the heartbeat stopped is kept, refused as busy, or not sent at
+    // all once the grace counted from the heartbeat's stop was over by the
+    // pass that found it. The heartbeat's failure (50 ms), a pass to find
+    // it (500 ms), then the grace: well short of the 14 s of the two ends'
+    // tries a poll apart.
+    assert!(took < Duration::from_secs(5), "{took:?}");
+    let kept = |db: &Path| {
+        HeldDir::of(db)
+            .kept()
+            .unwrap()
+            .iter()
+            .any(|kept| kept.params["args"][0] == "supervisor_heartbeat_failed")
+    };
+    assert!(
+        kept(&db),
+        "why the heartbeat stopped is not kept for the next supervisor"
+    );
+    // The next supervisor sends it.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_heartbeat")
+        .unwrap();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    supervise_with(&db, &repo, &backend, &supervise_options(1, true)).unwrap();
+    assert!(!kept(&db), "the next supervisor did not send what was kept");
+    let payload = SqliteQueue::open(&db)
+        .unwrap()
+        .latest_event_of(EventKind::SupervisorHeartbeatFailed.as_str())
+        .unwrap()
+        .expect("the next supervisor sent why the heartbeat stopped")
+        .payload;
+    // Told from a busy queue's, by the supervisor whose registration
+    // stays to go stale with its leases.
+    let registrations = SqliteQueue::open(&db).unwrap().supervisors().unwrap();
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| payload["supervisor"] == serde_json::json!(registration.token)),
+        "{payload}"
+    );
+    assert_eq!(payload["cause"], "failed", "{payload}");
+    // A write busy for the test's own trigger counts with it.
+    assert!(payload["failures"].as_u64().unwrap() >= 1, "{payload}");
+    assert!(
+        payload["error"]
+            .as_str()
+            .unwrap()
+            .contains("heartbeat refused by the test"),
+        "{payload}"
+    );
+}
+
+/// A clock whose monotonic time moves only when a test moves it.
+struct Stepped(std::sync::Mutex<std::time::Instant>);
+
+impl dagq::application::Clock for Stepped {
+    fn system_time(&self) -> std::time::SystemTime {
+        std::time::SystemTime::UNIX_EPOCH
+    }
+    fn monotonic(&self) -> std::time::Instant {
+        *self.0.lock().unwrap()
+    }
+}
+
+/// A report or a call that never answers: the slowest queue service.
+struct Never;
+
+impl dagq::application::TelemetrySink for Never {
+    fn report(
+        &self,
+        _: &dagq::domain::telemetry::TelemetryReport,
+    ) -> anyhow::Result<dagq::domain::telemetry::ReportRecorded> {
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+impl dagq::application::TelemetrySinks for Never {
+    fn sink(
+        &self,
+        _: &Path,
+        _: &dagq::domain::session_step::StepTarget,
+    ) -> Option<Box<dyn dagq::application::TelemetrySink>> {
+        Some(Box::new(Never))
+    }
+    fn digest_key(&self, _: &Path) -> Option<dagq::domain::command_shape::DigestKey> {
+        None
+    }
+    fn steps_file(
+        &self,
+        _: &Path,
+        _: &dagq::domain::session_step::StepTarget,
+    ) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+impl ServiceCaller for Never {
+    fn call(
+        &self,
+        _: dagq::domain::queue_service::UseCase,
+        _: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        loop {
+            std::thread::park();
+        }
+    }
+    fn with_token(&self, _: &Path) -> anyhow::Result<Arc<dyn ServiceCaller>> {
+        unreachable!()
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// Once the end's deadline is set, a report of an executor's steps and a
+/// call of the queue service that do not answer are each waited for until
+/// the supervisor's clock reaches it, not for their own timeouts (5 s a
+/// report, 120 s a call on the socket); past it, no target has a sink and
+/// no call is sent, failing as the service out of reach for a request not
+/// done, which the records' holder keeps.
+#[test]
+fn the_ends_deadline_cuts_a_report_and_a_call_that_do_not_answer() {
+    use dagq::application::TelemetrySinks;
+    use dagq::application::supervisor_service::end_bound::{EndBound, EndBoundSinks, EndDeadline};
+    use dagq::domain::session_step::{Step, StepKind, StepTarget};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let clock = Arc::new(Stepped(std::sync::Mutex::new(start)));
+    let deadline = Arc::new(EndDeadline::default());
+    let sinks = Arc::new(EndBoundSinks::new(
+        Arc::new(Never),
+        clock.clone(),
+        deadline.clone(),
+    ));
+    let caller = Arc::new(EndBound::new(
+        Arc::new(Never),
+        clock.clone(),
+        deadline.clone(),
+    ));
+    let target = StepTarget::run(&dagq::domain::RunId::new("r").unwrap());
+    let report = dagq::domain::telemetry::TelemetryReport::new(
+        target.clone(),
+        "s1",
+        vec![Step::new(1, StepKind::ModelTurn, 0, 5)],
+    );
+    let left = Duration::from_secs(10);
+    deadline.set_by(start + left);
+    let _waiting = common::within(Duration::from_secs(20), "the reports and calls cut");
+    let params = serde_json::json!({"op": "record_queue_event"});
+    let (called, call) = mpsc::channel();
+    {
+        let (caller, params) = (caller.clone(), params.clone());
+        std::thread::spawn(move || {
+            let _ =
+                called.send(caller.call(dagq::domain::queue_service::UseCase::Supervisor, params));
+        });
+    }
+    let (reported, reporting) = mpsc::channel();
+    {
+        let (sinks, target) = (sinks.clone(), target.clone());
+        std::thread::spawn(move || {
+            let sink = sinks
+                .sink(Path::new("queue.db"), &target)
+                .expect("a sink before the deadline");
+            let _ = reported.send(sink.report(&report).map_err(|error| format!("{error:#}")));
+        });
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        call.try_recv().is_err(),
+        "the call ended before its deadline"
+    );
+    assert!(
+        reporting.try_recv().is_err(),
+        "the report ended before its deadline"
+    );
+    *clock.0.lock().unwrap() = start + left;
+    let error = call
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the call cut at the deadline")
+        .unwrap_err();
+    assert!(unreachable(&error), "{error:#}");
+    let error = reporting
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the report cut at the deadline")
+        .unwrap_err();
+    assert!(error.contains("not sent"), "{error}");
+    // Past it.
+    assert!(sinks.sink(Path::new("queue.db"), &target).is_none());
+    let error = caller
+        .call(dagq::domain::queue_service::UseCase::Supervisor, params)
+        .unwrap_err();
+    assert!(
+        dagq::application::supervisor_service::undone(&error),
+        "{error:#}"
+    );
+}
+
+/// A send already waiting for its answer when the heartbeat stops is cut
+/// by the deadline set then: a call of the queue service and a report of
+/// an executor's steps that do not answer wait on, with no deadline and
+/// with one set while they wait but not reached on the supervisor's clock,
+/// and end as soon as that clock reaches it, the call as the service out
+/// of reach for a request that may have been done.
+#[test]
+fn a_send_that_began_before_the_heartbeat_stopped_ends_at_the_deadline() {
+    use dagq::application::TelemetrySinks;
+    use dagq::application::supervisor_service::end_bound::{EndBound, EndBoundSinks, EndDeadline};
+    use dagq::domain::session_step::{Step, StepKind, StepTarget};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let clock = Arc::new(Stepped(std::sync::Mutex::new(start)));
+    let deadline = Arc::new(EndDeadline::default());
+    let sinks = EndBoundSinks::new(Arc::new(Never), clock.clone(), deadline.clone());
+    let caller = Arc::new(EndBound::new(
+        Arc::new(Never),
+        clock.clone(),
+        deadline.clone(),
+    ));
+    let target = StepTarget::run(&dagq::domain::RunId::new("r").unwrap());
+    let report = dagq::domain::telemetry::TelemetryReport::new(
+        target.clone(),
+        "s1",
+        vec![Step::new(1, StepKind::ModelTurn, 0, 5)],
+    );
+    let _waiting = common::within(Duration::from_secs(20), "the sends cut");
+    // Both begin with no deadline.
+    let (called, call) = mpsc::channel();
+    {
+        let caller = caller.clone();
+        std::thread::spawn(move || {
+            let params = serde_json::json!({"op": "record_queue_event"});
+            let _ =
+                called.send(caller.call(dagq::domain::queue_service::UseCase::Supervisor, params));
+        });
+    }
+    let (reported, reporting) = mpsc::channel();
+    std::thread::spawn(move || {
+        let sink = sinks
+            .sink(Path::new("queue.db"), &target)
+            .expect("a sink with no deadline");
+        let _ = reported.send(sink.report(&report).map_err(|error| format!("{error:#}")));
+    });
+    let still = |what: &str| {
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(call.try_recv().is_err(), "the call ended {what}");
+        assert!(reporting.try_recv().is_err(), "the report ended {what}");
+    };
+    still("with no deadline");
+    // The heartbeat stops: the deadline is set, 10 s on.
+    deadline.set_by(start + Duration::from_secs(10));
+    still("before its deadline");
+    // The supervisor's clock reaches it.
+    *clock.0.lock().unwrap() = start + Duration::from_secs(10);
+    let error = call
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the call cut at the deadline")
+        .unwrap_err();
+    assert!(unreachable(&error), "{error:#}");
+    assert!(
+        !dagq::application::supervisor_service::undone(&error),
+        "{error:#}"
+    );
+    let error = reporting
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the report cut at the deadline")
+        .unwrap_err();
+    assert!(error.contains("not sent"), "{error}");
+}
+
+/// The supervisor's calls in this double, but the heartbeat once
+/// `refuse` is set, the time of its first refusal kept; a call that comes
+/// 100 ms after that or later (when the end's deadline is set, as the
+/// heartbeat's thread sets it at once) waits 3 s and then finds the
+/// service out of reach.
+struct StopsWhileEnding {
+    inner: Arc<dyn ServiceCaller>,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+    refused: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+}
+
+impl ServiceCaller for StopsWhileEnding {
+    fn call(
+        &self,
+        use_case: dagq::domain::queue_service::UseCase,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        use std::time::Duration;
+        if params["op"] == "heartbeat" && self.refuse.load(Ordering::SeqCst) {
+            self.refused
+                .lock()
+                .unwrap()
+                .get_or_insert_with(std::time::Instant::now);
+            anyhow::bail!("heartbeat refused by the test");
+        }
+        let refused = *self.refused.lock().unwrap();
+        if refused.is_some_and(|at| at.elapsed() >= Duration::from_millis(100)) {
+            std::thread::sleep(Duration::from_secs(3));
+            return Err(ServiceUnreachable::not_done("the service is down").into());
+        }
+        self.inner.call(use_case, params)
+    }
+    fn with_token(&self, file: &Path) -> anyhow::Result<Arc<dyn ServiceCaller>> {
+        self.inner.with_token(file)
+    }
+    fn send_held(&self) -> anyhow::Result<bool> {
+        self.inner.send_held()
+    }
+    fn sign_in(&self, registration: &LeaseToken, pid: u32) -> anyhow::Result<()> {
+        self.inner.sign_in(registration, pid)
+    }
+    fn take_back(&self, registration: &LeaseToken, pid: u32) -> anyhow::Result<()> {
+        self.inner.take_back(registration, pid)
+    }
+    fn hand_over(&self) {
+        self.inner.hand_over();
+    }
+    fn sign_out(&self) {
+        self.inner.sign_out();
+    }
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.inner.credential()
+    }
+}
+
+/// A supervisor stopped by a request whose heartbeat stops once its loop
+/// ended (the pause at the loop's end refuses it and waits for the
+/// heartbeat to stop) still records why and bounds the end by the lease's
+/// grace (shortened to 500 ms) from the heartbeat's stop, however slow the
+/// service is from then (3 s a call): the record is kept beside the queue
+/// for the next supervisor, and the registration stays to go stale with
+/// the leases.
+#[test]
+fn a_heartbeat_that_stops_while_the_loop_ends_bounds_the_end_and_is_recorded() {
+    heartbeat_stopped_at(dagq::runtime::PausePoint::LoopEnded);
+}
+
+/// The same for a heartbeat that stops at the last of the end, after the
+/// end's other looks at it and the observer's stop, just before it would
+/// have been stopped: why is still recorded, and the registration stays.
+#[test]
+fn a_heartbeat_that_stops_at_the_last_of_the_end_is_recorded() {
+    heartbeat_stopped_at(dagq::runtime::PausePoint::HeartbeatEnding);
+}
+
+/// A supervisor stopped by a request whose heartbeat is refused at `point`
+/// of the end of its loop, until it stopped: its end is bounded from then,
+/// why is recorded (written or kept), and its registration stays.
+fn heartbeat_stopped_at(point: dagq::runtime::PausePoint) {
+    use crate::runtime_support::{
+        IDLE_AGENT, TestWorkspace, await_passes, joined, supervise_options, supervise_with,
+    };
+    use dagq::application::supervisor_service::resend::HeldRecords;
+    use dagq::infrastructure::held_records::HeldDir;
+    use dagq::infrastructure::sqlite::SqliteQueue;
+    use std::time::{Duration, Instant};
+    let (_fixture, repo, db) = fixture();
+    // Claude held: nothing is claimed.
+    SqliteQueue::open(&db)
+        .unwrap()
+        .hold(dagq::domain::NewHold {
+            reason_category: dagq::domain::AskReason::Cost,
+            subject: Some(dagq::domain::queue_hold::USAGE_LIMIT_SUBJECT.to_owned()),
+            run_id: None,
+            job: None,
+            question: "the usage limit".into(),
+            options: dagq::domain::HOLD_OPTIONS
+                .iter()
+                .map(|o| (*o).to_owned())
+                .collect(),
+            asked_by: "supervisor".into(),
+        })
+        .unwrap();
+    let (refuse, refused) = (
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(std::sync::Mutex::new(None::<Instant>)),
+    );
+    let layer = {
+        let (refuse, refused) = (refuse.clone(), refused.clone());
+        dagq::compose::CallerLayer(Arc::new(move |inner| {
+            Arc::new(StopsWhileEnding {
+                inner,
+                refuse: refuse.clone(),
+                refused: refused.clone(),
+            }) as Arc<dyn ServiceCaller>
+        }))
+    };
+    // At the loop's end, the heartbeat is refused until it stopped.
+    let pauses = {
+        let (refuse, refused) = (refuse.clone(), refused.clone());
+        dagq::runtime::PausesPort(Arc::new(move |at, _| {
+            if at != point {
+                return;
+            }
+            refuse.store(true, Ordering::SeqCst);
+            let waited = Instant::now();
+            while refused.lock().unwrap().is_none() && waited.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // The heartbeat's thread stops on that refusal.
+            std::thread::sleep(Duration::from_millis(50));
+        }))
+    };
+    let options = dagq::compose::SuperviseOptions {
+        lease_lost_grace: Duration::from_millis(500),
+        heartbeat_interval: Duration::from_millis(50),
+        service_route: dagq::compose::ServiceRoute::InProcessThrough(layer),
+        pauses: Some(pauses),
+        ..supervise_options(1, false)
+    };
+    let (passes, stop) = (options.passes.clone(), options.stop.clone());
+    let supervisor = {
+        let (db, repo) = (db.clone(), repo.clone());
+        std::thread::spawn(move || {
+            let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+            supervise_with(&db, &repo, &backend, &options)
+        })
+    };
+    await_passes(&passes, 1);
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(
+        supervisor,
+        "the supervisor whose heartbeat stopped as it ended",
+    );
+    let took = refused
+        .lock()
+        .unwrap()
+        .expect("the heartbeat refused")
+        .elapsed();
+    // Its loop ended on the stop, not on the heartbeat.
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome["outcome"], "stopped", "{outcome}");
+    // The grace, not one call of 3 s.
+    assert!(took < Duration::from_secs(3), "{took:?}");
+    // Why it stopped: written, or kept for the next supervisor when the
+    // service no longer answered.
+    let queue = SqliteQueue::open(&db).unwrap();
+    let written = queue
+        .latest_event_of(dagq::domain::EventKind::SupervisorHeartbeatFailed.as_str())
+        .unwrap()
+        .map(|event| event.payload);
+    let kept: Vec<serde_json::Value> = HeldDir::of(&db)
+        .kept()
+        .unwrap()
+        .into_iter()
+        .filter(|kept| kept.params["args"][0] == "supervisor_heartbeat_failed")
+        .map(|kept| kept.params["args"][1].clone())
+        .collect();
+    let recorded: Vec<serde_json::Value> = written.into_iter().chain(kept).collect();
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["cause"], "failed", "{recorded:?}");
+    // Not deregistered: the registration goes stale with the leases.
+    let registrations = queue.supervisors().unwrap();
+    assert_eq!(registrations.len(), 1);
+    assert_eq!(
+        recorded[0]["supervisor"],
+        serde_json::json!(registrations[0].token),
+        "{recorded:?}"
     );
 }
 

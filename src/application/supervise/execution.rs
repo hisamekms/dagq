@@ -70,6 +70,7 @@ mod task_hold;
 mod triage;
 mod waiting;
 
+pub use crate::application::supervisor_service::end_bound::EndDeadline;
 use crate::application::telemetry_tokens;
 use crate::domain::run::review_findings;
 
@@ -281,6 +282,9 @@ pub struct LoopSettings {
     /// How long a supervisor whose owner is gone may still wait before it
     /// exits ([`OWNER_GONE_GRACE`]; tests shorten it).
     pub owner_gone_grace: Duration,
+    /// How long a supervisor whose heartbeat stopped may still wait before
+    /// it exits ([`LEASE_LOST_GRACE`]; tests shorten it).
+    pub lease_lost_grace: Duration,
     /// Counts the loop's passes, one at the top of each. Tests read it to
     /// wait for passes after a threshold instead of a fixed sleep (task
     /// 1046); a `--once` call names its records by it
@@ -434,6 +438,12 @@ pub enum PausePoint {
     /// request written, the clone made again), before the restore's lease
     /// is given back for the resume.
     RestoreHanded,
+    /// The end of the supervisor's loop, once the loop ended, before it
+    /// looks at its heartbeat and sends what it holds: of no run.
+    LoopEnded,
+    /// The end of the supervisor's loop, before its heartbeat stops for the
+    /// last look at it and its registration goes: of no run.
+    HeartbeatEnding,
     /// The supervisor's end, once its registration is removed, before it
     /// stops the queue's broker and service after a `down`'s drain and
     /// gives its token back: of no run.
@@ -504,6 +514,11 @@ pub struct Ports<'a> {
     /// executors too, send the steps of the commands they run
     /// (ADR-t1662-3 decision 1).
     pub telemetry_sinks: Arc<dyn crate::application::TelemetrySinks>,
+    /// The deadline of the end of a supervisor whose heartbeat stopped,
+    /// which bounds every call of `service` and every report of
+    /// `telemetry_sinks` from then ([`EndDeadline`]): the same one given to
+    /// both, set by the heartbeat's thread as it stops.
+    pub end: Arc<EndDeadline>,
     /// Where tests pause the supervisor ([`PausePoint`]); none outside them.
     pub pauses: Option<Pauses>,
     pub files: Arc<dyn RunFiles>,
@@ -650,19 +665,44 @@ pub fn spawn_traced<T: Send + 'static>(
     thread::spawn(move || tracing::dispatcher::with_default(&dispatch, work))
 }
 
+/// When the end of the loop stops waiting ([`finished_by`]) and sending
+/// ([`handoff::send_within`]): the deadline of a supervisor whose owner is
+/// gone, set as the loop ends, and that of one whose heartbeat stopped,
+/// set the moment it stopped ([`EndDeadline`]), read again at each look so
+/// a heartbeat that stops while the end waits bounds that wait too; the
+/// earlier of the two ([`handoff::end_at`]), none while neither is.
+#[derive(Debug, Clone)]
+pub(in crate::application) struct EndBy {
+    owner_gone: Option<Instant>,
+    lease_lost: Arc<EndDeadline>,
+}
+
+impl EndBy {
+    /// The deadline now, if there is one.
+    pub(in crate::application) fn at(&self) -> Option<Instant> {
+        handoff::end_at(self.owner_gone, self.lease_lost.at())
+    }
+
+    /// What is left of it at `now`, if there is one.
+    pub(in crate::application) fn left(&self, now: Instant) -> Option<Duration> {
+        self.at().map(|at| at.saturating_duration_since(now))
+    }
+}
+
 /// Wait for `job` to finish, until `deadline` on `clock`'s monotonic clock
-/// when one is given: whether
+/// when there is one ([`EndBy`], read again at each look): whether
 /// it finished, so that joining it does not wait. The end of the loop of
-/// a supervisor whose owner is gone waits for its jobs so
-/// ([`OWNER_GONE_GRACE`]); every other end waits for them to finish. What
+/// a supervisor whose owner is gone or whose heartbeat stopped waits for
+/// its jobs so ([`OWNER_GONE_GRACE`], [`LEASE_LOST_GRACE`]); every other
+/// end waits for them to finish. What
 /// to do next is [`handoff::job_wait`]'s; this reads the clock and sleeps.
 pub(in crate::application) fn finished_by<T>(
     job: &thread::JoinHandle<T>,
-    deadline: Option<Instant>,
+    deadline: &EndBy,
     clock: &dyn crate::application::Clock,
 ) -> bool {
     loop {
-        let left = deadline.map(|deadline| deadline.saturating_duration_since(clock.monotonic()));
+        let left = deadline.left(clock.monotonic());
         match handoff::job_wait(job.is_finished(), left) {
             handoff::JobWait::Join => return true,
             handoff::JobWait::Leave => return false,
@@ -736,6 +776,55 @@ struct BusyStreak {
     error: String,
 }
 
+/// Why a [`Heartbeat`] stopped, as the loop records it on the queue
+/// (`supervisor_heartbeat_failed`, [`Self::payload`]), so a supervisor that
+/// ended on a queue that stayed busy is told from one that ended otherwise.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeartbeatFailure {
+    /// What stopped it ([`HeartbeatFailure::cause_of`]).
+    pub cause: &'static str,
+    /// The writes that failed in a row before it stopped, the last one
+    /// included; none for a registration found gone.
+    pub failures: u32,
+    /// The seconds from the first of those failures to the last one's end.
+    pub secs: f64,
+    /// The last failure's error, with how many failed over how long since
+    /// the last write.
+    pub error: String,
+}
+
+impl HeartbeatFailure {
+    /// The cause of a heartbeat that stopped on a write that failed:
+    /// `busy` when the queue stayed locked until the leases would go
+    /// stale, `unreachable` when the queue service did not answer as long,
+    /// and `failed` for a failure that is not tried again.
+    pub const fn cause_of(busy: bool, unreachable: bool) -> &'static str {
+        if busy {
+            "busy"
+        } else if unreachable {
+            "unreachable"
+        } else {
+            "failed"
+        }
+    }
+
+    /// The cause of a heartbeat that stopped on a write that went through
+    /// and found the registration gone ([`HeartbeatPolicy::lost`]).
+    pub const REGISTRATION_GONE: &'static str = "registration_gone";
+
+    /// The payload of `supervisor_heartbeat_failed` of the supervisor
+    /// `token`.
+    pub fn payload(&self, token: &LeaseToken) -> Value {
+        json!({
+            "supervisor": token,
+            "cause": self.cause,
+            "failures": self.failures,
+            "secs": (self.secs * 10.0).round() / 10.0,
+            "error": self.error,
+        })
+    }
+}
+
 /// One process heartbeats its registration (a resident supervisor) and every
 /// lease it holds with a single token, every `interval`. A write that meets
 /// another connection's lock is tried again at the next interval, and only a
@@ -744,18 +833,39 @@ struct BusyStreak {
 pub struct Heartbeat {
     stop: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<()>>,
-    failed: Arc<std::sync::Mutex<Option<String>>>,
+    failed: Arc<std::sync::Mutex<Option<HeartbeatFailure>>>,
 }
 
 impl Heartbeat {
     pub fn start(queues: Arc<dyn QueueOpener>, token: LeaseToken, policy: HeartbeatPolicy) -> Self {
+        Self::start_with(queues, token, policy, None)
+    }
+
+    /// [`Self::start`], `stopped` called on the heartbeat's thread as it
+    /// stops on a failure, before the failure can be read
+    /// ([`Self::check`]).
+    pub fn start_with(
+        queues: Arc<dyn QueueOpener>,
+        token: LeaseToken,
+        policy: HeartbeatPolicy,
+        stopped: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Self {
         let (stop, recv) = mpsc::channel();
         let failed = Arc::new(std::sync::Mutex::new(None));
         let flag = failed.clone();
         let worker = spawn_traced(move || {
-            if let Err(error) = beat(&*queues, &token, policy, &recv) {
-                error!(error = %format_args!("{error:#}"), "supervisor heartbeat failed: {error:#}");
-                *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("{error:#}"));
+            if let Err(failure) = beat(&*queues, &token, policy, &recv) {
+                let error = &failure.error;
+                error!(
+                    error = %error,
+                    cause = failure.cause,
+                    failures = failure.failures,
+                    "supervisor heartbeat failed: {error}"
+                );
+                if let Some(stopped) = stopped {
+                    stopped();
+                }
+                *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(failure);
             }
         });
         Self {
@@ -775,16 +885,28 @@ impl Heartbeat {
     }
 
     /// The failure that stopped the heartbeat, if any; the loop records it
-    /// on every run as a `runtime_error` with the reason `lease_lost`.
+    /// on every run as a `runtime_error` with the reason `lease_lost`, and
+    /// its cause on the queue ([`HeartbeatFailure`]).
     /// When writes failed, its message carries how many failed in a row
     /// and over how many seconds since the last one written (`beat`).
     pub fn check(&self) -> Result<()> {
         match &*self.failed.lock().unwrap_or_else(|e| e.into_inner()) {
-            Some(error) => {
-                bail!("supervisor heartbeat failed; preserving runs for inspection: {error}")
+            Some(failure) => {
+                bail!(
+                    "supervisor heartbeat failed; preserving runs for inspection: {}",
+                    failure.error
+                )
             }
             None => Ok(()),
         }
+    }
+
+    /// Why the heartbeat stopped, if it did ([`HeartbeatFailure`]).
+    pub fn failure(&self) -> Option<HeartbeatFailure> {
+        self.failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -799,7 +921,7 @@ fn beat(
     token: &LeaseToken,
     policy: HeartbeatPolicy,
     stop: &mpsc::Receiver<()>,
-) -> Result<()> {
+) -> Result<(), HeartbeatFailure> {
     let mut queue: Option<Box<dyn Queue + Send>> = None;
     let mut written = Instant::now();
     let mut streak: Option<BusyStreak> = None;
@@ -817,7 +939,12 @@ fn beat(
         match attempt {
             Ok(write) => {
                 if let Some(lost) = policy.lost(&write) {
-                    bail!("{lost}");
+                    return Err(HeartbeatFailure {
+                        cause: HeartbeatFailure::REGISTRATION_GONE,
+                        failures: 0,
+                        secs: 0.0,
+                        error: lost.to_owned(),
+                    });
                 }
                 written = started;
                 // A resident supervisor's evidence of life on the events
@@ -875,14 +1002,20 @@ fn beat(
                 // A queue service that does not answer (being replaced, or
                 // started again) passes as a busy queue does: tried again
                 // while the leases hold (ADR-t3102-3 decision 5).
-                let passing = crate::application::QueueBusy::is(&error)
-                    || crate::application::supervisor_service::unreachable(&error);
-                if !policy.retries(passing, since) {
-                    return Err(error.context(format!(
+                let busy = crate::application::QueueBusy::is(&error);
+                let unreachable = crate::application::supervisor_service::unreachable(&error);
+                if !policy.retries(busy || unreachable, since) {
+                    let error = error.context(format!(
                         "{} heartbeat writes failed over {:.1}s since the last one written",
                         streak.failures,
                         since.as_secs_f64()
-                    )));
+                    ));
+                    return Err(HeartbeatFailure {
+                        cause: HeartbeatFailure::cause_of(busy, unreachable),
+                        failures: streak.failures,
+                        secs: streak.since.elapsed().as_secs_f64(),
+                        error: format!("{error:#}"),
+                    });
                 }
                 warn!(
                     error = %format_args!("{error:#}"),
@@ -1132,11 +1265,21 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             "previous_version": previous_version,
         }),
     )?;
-    let heartbeat = Heartbeat::start(
-        ports.queues.clone(),
-        token.clone(),
-        HeartbeatPolicy::supervisor(settings.heartbeat_interval),
-    );
+    // The heartbeat that stops sets the end's deadline at once, whatever
+    // the loop does then.
+    let heartbeat = {
+        let (end, clock, grace) = (
+            ports.end.clone(),
+            ports.generators.clock.clone(),
+            settings.lease_lost_grace,
+        );
+        Heartbeat::start_with(
+            ports.queues.clone(),
+            token.clone(),
+            HeartbeatPolicy::supervisor(settings.heartbeat_interval),
+            Some(Box::new(move || end.set_by(clock.monotonic() + grace))),
+        )
+    };
     let sessions = RecordingSessions::over(
         ports.sessions,
         ports.recording_queues.clone(),
@@ -1169,6 +1312,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         telemetry_tokens: ports.telemetry_tokens,
         environment: ports.environment.clone(),
         telemetry_sinks: ports.telemetry_sinks.clone(),
+        end: ports.end.clone(),
         unsent_steps: Arc::default(),
         handoff_drain: Arc::default(),
         stop: settings.stop.clone(),
@@ -1410,6 +1554,8 @@ struct Supervisor<'a> {
     /// Where the verifications send their commands' steps
     /// ([`Ports::telemetry_sinks`]).
     telemetry_sinks: Arc<dyn crate::application::TelemetrySinks>,
+    /// The deadline of the end once the heartbeat stopped ([`Ports::end`]).
+    end: Arc<EndDeadline>,
     /// The steps its executors (the landings' and the e2e's verifications,
     /// its headless jobs) could not send by their end: sent again on each
     /// sweep while their target has its token ([`Self::sweep_telemetry`]).
@@ -2660,13 +2806,17 @@ impl Supervisor<'_> {
         };
         // The records held on the last pass go before the process ends or
         // execs, for as long as a few looks at the service take (ADR-t3102-3
-        // decision 5), and for a supervisor whose owner is gone no longer
-        // than its grace; what is still held then stays kept beside the
-        // queue for the next supervisor.
-        let deadline = self.end_deadline(options.owner_gone_grace);
+        // decision 5), and for a supervisor whose owner is gone or whose
+        // heartbeat stopped no longer than its grace; what is still held
+        // then stays kept beside the queue for the next supervisor.
+        self.pause_at_end(PausePoint::LoopEnded);
+        // A heartbeat that stopped as the loop ended another way (a drain,
+        // a handoff, an error) is found here; one that stops while the end
+        // waits sets the deadline then, which every wait below reads again.
+        self.note_heartbeat_stopped(options);
+        let deadline = self.end_by(options);
         let clock = self.generators.clock.clone();
-        let left =
-            || deadline.map(|deadline| deadline.saturating_duration_since(clock.monotonic()));
+        let left = || deadline.left(clock.monotonic());
         let service = self.service.clone();
         match handoff::send_within(
             HELD_RECORD_TRIES,
@@ -2680,7 +2830,7 @@ impl Supervisor<'_> {
                 warn!("the records the queue service did not take are kept for the next supervisor")
             }
             handoff::Sent::Late => warn!(
-                "the grace of a supervisor whose owner is gone is over: what it holds is not sent and stays kept for the next supervisor"
+                "the grace of a supervisor whose owner is gone or whose heartbeat stopped is over: what it holds is not sent and stays kept for the next supervisor"
             ),
         }
         // The runs that ended on the last pass end their telemetry tokens
@@ -2691,9 +2841,12 @@ impl Supervisor<'_> {
             self.save_telemetry_retries();
         }
         self.host
-            .host_metrics_finish(deadline, &*self.generators.clock);
-        self.on_observation(|observation, env| observation.ledger_finish(env, deadline));
-        self.on_observation(|observation, env| observation.resources_finish(env, deadline));
+            .host_metrics_finish(&deadline, &*self.generators.clock);
+        self.on_observation(|observation, env| observation.ledger_finish(env, &deadline));
+        self.on_observation(|observation, env| observation.resources_finish(env, &deadline));
+        // Why a heartbeat that stopped while those waited did, before the
+        // jobs' ends, with which it is sent or kept.
+        self.note_heartbeat_stopped(options);
         // The jobs the loop stopped last (a handoff stops them all), and
         // those a loop that failed leaves running: dropped only after this
         // last write, their ends would not be written.
@@ -2722,7 +2875,7 @@ impl Supervisor<'_> {
             let held = self.cleanup_held();
             self.on_host(|host, env| {
                 host.poll_cleanup(env, &held, true);
-                host.finish_cleanup(env, &held, deadline);
+                host.finish_cleanup(env, &held, &deadline);
             });
         }
         if !self.registration.execs() {
@@ -2732,6 +2885,14 @@ impl Supervisor<'_> {
                 observation.stop_throughput_review(env, "with the supervisor");
             });
         }
+        // The heartbeat ends here, before the last look at it, so none
+        // fails after that look: why one that stopped did is recorded (held
+        // beside the queue at once when the service does not take it)
+        // before the registration goes, or stays for a heartbeat that
+        // stopped.
+        self.pause_at_end(PausePoint::HeartbeatEnding);
+        self.registration.stop_heartbeat();
+        self.note_heartbeat_stopped(options);
         // Its token goes with the registration (ADR-t3102-1 decision 2):
         // the service is asked to revoke it as it stops before the
         // registration goes, since a `down --wait` that sees it gone may
@@ -2757,14 +2918,57 @@ impl Supervisor<'_> {
         }
         result
     }
-    /// When the end of the loop stops waiting for its jobs ([`finished_by`]):
-    /// never, or, for a supervisor whose owner is gone, once what is left
-    /// of `grace` is over ([`handoff::owner_gone_left`]).
-    fn end_deadline(&self, grace: Duration) -> Option<Instant> {
+    /// When the end of the loop stops waiting for its jobs ([`finished_by`])
+    /// and for the queue to take what it holds ([`EndBy`]): for a
+    /// supervisor whose owner is gone, once what is left of its grace from
+    /// now is over, and for one whose heartbeat stopped, once the deadline
+    /// set when it stopped is.
+    fn end_by(&self, options: &LoopSettings) -> EndBy {
         let now = self.generators.clock.monotonic();
-        self.registration.owner_gone_since().map(|since| {
-            now + handoff::owner_gone_left(now.saturating_duration_since(since), grace)
-        })
+        EndBy {
+            owner_gone: self.registration.owner_gone_since().map(|since| {
+                now + handoff::owner_gone_left(
+                    now.saturating_duration_since(since),
+                    options.owner_gone_grace,
+                )
+            }),
+            lease_lost: self.end.clone(),
+        }
+    }
+    /// Whether the heartbeat stopped. The first look that finds it so sets
+    /// the end's deadline from now, unless the heartbeat's thread set an
+    /// earlier one as it stopped ([`EndDeadline`]), and records why
+    /// ([`Self::record_heartbeat_failure`]): on each pass, and at the end of
+    /// the loop for a heartbeat that stopped after the loop ended another
+    /// way.
+    fn note_heartbeat_stopped(&mut self, options: &LoopSettings) -> bool {
+        if self.registration.check_heartbeat().is_ok() {
+            return false;
+        }
+        if self.registration.note_lease_lost() {
+            let now = self.generators.clock.monotonic();
+            self.end.set_by(now + options.lease_lost_grace);
+            self.record_heartbeat_failure();
+        }
+        true
+    }
+    /// Record why the heartbeat stopped as `supervisor_heartbeat_failed`
+    /// ([`HeartbeatFailure::payload`]). A queue that stays busy, or a
+    /// service that does not answer, holds it with the other records of
+    /// results, sent at the end of the loop or kept beside the queue for
+    /// the next supervisor (ADR-t3102-3 decision 5).
+    fn record_heartbeat_failure(&mut self) {
+        let Some(failure) = self.registration.heartbeat_failure() else {
+            return;
+        };
+        let payload = failure.payload(self.registration.token());
+        if let Err(error) = self
+            .queue
+            .record_queue_event(EventKind::SupervisorHeartbeatFailed, payload)
+            && !crate::application::supervisor_service::resend::kept(&error)
+        {
+            warn!(error = %format_args!("{error:#}"), "why the heartbeat stopped could not be recorded: {error:#}");
+        }
     }
     /// Abandon every headless job still running once the loop ended: the
     /// plan review and the goal review ([`PlanningState::abandon_jobs`])
@@ -2787,9 +2991,13 @@ impl Supervisor<'_> {
                 .once
                 .then(|| tracing::debug_span!("pass", pass).entered());
             if let Err(error) = self.registration.check_heartbeat() {
-                // Supervisor-level failure: note it on every run and keep the
-                // leases and the registration; they go stale once this
+                // Supervisor-level failure: every send from the heartbeat's
+                // stop, of this pass and of the end of the loop, is bounded
+                // by its deadline ([`LEASE_LOST_GRACE`]), its cause goes on
+                // the queue first, and it is noted on every run; the leases
+                // and the registration are kept, and go stale once this
                 // process is gone.
+                self.note_heartbeat_stopped(options);
                 for slot in self.claim.slots.iter() {
                     let _ = self.queue.record_runtime_error(
                         slot.run.id(),
@@ -3225,8 +3433,8 @@ impl Supervisor<'_> {
             thread::sleep(options.tick);
         }
         let held = self.cleanup_held();
-        let deadline = self.end_deadline(options.owner_gone_grace);
-        self.on_host(|host, env| host.finish_cleanup(env, &held, deadline));
+        let deadline = self.end_by(options);
+        self.on_host(|host, env| host.finish_cleanup(env, &held, &deadline));
         if let Some(message) = &self.claim.provisioning_error {
             bail!(
                 "{message}; claiming stopped and {} active run(s) were drained; inspect doctor before recovery",
@@ -6288,5 +6496,32 @@ mod tests {
         // A failure that does not pass is not tried again.
         assert!(!policy.retries(false, Duration::ZERO));
         assert!(!HeartbeatPolicy::leases(Duration::from_secs(2)).registered);
+    }
+
+    /// A heartbeat that stopped on a queue that stayed busy is told from
+    /// one the service did not answer and from any other failure, and its
+    /// record names the supervisor, how many writes failed over how long
+    /// and the last error.
+    #[test]
+    fn a_heartbeat_stopped_by_a_busy_queue_is_told_from_other_failures() {
+        assert_eq!(HeartbeatFailure::cause_of(true, false), "busy");
+        assert_eq!(HeartbeatFailure::cause_of(false, true), "unreachable");
+        assert_eq!(HeartbeatFailure::cause_of(false, false), "failed");
+        let failure = HeartbeatFailure {
+            cause: HeartbeatFailure::cause_of(true, false),
+            failures: 4,
+            secs: 27.04,
+            error: "4 heartbeat writes failed over 28.1s since the last one written: database is locked".into(),
+        };
+        assert_eq!(
+            failure.payload(&LeaseToken::new("sv")),
+            json!({
+                "supervisor": "sv",
+                "cause": "busy",
+                "failures": 4,
+                "secs": 27.0,
+                "error": "4 heartbeat writes failed over 28.1s since the last one written: database is locked",
+            })
+        );
     }
 }

@@ -1083,6 +1083,177 @@ fn a_job_end_not_taken_before_its_supervisor_ended_is_written_by_the_next() {
     );
 }
 
+/// The supervisor's calls in this double, but the end of every headless
+/// job, which the service does not take; once one was refused, the
+/// heartbeat is refused too, and a call that comes 100 ms after the first
+/// refusal or later waits 3 s and then finds the service out of reach: a
+/// slow service whose calls the end's deadline has to cut.
+struct LostAfterJobEnd {
+    inner: std::sync::Arc<dyn dagq::application::supervisor_service::ServiceCaller>,
+    refused: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    lost: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+}
+
+impl LostAfterJobEnd {
+    const SLOW: Duration = Duration::from_secs(3);
+}
+
+impl dagq::application::supervisor_service::ServiceCaller for LostAfterJobEnd {
+    fn call(
+        &self,
+        use_case: dagq::domain::queue_service::UseCase,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        use std::sync::atomic::Ordering;
+        let down = || -> anyhow::Result<serde_json::Value> {
+            Err(
+                dagq::application::supervisor_service::ServiceUnreachable::not_done(
+                    "the service is down",
+                )
+                .into(),
+            )
+        };
+        if params["op"] == "heartbeat" && self.refused.load(Ordering::SeqCst) {
+            self.lost
+                .lock()
+                .unwrap()
+                .get_or_insert_with(std::time::Instant::now);
+            anyhow::bail!("heartbeat refused by the test");
+        }
+        // From when the end's deadline is set (the heartbeat's thread sets
+        // it as it stops on the refusal).
+        let lost = *self.lost.lock().unwrap();
+        if lost.is_some_and(|at| at.elapsed() >= Duration::from_millis(100)) {
+            std::thread::sleep(Self::SLOW);
+            return down();
+        }
+        if params["op"] == "end_headless_job" {
+            self.refused.store(true, Ordering::SeqCst);
+            return down();
+        }
+        self.inner.call(use_case, params)
+    }
+    fn with_token(
+        &self,
+        file: &Path,
+    ) -> anyhow::Result<std::sync::Arc<dyn dagq::application::supervisor_service::ServiceCaller>>
+    {
+        self.inner.with_token(file)
+    }
+    fn sign_in(&self, registration: &dagq::domain::LeaseToken, pid: u32) -> anyhow::Result<()> {
+        self.inner.sign_in(registration, pid)
+    }
+    fn take_back(&self, registration: &dagq::domain::LeaseToken, pid: u32) -> anyhow::Result<()> {
+        self.inner.take_back(registration, pid)
+    }
+    fn hand_over(&self) {
+        self.inner.hand_over();
+    }
+    fn sign_out(&self) {
+        self.inner.sign_out();
+    }
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.inner.credential()
+    }
+}
+
+/// A supervisor whose heartbeat stopped while the end of its plan review's
+/// job was not taken ends within the lease's grace (shortened to 500 ms),
+/// however slow the service's answers are then: every call of its end is
+/// cut at the deadline rather than waited for (3 s each here). The job's
+/// end and why the heartbeat stopped are kept beside the queue, and the
+/// next supervisor writes them: the row ends with the job's own outcome
+/// (ADR-t3102-3 decision 5).
+#[test]
+fn a_supervisor_whose_heartbeat_stopped_keeps_a_job_end_for_the_next_within_its_grace() {
+    use dagq::application::supervisor_service::resend::HeldRecords;
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(&mut queue, "kept", &[TaskId::new(1)], Priority::Normal);
+    submit(&mut queue, &[task], None);
+    let reviewer =
+        StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "sound"})]);
+    let lost = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let wrap = {
+        let (refused, lost) = (
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            lost.clone(),
+        );
+        dagq::compose::CallerLayer(std::sync::Arc::new(move |inner| {
+            std::sync::Arc::new(LostAfterJobEnd {
+                inner,
+                refused: refused.clone(),
+                lost: lost.clone(),
+            })
+        }))
+    };
+    let options = SuperviseOptions {
+        once: false,
+        heartbeat_interval: Duration::from_millis(50),
+        lease_lost_grace: Duration::from_millis(500),
+        service_route: dagq::compose::ServiceRoute::InProcessThrough(wrap),
+        ..options(1, Duration::from_secs(3600))
+    };
+    let error = {
+        let _waiting = common::within(common::STEP_LIMIT, "the supervisor whose heartbeat stopped");
+        runtime::supervise_with_reviewer(
+            &fx.db,
+            &fx.repo,
+            &PlanWorkspace::default(),
+            &fx.claude,
+            &reviewer,
+            Path::new(env!("CARGO_BIN_EXE_dagq")),
+            &options,
+        )
+        .unwrap_err()
+    };
+    let took = lost
+        .lock()
+        .unwrap()
+        .expect("the heartbeat refused")
+        .elapsed();
+    assert!(
+        format!("{error:#}").contains("heartbeat failed"),
+        "{error:#}"
+    );
+    // The grace, not one call of 3 s, let alone the two ends' tries.
+    assert!(took < LostAfterJobEnd::SLOW, "{took:?}");
+    let kept = || -> Vec<String> {
+        dagq::infrastructure::held_records::HeldDir::of(&fx.db)
+            .kept()
+            .unwrap()
+            .iter()
+            .map(|kept| kept.params["op"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    let held = kept();
+    assert!(held.iter().any(|op| op == "end_headless_job"), "{held:?}");
+    assert!(held.iter().any(|op| op == "record_queue_event"), "{held:?}");
+    let rows = || -> Vec<(Option<i64>, Option<String>)> {
+        Connection::open(&fx.db)
+            .unwrap()
+            .prepare("SELECT ended_at, outcome FROM headless_jobs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(rows(), [(None, None)]);
+    // The next supervisor writes what was kept.
+    supervise(&fx, &PlanWorkspace::default(), &reviewer);
+    let ended = rows();
+    assert!(ended[0].0.is_some(), "{ended:?}");
+    assert_eq!(ended[0].1.as_deref(), Some("ended"));
+    assert_eq!(kept(), Vec::<String>::new());
+    let failed = queue
+        .latest_event_of(dagq::domain::EventKind::SupervisorHeartbeatFailed.as_str())
+        .unwrap()
+        .expect("why the heartbeat stopped, written by the next supervisor")
+        .payload;
+    assert_eq!(failed["cause"], "failed", "{failed}");
+}
+
 #[test]
 fn a_ready_task_the_review_reopens_leaves_the_claim_for_a_planner() {
     let fx = fixture();

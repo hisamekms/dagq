@@ -21,7 +21,9 @@ pub fn truncate_reason(text: &str) -> String {
 /// `reason`, `message` or `error`) and, for a step of the automatic or the
 /// release update, its `commit` or `release`, `version`, `stage` and
 /// `plugin` (ADR-t618-2). Paths and receipts are left out but for the
-/// directory of a throughput review's or an observation's finish.
+/// directory of a throughput review's or an observation's finish, and of a
+/// supervisor's heartbeat that stopped its `supervisor`, `cause`,
+/// `failures` and `secs`.
 /// An attention event also carries its `next`.
 pub fn compact_event(event: &RunEvent) -> Value {
     let mut value = json!({"id": event.id, "kind": event.kind});
@@ -75,6 +77,16 @@ pub fn compact_event(event: &RunEvent) -> Value {
             "path",
             "finding_id",
         ] {
+            if let Some(value) = payload.get(key) {
+                object.insert(key.into(), value.clone());
+            }
+        }
+    }
+    if event.kind == EventKind::SupervisorHeartbeatFailed {
+        // Which supervisor ended on its heartbeat, and why: a queue that
+        // stayed busy (`busy`) is told from any other failure, with how
+        // many writes failed over how long; `reason` carries its error.
+        for key in ["supervisor", "cause", "failures", "secs"] {
             if let Some(value) = payload.get(key) {
                 object.insert(key.into(), value.clone());
             }
@@ -192,7 +204,23 @@ pub fn attention(
     control: &dyn ProcessControl,
     ci_named_jobs: Option<&[String]>,
 ) -> Result<Vec<Attention>> {
-    let mut attention = supervisor_attention(&pulses(registrations, now, control));
+    let pulses = pulses(registrations, now, control);
+    // A stale supervisor shows why its heartbeat stopped, when it recorded
+    // why (a queue that stayed busy, or another failure).
+    let stale: Vec<&str> = pulses
+        .iter()
+        .filter(|pulse| pulse.stale)
+        .map(|pulse| pulse.token.as_str())
+        .collect();
+    let failures = if stale.is_empty() {
+        Vec::new()
+    } else {
+        queue.latest_events_by_supervisor(
+            &[crate::domain::event_kind::SUPERVISOR_HEARTBEAT_FAILED],
+            &stale,
+        )?
+    };
+    let mut attention = supervisor_attention_with(&pulses, &failures);
     let no_claude = registrations.iter().any(|r| {
         !crate::domain::SupervisorPulse::judge(r, control.alive(r.pid), now).stale
             && r.claude_disabled()

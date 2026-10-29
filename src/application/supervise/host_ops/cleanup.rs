@@ -1254,14 +1254,15 @@ impl HostOpsState {
     /// next one, and record what they did. After a stop, only the running
     /// job and the rest of a cleanup for room it took on remain; ordinary
     /// cleanup stops after its current worktree. With a `deadline` (a
-    /// supervisor whose owner is gone, [`super::OWNER_GONE_GRACE`]), a job
+    /// supervisor whose owner is gone, [`super::OWNER_GONE_GRACE`], or
+    /// whose heartbeat stopped, [`super::LEASE_LOST_GRACE`]), a job
     /// still running then is left, its outcomes unrecorded: a cleanup for
     /// room goes to its last candidate and may take long.
     pub(in crate::application::supervise) fn finish_cleanup(
         &mut self,
         env: &mut HostEnv<'_>,
         held: &Held,
-        deadline: Option<Instant>,
+        deadline: &super::EndBy,
     ) {
         while let Some(job) = &self.cleanup.job {
             if !super::finished_by(&job.handle, deadline, &*env.generators.clock) {

@@ -135,6 +135,9 @@ pub struct SuperviseOptions {
     /// How long a supervisor whose owner is gone may still wait before it
     /// exits ([`supervisor::OWNER_GONE_GRACE`]); tests shorten it.
     pub owner_gone_grace: Duration,
+    /// How long a supervisor whose heartbeat stopped may still wait before
+    /// it exits ([`supervisor::LEASE_LOST_GRACE`]); tests shorten it.
+    pub lease_lost_grace: Duration,
     /// Start the observer job when this long passed since the last one
     /// started or finished (ADR-0024 decision 4); zero disables the
     /// observer, the daily one included.
@@ -441,6 +444,7 @@ impl SuperviseOptions {
             stop: Arc::new(AtomicBool::new(false)),
             owner: None,
             owner_gone_grace: supervisor::OWNER_GONE_GRACE,
+            lease_lost_grace: supervisor::LEASE_LOST_GRACE,
             observe_interval: Duration::ZERO,
             observe_daily: false,
             throughput_review: false,
@@ -564,6 +568,7 @@ impl SuperviseOptions {
             passes: self.passes.clone(),
             owner: self.owner,
             owner_gone_grace: self.owner_gone_grace,
+            lease_lost_grace: self.lease_lost_grace,
         }
     }
 }
@@ -855,6 +860,17 @@ pub fn supervise_with_reviewer(
         ServiceRoute::InProcess => in_process(),
         ServiceRoute::InProcessThrough(layer) => (layer.0)(in_process()),
     };
+    // Bounded by the end's deadline of a supervisor whose heartbeat
+    // stopped, behind the holding of the records not taken; the reports of
+    // its executors' steps by the same deadline.
+    let end = Arc::new(crate::application::supervisor_service::end_bound::EndDeadline::default());
+    let service: Arc<dyn ServiceCaller> = Arc::new(
+        crate::application::supervisor_service::end_bound::EndBound::new(
+            service,
+            generators.clock.clone(),
+            end.clone(),
+        ),
+    );
     // The records of results the service does not take are held and sent
     // first on the next pass (ADR-t3102-3 decision 5), kept beside the
     // queue so the next supervisor sends what this one did not; a landing's
@@ -1024,7 +1040,14 @@ pub fn supervise_with_reviewer(
         ),
         service_access: &service_tokens,
         telemetry_tokens: &service_tokens,
-        telemetry_sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
+        telemetry_sinks: Arc::new(
+            crate::application::supervisor_service::end_bound::EndBoundSinks::new(
+                Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
+                generators.clock.clone(),
+                end.clone(),
+            ),
+        ),
+        end,
         files: options.files.as_ref().map_or_else(
             || Arc::new(LocalRunFiles) as Arc<dyn RunFiles>,
             |port| port.0.clone(),

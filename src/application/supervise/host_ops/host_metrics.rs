@@ -347,7 +347,7 @@ impl HostMetricsWatch {
     /// runs that wait.
     pub(in crate::application::supervise) fn finish(
         &mut self,
-        deadline: Option<Instant>,
+        deadline: &super::EndBy,
         clock: &dyn crate::application::Clock,
     ) {
         if let Some(job) = self.job.take() {

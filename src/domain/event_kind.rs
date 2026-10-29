@@ -464,6 +464,7 @@ event_kinds! {
     SupervisorConfigChanged => "supervisor_config_changed",
     SupervisorDraining => "supervisor_draining",
     SupervisorHandedOff => "supervisor_handed_off",
+    SupervisorHeartbeatFailed => "supervisor_heartbeat_failed",
     SupervisorHeartbeatRetried => "supervisor_heartbeat_retried",
     SupervisorAlive => "supervisor_alive",
     SupervisorStarted => "supervisor_started",
@@ -701,8 +702,10 @@ impl EventKind {
                 // begins (task 1277).
                 | SupervisorDraining
                 | SupervisorStopped
-                // A heartbeat written again after busy failures (task 1119).
+                // A heartbeat written again after busy failures (task 1119),
+                // and why one stopped, which ends its supervisor.
                 | SupervisorHeartbeatRetried
+                | SupervisorHeartbeatFailed
                 | RunEnvChanged
                 // The sccache server the supervisor started, or failed to,
                 // outside any sandbox (ADR-t1215-1).
@@ -1507,6 +1510,9 @@ pub const SLOTS_FULL_ENDED: &str = EventKind::SlotsFullEnded.as_str();
 /// A supervisor's evidence of life (`supervisor`), from its heartbeat at
 /// most every [`super::supervisor_life::SUPERVISOR_ALIVE_INTERVAL_SECS`].
 pub const SUPERVISOR_ALIVE: &str = EventKind::SupervisorAlive.as_str();
+/// Why a supervisor's heartbeat stopped, which ends the supervisor
+/// (`supervisor`, `cause`, `failures`, `secs`, `error`).
+pub const SUPERVISOR_HEARTBEAT_FAILED: &str = EventKind::SupervisorHeartbeatFailed.as_str();
 /// A supervisor's stop, recorded with the removal of its registration.
 pub const SUPERVISOR_STOPPED: &str = EventKind::SupervisorStopped.as_str();
 pub const TASK_SUBMITTED: &str = EventKind::TaskSubmitted.as_str();
@@ -2038,6 +2044,10 @@ mod tests {
             ),
             (EventKind::SupervisorDraining, "supervisor_draining"),
             (EventKind::SupervisorHandedOff, "supervisor_handed_off"),
+            (
+                EventKind::SupervisorHeartbeatFailed,
+                "supervisor_heartbeat_failed",
+            ),
             (
                 EventKind::SupervisorHeartbeatRetried,
                 "supervisor_heartbeat_retried",

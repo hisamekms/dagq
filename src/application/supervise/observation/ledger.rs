@@ -527,7 +527,7 @@ impl LedgerWatch {
     pub(in crate::application::supervise) fn finish(
         &mut self,
         env: &mut ObservationEnv<'_>,
-        deadline: Option<Instant>,
+        deadline: &super::EndBy,
     ) {
         if let Some(job) = self.job.take() {
             if super::finished_by(&job, deadline, &*env.generators.clock) {

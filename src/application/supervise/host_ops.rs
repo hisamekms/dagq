@@ -209,7 +209,7 @@ impl HostOpsState {
     /// ([`host_metrics::HostMetricsWatch::finish`]).
     pub(super) fn host_metrics_finish(
         &mut self,
-        deadline: Option<Instant>,
+        deadline: &EndBy,
         clock: &dyn crate::application::Clock,
     ) {
         self.host_metrics.finish(deadline, clock);
