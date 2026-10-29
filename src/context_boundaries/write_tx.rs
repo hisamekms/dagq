@@ -23,7 +23,8 @@
 //! `Connection` is also any name a `use` gives it with `as`, and the SQL is
 //! read as SQLite reads it (comments, and a `;` or a keyword inside a name
 //! or a value, are no statement; [`begins_transaction`]). The tokens of a
-//! macro are read for the same begins (`. name (..)` and `owner :: name`),
+//! macro are read for the same begins (`. name (..)`, `owner :: name` and
+//! `owner ::< args > :: name`),
 //! and test code is also an expression or a macro statement under a `cfg`
 //! that requires `test`.
 //!
@@ -225,8 +226,8 @@ impl Reader {
     }
 
     /// The tokens of a macro, which syn does not parse: the same begins
-    /// read from the tokens (`. name ( .. )`, `owner :: name`), in its
-    /// groups too.
+    /// read from the tokens (`. name ( .. )`, `owner :: name`,
+    /// `owner ::< args > :: name`), in its groups too.
     fn tokens(&mut self, tokens: proc_macro2::TokenStream) {
         let trees: Vec<TokenTree> = tokens.into_iter().collect();
         for (at, tree) in trees.iter().enumerate() {
@@ -266,12 +267,28 @@ impl Reader {
                     }
                 }
                 TokenTree::Ident(owner) => {
+                    // `owner ::< args > :: name` names `name` of `owner` too.
+                    let colons = matches!(
+                        (next(1), next(2)),
+                        (Some(TokenTree::Punct(a)), Some(TokenTree::Punct(b)))
+                            if a.as_char() == ':' && b.as_char() == ':'
+                    );
+                    let after = match next(3) {
+                        Some(TokenTree::Punct(open)) if colons && open.as_char() == '<' => {
+                            generic_args_end(&trees, at + 3)
+                        }
+                        _ => Some(at),
+                    };
+                    let Some(after) = after else { continue };
                     if let (
                         Some(TokenTree::Punct(a)),
                         Some(TokenTree::Punct(b)),
                         Some(TokenTree::Ident(name)),
-                    ) = (next(1), next(2), next(3))
-                        && a.as_char() == ':'
+                    ) = (
+                        trees.get(after + 1),
+                        trees.get(after + 2),
+                        trees.get(after + 3),
+                    ) && a.as_char() == ':'
                         && b.as_char() == ':'
                     {
                         self.path(&owner.to_string(), &name.to_string());
@@ -281,6 +298,31 @@ impl Reader {
             }
         }
     }
+}
+
+/// The `>` that closes the generic arguments opened by the `<` at `open`
+/// in `trees` (an arrow `->` inside closes nothing), if any.
+fn generic_args_end(trees: &[TokenTree], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, tree) in trees.iter().enumerate().skip(open) {
+        let TokenTree::Punct(p) = tree else { continue };
+        match p.as_char() {
+            '<' => depth += 1,
+            '>' if !after_arrow(trees, at) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether the `>` at `at` of `trees` ends an arrow `->`.
+fn after_arrow(trees: &[TokenTree], at: usize) -> bool {
+    at > 0 && matches!(&trees[at - 1], TokenTree::Punct(p) if p.as_char() == '-')
 }
 
 /// The last name of the type `ty` (through references and parentheses).
@@ -303,7 +345,7 @@ fn qualified_owner(before: &[TokenTree]) -> Option<String> {
     let mut names: Vec<String> = Vec::new();
     for (at, tree) in before.iter().enumerate().rev() {
         match tree {
-            TokenTree::Punct(p) if p.as_char() == '>' => depth += 1,
+            TokenTree::Punct(p) if p.as_char() == '>' && !after_arrow(before, at) => depth += 1,
             TokenTree::Punct(p) if p.as_char() == '<' && depth > 0 => depth -= 1,
             TokenTree::Punct(p) if p.as_char() == '<' => {
                 let turbofish =
@@ -515,7 +557,7 @@ mod fixtures {
 
     /// The direct begins this module forbids, one statement each, with the
     /// name its error gives it.
-    const BEGINS: [(&str, &str); 14] = [
+    const BEGINS: [(&str, &str); 19] = [
         (
             "conn.transaction_with_behavior(TransactionBehavior::Immediate)",
             ".transaction_with_behavior()",
@@ -531,6 +573,23 @@ mod fixtures {
             "Transaction::new",
         ),
         ("Tx::new_unchecked(conn, b)", "Tx::new_unchecked"),
+        (
+            "rusqlite::Transaction::<'_>::new_unchecked(conn, TransactionBehavior::Immediate)",
+            "Transaction::new_unchecked",
+        ),
+        (
+            "Transaction::<'_>::new_unchecked(conn, b)",
+            "Transaction::new_unchecked",
+        ),
+        (
+            "rusqlite::Transaction::<'_>::new(conn, b)",
+            "Transaction::new",
+        ),
+        ("Transaction::<'_>::new(conn, b)", "Transaction::new"),
+        (
+            "Tx::<'static, Option<Vec<fn() -> u8>>>::new(conn, b)",
+            "Tx::new",
+        ),
         ("C::transaction(conn)", "C::transaction"),
         (
             "<rusqlite::Transaction>::new_unchecked(conn, b)",
@@ -647,7 +706,7 @@ mod fixtures {
         let found = errors(
             &[(
                 "src/infrastructure/store.rs",
-                "fn f(tx: &WriteTx, conn: &Connection) {\n    tx.execute(\"INSERT INTO t VALUES (1)\", []);\n    conn.execute_batch(\"PRAGMA foreign_keys = ON; BEGINNING\");\n    conn.execute(\"SELECT 'BEGIN'\", []);\n    conn.execute(\"INSERT INTO t VALUES ('text;BEGIN')\", []);\n    conn.execute_batch(\"-- BEGIN\\nSELECT \\\"x;savepoint\\\" FROM t\");\n    vec![wrapper.transaction(&name), other::Thing::new(conn)];\n    let v = Vec::<Transaction>::new();\n    let w = vec![Vec::<Transaction>::new(), <Other>::new(conn), <Vec<Transaction>>::new()];\n    let o = <Other as From<Transaction>>::new(conn);\n    wrapper.transaction(&name);\n    let words = [\"BEGIN\"];\n    other::Thing::new(conn);\n}",
+                "fn f(tx: &WriteTx, conn: &Connection) {\n    tx.execute(\"INSERT INTO t VALUES (1)\", []);\n    conn.execute_batch(\"PRAGMA foreign_keys = ON; BEGINNING\");\n    conn.execute(\"SELECT 'BEGIN'\", []);\n    conn.execute(\"INSERT INTO t VALUES ('text;BEGIN')\", []);\n    conn.execute_batch(\"-- BEGIN\\nSELECT \\\"x;savepoint\\\" FROM t\");\n    vec![wrapper.transaction(&name), other::Thing::new(conn)];\n    let v = Vec::<Transaction>::new();\n    let w = vec![Vec::<Transaction>::new(), <Other>::new(conn), <Vec<Transaction>>::new()];\n    let x = vec![Vec::<Transaction<'_>>::new(), HashMap::<u8, fn() -> Transaction>::new(), Option::<Vec<Transaction>>::None];\n    assert!(a < b && HashMap::<u8, fn() -> Transaction>::new().is_empty());\n    let o = <Other as From<Transaction>>::new(conn);\n    wrapper.transaction(&name);\n    let words = [\"BEGIN\"];\n    other::Thing::new(conn);\n}",
             )],
             &[],
         );
