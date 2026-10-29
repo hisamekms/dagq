@@ -112,7 +112,24 @@ impl Telemetry {
     /// Messages to stderr only, as a process that keeps no log file has them.
     pub fn stderr() -> Self {
         Self {
-            dispatch: Dispatch::new(Registry::default().with(StderrLine { enabled: true })),
+            dispatch: Dispatch::new(Registry::default().with(StderrLine {
+                enabled: true,
+                stamped: false,
+            })),
+            path: None,
+        }
+    }
+
+    /// Messages to stderr only, a WARN or ERROR one with its time, level and
+    /// fields ([`stderr_line`]): the queue service's, whose stderr is its
+    /// `service.log`, so that a hold or a failure there is read against
+    /// the times of other records.
+    pub fn stamped_stderr() -> Self {
+        Self {
+            dispatch: Dispatch::new(Registry::default().with(StderrLine {
+                enabled: true,
+                stamped: true,
+            })),
             path: None,
         }
     }
@@ -123,7 +140,10 @@ impl Telemetry {
             .with(JsonLines {
                 writer: Mutex::new(writer),
             })
-            .with(StderrLine { enabled: stderr });
+            .with(StderrLine {
+                enabled: stderr,
+                stamped: false,
+            });
         Self {
             dispatch: Dispatch::new(subscriber),
             path,
@@ -365,9 +385,11 @@ where
     }
 }
 
-/// The event's message on one stderr line, as the runtime always printed it.
+/// The event's message on one stderr line, as the runtime always printed it;
+/// when `stamped`, a WARN or ERROR one as [`stderr_line`] puts it.
 struct StderrLine {
     enabled: bool,
+    stamped: bool,
 }
 
 impl<S: Subscriber> Layer<S> for StderrLine {
@@ -377,12 +399,37 @@ impl<S: Subscriber> Layer<S> for StderrLine {
         }
         let mut fields = Fields::default();
         event.record(&mut fields);
-        let _ = writeln!(
-            io::stderr().lock(),
-            "{}",
-            fields.message.unwrap_or_default()
+        let line = stderr_line(
+            self.stamped,
+            SystemTime::now(),
+            *event.metadata().level(),
+            fields.message.unwrap_or_default(),
+            &fields.map,
         );
+        let _ = writeln!(io::stderr().lock(), "{line}");
     }
+}
+
+/// The stderr line of an event at `at`: its message alone, or, when
+/// `stamped` and it is a WARN or ERROR, `<timestamp> <LEVEL> <message>`
+/// followed by its own fields as one JSON object when it has any
+/// (`2026-09-24T01:02:03.456Z WARN queue write lock held long {"held_ms":2500}`).
+fn stderr_line(
+    stamped: bool,
+    at: SystemTime,
+    level: tracing::Level,
+    message: String,
+    fields: &Map<String, Value>,
+) -> String {
+    if !stamped || level > tracing::Level::WARN {
+        return message;
+    }
+    let mut line = format!("{} {level} {message}", timestamp(at));
+    if !fields.is_empty() {
+        line.push(' ');
+        line.push_str(&Value::Object(fields.clone()).to_string());
+    }
+    line
 }
 
 /// Collects an event's or span's fields as JSON, the message apart.
@@ -471,6 +518,34 @@ fn civil(secs: u64) -> (String, String) {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// The queue service's stderr (its `service.log`) stamps a WARN and an
+    /// ERROR with their time and level, and keeps their fields; an INFO, and
+    /// every line of another process, is its message alone.
+    #[test]
+    fn a_stamped_warn_line_has_its_time_level_and_fields() {
+        let at = UNIX_EPOCH + Duration::from_millis(1_790_000_000_123);
+        let mut fields = Map::new();
+        fields.insert("transaction".to_owned(), json!("ledger_row_over"));
+        fields.insert("held_ms".to_owned(), json!(2500));
+        let line = |stamped, level| stderr_line(stamped, at, level, "held".to_owned(), &fields);
+        assert_eq!(
+            line(true, tracing::Level::WARN),
+            r#"2026-09-21T14:13:20.123Z WARN held {"held_ms":2500,"transaction":"ledger_row_over"}"#
+        );
+        assert_eq!(
+            stderr_line(
+                true,
+                at,
+                tracing::Level::ERROR,
+                "gone".to_owned(),
+                &Map::new()
+            ),
+            "2026-09-21T14:13:20.123Z ERROR gone"
+        );
+        assert_eq!(line(true, tracing::Level::INFO), "held");
+        assert_eq!(line(false, tracing::Level::WARN), "held");
+    }
 
     #[test]
     fn a_record_is_one_json_line_even_when_its_message_has_newlines() {

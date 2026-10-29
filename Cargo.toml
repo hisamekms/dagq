@@ -22,7 +22,7 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 getrandom = "0.4"
 libc = "0.2"
-rusqlite = { version = "0.40", features = ["backup", "bundled", "functions", "hooks"] }
+rusqlite = { version = "0.40", features = ["backup", "bundled", "functions", "hooks", "modern_sqlite"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 sha2 = "0.10"

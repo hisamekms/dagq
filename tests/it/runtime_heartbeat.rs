@@ -8,7 +8,7 @@ use dagq::application::{NodeSampleStore, Queue, QueueOpener};
 use dagq::domain::host_metrics::{HOST_NODE, HostSample};
 use dagq::domain::{EventKind, LeaseToken};
 use dagq::infrastructure::sqlite::{SqliteQueue, WriteTx};
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -369,28 +369,40 @@ fn an_import_that_waited_for_the_lock_past_the_threshold_is_not_named() {
 }
 
 /// Over a real connection and clock, a [`WriteTx`] past a threshold of
-/// none is named once it ran a write statement, one that changed no row
-/// included: a deferred one from its first write, an immediate one from
-/// its `BEGIN`. One that only read is not, deferred or immediate, committed
-/// or rolled back.
+/// none is named once it held the write lock, whatever wrote: an immediate
+/// one from its `BEGIN`, one that only read included, and a deferred one
+/// once a write statement took the lock, through [`WriteTx::execute`] or
+/// only through the transaction it derefs to, one that changed no row
+/// included, committed or rolled back. A deferred one that only read is
+/// not.
 #[test]
-fn a_write_tx_is_named_once_it_wrote_and_not_when_it_only_read() {
+fn a_write_tx_is_named_once_it_held_the_lock_and_not_when_it_only_read() {
     let _test = common::test();
     let holds = LongHolds::default();
     let _subscriber =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(holds.clone()));
     let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch("CREATE TABLE t(x)").unwrap();
+    conn.execute_batch("CREATE TABLE t(x UNIQUE); INSERT INTO t VALUES (0)")
+        .unwrap();
     let read = |tx: &WriteTx<'_>| {
         let _: i64 = tx
             .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
             .unwrap();
+    };
+    // A write through the transaction the WriteTx derefs to, as
+    // `write_ledger_row_over` writes: it reports nothing to the WriteTx.
+    let deref_write = |tx: &WriteTx<'_>, sql: &str| {
+        let tx: &Transaction<'_> = tx;
+        tx.execute(sql, []).unwrap()
     };
     let begin = |name, behavior| WriteTx::begin(&conn, name, behavior, Duration::ZERO).unwrap();
 
     let tx = begin("deferred_read", TransactionBehavior::Deferred);
     read(&tx);
     tx.commit().unwrap();
+    let tx = begin("deferred_read_dropped", TransactionBehavior::Deferred);
+    read(&tx);
+    drop(tx);
     let tx = begin("immediate_read", TransactionBehavior::Immediate);
     read(&tx);
     drop(tx);
@@ -399,18 +411,170 @@ fn a_write_tx_is_named_once_it_wrote_and_not_when_it_only_read() {
     assert_eq!(tx.execute("INSERT INTO t VALUES (1),(2)", []).unwrap(), 2);
     tx.execute("INSERT INTO t VALUES (3)", []).unwrap();
     tx.commit().unwrap();
-    let tx = begin("immediate_unchanged", TransactionBehavior::Immediate);
-    assert_eq!(tx.execute("DELETE FROM t WHERE x = 9", []).unwrap(), 0);
+    let tx = begin("deferred_update_none", TransactionBehavior::Deferred);
+    read(&tx);
+    assert_eq!(deref_write(&tx, "UPDATE t SET x = 10 WHERE x = 9"), 0);
+    tx.commit().unwrap();
+    let tx = begin("deferred_delete_none", TransactionBehavior::Deferred);
+    assert_eq!(deref_write(&tx, "DELETE FROM t WHERE x = 9"), 0);
     drop(tx);
+    let tx = begin("deferred_insert_nothing", TransactionBehavior::Deferred);
+    assert_eq!(
+        deref_write(&tx, "INSERT INTO t VALUES (0) ON CONFLICT DO NOTHING"),
+        0
+    );
+    tx.commit().unwrap();
 
-    for name in ["deferred_read", "immediate_read"] {
+    for name in ["deferred_read", "deferred_read_dropped"] {
         assert!(holds.named(name).is_empty(), "{name}: {:?}", holds.0);
     }
-    for name in ["deferred_write", "immediate_unchanged"] {
+    for name in [
+        "immediate_read",
+        "deferred_write",
+        "deferred_update_none",
+        "deferred_delete_none",
+        "deferred_insert_nothing",
+    ] {
         assert_eq!(holds.named(name).len(), 1, "{name}: {:?}", holds.0);
     }
     let count: i64 = conn
         .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(count, 3);
+    assert_eq!(count, 4);
+}
+
+/// A deferred transaction whose lock a write through the transaction it
+/// derefs to took (one that changed no row) and that held it past a
+/// threshold before a write through [`WriteTx::execute`] is named, ended by
+/// its commit or by a drop: the later write does not move its lock time
+/// past the hold.
+#[test]
+fn a_deferred_hold_taken_through_the_deref_is_named_after_a_later_counted_write() {
+    let _test = common::test();
+    let holds = LongHolds::default();
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(holds.clone()));
+    let threshold = Duration::from_millis(100);
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE t(x)").unwrap();
+    let hold = |name| {
+        let tx = WriteTx::begin(&conn, name, TransactionBehavior::Deferred, threshold).unwrap();
+        let deref: &Transaction<'_> = &tx;
+        assert_eq!(
+            deref.execute("UPDATE t SET x = 1 WHERE x = 9", []).unwrap(),
+            0
+        );
+        thread::sleep(threshold * 3);
+        assert_eq!(tx.execute("DELETE FROM t WHERE x = 9", []).unwrap(), 0);
+        tx
+    };
+    hold("committed").commit().unwrap();
+    drop(hold("dropped"));
+    for name in ["committed", "dropped"] {
+        let held = holds.named(name);
+        assert_eq!(held.len(), 1, "{name}: {:?}", holds.0);
+        assert!(
+            held[0] >= u64::try_from((threshold * 3).as_millis()).unwrap(),
+            "{name}: {held:?}"
+        );
+    }
+}
+
+/// The `queue_write_held_long` events of the queue at `db`, as payloads.
+fn held_long(db: &Path) -> Vec<serde_json::Value> {
+    let conn = Connection::open(db).unwrap();
+    let mut statement = conn
+        .prepare("SELECT payload FROM run_events WHERE kind = 'queue_write_held_long' ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|payload| serde_json::from_str(&payload.unwrap()).unwrap())
+        .collect()
+}
+
+/// A deferred transaction of a queue that changed no row through the
+/// transaction it derefs to, past the threshold, is recorded as
+/// `queue_write_held_long` with its name, hold, role and pid after its
+/// commit and after its rollback; one that only read, and one within the
+/// threshold, are not.
+#[test]
+fn a_queue_s_deferred_hold_with_no_row_changed_is_recorded_as_an_event() {
+    let _test = common::test();
+    let (_dir, db, _queue) = registered();
+    let queue = SqliteQueue::open(&db)
+        .unwrap()
+        .with_write_hold_warn(Duration::ZERO);
+    let deref_write = |tx: &WriteTx<'_>, sql: &str| {
+        let tx: &Transaction<'_> = tx;
+        tx.execute(sql, []).unwrap()
+    };
+    let tx = queue
+        .write_tx("update_none", TransactionBehavior::Deferred)
+        .unwrap();
+    assert_eq!(
+        deref_write(&tx, "UPDATE tasks SET title = title WHERE id = -1"),
+        0
+    );
+    tx.commit().unwrap();
+    let tx = queue
+        .write_tx("delete_none", TransactionBehavior::Deferred)
+        .unwrap();
+    assert_eq!(deref_write(&tx, "DELETE FROM tasks WHERE id = -1"), 0);
+    drop(tx);
+    let tx = queue
+        .write_tx("read_only", TransactionBehavior::Deferred)
+        .unwrap();
+    let _: i64 = tx
+        .query_row("SELECT count(*) FROM tasks", [], |r| r.get(0))
+        .unwrap();
+    tx.commit().unwrap();
+    // The same write within the default threshold.
+    let quiet = SqliteQueue::open(&db).unwrap();
+    let tx = quiet
+        .write_tx("within", TransactionBehavior::Deferred)
+        .unwrap();
+    deref_write(&tx, "DELETE FROM tasks WHERE id = -1");
+    tx.commit().unwrap();
+
+    let recorded = held_long(&db);
+    let names: Vec<&str> = recorded
+        .iter()
+        .map(|payload| payload["transaction"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["update_none", "delete_none"]);
+    for payload in &recorded {
+        assert!(payload["held_ms"].is_u64(), "{payload}");
+        assert!(payload["before_lock_ms"].is_u64(), "{payload}");
+        assert_eq!(payload["role"], "user", "{payload}");
+        assert_eq!(payload["pid"], std::process::id(), "{payload}");
+    }
+}
+
+/// A long hold whose record fails (a connection with no queue's events)
+/// warns of the failure and leaves the transaction's result as it was:
+/// its commit returns and what it wrote stays.
+#[test]
+fn a_failed_record_of_a_long_hold_leaves_the_transaction_as_it_was() {
+    let _test = common::test();
+    let holds = LongHolds::default();
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(holds.clone()));
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE t(x)").unwrap();
+    let tx = WriteTx::begin(
+        &conn,
+        "unrecorded",
+        TransactionBehavior::Immediate,
+        Duration::ZERO,
+    )
+    .unwrap()
+    .recorded();
+    tx.execute("INSERT INTO t VALUES (1)", []).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(holds.named("unrecorded").len(), 1, "{:?}", holds.0);
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
 }

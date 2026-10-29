@@ -21,6 +21,7 @@ use dagq::domain::marks::utc_text;
 use dagq::domain::stats::Cursor;
 use dagq::domain::{EventId, RunEvent, RunId, TaskId};
 use dagq::infrastructure::sqlite::SqliteQueue;
+use dagq::infrastructure::telemetry::Telemetry;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -219,6 +220,46 @@ fn a_write_over_a_row_another_process_wrote_since_its_read_writes_nothing() {
     );
     let now = other.ledger_row(LedgerKind::Run, RUN).unwrap().unwrap();
     assert_eq!(now.inputs_through.events, EventId::new(2));
+}
+
+/// A write over a row that held the lock past the threshold (lowered to
+/// none) through the transaction its immediate `WriteTx` derefs to is
+/// warned of and recorded as `queue_write_held_long`, with the
+/// transaction's name, its hold and the process's role and pid.
+#[test]
+fn a_write_over_a_row_that_held_the_lock_long_is_warned_and_recorded() {
+    let (_dir, queue) = fixture();
+    let queue = queue.with_write_hold_warn(Duration::ZERO);
+    let row = ledger::run_row(
+        RUN,
+        &[event(1, true, "run_claimed", json!({}), 0)],
+        &[],
+        0,
+        BUILT,
+    );
+    let (telemetry, captured) = Telemetry::capture();
+    let written = telemetry.in_scope(|| queue.write_ledger_row_over(&row, None).unwrap());
+    assert_eq!(written, Some(true));
+    let warned: Vec<Value> = captured
+        .records()
+        .into_iter()
+        .filter(|record| record["message"] == "queue write lock held long")
+        .collect();
+    assert_eq!(warned.len(), 1, "{}", captured.text());
+    let fields = &warned[0]["fields"];
+    assert_eq!(fields["transaction"], "ledger_row_over", "{fields}");
+    assert!(fields["held_ms"].is_u64(), "{fields}");
+    assert_eq!(fields["role"], "user", "{fields}");
+    assert_eq!(fields["pid"], std::process::id(), "{fields}");
+    let recorded = queue
+        .latest_event_of("queue_write_held_long")
+        .unwrap()
+        .expect("the long hold is recorded");
+    assert_eq!(recorded.payload["transaction"], "ledger_row_over");
+    assert_eq!(recorded.payload["held_ms"], fields["held_ms"]);
+    assert_eq!(recorded.payload["role"], "user");
+    assert_eq!(recorded.payload["pid"], std::process::id());
+    assert_eq!(recorded.task_id, None);
 }
 
 /// A legacy run's stored row keeps the values `stats` gave it once, while

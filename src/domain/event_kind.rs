@@ -53,7 +53,8 @@
 //!   `report_written`, `throughput_review_*`, `candidates_sampled`, the
 //!   CI watch's `ci_*` and the record of main's history `main_*`.
 //! - host operation: `supervisor_*`, `update_*`, `release_check*`,
-//!   `queue_service_*`, `queue_broker_*`, `container_image_*`, `sccache_*`, `inbox_*`, the cleanup's
+//!   `queue_service_*`, `queue_broker_*`, `queue_write_held_long` (named in
+//!   full), `container_image_*`, `sccache_*`, `inbox_*`, the cleanup's
 //!   `build_outputs_removed`, `incremental_sessions_removed`,
 //!   `build_cache_removed`, `scratchpad_removed` and `run_tmp_removed`,
 //!   `backend_call_failed`, `headless_job_stopped` and
@@ -336,6 +337,7 @@ event_kinds! {
     QueueServiceStopRequested => "queue_service_stop_requested",
     QueueServiceStopped => "queue_service_stopped",
     QueueServiceUnauthenticated => "queue_service_unauthenticated",
+    QueueWriteHeldLong => "queue_write_held_long",
     ReceiptObserved => "receipt_observed",
     RecoveryFailed => "recovery_failed",
     RecoveryFinished => "recovery_finished",
@@ -820,6 +822,9 @@ impl EventKind {
                 | QueueRelayDown
                 | QueueRelayRunning
                 | QueueRelayStarted
+                // A write transaction of any process that held the queue's
+                // write lock long (`QUEUE_WRITE_HELD_LONG`).
+                | QueueWriteHeldLong
         )
     }
 }
@@ -1210,6 +1215,19 @@ pub const PUSH_FAILED: &str = EventKind::PushFailed.as_str();
 pub const PUSH_FINISHED: &str = EventKind::PushFinished.as_str();
 pub const PUSH_SKIPPED: &str = EventKind::PushSkipped.as_str();
 pub const QUEUE_HOLD_APPLIED: &str = EventKind::QueueHoldApplied.as_str();
+/// A named write transaction (`infrastructure::sqlite::WriteTx`) held the
+/// queue's write lock past `WRITE_HOLD_WARN`, recorded after its commit or
+/// rollback in a write of its own on the connection it ran on, so a reader
+/// names the writer another connection waited for. `transaction`: its
+/// name. `held_ms`: from having the lock (or, when that time is not known,
+/// its `BEGIN`) to the end of its commit or rollback. `before_lock_ms`:
+/// from its `BEGIN` to having the lock (the wait for another writer, and a
+/// deferred one's reads before its first write). `rows`: the rows its
+/// counted write statements changed. `role`: the role of the actor the
+/// process acts as (`supervisor`, `user` for the queue service and a
+/// person's CLI). `command`: the command the process runs (`supervise`,
+/// `service serve`), null when none was set. `pid`: the process's.
+pub const QUEUE_WRITE_HELD_LONG: &str = EventKind::QueueWriteHeldLong.as_str();
 pub const RECEIPT_OBSERVED: &str = EventKind::ReceiptObserved.as_str();
 /// A provider the workers could not use is held (ADR-t813-2 decision 6):
 /// a queue event with `provider`, `reason` (`authentication`,
@@ -1850,6 +1868,7 @@ mod tests {
                 "queue_service_stop_requested",
             ),
             (EventKind::QueueServiceStopped, "queue_service_stopped"),
+            (EventKind::QueueWriteHeldLong, "queue_write_held_long"),
             (
                 EventKind::QueueServiceUnauthenticated,
                 "queue_service_unauthenticated",

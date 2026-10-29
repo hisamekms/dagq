@@ -234,9 +234,10 @@ out_of_scopeの判断が名指した所属先の受け入れ条件の項目は�
   ロックの待ちは`QUEUE_BUSY_TIMEOUT`までで、超えればerrorを返す。
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#起動とheartbeat)）。
 - どのwriterがlockを握ったかは、名前付きのwrite transactionの包み`WriteTx`（`infrastructure::sqlite`）が観測する。
-  背景のjobの主な書き込み（ledgerのnode行のretention・hostのCSVの取り込み・forecastのsnapshotなど）はこれを通り、閾値を超えてlockを握ったら名前と保持時間をwarnに出す。
-  保持時間はwrite lockを得てからcommit / rollbackが返るまでで、他のwriterの待ちとlockを得る前の読み取り（遅延のtransactionの最初の書き込みの前）を含めず、書き込みの無いtransactionは持たない。
-  遅延のtransactionがlockを得た時点の近似は`WriteTxTimes`のdoc commentが持つ。
+  背景のjobの主な書き込みが通り、閾値を超えてwrite lockを握ればwarnし、queueのevent（`queue_write_held_long`）に記録する。
+  握ったかは書き込みの経路と行数によらず、`BEGIN IMMEDIATE`は`BEGIN`から、遅延のものは終わる直前のtransactionの状態で見る（readなら握らない）。
+  保持時間と近似は`WriteTxTimes`、欄は`QUEUE_WRITE_HELD_LONG`のdoc commentが持つ。
+  eventはlockを放した後に同じ接続で別に短く書き、その失敗は元のtransactionを変えない。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
   taskをcompletedかcanceledにするトランザクションは、開いたholdの行を閉じて`task_hold_ended`を書き、holdが残した結果を捨てる（`task_holds::end_with_task`）。

@@ -33,6 +33,24 @@ pub fn process_actor() -> ActorContext {
         .unwrap_or_else(ActorContext::user)
 }
 
+static PROCESS_COMMAND: OnceLock<String> = OnceLock::new();
+
+/// The command this process runs (`supervise`, `service serve`, `list`),
+/// which tells apart processes of one actor (the queue service and a
+/// person's CLI are both the user); only the first call counts.
+pub fn set_process_command(command: String) {
+    let _ = PROCESS_COMMAND.set(command);
+}
+
+/// The command [`set_process_command`] set; `None` in a process that set
+/// none or an empty one (a test, arguments that did not parse).
+pub fn process_command() -> Option<&'static str> {
+    PROCESS_COMMAND
+        .get()
+        .map(String::as_str)
+        .filter(|command| !command.is_empty())
+}
+
 #[derive(Debug, Clone)]
 struct State {
     actor: ActorContext,

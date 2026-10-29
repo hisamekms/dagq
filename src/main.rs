@@ -5821,12 +5821,30 @@ fn session_wrapper(cli: Cli) -> Result<Value> {
     }
 }
 
+/// The subcommands `arguments` name, joined by a space (`service serve`),
+/// empty for arguments that do not parse: the command this process runs.
+fn command_path(arguments: &[OsString]) -> String {
+    use clap::CommandFactory;
+    let Ok(matches) = Cli::command().try_get_matches_from(arguments) else {
+        return String::new();
+    };
+    let mut names = Vec::new();
+    let mut current = matches.subcommand();
+    while let Some((name, sub)) = current {
+        names.push(name);
+        current = sub.subcommand();
+    }
+    names.join(" ")
+}
+
 /// The subscriber of this process's progress and diagnostic events
 /// (ADR-0033): the long-running and landing processes (`supervise`,
 /// `integrate`, `observe` and the session wrapper) and `up`, `down` and
 /// `rebind` (on a queue that exists) keep a JSON Lines file in the
-/// queue's `logs/` (a supervisor's `--log-dir` if given); every other
-/// command prints its messages on stderr only.
+/// queue's `logs/` (a supervisor's `--log-dir` if given); the queue
+/// service, whose stderr is its `service.log`, prints its WARN and ERROR
+/// lines with their time, level and fields; every other command prints its
+/// messages on stderr only.
 fn install_telemetry(command: &Command, location: &QueueLocation) {
     use dagq::infrastructure::telemetry::Telemetry;
     let file = match command {
@@ -5859,6 +5877,15 @@ fn install_telemetry(command: &Command, location: &QueueLocation) {
     };
     let telemetry = match file {
         Some((process, dir)) => Telemetry::open(&dir, process),
+        None if matches!(
+            command,
+            Command::Service {
+                command: ServiceCommand::Serve { .. }
+            }
+        ) =>
+        {
+            Telemetry::stamped_stderr()
+        }
         None => Telemetry::stderr(),
     };
     telemetry.install();
@@ -5976,6 +6003,7 @@ fn takes_option(binary: &str, option: &str) -> bool {
 /// registration back and supervises on, so the one asking sees the version
 /// it did not ask for.
 fn run(mut arguments: Vec<OsString>) -> Result<Value> {
+    dagq::infrastructure::event_actor::set_process_command(command_path(&arguments));
     loop {
         let value = execute(Cli::parse_from(&arguments))?;
         if value["outcome"] != "handoff" {
@@ -6272,6 +6300,33 @@ fn job_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The command a process runs, as its long holds of the queue record
+    /// it: its subcommands, past the global options.
+    #[test]
+    fn the_command_path_names_the_subcommands() {
+        // Clap's parser of every command needs more than a test thread's
+        // stack, as `main` gives it; the test waits for it a minute at most.
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let path = |argv: &[&str]| {
+                    command_path(&argv.iter().map(OsString::from).collect::<Vec<_>>())
+                };
+                assert_eq!(
+                    path(&["dagq", "--db", "q.db", "service", "status"]),
+                    "service status"
+                );
+                assert_eq!(path(&["dagq", "list"]), "list");
+                assert_eq!(path(&["dagq", "no-such-command"]), "");
+                done.send(()).unwrap();
+            })
+            .unwrap();
+        finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the command paths are read, without a panic, within a minute");
+    }
 
     #[test]
     fn observer_interval_defaults_to_three_hours() {
