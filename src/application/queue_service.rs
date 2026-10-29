@@ -238,6 +238,11 @@ pub trait ServiceBackend: Send + Sync {
     /// The process `pid` as a session is read (its start), `None` when
     /// that cannot be read.
     fn process_of(&self, pid: u32) -> Option<crate::domain::queue_service::SessionProcess>;
+    /// The executable process `pid` runs, `None` when that cannot be read
+    /// (refused wherever it is needed).
+    fn executable_of(&self, _pid: u32) -> Option<std::path::PathBuf> {
+        None
+    }
     /// Whether the process on `pid`, which had started by `by` (unix
     /// seconds), is known to have ended: its pid is gone, or a process that
     /// started after then is on it
@@ -2399,15 +2404,20 @@ pub fn host_status(source: &dyn ServiceStatusSource) -> Value {
     unreached_view(&probe, source.recorded_outage().as_ref())
 }
 
-/// `dagq service start`: [`ensure`] the service with `control`, recorded
-/// in `log` as `queue_service_started` (`by: service start`) unless one of
-/// this build already answered.
+/// `dagq service start`: [`ensure`] the service with `control`, then open
+/// the queue `log` opens on it, whether the service was started or one of
+/// this build already answered: its first step is where the service
+/// authenticates the caller, authorizes it (`service.lifecycle`) and checks
+/// the repository's binding, so a caller it refuses is refused on a reused
+/// service too. Recorded as `queue_service_started` (`by: service start`)
+/// when it started one. Nothing is opened before the service answers.
 pub fn start_by_hand(
-    log: &dyn super::RunLog,
+    log: &dyn super::QueueOpener<dyn super::RunLog + Send>,
     control: &dyn QueueServiceControl,
     timeout: Duration,
 ) -> Result<Value> {
     let report = ensure(control, timeout)?;
+    let log = log.open()?;
     if report["outcome"] != "reused" {
         log.record_queue_event(
             EventKind::QueueServiceStarted,
@@ -2425,24 +2435,72 @@ pub fn start_by_hand(
     Ok(report)
 }
 
+/// What sending the record of a service's stop, before it stops, came to:
+/// `opened`, the caller's queue on that service, and `record`, the record
+/// on it. A caller the service refuses on the queue's first step (its
+/// authentication, its authorization, the repository's binding, all looked
+/// at before anything is done) is the error, and nothing is to be stopped,
+/// so that only a principal the service takes stops it. A service out of
+/// reach ([`unreachable`](super::supervisor_service::unreachable)), or one
+/// that took the caller and failed to write the record, is stopped all the
+/// same: `Ok(Some(why))`, warned of. `Ok(None)` when it took the record.
+pub fn stop_record<L: ?Sized>(
+    opened: Result<Box<L>>,
+    record: impl FnOnce(&L) -> Result<()>,
+) -> Result<Option<String>> {
+    let warned = |error: anyhow::Error| {
+        warn!(error = %format_args!("{error:#}"), "the queue service's stop could not be recorded: {error:#}");
+        format!("{error:#}")
+    };
+    match opened {
+        Ok(log) => Ok(record(&*log).err().map(warned)),
+        Err(error) if super::supervisor_service::unreachable(&error) => Ok(Some(warned(error))),
+        Err(error) => Err(error
+            .context("the queue service refused the caller of its stop, so it was not stopped")),
+    }
+}
+
+/// `queue_service_stopped` of the service `found` with `by`, recorded on
+/// the queue `log` opens before that service stops, since the record goes
+/// to it, as [`stop_record`] judges it; the queue is opened neither before
+/// nor after.
+pub fn record_stop(
+    log: &dyn super::QueueOpener<dyn super::RunLog + Send>,
+    found: &ServiceProbe,
+    by: &str,
+) -> Result<Option<String>> {
+    stop_record(log.open(), |log| {
+        log.record_queue_event(
+            EventKind::QueueServiceStopped,
+            json!({"pid": found.pid, "by": by}),
+        )
+        .map(drop)
+    })
+}
+
 /// `dagq service stop`: stop the queue's service with `control`, recorded
-/// in `log` as `queue_service_stopped` (`by: service stop`) when one ran. A
-/// supervisor at work starts it again at its next look.
+/// as `queue_service_stopped` (`by: service stop`) before it stops when one
+/// runs ([`record_stop`]): a refused record stops nothing. A supervisor at
+/// work starts it again at its next look.
 pub fn stop_by_hand(
-    log: &dyn super::RunLog,
+    log: &dyn super::QueueOpener<dyn super::RunLog + Send>,
     control: &dyn QueueServiceControl,
     timeout: Duration,
 ) -> Result<Value> {
-    Ok(match control.stop(timeout)? {
-        Some(pid) => {
-            log.record_queue_event(
-                EventKind::QueueServiceStopped,
-                json!({"pid": pid, "by": "service stop"}),
-            )?;
-            json!({"outcome": "stopped", "pid": pid})
-        }
+    let found = control.probe();
+    let unrecorded = if found.state == ServiceState::Stopped {
+        None
+    } else {
+        record_stop(log, &found, "service stop")?
+    };
+    let mut report = match control.stop(timeout)? {
+        Some(pid) => json!({"outcome": "stopped", "pid": pid}),
         None => json!({"outcome": "not_running"}),
-    })
+    };
+    if let Some(error) = unrecorded {
+        report["unrecorded"] = json!(error);
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -2453,6 +2511,33 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
+
+    #[test]
+    fn a_stop_s_record_out_of_reach_or_failed_stops_it_and_a_refused_caller_does_not() {
+        let unreachable = || {
+            anyhow::Error::new(super::super::supervisor_service::ServiceUnreachable {
+                reason: "no socket".into(),
+                maybe_done: false,
+            })
+            .context("send the step")
+        };
+        let taken = |_: &()| Ok(());
+        assert_eq!(stop_record(Ok(Box::new(())), taken).unwrap(), None);
+        // The service took the caller but did not write the record.
+        let failed = stop_record(Ok(Box::new(())), |_: &()| {
+            Err(anyhow!("database or disk is full"))
+        });
+        assert!(failed.unwrap().is_some());
+        assert!(
+            stop_record::<()>(Err(unreachable()), taken)
+                .unwrap()
+                .is_some()
+        );
+        let refused = anyhow!("authorization_denied: worker may not service.lifecycle");
+        let error = format!("{:#}", stop_record::<()>(Err(refused), taken).unwrap_err());
+        assert!(error.contains("not stopped"), "{error}");
+        assert!(error.contains("authorization_denied"), "{error}");
+    }
     use crate::domain::Answerer;
     use crate::domain::queue_service::SessionProcess;
 

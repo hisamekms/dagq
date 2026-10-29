@@ -86,7 +86,7 @@ fn up_starts_with_the_removed_brokers_tables_left_in_place() {
     fixture.environment.path = format!("{}:/nonexistent", bin.display());
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = dagq::compose::OneShot::system()
+    let report = one_shot()
         .up(
             &fixture.location,
             &fixture.repo,
@@ -292,15 +292,16 @@ fn up_fails_when_the_started_supervisor_never_registers() {
     launchd.registers_on_install = false;
     let mut options = fixture.options.clone();
     options.startup_timeout = Duration::from_millis(100);
-    let error = lifecycle::up(
-        &fixture.location,
-        &fixture.repo,
-        &launchd,
-        &FakeProcesses::default(),
-        &fixture.environment,
-        &options,
-    )
-    .unwrap_err();
+    let error = one_shot()
+        .up(
+            &fixture.location,
+            &fixture.repo,
+            &launchd,
+            &FakeProcesses::default(),
+            &fixture.environment,
+            &options,
+        )
+        .unwrap_err();
     let message = format!("{error:#}");
     assert!(message.contains("did not register within 0s"), "{message}");
     assert!(message.contains("launchd.log"), "{message}");
@@ -937,15 +938,16 @@ fn up_and_down_record_what_they_did_through_tracing() {
         let report = down(&fixture, &launchd, &processes, false, false);
         let mut options = fixture.options.clone();
         options.claude = fixture._dir.path().join("missing-claude");
-        lifecycle::up(
-            &fixture.location,
-            &fixture.repo,
-            &launchd,
-            &processes,
-            &fixture.environment,
-            &options,
-        )
-        .unwrap_err();
+        one_shot()
+            .up(
+                &fixture.location,
+                &fixture.repo,
+                &launchd,
+                &processes,
+                &fixture.environment,
+                &options,
+            )
+            .unwrap_err();
         (first, report)
     });
     let records: Vec<Value> = captured
@@ -989,27 +991,29 @@ fn up_requires_claude_and_an_initialized_queue_but_no_cmux() {
     let processes = FakeProcesses::default();
     let mut options = fixture.options.clone();
     options.claude = fixture._dir.path().join("missing-claude");
-    let error = lifecycle::up(
-        &fixture.location,
-        &fixture.repo,
-        &launchd,
-        &processes,
-        &fixture.environment,
-        &options,
-    )
-    .unwrap_err();
+    let error = one_shot()
+        .up(
+            &fixture.location,
+            &fixture.repo,
+            &launchd,
+            &processes,
+            &fixture.environment,
+            &options,
+        )
+        .unwrap_err();
     assert!(format!("{error:#}").contains("missing-claude"), "{error:#}");
     let uninitialized =
         QueueLocation::explicit_in(&fixture._dir.path().join("nowhere.db"), fixture._dir.path());
-    let error = lifecycle::up(
-        &uninitialized,
-        &fixture.repo,
-        &launchd,
-        &processes,
-        &fixture.environment,
-        &fixture.options,
-    )
-    .unwrap_err();
+    let error = one_shot()
+        .up(
+            &uninitialized,
+            &fixture.repo,
+            &launchd,
+            &processes,
+            &fixture.environment,
+            &fixture.options,
+        )
+        .unwrap_err();
     assert!(format!("{error:#}").contains("queue must already be initialized"));
     assert!(launchd.installs.lock().unwrap().is_empty());
 

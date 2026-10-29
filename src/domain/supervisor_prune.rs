@@ -18,21 +18,30 @@ pub fn heartbeat_expired(registration: &SupervisorRegistration, now: i64) -> boo
 
 /// Whether the pid of a registration that stopped heartbeating now belongs
 /// to another process (task 330): the supervisor died without removing its
-/// row and the system gave its pid to a process of another user (absent
-/// from `listed`, this user's processes), or to one of this user's that
-/// started after the registration, which the process that registered
-/// cannot be (an exec keeps the start). Such a row is as dead as one whose
-/// pid runs nothing, while an alive-but-silent supervisor, which started
-/// before its registration, is kept. When the processes could not be
-/// listed (`listed` none), nothing is taken over.
+/// row and the system gave its pid to another process ([`pid_reused`]).
+/// Such a row is as dead as one whose pid runs nothing, while an
+/// alive-but-silent supervisor, which started before its registration, is
+/// kept. When the processes could not be listed (`listed` none), nothing is
+/// taken over.
 pub fn pid_taken_over(
     registration: &SupervisorRegistration,
     now: i64,
     listed: Option<&[ProcessInfo]>,
 ) -> bool {
-    if !heartbeat_expired(registration, now) {
-        return false;
-    }
+    heartbeat_expired(registration, now) && pid_reused(registration, now, listed)
+}
+
+/// Whether the pid of `registration` runs, at `now`, another process than
+/// the one that registered: one of another user (absent from `listed`, this
+/// user's processes, which every supervisor of this queue is), or one of
+/// this user's that started after the registration, which the process that
+/// registered cannot be (an exec keeps the start). Not judged, so `false`,
+/// when the processes could not be listed (`listed` none).
+pub fn pid_reused(
+    registration: &SupervisorRegistration,
+    now: i64,
+    listed: Option<&[ProcessInfo]>,
+) -> bool {
     let Some(listed) = listed else {
         return false;
     };
@@ -40,14 +49,29 @@ pub fn pid_taken_over(
         .iter()
         .find(|process| process.pid == registration.pid)
     {
-        // Alive, yet not among this user's processes, which every
-        // supervisor of this queue is.
         None => true,
         Some(process) => {
             let started = now - i64::try_from(process.elapsed_secs).unwrap_or(i64::MAX);
             started > registration.started_at + PID_START_SLACK_SECS
         }
     }
+}
+
+/// Whether every supervisor of `live` ended its drain as the processes
+/// alone tell it at `now`, for `down --wait` once the queue's service is out
+/// of reach (the last supervisor stops it at the end of its drain, so its
+/// registrations cannot be read): each pid runs nothing (`alive` false) or
+/// another process ([`pid_reused`]). The heartbeat is not looked at, as a
+/// draining supervisor's goes on.
+pub fn drain_ended_by_processes(
+    live: &[SupervisorRegistration],
+    now: i64,
+    alive: impl Fn(u32) -> bool,
+    listed: Option<&[ProcessInfo]>,
+) -> bool {
+    !live
+        .iter()
+        .any(|registration| alive(registration.pid) && !pid_reused(registration, now, listed))
 }
 
 /// Whether a live supervisor prunes another's registration on its own: the
@@ -136,6 +160,40 @@ mod tests {
         assert!(!pid_taken_over(&silent, NOW, None));
         // A heartbeating registration is never taken over.
         assert!(!pid_taken_over(&registration(NOW), NOW, Some(&[])));
+    }
+
+    /// Out of the service's reach, a drain is over once each supervisor's
+    /// pid runs nothing or another process, its heartbeat fresh or not; the
+    /// process that registered, still alive, is waited for, as is one that
+    /// cannot be told apart for want of a listing.
+    #[test]
+    fn a_drain_ends_by_the_processes_when_the_pid_is_gone_or_reused() {
+        let draining = [registration(NOW)];
+        let alive = |_: u32| true;
+        let dead = |_: u32| false;
+        assert!(!drain_ended_by_processes(
+            &draining,
+            NOW,
+            alive,
+            Some(&own_process())
+        ));
+        assert!(drain_ended_by_processes(
+            &draining,
+            NOW,
+            dead,
+            Some(&own_process())
+        ));
+        // Reused: by a later process of this user's, or another user's.
+        assert!(drain_ended_by_processes(
+            &draining,
+            NOW,
+            alive,
+            Some(&later_process())
+        ));
+        assert!(drain_ended_by_processes(&draining, NOW, alive, Some(&[])));
+        assert!(!drain_ended_by_processes(&draining, NOW, alive, None));
+        assert!(drain_ended_by_processes(&draining, NOW, dead, None));
+        assert!(drain_ended_by_processes(&[], NOW, alive, None));
     }
 
     /// Each pair of the heartbeat (fresh or expired) and the pid (dead,

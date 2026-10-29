@@ -2029,6 +2029,27 @@ pub fn restart(
     }
 }
 
+/// [`restart`] for an update's job (the automatic update's and the release
+/// update's), which runs no `up`: one of the retired in-cmux mode is left
+/// to a person, the error naming the `up` to run, which [`bring_back`]
+/// reports in the `update_failed` ask. The job has no principal to call
+/// that `up` as: the token of the supervisor that started it ends with that
+/// supervisor (ADR-t3102-1 decision 2), and the job does not call it as the
+/// user. A person's `install` starts it as its caller ([`restart`]).
+pub fn restart_by_update(
+    registration: &SupervisorRegistration,
+    db: &str,
+    arguments: &[String],
+) -> Result<Value> {
+    restart(registration, db, arguments, &|up| {
+        bail!(
+            "an update's job does not start a supervisor of the retired in-cmux mode again: \
+             run `dagq {}` (after `dagq down --wait` if it still runs)",
+            super::naming::shell_join(up)
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2482,5 +2503,29 @@ mod tests {
         .unwrap();
         assert_eq!(report["by"], "launchd");
         assert_eq!(ran.borrow().len(), 1);
+    }
+
+    /// An update's job starts no in-cmux supervisor again: its `up` is
+    /// named for a person; a launchd one is left to its agent.
+    #[test]
+    fn an_update_s_restart_leaves_an_in_cmux_supervisor_to_a_person() {
+        let error = restart_by_update(
+            &gone_registration(Some(SupervisorMode::InCmux), true),
+            "/q/queue.db",
+            &["--claude".to_owned(), "/opt/claude".to_owned()],
+        )
+        .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("run `dagq '--db' '/q/queue.db' 'up' '--auto-update'"),
+            "{error}"
+        );
+        let launchd = restart_by_update(
+            &gone_registration(Some(SupervisorMode::Launchd), true),
+            "/q/queue.db",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(launchd["by"], "launchd");
     }
 }

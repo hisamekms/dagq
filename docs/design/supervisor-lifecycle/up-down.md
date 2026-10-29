@@ -31,6 +31,8 @@ related:
 # `up` / `down`
 `dagq up`はqueueのruntimeをcold startする1コマンドで、application層の`src/application/lifecycle.rs`の`up`が行う（`down`も同じファイル。[ADR-0013](../../adr/0013-layered-architecture-and-type-function-style.md)）。
 外への口は`lifecycle::Ports`にまとめ、`compose::up` / `compose::down`が組み立てる。
+queueの読み書き（登録・event・run）は呼び出し元のprincipalでqueue serviceの`control`のstepとして送り、DBを開かず、届かなければそのerrorで失敗する。
+`down`がserviceを止める前の記録だけは、届かないか失敗しても警告して止める（呼び出し元は最初のstepで通っている。[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
 冪等で、続けて2回叩けば2回目は`reused`になる。
 外部（launchctl、PIDの生存とsignal）は`LaunchAgent`、`ProcessControl`のtrait越しに呼び、判定はfakeで、実launchdの`up → status → down --wait`はe2eで確かめる（e2eの条件は`tests/e2e.rs`の冒頭のdoc comment）。
 in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の手順を文面に書く（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。
@@ -79,8 +81,9 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
    - **buildの違うsupervisorの入れ替え**（[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10・12・15・16）: 登録の`binary_version`は`supervise`プロセス自身が書いた自分のbuild識別子で、`up`はliveな登録のどれか1つでも自分のbuild識別子と違えば（nullを含む。package versionが同じでもcommitやdirtyが違えば違う）入れ替える。
      liveな登録が全部引き継ぎを受けられるなら**引き継ぎ**、そうでなければ**drain**で入れ替える。
      launchd modeの登録は、LaunchAgentの`ProgramArguments`の先頭が`up`自身の絶対pathで、`ProcessType`が`up`の書く値のときだけ引き継ぐ（execはplistもlaunchdがprocessに当てる制限も変えないので、pathの違うagentはlaunchdの次の再起動で前のbinaryに戻り、`ProcessType`の無いagentは制限の下で流れ続ける。そのときはdrainし、`up`がplistを書き直してlaunchdが読み直す。判定は`agent_takes_handoff`のdoc comment）。
-     - **migrate**: `up`はDBを開く前に自分のqueue serviceを入れ替えの口で起動し（[Queue service](../queue-service.md)の「入れ替えの口」）、そのserviceが受け付けの前に未適用の互換のmigrationを適用して、`up`はそれを結果に載せる。
+     - **migrate**: `up`はqueueに何かを送る前に自分のqueue serviceを入れ替えの口で起動し（[Queue service](../queue-service.md)の「入れ替えの口」）、そのserviceが受け付けの前に未適用の互換のmigrationを適用して、`up`はそれを結果に載せる。
        `up`のプロセスはmigrateしない。
+       queueが`up`のrepositoryと別のrepositoryに束縛されていれば、serviceは引き継ぐ前に断り、`up`は何も入れ替えもmigrateもせずにerrorで止まる。
        未適用のものがあって`up`がqueueのbinaryでなければ（[persistence](../persistence.md#database-setup-and-migrations)）、serviceは何も適用せず受け付けず、`up`は何も起動もせずにerrorで止まる。
        非互換が1つでもあれば、serviceは動いているserviceにも触れずに終わり、`up`は何も起動もsignalもせず、`down --wait` → `dagq migrate` → `up`、または`dagq install --allow-breaking`を案内するerrorで止まる。
        queueのfloorが`up`のbuildを拒むときも、未適用のものの有無にかかわらず、serviceは動いているserviceに触れずに終わり、`up`は何も起動もせずにerrorで止まる。

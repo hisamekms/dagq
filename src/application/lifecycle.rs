@@ -273,7 +273,8 @@ pub struct RepositoryPaths {
 }
 
 /// What `up` and `down` reach the outside through. `queues` opens the
-/// queue at a database path as their ports (once for the use case);
+/// queue at a database path as their ports (once for the use case), which
+/// the binary reaches only through the queue's service;
 /// `inspect_repository` finds the repository containing a checkout;
 /// `trusts_repository(config, root)` reads Claude Code's global config for
 /// the folder trust of `root`. Neither reaches cmux (ADR-t2159-1 decision 1).
@@ -495,8 +496,9 @@ pub fn up(
     // The queue's service before the supervisor, of this binary's build
     // (ADR-t1233-4 decision 1), started as a replacement's: it applies the
     // compatible migrations of its build before it accepts, and refuses a
-    // breaking one (ADR-t3102-2 decision 2). `up` opens the queue only
-    // after, so it applies none itself. One that does not start stops `up`.
+    // breaking one (ADR-t3102-2 decision 2). `up` reaches the queue only
+    // after, through that service, so it applies none itself. One that does
+    // not start stops `up`.
     // Held until `up` returns, so that the watch of a supervisor of the
     // build before does not replace it before the handoff.
     let mut _hold = None;
@@ -2619,7 +2621,8 @@ pub struct DownOptions {
 ///
 /// The queue's service (and its broker) stops once no supervisor is left:
 /// when none ran, after `--force` killed them, and after the drain `--wait`
-/// waited for, each recorded `queue_service_stopped`. A `down` that does
+/// waited for, each recorded `queue_service_stopped` (the service's before
+/// it stops, since the record goes to it). A `down` that does
 /// not wait asks for the stop with `queue_service_stop_requested` before
 /// the signal and leaves it to the last supervisor to end its drain. A
 /// service that was not running gets no `queue_service` in the report.
@@ -2653,8 +2656,9 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     // decision 1): `down` stops it once they are gone, and asks the ones
     // about to drain to stop it when their drain ends.
     let service = (ports.queue_service)(&location.db, Path::new("dagq"));
+    let service_found = service.probe();
     let service_running =
-        service.probe().state != crate::domain::queue_service::ServiceState::Stopped;
+        service_found.state != crate::domain::queue_service::ServiceState::Stopped;
     // So does the queue's broker (ADR-t2114-1 decision 1), by the same
     // steps.
     let broker = (ports.queue_broker)(&location.db, Path::new("dagq"));
@@ -2699,16 +2703,18 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         if !drained {
             return Some(json!({"outcome": "left_to_the_drain"}));
         }
+        // Recorded before the stop, on the service that stops: nothing is
+        // opened after it. The service took `down`'s caller on its first
+        // step, so one out of reach (the last supervisor's drain stopped
+        // it) or that fails the record is stopped all the same.
+        if let Err(error) = queue.record_queue_event(
+            crate::domain::EventKind::QueueServiceStopped,
+            json!({"pid": service_found.pid, "by": "down"}),
+        ) {
+            tracing::warn!(error = %format_args!("{error:#}"), "the queue service's stop could not be recorded: {error:#}");
+        }
         match service.stop(QUEUE_SERVICE_START_TIMEOUT) {
-            Ok(Some(pid)) => {
-                if let Err(error) = queue.record_queue_event(
-                    crate::domain::EventKind::QueueServiceStopped,
-                    json!({"pid": pid, "by": "down"}),
-                ) {
-                    tracing::warn!(error = %format_args!("{error:#}"), "the queue service's stop could not be recorded: {error:#}");
-                }
-                Some(json!({"outcome": "stopped", "pid": pid}))
-            }
+            Ok(Some(pid)) => Some(json!({"outcome": "stopped", "pid": pid})),
             // The last supervisor stopped it at the end of its drain.
             Ok(None) => Some(json!({"outcome": "not_running"})),
             Err(error) => Some(json!({"outcome": "failed", "error": format!("{error:#}")})),
@@ -2798,18 +2804,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         return Ok(report);
     }
     if options.wait {
-        loop {
-            let remaining = queue
-                .supervisors()?
-                .into_iter()
-                .filter(|registration| {
-                    live.iter().any(|l| l.token == registration.token)
-                        && processes.alive(registration.pid)
-                })
-                .count();
-            if remaining == 0 {
-                break;
-            }
+        while !drained(queue, processes, &live, ports.clock.now())? {
             thread::sleep(options.poll);
         }
         let mut report = json!({
@@ -2837,6 +2832,37 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     }
     stop_both(&mut report, false);
     Ok(report)
+}
+
+/// Whether every supervisor of `live` ended its drain, as `down --wait`
+/// looks at `now`: its registration gone or its process dead. The last
+/// supervisor stops the queue's service once it deregistered at the end of
+/// its drain, so a service out of reach is a drain that may have ended:
+/// then only the processes are looked at, a pid another process took over
+/// counted as ended ([`supervisor_prune::drain_ended_by_processes`]), and
+/// one still the supervisor's is looked at again.
+fn drained(
+    queue: &(impl SupervisorRegistry + ?Sized),
+    processes: &dyn ProcessControl,
+    live: &[SupervisorRegistration],
+    now: i64,
+) -> Result<bool> {
+    let registrations = match queue.supervisors() {
+        Ok(registrations) => registrations,
+        Err(error) if super::supervisor_service::unreachable(&error) => {
+            let listed = processes.list().ok();
+            return Ok(supervisor_prune::drain_ended_by_processes(
+                live,
+                now,
+                |pid| processes.alive(pid),
+                listed.as_deref(),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(!registrations.iter().any(|registration| {
+        live.iter().any(|l| l.token == registration.token) && processes.alive(registration.pid)
+    }))
 }
 
 /// What became of the cmux workspace of every `in_cmux` registration among

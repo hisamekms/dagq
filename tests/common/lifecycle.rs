@@ -10,9 +10,10 @@ use anyhow::{Result, bail};
 use dagq::{
     VERSION,
     application::{AgentState, DefinedAgent, LaunchAgent, ProcessControl},
+    compose::{LifecycleRoute, OneShot},
     domain::{SupervisorMode, recovery::ProcessInfo},
     infrastructure::{location::QueueLocation, sqlite::SqliteQueue},
-    lifecycle::{self, DownOptions, UpEnvironment, UpOptions},
+    lifecycle::{DownOptions, UpEnvironment, UpOptions},
 };
 use serde_json::{Value, json};
 use std::{
@@ -169,6 +170,10 @@ pub struct FakeLaunchd {
     /// first, the way an alive but silent supervisor can come back while
     /// `up` waits for the one it started.
     pub heartbeats_existing_on_install: bool,
+    /// The supervisor an install starts registers through the queue's
+    /// service, signed in as the supervisor does, rather than on the DB:
+    /// for a test whose process refuses to open the queue.
+    pub registers_through_service: bool,
     pub loaded: Mutex<bool>,
     /// The agent's process while loaded, as `launchctl print` would show it.
     pub agent_pid: Mutex<Option<u32>>,
@@ -186,6 +191,7 @@ impl FakeLaunchd {
             db: db.into(),
             registers_on_install: true,
             heartbeats_existing_on_install: false,
+            registers_through_service: false,
             loaded: Mutex::new(false),
             agent_pid: Mutex::new(None),
             installs: Mutex::new(Vec::new()),
@@ -242,6 +248,31 @@ impl FakeLaunchd {
     }
 }
 
+/// Register a supervisor of this process and build on the queue at `db`
+/// through its service, signed in as that supervisor
+/// ([`FakeLaunchd::registers_through_service`]).
+fn register_through_service(db: &Path) -> Result<()> {
+    use dagq::application::{
+        SupervisorRegistry,
+        supervisor_service::{ServiceCaller, SupervisorQueues},
+    };
+    use dagq::domain::slot_limits::{SlotFlags, SlotLimits, SupervisorConfig};
+    let pid = std::process::id();
+    let token = LeaseToken::new(uuid::Uuid::new_v4().to_string());
+    let caller: std::sync::Arc<dyn ServiceCaller> =
+        std::sync::Arc::new(dagq::infrastructure::queue_service::SocketCaller::new(db));
+    caller.sign_in(&token, pid)?;
+    let queues = SupervisorQueues::new(
+        caller,
+        dagq::domain::ActorContext::instance(dagq::domain::ActorRole::Supervisor, pid),
+    );
+    let limits = SlotLimits::resolve(SlotFlags::default(), &SupervisorConfig::default());
+    queues
+        .queue()
+        .register_supervisor(&token, pid, limits, &[], VERSION)?;
+    Ok(())
+}
+
 impl LaunchAgent for FakeLaunchd {
     fn install(&self, label: &str, path: &Path, contents: &str) -> Result<()> {
         self.installs
@@ -249,6 +280,9 @@ impl LaunchAgent for FakeLaunchd {
             .unwrap()
             .push((label.into(), path.into(), contents.into()));
         self.load(Some(std::process::id()));
+        if self.registers_through_service {
+            return register_through_service(&self.db);
+        }
         let mut queue = SqliteQueue::open(&self.db)?;
         if self.heartbeats_existing_on_install {
             for registration in queue.supervisors()? {
@@ -353,16 +387,36 @@ impl ProcessControl for FakeProcesses {
     }
 }
 
+/// The commands of `up`, `down` and `dagq inbox` of a test that keeps no
+/// service: each operation of their queue answered by the service's use
+/// cases in this process, as the user's on the socket.
+pub fn one_shot() -> OneShot {
+    OneShot {
+        lifecycle_route: LifecycleRoute::InProcess,
+        ..OneShot::system()
+    }
+}
+
+/// [`one_shot`] on the service's socket as the user's, whatever actor runs
+/// the tests: the test's process opens no queue for them.
+pub fn on_socket() -> OneShot {
+    OneShot {
+        lifecycle_route: LifecycleRoute::Socket(|_| None),
+        ..OneShot::system()
+    }
+}
+
 pub fn up(fixture: &Fixture, launchd: &FakeLaunchd, processes: &FakeProcesses) -> Value {
-    lifecycle::up(
-        &fixture.location,
-        &fixture.repo,
-        launchd,
-        processes,
-        &fixture.environment,
-        &fixture.options,
-    )
-    .unwrap()
+    one_shot()
+        .up(
+            &fixture.location,
+            &fixture.repo,
+            launchd,
+            processes,
+            &fixture.environment,
+            &fixture.options,
+        )
+        .unwrap()
 }
 
 pub fn try_up(
@@ -370,7 +424,7 @@ pub fn try_up(
     launchd: &FakeLaunchd,
     processes: &FakeProcesses,
 ) -> Result<Value> {
-    lifecycle::up(
+    one_shot().up(
         &fixture.location,
         &fixture.repo,
         launchd,
@@ -431,17 +485,18 @@ pub fn down(
     wait: bool,
     force: bool,
 ) -> Value {
-    lifecycle::down(
-        &fixture.location,
-        launchd,
-        processes,
-        &DownOptions {
-            wait,
-            force,
-            poll: Duration::from_millis(20),
-        },
-    )
-    .unwrap()
+    one_shot()
+        .down(
+            &fixture.location,
+            launchd,
+            processes,
+            &DownOptions {
+                wait,
+                force,
+                poll: Duration::from_millis(20),
+            },
+        )
+        .unwrap()
 }
 
 /// A registration of an older build that takes a handoff (ADR-0045

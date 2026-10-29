@@ -2560,6 +2560,10 @@ pub struct ServeOptions {
     /// The binary it runs from: the queue's binary, or the one an
     /// `install` grants, applies migrations ([`queue_binary`]).
     pub executable: PathBuf,
+    /// The Git common directory the starter (`up`) is bound to: a queue
+    /// bound to another repository is refused before the service takes
+    /// over or applies anything, leaving the running service as it was.
+    pub binding: Option<String>,
 }
 
 /// How the start of a replacement's service goes, as it tells its starter
@@ -2778,6 +2782,14 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
     // A replacement's service applies its build's migrations before it
     // accepts; what refuses them leaves the running service as it was.
     let taken = (|| {
+        if let Some(binding) = &options.binding
+            && let Some(bound) = SqliteQueue::binding_at(&options.db)?
+        {
+            ensure!(
+                bound == *binding,
+                "queue is bound to another Git repository: {bound} (this repository is {binding})"
+            );
+        }
         judge_start(&options.db, &options.executable, migrations)?;
         let wait = if migrations == StartMigrations::None {
             Duration::from_secs(2)
@@ -2847,6 +2859,7 @@ accepts: schema {} to {}",
         detail: options.detail,
         commands: options.commands.clone(),
         at_stop: Some(AtStop::default()),
+        stands_for: None,
     });
     match crate::application::queue_service::revoke_ended_sign_ins(&*backend) {
         Ok(revoked) if !revoked.is_empty() => {
@@ -3106,6 +3119,10 @@ pub struct SqliteServiceBackend {
     /// it exits; `None` for a backend that never stops on its own (a
     /// supervisor's in-process one), which keeps none.
     pub at_stop: Option<AtStop>,
+    /// The executable of the command an in-process caller of a test stands
+    /// for ([`InProcessControlCaller`]), answered for its process instead
+    /// of the one the system reads; `None` for any other backend.
+    pub stands_for: Option<PathBuf>,
 }
 
 /// The keys ([`Principal::credential_key`]) of the tokens a service
@@ -3295,6 +3312,12 @@ impl ServiceBackend for SqliteServiceBackend {
 
     fn alive(&self, pid: u32) -> bool {
         super::adapters::process_alive(pid)
+    }
+
+    fn executable_of(&self, pid: u32) -> Option<PathBuf> {
+        self.stands_for
+            .clone()
+            .or_else(|| super::adapters::process_executable(pid).map(PathBuf::from))
     }
 }
 
@@ -3591,6 +3614,7 @@ impl InProcessCaller {
                 detail,
                 commands,
                 at_stop: None,
+                stands_for: None,
             }),
             queue_dir,
             signed_in: SignedIn::default(),
@@ -3848,6 +3872,101 @@ impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
     /// the socket's peer).
     fn credential(&self) -> Option<PathBuf> {
         self.client.credential.clone()
+    }
+}
+
+/// The steps of a control-side command answered in this process by the
+/// service's use cases on a backend of its own, as the user's on the
+/// socket (a peer of the service's own OS user, no token): `up`, `down`
+/// and `dagq inbox` of a test that keeps no service, each step made and
+/// read back as the socket's would be.
+pub struct InProcessControlCaller {
+    backend: SqliteServiceBackend,
+    control: crate::domain::queue_service::ControlCall,
+}
+
+impl InProcessControlCaller {
+    /// The caller of `control`'s steps on the queue at `db`, its records
+    /// made with `generators`, standing for a command that runs
+    /// `executable` when given.
+    pub fn new(
+        db: &Path,
+        generators: Generators,
+        services: (ServiceReads, ServiceWrites, ServiceDetail, ServiceCommands),
+        control: crate::domain::queue_service::ControlCall,
+        executable: Option<&Path>,
+    ) -> Self {
+        let (reads, writes, detail, commands) = services;
+        Self {
+            backend: SqliteServiceBackend {
+                db: db.to_path_buf(),
+                queue_dir: queue_dir_of(db),
+                generators,
+                reads,
+                writes,
+                detail,
+                commands,
+                at_stop: None,
+                stands_for: executable.map(Path::to_path_buf),
+            },
+            control,
+        }
+    }
+}
+
+impl crate::application::supervisor_service::ServiceCaller for InProcessControlCaller {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        ensure!(
+            use_case == UseCase::Supervisor,
+            "a control-side command sends the queue's operations only, not {}",
+            use_case.as_str()
+        );
+        let step = serde_json::from_value(params)
+            .context("a control-side command's step does not read")?;
+        let request = ServiceRequest {
+            api_version: API_VERSION,
+            token: None,
+            env_role: None,
+            queue: None,
+            binding: None,
+            use_case: UseCase::Control,
+            params: serde_json::to_value(crate::domain::queue_service::ControlParams {
+                control: self.control,
+                call: step,
+            })?,
+        };
+        // Through the request's text and the answer's, as on the socket.
+        let request: ServiceRequest = serde_json::from_slice(&serde_json::to_vec(&request)?)?;
+        let response = QueueService {
+            backend: &self.backend,
+            build: crate::VERSION,
+            pid: std::process::id(),
+        }
+        .handle_from_process(&request, Peer::Owner, Some(self.control.pid));
+        control_answer(serde_json::from_slice(&serde_json::to_vec(&response)?)?)
+    }
+
+    fn with_token(
+        &self,
+        _: &Path,
+    ) -> Result<Arc<dyn crate::application::supervisor_service::ServiceCaller>> {
+        bail!("a lifecycle command takes no other principal's token")
+    }
+
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        bail!("a control-side command signs in as none: it calls as its caller")
+    }
+
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        bail!("a control-side command signs in as none: it calls as its caller")
+    }
+
+    fn hand_over(&self) {}
+
+    fn sign_out(&self) {}
+
+    fn credential(&self) -> Option<PathBuf> {
+        None
     }
 }
 
@@ -4298,6 +4417,9 @@ impl ServiceQueue for ServiceSqlite {
 pub struct SystemQueueService {
     pub db: PathBuf,
     pub executable: PathBuf,
+    /// The repository a replacement's service is told the starter is
+    /// bound to ([`ServeOptions::binding`]).
+    pub binding: Option<String>,
 }
 
 impl SystemQueueService {
@@ -4305,7 +4427,15 @@ impl SystemQueueService {
         Self {
             db: db.to_path_buf(),
             executable: executable.to_path_buf(),
+            binding: None,
         }
+    }
+
+    /// This control, its replacement's service refusing a queue bound to
+    /// another repository than `binding` before it takes over.
+    pub fn bound_to(mut self, binding: Option<&str>) -> Self {
+        self.binding = binding.map(str::to_owned);
+        self
     }
 
     fn queue_dir(&self) -> PathBuf {
@@ -4642,6 +4772,9 @@ again once it ends"
         let mut arguments = vec![std::ffi::OsStr::new("--replacement"), report.as_os_str()];
         if breaking {
             arguments.push(std::ffi::OsStr::new("--breaking"));
+        }
+        if let Some(binding) = &self.binding {
+            arguments.extend([std::ffi::OsStr::new("--binding"), binding.as_ref()]);
         }
         let result = self
             .spawn(&arguments)

@@ -218,7 +218,9 @@ fn the_user_the_inbox_and_the_planner_keep_their_operations() {
         ),
     ];
     let inbox = [("DAGQ_ROLE", "inbox")];
-    // `down` with no supervisor and `migrate --check` succeed.
+    // `down` with no supervisor and `migrate --check` succeed. `down`
+    // reaches the queue through its service, as each role's principal, and
+    // stops it; the next command's service is started again for the test.
     for env in [&[][..], &inbox[..], &planner[..]] {
         let output = invoke_with(env, &db, &["down"]);
         assert!(

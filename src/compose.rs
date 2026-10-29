@@ -46,6 +46,40 @@ mod observation;
 mod planning;
 mod supervisor;
 
+/// The queues of a lifecycle command's steps on `client`'s socket, for
+/// [`host`] (rule L9: a context module reaches another through the root).
+fn lifecycle_socket(
+    client: crate::infrastructure::queue_service::Client,
+    control: crate::domain::queue_service::ControlCall,
+) -> Result<crate::application::supervisor_service::SupervisorQueues> {
+    control::lifecycle_socket(client, control)
+}
+
+/// The queues of a lifecycle command's steps answered in this process by
+/// the service's scope at `db`, as the user, for [`host`]'s tests that keep
+/// no service, the command's process taken to run `executable` when given.
+fn lifecycle_in_process(
+    db: &Path,
+    generators: Generators,
+    control: crate::domain::queue_service::ControlCall,
+    executable: Option<&Path>,
+) -> Result<crate::application::supervisor_service::SupervisorQueues> {
+    control::lifecycle_queues(std::sync::Arc::new(
+        crate::infrastructure::queue_service::InProcessControlCaller::new(
+            db,
+            generators,
+            (
+                service_reads(),
+                service_writes(),
+                service_detail(),
+                service_commands(),
+            ),
+            control,
+            executable,
+        ),
+    ))
+}
+
 pub use control::{ControlQueues, control_queues};
 pub use execution::{
     RunE2eOptions, SetupReviewOptions, ended_run_material, init_recommended, integrate, recover,
@@ -53,12 +87,13 @@ pub use execution::{
     session_in_background_as_with_processes, session_in_background_with_containers, setup_review,
 };
 pub use host::{
-    AutoUpdateJob, COMMAND_TARGET, HostMetricsSettings, QueueBrokerControlPort, QueueBrokerOptions,
-    QueueRelayControlPort, QueueRelayOptions, QueueServiceControlPort, QueueServiceOptions,
-    ReleaseIndexPort, ReleaseUpdateJob, SccacheOptions, down, inbox, inbox_command, init_queue,
-    install_restart_arguments, migrate_queue, queue_schema, queue_service_start,
-    queue_service_status, queue_service_stop, rebind, repair_rebound_worktrees,
-    repository_common_dir, repository_queue_dir, run_command, service_commands, trace_command, up,
+    AutoUpdateJob, COMMAND_TARGET, HostMetricsSettings, LifecycleRoute, QueueBrokerControlPort,
+    QueueBrokerOptions, QueueRelayControlPort, QueueRelayOptions, QueueServiceControlPort,
+    QueueServiceOptions, ReleaseIndexPort, ReleaseUpdateJob, SccacheOptions, down, inbox,
+    inbox_command, init_queue, install_restart_arguments, migrate_queue, queue_schema,
+    queue_service_start, queue_service_status, queue_service_stop, rebind,
+    repair_rebound_worktrees, repository_common_dir, repository_queue_dir, run_command,
+    service_commands, trace_command, up,
 };
 pub use observation::{
     CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, call_stats_read, ci_failures,
@@ -101,6 +136,16 @@ pub struct OneShot {
     /// name: the runtime's built-in ones
     /// ([`crate::domain::toolchain::BUILTIN`]); tests register another.
     pub profiles: &'static crate::domain::toolchain::ProfileRegistry,
+    /// Where `up`, `down` and `dagq inbox` send the operations of the queue
+    /// they make: the queue service's socket, which the binary takes; tests
+    /// that keep no service run its use cases in their process.
+    pub lifecycle_route: LifecycleRoute,
+}
+
+/// This process's environment, which the binary's commands read their
+/// principal from.
+fn process_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
 }
 
 /// `ask`: register an ask (see [`crate::application::ask::ask`]); the
@@ -541,6 +586,7 @@ impl OneShot {
             free_space: free_disk_bytes,
             verification_timeout: VERIFICATION_TIMEOUT,
             profiles: &crate::domain::toolchain::BUILTIN,
+            lifecycle_route: LifecycleRoute::Socket(process_env),
         }
     }
 

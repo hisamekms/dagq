@@ -62,6 +62,12 @@ fn checked_output(command: &mut Command, binary: &Path, arguments: &[&str]) -> R
     for name in crate::domain::queue_service::CLIENT_ENV {
         command.env_remove(name);
     }
+    run_checked(command, binary, arguments)
+}
+
+/// Run `command`, `binary` with `arguments`, as it is set: its stdout, or
+/// an error with its stderr when it fails.
+fn run_checked(command: &mut Command, binary: &Path, arguments: &[&str]) -> Result<String> {
     // Not `output()`: its pipes can be inherited by what the supervisor
     // spawns meanwhile and then not end (task 1273).
     let output = unpiped_output(command.args(arguments))
@@ -85,6 +91,24 @@ fn json_output(binary: &Path, arguments: &[&str]) -> Result<Value> {
 fn text(path: &Path) -> Result<&str> {
     path.to_str()
         .with_context(|| format!("{} is not UTF-8", path.display()))
+}
+
+/// The command of the `up` of `binary` that starts a supervisor again, as
+/// this process's caller: the token in `DAGQ_SERVICE_CREDENTIAL_FILE` that
+/// `env` holds (an inbox's `install`), or the user's with none, so `up`
+/// reaches the queue only through its service. No socket is named to it: it
+/// finds the service of the queue it names.
+fn up_command(binary: &Path, env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Command {
+    use crate::domain::queue_service::CREDENTIAL_FILE_ENV;
+    let mut command = Command::new(binary);
+    for name in crate::domain::queue_service::CLIENT_ENV {
+        command.env_remove(name);
+    }
+    command.env(crate::application::lifecycle::UP_RESTART_ENV, "1");
+    if let Some(file) = env(CREDENTIAL_FILE_ENV) {
+        command.env(CREDENTIAL_FILE_ENV, file);
+    }
+    command
 }
 
 impl Binaries for LocalBinaries {
@@ -239,11 +263,8 @@ impl Binaries for LocalBinaries {
     /// it runs as the runtime's restart (`UP_RESTART_ENV`).
     fn run(&self, binary: &Path, arguments: &[String]) -> Result<Value> {
         let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        let text = output_with(
-            binary,
-            &arguments,
-            &[(crate::application::lifecycle::UP_RESTART_ENV, "1")],
-        )?;
+        let mut command = up_command(binary, |name| env::var_os(name));
+        let text = run_checked(&mut command, binary, &arguments)?;
         serde_json::from_str(&text)
             .with_context(|| format!("read what {} printed", binary.display()))
     }
@@ -421,5 +442,45 @@ builds dagq {version})",
             binary.display()
         );
         Ok(binary)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{actor::ROLE_ENV, queue_service::CREDENTIAL_FILE_ENV};
+    use std::ffi::{OsStr, OsString};
+
+    /// What `command` sets (`Some`) or removes (`None`) of `name`; absent
+    /// when it leaves `name` as this process has it.
+    fn set(command: &Command, name: &str) -> Option<Option<OsString>> {
+        command
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new(name))
+            .map(|(_, value)| value.map(OsStr::to_owned))
+    }
+
+    #[test]
+    fn an_install_s_up_calls_as_its_caller() {
+        let given = |name: &str| match name {
+            CREDENTIAL_FILE_ENV => Some(OsString::from("/q/inbox-token")),
+            ROLE_ENV => Some(OsString::from("inbox")),
+            _ => None,
+        };
+        let binary = Path::new("dagq");
+        // An inbox's `install`: its own token and role go on.
+        let inherited = up_command(binary, given);
+        assert_eq!(
+            set(&inherited, CREDENTIAL_FILE_ENV),
+            Some(Some("/q/inbox-token".into()))
+        );
+        assert_eq!(set(&inherited, ROLE_ENV), None);
+        assert_eq!(
+            set(&inherited, crate::application::lifecycle::UP_RESTART_ENV),
+            Some(Some("1".into()))
+        );
+        // The user's: no token.
+        let none = up_command(binary, |_| None);
+        assert_eq!(set(&none, CREDENTIAL_FILE_ENV), Some(None));
     }
 }

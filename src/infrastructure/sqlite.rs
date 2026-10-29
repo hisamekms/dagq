@@ -685,6 +685,18 @@ impl SqliteQueue {
         Ok(state.report())
     }
 
+    /// The Git common directory the queue at `path` is bound to, read on a
+    /// read-only connection of the file as it is, whatever its schema
+    /// within the binary's: a service's replacement checks it before it
+    /// takes over, with nothing migrated, even in memory.
+    pub fn binding_at(path: impl AsRef<Path>) -> Result<Option<String>> {
+        let queue = Self::connect_with(
+            path.as_ref(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        queue.repository_binding()
+    }
+
     /// Apply the migrations this binary knows and the queue at `path`
     /// lacks when every one of them is compatible, as the start of `up`
     /// does (ADR-0045 decisions 5, 15): a supervisor and the wrappers of an

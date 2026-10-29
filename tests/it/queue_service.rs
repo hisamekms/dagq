@@ -2872,17 +2872,18 @@ fn a_down_wait_that_stops_the_service_once_the_registration_is_gone_leaves_no_to
     let processes = FakeProcesses::default();
     let report = std::thread::scope(|scope| {
         let down = scope.spawn(|| {
-            dagq::lifecycle::down(
-                &location,
-                &launchd,
-                &processes,
-                &dagq::lifecycle::DownOptions {
-                    wait: true,
-                    force: false,
-                    poll: Duration::from_millis(20),
-                },
-            )
-            .unwrap()
+            common::lifecycle::one_shot()
+                .down(
+                    &location,
+                    &launchd,
+                    &processes,
+                    &dagq::lifecycle::DownOptions {
+                        wait: true,
+                        force: false,
+                        poll: Duration::from_millis(20),
+                    },
+                )
+                .unwrap()
         });
         // The supervisor drains once `down` asked it to stop the service
         // and signalled it, and is held right after its deregistration.

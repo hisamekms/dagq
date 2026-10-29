@@ -53,7 +53,7 @@ When `status` or `doctor` says the inbox's guardrail is off (`inbox_guardrail.gu
 - Plain `down` ends the day's work: the supervisor stops claiming, drains its runs and exits.
 - `--wait` blocks until it is gone. Use it when the next step needs that (changing flags, moving a supervisor of the retired mode, shutting down).
 - `--force` loses the active runs (handled afterwards with this skill): only on the person's explicit word.
-- Once no supervisor is left, `down` stops the queue's service too (at once with `--wait`, `--force` or no supervisor running; without `--wait`, when the last supervisor ends its drain). From then on `status` and `watch` fail as `unreachable`, with no outage record and no attention: that is the expected state, not a failure. The inbox tells the person once, does not restart its watch in a loop, and starts it again from the same cursor after `up`. To read or `recover` without a supervisor, start the service alone (`reference/doctor.md`).
+- Once no supervisor is left, `down` stops the queue's service too (at once with `--wait`, `--force` or no supervisor running; without `--wait`, when the last supervisor ends its drain). From then on `status` and `watch` fail as `unreachable`, with no outage record and no attention: that is the expected state, not a failure. The inbox tells the person once, does not restart its watch in a loop, and starts it again from the same cursor after `up`. `down` reaches the queue only through the service too: to read, `down` again or `recover` without a supervisor, start the service alone (`reference/doctor.md`).
 
 ## Logs
 

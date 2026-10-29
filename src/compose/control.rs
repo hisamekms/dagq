@@ -62,6 +62,32 @@ pub fn control_queues(client: Client, control: ControlCall) -> Result<ControlQue
     })
 }
 
+/// The queues of the steps of `up`, `down`, `dagq inbox` or `service
+/// start|stop` on `caller` ([`ControlCall::command`] one whose
+/// [`lifecycle`](crate::domain::queue_service::ControlCommand::lifecycle)
+/// holds): the service names the principal's actor first, so a principal
+/// the command is not for is refused before anything is done. A record the
+/// service does not take is the command's error, sent no more: the command
+/// stops rather than waits for a service that is not there, and the queue is
+/// not opened instead (fail closed).
+pub(super) fn lifecycle_queues(caller: Arc<dyn ServiceCaller>) -> Result<SupervisorQueues> {
+    let begun = caller.call(UseCase::Supervisor, json!({"op": CONTROL_QUEUE}))?;
+    let role: ActorRole = serde_json::from_value(begun["role"].clone())
+        .context("the queue service's answer names no role")?;
+    let actor_id = begun["actor_id"]
+        .as_str()
+        .context("the queue service's answer names no actor")?;
+    Ok(SupervisorQueues::new(
+        caller,
+        ActorContext::new(role, actor_id),
+    ))
+}
+
+/// [`lifecycle_queues`] of `control`'s steps on `client`'s socket.
+pub(super) fn lifecycle_socket(client: Client, control: ControlCall) -> Result<SupervisorQueues> {
+    lifecycle_queues(Arc::new(ControlCaller::new(client, control)?))
+}
+
 impl ControlQueues {
     /// The tokens of the telemetry of the command's agent or
     /// verification, issued and revoked by the service, their files read

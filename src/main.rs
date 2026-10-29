@@ -2121,6 +2121,10 @@ enum ServiceCommand {
         /// supervisor, a run or a wrapper uses the queue.
         #[arg(long, requires = "replacement", hide = true)]
         breaking: bool,
+        /// With --replacement: the Git common directory the starter is bound to; a queue bound
+        /// to another repository is refused before the service takes over or migrates.
+        #[arg(long, requires = "replacement", hide = true)]
+        binding: Option<String>,
     },
 }
 
@@ -4691,36 +4695,6 @@ fn execute(cli: Cli) -> Result<Value> {
             ),
         }));
     }
-    if let Command::SetupReview {
-        yes,
-        timeout,
-        claude,
-        codex,
-        codex_home,
-    } = &cli.command
-    {
-        if !db.is_file() {
-            bail!(
-                "no queue at {}: run `dagq init` first; setup-review makes its temporary \
-                 checkout under the queue's directory",
-                db.display()
-            );
-        }
-        use dagq::application::setup_review::Approval;
-        return dagq::compose::setup_review(
-            &db,
-            &cwd,
-            &dagq::compose::SetupReviewOptions {
-                claude: claude.clone(),
-                codex: codex.clone(),
-                codex_home: codex_home.clone(),
-                timeout: Duration::from_secs(*timeout),
-                approval: if *yes { Approval::Given } else { Approval::Ask },
-                dagq: env::current_exe()?,
-                profiles: &dagq::domain::toolchain::BUILTIN,
-            },
-        );
-    }
     if let Command::Migrate { check } = cli.command {
         if check {
             return Ok(serde_json::to_value(dagq::compose::queue_schema(&db)?)?);
@@ -4878,6 +4852,78 @@ fn execute(cli: Cli) -> Result<Value> {
             command.get_program().to_string_lossy()
         )));
     }
+    // `up` and `down` reach the queue only through its service, and open
+    // none: `up` starts the service first (ADR-t3102-2 decision 2).
+    if let Command::Up {
+        no_claude,
+        parallel,
+        max_waiting,
+        runtime_planners,
+        max_load,
+        in_cmux,
+        no_wait,
+        handoff_timeout,
+        plugin_dir,
+        repo,
+        cmux: _,
+        claude,
+        codex,
+        auto_update,
+    } = cli.command
+    {
+        use dagq::application::lifecycle::UpOptions;
+        use dagq::infrastructure::{adapters::SystemProcesses, launchd::Launchctl};
+        let environment = up_environment()?;
+        let options = UpOptions {
+            no_claude,
+            parallel,
+            max_waiting,
+            runtime_planners,
+            max_load,
+            in_cmux,
+            no_wait,
+            plugin_dir,
+            claude: if no_claude {
+                claude
+            } else {
+                dagq::infrastructure::adapters::claude_at_entry(&claude)?
+            },
+            codex: dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or(codex),
+            startup_timeout: Duration::from_secs(30),
+            handoff_timeout: Duration::from_secs(handoff_timeout),
+            auto_update,
+            queue_service: true,
+            queue_broker: true,
+            poll: Duration::from_millis(500),
+        };
+        return one_shot.up(
+            &location,
+            &checkout(repo),
+            &Launchctl { uid: current_uid() },
+            &SystemProcesses,
+            &environment,
+            &options,
+        );
+    }
+    if let Command::Down {
+        wait,
+        force,
+        cmux: _,
+    } = cli.command
+    {
+        use dagq::application::lifecycle::DownOptions;
+        use dagq::infrastructure::{adapters::SystemProcesses, launchd::Launchctl};
+        return one_shot.down(
+            &location,
+            &Launchctl { uid: current_uid() },
+            &SystemProcesses,
+            &DownOptions {
+                wait,
+                force,
+                poll: Duration::from_secs(2),
+            },
+        );
+    }
     // `doctor` reports the schema even of a queue this binary cannot open
     // (ADR-0045 decision 5), so it opens the queue itself.
     if let Command::Doctor { full } = cli.command {
@@ -4904,14 +4950,22 @@ fn execute(cli: Cli) -> Result<Value> {
                     |name| env::var(name).ok(),
                 ),
             )),
-            ServiceCommand::Start { cmux: _ } => {
-                dagq::compose::queue_service_start(&db, &env::current_exe()?)
+            ServiceCommand::Start { cmux: _ } => dagq::compose::queue_service_start(
+                &db,
+                &env::current_exe()?,
+                common_dir.as_deref(),
+                |name| env::var(name).ok(),
+            ),
+            ServiceCommand::Stop => {
+                dagq::compose::queue_service_stop(&db, common_dir.as_deref(), |name| {
+                    env::var(name).ok()
+                })
             }
-            ServiceCommand::Stop => dagq::compose::queue_service_stop(&db),
             ServiceCommand::Serve {
                 cmux: _,
                 replacement,
                 breaking,
+                binding,
             } => dagq::infrastructure::queue_service::serve(
                 &dagq::infrastructure::queue_service::ServeOptions {
                     db: db.clone(),
@@ -4934,6 +4988,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     },
                     report: replacement,
                     executable: env::current_exe()?,
+                    binding,
                 },
             ),
         };
@@ -5062,6 +5117,8 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Doctor { .. }
         | Command::Ci { .. }
         | Command::Inbox { .. }
+        | Command::Up { .. }
+        | Command::Down { .. }
         | Command::Service { .. }
         | Command::QueueBroker { .. }
         | Command::Relay { .. }
@@ -5469,56 +5526,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 &options,
             )?
         }
-        Command::Up {
-            no_claude,
-            parallel,
-            max_waiting,
-            runtime_planners,
-            max_load,
-            in_cmux,
-            no_wait,
-            handoff_timeout,
-            plugin_dir,
-            repo,
-            cmux: _,
-            claude,
-            codex,
-            auto_update,
-        } => {
-            use dagq::application::lifecycle::UpOptions;
-            use dagq::infrastructure::{adapters::SystemProcesses, launchd::Launchctl};
-            let environment = up_environment()?;
-            let options = UpOptions {
-                no_claude,
-                parallel,
-                max_waiting,
-                runtime_planners,
-                max_load,
-                in_cmux,
-                no_wait,
-                plugin_dir,
-                claude: if no_claude {
-                    claude
-                } else {
-                    dagq::infrastructure::adapters::claude_at_entry(&claude)?
-                },
-                codex: dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or(codex),
-                startup_timeout: Duration::from_secs(30),
-                handoff_timeout: Duration::from_secs(handoff_timeout),
-                auto_update,
-                queue_service: true,
-                queue_broker: true,
-                poll: Duration::from_millis(500),
-            };
-            one_shot.up(
-                &location,
-                &checkout(repo),
-                &Launchctl { uid: current_uid() },
-                &SystemProcesses,
-                &environment,
-                &options,
-            )?
-        }
         Command::AutoUpdate {
             commit,
             token,
@@ -5596,24 +5603,6 @@ fn execute(cli: Cli) -> Result<Value> {
         Command::Run {
             command: RunCommand::CloseWorkspaces { .. },
         } => bail!(dagq::application::screen::CLOSE_WORKSPACES_REFUSED),
-        Command::Down {
-            wait,
-            force,
-            cmux: _,
-        } => {
-            use dagq::application::lifecycle::DownOptions;
-            use dagq::infrastructure::{adapters::SystemProcesses, launchd::Launchctl};
-            one_shot.down(
-                &location,
-                &Launchctl { uid: current_uid() },
-                &SystemProcesses,
-                &DownOptions {
-                    wait,
-                    force,
-                    poll: Duration::from_secs(2),
-                },
-            )?
-        }
         Command::Integrate {
             id,
             next,
@@ -6656,6 +6645,8 @@ mod tests {
             leaves(sub, sub.get_name(), &mut found);
         }
         const CONTROL: &str = "a process of the control side: ADR-t3102-2 decision 6 (5)";
+        const LIFECYCLE: &str = "a process of the control side that sends its queue's \
+                                 operations as its command's steps (ControlCommand::lifecycle)";
         const DIAGNOSIS: &str =
             "the migration and the diagnosis of the queue: ADR-t3102-2 decision 6 (6)";
         const NO_QUEUE: &str = "opens no queue for the command";
@@ -6696,14 +6687,14 @@ mod tests {
                  planner's leaves it to its wrapper (ADR-t3102-1 decision 4)",
             ),
             ("supervise", CONTROL),
-            ("up", CONTROL),
-            ("down", CONTROL),
+            ("up", LIFECYCLE),
+            ("down", LIFECYCLE),
             ("install", CONTROL),
             ("auto-update", CONTROL),
             ("release-update", CONTROL),
-            ("inbox", CONTROL),
-            ("service start", CONTROL),
-            ("service stop", CONTROL),
+            ("inbox", LIFECYCLE),
+            ("service start", LIFECYCLE),
+            ("service stop", LIFECYCLE),
             ("queue-broker serve", CONTROL),
             ("migrate", DIAGNOSIS),
             ("doctor", DIAGNOSIS),

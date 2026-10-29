@@ -266,7 +266,7 @@ pluginはskillと`SessionStart` / `Stop` / `SessionEnd` hookだけでinstallに`
 `dagq plan`は何も開かずに拒むので（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)、[`plan` / `planners`](supervisor-lifecycle/plan-planners.md)）、確かめない。
 `--plugin-dir`を付けたときは確かめない（そのpluginが同じ名前のinstall済みのpluginより優先されるため）。
 runtimeが立てるplannerと`install`の引き継ぎは確かめない（supervisorに渡された`--plugin-dir`だけを使う）。
-runtimeがsupervisorを起動し直すために打つ`up`（`install --allow-breaking`のdrainの後と、自動更新の戻しで登録済みのin-cmuxのsupervisorをlaunchd modeで起動し直すとき）も確かめない。
+runtimeがsupervisorを起動し直すために打つ`up`（`install --allow-breaking`のdrainの後と、`install`の戻しで登録済みのin-cmuxのsupervisorをlaunchd modeで起動し直すとき）も確かめない。
 runtimeはその`up`の環境に`DAGQ_UP_RESTART`（`lifecycle::UP_RESTART_ENV`）を置く（envにしたのは、知らない古いバイナリが無視できるから）。
 
 - 確かめ方: `claude plugin list --json`を、sessionが開くrepositoryのroot（project scopeのpluginもそこで数える）で実行する。

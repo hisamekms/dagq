@@ -12,7 +12,7 @@ use common::{Bounded, WithoutActor, lifecycle::*, service::OwnedByTest};
 use dagq::{
     domain::{EventKind, SessionRole},
     infrastructure::sqlite::SqliteQueue,
-    lifecycle::{self, CLAUDE_INSTEAD, INBOX_INSIDE_REFUSED, InboxOptions},
+    lifecycle::{CLAUDE_INSTEAD, INBOX_INSIDE_REFUSED, InboxOptions},
 };
 use serde_json::{Value, json};
 use std::{
@@ -470,6 +470,7 @@ fn a_codex_inbox_opens_once_the_persons_settings_hold_and_records_its_launch() {
 #[test]
 fn a_codex_that_cannot_be_used_opens_no_inbox_and_says_how_to_open_claude() {
     let fixture = fixture();
+    let _served = common::service::Served::start(&fixture.location.db);
     let stub = stub_claude(&fixture);
     let plugin_dir = fixture.options.plugin_dir.clone().unwrap();
     let plugin_dir = plugin_dir.to_str().unwrap();
@@ -635,13 +636,14 @@ fn the_inbox_prompt_carries_the_language_and_a_wrong_one_opens_nothing() {
         provider: None,
         model: None,
     };
-    let error = lifecycle::inbox(
-        &fixture.location,
-        &fixture.repo,
-        &fixture.environment,
-        &options,
-    )
-    .unwrap_err();
+    let error = one_shot()
+        .inbox(
+            &fixture.location,
+            &fixture.repo,
+            &fixture.environment,
+            &options,
+        )
+        .unwrap_err();
     let error = format!("{error:#}");
     assert!(
         error.contains("BCP 47") && error.ends_with("the inbox was not opened"),
@@ -650,13 +652,14 @@ fn the_inbox_prompt_carries_the_language_and_a_wrong_one_opens_nothing() {
     assert_eq!(opened(&fixture), None);
 
     fs::write(&config, "[language]\ntag = 'ja'\n").unwrap();
-    let command = lifecycle::inbox(
-        &fixture.location,
-        &fixture.repo,
-        &fixture.environment,
-        &options,
-    )
-    .unwrap();
+    let command = one_shot()
+        .inbox(
+            &fixture.location,
+            &fixture.repo,
+            &fixture.environment,
+            &options,
+        )
+        .unwrap();
     let prompt = command.get_args().last().unwrap().to_string_lossy();
     assert!(prompt.contains("You are the inbox of"), "{prompt}");
     assert!(prompt.contains("BCP 47 tag `ja`"), "{prompt}");
@@ -664,9 +667,10 @@ fn the_inbox_prompt_carries_the_language_and_a_wrong_one_opens_nothing() {
 }
 
 /// The inbox's token is issued by the queue's service at the user's
-/// request (ADR-t3102-1 decision 2), never written by `dagq inbox`: with no
-/// service answering, the inbox is not opened, nothing is started or
-/// recorded, and no token is left.
+/// request (ADR-t3102-1 decision 2), never written by `dagq inbox`, which
+/// reads the queue only through that service: with no service answering,
+/// the inbox is not opened, nothing is started or recorded, the queue is
+/// not opened instead, and no token is left.
 #[test]
 fn dagq_inbox_asks_the_service_for_its_token_and_opens_nothing_without_one() {
     let fixture = fixture();
@@ -679,9 +683,7 @@ fn dagq_inbox_asks_the_service_for_its_token_and_opens_nothing_without_one() {
         &["--plugin-dir", plugin_dir.to_str().unwrap()],
     ));
     assert!(
-        message.contains("issue the inbox's token")
-            && message.contains("unreachable")
-            && message.ends_with("the inbox was not opened"),
+        message.contains("unreachable") && message.ends_with("the inbox was not opened"),
         "{message}"
     );
     assert_eq!(started(&stub, "argv"), None);
@@ -693,4 +695,39 @@ fn dagq_inbox_asks_the_service_for_its_token_and_opens_nothing_without_one() {
         fs::read_dir(&credentials).map_or(true, |mut files| files.next().is_none()),
         "{credentials:?}"
     );
+}
+
+/// `dagq inbox` reads whether a person forbade Claude and records its
+/// opening only through the queue's service, as the user who opens it:
+/// its process opens no queue (docs/design/queue-service.md, "起動と停止").
+#[test]
+fn dagq_inbox_reads_and_records_only_through_the_service() {
+    let fixture = fixture();
+    let _served = common::service::Served::start(&fixture.location.db);
+    let options = InboxOptions {
+        plugin_dir: fixture.options.plugin_dir.clone(),
+        agent: fixture.options.claude.clone(),
+        codex: PathBuf::from("codex"),
+        provider: None,
+        model: None,
+    };
+    let refused = dagq::infrastructure::sqlite::refuse_opening(&fixture.location.db);
+    let command = on_socket()
+        .inbox(
+            &fixture.location,
+            &fixture.repo,
+            &fixture.environment,
+            &options,
+        )
+        .unwrap();
+    drop(refused);
+    let prompt = command.get_args().last().unwrap().to_string_lossy();
+    assert!(prompt.contains("You are the inbox of"), "{prompt}");
+    let event = SqliteQueue::open(&fixture.location.db)
+        .unwrap()
+        .latest_event_of("inbox_opened")
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.payload["provider"], "claude", "{:?}", event.payload);
+    assert_eq!(event.actor.map(|actor| actor.id).as_deref(), Some("user"));
 }

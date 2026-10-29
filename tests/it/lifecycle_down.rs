@@ -15,7 +15,7 @@ use dagq::{
     application::ProcessControl,
     domain::{SessionRole, SupervisorMode, recovery::ProcessInfo},
     infrastructure::sqlite::SqliteQueue,
-    lifecycle::{self, DownOptions},
+    lifecycle::DownOptions,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -472,19 +472,20 @@ fn down_wait_returns_stopped_once_the_registration_is_gone_or_the_process_died()
             unreachable!()
         }
     }
-    let report = lifecycle::down(
-        &fixture.location,
-        &launchd,
-        &DiesLater {
-            polls: AtomicUsize::new(0),
-        },
-        &DownOptions {
-            wait: true,
-            force: false,
-            poll: Duration::from_millis(20),
-        },
-    )
-    .unwrap();
+    let report = one_shot()
+        .down(
+            &fixture.location,
+            &launchd,
+            &DiesLater {
+                polls: AtomicUsize::new(0),
+            },
+            &DownOptions {
+                wait: true,
+                force: false,
+                poll: Duration::from_millis(20),
+            },
+        )
+        .unwrap();
     assert_eq!(
         report,
         json!({"outcome": "stopped", "pid": pid, "pids": [pid],

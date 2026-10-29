@@ -532,7 +532,7 @@ fn process_cwd(pid: u32) -> Option<String> {
 /// call for the one process (task 1590). `None` when the process is gone
 /// or not the user's.
 #[cfg(target_os = "macos")]
-fn process_executable(pid: u32) -> Option<String> {
+pub(crate) fn process_executable(pid: u32) -> Option<String> {
     let pid = libc::c_int::try_from(pid).ok()?;
     let mut buffer = vec![0u8; usize::try_from(libc::PROC_PIDPATHINFO_MAXSIZE).ok()?];
     let size = u32::try_from(buffer.len()).ok()?;
@@ -546,7 +546,7 @@ fn process_executable(pid: u32) -> Option<String> {
 /// The path of the executable `pid` runs, from `/proc/<pid>/exe`; `None`
 /// where there is no `/proc` or the link cannot be read.
 #[cfg(not(target_os = "macos"))]
-fn process_executable(pid: u32) -> Option<String> {
+pub(crate) fn process_executable(pid: u32) -> Option<String> {
     let executable = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     Some(executable.to_string_lossy().into_owned())
 }

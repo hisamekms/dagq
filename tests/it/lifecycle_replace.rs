@@ -8,6 +8,7 @@ use dagq::domain::LeaseToken;
 
 use common::lifecycle::*;
 
+use common::queue::{queue_at_schema, user_version};
 use common::{Bounded, WithoutActor};
 use dagq::{
     VERSION,
@@ -1195,31 +1196,6 @@ fn up_replaces_a_supervisor_of_this_build_whose_agent_lacks_the_process_type() {
     );
 }
 
-/// Replace the queue at `db` with one made by only the first `version`
-/// migrations, as a binary of that schema left it. The queue is built up
-/// rather than cut down from the latest one, so a later migration does not
-/// change what this makes.
-fn queue_at_schema(db: &Path, version: usize) {
-    for side in ["", "-wal", "-shm"] {
-        let file = format!("{}{side}", db.display());
-        if Path::new(&file).exists() {
-            fs::remove_file(file).unwrap();
-        }
-    }
-    let conn = Connection::open(db).unwrap();
-    for migration in &dagq::infrastructure::schema::MIGRATIONS[..version] {
-        conn.execute_batch(migration).unwrap();
-    }
-    // What `migrate` writes with the migrations: the header and the floor.
-    conn.execute_batch(&format!(
-        "PRAGMA application_id = 1129599281; PRAGMA user_version = {version};
-         INSERT INTO schema_floor(singleton, floor) VALUES (1, {floor})
-         ON CONFLICT(singleton) DO UPDATE SET floor = excluded.floor;",
-        floor = dagq::infrastructure::schema::floor_for(version as i64),
-    ))
-    .unwrap();
-}
-
 /// `up`'s service applies the queue's pending migrations first only when
 /// every one of them is compatible (ADR-0045 decision 15, ADR-t3102-2
 /// decision 2), and refuses a breaking one with the way to it, before `up`
@@ -1336,13 +1312,6 @@ fn queue_at_last_breaking(db: &Path) -> bool {
         .unwrap();
     queue_at_schema(db, last_breaking);
     last_breaking < migrations.len()
-}
-
-fn user_version(db: &Path) -> i64 {
-    Connection::open(db)
-        .unwrap()
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap()
 }
 
 /// The compatible migrations `up` brings are applied by the queue's

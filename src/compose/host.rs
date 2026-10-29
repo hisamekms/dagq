@@ -7,7 +7,10 @@
 
 use super::OneShot;
 use crate::application::queue_commands::QueueCommand;
+use crate::application::queue_service::QueueServiceControl;
+use crate::application::supervisor_service::{SupervisorQueue, SupervisorQueues};
 use crate::domain::LeaseToken;
+use crate::domain::queue_service::{ControlCall, ControlCommand};
 use crate::infrastructure::location::runs_dir;
 use crate::infrastructure::queue_service as service;
 use anyhow::{Context, Result};
@@ -107,9 +110,9 @@ fn restart_arguments(
     Ok(arguments)
 }
 
-/// Starts a supervisor an update's job found gone with the binary in
+/// Starts a supervisor a person's `install` found gone with the binary in
 /// place, as [`update::restart`] decides: `binary` runs the `up` of one
-/// registered in the retired in-cmux mode.
+/// registered in the retired in-cmux mode, as the install's caller.
 fn restarter<'a>(
     db: &'a Path,
     binary: &'a Path,
@@ -119,6 +122,17 @@ fn restarter<'a>(
         update::restart(registration, &path_text(db)?, arguments, &|up| {
             LocalBinaries.run(binary, up)
         })
+    }
+}
+
+/// The restart of an update's job ([`update::restart_by_update`]): it runs
+/// no `up`.
+fn update_restarter<'a>(
+    db: &'a Path,
+    arguments: &'a [String],
+) -> impl Fn(&SupervisorRegistration) -> Result<Value> + 'a {
+    move |registration: &SupervisorRegistration| -> Result<Value> {
+        update::restart_by_update(registration, &path_text(db)?, arguments)
     }
 }
 
@@ -318,6 +332,17 @@ fn queue_paths(location: &QueueLocation) -> QueuePaths {
     }
 }
 
+/// The Git common directory a repository queue at `location` is bound to,
+/// which the service checks the queue's binding against before it answers,
+/// as the command line on the DB checked it; `None` for a `--db` queue.
+fn binding_of(location: &QueueLocation) -> Result<Option<String>> {
+    location
+        .git_common_dir
+        .as_deref()
+        .map(path_text)
+        .transpose()
+}
+
 fn inspect_repository(repo: &Path) -> Result<RepositoryPaths> {
     let repository = GitRepository::inspect(repo)?;
     let landing = repository
@@ -349,8 +374,8 @@ pub const COMMAND_TARGET: &str = "dagq::telemetry::command";
 /// decision 2), next to `rebind.jsonl`, which `rebind` keeps writing: its
 /// `outcome` (for `up`, the supervisor's and the inbox's) and its whole
 /// report as JSON, or the error that stopped it (a refused `rebind` too).
-/// A failure before the use case (opening the queue, inspecting the
-/// repository, `up`'s compatible migration) returns early, leaving only
+/// A failure before the use case (inspecting the repository, reaching
+/// `rebind`'s queue) returns early, leaving only
 /// the `dagq::telemetry::exit` record `main` writes. The host's `rebind`
 /// through the queue service records its answer, a refusal or a failure
 /// of the service's included, as the service does in its own log.
@@ -496,23 +521,109 @@ pub fn queue_service_status(db: &Path, client: &service::Client) -> Value {
 }
 
 /// `dagq service start`: see
-/// [`crate::application::queue_service::start_by_hand`], with `executable`.
-pub fn queue_service_start(db: &Path, executable: &Path) -> Result<Value> {
+/// [`crate::application::queue_service::start_by_hand`], with `executable`:
+/// its record goes to the service it started, as the principal the
+/// environment `env` names (the user with none), and the queue at `db`,
+/// bound to `binding`, is not opened.
+pub fn queue_service_start(
+    db: &Path,
+    executable: &Path,
+    binding: Option<&str>,
+    env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+) -> Result<Value> {
+    let log = lifecycle_socket_opener(db, binding, ControlCommand::ServiceStart, env, keep_log);
     crate::application::queue_service::start_by_hand(
-        &SqliteQueue::open(db)?,
+        &*log,
         &crate::infrastructure::queue_service::SystemQueueService::new(db, executable),
         crate::application::lifecycle::QUEUE_SERVICE_START_TIMEOUT,
     )
 }
 
 /// `dagq service stop`: see
-/// [`crate::application::queue_service::stop_by_hand`].
-pub fn queue_service_stop(db: &Path) -> Result<Value> {
+/// [`crate::application::queue_service::stop_by_hand`], its record sent to
+/// the service before it stops as [`queue_service_start`]'s.
+pub fn queue_service_stop(
+    db: &Path,
+    binding: Option<&str>,
+    env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+) -> Result<Value> {
+    let log = lifecycle_socket_opener(db, binding, ControlCommand::ServiceStop, env, keep_log);
     crate::application::queue_service::stop_by_hand(
-        &SqliteQueue::open(db)?,
+        &*log,
         &crate::infrastructure::queue_service::SystemQueueService::new(db, Path::new("dagq")),
         crate::application::lifecycle::QUEUE_SERVICE_START_TIMEOUT,
     )
+}
+
+/// Where `up`, `down`, `dagq inbox` and `service start|stop` send the
+/// operations of the queue they make ([`OneShot::lifecycle_route`]).
+#[derive(Debug, Clone, Copy)]
+pub enum LifecycleRoute {
+    /// The queue service's socket, each operation a step of the command
+    /// ([`UseCase::Control`](crate::domain::queue_service::UseCase::Control))
+    /// as the principal of the token the environment read by the function
+    /// names (`DAGQ_SERVICE_CREDENTIAL_FILE`, `DAGQ_ROLE`), or the user's
+    /// with none: the process opens no queue, and a service that does not
+    /// answer is the command's failure (fail closed).
+    Socket(fn(&str) -> Option<String>),
+    /// The service's use cases run in this process, each step made and
+    /// read back as on the socket, as the user's: a test's command that
+    /// keeps no service.
+    InProcess,
+}
+
+/// The queue of a lifecycle command's steps as the ports `P`, made again at
+/// each open: the steps' caller is made only when the queue is first
+/// needed, so `up` and `service start` reach the service they started.
+struct LifecycleOpener<P: ?Sized> {
+    queues: Box<dyn Fn() -> Result<SupervisorQueues> + Send + Sync>,
+    keep: fn(SupervisorQueue) -> Box<P>,
+}
+
+impl<P: ?Sized> QueueOpener<P> for LifecycleOpener<P> {
+    fn open(&self) -> Result<Box<P>> {
+        Ok((self.keep)((self.queues)()?.queue()))
+    }
+}
+
+fn keep_log(queue: SupervisorQueue) -> Box<dyn RunLog + Send> {
+    Box::new(queue)
+}
+
+fn keep_lifecycle(queue: SupervisorQueue) -> Box<dyn LifecycleQueue + Send> {
+    Box::new(queue)
+}
+
+/// The step of `command` this process makes.
+fn lifecycle_call(command: ControlCommand) -> ControlCall {
+    ControlCall {
+        command,
+        task: None,
+        yes: false,
+        pid: std::process::id(),
+    }
+}
+
+/// The queue of `command`'s steps on the socket of the service of the queue
+/// at `db`, bound to `binding`, as the principal `env` names
+/// ([`LifecycleRoute::Socket`]).
+fn lifecycle_socket_opener<P: ?Sized + 'static>(
+    db: &Path,
+    binding: Option<&str>,
+    command: ControlCommand,
+    env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    keep: fn(SupervisorQueue) -> Box<P>,
+) -> Arc<dyn QueueOpener<P>> {
+    let (db, binding) = (db.to_path_buf(), binding.map(str::to_owned));
+    Arc::new(LifecycleOpener {
+        queues: Box::new(move || {
+            super::lifecycle_socket(
+                service::Client::host(&db, binding.as_deref(), &env),
+                lifecycle_call(command),
+            )
+        }),
+        keep,
+    })
 }
 
 /// `init`: create the queue at `db`, naming the binary at `executable`
@@ -631,9 +742,30 @@ impl OneShot {
         let claude = ClaudeCode {
             executable: options.claude.clone(),
         };
-        let queues = |db: &Path| self.lifecycle_queues(db);
+        let binding = binding_of(location)?;
+        let queues = |db: &Path| {
+            self.lifecycle_opener(
+                db,
+                binding.as_deref(),
+                ControlCommand::Up,
+                Some(&environment.current_exe),
+                keep_lifecycle,
+            )
+        };
+        // The service `up` starts refuses a queue bound to another
+        // repository before it takes over or migrates: `up` opens none to
+        // look.
+        let bound = binding.clone();
+        let service = move |db: &Path, executable: &Path| -> Box<dyn QueueServiceControl> {
+            Box::new(
+                crate::infrastructure::queue_service::SystemQueueService::new(db, executable)
+                    .bound_to(bound.as_deref()),
+            )
+        };
+        let mut ports = self.lifecycle_ports(launchd, processes, &queues);
+        ports.queue_service = &service;
         let result = lifecycle::up(
-            &self.lifecycle_ports(launchd, processes, &queues),
+            &ports,
             &claude,
             &queue_paths(location),
             repo,
@@ -652,7 +784,16 @@ impl OneShot {
         processes: &dyn ProcessControl,
         options: &DownOptions,
     ) -> Result<Value> {
-        let queues = |db: &Path| self.lifecycle_queues(db);
+        let binding = binding_of(location)?;
+        let queues = |db: &Path| {
+            self.lifecycle_opener(
+                db,
+                binding.as_deref(),
+                ControlCommand::Down,
+                None,
+                keep_lifecycle,
+            )
+        };
         let result = lifecycle::down(
             &self.lifecycle_ports(launchd, processes, &queues),
             &queue_paths(location),
@@ -681,7 +822,16 @@ impl OneShot {
             crate::infrastructure::codex::codex_at_entry(&options.codex)
                 .unwrap_or_else(|_| options.codex.clone()),
         );
-        let queues = |db: &Path| self.event_queues(db);
+        let binding = binding_of(location)?;
+        let queues = |db: &Path| {
+            self.lifecycle_opener(
+                db,
+                binding.as_deref(),
+                ControlCommand::Inbox,
+                None,
+                keep_log,
+            )
+        };
         lifecycle::inbox(
             &InboxPorts {
                 files: &LocalRunFiles,
@@ -705,7 +855,16 @@ impl OneShot {
                 codex_settings: &crate::infrastructure::codex_inbox::check_this_user_config,
                 codex_usable: &crate::infrastructure::codex_inbox::check_this_codex,
                 claude_forbidden: &|db: &Path| {
-                    let supervisors = self.host_queues(db).open()?.supervisors()?;
+                    let supervisors = self
+                        .lifecycle_opener(
+                            db,
+                            binding.as_deref(),
+                            ControlCommand::Inbox,
+                            None,
+                            keep_lifecycle,
+                        )
+                        .open()?
+                        .supervisors()?;
                     Ok(lifecycle::claude_forbidden(
                         &supervisors,
                         &crate::infrastructure::adapters::SystemProcesses,
@@ -790,7 +949,7 @@ impl OneShot {
         let queues = |db: &Path| self.host_queues(db);
         let restart_arguments =
             restart_arguments(&job.claude, &job.codex, job.plugin_dir.as_deref())?;
-        let restart = restarter(&db, &job.target, &restart_arguments);
+        let restart = update_restarter(&db, &restart_arguments);
         let paths = update::UpdatePaths::under(&location.queue_dir);
         let e2e = installation::E2eSettings {
             command: job.e2e_command.clone(),
@@ -854,7 +1013,7 @@ impl OneShot {
         let queues = |db: &Path| self.host_queues(db);
         let restart_arguments =
             restart_arguments(&job.claude, &job.codex, job.plugin_dir.as_deref())?;
-        let restart = restarter(&db, &job.target, &restart_arguments);
+        let restart = update_restarter(&db, &restart_arguments);
         // Where the supervisor started it: its sessions' repository.
         let plugin = job.plugin_dir.is_none().then(|| ClaudePlugin {
             executable: job.claude.clone(),
@@ -953,20 +1112,37 @@ impl OneShot {
         }
     }
 
-    /// The queue at a path as the ports `up` and `down` take.
-    fn lifecycle_queues(&self, db: &Path) -> Arc<dyn QueueOpener<dyn LifecycleQueue + Send>> {
-        Arc::new(SqlitePorts {
-            opener: self.opener(db),
-            keep: |queue| -> Box<dyn LifecycleQueue + Send> { Box::new(queue) },
-        })
-    }
-
-    /// The queue at a path as its events, the one port `dagq inbox` takes.
-    fn event_queues(&self, db: &Path) -> Arc<dyn QueueOpener<dyn RunLog + Send>> {
-        Arc::new(SqlitePorts {
-            opener: self.opener(db),
-            keep: |queue| -> Box<dyn RunLog + Send> { Box::new(queue) },
-        })
+    /// The queue at `db`, bound to `binding`, as the ports `P` of
+    /// `command`'s steps, on [`Self::lifecycle_route`] (in this process, as
+    /// a command that runs `executable` when given): the queue `up`,
+    /// `down` and `dagq inbox` take, which they reach only through the
+    /// queue service's use cases.
+    fn lifecycle_opener<P: ?Sized + 'static>(
+        &self,
+        db: &Path,
+        binding: Option<&str>,
+        command: ControlCommand,
+        executable: Option<&Path>,
+        keep: fn(SupervisorQueue) -> Box<P>,
+    ) -> Arc<dyn QueueOpener<P>> {
+        match self.lifecycle_route {
+            LifecycleRoute::Socket(env) => lifecycle_socket_opener(db, binding, command, env, keep),
+            LifecycleRoute::InProcess => {
+                let (db, generators) = (db.to_path_buf(), self.generators.clone());
+                let executable = executable.map(Path::to_path_buf);
+                Arc::new(LifecycleOpener {
+                    queues: Box::new(move || {
+                        super::lifecycle_in_process(
+                            &db,
+                            generators.clone(),
+                            lifecycle_call(command),
+                            executable.as_deref(),
+                        )
+                    }),
+                    keep,
+                })
+            }
+        }
     }
 
     /// The queue at a path as the ports `install` and the update jobs take.
@@ -978,7 +1154,7 @@ impl OneShot {
     }
 
     /// The adapters `up` and `down` run on: the queue at a path through
-    /// `SqliteQueue` with these generators, Git for the repository, the
+    /// the queue service (`queues`), Git for the repository, the
     /// local files and Claude Code's global config for the folder trust.
     fn lifecycle_ports<'a>(
         &'a self,

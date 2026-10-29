@@ -443,7 +443,12 @@ string_enum!(UseCase {
     // only the operations that command makes. The landing's slot is taken
     // with the integrator's token issued in the same transaction, and the
     // landing goes on with that token as a supervisor's does. Git and the
-    // programs stay with the client (ADR-t3102-3 decision 5).
+    // programs stay with the client (ADR-t3102-3 decision 5). So does
+    // `up`, `down`, `dagq inbox` and `service start|stop` of the user, the
+    // inbox, a planner or a supervisor (`service.lifecycle`): launchd, the
+    // processes and the service's own process stay with the client, and
+    // only the registrations, the events and the reads they make are
+    // steps ([`ControlCommand::lifecycle`]).
     Control => "control",
     // A session wrapper's operations on its own target, a run or a
     // planner (ADR-t3102-1 decision 4, ADR-t3102-3 decision 3), each the
@@ -582,7 +587,8 @@ impl UseCase {
     /// The use case a `dagq` command line goes to through the service:
     /// `words` are its arguments after the global options, the subcommand
     /// first; a control-side command that sends its steps as
-    /// [`Self::Control`] goes to that. `None` for a command the service does
+    /// [`Self::Control`] goes to that, and so do `up`, `down`, `dagq inbox`
+    /// and `service start|stop`. `None` for a command the service does
     /// not answer (the rest of the control side's, `watch`, whose looks
     /// only the host's `dagq` sends as [`Self::WatchPoll`], `locate`,
     /// `doctor`, ...).
@@ -674,9 +680,9 @@ impl UseCase {
             ("request", Some("add")) => Self::RequestAdd,
             ("request", Some("decline")) => Self::RequestDecline,
             ("mark", _) => Self::Mark,
-            ("integrate" | "review" | "observe" | "throughput-review" | "setup-review", _) => {
-                Self::Control
-            }
+            ("integrate" | "review" | "observe" | "throughput-review" | "setup-review", _)
+            | ("up" | "down" | "inbox", _)
+            | ("service", Some("start" | "stop")) => Self::Control,
             _ => return None,
         })
     }
@@ -840,7 +846,26 @@ string_enum!(ControlCommand {
     Observe => "observe",
     ThroughputReview => "throughput_review",
     SetupReview => "setup_review",
+    Up => "up",
+    Down => "down",
+    Inbox => "inbox",
+    ServiceStart => "service_start",
+    ServiceStop => "service_stop",
 });
+
+impl ControlCommand {
+    /// Whether the command starts, stops or opens what serves the queue
+    /// (`up`, `down`, `dagq inbox`, `service start|stop`): its operation is
+    /// `service.lifecycle`, and its steps act on any supervisor's
+    /// registration, as the command line on the DB did, rather than under
+    /// a lease of its own.
+    pub const fn lifecycle(self) -> bool {
+        matches!(
+            self,
+            Self::Up | Self::Down | Self::Inbox | Self::ServiceStart | Self::ServiceStop
+        )
+    }
+}
 
 /// The command a request of [`UseCase::Control`] is a step of, as its
 /// command line names it: the task `integrate ID` and `review ID` name
@@ -4424,6 +4449,11 @@ mod tests {
             (&["observe", "--daily"], "control"),
             (&["throughput-review"], "control"),
             (&["setup-review", "--yes"], "control"),
+            (&["up", "--auto-update"], "control"),
+            (&["down", "--wait"], "control"),
+            (&["inbox"], "control"),
+            (&["service", "start"], "control"),
+            (&["service", "stop"], "control"),
         ] {
             assert_eq!(
                 UseCase::of_command(words).map(UseCase::as_str),
@@ -4442,6 +4472,8 @@ mod tests {
             &["dependency"],
             &["request"],
             &["supervise"],
+            &["service", "serve"],
+            &["service", "status"],
         ] {
             assert_eq!(UseCase::of_command(words), None, "{words:?}");
         }

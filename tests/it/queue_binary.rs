@@ -8,6 +8,7 @@ use crate::common;
 use common::lifecycle::*;
 use common::{Bounded, WithoutActor};
 
+use common::queue::user_version;
 use common::service::OwnedByTest;
 use dagq::application::queue_service::QueueServiceControl;
 use dagq::infrastructure::{
@@ -34,13 +35,6 @@ fn run(binary: &Path, db: &Path, args: &[&str]) -> Output {
 fn error_of(output: &Output) -> String {
     assert!(!output.status.success(), "succeeded");
     String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
-fn user_version(db: &Path) -> i64 {
-    rusqlite::Connection::open(db)
-        .unwrap()
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap()
 }
 
 /// A copy of the test's `dagq` at `path`.

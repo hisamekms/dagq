@@ -76,6 +76,7 @@ mod lifecycle_install_drain;
 mod lifecycle_install_watch;
 mod lifecycle_plan;
 mod lifecycle_replace;
+mod lifecycle_service;
 mod lifecycle_up;
 mod live_alerts;
 mod location;

@@ -4,7 +4,12 @@
 //! `setup-review` run in the caller's process, which does their Git and
 //! starts their programs (ADR-t3102-3 decision 5), and send each operation
 //! of the queue they make as a step of their command, one transaction
-//! each, as the supervisor's are ([`super::SupervisorQueue`]).
+//! each, as the supervisor's are ([`super::SupervisorQueue`]). So do `up`,
+//! `down`, `dagq inbox` and `service start|stop`, which keep launchd, the
+//! processes and the service's own process on the caller's side and send
+//! the registrations, events and reads they make ([`lifecycle_ops`]); their
+//! steps act on any supervisor's registration, as the principal that may
+//! run them (`service.lifecycle`) starts and stops every supervisor.
 //!
 //! At each step the command's operation is authorized for the principal
 //! as the command line authorizes it before it runs (refusals recorded), so
@@ -87,6 +92,10 @@ pub fn operation(call: &ControlCall) -> Result<Operation> {
         ),
         ControlCommand::Observe | ControlCommand::ThroughputReview => Operation::Observe,
         ControlCommand::SetupReview => Operation::SetupReview { yes: call.yes },
+        ControlCommand::Up => Operation::Up,
+        ControlCommand::Down => Operation::Down,
+        ControlCommand::Inbox => Operation::OpenInbox,
+        ControlCommand::ServiceStart | ControlCommand::ServiceStop => Operation::QueueService,
     })
 }
 
@@ -140,6 +149,48 @@ fn recorded_kinds(command: ControlCommand) -> (&'static [EventKind], &'static [E
             ],
             &[],
         ),
+        ControlCommand::Up => (
+            &[
+                EventKind::QueueServiceStarted,
+                EventKind::QueueBrokerStarted,
+            ],
+            &[],
+        ),
+        ControlCommand::Down => (
+            &[
+                EventKind::QueueServiceStopRequested,
+                EventKind::QueueBrokerStopRequested,
+                EventKind::QueueServiceStopped,
+                EventKind::QueueBrokerStopped,
+            ],
+            &[],
+        ),
+        ControlCommand::Inbox => (&[EventKind::InboxOpened], &[]),
+        ControlCommand::ServiceStart => (&[EventKind::QueueServiceStarted], &[]),
+        ControlCommand::ServiceStop => (&[EventKind::QueueServiceStopped], &[]),
+    }
+}
+
+/// The operations on the supervisors' registrations and the sessions'
+/// records `command` makes besides its events ([`recorded_kinds`]): `up`
+/// prunes the registrations whose process is gone, hands the live ones
+/// over or drains them, records the mode of the one it started and sets
+/// their automatic update, and forgets the workspaces an earlier binary
+/// recorded, the drained supervisor's too; `down` prunes and forgets the
+/// supervisor's workspace.
+fn lifecycle_ops(command: ControlCommand) -> &'static [&'static str] {
+    match command {
+        ControlCommand::Up => &[
+            "prune_supervisor",
+            "request_handoff",
+            "cancel_handoff",
+            "set_supervisor_mode",
+            "set_auto_update",
+            "forget_retired_session_workspaces",
+            "remove_session_workspace",
+        ],
+        ControlCommand::Down => &["prune_supervisor", "remove_session_workspace"],
+        _ => &[],
     }
 }
 
@@ -163,7 +214,15 @@ pub fn scope(command: ControlCommand, op: &str, args: &[Value]) -> Result<(), St
         ),
         "record_finding" => command == ControlCommand::ThroughputReview,
         "hold" => own_hold(command, args),
-        _ if TELEMETRY_OPS.contains(&op) => command != ControlCommand::Review,
+        // A pruned registration's stop, as the command line records it.
+        "prune_supervisor" => {
+            lifecycle_ops(command).contains(&op)
+                && kind(1).is_some_and(|kind| kind == EventKind::SupervisorStopped)
+        }
+        _ if lifecycle_ops(command).contains(&op) => true,
+        _ if TELEMETRY_OPS.contains(&op) => {
+            command != ControlCommand::Review && !command.lifecycle()
+        }
         _ => super::needs::READS.contains(&op),
     };
     if named {
@@ -383,6 +442,19 @@ pub fn answer(
         }
         _ => {}
     }
+    if op == "request_handoff" {
+        let (_, binary): (Value, String) = read(op, args.clone())?;
+        if let Some(why) = handoff_refusal(&binary, process, |pid| backend.executable_of(pid)) {
+            return Err(super::super::queue_service::refuse_recorded(
+                &mut *queue,
+                &actor,
+                Capability::ServiceLifecycle,
+                &crate::domain::Resource::Queue,
+                crate::domain::authorization::DenyReason::Resource,
+                &why,
+            ));
+        }
+    }
     let store = queue.supervisor_store();
     if op == "record_runtime_event" {
         let run: RunId = read(op, call.args.first().cloned().unwrap_or(Value::Null))?;
@@ -393,10 +465,20 @@ pub fn answer(
         return super::dispatch::dispatch_once(store, op, args, &record);
     }
     // The caller names no lease of its own here: its landing's goes with
-    // the integrator's token.
+    // the integrator's token. `up` and `down` act on every supervisor's
+    // registration, as the command line on the DB did: the principal that
+    // may run them (`service.lifecycle`) is the one that starts and stops
+    // the supervisors.
+    let lifecycle = control.command.lifecycle();
     super::dispatch::dispatch(
         store,
-        &|_| Err(anyhow::Error::new(NotOwnLease)),
+        &|_| {
+            if lifecycle {
+                Ok(())
+            } else {
+                Err(anyhow::Error::new(NotOwnLease))
+            }
+        },
         &|pid| backend.alive(pid),
         backend.now_ms() / 1000,
         op,
@@ -509,6 +591,44 @@ fn landing_refusal(named: &ControlCall, connection: Option<u32>) -> Option<Strin
         (None, None) => Some(format!(
             "the landing's step names process {} and its connection tells none",
             named.pid
+        )),
+    }
+}
+
+/// Why `up`'s handoff to `binary` is refused, if it is: a live
+/// supervisor execs the binary it is handed with its own rights, so only
+/// the executable of the process that sends the step, as the connection
+/// tells it (`connection`) and `executable_of` reads it, is handed over,
+/// as the command line hands over its own. One that cannot be told is
+/// refused.
+fn handoff_refusal(
+    binary: &str,
+    connection: Option<u32>,
+    executable_of: impl Fn(u32) -> Option<std::path::PathBuf>,
+) -> Option<String> {
+    let Some(pid) = connection else {
+        return Some(format!(
+            "the handoff to {binary} comes from a connection that tells no process"
+        ));
+    };
+    let named = std::path::Path::new(binary);
+    // A relative path names a file only from the supervisor's directory.
+    if !named.is_absolute() {
+        return Some(format!("the handoff names {binary}, not an absolute path"));
+    }
+    let own = executable_of(pid);
+    let same = own.as_deref().is_some_and(|own| {
+        own == named
+            || matches!(
+                (own.canonicalize(), named.canonicalize()),
+                (Ok(own), Ok(named)) if own == named
+            )
+    });
+    match same {
+        true => None,
+        false => Some(format!(
+            "the handoff names {binary}, not the executable of process {pid} that asks for it ({})",
+            own.map_or_else(|| "unknown".to_owned(), |own| own.display().to_string())
         )),
     }
 }
@@ -693,6 +813,141 @@ mod tests {
         // connection that tells no process, are refused.
         assert!(landing_refusal(&named, Some(8)).is_some_and(|why| why.contains("process 8")));
         assert!(landing_refusal(&named, None).is_some());
+    }
+
+    #[test]
+    fn up_hands_over_only_the_executable_of_the_process_that_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join("dagq");
+        std::fs::write(&own, "").unwrap();
+        let link = dir.path().join("linked");
+        std::os::unix::fs::symlink(&own, &link).unwrap();
+        let other = dir.path().join("other");
+        std::fs::write(&other, "").unwrap();
+        let runs = |pid: u32| (pid == 7).then(|| own.clone());
+        let text = |path: &std::path::Path| path.to_str().unwrap().to_owned();
+        assert_eq!(handoff_refusal(&text(&own), Some(7), runs), None);
+        // The same file by another name is the same executable.
+        assert_eq!(handoff_refusal(&text(&link), Some(7), runs), None);
+        // Another file, the executable of a process the system cannot
+        // read, and a connection that tells no process are refused.
+        let refused = handoff_refusal(&text(&other), Some(7), runs).unwrap();
+        assert!(
+            refused.contains("not the executable of process 7"),
+            "{refused}"
+        );
+        assert!(handoff_refusal(&text(&own), Some(8), runs).is_some());
+        assert!(handoff_refusal(&text(&own), None, runs).is_some());
+        let relative = |_: u32| Some(std::path::PathBuf::from("dagq"));
+        assert!(handoff_refusal("dagq", Some(7), relative).is_some());
+    }
+
+    #[test]
+    fn the_lifecycle_commands_are_authorized_as_the_service_s_lifecycle() {
+        use ControlCommand as C;
+        for (command, expected) in [
+            (C::Up, Operation::Up),
+            (C::Down, Operation::Down),
+            (C::Inbox, Operation::OpenInbox),
+            (C::ServiceStart, Operation::QueueService),
+            (C::ServiceStop, Operation::QueueService),
+        ] {
+            assert!(command.lifecycle(), "{command:?}");
+            assert_eq!(operation(&call(command)).unwrap(), expected);
+        }
+        for command in [
+            C::Integrate,
+            C::Review,
+            C::Observe,
+            C::ThroughputReview,
+            C::SetupReview,
+        ] {
+            assert!(!command.lifecycle(), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn a_lifecycle_command_sends_the_reads_and_its_own_registrations_and_records() {
+        use ControlCommand as C;
+        let event = |kind: EventKind| serde_json::to_value(kind).unwrap();
+        let queue_event = |kind| vec![event(kind), json!({})];
+        let records = |command, kind| scope(command, "record_queue_event", &queue_event(kind));
+        let lifecycle = [C::Up, C::Down, C::Inbox, C::ServiceStart, C::ServiceStop];
+        for command in lifecycle {
+            assert!(scope(command, "supervisors", &[]).is_ok(), "{command:?}");
+            assert!(scope(command, CONTROL_QUEUE, &[]).is_ok(), "{command:?}");
+            // None claims, lands, issues a telemetry token or takes a
+            // handoff as a supervisor would.
+            for op in [
+                "claim_for_supervisor",
+                BEGIN_LANDING,
+                APPROVE_INTEGRATION,
+                "issue_telemetry",
+                "take_handoff",
+                "register_supervisor",
+                "heartbeat",
+            ] {
+                assert!(scope(command, op, &[]).is_err(), "{command:?} {op}");
+            }
+        }
+        assert!(records(C::Up, EventKind::QueueServiceStarted).is_ok());
+        // A supervisor records its own start and drain, never `up`.
+        assert!(records(C::Up, EventKind::SupervisorDraining).is_err());
+        assert!(records(C::Up, EventKind::SupervisorStarted).is_err());
+        assert!(records(C::Up, EventKind::QueueServiceStopped).is_err());
+        assert!(records(C::Down, EventKind::QueueServiceStopped).is_ok());
+        assert!(records(C::Down, EventKind::QueueBrokerStopRequested).is_ok());
+        assert!(records(C::Down, EventKind::QueueServiceStarted).is_err());
+        assert!(records(C::Inbox, EventKind::InboxOpened).is_ok());
+        assert!(records(C::Inbox, EventKind::SupervisorStarted).is_err());
+        assert!(records(C::ServiceStart, EventKind::QueueServiceStarted).is_ok());
+        assert!(records(C::ServiceStart, EventKind::QueueServiceStopped).is_err());
+        assert!(records(C::ServiceStop, EventKind::QueueServiceStopped).is_ok());
+        assert!(records(C::ServiceStop, EventKind::QueueServiceStarted).is_err());
+        let prune = |kind| vec![json!("token"), event(kind), json!({})];
+        for command in [C::Up, C::Down] {
+            assert!(
+                scope(
+                    command,
+                    "prune_supervisor",
+                    &prune(EventKind::SupervisorStopped)
+                )
+                .is_ok()
+            );
+            assert!(
+                scope(
+                    command,
+                    "prune_supervisor",
+                    &prune(EventKind::QueueServiceStopped)
+                )
+                .is_err()
+            );
+        }
+        for command in [C::Inbox, C::ServiceStart, C::ServiceStop, C::Integrate] {
+            assert!(
+                scope(
+                    command,
+                    "prune_supervisor",
+                    &prune(EventKind::SupervisorStopped)
+                )
+                .is_err(),
+                "{command:?}"
+            );
+        }
+        for op in [
+            "request_handoff",
+            "cancel_handoff",
+            "set_supervisor_mode",
+            "set_auto_update",
+            "forget_retired_session_workspaces",
+        ] {
+            assert!(scope(C::Up, op, &[]).is_ok(), "{op}");
+            assert!(scope(C::Down, op, &[]).is_err(), "{op}");
+            assert!(scope(C::Integrate, op, &[]).is_err(), "{op}");
+        }
+        assert!(scope(C::Up, "remove_session_workspace", &[]).is_ok());
+        assert!(scope(C::Down, "remove_session_workspace", &[]).is_ok());
+        assert!(scope(C::Inbox, "remove_session_workspace", &[]).is_err());
     }
 
     #[test]
