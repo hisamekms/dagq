@@ -122,7 +122,7 @@ roleの名前だけでactorを名指さないplannerのidは、どのproposalの
 | plan-review-job・goal-review-job・throughput-review-job | 読み取りだけ | throughput-review-jobは[スループットの見直し](supervisor-lifecycle/throughput-review.md)（ADR-t996-1） |
 | setup-review-job | 読み取りだけ | なし（[setup-review](supervisor-lifecycle/setup-review.md)） |
 | observer | 読み取り・`queue.watch`・`ci.read`・`finding.record`・`finding.resolve`・`finding.ask`・`eval.read` | `finding.resolve`と`finding.ask`はfindingだけ |
-| supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`eval.read`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request`・`replan.park`・`replan.apply`・`token.issue`・`queue_broker.record` | なし。`queue.admin`は自動更新が新しいbuildで`migrate --check`と使い捨てqueueの`init`を打つため（適用は[入れ替えの口のservice](persistence.md#database-setup-and-migrations)）。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
+| supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`eval.read`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request`・`replan.park`・`replan.apply`・`token.issue`・`queue_broker.record` | なし。`queue.admin`は自動更新の確認のため（下の`auto-update`）。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
 | wrapper | 読み取り・`session.run`・`session.record` | 自分のrunかplanner（tokenのprincipalのactor id）だけ（ADR-t3102-1決定4） |
 | integrator | 読み取り・`landing.land`・`landing.push` | なし |
 | executor-telemetry | `telemetry.report`だけ | tokenの対象に制御側が登録したsessionだけ |
@@ -285,10 +285,10 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
 - `supervise`は`scheduler.supervise`を持つuser・inbox・supervisorだけが打てる。
   launchdのsupervisorは`DAGQ_ROLE`を持たない（user）ので、`up`を打ったのがplannerでも起動は通る（登録済みのin-cmuxのものは`DAGQ_ROLE=supervisor`で動く）。
   exec の引き継ぎは同じ環境のまま自分をexecするので、同じroleで判定される。
-  plannerは`supervise`を直接打てない（ADR-t728-1の決定7の表にschedulerは無い）。
   起動したプロセスのeventのactorは、呼び出し元ではなく`supervisor:<pid>`（`event_actor`）
 - `auto-update`は`install`と同じ`service.install`で、supervisorが自分の環境（`supervisor:<pid>`）で起動する。
-  `install`と`auto-update`は新しいバイナリでの確認と`up`を子プロセスとして同じ環境のまま打つので、そのroleは`queue.admin`と`service.lifecycle`も持つ。
+  `install`と`auto-update`は新しいバイナリでの確認を子として同じ環境のまま打つので、そのroleは`queue.admin`と`service.lifecycle`も持つ。
+  子の`up`は`install`だけが呼び出し元のprincipalで打ち、更新のjobは打たずlaunchdに任せるか打つ`up`をaskで人とinboxに知らせる（[Auto-update](supervisor-lifecycle/auto-update.md)の5）。
   人とinboxとplannerも`install`と同じ権限で打てる（手順の再現と復旧）。
   `observe`（`observe.run`）もsupervisorが自分の環境で起動し、その中のagentだけがobserverになる
 
