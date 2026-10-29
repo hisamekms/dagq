@@ -77,9 +77,7 @@ impl SqliteQueue {
     pub fn register_recurring_draft(&mut self, item: &RecurringDraft) -> Result<RecurringOutcome> {
         let now = self.generators.clock.now();
         let timestamp = self.generators.clock.timestamp();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("register_recurring_draft", TransactionBehavior::Immediate)?;
         let open = open_task(&tx, &item.key)?;
         let last = last_registration(&tx, &item.key)?;
         if let Some(held) = held_back(now, item.interval_days, last.map(|(_, at)| at), open) {

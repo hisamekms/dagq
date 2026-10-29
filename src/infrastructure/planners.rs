@@ -57,10 +57,7 @@ impl SqliteQueue {
         answered: bool,
         payload: &serde_json::Value,
     ) -> Result<bool> {
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.conn,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        let tx = self.write_tx("mark_answer_wait", rusqlite::TransactionBehavior::Immediate)?;
         for ask in asks {
             let waiting: bool = tx
                 .query_row(
@@ -189,10 +186,7 @@ impl SqliteQueue {
     /// declines that request ([`super::plan_requests::decline_after_planner`]),
     /// in the same transaction.
     pub fn close_planner(&self, id: PlannerId, error: Option<&str>) -> Result<PlannerSession> {
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.conn,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        let tx = self.write_tx("close_planner", rusqlite::TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         let closed = tx.execute(
             "UPDATE planners SET closed_at=?2, error=coalesce(error, ?3)

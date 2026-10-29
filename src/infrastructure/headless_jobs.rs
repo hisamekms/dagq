@@ -16,7 +16,7 @@ impl HeadlessJobStore for SqliteQueue {
     fn record_headless_job(&self, job: &NewHeadlessJob) -> Result<i64> {
         check_non_blank("headless job kind", job.kind)?;
         let now = self.generators.clock.now();
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_headless_job", TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO headless_jobs(kind, label, run_id, proposal_id, goal_id, attempt, pid,
                                        process_start, supervisor_token, started_at, provider, stdout)
@@ -47,7 +47,7 @@ impl HeadlessJobStore for SqliteQueue {
     fn end_headless_job(&self, id: i64, outcome: &str) -> Result<bool> {
         check_non_blank("headless job outcome", outcome)?;
         let now = self.generators.clock.now();
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("end_headless_job", TransactionBehavior::Immediate)?;
         let ended = tx.execute(
             "UPDATE headless_jobs SET ended_at=?2, outcome=?3 WHERE id=?1 AND ended_at IS NULL",
             params![id, now, outcome],

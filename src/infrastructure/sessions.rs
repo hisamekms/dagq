@@ -19,13 +19,14 @@ use crate::domain::event_kind::{self, EventKind};
 use std::cell::RefCell;
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
+use std::time::Duration;
 use tracing::{debug, info};
 
 use super::{
     run_env,
-    sqlite::{event_row, json_col},
+    sqlite::{WriteTx, event_row, json_col},
     transcripts::ClaudeTranscripts,
 };
 use crate::{
@@ -1702,7 +1703,7 @@ fn hook_intake_finished_sql() -> String {
 /// Finish closed hook spans once, including their last (not necessarily
 /// followed by another input) turn. An append-only final session_turns event
 /// carries the measurements; even an unreadable transcript gets a final marker.
-fn record_closed_hook_turns(conn: &Connection) -> Result<usize> {
+fn record_closed_hook_turns(conn: &Connection, write_hold_warn: Duration) -> Result<usize> {
     let pending = |conn: &Connection| -> Result<Vec<(OpenSpan, String)>> {
         Ok(conn
             .prepare(&pending_hook_intakes_sql())?
@@ -1722,7 +1723,7 @@ fn record_closed_hook_turns(conn: &Connection) -> Result<usize> {
     for (span, end) in pending(conn)? {
         // One span that cannot be finalized does not hold back the others
         // nor the open spans' turns: it is tried again next time.
-        match finalize_hook_intake(conn, &span, &end) {
+        match finalize_hook_intake(conn, write_hold_warn, &span, &end) {
             Ok(true) => recorded += 1,
             Ok(false) => {}
             Err(error) => info!(
@@ -1738,9 +1739,20 @@ fn record_closed_hook_turns(conn: &Connection) -> Result<usize> {
 /// Take in the transcript of the closed hook `span` that ended at `end`:
 /// its remaining turns and its final `session_turns` with its
 /// measurements. `false` when another intake finished it first.
-fn finalize_hook_intake(conn: &Connection, span: &OpenSpan, end: &str) -> Result<bool> {
+fn finalize_hook_intake(
+    conn: &Connection,
+    write_hold_warn: Duration,
+    span: &OpenSpan,
+    end: &str,
+) -> Result<bool> {
     let _read = read_before(conn, Closing::Spans(&[(span.clone(), DEFERRED)]))?;
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let tx = WriteTx::begin(
+        conn,
+        "finalize_hook_intake",
+        TransactionBehavior::Immediate,
+        write_hold_warn,
+    )?
+    .recorded();
     // Another intake may have finished while this one read the transcript.
     let finished: bool =
         tx.query_row(&hook_intake_finished_sql(), [span.opened_event_id], |r| {
@@ -1776,11 +1788,11 @@ fn finalize_hook_intake(conn: &Connection, span: &OpenSpan, end: &str) -> Result
 /// finalized too, once. The transcript is read outside the write lock;
 /// the span is checked again under it, since the process that closes it
 /// (a session's wrapper) records its remaining turns itself.
-pub(super) fn record_open_turns(conn: &Connection) -> Result<usize> {
+pub(super) fn record_open_turns(conn: &Connection, write_hold_warn: Duration) -> Result<usize> {
     let open = open_spans(conn, "1=1", "1=1", params![])?;
     // The closed hook spans' intake failing does not hold back the open
     // spans' turns.
-    let mut recorded = record_closed_hook_turns(conn).unwrap_or_else(|error| {
+    let mut recorded = record_closed_hook_turns(conn, write_hold_warn).unwrap_or_else(|error| {
         info!("closed hook spans not taken in now: {error:#}");
         0
     });
@@ -1802,7 +1814,13 @@ pub(super) fn record_open_turns(conn: &Connection) -> Result<usize> {
                 continue;
             }
         };
-        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        let tx = WriteTx::begin(
+            conn,
+            "record_open_turns",
+            TransactionBehavior::Immediate,
+            write_hold_warn,
+        )?
+        .recorded();
         if span_closed(&tx, span.opened_event_id)? {
             continue;
         }
@@ -2004,7 +2022,11 @@ pub(super) fn span_task(conn: &Connection, span: &OpenSpan) -> Result<Option<Tas
 /// replaced span count it once. A runtime planner's span is on the first task of
 /// its proposal, with the proposal and its goals; the others are on no
 /// task. Only the spans are written: no run, proposal or planner changes.
-pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value> {
+pub(super) fn record_hook(
+    conn: &Connection,
+    write_hold_warn: Duration,
+    hook: &SessionHook,
+) -> Result<Value> {
     if headless_planner_hook(conn, hook)? {
         return Ok(json!({
             "kind": hook.kind,
@@ -2014,7 +2036,13 @@ pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value
             "skipped": "headless_planner",
         }));
     }
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let tx = WriteTx::begin(
+        conn,
+        "record_hook",
+        TransactionBehavior::Immediate,
+        write_hold_warn,
+    )?
+    .recorded();
     let (task_id, context) = planner_context(&tx, hook)?;
     let open = open_hook_spans(&tx)?;
     let changes = hook_changes(hook, &open, &context);
@@ -2117,7 +2145,11 @@ pub(super) fn hook_spans(conn: &Connection) -> Result<Vec<OpenSpan>> {
 /// transcript now (ADR-t655-1 decision 1) and ends at its last record (now
 /// when it cannot be read, ADR-0048 decision 7). Returns how many it
 /// closed.
-pub(super) fn close_inferred_hook_spans(conn: &Connection, ended: &[EventId]) -> Result<usize> {
+pub(super) fn close_inferred_hook_spans(
+    conn: &Connection,
+    write_hold_warn: Duration,
+    ended: &[EventId],
+) -> Result<usize> {
     let spans: Vec<OpenSpan> = open_hook_spans(conn)?
         .into_iter()
         .filter(|span| ended.contains(&span.opened_event_id))
@@ -2128,7 +2160,13 @@ pub(super) fn close_inferred_hook_spans(conn: &Connection, ended: &[EventId]) ->
     let closing: Vec<(OpenSpan, &'static str)> =
         spans.iter().map(|span| (span.clone(), INFERRED)).collect();
     let _read = read_before(conn, Closing::Spans(&closing))?;
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let tx = WriteTx::begin(
+        conn,
+        "close_inferred_hook_spans",
+        TransactionBehavior::Immediate,
+        write_hold_warn,
+    )?
+    .recorded();
     let now = now(&tx)?;
     let mut closed = 0;
     // Found outside the write lock; checked again under it one by one, so a
@@ -2327,6 +2365,8 @@ pub(super) mod tests {
     use super::*;
     use crate::domain::LeaseToken;
     use crate::infrastructure::git_binary::git_executable;
+    use crate::infrastructure::sqlite::WRITE_HOLD_WARN;
+    use rusqlite::Transaction;
 
     thread_local! {
         /// The transcripts read on this thread.
@@ -2798,8 +2838,8 @@ pub(super) mod tests {
             record(EventKind::TurnStarted, json!({"turn": 2})),
             base + 40_000,
         );
-        assert_eq!(record_open_turns(conn).unwrap(), 1);
-        assert_eq!(record_open_turns(conn).unwrap(), 0);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 1);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 0);
         at(
             record(
                 EventKind::TurnFinished,
@@ -3157,8 +3197,8 @@ pub(super) mod tests {
             base + 40_000,
         );
         assert_eq!(of_kind(&queue, SESSION_OPENED).len(), 2);
-        assert_eq!(record_open_turns(conn).unwrap(), 2);
-        assert_eq!(record_open_turns(conn).unwrap(), 0);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 2);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 0);
         queue
             .close_planner(crate::domain::PlannerId::new(4), Some("gone"))
             .unwrap();
@@ -3180,9 +3220,9 @@ pub(super) mod tests {
             planner_id: Some(5),
             ..hook(dir.path(), event, RUNTIME_PLANNER, "s-5")
         };
-        let skipped = record_hook(conn, &planner5(Some("startup"))).unwrap();
+        let skipped = record_hook(conn, WRITE_HOLD_WARN, &planner5(Some("startup"))).unwrap();
         assert_eq!(skipped["skipped"], "headless_planner");
-        record_hook(conn, &planner5(None)).unwrap();
+        record_hook(conn, WRITE_HOLD_WARN, &planner5(None)).unwrap();
         assert_eq!(of_kind(&queue, SESSION_OPENED).len(), 2);
         assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
         assert!(open_hook_spans(conn).unwrap().is_empty());
@@ -3206,9 +3246,9 @@ pub(super) mod tests {
         let start = retime(conn, 0, 100);
         // The first turn is finished (the next input came); the second not.
         transcript(dir.path(), start, &[(5, 25), (40, 50)], None);
-        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 1);
         // Nothing new: nothing written.
-        assert_eq!(record_open_turns(conn).unwrap(), 0);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 0);
         let recorded = of_kind(&queue, SESSION_TURNS);
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].payload["kind"], "worker");
@@ -3397,7 +3437,7 @@ pub(super) mod tests {
             json!({"session_id": RUN}),
         )
         .unwrap();
-        assert_eq!(record_open_turns(conn).unwrap(), 0);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 0);
     }
 
     /// The `dagq.toml` of a repository that declares the Rust profile, as
@@ -4616,34 +4656,49 @@ pub(super) mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &queue.conn;
-        let started = record_hook(conn, &hook(dir.path(), Some("startup"), INBOX, "s-1")).unwrap();
+        let started = record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &hook(dir.path(), Some("startup"), INBOX, "s-1"),
+        )
+        .unwrap();
         assert_eq!(started["closed"], json!([]));
         let opened = started["opened"].as_i64().unwrap();
         let start = retime(conn, 0, 100);
         hook_transcript(dir.path(), "s-1", start, &[(5, 25), (40, 50)], 60);
         // Finished turns of the open span, recorded as they come.
-        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 1);
         assert_eq!(of_kind(&queue, SESSION_TURNS)[0].payload["kind"], "inbox");
         // A compaction keeps the session id: the span goes on.
-        let compacted =
-            record_hook(conn, &hook(dir.path(), Some("compact"), INBOX, "s-1")).unwrap();
+        let compacted = record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &hook(dir.path(), Some("compact"), INBOX, "s-1"),
+        )
+        .unwrap();
         assert_eq!(compacted["opened"], Value::Null);
         assert_eq!(compacted["closed"], json!([]));
         // A /clear whose SessionStart comes first: the new session id
         // closes the span of its kind as inferred.
         READS.set(0);
-        let cleared = record_hook(conn, &hook(dir.path(), Some("clear"), INBOX, "s-2")).unwrap();
+        let cleared = record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &hook(dir.path(), Some("clear"), INBOX, "s-2"),
+        )
+        .unwrap();
         assert_eq!(READS.get(), 0);
         assert_eq!(cleared["closed"], json!([opened]));
         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
         assert_eq!(closed.payload["reason"], INFERRED);
         assert_eq!(closed.payload["active_unavailable"], "hook_intake_pending");
         assert_eq!(closed.task_id, None);
-        assert_eq!(record_open_turns(conn).unwrap(), 1);
-        assert_eq!(record_open_turns(conn).unwrap(), 0);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 1);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 0);
         // Its SessionEnd, late, and a second one: closed once.
         for _ in 0..2 {
-            let ended = record_hook(conn, &hook(dir.path(), None, INBOX, "s-1")).unwrap();
+            let ended =
+                record_hook(conn, WRITE_HOLD_WARN, &hook(dir.path(), None, INBOX, "s-1")).unwrap();
             assert_eq!(ended["closed"], json!([]));
         }
         assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
@@ -4686,10 +4741,10 @@ pub(super) mod tests {
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &queue.conn;
         let start_hook = hook(dir.path(), Some("startup"), INBOX, "s");
-        record_hook(conn, &start_hook).unwrap();
+        record_hook(conn, WRITE_HOLD_WARN, &start_hook).unwrap();
         let start = retime(conn, 0, 100);
         hook_transcript(dir.path(), "s", start, &[(5, 25), (40, 50)], 60);
-        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 1);
         // Append the final assistant without another input: open intake
         // must leave this turn for the close, clipping it at that boundary.
         let path = dir.path().join("s.jsonl");
@@ -4704,7 +4759,7 @@ pub(super) mod tests {
         text.push_str(&format!("\n{}\n{}", assistant(80_000), assistant(150_000)));
         std::fs::write(&path, text).unwrap();
         READS.set(0);
-        record_hook(conn, &hook(dir.path(), None, INBOX, "s")).unwrap();
+        record_hook(conn, WRITE_HOLD_WARN, &hook(dir.path(), None, INBOX, "s")).unwrap();
         assert_eq!(READS.get(), 0);
         let closed = of_kind(&queue, SESSION_CLOSED)[0].clone();
         let end = start + 100_000;
@@ -4713,9 +4768,9 @@ pub(super) mod tests {
             params![millis_text(end), closed.id],
         )
         .unwrap();
-        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 1);
         assert_eq!(READS.get(), 1);
-        assert_eq!(record_open_turns(conn).unwrap(), 0);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 0);
         assert_eq!(READS.get(), 1);
         let opened = of_kind(&queue, SESSION_OPENED)[0].id;
         let recorded = recorded_turns(conn, opened).unwrap();
@@ -4738,7 +4793,7 @@ pub(super) mod tests {
         assert!(!spans[0].active_unavailable);
         assert_eq!(spans[0].end, Some(end));
         // Finalized even if intake is called again or SessionEnd is duplicated.
-        record_hook(conn, &hook(dir.path(), None, INBOX, "s")).unwrap();
+        record_hook(conn, WRITE_HOLD_WARN, &hook(dir.path(), None, INBOX, "s")).unwrap();
         assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
         assert_eq!(
             of_kind(&queue, SESSION_TURNS)
@@ -4756,12 +4811,22 @@ pub(super) mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &queue.conn;
-        record_hook(conn, &hook(dir.path(), Some("startup"), INBOX, "missing")).unwrap();
+        record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &hook(dir.path(), Some("startup"), INBOX, "missing"),
+        )
+        .unwrap();
         READS.set(0);
-        record_hook(conn, &hook(dir.path(), None, INBOX, "missing")).unwrap();
+        record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &hook(dir.path(), None, INBOX, "missing"),
+        )
+        .unwrap();
         assert_eq!(READS.get(), 0);
         assert!(open_hook_spans(conn).unwrap().is_empty());
-        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 1);
         let final_turns = of_kind(&queue, SESSION_TURNS);
         assert_eq!(final_turns.len(), 1);
         assert_eq!(final_turns[0].payload["active"], "unavailable");
@@ -4769,7 +4834,7 @@ pub(super) mod tests {
             final_turns[0].payload["active_unavailable"],
             "transcript_missing"
         );
-        assert_eq!(record_open_turns(conn).unwrap(), 0);
+        assert_eq!(record_open_turns(conn, WRITE_HOLD_WARN).unwrap(), 0);
         assert_eq!(READS.get(), 1);
         assert!(open_hook_spans(conn).unwrap().is_empty());
     }
@@ -4782,12 +4847,12 @@ pub(super) mod tests {
         let conn = &queue.conn;
         let start = |kind, session| hook(dir.path(), Some("startup"), kind, session);
         for (kind, session) in [(INBOX, "i"), (PLANNER, "p"), (RUNTIME_PLANNER, "r")] {
-            record_hook(conn, &start(kind, session)).unwrap();
+            record_hook(conn, WRITE_HOLD_WARN, &start(kind, session)).unwrap();
         }
         READS.set(0);
-        record_hook(conn, &start(INBOX, "i")).unwrap();
+        record_hook(conn, WRITE_HOLD_WARN, &start(INBOX, "i")).unwrap();
         assert!(of_kind(&queue, SESSION_CLOSED).is_empty());
-        record_hook(conn, &start(INBOX, "i-next")).unwrap();
+        record_hook(conn, WRITE_HOLD_WARN, &start(INBOX, "i-next")).unwrap();
         assert_eq!(READS.get(), 0);
         let closed = of_kind(&queue, SESSION_CLOSED);
         assert_eq!(closed.len(), 1);
@@ -4839,14 +4904,29 @@ pub(super) mod tests {
             planner_id: planner,
             ..hook(dir.path(), Some("startup"), kind, session)
         };
-        record_hook(conn, &planner(RUNTIME_PLANNER, "p-3", Some(3))).unwrap();
+        record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &planner(RUNTIME_PLANNER, "p-3", Some(3)),
+        )
+        .unwrap();
         // Its end closes it on the same task.
-        record_hook(conn, &hook(dir.path(), None, RUNTIME_PLANNER, "p-3")).unwrap();
+        record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &hook(dir.path(), None, RUNTIME_PLANNER, "p-3"),
+        )
+        .unwrap();
         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
         assert_eq!(closed.task_id, Some(first));
         assert_eq!(closed.payload["reason"], crate::domain::sessions::EXITED);
-        record_hook(conn, &planner(RUNTIME_PLANNER, "p-4", Some(4))).unwrap();
-        record_hook(conn, &planner(PLANNER, "p-5", Some(3))).unwrap();
+        record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &planner(RUNTIME_PLANNER, "p-4", Some(4)),
+        )
+        .unwrap();
+        record_hook(conn, WRITE_HOLD_WARN, &planner(PLANNER, "p-5", Some(3))).unwrap();
         let opened = of_kind(&queue, SESSION_OPENED);
         assert_eq!(opened[0].task_id, Some(first));
         assert_eq!(opened[0].payload["proposal_id"], 5);
@@ -4869,8 +4949,18 @@ pub(super) mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &queue.conn;
-        record_hook(conn, &hook(dir.path(), Some("startup"), INBOX, "s-1")).unwrap();
-        record_hook(conn, &hook(dir.path(), Some("startup"), PLANNER, "s-2")).unwrap();
+        record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &hook(dir.path(), Some("startup"), INBOX, "s-1"),
+        )
+        .unwrap();
+        record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &hook(dir.path(), Some("startup"), PLANNER, "s-2"),
+        )
+        .unwrap();
         let start = retime(conn, 0, 100);
         hook_transcript(dir.path(), "s-2", start, &[(5, 25)], 30);
         let spans = hook_spans(conn).unwrap();
@@ -4879,9 +4969,18 @@ pub(super) mod tests {
             [INBOX, PLANNER]
         );
         let ended = [spans[1].opened_event_id];
-        assert_eq!(close_inferred_hook_spans(conn, &ended).unwrap(), 1);
-        assert_eq!(close_inferred_hook_spans(conn, &ended).unwrap(), 0);
-        assert_eq!(close_inferred_hook_spans(conn, &[]).unwrap(), 0);
+        assert_eq!(
+            close_inferred_hook_spans(conn, WRITE_HOLD_WARN, &ended).unwrap(),
+            1
+        );
+        assert_eq!(
+            close_inferred_hook_spans(conn, WRITE_HOLD_WARN, &ended).unwrap(),
+            0
+        );
+        assert_eq!(
+            close_inferred_hook_spans(conn, WRITE_HOLD_WARN, &[]).unwrap(),
+            0
+        );
         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
         assert_eq!(closed.payload["kind"], "planner");
         assert_eq!(closed.payload["reason"], INFERRED);
@@ -5023,7 +5122,7 @@ pub(super) mod tests {
                 ClaudeTranscripts::use_config_dir_in_test(&config);
                 let other = SqliteQueue::open(&db).unwrap();
                 if between == Between::RecordsTurns {
-                    assert_eq!(record_open_turns(&other.conn).unwrap(), 1);
+                    assert_eq!(record_open_turns(&other.conn, WRITE_HOLD_WARN).unwrap(), 1);
                 } else {
                     event(
                         &other.conn,

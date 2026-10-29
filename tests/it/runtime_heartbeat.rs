@@ -561,6 +561,65 @@ fn a_queue_s_deferred_hold_with_no_row_changed_is_recorded_as_an_event() {
     }
 }
 
+/// A queue's transactions that hold the lock from their `BEGIN` and are
+/// past its threshold are recorded as `queue_write_held_long` by their
+/// names, both that of a store method on the queue (a headless job's
+/// record) and that of a session hook, which the session registry writes on
+/// the queue's connection with the queue's threshold; what each wrote is as
+/// it is otherwise.
+#[test]
+fn a_job_record_and_a_session_hook_that_held_the_lock_long_are_recorded_by_their_names() {
+    use dagq::application::{HeadlessJobStore, NewHeadlessJob, SessionRegistry};
+    use dagq::domain::sessions::{HookEvent, INBOX, SessionHook};
+    let _test = common::test();
+    let (_dir, db, _queue) = registered();
+    let queue = SqliteQueue::open(&db)
+        .unwrap()
+        .with_write_hold_warn(Duration::ZERO);
+    let job = queue
+        .record_headless_job(&NewHeadlessJob {
+            kind: dagq::domain::headless_job::RECOVERY,
+            label: None,
+            run_id: None,
+            proposal_id: None,
+            goal_id: None,
+            attempt: 1,
+            provider: None,
+            pid: std::process::id(),
+            process_start: None,
+            supervisor_token: LeaseToken::new("sv"),
+            stdout: None,
+        })
+        .unwrap();
+    assert!(job > 0);
+    let started = queue
+        .record_session_hook(&SessionHook {
+            event: HookEvent::Start {
+                source: "startup".into(),
+            },
+            kind: INBOX,
+            session_id: "s-1".into(),
+            transcript_path: None,
+            cwd: None,
+            planner_id: None,
+            launch: None,
+            model: None,
+        })
+        .unwrap();
+    assert!(started["opened"].is_i64(), "{started}");
+
+    let recorded = held_long(&db);
+    let names: Vec<&str> = recorded
+        .iter()
+        .map(|payload| payload["transaction"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["record_headless_job", "record_hook"]);
+    for payload in &recorded {
+        assert!(payload["held_ms"].is_u64(), "{payload}");
+        assert_eq!(payload["pid"], std::process::id(), "{payload}");
+    }
+}
+
 /// A queue's immediate transaction of a runtime transition, past the
 /// threshold, warns and is recorded as `queue_write_held_long` with its
 /// name, hold, role and pid, also when it fails and rolls back; the error

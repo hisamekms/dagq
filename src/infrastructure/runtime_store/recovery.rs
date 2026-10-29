@@ -1337,7 +1337,7 @@ impl SqliteQueue {
     /// task unchanged.
     pub fn end_holds_of_ended_tasks(&mut self) -> Result<Vec<TaskId>> {
         let now = self.generators.clock.now();
-        crate::infrastructure::task_holds::end_holds_of_ended(&mut self.conn, now)
+        crate::infrastructure::task_holds::end_holds_of_ended(self, now)
     }
 
     /// The kept results whose hold is released and that are not settled.

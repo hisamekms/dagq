@@ -4,7 +4,7 @@
 //! judged the same breach one records it, and a breach's immediate push is
 //! counted against the day's limit once.
 use anyhow::{Result, bail};
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
 
 use super::sqlite::SqliteQueue;
@@ -92,7 +92,7 @@ impl SqliteQueue {
         if !KPI_BREACH_KINDS.contains(&kind.as_str()) {
             bail!("{kind} is not a breach event");
         }
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_kpi_breach", TransactionBehavior::Immediate)?;
         let key = breach_key(&payload);
         let open = open_in(&tx)?
             .iter()
@@ -131,7 +131,7 @@ impl SqliteQueue {
     /// since the latest `kpi_push_sent`: a failure that goes on keeps the
     /// one attention. `false` when it was not recorded.
     pub fn record_kpi_push_abandoned(&self, payload: Value) -> Result<bool> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_kpi_push_abandoned", TransactionBehavior::Immediate)?;
         let latest: Option<String> = tx
             .query_row(
                 "SELECT kind FROM run_events WHERE kind IN (?1, ?2)

@@ -42,7 +42,7 @@ impl SqliteQueue {
     /// authorization, by `supervisor`.
     pub fn record_ci_check(&self, record: CiCheckRecord) -> Result<Option<CiCheckRecorded>> {
         let now = self.generators.clock.now();
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_ci_check", TransactionBehavior::Immediate)?;
         let latest: Option<i64> = tx
             .query_row(
                 "SELECT id FROM run_events WHERE kind=?1

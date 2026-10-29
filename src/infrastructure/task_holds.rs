@@ -48,9 +48,7 @@ impl SqliteQueue {
         by_id: &str,
     ) -> Result<HoldRecorded> {
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("hold_task", TransactionBehavior::Immediate)?;
         let task_id = resolve(&tx, target)?;
         let task = read_task(&tx, task_id)?;
         let open = open_hold_of(&tx, task_id)?;
@@ -184,9 +182,7 @@ impl SqliteQueue {
             None => None,
         };
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("release_task", TransactionBehavior::Immediate)?;
         let task_id = resolve(&tx, &request.target)?;
         let task = read_task(&tx, task_id)?;
         let open = open_hold_of(&tx, task_id)?;
@@ -450,9 +446,7 @@ impl SqliteQueue {
     /// holds told, with why.
     pub fn remind_task_holds(&mut self) -> Result<Vec<(TaskHold, task_hold::HoldReminder)>> {
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("remind_task_holds", TransactionBehavior::Immediate)?;
         let holds: Vec<TaskHold> = tx
             .prepare(
                 "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
@@ -664,11 +658,11 @@ fn discard_kept_of_ended(
 /// holds ([`end_with_task`]), as that end would have, the task unchanged:
 /// in one transaction, which a pass with none to close does not open. The
 /// tasks whose hold was closed.
-pub(super) fn end_holds_of_ended(conn: &mut Connection, now: i64) -> Result<Vec<TaskId>> {
-    if ended_with_open_hold(conn)?.is_empty() {
+pub(super) fn end_holds_of_ended(queue: &SqliteQueue, now: i64) -> Result<Vec<TaskId>> {
+    if ended_with_open_hold(&queue.conn)?.is_empty() {
         return Ok(Vec::new());
     }
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = queue.write_tx("end_holds_of_ended", TransactionBehavior::Immediate)?;
     let mut closed = Vec::new();
     for (task, status) in ended_with_open_hold(&tx)? {
         if end_with_task(&tx, task, status, now)? {

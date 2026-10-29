@@ -204,22 +204,29 @@ impl SessionRegistry for SqliteQueue {
         SqliteQueue::planner_silent(self, id, payload)
     }
     fn record_session_turns(&self) -> Result<usize> {
-        crate::infrastructure::sessions::record_open_turns(&self.conn)
+        crate::infrastructure::sessions::record_open_turns(&self.conn, self.write_hold_warn)
     }
     fn record_session_tokens(&self) -> Result<usize> {
-        crate::infrastructure::session_tokens::record_session_tokens(&self.conn)
+        crate::infrastructure::session_tokens::record_session_tokens(
+            &self.conn,
+            self.write_hold_warn,
+        )
     }
     fn record_session_hook(
         &self,
         hook: &crate::domain::sessions::SessionHook,
     ) -> Result<serde_json::Value> {
-        crate::infrastructure::sessions::record_hook(&self.conn, hook)
+        crate::infrastructure::sessions::record_hook(&self.conn, self.write_hold_warn, hook)
     }
     fn open_hook_session_spans(&self) -> Result<Vec<crate::domain::sessions::OpenSpan>> {
         crate::infrastructure::sessions::hook_spans(&self.conn)
     }
     fn close_inferred_sessions(&self, ended: &[EventId]) -> Result<usize> {
-        crate::infrastructure::sessions::close_inferred_hook_spans(&self.conn, ended)
+        crate::infrastructure::sessions::close_inferred_hook_spans(
+            &self.conn,
+            self.write_hold_warn,
+            ended,
+        )
     }
     fn close_review_session(
         &self,
