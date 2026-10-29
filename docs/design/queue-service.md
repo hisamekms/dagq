@@ -204,7 +204,7 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
 - `watch`（`queue.watch`。hostのCLIは上の`watch_poll`）: jobとworkerのpolicyに無い操作で、今のCLIでも拒まれる
 - `graph --format svg`: hostのd2を起動するので、serviceは読み取りとして受け取らない（`json`と`d2`は答える）。
   promptとskillはsvgを名指さない
-- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`（attentionだけ`service_status`）: 制御側の状態を見るもので、jobのpromptは名指さない。
+- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`と`queue-broker status`（attentionだけ`service_status`）: 制御側の状態を見るもので、jobのpromptは名指さない。
   クライアントモードでの扱いは[クライアントモード](#クライアントモード)
 
 ## クライアントモード
@@ -224,7 +224,7 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
   serviceの`authorization_denied`は、codeに加えてローカルのCLIの断りと同じ`denied`（role・capability・reason）とerrorの文（observerとjobには各々の決まった文）を出す。
   クライアントで断るもの（`no_use_case`・`queue_named`など）は`denied`を持たない
   どの断りでもDBを開くことに戻らない（fail closed）
-- `doctor`・`service status`は制御側（人かinboxがhostで打つ）のコマンドとして`control_side_command`で断り、errorの文がコマンド名とそれを言う。
+- `doctor`・`service status`・`queue-broker status`は制御側（人かinboxがhostで打つ）のコマンドとして`control_side_command`で断り、errorの文がコマンド名とそれを言う。
   DBもserviceも触らない。
   `no_use_case`になるのはそのほかのserviceのユースケースでない全てのコマンド。
 - `locate`はDBのpathを出さずにsocket（brokerの宛てではbroker）を答え、DBの有無を答えない。
@@ -297,7 +297,6 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
 - containerの中からbrokerを通す`telemetry_report`（[Queue broker](queue-broker.md)の`TokenRefusal`）。
   containerのrunのstepはhostのwrapperが送る
-- 段(4)〜(6)の残り: brokerの見せ方と人の手での起動・停止（[Queue broker](queue-broker.md#まだ無いもの)）
 - 段(5)の残り: hostのCLIが送らないもの（[送る範囲](queue-service-host-cli.md#送る範囲)。決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
 
 ## CIの見張り（ADR-t1920-1）

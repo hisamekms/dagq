@@ -53,6 +53,7 @@ related:
 - `service status`はserviceに届かなくても答える。
   socketとserviceの記録はhostのCLIが見て、届けばqueueのattentionだけを`service_status`（`queue.read`）で読み、届かなければ[落ちたときの知らせ](queue-service.md#落ちたときの知らせadr-t3102-3決定12)の記録と次の手を返す（`application::queue_service::host_status`）。
   どちらでもDBを開かない。
+- `queue-broker status`も同じくserviceに届かなくても答え、brokerの記録とhealthをhostのCLIが見て、attentionは`service_status`の答えから読む（`application::queue_broker::host_status`）。
 
 ## 対話と操作
 
@@ -89,7 +90,7 @@ Gitとprogramはserviceでなくクライアントがユースケースの外で
 人とinboxがhostで打つ`integrate`・`review`・`observe`（`--history`と`--input`は読み取り）・`throughput-review`・`setup-review`は、自分のプロセスでGit・検証・agentを走らせ、queueの操作を1つずつそのコマンドのstepとして`control`のユースケースで送る（ADR-t3102-3決定3〜5）。
 hostの`dagq`（`--db`）もクライアントモード（socketとtoken）も同じ経路で、brokerを通る宛てからは送らない（`ControlCaller`）。
 stepの形はsupervisorの操作と同じ名前と引数（`ControlParams`）で、serviceの側は`application::supervisor_service::control`。
-`up`・`down`・`dagq inbox`・`service start`・`service stop`も、launchdとプロセスとserviceのプロセスを自分で扱い、登録・event・runの読み書きをstepとして送る（`OneShot::lifecycle_route`）。
+`up`・`down`・`dagq inbox`・`service start`・`service stop`・`queue-broker start|stop`も、launchdとプロセスとserviceかbrokerのプロセスを自分で扱い、登録・event・runの読み書きをstepとして送る（`OneShot::lifecycle_route`）。
 `up`と`service start`はserviceを起動してから、`down`と`service stop`はserviceを止める前に送り、`service start`は動いているserviceを再利用するときも最初のstepを送る。
 `up`が起動する入れ替えの口のserviceは、引き継ぐ前にqueueのrepositoryの束縛を確かめ、違えば何も入れ替えもmigrateもせずに断る（`ServeOptions::binding`）。
 
@@ -116,8 +117,11 @@ stepの形はsupervisorの操作と同じ名前と引数（`ControlParams`）で
 - 結果の記録（eventと着地）は、serviceが取るまでこのプロセスが期限なく送り直し、同じ記録はidentityで1回だけ取る（`control::resending`）。
   呼び出し元のprincipalで送れるのはこのプロセスだけなので、supervisorのjobのコマンドと違い、期限の後に記録を残して終わることはしない
   記録でないstepが届かないときは新しいstepを始めず、DBを開かずに`unreachable`で終わる
-  `up`・`down`・`inbox`・`service start`・`service stop`は送り直さず、届かないstepはそのerrorでコマンドが失敗する。
+  `up`・`down`・`inbox`・`service start|stop`・`queue-broker start|stop`は送り直さず、届かないstepはそのerrorでコマンドが失敗する。
   例外は`down`と`service stop`の止める前の記録で、届かないか記録だけが失敗すれば警告して止め（`service stop`は`unrecorded`）、`service stop`の呼び出し元をserviceが最初のstepで断れば（認証・認可・束縛）止めずに失敗する（`queue_service::stop_record`）。
+  `queue-broker start|stop`は最初のstepを止めるか起動する前に送り、断られれば何もしない。
+  startはserviceに届かなければ起動せず、起動の記録が失敗すればその失敗で終わる（brokerは動いたまま）。
+  stopはserviceに届かないか止めた後の記録が失敗しても止めて`unrecorded`を返す（`queue_broker::start_by_hand`・`stop_by_hand`）。
   `down --wait`は、drainを終えた最後のsupervisorがserviceを止めて届かなくなれば、supervisorのプロセスだけで終わりを見る
 
 ## principal

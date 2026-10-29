@@ -95,7 +95,10 @@ pub fn operation(call: &ControlCall) -> Result<Operation> {
         ControlCommand::Up => Operation::Up,
         ControlCommand::Down => Operation::Down,
         ControlCommand::Inbox => Operation::OpenInbox,
-        ControlCommand::ServiceStart | ControlCommand::ServiceStop => Operation::QueueService,
+        ControlCommand::ServiceStart
+        | ControlCommand::ServiceStop
+        | ControlCommand::BrokerStart
+        | ControlCommand::BrokerStop => Operation::QueueService,
     })
 }
 
@@ -168,6 +171,8 @@ fn recorded_kinds(command: ControlCommand) -> (&'static [EventKind], &'static [E
         ControlCommand::Inbox => (&[EventKind::InboxOpened], &[]),
         ControlCommand::ServiceStart => (&[EventKind::QueueServiceStarted], &[]),
         ControlCommand::ServiceStop => (&[EventKind::QueueServiceStopped], &[]),
+        ControlCommand::BrokerStart => (&[EventKind::QueueBrokerStarted], &[]),
+        ControlCommand::BrokerStop => (&[EventKind::QueueBrokerStopped], &[]),
     }
 }
 
@@ -851,6 +856,8 @@ mod tests {
             (C::Inbox, Operation::OpenInbox),
             (C::ServiceStart, Operation::QueueService),
             (C::ServiceStop, Operation::QueueService),
+            (C::BrokerStart, Operation::QueueService),
+            (C::BrokerStop, Operation::QueueService),
         ] {
             assert!(command.lifecycle(), "{command:?}");
             assert_eq!(operation(&call(command)).unwrap(), expected);
@@ -872,7 +879,15 @@ mod tests {
         let event = |kind: EventKind| serde_json::to_value(kind).unwrap();
         let queue_event = |kind| vec![event(kind), json!({})];
         let records = |command, kind| scope(command, "record_queue_event", &queue_event(kind));
-        let lifecycle = [C::Up, C::Down, C::Inbox, C::ServiceStart, C::ServiceStop];
+        let lifecycle = [
+            C::Up,
+            C::Down,
+            C::Inbox,
+            C::ServiceStart,
+            C::ServiceStop,
+            C::BrokerStart,
+            C::BrokerStop,
+        ];
         for command in lifecycle {
             assert!(scope(command, "supervisors", &[]).is_ok(), "{command:?}");
             assert!(scope(command, CONTROL_QUEUE, &[]).is_ok(), "{command:?}");
@@ -904,6 +919,10 @@ mod tests {
         assert!(records(C::ServiceStart, EventKind::QueueServiceStopped).is_err());
         assert!(records(C::ServiceStop, EventKind::QueueServiceStopped).is_ok());
         assert!(records(C::ServiceStop, EventKind::QueueServiceStarted).is_err());
+        assert!(records(C::BrokerStart, EventKind::QueueBrokerStarted).is_ok());
+        assert!(records(C::BrokerStart, EventKind::QueueServiceStarted).is_err());
+        assert!(records(C::BrokerStop, EventKind::QueueBrokerStopped).is_ok());
+        assert!(records(C::BrokerStop, EventKind::QueueBrokerStarted).is_err());
         let prune = |kind| vec![json!("token"), event(kind), json!({})];
         for command in [C::Up, C::Down] {
             assert!(

@@ -851,18 +851,27 @@ string_enum!(ControlCommand {
     Inbox => "inbox",
     ServiceStart => "service_start",
     ServiceStop => "service_stop",
+    BrokerStart => "broker_start",
+    BrokerStop => "broker_stop",
 });
 
 impl ControlCommand {
     /// Whether the command starts, stops or opens what serves the queue
-    /// (`up`, `down`, `dagq inbox`, `service start|stop`): its operation is
+    /// (`up`, `down`, `dagq inbox`, `service start|stop`, `queue-broker
+    /// start|stop`): its operation is
     /// `service.lifecycle`, and its steps act on any supervisor's
     /// registration, as the command line on the DB did, rather than under
     /// a lease of its own.
     pub const fn lifecycle(self) -> bool {
         matches!(
             self,
-            Self::Up | Self::Down | Self::Inbox | Self::ServiceStart | Self::ServiceStop
+            Self::Up
+                | Self::Down
+                | Self::Inbox
+                | Self::ServiceStart
+                | Self::ServiceStop
+                | Self::BrokerStart
+                | Self::BrokerStop
         )
     }
 }

@@ -2580,10 +2580,11 @@ pub enum AttentionNext {
     QueueServiceStatus,
     /// The supervisor could not keep the queue broker running (it did not
     /// start again within its limit, `queue_broker_down`, ADR-t2114-1
-    /// decision 1): a person reads the broker's log under the queue's
-    /// `broker/`, and runs `up` again. Meanwhile nothing set to the
-    /// container runs. It ends once the broker runs again.
-    QueueBrokerLog,
+    /// decision 1): a person reads `dagq queue-broker status` and the
+    /// broker's log, and starts it again (`dagq queue-broker start` or
+    /// `up`). Meanwhile nothing set to the container runs. It ends once the
+    /// broker runs again.
+    QueueBrokerStatus,
     /// The supervisor could not keep the relay of a run's container
     /// running (`queue_relay_down`, ADR-t2114-3 decision 4): a person looks
     /// at the dagq podman machine (`podman machine list`, the relay
@@ -2740,7 +2741,7 @@ impl fmt::Display for AttentionNext {
             Self::CheckObserver => f.write_str("check the failed observer"),
             Self::FixPush => f.write_str("fix the push command"),
             Self::QueueServiceStatus => f.write_str("dagq service status"),
-            Self::QueueBrokerLog => f.write_str("read the queue broker's log and run up"),
+            Self::QueueBrokerStatus => f.write_str("dagq queue-broker status"),
             Self::QueueRelayMachine => f.write_str("look at the dagq podman machine's relays"),
             Self::WaitingForMemory => {
                 f.write_str("waiting for the dagq podman machine's memory (runtime)")
@@ -3178,7 +3179,7 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
         }
         (Some(EventKind::KpiPushAbandoned), _) => Some(AttentionNext::FixPush),
         (Some(EventKind::QueueServiceDown), _) => Some(AttentionNext::QueueServiceStatus),
-        (Some(EventKind::QueueBrokerDown), _) => Some(AttentionNext::QueueBrokerLog),
+        (Some(EventKind::QueueBrokerDown), _) => Some(AttentionNext::QueueBrokerStatus),
         (Some(EventKind::QueueRelayDown), _) => Some(AttentionNext::QueueRelayMachine),
         // A hold past its `until` or a day on, told once per day
         // (ADR-t1879-1).
@@ -4515,7 +4516,7 @@ mod attention_tests {
             (
                 "queue_broker_down",
                 json!({"reason": "start_failed"}),
-                Some(QueueBrokerLog),
+                Some(QueueBrokerStatus),
             ),
             ("queue_broker_running", json!({}), None),
             ("queue_broker_denied", json!({"run": "r1"}), None),
@@ -4906,10 +4907,7 @@ mod attention_tests {
         assert_eq!(CheckObserver.to_string(), "check the failed observer");
         assert_eq!(FixPush.to_string(), "fix the push command");
         assert_eq!(QueueServiceStatus.to_string(), "dagq service status");
-        assert_eq!(
-            QueueBrokerLog.to_string(),
-            "read the queue broker's log and run up"
-        );
+        assert_eq!(QueueBrokerStatus.to_string(), "dagq queue-broker status");
         assert_eq!(
             QueueRelayMachine.to_string(),
             "look at the dagq podman machine's relays"

@@ -57,7 +57,7 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
   - `fix dagq.toml`: the CI watch or the container runtime does not work as configured. The person fixes it, or on their word the inbox asks through a planning request for a task that changes the configuration.
   - `fix the push command`: the host's push command dropped a message; the person fixes the command or its service.
   - `dagq service status`: the queue service was down and answers again (while it is down, `status` and `watch` fail as `unreachable` instead: `watch.md`). Show `dagq service status` and the service's log; if it is not running now, `dagq service start` (or `up`) at the person's word.
-  - `read the queue broker's log and run up`: show the broker's log; at the person's word, `up`.
+  - `dagq queue-broker status`: the supervisor could not keep the queue broker running, and nothing set to the container runs meanwhile. Show its state, address, build and attention (its log is `broker/broker.log` under the queue's directory); at the person's word, `dagq queue-broker start` or `up`.
   - `look at the dagq podman machine's relays`: show `podman machine list` and the error; the person mends the machine.
   - `look at the dagq podman machine's memory`: a run's turn or verification has waited long for the machine's memory before its container starts. Show the error and `podman --connection dagq ps`; the person stops a container that does not end, or changes the machine's or the containers' memory in `host.toml`. The attention clears once the wait ends.
   - `restart supervisor`: no supervisor of the queue is live. `up` on the person's word. Two supervisors: `down --wait`, then `up` (`dagq-recover`'s `reference/up-down.md`).

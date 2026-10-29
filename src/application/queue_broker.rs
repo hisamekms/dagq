@@ -122,6 +122,140 @@ pub fn started_payload(by: &str, report: &Value) -> Value {
     })
 }
 
+/// The queue broker as `status`, `doctor` and `dagq queue-broker status`
+/// show it: `probe`, what a look at its record and its health found
+/// (whether it runs, its address and build), and the [`attention`] of the
+/// queue's `log` when it can be read (`null` without one). A look starts
+/// no broker.
+pub fn view(probe: &BrokerProbe, log: Option<&dyn super::RunLog>) -> Value {
+    view_with(probe, log.map_or(Value::Null, attention))
+}
+
+/// Whether the attention the latest of the broker's events in `log` leaves
+/// stands (`queue_broker_down`): a boolean, or `{"error"}` when the read
+/// fails.
+pub fn attention(log: &dyn super::RunLog) -> Value {
+    use crate::domain::queue_broker::QUEUE_BROKER_ATTENTION_KINDS;
+    match log.latest_queue_event(&QUEUE_BROKER_ATTENTION_KINDS) {
+        Ok(latest) => json!(latest.is_some_and(|event| {
+            crate::domain::queue_broker::attention_stands(Some(&event.kind))
+        })),
+        Err(error) => json!({"error": format!("{error:#}")}),
+    }
+}
+
+/// [`view`] with its `attention` read elsewhere.
+pub fn view_with(probe: &BrokerProbe, attention: Value) -> Value {
+    let mut view = serde_json::to_value(probe).unwrap_or(Value::Null);
+    view["attention"] = attention;
+    if !probe.current() {
+        view["next"] = json!(NOT_CURRENT_NEXT);
+    }
+    view
+}
+
+/// What [`view_with`] says to do next of a broker that does not run this
+/// binary's build.
+pub const NOT_CURRENT_NEXT: &str = "dagq queue-broker start (or dagq up) starts it or replaces \
+                                    one of another build; its log is broker/broker.log under the \
+                                    queue's directory";
+
+/// The host's `dagq queue-broker status`, which opens no queue and starts
+/// no broker: `probe` with the attention `service` reads for it. Only a
+/// service its look finds running is asked (its `service_status`, whose
+/// `queue_broker_attention` an older service does not give: `null`); one
+/// stopped or unreachable, or that does not answer the read, leaves the
+/// attention unknown (`null`), and one that refuses leaves it `{"error"}`.
+pub fn host_status(
+    probe: &BrokerProbe,
+    service: &dyn super::queue_service::ServiceStatusSource,
+) -> Value {
+    use super::queue_service::ServiceStatusRead;
+    let attention = if service.probe().state == ServiceState::Running {
+        match service.read() {
+            ServiceStatusRead::Answered(answer) => answer["queue_broker_attention"].clone(),
+            ServiceStatusRead::Unreached(_) => Value::Null,
+            ServiceStatusRead::Refused(why) => json!({"error": why}),
+        }
+    } else {
+        Value::Null
+    };
+    view_with(probe, attention)
+}
+
+/// `dagq queue-broker start`: open the queue `log` opens on the queue
+/// service first, whose first step authenticates the caller, authorizes it
+/// (`service.lifecycle`) and checks the repository's binding, so a caller
+/// it refuses starts nothing; then [`ensure`] the broker with `control` (a
+/// broker of this build that answers is reused, one of another build or
+/// one that does not answer is replaced), recorded as
+/// `queue_broker_started` (`by: queue-broker start`) when it started one.
+pub fn start_by_hand(
+    log: &dyn super::QueueOpener<dyn super::RunLog + Send>,
+    control: &dyn QueueBrokerControl,
+    timeout: Duration,
+) -> Result<Value> {
+    let log = log
+        .open()
+        .context("the queue service refused or did not answer the queue broker's start")?;
+    let report = ensure(control, timeout)?;
+    if report["outcome"] != "reused" {
+        log.record_queue_event(
+            crate::domain::EventKind::QueueBrokerStarted,
+            started_payload("queue-broker start", &report),
+        )?;
+    }
+    Ok(report)
+}
+
+/// `dagq queue-broker stop`: stop the queue's broker with `control`, which
+/// clears its record, and record `queue_broker_stopped` (`by: queue-broker
+/// stop`) on the queue `log` opens. The queue is opened first: a caller
+/// the service refuses stops nothing. A service out of reach stops the
+/// broker all the same (only the host's user reaches the service's socket
+/// and the broker's directory), and so does a record that fails, `unrecorded`
+/// saying why. A supervisor at work starts it again at its next look.
+pub fn stop_by_hand(
+    log: &dyn super::QueueOpener<dyn super::RunLog + Send>,
+    control: &dyn QueueBrokerControl,
+    timeout: Duration,
+) -> Result<Value> {
+    let (opened, mut unrecorded) = match log.open() {
+        Ok(log) => (Some(log), None),
+        Err(error) if super::supervisor_service::unreachable(&error) => {
+            (None, Some(format!("{error:#}")))
+        }
+        Err(error) => {
+            return Err(error.context(
+                "the queue service refused the caller of the queue broker's stop, so it was not \
+                 stopped",
+            ));
+        }
+    };
+    let mut report = match control.stop(timeout)? {
+        Some(pid) => {
+            if let Some(log) = &opened
+                && let Err(error) = log.record_queue_event(
+                    crate::domain::EventKind::QueueBrokerStopped,
+                    json!({"pid": pid, "by": "queue-broker stop"}),
+                )
+            {
+                unrecorded = Some(format!("{error:#}"));
+            }
+            json!({"outcome": "stopped", "pid": pid})
+        }
+        None => {
+            unrecorded = None;
+            json!({"outcome": "not_running"})
+        }
+    };
+    if let Some(error) = unrecorded {
+        warn!(error = %error, "the queue broker's stop could not be recorded: {error}");
+        report["unrecorded"] = json!(error);
+    }
+    Ok(report)
+}
+
 /// What the broker runs a request on.
 /// The queue service did not answer a read of the broker's own
 /// ([`BrokerBackend::run_status`]): the request is refused `unreachable`,
@@ -2407,5 +2541,191 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn looked(state: ServiceState, build: Option<&str>) -> BrokerProbe {
+        BrokerProbe {
+            state,
+            address: build.map(|_| "127.0.0.1:4000".to_owned()),
+            pid: build.map(|_| 7),
+            build: build.map(str::to_owned),
+            build_matches: build.map(|build| build == "this"),
+            started_at: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn a_broker_s_view_names_its_state_address_build_and_attention_and_what_to_do_next() {
+        let current = looked(ServiceState::Running, Some("this"));
+        let view = view_with(&current, json!(true));
+        assert_eq!(view["state"], "running");
+        assert_eq!(view["address"], "127.0.0.1:4000");
+        assert_eq!(view["build"], "this");
+        assert_eq!(view["build_matches"], true);
+        assert_eq!(view["attention"], true);
+        assert!(view.get("next").is_none(), "{view}");
+        for other in [
+            looked(ServiceState::Running, Some("old")),
+            looked(ServiceState::Stopped, None),
+            looked(ServiceState::Unreachable, Some("this")),
+        ] {
+            assert_eq!(view_with(&other, Value::Null)["next"], NOT_CURRENT_NEXT);
+        }
+    }
+
+    /// The queue service as the host's `queue-broker status` finds it: its
+    /// state and the answer to its read, with the reads counted.
+    struct Service {
+        state: ServiceState,
+        answer: super::super::queue_service::ServiceStatusRead,
+        reads: Mutex<u32>,
+    }
+
+    impl super::super::queue_service::ServiceStatusSource for Service {
+        fn probe(&self) -> super::super::queue_service::ServiceProbe {
+            super::super::queue_service::ServiceProbe {
+                state: self.state,
+                socket: "/q/service.sock".into(),
+                pid: None,
+                build: None,
+                api_version: None,
+                min_api_version: None,
+                build_matches: None,
+                started_at: None,
+                error: None,
+            }
+        }
+        fn read(&self) -> super::super::queue_service::ServiceStatusRead {
+            *self.reads.lock().unwrap() += 1;
+            self.answer.clone()
+        }
+        fn recorded_outage(&self) -> Option<crate::domain::queue_service::ServiceOutage> {
+            None
+        }
+    }
+
+    #[test]
+    fn the_host_s_broker_status_asks_only_a_running_service_for_the_attention() {
+        use super::super::queue_service::ServiceStatusRead as Read;
+        let current = looked(ServiceState::Running, Some("this"));
+        let status = |state, answer| {
+            let service = Service {
+                state,
+                answer,
+                reads: Mutex::new(0),
+            };
+            let view = host_status(&current, &service);
+            let reads = *service.reads.lock().unwrap();
+            (view["attention"].clone(), reads)
+        };
+        let answered =
+            || Read::Answered(json!({"attention": false, "queue_broker_attention": true}));
+        assert_eq!(status(ServiceState::Running, answered()), (json!(true), 1));
+        // An older service gives no broker's attention.
+        let older = Read::Answered(json!({"attention": false}));
+        assert_eq!(status(ServiceState::Running, older), (Value::Null, 1));
+        let unreached = Read::Unreached("no socket".into());
+        assert_eq!(status(ServiceState::Running, unreached), (Value::Null, 1));
+        let refused = Read::Refused("wrong_queue".into());
+        assert_eq!(
+            status(ServiceState::Running, refused),
+            (json!({"error": "wrong_queue"}), 1)
+        );
+        // A service stopped or unreachable is not asked.
+        assert_eq!(status(ServiceState::Stopped, answered()), (Value::Null, 0));
+        assert_eq!(
+            status(ServiceState::Unreachable, answered()),
+            (Value::Null, 0)
+        );
+    }
+
+    /// A broker in a test's hands: what a look finds, with the starts and
+    /// stops counted.
+    struct HandControl {
+        found: Mutex<BrokerProbe>,
+        starts: Mutex<u32>,
+        stops: Mutex<u32>,
+    }
+
+    impl HandControl {
+        fn new(found: BrokerProbe) -> Self {
+            Self {
+                found: Mutex::new(found),
+                starts: Mutex::new(0),
+                stops: Mutex::new(0),
+            }
+        }
+    }
+
+    impl QueueBrokerControl for HandControl {
+        fn probe(&self) -> BrokerProbe {
+            self.found.lock().unwrap().clone()
+        }
+        fn start(&self, _: Duration) -> Result<BrokerProbe> {
+            *self.starts.lock().unwrap() += 1;
+            let started = looked(ServiceState::Running, Some("this"));
+            *self.found.lock().unwrap() = started.clone();
+            Ok(started)
+        }
+        fn stop(&self, _: Duration) -> Result<Option<u32>> {
+            *self.stops.lock().unwrap() += 1;
+            let pid = self.found.lock().unwrap().pid;
+            *self.found.lock().unwrap() = looked(ServiceState::Stopped, None);
+            Ok(pid)
+        }
+    }
+
+    /// A queue the service does not open: it refuses the caller, or is out
+    /// of reach.
+    struct Unopened {
+        reachable: bool,
+    }
+
+    impl super::super::QueueOpener<dyn super::super::RunLog + Send> for Unopened {
+        fn open(&self) -> Result<Box<dyn super::super::RunLog + Send>> {
+            Err(if self.reachable {
+                anyhow!("authorization_denied: worker may not service.lifecycle")
+            } else {
+                anyhow::Error::new(super::super::supervisor_service::ServiceUnreachable {
+                    reason: "no socket".into(),
+                    maybe_done: false,
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn a_caller_the_service_refuses_starts_and_stops_no_broker_and_one_out_of_reach_stops_it() {
+        let refused = Unopened { reachable: true };
+        let control = HandControl::new(looked(ServiceState::Running, Some("old")));
+        let error = format!(
+            "{:#}",
+            start_by_hand(&refused, &control, Duration::ZERO).unwrap_err()
+        );
+        assert!(error.contains("service.lifecycle"), "{error}");
+        let error = format!(
+            "{:#}",
+            stop_by_hand(&refused, &control, Duration::ZERO).unwrap_err()
+        );
+        assert!(error.contains("not stopped"), "{error}");
+        assert_eq!(*control.starts.lock().unwrap(), 0);
+        assert_eq!(*control.stops.lock().unwrap(), 0);
+        // A start needs the service that takes its record and the broker's
+        // requests; a stop does not.
+        let out_of_reach = Unopened { reachable: false };
+        assert!(start_by_hand(&out_of_reach, &control, Duration::ZERO).is_err());
+        assert_eq!(*control.starts.lock().unwrap(), 0);
+        let stopped = stop_by_hand(&out_of_reach, &control, Duration::ZERO).unwrap();
+        assert_eq!(stopped["outcome"], "stopped");
+        assert_eq!(stopped["pid"], 7);
+        assert!(
+            stopped["unrecorded"]
+                .as_str()
+                .unwrap()
+                .contains("no socket")
+        );
+        let again = stop_by_hand(&out_of_reach, &control, Duration::ZERO).unwrap();
+        assert_eq!(again, json!({"outcome": "not_running"}));
     }
 }

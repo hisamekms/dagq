@@ -240,7 +240,7 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
 | --- | --- | --- |
 | `init` `migrate`（`--check`を含む） `rebind` | `queue.admin` | queue |
 | `install` / `auto-update` | `service.install` | queue |
-| `up` `down` `inbox` `service start` `service stop` `service serve` `queue-broker serve` | `service.lifecycle` | queue |
+| `up` `down` `inbox` `service start` `service stop` `service serve` `queue-broker serve\|start\|stop` | `service.lifecycle` | queue |
 | `plan`（何も開かず、inboxへの依頼の案内を付けて拒む。ADR-t1394-1） | `planner.open` | queue |
 | `supervise` | `scheduler.supervise` | queue |
 | `observe`（`--history`・`--input`を除く） | `observe.run` | queue |
@@ -321,7 +321,7 @@ supervisorの操作（containerの部品・NodeSampleStore・runの資源・台�
 着地のintegratorには`landing.land`を通し、着地の操作だけを、名指すrun・task・leaseをそのものに限って答え、ほかは書かずに拒む（`integrator_scope`）。
 wrapperには`session.run`・`session.record`を自分のrunかplannerに、containerの準備はrunのものだけに通す。
 
-制御側のコマンド（`control`）の各stepは、CLIと同じcapability（`up`・`down`・`inbox`・`service start|stop`は`service.lifecycle`）で通し断りを記録する（[制御側のコマンド](queue-service-host-cli.md#制御側のコマンド)）。
+制御側のコマンド（`control`）の各stepは、CLIと同じcapability（`up`・`down`・`inbox`・`service`と`queue-broker`の`start|stop`は`service.lifecycle`）で通し断りを記録する（[制御側のコマンド](queue-service-host-cli.md#制御側のコマンド)）。
 
 ### ほかのコマンド（CLIの入口）
 

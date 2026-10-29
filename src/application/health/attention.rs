@@ -632,7 +632,7 @@ pub fn attention(
             kind: crate::domain::queue_broker::QUEUE_BROKER_DOWN.into(),
             last_error: message.map(truncate_reason),
             last_error_code: None,
-            next: AttentionNext::QueueBrokerLog,
+            next: AttentionNext::QueueBrokerStatus,
         });
     }
     // And the relays of the runs' containers (ADR-t2114-3 decision 4).

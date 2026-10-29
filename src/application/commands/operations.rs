@@ -55,7 +55,7 @@ pub enum Operation {
     OpenInbox,
     /// `service start`, `service stop` and `service serve`: the queue
     /// service, with the service's capability (ADR-t1233-4 decision 1);
-    /// and `queue-broker serve`, the queue broker, with the same
+    /// and `queue-broker serve|start|stop`, the queue broker, with the same
     /// (ADR-t2114-1 decision 1).
     QueueService,
     Plan,

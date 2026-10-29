@@ -41,6 +41,9 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
 - tokenを確かめる前に読む大きさ・headを待つ接続の数・runごとと全体の同時の接続数の上限の`host.toml`の表の綴り・置き場は`infrastructure::queue_broker_limits`のmodule doc、意味・既定・根拠は`domain::queue_broker::BrokerLimits`のdoc commentが持つ。
 - Claudeの資格情報の`host.toml`の表の綴り・置き場・意味は`infrastructure::claude_credential`のmodule doc、上流へ送って応答を流すところは`infrastructure::queue_broker::forward_claude`が持つ。
 - brokerのプロセスがHTTPを読み書きしてserviceのsocketへ転送するところと、`up`・`down`・supervisorが起動・停止・生死を見る口は`infrastructure::queue_broker`のmodule docから辿る。
+- `status`・`doctor`・`dagq queue-broker status`が出すbrokerの状態（動いているか・address・build・attention）は`application::queue_broker::view`、欄の意味は`BrokerProbe`と`view`のdoc comment。
+  見るだけでbrokerを起動しない。
+  `queue-broker status`はqueueを開かず、attentionはqueue serviceの`service_status`の答えから読む。
   clientの要求の送り方はそのmoduleの送る側の関数が、上の形のまま持つ。
   containerの中のクライアントモードのdagqもこの形で送る（[Queue service](queue-service.md#クライアントモード)）。
 - 置き場は`<queue dir>/broker/`（mode 0700）で、記録・lock・logのファイル名は`domain::queue_broker`の定数が持つ。
@@ -135,6 +138,10 @@ queue serviceと同じ手順に乗せる（[Queue service](queue-service.md#起�
   起動できなければsupervisorを起動せずに止まる。
 - 止まるとき: brokerは、workerの終わり、threadで扱っている接続のsocketを閉じた後のそのthreadの終わり、最後の拒否の件数の記録を、合わせて1つの上限まで待ってからlockを放す（`infrastructure::queue_broker::serve`）。
   queue serviceかClaude APIの答えを待っているworkerとthreadは、上限を過ぎれば待たない。
+- 人の手: `dagq queue-broker start`（`up`と同じ`ensure`）・`dagq queue-broker stop`（止めて記録を片付ける。動くsupervisorは起動し直す）・`dagq queue-broker status`。
+  startとstopは`service.lifecycle`で、queue serviceの最初のstepで認可を受けてから動き、断られれば何もしない（`application::queue_broker::start_by_hand`・`stop_by_hand`）。
+  startはserviceが答えなければ起動せず、stopはserviceに届かなくても止めて、記録できなかったことを答えに残す。
+  クライアントモードのdagqとworkerには拒まれる。
 - `down`: supervisorの後に、serviceより先に止める。
   drainを待たない`down`は`queue_broker_stop_requested`で、drainを終えた最後のsupervisorに止めさせる。
 - `install`と自動更新: execの引き継ぎの後の新しいバイナリのsupervisorの最初の見張りが、別のbuildのbrokerを1回だけ入れ替え、入れ替えて動いたbuildはそのまま受け入れる。
@@ -152,10 +159,7 @@ queue serviceと同じ手順に乗せる（[Queue service](queue-service.md#起�
   見る時期・窓の数え方・次の一手の判断は`domain::queue_broker::watch_step`ほかで、supervisorは注入した時計の単調時刻を値で渡す。
   drainと引き継ぎの間は見ない。
 - 起動し直せない・上限に達したときは、inbox宛てのattention `queue_broker_down`をqueue serviceのユースケース（`record_queue_event`）で記録し、brokerがまた動けば消える。
+  attentionの次の手は`dagq queue-broker status`。
   serviceに届かず記録できなければ、supervisorはwarnのログを残すだけでDBを開いて代わりに書かない。
 - brokerが居ない間、containerは使えない: supervisorと`integrate`は`ContainerRuntime`を`BrokerGate`越しに問い、brokerが動いていなければ理由つきで使えないと答える（[Container runtime](container-runtime.md#fail-closedの境界)）。
   serviceと違い、hostのrunのclaimとjobは控えない。
-
-## まだ無いもの
-
-- `status`・`doctor`でのbrokerの見せ方と、人の手での起動・停止のコマンド。

@@ -555,6 +555,54 @@ pub fn queue_service_stop(
     )
 }
 
+/// `dagq queue-broker status` of the queue at `db`, which opens no queue
+/// and starts no broker
+/// ([`host_status`](crate::application::queue_broker::host_status)): the
+/// broker's record and health under its directory, with its attention read
+/// through `client`'s service.
+pub fn queue_broker_status(db: &Path, client: &service::Client) -> Value {
+    let queue_dir = db.parent().unwrap_or(Path::new("."));
+    crate::application::queue_broker::host_status(
+        &crate::infrastructure::queue_broker::probe(queue_dir),
+        &service::HostServiceStatus { queue_dir, client },
+    )
+}
+
+/// `dagq queue-broker start`: see
+/// [`crate::application::queue_broker::start_by_hand`], the broker started
+/// from `executable`, as the principal the environment `env` names (the
+/// user with none), the queue at `db`, bound to `binding`, reached through
+/// its service and not opened.
+pub fn queue_broker_start(
+    db: &Path,
+    executable: &Path,
+    binding: Option<&str>,
+    env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+) -> Result<Value> {
+    let log = lifecycle_socket_opener(db, binding, ControlCommand::BrokerStart, env, keep_log);
+    crate::application::queue_broker::start_by_hand(
+        &*log,
+        &crate::infrastructure::queue_broker::SystemQueueBroker::new(db, executable),
+        crate::application::lifecycle::QUEUE_SERVICE_START_TIMEOUT,
+    )
+}
+
+/// `dagq queue-broker stop`: see
+/// [`crate::application::queue_broker::stop_by_hand`], as
+/// [`queue_broker_start`]'s caller.
+pub fn queue_broker_stop(
+    db: &Path,
+    binding: Option<&str>,
+    env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+) -> Result<Value> {
+    let log = lifecycle_socket_opener(db, binding, ControlCommand::BrokerStop, env, keep_log);
+    crate::application::queue_broker::stop_by_hand(
+        &*log,
+        &crate::infrastructure::queue_broker::SystemQueueBroker::new(db, Path::new("dagq")),
+        crate::application::lifecycle::QUEUE_SERVICE_START_TIMEOUT,
+    )
+}
+
 /// Where `up`, `down`, `dagq inbox` and `service start|stop` send the
 /// operations of the queue they make ([`OneShot::lifecycle_route`]).
 #[derive(Debug, Clone, Copy)]

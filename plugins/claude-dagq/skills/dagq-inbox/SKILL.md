@@ -60,7 +60,7 @@ Report each in a list (task, status, `next`, gist of `last_error`); act with `da
 - `stop sccache on the host; the supervisor starts it`, `install tool` (`run_env_program_missing`, `ci_watch_unavailable`), `log in to gh`, `fix dagq.toml` (`ci_watch_unavailable`, `ci_jobs_missing`, `container_runtime_unavailable`), `fix the push command` (`kpi_push_abandoned`), `check the e2e host` (`run_e2e_finished`): the person fixes it.
 - `stop the dead landing's processes` (`landing_release_stuck`): the person stops its pids.
 - `dagq service status` (`queue_service_down`): the service is back; tell the person.
-- `read the queue broker's log and run up` (`queue_broker_down`): `up` on the person's word.
+- `dagq queue-broker status` (`queue_broker_down`): `dagq queue-broker start` or `up` on the person's word.
 - `look at the dagq podman machine's relays` (`queue_relay_down`): the person.
 - `restart supervisor`: `up` (`supervisor_duplicate`: `down --wait` first); `stop the stale supervisor's process`: stop its `pid` (`dagq-recover` section 5).
 - `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`.

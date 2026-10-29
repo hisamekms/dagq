@@ -1701,7 +1701,8 @@ enum Command {
     },
     /// The queue broker: the host process a container's run reaches the queue service through,
     /// on a port of 127.0.0.1, with its run token checked. `up` starts it before the
-    /// supervisor, the supervisor starts it again, and `down` stops it.
+    /// supervisor, the supervisor starts it again, and `down` stops it; `start`, `stop` and
+    /// `status` do the same by hand.
     QueueBroker {
         #[command(subcommand)]
         command: QueueBrokerCommand,
@@ -2208,6 +2209,15 @@ enum RelayCommand {
 
 #[derive(Subcommand, Clone)]
 enum QueueBrokerCommand {
+    /// Report whether the queue broker runs and answers, its pid, build and address, and its
+    /// attention, without starting or changing anything.
+    Status,
+    /// Start the queue broker of this binary unless one of its build answers, replacing one of
+    /// another build or one that does not answer; `up` does this before the supervisor.
+    Start,
+    /// Stop the queue broker and clear its record; `down` does this after the supervisor. A
+    /// supervisor at work starts it again.
+    Stop,
     /// Run the queue broker in the foreground until SIGINT or SIGTERM (what `up` and the
     /// supervisor run in the background). A second one for the same queue is refused.
     Serve,
@@ -2597,6 +2607,9 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Service {
             command: ServiceCommand::Status,
         }
+        | Command::QueueBroker {
+            command: QueueBrokerCommand::Status,
+        }
         | Command::Notes { .. }
         | Command::Marks { .. }
         | Command::Findings { .. }
@@ -2630,7 +2643,10 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             command:
                 ServiceCommand::Start { .. } | ServiceCommand::Stop | ServiceCommand::Serve { .. },
         }
-        | Command::QueueBroker { .. }
+        | Command::QueueBroker {
+            command:
+                QueueBrokerCommand::Start | QueueBrokerCommand::Stop | QueueBrokerCommand::Serve,
+        }
         | Command::Plan { .. }
         | Command::Supervise { .. }
         | Command::Observe { history: false, .. }
@@ -2847,7 +2863,10 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
             command:
                 ServiceCommand::Start { .. } | ServiceCommand::Stop | ServiceCommand::Serve { .. },
         }
-        | Command::QueueBroker { .. } => Operation::QueueService,
+        | Command::QueueBroker {
+            command:
+                QueueBrokerCommand::Start | QueueBrokerCommand::Stop | QueueBrokerCommand::Serve,
+        } => Operation::QueueService,
         Command::Plan { .. } => Operation::Plan,
         Command::Supervise { .. } => Operation::Supervise,
         // Starting a job of the supervisor's timer, as `observe` (ADR-t996-1).
@@ -4323,6 +4342,9 @@ fn host_routed(command: &Command) -> Result<bool> {
             | Command::Service {
                 command: ServiceCommand::Status
             }
+            | Command::QueueBroker {
+                command: QueueBrokerCommand::Status
+            }
             | Command::Rebind { .. }
             | Command::Planner {
                 command: PlannerCommand::Request { .. }
@@ -4386,6 +4408,15 @@ fn host_client(
     ) {
         return Ok(dagq::compose::queue_service_status(db, &client));
     }
+    // So does `queue-broker status`, which starts no broker either.
+    if matches!(
+        command,
+        Command::QueueBroker {
+            command: QueueBrokerCommand::Status
+        }
+    ) {
+        return Ok(dagq::compose::queue_broker_status(db, &client));
+    }
     // The service reads the diagram and the host's d2 draws it, as the
     // command line draws it: no read starts a program on the service's side.
     if let Command::Graph {
@@ -4427,6 +4458,9 @@ fn control_side_command(command: &Command) -> Option<&'static str> {
         Command::Service {
             command: ServiceCommand::Status,
         } => Some("service status"),
+        Command::QueueBroker {
+            command: QueueBrokerCommand::Status,
+        } => Some("queue-broker status"),
         _ => None,
     }
 }
@@ -4593,11 +4627,14 @@ fn execute(cli: Cli) -> Result<Value> {
     if dagq::domain::queue_service::host_client_role(actor.role()) && host_routed(&cli.command)? {
         let cwd = env::current_dir().context("working directory is unavailable")?;
         let location = QueueLocation::resolve(cli.db.as_deref(), &cwd)?;
-        // `service status` reads no DB, and answers where there is none.
+        // `service status` and `queue-broker status` read no DB, and answer
+        // where there is none.
         let status = matches!(
             cli.command,
             Command::Service {
                 command: ServiceCommand::Status
+            } | Command::QueueBroker {
+                command: QueueBrokerCommand::Status
             }
         );
         anyhow::ensure!(
@@ -4993,7 +5030,37 @@ fn execute(cli: Cli) -> Result<Value> {
             ),
         };
     }
-    // The queue broker needs no queue state either (ADR-t2114-1).
+    // The queue broker needs no queue state either (ADR-t2114-1): its
+    // start and stop are authorized and recorded through the queue's
+    // service, and its status opens no queue.
+    if let Command::QueueBroker { command } = &cli.command {
+        match command {
+            QueueBrokerCommand::Status => {
+                return Ok(dagq::compose::queue_broker_status(
+                    &db,
+                    &dagq::infrastructure::queue_service::Client::host(
+                        &db,
+                        common_dir.as_deref(),
+                        |name| env::var(name).ok(),
+                    ),
+                ));
+            }
+            QueueBrokerCommand::Start => {
+                return dagq::compose::queue_broker_start(
+                    &db,
+                    &env::current_exe()?,
+                    common_dir.as_deref(),
+                    |name| env::var(name).ok(),
+                );
+            }
+            QueueBrokerCommand::Stop => {
+                return dagq::compose::queue_broker_stop(&db, common_dir.as_deref(), |name| {
+                    env::var(name).ok()
+                });
+            }
+            QueueBrokerCommand::Serve => {}
+        }
+    }
     if let Command::QueueBroker {
         command: QueueBrokerCommand::Serve,
     } = cli.command
@@ -6454,6 +6521,8 @@ mod tests {
             ("service stop", &[]),
             ("service serve", &[]),
             ("queue-broker serve", &[]),
+            ("queue-broker start", &[]),
+            ("queue-broker stop", &[]),
             ("plan", &[]),
             ("supervise", &[]),
             ("throughput-review", &[]),
@@ -6696,6 +6765,8 @@ mod tests {
             ("service start", LIFECYCLE),
             ("service stop", LIFECYCLE),
             ("queue-broker serve", CONTROL),
+            ("queue-broker start", LIFECYCLE),
+            ("queue-broker stop", LIFECYCLE),
             ("migrate", DIAGNOSIS),
             ("doctor", DIAGNOSIS),
         ];
@@ -6849,7 +6920,10 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
-        assert_eq!(refused_by_name, ["doctor", "service status"]);
+        assert_eq!(
+            refused_by_name,
+            ["doctor", "service status", "queue-broker status"]
+        );
         for (leaf, _) in kept {
             assert!(found.iter().any(|found| found == leaf), "no command {leaf}");
         }
@@ -7307,6 +7381,7 @@ mod tests {
         "forecast",
         "doctor",
         "service status",
+        "queue-broker status",
         // Forms that read: `graph` without `--out` and `observe --history` /
         // `--input`.
         "graph",

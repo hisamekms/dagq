@@ -90,10 +90,10 @@ pub use host::{
     AutoUpdateJob, COMMAND_TARGET, HostMetricsSettings, LifecycleRoute, QueueBrokerControlPort,
     QueueBrokerOptions, QueueRelayControlPort, QueueRelayOptions, QueueServiceControlPort,
     QueueServiceOptions, ReleaseIndexPort, ReleaseUpdateJob, SccacheOptions, down, inbox,
-    inbox_command, init_queue, install_restart_arguments, migrate_queue, queue_schema,
-    queue_service_start, queue_service_status, queue_service_stop, rebind,
-    repair_rebound_worktrees, repository_common_dir, repository_queue_dir, run_command,
-    service_commands, trace_command, up,
+    inbox_command, init_queue, install_restart_arguments, migrate_queue, queue_broker_start,
+    queue_broker_status, queue_broker_stop, queue_schema, queue_service_start,
+    queue_service_status, queue_service_stop, rebind, repair_rebound_worktrees,
+    repository_common_dir, repository_queue_dir, run_command, service_commands, trace_command, up,
 };
 pub use observation::{
     CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, call_stats_read, ci_failures,
@@ -558,6 +558,17 @@ pub fn wrapper_entry(background: bool) -> Result<WrapperStart> {
 fn queue_service_view(db: &Path, queue: Option<&SqliteQueue>) -> Value {
     crate::application::queue_service::view(
         &crate::infrastructure::queue_service::probe(db.parent().unwrap_or(Path::new("."))),
+        queue.map(|queue| queue as &dyn crate::application::RunLog),
+    )
+}
+
+/// The queue broker as `status`, `doctor` and `dagq queue-broker status`
+/// show it ([`crate::application::queue_broker::view`]): its record and
+/// health under the queue's directory, and its attention when `queue` can
+/// be read. It starts no broker.
+fn queue_broker_view(db: &Path, queue: Option<&SqliteQueue>) -> Value {
+    crate::application::queue_broker::view(
+        &crate::infrastructure::queue_broker::probe(db.parent().unwrap_or(Path::new("."))),
         queue.map(|queue| queue as &dyn crate::application::RunLog),
     )
 }

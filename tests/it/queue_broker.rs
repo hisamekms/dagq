@@ -795,7 +795,7 @@ fn the_supervisor_starts_the_broker_again_and_tells_the_inbox_when_it_cannot() {
         .iter()
         .find(|entry| entry["kind"] == "queue_broker_down")
         .unwrap_or_else(|| panic!("{status}"));
-    assert_eq!(entry["next"], "read the queue broker's log and run up");
+    assert_eq!(entry["next"], "dagq queue-broker status");
     let container = attention
         .iter()
         .find(|entry| entry["kind"] == "container_runtime_unavailable")
@@ -2292,5 +2292,130 @@ fn the_broker_bounds_each_way_it_holds_connections_apart() {
     assert!(
         outcome["turned_away"]["broker"].as_u64().unwrap() >= 1,
         "{outcome}"
+    );
+}
+
+/// `status`, `doctor` and `queue-broker status` show the broker (whether it
+/// runs, its address and build, its attention) and start none;
+/// `queue-broker start` replaces one of another build and reuses its own,
+/// `queue-broker stop` stops it and clears its record, each recorded by the
+/// command; a worker and a client-mode `dagq` are refused both.
+#[test]
+fn queue_broker_start_stop_and_status_by_hand() {
+    let _test = common::test();
+    let queue = queue();
+    start(&queue);
+    let db = queue.db.clone();
+    let _stop = Stop(SystemQueueBroker::new(&db, Path::new("dagq")));
+    let views = || {
+        [&["status"][..], &["doctor"], &["queue-broker", "status"]].map(|args| {
+            let report = ok(&db, args);
+            if args[0] == "queue-broker" {
+                report
+            } else {
+                report["queue_broker"].clone()
+            }
+        })
+    };
+    for view in views() {
+        assert_eq!(view["state"], "stopped", "{view}");
+        assert_eq!(view["address"], Value::Null, "{view}");
+        assert_eq!(view["attention"], false, "{view}");
+        assert!(
+            view["next"]
+                .as_str()
+                .unwrap()
+                .contains("queue-broker start")
+        );
+    }
+    assert_eq!(broker::probe(queue.dir()).state, ServiceState::Stopped);
+
+    // The broker's start and stop are the service's lifecycle: a worker's
+    // `dagq` is refused them, and so is a client-mode `dagq`.
+    for args in [["queue-broker", "start"], ["queue-broker", "stop"]] {
+        let worker = common::cli::invoke_as(Some("worker"), &db, &args);
+        assert!(!worker.status.success());
+        let refusal = String::from_utf8_lossy(&worker.stderr);
+        assert!(refusal.contains("service.lifecycle"), "{refusal}");
+        let client = {
+            use common::service::OwnedByTest;
+            use common::{Bounded, WithoutActor};
+            std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+                .without_actor_env()
+                .owned_by_test()
+                .env(
+                    dagq::domain::queue_service::SOCKET_ENV,
+                    service::socket_path(queue.dir()),
+                )
+                .env(
+                    dagq::domain::queue_service::CREDENTIAL_FILE_ENV,
+                    db.with_file_name("no-credential"),
+                )
+                .args(args)
+                .bounded_output()
+                .unwrap()
+        };
+        assert!(!client.status.success());
+        let refusal: Value = serde_json::from_slice(&client.stderr).unwrap();
+        assert_eq!(refusal["queue_service"]["code"], "no_use_case", "{refusal}");
+    }
+    assert_eq!(broker::probe(queue.dir()).state, ServiceState::Stopped);
+
+    // One of another build is shown as it is, and `start` replaces it.
+    let before = broker_of_the_binary_before(&db);
+    for view in views() {
+        assert_eq!(view["state"], "running", "{view}");
+        assert_eq!(view["build"], OLD_BUILD, "{view}");
+        assert_eq!(view["build_matches"], false, "{view}");
+        assert!(view["next"].is_string(), "{view}");
+    }
+    let started = ok(&db, &["queue-broker", "start"]);
+    assert_eq!(started["outcome"], "replaced", "{started}");
+    assert_eq!(started["replaced"]["build"], OLD_BUILD);
+    assert_eq!(started["broker"]["build"], dagq::VERSION);
+    ended(before);
+    let reused = ok(&db, &["queue-broker", "start"]);
+    assert_eq!(reused["outcome"], "reused", "{reused}");
+    let address = started["broker"]["address"].clone();
+    assert!(address.as_str().unwrap().starts_with("127.0.0.1:"));
+    for view in views() {
+        assert_eq!(view["state"], "running", "{view}");
+        assert_eq!(view["address"], address, "{view}");
+        assert_eq!(view["build"], dagq::VERSION, "{view}");
+        assert_eq!(view["build_matches"], true, "{view}");
+        assert_eq!(view["attention"], false, "{view}");
+        assert!(view.get("next").is_none(), "{view}");
+    }
+
+    // An attention that stands is shown by each.
+    SqliteQueue::open(&db)
+        .unwrap()
+        .record_queue_event(
+            dagq::domain::EventKind::QueueBrokerDown,
+            json!({"reason": "start_failed", "message": "test"}),
+        )
+        .unwrap();
+    for view in views() {
+        assert_eq!(view["attention"], true, "{view}");
+    }
+
+    let stopped = ok(&db, &["queue-broker", "stop"]);
+    assert_eq!(stopped["outcome"], "stopped", "{stopped}");
+    assert_eq!(stopped["pid"], started["broker"]["pid"]);
+    assert!(stopped.get("unrecorded").is_none(), "{stopped}");
+    assert_eq!(broker::probe(queue.dir()).state, ServiceState::Stopped);
+    assert!(broker::BrokerRecord::read(queue.dir()).is_none());
+    assert_eq!(ok(&db, &["queue-broker", "stop"])["outcome"], "not_running");
+    let by: Vec<Value> = [
+        events(&db, "queue_broker_started"),
+        events(&db, "queue_broker_stopped"),
+    ]
+    .concat()
+    .iter()
+    .map(|event| event["payload"]["by"].clone())
+    .collect();
+    assert_eq!(
+        by,
+        [json!("queue-broker start"), json!("queue-broker stop")]
     );
 }

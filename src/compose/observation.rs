@@ -8,7 +8,7 @@
 
 use super::{
     OneShot, bound_checkout, bound_main_checkout, goal_tags, open_queue_watch, provider_checks,
-    queue_service_view, task_changes, task_title_prefixes, worker_adapters,
+    queue_broker_view, queue_service_view, task_changes, task_title_prefixes, worker_adapters,
 };
 use crate::domain::{EventFilter, EventId, EventKind};
 use anyhow::{Context, Result, ensure};
@@ -1664,6 +1664,7 @@ impl OneShot {
             status["inbox_guardrail"] = inbox_guardrail(queue)?;
             status["inbox_watcher"] = self.inbox_watcher(db);
             status["queue_service"] = queue_service_view(db, Some(queue));
+            status["queue_broker"] = queue_broker_view(db, Some(queue));
             status["requests"] = open_requests(queue)?;
         }
         Ok(status)
@@ -1718,6 +1719,7 @@ impl OneShot {
     ) -> Result<Value> {
         let (schema, queue) = SqliteQueue::inspect_read_only(db)?;
         let mut service_view = None;
+        let mut broker_view = None;
         let mut report = match queue {
             ReadOnlyQueue::Refused { binding, error } => {
                 if let Some(common_dir) = common_dir {
@@ -1731,6 +1733,7 @@ impl OneShot {
                     queue.assert_repository(common_dir)?;
                 }
                 service_view = Some(queue_service_view(db, Some(&queue)));
+                broker_view = Some(queue_broker_view(db, Some(&queue)));
                 let run_env = doctor_run_env(&queue, db).map_err(|error| format!("{error:#}"));
                 let mut report = health::doctor(
                     &queue,
@@ -1789,6 +1792,9 @@ impl OneShot {
         // The queue service (ADR-t1233-4): whether it answers, and its
         // attention from a queue that can be read.
         report["queue_service"] = service_view.unwrap_or_else(|| queue_service_view(db, None));
+        // The queue broker (ADR-t2114-1): whether it runs, its address and
+        // build, and its attention from a queue that can be read.
+        report["queue_broker"] = broker_view.unwrap_or_else(|| queue_broker_view(db, None));
         // The host's `[update]`, with what was taken as its default
         // (ADR-t618-1 decision 3).
         report["release_update"] = serde_json::to_value(host_update(db))?;
