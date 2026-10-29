@@ -191,14 +191,17 @@ pub fn acceptance_digest() -> String {
 
 /// How a run's review, the whole one and each agent's job, reads a
 /// person's answers to the run's `approve_landing` asks: a concern the
-/// person accepted is not raised again as `scope` while the diff since the
-/// answer does not widen what was accepted; only what widens it is a
-/// concern, and every other judgement of scope still goes to a person
-/// (ADR-t451-1 decisions 1 and 3 kept). The runtime does not match the
+/// person accepted is not raised again as `scope` while the run's whole
+/// diff stays within what the answer accepted; only what goes beyond it is
+/// a concern, and every other judgement of scope still goes to a person
+/// (ADR-t451-1 decisions 1 and 3 kept). The review matches the whole diff
+/// it reads every round against the answer's text, so it needs no starting
+/// point: no answer carries the head its round read, and no diff of the
+/// fixes since is handed over (ADR-t3656-1). The runtime does not match the
 /// concerns' text itself: the review judges whether it is the same concern
-/// and whether its reach grew. Plan review and the claim's review share
-/// none of it.
-pub(super) const ACCEPTED_CONCERNS: &str = "A person already decided the concerns these answers accept (as designed, or acceptable within the task). Do not raise such a concern again, as scope or otherwise, while the diff since the answer does not widen what was accepted (it adds no new permission, write target, outside connection or other reach beyond it): name it in summary as accepted by the person, with the ask's id. When the diff widens it, make only the widened part the concern. Any other concern, and any judgement of scope the answers do not settle, goes to a person as before.\n\n";
+/// and whether the diff goes beyond it. Plan review and the claim's review
+/// share none of it.
+pub(super) const ACCEPTED_CONCERNS: &str = "A person already decided the concerns these answers accept (as designed, or acceptable within the task). Do not raise such a concern again, as scope or otherwise, while the run's whole diff stays within what the answer accepted (the permissions, write targets, outside connections or other reach the answer names): name it in summary as accepted by the person, with the ask's id. Match the whole diff you read against the answer, not only what changed after the answer, so you need no starting commit. When an answer does not say how far it accepts, read it as accepting only the kind of reach it names, and raise the part you are unsure is within it. When the whole diff goes beyond what was accepted, make only the part beyond it the concern. Any other concern, and any judgement of scope the answers do not settle, goes to a person as before.\n\n";
 
 /// The section on a person's answers to the run's `approve_landing` asks
 /// ([`PersonAnswers::lines`], held to [`LANDING_ANSWERS_PROMPT_BYTES`]

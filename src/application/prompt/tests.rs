@@ -2463,13 +2463,21 @@ fn a_runs_review_reads_a_persons_landing_answers_and_does_not_ask_again() {
     };
     let line = "- ask 893, after review 5: send_back: the added permissions are as designed\n";
     for part in [
-        "Do not raise such a concern again, as scope or otherwise, while the diff since the answer does not widen what was accepted",
-        "new permission, write target, outside connection",
+        "Do not raise such a concern again, as scope or otherwise, while the run's whole diff stays within what the answer accepted",
+        "the permissions, write targets, outside connections or other reach the answer names",
         "name it in summary as accepted by the person",
-        "make only the widened part the concern",
+        "Match the whole diff you read against the answer",
+        "make only the part beyond it the concern",
+        "read it as accepting only the kind of reach it names",
         "goes to a person as before",
     ] {
         assert_eq!(ACCEPTED_CONCERNS.matches(part).count(), 1, "{part}");
+    }
+    // The judgement needs no starting point: the rule names no head of the
+    // answer's round and no diff of the fixes since (the answer's line, matched
+    // whole below, carries only the ask and its round).
+    for gone in ["since the answer", "widen", "SHA", ".."] {
+        assert!(!ACCEPTED_CONCERNS.contains(gone), "{gone}");
     }
     let review = review_prompt(&task, &run, "/runs/r/review.md", None, None, &answers);
     let section = format!("{LANDING_ANSWERS_INTRO}\n{line}\n{ACCEPTED_CONCERNS}");

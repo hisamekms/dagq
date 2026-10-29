@@ -159,7 +159,8 @@ ADR-t451-1決定3。
 - **verdictの欄**: 推奨・確信度・人が要る理由はconcernのverdictだけが持つ（`ReviewVerdict`）。
   例外は下の`already_satisfied`の判定だけ（`domain::satisfied_judgment`）。
 - 推奨が無い・人が要る理由がある・確信度が`high`でないconcernはaskにし、知らない理由は人が決める側に倒す（`domain::concern::decide`）。
-- 次の回のreviewは全体のreviewもagentのjobも、そのrunの`approve_landing`に人が書いた答えを資料とpromptに持ち、答えが受け入れたconcernは答えの後の差分が範囲を広げない限り`scope`で聞き直さず、広げた部分だけをconcernにする（[ADR-t3592-1](../../adr/2026-10-29-t3592-1-run-review-reads-the-persons-landing-answers-and-does-not-ask-again.md)、`review::landing_answers`）。
+- 次の回のreviewは全体のreviewもagentのjobも、そのrunの`approve_landing`に人が書いた答えを資料とpromptに持ち、答えが受け入れたconcernはrunの差分の全体が答えの受け入れた範囲を超えない限り`scope`で聞き直さず、超えた部分だけをconcernにする。
+  答えの回のheadも直しの差分も渡さず、起点の要らない判断にする（[ADR-t3592-1](../../adr/2026-10-29-t3592-1-run-review-reads-the-persons-landing-answers-and-does-not-ask-again.md)、[ADR-t3656-1](../../adr/2026-10-29-t3656-1-run-review-matches-the-whole-diff-against-what-the-answer-accepted.md)、`review::landing_answers`）。
 - 引き継いだsupervisorは記録されたconcernを生きたものと同じに決める（`adopt.rs`）。
   ただし上限の前の`send_back`は依頼の記録が無いので、送れなかったものとして人に聞く（`adopted_concern`）。
 - セキュリティのagentは[ADR-t1906-1](../../adr/2026-10-14-t1906-1-security-review-agent-findings-follow-the-concern-rules.md)。
