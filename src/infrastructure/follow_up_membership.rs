@@ -221,9 +221,7 @@ impl SqliteQueue {
             ["user", "inbox", "planner"].contains(&role),
             "{role} may not judge follow_up membership"
         );
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("judge_follow_up", rusqlite::TransactionBehavior::Immediate)?;
         let origin: Option<(String, String)> = tx
             .query_row(
                 "SELECT origin,material FROM draft_origins WHERE task_id=?1",
@@ -476,12 +474,15 @@ pub(super) fn correction_answers(conn: &Connection) -> Result<Vec<Ask>> {
 /// not one the runtime applies now (left for the inbox); a goal no longer
 /// closed as achieved closes the ask without a change.
 pub(super) fn decide_correction(
-    conn: &mut Connection,
+    queue: &SqliteQueue,
     ask_id: AskId,
     stamp: String,
     now: i64,
 ) -> Result<Option<Value>> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let tx = queue.write_tx(
+        "decide_correction",
+        rusqlite::TransactionBehavior::Immediate,
+    )?;
     let ask = read_ask(&tx, ask_id)?;
     ensure!(
         ask.kind == AskKind::CorrectGoal,

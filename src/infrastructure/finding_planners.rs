@@ -58,9 +58,7 @@ impl SqliteQueue {
             PlannerOrigin::Runtime => "planner",
             PlannerOrigin::Person => "person",
         };
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("submit_linking", TransactionBehavior::Immediate)?;
         let previous = super::plan_requests::previous_proposals(&tx, &submission)?;
         let held_retry = super::proposals::held_retry(&tx, &submission)?;
         let proposal = super::proposals::submit(
@@ -143,9 +141,7 @@ impl SqliteQueue {
         limit: usize,
     ) -> Result<FindingPlannerStart> {
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("open_finding_planner", TransactionBehavior::Immediate)?;
         let eligible = match answer {
             None => is_target(&tx, finding)?,
             // A planner of the finding still open (asked to exit because
@@ -255,9 +251,7 @@ impl SqliteQueue {
             return Ok(Vec::new());
         }
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("settle_findings", TransactionBehavior::Immediate)?;
         let proposed: Vec<Finding> = tx
             .prepare(
                 "SELECT * FROM findings WHERE status='proposed' AND proposal_id IS NOT NULL

@@ -168,9 +168,7 @@ impl SqliteQueue {
         depth: i64,
     ) -> Result<Vec<RegisteredFollowUp>> {
         ensure!(depth >= 0, "follow_up_depth must not be negative");
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("register_follow_ups", TransactionBehavior::Immediate)?;
         let source: TaskId =
             tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [run], |row| {
                 row.get(0)
@@ -296,9 +294,7 @@ impl SqliteQueue {
             origin != DraftOrigin::Reopened,
             "a reopened draft's origin is recorded by withdrawing its proposal"
         );
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_draft_origin", TransactionBehavior::Immediate)?;
         let status = read_task(&tx, task)?.status();
         ensure!(
             status == TaskStatus::Draft,
@@ -344,9 +340,7 @@ impl SqliteQueue {
         authorized: Option<&crate::domain::TaskAuthorization>,
     ) -> Result<Option<DraftRevisit>> {
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("revisit_draft_authorized", TransactionBehavior::Immediate)?;
         super::sqlite::check_authorized(&tx, task, authorized)?;
         let status = read_task(&tx, task)?.status();
         ensure!(
@@ -455,9 +449,7 @@ impl SqliteQueue {
         answer: Option<AskId>,
     ) -> Result<DraftPlannerStart> {
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("open_draft_planner", TransactionBehavior::Immediate)?;
         let Some(&lead) = drafts.first() else {
             return Ok(DraftPlannerStart::Skipped);
         };
@@ -685,9 +677,7 @@ impl SqliteQueue {
         planner: PlannerId,
         workspace: &str,
     ) -> Result<bool> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("claim_planner_answer", TransactionBehavior::Immediate)?;
         let ask = read_ask(&tx, id)?;
         // A question about a finding may be about no task: its claim is on
         // the finding's target (ADR-0044 decision 19).
@@ -738,9 +728,7 @@ impl SqliteQueue {
     }
 
     pub fn close_planner_answer(&mut self, id: AskId, why: &str) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("close_planner_answer", TransactionBehavior::Immediate)?;
         let ask = read_ask(&tx, id)?;
         if ask.closed_at.is_some() {
             return Ok(());

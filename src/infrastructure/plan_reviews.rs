@@ -101,14 +101,14 @@ fn running(conn: &Connection, job: &PlanReviewJob, token: &LeaseToken) -> Result
 /// (`plan_reviews` or `goal_reviews`) when its owner is gone or is `token`
 /// itself ([`review_owner_gone`]), in one transaction: what it found.
 pub(super) fn take_over_review(
-    conn: &mut Connection,
+    queue: &SqliteQueue,
     table: &'static str,
     id: i64,
     token: &LeaseToken,
     now: i64,
     alive: &dyn Fn(u32) -> bool,
 ) -> Result<ReviewTakeover> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = queue.write_tx("review_take_over", TransactionBehavior::Immediate)?;
     let owner: Option<String> = tx
         .query_row(
             &format!("SELECT supervisor_token FROM {table} WHERE id=?1 AND finished_at IS NULL"),
@@ -506,9 +506,10 @@ impl PlanReviewStore for SqliteQueue {
         let now = self.generators.clock.now();
         // Read transcripts before taking the write lock, as in begin/finish.
         let _read = sessions::read_before(&self.conn, sessions::Closing::PlanReviews(None, false))?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx(
+            "interrupt_plan_reviews_for_handoff",
+            TransactionBehavior::Immediate,
+        )?;
         let unfinished: Vec<i64> = tx
             .prepare(
                 "SELECT id FROM plan_reviews WHERE supervisor_token=?1 AND finished_at IS NULL",
@@ -541,7 +542,7 @@ impl PlanReviewStore for SqliteQueue {
         alive: &dyn Fn(u32) -> bool,
     ) -> Result<ReviewTakeover> {
         let now = self.generators.clock.now();
-        take_over_review(&mut self.conn, "plan_reviews", job.id, token, now, alive)
+        take_over_review(self, "plan_reviews", job.id, token, now, alive)
     }
 
     fn begin_plan_review(
@@ -565,9 +566,7 @@ impl PlanReviewStore for SqliteQueue {
         };
         // The spans it closes read their transcripts first (task 543).
         let _read = sessions::read_before(&self.conn, sessions::Closing::PlanReviews(None, true))?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("begin_plan_review", TransactionBehavior::Immediate)?;
         type Unfinished = (i64, LeaseToken, Option<u32>, Option<i64>);
         let unfinished: Vec<Unfinished> = tx
             .prepare(
@@ -655,9 +654,7 @@ impl PlanReviewStore for SqliteQueue {
             &self.conn,
             sessions::Closing::PlanReviews(Some(job.id), false),
         )?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("finish_plan_review", TransactionBehavior::Immediate)?;
         if !running(&tx, job, token)? {
             return Ok(PlanReviewApplied {
                 stale: true,
@@ -926,9 +923,7 @@ impl PlanReviewStore for SqliteQueue {
             &self.conn,
             sessions::Closing::PlanReviews(Some(job.id), false),
         )?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("fail_plan_review", TransactionBehavior::Immediate)?;
         if !running(&tx, job, token)? {
             return Ok(());
         }
@@ -975,7 +970,7 @@ impl PlanReviewStore for SqliteQueue {
     }
 
     fn revising_proposals(&self) -> Result<Vec<RevisingProposal>> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx("revising_proposals", TransactionBehavior::Deferred)?;
         let ids: Vec<ProposalId> = tx
             .prepare("SELECT id FROM proposals WHERE status='revising' ORDER BY id")?
             .query_map([], |r| r.get(0))?
@@ -1056,9 +1051,7 @@ impl PlanReviewStore for SqliteQueue {
         opened: Option<&crate::domain::actor_model::ActorLaunch>,
         answers: &[AskId],
     ) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("revise_sent", TransactionBehavior::Immediate)?;
         tx.execute(
             "UPDATE proposals SET revise_planner_id=?2, unresponsive_at=NULL
              WHERE id=?1 AND status='revising'",
@@ -1095,9 +1088,7 @@ impl PlanReviewStore for SqliteQueue {
         planner: Option<PlannerId>,
         why: &str,
     ) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("revise_lost", TransactionBehavior::Immediate)?;
         let changed = tx.execute(
             "UPDATE proposals SET revise_sent_at=NULL, revise_planner_id=NULL, unresponsive_at=NULL
              WHERE id=?1 AND status='revising' AND revise_sent_at IS NOT NULL",
@@ -1124,9 +1115,7 @@ impl PlanReviewStore for SqliteQueue {
         holders: &[PlannerHold],
     ) -> Result<()> {
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("planner_unresponsive", TransactionBehavior::Immediate)?;
         let changed = tx.execute(
             "UPDATE proposals SET unresponsive_at=?2
              WHERE id=?1 AND status='revising' AND unresponsive_at IS NULL",
@@ -1184,9 +1173,7 @@ impl PlanReviewStore for SqliteQueue {
 
     fn settle_proposals(&mut self) -> Result<Vec<(ProposalId, ProposalStatus)>> {
         let stamp = self.generators.clock.timestamp();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("settle_proposals", TransactionBehavior::Immediate)?;
         let emptied: Vec<ProposalId> = tx
             .prepare(
                 "SELECT p.id FROM proposals p WHERE p.status='submitted'
@@ -1243,9 +1230,7 @@ impl PlanReviewStore for SqliteQueue {
     fn decide_plan(&mut self, ask_id: AskId) -> Result<Option<PlanDecided>> {
         let now = self.generators.clock.now();
         let stamp = self.generators.clock.timestamp();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("decide_plan", TransactionBehavior::Immediate)?;
         let ask = read_ask(&tx, ask_id)?;
         ensure!(
             ask.kind == AskKind::ApprovePlan,

@@ -1005,3 +1005,34 @@ fn an_undelivered_planner_answer_is_planned_for_a_draft_and_never_sent_to_a_work
         "{status}"
     );
 }
+
+/// An ask opened in its immediate transaction that held the queue's write
+/// lock past the threshold (lowered to none) is still opened, and the hold
+/// is recorded as `queue_write_held_long` with the transaction's name, its
+/// hold and the process's role and pid.
+#[test]
+fn an_ask_whose_transaction_held_the_lock_long_is_recorded_by_name() {
+    use dagq::domain::AskKind;
+    let (dir, _owner) = crate::common::cleanup::owned_temp_dir();
+    let mut queue = crate::common::template::queue(&dir.path().join("queue.db"))
+        .with_write_hold_warn(Duration::ZERO);
+    let ask = queue
+        .open_update_ask(
+            AskKind::UpdateFailed,
+            "retry?",
+            &["retry", "skip"],
+            "runtime",
+            Some("0.4.0"),
+            serde_json::Value::Null,
+        )
+        .unwrap();
+    assert!(ask.closed_at.is_none());
+    let recorded = queue
+        .latest_event_of("queue_write_held_long")
+        .unwrap()
+        .expect("the long hold is recorded");
+    assert_eq!(recorded.payload["transaction"], "open_update_ask");
+    assert!(recorded.payload["held_ms"].is_u64(), "{}", recorded.payload);
+    assert_eq!(recorded.payload["role"], "user");
+    assert_eq!(recorded.payload["pid"], std::process::id());
+}

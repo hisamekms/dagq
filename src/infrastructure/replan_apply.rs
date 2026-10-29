@@ -69,9 +69,7 @@ impl SqliteQueue {
     /// it is.
     pub fn begin_replan_apply(&mut self, id: ReplanId, generation: i64) -> Result<ReplanOperation> {
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("begin_replan_apply", TransactionBehavior::Immediate)?;
         let op = read_operation(&tx, id)?;
         let op = if op.status == ReplanStatus::Applying && op.generation == generation {
             op
@@ -112,9 +110,7 @@ impl SqliteQueue {
         snapshot_problem: Option<&str>,
     ) -> Result<ApplyOutcome> {
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("apply_replacement", TransactionBehavior::Immediate)?;
         let op = read_operation(&tx, id)?;
         if op.status == ReplanStatus::Applied {
             return Ok(ApplyOutcome::AlreadyApplied);
@@ -185,9 +181,7 @@ impl SqliteQueue {
         recovery: ApplyRecovery,
         now: i64,
     ) -> Result<bool> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("hold_apply", TransactionBehavior::Immediate)?;
         let mut op = read_operation(&tx, id)?;
         let reason = format!(
             "the replacement was not applied, nothing of it is written and the saved work is kept: {}",

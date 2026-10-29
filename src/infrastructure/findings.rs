@@ -22,9 +22,7 @@ impl SqliteQueue {
     /// record that brings nothing new writes nothing (`changed` is empty).
     pub fn record_finding(&mut self, new: NewFinding) -> Result<FindingOutcome> {
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_finding", TransactionBehavior::Immediate)?;
         let outcome = record_in(&tx, &new, now)?;
         tx.commit()?;
         Ok(outcome)
@@ -38,7 +36,7 @@ impl SqliteQueue {
     /// or `None` when one was there.
     pub fn record_finding_once(&self, new: NewFinding) -> Result<Option<FindingId>> {
         let now = self.generators.clock.now();
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_finding_once", TransactionBehavior::Immediate)?;
         let (task_id, run_id, goal_id) = resolve_target(&tx, &new.target)?;
         let there: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM findings WHERE kind=?1 AND target=?2
@@ -90,9 +88,7 @@ impl SqliteQueue {
         covered_by: Option<TaskId>,
     ) -> Result<Finding> {
         let now = self.generators.clock.now();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("set_finding_status_covered", TransactionBehavior::Immediate)?;
         if let Some(task) = covered_by {
             ensure!(
                 to == FindingStatus::Dismissed,
