@@ -1082,15 +1082,29 @@ impl RunTransitions for SupervisorQueue {
             ],
         )
     }
-    fn running_diagnosis_owners(&self) -> Result<Vec<u32>> {
-        self.remote("running_diagnosis_owners", vec![])
+    fn running_diagnosis_owners(&self) -> Result<Vec<crate::domain::replan_detect::RunningOwner>> {
+        // The service of the binary before a handoff, until this
+        // supervisor replaces it, answers the owners as pids alone, which
+        // cannot tell a dead owner whose pid another process took from a
+        // live one, nor another pid namespace's supervisor from this one:
+        // no owner is read, so no diagnosis job starts until then.
+        match self.remote("diagnosis_owners", vec![]) {
+            Err(error) if super::Refused::bad_request(&error) => Err(error.context(
+                "the queue's service of another binary does not tell the owners of the diagnosis jobs by their registration",
+            )),
+            result => result,
+        }
     }
     fn start_replan_diagnosis(
         &mut self,
         op: (crate::domain::ReplanId, i64),
         reason: &str,
         run: &RunId,
-        (payload, owner, gone): (serde_json::Value, u32, &[u32]),
+        (payload, owner, gone): (
+            serde_json::Value,
+            &crate::domain::replan_detect::JobOwner,
+            &[crate::domain::replan_detect::JobOwner],
+        ),
     ) -> Result<crate::domain::task_replan::ReplanOperation> {
         self.remote(
             "start_replan_diagnosis",

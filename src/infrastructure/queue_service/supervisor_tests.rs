@@ -231,3 +231,72 @@ fn only_the_supervisor_principal_reaches_its_operations() {
         Some(crate::domain::queue_service::FailureKind::RunNotFound(_))
     ));
 }
+
+/// A supervisor of the binary before a handoff starts a diagnosis job in
+/// its form (its pid, and the pids it took as gone, its own always among
+/// them): a job of a registered supervisor of another token with that pid
+/// (another pid namespace's) is not taken as gone by it, and the start is
+/// refused; once that registration is gone, the same start takes the
+/// operation over.
+#[test]
+fn an_older_supervisors_start_takes_no_registered_owner_of_its_pid_as_gone() {
+    use crate::domain::replan_detect::JobOwner;
+    use crate::domain::task_replan::{NewReplan, ReplanOrigin};
+    let (_dir, backend) = claimed(&LeaseToken::new("old"));
+    let mut queue = SqliteQueue::open(&backend.db).unwrap();
+    let run = RunId::new(RUN).unwrap();
+    let op = queue
+        .record_replan(
+            &NewReplan {
+                run: run.clone(),
+                reason: "the reviews keep failing".into(),
+                evidence: Vec::new(),
+            },
+            ReplanOrigin::Runtime,
+            "supervisor",
+            "supervisor",
+        )
+        .unwrap()
+        .operation;
+    let twin = LeaseToken::new("twin");
+    queue.register_supervisor(&twin, 7, 1, "test").unwrap();
+    let twins = JobOwner {
+        pid: 7,
+        token: Some("twin".into()),
+        process_start: Some("Mon 10:00".into()),
+    };
+    let claimed = queue
+        .start_replan_diagnosis(
+            (op.id, op.generation),
+            "its diagnosis 1 starts",
+            &run,
+            (json!({"attempt": 1}), &twins, &[]),
+        )
+        .unwrap();
+    let old = token_of(&backend, &Principal::supervisor(&LeaseToken::new("old"), 7));
+    let older_start = || {
+        call(
+            &backend,
+            &old,
+            "start_replan_diagnosis",
+            json!([[op.id, claimed.generation], "its diagnosis 2 starts", RUN,
+                   {"attempt": 2}, 7, [7]]),
+        )
+    };
+    let refusal = refused(&older_start());
+    assert!(
+        refusal.contains("one runs at a time in the queue"),
+        "{refusal}"
+    );
+    assert_eq!(
+        queue.replan_operation(op.id).unwrap().generation,
+        claimed.generation
+    );
+    assert!(queue.deregister_supervisor(&twin).unwrap());
+    let taken = older_start();
+    assert!(taken.ok, "{taken:?}");
+    assert_eq!(
+        queue.replan_operation(op.id).unwrap().generation,
+        claimed.generation + 1
+    );
+}

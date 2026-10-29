@@ -45,6 +45,7 @@ pub(super) const READS: &[&str] = &[
     "open_replan_operations",
     "replan_lineage",
     "running_diagnosis_owners",
+    "diagnosis_owners",
     "runs_leased_by_others",
     "runs_leased_by",
     "unclosed_run_asks",

@@ -2336,3 +2336,141 @@ fn a_row_past_an_answer_is_read_in_parts_again_once_another_writer_wrote_it() {
     });
     assert_eq!(queue(service).ledger_rows(LedgerKind::Run).unwrap(), [then]);
 }
+
+/// A service of the binary before a handoff: it refuses `diagnosis_owners`
+/// and a start that names its owner by more than a pid as requests it
+/// does not read, and answers the owners as pids; it keeps each call's op.
+struct OlderDiagnosisService {
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl ServiceCaller for OlderDiagnosisService {
+    fn call(&self, _: UseCase, params: Value) -> Result<Value> {
+        let op = params["op"].as_str().unwrap_or_default().to_owned();
+        self.calls.lock().unwrap().push(op.clone());
+        match op.as_str() {
+            "running_diagnosis_owners" => Ok(serde_json::json!([5])),
+            _ => Err(service_error(&ServiceError {
+                code: ServiceErrorCode::BadRequest,
+                message: format!("{op} does not read"),
+                denied: None,
+                kind: None,
+            })),
+        }
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        anyhow::bail!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// This supervisor with the service of the binary before a handoff, which
+/// answers the owners of the diagnosis jobs as pids alone: no owner is
+/// read from it (a pid cannot tell a dead owner whose pid was taken, nor
+/// another pid namespace's supervisor from this one), so the supervisor
+/// starts no job; and a start it refuses is not sent again by pids.
+#[test]
+fn no_diagnosis_owner_is_read_from_a_service_that_tells_them_by_pid() {
+    use crate::application::RunTransitions;
+    use crate::domain::replan_detect::JobOwner;
+    let service = Arc::new(OlderDiagnosisService {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut queue = SupervisorQueues::new(
+        service.clone(),
+        ActorContext::instance(ActorRole::Supervisor, 1),
+    )
+    .open()
+    .unwrap();
+    let error = RunTransitions::running_diagnosis_owners(&*queue).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("does not tell the owners"),
+        "{error:#}"
+    );
+    let me = JobOwner {
+        pid: 7,
+        token: Some("me".into()),
+        process_start: Some("Mon 10:00".into()),
+    };
+    let run = RunId::new("r1").unwrap();
+    let started = RunTransitions::start_replan_diagnosis(
+        &mut *queue,
+        (crate::domain::ReplanId::new(1), 2),
+        "its diagnosis 1 starts",
+        &run,
+        (serde_json::json!({"attempt": 1}), &me, &[]),
+    );
+    assert!(started.is_err());
+    assert_eq!(
+        *service.calls.lock().unwrap(),
+        ["diagnosis_owners", "start_replan_diagnosis"]
+    );
+}
+
+/// The service reads a start in this binary's form and in the form of a
+/// supervisor of the binary before a handoff (the owner and the gone as
+/// pids), whose gone stand for the running owners of those pids but the
+/// registered owners of a token (another pid namespace's supervisor with
+/// its pid).
+#[test]
+fn the_service_reads_a_diagnosis_start_of_either_binary() {
+    use crate::domain::replan_detect::{JobOwner, RunningOwner};
+    use dispatch::DiagnosisStarter;
+    let owner = |pid: u32, token: Option<&str>| JobOwner {
+        pid,
+        token: token.map(str::to_owned),
+        process_start: None,
+    };
+    let head = serde_json::json!([[1, 2], "its diagnosis 1 starts", "r1", {"attempt": 1}]);
+    let with = |owner: Value, gone: Value| {
+        let mut args = head.as_array().unwrap().clone();
+        args.extend([owner, gone]);
+        dispatch::diagnosis_start_args("start_replan_diagnosis", Value::Array(args))
+            .unwrap()
+            .4
+    };
+    let me = owner(7, Some("me"));
+    let gone = owner(5, Some("gone"));
+    assert_eq!(
+        with(
+            serde_json::to_value(&me).unwrap(),
+            serde_json::to_value([&gone]).unwrap()
+        ),
+        DiagnosisStarter::Owner(me, vec![gone.clone()])
+    );
+    assert_eq!(
+        with(serde_json::json!(7), serde_json::json!([5, 7])),
+        DiagnosisStarter::Pid(7, vec![5, 7])
+    );
+    assert!(
+        dispatch::diagnosis_start_args("start_replan_diagnosis", serde_json::json!([1])).is_err()
+    );
+    let running = |owner| RunningOwner {
+        owner,
+        heartbeat_at: None,
+    };
+    let registered = |owner| RunningOwner {
+        owner,
+        heartbeat_at: Some(1),
+    };
+    let owners = [
+        running(gone.clone()),
+        running(owner(6, Some("live"))),
+        running(owner(5, None)),
+        registered(owner(7, Some("twin"))),
+    ];
+    assert_eq!(
+        dispatch::gone_of_pids(&owners, &[5, 7]),
+        [gone, owner(5, None)]
+    );
+}

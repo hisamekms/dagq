@@ -708,6 +708,19 @@ fn an_answer_to_the_diagnosis_of_a_held_task_is_applied_after_the_release() {
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
 }
 
+/// Another supervisor of `pid`, not registered: its token and its
+/// process's start.
+fn stand_in(pid: u32) -> replan_detect::JobOwner {
+    replan_detect::JobOwner {
+        pid,
+        token: Some("other".into()),
+        process_start: dagq::application::ProcessControl::start_identity(
+            &dagq::infrastructure::adapters::SystemProcesses,
+            pid,
+        ),
+    }
+}
+
 /// Acceptance (two supervisors, an owner gone): a diagnosis job another
 /// supervisor alive started is left to it, so no second job starts in the
 /// queue; once that supervisor is gone, the next one claims the operation
@@ -738,12 +751,13 @@ fn a_diagnosis_another_supervisor_runs_is_left_to_it_and_taken_over_once_it_is_g
             .unwrap(),
         "the other supervisor's stand-in",
     );
+    // Not registered, it is told by its pid and its process's start.
     let claimed = queue
         .start_replan_diagnosis(
             (op.id, op.generation),
             "its diagnosis 1 starts",
             &run,
-            (json!({"attempt": 1}), other.child().id(), &[]),
+            (json!({"attempt": 1}), &stand_in(other.child().id()), &[]),
         )
         .unwrap();
     enable_replan(&repo, "non_pass_reviews = 1\n");
@@ -807,13 +821,13 @@ fn a_start_the_queues_transaction_refuses_starts_no_provider() {
             .unwrap(),
         "the other supervisor's stand-in",
     );
-    let owner = other.child().id();
+    let owner = stand_in(other.child().id());
     let claimed = queue
         .start_replan_diagnosis(
             (first.id, first.generation),
             "its diagnosis 1 starts",
             &run,
-            (json!({"attempt": 1}), owner, &[]),
+            (json!({"attempt": 1}), &owner, &[]),
         )
         .unwrap();
     queue
@@ -851,7 +865,13 @@ fn a_start_the_queues_transaction_refuses_starts_no_provider() {
         (unclaimed.status, unclaimed.generation),
         (ReplanStatus::Candidate, second.generation)
     );
-    assert_eq!(queue.running_diagnosis_owners().unwrap(), [owner]);
+    let owners: Vec<_> = queue
+        .running_diagnosis_owners()
+        .unwrap()
+        .into_iter()
+        .map(|o| o.owner)
+        .collect();
+    assert_eq!(owners, [owner]);
     drop(other);
 }
 

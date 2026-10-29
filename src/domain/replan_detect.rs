@@ -883,6 +883,13 @@ pub struct PlanningPayload {
     pub window_end: Option<EventId>,
     /// `replan_diagnosis_started`: the supervisor that runs the job.
     pub supervisor_pid: Option<u32>,
+    /// `replan_diagnosis_started`: that supervisor's registration (none of
+    /// an older binary's start).
+    pub supervisor_token: Option<String>,
+    /// `replan_diagnosis_started`: when that supervisor's process started,
+    /// as [`crate::application::ProcessControl::start_identity`] reads it
+    /// (none of an older binary's start, or when it could not be read).
+    pub supervisor_process_start: Option<String>,
     /// `replan_diagnosed` and `replan_diagnosis_failed` of a job: the
     /// generation its start claimed the operation under, which ties the
     /// end to that start (an ask's record or another attempt's names
@@ -914,6 +921,8 @@ impl PlanningPayload {
             generation: typed(field("generation")),
             window_end: typed(field("window_end")),
             supervisor_pid: typed(field("supervisor_pid")),
+            supervisor_token: typed(field("supervisor_token")),
+            supervisor_process_start: typed(field("supervisor_process_start")),
             started_generation: typed(field("started_generation")),
             attempt: typed(field("attempt")),
             verdict: typed(field("verdict")),
@@ -924,15 +933,111 @@ impl PlanningPayload {
     pub fn is_of(&self, op: super::ReplanId) -> bool {
         self.operation_id == Some(op)
     }
+
+    /// The supervisor a `replan_diagnosis_started` names as its job's
+    /// owner, `None` when it names no pid.
+    pub fn owner(&self) -> Option<JobOwner> {
+        Some(JobOwner {
+            pid: self.supervisor_pid?,
+            token: self.supervisor_token.clone(),
+            process_start: self.supervisor_process_start.clone(),
+        })
+    }
 }
+
+/// The supervisor that owns a diagnosis job, as its start names it: its
+/// pid, and the token of its registration and its process's start, which
+/// tell it from another process that took the pid later or from a
+/// supervisor of another pid namespace that has the same pid. A start of
+/// an older binary names the pid only.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct JobOwner {
+    pub pid: u32,
+    pub token: Option<String>,
+    pub process_start: Option<String>,
+}
+
+/// The owner of a diagnosis job the queue records as running, with the
+/// `supervisors` row of its token: the row's `heartbeat_at` (unix
+/// seconds), `None` when no row has its token or it names none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningOwner {
+    pub owner: JobOwner,
+    pub heartbeat_at: Option<i64>,
+}
+
+/// What a supervisor sees of the owner of a diagnosis job besides the
+/// queue's records: itself (its token and pid), and the process that has
+/// the owner's pid now: whether one does and when it started (`None` when
+/// it cannot be read).
+#[derive(Debug, Clone, Copy)]
+pub struct OwnerSeen<'a> {
+    pub me: (&'a str, u32),
+    pub pid_alive: bool,
+    pub pid_start: Option<&'a str>,
+}
+
+/// Whether `owner`, with `heartbeat_at` its registration's heartbeat
+/// ([`RunningOwner`], `None` when no `supervisors` row has its token),
+/// still runs its diagnosis job for the supervisor that sees it as `seen`.
+/// An owner that names a token runs when it is not this supervisor's (a
+/// job of it before an exec, which keeps its token, runs no more) and
+/// either its registration is there, whatever its heartbeat (an old one,
+/// as every one is right after the host wakes from sleep, is not read
+/// here: the registration of a supervisor that is gone is pruned by a live
+/// one, [`super::supervisor_prune::left_behind`]), or, its registration
+/// gone, its pid runs the process that started when it did, whichever
+/// process that is here: a pid taken by another process later, or whose
+/// start cannot be told, runs no job. Its pid is not compared with this
+/// process's, so another pid namespace's supervisor with the same pid is
+/// not taken for this one. A start of an older binary, which names no
+/// token, is judged by its pid alone, as that binary did, since its
+/// supervisor may still run: it runs when the pid is not this process's
+/// and a process has it (one that started at another time than a recorded
+/// start runs none).
+pub fn owner_runs(owner: &JobOwner, heartbeat_at: Option<i64>, seen: &OwnerSeen<'_>) -> bool {
+    let (token, pid) = seen.me;
+    let started_alike = |recorded: &str| seen.pid_start == Some(recorded);
+    match &owner.token {
+        Some(owner_token) => {
+            owner_token != token
+                && (heartbeat_at.is_some()
+                    || seen.pid_alive && owner.process_start.as_deref().is_some_and(started_alike))
+        }
+        None => {
+            owner.pid != pid
+                && seen.pid_alive
+                && owner.process_start.as_deref().is_none_or(started_alike)
+        }
+    }
+}
+
+/// The owners of the diagnosis jobs the queue records as running, split
+/// by [`owner_runs`] (`seen` gives what the caller sees of each): those
+/// that run theirs, whose job is not started again, and those gone, whose
+/// job is taken as ended so that the next attempt starts.
+pub fn split_owners<'a>(
+    owners: &[RunningOwner],
+    seen: impl Fn(&JobOwner) -> OwnerSeen<'a>,
+) -> (Vec<JobOwner>, Vec<JobOwner>) {
+    let (live, gone): (Vec<&RunningOwner>, Vec<&RunningOwner>) = owners
+        .iter()
+        .partition(|o| owner_runs(&o.owner, o.heartbeat_at, &seen(&o.owner)));
+    let owners = |of: Vec<&RunningOwner>| of.into_iter().map(|o| o.owner.clone()).collect();
+    (owners(live), owners(gone))
+}
+
+/// Who runs one diagnosis job at a time: a registration's token, or the
+/// pid of a start that names none.
+type OwnerKey<'a> = (Option<&'a str>, Option<u32>);
 
 /// A diagnosis job that runs: its operation, the generation its start
 /// claimed it under and the supervisor that owns it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningJob {
     pub operation: super::ReplanId,
     pub generation: i64,
-    pub owner: u32,
+    pub owner: JobOwner,
 }
 
 /// A planning event read as a record of a diagnosis job.
@@ -988,25 +1093,30 @@ impl PlanningPayload {
 /// operation's jobs in their order ([`JobRecord`]): each owner's latest
 /// start that no end of a job tied to it came after
 /// ([`PlanningPayload::ends`]), its owner not among `gone` (ended, or the
-/// caller itself, which runs none). A supervisor runs one job at a time,
-/// so its later start ends its earlier one. A job runs on whatever its
+/// caller itself, which runs none). A supervisor (one registration, or
+/// one pid for a start that names none: [`JobOwner`]) runs one job at a
+/// time, so its later start ends its earlier one. A job runs on whatever its
 /// operation does meanwhile (a later claim, a new run that takes the
 /// operation over, its close) until its end is recorded; a start that
 /// names no owner or generation has none to wait for.
-pub fn running_jobs(records: &[JobRecord], gone: &[u32]) -> Vec<RunningJob> {
-    let mut by_owner: BTreeMap<u32, (RunningJob, &PlanningPayload)> = BTreeMap::new();
+pub fn running_jobs(records: &[JobRecord], gone: &[JobOwner]) -> Vec<RunningJob> {
+    let mut by_owner: BTreeMap<OwnerKey<'_>, (RunningJob, &PlanningPayload)> = BTreeMap::new();
     for record in records {
         match record {
             JobRecord::Started(read) => {
                 if let (Some(operation), Some(owner), Some(generation)) =
-                    (read.operation_id, read.supervisor_pid, read.generation)
+                    (read.operation_id, read.owner(), read.generation)
                 {
                     let job = RunningJob {
                         operation,
                         generation,
                         owner,
                     };
-                    by_owner.insert(owner, (job, read));
+                    let key = match &read.supervisor_token {
+                        Some(token) => (Some(token.as_str()), None),
+                        None => (None, Some(job.owner.pid)),
+                    };
+                    by_owner.insert(key, (job, read));
                 }
             }
             JobRecord::Ended(end) => {
@@ -1912,10 +2022,15 @@ mod tests {
             .unwrap()
         };
         let failed = |payload: Value| record(EventKind::ReplanDiagnosisFailed, payload).unwrap();
+        let pid = |pid: u32| JobOwner {
+            pid,
+            token: None,
+            process_start: None,
+        };
         let job = |op: i64, generation: i64, owner: u32| RunningJob {
             operation: ReplanId::new(op),
             generation,
-            owner,
+            owner: pid(owner),
         };
         // An ask's own record, of a verdict-less ask whatever binary wrote
         // it, is no job's end; other events are no job's records.
@@ -1939,9 +2054,9 @@ mod tests {
             failed(json!({"operation_id": 2, "started_generation": 2})),
         ];
         assert_eq!(running_jobs(&records, &[]), [job(1, 2, 10)]);
-        assert_eq!(running_jobs(&records, &[11]), [job(1, 2, 10)]);
+        assert_eq!(running_jobs(&records, &[pid(11)]), [job(1, 2, 10)]);
         // Its owner gone, or the caller itself.
-        assert!(running_jobs(&records, &[10]).is_empty());
+        assert!(running_jobs(&records, &[pid(10)]).is_empty());
         // Its end: one that names its generation, one of an older binary
         // of its attempt (a failure, or the verdict of the job, applied or
         // asked about), or one that names neither.
@@ -1976,5 +2091,129 @@ mod tests {
         )
         .unwrap();
         assert!(running_jobs(&[ownerless], &[]).is_empty());
+    }
+
+    fn owner(pid: u32, token: Option<&str>, start: Option<&str>) -> JobOwner {
+        JobOwner {
+            pid,
+            token: token.map(str::to_owned),
+            process_start: start.map(str::to_owned),
+        }
+    }
+
+    /// This supervisor is `me` (pid 7); the owner's pid is alive and
+    /// started at `start`, or not alive.
+    fn seen(pid_start: Option<&str>) -> OwnerSeen<'_> {
+        OwnerSeen {
+            me: ("me", 7),
+            pid_alive: pid_start.is_some(),
+            pid_start,
+        }
+    }
+
+    #[test]
+    fn an_owner_runs_by_its_registration_or_its_pid_and_its_start() {
+        const NOW: i64 = 10_000;
+        let fresh = Some(NOW - 5);
+        let stale = Some(NOW - crate::domain::HEARTBEAT_TIMEOUT_SECS - 1);
+        let started = owner(10, Some("other"), Some("Mon 10:00"));
+        // Its registration there, its heartbeat fresh or old (a host just
+        // woken): it runs, whatever its pid runs here (another pid
+        // namespace's supervisor's pid is not ours).
+        for heartbeat in [fresh, stale] {
+            assert!(owner_runs(&started, heartbeat, &seen(None)));
+            assert!(owner_runs(&started, heartbeat, &seen(Some("Tue 09:00"))));
+        }
+        // Its registration gone: its pid running the process that started
+        // when it did.
+        assert!(owner_runs(&started, None, &seen(Some("Mon 10:00"))));
+        // Its pid alive in a process that started at another time, or of
+        // an unknown start, or gone: the owner is gone.
+        assert!(!owner_runs(&started, None, &seen(Some("Tue 09:00"))));
+        assert!(!owner_runs(&started, None, &seen(None)));
+        let unknown = OwnerSeen {
+            pid_start: None,
+            ..seen(Some("x"))
+        };
+        assert!(!owner_runs(&started, None, &unknown));
+        let no_start = owner(10, Some("other"), None);
+        assert!(!owner_runs(&no_start, None, &seen(Some("Mon 10:00"))));
+        assert!(owner_runs(&no_start, stale, &seen(None)));
+        // This supervisor's own token (a job of it before an exec): gone,
+        // even registered with its pid and start this process's.
+        let mine = owner(7, Some("me"), Some("Mon 10:00"));
+        assert!(!owner_runs(&mine, fresh, &seen(Some("Mon 10:00"))));
+        // Another registration with this process's pid (another pid
+        // namespace's): not this one's job. It runs while registered,
+        // whatever its heartbeat, and once its registration is gone while
+        // the pid runs the process of its start.
+        let twin = owner(7, Some("other"), Some("Mon 10:00"));
+        for heartbeat in [fresh, stale] {
+            assert!(owner_runs(&twin, heartbeat, &seen(Some("Tue 09:00"))));
+        }
+        assert!(owner_runs(&twin, None, &seen(Some("Mon 10:00"))));
+        assert!(!owner_runs(&twin, None, &seen(Some("Tue 09:00"))));
+    }
+
+    #[test]
+    fn an_older_binarys_start_is_judged_by_its_pid_alone() {
+        let legacy = owner(10, None, None);
+        // Any process with its pid runs it; none, or this process, not.
+        assert!(owner_runs(&legacy, None, &seen(Some("Tue 09:00"))));
+        assert!(!owner_runs(&legacy, None, &seen(None)));
+        assert!(!owner_runs(&owner(7, None, None), None, &seen(Some("Mon"))));
+        // A start it names is compared, a heartbeat is not read.
+        let timed = owner(10, None, Some("Mon 10:00"));
+        assert!(owner_runs(&timed, None, &seen(Some("Mon 10:00"))));
+        assert!(!owner_runs(&timed, Some(1), &seen(Some("Tue 09:00"))));
+    }
+
+    #[test]
+    fn the_jobs_of_gone_owners_are_started_again_and_the_others_not() {
+        let start = |op: i64, owner: &JobOwner| {
+            JobRecord::of(
+                EventKind::ReplanDiagnosisStarted,
+                &json!({"operation_id": op, "attempt": 1, "generation": 1,
+                        "supervisor_pid": owner.pid, "supervisor_token": owner.token,
+                        "supervisor_process_start": owner.process_start}),
+            )
+            .unwrap()
+        };
+        let live = owner(10, Some("live"), Some("Mon 10:00"));
+        // Its pid taken by a process that started later.
+        let reused = owner(11, Some("gone"), Some("Mon 10:00"));
+        // The same pid as `live`'s, of another registration (another pid
+        // namespace): a job of its own beside `live`'s.
+        let twin = owner(10, Some("twin"), Some("Mon 10:00"));
+        let mine = owner(7, Some("me"), None);
+        let records = [
+            start(1, &live),
+            start(2, &reused),
+            start(3, &twin),
+            start(4, &mine),
+        ];
+        let running: Vec<RunningOwner> = running_jobs(&records, &[])
+            .into_iter()
+            .map(|job| RunningOwner {
+                heartbeat_at: matches!(job.owner.token.as_deref(), Some("live" | "twin"))
+                    .then_some(1),
+                owner: job.owner,
+            })
+            .collect();
+        assert_eq!(running.len(), 4, "{running:?}");
+        let (runs, gone) = split_owners(&running, |o| {
+            seen(if o.pid == 11 {
+                Some("Tue 09:00")
+            } else {
+                Some("Mon 10:00")
+            })
+        });
+        assert_eq!(runs, [live.clone(), twin.clone()]);
+        assert_eq!(gone, [reused, mine]);
+        let jobs: Vec<i64> = running_jobs(&records, &gone)
+            .into_iter()
+            .map(|job| job.operation.as_i64())
+            .collect();
+        assert_eq!(jobs, [1, 3]);
     }
 }

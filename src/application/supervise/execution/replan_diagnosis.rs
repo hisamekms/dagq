@@ -44,8 +44,8 @@ use super::*;
 use crate::application::prompt::{DiagnosisMaterial, TRIAGE_ACCESS, replan_diagnosis_prompt};
 use crate::domain::replan_detect::{
     self, AskWhy, DECIDED_BY_PERSON, DECIDED_BY_RUNTIME, DIAGNOSIS_ASKER, DIAGNOSIS_OPTIONS,
-    DecideFacts, Decided, Detection, DiagnosisVerdict, JobPlace, JobRecord, MAX_DIAGNOSIS_ATTEMPTS,
-    PlanningPayload,
+    DecideFacts, Decided, Detection, DiagnosisVerdict, JobOwner, JobPlace, JobRecord,
+    MAX_DIAGNOSIS_ATTEMPTS, OwnerSeen, PlanningPayload,
 };
 use crate::domain::task_hold::HoldGuard;
 use crate::domain::task_replan::{
@@ -99,6 +99,43 @@ enum InFlight {
     Next(usize, usize),
     /// A job another supervisor still alive runs.
     Elsewhere,
+}
+
+/// The next diagnosis job of `op` from `events` (its task's): the attempt
+/// after the last one started, or none while its owner, among `live`
+/// (the owners of a job the queue records as running that still run it:
+/// [`replan_detect::split_owners`]), runs it. A job of a supervisor that
+/// is gone or of this process before an exec is started again as the
+/// next attempt.
+fn diagnosis_in_flight(op: ReplanId, events: &[RunEvent], live: &[JobOwner]) -> InFlight {
+    let started: Vec<&RunEvent> = events
+        .iter()
+        .filter(|e| e.kind == EventKind::ReplanDiagnosisStarted && of_operation(e, op))
+        .collect();
+    let failed = events
+        .iter()
+        .filter(|e| e.kind == EventKind::ReplanDiagnosisFailed && of_operation(e, op))
+        .count();
+    let Some(last) = started.last() else {
+        return InFlight::Next(1, failed);
+    };
+    // Its end is tied to it: an ask's own record, or another attempt's
+    // end, ends it not.
+    let start = PlanningPayload::of(last);
+    let ended = events.iter().any(|e| {
+        e.id > last.id
+            && of_operation(e, op)
+            && matches!(
+                e.kind.known().and_then(|kind| JobRecord::of(kind, &e.payload)),
+                Some(JobRecord::Ended(end)) if end.ends(&start)
+            )
+    });
+    let elsewhere = start.owner().is_some_and(|owner| live.contains(&owner));
+    if !ended && elsewhere {
+        InFlight::Elsewhere
+    } else {
+        InFlight::Next(started.len() + 1, failed)
+    }
 }
 
 /// `event`'s `operation_id` is `op`'s.
@@ -256,43 +293,6 @@ impl Supervisor<'_> {
         Ok(opened)
     }
 
-    /// The next diagnosis job of `op` from `events` (its task's): the
-    /// attempt after the last one started, or none while a supervisor
-    /// still alive runs the last one (a job of a supervisor that is gone,
-    /// or of this process before an exec, which runs none now, is started
-    /// again as the next attempt).
-    fn diagnosis_in_flight(&self, op: ReplanId, events: &[RunEvent]) -> InFlight {
-        let started: Vec<&RunEvent> = events
-            .iter()
-            .filter(|e| e.kind == EventKind::ReplanDiagnosisStarted && of_operation(e, op))
-            .collect();
-        let failed = events
-            .iter()
-            .filter(|e| e.kind == EventKind::ReplanDiagnosisFailed && of_operation(e, op))
-            .count();
-        let Some(last) = started.last() else {
-            return InFlight::Next(1, failed);
-        };
-        // Its end is tied to it: an ask's own record, or another attempt's
-        // end, ends it not.
-        let start = PlanningPayload::of(last);
-        let ended = events.iter().any(|e| {
-            e.id > last.id
-                && of_operation(e, op)
-                && matches!(
-                    e.kind.known().and_then(|kind| JobRecord::of(kind, &e.payload)),
-                    Some(JobRecord::Ended(end)) if end.ends(&start)
-                )
-        });
-        let pid = PlanningPayload::of(last).supervisor_pid;
-        let elsewhere = pid.is_some_and(|pid| pid != self.layout.pid && self.processes.alive(pid));
-        if !ended && elsewhere {
-            InFlight::Elsewhere
-        } else {
-            InFlight::Next(started.len() + 1, failed)
-        }
-    }
-
     /// Close `op` (in `candidate` or `diagnosing`) as `continuing` for
     /// `reason`: its task or run went on without it. Its ask, if one is
     /// open, closes with it.
@@ -352,7 +352,15 @@ impl Supervisor<'_> {
         if self.replan_diagnosis.is_some() {
             return Ok(false);
         }
-        let gone = self.diagnosis_owners_gone()?;
+        // Owners that cannot be told (the queue's service of another
+        // binary answers no registration of theirs) start no job.
+        let owners = match self.diagnosis_owners() {
+            Ok(owners) => owners,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "no diagnosis job starts: the owners of the running ones are not read: {error:#}");
+                return Ok(false);
+            }
+        };
         for op in self.queue.open_replan_operations()? {
             if !matches!(
                 op.status,
@@ -360,7 +368,7 @@ impl Supervisor<'_> {
             ) {
                 continue;
             }
-            match self.try_start_diagnosis(&op, &gone) {
+            match self.try_start_diagnosis(&op, &owners) {
                 Ok(true) => return Ok(true),
                 Ok(false) => {}
                 Err(error) => {
@@ -371,25 +379,60 @@ impl Supervisor<'_> {
         Ok(false)
     }
 
-    /// The supervisors that own a diagnosis job the queue records as
-    /// running and that run none: this one, which runs none now (a job of
-    /// it before an exec is gone), and each that is not alive. The queue's
-    /// transaction of a start counts the jobs of the others
-    /// ([`crate::application::RunTransitions::start_replan_diagnosis`]).
-    fn diagnosis_owners_gone(&self) -> Result<Vec<u32>> {
-        let mut gone = vec![self.layout.pid];
-        for owner in self.queue.running_diagnosis_owners()? {
-            if owner != self.layout.pid && !self.processes.alive(owner) {
-                gone.push(owner);
-            }
+    /// This supervisor as the owner of the diagnosis job it starts: its
+    /// pid, its registration's token and its process's start.
+    fn diagnosis_owner(&self) -> JobOwner {
+        JobOwner {
+            pid: self.layout.pid,
+            token: Some(self.registration.token().as_str().to_owned()),
+            process_start: self.processes.start_identity(self.layout.pid),
         }
-        Ok(gone)
     }
 
-    /// Start `op`'s diagnosis job if it is due, the supervisors in `gone`
-    /// taken as running none; whether one started (or a person was asked
-    /// instead), so that no other starts in this pass.
-    fn try_start_diagnosis(&mut self, op: &ReplanOperation, gone: &[u32]) -> Result<bool> {
+    /// The supervisors that own a diagnosis job the queue records as
+    /// running, split into those that still run theirs and those gone
+    /// ([`replan_detect::split_owners`]): this one among the gone, which
+    /// runs none now (a job of it before an exec is gone), and each whose
+    /// registration and process are gone. The queue's transaction of a
+    /// start counts the jobs of the others
+    /// ([`crate::application::RunTransitions::start_replan_diagnosis`]).
+    fn diagnosis_owners(&self) -> Result<(Vec<JobOwner>, Vec<JobOwner>)> {
+        let owners = self.queue.running_diagnosis_owners()?;
+        let token = self.registration.token().as_str();
+        let processes: Vec<(u32, bool, Option<String>)> = owners
+            .iter()
+            .map(|o| {
+                let alive = self.processes.alive(o.owner.pid);
+                let start = alive
+                    .then(|| self.processes.start_identity(o.owner.pid))
+                    .flatten();
+                (o.owner.pid, alive, start)
+            })
+            .collect();
+        Ok(replan_detect::split_owners(&owners, |owner| {
+            let (pid_alive, pid_start) = processes
+                .iter()
+                .find(|(pid, ..)| *pid == owner.pid)
+                .map_or((false, None), |(_, alive, start)| {
+                    (*alive, start.as_deref())
+                });
+            OwnerSeen {
+                me: (token, self.layout.pid),
+                pid_alive,
+                pid_start,
+            }
+        }))
+    }
+
+    /// Start `op`'s diagnosis job if it is due, of the owners of a job the
+    /// queue records as running those in `owners.0` running theirs and
+    /// those in `owners.1` none; whether one started (or a person was
+    /// asked instead), so that no other starts in this pass.
+    fn try_start_diagnosis(
+        &mut self,
+        op: &ReplanOperation,
+        (live, gone): &(Vec<JobOwner>, Vec<JobOwner>),
+    ) -> Result<bool> {
         let detail = self.queue.show(op.task_id)?;
         if detail.task.status() != TaskStatus::InProgress {
             let reason = format!(
@@ -425,7 +468,7 @@ impl Supervisor<'_> {
         if replan_detect::kept_verdict(&events, op.id, op.generation).is_some() {
             return Ok(false);
         }
-        let (attempt, failed) = match self.diagnosis_in_flight(op.id, &events) {
+        let (attempt, failed) = match diagnosis_in_flight(op.id, &events, live) {
             InFlight::Elsewhere => return Ok(false),
             InFlight::Next(attempt, failed) => (attempt, failed),
         };
@@ -594,7 +637,7 @@ impl Supervisor<'_> {
             (op.id, op.generation),
             &reason,
             run.id(),
-            (started, self.layout.pid, gone),
+            (started, &self.diagnosis_owner(), gone),
         ) {
             Ok(claimed) => claimed,
             Err(error) => {

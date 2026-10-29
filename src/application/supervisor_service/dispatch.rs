@@ -210,22 +210,39 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 (payload, premise.as_ref()),
             ))
         }
-        "running_diagnosis_owners" => answer(RunTransitions::running_diagnosis_owners(&*store)),
+        "diagnosis_owners" => answer(RunTransitions::running_diagnosis_owners(&*store)),
+        // A supervisor of the binary before a handoff reads the owners as
+        // pids.
+        "running_diagnosis_owners" => answer(
+            RunTransitions::running_diagnosis_owners(&*store).map(|owners| {
+                owners
+                    .into_iter()
+                    .map(|o| o.owner.pid)
+                    .collect::<Vec<u32>>()
+            }),
+        ),
         "start_replan_diagnosis" => {
-            let (replan, reason, run, payload, owner, gone): (
-                (crate::domain::ReplanId, i64),
-                String,
-                RunId,
-                Value,
-                u32,
-                Vec<u32>,
-            ) = read(op, args)?;
+            let (replan, reason, run, payload, starter) = diagnosis_start_args(op, args)?;
+            let (owner, gone) = match starter {
+                DiagnosisStarter::Owner(owner, gone) => (owner, gone),
+                DiagnosisStarter::Pid(pid, gone) => {
+                    let owners = RunTransitions::running_diagnosis_owners(&*store)?;
+                    (
+                        crate::domain::replan_detect::JobOwner {
+                            pid,
+                            token: None,
+                            process_start: None,
+                        },
+                        gone_of_pids(&owners, &gone),
+                    )
+                }
+            };
             answer(RunTransitions::start_replan_diagnosis(
                 &mut *store,
                 replan,
                 &reason,
                 &run,
-                (payload, owner, &gone),
+                (payload, &owner, &gone),
             ))
         }
         "detect_replan" => {
@@ -2428,6 +2445,79 @@ fn write_over<S: SupervisorStore + ?Sized>(
         return Ok(None);
     }
     LedgerStore::write_ledger_row_over(store, row, held.as_ref())
+}
+
+/// Who starts a diagnosis job, as `start_replan_diagnosis` names it: the
+/// owner and the owners taken as gone, or, from a supervisor of the binary
+/// before a handoff, its pid and the pids it took as gone.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum DiagnosisStarter {
+    Owner(
+        crate::domain::replan_detect::JobOwner,
+        Vec<crate::domain::replan_detect::JobOwner>,
+    ),
+    Pid(u32, Vec<u32>),
+}
+
+/// The arguments of `start_replan_diagnosis` in either form
+/// ([`DiagnosisStarter`]).
+#[allow(clippy::type_complexity)]
+pub(super) fn diagnosis_start_args(
+    op: &str,
+    args: Value,
+) -> Result<(
+    (crate::domain::ReplanId, i64),
+    String,
+    RunId,
+    Value,
+    DiagnosisStarter,
+)> {
+    use crate::domain::replan_detect::JobOwner;
+    type Replan = (crate::domain::ReplanId, i64);
+    match read::<(Replan, String, RunId, Value, JobOwner, Vec<JobOwner>)>(op, args.clone()) {
+        Ok((replan, reason, run, payload, owner, gone)) => Ok((
+            replan,
+            reason,
+            run,
+            payload,
+            DiagnosisStarter::Owner(owner, gone),
+        )),
+        Err(_) => {
+            let (replan, reason, run, payload, pid, gone): (
+                Replan,
+                String,
+                RunId,
+                Value,
+                u32,
+                Vec<u32>,
+            ) = read(op, args)?;
+            Ok((
+                replan,
+                reason,
+                run,
+                payload,
+                DiagnosisStarter::Pid(pid, gone),
+            ))
+        }
+    }
+}
+
+/// The owners of the running diagnosis jobs a supervisor of the binary
+/// before a handoff took as gone by `pids`, as it judged them by their pid
+/// alone: those whose pid is among them, but an owner that names a token
+/// still registered (which [`crate::domain::replan_detect::owner_runs`]
+/// takes as running). That supervisor names its own pid among them, which
+/// may be the pid of another pid namespace's supervisor that runs a job.
+pub(super) fn gone_of_pids(
+    owners: &[crate::domain::replan_detect::RunningOwner],
+    pids: &[u32],
+) -> Vec<crate::domain::replan_detect::JobOwner> {
+    owners
+        .iter()
+        .filter(|o| pids.contains(&o.owner.pid))
+        .filter(|o| o.owner.token.is_none() || o.heartbeat_at.is_none())
+        .map(|o| o.owner.clone())
+        .collect()
 }
 
 /// The arguments of `set_max_load`: the token, the threshold and its

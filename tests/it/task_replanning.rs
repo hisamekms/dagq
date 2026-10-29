@@ -2276,8 +2276,16 @@ fn a_diagnosis_asks_atomically_and_applies_only_under_its_request_and_park_limit
 /// refused by its generation.
 #[test]
 fn a_diagnosis_starts_once_queue_wide_and_is_taken_over_after_its_start() {
+    use dagq::domain::replan_detect::{JobOwner, PlanningPayload};
     use dagq::domain::task_replan::ReplanOperation;
     use std::sync::{Arc, Barrier};
+    // A supervisor of this pid: its registration's token, its process's
+    // start.
+    let sv = |pid: u32| JobOwner {
+        pid,
+        token: Some(format!("sv-{pid}")),
+        process_start: Some("Thu Oct 29 10:00:00 2026".into()),
+    };
     let (_dir, db) = queue();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let tasks: Vec<TaskId> = ["A", "B"]
@@ -2336,7 +2344,7 @@ fn a_diagnosis_starts_once_queue_wide_and_is_taken_over_after_its_start() {
                         (id, generation),
                         "its diagnosis 1 starts",
                         &run,
-                        (json!({"attempt": 1}), owner, &[]),
+                        (json!({"attempt": 1}), &sv(owner), &[]),
                     )
                 })
             })
@@ -2373,10 +2381,19 @@ fn a_diagnosis_starts_once_queue_wide_and_is_taken_over_after_its_start() {
         }
         outcomes.into_iter().find_map(Result::ok).unwrap()
     };
-    let owner_of = |queue: &SqliteQueue, task: TaskId| -> u32 {
+    let owner_of = |queue: &SqliteQueue, task: TaskId| -> JobOwner {
         let records = started(queue, task);
-        let last = records.last().unwrap();
-        last["supervisor_pid"].as_u64().unwrap().try_into().unwrap()
+        PlanningPayload::from_value(records.last().unwrap())
+            .owner()
+            .unwrap()
+    };
+    let owners = |queue: &SqliteQueue| -> Vec<JobOwner> {
+        queue
+            .running_diagnosis_owners()
+            .unwrap()
+            .into_iter()
+            .map(|o| o.owner)
+            .collect()
     };
 
     // Two tasks' operations raced: one job queue-wide, the other's
@@ -2395,8 +2412,14 @@ fn a_diagnosis_starts_once_queue_wide_and_is_taken_over_after_its_start() {
     assert_eq!(other.status, ReplanStatus::Candidate);
     let records = started(&queue, tasks[winner]);
     assert_eq!(records[0]["generation"], first.generation);
+    // The start names its owner by its pid, token and process's start.
     let owner = owner_of(&queue, tasks[winner]);
-    assert!([101, 102].contains(&owner));
+    assert!([sv(101), sv(102)].contains(&owner), "{owner:?}");
+    assert_eq!(records[0]["supervisor_token"], json!(owner.token));
+    assert_eq!(
+        records[0]["supervisor_process_start"],
+        "Thu Oct 29 10:00:00 2026"
+    );
 
     // Its owner gone (or a supervisor that runs no job of its own), the
     // other task's job is the queue's one.
@@ -2405,11 +2428,11 @@ fn a_diagnosis_starts_once_queue_wide_and_is_taken_over_after_its_start() {
             (other.id, other.generation),
             "its diagnosis 1 starts",
             &runs[loser],
-            (json!({"attempt": 1}), 103, &[owner]),
+            (json!({"attempt": 1}), &sv(103), &[owner]),
         )
         .unwrap();
     assert_eq!(next.generation, other.generation + 1);
-    assert_eq!(owner_of(&queue, tasks[loser]), 103);
+    assert_eq!(owner_of(&queue, tasks[loser]), sv(103));
 
     // A start that failed ends its job; one operation raced by two
     // supervisors then: one claim and one start under one owner.
@@ -2430,7 +2453,7 @@ fn a_diagnosis_starts_once_queue_wide_and_is_taken_over_after_its_start() {
                 (first.id, first.generation),
                 "its diagnosis 2 starts",
                 &runs[winner],
-                (json!({"attempt": 2}), 104, &[101, 102]),
+                (json!({"attempt": 2}), &sv(104), &[sv(101), sv(102)]),
             )
             .is_err()
     );
@@ -2461,13 +2484,13 @@ fn a_diagnosis_starts_once_queue_wide_and_is_taken_over_after_its_start() {
             .unwrap();
     }
     let owner = owner_of(&queue, tasks[winner]);
-    assert_eq!(queue.running_diagnosis_owners().unwrap(), [owner]);
+    assert_eq!(owners(&queue), [owner]);
     let error = queue
         .start_replan_diagnosis(
             (next.id, next.generation),
             "its diagnosis 2 starts",
             &runs[loser],
-            (json!({"attempt": 2}), 105, &[]),
+            (json!({"attempt": 2}), &sv(105), &[]),
         )
         .unwrap_err();
     assert!(
@@ -2476,13 +2499,13 @@ fn a_diagnosis_starts_once_queue_wide_and_is_taken_over_after_its_start() {
     );
     // Its own end lets the next start in.
     ended(&mut queue, &again, &runs[winner]);
-    assert!(queue.running_diagnosis_owners().unwrap().is_empty());
+    assert!(owners(&queue).is_empty());
     let after = queue
         .start_replan_diagnosis(
             (next.id, next.generation),
             "its diagnosis 2 starts",
             &runs[loser],
-            (json!({"attempt": 2}), 105, &[]),
+            (json!({"attempt": 2}), &sv(105), &[]),
         )
         .unwrap();
     assert_eq!(after.generation, next.generation + 1);
@@ -2507,12 +2530,192 @@ fn a_diagnosis_starts_once_queue_wide_and_is_taken_over_after_its_start() {
         EventKind::ReplanDiagnosed,
         json!({"operation_id": after.id, "attempt": 3, "window_end": 1, "outcome": "ask"}),
     );
-    assert_eq!(queue.running_diagnosis_owners().unwrap(), [106]);
+    let legacy_owner = JobOwner {
+        pid: 106,
+        token: None,
+        process_start: None,
+    };
+    assert_eq!(owners(&queue), [legacy_owner]);
     legacy(
         &mut queue,
         EventKind::ReplanDiagnosed,
         json!({"operation_id": after.id, "attempt": 3, "verdict": {"choice": "continue"},
                "duration_secs": 4, "outcome": "continue"}),
     );
-    assert!(queue.running_diagnosis_owners().unwrap().is_empty());
+    assert!(owners(&queue).is_empty());
+}
+
+/// A diagnosis job's owner is told by its registration and its process's
+/// start, not its pid alone: a job whose owner is gone while another
+/// process took its pid is started again by a later supervisor, so the
+/// queue's one job does not hold the diagnosis of every operation; and a
+/// job of a supervisor whose registration is fresh, of another pid
+/// namespace with the later supervisor's pid, is not started twice.
+#[test]
+fn a_diagnosis_owner_is_told_by_its_registration_and_start_not_its_pid() {
+    use dagq::application::ProcessControl;
+    use dagq::domain::replan_detect::{self, JobOwner, OwnerSeen, PlanningPayload};
+    use dagq::infrastructure::adapters::SystemProcesses;
+    let (_dir, db) = queue();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let task = queue.add(new_task("A")).unwrap().id();
+    queue.transition(task, TaskAction::BypassReview).unwrap();
+    let ClaimOutcome::Claimed { run } = queue.claim(&base()).unwrap() else {
+        panic!("claim")
+    };
+    let run = run.id().clone();
+    let op = queue
+        .record_replan(
+            &NewReplan {
+                run: run.clone(),
+                reason: "the reviews keep failing".into(),
+                evidence: Vec::new(),
+            },
+            ReplanOrigin::Runtime,
+            "supervisor",
+            "supervisor",
+        )
+        .unwrap()
+        .operation;
+    // The process that has the gone owner's pid now, started after it.
+    let mut taker = crate::common::KillOnDrop::new(
+        std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .unwrap(),
+        "the process that took the gone owner's pid",
+    );
+    let gone_owner = JobOwner {
+        pid: taker.child().id(),
+        token: Some("gone".into()),
+        process_start: Some("Thu Jan  1 00:00:00 2026".into()),
+    };
+    let first = queue
+        .start_replan_diagnosis(
+            (op.id, op.generation),
+            "its diagnosis 1 starts",
+            &run,
+            (json!({"attempt": 1}), &gone_owner, &[]),
+        )
+        .unwrap();
+    let started = |queue: &SqliteQueue| -> Vec<Value> {
+        queue
+            .task_events(task)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == EventKind::ReplanDiagnosisStarted)
+            .map(|e| e.payload.clone())
+            .collect()
+    };
+    let records = started(&queue);
+    assert_eq!(
+        PlanningPayload::from_value(&records[0]).owner(),
+        Some(gone_owner.clone())
+    );
+
+    // A supervisor `me` (its token, this process's pid) splits the owners
+    // of the jobs the queue runs as the runtime does.
+    let me_pid = std::process::id();
+    let split = |queue: &SqliteQueue, token: &str| {
+        let owners = queue.running_diagnosis_owners().unwrap();
+        let starts: Vec<(u32, bool, Option<String>)> = owners
+            .iter()
+            .map(|o| {
+                let pid = o.owner.pid;
+                (
+                    pid,
+                    SystemProcesses.alive(pid),
+                    SystemProcesses.start_identity(pid),
+                )
+            })
+            .collect();
+        replan_detect::split_owners(&owners, |owner| {
+            let (_, alive, start) = starts.iter().find(|(pid, ..)| *pid == owner.pid).unwrap();
+            OwnerSeen {
+                me: (token, me_pid),
+                pid_alive: *alive,
+                pid_start: start.as_deref(),
+            }
+        })
+    };
+    let later = JobOwner {
+        pid: me_pid,
+        token: Some("later".into()),
+        process_start: SystemProcesses.start_identity(me_pid),
+    };
+    // Its pid alive in a process of another start: the owner is gone. Not
+    // told so, the queue refuses a second job; told so, the later
+    // supervisor takes the operation over as its next attempt.
+    let (live, gone) = split(&queue, "later");
+    assert!(live.is_empty(), "{live:?}");
+    assert_eq!(gone, std::slice::from_ref(&gone_owner));
+    let refused = queue
+        .start_replan_diagnosis(
+            (first.id, first.generation),
+            "its diagnosis 2 starts",
+            &run,
+            (json!({"attempt": 2}), &later, &[]),
+        )
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("one runs at a time in the queue"),
+        "{refused:#}"
+    );
+    let second = queue
+        .start_replan_diagnosis(
+            (first.id, first.generation),
+            "its diagnosis 2 starts",
+            &run,
+            (json!({"attempt": 2}), &later, &gone),
+        )
+        .unwrap();
+    assert_eq!(second.generation, first.generation + 1);
+    assert_eq!(started(&queue).len(), 2);
+
+    // `later` registered with a fresh heartbeat: a supervisor of another
+    // pid namespace with the same pid sees its job running and starts none.
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO supervisors(token, pid, parallel, heartbeat_at)
+             VALUES ('later', ?1, 1, unixepoch())",
+            [me_pid],
+        )
+        .unwrap();
+    let (live, gone) = split(&queue, "twin");
+    assert_eq!(
+        (live, gone.clone()),
+        (vec![later.clone()], vec![gone_owner.clone()])
+    );
+    let twin = JobOwner {
+        token: Some("twin".into()),
+        ..later.clone()
+    };
+    assert!(
+        queue
+            .start_replan_diagnosis(
+                (second.id, second.generation),
+                "its diagnosis 3 starts",
+                &run,
+                (json!({"attempt": 3}), &twin, &gone),
+            )
+            .is_err()
+    );
+    // `later` itself after an exec (its own token) runs none: it starts
+    // the next attempt.
+    let (live, gone) = split(&queue, "later");
+    assert_eq!(
+        (live, gone.clone()),
+        (vec![], vec![gone_owner, later.clone()])
+    );
+    let third = queue
+        .start_replan_diagnosis(
+            (second.id, second.generation),
+            "its diagnosis 3 starts",
+            &run,
+            (json!({"attempt": 3}), &later, &gone),
+        )
+        .unwrap();
+    assert_eq!(third.generation, second.generation + 1);
+    drop(taker);
 }

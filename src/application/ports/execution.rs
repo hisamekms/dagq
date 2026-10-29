@@ -1348,8 +1348,9 @@ pub trait RunTransitions {
         crate::domain::task_replan::ReplanOperation,
     )>;
     /// The supervisors that own a diagnosis job that runs now, queue-wide:
-    /// each one's latest start that no end tied to it followed.
-    fn running_diagnosis_owners(&self) -> Result<Vec<u32>>;
+    /// each one's latest start that no end tied to it followed, with the
+    /// heartbeat of its registration.
+    fn running_diagnosis_owners(&self) -> Result<Vec<crate::domain::replan_detect::RunningOwner>>;
     /// Claim operation `op` (read under its generation) for a diagnosis
     /// job of supervisor `owner` on `run` and record its
     /// `replan_diagnosis_started` with `payload`, in one transaction, once
@@ -1360,7 +1361,11 @@ pub trait RunTransitions {
         op: (crate::domain::ReplanId, i64),
         reason: &str,
         run: &RunId,
-        started: (serde_json::Value, u32, &[u32]),
+        started: (
+            serde_json::Value,
+            &crate::domain::replan_detect::JobOwner,
+            &[crate::domain::replan_detect::JobOwner],
+        ),
     ) -> Result<crate::domain::task_replan::ReplanOperation>;
     /// Every replanning operation on run `run`, oldest first.
     fn replans_of_run(

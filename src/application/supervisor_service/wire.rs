@@ -70,6 +70,7 @@ whole!(
     EndedRunWorkspace,
     EndedRunWorktree,
     crate::domain::task_replan::ReplanOperation,
+    crate::domain::replan_detect::RunningOwner,
     crate::domain::replan_plan::ReplanBrief,
     crate::domain::replan_apply::ApplyOutcome,
     crate::domain::replan_apply::ChildCarry,

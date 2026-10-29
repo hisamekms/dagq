@@ -282,7 +282,7 @@ impl SqliteQueue {
     /// `run` for supervisor `owner`, in one transaction: the operation is
     /// claimed (`diagnosing` under a new generation, for `reason`) and its
     /// `replan_diagnosis_started` is written with `payload`, that
-    /// generation and `owner`, once no diagnosis job of any operation runs
+    /// generation and `owner` (its pid, token and process's start), once no diagnosis job of any operation runs
     /// in the queue ([`running_diagnoses`], read in the same transaction,
     /// with the supervisors in `gone` taken as running none): a job runs
     /// until the end tied to its start is recorded, whatever its operation
@@ -294,7 +294,11 @@ impl SqliteQueue {
         (id, generation): (ReplanId, i64),
         reason: &str,
         run: &RunId,
-        (payload, owner, gone): (serde_json::Value, u32, &[u32]),
+        (payload, owner, gone): (
+            serde_json::Value,
+            &replan_detect::JobOwner,
+            &[replan_detect::JobOwner],
+        ),
     ) -> Result<ReplanOperation> {
         let mut payload = payload;
         let now = self.generators.clock.now();
@@ -323,7 +327,9 @@ impl SqliteQueue {
         )?;
         payload["operation_id"] = json!(claimed.id);
         payload["generation"] = json!(claimed.generation);
-        payload["supervisor_pid"] = json!(owner);
+        payload["supervisor_pid"] = json!(owner.pid);
+        payload["supervisor_token"] = json!(owner.token);
+        payload["supervisor_process_start"] = json!(owner.process_start);
         event(
             &tx,
             claimed.task_id,
@@ -336,12 +342,26 @@ impl SqliteQueue {
     }
 
     /// The supervisors that own a diagnosis job that runs now, queue-wide
-    /// ([`running_diagnoses`]), whose liveness the next start is told of.
-    pub fn running_diagnosis_owners(&self) -> Result<Vec<u32>> {
-        Ok(running_diagnoses(&self.conn, &[])?
+    /// ([`running_diagnoses`]), each with the heartbeat of the
+    /// `supervisors` row of its token, whose liveness the next start is
+    /// told of.
+    pub fn running_diagnosis_owners(&self) -> Result<Vec<replan_detect::RunningOwner>> {
+        let mut heartbeat = self
+            .conn
+            .prepare("SELECT heartbeat_at FROM supervisors WHERE token=?1")?;
+        running_diagnoses(&self.conn, &[])?
             .into_iter()
-            .map(|job| job.owner)
-            .collect())
+            .map(|job| {
+                let heartbeat_at = match &job.owner.token {
+                    Some(token) => heartbeat.query_row([token], |r| r.get(0)).optional()?,
+                    None => None,
+                };
+                Ok(replan_detect::RunningOwner {
+                    owner: job.owner,
+                    heartbeat_at,
+                })
+            })
+            .collect()
     }
 
     /// Add `mappings` to operation `id`'s condition mappings in one write
@@ -682,7 +702,10 @@ fn check_not_held(conn: &Connection, op: &ReplanOperation) -> Result<()> {
 /// caller's transaction when it has one), read from the records of every
 /// operation's jobs ([`replan_detect::running_jobs`]), the supervisors in
 /// `gone` taken as running none.
-fn running_diagnoses(conn: &Connection, gone: &[u32]) -> Result<Vec<replan_detect::RunningJob>> {
+fn running_diagnoses(
+    conn: &Connection,
+    gone: &[replan_detect::JobOwner],
+) -> Result<Vec<replan_detect::RunningJob>> {
     let records: Vec<(String, String)> = conn
         .prepare("SELECT kind, payload FROM run_events WHERE kind IN (?1, ?2, ?3) ORDER BY id")?
         .query_map(
