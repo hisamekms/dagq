@@ -17,6 +17,10 @@ use crate::application::update::{
 use crate::domain::EventKind;
 use crate::domain::{AskKind, RunEvent, UPDATE_FAILED_OPTIONS};
 
+/// How many of the newest update events a look at the automatic update's
+/// jobs reads.
+const JOB_LOOK_BACK: usize = 50;
+
 /// How often the supervisor looks at main for an update by default.
 pub const UPDATE_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -161,7 +165,7 @@ impl HostOpsState {
         if self.update.job.is_some() {
             return Ok(());
         }
-        let updates = env.queue.update_events(50)?;
+        let updates = env.queue.update_events(JOB_LOOK_BACK)?;
         if let Some(step) = latest_job_step(&updates) {
             // A job this process started before it exec'd is its child
             // with no other reaper: collect it once it ended.
@@ -181,6 +185,13 @@ impl HostOpsState {
                 env.processes.reap(pid);
             }
             if !in_progress(step, &**env.processes) {
+                // The job may have recorded how it ended and exited after
+                // the events were read: only a step still its latest once
+                // its process is known gone tells it was interrupted.
+                let again = env.queue.update_events(JOB_LOOK_BACK)?;
+                if !still_latest_step(step, &again, false) {
+                    return Ok(());
+                }
                 return self.job_interrupted(env, step);
             }
         }
@@ -406,6 +417,15 @@ fn update_job_command(
     command
 }
 
+/// Whether `step`, a job step of the release update's jobs (`release`) or
+/// of the automatic update's whose process was then found gone, is still
+/// the newest step of that kind in `updates`, read after that look: a job
+/// that recorded how it ended (`update_installed`, `update_failed`, …) and
+/// exited in between was not interrupted.
+pub(super) fn still_latest_step(step: &RunEvent, updates: &[RunEvent], release: bool) -> bool {
+    latest_job_step_of(updates, release).is_some_and(|latest| latest.id == step.id)
+}
+
 /// Whether the automatic update looks again: on the first pass and
 /// `interval` after the last look, given as the time since.
 fn check_due(since_last: Option<Duration>, interval: Duration) -> bool {
@@ -466,6 +486,63 @@ mod tests {
             ]
         );
         assert!(!args.contains(&"--cmux"), "{args:?}");
+    }
+
+    fn event(id: i64, kind: &str, payload: Value) -> RunEvent {
+        RunEvent {
+            id: crate::domain::EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    /// A job found gone after its `update_e2e_passed` was read, which
+    /// recorded `update_installed` (or `update_failed`) before it exited,
+    /// is not interrupted; one whose `update_e2e_passed` is still its
+    /// newest step once it is gone is, even when the release update's job
+    /// or an answer wrote after it.
+    #[test]
+    fn a_job_that_recorded_its_end_before_it_exited_is_not_interrupted() {
+        use crate::domain::{
+            UPDATE_ANSWERED, UPDATE_E2E_PASSED, UPDATE_FAILED, UPDATE_INSTALLED, UPDATE_STARTED,
+        };
+        let passed = event(2, UPDATE_E2E_PASSED, json!({"pid": 7, "commit": "abc"}));
+        let read = [
+            passed.clone(),
+            event(1, UPDATE_STARTED, json!({"pid": 7, "commit": "abc"})),
+        ];
+        assert!(still_latest_step(&passed, &read, false));
+        for end in [UPDATE_INSTALLED, UPDATE_FAILED] {
+            let mut again = vec![event(3, end, json!({"pid": 7, "commit": "abc"}))];
+            again.extend(read.iter().cloned());
+            assert!(!still_latest_step(&passed, &again, false), "{end}");
+        }
+        let mut again = vec![
+            event(4, UPDATE_ANSWERED, json!({"ask_id": 1})),
+            event(
+                3,
+                UPDATE_STARTED,
+                json!({"pid": 9, "source": "release", "release": "0.4.0"}),
+            ),
+        ];
+        again.extend(read.iter().cloned());
+        assert!(still_latest_step(&passed, &again, false));
+        // A release's job the same way, apart from the automatic update's.
+        let release = json!({"pid": 9, "source": "release", "release": "0.4.0"});
+        let started = event(5, UPDATE_STARTED, release.clone());
+        let read = [
+            event(6, UPDATE_STARTED, json!({"pid": 8, "commit": "def"})),
+            started.clone(),
+        ];
+        assert!(still_latest_step(&started, &read, true));
+        let mut again = vec![event(7, UPDATE_INSTALLED, release)];
+        again.extend(read.iter().cloned());
+        assert!(!still_latest_step(&started, &again, true));
     }
 
     /// The automatic update looks on the first pass and at its interval

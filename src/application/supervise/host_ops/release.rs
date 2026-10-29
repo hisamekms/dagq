@@ -183,6 +183,13 @@ impl HostOpsState {
         match job_look(&updates, working) {
             JobLook::Running => return Ok(()),
             JobLook::Interrupted(step, version) => {
+                // The job may have recorded how it ended and exited after
+                // the events were read: only a step still its latest once
+                // its process is known gone tells it was interrupted.
+                let again = env.queue.update_events(UPDATE_HISTORY)?;
+                if !super::update::still_latest_step(step, &again, true) {
+                    return Ok(());
+                }
                 return self.release_job_interrupted(env, step, version);
             }
             JobLook::None => {}
