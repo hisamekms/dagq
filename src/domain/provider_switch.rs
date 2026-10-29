@@ -180,10 +180,18 @@ pub fn request_answering(
     finished_at: usize,
     taken: Option<u64>,
 ) -> Option<&RunEvent> {
-    events[finished_at..].iter().find(|e| {
-        e.kind == EventKind::TurnRequested
-            && !taken.is_some_and(|taken| e.payload["seq"].as_u64().is_some_and(|s| s <= taken))
-    })
+    events[finished_at..]
+        .iter()
+        .find(|e| requested_past(e, taken))
+}
+
+/// Whether `event` is a `turn_requested` other than the request a failed
+/// turn took (`taken`, none for the task's prompt): its number is past
+/// `taken`, or it has none. A request numbered up to `taken` is the
+/// turn's own, recorded late ([`request_answering`]).
+pub fn requested_past(event: &RunEvent, taken: Option<u64>) -> bool {
+    event.kind == EventKind::TurnRequested
+        && !taken.is_some_and(|taken| event.payload["seq"].as_u64().is_some_and(|s| s <= taken))
 }
 
 /// A look at the run's last turn, which failed with `failure` on `from`,

@@ -140,12 +140,26 @@ pub fn idle_after_turn(mark: Option<&TurnMark>, waiting: bool) -> bool {
 
 /// Whether the wall a headless planner's last turn met is answered: a
 /// `provider retry` was requested among the `events` after that turn's
-/// `turn_finished`. Another request written after it waits behind the
-/// retry (the wrapper takes the retry first), so it is no answer.
-pub fn wall_answered(events: &[RunEvent]) -> bool {
-    events
+/// `turn_finished` (`events[finished_at]`), other than the request the
+/// turn took (its `turn_started`'s, none for the initial prompt). Another
+/// request written after it waits behind the retry (the wrapper takes the
+/// retry first), so it is no answer. The supervisor records a request only
+/// once it is written, so the wrapper may take a retry, run it into the
+/// wall again and finish before the retry's record: that late record,
+/// numbered not past the request the turn took, is the turn's own and
+/// answers nothing, as a worker's
+/// ([`crate::domain::provider_switch::request_answering`]); counted, the
+/// planner would wait at the wall with no hold and no retry.
+pub fn wall_answered(events: &[RunEvent], finished_at: usize) -> bool {
+    let turn = &events[finished_at].payload["turn"];
+    let taken = events[..finished_at]
         .iter()
-        .any(|e| e.kind == EventKind::TurnRequested && e.payload["what"] == PROVIDER_RETRY)
+        .rfind(|e| e.kind == EventKind::TurnStarted && e.payload["turn"] == *turn)
+        .and_then(|e| e.payload["request"].as_u64());
+    events[finished_at..].iter().any(|e| {
+        crate::domain::provider_switch::requested_past(e, taken)
+            && e.payload["what"] == PROVIDER_RETRY
+    })
 }
 
 /// Whether a headless planner's wrapper waiting at the provider's wall
@@ -1618,20 +1632,63 @@ mod tests {
     #[test]
     fn only_a_provider_retry_after_the_turn_answers_its_wall() {
         let requested = |what: &str| turn_event(TURN_REQUESTED, json!({"seq": 3, "what": what}));
-        assert!(!wall_answered(&[]));
-        assert!(!wall_answered(&[requested("revise")]));
-        assert!(!wall_answered(&[
-            requested("follow-up request followup-1"),
-            requested("answer of ask 4"),
-        ]));
-        assert!(wall_answered(&[
-            requested("revise"),
+        let after = |rest: &[RunEvent]| {
+            [
+                vec![
+                    started(2, Some(2), "revise"),
+                    finished(2, Some("usage_limit")),
+                ],
+                rest.to_vec(),
+            ]
+            .concat()
+        };
+        assert!(!wall_answered(&after(&[]), 1));
+        assert!(!wall_answered(&after(&[requested("revise")]), 1));
+        assert!(!wall_answered(
+            &after(&[
+                requested("follow-up request followup-1"),
+                requested("answer of ask 4"),
+            ]),
+            1
+        ));
+        assert!(wall_answered(
+            &after(&[requested("revise"), requested(PROVIDER_RETRY)]),
+            1
+        ));
+        assert!(!wall_answered(
+            &after(&[started(3, Some(3), PROVIDER_RETRY)]),
+            1
+        ));
+        // Before the turn is none of its answer.
+        let before = [
             requested(PROVIDER_RETRY),
-        ]));
-        assert!(!wall_answered(&[turn_event(
-            TURN_STARTED,
-            json!({"turn": 3, "what": PROVIDER_RETRY}),
-        )]));
+            started(2, Some(2), "revise"),
+            finished(2, Some("usage_limit")),
+        ];
+        assert!(!wall_answered(&before, 2));
+    }
+
+    #[test]
+    fn the_late_record_of_the_retry_the_walled_turn_took_does_not_answer_its_wall() {
+        let retry =
+            |seq: u64| turn_event(TURN_REQUESTED, json!({"seq": seq, "what": PROVIDER_RETRY}));
+        // The wrapper took retry 4 before its record, met the wall again,
+        // and the record came after the turn's end.
+        let late = [
+            started(3, Some(4), PROVIDER_RETRY),
+            finished(3, Some("usage_limit")),
+            retry(4),
+        ];
+        assert!(!wall_answered(&late, 1));
+        // A retry written after it, numbered past the one the turn took,
+        // answers it as before; so does any retry after the initial prompt.
+        assert!(wall_answered(&[late.to_vec(), vec![retry(5)]].concat(), 1));
+        let prompt = [
+            started(1, None, "initial prompt"),
+            finished(1, Some("launch")),
+            retry(1),
+        ];
+        assert!(wall_answered(&prompt, 1));
     }
 
     #[test]

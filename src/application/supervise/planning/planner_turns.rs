@@ -237,7 +237,7 @@ impl PlanningState {
         let reason = match wall_step(
             failure,
             // The retry after the turn answers it ([`wall_answered`]).
-            wall_answered(&events[finished_at..]),
+            wall_answered(&events, finished_at),
             provider_switch::waiting_on(&events, turn),
         ) {
             WallStep::Nothing => return Ok(()),
@@ -461,6 +461,53 @@ mod tests {
         assert_eq!(
             NewHold::wall(Wall::UsageLimit, None, None).reason_category,
             AskReason::Cost
+        );
+    }
+
+    #[test]
+    fn a_turn_at_the_wall_holds_after_the_late_record_of_its_own_retry() {
+        let event = |kind: EventKind, payload: Value| RunEvent {
+            id: crate::domain::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.as_str().into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let retry = |seq: u64| {
+            event(
+                EventKind::TurnRequested,
+                json!({"seq": seq, "what": PROVIDER_RETRY}),
+            )
+        };
+        // The wrapper took retry 4 before the supervisor recorded it, and
+        // the turn met the usage limit again before that record.
+        let late = vec![
+            event(
+                EventKind::TurnStarted,
+                json!({"turn": 3, "request": 4, "what": PROVIDER_RETRY}),
+            ),
+            event(
+                EventKind::TurnFinished,
+                json!({"turn": 3, "outcome": "failed", "failure": "usage_limit"}),
+            ),
+            retry(4),
+        ];
+        assert_eq!(
+            wall_step(TurnFailure::UsageLimit, wall_answered(&late, 1), false),
+            WallStep::Hold {
+                reason: SwitchReason::UsageLimit,
+                wall: Some(Wall::UsageLimit),
+            }
+        );
+        // A retry recorded after it, past the request the turn took,
+        // answers it as before.
+        let answered = [late, vec![retry(5)]].concat();
+        assert_eq!(
+            wall_step(TurnFailure::UsageLimit, wall_answered(&answered, 1), false),
+            WallStep::Nothing
         );
     }
 
