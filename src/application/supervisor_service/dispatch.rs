@@ -2094,6 +2094,7 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             ))
         }
         "all_events" => answer(EventStore::all_events(&*store)),
+        "stats_window" => answer(EventStore::stats_window(&*store)),
         "record_attributes_baseline" => answer(EventStore::record_attributes_baseline(&*store)),
         "record_findings_baseline" => answer(EventStore::record_findings_baseline(&*store)),
         "findings" => {

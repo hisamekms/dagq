@@ -43,7 +43,7 @@ use crate::{
             decide_verdict, refuse_replacement,
         },
         search::{SearchKind, SearchQuery, SearchRef, any_word_query},
-        stats::{LiveSnapshot, SlotSnapshot, StatsQuery, conflicts::ConflictHotspot},
+        stats::conflicts::{CONFLICT_KINDS, ConflictHotspot, conflict_hotspots_over},
     },
 };
 use std::collections::BTreeMap;
@@ -769,16 +769,13 @@ impl PlanningState {
     /// current name; the prompt lists with each the tasks of the proposal
     /// and the ready and in-progress tasks expected to touch it.
     fn conflict_hotspots(&self, env: &PlanningEnv<'_>) -> Result<Vec<ConflictHotspot>> {
-        Ok(conflict_hotspot_files(
-            &*env.queue,
-            &**env.repository,
-            &*env.generators.clock,
-            env.conflicts,
-        )?
-        .into_iter()
-        .filter(|file| file.state != "deleted")
-        .take(HOTSPOT_FILES)
-        .collect())
+        Ok(
+            conflict_hotspot_files(&*env.queue, &**env.repository, env.conflicts)?
+                .into_iter()
+                .filter(|file| file.state != "deleted")
+                .take(HOTSPOT_FILES)
+                .collect(),
+        )
     }
 
     /// Reap the job once it ended and apply its verdict, or record its
@@ -2126,31 +2123,48 @@ fn remove_unused_planner_runners(env: &PassEnv<'_>) {
 /// Every file the landings conflicted in, as `stats` counts them over its
 /// default window, most conflicts first; its `alert` is judged by the
 /// `[conflicts]` thresholds this process read (`conflicts`). The plan
-/// review's material, and the claim's deferral (ADR-0069).
+/// review's material, and the claim's deferral (ADR-0069). It reads the
+/// window's bounds ([`crate::application::EventStore::stats_window`]) and
+/// then only its conflict events, so what it reads follows the window and
+/// not the queue's history; main's history is read from the window's
+/// first event, which gives the same files as from the queue's first.
 pub(in crate::application::supervise) fn conflict_hotspot_files(
     queue: &dyn Queue,
     repository: &dyn Repository,
-    clock: &dyn crate::application::Clock,
     conflicts: crate::domain::stats::ConflictConfigReport,
 ) -> Result<Vec<ConflictHotspot>> {
-    let events = queue.all_events()?;
-    let live = LiveSnapshot {
-        history: crate::application::stats::conflict_history(&events, &|since| {
-            repository.main_history(since)
-        }),
-        conflicts,
-        ..LiveSnapshot::default()
-    };
-    let stats = crate::domain::stats::stats(
-        &events,
-        &queue.task_goals()?,
-        clock.now(),
-        SlotSnapshot::default(),
-        &StatsQuery::default(),
-        &live,
-    );
-    Ok(stats.conflict_hotspots.files)
+    window_hotspot_files(queue, &|since| repository.main_history(since), conflicts)
 }
+
+/// [`conflict_hotspot_files`] of the events of `events`, main's history
+/// read by `history`.
+fn window_hotspot_files<E: crate::application::EventStore + ?Sized>(
+    events: &E,
+    history: &dyn Fn(i64) -> Result<crate::domain::stats::conflicts::MainHistory>,
+    conflicts: crate::domain::stats::ConflictConfigReport,
+) -> Result<Vec<ConflictHotspot>> {
+    let window = events.stats_window()?;
+    let read = events.events_of_between(
+        &CONFLICT_KINDS.map(EventKind::as_str),
+        window.after,
+        window.upto,
+        usize::MAX,
+    )?;
+    let history =
+        crate::application::stats::window_conflict_history(&read, window.start_ms, history);
+    Ok(conflict_hotspots_over(
+        &read,
+        (window.after, window.upto),
+        window.span(),
+        |_| true,
+        &history,
+        conflicts,
+    )
+    .files)
+}
+
+#[cfg(test)]
+mod hotspot_tests;
 
 /// What a pass makes of a revise on its way to a planner (ADR-0041
 /// decisions 12, 13).

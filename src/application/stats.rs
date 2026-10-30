@@ -116,6 +116,21 @@ pub fn conflict_history(
     }
 }
 
+/// Main's history for the conflicts of a window whose span starts at
+/// `start` (unix milliseconds): since the second before it, as
+/// [`conflict_history`] of the window's events reads it, and none without
+/// a conflict among `conflicts` (the window's conflict events).
+pub fn window_conflict_history(
+    conflicts: &[crate::domain::RunEvent],
+    start: Option<i64>,
+    read: &dyn Fn(i64) -> Result<MainHistory>,
+) -> History {
+    match earliest_conflict(conflicts).and(start) {
+        None => History::Read(MainHistory::default()),
+        Some(millis) => read_history(read, millis.div_euclid(1000) - 1),
+    }
+}
+
 /// `read` of main's history since `since`, or why it could not be read.
 fn read_history(read: &dyn Fn(i64) -> Result<MainHistory>, since: i64) -> History {
     match read(since) {

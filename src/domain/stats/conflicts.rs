@@ -294,12 +294,18 @@ struct Tally {
     last: (EventId, String),
 }
 
+/// The kinds of the conflict events, the only ones [`conflict_hotspots`]
+/// counts.
+pub const CONFLICT_KINDS: [EventKind; 2] =
+    [EventKind::IntegrationDeferred, EventKind::ConflictPrecheck];
+
 /// The conflicted files of `event`, when it is a conflict event.
 fn conflicted(event: &RunEvent) -> Option<Vec<&str>> {
-    if !matches!(
-        event.kind.known(),
-        Some(EventKind::IntegrationDeferred | EventKind::ConflictPrecheck)
-    ) {
+    if !event
+        .kind
+        .known()
+        .is_some_and(|kind| CONFLICT_KINDS.contains(&kind))
+    {
         return None;
     }
     let files: Vec<&str> = event
@@ -366,11 +372,31 @@ pub fn conflict_hotspots(
     history: &History,
     config: ConflictConfigReport,
 ) -> ConflictHotspots {
+    conflict_hotspots_over(
+        events,
+        (after, upto),
+        window_span(events, after, upto),
+        counts,
+        history,
+        config,
+    )
+}
+
+/// [`conflict_hotspots`] of the window `after < id <= upto` (`range`)
+/// whose span in time is `span` ([`window_span`] of every event in it):
+/// `events` needs only the window's conflict events.
+pub fn conflict_hotspots_over(
+    events: &[RunEvent],
+    (after, upto): (EventId, EventId),
+    (start, end): (Option<i64>, Option<i64>),
+    counts: impl Fn(Option<TaskId>) -> bool,
+    history: &History,
+    config: ConflictConfigReport,
+) -> ConflictHotspots {
     let window: Vec<&RunEvent> = events
         .iter()
         .filter(|event| event.id > after && event.id <= upto)
         .collect();
-    let (start, end) = window_span(events, after, upto);
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
     let mut tallies: BTreeMap<&str, Tally> = BTreeMap::new();
     let mut count = 0;

@@ -2357,6 +2357,9 @@ impl EventStore for SupervisorQueue {
     fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
         self.remote("e2e_gate_events", vec![to_value(limit)?])
     }
+    fn stats_window(&self) -> Result<crate::domain::stats::StatsWindow> {
+        self.remote("stats_window", vec![])
+    }
     // A page at a time, each within the answer's limit, up to the newest
     // event when the read began: the log only grows, so the pages are the
     // events the one read would have given.

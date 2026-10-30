@@ -919,3 +919,82 @@ fn a_deferral_stays_shown_while_the_supervisor_does_not_judge_the_claims() {
         view["deferred"]
     );
 }
+
+/// The window of the hotspots, read back from the queue's newest event, is
+/// the one of every event (`default_window`), however many runs ended
+/// before it: a run that ended again late counts by its first end, a run's
+/// first event without its task starts it, and a queue with no run ends at
+/// its latest event.
+#[test]
+fn the_hotspots_window_is_read_back_from_the_newest_event_as_of_every_event() {
+    use dagq::application::EventStore;
+    use dagq::domain::stats::{DEFAULT_RUNS, window::default_window};
+    for outside in [1, 3 * DEFAULT_RUNS] {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("q.db");
+        let queue = SqliteQueue::init(&db).unwrap();
+        // Runs of no task row: the events alone pick the window.
+        let raw = Connection::open(&db).unwrap();
+        raw.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        let mut secs = 0;
+        let mut push = |run: Option<usize>, task: bool, kind: &str, payload: &str| {
+            secs += 1;
+            raw.execute(
+                "INSERT INTO run_events(task_id,run_id,kind,payload,created_at)
+                 VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![
+                    run.filter(|_| task).map(|n| i64::try_from(n).unwrap() + 1),
+                    run.map(|n| format!("{n:08x}-1111-4111-8111-111111111111")),
+                    kind,
+                    payload,
+                    format!(
+                        "2027-01-15T{:02}:{:02}:{:02}.000Z",
+                        secs / 3600,
+                        secs % 3600 / 60,
+                        secs % 60
+                    ),
+                ],
+            )
+            .unwrap();
+        };
+        push(None, false, "host_sampled", "{}");
+        assert_eq!(
+            EventStore::stats_window(&queue).unwrap(),
+            default_window(&EventStore::all_events(&queue).unwrap())
+        );
+        // Ended early, and again in the window: its first end counts.
+        push(Some(0), true, "run_claimed", "{}");
+        push(Some(0), true, "run_failed", r#"{"status":"failed"}"#);
+        for n in 1..=outside + DEFAULT_RUNS {
+            push(Some(n), false, "workspace_created", "{}");
+            push(Some(n), true, "run_claimed", "{}");
+            push(None, false, "host_sampled", "{}");
+            if n % 5 == 0 {
+                push(
+                    Some(n),
+                    true,
+                    "run_interrupted",
+                    r#"{"status":"interrupted"}"#,
+                );
+            } else {
+                push(Some(n), true, "run_integrated", "{}");
+            }
+        }
+        push(Some(0), true, "run_integrated", "{}");
+        // In flight, and an end of no task's.
+        push(Some(99_999), true, "run_claimed", r#"{"status":"running"}"#);
+        push(Some(99_998), false, "run_integrated", "{}");
+        let window = EventStore::stats_window(&queue).unwrap();
+        assert_eq!(
+            window,
+            default_window(&EventStore::all_events(&queue).unwrap())
+        );
+        // The window starts before the first event (with no task) of the
+        // earliest of the runs that ended last.
+        assert_eq!(
+            window.after.as_i64(),
+            4 * (i64::try_from(outside).unwrap() + 1) - 1,
+            "{window:?}"
+        );
+    }
+}

@@ -765,7 +765,6 @@ impl Supervisor<'_> {
             let hot = match super::plan_review::conflict_hotspot_files(
                 &*self.queue,
                 &*self.repository,
-                &*self.generators.clock,
                 self.claim.conflicts,
             ) {
                 Ok(files) => files

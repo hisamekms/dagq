@@ -20,8 +20,11 @@
 //! judgement of its own → [`stats`] here, which holds every rule of the
 //! counting and does no I/O → [`with_changes`], [`with_areas`],
 //! [`without_cargo_measures`] and [`without_rustc`] → JSON. The KPI
-//! windows, the forecast and plan review's conflict hotspots call
-//! [`stats`] directly, so they read the same rules. Where each field comes from in the ledger is
+//! windows and the forecast call [`stats`] directly, so they read the same
+//! rules; plan review's and the claim deferral's conflict hotspots apply
+//! the same window rule ([`window`]) and the same counting
+//! ([`conflicts::conflict_hotspots_over`]) without the whole [`stats`].
+//! Where each field comes from in the ledger is
 //! [`crate::domain::ledger::window`]'s.
 //!
 //! One read has four ranges: the page of runs (`--since` <
@@ -90,6 +93,7 @@ pub mod thresholds;
 pub mod tokens;
 pub mod trial;
 pub mod updates;
+pub mod window;
 pub mod work;
 pub mod worker_question_topics;
 
@@ -112,6 +116,7 @@ pub use sessions::{GoalKindSessions, KindSessions, RunKindSessions, SessionWindo
 pub use thresholds::ThresholdStats;
 pub use tokens::{RunTokens, TokenSummary, TokenTotals};
 pub use updates::UpdateStats;
+pub use window::StatsWindow;
 pub use work::{CategoryShare, CommandCount, RunWork, WorkShares};
 
 /// Runs returned without `--full`.

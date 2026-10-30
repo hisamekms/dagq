@@ -103,6 +103,7 @@ whole!(
     crate::domain::DraftBundleView,
     crate::domain::follow_up::GoalFollowUps,
     crate::domain::HoldOutcome,
+    crate::domain::stats::StatsWindow,
     crate::domain::AskOutcome,
     crate::domain::ImprovementLimit,
     crate::domain::sessions::OpenSpan,

@@ -547,6 +547,14 @@ pub trait EventStore {
             .filter_map(|event| crate::domain::stats::timestamp_millis(&event.created_at))
             .min())
     }
+    /// The default window of `stats` ([`crate::domain::stats::window`]),
+    /// for a reader that then reads only the events of it it counts. A
+    /// store that reads no range of its own derives it from every event.
+    fn stats_window(&self) -> Result<crate::domain::stats::StatsWindow> {
+        Ok(crate::domain::stats::window::default_window(
+            &self.all_events()?,
+        ))
+    }
     /// Per task, its newest event of one of `kinds` (ADR-0069).
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>>;
     fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>>;

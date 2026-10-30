@@ -748,6 +748,77 @@ impl SqliteQueue {
         Ok(None)
     }
 
+    /// The default window of `stats` without reading every event
+    /// ([`crate::domain::stats::window`]): the run events from the newest
+    /// back, each run's first by `events_by_run` once one of its events
+    /// that ends it is met, until [`crate::domain::stats::DEFAULT_RUNS`]
+    /// runs ended past the event read, which no run met later can end
+    /// before; then the times of the window's events, without their
+    /// payloads. Every read stops at the latest event read first, so an
+    /// event written meanwhile moves no bound. A pure read.
+    pub fn stats_window(&self) -> Result<crate::domain::stats::StatsWindow> {
+        use crate::domain::stats::{DEFAULT_RUNS, StatsWindow, timestamp_millis, window};
+        let upto = self.latest_event_id()?;
+        // Each run met: its first event and the first event that ended it.
+        let mut ended: HashMap<RunId, (EventId, EventId)> = HashMap::new();
+        let mut newest = self.conn.prepare(
+            "SELECT * FROM run_events WHERE run_id IS NOT NULL AND task_id IS NOT NULL
+             AND id<=?1 ORDER BY id DESC",
+        )?;
+        let mut rows = newest.query([upto])?;
+        let mut of_run = self
+            .conn
+            .prepare("SELECT * FROM run_events WHERE run_id=?1 AND id<=?2 ORDER BY id")?;
+        while let Some(row) = rows.next()? {
+            let event = event_row(row)?;
+            if ended.values().filter(|(_, end)| *end > event.id).count() >= DEFAULT_RUNS {
+                break;
+            }
+            let Some(run_id) = event.run_id.as_ref().filter(|_| window::ends_run(&event)) else {
+                continue;
+            };
+            if ended.contains_key(run_id) {
+                continue;
+            }
+            let mut first = None;
+            let mut end = event.id;
+            let mut run_rows = of_run.query(params![run_id, upto])?;
+            while let Some(row) = run_rows.next()? {
+                let run_event = event_row(row)?;
+                first.get_or_insert(run_event.id);
+                if window::ends_run(&run_event) {
+                    end = run_event.id;
+                    break;
+                }
+            }
+            ended.insert(run_id.clone(), (first.unwrap_or(end), end));
+        }
+        let latest = window::latest_ended(
+            ended
+                .iter()
+                .map(|(run_id, (_, end))| (run_id.clone(), *end))
+                .collect(),
+        );
+        let after = window::window_after(latest.iter().map(|(run, _)| ended[run].0).min());
+        let (mut start_ms, mut end_ms) = (None::<i64>, None::<i64>);
+        let mut times = self
+            .conn
+            .prepare("SELECT created_at FROM run_events WHERE id>?1 AND id<=?2")?;
+        let mut rows = times.query(params![after, upto])?;
+        while let Some(row) = rows.next()? {
+            if let Some(at) = timestamp_millis(&row.get::<_, String>(0)?) {
+                start_ms = Some(start_ms.map_or(at, |start| start.min(at)));
+                end_ms = Some(end_ms.map_or(at, |end| end.max(at)));
+            }
+        }
+        Ok(StatsWindow {
+            after,
+            upto,
+            start_ms,
+            end_ms,
+        })
+    }
+
     /// Events with `after < id <= upto` that `filter` keeps, oldest first,
     /// at most `limit`. A pure read.
     pub fn events_between(
@@ -1132,6 +1203,9 @@ impl EventStore for SqliteQueue {
     }
     fn earliest_event_at(&self) -> Result<Option<i64>> {
         SqliteQueue::earliest_event_at(self)
+    }
+    fn stats_window(&self) -> Result<crate::domain::stats::StatsWindow> {
+        SqliteQueue::stats_window(self)
     }
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
         SqliteQueue::latest_task_events(self, kinds)

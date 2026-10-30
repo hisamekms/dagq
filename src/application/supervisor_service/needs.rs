@@ -158,6 +158,7 @@ pub(super) const READS: &[&str] = &[
     "last_worker_question_closed",
     "unclosed_stalled_ask",
     "all_events",
+    "stats_window",
     "findings",
     "reports_written",
     "kpi_breaches_open",
