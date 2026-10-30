@@ -31,7 +31,7 @@ use super::{
 use crate::domain::{
     GoalStatus, RunId, RunStatus, SupervisorPulse, TaskRun, TaskStatus,
     host_metrics::HostSummary,
-    live_alerts::LiveInputs,
+    live_alerts::{EVENTS_PER_READ, LiveHistory, LiveInputs},
     stall::{BackgroundTask, IDLE_LOG, StallConfig, background_first_seen},
     stats::{
         ConflictConfig, ConflictConfigReport, History, LiveRun, LiveSnapshot, SlotSnapshot,
@@ -691,7 +691,7 @@ pub(crate) fn inputs(
     let goals = queue.task_goals()?;
     let snapshot = slot_snapshot(queue, processes, now)?;
     let config = stall_config(&events, sources.config_file)?;
-    let (runs, _) = live_runs(queue, processes, &events, &sources.live())?;
+    let (runs, _) = live_runs(&queue.all_runs()?, processes, &events, &sources.live())?;
     let live = LiveSnapshot {
         runs,
         config,
@@ -779,7 +779,7 @@ pub fn live_inputs(
     events: &[crate::domain::RunEvent],
     sources: &LiveSources<'_>,
 ) -> Result<LiveInputs> {
-    let (runs, positions) = live_runs(queue, processes, events, sources)?;
+    let (runs, positions) = live_runs(&queue.all_runs()?, processes, events, sources)?;
     let outliers = outlier_thresholds(events, &queue.task_goals()?, &runs);
     Ok(LiveInputs {
         slots: slot_snapshot(queue, processes, now)?,
@@ -788,6 +788,61 @@ pub fn live_inputs(
         outliers,
         positions,
     })
+}
+
+/// [`live_inputs`] on `history`, the events a supervisor folded on its
+/// passes before, and the events the judgments read with them
+/// ([`carried_events`]): what its pass judges and records without reading
+/// the whole history.
+pub fn carried_live_inputs(
+    queue: &(impl TaskReads + PlanningRecords + SupervisorReads + CoordinationReads + RunLog + ?Sized),
+    processes: &dyn ProcessControl,
+    now: i64,
+    history: &mut LiveHistory,
+    sources: &LiveSources<'_>,
+) -> Result<(LiveInputs, Vec<crate::domain::RunEvent>)> {
+    let (all, events) = carried_events(queue, history)?;
+    let (runs, positions) = live_runs(&all, processes, &events, sources)?;
+    let outliers = history.outlier_thresholds(&queue.task_goals()?, &runs);
+    let inputs = LiveInputs {
+        slots: slot_snapshot(queue, processes, now)?,
+        config: stall_config(&events, sources.config_file)?,
+        runs,
+        outliers,
+        positions,
+    };
+    Ok((inputs, events))
+}
+
+/// Fold into `history` the events past its cursor, [`EVENTS_PER_READ`] at
+/// a time, then read the events of the runs not finished: every run of the
+/// queue, and the events the judgments of now read, which judge as the
+/// whole history does ([`LiveHistory::events`]). Only the first pass of a
+/// process reads every event, a page at a time.
+fn carried_events(
+    queue: &(impl RunLog + ?Sized),
+    history: &mut LiveHistory,
+) -> Result<(Vec<TaskRun>, Vec<crate::domain::RunEvent>)> {
+    let latest = queue.latest_event_id()?;
+    while latest > history.upto() {
+        let new = queue.events_between(
+            history.upto(),
+            latest,
+            &crate::domain::EventFilter::default(),
+            EVENTS_PER_READ,
+        )?;
+        if new.is_empty() {
+            history.reach(latest);
+        }
+        history.mark(&new);
+    }
+    let all = queue.all_runs()?;
+    let mut runs = Vec::new();
+    for run in all.iter().filter(|run| !finished(run.status())) {
+        runs.extend(queue.run_events(run.id())?);
+    }
+    let events = history.events(runs);
+    Ok((all, events))
 }
 
 /// The queue's slots at `now`: the live supervisors' (`processes` telling
@@ -882,18 +937,18 @@ fn stall_config(
     })
 }
 
-/// The queue's runs not finished yet, in its order, with their markers and
+/// The runs of `all` (every run of the queue) not finished yet, in its order, with their markers and
 /// whether their background wrapper runs, and each one's position in the
 /// list of every run.
 fn live_runs(
-    queue: &(impl RunReads + ?Sized),
+    all: &[TaskRun],
     processes: &dyn ProcessControl,
     events: &[crate::domain::RunEvent],
     sources: &LiveSources<'_>,
 ) -> Result<(Vec<LiveRun>, HashMap<RunId, usize>)> {
     let mut runs = Vec::new();
     let mut positions = HashMap::new();
-    for (position, run) in queue.all_runs()?.iter().enumerate() {
+    for (position, run) in all.iter().enumerate() {
         if finished(run.status()) {
             continue;
         }
@@ -1035,6 +1090,9 @@ fn background_since(
         .min()
         .filter(|&since| since < at))
 }
+
+#[cfg(test)]
+mod carried_tests;
 
 #[cfg(test)]
 mod tests {

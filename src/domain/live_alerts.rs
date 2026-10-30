@@ -32,8 +32,11 @@ use super::{
     supervisor_life::supervisor_life_end,
 };
 
+mod history;
+pub use history::{EVENTS_PER_READ, LiveHistory};
+
 /// The least time between two observations of a supervisor: each reads
-/// every event, so not on every pass.
+/// the events of every run not finished, so not on every pass.
 pub const OBSERVE_INTERVAL_SECS: i64 = 60;
 /// How often a supervisor whose inputs do not change records a reach.
 pub const REACH_INTERVAL_SECS: i64 = 300;

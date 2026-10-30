@@ -143,7 +143,7 @@ supervisorの生存と停止の証拠はEventStoreに残し、一生の終わり
 
 statsのslotの今の判定は状態表・run dirのmarker・processを入力に今を判定するので、supervisorの周回がその入力を観測してEventStoreに記録し、統計はeventだけから同じ値を作れる（`supervise::observation::live_alerts`）。
 
-- **観測**: どのsupervisorも`OBSERVE_INTERVAL_SECS`ごとに、自分のslotやleaseに限らずqueue全体をstatsと同じ読み方で読み、statsと同じ判定の関数（`live_alerts::judge`）で判定する。
+- **観測**: どのsupervisorも`OBSERVE_INTERVAL_SECS`ごとにqueue全体の入力を読み（eventは前回の後の分を`LiveHistory`に畳む）、statsと同じ判定の関数（`live_alerts::judge`）で判定する。
   警告の鍵（`AlertKey`）はleaseの持ち主を含めないので、leaseが移っても何も書かない。
 - **判定の入力と警告の開閉**: 入力は離散の時刻と値で、経過で伸びる長さは持たない（入力の中身は`domain::live_alerts`のmodule doc）。
   開閉のeventは警告がいつ立ち消えたかの記録で、値の再現には使わない。

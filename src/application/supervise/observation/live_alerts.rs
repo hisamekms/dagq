@@ -2,19 +2,23 @@
 //! measurement.md "今の判定の記録"): on a pass at most every
 //! `LoopSettings::live_alert_interval`, the supervisor reads the whole
 //! queue's inputs as `stats` does, judges them with the same functions and
-//! writes what its stream records ([`LiveRecorder`]). The runtime's control
-//! never reads these records.
+//! writes what its stream records ([`LiveRecorder`]). Of the events it
+//! reads those past what it folded on its passes before ([`LiveHistory`])
+//! and those of the runs not finished. The runtime's control never reads
+//! these records.
 
 use super::*;
-use crate::application::stats::{LiveSources, live_inputs};
+use crate::application::stats::{LiveSources, carried_live_inputs};
 use crate::domain::ledger::attributes::reconcile_due;
-use crate::domain::live_alerts::{LiveRecorder, Observation, judge};
+use crate::domain::live_alerts::{LiveHistory, LiveRecorder, Observation, judge};
 
-/// The stream this process records and when it last observed.
+/// The stream this process records, when it last observed, and the events
+/// it folded so far.
 #[derive(Debug, Default)]
 pub(in crate::application::supervise) struct LiveAlertWatch {
     recorder: LiveRecorder,
     observed: Option<Instant>,
+    history: LiveHistory,
 }
 
 impl LiveAlertWatch {
@@ -37,7 +41,7 @@ impl LiveAlertWatch {
         }
         self.observed = Some(at);
         let now = env.generators.clock.now();
-        let observation = observe(env, signals, now);
+        let observation = observe(env, signals, now, &mut self.history);
         let records = self
             .recorder
             .observe(env.token.as_str(), now * 1000, observation);
@@ -117,19 +121,24 @@ impl AttributesBaseline {
 }
 
 /// The whole queue's inputs at `now` and the keys of the alerts judged on
-/// them, or why they could not be read. The thresholds are the
-/// supervisors' (`stall_config_loaded`), which every supervisor records as
-/// it starts.
-fn observe(env: &ObservationEnv<'_>, signals: &dyn AgentSignals, now: i64) -> Observation {
-    let read = || -> Result<Observation> {
-        let events = env.queue.all_events()?;
+/// them, or why they could not be read, with `history` folded on to the
+/// queue's latest event. The thresholds are the supervisors'
+/// (`stall_config_loaded`), which every supervisor records as it starts.
+fn observe(
+    env: &ObservationEnv<'_>,
+    signals: &dyn AgentSignals,
+    now: i64,
+    history: &mut LiveHistory,
+) -> Observation {
+    let mut read = || -> Result<Observation> {
         let no_file = || Ok(None);
         let sources = LiveSources {
             files: &**env.files,
             signals,
             config_file: &no_file,
         };
-        let inputs = live_inputs(&*env.queue, &**env.processes, now, &events, &sources)?;
+        let (inputs, events) =
+            carried_live_inputs(&*env.queue, &**env.processes, now, history, &sources)?;
         let alerts = judge(&events, now, &inputs).keys();
         Ok(Observation::Seen {
             inputs: Box::new(inputs),

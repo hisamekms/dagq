@@ -1758,24 +1758,34 @@ pub fn outlier_thresholds(
 }
 
 fn outlier_thresholds_of(tracks: &[Track], runs: &[LiveRun]) -> HashMap<RunId, i64> {
-    // The work medians over every finished run, per goal.
-    let mut works: HashMap<Option<GoalId>, Vec<i64>> = HashMap::new();
-    for track in tracks
+    let works: HashMap<&RunId, (Option<GoalId>, &WorkClock)> = tracks
         .iter()
-        .filter(|t| t.stats.finished_event_id.is_some())
-    {
-        if let Some(work) = track.stats.work {
-            works.entry(track.stats.goal_id).or_default().push(work);
+        .map(|t| (&t.stats.run_id, (t.stats.goal_id, &t.clock)))
+        .collect();
+    work_outliers(&works, runs)
+}
+
+/// [`outlier_thresholds`] from each run's goal and [`WorkClock`]: the work
+/// medians over every finished run, per goal, and the threshold of each of
+/// `runs` that `works` has.
+pub fn work_outliers(
+    works: &HashMap<&RunId, (Option<GoalId>, &WorkClock)>,
+    runs: &[LiveRun],
+) -> HashMap<RunId, i64> {
+    let mut finished: HashMap<Option<GoalId>, Vec<i64>> = HashMap::new();
+    for (goal, clock) in works.values() {
+        if let (Some(_), Some(work)) = (clock.finished, clock.work) {
+            finished.entry(*goal).or_default().push(work);
         }
     }
-    let medians: HashMap<Option<GoalId>, i64> = works
+    let medians: HashMap<Option<GoalId>, i64> = finished
         .into_iter()
         .filter_map(|(goal, mut works)| Some((goal, median(&mut works)?)))
         .collect();
     runs.iter()
         .filter_map(|run| {
-            let track = tracks.iter().find(|t| t.stats.run_id == run.run_id)?;
-            let median = *medians.get(&track.stats.goal_id)?;
+            let (goal, _) = works.get(&run.run_id)?;
+            let median = *medians.get(goal)?;
             (median > 0).then(|| (run.run_id.clone(), median * WORK_MEDIAN_FACTOR))
         })
         .collect()
@@ -2342,8 +2352,8 @@ fn intervals(runs: &[&RunStats]) -> Intervals {
 /// the intervals are measured between.
 struct Track {
     stats: RunStats,
-    claimed: Option<i64>,
-    receipt: Option<i64>,
+    /// Its claim and receipt, and so its `work` and `finished_event_id`.
+    clock: WorkClock,
     validated: Option<i64>,
     agent_started: Option<i64>,
     awaiting_since: Option<i64>,
@@ -2433,8 +2443,7 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     review_reasons: Vec::new(),
                     session_spans: Vec::new(),
                 },
-                claimed: None,
-                receipt: None,
+                clock: WorkClock::default(),
                 validated: None,
                 agent_started: None,
                 awaiting_since: None,
@@ -2447,6 +2456,7 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
             }
         });
         track.measure.observe(event);
+        track.clock.observe(event, at);
         if let (Some(clock), Some(at)) = (&mut track.land, at) {
             clock.observe(event, at);
         }
@@ -2464,7 +2474,6 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
         }
         match event.kind.known() {
             Some(EventKind::RunClaimed) => {
-                track.claimed = track.claimed.or(at);
                 run.claimed_at
                     .get_or_insert_with(|| event.created_at.clone());
             }
@@ -2472,15 +2481,11 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
             Some(EventKind::FirstCommitObserved) if run.startup.is_none() => {
                 run.startup = seconds_between(track.agent_started, at);
             }
-            Some(EventKind::ReceiptObserved) if track.receipt.is_none() => {
-                track.receipt = at;
-                run.work = seconds_between(track.claimed, at);
-            }
             Some(EventKind::ValidationFinished) if track.validated.is_none() => {
                 track.validated = at;
                 track.land = at.map(|at| LandClock::start(event, at));
                 run.validated_at = Some(event.created_at.clone());
-                run.validate = seconds_between(track.receipt, at);
+                run.validate = seconds_between(track.clock.receipt, at);
             }
             Some(EventKind::IntegrationStarted) => run.status = Some("integrating".to_owned()),
             Some(EventKind::ResumeStarted) => {
@@ -2506,7 +2511,6 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
             }
             Some(EventKind::RunSatisfiedClosed) => {
                 run.status = Some(ALREADY_SATISFIED.to_owned());
-                run.finished_event_id.get_or_insert(event.id);
             }
             Some(EventKind::RunIntegrated) => {
                 // The same end as `wait_to_land`'s, which the hold's waits
@@ -2515,7 +2519,6 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                 run.wait_to_land = seconds_between(track.validated, at);
                 run.landed_at = Some(event.created_at.clone());
                 run.status = Some("integrated".to_owned());
-                run.finished_event_id.get_or_insert(event.id);
             }
             _ => {}
         }
@@ -2546,9 +2549,6 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
             if status == "awaiting_integration" && track.awaiting_since.is_none() {
                 track.awaiting_since = at;
             }
-            if matches!(status, "failed" | "interrupted") {
-                run.finished_event_id.get_or_insert(event.id);
-            }
         }
     }
     let mut retries = retries::retries(events);
@@ -2556,6 +2556,8 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
         .into_iter()
         .filter_map(|id| tracks.remove(&id))
         .map(|mut track| {
+            track.stats.work = track.clock.work;
+            track.stats.finished_event_id = track.clock.finished;
             track.stats.retries = retries.remove(&track.stats.run_id).unwrap_or_default();
             track.stats.measures = std::mem::take(&mut track.measure).finish();
             track.stats.land_phases = track
@@ -2567,6 +2569,44 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
             track
         })
         .collect()
+}
+
+/// One run's `work` and whether it finished, from its events in order by
+/// the rules `stats` measures every run by: the work runs from its first
+/// `run_claimed` to its first `receipt_observed`, and the run finished at
+/// its first `run_satisfied_closed`, `run_integrated` or event that put it
+/// in `failed` or `interrupted`. The work medians of `running_outlier` read
+/// it, so a reader that keeps one per run across passes folds only the
+/// events that came since.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkClock {
+    claimed: Option<i64>,
+    receipt: Option<i64>,
+    work: Option<i64>,
+    finished: Option<EventId>,
+}
+
+impl WorkClock {
+    /// Fold `event`, the run's next, recorded at `at` (unix milliseconds;
+    /// `None` when its time does not parse).
+    pub fn observe(&mut self, event: &RunEvent, at: Option<i64>) {
+        match event.kind.known() {
+            Some(EventKind::RunClaimed) => self.claimed = self.claimed.or(at),
+            Some(EventKind::ReceiptObserved) if self.receipt.is_none() => {
+                self.receipt = at;
+                self.work = seconds_between(self.claimed, at);
+            }
+            Some(EventKind::RunSatisfiedClosed | EventKind::RunIntegrated) => {
+                self.finished.get_or_insert(event.id);
+            }
+            _ => {}
+        }
+        if payload_status(&event.payload)
+            .is_some_and(|status| matches!(status, "failed" | "interrupted"))
+        {
+            self.finished.get_or_insert(event.id);
+        }
+    }
 }
 
 impl Track {
@@ -2616,8 +2656,8 @@ impl Track {
                 / 1000,
         );
         run.without_held = Some(WithoutHeld {
-            work: less(run.work, within(self.claimed, self.receipt)),
-            validate: less(run.validate, within(self.receipt, self.validated)),
+            work: less(run.work, within(self.clock.claimed, self.clock.receipt)),
+            validate: less(run.validate, within(self.clock.receipt, self.validated)),
             wait_to_land: less(run.wait_to_land, within(self.validated, self.integrated)),
         });
     }
