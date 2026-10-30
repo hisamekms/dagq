@@ -49,6 +49,7 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
 - 置き場は`<queue dir>/broker/`（mode 0700）で、記録・lock・logのファイル名は`domain::queue_broker`の定数が持つ。
   portは起動のたびに空いているものを取り、記録（`BrokerRecord`）に残す。
   supervisorはこの記録のportへrelayを向け、brokerが別のportで起動し直せばrelayを起動し直す（記録の区分と寿命は[計測](measurement.md#ssotとビュー)の表）。
+  ただし使う者と数えないrunの休ませたrelayは見張りが起動し直さず、そのrunの次のturnかverificationの準備で`broker_relay::ready_for_turn`がbrokerの今のportへ開き直す（[Container runtime](container-runtime.md#brokerへの経路)の「見張り」「runのsocket」）。
 
 ## 不変条件
 
