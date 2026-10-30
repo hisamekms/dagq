@@ -550,6 +550,16 @@ impl RunContainers for PodmanRunContainers {
     /// memory's release, a container's removal) by
     /// [`FACTS_CLEANUP_TIMEOUT`] after it. A readying cut off leaves the
     /// machine again when it joined it.
+    ///
+    /// The run is one that failed or was interrupted, which is not counted
+    /// as a user of the machine: the machine is held by this call as a
+    /// user of its own ([`own_user`]) from before the image is made ready
+    /// to after the container ended ([`RunMachine::hold`], by the same
+    /// deadline), so the supervisor's watch that stops the unused machine
+    /// does not stop it under the turn, nor does another facts-only turn
+    /// of the same run that ends first. It leaves however the turn ends,
+    /// by the cleanup's deadline, and the machine stops then when no user
+    /// is left.
     fn facts_turn(&self, run: &TaskRun) -> Result<()> {
         let deadline = std::time::Instant::now() + self.facts_limit;
         let cleanup_deadline = deadline + FACTS_CLEANUP_TIMEOUT;
@@ -557,6 +567,41 @@ impl RunContainers for PodmanRunContainers {
         let machine = bounded.as_deref().unwrap_or(&*self.machine);
         let cleanup_bounded = self.machine.ending_by(cleanup_deadline);
         let cleanup = cleanup_bounded.as_deref().unwrap_or(&*self.machine);
+        let user = own_user("facts", run.id());
+        machine
+            .hold(&user)
+            .map_err(|error| anyhow::anyhow!("make the machine and the image ready: {error:#}"))?;
+        let turned = self.held_facts_turn(run, machine, cleanup, deadline, cleanup_deadline);
+        if let Err(error) = cleanup.leave(&user) {
+            tracing::warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the facts-only turn of run {} could not leave the dagq machine: {error:#}", run.id());
+        }
+        turned
+    }
+}
+
+/// A user of the dagq machine of its own for one call of this process's
+/// work for the run `run` (`what`: `facts`, `cleanup`), held by the
+/// process ([`RunMachine::hold`]): two calls for the same run that overlap
+/// (two people's `ready --inherit` of the same run) hold the machine apart,
+/// and the one that ends first leaves only its own.
+fn own_user(what: &str, run: &RunId) -> String {
+    format!(
+        "{what}-{run}-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..VERIFICATION_SUFFIX]
+    )
+}
+
+impl PodmanRunContainers {
+    /// [`RunContainers::facts_turn`] while the machine is held for it:
+    /// `machine` ends by `deadline`, `cleanup` by `cleanup_deadline`.
+    fn held_facts_turn(
+        &self,
+        run: &TaskRun,
+        machine: &dyn RunMachine,
+        cleanup: &dyn RunMachine,
+        deadline: std::time::Instant,
+        cleanup_deadline: std::time::Instant,
+    ) -> Result<()> {
         let image = machine
             .ready_image(run.id().as_str())
             .map_err(|error| anyhow::anyhow!("make the machine and the image ready: {error:#}"))?;
@@ -1147,22 +1192,33 @@ impl VerificationContainers for PodmanVerificationContainers {
             return Ok(left);
         }
         // The machine may have stopped since: podman reaches it only
-        // running, as for a verification of its own.
-        self.machine.ready(run.as_str(), None)?;
-        let mut removed = Vec::new();
-        for id in &left {
-            let id = id.as_str();
-            let container = queue
-                .verification_container(id)
-                .map_err(anyhow::Error::msg)?;
-            let gone = self.remove_named(&container);
-            self.machine.release_memory(&container)?;
-            gone?;
-            self.machine.remove_build_output(id)?;
-            GitRepository::remove_verification_dir(&parent.join(id))?;
-            removed.push(id.to_owned());
+        // running. It is held by this call ([`own_user`]), not by the run,
+        // which may be over and is then not counted: the runs leaving
+        // meanwhile, and another removal for the run ending first, do not
+        // stop it under the removal. It leaves however the removal ends,
+        // and the machine stops then when no user is left.
+        let user = own_user("cleanup", run);
+        self.machine.hold(&user)?;
+        let removed = (|| {
+            let mut removed = Vec::new();
+            for id in &left {
+                let id = id.as_str();
+                let container = queue
+                    .verification_container(id)
+                    .map_err(anyhow::Error::msg)?;
+                let gone = self.remove_named(&container);
+                self.machine.release_memory(&container)?;
+                gone?;
+                self.machine.remove_build_output(id)?;
+                GitRepository::remove_verification_dir(&parent.join(id))?;
+                removed.push(id.to_owned());
+            }
+            Ok(removed)
+        })();
+        if let Err(error) = self.machine.leave(&user) {
+            tracing::warn!(run_id = %run, error = %format_args!("{error:#}"), "the removal of what run {run}'s verification left could not leave the dagq machine: {error:#}");
         }
-        Ok(removed)
+        removed
     }
 }
 

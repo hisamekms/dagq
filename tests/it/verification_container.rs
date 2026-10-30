@@ -114,6 +114,21 @@ struct FakeMachine {
     waits: std::sync::atomic::AtomicUsize,
     /// The fake podman's state, whose `podman run`s a try counts.
     state: Option<PathBuf>,
+    /// Each hold of the machine and leave, with how many podman commands
+    /// had run then.
+    held: Mutex<Vec<(String, usize)>>,
+}
+
+impl FakeMachine {
+    fn note_held(&self, what: String) {
+        let ran = self.state.as_deref().map_or(0, |state| {
+            fs::read_to_string(state.join("calls"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        });
+        self.held.lock().unwrap().push((what, ran));
+    }
 }
 
 impl RunMachine for FakeMachine {
@@ -170,6 +185,16 @@ impl RunMachine for FakeMachine {
             .unwrap()
             .push(format!("release {container} after {ran} runs"));
         Ok(())
+    }
+
+    fn hold(&self, user: &str) -> Result<()> {
+        self.note_held(format!("hold {user}"));
+        Ok(())
+    }
+
+    fn leave(&self, user: &str) -> Result<bool> {
+        self.note_held(format!("leave {user}"));
+        Ok(true)
     }
 }
 
@@ -1817,6 +1842,38 @@ fn an_already_satisfied_claim_is_verified_in_the_container_and_closes() {
         "{calls}"
     );
     assert!(queue.machine.removed.lock().unwrap().contains(&left));
+    // Acceptance (7) of the release's wiring: the removal holds the
+    // machine as this process's own user, not as the run (which may be
+    // over and is not counted, so the runs leaving meanwhile do not stop
+    // the machine under it), and leaves it after its last podman command;
+    // the machine stops then if no user is left.
+    let held = queue.machine.held.lock().unwrap().clone();
+    let user = held[0]
+        .0
+        .strip_prefix("hold ")
+        .unwrap_or_else(|| panic!("{held:?}"))
+        .to_owned();
+    // A user of the call's own, which another removal for the run does
+    // not share.
+    assert!(
+        user.starts_with(&format!("cleanup-{}-", run.id())),
+        "{held:?}"
+    );
+    assert_eq!(
+        held.iter()
+            .map(|(what, _)| what.clone())
+            .collect::<Vec<_>>(),
+        [format!("hold {user}"), format!("leave {user}")]
+    );
+    let calls: Vec<String> = calls.lines().map(str::to_owned).collect();
+    let removal = calls
+        .iter()
+        .position(|call| call.ends_with(&format!("dagq-{QUEUE}-verify-{left}")))
+        .unwrap();
+    assert!(
+        held[0].1 <= removal && removal < held[1].1,
+        "{held:?} {calls:?}"
+    );
     let remaining: Vec<_> = fs::read_dir(queue_dir.join("verification"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

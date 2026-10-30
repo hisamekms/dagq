@@ -448,6 +448,23 @@ pub trait RunMachine: Send + Sync {
         let _ = deadline;
         None
     }
+    /// Make the dagq machine run for this process's own work in it for a
+    /// run that may be over (the removal of what an earlier verification
+    /// left, the facts-only turn of a run that failed or was interrupted),
+    /// counted as the user `user` while this process lives or until
+    /// [`Self::leave`] ([`ensure`]), and nothing else: no image, relay or
+    /// volume. Such a run is not counted, so without it the machine could
+    /// be stopped under the work as unused.
+    fn hold(&self, user: &str) -> Result<()> {
+        let _ = user;
+        Ok(())
+    }
+    /// `user` leaves the dagq machine, which stops when no user is left
+    /// ([`release`]). Whether it was stopped is returned.
+    fn leave(&self, user: &str) -> Result<bool> {
+        let _ = user;
+        Ok(false)
+    }
 }
 
 /// What [`ensure`] and [`release`] act with.
@@ -536,6 +553,27 @@ pub fn ensure_then<T>(
 pub fn release(machine: &Machine<'_>, user: &str) -> Result<bool> {
     let _held = machine.users.lock()?;
     machine.users.leave(user)?;
+    let running = machine
+        .podman
+        .machines()?
+        .iter()
+        .any(|entry| entry.name == MACHINE_NAME && entry.running);
+    if !stops(running, machine.users.count()?) {
+        return Ok(false);
+    }
+    machine.podman.stop()?;
+    Ok(true)
+}
+
+/// Stop the dagq machine when it runs and no user is held, under the
+/// host-wide lock, making no user leave: the users whose owner is over are
+/// forgotten as they are counted ([`MachineUsers::count`]). What the
+/// supervisor's relay watch does once runs ended: a run that joined again
+/// meanwhile (resumed under the same ID) is held and keeps the machine,
+/// where a leave by its ID would forget it. Whether it was stopped is
+/// returned.
+pub fn stop_unused(machine: &Machine<'_>) -> Result<bool> {
+    let _held = machine.users.lock()?;
     let running = machine
         .podman
         .machines()?

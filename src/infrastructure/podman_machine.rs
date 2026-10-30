@@ -1734,17 +1734,17 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
             self.host_wide.as_deref(),
         )
         .with_owner_runs(self.owner_runs.clone());
-        if !relays.is_open(run)? {
-            crate::application::broker_relay::open(
-                &relays,
-                &super::queue_broker::SystemQueueBroker::new(&self.db, Path::new("dagq")),
-                &crate::domain::broker_relay::RelaySpec {
-                    run: run.to_owned(),
-                    image: image.clone(),
-                    uid: crate::domain::broker_relay::CONTAINER_UID,
-                },
-            )?;
-        }
+        // A relay kept recorded while its run used no machine may have
+        // gone with a machine that stopped meanwhile, or pass to a port
+        // the broker left: it is opened again then.
+        relays.ready_for_turn(
+            &super::queue_broker::SystemQueueBroker::new(&self.db, Path::new("dagq")),
+            &crate::domain::broker_relay::RelaySpec {
+                run: run.to_owned(),
+                image: image.clone(),
+                uid: crate::domain::broker_relay::CONTAINER_UID,
+            },
+        )?;
         if let Some(volume) = build_output {
             let queue_dir = super::queue_service::queue_dir_of(&self.db);
             QueueVolumes::of_queue(self.podman.clone(), &queue_dir)?.create_build_output(volume)?;
@@ -1758,59 +1758,65 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
             .as_deref()
             .context("the queue is bound to no checkout, whose dagq.toml decides the image")?;
         let queue_dir = super::queue_service::queue_dir_of(&self.db);
-        let data_root = queue_dir.parent().unwrap_or(Path::new("."));
-        let mut machine = QueueMachine::new(
-            self.podman.clone(),
-            data_root,
-            &queue_dir,
-            self.host_wide.as_deref(),
-        );
-        machine.users.runs.clone_from(&self.owner_runs);
         // Absolute: another process, whatever its cwd, reads the queue.
         let owner = LeaseOwner::Run {
             db: fs::canonicalize(&self.db).unwrap_or_else(|_| self.db.clone()),
             run: run.to_owned(),
         };
-        let by = self.deadline.map(|deadline| PodmanCliBy {
-            podman: self.podman.clone(),
-            deadline,
-        });
-        let podman: &dyn PodmanMachine = match &by {
-            Some(by) => by,
-            None => &machine.podman,
-        };
-        let users = UsersBy {
-            users: &machine.users,
-            deadline: self.deadline,
-        };
-        let machine = Machine {
-            podman,
-            users: &users,
-            resources: machine.resources,
-            required: machine.required.clone(),
-            volumes: machine.volumes.clone(),
-        };
-        let image = || self.prepare_image(checkout, &queue_dir);
-        match self.deadline {
-            Some(deadline) => crate::application::podman_machine::ensure_then(
-                &machine,
-                run,
-                &owner,
-                &|| Instant::now() >= deadline,
-                image,
-            ),
-            None => {
-                crate::application::podman_machine::ensure(&machine, run, &owner)
-                    .map_err(anyhow::Error::msg)
-                    .context("make the dagq machine run")?;
-                image()
+        self.with_machine(|machine| {
+            let image = || self.prepare_image(checkout, &queue_dir);
+            match self.deadline {
+                Some(deadline) => crate::application::podman_machine::ensure_then(
+                    machine,
+                    run,
+                    &owner,
+                    &|| Instant::now() >= deadline,
+                    image,
+                ),
+                None => {
+                    crate::application::podman_machine::ensure(machine, run, &owner)
+                        .map_err(anyhow::Error::msg)
+                        .context("make the dagq machine run")?;
+                    image()
+                }
             }
-        }
+        })
     }
 
     fn remove_build_output(&self, build_output: &str) -> Result<()> {
         let queue_dir = super::queue_service::queue_dir_of(&self.db);
         QueueVolumes::of_queue(self.podman.clone(), &queue_dir)?.remove_build_output(build_output)
+    }
+
+    fn hold(&self, user: &str) -> Result<()> {
+        self.with_machine(|machine| {
+            crate::application::podman_machine::ensure(
+                machine,
+                user,
+                &LeaseOwner::Process {
+                    pid: std::process::id(),
+                },
+            )
+            .map(drop)
+            .map_err(anyhow::Error::msg)
+            .context("make the dagq machine run")
+        })
+    }
+
+    /// When the release fails (the host-wide lock is not had by
+    /// [`Self::deadline`], or a podman command fails), `user` still leaves
+    /// without the lock, as a readying cut off does
+    /// ([`crate::application::podman_machine::ensure_then`]): a lease of
+    /// this process is not kept for as long as it lives, and the machine
+    /// is left running for the next stop.
+    fn leave(&self, user: &str) -> Result<bool> {
+        self.with_machine(|machine| {
+            crate::application::podman_machine::release(machine, user).inspect_err(|_| {
+                if let Err(error) = machine.users.leave(user) {
+                    tracing::warn!(user = %user, error = %format_args!("{error:#}"), "{user} could not leave the dagq machine {MACHINE_NAME}: {error:#}");
+                }
+            })
+        })
     }
 
     fn create_worker_cache(&self, dirs: &[String]) -> Result<()> {
@@ -1887,6 +1893,47 @@ impl QueueRunMachine {
             now,
         )
         .map_err(anyhow::Error::msg)
+    }
+
+    /// `act` with the dagq machine as this queue uses it, its waits for
+    /// the host-wide lock and its podman commands ended by
+    /// [`Self::deadline`] when there is one.
+    fn with_machine<T>(&self, act: impl FnOnce(&Machine<'_>) -> T) -> T {
+        let machine = self.queue_machine();
+        let by = self.deadline.map(|deadline| PodmanCliBy {
+            podman: self.podman.clone(),
+            deadline,
+        });
+        let podman: &dyn PodmanMachine = match &by {
+            Some(by) => by,
+            None => &machine.podman,
+        };
+        let users = UsersBy {
+            users: &machine.users,
+            deadline: self.deadline,
+        };
+        act(&Machine {
+            podman,
+            users: &users,
+            resources: machine.resources,
+            required: machine.required.clone(),
+            volumes: machine.volumes.clone(),
+        })
+    }
+
+    /// The dagq machine as this queue uses it, its users' runs read as
+    /// [`Self::owner_runs`] says.
+    fn queue_machine(&self) -> QueueMachine {
+        let queue_dir = super::queue_service::queue_dir_of(&self.db);
+        let data_root = queue_dir.parent().unwrap_or(Path::new("."));
+        let mut machine = QueueMachine::new(
+            self.podman.clone(),
+            data_root,
+            &queue_dir,
+            self.host_wide.as_deref(),
+        );
+        machine.users.runs.clone_from(&self.owner_runs);
+        machine
     }
 
     /// The machine's host-wide records and its reads of what it holds.

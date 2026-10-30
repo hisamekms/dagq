@@ -52,7 +52,9 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// `--connection dagq <verb>` while `state/hang-<verb>` is there and a
 /// `machine <verb>` while `state/hang-machine-<verb>` is, each hung one
 /// writing its pid to `state/hung`. A machine's stop takes its containers
-/// with it.
+/// with it and leaves `state/stopped`, under which the machine is listed
+/// as not running and every `--connection dagq` command fails, until a
+/// start; it fails while `state/stop-fails` is there.
 fn fake_podman(state: &Path) -> PathBuf {
     fs::create_dir_all(state.join("containers")).unwrap();
     fs::create_dir_all(state.join("volumes")).unwrap();
@@ -70,15 +72,19 @@ hang() {{
 [ "$1" = machine ] && [ -f "$S/hang-machine-$2" ] && hang
 [ "$1 $2" = "--connection dagq" ] && [ -f "$S/hang-$3" ] && hang
 case "$1 $2" in
-"machine list") printf '[{{"Name":"dagq","Running":true}}]' ;;
-"machine stop") rm -f "$S"/containers/* ;;
+"machine list")
+  r=true; [ -f "$S/stopped" ] && r=false
+  printf '[{{"Name":"dagq","Running":%s}}]' "$r" ;;
+"machine stop")
+  [ -f "$S/stop-fails" ] && {{ echo "cannot stop" >&2; exit 125; }}
+  rm -f "$S"/containers/*; touch "$S/stopped" ;;
 "machine start")
   [ -f "$S/start-fails" ] && {{ echo "cannot start" >&2; exit 125; }}
-  rm -f "$S/no-connection" "$S/hang" ;;
+  rm -f "$S/no-connection" "$S/hang" "$S/stopped" ;;
 "system connection") printf '[{{"Name":"dagq","Default":true}}]' ;;
 "--connection dagq")
   [ -f "$S/hang" ] && hang
-  [ -f "$S/no-connection" ] && {{ echo "Cannot connect to Podman" >&2; exit 125; }}
+  [ -f "$S/no-connection" ] || [ -f "$S/stopped" ] && {{ echo "Cannot connect to Podman" >&2; exit 125; }}
   shift 2
   case "$1" in
   rm) rm -f "$S/containers/$4" ;;
@@ -255,6 +261,10 @@ struct FakeRelays {
     restarts: Mutex<Vec<(String, u16)>>,
     closes: Mutex<Vec<String>>,
     machine_restarts: AtomicU32,
+    /// The machine is stopped: a close is not tried.
+    machine_stopped: AtomicBool,
+    /// How many times the machine was to stop if unused.
+    stops: AtomicU32,
 }
 
 impl RelayControl for FakeRelays {
@@ -293,6 +303,13 @@ impl RelayControl for FakeRelays {
         self.machine_restarts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+    fn machine_runs(&self) -> anyhow::Result<bool> {
+        Ok(!self.machine_stopped.load(Ordering::SeqCst))
+    }
+    fn stop_unused(&self) -> anyhow::Result<bool> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(false)
+    }
 }
 
 /// A broker that runs this build at `127.0.0.1:4321`.
@@ -300,9 +317,24 @@ struct RunningBroker;
 
 impl QueueBrokerControl for RunningBroker {
     fn probe(&self) -> BrokerProbe {
+        BrokerAt(4321).probe()
+    }
+    fn start(&self, _: Duration) -> anyhow::Result<BrokerProbe> {
+        Ok(self.probe())
+    }
+    fn stop(&self, _: Duration) -> anyhow::Result<Option<u32>> {
+        Ok(None)
+    }
+}
+
+/// A broker that runs this build at `127.0.0.1:<port>`.
+struct BrokerAt(u16);
+
+impl QueueBrokerControl for BrokerAt {
+    fn probe(&self) -> BrokerProbe {
         BrokerProbe {
             state: ServiceState::Running,
-            address: Some("127.0.0.1:4321".to_owned()),
+            address: Some(format!("127.0.0.1:{}", self.0)),
             pid: Some(4242),
             build: Some(dagq::VERSION.to_owned()),
             build_matches: Some(true),
@@ -367,6 +399,17 @@ fn run_in(db: &Path, repo: &Path, status: &str, task: &str) -> String {
     run.id().to_string()
 }
 
+/// The task of the run `run` set to `task`.
+fn set_task(db: &Path, run: &str, task: &str) {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET status=?2 WHERE id=(SELECT task_id FROM task_runs WHERE id=?1)",
+            rusqlite::params![run, task],
+        )
+        .unwrap();
+}
+
 /// The fixture's repository set to run its workers in containers, and the
 /// supervisor's options with `relays` and a running broker.
 fn container_fixture() -> (
@@ -389,14 +432,20 @@ fn container_fixture() -> (
 }
 
 fn relay_options(relays: Arc<dyn RelayControl>) -> dagq::compose::SuperviseOptions {
+    relay_options_with(relays, Arc::new(RunningBroker))
+}
+
+/// [`relay_options`] with the broker `broker`.
+fn relay_options_with(
+    relays: Arc<dyn RelayControl>,
+    broker: Arc<dyn QueueBrokerControl>,
+) -> dagq::compose::SuperviseOptions {
     dagq::compose::SuperviseOptions {
         queue_broker: Some(dagq::compose::QueueBrokerOptions {
             executable: "/unused".into(),
             interval: Duration::ZERO,
             start_timeout: TIMEOUT,
-            control: Some(dagq::compose::QueueBrokerControlPort(Arc::new(
-                RunningBroker,
-            ))),
+            control: Some(dagq::compose::QueueBrokerControlPort(broker)),
         }),
         broker_relay: Some(dagq::compose::QueueRelayOptions {
             interval: Duration::ZERO,
@@ -613,6 +662,240 @@ fn the_supervisor_closes_the_relays_of_runs_that_are_over() {
     let started = events(&db, "queue_relay_started");
     assert_eq!(started.len(), 1, "{started:?}");
     assert_eq!(started[0]["payload"]["run"], living.as_str());
+}
+
+/// Acceptance (1), (2) and (6) of the release's wiring: a run that
+/// failed or was interrupted while its task waits (its triage, an answer)
+/// keeps its relay idle: it is not looked at, so a look that does not
+/// reach the machine has it neither started again nor counted. With no
+/// relay looked at, the running machine is stopped after the closes if no
+/// user is held, at every look. While the machine is stopped, the relay
+/// of a run that is over is not closed (its close needs the machine) and
+/// waits, and no stop is asked.
+#[test]
+fn idle_relays_are_left_alone_and_the_runs_leave_the_machine_once_none_is_looked_at() {
+    use crate::runtime_support::supervise_with;
+    let (_fixture, repo, db, backend) = container_fixture();
+    let failed = run_in(&db, &repo, "failed", "in_progress");
+    let interrupted = run_in(&db, &repo, "interrupted", "in_progress");
+    // A run whose task ended between its turns.
+    let living = run_in(&db, &repo, "needs_session", "completed");
+    let over = run_in(&db, &repo, "succeeded", "completed");
+    let unreachable = |run: &str| RelaySeen {
+        state: RelayState::PodmanUnreachable,
+        ..relay(run, false, None, None)
+    };
+    let relays = Arc::new(FakeRelays {
+        seen: Mutex::new(vec![
+            unreachable(&failed),
+            unreachable(&interrupted),
+            relay(&living, true, Some(4321), Some(true)),
+            relay(&over, false, None, None),
+        ]),
+        ..FakeRelays::default()
+    });
+    let options = relay_options(relays.clone());
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(
+        *relays.closes.lock().unwrap(),
+        [living.clone(), over.clone()]
+    );
+    assert!(relays.stops.load(Ordering::SeqCst) >= 1);
+    assert_eq!(relays.machine_restarts.load(Ordering::SeqCst), 0);
+    assert!(relays.restarts.lock().unwrap().is_empty());
+    assert!(events(&db, "queue_relay_started").is_empty());
+    assert!(events(&db, "queue_relay_down").is_empty());
+    assert_eq!(relays.seen.lock().unwrap().len(), 2);
+
+    // An idle run's task is canceled while the machine is stopped: its
+    // close waits for the machine, and the machine stops again after it.
+    set_task(&db, &failed, "canceled");
+    relays.machine_stopped.store(true, Ordering::SeqCst);
+    let before = relays.stops.load(Ordering::SeqCst);
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(relays.closes.lock().unwrap().len(), 2);
+    assert_eq!(relays.stops.load(Ordering::SeqCst), before);
+    relays.machine_stopped.store(false, Ordering::SeqCst);
+    let before = relays.stops.load(Ordering::SeqCst);
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(relays.closes.lock().unwrap()[2], failed);
+    assert!(relays.stops.load(Ordering::SeqCst) > before);
+    assert_eq!(relays.machine_restarts.load(Ordering::SeqCst), 0);
+}
+
+/// Acceptance (1), (2) and (6) at the podman boundary: while a run waits
+/// between its turns with its relay open, the machine runs; when its task
+/// ends, its relay is closed and, the other run having failed while its
+/// task waits for its triage, no user is left and the machine stops. The
+/// failed run's relay stays recorded, and a look that cannot reach the
+/// stopped machine does not start it again.
+#[test]
+fn the_last_run_to_leave_stops_the_machine_and_an_idle_relay_does_not_start_it_again() {
+    use crate::runtime_support::supervise_with;
+    use dagq::application::podman_machine::MachineUsers;
+    use dagq::domain::podman_machine::LeaseOwner;
+    let (_fixture, repo, db, backend) = container_fixture();
+    let living = run_in(&db, &repo, "needs_session", "in_progress");
+    let failed = run_in(&db, &repo, "failed", "in_progress");
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("podman");
+    let relays = Arc::new(podman_relays(dir.path(), &state, TIMEOUT));
+    let owner_db = fs::canonicalize(&db).unwrap();
+    for run in [&living, &failed] {
+        relays.open(&spec(run), 4321).unwrap();
+        relays
+            .machine
+            .users
+            .join(
+                run,
+                &LeaseOwner::Run {
+                    db: owner_db.clone(),
+                    run: run.clone(),
+                },
+            )
+            .unwrap();
+    }
+    let record = |run: &str| {
+        dir.path()
+            .join("data/dagq")
+            .join(QUEUE)
+            .join("relay")
+            .join(format!("{run}.json"))
+    };
+    let options = relay_options(relays.clone());
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert!(!state.join("stopped").exists(), "{:?}", calls(&state));
+    assert!(record(&living).is_file() && record(&failed).is_file());
+
+    set_task(&db, &living, "completed");
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert!(state.join("stopped").exists(), "{:?}", calls(&state));
+    assert!(!record(&living).exists());
+    assert!(record(&failed).is_file());
+    let stop = first_call(&state, "machine stop dagq");
+    assert!(stop > first_call(&state, "--connection dagq rm --force --ignore --time 0"));
+
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert!(
+        !calls(&state)[stop..]
+            .iter()
+            .any(|call| call.starts_with("machine start")),
+        "{:?}",
+        calls(&state)
+    );
+    assert!(state.join("stopped").exists());
+    assert!(record(&failed).is_file());
+    assert!(events(&db, "queue_relay_started").is_empty());
+    assert!(events(&db, "queue_relay_down").is_empty());
+}
+
+/// A run idle (failed, its task waiting for its triage) while another
+/// user holds the machine and the broker is started again on another
+/// port: the watch leaves its relay towards the port the broker left, so
+/// the turn that resumes it opens the relay again towards the broker's
+/// port now before it starts, and a later turn keeps the relay that serves
+/// it.
+#[test]
+fn a_resumed_idle_run_s_relay_is_opened_again_towards_the_port_the_broker_moved_to() {
+    use crate::runtime_support::supervise_with;
+    use dagq::application::podman_machine::MachineUsers;
+    use dagq::domain::podman_machine::LeaseOwner;
+    let (_fixture, repo, db, backend) = container_fixture();
+    let idle = run_in(&db, &repo, "failed", "in_progress");
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("podman");
+    let relays = Arc::new(podman_relays(dir.path(), &state, TIMEOUT));
+    relays.open(&spec(&idle), 4321).unwrap();
+    relays
+        .machine
+        .users
+        .join(
+            "smoke",
+            &LeaseOwner::Process {
+                pid: std::process::id(),
+            },
+        )
+        .unwrap();
+    let moved = Arc::new(BrokerAt(5555));
+    supervise_with(
+        &db,
+        &repo,
+        &backend,
+        &relay_options_with(relays.clone(), moved.clone()),
+    )
+    .unwrap();
+    assert!(!state.join("stopped").exists(), "{:?}", calls(&state));
+    assert_eq!(relays.relays().unwrap()[0].target_port, Some(4321));
+    let starts = || {
+        calls(&state)
+            .iter()
+            .filter(|call| call.starts_with("--connection dagq run "))
+            .count()
+    };
+    let before = starts();
+
+    relays.ready_for_turn(&*moved, &spec(&idle)).unwrap();
+    let seen = relays.relays().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].state, RelayState::Running);
+    assert_eq!(seen[0].target_port, Some(5555));
+    assert_eq!(starts(), before + 1);
+    relays.ready_for_turn(&*moved, &spec(&idle)).unwrap();
+    assert_eq!(starts(), before + 1);
+}
+
+/// Acceptance (1) for a run that ended before it recorded a relay: the
+/// machine was made to run for it (its user joined) and its relay did not
+/// start, so no relay is left to close. Once it failed, the watch stops
+/// the machine with no relay at all, and a stop that failed is tried again
+/// at the next look.
+#[test]
+fn a_run_without_a_relay_and_a_failed_stop_still_have_the_unused_machine_stopped() {
+    use crate::runtime_support::supervise_with;
+    use dagq::application::podman_machine::MachineUsers;
+    use dagq::domain::podman_machine::LeaseOwner;
+    let (_fixture, repo, db, backend) = container_fixture();
+    let run = run_in(&db, &repo, "needs_session", "in_progress");
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("podman");
+    let relays = Arc::new(podman_relays(dir.path(), &state, TIMEOUT));
+    relays
+        .machine
+        .users
+        .join(
+            &run,
+            &LeaseOwner::Run {
+                db: fs::canonicalize(&db).unwrap(),
+                run: run.clone(),
+            },
+        )
+        .unwrap();
+    fs::write(state.join("fail-run"), "").unwrap();
+    assert!(relays.open(&spec(&run), 4321).is_err());
+    fs::remove_file(state.join("fail-run")).unwrap();
+    assert!(relays.relays().unwrap().is_empty());
+    let options = relay_options(relays.clone());
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='failed' WHERE id=?1",
+            [run.as_str()],
+        )
+        .unwrap();
+    fs::write(state.join("stop-fails"), "").unwrap();
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert!(!state.join("stopped").exists());
+    let failed_stops = count_calls(&state, "machine stop dagq");
+    assert!(failed_stops >= 1, "{:?}", calls(&state));
+    fs::remove_file(state.join("stop-fails")).unwrap();
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert!(state.join("stopped").exists(), "{:?}", calls(&state));
+    assert_eq!(count_calls(&state, "machine stop dagq"), failed_stops + 1);
+}
+
+/// How many calls of `state`'s podman are `call`.
+fn count_calls(state: &Path, call: &str) -> usize {
+    calls(state).iter().filter(|seen| *seen == call).count()
 }
 
 /// The relays of a queue of the test's in `dir` through the fake podman

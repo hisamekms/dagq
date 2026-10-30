@@ -241,7 +241,8 @@ pub fn queue_fixture(dir: &Path) -> (PathBuf, PathBuf) {
 /// The machine's parts of the test's turns: none is asked, and every turn
 /// runs the test's image. Each readying is written to `<state>/machine`
 /// (`ready <run>` for a turn's parts with its relay, `image <run>` for the
-/// machine and the image alone).
+/// machine and the image alone), and so are each hold of the machine by
+/// the process and its leave (`hold <user>`, `leave <user>`).
 pub struct FakeMachine(PathBuf);
 
 impl FakeMachine {
@@ -320,6 +321,16 @@ impl RunMachine for FakeMachine {
     fn release_memory_if_free(&self, container: &str) -> Result<()> {
         self.memory_note(format!("release-if-free {container}"));
         Ok(())
+    }
+
+    fn hold(&self, user: &str) -> Result<()> {
+        self.note(format!("hold {user}"));
+        Ok(())
+    }
+
+    fn leave(&self, user: &str) -> Result<bool> {
+        self.note(format!("leave {user}"));
+        Ok(true)
     }
 }
 

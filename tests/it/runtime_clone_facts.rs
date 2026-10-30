@@ -181,15 +181,30 @@ fn released_with_the_facts_only_turn_s_head(first_ended: bool) {
 
 /// The facts-only turn of `run` (the last container the fake podman of
 /// the queue in `dir` ran) had only the machine and the image made ready,
-/// with no relay of the run towards the queue broker; mounted only the
-/// clone and the run directory, with no socket and no variable; and found
-/// no run token's copy left in the run directory.
+/// with no relay of the run towards the queue broker, the machine held by
+/// the turn's own user around it (the run is not counted as its user);
+/// mounted only the clone and the run directory, with no socket and no
+/// variable; and found no run token's copy left in the run directory.
 #[track_caller]
 fn facts_turn_was_narrow(dir: &Path, run: &ContainerRun) {
     let state = dir.join("podman");
+    let calls = containers::machine_calls(&state);
+    let user = calls
+        .first()
+        .and_then(|call| call.strip_prefix("hold "))
+        .unwrap_or_else(|| panic!("{calls:?}"))
+        .to_owned();
+    assert!(
+        user.starts_with(&format!("facts-{}-", run.run.id())),
+        "{calls:?}"
+    );
     assert_eq!(
-        containers::machine_calls(&state),
-        [format!("image {}", run.run.id())]
+        calls,
+        [
+            format!("hold {user}"),
+            format!("image {}", run.run.id()),
+            format!("leave {user}")
+        ]
     );
     let args: Vec<String> = fs::read_to_string(state.join("run-args"))
         .unwrap()
@@ -399,8 +414,9 @@ fn ready_inherit_of_a_cut_off_container_run_carries_the_head_its_facts_only_turn
 /// queue's path) carrying a cut-off container run over runs the run's
 /// facts-only turn as the command line on the DB does, in the containers
 /// of the queue the service answered for: it makes that queue's machine
-/// and starts it, counts the run among the machine's users (under the
-/// queue's data root), and readies the image, which this machine
+/// and starts it, counts the turn's process and the run among the
+/// machine's users (under the queue's data root), and readies the image,
+/// which this machine
 /// cannot list. The image's failure reaches the queue only through the
 /// service, as the inbox's record, and the carry-over is refused with
 /// nothing else recorded, the ref untouched and no Git of the service's.
@@ -471,17 +487,14 @@ fn a_client_mode_ready_inherit_runs_a_cut_off_container_run_s_facts_only_turn_in
         calls.contains("machine init") && calls.contains("machine start"),
         "{calls}"
     );
-    let user = queue_dir
-        .parent()
-        .unwrap()
-        .join("machine")
-        .join("users")
-        .join(run.run.id().as_str());
-    let owner = fs::read_to_string(&user).unwrap_or_default();
+    // The users were counted under the served queue's data root; the
+    // turn's own hold left, and the run, cut off, is no longer held.
+    let users = queue_dir.parent().unwrap().join("machine").join("users");
     assert!(
-        owner.contains(run.run.id().as_str()),
-        "the run is not among the served queue's machine's users: {owner:?}"
+        users.is_dir(),
+        "no user of the served queue's machine was counted"
     );
+    assert!(!elsewhere.join("machine").exists());
     let failed = crate::common::service::events(&db, "container_image_failed");
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert_eq!(failed[0]["actor"]["role"], "inbox", "{failed:?}");

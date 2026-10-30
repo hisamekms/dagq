@@ -84,6 +84,8 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
   Podmanの版によってはinitとstartが既定の接続を変えるので、`PodmanCli`が前の既定に戻す（前に既定が無ければ戻す先が無く、dagqの接続が既定に残りうる）。
 - 起動と停止: `ensure`は無ければinitし、止まっていればstartし、使う者として数える入口で、workerのturnとverificationのcontainerの起動の前（runを使う者にする）とpodmanを要るtestとスモークの前に呼ぶ。
   使い終えたら`release`を呼び、使う者が居なければ止める。
+  runの終わりは、relayの見張りが見るrelayの無い回ごとに使う者が居なければ止める。
+  前のverificationの残りの片付けとfacts-onlyのturnは呼び出しごとの使う者を持つ。
   どちらもhost全体のlock（data homeの`dagq/machine/`）の中で判定と操作を行うので、並行するrun・verification・testが同時に呼んでも作るのと起動するのは1回になる。
   使う者は持ち主（`LeaseOwner`）が終われば数えず、呼んだprocessには依らない（turnとverificationの持ち主はrun）。
 - 人のmachine: Podmanは同時に1つのmachineしか動かさないので、人のmachineが動いている間はdagqのmachineを起動せず、containerを使えないと答える（fail closed）。
@@ -144,11 +146,10 @@ containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すproject�
 runのcontainerは`--network none`で、外への経路はhostのqueueのbrokerへの1本だけにする（[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)決定1〜4）。
 `broker_relay`のmoduleは、判断が`domain`、use caseと門が`application`、relay・転送のprocessとpodmanのコマンドが`infrastructure`、見張りが`supervise::host_ops`の下にある。
 
-- runのsocket: runのturnかverificationのcontainerを起動する前に、開いていなければ`application::broker_relay::open`が、machineの中にrunごとのnamed volumeを作ってそのrunのrelayを起動し、runの終わりに`close`がrelayとvolumeを消す。
+- runのsocket: runのturnかverificationのcontainerの起動の前に、relayがbrokerの今のportへ向いて動かなければ`broker_relay::ready_for_turn`が、machineにrunごとのnamed volumeを作ってrunのrelayを起動し、runの終わりに`close`がrelayとvolumeを消す。
   relayはrunのcontainerの非rootのuidで動き、そのcontainerと同じuidの対応（`keep-id`）でvolumeの中にsocketをmode 0600で作る。
   volumeをmountするのはrelayとそのrunのcontainerだけで、どちらも`:z`を付ける。
-  開いたrelayは`<queue dir>/relay/`に記録するので、machineの停止で消えたrelayも見張りが見つける。
-  記録は`close`が成功するまで残る。
+  開いたrelayは`close`が成功するまで`<queue dir>/relay/`に記録するので、machineの停止で消えたrelayも見張りが見つける。
 - relay（`dagq relay serve`）: machineの中のcontainerで、socketへの接続をhostのbrokerのportへ双方向にそのまま流す。
   hostへはmachineのgvproxy（`host.containers.internal`）を通る。
   tokenを持たず、認証も宛ての判定もしない（brokerが行う）。
@@ -160,13 +161,11 @@ runのcontainerは`--network none`で、外への経路はhostのqueueのbroker�
   これは隔離の結果として扱い、要るものはhostのrunかqueue serviceのユースケースに回す。
 - 見張り: supervisor（`--once`でないもの）は、brokerが答える間、各relayのcontainerが動くか・brokerの今のportへ向くか・socket越しにbrokerのhealthに届くかを見る。
   先に、記録のrunがqueueの上でもう生きていない（taskが進行中でない・後のrunに代わった・着地した・runが無い）relayは起動し直さず`close`で片付け、起動し直しの回数にもattentionの判定にも数えない。
-  `close`が失敗した記録は次の回にやり直す。
+  `close`が失敗した記録は次の回に、machineが止まっている間のものは動いた回にやり直す。
+  使う者と数えないrunのrelayは休ませ、見ず・閉じず、止めたmachineを起こし直さない。
   落ちたかportの古いrelayは起動し直す。
   動くのに届かないrelayがあるか、podmanがmachineに繋がらない（`--connection dagq`もgvproxyを通る）ときはgvproxyが落ちたとみて、machineをhost全体のlockの中で起動し直してから全てのrelayを起動し直す。
-  relayを見るpodmanの呼び出しには時間の上限があり、超えたものは止めて繋がらないとして扱う。
-  relayの起動（`open`と起動し直し）と`close`のpodmanの呼び出しにも時間の上限があり、見張りからのmachineの起動し直しのpodmanの呼び出しにはそれより長い別の上限がある。
-  超えたものは止めて起動し直しか`close`の失敗として扱い、`close`が超えた回は残りの`close`を次の回に回す。
-  回数の上限と窓はqueue serviceと同じ。
+  podmanの呼び出しは時間の上限（`PodmanRelays`）を超えれば止めて失敗として扱い、`close`が超えた回は残りを次の回に回す。
   起動し直せない・上限に達した・見られないときはinbox宛てのattention `queue_relay_down`を書き、全てのrelayが動けば消える。
   attentionが立つ間は`RelayGate`がcontainerを使えないと答え、新しいrunを控える（上の「fail closedの境界」）。
 

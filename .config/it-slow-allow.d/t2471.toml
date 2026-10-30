@@ -1,0 +1,14 @@
+# The items of task 2471 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 5.4s: three supervise passes over the relays of runs in four states
+[[test]]
+name = "broker_relay::idle_relays_are_left_alone_and_the_runs_leave_the_machine_once_none_is_looked_at"
+reason = "B 境界（守る境界）: supervisor の relay の見張りが SQLite の run と task の状態から relay を閉じ・休ませ、見る relay の無い回に machine を止め、止まっている間は close を待つことを、close・停止・machine の有無の順と回をまたいで supervise の配線で確かめる（判断は domain::broker_relay の relay_fate と may_stop_machine の unit test）"
+task = 2471
+
+# 5.9s: three supervise passes with the fake podman's machine
+[[test]]
+name = "broker_relay::the_last_run_to_leave_stops_the_machine_and_an_idle_relay_does_not_start_it_again"
+reason = "B 境界（守る境界）: 答え待ちの run の relay がある間は machine を止めず、その task が終われば relay を閉じて machine を止め、休ませた relay の見張りが止めた machine を起こし直さないことを、fake の podman の machine・host 全体の users の記録・SQLite の run の配線で確かめる（判断は domain::broker_relay の unit test）"
+task = 2471

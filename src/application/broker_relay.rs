@@ -1,7 +1,10 @@
 //! The relays of the runs' containers ([Container runtime], ADR-t2114-3
 //! decisions 2 and 4): how the control side opens a run's socket and relay
 //! in the dagq machine before the run's container starts and closes them
-//! at the run's end ([`open`], [`close`], through [`RelayControl`]), and
+//! at the run's end ([`open`], [`close`], through [`RelayControl`]), with
+//! the dagq machine stopped by the supervisor's watch while no relay is
+//! to be looked at and no user is left ([`RelayControl::stop_unused`]),
+//! and
 //! how the container runtime cannot be used while the supervisor could not
 //! keep the relays running ([`RelayGate`]). The supervisor's watch is
 //! [`super::supervise`]'s.
@@ -20,6 +23,7 @@ use super::EventStore;
 use super::queue_broker::QueueBrokerControl;
 use crate::domain::broker_relay::{
     QUEUE_RELAY_ATTENTION_KINDS, RelayRun, RelaySeen, RelaySpec, address_port, attention_stands,
+    relay_serves,
 };
 use crate::domain::container_runtime::{Availability, RuntimeTarget};
 use crate::domain::queue_service::ServiceState;
@@ -44,6 +48,15 @@ pub trait RelayControl: Send + Sync {
     /// Stop and start the dagq machine under its host-wide lock: what
     /// mends its gvproxy (ADR-t2114-3 decision 4).
     fn restart_machine(&self) -> Result<()>;
+    /// Whether the dagq machine runs now: a relay's [`Self::close`] needs
+    /// it, and what a stopped machine keeps (the volumes) waits for it to
+    /// run again.
+    fn machine_runs(&self) -> Result<bool>;
+    /// Stop the dagq machine when it runs and no user of any queue is
+    /// held, the runs that ended forgotten as they are counted
+    /// ([`super::podman_machine::stop_unused`]). Whether it was stopped is
+    /// returned.
+    fn stop_unused(&self) -> Result<bool>;
 }
 
 /// A podman command of a relay's start or close that did not end within
@@ -90,20 +103,45 @@ pub fn open(
     broker: &dyn QueueBrokerControl,
     spec: &RelaySpec,
 ) -> Result<()> {
+    let port = broker_port(broker)?;
+    control
+        .open(spec, port)
+        .with_context(|| format!("open the relay of run {}", spec.run))
+}
+
+/// Before a turn of the run: keep the relay recorded for it when it
+/// serves the turn as it is, `seen` being what a look found of it (`None`
+/// when none is recorded), else open it (again) towards the broker's port
+/// now ([`relay_serves`]). A broker that does not run is an error, as for
+/// [`open`].
+pub fn ready_for_turn(
+    control: &dyn RelayControl,
+    broker: &dyn QueueBrokerControl,
+    spec: &RelaySpec,
+    seen: Option<&RelaySeen>,
+) -> Result<()> {
+    let port = broker_port(broker)?;
+    if relay_serves(seen, port) {
+        return Ok(());
+    }
+    control
+        .open(spec, port)
+        .with_context(|| format!("open the relay of run {}", spec.run))
+}
+
+/// The port of the queue broker that runs.
+fn broker_port(broker: &dyn QueueBrokerControl) -> Result<u16> {
     let found = broker.probe();
     ensure!(
         found.state == ServiceState::Running,
         "the queue broker is not running ({})",
         found.describe()
     );
-    let port = found
+    found
         .address
         .as_deref()
         .and_then(address_port)
-        .context("the queue broker recorded no port")?;
-    control
-        .open(spec, port)
-        .with_context(|| format!("open the relay of run {}", spec.run))
+        .context("the queue broker recorded no port")
 }
 
 /// At the run's end: close its relay, remove its socket and its build
@@ -251,6 +289,12 @@ mod tests {
         fn restart_machine(&self) -> Result<()> {
             Ok(())
         }
+        fn machine_runs(&self) -> Result<bool> {
+            Ok(true)
+        }
+        fn stop_unused(&self) -> Result<bool> {
+            Ok(false)
+        }
     }
 
     struct Broker(Option<&'static str>);
@@ -292,5 +336,42 @@ mod tests {
         let error = open(&relays, &Broker(None), &spec).unwrap_err();
         assert!(format!("{error:#}").contains("not running"), "{error:#}");
         assert_eq!(relays.opened.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_turn_opens_its_relay_again_only_when_the_one_recorded_does_not_serve_it() {
+        use crate::domain::broker_relay::RelayState;
+        let spec = RelaySpec {
+            run: "r1".to_owned(),
+            image: "i".to_owned(),
+            uid: crate::domain::broker_relay::CONTAINER_UID,
+        };
+        let seen = |state, target_port| RelaySeen {
+            run: "r1".to_owned(),
+            state,
+            target_port,
+            reaches: None,
+        };
+        let broker = Broker(Some("127.0.0.1:5555"));
+        let relays = Relays::default();
+        let running_there = seen(RelayState::Running, Some(5555));
+        ready_for_turn(&relays, &broker, &spec, Some(&running_there)).unwrap();
+        assert!(relays.opened.lock().unwrap().is_empty());
+        // Towards the port the broker left while the run was idle, gone
+        // with the machine, or none recorded.
+        let left = seen(RelayState::Running, Some(4321));
+        let gone = seen(RelayState::Stopped, None);
+        for seen in [Some(&left), Some(&gone), None] {
+            ready_for_turn(&relays, &broker, &spec, seen).unwrap();
+        }
+        assert_eq!(
+            *relays.opened.lock().unwrap(),
+            vec![("r1".to_owned(), 5555); 3]
+        );
+        // A broker that does not run: fail closed, even for a relay that
+        // runs.
+        let error =
+            ready_for_turn(&relays, &Broker(None), &spec, Some(&running_there)).unwrap_err();
+        assert!(format!("{error:#}").contains("not running"), "{error:#}");
     }
 }

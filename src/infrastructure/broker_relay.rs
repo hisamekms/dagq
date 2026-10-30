@@ -35,11 +35,11 @@ use super::podman_machine::{MACHINE_TIMEOUT, PodmanCli, PodmanCliWithin, QueueMa
 use super::queue_service::{private_dir, queue_dir_of, write_private};
 use super::sqlite::SqliteQueue;
 use crate::application::broker_relay::{RelayControl, RelayRecords, RelayTimedOut, down_message};
-use crate::application::podman_machine::Machine;
+use crate::application::podman_machine::{Machine, PodmanMachine};
 use crate::domain::broker_relay::{
     RelaySeen, RelaySpec, RelayState, SOCKET_MODE, TARGET_LABEL, relay_run_args, socket_path,
 };
-use crate::domain::podman_machine::QueueKey;
+use crate::domain::podman_machine::{MACHINE_NAME, QueueKey};
 
 /// The directory of a queue's open relays under its directory.
 pub const RELAY_DIR: &str = "relay";
@@ -315,6 +315,34 @@ impl PodmanRelays {
         Ok(self.record(run)?.is_file())
     }
 
+    /// Before a turn of the run of `spec`: its relay kept when the one
+    /// recorded runs towards the port of `broker` now, else opened (again)
+    /// towards it ([`crate::application::broker_relay::ready_for_turn`]).
+    /// A record kept while the run was idle may name a relay that went
+    /// with a machine that stopped, or one towards a port the broker left.
+    pub fn ready_for_turn(
+        &self,
+        broker: &dyn crate::application::queue_broker::QueueBrokerControl,
+        spec: &RelaySpec,
+    ) -> Result<()> {
+        let seen = if self.is_open(&spec.run)? {
+            let container = self
+                .key()?
+                .relay_container(&spec.run)
+                .map_err(anyhow::Error::msg)?;
+            let (state, target_port) = self.look(&container);
+            Some(RelaySeen {
+                run: spec.run.clone(),
+                state,
+                target_port,
+                reaches: None,
+            })
+        } else {
+            None
+        };
+        crate::application::broker_relay::ready_for_turn(self, broker, spec, seen.as_ref())
+    }
+
     fn specs(&self) -> Result<Vec<RelaySpec>> {
         let entries = match fs::read_dir(self.dir()) {
             Ok(entries) => entries,
@@ -564,6 +592,28 @@ impl RelayControl for PodmanRelays {
             limit: self.machine_timeout,
         };
         crate::application::podman_machine::restart(&Machine {
+            podman: &podman,
+            ..self.machine.machine()
+        })
+    }
+
+    fn machine_runs(&self) -> Result<bool> {
+        let podman = PodmanCliWithin {
+            podman: self.machine.podman.clone(),
+            limit: self.look_timeout,
+        };
+        Ok(podman
+            .machines()?
+            .iter()
+            .any(|entry| entry.name == MACHINE_NAME && entry.running))
+    }
+
+    fn stop_unused(&self) -> Result<bool> {
+        let podman = PodmanCliWithin {
+            podman: self.machine.podman.clone(),
+            limit: self.machine_timeout,
+        };
+        crate::application::podman_machine::stop_unused(&Machine {
             podman: &podman,
             ..self.machine.machine()
         })

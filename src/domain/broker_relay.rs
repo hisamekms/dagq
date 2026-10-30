@@ -10,9 +10,10 @@
 //! What is decided here: the names and the mounts of the run's socket and
 //! relay ([`relay_run_args`], [`run_socket_mount`]), the environment that
 //! points a run's tools at the forwarder ([`container_env`]), whether the
-//! supervisor looks at a relay or closes it as its run is over
-//! ([`relay_fate`]), and what it does after a look at a relay
-//! ([`relay_action`]).
+//! supervisor looks at a relay, keeps it idle or closes it as its run is
+//! over ([`relay_fate`]), when it has the unused dagq machine stopped
+//! ([`may_stop_machine`]), and what it does after
+//! a look at a relay ([`relay_action`]).
 //!
 //! [Container runtime]: ../../docs/design/container-runtime.md
 
@@ -226,12 +227,23 @@ pub enum RelayRun {
     },
 }
 
-/// Whether the supervisor looks at a relay or closes it.
+/// Whether the supervisor looks at a relay, keeps it idle or closes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayFate {
     /// Its run lives (or the queue could not say): [`relay_action`] judges
     /// it.
     Look,
+    /// Its run may be resumed under the same ID (the latest run of a task
+    /// in progress that failed, was interrupted or succeeded and waits for
+    /// its triage, an answer or its review) but uses no machine meanwhile
+    /// ([`lease_held`]): its record and volumes are kept for its resume,
+    /// which opens the relay again before its turn, and it is not looked
+    /// at, started again or closed. A machine stopped once no user was
+    /// left is not started again for it, and it counts for no start and no
+    /// attention.
+    ///
+    /// [`lease_held`]: super::podman_machine::lease_held
+    Idle,
     /// Its run is over (its task is not in progress, a later run took its
     /// place, it landed, or it is not in the queue): the relay is closed,
     /// not started again, and counts for no start and no attention. A
@@ -241,9 +253,12 @@ pub enum RelayFate {
 }
 
 /// What to do with the relay of `run` before any look at it. The latest
-/// run of a task in progress lives whatever its status but `integrated`:
-/// a `failed` or `interrupted` one is resumed under the same ID after its
-/// triage.
+/// run of a task in progress is not over whatever its status but
+/// `integrated`: a `failed` or `interrupted` one is resumed under the same
+/// ID after its triage. It is looked at while it uses the machine (it is
+/// unfinished, as [`lease_held`] counts a run), and idle otherwise.
+///
+/// [`lease_held`]: super::podman_machine::lease_held
 pub fn relay_fate(run: RelayRun) -> RelayFate {
     match run {
         RelayRun::Unknown => RelayFate::Look,
@@ -252,13 +267,29 @@ pub fn relay_fate(run: RelayRun) -> RelayFate {
             status,
             task_in_progress,
         } => {
-            if task_in_progress && status != RunStatus::Integrated {
+            if !task_in_progress || status == RunStatus::Integrated {
+                RelayFate::Close
+            } else if status.is_unfinished() {
                 RelayFate::Look
             } else {
-                RelayFate::Close
+                RelayFate::Idle
             }
         }
     }
+}
+
+/// Whether the supervisor's watch, after a pass over the queue's relays
+/// whose fates are `fates`, has the running dagq machine stopped if no
+/// user of any queue is held ([`stop_unused`]): only while no relay is to
+/// be looked at. A relay to be looked at is a run that lives and may start
+/// a turn, for which the machine is kept running. It is asked at every
+/// such pass, not only once a relay was closed: a run that ended before it
+/// recorded a relay has none to close, and a stop that failed is tried
+/// again.
+///
+/// [`stop_unused`]: crate::application::podman_machine::stop_unused
+pub fn may_stop_machine(fates: &[RelayFate]) -> bool {
+    !fates.contains(&RelayFate::Look)
 }
 
 /// What the supervisor does about one relay after a look.
@@ -288,6 +319,17 @@ pub fn relay_action(seen: &RelaySeen, port: u16) -> RelayAction {
     } else {
         RelayAction::Keep
     }
+}
+
+/// Whether the relay recorded for a run serves its next turn as it is,
+/// `seen` being what a look found of it (`None` when none is recorded) and
+/// the broker listening on `port` now: it is one [`relay_action`] keeps,
+/// running towards that port. One kept while its run was idle may have
+/// gone with a machine that stopped, or pass to a port the broker left
+/// when it was started again meanwhile, which the watch does not mend for
+/// an idle relay; the turn opens it again before it starts.
+pub fn relay_serves(seen: Option<&RelaySeen>, port: u16) -> bool {
+    seen.is_some_and(|seen| relay_action(seen, port) == RelayAction::Keep)
 }
 
 /// The port of a broker's `127.0.0.1:<port>` address.
@@ -427,14 +469,23 @@ mod tests {
             RunStatus::AwaitingIntegration,
             RunStatus::Integrating,
             RunStatus::NeedsSession,
+        ] {
+            assert_eq!(
+                relay_fate(found(status, true)),
+                RelayFate::Look,
+                "{status:?}"
+            );
+        }
+        // Resumed under the same ID after its triage, an answer or its
+        // review, and using no machine meanwhile.
+        for status in [
             RunStatus::Succeeded,
-            // Resumed under the same ID after its triage.
             RunStatus::Failed,
             RunStatus::Interrupted,
         ] {
             assert_eq!(
                 relay_fate(found(status, true)),
-                RelayFate::Look,
+                RelayFate::Idle,
                 "{status:?}"
             );
         }
@@ -462,6 +513,76 @@ mod tests {
         assert_eq!(relay_fate(RelayRun::Missing), RelayFate::Close);
         // A queue that cannot be read closes nothing.
         assert_eq!(relay_fate(RelayRun::Unknown), RelayFate::Look);
+    }
+
+    /// A relay is looked at exactly while its run is counted as a user of
+    /// the machine: one whose run uses no machine is never what has the
+    /// machine started again.
+    #[test]
+    fn a_relay_is_looked_at_exactly_while_its_run_uses_the_machine() {
+        use super::super::podman_machine::{OwnerSeen, lease_held};
+        let statuses = [
+            RunStatus::Claimed,
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::Validating,
+            RunStatus::AwaitingIntegration,
+            RunStatus::Integrating,
+            RunStatus::NeedsSession,
+            RunStatus::Integrated,
+            RunStatus::Succeeded,
+            RunStatus::Failed,
+            RunStatus::Interrupted,
+            RunStatus::Replaced,
+        ];
+        let mut runs = vec![RelayRun::Unknown, RelayRun::Missing];
+        for status in statuses {
+            for task_in_progress in [true, false] {
+                runs.push(RelayRun::Found {
+                    status,
+                    task_in_progress,
+                });
+            }
+        }
+        for run in runs {
+            assert_eq!(
+                relay_fate(run) == RelayFate::Look,
+                lease_held(OwnerSeen::Run(run)),
+                "{run:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_machine_may_stop_only_while_no_relay_is_looked_at() {
+        assert!(may_stop_machine(&[]));
+        assert!(may_stop_machine(&[RelayFate::Close, RelayFate::Idle]));
+        assert!(may_stop_machine(&[RelayFate::Idle]));
+        // A run waits for an answer between its turns: the machine stays.
+        assert!(!may_stop_machine(&[RelayFate::Close, RelayFate::Look]));
+        assert!(!may_stop_machine(&[RelayFate::Look, RelayFate::Idle]));
+    }
+
+    #[test]
+    fn a_turn_keeps_only_a_running_relay_towards_the_broker_s_port_now() {
+        let seen = |state, target_port| RelaySeen {
+            run: "r1".to_owned(),
+            state,
+            target_port,
+            reaches: None,
+        };
+        assert!(relay_serves(Some(&seen(RelayState::Running, Some(9))), 9));
+        // None is recorded, or it went with the machine.
+        assert!(!relay_serves(None, 9));
+        assert!(!relay_serves(Some(&seen(RelayState::Stopped, Some(9))), 9));
+        assert!(!relay_serves(
+            Some(&seen(RelayState::PodmanUnreachable, None)),
+            9
+        ));
+        // The broker was started again on another port while the run was
+        // idle.
+        assert!(!relay_serves(Some(&seen(RelayState::Running, Some(8))), 9));
+        assert!(!relay_serves(Some(&seen(RelayState::Running, None)), 9));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 
 use dagq::application::podman_machine::{MachineVolumes, ensure, release};
@@ -420,6 +421,255 @@ fn a_run_that_ended_without_leaving_does_not_keep_the_machine_running() {
     assert!(!running());
     assert_eq!(count_in(&host.state, "machine stop"), 1);
     assert!(!host.root.join("machine/users").join(third).exists());
+}
+
+/// Acceptance (7) of the release's wiring: the removal of what an earlier
+/// verification of a run left holds the machine as its process's own
+/// user, not as the run. A machine stopped once no user was left is
+/// started for it; while it holds the machine, a run that ended without
+/// leaving (not counted) and a user leaving do not stop it under the
+/// removal; once it leaves, the machine stops as no user is left.
+#[test]
+fn a_removal_holds_the_machine_as_its_own_user_and_its_leave_stops_it_when_none_is_left() {
+    use dagq::application::podman_machine::RunMachine;
+    use dagq::infrastructure::podman_machine::QueueRunMachine;
+    // The fake podman's children and the host-wide lock have no limit
+    // of their own.
+    let _waiting = common::test();
+    let host = Host::new();
+    let (_fixture, repo, db) = crate::runtime_support::fixture();
+    let ended = running_run(&db, &repo);
+    let machine = host.machine(QUEUE_A);
+    let owner = LeaseOwner::Run {
+        db: db.clone(),
+        run: ended.clone(),
+    };
+    ensure(&machine.machine(), &ended, &owner).unwrap();
+    set_run(&db, &ended, "failed", "in_progress");
+    assert!(release(&machine.machine(), "nobody").unwrap());
+    let running = || {
+        fs::read_to_string(host.state.join("machine")).unwrap()
+            == "running
+"
+    };
+    assert!(!running());
+
+    let run_machine = QueueRunMachine {
+        podman: host.podman.clone(),
+        db: host.root.join(QUEUE_A).join("queue.db"),
+        main_checkout: None,
+        host_wide: None,
+        kept_records: None,
+        owner_runs: None,
+        deadline: None,
+    };
+    let user = format!("cleanup-{ended}");
+    run_machine.hold(&user).unwrap();
+    assert!(running());
+    // Others come and go while the removal goes on.
+    ensure(&machine.machine(), "smoke", &me()).unwrap();
+    assert!(!release(&machine.machine(), "smoke").unwrap());
+    assert!(!release(&machine.machine(), &ended).unwrap());
+    assert!(running());
+    assert!(run_machine.leave(&user).unwrap());
+    assert!(!running());
+    assert_eq!(count_in(&host.state, "machine stop"), 2);
+}
+
+/// A facts-only turn's parts in the machine for the boundary test below:
+/// the real hold and leave of the process; the image made ready as the
+/// real one does (the machine made to run with the run, which failed, as
+/// its user), then, with `overlap`, another facts-only turn of the same run
+/// run to its end meanwhile, and the supervisor's watch stopping the
+/// unused machine, as it may at any pass; with `fails`, the image's
+/// readying fails instead. The memory is always there.
+struct FactsMachine {
+    held: dagq::infrastructure::podman_machine::QueueRunMachine,
+    machine: QueueMachine,
+    db: PathBuf,
+    fails: bool,
+    overlap: Option<(
+        dagq::infrastructure::run_container::PodmanRunContainers,
+        dagq::domain::TaskRun,
+    )>,
+    /// Whether the overlapping turn failed, and whether the watch stopped
+    /// the machine during the turn.
+    seen: std::sync::Mutex<Option<(bool, bool)>>,
+}
+
+impl dagq::application::podman_machine::RunMachine for FactsMachine {
+    fn ready(&self, run: &str, _: Option<&str>) -> anyhow::Result<String> {
+        panic!("a facts-only turn made the relay of {run} ready")
+    }
+    fn ready_image(&self, run: &str) -> anyhow::Result<String> {
+        use dagq::application::run_container::RunContainers;
+        let owner = LeaseOwner::Run {
+            db: self.db.clone(),
+            run: run.to_owned(),
+        };
+        ensure(&self.machine.machine(), run, &owner).map_err(anyhow::Error::msg)?;
+        if self.fails {
+            anyhow::bail!("the test's image cannot be built");
+        }
+        let overlapping_failed = self
+            .overlap
+            .as_ref()
+            .is_some_and(|(containers, run)| containers.facts_turn(run).is_err());
+        let stopped = dagq::application::podman_machine::stop_unused(&self.machine.machine())?;
+        *self.seen.lock().unwrap() = Some((overlapping_failed, stopped));
+        Ok("localhost/dagq-test-image:t".to_owned())
+    }
+    fn remove_build_output(&self, _: &str) -> anyhow::Result<()> {
+        panic!("a facts-only turn removed a build output")
+    }
+    fn create_worker_cache(&self, _: &[String]) -> anyhow::Result<()> {
+        panic!("a facts-only turn made the worker cache")
+    }
+    fn reserve(
+        &self,
+        _: &dagq::domain::machine_memory::MemoryAsk,
+        _: i64,
+    ) -> anyhow::Result<dagq::domain::machine_memory::MemoryStep> {
+        Ok(dagq::domain::machine_memory::MemoryStep::Reserved)
+    }
+    fn release_memory(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn hold(&self, user: &str) -> anyhow::Result<()> {
+        self.held.hold(user)
+    }
+    fn leave(&self, user: &str) -> anyhow::Result<bool> {
+        self.held.leave(user)
+    }
+}
+
+/// The facts-only turn of a run that failed (a person's `ready --inherit`
+/// or a hold's release takes its facts again) is not counted as a user
+/// through the run, so each turn holds the machine as a user of its own.
+/// While one readies its image, another of the same run (a second
+/// `ready --inherit`) fails and leaves, and the supervisor's watch stops
+/// the unused machine: neither stops it under the first turn, whose
+/// container runs in the running machine; once it ends it leaves, and the
+/// machine stops as no user is left.
+#[test]
+fn neither_the_watch_nor_an_overlapping_turn_stops_the_machine_under_a_facts_only_turn() {
+    use dagq::application::run_container::RunContainers;
+    use dagq::domain::{CommitSha, RunId, RunRecord, RunStatus, TaskRun};
+    use dagq::infrastructure::podman_machine::QueueRunMachine;
+    use dagq::infrastructure::run_container::PodmanRunContainers;
+    // The fake podman's children and the host-wide lock have no limit
+    // of their own.
+    let _waiting = common::test();
+    let host = Host::new();
+    let (_fixture, repo, db) = crate::runtime_support::fixture();
+    let id = running_run(&db, &repo);
+    set_run(&db, &id, "failed", "in_progress");
+    let queue_db = host.root.join(QUEUE_A).join("queue.db");
+    let run_dir = host.root.join(QUEUE_A).join("runs").join(&id);
+    let clone = host.root.join(QUEUE_A).join("clones").join(&id);
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::create_dir_all(&clone).unwrap();
+    let base = crate::runtime_support::git_out(&repo, &["rev-parse", "main"]);
+    let run = TaskRun::restore(RunRecord {
+        id: RunId::new(&id).unwrap(),
+        task_id: dagq::domain::TaskId::new(1),
+        status: RunStatus::Failed,
+        requested_provider: dagq::domain::Provider::Claude,
+        actual_provider: dagq::domain::Provider::Claude,
+        worker_mode: dagq::domain::worker::Worker::default_mode(dagq::domain::Provider::Claude),
+        base_commit: CommitSha::try_from(base.as_str()).unwrap(),
+        branch: Some(format!("dagq/{id}")),
+        worktree_path: Some(clone.to_string_lossy().into_owned()),
+        workspace_id: None,
+        receipt_path: None,
+        log_path: None,
+        result_commit: None,
+        repo_path: None,
+        run_dir: Some(run_dir.to_string_lossy().into_owned()),
+        last_error: None,
+        workspace_closed_at: None,
+        created_at: String::new(),
+    })
+    .unwrap();
+    let machine = |fails, overlap| {
+        Arc::new(FactsMachine {
+            held: QueueRunMachine {
+                podman: host.podman.clone(),
+                db: queue_db.clone(),
+                main_checkout: None,
+                host_wide: None,
+                kept_records: None,
+                owner_runs: None,
+                deadline: None,
+            },
+            machine: host.machine(QUEUE_A),
+            db: db.clone(),
+            fails,
+            overlap,
+            seen: std::sync::Mutex::new(None),
+        })
+    };
+    let containers = |machine: Arc<FactsMachine>| {
+        PodmanRunContainers::of_queue(host.podman.clone(), &queue_db, None, None, machine)
+    };
+    let overlapping = containers(machine(true, None));
+    let first = machine(false, Some((overlapping, run.clone())));
+
+    containers(first.clone()).facts_turn(&run).unwrap();
+    assert_eq!(*first.seen.lock().unwrap(), Some((true, false)));
+    let all = calls(&host.state);
+    let turn = all
+        .iter()
+        .position(|call| call.starts_with("--connection dagq run "))
+        .unwrap_or_else(|| panic!("{all:#?}"));
+    let stop = all
+        .iter()
+        .position(|call| call.starts_with("machine stop"))
+        .unwrap_or_else(|| panic!("{all:#?}"));
+    assert!(turn < stop, "{all:#?}");
+    assert_eq!(count_in(&host.state, "machine stop"), 1);
+    assert_eq!(
+        fs::read_to_string(host.state.join("machine")).unwrap(),
+        "stopped\n"
+    );
+    let left: Vec<_> = fs::read_dir(host.root.join("machine/users"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// What the supervisor's relay watch does once runs ended: no run leaves
+/// by its ID, so a run that failed and was resumed, joining again under
+/// the same ID, keeps the machine; once it fails again it no longer does,
+/// and the machine stops.
+#[test]
+fn stopping_the_unused_machine_keeps_a_run_that_joined_again() {
+    use dagq::application::podman_machine::stop_unused;
+    // The fake podman's children and the host-wide lock have no limit
+    // of their own.
+    let _waiting = common::test();
+    let host = Host::new();
+    let (_fixture, repo, db) = crate::runtime_support::fixture();
+    let run = running_run(&db, &repo);
+    let machine = host.machine(QUEUE_A);
+    let owner = LeaseOwner::Run {
+        db: db.clone(),
+        run: run.clone(),
+    };
+    ensure(&machine.machine(), &run, &owner).unwrap();
+    set_run(&db, &run, "failed", "in_progress");
+    // Resumed before the watch acts on its failure.
+    set_run(&db, &run, "running", "in_progress");
+    ensure(&machine.machine(), &run, &owner).unwrap();
+    assert!(!stop_unused(&machine.machine()).unwrap());
+    assert!(host.root.join("machine/users").join(&run).exists());
+    set_run(&db, &run, "failed", "in_progress");
+    assert!(stop_unused(&machine.machine()).unwrap());
+    assert_eq!(
+        fs::read_to_string(host.state.join("machine")).unwrap(),
+        "stopped\n"
+    );
 }
 
 /// The real dagq machine with the real `podman` on `PATH`: it is created
