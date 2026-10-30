@@ -35,6 +35,8 @@ related:
 - 制御側は worker の turn と verification のどちらの container にも `--rm` を付ける（[run_container.rs の hardened](../../src/domain/run_container.rs)）。
   verification はコマンドごとに 1 つの container で、主の process は `dagq relay verify`、検証のコマンドはその子の `sh -c`、rustc などは孫になる（`verification_command`）。
 - `dagq relay verify` の exit code は子の `sh -c` の exit code で、signal で死んだときだけ 128＋signal になる（[container_turn.rs の run_verification](../../src/infrastructure/container_turn.rs)）。
+  例外は子が自分で 125 で終わったときで、制御側が podman の起動の失敗と取り違えないよう 1 で終わり、元の 125 は stderr に書く（[run_container.rs の verification_exit](../../src/domain/run_container.rs)）。
+  付け替えるのは 125 だけなので、signal の 128＋signal や親の失敗の code はそのまま運ばれる。
   孫が OOM で殺されても、cargo のような親が自分の失敗の code（例: 101）で終われば、container の exit code に OOM の跡は残らない。
 
 ## (1) State.OOMKilled の決まる箇所と時点と、--rm の削除との順序
