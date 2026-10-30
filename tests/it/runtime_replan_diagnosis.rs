@@ -482,7 +482,74 @@ fn a_diagnosis_that_never_gives_a_verdict_asks_a_person_after_its_attempts() {
     assert_eq!(ask.reason_category, AskReason::RecoveryFailed);
     assert!(
         ask.question
-            .contains("the diagnosis job did not give a verdict"),
+            .contains("the diagnosis jobs failed: none started"),
+        "{}",
+        ask.question
+    );
+}
+
+/// Acceptance (an apply that fails): a verdict whose apply ends in an
+/// error (here the queue's write of the ask the verdict asks for fails,
+/// while the events can be written) is recorded as a failed job with its
+/// verdict, not discarded, and once the failures reach the limit a person
+/// is asked, told that the verdicts could not be applied, instead of a job
+/// started again.
+#[test]
+fn a_verdict_whose_apply_keeps_failing_asks_a_person_after_its_attempts() {
+    let (_dir, repo, db) = fixture();
+    enable_replan(&repo, "non_pass_reviews = 1\n");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_verdict_asks BEFORE INSERT ON asks
+             WHEN NEW.asked_by = 'replan-diagnosis' AND NEW.reason_category = 'scope'
+             BEGIN SELECT RAISE(ABORT, 'ask write failed'); END",
+        )
+        .unwrap();
+    let asking = diagnosis("ask", &["oversized_unit"], "high");
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[asking_concern()]).with_triages(&[
+        asking.clone(),
+        asking.clone(),
+        asking.clone(),
+        asking,
+    ]);
+    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(reviewer.triage_prompts().len(), 3, "no job past the limit");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let started = payloads(&detail, "replan_diagnosis_started");
+    let failed = payloads(&detail, "replan_diagnosis_failed");
+    assert_eq!((started.len(), failed.len()), (3, 3), "{failed:?}");
+    for (start, failure) in started.iter().zip(&failed) {
+        assert_eq!(failure["started_generation"], start["generation"]);
+        assert_eq!(failure["verdict"]["choice"], "ask", "{failure}");
+        assert!(
+            failure["error"]
+                .as_str()
+                .unwrap()
+                .contains("ask write failed"),
+            "{failure}"
+        );
+    }
+    assert!(
+        payloads(&detail, "replan_diagnosed")
+            .iter()
+            .all(|d| d["outcome"] != "discarded"),
+        "no verdict discarded"
+    );
+    assert!(queue.running_diagnosis_owners().unwrap().is_empty());
+    let ask = queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.asked_by == replan_detect::DIAGNOSIS_ASKER)
+        .expect("the diagnosis's ask");
+    assert_eq!(ask.reason_category, AskReason::RecoveryFailed);
+    assert!(
+        ask.question
+            .contains("job 3 gave a verdict (ask) that could not be applied"),
         "{}",
         ask.question
     );
@@ -922,6 +989,125 @@ fn a_diagnosis_job_that_does_not_start_ends_failed_and_the_next_attempt_diagnose
     assert_eq!(diagnosed[0]["started_generation"], started[1]["generation"]);
     assert!(queue.running_diagnosis_owners().unwrap().is_empty());
     assert_eq!(operation(&db).status, ReplanStatus::Continuing);
+}
+
+/// Acceptance (one settlement of one verdict, on the supervisor's path): a
+/// park the queue refuses at the lineage's limit turns into an ask written
+/// under the job's generation, as the move was. Here, once the verdict is
+/// decided on (a park), the lineage reaches its limit and another
+/// supervisor records the failure of the same verdict, claiming the
+/// operation again: the park and then its ask are refused, the verdict is
+/// discarded and no ask opens, the failure counts once, and the next job
+/// goes on from there.
+#[test]
+fn a_refused_parks_ask_after_another_supervisors_failure_of_its_verdict_opens_none() {
+    let (_dir, repo, db) = fixture();
+    enable_replan(&repo, "non_pass_reviews = 1\nmax_auto_parks = 1\n");
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[asking_concern()]).with_triages(&[
+        diagnosis("replan", &["oversized_unit"], "high"),
+        diagnosis("continue", &["local_defect"], "high"),
+    ]);
+    let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let at_decision = db.clone();
+    let mut options = supervise_options(4, true);
+    options.pauses = Some(runtime::PausesPort(Arc::new(move |at, run| {
+        if at != runtime::PausePoint::VerdictDecided || reached.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let mut queue = SqliteQueue::open(&at_decision).unwrap();
+        let open = queue.replan_operations(false).unwrap();
+        assert_eq!(open.len(), 1, "{open:?}");
+        let op = &open[0];
+        assert_eq!(op.status, ReplanStatus::Diagnosing, "{op:?}");
+        // An earlier park of the lineage without a person ended meanwhile.
+        let conn = Connection::open(&at_decision).unwrap();
+        conn.busy_timeout(crate::common::STEP_LIMIT).unwrap();
+        conn.execute(
+            "INSERT INTO replan_operations(task_id, run_id, goal_id, origin, status, reason,
+                   conditions, task_version, goal_acceptance_version, diagnosis, requested_by,
+                   requested_by_id, created_at, updated_at, closed_at)
+                 SELECT task_id, run_id, goal_id, origin, 'withdrawn', 'an earlier park',
+                   conditions, task_version, goal_acceptance_version,
+                   '{\"evidence\":[],\"choice\":\"replan\",\"decided_by\":\"runtime\"}',
+                   requested_by, requested_by_id, created_at, updated_at, updated_at
+                 FROM replan_operations WHERE id=?1",
+            [op.id.as_i64()],
+        )
+        .unwrap();
+        // Another supervisor fails the same verdict under the job's
+        // generation.
+        queue
+            .fail_replan_diagnosis(
+                (op.id, op.generation),
+                "the apply of its diagnosis's verdict failed",
+                run.unwrap(),
+                json!({"operation_id": op.id, "attempt": 1,
+                       "started_generation": op.generation,
+                       "verdict": {"choice": "replan"},
+                       "error": "the verdict could not be applied: another supervisor's"}),
+            )
+            .unwrap();
+    })));
+    let outcome = supervise_reviewed_owned_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert!(
+        !queue
+            .asks(Default::default())
+            .unwrap()
+            .iter()
+            .any(|ask| ask.asked_by == replan_detect::DIAGNOSIS_ASKER),
+        "the refused park's ask opened"
+    );
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let started = payloads(&detail, "replan_diagnosis_started");
+    let failed = payloads(&detail, "replan_diagnosis_failed");
+    assert_eq!((started.len(), failed.len()), (2, 1), "{failed:?}");
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("another supervisor's"),
+        "{}",
+        failed[0]
+    );
+    let diagnosed = payloads(&detail, "replan_diagnosed");
+    let outcomes: Vec<(&Value, &Value)> = diagnosed
+        .iter()
+        .map(|d| (&d["attempt"], &d["outcome"]))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (&json!(1), &json!("discarded")),
+            (&json!(2), &json!("continue"))
+        ],
+        "{diagnosed:?}"
+    );
+    // The refused park went on to the ask at the lineage's limit, which
+    // the queue refused under the job's generation.
+    assert_eq!(diagnosed[0]["why"], "park_limit", "{}", diagnosed[0]);
+    assert!(
+        diagnosed[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("generation"),
+        "{}",
+        diagnosed[0]
+    );
+    assert_eq!(reviewer.triage_prompts().len(), 2);
+    let op = queue
+        .replan_operations(true)
+        .unwrap()
+        .into_iter()
+        .find(|op| op.status != ReplanStatus::Withdrawn)
+        .unwrap();
+    assert_eq!(
+        replan_detect::failed_jobs(&queue.task_events(TaskId::new(1)).unwrap(), op.id),
+        1
+    );
+    assert_eq!(op.status, ReplanStatus::Continuing);
 }
 
 fn common_ok(db: &Path, args: &[&str]) -> Value {

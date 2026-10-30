@@ -1347,6 +1347,18 @@ pub trait RunTransitions {
         crate::domain::AskOutcome,
         crate::domain::task_replan::ReplanOperation,
     )>;
+    /// Record `payload` as the `replan_diagnosis_failed` of the apply of a
+    /// diagnosis job's verdict on operation `op` (read under the job's
+    /// generation) on `run`, the operation claimed again for `reason`, in
+    /// one transaction: refused, writing nothing, once a move or an ask of
+    /// the verdict, or any other claim, moved the operation on.
+    fn fail_replan_diagnosis(
+        &mut self,
+        op: (crate::domain::ReplanId, i64),
+        reason: &str,
+        run: &RunId,
+        payload: serde_json::Value,
+    ) -> Result<crate::domain::task_replan::ReplanOperation>;
     /// The supervisors that own a diagnosis job that runs now, queue-wide:
     /// each one's latest start that no end tied to it followed, with the
     /// heartbeat of its registration.

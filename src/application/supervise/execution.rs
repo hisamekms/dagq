@@ -438,6 +438,9 @@ pub enum PausePoint {
     /// A landing recheck that found a run no longer landing, before the
     /// supervisor records the finding and parks the run.
     RecheckFailure,
+    /// A diagnosis job's verdict decided on, before its move or ask is
+    /// written: another supervisor may settle the same verdict meanwhile.
+    VerdictDecided,
     /// The restore of a container run's work handed to its executor (the
     /// request written, the clone made again), before the restore's lease
     /// is given back for the resume.
@@ -1336,6 +1339,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         replan_error: None,
         replan_seen: (None, HashMap::new()),
         replan_diagnosis: None,
+        replan_unrecorded: Vec::new(),
         finished: Vec::new(),
         errors: Vec::new(),
         last_turns: None,
@@ -1616,6 +1620,9 @@ struct Supervisor<'a> {
     ),
     /// The diagnosis job running now (one at a time, queue-wide).
     replan_diagnosis: Option<Box<replan_diagnosis::DiagnosisJob>>,
+    /// The records of diagnosis jobs' ends that could not be written,
+    /// written again at each pass.
+    replan_unrecorded: Vec<replan_diagnosis::UnrecordedRecord>,
     /// The runs that came to rest in this process's slots (a step ended
     /// them in a status the loop no longer drives); the result's `runs`.
     finished: Vec<TaskRun>,

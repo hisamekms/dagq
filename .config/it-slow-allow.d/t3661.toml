@@ -1,0 +1,14 @@
+# The items of task 3661 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 9.7s in a stress run: one review and three diagnosis jobs whose verdict's apply fails, then the ask
+[[test]]
+name = "runtime_replan_diagnosis::a_verdict_whose_apply_keeps_failing_asks_a_person_after_its_attempts"
+reason = "B 境界（守る境界）: verdict の適用が SQLite の queue の書き込みの誤りで終わるたびに replan_diagnosis_failed が記録され、supervise のループが試行の上限の後に診断 job を始めず人への ask に進むことを、job のプロセスと SQLite の記録の配線で確かめる（判断は domain::replan_detect の unit test）"
+task = 3661
+
+# 9.5s in a stress run: one review and two diagnosis jobs, the supervisor paused once at the first verdict's decision
+[[test]]
+name = "runtime_replan_diagnosis::a_refused_parks_ask_after_another_supervisors_failure_of_its_verdict_opens_none"
+reason = "B 境界（守る境界）: supervisor の verdict の適用の実経路で、Park の判断の後に別 supervisor が SQLite の queue に同じ verdict の失敗を確定すると、拒まれた移動から切り替える ask も job の世代で queue に拒まれて開かず、次の診断 job に進むことを、supervisor の配線と SQLite の transaction で確かめる（ask の世代の判断は domain::replan_detect の unit test）"
+task = 3661

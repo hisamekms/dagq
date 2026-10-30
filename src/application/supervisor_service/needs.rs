@@ -380,6 +380,7 @@ const OTHERS: &[(C, &[&str])] = &[
             "detect_replan",
             "ask_replan_diagnosis",
             "start_replan_diagnosis",
+            "fail_replan_diagnosis",
         ],
     ),
     (

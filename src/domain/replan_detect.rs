@@ -512,6 +512,249 @@ pub fn auto_parks(lineage: &[ReplanOperation]) -> usize {
 /// How many diagnosis jobs one operation gets; past it a person decides.
 pub const MAX_DIAGNOSIS_ATTEMPTS: usize = 3;
 
+/// The failures of the diagnosis jobs of operation `op`, of `events` (its
+/// task's), in order: of each job's start, the first
+/// `replan_diagnosis_failed` of `op` that names it (by the generation its
+/// start claimed, or, an older binary's, by its attempt). A later one of
+/// the same start is the same failure: two supervisors that applied the
+/// same verdict a hold kept and failed both record one, and the job
+/// failed once. A record that names neither is a failure of its own.
+fn job_failures(events: &[RunEvent], op: super::ReplanId) -> Vec<&RunEvent> {
+    let mut seen: Vec<(Option<i64>, Option<usize>)> = Vec::new();
+    events
+        .iter()
+        .filter(|e| e.kind == EventKind::ReplanDiagnosisFailed && PlanningPayload::of(e).is_of(op))
+        .filter(|e| {
+            let read = PlanningPayload::of(e);
+            let start = match (read.started_generation, read.attempt) {
+                (Some(generation), _) => (Some(generation), None),
+                (None, Some(attempt)) => (None, Some(attempt)),
+                (None, None) => return true,
+            };
+            if seen.contains(&start) {
+                false
+            } else {
+                seen.push(start);
+                true
+            }
+        })
+        .collect()
+}
+
+/// How many diagnosis jobs of operation `op` failed, of `events` (its
+/// task's): each job whose start a `replan_diagnosis_failed` of it names
+/// ([`job_failures`], once however many name it), whether the job did not
+/// start, gave no verdict, or gave one whose apply ended in an error (that
+/// record carries the verdict). A verdict applied, asked about, kept for a
+/// hold or discarded because the run moved on (`replan_diagnosed`) is no
+/// failure, whatever failed after the queue settled it
+/// ([`MoveResult::settles`]), nor is a start whose owner went without
+/// recording its end.
+pub fn failed_jobs(events: &[RunEvent], op: super::ReplanId) -> usize {
+    job_failures(events, op).len()
+}
+
+/// What a person reads of the failed diagnosis jobs of operation `op`, of
+/// `events` (its task's): each failed job of it in order ([`job_failures`]),
+/// its attempt, the verdict's choice when the job gave one whose apply
+/// failed, and its error.
+pub fn failures_said(events: &[RunEvent], op: super::ReplanId) -> String {
+    let failures: Vec<String> = job_failures(events, op)
+        .into_iter()
+        .map(|e| {
+            let read = PlanningPayload::of(e);
+            let attempt = read
+                .attempt
+                .map_or_else(|| "?".to_owned(), |n| n.to_string());
+            let error = e.payload["error"].as_str().unwrap_or("no error recorded");
+            match e.payload.get("verdict").and_then(|v| v["choice"].as_str()) {
+                Some(choice) => {
+                    format!(
+                        "job {attempt} gave a verdict ({choice}) that could not be applied: {error}"
+                    )
+                }
+                None => format!("job {attempt}: {error}"),
+            }
+        })
+        .collect();
+    if failures.is_empty() {
+        "No diagnosis job gave a verdict.".to_owned()
+    } else {
+        format!("The diagnosis jobs failed: {}.", failures.join("; "))
+    }
+}
+
+/// What an operation due for a diagnosis does next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosisStep {
+    /// Its next job starts.
+    Start,
+    /// Its jobs failed [`MAX_DIAGNOSIS_ATTEMPTS`] times: a person decides
+    /// in the diagnosis's `decide` ask, and no job starts.
+    Ask,
+    /// A failure of its last job is not recorded yet ([`FailedApply::Kept`]):
+    /// nothing starts until it is, so that the limit counts it.
+    Wait,
+}
+
+/// The step of an operation after `failed` of its jobs failed
+/// ([`failed_jobs`]), `unrecorded` whether this supervisor still keeps a
+/// failure of one that it could not record.
+pub const fn diagnosis_step(failed: usize, unrecorded: bool) -> DiagnosisStep {
+    if unrecorded {
+        DiagnosisStep::Wait
+    } else if failed >= MAX_DIAGNOSIS_ATTEMPTS {
+        DiagnosisStep::Ask
+    } else {
+        DiagnosisStep::Start
+    }
+}
+
+/// What becomes of a diagnosis job whose verdict's apply ended in an error
+/// (its `replan_diagnosis_failed`, carrying the verdict and the error, is
+/// what ends the job's start for the queue-wide count). The record of an
+/// operation still there is written with a claim of the operation under
+/// the job's generation, the guard every move and ask of the verdict
+/// passes, so that the apply of the verdict by one supervisor and the
+/// failure of it by another are not both settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailedApply {
+    /// Recorded: one failed job of the operation ([`failed_jobs`]).
+    Counted,
+    /// Recorded, its operation gone: it only ends the job's start, and
+    /// nothing is diagnosed after it.
+    Ended,
+    /// Refused by the queue: the operation moved on before it (another
+    /// supervisor applied the verdict a hold kept, or claimed the
+    /// operation). Nothing is counted. A verdict a hold kept is left as the
+    /// queue has it; the supervisor's own job's verdict is recorded as
+    /// discarded, which ends its start.
+    Superseded,
+    /// Refused by the queue because the task is held (a hold that came
+    /// before the record): nothing is counted, and the verdict is kept for
+    /// the release with what its job read, as any verdict that reaches a
+    /// held task is (ADR-t1879-1 decision 6), its premise checked again
+    /// then. A verdict a hold kept stays kept as it is; the supervisor's
+    /// own job's is kept by a `replan_diagnosed` of [`HELD_OUTCOME`], which
+    /// ends its start. The same on a write again of a record kept
+    /// unwritten.
+    Held,
+    /// Not recorded, its operation still there: the supervisor keeps the
+    /// record and writes it at its next passes, no job of the operation
+    /// starting meanwhile ([`DiagnosisStep::Wait`]). A supervisor that goes
+    /// before it is written loses it, as a job of a supervisor gone does.
+    Kept,
+    /// Not recorded, its operation gone: dropped with a warning, as nothing
+    /// is diagnosed after it; this supervisor's next start ends its start.
+    Dropped,
+}
+
+/// What follows a park of a job's verdict that the queue refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkRefused {
+    /// The lineage's parks without a person are used up: a person is
+    /// asked, the ask claiming the operation under `generation`.
+    Ask { generation: i64 },
+    /// The verdict is discarded, and the operation diagnosed again.
+    Discard,
+}
+
+/// What follows a refused park of the verdict of the job that claimed its
+/// operation under `job_generation`, by the lineage's `parks` without a
+/// person and their `limit`. The ask claims the operation under the job's
+/// generation, as the move did, never under one read again after the
+/// refusal: a claim since (another supervisor's failure or apply of the
+/// same verdict) refuses the ask as it would have the move, so that the
+/// verdict is not settled twice.
+pub const fn after_park_refused(parks: usize, limit: usize, job_generation: i64) -> ParkRefused {
+    if parks >= limit {
+        ParkRefused::Ask {
+            generation: job_generation,
+        }
+    } else {
+        ParkRefused::Discard
+    }
+}
+
+/// What the move of a diagnosis's verdict (or a person's answer) came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveResult {
+    /// Its transaction committed: the operation moved. `followed` is
+    /// whether what follows the move (reading and closing the operation's
+    /// open diagnosis asks) went through too.
+    Committed { followed: bool },
+    /// The queue refused it (a premise that moved on, a hold): the verdict
+    /// is discarded or kept.
+    Refused,
+    /// A read or a write failed before it committed.
+    Failed,
+}
+
+impl MoveResult {
+    /// Whether the verdict is settled by it (applied, or discarded or kept
+    /// on a refusal), so that its job did not fail: what fails after a
+    /// move that committed does not undo the move, and is no failed job.
+    pub const fn settles(self) -> bool {
+        !matches!(self, Self::Failed)
+    }
+}
+
+/// What follows a diagnosis job's verdict the supervisor took up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictEnd {
+    /// The queue settled it (applied, asked about, kept for a hold or
+    /// discarded) and its `replan_diagnosed` is written: no failure.
+    Recorded,
+    /// The queue settled it but its `replan_diagnosed` could not be
+    /// written: only the record is kept and written again at the next
+    /// passes. Nothing is applied again and no failed job is counted.
+    RecordKept,
+    /// Its apply failed before the queue settled it (a read or a write
+    /// that failed): a failed job ([`failed_apply`]).
+    Failed,
+}
+
+/// What follows a verdict, by whether the queue `settled` it and whether
+/// its `replan_diagnosed` was then `recorded`.
+pub const fn verdict_end(settled: bool, recorded: bool) -> VerdictEnd {
+    match (settled, recorded) {
+        (false, _) => VerdictEnd::Failed,
+        (true, true) => VerdictEnd::Recorded,
+        (true, false) => VerdictEnd::RecordKept,
+    }
+}
+
+/// How the write of a failed job's `replan_diagnosis_failed` went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureWrite {
+    Written,
+    /// The queue refused it ([`crate::domain::DomainError`]): the
+    /// operation moved on.
+    Refused,
+    /// The queue refused it for a hold of the task, which the refusal
+    /// names (not a hold read after it, which may be released since).
+    Held,
+    /// A write that failed.
+    Failed,
+}
+
+/// What becomes of a job whose verdict's apply failed, by whether its
+/// operation was found (`replan operation ... is gone` is the one error
+/// for which it is not) and how the write of its `replan_diagnosis_failed`
+/// went.
+pub const fn failed_apply(operation_found: bool, write: FailureWrite) -> FailedApply {
+    match (operation_found, write) {
+        (true, FailureWrite::Written) => FailedApply::Counted,
+        (true, FailureWrite::Refused) => FailedApply::Superseded,
+        (true, FailureWrite::Held) => FailedApply::Held,
+        (true, FailureWrite::Failed) => FailedApply::Kept,
+        (false, FailureWrite::Written) => FailedApply::Ended,
+        (false, FailureWrite::Refused | FailureWrite::Held | FailureWrite::Failed) => {
+            FailedApply::Dropped
+        }
+    }
+}
+
 /// The asker of the `decide` ask a diagnosis escalates to.
 pub const DIAGNOSIS_ASKER: &str = "replan-diagnosis";
 
@@ -626,7 +869,9 @@ impl AskWhy {
             Self::ManualRequest => {
                 "a person asked for this replanning, and the diagnosis would go on instead"
             }
-            Self::JobFailed => "the diagnosis job did not give a verdict",
+            Self::JobFailed => {
+                "the diagnosis jobs failed: none started, gave a verdict or had its verdict applied"
+            }
             Self::NoRunDir => "the run has no run directory, so no diagnosis job starts for it",
         }
     }
@@ -842,10 +1087,11 @@ pub const HELD_OUTCOME: &str = "held";
 pub const KEPT_ID: &str = "kept_id";
 
 /// The verdict a hold kept for operation `op`, still `diagnosing` under
-/// `generation`, that is neither applied nor discarded yet: of `events`
-/// (its task's), the op's last [`HELD_OUTCOME`] record under that
-/// generation, unless a later `replan_diagnosed` of the op names it in
-/// [`KEPT_ID`]. A claim since (a job or an ask) moved the generation on.
+/// `generation`, that is neither applied, discarded nor failed yet: of
+/// `events` (its task's), the op's last [`HELD_OUTCOME`] record under that
+/// generation, unless a later `replan_diagnosed` of the op, or a
+/// `replan_diagnosis_failed` of its apply, names it in [`KEPT_ID`]. A
+/// claim since (a job or an ask) moved the generation on.
 pub fn kept_verdict(
     events: &[RunEvent],
     op: super::ReplanId,
@@ -857,8 +1103,10 @@ pub fn kept_verdict(
         e.payload["outcome"] == HELD_OUTCOME
             && PlanningPayload::of(e).generation == Some(generation)
     })?;
-    let settled = events.iter().filter(diagnosed).any(|e| {
-        e.id > kept.id
+    let settled = events.iter().any(|e| {
+        (diagnosed(&e)
+            || (e.kind == EventKind::ReplanDiagnosisFailed && PlanningPayload::of(e).is_of(op)))
+            && e.id > kept.id
             && e.payload
                 .get(KEPT_ID)
                 .and_then(|id| serde_json::from_value::<EventId>(id.clone()).ok())
@@ -2215,5 +2463,329 @@ mod tests {
             .map(|job| job.operation.as_i64())
             .collect();
         assert_eq!(jobs, [1, 3]);
+    }
+
+    /// A job whose verdict's apply failed is a failed job of its operation
+    /// like one that gave no verdict or did not start; a verdict applied,
+    /// asked about, kept or discarded is none, nor is another operation's
+    /// failure or a start without its end.
+    #[test]
+    fn a_failed_apply_counts_as_a_failed_job_and_an_applied_verdict_does_not() {
+        let op = ReplanId::new(3);
+        let verdict = json!({"choice": "ask", "causes": [], "confidence": "high",
+                             "reason": "r", "progress": "p"});
+        let started = |id: i64, generation: i64| {
+            event(
+                id,
+                "r1",
+                "replan_diagnosis_started",
+                json!({"operation_id": 3, "attempt": generation, "generation": generation,
+                       "supervisor_pid": 10}),
+            )
+        };
+        let mut events = vec![
+            started(1, 1),
+            event(
+                2,
+                "r1",
+                "replan_diagnosis_failed",
+                json!({"operation_id": 3, "attempt": 1, "started_generation": 1,
+                       "error": "the diagnosis job did not give a verdict"}),
+            ),
+            started(3, 2),
+            event(
+                4,
+                "r1",
+                "replan_diagnosed",
+                json!({"operation_id": 3, "attempt": 2, "started_generation": 2,
+                       "verdict": verdict, "outcome": "discarded", "reason": "moved"}),
+            ),
+            started(5, 3),
+            event(
+                6,
+                "r1",
+                "replan_diagnosed",
+                json!({"operation_id": 3, "attempt": 3, "started_generation": 3,
+                       "verdict": verdict, "outcome": HELD_OUTCOME}),
+            ),
+            event(
+                7,
+                "r1",
+                "replan_diagnosis_failed",
+                json!({"operation_id": 4, "attempt": 1, "started_generation": 1,
+                       "error": "another operation's"}),
+            ),
+            started(8, 4),
+        ];
+        assert_eq!(failed_jobs(&events, op), 1);
+        // The apply of attempt 4's verdict failed: one more failed job,
+        // whose record ends its start like a job's own failure.
+        let failed_apply = event(
+            9,
+            "r1",
+            "replan_diagnosis_failed",
+            json!({"operation_id": 3, "attempt": 4, "started_generation": 4,
+                   "verdict": verdict, "error": "the ask could not be written"}),
+        );
+        let start = PlanningPayload::of(&events[7]);
+        match JobRecord::of(EventKind::ReplanDiagnosisFailed, &failed_apply.payload) {
+            Some(JobRecord::Ended(end)) => assert!(end.ends(&start)),
+            other => panic!("{other:?}"),
+        }
+        events.push(failed_apply);
+        assert_eq!(failed_jobs(&events, op), 2);
+        assert_eq!(failed_jobs(&events, ReplanId::new(4)), 1);
+    }
+
+    /// The failures a person reads name each job and its error, and say of
+    /// a job whose verdict's apply failed that it gave one.
+    #[test]
+    fn the_failures_said_name_a_verdict_whose_apply_failed() {
+        let op = ReplanId::new(3);
+        assert_eq!(failures_said(&[], op), "No diagnosis job gave a verdict.");
+        let events = [
+            event(
+                1,
+                "r1",
+                "replan_diagnosis_failed",
+                json!({"operation_id": 3, "attempt": 1, "error": "no verdict printed"}),
+            ),
+            event(
+                2,
+                "r1",
+                "replan_diagnosis_failed",
+                json!({"operation_id": 3, "attempt": 2, "verdict": {"choice": "ask"},
+                       "error": "the verdict could not be applied: disk I/O error"}),
+            ),
+            event(
+                3,
+                "r1",
+                "replan_diagnosis_failed",
+                json!({"operation_id": 4, "attempt": 1, "error": "another operation's"}),
+            ),
+        ];
+        assert_eq!(
+            failures_said(&events, op),
+            "The diagnosis jobs failed: job 1: no verdict printed; job 2 gave a verdict (ask) \
+             that could not be applied: the verdict could not be applied: disk I/O error."
+        );
+    }
+
+    /// Below the limit the next job starts; once the failed jobs reach
+    /// it, a person is asked and none starts; a failure kept unrecorded
+    /// holds the operation whatever the count.
+    #[test]
+    fn the_failed_jobs_reaching_the_limit_ask_a_person_instead_of_a_job() {
+        for failed in 0..MAX_DIAGNOSIS_ATTEMPTS {
+            assert_eq!(diagnosis_step(failed, false), DiagnosisStep::Start);
+        }
+        for failed in [MAX_DIAGNOSIS_ATTEMPTS, MAX_DIAGNOSIS_ATTEMPTS + 1] {
+            assert_eq!(diagnosis_step(failed, false), DiagnosisStep::Ask);
+        }
+        for failed in [0, MAX_DIAGNOSIS_ATTEMPTS] {
+            assert_eq!(diagnosis_step(failed, true), DiagnosisStep::Wait);
+        }
+    }
+
+    /// A verdict the queue settled fails nothing, its record kept to be
+    /// written again when it could not be; only an apply that failed
+    /// before the queue settled it is a failed job. A kept record is a
+    /// `replan_diagnosed`, which no count of failed jobs reads.
+    #[test]
+    fn a_settled_verdict_whose_record_fails_is_no_failed_job() {
+        assert_eq!(verdict_end(true, true), VerdictEnd::Recorded);
+        assert_eq!(verdict_end(true, false), VerdictEnd::RecordKept);
+        assert_eq!(verdict_end(false, true), VerdictEnd::Failed);
+        assert_eq!(verdict_end(false, false), VerdictEnd::Failed);
+        let applied = event(
+            1,
+            "r1",
+            "replan_diagnosed",
+            json!({"operation_id": 3, "attempt": 1, "started_generation": 1,
+                   "verdict": {"choice": "continue"}, "outcome": "continue"}),
+        );
+        assert_eq!(failed_jobs(&[applied], ReplanId::new(3)), 0);
+    }
+
+    /// A verdict kept for a hold whose apply failed after the release is
+    /// settled by the failure's record naming it, so that it is applied no
+    /// more and counts once; a failure that names another kept verdict, or
+    /// none, leaves it due.
+    #[test]
+    fn a_kept_verdict_whose_apply_failed_is_settled_by_its_failure() {
+        let op = ReplanId::new(3);
+        let kept = event(
+            5,
+            "r1",
+            "replan_diagnosed",
+            json!({"operation_id": 3, "outcome": HELD_OUTCOME, "generation": 2,
+                   "started_generation": 2, "verdict": {"choice": "ask"}}),
+        );
+        let failed = |id: i64, names: Option<i64>| {
+            let mut payload = json!({"operation_id": 3, "attempt": 2, "started_generation": 2,
+                                     "verdict": {"choice": "ask"}, "error": "ask write failed"});
+            if let Some(names) = names {
+                payload[KEPT_ID] = json!(names);
+            }
+            event(id, "r1", "replan_diagnosis_failed", payload)
+        };
+        let due = [kept.clone(), failed(6, None), failed(7, Some(4))];
+        assert_eq!(
+            kept_verdict(&due, op, 2).map(|e| e.id),
+            Some(EventId::new(5))
+        );
+        let settled = [kept, failed(8, Some(5))];
+        assert_eq!(kept_verdict(&settled, op, 2), None);
+        assert_eq!(failed_jobs(&settled, op), 1);
+    }
+
+    /// Two supervisors that applied the same verdict a hold kept, and
+    /// failed both, record two failures of the same start: the job failed
+    /// once, so the limit is reached only by as many jobs, and the person
+    /// reads it once. Failures of other starts each count.
+    #[test]
+    fn two_failures_of_one_kept_verdict_count_as_one_failed_job() {
+        let op = ReplanId::new(3);
+        let failed = |id: i64, generation: i64| {
+            event(
+                id,
+                "r1",
+                "replan_diagnosis_failed",
+                json!({"operation_id": 3, "attempt": generation, "started_generation": generation,
+                       "verdict": {"choice": "ask"}, "kept_id": 4,
+                       "error": format!("ask write failed {id}")}),
+            )
+        };
+        let raced = [failed(5, 2), failed(6, 2)];
+        assert_eq!(failed_jobs(&raced, op), 1);
+        assert_eq!(
+            diagnosis_step(failed_jobs(&raced, op), false),
+            DiagnosisStep::Start
+        );
+        assert_eq!(
+            failures_said(&raced, op),
+            "The diagnosis jobs failed: job 2 gave a verdict (ask) that could not be applied: \
+             ask write failed 5."
+        );
+        let older = |id: i64, attempt: i64| {
+            event(
+                id,
+                "r1",
+                "replan_diagnosis_failed",
+                json!({"operation_id": 3, "attempt": attempt, "error": "no verdict"}),
+            )
+        };
+        // Attempt 1 of an older binary twice, the start of generation 3,
+        // and the raced start of generation 2: three jobs.
+        let mut events = vec![older(1, 1), older(2, 1), failed(3, 3)];
+        events.extend(raced);
+        assert_eq!(failed_jobs(&events, op), 3);
+        assert_eq!(
+            diagnosis_step(failed_jobs(&events, op), false),
+            DiagnosisStep::Ask
+        );
+    }
+
+    /// A move that committed settles the verdict even when reading or
+    /// closing the operation's asks failed after it: no failed job is
+    /// recorded for it, only one that failed before it committed. A
+    /// refusal settles it too (discarded or kept).
+    #[test]
+    fn a_move_that_committed_settles_its_verdict_whatever_follows_it() {
+        assert!(MoveResult::Committed { followed: true }.settles());
+        assert!(MoveResult::Committed { followed: false }.settles());
+        assert!(MoveResult::Refused.settles());
+        assert!(!MoveResult::Failed.settles());
+        let settled = MoveResult::Committed { followed: false }.settles();
+        assert_eq!(verdict_end(settled, true), VerdictEnd::Recorded);
+        assert_eq!(verdict_end(settled, false), VerdictEnd::RecordKept);
+        assert_eq!(
+            verdict_end(MoveResult::Failed.settles(), true),
+            VerdictEnd::Failed
+        );
+    }
+
+    /// A failed apply recorded is counted, or only ends the job when its
+    /// operation is gone; one not recorded is kept to be written again,
+    /// or dropped when its operation is gone.
+    #[test]
+    fn a_failed_apply_is_counted_ended_kept_or_dropped() {
+        use FailureWrite::{Failed, Refused, Written};
+        assert_eq!(failed_apply(true, Written), FailedApply::Counted);
+        assert_eq!(failed_apply(false, Written), FailedApply::Ended);
+        assert_eq!(failed_apply(true, Failed), FailedApply::Kept);
+        assert_eq!(failed_apply(false, Failed), FailedApply::Dropped);
+        assert_eq!(failed_apply(false, Refused), FailedApply::Dropped);
+        assert_eq!(
+            failed_apply(false, FailureWrite::Held),
+            FailedApply::Dropped
+        );
+    }
+
+    /// A failure refused because the task is held keeps the verdict for
+    /// the release instead of discarding it or counting it, on its first
+    /// write and on a write again of a record kept unwritten (the same
+    /// decision); one refused because the operation moved on is
+    /// superseded.
+    #[test]
+    fn a_failure_refused_for_a_hold_keeps_its_verdict() {
+        assert_eq!(failed_apply(true, FailureWrite::Held), FailedApply::Held);
+        assert_ne!(
+            failed_apply(true, FailureWrite::Held),
+            failed_apply(true, FailureWrite::Refused)
+        );
+        let kept = event(
+            1,
+            "r1",
+            "replan_diagnosed",
+            json!({"operation_id": 3, "attempt": 2, "started_generation": 2,
+                   "verdict": {"choice": "ask"}, "outcome": HELD_OUTCOME, "generation": 2}),
+        );
+        assert_eq!(
+            failed_jobs(std::slice::from_ref(&kept), ReplanId::new(3)),
+            0
+        );
+        assert_eq!(
+            kept_verdict(std::slice::from_ref(&kept), ReplanId::new(3), 2).map(|e| e.id),
+            Some(EventId::new(1))
+        );
+    }
+
+    /// A park refused once the lineage's parks are used up asks a person
+    /// under the job's generation, whatever the operation's generation
+    /// read again after the refusal: another supervisor's failure of the
+    /// same verdict that claimed it since refuses the ask too. Below the
+    /// limit the verdict is discarded.
+    #[test]
+    fn a_refused_park_asks_under_the_jobs_generation() {
+        assert_eq!(
+            after_park_refused(2, 2, 5),
+            ParkRefused::Ask { generation: 5 }
+        );
+        assert_eq!(
+            after_park_refused(3, 2, 5),
+            ParkRefused::Ask { generation: 5 }
+        );
+        assert_eq!(after_park_refused(1, 2, 5), ParkRefused::Discard);
+    }
+
+    /// A failure whose record the queue refused, the operation moved on
+    /// under another supervisor's apply of the same verdict (or a hold),
+    /// is no failed job: of an apply and a failure of one verdict, only
+    /// the first the queue took is settled.
+    #[test]
+    fn a_failure_refused_after_another_apply_is_superseded_and_not_counted() {
+        assert_eq!(
+            failed_apply(true, FailureWrite::Refused),
+            FailedApply::Superseded
+        );
+        let applied = event(
+            1,
+            "r1",
+            "replan_diagnosed",
+            json!({"operation_id": 3, "attempt": 2, "started_generation": 2,
+                   "verdict": {"choice": "ask"}, "outcome": "ask", "kept_id": 4}),
+        );
+        assert_eq!(failed_jobs(&[applied], ReplanId::new(3)), 0);
     }
 }

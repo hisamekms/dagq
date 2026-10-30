@@ -392,6 +392,20 @@ pub enum DomainError {
         status: RunStatus,
         task_status: TaskStatus,
     },
+    /// A move or an ask of a diagnosis's verdict whose premise no longer
+    /// holds (the run, its HEAD or the task moved on since the job read
+    /// them): the verdict is discarded and the operation diagnosed again.
+    ReplanPremiseStale {
+        operation: ReplanId,
+        why: String,
+    },
+    /// A claim, a move or an ask of a diagnosis while its task is held
+    /// (ADR-t1879-1 decision 6).
+    ReplanDiagnosisHeld {
+        operation: ReplanId,
+        task_id: TaskId,
+        hold: HoldId,
+    },
     /// A move of a replanning operation read under an older generation.
     ReplanGenerationStale {
         operation: ReplanId,
@@ -1055,6 +1069,18 @@ impl fmt::Display for DomainError {
                 "run {run_id} ({}) of a task {} is not the run its task waits on: only the latest run of an in_progress task that has not landed is replanned",
                 status.as_str(),
                 task_status.as_str()
+            ),
+            Self::ReplanPremiseStale { operation, why } => write!(
+                f,
+                "the diagnosis of replan operation {operation} no longer holds: {why}"
+            ),
+            Self::ReplanDiagnosisHeld {
+                operation,
+                task_id,
+                hold,
+            } => write!(
+                f,
+                "replan operation {operation}: task {task_id} is held (hold {hold}), so its diagnosis waits for the release"
             ),
             Self::ReplanGenerationStale {
                 operation,

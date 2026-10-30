@@ -341,6 +341,8 @@ pub fn service_error(error: &ServiceError) -> anyhow::Error {
         None => Refused {
             code: error.code,
             message: error.message.clone(),
+            rejected: error.rejected,
+            held: error.held.as_deref().copied(),
         }
         .into(),
     }
@@ -353,6 +355,12 @@ pub fn service_error(error: &ServiceError) -> anyhow::Error {
 pub struct Refused {
     pub code: crate::domain::queue_service::ServiceErrorCode,
     pub message: String,
+    /// The service's failure is the domain's rejection of the request
+    /// ([`crate::domain::queue_service::ServiceError::rejected`]).
+    pub rejected: bool,
+    /// The hold that refused it
+    /// ([`crate::domain::queue_service::ServiceError::held`]).
+    pub held: Option<crate::domain::task_hold::HoldGuard>,
 }
 
 impl std::fmt::Display for Refused {
@@ -383,6 +391,38 @@ impl Refused {
 pub fn too_large(error: &anyhow::Error) -> bool {
     let code = crate::domain::queue_service::ServiceErrorCode::ResponseTooLarge.as_str();
     format!("{error:#}").contains(&format!("({code})"))
+}
+
+/// Whether `error` is the domain's rejection of a request (a rule or a
+/// premise that does not hold), on the queue ([`crate::domain::DomainError`])
+/// or through the service ([`Refused::rejected`]), rather than a read or a
+/// write that failed.
+pub fn rejected(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.is::<crate::domain::DomainError>()
+            || cause
+                .downcast_ref::<Refused>()
+                .is_some_and(|refused| refused.rejected)
+    })
+}
+
+/// The open hold of a task that refused a request, when `error` is that
+/// refusal ([`crate::domain::DomainError::ReplanDiagnosisHeld`]), on the
+/// queue or through the service ([`Refused::held`]): read from the refusal
+/// itself, so that a hold released since does not make it read as another
+/// rejection.
+pub fn held_refusal(error: &anyhow::Error) -> Option<crate::domain::task_hold::HoldGuard> {
+    error.chain().find_map(|cause| match cause.downcast_ref() {
+        Some(crate::domain::DomainError::ReplanDiagnosisHeld { task_id, hold, .. }) => {
+            Some(crate::domain::task_hold::HoldGuard {
+                task: *task_id,
+                hold: *hold,
+            })
+        }
+        _ => cause
+            .downcast_ref::<Refused>()
+            .and_then(|refused| refused.held),
+    })
 }
 
 /// The kind of a use case's failure `error` the caller tells apart

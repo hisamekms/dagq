@@ -23,6 +23,7 @@ use super::plan_requests::read_request;
 use super::sqlite::{
     SqliteQueue, enum_col, event, json_col, read_task, record_queue_event_in, replan_guarding,
 };
+use crate::domain::DomainError;
 use crate::domain::event_kind::EventKind;
 use crate::domain::plan_request::{RequestRef, RequestStatus};
 use crate::domain::plan_review::PlanReviewAction;
@@ -335,6 +336,49 @@ impl SqliteQueue {
             claimed.task_id,
             Some(run),
             EventKind::ReplanDiagnosisStarted,
+            payload,
+        )?;
+        tx.commit()?;
+        Ok(claimed)
+    }
+
+    /// Record the failure of the apply of a diagnosis job's verdict on
+    /// operation `id`, read under `generation` (the job's), as its
+    /// `replan_diagnosis_failed` on `run` with `payload`, in one
+    /// transaction with a claim of the operation (`diagnosing` under a new
+    /// generation, for `reason`). Every move and ask of that verdict is
+    /// written under the same generation ([`move_in`]), so of a supervisor
+    /// that applies the verdict (a verdict a hold kept, which any
+    /// supervisor applies after the release) and another that records its
+    /// failure, the one that commits first wins: the other is refused
+    /// ([`DomainError`]) and writes nothing. A held task refuses it too,
+    /// and its verdict stays kept for the release.
+    pub fn fail_replan_diagnosis(
+        &mut self,
+        (id, generation): (ReplanId, i64),
+        reason: &str,
+        run: &RunId,
+        payload: serde_json::Value,
+    ) -> Result<ReplanOperation> {
+        let now = self.generators.clock.now();
+        let tx = self.write_tx("fail_replan_diagnosis", TransactionBehavior::Immediate)?;
+        let claimed = move_in(
+            &tx,
+            id,
+            generation,
+            &ReplanMove {
+                to: ReplanStatus::Diagnosing,
+                reason: reason.to_owned(),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+            now,
+        )?;
+        event(
+            &tx,
+            claimed.task_id,
+            Some(run),
+            EventKind::ReplanDiagnosisFailed,
             payload,
         )?;
         tx.commit()?;
@@ -698,12 +742,12 @@ pub(crate) fn lineage_in(conn: &Connection, task: TaskId) -> Result<Vec<ReplanOp
 /// answer until the release.
 fn check_not_held(conn: &Connection, op: &ReplanOperation) -> Result<()> {
     if let Some(hold) = super::task_holds::guard_of(conn, op.task_id)? {
-        anyhow::bail!(
-            "replan operation {}: task {} is held (hold {}), so its diagnosis waits for the release",
-            op.id,
-            op.task_id,
-            hold.hold
-        );
+        return Err(DomainError::ReplanDiagnosisHeld {
+            operation: op.id,
+            task_id: op.task_id,
+            hold: hold.hold,
+        }
+        .into());
     }
     Ok(())
 }
@@ -754,10 +798,10 @@ fn check_premise(
 ) -> Result<()> {
     check_not_held(conn, op)?;
     let stale = |why: String| {
-        anyhow::anyhow!(
-            "the diagnosis of replan operation {} no longer holds: {why}",
-            op.id
-        )
+        anyhow::Error::new(DomainError::ReplanPremiseStale {
+            operation: op.id,
+            why,
+        })
     };
     let task = read_task(conn, op.task_id)?;
     if task.status() != TaskStatus::InProgress {

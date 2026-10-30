@@ -659,6 +659,8 @@ fn respond(result: Result<Value>) -> ServiceResponse {
                     ServiceResponse::failure(ServiceErrorCode::Failed, format!("{error:#}"));
                 if let Some(failure) = &mut response.error {
                     failure.kind = super::supervisor_service::failure_kind(&error);
+                    failure.rejected = super::supervisor_service::rejected(&error);
+                    failure.held = super::supervisor_service::held_refusal(&error).map(Box::new);
                 }
                 response
             }
@@ -2608,6 +2610,57 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
+
+    /// The domain's rejection of a supervisor's request (a diagnosis's
+    /// premise that moved on, a hold, with the hold it names) reads as one
+    /// on the client after the service's answer went over the wire, as it
+    /// did on the queue; a write that failed does not.
+    #[test]
+    fn a_domain_rejection_reads_as_one_through_the_service() {
+        use super::super::supervisor_service::{held_refusal, rejected, service_error};
+        let through = |error: anyhow::Error| {
+            let line = serde_json::to_string(&respond(Err(error))).unwrap();
+            let answer: ServiceResponse = serde_json::from_str(&line).unwrap();
+            service_error(answer.error.as_ref().unwrap())
+        };
+        let stale = anyhow::Error::new(crate::domain::DomainError::ReplanPremiseStale {
+            operation: crate::domain::ReplanId::new(1),
+            why: "task 1 was edited".into(),
+        })
+        .context("move_replan");
+        assert!(rejected(&stale));
+        let read = through(stale);
+        assert!(rejected(&read), "{read:#}");
+        assert_eq!(held_refusal(&read), None);
+        assert!(
+            format!("{read:#}").contains("no longer holds: task 1 was edited"),
+            "{read:#}"
+        );
+        let hold = crate::domain::task_hold::HoldGuard {
+            task: crate::domain::TaskId::new(1),
+            hold: crate::domain::HoldId::new(2),
+        };
+        let held = anyhow::Error::new(crate::domain::DomainError::ReplanDiagnosisHeld {
+            operation: crate::domain::ReplanId::new(1),
+            task_id: hold.task,
+            hold: hold.hold,
+        })
+        .context("fail_replan_diagnosis");
+        assert_eq!(held_refusal(&held), Some(hold));
+        let read = through(held);
+        assert!(rejected(&read), "{read:#}");
+        assert_eq!(held_refusal(&read), Some(hold), "{read:#}");
+        let failed = through(anyhow!("database or disk is full").context("move_replan"));
+        assert!(!rejected(&failed), "{failed:#}");
+        // An answer without the field, an older service's, rejects nothing.
+        let older: ServiceResponse = serde_json::from_str(
+            r#"{"api_version":2,"min_api_version":1,"ok":false,"error":{"code":"failed","message":"m"}}"#,
+        )
+        .unwrap();
+        let older = service_error(older.error.as_ref().unwrap());
+        assert!(!rejected(&older));
+        assert_eq!(held_refusal(&older), None);
+    }
 
     #[test]
     fn a_stop_s_record_out_of_reach_or_failed_stops_it_and_a_refused_caller_does_not() {

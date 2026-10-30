@@ -1096,6 +1096,18 @@ impl RunTransitions for SupervisorQueue {
             ],
         )
     }
+    fn fail_replan_diagnosis(
+        &mut self,
+        op: (crate::domain::ReplanId, i64),
+        reason: &str,
+        run: &RunId,
+        payload: serde_json::Value,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        self.remote(
+            "fail_replan_diagnosis",
+            vec![to_value(op)?, to_value(reason)?, to_value(run)?, payload],
+        )
+    }
     fn running_diagnosis_owners(&self) -> Result<Vec<crate::domain::replan_detect::RunningOwner>> {
         // The service of the binary before a handoff, until this
         // supervisor replaces it, answers the owners as pids alone, which

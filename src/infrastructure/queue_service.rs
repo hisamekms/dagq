@@ -1580,6 +1580,8 @@ fn request_refused(past: RequestPastLimit) -> anyhow::Error {
             message: past.to_string(),
             denied: None,
             kind: None,
+            rejected: false,
+            held: None,
         },
     )
 }

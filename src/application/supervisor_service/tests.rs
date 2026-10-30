@@ -11,6 +11,8 @@ fn failed(kind: Option<FailureKind>) -> ServiceError {
         message: "it failed".into(),
         denied: None,
         kind,
+        rejected: false,
+        held: None,
     }
 }
 
@@ -225,6 +227,8 @@ fn set_max_load_sends_the_value_alone_only_to_a_service_that_reads_no_source() {
             message: "the arguments of set_max_load do not read".into(),
             denied: None,
             kind: None,
+            rejected: false,
+            held: None,
         })
     }
     assert_eq!(
@@ -377,6 +381,8 @@ impl ServiceCaller for PagedEvents {
                         message: "too large".into(),
                         denied: None,
                         kind: None,
+                        rejected: false,
+                        held: None,
                     }));
                 }
                 let page: Vec<Value> = (after + 1..=upto)
@@ -452,6 +458,8 @@ impl ServiceCaller for PagedRuns {
                 message: "too large".into(),
                 denied: None,
                 kind: None,
+                rejected: false,
+                held: None,
             }));
         }
         let runs: Vec<_> = self.runs.iter().skip(offset).take(page).collect();
@@ -1352,6 +1360,8 @@ impl ServiceCaller for Tokens {
                         message: format!("a supervisor revokes no token of {key}"),
                         denied: None,
                         kind: None,
+                        rejected: false,
+                        held: None,
                     }))
                 }
             }
@@ -1799,6 +1809,8 @@ impl ServiceCaller for PagedSamples {
                 message: "too large".into(),
                 denied: None,
                 kind: None,
+                rejected: false,
+                held: None,
             }));
         }
         Ok(Value::Array(
@@ -1921,6 +1933,8 @@ impl ServiceCaller for PagedResources {
                 message: "too large".into(),
                 denied: None,
                 kind: None,
+                rejected: false,
+                held: None,
             }));
         }
         Ok(Value::Array(
@@ -2255,6 +2269,8 @@ impl ServiceCaller for PagedLedger {
                 message: "too large".into(),
                 denied: None,
                 kind: None,
+                rejected: false,
+                held: None,
             }));
         }
         Ok(Value::Array(answer(page)))
@@ -2363,6 +2379,8 @@ impl ServiceCaller for RowInParts {
                 message: "too large".into(),
                 denied: None,
                 kind: None,
+                rejected: false,
+                held: None,
             })),
             "ledger_row_keys" => {
                 let after = params.args[1].as_str().map(str::to_owned);
@@ -2461,6 +2479,8 @@ impl ServiceCaller for OlderDiagnosisService {
                 message: format!("{op} does not read"),
                 denied: None,
                 kind: None,
+                rejected: false,
+                held: None,
             })),
         }
     }

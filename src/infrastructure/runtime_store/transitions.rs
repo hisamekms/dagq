@@ -1533,6 +1533,15 @@ impl RunTransitions for SqliteQueue {
     )> {
         SqliteQueue::ask_replan_diagnosis(self, ask, op, reason, run, written)
     }
+    fn fail_replan_diagnosis(
+        &mut self,
+        op: (crate::domain::ReplanId, i64),
+        reason: &str,
+        run: &RunId,
+        payload: serde_json::Value,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        SqliteQueue::fail_replan_diagnosis(self, op, reason, run, payload)
+    }
     fn running_diagnosis_owners(&self) -> Result<Vec<crate::domain::replan_detect::RunningOwner>> {
         SqliteQueue::running_diagnosis_owners(self)
     }

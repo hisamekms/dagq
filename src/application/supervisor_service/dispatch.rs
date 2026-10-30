@@ -219,6 +219,21 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 (payload, premise.as_ref()),
             ))
         }
+        "fail_replan_diagnosis" => {
+            let (replan, reason, run, payload): (
+                (crate::domain::ReplanId, i64),
+                String,
+                RunId,
+                Value,
+            ) = read(op, args)?;
+            answer(RunTransitions::fail_replan_diagnosis(
+                &mut *store,
+                replan,
+                &reason,
+                &run,
+                payload,
+            ))
+        }
         "diagnosis_owners" => answer(RunTransitions::running_diagnosis_owners(&*store)),
         // A supervisor of the binary before a handoff reads the owners as
         // pids.

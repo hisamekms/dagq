@@ -815,6 +815,20 @@ pub struct ServiceError {
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<FailureKind>,
+    /// Whether a `failed` is the domain's rejection of the request (a
+    /// [`crate::domain::DomainError`]: a rule or a premise that does not
+    /// hold) rather than a read or a write that failed, which a caller
+    /// tells apart as it did on the queue: a client that does not know the
+    /// field ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rejected: bool,
+    /// The open hold of the task that refused a `failed` (a
+    /// [`crate::domain::DomainError::ReplanDiagnosisHeld`], one of the
+    /// rejections), which a caller tells apart from the others as it did on
+    /// the queue, from the refusal itself rather than a read after it: a
+    /// client that does not know the field ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<Box<super::task_hold::HoldGuard>>,
 }
 
 /// A failure of a use case the caller tells apart from the others, as the
@@ -998,6 +1012,8 @@ impl ServiceResponse {
                 message: message.into(),
                 denied: None,
                 kind: None,
+                rejected: false,
+                held: None,
             }),
         }
     }

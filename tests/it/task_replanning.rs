@@ -2606,3 +2606,224 @@ fn a_diagnosis_owner_is_told_by_its_registration_and_start_not_its_pid() {
     assert_eq!(third.generation, second.generation + 1);
     drop(taker);
 }
+
+/// Acceptance (one settlement of one verdict): the failure of a verdict's
+/// apply is recorded with a claim of its operation under the job's
+/// generation, the guard of every move and ask of the verdict. Of a
+/// supervisor that applies a verdict a hold kept and another that records
+/// its failure, the one the queue takes first wins and the other is
+/// refused and writes nothing: the failure first (a move, or the ask a
+/// refused park makes under the job's generation), the apply first, and
+/// both at once. A failure that lost is no failed job. A hold that came
+/// before the failure refuses it too, and nothing is written (the
+/// supervisor keeps the verdict for the release).
+#[test]
+fn the_apply_and_the_failure_of_one_verdict_are_not_both_settled() {
+    use dagq::application::supervisor_service::rejected;
+    use dagq::domain::replan_detect::{JobOwner, failed_jobs};
+    use dagq::domain::task_replan::ReplanOperation;
+    use dagq::domain::{AskKind, AskReason, NewAsk};
+    use std::sync::{Arc, Barrier};
+    let (_dir, db) = queue();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let task = queue.add(new_task("A")).unwrap().id();
+    queue.transition(task, TaskAction::BypassReview).unwrap();
+    let ClaimOutcome::Claimed { run } = queue.claim(&base()).unwrap() else {
+        panic!("claim")
+    };
+    let run = run.id().clone();
+    let op = queue
+        .record_replan(
+            &NewReplan {
+                run: run.clone(),
+                reason: "the reviews keep failing".into(),
+                evidence: Vec::new(),
+            },
+            ReplanOrigin::Runtime,
+            "supervisor",
+            "supervisor",
+        )
+        .unwrap()
+        .operation;
+    let owner = JobOwner {
+        pid: 101,
+        token: Some("sv-101".into()),
+        process_start: Some("Thu Oct 29 10:00:00 2026".into()),
+    };
+    let start = |queue: &mut SqliteQueue, read: &ReplanOperation, attempt: u64| {
+        queue
+            .start_replan_diagnosis(
+                (read.id, read.generation),
+                "its diagnosis starts",
+                &run,
+                (
+                    json!({"attempt": attempt}),
+                    &owner,
+                    std::slice::from_ref(&owner),
+                ),
+            )
+            .unwrap()
+    };
+    let failure = |generation: i64| {
+        json!({"operation_id": op.id, "started_generation": generation,
+               "verdict": {"choice": "ask"}, "error": "the ask could not be written"})
+    };
+    let claim = |to: ReplanStatus| ReplanMove {
+        to,
+        reason: "the verdict is applied".into(),
+        snapshot_id: None,
+        diagnosis: None,
+    };
+    let events = |queue: &SqliteQueue| queue.task_events(task).unwrap();
+    let failed = |queue: &SqliteQueue| failed_jobs(&events(queue), op.id);
+
+    // The failure first: the apply under the job's generation is refused.
+    let first = start(&mut queue, &op, 1);
+    let after = queue
+        .fail_replan_diagnosis(
+            (op.id, first.generation),
+            "the apply failed",
+            &run,
+            failure(first.generation),
+        )
+        .unwrap();
+    assert_eq!(after.generation, first.generation + 1);
+    let error = queue
+        .move_replan(op.id, first.generation, &claim(ReplanStatus::Continuing))
+        .unwrap_err();
+    assert!(rejected(&error), "{error:#}");
+    // The ask a park refused at the lineage's limit makes claims the
+    // operation under the job's generation too, and is refused as well.
+    let asks = |queue: &SqliteQueue| queue.asks(Default::default()).unwrap().len();
+    let before = asks(&queue);
+    let ask = NewAsk {
+        kind: AskKind::Decide,
+        task_id: Some(task),
+        run_id: None,
+        question: "continue or replan?".into(),
+        options: vec!["continue".into(), "replan".into()],
+        asked_by: "replan-diagnosis".into(),
+        reason_category: AskReason::RecoveryFailed,
+        topics: Vec::new(),
+        recommendation: Some("replan".into()),
+        confidence: None,
+        finding_id: None,
+        request_id: None,
+    };
+    let error = queue
+        .ask_replan_diagnosis(
+            &ask,
+            (op.id, first.generation),
+            "a person is asked",
+            &run,
+            (
+                json!({"operation_id": op.id, "verdict": {"choice": "replan"}}),
+                None,
+            ),
+        )
+        .unwrap_err();
+    assert!(rejected(&error), "{error:#}");
+    assert_eq!(asks(&queue), before);
+    assert_eq!(failed(&queue), 1);
+
+    // Both at once: one wins.
+    let second = start(&mut queue, &after, 2);
+    let barrier = Arc::new(Barrier::new(2));
+    let racers: Vec<_> = [true, false]
+        .into_iter()
+        .map(|fails| {
+            let barrier = barrier.clone();
+            let mut queue = SqliteQueue::open(&db).unwrap();
+            let (run, payload) = (run.clone(), failure(second.generation));
+            std::thread::spawn(move || {
+                barrier.wait();
+                if fails {
+                    queue.fail_replan_diagnosis(
+                        (op.id, second.generation),
+                        "the apply failed",
+                        &run,
+                        payload,
+                    )
+                } else {
+                    queue.move_replan(op.id, second.generation, &claim(ReplanStatus::Diagnosing))
+                }
+            })
+        })
+        .collect();
+    let outcomes: Vec<anyhow::Result<ReplanOperation>> = {
+        let _waiting =
+            crate::common::within(crate::common::STEP_LIMIT, "the apply and the failure");
+        racers
+            .into_iter()
+            .map(|racer| racer.join().unwrap())
+            .collect()
+    };
+    assert_eq!(
+        outcomes.iter().filter(|o| o.is_ok()).count(),
+        1,
+        "{outcomes:?}"
+    );
+    let lost = outcomes.iter().find_map(|o| o.as_ref().err()).unwrap();
+    assert!(rejected(lost), "{lost:#}");
+    let failure_won = outcomes[0].is_ok();
+    assert_eq!(failed(&queue), if failure_won { 2 } else { 1 });
+    let now = queue.replan_operation(op.id).unwrap();
+    assert_eq!(now.generation, second.generation + 1);
+
+    // A hold before the failure refuses it and writes nothing, the
+    // operation left under the job's generation for the release.
+    let third = start(&mut queue, &now, 3);
+    let holds = Connection::open(&db).unwrap();
+    holds
+        .execute(
+            "INSERT INTO task_holds(task_id, reason, by_role, by_id, created_at, settled_at)
+             VALUES (?1, 'the login expired', 'user', 'user', 0, 0)",
+            [task.as_i64()],
+        )
+        .unwrap();
+    let written = events(&queue).len();
+    let error = queue
+        .fail_replan_diagnosis(
+            (op.id, third.generation),
+            "the apply failed",
+            &run,
+            failure(third.generation),
+        )
+        .unwrap_err();
+    assert!(rejected(&error), "{error:#}");
+    assert!(format!("{error:#}").contains("is held"), "{error:#}");
+    assert_eq!(events(&queue).len(), written);
+    assert_eq!(
+        queue.replan_operation(op.id).unwrap().generation,
+        third.generation
+    );
+    holds
+        .execute(
+            "UPDATE task_holds SET released_at=1 WHERE task_id=?1",
+            [task.as_i64()],
+        )
+        .unwrap();
+
+    // The apply first: the failure under the job's generation is refused
+    // and writes nothing.
+    let written = events(&queue).len();
+    queue
+        .move_replan(op.id, third.generation, &claim(ReplanStatus::Continuing))
+        .unwrap();
+    let written = written + 1;
+    let error = queue
+        .fail_replan_diagnosis(
+            (op.id, third.generation),
+            "the apply failed",
+            &run,
+            failure(third.generation),
+        )
+        .unwrap_err();
+    assert!(rejected(&error), "{error:#}");
+    assert_eq!(events(&queue).len(), written);
+    assert_eq!(failed(&queue), if failure_won { 2 } else { 1 });
+    assert_eq!(
+        queue.replan_operation(op.id).unwrap().status,
+        ReplanStatus::Continuing
+    );
+}

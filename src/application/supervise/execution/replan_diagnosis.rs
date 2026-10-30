@@ -23,7 +23,41 @@
 //!   the replanning (`pause_requested`, which the park takes up), or asks
 //!   a person in a `decide` ask whose answer (`continue` or `replan`) the
 //!   next pass applies. A job that fails is started again, up to
-//!   [`MAX_DIAGNOSIS_ATTEMPTS`] jobs, then a person is asked.
+//!   [`replan_detect::MAX_DIAGNOSIS_ATTEMPTS`] jobs, then a person is asked.
+//! - a job fails when it does not start, gives no verdict, or gives one
+//!   whose apply ends in an error (the operation gone, a read or a write of
+//!   the queue failing, the move's or the ask's included; a premise that
+//!   moved on, which the queue refuses as a [`crate::domain::DomainError`]
+//!   and the queue service carries as one, discards the verdict instead):
+//!   each is recorded as `replan_diagnosis_failed`,
+//!   the last with its verdict, which ends the job's start and counts
+//!   toward the limit once per start, however many records name it
+//!   ([`replan_detect::failed_jobs`]: two supervisors that fail on the
+//!   same kept verdict fail one job), so that an error that persists ends
+//!   in the person's ask rather than in jobs without end. A move of a
+//!   verdict that committed applies it, whatever fails after it (closing
+//!   the operation's asks), and fails no job
+//!   ([`replan_detect::MoveResult::settles`]). The failure of an apply is
+//!   written with a claim of the operation under the job's generation, the
+//!   guard of every move and ask of the verdict, so that of two
+//!   supervisors that take up the same verdict a hold kept, an apply and a
+//!   failure are not both settled: the one the queue takes first wins, and
+//!   a failure refused is no failure. The ask a park refused at the
+//!   lineage's limit makes claims it under the job's generation as well
+//!   ([`replan_detect::after_park_refused`]). A failure a hold refused
+//!   (as the refusal itself says, through the queue service too) keeps the
+//!   verdict for the release, with what its job read, on its first write
+//!   and on a write again alike. A verdict kept for a hold whose apply
+//!   fails after the release is recorded so once, and that record settles
+//!   it. A verdict the queue
+//!   settled (applied, asked about, kept or discarded) whose
+//!   `replan_diagnosed` then cannot be written fails nothing: only the
+//!   record is written again ([`replan_detect::verdict_end`]). A record of
+//!   any of them that cannot be written is kept and written again at the
+//!   next passes, the operation's next job and kept verdict waiting for it
+//!   (meanwhile the queue counts the job as running for the other
+//!   supervisors); one of an operation that is gone only ends the job's
+//!   start ([`replan_detect::failed_apply`]).
 //!
 //! A run that lands while its operation is diagnosed closes it as
 //! `continuing`; one that is landing waits, and the diagnosis is taken up
@@ -44,8 +78,8 @@ use super::*;
 use crate::application::prompt::{DiagnosisMaterial, TRIAGE_ACCESS, replan_diagnosis_prompt};
 use crate::domain::replan_detect::{
     self, AskWhy, DECIDED_BY_PERSON, DECIDED_BY_RUNTIME, DIAGNOSIS_ASKER, DIAGNOSIS_OPTIONS,
-    DecideFacts, Decided, Detection, DiagnosisVerdict, JobOwner, JobPlace, JobRecord,
-    MAX_DIAGNOSIS_ATTEMPTS, OwnerSeen, PlanningPayload,
+    DecideFacts, Decided, Detection, DiagnosisVerdict, JobOwner, JobPlace, JobRecord, OwnerSeen,
+    PlanningPayload,
 };
 use crate::domain::task_hold::HoldGuard;
 use crate::domain::task_replan::{
@@ -112,10 +146,7 @@ fn diagnosis_in_flight(op: ReplanId, events: &[RunEvent], live: &[JobOwner]) -> 
         .iter()
         .filter(|e| e.kind == EventKind::ReplanDiagnosisStarted && of_operation(e, op))
         .collect();
-    let failed = events
-        .iter()
-        .filter(|e| e.kind == EventKind::ReplanDiagnosisFailed && of_operation(e, op))
-        .count();
+    let failed = replan_detect::failed_jobs(events, op);
     let Some(last) = started.last() else {
         return InFlight::Next(1, failed);
     };
@@ -135,6 +166,114 @@ fn diagnosis_in_flight(op: ReplanId, events: &[RunEvent], live: &[JobOwner]) -> 
         InFlight::Elsewhere
     } else {
         InFlight::Next(started.len() + 1, failed)
+    }
+}
+
+/// A record of a diagnosis job's end that could not be written: its
+/// `replan_diagnosis_failed` (it did not start, gave no verdict or its
+/// verdict's apply failed, [`replan_detect::FailedApply::Kept`]), or the
+/// `replan_diagnosed` of a verdict the queue settled already (applied,
+/// asked about, kept for a hold or discarded,
+/// [`replan_detect::VerdictEnd::RecordKept`]). Kept by the supervisor and
+/// written again at each pass, at the request of `requester` (the job)
+/// when the first write was.
+pub(super) struct UnrecordedRecord {
+    run: RunId,
+    operation: ReplanId,
+    kind: EventKind,
+    payload: Value,
+    requester: Option<ActorContext>,
+    /// The guard of a failed apply's record, written again under it.
+    guard: Option<FailureGuard>,
+}
+
+/// The guard of the `replan_diagnosis_failed` of a verdict's apply that
+/// failed ([`replan_detect::FailedApply`]): written with a claim of the
+/// operation under the generation of the job that `read` is of, as every
+/// move and ask of the verdict is
+/// ([`crate::application::RunTransitions::fail_replan_diagnosis`]); `read`
+/// is also what a hold that refuses the record keeps the verdict with.
+/// `kept` is whether the verdict was one a hold kept, which any supervisor
+/// applies after the release.
+#[derive(Debug, Clone)]
+struct FailureGuard {
+    read: DiagnosisRead,
+    kept: bool,
+}
+
+/// The error of a verdict's apply whose operation is no longer in the
+/// queue ([`replan_detect::FailedApply::Ended`]).
+#[derive(Debug)]
+struct OperationGone(ReplanId);
+
+impl std::fmt::Display for OperationGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "replan operation {} is gone", self.0)
+    }
+}
+
+impl std::error::Error for OperationGone {}
+
+/// A move of an operation out of its diagnosis whose transaction committed
+/// ([`Supervisor::move_diagnosed`]), and how what followed it went.
+struct Moved {
+    /// Reading and closing the operation's open diagnosis asks.
+    followed: Result<()>,
+}
+
+impl Moved {
+    /// Note on the `replan_diagnosed` (`payload`) of `job`'s verdict what
+    /// failed after its move committed: the verdict is applied all the
+    /// same.
+    fn note(&self, job: &DiagnosisRead, payload: &mut Value) {
+        if let Err(error) = &self.followed {
+            info!(run_id = %job.run, "replan operation {}: the verdict of diagnosis job {} is applied; what followed its move failed: {error:#}", job.operation, job.attempt);
+            payload["after_move_error"] = json!(format!("{error:#}"));
+        }
+    }
+}
+
+/// What a verdict's move `moved` came to ([`replan_detect::MoveResult`]):
+/// committed, refused by the queue ([`refused`]) or failed before it
+/// committed.
+fn move_result(moved: &Result<Moved>) -> replan_detect::MoveResult {
+    match moved {
+        Ok(moved) => replan_detect::MoveResult::Committed {
+            followed: moved.followed.is_ok(),
+        },
+        Err(error) if refused(error) => replan_detect::MoveResult::Refused,
+        Err(_) => replan_detect::MoveResult::Failed,
+    }
+}
+
+/// Whether `error` of a verdict's move or ask is the queue's refusal of it
+/// (a [`crate::domain::DomainError`]: its premise or the operation moved
+/// on, or a hold came), on the queue or through the queue service
+/// ([`crate::application::supervisor_service::rejected`]), after which the
+/// verdict is discarded or kept, and not a read or a write that failed,
+/// which fails the job.
+fn refused(error: &anyhow::Error) -> bool {
+    crate::application::supervisor_service::rejected(error)
+}
+
+/// How the write of a failed apply's `replan_diagnosis_failed` went, from
+/// its result `written` alone ([`replan_detect::failed_apply`]), with the
+/// error when it did not go and the hold when one refused it. A refusal is
+/// the hold's when the refusal itself names the hold
+/// ([`crate::application::supervisor_service::held_refusal`]), never by a
+/// read after it: a hold released in between would make it read as another
+/// settlement, and the verdict the hold keeps would be discarded.
+fn failure_write(written: Result<()>) -> (replan_detect::FailureWrite, String, Option<HoldGuard>) {
+    let Err(error) = written else {
+        return (replan_detect::FailureWrite::Written, String::new(), None);
+    };
+    let why = format!("{error:#}");
+    if !refused(&error) {
+        return (replan_detect::FailureWrite::Failed, why, None);
+    }
+    match crate::application::supervisor_service::held_refusal(&error) {
+        Some(hold) => (replan_detect::FailureWrite::Held, why, Some(hold)),
+        None => (replan_detect::FailureWrite::Refused, why, None),
     }
 }
 
@@ -198,7 +337,8 @@ impl Supervisor<'_> {
     /// pass: the park of a run just fenced starts on the next.
     pub(super) fn replan_diagnosis_pass(&mut self, starting: bool) -> Result<bool> {
         self.reread_replan();
-        let mut done = self.reap_replan_diagnosis()?;
+        let mut done = self.record_unrecorded();
+        done |= self.reap_replan_diagnosis()?;
         match self.apply_diagnosis_answers() {
             Ok(applied) => done |= applied,
             Err(error) => {
@@ -512,16 +652,20 @@ impl Supervisor<'_> {
         let window_end = events.last().map_or(EventId::new(0), |e| e.id);
         // A person decides once the jobs failed or none can start; the ask
         // claims the operation itself.
-        if failed >= MAX_DIAGNOSIS_ATTEMPTS {
-            self.ask_diagnosis(
-                op,
-                &run,
-                attempt - 1,
-                (None, window_end),
-                AskWhy::JobFailed,
-                None,
-            )?;
-            return Ok(true);
+        match replan_detect::diagnosis_step(failed, self.unrecorded(op.id)) {
+            replan_detect::DiagnosisStep::Start => {}
+            replan_detect::DiagnosisStep::Wait => return Ok(false),
+            replan_detect::DiagnosisStep::Ask => {
+                self.ask_diagnosis(
+                    op,
+                    &run,
+                    attempt - 1,
+                    (None, window_end),
+                    AskWhy::JobFailed,
+                    None,
+                )?;
+                return Ok(true);
+            }
         }
         let Some(route) = self.recovery_route() else {
             return Ok(false);
@@ -705,12 +849,8 @@ impl Supervisor<'_> {
                 if let Some((provider, reason)) = unusable {
                     payload["provider_unusable"] = json!({"provider": provider, "reason": reason});
                 }
-                self.queue.record_runtime_event(
-                    run.id(),
-                    EventKind::ReplanDiagnosisFailed,
-                    payload,
-                )?;
                 warn!(run_id = %run.id(), "replan operation {}: {error}", op.id);
+                self.record_job_failure(run.id(), op.id, payload);
             }
         }
         Ok(true)
@@ -769,7 +909,8 @@ impl Supervisor<'_> {
     }
 
     /// Reap the diagnosis job once it ended and apply its verdict, or
-    /// record its failure for the next attempt.
+    /// record its failure (its own, or its verdict's apply's) for the next
+    /// attempt.
     /// Whether a job ended (taken from the watch whatever its record).
     fn reap_replan_diagnosis(&mut self) -> Result<bool> {
         let Some(provider) = self.replan_diagnosis.as_ref().map(|job| job.job.provider()) else {
@@ -806,12 +947,8 @@ impl Supervisor<'_> {
                                          "started_generation": job.generation,
                                          "error": error, "duration_secs": duration_secs});
                 end.record(&mut payload);
-                self.queue.record_runtime_event(
-                    &job.run,
-                    EventKind::ReplanDiagnosisFailed,
-                    payload,
-                )?;
                 warn!(run_id = %job.run, "replan operation {}: diagnosis job {} failed: {error}", job.operation, job.attempt);
+                self.record_job_failure(&job.run, job.operation, payload);
                 Ok(true)
             }
             Ok(verdict) => {
@@ -821,13 +958,297 @@ impl Supervisor<'_> {
                                          "verdict": verdict, "window_end": job.window_end,
                                          "duration_secs": duration_secs});
                 end.record(&mut payload);
-                self.apply_diagnosis(job, &verdict, payload).map(|()| true)
+                let failed = payload.clone();
+                if let Err(error) = self.apply_diagnosis(job, &verdict, payload) {
+                    self.record_failed_apply(job, failed, &error, false);
+                }
+                Ok(true)
             }
         }
     }
 
+    /// Record the apply of `job`'s verdict that ended in `error` as its
+    /// `replan_diagnosis_failed` (`payload`, the verdict's, with the
+    /// error), which counts toward the limit of its operation, or ends
+    /// only the job's start when the operation is gone. The record of an
+    /// operation still there claims it under the job's generation
+    /// ([`FailureGuard`]), so that it is refused once another supervisor
+    /// settled the same verdict (`kept`, a verdict a hold kept), and is
+    /// then no failure. A record that cannot be written is kept for the
+    /// next passes ([`replan_detect::failed_apply`]).
+    fn record_failed_apply(
+        &mut self,
+        job: &DiagnosisRead,
+        mut payload: Value,
+        error: &anyhow::Error,
+        kept: bool,
+    ) {
+        let found = error.downcast_ref::<OperationGone>().is_none();
+        // A kept verdict's payload carries the outcome it was kept with.
+        if let Some(fields) = payload.as_object_mut() {
+            fields.remove("outcome");
+            fields.remove("reason");
+        }
+        payload["error"] = json!(format!("the verdict could not be applied: {error:#}"));
+        if !found {
+            payload["operation_gone"] = json!(true);
+        }
+        let guard = found.then(|| FailureGuard {
+            read: job.clone(),
+            kept,
+        });
+        let written = self.write_failure(&job.run, job.operation, guard.as_ref(), &payload);
+        warn!(run_id = %job.run, "replan operation {}: the verdict of diagnosis job {} could not be applied: {error:#}", job.operation, job.attempt);
+        self.settle_failure(&job.run, job.operation, guard, payload, written);
+    }
+
+    /// Settle the failure of a verdict's apply of `operation` on `run`
+    /// (`payload`, written under `guard` unless the operation is gone) by
+    /// how its write went ([`replan_detect::failed_apply`]), the same on
+    /// its first write and on each write again of a record kept unwritten.
+    /// Whether it is settled: anything but kept to be written again.
+    fn settle_failure(
+        &mut self,
+        run: &RunId,
+        operation: ReplanId,
+        guard: Option<FailureGuard>,
+        payload: Value,
+        (write, why, hold): (replan_detect::FailureWrite, String, Option<HoldGuard>),
+    ) -> bool {
+        match replan_detect::failed_apply(guard.is_some(), write) {
+            replan_detect::FailedApply::Counted => {
+                warn!(run_id = %run, "replan operation {}: the failure of its diagnosis's apply is recorded, a failed job", operation);
+            }
+            replan_detect::FailedApply::Ended => {
+                warn!(run_id = %run, "replan operation {} is gone: the verdict of its diagnosis is not applied", operation);
+            }
+            replan_detect::FailedApply::Superseded => {
+                if let Some(guard) = guard {
+                    let requester = Some(Self::job_requester(&guard.read));
+                    self.supersede_failure(run, operation, guard.kept, payload, &why, requester);
+                }
+            }
+            replan_detect::FailedApply::Held => {
+                if let (Some(guard), Some(hold)) = (guard, hold) {
+                    self.keep_failed_for_hold(&guard, hold, payload, &why);
+                }
+            }
+            replan_detect::FailedApply::Kept => {
+                warn!(run_id = %run, "replan operation {}: the failure of its diagnosis's apply could not be recorded ({why}): it is recorded again at the next pass", operation);
+                self.replan_unrecorded.push(UnrecordedRecord {
+                    run: run.clone(),
+                    operation,
+                    kind: EventKind::ReplanDiagnosisFailed,
+                    payload,
+                    requester: None,
+                    guard,
+                });
+                return false;
+            }
+            replan_detect::FailedApply::Dropped => {
+                warn!(run_id = %run, "replan operation {} is gone and the failure of its diagnosis's apply could not be recorded ({why}): it is dropped", operation);
+            }
+        }
+        true
+    }
+
+    /// The failure of a verdict's apply that a hold refused (`why`), the
+    /// task held before the record ([`replan_detect::FailedApply::Held`]):
+    /// nothing is counted, and the verdict is kept for the release. A
+    /// verdict a hold kept already stays as it is; this supervisor's own
+    /// job's verdict (`payload`) is kept with what its job read
+    /// ([`Self::keep_diagnosis`]), applied after the release on its premise
+    /// checked again.
+    fn keep_failed_for_hold(
+        &mut self,
+        guard: &FailureGuard,
+        hold: HoldGuard,
+        mut payload: Value,
+        why: &str,
+    ) {
+        info!(run_id = %guard.read.run, task_id = %guard.read.task, "replan operation {}: the failure of its diagnosis's apply is not recorded, the task is held, and the verdict is kept: {why}", guard.read.operation);
+        if guard.kept {
+            return;
+        }
+        if let Some(fields) = payload.as_object_mut() {
+            fields.remove("error");
+        }
+        if let Err(error) = self.keep_diagnosis(&guard.read, hold, payload) {
+            warn!(run_id = %guard.read.run, "replan operation {}: the verdict could not be kept for the hold: {error:#}", guard.read.operation);
+        }
+    }
+
+    /// Write the `replan_diagnosis_failed` (`payload`) of a verdict's
+    /// apply of `operation` on `run`: under `guard`, with the claim that
+    /// excludes another settlement of the verdict, or, of an operation
+    /// gone, alone. How it went, and the error when it did not go.
+    fn write_failure(
+        &mut self,
+        run: &RunId,
+        operation: ReplanId,
+        guard: Option<&FailureGuard>,
+        payload: &Value,
+    ) -> (replan_detect::FailureWrite, String, Option<HoldGuard>) {
+        let written = match guard {
+            Some(guard) => self
+                .queue
+                .fail_replan_diagnosis(
+                    (operation, guard.read.generation),
+                    "the apply of its diagnosis's verdict failed",
+                    run,
+                    payload.clone(),
+                )
+                .map(|_| ()),
+            None => self.queue.record_runtime_event(
+                run,
+                EventKind::ReplanDiagnosisFailed,
+                payload.clone(),
+            ),
+        };
+        failure_write(written)
+    }
+
+    /// The failure of a verdict's apply that the queue refused (`why`): the
+    /// operation moved on before it, under another supervisor's settlement
+    /// of the same verdict or another claim
+    /// ([`replan_detect::FailedApply::Superseded`]). Nothing is counted. A
+    /// verdict a hold kept (`kept`) is left as the queue has it; this
+    /// supervisor's own job's verdict is recorded as discarded (`payload`,
+    /// under `requester`), which ends the job's start.
+    fn supersede_failure(
+        &mut self,
+        run: &RunId,
+        operation: ReplanId,
+        kept: bool,
+        mut payload: Value,
+        why: &str,
+        requester: Option<ActorContext>,
+    ) {
+        info!(run_id = %run, "replan operation {}: the failure of its diagnosis's apply is not recorded, the operation moved on: {why}", operation);
+        if kept {
+            return;
+        }
+        if let Some(fields) = payload.as_object_mut() {
+            fields.remove("error");
+        }
+        payload["outcome"] = json!("discarded");
+        payload["reason"] = json!(format!(
+            "the operation moved on before the failure of its apply was recorded: {why}"
+        ));
+        self.record_settled(run, operation, payload, requester);
+    }
+
+    /// Record the `replan_diagnosis_failed` of a job of `operation` that
+    /// did not start or gave no verdict, kept for the next passes when it
+    /// cannot be written, as [`Self::record_failed_apply`] keeps one.
+    fn record_job_failure(&mut self, run: &RunId, operation: ReplanId, payload: Value) {
+        if let Err(error) =
+            self.queue
+                .record_runtime_event(run, EventKind::ReplanDiagnosisFailed, payload.clone())
+        {
+            warn!(run_id = %run, "replan operation {}: the failure of its diagnosis job could not be recorded ({error:#}): it is recorded again at the next pass", operation);
+            self.replan_unrecorded.push(UnrecordedRecord {
+                run: run.clone(),
+                operation,
+                kind: EventKind::ReplanDiagnosisFailed,
+                payload,
+                requester: None,
+                guard: None,
+            });
+        }
+    }
+
+    /// Record the `replan_diagnosed` (`payload`) of a verdict of a job of
+    /// `operation` whose outcome the queue settled already: applied, asked
+    /// about, kept for a hold or discarded. A write that fails fails
+    /// nothing: the verdict is not applied again nor counted as a failed
+    /// job, and only the record is kept and written again at the next
+    /// passes ([`replan_detect::verdict_end`]), under `requester` (the job
+    /// whose verdict it is) when there is one.
+    fn record_settled(
+        &mut self,
+        run: &RunId,
+        operation: ReplanId,
+        payload: Value,
+        requester: Option<ActorContext>,
+    ) {
+        let recorded =
+            self.queue
+                .record_runtime_event(run, EventKind::ReplanDiagnosed, payload.clone());
+        if let (replan_detect::VerdictEnd::RecordKept, Err(error)) = (
+            replan_detect::verdict_end(true, recorded.is_ok()),
+            &recorded,
+        ) {
+            warn!(run_id = %run, "replan operation {}: the outcome of its diagnosis is settled but could not be recorded ({error:#}): it is recorded again at the next pass", operation);
+            self.replan_unrecorded.push(UnrecordedRecord {
+                run: run.clone(),
+                operation,
+                kind: EventKind::ReplanDiagnosed,
+                payload,
+                requester,
+                guard: None,
+            });
+        }
+    }
+
+    /// Write again each record kept unwritten ([`UnrecordedRecord`]), in
+    /// order; one that still cannot be written is kept for the next pass.
+    /// Whether one was written.
+    fn record_unrecorded(&mut self) -> bool {
+        let mut written = false;
+        for record in std::mem::take(&mut self.replan_unrecorded) {
+            // A failure of an apply is written again under its guard, and
+            // settled as its first write is: a hold that came since keeps
+            // its verdict.
+            if record.guard.is_some() {
+                let UnrecordedRecord {
+                    run,
+                    operation,
+                    payload,
+                    guard,
+                    ..
+                } = record;
+                let write = self.write_failure(&run, operation, guard.as_ref(), &payload);
+                written |= self.settle_failure(&run, operation, guard, payload, write);
+                continue;
+            }
+            let write = |sv: &mut Self| {
+                sv.queue
+                    .record_runtime_event(&record.run, record.kind, record.payload.clone())
+            };
+            let done = match &record.requester {
+                Some(requester) => self.for_job(requester, write),
+                None => write(self),
+            };
+            match done {
+                Ok(()) => written = true,
+                Err(error) => {
+                    warn!(run_id = %record.run, "replan operation {}: its {} is still not recorded: {error:#}", record.operation, record.kind.as_str());
+                    self.replan_unrecorded.push(record);
+                }
+            }
+        }
+        written
+    }
+
+    /// Whether a record of `op`'s diagnosis is kept unwritten
+    /// ([`UnrecordedRecord`]): its next job and its kept verdict wait for it.
+    fn unrecorded(&self, op: ReplanId) -> bool {
+        self.replan_unrecorded.iter().any(|u| u.operation == op)
+    }
+
+    /// The actor of diagnosis job `job`, the requester of what its verdict
+    /// writes.
+    fn job_requester(job: &DiagnosisRead) -> ActorContext {
+        ActorContext::recovery_job(&job.run, DIAGNOSIS_LABEL, job.attempt)
+    }
+
     /// Apply `verdict` of `job`, checked again against the queue now, and
-    /// record it as `replan_diagnosed` (`payload` with the outcome). A
+    /// record it as `replan_diagnosed` (`payload` with the outcome;
+    /// [`Self::record_settled`], so that a record that fails after the
+    /// queue settled the verdict fails nothing). An error is a read or a
+    /// write that failed before the verdict was settled, which fails the
+    /// job; a refusal of the queue discards the verdict. A
     /// verdict that reaches a held task, or that the queue refused for a
     /// hold that came meanwhile, is kept instead ([`Self::keep_diagnosis`]).
     /// Every event written meanwhile, a discarded verdict's included, has
@@ -838,7 +1259,7 @@ impl Supervisor<'_> {
         verdict: &DiagnosisVerdict,
         payload: Value,
     ) -> Result<()> {
-        let requester = ActorContext::recovery_job(&job.run, DIAGNOSIS_LABEL, job.attempt);
+        let requester = Self::job_requester(job);
         self.for_job(&requester, |sv| sv.apply_verdict(job, verdict, payload))
     }
 
@@ -851,7 +1272,7 @@ impl Supervisor<'_> {
     ) -> Result<()> {
         let lineage = self.queue.replan_lineage(job.task)?;
         let Some(op) = lineage.iter().find(|op| op.id == job.operation).cloned() else {
-            anyhow::bail!("replan operation {} is gone", job.operation);
+            return Err(OperationGone(job.operation).into());
         };
         let discarded = |payload: &mut Value, why: String| {
             payload["outcome"] = json!("discarded");
@@ -877,10 +1298,19 @@ impl Supervisor<'_> {
                 &mut payload,
                 "the task's run landed or the task ended while it was diagnosed".to_owned(),
             );
-            self.queue
-                .record_runtime_event(&job.run, EventKind::ReplanDiagnosed, payload)?;
-            return self
-                .close_undiagnosed(&op, "the run landed or the task ended during its diagnosis");
+            self.record_settled(
+                &job.run,
+                job.operation,
+                payload,
+                Some(Self::job_requester(job)),
+            );
+            // The next pass closes it as well (the task is not in progress).
+            if let Err(error) =
+                self.close_undiagnosed(&op, "the run landed or the task ended during its diagnosis")
+            {
+                warn!(task_id = %op.task_id, "replan operation {} is not closed yet: {error:#}", op.id);
+            }
+            return Ok(());
         } else if let Some(hold) = self.queue.hold_guard(op.task_id)? {
             return self.keep_diagnosis(job, hold, payload);
         } else if latest
@@ -915,7 +1345,9 @@ impl Supervisor<'_> {
                     .collect(),
             };
             let run = latest.expect("checked above").clone();
-            match replan_detect::decide(verdict, &facts) {
+            let decided = replan_detect::decide(verdict, &facts);
+            self.pause_at(PausePoint::VerdictDecided, &job.run);
+            match decided {
                 Decided::Continue(reason) => {
                     // The runtime's choice, which may override the job's
                     // (a replanning for external causes only), is recorded.
@@ -926,14 +1358,24 @@ impl Supervisor<'_> {
                     );
                     diagnosis.choice = Some(DiagnosisChoice::Continue);
                     diagnosis.premise = Some(job.premise(manual, None));
-                    match self.move_on_premise(&op, ReplanStatus::Continuing, &reason, diagnosis) {
-                        Ok(_) => {
+                    let moved =
+                        self.move_on_premise(&op, ReplanStatus::Continuing, &reason, diagnosis);
+                    let result = move_result(&moved);
+                    match moved {
+                        Ok(moved) => {
                             payload["outcome"] = json!("continue");
                             payload["reason"] = json!(reason);
+                            moved.note(job, &mut payload);
                         }
                         Err(error) => {
                             if let Some(hold) = self.queue.hold_guard(op.task_id)? {
                                 return self.keep_diagnosis(job, hold, payload);
+                            }
+                            // A read or a write that failed before the move
+                            // committed is the job's failure, not a premise
+                            // that moved on.
+                            if !result.settles() {
+                                return Err(error);
                             }
                             discarded(&mut payload, format!("{error:#}"));
                         }
@@ -950,38 +1392,49 @@ impl Supervisor<'_> {
                     // or moved on since the job started (diagnosed again),
                     // or when another park of the lineage used up its limit
                     // meanwhile (a person is asked).
-                    match self.move_on_premise(
-                        &op,
-                        ReplanStatus::PauseRequested,
-                        &reason,
-                        diagnosis,
-                    ) {
-                        Ok(_) => {
+                    let moved =
+                        self.move_on_premise(&op, ReplanStatus::PauseRequested, &reason, diagnosis);
+                    let result = move_result(&moved);
+                    match moved {
+                        Ok(moved) => {
                             payload["outcome"] = json!("park");
                             payload["reason"] = json!(reason);
+                            moved.note(job, &mut payload);
                         }
                         Err(error) => {
                             if let Some(hold) = self.queue.hold_guard(op.task_id)? {
                                 return self.keep_diagnosis(job, hold, payload);
                             }
-                            let lineage = self.queue.replan_lineage(op.task_id)?;
-                            if replan_detect::auto_parks(&lineage) >= self.replan.max_auto_parks {
-                                let op = lineage
-                                    .into_iter()
-                                    .find(|other| other.id == op.id)
-                                    .unwrap_or(op);
-                                // The limit is why a person is asked; the
-                                // rest of the premise must still hold.
-                                return self.ask_diagnosis(
-                                    &op,
-                                    &run,
-                                    job.attempt,
-                                    (Some((verdict, payload, job, manual)), job.window_end),
-                                    AskWhy::ParkLimit,
-                                    Some(DiagnosisChoice::Replan),
-                                );
+                            if !result.settles() {
+                                return Err(error);
                             }
-                            discarded(&mut payload, format!("{error:#}"));
+                            let lineage = self.queue.replan_lineage(op.task_id)?;
+                            // The limit is why a person is asked; the rest
+                            // of the premise must still hold. The ask claims
+                            // the operation under the job's generation, as
+                            // the move did, so that a failure of the same
+                            // verdict another supervisor recorded since
+                            // refuses it.
+                            match replan_detect::after_park_refused(
+                                replan_detect::auto_parks(&lineage),
+                                self.replan.max_auto_parks,
+                                job.generation,
+                            ) {
+                                replan_detect::ParkRefused::Ask { generation } => {
+                                    let op = ReplanOperation { generation, ..op };
+                                    return self.ask_diagnosis(
+                                        &op,
+                                        &run,
+                                        job.attempt,
+                                        (Some((verdict, payload, job, manual)), job.window_end),
+                                        AskWhy::ParkLimit,
+                                        Some(DiagnosisChoice::Replan),
+                                    );
+                                }
+                                replan_detect::ParkRefused::Discard => {
+                                    discarded(&mut payload, format!("{error:#}"));
+                                }
+                            }
                         }
                     }
                 }
@@ -1003,8 +1456,13 @@ impl Supervisor<'_> {
             }
         }
         info!(run_id = %job.run, "replan operation {}: diagnosis {} {}: {}", job.operation, job.attempt, payload["outcome"].as_str().unwrap_or_default(), payload["reason"].as_str().unwrap_or_default());
-        self.queue
-            .record_runtime_event(&job.run, EventKind::ReplanDiagnosed, payload)
+        self.record_settled(
+            &job.run,
+            job.operation,
+            payload,
+            Some(Self::job_requester(job)),
+        );
+        Ok(())
     }
 
     /// Keep the verdict of `job` (in `payload`) while its task is held by
@@ -1027,19 +1485,30 @@ impl Supervisor<'_> {
         payload["generation"] = json!(job.generation);
         payload["read"] = json!(job);
         info!(run_id = %job.run, task_id = %job.task, "replan operation {}: diagnosis {}: {reason}", job.operation, job.attempt);
-        self.queue
-            .record_runtime_event(&job.run, EventKind::ReplanDiagnosed, payload)
+        self.record_settled(
+            &job.run,
+            job.operation,
+            payload,
+            Some(Self::job_requester(job)),
+        );
+        Ok(())
     }
 
     /// Apply each verdict a hold kept ([`replan_detect::kept_verdict`])
     /// once its task is held no more, as [`Self::apply_diagnosis`] would
     /// have: its premise is checked again, and a verdict that no longer
     /// holds is discarded, after which the next pass diagnoses the
-    /// operation again. Whether one was applied or discarded.
+    /// operation again. One whose apply fails is recorded once as its job's
+    /// failure ([`Self::record_failed_apply`]), whose record names it and
+    /// so settles it ([`replan_detect::kept_verdict`]): the next pass
+    /// starts the next job, or asks a person past the limit. Whether one
+    /// was applied, discarded or failed.
     fn apply_kept_diagnoses(&mut self) -> Result<bool> {
         let mut settled = false;
         for op in self.queue.open_replan_operations()? {
-            if op.status != ReplanStatus::Diagnosing || self.queue.hold_guard(op.task_id)?.is_some()
+            if op.status != ReplanStatus::Diagnosing
+                || self.unrecorded(op.id)
+                || self.queue.hold_guard(op.task_id)?.is_some()
             {
                 continue;
             }
@@ -1056,24 +1525,23 @@ impl Supervisor<'_> {
                     fields.remove(key);
                 }
             }
-            let done = match (read, verdict) {
-                (Ok(read), Some(verdict)) => self.apply_diagnosis(&read, &verdict, payload),
+            match (read, verdict) {
+                (Ok(read), Some(verdict)) => {
+                    let failed = payload.clone();
+                    if let Err(error) = self.apply_diagnosis(&read, &verdict, payload) {
+                        warn!(task_id = %op.task_id, error = %format_args!("{error:#}"), "the verdict kept for replan operation {} could not be applied: {error:#}", op.id);
+                        self.record_failed_apply(&read, failed, &error, true);
+                    }
+                }
                 _ => {
                     // A record this binary cannot read is diagnosed again.
                     payload["outcome"] = json!("discarded");
                     payload["reason"] = json!("the verdict kept for the hold cannot be read");
                     let run = kept.run_id.clone().unwrap_or_else(|| op.run_id.clone());
-                    self.queue
-                        .record_runtime_event(&run, EventKind::ReplanDiagnosed, payload)
-                }
-            };
-            // One operation that fails leaves the others' kept verdicts due.
-            match done {
-                Ok(()) => settled = true,
-                Err(error) => {
-                    warn!(task_id = %op.task_id, error = %format_args!("{error:#}"), "the verdict kept for replan operation {} could not be applied: {error:#}", op.id);
+                    self.record_settled(&run, op.id, payload, None);
                 }
             }
+            settled = true;
         }
         Ok(settled)
     }
@@ -1087,7 +1555,7 @@ impl Supervisor<'_> {
         to: ReplanStatus,
         reason: &str,
         diagnosis: Diagnosis,
-    ) -> Result<ReplanOperation> {
+    ) -> Result<Moved> {
         if let Some(premise) = &diagnosis.premise {
             self.head_still(op, premise)?;
         }
@@ -1106,27 +1574,36 @@ impl Supervisor<'_> {
             .cloned()
             .with_context(|| format!("task {} has no run", op.task_id))?;
         let now = self.run_head(&run);
-        anyhow::ensure!(
-            !premise.head_moved(now.as_deref()),
-            "run {}'s HEAD moved from {} to {} since its diagnosis started",
-            run.id(),
-            premise.head.as_deref().unwrap_or_default(),
-            now.as_deref().unwrap_or_default()
-        );
+        if premise.head_moved(now.as_deref()) {
+            return Err(crate::domain::DomainError::ReplanPremiseStale {
+                operation: op.id,
+                why: format!(
+                    "run {}'s HEAD moved from {} to {} since its diagnosis started",
+                    run.id(),
+                    premise.head.as_deref().unwrap_or_default(),
+                    now.as_deref().unwrap_or_default()
+                ),
+            }
+            .into());
+        }
         Ok(())
     }
 
     /// Move `op` from its diagnosis to `to` with `diagnosis` recorded; an
     /// ask of its diagnosis still open closes with it, and its task is
-    /// looked at again by the next detection.
+    /// looked at again by the next detection. An error is the move's own
+    /// (it did not commit); one of closing the asks after it committed is
+    /// [`Moved::followed`]'s, and leaves the move as it is: an ask left
+    /// open is closed once it is answered, its operation having moved on
+    /// ([`Self::apply_diagnosis_answers`]).
     fn move_diagnosed(
         &mut self,
         op: &ReplanOperation,
         to: ReplanStatus,
         reason: &str,
         diagnosis: Diagnosis,
-    ) -> Result<ReplanOperation> {
-        let moved = self.queue.move_replan(
+    ) -> Result<Moved> {
+        self.queue.move_replan(
             op.id,
             op.generation,
             &ReplanMove {
@@ -1136,13 +1613,22 @@ impl Supervisor<'_> {
                 diagnosis: Some(diagnosis),
             },
         )?;
+        self.replan_seen.1.remove(&op.task_id);
+        let followed = self.close_open_diagnosis_asks(op);
+        if let Err(error) = &followed {
+            warn!(task_id = %op.task_id, "replan operation {} moved to {}, but its open diagnosis asks could not be closed: {error:#}", op.id, to.as_str());
+        }
+        Ok(Moved { followed })
+    }
+
+    /// Close the unanswered diagnosis asks of `op`.
+    fn close_open_diagnosis_asks(&mut self, op: &ReplanOperation) -> Result<()> {
         for ask in self.diagnosis_asks(op.task_id, Some(op.id))? {
             if ask.answered_at.is_none() {
                 self.queue.close_ask(ask.id)?;
             }
         }
-        self.replan_seen.1.remove(&op.task_id);
-        Ok(moved)
+        Ok(())
     }
 
     /// Whether `op`'s planning request was recorded by a person's (or the
@@ -1215,8 +1701,13 @@ impl Supervisor<'_> {
             ),
         };
         let premise = job.map(|(job, manual)| job.premise(manual, None));
+        let failures = if verdict.is_none() {
+            replan_detect::failures_said(&self.queue.task_events(op.task_id)?, op.id)
+        } else {
+            String::new()
+        };
         let said = verdict.map_or_else(
-            || "No diagnosis job gave a verdict.".to_owned(),
+            || failures,
             |verdict| {
                 format!(
                     "The diagnosis chose {} with {} confidence: {}. Causes: {}. Progress: {}. Unmet acceptance items: {}.{}",
@@ -1312,14 +1803,18 @@ impl Supervisor<'_> {
                 {
                     return self.keep_diagnosis(job, hold, payload);
                 }
+                // A verdict whose ask a read or a write failed to open is
+                // its job's failure; one whose premise moved on is
+                // discarded and diagnosed again.
+                if job.is_some() && !refused(&error) {
+                    return Err(error);
+                }
                 payload["outcome"] = json!("discarded");
                 payload["reason"] = json!(format!("{error:#}"));
                 info!(task_id = %op.task_id, "replan operation {}: no ask: {error:#}", op.id);
-                return self.queue.record_runtime_event(
-                    run.id(),
-                    EventKind::ReplanDiagnosed,
-                    payload,
-                );
+                let requester = job.map(|(job, _)| Self::job_requester(job));
+                self.record_settled(run.id(), op.id, payload, requester);
+                return Ok(());
             }
         };
         if ask.asked_by == DIAGNOSIS_ASKER {
@@ -1441,7 +1936,7 @@ impl Supervisor<'_> {
                 )
             };
             match self.move_diagnosed(&op, to, &reason, diagnosis) {
-                Ok(_) => {
+                Ok(Moved { .. }) => {
                     info!(ask_id = %ask.id, task_id = %task, "replan operation {}: {reason}", op.id);
                     self.queue.close_ask(ask.id)?;
                     applied = true;
@@ -1452,5 +1947,83 @@ impl Supervisor<'_> {
             }
         }
         Ok(applied)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::DomainError;
+
+    /// The queue's refusal of a verdict's move or ask, through any context,
+    /// discards the verdict; any other error, a write that failed, fails
+    /// the job.
+    #[test]
+    fn a_refusal_discards_a_verdict_and_a_failed_write_fails_the_job() {
+        let stale = anyhow::Error::new(DomainError::ReplanPremiseStale {
+            operation: ReplanId::new(1),
+            why: "task 1 was edited".to_owned(),
+        });
+        assert!(refused(&stale));
+        assert!(refused(&stale.context("apply the verdict")));
+        let held = anyhow::Error::new(DomainError::ReplanDiagnosisHeld {
+            operation: ReplanId::new(1),
+            task_id: TaskId::new(1),
+            hold: crate::domain::HoldId::new(2),
+        });
+        assert!(refused(&held));
+        let write = anyhow::anyhow!("ask write failed").context("open the diagnosis's ask");
+        assert!(!refused(&write));
+    }
+
+    /// The write of a failed apply's record is judged by its result alone:
+    /// a refusal that names a hold, on the queue or through the service,
+    /// keeps the verdict for that hold (on a first write and on a write
+    /// again alike, which both go through it), whatever a read of the hold
+    /// after it would say; any other refusal is another settlement, and an
+    /// error that is no refusal keeps the record for the next pass.
+    #[test]
+    fn a_failure_refused_for_a_hold_is_held_by_the_refusal_alone() {
+        use crate::application::supervisor_service::service_error;
+        use crate::domain::queue_service::{ServiceError, ServiceErrorCode};
+        use crate::domain::task_hold::HoldGuard;
+        use replan_detect::FailureWrite;
+        let hold = HoldGuard {
+            task: TaskId::new(1),
+            hold: crate::domain::HoldId::new(2),
+        };
+        let on_queue = anyhow::Error::new(DomainError::ReplanDiagnosisHeld {
+            operation: ReplanId::new(1),
+            task_id: hold.task,
+            hold: hold.hold,
+        })
+        .context("fail_replan_diagnosis");
+        let through_service = |held: Option<HoldGuard>| {
+            service_error(&ServiceError {
+                code: ServiceErrorCode::Failed,
+                message: "refused".into(),
+                denied: None,
+                kind: None,
+                rejected: true,
+                held: held.map(Box::new),
+            })
+        };
+        for refusal in [on_queue, through_service(Some(hold))] {
+            let (write, why, held) = failure_write(Err(refusal));
+            assert_eq!((write, held), (FailureWrite::Held, Some(hold)), "{why}");
+        }
+        let stale = anyhow::Error::new(DomainError::ReplanGenerationStale {
+            operation: ReplanId::new(1),
+            expected: 3,
+            actual: 4,
+        });
+        for refusal in [stale, through_service(None)] {
+            let (write, _, held) = failure_write(Err(refusal));
+            assert_eq!((write, held), (FailureWrite::Refused, None));
+        }
+        let (write, why, held) = failure_write(Err(anyhow::anyhow!("database or disk is full")));
+        assert_eq!((write, held), (FailureWrite::Failed, None));
+        assert!(why.contains("disk is full"), "{why}");
+        assert_eq!(failure_write(Ok(())).0, FailureWrite::Written);
     }
 }
