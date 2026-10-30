@@ -85,7 +85,6 @@ supervisorは`needs_session`のrunを自分でresumeする（ADR-0019の決定1�
 このsupervisorがまだslotで進めているrun（leaseが他のtokenに移ってstaleになり、sessionが終わっていても）も飛ばす: そのslotは次のtickでleaseを失ったとして外れ（[supervise](supervise.md#provisionと監視)）、その後のpassでだけ他のrunと同じく次の試行を始める（同じrunを2つのslotで進めない）。
 resumeの前に、このrunに記録されたresumeのsession（backgroundのwrapperのhandle）のうち止めた記録の無いもの（手放したsession、errorで残したもの）がまだ動いていれば止め、`workspace_closed`を記録する。
 動いているかはhandleのprocessで見る（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
-ADR-t1433-3より前にworkspaceで開いたresumeのsessionのIDは動いていないとみなし、閉じずに人に任せる（人が自分のterminalで閉じる）。
 resume中に死んだsupervisorが起動したwrapper（handleの記録が無い）は見つけないが、wrapperが生きている間は上の条件で飛ばす。
 `dagq.toml`がworkerをcontainerで動かすときは、containerが使えないか、containerの届かないproviderで動くrunを候補から飛ばし、hostで再開しない（[Container runtime](../container-runtime.md#fail-closedの境界)）。
 試行を使い切ったrunを復旧jobに渡すことは止めない。
@@ -164,6 +163,7 @@ worktreeは残る。
 保留したrunは`needs_session`（`replan_parked`）になってresume/reviseの回数を引き継ぎ、保護中は自動resume・`resolved_head`・使い切りの後始末の対象にならない。
 snapshotを保存した保留は、継続か案の撤回で操作が閉じると照合してから続ける（[順と失敗](../../plans/task-replanning.md#実装の状態)）。
 hostのrunは制御側がresumeか後始末の前に照合し（無ければ作る）、containerのrunはresumeのagentの前にexecutorが照合し制御側がslotで記録し、使い切れば失敗とし、失敗は`replan_restore_failed`で操作を`blocked`に戻す。
+継続・撤回の後の最初のresumeでwrapperの起動か登録の失敗も`replan_restore_failed`で成果を残して`blocked`に戻し、再び続ければ照合し直す。
 保留を終えた柵（`blocked`などの保留の後の操作、落ち着いたhold）がslotに見つけたrunは、書き手の終わりを待ってから、snapshotを作らずworktreeを残して休む（`ParkFor::Rest`）。
 この休止は照合も作り直しもせず、操作の結末か解除の後のresumeが新しいvalidationとreviewから続ける。
 保留の時にturnが始まっていなかった回答は継続のresumeの依頼に載せ、柵に拒まれて配れなかった回答は継続のsessionが届ける。
