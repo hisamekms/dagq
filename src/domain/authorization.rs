@@ -69,10 +69,13 @@ string_enum!(Capability {
     RequestRecord => "request.record",
     RequestDecline => "request.decline",
     // The replanning of a run (ADR-t1521-1, ADR-t1521-2): a person's
-    // request, a worker's proposal on its own run, and the park and the
-    // replacement only the trusted runtime does.
+    // request, a worker's proposal on its own run, a person's resolution
+    // of an operation held `blocked` (continue, withdraw or plan again,
+    // ADR-t1521-2 decision 2), and the park and the replacement only the
+    // trusted runtime does.
     ReplanRequest => "replan.request",
     ReplanPropose => "replan.propose",
+    ReplanResolve => "replan.resolve",
     ReplanPark => "replan.park",
     ReplanApply => "replan.apply",
     // The hold of a task and its release (ADR-t1879-1 decision 3): a
@@ -138,7 +141,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 65] = [
+    pub const ALL: [Self; 66] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -175,6 +178,7 @@ impl Capability {
         Self::RequestDecline,
         Self::ReplanRequest,
         Self::ReplanPropose,
+        Self::ReplanResolve,
         Self::ReplanPark,
         Self::ReplanApply,
         Self::TaskHold,
@@ -591,6 +595,7 @@ const INBOX: &[Capability] = &[
     C::PlannerOpen,
     C::RequestRecord,
     C::ReplanRequest,
+    C::ReplanResolve,
     C::TaskHold,
     C::ScreenRead,
     C::ScreenSend,
@@ -1056,6 +1061,7 @@ mod tests {
         };
         for role_ in [ActorRole::User, ActorRole::Inbox] {
             assert!(allowed(&role(role_), C::ReplanRequest, &on("r1")));
+            assert!(allowed(&role(role_), C::ReplanResolve, &on("r1")));
             assert!(!allowed(&role(role_), C::ReplanPark, &on("r1")));
             assert!(!allowed(&role(role_), C::ReplanApply, &on("r1")));
         }
@@ -1063,11 +1069,13 @@ mod tests {
         assert!(allowed(&worker, C::ReplanPropose, &on("r1")));
         assert!(!allowed(&worker, C::ReplanPropose, &on("r2")));
         assert!(!allowed(&worker, C::ReplanRequest, &on("r1")));
+        assert!(!allowed(&worker, C::ReplanResolve, &on("r1")));
         assert!(!allowed(&worker, C::ReplanPark, &on("r1")));
         let supervisor = role(ActorRole::Supervisor);
         assert!(allowed(&supervisor, C::ReplanPark, &on("r1")));
         assert!(allowed(&supervisor, C::ReplanApply, &on("r1")));
         assert!(!allowed(&supervisor, C::ReplanRequest, &on("r1")));
+        assert!(!allowed(&supervisor, C::ReplanResolve, &on("r1")));
         for role_ in ActorRole::ALL.into_iter().filter(|role_| {
             !matches!(
                 role_,
@@ -1077,6 +1085,7 @@ mod tests {
             for capability in [
                 C::ReplanRequest,
                 C::ReplanPropose,
+                C::ReplanResolve,
                 C::ReplanPark,
                 C::ReplanApply,
             ] {

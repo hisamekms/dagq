@@ -261,6 +261,8 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::ReadyInheritRead
         | UseCase::ReadyInheritImages
         | UseCase::ReplanRequest
+        | UseCase::ReplanResolve
+        | UseCase::ReplanResolveRead
         | UseCase::Rebind
         | UseCase::Recover
         | UseCase::RunScreen
@@ -543,6 +545,12 @@ string_enum!(UseCase {
     // run's work, read or not. No command line goes to it alone.
     ReleaseImages => "release_images",
     ReplanRequest => "replan_request",
+    ReplanResolve => "replan_resolve",
+    // What `dagq replan resolve` asks for first: the ref that pins the
+    // operation's snapshot and the head it must name, which the client
+    // reads with Git itself before it sends the resolution. No command
+    // line goes to it alone.
+    ReplanResolveRead => "replan_resolve_read",
     Rebind => "rebind",
     Recover => "recover",
     // A run's and a planner's screen, input and log, as `dagq run
@@ -620,6 +628,7 @@ impl UseCase {
             ("hold", _) => Self::Hold,
             ("release", _) => Self::Release,
             ("replan", Some("request")) => Self::ReplanRequest,
+            ("replan", Some("resolve")) => Self::ReplanResolve,
             ("rebind", _) => Self::Rebind,
             ("recover", _) => Self::Recover,
             ("run", Some("screen")) => Self::RunScreen,
@@ -4445,6 +4454,7 @@ mod tests {
             (&["hold", "4", "--reason", "x"], "hold"),
             (&["release", "4"], "release"),
             (&["replan", "request", "r1"], "replan_request"),
+            (&["replan", "resolve", "3"], "replan_resolve"),
             (&["rebind"], "rebind"),
             (&["recover", "r1"], "recover"),
             (&["run", "screen", "r1"], "run_screen"),

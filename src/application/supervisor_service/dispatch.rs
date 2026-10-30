@@ -337,6 +337,24 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 generation,
             ))
         }
+        "fail_continuation_start" => {
+            let (id, token, op, generation, why): (
+                RunId,
+                LeaseToken,
+                crate::domain::ReplanId,
+                i64,
+                String,
+            ) = read(op, args)?;
+            own(&token)?;
+            answer(RunTransitions::fail_continuation_start(
+                &mut *store,
+                &id,
+                &token,
+                op,
+                generation,
+                &why,
+            ))
+        }
         "finish_restore" => {
             let (id, token, op, generation, restored): (
                 RunId,

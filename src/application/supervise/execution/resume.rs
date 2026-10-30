@@ -205,17 +205,70 @@ impl Supervisor<'_> {
             Err(error) => {
                 let message = format!("run {} could not be resumed: {error:#}", run.id());
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{}", message);
+                self.block_unstarted_continuation(&run, &message);
                 self.give_up_resume(
                     &run,
                     attempt,
                     None,
                     message,
                     &reason_of_error(&error, ReasonCode::Other),
+                    None,
                 );
             }
         }
         Ok(())
     }
+    /// [`Self::block_unstarted_continuation`] for a resume whose watch
+    /// failed (`why`) after its session was launched, when the run's
+    /// `processes` hold no wrapper: the session never registered (the
+    /// resume's lease cleared the earlier session's processes, so a
+    /// wrapper of the run is this resume's). A session that registered and
+    /// failed later did start, and its failure is the run's own.
+    pub(super) fn block_unregistered_continuation(
+        &mut self,
+        run: &TaskRun,
+        why: &str,
+        processes: &[RunProcess],
+    ) {
+        if !processes.iter().any(|p| p.role == "wrapper") {
+            self.block_unstarted_continuation(run, why);
+        }
+    }
+    /// Hold the replanning operation `run` resumes after, a continuation
+    /// or a withdrawal, `blocked` again when its new session could not be
+    /// started (`why`), with the saved work kept (ADR-t1521-2 decision 2):
+    /// only for the continuation's first resume, while this supervisor
+    /// still holds the run (`fail_continuation_start` of the store).
+    /// The blocked operation then guards the task, so the run is not
+    /// resumed again and its resumes are not spent until a person decides.
+    fn block_unstarted_continuation(&mut self, run: &TaskRun, why: &str) {
+        let op = match self.queue.replans_of_run(run.id()) {
+            Ok(ops) => ops.into_iter().rev().find(|op| op.status.reopens()),
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its replanning could not be read after its session did not start: {error:#}", run.id());
+                return;
+            }
+        };
+        let Some(op) = op else {
+            return;
+        };
+        match self.queue.fail_continuation_start(
+            run.id(),
+            self.registration.token(),
+            op.id,
+            op.generation,
+            why,
+        ) {
+            Ok(true) => {
+                warn!(run_id = %run.id(), "run {}: replan operation {} is blocked again: the session that continues it did not start; the saved work is kept", run.id(), op.id);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: replan operation {} could not be held blocked after its session did not start: {error:#}", run.id(), op.id);
+            }
+        }
+    }
+
     /// The worktree head of a `needs_session` run an earlier resume already
     /// resolved although it was not judged so (its session rewrote the
     /// receipt before the attempt that saw it, or went idle without

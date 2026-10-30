@@ -875,6 +875,10 @@ pub struct ReplanBrief {
     pub successors: Vec<SuccessorBrief>,
     pub plan: Option<PlanRevision>,
     pub problems: Vec<PlanProblem>,
+    /// A person's resolutions of the operation held `blocked`, oldest
+    /// first: each `replan_resolved`'s payload with its event id and time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolutions: Vec<serde_json::Value>,
 }
 
 /// What a turn was for, by the first word of its `what`: the count the

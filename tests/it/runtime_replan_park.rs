@@ -12,7 +12,8 @@ use dagq::domain::EventKind;
 
 use dagq::domain::replan_snapshot::SnapshotManifest;
 use dagq::domain::task_replan::{
-    NewReplan, ReplanMove, ReplanOperation, ReplanOrigin, ReplanStatus,
+    NewReplan, ReplanMove, ReplanOperation, ReplanOrigin, ReplanResolution, ReplanStatus,
+    ResolveReplan,
 };
 use dagq::domain::{ReplanId, worker::WorkerMode};
 use dagq::infrastructure::location::replans_dir;
@@ -320,6 +321,64 @@ fn a_continuation_resumes_the_parked_run_on_its_saved_work_and_lands() {
     }
 }
 
+/// Acceptance: a continuation whose first resumed session is launched but
+/// whose wrapper never registers did not start: past the registration
+/// timeout the supervisor holds the operation `blocked` again
+/// (`replan_restore_failed` with `start_failed`), with the work kept, and
+/// stops the session it launched; the blocked operation keeps the run
+/// from being resumed again, so no other resume is spent. Which resume is the continuation's first is
+/// `domain::task_replan`'s (unit tests).
+#[test]
+fn a_continuation_whose_wrapper_never_registers_is_blocked_again() {
+    let (_dir, repo, db, first, op) = park_during_a_turn("");
+    let run = detail(&db).runs[0].clone();
+    let worktree = Path::new(run.worktree_path().unwrap());
+    let continuing = advance(&db, &op, ReplanStatus::ContinuingAfterPark);
+    let mut backend = TestWorkspace::new(&db, false, "exit 99");
+    backend.headless = first.headless.clone();
+    backend.resume_no_session = true;
+    backend.registration_timeout = Duration::from_secs(1);
+    let backend = Arc::new(backend);
+    let (_reviewer, supervisor) =
+        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    let errors = outcome["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1, "{outcome}");
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("did not register"),
+        "{outcome}"
+    );
+    let detail = detail(&db);
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    assert_eq!(payloads(&detail, "replan_restored").len(), 1);
+    assert_eq!(payloads(&detail, "resume_started").len(), 1);
+    let finished = payloads(&detail, "resume_finished");
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert_eq!(finished[0]["outcome"], "error");
+    // The session it launched, whose wrapper never registered, is stopped.
+    let launched = finished[0]["workspace_id"].as_str().unwrap().to_owned();
+    assert_eq!(backend.closed(), [launched]);
+    let failed = payloads(&detail, "replan_restore_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["start_failed"], true, "{failed:?}");
+    assert_eq!(failed[0]["generation"], json!(continuing.generation));
+    let blocked = operation(&db, op.id);
+    assert_eq!(blocked.status, ReplanStatus::Blocked, "{blocked:?}");
+    assert_eq!(
+        blocked.return_phase,
+        Some(ReplanStatus::ContinuingAfterPark)
+    );
+    assert!(blocked.closed_at.is_none());
+    assert_eq!(blocked.snapshot_id, op.snapshot_id);
+    for file in ["notes.txt", "staged.txt"] {
+        assert!(worktree.join(file).exists(), "{file} is kept");
+    }
+}
+
 /// Acceptance: once a withdrawal ends the operation, a run whose worktree
 /// is gone gets it made again from the snapshot (its branch at the pinned
 /// head, the staged and unstaged changes and the untracked file) before
@@ -460,7 +519,14 @@ fn a_restore_of_the_old_layout_stopped_in_the_old_scratch_starts_again() {
 /// keeps the work from being saved while it may still write it: once the
 /// wrapper and the turn are gone and the helper outlives a short grace,
 /// the operation is `blocked` with the helper named, no snapshot is
-/// recorded, the worktree keeps the work, and the slot is given back.
+/// recorded, the worktree keeps the work, and the slot is given back. A
+/// continuation a person resolves from there starts no session beside the
+/// helper, even with another operation opened on the run since: the
+/// supervisor looks for it again before the resume, holds the operation
+/// `blocked` again with the helper named (superseding the later one,
+/// which does not guard the task), and spends no resume;
+/// once the helper is gone, the continuation resumes the run on its
+/// worktree as it left it (`replan_restored` `unsaved`) and it lands.
 #[test]
 fn a_helper_left_running_in_the_worktree_blocks_the_park() {
     /// Stops the helper by its pid when the test ends, passed or not.
@@ -482,9 +548,9 @@ fn a_helper_left_running_in_the_worktree_blocks_the_park() {
         r#"printf '%s\n' 'i=0; while [ $i -lt 120 ] && kill -0 {test} 2>/dev/null && [ -d "$1" ]; do sleep 1; i=$((i+1)); done' > "$RUN_DIR/helper.sh"; perl -e 'setpgrp(0, 0) or die "setpgrp: $!"; open(my $p, ">", "$ARGV[0]/helper.tmp") or die $!; print $p "$$\n"; close($p) or die $!; rename "$ARGV[0]/helper.tmp", "$ARGV[0]/helper.pid" or die $!; exec "sh", "$ARGV[0]/helper.sh", "$ARGV[0]"' "$RUN_DIR" >/dev/null 2>&1 & await_file "$RUN_DIR/helper.pid";"#,
         test = std::process::id()
     );
-    let (_dir, _repo, db, _backend, op) = park_during_a_turn(&helper);
+    let (_dir, repo, db, backend, op) = park_during_a_turn(&helper);
     let run = detail(&db).runs[0].clone();
-    let _helper = Helper(Path::new(run.run_dir().unwrap()).join("helper.pid"));
+    let helper = Helper(Path::new(run.run_dir().unwrap()).join("helper.pid"));
     let pid = fs::read_to_string(Path::new(run.run_dir().unwrap()).join("helper.pid")).unwrap();
     assert_eq!(op.status, ReplanStatus::Blocked, "{op:?}");
     assert_eq!(op.return_phase, Some(ReplanStatus::Quiescing));
@@ -501,6 +567,92 @@ fn a_helper_left_running_in_the_worktree_blocks_the_park() {
     assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
     let worktree = Path::new(run.worktree_path().unwrap());
     assert!(worktree.join("notes.txt").exists());
+
+    // A person's continuation, then (`between`) a supervisor's pass.
+    let continued = |op: &ReplanOperation, between: &dyn Fn()| {
+        let resolved = SqliteQueue::open(&db)
+            .unwrap()
+            .resolve_replan(
+                &ResolveReplan {
+                    operation: op.id,
+                    generation: op.generation,
+                    resolution: ReplanResolution::Continue,
+                    reason: "the person continues it".into(),
+                },
+                None,
+                "user",
+                "user",
+            )
+            .unwrap()
+            .operation;
+        assert_eq!(resolved.status, ReplanStatus::ContinuingAfterPark);
+        between();
+        let (_reviewer, supervisor) =
+            supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
+        finished(&db, &backend, supervisor);
+        resolved
+    };
+    // A request made on the run before the supervisor resumes it opens
+    // another operation, which does not hide the continuation's check and
+    // is superseded once the continuation is held `blocked` again.
+    let later = std::cell::Cell::new(None);
+    let first = continued(&op, &|| {
+        let opened = SqliteQueue::open(&db)
+            .unwrap()
+            .record_replan(
+                &NewReplan {
+                    run: run.id().clone(),
+                    reason: "split it after all".into(),
+                    evidence: Vec::new(),
+                },
+                ReplanOrigin::Manual,
+                "inbox",
+                "inbox",
+            )
+            .unwrap()
+            .operation;
+        assert_eq!(opened.status, ReplanStatus::Candidate);
+        later.set(Some(opened.id));
+    });
+    let later = operation(&db, later.get().unwrap());
+    assert_eq!(later.status, ReplanStatus::Continuing, "{later:?}");
+    let held = self::detail(&db);
+    assert!(payloads(&held, "resume_started").is_empty());
+    let failed = payloads(&held, "replan_restore_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["generation"], json!(first.generation));
+    let why = failed[0]["reason"].as_str().unwrap();
+    assert!(
+        why.contains("still run") && why.contains(pid.trim()),
+        "{why}"
+    );
+    let blocked = operation(&db, op.id);
+    assert_eq!(blocked.status, ReplanStatus::Blocked, "{blocked:?}");
+    assert_eq!(
+        blocked.return_phase,
+        Some(ReplanStatus::ContinuingAfterPark)
+    );
+    assert!(worktree.join("notes.txt").exists());
+
+    // The helper stopped, the next continuation resumes and lands.
+    drop(helper);
+    wait_until(&db, common::STEP_LIMIT, |_| {
+        use crate::common::Bounded;
+        !std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .bounded_output()
+            .unwrap()
+            .status
+            .success()
+    });
+    let second = continued(&blocked, &|| {});
+    let landed = self::detail(&db);
+    assert_eq!(landed.task.status(), TaskStatus::Completed);
+    let restored = payloads(&landed, "replan_restored");
+    assert_eq!(restored.len(), 1, "{restored:?}");
+    assert_eq!(restored[0]["action"], "unsaved");
+    assert_eq!(restored[0]["generation"], json!(second.generation));
+    assert_eq!(payloads(&landed, "resume_started").len(), 1);
 }
 
 /// Acceptance: a turn the wrapper would run again as a new session (its

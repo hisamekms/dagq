@@ -114,7 +114,8 @@ pub fn requests<Q: ?Sized>(
 
 /// `replans`: the one operation `read` names whatever its status, with
 /// its latest replacement plan and that plan's problems now (`plan`,
-/// `plan_problems`), or the open ones (every one with `all`), as
+/// `plan_problems`) and a person's resolutions of it held `blocked`
+/// (`resolutions`), or the open ones (every one with `all`), as
 /// `{"replans"}`.
 pub fn replans<Q: ?Sized>(
     queue: &Q,
@@ -127,6 +128,7 @@ pub fn replans<Q: ?Sized>(
             let mut operation = serde_json::to_value(&brief.operation)?;
             operation["plan"] = serde_json::to_value(&brief.plan)?;
             operation["plan_problems"] = serde_json::to_value(&brief.problems)?;
+            operation["resolutions"] = serde_json::to_value(&brief.resolutions)?;
             json!([operation])
         }
         None => serde_json::to_value(sources.replan_operations(queue, read.all)?)?,

@@ -14,16 +14,16 @@ Every replanning is one **operation** on a task (at most one open per task), wha
 6. **Plan review** (`reviewing`, `awaiting_answer` on its concern): the usual plan review plus the replacement's own checks. Its pass marks the plan approved; the children stay `submitted` and no one may `ready` them.
 7. **Apply** (`applying` → `applied`): the supervisor checks the snapshot and everything again and, in one transaction, marks the original task and run `replaced`, readies the children, hands each its part of the saved work and moves every successor's dependency onto the children it needs. Or **continue after the park** (`continuing_after_park`): the run's worktree is checked against the snapshot (rebuilt when it is gone) and the runtime resumes it.
 
-A step past the diagnosis that fails holds the operation `blocked` with its reason, the run parked and its work kept (in the snapshot, or in the untouched worktree when the save failed). A diagnosis that keeps failing becomes a `decide` ask instead.
+A step past the diagnosis that fails holds the operation `blocked` with its reason, the run parked and its work kept (in the snapshot, or in the untouched worktree when the save failed). A failed apply is the supervisor's to check again; any other `blocked` one waits for a person's `replan resolve` (continue, withdraw or plan again, the work kept whichever: the `dagq-recover` skill's `reference/replan-held.md`). A diagnosis that keeps failing becomes a `decide` ask instead.
 
 ## 2. What each role may do
 
 | Role | May | Never |
 | --- | --- | --- |
-| Person (terminal without `DAGQ_ROLE`) | `replan request`; answer the `decide` ask, a planner's `planner_question` and plan review's `approve_plan` | edit, `cancel`, `ready`, `integrate`, `recover`, resume or land the held task or run: refused while the operation guards it, for every role |
+| Person (terminal without `DAGQ_ROLE`) | `replan request`; `replan resolve` of a `blocked` operation; answer the `decide` ask, a planner's `planner_question` and plan review's `approve_plan` | edit, `cancel`, `ready`, `integrate`, `recover`, resume or land the held task or run: refused while the operation guards it, for every role |
 | Inbox | the same, on the person's word, recorded as delegated | `replan propose`; deciding for the person |
-| Worker (Claude or Codex), its own run only | `replan propose --run <its run>` | `replan request`; a proposal on another run; asking a person whether to split |
-| Runtime planner of the operation's request | `request decline N --continue-run`, `add` / `lint` / `submit --replacement` for the children, `planner_question` (section 3) | `replan`; editing, cancelling or readying the original task, its run or worktree; `ready` of a child |
+| Worker (Claude or Codex), its own run only | `replan propose --run <its run>` | `replan request`, `replan resolve`; a proposal on another run; asking a person whether to split |
+| Runtime planner of the operation's request | `request decline N --continue-run`, `add` / `lint` / `submit --replacement` for the children, `planner_question` (section 3) | `replan` (`resolve` included); editing, cancelling or readying the original task, its run or worktree; `ready` of a child |
 | Plan review, diagnosis and other jobs | their verdict | any command that changes state |
 | Supervisor (no command) | the diagnosis's move, the park, the snapshot, the apply, the restore and resume | — |
 
@@ -51,7 +51,7 @@ Your prompt holds the operation: the acceptance items with their ordinal and has
 
 A revise of the replacement proposal comes back to the planner the revise opens: fix the children and the plan, `submit --proposal P --replacement plan.json`. That planner deletes an item only through `ask --task <original> --kind planner_question --because scope` (an ask about a child allows none).
 
-There is no command to withdraw an operation. `proposal withdraw P` of a replacement puts the operation back to `planning`, but the request is already `proposed` and can no longer be declined: submit another plan in the same session, or the operation ends `blocked`. Never `request decline` without `--continue-run` only to drop the request: the operation then waits `blocked`, the run parked, for a person (`skills/dagq-recover/reference/replan-held.md`).
+The planner has no command to withdraw an operation: once it is `blocked`, a person or the inbox may withdraw it with `replan resolve --withdraw`. `proposal withdraw P` of a replacement puts the operation back to `planning`, but the request is already `proposed` and can no longer be declined: submit another plan in the same session, or the operation ends `blocked`. Never `request decline` without `--continue-run` only to drop the request: the operation then waits `blocked`, the run parked, for a person (`skills/dagq-recover/reference/replan-held.md`).
 
 ## 5. Moving a condition to a child is not deleting it
 

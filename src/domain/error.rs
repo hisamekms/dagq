@@ -414,6 +414,12 @@ pub enum DomainError {
     ReplanApplyUnavailable {
         operation: ReplanId,
     },
+    /// A person's resolution of a replanning operation that does not take
+    /// one now ([`super::task_replan::resolve_to`]): nothing is written.
+    ReplanNotResolvable {
+        operation: ReplanId,
+        reason: String,
+    },
     /// A replacement plan that is not the JSON of one.
     InvalidReplacementPlan {
         reason: String,
@@ -1076,6 +1082,10 @@ impl fmt::Display for DomainError {
             Self::ReplanApplyUnavailable { operation } => write!(
                 f,
                 "replan operation {operation} moves into the replacement only by the trusted runtime's atomic apply"
+            ),
+            Self::ReplanNotResolvable { operation, reason } => write!(
+                f,
+                "replan operation {operation} is not resolved, and nothing is changed: {reason}"
             ),
             Self::InvalidReplacementPlan { reason } => {
                 write!(f, "the replacement plan is not valid JSON of one: {reason}")

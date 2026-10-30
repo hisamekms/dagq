@@ -63,7 +63,9 @@ CLIのDBの経路とserviceは同じ`compose::run_command`で走らせるので�
 書き込みは1つのコマンドにつき1つのtransactionでserviceの中で終わり（`planner request`の2つのeventも一緒に確定する）、eventのactorは呼び出し元のprincipal。
 Gitとprogramはserviceでなくクライアントがユースケースの外で走らせる（ADR-t3102-3決定5）。
 
-- 認可: runtimeの操作（`rebind`・`recover`・screen・`planner request`）と`report`・`graph --out`（`queue.export`）は走らせる前にCLIと同じcapabilityを`Gate`で通し、`answer`・`ask close`・`hold`・`release`・`replan request`はapplicationがqueueを読んで通す
+- 認可: runtimeの操作（`rebind`・`recover`・screen・`planner request`）と`report`・`graph --out`（`queue.export`）は走らせる前にCLIと同じcapabilityを`Gate`で通し、`answer`・`ask close`・`hold`・`release`・`replan request`・`replan resolve`はapplicationがqueueを読んで通す
+  `replan resolve`はまず`replan_resolve_read`でsnapshotの固定したrefと保存したheadを受け取り、クライアントが束縛したrepositoryのGitで照合した結果を添えて送る。
+  `run_command`はmanifestとfileをqueueの隣から読んでその結果と突き合わせ、storeの1つのtransactionが操作の版と子を確かめ直す
 - paramsのpathは絶対path（serviceは別のdirectoryで動く）。
   `planner request`の言葉はクライアントが読み、環境が名指すroleがpolicyで`planner.request`を持たなければ読まずに送るので、断られる呼び出し元のfileとstdinは読まれない
 - `run log`・`planner log`の答えはlogを読むbackgroundのsessionで、fileを出し`--follow`で追うのはクライアント。

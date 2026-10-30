@@ -425,8 +425,9 @@ pub(crate) fn verification_containers(
 /// Git and programs, before it sends it, as none runs in the queue service
 /// (ADR-t3102-3 decision 5), asking `call` (the service, or [`run_command`]
 /// on the DB of the queue at `db`) what to read: `report`
-/// ([`observation::prepare_report`]) and `release`
-/// ([`host::prepare_release`]). Any other command as it is.
+/// ([`observation::prepare_report`]), `release`
+/// ([`host::prepare_release`]) and `replan resolve`
+/// ([`host::prepare_resolve`]). Any other command as it is.
 pub fn prepare_command(
     mut command: crate::application::queue_commands::QueueCommand,
     db: Option<&Path>,
@@ -436,6 +437,7 @@ pub fn prepare_command(
     match &mut command {
         C::Report(params) => observation::prepare_report(params, call)?,
         C::Release(params) => host::prepare_release(params, db, call)?,
+        C::ReplanResolve(params) if params.pin.is_none() => host::prepare_resolve(params, call)?,
         _ => {}
     }
     Ok(command)

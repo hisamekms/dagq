@@ -4341,6 +4341,16 @@ impl crate::application::commands::replans::ReplanStore for ServiceSqlite {
     ) -> Result<crate::domain::task_replan::ReplanOperation> {
         self.queue.move_replan(id, generation, step)
     }
+    fn resolve_replan(
+        &mut self,
+        resolve: &crate::domain::task_replan::ResolveReplan,
+        snapshot_problem: Option<&str>,
+        by_role: &str,
+        by_id: &str,
+    ) -> Result<crate::domain::task_replan::ReplanResolved> {
+        self.queue
+            .resolve_replan(resolve, snapshot_problem, by_role, by_id)
+    }
 }
 
 impl crate::application::agent_cases::CaseSetStore for ServiceSqlite {

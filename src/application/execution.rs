@@ -378,6 +378,7 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("agent set", &[C::EvalRead]),
     ("request decline", &[C::RequestDecline]),
     ("replan request", &[C::ReplanRequest]),
+    ("replan resolve", &[C::ReplanResolve]),
     ("replan propose", &[C::ReplanPropose]),
     ("hold", &[C::TaskHold]),
     ("release", &[C::TaskHold]),

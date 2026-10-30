@@ -1227,6 +1227,25 @@ impl RunTransitions for SupervisorQueue {
             ],
         )
     }
+    fn fail_continuation_start(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        why: &str,
+    ) -> Result<bool> {
+        self.remote(
+            "fail_continuation_start",
+            vec![
+                to_value(id)?,
+                to_value(token)?,
+                to_value(op)?,
+                to_value(generation)?,
+                to_value(why)?,
+            ],
+        )
+    }
     #[allow(clippy::too_many_arguments)]
     fn finish_restore(
         &mut self,

@@ -1599,7 +1599,13 @@ impl Supervisor<'_> {
     /// Before the resume of a run a replanning parked, once its operation
     /// ended in a continuation or a withdrawal: compare the run's worktree
     /// with the snapshot and make it again from the snapshot when it is
-    /// gone (`replan_restored`). Whether the run may resume now: `false`
+    /// gone (`replan_restored`); one whose operation saved nothing (its
+    /// save failed, or a writer left in the worktree kept it from saving)
+    /// resumes on the worktree as the run left it (`action` `unsaved`).
+    /// No process the run left in its worktree may still run first: one
+    /// that outlives [`LEFT_WRITER_GRACE`] fails the restore, with the
+    /// processes named, so that no new session starts beside a writer.
+    /// Whether the run may resume now: `false`
     /// while another supervisor restores it. The restore is one owner's
     /// from its start to its recorded result: the run is leased to this
     /// supervisor first ([`RunTransitions::begin_restore`]), each step that
@@ -1621,12 +1627,31 @@ impl Supervisor<'_> {
     /// it already.
     pub(super) fn restore_parked(&mut self, run: &TaskRun, resuming: bool) -> Result<bool> {
         let ops = self.queue.replans_of_run(run.id())?;
-        let Some(op) = ops.iter().rev().find(|op| op.snapshot_id.is_some()) else {
-            return Ok(true);
-        };
-        if !op.status.reopens() {
-            return Ok(true);
+        // The latest operation that saved the run's work comes back first,
+        // then the latest one that saved nothing and ended in a
+        // continuation or a withdrawal, on the work restored, whatever
+        // operation was opened on the run since.
+        let saved = ops.iter().rev().find(|op| op.snapshot_id.is_some());
+        let unsaved = ops
+            .iter()
+            .rev()
+            .find(|op| op.snapshot_id.is_none() && op.status.reopens());
+        for op in [saved, unsaved].into_iter().flatten() {
+            if op.status.reopens() && !self.restore_operation(run, op, resuming)? {
+                return Ok(false);
+            }
         }
+        Ok(true)
+    }
+
+    /// [`Self::restore_parked`] of operation `op`, closed in a continuation
+    /// or a withdrawal: whether the run may go on past it now.
+    fn restore_operation(
+        &mut self,
+        run: &TaskRun,
+        op: &ReplanOperation,
+        resuming: bool,
+    ) -> Result<bool> {
         let token = self.registration.token().clone();
         match self
             .queue
@@ -1640,11 +1665,18 @@ impl Supervisor<'_> {
             RestoreStart::Owned => {}
         }
         let snapshot = op.snapshot_id.clone().unwrap_or_default();
-        let restored = self.restore_from(run, op.id, &snapshot, &token, resuming);
+        let restored = match self.left_writers(run, LEFT_WRITER_GRACE) {
+            Quiet::Stuck(why) => Err(anyhow!("{why}")),
+            Quiet::Stopped | Quiet::Waiting => match &op.snapshot_id {
+                Some(_) => self.restore_from(run, op.id, &snapshot, &token, resuming),
+                None => Ok(Restored::Unsaved),
+            },
+        };
         // Handed to a container's executor, which answers before the
         // resumed turn's agent runs: the answer is recorded at a later look.
         let restored = match restored {
-            Ok(Restored::Done(action, manifest)) => Ok((action, manifest)),
+            Ok(Restored::Done(action, manifest)) => Ok((action, Some(manifest))),
+            Ok(Restored::Unsaved) => Ok(("unsaved".to_owned(), None)),
             Ok(Restored::Handed) => {
                 self.pause_at(PausePoint::RestoreHanded, run.id());
                 // A lease another supervisor took over meanwhile: the run
@@ -1670,12 +1702,17 @@ impl Supervisor<'_> {
             return Ok(false);
         }
         let result = match &restored {
-            Ok((action, manifest)) => Ok(
+            Ok((action, Some(manifest))) => Ok(
                 json!({"operation_id": op.id, "snapshot_id": snapshot, "action": action,
                        "head": manifest.head, "dirty": manifest.dirty}),
             ),
-            Err(error) => Err(format!(
+            Ok((action, None)) => Ok(json!({"operation_id": op.id, "action": action})),
+            Err(error) if op.snapshot_id.is_some() => Err(format!(
                 "the work of run {} could not be restored from snapshot {snapshot}: {error:#}; the snapshot and the worktree are kept and the run does not resume",
+                run.id()
+            )),
+            Err(error) => Err(format!(
+                "the work of run {} could not be taken up again in its worktree: {error:#}; the worktree is kept and the run does not resume",
                 run.id()
             )),
         };
@@ -1688,8 +1725,12 @@ impl Supervisor<'_> {
             return Ok(false);
         }
         match (restored, failed) {
-            (Ok((action, _)), _) => {
+            (Ok((action, Some(_))), _) => {
                 info!(run_id = %run.id(), "run {}: the work saved in snapshot {snapshot} is in its worktree ({action}); it resumes", run.id());
+                Ok(true)
+            }
+            (Ok((_, None)), _) => {
+                info!(run_id = %run.id(), "run {}: replan operation {} saved nothing and no process it left in its worktree runs; it resumes on its worktree as it is", run.id(), op.id);
                 Ok(true)
             }
             (Err(_), Some(why)) => bail!("{why}"),
@@ -2189,6 +2230,9 @@ enum Restored {
     /// The restore is handed to the executor of the run's container, which
     /// answers before the resumed turn's agent runs.
     Handed,
+    /// The operation saved nothing: the worktree is the run's work as it
+    /// left it.
+    Unsaved,
 }
 
 /// The head of a run in a container and the work its executor wrote at its

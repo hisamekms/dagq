@@ -1,9 +1,10 @@
 //! The host's dialogue and operations through the queue service
 //! (ADR-t3102-2 decision 6 (4), ADR-t3102-3 decision 3): `answer`, `ask
-//! close`, `hold`, `release`, `replan request`, `rebind`, `recover`, `run
-//! screen|send|log`, `planner screen|send|log|request`, `report` and
-//! `graph --out` of the user and the inbox go to the queue's service as
-//! the caller's principal and print what the command line printed on the
+//! close`, `hold`, `release`, `replan request`, `replan resolve`,
+//! `rebind`, `recover`, `run screen|send|log`, `planner
+//! screen|send|log|request`, `report` and `graph --out` of the user and
+//! the inbox go to the queue's service as the caller's principal and
+//! print what the command line printed on the
 //! DB, which its own function (`compose::run_command`) answers on a twin
 //! of the queue opened directly; the service refuses a worker's
 //! client-mode `dagq` each of them and records the refusal; and each write
@@ -230,6 +231,19 @@ fn each_host_command_runs_through_the_service_as_on_the_db_and_is_refused_a_work
         (
             &["replan", "request", "--run", &run, "--reason", "r"],
             "replan.request",
+        ),
+        (
+            &[
+                "replan",
+                "resolve",
+                "1",
+                "--generation",
+                "1",
+                "--continue",
+                "--reason",
+                "r",
+            ],
+            "replan.resolve",
         ),
         (&["rebind", "--repo", "/nowhere"], "queue.admin"),
         (&["recover", &run], "run.recover"),

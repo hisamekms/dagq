@@ -74,11 +74,23 @@ pub fn provider_switches(events: &[RunEvent]) -> Vec<Value> {
 /// oldest first: the operations opened on it (`replan_requested`, with
 /// their origin), their diagnosis jobs and what the runtime made of each
 /// (`replan_diagnosis_started`, `replan_diagnosed` with its outcome,
-/// `replan_diagnosis_failed`), and their moves (`replan_status_changed`),
-/// each with its event, time and operation.
+/// `replan_diagnosis_failed`), a person's resolution of one held
+/// `blocked` (`replan_resolved`, with the choice and who made it), and
+/// their moves (`replan_status_changed`), each with its event, time and
+/// operation.
 pub fn replan_steps(events: &[RunEvent]) -> Vec<Value> {
-    const FIELDS: [&str; 9] = [
-        "origin", "attempt", "outcome", "why", "ask_id", "from", "to", "reason", "error",
+    const FIELDS: [&str; 11] = [
+        "origin",
+        "attempt",
+        "outcome",
+        "why",
+        "ask_id",
+        "resolution",
+        "by",
+        "from",
+        "to",
+        "reason",
+        "error",
     ];
     events
         .iter()
@@ -88,6 +100,7 @@ pub fn replan_steps(events: &[RunEvent]) -> Vec<Value> {
                 EventKind::ReplanDiagnosisStarted,
                 EventKind::ReplanDiagnosed,
                 EventKind::ReplanDiagnosisFailed,
+                EventKind::ReplanResolved,
                 EventKind::ReplanStatusChanged,
             ])
         })

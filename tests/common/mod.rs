@@ -30,6 +30,7 @@ pub mod cli;
 pub mod install;
 pub mod lifecycle;
 pub mod queue;
+pub mod replans;
 pub mod report;
 pub mod service;
 pub mod setup_review;

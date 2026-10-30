@@ -710,6 +710,8 @@ impl QueueRead {
             | UseCase::ReadyInheritRead
             | UseCase::ReadyInheritImages
             | UseCase::ReplanRequest
+            | UseCase::ReplanResolve
+            | UseCase::ReplanResolveRead
             | UseCase::Rebind
             | UseCase::Recover
             | UseCase::RunScreen

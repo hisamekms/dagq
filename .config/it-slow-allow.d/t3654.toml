@@ -1,0 +1,6 @@
+# 6.0s to 13.4s in the worker's runs and stress 5 under the host's load (the
+# park of a turn, then the 1-second registration timeout of the resume)
+[[test]]
+name = "runtime_replan_park::a_continuation_whose_wrapper_never_registers_is_blocked_again"
+reason = "B 境界（supervisor の配線・wrapper の process・SQLite）: 継続の最初の resume で起動した process の wrapper が登録されないまま時間切れになると、supervisor の resume の error の経路が操作を blocked に戻し、resume を使い切らないことを、実際の park・snapshot・supervisor の loop で確かめる。最初の resume の判断は domain::task_replan の unit test"
+task = 3654

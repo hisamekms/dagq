@@ -1453,6 +1453,18 @@ pub trait RunTransitions {
         generation: i64,
         restored: std::result::Result<serde_json::Value, String>,
     ) -> Result<bool>;
+    /// Hold `op` (read under `generation`), the continuation or withdrawal
+    /// run `id` resumes after, `blocked` again because the new session
+    /// could not be started (`why`), while `token` holds the run: only for
+    /// the continuation's first resume; whether it was recorded.
+    fn fail_continuation_start(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        why: &str,
+    ) -> Result<bool>;
     /// Record the answer of a container's executor to the restore of `op`
     /// handed before run `id`'s resume, while `token` holds the run in its
     /// slot: as [`Self::finish_restore`] records it, the lease kept, and

@@ -1998,6 +1998,32 @@ enum ReplanCommand {
         #[arg(long = "evidence")]
         evidence: Vec<i64>,
     },
+    /// Decide on replanning operation ID, held blocked by anything but its apply (only a person
+    /// at a plain terminal and the inbox, at a person's word): continue the parked run on its
+    /// saved work, withdraw the plan and continue it, or plan it again (from the snapshot, else
+    /// through the save again). The saved work is kept whichever is chosen. Refused, with
+    /// nothing changed, unless it is blocked at GENERATION as `replans ID` shows, its snapshot
+    /// is as saved and no child of its replacement proposal may be claimed. Prints
+    /// {"operation", "resolution", "blocked_at"}.
+    #[command(group(clap::ArgGroup::new("resolution").required(true).args(["continue_run", "withdraw", "replan"])))]
+    Resolve {
+        id: i64,
+        /// The generation the operation was read under.
+        #[arg(long)]
+        generation: i64,
+        /// Continue the parked run on its saved work.
+        #[arg(long = "continue")]
+        continue_run: bool,
+        /// Withdraw the plan and continue the run on its saved work.
+        #[arg(long)]
+        withdraw: bool,
+        /// Plan it again.
+        #[arg(long)]
+        replan: bool,
+        /// Why, in the person's words.
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 /// The splits of an agent's cases (`.dagq/agents/<agent>/evals/<split>.json`).
@@ -2766,6 +2792,8 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         Command::Replan { command } => match command {
             ReplanCommand::Request { run, .. } => one(C::ReplanRequest, run_resource(run)),
             ReplanCommand::Propose { run, .. } => one(C::ReplanPropose, run_resource(run)),
+            // The run of the operation is read from the queue.
+            ReplanCommand::Resolve { .. } => queue(C::ReplanResolve),
         },
         // The list of the tests that fail already (ADR-t1920-1): not for
         // a worker or a job, whose prompt carries it.
@@ -3433,6 +3461,31 @@ fn queue_command(command: &Command) -> Result<Option<QueueCommand>> {
             reason: reason.clone(),
             evidence: evidence.clone(),
         }),
+        Command::Replan {
+            command:
+                ReplanCommand::Resolve {
+                    id,
+                    generation,
+                    continue_run,
+                    withdraw,
+                    replan: _,
+                    reason,
+                },
+        } => QueueCommand::ReplanResolve(commands::ReplanResolveParams {
+            id: *id,
+            generation: *generation,
+            resolution: {
+                use dagq::domain::task_replan::ReplanResolution as R;
+                match (continue_run, withdraw) {
+                    (true, _) => R::Continue,
+                    (_, true) => R::Withdraw,
+                    _ => R::Replan,
+                }
+            },
+            reason: reason.clone(),
+            // Read here with Git before it is sent (`call_service`).
+            pin: None,
+        }),
         // The checkout's Git is read here, as none runs in the service; a
         // caller the policy does not grant `rebind` reads none and sends
         // none, and the service refuses and records it.
@@ -3600,9 +3653,9 @@ fn rebind_checkout(repo: Option<&Path>) -> Result<PathBuf> {
 }
 
 /// What `client` answers `command`, sent as the use case and params of
-/// [`client_request`], printed as [`finish_command`] prints it: a `report`
-/// and a `release` first ask what to read, and read it with Git and draw
-/// here before they are sent ([`dagq::compose::prepare_command`]), for the
+/// [`client_request`], printed as [`finish_command`] prints it: a
+/// `report`, a `release` and a `replan resolve` first ask what to read,
+/// and read it with Git and draw here before they are sent ([`dagq::compose::prepare_command`]), for the
 /// queue at `db` when the caller knows it; so do `stats` and `kpi`
 /// ([`dagq::compose::call_stats_read`], sent again while the service finds
 /// the Git reads older than the queue's events). A `ready --inherit` writes
@@ -3635,7 +3688,11 @@ fn call_service(
                 )?,
             );
         }
-        Command::Report { .. } | Command::Release { .. } => {
+        Command::Report { .. }
+        | Command::Release { .. }
+        | Command::Replan {
+            command: ReplanCommand::Resolve { .. },
+        } => {
             let queued = queue_command(command)?.context("the command is one of the service's")?;
             dagq::compose::prepare_command(queued, db, |first| {
                 let (use_case, params) = first.request();
@@ -5240,7 +5297,7 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Hold { .. }
         | Command::Release { .. }
         | Command::Replan {
-            command: ReplanCommand::Request { .. },
+            command: ReplanCommand::Request { .. } | ReplanCommand::Resolve { .. },
         }
         | Command::Recover { .. }
         | Command::Run {
@@ -6603,6 +6660,10 @@ mod tests {
             ("request decline", &["1", "--reason", "r"]),
             ("replan request", &["--run", "r1", "--reason", "r"]),
             (
+                "replan resolve",
+                &["3", "--generation", "2", "--continue", "--reason", "r"],
+            ),
+            (
                 "replan propose",
                 &["--run", "r1", "--reason", "r", "--evidence", "3"],
             ),
@@ -6809,6 +6870,10 @@ mod tests {
             ("hold", &["7", "--reason", "r"]),
             ("release", &["7"]),
             ("replan request", &["--run", "r1", "--reason", "r"]),
+            (
+                "replan resolve",
+                &["3", "--generation", "2", "--replan", "--reason", "r"],
+            ),
             ("replan propose", &["--run", "r1", "--reason", "r"]),
             ("agent eval", &["adr-rules"]),
             ("agent cases", &["adr-rules"]),

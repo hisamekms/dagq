@@ -1602,6 +1602,16 @@ impl RunTransitions for SqliteQueue {
     ) -> Result<Option<TaskRun>> {
         SqliteQueue::lease_for_hold_park(self, id, token, hold)
     }
+    fn fail_continuation_start(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        why: &str,
+    ) -> Result<bool> {
+        SqliteQueue::fail_continuation_start(self, id, token, op, generation, why)
+    }
     fn finish_restore(
         &mut self,
         id: &RunId,

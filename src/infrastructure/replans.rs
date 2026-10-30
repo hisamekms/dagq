@@ -446,6 +446,16 @@ impl crate::application::commands::replans::ReplanStore for SqliteQueue {
     ) -> Result<ReplanOperation> {
         SqliteQueue::move_replan(self, id, generation, step)
     }
+
+    fn resolve_replan(
+        &mut self,
+        resolve: &task_replan::ResolveReplan,
+        snapshot_problem: Option<&str>,
+        by_role: &str,
+        by_id: &str,
+    ) -> Result<task_replan::ReplanResolved> {
+        SqliteQueue::resolve_replan(self, resolve, snapshot_problem, by_role, by_id)
+    }
 }
 
 /// Move operation `id`, read under `generation`, as `step` says, on
@@ -931,6 +941,49 @@ fn open_operations(conn: &Connection, task: TaskId) -> Result<Vec<ReplanOperatio
         )?
         .query_map([task], operation_row)?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Move operation `id` (closed in a continuation or a withdrawal), read
+/// under `generation`, back to `blocked` with `why` when its restore or
+/// its new session failed (ADR-t1521-2 decision 2), on `conn` inside the
+/// caller's transaction, keeping its task to one open operation: one
+/// opened on the task since that does not guard it (`candidate`,
+/// `diagnosing`, which leaves the run going and holds no work) is
+/// superseded by `id` as `continuing`, as [`carry_open_to`] supersedes
+/// one, so that a request joins `id` from then on. One that guards the
+/// task parks the run itself and keeps it: nothing is moved, and `false`
+/// (the caller writes nothing either).
+pub(crate) fn reopen_blocked(
+    conn: &Connection,
+    id: ReplanId,
+    generation: i64,
+    why: &str,
+    now: i64,
+) -> Result<bool> {
+    let op = read_operation(conn, id)?;
+    let open = open_operations(conn, op.task_id)?;
+    if open.iter().any(|other| other.status.guards()) {
+        return Ok(false);
+    }
+    for other in open.iter().filter(|other| other.id != id) {
+        let step = ReplanMove {
+            to: ReplanStatus::Continuing,
+            reason: format!(
+                "superseded by replan operation {id} of the task, held blocked again: {why}"
+            ),
+            snapshot_id: None,
+            diagnosis: None,
+        };
+        move_in(conn, other.id, other.generation, &step, now)?;
+    }
+    let step = ReplanMove {
+        to: ReplanStatus::Blocked,
+        reason: why.to_owned(),
+        snapshot_id: None,
+        diagnosis: None,
+    };
+    move_in(conn, id, generation, &step, now)?;
+    Ok(true)
 }
 
 /// The task's open operation, if any ([`task_replan::current`]): what
@@ -1681,18 +1734,19 @@ pub(super) fn check_child_ready(conn: &Connection, task: TaskId) -> Result<()> {
     Ok(())
 }
 
-/// Send operation `op`, held `blocked` from its apply because its approved
-/// plan no longer holds (`problems`), back to a planner inside the
-/// caller's transaction (ADR-t1521-2 decision 2): the children of the
-/// plan's proposal go back to draft ([`release_children`]), the operation
-/// to `parked` with its snapshot, and its ended request is renewed
+/// Send operation `op`, held `blocked` with its snapshot (from its apply
+/// because its approved plan no longer holds, or at a person's word), back
+/// to a planner for `reason` inside the caller's transaction (ADR-t1521-2
+/// decision 2): the children of the plan's proposal go back to draft
+/// ([`release_children`]), the operation to `parked` with its snapshot,
+/// and its ended request is renewed
 /// ([`super::plan_requests::renew_declined`]) so that one planner opens for
 /// it with the material and the plan's problems. That planner makes a new
 /// plan, continues the run or withdraws; the saved work stays.
 pub(super) fn replan_again(
     conn: &Connection,
     op: &ReplanOperation,
-    problems: &[String],
+    reason: String,
     now: i64,
 ) -> Result<ReplanOperation> {
     release_children(conn, op, now)?;
@@ -1702,10 +1756,7 @@ pub(super) fn replan_again(
         op.generation,
         &ReplanMove {
             to: ReplanStatus::Parked,
-            reason: format!(
-                "the approved plan no longer applies, so a planner makes a new one from the saved work, continues the run or withdraws: {}",
-                problems.join("; ")
-            ),
+            reason,
             snapshot_id: None,
             diagnosis: None,
         },
@@ -1767,6 +1818,96 @@ fn release_children(conn: &Connection, op: &ReplanOperation, now: i64) -> Result
 }
 
 impl SqliteQueue {
+    /// Resolve the operation `resolve` names, held `blocked` by anything
+    /// but its apply, at a person's word (`by_role`, `by_id`: the user or
+    /// the inbox), in one write transaction ([`task_replan::resolve_to`]
+    /// reads the operation, its generation and the children of its
+    /// replacement proposal there, and `snapshot_problem` is why the caller
+    /// found its snapshot not as saved): one refused writes nothing, so a
+    /// second same resolution, under the generation the first raised past,
+    /// changes nothing. The operation takes a new generation, so that a
+    /// write decided under the one the person read (a restore's late
+    /// result) is refused, and then moves: to `continuing_after_park` or
+    /// `withdrawn`, which release the proposal's children to draft and
+    /// whose restore and resume are the continuation's ([`move_in`]); to
+    /// `parked` with its snapshot, on a new request when its request ended
+    /// ([`replan_again`]); or back to the save. `replan_resolved` records
+    /// the choice, who made it and why, beside the move's
+    /// `replan_status_changed`. The task's conditions and dependencies are
+    /// not touched.
+    pub fn resolve_replan(
+        &mut self,
+        resolve: &task_replan::ResolveReplan,
+        snapshot_problem: Option<&str>,
+        by_role: &str,
+        by_id: &str,
+    ) -> Result<task_replan::ReplanResolved> {
+        resolve.validate()?;
+        let now = self.generators.clock.now();
+        let tx = self.write_tx("resolve_replan", TransactionBehavior::Immediate)?;
+        let op = read_operation(&tx, resolve.operation)?;
+        let mut children = Vec::new();
+        if let Some(proposal) = op.proposal_id {
+            for &task in super::proposals::read(&tx, proposal)?.task_ids() {
+                children.push((task, read_task(&tx, task)?.status()));
+            }
+        }
+        let to = task_replan::resolve_to(&task_replan::ResolveState {
+            operation: &op,
+            generation: resolve.generation,
+            resolution: resolve.resolution,
+            children: &children,
+            snapshot_problem,
+        })?;
+        let generation = op.generation + 1;
+        tx.execute(
+            "UPDATE replan_operations SET generation=?1, updated_at=?2 WHERE id=?3 AND generation=?4",
+            params![generation, now, op.id, op.generation],
+        )?;
+        let raised = read_operation(&tx, op.id)?;
+        let reason = format!(
+            "{by_role} chose to {}: {}",
+            match resolve.resolution {
+                task_replan::ReplanResolution::Continue => "continue the run on its saved work",
+                task_replan::ReplanResolution::Withdraw =>
+                    "withdraw the plan and continue the run on its saved work",
+                task_replan::ReplanResolution::Replan => "plan it again",
+            },
+            resolve.reason
+        );
+        event(
+            &tx,
+            op.task_id,
+            Some(&op.run_id),
+            EventKind::ReplanResolved,
+            json!({"operation_id": op.id, "resolution": resolve.resolution,
+                   "blocked_at": op.return_phase, "to": to, "generation": generation,
+                   "reason": resolve.reason, "by": by_role, "by_id": by_id}),
+        )?;
+        let moved = if to == ReplanStatus::Parked {
+            replan_again(&tx, &raised, reason, now)?
+        } else {
+            move_in(
+                &tx,
+                op.id,
+                generation,
+                &ReplanMove {
+                    to,
+                    reason,
+                    snapshot_id: None,
+                    diagnosis: None,
+                },
+                now,
+            )?
+        };
+        tx.commit()?;
+        Ok(task_replan::ReplanResolved {
+            operation: moved,
+            resolution: resolve.resolution,
+            blocked_at: op.return_phase,
+        })
+    }
+
     /// What the planner of operation `id`'s request reads of it
     /// ([`ReplanBrief`]).
     pub fn replan_brief(&self, id: ReplanId) -> Result<ReplanBrief> {
@@ -1822,6 +1963,29 @@ impl SqliteQueue {
             }
             None => Vec::new(),
         };
+        let mut resolutions = Vec::new();
+        let mut statement = self.conn.prepare(
+            "SELECT id, created_at, payload FROM run_events WHERE task_id=?1 AND kind=?2
+             AND json_extract(payload,'$.operation_id')=?3 ORDER BY id",
+        )?;
+        let rows = statement.query_map(
+            params![op.task_id, EventKind::ReplanResolved.as_str(), id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            let (event_id, at, payload) = row?;
+            let mut resolution: serde_json::Value =
+                serde_json::from_str(&payload).unwrap_or_default();
+            resolution["event_id"] = json!(event_id);
+            resolution["at"] = json!(at);
+            resolutions.push(resolution);
+        }
         Ok(ReplanBrief {
             operation: op,
             turns: turns.into_iter().collect(),
@@ -1829,6 +1993,7 @@ impl SqliteQueue {
             successors,
             plan,
             problems,
+            resolutions,
         })
     }
 

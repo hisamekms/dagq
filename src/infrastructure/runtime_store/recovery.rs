@@ -8,7 +8,9 @@ use crate::domain::replan_snapshot::RestoreStart;
 use crate::domain::task_hold::{
     self, DiscardReason, Disposition, HoldGuard, KeptSource, ProgressVersion,
 };
-use crate::domain::task_replan::GuardedStep;
+use crate::domain::task_replan::{
+    ContinuationRecord, GuardedStep, first_resume_of_continuation, restored_now,
+};
 use crate::domain::{AskKind, EventKind, run_phase};
 
 impl SqliteQueue {
@@ -374,9 +376,12 @@ impl SqliteQueue {
 
     /// Start the restore of the work replanning operation `op` (read under
     /// `generation`) saved for parked run `id` (ADR-t1521-2): in one
-    /// transaction, [`RestoreStart::Done`] when a `replan_restored` of the
-    /// operation is recorded already; else the run, `needs_session` with no
-    /// lease but a stale one, is leased to `token` (`lease_acquired` with
+    /// transaction, [`RestoreStart::Done`] when the work is restored for the
+    /// continuation the operation is in now
+    /// ([`crate::domain::task_replan::restored_now`]: not by a restore of an
+    /// earlier one, whose new session did not start); else the run,
+    /// `needs_session` with no lease but a stale one, is leased to `token`
+    /// (`lease_acquired` with
     /// `reason: replan_restore`) and the restore is `token`'s alone
     /// ([`RestoreStart::Owned`]) until [`Self::finish_restore`]. A lease
     /// `token` holds already (a restore of its own whose end could not give
@@ -398,7 +403,7 @@ impl SqliteQueue {
         {
             return Ok(RestoreStart::Elsewhere);
         }
-        if restored_by(&tx, id, op)? {
+        if restored_now(&operation, &continuation_records(&tx, id)?) {
             return Ok(RestoreStart::Done);
         }
         if stored_run(&tx, id)?.is_none_or(|run| run.status() != RunStatus::NeedsSession) {
@@ -461,6 +466,62 @@ impl SqliteQueue {
         recorded
     }
 
+    /// Hold operation `op`, read under `generation`, `blocked` again when
+    /// the new wrapper of the continuation (or the withdrawal) it ended in
+    /// could not be started for run `id` (`why`), as a failed restore does
+    /// (ADR-t1521-2 decision 2: a failure to restore or to start keeps the
+    /// work and the operation blocked), in one transaction while `token`
+    /// still holds the run: `replan_restore_failed` with `start_failed`,
+    /// and the operation back to `blocked`, superseding one opened on the
+    /// task since that does not guard it
+    /// ([`crate::infrastructure::replans::reopen_blocked`]; one that guards
+    /// it parks the run itself, and nothing is written). Only for the continuation's
+    /// first resume ([`crate::domain::task_replan::first_resume_of_continuation`]):
+    /// once a resume that started since the operation closed has finished,
+    /// a later failure to start is the run's own and goes on as any
+    /// resume's. Whether it was recorded; nothing is written otherwise (a
+    /// lost lease, an operation that moved, a later resume).
+    pub fn fail_continuation_start(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        why: &str,
+    ) -> Result<bool> {
+        let tx = self.write_tx("fail_continuation_start", TransactionBehavior::Immediate)?;
+        let now = self.generators.clock.now();
+        if renew_lease(&tx, id, token, now).is_err() {
+            return Ok(false);
+        }
+        let operation = crate::infrastructure::replans::read_operation(&tx, op)?;
+        if operation.run_id != *id
+            || operation.generation != generation
+            || !operation.status.reopens()
+        {
+            return Ok(false);
+        }
+        if !first_resume_of_continuation(&operation, &continuation_records(&tx, id)?) {
+            return Ok(false);
+        }
+        let why = format!(
+            "the new session of run {id} could not be started after replan operation {op} ended {}: {why}; the saved work is kept and the run does not resume",
+            operation.status.as_str()
+        );
+        run_event(
+            &tx,
+            id,
+            EventKind::ReplanRestoreFailed,
+            json!({"operation_id": op, "generation": generation,
+                   "snapshot_id": operation.snapshot_id, "reason": why, "start_failed": true}),
+        )?;
+        if !crate::infrastructure::replans::reopen_blocked(&tx, op, generation, &why, now)? {
+            return Ok(false);
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Record the answer a container's executor gave to the restore of
     /// operation `op` (read under `generation`) handed for run `id`, which
     /// `token` holds in a slot for the resume the restore came before
@@ -477,17 +538,20 @@ impl SqliteQueue {
     ) -> Result<bool> {
         let tx = self.write_tx("record_clone_restore", TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
-        if renew_lease(&tx, id, token, now).is_err() || restored_by(&tx, id, op)? {
+        if renew_lease(&tx, id, token, now).is_err() {
             return Ok(false);
         }
         let operation = crate::infrastructure::replans::read_operation(&tx, op)?;
         if operation.run_id != *id
             || operation.generation != generation
             || !operation.status.reopens()
+            || restored_now(&operation, &continuation_records(&tx, id)?)
         {
             return Ok(false);
         }
-        record_restore_in(&tx, id, op, generation, &operation, restored, now)?;
+        if !record_restore_in(&tx, id, op, generation, &operation, restored, now)? {
+            return Ok(false);
+        }
         tx.commit()?;
         Ok(true)
     }
@@ -509,7 +573,9 @@ impl SqliteQueue {
         if operation.generation != generation || !operation.status.reopens() {
             return Ok(false);
         }
-        record_restore_in(&tx, id, op, generation, &operation, restored, now)?;
+        if !record_restore_in(&tx, id, op, generation, &operation, restored, now)? {
+            return Ok(false);
+        }
         tx.execute(
             "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
             params![id, token],
@@ -526,8 +592,11 @@ impl SqliteQueue {
 }
 
 /// Record in `tx` the result of the restore of operation `op` for run
-/// `id`: `replan_restored` with its payload, or `replan_restore_failed`
-/// with why and the operation back to `blocked`.
+/// `id` at `generation`, which each record names: `replan_restored` with
+/// its payload, or `replan_restore_failed` with why and the operation back
+/// to `blocked` ([`crate::infrastructure::replans::reopen_blocked`]).
+/// Whether it was recorded: not a failure while another operation guards
+/// the task (the caller then commits nothing).
 fn record_restore_in(
     tx: &rusqlite::Transaction<'_>,
     id: &RunId,
@@ -536,31 +605,26 @@ fn record_restore_in(
     operation: &crate::domain::task_replan::ReplanOperation,
     restored: std::result::Result<serde_json::Value, String>,
     now: i64,
-) -> Result<()> {
+) -> Result<bool> {
     match restored {
-        Ok(payload) => run_event(tx, id, EventKind::ReplanRestored, payload)?,
+        Ok(mut payload) => {
+            if let Some(fields) = payload.as_object_mut() {
+                fields.insert("generation".to_owned(), json!(generation));
+            }
+            run_event(tx, id, EventKind::ReplanRestored, payload)?;
+        }
         Err(why) => {
             run_event(
                 tx,
                 id,
                 EventKind::ReplanRestoreFailed,
-                json!({"operation_id": op, "snapshot_id": operation.snapshot_id, "reason": why}),
+                json!({"operation_id": op, "generation": generation,
+                       "snapshot_id": operation.snapshot_id, "reason": why}),
             )?;
-            crate::infrastructure::replans::move_in(
-                tx,
-                op,
-                generation,
-                &crate::domain::task_replan::ReplanMove {
-                    to: crate::domain::task_replan::ReplanStatus::Blocked,
-                    reason: why,
-                    snapshot_id: None,
-                    diagnosis: None,
-                },
-                now,
-            )?;
+            return crate::infrastructure::replans::reopen_blocked(tx, op, generation, &why, now);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 impl SqliteQueue {
@@ -2220,14 +2284,45 @@ fn lease_in(
     Ok(true)
 }
 
-/// Whether run `id` records the restore of operation `op`'s work.
-fn restored_by(conn: &Connection, id: &RunId, op: crate::domain::ReplanId) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND kind=?2
-         AND json_extract(payload,'$.operation_id')=?3)",
-        params![id, EventKind::ReplanRestored.as_str(), op],
-        |r| r.get(0),
-    )?)
+/// The events of run `id` its continuation of a replanning operation
+/// decides on, oldest first, each read back typed from its payload
+/// ([`ContinuationRecord`]); one whose payload does not read is left out.
+fn continuation_records(conn: &Connection, id: &RunId) -> Result<Vec<ContinuationRecord>> {
+    let mut statement = conn.prepare(
+        "SELECT kind, payload FROM run_events WHERE run_id=?1 AND kind IN (?2,?3,?4,?5,?6)
+         ORDER BY id",
+    )?;
+    let rows = statement.query_map(
+        params![
+            id,
+            EventKind::ReplanStatusChanged.as_str(),
+            EventKind::ReplanRestored.as_str(),
+            EventKind::ReplanRestoreFailed.as_str(),
+            EventKind::ResumeStarted.as_str(),
+            EventKind::ResumeFinished.as_str()
+        ],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (kind, payload) = row?;
+        let record = match crate::domain::RecordedKind::from_name(&kind).known() {
+            Some(EventKind::ReplanStatusChanged) => serde_json::from_str(&payload)
+                .ok()
+                .map(ContinuationRecord::Moved),
+            Some(EventKind::ReplanRestored) => serde_json::from_str(&payload)
+                .ok()
+                .map(ContinuationRecord::Restored),
+            Some(EventKind::ReplanRestoreFailed) => serde_json::from_str(&payload)
+                .ok()
+                .map(ContinuationRecord::RestoreFailed),
+            Some(EventKind::ResumeStarted) => Some(ContinuationRecord::ResumeStarted),
+            Some(EventKind::ResumeFinished) => Some(ContinuationRecord::ResumeFinished),
+            _ => None,
+        };
+        records.extend(record);
+    }
+    Ok(records)
 }
 
 /// Whether a replanning operation or a hold guards the task of run `id`,

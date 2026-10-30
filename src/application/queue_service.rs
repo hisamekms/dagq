@@ -1767,6 +1767,8 @@ fn run(
         | UseCase::ReadyInheritRead
         | UseCase::ReadyInheritImages
         | UseCase::ReplanRequest
+        | UseCase::ReplanResolve
+        | UseCase::ReplanResolveRead
         | UseCase::Rebind
         | UseCase::Recover
         | UseCase::RunScreen
@@ -2069,6 +2071,16 @@ impl super::commands::replans::ReplanStore for Store<'_> {
         step: &crate::domain::task_replan::ReplanMove,
     ) -> Result<crate::domain::task_replan::ReplanOperation> {
         self.0.move_replan(id, generation, step)
+    }
+    fn resolve_replan(
+        &mut self,
+        resolve: &crate::domain::task_replan::ResolveReplan,
+        snapshot_problem: Option<&str>,
+        by_role: &str,
+        by_id: &str,
+    ) -> Result<crate::domain::task_replan::ReplanResolved> {
+        self.0
+            .resolve_replan(resolve, snapshot_problem, by_role, by_id)
     }
 }
 
@@ -2747,6 +2759,15 @@ mod tests {
             _: &crate::domain::task_replan::ReplanMove,
         ) -> Result<crate::domain::task_replan::ReplanOperation> {
             Err(anyhow!("no move"))
+        }
+        fn resolve_replan(
+            &mut self,
+            _: &crate::domain::task_replan::ResolveReplan,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+        ) -> Result<crate::domain::task_replan::ReplanResolved> {
+            Err(anyhow!("no resolve"))
         }
     }
 
@@ -3948,6 +3969,10 @@ mod tests {
                 (UseCase::Hold, json!({"target": "1", "reason": "r"})),
                 (UseCase::Release, json!({"target": "r1"})),
                 (UseCase::ReplanRequest, json!({"run": "r1", "reason": "r"})),
+                (
+                    UseCase::ReplanResolve,
+                    json!({"id": 3, "generation": 2, "resolution": "continue", "reason": "r"}),
+                ),
             ] {
                 let response = service.handle_from(&request(token, use_case, params), Peer::Owner);
                 assert!(

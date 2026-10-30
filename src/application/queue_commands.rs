@@ -4,7 +4,7 @@
 //! the inbox runs on the host (and a planner, as far as the policy grants
 //! it) that changes or reads the queue apart from the reads of
 //! [`super::queue_reads`]: `answer`, `ask close`, `hold`, `release`,
-//! `replan request`, `rebind`, `recover`, `run screen|send|log`, `planner
+//! `replan request`, `replan resolve`, `rebind`, `recover`, `run screen|send|log`, `planner
 //! screen|send|log|request`, `report`, `graph --out` and `ready
 //! --inherit`.
 //!
@@ -63,6 +63,8 @@ pub enum QueueCommand {
     ReleaseRead(ReleaseParams),
     ReleaseImages(ReleaseImagesParams),
     ReplanRequest(ReplanRequestParams),
+    ReplanResolve(ReplanResolveParams),
+    ReplanResolveRead(ReplanResolveParams),
     Rebind(RebindParams),
     Recover(RunParams),
     RunScreen(RunParams),
@@ -158,6 +160,25 @@ pub struct ReleaseToRead {
     pub repository: Option<String>,
 }
 
+/// `replan_resolve_read`'s answer: the ref that pins the operation's
+/// snapshot and the head it must name (none for an operation with no
+/// snapshot, or one whose snapshot does not read back), and the Git common
+/// directory of the repository the queue is bound to, where the client
+/// reads the ref.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplanResolveToRead {
+    pub pin: Option<PinToRead>,
+    pub repository: Option<String>,
+}
+
+/// [`ReplanResolveToRead::pin`]: the ref and the head the snapshot's
+/// manifest names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinToRead {
+    pub pinned_ref: String,
+    pub head: String,
+}
+
 /// `ready --inherit`'s and `ready_inherit_read`'s: the task and the reason
 /// it is carried over for; `ready --inherit`'s also the head its client
 /// chose and wrote, from what `ready_inherit_read` read.
@@ -215,6 +236,22 @@ pub struct ReplanRequestParams {
     pub reason: String,
     #[serde(default)]
     pub evidence: Vec<i64>,
+}
+
+/// `replan resolve`'s: the operation, the generation it was read under,
+/// the choice and why, and what its client read with Git of the ref that
+/// pins the operation's snapshot (`pin`, after
+/// [`QueueCommand::ReplanResolveRead`] named the ref and the head to
+/// read; none for an operation with no snapshot).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplanResolveParams {
+    pub id: i64,
+    pub generation: i64,
+    pub resolution: crate::domain::task_replan::ReplanResolution,
+    pub reason: String,
+    #[serde(default)]
+    pub pin: Option<crate::domain::replan_snapshot::PinRead>,
 }
 
 /// `rebind`'s: the Git common directory of the repository to bind the
@@ -369,6 +406,8 @@ impl QueueCommand {
             UseCase::ReleaseRead => Self::ReleaseRead(read(use_case, params)?),
             UseCase::ReleaseImages => Self::ReleaseImages(read(use_case, params)?),
             UseCase::ReplanRequest => Self::ReplanRequest(read(use_case, params)?),
+            UseCase::ReplanResolve => Self::ReplanResolve(read(use_case, params)?),
+            UseCase::ReplanResolveRead => Self::ReplanResolveRead(read(use_case, params)?),
             UseCase::Rebind => Self::Rebind(read(use_case, params)?),
             UseCase::Recover => Self::Recover(read(use_case, params)?),
             UseCase::RunScreen => Self::RunScreen(read(use_case, params)?),
@@ -401,6 +440,10 @@ impl QueueCommand {
             Self::ReadyInheritRead(params) if params.work.is_some() => Err(BadCommand(
                 "ready_inherit_read takes no work: it reads what the head is chosen from"
                     .to_owned(),
+            )
+            .into()),
+            Self::ReplanResolveRead(params) if params.pin.is_some() => Err(BadCommand(
+                "replan_resolve_read takes no pin: it names the ref to read".to_owned(),
             )
             .into()),
             Self::ReadyInherit(params) if params.work.is_none() => Err(BadCommand(
@@ -452,6 +495,8 @@ impl QueueCommand {
             Self::ReleaseRead(_) => UseCase::ReleaseRead,
             Self::ReleaseImages(_) => UseCase::ReleaseImages,
             Self::ReplanRequest(_) => UseCase::ReplanRequest,
+            Self::ReplanResolve(_) => UseCase::ReplanResolve,
+            Self::ReplanResolveRead(_) => UseCase::ReplanResolveRead,
             Self::Rebind(_) => UseCase::Rebind,
             Self::Recover(_) => UseCase::Recover,
             Self::RunScreen(_) => UseCase::RunScreen,
@@ -480,6 +525,9 @@ impl QueueCommand {
             Self::Release(params) | Self::ReleaseRead(params) => serde_json::to_value(params),
             Self::ReleaseImages(params) => serde_json::to_value(params),
             Self::ReplanRequest(params) => serde_json::to_value(params),
+            Self::ReplanResolve(params) | Self::ReplanResolveRead(params) => {
+                serde_json::to_value(params)
+            }
             Self::Rebind(params) => serde_json::to_value(params),
             Self::Recover(params)
             | Self::RunScreen(params)
@@ -533,7 +581,7 @@ impl QueueCommand {
     /// `queue.export` on the queue for `report` and `graph --out`. `None`
     /// for the ones the application authorizes itself as it runs them,
     /// with what it reads of the queue (`answer`, `ask close`, `hold`,
-    /// `release`, `replan request`, `ready --inherit`).
+    /// `release`, `replan request`, `replan resolve`, `ready --inherit`).
     pub fn authorization(&self) -> Option<(Capability, Resource)> {
         match self {
             Self::Report(_) | Self::ReportInputs(_) | Self::GraphExport(_) => {
@@ -608,6 +656,24 @@ mod tests {
                 run: "r1".to_owned(),
                 reason: "split".to_owned(),
                 evidence: vec![7],
+            }),
+            QueueCommand::ReplanResolve(ReplanResolveParams {
+                id: 3,
+                generation: 2,
+                resolution: crate::domain::task_replan::ReplanResolution::Withdraw,
+                reason: "keep it".to_owned(),
+                pin: Some(crate::domain::replan_snapshot::PinRead {
+                    pinned_ref: "refs/dagq/replans/3".to_owned(),
+                    head: "b".repeat(40),
+                    names_head: true,
+                }),
+            }),
+            QueueCommand::ReplanResolveRead(ReplanResolveParams {
+                id: 3,
+                generation: 2,
+                resolution: crate::domain::task_replan::ReplanResolution::Replan,
+                reason: "plan it".to_owned(),
+                pin: None,
             }),
             QueueCommand::ReadyInheritRead(ReadyInheritParams {
                 id: 7,
@@ -691,6 +757,17 @@ mod tests {
         for (use_case, params) in [
             (UseCase::Answer, json!({"id": 3})),
             (UseCase::AskClose, json!({"id": 3, "extra": true})),
+            (
+                UseCase::ReplanResolve,
+                json!({"id": 3, "generation": 2, "resolution": "discard", "reason": "r"}),
+            ),
+            // The read names the ref to read, and the resolution is sent
+            // with what was read.
+            (
+                UseCase::ReplanResolveRead,
+                json!({"id": 3, "generation": 2, "resolution": "replan", "reason": "r",
+                       "pin": {"pinned_ref": "r", "head": "h", "names_head": true}}),
+            ),
             // The read names no head, and the record is sent with one.
             (
                 UseCase::ReadyInheritRead,
@@ -740,6 +817,8 @@ mod tests {
                 (UseCase::ReleaseRead, None),
                 (UseCase::ReleaseImages, None),
                 (UseCase::ReplanRequest, None),
+                (UseCase::ReplanResolve, None),
+                (UseCase::ReplanResolveRead, None),
                 (UseCase::ReadyInheritRead, None),
                 (UseCase::ReadyInherit, None),
                 (UseCase::ReadyInheritImages, None),

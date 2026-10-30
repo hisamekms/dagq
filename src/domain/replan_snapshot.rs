@@ -139,6 +139,18 @@ pub fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// What the caller of a person's resolution of a replanning operation
+/// read with Git of the ref that pins its snapshot's head, as no Git runs
+/// in the queue service: the ref and the head the snapshot's manifest
+/// names, and whether the ref names that head (its commit and the head
+/// are each other's ancestor).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinRead {
+    pub pinned_ref: String,
+    pub head: String,
+    pub names_head: bool,
+}
+
 /// The manifest of a snapshot: whose work, which operation and generation
 /// saved it, the run's base and head and the ref that pins it, whether the
 /// worktree held uncommitted work, every saved file, what was left out on

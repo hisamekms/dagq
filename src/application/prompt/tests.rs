@@ -6303,6 +6303,7 @@ fn huge_replan_brief() -> crate::domain::replan_plan::ReplanBrief {
             .collect(),
         plan: None,
         problems: Vec::new(),
+        resolutions: Vec::new(),
     }
 }
 
@@ -8281,6 +8282,7 @@ fn a_replacement_section_past_its_limit_keeps_its_checks_whole() {
             approved_at: None,
         }),
         problems: Vec::new(),
+        resolutions: Vec::new(),
         operation,
     };
     let proposal = Proposal::restore(crate::domain::ProposalRecord {

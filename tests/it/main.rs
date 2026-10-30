@@ -119,6 +119,7 @@ mod recovery_codex;
 mod recurring_drafts;
 mod related;
 mod replan_planning;
+mod replan_resolve;
 mod request_planner;
 mod request_planner_spike;
 mod review_builtins;

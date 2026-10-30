@@ -847,6 +847,225 @@ pub fn request_on(kept: Option<&ReplanOperation>, run: &RunId) -> Request {
     }
 }
 
+// What a person (or the inbox, at a person's word) makes of an operation
+// held `blocked` by anything but its apply (ADR-t1521-2 decision 2): go on
+// with the parked run on its saved work, withdraw the plan and go on with
+// it (ADR-t1521-1 decision 2: a withdrawal keeps the task's conditions and
+// the work, and is no cancel of the task or the goal), or go back to the
+// planner, through the save again when the work was not saved. None throws
+// the saved work away.
+string_enum!(ReplanResolution {
+    Continue => "continue",
+    Withdraw => "withdraw",
+    Replan => "replan",
+});
+
+/// A person's resolution of operation `operation`, read under
+/// `generation`, as `replan resolve` gives it: the choice and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveReplan {
+    pub operation: ReplanId,
+    pub generation: i64,
+    pub resolution: ReplanResolution,
+    pub reason: String,
+}
+
+impl ResolveReplan {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        require(!self.reason.trim().is_empty(), || DomainError::Blank {
+            field: "reason",
+        })
+    }
+}
+
+/// What a person's resolution of an operation reads, in the transaction
+/// that writes it.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolveState<'a> {
+    pub operation: &'a ReplanOperation,
+    /// The generation the person read the operation under.
+    pub generation: i64,
+    pub resolution: ReplanResolution,
+    /// The tasks of the operation's replacement proposal and their status
+    /// now.
+    pub children: &'a [(TaskId, TaskStatus)],
+    /// Why the operation's snapshot is not as the park saved it, when it
+    /// is not.
+    pub snapshot_problem: Option<&'a str>,
+}
+
+/// Where a person's resolution moves the operation of `state`, or why it
+/// does not take one and nothing is written. Only a `blocked` operation
+/// read under its generation now takes one, and not one held from its
+/// apply, which the runtime's apply pass checks again and sends back to a
+/// planner itself (its snapshot that does not match is a person's
+/// otherwise). A snapshot that does not match, and a child of the
+/// replacement proposal already ready or claimed, refuse every choice.
+/// A continuation goes to `continuing_after_park` and a withdrawal to
+/// `withdrawn`, whose restore and resume are the continuation's; a new
+/// plan goes to `parked` with a snapshot, else back to the save
+/// (`snapshotting` when the save is what failed, `quiescing` otherwise, so
+/// that the writer is waited for first).
+pub fn resolve_to(state: &ResolveState<'_>) -> Result<ReplanStatus, DomainError> {
+    let op = state.operation;
+    let refuse = |reason: String| {
+        Err(DomainError::ReplanNotResolvable {
+            operation: op.id,
+            reason,
+        })
+    };
+    if op.status.is_closed() {
+        return refuse(format!(
+            "it is closed as {}, so there is nothing to resolve",
+            op.status.as_str()
+        ));
+    }
+    if op.status != ReplanStatus::Blocked {
+        return refuse(format!(
+            "it is {}, not blocked: the runtime moves it on",
+            op.status.as_str()
+        ));
+    }
+    if op.generation != state.generation {
+        return refuse(format!(
+            "it is at generation {}, not {}: read it again (`replans {}`) and decide on what it is now",
+            op.generation, state.generation, op.id
+        ));
+    }
+    if op.return_phase == Some(ReplanStatus::Applying) {
+        return refuse(
+            "it was held at its apply, which the runtime's planner pass checks again and sends back to a planner itself; a snapshot that does not match is not resolved here".to_owned(),
+        );
+    }
+    if let Some(problem) = state.snapshot_problem {
+        return refuse(format!(
+            "its snapshot is not as the park saved it, and no choice overwrites it: {problem}"
+        ));
+    }
+    if let Some((task, status)) = state.children.iter().find(|(_, status)| {
+        !matches!(
+            status,
+            TaskStatus::Draft | TaskStatus::Submitted | TaskStatus::Canceled
+        )
+    }) {
+        return refuse(format!(
+            "task {task} of its replacement proposal is {}: a child that may be claimed is not released",
+            status.as_str()
+        ));
+    }
+    Ok(match state.resolution {
+        ReplanResolution::Continue => ReplanStatus::ContinuingAfterPark,
+        ReplanResolution::Withdraw => ReplanStatus::Withdrawn,
+        ReplanResolution::Replan if op.snapshot_id.is_some() => ReplanStatus::Parked,
+        ReplanResolution::Replan if op.return_phase == Some(ReplanStatus::Snapshotting) => {
+            ReplanStatus::Snapshotting
+        }
+        ReplanResolution::Replan => ReplanStatus::Quiescing,
+    })
+}
+
+/// What a person's resolution did: the operation as it is now, what was
+/// chosen, and the step it was held `blocked` at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReplanResolved {
+    pub operation: ReplanOperation,
+    pub resolution: ReplanResolution,
+    pub blocked_at: Option<ReplanStatus>,
+}
+
+/// An event of a run, read back typed from its payload, that decides on
+/// the continuation (or the withdrawal) a replanning operation of the run
+/// closed in (ADR-t1521-2 decision 2): its restore and its first resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuationRecord {
+    /// `replan_status_changed`: an operation moved.
+    Moved(ReplanMoved),
+    /// `replan_restored`: an operation's work is in the run's worktree.
+    Restored(RestoreRecord),
+    /// `replan_restore_failed`: the restore failed, or the new session
+    /// after it did not start, and the operation went back to `blocked`.
+    RestoreFailed(RestoreRecord),
+    /// `resume_started`: a resume of the run took its lease.
+    ResumeStarted,
+    /// `resume_finished`: the resume that holds the run's lease finished
+    /// (the latest `resume_started` before it).
+    ResumeFinished,
+}
+
+/// What a decision reads of a `replan_status_changed` payload: the
+/// operation, the status it moved to and its generation after the move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ReplanMoved {
+    pub operation_id: ReplanId,
+    pub to: ReplanStatus,
+    pub generation: i64,
+}
+
+/// What a decision reads of a `replan_restored` or `replan_restore_failed`
+/// payload: the operation, and the generation it was restored at (none in
+/// a record that does not name it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct RestoreRecord {
+    pub operation_id: ReplanId,
+    #[serde(default)]
+    pub generation: Option<i64>,
+}
+
+/// Whether the work of `op`, closed in a continuation or a withdrawal, is
+/// restored for the one it is in now, from its run's `records` (oldest
+/// first): the operation's latest restore result is a success, at the
+/// generation the operation is at (or one that names none). A restore of
+/// an earlier continuation, whose new session did not start and which a
+/// person resolved again since, does not count: the worktree is checked
+/// against the snapshot again before the run resumes.
+pub fn restored_now(op: &ReplanOperation, records: &[ContinuationRecord]) -> bool {
+    records
+        .iter()
+        .rev()
+        .find_map(|record| match record {
+            ContinuationRecord::Restored(restored) if restored.operation_id == op.id => Some(
+                restored
+                    .generation
+                    .is_none_or(|generation| generation == op.generation),
+            ),
+            ContinuationRecord::RestoreFailed(failed) if failed.operation_id == op.id => {
+                Some(false)
+            }
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Whether a resume of the run `op` closed on is the first of the
+/// continuation (or withdrawal) `op` is in now, from the run's `records`
+/// (oldest first): no resume that started since the operation moved into
+/// the status it is at, at its generation, has finished (since the run's
+/// first record when no such move is read). A resume that started before
+/// it is an earlier continuation's even when it finishes after it (a
+/// person resolved the operation again between the earlier resume's
+/// failure to start and its end). A new session of it that does not start
+/// holds the operation `blocked` again; a later one's is the run's own.
+pub fn first_resume_of_continuation(op: &ReplanOperation, records: &[ContinuationRecord]) -> bool {
+    let since = records
+        .iter()
+        .rposition(|record| {
+            matches!(record, ContinuationRecord::Moved(moved)
+                if moved.operation_id == op.id
+                    && moved.to == op.status
+                    && moved.generation == op.generation)
+        })
+        .map_or(0, |at| at + 1);
+    let mut started = false;
+    for record in &records[since..] {
+        match record {
+            ContinuationRecord::ResumeStarted => started = true,
+            ContinuationRecord::ResumeFinished if started => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1572,5 +1791,228 @@ mod tests {
         for (what, changed) in changed {
             assert_ne!(changed, base, "{what}");
         }
+    }
+
+    #[test]
+    fn a_person_resolves_only_a_blocked_operation_read_now_and_never_one_held_at_its_apply() {
+        use ReplanResolution::{Continue, Replan, Withdraw};
+        use ReplanStatus as S;
+        let blocked = |at: Option<S>, snapshot: bool| ReplanOperation {
+            return_phase: at,
+            snapshot_id: snapshot.then(|| "s-1".to_owned()),
+            ..op(S::Blocked)
+        };
+        let resolve =
+            |op: &ReplanOperation, resolution, children: &[(TaskId, TaskStatus)], problem| {
+                resolve_to(&ResolveState {
+                    operation: op,
+                    generation: 1,
+                    resolution,
+                    children,
+                    snapshot_problem: problem,
+                })
+            };
+        // Where each choice goes, by the step it was held at.
+        let cases = [
+            (Some(S::Planning), true, Continue, S::ContinuingAfterPark),
+            (Some(S::Planning), true, Withdraw, S::Withdrawn),
+            (Some(S::Planning), true, Replan, S::Parked),
+            (Some(S::ContinuingAfterPark), true, Replan, S::Parked),
+            (Some(S::Snapshotting), false, Replan, S::Snapshotting),
+            (Some(S::Quiescing), false, Replan, S::Quiescing),
+            (Some(S::PauseRequested), false, Replan, S::Quiescing),
+            (
+                Some(S::Snapshotting),
+                false,
+                Continue,
+                S::ContinuingAfterPark,
+            ),
+            (Some(S::Quiescing), false, Withdraw, S::Withdrawn),
+        ];
+        for (at, snapshot, resolution, to) in cases {
+            let op = blocked(at, snapshot);
+            assert_eq!(
+                resolve(&op, resolution, &[], None).unwrap(),
+                to,
+                "{at:?} {resolution:?}"
+            );
+            assert!(S::Blocked.can_move_to(to), "{to:?}");
+        }
+        let refused = |result: Result<ReplanStatus, DomainError>, why: &str| {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(why), "{error}");
+        };
+        let held = blocked(Some(S::Planning), true);
+        for resolution in [Continue, Withdraw, Replan] {
+            // Not blocked, closed, read under another generation.
+            refused(
+                resolve(&op(S::Planning), resolution, &[], None),
+                "not blocked",
+            );
+            for closed in [
+                S::ContinuingAfterPark,
+                S::Withdrawn,
+                S::Applied,
+                S::Continuing,
+            ] {
+                refused(resolve(&op(closed), resolution, &[], None), "closed");
+            }
+            refused(
+                resolve_to(&ResolveState {
+                    operation: &held,
+                    generation: 0,
+                    resolution,
+                    children: &[],
+                    snapshot_problem: None,
+                }),
+                "generation 1, not 0",
+            );
+            // Held at its apply: the runtime's.
+            refused(
+                resolve(&blocked(Some(S::Applying), true), resolution, &[], None),
+                "held at its apply",
+            );
+            // A snapshot that does not match is overwritten by no choice.
+            refused(
+                resolve(&held, resolution, &[], Some("a.diff: size 3, not 4")),
+                "a.diff: size 3, not 4",
+            );
+            // A child that may be claimed.
+            for started in [
+                TaskStatus::Ready,
+                TaskStatus::InProgress,
+                TaskStatus::Completed,
+            ] {
+                refused(
+                    resolve(&held, resolution, &[(TaskId::new(9), started)], None),
+                    "task 9",
+                );
+            }
+            let released = [
+                (TaskId::new(8), TaskStatus::Draft),
+                (TaskId::new(9), TaskStatus::Submitted),
+                (TaskId::new(10), TaskStatus::Canceled),
+            ];
+            assert!(resolve(&held, resolution, &released, None).is_ok());
+        }
+    }
+
+    /// The records of a continuation's run: operation 1 (or `other`)
+    /// moved, restored or failed at a generation, or a resume finished.
+    fn moved(to: ReplanStatus, generation: i64) -> ContinuationRecord {
+        ContinuationRecord::Moved(ReplanMoved {
+            operation_id: ReplanId::new(1),
+            to,
+            generation,
+        })
+    }
+
+    fn restored(operation: i64, generation: Option<i64>) -> ContinuationRecord {
+        ContinuationRecord::Restored(RestoreRecord {
+            operation_id: ReplanId::new(operation),
+            generation,
+        })
+    }
+
+    fn failed(generation: Option<i64>) -> ContinuationRecord {
+        ContinuationRecord::RestoreFailed(RestoreRecord {
+            operation_id: ReplanId::new(1),
+            generation,
+        })
+    }
+
+    /// The work of a continuation is restored for it only by a success of
+    /// its own: at the generation it is at, not followed by a failure (a
+    /// new session that did not start), and not another operation's. One
+    /// that names no generation counts until a failure follows it.
+    #[test]
+    fn a_continuation_s_work_is_restored_only_by_a_restore_of_its_own() {
+        let mut continuing = op(ReplanStatus::ContinuingAfterPark);
+        continuing.generation = 4;
+        assert!(!restored_now(&continuing, &[]));
+        assert!(restored_now(&continuing, &[restored(1, Some(4))]));
+        assert!(restored_now(&continuing, &[restored(1, None)]));
+        assert!(!restored_now(&continuing, &[restored(2, Some(4))]));
+        // Restored at 3, its session not started, resolved again to 4.
+        let again = [
+            moved(ReplanStatus::ContinuingAfterPark, 3),
+            restored(1, Some(3)),
+            failed(None),
+            moved(ReplanStatus::Blocked, 3),
+            moved(ReplanStatus::ContinuingAfterPark, 4),
+        ];
+        assert!(!restored_now(&continuing, &again));
+        let mut legacy = again;
+        legacy[1] = restored(1, None);
+        assert!(!restored_now(&continuing, &legacy));
+        // Restored again for 4: it resumes without a third restore.
+        let mut done = again.to_vec();
+        done.push(restored(1, Some(4)));
+        assert!(restored_now(&continuing, &done));
+        done.push(restored(2, Some(9)));
+        assert!(restored_now(&continuing, &done));
+    }
+
+    /// A continuation's first resume is one with no resume finished that
+    /// started since the operation moved into the status and generation it
+    /// is at: a later resume's failure to start is the run's own, a
+    /// resolution again opens a first resume of its own, and the end of a
+    /// resume that started before the resolution is not the new one's.
+    /// With no such move read, a resume the run finished at any time makes
+    /// it a later one.
+    #[test]
+    fn only_a_continuation_s_first_resume_is_its_start() {
+        let mut continuing = op(ReplanStatus::ContinuingAfterPark);
+        continuing.generation = 4;
+        let first = [
+            ContinuationRecord::ResumeFinished,
+            moved(ReplanStatus::Parked, 3),
+            moved(ReplanStatus::ContinuingAfterPark, 4),
+            restored(1, Some(4)),
+        ];
+        assert!(first_resume_of_continuation(&continuing, &first));
+        let mut later = first.to_vec();
+        later.push(ContinuationRecord::ResumeStarted);
+        assert!(first_resume_of_continuation(&continuing, &later));
+        later.push(ContinuationRecord::ResumeFinished);
+        assert!(!first_resume_of_continuation(&continuing, &later));
+        // Resumed at 3, blocked by a restore that failed, resolved to 4.
+        let resolved = [
+            moved(ReplanStatus::ContinuingAfterPark, 3),
+            ContinuationRecord::ResumeStarted,
+            ContinuationRecord::ResumeFinished,
+            failed(Some(3)),
+            moved(ReplanStatus::Blocked, 3),
+            moved(ReplanStatus::ContinuingAfterPark, 4),
+        ];
+        assert!(first_resume_of_continuation(&continuing, &resolved));
+        // The resume at 3 failed to start, a person resolved it again to 4
+        // before that resume ended: its end is not the new continuation's.
+        let raced = [
+            moved(ReplanStatus::ContinuingAfterPark, 3),
+            ContinuationRecord::ResumeStarted,
+            failed(Some(3)),
+            moved(ReplanStatus::Blocked, 3),
+            moved(ReplanStatus::ContinuingAfterPark, 4),
+            ContinuationRecord::ResumeFinished,
+        ];
+        assert!(first_resume_of_continuation(&continuing, &raced));
+        let mut raced = raced.to_vec();
+        raced.push(ContinuationRecord::ResumeStarted);
+        assert!(first_resume_of_continuation(&continuing, &raced));
+        raced.push(ContinuationRecord::ResumeFinished);
+        assert!(!first_resume_of_continuation(&continuing, &raced));
+        // The move into another generation is not this continuation's.
+        let mut withdrawn = op(ReplanStatus::Withdrawn);
+        withdrawn.generation = 4;
+        assert!(!first_resume_of_continuation(&withdrawn, &resolved));
+        assert!(first_resume_of_continuation(&continuing, &[]));
+        assert!(!first_resume_of_continuation(
+            &continuing,
+            &[
+                ContinuationRecord::ResumeStarted,
+                ContinuationRecord::ResumeFinished
+            ]
+        ));
     }
 }

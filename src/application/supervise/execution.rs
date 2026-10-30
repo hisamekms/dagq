@@ -4369,12 +4369,27 @@ impl Supervisor<'_> {
                         Phase::Resume(watch) => (watch.attempt, Some(watch.workspace.clone())),
                         _ => unreachable!("matched a resume"),
                     };
+                    // One read of whether its wrapper registered both
+                    // holds a continuation that did not start `blocked`
+                    // and stops the session: a wrapper that registers in
+                    // between is stopped with it, not left running.
+                    let processes = match self.queue.processes(slot.run.id()) {
+                        Ok(processes) => {
+                            self.block_unregistered_continuation(&slot.run, &message, &processes);
+                            Some(processes)
+                        }
+                        Err(error) => {
+                            warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: whether its resumed session registered could not be read: {error:#}", slot.run.id());
+                            None
+                        }
+                    };
                     self.give_up_resume(
                         &slot.run,
                         attempt,
                         workspace.as_deref(),
                         message,
                         &reason_of_error(&error, ReasonCode::Other),
+                        processes,
                     );
                 }
                 Err(error) => {
@@ -4745,9 +4760,11 @@ impl Supervisor<'_> {
     /// run stays `needs_session` with its reason, and the attempt counts.
     /// The resume workspace is closed only when no session of this resume
     /// can be alive: its wrapper never registered (and, the lease gone, no
-    /// longer can) or already exited. `workspace` is `None` when opening it
-    /// failed before cmux returned its ID; workspaces are never looked up
-    /// by title (ADR-0026).
+    /// longer can) or already exited, by the run's `processes` as the
+    /// caller read them while it held the lease, or as they are read once
+    /// the resume is recorded when the caller read none. `workspace` is
+    /// `None` when opening it failed before cmux returned its ID;
+    /// workspaces are never looked up by title (ADR-0026).
     fn give_up_resume(
         &mut self,
         run: &TaskRun,
@@ -4755,6 +4772,7 @@ impl Supervisor<'_> {
         workspace: Option<&str>,
         message: String,
         reason: &Reason,
+        processes: Option<Vec<RunProcess>>,
     ) {
         let workspace = workspace.map(str::to_owned);
         // The workspace is recorded so a later pass knows it for this run's
@@ -4777,11 +4795,13 @@ impl Supervisor<'_> {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not record the resume error: {error:#}", run.id());
         }
         self.record_rest(run.id(), None, EventKind::ResumeFinished.as_str());
-        let session_may_live = self.queue.processes(run.id()).map_or(true, |processes| {
-            processes
-                .iter()
-                .any(|p| p.role == "wrapper" && p.exited_at.is_none())
-        });
+        let session_may_live = processes
+            .map_or_else(|| self.queue.processes(run.id()), Ok)
+            .map_or(true, |processes| {
+                processes
+                    .iter()
+                    .any(|p| p.role == "wrapper" && p.exited_at.is_none())
+            });
         if let Some(workspace) = workspace {
             if session_may_live {
                 info!(run_id = %run.id(), "run {}: resume workspace {workspace} is kept; its session may still run", run.id());

@@ -59,20 +59,20 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 
 `src/domain/authorization.rs`の`StaticPolicy`（`grants(role)`とresourceの規則）の要約。明示して許したもの以外は全て拒む（default deny）。resourceの持ち主や状態が分からないときも拒む（fail closed）。列はcapabilityの群（名前は[Authorization](authorization.md#capability)）で、○は許す、△はresourceの規則つきで許す、—は拒む。
 
-| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose`） | session | 運用（up・down・install・init・migrate・rebind・plan・setup-review） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push | telemetryの送信（`telemetry_report`） |
+| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose` / `replan resolve`） | session | 運用（up・down・install・init・migrate・rebind・plan・setup-review） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push | telemetryの送信（`telemetry_report`） |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — | ○ | ○ | ○ | ○ | — | — |
-| inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — | ○ | ○（`--yes`は—） | ○ | ○ | — | — |
-| planner | ○ | △ draft・submitted・readyのtask（`revising`のproposalのtaskは持ち主だけ、`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ・— / — | — | ○（setup-reviewは—） | — | — | — | — |
-| worker | 読み取り（`watch`・`queue.export`・`ci.read`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / —・— / △ 自分のrunだけ | — | — | — | — | — | — |
-| review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — | — |
-| recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — | — |
-| plan-review-job・goal-review-job・throughput-review-job・setup-review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — | — |
-| observer | ○ | — | — / — | — | △ findingに紐づく`blocked`だけ | — / — | △ recordとresolve（dismissは—） | — / —・— / — | — | — | — | — | — | — |
-| supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / —・— / —（保留と置換は○） | ○（recordは—） | ○（setup-reviewは—） | ○ | ○ | — | — |
-| wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | △ 自分のrunかplannerだけ | — | — | — | — | — |
-| integrator | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | ○ | — |
-| executor-telemetry | — | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — | △ 自分のtokenの対象に登録されたsessionだけ |
+| user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — / ○ | ○ | ○ | ○ | ○ | — | — |
+| inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — / ○ | ○ | ○（`--yes`は—） | ○ | ○ | — | — |
+| planner | ○ | △ draft・submitted・readyのtask（`revising`のproposalのtaskは持ち主だけ、`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ・— / — / — | — | ○（setup-reviewは—） | — | — | — | — |
+| worker | 読み取り（`watch`・`queue.export`・`ci.read`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / —・— / △ 自分のrunだけ / — | — | — | — | — | — | — |
+| review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — |
+| recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — |
+| plan-review-job・goal-review-job・throughput-review-job・setup-review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — |
+| observer | ○ | — | — / — | — | △ findingに紐づく`blocked`だけ | — / — | △ recordとresolve（dismissは—） | — / —・— / — / — | — | — | — | — | — | — |
+| supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / —・— / — / —（保留と置換は○） | ○（recordは—） | ○（setup-reviewは—） | ○ | ○ | — | — |
+| wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | △ 自分のrunかplannerだけ | — | — | — | — | — |
+| integrator | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | ○ | — |
+| executor-telemetry | — | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | △ 自分のtokenの対象に登録されたsessionだけ |
 
 - review-jobとrecovery-jobの`review.submit` / `triage.submit`は自分のrunだけのcapabilityだが、CLIのコマンドは無く、verdictはsupervisorがデータとして読む。jobの環境には`DAGQ_RUN_ID`が無いので、今は持ち主が分からず拒まれる
 - observerの`queue.export`は—。
@@ -89,7 +89,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   `set-priority`と`goal edit`の変更、依頼の値と違う優先度の`goal add`・`add`は拒んで`authorization_denied`に残し、plan reviewの`lower_priority`は適用せず記録する。
   AIのactorの所属の変更は拒まず、`set-goal`では移動先のgoalが同じ値の人の優先度でなければ移動の前の値を人の個別の優先度としてtaskに残し、follow_upの`out_of_scope`の判断の移動では継いだだけの値を残さない（ADR-t2373-1）。
   拒否と記録は[Authorization](authorization.md#policy)、移動の判断は`task::set_goal`が持つ。
-- plannerの行は[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定7のとおり、この段で運用の権限を変えていない（`dagq-planner` skillの「Where your authority ends」はこの行と一致させる。規則は[文書の規則](../development/documents.md)の「権限の表を写す文書」）
+- plannerの行はADR-t728-1（上）の決定7のとおり、この段で運用の権限を変えていない（`dagq-planner` skillの「Where your authority ends」はこの行と一致させる。規則は[文書の規則](../development/documents.md)の「権限の表を写す文書」）
 - sessionの画面とlogを読む・送る`screen.read`・`screen.send`（[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定7）はuserとinboxだけが持つ。
   表のsessionの列のsupervisorの○とwrapperの△はこれを含まない（supervisorは自分の送信の経路を使う）。
   plannerは自分のplannerのものも拒まれる。
@@ -103,7 +103,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 - 計画の依頼の`request.record`はuserとinboxだけが持ち（inboxの記録は人の言葉の代行、[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3）、`request.decline`はplannerだけが、自分が立てられた依頼にだけ持つ（決定6）。
   依頼に紐づく`planner_question`も、plannerは自分が立てられた依頼にだけ開ける。
   拒否は`authorization_denied`に残る
-- 再計画（[再計画](../plans/task-replanning.md)）の`replan.request`はuserとinboxだけ、`replan.propose`は自分のrunのworkerだけが持つ。
+- 再計画（[再計画](../plans/task-replanning.md)）の`replan.request`・`replan.resolve`はuserとinboxだけ、`replan.propose`は自分のrunのworkerだけが持つ。
   runの保留と置換の`replan.park`・`replan.apply`はsupervisorだけが持つ。
   plannerはどれも持たない。
   holdの`task.hold`もuserとinboxだけ

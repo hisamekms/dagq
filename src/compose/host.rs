@@ -1564,6 +1564,45 @@ pub fn run_command(queue: &mut SqliteQueue, db: &Path, command: &QueueCommand) -
                 },
             )?)?
         }
+        // The snapshot is read here, beside the queue, with what the
+        // caller read of its pinned ref with Git, before the store's
+        // transaction checks the rest again.
+        C::ReplanResolve(params) => {
+            let replans_dir = crate::infrastructure::location::replans_dir(db);
+            serde_json::to_value(Replans::new(queue, &actor, &StaticPolicy).resolve(
+                &crate::domain::task_replan::ResolveReplan {
+                    operation: crate::domain::ReplanId::new(params.id),
+                    generation: params.generation,
+                    resolution: params.resolution,
+                    reason: params.reason.clone(),
+                },
+                |op| {
+                    crate::application::commands::replans::snapshot_problem(
+                        &LocalRunFiles,
+                        &replans_dir,
+                        op,
+                        params.pin.as_ref(),
+                    )
+                },
+            )?)?
+        }
+        // What the caller reads with Git before it sends the resolution:
+        // the repository the queue is bound to and the ref and head the
+        // snapshot names.
+        C::ReplanResolveRead(params) => {
+            let replans_dir = crate::infrastructure::location::replans_dir(db);
+            let op = Replans::new(queue, &actor, &StaticPolicy)
+                .to_resolve(crate::domain::ReplanId::new(params.id))?;
+            let pin = crate::application::commands::replans::pin_to_read(
+                &LocalRunFiles,
+                &replans_dir,
+                &op,
+            );
+            serde_json::to_value(crate::application::queue_commands::ReplanResolveToRead {
+                pin,
+                repository: queue.repository_binding()?,
+            })?
+        }
         C::Rebind(params) => one_shot.rebind_on(
             queue,
             db,
@@ -1703,6 +1742,28 @@ pub(super) fn prepare_release(
                     });
                     Vec::new()
                 }
+            },
+        },
+        call,
+    )
+}
+
+/// A person's `replan resolve` of `params` as its caller sends it
+/// ([`crate::application::commands::replans::prepare_resolve`]), asking
+/// `call` (the service, or [`run_command`] on the DB), with the host's Git
+/// for the main checkout and the ref that pins the snapshot.
+pub(super) fn prepare_resolve(
+    params: &mut crate::application::queue_commands::ReplanResolveParams,
+    call: impl FnMut(&QueueCommand) -> Result<Value>,
+) -> Result<()> {
+    use crate::application::commands::replans::{self, ResolveClient};
+    replans::prepare_resolve(
+        params,
+        &ResolveClient {
+            main_checkout: &crate::infrastructure::adapters::main_checkout_of,
+            is_ancestor: &|main, ancestor, descendant| {
+                crate::infrastructure::adapters::GitRepository::inspect(main)?
+                    .is_ancestor(ancestor, descendant)
             },
         },
         call,

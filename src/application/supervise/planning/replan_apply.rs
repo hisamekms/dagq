@@ -12,7 +12,6 @@
 use super::*;
 use crate::domain::{
     replan_apply::ApplyOutcome,
-    replan_snapshot::{self, MANIFEST, SnapshotManifest},
     task_replan::{ReplanOperation, ReplanStatus},
 };
 
@@ -83,33 +82,12 @@ fn check_snapshot(env: &PlanningEnv<'_>, op: &ReplanOperation) -> Result<()> {
         .snapshot_id
         .as_deref()
         .with_context(|| format!("replan operation {} has no snapshot", op.id))?;
-    let dir = replan_snapshot::snapshot_dir(&env.layout.replans_dir, id);
-    let manifest: SnapshotManifest = serde_json::from_slice(
-        &env.files
-            .read(&dir.join(MANIFEST))
-            .with_context(|| format!("read the manifest of snapshot {id}"))?,
-    )
-    .with_context(|| format!("parse the manifest of snapshot {id}"))?;
-    ensure!(
-        manifest.operation == op.id && manifest.run_id == op.run_id,
-        "snapshot {id} is of replan operation {} and run {}, not of operation {} and run {}",
-        manifest.operation,
-        manifest.run_id,
-        op.id,
-        op.run_id
-    );
-    manifest.check_paths()?;
-    let mut saved = Vec::new();
-    for file in &manifest.files {
-        if let Ok(contents) = env.files.read(&dir.join(&file.name)) {
-            saved.push((
-                file.name.clone(),
-                contents.len() as u64,
-                replan_snapshot::sha256(&contents),
-            ));
-        }
-    }
-    replan_snapshot::check_saved(&manifest, &saved)?;
+    let manifest = crate::application::commands::replans::check_snapshot_files(
+        &**env.files,
+        &env.layout.replans_dir,
+        op,
+        id,
+    )?;
     let pinned = env
         .repository
         .is_ancestor(&manifest.head, &manifest.pinned_ref)

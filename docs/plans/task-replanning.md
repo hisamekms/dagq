@@ -143,9 +143,24 @@ Claude/Codexで同じ状態機械を使う。
   `status`・`doctor`の`replans`は、`dagq.toml`が読めなければ設定と窓を出さずにその誤りを出す（supervisorは前に読めた設定で動き続ける）。開いた操作ごとに診断・taskの原因別のturn・窓（閾値は継続の後の上限を含む）・系統の自動の保留の数を出す。
   全体では状態・起点・選択・決めた者・主因ごとの数と、柵を越えた数と置換先を出す。
   `timeline`はrunの原因別のturnと再計画の段を、`stats`は窓の原因別のturn・開いた操作・診断・askの理由・移動を出し、数え方は検知と同じ関数による。
-- pluginの手順: 済み（dagq skillの`reference/replan.md`がフローと役割ごとのコマンド・条件の対応・分割の例を、dagq-recover skillの`reference/replan-held.md`が保留の読み方・人の判断・`blocked`の扱いを持つ）。
-  `withdrawn`へ進める経路と、適用以外の`blocked`（保存・復元の失敗、継続なしの却下・使い切り・置換proposalの取り下げ）を先へ進めるコマンドはまだ無い。
-  pluginはそれらを手順として書かず、操作は`blocked`のまま成果を保持し、人に理由を見せるだけとする。
+- 人の判断で`blocked`を先へ進めること: 済み（`task_replan.rs`の`resolve_to`、`replans.rs`の`resolve_replan`、人とinboxの`replan resolve`）。
+  適用以外の理由（保存・復元の失敗、継続なしの却下・使い切り・置換proposalの取り下げ）で`blocked`の操作に、人とinboxが継続（`continuing_after_park`）・案の撤回（`withdrawn`）・計画のやり直しを指示する。
+  やり直しはsnapshotがあれば`parked`に戻して依頼を新しくし（適用の計画が成り立たないときと同じ`replan_again`）、無ければ保存の段（保存で失敗したなら`snapshotting`、ほかは書き手の終了待ちからの`quiescing`）に戻す。
+  1つのtransactionで操作が`blocked`であること・人が読んだgeneration・置換proposalの子がreadyでもclaim済みでもないことを確かめ、generationを上げてから動かすので、古いgenerationの指示と同じ指示の2度目は何も書かない。
+  snapshotのmanifestとfileが保存したとおりに読めないか、固定したrefが保存したheadを名指さなければ、どの選択も上書きせず拒む。
+  refはqueue serviceでGitを走らせないので、クライアントが先に読む問い（`replan_resolve_read`）で読むrefとheadを受け取り、束縛したrepositoryのGitで照合した結果を添えて送り、読まれていない・別のrefやheadの結果も拒む。
+  適用で`blocked`になった操作は適用の回が扱うので拒む。
+  継続と撤回は未適用proposalの子をdraftに戻し、元taskの条件と依存はそのままで、その後の復元・旧wrapperの終了の確認・新wrapperの起動は既存の継続の経路に乗る。
+  復元の段は新しいsessionの前に、runがworktreeに残したprocessをもう一度探し、保留の猶予を過ぎても動くものがあれば名指して復元の失敗にする（残ったwriterの横でsessionを始めない）。
+  snapshotの無い操作（保存の失敗、残ったwriterで保存しなかったもの）はworktreeを残したまま照合せずにresumeし、`replan_restored`の`action`を`unsaved`にする。
+  復元の失敗と、継続の最初のresumeで新しいsessionが始まらなかったこと（起動の失敗と、起動したwrapperが登録の待ちの時間切れまで登録されないこと。`fail_continuation_start`。resumeを持つsupervisorのleaseと操作の世代を同じtransactionで確かめる）は、`replan_restore_failed`を残して`blocked`に戻す。
+  wrapperが登録された後の失敗はsessionが始まった後のrunの失敗で、操作を動かさない。
+  継続・撤回の後に同じrunへの依頼が別の操作を開いていても、復元の段はsnapshotの無い継続・撤回の操作を探して確かめる。
+  その失敗は、taskをguardしない後の操作（`candidate`・`diagnosing`）を`continuing`で置き換えて元の操作を`blocked`に戻す（taskの開いた操作は1つのまま）。taskをguardする後の操作があれば、runはその保留に任せて何も書かない。
+  そこからもう一度継続・撤回にした操作は、前の継続の復元を数えずにworktreeをsnapshotと照合し直してからresumeする。
+  判断は`replan_resolved`に残り、`replans ID`の`resolutions`と`timeline`が出す。
+  成果を捨てる選択は無い。
+- pluginの手順: 済み（dagq skillの`reference/replan.md`がフローと役割ごとのコマンド・条件の対応・分割の例を、dagq-recover skillの`reference/replan-held.md`が保留の読み方・人の判断・`blocked`の扱いと`replan resolve`を持つ）。
 
 ## 入口と診断
 

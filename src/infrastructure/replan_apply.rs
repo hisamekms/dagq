@@ -229,7 +229,15 @@ impl SqliteQueue {
             && op.return_phase == Some(ReplanStatus::Applying)
             && recovery == ApplyRecovery::Replan
         {
-            super::replans::replan_again(&tx, &op, problems, now)?;
+            super::replans::replan_again(
+                &tx,
+                &op,
+                format!(
+                    "the approved plan no longer applies, so a planner makes a new one from the saved work, continues the run or withdraws: {}",
+                    problems.join("; ")
+                ),
+                now,
+            )?;
             recorded = true;
         }
         tx.commit()?;

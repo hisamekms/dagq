@@ -10,8 +10,9 @@
 //! `list` and `show` say. The condition mappings' writer deletes an
 //! acceptance item at most once per operation.
 
-use crate::common::cli::{invoke_with, ok, ok_as, queue};
-use crate::common::queue::{base, new_goal, new_task};
+use crate::common::cli::{ok, ok_as, queue};
+use crate::common::queue::{base, new_task};
+use crate::common::replans::{args, as_role, claimed, denials, park, request};
 use dagq::domain::EventKind;
 use dagq::{
     application::{PlanRequestStore, TaskReads, TaskStore, commands::replans::Replans},
@@ -24,120 +25,6 @@ use dagq::{
 };
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::path::Path;
-
-/// A goal with task A (two acceptance items) claimed as a run, and task B
-/// that waits for A: the queue, A, B and A's run.
-fn claimed(db: &Path) -> (SqliteQueue, TaskId, TaskId, RunId) {
-    let mut queue = SqliteQueue::open(db).unwrap();
-    let goal = queue.add_goal(new_goal("replanning")).unwrap().id();
-    let a = queue
-        .add(dagq::domain::NewTask {
-            acceptance: "the API behaves\nthe operations are documented".into(),
-            goal_id: Some(goal),
-            ..new_task("A")
-        })
-        .unwrap()
-        .id();
-    let b = queue
-        .add(dagq::domain::NewTask {
-            dependencies: vec![a],
-            goal_id: Some(goal),
-            ..new_task("B")
-        })
-        .unwrap()
-        .id();
-    for task in [a, b] {
-        queue.transition(task, TaskAction::BypassReview).unwrap();
-    }
-    let ClaimOutcome::Claimed { run } = queue.claim(&base()).unwrap() else {
-        panic!("claim")
-    };
-    assert_eq!(run.task_id(), a);
-    let run = run.id().clone();
-    (queue, a, b, run)
-}
-
-/// `dagq` as `role` (with a worker's run and task; a person at a plain
-/// terminal for `user`), its JSON and whether it succeeded.
-fn as_role(
-    db: &Path,
-    role: &str,
-    worker: Option<(&RunId, TaskId)>,
-    args: &[&str],
-) -> (bool, Value) {
-    let task = worker.map(|(_, task)| task.to_string());
-    let mut env = Vec::new();
-    if role != "user" {
-        env.push(("DAGQ_ROLE", role));
-    }
-    if let (Some((run, _)), Some(task)) = (worker, task.as_deref()) {
-        env.extend([
-            ("DAGQ_RUN_ID", run.as_str()),
-            ("DAGQ_TASK_ID", task),
-            ("DAGQ_ACTOR_ID", run.as_str()),
-        ]);
-    }
-    let output = invoke_with(&env, db, args);
-    let bytes = if output.status.success() {
-        &output.stdout
-    } else {
-        &output.stderr
-    };
-    (
-        output.status.success(),
-        serde_json::from_slice(bytes).unwrap_or(Value::Null),
-    )
-}
-
-fn request(run: &RunId, reason: &str) -> Vec<String> {
-    [
-        "replan",
-        "request",
-        "--run",
-        run.as_str(),
-        "--reason",
-        reason,
-        "--evidence",
-        "1",
-    ]
-    .map(str::to_owned)
-    .to_vec()
-}
-
-fn args(words: &[String]) -> Vec<&str> {
-    words.iter().map(String::as_str).collect()
-}
-
-fn denials(db: &Path, capability: &str) -> i64 {
-    Connection::open(db)
-        .unwrap()
-        .query_row(
-            "SELECT count(*) FROM run_events WHERE kind='authorization_denied'
-             AND json_extract(payload,'$.capability')=?1",
-            [capability],
-            |r| r.get(0),
-        )
-        .unwrap()
-}
-
-/// Move operation `id` as the trusted runtime does (the supervisor).
-fn park(queue: &mut SqliteQueue, id: ReplanId, generation: i64, to: ReplanStatus) -> i64 {
-    let supervisor = ActorContext::instance(ActorRole::Supervisor, 1);
-    Replans::new(queue, &supervisor, &StaticPolicy)
-        .advance(
-            id,
-            generation,
-            &ReplanMove {
-                to,
-                reason: format!("diagnosed: {}", to.as_str()),
-                snapshot_id: None,
-                diagnosis: None,
-            },
-        )
-        .unwrap()
-        .generation
-}
 
 #[test]
 fn one_operation_per_run_keeps_the_conditions_it_began_with_across_a_reopen() {
