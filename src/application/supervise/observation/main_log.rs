@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::application::LandingBranchStamp;
-use crate::application::main_log::{Recorded, records};
+use crate::application::main_log::{MainReader, Recorded, records};
 use crate::domain::stats::main_log::{
     MAIN_OBSERVED, MAIN_OBSERVED_INTERVAL_SECS, MAIN_READ_FAILED, MAIN_READ_RECOVERED, MainReading,
     Reach,
@@ -90,51 +90,54 @@ impl ObservationState {
         // Read without starting Git.
         let stamp = env.repository.landing_branch_stamp();
         let result = self.main_log.look(now, stamp, || {
-            let recorded = Recorded {
-                reach: env
-                    .queue
-                    .latest_queue_event(&[MAIN_OBSERVED])?
-                    .as_ref()
-                    .and_then(Reach::of),
-                reading: MainReading::of(
-                    env.queue
-                        .latest_queue_event(&[MAIN_READ_FAILED, MAIN_READ_RECOVERED])?
-                        .as_ref(),
-                ),
-            };
-            let queue = &*env.queue;
-            // The queue's earliest event, read for the first record only.
-            let earliest = || -> Result<Option<i64>> {
-                Ok(queue
-                    .all_events()?
-                    .iter()
-                    .filter_map(|event| crate::domain::stats::timestamp_millis(&event.created_at))
-                    .min())
-            };
-            let records = records(&recorded, now, &earliest, env.repository);
-            let mut last = (
-                recorded.reach.as_ref().map(|reach| reach.head.clone()),
-                recorded.reach.as_ref().map_or(now, |reach| reach.at),
-                matches!(recorded.reading, MainReading::Failing { .. }),
-            );
-            for (kind, payload) in records {
-                match kind {
-                    EventKind::MainObserved => {
-                        last.0 = payload["head"].as_str().map(str::to_owned);
-                        last.1 = now;
-                    }
-                    EventKind::MainReadFailed => last.2 = true,
-                    EventKind::MainReadRecovered => last.2 = false,
-                    _ => {}
-                }
-                env.queue.record_queue_event(kind, payload)?;
-            }
-            Ok(last)
+            look_at_main(&*env.queue, now, env.repository)
         });
         if let Err(error) = result {
             warn!(error = %format_args!("{error:#}"), "main's history could not be recorded: {error:#}");
         }
     }
+}
+
+/// Read the record's reach and Git's reading from the queue, record what
+/// moved of main since ([`records`]) and give what this look found. The
+/// queue's earliest event, for the first record only, is the time
+/// [`EventStore::earliest_event_at`] answers, never every event read.
+fn look_at_main<Q: EventStore + ?Sized, M: MainReader + ?Sized>(
+    queue: &Q,
+    now: i64,
+    reader: &M,
+) -> Result<Looked> {
+    let recorded = Recorded {
+        reach: queue
+            .latest_queue_event(&[MAIN_OBSERVED])?
+            .as_ref()
+            .and_then(Reach::of),
+        reading: MainReading::of(
+            queue
+                .latest_queue_event(&[MAIN_READ_FAILED, MAIN_READ_RECOVERED])?
+                .as_ref(),
+        ),
+    };
+    let earliest = || queue.earliest_event_at();
+    let records = records(&recorded, now, &earliest, reader);
+    let mut last = (
+        recorded.reach.as_ref().map(|reach| reach.head.clone()),
+        recorded.reach.as_ref().map_or(now, |reach| reach.at),
+        matches!(recorded.reading, MainReading::Failing { .. }),
+    );
+    for (kind, payload) in records {
+        match kind {
+            EventKind::MainObserved => {
+                last.0 = payload["head"].as_str().map(str::to_owned);
+                last.1 = now;
+            }
+            EventKind::MainReadFailed => last.2 = true,
+            EventKind::MainReadRecovered => last.2 = false,
+            _ => {}
+        }
+        queue.record_queue_event(kind, payload)?;
+    }
+    Ok(last)
 }
 
 #[cfg(test)]
@@ -207,5 +210,192 @@ mod tests {
         assert!(!pass(&mut watch, at + 3, None, fine(at)));
         assert!(pass(&mut watch, at + 2 + MAIN_RETRY_SECS, None, fine(at)));
         assert_eq!(looks.get(), 7);
+    }
+
+    /// The queue's events, newest last: the time of the earliest answered
+    /// without [`EventStore::all_events`], which counts its reads.
+    #[derive(Default)]
+    struct Events {
+        events: std::cell::RefCell<Vec<RunEvent>>,
+        all_reads: Cell<usize>,
+    }
+
+    #[allow(unused_variables)]
+    impl EventStore for Events {
+        fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+            unreachable!("update_events is not what the test reaches")
+        }
+        fn all_events(&self) -> Result<Vec<RunEvent>> {
+            self.all_reads.set(self.all_reads.get() + 1);
+            Ok(self.events.borrow().clone())
+        }
+        fn earliest_event_at(&self) -> Result<Option<i64>> {
+            Ok(self
+                .events
+                .borrow()
+                .iter()
+                .filter_map(|event| crate::domain::stats::timestamp_millis(&event.created_at))
+                .min())
+        }
+        fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
+            unreachable!("latest_task_events is not what the test reaches")
+        }
+        fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
+            unreachable!("run_events is not what the test reaches")
+        }
+        fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
+            unreachable!("has_run_event is not what the test reaches")
+        }
+        fn record_runtime_event(
+            &self,
+            id: &RunId,
+            kind: EventKind,
+            payload: serde_json::Value,
+        ) -> Result<()> {
+            unreachable!("record_runtime_event is not what the test reaches")
+        }
+        fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
+            unreachable!("last_observe is not what the test reaches")
+        }
+        fn latest_event_id(&self) -> Result<EventId> {
+            unreachable!("latest_event_id is not what the test reaches")
+        }
+        fn record_backend_failure(
+            &self,
+            run: Option<&RunId>,
+            payload: serde_json::Value,
+        ) -> Result<()> {
+            unreachable!("record_backend_failure is not what the test reaches")
+        }
+        fn record_queue_event(
+            &self,
+            kind: EventKind,
+            payload: serde_json::Value,
+        ) -> Result<EventId> {
+            let mut events = self.events.borrow_mut();
+            let id = EventId::new(i64::try_from(events.len())? + 1);
+            events.push(RunEvent {
+                id,
+                task_id: None,
+                goal_id: None,
+                run_id: None,
+                kind: kind.as_str().into(),
+                payload,
+                created_at: String::new(),
+                actor: None,
+            });
+            Ok(id)
+        }
+        fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
+            unreachable!("latest_event_of is not what the test reaches")
+        }
+        fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>> {
+            unreachable!("latest_events_of is not what the test reaches")
+        }
+        fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
+            Ok(self
+                .events
+                .borrow()
+                .iter()
+                .rev()
+                .find(|event| kinds.contains(&event.kind.as_str()))
+                .cloned())
+        }
+        fn latest_events_by_supervisor(
+            &self,
+            kinds: &[&str],
+            supervisors: &[&str],
+        ) -> Result<Vec<RunEvent>> {
+            unreachable!("latest_events_by_supervisor is not what the test reaches")
+        }
+        fn events_of_between(
+            &self,
+            kinds: &[&str],
+            after: EventId,
+            upto: EventId,
+            limit: usize,
+        ) -> Result<Vec<RunEvent>> {
+            unreachable!("events_of_between is not what the test reaches")
+        }
+        fn events_between(
+            &self,
+            after: EventId,
+            upto: EventId,
+            filter: &crate::domain::EventFilter,
+            limit: usize,
+        ) -> Result<Vec<RunEvent>> {
+            unreachable!("events_between is not what the test reaches")
+        }
+    }
+
+    /// Main at `h` with no commits and no paths, keeping the `since` its
+    /// commits were read from.
+    #[derive(Default)]
+    struct Main {
+        since: Cell<Option<i64>>,
+    }
+
+    impl MainReader for Main {
+        fn head(&self) -> Result<String> {
+            Ok("h".to_owned())
+        }
+        fn commits(
+            &self,
+            _head: &str,
+            _after: Option<&str>,
+            since: i64,
+        ) -> Result<Vec<crate::domain::stats::conflicts::MainCommit>> {
+            self.since.set(Some(since));
+            Ok(Vec::new())
+        }
+        fn paths(&self, _commit: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn reaches(&self, _commit: &str, _head: &str) -> Result<bool> {
+            Ok(true)
+        }
+        fn merge_base(&self, _a: &str, _b: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    /// The first record reads main's commits since a second before the
+    /// queue's earliest event, the least time of every event's and not the
+    /// first id's, as a read of every event finds it, without reading every
+    /// event; a queue of few events or many reads none of them.
+    #[test]
+    fn the_first_record_reads_the_earliest_time_without_reading_every_event() {
+        let event = |id: i64, created_at: &str| RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: "task_added".into(),
+            payload: serde_json::json!({}),
+            created_at: created_at.to_owned(),
+            actor: None,
+        };
+        for count in [2, 500] {
+            let queue = Events::default();
+            let mut events: Vec<RunEvent> = (1..count)
+                .map(|id| event(id, "2026-09-23T00:00:00.000Z"))
+                .collect();
+            events.push(event(count, "2026-09-22T00:00:01.500Z"));
+            *queue.events.borrow_mut() = events;
+            let every = queue
+                .all_events()
+                .unwrap()
+                .iter()
+                .filter_map(|event| crate::domain::stats::timestamp_millis(&event.created_at))
+                .min()
+                .unwrap();
+            queue.all_reads.set(0);
+            let main = Main::default();
+            let now = every.div_euclid(1000) + 86_400;
+            let (head, at, failing) = look_at_main(&queue, now, &main).unwrap();
+            assert_eq!((head.as_deref(), at, failing), (Some("h"), now, false));
+            assert_eq!(main.since.get(), Some(every.div_euclid(1000) - 1));
+            assert_eq!(queue.all_reads.get(), 0, "{count} events");
+        }
     }
 }

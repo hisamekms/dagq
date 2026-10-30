@@ -2452,6 +2452,9 @@ impl EventStore for SupervisorQueue {
     fn latest_event_id(&self) -> Result<EventId> {
         self.remote("latest_event_id", vec![])
     }
+    fn earliest_event_at(&self) -> Result<Option<i64>> {
+        self.remote("earliest_event_at", vec![])
+    }
     fn record_backend_failure(
         &self,
         run: Option<&RunId>,

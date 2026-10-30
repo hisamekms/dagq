@@ -1008,6 +1008,7 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             answer(EventStore::last_observe(&*store, mode.as_str()))
         }
         "latest_event_id" => answer(EventStore::latest_event_id(&*store)),
+        "earliest_event_at" => answer(EventStore::earliest_event_at(&*store)),
         "record_backend_failure" => {
             let (run, payload): (Option<RunId>, serde_json::Value) = read(op, args)?;
             answer(EventStore::record_backend_failure(

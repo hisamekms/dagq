@@ -536,6 +536,17 @@ pub trait EventStore {
     }
     /// Every run event, oldest first, for `stats`.
     fn all_events(&self) -> Result<Vec<RunEvent>>;
+    /// When the queue's earliest event was recorded (unix milliseconds):
+    /// the least `created_at` that reads as a time, which need not be the
+    /// smallest id's; `None` for a queue with none. A store that can find
+    /// it without reading every event answers it so.
+    fn earliest_event_at(&self) -> Result<Option<i64>> {
+        Ok(self
+            .all_events()?
+            .iter()
+            .filter_map(|event| crate::domain::stats::timestamp_millis(&event.created_at))
+            .min())
+    }
     /// Per task, its newest event of one of `kinds` (ADR-0069).
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>>;
     fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>>;

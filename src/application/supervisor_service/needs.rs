@@ -68,6 +68,7 @@ pub(super) const READS: &[&str] = &[
     "has_run_event",
     "last_observe",
     "latest_event_id",
+    "earliest_event_at",
     "latest_event_of",
     "latest_events_of",
     "latest_queue_event",

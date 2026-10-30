@@ -729,6 +729,25 @@ impl SqliteQueue {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    /// When the earliest event was recorded (unix milliseconds), by its
+    /// `created_at` and not its id, reading only that column of the rows in
+    /// the order of their times until one whose time
+    /// [`crate::domain::stats::timestamp_millis`] reads. A pure read.
+    pub fn earliest_event_at(&self) -> Result<Option<i64>> {
+        let mut statement = self.conn.prepare(
+            "SELECT created_at FROM run_events WHERE julianday(created_at) IS NOT NULL
+             ORDER BY julianday(created_at), id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let created_at: String = row.get(0)?;
+            if let Some(millis) = crate::domain::stats::timestamp_millis(&created_at) {
+                return Ok(Some(millis));
+            }
+        }
+        Ok(None)
+    }
+
     /// Events with `after < id <= upto` that `filter` keeps, oldest first,
     /// at most `limit`. A pure read.
     pub fn events_between(
@@ -1110,6 +1129,9 @@ impl EventStore for SqliteQueue {
     }
     fn all_events(&self) -> Result<Vec<RunEvent>> {
         SqliteQueue::all_events(self)
+    }
+    fn earliest_event_at(&self) -> Result<Option<i64>> {
+        SqliteQueue::earliest_event_at(self)
     }
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
         SqliteQueue::latest_task_events(self, kinds)
