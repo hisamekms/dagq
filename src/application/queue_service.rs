@@ -43,8 +43,8 @@ use super::queue_reads::{BadRead, QueueRead};
 use super::queue_writes::{BadWrite, QueueWrite};
 use crate::domain::EventKind;
 use crate::domain::queue_service::{
-    API_VERSION, MIN_API_VERSION, Principal, ServiceErrorCode, ServiceRequest, ServiceResponse,
-    ServiceState, UseCase, answers, run_holds_token,
+    API_VERSION, IssueHeld, MIN_API_VERSION, Principal, ServiceErrorCode, ServiceRequest,
+    ServiceResponse, ServiceState, UseCase, answers, run_holds_token,
 };
 use crate::domain::session_step::{StepError, StepTarget};
 use crate::domain::telemetry::{ReportRecorded, TargetFacts, TelemetryReport};
@@ -258,6 +258,24 @@ pub trait ServiceBackend: Send + Sync {
     /// The token the file of `key` ([`Principal::credential_key`]) holds,
     /// its principal and who asked for it; `None` for no token.
     fn held(&self, key: &str) -> Result<Option<crate::domain::queue_service::HeldToken>>;
+    /// The tokens whose records name `principal`, each with the name of its
+    /// record: the one its file holds, and any its file no longer names
+    /// (one whose file a later issue replaced), which still authenticate.
+    fn held_records(
+        &self,
+        principal: &Principal,
+    ) -> Result<Vec<(String, crate::domain::queue_service::HeldToken)>>;
+    /// Revoke the token whose record is named `name` ([`Self::held_records`]),
+    /// a record of `principal`: the record, and the value its file holds only
+    /// when it is that token's. Whether there was such a record.
+    fn revoke_record(&self, principal: &Principal, name: &str) -> Result<bool>;
+    /// The name of the record of the token the file of `key` holds now
+    /// ([`Self::held_records`]), `None` for no file.
+    fn written_record(&self, key: &str) -> Result<Option<String>>;
+    /// Hold the queue's lock of the service's issues until what it answers
+    /// is dropped, waiting while another holds it: each issue holds it from
+    /// before its transaction to the end of its undo ([`issuing_undone`]).
+    fn hold_issues(&self) -> Result<Box<dyn std::any::Any>>;
     /// Revoke the token of `key` as this service stops, before it exits: a
     /// supervisor's whose registration ends, which a `down --wait` or the
     /// supervisor itself may stop the service after, before its last
@@ -923,7 +941,10 @@ pub(super) fn issue_token(
         parent,
         process.and_then(|pid| backend.process_of(pid)),
     );
-    let issued = store.0.issuing(&held, backend.now_ms(), &mut |facts| {
+    let key = child.credential_key();
+    let issuing =
+        |held: &IssueHeld, then: &mut IssueThen<'_>| store.0.issuing(held, backend.now_ms(), then);
+    let issue = &mut |facts: &dyn IssueFacts| {
         let file = match (&child.target, telemetry) {
             (Some(target), true) => {
                 // Only at the request of the parent that started the
@@ -956,7 +977,6 @@ pub(super) fn issue_token(
                 // transaction too: of two asking at once, the second finds
                 // the first's.
                 use crate::domain::queue_service::{Reissue, reissue};
-                let key = child.credential_key();
                 let held = backend.held(&key)?;
                 let kept = held.as_ref().map(|held| held.issued_by.clone());
                 match reissue(
@@ -984,8 +1004,20 @@ pub(super) fn issue_token(
                 }
             }
         };
-        Ok(serde_json::to_value(file)?)
-    });
+        // The one held already was written by an issue that committed.
+        let wrote = match file.held {
+            true => None,
+            false => backend.written_record(&key)?,
+        };
+        Ok((serde_json::to_value(file)?, wrote))
+    };
+    let issued = issuing_undone(
+        || backend.hold_issues(),
+        issuing,
+        &held,
+        issue,
+        |record| backend.revoke_record(child, record),
+    );
     let Err(error) = issued else {
         return issued;
     };
@@ -1021,6 +1053,56 @@ pub(super) fn issue_token(
         crate::domain::authorization::DenyReason::NotHeld,
         &why,
     ))
+}
+
+/// What an issue answered, and the name of the record of the token it
+/// wrote, `None` for none ([`issuing_undone`]).
+pub(super) type Wrote = (Value, Option<String>);
+
+/// What runs in an issue's transaction ([`ServiceQueue::issuing`]).
+pub(super) type IssueThen<'a> = dyn FnMut(&dyn IssueFacts) -> Result<Value> + 'a;
+
+/// `issuing`, an issue transaction of a token ([`ServiceQueue::issuing`])
+/// that finds `held` held, run with `issue`, which answers what it issued
+/// and the name of the record of the token it wrote in it, as read in the
+/// transaction ([`ServiceBackend::written_record`]): the file is written
+/// before the transaction commits, so when it was and the transaction then
+/// fails (its COMMIT included), `undo` revokes that token by its record
+/// ([`ServiceBackend::revoke_record`]), and no token the queue did not
+/// record is left to authenticate. Both run under the issues' lock `hold`
+/// takes ([`ServiceBackend::hold_issues`]), from before the transaction to
+/// the end of the undo, which every issue of the service takes too: no
+/// issue comes between the undo's look at the file and its removal, and
+/// none finds the token of one that did not commit, so none is handed that
+/// token as one held already
+/// ([`crate::domain::queue_service::Reissue::Held`]) to lose it to the
+/// undo. The undo touches the token's files alone and opens no transaction
+/// of the queue: a queue that failed the COMMIT and still fails (its lock
+/// taken by another writer past the wait, its disk failing) does not keep
+/// it from revoking. The transaction's answer or error is the answer; an
+/// `undo` that fails (the files' own error) is only logged, as the sweep
+/// revokes what it leaves.
+pub(super) fn issuing_undone<G>(
+    hold: impl FnOnce() -> Result<G>,
+    issuing: impl FnOnce(&IssueHeld, &mut IssueThen<'_>) -> Result<Value>,
+    held: &IssueHeld,
+    issue: &mut dyn FnMut(&dyn IssueFacts) -> Result<Wrote>,
+    undo: impl FnOnce(&str) -> Result<bool>,
+) -> Result<Value> {
+    let _issues = hold()?;
+    let mut wrote = None;
+    let issued = issuing(held, &mut |facts| {
+        let (value, written) = issue(facts)?;
+        wrote = written;
+        Ok(value)
+    });
+    if issued.is_err()
+        && let Some(record) = wrote
+        && let Err(error) = undo(&record)
+    {
+        warn!("the token of an issue that did not commit could not be revoked: {error:#}");
+    }
+    issued
 }
 
 /// Whether the parent kept with a token is still there
@@ -2965,6 +3047,21 @@ mod tests {
         fn held(&self, _: &str) -> Result<Option<crate::domain::queue_service::HeldToken>> {
             Ok(None)
         }
+        fn held_records(
+            &self,
+            _: &Principal,
+        ) -> Result<Vec<(String, crate::domain::queue_service::HeldToken)>> {
+            Ok(Vec::new())
+        }
+        fn revoke_record(&self, _: &Principal, _: &str) -> Result<bool> {
+            unimplemented!("these tests revoke no token")
+        }
+        fn written_record(&self, _: &str) -> Result<Option<String>> {
+            unimplemented!("these tests issue no token")
+        }
+        fn hold_issues(&self) -> Result<Box<dyn std::any::Any>> {
+            unimplemented!("these tests issue no token")
+        }
         fn issue_telemetry_as(
             &self,
             target: &crate::domain::session_step::StepTarget,
@@ -3007,6 +3104,205 @@ mod tests {
         ) -> Result<Option<crate::domain::queue_service::TargetStart>> {
             Ok(None)
         }
+    }
+
+    /// A token's file an issue wrote in its transaction goes when the
+    /// transaction then fails at its COMMIT, and the failure is the answer:
+    /// revoked by its record while the issues' lock is still held, with no
+    /// transaction of the queue, so a queue that goes on failing (no
+    /// transaction begins after the COMMIT failed: its disk fails, or
+    /// another writer holds its lock past the wait) does not keep the token.
+    /// One that committed, one held already (written by an issue that
+    /// committed) and an issue refused before it wrote anything leave the
+    /// file as it is.
+    #[test]
+    fn an_issue_whose_commit_fails_leaves_no_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credential");
+        let run = |commits: bool, writes: bool, refused: bool| {
+            let _ = std::fs::remove_file(&file);
+            if !writes {
+                std::fs::write(&file, "held").unwrap();
+            }
+            let lock = IssuesLock {
+                held: std::rc::Rc::default(),
+                excludes: true,
+            };
+            // The queue: once a COMMIT failed, no transaction begins again.
+            let failing = std::cell::Cell::new(false);
+            let begun = std::cell::Cell::new(0);
+            let begin = || -> Result<()> {
+                anyhow::ensure!(!failing.get(), "BEGIN IMMEDIATE failed: database is locked");
+                begun.set(begun.get() + 1);
+                Ok(())
+            };
+            let undone_under_lock = RefCell::new(None);
+            let issued = issuing_undone(
+                || lock.hold(),
+                |_: &IssueHeld, then: &mut IssueThen<'_>| {
+                    begin()?;
+                    let value = then(&Kept)?;
+                    if commits {
+                        return Ok(value);
+                    }
+                    failing.set(true);
+                    Err(anyhow!("COMMIT failed: disk I/O error"))
+                },
+                &IssueHeld::Registered(crate::domain::LeaseToken::new("registration")),
+                &mut |_| {
+                    if refused {
+                        return Err(anyhow!("refused"));
+                    }
+                    if writes {
+                        std::fs::write(&file, "token").unwrap();
+                    }
+                    Ok((json!(file), writes.then(|| "record".to_owned())))
+                },
+                |record| {
+                    // Only the record the issue wrote, the issues' lock
+                    // held, the queue still failing.
+                    assert_eq!(record, "record");
+                    assert!(begin().is_err());
+                    *undone_under_lock.borrow_mut() = Some(lock.held.get());
+                    std::fs::remove_file(&file)?;
+                    Ok(true)
+                },
+            );
+            assert!(!lock.held.get(), "the issues' lock is given back");
+            (
+                issued.map_err(|error| error.to_string()),
+                file.exists(),
+                begun.get(),
+                undone_under_lock.into_inner(),
+            )
+        };
+        let failed = Err("COMMIT failed: disk I/O error".to_owned());
+        assert_eq!(
+            run(false, true, false),
+            (failed.clone(), false, 1, Some(true))
+        );
+        assert_eq!(run(true, true, false), (Ok(json!(file)), true, 1, None));
+        assert_eq!(run(false, false, false), (failed, true, 1, None));
+        assert_eq!(
+            run(false, false, true),
+            (Err("refused".to_owned()), true, 1, None)
+        );
+    }
+
+    /// The issues' lock of a test: held while the guard it gives lives,
+    /// refused (where the service's waits) while another holds it, or
+    /// never held when `excludes` is false.
+    struct IssuesLock {
+        held: std::rc::Rc<std::cell::Cell<bool>>,
+        excludes: bool,
+    }
+
+    struct IssuesGuard(Option<std::rc::Rc<std::cell::Cell<bool>>>);
+
+    impl Drop for IssuesGuard {
+        fn drop(&mut self) {
+            if let Some(held) = &self.0 {
+                held.set(false);
+            }
+        }
+    }
+
+    impl IssuesLock {
+        fn hold(&self) -> Result<IssuesGuard> {
+            if !self.excludes {
+                return Ok(IssuesGuard(None));
+            }
+            anyhow::ensure!(!self.held.get(), "the issues' lock is held");
+            self.held.set(true);
+            Ok(IssuesGuard(Some(self.held.clone())))
+        }
+    }
+
+    /// Issue A writes its token and fails at its COMMIT; issue B of the
+    /// same principal by the same parent asks between A's rollback and its
+    /// undo, where it would find A's token held and be handed it
+    /// ([`crate::domain::queue_service::Reissue::Held`]), and then lose it
+    /// to A's undo. Under the issues' lock, which A holds from before its
+    /// transaction to the end of its undo, B cannot ask there (it waits;
+    /// here it is refused), and asked after A, it finds no token and is
+    /// issued its own, which A's undo left. With no lock that excludes, the
+    /// same order hands B A's token and leaves B a file gone.
+    #[test]
+    fn a_failed_issue_s_token_is_never_handed_to_another_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credential");
+        // An issue as `issue_token`'s: the token its file holds handed
+        // over again, or a token of its own written.
+        let issue_of = |name: &'static str| {
+            let file = file.clone();
+            move |_: &dyn IssueFacts| -> Result<Wrote> {
+                if file.exists() {
+                    return Ok((json!({"held": std::fs::read_to_string(&file)?}), None));
+                }
+                std::fs::write(&file, name)?;
+                Ok((json!({"issued": name}), Some(name.to_owned())))
+            }
+        };
+        // The undo by the record: the file only while it holds that token.
+        let undo = |record: &str| -> Result<bool> {
+            let holds = std::fs::read_to_string(&file).is_ok_and(|token| token == record);
+            if holds {
+                std::fs::remove_file(&file)?;
+            }
+            Ok(holds)
+        };
+        let commits = |held: &IssueHeld, then: &mut IssueThen<'_>| {
+            let _ = held;
+            then(&Kept)
+        };
+        let run = |excludes: bool| {
+            let _ = std::fs::remove_file(&file);
+            let lock = IssuesLock {
+                held: std::rc::Rc::default(),
+                excludes,
+            };
+            let asked_between = RefCell::new(None);
+            let a = issuing_undone(
+                || lock.hold(),
+                |held: &IssueHeld, then: &mut IssueThen<'_>| {
+                    then(&Kept)?;
+                    // Rolled back, the undo not run yet: B asks now.
+                    *asked_between.borrow_mut() = Some(
+                        issuing_undone(|| lock.hold(), commits, held, &mut issue_of("B"), undo)
+                            .map_err(|error| error.to_string()),
+                    );
+                    Err(anyhow!("COMMIT failed: disk I/O error"))
+                },
+                &IssueHeld::Nothing,
+                &mut issue_of("A"),
+                undo,
+            );
+            assert!(a.is_err());
+            let between = asked_between.into_inner().unwrap();
+            // B, asked again once A is done, if it could not ask before.
+            let after = between.is_err().then(|| {
+                issuing_undone(
+                    || lock.hold(),
+                    commits,
+                    &IssueHeld::Nothing,
+                    &mut issue_of("B"),
+                    undo,
+                )
+                .unwrap()
+            });
+            (between, after, std::fs::read_to_string(&file).ok())
+        };
+        // Under the lock: B waits out A, and holds its own token.
+        assert_eq!(
+            run(true),
+            (
+                Err("the issues' lock is held".to_owned()),
+                Some(json!({"issued": "B"})),
+                Some("B".to_owned())
+            )
+        );
+        // With none: B is handed A's token, which A's undo then takes.
+        assert_eq!(run(false), (Ok(json!({"held": "A"})), None, None));
     }
 
     /// A parent kept with a token is gone only once its process is known

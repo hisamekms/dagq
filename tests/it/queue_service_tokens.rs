@@ -1928,3 +1928,60 @@ fn a_down_wait_that_stops_the_service_once_the_registration_is_gone_leaves_no_to
     let answer = show_with(&queue_dir, &value);
     assert_eq!(answer["error"]["code"], "unauthenticated", "{answer}");
 }
+
+/// The supervisor's sweep of an ended worker (`revoke_principal`) takes,
+/// on the service's queue, every record of it: one whose file a later
+/// issue replaced, which still authenticates, and the one the file holds,
+/// with the file. Another worker's token and file stay.
+#[test]
+fn the_supervisors_sweep_takes_a_workers_record_its_file_no_longer_names() {
+    use dagq::domain::{LeaseToken, RunId, TaskId};
+    let queue = queue();
+    start(&queue);
+    let pid = std::process::id();
+    let lease = LeaseToken::new("it-sweep");
+    SqliteQueue::open(&queue.db)
+        .unwrap()
+        .register_supervisor(&lease, pid, 1, "test")
+        .unwrap();
+    let supervisor = token(&queue, &Principal::supervisor(&lease, pid));
+    let worker = Principal::worker(&RunId::new("it-ended").unwrap(), TaskId::new(1));
+    let other = Principal::worker(&RunId::new("it-other").unwrap(), TaskId::new(2));
+    // The first token's record, kept across a later issue over its file.
+    let first = token(&queue, &worker);
+    let records = queue.dir().join("service/tokens");
+    let before: Vec<_> = std::fs::read_dir(&records)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let kept: Vec<_> = before
+        .iter()
+        .map(|path| (path.clone(), std::fs::read(path).unwrap()))
+        .collect();
+    let later = token(&queue, &worker);
+    for (path, bytes) in &kept {
+        std::fs::write(path, bytes).unwrap();
+    }
+    let kept_token = token(&queue, &other);
+    assert_eq!(
+        service::lookup(queue.dir(), &first).unwrap(),
+        Some(worker.clone())
+    );
+
+    let swept = call(
+        &queue,
+        Some(&supervisor),
+        UseCase::Supervisor,
+        json!({"op": "revoke_principal", "args": [worker]}),
+    );
+    assert_eq!(swept["result"], true, "{swept}");
+    for value in [&first, &later] {
+        assert_eq!(service::lookup(queue.dir(), value).unwrap(), None);
+    }
+    assert!(!service::credential_path_of(queue.dir(), &worker).exists());
+    assert_eq!(
+        service::lookup(queue.dir(), &kept_token).unwrap(),
+        Some(other.clone())
+    );
+    assert!(service::credential_path_of(queue.dir(), &other).exists());
+}

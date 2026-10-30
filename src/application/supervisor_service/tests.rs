@@ -431,6 +431,112 @@ fn all_events_reads_the_log_in_pages_within_the_answers_limit() {
     assert!(asked[3..].iter().all(|limit| *limit == 500), "{asked:?}");
 }
 
+/// A service of `runs`, which answers a page of more than `largest` of
+/// them as past its limit and the whole read never.
+struct PagedRuns {
+    runs: Vec<crate::domain::TaskRun>,
+    largest: usize,
+    asked: std::sync::Mutex<Vec<(usize, usize)>>,
+}
+
+impl ServiceCaller for PagedRuns {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(use_case, UseCase::Supervisor);
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        assert_eq!(params.op, "runs_page", "the runs are read in pages only");
+        let (offset, page): (usize, usize) = serde_json::from_value(Value::Array(params.args))?;
+        self.asked.lock().unwrap().push((offset, page));
+        if page > self.largest {
+            return Err(service_error(&ServiceError {
+                code: ServiceErrorCode::ResponseTooLarge,
+                message: "too large".into(),
+                denied: None,
+                kind: None,
+            }));
+        }
+        let runs: Vec<_> = self.runs.iter().skip(offset).take(page).collect();
+        Ok(serde_json::to_value(runs)?)
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// The supervisor reads all the runs a page at a time from where the page
+/// before ended, never in one answer, a page past the answer's limit asked
+/// again at half its size: a queue of more runs than one answer holds
+/// comes back whole, each run once and in order.
+#[test]
+fn all_runs_reads_the_runs_in_pages_within_the_answers_limit() {
+    let task = Task::new(
+        crate::domain::TaskId::new(3),
+        NewTask {
+            title: "t".into(),
+            description: String::new(),
+            acceptance: String::new(),
+            verification_commands: Vec::new(),
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            dependencies: Vec::new(),
+            goal_dependencies: Vec::new(),
+            priority: None,
+            goal_id: None,
+            context: String::new(),
+            change: None,
+            provider: None,
+            worker_mode: None,
+            wait_for_build: false,
+            execution_class: Default::default(),
+        },
+        "2026-10-22T00:00:00.000Z".into(),
+    )
+    .unwrap();
+    let ready =
+        crate::domain::task::transition(task, crate::domain::TaskAction::BypassReview, false)
+            .unwrap();
+    let claimed = crate::domain::task::claim(ready).unwrap();
+    let base = crate::domain::CommitSha::parse("0123456789abcdef0123456789abcdef01234567", "base")
+        .unwrap();
+    let runs: Vec<_> = (0..1100)
+        .map(|i| {
+            let id = RunId::new(format!("r{i}")).unwrap();
+            crate::domain::TaskRun::new(id, &claimed, &base, "t0".into()).unwrap()
+        })
+        .collect();
+    let service = Arc::new(PagedRuns {
+        runs: runs.clone(),
+        largest: 300,
+        asked: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        ActorContext::instance(ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let read = RunReads::all_runs(&queue).unwrap();
+    let ids = |runs: &[crate::domain::TaskRun]| {
+        runs.iter()
+            .map(|run| run.id().as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&read), ids(&runs));
+    let asked = service.asked.lock().unwrap().clone();
+    assert_eq!(&asked[..2], [(0, 500), (0, 250)]);
+    assert!(asked[2..].iter().all(|(_, page)| *page == 250), "{asked:?}");
+    assert_eq!(asked.last(), Some(&(1000, 250)));
+}
+
 /// An integrator's token writes only for the landing it was issued for:
 /// one whose `integration_started` its run's events hold, which they keep
 /// after the landing has left `integrating`. One that names another event,

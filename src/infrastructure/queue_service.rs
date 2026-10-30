@@ -25,7 +25,8 @@
 //! target ended ([`kept_steps`]). `telemetry.lock` and `sessions.lock` are
 //! the `flock`s the issues of the executors' telemetry tokens
 //! ([`TelemetryLock`]) and of a session's token ([`issue`]) hold, so two of
-//! them never interleave.
+//! them never interleave; `issues.lock` the one each issue of the service
+//! holds from before its transaction to the end of its undo.
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
@@ -94,6 +95,10 @@ const TELEMETRY_LOCK_FILE: &str = "telemetry.lock";
 /// locks from the revocation of its actor's earlier sessions' tokens to its
 /// own record ([`issue`]).
 const SESSIONS_LOCK_FILE: &str = "sessions.lock";
+/// The file in [`SERVICE_DIR`] each issue of a token by the service locks
+/// from before its transaction to the end of its undo
+/// ([`crate::application::queue_service::ServiceBackend::hold_issues`]).
+const ISSUES_LOCK_FILE: &str = "issues.lock";
 /// The longest socket path a unix socket takes on macOS (`sun_path`).
 const MAX_SOCKET_PATH: usize = 103;
 /// How long a look waits for `hello`.
@@ -829,6 +834,65 @@ fn process_of(pid: u32) -> Option<SessionProcess> {
         .map(|start| SessionProcess { pid, start })
 }
 
+/// The tokens whose records name `principal`, each with the name of its
+/// record: the one its file holds, and any its file no longer names (one
+/// whose file a later issue replaced, or a revocation that ended between
+/// its two removals left), which still authenticate.
+pub fn held_records(queue_dir: &Path, principal: &Principal) -> Result<Vec<(String, HeldToken)>> {
+    Ok(records(queue_dir)?
+        .into_iter()
+        .filter(|(_, record)| record.principal == *principal)
+        .filter_map(|(path, record)| {
+            let name = path.file_stem()?.to_str()?.to_owned();
+            Some((
+                name,
+                HeldToken {
+                    principal: record.principal,
+                    issued_by: record.issued_by,
+                    issued_at: record.issued_at,
+                },
+            ))
+        })
+        .collect())
+}
+
+/// Revoke the token whose record is named `name` ([`held_records`]), a
+/// record of `principal`, as the sweep does ([`sweep_one`]): the record, and
+/// the value `principal`'s file holds only when it is that token's.
+/// Whether there was such a record.
+pub fn revoke_record(queue_dir: &Path, principal: &Principal, name: &str) -> Result<bool> {
+    // A record's name is the hex digest of its value: no other text names
+    // a file.
+    if name.len() != 64 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(false);
+    }
+    let record = service_dir(queue_dir)
+        .join(TOKENS_DIR)
+        .join(format!("{name}.json"));
+    let named = match fs::read(&record) {
+        Ok(bytes) => serde_json::from_slice::<TokenRecord>(&bytes)
+            .is_ok_and(|record| record.principal == *principal),
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("read a token's record"),
+    };
+    if !named {
+        return Ok(false);
+    }
+    sweep_one(queue_dir, &record, principal)?;
+    Ok(true)
+}
+
+/// The name of the record ([`held_records`]) of the token the file of
+/// `key` holds now, `None` for no file.
+pub fn written_record(queue_dir: &Path, key: &str) -> Result<Option<String>> {
+    let file = credential_path(queue_dir, key);
+    match fs::read_to_string(&file) {
+        Ok(token) => Ok(Some(sha256_hex(token.trim().as_bytes()))),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read {}", file.display())),
+    }
+}
+
 /// Remove the token's record at `record`, and the value `principal`'s file
 /// ([`credential_path_of`]) holds when it is that token's.
 fn sweep_one(queue_dir: &Path, record: &Path, principal: &Principal) -> Result<()> {
@@ -1469,6 +1533,57 @@ impl std::fmt::Display for AnswerPastLimit {
 
 impl std::error::Error for AnswerPastLimit {}
 
+/// A request of `use_case` whose line of `size` bytes is longer than
+/// [`MAX_REQUEST_BYTES`], which [`call`] refuses before it connects:
+/// nothing was sent, and the service did nothing. A caller refuses it as
+/// `request_too_large`, not `unreachable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestPastLimit {
+    pub use_case: UseCase,
+    pub size: usize,
+}
+
+impl std::fmt::Display for RequestPastLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&crate::domain::queue_service::request_too_large_message(
+            self.use_case,
+            self.size,
+        ))
+    }
+}
+
+impl std::error::Error for RequestPastLimit {}
+
+/// The line of `request`, its newline included, refused as
+/// [`RequestPastLimit`] past [`MAX_REQUEST_BYTES`].
+fn request_line(request: &ServiceRequest) -> Result<Vec<u8>> {
+    let mut line = serde_json::to_vec(request)?;
+    line.push(b'\n');
+    if line.len() > MAX_REQUEST_BYTES {
+        return Err(RequestPastLimit {
+            use_case: request.use_case,
+            size: line.len(),
+        }
+        .into());
+    }
+    Ok(line)
+}
+
+/// The supervisor's refusal of a request past [`MAX_REQUEST_BYTES`]
+/// ([`RequestPastLimit`]): the service's `request_too_large`, which the
+/// supervisor reads as a refusal of that request and not as a service out
+/// of reach.
+fn request_refused(past: RequestPastLimit) -> anyhow::Error {
+    crate::application::supervisor_service::service_error(
+        &crate::domain::queue_service::ServiceError {
+            code: ServiceErrorCode::RequestTooLarge,
+            message: past.to_string(),
+            denied: None,
+            kind: None,
+        },
+    )
+}
+
 /// Whether `error`, the failure of a [`Client::call`] that writes, says the
 /// write was not done: any but one whose answer did not come or was not
 /// read (`unreachable`, `response_too_large`), after which the service may
@@ -1483,6 +1598,9 @@ pub fn answered_refusal(error: &anyhow::Error) -> bool {
 /// reads: `response_too_large` for an [`AnswerPastLimit`] (the service
 /// answered), `unreachable` with `said` (where to look) for any other.
 fn no_answer(error: &anyhow::Error, use_case: UseCase, said: &str) -> ClientFailure {
+    if let Some(past) = error.downcast_ref::<RequestPastLimit>() {
+        return ClientFailure::new(ServiceErrorCode::RequestTooLarge.as_str(), past.to_string());
+    }
     if error.downcast_ref::<AnswerPastLimit>().is_some() {
         return ClientFailure::new(
             ServiceErrorCode::ResponseTooLarge.as_str(),
@@ -1524,15 +1642,16 @@ impl std::error::Error for NotConnected {
 /// answer: a listener whose backlog is full, and a service that sends its
 /// answer a little at a time, end in it as one that does not answer. An
 /// error when nothing answers (the caller does not fall back to the DB,
-/// ADR-t1233-1 decision 7), or [`AnswerPastLimit`].
+/// ADR-t1233-1 decision 7), or [`AnswerPastLimit`]; a request past
+/// [`MAX_REQUEST_BYTES`] is [`RequestPastLimit`], refused before anything
+/// is sent.
 pub fn call(socket: &Path, request: &ServiceRequest, timeout: Duration) -> Result<ServiceResponse> {
+    let line = request_line(request)?;
     let deadline = std::time::Instant::now() + timeout;
     let mut stream = connect_by(socket, deadline).map_err(|source| NotConnected {
         socket: socket.to_path_buf(),
         source,
     })?;
-    let mut line = serde_json::to_vec(request)?;
-    line.push(b'\n');
     write_by(&mut stream, &line, deadline).context("send the request to the queue service")?;
     stream.shutdown(std::net::Shutdown::Write).ok();
     let answer = read_by(&mut stream, deadline, MAX_ANSWER_BYTES + 1)
@@ -1716,7 +1835,9 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// (`unauthenticated`, `forbidden_destination`, `bad_request`,
 /// `unreachable`), or the client's (`unreachable`: nothing answers on the
 /// socket or at the broker; `response_too_large`: the answer, which the
-/// service gave, is longer than [`MAX_ANSWER_BYTES`]; `no_credential`: the
+/// service gave, is longer than [`MAX_ANSWER_BYTES`]; `request_too_large`:
+/// the request on the socket is longer than [`MAX_REQUEST_BYTES`] and was
+/// not sent; `no_credential`: the
 /// token's file does not read; `control_side_command`: the command is one of the control
 /// side's (`doctor`, `service status`), which a person or the
 /// inbox runs on the host; `no_use_case`: any other command that is none
@@ -3227,6 +3348,28 @@ impl ServiceBackend for SqliteServiceBackend {
         held(&self.queue_dir, key)
     }
 
+    fn held_records(&self, principal: &Principal) -> Result<Vec<(String, HeldToken)>> {
+        held_records(&self.queue_dir, principal)
+    }
+
+    fn revoke_record(&self, principal: &Principal, name: &str) -> Result<bool> {
+        // An executor's telemetry token under the telemetry's own lock, as
+        // its issues and revocations are.
+        let _telemetry = match principal.role {
+            ActorRole::ExecutorTelemetry => Some(TelemetryLock::take(&self.queue_dir)?),
+            _ => None,
+        };
+        revoke_record(&self.queue_dir, principal, name)
+    }
+
+    fn written_record(&self, key: &str) -> Result<Option<String>> {
+        written_record(&self.queue_dir, key)
+    }
+
+    fn hold_issues(&self) -> Result<Box<dyn std::any::Any>> {
+        Ok(Box::new(exclusive(&self.queue_dir, ISSUES_LOCK_FILE)?))
+    }
+
     fn revoke_at_stop(&self, key: String) {
         if let Some(at_stop) = &self.at_stop {
             at_stop.0.lock().expect("the stop's tokens lock").push(key);
@@ -3470,7 +3613,9 @@ impl SocketCaller {
     fn as_user(&self, request: &ServiceRequest) -> Result<Value> {
         let response = call(&self.socket, request, self.timeout).map_err(|error| {
             use crate::application::supervisor_service::ServiceUnreachable;
-            if error.downcast_ref::<NotConnected>().is_some() {
+            if let Some(past) = error.downcast_ref::<RequestPastLimit>() {
+                request_refused(*past)
+            } else if error.downcast_ref::<NotConnected>().is_some() {
                 anyhow::Error::new(ServiceUnreachable::not_done(format!("{error:#}")))
             } else {
                 anyhow::Error::new(ServiceUnreachable::maybe_done(format!("{error:#}")))
@@ -3515,7 +3660,9 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
         };
         let response = call(&self.socket, &request, self.timeout).map_err(|error| {
             use crate::application::supervisor_service::ServiceUnreachable;
-            if error.downcast_ref::<AnswerPastLimit>().is_some() {
+            if let Some(past) = error.downcast_ref::<RequestPastLimit>() {
+                request_refused(*past)
+            } else if error.downcast_ref::<AnswerPastLimit>().is_some() {
                 error
             } else if error.downcast_ref::<NotConnected>().is_some() {
                 // Nothing was sent: the service did not do it.
@@ -3654,8 +3801,16 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
             use_case,
             params,
         };
-        // Through the request's text and the answer's, as on the socket.
-        let request: ServiceRequest = serde_json::from_slice(&serde_json::to_vec(&request)?)?;
+        // Through the request's text and the answer's, as on the socket,
+        // a request past its limit refused as there.
+        let line = match request_line(&request) {
+            Err(error) => match error.downcast_ref::<RequestPastLimit>() {
+                Some(past) => return Err(request_refused(*past)),
+                None => return Err(error),
+            },
+            Ok(line) => line,
+        };
+        let request: ServiceRequest = serde_json::from_slice(&line)?;
         let response = QueueService {
             backend: &*self.backend,
             build: crate::VERSION,
@@ -3824,7 +3979,11 @@ impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
         let response = call(&self.socket, &request, CLIENT_TIMEOUT).map_err(|error| {
             use crate::application::supervisor_service::ServiceUnreachable;
             let failure = self.client.not_answered(&error, UseCase::Control);
-            if error.downcast_ref::<AnswerPastLimit>().is_some() {
+            // A request past the limit was never sent, and an answer past it
+            // was given: neither is a service out of reach, nor sent again.
+            if error.downcast_ref::<RequestPastLimit>().is_some()
+                || error.downcast_ref::<AnswerPastLimit>().is_some()
+            {
                 return anyhow::Error::new(failure);
             }
             let lost = if error.downcast_ref::<NotConnected>().is_some() {
@@ -5030,6 +5189,76 @@ mod tests {
         assert_eq!(injected.code, "client_misconfigured");
     }
 
+    /// A request past the limit the service reads is not sent: the client
+    /// refuses it before it connects as `request_too_large`, with its size,
+    /// and the supervisor reads it as the service's refusal of that
+    /// request, not as a service out of reach (which stops its pass); one
+    /// within the limit is sent.
+    #[test]
+    fn a_request_past_the_limit_is_refused_unsent_as_request_too_large() {
+        use crate::application::supervisor_service::{Refused, ServiceCaller, unreachable};
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let caller = SocketCaller::new(&dir.path().join("queue.db"));
+        let receipt = json!({"op": "finish_validation", "args": ["x".repeat(MAX_REQUEST_BYTES)]});
+        let refused = caller
+            .call(UseCase::Supervisor, receipt.clone())
+            .unwrap_err();
+        assert!(!unreachable(&refused), "{refused:#}");
+        let code = refused
+            .downcast_ref::<Refused>()
+            .map(|refused| refused.code);
+        assert_eq!(code, Some(ServiceErrorCode::RequestTooLarge), "{refused:#}");
+        assert!(
+            format!("{refused:#}").contains(&format!("past the {MAX_REQUEST_BYTES} bytes")),
+            "{refused:#}"
+        );
+        // One within the limit goes to the socket, where nothing answers.
+        let small = caller
+            .call(UseCase::Supervisor, json!({"op": "all_runs", "args": []}))
+            .unwrap_err();
+        assert!(unreachable(&small), "{small:#}");
+        // A client-mode command's is refused so too.
+        let request = ServiceRequest {
+            api_version: API_VERSION,
+            token: None,
+            env_role: None,
+            queue: None,
+            binding: None,
+            use_case: UseCase::Supervisor,
+            params: receipt,
+        };
+        let past = call(
+            &dir.path().join("none.sock"),
+            &request,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        let failure = no_answer(&past, UseCase::Supervisor, "look");
+        assert_eq!(failure.code, "request_too_large", "{failure}");
+        assert!(failure.message.contains("is not sent"), "{failure}");
+        // A control-side command's step so too: no service out of reach,
+        // so its record is not kept to be sent again.
+        let control = ControlCaller::new(
+            Client::host(&dir.path().join("queue.db"), None, env_of(&[])),
+            crate::domain::queue_service::ControlCall {
+                command: crate::domain::queue_service::ControlCommand::Observe,
+                task: None,
+                yes: false,
+                pid: 1,
+            },
+        )
+        .unwrap();
+        let step = json!({"op": "record_queue_event", "args": ["observation", "x".repeat(MAX_REQUEST_BYTES)]});
+        let refused = control.call(UseCase::Supervisor, step).unwrap_err();
+        assert!(!unreachable(&refused), "{refused:#}");
+        assert!(
+            !crate::application::supervisor_service::resend::not_taken(&refused),
+            "{refused:#}"
+        );
+        let failure = refused.downcast_ref::<ClientFailure>().unwrap();
+        assert_eq!(failure.code, "request_too_large", "{failure}");
+    }
+
     #[test]
     fn an_answer_past_the_limit_is_written_and_read_as_response_too_large() {
         // The service writes an answer within the limit as it is, and one
@@ -5620,6 +5849,59 @@ mod tests {
         assert_eq!(lookup(dir.path(), &live_token).unwrap(), Some(live));
         let records = fs::read_dir(service_dir(dir.path()).join(TOKENS_DIR)).unwrap();
         assert_eq!(records.count(), 1);
+    }
+
+    /// The records of a principal are found and revoked by their names
+    /// alone, as the service's sweep and the undo of an issue that did not
+    /// commit take them: one its file no longer names (a later issue
+    /// replaced the file) goes and leaves the file and the later token;
+    /// the one the file holds goes with the file. A name of no record, of
+    /// another principal's, or that is no digest revokes nothing.
+    #[test]
+    fn a_principal_s_records_are_revoked_by_name_and_its_file_only_with_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = Principal::worker(&RunId::new("r1").unwrap(), TaskId::new(3));
+        let other = Principal::worker(&RunId::new("r2").unwrap(), TaskId::new(4));
+        let key = worker.credential_key();
+        assert_eq!(written_record(dir.path(), &key).unwrap(), None);
+        let first = read_token(&issue(dir.path(), &worker, 1).unwrap().file).unwrap();
+        let first_name = written_record(dir.path(), &key).unwrap().unwrap();
+        assert_eq!(first_name, sha256_hex(first.as_bytes()));
+        // A later issue replaces the file; the first's record is kept, as an
+        // issue that did not commit, or a revocation ended between its
+        // removals, leaves it.
+        let kept = fs::read(record_path(dir.path(), &first)).unwrap();
+        let later_file = issue(dir.path(), &worker, 2).unwrap().file;
+        let later = read_token(&later_file).unwrap();
+        write_private(&record_path(dir.path(), &first), &kept).unwrap();
+        let mut names: Vec<String> = held_records(dir.path(), &worker)
+            .unwrap()
+            .into_iter()
+            .map(|(name, held)| {
+                assert_eq!(held.principal, worker);
+                name
+            })
+            .collect();
+        names.sort();
+        let later_name = sha256_hex(later.as_bytes());
+        let mut both = vec![first_name.clone(), later_name.clone()];
+        both.sort();
+        assert_eq!(names, both);
+        let other_token = read_token(&issue(dir.path(), &other, 1).unwrap().file).unwrap();
+        let other_name = sha256_hex(other_token.as_bytes());
+
+        assert!(revoke_record(dir.path(), &worker, &first_name).unwrap());
+        assert_eq!(lookup(dir.path(), &first).unwrap(), None);
+        assert_eq!(read_token(&later_file).unwrap(), later);
+        assert_eq!(lookup(dir.path(), &later).unwrap(), Some(worker.clone()));
+        for name in [first_name.as_str(), other_name.as_str(), "../x"] {
+            assert!(!revoke_record(dir.path(), &worker, name).unwrap(), "{name}");
+        }
+        assert_eq!(lookup(dir.path(), &other_token).unwrap(), Some(other));
+        assert!(revoke_record(dir.path(), &worker, &later_name).unwrap());
+        assert_eq!(lookup(dir.path(), &later).unwrap(), None);
+        assert!(!later_file.exists());
+        assert!(held_records(dir.path(), &worker).unwrap().is_empty());
     }
 
     #[test]

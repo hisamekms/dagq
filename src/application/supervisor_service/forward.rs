@@ -21,6 +21,10 @@ use crate::domain::search::{SearchPage, SearchQuery};
 /// for a page past the answer's limit.
 const EVENTS_PAGE: usize = 2000;
 
+/// How many runs [`RunReads::all_runs`] asks for at a time, halved for a
+/// page past the answer's limit.
+const RUNS_PAGE: usize = 500;
+
 /// How many rows of the NodeSampleStore a read asks for at a time, halved
 /// for a page past the answer's limit.
 const SAMPLES_PAGE: usize = 10_000;
@@ -742,8 +746,18 @@ impl RunReads for SupervisorQueue {
     fn active_runs(&self) -> Result<Vec<TaskRun>> {
         self.remote("active_runs", vec![])
     }
+    // A page at a time from where the page before ended: the runs only
+    // grow, in the order they were claimed, and none is removed, so the
+    // pages are the runs the one read would have given, however many the
+    // queue's history holds.
     fn all_runs(&self) -> Result<Vec<TaskRun>> {
-        self.remote("all_runs", vec![])
+        let mut offset = 0;
+        pages(RUNS_PAGE, usize::MAX, |page| {
+            let read: Vec<TaskRun> =
+                self.remote("runs_page", vec![to_value(offset)?, to_value(page)?])?;
+            offset += read.len();
+            Ok(read)
+        })
     }
     fn run(&self, id: &RunId) -> Result<TaskRun> {
         self.remote("run", vec![to_value(id)?])

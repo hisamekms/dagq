@@ -140,7 +140,10 @@ pub const URL_ENV: &str = "DAGQ_SERVICE_URL";
 pub const SUPERVISOR_REGISTRATION_ENV: &str = "DAGQ_SUPERVISOR_REGISTRATION";
 /// The variables of a client-mode `dagq`.
 pub const CLIENT_ENV: [&str; 3] = [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV];
-/// The longest request line the service reads.
+/// The longest request line the service reads: a client on its socket
+/// refuses a longer one before it sends it, with
+/// [`ServiceErrorCode::RequestTooLarge`]; one through the queue broker
+/// does not check it before it sends.
 pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 /// The longest answer line, its newline included, the service writes and a
 /// client-mode `dagq` reads, by the socket or through the broker: the
@@ -163,6 +166,16 @@ pub fn too_large_message(use_case: Option<UseCase>, size: Option<usize>) -> Stri
         "the queue service's answer to {what} {size} the {MAX_ANSWER_BYTES} bytes a client-mode \
          dagq reads, and is not sent in part: {}",
         narrowing(use_case)
+    )
+}
+
+/// The message of a [`ServiceErrorCode::RequestTooLarge`] of `use_case`:
+/// the request's `size` and [`MAX_REQUEST_BYTES`].
+pub fn request_too_large_message(use_case: UseCase, size: usize) -> String {
+    format!(
+        "the request of {} is {size} bytes, past the {MAX_REQUEST_BYTES} bytes the queue service \
+         reads, and is not sent",
+        use_case.as_str()
     )
 }
 
@@ -730,6 +743,10 @@ string_enum!(
     /// [`MAX_ANSWER_BYTES`], so the service sends this instead of a part of
     /// it, with how to narrow the read ([`too_large_message`]).
     ResponseTooLarge => "response_too_large",
+    /// `request_too_large`, only a client's on the service's socket: the
+    /// request is longer than [`MAX_REQUEST_BYTES`], so it is not sent
+    /// ([`request_too_large_message`]).
+    RequestTooLarge => "request_too_large",
 });
 
 // The state of a queue's service as a look at it finds it: `running` (it

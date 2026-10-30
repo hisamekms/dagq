@@ -26,6 +26,7 @@ pub(super) const READS: &[&str] = &[
     "list_goals",
     "active_runs",
     "all_runs",
+    "runs_page",
     "run",
     "runs_with_status",
     "next_awaiting_integration",

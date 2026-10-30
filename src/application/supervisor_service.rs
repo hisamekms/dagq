@@ -208,7 +208,7 @@ pub fn undone(error: &anyhow::Error) -> bool {
 /// The operations of [`dispatch`] that only read the queue: one the
 /// service did not answer did nothing ([`undone`]). An operation not here
 /// is taken as one that writes.
-const READ_OPS: [&str; 80] = [
+const READ_OPS: [&str; 81] = [
     "diagnosis_owners",
     "candidates",
     "build_waits",
@@ -219,6 +219,7 @@ const READ_OPS: [&str; 80] = [
     "list_goals",
     "active_runs",
     "all_runs",
+    "runs_page",
     "run",
     "runs_with_status",
     "next_awaiting_integration",
@@ -1390,51 +1391,52 @@ fn tokens(
         }
         "revoke_principal" => {
             let (principal,): (Principal,) = read(op, args)?;
-            let Some(key) = crate::domain::queue_service::swept_token_key(&principal) else {
+            if crate::domain::queue_service::swept_token_key(&principal).is_none() {
                 return Err(BadOperation(format!(
                     "a supervisor revokes no token of {}",
                     principal.actor_id
                 ))
                 .into());
-            };
-            // Only the token its file holds now, that very principal's, a
-            // supervisor's only once its registration and its process ended,
-            // an inbox's only once its session is known to have ended, a job's
-            // once the process that asked for it ended (one whose parent
-            // cannot be judged, once its job is taken as ended), and never
-            // another parent's that is there: never a live session's or
-            // job's on request. In a write transaction, as the issue's, so a
-            // token issued again meanwhile is not the one revoked.
+            }
+            // Every token of that very principal, by its record as the
+            // files' own sweep does: the one its file holds now and any its
+            // file no longer names (a later issue replaced the file). Each
+            // only as its own record tells: a supervisor's only once its
+            // registration and its process ended, an inbox's only once its
+            // session is known to have ended, a job's once the process that
+            // asked for it ended (one whose parent cannot be judged, once its
+            // job is taken as ended), and never another parent's that is
+            // there: never a live session's or job's on request. The file
+            // goes only with the token it holds. In a write transaction, as
+            // the issue's, so a token issued again meanwhile is not the one
+            // revoked.
             queue.issuing(&IssueHeld::Nothing, backend.now_ms(), &mut |facts| {
                 let there = parent_there(backend, facts);
-                let Some(held) = backend
-                    .held(&key)?
-                    .filter(|held| held.principal == principal)
-                else {
-                    return reply(Ok(false));
-                };
-                // Its job's state read once, which both judgements take.
-                let state = std::cell::OnceCell::new();
-                let job = || state.get_or_init(|| facts.job(&held, None)).clone();
-                // A supervisor's sign-in once its registration ended, as
-                // read in this transaction, and its process with it.
-                let signed_in =
-                    super::queue_service::supervisor_ended(backend, &held, |registration| {
-                        facts.registered(registration)
+                let mut revoked = false;
+                for (record, held) in backend.held_records(&principal)? {
+                    // Its job's state read once, which both judgements take.
+                    let state = std::cell::OnceCell::new();
+                    let job = || state.get_or_init(|| facts.job(&held, None)).clone();
+                    // A supervisor's sign-in once its registration ended, as
+                    // read in this transaction, and its process with it.
+                    let signed_in =
+                        super::queue_service::supervisor_ended(backend, &held, |registration| {
+                            facts.registered(registration)
+                        });
+                    let ended = signed_in.unwrap_or_else(|| {
+                        principal
+                            .session
+                            .as_ref()
+                            .is_none_or(|session| backend.session_ended(session))
+                            && (!is_job(principal.role)
+                                || job_token_ended(held.issued_by.as_ref(), there, job))
+                            && revoke_refusal(&held, &issuer.parent, there, job).is_none()
                     });
-                let ended = signed_in.unwrap_or_else(|| {
-                    principal
-                        .session
-                        .as_ref()
-                        .is_none_or(|session| backend.session_ended(session))
-                        && (!is_job(principal.role)
-                            || job_token_ended(held.issued_by.as_ref(), there, job))
-                        && revoke_refusal(&held, &issuer.parent, there, job).is_none()
-                });
-                if !ended {
-                    return reply(Ok(false));
+                    if ended && backend.revoke_record(&principal, &record)? {
+                        revoked = true;
+                    }
                 }
-                reply(backend.access().revoke(db, &key))
+                reply(Ok(revoked))
             })
         }
         "token_principals" => reply(backend.principals()),
@@ -1488,7 +1490,11 @@ fn tokens(
                 }
             };
             let child = Principal::telemetry(&target, task);
-            let issued = queue.issuing(&held, backend.now_ms(), &mut |facts| {
+            let now_ms = backend.now_ms();
+            let issuing = |held: &IssueHeld, then: &mut super::queue_service::IssueThen<'_>| {
+                queue.issuing(held, now_ms, then)
+            };
+            let issue = &mut |facts: &dyn super::queue_service::IssueFacts| {
                 // Under no lease, only the target this supervisor's command
                 // started, as the queue records its start in the issue's
                 // transaction.
@@ -1516,8 +1522,23 @@ fn tokens(
                 ) {
                     return Err(super::queue_service::Replacing(why).into());
                 }
-                reply(backend.issue_telemetry_as(&target, task, issued_under.as_ref(), &issuer))
-            });
+                let file = reply(backend.issue_telemetry_as(
+                    &target,
+                    task,
+                    issued_under.as_ref(),
+                    &issuer,
+                ))?;
+                Ok((file, backend.written_record(&child.credential_key())?))
+            };
+            // Written before the issue's COMMIT: one that did not commit
+            // is revoked, that token only.
+            let issued = super::queue_service::issuing_undone(
+                || backend.hold_issues(),
+                issuing,
+                &held,
+                issue,
+                |record| backend.revoke_record(&child, record),
+            );
             match issued {
                 Err(error) => match error.downcast_ref::<super::queue_service::NotHeld>() {
                     Some(not_held) => {
@@ -1661,15 +1682,24 @@ impl ServiceTokens {
     }
 }
 
-/// Revoke through `queue` the token of every principal `ended` says ended,
-/// by its key: the keys revoked. One token the service does not revoke
-/// leaves the rest to revoke, as the files' own sweep does; a service out
-/// of reach ends the sweep.
+/// Revoke through `queue` the tokens of every principal `ended` says
+/// ended, each principal once (the `revoke_principal` use case, which
+/// takes every record of it, as the files' own sweep does): the keys
+/// revoked. One token the service does not revoke leaves the rest to
+/// revoke; a service out of reach ends the sweep.
 fn sweep_tokens(
     queue: &SupervisorQueue,
     ended: &mut dyn FnMut(&Principal) -> bool,
 ) -> Result<Vec<String>> {
-    let principals: Vec<Principal> = queue.remote("token_principals", vec![])?;
+    let listed: Vec<Principal> = queue.remote("token_principals", vec![])?;
+    // A principal of two records (one whose file a later issue replaced)
+    // is asked for once.
+    let mut principals: Vec<Principal> = Vec::with_capacity(listed.len());
+    for principal in listed {
+        if !principals.contains(&principal) {
+            principals.push(principal);
+        }
+    }
     let mut revoked = Vec::new();
     // By the principal, whose token's file the service finds by its key:
     // an inbox's is its session's, not its actor id's.

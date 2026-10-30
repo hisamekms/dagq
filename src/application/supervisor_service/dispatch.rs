@@ -70,6 +70,15 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
         "list_goals" => answer(TaskReads::list_goals(&*store)),
         "active_runs" => answer(RunReads::active_runs(&*store)),
         "all_runs" => answer(RunReads::all_runs(&*store)),
+        // A page of the runs from the `offset`th, in the order they were
+        // claimed: the read of more runs than one answer holds.
+        "runs_page" => {
+            let (offset, page): (usize, usize) = read(op, args)?;
+            answer(
+                RunReads::all_runs(&*store)
+                    .map(|runs| runs.into_iter().skip(offset).take(page).collect::<Vec<_>>()),
+            )
+        }
         "run" => {
             let (id,): (RunId,) = read(op, args)?;
             answer(RunReads::run(&*store, &id))

@@ -56,10 +56,10 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 | `credentials/<keyのsha256>` | tokenの値（keyとinboxのsessionごとのfileは`Principal::credential_key`）。呼び出し元にはこのfileのpathを渡し、値をenvにもargvにも置かない（ADR-t1233-4決定4）。worktreeとrun dirの外 |
 
 1つの接続に1つの要求で、要求は1行のJSON、答えも1行のJSONで、答えた後に閉じる。
-上限（`MAX_ANSWER_BYTES`）を超える答えは送らず`response_too_large`で断る（ADR-t1233-5）。
+上限を超える答え（`MAX_ANSWER_BYTES`）はserviceが`response_too_large`（ADR-t1233-5）、要求（`MAX_REQUEST_BYTES`）はsocketのclientが`request_too_large`で断る。
+supervisorはどちらでもpassを止めず、育つ読み取りは区切る。
 transactionはserviceの中で完結し、クライアントとの往復で分けない（ADR-t1233-1決定3）。
 要求ごとにDBへの接続を開き、principalのactorで書く（eventの`actor`は呼び出し元のprincipal）。
-要求と答えの形は`domain::queue_service`の`ServiceRequest`と`ServiceResponse`が持つ。
 
 ## API versionと互換
 
@@ -78,6 +78,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
   親になれるroleと、発行と同じtransactionで確かめる前提は[Authorization](authorization.md#queue-serviceのユースケースservice側)が持つ。
   tokenを発行してservice dirに書くのはserviceだけで、AI actorにtokenを作るコマンドは無い。
   同じ対象に発行し直すと前のtokenは失効する（親が居る間のjobとplannerの規則は`reissue`のdoc comment）。
+  COMMITに失敗した発行はtokenを失効させる。
   依頼はactorの起動で（`ServiceAccess`）:
   - supervisor: 登録の前にuser（socketのpeer）として
   - workerとrunのwrapper: supervisorがclaimとresumeでrunのleaseの下に
@@ -92,7 +93,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
   supervisorのtokenは登録の終わり（execは除く）にserviceが消す。
   加えてserviceは、principalがrunを名指すtokenを、そのrunが終わったときに断る（`run_holds_token`）。
   workerのtokenは、supervisorがrunの終わり（slotのrunが着地・failed・interruptedで休むとき）に`ServiceAccess::revoke`で消す。
-  そこで消さなかったものは、supervisorが起動の最初のpassと終わったrunのsweepのたびに`ServiceAccess::sweep`で消す（`sweep_worker_tokens`）。
+  残りはsupervisorが起動の最初のpassとrunの終わりのsweepでserviceの`revoke_principal`に頼み、fileが置き換わった記録も消す。
   resumeを待つrun（`needs_session`）はtokenを保つので消さず、resumeは発行し直す
 - executorのtelemetryのprincipal（ADR-t1662-3決定9〜11・13）: role `executor-telemetry`で、対象を1つだけ持つ（runの対象は`run_id`、runを持たない対象は種類とid。`domain::session_step::StepTarget`）。
   actor idは対象から作り、runの対象のtokenはworkerのものと同じくrunの終わりで断る。
