@@ -1,7 +1,8 @@
 //! `dagq install` and the auto-update job against fake binaries, launchd,
 //! cmux and process signals: the migrate, replace and handoff, the restore
 //! on a failed handoff, and the job's watch, restore and asks. The drain
-//! for a breaking migration is `lifecycle_install_drain`.
+//! for a breaking migration is `lifecycle_install_drain`. The real probe of a
+//! built binary runs once, with the inbox's role.
 
 use crate::common;
 use dagq::domain::EventKind;
@@ -2656,4 +2657,62 @@ fn the_plugin_only_job_updates_the_plugin_and_nothing_else() {
     assert_eq!(failed.kind, EventKind::UpdateFailed);
     assert_eq!(failed.payload["plugin_only"], true);
     assert!(binaries.calls().is_empty());
+}
+
+/// Where [`the_probe_of_an_inbox_install_reads_as_the_user`] tells its
+/// child process to probe: the `dagq` binary to probe.
+const PROBE_AS_INBOX_OF: &str = "DAGQ_TEST_PROBE_AS_INBOX_OF";
+
+/// The probe of an `install` the inbox runs, with `DAGQ_ROLE=inbox` and no
+/// token for the throwaway queue's service, reads that queue as the user's
+/// and is not refused for a missing token. The real `LocalBinaries` probes
+/// the built `dagq` in another process of this test binary
+/// ([`probe_as_inbox_child_process`]), which carries the inbox's variables
+/// from its start, so no test thread changes its process's environment.
+/// The probe's service has this test process for its owner.
+#[test]
+fn the_probe_of_an_inbox_install_reads_as_the_user() {
+    use common::Bounded;
+    use common::actor::WithoutActor;
+    use common::service::OwnedByTest;
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "lifecycle_install::probe_as_inbox_child_process",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(PROBE_AS_INBOX_OF, env!("CARGO_BIN_EXE_dagq"))
+        .env(dagq::domain::actor::ROLE_ENV, "inbox")
+        .without_actor_env()
+        .owned_by_test()
+        .env_remove(dagq::domain::queue_service::URL_ENV);
+    let output = command.bounded_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("probed as inbox"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Not a test of its own: the other process of
+/// [`the_probe_of_an_inbox_install_reads_as_the_user`], which probes the
+/// binary it is asked to with the inbox's role it was started with, and
+/// does nothing otherwise.
+#[test]
+fn probe_as_inbox_child_process() {
+    use dagq::application::install::Binaries;
+    let Ok(binary) = std::env::var(PROBE_AS_INBOX_OF) else {
+        return;
+    };
+    assert_eq!(
+        std::env::var(dagq::domain::actor::ROLE_ENV).as_deref(),
+        Ok("inbox")
+    );
+    dagq::infrastructure::binaries::LocalBinaries
+        .probe(Path::new(&binary))
+        .unwrap();
+    println!("probed as inbox");
 }
