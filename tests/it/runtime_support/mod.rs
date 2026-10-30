@@ -8,6 +8,7 @@ use dagq::infrastructure::git_binary::git_executable;
 pub mod agent_eval;
 pub mod background_wrappers;
 pub mod ci_watch;
+pub mod container_runs;
 pub mod containers;
 mod e2e;
 pub use e2e::*;

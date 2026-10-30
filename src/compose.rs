@@ -213,6 +213,7 @@ fn run_containers_on(
             host_wide,
             kept_records: images,
             owner_runs,
+            deadline: None,
         }),
     )
 }
@@ -414,6 +415,7 @@ pub(crate) fn verification_containers(
             host_wide,
             kept_records: records.map(|records| records.images.clone()),
             owner_runs: records.and_then(|records| records.owner_runs.clone()),
+            deadline: None,
         }),
         memory_poll: std::time::Duration::from_secs(crate::domain::machine_memory::POLL_SECS),
     }

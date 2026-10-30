@@ -147,6 +147,7 @@ mod runtime_cleanup;
 mod runtime_cleanup_incremental;
 mod runtime_client_mode;
 mod runtime_clone;
+mod runtime_clone_facts;
 mod runtime_codex;
 mod runtime_codex_ask;
 mod runtime_codex_work;

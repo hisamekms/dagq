@@ -124,6 +124,9 @@ fn read_inside(checkout: &Path, path: &str) -> Result<Vec<u8>> {
 #[derive(Debug, Clone, Default)]
 pub struct PodmanImages {
     pub podman: PodmanCli,
+    /// When every command must have ended, `None` for no end: one still
+    /// running then (a build) is killed and is an error.
+    pub deadline: Option<std::time::Instant>,
 }
 
 #[derive(Deserialize)]
@@ -189,23 +192,22 @@ impl Drop for BuildContext {
 
 impl ImageBuilder for PodmanImages {
     fn images(&self) -> Result<Vec<String>> {
-        parse_image_list(&self.podman.on_machine(&[
-            "images".into(),
-            "--format".into(),
-            "json".into(),
-        ])?)
+        parse_image_list(&self.podman.on_machine(
+            &["images".into(), "--format".into(), "json".into()],
+            self.deadline,
+        )?)
     }
 
     fn build(&self, image: &ImageBuild) -> Result<()> {
         let context = BuildContext::new(image)?;
         self.podman
-            .on_machine(&build_args(image, &context.dir))
+            .on_machine(&build_args(image, &context.dir), self.deadline)
             .map(drop)
     }
 
     fn remove(&self, reference: &str) -> Result<()> {
         self.podman
-            .on_machine(&["rmi".into(), reference.into()])
+            .on_machine(&["rmi".into(), reference.into()], self.deadline)
             .map(drop)
     }
 }

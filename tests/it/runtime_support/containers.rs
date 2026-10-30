@@ -25,15 +25,25 @@ pub const QUEUE: &str = "bbbbbbbbbbbbbbbb";
 /// (taking that file away), as if one started and was gone again; and its
 /// `exec` of a container's ID writes its arguments to `state/exec-args`
 /// and runs the command on the host as `run` does, with the container's
-/// variables. Under coverage it also
+/// variables. Its `run` hangs ([`HANG_WHILE_PARENT`]), its container
+/// kept, while `state/run-hangs` is there. Under coverage it also
 /// gives the command the test's `LLVM_PROFILE_FILE`, which the runtime
 /// keeps out of the container's env: else the instrumented `dagq` writes
 /// its profile into the run's clone and the clone is not clean to land.
+/// A stub's command that does not end while the test lives: it waits a
+/// tenth of a second at a time while its parent (the test's process, whose
+/// runtime started it) is there, for two minutes at most, so a test that
+/// ends however it ends (a wait's timeout, a panic, a kill) leaves no
+/// process of it behind. A runtime that kills it leaves at most the last
+/// tenth of a second's `sleep`.
+pub const HANG_WHILE_PARENT: &str = r#"i=0; while [ "$i" -lt 1200 ] && kill -0 "$PPID" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done; exit 125"#;
+
 pub fn fake_podman(state: &Path) -> PathBuf {
     for dir in ["containers", "volumes", "bin"] {
         fs::create_dir_all(state.join(dir)).unwrap();
     }
     let s = shell_path(state);
+    let hang = HANG_WHILE_PARENT;
     let profile = std::env::var("LLVM_PROFILE_FILE")
         .map(|file| format!("export LLVM_PROFILE_FILE={}", shell_path(file)))
         .unwrap_or_default();
@@ -122,6 +132,8 @@ run)
   done
   shift
   printf 'id%s\ntrue\n[%s]\n[%s]\n' "$$" "$envs" "$mounts" > "$S/containers/$name"
+  # A container whose command does not end while `state/run-hangs` is there.
+  [ -f "$S/run-hangs" ] && {{ {hang}; }}
   cd "$workdir" || exit 125
   {profile}
   PATH="$S/bin:$PATH" "$@"

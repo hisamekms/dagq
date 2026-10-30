@@ -1,6 +1,6 @@
 # 3.86s to 7.01s (stress 5, median 5.37s, load average ~19)
 [[test]]
-name = "runtime_clone::ready_inherit_of_a_cut_off_container_run_carries_the_head_its_facts_only_turn_found"
+name = "runtime_clone_facts::ready_inherit_of_a_cut_off_container_run_carries_the_head_its_facts_only_turn_found"
 reason = "境界（Git・プロセス・container の clone）: 最後の turn が切れた container の run を、facts-only の turn を走らせて読んだ head で引き継ぎ、その head を記録の前に host の Git の refs/dagq/runs に書くことを実の clone と Git で確かめる。facts の判断は application::inherit の unit test"
 task = 3294
 

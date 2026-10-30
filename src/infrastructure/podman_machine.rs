@@ -76,11 +76,18 @@ impl PodmanCli {
             .with_context(|| format!("run {}", self.program.display()))
     }
 
-    /// `args` given at most `limit` when there is one: an error when they
-    /// did not end in time and were killed.
-    fn output_by(&self, args: &[OsString], limit: Option<Duration>) -> Result<Output> {
-        let Some(limit) = limit else {
-            return self.output(args);
+    /// `args` given at most what `limit` leaves them: an error when they
+    /// did not end in time and were killed, or when its deadline passed
+    /// before they started.
+    fn output_by(&self, args: &[OsString], limit: Limit) -> Result<Output> {
+        let limit = match limit.left() {
+            Some(Some(left)) => left,
+            Some(None) => return self.output(args),
+            None => bail!(
+                "{} {} did not start: its deadline passed",
+                self.program.display(),
+                shown(args)
+            ),
         };
         match self.output_within(args, limit)? {
             Some(output) => Ok(output),
@@ -94,16 +101,12 @@ impl PodmanCli {
 
     /// `args` run to success, given at most `limit` when there is one;
     /// their stdout.
-    fn run_by(&self, args: &[&str], limit: Option<Duration>) -> Result<String> {
+    fn run_by(&self, args: &[&str], limit: Limit) -> Result<String> {
         let args: Vec<OsString> = args.iter().map(OsString::from).collect();
         self.checked_by(&args, limit)
     }
 
-    fn checked(&self, args: &[OsString]) -> Result<String> {
-        self.checked_by(args, None)
-    }
-
-    fn checked_by(&self, args: &[OsString], limit: Option<Duration>) -> Result<String> {
+    fn checked_by(&self, args: &[OsString], limit: Limit) -> Result<String> {
         let output = self.output_by(args, limit)?;
         if !output.status.success() {
             bail!(
@@ -118,7 +121,7 @@ impl PodmanCli {
     }
 
     /// The connection that is the default now, if any.
-    fn default_connection(&self, limit: Option<Duration>) -> Result<Option<String>> {
+    fn default_connection(&self, limit: Limit) -> Result<Option<String>> {
         let text = self.run_by(&["system", "connection", "list", "--format", "json"], limit)?;
         parse_default_connection(&text)
     }
@@ -126,13 +129,10 @@ impl PodmanCli {
     /// Run `act`, then set the default connection back to the one before
     /// it, if `act` changed it. A host with no default before may keep the
     /// dagq machine's connection as its default: Podman cannot unset it.
-    fn keeping_default(
-        &self,
-        limit: Option<Duration>,
-        act: impl FnOnce() -> Result<()>,
-    ) -> Result<()> {
+    fn keeping_default(&self, limit: Limit, act: impl FnOnce() -> Result<()>) -> Result<()> {
         let before = self.default_connection(limit)?;
         let acted = act();
+        let limit = limit.restoring();
         let restore = || -> Result<()> {
             if let Some(before) = before
                 && self.default_connection(limit)?.as_deref() != Some(before.as_str())
@@ -148,10 +148,15 @@ impl PodmanCli {
 
     /// `podman --connection dagq <args>` run to success, inside the dagq
     /// machine; its stdout.
-    pub(super) fn on_machine(&self, args: &[OsString]) -> Result<String> {
+    /// Ended by `deadline` when there is one.
+    pub(super) fn on_machine(
+        &self,
+        args: &[OsString],
+        deadline: Option<Instant>,
+    ) -> Result<String> {
         let mut all: Vec<OsString> = vec!["--connection".into(), MACHINE_NAME.into()];
         all.extend(args.iter().cloned());
-        self.checked(&all)
+        self.checked_by(&all, deadline.map_or(Limit::None, Limit::By))
     }
 
     /// `podman --connection dagq <args>` given at most `limit`: its output
@@ -229,11 +234,11 @@ impl PodmanCli {
 }
 
 impl PodmanCli {
-    fn machines_by(&self, limit: Option<Duration>) -> Result<Vec<MachineEntry>> {
+    fn machines_by(&self, limit: Limit) -> Result<Vec<MachineEntry>> {
         parse_machine_list(&self.run_by(&["machine", "list", "--format", "json"], limit)?)
     }
 
-    fn mounts_by(&self, limit: Option<Duration>) -> Result<Vec<PathBuf>> {
+    fn mounts_by(&self, limit: Limit) -> Result<Vec<PathBuf>> {
         let inspect = self.run_by(&["machine", "inspect", MACHINE_NAME], limit)?;
         let file = config_file(&inspect)?;
         let text = fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
@@ -244,7 +249,7 @@ impl PodmanCli {
         &self,
         resources: &MachineResources,
         volumes: &[PathBuf],
-        limit: Option<Duration>,
+        limit: Limit,
     ) -> Result<()> {
         // A volume's source must be there when the machine starts.
         for dir in volumes {
@@ -254,14 +259,14 @@ impl PodmanCli {
         self.keeping_default(limit, || self.checked_by(&args, limit).map(drop))
     }
 
-    fn start_by(&self, limit: Option<Duration>) -> Result<()> {
+    fn start_by(&self, limit: Limit) -> Result<()> {
         self.keeping_default(limit, || {
             self.run_by(&["machine", "start", MACHINE_NAME], limit)
                 .map(drop)
         })
     }
 
-    fn stop_by(&self, limit: Option<Duration>) -> Result<()> {
+    fn stop_by(&self, limit: Limit) -> Result<()> {
         self.run_by(&["machine", "stop", MACHINE_NAME], limit)
             .map(drop)
     }
@@ -269,23 +274,23 @@ impl PodmanCli {
 
 impl PodmanMachine for PodmanCli {
     fn machines(&self) -> Result<Vec<MachineEntry>> {
-        self.machines_by(None)
+        self.machines_by(Limit::None)
     }
 
     fn mounts(&self) -> Result<Vec<PathBuf>> {
-        self.mounts_by(None)
+        self.mounts_by(Limit::None)
     }
 
     fn init(&self, resources: &MachineResources, volumes: &[PathBuf]) -> Result<()> {
-        self.init_by(resources, volumes, None)
+        self.init_by(resources, volumes, Limit::None)
     }
 
     fn start(&self) -> Result<()> {
-        self.start_by(None)
+        self.start_by(Limit::None)
     }
 
     fn stop(&self) -> Result<()> {
-        self.stop_by(None)
+        self.stop_by(Limit::None)
     }
 }
 
@@ -312,23 +317,24 @@ pub struct PodmanCliWithin {
 
 impl PodmanMachine for PodmanCliWithin {
     fn machines(&self) -> Result<Vec<MachineEntry>> {
-        self.podman.machines_by(Some(self.limit))
+        self.podman.machines_by(Limit::Each(self.limit))
     }
 
     fn mounts(&self) -> Result<Vec<PathBuf>> {
-        self.podman.mounts_by(Some(self.limit))
+        self.podman.mounts_by(Limit::Each(self.limit))
     }
 
     fn init(&self, resources: &MachineResources, volumes: &[PathBuf]) -> Result<()> {
-        self.podman.init_by(resources, volumes, Some(self.limit))
+        self.podman
+            .init_by(resources, volumes, Limit::Each(self.limit))
     }
 
     fn start(&self) -> Result<()> {
-        self.podman.start_by(Some(self.limit))
+        self.podman.start_by(Limit::Each(self.limit))
     }
 
     fn stop(&self) -> Result<()> {
-        self.podman.stop_by(Some(self.limit))
+        self.podman.stop_by(Limit::Each(self.limit))
     }
 }
 
@@ -339,51 +345,158 @@ impl PodmanMachine for PodmanCliWithin {
 /// for at most this per command.
 pub const MEMORY_LOOK_TIMEOUT: Duration = Duration::from_secs(60);
 
-impl PodmanCliWithin {
-    fn inside(&self, args: &[&str]) -> Result<String> {
-        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
-        let output = self
-            .podman
-            .inside_within(&args, self.limit)?
-            .with_context(|| {
-                format!(
-                    "podman --connection {MACHINE_NAME} {} did not end within {:?}: it was stopped",
-                    args.join(" "),
-                    self.limit
-                )
-            })?;
-        if !output.status.success() {
-            bail!(
-                "podman --connection {MACHINE_NAME} {} exited with {}: {}",
-                args.join(" "),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+/// How long a podman command of the dagq machine may take.
+#[derive(Debug, Clone, Copy)]
+enum Limit {
+    /// As long as it takes.
+    None,
+    /// At most this, each command.
+    Each(Duration),
+    /// Until this instant, every command together: one that would start
+    /// after it does not start.
+    By(Instant),
+    /// Until this instant, and at most `each` for each command besides.
+    ByEach(Instant, Duration),
+}
+
+/// How long after a deadline ([`Limit::By`]) the default connection may
+/// still be set back once a machine's init or start was cut off by it
+/// ([`PodmanCli::keeping_default`]): the person's default is not left on
+/// the dagq machine's. Shorter than the cleanup a facts-only turn has
+/// after its deadline
+/// ([`super::run_container::FACTS_CLEANUP_TIMEOUT`]), so the turn holds the
+/// supervisor's pass for no longer.
+const RESTORE_GRACE: Duration = Duration::from_secs(30);
+
+impl Limit {
+    /// What a command started now may take ([`Self::left_at`]).
+    fn left(self) -> Option<Option<Duration>> {
+        self.left_at(Instant::now())
+    }
+
+    /// What a command started at `now` may take: `Some(None)` for as long
+    /// as it takes, `None` when the deadline passed.
+    fn left_at(self, now: Instant) -> Option<Option<Duration>> {
+        match self {
+            Self::None => Some(None),
+            Self::Each(limit) => Some(Some(limit)),
+            Self::By(deadline) => {
+                let left = deadline.saturating_duration_since(now);
+                (!left.is_zero()).then_some(Some(left))
+            }
+            Self::ByEach(deadline, each) => {
+                let left = deadline.saturating_duration_since(now);
+                (!left.is_zero()).then_some(Some(left.min(each)))
+            }
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// This limit, each command given at most `each` besides.
+    fn at_most(self, each: Duration) -> Self {
+        match self {
+            Self::None => Self::Each(each),
+            Self::Each(limit) => Self::Each(limit.min(each)),
+            Self::By(deadline) => Self::ByEach(deadline, each),
+            Self::ByEach(deadline, limit) => Self::ByEach(deadline, limit.min(each)),
+        }
+    }
+
+    /// What setting the default connection back is given: a deadline's
+    /// [`RESTORE_GRACE`] later, as what it sets back may have been cut off
+    /// by it.
+    fn restoring(self) -> Self {
+        match self {
+            Self::By(deadline) => Self::By(deadline + RESTORE_GRACE),
+            Self::ByEach(deadline, each) => Self::ByEach(deadline + RESTORE_GRACE, each),
+            other => other,
+        }
     }
 }
 
-impl MachineMemory for PodmanCliWithin {
-    fn memory_mib(&self) -> Result<u64> {
-        let inspect = self
-            .podman
-            .run_by(&["machine", "inspect", MACHINE_NAME], Some(self.limit))?;
+impl PodmanCli {
+    /// `podman --connection dagq <args>` run to success within `limit`;
+    /// its stdout.
+    fn inside_by(&self, args: &[&str], limit: Limit) -> Result<String> {
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        self.checked_by(&connection_args(&args), limit)
+    }
+
+    fn memory_mib_by(&self, limit: Limit) -> Result<u64> {
+        let inspect = self.run_by(&["machine", "inspect", MACHINE_NAME], limit)?;
         parse_machine_memory(&inspect)
     }
 
     /// The containers labelled with a queue, listed and then inspected: one
     /// that ended between the two fails the read, which is tried again.
-    fn containers(&self) -> Result<Vec<MachineContainer>> {
+    fn containers_by(&self, limit: Limit) -> Result<Vec<MachineContainer>> {
         let label = format!("label={}", crate::domain::broker_relay::QUEUE_LABEL);
-        let listed = self.inside(&["ps", "--quiet", "--no-trunc", "--filter", &label])?;
+        let listed = self.inside_by(&["ps", "--quiet", "--no-trunc", "--filter", &label], limit)?;
         let ids: Vec<&str> = listed.split_whitespace().collect();
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let mut args = vec!["container", "inspect"];
         args.extend(ids);
-        parse_container_inspect(&self.inside(&args)?)
+        parse_container_inspect(&self.inside_by(&args, limit)?)
+    }
+}
+
+impl MachineMemory for PodmanCliWithin {
+    fn memory_mib(&self) -> Result<u64> {
+        self.podman.memory_mib_by(Limit::Each(self.limit))
+    }
+
+    fn containers(&self) -> Result<Vec<MachineContainer>> {
+        self.podman.containers_by(Limit::Each(self.limit))
+    }
+}
+
+/// The dagq machine's commands of `podman`, all of them ended by
+/// `deadline`: one still running then is killed, and one that would start
+/// after it does not start; either is an error. Only setting the default
+/// connection back after a machine's init or start is given
+/// [`RESTORE_GRACE`] more. What a facts-only turn's
+/// readying runs ([`QueueRunMachine::deadline`]). Its reads of the
+/// machine's memory are given at most [`MEMORY_LOOK_TIMEOUT`] each
+/// besides, as [`PodmanCliWithin`]'s.
+#[derive(Debug, Clone)]
+pub struct PodmanCliBy {
+    pub podman: PodmanCli,
+    pub deadline: Instant,
+}
+
+impl PodmanMachine for PodmanCliBy {
+    fn machines(&self) -> Result<Vec<MachineEntry>> {
+        self.podman.machines_by(Limit::By(self.deadline))
+    }
+
+    fn mounts(&self) -> Result<Vec<PathBuf>> {
+        self.podman.mounts_by(Limit::By(self.deadline))
+    }
+
+    fn init(&self, resources: &MachineResources, volumes: &[PathBuf]) -> Result<()> {
+        self.podman
+            .init_by(resources, volumes, Limit::By(self.deadline))
+    }
+
+    fn start(&self) -> Result<()> {
+        self.podman.start_by(Limit::By(self.deadline))
+    }
+
+    fn stop(&self) -> Result<()> {
+        self.podman.stop_by(Limit::By(self.deadline))
+    }
+}
+
+impl MachineMemory for PodmanCliBy {
+    fn memory_mib(&self) -> Result<u64> {
+        self.podman
+            .memory_mib_by(Limit::By(self.deadline).at_most(MEMORY_LOOK_TIMEOUT))
+    }
+
+    fn containers(&self) -> Result<Vec<MachineContainer>> {
+        self.podman
+            .containers_by(Limit::By(self.deadline).at_most(MEMORY_LOOK_TIMEOUT))
     }
 }
 
@@ -624,6 +737,68 @@ impl HostMachineUsers {
     }
 }
 
+/// How often a wait for the machine's lock by a deadline tries it again
+/// ([`HostMachineUsers::lock_by`]).
+const LOCK_RETRY: Duration = Duration::from_millis(50);
+
+impl HostMachineUsers {
+    /// The host-wide lock, tried without blocking until `deadline`: an
+    /// error when another still holds it then. The holder keeps it: a try
+    /// takes nothing from it.
+    pub fn lock_by(&self, deadline: Instant) -> Result<Box<dyn Any>> {
+        loop {
+            if let Some(held) = self.try_lock()? {
+                return Ok(held);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                bail!(
+                    "{} was held by another until the deadline",
+                    self.dir.join("lock").display()
+                );
+            }
+            thread::sleep(left.min(LOCK_RETRY));
+        }
+    }
+}
+
+/// The host-wide lock and users of `users`, its lock waited for until
+/// `deadline` when there is one ([`HostMachineUsers::lock_by`]), else for
+/// as long as it takes.
+struct UsersBy<'a> {
+    users: &'a HostMachineUsers,
+    deadline: Option<Instant>,
+}
+
+impl MachineUsers for UsersBy<'_> {
+    fn lock(&self) -> Result<Box<dyn Any>> {
+        match self.deadline {
+            Some(deadline) => self.users.lock_by(deadline),
+            None => self.users.lock(),
+        }
+    }
+
+    fn try_lock(&self) -> Result<Option<Box<dyn Any>>> {
+        self.users.try_lock()
+    }
+
+    fn join(&self, user: &str, owner: &LeaseOwner) -> Result<()> {
+        self.users.join(user, owner)
+    }
+
+    fn leave(&self, user: &str) -> Result<()> {
+        self.users.leave(user)
+    }
+
+    fn joined(&self, user: &str) -> Result<bool> {
+        self.users.joined(user)
+    }
+
+    fn count(&self) -> Result<usize> {
+        self.users.count()
+    }
+}
+
 impl MachineUsers for HostMachineUsers {
     fn lock(&self) -> Result<Box<dyn Any>> {
         fs::create_dir_all(&self.dir).with_context(|| format!("create {}", self.dir.display()))?;
@@ -679,6 +854,10 @@ impl MachineUsers for HostMachineUsers {
             }
             _ => Ok(()),
         }
+    }
+
+    fn joined(&self, user: &str) -> Result<bool> {
+        Ok(self.user_file(user)?.exists())
     }
 
     fn count(&self) -> Result<usize> {
@@ -1094,6 +1273,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_deadline_s_commands_are_given_what_is_left_and_its_restore_a_grace() {
+        let origin = Instant::now();
+        let secs = Duration::from_secs;
+        let at = |offset: u64| origin + secs(offset);
+        assert_eq!(Limit::None.left_at(origin), Some(None));
+        assert_eq!(
+            Limit::Each(MACHINE_TIMEOUT).left_at(at(900)),
+            Some(Some(MACHINE_TIMEOUT))
+        );
+        let by = Limit::By(at(600));
+        assert_eq!(by.left_at(origin), Some(Some(secs(600))));
+        assert_eq!(by.left_at(at(590)), Some(Some(secs(10))));
+        assert_eq!(by.left_at(at(600)), None);
+        assert_eq!(by.left_at(at(601)), None);
+        let each = by.at_most(MEMORY_LOOK_TIMEOUT);
+        assert_eq!(each.left_at(origin), Some(Some(MEMORY_LOOK_TIMEOUT)));
+        assert_eq!(each.left_at(at(590)), Some(Some(secs(10))));
+        assert_eq!(each.left_at(at(600)), None);
+        let restore = by.restoring();
+        assert_eq!(restore.left_at(at(600)), Some(Some(RESTORE_GRACE)));
+        assert_eq!(restore.left_at(at(600) + RESTORE_GRACE), None);
+        assert_eq!(
+            each.restoring().left_at(at(600)),
+            Some(Some(RESTORE_GRACE.min(MEMORY_LOOK_TIMEOUT)))
+        );
+        assert_eq!(
+            Limit::Each(MACHINE_TIMEOUT).restoring().left_at(origin),
+            Some(Some(MACHINE_TIMEOUT))
+        );
+    }
+
+    #[test]
     fn host_toml_overrides_the_machine_s_resources() {
         let (resources, warnings) = parse_host_machine(
             "[update]\ncpus = 9\n[machine]\ncpus = 6 # measured\nmemory_mib = 12_288\n",
@@ -1490,6 +1701,14 @@ pub struct QueueRunMachine {
     /// How the runs that own users of the machine are read when the
     /// process opens no queue ([`HostMachineUsers::runs`]).
     pub owner_runs: Option<std::sync::Arc<dyn OwnerRuns>>,
+    /// When everything this machine does must have ended, `None` for no
+    /// end: the wait for the host-wide lock ([`HostMachineUsers::lock_by`]),
+    /// the machine's start and the image's build ([`PodmanCliBy`]). What a
+    /// facts-only turn readies with ([`RunMachine::ending_by`]); a worker's
+    /// turn and a verification have none.
+    ///
+    /// [`RunMachine::ending_by`]: crate::application::podman_machine::RunMachine::ending_by
+    pub deadline: Option<Instant>,
 }
 
 impl std::fmt::Debug for QueueRunMachine {
@@ -1501,6 +1720,7 @@ impl std::fmt::Debug for QueueRunMachine {
             .field("host_wide", &self.host_wide)
             .field("kept_records", &self.kept_records.is_some())
             .field("owner_runs", &self.owner_runs.is_some())
+            .field("deadline", &self.deadline)
             .finish()
     }
 }
@@ -1551,33 +1771,41 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
             db: fs::canonicalize(&self.db).unwrap_or_else(|_| self.db.clone()),
             run: run.to_owned(),
         };
-        crate::application::podman_machine::ensure(&machine.machine(), run, &owner)
-            .map_err(anyhow::Error::msg)
-            .context("make the dagq machine run")?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| {
-                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
-            });
-        let queue_records = super::container_image::QueueImageRecords {
-            db: self.db.clone(),
-            actor: None,
+        let by = self.deadline.map(|deadline| PodmanCliBy {
+            podman: self.podman.clone(),
+            deadline,
+        });
+        let podman: &dyn PodmanMachine = match &by {
+            Some(by) => by,
+            None => &machine.podman,
         };
-        let records: &dyn crate::application::container_image::ImageRecords =
-            match &self.kept_records {
-                Some(kept) => &**kept,
-                None => &queue_records,
-            };
-        let image = crate::application::container_image::prepare(
-            &super::container_image::CheckoutImages::new(checkout, &queue_dir),
-            &super::container_image::PodmanImages {
-                podman: self.podman.clone(),
-            },
-            records,
-            now,
-        )
-        .map_err(anyhow::Error::msg)?;
-        Ok(image)
+        let users = UsersBy {
+            users: &machine.users,
+            deadline: self.deadline,
+        };
+        let machine = Machine {
+            podman,
+            users: &users,
+            resources: machine.resources,
+            required: machine.required.clone(),
+            volumes: machine.volumes.clone(),
+        };
+        let image = || self.prepare_image(checkout, &queue_dir);
+        match self.deadline {
+            Some(deadline) => crate::application::podman_machine::ensure_then(
+                &machine,
+                run,
+                &owner,
+                &|| Instant::now() >= deadline,
+                image,
+            ),
+            None => {
+                crate::application::podman_machine::ensure(&machine, run, &owner)
+                    .map_err(anyhow::Error::msg)
+                    .context("make the dagq machine run")?;
+                image()
+            }
+        }
     }
 
     fn remove_build_output(&self, build_output: &str) -> Result<()> {
@@ -1596,72 +1824,107 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
     }
 
     fn reserve(&self, ask: &MemoryAsk, now: i64) -> Result<MemoryStep> {
-        let (users, memory) = self.memory_parts();
-        crate::application::podman_machine::try_reserve(
-            &MemoryMachine {
-                users: &users,
-                memory: &memory,
-                records: &users,
-            },
-            ask,
-            now,
-        )
+        self.with_memory(|machine| {
+            crate::application::podman_machine::try_reserve(machine, ask, now)
+        })
     }
 
     fn release_memory(&self, container: &str) -> Result<()> {
-        let (users, memory) = self.memory_parts();
-        crate::application::podman_machine::release_memory(
-            &MemoryMachine {
-                users: &users,
-                memory: &memory,
-                records: &users,
-            },
-            container,
-        )
+        self.with_memory(|machine| {
+            crate::application::podman_machine::release_memory(machine, container)
+        })
     }
 
     fn mark_started(&self, container: &str, now: i64) -> Result<()> {
-        let (users, memory) = self.memory_parts();
-        crate::application::podman_machine::mark_started(
-            &MemoryMachine {
-                users: &users,
-                memory: &memory,
-                records: &users,
-            },
-            container,
-            now,
-        )
+        self.with_memory(|machine| {
+            crate::application::podman_machine::mark_started(machine, container, now)
+        })
     }
 
     fn release_memory_if_free(&self, container: &str) -> Result<()> {
-        let (users, memory) = self.memory_parts();
-        crate::application::podman_machine::release_memory_if_free(
-            &MemoryMachine {
-                users: &users,
-                memory: &memory,
-                records: &users,
-            },
-            container,
-        )
+        self.with_memory(|machine| {
+            crate::application::podman_machine::release_memory_if_free(machine, container)
+        })
         .map(drop)
+    }
+
+    fn ending_by(
+        &self,
+        deadline: Instant,
+    ) -> Option<std::sync::Arc<dyn crate::application::podman_machine::RunMachine>> {
+        Some(std::sync::Arc::new(Self {
+            deadline: Some(deadline),
+            ..self.clone()
+        }))
     }
 }
 
 impl QueueRunMachine {
+    /// The queue's image of `checkout` made ready in the running machine,
+    /// its podman commands ended by [`Self::deadline`].
+    fn prepare_image(&self, checkout: &Path, queue_dir: &Path) -> Result<String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        let queue_records = super::container_image::QueueImageRecords {
+            db: self.db.clone(),
+            actor: None,
+        };
+        let records: &dyn crate::application::container_image::ImageRecords =
+            match &self.kept_records {
+                Some(kept) => &**kept,
+                None => &queue_records,
+            };
+        crate::application::container_image::prepare(
+            &super::container_image::CheckoutImages::new(checkout, queue_dir),
+            &super::container_image::PodmanImages {
+                podman: self.podman.clone(),
+                deadline: self.deadline,
+            },
+            records,
+            now,
+        )
+        .map_err(anyhow::Error::msg)
+    }
+
     /// The machine's host-wide records and its reads of what it holds.
-    fn memory_parts(&self) -> (HostMachineUsers, PodmanCliWithin) {
+    fn memory_parts(&self) -> (HostMachineUsers, Box<dyn MachineMemory>) {
         let queue_dir = super::queue_service::queue_dir_of(&self.db);
         let data_root = queue_dir.parent().unwrap_or(Path::new("."));
+        let memory: Box<dyn MachineMemory> = match self.deadline {
+            Some(deadline) => Box::new(PodmanCliBy {
+                podman: self.podman.clone(),
+                deadline,
+            }),
+            None => Box::new(PodmanCliWithin {
+                podman: self.podman.clone(),
+                limit: MEMORY_LOOK_TIMEOUT,
+            }),
+        };
         (
             HostMachineUsers {
                 dir: data_root.join(MACHINE_DIR_NAME),
                 runs: self.owner_runs.clone(),
             },
-            PodmanCliWithin {
-                podman: self.podman.clone(),
-                limit: MEMORY_LOOK_TIMEOUT,
-            },
+            memory,
         )
+    }
+
+    /// [`Self::memory_parts`] acted on with its lock waited for until
+    /// [`Self::deadline`].
+    fn with_memory<T>(&self, act: impl FnOnce(&MemoryMachine<'_>) -> Result<T>) -> Result<T> {
+        let (records, memory) = self.memory_parts();
+        let users = UsersBy {
+            users: &records,
+            deadline: self.deadline,
+        };
+        act(&MemoryMachine {
+            users: &users,
+            memory: &*memory,
+            records: &records,
+        })
     }
 }
 

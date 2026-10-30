@@ -2296,13 +2296,13 @@ task = 3108
 
 # 5.3s (stress 5 under the host's load of other runs, task 2978)
 [[test]]
-name = "runtime_clone::the_triage_of_a_cut_off_container_run_refuses_a_retry_from_scratch"
+name = "runtime_clone_facts::the_triage_of_a_cut_off_container_run_refuses_a_retry_from_scratch"
 reason = "B 境界（supervisor の配線・復旧・プロセス）: 死んだ wrapper の container の run を supervisor が回収して triage し、復旧 job の retry の前提を、fake podman の container で実際に走らせた dagq relay turn --facts-only が書き直した事実で判定して拒み、ask にすることを確かめる。取り直しと拒否の判断は application::inherit の unit test"
 task = 2978
 
 # 6.4s (stress 5 under the host's load of other runs, task 2978)
 [[test]]
-name = "runtime_clone::the_triage_of_a_cut_off_container_run_carries_the_cut_off_turn_s_commit_over"
+name = "runtime_clone_facts::the_triage_of_a_cut_off_container_run_carries_the_cut_off_turn_s_commit_over"
 reason = "B 境界（supervisor の配線・復旧・Git・プロセス）: 同じ回収と triage で、retry_inherit が、実際の facts だけの turn が書いた bundle から取り込んだ切られた turn の commit を refs/dagq/runs に残して引き継ぎ、その container が clone と run dir だけを mount し relay を開かないことを確かめる。判断は application::inherit の unit test"
 task = 2978
 

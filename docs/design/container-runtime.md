@@ -123,7 +123,6 @@ containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すproject�
   releaseはcrates.ioのsource、開発版はbuild識別子が名指すcommitをdagqのrepositoryからcloneして取り、作ったclientの`--version`がinstallしたdagqのbuild識別子と同じでなければbuildを落とす。
   dagqのrepositoryにpushされていないcommitは取れず、baseのbuildが落ちる。
   hostにdagqのcheckoutは要らない。
-  未commitの変更を含むbuildとcommitを知らないbuildは同じ版のsourceが無いので、入手できないとしてcontainerを使えないと答える。
 - project: `dagq.toml`の`[container.image]`（綴りと意味は`ProjectImage`のdoc comment）が名指すContainerfileは、baseをbuildのARG（`DAGQ_BASE_IMAGE`）で受けてFROMにする。
   名指さなければbaseだけで動く。
   Containerfileと入力のファイルは制御側のmainのcheckoutから読み、runのcloneからは読まないので、着地前のworkerの変更でimageは変わらない。
@@ -180,9 +179,10 @@ runのworktreeのpathにcloneを記録したrunがcontainerのrunで、hostのru
 - cloneの作成: provisioningで制御側が`file://`のURLでbase commitを取り込み（hard linkもalternatesも無い）、run branchをcheckoutし、cloneの`refs/remotes/dagq/main`と制御側のrun branchをbaseに置く。
   remote・credential helper・上流の資格情報は置かない。
 - 事実: containerの中のexecutorがturnの終わりにrun dirへ書くrun branchのbundleと状態のファイルから読む。
-  bundleの1本のrun branchを確かめて制御側のrun branchだけへ取り込む（前回と同じファイルは読み直さない）。
+  bundleの1本のrun branchを確かめて制御側のrun branchだけへ取り込む。
   読めない・食い違うものはsessionに返す（pollは書きかけとして待つ）。
 - 事実だけのturn: 最後のturnの終わりのものでない事実は、headを読む前にagentもbrokerへの経路も無いturnで書き直す（[ADR-t2978-1](../adr/2026-10-23-t2978-1-facts-only-turn-runs-in-a-narrow-container-with-guarded-git.md)）。
+  supervisorのpassから呼ばれるので、lock待ち・machineのstart・imageのbuild・`podman run`を10分（startと既存のimageとgitに足り、cold buildは拒む）、片付けを含め最大11分30秒に収める。
 - 再計画の保留と復元: 書き出した作業と渡す材料による（[再計画](../plans/task-replanning.md)）。
 - 着地・review・e2e: 制御側だけの`<queue dir>/landing/<run>`の着地用のworktree（着地する`result_commit`をdetachedで置く）で動く。
   どのmachineとcontainerのmountにも入らず、作れないときは着地せず人を待つ。

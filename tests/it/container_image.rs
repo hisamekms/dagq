@@ -114,6 +114,7 @@ impl Host {
             podman: PodmanCli {
                 program: fake_podman(&state),
             },
+            deadline: None,
         };
         Self {
             _dir: dir,

@@ -56,9 +56,30 @@ use crate::domain::{CommitSha, RunId, TaskRun};
 /// machine hangs does not hold a stop of the run.
 pub const REMOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// How long a facts-only turn may take: it runs no agent, only git in the
-/// clone, so one that does not end is a machine that hangs, not work.
-pub const FACTS_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// How long a facts-only turn may take from its start, everything before
+/// its cleanup together: the wait for the machine's host-wide lock (tried
+/// without blocking, so another's start or build that holds it is never
+/// broken), the machine's start, the image's check or build, the wait for
+/// the machine's memory and the `podman run` of git in the clone: 10 min.
+/// It runs on the supervisor's pass (a triage's own commits, a carried
+/// head), so it is what a machine, a lock or a build that does not come
+/// back may hold the pass for, with [`FACTS_CLEANUP_TIMEOUT`] after. A
+/// machine's start takes tens of seconds and up to
+/// [`super::podman_machine::MACHINE_TIMEOUT`] on a loaded host, an image
+/// built already is a list, and git a few seconds; a cold build of the
+/// image may take longer, and is then killed: the turn did not run, and
+/// what reads the run's work refuses as for any turn that did not, while
+/// a worker's turn builds the image with no end.
+pub const FACTS_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How long a facts-only turn's cleanup may take after
+/// [`FACTS_TURN_TIMEOUT`]: the removal of a container it started
+/// ([`REMOVE_TIMEOUT`]) first and the release of its memory under the
+/// machine's lock in the 30 s left, which also cover setting the default
+/// connection back after a machine's start cut off by the deadline. A facts-only turn holds the supervisor's pass
+/// for at most the two together: 11 min 30 s.
+pub const FACTS_CLEANUP_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(REMOVE_TIMEOUT.as_secs() + 30);
 
 /// The containers of the runs of the queue at `db`, in the dagq machine.
 #[derive(Clone)]
@@ -76,6 +97,9 @@ pub struct PodmanRunContainers {
     /// How long a turn's container that waits for the machine's memory
     /// pauses between its tries ([`POLL_SECS`]).
     pub memory_poll: std::time::Duration,
+    /// How long a facts-only turn may take before its cleanup
+    /// ([`FACTS_TURN_TIMEOUT`]).
+    pub facts_limit: std::time::Duration,
 }
 
 /// The owner of what the run at `run` of the queue at `db` holds of the
@@ -90,9 +114,10 @@ fn run_owner(db: &Path, run: &RunId) -> LeaseOwner {
 
 /// Wait for `ask`'s memory through `machine`, pausing `poll` between the
 /// tries and reading `stop` after each; what it waited for or reserved is
-/// forgotten when it gives up.
+/// forgotten through `forget` when it gives up.
 fn reserve_with(
     machine: &dyn RunMachine,
+    forget: &dyn RunMachine,
     ask: &MemoryAsk,
     poll: std::time::Duration,
     stop: &dyn Fn() -> Option<String>,
@@ -106,7 +131,7 @@ fn reserve_with(
         &mut |note| notes(ask, note),
     );
     if reserved.is_err()
-        && let Err(error) = machine.release_memory(&ask.container)
+        && let Err(error) = forget.release_memory(&ask.container)
     {
         tracing::warn!(error = %format_args!("{error:#}"), "the wait of container {} for the machine's memory could not be forgotten: {error:#}", ask.container);
     }
@@ -177,6 +202,7 @@ impl PodmanRunContainers {
             host_wide,
             machine,
             memory_poll: std::time::Duration::from_secs(POLL_SECS),
+            facts_limit: FACTS_TURN_TIMEOUT,
         }
     }
 
@@ -195,6 +221,57 @@ impl PodmanRunContainers {
             seq: 0,
             started: None,
         })
+    }
+
+    /// [`RunContainers::remove`] with its `podman rm` given at most
+    /// `limit`.
+    fn remove_within(&self, run: &RunId, limit: std::time::Duration) -> Result<()> {
+        let queue_dir = queue_dir_of(&self.db);
+        let clone = queue_dir.join(CLONES_DIR).join(run.as_str());
+        let relay = queue_dir
+            .join(super::broker_relay::RELAY_DIR)
+            .join(format!("{}.json", run.as_str()));
+        if !clone.exists() && !relay.exists() {
+            return Ok(());
+        }
+        // The token's copy lives no longer than a turn's container.
+        let token = queue_dir.join("runs").join(run.as_str()).join(TOKEN_FILE);
+        match fs::remove_file(&token) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("remove {}", token.display()));
+            }
+        }
+        let name = self
+            .key()?
+            .run_container(run.as_str())
+            .map_err(anyhow::Error::msg)?;
+        let args = [
+            "rm".to_owned(),
+            "--force".to_owned(),
+            "--ignore".to_owned(),
+            "--time".to_owned(),
+            "0".to_owned(),
+            name.clone(),
+        ];
+        let output = self.podman.inside_within(&args, limit)?.with_context(|| {
+            format!("podman rm {name} did not end within {limit:?}: it was stopped")
+        })?;
+        if !output.status.success() {
+            bail!(
+                "podman rm {name} exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        // Its turn's reservation goes with it (ADR-t3163-1 decision 3), at
+        // once when the machine's lock is free; else the next try forgets
+        // it, its container gone. A stop is not held by it.
+        if let Err(error) = self.machine.release_memory_if_free(&name) {
+            tracing::warn!(run_id = %run, error = %format_args!("{error:#}"), "the memory reserved for run {run}'s container could not be released: {error:#}");
+        }
+        Ok(())
     }
 
     fn key(&self) -> Result<QueueKey> {
@@ -266,55 +343,7 @@ impl RunContainers for PodmanRunContainers {
     /// stops need no podman on the host. The run token's copy in the run
     /// directory goes with the container.
     fn remove(&self, run: &RunId) -> Result<()> {
-        let queue_dir = queue_dir_of(&self.db);
-        let clone = queue_dir.join(CLONES_DIR).join(run.as_str());
-        let relay = queue_dir
-            .join(super::broker_relay::RELAY_DIR)
-            .join(format!("{}.json", run.as_str()));
-        if !clone.exists() && !relay.exists() {
-            return Ok(());
-        }
-        // The token's copy lives no longer than a turn's container.
-        let token = queue_dir.join("runs").join(run.as_str()).join(TOKEN_FILE);
-        match fs::remove_file(&token) {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("remove {}", token.display()));
-            }
-        }
-        let name = self
-            .key()?
-            .run_container(run.as_str())
-            .map_err(anyhow::Error::msg)?;
-        let args = [
-            "rm".to_owned(),
-            "--force".to_owned(),
-            "--ignore".to_owned(),
-            "--time".to_owned(),
-            "0".to_owned(),
-            name.clone(),
-        ];
-        let output = self
-            .podman
-            .inside_within(&args, REMOVE_TIMEOUT)?
-            .with_context(|| {
-                format!("podman rm {name} did not end within {REMOVE_TIMEOUT:?}: it was stopped")
-            })?;
-        if !output.status.success() {
-            bail!(
-                "podman rm {name} exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        // Its turn's reservation goes with it (ADR-t3163-1 decision 3), at
-        // once when the machine's lock is free; else the next try forgets
-        // it, its container gone. A stop is not held by it.
-        if let Err(error) = self.machine.release_memory_if_free(&name) {
-            tracing::warn!(run_id = %run, error = %format_args!("{error:#}"), "the memory reserved for run {run}'s container could not be released: {error:#}");
-        }
-        Ok(())
+        self.remove_within(run, REMOVE_TIMEOUT)
     }
 
     fn reserve_memory(
@@ -325,7 +354,14 @@ impl RunContainers for PodmanRunContainers {
         notes: &mut dyn FnMut(&MemoryAsk, MemoryNote<'_>),
     ) -> Result<()> {
         let ask = self.turn_ask(run, &prepared.queue, prepared.limits.memory_mib)?;
-        reserve_with(&*self.machine, &ask, self.memory_poll, stop, notes)
+        reserve_with(
+            &*self.machine,
+            &*self.machine,
+            &ask,
+            self.memory_poll,
+            stop,
+            notes,
+        )
     }
 
     fn memory_started(&self, run: &RunId) -> Result<()> {
@@ -507,10 +543,21 @@ impl RunContainers for PodmanRunContainers {
     /// Only the machine and the image are made ready (no relay, no
     /// volume), the run token's copy a cut-off turn may have left in the
     /// run directory is removed first, and the container mounts only the
-    /// clone and the run directory ([`facts_run_args`]).
+    /// clone and the run directory ([`facts_run_args`]). Everything before
+    /// the cleanup ends by one deadline, [`Self::facts_limit`] from its
+    /// start: the machine's lock, start and image ([`RunMachine::ending_by`]),
+    /// the wait for its memory and the `podman run`; the cleanup (the
+    /// memory's release, a container's removal) by
+    /// [`FACTS_CLEANUP_TIMEOUT`] after it. A readying cut off leaves the
+    /// machine again when it joined it.
     fn facts_turn(&self, run: &TaskRun) -> Result<()> {
-        let image = self
-            .machine
+        let deadline = std::time::Instant::now() + self.facts_limit;
+        let cleanup_deadline = deadline + FACTS_CLEANUP_TIMEOUT;
+        let bounded = self.machine.ending_by(deadline);
+        let machine = bounded.as_deref().unwrap_or(&*self.machine);
+        let cleanup_bounded = self.machine.ending_by(cleanup_deadline);
+        let cleanup = cleanup_bounded.as_deref().unwrap_or(&*self.machine);
+        let image = machine
             .ready_image(run.id().as_str())
             .map_err(|error| anyhow::anyhow!("make the machine and the image ready: {error:#}"))?;
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
@@ -541,11 +588,16 @@ impl RunContainers for PodmanRunContainers {
         // when it ends, however it ends (ADR-t3163-1 decision 1): held by
         // this process meanwhile.
         let ask = self.turn_ask(run, &queue, limits.memory_mib)?;
+        let limit = self.facts_limit;
         reserve_with(
-            &*self.machine,
+            machine,
+            cleanup,
             &ask,
             self.memory_poll,
-            &|| None,
+            &|| {
+                (std::time::Instant::now() >= deadline)
+                    .then(|| format!("the facts-only turn did not start within {limit:?}"))
+            },
             &mut |_, note| {
                 if note != MemoryNote::Still {
                     tracing::info!(run_id = %run.id(), "run {}: its facts-only turn's container and the dagq machine's memory: {note:?}", run.id());
@@ -556,23 +608,34 @@ impl RunContainers for PodmanRunContainers {
             anyhow::anyhow!("reserve the dagq machine's memory for the facts-only turn: {error:#}")
         })?;
         let released = ReleaseOnDrop {
-            machine: &*self.machine,
+            machine: cleanup,
             container: &ask.container,
         };
-        let output = self.podman.inside_within(&args, FACTS_TURN_TIMEOUT);
-        drop(released);
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            bail!(
+                "the facts-only turn of run {} did not start within {limit:?}",
+                run.id()
+            );
+        }
+        let output = self.podman.inside_within(&args, left);
         let Some(output) = output? else {
             // Its podman was killed; the container may still run in the
-            // machine, and goes as a turn's does.
-            let removed = self.remove(run.id());
+            // machine, and goes as a turn's does, by the cleanup's end:
+            // before its memory is released, whose wait for the machine's
+            // lock is given what is left after.
+            let left = cleanup_deadline.saturating_duration_since(std::time::Instant::now());
+            let removed = self.remove_within(run.id(), left.min(REMOVE_TIMEOUT));
+            drop(released);
             bail!(
-                "the facts-only turn of run {} did not end within {FACTS_TURN_TIMEOUT:?}: it was stopped{}",
+                "the facts-only turn of run {} did not end within {limit:?}: it was stopped{}",
                 run.id(),
                 removed.err().map_or(String::new(), |error| format!(
                     ", and its container could not be removed: {error:#}"
                 ))
             );
         };
+        drop(released);
         if !output.status.success() {
             bail!(
                 "the facts-only turn of run {} exited with {}: {}",
@@ -1024,7 +1087,14 @@ impl VerificationContainers for PodmanVerificationContainers {
             seq: 0,
             started: None,
         };
-        reserve_with(&*self.machine, &ask, self.memory_poll, &|| None, notes)
+        reserve_with(
+            &*self.machine,
+            &*self.machine,
+            &ask,
+            self.memory_poll,
+            &|| None,
+            notes,
+        )
     }
 
     /// Every part is tried, and the first failure is returned: a container

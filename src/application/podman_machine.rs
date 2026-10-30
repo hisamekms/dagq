@@ -64,6 +64,9 @@ pub trait MachineUsers {
     /// ([`LeaseOwner`]).
     fn join(&self, user: &str, owner: &LeaseOwner) -> Result<()>;
     fn leave(&self, user: &str) -> Result<()>;
+    /// Whether `user` is among the users now, whether its owner lives or
+    /// not.
+    fn joined(&self, user: &str) -> Result<bool>;
     /// The users left whose owner still lives ([`lease_held`]); the others
     /// are forgotten.
     ///
@@ -434,6 +437,17 @@ pub trait RunMachine: Send + Sync {
     fn release_memory_if_free(&self, container: &str) -> Result<()> {
         self.release_memory(container)
     }
+    /// This machine with everything it does ended by `deadline`: each wait
+    /// for the host-wide lock gives up then instead of waiting on, and each
+    /// podman command (the machine's start, the image's build, the reads of
+    /// its memory) is killed then; either is an `Err`. What a facts-only
+    /// turn on the supervisor's pass readies with, so a machine or a lock
+    /// that does not come back holds the pass for no longer. `None` when
+    /// this machine has no such end (it never waits on a host's machine).
+    fn ending_by(&self, deadline: std::time::Instant) -> Option<Arc<dyn RunMachine>> {
+        let _ = deadline;
+        None
+    }
 }
 
 /// What [`ensure`] and [`release`] act with.
@@ -485,6 +499,36 @@ pub fn ensure(machine: &Machine<'_>, user: &str, owner: &LeaseOwner) -> Result<P
         .join(user, owner)
         .map_err(|error| format!("count a user of the podman machine {MACHINE_NAME}: {error:#}"))?;
     Ok(step)
+}
+
+/// [`ensure`] for `user`, then `then` with the machine running. When
+/// `then` fails once its deadline passed (`passed`: its commands were cut
+/// off by it)
+/// and this made `user` a user (it was none before), `user` leaves again,
+/// so a readying cut off by its deadline keeps no lease of the machine. It
+/// leaves without the host-wide lock, which may be held past the deadline,
+/// and the machine is left running for the next [`release`] to stop. A
+/// failure before the deadline keeps the lease, as [`ensure`]'s does.
+pub fn ensure_then<T>(
+    machine: &Machine<'_>,
+    user: &str,
+    owner: &LeaseOwner,
+    passed: &dyn Fn() -> bool,
+    then: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let joined = machine.users.joined(user)?;
+    ensure(machine, user, owner)
+        .map_err(anyhow::Error::msg)
+        .map_err(|error| error.context("make the dagq machine run"))?;
+    let done = then();
+    if done.is_err()
+        && !joined
+        && passed()
+        && let Err(error) = machine.users.leave(user)
+    {
+        tracing::warn!(user = %user, error = %format_args!("{error:#}"), "{user} could not leave the dagq machine {MACHINE_NAME} after its readying was cut off: {error:#}");
+    }
+    done
 }
 
 /// `user` leaves the dagq machine; under the same lock, the machine stops
@@ -683,6 +727,9 @@ mod tests {
             self.users.lock().unwrap().retain(|each| each != user);
             Ok(())
         }
+        fn joined(&self, user: &str) -> Result<bool> {
+            Ok(self.users.lock().unwrap().iter().any(|each| each == user))
+        }
         fn count(&self) -> Result<usize> {
             Ok(self.users.lock().unwrap().len())
         }
@@ -699,6 +746,38 @@ mod tests {
             volumes: required.dirs().map(Path::to_path_buf).to_vec(),
             required,
         }
+    }
+
+    /// Acceptance (d) of the facts-only turn's deadline: a readying cut
+    /// off by its deadline after the machine started leaves no lease of
+    /// it, and takes no lock to leave; one that fails before its deadline
+    /// keeps its lease, and so does a user that was one before.
+    #[test]
+    fn a_readying_cut_off_by_its_deadline_leaves_the_machine_it_joined() {
+        let passed = || true;
+        let ahead = || false;
+        let host = Host::default();
+        let cut_off = ensure_then(&machine(&host), "r1", &OWNER, &passed, || {
+            Err::<(), _>(anyhow!("the build was killed"))
+        });
+        assert!(cut_off.is_err());
+        assert_eq!(host.count().unwrap(), 0);
+        assert_eq!(host.calls(), ["lock", "init", "start"]);
+        let failed = ensure_then(&machine(&host), "r1", &OWNER, &ahead, || {
+            Err::<(), _>(anyhow!("no image"))
+        });
+        assert!(failed.is_err());
+        assert!(host.joined("r1").unwrap());
+        let again = ensure_then(&machine(&host), "r1", &OWNER, &passed, || {
+            Err::<(), _>(anyhow!("the build was killed"))
+        });
+        assert!(again.is_err());
+        assert!(host.joined("r1").unwrap());
+        assert_eq!(
+            ensure_then(&machine(&host), "r2", &OWNER, &passed, || Ok(7)).unwrap(),
+            7
+        );
+        assert!(host.joined("r2").unwrap());
     }
 
     #[test]
