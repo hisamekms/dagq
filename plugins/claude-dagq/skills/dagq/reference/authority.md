@@ -16,6 +16,7 @@ A worker, a job and the observer get the queue service's address and a token, ne
 - `authorization_denied`: refused for your principal, as in "The check".
 - `unreachable`, `unauthenticated`, `no_credential`, `client_misconfigured`: no service, token or usable address. Do not work around it (the client never opens the queue instead): try again later, or write it in the receipt.
 - `response_too_large`: the answer is too long to print. Do not retry the same read: narrow it as the message says (a smaller window or limit, the next page) and run it again.
+- `request_too_large`: the request is too large to send, and your `dagq` did not send it. Do not retry the same command: make it smaller (a shorter text, fewer items) or split it into several commands and run them.
 - `bad_request`, `failed`, `api_version_mismatch`: read the message.
 
 ## What each role is refused
