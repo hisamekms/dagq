@@ -283,15 +283,21 @@ impl RunMachine for FakeMachine {
         Ok(())
     }
 
-    /// The machine's memory is short while `<state>/memory-full` is there;
-    /// each try and release is written to `<state>/memory`.
+    /// The machine's memory is short while `<state>/memory-full` is there,
+    /// and, while `<state>/memory-ordered` ([`MEMORY_ORDERED`]) is, for an
+    /// ask behind the standing wait of another container; each try and
+    /// release is written to `<state>/memory`.
     fn reserve(
         &self,
         ask: &dagq::domain::machine_memory::MemoryAsk,
         _: i64,
     ) -> Result<dagq::domain::machine_memory::MemoryStep> {
         use dagq::domain::machine_memory::MemoryStep;
-        let full = self.0.join(MEMORY_FULL).exists();
+        let behind = self.0.join(MEMORY_ORDERED).exists()
+            && standing_waits(&self.0)
+                .iter()
+                .any(|waiting| *waiting != ask.container);
+        let full = self.0.join(MEMORY_FULL).exists() || behind;
         self.memory_note(format!(
             "{} {}",
             if full { "wait" } else { "reserve" },
@@ -308,11 +314,59 @@ impl RunMachine for FakeMachine {
         self.memory_note(format!("release {container}"));
         Ok(())
     }
+
+    /// Written apart from [`Self::release_memory`]: what a container's
+    /// removal forgets is told from what its turn forgot itself.
+    fn release_memory_if_free(&self, container: &str) -> Result<()> {
+        self.memory_note(format!("release-if-free {container}"));
+        Ok(())
+    }
 }
 
 /// The file whose presence makes [`FakeMachine`]'s memory short, and
 /// [`MemoryGated`] tell a claim to wait.
 pub const MEMORY_FULL: &str = "memory-full";
+
+/// The file whose presence makes [`FakeMachine`] keep the host-wide order
+/// of the waits: an ask waits while another container's wait stands.
+pub const MEMORY_ORDERED: &str = "memory-ordered";
+
+/// The containers whose wait for [`FakeMachine`]'s memory of `state`
+/// stands: their last try waited, and nothing reserved or forgot it since.
+pub fn standing_waits(state: &Path) -> Vec<String> {
+    let mut last: Vec<(String, String)> = Vec::new();
+    for line in memory_calls(state) {
+        let Some((call, container)) = line.split_once(' ') else {
+            continue;
+        };
+        last.retain(|(seen, _)| seen != container);
+        last.push((container.to_owned(), call.to_owned()));
+    }
+    last.into_iter()
+        .filter(|(_, call)| call == "wait")
+        .map(|(container, _)| container)
+        .collect()
+}
+
+/// One try of a turn's container `container` of another run, owned by
+/// this process, at [`FakeMachine`]'s memory of `state`, written to its
+/// memory calls as any try is.
+pub fn try_memory_of(state: &Path, container: &str) -> dagq::domain::machine_memory::MemoryStep {
+    use dagq::domain::machine_memory::{MemoryAsk, Purpose};
+    let ask = MemoryAsk {
+        container: container.to_owned(),
+        purpose: Purpose::Turn,
+        memory_mib: 1024,
+        owner: dagq::domain::podman_machine::LeaseOwner::Process {
+            pid: std::process::id(),
+        },
+        pid: std::process::id(),
+        since: 0,
+        seq: 0,
+        started: None,
+    };
+    FakeMachine(state.to_path_buf()).reserve(&ask, 0).unwrap()
+}
 
 impl FakeMachine {
     fn memory_note(&self, line: String) {

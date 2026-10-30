@@ -2530,7 +2530,7 @@ fn a_claim_waits_while_the_machine_s_memory_is_short_and_goes_on_once_it_fits() 
         "{memory:?}"
     );
     assert!(
-        memory.contains(&format!("release {container}")),
+        memory.contains(&format!("release-if-free {container}")),
         "{memory:?}"
     );
     queue.none_left();
@@ -2653,5 +2653,150 @@ fn a_running_run_s_next_turn_waits_for_the_machine_s_memory_outside_its_time() {
         !status.to_string().contains("container_memory_wait"),
         "{status}"
     );
+    queue.none_left();
+}
+
+/// Wait until the second turn of task 1's run waits for the machine's
+/// memory ([`TURN_THEN_FULL`]'s first turn filled it); its run directory.
+fn waiting_for_memory(queue: &ContainerQueue) -> PathBuf {
+    wait_until(&queue.db, crate::common::STEP_LIMIT, |sqlite| {
+        sqlite
+            .show(TaskId::new(1))
+            .unwrap()
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::ContainerMemoryWaiting)
+    });
+    PathBuf::from(queue.detail().runs[0].run_dir().unwrap())
+}
+
+/// What each run's wrapper `backend` started returned, once it did.
+fn wrappers_returned(backend: &TestWorkspace) -> Vec<Value> {
+    let workers: Vec<_> = backend
+        .sessions
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .filter_map(|(id, session)| session.worker.take().map(|worker| (id.clone(), worker)))
+        .collect();
+    workers
+        .into_iter()
+        .map(|(id, worker)| {
+            joined(worker, format!("the session wrapper of {id} to return"))
+                .unwrap_or_else(|error| panic!("the session wrapper of {id} failed: {error:#}"))
+        })
+        .collect()
+}
+
+/// What a turn whose wait for the machine's memory was stopped leaves: the
+/// wait ended as `stopped`, no turn after the first and no container of
+/// its own, a wrapper that ended without an error, and neither its wait
+/// nor a reservation standing: a later wait takes the memory.
+#[track_caller]
+fn assert_the_wait_ended_without_starting(queue: &ContainerQueue, returned: &[Value]) {
+    assert_eq!(returned.len(), 1, "{returned:?}");
+    assert_eq!(returned[0]["exit_code"], 0, "{returned:?}");
+    let detail = queue.detail();
+    let kinds = event_kinds(&detail);
+    let ended = payloads(&detail, "container_memory_wait_ended");
+    assert_eq!(ended.len(), 1, "{kinds:?}");
+    assert_eq!(ended[0]["outcome"], "stopped", "{ended:?}");
+    assert_eq!(payloads(&detail, "turn_started").len(), 1, "{kinds:?}");
+    let container = format!("dagq-{QUEUE}-run-{}", detail.runs[0].id());
+    let started = calls(&queue.state)
+        .iter()
+        .filter(|call| call.starts_with("--connection dagq run ") && call.contains(&container))
+        .count();
+    assert_eq!(started, 1, "only the first turn's container started");
+    let memory = memory_calls(&queue.state);
+    assert_eq!(
+        memory
+            .iter()
+            .filter(|line| **line == format!("reserve {container}"))
+            .count(),
+        1,
+        "{memory:?}"
+    );
+    // The turn forgot its wait itself, before any removal of its
+    // container forgot what was left.
+    let own: Vec<_> = memory
+        .iter()
+        .filter(|line| line.ends_with(&format!(" {container}")))
+        .collect();
+    let waited = own
+        .iter()
+        .rposition(|line| **line == format!("wait {container}"))
+        .unwrap_or_else(|| panic!("{memory:?}"));
+    assert_eq!(
+        own.get(waited + 1).map(|line| line.as_str()),
+        Some(format!("release {container}").as_str()),
+        "{memory:?}"
+    );
+    // The memory freed and the waits kept in order, a later one is not
+    // behind the stopped one.
+    fs::remove_file(queue.state.join(MEMORY_FULL)).unwrap();
+    fs::write(queue.state.join(MEMORY_ORDERED), "").unwrap();
+    assert_eq!(
+        try_memory_of(&queue.state, "dagq-later-run"),
+        dagq::domain::machine_memory::MemoryStep::Reserved
+    );
+}
+
+/// The wrapper's side of ADR-t3163-1 decision 4: a hold placed while a
+/// running run's next turn waits for the machine's memory fences the run's
+/// task, and the wait ends at its next try without starting the turn. The
+/// wrapper records the turns it withholds and ends between turns without
+/// an error, forgetting its wait, and the supervisor parks the run.
+#[test]
+fn a_turn_waiting_for_memory_ends_at_a_hold_without_starting() {
+    let _test = crate::common::test();
+    let queue = ContainerQueue::new(Some(TURN_THEN_FULL));
+    let supervisor = queue.supervise(TestReviewer::new(&[]));
+    waiting_for_memory(&queue);
+    let held = crate::common::cli::invoke_with(
+        &[],
+        &queue.db,
+        &["hold", "1", "--reason", "the login expired"],
+    );
+    assert!(
+        held.status.success(),
+        "{}",
+        String::from_utf8_lossy(&held.stderr)
+    );
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let returned = wrappers_returned(&queue.backend);
+    let detail = queue.detail();
+    let withheld = payloads(&detail, "turn_withheld");
+    assert_eq!(withheld.len(), 1, "{:?}", event_kinds(&detail));
+    assert!(withheld[0]["hold_id"].is_i64(), "{withheld:?}");
+    assert_eq!(payloads(&detail, "hold_parked").len(), 1);
+    assert_the_wait_ended_without_starting(&queue, &returned);
+    queue.none_left();
+}
+
+/// The exit's side of [`a_turn_waiting_for_memory_ends_at_a_hold_without_starting`]:
+/// the run's exit requested while its next turn waits for the machine's
+/// memory ends the wait without starting the turn, and the wrapper without
+/// an error, forgetting its wait; the supervisor takes the run as one that
+/// ended without its receipt. With no fence, nothing is withheld.
+#[test]
+fn a_turn_waiting_for_memory_ends_at_an_exit_request_without_starting() {
+    let _test = crate::common::test();
+    let queue = ContainerQueue::new(Some(TURN_THEN_FULL));
+    let supervisor = queue.supervise(TestReviewer::new(&[]));
+    let run_dir = waiting_for_memory(&queue);
+    fs::write(dagq::domain::turn::exit_path(&run_dir), "").unwrap();
+    let returned = wrappers_returned(&queue.backend);
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        queue.backend.sessions.lock().unwrap().len(),
+        1,
+        "no wrapper after it"
+    );
+    let detail = queue.detail();
+    assert!(payloads(&detail, "turn_withheld").is_empty());
+    assert_the_wait_ended_without_starting(&queue, &returned);
     queue.none_left();
 }

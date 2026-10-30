@@ -1,0 +1,11 @@
+# 4.47s to 6.78s (stress 5, median 4.52s, load average ~17)
+[[test]]
+name = "run_container::a_turn_waiting_for_memory_ends_at_a_hold_without_starting"
+reason = "境界（supervisor の配線・プロセス・SQLite）: supervisor が起動した background の wrapper が fake の podman で最初の turn を走らせ、次の turn の machine のメモリの待ちの間に人のプロセスが打った hold の柵を読み、待ちを止めて turn_withheld を記録して 0 で終わり、待ちを自分で外し、supervisor がその run を park することを確かめる。待ちの次の手と loop の判断は domain::machine_memory と application::podman_machine の unit test"
+task = 3451
+
+# 5.33s to 7.92s (stress 5, median 5.44s, load average ~17)
+[[test]]
+name = "run_container::a_turn_waiting_for_memory_ends_at_an_exit_request_without_starting"
+reason = "境界（supervisor の配線・プロセス・SQLite）: supervisor が起動した background の wrapper が fake の podman で最初の turn を走らせ、次の turn の machine のメモリの待ちの間に書かれた exit の依頼で待ちを止めて 0 で終わり、待ちを自分で外し、supervisor が receipt の無い終わりとしてその run を扱い終えることを確かめる。待ちの次の手と loop の判断は domain::machine_memory と application::podman_machine の unit test"
+task = 3451
