@@ -46,7 +46,8 @@ related:
 - 値は記録（run_events）から読むたびに同じ規則で導き、集計やKPIの表を持たない（[ADR-0040](../../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)決定5、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)）。
   台帳から作る形は[計測](../measurement.md#共通の読み取り関数)が持つ。
 - 規則は1か所に書く。
-  `kpi`と`report`は期間ごとの窓で`stats`と同じdomainの関数を呼び、observerの入力・plan reviewの衝突の多いファイル・完了見込みも同じ関数を直接呼ぶ。
+  `kpi`と`report`は期間ごとの窓で`stats`と同じdomainの関数を呼び、observerの入力と完了見込みも同じ関数を呼ぶ。
+  plan reviewとclaimの控えの衝突の多いファイルは、`stats`全体を通さずに`stats`の既定の窓の規則（`domain::stats::window`）と同じ数え方（`domain::stats::conflicts::conflict_hotspots_over`）を当てる。
 - 同じ記録・同じ今の時刻・同じ観測からは同じ出力になる。
 - 出力はstdoutのJSONで、既存の欄は変えず足すだけにする。
   observer・レポート・plan reviewやスループットの見直しのpromptが欄を名前で読むため。
