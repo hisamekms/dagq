@@ -53,9 +53,14 @@
 //! - `GET` [`HEALTH_PATH`] answers the broker's build and pid without a
 //!   token: `up`, `down` and the supervisor look at the broker with it.
 //!
-//! A refusal is the queue event [`QUEUE_BROKER_DENIED`] with the run and
-//! the destination, or, past the limits of [`DenialLimiter`], a count on
-//! a later one; no token's value is in a record or an error.
+//! A refusal is recorded as the queue event [`QUEUE_BROKER_DENIED`] with
+//! the run and the destination up to [`DENIALS_PER_WINDOW`] times of one
+//! [`DenialKey`] in a [`DENIAL_WINDOW`]; the window's rest are only
+//! counted, and the count rides on a later record: the key's next one, or
+//! an event of the window's end with only the run, the destination, the
+//! code (with the key's reason and token run) and `suppressed`
+//! ([`DenialLimiter`], the invariant 拒否の記録の量 of [Queue
+//! broker]). No token's value is in a record or an error.
 //!
 //! The token of a verification is issued by the control side for each of
 //! `integrate`'s verifications and revoked at its end; its value is in
