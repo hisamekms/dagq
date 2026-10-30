@@ -255,7 +255,7 @@ queueのDBが消えるか、testのownerのprocessが居なくなっても終わ
   結果は`up`の出力の`queue_service`で、起動か入れ替えはevent `queue_service_started`に残す
 - supervisor: CLIのsupervisor（`--once`も）は登録とsign inの前に、居ないか別のbuild（`install`や自動更新の前のバイナリ）のserviceを起動か入れ替えし、最初の見張りで`queue_service_started`に残す（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
   その後も一定の間隔で見て、同じように起動し直すか入れ替える。
-  起動し直しの上限、drainと引き継ぎと入れ替えの最中に見ないことは`application::supervise::host_ops::queue_service`のmodule doc
+  起動し直しの上限、起動した別のbuild（`install`がexecの前に置いたもの）を入れ替えないこと、drainと引き継ぎと入れ替えの最中に見ないことは`application::supervise::host_ops::queue_service`のmodule doc
 - serviceが居ない間、supervisorは新しいclaimとqueueのjobの起動を控える。
   走っているrunとそのreview・復旧は止めない（ADR-t1233-4決定2）
 - `down`: supervisorが居なければ`queue_service_stopped`をserviceに送ってから止める（`application::lifecycle::down`）。

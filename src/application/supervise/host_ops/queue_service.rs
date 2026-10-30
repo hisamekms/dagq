@@ -5,12 +5,12 @@
 //! [`QUEUE_SERVICE_RESTARTS`] times in [`QUEUE_SERVICE_RESTART_WINDOW`],
 //! and one of another build (left by the binary before an `install` or an
 //! automatic update handed the supervisor over) is replaced, uncounted. A
-//! replacement that runs is taken as it is after, but a start succeeds
-//! only for a service of this supervisor's own build (the control's
-//! `start`): a supervisor whose executable an `install` replaced before it
-//! execs fails the start (`queue_service_down`) and replaces the service
-//! again at a later look. Each start is `queue_service_started` (`by:
-//! supervisor`, `restart`, `replaced`).
+//! start succeeds for any service that answers after it, whatever its
+//! build (the control's `start`), and the build it runs is kept at the
+//! later looks: a supervisor whose executable an `install` replaced before
+//! it execs starts the next build's service, records no
+//! `queue_service_down`, and does not replace it again. Each start is
+//! `queue_service_started` (`by: supervisor`, `restart`, `replaced`).
 //!
 //! While the service is down the supervisor claims no new run and starts
 //! no plan review, goal review, observer or throughput review: its own
@@ -73,14 +73,32 @@ pub(in crate::application::supervise) struct QueueServiceWatch {
     /// The starts in the window.
     starts: Vec<Instant>,
     /// The build of the service this supervisor last started, kept, not
-    /// replaced, at the next looks. With a control whose start succeeds
-    /// only for this supervisor's own build it is that build.
+    /// replaced, at the next looks: the next binary's when an `install`
+    /// replaced the executable before this supervisor execs.
     accepted: Option<String>,
     /// The service this supervisor started before it registered
     /// ([`reach_at_start`]), recorded at its first look.
     started_at_start: Option<Value>,
     /// The `[push]` of an outage this look found, for the loop to send.
     push: Option<NudgePush>,
+}
+
+impl QueueServiceWatch {
+    /// The service this supervisor started before it registered: recorded
+    /// at the first look, and its build kept at the later ones.
+    fn started(&mut self, started: &Value) {
+        self.accepted = started["build"].as_str().map(str::to_owned);
+        self.started_at_start = Some(started.clone());
+    }
+
+    /// Whether `found` is kept as it is: it answers, of this build or of
+    /// the one this supervisor last started.
+    fn keeps(&self, found: &ServiceProbe) -> bool {
+        found.current()
+            || (found.state == ServiceState::Running
+                && found.build.is_some()
+                && found.build == self.accepted)
+    }
 }
 
 impl HostOpsState {
@@ -99,7 +117,7 @@ impl HostOpsState {
     /// The service this process started before it registered, recorded at
     /// its first look ([`reach_at_start`]).
     pub(in crate::application::supervise) fn started_queue_service(&mut self, started: Value) {
-        self.queue_service.started_at_start = Some(started);
+        self.queue_service.started(&started);
     }
 
     /// The service did not answer one of the supervisor's operations: look
@@ -141,10 +159,7 @@ impl HostOpsState {
         }
         self.queue_service.last = Some(env.generators.clock.monotonic());
         let found = port.control.probe();
-        let accepted = found.state == ServiceState::Running
-            && found.build.is_some()
-            && found.build == self.queue_service.accepted;
-        if found.current() || accepted {
+        if self.queue_service.keeps(&found) {
             let closed = self.close_outage(env);
             if closed || (!self.queue_service.up && self.queue_service_attention_stands(env)) {
                 info!("the queue service answers again");
@@ -606,5 +621,35 @@ mod tests {
         assert!(!restart_limited(&mut freed, base + window, window));
         assert_eq!(freed.len(), QUEUE_SERVICE_RESTARTS - 1);
         assert!(!restart_limited(&mut Vec::new(), base, window));
+    }
+
+    /// A service of this build is kept, and so is the build this
+    /// supervisor last started, before it registered or at a look, though
+    /// it is not its own (the next binary's an `install` put in place
+    /// before it execs); any other build is replaced.
+    #[test]
+    fn the_watch_keeps_its_own_build_and_the_one_it_started() {
+        let look = |build: &str| ServiceProbe {
+            state: ServiceState::Running,
+            socket: std::path::PathBuf::from("/q/queue.sock"),
+            pid: Some(1),
+            build: Some(build.to_owned()),
+            api_version: None,
+            min_api_version: None,
+            build_matches: Some(build == crate::VERSION),
+            started_at: None,
+            error: None,
+        };
+        let mut watch = QueueServiceWatch::default();
+        assert!(watch.keeps(&look(crate::VERSION)));
+        assert!(!watch.keeps(&look("9.9.9-next")));
+        watch.started(&json!({"by": "supervisor", "build": "9.9.9-next"}));
+        assert!(watch.started_at_start.is_some());
+        assert!(watch.keeps(&look("9.9.9-next")));
+        assert!(!watch.keeps(&look("0.0.1-old")));
+        assert!(!watch.keeps(&ServiceProbe {
+            state: ServiceState::Unreachable,
+            ..look("9.9.9-next")
+        }));
     }
 }

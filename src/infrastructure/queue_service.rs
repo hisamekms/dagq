@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -4544,6 +4544,47 @@ pub(crate) fn runs_for(pid: u32, command_words: &str, db: &Path) -> bool {
         && command.contains(&*db.to_string_lossy())
 }
 
+/// Look with `look` until a service answers, up to `timeout`
+/// ([`start_settled`] at each look).
+fn await_answer(
+    look: impl Fn() -> ServiceProbe,
+    timeout: Duration,
+    log_file: &Path,
+) -> Result<ServiceProbe> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(settled) = start_settled(look(), Instant::now() >= deadline, timeout, log_file)
+        {
+            return settled;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// What a start's look at `found` settles, `None` to look again: any
+/// service that answers will do, whatever its build. Another starter may
+/// have won the lock, and the executable may already be the next binary an
+/// `install` put in place; the caller judges the build. With none once
+/// `timed_out`, the start fails naming `log_file`.
+fn start_settled(
+    found: ServiceProbe,
+    timed_out: bool,
+    timeout: Duration,
+    log_file: &Path,
+) -> Option<Result<ServiceProbe>> {
+    if found.state == ServiceState::Running {
+        return Some(Ok(found));
+    }
+    timed_out.then(|| {
+        Err(anyhow!(
+            "the queue service did not answer within {}s ({}); see {}",
+            timeout.as_secs(),
+            found.state.as_str(),
+            log_file.display()
+        ))
+    })
+}
+
 impl SystemQueueService {
     /// Start `dagq service serve` with `arguments` from the binary,
     /// detached, its output appended to the service's log: the log's path.
@@ -4689,24 +4730,7 @@ impl QueueServiceControl for SystemQueueService {
         }
         let queue_dir = self.queue_dir();
         let log_file = self.spawn(&[])?;
-        let deadline = Instant::now() + timeout;
-        loop {
-            // Any service of this build that answers will do: another
-            // starter may have won the lock.
-            let found = probe(&queue_dir);
-            if found.current() {
-                return Ok(found);
-            }
-            if Instant::now() >= deadline {
-                bail!(
-                    "the queue service did not answer within {}s ({}); see {}",
-                    timeout.as_secs(),
-                    found.state.as_str(),
-                    log_file.display()
-                );
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
+        await_answer(|| probe(&queue_dir), timeout, &log_file)
     }
 
     fn hold(&self) -> Result<crate::application::queue_service::ServiceHold> {
@@ -5791,6 +5815,47 @@ mod tests {
         assert!(ServiceRecord::read(dir.path()).is_none());
         // A start of a binary that is not there fails.
         assert!(control.start(Duration::from_secs(1)).is_err());
+    }
+
+    /// A start takes the first service that answers, whatever its build:
+    /// the executable an `install` replaced runs the next build, and the
+    /// supervisor that started it judges the build. Until one answers it
+    /// looks again, and with none in time it fails naming the log.
+    #[test]
+    fn a_start_takes_a_service_that_answers_whatever_its_build() {
+        let look = |state: ServiceState, build: Option<&str>| ServiceProbe {
+            state,
+            socket: PathBuf::from("/q/queue.sock"),
+            pid: Some(1),
+            build: build.map(str::to_owned),
+            api_version: None,
+            min_api_version: None,
+            build_matches: build.map(|build| build == crate::VERSION),
+            started_at: None,
+            error: None,
+        };
+        let answering = |build| look(ServiceState::Running, Some(build));
+        let unreachable = || look(ServiceState::Unreachable, None);
+        let log = Path::new("/q/service.log");
+        let timeout = Duration::from_secs(5);
+        let next = start_settled(answering("9.9.9-next"), false, timeout, log)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.build.as_deref(), Some("9.9.9-next"));
+        assert!(!next.current());
+        let this = start_settled(answering(crate::VERSION), true, timeout, log)
+            .unwrap()
+            .unwrap();
+        assert!(this.current());
+        assert!(start_settled(unreachable(), false, timeout, log).is_none());
+        assert!(start_settled(look(ServiceState::Stopped, None), false, timeout, log).is_none());
+        let none = start_settled(unreachable(), true, timeout, log)
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            format!("{none:#}").contains(&log.display().to_string()),
+            "{none:#}"
+        );
     }
 
     /// A client uses only a service whose range holds its API version

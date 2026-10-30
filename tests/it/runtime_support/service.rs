@@ -101,6 +101,17 @@ pub fn idle_queue() -> (crate::runtime_support::Fixture, PathBuf, PathBuf) {
     (fixture, repo, db)
 }
 
+/// Ask, as `down` asks, the supervisors that `tokens` name to stop the
+/// queue's service at the end of their drain.
+pub fn request_stop(db: &Path, tokens: &[&str]) {
+    dagq::application::EventStore::record_queue_event(
+        &SqliteQueue::open(db).unwrap(),
+        dagq::domain::EventKind::QueueServiceStopRequested,
+        serde_json::json!({"supervisors": tokens, "by": "down"}),
+    )
+    .unwrap();
+}
+
 pub fn supervisor_token(db: &Path) -> String {
     let _waiting = common::within(TIMEOUT * 3, "the supervisor to register");
     loop {

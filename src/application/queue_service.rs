@@ -2065,8 +2065,11 @@ impl ServiceProbe {
 pub trait QueueServiceControl: Send + Sync {
     /// Look at the service: its record and whether it answers `hello`.
     fn probe(&self) -> ServiceProbe;
-    /// Start the service of this binary, stopping one of another build
-    /// first, and wait up to `timeout` for it to answer.
+    /// Start the service of this binary's executable, stopping one of
+    /// another build first, and wait up to `timeout` for a service to
+    /// answer: any that answers, whatever its build (the executable may
+    /// already be the next binary an `install` put in place). The caller
+    /// judges the build.
     fn start(&self, timeout: Duration) -> Result<ServiceProbe>;
     /// Stop the service; `None` when none ran.
     fn stop(&self, timeout: Duration) -> Result<Option<u32>>;
