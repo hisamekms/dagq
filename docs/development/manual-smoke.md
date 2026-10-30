@@ -545,6 +545,17 @@ container の runtime の部品（machine・image・broker・relay・executor・
 4. image: `tq events --all --full` に base と project の `container_image_built` があり、`podman --connection dagq images` に `localhost/dagq-base:<tag>` と `localhost/dagq-<key>-image:<tag>` がある。
    `podman --connection dagq run --rm --network none localhost/dagq-<key>-image:<tag> sh -c 'cargo --version; cargo nextest --version; sccache --version; dagq --version'` が project の Containerfile の道具を出し、`dagq --version` の build 識別子が `<scratch>/bin/dagq --version` と同じ。
 
+### 後片付けの見方
+
+着地・stop・cancel の後の後片付けは、その時の machine の状態で見方を変える（[Container runtime](../design/container-runtime.md#dagq専用のmachine)の「起動と停止」と[brokerへの経路](../design/container-runtime.md#brokerへの経路)の「見張り」）。
+relay の見張りは終わった run の relay を machine が動いていれば閉じ（relay・socket の volume・build の出力の volume を消して `<queue dir>/relay/` の記録を消す）、見る relay が無くどの queue にも使う者が居なければ machine を止める。
+machine が止まっている間の close は、次に machine が動いた回の見張りまで延期される。
+
+1. 見張りの後に `podman machine list` で `dagq` が止まっていれば、止まったことを見る（止まった machine には `podman --connection dagq` が繋がらないので `ps -a`・`volume ls` は打たない）。
+   `<queue dir>/relay/` にその run の記録が無ければ close は止まる前に済んでいる。
+   記録が残るか volume も見たいときは、次に container の task を流して machine が動いた後の見張りの後に 2 で見る。
+2. 動いていれば（他の run・verification・test が使う間）、`podman --connection dagq ps -a` と `podman --connection dagq volume ls` でその run の container と volume が無いことを見る。
+
 ### container の worker の run（claim から着地まで）
 
 1. task を 1 件登録して `tq ready ID --bypass-review` する（add が返した ID だけに打つ）。
@@ -565,7 +576,7 @@ container の runtime の部品（machine・image・broker・relay・executor・
      worker の cache の dir が `10001` の持ち主で書ける。
    - host で `grep -rlF -f <token の file> <queue dir>/runs/<run> <queue dir>/clones/<run>` が何も出さず、`podman --connection dagq inspect dagq-<key>-run-<run> | grep -cF -f <token の file>` と `podman --connection dagq exec dagq-<key>-run-<run> env | grep -cF -f <token の file>` が `0`（長期 token は container の設定・env・run dir に入らない。host の `grep` が数だけを出す）。
    - 着地: `tq show ID` の task `completed`・run `integrated`、`origin/main` に 1 commit。
-     その後の `podman --connection dagq ps -a` に `dagq-<key>-run-<run>`・`dagq-<key>-relay-<run>` が無く、`podman --connection dagq volume ls` に `dagq-<key>-socket-<run>` と `dagq-<key>-build-<run>` が無く、`dagq-<key>-cache-<hex>` は残る。
+     その後の見張りの後に、上の「後片付けの見方」で、machine が止まっていれば止まったことと `<queue dir>/relay/` にその run の記録が無いことを、動いていれば `podman --connection dagq ps -a` に `dagq-<key>-run-<run>`・`dagq-<key>-relay-<run>` が無く、`podman --connection dagq volume ls` に `dagq-<key>-socket-<run>` と `dagq-<key>-build-<run>` が無く、`dagq-<key>-cache-<hex>` は残ることを見る。
    - 2 本目の task を同じく流し、その worker が 1 本目の cache の file を読めること（queue の worker の間で共有）と、下の verification の container の mount に cache が無いこと。
 
 ### container の verification
@@ -585,7 +596,7 @@ container の runtime の部品（machine・image・broker・relay・executor・
    - `tq events --all --full --run RUN` の `verification_command` が 5 本とも成功で、run が `integrated`。
      `sccache_wrapper_removed`（verification の container は `RUSTC_WRAPPER` を外す）と、verification の宛ての `queue_broker_denied`（example.com）が残る。
    - 検証の間の `podman --connection dagq inspect dagq-<key>-verify-<id> --format '{{json .Mounts}}'` が verification ごとの dir・材料の dir・socket の volume・build の出力の volume だけで、`dagq-<key>-cache-…`・worker の clone・`<queue dir>/landing` が無い。
-   - 終わった後、`<queue dir>/verification/` にその verification の dir が無く、`podman --connection dagq volume ls` に `dagq-<key>-build-<verification の id>` が無く、`podman --connection dagq ps -a` に `dagq-<key>-verify-…` が無い。
+   - 終わった後、`<queue dir>/verification/` にその verification の dir が無く、上の「後片付けの見方」で machine が動いていれば `podman --connection dagq volume ls` に `dagq-<key>-build-<verification の id>` が無く、`podman --connection dagq ps -a` に `dagq-<key>-verify-…` が無い（止まっていれば次に machine が動いた後に見る）。
 3. 終了 code: 別の task で `--verify "sh -c 'exit 7'"` を流し、`verification_command` に終了 code `7` が残って run が `needs_session` に戻り、host で流し直さないことを見る（resume の後の receipt で直させるか、`tq` で task を片付ける）。
 
 ### 止める経路
@@ -593,9 +604,11 @@ container の runtime の部品（machine・image・broker・relay・executor・
 1. turn の終わりごと: worker の turn と turn の間（例: `worker_question` の答えを待つ間）に `podman --connection dagq ps -a` に `dagq-<key>-run-<run>` が無い。
 2. stop と cancel は別の task の run で 1 本ずつ起こす（runtime が session を止める経路は[Container runtime](../design/container-runtime.md#workerの実行)の「止める」、答えごとの扱いは[生きているrunの復旧job](../design/supervisor-lifecycle/background-recovery-job.md#escalate)と[Triage](../design/supervisor-lifecycle/triage.md)の 6・9）。
    relay は記録の run が queue の上でもう生きていない（task が進行中でない・後の run に代わった）ときに見張りが片付けるので（[Container runtime](../design/container-runtime.md#brokerへの経路)の「見張り」）、relay の期待する結果は task が先へ進んだ後に見る。
-   どちらも、期待する結果は次のとおり。
-   - session が止まった後の `podman --connection dagq ps -a` に `dagq-<key>-run-<run>` が無い。
-   - task が先へ進んだ後の次の relay の見張りの後に、`podman --connection dagq ps -a` に `dagq-<key>-relay-<run>` が、`podman --connection dagq volume ls` に `dagq-<key>-socket-<run>` が無く、`<queue dir>/relay/` にその run の記録が無い。
+   triage か答えを待つ run は machine を使わず relay を休ませるので、その間に machine が止まり得て、止まった machine の relay の close は次に machine が動くまで延期される。
+   どちらも、期待する結果は次のとおり（machine の状態ごとの見方は上の「後片付けの見方」）。
+   - session が止まった後に、machine が動いていれば `podman --connection dagq ps -a` に `dagq-<key>-run-<run>` が無い（止まっていれば `podman machine list` で止まったことを見る）。
+   - task が先へ進んだ後、machine が動いた後の次の relay の見張りの後に、`podman --connection dagq ps -a` に `dagq-<key>-relay-<run>` が、`podman --connection dagq volume ls` に `dagq-<key>-socket-<run>` が無く、`<queue dir>/relay/` にその run の記録が無い。
+     cancel の後のように次の run が無く machine が止まったままなら、`<queue dir>/relay/` の記録は残り得るので、container の task をもう 1 件流して machine が動いた後の見張りの後に見る。
    - 残ったものがあれば、どの段の後に残ったかと supervisor の log の container を消せなかった行を記録する。
 3. stop（`stalled` の ask に `stop` と答える）: task を 1 件登録して ready にする。
    description は「clone に `smoke-stop-done` があれば `smoke-stop.txt` に 1 行足して commit し（message は `test:` で始める）、receipt を書く。無ければ receipt も `dagq ask` も書かずに turn を終え、続く turn でも同じく終える。復旧 job はこの turn の stall を直さず escalate する（container のスモークで、人が `stop` と答える）」。
@@ -620,7 +633,7 @@ container の runtime の部品（machine・image・broker・relay・executor・
 
 ### 正常に止めた machine からの自動の start
 
-1. 走っている run が無いときに `podman machine stop dagq` を打ち、`podman machine list` で止まったことを見る。
+1. 走っている run が無いときに、`podman machine list` で `dagq` が動いていれば（使う者が居なくなると見張りが止めるので、多くは止まっている）`podman machine stop dagq` を打ち、止まったことを見る。
 2. container の worker の task を 1 件 ready にする。
 3. 期待する結果: `claim_deferred` も `container_runtime_unavailable` も無く claim され、`podman machine list` で `dagq` が動き、run が着地まで進む（`MachineGate` は止まった machine を使えるとし、turn の前の `ensure` が start する）。
 
