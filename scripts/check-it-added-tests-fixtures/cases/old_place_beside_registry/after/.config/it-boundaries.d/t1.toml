@@ -1,0 +1,15 @@
+# The items of task 1.
+
+[[boundary]]
+id = "queue-row-across-connections"
+kind = "SQLite"  # the file of the queue
+test = "alpha::a_decision_case"
+reason = "the queue's SQLite file keeps the row across two connections"
+task = 1
+
+[[boundary]]
+id = "adopt-after-restart"
+kind = '復旧とadopt'
+test = 'nested::fresh::cases::a_fresh_case'
+reason = "a supervisor started again adopts the run the dead one left"
+task = 1

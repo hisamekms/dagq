@@ -74,26 +74,17 @@
 # representative is replaced when the base's item of it names another test.
 # To replace a representative, change the test of the id's item where it is.
 #
-# The old place, for a while: .config/it-boundary.d/*.toml is read too, with
-# items of the old form
-#   [[test]]
-#   name = "<the full name>"
-#   boundary = "<one of the set above>"
-#   reason = "<the boundary it keeps>"
-#   task = <the ID of the task that added the item>
-# An old item reads as one id, t<task>:<name> (e.g.
-# t3760:runtime_verify_retry::a_case), whose representative is the named
-# test, so a run of a task registered under the old rule passes (a) and
-# counts one new id in (c). The derived ids have a : and so never meet an id
-# of the registry. New items go in the registry, not in the old place.
-# Reading the old place stops with a later task that retires it, not here.
+# The old place .config/it-boundary.d is retired: a file in it (any file of
+# the work tree there) fails the check with a message to write the item in
+# the registry instead. It is not read for items.
 #
 # An item missing a key or with an empty one, a key it does not know or one
-# key twice, a kind (boundary) outside the set, an id not of the form, an id
+# key twice, a kind outside the set, an id not of the form, an id
 # given twice or a test named by two items (in one file or in two) fail the
 # check. An item whose test has no #[test] in the work tree's tests/it is
 # warned about, without changing the exit status. A line that is not one of
-# these forms, or the other place's item table, makes the list unreadable.
+# these forms, or an item table other than [[boundary]], makes the list
+# unreadable.
 # The base's registry is read only for its ids and their representatives.
 #
 # The tree checked is the git work tree of the cwd (`git rev-parse
@@ -332,9 +323,7 @@ TABLE = re.compile(r"^\[\[([A-Za-z0-9_-]+)\]\]\s*(#.*)?$")
 KEY = re.compile(r'''^([A-Za-z0-9_-]+)\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*'|[0-9]+)\s*(#.*)?$''')
 ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 NEW_DIR, OLD_DIR = ".config/it-boundaries.d", ".config/it-boundary.d"
-# (directory, table, keys, whether its items are of the old format)
-DIRS = [(NEW_DIR, "boundary", ("id", "kind", "test", "reason", "task"), False),
-        (OLD_DIR, "test", ("name", "boundary", "reason", "task"), True)]
+TABLE_NAME, KEYS = "boundary", ("id", "kind", "test", "reason", "task")
 bad = 0
 
 
@@ -400,57 +389,58 @@ def parse(f, text, table, keys, report, strict):
     return items
 
 
-def entries(f, text, table, keys, old, report, strict):
-    """The registry's entries of a file: {id, kind, test, where}. An old item
-    reads as the id t<task>:<name> with the name as its representative."""
+def entries(f, text, report, strict):
+    """The registry's entries of a file: {id, kind, test, where}."""
     out = []
-    for item in parse(f, text, table, keys, report, strict):
+    for item in parse(f, text, TABLE_NAME, KEYS, report, strict):
         where = item["_where"]
-        missing = [k for k in keys if not str(item.get(k, "")).strip()]
+        missing = [k for k in KEYS if not str(item.get(k, "")).strip()]
         if missing:
-            report("%s: the item %s has no %s" % (where, item.get("id", item.get("name", "")), ", ".join(missing)))
-        kind = item.get("boundary" if old else "kind")
-        test = item.get("name" if old else "test")
-        if old:
-            ident = "t%s:%s" % (item["task"], test) if item.get("task") and test else None
-        else:
-            ident = item.get("id")
-            if ident and not ID.match(ident):
-                report("%s: id %r is not lowercase words joined by - (e.g. queue-file-across-connections)" % (where, ident))
-                ident = None
+            report("%s: the item %s has no %s" % (where, item.get("id", ""), ", ".join(missing)))
+        kind = item.get("kind")
+        test = item.get("test")
+        ident = item.get("id")
+        if ident and not ID.match(ident):
+            report("%s: id %r is not lowercase words joined by - (e.g. queue-file-across-connections)" % (where, ident))
+            ident = None
         if kind is not None and kind not in BOUNDARIES:
-            report("%s: %s %r of %s is not one of %s (docs/development/testing.md, 判断と境界のtest);"
+            report("%s: kind %r of %s is not one of %s (docs/development/testing.md, 判断と境界のtest);"
                    " a test with no boundary goes to a unit test of src/"
-                   % (where, "boundary" if old else "kind", kind, test or ident or "", ", ".join(BOUNDARIES)))
+                   % (where, kind, test or ident or "", ", ".join(BOUNDARIES)))
         if ident and test:
             out.append({"id": ident, "kind": kind, "test": test, "where": where})
     return out
 
 
+# The retired old place: an item written there is not read, and fails.
+if os.path.isdir(OLD_DIR):
+    for f in sorted(os.listdir(OLD_DIR)):
+        fail("%s/%s: the old place %s is retired and is not read; write the item in the registry,"
+             " %s/t<task ID>.toml, in its form ([[boundary]] with id, kind, test, reason, task; the header of"
+             " scripts/check-it-added-tests.sh), and remove %s" % (OLD_DIR, f, OLD_DIR, NEW_DIR, OLD_DIR))
+
 # The work tree's registry, checked.
 registry = []
-for d, table, keys, old in DIRS:
-    for f in sorted(glob.glob(d + "/*.toml")):
-        try:
-            text = read_work(f)
-        except OSError as e:
-            die("cannot read %s: %s" % (f, e))
-        registry += entries(f, text, table, keys, old, fail, True)
+for f in sorted(glob.glob(NEW_DIR + "/*.toml")):
+    try:
+        text = read_work(f)
+    except OSError as e:
+        die("cannot read %s: %s" % (f, e))
+    registry += entries(f, text, fail, True)
 
 # The base's registry, read leniently: only its ids and representatives.
 base_reg = {}
 listing = {}
-for entry in git("ls-tree", "-r", "-z", base, "--", NEW_DIR, OLD_DIR).split(b"\0"):
+for entry in git("ls-tree", "-r", "-z", base, "--", NEW_DIR).split(b"\0"):
     if not entry:
         continue
     meta, path = entry.split(b"\t", 1)
     path = path.decode("utf-8", "surrogateescape")
     fields = meta.split()
-    if fields[1] == b"blob" and path.endswith(".toml") and os.path.dirname(path) in (NEW_DIR, OLD_DIR):
+    if fields[1] == b"blob" and path.endswith(".toml") and os.path.dirname(path) == NEW_DIR:
         listing[path] = fields[2].decode()
 for path, text in sorted(read_blobs(listing).items()):
-    d, table, keys, old = [x for x in DIRS if x[0] == os.path.dirname(path)][0]
-    for e in entries(path, text, table, keys, old, quiet, False):
+    for e in entries(path, text, quiet, False):
         base_reg.setdefault(e["id"], e["test"])
 
 # One id has one representative (a second is R), and one test represents one

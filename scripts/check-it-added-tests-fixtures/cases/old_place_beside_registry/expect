@@ -1,0 +1,5 @@
+1
++.config/it-boundary.d/t2.toml: the old place .config/it-boundary.d is retired and is not read
+-no boundary id
+-declared twice
+-over the base

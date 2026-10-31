@@ -1,0 +1,6 @@
+1
++.config/it-boundary.d/t1.toml: the old place .config/it-boundary.d is retired and is not read
++.config/it-boundary.d/t2.toml: the old place .config/it-boundary.d is retired and is not read
++write the item in the registry, .config/it-boundaries.d/t<task ID>.toml
++2 new test(s) in tests/it with no boundary id
+-new id(s)

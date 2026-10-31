@@ -99,7 +99,6 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
   - module（`tests/it`のファイル）ごとの`#[test]`の本数をbaseとwork treeで数え、新しいid・代表の入れ替え・移したtestで説明できない増加があれば落ちる（入れ替えた元の代表を残したときも）。数は保存せず毎回baseから数えるので、並行のtaskで衝突しない。
   - idを持てるのは、そのtestが上の境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか）を代表の1 caseで確かめ、ITでしか確かめられない理由を`reason`に書けるときだけ。判断のcaseを並べただけのtestはidを持たず、判断を`src/`の副作用のない関数のunit testへ移す。
   - 新しいidの承認: 項目に足したtaskのIDを書き、そのtaskのacceptanceかdescriptionがidを名指していること（plan reviewが見る）と、`reason`が境界を書いていること（test-rulesのreviewが見る）で承認とする。機械は項目の形と数だけを見る。taskの受け入れ条件と`--verify`でidを名指す書き方と、plan reviewが差し戻す形は[taskの登録](task-registration.md)の「受け入れ条件とITの名指し方」と「plan reviewが当てはめる規則」が持つ。
-  - 移行の期間: 古い置き場`.config/it-boundary.d/*.toml`の古い書式の項目（`name`・`boundary`・`reason`・`task`）も、そのtestを代表に持つ新しいid1つとして読む。登録簿より前の規則で登録されたtaskのrunがそこに書くのを通すためで、新しい項目は登録簿に書く。古い置き場を読むのをやめるのは後の退役のtask。
   - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「testの規則の点検」）、runのプログラムのreview、CIのpushとpull_request。`integrate`の検証には足さない（時間の関門と同じく、着地の時間を増やさないため）。
   - testを消すか名前を変えるtaskは、そのtestを代表に持つ項目を同じ変更で直す（scriptは無いtestの代表を警告するだけで落とさない）。
 
