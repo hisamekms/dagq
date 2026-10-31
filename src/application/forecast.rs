@@ -2,7 +2,9 @@
 //! [`crate::domain::forecast::forecast`] computes the completion forecast
 //! from. `dagq forecast` reads only and records nothing; the supervisor
 //! records a snapshot of it at its triggers (ADR-0070 decision 3,
-//! [`pending`] and [`record_snapshot`]).
+//! [`pending`] and [`record_snapshot`]). The supervisor's snapshots are
+//! stopped now, as [`forecast`] reads every event (request 190,
+//! ADR-t3745-1; `supervise::observation::forecast`'s `STOPPED`).
 
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;

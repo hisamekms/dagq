@@ -5,6 +5,8 @@ use crate::runtime_support;
 use runtime_support::*;
 
 /// What a page may not contain if it loads nothing from anywhere else.
+// Only for the tests stopped below (request 190): task 1669 removes this cfg.
+#[cfg(any())]
 pub const EXTERNAL: &[&str] = &[
     "<script",
     "<link",
@@ -20,6 +22,8 @@ pub const EXTERNAL: &[&str] = &[
     "@font-face",
 ];
 
+// Only for the tests stopped below (request 190): task 1669 removes this cfg.
+#[cfg(any())]
 fn report_events(db: &Path) -> Vec<Value> {
     Connection::open(db)
         .unwrap()
@@ -31,6 +35,9 @@ fn report_events(db: &Path) -> Vec<Value> {
         .collect()
 }
 
+// Stopped with the supervisor's report job (request 190, decision (3) of
+// ADR-t3745-1): task 1669 brings it back and removes this cfg.
+#[cfg(any())]
 #[test]
 fn supervisor_writes_the_reports_it_owes_once_and_prunes_old_ones() {
     let (_dir, repo, db) = fixture();
@@ -144,6 +151,9 @@ fn a_report_is_recorded_once() {
 
 /// A retention shorter than the backfill writes only the days it keeps, and
 /// a temporary file an ended writer left is removed once it is old.
+// Stopped with the supervisor's report job (request 190, decision (3) of
+// ADR-t3745-1): task 1669 brings it back and removes this cfg.
+#[cfg(any())]
 #[test]
 fn the_backfill_stops_at_the_retention_and_old_temporary_files_go() {
     let (_dir, repo, db) = fixture();
@@ -185,6 +195,8 @@ fn the_backfill_stops_at_the_retention_and_old_temporary_files_go() {
 }
 
 /// A stub `name` in `bin` running `body`.
+// Only for the tests stopped below (request 190): task 1669 removes this cfg.
+#[cfg(any())]
 fn stub(bin: &Path, name: &str, body: &str) {
     let path = bin.join(name);
     crate::common::template::script(&path, format!("#!/bin/sh\n{body}\n"));
@@ -195,6 +207,9 @@ fn stub(bin: &Path, name: &str, body: &str) {
 /// it loads from outside the page; the tools are found on the supervisor's
 /// PATH, and d2 runs once for all the reports owed. Without TALA the section says why and the rest
 /// of the report is written.
+// Stopped with the supervisor's report job (request 190, decision (3) of
+// ADR-t3745-1): task 1669 brings it back and removes this cfg.
+#[cfg(any())]
 #[test]
 fn the_reports_carry_the_dependency_diagram_or_why_not() {
     let (dir, repo, db) = fixture();

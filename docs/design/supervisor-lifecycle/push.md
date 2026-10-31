@@ -17,6 +17,7 @@ related:
 
 [ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定18（目標割れの始まりと解消のevent）・22・23の実装。
 supervisorが日次の[レポート](commands.md)を書いた後に、目標割れの始まりと解消をqueueのeventに記録し、ホストの設定に書いたコマンドがあれば、日次・週次のまとめと目標割れの即時通知をそのコマンドのstdinに渡す。
+今はそのレポートのjobを止めていて（ADR-t3745-1の決定(1)、`application::supervise::observation::report`の`STOPPED`。[目標割れの記録](#目標割れの記録)）、この文書のレポートの後の記録とまとめのpushはjobが動くときのもの。
 runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookのURLやtoken）はrepositoryにもeventにも入らない。
 
 ここのpushはホストのコマンドへの通知で、着地したbranchのGitのpushではない。
@@ -33,9 +34,9 @@ runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookの
   queueのファイルの空の`command`は、host全体の`[push]`をそのqueueだけ切る。
 - 書式は`infrastructure::push::parse_host_push`で、1行の文字列の配列と決まったキーだけを受け付け、知らないキーは拒む。
   キーと既定は`infrastructure::push`のmodule docと`domain::kpi::push::PushConfig`が持つ。
-- `[push]`が無いか`command`が空なら、runtimeはコマンドを呼ばず、pushのeventも記録しない（レポートと目標割れのeventは書く）。
+- `[push]`が無いか`command`が空なら、runtimeはコマンドを呼ばず、pushのeventも記録しない（jobが動くときのレポートと目標割れのeventは書く）。
   設定はレポートを書くたびに読み直す。
-  読めない`[push]`は`warn`のlogを出してその日のpushをしないだけで、レポートと目標割れの記録は止めない。
+  読めない`[push]`は`warn`のlogを出してその日のpushをしないだけで、jobが動くときのレポートと目標割れの記録は止めない。
 - 読むのは日次のレポートを書くsupervisor（`compose`の`ReportPort::push_config`）とinboxのwatchだけで、どれも使うときに読み直す。
   supervisorはレポートを書くときと、watcherの居ないinboxへの知らせを出すと決めたとき（drainの間も。[inboxへの知らせ](ask-push.md#supervisorによるinboxへの知らせ)）に読む。
   watchは始めるときに読む（[人へのaskの通知](ask-push.md)）。
@@ -43,6 +44,11 @@ runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookの
 
 ## 目標割れの記録
 
+- 今はsupervisorのレポートのjobを止めている（ADR-t3745-1の決定(1)、`application::supervise::observation::report`の`STOPPED`）。
+  レポートと目標割れの判定と日次・週次のまとめは全eventを読むため、supervisorはjobを始めず、レポートもこの節の記録もまとめのpushもしない。
+  止めている間は失敗のevent・attention・ask・再試行も起こさず、止めたことはprocessごとに1度logの1行で出す。
+  開いた目標割れは判定できない間も開いたまま残り、解消を記録しない（判定できないことと割れが直ったことを分けるため）。
+  以下はjobが動くときの記録。
 - supervisorのレポートのjob（[レポート](commands.md)のsupervisorの日次）が、`write_due`の後に`application::push::check_breaches`で、今の時点の日と週の`kpi`の目標の判定（[kpi](commands.md)）を読む。
   目標が1つも無く、開いた目標割れも無ければ何もしない。
   `dagq kpi`とレポートと同じくhostの負荷の記録も読むので、hostの負荷から作るKPI（`cpu_per_landing`・`load_per_core`）の目標も判定し、記録が無ければそのKPIは`not_judged`になるだけで検査は続く。

@@ -16,6 +16,8 @@ fn snapshots(db: &Path) -> Vec<Value> {
         .collect()
 }
 
+// Only for the tests stopped below (request 190): task 1670 removes this cfg.
+#[cfg(any())]
 fn ids(snapshot: &Value, key: &str) -> Vec<i64> {
     snapshot[key]
         .as_array()
@@ -25,6 +27,8 @@ fn ids(snapshot: &Value, key: &str) -> Vec<i64> {
         .collect()
 }
 
+// Only for the tests stopped below (request 190): task 1670 removes this cfg.
+#[cfg(any())]
 fn triggers(snapshot: &Value) -> Vec<String> {
     snapshot["triggers"]
         .as_array()
@@ -68,6 +72,9 @@ fn common_within() -> crate::common::Waiting {
 /// event; the landing of the first task moves the second (it gets a time
 /// from the landed run) and is recorded, the landing of the last moves
 /// nothing and is not. The next supervisor's start is a change mark.
+// Stopped with the supervisor's forecast snapshots (request 190, decision (3) of
+// ADR-t3745-1): task 1670 brings it back and removes this cfg.
+#[cfg(any())]
 #[test]
 fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
     let (dir, repo, db) = fixture();

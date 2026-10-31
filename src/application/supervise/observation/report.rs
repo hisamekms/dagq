@@ -13,6 +13,8 @@
 //! breaches that started and ended and makes the messages of the host's
 //! push command (ADR-0051 decisions 18 and 23), which [`super::push`]
 //! sends.
+//!
+//! The job is stopped now ([`STOPPED`]): it reads every event of the queue.
 
 use super::*;
 use crate::application::push::{self, PushOutcome, PushRequest, PushTarget};
@@ -21,6 +23,16 @@ use crate::domain::kpi::push::{PushConfig, PushMessage};
 
 /// How long after a failed report job the reports are looked for again.
 const RETRY: Duration = Duration::from_secs(600);
+
+/// The report job is stopped (request 190, decision (1) of ADR-t3745-1):
+/// the reports ([`report::write_due`]), the judgment of the targets'
+/// breaches ([`push::check_breaches`]) and the push's summary read every
+/// event of the queue. No job starts, so nothing of the queue is read and
+/// no failure, attention, ask nor retry follows; the log says so once a
+/// process. The breaches open stay open: a target not judged is not
+/// resolved. Task 1669 brings the job back from the ledger and removes
+/// this with the branch it stops.
+const STOPPED: bool = true;
 
 /// What the supervisor writes the reports with.
 #[derive(Clone)]
@@ -54,11 +66,28 @@ pub(in crate::application::supervise) struct ReportWatch {
     job: Option<(i64, thread::JoinHandle<Result<ReportJob>>)>,
     checked: Option<i64>,
     failed: Option<Instant>,
+    /// The log said this process starts no job ([`STOPPED`]).
+    told_stopped: bool,
 }
 
 impl ReportWatch {
     pub(in crate::application::supervise) const fn running(&self) -> bool {
         self.job.is_some()
+    }
+
+    /// Start `job` for the local `day`, unless [`STOPPED`]: then `job` is
+    /// not run, and the first time the log says why.
+    fn start(&mut self, day: i64, job: impl FnOnce() -> Result<ReportJob> + Send + 'static) {
+        if STOPPED {
+            if !self.told_stopped {
+                info!(
+                    "the KPI reports, the targets' breaches and the push's summary are stopped: they read every event of the queue, and come back once they read the ledger"
+                );
+                self.told_stopped = true;
+            }
+            return;
+        }
+        self.job = Some((day, spawn_traced(job)));
     }
 }
 
@@ -115,7 +144,7 @@ impl ObservationState {
         let queues = self.queues.clone();
         let files = env.files.clone();
         let token = env.token.clone();
-        let job = spawn_traced(move || -> Result<ReportJob> {
+        self.report.start(day, move || -> Result<ReportJob> {
             let setup = (port.setup)(now)?;
             let queue = queues.open()?;
             let written = report::write_due(&*queue, &*files, &setup, now, &token)?;
@@ -145,7 +174,6 @@ impl ObservationState {
                 push,
             })
         });
-        self.report.job = Some((day, job));
     }
 }
 
@@ -168,5 +196,27 @@ mod tests {
         assert!(!start_due(false, None));
         assert!(!start_due(true, Some(RETRY - ms)));
         assert!(start_due(true, Some(RETRY)));
+    }
+
+    /// While stopped, no pass runs the job that reads every event nor
+    /// records a breach resolved: nothing runs, none is due again after a
+    /// failure, and the log is told once.
+    #[test]
+    fn a_stopped_report_job_reads_nothing_and_leaves_the_breaches_open() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut watch = ReportWatch::default();
+        for day in [1, 1, 2] {
+            let ran = ran.clone();
+            watch.start(day, move || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                panic!("the report job reads every event and judges the breaches")
+            });
+            assert!(!watch.running());
+        }
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        assert_eq!(watch.checked, None);
+        assert_eq!(watch.failed, None);
+        assert!(watch.told_stopped);
     }
 }

@@ -5,7 +5,10 @@
 //! the summary of the latest day and week written. Running the command,
 //! trying it again and recording how it went is the supervisor's
 //! ([`record_attempt`]). Without `[push]` nothing is made nor recorded
-//! but the breaches.
+//! but the breaches. The supervisor's report job that calls these is
+//! stopped now, as the judgment reads every event (request 190,
+//! ADR-t3745-1; `supervise::observation::report`'s `STOPPED`): the
+//! breaches open stay open.
 use crate::domain::EventKind;
 use std::time::Duration;
 

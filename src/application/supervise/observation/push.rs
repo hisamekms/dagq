@@ -5,7 +5,9 @@
 //! attention for the inbox). Nothing here stops a report, a claim nor a
 //! landing. The messages wait in this process only: a supervisor that
 //! stops or execs drops those not sent yet (it waits for the one being
-//! sent).
+//! sent). While the report job is stopped ([`super::report`]) it makes no
+//! message: the messages sent are the other passes' (the queue service's
+//! outage, the inbox's nudge).
 
 use std::collections::VecDeque;
 
