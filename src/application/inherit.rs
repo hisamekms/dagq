@@ -521,6 +521,11 @@ mod tests {
 
     /// A run in a container with no validated commit, at the base `a`.
     fn container_run() -> TaskRun {
+        container_run_at(None)
+    }
+
+    /// [`container_run`] holding `result_commit`.
+    fn container_run_at(result_commit: Option<CommitSha>) -> TaskRun {
         TaskRun::restore(RunRecord {
             id: RunId::new("r1").unwrap(),
             task_id: TaskId::new(1),
@@ -534,7 +539,7 @@ mod tests {
             workspace_id: None,
             receipt_path: None,
             log_path: None,
-            result_commit: None,
+            result_commit,
             repo_path: None,
             run_dir: Some("/q/runs/r1".into()),
             last_error: None,
@@ -845,6 +850,29 @@ mod tests {
         fn diff_to_file(&self, _: &str, _: &str, _: &Path) -> Result<()> {
             unreachable!()
         }
+    }
+
+    /// A retry carries over the run's `result_commit` as the store holds it
+    /// when the retry is made, whatever that commit is; its clone or
+    /// worktree is not read for it. One that is the run's base carries
+    /// nothing.
+    #[test]
+    fn the_carried_head_is_the_result_commit_the_run_holds_now() {
+        let run = container_run_at;
+        let files = MemoryFiles::default();
+        files.put_dir(Path::new(CLONE));
+        // Facts that refuse: read, they would fail the call.
+        let facts = Facts::new(state('b', Some(false), ""), None);
+        assert_eq!(
+            carried_head(&run(Some(sha('d'))), &files, &facts, &facts).unwrap(),
+            Some(sha('d'))
+        );
+        assert_eq!(*facts.turns.lock().unwrap(), 0);
+        assert_eq!(
+            carried_head(&run(Some(sha('a'))), &files, &facts, &facts).unwrap(),
+            None
+        );
+        assert!(carried_head(&run(None), &files, &facts, &facts).is_err());
     }
 
     /// The release's and the retry's reads of a container run both go

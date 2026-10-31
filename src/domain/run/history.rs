@@ -1766,6 +1766,22 @@ mod tests {
             finished(2, "unresolved"),
             event(3, "resume_skipped", json!({}))
         ]));
+        // Parked again after the skip (its landing failed on the skipped
+        // head): a resume comes first, and one that could not start (an
+        // `error`) leaves it to be resumed again, never skipped.
+        let skipped_then_parked = vec![
+            deferred(1),
+            finished(2, "unresolved"),
+            event(3, "resume_skipped", json!({})),
+            deferred(4),
+        ];
+        assert!(!unresolved(skipped_then_parked.clone()));
+        let mut errored = skipped_then_parked.clone();
+        errored.push(finished(5, "error"));
+        assert!(!unresolved(errored));
+        let mut resumed = skipped_then_parked;
+        resumed.push(finished(5, "unresolved"));
+        assert!(unresolved(resumed));
         // A park for a replanning after the unresolved resume: the receipt
         // written after its fence moves nothing on; a resume after it that
         // ended unresolved is read as after any system park.

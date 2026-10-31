@@ -468,20 +468,14 @@ task = 1707
 # 5.601s, class D
 [[test]]
 name = "runtime_resume::a_run_whose_conflict_only_resumes_are_used_up_is_retried_with_its_branch"
-reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557・1558）: counting already unit tested in domain::resume"
-task = 1707
+reason = "B 境界（守る境界）: supervisor の配線と Git — 衝突だけの resume を使い切った run を retry_inherit し refs/dagq/runs に head を残して次の run の prompt に渡す（数え方は unit test の domain::resume、引き継ぐ head は inherit::tests）"
+task = 3764
 
 # 6.396s, class B
 [[test]]
 name = "runtime_resume::a_session_nobody_watches_blocks_the_resume_until_it_ends"
-reason = "B 境界（守る境界）: live process of dead supervisor's resume"
-task = 1707
-
-# 5.188s, class D
-[[test]]
-name = "runtime_resume::a_used_up_run_is_retried_with_its_branch_by_its_recovery_job"
-reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557・1558）: alert routing and retry_inherit decision"
-task = 1707
+reason = "B 境界（守る境界）: 復旧と adopt・プロセス — 死んだ supervisor の resume の生きた session が次の resume を止め、stale の lease を引き継ぐ。SQLite の begin_resume が旧い interactive の run を headless にして変換を 1 回記録する"
+task = 3764
 
 # 6.535s, class R
 [[test]]
@@ -498,8 +492,8 @@ task = 1707
 # 5.424s, class D
 [[test]]
 name = "runtime_resume::resuming_stops_after_three_attempts"
-reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557・1558）: attempt limit"
-task = 1707
+reason = "B 境界（守る境界）: supervisor の配線 — 使い切った run を failed にし recovery job の decide の ask と答えの適用まで（上限と文面は unit test の domain::resume・supervise::resume）"
+task = 3764
 
 # 6.420s, class D
 [[test]]
@@ -1857,12 +1851,6 @@ name = "runtime_headless::a_worker_question_is_answered_by_a_resume_of_the_same_
 reason = "B 境界（守る境界）: the supervisor's wiring of a headless worker's ask and the resume of the same session that carries the answer (processes, SQLite)"
 task = 2394
 
-# 6.071s in task 2394's stress, whose change to it was the type of its kind comparisons
-[[test]]
-name = "runtime_resume::a_historical_interactive_run_resumes_headless_and_records_its_conversion"
-reason = "B 境界（守る境界）: adopt and resume: a run an older binary left interactive is resumed headless by the supervisor (processes, SQLite)"
-task = 2394
-
 # 6.046s in task 2394's stress, whose change to it was the type of its kind comparisons
 [[test]]
 name = "goal_review::a_goal_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_closed"
@@ -2240,11 +2228,6 @@ task = 3033
 [[test]]
 name = "runtime_resume::an_approved_run_resolved_by_its_resume_lands_the_resolved_head"
 reason = "B 境界（守る境界）: supervisor の配線と Git — resolved の resume の head が SQLite の result_commit になり、着地の前の e2e と landing recheck の park がそれを読む（判断は unit test の landing_of）"
-task = 3113
-
-[[test]]
-name = "runtime_resume::the_retry_after_used_up_resumes_carries_the_last_resolved_head_over"
-reason = "B 境界（守る境界）: SQLite と Git — store が記録した resolved の head を supervisor の retry_inherit が refs/dagq/runs に残して引き継ぐ"
 task = 3113
 
 [[test]]
