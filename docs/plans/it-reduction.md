@@ -26,6 +26,7 @@ inbox が 2026-10-04 に subagent で `tests/it` の全 1,192 本を分類した
 - **goal 92 で消える G（230 本・667.5 秒）を除いた後の it（962 本・2,217.0 秒）では、B は本数の 37.8%・秒の 37.3%**（揺れを見込むと 34〜42%）。残りの 6 割強（D 492 本・1,076.2 秒と R 106 本・314.7 秒）は、判断を src の unit test に移せば消せるか unit に移せる。
 - goal 119（task 1709〜1713）の着地の前後の本番の関門の比較は「[goal 119 の前後](#goal-119-の前後)」（後の区間は 15 本で暫定）。
 - goal 237（task 3759・3761・3763〜3770）の前後は「[goal 237 の前後](#goal-237-の前後)」。
+- goal 239 の B・D・R の分け直しと登録簿の id は「[2026-11 の分類](#2026-11-の分類)」（`runtime_` の側は B 180・D 289・R 370 本）。
   前の区間は IT を全部流した log の 40% が 30 分の上限で kill され、全件の検証は 60 分の上限の 4〜6 割を使って収まる見込み（後の区間は 0 本で、上位 8 module の後の秒は A/B の比からの見積もり）。
 - D+R の秒の大きい上位 20 module で D+R の秒の 59%（823.9 / 1,390.6 秒。module ごとの値なので modules.tsv の秒）を占める。最大は `runtime_cleanup`（152.4 秒）。
 
@@ -659,3 +660,188 @@ A/B の load1 は 7〜47 と task ごと・回ごとに違い（各 task の com
   秒の大きさで並べただけで、判断の case がどれだけ残るかは、移す task が module を読んで決める。
 - **全部流す理由**: 前の区間の時間切れ 14 本のうち 11 本が `tests/common/**`、4 本が `Cargo.toml` を理由に持つ。
   `tests/common/**` は 3761 の選び方で helper を使う module に絞られ、`Cargo.toml`・`Cargo.lock` は全部流す理由に残る。
+
+## 2026-11 の分類
+
+goal 239 の分類（方針 A.2）。`tests/it` の全ての `#[test]` を、上の「(a) 分類の定義」の B・D・R と同じ基準で分け直し、B に境界の登録簿（[testing.md](../development/testing.md) の「判断と境界のtest」）の id を付ける。
+B は SQLite・Git・プロセス・supervisor の配線・復旧と adopt のどれかの境界の代表で module か機能ごとに 1 本、「supervisor の配線」は supervisor の機能ごとに 1 本で同じ機能の 2 本目からは R。
+G（goal 92 で消える）は使わない。
+`runtime_` で始まる module（`tests/it/runtime_*.rs` と `tests/it/runtime_support/` の下）を task 3803 が、それ以外を task 3804 が分け、3804 が両側の B・R と id を突き合わせる。
+test の移し替え・削除はしていない。
+
+- [it-test-secs-2026-11.tsv](it-reduction/it-test-secs-2026-11.tsv): `tests/it` の全体の 1 本ごとの秒。列は `module`・`test`・`secs`・`secs_n`・`secs_window`。
+- [it-tests-2026-11-runtime.tsv](it-reduction/it-tests-2026-11-runtime.tsv): `runtime_` の側の分類。10/04 の表の列（`module`・`test`・`class`・`secs`・`reason`）に、`mark`（`cfg_any` か `ignore`）・`secs_n`・`secs_window`・`id`（B の登録簿の id）・`dest`（D は unit test の行き先の候補の `src` の関数、R は同じ境界の B の名前と、移せる判断があれば ` / ` の後にその関数）を足した。
+- `runtime_` の側の B の登録簿の項目は `.config/it-boundaries.d/t3803.toml`。前の task が登録した B（`runtime_integrate` の 4 本・`runtime_cleanup` と `runtime_verify_retry` の 1 本ずつ）は、その task のファイルの id をそのまま使う。
+
+### 手順
+
+[it_test_secs.py](it-reduction/it_test_secs.py) が読む。
+Python の標準ライブラリだけで、queue を開かず `dagq` を呼ばず、`--runs-dir` の下に書かない。
+
+```sh
+python3 -I docs/plans/it-reduction/it_test_secs.py \
+  --runs-dir ~/.local/share/dagq/77067154921b9014/runs \
+  --until 2026-11-01T01:20:00+09:00 \
+  --out docs/plans/it-reduction/it-test-secs-2026-11.tsv
+```
+
+- 行: `grep -E '^[[:space:]]*#\[test\]'` が当たる行ごとに 1 行（`#[cfg]` の対で同じ名前が 2 つあれば 2 行）。`module` は file の module の path（`tests/it/runtime_support/cleanup.rs` は `runtime_support::cleanup`）、`test` はその中の mod と fn で、`dagq::it <module>::<test>` が nextest の名前。
+- 本数の数え方（両側で同じ。和が `tests/it` の全体）: `runtime_` の側は `grep -rE '^[[:space:]]*#\[test\]' --include='*.rs' tests/it | grep -c '^tests/it/runtime_'`、それ以外は同じ grep の `grep -vc '^tests/it/runtime_'`。
+  この分類の tree（00fe28661）では 839 と 1,076、和 1,915（2026-10-31 の tree の 835・1,076 から `runtime_` の側が 4 本増えた）。
+- log の選び方: 「[goal 237 の前後](#goal-237-の前後)」の「手順」と同じ（1 行目が `# dagq: [landing_verification]` で先頭 4 KiB に `landing-it: ` の行を持つもの。task の検証のコマンドが直に流した `landing-it.sh` は除かれる）。
+- 区間: 後は mtime が 3770 の着地の commit（c77abb98、2026-10-31 20:05:30 +09:00）以後で `--until`（読んだ時刻）まで、前は `--before-since` の既定の 2026-10-27 00:00 +09:00 から 3759 の着地の commit（bd10d148、2026-10-31 14:02:20 +09:00）の前まで。
+- test の値: log ごとに `PASS [ N s]` か `FAIL [ N s]` の行のうち `dagq::it <module>::<test>` を名指すものの秒で、`TRY n` の付いたやり直しは最後の試行（n の最も大きい行）だけ。TIMEOUT・SIGKILL の行は上限の時間なので入れない。
+  `secs` は後の区間の log ごとの値の中央値（`secs_window` が `after`）、後に 1 本も出ない test は前の区間の中央値（`before`）、どちらにも出ない test は空。`secs_n` は使った log の数。
+- 周回はしない: test を流さず、既にある本番の log を 1 回読むだけで、繰り返しは区間の log の本数が担う。
+
+| 区間 | log | mtime（JST） | 秒の出た test |
+| --- | ---: | --- | ---: |
+| 後 | 8 | 10-31 20:21 〜 11-01 00:47 | 1,175 |
+| 前 | 132 | 10-27 12:42 〜 10-31 14:02 | 727（後に出ない test のうち） |
+| どちらにも出ない | — | — | 13 |
+
+どちらにも出ない 13 本は、12 本が `#[ignore]` の test（実機・実 Claude の test と、別の test が子の process として流す probe）、1 本が `#[cfg(any())]` で外した test。
+`runtime_` の側では 2 本（`runtime_background_process::child_supervisor` は `ignore`、`runtime_forecast::kpi_scores_the_snapshots_against_the_finishes` は `cfg_any`）で、表の `reason` に理由を書いた。
+`runtime_` の側の 839 本の `secs_window` は `after` 505・`before` 332・空 2。
+後の区間は絞った IT の log が多く、全部流した log が無いので、test ごとに別の log の値が混ざる。秒は割合と順位を読むのに使い、関門の Summary（並列の壁時計）とは読み替えない。
+
+### `runtime_` の側の集計
+
+判定は subagent が module ごとに test の本文と fixture を読んで行い、supervisor の配線の B を機能ごとに 1 本に寄せ（同じ機能の 2 本目は R にして行き先にその B を書いた）、R の行き先を B に揃えた。
+上の「(d) 判定の方法と揺れ」と同じく、B・D・R の境目は揺れ、移す task は対象の test の本文で確かめ直す。
+集計は表から計算した（秒は `secs` の和で、空の `secs` は和から除き、除いた本数を「secs が空」に書いた）。
+
+| class | 本数 | 秒 | secs が空 | 本数の割合 | 秒の割合 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| B 境界の代表 | 180 | 1,521.4 | 0 | 21.5% | 22.8% |
+| D 判断 | 289 | 2,137.2 | 1 | 34.4% | 32.0% |
+| R 同じ境界の 2 本目 | 370 | 3,028.7 | 1 | 44.1% | 45.3% |
+| 計 | 839 | 6,687.3 | 2 | 100% | 100% |
+
+```sh
+awk -F'\t' 'NR>1{n[$3]++;if($4!=""){s[$3]+=$4}else{e[$3]++}}
+  END{for(c in n)printf "%s %d %.1f %d\n",c,n[c],s[c],e[c]}' docs/plans/it-reduction/it-tests-2026-11-runtime.tsv
+```
+
+- B の 180 本の境界の種類は、supervisor の配線 59（59 の機能に 1 本ずつ）・プロセス 43・SQLite 27・復旧と adopt 26・Git 25。180 本のうち 174 本が `t3803.toml` の新しい id、6 本が前の task の id。
+- R の行き先のうち 3 本は `runtime_` の外の test（`runtime_claim::migration_from_v1_preserves_task_and_initializes_runtime_tables` は `queue_migration`、`runtime_ask` の watch の 2 本は `inbox_watch_wake`）で、その test が B かは 3804 が突き合わせる。
+- `mark` の印は `cfg_any` 13 本・`ignore` 1 本。
+
+module ごと（秒は `secs` の和）:
+
+| module | B | D | R | B 秒 | D 秒 | R 秒 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `runtime_actor_env` | 1 | 0 | 0 | 11.6 | 0.0 | 0.0 |
+| `runtime_adopt` | 4 | 2 | 6 | 30.8 | 11.9 | 35.1 |
+| `runtime_already_satisfied` | 4 | 6 | 13 | 42.9 | 32.1 | 105.1 |
+| `runtime_ask` | 2 | 4 | 3 | 5.8 | 12.1 | 8.9 |
+| `runtime_background` | 3 | 0 | 5 | 19.8 | 0.0 | 50.9 |
+| `runtime_background_process` | 2 | 0 | 7 | 16.5 | 0.0 | 40.0 |
+| `runtime_candidates` | 0 | 2 | 0 | 0.0 | 8.5 | 0.0 |
+| `runtime_ci_watch` | 2 | 5 | 2 | 11.5 | 35.8 | 19.9 |
+| `runtime_claim` | 9 | 5 | 12 | 45.4 | 36.2 | 27.7 |
+| `runtime_claim_build` | 2 | 0 | 1 | 24.4 | 0.0 | 0.2 |
+| `runtime_claim_class` | 2 | 9 | 1 | 16.2 | 82.4 | 0.2 |
+| `runtime_claim_defer` | 1 | 9 | 1 | 21.1 | 91.1 | 6.5 |
+| `runtime_claim_hold` | 1 | 1 | 0 | 8.6 | 5.2 | 0.0 |
+| `runtime_claim_spacing` | 1 | 2 | 0 | 14.6 | 32.5 | 0.0 |
+| `runtime_claim_worker` | 1 | 2 | 2 | 0.1 | 2.6 | 3.9 |
+| `runtime_cleanup` | 3 | 5 | 9 | 31.8 | 68.8 | 140.3 |
+| `runtime_cleanup_incremental` | 0 | 0 | 1 | 0.0 | 0.0 | 9.7 |
+| `runtime_client_mode` | 1 | 0 | 3 | 15.8 | 0.0 | 22.9 |
+| `runtime_clone` | 2 | 2 | 18 | 5.8 | 2.9 | 44.0 |
+| `runtime_clone_facts` | 2 | 0 | 12 | 5.1 | 0.0 | 33.9 |
+| `runtime_codex` | 2 | 6 | 4 | 19.1 | 34.7 | 35.6 |
+| `runtime_codex_ask` | 1 | 0 | 0 | 8.9 | 0.0 | 0.0 |
+| `runtime_codex_work` | 0 | 1 | 1 | 0.0 | 7.9 | 8.1 |
+| `runtime_container` | 2 | 0 | 3 | 16.0 | 0.0 | 23.2 |
+| `runtime_disk` | 1 | 2 | 3 | 10.2 | 12.8 | 32.1 |
+| `runtime_e2e` | 1 | 3 | 2 | 10.3 | 42.8 | 34.1 |
+| `runtime_evidence` | 2 | 2 | 2 | 14.8 | 17.4 | 21.5 |
+| `runtime_forecast` | 1 | 3 | 0 | 17.4 | 17.6 | 0.0 |
+| `runtime_fresh_session` | 1 | 3 | 4 | 13.7 | 38.0 | 58.1 |
+| `runtime_handoff` | 4 | 4 | 22 | 35.7 | 48.6 | 238.8 |
+| `runtime_handoff_race` | 1 | 0 | 4 | 4.1 | 0.0 | 22.3 |
+| `runtime_headless` | 3 | 2 | 7 | 34.4 | 22.8 | 73.8 |
+| `runtime_headless_jobs` | 3 | 0 | 3 | 17.9 | 0.0 | 10.4 |
+| `runtime_headless_reopen` | 3 | 3 | 2 | 25.1 | 35.9 | 16.0 |
+| `runtime_headless_stall` | 2 | 7 | 2 | 21.0 | 81.8 | 21.3 |
+| `runtime_headless_turn_inputs` | 2 | 0 | 6 | 24.7 | 0.0 | 75.0 |
+| `runtime_heartbeat` | 1 | 2 | 12 | 0.5 | 0.4 | 3.8 |
+| `runtime_heavy_turns` | 0 | 0 | 5 | 0.0 | 0.0 | 57.2 |
+| `runtime_host_metrics` | 1 | 1 | 2 | 3.7 | 0.0 | 14.5 |
+| `runtime_inherit_by_hand` | 5 | 4 | 7 | 14.5 | 28.1 | 22.6 |
+| `runtime_integrate` | 7 | 3 | 10 | 93.9 | 47.1 | 113.8 |
+| `runtime_job_verdicts` | 0 | 5 | 1 | 0.0 | 27.3 | 7.9 |
+| `runtime_landing_answers` | 2 | 3 | 5 | 30.0 | 32.5 | 83.9 |
+| `runtime_landing_release` | 4 | 5 | 2 | 49.1 | 38.8 | 29.7 |
+| `runtime_landing_verification` | 1 | 1 | 2 | 6.2 | 6.1 | 12.5 |
+| `runtime_light_slots` | 1 | 4 | 0 | 20.9 | 85.0 | 0.0 |
+| `runtime_local_checks` | 2 | 3 | 0 | 9.2 | 8.3 | 0.0 |
+| `runtime_observer` | 2 | 13 | 5 | 16.7 | 15.2 | 19.6 |
+| `runtime_precheck` | 1 | 2 | 0 | 34.4 | 24.2 | 0.0 |
+| `runtime_provider_switch` | 1 | 6 | 2 | 8.1 | 54.2 | 18.0 |
+| `runtime_push` | 1 | 4 | 1 | 0.1 | 27.7 | 0.1 |
+| `runtime_queue_hold` | 0 | 1 | 1 | 0.0 | 5.6 | 11.1 |
+| `runtime_queue_hold_detect` | 0 | 1 | 1 | 0.0 | 0.1 | 13.5 |
+| `runtime_queue_hold_shared` | 1 | 1 | 1 | 5.9 | 6.6 | 15.3 |
+| `runtime_recheck` | 3 | 0 | 6 | 57.7 | 0.0 | 93.0 |
+| `runtime_release` | 3 | 2 | 2 | 13.4 | 2.7 | 15.5 |
+| `runtime_repair` | 1 | 3 | 1 | 10.0 | 39.7 | 9.1 |
+| `runtime_replan_carry` | 1 | 4 | 1 | 13.3 | 36.7 | 5.2 |
+| `runtime_replan_diagnosis` | 3 | 9 | 3 | 29.2 | 66.8 | 20.1 |
+| `runtime_replan_park` | 4 | 11 | 11 | 50.0 | 99.2 | 170.7 |
+| `runtime_replanning` | 0 | 0 | 5 | 0.0 | 0.0 | 65.0 |
+| `runtime_report` | 3 | 1 | 0 | 9.5 | 1.4 | 0.0 |
+| `runtime_resume` | 4 | 10 | 8 | 63.6 | 121.3 | 101.6 |
+| `runtime_retention` | 2 | 0 | 3 | 1.1 | 0.0 | 0.4 |
+| `runtime_review` | 2 | 12 | 2 | 16.4 | 121.2 | 15.6 |
+| `runtime_review_concern` | 1 | 2 | 7 | 5.6 | 10.8 | 49.5 |
+| `runtime_review_conflict` | 2 | 1 | 6 | 20.9 | 2.8 | 51.6 |
+| `runtime_review_questions` | 0 | 2 | 0 | 0.0 | 22.2 | 0.0 |
+| `runtime_review_reasons` | 0 | 2 | 1 | 0.0 | 14.8 | 15.4 |
+| `runtime_review_revise_limit` | 1 | 2 | 6 | 15.5 | 19.5 | 109.3 |
+| `runtime_run_env` | 2 | 3 | 2 | 17.2 | 17.3 | 33.6 |
+| `runtime_run_files` | 2 | 0 | 4 | 11.4 | 0.0 | 22.0 |
+| `runtime_sccache` | 2 | 3 | 7 | 7.9 | 29.4 | 41.0 |
+| `runtime_session` | 3 | 5 | 5 | 12.4 | 13.7 | 23.2 |
+| `runtime_slot_limits` | 1 | 1 | 1 | 9.6 | 7.7 | 5.1 |
+| `runtime_slot_order` | 0 | 5 | 0 | 0.0 | 22.7 | 0.0 |
+| `runtime_spike` | 0 | 0 | 1 | 0.0 | 0.0 | 8.8 |
+| `runtime_spike_replan` | 1 | 7 | 0 | 11.7 | 40.9 | 0.0 |
+| `runtime_stale_receipt` | 1 | 2 | 1 | 6.5 | 24.9 | 16.5 |
+| `runtime_stall_end` | 1 | 1 | 0 | 0.3 | 0.3 | 0.0 |
+| `runtime_stranded_landing` | 3 | 0 | 0 | 41.9 | 0.0 | 0.0 |
+| `runtime_support::background_wrappers` | 1 | 0 | 0 | 1.4 | 0.0 | 0.0 |
+| `runtime_support::session_handles` | 1 | 0 | 1 | 0.4 | 0.0 | 0.7 |
+| `runtime_support::thread_stacks` | 1 | 3 | 1 | 5.5 | 0.1 | 0.2 |
+| `runtime_sweep` | 3 | 6 | 4 | 22.7 | 22.9 | 34.5 |
+| `runtime_task_hold` | 3 | 3 | 2 | 2.0 | 1.1 | 4.2 |
+| `runtime_task_hold_end` | 1 | 5 | 4 | 0.2 | 1.7 | 9.7 |
+| `runtime_task_hold_park` | 2 | 0 | 10 | 22.6 | 0.0 | 117.7 |
+| `runtime_task_release` | 4 | 4 | 8 | 35.5 | 42.6 | 93.2 |
+| `runtime_telemetry_lease` | 0 | 1 | 3 | 0.0 | 4.6 | 20.6 |
+| `runtime_telemetry_sessions` | 2 | 0 | 1 | 12.5 | 0.0 | 3.4 |
+| `runtime_throughput_review` | 3 | 6 | 5 | 14.8 | 7.4 | 13.4 |
+| `runtime_toolchains` | 1 | 3 | 2 | 6.2 | 19.5 | 16.8 |
+| `runtime_triage` | 4 | 13 | 12 | 27.9 | 63.2 | 81.5 |
+| `runtime_verify_flaky` | 1 | 3 | 1 | 5.9 | 24.2 | 7.4 |
+| `runtime_verify_retry` | 1 | 3 | 2 | 8.8 | 21.2 | 15.7 |
+| `runtime_waiting` | 2 | 2 | 5 | 20.7 | 22.7 | 34.3 |
+| `runtime_waiting_stages` | 1 | 0 | 3 | 14.4 | 0.0 | 58.1 |
+| `runtime_worktree_records` | 1 | 0 | 5 | 0.4 | 0.0 | 2.1 |
+
+D と R の本数の和の多い module の上位 10（同じ本数は D+R の秒の降順）:
+
+| 順 | module | D+R の本数 | D | R | D+R の秒 |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | `runtime_handoff` | 26 | 4 | 22 | 287.4 |
+| 2 | `runtime_triage` | 25 | 13 | 12 | 144.7 |
+| 3 | `runtime_replan_park` | 22 | 11 | 11 | 269.9 |
+| 4 | `runtime_clone` | 20 | 2 | 18 | 46.9 |
+| 5 | `runtime_already_satisfied` | 19 | 6 | 13 | 137.1 |
+| 6 | `runtime_resume` | 18 | 10 | 8 | 223.0 |
+| 7 | `runtime_observer` | 18 | 13 | 5 | 34.8 |
+| 8 | `runtime_claim` | 17 | 5 | 12 | 63.8 |
+| 9 | `runtime_cleanup` | 14 | 5 | 9 | 209.1 |
+| 10 | `runtime_review` | 14 | 12 | 2 | 136.9 |

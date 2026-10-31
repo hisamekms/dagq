@@ -1,0 +1,1221 @@
+# The registry's boundaries task 3803 gave to the representative tests of the
+# runtime_ modules of tests/it (docs/plans/it-reduction.md, "2026-11 の分類")
+# (the format is in the header of scripts/check-it-added-tests.sh).
+
+[[boundary]]
+id = "adopt-independent-runs-and-dependent-claim-after-landing"
+kind = "supervisorの配線"
+test = "runtime_adopt::independent_tasks_run_concurrently_and_a_dependent_starts_after_integration"
+reason = "常駐の supervisor の 1 本の loop が独立した 2 件の run を同時に流し、integrate で main が動いた後に依存する task をその新しい main を base に claim することは、実の supervisor の loop と git と queue をつないだ配線でしか確かめられない。依存の ready の判断は queue の claim の unit test"
+task = 3803
+
+[[boundary]]
+id = "recover-orphan-run-spares-sibling-process-group"
+kind = "プロセス"
+test = "runtime_adopt::recovering_one_orphaned_run_leaves_the_other_running"
+reason = "同じ supervisor の 2 件の run のうち孤児の 1 件を回収するとき、もう 1 件の lease と実の process group を止めないことは、実の process と signal でしか確かめられない。回収してよい run の判断は adopt の unit test"
+task = 3803
+
+[[boundary]]
+id = "adopt-stale-lease-of-live-wrapper-to-landing"
+kind = "復旧とadopt"
+test = "runtime_adopt::stale_lease_of_a_live_wrapper_is_adopted_and_driven_to_awaiting_integration"
+reason = "heartbeat の止まった supervisor の lease を、生きている wrapper の run ごと次の supervisor が token を移して引き取り、receipt から検証と close まで進めることは、2 つの supervisor と実の wrapper の heartbeat をまたぐ復旧の IT でしか確かめられない。adopt してよいかの判断は adopt::adoptable の unit test"
+task = 3803
+
+[[boundary]]
+id = "adopt-stale-lease-race-takes-once"
+kind = "SQLite"
+test = "runtime_adopt::two_supervisors_racing_for_one_stale_lease_adopt_it_once"
+reason = "2 つの supervisor が同じ古い lease を同時に見つけて片方だけが adopt することは、別の接続から同じ queue file を書く実の SQLite の transaction でしか確かめられない。adopt してよいかの判断は adopt::adoptable の unit test"
+task = 3803
+
+[[boundary]]
+id = "adopt-detached-wrapper-after-supervisor-sigkill"
+kind = "復旧とadopt"
+test = "runtime_background_process::a_detached_wrapper_and_its_turn_outlive_a_killed_supervisor"
+reason = "別 process の supervisor を drain なしに SIGKILL しても、その子でない wrapper と turn が生き続け、次の supervisor が記録した pid と heartbeat で wrapper を引き取り新しい wrapper を立てないことは、実の process の kill と復旧の IT でしか確かめられない。adopt してよいかの判断は adopt::adoptable の unit test"
+task = 3803
+
+[[boundary]]
+id = "background-wrapper-ignoring-sigterm-killed-with-turn"
+kind = "プロセス"
+test = "runtime_background_process::a_wrapper_that_ignores_sigterm_is_killed_with_its_turn"
+reason = "SIGTERM を無視する実の wrapper を猶予の後に SIGKILL し、別の process group の turn にも SIGKILL を送って何も残さないことは、実の process と signal でしか確かめられない。停止の signal と結果の記録の組み立ては session の unit test"
+task = 3803
+
+[[boundary]]
+id = "claim-waits-for-build-containing-landings"
+kind = "supervisorの配線"
+test = "runtime_claim_build::a_task_waits_for_a_build_that_contains_its_dependencies_landings"
+reason = "着地を含まない build の supervisor が待つ task を見送り status と show が理由を出し、着地を含む build の supervisor が最初の pass で claim することは、supervisor の build と git の履歴と claim をつないだ配線でしか確かめられない。待つかの判断は domain::build_wait の unit test"
+task = 3803
+
+[[boundary]]
+id = "claim-fallback-skips-build-waiting-task"
+kind = "SQLite"
+test = "runtime_claim_build::the_claims_fallback_never_takes_a_task_that_waits_for_the_build"
+reason = "supervisor の選んだ task が無いときの claim の順の fallback が wait_for_build の task を取らないことは、実の SQLite の claim の query でしか確かめられない。待つかの判断は domain::build_wait の unit test"
+task = 3803
+
+[[boundary]]
+id = "codex-worker-ask-through-queue-service"
+kind = "プロセス"
+test = "runtime_codex_ask::a_codex_workers_ask_goes_to_the_queue_service"
+reason = "Codex の turn の中の実の dagq の process が queue の path を持たずに queue service の socket へ ask を開き、答えが次の codex exec resume の turn になることは、実の process と socket でしか確かめられない。ask の中身の組み立てと答えの turn の判断は worker_question の unit test"
+task = 3803
+
+[[boundary]]
+id = "container-unusable-worker-not-claimed"
+kind = "supervisorの配線"
+test = "runtime_container::a_worker_set_to_an_unusable_container_is_not_claimed_and_never_runs_on_the_host"
+reason = "dagq.toml が worker を使えない container に置くと claim を見送り host で走らせず、inbox への attention と status・doctor の表示まで通すことは、supervisor の claim と設定の読み込みと status をつないだ配線でしか確かめられない。見送りと通知の判断は domain::container_runtime の unit test"
+task = 3803
+
+[[boundary]]
+id = "wrapper-refuses-host-turn-when-set-to-container"
+kind = "プロセス"
+test = "runtime_container::a_host_run_switched_to_the_container_takes_no_next_turn_on_the_host"
+reason = "host で始まった run の答えの turn を、実の wrapper の process が作業中に書かれた dagq.toml を読んで起こさないことは、実の wrapper の process と file でしか確かめられない。拒否の判断は domain::container_runtime の unit test"
+task = 3803
+
+[[boundary]]
+id = "forecast-snapshots-recorded-by-supervisor"
+kind = "supervisorの配線"
+test = "runtime_forecast::snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start"
+reason = "日の始まり・p50 を動かした着地・次の supervisor の起動で snapshot を 1 件ずつ記録することは、supervisor の loop と台帳と queue の event をつないだ配線でしか確かめられない。どの trigger を残すかの判断は domain::forecast::snapshot の unit test"
+task = 3803
+
+[[boundary]]
+id = "handoff-take-requires-token-and-binary"
+kind = "SQLite"
+test = "runtime_handoff::taking_a_handoff_requires_the_same_token_and_binary_and_beats_cancellation"
+reason = "handoff の要求を同じ token と binary でだけ取り、cancel と競り、exec の途中は次の要求を受けないことは、supervisors の行を条件つきで書く実の SQLite でしか確かめられない。要求を読み直した後の判断は host_ops::handoff の unit test"
+task = 3803
+
+[[boundary]]
+id = "handoff-next-process-drives-live-session"
+kind = "supervisorの配線"
+test = "runtime_handoff::a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on"
+reason = "handoff で supervisor が worker の作業中に loop を終え、登録と lease を残したまま次の process が同じ token で adopt なしに run を引き継いで receipt から検証まで進めることは、supervisor の loop の終わりと次の起動をつないだ配線でしか確かめられない。drain と引き渡しの判断は host_ops::handoff の unit test"
+task = 3803
+
+[[boundary]]
+id = "adopt-resume-of-stopped-supervisor"
+kind = "復旧とadopt"
+test = "runtime_handoff::a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter"
+reason = "resume の途中で止まり handoff.json を残さなかった supervisor の needs_session の run を、別の token の supervisor が adopt して event から resume を組み直し、二度目の resume なしに着地させることは、2 つの supervisor と生きている session をまたぐ復旧の IT でしか確かめられない。組み直しの判断は execution::resume の unit test"
+task = 3803
+
+[[boundary]]
+id = "auto-update-job-started-for-runtime-landings-and-retried"
+kind = "supervisorの配線"
+test = "runtime_handoff::auto_update_builds_runtime_landings_and_retries_on_the_answer"
+reason = "登録の auto_update を持つ常駐の supervisor が main の head を見て runtime を変える着地のときだけ update job を起動し、update_failed の ask の retry の答えで同じ head の build をもう一度起動することは、実の queue と supervisor の周回と job の process を通す配線でしか確かめられない。runtime を変える着地かどうかの判断は src/application/update.rs の changes_runtime の unit test"
+task = 3803
+
+[[boundary]]
+id = "headless-stall-job-resume-parks-and-lands"
+kind = "supervisorの配線"
+test = "runtime_headless_stall::a_headless_stall_the_job_resumes_is_parked_resumed_and_lands"
+reason = "headless の run の stall の復旧の job が resume と答えると run を needs_session に park し、session を終えて指示つきで resume し着地させることは、stall の検出と復旧の job と resume をつないだ supervisor の配線でしか確かめられない。答えごとの動作の判断は stall と domain::recovery の unit test"
+task = 3803
+
+[[boundary]]
+id = "adopter-stops-orphan-recovery-job-before-next"
+kind = "復旧とadopt"
+test = "runtime_headless_stall::an_adopter_stops_the_recovery_job_a_dead_supervisor_left_before_its_own_attempt"
+reason = "死んだ supervisor が走らせたままの復旧の job を、run を adopt した supervisor が引き取らずに止めてから自分の試行を始め、job が重ならないことは、実の job の process と supervisor の交代をまたぐ復旧の IT でしか確かめられない。job が重ならない順の判断は domain::recovery の unit test"
+task = 3803
+
+[[boundary]]
+id = "heartbeat-retries-on-busy-queue-lock"
+kind = "SQLite"
+test = "runtime_heartbeat::a_busy_heartbeat_is_tried_again_and_its_failures_are_recorded"
+reason = "別の接続が queue の write lock を持つ間に heartbeat の書き込みが database is locked で失敗し、lock が外れた後に再試行と失敗の連続を記録することは、実の SQLite の file と lock でしか確かめられない。再試行を続けるか止めるかの判断は HeartbeatPolicy の unit test"
+task = 3803
+
+[[boundary]]
+id = "kpi-breach-recorded-once-across-connections"
+kind = "SQLite"
+test = "runtime_push::two_connections_record_the_same_breach_once"
+reason = "2 つの接続が同じ breach の始まりを同時に書いても 1 件だけ記録し日の上限も 1 回と数えることは、別の接続から同じ queue file を書く実の SQLite の transaction でしか確かめられない。breach の始まりと終わりの判断は domain::kpi::push の unit test"
+task = 3803
+
+[[boundary]]
+id = "idle-orphan-process-sampled-and-stopped"
+kind = "プロセス"
+test = "runtime_repair::a_process_without_cpu_progress_is_an_idle_process_alert_for_the_recovery_job"
+reason = "worktree の孤児の実の process の CPU 時間を標本にとって idle_process の alert にし、復旧の job の判定の直後に host の process を数え直して止めることは、実の process と CPU 時間でしか確かめられない。idle かの判断は domain::idle_process の unit test"
+task = 3803
+
+[[boundary]]
+id = "conflict-precheck-merge-tree-against-main"
+kind = "Git"
+test = "runtime_review_conflict::a_passed_run_that_conflicts_with_main_is_rebased_by_its_live_session_and_lands"
+reason = "review の通った run の head と動いた main の衝突を worktree に触れずに git merge-tree で見つけ、session の rebase の後に二度目の precheck が衝突なしとすることは、実の git でしか確かめられない。衝突の後に何を送るかの判断は landing::precheck の unit test"
+task = 3803
+
+[[boundary]]
+id = "adopt-pending-conflict-request-not-resent"
+kind = "復旧とadopt"
+test = "runtime_review_conflict::an_adopted_headless_run_with_a_pending_conflict_request_waits_without_sending_it_again"
+reason = "送ったと記録し headless の session の次の request に書いた衝突の request を、run を adopt した supervisor が送り直さず session の turn を待って着地させることは、supervisor の交代と生きている session をまたぐ復旧の IT でしか確かめられない。送り直すかの判断は adopt と revise の unit test"
+task = 3803
+
+[[boundary]]
+id = "run-env-reaches-verification-commands"
+kind = "プロセス"
+test = "runtime_run_env::dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands"
+reason = "dagq.toml の [run.env] を展開して wrapper に渡し、integrate が rebase の後に流す実の検証の command の process の環境に届くことは、実の process と shell でしか確かめられない。展開の判断は domain::run_env の unit test"
+task = 3803
+
+[[boundary]]
+id = "run-env-missing-program-holds-claims-and-landings"
+kind = "supervisorの配線"
+test = "runtime_run_env::a_missing_run_env_program_stops_claims_and_landings_until_it_is_found"
+reason = "[run.env] の名指す program が無い間は claim と着地と integrate の検証を止め、attention と doctor に出し、見つかれば再開することは、supervisor と integrate と status をつないだ配線でしか確かめられない。無いかと変化の記録の判断は domain::run_env の unit test"
+task = 3803
+
+[[boundary]]
+id = "stranded-landing-lease-taken-in-one-transaction"
+kind = "SQLite"
+test = "runtime_stranded_landing::a_run_left_awaiting_integration_is_taken_up_by_one_supervisor_and_lands"
+reason = "着地を待つまま残った run の lease を、run を今の状態で判断し直す 1 つの transaction で取り、同時に判断した 2 つの supervisor の片方だけが取ることは、実の SQLite の transaction でしか確かめられない。取ってよいかの判断は domain::stranded_landing の unit test"
+task = 3803
+
+[[boundary]]
+id = "stranded-landing-taken-up-by-another-build"
+kind = "supervisorの配線"
+test = "runtime_stranded_landing::a_landing_an_error_stopped_is_taken_up_by_another_build_and_lands"
+reason = "error で止まった着地を同じ build の supervisor は残し、別の build の supervisor が 1 回だけ review なしに引き取って着地させることは、supervisor の登録の build と着地をつないだ配線でしか確かめられない。どの build が引き取れるかの判断は domain::stranded_landing の unit test"
+task = 3803
+
+[[boundary]]
+id = "stranded-landing-empty-rebase-ends-failed"
+kind = "Git"
+test = "runtime_stranded_landing::a_run_whose_change_is_already_on_main_is_taken_up_once_and_ends_failed"
+reason = "人が手で main に載せた変更の run を引き取ると実の git の rebase が main の上に何も残さず rebase_empty として session に返り failed で終わることは、実の git でしか確かめられない。空の rebase の後の扱いの判断は landing の unit test"
+task = 3803
+
+[[boundary]]
+id = "ci-watch-records-runs-and-findings-through-gh"
+kind = "supervisorの配線"
+test = "runtime_ci_watch::the_watch_records_runs_files_one_finding_per_failure_set_and_keeps_the_list"
+reason = "supervisor が dagq.toml の [ci_watch] を読み、偽の gh から run と JUnit を読んで event と ci_failure の finding を queue に書き、一覧を読み戻すことは、supervisor の配線を通してしか確かめられない。run が足し引きするものと key の判断は domain::ci_watch の unit test"
+task = 3803
+
+[[boundary]]
+id = "ci-watch-hold-read-back-by-its-own-token"
+kind = "SQLite"
+test = "runtime_ci_watch::a_handed_off_supervisor_reads_its_own_hold_past_the_others_records"
+reason = "handoff の後に同じ token で続く supervisor が、他の supervisor が後から書いた同じ種類の記録を越えて自分の最新の hold を読み戻すことは、実の SQLite の queue の問い合わせでしか確かめられない。hold を記録し直すかの判断は domain::ci_watch の unit test"
+task = 3803
+
+[[boundary]]
+id = "claim-class-spike-limit-defers-and-frees-the-slot"
+kind = "supervisorの配線"
+test = "runtime_claim_class::the_spike_limit_defers_a_spike_and_gives_its_slot_to_an_implementation"
+reason = "max_spikes で 2 本目の Spike を spike_limit で控え、1 本目が slot を出たら claim して控えを終えることは、supervisor の claim の pass と candidates・status・stats の配線でしか確かめられない。どの class を控えるかの判断は domain::claim_order の unit test"
+task = 3803
+
+[[boundary]]
+id = "claim-aging-clock-read-from-task-dependency-and-goal-events"
+kind = "SQLite"
+test = "runtime_claim_class::the_aging_s_clock_is_read_from_the_task_s_its_dependencies_and_its_goal_s_events"
+reason = "task 自身の event、依存先の status の変化、goal の event を集めて claim できるようになった時刻を読むことは、実の SQLite の queue の問い合わせでしか確かめられない。時刻の判断は domain::claim_facts::claimable_since の unit test"
+task = 3803
+
+[[boundary]]
+id = "claim-spacing-resident-supervisor-rereads-its-table"
+kind = "supervisorの配線"
+test = "runtime_claim_spacing::a_resident_supervisor_waits_for_the_spacing_and_status_shows_it"
+reason = "常駐する supervisor が [supervisor] の claim_spacing を読み、間隔が過ぎるまで待って次を claim し、表の変更を再起動なしに取り込み status に出すことは、実の設定の読み直しと supervisor の配線でしか確かめられない。間隔の判断は domain::claim_spacing の unit test"
+task = 3803
+
+[[boundary]]
+id = "disk-short-holds-the-claim-and-asks-the-inbox-once"
+kind = "supervisorの配線"
+test = "runtime_disk::no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once"
+reason = "空きが足りない間に supervisor が claim を控えて claim_held を記録し、inbox に disk の ask を 1 件開き、答えを適用して空きが戻れば claim_resumed で claim することは、supervisor の配線を通してしか確かめられない。ask の文と開閉の判断は supervise::disk の unit test"
+task = 3803
+
+[[boundary]]
+id = "validation-parks-missing-evidence-for-a-resumed-session"
+kind = "supervisorの配線"
+test = "runtime_evidence::missing_required_evidence_parks_the_run_for_a_resumed_session"
+reason = "必須の evidence の無い receipt を validation が needs_session に park し、supervisor が依頼付きで session を resume して書き直した receipt で awaiting_integration に進めることは、supervisor の配線を通してしか確かめられない。evidence の有無の判断は domain::receipt と domain::validation の unit test"
+task = 3803
+
+[[boundary]]
+id = "validation-diffs-from-the-fork-point-of-a-moved-main"
+kind = "Git"
+test = "runtime_evidence::a_branch_rebased_onto_a_moved_main_is_held_only_to_its_own_changes"
+reason = "validation が base の commit ではなく今の main からの分岐点で diff をとり、他の task が main に足した変更を run の変更に数えないことは、実の git の merge-base でしか確かめられない。path が宣言に収まるかの判断は domain::scope の unit test"
+task = 3803
+
+[[boundary]]
+id = "host-metrics-recorded-while-the-supervisor-runs-and-pruned"
+kind = "supervisorの配線"
+test = "runtime_host_metrics::supervisor_records_the_host_load_while_it_runs_and_prunes_old_files"
+reason = "走っている supervisor が間隔ごとにその日のファイルへ行を足し、保持の期間を過ぎたファイルだけを消すことは、実の supervisor の配線と実のファイルでしか確かめられない。行の形と保持の判断は domain::host_metrics の unit test"
+task = 3803
+
+[[boundary]]
+id = "dead-landing-of-a-passed-run-released-and-landed-again"
+kind = "復旧とadopt"
+test = "runtime_landing_release::a_passed_run_whose_landing_died_is_released_and_lands_again"
+reason = "着地の途中で supervisor が死んだ passed の run を次の supervisor が解放し、review も人も通さず着地し直し、残った検証の token を片付けることは、実の supervisor の死と引き継ぎでしか確かめられない。解放した run の行き先の判断は domain::landing_release の unit test"
+task = 3803
+
+[[boundary]]
+id = "dead-landing-held-while-a-process-works-in-its-worktree"
+kind = "プロセス"
+test = "runtime_landing_release::a_dead_landing_is_not_released_while_a_process_works_in_its_worktree"
+reason = "死んだ着地が残した検証のコマンドが run の worktree でまだ動く間は解放しないことは、実の process の cwd を数えることでしか確かめられない。待つか解放するかの判断は domain::landing_release::processes_step の unit test"
+task = 3803
+
+[[boundary]]
+id = "dead-landing-already-on-main-not-landed-twice"
+kind = "Git"
+test = "runtime_landing_release::a_landing_that_reached_main_before_its_supervisor_died_is_not_landed_twice"
+reason = "supervisor が死ぬ前に main を進めた着地を、次の着地が main にある commit から見つけて 2 度目を着地させないことは、実の git の履歴でしか確かめられない。integrated にするかの判断は domain::landing_release の unit test"
+task = 3803
+
+[[boundary]]
+id = "task-hold-settles-in-the-transaction-that-ends-the-landing"
+kind = "SQLite"
+test = "runtime_landing_release::a_held_task_whose_landing_ends_settles_at_its_end_and_is_not_leased_to_review"
+reason = "着地中の task の hold が、死んだ着地の復旧が着地を終える同じ transaction で落ち着き、supervisor の pass を待たないことは、実の SQLite の transaction でしか確かめられない。hold が落ち着くかの判断は domain::task_hold::settles_at_rest の unit test"
+task = 3803
+
+[[boundary]]
+id = "review-code-paths-read-from-the-landing-branch-commit"
+kind = "Git"
+test = "runtime_review_revise_limit::an_acceptance_unmet_off_the_code_paths_lands_whatever_the_runs_branch_says"
+reason = "review の attempt が code paths を run の branch や main checkout の未 commit のファイルではなく着地の branch の commit の dagq.toml から読むことは、実の git の commit を読むことでしか確かめられない。code finding かの判断は domain::review_reason の unit test"
+task = 3803
+
+[[boundary]]
+id = "held-run-released-resumes-its-session-and-lands"
+kind = "supervisorの配線"
+test = "runtime_task_release::a_held_run_released_on_its_provider_resumes_its_session_with_the_model_chosen"
+reason = "held の run を provider で release すると resume の入口から元の session で 1 度 resume して着地し、--model を resume の session に渡すことは、supervisor の配線を通してしか確かめられない。session を保つか替えるかの判断は domain::fresh_session::next_session の unit test"
+task = 3803
+
+[[boundary]]
+id = "release-keeps-the-carried-head-as-a-run-ref"
+kind = "Git"
+test = "runtime_task_release::a_release_whose_carried_head_cannot_be_kept_is_refused_and_changes_nothing"
+reason = "release が引き継ぐ head を refs/dagq/runs/<run-id> に保ち、名前が塞がれていれば何も変えずに拒み、未 commit の作業を run の commit の上に保存することは、実の git の ref と worktree でしか確かめられない。拒むかの判断は domain::task_hold::check_release の unit test"
+task = 3803
+
+[[boundary]]
+id = "release-through-the-service-keeps-the-work-with-the-client-git"
+kind = "プロセス"
+test = "runtime_task_release::a_release_through_the_service_reads_and_keeps_the_work_with_the_client_s_git"
+reason = "queue service を通す release で client の process が自分の Git で作業を読み保存し、service の process は Git を流さないことは、実の service の process と socket を通してしか確かめられない。release の判断は domain::task_hold::check_release の unit test"
+task = 3803
+
+[[boundary]]
+id = "release-refused-when-the-hold-moved-after-it-read-the-work"
+kind = "SQLite"
+test = "runtime_task_release::a_release_whose_hold_or_run_moved_after_it_read_the_work_is_refused_and_changes_nothing"
+reason = "release が作業を store の transaction の前に読み、その間に別の release と新しい hold が落ち着いたら release_read_moved で拒み何も変えないことは、実の SQLite の transaction でしか確かめられない。読んだ状態と今の状態の比較の判断は domain::task_hold::check_release_read の unit test"
+task = 3803
+
+[[boundary]]
+id = "run-sessions-registered-and-reports-stored-under-the-run"
+kind = "supervisorの配線"
+test = "runtime_telemetry_sessions::a_runs_sessions_are_registered_to_it_and_their_reports_go_into_the_step_store"
+reason = "claim の session を wrapper の開始の前に run のものとして登録し、Codex の thread や更新した session は pass が event を読むまで拒み、送り直しを SessionStepStore に run の下で記録することは、supervisor の配線を通してしか確かめられない。受けるかの判断は domain::telemetry::check の unit test"
+task = 3803
+
+[[boundary]]
+id = "headless-wrapper-sends-turn-steps-with-the-run-token"
+kind = "プロセス"
+test = "runtime_telemetry_sessions::a_headless_runs_steps_go_into_the_step_store_under_the_run"
+reason = "headless の worker の session wrapper の process が turn の stream から集めた step を run の token で送り、token のファイルを agent のコマンドラインに出さないことは、実の wrapper の process でしか確かめられない。step の形の判断は domain::session_step の unit test"
+task = 3803
+
+[[boundary]]
+id = "recovery-job-retries-a-failed-run-and-it-lands"
+kind = "supervisorの配線"
+test = "runtime_triage::a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands"
+reason = "失敗した run を復旧 job が受け、commit の無い run の retry を適用して auto_repaired と triage_finished を記録し、round の終わりに残った wrapper を止めて次の run が着地することは、supervisor の配線を通してしか確かめられない。verdict を適用するかの判断は domain::recovery の unit test"
+task = 3803
+
+[[boundary]]
+id = "retry-inherit-carries-the-run-branch-over"
+kind = "Git"
+test = "runtime_triage::retry_inherit_carries_the_branch_over_once_and_a_failed_job_is_recovered_by_hand"
+reason = "retry_inherit で失敗した run の branch の commit を次の run に引き継ぐことは、実の git の branch と worktree でしか確かめられない。引き継ぐかと 2 度目を拒む判断は domain::recovery と domain::resume の unit test"
+task = 3803
+
+[[boundary]]
+id = "triage-resume-rereads-revivable-in-its-own-transaction"
+kind = "SQLite"
+test = "runtime_triage::a_resume_is_refused_once_the_runs_task_ended_or_has_a_later_run_while_its_round_ran"
+reason = "triage の round の resume が、round の間に task が cancel や後の run を得たかを自分の transaction で読み直して拒むことは、実の SQLite の transaction でしか確かめられない。戻せるかの判断は domain::telemetry::run_revivable の unit test"
+task = 3803
+
+[[boundary]]
+id = "dead-run-nobody-leases-recovered-and-retried"
+kind = "復旧とadopt"
+test = "runtime_triage::a_dead_run_nobody_leases_is_recovered_triaged_and_retried"
+reason = "wrapper が死に誰も lease しない run を supervisor が復旧して interrupted で triage し、retry で着地させることは、実の process の死と supervisor の復旧でしか確かめられない。復旧の判断は domain::recovery の unit test"
+task = 3803
+
+[[boundary]]
+id = "background-launch-failure-keeps-run-starting-and-stops-claims"
+kind = "supervisorの配線"
+test = "runtime_claim::provisioning_failure_retains_the_run_and_stops_claiming_other_tasks"
+reason = "worker の background wrapper を起動できないとき、port の失敗が backend_call_failed として run に記録され、supervisor が run を starting に残して claim を止めることは、supervisor の pass と queue をつないだ配線でしか確かめられない。失敗の記録の形は application::recording の unit test"
+task = 3803
+
+[[boundary]]
+id = "run-lease-guarded-by-supervisor-token"
+kind = "SQLite"
+test = "runtime_claim::claim_creates_a_lease_that_only_its_owner_can_use_or_release"
+reason = "claim が作る run_leases の行を token の持ち主だけが使い・更新し・離せ、他の token の書き込みが SQL の条件で拒まれることは、実の SQLite のファイルと別の接続でしか確かめられない。lease が古いかの判断は infrastructure::runtime_store の lease_is_stale の unit test"
+task = 3803
+
+[[boundary]]
+id = "resident-supervisor-registration-heartbeat-and-stop"
+kind = "supervisorの配線"
+test = "runtime_claim::resident_supervisor_without_runs_is_listed_until_it_stops"
+reason = "常駐の supervisor が run を持たなくても登録を heartbeat で新しく保ち、穏やかな停止で消し、status と doctor がそれを読むことは、走る supervisor の thread と queue をつないだ配線でしか確かめられない。生死の判定は domain::supervisor_life の unit test"
+task = 3803
+
+[[boundary]]
+id = "main-vanishing-between-landing-check-and-claim"
+kind = "Git"
+test = "runtime_claim::main_vanishing_after_the_landing_branch_check_holds_the_claim"
+reason = "pass の頭で landing branch を確かめた後に実の git repository から main が消えても claim を保留し loop を落とさないことは、実の git の ref の削除でしか確かめられない。保留にする判断は domain::landing_branch の unit test"
+task = 3803
+
+[[boundary]]
+id = "supervisor-progress-to-json-lines-log-file"
+kind = "supervisorの配線"
+test = "runtime_claim::supervise_records_its_progress_as_json_lines"
+reason = "supervisor の起動の事実・進み具合・結果が process ごとの log directory の JSON Lines のファイルに 1 行 1 record で書かれることは、走る supervisor と実のファイルをつないだ配線でしか確かめられない。record の形は tracing の層の unit test"
+task = 3803
+
+[[boundary]]
+id = "dead-supervisor-pid-reported-stale-and-kept"
+kind = "プロセス"
+test = "runtime_claim::killed_supervisor_registration_is_reported_stale_and_never_deleted"
+reason = "死んだ process や heartbeat の止まった登録を status と doctor が stale と報告し、後の supervisor も recover も消さないことは、実の process を殺した pid の生死の確認でしか確かめられない。stale の判断は domain::supervisor_life の unit test"
+task = 3803
+
+[[boundary]]
+id = "recover-requires-dead-processes-and-stale-lease"
+kind = "復旧とadopt"
+test = "runtime_claim::recover_requires_dead_processes_and_stale_lease_then_allows_a_new_run"
+reason = "wrapper と agent の実の process と supervisor の lease がすべて死ぬまで recover を拒み、死んだ後は run を interrupted にして新しい run を許すことは、実の process の生死と queue の復旧の経路でしか確かめられない。recover を許すかの判断は application::health::runs の recover_takes の unit test"
+task = 3803
+
+[[boundary]]
+id = "claim-records-slots-line-and-attributes"
+kind = "supervisorの配線"
+test = "runtime_claim::the_claim_records_its_slots_its_line_and_its_attributes"
+reason = "claim の pass が slot の埋まりと空きを、claim が列の位置・長さ・ready になった時刻・優先度・属性を event に記録することは、supervisor の claim の pass と queue をつないだ配線でしか確かめられない。記録する値の判断は domain::claim_order と domain::slot_order の unit test"
+task = 3803
+
+[[boundary]]
+id = "supervisor-records-landed-main-commit-once"
+kind = "supervisorの配線"
+test = "runtime_claim::the_supervisor_records_the_landed_commit_once"
+reason = "人の integrate が main に載せた commit を次の pass が 1 回だけ記録し、main が動かない pass は何も記録しないことは、実の git の main と supervisor の pass をつないだ配線でしか確かめられない。記録するかの判断は application::main_log の unit test"
+task = 3803
+
+[[boundary]]
+id = "facts-only-turn-reads-cut-off-head-from-clone"
+kind = "Git"
+test = "runtime_clone_facts::a_held_container_run_whose_last_turn_was_cut_off_is_released_with_the_head_its_facts_only_turn_found"
+reason = "途中で切れた container の run の release が facts だけの turn に実の git の clone を読み直させ、切れた turn の head で放すことは、executor の process と実の git の clone を通してしか確かめられない。facts を読み直すかの判断は application::inherit の facts_step の unit test"
+task = 3803
+
+[[boundary]]
+id = "facts-only-turn-kills-hanging-readying-at-deadline"
+kind = "プロセス"
+test = "runtime_clone_facts::a_facts_only_turn_that_hangs_in_its_readying_is_refused_by_its_deadline"
+reason = "facts だけの turn の machine の起動が止まったままのとき、turn の期限で止まった command を殺し、machine の lease も container も残さないことは、実の process と時計でしか確かめられない。期限の判断は domain::run_container の unit test"
+task = 3803
+
+[[boundary]]
+id = "e2e-runs-in-worktree-after-review-then-lands"
+kind = "supervisorの配線"
+test = "runtime_e2e::a_passed_run_that_needs_the_e2e_runs_it_on_the_host_and_lands"
+reason = "e2e の paths に当たる run の review が通った後、supervisor が review した commit の worktree で e2e の command を流して出力を run directory に残し、通れば着地することは、supervisor と実の command と integrate をつないだ配線でしか確かめられない。e2e が要るかの判断は domain::run_e2e の unit test"
+task = 3803
+
+[[boundary]]
+id = "adopter-stops-dead-supervisors-review-job"
+kind = "復旧とadopt"
+test = "runtime_headless_jobs::an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs"
+reason = "死んだ supervisor が残した review の job を、run を adopt した supervisor が自分の review の前にその process ごと止め、pid が別の process に使い回された行は signal を送らず閉じることは、実の process と adopt の経路でしか確かめられない。どの行を止めるかの判断は domain::headless_job の unit test"
+task = 3803
+
+[[boundary]]
+id = "timed-out-review-job-stops-its-process-group"
+kind = "プロセス"
+test = "runtime_headless_jobs::a_timed_out_review_stops_the_processes_it_started"
+reason = "時間切れの review の job を止めるとき、その shell が background に残した process も job より長く生きず、行が stopped で閉じることは、実の process group と時計でしか確かめられない。時間の上限の読み取りは domain::review_jobs の unit test"
+task = 3803
+
+[[boundary]]
+id = "review-program-runs-landing-script-in-narrowed-env"
+kind = "supervisorの配線"
+test = "runtime_headless_jobs::a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit"
+reason = "review の program が run の worktree で landing branch の commit の script を、queue service や broker に届く変数を外した環境で流され、上限を過ぎれば process group ごと止まることは、supervisor の review と実の script と git をつないだ配線でしか確かめられない。環境を狭める判断は domain::review_programs の unit test"
+task = 3803
+
+[[boundary]]
+id = "ready-inherit-by-hand-carried-into-next-run"
+kind = "supervisorの配線"
+test = "runtime_inherit_by_hand::the_inbox_carries_a_failed_run_over_by_hand_and_the_next_run_inherits_it"
+reason = "inbox の ready --inherit が run の head を refs/dagq/runs に残して記録し、次の pass の claim がそれを引き継いで prompt に載せることは、CLI と実の git と supervisor の claim をつないだ配線でしか確かめられない。引き継げるかの判断は domain::inherit_by_hand の check の unit test"
+task = 3803
+
+[[boundary]]
+id = "retry-by-hand-removes-stale-recovery-round-lease"
+kind = "復旧とadopt"
+test = "runtime_inherit_by_hand::a_retry_by_hand_over_a_stale_round_takes_its_right_to_apply_away"
+reason = "lease の古くなった復旧の round を手のやり直しが同じ transaction で lease ごと取り上げ、遅れて来た round の retry_inherit が失敗して run が 1 回だけ引き継がれることは、実の queue の lease と復旧の round の経路でしか確かめられない。lease が古いかと引き継げるかの判断は lease_is_stale と domain::inherit_by_hand の unit test"
+task = 3803
+
+[[boundary]]
+id = "client-mode-ready-inherit-through-queue-service"
+kind = "プロセス"
+test = "runtime_inherit_by_hand::a_client_mode_ready_inherit_carries_the_run_over_through_the_service"
+reason = "inbox の client mode の dagq が queue service の socket と token を通って run を引き継ぎ、head は自分の git で選んで残し、planner の client は authorization_denied で拒まれることは、実の dagq の process と queue service の socket でしか確かめられない。誰に許すかの判断は domain::authorization の unit test"
+task = 3803
+
+[[boundary]]
+id = "ready-inherit-record-rechecks-read-in-one-transaction"
+kind = "SQLite"
+test = "runtime_inherit_by_hand::the_record_refuses_a_run_that_moved_since_the_read_and_applies_once"
+reason = "読んだ後に状態の動いた run を記録の 1 つの transaction が拒んで何も書かず、同じ記録を 2 回送っても 1 回だけ適用することは、実の SQLite の transaction と別の接続の書き込みでしか確かめられない。拒む条件の判断は domain::inherit_by_hand の check の unit test"
+task = 3803
+
+[[boundary]]
+id = "run-ref-write-checked-against-read-value"
+kind = "Git"
+test = "runtime_inherit_by_hand::a_caller_paused_after_reading_the_ref_writes_nothing_over_a_recorded_head"
+reason = "ref を空と読んで止まった caller の書き込みを、その間に別の writer が head を残して記録していれば git が読んだ値との比較で拒み、記録された head が残ることは、実の git の update-ref の比較つきの書き込みでしか確かめられない。どの head を選ぶかの判断は application::inherit の unit test"
+task = 3803
+
+[[boundary]]
+id = "landing-verification-replaces-coverage-gate-command"
+kind = "supervisorの配線"
+test = "runtime_landing_verification::the_repository_command_runs_in_place_of_the_coverage_gate_with_the_landing_env"
+reason = "integrate の検証で coverage gate の command が repository の command に差し替わり、rebase した main と既知の失敗を変数で受けて流れ、event と log が差し替えを記録することは、integrate と実の command をつないだ配線でしか確かめられない。差し替えと変数の判断は domain::landing_verification の plan と env の unit test"
+task = 3803
+
+[[boundary]]
+id = "precheck-rebase-conflict-retries-task-with-branch"
+kind = "Git"
+test = "runtime_precheck::precheck_conflicts_up_to_the_conflict_only_limit_retry_the_task_with_its_branch"
+reason = "main が動き続けて実の git の rebase が衝突するとき、precheck が上限まで session に rebase を頼み、超えれば着地で park して branch を引き継いで task をやり直すことは、実の git の rebase の衝突でしか確かめられない。上限を数える判断は domain::resume の unit test"
+task = 3803
+
+[[boundary]]
+id = "usage-limit-turn-moves-to-other-provider-same-worktree"
+kind = "supervisorの配線"
+test = "runtime_provider_switch::a_claude_turn_at_its_usage_limit_moves_to_codex_and_lands"
+reason = "Claude の turn が上限に当たったとき、supervisor が同じ worktree で Codex の新しい thread として呼び直し、hold の ask を開いて review を待たせ、答えの後に着地させることは、supervisor・provider の wrapper・ask をつないだ配線でしか確かめられない。移すかと hold の判断は domain::provider_switch の unit test"
+task = 3803
+
+[[boundary]]
+id = "retention-sweep-removes-expired-directories-and-backups"
+kind = "supervisorの配線"
+test = "runtime_retention::the_sweep_removes_the_directories_past_their_retention_and_keeps_two_backups"
+reason = "supervisor の sweep が保持期間を過ぎた planner・plan review・観察の directory と古い backup を消し、process の走るものや新しいものを残すことは、supervisor の pass と実のファイルと process をつないだ配線でしか確かめられない。何を消すかの判断は domain::retention の unit test"
+task = 3803
+
+[[boundary]]
+id = "events-of-kinds-in-range-read-by-index"
+kind = "SQLite"
+test = "runtime_retention::the_events_of_kinds_in_a_range_come_oldest_first_up_to_the_limit"
+reason = "観察の記録を種類ごとに索引の範囲で読み、範囲の中の指定した種類の event を古い順に上限まで返すことは、実の SQLite の query と索引でしか確かめられない。読んだ記録から終わりを決める判断は domain::retention の unit test"
+task = 3803
+
+[[boundary]]
+id = "worktree-helper-process-keeps-hold-settling"
+kind = "プロセス"
+test = "runtime_task_hold_park::a_helper_left_running_in_the_worktree_keeps_the_hold_settling"
+reason = "turn が worktree に残した実の helper の process が走る間は hold が落ち着かず release を拒み、終わってから待ちに入ることは、実の process の生死の確認でしか確かめられない。落ち着いたかの判断は domain::task_hold の unit test"
+task = 3803
+
+[[boundary]]
+id = "dead-supervisor-hold-park-adopted-by-another"
+kind = "復旧とadopt"
+test = "runtime_task_hold_park::a_hold_whose_resuming_supervisor_died_is_settled_by_another_supervisor"
+reason = "resume 中の supervisor が死んで lease が古くなったとき、別の supervisor が run を引き取って session を閉じて park し hold を落ち着かせ、戻った supervisor が何も記録しないことは、二つの supervisor と古い lease の adopt の経路でしか確かめられない。引き取るかの判断は lease_is_stale と domain::task_hold の unit test"
+task = 3803
+
+[[boundary]]
+id = "waiting-run-leaves-slot-and-returns-on-answer"
+kind = "supervisorの配線"
+test = "runtime_waiting::a_run_waiting_for_its_answer_leaves_the_slot_to_another_task"
+reason = "worker_question の答えを待つ run が slot を空けて別の task が claim され、答えで待ちが終わって run が空いた slot に戻り答えが届くことは、supervisor の slot と wrapper と ask をつないだ配線でしか確かめられない。待つかの判断は domain::waiting の unit test"
+task = 3803
+
+[[boundary]]
+id = "supervisor-stops-when-owner-process-killed"
+kind = "プロセス"
+test = "runtime_waiting::a_supervisor_whose_owner_is_gone_lets_a_waiting_run_go_and_stops"
+reason = "supervisor の owner の process が SIGKILL で消えると、待ちの run を人の答えを待たずに放して owner_gone で loop を終え登録を残さないことは、実の process を殺すことでしか確かめられない。止まるかの判断は domain::supervisor_life の unit test"
+task = 3803
+
+[[boundary]]
+id = "run-worktree-record-named-by-run"
+kind = "Git"
+test = "runtime_worktree_records::each_run_worktree_has_a_record_of_its_own_name_that_no_later_run_takes_over"
+reason = "run の worktree の .git/worktrees の記録が run の名前を持ち、記録だけが消えても後の run がその名前を取らず残った run が自分の branch を読めることは、実の git worktree add と prune でしか確かめられない。名前の付け方は application::naming の unit test"
+task = 3803
+
+[[boundary]]
+id = "background-wrapper-launch-without-workspace"
+kind = "supervisorの配線"
+test = "runtime_background::a_background_headless_run_lands_without_a_workspace"
+reason = "supervisor が run の worktree で wrapper を background に起動し、handle と起動の記録・worker の環境・session.log・終わった wrapper の handle での停止を経て着地することは、実の supervisor の配線を通してしか確かめられない。古い設定の警告と handle の組み立ては domain::background_wrapper と設定の読みの unit test"
+task = 3803
+
+[[boundary]]
+id = "background-session-adopted-by-next-supervisor"
+kind = "復旧とadopt"
+test = "runtime_background::a_new_supervisor_adopts_a_background_session"
+reason = "止まった supervisor が残した background wrapper を次の supervisor が handle と heartbeat で adopt し、自分の wrapper を起こさずに着地まで続けることは、実の wrapper の process と二つの supervisor の生涯を通してしか確かめられない。adopt するかの判断は supervise::execution::adopt の unit test"
+task = 3803
+
+[[boundary]]
+id = "background-wrapper-registers-on-own-start-record"
+kind = "プロセス"
+test = "runtime_background::a_wrapper_without_a_terminal_or_workspace_registers_once_its_start_is_recorded"
+reason = "端末も CMUX_WORKSPACE_ID も無い実の dagq session --background が拒まれず、別の pid や別の start の記録を自分のものとせず、自分の pid と start の記録で登録して turn を始めることは、実の process と OS の process の start でしか確かめられない。handle の一致の判断は domain::background_wrapper の unit test"
+task = 3803
+
+[[boundary]]
+id = "conflicts-table-reread-every-pass"
+kind = "supervisorの配線"
+test = "runtime_claim_defer::a_changed_conflicts_table_is_read_again_without_a_restart"
+reason = "supervisor が main checkout の dagq.toml の [conflicts] を再起動なしに毎 pass 読み直し、変更を一度記録して claim の defer と上限に効かせることは、実のファイルの書き換えと走る supervisor の配線でしか確かめられない。変更と不正な表の判断は domain::stats::conflicts::conflicts_change と claim_defer の unit test"
+task = 3803
+
+[[boundary]]
+id = "claim-held-by-load-across-supervisors"
+kind = "supervisorの配線"
+test = "runtime_claim_hold::no_run_is_claimed_while_the_load_is_above_the_threshold"
+reason = "load が閾値を超える間 supervisor が claim を止めて claim_held を自分の token で一度記録し、status に出し、load が下がれば claim_resumed を記録して claim することは、走る supervisor と次の supervisor の配線でしか確かめられない。閾値と hold の遷移の判断は domain::claim_hold::transition の unit test"
+task = 3803
+
+[[boundary]]
+id = "handoff-request-refuses-landing-in-same-write"
+kind = "SQLite"
+test = "runtime_handoff_race::a_supervisor_asked_to_hand_off_begins_no_landing_in_the_same_write"
+reason = "handoff を求められた supervisor の landing と e2e の開始を、pass が要求を読んだ後に書かれた要求でも integration_started を書く同じ transaction で拒むことは、実の SQLite の write でしか確かめられない。拒んだ後の handoff と stop の選び方は supervise::host_ops::handoff の unit test"
+task = 3803
+
+[[boundary]]
+id = "turn-input-awaited-until-its-turn-ends"
+kind = "supervisorの配線"
+test = "runtime_headless_turn_inputs::a_continue_written_during_a_turn_is_awaited_until_its_turn_ends"
+reason = "supervisor が headless の session に送った continue・answer・nudge・指示がその次の turn の request になり、その turn が終わるまで nudge や ask や job を起こさないことは、実の wrapper の turn と走る supervisor の配線でしか確かめられない。待つかの判断は domain::turn の a_requested_turn_is_awaited_from_its_request_until_it_ends"
+task = 3803
+
+[[boundary]]
+id = "turn-request-awaited-by-adopter"
+kind = "復旧とadopt"
+test = "runtime_headless_turn_inputs::an_adopter_awaits_the_turn_of_a_continue_written_during_a_turn"
+reason = "request と turn の終わりの間に run を adopt した supervisor が、その turn の request を記録から読み、終わるまで nudge や job を起こさないことは、二つの supervisor と実の wrapper の turn でしか確かめられない。待つかの判断は domain::turn の unit test"
+task = 3803
+
+[[boundary]]
+id = "approved-landing-lands-by-approval-order"
+kind = "supervisorの配線"
+test = "runtime_landing_answers::approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once"
+reason = "approve_landing の land の答えを supervisor が適用して ask を閉じ、run.env の program が欠ける間は着地を待たせ、見つかれば別の supervisor が承認の古い順に review も ask もせず一度ずつ着地させることは、実の supervisor と landing の配線でしか確かめられない。どの答えをどう適用するかは supervise::execution::landing::landing_answer_to_apply の unit test"
+task = 3803
+
+[[boundary]]
+id = "draining-supervisor-applies-landing-answers"
+kind = "supervisorの配線"
+test = "runtime_landing_answers::a_draining_supervisor_applies_the_landing_answers_and_starts_no_new_work"
+reason = "stop のために drain する supervisor が誰も lease しない run の land・send_back・cancel・retry_review の答えを適用して ask を閉じ、claim も resume も review も着地も新しく始めないことは、走る supervisor の drain の配線でしか確かめられない。drain で着地を始めるかは supervise::execution::landing::drain_starts_approved_landing の unit test"
+task = 3803
+
+[[boundary]]
+id = "queue-hold-answer-applied-by-every-supervisor"
+kind = "supervisorの配線"
+test = "runtime_queue_hold_shared::cancel_affected_gives_up_the_held_runs_of_every_supervisor"
+reason = "一つの queue の二つの supervisor が authentication の queue_hold の答えを自分の slot の held の run にだけ一度ずつ適用し、全部に適用されたら ask を一度閉じることは、二つの走る supervisor の配線でしか確かめられない。答えの適用と closed の判断は domain::queue_hold の unit test"
+task = 3803
+
+[[boundary]]
+id = "replan-carry-hands-saved-work-to-child"
+kind = "Git"
+test = "runtime_replan_carry::a_childs_run_is_handed_its_part_of_the_saved_work_and_goes_through_its_own_gates"
+reason = "replace の child の run が replan の snapshot から plan の名指した部分の未 commit の変更だけを実の worktree と run directory に受け、実行可能な untracked file の mode を保ち、自分の receipt と検証と着地を経ることは、実の git の ref と worktree でしか確かめられない。渡す部分の判断は domain::task_replan::carry の unit test"
+task = 3803
+
+[[boundary]]
+id = "replan-park-at-turn-end-saving-dirty-work"
+kind = "supervisorの配線"
+test = "runtime_replan_park::a_request_during_a_turn_parks_the_run_at_its_end_with_its_dirty_work_saved"
+reason = "turn の最中に開いた replan の操作が turn を終わらせてから次の turn を止め、汚れた作業を snapshot に保存して run を park することは、実の wrapper の turn と走る supervisor の配線でしか確かめられない。park するかとその時の判断は supervise::execution::replan_park::choose_park の unit test"
+task = 3803
+
+[[boundary]]
+id = "replan-park-blocked-by-helper-left-in-worktree"
+kind = "プロセス"
+test = "runtime_replan_park::a_helper_left_running_in_the_worktree_blocks_the_park"
+reason = "turn が process group の外に残した helper の process を worktree で見つけて park を止め、作業を保存しないことは、実の process とその cwd でしか確かめられない。残った process をどう扱うかの判断は supervise::execution::replan_park::left_writers_verdict の unit test"
+task = 3803
+
+[[boundary]]
+id = "replan-park-half-done-finished-by-adopter"
+kind = "復旧とadopt"
+test = "runtime_replan_park::a_park_left_half_done_is_finished_once_by_the_adopter"
+reason = "snapshotting の途中で死んだ supervisor の park を次の supervisor が引き取り一度だけ仕上げることは、supervisor の生涯をまたぐ記録と実の worktree でしか確かめられない。どこから続けるかの判断は domain::task_replan の unit test"
+task = 3803
+
+[[boundary]]
+id = "restore-scratch-worktree-discard-guard"
+kind = "Git"
+test = "runtime_replan_park::a_discarded_scratch_worktree_is_never_a_link_nor_another_branchs"
+reason = "restore の scratch worktree を消す前に、その path が link でも別の branch の登録された worktree でもない自分のものであることを確かめ、他を壊さないことは、実の git の worktree の登録とファイルシステムでしか確かめられない。path の決め方は domain::replan_snapshot::scratch_worktree の unit test"
+task = 3803
+
+[[boundary]]
+id = "supervisor-writes-owed-reports-once"
+kind = "supervisorの配線"
+test = "runtime_report::supervisor_writes_the_reports_it_owes_once_and_prunes_old_ones"
+reason = "supervisor が負っている日次と週次の report を pass の中で一度ずつ書き、古いものを消すことは、走る supervisor の配線と実のファイルでしか確かめられない。どの report を負うかの判断は application::report::write_due の unit test"
+task = 3803
+
+[[boundary]]
+id = "report-written-recorded-once"
+kind = "SQLite"
+test = "runtime_report::a_report_is_recorded_once"
+reason = "同じ期間の report を二つの writer が記録しようとしても一つだけが report_written を書くことは、実の SQLite の一意の制約と write でしか確かめられない。期間の名前の判断は application::report の unit test"
+task = 3803
+
+[[boundary]]
+id = "report-dependency-diagram-from-d2-process"
+kind = "プロセス"
+test = "runtime_report::the_reports_carry_the_dependency_diagram_or_why_not"
+reason = "report が supervisor の PATH の d2 と TALA を実の process として一度だけ起こし、その SVG を外を読まない画像として載せ、TALA が無ければ理由を書くことは、実の process と PATH でしか確かめられない。図に載せる task の選び方は application::report::diagram_draft の unit test"
+task = 3803
+
+[[boundary]]
+id = "passing-review-exits-live-session-and-lands"
+kind = "supervisorの配線"
+test = "runtime_review::a_passing_review_exits_the_live_session_and_lands_it"
+reason = "session が開いたまま受けた receipt を review し、pass で session に exit を求めて閉じてから着地させることは、実の supervisor の review と session の配線でしか確かめられない。verdict から次の手を選ぶ判断は supervise::execution::landing の unit test"
+task = 3803
+
+[[boundary]]
+id = "review-job-stopped-at-timeout"
+kind = "プロセス"
+test = "runtime_review::a_timed_out_review_job_runs_once_more_then_fails"
+reason = "時間の上限を超えた実の review job の process を止め、同じ入力で一度だけ流し直してなお超えれば review を失敗にして approve_landing を一つ聞くことは、実の process と時計でしか確かめられない。流し直すかの判断は domain::review_jobs::runs_again の unit test"
+task = 3803
+
+[[boundary]]
+id = "recover-closes-stalled-ask-once"
+kind = "復旧とadopt"
+test = "runtime_stall_end::recover_closes_the_stalled_ask_and_ends_its_detections_once"
+reason = "dagq recover が workspace の残らない idle の run を interrupted にし、開いた stalled の ask を runtime として閉じ、nudge・recovery・ask の検出を一度ずつ終えて後の sweep が重ねないことは、復旧の経路と実の queue の記録でしか確かめられない。どの検出をどう終えるかの判断は domain::stall の unit test"
+task = 3803
+
+[[boundary]]
+id = "throughput-review-job-reads-only-through-service"
+kind = "プロセス"
+test = "runtime_throughput_review::an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only_reads"
+reason = "throughput review の job が別の process として queue の service に client mode で届き、note・finding・mark・ready を拒まれ読むだけであることは、実の process と service の socket でしか確かめられない。規則に当たるかの判断は domain::throughput_review::judge_hourly の unit test"
+task = 3803
+
+[[boundary]]
+id = "supervisor-starts-due-throughput-reviews"
+kind = "supervisorの配線"
+test = "runtime_throughput_review::the_supervisor_starts_each_review_due_once_without_a_run_slot"
+reason = "supervisor が期日の来た hourly・daily・weekly の throughput review を run の slot を使わず一度ずつ起こすことは、走る supervisor の配線と実の job でしか確かめられない。期日と済みの判断は domain::throughput_review::reviewed と window の unit test"
+task = 3803
+
+[[boundary]]
+id = "exec-supervisor-reaps-handed-over-reviews"
+kind = "復旧とadopt"
+test = "runtime_throughput_review::a_supervisor_that_exec_d_reaps_each_review_handed_over_once"
+reason = "exec で引き継いだ supervisor が前の process の起こして終わった throughput review を一度ずつ reap することは、実の exec と子 process の生涯でしか確かめられない。どの子を reap するかの判断は domain::throughput_review::children_finished の unit test"
+task = 3803
+
+[[boundary]]
+id = "satisfied-claim-verified-and-closed-by-answer"
+kind = "supervisorの配線"
+test = "runtime_already_satisfied::a_verified_claim_is_closed_without_a_commit_by_the_answer"
+reason = "worker の claim を main の head で検証し approve_close の ask を開き close の答えで commit なしに task を閉じて後続を claim するまでを、supervisor の pass と queue と実の検証の command をつないで確かめられるのは IT だけ。close の段の判断は satisfied::close_step の unit test"
+task = 3803
+
+[[boundary]]
+id = "satisfied-scratch-leftover-process-stopped"
+kind = "プロセス"
+test = "runtime_already_satisfied::a_verification_a_dead_supervisor_left_running_is_stopped_before_the_next"
+reason = "死んだ supervisor の検証が scratch worktree で残した実の process を checkout の前に止め、他の場所の process は残すことは、実の process と worktree でしか確かめられない。止める process の選び方は disk::worktree_executables の unit test"
+task = 3803
+
+[[boundary]]
+id = "satisfied-scratch-worktree-git-file-not-trusted"
+kind = "Git"
+test = "runtime_already_satisfied::a_git_file_where_the_scratch_is_is_not_trusted"
+reason = "scratch worktree の場所にある他の worktree の Git ディレクトリを名指す .git file や link を使わないことは、実の git worktree と file system でしか確かめられない。信頼するかの判断は satisfied の scratch の場所の関数の unit test"
+task = 3803
+
+[[boundary]]
+id = "satisfied-judgment-adopted-after-main-moved"
+kind = "復旧とadopt"
+test = "runtime_already_satisfied::a_high_pass_a_stopped_supervisor_recorded_does_not_close_once_main_moved"
+reason = "high pass を記録して止まった supervisor の lease を次の supervisor が adopt し、古い判定で閉じず新しい head で検証と判定をし直すことは、実の supervisor の停止と再起動でしか確かめられない。古い判定を使わない判断は satisfied_judgment::decide の unit test"
+task = 3803
+
+[[boundary]]
+id = "cleanup-runs-off-the-supervisor-loop"
+kind = "supervisorの配線"
+test = "runtime_cleanup::a_slow_cleanup_does_not_hold_up_the_loop"
+reason = "終わった run の build outputs の計測と削除を loop の外の thread で回し、その間も次の task を claim し、終わりを 1 回だけ記録することは、supervisor の loop と job の thread をつないだ IT でしか確かめられない。片付ける候補の判断は host_ops::cleanup の unit test"
+task = 3803
+
+[[boundary]]
+id = "cleanup-stops-process-running-from-ended-worktree"
+kind = "プロセス"
+test = "runtime_cleanup::a_process_running_from_an_ended_runs_worktree_is_stopped_before_it_goes"
+reason = "終わった run の worktree の下の実行ファイルを走らせる実の process を worktree を消す前に止め、他所の実行ファイルの process は残すことは、実の process の一覧と kill でしか確かめられない。止める process の選び方は disk::worktree_executables の unit test"
+task = 3803
+
+[[boundary]]
+id = "codex-review-records-thread-and-model"
+kind = "supervisorの配線"
+test = "runtime_codex::no_claude_run_uses_a_read_only_codex_review_and_lands"
+reason = "Codex の review job を読み取り専用で起動し、その終わりの thread と rollout の model を review_finished と span と stats に載せることは、supervisor と Codex の wrapper と rollout file をつないだ IT でしか確かめられない。model の読み取りは codex_turns::rollout_model の unit test"
+task = 3803
+
+[[boundary]]
+id = "codex-exec-and-resume-thread-argv"
+kind = "プロセス"
+test = "runtime_codex::a_codex_run_answers_and_revises_through_resumes_of_its_thread_and_lands"
+reason = "worker の turn を codex exec --json と sandbox の -c で起動し、答えと revise を同じ thread の codex exec resume で送り、人の Codex の設定を変えないことは、実の wrapper の process と argv でしか確かめられない。失敗の分類は codex_turns::classify の unit test"
+task = 3803
+
+[[boundary]]
+id = "fresh-session-renewed-for-revise-past-threshold"
+kind = "supervisorの配線"
+test = "runtime_fresh_session::a_revise_past_the_threshold_goes_on_in_a_new_session_that_the_wait_follows"
+reason = "閾値を超えた revise を同じ run の新しい session に移し、session_renewed を revise_requested の前に記録して wrapper が start で handoff を送り、待ちがその session を追うことは、supervisor と wrapper をつないだ IT でしか確かめられない。新しい session にするかは fresh_session::next_session の unit test"
+task = 3803
+
+[[boundary]]
+id = "replan-diagnosis-detects-and-diagnoses-once"
+kind = "supervisorの配線"
+test = "runtime_replan_diagnosis::a_task_whose_reviews_keep_failing_is_diagnosed_once_and_goes_on"
+reason = "3 回目の通らない review で task を候補にし、診断の job にその review を読ませて続け、再起動でも同じ window を診断し直さないことは、supervisor と job と queue をつないだ IT でしか確かめられない。検出の判断は replan_detect::detect の unit test"
+task = 3803
+
+[[boundary]]
+id = "replan-diagnosis-taken-over-from-gone-supervisor"
+kind = "復旧とadopt"
+test = "runtime_replan_diagnosis::a_diagnosis_another_supervisor_runs_is_left_to_it_and_taken_over_once_it_is_gone"
+reason = "生きた別の supervisor の診断 job には手を出さず、その supervisor が消えたら次の supervisor が operation を取り直して次の試行で verdict を出すことは、実の複数の supervisor と owner の生死でしか確かめられない。owner の生死の判断は replan_detect::owner_runs と split_owners の unit test"
+task = 3803
+
+[[boundary]]
+id = "replan-diagnosis-start-refused-by-queue-transaction"
+kind = "SQLite"
+test = "runtime_replan_diagnosis::a_start_the_queues_transaction_refuses_starts_no_provider"
+reason = "診断の job は queue 全体で 1 つという制約を、別の supervisor の job が走る間の開始を queue の transaction が拒み provider を起動しないことで守るのは、実の SQLite の transaction でしか確かめられない。開始してよいかの判断は replan_diagnosis::diagnosis_in_flight の unit test"
+task = 3803
+
+[[boundary]]
+id = "review-concern-decided-by-adopter"
+kind = "復旧とadopt"
+test = "runtime_review_concern::an_adopter_decides_a_concern_left_by_a_dead_supervisor"
+reason = "concern の verdict を記録して死んだ supervisor の run を adopter が引き取り、同じ判断で concern_decided を 1 回だけ記録することは、実の supervisor の死と adopt でしか確かめられない。concern の判断は concern::decide の unit test"
+task = 3803
+
+[[boundary]]
+id = "run-file-markers-fifo-do-not-block-passes"
+kind = "supervisorの配線"
+test = "runtime_run_files::fifo_markers_do_not_block_supervisor_passes"
+reason = "run directory の marker が FIFO でも supervisor の pass を止めず読まないことは、実の FIFO と supervisor の pass をつないだ IT でしか確かめられない。通常 file かの判断は infrastructure::run_files の unit test"
+task = 3803
+
+[[boundary]]
+id = "run-files-refuse-linked-run-and-turns-dirs"
+kind = "プロセス"
+test = "runtime_run_files::linked_run_or_turns_directories_are_never_used_by_run_files"
+reason = "run directory や turns/ が link のとき、書き込み・一覧・rename・削除のどれも外の実体に触れないことは、実の file system の symlink と OS の open でしか確かめられない。どの path を拒むかは infrastructure::run_files の unit test"
+task = 3803
+
+[[boundary]]
+id = "spike-landing-records-one-request-in-its-transaction"
+kind = "SQLite"
+test = "runtime_spike_replan::a_spike_s_landing_records_one_request_whatever_the_verdict_and_passes_add_none"
+reason = "Spike の着地がその request を同じ transaction で 1 回だけ記録し、2 つの supervisor の pass が 2 本目を書かないことは、実の SQLite の transaction と複数の接続でしか確かめられない。記録すべき request の判断は domain の Spike の unit test"
+task = 3803
+
+[[boundary]]
+id = "stale-receipt-nudged-once-for-clean-head"
+kind = "supervisorの配線"
+test = "runtime_stale_receipt::a_session_idle_with_a_stale_receipt_is_asked_once_and_the_rewrite_goes_on"
+reason = "receipt の後に commit して止まった session に clean な HEAD の receipt を 1 回だけ依頼し、書き直しから検証と review に進めることは、supervisor と wrapper と実の git の HEAD をつないだ IT でしか確かめられない。古さと結果の判断は stale の unit test"
+task = 3803
+
+[[boundary]]
+id = "background-handle-open-while-process-lives"
+kind = "プロセス"
+test = "runtime_support::session_handles::a_background_handle_is_open_while_its_process_lives_and_not_until_its_stop"
+reason = "handle が名指す pid と開始時刻の実の process が生きている間だけ開いていて、終わった process や別の開始の pid は開いていないことは、実の process でしか確かめられない。handle の比べ方は sessions の unit test"
+task = 3803
+
+[[boundary]]
+id = "test-timeout-prints-thread-stacks-before-cleanup"
+kind = "プロセス"
+test = "runtime_support::thread_stacks::supervise_timeout_prints_stacks_before_cleanup"
+reason = "時間切れになった実の test の子 process が cleanup の前に自分の thread の stack を出すことは、実の process と sampler でしか確かめられない。tool の選び方は thread_stacks::collect の test"
+task = 3803
+
+[[boundary]]
+id = "job-processes-run-as-their-own-actors"
+kind = "プロセス"
+test = "runtime_actor_env::the_review_and_the_recovery_job_run_as_their_own_actors"
+reason = "supervisor が起動する review と recovery job と worker の wrapper の実の process の環境に役割と actor id が届くことは、実の process を起動してしか確かめられない。どの役割にどの id を付けるかは src/domain/actor.rs の unit test"
+task = 3803
+
+[[boundary]]
+id = "container-run-lands-from-its-bundle-through-the-landing-worktree"
+kind = "Git"
+test = "runtime_clone::a_container_run_lands_from_its_bundle_through_its_landing_worktree"
+reason = "container の run の commit が bundle から取り込まれ、着地の worktree での検証と review を経て main に着き、残したものが消えることは、実の git の bundle と worktree でしか確かめられない。受け取りの判断は domain::validation の unit test"
+task = 3803
+
+[[boundary]]
+id = "relay-turn-marks-and-writes-the-clone-state"
+kind = "プロセス"
+test = "runtime_clone::a_container_turn_marks_its_last_state_before_its_agent_runs_and_writes_it_anew_at_its_end"
+reason = "executor の turn（dagq relay turn）が agent の実の process の前後で clone の state を印し書き直し、書けなければ agent を起動しないことは、実の process と file でしか確かめられない。見つけた state の扱いは run_clone::turn_start の unit test"
+task = 3803
+
+[[boundary]]
+id = "headless-run-lands-after-its-first-turn"
+kind = "supervisorの配線"
+test = "runtime_headless::a_headless_run_lands_after_its_first_turn"
+reason = "supervisor が headless の最初の turn を実の wrapper で起動し、receipt・idle の印・終了の request を経て validating・review・着地まで運ぶことは、supervisor の配線を通してしか確かめられない。turn の判断は domain::turn の unit test"
+task = 3803
+
+[[boundary]]
+id = "headless-turn-past-its-limit-stops-its-command-group"
+kind = "プロセス"
+test = "runtime_headless::a_turn_past_its_limit_is_stopped_with_its_command_outside_its_group"
+reason = "時間の上限を超えた turn を止める signal が、自分の process group に移った command にも実際に届いて止めることは、実の process group と signal でしか確かめられない。上限の判断は domain::turn の TurnLimits の unit test"
+task = 3803
+
+[[boundary]]
+id = "adopter-sends-a-requested-stalled-answer-once"
+kind = "復旧とadopt"
+test = "runtime_headless::an_adopter_does_not_send_a_stalled_answer_already_requested"
+reason = "死んだ supervisor が stalled の答えの request を書いた後で ask を閉じる前に落ちたとき、adopt した supervisor が turns の request を見つけ答えを 1 回だけ送ることは、実の adopt を通してしか確かめられない。どの request を書き済みとみなすかは domain::turn の unit test"
+task = 3803
+
+[[boundary]]
+id = "lost-headless-session-is-reopened-and-takes-the-answer"
+kind = "復旧とadopt"
+test = "runtime_headless_reopen::a_session_lost_during_its_wait_is_opened_again_and_takes_the_answer"
+reason = "待ちの間に wrapper の process が消えた headless の run を、同じ session を resume する新しい wrapper で開き直し、答えを次の turn として渡して着地させることは、実の wrapper の消失と復旧でしか確かめられない。試行の数と待ちの判断は supervise::execution::reopen の unit test"
+task = 3803
+
+[[boundary]]
+id = "queue-forgets-only-the-lost-wrapper-and-takes-the-reopened-one"
+kind = "SQLite"
+test = "runtime_headless_reopen::the_queue_forgets_only_the_lost_wrapper_and_takes_the_reopened_one"
+reason = "失った wrapper だけを忘れ、別の pid で登録したものは拒み、resume の wrapper を 1 回だけ登録して workspace と修復の記録を同じ transaction で書くことは、実の SQLite の queue でしか確かめられない。開き直すかの判断は supervise::execution::reopen の unit test"
+task = 3803
+
+[[boundary]]
+id = "lost-wrapper-turn-is-waited-for-before-the-reopen"
+kind = "プロセス"
+test = "runtime_headless_reopen::a_session_lost_in_the_middle_of_a_turn_is_opened_again_once_the_turn_ended"
+reason = "wrapper を失っても turn の実の process が生きている間は横に何も開かず、終わってから lost_turn の印を書いて開き直すことは、実の孤児の process の生存でしか確かめられない。待つ上限の判断は reopen::turn_outlived の unit test"
+task = 3803
+
+[[boundary]]
+id = "landing-pushes-to-a-real-remote-while-an-earlier-push-runs"
+kind = "Git"
+test = "runtime_integrate::a_later_landing_pushes_both_commits_before_the_first_push_finishes"
+reason = "前の着地の push の最中に次の着地が両方の commit を push し、前の push の stale ref の拒否を remote の head から配達済みと読むことは、実の git の remote でしか確かめられない。拒否が何になるかは integrate の decide_push の unit test"
+task = 3803
+
+[[boundary]]
+id = "abandoned-landing-lease-is-recovered-and-the-slot-stays-exclusive"
+kind = "復旧とadopt"
+test = "runtime_integrate::integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable"
+reason = "着地の slot が一度に 1 つで、死んだ integrate の process が残した stale な lease を recover が queue に戻し次の integrate が着地させることは、実の process の死と lease でしか確かめられない。rebind の拒否の判断は unit test"
+task = 3803
+
+[[boundary]]
+id = "rebind-follows-a-moved-repository"
+kind = "SQLite"
+test = "runtime_integrate::rebind_follows_a_moved_repository_and_the_awaiting_run_lands"
+reason = "validated の後に repository を移すと古い binding の検査が rebind まで落ち、supervisor か integrate が生きている間は rebind を拒み、後は新しい checkout から着地することは、実の SQLite の binding と移した checkout でしか確かめられない。拒否の判断は rebind の unit test"
+task = 3803
+
+[[boundary]]
+id = "landing-queue-leaves-a-light-room-for-the-claim"
+kind = "supervisorの配線"
+test = "runtime_light_slots::the_landing_queue_leaves_room_for_light_tasks_only"
+reason = "着地の待ちが slot を埋める間に、supervisor の claim が light_changes の task だけを部屋に取り status がそれを示すことは、supervisor の配線を通してしか確かめられない。部屋の数と入れる task の判断は domain::light_slots の unit test"
+task = 3803
+
+[[boundary]]
+id = "stub-agent-dies-with-its-fixture-and-holds-no-test-stream"
+kind = "プロセス"
+test = "runtime_session::a_stub_agent_dies_with_its_fixture_and_holds_no_stream_of_the_test"
+reason = "test が panic で終わったとき stub の agent と子が fixture と一緒に死に、test の process の stream を持たないことは、実の process group と fd でしか確かめられない。判断は持たない"
+task = 3803
+
+[[boundary]]
+id = "compatible-migration-during-a-run-leaves-it-working"
+kind = "SQLite"
+test = "runtime_session::a_compatible_migration_during_a_run_leaves_the_run_working"
+reason = "agent の作業中に後の binary が互換の migration を当てても、古い wrapper・supervisor・CLI が実の queue の file で receipt まで運ぶことは、実の SQLite の file と schema でしか確かめられない。互換の判断は migration の unit test"
+task = 3803
+
+[[boundary]]
+id = "valid-receipt-is-verified-against-the-worktree"
+kind = "Git"
+test = "runtime_session::valid_receipt_is_verified_and_awaits_integration"
+reason = "receipt の commit を実の worktree の branch head と状態に照らして受け取り awaiting_integration にすることは、実の git の worktree でしか確かめられない。拒否の理由の判断は domain::validation の unit test"
+task = 3803
+
+[[boundary]]
+id = "supervisor-table-sets-the-slot-limits-and-is-read-again"
+kind = "supervisorの配線"
+test = "runtime_slot_limits::the_supervisor_table_sets_parallel_and_max_waiting_and_is_read_again"
+reason = "動いている supervisor が dagq.toml の [supervisor] を読み直し、再起動なしに parallel と max_waiting を変えて status と doctor に出すことは、supervisor の配線を通してしか確かめられない。値の解決は domain::slot_limits の unit test"
+task = 3803
+
+[[boundary]]
+id = "parked-test-wrapper-ends-once-its-test-is-gone"
+kind = "プロセス"
+test = "runtime_support::background_wrappers::a_parked_wrapper_waits_while_its_test_lives_and_ends_once_it_is_gone"
+reason = "park した test の wrapper が test の process が生きている間は待ち、消えると終わることは、実の process の生存でしか確かめられない。判断は持たない"
+task = 3803
+
+[[boundary]]
+id = "task-hold-is-read-again-in-each-starts-transaction"
+kind = "SQLite"
+test = "runtime_task_hold::a_hold_after_the_line_was_read_keeps_the_claim_the_recovery_job_and_the_resume"
+reason = "fill の pass が候補を読んだ後に来た hold を、claim・resume・recovery job の開始のそれぞれの transaction が読み直して止めることは、実の SQLite の transaction でしか確かめられない。保つか当てるかの判断は domain::task_hold の unit test"
+task = 3803
+
+[[boundary]]
+id = "supervisor-claims-no-held-task"
+kind = "supervisorの配線"
+test = "runtime_task_hold::the_supervisor_claims_no_held_task"
+reason = "保留の ready な task を supervisor の pass が claim せず理由を 1 回記録することは、supervisor の配線を通してしか確かめられない。保留の判断は domain::task_hold の unit test"
+task = 3803
+
+[[boundary]]
+id = "held-runs-stale-lease-is-taken-over-for-the-park"
+kind = "復旧とadopt"
+test = "runtime_task_hold::a_held_runs_stale_lease_is_taken_over_for_the_park_only_while_the_hold_settles"
+reason = "recovery の round の lease が新しい間は拒み、殺された supervisor の stale な lease は park のために引き取り、返す lease で hold を同じ transaction で落ち着かせることは、実の lease の引き取りでしか確かめられない。判断は domain::task_hold の unit test"
+task = 3803
+
+[[boundary]]
+id = "task-cancel-closes-its-hold-in-the-same-transaction"
+kind = "SQLite"
+test = "runtime_task_hold_end::a_held_task_canceled_closes_its_hold_and_is_not_held_when_it_moves_on_again"
+reason = "人の cancel が task を終える同じ transaction で開いた hold を閉じ、後でまた動いた task に前の hold が残らないことは、実の SQLite の transaction でしか確かめられない。終わりの判断は domain::task_hold の unit test"
+task = 3803
+
+[[boundary]]
+id = "claim-records-the-host-rust-toolchain"
+kind = "プロセス"
+test = "runtime_toolchains::a_claim_records_the_rust_toolchain_where_the_profile_is_declared"
+reason = "Rust の profile を宣言した repository の claim が host の実の rustc を起動して release と host を記録することは、実の rustc の process でしか確かめられない。記録するかの判断は domain::toolchain の unit test"
+task = 3803
+
+[[boundary]]
+id = "flaky-only-failure-reruns-the-landing-verification"
+kind = "プロセス"
+test = "runtime_verify_flaky::only_flaky_tests_failing_lands_the_run_once_more_without_a_resume"
+reason = "flaky だけが落ちたとき同じ rebase した head で着地の検証の実のコマンドを自分の log で流し直し、通れば resume なしに着地することは、実の process と log でしか確かめられない。flaky かの判断は domain::verify_failure の unit test"
+task = 3803
+
+[[boundary]]
+id = "follow-up-bundle-in-one-sqlite-transaction"
+kind = "SQLite"
+test = "runtime_ask::receipt_follow_ups_appear_as_one_atomic_planner_bundle"
+reason = "受領の follow-up の draft・origin・event を 1 つの transaction で書き、途中で失敗すれば読み手に何も見えないことは、実の SQLite file に trigger で失敗を注いでしか確かめられない。どの entry をどの category で draft にするかは integrate::register_follow_ups の unit test"
+task = 3803
+
+[[boundary]]
+id = "abandoned-run-recovered-and-triaged-by-supervisor"
+kind = "復旧とadopt"
+test = "runtime_ask::an_abandoned_run_is_recovered_and_triaged_by_the_supervisor"
+reason = "wrapper が登録しないまま lease を失った run を、session が無いと見た supervisor が次の pass で recover して triage に回し、session が生きうる run は recover を待たせることは、実の supervisor と process の生死でしか確かめられない。attention の判断は domain::run_attention の unit test"
+task = 3803
+
+[[boundary]]
+id = "claim-writes-worker-of-task-on-run"
+kind = "SQLite"
+test = "runtime_claim_worker::a_claim_writes_the_worker_of_its_task_on_the_run"
+reason = "claim の SQL が走れる worker で他の provider の task を飛ばし、run の行と run_claimed に provider と mode を書くことは、実の SQLite file の claim でしか確かめられない。どの worker が走れるかは domain::worker の unit test"
+task = 3803
+
+[[boundary]]
+id = "worker-and-resume-reach-queue-only-through-service"
+kind = "プロセス"
+test = "runtime_client_mode::the_worker_and_its_resume_reach_the_queue_only_through_the_service"
+reason = "worker と resume の実の process の環境と引数に queue の path が無く、socket と token で service を通して読み書きし、run の終わりで token が消えることは、実の process と service でしか確かめられない。token を持つ状態の判断は domain::queue_service::run_holds_token の unit test"
+task = 3803
+
+[[boundary]]
+id = "turn-told-local-checks-dir-review-lists-records"
+kind = "supervisorの配線"
+test = "runtime_local_checks::each_turn_is_told_the_records_and_the_review_lists_those_on_the_receipts_tree"
+reason = "headless の各 turn に記録の directory を渡し着地の検証には渡さず、review の material が receipt の commit の tree の記録だけを並べることは、supervisor の配線と実の turn でしか確かめられない。記録の読み分けは application::review::read_local_checks の unit test"
+task = 3803
+
+[[boundary]]
+id = "local-gates-diff-from-merge-base"
+kind = "Git"
+test = "runtime_local_checks::the_review_says_which_declared_gates_the_diff_requires"
+reason = "landing branch の今の dagq.toml の gate と、merge base から receipt の commit までの実の diff の test の行を読むことは、実の git の履歴でしか確かめられない。どの gate が要るかの判断は domain::local_gates の unit test"
+task = 3803
+
+[[boundary]]
+id = "observer-agent-killed-with-children-on-timeout"
+kind = "プロセス"
+test = "runtime_observer::observe_kills_an_agent_past_its_timeout_with_its_children"
+reason = "時間を超えた observer の実の agent とその子の Bash を process group ごと止め、観測の後に残さないことは、実の process と時計でしか確かめられない。時間切れの結果の記録は application::observer の unit test"
+task = 3803
+
+[[boundary]]
+id = "supervisor-starts-observer-on-interval-without-slot"
+kind = "supervisorの配線"
+test = "runtime_observer::supervisor_starts_the_observer_on_its_interval_without_a_run_slot"
+reason = "supervisor が間隔の来た observer を run の slot を使わずに子の observe として起こし、その結果を queue に残すことは、supervisor の配線を通してしか確かめられない。いつ観測するかは application::observer::skip の unit test"
+task = 3803
+
+[[boundary]]
+id = "recheck-finds-conflict-with-git-merge-tree"
+kind = "Git"
+test = "runtime_recheck::a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer"
+reason = "着地の後の recheck が待つ run と新しい main の衝突を実の git merge-tree で見つけ、run を止めて recheck の依頼で再開することは、実の git でしか確かめられない。数えるかと ask の段落の判断は domain::recheck の unit test"
+task = 3803
+
+[[boundary]]
+id = "recheck-command-runs-on-merged-tree-in-scratch-worktree"
+kind = "プロセス"
+test = "runtime_recheck::a_waiting_run_whose_check_fails_on_the_new_main_is_resumed"
+reason = "git が衝突と見ない壊れを、main に run を merge した tree の scratch worktree で profile の target を使い recheck の実の command を流して見つけることは、実の process と worktree でしか確かめられない。command を流すかと結果の判断は domain::recheck の unit test"
+task = 3803
+
+[[boundary]]
+id = "recheck-lock-shared-by-supervisors"
+kind = "supervisorの配線"
+test = "runtime_recheck::no_recheck_starts_while_another_supervisor_holds_the_recheck_lock"
+reason = "queue の supervisor が recheck の scratch worktree と target の lock を分け合い、他が持つ間は始めず記録もせず、空いたら着地の main を調べることは、supervisor の配線と実の lock でしか確かめられない。いつ recheck するかは domain::recheck::judged_against の unit test"
+task = 3803
+
+[[boundary]]
+id = "supervisor-looks-up-latest-release-and-asks"
+kind = "supervisorの配線"
+test = "runtime_release::a_release_build_records_the_latest_release_and_asks_about_it"
+reason = "release の build の supervisor が host.toml の設定で release の索引を取りに行き、最新の版を記録して approve_release を開くことは、supervisor の配線を通してしか確かめられない。どの版を聞くかは release_update::next_action の unit test"
+task = 3803
+
+[[boundary]]
+id = "approve-release-supersedes-in-one-transaction"
+kind = "SQLite"
+test = "runtime_release::a_new_release_opens_one_approve_release_and_a_newer_one_supersedes_it"
+reason = "新しい release の approve_release を開くことと古い ask を superseded で閉じることを 1 つの transaction で書くことは、実の SQLite file でしか確かめられない。どの release を聞くかは release_update::next_action、ask の文は supervise::release の unit test"
+task = 3803
+
+[[boundary]]
+id = "install-answer-runs-cargo-install-job"
+kind = "プロセス"
+test = "runtime_release::the_install_answer_starts_the_job_and_retry_and_skip_follow_its_failure"
+reason = "install の答えで queue の update/release の下に cargo install の実の process を流し、失敗すれば何も置き換えず update_failed を開き retry で流し直すことは、実の process でしか確かめられない。retry と skip の写しは release_update の unit test"
+task = 3803
+
+[[boundary]]
+id = "needs-session-run-resumed-and-landed"
+kind = "supervisorの配線"
+test = "runtime_resume::conflicting_run_needs_a_session_and_lands_after_the_session_resolves_it"
+reason = "実の git で衝突した run を supervisor が needs_session として session に返し、session が解いて検証し receipt を書き直した後に着地させることは、supervisor の配線と実の git でしか確かめられない。再開の始め方は domain::resume::resume_start_plan の unit test"
+task = 3803
+
+[[boundary]]
+id = "resume-skip-reads-real-worktree-state"
+kind = "Git"
+test = "runtime_resume::a_run_with_a_dirty_worktree_is_resumed"
+reason = "再開の skip の条件を実の worktree の dirty の状態から読み、条件が欠ければ attempt を使って再開することは、実の git の worktree でしか確かめられない。skip の条件の判断は supervise::resume の unit test"
+task = 3803
+
+[[boundary]]
+id = "live-session-of-dead-supervisor-blocks-resume"
+kind = "復旧とadopt"
+test = "runtime_resume::a_session_nobody_watches_blocks_the_resume_until_it_ends"
+reason = "再開の途中で死んだ supervisor の実の session が生きる間は次の supervisor が並べて再開せず、その session が終わってから再開して着地させることは、実の process の生死と supervisor の引き継ぎでしか確かめられない。attention の判断は domain::run_attention の unit test"
+task = 3803
+
+[[boundary]]
+id = "resumed-session-ignoring-exit-let-go-after-timeout"
+kind = "プロセス"
+test = "runtime_resume::a_resumed_session_that_ignores_its_exit_request_is_let_go_after_the_exit_timeout"
+reason = "exit の要求を読まない実の wrapper の session を exit の時間切れで手放し、workspace を残してその session が終わるまで次の再開をしないことは、実の process と時計でしか確かめられない。unresolved と exit_timed_out の判断は supervise::resume の unit test"
+task = 3803
+
+[[boundary]]
+id = "supervisor-starts-missing-sccache-server-outside-sandbox"
+kind = "supervisorの配線"
+test = "runtime_sccache::the_supervisor_starts_a_missing_server_outside_the_sandbox_and_records_it"
+reason = "supervisor が止まった sccache の server を sandbox の外で起こし、loopback の port で確かめて記録することは、supervisor の配線と実の process でしか確かめられない。起こすかと記録の判断は application::sccache の unit test"
+task = 3803
+
+[[boundary]]
+id = "sccache-guard-compiles-through-listening-server"
+kind = "プロセス"
+test = "runtime_sccache::the_guard_compiles_through_a_server_that_listens"
+reason = "RUSTC_WRAPPER の guard が実の port で待ち受ける sccache の server を通して compiler を流すことは、実の process と port でしか確かめられない。guard が通すかの判断は application::sccache::look の unit test"
+task = 3803
+
+[[boundary]]
+id = "sweep-stops-wrappers-of-failed-runs"
+kind = "supervisorの配線"
+test = "runtime_sweep::the_sweep_stops_the_wrappers_of_failed_runs_the_triage_does_not_take"
+reason = "supervisor の sweep が triage の取らない失敗の run の動き続ける background の wrapper を止め、worktree と branch を残すことは、supervisor の配線と実の process でしか確かめられない。どの run が triage のものかは supervise::cleanup の unit test"
+task = 3803
+
+[[boundary]]
+id = "ended-run-loses-build-outputs-and-worktree"
+kind = "Git"
+test = "runtime_sweep::ended_runs_lose_their_build_outputs_and_canceled_tasks_their_worktrees"
+reason = "終わった run の実の worktree から build の出力を消し、task が取消になれば git の worktree と branch を消し、渡された checkout には触らないことは、実の git と file でしか確かめられない。どの run を消すかは supervise::cleanup の unit test"
+task = 3803
+
+[[boundary]]
+id = "planner-runner-kept-by-handle-pid-and-start"
+kind = "プロセス"
+test = "runtime_sweep::a_background_planners_runner_goes_by_its_handles_pid_and_start_not_its_heartbeat"
+reason = "background の planner の runner を heartbeat でなく wrapper の handle の実の pid と開始時刻で見分け、pid が別の process に取られれば消すことは、実の process でしか確かめられない。消すかの判断は supervise の sweep の unit test"
+task = 3803
+
+[[boundary]]
+id = "adopted-revise-keeps-waiting-outside-slot"
+kind = "復旧とadopt"
+test = "runtime_waiting_stages::an_adopted_headless_revise_keeps_waiting_outside_the_slot"
+reason = "supervisor が死んだ headless の revise の run を次の supervisor が event から待ちとして slot 無しで引き取り、答えを生きた session の次の turn に届けることは、実の supervisor の引き継ぎでしか確かめられない。待ちとして引き取るかは domain::waiting::adopts_as_waiting の unit test"
+task = 3803
