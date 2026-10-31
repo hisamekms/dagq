@@ -1702,6 +1702,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         )
                         .with_context(with)?;
                     }
+                    "watch" => {
+                        eval.watch.enabled = parse_bool(rest.trim()).with_context(with)?;
+                    }
                     "watch_new_reviews" => {
                         eval.watch.new_reviews = usize::try_from(
                             parse_positive(rest.trim(), "number of reviews").with_context(with)?,
@@ -6364,6 +6367,9 @@ LITERAL = 'no \n escapes # here'
             (60, 12.5, 2, 0.8, 5)
         );
         assert_eq!((read.watch.new_reviews, read.watch.interval_days), (4, 3));
+        assert!(read.watch.enabled);
+        assert!(!eval("[eval]\nwatch = false\n").unwrap().watch.enabled);
+        assert!(eval("[eval]\nwatch = true\n").unwrap().watch.enabled);
         let codex = read.provider(crate::domain::Provider::Codex);
         assert!(codex.converts());
         assert_eq!(codex.default_run_usd, Some(0.3));
@@ -6378,6 +6384,9 @@ LITERAL = 'no \n escapes # here'
             "[eval]\nmax_runs = 0\n",
             "[eval]\nwatch_interval_days = 0\n",
             "[eval]\nwatch_new_reviews = -1\n",
+            "[eval]\nwatch = 0\n",
+            "[eval]\nwatch = \"off\"\n",
+            "[eval]\nwatch = false\nwatch = true\n",
             "[eval]\nlimit = 3\n",
             "[eval]\nmax_runs = 3\nmax_runs = 4\n",
             "[eval.providers.gemini]\ndefault_run_usd = 1\n",

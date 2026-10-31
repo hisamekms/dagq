@@ -11,7 +11,9 @@
 //! could not be read is logged with why and judged again at the next
 //! check. It asks for no set and no round: a runtime
 //! planner the findings open does. It takes no run slot and uses no LLM; a
-//! failure is logged and looked at again at the next check.
+//! failure is logged and looked at again at the next check. Each check
+//! reads `[eval]` again, and with its `watch` off returns before it reads
+//! anything.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -75,7 +77,12 @@ impl ObservationState {
             }
         };
         let now = env.generators.clock.now().saturating_mul(1000);
-        match look(&*env.queue, env.repository, &config, now, env.token) {
+        let Some(looked) = look_when_on(&config, |config| {
+            look(&*env.queue, env.repository, config, now, env.token)
+        }) else {
+            return;
+        };
+        match looked {
             Ok(looked) => {
                 for subject in &looked.findings {
                     info!("agents' watch recorded the finding {subject}");
@@ -94,6 +101,15 @@ impl ObservationState {
             }
         }
     }
+}
+
+/// `look` with `config` when its `[eval]` `watch` is on; `None` without
+/// calling it when off, so the check reads no event and records nothing.
+fn look_when_on(
+    config: &EvalConfig,
+    look: impl FnOnce(&EvalConfig) -> Result<Looked>,
+) -> Option<Result<Looked>> {
+    config.watch.enabled.then(|| look(config))
 }
 
 /// One look at `now` (Unix milliseconds) as supervisor `token`.
@@ -262,4 +278,36 @@ fn review_event(event: &RunEvent) -> Option<ReviewEvent<'_>> {
         payload: &event.payload,
         created_at: &event.created_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With `[eval]` `watch = false` the check does not look: it reads no
+    /// event and records no finding and no `agent_eval_watch_skipped`; on
+    /// (the default) it looks as before.
+    #[test]
+    fn the_watch_looks_only_when_eval_watch_is_on() {
+        let mut off = EvalConfig::default();
+        off.watch.enabled = false;
+        let mut called = false;
+        assert!(
+            look_when_on(&off, |_| {
+                called = true;
+                Ok(Looked::default())
+            })
+            .is_none()
+        );
+        assert!(!called);
+
+        let on = EvalConfig::default();
+        let looked = look_when_on(&on, |_| {
+            Ok(Looked {
+                skipped: vec!["demo".to_owned()],
+                ..Looked::default()
+            })
+        });
+        assert_eq!(looked.unwrap().unwrap().skipped, vec!["demo".to_owned()]);
+    }
 }

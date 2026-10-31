@@ -57,10 +57,13 @@ const PLANNER: &str = "planner";
 
 const DAY_MILLIS: i64 = 86_400_000;
 
-/// When the watch is due (`[eval]`'s `watch_new_reviews` and
-/// `watch_interval_days`).
+/// Whether the watch looks (`[eval]`'s `watch`) and when it is due
+/// (`watch_new_reviews` and `watch_interval_days`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchConfig {
+    /// Whether the supervisor looks at all: when false, each check of the
+    /// watch returns before it reads an event or records anything.
+    pub enabled: bool,
     /// The new production reviews that make it due at once.
     pub new_reviews: usize,
     /// The days (of 24 hours) after the last watch that make it due with
@@ -71,6 +74,7 @@ pub struct WatchConfig {
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             new_reviews: DEFAULT_WATCH_NEW_REVIEWS,
             interval_days: DEFAULT_WATCH_INTERVAL_DAYS,
         }
@@ -646,6 +650,7 @@ mod tests {
 
     fn config() -> WatchConfig {
         WatchConfig {
+            enabled: true,
             new_reviews: 10,
             interval_days: 7,
         }

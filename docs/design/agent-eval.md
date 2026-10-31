@@ -129,7 +129,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 
 ## hold-outの1回の制限
 
-- キーはagent・定義のdigest・ケースの集合のdigest（`round::case_set_digest`）で、hold-outとproductionの周に当てる（`holdout_refusal`）。
+- キーはagent・定義のdigest・ケースの集合のdigestで、hold-outとproductionの周に当てる（`holdout_refusal`）。
 - 判定はeventに記録した開始した周のキーから読み、別の状態を持たない。
 
 ## evalの枠
@@ -140,7 +140,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
   周の持ち主はそれを始めたか引き取ったsupervisorで（そのtokenをeventに書く）、同じqueueのほかのsupervisorは持ち主が生きている間は触らない。
   周の開始と引き取りはそれぞれ1つの書き込みのtransactionで、2つのsupervisorが同じ周を始めることも引き取ることもない（`EvalRounds`）。
   1周の中のproviderのprocessの同時数は設定の上限まで。
-- 待っている周は、着地の前のdevを先に、依頼の古い順に流し（`round::next_round`）、流れている周は止めない。
+- 待っている周は、着地の前のdevを先に、依頼の古い順に流し、流れている周は止めない。
 - evalのjobはrunのreviewのjobの同時実行の上限（`ReviewJobs::concurrency`）に数えず、runのreviewのjobはevalの枠に数えない。
 
 ## 採用の判定（着地の前のdev）
@@ -172,7 +172,7 @@ built-inの定義の変更には広げない（定義がdagqのsourceにあり�
   集合を作るsupervisorは1つで、取るのも居なくなった持ち主から引き取るのも1つの書き込みのtransaction（`EvalRounds::take_case_set`、`agent_cases_taken`）。
   ほかのsupervisorは持ち主が生きている間その集合に触らないので、2つが同じケースにjobを起動したりtreeを共有したりしない。
   引き取ったsupervisorは、前の持ち主のjobが引き継ぎで止められた後、ラベルの無いケースを付け直す。
-- 準備: landing branchのcommitの定義とケースの一覧から、規則コード・`k`・規則の文書のpathと、規則コードごとの規則の場所の対応を決め（`production::frame`）、期間の`review_started`（`subagents`がそのagentを選んだもの）と同じrunとattemptの`review_finished`（そのagentの判定）から、`<base>...<head>`の差分を内容のhashで集合のpatchに書く。
+- 準備: landing branchのcommitの定義とケースの一覧から、規則コード・`k`・規則の文書のpathと、規則コードごとの規則の場所の対応を決め、期間の`review_started`（`subagents`がそのagentを選んだもの）と同じrunとattemptの`review_finished`（そのagentの判定）から、`<base>...<head>`の差分を内容のhashで集合のpatchに書く。
   baseかheadのcommitがrepositoryのどのrefからも辿れないreviewは、objectが残っていても（branchを消した後、GCの前）理由つきで飛ばす（`Repository::reachable_commit`）。
   差分が読めないreviewも理由つきで飛ばし、1つのreviewが集合と後の依頼を止めない。
   reviewが多すぎる依頼は作らず理由を記録し、人・inbox・plannerが期間を狭めて依頼し直す（上限は`application::supervise::execution::agent_cases`のmodule doc）。
@@ -199,15 +199,16 @@ built-inの定義の変更には広げない（定義がdagqのsourceにあり�
 landing branchの定義を新しい本番のreviewで測り直す時期をsupervisorが判断し、findingにする。
 判断は`domain::agent_eval::watch`、記録は`application::supervise::observation::agent_watch`（間隔と値は`[eval]`、`EvalConfig`のdoc comment）。
 
+- `[eval]`の`watch`がfalse（既定true）なら各回はeventを読まず何も記録しない（読み直すので次の回から効く）。
 - supervisorは依頼しない: 集合の作成もhold-outも、findingで開かれたruntimeのplannerが依頼し、実行はsupervisorが行う。
   plannerの手順はその初期prompt（[Finding planners](supervisor-lifecycle/finding-planners.md)の4）とpluginの`dagq` skillの`reference/observer.md`が持つ。
-- 対象と時期: 働いているsupervisorが一定の間隔で、landing branchのcommitに`evals/`のファイルを持つagentごとに、新しい期間にそのagentを選んで判定の付いた本番のreview（`production::candidates`と同じく開始の時刻で数える）を数える。
+- 対象と時期: 働いているsupervisorが一定の間隔で、landing branchのcommitに`evals/`のファイルを持つagentごとに、新しい期間にそのagentを選んで判定の付いた本番のreview（開始の時刻で数える）を数える。
   間隔は最後の見張り（`due`のfinding・productionの周の開始・新しいreviewの無かった周の記録）から数え、期間は前の期間の終わり（`due`の`until`、集合の周はその集合の`--until`、周の無かった記録の`through`）から始まる。
-  期間の終わりは今か、まだ終わっていないそのagentのreviewのうち最も早い開始の前（上限の時間を過ぎたものは数えない）で、見張りの間に走っていたreviewは終わった後に次の期間で数える（`watch::period_end`）。
+  期間の終わりは今か、まだ終わっていないそのagentのreviewのうち最も早い開始の前（上限の時間を過ぎたものは数えない）で、見張りの間に走っていたreviewは終わった後に次の期間で数える。
   件数が設定に達したか、間隔が過ぎて1件以上あれば`due`のfindingを記録する。
   間隔が過ぎて1件も無ければfindingを作らず`agent_eval_watch_skipped`に理由と期間の終わりを記録する。
   同じagentの見張りのfindingが開いている間は何も記録しない。
-- findingの段: どれも種類`agent_eval_watch_due`・対象queue・`--propose`付きで、subjectが段と対象を名指し、同じsubjectは状態に依らず1回だけ記録する（2つのsupervisorでも1つ、`record_finding_once`）。
+- findingの段: どれも種類`agent_eval_watch_due`・対象queue・`--propose`付きで、subjectが段と対象を名指し、同じsubjectは状態に依らず1回だけ記録する（2つのsupervisorでも1つ）。
   `due`は期間と依頼する`agent cases`を、`holdout`はplannerが依頼した集合が作られて周が無いことと依頼する`agent eval --set`を、`refused`はplannerの集合の周が始まらなかった理由を持つ。
   `refused`はplannerが理由を書いてdismissする（再実行は権限に無い）。
   段のplannerはproposalを出さず改善の上限の外（同じく3）。
