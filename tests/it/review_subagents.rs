@@ -115,13 +115,17 @@ fn assert_job_input(reviewer: &TestReviewer, detail: &dagq::domain::TaskDetail, 
 }
 
 /// (a) A worker that rewrites or deletes `dagq.toml` and the definition
-/// on its branch neither drops nor changes its required review: main's
-/// commit decides, and the job reads main's definition (the Git boundary of ADR-t1453-1
-/// decision 4; what the commit's files select is
-/// `application::review::tests`). The three ways, one task's run each, in
-/// one fixture and one supervisor's pass: the whole review's `concern`
-/// keeps each run from landing, so main's commit stays the one each
-/// review reads.
+/// on its branch neither drops nor changes its required review, and the
+/// main checkout's uncommitted edits of them are not used: main's commit
+/// decides, and the job reads main's definition (the Git boundary of
+/// ADR-t1453-1 decision 4; what the commit's files select is
+/// `application::review::tests`). The range is Git's, without rename
+/// detection: the old path of a rename out of `docs/` and a deleted path
+/// under it select `design`; and a diff the table does not select reviews
+/// with the whole review's job alone, no word of subagents in the prompt,
+/// the material or `review_finished`. One task's run each, in one fixture
+/// and one supervisor's pass: the whole review's `concern` keeps each run
+/// from landing, so main's commit stays the one each review reads.
 #[test]
 fn the_worker_cannot_change_or_drop_its_required_review() {
     // Each tamper, and what the reviewed head keeps of `dagq.toml` and the
@@ -146,12 +150,28 @@ fn the_worker_cannot_change_or_drop_its_required_review() {
             String::new(),
         ),
     ];
+    // After the tampers: a change no glob matches, and a rename and a
+    // deletion under `docs/`.
+    let unselected = TaskId::new(tampers.len() as i64 + 1);
+    let renamed = TaskId::new(tampers.len() as i64 + 2);
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
-    for _ in 1..tampers.len() {
+    for _ in 1..renamed.as_i64() {
         add_ready_task(&mut queue, "test task", &[]);
     }
+    fs::create_dir_all(repo.join("docs")).unwrap();
+    fs::write(repo.join("docs/old.md"), "old\n").unwrap();
+    fs::write(repo.join("docs/gone.md"), "gone\n").unwrap();
+    git(&repo, &["add", "docs/old.md", "docs/gone.md"]);
     let main = commit_on_main(&repo, CONFIG, Some(MAIN_DEFINITION));
+    // The main checkout's uncommitted edits: the agent `all` would select
+    // every run (its definition is nowhere, which would fail the review).
+    fs::write(
+        repo.join("dagq.toml"),
+        format!("{CONFIG}[review.subagents.all]\npaths = [\"**\"]\n"),
+    )
+    .unwrap();
+    fs::write(repo.join(DEFINITION), "uncommitted checks\n").unwrap();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     for (task, (tamper, _)) in (1..).zip(&tampers) {
         backend.script_for(
@@ -159,11 +179,22 @@ fn the_worker_cannot_change_or_drop_its_required_review() {
             &format!("{tamper}; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit"),
         );
     }
+    backend.script_for(
+        unselected.as_i64(),
+        "printf 'x\\n' > other.txt; git add other.txt; git commit -q -m other; \
+         receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    backend.script_for(
+        renamed.as_i64(),
+        "git mv docs/old.md moved.md; git rm -q docs/gone.md; git commit -q -m change; \
+         receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
     let reviewer = TestReviewer::new(&[verdict("concern", &["a finding"], "look")])
         .with_review_agents(&[("design", vec![agent_says("design", "pass", &[])])]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(reviewer.launches().len(), tampers.len());
+    // design's job for each tamper and the rename, none for the unselected.
+    assert_eq!(reviewer.launches().len(), tampers.len() + 1);
     for (task, (tamper, kept)) in (1..).zip(&tampers) {
         let detail = queue.show(TaskId::new(task)).unwrap();
         assert_eq!(
@@ -196,80 +227,65 @@ fn the_worker_cannot_change_or_drop_its_required_review() {
         assert_job_input(&reviewer, &detail, &main);
         assert!(payloads(&detail, "review_failed").is_empty(), "{tamper}");
     }
-}
 
-/// (b) Uncommitted edits of the main checkout's `dagq.toml` and
-/// definition are not used: the uncommitted agent `all` is not selected
-/// (its definition is nowhere, which would fail the review), and the
-/// committed definition is the one handed on. Its own fixture: the dirty
-/// main checkout would stop a landing (the review's verdict keeps the run
-/// from landing).
-#[test]
-fn uncommitted_main_checkout_edits_are_not_used() {
-    let (_dir, repo, db) = fixture();
-    let main = commit_on_main(&repo, CONFIG, Some(MAIN_DEFINITION));
-    fs::write(
-        repo.join("dagq.toml"),
-        format!("{CONFIG}[review.subagents.all]\npaths = [\"**\"]\n"),
-    )
-    .unwrap();
-    fs::write(repo.join(DEFINITION), "uncommitted checks\n").unwrap();
-    let (reviewer, detail) = reviewed(
-        &repo,
-        &db,
-        IDLE_AGENT,
-        (
-            &[verdict("concern", &["a finding"], "look")],
-            &[("design", vec![agent_says("design", "pass", &[])])],
-        ),
-    );
-    let started = payloads(&detail, "review_started");
-    assert_eq!(started.len(), 1);
-    assert_eq!(started[0]["subagents"], expected_snapshot(&main, &detail));
-    assert_job_input(&reviewer, &detail, &main);
-    assert!(payloads(&detail, "review_failed").is_empty());
-}
-
-/// The reviewed range is Git's, without rename detection: the old path of
-/// a rename out of `docs/` and a deleted path under it, in one commit,
-/// both select `design`.
-#[test]
-fn the_old_path_of_a_rename_and_a_deleted_path_select_an_agent() {
-    let (_dir, repo, db) = fixture();
-    fs::create_dir_all(repo.join("docs")).unwrap();
-    fs::write(repo.join("docs/old.md"), "old\n").unwrap();
-    fs::write(repo.join("docs/gone.md"), "gone\n").unwrap();
-    git(&repo, &["add", "docs/old.md", "docs/gone.md"]);
-    let main = commit_on_main(&repo, CONFIG, Some(MAIN_DEFINITION));
-    let worker = "git mv docs/old.md moved.md; git rm -q docs/gone.md; git commit -q -m change; \
-                  receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
-    let (_reviewer, detail) = reviewed(
-        &repo,
-        &db,
-        worker,
-        (
-            &[verdict("concern", &["a finding"], "look")],
-            &[("design", vec![agent_says("design", "pass", &[])])],
-        ),
-    );
+    // The rename's old path and the deleted path select design.
+    let detail = queue.show(renamed).unwrap();
     let started = payloads(&detail, "review_started");
     assert_eq!(started.len(), 1);
     let subagents = &started[0]["subagents"];
     assert_eq!(subagents["commit"], main.as_str());
+    assert_eq!(subagents["agents"].as_array().unwrap().len(), 1);
     assert_eq!(subagents["agents"][0]["agent"], "design");
     assert_eq!(
         subagents["agents"][0]["paths"],
         json!(["docs/gone.md", "docs/old.md"])
     );
+    assert!(payloads(&detail, "review_failed").is_empty());
+
+    // A diff the table does not select: the event records the empty
+    // selection, the whole review's job alone runs, and nothing of agents
+    // is in the material or review_finished (without the table,
+    // `application::review::tests::a_review_without_required_agents_reads_as_before`).
+    let detail = queue.show(unselected).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    let started = payloads(&detail, "review_started");
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        started[0]["subagents"],
+        json!({
+            "commit": main,
+            "base": detail.runs[0].base_commit().as_str(),
+            "head": reviewed_head(&detail),
+            "agents": [],
+        })
+    );
+    let run_dir = detail.runs[0].run_dir().unwrap();
+    assert!(!Path::new(&format!("{run_dir}/review-subagents-1.json")).exists());
+    let material = PathBuf::from(format!("{run_dir}/review.md"));
+    assert!(
+        reviewer
+            .launches()
+            .iter()
+            .all(|launch| launch.material != material)
+    );
+    assert_eq!(payloads(&detail, "review_job_started").len(), 1);
+    let finished = payloads(&detail, "review_finished");
+    assert_eq!(finished.len(), 1);
+    assert!(finished[0].get("agents").is_none() && finished[0].get("route").is_none());
+    let material = fs::read_to_string(&material).unwrap();
+    assert!(!material.contains("subagent"), "{material}");
+    assert!(payloads(&detail, "review_failed").is_empty());
 }
 
 /// (c) An agent the diff selects whose definition is not in main's
 /// commit fails the review to the person with why: no job runs, the run
 /// does not land, and `review_failed` and the ask say which definition.
 /// The wiring of a review that cannot start to `review_failed` and the
-/// ask; why it cannot (an unparsable config, a missing definition, no
-/// provider that runs the agents) is `application::review::tests` and
-/// `supervise::landing::tests`. `dagq doctor`'s `agents` reports the
+/// ask; why it cannot (an unparsable config, a missing definition, a
+/// definition declaring a tool beyond a review's reads (ADR-t1728-2), no
+/// provider that runs the agents) is `application::review::tests` (the
+/// tools: `a_definitions_tools_are_checked_by_the_snapshot_and_doctor`)
+/// and `supervise::landing::tests`. `dagq doctor`'s `agents` reports the
 /// same configuration's agents without a definition in `errors`
 /// (ADR-t1728-1; the judgment is `domain::review_subagents::tests`).
 #[test]
@@ -313,95 +329,6 @@ fn a_selected_agent_without_its_definition_fails_the_review() {
         ]),
         "{doctor}"
     );
-}
-
-/// An agent the diff selects whose definition declares a tool beyond a
-/// review's reads (ADR-t1728-2) fails the review as a missing definition
-/// does: no job runs, the run does not land, and `review_failed` says
-/// why; `dagq doctor`'s `agents` reports the same declaration in
-/// `errors`. Which declarations are mistakes is
-/// `domain::review_subagents::tests`.
-#[test]
-fn a_definition_declaring_a_tool_beyond_the_reads_fails_the_review() {
-    let (_dir, repo, db) = fixture();
-    let main = commit_on_main(
-        &repo,
-        CONFIG,
-        Some("---\ndescription: d\ntools: [read, shell]\n---\nCheck.\n"),
-    );
-    let (reviewer, detail) = reviewed(
-        &repo,
-        &db,
-        IDLE_AGENT,
-        (&[verdict("pass", &[], "would pass")], &[]),
-    );
-    assert!(reviewer.prompts().is_empty());
-    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
-    assert!(payloads(&detail, "review_started").is_empty());
-    let failed = payloads(&detail, "review_failed");
-    assert_eq!(failed.len(), 1);
-    let why = "the frontmatter's tools declares shell is beyond what an agent of [review.subagents] may use (read, grep, glob)";
-    let error = failed[0]["error"].as_str().unwrap();
-    assert!(
-        error.contains(&format!(
-            "the review subagent design's definition {DEFINITION} in the landing branch's commit {main} is a mistake: {why}"
-        )),
-        "{failed:?}"
-    );
-    let doctor = crate::common::cli::ok(&db, &["doctor"]);
-    assert!(
-        doctor["agents"]["errors"]
-            .as_array()
-            .unwrap()
-            .contains(&json!(format!(
-                "[review.subagents.design] {DEFINITION}: {why}"
-            ))),
-        "{doctor}"
-    );
-}
-
-/// (d) With `[review.subagents]` but a diff it does not select, the
-/// review is as before: the event records the empty selection, the whole
-/// review's job alone runs, and no word of subagents is in the prompt or
-/// the material (the supervisor's wiring;
-/// without the table, `application::review::tests::
-/// a_review_without_required_agents_reads_as_before`).
-#[test]
-fn a_review_without_required_agents_is_unchanged() {
-    let (_dir, repo, db) = fixture();
-    let main = commit_on_main(&repo, CONFIG, Some(MAIN_DEFINITION));
-    // A worker whose change no glob matches.
-    let worker = "printf 'x\\n' > other.txt; git add other.txt; git commit -q -m other; \
-                  receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
-    let (reviewer, detail) = reviewed(
-        &repo,
-        &db,
-        worker,
-        (&[verdict("pass", &[], "meets the acceptance")], &[]),
-    );
-    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
-    let started = payloads(&detail, "review_started");
-    assert_eq!(started.len(), 1);
-    assert_eq!(
-        started[0]["subagents"],
-        json!({
-            "commit": main,
-            "base": detail.runs[0].base_commit().as_str(),
-            "head": reviewed_head(&detail),
-            "agents": [],
-        })
-    );
-    let run_dir = detail.runs[0].run_dir().unwrap();
-    assert!(!Path::new(&format!("{run_dir}/review-subagents-1.json")).exists());
-    let prompt = &reviewer.prompts()[0];
-    assert!(!prompt.contains("subagent"), "{prompt}");
-    // No agent's job runs, and nothing of agents reaches review_finished.
-    assert!(reviewer.launches().is_empty());
-    assert_eq!(payloads(&detail, "review_job_started").len(), 1);
-    let finished = payloads(&detail, "review_finished");
-    assert!(finished[0].get("agents").is_none() && finished[0].get("route").is_none());
-    let material = fs::read_to_string(format!("{run_dir}/review.md")).unwrap();
-    assert!(!material.contains("subagent"), "{material}");
 }
 
 /// The range starts at the merge base of the current main and the
@@ -792,57 +719,27 @@ fn an_agent_that_never_answers_fails_the_review_and_no_other_job_runs_again() {
     assert_eq!(landing_ask(&db).run_id.as_ref(), Some(detail.runs[0].id()));
 }
 
-/// (f) An agent's concern that needs a person (`scope`) beside a whole
-/// review that would land on high confidence asks a person, naming the
-/// agent and why; the run does not land. The wiring of a route that asks;
-/// the routes of each judgment are `supervise::landing::tests::
+/// (f) The agents' judgments decide where the run goes, over two rounds.
+/// Round 1: the whole review passes, but `design` recommends `send_back`
+/// with high confidence and `tests` asks for a change: the run goes back
+/// to the session in one revise with each agent's reasons. Round 2: an
+/// agent's concern that needs a person (`scope`) beside a whole review
+/// that would land on high confidence asks a person, naming the agent and
+/// why; the run does not land. The wiring of a route that sends the run
+/// back and of one that asks; the routes and the ask's words of each
+/// judgment are `supervise::landing::tests::
 /// an_agents_heavier_judgment_under_a_lighter_verdict_decides_where_the_run_goes`.
 #[test]
-fn an_agents_scope_concern_under_a_landing_concern_asks_a_person() {
-    let (_dir, repo, db) = fixture();
-    two_agents_on_main(&repo, TWO_AGENTS);
-    let scope = json!({"agent": "design", "status": "completed", "verdict": "concern",
-        "reasons": ["departs from the ADR"], "summary": "s",
-        "recommendation": "land", "confidence": "high", "reason_category": "scope"});
-    let whole = json!({"verdict": "concern", "reasons": [], "summary": "lands",
-        "recommendation": "land", "confidence": "high"});
-    let (_reviewer, detail) = reviewed(
-        &repo,
-        &db,
-        IDLE_AGENT,
-        (
-            &[format!("printf '%s\\n' '{whole}'")],
-            &[
-                ("design", vec![agent_answers(scope)]),
-                ("tests", vec![agent_says("tests", "pass", &[])]),
-            ],
-        ),
-    );
-    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
-    let finished = payloads(&detail, "review_finished");
-    assert_eq!(finished[0]["route"]["destination"], "ask");
-    assert_eq!(finished[0]["route"]["parent"], "land");
-    assert!(payloads(&detail, "integration_approved").is_empty());
-    let ask = landing_ask(&db);
-    for part in [
-        "the subagent design returned concern recommending land (high confidence, scope)",
-        "the review's own verdict concern was lighter",
-        "- design: departs from the ADR",
-    ] {
-        assert!(ask.question.contains(part), "{part} in {}", ask.question);
-    }
-}
-
-/// (f) The whole review passes, but `design` recommends `send_back` with
-/// high confidence and `tests` asks for a change: the run goes back to the
-/// session in one revise with each agent's reasons, and lands once every
-/// job passes. The wiring of a route that sends the run back.
-#[test]
-fn the_agents_send_backs_go_back_in_one_revise_with_each_agents_reasons() {
+fn the_agents_judgments_send_the_run_back_and_then_ask_a_person() {
     let (_dir, repo, db) = fixture();
     two_agents_on_main(&repo, TWO_AGENTS);
     let send_back = json!({"agent": "design", "status": "completed", "verdict": "concern",
         "reasons": ["departs"], "summary": "s", "recommendation": "send_back", "confidence": "high"});
+    let scope = json!({"agent": "design", "status": "completed", "verdict": "concern",
+        "reasons": ["departs from the ADR"], "summary": "s",
+        "recommendation": "land", "confidence": "high", "reason_category": "scope"});
+    let landing = json!({"verdict": "concern", "reasons": [], "summary": "lands",
+        "recommendation": "land", "confidence": "high"});
     let (_reviewer, detail) = reviewed(
         &repo,
         &db,
@@ -850,12 +747,12 @@ fn the_agents_send_backs_go_back_in_one_revise_with_each_agents_reasons() {
         (
             &[
                 verdict("pass", &[], "looks fine"),
-                verdict("pass", &[], "fixed"),
+                format!("printf '%s\\n' '{landing}'"),
             ],
             &[
                 (
                     "design",
-                    vec![agent_answers(send_back), agent_says("design", "pass", &[])],
+                    vec![agent_answers(send_back), agent_answers(scope)],
                 ),
                 (
                     "tests",
@@ -867,7 +764,7 @@ fn the_agents_send_backs_go_back_in_one_revise_with_each_agents_reasons() {
             ],
         ),
     );
-    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
     let requested = payloads(&detail, "revise_requested");
     assert_eq!(requested.len(), 1);
     assert_eq!(
@@ -875,11 +772,22 @@ fn the_agents_send_backs_go_back_in_one_revise_with_each_agents_reasons() {
         json!(["design: departs", "tests: add a test"])
     );
     let finished = payloads(&detail, "review_finished");
+    assert_eq!(finished.len(), 2);
     assert_eq!(finished[0]["route"]["destination"], "send_back");
     assert_eq!(finished[0]["route"]["parent_lighter"], true);
-    assert_eq!(finished[1]["route"]["destination"], "land");
-    // The whole review's own pass is no concern: nothing to decide.
+    assert_eq!(finished[1]["route"]["destination"], "ask");
+    assert_eq!(finished[1]["route"]["parent"], "land");
+    // Neither whole review's own judgment decided: nothing to decide.
     assert!(payloads(&detail, "concern_decided").is_empty());
+    assert!(payloads(&detail, "integration_approved").is_empty());
+    let ask = landing_ask(&db);
+    for part in [
+        "the subagent design returned concern recommending land (high confidence, scope)",
+        "the review's own verdict concern was lighter",
+        "- design: departs from the ADR",
+    ] {
+        assert!(ask.question.contains(part), "{part} in {}", ask.question);
+    }
 }
 
 /// With `[review.jobs] concurrency = 1` the jobs of two runs' reviews,
@@ -1257,106 +1165,6 @@ fn a_codex_review_runs_its_whole_review_and_its_agents_on_codex() {
     assert_eq!(finished[0]["agents"][0]["summary"], "codex agent passed");
 }
 
-/// With `[provider_fallback] jobs = false`, the agent's job of a Codex
-/// review stops at Codex's usage limit: Codex is held, the job does not
-/// move to Claude but waits, the whole review's answer kept, and once the
-/// hold ends it starts on Codex again and answers; the run lands. Claude
-/// is never held nor started.
-#[test]
-fn with_the_fallback_off_an_agents_job_waits_for_its_provider_and_lands() {
-    use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
-    let (dir, repo, db, backend, codex) = codex_fixture();
-    codex_review_with_design(&repo, "[provider_fallback]\njobs = false\n");
-    set_turns(dir.path(), FINISH);
-    fs::write(
-        dir.path().join("codex-agent-design-failure.jsonl"),
-        "{\"type\":\"error\",\"message\":\"unexpected status 429 Too Many Requests: You have hit your usage limit. Try again later.\"}\n",
-    )
-    .unwrap();
-    let options = SuperviseOptions {
-        codex,
-        codex_home: Some(dir.path().join(CODEX_HOME)),
-        ..supervise_options(1, true)
-    };
-    let reviewer = TestReviewer::new(&[verdict("pass", &[], "from Claude")]);
-    let supervisor = {
-        let (db, repo) = (db.clone(), repo.clone());
-        thread::spawn(move || {
-            let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-            (outcome, reviewer.prompts().len())
-        })
-    };
-    // Codex is held for the agent's job; its hold is lifted by hand.
-    wait_until(&db, Duration::from_secs(60), |queue| {
-        queue
-            .all_events()
-            .unwrap()
-            .iter()
-            .any(|event| event.kind == EventKind::ProviderHeld)
-    });
-    let held = SqliteQueue::open(&db)
-        .unwrap()
-        .all_events()
-        .unwrap()
-        .into_iter()
-        .find(|event| event.kind == EventKind::ProviderHeld)
-        .unwrap();
-    assert_eq!(held.payload["provider"], "codex");
-    SqliteQueue::open(&db)
-        .unwrap()
-        .record_queue_event(
-            dagq::domain::EventKind::ProviderReleased,
-            json!({"provider": "codex", "reason": "usage_limit",
-                   "since": held.payload["since"], "why": "retry_due"}),
-        )
-        .unwrap();
-    let (outcome, claude_prompts) = joined(supervisor, "the supervisor to return");
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(claude_prompts, 0, "Claude reviewed nothing");
-    let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
-    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
-    let starts: Vec<(Value, Value, Value)> = payloads(&detail, "review_job_started")
-        .iter()
-        .map(|job| {
-            (
-                job["agent"].clone(),
-                job["launch"]["provider"].clone(),
-                job["launch"]["switched_from"].clone(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        starts,
-        [
-            (Value::Null, json!("codex"), Value::Null),
-            (json!("design"), json!("codex"), Value::Null),
-            (json!("design"), json!("codex"), Value::Null),
-        ]
-    );
-    let ends: Vec<(Value, Value)> = payloads(&detail, "review_job_finished")
-        .iter()
-        .map(|end| (end["agent"].clone(), end["outcome"].clone()))
-        .collect();
-    assert!(ends.contains(&(json!("design"), json!("held"))), "{ends:?}");
-    assert!(
-        ends.contains(&(json!("design"), json!("answered"))),
-        "{ends:?}"
-    );
-    assert!(payloads(&detail, "review_failed").is_empty());
-    let held_providers: Vec<Value> = SqliteQueue::open(&db)
-        .unwrap()
-        .all_events()
-        .unwrap()
-        .into_iter()
-        .filter(|event| event.kind == EventKind::ProviderHeld)
-        .map(|event| event.payload["provider"].clone())
-        .collect();
-    assert!(
-        held_providers.iter().all(|p| p == "codex"),
-        "{held_providers:?}"
-    );
-}
-
 /// `[roles.review]` names no provider (the whole review runs on Claude);
 /// `design` names Codex for its job and `tests` names none, both
 /// required for `change.txt`; `extra` goes before them.
@@ -1388,56 +1196,6 @@ fn job_launches(detail: &dagq::domain::TaskDetail) -> Vec<(Value, Value, Value, 
             )
         })
         .collect()
-}
-
-/// An agent whose `[review.subagents.<agent>]` names Codex runs its job on
-/// Codex while the whole review's job and the agent that names no provider
-/// run where `[roles.review]` sends the review (Claude); each job's start
-/// records its launch's provider and where it came from, and the run lands.
-#[test]
-fn an_agent_that_names_codex_runs_its_job_on_codex_and_the_others_on_the_roles_provider() {
-    use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
-    let (dir, repo, db, backend, codex) = codex_fixture();
-    design_on_codex(&repo, "");
-    set_turns(dir.path(), FINISH);
-    let options = SuperviseOptions {
-        codex,
-        codex_home: Some(dir.path().join(CODEX_HOME)),
-        ..supervise_options(1, true)
-    };
-    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")])
-        .with_review_agents(&[("tests", vec![agent_says("tests", "pass", &[])])]);
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
-    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
-    assert_eq!(
-        job_launches(&detail),
-        [
-            (Value::Null, json!("claude"), json!("default"), Value::Null),
-            (
-                json!("design"),
-                json!("codex"),
-                json!("review.subagents"),
-                Value::Null
-            ),
-            (
-                json!("tests"),
-                json!("claude"),
-                json!("default"),
-                Value::Null
-            ),
-        ]
-    );
-    let args = fs::read_to_string(dir.path().join("codex-agent-args.log")).unwrap();
-    assert!(args.starts_with("design "), "{args}");
-    assert!(!args.contains("\ntests "), "{args}");
-    let launches = reviewer.launches();
-    assert_eq!(launches.len(), 1, "only tests' job ran on Claude");
-    assert!(launches[0].prompt.contains(TESTS_DEFINITION));
-    let finished = payloads(&detail, "review_finished");
-    assert_eq!(finished[0]["agents"][0]["summary"], "codex agent passed");
-    assert_eq!(finished[0]["agents"][1]["summary"], "tests looked");
 }
 
 /// With the fallback on, the job of the agent that names Codex stops at
@@ -1498,47 +1256,33 @@ fn an_agent_that_names_codex_moves_alone_to_claude_and_keeps_where_its_provider_
     assert!(payloads(&detail, "review_failed").is_empty());
 }
 
-/// With `[provider_fallback] jobs = false`, the job of the agent that
-/// names Codex stops at Codex's usage limit: Codex alone is held and the
-/// job waits for it, not moving to Claude, while the whole review's job
-/// and the other agent's answer on Claude; the review is not judged until
-/// the hold ends and the job starts on Codex again and answers, and the
-/// run lands.
-#[test]
-fn with_the_fallback_off_an_agent_that_names_codex_waits_alone_and_the_review_lands() {
-    codex_agent_waits_alone_and_the_review_lands(
-        "{\"type\":\"error\",\"message\":\"unexpected status 429 Too Many Requests: You have hit your usage limit. Try again later.\"}\n",
-        "",
-        "usage_limit",
-    );
-}
-
-/// As above, the job of the agent that names Codex stopping where Codex's
-/// login's refresh token ran out, said only on its stderr: Codex is held
-/// at its login, not asked of per run, and once the hold ends (the login
-/// fixed) the job starts on Codex again in a later pass.
+/// An agent whose `[review.subagents.<agent>]` names Codex runs its job on
+/// Codex while the whole review's job and the agent that names no provider
+/// run where `[roles.review]` sends the review (Claude), each job's start
+/// recording its launch's provider and where it came from. With
+/// `[provider_fallback] jobs = false`, the job of `design`, on Codex,
+/// stops where Codex's login's refresh token ran out, said only on its
+/// stderr: Codex alone is held at its login, not asked of per run, and the
+/// job waits for it, not moving to Claude, while the whole review's job and
+/// the other agent's answer on Claude; the review is not judged until the
+/// hold ends (the login fixed) and the job starts on Codex again in a later
+/// pass and answers, and the run lands. How a job moves or waits as its
+/// provider and the fallback say, and which failure holds which provider,
+/// is `supervise::landing::tests::
+/// an_agent_that_names_its_provider_moves_or_waits_alone_as_the_fallback_says`;
+/// which output is a usage limit or an expired login is
+/// `infrastructure::codex_turns`' tests.
 #[test]
 fn with_the_fallback_off_an_agent_whose_codex_login_ran_out_waits_for_it_and_the_review_lands() {
-    codex_agent_waits_alone_and_the_review_lands(
-        "{\"type\":\"turn.failed\",\"error\":{\"message\":\"stream disconnected before completion\"}}\n",
-        "ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.\n",
-        "authentication",
-    );
-}
-
-/// With `[provider_fallback] jobs = false`, the job of `design`, on Codex,
-/// prints `stdout` and `stderr` once and fails: Codex is held for
-/// `reason`, the job waits for it while the others answer, and the run
-/// lands once the hold ends.
-fn codex_agent_waits_alone_and_the_review_lands(stdout: &str, stderr: &str, reason: &str) {
     use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
+    let stdout = "{\"type\":\"turn.failed\",\"error\":{\"message\":\"stream disconnected before completion\"}}\n";
+    let stderr = "ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.\n";
+    let reason = "authentication";
     let (dir, repo, db, backend, codex) = codex_fixture();
     design_on_codex(&repo, "[provider_fallback]\njobs = false\n");
     set_turns(dir.path(), FINISH);
     fs::write(dir.path().join("codex-agent-design-failure.jsonl"), stdout).unwrap();
-    if !stderr.is_empty() {
-        fs::write(dir.path().join("codex-agent-design-failure.err"), stderr).unwrap();
-    }
+    fs::write(dir.path().join("codex-agent-design-failure.err"), stderr).unwrap();
     let options = SuperviseOptions {
         codex,
         codex_home: Some(dir.path().join(CODEX_HOME)),
@@ -1550,7 +1294,8 @@ fn codex_agent_waits_alone_and_the_review_lands(stdout: &str, stderr: &str, reas
         let (db, repo) = (db.clone(), repo.clone());
         thread::spawn(move || {
             let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-            (outcome, reviewer.launches().len())
+            let prompts: Vec<String> = reviewer.launches().into_iter().map(|l| l.prompt).collect();
+            (outcome, prompts)
         })
     };
     // The others answer while Codex is held for design's job.
@@ -1592,7 +1337,11 @@ fn codex_agent_waits_alone_and_the_review_lands(stdout: &str, stderr: &str, reas
         .unwrap();
     let (outcome, claude_agent_jobs) = joined(supervisor, "the supervisor to return");
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(claude_agent_jobs, 1, "only tests' job ran on Claude");
+    assert_eq!(claude_agent_jobs.len(), 1, "only tests' job ran on Claude");
+    assert!(claude_agent_jobs[0].contains(TESTS_DEFINITION));
+    let args = fs::read_to_string(dir.path().join("codex-agent-args.log")).unwrap();
+    assert!(args.starts_with("design "), "{args}");
+    assert!(!args.contains("\ntests "), "{args}");
     let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
     assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
     let subagent = || json!("review.subagents");
@@ -1621,6 +1370,9 @@ fn codex_agent_waits_alone_and_the_review_lands(stdout: &str, stderr: &str, reas
         "{ends:?}"
     );
     assert!(payloads(&detail, "review_failed").is_empty());
+    let finished = payloads(&detail, "review_finished");
+    assert_eq!(finished[0]["agents"][0]["summary"], "codex agent passed");
+    assert_eq!(finished[0]["agents"][1]["summary"], "tests looked");
     let held_providers: Vec<Value> = SqliteQueue::open(&db)
         .unwrap()
         .all_events()
@@ -1636,127 +1388,18 @@ fn codex_agent_waits_alone_and_the_review_lands(stdout: &str, stderr: &str, reas
 }
 
 /// A hold that is there before the review begins holds only the jobs that
-/// need its provider. `[roles.review]` names Codex, `[provider_fallback]
-/// jobs = false`, and Codex is held (its login) while the worker works;
-/// `design` names Claude. The review begins anyway: `design`'s job runs on
-/// Claude and answers while the whole review's job waits for Codex, the
-/// review is not judged meanwhile, and once Codex's hold ends the whole
-/// review's job starts on Codex, not moved, and the run lands.
-#[test]
-fn a_hold_before_the_review_begins_holds_only_the_jobs_of_its_provider() {
-    use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
-    use dagq::domain::provider_switch::{ProviderHold, SwitchReason};
-    let (dir, repo, db, backend, codex) = codex_fixture();
-    commit_on_main(
-        &repo,
-        "[roles.review]\nprovider = 'codex'\n[provider_fallback]\njobs = false\n\
-         [review.subagents.design]\npaths = [\"change.txt\"]\nprovider = \"claude\"\n",
-        Some(MAIN_DEFINITION),
-    );
-    // The worker's turn finishes only once Codex is held.
-    let gate = dir.path().join("codex-held");
-    set_turns(
-        dir.path(),
-        &format!("{}; {FINISH}", crate::common::await_path(&gate)),
-    );
-    let options = SuperviseOptions {
-        codex,
-        codex_home: Some(dir.path().join(CODEX_HOME)),
-        ..supervise_options(1, true)
-    };
-    let reviewer = TestReviewer::new(&[])
-        .with_review_agents(&[("design", vec![agent_says("design", "pass", &[])])]);
-    let supervisor = {
-        let (db, repo) = (db.clone(), repo.clone());
-        thread::spawn(move || {
-            let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-            (outcome, reviewer.launches().len())
-        })
-    };
-    wait_until(&db, Duration::from_secs(60), |queue| {
-        queue
-            .show(TASK)
-            .unwrap()
-            .runs
-            .first()
-            .is_some_and(|run| run.status() == RunStatus::Running)
-    });
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    let hold = ProviderHold::new(
-        dagq::domain::Provider::Codex,
-        SwitchReason::Authentication,
-        now,
-    );
-    SqliteQueue::open(&db)
-        .unwrap()
-        .record_queue_event(
-            dagq::domain::EventKind::ProviderHeld,
-            hold.held_payload(None),
-        )
-        .unwrap();
-    fs::write(&gate, "").unwrap();
-    // design answers on Claude while the whole review waits for Codex.
-    wait_until(&db, Duration::from_secs(60), |queue| {
-        payloads(&queue.show(TASK).unwrap(), "review_job_finished")
-            .iter()
-            .any(|end| end["agent"] == "design" && end["outcome"] == "answered")
-    });
-    let waiting = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
-    assert_eq!(payloads(&waiting, "review_started").len(), 1);
-    assert_eq!(
-        job_launches(&waiting),
-        [(
-            json!("design"),
-            json!("claude"),
-            json!("review.subagents"),
-            Value::Null
-        )]
-    );
-    assert!(payloads(&waiting, "review_finished").is_empty());
-    let held = SqliteQueue::open(&db)
-        .unwrap()
-        .all_events()
-        .unwrap()
-        .into_iter()
-        .find(|event| event.kind == EventKind::ProviderHeld)
-        .unwrap();
-    SqliteQueue::open(&db)
-        .unwrap()
-        .record_queue_event(
-            dagq::domain::EventKind::ProviderReleased,
-            json!({"provider": "codex", "reason": "authentication",
-                   "since": held.payload["since"], "why": "retry_due"}),
-        )
-        .unwrap();
-    let (outcome, claude_agent_jobs) = joined(supervisor, "the supervisor to return");
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(claude_agent_jobs, 1, "only design's job ran on Claude");
-    let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
-    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
-    assert_eq!(
-        job_launches(&detail),
-        [
-            (
-                json!("design"),
-                json!("claude"),
-                json!("review.subagents"),
-                Value::Null
-            ),
-            (Value::Null, json!("codex"), json!("dagq.toml"), Value::Null),
-        ]
-    );
-    assert!(payloads(&detail, "review_failed").is_empty());
-}
-
-/// Claude held before the review begins, the whole review's job waits
-/// while an agent that names Codex proceeds, and once Claude's hold ends
-/// its first start on Claude takes the session id `review_started` named:
-/// the review's span names that session from its open to its close.
-/// `[roles.review]` names Claude and `[provider_fallback] jobs = false`;
-/// Claude is held (its agent did not start) while the worker works.
+/// need its provider, and the whole review that waited takes the session
+/// its span names. `[roles.review]` names Claude, `[provider_fallback]
+/// jobs = false`, and Claude is held (its agent did not start) while the
+/// worker works; `design` names Codex. The review begins anyway:
+/// `design`'s job runs on Codex and answers while the whole review's job
+/// waits for Claude, the review is not judged meanwhile, and once
+/// Claude's hold ends the whole review's job starts on Claude, not moved,
+/// its launch saying `dagq.toml` named its provider, in the session id
+/// `review_started` named: the review's span names that session from its
+/// open to its close, and the run lands. Whether a review waits as a whole
+/// is `supervise::landing::tests::
+/// a_review_waits_as_a_whole_only_while_none_of_its_jobs_can_start`.
 #[test]
 fn a_whole_review_that_waited_for_claude_starts_in_the_session_its_span_names() {
     use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
@@ -1819,6 +1462,7 @@ fn a_whole_review_that_waited_for_claude_starts_in_the_session_its_span_names() 
             .any(|end| end["agent"] == "design" && end["outcome"] == "answered")
     });
     let waiting = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
+    assert_eq!(payloads(&waiting, "review_started").len(), 1);
     assert_eq!(
         job_launches(&waiting),
         [(
@@ -1845,11 +1489,26 @@ fn a_whole_review_that_waited_for_claude_starts_in_the_session_its_span_names() 
     assert_eq!(claude_reviews, 1, "the whole review ran on Claude once");
     let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
     assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(
+        job_launches(&detail),
+        [
+            (
+                json!("design"),
+                json!("codex"),
+                json!("review.subagents"),
+                Value::Null
+            ),
+            (
+                Value::Null,
+                json!("claude"),
+                json!("dagq.toml"),
+                Value::Null
+            ),
+        ]
+    );
     let started = payloads(&detail, "review_job_started");
-    assert_eq!(started.len(), 2, "{started:?}");
-    assert_eq!(started[1]["agent"], Value::Null);
-    assert_eq!(started[1]["launch"]["provider"], "claude");
     assert_eq!(started[1]["session_id"], json!(session_id));
+    assert!(payloads(&detail, "review_failed").is_empty());
     // The review's one span names the session the whole job ran in.
     let reviews = |kind: &str| -> Vec<Value> {
         payloads(&detail, kind)

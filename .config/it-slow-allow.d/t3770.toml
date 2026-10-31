@@ -1,0 +1,14 @@
+# The items of task 3770 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 20.2s at NEXTEST_TEST_THREADS=6: one fixture whose supervisor reviews five tasks' runs
+[[test]]
+name = "review_subagents::the_worker_cannot_change_or_drop_its_required_review"
+reason = "B 境界（Git・SQLite・supervisor の配線）: worker の branch の dagq.toml と定義の書き換え・削除、main の checkout の未 commit の編集のどれも review の agent を変えず landing branch の commit が決めること、rename の旧 path と削除した path が実の git diff（rename 検出なし）で agent を選ぶこと、選ばれない差分が全体の review の job 1 本だけになることを、実の Git と supervisor の 1 回の pass の 5 本の run で確かめる。選び方は application::review の unit test"
+task = 3770
+
+# 12.5s at NEXTEST_TEST_THREADS=6: two review rounds through a revise of the live session
+[[test]]
+name = "review_subagents::the_agents_judgments_send_the_run_back_and_then_ask_a_person"
+reason = "B 境界（SQLite・プロセス・supervisor の配線）: agent の判断が行き先を決める 2 つの経路（agent ごとの差し戻しが 1 回の revise として生きている session に届くことと、agent の scope の concern が approve_landing の ask になり着地しないこと）を実際の worker の session と queue で確かめる。行き先と ask の文面の判断は supervise::landing の unit test"
+task = 3770
