@@ -10,14 +10,17 @@
 //! the providers' holds to 計画管理's jobs.
 
 use super::*;
-use crate::application::review_programs::ProgramBackends;
+pub use crate::application::review_programs::{PROGRAM_OUTPUT_TAIL, ProgramEnd};
+use crate::application::review_programs::{
+    ProgramBackends, prepare_program, program_end, spawn_program,
+};
 use crate::domain::EventKind;
 use crate::domain::environment::{RunChild, RunChildren};
 use crate::domain::headless_job::{JobFailure, JobKind, JobStop};
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::review_jobs::{self, ReviewJobId};
 use crate::{
-    application::{Clock, CommandSpec, Exit, HeadlessJobRecord, HeadlessJobStore, NewHeadlessJob},
+    application::{Clock, CommandSpec, HeadlessJobRecord, HeadlessJobStore, NewHeadlessJob},
     domain::headless_job::{Takeover, takeover},
 };
 use std::sync::Mutex;
@@ -386,15 +389,7 @@ pub fn start_program_job(
     subject: JobSubject,
     timeout: Duration,
 ) -> Result<HeadlessJob> {
-    let mut program = program.clone();
-    program.new_session();
-    let child = spawner.spawn(
-        &program,
-        Streams::Files {
-            stdout: &output.0,
-            stderr: &output.1,
-        },
-    )?;
+    let child = spawn_program(spawner, program, (&output.0, &output.1))?;
     Ok(record_job(
         ports,
         "review program",
@@ -404,10 +399,6 @@ pub fn start_program_job(
         timeout,
     ))
 }
-
-/// The most of each of a program job's stdout and stderr its end keeps
-/// ([`ProgramEnd`]), from their ends.
-pub const PROGRAM_OUTPUT_TAIL: usize = 4000;
 
 /// Start the program review `program` of `run`'s review `attempt` as a
 /// program job against `worktree` (ADR-t1895-2) on the backend of the
@@ -462,41 +453,21 @@ pub(super) fn start_program_against(
     (stem, subject): (&str, JobSubject),
     timeout: Duration,
 ) -> Result<HeadlessJob> {
-    let name = &program.program.name;
-    let backend = backends
-        .backend()
-        .with_context(|| format!("start the review program {name}"))?;
-    let mut command = backend
-        .command(program, worktree, output, &scratch.join(stem))
-        .with_context(|| format!("prepare the review program {name}"))?;
-    for (key, value) in env {
-        command.env(key, value);
-    }
-    let timeout = program
-        .program
-        .timeout_secs
-        .map_or(timeout, Duration::from_secs);
+    let prepared = prepare_program(
+        backends,
+        program,
+        (worktree, env),
+        (output, scratch, stem),
+        timeout,
+    )?;
     start_program_job(
         ports,
         spawner,
-        &command,
-        (
-            output.join(format!("{stem}.out")),
-            output.join(format!("{stem}.err")),
-        ),
+        &prepared.command,
+        (prepared.stdout, prepared.stderr),
         subject,
-        timeout,
+        prepared.timeout,
     )
-}
-
-/// How a program job ended: its exit (`None` when it ran past its timeout
-/// and was stopped with its group) and the ends of its stdout and stderr,
-/// [`PROGRAM_OUTPUT_TAIL`] bytes of each at most.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProgramEnd {
-    pub exit: Option<Exit>,
-    pub stdout_tail: String,
-    pub stderr_tail: String,
 }
 
 /// A headless job's process (a review or a recovery job) whose stdout and stderr
@@ -708,7 +679,8 @@ impl HeadlessJob {
 
     /// `Some` once a program job ended ([`ProgramEnd`]): what it exited
     /// with, or the timeout, after which it is [`Self::stop`]ped; with the
-    /// ends of its output either way.
+    /// ends of its output either way ([`program_end`], read as
+    /// [`crate::application::review_programs::run_program`] reads them).
     pub fn poll_program(&mut self, files: &dyn RunFiles) -> Result<Option<ProgramEnd>> {
         let exit = match self.child.try_wait()? {
             // Its kill's exit, read again: still its timeout.
@@ -724,19 +696,7 @@ impl HeadlessJob {
                 None
             }
         };
-        // Only the end is read, and bytes that are not UTF-8 are replaced,
-        // so a long or binary output still shows how it ended.
-        let read = |path: &Path| {
-            let bytes = files
-                .read_tail(path, PROGRAM_OUTPUT_TAIL as u64)
-                .unwrap_or_default();
-            tail(&String::from_utf8_lossy(&bytes), PROGRAM_OUTPUT_TAIL).to_owned()
-        };
-        Ok(Some(ProgramEnd {
-            exit,
-            stdout_tail: read(&self.stdout),
-            stderr_tail: read(&self.stderr),
-        }))
+        Ok(Some(program_end(files, (&self.stdout, &self.stderr), exit)))
     }
 
     /// The provider whose adapter reads why the job failed

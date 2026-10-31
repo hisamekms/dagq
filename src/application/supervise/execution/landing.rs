@@ -12,7 +12,7 @@ use crate::application::review::{
     ReviewRange, SnapshotAgent, SubagentSnapshot, acceptance_record, acceptance_rules,
     landing_answers, review_code_paths, review_range_at, review_revise_limit, snapshot_subagents,
 };
-use crate::application::review_programs::{self, ProgramSnapshot, snapshot_programs};
+use crate::application::review_programs::{self, ProgramRun, ProgramSnapshot, snapshot_programs};
 use crate::application::run_git;
 use crate::domain::ActorContext;
 use crate::domain::AskConfidence;
@@ -314,7 +314,7 @@ impl Supervisor<'_> {
                     }
                     Err(error) => {
                         let name = name(index);
-                        let error = format!("the review program {name} could not start: {error:#}");
+                        let error = ProgramRun::start_failure(&name, &error);
                         warn!(run_id = %run.id(), "run {}: {error}", run.id());
                         self.queue.record_runtime_event(
                             run.id(),
@@ -472,7 +472,8 @@ impl Supervisor<'_> {
             .program
             .name
             .clone();
-        let outcome = ProgramOutcome::of_exit(end.exit.as_ref().map(|exit| exit.success));
+        let ended = ProgramRun::ended(&name, end.clone(), Duration::from_secs(timeout_secs));
+        let outcome = ended.outcome();
         let exit = end.exit.as_ref().map(ToString::to_string);
         let error = (outcome == ProgramOutcome::TimedOut).then(|| {
             let output = self.program_output(run, state.round, &name);
@@ -495,13 +496,8 @@ impl Supervisor<'_> {
                 "error": error,
             }),
         )?;
-        state.detail = match outcome {
-            ProgramOutcome::Rejected => Some(programs::rejection_reason(
-                &name,
-                exit.as_deref().unwrap_or("no exit status"),
-                &end.stdout_tail,
-                &end.stderr_tail,
-            )),
+        state.detail = match ended {
+            ProgramRun::Rejected { reason, .. } => Some(reason),
             _ => error,
         };
         state.outcomes.push(outcome);

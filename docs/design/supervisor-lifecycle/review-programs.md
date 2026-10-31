@@ -28,6 +28,7 @@ related:
 | 段の流れと記録 | `src/application/supervise/execution/landing.rs`の`start_review_programs` |
 | 次の一手の判断と差し戻しの理由 | `src/domain/review_programs.rs`の`step` |
 | 一覧とscriptの読み込み | `src/application/review_programs.rs`の`snapshot_programs` |
+| 範囲での選びと1本の実行の共有の部品 | `src/application/review_programs.rs`の`programs_for_range`・`run_program`・`ProgramRun` |
 | jobの起動と終わり | `src/application/supervise/execution/jobs.rs`の`start_review_program` |
 | eventの欄 | `src/domain/event_kind.rs`の`REVIEW_PROGRAMS_STARTED`ほかのdoc comment |
 | 送れなかった差し戻しの引き継ぎ | `src/application/supervise/execution/adopt.rs`の`programs_rejected_after` |
@@ -85,4 +86,5 @@ eventはrunのeventとして`events --run`と`timeline`に出る。
   coverageを計測したdagqのバイナリはこれが無いか相対pathだとcwdのworktreeにprofileを書き、着地でworktreeが汚れるため。
   `PATH`からは空・相対の項目と、runのworktree・run dir・main checkoutとその下を指す項目を除く（`review_programs::narrowed_path`）。
 - **結果**: `HeadlessJob::poll_program`が終了のstatusとstdout・stderrの末尾を返す。
+  終わりの分類と出力の末尾の取り方は、reviewの段の非同期のjobと、呼んだthreadで終わりまで待つ`run_program`が同じ部品（`program_end`・`ProgramRun`）を使う。
   上限（programの`timeout_secs`、無ければ`[review.jobs]`）を超えればprocess groupごと止め、statusは無い。

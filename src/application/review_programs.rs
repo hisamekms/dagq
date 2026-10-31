@@ -10,6 +10,14 @@
 //! ([`crate::domain::review_programs::BuiltinProgram`]) runs what
 //! the binary carries instead of a script of the commit, and is given the
 //! range it checks ([`review_programs::with_range`]).
+//!
+//! The parts any caller that runs them shares live here: which programs a
+//! range requires ([`programs_for_range`], from the snapshot
+//! [`snapshot_programs`] reads), what one runs and where
+//! ([`prepare_program`]), how its process starts ([`spawn_program`]) and
+//! how its end is read and classed ([`program_end`], [`ProgramRun`]).
+//! The review stage runs them as asynchronous program jobs it starts and
+//! polls; [`run_program`] runs one to its end in the calling thread.
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -17,10 +25,16 @@ use sha2::{Digest, Sha256};
 
 use super::execution::{ExecutionConfig, ExecutorBackend};
 use super::review::{CONFIG_FILE, ReviewRange};
-use super::{Repository, ReviewProgramBackend};
-use crate::domain::review_programs::{self, ReviewProgram, ReviewPrograms, SelectedProgram};
+use super::{
+    Clock, CommandSpec, Exit, Repository, ReviewProgramBackend, RunFiles, Spawned, Spawner,
+    Streams, tail,
+};
+use crate::domain::review_programs::{
+    self, ProgramOutcome, ReviewProgram, ReviewPrograms, SelectedProgram,
+};
 use crate::domain::{ActorRole, CommitSha, RunId};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The backends a program job can run on, and which the review's actor
 /// (`ExecutionConfig::backend_of(ActorRole::ReviewJob)`) runs on: a
@@ -175,8 +189,28 @@ pub fn snapshot_programs(
     let from = repository
         .merge_base(&range.base, &range.head)?
         .map_or_else(|| range.base.clone(), CommitSha::into_string);
-    let changed = repository.changed_paths(&from, &range.head)?;
-    let programs = required_programs(repository, &commit, &configured, &changed)?
+    let programs = programs_for_range(repository, &commit, &configured, (&from, &range.head))?;
+    Ok(Some(ProgramSnapshot {
+        commit,
+        range,
+        programs,
+    }))
+}
+
+/// The programs of `configured` (in its order, [`ReviewPrograms::effective`]'s
+/// with the built-ins first) whose paths the paths `from..head` changes
+/// touch, each script read in `commit`'s tree ([`required_programs`]) and
+/// a built-in given the range `from` `head` it checks
+/// ([`review_programs::with_range`]). `Err` when the changed paths cannot
+/// be read or a selected script is not in the commit.
+pub fn programs_for_range(
+    repository: &dyn Repository,
+    commit: &str,
+    configured: &[ReviewProgram],
+    (from, head): (&str, &str),
+) -> Result<Vec<SnapshotProgram>> {
+    let changed = repository.changed_paths(from, head)?;
+    Ok(required_programs(repository, commit, configured, &changed)?
         .into_iter()
         .map(|snapshot| {
             let SelectedProgram { program, matched } = review_programs::with_range(
@@ -184,8 +218,8 @@ pub fn snapshot_programs(
                     program: snapshot.program,
                     matched: snapshot.matched,
                 },
-                &from,
-                &range.head,
+                from,
+                head,
             );
             SnapshotProgram {
                 program,
@@ -193,12 +227,7 @@ pub fn snapshot_programs(
                 script: snapshot.script,
             }
         })
-        .collect();
-    Ok(Some(ProgramSnapshot {
-        commit,
-        range,
-        programs,
-    }))
+        .collect())
 }
 
 /// Where `run`'s program reviews write the scripts they run: its directory
@@ -208,6 +237,224 @@ pub fn snapshot_programs(
 /// would run instead of the landing branch's (ADR-t1895-2 decision 2).
 pub fn program_scratch(dir: &Path, run: &RunId) -> PathBuf {
     dir.join(run.as_str())
+}
+
+/// The most of each of a program's stdout and stderr its end keeps
+/// ([`ProgramEnd`]), from their ends.
+pub const PROGRAM_OUTPUT_TAIL: usize = 4000;
+
+/// How a program's process ended: its exit (`None` when it ran past its
+/// timeout and was stopped with its group) and the ends of its stdout and
+/// stderr, [`PROGRAM_OUTPUT_TAIL`] bytes of each at most.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramEnd {
+    pub exit: Option<Exit>,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+}
+
+/// The end of a program whose process ended as `exit` (`None`: stopped
+/// past its time), with the ends of its output files `stdout` and
+/// `stderr`. Only the end of each is read, and bytes that are not UTF-8
+/// are replaced, so a long or binary output still shows how it ended; a
+/// file that cannot be read is empty.
+pub fn program_end(
+    files: &dyn RunFiles,
+    (stdout, stderr): (&Path, &Path),
+    exit: Option<Exit>,
+) -> ProgramEnd {
+    let read = |path: &Path| {
+        let bytes = files
+            .read_tail(path, PROGRAM_OUTPUT_TAIL as u64)
+            .unwrap_or_default();
+        tail(&String::from_utf8_lossy(&bytes), PROGRAM_OUTPUT_TAIL).to_owned()
+    };
+    ProgramEnd {
+        exit,
+        stdout_tail: read(stdout),
+        stderr_tail: read(stderr),
+    }
+}
+
+/// How one program run ended, the same for a review stage's program job
+/// and [`run_program`]: it passed, it rejected the change (a non-zero
+/// exit, the worker's to fix: ADR-t1895-2 decision 3), it could not be
+/// prepared, started or waited for, or it ran past its time and was
+/// stopped with its process group (neither the worker's: decision 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramRun {
+    Passed(ProgramEnd),
+    /// `reason` names the program, its exit and the end of its output
+    /// ([`review_programs::rejection_reason`]).
+    Rejected {
+        reason: String,
+        end: ProgramEnd,
+    },
+    /// Why it did not run, naming the program.
+    StartFailed(String),
+    /// The limit it ran past.
+    TimedOut {
+        timeout: Duration,
+        end: ProgramEnd,
+    },
+}
+
+impl ProgramRun {
+    /// The program `name` that ended as `end`, its limit `timeout`.
+    pub fn ended(name: &str, end: ProgramEnd, timeout: Duration) -> Self {
+        match &end.exit {
+            Some(exit) if exit.success => Self::Passed(end),
+            Some(exit) => Self::Rejected {
+                reason: review_programs::rejection_reason(
+                    name,
+                    &exit.to_string(),
+                    &end.stdout_tail,
+                    &end.stderr_tail,
+                ),
+                end,
+            },
+            None => Self::TimedOut { timeout, end },
+        }
+    }
+
+    /// The program `name` that could not start for `error`
+    /// ([`Self::start_failure`]).
+    pub fn start_failed(name: &str, error: &anyhow::Error) -> Self {
+        Self::StartFailed(Self::start_failure(name, error))
+    }
+
+    /// Why the program `name` could not start for `error`, as its
+    /// [`Self::StartFailed`] and a review's `review_program_finished` say.
+    pub fn start_failure(name: &str, error: &anyhow::Error) -> String {
+        format!("the review program {name} could not start: {error:#}")
+    }
+
+    /// Its `outcome` in `review_program_finished`.
+    pub const fn outcome(&self) -> ProgramOutcome {
+        match self {
+            Self::Passed(_) => ProgramOutcome::Passed,
+            Self::Rejected { .. } => ProgramOutcome::Rejected,
+            Self::StartFailed(_) => ProgramOutcome::StartFailed,
+            Self::TimedOut { .. } => ProgramOutcome::TimedOut,
+        }
+    }
+}
+
+/// A program ready to start ([`prepare_program`]): its command, the files
+/// its stdout and stderr go to, and its time limit.
+pub struct PreparedProgram {
+    pub command: CommandSpec,
+    pub stdout: PathBuf,
+    pub stderr: PathBuf,
+    pub timeout: Duration,
+}
+
+/// What `program` runs against `worktree`, on the backend of the review's
+/// actor ([`ProgramBackends::backend`]: one not implemented is the error,
+/// never the host instead), with `env` on top of what its backend sets
+/// (the guard of a container run's landing worktree, ADR-t2179-1 decision
+/// 8): its script written under `scratch` joined with `stem`, its output
+/// to `<output>/<stem>.out` and `.err`, its limit its own `timeout_secs`
+/// or `timeout` without one.
+pub fn prepare_program(
+    backends: &ProgramBackends<'_>,
+    program: &SnapshotProgram,
+    (worktree, env): (&Path, &[(String, String)]),
+    (output, scratch, stem): (&Path, &Path, &str),
+    timeout: Duration,
+) -> Result<PreparedProgram> {
+    let name = &program.program.name;
+    let backend = backends
+        .backend()
+        .with_context(|| format!("start the review program {name}"))?;
+    let mut command = backend
+        .command(program, worktree, output, &scratch.join(stem))
+        .with_context(|| format!("prepare the review program {name}"))?;
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    Ok(PreparedProgram {
+        command,
+        stdout: output.join(format!("{stem}.out")),
+        stderr: output.join(format!("{stem}.err")),
+        timeout: program
+            .program
+            .timeout_secs
+            .map_or(timeout, Duration::from_secs),
+    })
+}
+
+/// Start `command` as a program's process in a process group of its own,
+/// so its timeout stops it with what it started, its stdout and stderr to
+/// `output`.
+pub fn spawn_program(
+    spawner: &dyn Spawner,
+    command: &CommandSpec,
+    (stdout, stderr): (&Path, &Path),
+) -> Result<Box<dyn Spawned>> {
+    let mut command = command.clone();
+    command.new_session();
+    spawner.spawn(&command, Streams::Files { stdout, stderr })
+}
+
+/// How often [`run_program`] looks whether its program ended.
+const RUN_POLL: Duration = Duration::from_millis(100);
+
+/// Run `program` to its end in the calling thread, as a review stage's
+/// program job runs ([`prepare_program`], [`spawn_program`]), and class
+/// its end ([`ProgramRun`]): past its limit, measured on `clock`, its
+/// process group is stopped. Nothing of it is recorded in the queue.
+pub fn run_program(
+    (spawner, backends, files, clock): (
+        &dyn Spawner,
+        &ProgramBackends<'_>,
+        &dyn RunFiles,
+        &dyn Clock,
+    ),
+    program: &SnapshotProgram,
+    tree: (&Path, &[(String, String)]),
+    place: (&Path, &Path, &str),
+    timeout: Duration,
+) -> ProgramRun {
+    let name = &program.program.name;
+    let started = |prepared: &PreparedProgram| {
+        spawn_program(
+            spawner,
+            &prepared.command,
+            (&prepared.stdout, &prepared.stderr),
+        )
+    };
+    let (prepared, mut child) = match prepare_program(backends, program, tree, place, timeout)
+        .and_then(|prepared| {
+            let child = started(&prepared)?;
+            Ok((prepared, child))
+        }) {
+        Ok(started) => started,
+        Err(error) => return ProgramRun::start_failed(name, &error),
+    };
+    let since = clock.monotonic();
+    let exit = loop {
+        match child.try_wait() {
+            Ok(Some(exit)) => break Some(exit),
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill_group();
+                let _ = child.wait();
+                return ProgramRun::StartFailed(format!(
+                    "the review program {name} could not be waited for: {error:#}"
+                ));
+            }
+        }
+        let ran = clock.since(since);
+        if ran >= prepared.timeout {
+            let _ = child.kill_group();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(RUN_POLL.min(prepared.timeout - ran));
+    };
+    let end = program_end(files, (&prepared.stdout, &prepared.stderr), exit);
+    ProgramRun::ended(name, end, prepared.timeout)
 }
 
 #[cfg(test)]
@@ -638,5 +885,231 @@ mod tests {
             actors: vec![(ActorRole::Worker, ExecutorBackend::Container)],
         };
         assert!(ProgramBackends::new(&host, other).backend().is_ok());
+    }
+
+    /// A process that ends as `exit` at its first look, or never
+    /// (`None`), and tells whether its group was stopped.
+    struct Process {
+        exit: Option<Exit>,
+        stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Spawned for Process {
+        fn id(&self) -> u32 {
+            7
+        }
+        fn try_wait(&mut self) -> Result<Option<Exit>> {
+            Ok(self.exit.clone())
+        }
+        fn kill(&mut self) -> Result<()> {
+            panic!("a program is stopped with its group, not alone")
+        }
+        fn kill_group(&mut self) -> Result<()> {
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn wait(&mut self) -> Result<Exit> {
+            Ok(exit(false, "signal: 9 (SIGKILL)"))
+        }
+    }
+
+    /// Starts a [`Process`] that writes `output` to its stdout and stderr
+    /// files, keeping the commands it was given; `refuse` fails the spawn.
+    struct Spawns<'f> {
+        files: &'f crate::application::memory_files::MemoryFiles,
+        exit: Option<Exit>,
+        output: (&'static str, &'static str),
+        refuse: bool,
+        commands: std::sync::Mutex<Vec<CommandSpec>>,
+        stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl<'f> Spawns<'f> {
+        fn new(
+            files: &'f crate::application::memory_files::MemoryFiles,
+            exit: Option<Exit>,
+        ) -> Self {
+            Self {
+                files,
+                exit,
+                output: ("checked\n", "src/b.rs: not formatted\n"),
+                refuse: false,
+                commands: std::sync::Mutex::default(),
+                stopped: std::sync::Arc::default(),
+            }
+        }
+    }
+
+    impl Spawner for Spawns<'_> {
+        fn spawn(&self, command: &CommandSpec, streams: Streams<'_>) -> Result<Box<dyn Spawned>> {
+            self.commands.lock().unwrap().push(command.clone());
+            if self.refuse {
+                bail!("no such file or directory");
+            }
+            let Streams::Files { stdout, stderr } = streams else {
+                panic!("a program's output goes to its files")
+            };
+            let at = std::time::SystemTime::UNIX_EPOCH;
+            self.files.put(stdout, at, self.output.0);
+            self.files.put(stderr, at, self.output.1);
+            Ok(Box::new(Process {
+                exit: self.exit.clone(),
+                stopped: self.stopped.clone(),
+            }))
+        }
+    }
+
+    /// A clock that stands still: a program's limit is reached only when
+    /// it is zero.
+    struct Still(std::time::Instant);
+
+    impl Clock for Still {
+        fn system_time(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH
+        }
+        fn monotonic(&self) -> std::time::Instant {
+            self.0
+        }
+    }
+
+    fn exit(success: bool, description: &str) -> Exit {
+        Exit {
+            success,
+            code: success.then_some(0).or(Some(1)),
+            signal: None,
+            description: description.to_owned(),
+        }
+    }
+
+    /// Run [`a_program`] against `/w` to its end with `spawns`, on the
+    /// host's backend or the container's, within `timeout`.
+    fn run(spawns: &Spawns<'_>, config: ExecutionConfig, timeout: Duration) -> ProgramRun {
+        let host = Counting::default();
+        let backends = ProgramBackends::new(&host, config);
+        let clock = Still(std::time::Instant::now());
+        let env = [("GIT_GUARD".to_owned(), "1".to_owned())];
+        run_program(
+            (spawns, &backends, spawns.files, &clock),
+            &a_program(),
+            (Path::new("/w"), &env),
+            (Path::new("/run"), Path::new("/scratch"), "check-fmt"),
+            timeout,
+        )
+    }
+
+    /// A program that exits 0 passes, with the ends of its output; it ran
+    /// from the host's command in a group of its own, with the guard's env
+    /// on top, its output to `<output>/<stem>.out` and `.err`.
+    #[test]
+    fn a_program_run_to_its_end_that_exits_0_passes() {
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let spawns = Spawns::new(&files, Some(exit(true, "exit status: 0")));
+        let ended = run(&spawns, ExecutionConfig::default(), Duration::from_secs(60));
+        let ProgramRun::Passed(end) = &ended else {
+            panic!("{ended:?}")
+        };
+        assert_eq!(ended.outcome(), ProgramOutcome::Passed);
+        assert_eq!(end.stdout_tail, "checked\n");
+        assert_eq!(end.stderr_tail, "src/b.rs: not formatted\n");
+        assert!(files.bytes(Path::new("/run/check-fmt.out")).is_ok());
+        let commands = spawns.commands.lock().unwrap();
+        assert!(commands[0].get_new_session());
+        assert!(
+            commands[0]
+                .get_envs()
+                .any(|(key, value)| key == "GIT_GUARD" && value == Some("1".as_ref()))
+        );
+        assert!(!spawns.stopped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A program that exits non-zero rejects the change, its reason
+    /// naming it, its exit and the end of its output.
+    #[test]
+    fn a_program_run_to_its_end_that_exits_non_zero_rejects_with_its_name_and_output() {
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let spawns = Spawns::new(&files, Some(exit(false, "exit status: 1")));
+        let ended = run(&spawns, ExecutionConfig::default(), Duration::from_secs(60));
+        assert_eq!(ended.outcome(), ProgramOutcome::Rejected);
+        let ProgramRun::Rejected { reason, end } = ended else {
+            panic!()
+        };
+        assert_eq!(
+            reason,
+            review_programs::rejection_reason(
+                "fmt",
+                "exit status: 1",
+                "checked\n",
+                "src/b.rs: not formatted\n"
+            )
+        );
+        assert!(reason.contains("fmt") && reason.contains("src/b.rs: not formatted"));
+        assert_eq!(end.exit.unwrap().description, "exit status: 1");
+    }
+
+    /// A program on the container's backend, or one whose process cannot
+    /// be spawned, could not start: nothing runs on the host instead.
+    #[test]
+    fn a_program_run_to_its_end_that_cannot_start_says_why_and_never_runs_on_the_host() {
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let spawns = Spawns::new(&files, Some(exit(true, "exit status: 0")));
+        let container = ExecutionConfig {
+            backend: ExecutorBackend::Container,
+            actors: Vec::new(),
+        };
+        let ended = run(&spawns, container, Duration::from_secs(60));
+        assert_eq!(ended.outcome(), ProgramOutcome::StartFailed);
+        let ProgramRun::StartFailed(error) = &ended else {
+            panic!("{ended:?}")
+        };
+        assert!(
+            error.starts_with("the review program fmt could not start")
+                && error.contains("container"),
+            "{error}"
+        );
+        assert!(spawns.commands.lock().unwrap().is_empty());
+
+        let mut refused = Spawns::new(&files, Some(exit(true, "exit status: 0")));
+        refused.refuse = true;
+        let ended = run(
+            &refused,
+            ExecutionConfig::default(),
+            Duration::from_secs(60),
+        );
+        let ProgramRun::StartFailed(error) = &ended else {
+            panic!("{ended:?}")
+        };
+        assert!(error.contains("no such file or directory"), "{error}");
+    }
+
+    /// A program still running at its limit (zero here, so the first look
+    /// reaches it) is stopped with its process group and timed out, with
+    /// the ends of its output.
+    #[test]
+    fn a_program_run_to_its_end_past_its_limit_is_stopped_with_its_group() {
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let spawns = Spawns::new(&files, None);
+        let ended = run(&spawns, ExecutionConfig::default(), Duration::ZERO);
+        assert_eq!(ended.outcome(), ProgramOutcome::TimedOut);
+        let ProgramRun::TimedOut { timeout, end } = ended else {
+            panic!()
+        };
+        assert_eq!(timeout, Duration::ZERO);
+        assert_eq!(end.exit, None);
+        assert_eq!(end.stdout_tail, "checked\n");
+        assert!(spawns.stopped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// The end of a long output is what is kept, at most
+    /// [`PROGRAM_OUTPUT_TAIL`] bytes of each stream.
+    #[test]
+    fn a_programs_end_keeps_the_end_of_its_output() {
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let long = format!("{}the end", "x".repeat(PROGRAM_OUTPUT_TAIL));
+        files.put(Path::new("/o"), std::time::SystemTime::UNIX_EPOCH, &long);
+        let end = program_end(&files, (Path::new("/o"), Path::new("/missing")), None);
+        assert_eq!(end.stdout_tail.len(), PROGRAM_OUTPUT_TAIL);
+        assert!(end.stdout_tail.ends_with("the end"));
+        assert_eq!(end.stderr_tail, "");
     }
 }
