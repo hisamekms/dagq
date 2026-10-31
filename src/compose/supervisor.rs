@@ -113,8 +113,10 @@ pub struct SuperviseOptions {
     /// No CLI or repository setting overrides this policy.
     pub retry_unreadable_review: bool,
     /// How long one verification command (integrate's, the landing
-    /// recheck's) may run in all ([`VERIFICATION_TIMEOUT`]); tests shorten
-    /// it to reach the limit.
+    /// recheck's) may run in all when `dagq.toml` declares no
+    /// `[verification] command_timeout_secs`, which replaces it, and the
+    /// grace of a dead landing's release with it ([`VERIFICATION_TIMEOUT`]);
+    /// tests shorten it to reach the limit.
     pub verification_timeout: Duration,
     /// Upper bound on runs executing at once (`supervise --parallel`);
     /// `None` follows `[supervisor] parallel` of the main checkout's

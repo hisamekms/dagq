@@ -2689,6 +2689,18 @@ pub trait Verifier {
     fn recheck_config(&self) -> Result<crate::domain::recheck::RecheckConfig> {
         Ok(crate::domain::recheck::RecheckConfig::default())
     }
+    /// How long one verification command [`Self::run_to_log`] runs (of
+    /// `integrate`, the landing recheck and a verification in a container)
+    /// may run in all: `[verification] command_timeout_secs` of
+    /// `dagq.toml` when declared
+    /// ([`crate::domain::verification_limit`]), else the runtime's limit;
+    /// by default the default one. The release of a dead landing waits as
+    /// long ([`crate::domain::landing_release::grace_secs`]).
+    fn verification_timeout(&self) -> Result<std::time::Duration> {
+        Ok(std::time::Duration::from_secs(
+            crate::domain::verification_limit::DEFAULT_COMMAND_TIMEOUT_SECS,
+        ))
+    }
     /// The command the landing runs in place of some of a task's
     /// verification commands (`[landing_verification]` of `dagq.toml`,
     /// ADR-t1925-1 decision 4); none by default, which runs them as

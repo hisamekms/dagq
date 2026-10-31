@@ -4,11 +4,13 @@
 //! its worktree; a process of the dead landing that hangs would hold the
 //! slot for good. The first pass that finds one records
 //! `landing_release_waiting` (`pids`, `seen_at`), so that the grace counts
-//! from it across supervisors; past [`GRACE_SECS`] the runtime stops those
-//! processes by pid and releases the run. When it cannot (a process
-//! outlives its `SIGKILL`, or the processes cannot be listed for
-//! [`UNLISTED_SECS`]), `landing_release_stuck` is the inbox's attention,
+//! from it across supervisors; past the grace ([`grace_secs`], the limit of
+//! one verification command) the runtime stops those processes by pid and
+//! releases the run. When it cannot (a process outlives its `SIGKILL`, or
+//! the processes cannot be listed for twice the grace, [`unlisted_secs`]), `landing_release_stuck` is the inbox's attention,
 //! once for the run's landing.
+
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -18,20 +20,38 @@ use super::{
 };
 
 /// How long the release waits for the processes in a dead landing's
-/// worktree to end by themselves: the time limit of one verification
-/// command of `integrate` (`VERIFICATION_TIMEOUT`, 60 minutes), past which
-/// a live landing would have stopped it too.
-pub const GRACE_SECS: i64 = 60 * 60;
+/// worktree to end by themselves when the limit of one verification
+/// command is the default
+/// ([`DEFAULT_COMMAND_TIMEOUT_SECS`](super::verification_limit::DEFAULT_COMMAND_TIMEOUT_SECS),
+/// 60 minutes): [`grace_secs`] of it.
+pub const GRACE_SECS: i64 = super::verification_limit::DEFAULT_COMMAND_TIMEOUT_SECS as i64;
 
 /// How long the release goes on without a list of the host's processes
-/// before it is the inbox's: twice [`GRACE_SECS`].
-pub const UNLISTED_SECS: i64 = 2 * GRACE_SECS;
+/// before it is the inbox's, with the default grace: twice [`GRACE_SECS`].
+pub const UNLISTED_SECS: i64 = unlisted_secs(GRACE_SECS);
+
+/// The grace of the release for `limit`, the time limit of one
+/// verification command (the one `dagq.toml` declares, else the
+/// runtime's): past it a live landing would have stopped the command too.
+/// A fraction of a second counts as a whole one.
+pub fn grace_secs(limit: Duration) -> i64 {
+    let secs = limit
+        .as_secs()
+        .saturating_add(u64::from(limit.subsec_nanos() > 0));
+    i64::try_from(secs).unwrap_or(i64::MAX)
+}
+
+/// How long the release goes on without a list of the host's processes
+/// before it is the inbox's: twice the grace `grace_secs`.
+pub const fn unlisted_secs(grace_secs: i64) -> i64 {
+    grace_secs.saturating_mul(2)
+}
 
 /// `landing_release_stuck`'s `cause` when a process stopped by pid was
 /// still alive after its `SIGKILL`.
 pub const SURVIVED_STOP: &str = "survived_stop";
 /// `landing_release_stuck`'s `cause` when the host's processes could not
-/// be listed for [`UNLISTED_SECS`].
+/// be listed for twice the grace ([`unlisted_secs`]).
 pub const UNLISTED: &str = "unlisted";
 
 /// The events of the run's latest landing: those after its latest
@@ -88,7 +108,7 @@ pub enum ProcessesStep {
     /// with this payload, from whose `seen_at` the grace counts across
     /// supervisors, and waits.
     Note(Value),
-    /// Within [`GRACE_SECS`] of the first pass that found them: wait.
+    /// Within the grace of the first pass that found them: wait.
     Wait { waited: i64 },
     /// Past the grace, but a process already outlived its `SIGKILL`
     /// (`landing_release_stuck`, `cause: survived_stop`): the inbox's,
@@ -99,15 +119,21 @@ pub enum ProcessesStep {
 }
 
 /// [`ProcessesStep`] for `pids`, found at `now` in the worktree of the
-/// dead landing whose run has `events`.
-pub fn processes_step(events: &[RunEvent], pids: &[u32], now: i64) -> ProcessesStep {
+/// dead landing whose run has `events`, with the grace `grace_secs`
+/// ([`grace_secs`]).
+pub fn processes_step(
+    events: &[RunEvent],
+    pids: &[u32],
+    now: i64,
+    grace_secs: i64,
+) -> ProcessesStep {
     let Some(since) = waiting_since(events) else {
         return ProcessesStep::Note(
-            json!({"pids": pids, "seen_at": now, "grace_secs": GRACE_SECS}),
+            json!({"pids": pids, "seen_at": now, "grace_secs": grace_secs}),
         );
     };
     let waited = now - since;
-    if waited < GRACE_SECS {
+    if waited < grace_secs {
         return ProcessesStep::Wait { waited };
     }
     if stuck(events).is_some_and(|e| e.payload["cause"] == SURVIVED_STOP) {
@@ -131,8 +157,14 @@ pub fn survived_stop(left: &[u32], processes: &[&ProcessInfo], waited: i64) -> V
 
 /// `auto_repaired` (`repair: landing_processes_stopped`) for the processes
 /// `working` stopped by pid `waited` seconds after the first pass that
-/// found them, those in `killed` with `SIGKILL`.
-pub fn processes_stopped(working: &[ProcessInfo], killed: &[u32], waited: i64) -> Value {
+/// found them, those in `killed` with `SIGKILL`, past the grace
+/// `grace_secs`.
+pub fn processes_stopped(
+    working: &[ProcessInfo],
+    killed: &[u32],
+    waited: i64,
+    grace_secs: i64,
+) -> Value {
     let pids: Vec<u32> = working.iter().map(|p| p.pid).collect();
     json!({
         "layer": "runtime",
@@ -140,7 +172,7 @@ pub fn processes_stopped(working: &[ProcessInfo], killed: &[u32], waited: i64) -
         "conditions": {
             "pids": pids,
             "waited_secs": waited,
-            "grace_secs": GRACE_SECS,
+            "grace_secs": grace_secs,
         },
         "detail": {
             "stopped": working.iter().map(|p| json!({
@@ -157,23 +189,30 @@ pub fn processes_stopped(working: &[ProcessInfo], killed: &[u32], waited: i64) -
 /// What the release records at `now` when the processes in the worktree
 /// of the dead landing whose run has `events` could not be listed
 /// (`error`): the first time `landing_release_waiting` without `pids`,
-/// and past [`UNLISTED_SECS`] from it `landing_release_stuck` (`cause:
-/// unlisted`), once; `None` otherwise.
-pub fn unlisted(events: &[RunEvent], now: i64, error: &str) -> Option<(EventKind, Value)> {
+/// and past twice the grace `grace_secs` ([`unlisted_secs`]) from it
+/// `landing_release_stuck` (`cause: unlisted`), once; `None` otherwise.
+pub fn unlisted(
+    events: &[RunEvent],
+    now: i64,
+    error: &str,
+    grace_secs: i64,
+) -> Option<(EventKind, Value)> {
     match waiting_since(events) {
         None => Some((
             EventKind::LandingReleaseWaiting,
             json!({"pids": null, "seen_at": now, "error": error}),
         )),
-        Some(since) if now - since >= UNLISTED_SECS && stuck(events).is_none() => Some((
-            EventKind::LandingReleaseStuck,
-            json!({
-                "cause": UNLISTED,
-                "pids": [],
-                "waited_secs": now - since,
-                "error": format!("the processes in the worktree of the dead landing could not be listed: {error}"),
-            }),
-        )),
+        Some(since) if now - since >= unlisted_secs(grace_secs) && stuck(events).is_none() => {
+            Some((
+                EventKind::LandingReleaseStuck,
+                json!({
+                    "cause": UNLISTED,
+                    "pids": [],
+                    "waited_secs": now - since,
+                    "error": format!("the processes in the worktree of the dead landing could not be listed: {error}"),
+                }),
+            ))
+        }
         Some(_) => None,
     }
 }
@@ -293,7 +332,7 @@ mod tests {
     fn processes_are_waited_for_then_stopped_unless_one_outlived_its_stop() {
         let started = event(INTEGRATION_STARTED, json!({}));
         assert_eq!(
-            processes_step(std::slice::from_ref(&started), &[7, 8], 1000),
+            processes_step(std::slice::from_ref(&started), &[7, 8], 1000, GRACE_SECS),
             ProcessesStep::Note(json!({"pids": [7, 8], "seen_at": 1000, "grace_secs": GRACE_SECS}))
         );
         let waiting = event(
@@ -302,13 +341,13 @@ mod tests {
         );
         let events = [started.clone(), waiting.clone()];
         assert_eq!(
-            processes_step(&events, &[7], 1000 + GRACE_SECS - 1),
+            processes_step(&events, &[7], 1000 + GRACE_SECS - 1, GRACE_SECS),
             ProcessesStep::Wait {
                 waited: GRACE_SECS - 1
             }
         );
         assert_eq!(
-            processes_step(&events, &[7], 1000 + GRACE_SECS + 5),
+            processes_step(&events, &[7], 1000 + GRACE_SECS + 5, GRACE_SECS),
             ProcessesStep::Stop {
                 waited: GRACE_SECS + 5
             }
@@ -317,7 +356,7 @@ mod tests {
         let events = [started.clone(), waiting.clone(), survived];
         for later in [GRACE_SECS + 5, 3 * GRACE_SECS] {
             assert_eq!(
-                processes_step(&events, &[7], 1000 + later),
+                processes_step(&events, &[7], 1000 + later, GRACE_SECS),
                 ProcessesStep::Stuck
             );
         }
@@ -326,7 +365,7 @@ mod tests {
         let unlisted = event(LANDING_RELEASE_STUCK, json!({"cause": UNLISTED}));
         let events = [started, waiting, unlisted];
         assert_eq!(
-            processes_step(&events, &[7], 1000 + GRACE_SECS),
+            processes_step(&events, &[7], 1000 + GRACE_SECS, GRACE_SECS),
             ProcessesStep::Stop { waited: GRACE_SECS }
         );
     }
@@ -348,7 +387,7 @@ mod tests {
     fn the_stopped_and_the_surviving_processes_are_recorded_by_pid() {
         let working = [process(7, "/w"), process(8, "/w/sub")];
         assert_eq!(
-            processes_stopped(&working, &[8], GRACE_SECS + 5),
+            processes_stopped(&working, &[8], GRACE_SECS + 5, GRACE_SECS),
             json!({
                 "layer": "runtime",
                 "repair": "landing_processes_stopped",
@@ -378,7 +417,12 @@ mod tests {
     fn unlisted_processes_are_the_inboxs_once_past_twice_the_grace() {
         let started = event(INTEGRATION_STARTED, json!({}));
         assert_eq!(
-            unlisted(std::slice::from_ref(&started), 1000, "ps failed"),
+            unlisted(
+                std::slice::from_ref(&started),
+                1000,
+                "ps failed",
+                GRACE_SECS
+            ),
             Some((
                 EventKind::LandingReleaseWaiting,
                 json!({"pids": null, "seen_at": 1000, "error": "ps failed"})
@@ -390,10 +434,11 @@ mod tests {
         );
         let events = [started.clone(), waiting.clone()];
         assert_eq!(
-            unlisted(&events, 1000 + UNLISTED_SECS - 1, "ps failed"),
+            unlisted(&events, 1000 + UNLISTED_SECS - 1, "ps failed", GRACE_SECS),
             None
         );
-        let (kind, payload) = unlisted(&events, 1000 + UNLISTED_SECS + 5, "ps failed").unwrap();
+        let (kind, payload) =
+            unlisted(&events, 1000 + UNLISTED_SECS + 5, "ps failed", GRACE_SECS).unwrap();
         assert_eq!(kind, EventKind::LandingReleaseStuck);
         assert_eq!(
             payload,
@@ -407,9 +452,55 @@ mod tests {
         let stuck = event(LANDING_RELEASE_STUCK, payload);
         let events = [started, waiting, stuck];
         assert_eq!(
-            unlisted(&events, 1000 + 3 * UNLISTED_SECS, "ps failed"),
+            unlisted(&events, 1000 + 3 * UNLISTED_SECS, "ps failed", GRACE_SECS),
             None
         );
+    }
+
+    /// The grace is the limit of one verification command, a fraction of
+    /// a second counting whole, and the wait without a list twice it: a
+    /// declared limit moves the wait, the stop and the stuck with it.
+    #[test]
+    fn the_grace_and_the_unlisted_wait_follow_the_command_limit() {
+        assert_eq!(grace_secs(Duration::from_secs(3600)), GRACE_SECS);
+        assert_eq!(UNLISTED_SECS, 2 * GRACE_SECS);
+        assert_eq!(grace_secs(Duration::from_millis(20)), 1);
+        assert_eq!(grace_secs(Duration::from_millis(1500)), 2);
+        assert_eq!(grace_secs(Duration::MAX), i64::MAX);
+        assert_eq!(unlisted_secs(i64::MAX), i64::MAX);
+        let grace = grace_secs(Duration::from_secs(600));
+        assert_eq!(grace, 600);
+        let started = event(INTEGRATION_STARTED, json!({}));
+        assert_eq!(
+            processes_step(std::slice::from_ref(&started), &[7], 1000, grace),
+            ProcessesStep::Note(json!({"pids": [7], "seen_at": 1000, "grace_secs": 600}))
+        );
+        let waiting = event(
+            LANDING_RELEASE_WAITING,
+            json!({"pids": [7], "seen_at": 1000}),
+        );
+        let events = [started.clone(), waiting];
+        assert_eq!(
+            processes_step(&events, &[7], 1599, grace),
+            ProcessesStep::Wait { waited: 599 }
+        );
+        assert_eq!(
+            processes_step(&events, &[7], 1600, grace),
+            ProcessesStep::Stop { waited: 600 }
+        );
+        assert_eq!(
+            processes_stopped(&[process(7, "/w")], &[], 600, grace)["conditions"]["grace_secs"],
+            600
+        );
+        let unlisted_wait = event(
+            LANDING_RELEASE_WAITING,
+            json!({"pids": null, "seen_at": 1000, "error": "ps failed"}),
+        );
+        let events = [started, unlisted_wait];
+        assert_eq!(unlisted(&events, 2199, "ps failed", grace), None);
+        let (kind, payload) = unlisted(&events, 2200, "ps failed", grace).unwrap();
+        assert_eq!(kind, EventKind::LandingReleaseStuck);
+        assert_eq!(payload["waited_secs"], 1200);
     }
 
     /// A released run lands again when it was approved or its review passed,

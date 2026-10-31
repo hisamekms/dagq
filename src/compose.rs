@@ -140,7 +140,9 @@ pub struct OneShot {
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
     /// How long one verification command of `integrate` may run in all
-    /// ([`VERIFICATION_TIMEOUT`]; tests shorten it, task 639).
+    /// when `dagq.toml` declares no `[verification]
+    /// command_timeout_secs`, which replaces it ([`VERIFICATION_TIMEOUT`];
+    /// tests shorten it, task 639).
     pub verification_timeout: std::time::Duration,
     /// The toolchain profiles a `[toolchains.<name>]` of `dagq.toml` may
     /// name: the runtime's built-in ones

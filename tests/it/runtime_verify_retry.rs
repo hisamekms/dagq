@@ -250,6 +250,36 @@ fn a_command_past_its_whole_limit_is_a_timeout_failure() {
     assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
 }
 
+/// The limit `[verification] command_timeout_secs` of main's `dagq.toml`
+/// declares replaces the runtime's hour: the command is stopped at it and
+/// recorded as a `timeout` failure naming it.
+#[test]
+fn a_command_past_the_declared_limit_is_a_timeout_failure() {
+    let (_dir, db, repo) = awaiting();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[verification]\ncommand_timeout_secs = 1\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-q", "-m", "verification limit"]);
+    set_commands(&db, json!(["sleep 30"]));
+    let started = std::time::Instant::now();
+    let outcome = runtime::OneShot::system()
+        .integrate(&db, IntegrateTarget::Task(TaskId::new(1)), &repo, None)
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(25));
+    assert_eq!(outcome["outcome"], "held", "{outcome}");
+    let detail = show(&db);
+    let timeout = json!({"class": "timeout", "evidence": "the command ran past its 1 s limit and was killed"});
+    let verifications = integration_verifications(&detail);
+    assert_eq!(verifications.len(), 2, "{verifications:?}");
+    for verification in &verifications {
+        assert_eq!(verification["failure"], timeout);
+    }
+    assert_eq!(payloads(&detail, "integration_held")[0]["failure"], timeout);
+}
+
 /// The reads of the free space in the next test: room for the approval,
 /// short afterwards.
 static READS: AtomicUsize = AtomicUsize::new(0);

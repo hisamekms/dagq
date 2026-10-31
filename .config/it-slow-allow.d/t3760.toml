@@ -1,0 +1,7 @@
+# The items of task 3760 in the allow list of the time gate of tests/it
+# (the format is in the header of .config/it-slow-allow.toml).
+
+[[test]]
+name = "runtime_verify_retry::a_command_past_the_declared_limit_is_a_timeout_failure"
+reason = "境界（プロセス）: dagq.toml が宣言した上限が integrate の検証のコマンドの実の process group に掛かり、1 秒の上限で 2 回（やり直しを含む）kill されて timeout と記録されるので、上限の 2 秒と停止の待ちと run を作る fixture の分だけ 5 秒を超える"
+task = 3760

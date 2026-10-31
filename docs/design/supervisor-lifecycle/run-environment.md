@@ -121,7 +121,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   読むのはsupervisorがvalidatingとworkerのpromptを作るたびのmain checkoutの作業ファイルで、読めなければ警告を出して空として扱う（本番を守るのは[Auto-update](auto-update.md)の入れ替え前のe2eの関門）。
   使い方と無いときの扱い、この repositoryの範囲は[Validation](validation.md)の8と「この repository で置く範囲」。
 - `[local_checks]`と`[local_checks.gates.<name>]`は手元の関門の宣言で、reviewがmainのcommitから読む（ADR-t2589-1決定6）。
-- `[areas]`は`stats`と`kpi`がrunを分けるareaの名前→globの1行の配列（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。`domain::areas::AreaMap`）。
+- `[areas]`は`stats`と`kpi`がrunを分けるareaの名前→globの1行の配列（ADR-t980-1。`domain::areas::AreaMap`）。
   書式は上の型、求め方は`application::areas::AreaReader`のdoc commentが持つ。
 
 - `[kpi]`と`[kpi.targets."<KPI>"]`はKPIの判定の設定と目標で、KPIの計算（`kpi`・レポート・push・observerの入力）だけが読む（[計測のコマンド](commands.md)、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定17・19。解析は`src/infrastructure/kpi_config.rs`の`KpiTables`）。
@@ -135,7 +135,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   supervisorがclaimのpassごとに読み、読めなければ試しの外でclaimする。
   taskに由来する失敗の後のworkerのsessionの段上げ（決定5、[Worker model](worker-model.md#段上げ決定5)）は設定を持たず、`[worker.trial]`の有無に関係なく働く。
 
-- `[roles.<role>]`はworker以外のアクターのsessionのprovider・model・effortを持つ（[Actor model](actor-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定7、[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定1）。
+- `[roles.<role>]`はworker以外のアクターのsessionのprovider・model・effortを持つ（[Actor model](actor-model.md)、ADR-0079の決定7、[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定1）。
   役割・key・値と読み込みが拒むものは、`domain::actor_model`のdoc commentが持つ。
   読み込みの入口は`Verifier::role_models`で、読む時点と、読めないときと表の無いときの起動は[Actor model](actor-model.md)が持つ。
   runtimeのplannerの古い経路の欄は受け付けて無視し、runtimeのplannerは常に非対話で動く（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)の決定3）。
@@ -151,11 +151,12 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[ci_watch]`はsupervisorが着地先のbranchのCIの結果を`gh`で読む見張りの設定で（[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)。振る舞いは[CI watch](ci-watch.md)）、表があるときだけ有効になる（表が無ければ無効で、何も読まず何も記録しない）。
   keyの型・既定・意味は`domain::ci_watch::CiWatchConfig`のdoc commentが持ち、読み直しと`up`のpreflightは[CI watch](ci-watch.md)の「いつ確かめるか」と「読む手段が無いとき」が持つ。
   この repositoryの値は`dagq.toml`の`[ci_watch]`が持ち、`ci.yml`で成果物やRustのjobの名前（`required_jobs`、[CI watch](ci-watch.md)の「実行の扱い」）を変えたら同じ変更で合わせる。
-- `[landing_verification]`は`integrate`がtaskの検証のコマンドの一部をrepositoryの着地の検証のコマンドに置き換える設定で（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)。流れと境界は[Validation](validation.md#着地の検証)）、表があるときだけ働く。
+- `[landing_verification]`は`integrate`がtaskの検証のコマンドの一部をrepositoryの着地の検証のコマンドに置き換える設定で（ADR-t1925-1。流れと境界は[Validation](validation.md#着地の検証)）、表があるときだけ働く。
   `integrate`が着地のたびにmain checkoutから読む（読めなければ`[run.env]`と同じく着地処理のエラー）。
   書式（key・型・既定値・検査）と、置き換えたコマンドにだけ`[run.env]`の後ろに足すenvの意味は`domain::landing_verification`のdoc commentが持つ。
   そのenvは`DAGQ_`で始まり、`[run.env]`は`DAGQ_`のkeyを拒むので衝突しない。
   何を置き換え、ITをどう選ぶかはrepositoryの設定とscriptが持ち、runtimeは知らない。
+- `[verification]`の`command_timeout_secs`は検証のコマンド1本の時間の上限（秒）で、`integrate`・landing recheck・containerのverificationに掛かり、死んだ着地の解放の猶予も従う（範囲と既定は`domain::verification_limit`）。
 - `[egress]`の`registries`は、containerのrunが[queueのbroker](../queue-broker.md)を通って届くregistryのhostを挙げる（[ADR-t2257-1](../../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定3）。
   書式・意味・既定は`run_env::EGRESS_REGISTRIES`のdoc commentが、案は[profile](../toolchain-profiles.md#推奨の設定)が持ち、brokerは`CONNECT`のたびにmain checkoutから読む。
 - `[toolchains.<name>]`は使うtoolchainのprofileと当てるpathsの宣言で、宣言したprofileはpathsに依らず`integrate`とlanding recheckの検証の出力の読み方に効く（書式と誤りの扱いは`run_env::TOOLCHAINS_PREFIX`のdoc comment、当て方は[Toolchain profiles](../toolchain-profiles.md)）。

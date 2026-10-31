@@ -99,6 +99,8 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 - 1つの試行の流れは`land`の検証のloopと`VerifyStep::run`が持つ。
 - コマンドの起動と止め方は`infrastructure::adapters::run_shell_to_log`、環境は`verification_command`が持つ（[Run environment](run-environment.md#run-environment)）。
+- 1本のコマンドの時間の上限は`dagq.toml`の`[verification] command_timeout_secs`（秒）で、宣言が無ければ60分で、置き換えたコマンドにもlanding recheckにも同じく掛かる（[Run environment](run-environment.md#run-environment)）。
+  上限で止めたコマンドは`timeout`の失敗で、下のhostの失敗のやり直しに入り、死んだ着地の解放の猶予も同じ上限に従う。
 - 失敗の分類は`domain::verify_failure::classify`、印の出どころは[Toolchain profiles](../toolchain-profiles.md)、Rustの印とnextestのstatusの集合は`domain::toolchain::rust`が持つ。
 - `dagq.toml`の着地の検証は、名指すtaskのコマンドを置き換える（ADR-t1925-1、[Validation](validation.md#着地の検証)）。
   下の2つのやり直しは置き換えたコマンドにも効く。

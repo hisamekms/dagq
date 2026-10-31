@@ -1063,10 +1063,14 @@ fn wait_until(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>
 }
 
 /// Verification commands are task-defined shell lines whose full output belongs
-/// in the run directory, not in the event payload. Each one may run for an
-/// hour: about twice a full run of the repository's tests, with room for a
-/// loaded host, while a timed-out run holds its slot no longer than that.
-pub const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// in the run directory, not in the event payload. Each one may run for the
+/// default limit
+/// ([`DEFAULT_COMMAND_TIMEOUT_SECS`](crate::domain::verification_limit::DEFAULT_COMMAND_TIMEOUT_SECS),
+/// an hour) unless the project's `dagq.toml` declares its own
+/// (`[verification] command_timeout_secs`, read by
+/// [`ShellVerifier`](super::run_env::ShellVerifier)).
+pub const VERIFICATION_TIMEOUT: Duration =
+    Duration::from_secs(crate::domain::verification_limit::DEFAULT_COMMAND_TIMEOUT_SECS);
 
 /// How long a verification command's process group has, after SIGTERM at
 /// its limit, before the group gets SIGKILL.

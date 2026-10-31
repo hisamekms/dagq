@@ -198,7 +198,7 @@ impl Supervisor<'_> {
     /// The processes `working` left by the dead landing of `run` in its
     /// worktree (task 1129): the first pass that finds them records
     /// `landing_release_waiting`, from whose `seen_at` the grace
-    /// ([`landing_release::GRACE_SECS`]) counts across supervisors; past
+    /// ([`Self::landing_grace_secs`]) counts across supervisors; past
     /// it they are stopped by pid (SIGTERM, then SIGKILL after
     /// [`super::recovery::STOP_GRACE`]) and `auto_repaired` (`repair:
     /// landing_processes_stopped`) is recorded. Returns how many were
@@ -215,14 +215,15 @@ impl Supervisor<'_> {
     ) -> Result<Option<usize>> {
         let pids: Vec<u32> = working.iter().map(|p| p.pid).collect();
         let events = self.queue.run_events(run.id())?;
-        let waited = match landing_release::processes_step(&events, &pids, now) {
+        let grace = self.landing_grace_secs();
+        let waited = match landing_release::processes_step(&events, &pids, now, grace) {
             ProcessesStep::Note(payload) => {
                 self.note_landing(run, EventKind::LandingReleaseWaiting, payload);
-                info!(run_id = %run.id(), "run {} is integrating under a dead supervisor, but processes {pids:?} still work in its worktree; it is released once they end, or they are stopped after {}s", run.id(), landing_release::GRACE_SECS);
+                info!(run_id = %run.id(), "run {} is integrating under a dead supervisor, but processes {pids:?} still work in its worktree; it is released once they end, or they are stopped after {grace}s", run.id());
                 return Ok(None);
             }
             ProcessesStep::Wait { waited } => {
-                info!(run_id = %run.id(), "run {} is integrating under a dead supervisor, but processes {pids:?} still work in its worktree; waited {waited}s of {}s before they are stopped", run.id(), landing_release::GRACE_SECS);
+                info!(run_id = %run.id(), "run {} is integrating under a dead supervisor, but processes {pids:?} still work in its worktree; waited {waited}s of {grace}s before they are stopped", run.id());
                 return Ok(None);
             }
             // A process that outlived its SIGKILL is a person's now.
@@ -280,7 +281,7 @@ impl Supervisor<'_> {
         self.note_landing(
             run,
             EventKind::AutoRepaired,
-            landing_release::processes_stopped(working, &killed, waited),
+            landing_release::processes_stopped(working, &killed, waited, grace),
         );
         info!(run_id = %run.id(), "run {}: stopped processes {pids:?} the dead landing left in its worktree after {waited}s", run.id());
         // One that started meanwhile waits for the next pass.
@@ -292,16 +293,34 @@ impl Supervisor<'_> {
     }
     /// The processes of the worktree of `run`'s dead landing could not be
     /// listed (`error`): the first time records `landing_release_waiting`
-    /// without `pids`, and past [`landing_release::UNLISTED_SECS`] from it
-    /// `landing_release_stuck` (`cause: unlisted`) is the inbox's, once.
+    /// without `pids`, and past twice the grace
+    /// ([`landing_release::unlisted_secs`] of [`Self::landing_grace_secs`])
+    /// from it `landing_release_stuck` (`cause: unlisted`) is the inbox's,
+    /// once.
     fn landing_unlisted(&mut self, run: &TaskRun, now: i64, error: &anyhow::Error) -> Result<()> {
         let events = self.queue.run_events(run.id())?;
+        let grace = self.landing_grace_secs();
         if let Some((kind, payload)) =
-            landing_release::unlisted(&events, now, &format!("{error:#}"))
+            landing_release::unlisted(&events, now, &format!("{error:#}"), grace)
         {
             self.note_landing(run, kind, payload);
         }
         Ok(())
+    }
+    /// The grace of a dead landing's release: the limit of one
+    /// verification command as the verifier reads it now (`[verification]
+    /// command_timeout_secs` of `dagq.toml`, else the runtime's), past
+    /// which a live landing would have stopped the command too. A
+    /// `dagq.toml` that cannot be read leaves the default grace
+    /// ([`landing_release::GRACE_SECS`]): the release does not wait on it.
+    fn landing_grace_secs(&self) -> i64 {
+        match self.verifier.verification_timeout() {
+            Ok(limit) => landing_release::grace_secs(limit),
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the limit of a verification command could not be read: {error:#}; a dead landing's release waits the default {}s", landing_release::GRACE_SECS);
+                landing_release::GRACE_SECS
+            }
+        }
     }
     /// Record `payload` as `kind` on `run`; a failure is only logged, as
     /// the release goes on from the run's state at the next pass.

@@ -114,6 +114,7 @@ use crate::{
         stats::ConflictConfig,
         throughput_review::ThroughputReviewConfig,
         toolchain::{ProfileRegistry, ToolchainDeclaration, Toolchains},
+        verification_limit::{self, VerificationConfig},
         verify_marks::{LinePattern, MarkClass, ProjectMark},
         worker_model::WorkerTrial,
     },
@@ -278,6 +279,12 @@ const CI_WATCH_TABLE: &str = "ci_watch";
 /// `[landing_verification]`: the command `integrate` runs in place of
 /// some of a task's (ADR-t1925-1 decision 4).
 const LANDING_VERIFICATION_TABLE: &str = landing_verification::TABLE;
+/// `[verification]`: the time limit of one verification command
+/// (`command_timeout_secs`, a positive whole number of seconds); what it
+/// bounds and its default are on [`VerificationConfig`]. A binary older
+/// than this table refuses it, so a repository adds it only once the
+/// binary that runs its queue reads it.
+const VERIFICATION_TABLE: &str = verification_limit::TABLE;
 /// `[eval]`: the limits of a round of the eval of an agent (ADR-t1728-1
 /// decisions 8 and 9); its keys are on [`EvalConfig`].
 const EVAL_TABLE: &str = "eval";
@@ -483,7 +490,7 @@ const LOCAL_GATE_PATHS: &str = "paths";
 const LOCAL_GATE_KIND: &str = "kind";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 33] = [
+const TABLES: [&str; 34] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -510,6 +517,7 @@ const TABLES: [&str; 33] = [
     REVIEW_CODE_TABLE,
     CI_WATCH_TABLE,
     LANDING_VERIFICATION_TABLE,
+    VERIFICATION_TABLE,
     EVAL_TABLE,
     EGRESS_TABLE,
     CONTAINER_IMAGE_TABLE,
@@ -657,6 +665,9 @@ pub struct Config {
     /// `[landing_verification]` (ADR-t1925-1 decision 4); `None` without
     /// the table, which runs a task's commands as registered.
     pub landing_verification: Option<LandingVerification>,
+    /// `[verification]`; no key leaves the runtime's limit of one
+    /// verification command.
+    pub verification: VerificationConfig,
     /// `[eval]` and `[eval.providers.<provider>]` (ADR-t1728-1), each key's
     /// default where unset.
     pub eval: EvalConfig,
@@ -741,6 +752,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut light_changes: Option<(Vec<TaskChange>, usize)> = None;
     let mut fallback_keys: Vec<String> = Vec::new();
     let mut fresh_session_keys: Vec<String> = Vec::new();
+    let mut verification_keys: Vec<String> = Vec::new();
     let mut throughput_review_keys: Vec<String> = Vec::new();
     let mut replan_keys: Vec<String> = Vec::new();
     let mut review_jobs_keys: Vec<String> = Vec::new();
@@ -1097,7 +1109,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{RETENTION_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{RETENTION_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{VERIFICATION_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -1657,6 +1669,25 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 config.fresh_session.peak_context_above =
                     Some(u64::try_from(tokens).with_context(with)?);
                 fresh_session_keys.push(key.to_owned());
+            }
+            Some(VERIFICATION_TABLE) => {
+                ensure!(
+                    verification_limit::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{VERIFICATION_TABLE}]; the keys are {}",
+                    verification_limit::KEYS.join(", ")
+                );
+                ensure!(
+                    !verification_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let secs = parse_positive(rest.trim(), "number of seconds").with_context(with)?;
+                config.verification.command_timeout_secs = Some(
+                    verification_limit::checked_timeout_secs(secs)
+                        .map_err(anyhow::Error::msg)
+                        .with_context(with)?,
+                );
+                verification_keys.push(key.to_owned());
             }
             Some(THROUGHPUT_REVIEW_TABLE) => {
                 ensure!(
@@ -2975,6 +3006,18 @@ pub fn load_landing_verification(root: &Path) -> Result<Option<LandingVerificati
         .landing_verification)
 }
 
+/// `[verification]` of the `dagq.toml` in `root`; no file, no table or no
+/// key leaves the runtime's limit of one verification command.
+pub fn load_verification_config(root: &Path) -> Result<VerificationConfig> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(VerificationConfig::default());
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .verification)
+}
+
 /// The toolchain profiles the `dagq.toml` in `root` declares
 /// ([`TOOLCHAINS_PREFIX`]), resolved against `registry`, with the
 /// project's own marks it declares ([`VERIFY_MARKS_PREFIX`]) and its
@@ -3605,9 +3648,12 @@ pub struct ShellVerifier {
     /// (ADR-t616-2); `None` reads none.
     pub user_config: Option<PathBuf>,
     /// How long one verification command may run in all before it is
-    /// killed and recorded as a `timeout` failure (task 639):
+    /// killed and recorded as a `timeout` failure (task 639) when the
+    /// `dagq.toml` of `checkout` declares no `[verification]
+    /// command_timeout_secs`, which replaces it
+    /// ([`Verifier::verification_timeout`]):
     /// [`VERIFICATION_TIMEOUT`](super::adapters::VERIFICATION_TIMEOUT)
-    /// but in tests.
+    /// but in tests, which shorten it to reach the limit.
     pub verification_timeout: std::time::Duration,
     /// The profiles a `[toolchains.<name>]` may name:
     /// [`crate::domain::toolchain::BUILTIN`] but in tests that add one.
@@ -3665,6 +3711,9 @@ impl Verifier for ShellVerifier {
     fn landing_verification(&self) -> Result<Option<LandingVerification>> {
         load_landing_verification(&self.checkout)
     }
+    fn verification_timeout(&self) -> Result<std::time::Duration> {
+        Ok(load_verification_config(&self.checkout)?.command_timeout(self.verification_timeout))
+    }
     fn prepare_verification(&self, materials: &Path, log: &Path) -> Result<Option<Exit>> {
         let Some(command) = load_verification_prepare(&self.checkout)? else {
             return Ok(None);
@@ -3721,8 +3770,8 @@ impl Verifier for ShellVerifier {
         env: &[(String, String)],
         log: &Path,
     ) -> Result<Exit> {
-        super::adapters::run_shell_to_log(command, cwd, env, log, self.verification_timeout)
-            .map(super::process::exit)
+        let timeout = Verifier::verification_timeout(self)?;
+        super::adapters::run_shell_to_log(command, cwd, env, log, timeout).map(super::process::exit)
     }
 
     fn run_to_log_for(
@@ -3733,14 +3782,10 @@ impl Verifier for ShellVerifier {
         env: &[(String, String)],
         log: &Path,
     ) -> Result<Exit> {
-        super::adapters::run_shell_to_log_started(
-            command,
-            cwd,
-            env,
-            log,
-            self.verification_timeout,
-            &mut |pid| self.children.started(run, pid),
-        )
+        let timeout = Verifier::verification_timeout(self)?;
+        super::adapters::run_shell_to_log_started(command, cwd, env, log, timeout, &mut |pid| {
+            self.children.started(run, pid)
+        })
         .map(super::process::exit)
     }
 }
@@ -6619,6 +6664,107 @@ LITERAL = 'no \n escapes # here'
         )
         .unwrap();
         assert_eq!(load_retention_config(dir.path()).unwrap().backups, 1);
+    }
+
+    /// `[verification] command_timeout_secs` is a whole number of seconds
+    /// above 0 and at most a week, none without it; a value of another
+    /// kind, an unknown key or a key set twice is an error of `dagq.toml`
+    /// naming the line and the value. The verifier's limit is the declared
+    /// one, else its own (the default, or what a test sets).
+    #[test]
+    fn parses_the_limit_of_a_verification_command() {
+        let limit = |text: &str| parse_config(text).unwrap().verification;
+        assert_eq!(limit(""), VerificationConfig::default());
+        assert_eq!(limit("[verification]\n").command_timeout_secs, None);
+        assert_eq!(
+            limit("[verification]\ncommand_timeout_secs = 5_400 # 90 minutes\n")
+                .command_timeout_secs,
+            Some(5400)
+        );
+        for (text, expected) in [
+            (
+                "[verification]\ncommand_timeout_secs = 0\n",
+                "dagq.toml:2: value of command_timeout_secs: must be a positive number of seconds, not 0",
+            ),
+            (
+                "[verification]\ncommand_timeout_secs = -60\n",
+                "dagq.toml:2: value of command_timeout_secs: must be a positive number of seconds, not -60",
+            ),
+            (
+                "[verification]\ncommand_timeout_secs = 1.5\n",
+                "dagq.toml:2: value of command_timeout_secs: expected a whole number of seconds, not 1.5",
+            ),
+            (
+                "[verification]\ncommand_timeout_secs = \"1h\"\n",
+                "dagq.toml:2: value of command_timeout_secs: expected a whole number of seconds, not \"1h\"",
+            ),
+            (
+                "[verification]\ncommand_timeout_secs = 604801\n",
+                "dagq.toml:2: value of command_timeout_secs: must be at most 604800 seconds (a week), not 604801",
+            ),
+            (
+                "[verification]\ntimeout = 60\n",
+                "dagq.toml:2: unknown key timeout in [verification]; the keys are command_timeout_secs",
+            ),
+            (
+                "[verification]\ncommand_timeout_secs = 60\ncommand_timeout_secs = 70\n",
+                "dagq.toml:3: command_timeout_secs is defined twice",
+            ),
+            (
+                "[verification]\n[verification]\n",
+                "dagq.toml:2: [verification] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let verifier = ShellVerifier {
+            checkout: dir.path().to_path_buf(),
+            db: dir.path().join("queue.db"),
+            user_config: None,
+            verification_timeout: super::super::adapters::VERIFICATION_TIMEOUT,
+            profiles: &crate::domain::toolchain::BUILTIN,
+            children: crate::domain::environment::RunChildren::default(),
+        };
+        assert_eq!(
+            verifier.verification_timeout().unwrap(),
+            Duration::from_secs(3600)
+        );
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[stall]\n").unwrap();
+        assert_eq!(
+            verifier.verification_timeout().unwrap(),
+            Duration::from_secs(3600)
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[verification]\ncommand_timeout_secs = 5400\n",
+        )
+        .unwrap();
+        assert_eq!(
+            verifier.verification_timeout().unwrap(),
+            Duration::from_secs(5400)
+        );
+        let short = ShellVerifier {
+            verification_timeout: Duration::from_secs(1),
+            ..verifier
+        };
+        assert_eq!(
+            short.verification_timeout().unwrap(),
+            Duration::from_secs(5400)
+        );
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[verification]\n").unwrap();
+        assert_eq!(
+            short.verification_timeout().unwrap(),
+            Duration::from_secs(1)
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[verification]\ncommand_timeout_secs = 0\n",
+        )
+        .unwrap();
+        let error = format!("{:#}", short.verification_timeout().unwrap_err());
+        assert!(error.contains("value of command_timeout_secs"), "{error}");
     }
 
     /// `[fresh_session] peak_context_above` is a whole number of tokens
