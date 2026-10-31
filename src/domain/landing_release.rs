@@ -19,9 +19,9 @@ use super::{
 
 /// How long the release waits for the processes in a dead landing's
 /// worktree to end by themselves: the time limit of one verification
-/// command of `integrate` (`VERIFICATION_TIMEOUT`, 30 minutes), past which
+/// command of `integrate` (`VERIFICATION_TIMEOUT`, 60 minutes), past which
 /// a live landing would have stopped it too.
-pub const GRACE_SECS: i64 = 30 * 60;
+pub const GRACE_SECS: i64 = 60 * 60;
 
 /// How long the release goes on without a list of the host's processes
 /// before it is the inbox's: twice [`GRACE_SECS`].
