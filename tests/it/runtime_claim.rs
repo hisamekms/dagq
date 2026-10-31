@@ -1176,7 +1176,7 @@ fn main_vanishing_after_the_landing_branch_check_holds_the_claim() {
     assert!(
         records.iter().any(|record| {
             record["fields"]["event"] == "claim_landing_branch_unresolved"
-                && record["target"] == "dagq::application::supervise::execution"
+                && record["target"] == "dagq::application::supervise::execution::claim"
         }),
         "the claim did not recheck the landing branch during the pass: {log}"
     );
