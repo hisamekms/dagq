@@ -115,7 +115,7 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
   起動するのはqueue serviceが居るときだけ。
 - **出力の扱い**: findingは人とplannerが`findings`で影響の大きい順に読み、手当てしないと決めたものを`finding dismiss`する。
   proposalを求める印の付いたfindingには、supervisorがruntimeのplannerを立ててproposalを作らせる（[Finding planners (supervisor)](finding-planners.md)）。
-  種類`agent_eval_watch_due`・`agent_eval_below_threshold`（[agentのeval](../agent-eval.md#採用した定義の見張り)）と`ci_failure`・`ci_scheduled_failure`（[CI watch](ci-watch.md#定時のworkflow)）はsupervisorの見張りだけが記録し`finding record`は拒む。
+  種類`agent_eval_watch_due`・`agent_eval_below_threshold`（[agentのeval](../agent-eval.md#採用した定義の見張り)）と`ci_failure`・`ci_scheduled_failure`（[CI watch](ci-watch.md#定時のworkflow)）はsupervisorの見張りだけが記録し`finding record`は拒む（`due`の`agent cases`の依頼は見張りが数えた期間の両端を持つ）。
   findingに紐づけた`blocked`のaskには、runtimeが`propose`と`dismiss`のoptionを足し、人のその答えをfindingに適用する。
   `blocked`のaskは`status --role inbox`に`ask_opened`として出る。
 
@@ -129,7 +129,7 @@ promptと打たせるコマンドと出力の形は変えず、Claudeのplugin�
 設定は観測ごとに読み直すので、着地してmain checkoutに反映されればsupervisorの再起動は要らない。
 
 - **sandbox**: 権限の意図`ACCESS`（`queue_cli`）のまま、Codexの実装が読み取りだけのsandboxに訳す。
-  queue serviceが居れば、`:read-only`を継いでserviceのsocketへの到達だけを足したjobのpermission profile（`codex::job_service_config`）で起動し、書けるroot・network・sandboxを外すflagは渡さない（[Agent provider lifecycle](../provider-lifecycle.md#codexのheadless-job)）。
+  queue serviceが居れば、`:read-only`を継いでserviceのsocketへの到達だけを足したjobのpermission profileで起動し、書けるroot・network・sandboxを外すflagは渡さない（[Agent provider lifecycle](../provider-lifecycle.md#codexのheadless-job)）。
   queue dirとDBのファイルにも書けないので、queueへの書き込みはjobの`dagq`がクライアントモードでserviceに送るものだけで、serviceがobserverのprincipalで認可する（ADR-t1222-1決定1・2）。
 - **行き先**（`Supervisor::job_start_route`に`ModelRole::Observer`。スループットの見直しと共有）: providerを書かない役割はClaudeで、queueのholdのあいだと`--no-claude`では起動しない（[ADR-t1204-1](../../adr/2026-09-30-t1204-1-explicit-no-claude-operation.md)の決定2）。
   providerを書いた役割は`job_route`で、そのproviderが使えればそこで、使えなければもう一方のproviderで（launchに切り替えの元と理由）起動し、どちらも使えなければ待つ。
@@ -137,7 +137,7 @@ promptと打たせるコマンドと出力の形は変えず、Claudeのplugin�
   `--no-claude`ではClaudeは使えないので、Codexを設定したobserverはCodexで起動し、Codexも使えなければ子プロセスに`--unavailable`で理由を渡す。
   子プロセスは0の判定でskipしなければ、agentを起動せずdirも`observe_started`も作らずに、理由を持つ`outcome: error`の`observe_finished`を記録する。
 - **子プロセス**: supervisorは行き先のlaunchを`--launch`で渡し、コマンドはその`provider`のagent（`ClaudeCode`か`Codex`）で起動する。
-  `--launch`が無い（人が手で打つ）ときは束縛されたcheckoutの`[roles.observer]`（`compose::observer_launch`）。
+  `--launch`が無い（人が手で打つ）ときは束縛されたcheckoutの`[roles.observer]`。
   Codexの実行ファイルを解決できない（supervisorが見つけた後に消えた）ときもコマンドは失敗せず、与えられたpathのまま起動を試み、起動の失敗を`provider_unusable`（`executable_missing`、`application::job_start_failure`）として`--switchable`のとき終わりに記録する。
   Claudeの実行ファイルは解決できなければ失敗し（`--switchable`と`--no-provider-fallback`のときはCodexと同じく与えられたpathのまま起動を試み、`executable_missing`を記録する）、起動しない側のproviderの実行ファイルは解決しない
 - **記録**: Codexのthreadは始まりの記録に無く、終わりが記録する（threadはCodexが名付けるので）。
@@ -148,7 +148,7 @@ promptと打たせるコマンドと出力の形は変えず、Claudeのplugin�
   supervisorは自分の子のその終わり（起動時のevent idより後の同じmodeの`observe_finished`）を見てCodexを控え（`hold_provider`。利用上限はCodexの出力から再開の時刻を読む）、そのmodeをこのprocessの起動の記録から外して期日にする（`observer_again`）ので、次のpassでもう一方のproviderで起動し、`--no-claude`では上の`--unavailable`で理由を記録する。
   控えを書けなかったときは間隔を待つ（同じCodexをすぐ起動し直さないため）。
   `[provider_fallback] jobs = false`のとき（supervisorは`--switchable`に加えて`--no-provider-fallback`を渡す）: Codexを書いた役割は上と同じくCodexを控えてmodeを期日にするが、次のpassはClaudeで起動せず、Codexの控えが解けた後にCodexで起動し直す。
-  Claudeを書いた役割は、Claudeが使えずに終わったとき（起動の失敗は起動のerrorから、認証・利用上限は`signals.job_failure`の壁の読みから。`read_failure`）に`provider_unusable`（`claude`）を記録し（壁では子プロセスが`hold_wall`で控えのaskを開く）、supervisorは認証・利用上限なら同じ控えのask（`HoldJob::Observer`。既に入っていれば重ねない）、起動の失敗なら`ProviderHold`（控えのaskが既にClaudeを控えていれば重ねない）でClaudeを控え（`hold_timer_jobs_unusable`。Codexは控えない）、`observer_again`で期日にし、控えのあいだ待って、控えが解けた後（askの`done`か`retry_at`）のpassでClaudeで観測し直す。
+  Claudeを書いた役割は、Claudeが使えずに終わったとき（起動の失敗は起動のerrorから、認証・利用上限は`signals.job_failure`の壁の読みから）に`provider_unusable`（`claude`）を記録し（壁では子プロセスが`hold_wall`で控えのaskを開く）、supervisorは認証・利用上限なら同じ控えのask（`HoldJob::Observer`。既に入っていれば重ねない）、起動の失敗なら`ProviderHold`（控えのaskが既にClaudeを控えていれば重ねない）でClaudeを控え（Codexは控えない）、`observer_again`で期日にし、控えのあいだ待って、控えが解けた後（askの`done`か`retry_at`）のpassでClaudeで観測し直す。
   onのClaudeを書いた役割は`provider_unusable`を記録しない
 - **時間の上限**: 4のとおりClaudeと同じ`run_agent`でjobと子孫をpidで止める。
   execの引き継ぎとsupervisorのerrorでは、timerの節のとおり`dagq observe`とその子孫（Codexとその子孫）をkillする

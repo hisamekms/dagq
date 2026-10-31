@@ -254,7 +254,9 @@ fn look(
         let (verdict, until, reviews) = judge(agent, config, &marks, open, &reviews, now);
         match verdict {
             Watch::Due => {
-                let found = watch::due_finding(agent, &marks, &reviews, until, commit.as_str());
+                let since = watch::reviews_from(marks.since, now);
+                let found =
+                    watch::due_finding(agent, &marks, &reviews, (since, until), commit.as_str());
                 record(found, &mut looked)?;
             }
             Watch::NoNewReviews => {
@@ -274,7 +276,7 @@ fn look(
 /// decision, the end of its new period and the reviews in it. A period
 /// with no start counts the reviews from [`watch::reviews_from`], as far
 /// back as they are read.
-fn judge(
+pub(in crate::application::supervise) fn judge(
     agent: &str,
     config: &EvalConfig,
     marks: &watch::Marks,

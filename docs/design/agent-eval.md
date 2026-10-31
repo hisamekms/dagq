@@ -172,7 +172,7 @@ built-inの定義の変更には広げない（定義がdagqのsourceにあり�
   集合を作るsupervisorは1つで、取るのも居なくなった持ち主から引き取るのも1つの書き込みのtransaction（`agent_cases_taken`）。
   ほかのsupervisorは持ち主が生きている間その集合に触らないので、2つが同じケースにjobを起動したりtreeを共有したりしない。
   引き取ったsupervisorは、前の持ち主のjobが引き継ぎで止められた後、ラベルの無いケースを付け直す。
-- 準備: landing branchのcommitの定義とケースの一覧から、規則コード・`k`・規則の文書のpathと、規則コードごとの規則の場所の対応を決め、期間の`review_started`（`subagents`がそのagentを選んだもの）と同じrunとattemptの`review_finished`（そのagentの判定）から（期間の始まりが無ければ見張りの遡りの上限から読む）、`<base>...<head>`の差分を内容のhashで集合のpatchに書く。
+- 準備: landing branchのcommitの定義とケースの一覧から、規則コード・`k`・規則の文書のpathと、規則コードごとの規則の場所の対応を決め、期間の`review_started`（`subagents`がそのagentを選んだもの）と同じrunとattemptの`review_finished`（そのagentの判定）から（`--since`が無ければ作る時の遡りの上限から読み、`--until`がそれ以前なら`period_before_lookback`で断る）、`<base>...<head>`の差分を内容のhashで集合のpatchに書く。
   baseかheadのcommitがrepositoryのどのrefからも辿れないreviewは、objectが残っていても（branchを消した後、GCの前）理由つきで飛ばす。
   差分が読めないreviewも理由つきで飛ばし、1つのreviewが集合と後の依頼を止めない。
   reviewが多すぎる依頼は作らず理由を記録し、人・inbox・plannerが期間を狭めて依頼し直す（上限は`application::supervise::execution::agent_cases`のmodule doc）。
@@ -206,7 +206,7 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
   間隔は最後の見張り（`due`のfinding・productionの周の開始・新しいreviewの無かった周の記録）から数え、期間は前の期間の終わり（`due`の`until`、集合の周はその集合の`--until`、周の無かった記録の`through`）から始まる。
   期間の終わりは今か、まだ終わっていないそのagentのreviewのうち最も早い開始の前（上限の時間を過ぎたものは数えない）で、見張りの間に走っていたreviewは終わった後に次の期間で数える。
   reviewのeventは、最も早いagentの期間の始まりと今から上限の時間前の早い方から先だけを読む。
-  見張りの記録が無いagentの期間は遡りの上限（`watch::REVIEW_LOOKBACK_MILLIS`、7日）前に始まる。
+  見張りの記録が無いagentの期間は遡りの上限（7日）前に始まり、`due`の依頼はその始まりを`--since`に持つ。
   件数が設定に達したか、間隔が過ぎて1件以上あれば`due`のfindingを記録する。
   間隔が過ぎて1件も無ければfindingを作らず`agent_eval_watch_skipped`に理由と期間の終わりを記録する。
   同じagentの見張りのfindingが開いている間は何も記録しない。
@@ -226,7 +226,7 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
 
 - frontmatterの`tools`: runtimeが持つ道具の一覧の名前のリストで、無ければ役割の既定（`AgentTools::declared`）。
   `tools: []`は道具を持たない宣言。
-- runtimeの道具の一覧は`domain::review_subagents::AgentTool::ALL`で、役割が許さない道具と一覧に無い名前とリストでない`tools`は定義の誤りにする（`AgentTools::declared`）。
+- runtimeの道具の一覧は`domain::review_subagents::AgentTool::ALL`で、役割が許さない道具と一覧に無い名前とリストでない`tools`は定義の誤りにする。
   誤りの定義を選んだreviewはsnapshotが誤りにしてADR-t1453-1決定6の経路でpassにせず、`dagq doctor`の`agents`の`errors`にも出す。
 - providerごとの変換（ADR-t1895-1、`AgentProvider::agent_job_command`が使う）:
   - Claude: jobの起動の引数で宣言した道具を許し、一覧の残りを拒む。
@@ -252,7 +252,7 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
 - jobのcwdはそのtreeで、Codexのjobが読めるのはtree・ケースの材料のdir・commandの実行に要るsystemの場所だけである。
   repositoryのcheckoutとGit directory、queueのdata dirのほか（ほかのケースと実行の出力、productionのケースの集合）は読めない。
   Claudeのjobは読める場所の欄を使わず、`--add-dir`でtree・材料のdir・自分のjobのdirを足す今の起動のままである（shellを宣言した定義のcommandは限らない）。
-  Codexのjobは、`--sandbox read-only`の代わりに、読める場所の欄から作るjobのpermission profileの読み取りの設定で限る（`infrastructure::codex::agent_reads_config`）。
+  Codexのjobは、`--sandbox read-only`の代わりに、読める場所の欄から作るjobのpermission profileの読み取りの設定で限る。
   書き込みとnetworkはread-onlyのsandbox・jobのpermission profile（ADR-t1233-5）・`untrusted`（ADR-t1570-1）のまま変えない。
   ケースのdirは番号で名付け、promptにもpathにもケースのidと期待を出さない。
 - providerのloginか使用量の上限で止まった実行は、providerを控えて同じ実行を待たせ、やり直しに数えない。

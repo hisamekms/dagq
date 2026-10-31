@@ -14,7 +14,8 @@
 //!   definition links to), collect the production reviews of the period
 //!   that selected the agent from `review_started` and `review_finished`
 //!   (read from the period's start, or with none from
-//!   [`watch::REVIEW_LOOKBACK_MILLIS`] back),
+//!   [`watch::REVIEW_LOOKBACK_MILLIS`] back, a set whose `--until` is not
+//!   after that refused, [`watch::set_reads_from`]),
 //!   and write each one's change (`git diff <base>...<head>`) to the set's
 //!   patches by its content's hash; a review whose commits are gone is
 //!   left out with why. More reviews than `[eval] max_runs` refuse the set.
@@ -289,7 +290,10 @@ impl Supervisor<'_> {
         // The reviews from the period's start (with none, as far back as
         // the watch reads), never every review the queue holds.
         let now = self.generators.clock.now().saturating_mul(1000);
-        let from = watch::reviews_from(period.since, now);
+        let from = match watch::set_reads_from(period, now) {
+            Ok(from) => from,
+            Err((reason, why)) => return self.refuse_set(set.id, reason, why),
+        };
         period.since = Some(from);
         let upto = self.queue.latest_event_id()?;
         let limit = usize::try_from(upto.as_i64()).unwrap_or_default();
@@ -911,6 +915,127 @@ mod tests {
         assert_eq!(
             runs(&period_reviews("rules", open, &read, 10).unwrap()),
             ["in1", "in2", "in3", "after"]
+        );
+    }
+
+    /// The due finding of an agent never watched asks for the period the
+    /// watch counted, so the set made of it later (here two and nine days
+    /// after the look) reads the same reviews and decides as the watch
+    /// did; the same `--until` with no `--since` would lose the first
+    /// review, and past the lookback be refused with a reason of its own.
+    #[test]
+    fn a_set_asked_for_by_a_due_finding_reads_the_reviews_the_watch_counted() {
+        use crate::application::supervise::observation::agent_watch::judge;
+        use crate::domain::agent_eval::production::{Period, event_instant, period};
+        use crate::domain::agent_eval::round::EvalConfig;
+        use crate::domain::agent_eval::watch::{
+            Marks, PERIOD_BEFORE_LOOKBACK, REVIEW_LOOKBACK_MILLIS, Watch,
+        };
+        use crate::domain::marks::utc_text;
+        const NOW: i64 = 1_790_000_000_000;
+        const HOUR: i64 = 3_600_000;
+        const DAY: i64 = 24 * HOUR;
+        let mut every = Vec::new();
+        for (id, (run, at)) in [
+            ("before", NOW - 10 * DAY),
+            ("first", NOW - REVIEW_LOOKBACK_MILLIS + HOUR),
+            ("second", NOW - 2 * DAY),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = i64::try_from(id).unwrap() * 2;
+            let event = |id: i64, kind: EventKind, payload: Value| RunEvent {
+                id: EventId::new(id),
+                task_id: None,
+                goal_id: None,
+                run_id: Some(RunId::new(run).unwrap()),
+                kind: kind.into(),
+                payload,
+                created_at: utc_text(at),
+                actor: None,
+            };
+            every.push(event(
+                id + 1,
+                EventKind::ReviewStarted,
+                json!({"attempt": 1, "subagents": {"base": "b", "head": "h", "agents": [{"agent": "rules"}]}}),
+            ));
+            every.push(event(
+                id + 2,
+                EventKind::ReviewFinished,
+                json!({"attempt": 1, "agents": [{"agent": "rules", "verdict": "pass", "reasons": []}]}),
+            ));
+        }
+        let read_from = |from: i64| -> Vec<RunEvent> {
+            every
+                .iter()
+                .filter(|event| event_instant(&event.created_at).is_some_and(|at| at >= from))
+                .cloned()
+                .collect()
+        };
+        let config = EvalConfig::default();
+        let never = Marks::default();
+        let start = watch::reviews_from(never.since, NOW);
+        let (verdict, until, counted) =
+            judge("rules", &config, &never, None, &read_from(start), NOW);
+        assert_eq!(verdict, Watch::Due);
+        assert_eq!(counted.len(), 2);
+        // The watch counted none of an agent with no review, as the set
+        // finds none below.
+        assert!(
+            judge("other", &config, &never, None, &read_from(start), NOW)
+                .2
+                .is_empty()
+        );
+        let finding = watch::due_finding("rules", &never, &counted, (start, until), "c0ffee");
+        let asked = period(
+            finding.detail["since"].as_str(),
+            finding.detail["until"].as_str(),
+        )
+        .unwrap();
+        assert_eq!(asked.since, Some(start));
+        for prepared in [NOW + 2 * DAY, NOW + 9 * DAY] {
+            let from = watch::set_reads_from(asked, prepared).unwrap();
+            assert_eq!(from, start);
+            let period = Period {
+                since: Some(from),
+                until: asked.until,
+            };
+            let read = read_from(from);
+            assert_eq!(
+                period_reviews("rules", period, &read, 2),
+                Ok(counted.clone())
+            );
+            assert_eq!(
+                period_reviews("rules", period, &read, 1).unwrap_err().0,
+                "too_many_reviews"
+            );
+            // An agent with no review in the period the watch counted.
+            assert_eq!(
+                period_reviews("other", period, &read, 2).unwrap_err().0,
+                "no_reviews"
+            );
+        }
+        // The same --until without --since: from the lookback at the
+        // prepare's now, the first review lost; past it, refused.
+        let open = Period {
+            since: None,
+            until: asked.until,
+        };
+        let later = watch::set_reads_from(open, NOW + 2 * DAY).unwrap();
+        let lost = Period {
+            since: Some(later),
+            until: asked.until,
+        };
+        assert_eq!(
+            period_reviews("rules", lost, &read_from(later), 2)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            watch::set_reads_from(open, NOW + 9 * DAY).unwrap_err().0,
+            PERIOD_BEFORE_LOOKBACK
         );
     }
 

@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
-use super::production::{Candidate, CaseSet};
+use super::production::{Candidate, CaseSet, Period};
 use super::record::Round;
 use super::round::held_out;
 use super::{EVALS_DIR, Split};
@@ -116,6 +116,35 @@ pub const REVIEW_LOOKBACK_MILLIS: i64 = 7 * DAY_MILLIS;
 /// `now` when the period has no start.
 pub fn reviews_from(since: Option<i64>, now: i64) -> i64 {
     since.unwrap_or_else(|| now.saturating_sub(REVIEW_LOOKBACK_MILLIS))
+}
+
+/// The reason a production set is refused when it was asked for with no
+/// `--since` and its `--until` is at or before [`REVIEW_LOOKBACK_MILLIS`]
+/// before the set is prepared: its period, starting at the lookback, is
+/// empty, which is not the same as one with no review (`no_reviews`).
+pub const PERIOD_BEFORE_LOOKBACK: &str = "period_before_lookback";
+
+/// Where a production set of `period` prepared at `now` (Unix
+/// milliseconds) reads its reviews from, which is where its period
+/// starts: its `--since` (the watch's due finding always names the start
+/// it counted from, so the set reads the reviews it counted whenever it is
+/// prepared), or with none [`reviews_from`]'s lookback. With no start and
+/// an `--until` at or before the lookback, the set is refused with
+/// [`PERIOD_BEFORE_LOOKBACK`] and why.
+pub fn set_reads_from(period: Period, now: i64) -> Result<i64, (&'static str, String)> {
+    let from = reviews_from(period.since, now);
+    match period.until {
+        Some(until) if period.since.is_none() && until <= from => Err((
+            PERIOD_BEFORE_LOOKBACK,
+            format!(
+                "--until {} is not after {}, as far back as a set with no --since reads ({} days): ask again with --since",
+                utc_text(until),
+                utc_text(from),
+                REVIEW_LOOKBACK_MILLIS / DAY_MILLIS
+            ),
+        )),
+        _ => Ok(from),
+    }
 }
 
 /// Where one look of the watch at `now` reads the reviews from, of the
@@ -467,29 +496,30 @@ pub struct WatchFinding {
     pub evidence: Option<i64>,
 }
 
-/// The due finding of `agent`: the period from `marks.since` (open when
-/// none) to `until` ([`period_end`]), the reviews in it, and the set to ask
-/// for (`agent cases <agent> --since --until`) on the landing branch's
-/// `commit`. The subject names where the period starts, so two
-/// supervisors record one finding.
+/// The due finding of `agent`: the period the watch counted, from `since`
+/// ([`reviews_from`] of `marks.since` at the watch's now) to `until`
+/// ([`period_end`]), the reviews in it, and the set to ask for (`agent
+/// cases <agent> --until --since`, always with both ends, so the set reads
+/// the reviews counted however late it is prepared) on the landing
+/// branch's `commit`. The subject names where the period starts by
+/// `marks.since` (`the start` for an agent never watched, whose `since`
+/// moves with the now of each supervisor), so two supervisors record one
+/// finding.
 pub fn due_finding(
     agent: &str,
     marks: &Marks,
     reviews: &[Candidate],
-    until: i64,
+    (since, until): (i64, i64),
     commit: &str,
 ) -> WatchFinding {
-    let since = marks.since.map(utc_text);
+    let since = utc_text(since);
     let until = utc_text(until);
-    let command = match &since {
-        Some(since) => format!("agent cases {agent} --since {since} --until {until}"),
-        None => format!("agent cases {agent} --until {until}"),
-    };
+    let command = format!("agent cases {agent} --until {until} --since {since}");
     WatchFinding {
         kind: WATCH_FINDING_KIND,
         subject: format!(
             "{agent}/due since {}",
-            since.as_deref().unwrap_or("the start")
+            marks.since.map_or_else(|| "the start".to_owned(), utc_text)
         ),
         summary: format!(
             "{agent}'s definition is due to be watched: {} new production review(s)",
@@ -1047,7 +1077,7 @@ mod tests {
             since: Some(last.at),
             last: Some(last.clone()),
         };
-        let finding = due_finding("rules", &marks, &reviews, NOW, "c0ffee");
+        let finding = due_finding("rules", &marks, &reviews, (last.at, NOW), "c0ffee");
         let since = utc_text(last.at);
         let until = utc_text(NOW);
         assert_eq!(finding.kind, WATCH_FINDING_KIND);
@@ -1061,16 +1091,65 @@ mod tests {
         assert_eq!(finding.detail["previous"]["kind"], "finding");
         assert_eq!(
             finding.detail["ask"],
-            format!("agent cases rules --since {since} --until {until}")
+            format!("agent cases rules --until {until} --since {since}")
         );
         // The period's ends read back as the set's boundaries.
         assert_eq!(super::super::production::boundary(&since), Some(last.at));
-        let first = due_finding("rules", &Marks::default(), &reviews, NOW, "c0ffee");
+        // An agent never watched: the subject names the start, and the ask
+        // the start the watch counted from, its lookback at its now.
+        let from = reviews_from(None, NOW);
+        let first = due_finding("rules", &Marks::default(), &reviews, (from, NOW), "c0ffee");
         assert_eq!(first.subject, "rules/due since the start");
+        let start = utc_text(NOW - REVIEW_LOOKBACK_MILLIS);
+        assert_eq!(first.detail["since"], start);
         assert_eq!(
             first.detail["ask"],
-            format!("agent cases rules --until {until}")
+            format!("agent cases rules --until {until} --since {start}")
         );
+        assert_eq!(
+            super::super::production::boundary(&start),
+            Some(NOW - REVIEW_LOOKBACK_MILLIS)
+        );
+    }
+
+    /// A set reads from its `--since`, whenever it is prepared; with none
+    /// from the lookback at its own now, and is refused with a reason of
+    /// its own when its `--until` is not after that.
+    #[test]
+    fn a_set_reads_from_its_start_or_is_refused_before_the_lookback() {
+        let lookback = NOW - REVIEW_LOOKBACK_MILLIS;
+        let asked = Period {
+            since: Some(lookback - 3 * DAY_MILLIS),
+            until: Some(lookback - DAY_MILLIS),
+        };
+        assert_eq!(set_reads_from(asked, NOW), Ok(lookback - 3 * DAY_MILLIS));
+        let open = Period {
+            since: None,
+            until: Some(lookback + 1),
+        };
+        assert_eq!(set_reads_from(open, NOW), Ok(lookback));
+        assert_eq!(
+            set_reads_from(
+                Period {
+                    since: None,
+                    until: None
+                },
+                NOW
+            ),
+            Ok(lookback)
+        );
+        for until in [lookback, lookback - DAY_MILLIS] {
+            let (reason, why) = set_reads_from(
+                Period {
+                    since: None,
+                    until: Some(until),
+                },
+                NOW,
+            )
+            .unwrap_err();
+            assert_eq!(reason, PERIOD_BEFORE_LOOKBACK);
+            assert!(why.contains("--since"), "{why}");
+        }
     }
 
     /// A planner's built set with no round on it asks for its hold-out; a
