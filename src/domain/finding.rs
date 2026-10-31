@@ -441,8 +441,9 @@ impl ImprovementLimit {
 /// branch's CI (ADR-t2928-1), and an `agent_eval_watch_due` one of its
 /// watch of the adopted definitions, whose planner asks for cases or a
 /// hold-out and submits no proposal (ADR-t2971-1). Either kind recorded by
-/// anyone else, and an `agent_eval_below_threshold` finding, is an
-/// improvement.
+/// anyone else, an `agent_eval_below_threshold` finding, and the CI
+/// watch's `ci_scheduled_failure` (a scheduled workflow failed, not the
+/// landing branch's tests, ADR-t3807-1) are improvements.
 pub fn counts_as_improvement(kind: &str, recorded_by: &str) -> bool {
     !(recorded_by == super::ActorRole::Supervisor.as_str()
         && (kind == super::ci_watch::FINDING_KIND
@@ -474,11 +475,14 @@ pub fn planner_turns(findings: Vec<Finding>) -> PlannerTurns {
 
 /// Whether `finding record` may record a finding of `kind`: not one only
 /// a watch of the supervisor's records, whoever records it: `ci_failure`
-/// of its CI watch (ADR-t2928-1), nor `agent_eval_watch_due` or
-/// `agent_eval_below_threshold` of its watch of the adopted definitions
-/// (ADR-t2971-1).
+/// of its CI watch (ADR-t2928-1) and `ci_scheduled_failure` of its watch
+/// of the scheduled workflows, which it resolves (ADR-t3807-1), nor
+/// `agent_eval_watch_due` or `agent_eval_below_threshold` of its watch of
+/// the adopted definitions (ADR-t2971-1).
 pub fn check_recordable_kind(kind: &str) -> Result<(), DomainError> {
-    let watch = if kind == super::ci_watch::FINDING_KIND {
+    let watch = if kind == super::ci_watch::FINDING_KIND
+        || kind == super::ci_watch::scheduled::SCHEDULED_FINDING_KIND
+    {
         "CI watch"
     } else if kind == super::agent_eval::watch::WATCH_FINDING_KIND
         || kind == super::agent_eval::watch::SCORE_FINDING_KIND
@@ -1063,7 +1067,16 @@ mod tests {
         let ci_failure = super::super::ci_watch::FINDING_KIND;
         let watch_due = super::super::agent_eval::watch::WATCH_FINDING_KIND;
         let below = super::super::agent_eval::watch::SCORE_FINDING_KIND;
-        for kind in ["kpi", "conflict_hotspot", "failure", "wait", "stall", below] {
+        let scheduled = super::super::ci_watch::scheduled::SCHEDULED_FINDING_KIND;
+        for kind in [
+            "kpi",
+            "conflict_hotspot",
+            "failure",
+            "wait",
+            "stall",
+            below,
+            scheduled,
+        ] {
             assert!(counts_as_improvement(kind, "observer"), "{kind}");
             assert!(counts_as_improvement(kind, "supervisor"), "{kind}");
         }
@@ -1108,13 +1121,16 @@ mod tests {
 
     #[test]
     fn finding_record_refuses_the_supervisors_watch_kinds_and_takes_any_other() {
-        let error = check_recordable_kind(super::super::ci_watch::FINDING_KIND)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("recorded only by the supervisor's CI watch"),
-            "{error}"
-        );
+        for kind in [
+            super::super::ci_watch::FINDING_KIND,
+            super::super::ci_watch::scheduled::SCHEDULED_FINDING_KIND,
+        ] {
+            let error = check_recordable_kind(kind).unwrap_err().to_string();
+            assert!(
+                error.contains("recorded only by the supervisor's CI watch"),
+                "{error}"
+            );
+        }
         for kind in [
             super::super::agent_eval::watch::WATCH_FINDING_KIND,
             super::super::agent_eval::watch::SCORE_FINDING_KIND,

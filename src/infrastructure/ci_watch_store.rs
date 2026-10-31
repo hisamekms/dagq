@@ -1,7 +1,8 @@
 //! The queue's records of the CI watch (ADR-t1920-1): its events, one
 //! settled run's events and finding written in one transaction that
-//! another supervisor's record of the same run takes, and the
-//! `ci_failure` findings a task fixes.
+//! another supervisor's record of the same run takes, the runs of the
+//! scheduled workflows it declares (ADR-t3807-1) recorded the same way,
+//! and the `ci_failure` findings a task fixes.
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -10,8 +11,9 @@ use std::collections::BTreeMap;
 
 use super::findings::{record_in, set_status_in};
 use super::sqlite::{SqliteQueue, event_row};
+use crate::domain::ci_watch::scheduled::{CI_SCHEDULED_CHECKED, ScheduledCheckRecord};
 use crate::domain::ci_watch::{CI_CHECKED, CI_WATCH_KINDS, CiCheckRecord, CiCheckRecorded};
-use crate::domain::{EventId, EventKind, FindingId, FindingStatus, RunEvent, TaskId};
+use crate::domain::{EventId, EventKind, FindingId, FindingStatus, NewFinding, RunEvent, TaskId};
 
 impl SqliteQueue {
     /// Every event of the watch, oldest first.
@@ -69,16 +71,7 @@ impl SqliteQueue {
         let finding = match record.finding {
             Some(mut finding) => {
                 finding.evidence = std::iter::once(checked).chain(red).collect();
-                let outcome = record_in(&tx, &finding, now)?;
-                let id = outcome.finding.id;
-                if outcome.changed.contains(&"status")
-                    && outcome.finding.status == FindingStatus::Open
-                {
-                    tx.execute(
-                        "UPDATE findings SET propose_requested_at=?2 WHERE id=?1",
-                        params![id, now],
-                    )?;
-                }
+                let id = record_marked(&tx, &finding, now)?;
                 tx.execute(
                     "UPDATE run_events SET payload=json_set(payload,'$.finding_id',?2) WHERE id=?1",
                     params![checked, id],
@@ -94,14 +87,65 @@ impl SqliteQueue {
             }
             None => None,
         };
-        let mut resolved = Vec::new();
-        for (id, reason) in record.resolve {
-            let id = FindingId::new(id);
-            if resolvable(&tx, id)? {
-                set_status_in(&tx, id, FindingStatus::Resolved, &reason, "runtime", now)?;
-                resolved.push(id);
-            }
+        let resolved = resolve_all(&tx, record.resolve, now)?;
+        tx.commit()?;
+        Ok(Some(CiCheckRecorded {
+            event: checked,
+            finding,
+            resolved,
+        }))
+    }
+
+    /// Every `ci_scheduled_checked` event, oldest first.
+    pub fn ci_scheduled_events(&self) -> Result<Vec<RunEvent>> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT * FROM run_events WHERE kind=?1
+                 AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL ORDER BY id",
+            )?
+            .query_map([CI_SCHEDULED_CHECKED], event_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Write `record` of a scheduled workflow's run unless the latest
+    /// `ci_scheduled_checked` is no longer the one it was decided after
+    /// (`None` then), as [`Self::record_ci_check`]: the event, the
+    /// finding with the event as its evidence (named back by
+    /// `finding_id`, marked for a proposal anew when it opens again), and
+    /// the findings resolved while `open` with no planner open for them.
+    pub fn record_ci_scheduled_check(
+        &self,
+        record: ScheduledCheckRecord,
+    ) -> Result<Option<CiCheckRecorded>> {
+        let now = self.generators.clock.now();
+        let tx = self.write_tx("record_ci_scheduled_check", TransactionBehavior::Immediate)?;
+        let latest: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM run_events WHERE kind=?1
+                 AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
+                 ORDER BY id DESC LIMIT 1",
+                [CI_SCHEDULED_CHECKED],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if latest != record.previous {
+            return Ok(None);
         }
+        let checked = insert(&tx, EventKind::CiScheduledChecked, &record.checked)?;
+        let finding = match record.finding {
+            Some(mut finding) => {
+                finding.evidence = vec![checked];
+                let id = record_marked(&tx, &finding, now)?;
+                tx.execute(
+                    "UPDATE run_events SET payload=json_set(payload,'$.finding_id',?2) WHERE id=?1",
+                    params![checked, id],
+                )?;
+                Some(id)
+            }
+            None => None,
+        };
+        let resolved = resolve_all(&tx, record.resolve, now)?;
         tx.commit()?;
         Ok(Some(CiCheckRecorded {
             event: checked,
@@ -161,6 +205,34 @@ fn insert(conn: &Connection, kind: EventKind, payload: &Value) -> Result<EventId
         params![kind.as_str(), serde_json::to_string(payload)?],
     )?;
     Ok(EventId::new(conn.last_insert_rowid()))
+}
+
+/// Record `finding` (matched and updated as `finding record` does); one
+/// that opens again is marked for a proposal anew. Its ID.
+fn record_marked(conn: &Connection, finding: &NewFinding, now: i64) -> Result<FindingId> {
+    let outcome = record_in(conn, finding, now)?;
+    let id = outcome.finding.id;
+    if outcome.changed.contains(&"status") && outcome.finding.status == FindingStatus::Open {
+        conn.execute(
+            "UPDATE findings SET propose_requested_at=?2 WHERE id=?1",
+            params![id, now],
+        )?;
+    }
+    Ok(id)
+}
+
+/// Resolve each finding of `resolve` with its reason where
+/// [`resolvable`]: the ones resolved.
+fn resolve_all(conn: &Connection, resolve: Vec<(i64, String)>, now: i64) -> Result<Vec<FindingId>> {
+    let mut resolved = Vec::new();
+    for (id, reason) in resolve {
+        let id = FindingId::new(id);
+        if resolvable(conn, id)? {
+            set_status_in(conn, id, FindingStatus::Resolved, &reason, "runtime", now)?;
+            resolved.push(id);
+        }
+    }
+    Ok(resolved)
 }
 
 /// Whether the runtime resolves the finding: still `open`, with no planner

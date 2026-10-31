@@ -6,6 +6,7 @@ status: current
 created: 2026-09-27
 scope: runtime
 related:
+  - adr-t3807-1
   - adr-t2971-1
   - adr-t1920-1
   - adr-t2928-1
@@ -134,3 +135,13 @@ findingのplannerも、[Draft planners](draft-planners.md#推奨が出せればp
 `finding_planner_prompt`は`ci_failure`のときに節を足し、findingの`detail`の各項を修正taskの説明に写すこと、同じtestを直す閉じていないtaskを探して、あればtaskを足さずにfindingをそのtaskが覆うものとして`finding dismiss`すること、修正taskに改善の規則どおり優先度を付けないこと（6）を指示する。
 findingの項目が全部CIで通れば、そのfindingが`open`で閉じていないplannerが無いときに限りsupervisorが`resolved`にする。
 findingの欄と鍵は[CI watch](ci-watch.md)の「finding（修正taskの材料）」。
+
+## CIの見張りの定時のworkflowのfinding
+
+[ADR-t3807-1](../../adr/2026-10-31-t3807-1-ci-watch-reads-declared-scheduled-workflows-and-files-their-failures-as-findings.md)。
+`[ci_watch]`が宣言した定時のworkflowの実行が着地先のbranchで落ちると、supervisorがworkflowごとに1つの`ci_scheduled_failure`のfindingを印付きで記録し、上の1〜10の経路でplannerが立つ。
+このfindingは着地先のbranchの壊れではないので改善として数え（`finding::counts_as_improvement`）、11の上限の中で印の古い順に待つ。
+`finding record`はこの種類も拒み（`finding::check_recordable_kind`）、記録するのは見張りだけである。
+`finding_planner_prompt`はこの種類に節を足さず、findingの`detail`（落ちたjobとstep・実行のURL）がふだんの手順の材料になる。
+既に落ちているtestの一覧の項目にはならず、修正taskのrunの一覧（`ci_failure_findings_of`）にも入らない。
+そのworkflowの後の実行が通れば、findingが`open`で閉じていないplannerが無いときに限りsupervisorが`resolved`にする。

@@ -6,6 +6,9 @@
 //! A run is processed once per attempt, by its ID and attempt, so one that
 //! ended after a later-created one and a re-run's new attempt are read too.
 //! The readers of the list (`ci failures`, `status`) fold the same events.
+//! The same check then records the runs of the scheduled workflows
+//! `[ci_watch]` declares (ADR-t3807-1), apart from the list, the state and
+//! the holds.
 //! What GitHub says comes through [`CiSource`]; what it means is
 //! `domain::ci_watch`.
 
@@ -16,6 +19,10 @@ use serde_json::{Value, json};
 
 use super::{QueueRecords, RunLog};
 use crate::domain::EventKind;
+use crate::domain::ci_watch::scheduled::{
+    SCHEDULED_FINDING_KIND, ScheduledCheckRecord, ScheduledState, decide_scheduled,
+    scheduled_runs_to_process,
+};
 use crate::domain::ci_watch::{
     Access, CI_WATCH_ACCESS_KINDS, CI_WATCH_FAILURE_LIMIT, CiCheckRecord, CiJob, CiRun, CiState,
     CiWatchConfig, FINDING_KIND, FailedJob, GreenReading, JobsUnread, Junit, RangeFacts, RunInput,
@@ -33,6 +40,11 @@ pub trait CiSource: Send + Sync {
     /// The finished push runs of the watched workflow and branch, at most
     /// [`crate::domain::ci_watch::RUN_LIST_LIMIT`].
     fn completed_runs(&self) -> Result<Vec<CiRun>>;
+    /// The finished runs of the scheduled workflow `workflow` on the
+    /// watched branch, of each event of
+    /// [`crate::domain::ci_watch::scheduled::SCHEDULED_EVENTS`], at most
+    /// [`crate::domain::ci_watch::RUN_LIST_LIMIT`] each.
+    fn scheduled_runs(&self, workflow: &str) -> Result<Vec<CiRun>>;
     /// The failed jobs of a red run, with their failed steps.
     fn failed_jobs(&self, run_id: i64) -> Result<Vec<FailedJob>>;
     /// Every job of a run's attempt with how it ended, for a success run
@@ -57,6 +69,8 @@ pub struct CheckOutcome {
     pub available: bool,
     /// The settled runs it recorded.
     pub recorded: usize,
+    /// The runs of the scheduled workflows it recorded.
+    pub scheduled: usize,
     /// Another supervisor recorded a run first; the next check goes on
     /// after it.
     pub taken: bool,
@@ -76,7 +90,9 @@ pub struct CheckOutcome {
 /// limit is counted with them and `ci_check_failed` recorded once.
 /// `build` is the supervisor's build identifier, whose commit tells
 /// whether it contains a red range. An error (a call that failed or ran
-/// out of time) is a passing failure the caller counts.
+/// out of time) is a passing failure the caller counts. Then, unless
+/// another supervisor took a run, the scheduled workflows'
+/// runs ([`check_scheduled`]), whose error is only warned of.
 pub fn check<Q: RunLog + QueueRecords + ?Sized>(
     queue: &Q,
     source: &dyn CiSource,
@@ -97,12 +113,47 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
     let mut outcome = CheckOutcome {
         available: access.is_available(),
         recorded: 0,
+        scheduled: 0,
         taken: false,
         jobs_unread: JobsUnread::default(),
     };
     if !outcome.available {
         return Ok(outcome);
     }
+    check_pushes(
+        queue,
+        source,
+        config,
+        branch,
+        supervisor,
+        build,
+        jobs_unread,
+        &mut outcome,
+    )?;
+    if !outcome.taken
+        && let Err(error) = check_scheduled(queue, source, config, branch, supervisor, &mut outcome)
+    {
+        // Not the check's failure: what it read of the pushes stands, and
+        // the scheduled runs are read again at the next check.
+        tracing::warn!(error = %format_args!("{error:#}"), "the scheduled workflows of [ci_watch] could not be read; they are read again at the next check: {error:#}");
+    }
+    Ok(outcome)
+}
+
+/// The push runs of one [`check`], into `outcome`; it returns early where
+/// the check stops reading them (a success run whose jobs are read again
+/// next, another supervisor's record).
+#[allow(clippy::too_many_arguments)]
+fn check_pushes<Q: RunLog + QueueRecords + ?Sized>(
+    queue: &Q,
+    source: &dyn CiSource,
+    config: &CiWatchConfig,
+    branch: &str,
+    supervisor: &LeaseToken,
+    build: &str,
+    jobs_unread: &JobsUnread,
+    outcome: &mut CheckOutcome,
+) -> Result<()> {
     let runs = source.completed_runs()?;
     let mut watch = WatchState::fold(&queue.ci_watch_events()?);
     let (runs, mut gap) = runs_to_process(runs, &watch);
@@ -129,7 +180,7 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
                     if let Err(error) = &jobs {
                         tracing::warn!(error = %format_args!("{error:#}"), "the jobs of CI run {} could not be read ({} in a row); it is read again at the next check: {error:#}", run.run_id, outcome.jobs_unread.failures(run));
                     }
-                    return Ok(outcome);
+                    return Ok(());
                 }
                 GreenReading::Undecided(why) => {
                     if let Undecided::JobsMissing { jobs } = &why
@@ -232,7 +283,7 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
         };
         if queue.record_ci_check(record)?.is_none() {
             outcome.taken = true;
-            return Ok(outcome);
+            return Ok(());
         }
         outcome.recorded += 1;
         skipped.clear();
@@ -240,7 +291,85 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
         gap = false;
         watch = WatchState::fold(&queue.ci_watch_events()?);
     }
-    Ok(outcome)
+    Ok(())
+}
+
+/// The runs of each scheduled workflow `[ci_watch]` declares, into
+/// `outcome`: every finished run no record holds, in the order they were
+/// created ([`scheduled_runs_to_process`]), recorded once with what
+/// [`decide_scheduled`] makes of it. A failed run's jobs and steps are
+/// read for its finding (taken without them when they cannot be read).
+/// None of it reads or writes the list, the state or a hold; with no
+/// workflow declared, nothing is read. A workflow that cannot be read
+/// (renamed, removed) is warned of and the next one is read all the same.
+fn check_scheduled<Q: RunLog + QueueRecords + ?Sized>(
+    queue: &Q,
+    source: &dyn CiSource,
+    config: &CiWatchConfig,
+    branch: &str,
+    supervisor: &LeaseToken,
+    outcome: &mut CheckOutcome,
+) -> Result<()> {
+    for workflow in &config.scheduled_workflows {
+        if let Err(error) =
+            check_one_scheduled(queue, source, workflow, branch, supervisor, outcome)
+        {
+            tracing::warn!(error = %format_args!("{error:#}"), "the scheduled workflow {workflow} of [ci_watch] could not be read; it is read again at the next check: {error:#}");
+        }
+        if outcome.taken {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// [`check_scheduled`] of one workflow.
+fn check_one_scheduled<Q: RunLog + QueueRecords + ?Sized>(
+    queue: &Q,
+    source: &dyn CiSource,
+    workflow: &str,
+    branch: &str,
+    supervisor: &LeaseToken,
+    outcome: &mut CheckOutcome,
+) -> Result<()> {
+    let runs = source.scheduled_runs(workflow)?;
+    let mut state = ScheduledState::fold(&queue.ci_scheduled_events()?, workflow);
+    for run in scheduled_runs_to_process(runs, &state) {
+        let failed_jobs = if classify(&run.conclusion) == Some(CiState::Red) {
+            source.failed_jobs(run.run_id).unwrap_or_else(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "the jobs of CI run {} of {workflow} could not be read: {error:#}", run.run_id);
+                Vec::new()
+            })
+        } else {
+            Vec::new()
+        };
+        let decision = decide_scheduled(&state, &run, &failed_jobs, workflow, branch);
+        let mut checked = decision.checked;
+        checked["supervisor"] = json!(supervisor);
+        let record = ScheduledCheckRecord {
+            previous: state.last_event,
+            checked,
+            finding: decision.finding.map(|finding| NewFinding {
+                kind: SCHEDULED_FINDING_KIND.to_owned(),
+                target: FindingTarget::Queue,
+                subject: finding.subject,
+                summary: finding.summary,
+                detail: Some(finding.detail.to_string()),
+                impact: Some(Impact::Normal),
+                evidence: Vec::new(),
+                propose: Some(finding.propose),
+                by: crate::domain::ActorRole::Supervisor.as_str().to_owned(),
+            }),
+            resolve: decision.resolved.into_iter().collect(),
+        };
+        if queue.record_ci_scheduled_check(record)?.is_none() {
+            outcome.taken = true;
+            return Ok(());
+        }
+        outcome.scheduled += 1;
+        state = ScheduledState::fold(&queue.ci_scheduled_events()?, workflow);
+    }
+    Ok(())
 }
 
 /// The workflow and branch the list is of: `[ci_watch]`'s when it is set,
@@ -387,6 +516,7 @@ mod tests {
             interval_secs: 60,
             junit_artifacts: Vec::new(),
             required_jobs: vec!["test".into()],
+            scheduled_workflows: Vec::new(),
         };
         let named = Ok(Some(config));
         assert_eq!(

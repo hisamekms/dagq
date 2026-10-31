@@ -4,7 +4,9 @@
 use super::*;
 
 /// A fake `gh`: `auth status` passes once `authed` exists beside it, `run
-/// list` prints `runs.json`, `run view ID` prints `jobs-ID.json` (fails
+/// list --event push` prints `runs.json` and `run list --event E` of any
+/// other event `runs-E.json` (`[]` without it), `run view ID` prints
+/// `jobs-ID.json` (fails
 /// while `jobs-ID.fail` exists), and `run download ID --pattern P --dir D`
 /// copies the artifacts `artifacts-ID/P` into `D` (fails when none
 /// matches, as gh does). Each call is appended to `calls`.
@@ -16,7 +18,13 @@ case "$1 $2" in
     [ -f "$dir/authed" ] && exit 0
     echo "You are not logged into any GitHub hosts. To log in, run: gh auth login" >&2
     exit 1 ;;
-"run list") cat "$dir/runs.json" ;;
+"run list")
+    event=push
+    while [ $# -gt 0 ]; do
+        [ "$1" = --event ] && event=$2
+        shift
+    done
+    if [ "$event" = push ]; then cat "$dir/runs.json"; else cat "$dir/runs-$event.json" 2>/dev/null || echo '[]'; fi ;;
 "run view")
     [ -f "$dir/jobs-$3.fail" ] && { echo "HTTP 502" >&2; exit 1; }
     cat "$dir/jobs-$3.json" 2>/dev/null || echo '{"jobs":[]}' ;;
@@ -91,6 +99,27 @@ pub fn attempts(gh: &Path, runs: &[(i64, i64, &str, &str)]) {
         })
         .collect();
     fs::write(gh.with_file_name("runs.json"), json!(list).to_string()).unwrap();
+}
+
+/// The runs `gh run list --event schedule` returns: (id, conclusion,
+/// commit), each at its first attempt, created after the push runs.
+pub fn scheduled_runs(gh: &Path, runs: &[(i64, &str, &str)]) {
+    let list: Vec<Value> = runs
+        .iter()
+        .map(|(id, conclusion, sha)| {
+            json!({
+                "databaseId": id, "number": id, "attempt": 1, "headSha": sha,
+                "conclusion": conclusion,
+                "url": format!("https://github.com/owner/name/actions/runs/{id}"),
+                "createdAt": format!("2026-10-07T00:{:02}:00Z", id % 60), "displayTitle": "x",
+            })
+        })
+        .collect();
+    fs::write(
+        gh.with_file_name("runs-schedule.json"),
+        json!(list).to_string(),
+    )
+    .unwrap();
 }
 
 /// A red run's failed job and its JUnit, with `failed` failing and

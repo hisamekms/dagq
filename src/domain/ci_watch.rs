@@ -20,6 +20,8 @@ use super::event_kind::EventKind;
 use super::toolchain::JunitTestName;
 use super::{AttentionNext, RunEvent};
 
+pub mod scheduled;
+
 /// A finished run of the watched workflow was read (one per run whose
 /// outcome is settled; a check that found none writes nothing).
 pub const CI_CHECKED: &str = EventKind::CiChecked.as_str();
@@ -105,15 +107,27 @@ pub struct CiWatchConfig {
     /// docs-only push), is absent, or whose jobs cannot be read is not
     /// green ([`read_green`]). Empty (the key left out) reads no job.
     pub required_jobs: Vec<String>,
+    /// `scheduled_workflows = ["file.yml", ...]`: more workflows (file
+    /// names or names, distinct and non-blank) whose `schedule` and
+    /// `workflow_dispatch` runs on the watched branch each check reads
+    /// too (ADR-t3807-1). Each finished run is recorded once
+    /// ([`scheduled::CI_SCHEDULED_CHECKED`]); a failed one opens (or
+    /// updates) the workflow's [`scheduled::SCHEDULED_FINDING_KIND`]
+    /// finding marked for a proposal, and a later success resolves it.
+    /// They touch neither the list of the tests that fail already, the
+    /// state green or red, nor any hold of the claims or the landings.
+    /// Empty (the key left out) reads none.
+    pub scheduled_workflows: Vec<String>,
 }
 
 impl CiWatchConfig {
-    pub const KEYS: [&'static str; 5] = [
+    pub const KEYS: [&'static str; 6] = [
         "workflow",
         "branch",
         "interval_secs",
         "junit_artifacts",
         "required_jobs",
+        "scheduled_workflows",
     ];
 
     /// How long after a check the next one is due.
@@ -301,16 +315,28 @@ impl CiRun {
 /// new attempt, is still read; only the newest one at the first check of
 /// a queue. `gap` when the list was full and even its oldest run came
 /// after the latest recorded one: the runs in between are not read.
-pub fn runs_to_process(mut runs: Vec<CiRun>, watch: &WatchState) -> (Vec<CiRun>, bool) {
+pub fn runs_to_process(runs: Vec<CiRun>, watch: &WatchState) -> (Vec<CiRun>, bool) {
+    unprocessed(runs, watch.head(), watch.floor.as_ref(), &watch.processed)
+}
+
+/// [`runs_to_process`] against a record's latest run (`head`), first run
+/// (`floor`) and processed runs: what the scheduled workflows read too
+/// ([`scheduled::scheduled_runs_to_process`]).
+fn unprocessed(
+    mut runs: Vec<CiRun>,
+    head: Option<(&str, i64)>,
+    floor: Option<&(String, i64)>,
+    processed: &BTreeSet<(i64, i64)>,
+) -> (Vec<CiRun>, bool) {
     runs.sort_by(|a, b| a.key().cmp(&b.key()));
-    let (Some(head), Some((floor_at, floor_id))) = (watch.head(), &watch.floor) else {
+    let (Some(head), Some((floor_at, floor_id))) = (head, floor) else {
         return (runs.pop().into_iter().collect(), false);
     };
     let gap = runs.len() >= RUN_LIST_LIMIT && runs.first().is_some_and(|run| run.key() > head);
     let floor = (floor_at.as_str(), *floor_id);
     let runs = runs
         .into_iter()
-        .filter(|run| run.key() >= floor && !watch.processed.contains(&(run.run_id, run.attempt)))
+        .filter(|run| run.key() >= floor && !processed.contains(&(run.run_id, run.attempt)))
         .collect();
     (runs, gap)
 }
@@ -850,7 +876,8 @@ pub struct RangeFacts {
 /// The `ci_failure` finding a red run with new failures records.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FailureFinding {
-    /// `ci_failure:<key>` ([`failure_key`]).
+    /// `ci_failure:<key>` ([`failure_key`]); a scheduled workflow's is
+    /// [`scheduled::scheduled_subject`].
     pub subject: String,
     pub summary: String,
     /// What the fix task carries, one JSON object, which the planner copies
@@ -2581,6 +2608,7 @@ mod tests {
             interval_secs: DEFAULT_INTERVAL_SECS,
             junit_artifacts: Vec::new(),
             required_jobs: vec!["rust".into(), "linux".into()],
+            scheduled_workflows: Vec::new(),
         };
         let success = run(2, "success", "2026-10-06T02:00:00Z");
         let linux = vec!["linux".to_owned()];

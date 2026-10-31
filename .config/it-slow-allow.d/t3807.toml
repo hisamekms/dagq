@@ -1,0 +1,11 @@
+# 14.430s in the worker's stress
+[[test]]
+name = "runtime_ci_watch::the_watch_records_runs_files_one_finding_per_failure_set_and_keeps_the_list"
+reason = "B 境界（守る境界）: the output of a gh process read for the push and the scheduled workflows' runs and their records and findings written to SQLite by the supervisor's checks"
+task = 3807
+
+# 10.024s in the worker's stress
+[[test]]
+name = "runtime_ci_watch::a_run_that_ends_late_and_a_green_re_run_are_each_recorded_once"
+reason = "B 境界（守る境界）: the gh process's run lists read across checks and recorded once in SQLite, with no scheduled run read without the key"
+task = 3807

@@ -6,6 +6,7 @@ status: current
 created: 2026-10-06
 scope: runtime
 related:
+  - adr-t3807-1
   - adr-t2034-1
   - adr-t1920-1
   - adr-t2928-1
@@ -33,6 +34,7 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
 確かめ: 読む手段 → 終わった実行の一覧 → 未処理の実行を作られた順に
         └─ 成否の決まらない実行は次に決まった実行が引き受ける
         └─ 決まった実行ごとに 落ちたjobとstep・JUnit → 一覧の足し引き → 1つのトランザクションで記録（ci_checked・赤緑の転換・finding・resolved）
+      → 宣言した定時のworkflowごとに 未処理の実行を作られた順に → 1つのトランザクションで記録（ci_scheduled_checked・finding・resolved）
 読み手: ci failures・status・着地の検証・workerとreviewのprompt
 ```
 
@@ -52,6 +54,7 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
 - 後に作られた実行が決めた一覧と状態を、遅れて終わった古い実行で戻さない（`domain::ci_watch::decide`）。
 - 名指したjobが揃って通ったと分からない`success`の実行を緑と読まないので、一覧はjobの分からない実行では空にならない（[ADR-t2034-1](../../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）。
 - 読む手段が無い間と最初の答えの前は、新しいclaim・resume・着地を始めない。
+- 定時のworkflowの実行は一覧・赤と緑・着地の検証・claimと着地の保留を変えず、読めないときも見張りの一時の失敗に数えない（[ADR-t3807-1](../../adr/2026-10-31-t3807-1-ci-watch-reads-declared-scheduled-workflows-and-files-their-failures-as-findings.md)）。
 
 ## いつ確かめるか
 
@@ -74,6 +77,16 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
 - testの名前は、JUnitを読む最初の宣言したprofileが道具の表示と同じに作る（`Toolchains::junit_test_name`、[Toolchain profiles](../toolchain-profiles.md)）。
 - testの名前が取れない失敗をjobとstepの項目にする規則は`decide`と`FailedJob`が持つ。
 - 落とし穴: docsだけのpushで落ちたdocの検査の項目は、docsだけの修正の実行では外れず、Rustのjobも流して通る実行で外れる（ADR-t2034-1決定4）。
+
+## 定時のworkflow
+
+- `[ci_watch]`が宣言した追加のworkflowの、着地先のbranchの定時と手動の実行を、pushの実行の後に同じ確かめで読む（[ADR-t3807-1](../../adr/2026-10-31-t3807-1-ci-watch-reads-declared-scheduled-workflows-and-files-their-failures-as-findings.md)）。
+  宣言の無いprojectでは何も読まない。
+- 判断（どの実行を記録するか・findingを開くか閉じるか）は`domain::ci_watch::scheduled`、1回の確かめは`application::ci_watch::check_scheduled`、記録は`SqliteQueue::record_ci_scheduled_check`が持つ。
+- 記録はpushの`ci_checked`と別のeventで、`WatchState::fold`は読まない。
+  同じ実行の記録の取り合いはpushと同じ形（`ScheduledCheckRecord::previous`）。
+- findingは`ci_failure`と別の種類で、改善として数える。
+  plannerへの載せ方は[Finding planners](finding-planners.md)の「CIの見張りの定時のworkflowのfinding」。
 
 ## 一覧
 

@@ -710,6 +710,7 @@ pub(super) const METHODS: &[Method] = &[
     method("QueueRecords", "reports_written", All),
     method("QueueRecords", "kpi_breaches_open", All),
     method("QueueRecords", "ci_watch_events", All),
+    method("QueueRecords", "ci_scheduled_events", All),
     method("QueueRecords", "ci_failure_findings_of", All),
     method("QueueRecords", "ci_failure_fix_tasks", All),
     method("NodeSampleStore", "record_node_sample", Only(&[Host])), // the record of the host's load

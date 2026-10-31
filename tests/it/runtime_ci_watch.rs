@@ -55,8 +55,27 @@ fn watching(mut options: SuperviseOptions, gh: &Path) -> SuperviseOptions {
 fn watch_events(db: &Path) -> Vec<(String, Value)> {
     events_where(
         db,
-        "kind LIKE 'ci_%' AND kind NOT IN ('ci_watch_held', 'ci_watch_resumed')",
+        "kind LIKE 'ci_%' AND kind NOT IN ('ci_watch_held', 'ci_watch_resumed', 'ci_scheduled_checked')",
     )
+}
+
+/// The finding `id`, whatever its status.
+fn scheduled_finding_of(db: &Path, id: i64) -> dagq::domain::Finding {
+    let query = dagq::domain::FindingQuery {
+        id: Some(FindingId::new(id)),
+        ..Default::default()
+    };
+    let mut found = SqliteQueue::open(db).unwrap().findings(&query).unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    found.remove(0).finding
+}
+
+/// The records of the scheduled workflows' runs, oldest first.
+fn scheduled_events(db: &Path) -> Vec<Value> {
+    events_where(db, "kind = 'ci_scheduled_checked'")
+        .into_iter()
+        .map(|(_, payload)| payload)
+        .collect()
 }
 
 /// The supervisors' `ci_watch_held` / `ci_watch_resumed`.
@@ -91,7 +110,8 @@ fn events_where(db: &Path, filter: &str) -> Vec<(String, Value)> {
 #[test]
 fn the_watch_records_runs_files_one_finding_per_failure_set_and_keeps_the_list() {
     let (fixture, repo, db) = fixture();
-    let gh = watched(&fixture, &repo);
+    // A scheduled workflow is declared too; it has no run until the end.
+    let gh = watched_with(&fixture, &repo, "scheduled_workflows = [\"nightly.yml\"]\n");
     fs::write(gh.with_file_name("authed"), "").unwrap();
     // Nothing to claim: only the watch works.
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -304,6 +324,63 @@ fn the_watch_records_runs_files_one_finding_per_failure_set_and_keeps_the_list()
     let list = runtime::ci_failures(&db, None).unwrap();
     assert_eq!(list["state"], "green");
     assert_eq!(list["failures"], json!([]));
+    assert_eq!(scheduled_events(&db), Vec::<Value>::new());
+
+    // ADR-t3807-1: the declared scheduled workflow fails on the branch.
+    // Its run is recorded once with its own finding, marked for a
+    // proposal, and the list, the state and the holds stay as they were.
+    scheduled_runs(&gh, &[(101, "failure", &fixed)]);
+    fs::write(
+        gh.with_file_name("jobs-101.json"),
+        json!({"jobs": [{"name": "budget", "conclusion": "failure",
+                         "steps": [{"name": "measure", "conclusion": "failure"}]}]})
+        .to_string(),
+    )
+    .unwrap();
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    let scheduled = scheduled_events(&db);
+    assert_eq!(scheduled.len(), 1, "{scheduled:?}");
+    assert_eq!(scheduled[0]["workflow"], "nightly.yml");
+    assert_eq!(scheduled[0]["state"], "red");
+    assert_eq!(
+        scheduled[0]["failed_jobs"],
+        json!([{"job": "budget", "steps": ["measure"]}])
+    );
+    let scheduled_finding = scheduled[0]["finding_id"].as_i64().unwrap();
+    let finding = scheduled_finding_of(&db, scheduled_finding);
+    assert_eq!(finding.kind, "ci_scheduled_failure");
+    assert_eq!(finding.subject, "ci_scheduled_failure:nightly.yml");
+    assert_eq!(finding.status, FindingStatus::Open);
+    assert!(finding.propose_reason.is_some());
+    let detail: Value = serde_json::from_str(&finding.detail).unwrap();
+    assert_eq!(
+        detail["url"],
+        "https://github.com/owner/name/actions/runs/101"
+    );
+    assert_eq!(watch_events(&db).len(), 6);
+    // Each start holds only until its first answer, as before.
+    assert!(
+        hold_events(&db)
+            .iter()
+            .all(|(_, payload)| payload["reason"] == "pending"),
+        "{:?}",
+        hold_events(&db)
+    );
+    let list = runtime::ci_failures(&db, None).unwrap();
+    assert_eq!(list["state"], "green");
+    assert_eq!(list["failures"], json!([]));
+    assert_eq!(list["latest_run"]["run_id"], 5);
+
+    // Its next run passes: the finding is resolved.
+    scheduled_runs(&gh, &[(101, "failure", &fixed), (102, "success", &fixed)]);
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    let scheduled = scheduled_events(&db);
+    assert_eq!(scheduled.len(), 2, "{scheduled:?}");
+    assert_eq!(scheduled[1]["state"], "green");
+    let finding = scheduled_finding_of(&db, scheduled_finding);
+    assert_eq!(finding.status, FindingStatus::Resolved);
+    assert_eq!(watch_events(&db).len(), 6);
     backend.join();
 }
 
@@ -707,6 +784,10 @@ fn a_run_that_ends_late_and_a_green_re_run_are_each_recorded_once() {
         .findings(&dagq::domain::FindingQuery::default())
         .unwrap();
     assert!(open.is_empty(), "{open:?}");
+    // Without scheduled_workflows no scheduled run is read (ADR-t3807-1).
+    let calls = fs::read_to_string(gh.with_file_name("calls")).unwrap();
+    assert!(!calls.contains("--event schedule"), "{calls}");
+    assert!(calls.contains("--event push"), "{calls}");
     backend.join();
 }
 

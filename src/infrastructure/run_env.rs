@@ -272,8 +272,9 @@ const REVIEW_REVISE_LIMIT: &str = "revise_limit";
 /// (ADR-t1920-1). `workflow` (a non-blank string) is required; `branch`
 /// (a branch name without `refs/heads/`), `interval_secs` (at least
 /// [`MIN_INTERVAL_SECS`]), `junit_artifacts` (an array of distinct
-/// non-blank globs) and `required_jobs` (an array of distinct non-blank
-/// job names, ADR-t2034-1) are optional; what each means is on
+/// non-blank globs), `required_jobs` (an array of distinct non-blank
+/// job names, ADR-t2034-1) and `scheduled_workflows` (an array of distinct
+/// non-blank workflows, ADR-t3807-1) are optional; what each means is on
 /// [`CiWatchConfig`].
 const CI_WATCH_TABLE: &str = "ci_watch";
 /// `[landing_verification]`: the command `integrate` runs in place of
@@ -1127,6 +1128,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         interval_secs: DEFAULT_INTERVAL_SECS,
                         junit_artifacts: Vec::new(),
                         required_jobs: Vec::new(),
+                        scheduled_workflows: Vec::new(),
                     },
                 ));
             }
@@ -1868,19 +1870,28 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         }
                         config.junit_artifacts = globs;
                     }
-                    "required_jobs" => {
+                    "required_jobs" | "scheduled_workflows" => {
                         let names = parse_string_array(rest.trim()).with_context(with)?;
+                        let what = if key == "required_jobs" {
+                            "job name"
+                        } else {
+                            "workflow"
+                        };
                         for (index, name) in names.iter().enumerate() {
                             ensure!(
                                 !name.trim().is_empty(),
-                                "{CONFIG_FILE_NAME}:{number}: {key} has a blank job name"
+                                "{CONFIG_FILE_NAME}:{number}: {key} has a blank {what}"
                             );
                             ensure!(
                                 !names[..index].contains(name),
                                 "{CONFIG_FILE_NAME}:{number}: {key} names {name:?} twice"
                             );
                         }
-                        config.required_jobs = names;
+                        if key == "required_jobs" {
+                            config.required_jobs = names;
+                        } else {
+                            config.scheduled_workflows = names;
+                        }
                     }
                     _ => {
                         let value = parse_string(rest.trim()).with_context(with)?;
@@ -6186,11 +6197,12 @@ LITERAL = 'no \n escapes # here'
                 interval_secs: 600,
                 junit_artifacts: Vec::new(),
                 required_jobs: Vec::new(),
+                scheduled_workflows: Vec::new(),
             })
         );
         assert_eq!(
             parse_config(
-                "[ci_watch]\nworkflow = 'CI'\nbranch = 'trunk'\ninterval_secs = 60 # a minute\njunit_artifacts = ['junit-*', 'more'] # globs\nrequired_jobs = ['Rust (macOS)', 'linux']\n"
+                "[ci_watch]\nworkflow = 'CI'\nbranch = 'trunk'\ninterval_secs = 60 # a minute\njunit_artifacts = ['junit-*', 'more'] # globs\nrequired_jobs = ['Rust (macOS)', 'linux']\nscheduled_workflows = ['it-budget.yml', 'Stress']\n"
             )
             .unwrap()
             .ci_watch,
@@ -6200,13 +6212,14 @@ LITERAL = 'no \n escapes # here'
                 interval_secs: 60,
                 junit_artifacts: vec!["junit-*".into(), "more".into()],
                 required_jobs: vec!["Rust (macOS)".into(), "linux".into()],
+                scheduled_workflows: vec!["it-budget.yml".into(), "Stress".into()],
             })
         );
         for (text, expected) in [
             ("[ci_watch]\n", "dagq.toml:1: [ci_watch] has no workflow"),
             (
                 "[ci_watch]\nworkflow = 'a'\nkind = 'b'\n",
-                "dagq.toml:3: unknown key kind in [ci_watch]; the keys are workflow, branch, interval_secs, junit_artifacts, required_jobs",
+                "dagq.toml:3: unknown key kind in [ci_watch]; the keys are workflow, branch, interval_secs, junit_artifacts, required_jobs, scheduled_workflows",
             ),
             (
                 "[ci_watch]\nworkflow = 'a'\nworkflow = 'b'\n",
@@ -6251,6 +6264,18 @@ LITERAL = 'no \n escapes # here'
             (
                 "[ci_watch]\nworkflow = 'a'\nrequired_jobs = ['x', 'x']\n",
                 "dagq.toml:3: required_jobs names \"x\" twice",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\nscheduled_workflows = 'x'\n",
+                "dagq.toml:3: value of scheduled_workflows",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\nscheduled_workflows = [' ']\n",
+                "dagq.toml:3: scheduled_workflows has a blank workflow",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\nscheduled_workflows = ['x', 'x']\n",
+                "dagq.toml:3: scheduled_workflows names \"x\" twice",
             ),
             (
                 "[ci_watch]\nworkflow = 'a'\n[ci_watch]\n",
@@ -6968,14 +6993,19 @@ enabled = true
         assert!(load_replan(dir.path()).unwrap().unwrap().enabled);
     }
 
-    /// This repository's own `dagq.toml` reads, and leaves the runtime's
-    /// detection off: it adds no `[replan]` until the fixed binary that
-    /// runs its queue reads the table.
+    /// This repository's own `dagq.toml` reads, and turns the runtime's
+    /// detection on with every other key of `[replan]` at its default.
     #[test]
-    fn the_repositorys_own_config_leaves_the_replan_detection_off() {
+    fn the_repositorys_own_config_turns_the_replan_detection_on_at_the_defaults() {
         let text = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(CONFIG_FILE_NAME))
             .unwrap();
-        assert_eq!(parse_config(&text).unwrap().replan, ReplanConfig::default());
+        assert_eq!(
+            parse_config(&text).unwrap().replan,
+            ReplanConfig {
+                enabled: true,
+                ..ReplanConfig::default()
+            }
+        );
     }
 
     /// `[supervisor] light_changes` names changes of `[tasks] changes`,

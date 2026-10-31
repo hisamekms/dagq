@@ -151,6 +151,7 @@ event_kinds! {
     CiCheckFailed => "ci_check_failed",
     CiChecked => "ci_checked",
     CiJobsMissing => "ci_jobs_missing",
+    CiScheduledChecked => "ci_scheduled_checked",
     CiTurnedGreen => "ci_turned_green",
     CiTurnedRed => "ci_turned_red",
     CiWatchAvailable => "ci_watch_available",
@@ -613,6 +614,9 @@ impl EventKind {
                 | CiWatchAvailable
                 | CiCheckFailed
                 | CiJobsMissing
+                // A run of a scheduled workflow `[ci_watch]` declares
+                // (ADR-t3807-1).
+                | CiScheduledChecked
                 // The supervisor's hold of its claims for the CI watch and
                 // for a landing branch that does not resolve (task 2016).
                 | CiWatchHeld
@@ -1627,6 +1631,7 @@ mod tests {
             (EventKind::CiCheckFailed, "ci_check_failed"),
             (EventKind::CiChecked, "ci_checked"),
             (EventKind::CiJobsMissing, "ci_jobs_missing"),
+            (EventKind::CiScheduledChecked, "ci_scheduled_checked"),
             (EventKind::CiTurnedGreen, "ci_turned_green"),
             (EventKind::CiTurnedRed, "ci_turned_red"),
             (EventKind::CiWatchAvailable, "ci_watch_available"),

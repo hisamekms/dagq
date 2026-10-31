@@ -150,7 +150,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 
 - `[ci_watch]`はsupervisorが着地先のbranchのCIの結果を`gh`で読む見張りの設定で（[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)。振る舞いは[CI watch](ci-watch.md)）、表があるときだけ有効になる（表が無ければ無効で、何も読まず何も記録しない）。
   keyの型・既定・意味は`domain::ci_watch::CiWatchConfig`のdoc commentが持ち、読み直しと`up`のpreflightは[CI watch](ci-watch.md)の「いつ確かめるか」と「読む手段が無いとき」が持つ。
-  この repositoryの値は`dagq.toml`の`[ci_watch]`が持ち、`ci.yml`で成果物やRustのjobの名前（`required_jobs`、[CI watch](ci-watch.md)の「実行の扱い」）を変えたら同じ変更で合わせる。
+  この repositoryの値は`dagq.toml`の`[ci_watch]`が持ち、workflowとjobの名前や成果物（[CI watch](ci-watch.md)の「実行の扱い」と「定時のworkflow」）を変えたら同じ変更で合わせる。
 - `[landing_verification]`は`integrate`がtaskの検証のコマンドの一部をrepositoryの着地の検証のコマンドに置き換える設定で（ADR-t1925-1。流れと境界は[Validation](validation.md#着地の検証)）、表があるときだけ働く。
   `integrate`が着地のたびにmain checkoutから読む（読めなければ`[run.env]`と同じく着地処理のエラー）。
   書式（key・型・既定値・検査）と、置き換えたコマンドにだけ`[run.env]`の後ろに足すenvの意味は`domain::landing_verification`のdoc commentが持つ。

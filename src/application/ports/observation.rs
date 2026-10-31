@@ -539,6 +539,16 @@ pub trait QueueRecords {
         &self,
         finding: crate::domain::NewFinding,
     ) -> Result<Option<crate::domain::FindingId>>;
+    /// Every `ci_scheduled_checked` event (the runs of the scheduled
+    /// workflows `[ci_watch]` declares, ADR-t3807-1), oldest first.
+    fn ci_scheduled_events(&self) -> Result<Vec<RunEvent>>;
+    /// Record one run of a scheduled workflow in one write transaction
+    /// unless another supervisor recorded one since `record.previous`;
+    /// `None` then.
+    fn record_ci_scheduled_check(
+        &self,
+        record: crate::domain::ci_watch::scheduled::ScheduledCheckRecord,
+    ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>>;
     /// The `ci_failure` findings `task` fixes (linked to its proposal, or
     /// dismissed as covered by it).
     fn ci_failure_findings_of(&self, task: TaskId) -> Result<Vec<crate::domain::FindingId>>;

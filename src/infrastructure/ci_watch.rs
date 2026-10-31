@@ -20,6 +20,7 @@ use crate::application::ci_watch::CiSource;
 use crate::domain::ci_watch::{
     Access, CI_WATCH_CALL_TIMEOUT, CiJob, CiRun, CiWatchConfig, FailedJob, Junit, RUN_LIST_LIMIT,
     Unavailable, github_repo, job_failed, merge_outcomes, parse_junit, remote_repo,
+    scheduled::SCHEDULED_EVENTS,
 };
 use crate::domain::toolchain::JunitTestName;
 
@@ -118,6 +119,46 @@ impl GhSource {
         command.arg("-C").arg(&self.checkout).args(args);
         let (status, stdout, _) = capture(&mut command, self.timeout).ok()?;
         Some((status.success(), stdout))
+    }
+
+    /// The finished runs of `workflow` on the watched branch triggered by
+    /// `event`, at most [`RUN_LIST_LIMIT`].
+    fn runs_of(&self, workflow: &str, event: &str) -> Result<Vec<CiRun>> {
+        let limit = RUN_LIST_LIMIT.to_string();
+        let out = self.gh(&[
+            "run",
+            "list",
+            "--workflow",
+            workflow,
+            "--branch",
+            &self.branch,
+            "--event",
+            event,
+            "--status",
+            "completed",
+            "--limit",
+            &limit,
+            "--json",
+            "databaseId,number,attempt,headSha,conclusion,url,createdAt,displayTitle",
+        ])?;
+        let runs: Vec<Value> =
+            serde_json::from_str(&out).context("read the output of gh run list")?;
+        runs.iter()
+            .map(|run| {
+                let text = |key: &str| run[key].as_str().unwrap_or_default().to_owned();
+                Ok(CiRun {
+                    run_id: run["databaseId"]
+                        .as_i64()
+                        .context("a run of gh run list has no databaseId")?,
+                    run_number: run["number"].as_i64().unwrap_or_default(),
+                    sha: text("headSha"),
+                    conclusion: text("conclusion"),
+                    url: text("url"),
+                    created_at: text("createdAt"),
+                    attempt: run["attempt"].as_i64().unwrap_or(1),
+                })
+            })
+            .collect()
     }
 
     /// The JUnit XML files of one run's artifacts, downloaded under
@@ -230,41 +271,15 @@ impl CiSource for GhSource {
     }
 
     fn completed_runs(&self) -> Result<Vec<CiRun>> {
-        let limit = RUN_LIST_LIMIT.to_string();
-        let out = self.gh(&[
-            "run",
-            "list",
-            "--workflow",
-            &self.config.workflow,
-            "--branch",
-            &self.branch,
-            "--event",
-            "push",
-            "--status",
-            "completed",
-            "--limit",
-            &limit,
-            "--json",
-            "databaseId,number,attempt,headSha,conclusion,url,createdAt,displayTitle",
-        ])?;
-        let runs: Vec<Value> =
-            serde_json::from_str(&out).context("read the output of gh run list")?;
-        runs.iter()
-            .map(|run| {
-                let text = |key: &str| run[key].as_str().unwrap_or_default().to_owned();
-                Ok(CiRun {
-                    run_id: run["databaseId"]
-                        .as_i64()
-                        .context("a run of gh run list has no databaseId")?,
-                    run_number: run["number"].as_i64().unwrap_or_default(),
-                    sha: text("headSha"),
-                    conclusion: text("conclusion"),
-                    url: text("url"),
-                    created_at: text("createdAt"),
-                    attempt: run["attempt"].as_i64().unwrap_or(1),
-                })
-            })
-            .collect()
+        self.runs_of(&self.config.workflow, "push")
+    }
+
+    fn scheduled_runs(&self, workflow: &str) -> Result<Vec<CiRun>> {
+        let mut runs = Vec::new();
+        for event in SCHEDULED_EVENTS {
+            runs.extend(self.runs_of(workflow, event)?);
+        }
+        Ok(runs)
     }
 
     fn failed_jobs(&self, run_id: i64) -> Result<Vec<FailedJob>> {

@@ -94,6 +94,15 @@ impl QueueRecords for Records {
     ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>> {
         unimplemented!()
     }
+    fn ci_scheduled_events(&self) -> Result<Vec<RunEvent>> {
+        unimplemented!()
+    }
+    fn record_ci_scheduled_check(
+        &self,
+        _: crate::domain::ci_watch::scheduled::ScheduledCheckRecord,
+    ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>> {
+        unimplemented!()
+    }
     fn record_finding_once(
         &self,
         _: crate::domain::NewFinding,

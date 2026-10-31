@@ -136,6 +136,15 @@ impl QueueRecords for SqliteQueue {
     ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>> {
         SqliteQueue::record_ci_check(self, record)
     }
+    fn ci_scheduled_events(&self) -> Result<Vec<RunEvent>> {
+        SqliteQueue::ci_scheduled_events(self)
+    }
+    fn record_ci_scheduled_check(
+        &self,
+        record: crate::domain::ci_watch::scheduled::ScheduledCheckRecord,
+    ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>> {
+        SqliteQueue::record_ci_scheduled_check(self, record)
+    }
     fn record_finding_once(
         &self,
         finding: crate::domain::NewFinding,

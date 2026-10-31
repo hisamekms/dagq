@@ -221,6 +221,12 @@ impl ObservationState {
                 if outcome.recorded > 0 {
                     info!("the CI watch recorded {} run(s)", outcome.recorded);
                 }
+                if outcome.scheduled > 0 {
+                    info!(
+                        "the CI watch recorded {} run(s) of the scheduled workflows",
+                        outcome.scheduled
+                    );
+                }
             }
             Err(error) => {
                 let message = format!("{error:#}");

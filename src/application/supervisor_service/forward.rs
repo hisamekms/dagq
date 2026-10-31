@@ -2616,6 +2616,15 @@ impl QueueRecords for SupervisorQueue {
     ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>> {
         self.remote("record_ci_check", vec![to_value(record)?])
     }
+    fn ci_scheduled_events(&self) -> Result<Vec<RunEvent>> {
+        self.remote("ci_scheduled_events", vec![])
+    }
+    fn record_ci_scheduled_check(
+        &self,
+        record: crate::domain::ci_watch::scheduled::ScheduledCheckRecord,
+    ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>> {
+        self.remote("record_ci_scheduled_check", vec![to_value(record)?])
+    }
     fn record_finding_once(
         &self,
         finding: crate::domain::NewFinding,
