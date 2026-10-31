@@ -215,12 +215,16 @@ fn the_spike_limit_defers_a_spike_and_gives_its_slot_to_an_implementation() {
         assert_eq!(runs[0].status(), RunStatus::AwaitingIntegration);
     }
 
-    let stats = crate::common::cli::ok(&db, &["stats", "--full"]);
-    assert_eq!(stats["claim_waits"]["spike"]["count"], 2, "{stats}");
-    assert_eq!(
-        stats["claim_waits"]["implementation"]["count"], 2,
-        "{stats}"
-    );
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = crate::common::cli::ok(&db, &["stats", "--full"]);
+        assert_eq!(stats["claim_waits"]["spike"]["count"], 2, "{stats}");
+        assert_eq!(
+            stats["claim_waits"]["implementation"]["count"], 2,
+            "{stats}"
+        );
+    }
 }
 
 /// Without `max_spikes` nothing limits the Spikes: three of them take the

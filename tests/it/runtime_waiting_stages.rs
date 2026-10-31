@@ -244,8 +244,12 @@ fn a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped() {
         fs::read_to_string(repo.join("answer.txt")).unwrap(),
         format!("answer to ask {ask}: the second")
     );
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(stats["waiting"]["started"]["worker_question"], 1, "{stats}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        assert_eq!(stats["waiting"]["started"]["worker_question"], 1, "{stats}");
+    }
 }
 
 /// A worker that asks twice while it revises: the turn of the revise
@@ -617,8 +621,12 @@ fn a_resume_question_waits_in_its_slot_then_outside_it_with_its_clock_stopped() 
         payloads(&detail, "resume_finished")[0]["outcome"],
         "resolved"
     );
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(stats["waiting"]["deferred"], 1, "{stats}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        assert_eq!(stats["waiting"]["deferred"], 1, "{stats}");
+    }
     // Kept in its slot, the question is a wait there from the pass that
     // defers it; the wait outside the slots is a record of its own, and
     // back in its slot the run resumes.

@@ -106,7 +106,14 @@ fn migrate_is_explicit_and_older_binaries_keep_working_within_the_floor() {
     // memory; the file stays at schema 23 (ADR-0045 decision 18).
     assert_eq!(ok(&db, &["list"])["total"], 1);
     assert_eq!(ok(&db, &["show", "1"])["task"]["title"], "old task");
-    for args in [&["status"][..], &["graph"], &["stats"], &["goal", "list"]] {
+    for args in [
+        &["status"][..],
+        &["graph"],
+        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+        #[cfg(any())]
+        &["stats"],
+        &["goal", "list"],
+    ] {
         ok(&db, args);
     }
     assert_eq!(version(), 23);
@@ -975,7 +982,7 @@ exec {quoted_bin} \"$@\"\n"
 
     // The steps are queue events (ADR-0073 decision 17): `events` shows
     // them by kind with their commit, an install is an attention `watch`
-    // wakes on, `stats` counts them, and `binary_updates` stays empty.
+    // wakes on, `events` counts them by kind, and `binary_updates` stays empty.
     let steps = ok(
         &db,
         &[
@@ -1008,17 +1015,24 @@ exec {quoted_bin} \"$@\"\n"
         .collect();
     assert_eq!(installs.len(), 3, "{watched}");
     assert_eq!(installs[0]["next"], "report the update", "{watched}");
-    let stats = ok(&db, &["stats", "--full"]);
-    let updates_stats = &stats["updates"];
-    assert_eq!(updates_stats["by_kind"]["update_installed"], 3, "{stats}");
-    assert_eq!(updates_stats["failed_by_stage"]["install"], 1, "{stats}");
-    assert!(updates_stats["by_kind"]["update_started"].as_i64() >= Some(4));
+    let of_kind = |kind: &str| -> Vec<Value> {
+        ok(&db, &["events", "--all", "--kind", kind, "--limit", "1000"])["events"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let failed_at = |stage: &str| {
+        of_kind("update_failed")
+            .iter()
+            .filter(|e| e["stage"] == stage)
+            .count()
+    };
+    assert_eq!(of_kind("update_installed").len(), 3);
+    assert_eq!(failed_at("install"), 1);
+    assert!(of_kind("update_started").len() >= 4);
     // Every build passed the e2e gate before it was put in place (ADR-t963-1).
-    assert!(
-        updates_stats["e2e"]["passed"].as_i64() >= Some(4),
-        "{stats}"
-    );
-    assert_eq!(updates_stats["e2e"]["failed"], 0, "{stats}");
+    assert!(of_kind("update_e2e_passed").len() >= 4);
+    assert_eq!(failed_at("e2e"), 0);
     let rows: i64 = rusqlite::Connection::open(&db)
         .unwrap()
         .query_row("SELECT count(*) FROM binary_updates", [], |r| r.get(0))

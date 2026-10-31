@@ -3,10 +3,14 @@
 //! and the landed commit's files from Git whenever they read, so a run
 //! landed before the map existed gets its areas, and changing the map
 //! reclassifies it. Nothing is stored.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 use crate::runtime_support::*;
 
 /// `dagq kpi` on the queue at `db` in UTC, with the host-wide settings
 /// read from `config` rather than the home of the person running the tests.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn kpi(db: &Path, config: &Path, args: &[&str]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command
@@ -29,6 +33,8 @@ fn kpi(db: &Path, config: &Path, args: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn stats_and_kpi_split_the_landed_runs_by_the_areas_of_their_commit() {
     let (dir, repo, db, run) = awaiting_run();
@@ -100,6 +106,8 @@ fn stats_and_kpi_split_the_landed_runs_by_the_areas_of_their_commit() {
 /// reads the landed commit's files with Git in the main checkout, and the
 /// service, whose Git logs each run, runs none, yet the report splits the
 /// landing by its areas.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn a_report_through_the_service_reads_the_areas_with_the_client_s_git() {
     let (dir, repo, db, _run) = awaiting_run();
@@ -150,6 +158,8 @@ fn a_report_through_the_service_reads_the_areas_with_the_client_s_git() {
 /// without reading that directory's `dagq.toml` (one that does not parse),
 /// and answers both for the main checkout it finds from the binding, the
 /// landed commit with them.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn a_report_naming_another_directory_than_the_main_checkout_is_refused_unread() {
     use dagq::domain::queue_service::{API_VERSION, ServiceRequest, UseCase};
@@ -227,6 +237,8 @@ fn a_report_naming_another_directory_than_the_main_checkout_is_refused_unread() 
 /// `dagq` with `args` on the queue at `db` through the queue service, in
 /// the host's time zone (the one the test reads the DB in) with the
 /// host-wide settings of `config`: the JSON it prints.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn served(db: &Path, config: &Path, args: &[&str]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command.without_actor_env().env("XDG_CONFIG_HOME", config);
@@ -253,6 +265,8 @@ fn served(db: &Path, config: &Path, args: &[&str]) -> Value {
 /// `[conflicts]` source is the file), and the areas, the conflict hotspots,
 /// the recurring drafts and the KPIs' landings are those `stats` and `kpi`
 /// on the DB read with Git themselves. `stats` and `kpi` as served.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn served_as_on_the_db(dir: &Path, repo: &Path, db: &Path, run: &TaskRun) -> (Value, Value) {
     use dagq::application::DraftPlannerStore;
     fs::write(
@@ -276,14 +290,18 @@ fn served_as_on_the_db(dir: &Path, repo: &Path, db: &Path, run: &TaskRun) -> (Va
     fs::write(&git_log, "").unwrap();
 
     let stats = served(db, &config, &["stats", "--full"]);
-    let ledger = served(db, &config, &["stats", "--ledger"]);
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1671 takes this cfg off.
+    #[cfg(any())]
+    {
+        let ledger = served(db, &config, &["stats", "--ledger"]);
+        assert!(ledger.get("fields").is_some(), "{ledger}");
+    }
     let kpi = served(db, &config, &["kpi", "--last", "1"]);
     assert_eq!(
         fs::read_to_string(&git_log).unwrap(),
         "",
         "the service ran Git"
     );
-    assert!(ledger.get("fields").is_some(), "{ledger}");
 
     let on_db = runtime::stats(
         db,
@@ -318,6 +336,8 @@ fn served_as_on_the_db(dir: &Path, repo: &Path, db: &Path, run: &TaskRun) -> (Va
 /// [`served_as_on_the_db`] on a repository with `[areas]`, a landed run
 /// and a conflict: the run's areas and the conflicted file's hotspot, with
 /// the landings main's history counts, are read.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn stats_and_kpi_through_the_service_read_areas_and_main_s_history_with_the_client_s_git() {
     let (dir, repo, db, run) = awaiting_run();
@@ -337,6 +357,8 @@ fn stats_and_kpi_through_the_service_read_areas_and_main_s_history_with_the_clie
 /// another directory: the service finds, with no Git, the main checkout
 /// `main_checkout_of` finds with Git on the DB (the directory of the
 /// `.git`), and reads its `dagq.toml`.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn stats_and_kpi_of_a_core_worktree_repository_through_the_service_are_those_on_the_db() {
     let (dir, repo, db, run) = awaiting_run();
@@ -360,6 +382,8 @@ fn stats_and_kpi_of_a_core_worktree_repository_through_the_service_are_those_on_
 /// the inputs before it, the client reads Git again for the new inputs and
 /// sends them, and the answer's hotspots, the new file's with them, are
 /// those of `stats` on the DB; the service runs no Git all along.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn a_conflict_between_the_inputs_and_stats_is_read_again_not_mixed() {
     use dagq::application::{DraftPlannerStore, queue_reads::QueueRead};

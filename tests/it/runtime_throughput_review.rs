@@ -1,6 +1,9 @@
 //! Runtime tests: the throughput review (ADR-t996-1, ADR-t1172-1).
 use crate::{common, runtime_support};
-use dagq::application::throughput_review::{PROMPT_INPUT_LIMIT, PROMPT_LIMIT, ReviewOptions};
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
+use dagq::application::throughput_review::PROMPT_INPUT_LIMIT;
+use dagq::application::throughput_review::{PROMPT_LIMIT, ReviewOptions};
 use dagq::domain::throughput_review::{HOUR_MS, ReviewMode, window};
 
 use runtime_support::*;
@@ -133,6 +136,9 @@ pub(crate) fn land(db: &Path, per_hour: &[usize]) {
 }
 
 /// The agent prints its review after trying what the queue refuses it.
+/// It reads the queue with `dagq status`: `dagq kpi` is stopped while it
+/// reads every event of the queue (ADR-t3745-1); task 1669 puts back
+/// `dagq kpi > kpi.json || exit 7` and the check of `kpi.json`.
 const REVIEWER: &str = r#"
 printf '%s' "$DAGQ_ROLE" > role.txt
 printf '%s' "$0" > mcp.txt
@@ -141,7 +147,7 @@ if q note --task 1 --text 'seen' 2> note.err; then exit 3; fi
 if q finding record --kind throughput --queue --summary 's' 2> finding.err; then exit 4; fi
 if q mark 'faster' 2> mark.err; then exit 5; fi
 if q ready 1 2> ready.err; then exit 6; fi
-dagq kpi > kpi.json || exit 7
+dagq status > status.json || exit 7
 printf '## Conclusion\n- landings rose to 10 in the hour\n- nothing to do\n\n## Details\nthe numbers\n'
 printf '```next_move\n{"summary": "split the e2e", "why": "verify is the constraint"}\n```\n'
 "#;
@@ -301,8 +307,12 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
             serde_json::from_str(&fs::read_to_string(dir.join(denied)).unwrap()).unwrap();
         assert_eq!(error["queue_service"]["code"], code, "{denied}: {error}");
     }
-    // It read the KPIs.
-    assert!(!fs::read_to_string(dir.join("kpi.json")).unwrap().is_empty());
+    // It read the queue.
+    assert!(
+        !fs::read_to_string(dir.join("status.json"))
+            .unwrap()
+            .is_empty()
+    );
     let input: Value =
         serde_json::from_str(&fs::read_to_string(dir.join("input.json")).unwrap()).unwrap();
     assert_eq!(input["landings"]["total"], 10);
@@ -373,11 +383,15 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
     assert_eq!(closed[0]["kind"], "throughput_review");
     assert_eq!(closed[0]["session_id"], *session);
     assert_eq!(closed[0]["reason"], "job_finished");
-    let stats = crate::common::cli::ok(&db, &["stats", "--full"]);
-    assert_eq!(
-        stats["sessions"]["by_kind"]["throughput_review"]["count"], 1,
-        "{stats}"
-    );
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = crate::common::cli::ok(&db, &["stats", "--full"]);
+        assert_eq!(
+            stats["sessions"]["by_kind"]["throughput_review"]["count"], 1,
+            "{stats}"
+        );
+    }
     // Nothing changed state but the review's own record.
     let mut queue = SqliteQueue::open(&db).unwrap();
     assert_eq!(
@@ -686,6 +700,8 @@ fn a_failed_review_is_recorded_and_told_to_the_inbox_as_a_notice() {
 /// Record `per_day` marks with long labels on each of the days from
 /// 2026-09-21 to 2026-09-28 (UTC): `kpi` lists each period's marks, so the
 /// review's inputs grow to a production day's MBs.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn mark_the_days(db: &Path, per_day: usize) {
     let mut connection = Connection::open(db).unwrap();
     let batch = connection.transaction().unwrap();
@@ -708,6 +724,8 @@ fn mark_the_days(db: &Path, per_day: usize) {
     batch.commit().unwrap();
 }
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_prompt() {
     let (_dir, _repo, db) = fixture();

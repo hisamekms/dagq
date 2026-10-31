@@ -1837,6 +1837,8 @@ fn failed_receipt_from_a_session_ends_the_run_without_landing() {
 /// first run's landing, whose main it was rebased onto, and counts the
 /// resumes by reason: the first resolved in its session but was deferred
 /// again, the second landed the run. A time window narrows the runs.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn stats_ties_a_deferred_landing_to_the_landing_that_broke_it() {
     use dagq::domain::stats::{Cursor, StatsQuery};

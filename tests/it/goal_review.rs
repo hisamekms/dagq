@@ -312,11 +312,15 @@ fn a_goal_review_records_its_launch_and_session() {
     assert_eq!(closed[0]["kind"], "goal_review");
     assert_eq!(closed[0]["session_id"], session);
     assert_eq!(closed[0]["reason"], "job_finished");
-    // `stats` counts the job under its provider (goal 73).
-    let jobs = &crate::common::cli::ok(&fx.db, &["stats", "--full"])["jobs"]["goal_review"];
-    assert_eq!((&jobs["count"], &jobs["failed"]), (&json!(1), &json!(0)));
-    assert_eq!(jobs["by_provider"]["claude"]["verdicts"]["achieved"], 1);
-    assert_eq!(jobs["by_provider"]["claude"]["secs"]["count"], 1);
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        // `stats` counts the job under its provider (goal 73).
+        let jobs = &crate::common::cli::ok(&fx.db, &["stats", "--full"])["jobs"]["goal_review"];
+        assert_eq!((&jobs["count"], &jobs["failed"]), (&json!(1), &json!(0)));
+        assert_eq!(jobs["by_provider"]["claude"]["verdicts"]["achieved"], 1);
+        assert_eq!(jobs["by_provider"]["claude"]["secs"]["count"], 1);
+    }
 }
 
 /// A `gaps` verdict registers its gaps as drafts of the open goal, whose

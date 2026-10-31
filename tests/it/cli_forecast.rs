@@ -1,20 +1,34 @@
 //! `dagq forecast` (ADR-0070 decisions 1 and 2) on a real queue: the open
 //! tasks and goals with their p50 and p90, what it assumed, the narrowing
 //! by task and goal, and that it records nothing.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 use dagq::domain::EventKind;
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 use dagq::domain::LeaseToken;
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 use std::{path::Path, process::Command};
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 use dagq::{
     domain::{ClaimOutcome, CommitSha, TaskRun},
     infrastructure::sqlite::SqliteQueue,
 };
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 use serde_json::{Value, json};
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 use crate::common::{Bounded, WithoutActor, cli::*};
 
 /// `dagq forecast` as `role`, with the host-wide `host.toml` read from
 /// `config` rather than the home of the person running the tests.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 fn forecast(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command.without_actor_env();
@@ -38,6 +52,8 @@ fn forecast(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> Valu
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 fn claim(queue: &mut SqliteQueue) -> TaskRun {
     let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
     let ClaimOutcome::Claimed { run } = queue
@@ -49,6 +65,8 @@ fn claim(queue: &mut SqliteQueue) -> TaskRun {
     *run
 }
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 fn ids(list: &Value) -> Vec<i64> {
     list.as_array()
         .unwrap()
@@ -59,6 +77,8 @@ fn ids(list: &Value) -> Vec<i64> {
 
 /// One feature task of a goal lands; a docs task of the goal is in flight,
 /// a third waits for it, and a task outside the goal waits for a slot.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
     let (dir, db) = queue();
@@ -159,6 +179,8 @@ fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
 }
 
 /// Set run `run`'s status as the runtime would have left it.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 fn set_run_status(db: &Path, run: &TaskRun, status: &str) {
     rusqlite::Connection::open(db)
         .unwrap()
@@ -169,6 +191,8 @@ fn set_run_status(db: &Path, run: &TaskRun, status: &str) {
         .unwrap();
 }
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 fn record(queue: &SqliteQueue, run: &TaskRun, steps: &[(EventKind, Value)]) {
     for (kind, payload) in steps {
         queue
@@ -183,6 +207,8 @@ fn record(queue: &SqliteQueue, run: &TaskRun, steps: &[(EventKind, Value)]) {
 /// in and waiting while it waits for a person; a failed run's retry and
 /// an earlier failed run of a task are not, and a ready task still waits
 /// for a slot.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn forecast_keeps_runs_under_review_revise_and_resume_in_flight() {
     let (dir, db) = queue();

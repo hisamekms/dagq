@@ -10,6 +10,7 @@ description: この repository の本番 queue の着地の流れ（スループ
 共通の決まり:
 
 - 使うのは固定バイナリ `~/.local/bin/dagq` の読み取りコマンド（`events`・`status`・`stats`・`kpi`・`timeline`・`report --print json`・`locate`）だけ。状態を変えるコマンドは打たない（`mark` は人の指示があるときだけで、この skill の範囲の外）
+- 今の build では `stats`（`--ledger` も）・`kpi`（`--compare` も）・`report`・`forecast`・`marks`・`mark` は queue の全 event を読むので止めてあり、読む前に理由と戻すもの（台帳の読み手）を名指して断る（ADR-t3745-1）。止まっている間はこれらを打たず、下の手順のそれらの箇所は `events`（`--kind`・`--since`・`--until`・`--limit` で絞る）と `timeline RUN` の読みで代え、代えられなかった値（目標割れ・KPI・前後比較）は「止まっていて読めない」と報告に書く。断りが返らなくなったら（戻す task の着地）元の手順に戻す
 - コマンドは repository の中（どの worktree でもよい）で打つ。外で打つと queue を解決できない
 - `events` の `--limit` を必ず付ける（既定は 100 件で、30 時間ぶんの `run_integrated` は超えうる）
 - `created_at` は UTC。JST への変換は jq の `sub("\\.[0-9]+Z$";"Z") | fromdateiso8601 + 9*3600 | strftime(...)` で行い、`date -j` では変換しない（`date` は `--since` の UTC の時刻を作るのにだけ使う）

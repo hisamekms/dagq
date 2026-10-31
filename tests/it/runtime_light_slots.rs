@@ -673,8 +673,12 @@ fn a_light_room_deferral_stays_one_record_while_a_free_slot_comes_and_goes() {
     assert_eq!(events_of(&db, heavy, EventKind::ClaimDeferred).len(), 1);
     assert!(events_of(&db, heavy, EventKind::ClaimDeferralEnded).is_empty());
     assert_eq!(open(&db), before);
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(stats["claim_deferrals"]["count"], 1, "{stats}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        assert_eq!(stats["claim_deferrals"]["count"], 1, "{stats}");
+    }
     assert_eq!(claims(&db).len(), 2);
 
     // A free slot with no spacing claims the heavy task, still recorded:
@@ -692,8 +696,12 @@ fn a_light_room_deferral_stays_one_record_while_a_free_slot_comes_and_goes() {
     assert_eq!(ended.len(), 1, "{ended:?}");
     assert_eq!(ended[0]["why"], "not_candidate", "{ended:?}");
     assert_eq!(events_of(&db, heavy, EventKind::ClaimDeferred).len(), 1);
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(stats["claim_deferrals"]["count"], 1, "{stats}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        assert_eq!(stats["claim_deferrals"]["count"], 1, "{stats}");
+    }
 
     stop.store(true, Ordering::SeqCst);
     queue
@@ -779,8 +787,12 @@ fn a_supervisor_that_takes_over_a_light_room_deferral_shows_it_by_its_own_free_s
     assert_eq!(shown(&db), (vec![heavy.as_i64()], Vec::new()));
     assert_eq!(events_of(&db, heavy, EventKind::ClaimDeferred).len(), 1);
     assert!(events_of(&db, heavy, EventKind::ClaimDeferralEnded).is_empty());
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(stats["claim_deferrals"]["count"], 1, "{stats}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        assert_eq!(stats["claim_deferrals"]["count"], 1, "{stats}");
+    }
     assert_eq!(claims(&db).len(), 1);
 
     stop.store(true, Ordering::SeqCst);

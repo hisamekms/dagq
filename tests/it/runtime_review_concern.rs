@@ -103,12 +103,16 @@ fn a_high_land_lands_the_run_without_an_ask() {
         );
     }
     assert!(!kinds.contains(&"integration_approved"), "{kinds:?}");
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(
-        stats["recommendations"]["decided_without_ask"]["approve_landing"], 1,
-        "{}",
-        stats["recommendations"]
-    );
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        assert_eq!(
+            stats["recommendations"]["decided_without_ask"]["approve_landing"], 1,
+            "{}",
+            stats["recommendations"]
+        );
+    }
 }
 
 /// A run that needs the e2e and whose concern the job lands runs the e2e
@@ -243,14 +247,18 @@ fn assert_asked_after_the_applied_send_back(db: &Path, run: &TaskRun, why: &str)
     );
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "ask_opened") < position(&kinds, "concern_send_back_escalated"));
-    let stats = runtime::stats(db, &Default::default()).unwrap();
-    assert!(
-        stats["recommendations"]["decided_without_ask"]
-            .get("approve_landing")
-            .is_none(),
-        "{}",
-        stats["recommendations"]
-    );
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(db, &Default::default()).unwrap();
+        assert!(
+            stats["recommendations"]["decided_without_ask"]
+                .get("approve_landing")
+                .is_none(),
+            "{}",
+            stats["recommendations"]
+        );
+    }
 }
 
 /// A `send_back` of high confidence the runtime applied, whose session

@@ -66,7 +66,6 @@ SSOTは消えてはいけない正本、ビューはSSOTから作り直せるも
 | 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | hostで`scripts/landing-it.sh`がartifact `it-coverage-map`から取ってqueueの外に置き、containerのverificationはrun dirの材料への写しだけを読む（置き場・取り直し・写し方はscriptの冒頭）。cacheも写しも消えてよい |
 
 計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足すか変えるtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、[文書の規則](../development/documents.md)の「design」）。
-`docs/plans/`の1回きりや週次の見直しの測定の出力（scriptとCSV）はこの表に足さず、そのplansの文書が区分（SSOT・ビュー・材料）と作り直せる範囲を持つ。
 
 ## 区間とタグ
 
@@ -238,7 +237,9 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 
 ## 並走の比較と照合
 
-段2の並走で使い、段3で今の値を台帳から作った後に消す読み取り（`stats --ledger`）で、runの値・run・taskを持たない欄・hostの欄の比べ方と台帳の照合は`domain::ledger::compare`のmodule docが持つ。
+全eventを読む読み手は台帳の読み手が入るまで止め、入口が読む前に断り、集計の関数は台帳の値を確かめる基準に残す（[ADR-t3745-1](../adr/2026-10-31-t3745-1-stop-readers-of-every-event-until-the-ledger-readers.md)、`domain::stopped_reads`）。
+`stats --ledger`も止め、段2の並走の比較はせず、段3の後に消す。
+比べ方と照合は`domain::ledger::compare`のmodule docが持つ。
 
 ## runの比較の軸
 
@@ -273,4 +274,4 @@ stepのコマンドの形と台帳を作るときの分類は[計測のコマン
 
 ## 段と後続のtask
 
-段0（ADR 3本とこの文書）→段1（`run_phase_changed`・claimの前の区間・`run_claimed`の欄・`blocked_by`の記録）→段2（ストアのport・台帳と畳む関数・並走比較。差は`docs/plans/`に説明する）→段3（読み手を台帳と畳む関数へ移し`LandClock`を撤去）。
+段0（ADR 3本とこの文書）→段1（`run_phase_changed`・claimの前の区間・`run_claimed`の欄・`blocked_by`の記録）→段2（ストアのport・台帳と畳む関数。並走の比較はしない）→段3（読み手を台帳と畳む関数へ移し`LandClock`を撤去）。

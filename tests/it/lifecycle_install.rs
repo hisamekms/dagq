@@ -854,7 +854,7 @@ fn the_update_job_installs_watches_restores_and_asks() {
 /// fails, runs past its timeout or cannot start replaces nothing (a
 /// breaking one is not staged either) and opens the `update_failed` ask at
 /// the `e2e` stage with its failed tests and log; one whose e2e passes is
-/// installed after `update_e2e_passed`; `stats` counts both.
+/// installed after `update_e2e_passed`; `events` reads both.
 #[test]
 fn the_update_job_replaces_nothing_unless_the_build_passes_its_e2e() {
     let fixture = fixture();
@@ -974,15 +974,31 @@ fn the_update_job_replaces_nothing_unless_the_build_passes_its_e2e() {
     assert_eq!(passed.payload["secs"], 170);
     assert_eq!(passed.payload["log"], json!(e2e_log));
 
-    let stats = common::cli::ok(&fixture.location.db, &["stats", "--full"]);
-    let e2e = &stats["updates"]["e2e"];
+    let of_kind = |kind: &str| -> Vec<Value> {
+        common::cli::ok(
+            &fixture.location.db,
+            &[
+                "events", "--all", "--full", "--kind", kind, "--limit", "1000",
+            ],
+        )["events"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let failed_e2e: Vec<Value> = of_kind("update_failed")
+        .into_iter()
+        .filter(|e| e["payload"]["stage"] == "e2e")
+        .collect();
     assert_eq!(
-        (e2e["passed"].as_i64(), e2e["failed"].as_i64()),
-        (Some(1), Some(4)),
-        "{stats}"
+        (of_kind("update_e2e_passed").len(), failed_e2e.len()),
+        (1, 4),
+        "{failed_e2e:?}"
     );
-    assert_eq!(e2e["timed_out"], 1, "{stats}");
-    assert_eq!(stats["updates"]["failed_by_stage"]["e2e"], 4, "{stats}");
+    let timed_out = failed_e2e
+        .iter()
+        .filter(|e| e["payload"]["timed_out"] == true)
+        .count();
+    assert_eq!(timed_out, 1, "{failed_e2e:?}");
     assert!(restarted.lock().unwrap().is_empty());
 }
 
@@ -1106,12 +1122,25 @@ fn the_update_job_passes_flaky_and_quarantined_e2e_and_fails_the_rest() {
         "failed_in_a_row"
     );
 
-    let stats = common::cli::ok(&fixture.location.db, &["stats", "--full"]);
-    let e2e = &stats["updates"]["e2e"];
+    let of_kind = |kind: &str| -> Vec<Value> {
+        common::cli::ok(
+            &fixture.location.db,
+            &[
+                "events", "--all", "--full", "--kind", kind, "--limit", "1000",
+            ],
+        )["events"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let failed_e2e: Vec<Value> = of_kind("update_failed")
+        .into_iter()
+        .filter(|e| e["payload"]["stage"] == "e2e")
+        .collect();
     assert_eq!(
-        (e2e["passed"].as_i64(), e2e["failed"].as_i64()),
-        (Some(1), Some(4)),
-        "{stats}"
+        (of_kind("update_e2e_passed").len(), failed_e2e.len()),
+        (1, 4),
+        "{failed_e2e:?}"
     );
 }
 

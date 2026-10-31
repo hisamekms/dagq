@@ -17,7 +17,7 @@ use crate::domain::cancel_reason::NewCancel;
 use crate::domain::related::RelatedPage;
 use crate::domain::search::{SearchPage, SearchQuery};
 
-/// How many events [`EventStore::all_events`] asks for at a time, halved
+/// How many events a read of the log in pages asks for at a time, halved
 /// for a page past the answer's limit.
 const EVENTS_PAGE: usize = 2000;
 
@@ -2405,40 +2405,13 @@ impl EventStore for SupervisorQueue {
     fn stats_window(&self) -> Result<crate::domain::stats::StatsWindow> {
         self.remote("stats_window", vec![])
     }
-    // A page at a time, each within the answer's limit, up to the newest
-    // event when the read began: the log only grows, so the pages are the
-    // events the one read would have given.
+    // Stopped: the service refuses its all_events, and no page of the whole
+    // log is read in its place (ADR-t3745-1).
     fn all_events(&self) -> Result<Vec<RunEvent>> {
-        let upto = self.latest_event_id()?;
-        let filter = EventFilter::default();
-        let (mut events, mut after, mut page) = (Vec::new(), EventId::new(0), EVENTS_PAGE);
-        loop {
-            let read: Result<Vec<RunEvent>> = self.remote(
-                "events_between",
-                vec![
-                    to_value(after)?,
-                    to_value(upto)?,
-                    to_value(&filter)?,
-                    to_value(page)?,
-                ],
-            );
-            let read = match read {
-                Err(error) if page > 1 && super::too_large(&error) => {
-                    page /= 2;
-                    continue;
-                }
-                read => read?,
-            };
-            let Some(last) = read.last() else {
-                return Ok(events);
-            };
-            after = last.id;
-            let full = read.len() == page;
-            events.extend(read);
-            if !full {
-                return Ok(events);
-            }
-        }
+        Err(crate::domain::stopped_reads::ReadStopped(
+            crate::domain::stopped_reads::StoppedRead::AllEvents,
+        )
+        .into())
     }
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
         self.remote("latest_task_events", vec![to_value(kinds)?])

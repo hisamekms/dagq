@@ -231,6 +231,7 @@ mod setup_review;
 mod setup_review_profiles;
 mod shell_leftovers;
 mod source_repository;
+mod stopped_reads;
 mod supervisor_service;
 mod supervisor_service_events;
 mod supervisor_service_ledger;

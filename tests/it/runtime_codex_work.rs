@@ -115,14 +115,18 @@ printf '{{"type":"item.completed","item":{{"id":"t1","type":"mcp_tool_call","ser
     assert_eq!(lines[1]["secs"], 0);
 
     // `stats --full` and `timeline` take the span's work.
-    let stats = common::cli::ok(&db, &["stats", "--full"]);
-    let breakdown = &stats["runs"][0]["work_breakdown"];
-    assert_eq!(breakdown["sessions"], 1, "{breakdown}");
-    assert_eq!(
-        breakdown["commands"]["build"],
-        json!({"runs": 1, "failed": 0}),
-        "{breakdown}"
-    );
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = common::cli::ok(&db, &["stats", "--full"]);
+        let breakdown = &stats["runs"][0]["work_breakdown"];
+        assert_eq!(breakdown["sessions"], 1, "{breakdown}");
+        assert_eq!(
+            breakdown["commands"]["build"],
+            json!({"runs": 1, "failed": 0}),
+            "{breakdown}"
+        );
+    }
     let timeline = common::cli::ok(&db, &["timeline", run.id().as_str()]);
     let commands = timeline["commands"].as_array().unwrap();
     assert_eq!(commands.len(), 1, "{timeline}");

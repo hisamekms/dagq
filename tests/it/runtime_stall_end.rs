@@ -129,11 +129,15 @@ fn recover_closes_the_stalled_ask_and_ends_its_detections_once() {
         .unwrap();
     assert_eq!(resolved(&db, &run).len(), 3);
     // `stats` reads the ends as the run's.
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    let idle = &stats["stall_thresholds"]["idle_without_receipt_secs"];
-    assert_eq!(idle["detections"], 3, "{stats}");
-    assert_eq!(idle["outcomes"]["escalated"], 2, "{stats}");
-    assert_eq!(idle["outcomes"]["run_ended"], 1, "{stats}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let idle = &stats["stall_thresholds"]["idle_without_receipt_secs"];
+        assert_eq!(idle["detections"], 3, "{stats}");
+        assert_eq!(idle["outcomes"]["escalated"], 2, "{stats}");
+        assert_eq!(idle["outcomes"]["run_ended"], 1, "{stats}");
+    }
 }
 
 /// The supervisor abandons a run (a runtime error) whose nudge is not
@@ -197,15 +201,19 @@ fn an_abandoned_run_closes_its_answered_stalled_ask_and_ends_its_nudge() {
     assert_eq!(ends[0]["threshold_secs"], 60);
     assert_eq!(ends[0]["detected_after_secs"], 61);
     assert_eq!(ends[1]["ask_id"], json!(ask.id));
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    let idle = &stats["stall_thresholds"]["idle_without_receipt_secs"];
-    assert_eq!(idle["detections"], 2, "{stats}");
-    assert_eq!(idle["outcomes"]["answered_intervene"], 1, "{stats}");
-    assert_eq!(idle["outcomes"]["escalated"], 1, "{stats}");
-    assert_eq!(
-        idle["by_detection"]["ask"]["outcomes"]["answered_intervene"], 1,
-        "{stats}"
-    );
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let idle = &stats["stall_thresholds"]["idle_without_receipt_secs"];
+        assert_eq!(idle["detections"], 2, "{stats}");
+        assert_eq!(idle["outcomes"]["answered_intervene"], 1, "{stats}");
+        assert_eq!(idle["outcomes"]["escalated"], 1, "{stats}");
+        assert_eq!(
+            idle["by_detection"]["ask"]["outcomes"]["answered_intervene"], 1,
+            "{stats}"
+        );
+    }
 
     // An ask left open (its answer never came) is answered by the runtime.
     let other = queue

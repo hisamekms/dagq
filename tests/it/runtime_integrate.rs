@@ -1844,25 +1844,29 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     // `stats` puts the drafts next to the landing that registered them,
     // and counts one canceled (task 470).
     crate::common::cli::ok(&db, &["cancel", "3", "--reason", "not_worth"]);
-    let flow = &crate::common::cli::ok(&db, &["stats", "--full"])["draft_flow"];
-    assert_eq!(flow["landings"], 1, "{flow}");
-    assert_eq!(flow["registered"], 2, "{flow}");
-    assert_eq!(flow["canceled"], 1, "{flow}");
-    assert_eq!(flow["drafts_per_landing"], 2.0, "{flow}");
-    assert_eq!(flow["inflow_per_outflow"], 2.0, "{flow}");
-    let follow_up = &flow["by_origin"]["follow_up"];
-    assert_eq!(follow_up["backlog"], 1, "{flow}");
-    assert_eq!(follow_up["oldest_backlog_task_id"], 2, "{flow}");
-    assert!(follow_up["oldest_backlog_secs"].as_i64().unwrap() >= 0);
-    // The same drafts by category (ADR-t947-3).
-    let categories = &crate::common::cli::ok(&db, &["stats", "--full"])["follow_up_categories"];
-    assert_eq!(categories["defect"]["registered"], 1, "{categories}");
-    assert_eq!(categories["defect"]["backlog"], 1, "{categories}");
-    assert_eq!(categories["unlabeled"]["canceled"], 1, "{categories}");
-    assert_eq!(
-        categories["unlabeled"]["adoption_rate"], 0.0,
-        "{categories}"
-    );
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let flow = &crate::common::cli::ok(&db, &["stats", "--full"])["draft_flow"];
+        assert_eq!(flow["landings"], 1, "{flow}");
+        assert_eq!(flow["registered"], 2, "{flow}");
+        assert_eq!(flow["canceled"], 1, "{flow}");
+        assert_eq!(flow["drafts_per_landing"], 2.0, "{flow}");
+        assert_eq!(flow["inflow_per_outflow"], 2.0, "{flow}");
+        let follow_up = &flow["by_origin"]["follow_up"];
+        assert_eq!(follow_up["backlog"], 1, "{flow}");
+        assert_eq!(follow_up["oldest_backlog_task_id"], 2, "{flow}");
+        assert!(follow_up["oldest_backlog_secs"].as_i64().unwrap() >= 0);
+        // The same drafts by category (ADR-t947-3).
+        let categories = &crate::common::cli::ok(&db, &["stats", "--full"])["follow_up_categories"];
+        assert_eq!(categories["defect"]["registered"], 1, "{categories}");
+        assert_eq!(categories["defect"]["backlog"], 1, "{categories}");
+        assert_eq!(categories["unlabeled"]["canceled"], 1, "{categories}");
+        assert_eq!(
+            categories["unlabeled"]["adoption_rate"], 0.0,
+            "{categories}"
+        );
+    }
 
     // A closed goal takes no task: a new follow-up is registered without it.
     queue

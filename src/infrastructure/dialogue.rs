@@ -1,7 +1,8 @@
 //! The queue the dialogue and record commands work on
 //! ([`crate::application::commands::dialogue`]): the asks, notes, marks
 //! and findings of a [`SqliteQueue`] (a mark through
-//! [`crate::application::marks`], on the queue's injected clock). A new
+//! [`crate::application::marks`], on the queue's injected clock, stopped
+//! while it reads every event). A new
 //! ask notifies nobody here: the inbox's watch tells the person
 //! (ADR-t1433-1 decision 2).
 
@@ -13,6 +14,7 @@ use super::sqlite::SqliteQueue;
 use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::{EventStore, TaskStore, marks};
+use crate::domain::stopped_reads::{StoppedRead, refuse};
 use crate::domain::{
     Answerer, Ask, AskId, Finding, FindingId, FindingOutcome, FindingStatus, NewAsk, NewFinding,
     NewNote, PlannerId, RequestId, RunEvent,
@@ -55,7 +57,10 @@ impl DialogueStore for DialogueQueue<'_> {
         TaskStore::add_note(self.queue, note)
     }
 
+    /// Stopped: refused before it reads, as a mark is checked against
+    /// every event of the queue ([`StoppedRead::Mark`], ADR-t3745-1).
     fn mark(&mut self, change: MarkChange, by: &str) -> Result<Value> {
+        refuse::<()>(StoppedRead::Mark)?;
         let queue = &*self.queue;
         match change {
             MarkChange::Record { label, note, at } => marks::record_mark(

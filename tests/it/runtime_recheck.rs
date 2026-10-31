@@ -12,6 +12,8 @@
 use crate::runtime_support;
 
 use dagq::domain::EventKind;
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 use dagq::domain::stats::StatsQuery;
 use runtime_support::*;
 
@@ -161,20 +163,24 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
         recheck["failed_runs"],
         json!([{"run_id": run.id(), "code": "rebase_conflict", "action": "resumed"}])
     );
-    let stats = runtime::stats(
-        &db,
-        &StatsQuery {
-            full: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let rechecks = &stats["landing_rechecks"];
-    assert_eq!(rechecks["rechecks"], 1);
-    assert_eq!(rechecks["runs_checked"], 1);
-    assert_eq!(rechecks["conflicts"], 1);
-    assert_eq!(rechecks["check_failures"], 0);
-    assert_eq!(rechecks["resumed"], 1);
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(
+            &db,
+            &StatsQuery {
+                full: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let rechecks = &stats["landing_rechecks"];
+        assert_eq!(rechecks["rechecks"], 1);
+        assert_eq!(rechecks["runs_checked"], 1);
+        assert_eq!(rechecks["conflicts"], 1);
+        assert_eq!(rechecks["check_failures"], 0);
+        assert_eq!(rechecks["resumed"], 1);
+    }
 
     queue.answer(ask.id, "land").unwrap();
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
@@ -190,29 +196,33 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
 
     // The run that waited in its `approve_landing` ask landed after the
     // recheck found its conflict; the landing that moved main did not wait.
-    let stats = runtime::stats(
-        &db,
-        &StatsQuery {
-            full: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let waits = &stats["landing_waits"];
-    let waited = &waits["waited"];
-    assert_eq!(waited["landed"], 1, "{waits}");
-    assert_eq!(waited["conflicted"], 1);
-    assert_eq!(waited["conflicted_ratio"], 1.0);
-    assert_eq!(waited["recheck_conflicts"], 1);
-    assert_eq!(waited["rebase_conflicts"], 0);
-    assert_eq!(waited["wait_secs"]["count"], 1);
-    assert_eq!(waited["by_wait"], json!({"approve_landing": 1}));
-    assert_eq!(waited["runs"][0]["run_id"], json!(run.id()));
-    let not_waited = &waits["not_waited"];
-    assert_eq!(not_waited["landed"], 1);
-    assert_eq!(not_waited["conflicted"], 0);
-    assert_eq!(not_waited["conflicted_ratio"], 0.0);
-    assert!(not_waited.get("wait_secs").is_none(), "{not_waited}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(
+            &db,
+            &StatsQuery {
+                full: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let waits = &stats["landing_waits"];
+        let waited = &waits["waited"];
+        assert_eq!(waited["landed"], 1, "{waits}");
+        assert_eq!(waited["conflicted"], 1);
+        assert_eq!(waited["conflicted_ratio"], 1.0);
+        assert_eq!(waited["recheck_conflicts"], 1);
+        assert_eq!(waited["rebase_conflicts"], 0);
+        assert_eq!(waited["wait_secs"]["count"], 1);
+        assert_eq!(waited["by_wait"], json!({"approve_landing": 1}));
+        assert_eq!(waited["runs"][0]["run_id"], json!(run.id()));
+        let not_waited = &waits["not_waited"];
+        assert_eq!(not_waited["landed"], 1);
+        assert_eq!(not_waited["conflicted"], 0);
+        assert_eq!(not_waited["conflicted_ratio"], 0.0);
+        assert!(not_waited.get("wait_secs").is_none(), "{not_waited}");
+    }
 }
 
 /// The events of `kinds` of `detail`, in order, from the first of them
@@ -848,6 +858,8 @@ fn one_waiting(
 }
 
 /// The number of landing rechecks that ended, from `stats`.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn rechecks_finished(db: &Path) -> Value {
     runtime::stats(
         db,
@@ -984,6 +996,8 @@ fn no_recheck_starts_while_another_supervisor_holds_the_recheck_lock() {
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert!(payloads(&detail, "landing_recheck_failed").is_empty());
     assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
     assert_eq!(rechecks_finished(&db), 0);
     assert!(
         !supervisor.is_finished(),
@@ -996,6 +1010,8 @@ fn no_recheck_starts_while_another_supervisor_holds_the_recheck_lock() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let second = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
     let main = events_of(&db, second.id(), "run_integrated")[0]["commit"].clone();
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
     assert_eq!(rechecks_finished(&db), 1);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let found = payloads(&detail, "landing_recheck_failed");

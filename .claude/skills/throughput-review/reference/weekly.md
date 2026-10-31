@@ -2,6 +2,8 @@
 
 [SKILL.md](../SKILL.md) の「4. 毎週の見直し」の、この host の前提と当てはめの 1〜4（5 と報告は SKILL.md）。
 
+> 今の build では、この手順の `stats`・`kpi`・`report` は止めてあり断る（[SKILL.md](../SKILL.md) の共通の決まり）。止まっている間は打たず、`events` と `timeline RUN` の読みで代える。
+
 この host の前提（変わったらここも直す）:
 
 - 8 コア / 16GB。supervisor の並列数は `dagq.toml` の `[supervisor]` の `parallel = 3`

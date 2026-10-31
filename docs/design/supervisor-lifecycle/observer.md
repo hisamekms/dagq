@@ -21,6 +21,7 @@ related:
   - adr-t1063-1
   - adr-t1204-1
   - design-supervisor-lifecycle-actor-model
+  - adr-t3745-1
 ---
 
 # Observer
@@ -50,12 +51,13 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
      直前が`failed` / `error`なら（何も観察できていないので）起動する。
      skippedの`observe_finished`もtimerの期日の起点になる。
   1. 入力を集める: `stats --since <cursor>`（cursorは`--since`、無ければ前回のobserveが保存した`<queue dir>/observer/cursor`、それも無ければ`stats`の既定で、`--daily`は日次の窓（`DAILY_WINDOW_SECS`）より前の最後のevent id）、未決のfinding、直近のnote、openなask、`graph`、KPIと改善のproposalの数（下の「KPIの目標割れと改善の上限」）。
+     止めている`stats`（ADR-t3745-1）の断りは入力の`error`になりalertを出さない。
      入力のJSONは`observer::observer_input`が組み立て、promptが切る一覧はpromptが残す順に並べるので、promptが省いたものは`input.json`のその一覧のoffsetから後になる。
   2. promptを作る。
      役割は「dagqが回っているかを観察し、うまくいっていないことを`finding record`でfindingに記録し（根拠はrun_eventsのidで渡し、本文に埋めない。同じ種類・対象・subjectは既存のfindingの更新になるので、持っていない根拠か読みの変化があるときだけ記録し直す）、remedyが要るfindingには`--propose`で理由を付け、もう起きていない問題は`finding resolve`し、見立てが「待てば解ける」「leave it」のものはaskにせずfindingのdetailに見立てを書いて記録・更新だけにし、見立てが人を要るものだけを`blocked`のaskでinboxに上げる（openなaskのあるfindingには上げない。下の「人が要る見立てだけをblockedにする」）。note、goal、taskは書かず、個々の詰まりは解消しない。run / task / goalの状態は変えない」。
      promptは止まったsessionの閾値の読み方を持つ（読み方の中身はADR-0043の決定6とADR-0047の決定35、ADR-0044の決定21）。
      見直しが要ればkind `threshold`・subjectに設定名のfindingを記録し、繰り返すなら`--propose`を付け、閾値そのものは変えない。
-     promptはflakyなtestの読み方も持つ: statsの`failed_tests.flaky_candidates`（[stats](commands.md)）の各testを、その`integrate`のeventを根拠に`flaky_test`のfindingとして記録し、同じ根拠を持つfindingは記録し直さない。
+     promptはflakyなtestの読み方も持つ: statsの`failed_tests.flaky_candidates`（[stats](commands.md)）の各testを、その`integrate`のeventを根拠に`flaky_test`のfindingとして記録する。
      workerのsessionだけで落ちたtestは作業中なのでfindingにしない。
      候補から消え、windowの`failed_tests.tests`でも`integrate`で落ちていないtestの`flaky_test`のfindingは`finding resolve`してよい。
      自動更新・`install`のe2eの関門のtestも同じくflakyなtestとして読み（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)決定4、欄は[自動更新](auto-update.md)の`e2e.tests`）、windowの関門で繰り返し落ちた（流し直しや印で通したものを含む。回数はpromptの文面）testを、その関門のeventを根拠に`flaky_test`のfindingとして記録する。
@@ -80,12 +82,11 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
      `outcome`は`succeeded`、`failed`（非0終了）、`error`（起動できない・timeout）のどれかで、`consecutive_failures`はmodeを問わず続く`error` / `failed`の回数。
      `succeeded`のhourlyのときだけ`cursor`を`<queue dir>/observer/cursor`に保存する（一時ファイルからrename）。
      失敗したobservationのwindowは次のobservationが読み直す。
-     dailyはcursorを動かさない。
-     保存する`cursor`は`stats`の`next_cursor`（runのpageの続き）のままなので、終わったrunを飛ばさない。
-     `stats`の期間集計はpageに依らず窓の終わりまで数える（`domain::stats`のmodule docの期間の窓）ので、observationの間隔のうちにpageを超えるrunが終わったときだけ、次のobservationの期間集計が前のobservationと重なる。
+     保存する`cursor`は`stats`の`next_cursor`（runのpageの続き）なので終わったrunを飛ばさず、`stats`が断った回は最新のevent idなので止めている間に終わったrunは後で読まない。
+     `stats`の期間集計はpageに依らず窓の終わりまで数える（`domain::stats`のmodule docの期間の窓）ので、間隔のうちにpageを超えるrunが終わったときだけ、次の期間集計が前の窓と重なる。
      observationごとの期間集計を足し合わせず、1回の値をその窓の値として読む。
      `consecutive_failures`が`OBSERVER_FAILURES_TOLD`に等しい`observe_finished`はinbox宛てのattention（`check the failed observer`）になり、`--role inbox`のwatchを起こす。
-     ほかの回数と成功に戻ったものはattentionにしないので、1つの連続に1回だけ届く（毎時のobserverが止まり続けてもinboxを毎時起こさない。ADR-t1418-1）。
+     ほかの回数と成功に戻ったものはattentionにしないので、1つの連続に1回だけ届く（ADR-t1418-1）。
      askにせず、claimと着地を止めず、`status`にも残らない（`domain::event_attention`）。
 - **`dagq observe --history`**: 過去のobservationを新しい順に返す（`observe_finished`ごとに1件で、各件の中身は`observer::history`）。
   読むだけで、queue serviceの読み取りのユースケース`observe_history`（[Queue service](../queue-service.md#ユースケース)、`queue.read`）なので、observerのenv（クライアントモード）からも打てる（queueを開くのはservice）。

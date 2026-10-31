@@ -158,6 +158,7 @@ pub(super) const READS: &[&str] = &[
     "has_unclosed_worker_question_since",
     "last_worker_question_closed",
     "unclosed_stalled_ask",
+    // Answered with its refusal while it is stopped (ADR-t3745-1).
     "all_events",
     "stats_window",
     "findings",

@@ -357,108 +357,112 @@ fn timeline_and_stats_show_the_work_breakdown() {
     assert_eq!(commands[0]["category"], "llvm_cov");
     assert_eq!(commands[0]["secs"], 900);
     assert_eq!(commands[0]["background"], true);
-    let stats = ok(&db, &["stats", "--full"]);
-    let breakdown = &stats["runs"][0]["work_breakdown"];
-    assert_eq!(breakdown["secs"]["llvm_cov"], 900);
-    let overall = &stats["overall"]["work_breakdown"];
-    assert_eq!(overall["runs"], 1);
-    assert_eq!(overall["categories"]["llvm_cov"]["share"], json!(0.501));
-    assert_eq!(stats["goals"][0]["work_breakdown"]["runs"], 1);
-    let counts_left_out = |stats: &Value| {
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = ok(&db, &["stats", "--full"]);
         let breakdown = &stats["runs"][0]["work_breakdown"];
-        assert_eq!(breakdown["secs"]["model"], 600);
-        let groups = [
-            breakdown,
-            &stats["overall"]["work_breakdown"],
-            &stats["goals"][0]["work_breakdown"],
-            &stats["versions"]["dagq"][0]["work_breakdown"],
-        ];
-        for group in groups {
-            assert!(group.is_object(), "{group}");
-            for key in [
-                "verification_repeats",
-                "runs_with_repeats",
-                "test_with_llvm_cov",
-            ] {
-                assert!(group.get(key).is_none(), "{key}: {group}");
+        assert_eq!(breakdown["secs"]["llvm_cov"], 900);
+        let overall = &stats["overall"]["work_breakdown"];
+        assert_eq!(overall["runs"], 1);
+        assert_eq!(overall["categories"]["llvm_cov"]["share"], json!(0.501));
+        assert_eq!(stats["goals"][0]["work_breakdown"]["runs"], 1);
+        let counts_left_out = |stats: &Value| {
+            let breakdown = &stats["runs"][0]["work_breakdown"];
+            assert_eq!(breakdown["secs"]["model"], 600);
+            let groups = [
+                breakdown,
+                &stats["overall"]["work_breakdown"],
+                &stats["goals"][0]["work_breakdown"],
+                &stats["versions"]["dagq"][0]["work_breakdown"],
+            ];
+            for group in groups {
+                assert!(group.is_object(), "{group}");
+                for key in [
+                    "verification_repeats",
+                    "runs_with_repeats",
+                    "test_with_llvm_cov",
+                ] {
+                    assert!(group.get(key).is_none(), "{key}: {group}");
+                }
             }
-        }
-    };
-    counts_left_out(&stats);
-    let rustc_left_out = |stats: &Value| {
-        for key in ["rustc_release", "rustc_host"] {
-            assert!(stats["runs"][0].get(key).is_none(), "{key}: {stats}");
-        }
-        assert!(
-            stats["versions"].get("rustc").is_none(),
-            "{}",
-            stats["versions"]
-        );
-    };
-    rustc_left_out(&stats);
-    let kpi = |db: &Path| {
-        ok(
-            db,
-            &[
-                "kpi",
-                "--since",
-                "2026-09-24T00:00:00Z",
-                "--until",
-                "2026-09-24T01:00:00Z",
-                "--by",
-                "toolchain",
-            ],
+        };
+        counts_left_out(&stats);
+        let rustc_left_out = |stats: &Value| {
+            for key in ["rustc_release", "rustc_host"] {
+                assert!(stats["runs"][0].get(key).is_none(), "{key}: {stats}");
+            }
+            assert!(
+                stats["versions"].get("rustc").is_none(),
+                "{}",
+                stats["versions"]
+            );
+        };
+        rustc_left_out(&stats);
+        let kpi = |db: &Path| {
+            ok(
+                db,
+                &[
+                    "kpi",
+                    "--since",
+                    "2026-09-24T00:00:00Z",
+                    "--until",
+                    "2026-09-24T01:00:00Z",
+                    "--by",
+                    "toolchain",
+                ],
+            )
+        };
+        let landings = |kpi: &Value| kpi["periods"][0]["kpis"]["landings"].clone();
+        let no_toolchain = |landings: &Value| {
+            assert!(
+                landings
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .all(|stratum| !stratum.starts_with("toolchain=")),
+                "{landings}"
+            );
+        };
+        no_toolchain(&landings(&kpi(&db)));
+
+        // dagq's source that declares the Rust profile shows them.
+        std::fs::write(
+            dir.path().join("repo-dagq").join("dagq.toml"),
+            "[toolchains.rust]\nprofile = \"rust\"\n",
         )
-    };
-    let landings = |kpi: &Value| kpi["periods"][0]["kpis"]["landings"].clone();
-    let no_toolchain = |landings: &Value| {
-        assert!(
-            landings
-                .as_object()
-                .unwrap()
-                .keys()
-                .all(|stratum| !stratum.starts_with("toolchain=")),
-            "{landings}"
+        .unwrap();
+        let stats = ok(&db, &["stats", "--full"]);
+        assert_eq!(stats["runs"][0]["rustc_release"], "1.93.0");
+        assert_eq!(
+            stats["versions"]["rustc"][0]["version"],
+            "1.93.0 aarch64-apple-darwin"
         );
-    };
-    no_toolchain(&landings(&kpi(&db)));
+        assert_eq!(
+            stats["runs"][0]["work_breakdown"]["verification_repeats"],
+            1
+        );
+        assert_eq!(
+            stats["overall"]["work_breakdown"]["verification_repeats"],
+            1
+        );
+        assert_eq!(
+            landings(&kpi(&db))["toolchain=1.93.0 aarch64-apple-darwin"]["value"],
+            1.0
+        );
 
-    // dagq's source that declares the Rust profile shows them.
-    std::fs::write(
-        dir.path().join("repo-dagq").join("dagq.toml"),
-        "[toolchains.rust]\nprofile = \"rust\"\n",
-    )
-    .unwrap();
-    let stats = ok(&db, &["stats", "--full"]);
-    assert_eq!(stats["runs"][0]["rustc_release"], "1.93.0");
-    assert_eq!(
-        stats["versions"]["rustc"][0]["version"],
-        "1.93.0 aarch64-apple-darwin"
-    );
-    assert_eq!(
-        stats["runs"][0]["work_breakdown"]["verification_repeats"],
-        1
-    );
-    assert_eq!(
-        stats["overall"]["work_breakdown"]["verification_repeats"],
-        1
-    );
-    assert_eq!(
-        landings(&kpi(&db))["toolchain=1.93.0 aarch64-apple-darwin"]["value"],
-        1.0
-    );
-
-    // Another repository that declares none shows none of them either;
-    // the rest is as before.
-    bind(&db, dir.path(), "other");
-    let stats = ok(&db, &["stats", "--full"]);
-    counts_left_out(&stats);
-    assert_eq!(stats["overall"]["work_breakdown"]["runs"], 1);
-    rustc_left_out(&stats);
-    assert_eq!(stats["versions"]["dagq"][0]["runs"], 1);
-    let landings = landings(&kpi(&db));
-    no_toolchain(&landings);
-    assert_eq!(landings["all"]["value"], 1.0);
+        // Another repository that declares none shows none of them either;
+        // the rest is as before.
+        bind(&db, dir.path(), "other");
+        let stats = ok(&db, &["stats", "--full"]);
+        counts_left_out(&stats);
+        assert_eq!(stats["overall"]["work_breakdown"]["runs"], 1);
+        rustc_left_out(&stats);
+        assert_eq!(stats["versions"]["dagq"][0]["runs"], 1);
+        let landings = landings(&kpi(&db));
+        no_toolchain(&landings);
+        assert_eq!(landings["all"]["value"], 1.0);
+    }
 }
 
 /// The `toolchain` axis outside dagq's source follows the profiles its
@@ -466,6 +470,8 @@ fn timeline_and_stats_show_the_work_breakdown() {
 /// declared (the made-up one of `tests/common`), a stratum with the
 /// Rust profile declared. Undeclared, none even in dagq's source
 /// (`timeline_and_stats_show_the_work_breakdown`).
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn the_toolchain_axis_follows_the_declared_rust_profile() {
     use dagq::domain::kpi::{Axis, KpiQuery, Period};
@@ -524,6 +530,8 @@ fn the_toolchain_axis_follows_the_declared_rust_profile() {
 /// source both are left out with only another profile declared, one whose
 /// rules count no check of `integrate`. Undeclared, both are left out in
 /// dagq's source too (`timeline_and_stats_show_the_work_breakdown`).
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn the_stats_rustc_follows_the_declared_rust_profile() {
     use dagq::domain::stats::StatsQuery;
@@ -1078,7 +1086,11 @@ fn status_watch_and_show_read_kinds_a_newer_binary_wrote() {
         ],
     );
     ok(&db, &["timeline", &run]);
-    ok(&db, &["stats", "--full"]);
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        ok(&db, &["stats", "--full"]);
+    }
 }
 
 /// A queue with a kind this binary no longer writes and one it does not
@@ -1362,7 +1374,11 @@ fn past_ask_request_taken_events_are_still_read() {
         .filter(|e| e["kind"] == "ask_request_taken")
         .count();
     assert_eq!(shown, 2, "{show}");
-    ok(&db, &["stats", "--full"]);
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        ok(&db, &["stats", "--full"]);
+    }
 }
 
 #[test]

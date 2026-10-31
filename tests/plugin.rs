@@ -1008,18 +1008,18 @@ fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
         "hook_intake_pending"
     );
 
-    // stats counts them in its window, per kind.
-    let stats = stdout_json(&launcher(
-        &[("DAGQ_BIN", binary), ("DAGQ_DB", db.as_str())],
-        &data_home,
-        &repo,
-        &["stats", "--full"],
-    ));
-    let by_kind = &stats["sessions"]["by_kind"];
-    assert_eq!(by_kind["inbox"]["count"], 2, "{by_kind}");
-    assert_eq!(by_kind["inbox"]["open_now"], 0, "{by_kind}");
+    // The spans per kind, as `events` lists them: the inbox's two, none
+    // open now.
+    let spans_of = |event_kind: &str, kind: &str| {
+        events
+            .iter()
+            .filter(|event| event["kind"] == event_kind && event["payload"]["kind"] == kind)
+            .count()
+    };
+    assert_eq!(spans_of("session_opened", "inbox"), 2, "{events:?}");
+    assert_eq!(spans_of("session_closed", "inbox"), 2, "{events:?}");
     // The planner's are its wrapper's to record.
-    assert_eq!(by_kind["planner"]["count"], 0, "{by_kind}");
+    assert_eq!(spans_of("session_opened", "planner"), 0, "{events:?}");
 
     // A failure is silent and never fails the session: no dagq, a dagq
     // that is not executable, a queue that cannot be opened, bad input.

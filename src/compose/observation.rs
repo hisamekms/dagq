@@ -5,6 +5,13 @@
 //! and the ports of the supervisor's reports, forecasts and CI watch. Each
 //! entry builds the adapters and the settings it reads and calls the use
 //! case; what is decided is in `application` and `domain`.
+//!
+//! `stats` (`--ledger` too), `stats_inputs`, `kpi` (`--compare` too, and
+//! the observer's KPI input), `forecast` and `report` (`report_inputs`
+//! too) are stopped: each refuses before it reads, as it reads every event
+//! of the queue ([`crate::domain::stopped_reads`], ADR-t3745-1). The wiring
+//! behind them stays, reading [`refuse`] where it read every event, for the
+//! ledger's readers to take.
 
 use super::{
     OneShot, bound_checkout, bound_main_checkout, goal_tags, open_queue_watch, provider_checks,
@@ -25,7 +32,11 @@ use crate::{
         stats::{self as statistics, StatsGitReads, StatsSources},
         supervisor_service::{ServiceTokens, SupervisorQueues},
     },
-    domain::{RunId, SessionRole, TaskId, stats::StatsQuery},
+    domain::{
+        RunId, SessionRole, TaskId,
+        stats::StatsQuery,
+        stopped_reads::{StoppedRead, refuse},
+    },
     infrastructure::{
         adapters::{ClaudeCode, GitRepository, SystemProcesses, VERIFICATION_TIMEOUT},
         clock,
@@ -512,8 +523,9 @@ impl GitPart {
                 served: None,
             });
         };
+        let events: Vec<crate::domain::RunEvent> = refuse(StoppedRead::StatsInputs)?;
         let checkout = served_checkout(queue)?;
-        let inputs = statistics::stats_inputs(checkout.clone(), &queue.all_events()?);
+        let inputs = statistics::stats_inputs(checkout.clone(), &events);
         Ok(Self {
             served: Some(git.served(&inputs)?),
             checkout,
@@ -551,12 +563,33 @@ fn served_checkout(queue: &SqliteQueue) -> Result<Option<PathBuf>> {
 /// sends, by `call`, sent with what the client read with the host's Git in
 /// the main checkout the service's `stats_inputs` names
 /// ([`crate::application::stats::call_read`]). The one place a client
-/// reads Git for them.
+/// reads Git for them. Stopped: refused before the service is asked
+/// ([`stopped_read`]).
 pub fn call_stats_read(
     read: &crate::application::queue_reads::QueueRead,
     call: impl FnMut(&crate::application::queue_reads::QueueRead) -> Result<Value>,
 ) -> Result<Value> {
+    if let Some(stopped) = stopped_read(read) {
+        refuse::<()>(stopped)?;
+    }
     statistics::call_read(read, &STATS_CLIENT, call)
+}
+
+/// The stopped entry `read` is, if it is one: `stats` (`--ledger`),
+/// `stats_inputs` and `kpi`, and a job's reads of them.
+fn stopped_read(read: &crate::application::queue_reads::QueueRead) -> Option<StoppedRead> {
+    use crate::application::queue_reads::{JobRead, QueueRead};
+    match read {
+        QueueRead::Stats(stats) if stats.ledger => Some(StoppedRead::StatsLedger),
+        QueueRead::Stats(_) | QueueRead::Job(JobRead::Stats { .. }) => Some(StoppedRead::Stats),
+        QueueRead::StatsInputs(_) | QueueRead::Job(JobRead::StatsInputs) => {
+            Some(StoppedRead::StatsInputs)
+        }
+        QueueRead::Kpi(_) | QueueRead::Job(JobRead::Kpi { .. } | JobRead::ObserverKpi { .. }) => {
+            Some(StoppedRead::Kpi)
+        }
+        _ => None,
+    }
 }
 
 /// The host's Git a client of `stats` and `kpi` reads with
@@ -588,11 +621,13 @@ fn host_metrics_reader(dir: PathBuf) -> crate::application::report::HostMetrics 
 /// ([`crate::application::report::prepare_request`]), from what `call`
 /// answers (the service, or `run_command` on the DB), with the host's Git
 /// for the main checkout and the landed commits' changes, and the host's d2
-/// and TALA for the diagram.
+/// and TALA for the diagram. Stopped: refused before `report_inputs` is
+/// asked.
 pub(super) fn prepare_report(
     params: &mut crate::application::queue_commands::ReportParams,
     call: impl FnMut(&crate::application::queue_commands::QueueCommand) -> Result<Value>,
 ) -> Result<()> {
+    refuse::<()>(StoppedRead::Report)?;
     crate::application::report::prepare_request(
         params,
         &crate::application::report::ReportClient {
@@ -880,6 +915,7 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
         query: &StatsQuery,
         git: Option<&StatsGitReads>,
     ) -> Result<Value> {
+        refuse::<()>(StoppedRead::Stats)?;
         self.one_shot
             .stats_read(queue, self.db, query, self.git("stats", git)?)
     }
@@ -889,13 +925,15 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
         query: &StatsQuery,
         git: Option<&StatsGitReads>,
     ) -> Result<Value> {
+        refuse::<()>(StoppedRead::StatsLedger)?;
         self.one_shot
             .ledger_check_of(queue, self.db, query, self.git("stats", git)?)
     }
     fn stats_inputs(&self, queue: &SqliteQueue) -> Result<Value> {
+        let events: Vec<crate::domain::RunEvent> = refuse(StoppedRead::StatsInputs)?;
         Ok(serde_json::to_value(statistics::stats_inputs(
             served_checkout(queue)?,
-            &queue.all_events()?,
+            &events,
         ))?)
     }
     fn kpi(
@@ -904,10 +942,12 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
         query: &crate::domain::kpi::KpiQuery,
         git: Option<&StatsGitReads>,
     ) -> Result<Value> {
+        refuse::<()>(StoppedRead::Kpi)?;
         self.one_shot
             .kpi_read(queue, self.db, query, self.git("kpi", git)?)
     }
     fn observer_kpi(&self, queue: &SqliteQueue, git: Option<&StatsGitReads>) -> Result<Value> {
+        refuse::<()>(StoppedRead::Kpi)?;
         self.one_shot
             .observer_kpi_read(queue, self.db, self.git("kpi", git)?)
     }
@@ -1849,7 +1889,8 @@ impl OneShot {
 
     /// [`Self::stats_of`] with what the queue service's client read with
     /// Git in place of Git (`git`, ADR-t3102-3 decision 5); `None` reads Git
-    /// in the bound main checkout.
+    /// in the bound main checkout. Stopped: refused before it reads
+    /// ([`StoppedRead::Stats`]).
     pub fn stats_read(
         &self,
         queue: &SqliteQueue,
@@ -1857,6 +1898,7 @@ impl OneShot {
         query: &StatsQuery,
         git: Option<&StatsGitReads>,
     ) -> Result<Value> {
+        refuse::<()>(StoppedRead::Stats)?;
         let part = GitPart::of(queue, git)?;
         let mut stats = self.with_stats_sources(db, &part, |now, sources| {
             Ok(serde_json::to_value(statistics::stats(
@@ -1877,7 +1919,8 @@ impl OneShot {
     /// `stats --ledger` on `queue`, the queue at `db`: see
     /// [`crate::application::ledger_check::ledger_check`], with `stats`'
     /// sources ([`Self::stats_read`]'s, `git` as it reads it) and today's
-    /// CSV files of the host's load under the queue's `host/`.
+    /// CSV files of the host's load under the queue's `host/`. Stopped:
+    /// refused before it reads ([`StoppedRead::StatsLedger`]).
     pub fn ledger_check_of(
         &self,
         queue: &SqliteQueue,
@@ -1885,6 +1928,7 @@ impl OneShot {
         query: &StatsQuery,
         git: Option<&StatsGitReads>,
     ) -> Result<Value> {
+        refuse::<()>(StoppedRead::StatsLedger)?;
         let part = GitPart::of(queue, git)?;
         let host_dir = db
             .parent()
@@ -1975,7 +2019,8 @@ impl OneShot {
     /// [`Self::kpi_of`] with the landed commits' areas the queue service's
     /// client read with Git (`git`, ADR-t3102-3 decision 5) in the main
     /// checkout the service finds with no Git run; `None` reads Git in the
-    /// bound main checkout.
+    /// bound main checkout. Stopped: refused before it reads
+    /// ([`StoppedRead::Kpi`]).
     pub fn kpi_read(
         &self,
         queue: &SqliteQueue,
@@ -1983,6 +2028,7 @@ impl OneShot {
         query: &crate::domain::kpi::KpiQuery,
         git: Option<&StatsGitReads>,
     ) -> Result<Value> {
+        refuse::<()>(StoppedRead::Kpi)?;
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
         let part = GitPart::of(queue, git)?;
@@ -2012,12 +2058,14 @@ impl OneShot {
     /// `forecast` (ADR-0070 decision 2): see
     /// [`crate::application::forecast::forecast`], at these generators' now,
     /// with the `min_samples` of the `[kpi]` settings `kpi` judges by.
+    /// Stopped: refused before it reads ([`StoppedRead::Forecast`]).
     pub fn forecast_of(
         &self,
         queue: &SqliteQueue,
         db: &Path,
         query: &crate::application::forecast::ForecastQuery,
     ) -> Result<Value> {
+        refuse::<()>(StoppedRead::Forecast)?;
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
         let setup = report_setup(
@@ -2048,6 +2096,7 @@ impl OneShot {
 
     /// [`Self::observer_kpi`] with the landed commits' areas the queue
     /// service's client read with Git (`git`), as [`Self::kpi_read`].
+    /// Stopped with `kpi` ([`StoppedRead::Kpi`]).
     pub fn observer_kpi_read(
         &self,
         queue: &SqliteQueue,
@@ -2055,6 +2104,7 @@ impl OneShot {
         git: Option<&StatsGitReads>,
     ) -> Result<serde_json::Value> {
         use crate::domain::kpi::{KpiQuery, Period, observe};
+        refuse::<()>(StoppedRead::Kpi)?;
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
         let part = GitPart::of(queue, git)?;
@@ -2106,7 +2156,8 @@ impl OneShot {
     /// `report_inputs` ([`crate::application::report::report_inputs`]) of
     /// `queue`, with the `[kpi]` settings of the main checkout
     /// [`served_checkout`] finds (the one a checkout `params` names is
-    /// accepted only as) and the host's.
+    /// accepted only as) and the host's. Stopped with `report`
+    /// ([`StoppedRead::Report`]).
     pub fn report_inputs_of(
         &self,
         queue: &SqliteQueue,
@@ -2114,6 +2165,7 @@ impl OneShot {
         params: &crate::application::queue_commands::ReportInputsParams,
     ) -> Result<Value> {
         use crate::application::report;
+        refuse::<()>(StoppedRead::Report)?;
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
         let settings = |checkout: &Path| {
@@ -2135,7 +2187,7 @@ impl OneShot {
             &report::ReportInputsSources {
                 files: &LocalRunFiles,
                 settings: &settings,
-                events: &|| queue.all_events(),
+                events: &|| Ok(refuse(StoppedRead::Report)?),
             },
             now,
         )?)?)
@@ -2155,6 +2207,7 @@ impl OneShot {
     /// program runs: the `dagq.toml` read is the main checkout's
     /// [`served_checkout`] finds, and a checkout `params` names that is not
     /// it is refused ([`crate::application::report::accept_checkout`]).
+    /// Stopped: refused before it reads ([`StoppedRead::Report`]).
     pub fn report_of(
         &self,
         queue: &SqliteQueue,
@@ -2162,6 +2215,7 @@ impl OneShot {
         params: &crate::application::queue_commands::ReportParams,
     ) -> Result<Value> {
         use crate::application::report;
+        refuse::<()>(StoppedRead::Report)?;
         let period = params.period.parse().map_err(anyhow::Error::msg)?;
         let at = params
             .at
@@ -2403,5 +2457,65 @@ mod tests {
             assert!(!shown(package, Some("[toolchains\n")), "{package}");
         }
         assert!(!counts_checks(None, &REGISTRY));
+    }
+
+    /// The client of `stats` (`--ledger`), `kpi` and their job reads is
+    /// refused as the entry it is, before the service is asked anything;
+    /// another read is not one of them.
+    #[test]
+    fn the_stopped_reads_are_refused_before_the_service_is_asked() {
+        use super::{StoppedRead, call_stats_read, stopped_read};
+        use crate::application::queue_reads::{JobRead, QueueRead};
+        use crate::domain::queue_service::UseCase;
+        let parsed = |use_case, params| QueueRead::parse(use_case, &params).unwrap().unwrap();
+        let cases = [
+            (
+                parsed(UseCase::Stats, serde_json::json!({})),
+                StoppedRead::Stats,
+            ),
+            (
+                parsed(UseCase::Stats, serde_json::json!({"ledger": true})),
+                StoppedRead::StatsLedger,
+            ),
+            (
+                parsed(UseCase::StatsInputs, serde_json::json!({})),
+                StoppedRead::StatsInputs,
+            ),
+            (
+                parsed(UseCase::Kpi, serde_json::json!({})),
+                StoppedRead::Kpi,
+            ),
+            (
+                parsed(UseCase::Kpi, serde_json::json!({"compare": "12"})),
+                StoppedRead::Kpi,
+            ),
+            (
+                QueueRead::Job(JobRead::StatsInputs),
+                StoppedRead::StatsInputs,
+            ),
+            (
+                QueueRead::Job(JobRead::ObserverKpi { git: None }),
+                StoppedRead::Kpi,
+            ),
+        ];
+        for (read, stopped) in cases {
+            assert_eq!(stopped_read(&read), Some(stopped), "{read:?}");
+            let mut asked = 0;
+            let error = call_stats_read(&read, |_| {
+                asked += 1;
+                Ok(serde_json::json!({}))
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.starts_with(&format!("{} is stopped", stopped.entry())),
+                "{error}"
+            );
+            assert_eq!(asked, 0, "{read:?}");
+        }
+        assert_eq!(
+            stopped_read(&parsed(UseCase::Events, serde_json::json!({}))),
+            None
+        );
     }
 }

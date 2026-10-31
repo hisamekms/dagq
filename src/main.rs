@@ -606,6 +606,9 @@ enum Command {
     /// Record a change mark: a change the KPIs should be compared before and after (a setting,
     /// the operation, the host). With --retract, record that an earlier mark (a `dagq mark` or
     /// a `[run.env]` change) was none. Prints the mark. Not for the observer or a job.
+    /// Stopped in this build, --retract too: refused before it reads, as it reads every event of
+    /// the queue; a read of the marks that does not read every event brings it back.
+    // ADR-t3745-1; the marks task of goal 235 brings it back.
     #[command(group = clap::ArgGroup::new("mark").required(true))]
     Mark {
         /// Short name of the change, e.g. "parallel 4→3" or "host arm64".
@@ -628,6 +631,9 @@ enum Command {
     /// retractions) and the ones derived from the claims (`derived:dagq_version`,
     /// `derived:claude_version`, `derived:codex_version`, `derived:parallel`,
     /// `derived:toolchain`). Reads only.
+    /// Stopped in this build: refused before it reads, as it reads every event of the queue; a
+    /// read of the marks that does not read every event brings it back.
+    // ADR-t3745-1; the marks task of goal 235 brings it back.
     Marks {
         /// Event id, `@<unix seconds>` or an RFC 3339 time: only marks after it.
         #[arg(long)]
@@ -1550,6 +1556,9 @@ enum Command {
     /// 50 finished runs unless --full; pass `next_cursor` to --since for only the runs finished later.
     /// Each run also carries its title, claim/validation/landing times, integrate attempts and
     /// deferrals, the landings that broke it, and its resumes.
+    /// Stopped in this build, --ledger too: refused before it reads, as it reads every event of the
+    /// queue; the ledger's reader brings it back, and --ledger is removed then.
+    // ADR-t3745-1; task 1669 brings it back from the ledger, task 1671 removes --ledger.
     Stats {
         /// Event id (a previous `next_cursor`), `@<unix seconds>` or an RFC 3339 time: only runs
         /// that finished after it.
@@ -1584,6 +1593,9 @@ enum Command {
     /// previous period (and a day's 7-day median), judged against the `[kpi.targets]` of
     /// dagq.toml and host.toml. --compare splits at a mark (its event id) or a time, or compares
     /// two windows A..B,C..D, and lists every other mark in and between them. Reads only; JSON.
+    /// Stopped in this build, --compare too: refused before it reads, as it reads every event of
+    /// the queue; the ledger's reader brings it back.
+    // ADR-t3745-1; task 1669 brings it back from the ledger.
     Kpi {
         #[arg(long, default_value = "day", value_parser = ["day", "week"])]
         period: String,
@@ -1631,6 +1643,9 @@ enum Command {
     /// over the dependencies, the claim order, the slots and each change's landed runs (the whole
     /// distribution for a change with fewer than `[kpi]` `min_samples`), with what it assumed.
     /// New tasks are not added. Reads only and records nothing; JSON.
+    /// Stopped in this build: refused before it reads, as it reads every event of the queue; the
+    /// ledger's reader brings it back.
+    // ADR-t3745-1; task 1670 brings it back from the ledger.
     Forecast {
         /// Only this task, and its goal.
         #[arg(long = "task")]
@@ -1652,6 +1667,9 @@ enum Command {
     /// under the queue's reports/ (daily/YYYY-MM-DD, weekly/YYYY-Www; today's and this week's are
     /// named .partial), then index.html and the [report] retention of host.toml. Prints the paths
     /// written. Changes no queue state.
+    /// Stopped in this build: refused before it reads, as it reads every event of the queue; the
+    /// ledger's reader brings it back.
+    // ADR-t3745-1; task 1669 brings it back from the ledger.
     Report {
         #[arg(long, default_value = "day", value_parser = ["day", "week"])]
         period: String,

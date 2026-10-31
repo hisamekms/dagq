@@ -799,6 +799,8 @@ fn observe_reads_again_what_others_wrote_while_its_agent_ran() {
 /// alerts again, or an older observation that kept none while there are
 /// none, leave the observation skipped. After an older observation that
 /// kept no alerts, any alert starts it.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn observe_starts_again_for_an_alert_that_time_alone_raised() {
     use dagq::application::observer::ObserveMode;
@@ -933,25 +935,29 @@ q finding record --kind kpi --queue --subject 'lead_time/all' --summary 'lead ti
     let dir = PathBuf::from(done["dir"].as_str().unwrap());
     let input: Value =
         serde_json::from_str(&fs::read_to_string(dir.join("input.json")).unwrap()).unwrap();
-    let targets = input["kpi"]["targets"].as_array().unwrap();
-    assert_eq!(
-        targets
-            .iter()
-            .map(|t| (t["period"].clone(), t["kpi"].clone(), t["max"].clone()))
-            .collect::<Vec<_>>(),
-        [
-            (json!("day"), json!("lead_time"), json!(60.0)),
-            (json!("week"), json!("lead_time"), json!(60.0)),
-        ],
-        "{input}"
-    );
-    // No landing: nothing is judged, so nothing is in breach.
-    assert!(
-        targets.iter().all(|t| t["state"] == "not_judged"),
-        "{input}"
-    );
-    assert_eq!(input["kpi"]["breaches"], json!([]));
-    assert_eq!(input["kpi"]["trend"]["day"].as_array().unwrap().len(), 7);
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let targets = input["kpi"]["targets"].as_array().unwrap();
+        assert_eq!(
+            targets
+                .iter()
+                .map(|t| (t["period"].clone(), t["kpi"].clone(), t["max"].clone()))
+                .collect::<Vec<_>>(),
+            [
+                (json!("day"), json!("lead_time"), json!(60.0)),
+                (json!("week"), json!("lead_time"), json!(60.0)),
+            ],
+            "{input}"
+        );
+        // No landing: nothing is judged, so nothing is in breach.
+        assert!(
+            targets.iter().all(|t| t["state"] == "not_judged"),
+            "{input}"
+        );
+        assert_eq!(input["kpi"]["breaches"], json!([]));
+        assert_eq!(input["kpi"]["trend"]["day"].as_array().unwrap().len(), 7);
+    }
     assert_eq!(
         input["improvements"],
         json!({"running": 0, "limit": 3, "reached": false, "waiting": []})
@@ -972,8 +978,12 @@ q finding record --kind kpi --queue --subject 'lead_time/all' --summary 'lead ti
 /// An observer that does what the prompt asks of the KPIs' breaches: it
 /// reads `kpi.breaches` from the prompt's inputs and records each breach
 /// with its evidence as a finding of its `finding_kind` and `subject`.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 struct BreachRecorder;
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 impl AgentProvider for BreachRecorder {
     fn preflight(&self) -> Result<()> {
         Ok(())
@@ -1016,6 +1026,8 @@ impl AgentProvider for BreachRecorder {
 /// The observer's `kpi` judges a target on the host's load from the
 /// host's records as `dagq kpi` does: off target, it is in breach in the
 /// input; without records it is not judged and the observer goes on.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn observe_judges_a_host_load_target_from_the_host_records() {
     use dagq::application::observer::ObserveMode;
@@ -1086,6 +1098,8 @@ fn observe_judges_a_host_load_target_from_the_host_records() {
 /// in the observer's input (`kpi.forecast`), the target on its p90 hit
 /// rate goes into breach, and the breach is recorded as a `forecast`
 /// finding, not a `kpi` one.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_finding() {
     use dagq::application::observer::ObserveMode;

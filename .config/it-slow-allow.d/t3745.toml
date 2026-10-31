@@ -1,0 +1,160 @@
+# The items of task 3745 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+# Each test was already over the threshold; task 3745 changed its body only by
+# leaving its checks of stats or kpi out while they are stopped (ADR-t3745-1).
+
+# 5.9s
+[[test]]
+name = "goal_review_codex::a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model"
+reason = "B 境界（守る境界）: 実の Codex の stub のプロセスで goal review の job が読み取り専用で走り、thread と model を session の event に記録することを、プロセスと SQLite の event の配線で確かめる"
+task = 3745
+
+# 8.9s
+[[test]]
+name = "inbox_nudge::the_watchers_changes_are_recorded_once_and_give_how_long_an_ask_waited_to_be_seen"
+reason = "B 境界（守る境界）: inbox の watcher のプロセスの変化が一度ずつ記録されることを、watch のプロセスと SQLite の event の配線で確かめる"
+task = 3745
+
+# 11.7s
+[[test]]
+name = "plan_review_codex::a_plan_review_on_codex_runs_read_only_and_applies_its_verdicts"
+reason = "B 境界（守る境界）: Codex の stub のプロセスで plan review の job が読み取り専用で走り、supervise が verdict を適用することを、プロセス・supervisor・SQLite の配線で確かめる"
+task = 3745
+
+# 7.9s
+[[test]]
+name = "plan_review_codex::a_codex_that_cannot_log_in_moves_the_plan_review_to_claude"
+reason = "B 境界（守る境界）: login できない Codex の plan review が supervisor の配線で Claude に移ることを、プロセスと SQLite の event で確かめる"
+task = 3745
+
+# 7.7s
+[[test]]
+name = "recovery_codex::a_failed_codex_recovery_job_fails_its_round_to_a_person"
+reason = "B 境界（守る境界）: 失敗した Codex の復旧 job が round を人に上げることを、job のプロセス・supervisor・SQLite の ask の配線で確かめる（復旧）"
+task = 3745
+
+# 10.7s
+[[test]]
+name = "runtime_codex::no_claude_codex_review_failure_asks_without_starting_claude"
+reason = "B 境界（守る境界）: Claude なしの supervisor で Codex の review が失敗したとき Claude を起動せずに ask にすることを、プロセスと supervisor の配線で確かめる"
+task = 3745
+
+# 19.4s
+[[test]]
+name = "runtime_codex::a_codex_run_answers_and_revises_through_resumes_of_its_thread_and_lands"
+reason = "B 境界（守る境界）: Codex の run が thread の resume で答えと手直しを経て着地することを、worker のプロセス・Git・supervisor・SQLite の配線で確かめる"
+task = 3745
+
+# 5.3s
+[[test]]
+name = "runtime_host_metrics::supervisor_records_the_host_load_while_it_runs_and_prunes_old_files"
+reason = "B 境界（守る境界）: 動いている supervisor が host の負荷を記録し古いファイルを消すことを、supervisor のプロセスと SQLite とファイルの配線で確かめる"
+task = 3745
+
+# 11.1s
+[[test]]
+name = "runtime_provider_switch::a_codex_task_without_codex_starts_on_claude_and_lands"
+reason = "B 境界（守る境界）: Codex を使えない host で Codex の task が Claude で始まり着地することを、プロセス・Git・supervisor の配線で確かめる"
+task = 3745
+
+# 12.593s
+[[test]]
+name = "landing_branch::a_master_repository_without_origin_lands_on_master"
+reason = "B 境界（守る境界）: origin の無い master の repository で run が master に着地することを、実の Git と integrate の配線で確かめる"
+task = 3745
+
+# 16.612s
+[[test]]
+name = "runtime_claim_defer::a_failed_run_with_no_commit_of_its_own_lets_the_deferred_task_go"
+reason = "B 境界（守る境界）: 自分の commit の無い失敗した run が控えた task の claim を通すことを、supervisor の pass と SQLite の event の配線で確かめる"
+task = 3745
+
+# 11.995s
+[[test]]
+name = "runtime_claim_hold::no_run_is_claimed_while_the_load_is_above_the_threshold"
+reason = "B 境界（守る境界）: 負荷が閾値を超える間 claim しないことを、supervisor のプロセスの pass と引き継ぎ、SQLite の event の配線で確かめる"
+task = 3745
+
+# 14.428s
+[[test]]
+name = "runtime_disk::a_landing_waits_for_room_before_its_verification"
+reason = "B 境界（守る境界）: 着地が検証の前にディスクの空きを待つことを、supervisor と integrate の配線で確かめる"
+task = 3745
+
+# 15.257s
+[[test]]
+name = "runtime_disk::no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once"
+reason = "B 境界（守る境界）: ディスクが足りない間 claim せず inbox に一度だけ知らせることを、supervisor の pass と SQLite の ask の配線で確かめる"
+task = 3745
+
+# 18.332s
+[[test]]
+name = "runtime_landing_answers::approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once"
+reason = "B 境界（守る境界）: 承認された run が着地の slot を待ち古い承認から一度ずつ着地することを、supervisor・Git・SQLite の配線で確かめる"
+task = 3745
+
+# 20.627s
+[[test]]
+name = "runtime_recheck::no_recheck_starts_while_another_supervisor_holds_the_recheck_lock"
+reason = "B 境界（守る境界）: 別の supervisor が recheck の lock を持つ間 recheck を始めないことを、lock のファイルと supervisor のプロセスの配線で確かめる"
+task = 3745
+
+# 10.591s
+[[test]]
+name = "runtime_review_concern::a_high_land_lands_the_run_without_an_ask"
+reason = "B 境界（守る境界）: 確信度 high の land の判定で ask なしに着地することを、review の job・supervisor・Git の配線で確かめる"
+task = 3745
+
+# 11.282s
+[[test]]
+name = "runtime_review_reasons::a_concern_landed_records_the_departure_accepted"
+reason = "B 境界（守る境界）: 着地した concern が受け入れた逸脱を記録することを、review の job と SQLite の event の配線で確かめる"
+task = 3745
+
+# 16.565s
+[[test]]
+name = "runtime_review_reasons::a_concern_sent_back_records_its_codes_and_outcome_and_stats_tally_them"
+reason = "B 境界（守る境界）: 差し戻した concern が理由の code と結果を記録することを、review の job と SQLite の event の配線で確かめる"
+task = 3745
+
+# 9.521s
+[[test]]
+name = "runtime_verify_flaky::a_failed_retry_resumes_and_a_later_landing_can_retry_again"
+reason = "B 境界（守る境界）: 失敗したやり直しが resume になり後の着地で再びやり直せることを、integrate の検証のプロセスと supervisor の配線で確かめる"
+task = 3745
+
+# 8.470s
+[[test]]
+name = "runtime_verify_flaky::a_failure_that_is_not_flaky_is_resumed_at_once"
+reason = "B 境界（守る境界）: flaky でない失敗がすぐ resume になることを、integrate の検証のプロセスと supervisor の配線で確かめる"
+task = 3745
+
+# 8.870s
+[[test]]
+name = "runtime_verify_flaky::only_flaky_tests_failing_lands_the_run_once_more_without_a_resume"
+reason = "B 境界（守る境界）: flaky な test だけの失敗で resume なしにもう一度着地を試すことを、integrate の検証のプロセスの配線で確かめる"
+task = 3745
+
+# 8.724s
+[[test]]
+name = "runtime_verify_retry::a_command_that_failed_on_the_host_is_retried_and_lands_when_it_passes"
+reason = "B 境界（守る境界）: host で落ちた検証のコマンドをやり直し通れば着地することを、integrate のプロセスと supervisor の配線で確かめる"
+task = 3745
+
+# 10.716s
+[[test]]
+name = "runtime_verify_retry::a_command_that_fails_on_the_host_again_waits_for_a_person_without_a_resume"
+reason = "B 境界（守る境界）: host でまた落ちた検証のコマンドが resume せず人を待つことを、integrate のプロセスと SQLite の ask の配線で確かめる"
+task = 3745
+
+# 16.170s
+[[test]]
+name = "runtime_waiting::a_landing_run_fills_its_supervisors_slot_in_status_and_stats"
+reason = "B 境界（守る境界）: 着地中の run が supervisor の slot を占めることを、lease と supervisor の登録と status の配線で確かめる"
+task = 3745
+
+# 15.782s
+[[test]]
+name = "runtime_waiting::a_run_waiting_for_its_answer_leaves_the_slot_to_another_task"
+reason = "B 境界（守る境界）: 答えを待つ run が slot を別の task に譲ることを、worker のプロセス・supervisor・SQLite の ask の配線で確かめる"
+task = 3745

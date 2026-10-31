@@ -169,6 +169,8 @@ fn graph_prints_the_near_term_diagram_as_d2_or_svg() {
 /// does (ADR-0077 decision 7): d2 and TALA from PATH, the SVG shown as an
 /// image of its own bytes, and the reason in its place when they cannot
 /// draw.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn report_carries_the_near_term_diagram_or_why_not() {
     let (dir, db) = queue();

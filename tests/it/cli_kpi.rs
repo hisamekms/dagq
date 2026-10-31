@@ -1,20 +1,34 @@
 //! `dagq kpi` (ADR-0051 decisions 1–9 and 14–19) on a real queue: the
 //! periods, the changes, the host's `[kpi]` settings and targets, and a
 //! comparison across a mark.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 use dagq::domain::EventKind;
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 use dagq::domain::LeaseToken;
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 use std::{path::Path, process::Command};
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 use dagq::{
     domain::{ClaimOutcome, CommitSha, DraftOrigin, TaskId},
     infrastructure::sqlite::SqliteQueue,
 };
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 use serde_json::{Value, json};
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 use crate::common::{Bounded, WithoutActor, cli::*};
 
 /// `dagq kpi` in UTC, with the host-wide `host.toml` read from `config`
 /// rather than the home of the person running the tests.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn kpi(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command.without_actor_env();
@@ -32,6 +46,8 @@ fn kpi(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::proc
         .unwrap()
 }
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn kpi_ok(db: &Path, config: &Path, args: &[&str]) -> Value {
     let output = kpi(None, db, config, args);
     assert!(
@@ -44,6 +60,8 @@ fn kpi_ok(db: &Path, config: &Path, args: &[&str]) -> Value {
 
 /// A fix task and a task without a change land today; the host's
 /// `host.toml` sets `min_samples` and a target; a mark splits a comparison.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+#[cfg(any())]
 #[test]
 fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
     let (dir, db) = queue();
@@ -187,6 +205,8 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
 /// A job's draft next to a landing: `drafts_per_landing` and
 /// `draft_backlog` read the draft's origin from the queue, as `stats`'
 /// `draft_flow` does, and a `[kpi]` target judges them (task 611).
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn kpi_counts_the_drafts_registered_per_landing() {
     let (dir, db) = queue();
@@ -240,6 +260,8 @@ fn kpi_counts_the_drafts_registered_per_landing() {
 
 /// Submits a draft task named `title` linked to `finding`, as a planner
 /// of `origin`'s; returns the task.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn submit_improvement(
     queue: &mut SqliteQueue,
     db: &Path,
@@ -269,6 +291,8 @@ fn submit_improvement(
 /// proposals the runtime's planners linked to a finding count while a task
 /// is to be done, a person's `submit --finding` does not, and the count of
 /// today is the one `SqliteQueue::improvements` gives now.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn kpi_counts_the_improvement_proposals_running() {
     use dagq::domain::{FindingTarget, NewFinding, PlannerOrigin};
@@ -321,6 +345,8 @@ fn kpi_counts_the_improvement_proposals_running() {
 }
 
 /// `dagq report` in UTC with the host-wide `host.toml` under `config`.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn report(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command.without_actor_env();
@@ -340,6 +366,8 @@ fn report(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::p
 
 /// `dagq report` writes the report of a day or week as the supervisor does,
 /// today's apart as partial, and returns the paths; it records nothing.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn report_writes_the_html_and_json_and_returns_their_paths() {
     let (dir, db) = queue();
@@ -424,6 +452,8 @@ fn report_writes_the_html_and_json_and_returns_their_paths() {
 /// the service wrote; the service writes nothing under `--out` nor under
 /// the queue's `reports/`, and params naming an `out` sent to it straight
 /// are refused with nothing written.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn report_out_through_the_service_is_written_by_the_client() {
     use dagq::domain::queue_service::{API_VERSION, ServiceRequest, UseCase};
@@ -504,6 +534,8 @@ fn report_out_through_the_service_is_written_by_the_client() {
 /// a target's `change` take it, and a comparison without `--change`
 /// summarises every change it saw. The task's kind is gone: `add --kind`,
 /// `kpi --kind`, `--by kind` and a target's `kind` are refused.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+#[cfg(any())]
 #[test]
 fn kpi_and_stats_group_the_runs_by_any_label() {
     let (dir, db) = queue();
@@ -614,6 +646,8 @@ fn kpi_and_stats_group_the_runs_by_any_label() {
 /// start exclusive), empty where nothing was recorded, and with the reason
 /// when the records cannot be read, without failing `kpi` or judging a
 /// target on it.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn kpi_summarizes_the_host_load_of_each_span() {
     use dagq::domain::host_metrics::{HostSample, file_name, header, local_day};
@@ -738,6 +772,8 @@ fn kpi_summarizes_the_host_load_of_each_span() {
 /// decision 4): per primary topic the asks and the time to the answer,
 /// the secondary topic in `codes`, and the answer's wait as
 /// `ask.worker_question_wait` by `topic=`.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn the_worker_question_topics_reach_stats_and_kpi() {
     let (dir, db) = queue();
@@ -791,6 +827,8 @@ fn the_worker_question_topics_reach_stats_and_kpi() {
 /// decision 4): per reason how many, who canceled them and the time from
 /// the registration, as `plan.cancels` and `plan.cancel_registered_secs`
 /// by `reason=`, with `stats`' `cancel_reasons` in the details.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn the_cancel_reasons_reach_stats_and_kpi() {
     let (dir, db) = queue();
@@ -834,6 +872,8 @@ fn the_cancel_reasons_reach_stats_and_kpi() {
 /// A target's `kind` is refused with a pointer to `change` and `area`
 /// (ADR-t980-1), in the host's `host.toml` as in the repository's
 /// `dagq.toml`.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn a_target_bound_by_kind_is_refused_with_its_replacement() {
     let (dir, db) = queue();
@@ -856,6 +896,8 @@ fn a_target_bound_by_kind_is_refused_with_its_replacement() {
 /// The throughput review's jobs (task 1173) reach `stats --full` and `kpi`
 /// per mode: a skipped hour is no job, `failed` and `error` are failures,
 /// a mode without a job is listed too, and `--compare` reads them.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+#[cfg(any())]
 #[test]
 fn the_throughput_review_jobs_reach_stats_and_kpi_per_mode() {
     let (dir, db) = queue();
@@ -949,6 +991,8 @@ fn the_throughput_review_jobs_reach_stats_and_kpi_per_mode() {
     assert_eq!(strata["mode=hourly"]["before"]["value"], 0.0, "{strata}");
 }
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+#[cfg(any())]
 #[test]
 fn kpi_cross_reaches_periods_and_compare_without_replacing_single_axes() {
     let (dir, db) = queue();
@@ -1063,6 +1107,8 @@ fn kpi_cross_reaches_periods_and_compare_without_replacing_single_axes() {
 
 /// Claim the next task with `attributes` in its `run_claimed` and land it;
 /// returns the claim's event id.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+#[cfg(any())]
 fn land_claimed(db: &Path, queue: &mut SqliteQueue, attributes: Value) -> i64 {
     let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
     let ClaimOutcome::Claimed { run } = queue
@@ -1100,6 +1146,8 @@ fn land_claimed(db: &Path, queue: &mut SqliteQueue, attributes: Value) -> i64 {
 
 /// The queue's events a few milliseconds apart, so that each mark has a
 /// time of its own.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+#[cfg(any())]
 fn tick() {
     std::thread::sleep(std::time::Duration::from_millis(5));
 }
@@ -1109,6 +1157,8 @@ fn tick() {
 /// person's mark next to them is a change of its own, close marks with
 /// them between are still one change, naming one splits at it alone, and
 /// a claim that derives a build and a `parallel` names the `parallel`.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+#[cfg(any())]
 #[test]
 fn kpi_compare_leaves_routine_marks_out_of_every_change() {
     let (dir, db) = queue();

@@ -1,4 +1,6 @@
 use crate::common;
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 use dagq::domain::LeaseToken;
 
 use common::cli::*;
@@ -384,6 +386,8 @@ fn draft_goal_tasks_wait_for_goal_ready() {
     assert_eq!(ok(&db, &["goal", "add", "plain"])["status"], "open");
 }
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn ready_tasks_of_a_draft_goal_do_not_raise_idle_slots() {
     let (_dir, db) = queue();

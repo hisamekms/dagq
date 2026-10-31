@@ -317,13 +317,17 @@ fn a_codex_task_without_codex_starts_on_claude_and_lands() {
         timeline["provider_switches"][0]["reason"],
         "executable_missing"
     );
-    // `stats` counts it.
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(stats["provider_switches"]["count"], 1, "{stats}");
-    assert_eq!(
-        stats["provider_switches"]["by_direction"]["codex->claude"],
-        1
-    );
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        // `stats` counts it.
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        assert_eq!(stats["provider_switches"]["count"], 1, "{stats}");
+        assert_eq!(
+            stats["provider_switches"]["by_direction"]["codex->claude"],
+            1
+        );
+    }
 }
 
 /// Acceptance (2) and (3): a headless Claude turn at Claude's usage limit
@@ -434,25 +438,29 @@ esac"#
     let limited = payloads(&detail, "usage_limited");
     assert_eq!(limited[0]["switched_to"], "codex", "{limited:?}");
     assert!(queue_events(&db, "provider_held").is_empty());
-    // `stats` keeps the requested provider on the run, beside the one that
-    // did its work and how often it moved, splits its turns by the
-    // provider that ran them, and groups it under the actual provider
-    // (ADR-t813-2 decision 7).
-    let stats = common::cli::ok(&db, &["stats", "--full"]);
-    let row = &stats["runs"][0];
-    assert_eq!(row["provider"], "claude", "{row}");
-    assert_eq!(row["actual_provider"], "codex", "{row}");
-    assert_eq!(row["provider_switches"], 1, "{row}");
-    assert_eq!(row["route"], "headless", "{row}");
-    let by_provider = &row["turns"]["by_provider"];
-    assert_eq!(by_provider["claude"]["count"], 1, "{row}");
-    assert_eq!(by_provider["claude"]["failed"], 1, "{row}");
-    assert_eq!(by_provider["codex"]["count"], 1, "{row}");
-    assert_eq!(by_provider["codex"]["failed"], 0, "{row}");
-    assert_eq!(row["turns"]["count"], 2, "{row}");
-    let versions = &stats["versions"]["provider"];
-    assert_eq!(versions.as_array().unwrap().len(), 1, "{versions}");
-    assert_eq!(versions[0]["version"], "codex", "{versions}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        // `stats` keeps the requested provider on the run, beside the one that
+        // did its work and how often it moved, splits its turns by the
+        // provider that ran them, and groups it under the actual provider
+        // (ADR-t813-2 decision 7).
+        let stats = common::cli::ok(&db, &["stats", "--full"]);
+        let row = &stats["runs"][0];
+        assert_eq!(row["provider"], "claude", "{row}");
+        assert_eq!(row["actual_provider"], "codex", "{row}");
+        assert_eq!(row["provider_switches"], 1, "{row}");
+        assert_eq!(row["route"], "headless", "{row}");
+        let by_provider = &row["turns"]["by_provider"];
+        assert_eq!(by_provider["claude"]["count"], 1, "{row}");
+        assert_eq!(by_provider["claude"]["failed"], 1, "{row}");
+        assert_eq!(by_provider["codex"]["count"], 1, "{row}");
+        assert_eq!(by_provider["codex"]["failed"], 0, "{row}");
+        assert_eq!(row["turns"]["count"], 2, "{row}");
+        let versions = &stats["versions"]["provider"];
+        assert_eq!(versions.as_array().unwrap().len(), 1, "{versions}");
+        assert_eq!(versions[0]["version"], "codex", "{versions}");
+    }
 }
 
 /// Acceptance (2) and (3): a Codex turn at Codex's usage limit holds Codex

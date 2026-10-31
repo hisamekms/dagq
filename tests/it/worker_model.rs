@@ -2,6 +2,8 @@
 //! explicitly at every start, recorded at the claim, and with
 //! `[worker.trial]` on, alternated between the control and the treatment
 //! for the mechanical tasks of the lower third.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 use crate::common;
 use crate::runtime_support;
 use dagq::domain::EventKind;
@@ -183,6 +185,8 @@ fn claims_choose_the_session_in_their_transaction() {
 
 /// `stats` puts the runs of each group side by side: their model, their
 /// speed and their task-caused rework.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn stats_compare_the_groups() {
     let (_dir, _repo, db) = fixture();
@@ -359,15 +363,19 @@ fn a_codex_run_is_outside_the_trial() {
             json!("treatment")
         )
     );
-    let stats = common::cli::ok(&db, &["stats", "--full"]);
-    let groups = stats["trial_groups"].as_array().unwrap();
-    let runs: Vec<Value> = groups.iter().map(|group| group["runs"].clone()).collect();
-    assert_eq!(runs, [json!(1), json!(1)], "{groups:?}");
-    let rows = stats["runs"].as_array().unwrap();
-    let of = |task: i64| rows.iter().find(|run| run["task_id"] == task).unwrap();
-    assert_eq!(of(2)["worker_model"], Value::Null);
-    assert_eq!(of(2)["trial_group"], Value::Null);
-    assert_eq!(of(2)["claude_version"], Value::Null);
-    assert_eq!(of(1)["claude_version"], "2.1.0");
-    assert_eq!(of(1)["worker_model"], "claude-opus-5-5");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = common::cli::ok(&db, &["stats", "--full"]);
+        let groups = stats["trial_groups"].as_array().unwrap();
+        let runs: Vec<Value> = groups.iter().map(|group| group["runs"].clone()).collect();
+        assert_eq!(runs, [json!(1), json!(1)], "{groups:?}");
+        let rows = stats["runs"].as_array().unwrap();
+        let of = |task: i64| rows.iter().find(|run| run["task_id"] == task).unwrap();
+        assert_eq!(of(2)["worker_model"], Value::Null);
+        assert_eq!(of(2)["trial_group"], Value::Null);
+        assert_eq!(of(2)["claude_version"], Value::Null);
+        assert_eq!(of(1)["claude_version"], "2.1.0");
+        assert_eq!(of(1)["worker_model"], "claude-opus-5-5");
+    }
 }

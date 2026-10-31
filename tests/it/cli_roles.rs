@@ -291,64 +291,68 @@ fn ask_answer_asks_and_close_through_the_cli() {
     assert_eq!(withdrawn["answered_by"], "person");
     assert!(withdrawn["option_index"].is_null());
     ok(&db, &["ask", "close", &next_id]);
-    // `stats` counts both asks by kind, asker, answerer and choice.
-    let asks = &ok(&db, &["stats", "--full"])["asks"];
-    assert_eq!(asks["opened"]["count"], 2, "{asks}");
-    assert_eq!(asks["opened"]["by_kind"]["decide"], 2, "{asks}");
-    assert_eq!(asks["opened"]["by_asked_by"]["human"], 2, "{asks}");
-    assert_eq!(
-        asks["opened"]["by_reason_category"]["recovery_failed"], 2,
-        "{asks}"
-    );
-    // Per reason, next to `auto_repairs` of the same window (task 439).
-    assert_eq!(
-        asks["by_reason_category"],
-        serde_json::json!({"recovery_failed": {"opened": 2, "answered": 2, "open": 0}})
-    );
-    // `auto_repairs` puts the asks opened each day next to the repairs:
-    // none here.
-    let repairs = &ok(&db, &["stats", "--full"])["auto_repairs"];
-    assert_eq!(repairs["count"], 0, "{repairs}");
-    assert_eq!(repairs["by_layer"], serde_json::json!({}));
-    let days = repairs["by_day"].as_object().unwrap();
-    assert_eq!(days.len(), 1, "{repairs}");
-    let day = days.values().next().unwrap();
-    assert_eq!(day["asks_opened"], 2, "{repairs}");
-    assert_eq!(day["auto_repaired"], 0, "{repairs}");
-    assert_eq!(day["asks_by_reason"]["recovery_failed"], 2, "{repairs}");
-    assert_eq!(
-        asks["answered"]["by_answered_by"],
-        serde_json::json!({"inbox": 1, "person": 1})
-    );
-    assert_eq!(
-        asks["answered"]["choices"]["decide"],
-        serde_json::json!({"by_option": {"0030": 1}, "free": 1, "unknown": 0})
-    );
-    // Per kind and asker, how long the asks waited for their answer and
-    // for its application, here `ask close` (task 468); none is open.
-    for group in [
-        &asks["times"]["by_kind"]["decide"],
-        &asks["times"]["by_asked_by"]["human"],
-    ] {
-        for wait in ["to_answer", "to_apply", "answer_to_apply"] {
-            assert_eq!(group[wait]["count"], 2, "{wait}: {asks}");
-            assert!(group[wait]["median"].as_i64().unwrap() >= 0, "{asks}");
-            assert!(
-                group[wait]["p90"].as_i64() <= group[wait]["max"].as_i64(),
-                "{asks}"
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        // `stats` counts both asks by kind, asker, answerer and choice.
+        let asks = &ok(&db, &["stats", "--full"])["asks"];
+        assert_eq!(asks["opened"]["count"], 2, "{asks}");
+        assert_eq!(asks["opened"]["by_kind"]["decide"], 2, "{asks}");
+        assert_eq!(asks["opened"]["by_asked_by"]["human"], 2, "{asks}");
+        assert_eq!(
+            asks["opened"]["by_reason_category"]["recovery_failed"], 2,
+            "{asks}"
+        );
+        // Per reason, next to `auto_repairs` of the same window (task 439).
+        assert_eq!(
+            asks["by_reason_category"],
+            serde_json::json!({"recovery_failed": {"opened": 2, "answered": 2, "open": 0}})
+        );
+        // `auto_repairs` puts the asks opened each day next to the repairs:
+        // none here.
+        let repairs = &ok(&db, &["stats", "--full"])["auto_repairs"];
+        assert_eq!(repairs["count"], 0, "{repairs}");
+        assert_eq!(repairs["by_layer"], serde_json::json!({}));
+        let days = repairs["by_day"].as_object().unwrap();
+        assert_eq!(days.len(), 1, "{repairs}");
+        let day = days.values().next().unwrap();
+        assert_eq!(day["asks_opened"], 2, "{repairs}");
+        assert_eq!(day["auto_repaired"], 0, "{repairs}");
+        assert_eq!(day["asks_by_reason"]["recovery_failed"], 2, "{repairs}");
+        assert_eq!(
+            asks["answered"]["by_answered_by"],
+            serde_json::json!({"inbox": 1, "person": 1})
+        );
+        assert_eq!(
+            asks["answered"]["choices"]["decide"],
+            serde_json::json!({"by_option": {"0030": 1}, "free": 1, "unknown": 0})
+        );
+        // Per kind and asker, how long the asks waited for their answer and
+        // for its application, here `ask close` (task 468); none is open.
+        for group in [
+            &asks["times"]["by_kind"]["decide"],
+            &asks["times"]["by_asked_by"]["human"],
+        ] {
+            for wait in ["to_answer", "to_apply", "answer_to_apply"] {
+                assert_eq!(group[wait]["count"], 2, "{wait}: {asks}");
+                assert!(group[wait]["median"].as_i64().unwrap() >= 0, "{asks}");
+                assert!(
+                    group[wait]["p90"].as_i64() <= group[wait]["max"].as_i64(),
+                    "{asks}"
+                );
+            }
+            assert_eq!(
+                group["open"],
+                serde_json::json!({"count": 0, "median": null, "p90": null, "max": null})
             );
         }
-        assert_eq!(
-            group["open"],
-            serde_json::json!({"count": 0, "median": null, "p90": null, "max": null})
-        );
+        // `--since` past both leaves nothing.
+        let latest = ok(&db, &["status"])["cursor"].to_string();
+        let later = &ok(&db, &["stats", "--since", &latest])["asks"];
+        assert_eq!(later["opened"]["count"], 0, "{later}");
+        assert_eq!(later["answered"]["count"], 0, "{later}");
+        assert_eq!(later["by_reason_category"], serde_json::json!({}));
     }
-    // `--since` past both leaves nothing.
-    let latest = ok(&db, &["status"])["cursor"].to_string();
-    let later = &ok(&db, &["stats", "--since", &latest])["asks"];
-    assert_eq!(later["opened"]["count"], 0, "{later}");
-    assert_eq!(later["answered"]["count"], 0, "{later}");
-    assert_eq!(later["by_reason_category"], serde_json::json!({}));
     assert!(!invoke(&db, &["ask", "close", "99"]).status.success());
     assert_eq!(
         ok(&db, &["asks", "--role", "inbox"])["asks"],
@@ -404,12 +408,16 @@ fn stats_times_the_open_asks_up_to_the_window_end() {
     };
     let open = ask("still open?");
     let since = ok(&db, &["status"])["cursor"].to_string();
-    let times = &ok(&db, &["stats", "--since", &since])["asks"]["times"];
-    let decide = &times["by_kind"]["decide"];
-    assert_eq!(decide["open"]["count"], 1, "{times}");
-    assert!(decide["open"]["max"].as_i64().unwrap() >= 0, "{times}");
-    assert_eq!(decide["to_answer"]["count"], 0, "{times}");
-    assert_eq!(times["by_asked_by"]["human"]["open"]["count"], 1, "{times}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let times = &ok(&db, &["stats", "--since", &since])["asks"]["times"];
+        let decide = &times["by_kind"]["decide"];
+        assert_eq!(decide["open"]["count"], 1, "{times}");
+        assert!(decide["open"]["max"].as_i64().unwrap() >= 0, "{times}");
+        assert_eq!(decide["to_answer"]["count"], 0, "{times}");
+        assert_eq!(times["by_asked_by"]["human"]["open"]["count"], 1, "{times}");
+    }
 
     ok(&db, &["answer", &open, "--text", "yes"]);
     ok(&db, &["ask", "close", &open]);
@@ -421,11 +429,15 @@ fn stats_times_the_open_asks_up_to_the_window_end() {
         .map(|event| event["kind"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(kinds, ["ask_answered", "ask_closed"], "{closed}");
-    let times = &ok(&db, &["stats", "--since", &since])["asks"]["times"];
-    let decide = &times["by_kind"]["decide"];
-    assert_eq!(decide["open"]["count"], 0, "{times}");
-    assert_eq!(decide["to_answer"]["count"], 1, "{times}");
-    assert_eq!(decide["to_apply"]["count"], 1, "{times}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let times = &ok(&db, &["stats", "--since", &since])["asks"]["times"];
+        let decide = &times["by_kind"]["decide"];
+        assert_eq!(decide["open"]["count"], 0, "{times}");
+        assert_eq!(decide["to_answer"]["count"], 1, "{times}");
+        assert_eq!(decide["to_apply"]["count"], 1, "{times}");
+    }
 }
 
 #[test]
@@ -574,7 +586,6 @@ fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
         &["graph"],
         &["status"],
         &["events"],
-        &["stats"],
         &["doctor"],
         &["goal", "list"],
         &["goal", "show", "1"],
@@ -585,6 +596,11 @@ fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
         &["findings", "--all", "--full"],
     ] {
         ok_as("observer", &db, args);
+    }
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        ok_as("observer", &db, &["stats"]);
     }
     let finding = ok_as(
         "observer",

@@ -33,9 +33,11 @@ const REPLY: &str = "## Conclusion\n- landings held on Codex\n\n## Details\nthe 
 /// appends its arguments (each ended by `|`) to `codex-args.txt` and its
 /// role and actor to `codex-actors.txt`, prints `thread.started` (thread
 /// `codex-thread-<call>`) and `turn.started`, then, as `codex-mode` says,
-/// fails at the usage limit (`limit`), or reads the KPIs through the
-/// queue service, writes the thread's rollout with its model and prints
-/// [`REPLY`] as its last message and `turn.completed`.
+/// fails at the usage limit (`limit`), or reads the queue's status through
+/// the queue service, writes the thread's rollout with its model and prints
+/// [`REPLY`] as its last message and `turn.completed`. It reads `status`:
+/// `kpi` is stopped while it reads every event of the queue (ADR-t3745-1);
+/// task 1669 puts back `kpi > "$DIR/codex-kpi.json"` and its check.
 fn stub_codex(db: &Path, mode: &str) -> PathBuf {
     let dir = db.parent().unwrap();
     let stub = dir.join("codex");
@@ -72,7 +74,7 @@ if [ "$(cat "$DIR/codex-mode")" = limit ]; then
   exit 1
 fi
 env > "$DIR/codex-env.txt"
-{dagq} kpi > "$DIR/codex-kpi.json" 2> "$DIR/codex-kpi.err"
+{dagq} status > "$DIR/codex-status.json" 2> "$DIR/codex-status.err"
 SESSIONS="$DIR/codex-home/sessions/2026/09/29"
 mkdir -p "$SESSIONS"
 printf '{{"timestamp":"%s","type":"turn_context","payload":{{"model":"{CODEX_MODEL}","effort":"high"}}}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$SESSIONS/rollout-2026-09-29T00-00-00-$THREAD.jsonl"
@@ -202,7 +204,7 @@ fn a_throughput_review_on_codex_reads_its_last_message_like_claude_s_output() {
     let env = fs::read_to_string(db.parent().unwrap().join("codex-env.txt")).unwrap();
     assert!(env.contains("DAGQ_SERVICE_SOCKET="), "{env}");
     assert!(
-        !fs::read_to_string(db.parent().unwrap().join("codex-kpi.json"))
+        !fs::read_to_string(db.parent().unwrap().join("codex-status.json"))
             .unwrap()
             .is_empty()
     );
@@ -258,14 +260,18 @@ fn a_throughput_review_on_codex_reads_its_last_message_like_claude_s_output() {
         assert_eq!(span["model"], CODEX_MODEL);
     }
 
-    let stats = crate::common::cli::ok(&db, &["stats", "--full"]);
-    let jobs = &stats["jobs"]["throughput_review"];
-    assert_eq!(jobs["by_provider"]["codex"]["count"], 3, "{jobs}");
-    assert!(jobs["by_provider"].get("claude").is_none(), "{jobs}");
-    assert_eq!(jobs["by_model"][CODEX_MODEL]["count"], 3, "{jobs}");
-    let kpi = crate::common::cli::ok(&db, &["kpi", "--last", "1"]);
-    let count = &kpi["periods"][0]["kpis"]["job.count.throughput_review"];
-    assert_eq!(count["provider=codex"]["value"], 3.0, "{count}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = crate::common::cli::ok(&db, &["stats", "--full"]);
+        let jobs = &stats["jobs"]["throughput_review"];
+        assert_eq!(jobs["by_provider"]["codex"]["count"], 3, "{jobs}");
+        assert!(jobs["by_provider"].get("claude").is_none(), "{jobs}");
+        assert_eq!(jobs["by_model"][CODEX_MODEL]["count"], 3, "{jobs}");
+        let kpi = crate::common::cli::ok(&db, &["kpi", "--last", "1"]);
+        let count = &kpi["periods"][0]["kpis"]["job.count.throughput_review"];
+        assert_eq!(count["provider=codex"]["value"], 3.0, "{count}");
+    }
 }
 
 /// A Codex review stopped at the usage limit: with a role that names its

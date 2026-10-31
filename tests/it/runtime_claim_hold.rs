@@ -27,6 +27,8 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
         .collect()
 }
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn alert_kinds(stats: &Value) -> Vec<&str> {
     stats["alerts"]
         .as_array()
@@ -57,8 +59,12 @@ fn no_run_is_claimed_while_the_load_is_above_the_threshold() {
     let outcome = supervise_with(&db, &repo, &backend, &once).unwrap();
     assert_eq!(outcome["runs"], json!([]), "{outcome}");
     assert_eq!(queue_events(&db, "claim_held").len(), 1);
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(stats["claim_holds"]["held"], Value::Null, "{stats}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        assert_eq!(stats["claim_holds"]["held"], Value::Null, "{stats}");
+    }
 
     // The next supervisor starts while the load is still high.
     let stop = Arc::new(AtomicBool::new(false));
@@ -101,23 +107,27 @@ fn no_run_is_claimed_while_the_load_is_above_the_threshold() {
     assert_eq!(hold["reason"], "load_average", "{status}");
     assert_eq!(hold["supervisor"], held[0]["supervisor"]);
     assert!(hold["since"].is_string());
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(stats["claim_holds"]["held"]["reason"], "load_average");
-    assert_eq!(
-        stats["claim_holds"]["held"]["supervisor"],
-        held[0]["supervisor"]
-    );
-    assert_eq!(stats["claim_holds"]["held"]["threshold"], 16.0);
-    let kinds = alert_kinds(&stats);
-    assert!(kinds.contains(&"claim_held"), "{stats}");
-    assert!(!kinds.contains(&"idle_slots"), "{stats}");
-    let alert = stats["alerts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|alert| alert["kind"] == "claim_held")
-        .unwrap();
-    assert_eq!(alert["value"], 2);
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        assert_eq!(stats["claim_holds"]["held"]["reason"], "load_average");
+        assert_eq!(
+            stats["claim_holds"]["held"]["supervisor"],
+            held[0]["supervisor"]
+        );
+        assert_eq!(stats["claim_holds"]["held"]["threshold"], 16.0);
+        let kinds = alert_kinds(&stats);
+        assert!(kinds.contains(&"claim_held"), "{stats}");
+        assert!(!kinds.contains(&"idle_slots"), "{stats}");
+        let alert = stats["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|alert| alert["kind"] == "claim_held")
+            .unwrap();
+        assert_eq!(alert["value"], 2);
+    }
 
     // The load falls back: the task is claimed and runs to its rest.
     set_load(1.0);
@@ -138,14 +148,18 @@ fn no_run_is_claimed_while_the_load_is_above_the_threshold() {
     assert_eq!(resumed[0]["reason"], "load_average");
     assert_eq!(resumed[0]["supervisor"], held[0]["supervisor"]);
     assert_eq!(queue_events(&db, "claim_held").len(), 2);
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(stats["claim_holds"]["count"], 2, "{stats}");
-    assert_eq!(
-        stats["claim_holds"]["by_reason"]["load_average"]["count"],
-        2
-    );
-    assert_eq!(stats["claim_holds"]["held"], Value::Null);
-    assert!(!alert_kinds(&stats).contains(&"claim_held"), "{stats}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        assert_eq!(stats["claim_holds"]["count"], 2, "{stats}");
+        assert_eq!(
+            stats["claim_holds"]["by_reason"]["load_average"]["count"],
+            2
+        );
+        assert_eq!(stats["claim_holds"]["held"], Value::Null);
+        assert!(!alert_kinds(&stats).contains(&"claim_held"), "{stats}");
+    }
     assert!(
         runtime::status(&db).unwrap()["supervisors"]
             .as_array()

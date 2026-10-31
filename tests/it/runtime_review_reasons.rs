@@ -94,37 +94,41 @@ fn a_concern_sent_back_records_its_codes_and_outcome_and_stats_tally_them() {
     assert_eq!(finished[1]["reason_codes"], json!([]));
     assert_eq!(finished[1]["primary_code"], Value::Null);
 
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    let review = &stats["review_reasons"]["review"];
-    assert_eq!(review["verdicts"], 2);
-    assert_eq!(review["reviewed"], 1);
-    assert_eq!(review["sent_back"], 1);
-    assert_eq!(review["rate"], 1.0);
-    let adr = &review["by_code"]["adr_conflict"];
-    assert_eq!(adr["verdicts"], 1);
-    assert_eq!(adr["concern"], 1);
-    assert_eq!(adr["subjects"], 1);
-    assert_eq!(
-        adr["outcomes"],
-        json!({"deviation_accepted": 0, "deviation_rejected": 1, "canceled": 0})
-    );
-    assert_eq!(adr["concern_wait_secs"]["count"], 1);
-    assert_eq!(adr["send_back_resume_secs"]["count"], 1);
-    assert_eq!(
-        review["codes"],
-        json!({"adr_conflict": 1, "docs_drift": 1, "unlabeled": 1})
-    );
-    // The fixture's task has no change.
-    assert!(review.get("by_kind").is_none());
-    assert_eq!(
-        review["by_change"],
-        json!([{"change": null, "reviewed": 1, "sent_back": 1, "rate": 1.0,
-                "by_code": {"adr_conflict": 1}}])
-    );
-    let run = &stats["runs"][0]["review_reasons"];
-    assert_eq!(run.as_array().unwrap().len(), 1);
-    assert_eq!(run[0]["verdict"], "concern");
-    assert_eq!(run[0]["outcome"], "deviation_rejected");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let review = &stats["review_reasons"]["review"];
+        assert_eq!(review["verdicts"], 2);
+        assert_eq!(review["reviewed"], 1);
+        assert_eq!(review["sent_back"], 1);
+        assert_eq!(review["rate"], 1.0);
+        let adr = &review["by_code"]["adr_conflict"];
+        assert_eq!(adr["verdicts"], 1);
+        assert_eq!(adr["concern"], 1);
+        assert_eq!(adr["subjects"], 1);
+        assert_eq!(
+            adr["outcomes"],
+            json!({"deviation_accepted": 0, "deviation_rejected": 1, "canceled": 0})
+        );
+        assert_eq!(adr["concern_wait_secs"]["count"], 1);
+        assert_eq!(adr["send_back_resume_secs"]["count"], 1);
+        assert_eq!(
+            review["codes"],
+            json!({"adr_conflict": 1, "docs_drift": 1, "unlabeled": 1})
+        );
+        // The fixture's task has no change.
+        assert!(review.get("by_kind").is_none());
+        assert_eq!(
+            review["by_change"],
+            json!([{"change": null, "reviewed": 1, "sent_back": 1, "rate": 1.0,
+                    "by_code": {"adr_conflict": 1}}])
+        );
+        let run = &stats["runs"][0]["review_reasons"];
+        assert_eq!(run.as_array().unwrap().len(), 1);
+        assert_eq!(run[0]["verdict"], "concern");
+        assert_eq!(run[0]["outcome"], "deviation_rejected");
+    }
 }
 
 /// `land` records `deviation_accepted` once, and the run lands.
@@ -138,11 +142,15 @@ fn a_concern_landed_records_the_departure_accepted() {
         payloads(&detail, "review_outcome")[0]["outcome"],
         "deviation_accepted"
     );
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(
-        stats["review_reasons"]["review"]["by_code"]["adr_conflict"]["outcomes"]["deviation_accepted"],
-        1
-    );
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        assert_eq!(
+            stats["review_reasons"]["review"]["by_code"]["adr_conflict"]["outcomes"]["deviation_accepted"],
+            1
+        );
+    }
 }
 
 /// `cancel` records `canceled`, and the task is canceled.

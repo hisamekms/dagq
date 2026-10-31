@@ -6,7 +6,7 @@
 //! Each read takes the observation context's ports ([`ObserverLog`],
 //! [`QueueRecords`]), the shared [`EventStore`], and
 //! only the reads the other contexts open to every context: the execution
-//! context's runs ([`RunLog`] for the events, the timeline and the marks)
+//! context's runs ([`RunLog`] for the events and the timeline)
 //! and the planning context's [`TaskReads`] (the notes).
 
 use anyhow::Result;
@@ -25,6 +25,7 @@ use crate::domain::kpi::KpiQuery;
 use crate::domain::plan_request::PlanRequest;
 use crate::domain::replan_plan::ReplanBrief;
 use crate::domain::stats::StatsQuery;
+use crate::domain::stopped_reads::{StoppedRead, refuse};
 use crate::domain::task_replan::ReplanOperation;
 use crate::domain::{
     EventFilter, EventId, FindingId, FindingQuery, FindingTarget, GoalId, NoteQuery, ReplanId,
@@ -213,8 +214,11 @@ pub fn notes(queue: &(impl TaskReads + ?Sized), read: &NotesRead) -> Result<Valu
 }
 
 /// `marks`: the recorded and the derived marks between the cursors.
-pub fn marks(queue: &(impl RunLog + ?Sized), read: &MarksRead) -> Result<Value> {
-    let marks = crate::domain::marks::marks(&queue.all_events()?, read.since, read.until);
+/// Stopped: refused before it reads, as the marks are read off every event
+/// of the queue ([`StoppedRead::Marks`], ADR-t3745-1).
+pub fn marks(read: &MarksRead) -> Result<Value> {
+    let events: Vec<crate::domain::RunEvent> = refuse(StoppedRead::Marks)?;
+    let marks = crate::domain::marks::marks(&events, read.since, read.until);
     Ok(json!({ "marks": marks }))
 }
 

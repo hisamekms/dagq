@@ -10,6 +10,7 @@ use crate::application::Landing;
 use crate::application::*;
 use crate::domain::cancel_reason::NewCancel;
 use crate::domain::search::SearchQuery;
+use crate::domain::stopped_reads::{ReadStopped, StoppedRead};
 use crate::domain::*;
 use anyhow::Result;
 use serde_json::Value;
@@ -2135,7 +2136,8 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 answer_.as_str(),
             ))
         }
-        "all_events" => answer(EventStore::all_events(&*store)),
+        // Stopped: refused without reading the log (ADR-t3745-1).
+        "all_events" => Err(ReadStopped(StoppedRead::AllEvents).into()),
         "stats_window" => answer(EventStore::stats_window(&*store)),
         "record_attributes_baseline" => answer(EventStore::record_attributes_baseline(&*store)),
         "record_findings_baseline" => answer(EventStore::record_findings_baseline(&*store)),

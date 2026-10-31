@@ -356,47 +356,16 @@ fn an_answerer_crosses_as_its_text() {
     assert_eq!(back, answerer);
 }
 
-/// A service whose events are `count` events, which answers a page of
-/// more than `largest` of them as past its limit.
-struct PagedEvents {
-    count: i64,
-    largest: usize,
-    asked: std::sync::Mutex<Vec<usize>>,
+/// A service that counts what it is asked and answers nothing.
+#[derive(Default)]
+struct Unasked {
+    asked: std::sync::atomic::AtomicUsize,
 }
 
-impl ServiceCaller for PagedEvents {
-    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
-        assert_eq!(use_case, UseCase::Supervisor);
-        let params: SupervisorParams = serde_json::from_value(params)?;
-        match params.op.as_str() {
-            "latest_event_id" => Ok(serde_json::json!(self.count)),
-            "events_between" => {
-                let after = params.args[0].as_i64().unwrap();
-                let upto = params.args[1].as_i64().unwrap();
-                let limit = usize::try_from(params.args[3].as_u64().unwrap()).unwrap();
-                self.asked.lock().unwrap().push(limit);
-                if limit > self.largest {
-                    return Err(service_error(&ServiceError {
-                        code: ServiceErrorCode::ResponseTooLarge,
-                        message: "too large".into(),
-                        denied: None,
-                        kind: None,
-                        rejected: false,
-                        held: None,
-                    }));
-                }
-                let page: Vec<Value> = (after + 1..=upto)
-                    .take(limit)
-                    .map(|id| {
-                        serde_json::json!({"id": id, "task_id": null, "goal_id": null,
-                            "run_id": null, "kind": "observation", "payload": {},
-                            "created_at": "2026-10-23T00:00:00.000Z"})
-                    })
-                    .collect();
-                Ok(Value::Array(page))
-            }
-            op => panic!("no {op} here"),
-        }
+impl ServiceCaller for Unasked {
+    fn call(&self, _: UseCase, _: Value) -> Result<Value> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        anyhow::bail!("nothing is answered here")
     }
     fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
         unreachable!("no landing here")
@@ -414,27 +383,24 @@ impl ServiceCaller for PagedEvents {
     }
 }
 
-/// The whole log is read a page at a time up to the newest event when the
-/// read began, a page past the answer's limit asked again at half its
-/// size: the events come back once each, in order.
+/// The whole log is stopped (ADR-t3745-1): the supervisor's all_events
+/// is refused with why and what brings its readers back, and no page of
+/// the log is asked for in its place.
 #[test]
-fn all_events_reads_the_log_in_pages_within_the_answers_limit() {
-    let service = Arc::new(PagedEvents {
-        count: 2500,
-        largest: 600,
-        asked: std::sync::Mutex::default(),
-    });
+fn all_events_is_refused_without_asking_the_service_for_the_log() {
+    let service = Arc::new(Unasked::default());
     let queue = SupervisorQueues::new(
         service.clone(),
         ActorContext::instance(ActorRole::Supervisor, 7),
     )
     .queue();
-    let events = EventStore::all_events(&queue).unwrap();
-    let ids: Vec<i64> = events.iter().map(|event| event.id.as_i64()).collect();
-    assert_eq!(ids, (1..=2500).collect::<Vec<_>>());
-    let asked = service.asked.lock().unwrap().clone();
-    assert_eq!(&asked[..3], [2000, 1000, 500]);
-    assert!(asked[3..].iter().all(|limit| *limit == 500), "{asked:?}");
+    let error = EventStore::all_events(&queue).unwrap_err().to_string();
+    assert!(error.starts_with("all_events is stopped"), "{error}");
+    assert!(
+        error.contains("until the ledger's readers take its place"),
+        "{error}"
+    );
+    assert_eq!(service.asked.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 /// A service of `runs`, which answers a page of more than `largest` of

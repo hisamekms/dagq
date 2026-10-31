@@ -257,6 +257,8 @@ fn each_host_command_runs_through_the_service_as_on_the_db_and_is_refused_a_work
             &["planner", "request", "1", "--text", "t"],
             "planner.request",
         ),
+        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+        #[cfg(any())]
         (&["report"], "queue.export"),
         (
             &["graph", "--out", "g.d2", "--format", "d2"],
@@ -349,6 +351,8 @@ fn each_host_command_runs_through_the_service_as_on_the_db_and_is_refused_a_work
                 text: "and the docs".to_owned(),
             }),
         ),
+        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+        #[cfg(any())]
         (
             &[],
             vec!["report", "--print", "json"],
@@ -530,6 +534,8 @@ fn each_host_command_runs_in_client_mode_as_on_the_db() {
                 text: "and the docs".to_owned(),
             }),
         ),
+        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+        #[cfg(any())]
         (
             vec!["report", "--print", "json"],
             QueueCommand::Report(commands::ReportParams {

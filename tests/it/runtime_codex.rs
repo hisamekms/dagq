@@ -176,13 +176,17 @@ fn no_claude_run_uses_a_read_only_codex_review_and_lands() {
     assert_eq!(spans.len(), 1, "{spans:?}");
     assert_eq!(spans[0]["session_id"], REVIEW_THREAD);
     assert_eq!(spans[0]["model"], REVIEW_MODEL);
-    let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["review"];
-    assert_eq!(
-        jobs["by_provider"]["codex"]["verdicts"]["pass"], 1,
-        "{jobs}"
-    );
-    assert_eq!(jobs["by_model"][REVIEW_MODEL]["count"], 1, "{jobs}");
-    assert!(jobs["by_model"].get("unknown").is_none(), "{jobs}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["review"];
+        assert_eq!(
+            jobs["by_provider"]["codex"]["verdicts"]["pass"], 1,
+            "{jobs}"
+        );
+        assert_eq!(jobs["by_model"][REVIEW_MODEL]["count"], 1, "{jobs}");
+        assert!(jobs["by_model"].get("unknown").is_none(), "{jobs}");
+    }
     let args = fs::read_to_string(dir.path().join("codex-review-args.log")).unwrap();
     // Read-only, in the profile that lets its `dagq` reach the queue
     // service's socket in place of `--sandbox read-only` (ADR-t1233-5
@@ -300,9 +304,13 @@ fn no_claude_codex_review_failure_asks_without_starting_claude() {
     assert_eq!(spans.len(), 1, "{spans:?}");
     assert_eq!(spans[0]["session_id"], REVIEW_THREAD);
     assert_eq!(spans[0]["model"], REVIEW_MODEL);
-    let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["review"];
-    // The stats count the review's end once.
-    assert_eq!(jobs["by_model"][REVIEW_MODEL]["failed"], 1, "{jobs}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["review"];
+        // The stats count the review's end once.
+        assert_eq!(jobs["by_model"][REVIEW_MODEL]["failed"], 1, "{jobs}");
+    }
     let started = payloads(&detail, "review_started");
     assert_eq!(started.len(), 1);
     assert_eq!(started[0]["launch"]["provider"], "codex");
@@ -997,21 +1005,25 @@ esac"#
         })
         .sum();
     assert_eq!(input, 21, "{spans:?}");
-    // `stats` shows them on the run, and per provider and route.
-    let stats = common::cli::ok(&db, &["stats", "--full"]);
-    let row = &stats["runs"][0];
-    assert_eq!(row["provider"], "codex", "{row}");
-    assert_eq!(row["route"], "headless", "{row}");
-    assert_eq!(row["codex_version"], "0.46.0", "{row}");
-    assert_eq!(row["worker_model"], "gpt-test-codex", "{row}");
-    assert_eq!(row["claude_version"], Value::Null, "{row}");
-    assert_eq!(row["trial_group"], Value::Null, "{row}");
-    assert_eq!(row["turns"]["count"], 3, "{row}");
-    assert_eq!(row["tokens"]["input"], 21, "{row}");
-    assert_eq!(row["tokens"]["cache_read"], 12, "{row}");
-    assert_eq!(stats["versions"]["provider"][0]["version"], "codex");
-    assert_eq!(stats["versions"]["route"][0]["version"], "headless");
-    assert_eq!(stats["versions"]["codex"][0]["version"], "0.46.0");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        // `stats` shows them on the run, and per provider and route.
+        let stats = common::cli::ok(&db, &["stats", "--full"]);
+        let row = &stats["runs"][0];
+        assert_eq!(row["provider"], "codex", "{row}");
+        assert_eq!(row["route"], "headless", "{row}");
+        assert_eq!(row["codex_version"], "0.46.0", "{row}");
+        assert_eq!(row["worker_model"], "gpt-test-codex", "{row}");
+        assert_eq!(row["claude_version"], Value::Null, "{row}");
+        assert_eq!(row["trial_group"], Value::Null, "{row}");
+        assert_eq!(row["turns"]["count"], 3, "{row}");
+        assert_eq!(row["tokens"]["input"], 21, "{row}");
+        assert_eq!(row["tokens"]["cache_read"], 12, "{row}");
+        assert_eq!(stats["versions"]["provider"][0]["version"], "codex");
+        assert_eq!(stats["versions"]["route"][0]["version"], "headless");
+        assert_eq!(stats["versions"]["codex"][0]["version"], "0.46.0");
+    }
 
     // The rules against pkill / killall are kept out of Git.
     let exclude = fs::read_to_string(repo.join(".git/info/exclude")).unwrap();

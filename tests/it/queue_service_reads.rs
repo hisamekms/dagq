@@ -24,7 +24,8 @@ use dagq::{
 use serde_json::{Value, json};
 
 /// A queue whose reads show something: a goal, a note on the claimed
-/// task, a finding and a mark besides the claimed run.
+/// task, a finding and a mark besides the claimed run (the mark while
+/// `mark` is not stopped).
 fn seeded() -> (Queue, i64, i64) {
     let queue = queue();
     let task = queue.run.task_id().as_i64();
@@ -50,7 +51,11 @@ fn seeded() -> (Queue, i64, i64) {
             "a stall",
         ],
     );
-    ok(&queue.db, &["mark", "parallel 3→2", "--note", "a test"]);
+    // Stopped while it reads every event of the queue (ADR-t3745-1): the marks task of goal 235 takes this cfg off.
+    #[cfg(any())]
+    {
+        ok(&queue.db, &["mark", "parallel 3→2", "--note", "a test"]);
+    }
     start(&queue);
     (queue, task, goal)
 }
@@ -236,11 +241,6 @@ fn a_worker_reads_what_a_measure_task_reads_as_the_command_line_prints_it() {
     );
     for (use_case, params, args) in [
         (
-            UseCase::Stats,
-            json!({"full": true}),
-            vec!["stats", "--full"],
-        ),
-        (
             UseCase::Events,
             json!({"full": true, "all": true}),
             vec!["events", "--full", "--all"],
@@ -255,18 +255,46 @@ fn a_worker_reads_what_a_measure_task_reads_as_the_command_line_prints_it() {
             json!({"run": run}),
             vec!["timeline", &run],
         ),
-        (UseCase::Kpi, json!({}), vec!["kpi"]),
-        (
-            UseCase::Kpi,
-            json!({"period": "week", "last": 4, "area": ["runtime"], "by": ["provider"]}),
-            vec![
-                "kpi", "--period", "week", "--last", "4", "--area", "runtime", "--by", "provider",
-            ],
-        ),
-        (UseCase::Marks, json!({}), vec!["marks"]),
-        (UseCase::Forecast, json!({}), vec!["forecast"]),
     ] {
         same_as_cli(&queue, &worker, use_case, &params, &args);
+    }
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        for (use_case, params, args) in [
+            (
+                UseCase::Stats,
+                json!({"full": true}),
+                vec!["stats", "--full"],
+            ),
+            (UseCase::Kpi, json!({}), vec!["kpi"]),
+            (
+                UseCase::Kpi,
+                json!({"period": "week", "last": 4, "area": ["runtime"], "by": ["provider"]}),
+                vec![
+                    "kpi", "--period", "week", "--last", "4", "--area", "runtime", "--by",
+                    "provider",
+                ],
+            ),
+        ] {
+            same_as_cli(&queue, &worker, use_case, &params, &args);
+        }
+    }
+    // Stopped while it reads every event of the queue (ADR-t3745-1): the marks task of goal 235 takes this cfg off.
+    #[cfg(any())]
+    {
+        same_as_cli(&queue, &worker, UseCase::Marks, &json!({}), &["marks"]);
+    }
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+    #[cfg(any())]
+    {
+        same_as_cli(
+            &queue,
+            &worker,
+            UseCase::Forecast,
+            &json!({}),
+            &["forecast"],
+        );
     }
     // The worker reads the whole queue, not only its own run (ADR-t1233-5
     // decision 3), and no read is recorded as a refusal.
@@ -338,31 +366,10 @@ fn the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it() {
             json!({"run": run, "full": true, "gap": 1}),
             vec!["timeline", &run, "--full", "--gap", "1"],
         ),
-        (UseCase::Stats, json!({}), vec!["stats"]),
-        (
-            UseCase::Stats,
-            json!({"since": "1", "goal": goal}),
-            vec!["stats", "--since", "1", "--goal", &goal_text],
-        ),
-        (
-            UseCase::Kpi,
-            json!({"compare": "@1790000000", "window": 3}),
-            vec!["kpi", "--compare", "@1790000000", "--window", "3"],
-        ),
-        (
-            UseCase::Forecast,
-            json!({"goal": goal, "trials": 50}),
-            vec!["forecast", "--goal", &goal_text, "--trials", "50"],
-        ),
         (
             UseCase::Notes,
             json!({"task": task}),
             vec!["notes", "--task", &task_text],
-        ),
-        (
-            UseCase::Marks,
-            json!({"since": "1"}),
-            vec!["marks", "--since", "1"],
         ),
         (UseCase::Findings, json!({}), vec!["findings"]),
         (
@@ -427,8 +434,65 @@ fn the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it() {
             ],
         ),
     ];
-    for (use_case, params, args) in &reads {
-        same_as_cli(&queue, &plan_review, *use_case, params, args);
+    // Every read role and the worker reads every one of them on the
+    // service's side (ADR-t728-1's `queue.read`, ADR-t1233-5 decision 3).
+    let principals = [
+        Principal::of(&ActorContext::review_job(queue.run.id(), 1)),
+        Principal::of(&ActorContext::recovery_job(queue.run.id(), "failed", 1)),
+        Principal::of(&ActorContext::goal_review_job(goal, 1)),
+        Principal::of(&ActorContext::throughput_review_job(
+            "hourly",
+            "2026-10-02T09",
+        )),
+        Principal::of(&ActorContext::instance(ActorRole::Observer, "s1")),
+        Principal::worker(queue.run.id(), queue.run.task_id()),
+    ];
+    let served_to_all = |reads: &[(UseCase, Value, Vec<&str>)]| {
+        for (use_case, params, args) in reads {
+            same_as_cli(&queue, &plan_review, *use_case, params, args);
+        }
+        for principal in &principals {
+            let token = token(&queue, principal);
+            for (use_case, params, _) in reads {
+                answer(&queue, &token, *use_case, params);
+            }
+        }
+    };
+    served_to_all(&reads);
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        served_to_all(&[
+            (UseCase::Stats, json!({}), vec!["stats"]),
+            (
+                UseCase::Stats,
+                json!({"since": "1", "goal": goal}),
+                vec!["stats", "--since", "1", "--goal", &goal_text],
+            ),
+            (
+                UseCase::Kpi,
+                json!({"compare": "@1790000000", "window": 3}),
+                vec!["kpi", "--compare", "@1790000000", "--window", "3"],
+            ),
+        ]);
+    }
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+    #[cfg(any())]
+    {
+        served_to_all(&[(
+            UseCase::Forecast,
+            json!({"goal": goal, "trials": 50}),
+            vec!["forecast", "--goal", &goal_text, "--trials", "50"],
+        )]);
+    }
+    // Stopped while it reads every event of the queue (ADR-t3745-1): the marks task of goal 235 takes this cfg off.
+    #[cfg(any())]
+    {
+        served_to_all(&[(
+            UseCase::Marks,
+            json!({"since": "1"}),
+            vec!["marks", "--since", "1"],
+        )]);
     }
     // `graph --format d2` prints its source as is.
     let d2 = answer(
@@ -444,25 +508,6 @@ fn the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it() {
         String::from_utf8(printed.stdout).unwrap()
     );
 
-    // Every read role and the worker reads every one of them on the
-    // service's side (ADR-t728-1's `queue.read`, ADR-t1233-5 decision 3).
-    let principals = [
-        Principal::of(&ActorContext::review_job(queue.run.id(), 1)),
-        Principal::of(&ActorContext::recovery_job(queue.run.id(), "failed", 1)),
-        Principal::of(&ActorContext::goal_review_job(goal, 1)),
-        Principal::of(&ActorContext::throughput_review_job(
-            "hourly",
-            "2026-10-02T09",
-        )),
-        Principal::of(&ActorContext::instance(ActorRole::Observer, "s1")),
-        Principal::worker(queue.run.id(), queue.run.task_id()),
-    ];
-    for principal in &principals {
-        let token = token(&queue, principal);
-        for (use_case, params, _) in &reads {
-            answer(&queue, &token, *use_case, params);
-        }
-    }
     assert!(
         ok(
             &queue.db,
@@ -708,21 +753,25 @@ fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
             json!({"git": {"inputs": "v", "checkout": "/elsewhere"}}),
         );
         assert_eq!(named["error"]["code"], "bad_request", "{named}");
-        for (params, said) in [
-            (json!({}), dagq::application::stats::NOT_READ),
-            (
-                json!({"git": {"inputs": "another"}}),
-                dagq::application::stats::STALE,
-            ),
-        ] {
-            let refused = call(&queue, Some(&worker), use_case, params.clone());
-            assert_eq!(refused["ok"], false, "{params}: {refused}");
-            assert!(
-                refused["error"]["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains(said)),
-                "{params}: {refused}"
-            );
+        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+        #[cfg(any())]
+        {
+            for (params, said) in [
+                (json!({}), dagq::application::stats::NOT_READ),
+                (
+                    json!({"git": {"inputs": "another"}}),
+                    dagq::application::stats::STALE,
+                ),
+            ] {
+                let refused = call(&queue, Some(&worker), use_case, params.clone());
+                assert_eq!(refused["ok"], false, "{params}: {refused}");
+                assert!(
+                    refused["error"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains(said)),
+                    "{params}: {refused}"
+                );
+            }
         }
     }
     // A read of what is not there fails as the command line does.
@@ -740,6 +789,8 @@ fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
 /// `--cmux` names none that runs) and in the service alike. A live wrapper
 /// whose heartbeat is far past its timeout is no alert; one whose process
 /// is gone is `run_without_wrapper`.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn stats_judges_a_background_wrapper_by_its_pid_and_start_on_both_paths() {
     use dagq::{

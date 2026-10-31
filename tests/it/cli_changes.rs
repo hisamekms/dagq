@@ -8,6 +8,8 @@ use crate::runtime_support::*;
 
 /// `dagq kpi` on the queue at `db` in UTC, with the host-wide settings
 /// read from `config` rather than the home of the person running the tests.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn kpi(db: &Path, config: &Path, args: &[&str]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command
@@ -161,6 +163,8 @@ fn the_set_of_changes_of_dagq_toml_holds_add_edit_lint_and_submit() {
     assert_eq!(ok(&db, &["add", "none"])["change"], Value::Null);
 }
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 #[test]
 fn stats_and_kpi_split_the_landed_runs_by_their_change() {
     let (dir, repo, db, run) = awaiting_run();

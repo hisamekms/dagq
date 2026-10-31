@@ -1012,29 +1012,37 @@ fn migration_dropping_the_task_kind_keeps_tasks_and_their_change() {
             .iter()
             .all(|task| task.get("kind").is_none())
     );
-    let stats = run(&["stats", "--full"]);
-    assert_eq!(stats["runs"][0]["change"], "fix");
-    assert!(stats.get("kinds").is_none(), "{stats}");
-    assert_eq!(stats["changes"][0]["change"], "fix");
-    let kpi = run(&[
-        "kpi",
-        "--since",
-        "2026-09-27T00:00:00Z",
-        "--until",
-        "2026-09-29T00:00:00Z",
-    ]);
-    let landings = &kpi["periods"][0]["kpis"]["landings"];
-    assert_eq!(landings["change=fix"]["value"], 1.0, "{landings}");
-    assert!(
-        landings
-            .as_object()
-            .unwrap()
-            .keys()
-            .all(|stratum| !stratum.starts_with("kind=")),
-        "{landings}"
-    );
-    let forecast = run(&["forecast"]);
-    assert!(forecast.get("tasks").is_some(), "{forecast}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = run(&["stats", "--full"]);
+        assert_eq!(stats["runs"][0]["change"], "fix");
+        assert!(stats.get("kinds").is_none(), "{stats}");
+        assert_eq!(stats["changes"][0]["change"], "fix");
+        let kpi = run(&[
+            "kpi",
+            "--since",
+            "2026-09-27T00:00:00Z",
+            "--until",
+            "2026-09-29T00:00:00Z",
+        ]);
+        let landings = &kpi["periods"][0]["kpis"]["landings"];
+        assert_eq!(landings["change=fix"]["value"], 1.0, "{landings}");
+        assert!(
+            landings
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|stratum| !stratum.starts_with("kind=")),
+            "{landings}"
+        );
+    }
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+    #[cfg(any())]
+    {
+        let forecast = run(&["forecast"]);
+        assert!(forecast.get("tasks").is_some(), "{forecast}");
+    }
 }
 
 /// ADR-t1340-1: the migration that makes Claude's default headless takes

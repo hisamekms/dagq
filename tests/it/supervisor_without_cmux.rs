@@ -113,6 +113,8 @@ fn the_service_the_observer_the_reads_and_an_ask_with_a_cmux_run_none() {
     for args in [
         &["service", "start"][..],
         &["observe", "--dry-run", "--daily"],
+        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+        #[cfg(any())]
         &["stats", "--full"],
         &["planners"],
         &[

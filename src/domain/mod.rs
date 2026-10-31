@@ -1345,6 +1345,7 @@ pub mod slot_order;
 pub mod source_repository;
 pub mod stall;
 pub mod stats;
+pub mod stopped_reads;
 pub mod stranded_landing;
 pub mod supervisor_life;
 pub mod supervisor_prune;

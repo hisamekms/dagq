@@ -5,6 +5,8 @@
 //! `planner_closed`, and is read per route next to the interactive
 //! planners' spans the hook records.
 
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 use crate::common::{Bounded, WithoutActor};
 use crate::plan_review::{
     PlanWorkspace, StubReviewer, add, fixture, git, options, submit, supervise_with,
@@ -16,10 +18,11 @@ use dagq::{
     infrastructure::sqlite::SqliteQueue,
 };
 use serde_json::{Value, json};
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
+use std::process::Command;
 use std::{
-    fs,
-    process::Command,
-    thread,
+    fs, thread,
     time::{Duration, Instant},
 };
 
@@ -71,6 +74,8 @@ fn planner_spans(db: &std::path::Path, kind: &str) -> Vec<Value> {
 }
 
 /// `dagq <args>` in UTC, without the host's settings.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+#[cfg(any())]
 fn read(db: &std::path::Path, config: &std::path::Path, args: &[&str]) -> Value {
     let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
         .without_actor_env()
@@ -149,49 +154,53 @@ fn a_headless_planners_session_and_route_are_read_by_stats_and_kpi() {
     assert!(close["model"].is_string(), "{close}");
     assert_eq!(close["effort"], span["launch"]["effort"]);
 
-    let config = fx.db.parent().unwrap().join("config");
-    fs::create_dir_all(&config).unwrap();
-    let stats = read(&fx.db, &config, &["stats", "--full"]);
-    let sessions = &stats["sessions"];
-    let all = &sessions["by_kind"]["runtime_planner"];
-    assert_eq!(all["count"], 1, "{sessions}");
-    assert_eq!(all["open_now"], 0, "{sessions}");
-    assert_eq!(all["active"]["count"], 1, "{sessions}");
-    assert_eq!(all["tokens"]["input"], 7, "{sessions}");
-    assert_eq!(all["models"].as_object().unwrap().len(), 1, "{sessions}");
-    let headless = &sessions["by_route"]["runtime_planner"]["headless"];
-    assert_eq!(headless["count"], 1, "{sessions}");
-    assert_eq!(headless["tokens"]["input"], 7, "{sessions}");
-    assert!(
-        sessions["by_route"]["runtime_planner"]
-            .get("interactive")
-            .is_none()
-    );
-    let planners = &stats["planner_routes"]["headless"];
-    assert_eq!(planners["opened"]["revise"], 1, "{planners}");
-    assert_eq!(planners["revise_to_review"]["count"], 1, "{planners}");
-    assert_eq!(planners["turns"], 1, "{planners}");
-    assert_eq!(planners["turn_outcomes"]["succeeded"], 1, "{planners}");
-    assert_eq!(planners["tokens"]["input"], 7, "{planners}");
-    assert_eq!(planners["planner_questions"], 0, "{planners}");
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let config = fx.db.parent().unwrap().join("config");
+        fs::create_dir_all(&config).unwrap();
+        let stats = read(&fx.db, &config, &["stats", "--full"]);
+        let sessions = &stats["sessions"];
+        let all = &sessions["by_kind"]["runtime_planner"];
+        assert_eq!(all["count"], 1, "{sessions}");
+        assert_eq!(all["open_now"], 0, "{sessions}");
+        assert_eq!(all["active"]["count"], 1, "{sessions}");
+        assert_eq!(all["tokens"]["input"], 7, "{sessions}");
+        assert_eq!(all["models"].as_object().unwrap().len(), 1, "{sessions}");
+        let headless = &sessions["by_route"]["runtime_planner"]["headless"];
+        assert_eq!(headless["count"], 1, "{sessions}");
+        assert_eq!(headless["tokens"]["input"], 7, "{sessions}");
+        assert!(
+            sessions["by_route"]["runtime_planner"]
+                .get("interactive")
+                .is_none()
+        );
+        let planners = &stats["planner_routes"]["headless"];
+        assert_eq!(planners["opened"]["revise"], 1, "{planners}");
+        assert_eq!(planners["revise_to_review"]["count"], 1, "{planners}");
+        assert_eq!(planners["turns"], 1, "{planners}");
+        assert_eq!(planners["turn_outcomes"]["succeeded"], 1, "{planners}");
+        assert_eq!(planners["tokens"]["input"], 7, "{planners}");
+        assert_eq!(planners["planner_questions"], 0, "{planners}");
 
-    let kpi = read(&fx.db, &config, &["kpi", "--last", "1"]);
-    let period = &kpi["periods"][0];
-    let open = &period["kpis"]["session_open.runtime_planner"];
-    assert_eq!(open["all"]["n"], 1, "{open}");
-    assert_eq!(open["route=headless"]["n"], 1, "{open}");
-    assert_eq!(
-        period["kpis"]["session_active.runtime_planner"]["route=headless"]["n"],
-        1
-    );
-    assert!(
-        period["kpis"]["session_active_ratio.runtime_planner"]
-            .get("route=headless")
-            .is_some()
-    );
-    assert_eq!(
-        period["health"]["planner_routes"]["headless"]["opened"]["revise"], 1,
-        "{}",
-        period["health"]
-    );
+        let kpi = read(&fx.db, &config, &["kpi", "--last", "1"]);
+        let period = &kpi["periods"][0];
+        let open = &period["kpis"]["session_open.runtime_planner"];
+        assert_eq!(open["all"]["n"], 1, "{open}");
+        assert_eq!(open["route=headless"]["n"], 1, "{open}");
+        assert_eq!(
+            period["kpis"]["session_active.runtime_planner"]["route=headless"]["n"],
+            1
+        );
+        assert!(
+            period["kpis"]["session_active_ratio.runtime_planner"]
+                .get("route=headless")
+                .is_some()
+        );
+        assert_eq!(
+            period["health"]["planner_routes"]["headless"]["opened"]["revise"], 1,
+            "{}",
+            period["health"]
+        );
+    }
 }

@@ -15,7 +15,7 @@ Each command's flags and the fields it prints are in `"$DAGQ" <command> --help` 
 | `findings` / `finding dismiss` / `finding resolve` | The observer's findings and how to decide them: `reference/observer.md`. `--covered-by TASK` only for a `ci_failure` finding (`reference/register.md`) |
 | `ci failures [--task ID]` | The tests already failing on the watched branch; `--task ID` sets apart those the task fixes |
 | `status` / `doctor` | Supervisors, slots, waiting runs and the runs in flight / the same per run with what blocks its recovery (the recover skill's `reference/doctor.md`) |
-| `stats` | Where time goes, per run, goal and overall |
+| `stats` | Where time goes, per run, goal and overall. Stopped in the current build (`reference/kpi.md`): read `timeline RUN` and `events` instead |
 | `kpi` / `forecast` / `marks` / `mark` / `report` | KPIs, forecasts and change marks: `reference/kpi.md` |
 | `observe --history` / `observe --input` | The observer's past observations and their whole input |
 | `locate` | The queue this directory resolves to, without opening it (`reference/locate.md`) |
@@ -33,7 +33,7 @@ Task: `draft` → `submitted` (waiting for plan review) → `ready` → `in_prog
 
 ## Claude session time
 
-Read a Claude session's time and tokens with `"$DAGQ" stats` (`stats --help`).
+Read a Claude session's time and tokens with `"$DAGQ" stats` (`stats --help`); while `stats` is stopped (`reference/kpi.md`), read the `session_opened` and `session_closed` events instead.
 
 - A session open much longer than it was active sat idle, waiting for a review, a person or its end: look for what it waited on, not for slow work.
 - The inbox and the planners have no run: read them in the window's sessions, not per run.

@@ -142,23 +142,27 @@ fn a_raised_resume_starts_the_session_higher_and_stats_reads_it() {
         [json!({"run_id": run.id(), "resume": true, "model": "claude-opus-5-5", "effort": "high"})]
     );
 
-    let stats = stats_full(&db);
-    let escalations = &stats["escalations"];
-    assert_eq!(escalations["count"], 1, "{escalations}");
-    assert_eq!(escalations["by_reason"], json!({"verification_failed": 1}));
-    assert_eq!(
-        escalations["by_step"],
-        json!({"claude-opus-5-5/medium -> claude-opus-5-5/high": 1})
-    );
-    assert_eq!(escalations["resumes"]["attempts"], 1);
-    assert_eq!(escalations["resumes"]["resolved"], 1);
-    assert_eq!(escalations["revises"], 0);
-    let runs = stats["runs"].as_array().unwrap();
-    let second = runs.iter().find(|r| r["task_id"] == 2).unwrap();
-    let attempt = &second["resume_attempts"][0];
-    assert_eq!(attempt["escalated_from"], "claude-opus-5-5/medium");
-    assert_eq!(attempt["escalated_to"], "claude-opus-5-5/high");
-    assert_eq!(attempt["resolved"], true);
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let stats = stats_full(&db);
+        let escalations = &stats["escalations"];
+        assert_eq!(escalations["count"], 1, "{escalations}");
+        assert_eq!(escalations["by_reason"], json!({"verification_failed": 1}));
+        assert_eq!(
+            escalations["by_step"],
+            json!({"claude-opus-5-5/medium -> claude-opus-5-5/high": 1})
+        );
+        assert_eq!(escalations["resumes"]["attempts"], 1);
+        assert_eq!(escalations["resumes"]["resolved"], 1);
+        assert_eq!(escalations["revises"], 0);
+        let runs = stats["runs"].as_array().unwrap();
+        let second = runs.iter().find(|r| r["task_id"] == 2).unwrap();
+        let attempt = &second["resume_attempts"][0];
+        assert_eq!(attempt["escalated_from"], "claude-opus-5-5/medium");
+        assert_eq!(attempt["escalated_to"], "claude-opus-5-5/high");
+        assert_eq!(attempt["resolved"], true);
+    }
 }
 
 /// A raised step stays with the task: its retry is claimed at it, in the
@@ -245,10 +249,16 @@ pub(crate) fn assert_raised_by_revise(requested: &Value, backend: &TestWorkspace
     );
     assert_eq!(requested["escalation_reason"], "revise");
     assert_eq!(revise_efforts(backend), ["/effort high"]);
-    let escalations = &stats_full(db)["escalations"];
-    assert_eq!(escalations["count"], 1, "{escalations}");
-    assert_eq!(escalations["revises"], 1);
-    assert_eq!(escalations["by_reason"], json!({"revise": 1}));
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        let escalations = &stats_full(db)["escalations"];
+        assert_eq!(escalations["count"], 1, "{escalations}");
+        assert_eq!(escalations["revises"], 1);
+        assert_eq!(escalations["by_reason"], json!({"revise": 1}));
+    }
+    // `db` is read only by the block above while it is stopped.
+    let _ = db;
 }
 
 /// Each of three revises raised the live session a step up to the top:

@@ -163,6 +163,8 @@ fn a_worker_s_dagq_runs_its_commands_through_the_service_as_the_worker() {
     for args in [
         vec!["events", "--full", "--all"],
         vec!["timeline", run.as_str()],
+        // Stopped while it reads every event of the queue (ADR-t3745-1): the marks task of goal 235 takes this cfg off.
+        #[cfg(any())]
         vec!["marks"],
         vec!["findings", "--all"],
         vec!["notes", "--task", task.as_str()],
@@ -177,29 +179,35 @@ fn a_worker_s_dagq_runs_its_commands_through_the_service_as_the_worker() {
             "{args:?}"
         );
     }
-    // The reads that tell the time now are read twice around the command
-    // line's, until the clock did not move between them (a few tries under
-    // load, each try being three processes).
-    for args in [
-        vec!["stats", "--full"],
-        vec!["kpi"],
-        vec![
-            "kpi", "--period", "week", "--last", "4", "--area", "runtime", "--by", "provider",
-        ],
-        vec!["forecast"],
-    ] {
-        let mut same = false;
-        for _ in 0..20 {
-            let before = answered(&as_worker(&args));
-            let printed = ok(&queue.db, &args);
-            let after = answered(&as_worker(&args));
-            if before == after {
-                assert_eq!(before, printed, "{args:?}");
-                same = true;
-                break;
+    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+    #[cfg(any())]
+    {
+        // The reads that tell the time now are read twice around the command
+        // line's, until the clock did not move between them (a few tries under
+        // load, each try being three processes).
+        for args in [
+            vec!["stats", "--full"],
+            vec!["kpi"],
+            vec![
+                "kpi", "--period", "week", "--last", "4", "--area", "runtime", "--by", "provider",
+            ],
+            // Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+            #[cfg(any())]
+            vec!["forecast"],
+        ] {
+            let mut same = false;
+            for _ in 0..20 {
+                let before = answered(&as_worker(&args));
+                let printed = ok(&queue.db, &args);
+                let after = answered(&as_worker(&args));
+                if before == after {
+                    assert_eq!(before, printed, "{args:?}");
+                    same = true;
+                    break;
+                }
             }
+            assert!(same, "{args:?} kept changing");
         }
-        assert!(same, "{args:?} kept changing");
     }
     // `graph --format d2` prints the source as the command line does.
     let d2 = as_worker(&["graph", "--format", "d2"]);
@@ -398,6 +406,8 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
     for args in [
         vec!["answer", "1", "--text", "a"],
         vec!["ask", "close", "1"],
+        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
+        #[cfg(any())]
         vec!["report"],
         vec!["graph", "--out", "g.d2", "--format", "d2"],
     ] {

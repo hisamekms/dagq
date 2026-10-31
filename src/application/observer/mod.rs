@@ -194,14 +194,14 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
         (None, ObserveMode::Hourly) => host.read_cursor(db)?,
         (None, ObserveMode::Daily) => Some(queue.event_id_before(started - DAILY_WINDOW_SECS)?),
     };
-    let stats = sources.stats(
+    let stats = stats_input(sources.stats(
         queue,
         db,
         &StatsQuery {
             since: since.map(Into::into),
             ..StatsQuery::default()
         },
-    )?;
+    ))?;
     let alerts = alert_keys(&stats);
     // A cursor given by hand asks to read past it whatever happened since.
     if options.since.is_none()
@@ -210,7 +210,10 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
     {
         return Ok(payload);
     }
-    let cursor = EventId::new(stats["next_cursor"].as_i64().unwrap_or_default());
+    let cursor = match window_end(&stats) {
+        WindowEnd::At(cursor) => cursor,
+        WindowEnd::Newest => queue.latest_event_id()?,
+    };
     // No provider can run it (`--no-claude`, Codex not usable): the
     // observation records why and starts no agent (ADR-t1204-1, task
     // 1223). Its window is read again by the next one.
@@ -693,6 +696,46 @@ pub fn observer_input(input: ObserverInput) -> Value {
         "open_asks": open_asks,
         "graph": input.graph,
     })
+}
+
+/// The `stats` input of an observation from what its source `read`. A
+/// `stats` refused while it reads every event (ADR-t3745-1) leaves the rest
+/// of the observation to run, as a KPI that does not read does: its input
+/// says why and judges no alert. Any other failure of it fails the
+/// observation, whose window is read again.
+fn stats_input(read: Result<Value>) -> Result<Value> {
+    match read {
+        Ok(stats) => Ok(stats),
+        Err(error) => {
+            let message = format!("{error:#}");
+            if crate::domain::stopped_reads::is_refusal(&message) {
+                Ok(json!({ "error": message }))
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Where an observation's window ends, which the next hourly one reads
+/// past.
+#[derive(Debug, PartialEq, Eq)]
+enum WindowEnd {
+    /// The cursor `stats` handed out, or 0 when it handed out none.
+    At(EventId),
+    /// The newest event of the queue: `stats` did not read (its input is an
+    /// error), so the window ends where the queue does, and the next one
+    /// does not read again what this one could not.
+    Newest,
+}
+
+/// Where the window of an observation whose `stats` input is `stats` ends.
+fn window_end(stats: &Value) -> WindowEnd {
+    match stats["next_cursor"].as_i64() {
+        Some(cursor) => WindowEnd::At(EventId::new(cursor)),
+        None if stats.get("error").is_some() => WindowEnd::Newest,
+        None => WindowEnd::At(EventId::new(0)),
+    }
 }
 
 /// What tells the alerts of `stats` apart (ADR-t649-1): the kind and the
@@ -1795,5 +1838,37 @@ mod tests {
         assert_eq!(second["skipped"], false);
         assert_eq!(second["started_at"], "2026-10-04T00:00:01Z");
         assert_eq!(second["asks"], json!({"count": 1, "ids": [7]}));
+    }
+
+    /// A `stats` refused while it reads every event becomes an input that
+    /// says why, judges no alert and ends the window at the newest event;
+    /// any other failure of it fails the observation; a `stats` that read
+    /// ends the window at its cursor, or at 0 without one (ADR-t3745-1).
+    #[test]
+    fn a_refused_stats_is_an_input_ending_at_the_newest_event_and_another_failure_fails() {
+        use crate::domain::stopped_reads::{ReadStopped, StoppedRead};
+
+        let refused = stats_input(Err(
+            anyhow::Error::new(ReadStopped(StoppedRead::Stats)).context("queue service")
+        ))
+        .unwrap();
+        let error = refused["error"].as_str().unwrap();
+        assert!(
+            error.starts_with("queue service: stats is stopped"),
+            "{error}"
+        );
+        assert!(alert_keys(&refused).is_empty());
+        assert_eq!(window_end(&refused), WindowEnd::Newest);
+
+        let failure = stats_input(Err(anyhow::anyhow!("database is locked"))).unwrap_err();
+        assert_eq!(format!("{failure:#}"), "database is locked");
+
+        let read = json!({"next_cursor": 42, "alerts": [{"kind": "stalled", "task_id": 7}]});
+        assert_eq!(stats_input(Ok(read.clone())).unwrap(), read);
+        assert_eq!(window_end(&read), WindowEnd::At(EventId::new(42)));
+        assert_eq!(
+            window_end(&json!({"runs": []})),
+            WindowEnd::At(EventId::new(0))
+        );
     }
 }
