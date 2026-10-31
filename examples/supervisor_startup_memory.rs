@@ -15,8 +15,19 @@
 //!
 //! Run with `cargo run --release --example supervisor_startup_memory --
 //! prepare "$TMPDIR/q20k" 20000` and then `... -- measure "$TMPDIR/q20k"`.
+//!
+//! `check` lays down two queues under the temporary directory that differ
+//! only in how many settled events they hold ([`CHECK_SMALL`], and four
+//! times as many), restarts a supervisor on each as `measure` does but
+//! with the ledger's passes only (`build_pass` from a new builder's
+//! cursors' start until no mark waits), and asserts that neither what it
+//! keeps after the catch-up nor its peak during it grows with the settled
+//! events ([`within`]): docs/design/measurement.md "台帳を作る係".
+//!
 //! A counting global allocator is set here only: neither the library's
-//! tests nor the integration tests carry it.
+//! tests nor the integration tests carry it (it would count every other
+//! test's allocations, and the integration tests' boundaries are kept in
+//! their register).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
@@ -147,6 +158,7 @@ impl Report {
 
 /// Lays down the events of a queue in id order: `push` writes each one.
 struct Writer<'a> {
+    db: &'a Connection,
     insert: rusqlite::Statement<'a>,
     at: i64,
     events: usize,
@@ -370,6 +382,13 @@ fn supervisor(life: i64) -> String {
 }
 
 fn prepare(dir: &Path, target: usize, pad: usize) {
+    lay_down(dir, target, pad, 2 * 86_400, true);
+}
+
+/// Lay down the queue of `prepare` at `dir`, its time `after_secs` after
+/// its last event, and build its ledger as the supervisor before the
+/// restart did; with `says`, print what it holds.
+fn lay_down(dir: &Path, target: usize, pad: usize, after_secs: i64, says: bool) -> usize {
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join("queue.db");
     drop(SqliteQueue::init(&path).unwrap());
@@ -382,6 +401,7 @@ fn prepare(dir: &Path, target: usize, pad: usize) {
     .unwrap();
     let tx = db.transaction().unwrap();
     let mut w = Writer {
+        db: &tx,
         insert: tx
             .prepare(
                 "INSERT INTO run_events(task_id, run_id, kind, payload, created_at)
@@ -425,7 +445,7 @@ fn prepare(dir: &Path, target: usize, pad: usize) {
             );
         }
         let now = supervisor(life);
-        if task % RUNS_PER_SESSION == 0 {
+        let opened = (task % RUNS_PER_SESSION == 0).then(|| {
             w.push(
                 "session",
                 None,
@@ -433,16 +453,17 @@ fn prepare(dir: &Path, target: usize, pad: usize) {
                 "session_opened",
                 &json!({"kind": "runtime_planner", "planner_id": task, "supervisor": now}),
             );
-        }
+            w.db.last_insert_rowid()
+        });
         finished_run(&mut w, task, &now);
         queue_events(&mut w, &now, task, &mut version);
-        if task % RUNS_PER_SESSION == 0 {
+        if let Some(opened) = opened {
             w.push(
                 "session",
                 None,
                 None,
                 "session_closed",
-                &json!({"kind": "runtime_planner", "planner_id": task}),
+                &json!({"kind": "runtime_planner", "planner_id": task, "opened_event_id": opened}),
             );
         }
     }
@@ -467,23 +488,29 @@ fn prepare(dir: &Path, target: usize, pad: usize) {
         w.phase(open_task, &run, "worker", "agent_started");
     }
     let last_at = w.at;
-    println!("events: {}", w.events);
-    println!("finished runs: {task}, open runs: {OPEN_RUNS}, supervisors' lives: {life}");
-    println!("mean payload: {} bytes", w.payload_bytes / w.events.max(1));
-    println!("by owner: {:?}", w.class);
-    println!("by kind: {:?}", w.kinds);
+    let events = w.events;
+    if says {
+        println!("events: {}", w.events);
+        println!("finished runs: {task}, open runs: {OPEN_RUNS}, supervisors' lives: {life}");
+        println!("mean payload: {} bytes", w.payload_bytes / w.events.max(1));
+        println!("by owner: {:?}", w.class);
+        println!("by kind: {:?}", w.kinds);
+    }
     drop(w);
     tx.commit().unwrap();
-    std::fs::write(dir.join("now"), (last_at + 2 * 86_400).to_string()).unwrap();
+    std::fs::write(dir.join("now"), (last_at + after_secs).to_string()).unwrap();
     // The supervisor before the restart built the ledger up to the end.
     let queue = SqliteQueue::open(&path).unwrap();
     let mut builder = Builder::default();
     let started = Instant::now();
     let passes = catch_up(&queue, &mut builder, now_ms(dir));
-    println!(
-        "ledger built by the earlier supervisor: {passes} passes, {:.1} s",
-        started.elapsed().as_secs_f64()
-    );
+    if says {
+        println!(
+            "ledger built by the earlier supervisor: {passes} passes, {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+    }
+    events
 }
 
 fn now_ms(dir: &Path) -> i64 {
@@ -536,29 +563,7 @@ fn measure(dir: &Path) {
     // The first pass of the judgments of now, as `LiveAlertWatch::pass`
     // runs it (the records it writes aside).
     let started = Instant::now();
-    let mut history = LiveHistory::default();
-    {
-        let files = LocalRunFiles;
-        let signals = ClaudeCode {
-            executable: "claude".into(),
-        };
-        let no_file = || Ok(None);
-        let sources = LiveSources {
-            files: &files,
-            signals: &signals,
-            config_file: &no_file,
-        };
-        let (inputs, events) = carried_live_inputs(
-            &queue,
-            &SystemProcesses,
-            now_ms / 1000,
-            &mut history,
-            &sources,
-        )
-        .unwrap();
-        let alerts = judge(&events, now_ms / 1000, &inputs).keys();
-        std::hint::black_box((&inputs, &events, &alerts));
-    }
+    let history = first_live_pass(&queue, now_ms);
     report.stage("live: first pass (LiveHistory kept)", started);
 
     // The ledger's catch-up from its cursors' start.
@@ -686,6 +691,144 @@ fn measure(dir: &Path) {
     report.stage("left after every holder dropped", started);
 }
 
+/// How many events the smaller queue of `check` holds, about: a page
+/// ([`EVENTS_PER_READ`]) and more, so that both queues are read in more
+/// than one page, and small enough that `check` takes some tens of seconds
+/// in the dev profile.
+const CHECK_SMALL: usize = 6_000;
+
+/// How long after its last event the queues of `check` are read: past the
+/// grace of every row (a week, an interactive session's after it closed),
+/// so that every row but those of the runs left open and the live
+/// supervisor's life is settled in the store, and the two queues differ
+/// in their settled events only.
+const CHECK_AFTER_SECS: i64 = 8 * 86_400;
+
+/// By how much of the smaller queue's bytes the larger one's may exceed
+/// them, and by how many bytes besides ([`within`]). What the builder keeps
+/// that is not of a row open still grows with the runs, by design: the
+/// waits before a claim that a task's fold reads (two of each run here),
+/// the landing slot's attempts (one of each run) and the summaries of the
+/// pushes; and the judgments of now keep a work clock of each run. They
+/// came to about 1.5 KB of each run of about a hundred events (some 15
+/// bytes of each settled event, 0.3 MiB for the 18,000 events more of the
+/// larger queue), under [`CHECK_KEPT_SLACK`]. The queue rows and the marks
+/// of the rows dropped that the builder kept besides took 246 bytes of
+/// each settled event (docs/plans/supervisor-startup-memory-spike.md
+/// "結果"), about 4 MiB here, and the peak that held the events and the
+/// folds of every row 3.2 KB of each, about 55 MiB, past
+/// [`CHECK_PEAK_SLACK`]; the peak of a page read and its folds was about
+/// 12 MiB of either queue, and grew by 1.3 MiB. The 20 % covers where the
+/// live supervisor's life, whose rows are open, falls in each queue.
+const CHECK_RATIO: f64 = 1.2;
+const CHECK_KEPT_SLACK: usize = 1024 * 1024;
+const CHECK_PEAK_SLACK: usize = 4 * 1024 * 1024;
+
+/// What a restarted supervisor's catch-up held: the bytes in use after it
+/// (the builder and the judgments' history kept) and the peak during it,
+/// over those in use before.
+struct Restart {
+    events: usize,
+    kept: usize,
+    peak: usize,
+    passes: usize,
+}
+
+/// The first pass of the judgments of now, as `LiveAlertWatch::pass` runs
+/// it (the records it writes aside): the history it keeps.
+fn first_live_pass(queue: &SqliteQueue, now_ms: i64) -> LiveHistory {
+    let mut history = LiveHistory::default();
+    let files = LocalRunFiles;
+    let signals = ClaudeCode {
+        executable: "claude".into(),
+    };
+    let no_file = || Ok(None);
+    let sources = LiveSources {
+        files: &files,
+        signals: &signals,
+        config_file: &no_file,
+    };
+    let (inputs, events) = carried_live_inputs(
+        queue,
+        &SystemProcesses,
+        now_ms / 1000,
+        &mut history,
+        &sources,
+    )
+    .unwrap();
+    let alerts = judge(&events, now_ms / 1000, &inputs).keys();
+    std::hint::black_box((&inputs, &events, &alerts));
+    history
+}
+
+/// Restart a supervisor on the queue at `dir`, of `events` events.
+fn restart(dir: &Path, events: usize) -> Restart {
+    let now_ms = now_ms(dir);
+    let queue = SqliteQueue::open(dir.join("queue.db")).unwrap();
+    let base = in_use().0;
+    reset_peak();
+    let history = first_live_pass(&queue, now_ms);
+    let mut builder = Builder::default();
+    let passes = catch_up(&queue, &mut builder, now_ms);
+    let kept = in_use().0.saturating_sub(base);
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    println!(
+        "{events} events: kept {:.2} MiB, peak {:.2} MiB, {passes} passes; {:?}",
+        mib(kept),
+        mib(peak),
+        builder.kept().size()
+    );
+    drop((builder, history));
+    Restart {
+        events,
+        kept,
+        peak,
+        passes,
+    }
+}
+
+/// Whether `large` is within [`CHECK_RATIO`] of `small` and `slack`.
+fn within(large: usize, small: usize, slack: usize) -> bool {
+    large as f64 <= small as f64 * CHECK_RATIO + slack as f64
+}
+
+fn check() {
+    let root =
+        std::env::temp_dir().join(format!("supervisor-startup-check-{}", std::process::id()));
+    let restarted = |target: usize| {
+        let dir = root.join(target.to_string());
+        let events = lay_down(&dir, target, 0, CHECK_AFTER_SECS, false);
+        restart(&dir, events)
+    };
+    let small = restarted(CHECK_SMALL);
+    let large = restarted(4 * small.events);
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(
+        large.events >= 4 * small.events,
+        "{} {}",
+        large.events,
+        small.events
+    );
+    assert!(small.passes > 0 && large.passes > 0);
+    assert!(
+        within(large.kept, small.kept, CHECK_KEPT_SLACK),
+        "kept after the catch-up grows with the settled events: {:.2} MiB of {} events, {:.2} MiB of {}",
+        mib(large.kept),
+        large.events,
+        mib(small.kept),
+        small.events
+    );
+    assert!(
+        within(large.peak, small.peak, CHECK_PEAK_SLACK),
+        "the catch-up's peak grows with the settled events: {:.2} MiB of {} events, {:.2} MiB of {}",
+        mib(large.peak),
+        large.events,
+        mib(small.peak),
+        small.events
+    );
+    println!("ok");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -694,9 +837,10 @@ fn main() {
             prepare(Path::new(&args[2]), args[3].parse().unwrap(), pad);
         }
         Some("measure") if args.len() == 3 => measure(Path::new(&args[2])),
+        Some("check") if args.len() == 2 => check(),
         _ => {
             eprintln!(
-                "usage: supervisor_startup_memory prepare <dir> <events> [<pad bytes>] | measure <dir>"
+                "usage: supervisor_startup_memory prepare <dir> <events> [<pad bytes>] | measure <dir> | check"
             );
             std::process::exit(2);
         }

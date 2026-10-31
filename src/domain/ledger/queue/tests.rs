@@ -751,3 +751,148 @@ fn the_slots_cost_a_bound_linear_in_the_events() {
         );
     }
 }
+
+/// The queue book and the waits before a claim of `log`, read as the
+/// builder reads its events.
+fn books_of(log: &Log) -> (QueueBook, PreClaimBook) {
+    let (mut pre_claim, mut book) = (PreClaimBook::default(), QueueBook::default());
+    let mut touched = BTreeSet::new();
+    for event in &log.events {
+        let moved = pre_claim.add(event);
+        book.add(event, owner(event) == Owner::Queue, moved, &mut touched);
+    }
+    (book, pre_claim)
+}
+
+/// A finding's record of `status`.
+fn finding_record(status: &str) -> Value {
+    json!({"finding_id": 1, findings::VALUES: {"id": 1, "target": "queue", "task_id": null,
+        "run_id": null, "goal_id": null, "kind": "conflict_hotspot", "subject": "src/a.rs",
+        "summary": "a", "impact": "normal", "status": status, "occurrences": 1, "last_seen_at": 0}})
+}
+
+/// A queue row no later event reaches is closed, so that the builder may
+/// forget it once the store holds it settled: an event of its own, a
+/// stream its next baseline replaced, an alert ended, a wait or a hold an
+/// event of its own ended. An open stream, alert or wait, a finding, a
+/// slots full or a hold a supervisor's life ended or reaches, a landing
+/// slot's row and a key of no row are not.
+#[test]
+fn a_queue_row_is_closed_once_no_later_event_reaches_it() {
+    let alert = json!({"supervisor": "s1", "judgment": "slots", "kind": "idle"});
+    let mut log = Log::default();
+    log.add(None, None, "mark_added", json!({"mark": "m"}), 0) // 1
+        .add(
+            None,
+            None,
+            "live_alert_baseline",
+            json!({"supervisor": "s1", "version": 1}),
+            1,
+        ) // 2: replaced by 4
+        .add(None, None, "live_alert_started", alert.clone(), 2) // 3: ended by 5
+        .add(
+            None,
+            None,
+            "live_alert_baseline",
+            json!({"supervisor": "s1", "version": 2}),
+            3,
+        ) // 4: open
+        .add(None, None, "live_alert_ended", alert, 4)
+        .add(
+            None,
+            None,
+            "live_alert_started",
+            json!({"supervisor": "s1", "judgment": "running", "kind": "stall"}),
+            5,
+        ) // 6: open
+        .add(None, None, "claim_held", json!({"supervisor": "s1"}), 6) // 7: ended by 8
+        .add(None, None, "claim_resumed", json!({"supervisor": "s1"}), 7)
+        .add(
+            Some(5),
+            None,
+            "claim_deferred",
+            json!({"supervisor": "s1", "reason": "paths"}),
+            8,
+        ) // 9: open
+        .add(
+            None,
+            None,
+            "slots_full_started",
+            json!({"supervisor": "s1", "class": "heavy"}),
+            9,
+        ) // 10: freed by 11
+        .add(
+            None,
+            None,
+            "slots_full_ended",
+            json!({"supervisor": "s1", "class": "heavy"}),
+            10,
+        )
+        .add(
+            None,
+            None,
+            "slots_full_started",
+            json!({"supervisor": "s2", "class": "heavy"}),
+            11,
+        ) // 12: open, its supervisor's life may end it
+        .add(None, None, "claim_held", json!({"supervisor": "s3"}), 12) // 13: its stop ends it
+        .add(
+            None,
+            None,
+            "supervisor_stopped",
+            json!({"supervisor": "s3"}),
+            13,
+        )
+        .add(
+            None,
+            None,
+            "finding_recorded",
+            finding_record("resolved"),
+            14,
+        ) // 15
+        .add(None, None, "landing_held", json!({"supervisor": "s1"}), 15) // 16: ended by 17
+        .add(
+            None,
+            None,
+            "landing_resumed",
+            json!({"supervisor": "s1"}),
+            16,
+        )
+        .add(None, None, "landing_held", json!({"supervisor": "s1"}), 17) // 18: open
+        .add(
+            Some(1),
+            Some(&run_id(1)),
+            "integration_started",
+            json!({}),
+            18,
+        ); // 19: a slot
+    let (book, pre_claim) = books_of(&log);
+    let closed: Vec<i64> = (1..=20)
+        .filter(|id| book.closed(&id.to_string(), &pre_claim))
+        .collect();
+    // An end (a resume, a freed slots full, the stop that ended a hold)
+    // is its interval's record and no row of its own.
+    assert_eq!(closed, vec![1, 2, 3, 7, 10, 16]);
+    assert!(!book.closed("x", &pre_claim));
+
+    let mut forgot = book.clone();
+    for id in &closed {
+        forgot.forget(&id.to_string());
+    }
+    let owned = owned_of(&log.events);
+    let at = At {
+        owned: &owned,
+        pre_claim: &pre_claim,
+        lives: &Lives::default(),
+        now_ms: ms(100),
+        built_at: "b",
+    };
+    for id in 1..=20 {
+        let key = id.to_string();
+        let row = forgot.row(&key, &at);
+        assert_eq!(
+            row.is_none(),
+            closed.contains(&id) || book.row(&key, &at).is_none()
+        );
+    }
+}

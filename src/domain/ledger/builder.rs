@@ -96,10 +96,16 @@
 //!   reads, so what it keeps does not grow with the rows settled; a
 //!   settled row a later event reaches gets its records back from the row
 //!   the store holds ([`Builder::to_restore`]), a settled run or task its
-//!   push by id ([`Builder::pushes_to_read`]). A new process's first pass
-//!   drops those of the rows the store holds settled as it ends
-//!   ([`Builder::sweep`]), not after the marks before them. How much it keeps
-//!   ([`KeptSize`]) goes to the supervisor's log.
+//!   push by id ([`Builder::pushes_to_read`]), and of a queue row no later
+//!   event reaches it forgets what assigns it too ([`QueueBook::closed`]).
+//!   A new process's first pass builds and sweeps the session and queue
+//!   rows each page of events changed as it reads it
+//!   ([`Builder::sweeps_pages`], [`Builder::sweep`]) and drops those of the
+//!   rows the store holds settled before it reads the next page, so that
+//!   neither what it keeps after its catch-up nor its peak during it grows
+//!   with the events settled; it folds those rows a share of
+//!   [`CHECKS_PER_PASS`] at a time. How much it keeps ([`KeptSize`]) goes
+//!   to the supervisor's log.
 //! - **What a pass makes**: each event is read into [`Kept`] once as it
 //!   comes in (the supervisors' lives, the waits before a claim, the
 //!   landing slot's attempts, which session or queue row it is a record
@@ -217,10 +223,19 @@ struct WaitsMoved {
 ///   A builder that starts at its cursors' start (a new process) reads
 ///   every event and marks every row behind the marks of every run and
 ///   task; so that it does not keep every settled row's events for the
-///   passes those marks take, its first pass that builds the rows sweeps
-///   those still marked past [`CHECKS_PER_PASS`] ([`Builder::sweep`]): one
-///   the store holds settled and its fold would not write is settled and
-///   its records dropped as that pass ends ([`Builder::swept`]).
+///   passes those marks take, nor every event it read until it builds the
+///   rows, its first pass sweeps the rows each page of events changed as
+///   it reads it ([`Builder::page_rows`], [`Builder::sweep`]): one the
+///   store holds settled and its fold would not write is settled and its
+///   records dropped before the next page ([`Builder::page_swept`]). A row
+///   a later page changes is built and swept again then, its records given
+///   back first, so the marks left are those of a sweep of every event.
+///   The rows still marked are swept again as that pass ends
+///   ([`Builder::swept`]).
+/// - **A settled queue row no later event reaches**: one event of its own,
+///   a stream replaced, an alert ended, a wait an event ended
+///   ([`QueueBook::closed`]); what assigns it is forgotten with its records
+///   ([`QueueBook::forget`]), and only how many goes to [`KeptSize`].
 /// - **A `push_finished` no fold not settled reads**: a run's or a
 ///   task's fold reads of the pushes only the first after the run's last
 ///   `push_pending` to the remote and branch of its last failed push
@@ -261,8 +276,12 @@ pub struct Kept {
     pre_claim: PreClaimBook,
     session_rows: SessionBook,
     queue_rows: QueueBook,
-    /// The session and queue rows whose records are dropped.
+    /// The session and queue rows whose records are dropped that a later
+    /// event may reach.
     dropped: BTreeSet<(LedgerKind, String)>,
+    /// How many queue rows no later event reaches it forgot as it dropped
+    /// their records ([`QueueBook::closed`]).
+    forgotten: usize,
     /// Roughly how many bytes the events kept hold outside their vectors
     /// ([`event_heap_bytes`]).
     event_heap: usize,
@@ -298,7 +317,8 @@ pub struct KeptSize {
     pub pre_claim: usize,
     pub session_rows: usize,
     pub queue_rows: usize,
-    /// The session and queue rows whose records are dropped.
+    /// The session and queue rows whose records are dropped: those a
+    /// later event may reach, and those it forgot.
     pub dropped_rows: usize,
     /// The runs of the summaries of the pushes: those that failed one,
     /// wait on one, or had a pending push closed.
@@ -503,7 +523,9 @@ impl Kept {
     }
 
     /// Drop the records of the session and queue rows of `rows`, and note
-    /// them dropped.
+    /// them dropped; forget a queue row no later event reaches
+    /// ([`QueueBook::closed`]), so that what it keeps of the rows settled
+    /// does not grow with them.
     fn drop_rows(&mut self, rows: impl IntoIterator<Item = (LedgerKind, String)>) {
         let (mut sessions, mut queue) = (BTreeSet::new(), BTreeSet::new());
         for (kind, key) in rows {
@@ -514,7 +536,12 @@ impl Kept {
                 LedgerKind::Session => sessions.extend(records.iter().copied()),
                 _ => queue.extend(records.iter().copied()),
             }
-            self.dropped.insert((kind, key));
+            if kind == LedgerKind::Queue && self.queue_rows.closed(&key, &self.pre_claim) {
+                self.queue_rows.forget(&key);
+                self.forgotten += 1;
+            } else {
+                self.dropped.insert((kind, key));
+            }
         }
         let mut freed = 0;
         for (events, ids) in [(&mut self.sessions, sessions), (&mut self.queue, queue)] {
@@ -635,7 +662,7 @@ impl Kept {
             pre_claim: self.pre_claim.waits(),
             session_rows: self.session_rows.row_count(),
             queue_rows: self.queue_rows.row_count(),
-            dropped_rows: self.dropped.len(),
+            dropped_rows: self.dropped.len() + self.forgotten,
             push_runs: self.waiting_push.len() + self.failed_push.len() + self.closing.len(),
             bytes: (self.sessions.capacity() + self.queue.capacity() + self.pushes.capacity())
                 * size_of::<RunEvent>()
@@ -966,8 +993,28 @@ impl Builder {
     /// [`Self::rows_to_build`] names, as [`build`] folds them) that read an
     /// input after the event the marks started at.
     pub fn mark_rows(&mut self, rows: &BTreeMap<(LedgerKind, String), LedgerRow>) {
+        let after = self.take_rows_after();
+        self.mark_rows_after(after, rows);
+    }
+
+    /// Take the event the marks of the session and queue rows started at,
+    /// once the rows to build are named ([`Self::rows_to_build`],
+    /// [`Self::page_rows`]): what [`Self::mark_rows`] does before it marks,
+    /// so that a pass may fold and mark those rows a share at a time
+    /// ([`Self::mark_rows_after`]).
+    pub fn take_rows_after(&mut self) -> Option<EventId> {
         self.touched.clear();
-        let Some(after) = self.rows_after.take() else {
+        self.rows_after.take()
+    }
+
+    /// Mark the rows of `rows`, a share of those named, that read an input
+    /// after `after` ([`Self::take_rows_after`]).
+    pub fn mark_rows_after(
+        &mut self,
+        after: Option<EventId>,
+        rows: &BTreeMap<(LedgerKind, String), LedgerRow>,
+    ) {
+        let Some(after) = after else {
             return;
         };
         for ((kind, key), row) in rows {
@@ -975,6 +1022,39 @@ impl Builder {
                 self.marks.insert(Target::Row(*kind, key.clone()));
             }
         }
+    }
+
+    /// Whether a pass sweeps, as it reads each page of events, the session
+    /// and queue rows that page changed ([`Self::page_rows`]): until a pass
+    /// swept ([`Self::swept`]), so that a builder from its cursors' start
+    /// (a new process) keeps of the rows the store holds settled no more
+    /// than a page's events before it reads the next page.
+    pub const fn sweeps_pages(&self) -> bool {
+        !self.swept
+    }
+
+    /// The session and queue rows the events read since they were last
+    /// built may have changed, as a page swept ([`Self::sweeps_pages`])
+    /// builds them: those [`Self::rows_to_build`] names but the marks left
+    /// of the pages before, which wait for the pass's marks.
+    pub fn page_rows(&self, kept: &Kept) -> BTreeSet<(LedgerKind, String)> {
+        if self.rows_after.is_none() && self.touched.is_empty() {
+            return BTreeSet::new();
+        }
+        let mut rows = self.touched.clone();
+        rows.extend(
+            kept.queue_rows
+                .open_slot()
+                .map(|key| (LedgerKind::Queue, key)),
+        );
+        rows
+    }
+
+    /// Drop the records of the rows a page's sweep found settled
+    /// ([`Self::sweep`]), and forget those no later event reaches, before
+    /// the next page is read; no [`Inputs`] of the pass may hold [`Kept`].
+    pub fn page_swept(&mut self) {
+        self.drop_settled();
     }
 
     /// Mark again the rows whose grace is over at `now_ms`, close where
@@ -1043,13 +1123,16 @@ impl Builder {
     }
 
     /// The session and queue rows of `rows` (those [`Self::rows_to_build`]
-    /// names, as [`build`] folds them) a pass sweeps once it looked at its
-    /// marks: until a pass swept, each of them marked; none after.
-    pub fn rows_to_sweep(&self, rows: &BTreeMap<(LedgerKind, String), LedgerRow>) -> Vec<Target> {
+    /// names) a pass sweeps once it looked at its marks: until a pass
+    /// swept, each of them marked; none after.
+    pub fn rows_to_sweep<'a>(
+        &self,
+        rows: impl IntoIterator<Item = &'a (LedgerKind, String)>,
+    ) -> Vec<Target> {
         if self.swept {
             return Vec::new();
         }
-        rows.keys()
+        rows.into_iter()
             .map(|(kind, key)| Target::Row(*kind, key.clone()))
             .filter(|target| self.marks.contains(target))
             .collect()

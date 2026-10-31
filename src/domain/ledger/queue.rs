@@ -298,6 +298,9 @@ pub struct QueueBook {
     /// reached: its open stream and slots full, and its holds its stop
     /// ended.
     lives_of: HashMap<String, BTreeSet<EventId>>,
+    /// How many supervisors' `lives_of` hold each row: a row one holds
+    /// is reached by that supervisor's later events ([`Self::closed`]).
+    held: HashMap<EventId, u32>,
     /// The supervisors with an open stream an event named since the last
     /// [`Self::close_lives`], and the ends it keeps of the rest: the time
     /// from which each one's life ends ([`Lives::ends_from`]), earliest
@@ -404,10 +407,7 @@ impl QueueBook {
             if started == Started::PreClaim(IntervalKind::SlotsFull)
                 && let Some(supervisor) = supervisor_of(event)
             {
-                self.lives_of
-                    .entry(supervisor.to_owned())
-                    .or_default()
-                    .insert(event.id);
+                self.hold(supervisor, event.id);
             }
             touched.insert((LedgerKind::Queue, event.id.to_string()));
         }
@@ -416,18 +416,14 @@ impl QueueBook {
             // no longer ends it.
             if let Some(supervisor) = supervisor_of(event)
                 && event.kind == EventKind::SlotsFullEnded
-                && let Some(rows) = self.lives_of.get_mut(supervisor)
             {
-                rows.remove(&start);
+                self.release(supervisor, start);
             }
             // A hold its supervisor's stop ended reads its later life.
             if event.kind == EventKind::SupervisorStopped
                 && let Some(supervisor) = supervisor_of(event)
             {
-                self.lives_of
-                    .entry(supervisor.to_owned())
-                    .or_default()
-                    .insert(start);
+                self.hold(supervisor, start);
             }
             touched.insert((LedgerKind::Queue, start.to_string()));
         }
@@ -476,18 +472,13 @@ impl QueueBook {
                     row.outcome = Some("replaced".into());
                     row.ended_by = Some(event.id);
                     touched.insert((LedgerKind::Queue, at.to_string()));
-                    if let Some(rows) = self.lives_of.get_mut(&supervisor) {
-                        rows.remove(&at);
-                    }
+                    self.release(&supervisor, at);
                 }
                 let mut row = Assigned::new(Of::Stream, event, supervisor.clone());
                 row.records.clear();
                 row.baseline = *kind == EventKind::LiveAlertBaseline;
                 self.rows.insert(event.id, row);
-                self.lives_of
-                    .entry(supervisor.clone())
-                    .or_default()
-                    .insert(event.id);
+                self.hold(&supervisor, event.id);
                 self.stream_named.insert(supervisor.clone());
                 self.streams.insert(supervisor, event.id);
                 event.id
@@ -566,6 +557,68 @@ impl QueueBook {
         true
     }
 
+    /// Note the row of `row` among those `supervisor`'s life reaches.
+    fn hold(&mut self, supervisor: &str, row: EventId) {
+        if self
+            .lives_of
+            .entry(supervisor.to_owned())
+            .or_default()
+            .insert(row)
+        {
+            *self.held.entry(row).or_default() += 1;
+        }
+    }
+
+    /// Note the row of `row` no longer among those `supervisor`'s life
+    /// reaches.
+    fn release(&mut self, supervisor: &str, row: EventId) {
+        if let Some(rows) = self.lives_of.get_mut(supervisor)
+            && rows.remove(&row)
+            && let Some(count) = self.held.get_mut(&row)
+        {
+            *count -= 1;
+            if *count == 0 {
+                self.held.remove(&row);
+            }
+        }
+    }
+
+    /// Whether no event after those read can reach the row of `key`, so
+    /// that once the store holds it settled what assigns it may be
+    /// forgotten ([`Self::forget`]) rather than kept to be given its
+    /// records back: no supervisor's life reaches it, and it is one event
+    /// of its own, a stream its next baseline replaced, an alert ended, or
+    /// a wait or hold an event of its own ended (`pre_claim`, of the same
+    /// events: one a supervisor's life ended may open again). An open
+    /// interval, stream or alert, a finding (any later record of it is
+    /// its), a landing slot's (an event timed before its end reaches it)
+    /// and a key of no row are not.
+    pub fn closed(&self, key: &str, pre_claim: &PreClaimBook) -> bool {
+        let Ok(id) = key.parse().map(EventId::new) else {
+            return false;
+        };
+        let Some(row) = self.rows.get(&id) else {
+            return false;
+        };
+        if self.held.contains_key(&id) || self.slot_of.contains_key(&id) {
+            return false;
+        }
+        match row.of {
+            Of::Event => true,
+            Of::Stream => self.streams.get(&row.about) != Some(&id),
+            Of::Alert => row.ended_at.is_some(),
+            Of::Finding => false,
+            Of::Interval(_) => pre_claim.ended_by_event(id),
+        }
+    }
+
+    /// Forget the row of `key`, [`Self::closed`]: no later read folds it.
+    pub fn forget(&mut self, key: &str) {
+        if let Ok(id) = key.parse().map(EventId::new) {
+            self.rows.remove(&id);
+        }
+    }
+
     /// The starts of the open streams whose supervisor's life ended by
     /// `now_ms` (`lives`, of the same events) with no event of it since the
     /// last close that found it ended, ascending: a silence ends a stream
@@ -641,6 +694,7 @@ impl QueueBook {
             + self.alerts.len()
             + self.findings.len()
             + self.lives_of.values().map(BTreeSet::len).sum::<usize>()
+            + self.held.len()
             + self.slot_of.len()
             + self.throughs.runs.len();
         rows + slots + finders * size_of::<(String, EventId)>()

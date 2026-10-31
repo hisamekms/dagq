@@ -15,7 +15,10 @@
 //! the whole EventStore. Nothing of the runtime's control waits for it or
 //! reads it, and a landing does not build a row. A settled row a later
 //! event reaches, whose records the builder dropped, gets them back from
-//! the row the store holds before it is folded. The log says how much the
+//! the row the store holds before it is folded. A new builder's first pass
+//! sweeps the rows a page at a time as it reads the events ([`pass`]), so
+//! that its catch-up holds a page's events and the rows open, not every
+//! event. The log says how much the
 //! builder keeps ([`KeptSize`]) after the first pass, then hourly or when
 //! its bytes change by half ([`logs_kept`]).
 //!
@@ -148,12 +151,25 @@ impl Retain {
 pub fn build_pass(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
-    (now_ms, built_at): (i64, &str),
+    at: (i64, &str),
     retain: Retain,
     classifier: Option<&crate::domain::command_rules::CommandClassifier>,
 ) -> Built {
+    build_pass_reading(store, builder, at, retain, classifier, EVENTS_PER_READ)
+}
+
+/// [`build_pass`], reading the events `per_read` at a time.
+fn build_pass_reading(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    (now_ms, built_at): (i64, &str),
+    retain: Retain,
+    classifier: Option<&crate::domain::command_rules::CommandClassifier>,
+    per_read: usize,
+) -> Built {
     let mut built = Built::default();
-    if let Err(error) = pass(store, builder, (now_ms, built_at), classifier, &mut built) {
+    let read = (classifier, per_read);
+    if let Err(error) = pass(store, builder, (now_ms, built_at), read, &mut built) {
         built.failure = Some(format!("{error:#}"));
     }
     if built.failure.is_none()
@@ -181,25 +197,35 @@ pub fn build_pass(
     built
 }
 
+/// One pass's reads, folds and writes. A builder that has not swept
+/// ([`Builder::sweeps_pages`]: a new process's, from its cursors' start)
+/// builds and sweeps the session and queue rows each page of events
+/// changed as it reads it ([`sweep_page`]), so that it keeps of the rows
+/// the store holds settled no more than a page's events; every pass folds
+/// those rows a share of [`CHECKS_PER_PASS`] at a time, and of the rows
+/// marked only those it takes.
 fn pass(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
     (now_ms, built_at): (i64, &str),
-    classifier: Option<&crate::domain::command_rules::CommandClassifier>,
+    (classifier, per_read): (
+        Option<&crate::domain::command_rules::CommandClassifier>,
+        usize,
+    ),
     built: &mut Built,
 ) -> Result<()> {
     let latest = store.latest_event_id()?;
     while latest > builder.events {
-        let new = store.events_between(
-            builder.events,
-            latest,
-            &EventFilter::default(),
-            EVENTS_PER_READ,
-        )?;
+        let new =
+            store.events_between(builder.events, latest, &EventFilter::default(), per_read)?;
         if new.is_empty() {
             break;
         }
         builder.mark_events(&new);
+        drop(new);
+        if builder.sweeps_pages() {
+            sweep_page(store, builder, (builder.folds_at(now_ms), built_at))?;
+        }
     }
     let samples = store.node_samples_after(builder.samples)?;
     builder.mark_samples(&samples);
@@ -232,9 +258,16 @@ fn pass(
     }
     let rows = builder.rows_to_build(builder.kept());
     restore(store, builder, &rows)?;
-    let mut inputs = Inputs::of(builder.kept(), now_ms, built_at, &rows);
-    builder.mark_rows(&inputs.rows);
-    let mut targets = builder.take(CHECKS_PER_PASS).into_iter();
+    let after = builder.take_rows_after();
+    fold_rows(store, builder, (now_ms, built_at), &rows, after, false)?;
+    let taken = builder.take(CHECKS_PER_PASS);
+    let rows_taken: BTreeSet<(LedgerKind, String)> = taken
+        .iter()
+        .filter(|target| matches!(target, Target::Row(..)))
+        .map(Target::row_key)
+        .collect();
+    let mut inputs = Inputs::of(builder.kept(), now_ms, built_at, &rows_taken);
+    let mut targets = taken.into_iter();
     while let Some(target) = targets.next() {
         // The next pass starts at what this one did not look at.
         if built.written >= WRITES_PER_PASS {
@@ -251,29 +284,76 @@ fn pass(
             return Err(error);
         }
     }
-    sweep(store, builder, &inputs)?;
     drop(inputs);
+    let left: BTreeSet<(LedgerKind, String)> = builder
+        .rows_to_sweep(&rows)
+        .iter()
+        .map(Target::row_key)
+        .collect();
+    fold_rows(store, builder, (now_ms, built_at), &left, None, true)?;
     builder.swept();
     Ok(())
 }
 
-/// Sweep the session and queue rows the pass built that are still marked
-/// while the builder has not swept ([`Builder::rows_to_sweep`]): those the
-/// store holds settled and up to date are settled now, past
-/// [`CHECKS_PER_PASS`], so that the records [`Kept`] read of every event
-/// from its cursors' start (a new process's) do not wait for the marks of
-/// every run and task before them.
+/// Build the session and queue rows the page of events just read changed
+/// ([`Builder::page_rows`]), their records given back first when the
+/// builder dropped them ([`restore`]); mark those that read an input of the
+/// page and sweep them ([`fold_rows`]); then drop the records of those the
+/// store holds settled, before the next page is read
+/// ([`Builder::page_swept`]). A row a later page changes is built again
+/// then, so the marks it leaves are those of a sweep after every page.
+fn sweep_page(store: &dyn LedgerQueue, builder: &mut Builder, at: (i64, &str)) -> Result<()> {
+    let rows = builder.page_rows(builder.kept());
+    restore(store, builder, &rows)?;
+    let after = builder.take_rows_after();
+    fold_rows(store, builder, at, &rows, after, true)?;
+    builder.page_swept();
+    Ok(())
+}
+
+/// Fold the session and queue rows of `rows` [`CHECKS_PER_PASS`] at a
+/// time ([`Inputs::of`]), so that no pass holds the folds of every row:
+/// mark each share's rows that read an input after `after`
+/// ([`Builder::mark_rows_after`]), every share before any read of the
+/// store, so that a read that fails leaves every mark; then with `sweeps`
+/// sweep those still marked: those the store holds settled and up to date
+/// are settled now, past [`CHECKS_PER_PASS`], so that the records [`Kept`]
+/// read of every event from its cursors' start (a new process's) do not
+/// wait for the marks of every run and task before them.
 ///
 /// [`Kept`]: crate::domain::ledger::builder::Kept
-fn sweep(store: &dyn LedgerQueue, builder: &mut Builder, inputs: &Inputs) -> Result<()> {
-    for target in builder.rows_to_sweep(&inputs.rows) {
-        let (kind, key) = target.row_key();
-        let stored = store.ledger_row(kind, &key)?;
-        builder.sweep(
-            &target,
-            stored.as_ref(),
-            build(&target, inputs, &[]).as_ref(),
-        );
+fn fold_rows(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    (now_ms, built_at): (i64, &str),
+    rows: &BTreeSet<(LedgerKind, String)>,
+    after: Option<EventId>,
+    sweeps: bool,
+) -> Result<()> {
+    let rows: Vec<&(LedgerKind, String)> = rows.iter().collect();
+    let share_of = |share: &[&(LedgerKind, String)]| -> BTreeSet<(LedgerKind, String)> {
+        share.iter().map(|row| (*row).clone()).collect()
+    };
+    if after.is_some() {
+        for share in rows.chunks(CHECKS_PER_PASS) {
+            let inputs = Inputs::of(builder.kept(), now_ms, built_at, &share_of(share));
+            builder.mark_rows_after(after, &inputs.rows);
+        }
+    }
+    if !sweeps {
+        return Ok(());
+    }
+    for share in rows.chunks(CHECKS_PER_PASS) {
+        let inputs = Inputs::of(builder.kept(), now_ms, built_at, &share_of(share));
+        for target in builder.rows_to_sweep(inputs.rows.keys()) {
+            let (kind, key) = target.row_key();
+            let stored = store.ledger_row(kind, &key)?;
+            builder.sweep(
+                &target,
+                stored.as_ref(),
+                build(&target, &inputs, &[]).as_ref(),
+            );
+        }
     }
     Ok(())
 }

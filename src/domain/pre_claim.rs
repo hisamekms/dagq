@@ -648,6 +648,17 @@ impl PreClaimBook {
         Cow::Owned(row)
     }
 
+    /// Whether the wait before a claim or the hold on the landings started
+    /// by `start` was ended by an event of its own: no later event moves
+    /// it. One open, one a supervisor's life ended (an event naming the
+    /// supervisor opens it again) and a start of none are not.
+    pub fn ended_by_event(&self, start: EventId) -> bool {
+        self.closed
+            .get(&start)
+            .or_else(|| self.landings.get(&start))
+            .is_some_and(|(_, end)| end.is_some())
+    }
+
     /// The holds on the landings in the order they started, each with the
     /// event that ended it.
     pub fn landing_holds(&self) -> impl Iterator<Item = (&PreClaimInterval, Option<EventId>)> {

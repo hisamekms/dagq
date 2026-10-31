@@ -197,8 +197,8 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **置き場**: 係の状態は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
 - **印**: EventStore・NodeSampleStore・SessionStepStore・runの資源のカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsession・queue・readyだったtaskの行（記録でない終わりも）・nodeの時間に印を付ける（全行を走査しない）。
   畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読んで持ち越す（何を持ち越すかは`builder::Kept`）。
-  カーソルの始めから読む起動の追いつきでも、最初に行を畳む周がstoreの確定した行のうち畳み直さない行のeventを落とす。
-  確定した行に後のeventが届けば、記録はstoreの行から、pushはidで読み戻す。
+  起動の追いつきはページごとに変わった行を畳み、確定した行のeventを次のページを読む前に落とす。
+  確定した行に後のeventが届けば、記録はstoreの行から、pushはidで読み戻し、届かないqueueの行は忘れる。
   周回は新しいeventが変えうる行と印の付いた行だけを畳み、周回で作る領域は前からのeventの数に比例しない。
 - **書く行**: 終わったrun（`push_pending`と旧方式を含み途中は書かない）と、全てのtask・session・queue・nodeの行。
 - **確定**（`final`）: run・taskは終わりから猶予の後で、`push_pending`には付けない。

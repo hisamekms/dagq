@@ -2539,6 +2539,7 @@ fn a_run_measured_from_inside_only_folds_its_executors_samples() {
     assert_eq!(row.inputs_through.resources, None);
 }
 
+mod pages;
 mod queue_waits;
 mod stream_waits;
 mod waits;
