@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="9" skipped="0" failures="0" errors="0" time="20.0">
+    <testsuite name="dagq" tests="2" skipped="0" errors="0" failures="0">
+        <testcase name="domain::tests::a_unit_test" classname="dagq" time="9.000"/>
+        <testcase name="domain::tests::another_unit_test" classname="dagq" time="9.000"/>
+    </testsuite>
+    <testsuite name="dagq::it" tests="4" skipped="0" errors="0" failures="0">
+        <testcase name="slow_mod::a_slow_test" classname="dagq::it" time="2.000"/>
+        <testcase name="fast_mod::a_test" classname="dagq::it" time="1.000"/>
+        <testcase name="fast_mod::inner::a_nested_test" classname="dagq::it" time="0.500">
+            <flakyFailure message="failed once" type="test failure"/>
+        </testcase>
+        <testcase name="dir_mod::file::a_test" classname="dagq::it" time="1.000"/>
+    </testsuite>
+    <testsuite name="dagq::e2e" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="an_e2e_test" classname="dagq::e2e" time="9.000"/>
+    </testsuite>
+</testsuites>

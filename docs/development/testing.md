@@ -67,12 +67,15 @@ testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通�
 
 ## CI
 
-jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`ci-failure.yml`の冒頭とjob・stepのコメントが持ち、ここは開発の規則だけを持つ。
+jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`ci-failure.yml`・`it-budget.yml`の冒頭とjob・stepのコメントが持ち、ここは開発の規則だけを持つ。
 
 - `ci.yml`はmainへのpushとpull requestで流れ、全部のtestを流してcoverageを見る最後の関門になる（[ADR-t1925-1](../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)）。docsだけの差分ではRustのjob（`checks`と`linux`）を飛ばし、docと`scripts/`の検査のjobは常に流す（[ADR-t2034-1](../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）。Rustのjobを飛ばした実行は緑と読まない。mainへのpushのdocsだけかは、直前のcommitではなく`checks`が流れて終わった最新の実行のcommitからの差分で決めるので、実行が取り消されたcodeのcommitの後のdocsだけのpushでもRustのjobは流れる（[ADR-t2134-1](../adr/2026-10-20-t2134-1-push-docs-only-base-is-the-latest-run-whose-rust-checks-ran.md)）。
 - mainへのpushの`ci.yml`がworkflow全体で落ちたら、`ci-failure.yml`がlabel `ci-failure`のissueを開くか追記し、次に通ったら閉じる。jobの`continue-on-error`の失敗だけでは開かない。
 - `stress.yml`は1日1回、mainで直近に足した・変えたtestを多い周回と高い並列度で繰り返し、落ちたtestごとにlabel `flaky-test`のissueを開くか追記する。workerの手元の[stress](local-checks.md)が止めきれない稀な不安定さを着地の後に見つけるためで、hostの負荷もqueueのslotも使わない（[ADR-t920-1](../adr/2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md)決定2）。
 - issueから直すtaskを登録するのはplanner。ただし`dagq.toml`に`[ci_watch]`を書いたrepositoryでは、supervisorの見張りが同じmainの失敗を`ci_failure`のfindingにして修正taskを作るので、plannerとinboxは`ci-failure`のissueからtaskを登録しない（見張りが止まっている間も。[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)決定8、[CI watch](../design/supervisor-lifecycle/ci-watch.md)）。issueは人に届く知らせとして残る。
+- `it-budget.yml`は毎晩と手動でmainの`dagq::it`だけをCIのrunnerで流し、JUnitから本数とtestごとの秒の和を求め、`.config/it-budget.toml`の予算を超えれば落ちる（比べるのは`scripts/check-it-budget.sh`、本数・秒・予算・超えた分・秒の上位のmoduleはjobのsummaryと成果物`it-budget`）。予算は今の値を超えないための天井で、着地の検証にも`ci.yml`の関門にも足さず、超えても着地は止まらない。
+  - 超過の経路: `[ci_watch]`がこのworkflowを宣言すると、mainの定時と手動の実行の失敗をCIの見張りが`ci_failure`と別の種類のfindingにし、runtimeのplannerが直すtaskを作る（[ADR-t3807-1](../adr/2026-10-31-t3807-1-ci-watch-reads-declared-scheduled-workflows-and-files-their-failures-as-findings.md)、[CI watch](../design/supervisor-lifecycle/ci-watch.md)の「定時のworkflow」）。宣言が無い間は、人かinboxがActionsの失敗を見てplannerに頼む。
+  - 秒はCIのrunnerの秒で、本番の関門とは並列度が違い同じtestの秒が違う。予算の値を変えるのは、予算のファイルのコメントの見直しの条件か、ITを減らして天井を下げるとき（目標は[ITの分類](../plans/it-reduction.md)の「予算と目標」）。
 - integration testのfixtureのtemplate（`tests/common/template.rs`）は`CARGO_TARGET_TMPDIR`（`target`の`tmp`）に作られる。CIで`target/`をcacheするjobは、cacheの復元の直後と保存の前にそのdirを消す（cacheの後始末がファイルだけを消して中身の無いtemplateを残し、testを落とすため）。jobを足すときも同じstepを置く。
 
 ## 判断と境界のtest

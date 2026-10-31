@@ -1,0 +1,25 @@
+# dagq::it（tests/it の binary）の合計の本数と秒の予算。毎晩 main で
+# .github/workflows/it-budget.yml が CI の runner（ubuntu-24.04）で dagq::it だけを
+# cargo nextest で流し、JUnit から求めた本数と test ごとの秒の和をここと比べ、
+# 超えれば job を落とす（scripts/check-it-budget.sh。書式は script の冒頭）。
+# 予算は今の値を超えないための天井で、着地は止めない。超過が finding になる経路と
+# 規則は docs/development/testing.md の「CI」、B の実数から求めた目標（配線の層の後に
+# 下げる値）は docs/plans/it-reduction.md の「予算と目標」。
+#
+# 本数: goal 239 の分類の後の tree（6014db2a3）の tests/it の #[test] は 1,915 本で、
+# そのうち #[cfg(any())] の 41 本と #[ignore] の 12 本は nextest が流さず JUnit に
+# 出ないので、流れる本数 1,862 本を上限にする（CI の linux の job の JUnit は
+# 14cce0dd の tree で 1,859 本＝grep の 1,912 本−53 本で、この数え方と合う）。
+#
+# 秒は仮: CI の linux の job（全ての test binary を一緒に流す cargo nextest run）の
+# JUnit の dagq::it の秒の和が 3 回で 4,606.7・6,309.9・6,425.4 秒
+# （run 41189788815・41203205093・41185586946、2026-10-31）とばらつき、dagq::it
+# だけを流す夜の job の秒はまだ無いので、最大の 6,425.4 秒に約 1 割の余裕を付けた。
+# 見直しの条件: 夜の job が 5 回流れたら、人か inbox がその 5 回の秒の最大に約 1 割の
+# 余裕を付けた値に置き直し、decided と basis を直してこのコメントの「仮」を外す。
+# それより前に本数が予算の内なのに秒だけで落ちた夜は、超過として扱わずにこの見直しを
+# 先に行う。
+count = 1862
+secs = 7000
+decided = "2026-11-01"
+basis = "本数は分類の後の tree の流れる本数、秒は CI の linux の job の 3 回の最大に約 1 割（仮、夜の job の 5 回で見直す）"

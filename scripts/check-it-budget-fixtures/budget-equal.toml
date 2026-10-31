@@ -1,0 +1,6 @@
+# within.xml's count and seconds, exactly (2.0 + 1.0 + 0.5 + 1.0 summed as floats),
+# with a backslash in the basis.
+count = 4
+secs = 4.5
+decided = "2026-11-01"
+basis = "fixture C:\new"

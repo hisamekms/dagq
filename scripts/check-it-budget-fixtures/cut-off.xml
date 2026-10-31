@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="9" skipped="0" failures="0" errors="0" time="20.0">
+    <testsuite name="dagq" tests="2" skipped="0" errors="0" failures="0">
+        <testcase name="domain::tests::a_unit_test" classname="dagq" time="9.000"/>
+        <testcase name="domain::tests::another_unit_test" classname="dagq" time="9.000"/>
+    </testsuite>
+    <testsuite name="dagq::it" tests="4" skipped="0" errors="0" failures="0">
+        <testcase name="slow_mod::a_slow_test" classname="dagq::it" time="2.000"/>

@@ -1,0 +1,105 @@
+name: IT budget
+
+# The number of dagq::it tests (the binary of tests/it) and the sum of their
+# seconds on a CI runner, against the ceiling in .config/it-budget.toml
+# (scripts/check-it-budget.sh compares them; its top comment has the budget's
+# format and the exit status). The job fails when either is over the budget,
+# and the job summary and the artifact it-budget hold the count, the seconds,
+# the budget, what is over it and the modules with the most seconds.
+#
+# Not a gate: the landing's verification and ci.yml's push and pull_request
+# runs do not run it, so an over-budget main still lands. The failed run of
+# this workflow on main is what becomes a finding and a fix
+# (docs/development/testing.md, section "CI"). A separate workflow from
+# ci.yml, so ci.yml's runs, its concurrency and the ci-failure issue (keyed on
+# the workflow name CI) stay as they are.
+on:
+  schedule:
+    # Once a day, 20:00 UTC (05:00 JST), after stress.yml's 18:00 UTC and
+    # it-coverage-map.yml's 19:00 UTC.
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+
+concurrency:
+  # Only the latest measurement of a ref matters (a manual run on another
+  # branch does not cancel main's).
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  budget:
+    name: dagq::it count and seconds
+    # The runner of ci.yml's linux job, whose JUnit the budget's seconds were
+    # first set from. The seconds are a CI runner's: the production gate runs
+    # with another parallelism and takes other seconds.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+          cargo --version
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The fixture templates under the tests' CARGO_TARGET_TMPDIR that a
+      # restored cache can leave empty (the same step as ci.yml's).
+      - name: Remove the target's tmp restored from the cache
+        run: rm -rf target/tmp
+
+      - name: Self-test
+        run: sh scripts/check-it-budget.sh --self-test
+
+      - name: cargo build
+        run: cargo build --locked
+
+      # dagq::it only. NEXTEST_PROFILE=ci writes target/nextest/ci/junit.xml
+      # (.config/nextest.toml). A failed test is ci.yml's to report: it does
+      # not fail this step, and its seconds still count. A build failure
+      # leaves no JUnit, and the next step fails on that.
+      - name: cargo nextest run --test it
+        shell: bash
+        env:
+          NEXTEST_PROFILE: ci
+        run: cargo nextest run --locked --test it --color never 2>&1 | tee "$RUNNER_TEMP/nextest.log" || true
+
+      - name: Compare with the budget
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          sh scripts/check-it-budget.sh --report "$RUNNER_TEMP/it-budget.md" target/nextest/ci/junit.xml || status=$?
+          if [ -s "$RUNNER_TEMP/it-budget.md" ]; then
+            cat "$RUNNER_TEMP/it-budget.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## dagq::it budget: no measurement (exit $status; see the log)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
+
+      - name: Upload the measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: it-budget
+          path: |
+            ${{ runner.temp }}/it-budget.md
+            target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Remove the target's tmp before the cache is saved
+        if: always()
+        run: rm -rf target/tmp

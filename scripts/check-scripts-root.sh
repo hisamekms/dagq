@@ -41,7 +41,7 @@ set -u
 me=check-scripts-root
 
 # The check scripts that take their root from the cwd's git work tree.
-scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-frontmatter-dates check-design-docs check-design-sentences check-test-rules check-it-added-tests check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages check-local-gates"
+scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-frontmatter-dates check-design-docs check-design-sentences check-test-rules check-it-added-tests check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages check-local-gates check-it-budget"
 
 # "<script> <case>": each case puts one violation of the script into the
 # clone (the cwd) with violate_<case>.
@@ -61,7 +61,8 @@ check-doc-frontmatter doc_frontmatter_missing_key
 check-doc-frontmatter doc_frontmatter_updated_line
 check-plugin-version plugin_version_mismatch
 check-commit-messages commit_message_prefix
-check-local-gates local_gates_declaration_drift"
+check-local-gates local_gates_declaration_drift
+check-it-budget it_budget_malformed"
 
 violate_migration_gap() {
   echo 'SELECT 1;' >migrations/9999_scripts_root_gap.sql
@@ -152,6 +153,11 @@ violate_commit_message_prefix() {
 violate_local_gates_declaration_drift() {
   awk '/^\[local_checks\.gates\.it-test-time\]$/ { g = 1 } g && /^kind = / { print "kind = \"zz-scripts-root\""; g = 0; next } { print }' \
     dagq.toml >dagq.toml.zz && mv dagq.toml.zz dagq.toml
+}
+
+# The budget of dagq::it gets a key it does not know.
+violate_it_budget_malformed() {
+  echo 'zz_scripts_root = 1' >>.config/it-budget.toml
 }
 
 # A worker's environment names its records' directory: without this,
