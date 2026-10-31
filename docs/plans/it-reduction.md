@@ -26,7 +26,7 @@ inbox が 2026-10-04 に subagent で `tests/it` の全 1,192 本を分類した
 - **goal 92 で消える G（230 本・667.5 秒）を除いた後の it（962 本・2,217.0 秒）では、B は本数の 37.8%・秒の 37.3%**（揺れを見込むと 34〜42%）。残りの 6 割強（D 492 本・1,076.2 秒と R 106 本・314.7 秒）は、判断を src の unit test に移せば消せるか unit に移せる。
 - goal 119（task 1709〜1713）の着地の前後の本番の関門の比較は「[goal 119 の前後](#goal-119-の前後)」（後の区間は 15 本で暫定）。
 - goal 237（task 3759・3761・3763〜3770）の前後は「[goal 237 の前後](#goal-237-の前後)」。
-- goal 239 の B・D・R の分け直しと登録簿の id は「[2026-11 の分類](#2026-11-の分類)」（`runtime_` の側は B 180・D 289・R 370 本）。
+- goal 239 の B・D・R の分け直しと登録簿の id は「[2026-11 の分類](#2026-11-の分類)」（`runtime_` の側は B 180・D 289・R 370 本、`runtime_` でない側は B 153・D 478・R 445 本、`tests/it` の全体は B 333・D 767・R 815 本の 1,915 本）。
   前の区間は IT を全部流した log の 40% が 30 分の上限で kill され、全件の検証は 60 分の上限の 4〜6 割を使って収まる見込み（後の区間は 0 本で、上位 8 module の後の秒は A/B の比からの見積もり）。
 - D+R の秒の大きい上位 20 module で D+R の秒の 59%（823.9 / 1,390.6 秒。module ごとの値なので modules.tsv の秒）を占める。最大は `runtime_cleanup`（152.4 秒）。
 
@@ -672,6 +672,8 @@ test の移し替え・削除はしていない。
 - [it-test-secs-2026-11.tsv](it-reduction/it-test-secs-2026-11.tsv): `tests/it` の全体の 1 本ごとの秒。列は `module`・`test`・`secs`・`secs_n`・`secs_window`。
 - [it-tests-2026-11-runtime.tsv](it-reduction/it-tests-2026-11-runtime.tsv): `runtime_` の側の分類。10/04 の表の列（`module`・`test`・`class`・`secs`・`reason`）に、`mark`（`cfg_any` か `ignore`）・`secs_n`・`secs_window`・`id`（B の登録簿の id）・`dest`（D は unit test の行き先の候補の `src` の関数、R は同じ境界の B の名前と、移せる判断があれば ` / ` の後にその関数）を足した。
 - `runtime_` の側の B の登録簿の項目は `.config/it-boundaries.d/t3803.toml`。前の task が登録した B（`runtime_integrate` の 4 本・`runtime_cleanup` と `runtime_verify_retry` の 1 本ずつ）は、その task のファイルの id をそのまま使う。
+- [it-tests-2026-11-other.tsv](it-reduction/it-tests-2026-11-other.tsv): `runtime_` でない側の分類。列は `runtime_` の側の表と同じ。`dest` の `src` の外の行き先（`tests/common/` の関数）は test の harness の判断で、その harness の unit test が行き先。
+- `runtime_` でない側の B の登録簿の項目は `.config/it-boundaries.d/t3804.toml`。前の task が登録した B（`review_subagents` の 1 本）は、その task のファイルの id をそのまま使う。
 
 ### 手順
 
@@ -845,3 +847,227 @@ D と R の本数の和の多い module の上位 10（同じ本数は D+R の�
 | 8 | `runtime_claim` | 17 | 5 | 12 | 63.8 |
 | 9 | `runtime_cleanup` | 14 | 5 | 9 | 209.1 |
 | 10 | `runtime_review` | 14 | 12 | 2 | 136.9 |
+
+### `runtime_` でない側の集計
+
+判定は `runtime_` の側と同じく subagent が module ごとに test の本文と fixture を読んで行い、3803 の表と登録簿を突き合わせた。
+3803 の B がすでに代表する境界か supervisor の配線の機能の test は R にして、行き先にその B の名前を書いた（3803 の id は使わない）。
+3803 の表の R が `runtime_` の外を行き先にした 3 本（`queue_migration::migration_to_v5_rebuilds_runs_moves_the_lease_and_keeps_foreign_keys` と `inbox_watch_wake` の 2 本）は、この側の B にした。
+別の test が子の process として流す probe（`#[ignore]` の `*_probe` と `*_child_process`）は R で、行き先はそれを流す test。
+集計は表から計算した（秒と空の `secs` の数え方は `runtime_` の側と同じ）。
+
+| class | 本数 | 秒 | secs が空 | 本数の割合 | 秒の割合 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| B 境界の代表 | 153 | 475.7 | 5 | 14.2% | 18.7% |
+| D 判断 | 478 | 770.8 | 0 | 44.4% | 30.3% |
+| R 同じ境界の 2 本目 | 445 | 1,300.4 | 6 | 41.4% | 51.1% |
+| 計 | 1,076 | 2,547.0 | 11 | 100% | 100% |
+
+```sh
+awk -F'\t' 'NR>1{n[$3]++;if($4!=""){s[$3]+=$4}else{e[$3]++}}
+  END{for(c in n)printf "%s %d %.1f %d\n",c,n[c],s[c],e[c]}' docs/plans/it-reduction/it-tests-2026-11-other.tsv
+```
+
+- B の 153 本の境界の種類は、プロセス 65・SQLite 42・supervisor の配線 30（30 の機能に 1 本ずつ）・Git 12・復旧と adopt 4。153 本のうち 152 本が `t3804.toml` の新しい id、1 本が前の task の id。
+- secs が空の 11 本は全て `#[ignore]` の test（実機の podman・実 Claude の test と、別の test が子の process として流す probe）。`#[cfg(any())]` の 28 本は前の区間の log に秒があり、`secs_window` は `before`。
+- `runtime_` でない側の 1,076 本の `secs_window` は `after` 670・`before` 395・空 11。`mark` の印は `cfg_any` 28 本・`ignore` 11 本。
+
+module ごと（秒は `secs` の和）:
+
+| module | B | D | R | B 秒 | D 秒 | R 秒 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `actor_model` | 0 | 0 | 2 | 0.0 | 0.0 | 23.2 |
+| `agent_cases` | 2 | 0 | 5 | 9.2 | 0.0 | 31.6 |
+| `agent_eval` | 0 | 1 | 0 | 0.0 | 0.5 | 0.0 |
+| `agent_eval_builtins` | 0 | 0 | 5 | 0.0 | 0.0 | 11.8 |
+| `agent_eval_rounds` | 4 | 0 | 7 | 29.4 | 0.0 | 39.0 |
+| `attribute_records` | 2 | 1 | 5 | 5.9 | 0.1 | 15.4 |
+| `background_logs` | 1 | 0 | 1 | 14.5 | 0.0 | 8.0 |
+| `broker_relay` | 5 | 0 | 10 | 13.2 | 0.0 | 36.5 |
+| `build_id_watch` | 1 | 0 | 1 | 1.5 | 0.0 | 1.7 |
+| `cli_actor` | 1 | 3 | 0 | 0.2 | 4.1 | 0.0 |
+| `cli_areas` | 0 | 1 | 5 | 0.0 | 7.0 | 34.6 |
+| `cli_authorization` | 1 | 9 | 3 | 1.3 | 3.6 | 1.9 |
+| `cli_candidates` | 0 | 3 | 1 | 0.0 | 0.9 | 0.4 |
+| `cli_changes` | 0 | 3 | 0 | 0.0 | 8.3 | 0.0 |
+| `cli_denials` | 1 | 1 | 1 | 0.3 | 0.3 | 0.3 |
+| `cli_dialogue` | 0 | 7 | 0 | 0.0 | 2.2 | 0.0 |
+| `cli_duplicate_supervisors` | 0 | 4 | 0 | 0.0 | 1.5 | 0.0 |
+| `cli_forecast` | 0 | 2 | 0 | 0.0 | 0.7 | 0.0 |
+| `cli_goals` | 0 | 11 | 1 | 0.0 | 5.3 | 0.6 |
+| `cli_graph` | 1 | 2 | 1 | 1.2 | 0.9 | 1.4 |
+| `cli_install_release` | 1 | 0 | 0 | 6.7 | 0.0 | 0.0 |
+| `cli_kpi` | 0 | 12 | 1 | 0.0 | 6.9 | 0.3 |
+| `cli_operations` | 0 | 3 | 0 | 0.0 | 2.9 | 0.0 |
+| `cli_planner_request` | 1 | 4 | 3 | 0.4 | 2.0 | 0.9 |
+| `cli_proposals` | 0 | 3 | 0 | 0.0 | 1.5 | 0.0 |
+| `cli_read` | 1 | 16 | 3 | 0.4 | 4.6 | 4.8 |
+| `cli_related_docs` | 0 | 1 | 0 | 0.0 | 0.5 | 0.0 |
+| `cli_request_words` | 1 | 2 | 1 | 0.3 | 0.6 | 0.2 |
+| `cli_roles` | 0 | 7 | 2 | 0.0 | 3.2 | 1.5 |
+| `cli_screen` | 0 | 3 | 0 | 0.0 | 1.6 | 0.0 |
+| `cli_session_event` | 1 | 0 | 4 | 0.8 | 0.0 | 1.6 |
+| `cli_stats` | 0 | 3 | 0 | 0.0 | 2.2 | 0.0 |
+| `cli_status_runs` | 0 | 2 | 0 | 0.0 | 2.2 | 0.0 |
+| `cli_task_hold` | 0 | 3 | 1 | 0.0 | 1.1 | 0.4 |
+| `cli_tasks` | 2 | 11 | 0 | 1.9 | 5.2 | 0.0 |
+| `cli_title_prefixes` | 0 | 1 | 0 | 0.0 | 1.0 | 0.0 |
+| `cli_version` | 2 | 2 | 8 | 24.2 | 0.5 | 58.6 |
+| `container_image` | 2 | 2 | 0 | 1.2 | 2.0 | 0.0 |
+| `draft_bundles` | 1 | 3 | 1 | 3.4 | 24.2 | 2.8 |
+| `draft_revisit` | 1 | 1 | 1 | 9.6 | 0.6 | 9.9 |
+| `e2e_gate` | 1 | 0 | 3 | 0.7 | 0.0 | 4.2 |
+| `finding_planner` | 1 | 6 | 2 | 6.5 | 23.0 | 15.9 |
+| `finding_records` | 1 | 1 | 2 | 0.2 | 0.2 | 0.3 |
+| `fixture_cleanup` | 2 | 1 | 6 | 1.8 | 0.1 | 0.5 |
+| `fixture_templates` | 2 | 0 | 2 | 3.2 | 0.0 | 0.6 |
+| `follow_up_membership` | 0 | 18 | 2 | 0.0 | 4.1 | 1.4 |
+| `goal_review` | 1 | 7 | 7 | 2.9 | 31.7 | 13.9 |
+| `goal_review_codex` | 1 | 2 | 1 | 5.5 | 9.1 | 3.7 |
+| `host_client` | 4 | 3 | 6 | 6.3 | 5.4 | 9.8 |
+| `host_commands` | 0 | 0 | 3 | 0.0 | 0.0 | 4.0 |
+| `host_control` | 2 | 5 | 7 | 16.6 | 19.1 | 26.2 |
+| `inbox_nudge` | 2 | 1 | 4 | 3.4 | 1.7 | 10.0 |
+| `inbox_watch_push` | 1 | 0 | 1 | 1.3 | 0.0 | 0.6 |
+| `inbox_watch_wake` | 2 | 2 | 1 | 4.6 | 2.4 | 2.2 |
+| `inbox_watcher` | 1 | 2 | 2 | 1.2 | 0.2 | 4.3 |
+| `installed_plugin` | 1 | 3 | 1 | 0.3 | 1.1 | 0.8 |
+| `landing_branch` | 2 | 3 | 2 | 12.6 | 16.0 | 15.9 |
+| `language` | 1 | 2 | 0 | 12.6 | 11.8 | 0.0 |
+| `ledger_resources` | 0 | 0 | 1 | 0.0 | 0.0 | 0.1 |
+| `ledger_rows` | 1 | 1 | 6 | 0.0 | 0.0 | 3.3 |
+| `ledger_steps` | 1 | 0 | 0 | 0.1 | 0.0 | 0.0 |
+| `lifecycle_down` | 0 | 7 | 3 | 0.0 | 1.3 | 0.9 |
+| `lifecycle_handoff_stop` | 0 | 2 | 0 | 0.0 | 0.2 | 0.0 |
+| `lifecycle_inbox` | 1 | 6 | 3 | 0.5 | 2.8 | 3.0 |
+| `lifecycle_install` | 2 | 23 | 3 | 1.1 | 10.1 | 0.5 |
+| `lifecycle_install_asks` | 1 | 1 | 0 | 0.1 | 0.3 | 0.0 |
+| `lifecycle_install_drain` | 0 | 4 | 0 | 0.0 | 0.8 | 0.0 |
+| `lifecycle_install_service` | 2 | 2 | 10 | 3.6 | 0.5 | 21.2 |
+| `lifecycle_install_watch` | 0 | 7 | 1 | 0.0 | 7.8 | 1.2 |
+| `lifecycle_plan` | 0 | 6 | 2 | 0.0 | 0.8 | 0.5 |
+| `lifecycle_replace` | 1 | 12 | 7 | 2.3 | 5.3 | 6.1 |
+| `lifecycle_service` | 1 | 1 | 6 | 0.7 | 1.0 | 4.0 |
+| `lifecycle_up` | 2 | 24 | 2 | 0.7 | 7.8 | 0.5 |
+| `live_alerts` | 1 | 1 | 0 | 11.2 | 2.4 | 0.0 |
+| `location` | 1 | 3 | 5 | 2.3 | 2.5 | 8.3 |
+| `main_checkout` | 1 | 0 | 4 | 0.2 | 0.0 | 1.8 |
+| `node_samples` | 1 | 5 | 6 | 1.4 | 2.2 | 5.2 |
+| `observer_codex` | 0 | 6 | 3 | 0.0 | 9.2 | 7.1 |
+| `plan_review` | 4 | 7 | 11 | 13.3 | 31.6 | 41.3 |
+| `plan_review_attribution` | 0 | 0 | 1 | 0.0 | 0.0 | 4.0 |
+| `plan_review_codex` | 0 | 2 | 1 | 0.0 | 6.8 | 7.0 |
+| `plan_review_concern` | 0 | 1 | 0 | 0.0 | 3.0 | 0.0 |
+| `plan_review_expected_files` | 1 | 0 | 1 | 2.1 | 0.0 | 1.9 |
+| `plan_review_launch` | 1 | 0 | 1 | 3.0 | 0.0 | 3.9 |
+| `plan_review_turns` | 0 | 2 | 0 | 0.0 | 4.7 | 0.0 |
+| `planner_close` | 0 | 1 | 1 | 0.0 | 1.6 | 1.1 |
+| `planner_headless` | 2 | 0 | 7 | 16.7 | 0.0 | 48.3 |
+| `planner_headless_stats` | 0 | 1 | 0 | 0.0 | 7.9 | 0.0 |
+| `planner_headless_turns` | 0 | 1 | 6 | 0.0 | 1.8 | 63.8 |
+| `planner_slots` | 1 | 9 | 3 | 0.1 | 47.7 | 14.5 |
+| `podman_machine` | 2 | 5 | 2 | 0.9 | 4.3 | 2.3 |
+| `provider_executables` | 1 | 0 | 5 | 16.5 | 0.0 | 30.2 |
+| `queue_binary` | 2 | 1 | 3 | 12.6 | 6.5 | 2.4 |
+| `queue_broker` | 6 | 0 | 10 | 10.9 | 0.0 | 14.3 |
+| `queue_dependencies` | 1 | 1 | 7 | 0.1 | 0.1 | 0.5 |
+| `queue_goals` | 1 | 3 | 2 | 0.1 | 0.2 | 0.1 |
+| `queue_kpi_breach_read_plan` | 1 | 0 | 1 | 1.7 | 0.0 | 1.0 |
+| `queue_migration` | 1 | 0 | 19 | 0.5 | 0.0 | 15.2 |
+| `queue_proposals` | 1 | 7 | 1 | 0.1 | 0.6 | 0.1 |
+| `queue_runs` | 1 | 2 | 4 | 0.1 | 0.1 | 0.2 |
+| `queue_schema` | 1 | 2 | 7 | 0.5 | 6.1 | 4.8 |
+| `queue_search` | 1 | 0 | 0 | 0.1 | 0.0 | 0.0 |
+| `queue_service` | 2 | 3 | 10 | 10.1 | 7.2 | 8.8 |
+| `queue_service_client` | 1 | 5 | 5 | 0.9 | 2.6 | 2.2 |
+| `queue_service_findings` | 0 | 1 | 2 | 0.0 | 0.4 | 0.9 |
+| `queue_service_planning` | 0 | 1 | 1 | 0.0 | 1.0 | 1.3 |
+| `queue_service_reads` | 0 | 2 | 4 | 0.0 | 0.7 | 3.7 |
+| `queue_service_telemetry` | 1 | 5 | 0 | 0.6 | 2.6 | 0.0 |
+| `queue_service_tokens` | 2 | 7 | 8 | 1.0 | 3.9 | 10.6 |
+| `queue_tasks` | 1 | 11 | 2 | 0.1 | 0.6 | 0.1 |
+| `recovery_codex` | 0 | 7 | 7 | 0.0 | 53.1 | 56.5 |
+| `recurring_drafts` | 1 | 1 | 0 | 6.1 | 0.1 | 0.0 |
+| `related` | 1 | 1 | 0 | 0.4 | 0.2 | 0.0 |
+| `replan_planning` | 3 | 18 | 5 | 17.5 | 98.2 | 24.9 |
+| `replan_resolve` | 0 | 3 | 1 | 0.0 | 1.2 | 1.5 |
+| `request_planner` | 1 | 9 | 1 | 5.1 | 27.8 | 4.3 |
+| `request_planner_spike` | 0 | 1 | 1 | 0.0 | 3.1 | 5.1 |
+| `review_builtins` | 0 | 0 | 2 | 0.0 | 0.0 | 17.8 |
+| `review_follow_ups` | 1 | 0 | 1 | 9.0 | 0.0 | 11.9 |
+| `review_programs` | 1 | 1 | 3 | 0.6 | 7.7 | 30.9 |
+| `review_subagents` | 3 | 1 | 13 | 26.8 | 0.4 | 103.7 |
+| `run_container` | 7 | 12 | 14 | 38.6 | 14.6 | 71.5 |
+| `run_resources` | 2 | 0 | 2 | 0.3 | 0.0 | 0.4 |
+| `run_session_spans` | 1 | 0 | 0 | 0.2 | 0.0 | 0.0 |
+| `session_steps` | 1 | 2 | 11 | 0.4 | 0.9 | 6.4 |
+| `session_wrapper_service` | 1 | 1 | 3 | 0.5 | 0.4 | 0.8 |
+| `setup_review` | 2 | 2 | 9 | 3.8 | 3.5 | 15.5 |
+| `setup_review_profiles` | 0 | 1 | 1 | 0.0 | 2.7 | 2.4 |
+| `shell_leftovers` | 1 | 0 | 4 | 0.8 | 0.0 | 0.5 |
+| `source_repository` | 0 | 2 | 0 | 0.0 | 0.8 | 0.0 |
+| `stopped_reads` | 1 | 1 | 1 | 0.2 | 0.2 | 0.3 |
+| `stub_templates` | 1 | 0 | 0 | 0.6 | 0.0 | 0.0 |
+| `supervisor_service` | 6 | 4 | 20 | 13.7 | 1.9 | 76.3 |
+| `supervisor_service_events` | 1 | 0 | 0 | 0.7 | 0.0 | 0.0 |
+| `supervisor_service_ledger` | 0 | 1 | 2 | 0.0 | 1.6 | 55.4 |
+| `supervisor_service_measures` | 1 | 2 | 2 | 3.7 | 1.4 | 1.0 |
+| `supervisor_without_cmux` | 1 | 0 | 1 | 1.7 | 0.0 | 0.6 |
+| `task_replanning` | 1 | 11 | 7 | 0.1 | 2.8 | 0.8 |
+| `telemetry_conformance` | 1 | 0 | 0 | 0.4 | 0.0 | 0.0 |
+| `telemetry_targets` | 0 | 0 | 2 | 0.0 | 0.0 | 1.0 |
+| `telemetry_tokens` | 1 | 0 | 4 | 0.3 | 0.0 | 1.2 |
+| `test_actor_env` | 0 | 2 | 0 | 0.0 | 0.0 | 0.0 |
+| `throughput_review_codex` | 0 | 5 | 4 | 0.0 | 11.9 | 9.1 |
+| `verification_container` | 3 | 6 | 9 | 17.6 | 60.0 | 37.4 |
+| `watch_read_only` | 1 | 0 | 2 | 0.1 | 0.0 | 0.4 |
+| `worker_escalation` | 0 | 6 | 1 | 0.0 | 47.4 | 12.7 |
+| `worker_model` | 1 | 4 | 0 | 4.9 | 8.0 | 0.0 |
+
+D と R の本数の和の多い module の上位 10（同じ本数は D+R の秒の降順）:
+
+| 順 | module | D+R の本数 | D | R | D+R の秒 |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | `run_container` | 26 | 12 | 14 | 86.1 |
+| 2 | `lifecycle_install` | 26 | 23 | 3 | 10.6 |
+| 3 | `lifecycle_up` | 26 | 24 | 2 | 8.3 |
+| 4 | `supervisor_service` | 24 | 4 | 20 | 78.1 |
+| 5 | `replan_planning` | 23 | 18 | 5 | 123.1 |
+| 6 | `follow_up_membership` | 20 | 18 | 2 | 5.5 |
+| 7 | `queue_migration` | 19 | 0 | 19 | 15.2 |
+| 8 | `lifecycle_replace` | 19 | 12 | 7 | 11.4 |
+| 9 | `cli_read` | 19 | 16 | 3 | 9.4 |
+| 10 | `plan_review` | 18 | 7 | 11 | 72.9 |
+
+### `tests/it` の全体の集計
+
+`runtime_` の側と `runtime_` でない側の表の和（1,915 本）。両方の表を合わせて、「supervisor の配線」の B は 89 本で機能ごとに 1 本、登録簿の同じ id の代表は 1 本（`sh scripts/check-it-added-tests.sh` が確かめる）。
+
+| class | 本数 | 秒 | secs が空 | 本数の割合 | 秒の割合 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| B 境界の代表 | 333 | 1,997.1 | 5 | 17.4% | 21.6% |
+| D 判断 | 767 | 2,908.0 | 1 | 40.1% | 31.5% |
+| R 同じ境界の 2 本目 | 815 | 4,329.1 | 7 | 42.6% | 46.9% |
+| 計 | 1,915 | 9,234.2 | 13 | 100% | 100% |
+
+```sh
+awk -F'\t' 'FNR>1{n[$3]++;if($4!=""){s[$3]+=$4}else{e[$3]++}}
+  END{for(c in n)printf "%s %d %.1f %d\n",c,n[c],s[c],e[c]}' \
+  docs/plans/it-reduction/it-tests-2026-11-runtime.tsv docs/plans/it-reduction/it-tests-2026-11-other.tsv
+```
+
+module ごとの B・D・R は 2 つの表の module ごとの表（module は両側で重ならない）。
+D と R の本数の和の多い module の上位 10（両側を通して。同じ本数は D+R の秒の降順）:
+
+| 順 | module | D+R の本数 | D | R | D+R の秒 |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | `runtime_handoff` | 26 | 4 | 22 | 287.4 |
+| 2 | `run_container` | 26 | 12 | 14 | 86.1 |
+| 3 | `lifecycle_install` | 26 | 23 | 3 | 10.6 |
+| 4 | `lifecycle_up` | 26 | 24 | 2 | 8.3 |
+| 5 | `runtime_triage` | 25 | 13 | 12 | 144.7 |
+| 6 | `supervisor_service` | 24 | 4 | 20 | 78.1 |
+| 7 | `replan_planning` | 23 | 18 | 5 | 123.1 |
+| 8 | `runtime_replan_park` | 22 | 11 | 11 | 269.9 |
+| 9 | `runtime_clone` | 20 | 2 | 18 | 46.9 |
+| 10 | `follow_up_membership` | 20 | 18 | 2 | 5.5 |

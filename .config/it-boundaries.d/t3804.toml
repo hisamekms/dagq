@@ -1,0 +1,1067 @@
+# The registry's boundaries task 3804 gave to the representative tests of the
+# modules of tests/it that do not start with runtime_ (docs/plans/it-reduction.md,
+# "2026-11 の分類") (the format is in the header of scripts/check-it-added-tests.sh).
+
+[[boundary]]
+id = "agent-production-set-built-and-labeled-by-another-provider"
+kind = "supervisorの配線"
+test = "agent_cases::a_set_is_made_of_the_agents_reviews_and_labeled_by_another_provider"
+reason = "supervisor が dagq agent cases の依頼から本番の review を選び、別の provider の agent job でラベルを付け、set の file と digest を queue の data dir に置き、食い違いを人に聞くことは、supervisor の配線と queue・Git・process を通してしか確かめられない。どの review を case にするかとラベルの判断は domain::agent_eval::production の unit test"
+task = 3804
+
+[[boundary]]
+id = "agent-definition-watch-records-due-findings"
+kind = "supervisorの配線"
+test = "agent_cases::the_watch_records_when_an_agent_is_due_and_asks_for_nothing"
+reason = "supervisor の採用した定義の見張りが本番の review の後に due の finding を 1 件記録し、終わっていない review を次に数え、set も round も依頼しないことは、supervisor の pass と queue を通してしか確かめられない。いつ due かと各段は domain::agent_eval::watch の unit test"
+task = 3804
+
+[[boundary]]
+id = "agent-eval-round-runs-one-job-per-run-and-records-scores"
+kind = "supervisorの配線"
+test = "agent_eval_rounds::a_requested_round_runs_one_agent_job_per_run_and_records_its_scores"
+reason = "supervisor が依頼した round を landing branch の定義と case の tree で case の run ごとに 1 つの agent job として headless job の経路で流し、score を event に記録することは、supervisor の配線と process を通してしか確かめられない。上限・順・prompt の判断は domain::agent_eval::round の unit test"
+task = 3804
+
+[[boundary]]
+id = "agent-eval-case-tree-has-a-git-of-its-own"
+kind = "Git"
+test = "agent_eval_rounds::a_cases_tree_has_a_git_of_its_own_that_holds_no_case"
+reason = "case の tree が repository と object・ref・Git directory を共有しない自分の Git を持ち、base の上に case の変更を detached HEAD で置き、case の一覧も期待も含まないことは、実の git の repository でしか確かめられない。case の commit と digest の作り方は domain::agent_eval の unit test"
+task = 3804
+
+[[boundary]]
+id = "agent-eval-round-of-a-gone-supervisor-taken-up"
+kind = "復旧とadopt"
+test = "agent_eval_rounds::a_round_a_gone_supervisor_left_is_taken_up_and_its_left_runs_started"
+reason = "死んだ supervisor が残した round の job を headless job の引き取りで止め、run を abandoned にし、event から round を読み戻して残りの run を始めることは、実の process の生死と supervisor の引き取りでしか確かめられない。どの run が残るかの判断は domain::agent_eval::round の unit test"
+task = 3804
+
+[[boundary]]
+id = "definition-change-run-measured-before-landing"
+kind = "supervisorの配線"
+test = "agent_eval_rounds::a_run_that_changes_a_definition_runs_its_dev_before_it_lands_and_goes_back_under_the_threshold"
+reason = "定義を変える run の dev の round を review の通った後・着地の前に run の定義で流し、run を slot に待たせ、閾値割れで session に revise として差し戻し直した head で測り直すことは、supervisor の着地の配線を通してしか確かめられない。閾値と差し戻しの判断は domain::agent_eval::before_landing の unit test"
+task = 3804
+
+[[boundary]]
+id = "attribute-records-written-in-each-write-transaction"
+kind = "SQLite"
+test = "attribute_records::every_write_path_records_the_new_values_and_the_fold_follows_the_store"
+reason = "属性を変える各書き込み経路が自分の transaction の中で新しい値の record を書き、fold が store の読みと一致し続けることは、実の SQLite の queue.db の transaction と読み直しでしか確かめられない。fold がどの record から何を作るかの判断は domain::ledger::attributes の unit test"
+task = 3804
+
+[[boundary]]
+id = "supervisor-pass-writes-the-attributes-baseline"
+kind = "supervisorの配線"
+test = "attribute_records::a_supervisors_pass_writes_the_baseline_of_what_an_older_binary_changed"
+reason = "supervisor の観測の pass が古い binary の変えた属性を状態と比べて baseline を書き、続く run まで fold が store と一致することは、実の supervisor の 1 周と queue.db を通してしか確かめられない。どの task が食い違うかの判断は domain::ledger::attributes の unit test"
+task = 3804
+
+[[boundary]]
+id = "run-log-follows-a-live-background-wrapper"
+kind = "プロセス"
+test = "background_logs::a_background_runs_log_is_followed_and_read_after_it_ended"
+reason = "background の実の wrapper の process が run の session.log に書く turn の要約を、run log --follow が wrapper の終わりまで追い、着地の後に run か task の ID で読めることは、実の wrapper の process と file を通してしか確かめられない。ID の解決と行の切り出しは unit test"
+task = 3804
+
+[[boundary]]
+id = "run-socket-volume-and-relay-per-run-removed-at-its-end"
+kind = "プロセス"
+test = "broker_relay::each_run_gets_its_own_socket_and_relay_and_its_end_removes_them"
+reason = "run ごとに socket の volume と relay を podman で作り、relay と run の container だけに mount させ、run の終わりにその relay と volume だけを消すことは、実の podman の process の呼び出しでしか確かめられない。引数の判断は domain::broker_relay::relay_run_args の unit test"
+task = 3804
+
+[[boundary]]
+id = "supervisor-restarts-relays-and-tells-the-inbox-when-it-cannot"
+kind = "supervisorの配線"
+test = "broker_relay::the_supervisor_starts_a_relay_again_and_tells_the_inbox_when_it_cannot"
+reason = "supervisor の pass が落ちた relay を broker の port へ起こし直し、起こせなければ inbox への attention を 1 回出して container の worker を待たせ、戻れば attention を閉じることは、supervisor の relay の見張りと claim をつないだ配線でしか確かめられない。relay の扱いの判断は domain::broker_relay::relay_action の unit test"
+task = 3804
+
+[[boundary]]
+id = "hung-podman-of-a-relay-look-killed-at-its-limit"
+kind = "プロセス"
+test = "broker_relay::a_hung_podman_of_a_look_is_killed_and_the_supervisor_goes_on"
+reason = "固まった podman の子 process を look の上限で殺し、machine に届かないと読んで supervisor の pass が先へ進むことは、実の子 process と時計でしか確かめられない。上限と読み方の判断は domain::broker_relay の unit test"
+task = 3804
+
+[[boundary]]
+id = "run-dagq-reaches-the-service-through-forwarder-relay-and-broker"
+kind = "プロセス"
+test = "broker_relay::a_run_s_dagq_reaches_the_service_through_the_forwarder_the_relay_and_the_broker"
+reason = "client mode の dagq が forwarder と run の unix socket と dagq relay serve と実の broker を通って実の service に run の principal として届き、token の無いものや取り消したものが拒まれることは、実の process と socket と port をつないだ経路でしか確かめられない。token の判断は domain::queue_broker::judge_run_token の unit test"
+task = 3804
+
+[[boundary]]
+id = "relay-in-the-real-machine-reaches-the-hosts-broker"
+kind = "プロセス"
+test = "broker_relay::a_relay_in_the_real_machine_reaches_the_host_s_broker"
+reason = "実の dagq machine の中の relay が gvproxy を通って host の broker に届くことは、実の podman と machine でしか確かめられない。relay の引数の判断は domain::broker_relay の unit test"
+task = 3804
+
+[[boundary]]
+id = "build-id-watches-the-git-files-that-exist"
+kind = "Git"
+test = "build_id_watch::a_fresh_repository_without_packed_refs_watches_only_files_that_are_there_and_follows"
+reason = "開発 build の script が見張る Git の file が実の repository に在るものだけで、commit・checkout・staging がそのどれかを変えて build の識別子が追うことは、実の git が書く file を通してしか確かめられない。識別子の組み立ては build_id の unit test"
+task = 3804
+
+[[boundary]]
+id = "event-rows-record-their-actor"
+kind = "SQLite"
+test = "cli_actor::every_event_records_its_actor"
+reason = "各 event の行に役割と actor id を書き events --full と show が読み戻し、actor を記録する前に書いた行も actor なしで読めることは、実の SQLite の queue の file と schema でしか確かめられない。どの役割にどの actor を付けるかは domain::actor の unit test"
+task = 3804
+
+[[boundary]]
+id = "refused-change-recorded-as-authorization-denied-and-nothing-changes"
+kind = "SQLite"
+test = "cli_authorization::workers_jobs_and_the_observer_change_no_plan_and_each_refusal_is_recorded"
+reason = "worker・job・observer の CLI の変更が拒まれて queue の行を何も変えず、拒否だけが actor 付きの authorization_denied として実の queue の file に残ることは、実の process と SQLite でしか確かめられない。誰に何を許すかの判断は domain::authorization の unit test"
+task = 3804
+
+[[boundary]]
+id = "cli-refusal-recorded-by-the-service-as-its-principal"
+kind = "プロセス"
+test = "cli_denials::a_refusal_is_recorded_by_the_service_as_the_refused_principal"
+reason = "host の dagq が自分で拒んだ操作を queue を開かず queue の service の socket に送り、service が token で認証した呼び手の principal の authorization_denied として記録することは、実の dagq と service の process と socket でしか確かめられない。何を拒むかは domain::authorization の unit test"
+task = 3804
+
+[[boundary]]
+id = "graph-draws-svg-with-d2-on-path"
+kind = "プロセス"
+test = "cli_graph::graph_prints_the_near_term_diagram_as_d2_or_svg"
+reason = "graph --format svg が PATH の d2 を実の子 process として起動し、その出力の SVG を返し、無ければ理由を出すことは、実の process と PATH でしか確かめられない。図の d2 の source は application::diagram の unit test"
+task = 3804
+
+[[boundary]]
+id = "install-release-puts-a-cargo-installed-binary-in-place"
+kind = "プロセス"
+test = "cli_install_release::install_release_installs_with_cargo_and_puts_the_binary_in_place"
+reason = "実の dagq の CLI が install --release で stub の cargo を子 process として動かし、入った実の binary を probe して置き換え .previous を残し、cargo の失敗では何も置き換えないことは、実の CLI の process とファイルの置き換えを通してしか確かめられない。release の版の選び方は release_update の unit test"
+task = 3804
+
+[[boundary]]
+id = "planner-request-records-written-in-one-transaction"
+kind = "SQLite"
+test = "cli_planner_request::a_request_whose_second_record_fails_leaves_neither"
+reason = "planner request の turn_requested と planner_request_handed が 1 つの transaction で書かれ、2 つ目が trigger で落ちればどちらも残らないことは、実の SQLite の file と trigger でしか確かめられない。planner に渡せるかの判断は domain::planner の unit test"
+task = 3804
+
+[[boundary]]
+id = "search-fts-index-of-the-real-queue-file"
+kind = "SQLite"
+test = "cli_read::search_prints_hits_with_excerpts_and_checks_its_filters"
+reason = "search の当たりと抜粋が実の queue の file の FTS5 trigram の仮想 table と、書き込みで索引を保つ trigger を通して返ることは、実の SQLite でしか確かめられない。filter の検査と並べ方の判断は application::queue_reads::planning::search の unit test"
+task = 3804
+
+[[boundary]]
+id = "request-words-read-from-a-file-or-the-process-stdin"
+kind = "プロセス"
+test = "cli_request_words::words_from_a_file_or_stdin_are_recorded_as_text_gives_them_and_stay"
+reason = "複数行と quote と日本語を含む言葉が file か実の dagq の process の stdin から読まれて手を加えずに queue に残ることは、実の process の stdin と file でしか確かめられない。入力の組の検査は main の request_words の unit test"
+task = 3804
+
+[[boundary]]
+id = "session-hook-records-the-inbox-span-through-the-service"
+kind = "プロセス"
+test = "cli_session_event::a_codex_inboxs_hooks_open_mark_and_close_its_span"
+reason = "db の path を持たない dagq session-event の process が stdin の hook と token の file で queue service の socket に届き、inbox の span を開き印を付け閉じることは、実の process と service でしか確かめられない。どの hook がどの span の記録になるかの判断は main の read_session_hook と domain::sessions の unit test"
+task = 3804
+
+[[boundary]]
+id = "cli-writes-persist-in-the-queue-file-across-processes"
+kind = "SQLite"
+test = "cli_tasks::cli_persists_across_processes_and_reports_dependency_errors_as_json"
+reason = "別々の dagq の process が空白を含む path の実の queue の file を init し、書いた task と依存が次の process から読め、拒否が stderr の JSON で何も変えないことは、実の SQLite の file と process でしか確かめられない。循環と候補の判断は domain::task::check_acyclic と application::claim_candidates の unit test"
+task = 3804
+
+[[boundary]]
+id = "read-commands-create-no-queue-file"
+kind = "SQLite"
+test = "cli_tasks::reads_do_not_create_a_queue_and_unknown_tasks_fail"
+reason = "読むだけのコマンドが無い queue の file を作らずに失敗し、init の後の doctor と status が読めることは、実の file system と SQLite の開き方でしか確かめられない。どのコマンドが読むだけかの判断は main の reads_only の unit test"
+task = 3804
+
+[[boundary]]
+id = "migrate-explicit-and-older-binaries-work-within-the-floor"
+kind = "SQLite"
+test = "cli_version::migrate_is_explicit_and_older_binaries_keep_working_within_the_floor"
+reason = "古い schema の実の queue の file に変更のコマンドが migrate を求め、読むだけのコマンドは file を変えずに読み、migrate の後も下限の中の古い binary の copy が同じ file で働くことは、実の SQLite の file と別の binary の process でしか確かめられない。互換の下限の判断は migration の unit test"
+task = 3804
+
+[[boundary]]
+id = "install-execs-the-running-supervisor-under-its-pid-and-rolls-back"
+kind = "プロセス"
+test = "cli_version::install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back"
+reason = "install が rename で前の binary を残して置き換え、走っている実の supervisor の process が自分の pid と token のまま新しい file を exec して続け、--rollback が同じく戻すことは、実の process の exec と file system でしか確かめられない。いつ戻すかの判断は release_update の unit test"
+task = 3804
+
+[[boundary]]
+id = "container-image-built-on-the-base-from-the-main-checkout"
+kind = "プロセス"
+test = "container_image::the_project_image_is_built_on_the_base_from_the_main_checkout_and_old_ones_go"
+reason = "base と project の image を main checkout の context から podman の build で作り、使われていない古い image を消すことは、実の podman の process と checkout の file でしか確かめられない。build の段と引数の判断は domain::container_image の unit test"
+task = 3804
+
+[[boundary]]
+id = "real-images-build-in-the-dagq-machine"
+kind = "プロセス"
+test = "container_image::the_real_images_build_in_the_dagq_machine"
+reason = "base と この repository の project image が実の podman と dagq machine と network で build できることは、実の machine でしか確かめられない。build の段の判断は domain::container_image の unit test"
+task = 3804
+
+[[boundary]]
+id = "draft-bundle-gets-one-runtime-planner"
+kind = "supervisorの配線"
+test = "draft_bundles::one_runs_follow_ups_are_one_bundle_for_one_planner"
+reason = "同じ run の follow-up の draft を supervisor の pass が 1 つの bundle にまとめ runtime の planner を 1 つ開き、作業中に来た同じ run の follow-up をその planner の終わりまで待たせることは、走る supervisor と planner の起動と queue をつないだ IT でしか確かめられない。どの draft を同じ bundle にするかの判断は follow_up の bundle の unit test"
+task = 3804
+
+[[boundary]]
+id = "draft-revisit-time-opens-a-headless-planner"
+kind = "supervisorの配線"
+test = "draft_revisit::a_kept_draft_gets_a_headless_planner_at_its_revisit_time_with_the_last_decision"
+reason = "keep_draft で planner から外した draft に、revisit の時刻が来た次の pass で supervisor が前の決定を載せた headless の planner を開くことは、走る supervisor と時計と planner の起動をつないだ IT でしか確かめられない。時刻が来たかの判断は follow_up の revisit の unit test"
+task = 3804
+
+[[boundary]]
+id = "e2e-gate-runs-the-narrowed-e2e-and-reruns-failed-tests-by-name"
+kind = "プロセス"
+test = "e2e_gate::the_gate_runs_the_e2e_with_the_narrowed_env_and_reruns_its_failed_tests_by_name"
+reason = "e2e の gate が空にした環境に渡すものだけを戻して e2e を実の process で流し、落ちた test を名前で自分の TMPDIR と log で流し直し、TMPDIR を消すことは、実の子 process と directory でしか確かめられない。流し直す test と渡すものの判断は infrastructure::e2e_gate の unit test"
+task = 3804
+
+[[boundary]]
+id = "marked-finding-gets-runtime-planner-whose-proposal-plan-review-readies"
+kind = "supervisorの配線"
+test = "finding_planner::a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies"
+reason = "observer が proposal へ印を付けた finding に走る supervisor の pass が runtime の planner を 1 つ開き、その submit で finding を proposed にし plan review が ready にすることは、supervisor の配線と queue を通してしか確かめられない。改善の上限と数え方の判断は domain::finding の unit test"
+task = 3804
+
+[[boundary]]
+id = "finding-record-failure-rolls-back-the-row-change"
+kind = "SQLite"
+test = "finding_records::a_record_that_cannot_be_written_rolls_back_the_change_on_every_path"
+reason = "finding の行を書く各経路で、属性の記録（run_events）が書けなければ行の変更も一緒に戻ることは、実の SQLite file に trigger で失敗を起こしてしか確かめられない。記録から属性を組み立てる判断は domain::ledger::findings の unit test"
+task = 3804
+
+[[boundary]]
+id = "fixture-drop-past-its-limit-fails-the-test-binary-and-keeps-its-directory"
+kind = "プロセス"
+test = "fixture_cleanup::a_wrapper_past_the_drops_limit_fails_the_test_and_leaves_its_directory_whole"
+reason = "drop の上限を超えて wrapper の thread が残る fixture が子の test binary を待ちの名で失敗させ、directory を丸ごと残して所有の lock を process の終わりで解き後の sweep に渡すことは、実の子 process の終了と flock でしか確かめられない。待つ上限の判断は harness の関数の unit test"
+task = 3804
+
+[[boundary]]
+id = "fixture-directory-swept-only-after-its-owner-lock-is-freed"
+kind = "プロセス"
+test = "fixture_cleanup::an_owned_directory_is_swept_only_once_its_owner_is_gone"
+reason = "fixture の directory が owner の flock を持つ間は sweep されず、lock が解けて初めて後の fixture の sweep が取ることは、実の file lock と directory でしか確かめられない。どの形の directory を取るかの判断は harness の関数の unit test"
+task = 3804
+
+[[boundary]]
+id = "fixture-templates-made-again-after-a-cache-cleanup"
+kind = "Git"
+test = "fixture_templates::templates_emptied_by_a_cache_cleanup_are_made_again"
+reason = "cache の掃除がファイルだけ消した template（中身の無い .git を含む）を実の git の検査で見分けて作り直し、script・repo・queue の template がまた使えることは、実の git と SQLite のファイルでしか確かめられない。template の名前と保つ数の判断は harness の関数の unit test"
+task = 3804
+
+[[boundary]]
+id = "fixture-template-pruning-skips-a-locked-template"
+kind = "プロセス"
+test = "fixture_templates::making_a_template_prunes_old_versions_and_leftovers_but_not_one_being_made"
+reason = "template を作る process が古い版と残骸を消しつつ、別の process が LOCK_EX で作っている途中や LOCK_SH で使っている template は消さないことは、実の flock でしか確かめられない。どれを古い版とするかの判断は harness の関数の unit test"
+task = 3804
+
+[[boundary]]
+id = "goal-review-job-closes-an-achieved-goal"
+kind = "supervisorの配線"
+test = "goal_review::an_achieved_goal_is_closed_with_its_evidence"
+reason = "supervisor の pass が完了した goal の goal review の job を起動し、achieved の verdict を根拠つきで適用して goal を閉じることは、走る supervisor と stub の provider と queue をつないだ IT でしか確かめられない。いつ review するか・verdict の扱いは domain::goal_review の unit test"
+task = 3804
+
+[[boundary]]
+id = "timed-out-job-stops-a-command-in-another-process-group"
+kind = "プロセス"
+test = "goal_review_codex::a_timed_out_codex_goal_review_stops_a_command_in_another_process_group"
+reason = "Codex が自分の process group を作って走らせた command を、job の時間切れで Codex とその group だけでなく残さず止めることは、実の process と process group でしか確かめられない。いつ止めるかの判断は headless_job の timeout の unit test"
+task = 3804
+
+[[boundary]]
+id = "host-commands-of-user-inbox-and-planner-go-only-through-the-service"
+kind = "プロセス"
+test = "host_client::the_user_the_inbox_and_a_planner_go_through_the_service_and_never_open_the_db"
+reason = "user・inbox・planner の host の dagq の command が呼び手の principal で別の process の queue service に届き、service の無いときも DB を開かず何も書かないことは、実の CLI の process と service の socket を通してしか確かめられない。どの use case をどの principal に許すかの判断は queue_service と control の unit test"
+task = 3804
+
+[[boundary]]
+id = "watch-of-a-silent-service-ends-within-its-timeout"
+kind = "プロセス"
+test = "host_client::a_watch_of_a_service_that_never_answers_is_unreachable_within_its_timeout"
+reason = "call を受けて答えない service への watch が look ごとに残りの時間を渡され timeout の内に unreachable で終わることは、実の socket の読みの待ちを通してしか確かめられない。残りの時間の配り方の判断は watch の unit test"
+task = 3804
+
+[[boundary]]
+id = "older-schema-queue-read-through-the-service-from-a-migrated-copy"
+kind = "SQLite"
+test = "host_client::an_older_queue_is_read_through_the_service_by_the_user_and_a_planner"
+reason = "floor の内の古い schema の queue を service が memory の上で migrate した写しから読み、書く操作を schema で拒みファイルの schema を変えないことは、実の SQLite のファイルと migration を通してしか確かめられない。どの操作を古い schema で拒むかの判断は queue_service の unit test"
+task = 3804
+
+[[boundary]]
+id = "inbox-token-ends-when-reopened-and-with-its-session-process"
+kind = "プロセス"
+test = "host_client::an_inbox_s_token_ends_when_it_is_opened_again_and_with_its_session"
+reason = "inbox の token が開き直しで前のものを revoke し、その session の process が終わると切れて、拒否が inbox を開き直すよう言うことは、実の session の process の終わりと service を通してしか確かめられない。どの token をいつ切るかの判断は domain::queue_service の unit test"
+task = 3804
+
+[[boundary]]
+id = "persons-integrate-lands-through-the-service-running-git-in-its-own-process"
+kind = "プロセス"
+test = "host_control::a_persons_integrate_lands_through_the_service_as_on_the_db_and_the_service_runs_no_git"
+reason = "人の integrate が Git を自分の process で動かし、queue の操作だけを別の process の queue service への step にして、DB の上と同じ outcome と actor の event で着地し service が Git を動かさないことは、実の service の process と socket を通してしか確かめられない。どの principal にどの command を許すかの判断は control の unit test"
+task = 3804
+
+[[boundary]]
+id = "landing-steps-only-of-the-connections-peer-process"
+kind = "プロセス"
+test = "host_control::a_command_naming_another_commands_process_neither_begins_nor_ends_its_landing"
+reason = "着地の始まりと終わりを step を送る接続の peer pid の process にだけ許し、別の process から名指した step を authorization_denied として記録し slot と lease と integrator の token を残すことは、実の別の process と socket の peer の資格を通してしか確かめられない。どの pid をどの接続から拒むかの判断は control の unit test"
+task = 3804
+
+[[boundary]]
+id = "inbox-nudge-recorded-once-for-an-unwatched-inbox"
+kind = "supervisorの配線"
+test = "inbox_nudge::an_inbox_without_a_watch_is_recorded_once_and_nothing_is_typed"
+reason = "watch の無い inbox に閾値を超えて待つ ask があるとき、supervisor の pass が不在 1 回に inbox_nudged を 1 度だけ記録し画面に何も打たないことは、実の supervisor の pass と queue.db を通してしか確かめられない。いつ nudge するかの判断は supervise::host_ops::inbox_nudge::nudge_due の unit test"
+task = 3804
+
+[[boundary]]
+id = "inbox-nudge-claimed-once-across-connections"
+kind = "SQLite"
+test = "inbox_nudge::a_nudge_of_an_absence_is_claimed_once_across_supervisors"
+reason = "2 つの接続（supervisor）が同じ不在の nudge を claim したとき 1 つだけが通り、別の試行や別の不在は別の claim になることは、実の SQLite の queue.db の制約と transaction でしか確かめられない。何を同じ claim とみなすかの判断は unit test"
+task = 3804
+
+[[boundary]]
+id = "inbox-watch-pushes-a-new-ask-through-the-push-command"
+kind = "プロセス"
+test = "inbox_watch_push::the_inbox_watch_pushes_a_new_ask_once_and_only_with_a_push_that_may_fail"
+reason = "watch --role inbox が ask_opened を返すときに host の [push] の実の command を件数だけで 1 度呼び、command が失敗しても watch を止めず出力に報告することは、実の CLI の process と push の command でしか確かめられない。送る文面の判断は unit test"
+task = 3804
+
+[[boundary]]
+id = "inbox-watch-returns-every-notice-past-its-cursor"
+kind = "SQLite"
+test = "inbox_watch_wake::every_notice_past_the_cursor_comes_back_before_or_after_what_woke_it"
+reason = "watch --role inbox が cursor の後の通知を 1 頁を超えても起こした event の前後の分すべて古い順に返し cursor を進めることは、実の CLI と queue.db の event の頁送りの読みでしか確かめられない。どの event が inbox を起こすかの判断は domain::wakes_inbox の unit test"
+task = 3804
+
+[[boundary]]
+id = "inbox-watch-woken-by-supervisor-health-with-every-notice-held"
+kind = "プロセス"
+test = "inbox_watch_wake::the_supervisors_health_wakes_the_inbox_with_every_notice_held"
+reason = "走っている watch --until-attention の process が通知だけでは眠り続け、別の接続の supervisor の登録で起きて溜まった通知をすべて返して終わることは、実の子 process と queue.db の変化でしか確かめられない。登録や健康の変化を起床とみなす判断は application::watch の unit test"
+task = 3804
+
+[[boundary]]
+id = "inbox-watcher-of-a-live-watch-seen-by-status-and-doctor"
+kind = "プロセス"
+test = "inbox_watcher::status_and_doctor_show_the_watcher_alive_while_it_watches_and_absent_after_the_grace"
+reason = "背景で走る watch --role inbox の process が queue の directory の下に記録と heartbeat を書き、status と doctor がそれを生きているとして示し猶予の後は不在とすることは、実の子 process と file でしか確かめられない。heartbeat の古さの判断は application::inbox_watcher::judge の unit test"
+task = 3804
+
+[[boundary]]
+id = "installed-plugin-read-and-updated-through-the-claude-process"
+kind = "プロセス"
+test = "installed_plugin::the_installed_plugin_is_read_and_updated_through_claude"
+reason = "release の更新が与えた claude を子 process として動かし plugin list --json から版を読み、marketplace と plugin の更新を指定の directory で順に打ち最初の失敗で止まることは、実の子 process の引数と出力を通してしか確かめられない。どの段で止めるかの判断は release_update の unit test"
+task = 3804
+
+[[boundary]]
+id = "master-repository-without-origin-lands-on-master"
+kind = "Git"
+test = "landing_branch::a_master_repository_without_origin_lands_on_master"
+reason = "main も origin も無く master だけの実の repository で claim・rebase・着地・stats の履歴の読みが master に向き push を飛ばすことは、実の git の branch と rebase でしか確かめられない。どの branch を着地先にするかの判断は domain::landing_branch::resolve の unit test"
+task = 3804
+
+[[boundary]]
+id = "running-supervisor-resolves-the-landing-branch-again-and-holds-claims"
+kind = "supervisorの配線"
+test = "landing_branch::a_running_supervisor_follows_each_change_of_the_landing_branch"
+reason = "走り続ける supervisor が解決の読む物の変化で着地の branch を解き直し、解けない間は claim を止め解ければ次の pass で戻すことは、実の supervisor の pass と git の branch の変化でしか確かめられない。いつ解き直すかの判断は supervise::execution の unit test"
+task = 3804
+
+[[boundary]]
+id = "language-from-config-files-into-worker-and-review-prompts"
+kind = "supervisorの配線"
+test = "language::the_repositorys_language_is_over_the_users"
+reason = "user の config.toml と repository の dagq.toml の言語が supervisor の 1 周で worker と review の prompt に入り、doctor と status --role inbox が出どころを示すことは、実の設定ファイルと supervisor が書く prompt を通してしか確かめられない。どちらを優先するかの判断は infrastructure::language::resolve_language の unit test"
+task = 3804
+
+[[boundary]]
+id = "ledger-row-write-refused-after-another-connection-wrote-it"
+kind = "SQLite"
+test = "ledger_rows::a_write_over_a_row_another_process_wrote_since_its_read_writes_nothing"
+reason = "2 つの接続が同じ queue.db の台帳の行を読み、先に他方が書いた行の上への書き込みが拒まれ他方の行が残ることは、実の SQLite の接続と transaction でしか確かめられない。行の中身をどう作るかの判断は domain::ledger::builder の unit test"
+task = 3804
+
+[[boundary]]
+id = "ledger-pass-folds-stored-steps-past-its-cursor"
+kind = "SQLite"
+test = "ledger_steps::a_runs_steps_fold_into_its_row_which_settles_after_its_tokens_revocation"
+reason = "台帳の pass が queue.db の SessionStepStore から step の cursor の後を読んで run の行へ畳み、送り直しでは畳み直さず遅れた step で畳み直し、retention が step を消した後も畳んだ物を保つことは、実の SQLite の store と cursor を通してしか確かめられない。畳み方と settle の判断は domain::ledger::builder と application::supervise::ledger の unit test"
+task = 3804
+
+[[boundary]]
+id = "inbox-agent-execs-in-place-and-records-its-open"
+kind = "プロセス"
+test = "lifecycle_inbox::dagq_inbox_starts_the_inbox_agent_in_this_terminal_and_records_its_open"
+reason = "dagq inbox の実の binary が inbox の設定・plugin・prompt・環境で stub の claude を自分の process の代わりに exec し、その前に inbox_opened を service を通して記録することは、実の子 process と CLI を通してしか確かめられない。provider と経路の判断は application::lifecycle の inbox_route の unit test"
+task = 3804
+
+[[boundary]]
+id = "install-hands-over-through-the-queue-and-restores-on-a-failed-handoff"
+kind = "SQLite"
+test = "lifecycle_install::install_migrates_replaces_and_hands_over_and_restores_on_a_failed_handoff"
+reason = "install が実の SQLite の queue に handoff の request を書き、別の接続がそれを読んで新しい build で登録し直すのを待ち、誰も取らなければ request を取り下げることは、実の queue の登録の表を接続をまたいで読み書きしてしか確かめられない。どの supervisor に頼むか・失敗で戻すかの判断は install の unit test"
+task = 3804
+
+[[boundary]]
+id = "inbox-install-probe-runs-the-built-binary-as-the-user"
+kind = "プロセス"
+test = "lifecycle_install::the_probe_of_an_inbox_install_reads_as_the_user"
+reason = "inbox の役割と token の無い環境で起動した別の process で実の LocalBinaries が build した dagq を probe し、その queue を user として読んで token の欠けで拒まれないことは、実の子 process と環境変数を通してしか確かめられない。probe の結果の読み方は install の unit test"
+task = 3804
+
+[[boundary]]
+id = "update-ask-sent-again-under-its-identity-opens-once"
+kind = "SQLite"
+test = "lifecycle_install_asks::an_update_ask_sent_again_under_its_identity_is_the_one_it_opened"
+reason = "同じ identity で送り直した update_failed の ask が実の SQLite の queue で開いた ask と同じになり、別の identity なら新しい ask が前のものを supersede することは、実の queue の ask の表を接続をまたいで読んでしか確かめられない。いつ送り直すかの判断は supervisor_service::resend の unit test"
+task = 3804
+
+[[boundary]]
+id = "install-and-rollback-reach-the-queue-only-through-its-service"
+kind = "プロセス"
+test = "lifecycle_install_service::install_and_its_rollback_reach_the_queue_only_through_its_service"
+reason = "install と install --rollback の読みと記録が別の process で動く queue service の socket への step だけを通り、test の process が queue を開かないことは、実の service の process と socket を通してしか確かめられない。どの step を送るかの判断は install と control の unit test"
+task = 3804
+
+[[boundary]]
+id = "install-steps-go-on-across-a-restart-of-the-service"
+kind = "プロセス"
+test = "lifecycle_install_service::an_install_s_steps_go_on_across_a_restart_of_the_service"
+reason = "install が handoff を待つ間に queue service の process が止まって立ち直っても、誰も取らなかった step が次に答える service に届き失敗がそこに記録されることは、実の service の process の停止と再起動を通してしか確かめられない。どの step を送り直すかの判断は supervisor_service::across の unit test"
+task = 3804
+
+[[boundary]]
+id = "up-applies-compatible-migrations-and-refuses-breaking"
+kind = "SQLite"
+test = "lifecycle_replace::up_applies_compatible_migrations_and_refuses_breaking_ones"
+reason = "up が起こす service が実の queue の file に互換な migration だけを当て、破壊的なものが残れば user_version を変えず何も起こさずに止まることは、実の SQLite の schema と service の process を通してしか確かめられない。どの migration が互換か・floor は infrastructure::schema の unit test"
+task = 3804
+
+[[boundary]]
+id = "lifecycle-commands-reach-queue-only-through-service"
+kind = "プロセス"
+test = "lifecycle_service::up_down_and_the_service_s_start_and_stop_reach_the_queue_only_through_it"
+reason = "up・down・service start と stop が自分の process で queue を開かず、起こした別 process の queue service の socket だけを通して登録・読み・記録をし、service が答えなければ失敗することは、実の service の process と socket を通してしか確かめられない。どの step を送るか・どう認可するかは supervisor_service::control の unit test"
+task = 3804
+
+[[boundary]]
+id = "up-reads-the-trust-of-the-main-checkout-from-a-linked-worktree"
+kind = "Git"
+test = "lifecycle_up::up_from_a_linked_worktree_checks_the_trust_of_the_main_checkout"
+reason = "実の git worktree add で作った linked worktree から up を打っても Claude Code の folder trust を main checkout の root で読むことは、実の Git の common dir の解決を通してしか確かめられない。trust の有無で止める判断と案内は lifecycle の unit test"
+task = 3804
+
+[[boundary]]
+id = "up-prunes-dead-registrations-keeping-live-ones-and-their-leases"
+kind = "SQLite"
+test = "lifecycle_up::up_prunes_dead_registrations_and_keeps_live_ones_and_leases"
+reason = "up が死んだ supervisor の登録の行を消して revoke し、生きた登録とそれが持つ run の lease の行を残すことは、実の SQLite の queue の登録と lease の表を別の接続から読み直してしか確かめられない。どの pid を死んだとみなすかの判断は lifecycle の unit test"
+task = 3804
+
+[[boundary]]
+id = "supervisor-pass-records-live-alerts-from-start-to-end"
+kind = "supervisorの配線"
+test = "live_alerts::a_supervisor_records_its_baseline_and_an_idle_alert_from_start_to_end"
+reason = "supervisor の pass が起動後に今の判定の baseline を書き、receipt の無いまま止まった headless の run の idle の alert の始まりと、答えの turn が receipt を書いた後の終わりを記録することは、実の supervisor の 1 周と headless の run を通してしか確かめられない。何を alert とするかの判断は domain::live_alerts::judge の unit test"
+task = 3804
+
+[[boundary]]
+id = "repository-queue-shared-by-every-worktree"
+kind = "Git"
+test = "location::every_worktree_of_a_repository_shares_one_queue_under_the_data_home"
+reason = "実の git の main checkout と linked worktree のどこから打っても同じ common dir から data home の下の 1 つの queue に解くことは、実の git の worktree を通してしか確かめられない。path の組み立ては infrastructure::location の unit test"
+task = 3804
+
+[[boundary]]
+id = "main-checkout-resolved-from-real-git-layout"
+kind = "Git"
+test = "main_checkout::the_parent_of_a_dot_git_is_the_main_checkout_from_anywhere"
+reason = "linked worktree や subdirectory のどこからでも .git の親を main checkout と解くことは、実の git の worktree の layout を通してしか確かめられない"
+task = 3804
+
+[[boundary]]
+id = "retention-commits-in-bounded-transactions-letting-a-heartbeat-write"
+kind = "SQLite"
+test = "node_samples::a_heartbeat_writes_while_the_retention_runs"
+reason = "多くの行を消す retention が限られた数ずつ別の transaction で commit し、その間に別の接続の heartbeat が busy wait の内に書き込みの lock を取れることは、実の SQLite の lock と接続でしか確かめられない。何を消すかの判断は domain::host_metrics の unit test"
+task = 3804
+
+[[boundary]]
+id = "plan-review-job-readies-the-proposal-with-its-actions"
+kind = "supervisorの配線"
+test = "plan_review::a_passing_plan_review_readies_the_proposal_with_its_actions"
+reason = "supervisor の pass が plan review の候補を取り、job を checkout で自分の actor として起動して prompt を残し、verdict の action を 1 つの transaction で適用して proposal を ready にすることは、走る supervisor と stub の provider と queue をつないだ IT でしか確かめられない。verdict と action の判断は domain::plan_review の unit test"
+task = 3804
+
+[[boundary]]
+id = "job-end-kept-beside-the-queue-written-by-the-next-supervisor"
+kind = "復旧とadopt"
+test = "plan_review::a_job_end_not_taken_before_its_supervisor_ended_is_written_by_the_next"
+reason = "queue service が受けないまま supervisor が終わった plan review の job の終わりを queue の脇に残し、次の supervisor が最初の pass で gone の job の引き取りより先に書いて job 自身の結果で行を閉じることは、supervisor の生涯をまたぐ記録と実の service でしか確かめられない。いつ送り直すかの判断は kept_key と hold の unit test"
+task = 3804
+
+[[boundary]]
+id = "planner-question-answer-reaches-its-planner"
+kind = "supervisorの配線"
+test = "plan_review::a_planner_question_answer_goes_to_its_planner_as_a_turn_or_is_carried_by_a_new_one"
+reason = "planner_question の答えを、開いた runtime の planner には次の turn として、終わった planner の分は新しい planner の prompt で運ぶことは、走る supervisor と headless の planner の turn と queue をつないだ IT でしか確かめられない。どちらに届けるかの判断は plan_review の planner の質問の unit test"
+task = 3804
+
+[[boundary]]
+id = "plan-review-duplicate-search-finds-similar-japanese-titles"
+kind = "SQLite"
+test = "plan_review::the_search_candidates_of_a_japanese_title_include_similar_japanese_tasks"
+reason = "plan review の重複の候補を、日本語の題から似た日本語の task へ実の SQLite の全文検索の索引と tokenizer で引くことは、実の SQLite file でしか確かめられない。候補をどう prompt に載せるかの判断は duplicate_candidates の unit test"
+task = 3804
+
+[[boundary]]
+id = "plan-review-expected-files-from-the-runs-branch"
+kind = "Git"
+test = "plan_review_expected_files::an_in_progress_tasks_expected_files_are_what_its_run_changed"
+reason = "進行中の task が触ると予想するファイルを、宣言した path でなく run の branch の実の Git の差分から取り hotspot に載せることは、実の git repository でしか確かめられない。どれを予想に入れるかの判断は plan_expected_files の unit test"
+task = 3804
+
+[[boundary]]
+id = "headless-job-start-past-argument-limit-fails-alone"
+kind = "プロセス"
+test = "plan_review_launch::a_job_past_the_argument_limit_fails_alone_and_holds_no_provider"
+reason = "引数が system の上限を超えた job の起動が実の exec で E2BIG になり、その job だけが失敗して provider を hold せず次の job が同じ provider で始まることは、実の process の起動でしか確かめられない。起動の失敗をどう分類するかの判断は provider_switch の unit test"
+task = 3804
+
+[[boundary]]
+id = "runtime-planner-runs-headless-in-the-background-and-ends-on-exit"
+kind = "supervisorの配線"
+test = "planner_headless::a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_the_exit_request"
+reason = "supervisor が revise のために開く runtime の planner が workspace なしの background の wrapper で prompt を最初の turn として走らせ、turn を queue に記録し、exit の request で終わって閉じられることは、走る supervisor と実の wrapper の process を通してしか確かめられない。いつ終えるか・誰に答えを運ぶかの判断は planning の unit test"
+task = 3804
+
+[[boundary]]
+id = "killed-planner-wrappers-orphan-turn-stopped-as-the-planner-closes"
+kind = "プロセス"
+test = "planner_headless::the_turn_a_killed_background_planner_wrapper_left_is_stopped_as_the_planner_closes"
+reason = "background の planner の wrapper が turn の途中で殺されたとき、自分の group に残った実の turn の process を turn_started の pid と開始時刻で見つけ、planner を閉じるときに止めることは、実の process の kill と process group でしか確かめられない。planner を閉じるかの判断は domain::planner の unit test"
+task = 3804
+
+[[boundary]]
+id = "revise-sent-closes-carried-answers-in-one-transaction"
+kind = "SQLite"
+test = "planner_slots::a_revise_sent_closes_the_answers_it_carries_in_its_transaction_or_records_nothing"
+reason = "revise を送った記録（plan_revise_sent）とそれが運ぶ答えの ask の close（ask_delivered）が 1 つの transaction で commit し、途中の失敗で何も残らず revise が取り戻せることは、実の SQLite file の transaction でしか確かめられない。どの答えを運ぶかの判断は planning の unit test"
+task = 3804
+
+[[boundary]]
+id = "podman-machine-host-lock-creates-and-starts-it-once"
+kind = "プロセス"
+test = "podman_machine::concurrent_users_create_and_start_the_machine_once_and_the_last_one_stops_it"
+reason = "同時に machine を要る複数の利用者が host 全体の lock の下で machine の init と start を 1 回だけ行い、最後に去る利用者が止めることは、実の thread と podman の process と lock のファイルでしか確かめられない。止めるかの判断は domain::podman_machine::stops の unit test"
+task = 3804
+
+[[boundary]]
+id = "real-dagq-machine-starts-holds-a-volume-and-stops"
+kind = "プロセス"
+test = "podman_machine::the_real_dagq_machine_starts_holds_a_volume_and_stops"
+reason = "実の podman と host の dagq machine が無ければ作られ、起き、build output の volume を持ち、去れば止まることは、実の machine でしか確かめられない。止めるかの判断は domain::podman_machine の unit test"
+task = 3804
+
+[[boundary]]
+id = "wrapper-starts-a-gone-claude-version-from-path"
+kind = "プロセス"
+test = "provider_executables::a_runner_whose_claude_version_is_gone_starts_its_next_turn_with_the_claude_on_path"
+reason = "update が消した版の Claude Code を渡された runner の実の wrapper の process が次の turn を PATH の claude で起こし、そう記録して run が着地することは、実の wrapper の process と file system の link でしか確かめられない。見つけ直す判断は infrastructure::adapters::executable の unit test"
+task = 3804
+
+[[boundary]]
+id = "install-grants-the-new-build-the-migration"
+kind = "プロセス"
+test = "queue_binary::install_lets_its_new_build_migrate_and_names_it_the_queues_binary"
+reason = "install が置く新しい build の service に実の process としてその起動だけの許しで queue を migrate させ、置き換えた path を queue の binary に名指すことは、実の binary と service の process でしか確かめられない。どの binary が migrate してよいかの判断は infrastructure::queue_binary の judge の unit test"
+task = 3804
+
+[[boundary]]
+id = "breaking-migration-checks-live-supervisors-in-its-transaction"
+kind = "SQLite"
+test = "queue_binary::a_replacement_s_service_applies_a_breaking_migration_only_on_an_unused_queue"
+reason = "破壊的な migration を当てる service が、その transaction の中で別の接続から登録した生きた supervisor を見つけて写しも migration もせずに止めることは、実の SQLite の別の接続と transaction でしか確かめられない。使われているかの判断は SqliteQueue::refuse_breaking_in_use の unit test"
+task = 3804
+
+[[boundary]]
+id = "broker-passes-a-runs-own-requests-to-the-service"
+kind = "プロセス"
+test = "queue_broker::the_broker_passes_a_run_s_own_requests_to_the_service_and_refuses_the_rest"
+reason = "実の broker の process が 127.0.0.1 の port で受けた request を run 自身の token のときだけ service の unix socket に渡して答えをそのまま返し、他を拒んで記録することは、実の process と socket と port でしか確かめられない。token と宛先の判断は domain::queue_broker::judge_run_token の unit test"
+task = 3804
+
+[[boundary]]
+id = "up-replaces-another-builds-broker-and-down-stops-it"
+kind = "プロセス"
+test = "queue_broker::up_replaces_the_broker_of_another_build_and_down_stops_it"
+reason = "読むコマンドが broker を起こさず、up が前の binary の実の broker の process を自分の binary のものに置き換え、down が supervisor の居なくなった後に止めることは、実の CLI と broker の process でしか確かめられない。置き換えるかの判断は domain::queue_broker の unit test"
+task = 3804
+
+[[boundary]]
+id = "supervisor-restarts-the-broker-and-tells-the-inbox-when-it-cannot"
+kind = "supervisorの配線"
+test = "queue_broker::the_supervisor_starts_the_broker_again_and_tells_the_inbox_when_it_cannot"
+reason = "supervisor の pass が止まった broker を起こし直し、起こせなければ inbox への attention を 1 回出して container の worker を待たせ、戻れば attention を閉じることは、supervisor の broker の見張りと claim をつないだ配線でしか確かめられない。attention の判断は domain::queue_broker::attention_stands の unit test"
+task = 3804
+
+[[boundary]]
+id = "broker-start-revokes-tokens-no-verification-runs-with"
+kind = "復旧とadopt"
+test = "queue_broker::the_broker_revokes_as_it_starts_the_tokens_no_verification_runs_with"
+reason = "途中で殺された検証が broker の directory に残した token を broker の起動が queue の run の状態と照らして取り消し記録し、integrating の run の token を残すことは、実の broker の process と queue と port でしか確かめられない。取り消すかの判断は domain::queue_broker::judge_verification_token の unit test"
+task = 3804
+
+[[boundary]]
+id = "broker-swaps-a-runs-token-for-the-claude-credential-and-streams"
+kind = "プロセス"
+test = "queue_broker::the_broker_swaps_a_run_s_token_for_the_chosen_claude_credential_and_streams_the_answer"
+reason = "Claude API への request を broker が run の生きた token のときだけ host.toml が選んだ資格情報に替えて渡し、API の答えを stream のまま返すことは、実の broker の process と HTTP の接続でしか確かめられない。header の判断は domain::queue_broker::claude_headers の unit test"
+task = 3804
+
+[[boundary]]
+id = "keychain-item-read-through-the-security-command"
+kind = "プロセス"
+test = "queue_broker::the_keychain_s_command_gets_the_item_by_its_arguments_and_gives_the_value_by_its_output"
+reason = "broker が [claude_credential] の item を macOS の security のコマンドに service と account を引数で渡し値をその出力だけから読むことは、実の子 process でしか確かめられない。"
+task = 3804
+
+[[boundary]]
+id = "dependency-edges-serialized-across-connections"
+kind = "SQLite"
+test = "queue_dependencies::concurrent_opposite_edges_cannot_create_a_cycle"
+reason = "別の接続から同じ queue file に逆向きの依存を同時に足しても片方だけが通り循環ができないことは、実の SQLite の file と transaction の直列化でしか確かめられない。循環の判断は domain::task の check_acyclic の unit test"
+task = 3804
+
+[[boundary]]
+id = "notes-stored-on-each-target-and-paged-by-cursor"
+kind = "SQLite"
+test = "queue_goals::notes_attach_to_tasks_runs_and_goals_and_page_by_cursor"
+reason = "note を task・run・goal のどれにも付けて保存し、cursor で頁を送って読むことは、実の SQLite の行と問い合わせでしか確かめられない。note の検査の判断は domain の unit test"
+task = 3804
+
+[[boundary]]
+id = "queue-kpi-breach-reads-use-the-kind-index"
+kind = "SQLite"
+test = "queue_kpi_breach_read_plan::the_queue_breach_reads_go_by_kind_and_do_not_grow_with_other_events"
+reason = "breach と attention の読みが events_by_kind の index を通り、他の種類の event を足しても実の SQLite の VM の step が増えないことは、実の SQLite の query plan と計測でしか確かめられない。breach の始まりと終わりの判断は domain::kpi の unit test"
+task = 3804
+
+[[boundary]]
+id = "queue-migration-rebuilds-a-real-older-queue-file"
+kind = "SQLite"
+test = "queue_migration::migration_to_v5_rebuilds_runs_moves_the_lease_and_keeps_foreign_keys"
+reason = "古い版の schema で作った実の queue の file に migration を当て、表の作り直し・行の移し替え・外部キーと index を保ったまま新しい schema で開けることは、実の SQLite の file と transaction でしか確かめられない。互換か破壊的かと floor の判断は infrastructure::schema の unit test"
+task = 3804
+
+[[boundary]]
+id = "proposal-plan-review-moves-tasks-in-the-store"
+kind = "SQLite"
+test = "queue_proposals::submitted_tasks_wait_for_plan_review_which_readies_or_sends_them_back"
+reason = "submit した task が plan review を待ち、approve で ready に、send back で draft に戻ることを proposal と task と event の行で 1 つの transaction に書くことは、実の SQLite の store でしか確かめられない。proposal の状態の移り方の判断は domain::proposal の unit test"
+task = 3804
+
+[[boundary]]
+id = "concurrent-claims-take-each-ready-task-once"
+kind = "SQLite"
+test = "queue_runs::concurrent_connections_claim_each_ready_task_once"
+reason = "複数の接続が同じ queue file から同時に claim しても各 ready の task を 1 回だけ取ることは、実の SQLite の file と書き込みの lock でしか確かめられない。claim してよいかの判断は domain::task の claim の unit test"
+task = 3804
+
+[[boundary]]
+id = "queue-open-judges-a-real-file-without-rewriting-it"
+kind = "SQLite"
+test = "queue_schema::foreign_and_future_databases_are_rejected_without_rewriting_them"
+reason = "他の DB・未来の版・floor の中の新しい版・古い版の実の file を開くか初期化するとき、file を書き換えずに受けるか拒むことは、実の SQLite の file と接続でしか確かめられない。版と floor の比べ方の判断は infrastructure::schema の unit test"
+task = 3804
+
+[[boundary]]
+id = "search-index-follows-edits-in-sqlite"
+kind = "SQLite"
+test = "queue_search::search_finds_every_kind_in_every_status_and_follows_edits"
+reason = "search の全文の索引が全ての種類と状態の行を見つけ、編集の後の値に追いつくことは、実の SQLite の FTS と trigger でしか確かめられない。検索語の解釈の判断は domain::search の unit test"
+task = 3804
+
+[[boundary]]
+id = "queue-service-answers-principals-over-its-socket"
+kind = "プロセス"
+test = "queue_service::the_service_answers_its_principals_and_refuses_the_rest_on_its_side"
+reason = "実の queue service の process が unix socket で token の principal ごとに答え、許されないものを service の側で拒んで記録することは、実の process と socket でしか確かめられない。どの principal に何を許すかの判断は domain::authorization の unit test"
+task = 3804
+
+[[boundary]]
+id = "supervisor-holds-claims-while-the-queue-service-is-out"
+kind = "supervisorの配線"
+test = "queue_service::the_supervisor_records_the_outage_outside_the_queue_and_holds_its_claims"
+reason = "service に届かない間 supervisor の loop が claim も queue への書き込みもせず、障害を queue の外の file に記録して [push] で 1 回だけ送り、service が戻ると queue_service_down と claim に移ることは、実の supervisor の周回と service の起動をつないだ配線でしか確かめられない。障害の記録と再起動の上限の判断は host_ops::queue_service の unit test"
+task = 3804
+
+[[boundary]]
+id = "client-mode-dagq-prints-through-the-service-as-on-the-db"
+kind = "プロセス"
+test = "queue_service_client::a_worker_s_dagq_runs_its_commands_through_the_service_as_the_worker"
+reason = "client mode の実の dagq の process が queue を開かず service の socket を通して show・note・ask・読みを流し、DB の経路の command line と同じに出して worker として記録することは、実の CLI の process と service でしか確かめられない。役割に何を許すかの判断は domain::authorization の unit test"
+task = 3804
+
+[[boundary]]
+id = "telemetry-token-reports-through-the-service-to-its-target"
+kind = "プロセス"
+test = "queue_service_telemetry::a_telemetry_token_records_its_targets_steps_and_samples_and_reaches_nothing_else"
+reason = "telemetry の token を持つ報告が実の service の request line を通って自分の target の step と sample だけを重複なく記録し、他の use case に届かないことは、実の service の process と socket でしか確かめられない。target と token の組を受けるかの判断は domain::queue_service の unit test"
+task = 3804
+
+[[boundary]]
+id = "queue-service-issues-tokens-at-the-parents-request"
+kind = "プロセス"
+test = "queue_service_tokens::tokens_are_issued_by_the_service_at_the_request_of_their_parent"
+reason = "token を呼び手ではなく実の service の process が socket の求めに応じて file に書き、表に無い親や保たれないものを拒んで記録し token を残さないことは、実の service の process と socket でしか確かめられない。誰がどの token を求めてよいかの判断は domain::queue_service と domain::authorization の unit test"
+task = 3804
+
+[[boundary]]
+id = "queue-service-token-issue-races-once-in-its-transaction"
+kind = "SQLite"
+test = "queue_service_tokens::of_two_callers_asking_at_once_for_a_jobs_executor_token_one_is_issued"
+reason = "同じ job の executor の token を 2 つの呼び手が同時に求めても、発行の transaction の中で target の持つ token を読み 1 つだけ発行し他を拒むことは、実の SQLite の transaction と同時の接続でしか確かめられない。発行を拒むかの判断は domain::queue_service の unit test"
+task = 3804
+
+[[boundary]]
+id = "task-change-rechecks-its-authorized-status-in-the-store"
+kind = "SQLite"
+test = "queue_tasks::changes_authorized_on_another_status_change_nothing"
+reason = "ready で認可された cancel・set-goal・dependency などの変更を、store が書き込みの transaction の中で今の状態を読み直して拒み、task・依存・event を元のままにすることは、実の SQLite の transaction でしか確かめられない。認可の状態と今の状態を比べる判断は domain::task の unit test"
+task = 3804
+
+[[boundary]]
+id = "recurring-key-due-gets-one-draft-and-a-planner"
+kind = "supervisorの配線"
+test = "recurring_drafts::a_due_recurring_key_gets_one_draft_and_a_planner"
+reason = "dagq.toml の [[recurring]] の期限の来た key に supervisor の pass が draft を 1 つ登録して headless の planner を開き、次の pass は間隔の前に登録しないことは、走る supervisor と設定と queue をつないだ IT でしか確かめられない。期限と保留の判断は domain::recurring の unit test"
+task = 3804
+
+[[boundary]]
+id = "related-ranks-known-duplicates-through-the-search-index"
+kind = "SQLite"
+test = "related::at_least_half_of_the_known_duplicates_are_in_each_others_top_five"
+reason = "実の queue.db の全文検索の索引が、この repository の形の task の中で既知の重複を互いの上位 5 件に半分以上入れることは、実の SQLite の FTS の索引と順位でしか確かめられない。候補の説明と status の絞り込みの判断は application::queue_reads::planning::related の unit test"
+task = 3804
+
+[[boundary]]
+id = "replan-request-gets-one-planner-with-its-material"
+kind = "supervisorの配線"
+test = "replan_planning::a_parked_operations_request_waits_for_a_planner_slot_and_gets_one_planner_with_its_material"
+reason = "park した replan の操作の planning request を supervisor の pass が planner の slot の空きまで待たせ、操作の材料を載せた runtime の planner を 1 つだけ開くことは、走る supervisor と queue と planner の起動をつないだ IT でしか確かめられない。いつ開くか・何を材料に載せるかの判断は replan_plan と planner_wait_start の unit test"
+task = 3804
+
+[[boundary]]
+id = "replan-approved-replacement-applied-by-the-runtime"
+kind = "supervisorの配線"
+test = "replan_planning::an_approved_replacement_is_applied_at_once_and_every_successor_waits_for_its_children"
+reason = "plan review が承認した置き換えを supervisor の pass がすぐ apply し、task と park した run を replaced で終え、child を ready にして後続を child に待たせることは、走る supervisor と plan review と queue をつないだ IT でしか確かめられない。apply できるか・後続がどの child を待つかの判断は replan_apply の unit test"
+task = 3804
+
+[[boundary]]
+id = "replan-apply-rolled-back-whole-on-a-failed-write"
+kind = "SQLite"
+test = "replan_planning::an_apply_that_fails_midway_writes_nothing_and_is_applied_once_the_failure_is_gone"
+reason = "置き換えの apply の最後の書き込みを trigger で失敗させ、task・run・child・依存・mapping のどれも書かれず blocked になり、失敗が消えた次の pass で一度だけ apply されることは、実の SQLite file の transaction に失敗を注いでしか確かめられない。apply の中身の判断は replan_apply の unit test"
+task = 3804
+
+[[boundary]]
+id = "request-recorded-gets-runtime-planner-whose-submission-proposes-it"
+kind = "supervisorの配線"
+test = "request_planner::a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it"
+reason = "inbox が CLI で記録した request に、走る supervisor の pass が runtime の planner を 1 つ開いて words を planner の directory に渡し、その submit で request を proposed にすることは、supervisor の配線と CLI と queue を通してしか確かめられない。上限・順番・答えの行き先の判断は plan_request の unit test"
+task = 3804
+
+[[boundary]]
+id = "review-follow-ups-recorded-once-as-drafts"
+kind = "supervisorの配線"
+test = "review_follow_ups::a_pass_with_follow_ups_lands_and_records_each_passage_once_as_a_draft"
+reason = "supervisor が全体の review と agent の job の follow_ups を run を差し戻さずに run の task の docs_drift の draft として queue に記録し、記録前に止まった supervisor の判定のやり直しで増やさないことは、supervisor の review の配線を通してしか確かめられない。どの記述を新しい draft にするかは domain::follow_up の unit test"
+task = 3804
+
+[[boundary]]
+id = "builtin-secrets-reads-gits-diff-regardless-of-repository-config"
+kind = "Git"
+test = "review_programs::builtin_secrets_reads_gits_diff_whatever_the_repository_configures"
+reason = "builtin:secrets の process が repository の rename・prefix・binary 属性・quote の設定によらず範囲の Git の差分を同じに読み、読めない範囲を通さないことは、実の git の設定と属性の下でしか確かめられない。各行が鍵らしいかの判断は domain::review_programs::secrets の unit test"
+task = 3804
+
+[[boundary]]
+id = "review-subagents-read-from-the-landing-branch-commit"
+kind = "Git"
+test = "review_subagents::the_worker_cannot_change_or_drop_its_required_review"
+reason = "review の agent の表と定義を run の branch でも main checkout の未 commit の編集でもなく landing branch の commit から読み、rename 検出なしの Git の差分で選ぶことは、実の git の commit と worktree でしか確かめられない。commit の file がどの agent を選ぶかの判断は application::review の unit test"
+task = 3804
+
+[[boundary]]
+id = "real-claude-review-jobs-keep-their-limits"
+kind = "プロセス"
+test = "review_subagents::the_real_claude_review_jobs_keep_their_limits"
+reason = "dagq が組む review と agent の job の argv が実の Claude Code で worktree の設定と agent を読まず、permissions.deny と宣言した道具だけを守ることは、実の Claude Code の process を起動してしか確かめられない。argv の組み立ては infrastructure::claude の unit test"
+task = 3804
+
+[[boundary]]
+id = "container-worker-turn-runs-hardened-and-leaves-bundle-and-state"
+kind = "プロセス"
+test = "run_container::a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_state"
+reason = "worker を container に置いた run の turn を、実の wrapper の process が podman で hardened に起こし、main の bundle を取り込ませてから agent を流し、turn の終わりに run branch の bundle と state を残して container を消すことは、実の wrapper と podman の process と git の bundle を通してしか確かめられない。container の引数と置き場の判断は domain::run_container の unit test"
+task = 3804
+
+[[boundary]]
+id = "container-sccache-server-started-through-the-launchers-gate"
+kind = "プロセス"
+test = "run_container::the_container_s_sccache_server_is_started_before_the_agent_with_its_cache_in_the_worker_cache"
+reason = "container の中の launcher が残す request に supervisor が podman exec で sccache の server と guard を agent の前に作り、gate のファイルで launcher に渡し、agent が guard を通して compile することは、実の wrapper と launcher の process とファイルでしか確かめられない。server を起こすかと gate の判定は domain::sccache の unit test"
+task = 3804
+
+[[boundary]]
+id = "run-stop-and-end-remove-its-container-and-build-output"
+kind = "プロセス"
+test = "run_container::a_stopped_or_ended_run_leaves_no_container_and_no_build_output"
+reason = "run の session や process の止めと machine の中の run の終わりが、実の podman の呼び出しで run の container・relay・socket・build output を消し、container の無い run には podman を呼ばないことは、実の stop の process と podman でしか確かめられない。何を消すかの判断は domain::podman_machine と domain::run_container の unit test"
+task = 3804
+
+[[boundary]]
+id = "container-task-claimed-into-a-clone-and-landed-by-the-supervisor"
+kind = "supervisorの配線"
+test = "run_container::a_task_set_to_the_container_lands_through_the_supervisor_and_leaves_no_container"
+reason = "worker を container に置いた task を supervisor が clone に claim し、container の turn が残した bundle と state から receipt を確かめ、review を通して着地させ、止めの後に container が残らないことは、supervisor の claim と turn と integrate をつないだ配線でしか確かめられない。turn の置き場の判断は domain::run_container::turn_place の unit test"
+task = 3804
+
+[[boundary]]
+id = "container-turn-runs-hardened-in-the-real-machine"
+kind = "プロセス"
+test = "run_container::a_turn_s_container_runs_hardened_in_the_real_machine"
+reason = "turn の container の引数が実の podman と dagq machine で非 root の user として mount した directory だけを書き network を持たずに動くことは、実の machine でしか確かめられない。引数を組む判断は domain::run_container::worker_run_args の unit test"
+task = 3804
+
+[[boundary]]
+id = "container-claim-waits-for-the-machines-memory"
+kind = "supervisorの配線"
+test = "run_container::a_claim_waits_while_the_machine_s_memory_is_short_and_goes_on_once_it_fits"
+reason = "worker を container に置いた task を machine の memory が足りない間 claim せず理由を記録し、足りれば claim して container で流し着地させることは、supervisor の claim と container の turn をつないだ配線でしか確かめられない。待つかの判断は domain::machine_memory::claim_wait の unit test"
+task = 3804
+
+[[boundary]]
+id = "next-turn-waits-for-the-machines-memory-outside-its-time"
+kind = "プロセス"
+test = "run_container::a_running_run_s_next_turn_waits_for_the_machine_s_memory_outside_its_time"
+reason = "動いている run の次の turn を実の wrapper の process が container を起こす前に machine の memory を待ち、待ちを run の記録と status に残し turn の時間に数えないことは、実の wrapper の process と queue の記録でしか確かめられない。待つかと順の判断は domain::machine_memory の unit test"
+task = 3804
+
+[[boundary]]
+id = "run-resource-windows-and-attachments-kept-in-the-queue-db"
+kind = "SQLite"
+test = "run_resources::the_windows_are_kept_in_order_and_an_attachment_is_open_until_its_last"
+reason = "run の資源の window を記録した順に値のまま queue.db に残し、最後の window まで attachment を開いておくことは、実の SQLite のファイルでしか確かめられない。fold の判断は domain::environment の unit test"
+task = 3804
+
+[[boundary]]
+id = "supervisor-pass-measures-slot-runs-by-their-host-processes"
+kind = "プロセス"
+test = "run_resources::a_pass_measures_the_runs_of_the_slots_and_closes_those_no_one_measures"
+reason = "supervisor の資源の pass が slot の run を登録した process でこの host の上で測り、slot を出た run と生きた lease の無い attachment を最後の window で閉じることは、実の process と queue でしか確かめられない。fold の判断は domain::environment と application::supervise::ledger の unit test"
+task = 3804
+
+[[boundary]]
+id = "run-session-span-reopened-in-sql-with-its-events"
+kind = "SQLite"
+test = "run_session_spans::a_withdrawn_revise_reopens_the_attempt_of_the_last_request_standing"
+reason = "run の session の span が開く event と同じ書き込みで queue.db に書かれ、取り下げた revise が最後に残った依頼の attempt の span を開き直すことは、実の SQLite の書き込みでしか確かめられない。どの attempt を開くかの判断は domain::sessions::revise_attempt の unit test"
+task = 3804
+
+[[boundary]]
+id = "session-step-store-one-row-per-seq-with-a-cursor"
+kind = "SQLite"
+test = "session_steps::a_session_keeps_one_row_per_seq_with_its_gaps_and_a_cursor"
+reason = "SessionStepStore が (session_id, seq) ごとに 1 行を保ち、送り直しは行を増やさず、来た順の id の cursor が step を読むことは、実の queue.db の制約と索引でしか確かめられない。欠けの計算と step の検査の判断は domain::session_step の unit test"
+task = 3804
+
+[[boundary]]
+id = "run-wrapper-reaches-its-run-only-through-service"
+kind = "プロセス"
+test = "session_wrapper_service::a_runs_wrapper_reaches_its_run_only_through_the_service"
+reason = "dagq session の実の process が queue の無い path を渡されても service の socket だけで run を読み始まりを待ち、持たない lease での登録を拒まれ、service が消えればすぐ終わることは、実の wrapper の process と service を通してしか確かめられない。wrapper の範囲の判断は domain::authorization の unit test"
+task = 3804
+
+[[boundary]]
+id = "setup-review-applies-generated-settings-only-when-approved"
+kind = "Git"
+test = "setup_review::the_generated_settings_reach_the_working_tree_only_when_approved"
+reason = "setup-review が実の git の一時の checkout で agent の生成した設定を作り、承認のときだけ main checkout の working tree に書き、commit・queue を変えず一時の checkout を消すことは、実の git の checkout と file でしか確かめられない。書いてよい path と差分の判断は domain::setup_review の unit test"
+task = 3804
+
+[[boundary]]
+id = "setup-review-interrupt-stops-the-job-and-removes-the-place"
+kind = "プロセス"
+test = "setup_review::an_interrupt_stops_the_job_and_removes_the_place"
+reason = "実の dagq setup-review の process に SIGINT を送ると生成の job を止め、何も書かず一時の checkout を消すことは、実の process と signal でしか確かめられない。割り込みの後に何を消すかの判断は持たない"
+task = 3804
+
+[[boundary]]
+id = "headless-stub-turn-group-dies-with-its-test-process"
+kind = "プロセス"
+test = "shell_leftovers::a_waiting_headless_turn_and_its_child_die_with_their_test_process"
+reason = "drop を経ずに終わった test process を親とする headless の stub の turn が、loop と子を含む process group ごと終わり directory と親は残ることは、実の子 process と process group と親の死でしか確かめられない。待つ間隔の判断は harness の関数の unit test"
+task = 3804
+
+[[boundary]]
+id = "queue-service-refuses-stopped-reads-before-reading"
+kind = "プロセス"
+test = "stopped_reads::the_service_refuses_each_stopped_read_it_is_sent"
+reason = "queue service の process が unix socket で直接送られた止めた読みと command（stats_inputs・report_inputs も）を読む前に拒むことは、実の service の process と socket でしか確かめられない。どの読みを止めるかと文面の判断は unit test"
+task = 3804
+
+[[boundary]]
+id = "stub-templates-share-a-warmed-inode-across-concurrent-processes"
+kind = "プロセス"
+test = "stub_templates::concurrent_processes_share_a_warmed_inode_but_keep_paths_and_values_private"
+reason = "並んで走る複数の test process が同じ template を競って公開し、温めた inode を共有しつつ各自の path と値を保つことは、実の子 process と file system の link でしか確かめられない。template の名前の判断は harness の関数の unit test"
+task = 3804
+
+[[boundary]]
+id = "supervisor-operations-reach-queue-only-through-service"
+kind = "プロセス"
+test = "supervisor_service::the_supervisors_operations_reach_the_queue_only_through_the_service"
+reason = "supervisor の登録・claim・lease の heartbeat・run の遷移と event・読み・worker の token の発行と失効が自分の process で queue を開かず別 process の queue service の socket だけを通り、service が止まれば届かないとして失敗することは、実の service の process と socket を通してしか確かめられない。どの操作をどの principal に許すかは domain::authorization の unit test"
+task = 3804
+
+[[boundary]]
+id = "supervisor-on-the-socket-reviews-and-lands-a-run"
+kind = "supervisorの配線"
+test = "supervisor_service::a_supervisor_on_the_socket_reviews_and_lands_a_run_without_opening_the_queue"
+reason = "queue を開けない process の supervisor の loop が service の socket だけで claim・検証・review の job・integrator としての着地を回し、記録が同じ actor で残ることは、実の supervisor の loop と service を通してしか確かめられない。各段の判断はそれぞれの application::supervise の unit test"
+task = 3804
+
+[[boundary]]
+id = "kept-records-sent-once-by-the-next-supervisor"
+kind = "復旧とadopt"
+test = "supervisor_service::records_not_taken_past_their_callers_are_kept_and_sent_by_the_next_supervisor"
+reason = "終わった supervisor が service に取られなかった記録を queue の横に置き、別の pid の次の supervisor が service の戻った後に答えの失われたものも二重にせず 1 回ずつ記録させることは、実の service と 2 つの supervisor の process をまたいでしか確かめられない。どの記録を保持するかは supervisor_service::resend の unit test"
+task = 3804
+
+[[boundary]]
+id = "unanswered-claim-and-transition-rebuilt-from-the-queue"
+kind = "supervisorの配線"
+test = "supervisor_service::a_claim_and_a_transition_done_unanswered_are_found_again_once_the_service_answers"
+reason = "service が行ったが答えの失われた claim と session の終わりを、supervisor の次の pass が二度送らず queue から slot を組み直して run を続けることは、実の supervisor の loop と service の答えの喪失を通してしか確かめられない。組み直すか手放すかの判断は supervise::execution::reconcile の unit test"
+task = 3804
+
+[[boundary]]
+id = "event-taken-once-per-record-key"
+kind = "SQLite"
+test = "supervisor_service::an_event_is_taken_once_per_record_however_late_and_two_alike_are_two"
+reason = "送り直した結果の event を、同じ種類の新しい event が 1500 件積もった後でも record の key で 1 つにし、同じ秒の同じ中身の別 record は 2 つにすることは、実の SQLite の index と行を通してしか確かめられない。どの記録に key を付けて送り直すかは supervisor_service::resend の unit test"
+task = 3804
+
+[[boundary]]
+id = "landing-begins-with-its-integrator-token-in-one-transaction"
+kind = "SQLite"
+test = "supervisor_service::a_landings_token_writes_only_once_its_landing_has_begun"
+reason = "着地の始まりと integrator の token の発行が 1 つの transaction で、発行できなければ run と lease が元のままで token も残らず、commit しなかった着地の token は run に書けないことは、実の SQLite の transaction を通してしか確かめられない。token の範囲の判断は domain::authorization の unit test"
+task = 3804
+
+[[boundary]]
+id = "earliest-event-time-read-by-sqlite"
+kind = "SQLite"
+test = "supervisor_service_events::the_earliest_event_is_the_least_time_served_without_reading_every_event"
+reason = "最も早い event を id ではなく時刻として読める created_at の最小として、全ての event を読まずに SQLite が 1 つの列から求め service が supervisor に答えることは、実の SQLite の query を通してしか確かめられない"
+task = 3804
+
+[[boundary]]
+id = "service-request-limit-crossed-in-parts"
+kind = "プロセス"
+test = "supervisor_service_measures::a_file_past_the_requests_limit_is_imported_in_parts_and_one_stopped_adds_the_rest"
+reason = "request の上限を超える host の負荷の file を実の service の socket に上限の中の部分に分けて送り、途中で止まった取り込みの残りを次が重ねずに足すことは、実の service の process と上限を通してしか確かめられない。どこで分けるかは supervisor_service::large の unit test"
+task = 3804
+
+[[boundary]]
+id = "registered-cmux-argv-runs-no-cmux"
+kind = "プロセス"
+test = "supervisor_without_cmux::a_supervise_argv_with_a_cmux_starts_and_finishes_its_pass_without_running_it"
+reason = "以前の binary が登録した --cmux 付きの supervise の argv を新しい実の binary で起こし、PATH の先頭の記録する cmux も渡された cmux も起こさずに pass を終えることは、実の子 process と PATH を通してしか確かめられない。flag を受けて help に出さないことは main.rs の unit test"
+task = 3804
+
+[[boundary]]
+id = "replan-restore-held-by-one-supervisor-loser-writes-nothing"
+kind = "SQLite"
+test = "task_replanning::two_supervisors_restore_a_parked_run_one_at_a_time_and_a_loser_writes_nothing"
+reason = "park した run の作業の restore を始めた supervisor が開始から記録まで持ち、2 つ目や lease の古くなった持ち主の遅い結果を queue の transaction が拒んで何も書かせないことは、実の SQLite file の transaction と lease でしか確かめられない。どの結果で操作をどこへ進めるかの判断は task_replan の unit test"
+task = 3804
+
+[[boundary]]
+id = "host-telemetry-delivery-passes-the-conformance-suite"
+kind = "プロセス"
+test = "telemetry_conformance::the_hosts_delivery_passes_the_conformance_suite_of_every_delivery"
+reason = "host の届け口（queue service の unix socket の telemetry_report）が step を (session_id, seq) ごとに 1 度だけ保ち、欠けを残し、送り直しを 1 度だけ保ち、読まない版を記録しないことは、実の service の process と socket を通してしか確かめられない。report の検査の判断は domain::telemetry::check の unit test"
+task = 3804
+
+[[boundary]]
+id = "queue-service-refuses-revoked-telemetry-tokens"
+kind = "プロセス"
+test = "telemetry_tokens::a_runs_token_is_refused_after_a_resume_an_adoption_a_lost_lease_and_the_runs_end"
+reason = "claim・resume・adopt・lease の喪失・run の終わりで token の発行と取り消しが進み、queue service の process が取り消した token をその都度拒むことは、実の service の process と token のファイルでしか確かめられない。いつ取り消すかの判断は domain::telemetry::run_token_due の unit test"
+task = 3804
+
+[[boundary]]
+id = "landing-verification-runs-in-its-own-hardened-container"
+kind = "プロセス"
+test = "verification_container::a_verification_set_to_the_container_runs_its_commands_there_and_leaves_nothing"
+reason = "着地の検証のコマンドを podman で検証ごとの hardened な container に起こし、検証の directory と材料と socket だけを mount して token を proxy にだけ渡し、終わりに何も残さないことは、実の integrate と podman の process でしか確かめられない。引数と環境の判断は domain::run_container::verification_run_args と verification_env の unit test"
+task = 3804
+
+[[boundary]]
+id = "verification-clone-made-where-nothing-is-runs-no-tracked-hook"
+kind = "Git"
+test = "verification_container::a_verification_s_directory_is_made_only_where_nothing_is_and_runs_no_tracked_hook"
+reason = "検証の directory を何も無い所にだけ作り、tracked な hook と .gitattributes の driver を持つ commit の clone で何も流さず、消すときに symlink を辿らないことは、実の git の clone と file system でしか確かめられない。"
+task = 3804
+
+[[boundary]]
+id = "relay-verify-runs-the-command-with-token-proxies"
+kind = "プロセス"
+test = "verification_container::relay_verify_runs_the_command_with_the_token_in_its_proxies_and_exits_with_its_code"
+reason = "container の中の dagq relay verify が token のファイルから proxy を作ってコマンドを流し、その終了コードで終わり、token が無ければ流さないことは、実の CLI の process でしか確かめられない。終了コードの読み方は domain::run_container::verification_exit の unit test"
+task = 3804
+
+[[boundary]]
+id = "watch-connection-is-read-only-and-sees-later-writes"
+kind = "SQLite"
+test = "watch_read_only::the_watch_connection_rejects_writes_and_sees_attention_added_after_a_poll"
+reason = "watch の接続が書き込みを拒みつつ、poll の後に別の接続が足した attention を見ることは、実の SQLite の読み取り専用の接続でしか確かめられない。何を attention とするかの判断は unit test"
+task = 3804
+
+[[boundary]]
+id = "worker-model-and-effort-given-at-start-and-recorded-at-claim"
+kind = "supervisorの配線"
+test = "worker_model::workers_start_at_opus_medium_by_default"
+reason = "走る supervisor が claim に worker の model と effort を記録し、wrapper がその値を明示して session を起動することは、supervisor の配線と wrapper の起動を通してしか確かめられない。どの段とどの組にするかの判断は domain::worker_model の unit test"
+task = 3804
