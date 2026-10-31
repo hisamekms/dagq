@@ -16,6 +16,7 @@ related:
   - plan-nextest-measurement
   - plan-coverage-at-landing
   - design-measurement
+  - adr-t3761-1
 ---
 
 # 過去の着地の差分に IT の対応表を当てた、絞った IT の時間と見逃しの測定と、全部流す閾値・共通のファイル・表の古さの上限
@@ -28,7 +29,7 @@ goal 157 の段 3a（spike、task 1924）。task 1923 の CI の job が作っ�
 - **閾値（見込みの壁時計 220 秒 = IT 全部の見込み 438.7 秒の半分 219.35 秒を丸めた値。219.35〜220 秒の着地は無い）を当てると、全部流した着地は 247 件（57.3%）**: 閾値超え 196・共通のファイル 33・その他（表の tree に無い src のファイル）18。絞れた 184 件のうち 106 件は IT に当たるファイルを変えておらず 0 本、IT を 1 本以上選んだ 78 件は見込みの壁時計の中央値 4.2 秒・p90 45.8 秒。
 - **IT の時間（見込みの壁時計）は全着地の中央値・p90 とも 438.7 秒（全部流したのが過半のため IT 全部と同じ）、平均は 254 秒（全部流すより 42% 短い）。** 絞った IT の大きさは二山で、閾値の前の見込みの壁時計は 60 秒以下が 182 件、350 秒超が 206 件、その間は 10 件。どの閾値（60〜350 秒）でも結果はほぼ変わらない。
 - **見逃しは 0 件。** 期間に main の CI で新たに赤くなった IT 1,655 件（範囲が複数の着地にまたがるもの 1,165 件。どれもその範囲のどれかの着地の絞った IT に入っていた）。範囲に dagq を通らない人の直接の commit を含み、それが原因で着地のどれにも選ばれなかったものが 6 件（見逃しと別に数える）。閾値を外すと、2026-09-29 の CI の環境の壊れ（fixture の template の cache）で一斉に赤くなった 682 本のうち 57 本が task 1046 の絞った IT に入らなかった。
-- **決めたこと（段 3b へ）**: 全部流す閾値は「絞った IT の見込みの壁時計が IT 全部の見込みの半分を超える」。全部流す共通のファイルは `Cargo.lock`・`Cargo.toml`・`crates/*/Cargo.toml`・`build.rs`・`crates/*/build.rs`・`rust-toolchain.toml`・`.config/nextest.toml`・`migrations/**`・`src/migration_numbers.rs`・`tests/common/**`。表の古さの上限は生成から 48 時間で、表に無い IT（表の後に足されたテスト）は必ず流す。表の tree に無い src のファイルと、表が IT の 25% より多くに当てるファイルは表から IT を選ばず CI に任せる（「決めたこと」の 2・4、[代替案の比較](landing-it-alternatives.md)）。
+- **決めたこと（段 3b へ）**: 全部流す閾値は「絞った IT の見込みの壁時計が IT 全部の見込みの半分を超える」。全部流す共通のファイルは `Cargo.lock`・`Cargo.toml`・`crates/*/Cargo.toml`・`build.rs`・`crates/*/build.rs`・`rust-toolchain.toml`・`.config/nextest.toml`・`migrations/**`・`src/migration_numbers.rs`。`tests/common` の helper の変更はそれを使う module の IT を選び、使う module の IT が IT の 25% より多い helper（`mod.rs` と共通の fixture）だけ全部流す。表の古さの上限は生成から 48 時間で、表に無い IT（表の後に足されたテスト）は必ず流す。表の tree に無い src のファイルと、表が IT の 25% より多くに当てるファイルは表から IT を選ばず CI に任せる（「決めたこと」の 2・4、[代替案の比較](landing-it-alternatives.md)、「tests/commonのhelperの選び方の測定」）。
 - **表の古さの上限 48 時間は、日付の違う表 15 本（保持中の 16 本のうち T_end より前のもの）を 2026-10-06〜10-19 の着地 498 件に当てて確かめた**（「表の古さの追加の測定」）。古い表で漏れるテストはどの古さでも中央値・p90 とも 0 本で、古さは主に表に無い IT を余分に流す側に効く。
 - 比べる今の値: `land_phases.verify` の中央値 516 秒・p90 982 秒（goal 157 の記述、`dagq stats --full`、2026-09-29 以降の着地 439 件）。これは build・unit test・coverage の計測を含む verify 全体で、ここの値は IT のテストの時間だけの見込み（build を含まない）なので、そのまま引き算はしない。
 
@@ -217,12 +218,68 @@ goal 157 の段 3a（spike、task 1924）。task 1923 の CI の job が作っ�
 - **ビュー**: `map-staleness.csv`・`map-staleness-single-failures.csv`・`map-staleness-multi-failures.csv`・`map-staleness-summary.txt`。上の SSOT から下のコマンドで作り直せる。
 - **作り直せる範囲**: artifact の保持は 30 日で、最も古い表（2026-10-06）は 2026-11-05 ごろに消える。消えた後は同じ表では作り直せないので、CSV と要約を正として残す。CI の log の保持（GitHub の既定 90 日）が切れた後も、見逃しの列は作り直せない。queue の event と git は消えないので、着地と差分は作り直せる。
 
+## tests/commonのhelperの選び方の測定
+
+goal 237 の task 3761。`tests/common/**` を共通のファイルから外し、helper の変更からそれを使う module の IT を選ぶ規則（下の「決めたこと」の 2）を、直近 14 日の main の着地に当てた。
+
+### helperの測定の母集団と数え方
+
+- **着地**: `git log main --since=2026-10-17T04:30:51Z`（main の `874278edf`、2026-10-31T04:30:51Z までの 14 日）の 602 commit。squash の 1 commit が 1 着地。そのうち `tests/common/**` に触れたものは 30 件。着地していない task 3585 の run の差分（`dagq/09f4492e-0455-4a44-a51d-90cf9724b3f6` の branch の main からの差分。着地の検証は `a common file: tests/common/install.rs` で IT を全部流し、30 分の上限で kill された）を最後の行に足した。
+- **使う module と IT の本数**: どの行も今の tree（この task の base `06e8ec489`）で数えた。着地の時点の tree ではない。IT の本数は `tests/it`・`tests/plugin.rs`・crates の `tests` の `#[test]` の数で、全部で 1,977 本（25% は 494.25 本）。使う module は `scripts/landing-it.py` の `helper_users()` が静的に読んだもの（`tests/it` の最上位の module と `tests/plugin.rs`）。
+- **比べたもの**: 共通のファイルで IT を全部流すかだけ。閾値・広い項目・表の古さは当時の表が要るので当てていない。差分の他のファイルが選ぶ IT も数えていない。
+
+### helperの測定の結果
+
+| commit | 触れた helper | 使う module の数 | その IT の本数 | 新しい規則 | 選ぶ IT の本数 |
+|---|---|---|---|---|---|
+| `4fa211496` | `mod.rs`・`replans.rs` | 242・2 | 1976・23 | 全部流す | 1977（全部） |
+| `f6df39c14` | `lifecycle.rs`・`queue.rs` | 20・234 | 204・1955 | 全部流す | 1977（全部） |
+| `432ecefe4` | `lifecycle.rs` | 20 | 204 | 選ぶ | 204 |
+| `b1f15aedc` | `install.rs`・`lifecycle.rs` | 4・20 | 41・204 | 選ぶ | 204 |
+| `772a3b1f2` | `cleanup.rs`・`mod.rs`・`service.rs` | 222・242・221 | 1861・1976・1859 | 全部流す | 1977（全部） |
+| `0e47d40c3` | `service.rs`・`setup_review.rs` | 221・3 | 1859・29 | 全部流す | 1977（全部） |
+| `94a64a7e1` | `install.rs` | 4 | 41 | 選ぶ | 41 |
+| `e3b18e4f9` | `setup_review.rs` | 3 | 29 | 選ぶ | 29 |
+| `59931db0d` | `mod.rs` | 242 | 1976 | 全部流す | 1977（全部） |
+| `6b9c82da8` | `mod.rs`・`service.rs` | 242・221 | 1976・1859 | 全部流す | 1977（全部） |
+| `21cc26711` | `mod.rs`・`report.rs`・`service.rs` | 242・2・221 | 1976・8・1859 | 全部流す | 1977（全部） |
+| `c8409f314` | `toolchain.rs` | 3 | 28 | 選ぶ | 28 |
+| `00ba95a62` | `cli.rs` | 221 | 1859 | 全部流す | 1977（全部） |
+| `d7dbc9894` | `service.rs` | 221 | 1859 | 全部流す（共通のファイル `migrations/0086_recurring_draft_origin.sql`） | 1977（全部） |
+| `8c512e8b0` | `cli.rs`・`service.rs` | 221・221 | 1859・1859 | 全部流す | 1977（全部） |
+| `1338f205f` | `install.rs` | 4 | 41 | 選ぶ | 41 |
+| `dee8b6d82` | `service.rs` | 221 | 1859 | 全部流す | 1977（全部） |
+| `5a0972ac0` | `template.rs` | 237 | 1962 | 全部流す | 1977（全部） |
+| `c1ce3e662` | `service.rs` | 221 | 1859 | 全部流す | 1977（全部） |
+| `984d4291d` | `mod.rs` | 242 | 1976 | 全部流す | 1977（全部） |
+| `00ff9e651` | `service.rs` | 221 | 1859 | 全部流す | 1977（全部） |
+| `3ba2759d3` | `mod.rs` | 242 | 1976 | 全部流す | 1977（全部） |
+| `b37a1e53b` | `lifecycle.rs` | 20 | 204 | 選ぶ | 204 |
+| `71c4e259c` | `cli.rs`・`install.rs`・`lifecycle.rs`・`service.rs` | 221・4・20・221 | 1859・41・204・1859 | 全部流す（共通のファイル `Cargo.toml`） | 1977（全部） |
+| `942bcf9ce` | `attributes.rs`・`queue.rs` | 2・234 | 28・1955 | 全部流す | 1977（全部） |
+| `b09d0282e` | `queue.rs` | 234 | 1955 | 全部流す | 1977（全部） |
+| `5e39650b7` | `toolchain.rs` | 3 | 28 | 選ぶ | 28 |
+| `9985e2787` | `lifecycle.rs`・`service.rs` | 20・221 | 204・1859 | 全部流す | 1977（全部） |
+| `75d821ea4` | `toolchain.rs` | 3 | 28 | 選ぶ | 28 |
+| `4e7ca45de` | `mod.rs`・`setup_review.rs`・`toolchain.rs` | 242・3・3 | 1976・29・28 | 全部流す | 1977（全部） |
+| `task-3585` | `install.rs` | 4 | 41 | 選ぶ | 41 |
+
+- **helper ごとの使い手**: `install.rs` 4 module・41 本、`lifecycle.rs` 20・204、`setup_review.rs` 3・29、`toolchain.rs` 3・28、`attributes.rs` 2・28、`replans.rs` 2・23、`report.rs` 2・8。`actor.rs`・`cleanup.rs`・`cli.rs`・`service.rs` は 221〜222 module・1,859〜1,861 本、`queue.rs` 234・1,955、`template.rs` 237・1,962、`mod.rs` 242・1,976。IT に対する割合は 10.3% 以下と 94.0% 以上の二山で、その間の helper は無い。
+- **全部流す着地の数**: 共通のファイルで IT を全部流した着地は 45 件から 36 件に減る。`tests/common` に触れた 30 件のうち、新しい規則で選ぶのは 9 件（選ぶ IT は 28〜204 本）、全部流すのは 21 件（どれも多くの IT に当たる helper に触れ、うち 2 件はほかの共通のファイルにも触れた）。task 3585 の差分は `install.rs` の 4 module・41 本を選ぶ。
+- 名を書かずに使う経路（glob の import の先の名など）は数えないので、使い手は外す側にもずれうる。`tests/it/runtime_support` の再 export と macro は、module の名指し（`crate::<m>`・`super::<m>`・`crate::{…}` の中の名）と macro の呼び出しで辿るので、`cleanup.rs` などは `runtime_support` を通って大半の module に当たる。
+
+### 結論（helperの扱い）
+
+- 多くの IT に当たる helper は全部流す（既定の推奨のとおり）。使い手の IT が 94% 以上の helper では、絞っても節約がほとんど無く、共通の fixture の壊れの見逃しは全 IT に及ぶ。
+- 多いかの上限は広い項目と同じ 25% にする。二山の間（10.3〜94.0%）のどこに置いても結果は変わらないので、新しい値を足さない。
+- `mod.rs` が出し直す名（`WithoutActor` など）は、その名を使う module を数える。数えた結果 `actor.rs` は 94.1% に当たり、全部流す側になる。
+
 ## 決めたこと（段 3b の ADR と design が使う）
 
-2 と 4 は、切り替えの後 7 日の記録に代替案を当てた[代替案の比較](landing-it-alternatives.md)の結果に拠る（[ADR-t2892-1](../adr/2026-10-20-t2892-1-landing-it-leaves-added-sources-and-broad-entries-to-ci.md)）。
+2 と 4 は、切り替えの後 7 日の記録に代替案を当てた[代替案の比較](landing-it-alternatives.md)の結果に拠る（[ADR-t2892-1](../adr/2026-10-20-t2892-1-landing-it-leaves-added-sources-and-broad-entries-to-ci.md)）。2 の `tests/common` の helper の扱いは「tests/commonのhelperの選び方の測定」に拠る（[ADR-t3761-1](../adr/2026-10-31-t3761-1-landing-it-selects-the-modules-a-changed-test-helper-reaches.md)）。
 
 1. **全部流す閾値**: 絞った IT の見込みの壁時計（max(直列の和 ÷ `NEXTEST_TEST_THREADS`, 最長のテスト)）が、同じ表の IT 全部の見込みの壁時計の半分を超えたら IT を全部流す（今の表では 220 秒）。根拠: 絞った IT は 60 秒以下と 350 秒超の二山で、60〜350 秒のどこに置いても全部流す割合は 0.559〜0.582、平均は 252〜257 秒でほぼ変わらない。半分を超える選択は全部流すのに比べて節約が半分未満で、見逃しの危険（閾値を外すと一斉の赤で 57 本を見逃した）を負う価値が小さい。表の秒は coverage の計測つきの CI の runner の値なので、秒の絶対値でなく IT 全部に対する割合で決める。
-2. **IT を全部流す共通のファイル**: `Cargo.lock`・`Cargo.toml`・`crates/*/Cargo.toml`・`build.rs`・`crates/*/build.rs`・`rust-toolchain.toml`・`.config/nextest.toml`・`migrations/**`・`src/migration_numbers.rs`（build.rs が読む）・`tests/common/**`（共通の fixture。`mod.rs`・`template.rs` は IT の 88〜89% に当たる）。表の tree に無い src・crates の `.rs`（差分が足したファイル）は全部流す理由にせず、表から IT を選ばない（そのファイルを通る IT は差分のテストと表に無い IT のほかは CI に任せる）。根拠: 切り替えの後の 7 日では、足したファイルで全部流した 81 回の差分はほかに広い項目（下の 4）にも触れていて、親の module や同じ directory の項目で選んでも閾値を超えた。`tests/it/runtime_support/**` と crates の `tests/common` は表で選ぶ（各ファイルに当たるテストが表にある）。下の 4 の広い項目の上限は表の全てのファイルに当たるので、多くの IT に当たる helper も表から選ばず CI に任せる（4 の根拠は src・crates のファイルだけで測った）。`tests/it/main.rs` は mod の行だけで、足した module はテストのファイルの変更として選ばれるので共通にしない。中心の src のファイル（`src/domain/mod.rs` など）は一覧に入れず、下の 4 と閾値に任せる（どれが中心かは表とともに変わる）。
+2. **IT を全部流す共通のファイル**: `Cargo.lock`・`Cargo.toml`・`crates/*/Cargo.toml`・`build.rs`・`crates/*/build.rs`・`rust-toolchain.toml`・`.config/nextest.toml`・`migrations/**`・`src/migration_numbers.rs`（build.rs が読む）。`tests/common` の helper の `.rs` は共通にせず、それを使う `tests/it` の module（と `tests/plugin.rs`）の IT を選ぶ。使う module は、checkout した tree の test のソースを静的に読み、helper を名指す module、helper を名指す別の helper の使い手、それらの module を名指すかその macro を呼ぶ module とする。`mod.rs` が出し直す名は、その名を使う module を数える。使う module の `#[test]` の本数が tree の IT の本数の 25%（下の 4 と同じ割合）を超える helper は IT を全部流す。`mod.rs` は `common` を名指す全部の module が使い手になり、ここに当たる。`tests/common` の下の helper の `.rs` でないファイルも全部流す。根拠: 「tests/commonのhelperの選び方の測定」で、helper の使い手は IT の 10.3% 以下と 94.0% 以上の二山で、共通のファイルで全部流す着地は 45 件から 36 件に減る。共通の fixture の壊れの見逃しは全 IT に及ぶので、多くの IT に当たる helper は CI に任せず全部流す（[ADR-t3761-1](../adr/2026-10-31-t3761-1-landing-it-selects-the-modules-a-changed-test-helper-reaches.md)）。表の tree に無い src・crates の `.rs`（差分が足したファイル）は全部流す理由にせず、表から IT を選ばない（そのファイルを通る IT は差分のテストと表に無い IT のほかは CI に任せる）。根拠: 切り替えの後の 7 日では、足したファイルで全部流した 81 回の差分はほかに広い項目（下の 4）にも触れていて、親の module や同じ directory の項目で選んでも閾値を超えた。`tests/it/runtime_support/**` と crates の `tests/common` は表で選ぶ（各ファイルに当たるテストが表にある）。下の 4 の広い項目の上限は表の全てのファイルに当たるので、多くの IT に当たる `tests/it/runtime_support` の helper も表から選ばず CI に任せる（4 の根拠は src・crates のファイルだけで測った）。`tests/it/main.rs` は mod の行だけで、足した module はテストのファイルの変更として選ばれるので共通にしない。中心の src のファイル（`src/domain/mod.rs` など）は一覧に入れず、下の 4 と閾値に任せる（どれが中心かは表とともに変わる）。
 3. **表の古さの上限**: 表の generated_at から 48 時間。それより古い表しか取れなければ IT を全部流す。あわせて、表に無い IT（表の後に足されたか名前の変わったテスト）は必ず流す。根拠: 夜間の job は毎日なので、ふだんの古さは 1 日以内で、48 時間は 1 回の失敗を許す。表に無いテストを必ず流せば足されたテストの漏れ（2 日で約 190 本の上限）は消え、残るのは確かめられない対応の変化だけになる。対応の変化の上限の目安（変わった src のファイルの割合）は 2 日で約 0.55、3 日で約 0.63、7 日でほぼ 1.0 で、7 日の表は選択の根拠にならない。日付の違う表を同じ差分に当てた測定（「表の古さの追加の測定」）では、古い表で漏れるテストは 48 時間未満で中央値・p90 とも 0 本、見逃しへの効きは 0 件で、48 時間を超えても漏れの増え方は小さく、上限を変える根拠は無かった。
 4. **広い項目の上限**: 表がファイルを当てる IT の本数が、同じ表の IT の本数の 25% を超えたら、そのファイルからは IT を選ばない（差分の他のファイルの項目・差分のテスト・表に無い IT は選ぶ）。その IT は CI に任せる。根拠: 表の src のファイルの 58〜65% が IT の 25% より多くに当たり、45〜54% が半分より多くに当たる。上限が半分では全部流す割合は 61%（大半が閾値超え）に留まり、25% で 22%（7 割は共通のファイル）、10% で 15% だった。25% と 10% の差は閾値超えの 12 回だけで、10% は IT の 10〜25% に当たる、選び方の手がかりになる項目まで捨てる。記録の上の見逃しはどの上限でも不安定な 2 本だけで、変更による壊れの見逃しは 0 件。割合は本数で測る（表の秒は計測つきの CI の値）。
 
@@ -249,7 +306,14 @@ SINCE=2026-10-06T04:54:42Z sh docs/plans/landing-it-selection/collect.sh 2026-10
 python3 docs/plans/landing-it-selection/compare_maps.py "$DATA" 2026-10-20T00:00:00Z
 ```
 
+tests/common の helper の選び方の測定（今の tree で）:
+
+```sh
+python3 docs/plans/landing-it-selection/common_helpers.py 2026-10-17T04:30:51Z --ref task-3585=dagq/09f4492e-0455-4a44-a51d-90cf9724b3f6
+```
+
 - `landing-it-selection/collect.sh`: 着地の event（`--after` でページング）・CI の run（`--limit` に達したら日ごと）・落ちたテスト・job ごとのテストの step の結論・ci-failure の issue・保持中の対応表を DATA に集める（dagq の読み取りのコマンド・git・認証済みの gh）。13 MB の表などの材料は repository に置かない。
+- `landing-it-selection/common_helpers.py`: `scripts/landing-it.py` の helper の選び方を main の着地と `--ref` の差分に当て、「tests/commonのhelperの選び方の測定」の表と全部流す着地の数の前後を出す（git と今の tree だけを読む）。
 - `landing-it-selection/compare_maps.py`: `scripts/landing-it.py` の規則で各着地に B と A_k を当て、`map-staleness*.csv` と `map-staleness-summary.txt` を書く（区分と作り直せる範囲は「表の古さの追加の測定」）。
 - `landing-it-selection/analyze.py`: 選択の規則・値の式・見逃し・古さの材料を計算し、`landings.csv`・`ci-new-failures.csv`・`staleness.csv`・`summary.txt` を書く（既定ではこの dir）。2026-10-06 の値は CI の artifact の保持（30 日）が切れると同じ表で作り直せないので、CSV を正として残す。
 

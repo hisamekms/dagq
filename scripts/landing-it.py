@@ -10,11 +10,14 @@ Usage: python3 scripts/landing-it.py select --diff FILE --tree FILE
                                             [--known FILE] [--fix-run 0|1]
                                             [--threads N] [--now TIME]
                                             [--table-error TEXT]
-                                            [--full REASON]
+                                            [--full REASON] [--root DIR]
        python3 scripts/landing-it.py needs-list --diff FILE --tree FILE
                                                 --table FILE|- [--now TIME]
                                                 [--table-error TEXT]
+                                                [--full REASON] [--root DIR]
        python3 scripts/landing-it.py self-test FIXTURES
+--root is the checked-out tree the changed helpers' users are read from
+(default: the current directory); the self-test reads FIXTURES/repo.
 """
 
 import argparse
@@ -46,8 +49,12 @@ COMMON_FILES = [
     ".config/nextest.toml",
     "migrations/**",
     "src/migration_numbers.rs",
-    "tests/common/**",
 ]
+#    The helpers of the integration tests under tests/common are not common
+#    files: a changed helper selects the IT of the modules that use it, read
+#    from the checked-out tree (helper_users()). A helper whose users hold
+#    more than BROAD_SHARE (below) of the IT by count, mod.rs among them,
+#    runs every IT: a broken shared fixture would reach most IT.
 # 3. How old a table may be: older than this since its generated_at, every IT
 #    runs. Together with it, the IT not in the table (added or renamed after
 #    it was built) always run.
@@ -56,7 +63,9 @@ MAX_TABLE_AGE = datetime.timedelta(hours=48)
 #    IT (by count) selects none of them; the IT through it are left to CI.
 #    A src or crates .rs file not in the tree of the table's commit (one the
 #    diff added) selects none from the table either. Both still run the
-#    diff's own tests and the IT not in the table, see choose().
+#    diff's own tests and the IT not in the table, see choose(). The same
+#    share, by the #[test] count of the tree, makes a helper under
+#    tests/common broad (see COMMON_FILES).
 BROAD_SHARE = 0.25
 
 # The table's format this reads (scripts/it-coverage-map.sh).
@@ -76,6 +85,192 @@ READ_BY_TESTS = [
     ("dagq.toml", ["(binary_id(=dagq::it) & test(=review_subagents::this_repository_names_only_agents_it_defines))"]),
     (".dagq/agents/**", ["(binary_id(=dagq::it) & test(=review_subagents::this_repository_names_only_agents_it_defines))"]),
 ]
+
+# The helpers of the integration tests: tests/it/main.rs and tests/plugin.rs
+# include tests/common/mod.rs as their module `common`.
+HELPER_DIR = "tests/common"
+
+
+def read_text(root, path):
+    """The text of a file without its whole-line comments (doc comments
+    name items they do not use), or "" when it cannot be read."""
+    try:
+        with open(os.path.join(root, path), encoding="utf-8") as f:
+            return re.sub(r"(?m)^[ \t]*//.*$", "", f.read())
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def rs_files(root, top):
+    """The .rs files under root/top, as paths from root, sorted."""
+    out = []
+    for d, dirs, files in os.walk(os.path.join(root, top)):
+        dirs.sort()
+        for name in sorted(files):
+            if name.endswith(".rs"):
+                out.append(os.path.relpath(os.path.join(d, name), root).replace(os.sep, "/"))
+    return out
+
+
+def helper_of(path):
+    """The helper a file under tests/common is ("mod" for mod.rs), or None
+    when it is not a .rs file of a helper (it runs every IT)."""
+    m = re.fullmatch(re.escape(HELPER_DIR) + r"/([^/]+?)(\.rs|/.*\.rs)", path)
+    return m.group(1) if m else None
+
+
+def group_items(text, prefix):
+    """The first segments of the items of every `<prefix>::{...}` group in
+    text, and whether one of them is a glob."""
+    items, glob = set(), re.search(r"\b%s::\*" % prefix, text) is not None
+    for m in re.finditer(r"\b%s::\{" % prefix, text):
+        depth, start, i = 1, m.end(), m.end()
+        while i < len(text) and depth:
+            depth += {"{": 1, "}": -1}.get(text[i], 0)
+            i += 1
+        part, item, depth = text[start:i - 1], "", 0
+        for ch in part + ",":
+            if ch == "," and depth == 0:
+                first = re.split(r"::|\s+as\s+", item.strip())[0].strip()
+                if first == "*":
+                    glob = True
+                elif first:
+                    items.add(first)
+                item = ""
+                continue
+            depth += {"{": 1, "}": -1}.get(ch, 0)
+            item += ch
+    return items, glob
+
+
+def names_helpers(text, helpers, reexported, prefixes):
+    """The helpers a file's text names through one of prefixes (`common` from
+    tests/it and tests/plugin.rs, `super` and `common` from another helper),
+    directly, in a use group or by a name mod.rs re-exports."""
+    out = set()
+    for prefix in prefixes:
+        items, glob = group_items(text, prefix)
+        if glob:
+            return set(helpers)
+        for h in helpers:
+            if h in items or re.search(r"\b%s::%s\b" % (prefix, h), text):
+                out.add(h)
+    for name, h in reexported.items():
+        if re.search(r"\b%s\b" % re.escape(name), text):
+            out.add(h)
+    return out
+
+
+def test_tree(root):
+    """What the choice of a changed helper reads from the tree at root, read
+    once: the helpers and which helpers each names (mod.rs only by code
+    beyond its mod and pub use lines), the names mod.rs re-exports, and for
+    each test module ("it::<top module>" of tests/it, and "plugin" for
+    tests/plugin.rs) the helpers it names, the modules it names
+    (`crate::<m>`, `super::<m>`, or `<m>` in a `crate::{...}` group, which a
+    bare `<m>::` in a module needs first), the macros it defines and calls, and its
+    #[test] count. total is the #[test] count of every IT file (tests/it,
+    tests/plugin.rs, crates/*/tests)."""
+    files = rs_files(root, HELPER_DIR)
+    helpers = sorted({helper_of(p) for p in files} - {None, "mod"})
+    mod_text = read_text(root, HELPER_DIR + "/mod.rs")
+    reexported = {}
+    for m in re.finditer(r"pub\s+use\s+(?:self::)?(\w+)::([^;]+);", mod_text):
+        if m.group(1) in helpers:
+            for name in re.findall(r"\b([A-Za-z_]\w*)\b", m.group(2)):
+                if name not in ("self", "crate", "super"):
+                    reexported[name] = m.group(1)
+    deps = {}
+    for h in helpers:
+        text = "\n".join(read_text(root, p) for p in files if helper_of(p) == h)
+        deps[h] = names_helpers(text, helpers, reexported, ("super", "common")) - {h}
+    body = re.sub(r"pub\s+(mod\s+\w+|use\s+[^;]+);", "", mod_text)
+    deps["mod"] = {h for h in helpers if re.search(r"\b%s::" % h, body)}
+    paths = {}
+    for path in rs_files(root, "tests/it"):
+        top = path[len("tests/it/"):].split("/")[0]
+        top = top[:-3] if top.endswith(".rs") else top
+        if top != "main":
+            paths.setdefault("it::" + top, []).append(path)
+    paths["plugin"] = ["tests/plugin.rs"]
+    modules = {}
+    for key, ps in paths.items():
+        text = "\n".join(read_text(root, p) for p in ps)
+        names = names_helpers(text, helpers, reexported, ("common",))
+        if re.search(r"\bcommon\b", text):
+            names.add("mod")
+        modules[key] = {
+            "helpers": names,
+            "refs": set(re.findall(r"\b(?:crate|super)::(\w+)", text))
+            | group_items(text, "crate")[0],
+            "defines": set(re.findall(r"macro_rules!\s*(\w+)", text)),
+            "calls": set(re.findall(r"\b(\w+)!", text)),
+            "tests": len(re.findall(r"#\[test\]", text)),
+        }
+    every = [p for ps in paths.values() for p in ps]
+    crates = os.path.join(root, "crates")
+    for c in sorted(os.listdir(crates)) if os.path.isdir(crates) else []:
+        every.extend(rs_files(root, "crates/%s/tests" % c))
+    total = sum(len(re.findall(r"#\[test\]", read_text(root, p))) for p in every)
+    return {"helpers": helpers, "deps": deps, "modules": modules, "total": total}
+
+
+def helper_users(tree, changed):
+    """The test modules that use the changed helpers (names as helper_of
+    gives them): through another helper that names one (mod.rs's own code
+    included, which every module naming `common` reaches), and a tests/it
+    module through another one it names or whose macros it calls."""
+    reached = set(changed)
+    while True:
+        more = {h for h, d in tree["deps"].items() if d & reached} - reached
+        if not more:
+            break
+        reached |= more
+    modules = tree["modules"]
+    users = {k for k, m in modules.items() if m["helpers"] & reached}
+    while True:
+        names = {k[len("it::"):] for k in users if k.startswith("it::")}
+        macros = set().union(*(modules[k]["defines"] for k in users)) if users else set()
+        more = {
+            k for k, m in modules.items()
+            if k not in users and k.startswith("it::")
+            and (m["refs"] & names or m["calls"] & macros)
+        }
+        if not more:
+            break
+        users |= more
+    return users
+
+
+def module_filter(key):
+    if key == "plugin":
+        return "binary_id(=dagq::plugin)"
+    return "(binary_id(=dagq::it) & test(/^%s::/))" % key[len("it::"):]
+
+
+def helper_choice(root, diff):
+    """For the diff's files under tests/common: the reasons to run every IT
+    (a file that is not a helper's .rs, a helper whose users hold more than
+    BROAD_SHARE of the IT by #[test] count) and otherwise the filtersets of
+    the modules that use the changed helpers."""
+    paths = [p for p in diff if p.startswith(HELPER_DIR + "/")]
+    if not paths:
+        return [], []
+    tree = test_tree(root)
+    limit = BROAD_SHARE * tree["total"]
+    reasons, filters = [], []
+    for p in paths:
+        h = helper_of(p)
+        if h is None:
+            reasons.append("a file under %s that is no helper: %s" % (HELPER_DIR, p))
+            continue
+        users = helper_users(tree, {h})
+        n = sum(tree["modules"][k]["tests"] for k in users)
+        if n > limit:
+            reasons.append("a helper whose users hold %d of %d IT: %s" % (n, tree["total"], p))
+        else:
+            filters.extend(f for f in map(module_filter, sorted(users)) if f not in filters)
+    return reasons, filters
 
 
 def glob_match(path, pattern):
@@ -152,8 +347,9 @@ def one_test(binary, name):
     return "(binary_id(=%s) & test(=%s))" % (binary, filter_quote(name))
 
 
-def full_reasons(diff, tree, table, table_error, now, forced=None):
-    """The reasons to run every IT that need no list of the tests."""
+def full_reasons(diff, tree, table, table_error, now, forced=None, root="."):
+    """The reasons to run every IT that need no list of the tests; root is
+    the checked-out tree the changed helpers' users are read from."""
     reasons = [forced] if forced else []
     if table is None:
         reasons.append("the table is not available: %s" % (table_error or "unknown"))
@@ -173,6 +369,7 @@ def full_reasons(diff, tree, table, table_error, now, forced=None):
     for path in diff:
         if any(glob_match(path, p) for p in COMMON_FILES):
             reasons.append("a common file: %s" % path)
+    reasons.extend(helper_choice(root, diff)[0])
     return reasons
 
 
@@ -231,11 +428,12 @@ def current_its(listing):
     return out
 
 
-def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now, forced=None):
+def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now, forced=None,
+           root="."):
     """The tests of the landing's verification and why: a dict with full,
     reasons, the IT filtersets (narrowed), the tests not in the table, the
     excluded and kept known failures and the nextest filterset."""
-    reasons = full_reasons(diff, tree, table, table_error, now, forced)
+    reasons = full_reasons(diff, tree, table, table_error, now, forced, root)
     narrowed = []
     from_table = set()
     not_in_table = []
@@ -253,6 +451,7 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
             for pattern, filters in READ_BY_TESTS:
                 if glob_match(path, pattern):
                     narrowed.extend(x for x in filters if x not in narrowed)
+        narrowed.extend(f for f in helper_choice(root, diff)[1] if f not in narrowed)
         all_durations = [t.get("duration_secs") or 0.0 for t in table_tests.values()]
         selected = [table_tests.get(k, {}).get("duration_secs") or 0.0 for k in from_table]
         limit = FULL_SHARE * wall(all_durations, threads)
@@ -354,7 +553,7 @@ def threads_of(text):
 def cmd_needs_list(args):
     reasons = full_reasons(
         read_lines(args.diff), read_lines(args.tree), read_json(args.table),
-        args.table_error, now_of(args.now), args.full,
+        args.table_error, now_of(args.now), args.full, args.root,
     )
     print("no" if reasons else "yes")
 
@@ -363,7 +562,7 @@ def cmd_select(args):
     choice = choose(
         read_lines(args.diff), read_lines(args.tree), read_json(args.table),
         args.table_error, read_json(args.list), read_json(args.known),
-        args.fix_run == "1", threads_of(args.threads), now_of(args.now), args.full,
+        args.fix_run == "1", threads_of(args.threads), now_of(args.now), args.full, args.root,
     )
     print(report(choice), file=sys.stderr)
     print(choice["filter"])
@@ -382,7 +581,7 @@ def cmd_self_test(args):
             case["diff"], tree, case_table,
             "gh failed" if case.get("no_table") else None, listing,
             case.get("known"), case.get("fix_run", False), 6, parse_time(case["now"]),
-            case.get("full"),
+            case.get("full"), os.path.join(args.fixtures, "repo"),
         )
         want = case["want"]
         got = {k: choice[k] for k in want}
@@ -410,6 +609,7 @@ def main():
         p.add_argument("--table-error")
         p.add_argument("--now")
         p.add_argument("--full", help="run every IT for this reason")
+        p.add_argument("--root", default=".", help="the tree the helpers' users are read from")
         if name == "select":
             p.add_argument("--list", required=True)
             p.add_argument("--known")

@@ -25,8 +25,10 @@
 #   --self-test  check the choice (the tests chosen, including the IT not in
 #                the table, running every IT and why, and the tests left
 #                out) on the fixtures under scripts/landing-it-fixtures/
-#                (a table, a tree, a nextest list and cases.json), and the
-#                hand-over of --prepare's table to a run in the container.
+#                (a table, a tree, a nextest list, cases.json and repo/, the
+#                tests/common and tests/it the helpers' users are read
+#                from), and the hand-over of --prepare's table to a run in
+#                the container.
 #                Needs only sh and python3.
 #
 # Which IT (scripts/landing-it.py, choose()): over the files of
@@ -36,15 +38,23 @@
 #     crates/<c>/tests/<t>.rs),
 #   - the tests that read a changed file from the repository (plugins/**,
 #     dagq.toml and the like, READ_BY_TESTS),
+#   - for a changed helper under tests/common, the tests of the tests/it
+#     modules (and tests/plugin.rs) that use it, read statically from the
+#     checked-out tree: through `common::<helper>`, a name tests/common/mod.rs
+#     re-exports from it, another helper that names it, or a tests/it module
+#     that names one of those or calls its macros,
 #   - the IT nextest lists now that the table does not have (added or renamed
 #     after the table was built).
 # A file the table maps to too many IT (a broad entry) and a src or crates .rs
 # file not in the tree of the table's commit select nothing from the table:
 # their other IT are left to CI, and the output names them.
 # Every IT runs instead, with the reasons printed, when the narrowed IT's
-# estimate is over the threshold, a common file is touched, or the table
-# cannot be had or is too old. The threshold, the common files, the age limit
-# and the share that makes an entry broad are written once, at the top of
+# estimate is over the threshold, a common file is touched, a changed helper
+# is broad (its users hold more than the broad entries' share of the IT by
+# #[test] count, as mod.rs and the shared fixtures do) or a file under
+# tests/common is no helper's .rs, or the table cannot be had or is too old.
+# The threshold, the common files, the age limit and the share that makes an
+# entry or a helper broad are written once, at the top of
 # scripts/landing-it.py, with their grounds in
 # docs/plans/landing-it-selection.md, section 「決めたこと」. The tests in the
 # known failures' "failures" are left out; a fix run's own ones are under

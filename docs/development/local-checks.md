@@ -89,7 +89,7 @@ runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料�
 - 変えた・関係するmoduleを1つずつ`<module>::`で名指しして流す。例: `sh scripts/cargo-brief.sh cargo test --locked --test it <変えた・関係するtestファイルの名前>::`（`tests/it/runtime_claim.rs`なら`sh scripts/cargo-brief.sh cargo test --locked --test it runtime_claim::`。e2eとplugin以外のintegration testは1つのtest binary `it`のmoduleで、ファイル名がmodule名になる。[ADR-0078](../adr/0078-one-integration-test-binary.md)）、`sh scripts/cargo-brief.sh cargo test --locked --lib <module>`。
 - 選び方の目安: 変えた`src/`のmoduleのunit test（`--lib <moduleのパス>`）と、その機能の`tests/it`のmodule（例: `tests/it/runtime_claim.rs`を変えたら`runtime_claim::`、`tests/it/lifecycle_replace.rs`なら`lifecycle_replace::`）。
 - filterはtestの名前（`<module>::<test>`）の部分一致なので、`runtime_`・`lifecycle_`のような接頭辞だけのfilterは多くのmoduleを選ぶ。`--test it`をfilterなしで流さない、接頭辞だけのfilterや多数のmoduleの列挙で`it`の大半を流さない、`--test it --test plugin`を合わせて全体を流さない。
-- `tests/common`や`tests/it/runtime_support`のhelperを変えたら、それを使っているmoduleを流す。使うmoduleが多いときは代表のmodule（数個）に絞り、残りは着地の検証（絞ったITは`tests/common`に触れれば全部のITを流す）とCIに任せたことをreceiptの`tests`のevidenceに書く。
+- `tests/common`や`tests/it/runtime_support`のhelperを変えたら、それを使っているmoduleを流す。使うmoduleが多いときは代表のmodule（数個）に絞り、残りは着地の検証（絞ったITは`tests/common`のhelperならそれを使うmoduleのITを選び、多くのITに当たるhelperなら全部のITを流す）とCIに任せたことをreceiptの`tests`のevidenceに書く。
 - これは流す範囲の選び方の手がかりで、全体の`cargo test --locked`と`cargo llvm-cov`をworkerが流さない規則は変わらない。
 - receiptの`tests`のevidenceには、範囲を選んだ理由（着地の検証とCIに任せた範囲を含む）と流したtestの件数を書く。流したコマンドとexit statusと結果は記録が示すので書かない（上の「実行の記録とreceiptのevidence」）。
 

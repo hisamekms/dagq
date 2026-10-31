@@ -144,19 +144,90 @@
   "now": "2026-10-06T12:00:00Z",
   "diff": [
    "src/a.rs",
-   "Cargo.lock",
-   "tests/common/template.rs"
+   "Cargo.lock"
   ],
   "want": {
    "full": true,
    "reasons": [
-    "a common file: Cargo.lock",
-    "a common file: tests/common/template.rs"
+    "a common file: Cargo.lock"
    ],
    "narrowed": [],
    "not_in_table": [],
    "excluded": [],
    "kept": []
+  }
+ },
+ {
+  "name": "a helper few modules use selects the IT of those modules only",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "tests/common/few.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(/^e::/))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "left_to_ci": []
+  }
+ },
+ {
+  "name": "a helper mod.rs re-exports a name of selects the modules that use the name",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "tests/common/named.rs",
+   "src/c.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(/^b::/))",
+    "(binary_id(=dagq::it) & test(=c::small))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ]
+  }
+ },
+ {
+  "name": "mod.rs, whose users hold most IT, runs every IT",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "tests/common/mod.rs",
+   "tests/common/few.rs"
+  ],
+  "want": {
+   "full": true,
+   "reasons": [
+    "a helper whose users hold 10 of 11 IT: tests/common/mod.rs"
+   ],
+   "narrowed": [],
+   "not_in_table": []
+  }
+ },
+ {
+  "name": "a file under tests/common that is no helper's .rs runs every IT",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "tests/common/data.json"
+  ],
+  "want": {
+   "full": true,
+   "reasons": [
+    "a file under tests/common that is no helper: tests/common/data.json"
+   ],
+   "narrowed": []
   }
  },
  {
