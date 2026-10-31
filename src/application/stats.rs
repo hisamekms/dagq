@@ -31,7 +31,7 @@ use super::{
 use crate::domain::{
     GoalStatus, RunId, RunStatus, SupervisorPulse, TaskRun, TaskStatus,
     host_metrics::HostSummary,
-    live_alerts::{EVENTS_PER_READ, LiveHistory, LiveInputs},
+    live_alerts::{EVENTS_PER_READ, LiveHistory, LiveInputs, first_pass_reads},
     stall::{BackgroundTask, IDLE_LOG, StallConfig, background_first_seen},
     stats::{
         ConflictConfig, ConflictConfigReport, History, LiveRun, LiveSnapshot, SlotSnapshot,
@@ -816,6 +816,7 @@ pub fn carried_live_inputs(
     history: &mut LiveHistory,
     sources: &LiveSources<'_>,
 ) -> Result<(LiveInputs, Vec<crate::domain::RunEvent>)> {
+    seed_history(queue, history)?;
     let (all, events) = carried_events(queue, history)?;
     let (runs, positions) = live_runs(&all, processes, &events, sources)?;
     let outliers = history.outlier_thresholds(&queue.task_goals()?, &runs);
@@ -829,11 +830,94 @@ pub fn carried_live_inputs(
     Ok((inputs, events))
 }
 
+/// How many times the first pass of a process reads what it folds from
+/// ([`seeded_history`]) before it folds every event instead.
+const SEED_ATTEMPTS: usize = 3;
+
+/// On the first pass of a process (`history` at no event), fold into
+/// `history` the events up to the newest from the reads
+/// [`first_pass_reads`] names, not from every event. When an event past
+/// the newest came while it read, it reads again, and after
+/// [`SEED_ATTEMPTS`] it leaves `history` to [`carried_events`], which
+/// then folds every event a page at a time.
+fn seed_history(queue: &(impl RunLog + ?Sized), history: &mut LiveHistory) -> Result<()> {
+    if history.upto() > crate::domain::EventId::new(0) {
+        return Ok(());
+    }
+    for _ in 0..SEED_ATTEMPTS {
+        if let Some(seeded) = seeded_history(queue)? {
+            *history = seeded;
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The history up to the queue's newest event from the reads
+/// [`first_pass_reads`] names and the whole events of the runs it leaves
+/// unsettled ([`LiveHistory::unsettled`]); `None` when a read of the newest
+/// events found one past the newest the pass started at.
+fn seeded_history(queue: &(impl RunLog + ?Sized)) -> Result<Option<LiveHistory>> {
+    let upto = queue.latest_event_id()?;
+    let reads = first_pass_reads();
+    let mut newest = Vec::new();
+    for kind in reads.hold {
+        newest.extend(queue.latest_event_of(kind.as_str())?);
+    }
+    let hold = newest.iter().max_by_key(|event| event.id).cloned();
+    newest.extend(queue.latest_event_of(reads.stall.as_str())?);
+    newest.extend(queue.latest_task_events(&reads.deferrals.map(EventKind::as_str))?);
+    if newest.iter().any(|event| event.id > upto) {
+        return Ok(None);
+    }
+    let mut events = newest;
+    if let Some(held) = hold.filter(|held| reads.opens_hold(held)) {
+        events.extend(events_of_kinds(queue, &[reads.hold_ends], held.id, upto)?);
+    }
+    events.extend(events_of_kinds(
+        queue,
+        &reads.work,
+        crate::domain::EventId::new(0),
+        upto,
+    )?);
+    let mut history = LiveHistory::seeded(upto, events);
+    for run in history.unsettled() {
+        history.refold(&run, &queue.run_events(&run)?);
+    }
+    Ok(Some(history))
+}
+
+/// The events of one of `kinds` with `after < id <= upto`,
+/// [`EVENTS_PER_READ`] at a time.
+fn events_of_kinds(
+    queue: &(impl RunLog + ?Sized),
+    kinds: &[EventKind],
+    mut after: crate::domain::EventId,
+    upto: crate::domain::EventId,
+) -> Result<Vec<crate::domain::RunEvent>> {
+    let kinds: Vec<&str> = kinds.iter().map(|kind| kind.as_str()).collect();
+    let mut events = Vec::new();
+    loop {
+        let page = queue.events_of_between(&kinds, after, upto, EVENTS_PER_READ)?;
+        let Some(last) = page.last() else {
+            return Ok(events);
+        };
+        after = last.id;
+        let full = page.len() >= EVENTS_PER_READ;
+        events.extend(page);
+        if !full {
+            return Ok(events);
+        }
+    }
+}
+
 /// Fold into `history` the events past its cursor, [`EVENTS_PER_READ`] at
 /// a time, then read the events of the runs not finished: every run of the
 /// queue, and the events the judgments of now read, which judge as the
-/// whole history does ([`LiveHistory::events`]). Only the first pass of a
-/// process reads every event, a page at a time.
+/// whole history does ([`LiveHistory::events`]). Each run not finished has
+/// its work clock folded again from its own events ([`LiveHistory::refold`]).
+/// Only a first pass that [`seed_history`] left at no event reads every
+/// event, a page at a time.
 fn carried_events(
     queue: &(impl RunLog + ?Sized),
     history: &mut LiveHistory,
@@ -854,7 +938,9 @@ fn carried_events(
     let all = queue.all_runs()?;
     let mut runs = Vec::new();
     for run in all.iter().filter(|run| !finished(run.status())) {
-        runs.extend(queue.run_events(run.id())?);
+        let of_run = queue.run_events(run.id())?;
+        history.refold(run.id(), &of_run);
+        runs.extend(of_run);
     }
     let events = history.events(runs);
     Ok((all, events))

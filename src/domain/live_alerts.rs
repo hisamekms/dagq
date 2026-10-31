@@ -33,7 +33,7 @@ use super::{
 };
 
 mod history;
-pub use history::{EVENTS_PER_READ, LiveHistory};
+pub use history::{EVENTS_PER_READ, FirstPassReads, LiveHistory, first_pass_reads};
 
 /// The least time between two observations of a supervisor: each reads
 /// the events of every run not finished, so not on every pass.

@@ -4,7 +4,9 @@
 //! queue's inputs as `stats` does, judges them with the same functions and
 //! writes what its stream records ([`LiveRecorder`]). Of the events it
 //! reads those past what it folded on its passes before ([`LiveHistory`])
-//! and those of the runs not finished. The runtime's control never reads
+//! and those of the runs not finished; the first pass of a process folds
+//! the history from the newest events of a few kinds and the events of the
+//! work clocks, not from every event. The runtime's control never reads
 //! these records.
 
 use super::*;

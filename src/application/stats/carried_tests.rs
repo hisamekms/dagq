@@ -2,6 +2,7 @@
 //! passes ([`carried_events`]) against the whole history.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::time::{Duration, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -14,6 +15,7 @@ use crate::domain::claim_hold::claim_holds;
 use crate::domain::live_alerts::judge;
 use crate::domain::{
     CommitSha, EventFilter, EventId, EventKind, GoalId, Provider, RunEvent, RunRecord, TaskId,
+    live_alerts::first_pass_reads,
 };
 
 /// A queue's runs and events that counts its reads of the events: the
@@ -23,6 +25,13 @@ struct EventLog {
     events: RefCell<Vec<RunEvent>>,
     all_events: Cell<usize>,
     read: Cell<usize>,
+    /// The ids of every event a read answered, and the reads of every
+    /// event (`events_between`).
+    answered_ids: RefCell<HashSet<EventId>>,
+    pages: Cell<usize>,
+    /// How many reads of the newest id answer the one before it, as if
+    /// the newest came after them.
+    behind: Cell<usize>,
 }
 
 impl EventLog {
@@ -32,12 +41,27 @@ impl EventLog {
             events: RefCell::new(events),
             all_events: Cell::new(0),
             read: Cell::new(0),
+            answered_ids: RefCell::new(HashSet::new()),
+            pages: Cell::new(0),
+            behind: Cell::new(0),
         }
     }
 
     fn answered(&self, events: Vec<RunEvent>) -> Vec<RunEvent> {
         self.read.set(self.read.get() + events.len());
+        self.answered_ids
+            .borrow_mut()
+            .extend(events.iter().map(|event| event.id));
         events
+    }
+
+    fn of_kinds(&self, kinds: &[&str]) -> Vec<RunEvent> {
+        self.events
+            .borrow()
+            .iter()
+            .filter(|event| kinds.contains(&event.kind.as_str()))
+            .cloned()
+            .collect()
     }
 }
 
@@ -88,7 +112,13 @@ impl EventStore for EventLog {
         Ok(self.answered(self.events.borrow().clone()))
     }
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
-        unreachable!("latest_task_events is not what the test reaches")
+        let mut newest: BTreeMap<TaskId, RunEvent> = BTreeMap::new();
+        for event in self.of_kinds(kinds) {
+            if let Some(task) = event.task_id {
+                newest.insert(task, event);
+            }
+        }
+        Ok(self.answered(newest.into_values().collect()))
     }
     fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
         let events = self.events.borrow();
@@ -109,11 +139,16 @@ impl EventStore for EventLog {
         unreachable!("last_observe is not what the test reaches")
     }
     fn latest_event_id(&self) -> Result<EventId> {
-        Ok(self
+        let newest = self
             .events
             .borrow()
             .last()
-            .map_or(EventId::new(0), |event| event.id))
+            .map_or(EventId::new(0), |event| event.id);
+        if self.behind.get() == 0 {
+            return Ok(newest);
+        }
+        self.behind.set(self.behind.get() - 1);
+        Ok(EventId::new(newest.as_i64() - 1))
     }
     fn record_backend_failure(&self, run: Option<&RunId>, payload: Value) -> Result<()> {
         unreachable!("record_backend_failure is not what the test reaches")
@@ -122,7 +157,8 @@ impl EventStore for EventLog {
         unreachable!("record_queue_event is not what the test reaches")
     }
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
-        unreachable!("latest_event_of is not what the test reaches")
+        let newest = self.of_kinds(&[kind]).pop();
+        Ok(self.answered(newest.into_iter().collect()).pop())
     }
     fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>> {
         unreachable!("latest_events_of is not what the test reaches")
@@ -144,7 +180,13 @@ impl EventStore for EventLog {
         upto: EventId,
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
-        unreachable!("events_of_between is not what the test reaches")
+        let page = self
+            .of_kinds(kinds)
+            .into_iter()
+            .filter(|event| event.id > after && event.id <= upto)
+            .take(limit)
+            .collect();
+        Ok(self.answered(page))
     }
     fn events_between(
         &self,
@@ -154,6 +196,7 @@ impl EventStore for EventLog {
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
         assert_eq!(filter, &EventFilter::default());
+        self.pages.set(self.pages.get() + 1);
         let page = self
             .events
             .borrow()
@@ -501,4 +544,166 @@ fn a_pass_reads_as_many_events_whatever_the_finished_history() {
     assert_eq!(few, many);
     // The three that came, and the two runs' nine.
     assert_eq!(few, 3 + 9);
+}
+
+/// The first of the runs that failed after their receipt, on tasks from
+/// 50 000, which only the `status` of a review's event finished; and the run
+/// interrupted with no receipt, on task 97.
+const FAILED: usize = 1_000_000;
+const INTERRUPTED: usize = 4;
+
+/// [`queue`] with `finished` landed runs and their steps, which the first
+/// pass does not read, `failed` runs that failed after a receipt long after
+/// their claim, the run interrupted with no receipt, and a claim hold of a
+/// supervisor that stopped.
+fn ended_queue(finished: usize, failed: usize) -> (Vec<TaskRun>, Vec<RunEvent>) {
+    let (mut runs, all) = queue(finished);
+    let mut events = Events(all);
+    for n in 0..finished {
+        let (run, task) = (10 + n, 100 + n as i64);
+        events.run(3705, run, task, "review_started", json!({}));
+        events.run(
+            3706,
+            run,
+            task,
+            "review_finished",
+            json!({"status": "passed"}),
+        );
+    }
+    events.queue(3707, "claim_held", json!({"supervisor": "c"}));
+    events.queue(3708, "supervisor_stopped", json!({"supervisor": "c"}));
+    for n in 0..failed {
+        let (run, task) = (FAILED + n, 50_000 + n as i64);
+        events.run(10, run, task, "run_claimed", json!({}));
+        events.run(11, run, task, "agent_started", json!({}));
+        events.run(3790, run, task, "receipt_observed", json!({}));
+        events.run(
+            3795,
+            run,
+            task,
+            "review_finished",
+            json!({"status": "failed"}),
+        );
+        runs.push(task_run(run, task, RunStatus::Failed, None));
+    }
+    events.run(3720, INTERRUPTED, 97, "run_claimed", json!({}));
+    events.run(
+        3721,
+        INTERRUPTED,
+        97,
+        "turn_started",
+        json!({"status": "interrupted"}),
+    );
+    events.queue(
+        3730,
+        "claim_held",
+        json!({"supervisor": "b", "reason": "disk_space"}),
+    );
+    runs.push(task_run(INTERRUPTED, 97, RunStatus::Interrupted, None));
+    (runs, events.0)
+}
+
+fn failed_run(id: Option<&RunId>) -> bool {
+    (FAILED..FAILED + 1000).any(|n| id == Some(&run_id(n)))
+}
+
+/// The judgments of now of a first pass folded from its reads
+/// ([`seed_history`]) and of one that folded every event (when the seed
+/// failed) are those of the whole history, its inputs, alerts and keys,
+/// on a short history and on one with many more landed runs.
+#[test]
+fn a_first_pass_from_its_reads_judges_as_the_whole_history() {
+    for finished in [5, 2 * EVENTS_PER_READ / 3 + 10] {
+        // As many runs failed after a receipt as landed, so their works
+        // move the median.
+        let (runs, all) = ended_queue(finished, finished + 1);
+        let goals = goals(&runs);
+        let (whole_inputs, whole) =
+            judged(&runs, &all, |live| outlier_thresholds(&all, &goals, live));
+        assert_eq!(whole.slot_alerts[0].kind, "claim_held");
+        assert!(!whole_inputs.outliers.is_empty());
+        let log = EventLog::new(runs.clone(), all.clone());
+        let mut seeded = LiveHistory::default();
+        seed_history(&log, &mut seeded).unwrap();
+        assert_eq!(seeded.upto(), all.last().unwrap().id);
+        let (_, carried) = carried_events(&log, &mut seeded).unwrap();
+        let (inputs, judgments) = judged(&runs, &carried, |live| {
+            seeded.outlier_thresholds(&goals, live)
+        });
+        assert_eq!(inputs, whole_inputs);
+        assert_eq!(judgments.keys(), whole.keys());
+        assert_eq!(judgments, whole);
+        let mut folded = LiveHistory::default();
+        let (_, every) = carried_events(&log, &mut folded).unwrap();
+        assert_eq!(every, carried);
+        assert_eq!(
+            folded.outlier_thresholds(&goals, &inputs.runs),
+            inputs.outliers
+        );
+    }
+}
+
+/// The first pass reads no page of every event: only the newest of the
+/// kinds the hold, the deferrals and the thresholds take, the events of
+/// the work clocks, the runs that failed after their receipt whole and the
+/// runs not finished. The steps of the landed runs are not read, and
+/// what it reads grows with the landed runs by their work clocks' events
+/// only.
+#[test]
+fn a_first_pass_reads_no_step_of_a_landed_run() {
+    let reads = |finished: usize| {
+        let (runs, all) = ended_queue(finished, 2);
+        let log = EventLog::new(runs, all.clone());
+        let mut history = LiveHistory::default();
+        seed_history(&log, &mut history).unwrap();
+        assert_eq!(log.pages.get(), 0);
+        assert_eq!(log.all_events.get(), 0);
+        let kinds: Vec<&str> = first_pass_reads()
+            .kinds()
+            .into_iter()
+            .map(EventKind::as_str)
+            .collect();
+        let answered = log.answered_ids.borrow();
+        for event in &all {
+            let whole = failed_run(event.run_id.as_ref());
+            let read = answered.contains(&event.id);
+            if !kinds.contains(&event.kind.as_str()) && !whole {
+                assert!(!read, "{event:?}");
+            }
+            if event.kind == EventKind::ReviewStarted {
+                assert!(!read);
+            }
+            if whole
+                || event.kind == EventKind::ReceiptObserved
+                || event.kind == EventKind::RunIntegrated
+            {
+                assert!(read, "{event:?}");
+            }
+        }
+        log.read.get()
+    };
+    let (few, many) = (reads(5), reads(105));
+    // Each landed run's claim, receipt and landing, and its claim again as
+    // the newest of its task's deferral kinds.
+    assert_eq!(many - few, 100 * 4);
+}
+
+/// When an event past the newest comes while the first pass reads, it
+/// reads again; when they keep coming, it leaves the history to fold every
+/// event.
+#[test]
+fn a_first_pass_reads_again_past_events_that_came_while_it_read() {
+    let (runs, all) = ended_queue(3, 1);
+    let newest = all.last().unwrap().id;
+    assert_eq!(all.last().unwrap().kind, EventKind::ClaimHeld);
+    let seeded = |behind: usize| {
+        let log = EventLog::new(runs.clone(), all.clone());
+        log.behind.set(behind);
+        let mut history = LiveHistory::default();
+        seed_history(&log, &mut history).unwrap();
+        history.upto()
+    };
+    assert_eq!(seeded(0), newest);
+    assert_eq!(seeded(SEED_ATTEMPTS - 1), newest);
+    assert_eq!(seeded(SEED_ATTEMPTS), EventId::new(0));
 }

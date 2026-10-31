@@ -2612,6 +2612,11 @@ impl WorkClock {
             self.finished.get_or_insert(event.id);
         }
     }
+
+    /// Whether the run's work is measured and no event seen finished it.
+    pub fn unsettled(&self) -> bool {
+        self.work.is_some() && self.finished.is_none()
+    }
 }
 
 impl Track {
