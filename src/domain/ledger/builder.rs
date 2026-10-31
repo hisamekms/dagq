@@ -277,6 +277,11 @@ struct Waiting {
     task: Option<TaskId>,
 }
 
+/// A clone of one part of what the builder keeps, held while a counting
+/// allocator reads it ([`Kept::clone_parts`]).
+#[doc(hidden)]
+pub type Part = Box<dyn std::any::Any>;
+
 /// How much [`Kept`] holds, for the supervisor's log: the events it keeps
 /// of each kind, the elements of each book, and roughly how many bytes
 /// all of them hold (the room of the events' vectors, used or not, the
@@ -562,6 +567,32 @@ impl Kept {
             self.dropped.remove(&row);
         }
         missing.into_iter().collect()
+    }
+
+    /// For the measurement of what a supervisor keeps after its start
+    /// (examples/supervisor_startup_memory.rs): hand `each` the name of each
+    /// part and a function that clones it, so that a counting allocator
+    /// reads what the part holds as what its clone allocates. A clone's
+    /// vectors take their length, not their room. Nothing of the runtime
+    /// calls it.
+    #[doc(hidden)]
+    pub fn clone_parts(&self, each: &mut dyn FnMut(&'static str, &dyn Fn() -> Part)) {
+        each("events: sessions", &|| Box::new(self.sessions.clone()));
+        each("events: queue", &|| Box::new(self.queue.clone()));
+        each("events: pushes", &|| Box::new(self.pushes.clone()));
+        each("lives", &|| Box::new(self.lives.clone()));
+        each("pre_claim", &|| Box::new(self.pre_claim.clone()));
+        each("session_rows", &|| Box::new(self.session_rows.clone()));
+        each("queue_rows", &|| Box::new(self.queue_rows.clone()));
+        each("dropped", &|| Box::new(self.dropped.clone()));
+        each("push summaries", &|| {
+            Box::new((
+                self.waiting_push.clone(),
+                self.failed_push.clone(),
+                self.closing.clone(),
+                self.push_readers.clone(),
+            ))
+        });
     }
 
     /// How much it holds.
@@ -1164,6 +1195,21 @@ impl Builder {
     /// How many marks wait.
     pub fn backlog(&self) -> usize {
         self.marks.len()
+    }
+
+    /// [`Kept::clone_parts`] of what it keeps besides [`Kept`]: its marks
+    /// and the books of the rows it waits on, touched and settled. Nothing
+    /// of the runtime calls it.
+    #[doc(hidden)]
+    pub fn clone_parts(&self, each: &mut dyn FnMut(&'static str, &dyn Fn() -> Part)) {
+        each("marks", &|| Box::new(self.marks.clone()));
+        each("unsettled", &|| Box::new(self.unsettled.clone()));
+        each("pending_pushes", &|| Box::new(self.pending_pushes.clone()));
+        each("ready_tasks", &|| Box::new(self.ready_tasks.clone()));
+        each("unsaved_steps", &|| Box::new(self.unsaved_steps.clone()));
+        each("touched", &|| Box::new(self.touched.clone()));
+        each("settled", &|| Box::new(self.settled.clone()));
+        each("settled_folds", &|| Box::new(self.settled_folds.clone()));
     }
 
     /// What the folds of the queue as a whole read, up to [`Self::events`].
