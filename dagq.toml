@@ -380,7 +380,7 @@ paths = ["src/infrastructure/adapters.rs", "src/infrastructure/adapters/ref_tran
 enabled = false
 
 [review.subagents.test-rules]
-paths = ["tests/**", "src/**", "Cargo.toml", ".config/e2e-quarantine.toml", ".config/it-slow-allow.toml", ".config/it-slow-allow.d/**"]
+paths = ["tests/**", "src/**", "Cargo.toml", ".config/e2e-quarantine.toml", ".config/it-slow-allow.toml", ".config/it-slow-allow.d/**", ".config/it-boundary.d/**"]
 
 # migration か schema を変える差分にだけ当てる。test の書き方の規則（A-140）は、migration を足す差分で同じ差分の test と一緒に見る。
 [review.subagents.migration-rules]
@@ -416,7 +416,7 @@ paths = ["src/**", "tests/**", "migrations/**", "build.rs", "Cargo.toml", "Cargo
 # 挙げるのはCIがmainで流す形式の検査で、scripts/check-scripts-root.shの一覧に入り（landing branchのscriptを一時の場所に写し、
 # cwdをrunのworktreeにして流す約束を満たす）、cargo・nextestを実行せず、3回の測定の最大が10秒以下で今のmainでexit 0になるものだけ。
 # build・testを流すもの（ADR-t1895-2決定1）、10秒を超えるもの、今のmainで落ちるもの（関係ないrunまで差し戻す）は挙げない。
-# 引数はCIと同じにし（CIが--baseを渡すcheck-design-docs・check-design-sentences・check-test-rulesはscriptの既定の基点を使う）、--self-testは挙げない。
+# 引数はCIと同じにし（CIが--baseを渡すcheck-design-docs・check-design-sentences・check-test-rules・check-it-added-testsはscriptの既定の基点を使う）、--self-testは挙げない。
 # 秒は2026-10-12に他のrunと並んだhostで3回測った最大で、順はその小さいものから。
 
 # .config/e2e-quarantine.tomlの書式・重複・上限と、印のtestがtests/e2e.rsかtests/e2e/にあること。最大約0.1秒。
@@ -470,6 +470,14 @@ paths = ["src/**", "tests/**"]
 [review.programs.check-migration-numbers]
 script = "scripts/check-migration-numbers.sh"
 paths = ["migrations/**", "build.rs"]
+
+# 差分がtests/itに足した#[test]のうち、.config/it-boundary.d/*.tomlに守る境界の宣言の無いものと、境界が値の集合の外の宣言
+# （docs/development/testing.mdの「判断と境界のtest」、ADR-t3762-1）。判断のcaseを並べたITが足されるのをtest-rulesのagentより前に返すため。
+# 既存のtestは見ない。基点は既定（HEADとmainのmerge base）。2026-10-31に他のrunと並んだhostで3回測った最大は、今のmainで約0.4秒、
+# tests/itの285ファイルに当たる差分で約3.2秒。
+[review.programs.check-it-added-tests]
+script = "scripts/check-it-added-tests.sh"
+paths = ["tests/it/**", ".config/it-boundary.d/**"]
 
 # docs/の.mdのfrontmatterの日付の行の形。最大約2.7秒。
 [review.programs.check-frontmatter-dates]

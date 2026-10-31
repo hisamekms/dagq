@@ -1,0 +1,5 @@
+[[test]]
+name = "nested::fresh::cases::a_fresh_case"
+reason = """
+two lines
+"""

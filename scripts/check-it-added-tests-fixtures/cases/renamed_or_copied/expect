@@ -1,0 +1,5 @@
+1
++nested::deeper::deeper_case_renamed at tests/it/nested/deeper.rs:2: a new test
++renamed::nested_case at tests/it/sub/thing.rs:5: a new test
++2 new test(s)
+-moved from

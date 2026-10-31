@@ -1,0 +1,8 @@
+1
++alpha::a_decision_case at tests/it/alpha.rs:11: a new test in tests/it with no boundary declared
++nested::fresh::cases::a_fresh_case at tests/it/nested/fresh.rs:3
++2 new test(s) in tests/it with no boundary
++move the cases of a decision to a unit test
++.config/it-boundary.d/t<task ID>.toml
+-keeps_a_boundary
+-inner_case

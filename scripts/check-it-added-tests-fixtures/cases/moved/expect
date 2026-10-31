@@ -1,0 +1,4 @@
+0
++nested::deepest::deeper_case at tests/it/nested/deepest.rs:2: moved from nested::deeper::deeper_case
++nested::deepest::thing_case at tests/it/nested/deepest.rs:5: moved from renamed::thing_case
+-no boundary declared

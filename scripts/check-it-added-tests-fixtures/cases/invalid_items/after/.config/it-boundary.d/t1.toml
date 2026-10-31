@@ -1,0 +1,7 @@
+# The items of task 1.
+
+[[test]]
+name = "alpha::a_decision_case"
+boundary = "SQLite"  # the file of the queue
+reason = "the queue's SQLite file keeps the row across two connections"
+task = 1

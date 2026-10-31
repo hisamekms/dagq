@@ -1,0 +1,7 @@
+1
++t2.toml:1: the item nested::fresh::cases::a_fresh_case has no reason
++t2.toml:10: key boundary is given twice in one item
++t2.toml:13: unknown key owner
++alpha::a_decision_case is declared twice (first at .config/it-boundary.d/t1.toml:3)
++warning: .config/it-boundary.d/t2.toml:15: alpha::no_such_test has no #[test] in tests/it
+-no boundary declared

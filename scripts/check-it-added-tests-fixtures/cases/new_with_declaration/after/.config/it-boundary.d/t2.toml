@@ -1,0 +1,5 @@
+[[test]]
+name = 'nested::fresh::cases::a_fresh_case'
+boundary = "復旧とadopt"
+reason = "a supervisor started again adopts the run the dead one left"
+task = 2

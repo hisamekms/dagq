@@ -14,6 +14,7 @@ related:
   - adr-t1582-1
   - adr-t1410-1
   - adr-t1707-1
+  - adr-t3762-1
   - development-local-checks
   - development-task-registration
   - development-migrations
@@ -89,6 +90,11 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
   - 閾値は本番の関門の`dagq::it`の1本の平均の数倍に置く。CIのrunnerと本番の関門は並列度が違い同じtestの秒が違うので、CIで落ちたtestが本番の関門のlogの秒では閾値の内なら、その秒を添えて直すか項目を足すかをplannerが決める。
   - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「itのtestの時間の関門」）、runのreviewのtestの規則の検査、CIのpushとpull_request（mainへのpushで落ちればci-failureのissue）。`integrate`の検証には足さない。
   - helperやfixtureだけの変更は対象にならず（それを使うtestが遅くなっても捕まえない）、CIのrunnerと本番の関門では秒が違う。
+- 境界の関門（[ADR-t3762-1](../adr/2026-10-31-t3762-1-integration-tests-added-by-a-diff-declare-the-boundary-they-keep.md)）: baseからの差分で`tests/it`に新しく現れたtestは、守る境界の宣言が無ければ`scripts/check-it-added-tests.sh`が落ちる。速さに依らず、判断のcaseを並べたITが足されるのを止めるため。宣言の一覧は`.config/it-boundary.d/*.toml`を合わせたもので、項目は足すtaskのファイル`.config/it-boundary.d/t<task ID>.toml`に足す（時間の関門の許可の一覧と同じく、別々のtaskの追加が同じファイルに触れないため）。書式・境界の値・新しいtestと移したtestの見分け方・baseの求め方はscriptの冒頭のコメントが持つ。
+  - 宣言できるのは、そのtestが上の境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか）を代表の1 caseで確かめ、ITでしか確かめられない理由を`reason`に書けるときだけ。判断のcaseを並べただけのtestは宣言せず、判断を`src/`の副作用のない関数のunit testへ移す。
+  - 機械は宣言の有無と`boundary`の値を見て、`reason`が境界を書いているかはtest-rulesのreviewが見る。既存のtestの本文の変更は対象にならない。
+  - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「testの規則の点検」）、runのプログラムのreview、CIのpushとpull_request。`integrate`の検証には足さない（時間の関門と同じく、着地の時間を増やさないため）。
+  - testを消すか名前を変えるtaskは、消えた名前の項目を同じ変更で外す（scriptは無いtestの項目を警告するだけで落とさない）。
 
 ## testファイルの行数
 

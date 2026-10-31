@@ -164,6 +164,8 @@ test（`tests/**`、`src/`の`#[cfg(test)]`）を足した・変えたworkerは�
 
 (a)と(b)のうち行だけで見分けられる形は`scripts/check-test-rules.sh`が見るので、testを足した・変えたらreceiptの前に`sh scripts/check-test-rules.sh`を流し、出た行を直す（runのプログラムのreviewとCIも同じscriptを流し、落ちればagentのreviewの前に差し戻す）。
 
+`tests/it`にtestを足したら、receiptの前に`sh scripts/check-it-added-tests.sh`を流す。名指されたtestは、判断のcaseならunit testへ移し、境界を代表するなら`.config/it-boundary.d/t<task ID>.toml`に宣言を足す（宣言してよい場合は[testの制約](testing.md)の「判断と境界のtest」の境界の関門、書式はscriptの冒頭のコメント）。runのプログラムのreviewとCIも同じscriptを流す。
+
 この点検はworkerが自分の差分を直すための手順で、したことをreceiptの`tests`のevidenceに書かない（上の「実行の記録とreceiptのevidence」）。
 
 ## hostに触らない

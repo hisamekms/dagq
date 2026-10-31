@@ -1,0 +1,19 @@
+[[test]]
+name = "nested::fresh::cases::a_fresh_case"
+boundary = "Git"
+reason = ""
+task = 2
+
+[[test]]
+name = "alpha::a_decision_case"
+boundary = "Git"
+boundary = "プロセス"
+reason = "a real git"
+task = 2
+owner = "x"
+
+[[test]]
+name = "alpha::no_such_test"
+boundary = "supervisorの配線"
+reason = "the supervisor's wiring"
+task = 2

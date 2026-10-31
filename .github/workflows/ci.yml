@@ -441,6 +441,25 @@ jobs:
             echo "no nextest output to summarise"
           fi
 
+      # The boundary gate of the tests in tests/it (ADR-t3762-1): a test the
+      # diff from the base adds to tests/it fails the job unless
+      # .config/it-boundary.d/*.toml declares the boundary it keeps
+      # (scripts/check-it-added-tests.sh, whose header has the format). The
+      # base is taken as for the time gate below; without one the script
+      # takes the merge base with origin/main. It reads no nextest output and
+      # runs after a failed test step too.
+      - name: IT boundary gate
+        if: ${{ !cancelled() }}
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$BASE" ] && printf '%s' "$BASE" | grep -q '[^0]' && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            sh scripts/check-it-added-tests.sh --base "$BASE"
+          else
+            sh scripts/check-it-added-tests.sh
+          fi
+          sh scripts/check-it-added-tests.sh --self-test
+
       # The time gate of the tests in tests/it (ADR-t1707-1): a test the diff
       # from the base added or changed that took longer than the threshold
       # fails the job unless the allow list (.config/it-slow-allow.toml and
