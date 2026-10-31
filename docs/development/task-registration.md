@@ -1,7 +1,7 @@
 ---
 id: development-task-registration
 type: development
-title: このrepositoryのtaskの登録（verify・paths・evidence・change・titleの選び方、固定バイナリを待つ宣言、依存の付け方、taskの大きさと分け方、Spikeのtask、負荷の下で落ちるtestを直すtask、ADRを書くtask、reviewのプログラムが読む形を変えるtask、ADRがリンクする文書を消すtask、runtimeの汎用性、文書の変更を求めるtask、plan reviewが当てはめる規則）
+title: このrepositoryのtaskの登録（verify・paths・evidence・change・titleの選び方、受け入れ条件とITの名指し方、固定バイナリを待つ宣言、依存の付け方、taskの大きさと分け方、Spikeのtask、負荷の下で落ちるtestを直すtask、ADRを書くtask、reviewのプログラムが読む形を変えるtask、ADRがリンクする文書を消すtask、runtimeの汎用性、文書の変更を求めるtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
 owners:
@@ -24,6 +24,8 @@ related:
   - adr-t1480-1
   - adr-t2257-1
   - adr-t2182-1
+  - adr-t1410-1
+  - adr-t3802-1
   - development-local-checks
   - development-testing
   - development-migrations
@@ -59,6 +61,16 @@ llvm-covとcargo testの重ね方:
 
 - llvm-covをverificationに含めるtaskでは`cargo test --locked`をverificationに重ねない。着地ではllvm-covの行がunit test全件と絞ったITに置き換わり（[testの制約](testing.md)の「test binary」）、`cargo test --locked`を並べると置き換えの外でITを全部流し直すので、着地の検証を軽くした分が戻る。
 - llvm-covを含めないtask（docs・pluginの文書など）は、必要なら`cargo test --locked`をverificationに残す。
+
+## 受け入れ条件とITの名指し方
+
+runtimeのtaskの受け入れ条件と`--verify`の書き方。判断はunit test、ITは境界の代表の1 caseだけ（[testの制約](testing.md)の「判断と境界のtest」、[ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)）で、ITの境界は登録簿のidで名指す（[ADR-t3802-1](../adr/2026-10-31-t3802-1-integration-test-boundaries-in-a-named-registry-with-a-module-ratchet.md)）。
+
+- 受け入れ条件は判断の結果で書く: どの入力（状態・設定・時刻の値・answer）からどの出力・操作・状態の遷移になるかを並べ、「ITで〜を確かめる」のようにtestの層で書かない。ITを名指してよいのは、登録簿のidで確かめる境界（SQLite・Git・プロセス・supervisorの配線・復旧とadopt）だけにする。
+- 新しい機能のtaskは、判断を`src/`の副作用のない関数に切り出して`#[cfg(test)]`のunit testで確かめる形でdescriptionを書く（関数の入力と出力、判断のcaseはunit testに並べること）。supervisorやfixtureを起動して判断のcaseを並べるITを前提にしない。
+- `--verify`や受け入れ条件に新しいITを名指すときは、そのITが代表する登録簿のidを添える。既存のidなら、その代表を入れ替えることと元の代表の行き先（消す・別のidの代表にする・unit testへ移す）を書く。新しいidを足すなら、descriptionかacceptanceにそのidと境界の種類と、既存のidで代表できない理由を書く（taskの文面がidを名指すことが新しいidの承認の一部で、`reason`が境界を書いていることはtest-rulesのreviewが見る（[testの制約](testing.md)の「判断と境界のtest」）。項目は足すtaskの`.config/it-boundaries.d/t<task ID>.toml`に入る）。
+- 例（新しいidを足す）: descriptionに「判断（上限の値の読みと既定との選び方）は`src/`の副作用のない関数にしてunit testで確かめる」、acceptanceに「(3) 登録簿に新しいid `verify-command-killed-in-its-process-group`（境界の種類: プロセス。integrateの検証のコマンドの実のprocess groupを上限でkillすることで、既存のidはprocess groupのkillを代表しない）を足し、代表のtest `<module>::<name>`で確かめる」。`--verify`はruntimeの組み合わせのllvm-covの行のままにする（着地では`[landing_verification]`が差分で足したITを選ぶ）。ITを1本だけ流す`--verify`を足すなら（1本に絞るので上の重ね方の`cargo test --locked`には当たらない）「`cargo nextest run --locked --test it -E 'test(=<module>::<name>)'`（id `verify-command-killed-in-its-process-group`）」のようにidを添える。
+- 例（既存のidの代表を入れ替える）: acceptanceに「登録簿のid `<既存のid>`の代表を新しいtest `<module>::<name>`に入れ替え、元の代表は消す（確かめていた判断は`src/`の`<関数>`のunit testへ移す）」。
 
 ## 固定バイナリがtask Xを含んでから行うtask
 
@@ -240,6 +252,8 @@ descriptionかacceptanceが文書の変更を求めるtaskは、登録の時に�
   旧い形を消すtaskが互換のtaskにだけ依存し、programの更新（または退役）に依存していなければ、それも欠けとみる。
   ADRがリンクする文書を消すtaskの移行中の行を足すtaskは、両方の形を通すprogramの変更に当たる。
   欠けていれば`revise`にする。
+- 新しい機能のtaskの受け入れ条件や`--verify`が、判断のcase（状態の遷移・回数と上限・時間の判定・answerから操作への対応・文面・次の一手の選び方）をITで確かめる前提なら`revise`にし、上の「受け入れ条件とITの名指し方」のとおり判断を`src/`の副作用のない関数に切り出してunit testで確かめ、ITは登録簿のidの境界だけにするよう返す。新しいITを名指すのにidが添えられていないときも`revise`にする。
+- 新しいidを足すtaskは、descriptionかacceptanceがidと境界の種類を名指し、その境界が登録簿の既存のidで代表できないこと（同じ境界の2本目でないこと）を見る。登録簿（`.config/it-boundaries.d/*.toml`）の同じ種類の項目の`test`と`reason`を読み、既存のidで代表できる、または判断のcaseを並べるだけの境界なら`revise`にし、既存のidの代表の入れ替えか、判断のunit testへの切り出しに直させる。
 - taskのtitleが上の「taskのtitle」の接頭辞で始まり、changeに合うこと。外れていれば`revise`にする。
 - ADRを書くtaskが上の「ADRを書くtask」を満たすこと（IDとファイル名の形、`check-adr-numbers.sh`のverify、置き換えか`amends`か）。足りなければ`revise`。
 - 現行のADRの決定に触れるtaskが、上の「ADRを書くtask」のとおりADRの扱い（(a)保つ決定を名指して書かない、か(b)書く）をdescriptionに確定していること。workerに選ばせる・既存のADRの本文（Consequencesを含む）の変更を許す・`superseded`のADRを今の決定として引く、のどれかに当たれば`revise`にする。
