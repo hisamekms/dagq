@@ -96,7 +96,9 @@ fn a_later_landing_pushes_both_commits_before_the_first_push_finishes() {
         repo: repo.clone(),
         second: Mutex::new(None),
     };
-    let outcome = runtime::integrate(&db, IntegrateTarget::Next, &repo, Some(&remote)).unwrap();
+    let outcome = landing_one_shot()
+        .integrate(&db, IntegrateTarget::Next, &repo, Some(&remote))
+        .unwrap();
     assert_eq!(outcome["run"]["id"], json!(first.id()));
     assert_eq!(outcome["push"]["outcome"], "pushed");
     assert_eq!(
@@ -410,7 +412,9 @@ fn the_landings_verification_of_a_deep_queue_has_a_short_tmpdir_outside_runs() {
     let short = dagq::application::host_verification_tmp_path(run.id());
     let _gone = RemoveOnDrop(short.clone());
 
-    let outcome = runtime::integrate(&db, IntegrateTarget::Task(task), &repo, None).unwrap();
+    let outcome = landing_one_shot()
+        .integrate(&db, IntegrateTarget::Task(task), &repo, None)
+        .unwrap();
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     let tmpdir = fs::read_to_string(&seen).unwrap();
     let tmpdir = Path::new(tmpdir.trim_end());
@@ -2167,5 +2171,287 @@ fn assert_load(payload: &Value) {
     assert!(
         mean.zip(max).is_some_and(|(mean, max)| mean <= max),
         "{payload}"
+    );
+}
+
+/// Commit `config` as `dagq.toml` and each `(path, text)` script on main.
+fn programs_on_main(repo: &Path, config: &str, scripts: &[(&str, String)]) {
+    fs::write(repo.join("dagq.toml"), config).unwrap();
+    git(repo, &["add", "dagq.toml"]);
+    fs::create_dir_all(repo.join("scripts")).unwrap();
+    for (path, text) in scripts {
+        fs::write(repo.join(path), text).unwrap();
+        git(repo, &["add", path]);
+    }
+    git(repo, &["commit", "-q", "-m", "review programs"]);
+}
+
+/// `(name, result, retry)` of each program run `integrate_programs_finished`
+/// recorded.
+fn landing_programs_ran(finished: &Value) -> Vec<(String, String, bool)> {
+    finished["programs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap().to_owned(),
+                p["result"].as_str().unwrap().to_owned(),
+                p["retry"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// Boundary (the landing's program reviews, ADR-t3749-1): after the
+/// rebase and before the task's verification commands, the landing runs
+/// builtin:secrets and then the project's program whose paths the diff
+/// that lands touches, from the script of the landing branch's commit
+/// (the worker's rewrite of it in the run branch does not run); `never`,
+/// whose paths it does not touch, does not. A verification done again on
+/// the same rebased head after the programs passed does not run them
+/// again. Their end is `integrate_programs_finished`, which `events --run`
+/// and `timeline` show, beside the review's own `review_programs_*`,
+/// recorded once as before. Which program
+/// runs next and when one is run once more is
+/// `application::integrate::programs::tests`.
+#[test]
+fn the_landing_runs_the_programs_of_main_before_its_commands_once_per_head() {
+    let (fixture, repo, db) = fixture();
+    let marks = fixture.dir.path().join("marks");
+    let flag = fixture.dir.path().join("verified");
+    let marks_sh = crate::common::shell_path(&marks);
+    programs_on_main(
+        &repo,
+        "[review.programs.order]\nscript = \"scripts/order.sh\"\npaths = [\"**\"]\n\
+         [review.programs.never]\nscript = \"scripts/never.sh\"\npaths = [\"nothing/**\"]\n",
+        &[
+            (
+                "scripts/order.sh",
+                format!("#!/bin/sh\necho program >> {marks_sh}\n"),
+            ),
+            (
+                "scripts/never.sh",
+                format!("#!/bin/sh\necho never >> {marks_sh}\n"),
+            ),
+        ],
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let verify = format!(
+        "echo verify >> {marks_sh} && test -f {}",
+        crate::common::shell_path(&flag)
+    );
+    let task = add_script_task(
+        &mut queue,
+        &backend,
+        "change with a rewritten check",
+        "printf 'a\\n' > a.txt && printf '#!/bin/sh\\nexit 1\\n' > scripts/order.sh",
+        &[&verify],
+    );
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let run = queue.show(task).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+
+    // The verification fails after the programs passed: the worker's.
+    let outcome = integrate(&db, task.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
+    // The review ran it once before; the landing once more, before the
+    // command.
+    assert_eq!(
+        fs::read_to_string(&marks).unwrap(),
+        "program\nprogram\nverify\n"
+    );
+    // The same rebased head verified again: the commands run, not the
+    // programs.
+    let worktree = PathBuf::from(run.worktree_path().unwrap());
+    let rebased = git_out(&worktree, &["rev-parse", "HEAD"]);
+    fs::write(&flag, "").unwrap();
+    let parked = queue.show(task).unwrap().runs[0].clone();
+    write_receipt(&parked, &rebased, "succeeded", "verified again");
+    let outcome = integrate(&db, task.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(
+        fs::read_to_string(&marks).unwrap(),
+        "program\nprogram\nverify\nverify\n"
+    );
+
+    let detail = queue.show(task).unwrap();
+    let finished = payloads(&detail, "integrate_programs_finished");
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert_eq!(finished[0]["outcome"], "passed");
+    assert_eq!(finished[0]["head"], json!(rebased));
+    assert_eq!(
+        landing_programs_ran(finished[0]),
+        [
+            ("builtin:secrets".to_owned(), "passed".to_owned(), false),
+            ("order".to_owned(), "passed".to_owned(), false)
+        ]
+    );
+    // The review's own program reviews are recorded as before, once.
+    assert_eq!(payloads(&detail, "review_programs_started").len(), 1);
+    assert_eq!(payloads(&detail, "review_programs_finished").len(), 1);
+    let kinds = event_kinds(&detail);
+    let rebased_at = kinds
+        .iter()
+        .position(|k| *k == "integration_rebased")
+        .unwrap();
+    let programs_at = kinds
+        .iter()
+        .position(|k| *k == "integrate_programs_finished")
+        .unwrap();
+    let verified_at = kinds
+        .iter()
+        .position(|k| *k == "verification_command")
+        .unwrap();
+    assert!(
+        rebased_at < programs_at && programs_at < verified_at,
+        "{kinds:?}"
+    );
+    let events = crate::common::cli::ok(
+        &db,
+        &[
+            "events",
+            "--run",
+            run.id().as_str(),
+            "--kind",
+            "integrate_programs_finished",
+        ],
+    );
+    assert_eq!(events["events"].as_array().unwrap().len(), 1, "{events}");
+    let timeline = crate::common::cli::ok(&db, &["timeline", run.id().as_str(), "--full"]);
+    let shown: Vec<&Value> = timeline["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "integrate_programs_finished")
+        .collect();
+    assert_eq!(shown.len(), 1, "{timeline}");
+    assert_eq!(shown[0]["payload"]["programs"][1]["name"], "order");
+}
+
+/// Boundary (the landing's program reviews, ADR-t3749-1): two runs each
+/// keep `notes/` within its budget on their own, so the first lands;
+/// rebased onto it, the second goes over it, and the program that checks
+/// the budget sends it back to its worker with its name and the end of
+/// its output before any of its verification commands runs.
+#[test]
+fn a_program_that_fails_only_after_the_rebase_sends_the_run_back_before_its_commands() {
+    let (fixture, repo, db) = fixture();
+    let marks = fixture.dir.path().join("marks");
+    let marks_sh = crate::common::shell_path(&marks);
+    fs::create_dir_all(repo.join("notes")).unwrap();
+    fs::write(repo.join("notes/a.txt"), "one\n").unwrap();
+    git(&repo, &["add", "notes/a.txt"]);
+    programs_on_main(
+        &repo,
+        "[review.programs.budget]\nscript = \"scripts/budget.sh\"\npaths = [\"notes/**\"]\n",
+        &[(
+            "scripts/budget.sh",
+            "#!/bin/sh\nlines=$(cat notes/*.txt | wc -l | tr -d ' ')\ntest \"$lines\" -le 2 && exit 0\necho \"notes over budget: $lines lines\"\nexit 1\n"
+                .to_owned(),
+        )],
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let verify = format!("echo verify >> {marks_sh}");
+    let first = add_file_task(&mut queue, &backend, "x", "notes/x.txt", "x", &["true"]);
+    let second = add_file_task(&mut queue, &backend, "y", "notes/y.txt", "y", &[&verify]);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(
+        integrate(&db, first.as_i64(), &repo).unwrap()["outcome"],
+        "integrated"
+    );
+
+    let outcome = integrate(&db, second.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
+    let reason = outcome["reason"].as_str().unwrap();
+    for part in [
+        "the review program budget rejected the change",
+        "notes over budget: 3 lines",
+        "before the verification commands",
+    ] {
+        assert!(reason.contains(part), "{part:?} in {reason}");
+    }
+    assert!(!marks.exists(), "no verification command ran");
+    let detail = queue.show(second).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    assert!(integration_verifications(&detail).is_empty());
+    let deferred = payloads(&detail, "integration_deferred");
+    assert_eq!(deferred[0]["code"], "verification_failed");
+    assert_eq!(deferred[0]["program"], "budget");
+    let finished = payloads(&detail, "integrate_programs_finished");
+    assert_eq!(finished[0]["outcome"], "failed");
+    assert_eq!(
+        landing_programs_ran(finished[0]).last().unwrap(),
+        &("budget".to_owned(), "failed".to_owned(), false)
+    );
+}
+
+/// Boundary (the landing's program reviews, ADR-t3749-1): a run whose
+/// diff no program's paths touch lands as before, recording nothing of
+/// them. A program past its limit is the host's, not the worker's: it is
+/// run once more in the same attempt, and past it again the run waits for
+/// a person (`integration_held`, `verification_environment`) without a
+/// session, and none of its commands runs.
+#[test]
+fn a_program_past_its_limit_twice_holds_the_landing_for_a_person() {
+    let (fixture, repo, db) = fixture();
+    let marks = fixture.dir.path().join("marks");
+    let marks_sh = crate::common::shell_path(&marks);
+    programs_on_main(
+        &repo,
+        "[review.programs.\"builtin:secrets\"]\nenabled = false\n\
+         [review.programs.slow]\nscript = \"scripts/slow.sh\"\npaths = [\"slow/**\"]\ntimeout_secs = 1\n",
+        &[("scripts/slow.sh", "#!/bin/sh\nsleep 30\n".to_owned())],
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let verify = format!("echo verify >> {marks_sh}");
+    let untouched = add_file_task(&mut queue, &backend, "other", "other.txt", "o", &["true"]);
+    let slow = add_script_task(
+        &mut queue,
+        &backend,
+        "slow",
+        "mkdir slow && printf 's\\n' > slow/s.txt",
+        &[&verify],
+    );
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(
+        integrate(&db, untouched.as_i64(), &repo).unwrap()["outcome"],
+        "integrated"
+    );
+    let detail = queue.show(untouched).unwrap();
+    assert!(payloads(&detail, "integrate_programs_finished").is_empty());
+
+    let outcome = integrate(&db, slow.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "held", "{outcome}");
+    let reason = outcome["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("the review program slow ran past its 1s limit")
+            && reason.contains("integrate-program-1-1-retry.err")
+            && reason.contains("no session is resumed"),
+        "{reason}"
+    );
+    assert!(!marks.exists(), "no verification command ran");
+    let detail = queue.show(slow).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    let held = payloads(&detail, "integration_held");
+    assert_eq!(held[0]["code"], "verification_environment");
+    assert_eq!(held[0]["program"], "slow");
+    let finished = payloads(&detail, "integrate_programs_finished");
+    assert_eq!(finished[0]["outcome"], "held");
+    assert_eq!(
+        landing_programs_ran(finished[0]),
+        [
+            ("slow".to_owned(), "timed_out".to_owned(), false),
+            ("slow".to_owned(), "timed_out".to_owned(), true)
+        ]
     );
 }

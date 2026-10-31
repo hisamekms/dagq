@@ -276,8 +276,9 @@ fn a_direct_integrate_waits_for_the_update_jobs_e2e() {
     await_that(&db, "the e2e", || e2e.exists());
 
     thread::scope(|scope| {
-        let integrate = scope
-            .spawn(|| runtime::integrate(&db, IntegrateTarget::Task(TaskId::new(2)), &repo, None));
+        let integrate = scope.spawn(|| {
+            landing_one_shot().integrate(&db, IntegrateTarget::Task(TaskId::new(2)), &repo, None)
+        });
         wait_until(&db, Duration::from_secs(60), |queue| {
             queue.run(waiting.id()).unwrap().status() == RunStatus::Integrating
         });

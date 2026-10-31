@@ -152,6 +152,10 @@ pub struct OneShot {
     /// they make: the queue service's socket, which the binary takes; tests
     /// that keep no service run its use cases in their process.
     pub lifecycle_route: LifecycleRoute,
+    /// The dagq a built-in review program of `integrate`'s landing runs as
+    /// (ADR-t3749-1): this process's executable, which tests that land in
+    /// their own process replace with dagq's.
+    pub dagq: Option<PathBuf>,
 }
 
 /// This process's environment, which the binary's commands read their
@@ -614,6 +618,7 @@ impl OneShot {
             verification_timeout: VERIFICATION_TIMEOUT,
             profiles: &crate::domain::toolchain::BUILTIN,
             lifecycle_route: LifecycleRoute::Socket(process_env),
+            dagq: std::env::current_exe().ok(),
         }
     }
 

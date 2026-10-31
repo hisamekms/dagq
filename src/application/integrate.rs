@@ -54,6 +54,9 @@ use crate::domain::{
 };
 use crate::migration_numbers;
 
+mod programs;
+pub use programs::LandingPrograms;
+
 /// Why validation did not accept a run's receipt, with what it could
 /// verify on the way.
 pub struct Rejection {
@@ -735,6 +738,10 @@ pub struct Integration<'a> {
     /// landing is handed over to wait for the slot again. `None` (a
     /// person's `integrate`) never hands over.
     pub handing_off: Option<HandoffDrain<'a>>,
+    /// What runs the review programs the diff that lands requires, after
+    /// the rebase and before the verification commands (ADR-t3749-1);
+    /// `None` runs none.
+    pub programs: Option<LandingPrograms<'a>>,
     /// The build identifier of the binary that lands (the supervisor's
     /// `binary_version`, or this binary's at a person's `integrate`),
     /// recorded as the `build` of an `integration_error`: a supervisor of
@@ -1315,6 +1322,7 @@ fn land_integrating(
             ctx.clock,
             ctx.steps.as_ref().map(|steps| &*steps.shared),
             ctx.handing_off,
+            ctx.programs.as_ref(),
             &task,
             run,
             &onto,
@@ -2141,6 +2149,7 @@ fn land(
     clock: &dyn Clock,
     steps: Option<&super::step_report::SharedVerification>,
     handing_off: Option<HandoffDrain<'_>>,
+    programs: Option<&LandingPrograms<'_>>,
     task: &Task,
     run: &TaskRun,
     landing_branch: &LandingBranch,
@@ -2383,6 +2392,29 @@ fn land(
             ),
             json!({"main": main, "head": rebased, "scope_violation": outside, "allowed": task.paths()}),
         );
+    }
+    // The review programs the diff that lands requires, the cheap gate
+    // before the commands (ADR-t3749-1): one that fails sends the run back
+    // before any command runs.
+    if let Some(programs) = programs
+        && let Some(verdict) = programs::landing_programs(
+            queue,
+            repository,
+            verifier,
+            (files, clock),
+            programs,
+            handing_off,
+            &programs::ProgramsAt {
+                run,
+                worktree,
+                run_dir,
+                onto,
+                main,
+                rebased: &rebased,
+            },
+        )?
+    {
+        return Ok(verdict);
     }
     // The task's verification commands run here, once per commit, on the
     // rebased tree: validation only checks the receipt (ADR-0023 decision 1).

@@ -68,6 +68,16 @@ impl<'a> ProgramBackends<'a> {
     }
 }
 
+/// The host's program backend and the spawner of its processes, owned:
+/// what a supervisor's landing thread runs the landing's program reviews
+/// with (ADR-t3749-1), apart from the supervisor's borrows; its backends
+/// are the review's ([`ProgramBackends`]) with the review's configuration.
+#[derive(Clone)]
+pub struct ProgramHost {
+    pub host: std::sync::Arc<dyn ReviewProgramBackend>,
+    pub spawner: std::sync::Arc<dyn Spawner>,
+}
+
 /// One program a review attempt runs, as the landing branch's commit has
 /// it: its configuration, the changed paths that required it, and its
 /// script's text at that commit (a built-in's, the source the binary

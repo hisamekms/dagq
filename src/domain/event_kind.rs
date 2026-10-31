@@ -42,8 +42,10 @@
 //!   `agent_started`, `approve_withheld`, `stale_receipt_*`, `slots_full_*`,
 //!   `queue_hold_applied`, `usage_limited`, `auth_required`,
 //!   `conflicts_config_changed`, `first_commit_observed`,
-//!   `migration_renumbered`, `job_restarted`, `runtime_error` and
-//!   `cleanup_failed`. The kinds of the retired worker screen and keys are
+//!   `migration_renumbered`, `job_restarted`, `runtime_error`,
+//!   `cleanup_failed` and `integrate_programs_finished` (the landing's
+//!   program reviews before its verification commands, ADR-t3749-1, apart
+//!   from the review stage's `review_programs_*`). The kinds of the retired worker screen and keys are
 //!   kept only so old records are read.
 //! - observation and analysis: `observation`, `observe_*`, `finding_*`
 //!   (but `finding_planner_*`), `mark_*`, `forecast_recorded`, `kpi_*`,
@@ -237,6 +239,7 @@ event_kinds! {
     IncrementalSessionsRemoved => "incremental_sessions_removed",
     InputNotReady => "input_not_ready",
     InstallE2eFinished => "install_e2e_finished",
+    IntegrateProgramsFinished => "integrate_programs_finished",
     IntegrationApproved => "integration_approved",
     IntegrationDeferred => "integration_deferred",
     IntegrationError => "integration_error",
@@ -1747,6 +1750,10 @@ mod tests {
             ),
             (EventKind::InputNotReady, "input_not_ready"),
             (EventKind::InstallE2eFinished, "install_e2e_finished"),
+            (
+                EventKind::IntegrateProgramsFinished,
+                "integrate_programs_finished",
+            ),
             (EventKind::IntegrationApproved, "integration_approved"),
             (EventKind::IntegrationDeferred, "integration_deferred"),
             (EventKind::IntegrationError, "integration_error"),

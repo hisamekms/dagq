@@ -510,6 +510,10 @@ pub struct Ports<'a> {
     /// review's actor (ADR-t1895-2 decision 5): an eval's case's program
     /// reviews (ADR-t1728-1 (i)).
     pub programs: crate::application::review_programs::ProgramBackends<'a>,
+    /// The host's program backend and spawner, owned, that the landings'
+    /// threads run the landing's program reviews with (ADR-t3749-1), on
+    /// [`Self::programs`]' configuration.
+    pub landing_programs: crate::application::review_programs::ProgramHost,
     /// The queue service's tokens and socket, which the workers and the
     /// jobs are given instead of the queue's path (goal 82's stage (3)).
     pub service_access: &'a dyn crate::application::queue_service::ServiceAccess,
@@ -1315,6 +1319,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         signals: claude.signals,
         spawner: ports.spawner,
         programs: &ports.programs,
+        landing_programs: ports.landing_programs.clone(),
         service_access: ports.service_access,
         telemetry_tokens: ports.telemetry_tokens,
         environment: ports.environment.clone(),
@@ -1554,6 +1559,9 @@ struct Supervisor<'a> {
     spawner: &'a dyn Spawner,
     /// Where the program jobs of a review run ([`Ports::programs`]).
     programs: &'a crate::application::review_programs::ProgramBackends<'a>,
+    /// What the landings run their program reviews with
+    /// ([`Ports::landing_programs`]).
+    landing_programs: crate::application::review_programs::ProgramHost,
     service_access: &'a dyn crate::application::queue_service::ServiceAccess,
     /// The runs' executors' telemetry tokens ([`Ports::telemetry_tokens`]).
     telemetry_tokens: &'a dyn crate::application::queue_service::TelemetryTokens,

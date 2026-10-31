@@ -1,0 +1,23 @@
+# The registry's boundaries task 3749 added to tests/it
+# (the format is in the header of scripts/check-it-added-tests.sh).
+
+[[boundary]]
+id = "landing-programs-read-from-main-run-before-the-commands"
+kind = "Git"
+test = "runtime_integrate::the_landing_runs_the_programs_of_main_before_its_commands_once_per_head"
+reason = "着地の program が rebase の後に landing branch の commit の tree から script を読み（run branch が書き換えた script ではなく）、main..rebased の Git の差分で選ばれ、実の verification のコマンドより前に流れ、同じ rebased head の検証のやり直しで流れないことは、実の Git の rebase と commit の tree と queue の event を通してしか確かめられない。どれを流すか・いつ流し直すかの判断は integrate::programs の unit test"
+task = 3749
+
+[[boundary]]
+id = "landing-program-fails-only-on-the-rebased-tree"
+kind = "Git"
+test = "runtime_integrate::a_program_that_fails_only_after_the_rebase_sends_the_run_back_before_its_commands"
+reason = "rebase の前はどちらの run も通り、先の run が着地して main と合わさって初めて落ちる筋書きは、実の Git の rebase が作る main..rebased の tree でしか作れない。非 0 の後に検証のコマンドを流さず needs_session にする判断は integrate::programs の unit test"
+task = 3749
+
+[[boundary]]
+id = "landing-program-past-its-limit-holds-the-landing"
+kind = "プロセス"
+test = "runtime_integrate::a_program_past_its_limit_twice_holds_the_landing_for_a_person"
+reason = "時間の上限を超えた実の script の process group を止め、同じ試行で 1 回流し直してなお超えれば held にし session を再開しないことは、実の process と時計でしか確かめられない。流し直しと held の判断は integrate::programs の unit test"
+task = 3749

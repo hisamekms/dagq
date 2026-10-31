@@ -507,6 +507,7 @@ pub(super) const MODULES: &[ModuleContext] = &[
     module("src/application/session.rs", Execution),
     module("src/application/headless_session.rs", Execution),
     module("src/application/integrate.rs", Execution),
+    module("src/application/integrate/", Execution),
     module("src/application/review.rs", Execution),
     module("src/application/setup_review.rs", Execution),
     module("src/application/recording.rs", Execution),

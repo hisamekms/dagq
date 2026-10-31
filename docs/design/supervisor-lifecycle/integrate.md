@@ -31,6 +31,8 @@ related:
   - adr-t2268-1
   - adr-t2424-1
   - adr-t2719-1
+  - adr-t3749-1
+  - design-supervisor-lifecycle-review-programs
   - design-toolchain-profiles
 ---
 
@@ -47,7 +49,7 @@ supervisorはreviewがpassしたrunと、上限の後の差し戻しを収束と
 ```text
 reviewのpass → 着地の前のe2e（要るrunだけ） → 着地slot
 承認: 束縛の確認 → runの選択 → leaseと空き容量の確認 → 着地の承認の記録 → slotを取る
-着地: 着地済みか → worktreeの前処理 → receiptの検査 → rebase → 番号の振り直し → pathsの検査 → 検証のコマンド
+着地: 着地済みか → worktreeの前処理 → receiptの検査 → rebase → 番号の振り直し → pathsの検査 → reviewのプログラム → 検証のコマンド
       └─ 通れば squash commit → mainを進める → 完了 → 後始末 → push → follow_upsの登録
       └─ 通らなければ needs_session / held（hostの失敗） / failed（receiptが失敗を報告）
 mainが動く → landing recheck → 着地しなくなった待ちのrunをresumeへ
@@ -94,6 +96,14 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 - rebaseの後にrunが足したmigrationの番号が`main`のものと重なれば、機械で直せる1件だけを振り直し、他は`needs_session`にする（`plan_renumber`・`renumber_migration`、[ADR-0067](../../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)の決定3）。
 - 振り直しはqueueのrepositoryがdagqのソースのときだけ動く（[Source repository](source-repository.md)）。
+
+## reviewのプログラム
+
+- pathsの検査の後・検証のコマンドの前に、landing branchのcommitのreviewのプログラム（built-inを含む）のうち着地する差分（`main..rebased`）にpathsが当たるものを、宣言の順に1本ずつ流す（`integrate::programs::landing_programs`、[ADR-t3749-1](../../adr/2026-10-31-t3749-1-integrate-runs-the-review-programs-of-the-landing-diff-before-its-commands.md)、読む元とenvは[プログラムのreview](review-programs.md)）。
+- 1本が非0なら検証のコマンドを1本も流さず`needs_session`にし、reviewのreviseの上限には数えない。
+- 起動できない・読めない・時間切れは下のhostの失敗と同じく同じ試行で1回だけ流し直し、なお同じなら`held`、handoffのdrain中は流し直さず引き継ぐ。
+- reviewのactorのbackendが流せないときはhostで流さず、`skipped`を記録して検証のコマンドへ進む（理由はADR-t3749-1決定5）。
+- 同じrebased headで全部が通った後の検証のやり直し（flaky・引き継ぎ）では流し直さず、当たるものが無ければ何も記録しない。
 
 ## 検証のコマンド
 

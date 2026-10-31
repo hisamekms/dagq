@@ -34,9 +34,9 @@ use crate::{
         adapters::{ClaudeCode, GitRepository, SystemProcesses, load_average, path_text},
         clock,
         codex::Codex,
-        location::runs_dir,
+        location::{review_programs_dir, runs_dir},
         process::LocalSpawner,
-        run_env::{ShellVerifier, load_disk_config},
+        run_env::{ShellVerifier, load_disk_config, load_review_jobs},
         run_files::LocalRunFiles,
         runtime_store::{SqliteOpener, SqlitePorts},
         sqlite::SqliteQueue,
@@ -627,6 +627,30 @@ impl OneShot {
                 Duration::ZERO,
             )
         };
+        // The landing's program reviews run as the supervisor's review runs
+        // them (ADR-t3749-1): on the host, within a program job's limit of
+        // `[review.jobs]` (the reviewer's without it).
+        let host_programs = crate::infrastructure::review_programs::HostPrograms::inheriting(
+            &main_checkout,
+            self.dagq.as_deref().unwrap_or(Path::new("dagq")),
+            std::env::vars_os(),
+        );
+        let program_scratch = review_programs_dir(&db);
+        let reviewer_timeout = ClaudeCode {
+            executable: PathBuf::from("claude"),
+        }
+        .review_timeout();
+        let program_timeout = load_review_jobs(&main_checkout)
+            .unwrap_or_else(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "[review.jobs] of dagq.toml not read: {error:#}; using the reviewer's timeout");
+                None
+            })
+            .unwrap_or_default()
+            .job_timeout(
+                Some(crate::domain::headless_job::JobKind::Program),
+                reviewer_timeout,
+                reviewer_timeout,
+            );
         let mut integration = Integration {
             queue,
             repository: &repository,
@@ -714,6 +738,15 @@ impl OneShot {
             steps: None,
             // No handoff drains a person's landing.
             handing_off: None,
+            programs: Some(integration::LandingPrograms {
+                backends: crate::application::review_programs::ProgramBackends::new(
+                    &host_programs,
+                    crate::application::execution::ExecutionConfig::default(),
+                ),
+                spawner: &LocalSpawner,
+                scratch: &program_scratch,
+                timeout: program_timeout,
+            }),
             build: crate::VERSION,
         };
         let integrator = Integrator::of_process(std::process::id());

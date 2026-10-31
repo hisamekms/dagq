@@ -963,7 +963,11 @@ pub fn supervise_with_reviewer(
             (&main_checkout, &db, options.profiles),
         )
     });
-    let host_programs = review_program_host(&repository, runner, std::env::vars_os())?;
+    let host_programs = Arc::new(review_program_host(
+        &repository,
+        runner,
+        std::env::vars_os(),
+    )?);
     // The container's parts record and read on the queue through the
     // service as the supervisor, opening no DB for them.
     let container_records = super::ContainerRecords::of_service(supervisor_queues(), &db);
@@ -1043,9 +1047,13 @@ pub fn supervise_with_reviewer(
         // Every actor runs on the host until a backend is configured
         // (`ExecutionConfig`).
         programs: crate::application::review_programs::ProgramBackends::new(
-            &host_programs,
+            &*host_programs,
             crate::application::execution::ExecutionConfig::default(),
         ),
+        landing_programs: crate::application::review_programs::ProgramHost {
+            host: host_programs.clone(),
+            spawner: Arc::new(LocalSpawner),
+        },
         service_access: &service_tokens,
         telemetry_tokens: &service_tokens,
         telemetry_sinks: Arc::new(

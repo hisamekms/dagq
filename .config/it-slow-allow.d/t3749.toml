@@ -1,0 +1,32 @@
+# The time gate's allow-list items of task 3749 (the format is in
+# .config/it-slow-allow.toml and scripts/check-it-test-time.sh).
+
+# 19.3s in the worker's stress
+[[test]]
+name = "runtime_integrate::a_program_that_fails_only_after_the_rebase_sends_the_run_back_before_its_commands"
+reason = "B 境界（守る境界）: Git: two runs supervised, one landed, the other rebased onto it so that the landing's program fails only on the combined tree"
+task = 3749
+
+# 20.6s in the worker's stress
+[[test]]
+name = "runtime_integrate::a_program_past_its_limit_twice_holds_the_landing_for_a_person"
+reason = "B 境界（守る境界）: プロセス: a real script's process group stopped at its 1s limit twice before the hold, after another run's landing"
+task = 3749
+
+# 14.8s in the worker's stress; only its call of integrate changed
+[[test]]
+name = "runtime_verify_retry::a_command_past_its_whole_limit_is_a_timeout_failure"
+reason = "B 境界（守る境界）: プロセス: a real verification command killed at its limit and again on its retry"
+task = 3749
+
+# 12.3s in the worker's stress; only its call of integrate changed
+[[test]]
+name = "runtime_verify_retry::a_full_disk_without_room_is_held_without_a_retry"
+reason = "B 境界（守る境界）: プロセス: a real verification command on the supervised run's landing, held for the disk"
+task = 3749
+
+# 14.0s in the worker's stress
+[[test]]
+name = "runtime_integrate::the_landing_runs_the_programs_of_main_before_its_commands_once_per_head"
+reason = "B 境界（守る境界）: Git: a supervised run rebased and landed twice on one head, its programs read from main's commit and its commands run after them"
+task = 3749

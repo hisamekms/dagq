@@ -120,13 +120,15 @@ fn a_rejecting_program_sends_the_worker_back_before_any_agent_and_a_passing_set_
         ]
         .map(|(p, o)| (p.to_owned(), o.to_owned()))
     );
+    // The landing runs those the diff that lands touches once more, after
+    // the rebase (ADR-t3749-1).
     assert_eq!(
         (
             runs_of(&mark("first")),
             runs_of(&mark("later")),
             runs_of(&mark("never"))
         ),
-        (2, 1, 0)
+        (3, 2, 0)
     );
     // Each script ran from the run's directory of the queue's
     // `review-programs/`, outside its run directory and worktree, which
@@ -143,7 +145,7 @@ fn a_rejecting_program_sends_the_worker_back_before_any_agent_and_a_passing_set_
         &dagq::infrastructure::location::review_programs_dir(&db).join(run.id().as_str()),
     );
     let ran = fs::read_to_string(mark("first")).unwrap();
-    assert_eq!(ran.lines().count(), 2, "{ran}");
+    assert_eq!(ran.lines().count(), 3, "{ran}");
     for path in ran.lines().map(Path::new) {
         assert!(path.starts_with(&scratch), "{path:?} under {scratch:?}");
         assert!(

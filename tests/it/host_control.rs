@@ -23,7 +23,7 @@ use crate::common::{
 };
 use crate::runtime_support::{
     Fixture, IntegrateTarget, RunStatus, SqliteQueue, TaskId, TaskReads, TaskRun, TestWorkspace,
-    VALID_AGENT, fixture, runtime, supervise,
+    VALID_AGENT, fixture, landing_one_shot, runtime, supervise,
 };
 use dagq::{
     application::ProcessControl,
@@ -307,13 +307,14 @@ fn event_count(db: &Path) -> usize {
 #[test]
 fn a_persons_integrate_lands_through_the_service_as_on_the_db_and_the_service_runs_no_git() {
     let (_direct, direct_repo, direct_db, direct_run) = awaiting();
-    let on_db = runtime::integrate(
-        &direct_db,
-        IntegrateTarget::Task(TaskId::new(1)),
-        &direct_repo,
-        None,
-    )
-    .unwrap();
+    let on_db = landing_one_shot()
+        .integrate(
+            &direct_db,
+            IntegrateTarget::Task(TaskId::new(1)),
+            &direct_repo,
+            None,
+        )
+        .unwrap();
     assert_eq!(on_db["outcome"], "integrated", "{on_db}");
 
     let (_served, repo, db, run) = awaiting();
@@ -1212,8 +1213,9 @@ fn a_held_run_is_approved_by_no_integrate_and_records_no_approval() {
             .filter(|event| event.kind.as_str() == "integration_approved")
             .count()
     };
-    let error =
-        runtime::integrate(&db, IntegrateTarget::Task(TaskId::new(1)), &repo, None).unwrap_err();
+    let error = landing_one_shot()
+        .integrate(&db, IntegrateTarget::Task(TaskId::new(1)), &repo, None)
+        .unwrap_err();
     assert!(
         format!("{error:#}").contains("is held by the supervisor"),
         "{error:#}"

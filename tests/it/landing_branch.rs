@@ -315,7 +315,9 @@ fn a_landing_that_renames_the_branch_still_lands_and_pushes_on_its_branch() {
 #[test]
 fn no_push_records_the_configured_remote() {
     let no_push = |db: &Path, repo: &Path| {
-        runtime::integrate(db, IntegrateTarget::Task(TaskId::new(1)), repo, None).unwrap()
+        landing_one_shot()
+            .integrate(db, IntegrateTarget::Task(TaskId::new(1)), repo, None)
+            .unwrap()
     };
     let (_dir, repo, db) = renamed("trunk");
     fs::write(

@@ -144,6 +144,17 @@ impl Supervisor<'_> {
         // Read at its verification's retry (ADR-t3344-1).
         let handing_off = self.handoff_drain.clone();
         let stop = self.stop.clone();
+        // The landing's program reviews run as the review's do
+        // (ADR-t3749-1): on its actor's backend, within a program job's
+        // limit, their scripts in the run's `review-programs/`.
+        let program_host = self.landing_programs.clone();
+        let program_config = self.programs.config.clone();
+        let program_scratch = self.layout.review_programs_dir.clone();
+        let program_timeout = self.job_timeout(&JobSubject::review_program(
+            request.run.id(),
+            0,
+            "integrate",
+        ));
         Ok(spawn_traced(move || {
             let mut queue = queues.open()?;
             // As `check_disk` reads it, for the retry of a command that
@@ -178,6 +189,15 @@ impl Supervisor<'_> {
                     handing_off: Some(integration::HandoffDrain {
                         handing_off: &handing_off,
                         stop: &stop,
+                    }),
+                    programs: Some(integration::LandingPrograms {
+                        backends: crate::application::review_programs::ProgramBackends::new(
+                            &*program_host.host,
+                            program_config,
+                        ),
+                        spawner: &*program_host.spawner,
+                        scratch: &program_scratch,
+                        timeout: program_timeout,
                     }),
                     build: &build,
                 },

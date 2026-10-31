@@ -229,7 +229,7 @@ fn a_command_past_its_whole_limit_is_a_timeout_failure() {
     set_commands(&db, json!(["sleep 30"]));
     let outcome = runtime::OneShot {
         verification_timeout: Duration::from_secs(1),
-        ..runtime::OneShot::system()
+        ..landing_one_shot()
     }
     .integrate(&db, IntegrateTarget::Task(TaskId::new(1)), &repo, None)
     .unwrap();
@@ -265,7 +265,7 @@ fn a_command_past_the_declared_limit_is_a_timeout_failure() {
     git(&repo, &["commit", "-q", "-m", "verification limit"]);
     set_commands(&db, json!(["sleep 30"]));
     let started = std::time::Instant::now();
-    let outcome = runtime::OneShot::system()
+    let outcome = landing_one_shot()
         .integrate(&db, IntegrateTarget::Task(TaskId::new(1)), &repo, None)
         .unwrap();
     assert!(started.elapsed() < Duration::from_secs(25));
@@ -306,7 +306,7 @@ fn a_full_disk_without_room_is_held_without_a_retry() {
             ..DiskConfig::default()
         }),
         free_space: room_then_short,
-        ..runtime::OneShot::system()
+        ..landing_one_shot()
     }
     .integrate(&db, IntegrateTarget::Task(TaskId::new(1)), &repo, None)
     .unwrap();

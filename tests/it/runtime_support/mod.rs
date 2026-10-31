@@ -1921,11 +1921,21 @@ pub fn stats_full(db: &Path) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+/// The one-shot commands of a landing in this process: a built-in review
+/// program of the landing runs as dagq, as it does under the CLI, not as
+/// this test binary.
+pub fn landing_one_shot() -> runtime::OneShot {
+    runtime::OneShot {
+        dagq: Some(PathBuf::from(env!("CARGO_BIN_EXE_dagq"))),
+        ..runtime::OneShot::system()
+    }
+}
+
 /// `integrate` as the CLI runs it without `--no-push`: pushing through the
 /// real Git adapter, which finds no origin in the fixtures.
 pub fn integrate(db: &Path, task_id: i64, repo: &Path) -> Result<Value> {
     let remote = GitRepository::inspect(repo).ok();
-    runtime::integrate(
+    landing_one_shot().integrate(
         db,
         IntegrateTarget::Task(TaskId::new(task_id)),
         repo,
@@ -1935,7 +1945,9 @@ pub fn integrate(db: &Path, task_id: i64, repo: &Path) -> Result<Value> {
 
 pub fn integrate_next(db: &Path, repo: &Path) -> Value {
     let remote = GitRepository::inspect(repo).unwrap();
-    runtime::integrate(db, IntegrateTarget::Next, repo, Some(&remote)).unwrap()
+    landing_one_shot()
+        .integrate(db, IntegrateTarget::Next, repo, Some(&remote))
+        .unwrap()
 }
 
 pub fn events_of(db: &Path, run_id: &RunId, kind: &str) -> Vec<Value> {

@@ -80,6 +80,7 @@ hostで動くrunのworktreeの登録が壊れている（`.git`が名指すadmin
 reviewの段の順は、先頭の[プログラムのreview](review-programs.md)、その後のagentのreview、passの後の[着地の前のe2e](integrate.md#着地の前のe2e)である。
 プログラムのreviewはtestを含まない速い形式の検査で、validatingと同じくtaskのverifyのコマンドを流さない。
 着地するrunのtestを含む検証は下の着地の検証（`integrate`のrebase後の1回）だけで、プログラムのreviewとは二重にしない。
+`integrate`はその検証のコマンドの前に、同じプログラムを着地する差分で流し直す（安い関門で、testを含む検証ではない。[`integrate`](integrate.md#reviewのプログラム)）。
 着地しない`already_satisfied`のrunは、下の「already_satisfiedの検証」でmainのsnapshotに流す。
 
 ## already_satisfiedの検証

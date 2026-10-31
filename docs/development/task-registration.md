@@ -206,7 +206,8 @@ reviewが3回以上になるrunは差分の大きいtaskに偏り、そのうち
 ## reviewのプログラムが読む形を変えるtask
 
 - runのプログラムのreviewは、runのcommitでなくlanding branch（main）の今のcommitから`[review.programs.<name>]`とそのscriptを読んで流す（[プログラムのreview](../design/supervisor-lifecycle/review-programs.md)の「読む元・流す場所・env・結果」のsnapshot）。
-  このため、programのscriptが読む設定・一覧（`.config/`など）や、scriptが前提にするコードの形を消す・変えるtaskは、同じrunでscriptを直してもreviewではmainの旧いscriptが動き、新しいtreeが落ちる。
+  `integrate`もrebaseの後・検証のコマンドの前に、同じくmainの今のcommitのprogramとscriptを着地する差分で流す（[integrate](../design/supervisor-lifecycle/integrate.md)の「reviewのプログラム」）。
+  このため、programのscriptが読む設定・一覧（`.config/`など）や、scriptが前提にするコードの形を消す・変えるtaskは、同じrunでscriptを直してもreviewでも着地でもmainの旧いscriptが動き、新しいtreeが落ちる。
 - そのようなtaskを登録するときは、旧い形と新しい形の両方を通すprogramの変更（またはprogramの退役）を先のtaskにし、形を変えるtaskをそれに`--depends-on`で依存させる（中身の前提の依存。先の変更が既にmainにあれば要らない）。
 - 先のtaskが両方の形を通せないときは、旧い形を残したまま新しい形を足す互換のtask、新しい形を読むprogramの更新（または退役）のtask、旧い形を消すtaskの3つに分ける。
   旧い形を消すtaskはprogramの更新（または退役）のtaskに`--depends-on`で依存させ、互換のtaskへの依存だけで代えない（互換のtaskの着地はmainのscriptを変えないため）。
