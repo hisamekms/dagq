@@ -1,0 +1,8 @@
+# The items of task 3743 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 5.7s: two supervise passes over a live and a gone owner, a label job and the set's build
+[[test]]
+name = "agent_cases::a_set_another_live_supervisor_makes_is_left_to_it_until_it_is_gone"
+reason = "B 境界（守る境界）: 生きている別の supervisor が取った集合に触らず、持ち主の process が居なくなった後に引き取って準備・ラベルの job・組み立てまで進むことを、supervisors の登録と SQLite の 1 つの書き込みの transaction と label の job の配線で確かめる（判断は domain::agent_eval::production の take の unit test）"
+task = 3743

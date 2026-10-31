@@ -76,7 +76,7 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
      記録の後にこのコマンドがその記録を対象にtelemetryのtokenを発行し、5の後に失効させる。
   4. そのdirをcwdに、envでobserverの役割とqueue serviceのsocketとobserverのtokenのfileを渡し（queueのpathは渡さない）、PATHの先頭に`dagq`のdirを置いてagentを起動し（promptは`dagq --db <db>`ではなく`dagq`を名指す。[Queue service](../queue-service.md#クライアントモード)）、stdoutを`output.out`、stderrを`output.err`に分けて書く（`Streams::Files`）。
      `--timeout`を過ぎたらkillする。
-     killの前にagentの子孫（`ProcessControl::descendants`。agentのBashとそれが起動したもの）を読み、agentの後にそれらもSIGKILLするので、agentの子プロセスは残らない。
+     killの前にagentの子孫（agentのBashとそれが起動したもの）を読み、agentの後にそれらもSIGKILLするので、agentの子プロセスは残らない。
      Codexのjobも同じ`run_agent`で止め、Codexがコマンドごとに別のprocess groupで走らせたものも、killの前に列挙した子孫としてpidで止まる。
   5. 終了後、`observe_started`より後にobserverが記録・更新したfindingと、observerが閉じたfinding（`resolved`か`dismissed`にしたもの。再記録による開き直しと、人やplannerの`resolve` / `dismiss`は数えない）とobserverのaskを集め、`observe_finished`を記録して返す。
      `outcome`は`succeeded`、`failed`（非0終了）、`error`（起動できない・timeout）のどれかで、`consecutive_failures`はmodeを問わず続く`error` / `failed`の回数。
@@ -115,11 +115,11 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
   起動するのはqueue serviceが居るときだけ。
 - **出力の扱い**: findingは人とplannerが`findings`で影響の大きい順に読み、手当てしないと決めたものを`finding dismiss`する。
   proposalを求める印の付いたfindingには、supervisorがruntimeのplannerを立ててproposalを作らせる（[Finding planners (supervisor)](finding-planners.md)）。
-  種類`agent_eval_watch_due`・`agent_eval_below_threshold`はsupervisorだけが印付きで記録し、`finding record`は拒む（[agentのeval](../agent-eval.md#採用した定義の見張り)）。
+  種類`agent_eval_watch_due`・`agent_eval_below_threshold`はsupervisorの見張りだけが記録し、見張りはreviewのeventを期間の始まりと遡りの上限から先だけを読む（[agentのeval](../agent-eval.md#採用した定義の見張り)）。
   findingに紐づけた`blocked`のaskには、runtimeが`propose`と`dismiss`のoptionを足し、人のその答えをfindingに適用する。
   `blocked`のaskは`status --role inbox`に`ask_opened`として出る。
 
-- **生死と通知**: `stats`の`workspace_mismatch`はrunのbackgroundのwrapperの生死で決まり（[Stats](commands.md)）、agentがloginの切れや利用上限で止まったときのholdのask（`application::ask::hold`）はinboxの`watch`が`ask_opened`で人に知らせる（[人への通知](ask-push.md)）。
+- **生死と通知**: `stats`の`workspace_mismatch`はrunのbackgroundのwrapperの生死で決まり（[Stats](commands.md)）、agentがloginの切れや利用上限で止まったときのholdのaskはinboxの`watch`が`ask_opened`で人に知らせる（[人への通知](ask-push.md)）。
 
 ## Codexで動かす
 

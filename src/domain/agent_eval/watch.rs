@@ -36,7 +36,7 @@ use super::{EVALS_DIR, Split};
 use crate::domain::marks::utc_text;
 use crate::domain::review_subagents::{DEFINITION_DIR, valid_agent_name};
 use crate::domain::run::restore_payload;
-use crate::domain::{EventKind, RunEvent};
+use crate::domain::{EventFilter, EventKind, RunEvent};
 
 /// The kind of the watch's findings: one per step, by its subject.
 pub const WATCH_FINDING_KIND: &str = "agent_eval_watch_due";
@@ -102,6 +102,47 @@ pub fn watched_agents<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<Strin
 /// end ([`period_end`]): longer than any review job runs, so one whose
 /// supervisor or run went away does not hold the watch for ever.
 pub const IN_FLIGHT_LIMIT_MILLIS: i64 = DAY_MILLIS;
+
+/// How far back the production reviews (`review_started` and
+/// `review_finished`) of a period with no start are read: the agents'
+/// watch of an agent never watched, and a production set asked for with
+/// no `--since`. Seven days of a busy queue's reviews stay well within one
+/// answer of the queue service, as `[eval] max_runs` keeps a set from
+/// growing past what is made.
+pub const REVIEW_LOOKBACK_MILLIS: i64 = 7 * DAY_MILLIS;
+
+/// Where the reviews of a period from `since` are read from at `now`
+/// (Unix milliseconds): `since`, or [`REVIEW_LOOKBACK_MILLIS`] before
+/// `now` when the period has no start.
+pub fn reviews_from(since: Option<i64>, now: i64) -> i64 {
+    since.unwrap_or_else(|| now.saturating_sub(REVIEW_LOOKBACK_MILLIS))
+}
+
+/// Where one look of the watch at `now` reads the reviews from, of the
+/// agents' period starts `sinces` ([`Marks::since`]): the earliest of
+/// them ([`reviews_from`]) and of the reviews still in flight that hold a
+/// period's end ([`IN_FLIGHT_LIMIT_MILLIS`], [`period_end`]). No older
+/// review is in a period or in flight, so the look judges as one that
+/// read every review.
+pub fn watch_reads_from(sinces: impl IntoIterator<Item = Option<i64>>, now: i64) -> i64 {
+    sinces
+        .into_iter()
+        .map(|since| reviews_from(since, now))
+        .fold(now.saturating_sub(IN_FLIGHT_LIMIT_MILLIS), i64::min)
+}
+
+/// The read of the production reviews recorded at or after `from` (Unix
+/// milliseconds), by their time.
+pub fn review_reads(from: i64) -> EventFilter {
+    EventFilter {
+        kinds: Some(vec![
+            EventKind::ReviewStarted.as_str().to_owned(),
+            EventKind::ReviewFinished.as_str().to_owned(),
+        ]),
+        since: Some(utc_text(from)),
+        ..EventFilter::default()
+    }
+}
 
 /// What watched an agent last.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -944,6 +985,44 @@ mod tests {
         assert_eq!(period_end(Some(noon), stale, &[noon]), stale);
         // Never before since.
         assert_eq!(period_end(Some(later), later + 5, &[noon]), later);
+    }
+
+    /// The reviews of a period are read from its start, and of one with no
+    /// start from [`REVIEW_LOOKBACK_MILLIS`] before now; a look reads them
+    /// from the earliest agent's start or the in-flight limit, whichever is
+    /// earlier, by their time.
+    #[test]
+    fn the_reviews_are_read_from_the_earliest_start_or_the_in_flight_limit() {
+        assert_eq!(reviews_from(Some(NOW - 5), NOW), NOW - 5);
+        assert_eq!(reviews_from(None, NOW), NOW - 7 * DAY_MILLIS);
+        // No agent: only the reviews that may hold a period's end.
+        assert_eq!(watch_reads_from([], NOW), NOW - IN_FLIGHT_LIMIT_MILLIS);
+        // Agents watched within the limit: the limit is earlier.
+        assert_eq!(
+            watch_reads_from([Some(NOW - 5), Some(NOW - 9)], NOW),
+            NOW - IN_FLIGHT_LIMIT_MILLIS
+        );
+        // The earliest start, however old.
+        let old = NOW - 40 * DAY_MILLIS;
+        assert_eq!(watch_reads_from([Some(NOW - 5), Some(old)], NOW), old);
+        // One never watched goes back no further than the lookback.
+        assert_eq!(
+            watch_reads_from([Some(NOW - 5), None], NOW),
+            NOW - REVIEW_LOOKBACK_MILLIS
+        );
+        let filter = review_reads(NOW - DAY_MILLIS);
+        assert_eq!(filter.since, Some(utc_text(NOW - DAY_MILLIS)));
+        assert_eq!(
+            filter.kinds,
+            Some(vec![
+                "review_started".to_owned(),
+                "review_finished".to_owned()
+            ])
+        );
+        assert_eq!(
+            (filter.run, filter.task, filter.goal, filter.until),
+            (None, None, None, None)
+        );
     }
 
     /// The due finding names the period from the last watch to now and the

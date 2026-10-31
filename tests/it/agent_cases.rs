@@ -489,7 +489,7 @@ fn a_set_another_live_supervisor_makes_is_left_to_it_until_it_is_gone() {
         (&base, &head),
         &["demo"],
         "revise",
-        "2026-10-06T00:00:00.000Z",
+        &an_hour_ago(),
     );
     let set = common::cli::ok(&fx.db, &["agent", "cases", "demo"])["set_id"]
         .as_i64()
@@ -616,6 +616,15 @@ fn a_set_round_taken_up_is_scored_on_the_labels_it_started_with() {
 
 /// Record `kind` of the review of run `run` (task `task`, made by
 /// [`reviewed`] or here) with `payload`, at `at`.
+/// An hour ago, within how far back a period with no start reads its
+/// reviews.
+fn an_hour_ago() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    dagq::domain::marks::utc_text(i64::try_from(now.as_millis()).unwrap() - 3_600_000)
+}
+
 fn review_event(db: &Path, (task, run): (i64, &str), kind: &str, payload: &Value, at: &str) {
     let conn = Connection::open(db).unwrap();
     conn.execute(
@@ -638,7 +647,7 @@ fn the_watch_records_when_an_agent_is_due_and_asks_for_nothing() {
     commit_agents(&fx.repo);
     commit_config(&fx.repo, "[eval]\nwatch_new_reviews = 1\n");
     let (base, head) = reviewed_change(&fx.repo);
-    let at = "2026-10-06T00:00:00.000Z";
+    let at = &an_hour_ago();
     reviewed(&fx.db, (11, "r1"), (&base, &head), &["demo"], "pass", at);
     // huge's review started a minute ago and runs still.
     let now = std::time::SystemTime::now()
@@ -695,7 +704,7 @@ fn the_watch_records_when_an_agent_is_due_and_asks_for_nothing() {
     let detail: Value = serde_json::from_str(due["detail"].as_str().unwrap()).unwrap();
     assert_eq!(detail["step"], "due");
     assert_eq!(detail["reviews"], 1);
-    assert_eq!(detail["first_review_at"], at);
+    assert_eq!(detail["first_review_at"], at.as_str());
     let ask = detail["ask"].as_str().unwrap();
     assert!(ask.starts_with("agent cases demo --until "), "{detail}");
     // huge has no review finished: why, no finding, and the period ends

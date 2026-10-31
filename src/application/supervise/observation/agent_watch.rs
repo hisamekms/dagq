@@ -2,9 +2,11 @@
 //! once every [`AGENT_WATCH_CHECK`], a supervisor at work reads the
 //! agents with case lists on the landing branch, the production reviews,
 //! the production sets, the eval's rounds and the watch's findings from
-//! the queue, and records what [`crate::domain::agent_eval::watch`] says:
-//! the steps of each agent's watch and the scores under the threshold as
-//! findings on the queue (each once, by its subject, so of two
+//! the queue (the reviews only from where the agents' periods start,
+//! [`crate::domain::agent_eval::watch::watch_reads_from`]), and records
+//! what [`crate::domain::agent_eval::watch`] says: the steps of each
+//! agent's watch and the scores under the threshold as findings on the
+//! queue (each once, by its subject, so of two
 //! supervisors one records it), and an interval with no new review as
 //! `agent_eval_watch_skipped`. A score is judged against each agent's
 //! `AGENT.md` on the landing branch's head; one whose definition there
@@ -128,13 +130,11 @@ fn look(
         .chain(production::KINDS.iter())
         .map(|kind| kind.as_str())
         .collect();
-    kinds.extend([
-        EventKind::ReviewStarted.as_str(),
-        EventKind::ReviewFinished.as_str(),
-        EventKind::AgentEvalWatchSkipped.as_str(),
-    ]);
+    kinds.push(EventKind::AgentEvalWatchSkipped.as_str());
     let upto = queue.latest_event_id()?;
     let every = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
+    // The small events first: the reviews are read only from where the
+    // agents' periods they decide start.
     let events = queue.events_of_between(&kinds, EventId::new(0), upto, every)?;
     let triples = || {
         events
@@ -219,6 +219,7 @@ fn look(
         }
     }
     // Each agent's watch, from where its last period ended.
+    let mut watched = Vec::new();
     for agent in &agents {
         let mine: Vec<&FindingView> = findings
             .iter()
@@ -244,17 +245,14 @@ fn look(
             })
             .collect();
         let marks = watch::marks(watch::agent_marks(agent, &records, &events, &rounds, &sets));
-        let running = production::in_flight(agent, events.iter().filter_map(review_event));
-        let until = watch::period_end(marks.since, now, &running);
-        let reviews = production::candidates(
-            agent,
-            Period {
-                since: marks.since,
-                until: Some(until),
-            },
-            events.iter().filter_map(review_event),
-        );
-        match watch::decide(config.watch, marks.last.as_ref(), reviews.len(), open, now) {
+        watched.push((agent, marks, open));
+    }
+    let from = watch::watch_reads_from(watched.iter().map(|(_, marks, _)| marks.since), now);
+    let limit = usize::try_from(upto.as_i64()).unwrap_or_default();
+    let reviews = queue.events_between(EventId::new(0), upto, &watch::review_reads(from), limit)?;
+    for (agent, marks, open) in watched {
+        let (verdict, until, reviews) = judge(agent, config, &marks, open, &reviews, now);
+        match verdict {
             Watch::Due => {
                 let found = watch::due_finding(agent, &marks, &reviews, until, commit.as_str());
                 record(found, &mut looked)?;
@@ -271,6 +269,33 @@ fn look(
     Ok(looked)
 }
 
+/// What the watch does for `agent` at `now` (Unix milliseconds), its
+/// `marks` and its `open` finding, of the production `reviews` read: the
+/// decision, the end of its new period and the reviews in it. A period
+/// with no start counts the reviews from [`watch::reviews_from`], as far
+/// back as they are read.
+fn judge(
+    agent: &str,
+    config: &EvalConfig,
+    marks: &watch::Marks,
+    open: Option<i64>,
+    reviews: &[RunEvent],
+    now: i64,
+) -> (Watch, i64, Vec<production::Candidate>) {
+    let running = production::in_flight(agent, reviews.iter().filter_map(review_event));
+    let until = watch::period_end(marks.since, now, &running);
+    let found = production::candidates(
+        agent,
+        Period {
+            since: Some(watch::reviews_from(marks.since, now)),
+            until: Some(until),
+        },
+        reviews.iter().filter_map(review_event),
+    );
+    let verdict = watch::decide(config.watch, marks.last.as_ref(), found.len(), open, now);
+    (verdict, until, found)
+}
+
 fn review_event(event: &RunEvent) -> Option<ReviewEvent<'_>> {
     Some(ReviewEvent {
         run_id: event.run_id.as_ref()?.as_str(),
@@ -283,6 +308,167 @@ fn review_event(event: &RunEvent) -> Option<ReviewEvent<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::RunId;
+    use crate::domain::agent_eval::production::event_instant;
+    use crate::domain::agent_eval::watch::{
+        IN_FLIGHT_LIMIT_MILLIS, LastWatch, Marks, Previous, REVIEW_LOOKBACK_MILLIS,
+    };
+    use crate::domain::marks::utc_text;
+
+    const NOW: i64 = 1_790_000_000_000;
+    const HOUR: i64 = 3_600_000;
+    const DAY: i64 = 24 * HOUR;
+
+    /// A production review of `agent` by run `run` started at `start` and,
+    /// with `end`, finished then with a verdict.
+    fn review(id: &mut i64, run: &str, agent: &str, start: i64, end: Option<i64>) -> Vec<RunEvent> {
+        let event = |id: i64, kind: EventKind, payload: serde_json::Value, at: i64| RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: Some(RunId::new(run).unwrap()),
+            kind: kind.into(),
+            payload,
+            created_at: utc_text(at),
+            actor: None,
+        };
+        *id += 1;
+        let mut events = vec![event(
+            *id,
+            EventKind::ReviewStarted,
+            json!({"attempt": 1, "subagents": {"base": "b", "head": "h", "agents": [{"agent": agent}]}}),
+            start,
+        )];
+        if let Some(end) = end {
+            *id += 1;
+            events.push(event(
+                *id,
+                EventKind::ReviewFinished,
+                json!({"attempt": 1, "agents": [{"agent": agent, "verdict": "pass", "reasons": []}]}),
+                end,
+            ));
+        }
+        events
+    }
+
+    fn marks(since: Option<i64>, last: Option<i64>) -> Marks {
+        Marks {
+            last: last.map(|at| LastWatch {
+                at,
+                through: since,
+                previous: Previous::Skipped(1),
+            }),
+            since,
+        }
+    }
+
+    /// The look reads the reviews from the earliest agent's start or the
+    /// in-flight limit, by their time, and judges each agent's period, its
+    /// end with the reviews in flight and its due or skipped interval as a
+    /// look that read every review: of reviews long before every period,
+    /// one never finished, ones in flight and ones in the periods.
+    #[test]
+    fn a_look_from_the_earliest_start_judges_as_one_that_read_every_review() {
+        let mut id = 0;
+        let mut every = Vec::new();
+        // Long before every period, finished and not.
+        every.extend(review(
+            &mut id,
+            "old1",
+            "rules",
+            NOW - 40 * DAY,
+            Some(NOW - 40 * DAY + HOUR),
+        ));
+        every.extend(review(
+            &mut id,
+            "old2",
+            "other",
+            NOW - 20 * DAY,
+            Some(NOW - 20 * DAY + HOUR),
+        ));
+        every.extend(review(&mut id, "old3", "rules", NOW - 9 * DAY, None));
+        every.extend(review(
+            &mut id,
+            "week4",
+            "idle",
+            NOW - 6 * DAY,
+            Some(NOW - 6 * DAY + HOUR),
+        ));
+        // In the periods, in flight within the limit and past it.
+        every.extend(review(
+            &mut id,
+            "new1",
+            "rules",
+            NOW - 2 * DAY,
+            Some(NOW - 2 * DAY + HOUR),
+        ));
+        every.extend(review(
+            &mut id,
+            "new2",
+            "other",
+            NOW - 3 * DAY,
+            Some(NOW - 3 * DAY + HOUR),
+        ));
+        every.extend(review(&mut id, "new3", "rules", NOW - 30 * HOUR, None));
+        every.extend(review(&mut id, "new4", "rules", NOW - 2 * HOUR, None));
+        every.extend(review(
+            &mut id,
+            "new5",
+            "rules",
+            NOW - HOUR,
+            Some(NOW - HOUR / 2),
+        ));
+        every.sort_by_key(|event| event.id);
+        let config = EvalConfig::default();
+        // rules: watched 3 days ago; other: never watched; idle: watched a
+        // week and a day ago, with no review since 5 days ago.
+        let agents = [
+            ("rules", marks(Some(NOW - 3 * DAY), Some(NOW - 3 * DAY))),
+            ("other", marks(None, None)),
+            ("idle", marks(Some(NOW - 5 * DAY), Some(NOW - 8 * DAY))),
+        ];
+        let from = watch::watch_reads_from(agents.iter().map(|(_, marks)| marks.since), NOW);
+        assert_eq!(from, NOW - REVIEW_LOOKBACK_MILLIS);
+        let filter = watch::review_reads(from);
+        assert_eq!(filter.since, Some(utc_text(from)));
+        let read: Vec<RunEvent> = every
+            .iter()
+            .filter(|event| event_instant(&event.created_at).is_some_and(|at| at >= from))
+            .cloned()
+            .collect();
+        assert!(read.len() < every.len());
+        assert!(
+            read.iter()
+                .all(|event| !event.run_id.as_ref().unwrap().as_str().starts_with("old"))
+        );
+        for (agent, marks) in &agents {
+            let all = judge(agent, &config, marks, None, &every, NOW);
+            let part = judge(agent, &config, marks, None, &read, NOW);
+            assert_eq!(all, part, "{agent}");
+        }
+        let (rules, until, found) = judge("rules", &config, &agents[0].1, None, &read, NOW);
+        assert_eq!(until, NOW - 2 * HOUR);
+        assert_eq!(
+            found.iter().map(|c| c.run_id.as_str()).collect::<Vec<_>>(),
+            ["new1"]
+        );
+        assert_eq!(rules, Watch::NotYet);
+        let (other, _, found) = judge("other", &config, &agents[1].1, None, &read, NOW);
+        assert_eq!((other, found.len()), (Watch::Due, 1));
+        let (idle, until, found) = judge("idle", &config, &agents[2].1, None, &read, NOW);
+        assert_eq!((idle, until, found.len()), (Watch::NoNewReviews, NOW, 0));
+        // An open finding holds the watch, as before.
+        assert_eq!(
+            judge("other", &config, &agents[1].1, Some(7), &read, NOW).0,
+            Watch::Open(7)
+        );
+        // Agents watched within the limit read only what may be in flight.
+        let near = [Some(NOW - HOUR)];
+        assert_eq!(
+            watch::watch_reads_from(near, NOW),
+            NOW - IN_FLIGHT_LIMIT_MILLIS
+        );
+    }
 
     /// With `[eval]` `watch = false` the check does not look: it reads no
     /// event and records no finding and no `agent_eval_watch_skipped`; on

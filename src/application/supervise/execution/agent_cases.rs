@@ -12,7 +12,9 @@
 //! - prepare: read the agent's definition and case lists from the landing
 //!   branch's commit (the rule codes, `k` and the rules' documents the
 //!   definition links to), collect the production reviews of the period
-//!   that selected the agent from `review_started` and `review_finished`,
+//!   that selected the agent from `review_started` and `review_finished`
+//!   (read from the period's start, or with none from
+//!   [`watch::REVIEW_LOOKBACK_MILLIS`] back),
 //!   and write each one's change (`git diff <base>...<head>`) to the set's
 //!   patches by its content's hash; a review whose commits are gone is
 //!   left out with why. More reviews than `[eval] max_runs` refuse the set.
@@ -53,7 +55,7 @@ use crate::domain::agent_eval::production::{
     self, CaseSet, Frame, PreparedCase, ReviewEvent, builtin_label_definition, candidates,
     label_definition, label_of, unreachable,
 };
-use crate::domain::agent_eval::{EVALS_DIR, Split};
+use crate::domain::agent_eval::{EVALS_DIR, Split, watch};
 use crate::domain::headless_job::JobKind;
 use crate::domain::review_builtins::{self, evals as builtin_evals};
 use crate::domain::review_subagents::{
@@ -279,54 +281,26 @@ impl Supervisor<'_> {
             Ok(frame) => frame,
             Err(why) => return self.refuse_set(set.id, "definition_missing", why),
         };
-        let kinds = [
-            EventKind::ReviewStarted.as_str(),
-            EventKind::ReviewFinished.as_str(),
-        ];
+        let mut period =
+            match production::period(request.since.as_deref(), request.until.as_deref()) {
+                Ok(period) => period,
+                Err(why) => return self.refuse_set(set.id, "period_invalid", why),
+            };
+        // The reviews from the period's start (with none, as far back as
+        // the watch reads), never every review the queue holds.
+        let now = self.generators.clock.now().saturating_mul(1000);
+        let from = watch::reviews_from(period.since, now);
+        period.since = Some(from);
         let upto = self.queue.latest_event_id()?;
-        let every = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
-        let events = self
-            .queue
-            .events_of_between(&kinds, EventId::new(0), upto, every)?;
-        let period = match production::period(request.since.as_deref(), request.until.as_deref()) {
-            Ok(period) => period,
-            Err(why) => return self.refuse_set(set.id, "period_invalid", why),
-        };
-        let found = candidates(
-            &request.agent,
-            period,
-            events.iter().filter_map(|event| {
-                Some(ReviewEvent {
-                    run_id: event.run_id.as_ref()?.as_str(),
-                    kind: &event.kind,
-                    payload: &event.payload,
-                    created_at: &event.created_at,
-                })
-            }),
-        );
+        let limit = usize::try_from(upto.as_i64()).unwrap_or_default();
+        let events =
+            self.queue
+                .events_between(EventId::new(0), upto, &watch::review_reads(from), limit)?;
         let config = self.verifier.eval_config()?;
-        if found.is_empty() {
-            return self.refuse_set(
-                set.id,
-                "no_reviews",
-                format!(
-                    "no production review of the period selected {} and has its judgment",
-                    request.agent
-                ),
-            );
-        }
-        if found.len() > config.max_runs as usize {
-            return self.refuse_set(
-                set.id,
-                "too_many_reviews",
-                format!(
-                    "{} reviews of {} in the period, past [eval] max_runs {}: ask again for a shorter period",
-                    found.len(),
-                    request.agent,
-                    config.max_runs
-                ),
-            );
-        }
+        let found = match period_reviews(&request.agent, period, &events, config.max_runs) {
+            Ok(found) => found,
+            Err((reason, why)) => return self.refuse_set(set.id, reason, why),
+        };
         let dir = set_dir(&self.layout.agent_cases_dir, set.id);
         let mut cases = Vec::new();
         let mut skipped = Vec::new();
@@ -783,9 +757,162 @@ Answer `decided` once the decisions are recorded, or `keep_disputed` to leave th
     }
 }
 
+/// The production reviews of `agent` in `period` of the review `events`
+/// read; why the set is refused when there is none, or more than
+/// `max_runs` (`[eval]`).
+fn period_reviews(
+    agent: &str,
+    period: production::Period,
+    events: &[RunEvent],
+    max_runs: u32,
+) -> std::result::Result<Vec<production::Candidate>, (&'static str, String)> {
+    let found = candidates(
+        agent,
+        period,
+        events.iter().filter_map(|event| {
+            Some(ReviewEvent {
+                run_id: event.run_id.as_ref()?.as_str(),
+                kind: &event.kind,
+                payload: &event.payload,
+                created_at: &event.created_at,
+            })
+        }),
+    );
+    if found.is_empty() {
+        return Err((
+            "no_reviews",
+            format!("no production review of the period selected {agent} and has its judgment"),
+        ));
+    }
+    if found.len() > max_runs as usize {
+        return Err((
+            "too_many_reviews",
+            format!(
+                "{} reviews of {agent} in the period, past [eval] max_runs {max_runs}: ask again for a shorter period",
+                found.len(),
+            ),
+        ));
+    }
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A set reads the reviews from its period's start, with none from the
+    /// watch's lookback, and decides no_reviews and too_many_reviews as a
+    /// read of every review: of reviews long before the period, ones in it
+    /// and one after its end.
+    #[test]
+    fn a_set_reads_the_reviews_from_its_period_and_judges_as_a_read_of_every_review() {
+        use crate::domain::agent_eval::production::{Period, event_instant};
+        use crate::domain::agent_eval::watch::REVIEW_LOOKBACK_MILLIS;
+        use crate::domain::marks::utc_text;
+        const NOW: i64 = 1_790_000_000_000;
+        const DAY: i64 = 86_400_000;
+        let mut every = Vec::new();
+        for (id, (run, at)) in [
+            ("old1", NOW - 30 * DAY),
+            ("old2", NOW - 9 * DAY),
+            ("in1", NOW - 5 * DAY),
+            ("in2", NOW - 3 * DAY),
+            ("in3", NOW - 2 * DAY),
+            ("after", NOW - DAY / 2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = i64::try_from(id).unwrap() * 2;
+            let event = |id: i64, kind: EventKind, payload: Value| RunEvent {
+                id: EventId::new(id),
+                task_id: None,
+                goal_id: None,
+                run_id: Some(RunId::new(run).unwrap()),
+                kind: kind.into(),
+                payload,
+                created_at: utc_text(at),
+                actor: None,
+            };
+            every.push(event(
+                id + 1,
+                EventKind::ReviewStarted,
+                json!({"attempt": 1, "subagents": {"base": "b", "head": "h", "agents": [{"agent": "rules"}]}}),
+            ));
+            every.push(event(
+                id + 2,
+                EventKind::ReviewFinished,
+                json!({"attempt": 1, "agents": [{"agent": "rules", "verdict": "pass", "reasons": []}]}),
+            ));
+        }
+        let read_from = |from: i64| -> Vec<RunEvent> {
+            assert_eq!(watch::review_reads(from).since, Some(utc_text(from)));
+            every
+                .iter()
+                .filter(|event| event_instant(&event.created_at).is_some_and(|at| at >= from))
+                .cloned()
+                .collect()
+        };
+        let runs = |found: &[production::Candidate]| {
+            found.iter().map(|c| c.run_id.clone()).collect::<Vec<_>>()
+        };
+        // A period with a start: the same reviews, the same refusals.
+        let period = Period {
+            since: Some(NOW - 6 * DAY),
+            until: Some(NOW - DAY),
+        };
+        let from = watch::reviews_from(period.since, NOW);
+        assert_eq!(from, NOW - 6 * DAY);
+        let read = read_from(from);
+        assert!(read.len() < every.len());
+        for max_runs in [2, 3] {
+            assert_eq!(
+                period_reviews("rules", period, &read, max_runs),
+                period_reviews("rules", period, &every, max_runs)
+            );
+        }
+        assert_eq!(
+            runs(&period_reviews("rules", period, &read, 3).unwrap()),
+            ["in1", "in2", "in3"]
+        );
+        assert_eq!(
+            period_reviews("rules", period, &read, 2).unwrap_err().0,
+            "too_many_reviews"
+        );
+        let empty = Period {
+            since: Some(NOW - 6 * DAY),
+            until: Some(NOW - 5 * DAY),
+        };
+        let read = read_from(watch::reviews_from(empty.since, NOW));
+        assert_eq!(
+            period_reviews("other", period, &read, 3).unwrap_err().0,
+            "no_reviews"
+        );
+        assert_eq!(
+            period_reviews("rules", empty, &read, 3),
+            period_reviews("rules", empty, &every, 3)
+        );
+        assert_eq!(
+            period_reviews("rules", empty, &read, 3).unwrap_err().0,
+            "no_reviews"
+        );
+        // No start: from the lookback, the period starting there too.
+        let from = watch::reviews_from(None, NOW);
+        assert_eq!(from, NOW - REVIEW_LOOKBACK_MILLIS);
+        let open = Period {
+            since: Some(from),
+            until: None,
+        };
+        let read = read_from(from);
+        assert_eq!(
+            period_reviews("rules", open, &read, 10),
+            period_reviews("rules", open, &every, 10)
+        );
+        assert_eq!(
+            runs(&period_reviews("rules", open, &read, 10).unwrap()),
+            ["in1", "in2", "in3", "after"]
+        );
+    }
 
     /// The label's provider is never the improving side's.
     #[test]
