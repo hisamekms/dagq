@@ -277,6 +277,24 @@ provider = "codex"
 # （CODEX_ROLES に plan_review が無い）は設定の誤りとして拒むので、固定バイナリが task 1218 を含んでから足した。
 provider = "codex"
 
+[eval]
+# 採用した review agent の見張り（agents' watch）をこの repository では止める（request 188 の人の判断「まず機能ごとの on/off を入れ、
+# この repository では off にする。根本の直しは別」。goal 233。振る舞いは docs/design/agent-eval.md の「採用した定義の見張り」）。
+# 2026-10-30 に queue service（service serve）のメモリが 13 GB まで膨らみ host の swap を使い切りかけた。主因の一つが見張りで、
+# 毎時 event を id 0 から上限なしで読み、答えが MAX_ANSWER_BYTES を超えて毎回捨てられていた（一度も成功していない）。
+# event の読みを cursor・期間で絞る根本の直しが着地したら、true に戻すか見直す。既定（key なし）は true。
+# [eval] の watch を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 3740 を含んでから足した。
+watch = false
+
+[throughput_review]
+# スループットの見直し（毎時・日次・週次）の kpi・stats をこの repository では止める（request 188 の人の判断「まず機能ごとの on/off を入れ、
+# この repository では off にする。根本の直しは別」。goal 233。振る舞いは docs/design/supervisor-lifecycle/throughput-review.md の「promptの入力」）。
+# 2026-10-30 に queue service のメモリが 13 GB まで膨らんだ主因の一つで、入力の gather と job が打つ kpi・stats が service の中で全期間を集計し、
+# client が 30 秒で諦めた後も計算が重なった。止めても見直し自体（着地数・ask などの残りの入力と結論）は続く。
+# 諦められた依頼を service で止める直しと kpi・stats の集計の軽量化が着地したら、true に戻すか見直す。既定（key なし）は true。
+# [throughput_review] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 3741 を含んでから足した。
+kpi_stats = false
+
 [roles.throughput_review]
 # スループットの見直し（毎時・日次・週次）の job を Codex（codex exec の読み取りだけの job）で動かす（人の 2026-10-01 の決定
 # 「inbox と worker は Claude、それ以外の actor は Codex」のスループットの見直しの分。goal 80、task 1220・1221。
