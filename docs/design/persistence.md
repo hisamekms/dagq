@@ -55,14 +55,14 @@ runtimeが状態を変えるのは、このDBへの書き込みトランザク�
 ## 全体の流れ
 
 ```text
-CLI / supervisor / integrate / queue service / job
+queue service（ADR-t3102-2の例外: init・migrate・doctor）
         │  port（application の trait）
         ▼
 SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（WAL）
         │  行を読む → domainの集約に復元 → domainのコマンド → 返った集約を UPDATE / INSERT
         │  同じトランザクションで run_events に event を書く
         ▼
-読み取り専用のコマンド ── SQLITE_OPEN_READ_ONLY（古いschemaはメモリの複製をmigrate）
+serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを拒むqueueは拒み、古いschemaはメモリの複製をmigrate）
 ```
 
 ## 責務と境界

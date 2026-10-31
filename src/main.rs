@@ -3049,9 +3049,11 @@ fn authorized_in_application(command: &Command) -> bool {
 /// which records it as `authorization_denied` of the caller's principal
 /// ([`CommandDenials`]); the queue is not opened. `request add` also uses
 /// this check before reading its input; Requests::record still authorizes
-/// before recording. A command allowed opens
-/// nothing here, and reads keep the queue read-only (ADR-0073 decisions 5,
-/// 7 and 18).
+/// before recording. A command allowed opens nothing here either: it is
+/// sent to the queue service, which runs reads on its read-only
+/// connection, run in this process ([`Unserved::OwnProcess`], where only
+/// the DB's exceptions of ADR-t3102-2 open the queue), or refused when no
+/// service serves it.
 fn check_access(actor: &ActorContext, command: &Command, db: Option<&Path>) -> Result<()> {
     // `request add` must reject before reading words from a file or stdin.
     // Keep Requests::record's application check too; a refusal here returns

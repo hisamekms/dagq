@@ -181,7 +181,7 @@ task = 3804
 id = "read-commands-create-no-queue-file"
 kind = "SQLite"
 test = "cli_tasks::reads_do_not_create_a_queue_and_unknown_tasks_fail"
-reason = "読むだけのコマンドが無い queue の file を作らずに失敗し、init の後の doctor と status が読めることは、実の file system と SQLite の開き方でしか確かめられない。どのコマンドが読むだけかの判断は main の reads_only の unit test"
+reason = "読むだけのコマンドが無い queue の file を作らずに失敗し、init の後の doctor と status が読めることは、実の file system と SQLite の開き方でしか確かめられない。どのコマンドが読むだけかの判断は application::queue_commands の QueueCommand::reads_only と、それで接続を選ぶ application::queue_service の unit test（reads_and_a_watch_s_look_open_the_queue_read_only）"
 task = 3804
 
 [[boundary]]

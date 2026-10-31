@@ -591,10 +591,10 @@ impl QueueCommand {
         }
     }
 
-    /// Whether the command only reads the queue, so the service runs it on
-    /// a read-only connection as the command line opens one for it: the
-    /// screens, the logs, `report` and `graph --out` (which write files,
-    /// but no queue state).
+    /// Whether the command only reads the queue, so the queue service runs
+    /// it on a read-only connection: the screens, the logs, `report` and
+    /// `graph --out` (which write files, but no queue state). Only the
+    /// service's choice of a use case's connection reads this.
     pub fn reads_only(&self) -> bool {
         matches!(
             self,
