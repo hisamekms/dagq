@@ -2882,6 +2882,12 @@ pub const INSTALL_E2E_FINISHED: &str =
 /// test's failures in `install`'s gate by.
 pub const INSTALL_GATE: &str = "install";
 
+/// The key of an update's ask's `ask_opened` that names the identity of
+/// the sending that opened it: the queue opens one ask per identity, so a
+/// sending whose answer was cut off is sent again under it and finds the
+/// ask it opened (ADR-t3102-3 decision 5).
+pub const UPDATE_ASK_RECORD: &str = "record";
+
 /// Every step of the automatic update, each with `commit` (the main commit
 /// it is about) in its payload but for the answers.
 pub const UPDATE_EVENT_KINDS: &[EventKind] = &[

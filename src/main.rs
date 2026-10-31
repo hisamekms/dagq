@@ -182,6 +182,11 @@ enum Command {
         /// before the install puts the old one back and tells the inbox (tests shorten it).
         #[arg(long, hide = true, default_value_t = dagq::application::update::WATCH_TIMEOUT.as_secs())]
         watch_timeout: u64,
+        /// Known to a build whose install sends its steps to the queue service: what an install
+        /// probes a binary it rolls back to with (`--help` with it), else it hands that binary
+        /// the whole install.
+        #[arg(long, hide = true)]
+        sends_steps: bool,
     },
     /// Show which queue this directory resolves to, without opening it: its database, log
     /// directory, LaunchAgent label and plist path (given even before `up` writes it).
@@ -4850,8 +4855,12 @@ fn execute(cli: Cli) -> Result<Value> {
         e2e_timeout,
         poll_ms,
         watch_timeout,
+        sends_steps,
     } = cli.command
     {
+        if sends_steps {
+            return Ok(json!({"sends_steps": true}));
+        }
         use dagq::application::install::{E2eGate, E2eSettings, InstallOptions, Source};
         use dagq::infrastructure::{adapters::executable, launchd::Launchctl};
         let source = match (rollback, from) {
@@ -4929,6 +4938,80 @@ fn execute(cli: Cli) -> Result<Value> {
             &Launchctl { uid: current_uid() },
             &options,
             Duration::from_secs(watch_timeout),
+        );
+    }
+    // The automatic update's and the release update's jobs, which their
+    // supervisor starts: they reach the queue only through its service, as
+    // that supervisor (ADR-t3102-1 decision 2).
+    if let Command::AutoUpdate {
+        commit,
+        token,
+        to,
+        repo,
+        log,
+        build_command,
+        e2e_command,
+        e2e_timeout,
+        cmux: _,
+        claude,
+        codex,
+        plugin_dir,
+        handoff_timeout,
+        watch_timeout,
+        poll_ms,
+    } = cli.command
+    {
+        return one_shot.auto_update(
+            &location,
+            &dagq::compose::AutoUpdateJob {
+                commit,
+                token: LeaseToken::new(token),
+                target: to,
+                repository: repo,
+                log,
+                build_command,
+                e2e_command,
+                e2e_timeout: Duration::from_secs(e2e_timeout),
+                claude: dagq::infrastructure::adapters::claude_at_entry(&claude).unwrap_or(claude),
+                codex: dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or(codex),
+                plugin_dir,
+                handoff_timeout: Duration::from_secs(handoff_timeout),
+                watch_timeout: Duration::from_secs(watch_timeout),
+                poll: Duration::from_millis(poll_ms),
+            },
+        );
+    }
+    if let Command::ReleaseUpdate {
+        release,
+        token,
+        to,
+        log,
+        cargo,
+        cmux: _,
+        claude,
+        codex,
+        plugin_dir,
+        handoff_timeout,
+        watch_timeout,
+        plugin_only,
+    } = cli.command
+    {
+        use dagq::infrastructure::adapters::executable;
+        return one_shot.release_update(
+            &location,
+            &dagq::compose::ReleaseUpdateJob {
+                version: release,
+                token: LeaseToken::new(token),
+                target: to,
+                log,
+                cargo: executable(&cargo).unwrap_or(cargo),
+                claude: dagq::infrastructure::adapters::claude_at_entry(&claude).unwrap_or(claude),
+                codex: dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or(codex),
+                plugin_dir,
+                handoff_timeout: Duration::from_secs(handoff_timeout),
+                watch_timeout: Duration::from_secs(watch_timeout),
+                plugin_only,
+            },
         );
     }
     // A repository queue already resolved the working directory; `--repo`
@@ -5260,6 +5343,8 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Rebind { .. }
         | Command::Migrate { .. }
         | Command::Install { .. }
+        | Command::AutoUpdate { .. }
+        | Command::ReleaseUpdate { .. }
         | Command::Doctor { .. }
         | Command::Ci { .. }
         | Command::Inbox { .. }
@@ -5670,79 +5755,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 },
                 &env::current_exe()?,
                 &options,
-            )?
-        }
-        Command::AutoUpdate {
-            commit,
-            token,
-            to,
-            repo,
-            log,
-            build_command,
-            e2e_command,
-            e2e_timeout,
-            cmux: _,
-            claude,
-            codex,
-            plugin_dir,
-            handoff_timeout,
-            watch_timeout,
-            poll_ms,
-        } => {
-            drop(queue);
-            one_shot.auto_update(
-                &location,
-                &dagq::compose::AutoUpdateJob {
-                    commit,
-                    token: LeaseToken::new(token),
-                    target: to,
-                    repository: repo,
-                    log,
-                    build_command,
-                    e2e_command,
-                    e2e_timeout: Duration::from_secs(e2e_timeout),
-                    claude: dagq::infrastructure::adapters::claude_at_entry(&claude)
-                        .unwrap_or(claude),
-                    codex: dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or(codex),
-                    plugin_dir,
-                    handoff_timeout: Duration::from_secs(handoff_timeout),
-                    watch_timeout: Duration::from_secs(watch_timeout),
-                    poll: Duration::from_millis(poll_ms),
-                },
-            )?
-        }
-        Command::ReleaseUpdate {
-            release,
-            token,
-            to,
-            log,
-            cargo,
-            cmux: _,
-            claude,
-            codex,
-            plugin_dir,
-            handoff_timeout,
-            watch_timeout,
-            plugin_only,
-        } => {
-            use dagq::infrastructure::adapters::executable;
-            drop(queue);
-            one_shot.release_update(
-                &location,
-                &dagq::compose::ReleaseUpdateJob {
-                    version: release,
-                    token: LeaseToken::new(token),
-                    target: to,
-                    log,
-                    cargo: executable(&cargo).unwrap_or(cargo),
-                    claude: dagq::infrastructure::adapters::claude_at_entry(&claude)
-                        .unwrap_or(claude),
-                    codex: dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or(codex),
-                    plugin_dir,
-                    handoff_timeout: Duration::from_secs(handoff_timeout),
-                    watch_timeout: Duration::from_secs(watch_timeout),
-                    plugin_only,
-                },
             )?
         }
         Command::Plan { .. } => bail!(dagq::application::planner::PLAN_REFUSED),

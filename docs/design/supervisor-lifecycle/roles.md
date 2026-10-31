@@ -140,7 +140,7 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
   envのactorがsupervisorでなければ止まる。
   serviceでの認可はsupervisorの操作と同じ（[Authorization](../authorization.md#queue-serviceのユースケースservice側)）。
 - `queue-broker serve`は`service.lifecycle`の認可を通った後、brokerのプロセスとしてqueueを開かず、自分の要求をtokenもactorの環境も持たない`user`としてserviceに送る（[Queue broker](../queue-broker.md#起動と停止)）。
-- `up`・`down`・`inbox`・`service start`・`service stop`は認可の後、queueの読み書きを呼び出し元のprincipalで制御側のコマンドのstepとしてserviceに送り、queueを開かない（[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
+- `up`・`down`・`inbox`・`service start`・`service stop`・`install`と更新のjob（`auto-update`・`release-update`）は認可の後、queueの読み書きを呼び出し元のprincipal（更新のjobは起動したsupervisorのtoken）で制御側のコマンドのstepとしてserviceに送り、queueを開かない（[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
 - それ以外（上の3つに当たらないもの）はqueueを開く。
 
 `ActorContext::from_env`の読み方は次のとおり。

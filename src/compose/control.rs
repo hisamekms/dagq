@@ -18,6 +18,7 @@ use super::OneShot;
 use crate::application::integrate::IntegrateTarget;
 use crate::application::supervisor_service::{
     ServiceCaller, ServiceTokens, SupervisorQueues,
+    across::AcrossReplacement,
     control::{self, CONTROL_QUEUE},
 };
 use crate::application::{AgentProvider, AgentSignals, MainRemote, QueueOpener, SupervisorReads};
@@ -86,6 +87,20 @@ pub(super) fn lifecycle_queues(caller: Arc<dyn ServiceCaller>) -> Result<Supervi
 /// [`lifecycle_queues`] of `control`'s steps on `client`'s socket.
 pub(super) fn lifecycle_socket(client: Client, control: ControlCall) -> Result<SupervisorQueues> {
     lifecycle_queues(Arc::new(ControlCaller::new(client, control)?))
+}
+
+/// [`lifecycle_queues`] of the steps of `install` or an update job on
+/// `client`'s socket, its records sent again under their first identity
+/// ([`control::resending`]) and its steps no service took sent again once
+/// the command's `answered` holds ([`AcrossReplacement`]).
+pub(super) fn install_socket(
+    client: Client,
+    control: ControlCall,
+    answered: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<SupervisorQueues> {
+    let caller: Arc<dyn ServiceCaller> = Arc::new(ControlCaller::new(client, control)?);
+    let across = Arc::new(AcrossReplacement::new(caller, answered));
+    lifecycle_queues(Arc::new(control::resending(across, clock::system())))
 }
 
 impl ControlQueues {

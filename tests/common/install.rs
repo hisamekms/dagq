@@ -32,6 +32,11 @@ pub struct FakeBinaries {
     pub serve_fails_for: Mutex<Option<PathBuf>>,
     /// Whether a service of the queue answers after a failed start.
     pub service_runs: std::sync::atomic::AtomicBool,
+    /// What each `serve` does besides noting it: a test's own service.
+    pub on_serve: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// Whether the binaries' `install` sends its steps to the service (a
+    /// build of before it does not).
+    pub sends_steps: std::sync::atomic::AtomicBool,
 }
 
 impl FakeBinaries {
@@ -55,6 +60,8 @@ impl FakeBinaries {
             serve_refuses: Mutex::default(),
             serve_fails_for: Mutex::default(),
             service_runs: std::sync::atomic::AtomicBool::new(false),
+            on_serve: Mutex::default(),
+            sends_steps: std::sync::atomic::AtomicBool::new(true),
         }
     }
     pub fn calls(&self) -> Vec<String> {
@@ -154,7 +161,13 @@ impl dagq::application::install::Binaries for FakeBinaries {
         if self.serve_fails_for.lock().unwrap().as_deref() == Some(binary) {
             anyhow::bail!("the queue service did not answer");
         }
+        if let Some(serve) = &*self.on_serve.lock().unwrap() {
+            serve();
+        }
         Ok(json!({"applied": self.schema.pending.len()}))
+    }
+    fn sends_install_steps(&self, _: &Path) -> bool {
+        self.sends_steps.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn service_runs(&self, _: &Path) -> bool {
         self.service_runs.load(std::sync::atomic::Ordering::SeqCst)

@@ -43,7 +43,6 @@ use crate::{
         location::{QueueLocation, REPOSITORY_FILE_NAME, data_home},
         queue_binary::{self, QueueBinary},
         run_files::LocalRunFiles,
-        runtime_store::{SqliteOpener, SqlitePorts},
         sqlite::SqliteQueue,
     },
 };
@@ -112,15 +111,17 @@ fn restart_arguments(
 
 /// Starts a supervisor a person's `install` found gone with the binary in
 /// place, as [`update::restart`] decides: `binary` runs the `up` of one
-/// registered in the retired in-cmux mode, as the install's caller.
+/// registered in the retired in-cmux mode with `binaries`, as the
+/// install's caller.
 fn restarter<'a>(
     db: &'a Path,
+    binaries: &'a dyn Binaries,
     binary: &'a Path,
     arguments: &'a [String],
 ) -> impl Fn(&SupervisorRegistration) -> Result<Value> + 'a {
     move |registration: &SupervisorRegistration| -> Result<Value> {
         update::restart(registration, &path_text(db)?, arguments, &|up| {
-            LocalBinaries.run(binary, up)
+            binaries.run(binary, up)
         })
     }
 }
@@ -642,6 +643,10 @@ fn keep_lifecycle(queue: SupervisorQueue) -> Box<dyn LifecycleQueue + Send> {
     Box::new(queue)
 }
 
+fn keep_host_ops(queue: SupervisorQueue) -> Box<dyn HostOpsQueue + Send> {
+    Box::new(queue)
+}
+
 /// The step of `command` this process makes.
 fn lifecycle_call(command: ControlCommand) -> ControlCall {
     ControlCall {
@@ -946,19 +951,44 @@ impl OneShot {
         options: &InstallOptions,
         watch_timeout: Duration,
     ) -> Result<Value> {
-        let queues = |db: &Path| self.host_queues(db);
+        self.install_on(
+            location,
+            launchd,
+            &SystemProcesses,
+            &LocalBinaries,
+            options,
+            watch_timeout,
+        )
+    }
+
+    /// [`Self::install`] with the processes `processes` (the drain's
+    /// `down`'s too) and the binaries `binaries`: tests' fakes.
+    pub fn install_on(
+        &self,
+        location: &QueueLocation,
+        launchd: &dyn LaunchAgent,
+        processes: &dyn ProcessControl,
+        binaries: &dyn Binaries,
+        options: &InstallOptions,
+        watch_timeout: Duration,
+    ) -> Result<Value> {
+        let binding = binding_of(location)?;
+        let answered = Arc::default();
+        let queues = |db: &Path| {
+            self.install_opener(db, binding.as_deref(), ControlCommand::Install, &answered)
+        };
         // A supervisor gone after a failed watch is started again with the
         // binary in place, as after the automatic update's.
         let db = location
             .db
             .canonicalize()
             .unwrap_or_else(|_| location.db.clone());
-        let restart = restarter(&db, &options.target, &options.restart);
+        let restart = restarter(&db, binaries, &options.target, &options.restart);
         let down = || {
             self.down(
                 location,
                 launchd,
-                &SystemProcesses,
+                processes,
                 &DownOptions {
                     wait: true,
                     force: false,
@@ -968,9 +998,9 @@ impl OneShot {
         };
         update::install_watched(
             &update::JobPorts {
-                binaries: &LocalBinaries,
+                binaries,
                 files: &LocalRunFiles,
-                processes: &SystemProcesses,
+                processes,
                 clock: &*self.generators.clock,
                 queues: &queues,
                 restart: &restart,
@@ -994,7 +1024,16 @@ impl OneShot {
             .db
             .canonicalize()
             .context("queue must already be initialized")?;
-        let queues = |db: &Path| self.host_queues(db);
+        let binding = binding_of(location)?;
+        let answered = Arc::default();
+        let queues = |db: &Path| {
+            self.install_opener(
+                db,
+                binding.as_deref(),
+                ControlCommand::AutoUpdate,
+                &answered,
+            )
+        };
         let restart_arguments =
             restart_arguments(&job.claude, &job.codex, job.plugin_dir.as_deref())?;
         let restart = update_restarter(&db, &restart_arguments);
@@ -1058,7 +1097,16 @@ impl OneShot {
             .db
             .canonicalize()
             .context("queue must already be initialized")?;
-        let queues = |db: &Path| self.host_queues(db);
+        let binding = binding_of(location)?;
+        let answered = Arc::default();
+        let queues = |db: &Path| {
+            self.install_opener(
+                db,
+                binding.as_deref(),
+                ControlCommand::ReleaseUpdate,
+                &answered,
+            )
+        };
         let restart_arguments =
             restart_arguments(&job.claude, &job.codex, job.plugin_dir.as_deref())?;
         let restart = update_restarter(&db, &restart_arguments);
@@ -1151,15 +1199,6 @@ impl OneShot {
         Ok(report)
     }
 
-    /// The queue at a path, writing through these generators.
-    fn opener(&self, db: &Path) -> SqliteOpener {
-        SqliteOpener {
-            db: db.to_path_buf(),
-            generators: self.generators.clone(),
-            actor: None,
-        }
-    }
-
     /// The queue at `db`, bound to `binding`, as the ports `P` of
     /// `command`'s steps, on [`Self::lifecycle_route`] (in this process, as
     /// a command that runs `executable` when given): the queue `up`,
@@ -1193,12 +1232,40 @@ impl OneShot {
         }
     }
 
-    /// The queue at a path as the ports `install` and the update jobs take.
-    fn host_queues(&self, db: &Path) -> Arc<dyn QueueOpener<dyn HostOpsQueue + Send>> {
-        Arc::new(SqlitePorts {
-            opener: self.opener(db),
-            keep: |queue| -> Box<dyn HostOpsQueue + Send> { Box::new(queue) },
-        })
+    /// The queue at `db`, bound to `binding`, as the ports `install` and
+    /// the update jobs take, each operation a step of `command`
+    /// ([`ControlCommand::installs`]) on [`Self::lifecycle_route`]: on the
+    /// socket, as the principal of the token the environment names (the
+    /// user with none, the supervisor that started an update job with its
+    /// own), its records sent again while no service answers and its steps
+    /// no service took once another of the command's was answered
+    /// (`answered`, the command's), and the queue never opened.
+    fn install_opener(
+        &self,
+        db: &Path,
+        binding: Option<&str>,
+        command: ControlCommand,
+        answered: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> Arc<dyn QueueOpener<dyn HostOpsQueue + Send>> {
+        match self.lifecycle_route {
+            LifecycleRoute::Socket(env) => {
+                let (db, binding) = (db.to_path_buf(), binding.map(str::to_owned));
+                let answered = answered.clone();
+                Arc::new(LifecycleOpener {
+                    queues: Box::new(move || {
+                        super::install_socket(
+                            service::Client::host(&db, binding.as_deref(), env),
+                            lifecycle_call(command),
+                            answered.clone(),
+                        )
+                    }),
+                    keep: keep_host_ops,
+                })
+            }
+            LifecycleRoute::InProcess => {
+                self.lifecycle_opener(db, binding, command, None, keep_host_ops)
+            }
+        }
     }
 
     /// The adapters `up` and `down` run on: the queue at a path through

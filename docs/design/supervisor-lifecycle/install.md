@@ -24,6 +24,8 @@ related:
 `dagq install`は固定バイナリを入れ替えて、このqueueのsupervisorを引き継がせ、引き継いだsupervisorを見張る人の入口（ADR-0045の決定11・12・14、[ADR-0073](../../adr/0073-kind-additions-are-compatible.md)の決定13・14）。
 flagと既定はCLI（`src/main.rs`）の`--help`が持つ。
 use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/application/update.rs`の`install_watched`（その後の見張り。下の7）、配線は`src/compose/host.rs`の`OneShot::install`、binaryのビルド・起動・置き換えは`src/infrastructure/binaries.rs`（`Binaries` port）。
+`install`（`--rollback`・`--release`を含む）のプロセスはqueueのDBを開かず、queueの読みと記録（登録の読み・引き継ぎの要求と取り下げ・`update_*`と`install_e2e_finished`・askを開く）は全てqueue serviceの制御側のユースケースの段として呼び出し元のprincipalで送り、serviceが`service.install`で認可する（[hostのCLI](../queue-service-host-cli.md)の「制御側のコマンド」）。
+最初の段の後にserviceに届かない段は受け付けるserviceへ送り直し（記録とupdateのaskは同じidentityで、queueは1度だけ取る）、DBを開くことへは戻らない。
 
 1. **元**: 与えたbinaryかcheckout、省略時はcwdのrepositoryのmain checkout（[Run environment](run-environment.md#main-checkoutの決め方)）をビルドしたもの、戻すときは`<to>.previous`、リリースならcrates.ioのリリース（下の「リリースから」）。
    - **e2eの関門**（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定1）: 元がdagqのソース（[Source repository](source-repository.md)）のcheckoutなら、ビルドの後・2の確認の前に、[自動更新](auto-update.md#auto-update)と同じ関門（`Binaries::e2e`、`src/infrastructure/e2e_gate.rs`）で全部のe2eを流す。
@@ -37,7 +39,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
      関門を流すかはCLIが`E2eGate`で決め、結果の`e2e`の形と印の続けての失敗の数え方は`E2eGate`と`E2eOutcome::report`のdoc commentが持つ。
      関門を流したときは、通っても落ちても（始められないときも）queueに`install_e2e_finished`のqueue eventを1件書く（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)決定4。欄は`domain::INSTALL_E2E_FINISHED`のdoc comment）。
      jobの段ではないので自動更新の状態・`retry`・askには関わらず、印の続けての失敗（[Auto-update](auto-update.md#auto-update)の印）と`stats`の関門のtestごとの数と、それを読むobserverの`flaky_test`のfindingに自動更新の関門と並んで入る。
-     queueが無い・開けない・書けないときは書かずに`install`を進め、通ったときの結果の`e2e`にその理由が載る。
+     queueが無い・serviceが答えない・書けないときは書かずに`install`を進め、通ったときの結果の`e2e`にその理由が載る。
      関門を飛ばしたときと関門を持たない元では書かない。
      mainでないcheckout（作業中のbranchなど）の関門も同じく数えるので、その失敗は自動更新とruntimeがrunに流すe2eの印の続けての失敗に入り、`stats`の`marked`は窓の最新の関門のcheckoutの印を映す。
    - **期間限定で外したケース**（[ADR-t1582-1](../../adr/2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md)）: 外したケースは登録に無いので結果の`e2e`には出ない。
@@ -54,6 +56,11 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    `install`のプロセスはmigrateのためにDBを開かない。
    元はまだqueueのbinaryではないので、その起動の間だけ元に許しを置く（[SQLite persistence](../persistence.md#database-setup-and-migrations)）。
    serviceが拒めば何も置き換えない。
+   未適用のmigrationが無くても、queueのserviceが答えないか、このstepを読めない前のbuildのものなら、同じ口で元のserviceを起動してから登録を読む。
+   元がこのstepを送らない前のbuildのbinary（その`install --sends-steps`が通らない。前のbuildへの戻しや前のbuildのcheckoutなど）なら、1の後に登録を読まずに`install`全体をそのbinaryの`install`に同じ引数で任せる（`update::install_watched`）。
+   checkoutはビルドしたbinaryを`--from`で渡し、1のe2eの関門とその記録はこの`install`が持つ。
+   引き継いだそのbuildのsupervisorがserviceを前のbuildのものに替えると、このbuildのstepは読まれないため。
+   その`install`は前のbuildとしてDBを開く（ADR-t3102-2決定7の並存）。
 4. **置き換え**（決定11）: 元が`<to>`そのもの（リリースで`<to>`がすでにその版だったとき）なら置き換えず（`.previous`もそのまま）、引き継ぎだけを行い、全員の引き継ぎが失敗しても戻さない。
    それ以外は元を`<to>`と同じdirの一時fileにcopyし、`<to>`をhard linkで残してから一時fileを`<to>`にrenameし、残したものを`<to>.previous`にrenameする。
    動いているプロセスは前のinodeを使い続けるので、上書きのcpで殺されることはない。
@@ -65,14 +72,16 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    上限の直後に要求を受け取ったsupervisorの扱いは`lifecycle::hand_off`のdoc commentと[`up` / `down`](up-down.md)の引き継ぎが持つ。
    `hand_off`は最初の失敗で止まらず、引き継がせた全員の成功か失敗を待つ（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）。
    fileは全員で1つなので、**全員が失敗したときだけ**`<to>.previous`を`<to>`に戻し（`restore`）、`install::HandoffFailed`のerrorで止まる。
+   答えの切れた要求と取り下げは登録を読み直して照合し、取ったかが分からないsupervisorが残れば戻さずに`<to>`を残すerrorで止まる（`lifecycle::HandoffUnsettled`）。
    **一部だけが失敗したとき**は戻さず、失敗したsupervisorを名指して、`down --force`と`up`（新しいbinaryで起動し直す）か戻し（全員を前のbinaryに戻す）を案内する`install::KeptBinary`のerrorで止まる。
    CLIはこのerrorのときも結果をstdoutに出してから、errorをstderrに出して失敗で終わる。
    結果の形は`install::install`と`lifecycle::Handed::report`が持つ。
    queueが無ければ置き換えだけを行う。
    全員の失敗で戻したときのほかは、`<to>`のpathをqueueのbinaryとして記録する（6のdrainも置き換えの後に記録する）。
    3で元のserviceを起動したときは、記録の後に`<to>`のserviceを同じ口で起動し直す（適用するものは残っていない）。
+   引き継ぎの要求と取り下げは`up`のものと違い、要求を送るプロセスの実行fileでなく置いた`<to>`を名指す（`service.install`を持つprincipalは固定バイナリを置き換えられる）。
    全員の失敗と一部の失敗は、CLIでは7の`update_failed`の経路を通る。
-6. **drain**（決定14）: 人が非互換のmigrationを許したとき、liveな登録があれば`down --wait`で止め（同じqueueのDBを持つ別のlabelのagentも外す。[up / down](up-down.md)の`down`）、元のserviceを非互換も適用してよい入れ替えの口で起動し（使用中のsupervisor・run・wrapperが無いことの判定と`backups/`への複製と適用を1つのtransactionで行う。使用中のものが残れば適用せず受け付けず、何も置き換えずにerrorで止まる）、置き換えて`<to>`のserviceを起動し直し、新しいbinaryの`up`で起動し直す（`--claude`と`--codex`の解決は[Provider executables](../provider-executables.md)）。
+6. **drain**（決定14）: 人が非互換のmigrationを許したとき、liveな登録があれば`down --wait`（serviceを通る。serviceが答えなければ止めるものは無いとし、使用中の判定は下のserviceに任せる）で止め（同じqueueのDBを持つ別のlabelのagentも外す。[up / down](up-down.md)の`down`）、元のserviceを非互換も適用してよい入れ替えの口で起動し（使用中のsupervisor・run・wrapperが無いことの判定と`backups/`への複製と適用を1つのtransactionで行う。使用中のものが残れば適用せず受け付けず、何も置き換えずにerrorで止まる）、置き換えて`<to>`のserviceを起動し直し、新しいbinaryの`up`で起動し直す（`--claude`と`--codex`の解決は[Provider executables](../provider-executables.md)）。
    止めた登録がin-cmuxでもlaunchd modeで起動する（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。
    止めた登録がflagで与えた値（[claimを控える](claim-hold.md)loadの上限を含む）は起動し直す`up`に同じflagで渡るので、drainの後に`up`を打ち直す必要はない（どの値をどう引き継ぐかは`install_breaking`のdoc comment）。
    drainは7の見張りの対象外: 前のbinaryは非互換のmigrationの後のDBを開けないので戻せず、supervisorの起動し直しは上の`up`が行う（その`up`の失敗はerrorで止まる）。
@@ -92,10 +101,10 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
      askの答えはsupervisorの自動更新のpassもリリースのpassも適用しない（ビルドを起こさない）ので、inboxが答えを読み、人の言葉で問いに書いた手を打ってaskを閉じる（dagq-recover skillの`reference/update.md`の`update_failed`）。
 
 queue serviceとqueueのbrokerは5の引き継ぎでは止めない。
-未適用のmigrationがあれば、queue serviceは3と6で`install`が入れ替え、置き換えの後に`<to>`のものへ替える。
+3で元のserviceを起動したとき（未適用のmigrationがあるか、serviceが答えないかこのstepを読めないとき）と6では、queue serviceは`install`が入れ替え、置き換えの後に`<to>`のものへ替える。
 5の間はsupervisorの見張りが触れないよう守る（`QueueServiceControl::hold`）。
-守りを知らない前のbuildの見張りがそれでも入れ替えたときも、migrationは受け付けの前に済んでいるので`install`は進む。
-無ければ、execした新しいbinaryのsupervisorが、queue serviceは登録とsign inの前に（記録は最初の見張りで）、brokerは最初の見張りで、前のbuildのものを1回だけ入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
+守りを知らない前のbuildの見張りがそれでも入れ替えると、migrationは受け付けの前に済んでいるが、そのbuildのserviceはこの後のstepを読めないので、`install`はそのstepのerrorで止まる。
+それ以外は、execした新しいbinaryのsupervisorが、queue serviceは登録とsign inの前に（記録は最初の見張りで）、brokerは最初の見張りで、前のbuildのものを1回だけ入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
 6のdrainの後のsupervisorとbrokerは`up`が新しいbinaryで起動する。
 
 `install`自身は引き継ぎの完了と、その後の見張り（上の7）を待つ。

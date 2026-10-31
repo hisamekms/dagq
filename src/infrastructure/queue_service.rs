@@ -3937,6 +3937,17 @@ fn control_answer(response: ServiceResponse) -> Result<Value> {
                 Err(anyhow::anyhow!(error.message))
             }
         }
+        // A service of a build before the command reads none of its steps.
+        (_, _, Some(error))
+            if error.code == ServiceErrorCode::BadRequest
+                && error.message.starts_with(
+                    crate::application::supervisor_service::control::UNREAD_PARAMS,
+                ) =>
+        {
+            Err(anyhow::Error::new(
+                crate::application::supervisor_service::CommandUnknown(error.message),
+            ))
+        }
         (_, _, Some(error)) => Err(ClientFailure {
             denied: error
                 .denied

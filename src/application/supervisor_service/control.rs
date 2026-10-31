@@ -10,6 +10,11 @@
 //! the registrations, events and reads they make ([`lifecycle_ops`]); their
 //! steps act on any supervisor's registration, as the principal that may
 //! run them (`service.lifecycle`) starts and stops every supervisor.
+//! `install` and the automatic and release updates' jobs (`service.install`)
+//! keep the build, the binaries, their e2e and the child commands they run
+//! (the new build's checks and service, `up`) on the caller's side and send
+//! the handoffs, the update records and asks and the reads they make
+//! ([`lifecycle_ops`]): they hand every live supervisor over, as `up` does.
 //!
 //! At each step the command's operation is authorized for the principal
 //! as the command line authorizes it before it runs (refusals recorded), so
@@ -47,6 +52,11 @@ use crate::domain::authorization::Capability;
 use crate::domain::queue_service::{ControlCall, ControlCommand, ControlParams, Principal};
 use crate::domain::session_step::StepTarget;
 use crate::domain::{CommitSha, EventKind, LeaseToken, RunId, RunStatus, TaskId};
+
+/// The start of the refusal of a step whose params the service does not
+/// read: a service of a build before the step's command answers a step of
+/// `install` or an update job so ([`super::CommandUnknown`]).
+pub const UNREAD_PARAMS: &str = "the params of control do not read";
 
 /// The step that starts a command: the queue's DB the service serves and
 /// the principal's actor, which the command's records are the events of.
@@ -99,6 +109,10 @@ pub fn operation(call: &ControlCall) -> Result<Operation> {
         | ControlCommand::ServiceStop
         | ControlCommand::BrokerStart
         | ControlCommand::BrokerStop => Operation::QueueService,
+        ControlCommand::Install => Operation::Install,
+        // The release update is authorized as the automatic update, as
+        // its command line is.
+        ControlCommand::AutoUpdate | ControlCommand::ReleaseUpdate => Operation::AutoUpdate,
     })
 }
 
@@ -173,6 +187,30 @@ fn recorded_kinds(command: ControlCommand) -> (&'static [EventKind], &'static [E
         ControlCommand::ServiceStop => (&[EventKind::QueueServiceStopped], &[]),
         ControlCommand::BrokerStart => (&[EventKind::QueueBrokerStarted], &[]),
         ControlCommand::BrokerStop => (&[EventKind::QueueBrokerStopped], &[]),
+        // A person's install records its e2e gate, and the failure of its
+        // watch with the binary it put back.
+        ControlCommand::Install => (
+            &[
+                EventKind::InstallE2eFinished,
+                EventKind::UpdateRestored,
+                EventKind::UpdateFailed,
+            ],
+            &[],
+        ),
+        // The automatic update's e2e gate records too the sccache wrapper
+        // it took off the e2e's environment.
+        ControlCommand::AutoUpdate | ControlCommand::ReleaseUpdate => (
+            &[
+                EventKind::SccacheWrapperRemoved,
+                EventKind::UpdateBuilt,
+                EventKind::UpdateE2ePassed,
+                EventKind::UpdateInstalled,
+                EventKind::UpdateRestored,
+                EventKind::UpdateFailed,
+                EventKind::UpdateAwaitingApproval,
+            ],
+            &[],
+        ),
     }
 }
 
@@ -182,7 +220,10 @@ fn recorded_kinds(command: ControlCommand) -> (&'static [EventKind], &'static [E
 /// over or drains them, records the mode of the one it started and sets
 /// their automatic update, and forgets the workspaces an earlier binary
 /// recorded, the drained supervisor's too; `down` prunes and forgets the
-/// supervisor's workspace.
+/// supervisor's workspace. `install` and the update jobs hand the live
+/// supervisors over (and withdraw what none took) and open the inbox's
+/// ask of a failed one; the automatic update closes the asks of the
+/// failures its install settled.
 fn lifecycle_ops(command: ControlCommand) -> &'static [&'static str] {
     match command {
         ControlCommand::Up => &[
@@ -195,6 +236,13 @@ fn lifecycle_ops(command: ControlCommand) -> &'static [&'static str] {
             "remove_session_workspace",
         ],
         ControlCommand::Down => &["prune_supervisor", "remove_session_workspace"],
+        ControlCommand::Install => &["request_handoff", "cancel_handoff", "open_update_ask"],
+        ControlCommand::AutoUpdate | ControlCommand::ReleaseUpdate => &[
+            "request_handoff",
+            "cancel_handoff",
+            "open_update_ask",
+            "close_installed_update_ask",
+        ],
         _ => &[],
     }
 }
@@ -226,7 +274,7 @@ pub fn scope(command: ControlCommand, op: &str, args: &[Value]) -> Result<(), St
         }
         _ if lifecycle_ops(command).contains(&op) => true,
         _ if TELEMETRY_OPS.contains(&op) => {
-            command != ControlCommand::Review && !command.lifecycle()
+            command != ControlCommand::Review && !command.acts_on_registrations()
         }
         _ => super::needs::READS.contains(&op),
     };
@@ -266,7 +314,7 @@ pub fn answer(
 ) -> Result<Value> {
     let actor = principal.actor();
     let params: ControlParams = serde_json::from_value(params.clone())
-        .map_err(|error| BadOperation(format!("the params of control do not read: {error}")))?;
+        .map_err(|error| BadOperation(format!("{UNREAD_PARAMS}: {error}")))?;
     let ControlParams { control, call } = params;
     let mut queue = backend.open(&actor)?;
     super::super::queue_service::authorize_operation(&mut *queue, &actor, &operation(&control)?)?;
@@ -447,7 +495,24 @@ pub fn answer(
         }
         _ => {}
     }
-    if op == "request_handoff" {
+    // `install` hands the supervisors over to the binary it put in place,
+    // which a principal that may install (`service.install`) puts wherever
+    // it names, as an absolute path: only `up` hands over its own
+    // executable.
+    if op == "request_handoff" && control.command.installs() {
+        let (_, binary): (Value, String) = read(op, args.clone())?;
+        if !std::path::Path::new(&binary).is_absolute() {
+            return Err(super::super::queue_service::refuse_recorded(
+                &mut *queue,
+                &actor,
+                Capability::BinaryInstall,
+                &crate::domain::Resource::Queue,
+                crate::domain::authorization::DenyReason::Resource,
+                &format!("the handoff names {binary}, not an absolute path"),
+            ));
+        }
+    }
+    if op == "request_handoff" && control.command == ControlCommand::Up {
         let (_, binary): (Value, String) = read(op, args.clone())?;
         if let Some(why) = handoff_refusal(&binary, process, |pid| backend.executable_of(pid)) {
             return Err(super::super::queue_service::refuse_recorded(
@@ -470,11 +535,12 @@ pub fn answer(
         return super::dispatch::dispatch_once(store, op, args, &record);
     }
     // The caller names no lease of its own here: its landing's goes with
-    // the integrator's token. `up` and `down` act on every supervisor's
-    // registration, as the command line on the DB did: the principal that
-    // may run them (`service.lifecycle`) is the one that starts and stops
-    // the supervisors.
-    let lifecycle = control.command.lifecycle();
+    // the integrator's token. `up`, `down`, `install` and the update jobs
+    // act on every supervisor's registration, as the command line on the DB
+    // did: the principal that may run them (`service.lifecycle`,
+    // `service.install`) is the one that starts, stops and hands over the
+    // supervisors.
+    let lifecycle = control.command.acts_on_registrations();
     super::dispatch::dispatch(
         store,
         &|_| {
@@ -871,6 +937,105 @@ mod tests {
         ] {
             assert!(!command.lifecycle(), "{command:?}");
         }
+    }
+
+    /// `install` and the update jobs are `service.install`'s, as their
+    /// command lines are: the user, the inbox, a planner and a supervisor
+    /// send their steps, and every other role is refused, not the AI
+    /// actors as one.
+    #[test]
+    fn the_install_commands_are_the_install_s_principals() {
+        use crate::domain::authorization::Authorizer;
+        use crate::domain::{ActorContext, ActorRole, StaticPolicy};
+        use ControlCommand as C;
+        for (command, expected) in [
+            (C::Install, Operation::Install),
+            (C::AutoUpdate, Operation::AutoUpdate),
+            (C::ReleaseUpdate, Operation::AutoUpdate),
+        ] {
+            assert!(command.installs() && command.acts_on_registrations());
+            assert!(!command.lifecycle(), "{command:?}");
+            let operation = operation(&call(command)).unwrap();
+            assert_eq!(operation, expected);
+            let (capability, resource) = operation.request();
+            assert_eq!(capability, Capability::BinaryInstall);
+            for role in ActorRole::ALL {
+                let allowed = StaticPolicy
+                    .authorize(&ActorContext::instance(role, 1), capability, &resource)
+                    .is_ok();
+                let expected = matches!(
+                    role,
+                    ActorRole::User | ActorRole::Inbox | ActorRole::Planner | ActorRole::Supervisor
+                );
+                assert_eq!(allowed, expected, "{command:?} {role:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_install_command_hands_over_and_records_only_its_update_steps() {
+        use ControlCommand as C;
+        let event = |kind: EventKind| serde_json::to_value(kind).unwrap();
+        let records = |command, kind| {
+            scope(
+                command,
+                "record_queue_event",
+                &[event(kind), serde_json::json!({})],
+            )
+        };
+        for command in [C::Install, C::AutoUpdate, C::ReleaseUpdate] {
+            for op in [
+                CONTROL_QUEUE,
+                "supervisors",
+                "update_events",
+                "asks",
+                "e2e_gate_events",
+                "request_handoff",
+                "cancel_handoff",
+                "open_update_ask",
+            ] {
+                assert!(scope(command, op, &[]).is_ok(), "{command:?} {op}");
+            }
+            // It neither registers, prunes nor takes a handoff as a
+            // supervisor would, and issues no telemetry token.
+            for op in [
+                "register_supervisor",
+                "prune_supervisor",
+                "take_handoff",
+                "set_auto_update",
+                "claim_for_supervisor",
+                BEGIN_LANDING,
+                "issue_telemetry",
+            ] {
+                assert!(scope(command, op, &[]).is_err(), "{command:?} {op}");
+            }
+            assert!(records(command, EventKind::UpdateFailed).is_ok());
+            let sccache = records(command, EventKind::SccacheWrapperRemoved);
+            assert_eq!(sccache.is_ok(), command != C::Install, "{command:?}");
+            assert!(records(command, EventKind::UpdateRestored).is_ok());
+            assert!(records(command, EventKind::QueueServiceStarted).is_err());
+            assert!(records(command, EventKind::SupervisorStarted).is_err());
+            // The supervisor records the update's start and its retries.
+            assert!(records(command, EventKind::UpdateStarted).is_err());
+        }
+        assert!(records(C::Install, EventKind::InstallE2eFinished).is_ok());
+        assert!(records(C::Install, EventKind::UpdateInstalled).is_err());
+        assert!(scope(C::Install, "close_installed_update_ask", &[]).is_err());
+        for command in [C::AutoUpdate, C::ReleaseUpdate] {
+            for kind in [
+                EventKind::UpdateBuilt,
+                EventKind::UpdateE2ePassed,
+                EventKind::UpdateInstalled,
+                EventKind::UpdateAwaitingApproval,
+            ] {
+                assert!(records(command, kind).is_ok(), "{command:?} {kind:?}");
+            }
+            assert!(scope(command, "close_installed_update_ask", &[]).is_ok());
+        }
+        // Only `up` hands over and its steps on another's registration are
+        // the lifecycle's; `integrate` acts under no other's.
+        assert!(scope(C::Integrate, "request_handoff", &[]).is_err());
+        assert!(!C::Integrate.acts_on_registrations());
     }
 
     #[test]

@@ -171,6 +171,11 @@ impl Binaries for LocalBinaries {
         output(binary, &["supervise", "--handoff-token", "probe", "--help"]).is_ok()
     }
 
+    fn sends_install_steps(&self, binary: &Path) -> bool {
+        // Clap refuses an unknown argument before it prints the help.
+        output(binary, &["install", "--sends-steps", "--help"]).is_ok()
+    }
+
     fn schema(&self, binary: &Path, db: &Path) -> Result<SchemaCheck> {
         let report = json_output(binary, &["--db", text(db)?, "migrate", "--check"])?;
         let pending = report["pending"]
@@ -271,13 +276,8 @@ impl Binaries for LocalBinaries {
 
     fn checkout(&self, repository: &Path, checkout: &Path, commit: &str) -> Result<()> {
         let git = |dir: &Path, arguments: &[&str]| -> Result<()> {
-            let output = unpiped_output(
-                Command::new(git_executable()?)
-                    .arg("-C")
-                    .arg(dir)
-                    .args(arguments),
-            )
-            .context("run git")?;
+            let output = unpiped_output(&mut checkout_git(git_executable()?, dir, arguments))
+                .context("run git")?;
             ensure!(
                 output.status.success(),
                 "git {} in {} exited with {}: {}",
@@ -327,20 +327,7 @@ impl Binaries for LocalBinaries {
             .append(true)
             .open(log)
             .with_context(|| format!("open {}", log.display()))?;
-        let mut build = match command {
-            Some(command) => {
-                let mut shell = Command::new("/bin/sh");
-                shell.args(["-c", command]);
-                shell
-            }
-            None => {
-                let mut cargo =
-                    Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-                cargo.args(BUILD_ARGS);
-                cargo
-            }
-        };
-        let status = build
+        let status = build_command(command)
             .current_dir(checkout)
             .env(target_env, target_dir)
             .stdin(Stdio::null())
@@ -370,6 +357,45 @@ impl Binaries for LocalBinaries {
     ) -> Result<E2eOutcome> {
         super::e2e_gate::run(checkout, target_dir, settings)
     }
+}
+
+/// `git -C <dir> <arguments>` of a checkout to build: its `checkout` and
+/// `worktree add` run the hooks the repository configures (its
+/// `core.hooksPath`), code of the commit the job does not trust, so it is
+/// given no credential of the queue service ([`without_credential`]).
+fn checkout_git(git: impl AsRef<std::ffi::OsStr>, dir: &Path, arguments: &[&str]) -> Command {
+    let mut command = without_credential(Command::new(git));
+    command.arg("-C").arg(dir).args(arguments);
+    command
+}
+
+/// `command` (run by `sh -c`), or cargo's release build: either runs the
+/// checkout's own code (its build scripts and proc macros), so it is given
+/// no credential of the queue service ([`without_credential`]).
+fn build_command(command: Option<&str>) -> Command {
+    match command {
+        Some(command) => {
+            let mut shell = without_credential(Command::new("/bin/sh"));
+            shell.args(["-c", command]);
+            shell
+        }
+        None => {
+            let mut cargo = without_credential(Command::new(
+                env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+            ));
+            cargo.args(BUILD_ARGS);
+            cargo
+        }
+    }
+}
+
+/// `command` without the file of the token the update job's supervisor
+/// gave it ([`CREDENTIAL_FILE_ENV`](crate::domain::queue_service::CREDENTIAL_FILE_ENV)):
+/// a build or a release's `cargo install` runs code the job does not
+/// trust, which must not act as that supervisor.
+fn without_credential(mut command: Command) -> Command {
+    command.env_remove(crate::domain::queue_service::CREDENTIAL_FILE_ENV);
+    command
 }
 
 /// [`ReleaseInstaller`] on this machine: `program` (`cargo` unless a test
@@ -404,7 +430,7 @@ impl ReleaseInstaller for CargoInstaller {
             .append(true)
             .open(log)
             .with_context(|| format!("open {}", log.display()))?;
-        let status = Command::new(&self.program)
+        let status = without_credential(Command::new(&self.program))
             .args(["install", "--locked"])
             .arg(format!(
                 "{}@{version}",
@@ -482,5 +508,23 @@ mod tests {
         // The user's: no token.
         let none = up_command(binary, |_| None);
         assert_eq!(set(&none, CREDENTIAL_FILE_ENV), Some(None));
+    }
+
+    /// A build (cargo's or a configured command) and a release's `cargo
+    /// install` run code the update job does not trust: none of them is
+    /// given the file of the token of the job's supervisor.
+    #[test]
+    fn the_builds_take_no_service_credential() {
+        let checkout = checkout_git("git", Path::new("/r"), &["worktree", "add"]);
+        for build in [
+            build_command(None),
+            build_command(Some("make dagq")),
+            checkout,
+        ] {
+            assert_eq!(set(&build, CREDENTIAL_FILE_ENV), Some(None));
+        }
+        // test-rules: allow A-262 Command を組み立てて環境だけを見る。起動しない
+        let install = without_credential(Command::new("cargo"));
+        assert_eq!(set(&install, CREDENTIAL_FILE_ENV), Some(None));
     }
 }

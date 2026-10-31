@@ -53,6 +53,11 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
   setsidで新しいsessionとprocess groupに入れる（supervisorのexecにも終わりにも巻き込まれないため）。
   結果・stderr・ビルドの出力・tracingのlogは`<queue dir>/logs/`の下に置き、古いものは消える（[Logs](commands.md#log)）。
   起動したら、supervisorが`update_started`を書く。
+  - **queueへの経路**: jobのプロセスはqueueのDBを開かず、読みと記録をqueue serviceの制御側のユースケースの段として送る（送り直しと届かないときは[hostのCLI](../queue-service-host-cli.md)の「制御側のコマンド」）。
+    principalは起動したsupervisorで、jobはその登録のtokenのfileを受け取り（ADR-t3102-1決定2）、serviceが`service.install`で認可する（tokenの無いjobは断られる）。
+    checkout・ビルド・`cargo install`の子にはこのfileを渡さない（`without_credential`）。
+    execの引き継ぎは同じ登録とtokenを継ぐ。
+    起動したsupervisorの登録が終わるとtokenは失効し、その後のjobの記録はserviceに拒まれ、jobは別のprincipalに替えずにerrorで終わる（書けなかった終わりは2の中断になる）ので、5はそれを`update_failed`とaskの後に止める。
   1. **ビルド**: `<queue dir>/update/checkout`をheadに合わせ、Rustのprofileのbuildの出力（`<queue dir>/update/`の下のdirとそれを指すenv。`UpdatePaths::under`）でreleaseのビルドを走らせる。
      人のmainのcheckoutと`target/`は使わない。
      成功すれば`update_built`。
@@ -127,11 +132,11 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
      PIDが死んだ、登録が消えて同じpidの登録も無い、build識別子が違う、heartbeatが進まない、のどれかでそのsupervisorを失敗にし、他のsupervisorは最後まで見張る。
      fileは全員で1つなので、全員が失敗したときだけ、`.previous`が置き換えた前のbuild識別子と同じなら`restore`で戻す（違えば戻さず、その旨をaskに書く）。
      一部だけが失敗したときは、新しいbinaryで動いているsupervisorがあるので戻さず、失敗したsupervisorだけを5で戻し（止まったものは置いたままの新しいbinaryで起動し直し、execに失敗して前のbinaryのまま動くものはそのまま）、`update_failed`のaskで人に判断を渡す（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)。askは前のbinaryのまま動くsupervisorを`down --force`と`up`で揃えるか、`install --rollback`で全員を戻すかを案内する）。
-     戻したら、supervisorを戻した（5）後に`update_restored`を書く（書けなくても続ける）。
+     戻したら、他を戻した（5）後に`update_restored`を書く（書けなくても続ける）。
      `update_restored`はjobの途中の段（`JOB_STEPS`）で、jobが死んで最新の段のまま残れば2のinterruptedになる。
   5. **supervisorを戻す**（`bring_back`）: 3の引き継ぎより前の失敗（差し替えの失敗など、supervisorごとの結果が無いもの）の後はjobを起動したsupervisorだけを、3の全員の引き継ぎの失敗と4の失敗の後は失敗したsupervisorのそれぞれを戻す。
      全員の引き継ぎの失敗で、jobを起動したsupervisorが引き継がせた中に居なければ（`install`が見たときliveでなかった）、それも戻す。
-     戻すのは見張りが追った今の登録（同じpidが登録し直した新しいtokenの登録なら、modeとworkspaceは入れ替え前の登録のもの）で行う。
+     戻すのは見張りが追った今の登録（同じpidが登録し直した新しいtokenの登録なら、modeとworkspaceは入れ替え前の登録のもの）を最初の戻しの前に1回読んで行う。
      その登録が前のbuild識別子のままheartbeatしていれば（execが失敗して前のbinaryが続けた）何もしない。
      PIDが生きていてheartbeatしていなければSIGTERM（止まらなければSIGKILL）で止め、止めたか死んでいた登録を起動し直す（`application::update::restart`、source buildのjobもリリースのjobも同じ）。
      launchd modeの登録（`up`を通さずlaunchdが起動したものも含む）は`KeepAlive`が戻したbinaryで起動し直すので任せる。
@@ -180,8 +185,8 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
 - **待ちの見直し**: 引き継いだsupervisorは、execした新しいprocessの最初のpassで、`wait_for_build`のtaskの待ち（[claimを控える](claim-hold.md#依存先の着地を含むbuildを待つtask)、ADR-t1632-1）を自分の新しいbuild識別子で判定し直し、依存先の着地を含めばclaimする（含むかの答えはprocessの中だけでcacheするので、引き継ぎの後は空から読む）。
   `update_installed`そのものは待ちを変えない: 待ちを決めるのは固定バイナリのfileではなくsupervisorの走っているbuildで、引き継いだsupervisorのbuildはそのfileと同じになる。
 - **queue serviceとqueueのbroker**: 3の引き継ぎはどちらも止めない。
-  未適用のmigrationがあれば、queue serviceは3の`install::install`が引き継ぎの前に入れ替えて後に置いたbinaryのものへ替える（[install](install.md#install)）。
-  無ければ引き継いだsupervisorが前のbuildのものを1回だけ入れ替え、queue serviceは登録とsign inの前に入れ替えて最初の見張りで記録し、brokerは最初の見張りで入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
+  3の`install::install`が元のserviceを起動するなら（[install](install.md#install)の3）、queue serviceは引き継ぎの前にそれへ、後に置いたbinaryのものへ替わる。
+  他は引き継いだsupervisorが前のbuildのものを1回だけ入れ替え、queue serviceは登録とsign inの前に入れ替えて最初の見張りで記録し、brokerは最初の見張りで入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
 - **status**: `status`は結果を作ったprocessのbuild識別子と、自動更新（liveな登録のどれかが有効か、最新の段）と、登録ごとの設定と今のbuild識別子を出す。
   `status`はqueue serviceが作るので（人・inbox・plannerは[hostのCLI](../queue-service-host-cli.md#送る範囲)、実行側は[クライアントモード](../queue-service.md#クライアントモード)）、出るのは打った`dagq`ではなくserviceのbuild識別子になる。
   `state`の値の意味と、人の`dagq install`の`update_failed`を数えないことは`application::update::status`のdoc commentが持つ。

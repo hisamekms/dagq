@@ -50,7 +50,8 @@ fn passing_build(marker: &Path) -> String {
 }
 
 /// Options of a supervisor with the automatic update on (`register`), its
-/// job's build and e2e the stubs `build` and `e2e`.
+/// job's build and e2e the stubs `build` and `e2e`, on the queue's service
+/// ([`served`]), to which the job sends its steps as that supervisor.
 fn update_options(register: bool, build: String, e2e: Option<String>) -> SuperviseOptions {
     let base = supervise_options(4, true);
     SuperviseOptions {
@@ -61,8 +62,16 @@ fn update_options(register: bool, build: String, e2e: Option<String>) -> Supervi
             e2e_command: e2e,
             ..base.update.clone()
         },
+        service_route: dagq::compose::ServiceRoute::Socket,
         ..base
     }
+}
+
+/// The fixture's queue with its service running until the test ends.
+fn served() -> (Fixture, PathBuf, PathBuf, crate::common::service::Served) {
+    let (fixture, repo, db) = fixture();
+    let served = crate::common::service::Served::start(&db);
+    (fixture, repo, db, served)
 }
 
 /// Cancel the fixture's task and add task 2, whose verification is
@@ -141,6 +150,17 @@ fn await_update_failed(db: &Path) {
     });
 }
 
+/// The update's job ended: its log holds its outcome or its error. Its own
+/// end goes unrecorded when the pass of the supervisor that started it
+/// ended first: the job's steps go under that registration's token, which
+/// ends with it.
+fn await_job_ended(db: &Path) {
+    await_that(db, "the update job's end", || {
+        let log = job_log(db);
+        log.contains("\"outcome\"") || log.contains("\"error\"")
+    });
+}
+
 /// What the update's job logged so far: its log, named by its
 /// `update_started`.
 fn job_log(db: &Path) -> String {
@@ -193,7 +213,7 @@ fn move_main(repo: &Path) {
 /// Once the e2e ended (failed, so nothing is replaced), it lands.
 #[test]
 fn a_landing_waits_for_the_update_jobs_e2e_and_verifies_once_it_ended() {
-    let (fixture, repo, db) = fixture();
+    let (fixture, repo, db, _served) = served();
     dagq_source(&repo, "");
     let dir = fixture.dir.path();
     let (built, e2e, gate, verified) = (
@@ -240,7 +260,7 @@ fn a_landing_waits_for_the_update_jobs_e2e_and_verifies_once_it_ended() {
 /// landing does: its verification command runs only once the e2e ended.
 #[test]
 fn a_direct_integrate_waits_for_the_update_jobs_e2e() {
-    let (fixture, repo, db) = fixture();
+    let (fixture, repo, db, _served) = served();
     dagq_source(&repo, "");
     let dir = fixture.dir.path();
     let (built, e2e, gate, verified) = (
@@ -273,9 +293,7 @@ fn a_direct_integrate_waits_for_the_update_jobs_e2e() {
         assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     });
     assert!(verified.exists());
-    let failed = update_step(&db, "update_failed").unwrap();
-    let landed = run_step(&db, waiting.id(), "run_integrated").unwrap();
-    assert!(failed < landed, "{failed:?} {landed:?}");
+    await_job_ended(&db);
     backend.join();
 }
 
@@ -284,7 +302,7 @@ fn a_direct_integrate_waits_for_the_update_jobs_e2e() {
 /// next supervisor rechecks the run and runs the recheck's command.
 #[test]
 fn a_landing_recheck_waits_for_the_update_jobs_e2e_and_runs_its_command_once_it_ended() {
-    let (fixture, repo, db) = fixture();
+    let (fixture, repo, db, _served) = served();
     let dir = fixture.dir.path();
     let (built, e2e, gate, rechecked) = (
         dir.join("built"),
@@ -311,13 +329,11 @@ fn a_landing_recheck_waits_for_the_update_jobs_e2e_and_runs_its_command_once_it_
     assert_eq!(update_step(&db, "update_failed"), None);
 
     fs::write(&gate, "go").unwrap();
-    await_update_failed(&db);
+    await_job_ended(&db);
     let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert!(rechecked.exists());
-    let clean = run_step(&db, waiting.id(), "landing_recheck_clean").expect("rechecked clean");
-    let failed = update_step(&db, "update_failed").unwrap();
-    assert!(failed < clean, "{failed:?} {clean:?}");
+    run_step(&db, waiting.id(), "landing_recheck_clean").expect("rechecked clean");
     backend.join();
 }
 
@@ -327,7 +343,7 @@ fn a_landing_recheck_waits_for_the_update_jobs_e2e_and_runs_its_command_once_it_
 /// ended, main's head with the landing in it.
 #[test]
 fn the_update_jobs_build_waits_for_a_landing_verification() {
-    let (fixture, repo, db) = fixture();
+    let (fixture, repo, db, _served) = served();
     dagq_source(&repo, "");
     let dir = fixture.dir.path();
     let (built, verifying, gate) = (dir.join("built"), dir.join("verifying"), dir.join("gate"));
@@ -368,7 +384,7 @@ fn the_update_jobs_build_waits_for_a_landing_verification() {
 /// ended.
 #[test]
 fn the_update_jobs_build_waits_for_a_landing_recheck_command() {
-    let (fixture, repo, db) = fixture();
+    let (fixture, repo, db, _served) = served();
     let dir = fixture.dir.path();
     let (built, rechecking, gate) = (dir.join("built"), dir.join("rechecking"), dir.join("gate"));
     dagq_source(

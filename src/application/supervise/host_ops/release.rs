@@ -639,7 +639,8 @@ fn release_job_command(
         .arg("release-update")
         .args(["--release", version, "--token", token.as_str()])
         .envs(layout.supervisor_actor().env())
-        // It opens the queue it names, not a client-mode `dagq`.
+        // It reaches the queue it names through the host's socket, not as
+        // a client-mode `dagq`.
         .env_remove(crate::domain::queue_service::SOCKET_ENV)
         .arg("--to")
         .arg(&layout.runner)
@@ -653,6 +654,13 @@ fn release_job_command(
         .new_session();
     if let Some(dir) = &layout.plugin_dir {
         command.arg("--plugin-dir").arg(dir);
+    }
+    // It sends its steps through the service as this supervisor, with the
+    // token of its registration (ADR-t3102-1 decision 2), which an exec's
+    // handoff keeps and the registration's end revokes; a supervisor whose
+    // service runs in its own process has none, and the job is refused.
+    if let Some(file) = layout.service_credential.get() {
+        command.env(crate::domain::queue_service::CREDENTIAL_FILE_ENV, file);
     }
     if let Some(cargo) = &update.cargo {
         command.arg("--cargo").arg(cargo);

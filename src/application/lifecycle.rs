@@ -1494,11 +1494,13 @@ pub fn hand_off(
     // made after the handoff was asked for: an older one is a stale row of
     // a pid the system reused.
     let asked_at = clock.now();
+    let mut asked = Vec::with_capacity(live.len());
     let waited = match wait_for_handoff(
         queue,
         processes,
         clock,
         live,
+        &mut asked,
         asked_at,
         &binary_text,
         version,
@@ -1507,27 +1509,45 @@ pub fn hand_off(
     ) {
         Ok(waited) => waited,
         Err(error) => {
-            for registration in live {
-                let _ = queue.cancel_handoff(&registration.token, &binary_text);
+            // The binary may go back only when each request was withdrawn
+            // before its supervisor took it.
+            let mut settled = !HandoffUnsettled::is(&error);
+            for registration in &asked {
+                settled &= matches!(
+                    withdraw_handoff(queue, registration, &binary_text),
+                    Ok(true)
+                );
             }
-            return Err(error);
+            return Err(if settled {
+                error
+            } else {
+                error.context(HandoffUnsettled)
+            });
         }
     };
     let mut handed = Vec::with_capacity(waited.len());
     let mut taken_late = Vec::new();
+    let mut unwithdrawn = None;
     for (index, (one, timed_out)) in waited.into_iter().enumerate() {
         if one.error.is_some() {
-            let withdrawn = queue.cancel_handoff(&one.registration.token, &binary_text);
-            // Nothing left to withdraw from one still asked a moment ago:
-            // its new binary cleared the request by registering again (or
-            // its row went away while it exec'd), so it took the handoff
-            // just then.
-            if timed_out && matches!(withdrawn, Ok(false)) {
-                taken_late.push(index);
+            match withdraw_handoff(queue, &one.registration, &binary_text) {
+                // Nothing left to withdraw from one still asked a moment
+                // ago: its new binary cleared the request by registering
+                // again (or its row went away while it exec'd), so it took
+                // the handoff just then.
+                Ok(false) if timed_out => taken_late.push(index),
+                Ok(_) => {}
+                // A request not known to be withdrawn may still be taken.
+                Err(error) => unwithdrawn = Some(error),
             }
         }
         handed.push(one);
     }
+    if let Some(error) = unwithdrawn {
+        return Err(error.context(HandoffUnsettled));
+    }
+    // A look that cannot be made leaves what the supervisors asked did
+    // unknown.
     look_again(
         queue,
         processes,
@@ -1539,18 +1559,140 @@ pub fn hand_off(
         version,
         HANDOFF_GRACE.min(timeout),
         poll,
-    )?;
+    )
+    .map_err(|error| error.context(HandoffUnsettled))?;
     Ok(handed)
 }
 
+/// The error of a handoff that ended while a supervisor it asked may have
+/// taken it: a request not withdrawn, or what became of it not read (the
+/// queue service out of reach past its replacement). The binary it hands
+/// over stays in place, as one of them may run it.
+#[derive(Debug)]
+pub struct HandoffUnsettled;
+
+impl std::fmt::Display for HandoffUnsettled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a supervisor asked to take the handoff may have taken it")
+    }
+}
+
+impl HandoffUnsettled {
+    /// Whether `error` is or wraps a [`HandoffUnsettled`].
+    pub fn is(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<Self>().is_some()
+    }
+}
+
+/// How many times a request or a withdrawal of a handoff whose answer was
+/// cut off is looked for and sent again.
+const LOOKS_AGAIN: u32 = 3;
+
+/// Whether `error` is the queue service out of reach for a write it may
+/// have done: its answer was cut off (a replacement of the service).
+fn maybe_done(error: &anyhow::Error) -> bool {
+    super::supervisor_service::unreachable(error) && !super::supervisor_service::undone(error)
+}
+
+/// What a registration shows of a request for its handoff, read again
+/// after a request or a withdrawal whose answer was cut off.
+enum Request {
+    /// The request is there.
+    Asked,
+    /// No request, and the registration as it was before it: accepting,
+    /// under its build.
+    AsBefore,
+    /// Its supervisor took it: it execs, registered again, or is gone.
+    Taken,
+}
+
+fn request_state(
+    queue: &(impl SupervisorRegistry + ?Sized),
+    registration: &SupervisorRegistration,
+    binary_text: &str,
+) -> Result<Request> {
+    let supervisors = queue.supervisors()?;
+    Ok(
+        match supervisors.iter().find(|r| r.token == registration.token) {
+            Some(now) if now.handoff_binary.as_deref() == Some(binary_text) => Request::Asked,
+            Some(now)
+                if now.handoff_accepted
+                    && now.handoff_binary.is_none()
+                    && now.binary_version == registration.binary_version =>
+            {
+                Request::AsBefore
+            }
+            _ => Request::Taken,
+        },
+    )
+}
+
+/// Ask `registration` to take the handoff to `binary_text`: whether it may.
+/// A request whose answer was cut off is looked for in the registrations:
+/// one there, or one its supervisor took, was asked (the look judges it,
+/// [`look_at_handoff`]), and one not there is asked again. When that is
+/// not known, the error is a [`HandoffUnsettled`].
+fn ask_for_handoff(
+    queue: &(impl SupervisorRegistry + ?Sized),
+    registration: &SupervisorRegistration,
+    binary_text: &str,
+) -> Result<bool> {
+    let mut looks = 0;
+    loop {
+        match queue.request_handoff(&registration.token, binary_text) {
+            Err(error) if maybe_done(&error) => {
+                looks += 1;
+                if looks > LOOKS_AGAIN {
+                    return Err(error.context(HandoffUnsettled));
+                }
+                match request_state(queue, registration, binary_text)
+                    .map_err(|error| error.context(HandoffUnsettled))?
+                {
+                    Request::AsBefore => {}
+                    Request::Asked | Request::Taken => return Ok(true),
+                }
+            }
+            asked => return asked,
+        }
+    }
+}
+
+/// Withdraw `registration`'s request for the handoff to `binary_text`:
+/// whether it was withdrawn before its supervisor took it (`false` when
+/// there was none). One whose answer was cut off is looked for as
+/// [`ask_for_handoff`] does: still asked, it is withdrawn again; as before
+/// the request, it was withdrawn; taken, it was not.
+fn withdraw_handoff(
+    queue: &(impl SupervisorRegistry + ?Sized),
+    registration: &SupervisorRegistration,
+    binary_text: &str,
+) -> Result<bool> {
+    let mut looks = 0;
+    loop {
+        match queue.cancel_handoff(&registration.token, binary_text) {
+            Err(error) if maybe_done(&error) && looks < LOOKS_AGAIN => {
+                looks += 1;
+                match request_state(queue, registration, binary_text)? {
+                    Request::Asked => {}
+                    Request::AsBefore => return Ok(true),
+                    Request::Taken => return Ok(false),
+                }
+            }
+            withdrawn => return withdrawn,
+        }
+    }
+}
+
 /// What became of each supervisor in `live`, with whether its failure is
-/// the timeout (it was still asked when the wait ran out).
+/// the timeout (it was still asked when the wait ran out); each one asked
+/// is added to `asked` as it is.
 #[allow(clippy::too_many_arguments)]
 fn wait_for_handoff(
     queue: &(impl SupervisorRegistry + RunLog + ?Sized),
     processes: &dyn ProcessControl,
     clock: &dyn Clock,
     live: &[SupervisorRegistration],
+    asked: &mut Vec<SupervisorRegistration>,
     asked_at: i64,
     binary_text: &str,
     version: &str,
@@ -1559,7 +1701,11 @@ fn wait_for_handoff(
 ) -> Result<Vec<(Handed, bool)>> {
     let mut handed = Vec::with_capacity(live.len());
     for registration in live {
-        let error = (!queue.request_handoff(&registration.token, binary_text)?).then(|| {
+        let may_take = ask_for_handoff(queue, registration, binary_text)?;
+        if may_take {
+            asked.push(registration.clone());
+        }
+        let error = (!may_take).then(|| {
             format!(
                 "supervisor {} (pid {}) cannot take a handoff; stop it with `down --wait` and \
 run `up`",
@@ -3496,6 +3642,46 @@ mod tests {
         let unrecorded = no_wait_refusal(None, &held[..1]).unwrap();
         assert!(unrecorded.contains("version (unrecorded)"), "{unrecorded}");
         assert!(unrecorded.contains("1 run(s)"), "{unrecorded}");
+    }
+
+    /// A request or a withdrawal whose answer was cut off is judged by the
+    /// registration read again: the request there, the registration as it
+    /// was before it (asked again, or withdrawn), or anything else its
+    /// supervisor did with it (exec'ing, back under another build, gone).
+    #[test]
+    fn a_request_cut_off_is_judged_by_the_registration_read_again() {
+        let before = SupervisorRegistration {
+            binary_version: Some("old".into()),
+            ..registration("s", 1, 0)
+        };
+        let state = |now: Option<SupervisorRegistration>| {
+            let queue = crate::application::port_fakes::SupervisorsAndEvents {
+                registrations: now.into_iter().collect(),
+                ..Default::default()
+            };
+            request_state(&queue, &before, "/opt/bin/dagq").unwrap()
+        };
+        let asked = |binary: &str| SupervisorRegistration {
+            handoff_binary: Some(binary.into()),
+            ..before.clone()
+        };
+        assert!(matches!(
+            state(Some(asked("/opt/bin/dagq"))),
+            Request::Asked
+        ));
+        assert!(matches!(state(Some(before.clone())), Request::AsBefore));
+        let execing = SupervisorRegistration {
+            handoff_accepted: false,
+            ..before.clone()
+        };
+        assert!(matches!(state(Some(execing)), Request::Taken));
+        let back = SupervisorRegistration {
+            binary_version: Some("new".into()),
+            ..before.clone()
+        };
+        assert!(matches!(state(Some(back)), Request::Taken));
+        assert!(matches!(state(None), Request::Taken));
+        assert!(matches!(state(Some(asked("/other/dagq"))), Request::Taken));
     }
 
     /// A handoff reads the stop requests from the events alone: the

@@ -1,0 +1,4 @@
+[[test]]
+name = "lifecycle_install_service::an_update_job_records_its_failure_before_it_stops_its_own_supervisor"
+reason = "B 境界（プロセス・supervisor の配線）: 実の dagq release-update の子が起動した supervisor の token で service に送り、その supervisor を止めて登録と token が実際に失効しても、update_failed と ask を止める前に記録し、止めることも済むことを、代役の supervisor のプロセスと service の失効を通して確かめる"
+task = 3585

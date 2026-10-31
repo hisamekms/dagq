@@ -41,6 +41,7 @@
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
+pub mod across;
 pub mod control;
 mod dispatch;
 pub mod end_bound;
@@ -137,6 +138,33 @@ pub trait ServiceCaller: Send + Sync {
     }
 }
 
+/// The queue service refused a control-side command's step as one it does
+/// not read ([`control::UNREAD_PARAMS`]): a service of a build before the
+/// command (ADR-t3102-2 decision 7). `install` takes it as a service it
+/// cannot send to, as one that does not answer.
+#[derive(Debug, Clone)]
+pub struct CommandUnknown(pub String);
+
+impl std::fmt::Display for CommandUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the queue service does not know the command's steps: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for CommandUnknown {}
+
+/// Whether `error` is a service that does not know the command's steps
+/// ([`CommandUnknown`]).
+pub fn command_unknown(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<CommandUnknown>().is_some())
+}
+
 /// The queue service did not answer (no socket, a process that does not
 /// accept or does not answer in time), and the queue was not opened
 /// instead (fail closed).
@@ -203,6 +231,12 @@ pub fn undone(error: &anyhow::Error) -> bool {
             .downcast_ref::<ServiceUnreachable>()
             .is_some_and(|unreachable| !unreachable.maybe_done)
     })
+}
+
+/// Whether `op` only reads the queue ([`READ_OPS`]): one the service did
+/// not answer did nothing.
+pub(crate) fn reads_only(op: &str) -> bool {
+    READ_OPS.contains(&op)
 }
 
 /// The operations of [`dispatch`] that only read the queue: one the

@@ -1126,6 +1126,7 @@ fn settle(
                 // or stuck with the new one, each brought back as after a
                 // failed watch.
                 if let Some(handoff) = install::HandoffFailed::of(&error) {
+                    let mut recovery = Recovery::read(&*queue, before)?;
                     let mut supervisors = Vec::new();
                     for failed in &handoff.supervisors {
                         let (Some(token), Some(pid)) = (
@@ -1141,7 +1142,7 @@ fn settle(
                             "token": token,
                             "pid": pid,
                             "error": failed["error"],
-                            "supervisor": bring_back(ports, &*queue, before, Some(&token))?,
+                            "supervisor": recovery.bring_back(ports, before, Some(&token)),
                         });
                         if stopping(failed) {
                             entry["stopping"] = json!(true);
@@ -1165,9 +1166,10 @@ fn settle(
                             .any(|s| s["token"] == before.token.as_str() || s["pid"] == before.pid)
                     }) {
                         details["supervisor"] =
-                            bring_back(ports, &*queue, Some(before), Some(&before.token))?;
+                            recovery.bring_back(ports, Some(before), Some(&before.token));
                     }
-                    return failed(queue, job, "install", &error, details).map(Settled::Failed);
+                    let failed = failed(queue, job, "install", &error, details);
+                    return recovery.finish(ports, failed).map(Settled::Failed);
                 }
                 // A person's install that failed before any handoff
                 // replaced nothing, or put it back: its error says so.
@@ -1177,15 +1179,16 @@ fn settle(
                 // It failed before any handoff: only the job's own
                 // supervisor can be in doubt.
                 let serving = before.map(|before| before.token.clone());
-                let supervisor = bring_back(ports, &*queue, before, serving.as_ref())?;
-                return failed(
+                let mut recovery = Recovery::read(&*queue, before)?;
+                let supervisor = recovery.bring_back(ports, before, serving.as_ref());
+                let failed = failed(
                     queue,
                     job,
                     "install",
                     &error,
                     json!({"supervisor": supervisor}),
-                )
-                .map(Settled::Failed);
+                );
+                return recovery.finish(ports, failed).map(Settled::Failed);
             }
         },
     };
@@ -1217,6 +1220,7 @@ fn settle(
             ),
         })
     };
+    let mut recovery = Recovery::read(&*queue, before)?;
     let mut supervisors = Vec::new();
     for watched in &watched {
         let mut entry = json!({
@@ -1241,7 +1245,7 @@ fn settle(
         }
         if watched.error.is_some() {
             let before = registered_before(registered, &watched.token, watched.pid);
-            entry["supervisor"] = bring_back(ports, &*queue, before, Some(&watched.now))?;
+            entry["supervisor"] = recovery.bring_back(ports, before, Some(&watched.now));
         }
         supervisors.push(entry);
     }
@@ -1267,7 +1271,7 @@ fn settle(
             .collect::<Vec<_>>()
             .join("; ")
     );
-    failed(
+    let failed = failed(
         queue,
         job,
         stage,
@@ -1278,8 +1282,8 @@ fn settle(
             "supervisors": supervisors,
             "version": version,
         }),
-    )
-    .map(Settled::Failed)
+    );
+    recovery.finish(ports, failed).map(Settled::Failed)
 }
 
 /// The error of a person's `dagq install` whose handoff or watch failed
@@ -1377,26 +1381,38 @@ pub fn install_watched(
     watch_timeout: Duration,
 ) -> Result<Value> {
     let db = db.filter(|db| ports.files.is_file(db));
+    let install_ports = install::Ports {
+        binaries: ports.binaries,
+        files: ports.files,
+        processes: ports.processes,
+        clock: ports.clock,
+        queues: ports.queues,
+        down,
+    };
+    let built = install::built(&install_ports, db, options)?;
+    // The binary of a build before this one (a rollback's, a given one or
+    // a checkout's build), whose service reads none of this install's
+    // steps and whose supervisors may start one, does the whole install
+    // itself (ADR-t3102-2 decision 7: its CLI opens the queue as that build
+    // did); a checkout's e2e gate stays this install's.
+    if let Some(db) = db
+        && !ports.binaries.sends_install_steps(&built.binary)
+    {
+        let arguments = handed_install_arguments(db, &built.binary, options, watch_timeout)?;
+        let mut report = ports.binaries.run(&built.binary, &arguments)?;
+        report["installed_by"] = json!(built.binary);
+        report["e2e"] = built.e2e;
+        return Ok(report);
+    }
     // What each supervisor was, for its mode when it is brought back; one
-    // that registers while the install builds and checks (a long while for
-    // a checkout and its e2e) is added after it ([`registered_since`]).
+    // that registers after it is added after the handoff
+    // ([`registered_since`]).
     let registered = db
         .and_then(|db| (ports.queues)(db).open().ok())
         .and_then(|queue| queue.supervisors().ok())
         .unwrap_or_default();
     let handoff_from = ports.clock.now();
-    let installed = install::install(
-        &install::Ports {
-            binaries: ports.binaries,
-            files: ports.files,
-            processes: ports.processes,
-            clock: ports.clock,
-            queues: ports.queues,
-            down,
-        },
-        db,
-        options,
-    );
+    let installed = install::install_built(&install_ports, db, options, built);
     let Some(db) = db else {
         return installed;
     };
@@ -1478,14 +1494,39 @@ pub fn install_watched(
     }
 }
 
-fn registration(
-    queue: &(impl SupervisorRegistry + ?Sized),
-    token: &LeaseToken,
-) -> Result<Option<SupervisorRegistration>> {
-    Ok(queue
-        .supervisors()?
-        .into_iter()
-        .find(|registration| registration.token == *token))
+/// The command line of the install `binary` does in this one's place, on
+/// the queue at `db`, with this install's options: a rollback's own, else
+/// one from `binary` as built, with no e2e of its own.
+fn handed_install_arguments(
+    db: &Path,
+    binary: &Path,
+    options: &InstallOptions,
+    watch_timeout: Duration,
+) -> Result<Vec<String>> {
+    let mut arguments = vec![
+        "--db".to_owned(),
+        super::path_text(db)?,
+        "install".to_owned(),
+    ];
+    match options.source {
+        Source::Rollback => arguments.push("--rollback".to_owned()),
+        _ => arguments.extend(["--from".to_owned(), super::path_text(binary)?]),
+    }
+    arguments.extend([
+        "--to".to_owned(),
+        super::path_text(&options.target)?,
+        "--handoff-timeout".to_owned(),
+        options.handoff_timeout.as_secs().to_string(),
+        "--poll-ms".to_owned(),
+        options.poll.as_millis().to_string(),
+        "--watch-timeout".to_owned(),
+        watch_timeout.as_secs().to_string(),
+    ]);
+    if options.allow_breaking {
+        arguments.push("--allow-breaking".to_owned());
+    }
+    arguments.extend(options.restart.iter().cloned());
+    Ok(arguments)
 }
 
 /// The registration a supervisor the install handed over had before it:
@@ -1722,24 +1763,109 @@ fn restore(
     }
 }
 
+/// The bring-backs of a failed install or watch, judged from the
+/// registrations read once before the first of them, as the job's steps go
+/// under the token of its own supervisor (`own`, the job's; none for a
+/// person's install): stopping that supervisor ends its registration and
+/// revokes the token (ADR-t3102-1 decision 2), so it is stopped and started
+/// again only once the job recorded its failure ([`Self::finish`]), and
+/// every other one at once, its registration not read again.
+struct Recovery<'a> {
+    registrations: Vec<SupervisorRegistration>,
+    own: Option<&'a SupervisorRegistration>,
+    /// The job's own supervisor to stop (whether it lives) and start again.
+    left: Vec<(SupervisorRegistration, bool)>,
+}
+
+impl<'a> Recovery<'a> {
+    fn read(
+        queue: &(impl SupervisorRegistry + ?Sized),
+        own: Option<&'a SupervisorRegistration>,
+    ) -> Result<Self> {
+        Ok(Self {
+            registrations: queue.supervisors()?,
+            own,
+            left: Vec::new(),
+        })
+    }
+
+    /// [`bringing_back`] the supervisor `before` and, when it is due, stop
+    /// and start it again now, or after the record for the job's own: what
+    /// was found and done, or that it is left until then.
+    fn bring_back(
+        &mut self,
+        ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+        before: Option<&SupervisorRegistration>,
+        serving: Option<&LeaseToken>,
+    ) -> Value {
+        match bringing_back(ports, &self.registrations, before, serving) {
+            Bringing::Found(found) => found,
+            Bringing::Due { current, alive }
+                if self
+                    .own
+                    .is_some_and(|own| current.token == own.token || current.pid == own.pid) =>
+            {
+                self.left.push((current, alive));
+                json!({"state": "brought_back_after_this_record", "stops": alive})
+            }
+            Bringing::Due { current, alive } => carry_out(ports, &current, alive),
+        }
+    }
+
+    /// Bring the job's own supervisor back after `recorded`, the job's
+    /// failure recorded or not, and add what was done to its value.
+    fn finish(
+        self,
+        ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+        recorded: Result<Value>,
+    ) -> Result<Value> {
+        let done: Vec<Value> = self
+            .left
+            .iter()
+            .map(|(current, alive)| carry_out(ports, current, *alive))
+            .collect();
+        recorded.map(|mut value| {
+            if !done.is_empty() {
+                value["brought_back"] = json!(done);
+            }
+            value
+        })
+    }
+}
+
+/// What [`bringing_back`] found of a supervisor: nothing to do, or its
+/// registration to stop (`alive`) and start again ([`carry_out`]).
+enum Bringing {
+    Found(Value),
+    Due {
+        current: SupervisorRegistration,
+        alive: bool,
+    },
+}
+
 /// After a failed install or watch, make sure a supervisor serves the
 /// queue with the binary in place: one that still heartbeats under the
 /// build it had (its exec failed and it went on) is left alone; one that
-/// lives but does not (the new binary hangs) is stopped; and one that is
-/// gone is started again ([`JobPorts::restart`]). `serving` is the token
-/// it serves under now (another one when its pid registered again), or
-/// `before`'s. What was found and done.
-fn bring_back(
+/// lives but does not (the new binary hangs) is to be stopped; and one
+/// that is gone is to be started again ([`JobPorts::restart`]). `serving`
+/// is the token it serves under now (another one when its pid registered
+/// again), or `before`'s, looked up in `registrations`.
+fn bringing_back(
     ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
-    queue: &(impl SupervisorRegistry + RunLog + ?Sized),
+    registrations: &[SupervisorRegistration],
     before: Option<&SupervisorRegistration>,
     serving: Option<&LeaseToken>,
-) -> Result<Value> {
+) -> Bringing {
     let Some(before) = before else {
-        return Ok(json!({"state": "not_registered"}));
+        return Bringing::Found(json!({"state": "not_registered"}));
     };
-    let Some(mut current) = registration(queue, serving.unwrap_or(&before.token))? else {
-        return Ok(json!({"state": "deregistered"}));
+    let serving = serving.unwrap_or(&before.token);
+    let Some(mut current) = registrations
+        .iter()
+        .find(|registration| registration.token == *serving)
+        .cloned()
+    else {
+        return Bringing::Found(json!({"state": "deregistered"}));
     };
     let now = ports.clock.now();
     let alive = ports.processes.alive(current.pid);
@@ -1748,8 +1874,24 @@ fn bring_back(
         && current.handoff_binary.is_none()
         && current.binary_version == before.binary_version
     {
-        return Ok(json!({"state": "running", "version": current.binary_version}));
+        return Bringing::Found(json!({"state": "running", "version": current.binary_version}));
     }
+    // A registration the same pid made again under the new build has no
+    // mode of its own: it is started again the way `up` started it.
+    if current.mode.is_none() {
+        current.mode = before.mode;
+        current.workspace_id = current.workspace_id.or_else(|| before.workspace_id.clone());
+    }
+    Bringing::Due { current, alive }
+}
+
+/// Stop `current`'s supervisor when `alive` and start it again: what was
+/// done.
+fn carry_out(
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+    current: &SupervisorRegistration,
+    alive: bool,
+) -> Value {
     if alive {
         let _ = ports.processes.terminate(current.pid);
         let started = ports.clock.monotonic();
@@ -1762,20 +1904,14 @@ fn bring_back(
             let _ = ports.processes.kill(current.pid);
         }
     }
-    // A registration the same pid made again under the new build has no
-    // mode of its own: it is started again the way `up` started it.
-    if current.mode.is_none() {
-        current.mode = before.mode;
-        current.workspace_id = current.workspace_id.or_else(|| before.workspace_id.clone());
-    }
-    Ok(match (ports.restart)(&current) {
+    match (ports.restart)(current) {
         Ok(restarted) => json!({"state": "restarted", "stopped": alive, "restart": restarted}),
         Err(error) => json!({
             "state": "stopped",
             "stopped": alive,
             "error": format!("{error:#}"),
         }),
-    })
+    }
 }
 
 /// How a question names the job's log.

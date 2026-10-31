@@ -38,8 +38,46 @@ pub(super) fn dispatch_once(
                 &*store, None, kind, payload, record,
             ))
         }
+        "open_update_ask" => {
+            let (kind, question, options, asked_by, subject, details): (
+                crate::domain::AskKind,
+                String,
+                Vec<String>,
+                String,
+                Option<String>,
+                serde_json::Value,
+            ) = read(op, args)?;
+            let details = update_ask_details(details, record)?;
+            answer(AskStore::open_update_ask(
+                &mut *store,
+                kind,
+                question.as_str(),
+                &options.iter().map(String::as_str).collect::<Vec<_>>(),
+                asked_by.as_str(),
+                subject.as_deref(),
+                details,
+            ))
+        }
         _ => Err(BadOperation(format!("{op} is not taken once by its record")).into()),
     }
+}
+
+/// The details of an update's ask sent under the identity `record`, with
+/// the identity among them ([`UPDATE_ASK_RECORD`]): an object, or none;
+/// other details are the request's error.
+fn update_ask_details(details: Value, record: &str) -> Result<Value> {
+    let mut details = match details {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(details) => details,
+        other => {
+            return Err(BadOperation(format!(
+                "the details of an update's ask are an object or null, not {other}"
+            ))
+            .into());
+        }
+    };
+    details.insert(UPDATE_ASK_RECORD.to_owned(), record.into());
+    Ok(Value::Object(details))
 }
 
 /// Run the operation `op` with `args` on `store` at `now` (seconds): its
@@ -2580,5 +2618,33 @@ pub(super) fn max_load_args(
     match read::<(LeaseToken, Option<f64>)>(op, args.clone()) {
         Ok((token, max_load)) => Ok((token, max_load, None)),
         Err(_) => read(op, args),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// An update's ask sent under an identity carries it in its details,
+    /// which are an object or none; any other details are refused as the
+    /// request's error rather than written into.
+    #[test]
+    fn an_update_ask_s_details_are_an_object_or_none() {
+        assert_eq!(
+            update_ask_details(Value::Null, "r").unwrap(),
+            json!({UPDATE_ASK_RECORD: "r"})
+        );
+        assert_eq!(
+            update_ask_details(json!({"source": "install"}), "r").unwrap(),
+            json!({"source": "install", UPDATE_ASK_RECORD: "r"})
+        );
+        for details in [json!([1]), json!("s"), json!(3), json!(true)] {
+            let error = update_ask_details(details.clone(), "r").unwrap_err();
+            assert!(
+                error.downcast_ref::<BadOperation>().is_some(),
+                "{details}: {error:#}"
+            );
+        }
     }
 }

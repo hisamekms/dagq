@@ -27,8 +27,8 @@ related:
 
 - 宛ての環境が無い`dagq`のうちuser・inbox・plannerのもの（`host_client_role`）は、serviceが答えるコマンド（`client_request`）と`watch`の各回の見る（`watch_poll`）と制御側のコマンドのstep（`control_call`、下の「制御側のコマンド」）をそのsocketへ送り、DBを開かない。
   serviceが一度も動いていないqueueも同じで、DBが無ければ送る前に`no queue at`で終わる（ADR-t3105-1決定3）。
-- 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、制御側のプロセス（`supervise`・`install`など。(5)）と`migrate`・`doctor`（(6)）。
-  `up`・`down`・`inbox`・`service start`・`service stop`は自分のプロセスに残るが、queueの読み書きは下の「制御側のコマンド」のstepとして送る。
+- 送らないのはADR-t3102-2が残すものだけで、今はDBを直接開く: DBの無い所に作る`init`と`service serve`（決定1）、queueを開かないもの、制御側のプロセス（`supervise`など。(5)）と`migrate`・`doctor`（(6)）。
+  `up`・`down`・`inbox`・`service start`・`service stop`・`install`と更新のjob（`auto-update`・`release-update`）は自分のプロセスに残るが、queueの読み書きは下の「制御側のコマンド」のstepとして送る。
   wrapperとhookの経路（決定6の(3)）は`client_request`でなく、wrapperはwrapperのtokenで（runのturnのcontainerの準備を含む）、inboxの`session-event`はspanをinboxのtokenで自分で`session_record`に送り、DBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
   CLIの全ての葉は送るものかこの例外のどれかに当たり、どちらでもない葉は無い（unit testが全ての葉を数えて確かめる）。
   1つのコマンドの中で経路を混ぜない。
@@ -99,6 +99,10 @@ stepの形はsupervisorの操作と同じ名前と引数（`ControlParams`）で
 `up`・`down`・`dagq inbox`・`service start`・`service stop`・`queue-broker start|stop`も、launchdとプロセスとserviceかbrokerのプロセスを自分で扱い、登録・event・runの読み書きをstepとして送る（`OneShot::lifecycle_route`）。
 `up`と`service start`はserviceを起動してから、`down`と`service stop`はserviceを止める前に送り、`service start`は動いているserviceを再利用するときも最初のstepを送る。
 `up`が起動する入れ替えの口のserviceは、引き継ぐ前にqueueのrepositoryの束縛を確かめ、違えば何も入れ替えもmigrateもせずに断る（`ServeOptions::binding`）。
+`install`（`--rollback`・`--release`を含む）と更新のjobも、ビルド・binary・確認とserviceの起動・`up`の子プロセスを自分で扱い、登録の読み・引き継ぎ・`update_*`の記録とaskをstepとして送る（`service.install`、`ControlCommand::installs`）。
+更新のjobのprincipalは起動したsupervisorで、その登録のtokenのfileを受け取る（[Auto-update](supervisor-lifecycle/auto-update.md)の「queueへの経路」）。
+`install`はserviceが答えないか、stepを読めない前のbuildのもの（`CommandUnknown`）なら、自分のbuildのserviceを入れ替えの口で起動してから送る。
+元が前のbuildのbinary（戻し・与えたbinary・checkoutのビルド）なら、そのbinaryの`install`に任せる（[install](supervisor-lifecycle/install.md)の3）。
 
 - 認可: serviceは各stepで、そのコマンドのoperationをCLIと同じcapabilityでprincipalに通し、断りを記録する（`control::operation`）。
   CLIと同じく、断られるprincipalは最初のstep（queueとactorを聞く`control_queue`）で断られ、何も始まらない
@@ -106,7 +110,9 @@ stepの形はsupervisorの操作と同じ名前と引数（`ControlParams`）で
   runのeventは着地するtask（`--next`ではどのtaskでも）の着地を待つか着地中のrunだけで、`requested_by`は名乗れない。
   runの資源とhostの負荷のsampleの読みと記録、台帳を作る係の読み書きはsupervisorだけのもので、どのコマンドにも`authorization_denied`で断り、断りを記録する。
   `up`・`down`はどのsupervisorの登録にも、刈り取り・引き継ぎ・modeと自動更新の設定・sessionの記録を送れる（`control::lifecycle_ops`。CLIがDBで書くのと同じ）
-  引き継ぎで渡すbinaryは、接続のpeerのプロセスの実行ファイルだけで、他のpathは`authorization_denied`として断って記録する（`control::handoff_refusal`）
+  `install`と更新のjobはどのsupervisorの登録にも引き継ぎの要求と取り下げを送れ、更新の失敗のaskを開き、自動更新はそれが片付けたaskを閉じる
+  `up`の引き継ぎで渡すbinaryは、接続のpeerのプロセスの実行ファイルだけで、他のpathは`authorization_denied`として断って記録する（`control::handoff_refusal`）。
+  `install`が渡すのは置いた固定バイナリのpath
   eventのactorは呼び出し元のprincipalで、CLIがDBで書くのと同じ
 - 着地の承認: `integration_approved`は自分のstep（`approve_integration`）だけで書き、serviceはrunの状態が呼び出し元の読んだまま着地かsessionを待つこと、生きたleaseが持たないこと（serviceのプロセスと時計で見る）、承認がまだ無いことを、記録と同じwrite transactionで確かめる（ADR-t3102-3決定4）。
   承認済みのrunには何も書かない
@@ -124,6 +130,7 @@ stepの形はsupervisorの操作と同じ名前と引数（`ControlParams`）で
   呼び出し元のprincipalで送れるのはこのプロセスだけなので、supervisorのjobのコマンドと違い、期限の後に記録を残して終わることはしない
   記録でないstepが届かないときは新しいstepを始めず、DBを開かずに`unreachable`で終わる
   `up`・`down`・`inbox`・`service start|stop`・`queue-broker start|stop`は送り直さず、届かないstepはそのerrorでコマンドが失敗する。
+  `install`と更新のjobは記録を送り直し、コマンドのどれかのstepが答えられた後はどのserviceも受けなかったstepも上限まで送り直すので（`supervisor_service::across`）、入れ替えとdrainの間のstepは次に受け付けるserviceへ届く。
   例外は`down`と`service stop`の止める前の記録で、届かないか記録だけが失敗すれば警告して止め（`service stop`は`unrecorded`）、`service stop`の呼び出し元をserviceが最初のstepで断れば（認証・認可・束縛）止めずに失敗する（`queue_service::stop_record`）。
   `queue-broker start|stop`は最初のstepを止めるか起動する前に送り、断られれば何もしない。
   startはserviceに届かなければ起動せず、起動の記録が失敗すればその失敗で終わる（brokerは動いたまま）。

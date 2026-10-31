@@ -261,8 +261,8 @@ queueのDBが消えるか、testのownerのprocessが居なくなっても終わ
   走っているrunとそのreview・復旧は止めない（ADR-t1233-4決定2）
 - `down`: supervisorが居なければ`queue_service_stopped`をserviceに送ってから止める（`application::lifecycle::down`）。
   drainを待たない`down`は、signalの前に`queue_service_stop_requested`を書き、drainを終えた最後のsupervisorが止める（`queue_service_stopped`）
-- `install`（自動更新とrelease-updateも）: 未適用のmigrationがあれば差し替えの前に新しいbuildのserviceを入れ替えの口で起動し、引き継ぎの後に置いたバイナリのものに替える。
-  無ければ引き継いだsupervisorが替える
+- `install`（更新のjobも）: 未適用のmigrationがあるか、使えるserviceが無ければ差し替えの前に新しいbuildのものを入れ替えの口で起動し、引き継ぎの後に置いたbinaryのものに替える。
+  他は引き継いだsupervisorが替える
 - 人の手: `dagq service start`（`service.lifecycle`。`ensure`と同じ）・`dagq service stop`（記録を送って止め、断られれば止めない。動くsupervisorは起動し直す）・`dagq service status`（`queue.read`）
 
 migrationを適用するのは入れ替えの口で起動したserviceだけで、受け付けの前に適用する（ADR-t3102-2決定2。順は`serve`のdoc comment）。

@@ -55,6 +55,16 @@ fn lifecycle_socket(
     control::lifecycle_socket(client, control)
 }
 
+/// The queues of the steps of `install` or an update job on `client`'s
+/// socket, for [`host`].
+fn install_socket(
+    client: crate::infrastructure::queue_service::Client,
+    control: crate::domain::queue_service::ControlCall,
+    answered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<crate::application::supervisor_service::SupervisorQueues> {
+    control::install_socket(client, control, answered)
+}
+
 /// The queues of a lifecycle command's steps answered in this process by
 /// the service's scope at `db`, as the user, for [`host`]'s tests that keep
 /// no service, the command's process taken to run `executable` when given.

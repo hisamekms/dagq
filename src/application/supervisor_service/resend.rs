@@ -26,14 +26,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The supervisor's operations that record a result and that the queue
-/// takes once however often they are sent: an event (by its record's
-/// identity, [`super::SupervisorParams::record`]), the landing (by its commit),
-/// the follow-ups (by their keys), the asks a landing closes (closed
-/// once), and a job command's finding (its same evidence is no new
-/// occurrence).
-pub const RESENT_OPS: [&str; 9] = [
+/// takes once however often they are sent: an event and an update's ask
+/// (by their record's identity, [`super::SupervisorParams::record`]), the
+/// landing (by its commit), the follow-ups (by their keys), the asks a
+/// landing closes (closed once), and a job command's finding (its same
+/// evidence is no new occurrence).
+pub const RESENT_OPS: [&str; 10] = [
     "record_runtime_event",
     "record_queue_event",
+    "open_update_ask",
     "finish_integration",
     "register_follow_ups",
     "close_approve_landing_asks",
@@ -71,8 +72,13 @@ pub const OWN_RETRY_KINDS: [&str; 17] = [
 ];
 
 /// The ones of [`RESENT_OPS`] the queue takes once by their record's
-/// identity: an event, which nothing in it tells from another alike.
-pub const MATCHED_OPS: [&str; 2] = ["record_runtime_event", "record_queue_event"];
+/// identity: an event, which nothing in it tells from another alike, and
+/// an update's ask, which supersedes the one of its kind open before it.
+pub const MATCHED_OPS: [&str; 3] = [
+    "record_runtime_event",
+    "record_queue_event",
+    "open_update_ask",
+];
 
 /// The supervisor's operation that ends a job's row: not sent again by
 /// [`Resending`] (a takeover reads whether it ended the row), but kept for

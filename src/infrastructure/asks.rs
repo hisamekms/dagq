@@ -488,6 +488,27 @@ impl SqliteQueue {
         let reason = AskReason::Scope;
         check_ask_kind(&kind, None, None, reason)?;
         let tx = self.write_tx("open_update_ask", TransactionBehavior::Immediate)?;
+        // One sent again under its identity is the ask it opened.
+        if let Some(record) = details
+            .get(crate::domain::UPDATE_ASK_RECORD)
+            .and_then(serde_json::Value::as_str)
+        {
+            let opened: Option<i64> = tx
+                .query_row(
+                    "SELECT json_extract(payload,'$.ask_id') FROM run_events WHERE kind=?1
+                     AND json_extract(payload,?3)=?2 ORDER BY id LIMIT 1",
+                    params![
+                        EventKind::AskOpened.as_str(),
+                        record,
+                        format!("$.{}", crate::domain::UPDATE_ASK_RECORD)
+                    ],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(id) = opened {
+                return Ok(tx.query_row("SELECT * FROM asks WHERE id=?1", [id], ask_row)?);
+            }
+        }
         let now = self.generators.clock.now();
         let open: Vec<Ask> = tx
             .prepare(

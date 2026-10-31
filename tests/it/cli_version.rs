@@ -951,10 +951,11 @@ exec {quoted_bin} \"$@\"\n"
     assert_supervisor_actor(EventKind::UpdateInstalled, &source);
     assert_supervisor_actor(EventKind::UpdateFailed, &broken_commit);
     assert_eq!(failed.payload["stage"], "install", "{failed:?}");
-    // Every supervisor failed the handoff: each is brought back (task 716).
+    // Every supervisor failed the handoff: each is brought back (task 716),
+    // the job's own once the failure is recorded under its token.
     assert_eq!(failed.payload["kept"], false, "{failed:?}");
     assert_eq!(
-        failed.payload["supervisors"][0]["supervisor"]["state"], "stopped",
+        failed.payload["supervisors"][0]["supervisor"]["state"], "brought_back_after_this_record",
         "{failed:?}"
     );
     assert_eq!(

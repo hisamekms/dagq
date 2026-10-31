@@ -771,10 +771,13 @@ fn the_update_job_installs_watches_restores_and_asks() {
     assert_eq!(report["outcome"], "failed", "{report}");
     assert_eq!(report["stage"], "watch", "{report}");
     assert_eq!(report["restored"]["restored"], true, "{report}");
+    // The job's own supervisor goes under the token of the job's steps: it
+    // is brought back once the failure is recorded.
     assert_eq!(
-        report["supervisors"][0]["supervisor"]["state"], "restarted",
+        report["supervisors"][0]["supervisor"]["state"], "brought_back_after_this_record",
         "{report}"
     );
+    assert_eq!(report["brought_back"][0]["state"], "restarted", "{report}");
     assert_eq!(*restarted.lock().unwrap(), ["auto"]);
     assert!(
         binaries
@@ -1674,8 +1677,12 @@ fn the_update_job_brings_back_every_supervisor_when_none_takes_the_handoff() {
         auto["stale_heartbeat_secs"].as_i64().unwrap() > 30,
         "{report}"
     );
-    assert_eq!(auto["supervisor"]["state"], "restarted", "{report}");
-    assert_eq!(auto["supervisor"]["stopped"], true, "{report}");
+    assert_eq!(
+        auto["supervisor"]["state"], "brought_back_after_this_record",
+        "{report}"
+    );
+    assert_eq!(report["brought_back"][0]["state"], "restarted", "{report}");
+    assert_eq!(report["brought_back"][0]["stopped"], true, "{report}");
     let other = supervisors.iter().find(|s| s["token"] == "other").unwrap();
     assert_eq!(other["pid"], OTHER_PID, "{report}");
     assert!(other["error"].as_str().is_some(), "{report}");
@@ -1747,7 +1754,11 @@ fn the_update_job_brings_back_only_its_supervisor_when_the_install_fails_before_
         "{report}"
     );
     assert_eq!(report["supervisors"], Value::Null, "{report}");
-    assert_eq!(report["supervisor"]["state"], "restarted", "{report}");
+    assert_eq!(
+        report["supervisor"]["state"], "brought_back_after_this_record",
+        "{report}"
+    );
+    assert_eq!(report["brought_back"][0]["state"], "restarted", "{report}");
     assert_eq!(*restarted.lock().unwrap(), ["auto"]);
     assert!(
         binaries.calls().iter().all(|c| !c.starts_with("restore")),

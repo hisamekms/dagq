@@ -64,6 +64,13 @@ pub trait Binaries {
     /// Whether `binary` continues a supervisor after an exec (it knows
     /// `supervise --handoff-token`); a binary before ADR-0045 exits on it.
     fn takes_handoff(&self, binary: &Path) -> bool;
+    /// Whether `binary`'s `install` sends its steps to the queue service
+    /// (it knows `install --sends-steps`): one of a build before does not,
+    /// and its service reads none of this build's steps.
+    fn sends_install_steps(&self, binary: &Path) -> bool {
+        let _ = binary;
+        true
+    }
     /// `binary --db <db> migrate --check`.
     fn schema(&self, binary: &Path, db: &Path) -> Result<SchemaCheck>;
     /// Start `binary`'s service of the queue at `db` as a replacement's
@@ -423,34 +430,73 @@ pub fn install(
     db: Option<&Path>,
     options: &InstallOptions,
 ) -> Result<Value> {
+    let built = built(ports, db, options)?;
+    install_built(ports, db, options, built)
+}
+
+/// The binary an install of `options.source` puts in place: a checkout's
+/// build once its e2e gate passed, a binary as it is, or `.previous`.
+pub struct Built {
+    pub binary: PathBuf,
+    /// The report's `e2e`.
+    pub e2e: Value,
+}
+
+/// Build `options.source` and run its e2e gate, or find the binary it
+/// names, for [`install_built`].
+pub fn built(
+    ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
+    db: Option<&Path>,
+    options: &InstallOptions,
+) -> Result<Built> {
+    let previous = previous_path(&options.target);
+    Ok(match &options.source {
+        Source::Checkout(checkout) => {
+            let binary = ports
+                .binaries
+                .build(checkout)
+                .with_context(|| format!("build {}", checkout.display()))?;
+            let e2e = match &options.e2e {
+                E2eGate::NotApplicable => json!({"status": "not_applicable"}),
+                E2eGate::Skip => json!({"status": "skipped"}),
+                E2eGate::Run(settings) => e2e_gate(ports, db, checkout, &binary, settings)?,
+            };
+            Built { binary, e2e }
+        }
+        Source::Binary(binary) => Built {
+            binary: binary.clone(),
+            e2e: json!({"status": "not_applicable"}),
+        },
+        Source::Rollback => {
+            ensure!(
+                ports.files.is_file(&previous),
+                "no previous binary at {} to roll back to",
+                previous.display()
+            );
+            Built {
+                binary: previous,
+                e2e: json!({"status": "not_applicable"}),
+            }
+        }
+    })
+}
+
+/// [`install`] of the binary [`built`] gave.
+pub fn install_built(
+    ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
+    db: Option<&Path>,
+    options: &InstallOptions,
+    built: Built,
+) -> Result<Value> {
     let Ports {
         binaries, files, ..
     } = *ports;
     let target = &options.target;
     let previous = previous_path(target);
-    let mut e2e = json!({"status": "not_applicable"});
-    let source = match &options.source {
-        Source::Checkout(checkout) => {
-            let built = binaries
-                .build(checkout)
-                .with_context(|| format!("build {}", checkout.display()))?;
-            e2e = match &options.e2e {
-                E2eGate::NotApplicable => json!({"status": "not_applicable"}),
-                E2eGate::Skip => json!({"status": "skipped"}),
-                E2eGate::Run(settings) => e2e_gate(ports, db, checkout, &built, settings)?,
-            };
-            built
-        }
-        Source::Binary(binary) => binary.clone(),
-        Source::Rollback => {
-            ensure!(
-                files.is_file(&previous),
-                "no previous binary at {} to roll back to",
-                previous.display()
-            );
-            previous.clone()
-        }
-    };
+    let Built {
+        binary: source,
+        e2e,
+    } = built;
     let version = binaries
         .version(&source)
         .with_context(|| format!("{} does not report its version", source.display()))?;
@@ -512,7 +558,7 @@ backups/ directory next to it"
     );
     // The service the new build starts is held from the supervisors of the
     // build before until they are handed over and its binary is in place.
-    let _hold = if schema.pending.is_empty() {
+    let mut hold = if schema.pending.is_empty() {
         None
     } else {
         Some(binaries.hold_service(db)?)
@@ -524,7 +570,28 @@ backups/ directory next to it"
     } else {
         binaries.serve(&source, db, false)?
     };
-    let queue = (ports.queues)(db).open()?;
+    // The install reaches the queue only through its service: with none
+    // answering (nothing runs on the queue), or one of a build before that
+    // reads none of its steps, it starts the new build's, as for a
+    // migration, and the binary in place takes over after.
+    let (queue, served) = match (ports.queues)(db).open() {
+        Ok(queue) => (queue, !schema.pending.is_empty()),
+        // A service of a build before this command does not read its steps:
+        // the install sends them to its build's, as to none.
+        Err(error)
+            if hold.is_none()
+                && (super::supervisor_service::unreachable(&error)
+                    || super::supervisor_service::command_unknown(&error)) =>
+        {
+            hold = Some(binaries.hold_service(db)?);
+            binaries.serve(&source, db, false).with_context(|| {
+                format!("no queue service answered, and {version}'s could not start: nothing was replaced")
+            })?;
+            ((ports.queues)(db).open()?, true)
+        }
+        Err(error) => return Err(error),
+    };
+    let _hold = hold;
     let live = live_supervisors(ports.clock, ports.processes, &*queue)?;
     let (takes, cannot): (Vec<_>, Vec<_>) = live
         .into_iter()
@@ -576,14 +643,20 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
                 ));
             }
             Ok(handed) => handed,
+            // One of them may run it: the binary stays.
+            Err(error) if super::lifecycle::HandoffUnsettled::is(&error) => {
+                return Err(error.context(format!(
+                    "{version} stays at {}, as a supervisor asked to take it may run it; check `status`, then `down --force` and `up` to start every supervisor with it, or `install --rollback` to put the binary it replaced back for every supervisor",
+                    target.display()
+                )));
+            }
             Err(error) => return Err(undo(error, None)),
         }
     };
     binaries.adopt(db, target)?;
     // The service that migrated runs from the build before it was put in
     // place: the one of the binary in place takes over.
-    let service =
-        (!schema.pending.is_empty() && !in_place).then(|| serve_in_place(binaries, target, db));
+    let service = (served && !in_place).then(|| serve_in_place(binaries, target, db));
     let failure = handoff_failures(&handed);
     let mut report = json!({
         "outcome": if failure.is_some() { "partially_handed_off" } else { "installed" },
@@ -878,9 +951,20 @@ fn install_breaking(
     options: &InstallOptions,
 ) -> Result<Value> {
     let binaries = ports.binaries;
-    let live = {
-        let queue = (ports.queues)(db).open()?;
-        live_supervisors(ports.clock, ports.processes, &*queue)?
+    // With no service answering nothing runs on the queue to drain: the
+    // breaking build's service judges the queue unused itself before it
+    // migrates.
+    let live = match (ports.queues)(db).open() {
+        Ok(queue) => live_supervisors(ports.clock, ports.processes, &*queue)?,
+        Err(error) if super::supervisor_service::unreachable(&error) => Vec::new(),
+        Err(error) if super::supervisor_service::command_unknown(&error) => {
+            return Err(error.context(
+                "the queue's service is of a build before this install and reads none of its \
+steps, so the supervisors to drain are unknown: nothing was replaced. Run `up` with this build \
+first (it replaces the service), then this install again",
+            ));
+        }
+        Err(error) => return Err(error),
     };
     let drained = if live.is_empty() {
         Value::Null

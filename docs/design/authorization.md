@@ -286,8 +286,8 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
   launchdのsupervisorは`DAGQ_ROLE`を持たない（user）ので、`up`を打ったのがplannerでも起動は通る（登録済みのin-cmuxのものは`DAGQ_ROLE=supervisor`で動く）。
   exec の引き継ぎは同じ環境のまま自分をexecするので、同じroleで判定される。
   起動したプロセスのeventのactorは、呼び出し元ではなく`supervisor:<pid>`（`event_actor`）
-- `auto-update`は`install`と同じ`service.install`で、supervisorが自分の環境（`supervisor:<pid>`）で起動する。
-  `install`と`auto-update`は新しいバイナリでの確認を子として同じ環境のまま打つので、そのroleは`queue.admin`と`service.lifecycle`も持つ。
+- `auto-update`と`release-update`は、supervisorが自分の環境（`supervisor:<pid>`）とtokenで起動する。
+  `install`とjobは新しいbuildの確認を同じ環境の子として打つので、roleは`queue.admin`と`service.lifecycle`も持つ。
   子の`up`は`install`だけが呼び出し元のprincipalで打ち、更新のjobは打たずlaunchdに任せるか打つ`up`をaskで人とinboxに知らせる（[Auto-update](supervisor-lifecycle/auto-update.md)の5）。
   人とinboxとplannerも`install`と同じ権限で打てる（手順の再現と復旧）。
   `observe`（`observe.run`）もsupervisorが自分の環境で起動し、その中のagentだけがobserverになる
@@ -321,7 +321,7 @@ supervisorの操作（containerの部品・NodeSampleStore・runの資源・台�
 着地のintegratorには`landing.land`を通し、着地の操作だけを、名指すrun・task・leaseをそのものに限って答え、ほかは書かずに拒む（`integrator_scope`）。
 wrapperには`session.run`・`session.record`を自分のrunかplannerに、containerの準備はrunのものだけに通す。
 
-制御側のコマンド（`control`）の各stepは、CLIと同じcapability（`up`・`down`・`inbox`・`service`と`queue-broker`の`start|stop`は`service.lifecycle`）で通し断りを記録する（[制御側のコマンド](queue-service-host-cli.md#制御側のコマンド)）。
+制御側のコマンド（`control`）の各stepは、CLIと同じcapability（`up`・`down`・`inbox`・`service`と`queue-broker`の`start|stop`は`service.lifecycle`、`install`と更新は`service.install`）で通し断りを記録する（[制御側のコマンド](queue-service-host-cli.md#制御側のコマンド)）。
 
 ### ほかのコマンド（CLIの入口）
 

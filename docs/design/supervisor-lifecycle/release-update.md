@@ -100,6 +100,7 @@ supervisorは前に見てから一定の間隔が経ったpassで、自分のbui
 
 人の入口は`dagq install --release`（[`install`](install.md)の「リリースから」）で、supervisorは隠しコマンドの`release-update`をjobとして起動する（`application::update::run_release`、配線は`src/compose/host.rs`の`OneShot::release_update`）。
 jobはsource buildの`auto-update`のjobと同じくsetsidで起動し、出力はqueueの`logs/`に書く。
+queueへの読みと記録も同じく、起動したsupervisorの登録のtokenでqueue serviceへ送り、DBを開かない（[Auto-update](auto-update.md)の「queueへの経路」）。
 起動したらsupervisorが`update_started`を書く。
 jobの段はどれも`update_*`で、`commit`の代わりにリリースの版を持つ（`application::update::step_release`）。
 source buildの自動更新の見直しはこれらの段を数えない。

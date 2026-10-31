@@ -463,7 +463,11 @@ string_enum!(UseCase {
     // inbox, a planner or a supervisor (`service.lifecycle`): launchd, the
     // processes and the service's own process stay with the client, and
     // only the registrations, the events and the reads they make are
-    // steps ([`ControlCommand::lifecycle`]).
+    // steps ([`ControlCommand::lifecycle`]). So does `install` and the
+    // automatic and release updates' jobs (`service.install`), whose
+    // builds, binaries and child commands stay with the client and whose
+    // handoffs, update records and asks are steps
+    // ([`ControlCommand::installs`]).
     Control => "control",
     // A session wrapper's operations on its own target, a run or a
     // planner (ADR-t3102-1 decision 4, ADR-t3102-3 decision 3), each the
@@ -608,11 +612,11 @@ impl UseCase {
     /// The use case a `dagq` command line goes to through the service:
     /// `words` are its arguments after the global options, the subcommand
     /// first; a control-side command that sends its steps as
-    /// [`Self::Control`] goes to that, and so do `up`, `down`, `dagq inbox`
-    /// and `service start|stop`. `None` for a command the service does
-    /// not answer (the rest of the control side's, `watch`, whose looks
-    /// only the host's `dagq` sends as [`Self::WatchPoll`], `locate`,
-    /// `doctor`, ...).
+    /// [`Self::Control`] goes to that, and so do `up`, `down`, `dagq inbox`,
+    /// `service start|stop`, `install` and the update jobs. `None` for a
+    /// command the service does not answer (the rest of the control
+    /// side's, `watch`, whose looks only the host's `dagq` sends as
+    /// [`Self::WatchPoll`], `locate`, `doctor`, ...).
     pub fn of_command(words: &[&str]) -> Option<Self> {
         let has = |flag: &str| {
             words
@@ -703,7 +707,7 @@ impl UseCase {
             ("request", Some("decline")) => Self::RequestDecline,
             ("mark", _) => Self::Mark,
             ("integrate" | "review" | "observe" | "throughput-review" | "setup-review", _)
-            | ("up" | "down" | "inbox", _)
+            | ("up" | "down" | "inbox" | "install" | "auto-update" | "release-update", _)
             | ("service", Some("start" | "stop")) => Self::Control,
             _ => return None,
         })
@@ -893,6 +897,9 @@ string_enum!(ControlCommand {
     ServiceStop => "service_stop",
     BrokerStart => "broker_start",
     BrokerStop => "broker_stop",
+    Install => "install",
+    AutoUpdate => "auto_update",
+    ReleaseUpdate => "release_update",
 });
 
 impl ControlCommand {
@@ -913,6 +920,23 @@ impl ControlCommand {
                 | Self::BrokerStart
                 | Self::BrokerStop
         )
+    }
+
+    /// Whether the command replaces the fixed binary (`install`, its
+    /// `--rollback` and `--release`, and the automatic update's and the
+    /// release update's jobs): its operation is `service.install`, and, as
+    /// it hands every live supervisor over to the binary it put in place,
+    /// its steps act on any supervisor's registration as a lifecycle
+    /// command's do.
+    pub const fn installs(self) -> bool {
+        matches!(self, Self::Install | Self::AutoUpdate | Self::ReleaseUpdate)
+    }
+
+    /// Whether the command's steps act on any supervisor's registration
+    /// rather than under a lease of its own: a [`Self::lifecycle`] or an
+    /// [`Self::installs`] one.
+    pub const fn acts_on_registrations(self) -> bool {
+        self.lifecycle() || self.installs()
     }
 }
 
@@ -4506,6 +4530,9 @@ mod tests {
             (&["inbox"], "control"),
             (&["service", "start"], "control"),
             (&["service", "stop"], "control"),
+            (&["install", "--rollback"], "control"),
+            (&["auto-update", "--commit", "c"], "control"),
+            (&["release-update", "--release", "0.4.0"], "control"),
         ] {
             assert_eq!(
                 UseCase::of_command(words).map(UseCase::as_str),

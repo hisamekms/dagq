@@ -52,6 +52,9 @@ struct Setup {
     calls: PathBuf,
     cargo_calls: PathBuf,
     options: SuperviseOptions,
+    /// The queue's service, which the jobs the supervisor starts send their
+    /// steps to as that supervisor.
+    _served: common::service::Served,
 }
 
 fn setup(host: &str, current: &str) -> Setup {
@@ -101,8 +104,10 @@ fn setup(host: &str, current: &str) -> Setup {
             url: "https://index.example/da/gq/dagq".to_owned(),
         }))),
         release_current: Some(current.to_owned()),
+        service_route: dagq::compose::ServiceRoute::Socket,
         ..base
     };
+    let _served = common::service::Served::start(&db);
     Setup {
         _fixture: fixture,
         repo,
@@ -110,6 +115,7 @@ fn setup(host: &str, current: &str) -> Setup {
         calls,
         cargo_calls,
         options,
+        _served,
     }
 }
 

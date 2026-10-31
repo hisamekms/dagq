@@ -109,3 +109,46 @@ fn the_update_job_closes_the_failures_its_swap_contains() {
     assert_eq!(answered[0]["runtime_closed"], true);
     assert_eq!(answered[0]["installed_commit"], json!(fixed));
 }
+
+/// An update ask sent again under the identity of the sending that opened
+/// it is that ask, open or not, and supersedes nothing; one of another
+/// identity is a new ask that supersedes it.
+#[test]
+fn an_update_ask_sent_again_under_its_identity_is_the_one_it_opened() {
+    let fixture = fixture();
+    let mut queue = dagq::infrastructure::sqlite::SqliteQueue::open(&fixture.location.db).unwrap();
+    let key = dagq::domain::UPDATE_ASK_RECORD;
+    let mut open = |record: &str| {
+        queue
+            .open_update_ask(
+                AskKind::UpdateFailed,
+                "failed",
+                dagq::domain::UPDATE_FAILED_OPTIONS,
+                "supervisor",
+                None,
+                json!({ key: record }),
+            )
+            .unwrap()
+            .id
+    };
+    let first = open("a");
+    assert_eq!(open("a"), first);
+    let next = open("b");
+    assert_ne!(next, first);
+    // Superseded since, it is still the ask its sending opened.
+    assert_eq!(open("a"), first);
+    let queue = dagq::infrastructure::sqlite::SqliteQueue::open(&fixture.location.db).unwrap();
+    let asks = queue
+        .asks(dagq::application::AskQuery {
+            all: true,
+            open: false,
+            role: None,
+        })
+        .unwrap();
+    let is_open = |id: AskId| asks.iter().find(|ask| ask.id == id).unwrap().is_open();
+    assert!(!is_open(first));
+    assert!(is_open(next));
+    assert_eq!(asks.len(), 2, "{asks:?}");
+    let opened = queue.ask_opened_payload(first).unwrap();
+    assert_eq!(opened[key], "a", "{opened}");
+}

@@ -1408,8 +1408,12 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
             poll: None,
             cargo: None,
         },
+        // The job the supervisor starts sends its steps to the queue's
+        // service as that supervisor.
+        service_route: dagq::compose::ServiceRoute::Socket,
         ..supervise_options(1, true)
     };
+    let _served = crate::common::service::Served::start(&db);
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let head = |repo: &Path| {
         let output = Command::new(git_executable().expect("git executable"))
