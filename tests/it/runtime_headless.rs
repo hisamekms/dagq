@@ -55,13 +55,53 @@ fn turns(detail: &dagq::domain::TaskDetail) -> (Pairs, Pairs) {
 /// the turn's result and writes the idle marker, and the run goes through
 /// validating and review and lands. Nothing is typed into the workspace:
 /// the exit is the exit request in `turns/`.
+///
+/// The same landing carries the supervisor's other passes over a run of
+/// one turn, each a boundary of its own:
+/// - Task 1328: the pass looks for the receipt, the turn writes it and
+///   ends, and the stall watch of the same pass then reads the idle
+///   marker ([`ReceiptSeenLate`]). The watch looks for the receipt again
+///   after the idle and sends no nudge: a nudge's turn would commit again
+///   under the receipt's validation. (A receipt written is no nudge's
+///   case: `stall::tests::an_idle_session_is_judged_only_past_its_inputs_question_receipt_and_hold`.)
+/// - What builds the ledger is wired into the supervisor's passes and off
+///   the landing (docs/design/measurement.md "台帳を作る係"): while the
+///   ledger cannot be written (a trigger of SQLite refuses its rows), the
+///   run lands as it would and the supervisor reports no error; once it
+///   can, the next supervisor's pass writes the landed run's and its
+///   task's rows, and passes on the same inputs leave them as they are.
+/// - The supervisor names the environment of a run as it claims it
+///   (docs/design/measurement-environment.md "environment_attached" and
+///   "runの資源"): the host's `environment_attached` with every item (its
+///   node the NodeSampleStore's of the host, no image, its cores, its
+///   memory and its architecture). It measures the run in its slots, and
+///   once the run left them its attachment is closed with a last window,
+///   by the supervisor that measured it or the next one, so no attachment
+///   stays open.
 #[test]
 fn a_headless_run_lands_after_its_first_turn() {
+    use dagq::application::{LedgerStore, RunResourceStore};
+    use dagq::domain::environment::{EnvKind, EnvironmentAttached};
+    use dagq::domain::ledger::{LEDGER_V, LedgerKind};
     let (dir, repo, db, backend) = headless_fixture(&[]);
     set_turns(dir.path(), FINISH);
     let base = git_out(&repo, &["rev-parse", "main"]);
+    let refuse = "CREATE TRIGGER ledger_refused BEFORE INSERT ON ledger_rows
+                  BEGIN SELECT RAISE(ABORT, 'the ledger refuses'); END";
+    Connection::open(&db).unwrap().execute(refuse, []).unwrap();
+    let options = SuperviseOptions {
+        files: Some(RunFilesPort(Arc::new(ReceiptSeenLate::default()))),
+        ledger: Some(runtime::LedgerOptions {
+            interval: Duration::ZERO,
+        }),
+        environment: Some(runtime::EnvironmentOptions {
+            interval: Duration::ZERO,
+        }),
+        ..supervise_options(4, true)
+    };
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
-    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
     let detail = detail(&db);
@@ -159,72 +199,76 @@ fn a_headless_run_lands_after_its_first_turn() {
     assert!(run_dir.join("turns/exit").exists());
     // The worker was told it runs headless.
     assert!(read_prompt(run).contains(runtime::HEADLESS_WORKER));
+    // The receipt seen late was not nudged.
+    assert!(
+        payloads(&detail, "stall_nudged").is_empty(),
+        "{:?}",
+        payloads(&detail, "stall_nudged")
+    );
+
+    // The environment attached as the run was claimed.
+    let queue = SqliteQueue::open(&db).unwrap();
+    let events = queue.run_events(run.id()).unwrap();
+    let claimed_at = events
+        .iter()
+        .position(|event| event.kind == EventKind::RunClaimed)
+        .unwrap();
+    let attached: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.kind == EventKind::EnvironmentAttached)
+        .collect();
+    assert_eq!(attached.len(), 1, "{events:?}");
+    let (at, event) = attached[0];
+    assert!(at > claimed_at);
+    let environment = EnvironmentAttached::of_payload(&event.payload).unwrap();
+    assert_eq!(environment.env_kind, EnvKind::Host);
+    assert_eq!(environment.node_id, "host");
+    assert_eq!(environment.image_digest, None);
+    assert!(environment.cpu_limit.is_some_and(|cores| cores >= 1.0));
+    assert!(environment.mem_limit.is_some_and(|bytes| bytes > 0));
+    assert_eq!(environment.arch, std::env::consts::ARCH);
+
+    // The ledger refused: the landing went on without its rows. Once it
+    // takes them, the next pass writes them (and closes the attachment if
+    // the first supervisor ended before a pass did), and a pass on the
+    // same inputs leaves them as they are.
+    assert!(queue.ledger_rows(LedgerKind::Run).unwrap().is_empty());
+    Connection::open(&db)
+        .unwrap()
+        .execute("DROP TRIGGER ledger_refused", [])
+        .unwrap();
+    let idle = TestReviewer::new(&[]);
+    supervise_reviewed_with(&db, &repo, &backend, &idle, &options);
+    let row = queue
+        .ledger_row(LedgerKind::Run, run.id().as_ref())
+        .unwrap()
+        .expect("the landed run's row");
+    assert_eq!(row.ledger_v, LEDGER_V);
+    assert!(row.ended_at.is_some(), "{row:?}");
+    assert!(
+        queue
+            .ledger_row(LedgerKind::Task, &TASK.to_string())
+            .unwrap()
+            .is_some()
+    );
+    let rows = queue.ledger_rows(LedgerKind::Run).unwrap();
+    supervise_reviewed_with(&db, &repo, &backend, &idle, &options);
+    assert_eq!(queue.ledger_rows(LedgerKind::Run).unwrap(), rows);
+    let windows = queue.run_resources(run.id()).unwrap();
+    assert!(
+        windows
+            .iter()
+            .any(|window| window.last && window.attachment == event.id.as_i64()),
+        "{windows:?}"
+    );
+    assert!(queue.open_attachments().unwrap().is_empty());
 }
 
 /// Acceptance (2) and (4): the worker asks and ends its turn; the run
 /// leaves its slot while it waits, and the answer goes to the same session
 /// as the prompt of a resume, after which the run lands.
-#[test]
-fn a_worker_question_is_answered_by_a_resume_of_the_same_session() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(
-        dir.path(),
-        &format!(
-            r#"case "$TURN" in
-1) ask "which file"; say asked ;;
-*) case "$PROMPT" in "answer to ask "*) {FINISH} ;; *) say lost ;; esac ;;
-esac"#
-        ),
-    );
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = Arc::new(backend);
-    let (_reviewer, supervisor) =
-        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        queue
-            .show(TASK)
-            .unwrap()
-            .events
-            .iter()
-            .any(|e| e.kind == EventKind::RunWaitingStarted)
-    });
-    let ask = SqliteQueue::open(&db)
-        .unwrap()
-        .asks(AskQuery::default())
-        .unwrap()
-        .into_iter()
-        .find(|ask| ask.kind == AskKind::WorkerQuestion)
-        .unwrap();
-    SqliteQueue::open(&db)
-        .unwrap()
-        .answer(ask.id, "change.txt")
-        .unwrap();
-    let detail = landed(&db, &repo, &base, &backend, supervisor);
-    let run = &detail.runs[0];
-    let calls = stub_calls(run);
-    assert_eq!(calls.len(), 2, "{calls:?}");
-    assert_eq!(
-        calls[1],
-        format!("resume {} answer to ask {}: change.txt", run.id(), ask.id)
-    );
-    assert_eq!(
-        turns(&detail).0,
-        [(json!(1), json!(false)), (json!(2), json!(true))]
-    );
-    let requested = payloads(&detail, "turn_requested");
-    assert_eq!(requested.len(), 1, "{requested:?}");
-    assert_eq!(requested[0]["what"], format!("answer of ask {}", ask.id));
-    // The answer's bytes, held to the next turn's limit (ADR-t2072-1).
-    let bytes = &requested[0]["prompt_bytes"];
-    assert_eq!(bytes["limit"], 16_000, "{bytes}");
-    assert_eq!(bytes["sections"]["answer"], "change.txt".len(), "{bytes}");
-    assert!(bytes["total"].as_u64().unwrap() > 0, "{bytes}");
-    assert_eq!(bytes["omitted"], json!({}), "{bytes}");
-    let kinds = event_kinds(&detail);
-    assert!(position(&kinds, "run_waiting_started") < position(&kinds, "run_waiting_ended"));
-    assert!(position(&kinds, "run_waiting_ended") < position(&kinds, "ask_delivered"));
-}
-
+///
 /// Task 3438: a Claude worker's turns, the first and the resumed one, have
 /// the run directory's `tmp` as their `TMPDIR` and write there, and the
 /// landing's verification on the host the run's short directory outside
@@ -278,7 +322,28 @@ esac"#
         .unwrap();
     let detail = landed(&db, &repo, &base, &backend, supervisor);
     let run = &detail.runs[0];
-    assert_eq!(stub_calls(run).len(), 2);
+    let calls = stub_calls(run);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(
+        calls[1],
+        format!("resume {} answer to ask {}: change.txt", run.id(), ask.id)
+    );
+    assert_eq!(
+        turns(&detail).0,
+        [(json!(1), json!(false)), (json!(2), json!(true))]
+    );
+    let requested = payloads(&detail, "turn_requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0]["what"], format!("answer of ask {}", ask.id));
+    // The answer's bytes, held to the next turn's limit (ADR-t2072-1).
+    let bytes = &requested[0]["prompt_bytes"];
+    assert_eq!(bytes["limit"], 16_000, "{bytes}");
+    assert_eq!(bytes["sections"]["answer"], "change.txt".len(), "{bytes}");
+    assert!(bytes["total"].as_u64().unwrap() > 0, "{bytes}");
+    assert_eq!(bytes["omitted"], json!({}), "{bytes}");
+    let kinds = event_kinds(&detail);
+    assert!(position(&kinds, "run_waiting_started") < position(&kinds, "run_waiting_ended"));
+    assert!(position(&kinds, "run_waiting_ended") < position(&kinds, "ask_delivered"));
     let run_dir = PathBuf::from(run.run_dir().unwrap());
     let tmp = run_dir.join("tmp");
     let tmp_text = tmp.to_string_lossy().into_owned();
@@ -572,146 +637,18 @@ esac"#
     assert!(stalled_asks(&SqliteQueue::open(&db).unwrap()).is_empty());
 }
 
-/// Acceptance (5b): a turn refused three permissions goes to the recovery
-/// job at once (reason `permission_denied`, no nudge); the job escalates,
-/// so one `stalled` ask opens with its reason category, and a person's
-/// answer is the session's next turn, after which the run lands.
-#[test]
-fn refused_permissions_go_to_the_recovery_job_whose_escalation_asks_a_person() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(
-        dir.path(),
-        &format!(
-            r#"case "$PROMPT" in
-"answer to ask "*) {FINISH} ;;
-*) denied; say refused ;;
-esac"#
-        ),
-    );
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = Arc::new(backend);
-    let (_reviewer, supervisor) =
-        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        !stalled_asks(queue).is_empty()
-    });
-    let ask = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
-    assert!(
-        ask.question.contains("headless session"),
-        "{}",
-        ask.question
-    );
-    assert!(
-        ask.question.contains("permission denial"),
-        "{}",
-        ask.question
-    );
-    assert_eq!(ask.reason_category, AskReason::RecoveryFailed);
-    SqliteQueue::open(&db)
-        .unwrap()
-        .answer(ask.id, "use the tools you are allowed")
-        .unwrap();
-    let detail = landed(&db, &repo, &base, &backend, supervisor);
-    let run = &detail.runs[0];
-    assert!(payloads(&detail, "stall_nudged").is_empty());
-    let requested = payloads(&detail, "recovery_requested");
-    assert_eq!(requested.len(), 1, "{requested:?}");
-    assert_eq!(requested[0]["reason"], "permission_denied");
-    assert_eq!(requested[0]["turn"]["permission_denials"], 3);
-    let finished = payloads(&detail, "turn_finished");
-    assert_eq!(finished[0]["denied_tools"], json!(["Bash", "Bash", "Edit"]));
-    let calls = stub_calls(run);
-    assert_eq!(calls.len(), 2, "{calls:?}");
-    assert_eq!(
-        calls[1],
-        format!(
-            "resume {} answer to ask {}: use the tools you are allowed",
-            run.id(),
-            ask.id
-        )
-    );
-    let resolved = payloads(&detail, "stall_resolved");
-    assert!(
-        resolved
-            .iter()
-            .any(|p| p["detection"] == "ask" && p["outcome"] == "answered_instruction"),
-        "{resolved:?}"
-    );
-}
-
-/// Task 1104: a headless run's `stalled` ask offers `stop`; a person's
-/// `stop` is sent as the session's exit request (never as a turn), the ask
-/// closes with `answered_stop`, and the run, ended without a receipt, fails
-/// and goes to its recovery job (alert `failed`).
-#[test]
-fn a_stop_answer_ends_the_headless_session_and_its_run_goes_to_recovery() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(dir.path(), "denied; say refused");
-    let backend = Arc::new(backend);
-    let (_reviewer, supervisor) =
-        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        !stalled_asks(queue).is_empty()
-    });
-    let ask = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
-    assert_eq!(ask.options, ["wait", "stop", "propose"]);
-    assert!(
-        ask.question
-            .contains("`stop` to have the supervisor end the session"),
-        "{}",
-        ask.question
-    );
-    assert!(
-        ask.question.contains("goes to its recovery job"),
-        "{}",
-        ask.question
-    );
-    SqliteQueue::open(&db)
-        .unwrap()
-        .answer(ask.id, "stop")
-        .unwrap();
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = detail(&db);
-    let run = &detail.runs[0];
-    assert_eq!(run.status(), RunStatus::Failed);
-    // Only the first turn ran: `stop` was no turn's prompt.
-    let calls = stub_calls(run);
-    assert_eq!(calls.len(), 1, "{calls:?}");
-    let turns = Path::new(run.run_dir().unwrap()).join("turns");
-    assert!(turns.join("exit").exists());
-    for entry in fs::read_dir(&turns).unwrap() {
-        let path = entry.unwrap().path();
-        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
-        if name.starts_with("request") {
-            let text = fs::read_to_string(&path).unwrap();
-            assert!(!text.contains("answer to ask"), "{name}: {text}");
-        }
-    }
-    assert!(payloads(&detail, "turn_requested").is_empty());
-    let resolved = payloads(&detail, "stall_resolved");
-    let stops: Vec<_> = resolved
-        .iter()
-        .filter(|p| p["detection"] == "ask" && p["outcome"] == "answered_stop")
-        .collect();
-    assert_eq!(stops.len(), 1, "{resolved:?}");
-    assert_eq!(stops[0]["ask_id"], json!(ask.id));
-    let closed = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
-    assert!(closed.closed_at.is_some(), "{closed:?}");
-    let requested = payloads(&detail, "recovery_requested");
-    assert!(
-        requested.iter().any(|p| p["alert"] == "failed"),
-        "{requested:?}"
-    );
-}
-
 /// Task 1104: a headless run waiting outside its one slot for its
 /// `stalled` ask gets the `stop` only once it is back in the slot: while
 /// another task holds the slot the exit is not requested, and the ask stays
 /// answered and open; once the slot is free the run goes back, the exit is
 /// requested and the ask closed (`answered_stop`), and the run fails and
 /// goes to its recovery job.
+///
+/// Task 1104: the `stall` ask of a headless run offers `stop`, and says so;
+/// a person's `stop` is sent as the session's exit request, never as a
+/// turn. Which answer does what, and that `stop` waits out of the slot,
+/// are the unit test `stall::tests::the_answers_of_a_stalled_ask_are_applied_by_kind`;
+/// this test keeps the wiring of the slot to the watch's send.
 #[test]
 fn a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
@@ -741,6 +678,17 @@ fn a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot() {
     });
     let ask = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
     assert_eq!(ask.options, ["wait", "stop", "propose"]);
+    assert!(
+        ask.question
+            .contains("`stop` to have the supervisor end the session"),
+        "{}",
+        ask.question
+    );
+    assert!(
+        ask.question.contains("goes to its recovery job"),
+        "{}",
+        ask.question
+    );
     // Added now, so the headless task took the slot first.
     let other = add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "other", &[]);
     assert_eq!(other, TaskId::new(3));
@@ -780,6 +728,16 @@ fn a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot() {
     assert!(exit.exists());
     assert_eq!(stub_calls(run).len(), 1, "{:?}", stub_calls(run));
     assert!(payloads(&detail, "turn_requested").is_empty());
+    for entry in fs::read_dir(exit.parent().unwrap()).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        if name.starts_with("request") {
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(!text.contains("answer to ask"), "{name}: {text}");
+        }
+    }
+    let closed = SqliteQueue::open(&db).unwrap().read_ask(ask.id).unwrap();
+    assert!(closed.closed_at.is_some(), "{closed:?}");
     let kinds = event_kinds(&detail);
     let stop = detail
         .events
@@ -792,81 +750,6 @@ fn a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot() {
             .iter()
             .any(|p| p["alert"] == "failed")
     );
-}
-
-/// A turn that says it started in another permission mode than it was
-/// asked (ADR-t813-1 decision 8) is stopped, and the run goes to its
-/// recovery job as one that failed.
-#[test]
-fn a_turn_started_in_another_permission_mode_is_stopped() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(dir.path(), "sleep 30");
-    // The stub says `default`, as haiku does for `auto`.
-    let stub = backend.headless.clone().unwrap();
-    let text = fs::read_to_string(&stub).unwrap();
-    // A new shared template; the stub's hardlink is read-only.
-    crate::common::template::script(
-        &stub,
-        text.replacen("#!/bin/sh\n", "#!/bin/sh\nPERMISSION_SAID=default\n", 1),
-    );
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = detail(&db);
-    assert_eq!(detail.runs[0].status(), RunStatus::Failed);
-    let finished = payloads(&detail, "turn_finished");
-    assert_eq!(finished[0]["outcome"], "launch_mismatch", "{finished:?}");
-    assert_eq!(
-        finished[0]["stopped"],
-        "the agent started in permission mode default instead of auto"
-    );
-}
-
-/// A turn that failed at the provider's login holds the queue's one
-/// authentication ask instead of a nudge; `done` has the session go on
-/// with a resume, and the run lands.
-#[test]
-fn a_turn_that_failed_at_the_login_holds_the_queue_until_a_person_logs_in() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(
-        dir.path(),
-        &format!(
-            r#"case "$TURN" in
-1) printf '%s\n' '{{"type":"assistant","error":"authentication_failed","message":{{"model":"<synthetic>","content":[{{"type":"text","text":"Not logged in"}}]}}}}'; fail "Not logged in" ;;
-*) {FINISH} ;;
-esac"#
-        ),
-    );
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = Arc::new(backend);
-    let (_reviewer, supervisor) =
-        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        queue
-            .asks(AskQuery::default())
-            .unwrap()
-            .iter()
-            .any(|ask| ask.reason_category == AskReason::Authentication)
-    });
-    let ask = SqliteQueue::open(&db)
-        .unwrap()
-        .asks(AskQuery::default())
-        .unwrap()
-        .into_iter()
-        .find(|ask| ask.reason_category == AskReason::Authentication)
-        .unwrap();
-    SqliteQueue::open(&db)
-        .unwrap()
-        .answer(ask.id, "done")
-        .unwrap();
-    let detail = landed(&db, &repo, &base, &backend, supervisor);
-    let finished = payloads(&detail, "turn_finished");
-    assert_eq!(finished[0]["outcome"], "failed", "{finished:?}");
-    assert_eq!(finished[0]["failure"], "authentication");
-    assert!(payloads(&detail, "stall_nudged").is_empty());
-    let calls = stub_calls(&detail.runs[0]);
-    // The failed turn never answered: the session is started again.
-    assert!(calls[1].starts_with("start "), "{calls:?}");
 }
 
 /// Task 862: each turn is a process of its own, and the one running is the
@@ -1192,84 +1075,19 @@ fn a_turn_that_ends_by_itself_leaves_what_runs_outside_its_group() {
     assert!(running(outside.0));
 }
 
-/// Task 1328: the pass looks for the receipt, the turn writes it and
-/// ends, and the stall watch of the same pass then reads the idle marker.
-/// The watch looks for the receipt again after the idle and sends no
-/// nudge: a nudge's turn would commit again under the receipt's
-/// validation (`receipt commit … is not the head`, `worktree is not
-/// clean`). The run lands after its one turn.
-#[test]
-fn a_receipt_written_as_its_turn_ends_is_not_nudged() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(dir.path(), FINISH);
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
-    let options = SuperviseOptions {
-        files: Some(RunFilesPort(Arc::new(ReceiptSeenLate::default()))),
-        ..supervise_options(4, true)
-    };
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-    let detail = detail(&db);
-    assert_landed_run(&detail.runs[0], &repo, &base);
-    assert!(
-        payloads(&detail, "stall_nudged").is_empty(),
-        "{:?}",
-        payloads(&detail, "stall_nudged")
-    );
-    let calls = stub_calls(&detail.runs[0]);
-    assert_eq!(calls.len(), 1, "{calls:?}");
-}
-
-/// Task 1594 (ADR-t1594-1): a turn that commits, writes its receipt and
-/// exits non-zero goes to validation and lands, also when the supervisor
-/// sees its wrapper's exit before its idle marker (here it never sees the
-/// marker, so the order is fixed). `supervision_finished` keeps the
-/// wrapper's code with `receipt: true` and no reason code, the turn's
-/// failure stays in its `turn_finished`, and no `last_error` is written.
-#[test]
-fn a_receipt_written_before_its_turn_failed_goes_to_validation() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(dir.path(), &format!("{FINISH}; exit 7"));
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
-    let options = SuperviseOptions {
-        files: Some(RunFilesPort(Arc::new(ReceiptSeenLate::idle_unseen()))),
-        ..supervise_options(4, true)
-    };
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-    let detail = detail(&db);
-    let run = &detail.runs[0];
-    assert_landed_run(run, &repo, &base);
-    assert_eq!(run.last_error(), None);
-    let finished = payloads(&detail, "turn_finished");
-    assert_eq!(finished.len(), 1, "{finished:?}");
-    assert_eq!(finished[0]["outcome"], "failed", "{:?}", finished[0]);
-    assert_eq!(finished[0]["exit_code"], 7, "{:?}", finished[0]);
-    let ended = payloads(&detail, "supervision_finished");
-    assert_eq!(
-        ended,
-        [&json!({"status": "validating", "exit_code": 1, "receipt": true})]
-    );
-    assert!(payloads(&detail, "session_idle_observed").is_empty());
-}
-
 /// Task 1109: exercise the real recovery job's PID stop with a command
 /// outside the turn's group. A short-lived intermediate parent makes the
-/// command an orphan; keeping that parent waiting preserves the wrapper's
-/// descendants. The extra parent also distinguishes a command from the
-/// agent's direct children, which the idle watch treats as session helpers.
-/// The fixture hosts the wrapper in the test's own process, which
-/// `run_processes` never takes as a wrapper to descend from, so in both
-/// cases the job finds the command by its worktree cwd; picking a wrapper's
-/// descendant whose cwd is elsewhere is the unit test
+/// command an orphan, which is no longer the wrapper's descendant. The
+/// extra parent also distinguishes a command from the agent's direct
+/// children, which the idle watch treats as session helpers. The fixture
+/// hosts the wrapper in the test's own process, which `run_processes`
+/// never takes as a wrapper to descend from, so the job finds the command
+/// by its worktree cwd, whether or not its parent still waits for it (the
+/// case of a descendant goes the same way and is not run apart); picking a
+/// wrapper's descendant whose cwd is elsewhere is the unit test
 /// `domain::recovery::tests::only_the_runs_own_processes_may_be_stopped`.
-fn recovery_stops_outside_command(orphan: bool) {
+#[test]
+fn recovery_stops_a_headless_turns_orphan_outside_its_group_by_worktree() {
     use dagq::application::ProcessControl;
     use dagq::infrastructure::adapters::SystemProcesses;
 
@@ -1296,7 +1114,6 @@ perl -e '
         }}
         exit 0;
     }}
-    {parent_wait}
 ' >/dev/null 2>&1 &
 await_file "$RUN_DIR/outside.pid"
 pid=$(cat "$RUN_DIR/outside.pid")
@@ -1305,7 +1122,6 @@ while kill -0 "$pid" 2>/dev/null && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1))
 {FINISH}
 "#,
             test_pid = std::process::id(),
-            parent_wait = if orphan { "" } else { "waitpid($child, 0);" },
         ),
     );
     let base = git_out(&repo, &["rev-parse", "main"]);
@@ -1372,13 +1188,13 @@ while kill -0 "$pid" 2>/dev/null && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1))
     };
     let run_dir = Path::new(run.run_dir().unwrap());
     let parent = written_pid(&run, "outside.parent");
-    // In the orphan case, wait for reparenting, not a guessed delay.
+    // Wait for reparenting, not a guessed delay.
     wait_until(&db, common::STEP_LIMIT, |_| {
         SystemProcesses
             .list()
             .unwrap()
             .iter()
-            .any(|p| p.pid == outside.0 && (!orphan || p.ppid != parent))
+            .any(|p| p.pid == outside.0 && p.ppid != parent)
     });
     let all = SystemProcesses.list().unwrap();
     let child = all.iter().find(|p| p.pid == outside.0).unwrap();
@@ -1390,24 +1206,11 @@ while kill -0 "$pid" 2>/dev/null && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1))
         assert_ne!(libc::getpgid(agent as i32), outside.0 as i32);
     }
     assert_eq!(child.cwd.as_deref(), run.worktree_path());
-    if orphan {
-        // init on macOS; a Linux subreaper may adopt it instead.
-        if cfg!(target_os = "macos") {
-            assert_eq!(child.ppid, 1);
-        }
-        assert!(!SystemProcesses.descendants(agent).contains(&outside.0));
-    } else {
-        assert_eq!(child.ppid, parent);
-        assert!(SystemProcesses.descendants(agent).contains(&outside.0));
-        // The wrapper runs on a thread of this process, which starts the
-        // turns; its row names the process its background session goes by
-        // (task 1439), which starts none.
-        assert!(
-            SystemProcesses
-                .descendants(std::process::id())
-                .contains(&outside.0)
-        );
+    // init on macOS; a Linux subreaper may adopt it instead.
+    if cfg!(target_os = "macos") {
+        assert_eq!(child.ppid, 1);
     }
+    assert!(!SystemProcesses.descendants(agent).contains(&outside.0));
     fs::write(run_dir.join("allow-repair"), "").unwrap();
     let detail = landed(&db, &repo, &base, &backend, supervisor);
     assert!(
@@ -1432,25 +1235,17 @@ while kill -0 "$pid" 2>/dev/null && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1))
     );
 }
 
+/// Task 863: the headless run's supervisor died with its first turn ended
+/// and its `stalled` ask answered with an instruction, after writing the
+/// answer's request and before closing the ask. The supervisor that adopts
+/// the run finds that request in the run's `turns/`, closes the ask and
+/// does not send the answer again: it goes to the session exactly once.
+/// The turn of the answer waits for the test's `go` file, so the adopter's
+/// watch meets the ask while it runs. Which request counts as already
+/// written (and that an answer never written is written by the adopter) is
+/// the unit test `domain::turn::tests::a_stalled_answer_is_requested_once_whoever_wrote_it`.
 #[test]
-fn recovery_stops_a_headless_turns_descendant_outside_its_group() {
-    recovery_stops_outside_command(false);
-}
-
-#[test]
-fn recovery_stops_a_headless_turns_orphan_outside_its_group_by_worktree() {
-    recovery_stops_outside_command(true);
-}
-
-/// The headless run's supervisor died with its first turn ended and its
-/// `stalled` ask answered with an instruction: after writing the answer's
-/// request when `written` (and before closing the ask), before writing it
-/// otherwise (task 863). The supervisor that adopts the run closes the ask
-/// and sends the answer as a turn exactly once: never again when the dead
-/// supervisor had written it, and itself when it had not. The turn of the
-/// answer waits for the test's `go` file, so the adopter's watch meets the
-/// ask while it runs.
-fn adopted_stalled_answer(written: bool) {
+fn an_adopter_does_not_send_a_stalled_answer_already_requested() {
     use dagq::domain::turn::turns_dir;
     let (dir, repo, db, backend) = headless_fixture(&[]);
     set_turns(
@@ -1489,17 +1284,15 @@ esac"#
         .ask;
     queue.answer(ask.id, "go on").unwrap();
     let what = format!("answer of the stalled ask {}", ask.id);
-    if written {
-        // What the dead supervisor wrote and recorded before it stopped.
-        request_turn_left_by_a_dead_supervisor(
-            &db,
-            &run,
-            &format!("answer to ask {}: go on", ask.id),
-            &what,
-        );
-        // The session took it.
-        wait_until(&db, common::STEP_LIMIT, |_| stub_calls(&run).len() == 2);
-    }
+    // What the dead supervisor wrote and recorded before it stopped.
+    request_turn_left_by_a_dead_supervisor(
+        &db,
+        &run,
+        &format!("answer to ask {}: go on", ask.id),
+        &what,
+    );
+    // The session took it.
+    wait_until(&db, common::STEP_LIMIT, |_| stub_calls(&run).len() == 2);
     age_lease(&db, &run, 31);
     let (_reviewer, supervisor) =
         supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
@@ -1536,136 +1329,4 @@ esac"#
     assert_eq!(of_ask[0]["outcome"], "answered_instruction");
     let closed = SqliteQueue::open(&db).unwrap().read_ask(ask.id).unwrap();
     assert_eq!(closed.answer.as_deref(), Some("go on"));
-}
-
-/// Task 863 (1): the dead supervisor wrote the answer's request; the
-/// adopter does not write another.
-#[test]
-fn an_adopter_does_not_send_a_stalled_answer_already_requested() {
-    adopted_stalled_answer(true);
-}
-
-/// Task 863 (2): the dead supervisor stopped before writing the answer's
-/// request; the adopter sends it once.
-#[test]
-fn an_adopter_sends_a_stalled_answer_not_yet_requested() {
-    adopted_stalled_answer(false);
-}
-
-/// What builds the ledger is wired into the supervisor's passes and off
-/// the landing (docs/design/measurement.md "台帳を作る係"): while the
-/// ledger cannot be written, the run lands as it would and the supervisor
-/// reports no error; once it can, the next supervisor's pass writes the
-/// landed run's and its task's rows, and passes on the same inputs leave
-/// them as they are.
-#[test]
-fn the_supervisor_builds_the_ledger_off_the_landing_whatever_its_writes_do() {
-    use dagq::application::LedgerStore;
-    use dagq::domain::ledger::{LEDGER_V, LedgerKind};
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(dir.path(), FINISH);
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let refuse = "CREATE TRIGGER ledger_refused BEFORE INSERT ON ledger_rows
-                  BEGIN SELECT RAISE(ABORT, 'the ledger refuses'); END";
-    Connection::open(&db).unwrap().execute(refuse, []).unwrap();
-    let options = SuperviseOptions {
-        ledger: Some(runtime::LedgerOptions {
-            interval: Duration::ZERO,
-        }),
-        ..supervise_options(4, true)
-    };
-    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-    let detail = detail(&db);
-    assert_landed_run(&detail.runs[0], &repo, &base);
-    let queue = SqliteQueue::open(&db).unwrap();
-    assert!(queue.ledger_rows(LedgerKind::Run).unwrap().is_empty());
-
-    Connection::open(&db)
-        .unwrap()
-        .execute("DROP TRIGGER ledger_refused", [])
-        .unwrap();
-    let idle = TestReviewer::new(&[]);
-    supervise_reviewed_with(&db, &repo, &backend, &idle, &options);
-    let run = detail.runs[0].id().to_string();
-    let row = queue
-        .ledger_row(LedgerKind::Run, &run)
-        .unwrap()
-        .expect("the landed run's row");
-    assert_eq!(row.ledger_v, LEDGER_V);
-    assert!(row.ended_at.is_some(), "{row:?}");
-    assert!(
-        queue
-            .ledger_row(LedgerKind::Task, &TASK.to_string())
-            .unwrap()
-            .is_some()
-    );
-    let rows = queue.ledger_rows(LedgerKind::Run).unwrap();
-    supervise_reviewed_with(&db, &repo, &backend, &idle, &options);
-    assert_eq!(queue.ledger_rows(LedgerKind::Run).unwrap(), rows);
-}
-
-/// The supervisor names the environment of a run as it claims it
-/// (docs/design/measurement-environment.md "environment_attached" and
-/// "runの資源"): the host's
-/// `environment_attached` with every item (its node the NodeSampleStore's
-/// of the host, no image, its cores, its memory and its architecture). It
-/// measures the run in its slots, and once the run left them its attachment
-/// is closed with a last window, by the supervisor that measured it or the
-/// next one, so no attachment stays open.
-#[test]
-fn the_supervisor_records_the_environment_a_run_is_claimed_on_and_closes_it() {
-    use dagq::application::RunResourceStore;
-    use dagq::domain::environment::{EnvKind, EnvironmentAttached};
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(dir.path(), FINISH);
-    let options = SuperviseOptions {
-        environment: Some(runtime::EnvironmentOptions {
-            interval: Duration::ZERO,
-        }),
-        ..supervise_options(4, true)
-    };
-    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-    let run = detail(&db).runs[0].id().clone();
-    let queue = SqliteQueue::open(&db).unwrap();
-    let events = queue.run_events(&run).unwrap();
-    let claimed = events
-        .iter()
-        .position(|event| event.kind == EventKind::RunClaimed)
-        .unwrap();
-    let attached: Vec<_> = events
-        .iter()
-        .enumerate()
-        .filter(|(_, event)| event.kind == EventKind::EnvironmentAttached)
-        .collect();
-    assert_eq!(attached.len(), 1, "{events:?}");
-    let (at, event) = attached[0];
-    assert!(at > claimed);
-    let environment = EnvironmentAttached::of_payload(&event.payload).unwrap();
-    assert_eq!(environment.env_kind, EnvKind::Host);
-    assert_eq!(environment.node_id, "host");
-    assert_eq!(environment.image_digest, None);
-    assert!(environment.cpu_limit.is_some_and(|cores| cores >= 1.0));
-    assert!(environment.mem_limit.is_some_and(|bytes| bytes > 0));
-    assert_eq!(environment.arch, std::env::consts::ARCH);
-
-    // The supervisor that measured it closes it once the run left its
-    // slots; the next one does when the first ended before a pass did.
-    if !queue.open_attachments().unwrap().is_empty() {
-        let idle = TestReviewer::new(&[]);
-        supervise_reviewed_with(&db, &repo, &backend, &idle, &options);
-    }
-    let windows = queue.run_resources(&run).unwrap();
-    assert!(
-        windows
-            .iter()
-            .any(|window| window.last && window.attachment == event.id.as_i64()),
-        "{windows:?}"
-    );
-    assert!(queue.open_attachments().unwrap().is_empty());
 }

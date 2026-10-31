@@ -291,6 +291,19 @@ fn starts_anew(on: &Agent, provider: Provider, events: &[RunEvent]) -> bool {
     provider != on.provider || session_starts(events) != on.starts
 }
 
+/// The session the next turn of `on` resumes, `None` when it starts one:
+/// for an agent that names its own (`from_output`), the one it said it
+/// started; otherwise `on`'s, once its model answered (`created`) or the
+/// agent `kept` it (a turn that failed before an answer may have left it).
+/// The caller looks for a kept session only when the answer depends on it.
+fn resumed_session(on: &Agent, from_output: bool, kept: bool) -> Option<String> {
+    if from_output {
+        on.identified.clone()
+    } else {
+        (on.created || kept).then(|| on.name.clone())
+    }
+}
+
 /// How a turn ended.
 struct Turn {
     outcome: TurnOutcome,
@@ -665,12 +678,12 @@ impl<'a> Turns<'a> {
             // started. One that never was starts with the task's prompt,
             // the request after it.
             let from_output = agent.turn_session_from_output();
-            let resume = if from_output {
-                on.identified.clone()
+            let kept = if from_output || on.created {
+                false
             } else {
-                (on.created || agent.turn_session_exists(&self.cwd()?, &on.name))
-                    .then(|| on.name.clone())
+                agent.turn_session_exists(&self.cwd()?, &on.name)
             };
+            let resume = resumed_session(&on, from_output, kept);
             let asked = prompt.clone();
             let prompt = match &request {
                 Some(_) if resume.is_none() => new_session_prompt(&task_prompt, &prompt),
@@ -1872,6 +1885,50 @@ mod tests {
         assert_eq!(
             new_session_prompt("the task", "the handoff"),
             "the task\n\nthe handoff"
+        );
+    }
+
+    /// Moved from
+    /// `runtime_headless::a_turn_that_failed_at_the_login_holds_the_queue_until_a_person_logs_in`:
+    /// a first turn that failed at the login before its model answered
+    /// (`session_created: false`) left no session, so the turn after a
+    /// person logged in starts one with the task's prompt; one whose model
+    /// answered, or whose session the agent kept, is resumed by name; an
+    /// agent that names its own resumes the one it said.
+    #[test]
+    fn a_session_is_resumed_only_once_its_model_answered_or_the_agent_kept_it() {
+        let finished = |created: bool| {
+            run_event(
+                event_kind::TURN_FINISHED,
+                json!({"turn": 1, "outcome": "failed", "failure": "authentication",
+                       "session_created": created}),
+            )
+        };
+        let unanswered = Agent::new("run-1".into(), Provider::Claude, &[finished(false)]);
+        assert!(!unanswered.created);
+        assert_eq!(resumed_session(&unanswered, false, false), None);
+        assert_eq!(
+            resumed_session(&unanswered, false, true).as_deref(),
+            Some("run-1")
+        );
+        let answered = Agent::new("run-1".into(), Provider::Claude, &[finished(true)]);
+        assert_eq!(
+            resumed_session(&answered, false, false).as_deref(),
+            Some("run-1")
+        );
+        // From the agent's output: only the session it said it started.
+        assert_eq!(resumed_session(&answered, true, true), None);
+        let said = Agent::new(
+            "run-1".into(),
+            Provider::Codex,
+            &[run_event(
+                event_kind::TURN_SESSION_IDENTIFIED,
+                json!({"turn": 1, "session_id": "thread-1"}),
+            )],
+        );
+        assert_eq!(
+            resumed_session(&said, true, false).as_deref(),
+            Some("thread-1")
         );
     }
 

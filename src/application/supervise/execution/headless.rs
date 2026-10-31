@@ -212,11 +212,14 @@ pub(super) fn requested(sv: &Supervisor<'_>, run: &TaskRun, what: &str) -> Resul
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("read the requests of the headless session"),
     };
+    let mut listed = Vec::new();
     for path in paths {
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let Some((seq, _)) = turn::request_seq(name).filter(|_| name.ends_with(".json")) else {
+        let Some((seq, state)) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(turn::request_state)
+            .filter(|(_, state)| *state != RequestState::Dropped)
+        else {
             continue;
         };
         // A request taken between the listing and the read is read under
@@ -228,14 +231,11 @@ pub(super) fn requested(sv: &Supervisor<'_>, run: &TaskRun, what: &str) -> Resul
             read => read,
         }
         .context("read a request of the headless session")?;
-        let Ok(request) = serde_json::from_slice::<TurnRequest>(&content) else {
-            continue;
-        };
-        if request.what == what {
-            return Ok(Some(request.seq));
+        if let Ok(request) = serde_json::from_slice::<TurnRequest>(&content) {
+            listed.push(ListedRequest { state, request });
         }
     }
-    Ok(None)
+    Ok(turn::requested_seq(&listed, what))
 }
 
 /// Every request in the `turns/` of the run directory `run_dir`, waiting,

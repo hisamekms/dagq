@@ -582,6 +582,18 @@ pub fn adopted_delivery(
         })
 }
 
+/// The request named `what` among `requests`, waiting or taken: a
+/// supervisor that stopped after writing it left it for its adopter, which
+/// then does not write it again. A dropped request never ran and does not
+/// count.
+pub fn requested_seq(requests: &[ListedRequest], what: &str) -> Option<u64> {
+    requests
+        .iter()
+        .filter(|listed| listed.state != RequestState::Dropped)
+        .find(|listed| listed.request.what == what)
+        .map(|listed| listed.request.seq)
+}
+
 /// What one line of a turn's output said, as the runtime reads it whatever
 /// the provider.
 #[derive(Debug, Clone, PartialEq)]
@@ -1449,6 +1461,43 @@ mod tests {
                 prompt: prompt.to_owned(),
             },
         }
+    }
+
+    /// Moved from `runtime_headless::an_adopter_sends_a_stalled_answer_not_yet_requested`
+    /// and the case `runtime_headless::an_adopter_does_not_send_a_stalled_answer_already_requested`
+    /// keeps end to end: the answer of a `stalled` ask a dead supervisor
+    /// wrote, waiting or taken, is found by its `what` and not written
+    /// again; one it never wrote, or one dropped with an earlier session,
+    /// is written by the adopter.
+    #[test]
+    fn a_stalled_answer_is_requested_once_whoever_wrote_it() {
+        const WHAT: &str = "answer of the stalled ask 7";
+        assert_eq!(requested_seq(&[], WHAT), None);
+        let other = listed(1, RequestState::Taken, "nudge", "go on");
+        assert_eq!(requested_seq(std::slice::from_ref(&other), WHAT), None);
+        for state in [RequestState::Pending, RequestState::Taken] {
+            assert_eq!(
+                requested_seq(&[other.clone(), listed(2, state, WHAT, "go on")], WHAT),
+                Some(2)
+            );
+        }
+        assert_eq!(
+            requested_seq(&[listed(2, RequestState::Dropped, WHAT, "go on")], WHAT),
+            None
+        );
+        // Another ask's answer is not this one's.
+        assert_eq!(
+            requested_seq(
+                &[listed(
+                    3,
+                    RequestState::Pending,
+                    "answer of the stalled ask 8",
+                    "x"
+                )],
+                WHAT
+            ),
+            None
+        );
     }
 
     #[test]

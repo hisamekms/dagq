@@ -1,0 +1,26 @@
+# The items of task 3769 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 10.7s to 15.9s in a stress 5: a headless worker's one turn, its review and landing, then two supervise passes
+[[test]]
+name = "runtime_headless::a_headless_run_lands_after_its_first_turn"
+reason = "B 境界（プロセス・supervisor の配線・SQLite）: session の wrapper が `claude -p` の turn を起動して結果を記録し、着地まで通す代表。同じ着地で、受け取りが遅れて見えた receipt に nudge を送らない観察の配線、SQLite の trigger が台帳を拒む間も着地が進み次の pass が台帳を書く配線、claim で environment_attached を書き次の pass が閉じる配線を確かめる（nudge・台帳・名乗りの判断は stall・ledger・environment の unit test）"
+task = 3769
+
+# 9.5s to 14.2s in a stress 5: a recovery job that stops a real process outside the turn's group
+[[test]]
+name = "runtime_headless::recovery_stops_a_headless_turns_orphan_outside_its_group_by_worktree"
+reason = "B 境界（プロセス・復旧）: turn の process group の外で親を失った実際の process を、復旧 job が worktree の cwd で見つけて止めることを OS の pid・pgid・ppid で確かめる（止めてよい process の判断は domain::recovery の unit test）"
+task = 3769
+
+# 7.1s to 10.8s in a stress 5: a dead supervisor's run adopted with the answer's request it left
+[[test]]
+name = "runtime_headless::an_adopter_does_not_send_a_stalled_answer_already_requested"
+reason = "B 境界（復旧と adopt）: 死んだ supervisor が turns/ に書いた答えの request を、run を adopt した supervisor が見つけて ask を閉じ、答えを二度送らないことを確かめる（既に書いたかの判断は domain::turn の unit test）"
+task = 3769
+
+# 7.8s in task 2394's stress (before this task's merge of the in-slot stop answer into it): another task holds the one slot while the stop answer waits
+[[test]]
+name = "runtime_headless::a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot"
+reason = "B 境界（supervisor の配線・プロセス・SQLite）: slot の外で待つ headless の run への stop の答えが、slot を取り戻すまで exit の request にならず、取り戻した後に session の exit になって run が復旧 job へ行くことを、別の task が実際に slot を持つ supervisor で確かめる代表（答えごとの操作と slot の外で送らない判断は stall の unit test）"
+task = 3769

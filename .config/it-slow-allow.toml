@@ -1768,12 +1768,6 @@ name = "runtime_triage::the_recovery_job_reads_the_supervisors_build_and_the_dep
 reason = "B 境界（守る境界）: recovery: the recovery job's process reads the supervisor's build and the dependencies' landed commits from Git and SQLite"
 task = 2394
 
-# 7.834s in task 2394's stress, whose change to it was the type of its kind comparisons
-[[test]]
-name = "runtime_headless::a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot"
-reason = "B 境界（守る境界）: the supervisor's slot wiring for a headless run waiting outside its slot, its exit and its recovery job (processes, SQLite)"
-task = 2394
-
 # 7.706s in task 2394's stress, whose change to it was the type of its kind comparisons
 [[test]]
 name = "runtime_actor_env::the_review_and_the_recovery_job_run_as_their_own_actors"
@@ -1796,12 +1790,6 @@ task = 2394
 [[test]]
 name = "runtime_integrate::integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable"
 reason = "B 境界（守る境界）: recovery: an `integrate` process that dies leaves a stale landing lease that `recover` puts back, across processes, Git and SQLite"
-task = 2394
-
-# 6.345s in task 2394's stress, whose change to it was the type of its kind comparisons
-[[test]]
-name = "runtime_headless::a_worker_question_is_answered_by_a_resume_of_the_same_session"
-reason = "B 境界（守る境界）: the supervisor's wiring of a headless worker's ask and the resume of the same session that carries the answer (processes, SQLite)"
 task = 2394
 
 # 6.046s in task 2394's stress, whose change to it was the type of its kind comparisons
@@ -2181,12 +2169,6 @@ task = 2978
 name = "runtime_clone_facts::the_triage_of_a_cut_off_container_run_carries_the_cut_off_turn_s_commit_over"
 reason = "B 境界（supervisor の配線・復旧・Git・プロセス）: 同じ回収と triage で、retry_inherit が、実際の facts だけの turn が書いた bundle から取り込んだ切られた turn の commit を refs/dagq/runs に残して引き継ぎ、その container が clone と run dir だけを mount し relay を開かないことを確かめる。判断は application::inherit の unit test"
 task = 2978
-
-# 3.9s to 7.9s in stress under the host's load (task 1676): a whole supervisor run from the claim to the landing, a second one only when the first left the attachment open
-[[test]]
-name = "runtime_headless::the_supervisor_records_the_environment_a_run_is_claimed_on_and_closes_it"
-reason = "B 境界（supervisor の配線・SQLite）: 実際の supervisor が claim で environment_attached を書き、run が slot を離れた後の資源の測りの pass が最後の窓で名乗りを閉じることを確かめる代表。名乗りの欄・窓の畳み・閉じる判断は infrastructure::environment と domain::environment と supervise::observation::ledger の unit test、測りの pass は run_resources の IT"
-task = 1676
 
 # 4.1s to 5.6s in stress under the host's load (task 1676): an import of a file of more rows than one transaction holds, stopped part way, then the rest
 [[test]]

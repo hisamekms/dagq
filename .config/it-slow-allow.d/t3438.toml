@@ -4,7 +4,7 @@
 # 7.1s in a stress 5: a headless worker's turn, its ask and resume, its review and landing, then a sweep, each a supervise
 [[test]]
 name = "runtime_headless::a_claude_workers_turns_and_its_landings_verification_keep_their_temporary_files_in_the_run"
-reason = "B 境界（守る境界）: session の wrapper が起動する Claude の turn と resume の process、shell の着地の検証のコマンドに run_dir/tmp の TMPDIR が届き、そこに書いたものを掃除の job が filesystem から消して SQLite に run_tmp_removed を書くことを通しで確かめる（TMPDIR の組み立ては infrastructure::adapters と application::integrate、消す判断は cleanup の unit test）"
+reason = "B 境界（守る境界）: session の wrapper が起動する Claude の turn と resume の process、shell の着地の検証のコマンドに run_dir/tmp の TMPDIR が届き、そこに書いたものを掃除の job が filesystem から消して SQLite に run_tmp_removed を書くことを通しで確かめる。同じ run で worker の質問の答えが slot を離れて待った後に同じ session の resume として届く配線も確かめる（TMPDIR の組み立ては infrastructure::adapters と application::integrate、消す判断は cleanup の unit test）"
 task = 3438
 
 # 6.8s in a stress 5: a landing, a sweep under a live lease and one under a stale lease, each a supervise
