@@ -20,7 +20,7 @@ FROM=2026-09-28T13:00:00Z; TO=2026-09-28T14:00:00Z
       (.wait_to_land|m), (.land_phases.verify|m), (.land_phases.ask|m), .resumes, .title[0:40]] | @tsv)'
 ```
 
-- 時間はどれも分。「人の答え待ち」は着地待ちの中の ask で、作業中の答え待ちが疑わしい run は `~/.local/bin/dagq timeline RUN` の `waiting_ask` の区間を足し、除いた値も並べる
+- 時間はどれも分。「人の答え待ち」は着地待ちの中の ask で、作業中の答え待ちが疑わしい run は `~/.local/bin/dagq timeline RUN --gap 1` の JSON で `blocker` が `human` の gap（`reason` の例: `waiting`・`landing_answer`。task の保留の `held` は ask の待ちでないので除く。`--gap` の既定 300 秒では短い gap が出ない）の `secs` を足し、除いた値も並べる。gap の `reason` が `legacy` の run（工程の記録の無い run）は区間を作り直さないので答え待ちを除けず、含む値だけを出してそう書く
 - 種類の層: task が宣言した `change`（`dagq.toml` の `[tasks] changes` の値。change の無い task と古いバイナリの記録では `-`）と、`dagq.toml` の `[areas]` から求める `areas`（着地 commit の差分から。`[areas]` が無い間と古いバイナリの記録では `-`）で分ける
 
 (b) claim の保留と resume と ask（同じ `FROM`・`TO`）:
