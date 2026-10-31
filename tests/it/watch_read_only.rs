@@ -31,7 +31,7 @@ impl WatchRecord for WriteAfterRead<'_> {
 #[test]
 fn the_watch_connection_rejects_writes_and_sees_attention_added_after_a_poll() {
     let (_dir, db) = queue();
-    let reader = compose::open_queue_watch(&db).unwrap();
+    let reader = dagq::infrastructure::sqlite::SqliteQueue::open_watch(&db).unwrap();
     let writer = SqliteQueue::open(&db).unwrap();
     let error = reader
         .record_queue_event(
@@ -128,7 +128,10 @@ fn cli_and_library_watch_refuse_old_schemas_for_every_role_and_wait_mode() {
     let watchers =
         dagq::infrastructure::inbox_watchers::read(&dagq::infrastructure::inbox_watchers::dir(&db));
     assert!(watchers.iter().all(|record| record.ended_at.is_some()));
-    assert!(compose::open_queue_watch(&dir.path().join("missing.db")).is_err());
+    assert!(
+        dagq::infrastructure::sqlite::SqliteQueue::open_watch(dir.path().join("missing.db"))
+            .is_err()
+    );
     assert!(!dir.path().join("missing.db").exists());
 }
 

@@ -777,8 +777,11 @@ fn stalling_containers(
             db: db.to_path_buf(),
             main_checkout: Some(repo.to_path_buf()),
             host_wide: None,
-            kept_records: None,
-            owner_runs: None,
+            kept_records: Arc::new(dagq::infrastructure::container_image::QueueImageRecords {
+                db: db.to_path_buf(),
+                actor: None,
+            }),
+            owner_runs: Some(Arc::new(crate::common::queue::QueueRuns)),
             deadline: None,
         }),
     );

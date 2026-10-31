@@ -53,14 +53,19 @@ fn forecast(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> Valu
     if let Some(role) = role {
         command.env("DAGQ_ROLE", role);
     }
-    crate::common::cli::reach(&mut command, db, &["forecast"]);
-    let output = command
-        .arg("--db")
-        .arg(db)
-        .arg("forecast")
-        .args(args)
-        .bounded_output()
-        .unwrap();
+    // The observer's `dagq` reaches the queue only in client mode, naming
+    // no queue; a host's goes to the queue's service.
+    match role.and_then(|role| crate::common::service::client_mode_env(db, &[("DAGQ_ROLE", role)]))
+    {
+        Some(client) => {
+            command.envs(client);
+        }
+        None => {
+            crate::common::cli::reach(&mut command, db, &["forecast"]);
+            command.arg("--db").arg(db);
+        }
+    }
+    let output = command.arg("forecast").args(args).bounded_output().unwrap();
     assert!(
         output.status.success(),
         "{args:?}: {}",

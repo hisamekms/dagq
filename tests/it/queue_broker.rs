@@ -653,13 +653,11 @@ fn up_replaces_the_broker_of_another_build_and_down_stops_it() {
     assert!(!client.status.success());
     let refusal: Value = serde_json::from_slice(&client.stderr).unwrap();
     assert_eq!(refusal["queue_service"]["code"], "no_use_case", "{refusal}");
+    // A worker's `dagq` is a client-mode one.
     let worker = common::cli::invoke_as(Some("worker"), &db, &["queue-broker", "serve"]);
     assert!(!worker.status.success());
     let refusal: Value = serde_json::from_slice(&worker.stderr).unwrap();
-    assert!(
-        refusal.to_string().contains("service.lifecycle"),
-        "{refusal}"
-    );
+    assert_eq!(refusal["queue_service"]["code"], "no_use_case", "{refusal}");
     assert_eq!(
         broker::probe(db.parent().unwrap()).state,
         ServiceState::Stopped
@@ -2331,12 +2329,13 @@ fn queue_broker_start_stop_and_status_by_hand() {
     assert_eq!(broker::probe(queue.dir()).state, ServiceState::Stopped);
 
     // The broker's start and stop are the service's lifecycle: a worker's
-    // `dagq` is refused them, and so is a client-mode `dagq`.
+    // `dagq`, a client-mode one, is refused them, and so is a client-mode
+    // `dagq` of no principal.
     for args in [["queue-broker", "start"], ["queue-broker", "stop"]] {
         let worker = common::cli::invoke_as(Some("worker"), &db, &args);
         assert!(!worker.status.success());
-        let refusal = String::from_utf8_lossy(&worker.stderr);
-        assert!(refusal.contains("service.lifecycle"), "{refusal}");
+        let refusal: Value = serde_json::from_slice(&worker.stderr).unwrap();
+        assert_eq!(refusal["queue_service"]["code"], "no_use_case", "{refusal}");
         let client = {
             use common::service::OwnedByTest;
             use common::{Bounded, WithoutActor};

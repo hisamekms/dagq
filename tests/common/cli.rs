@@ -54,6 +54,11 @@ pub fn invoke_with(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
     command.env("PATH", &path);
     command.env("XDG_CONFIG_HOME", &config);
     command.envs(env.iter().copied());
+    // A worker's, a job's or the observer's `dagq` reaches the queue only
+    // in client mode, naming no queue.
+    if let Some(client) = super::service::client_mode_env(db, env) {
+        return command.envs(client).args(args).bounded_output().unwrap();
+    }
     // A command the queue service answers goes to it, never to the DB.
     let mut reach = env.to_vec();
     for (key, value) in [
@@ -65,6 +70,25 @@ pub fn invoke_with(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
         }
     }
     command.envs(super::service::host_client_env(db, &reach, args));
+    command
+        .arg("--db")
+        .arg(db)
+        .args(args)
+        .bounded_output()
+        .unwrap()
+}
+
+/// [`invoke_with`] of a role but the user, the inbox and a planner run
+/// outside client mode, naming the queue at `db` with no service's socket
+/// or token, as no process of the runtime starts it: what the command line
+/// refuses itself before anything is sent (and sends to the queue's
+/// service as an unauthenticated refusal), and what it refuses for opening
+/// no queue.
+pub fn invoke_unserved(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command.without_actor_env().owned_by_test();
+    command.env("XDG_CONFIG_HOME", db.parent().unwrap().join("config"));
+    command.envs(env.iter().copied());
     command
         .arg("--db")
         .arg(db)

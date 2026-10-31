@@ -330,13 +330,6 @@ pub struct Layout {
     /// Variables the observer's process does not inherit (its role and
     /// actor).
     pub observer_env_remove: Vec<String>,
-    /// Whether the job commands it starts as its own (`observe`,
-    /// `throughput-review`) reach the queue through the service's socket
-    /// as this supervisor
-    /// ([`crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV`]):
-    /// the CLI's; a supervisor whose service runs in its own process
-    /// leaves them to open the queue.
-    pub jobs_through_service: bool,
     /// `planners/` of the queue, where the planners the runtime opens keep
     /// their files, and the plugin directory they load.
     pub planners_dir: PathBuf,
@@ -400,7 +393,6 @@ impl Layout {
             pid: 42,
             version: "0.0.0-test".into(),
             observer_env_remove: Vec::new(),
-            jobs_through_service: false,
             planners_dir: root.join("planners"),
             plugin_dir: Some("/plugin".into()),
             plan_reviews_dir: root.join("plan-reviews"),

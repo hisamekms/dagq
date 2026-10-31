@@ -111,13 +111,22 @@ fn a_refusal_is_recorded_by_the_service_as_the_refused_principal() {
     );
     assert_eq!(denied[0]["payload"]["reason"], "not granted");
 
-    // An observer is named with no token: the service records the
-    // request as unauthenticated, and no refusal as the observer's.
-    let refused = refusal(&invoke_with(
-        &[("DAGQ_ROLE", "observer")],
-        &queue.db,
-        &["down"],
-    ));
+    // An observer is named with no token (a `dagq` of its role run
+    // outside client mode): the service records the request as
+    // unauthenticated, and no refusal as the observer's.
+    let refused = refusal(&{
+        use common::service::OwnedByTest;
+        use common::{Bounded, WithoutActor};
+        std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+            .without_actor_env()
+            .owned_by_test()
+            .env("DAGQ_ROLE", "observer")
+            .arg("--db")
+            .arg(&queue.db)
+            .arg("down")
+            .bounded_output()
+            .unwrap()
+    });
     assert_eq!(refused["error"], "observer may not change queue state");
     assert_eq!(
         unauthenticated(&queue.db),

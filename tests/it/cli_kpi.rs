@@ -180,12 +180,17 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
         0.0
     );
 
-    // The observer and the jobs read it.
+    // The observer and the jobs read it, in client mode.
     for role in ["observer", "reviewer"] {
+        let output = invoke_with(
+            &[("DAGQ_ROLE", role), ("TZ", "UTC")],
+            &db,
+            &["kpi", "--last", "1"],
+        );
         assert!(
-            kpi(Some(role), &db, &config, &["--last", "1"])
-                .status
-                .success()
+            output.status.success(),
+            "{role}: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
     for args in [

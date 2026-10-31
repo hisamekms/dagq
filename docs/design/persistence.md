@@ -195,8 +195,7 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 
 ### queue service
 
-queue service（[Queue service](queue-service.md)）もDBを開くプロセスの1つである。
-DBを直接開く他のプロセスとは、SQLiteのトランザクションとleaseの規則で並ぶ。
+queue DBを開くのはqueue service（[Queue service](queue-service.md)）と[その例外](queue-service.md#dbを開く経路)だけで、SQLiteのトランザクションとleaseの規則で並ぶ。
 serviceのファイルはqueueのディレクトリの`service/`に置き、DBには置かない。
 送り直される結果の記録のeventは最初の送信の識別子と`event_records`で結んで同じトランザクションで書き、識別子ごとに1つのeventにする（ADR-t3102-3決定5）。
 
@@ -302,7 +301,7 @@ migrationを足すtaskの規則（リリース済みは変えない）は[migrat
   バイナリより新しくても下限以下なら動く。
   このため`INSERT`は必ず列を列挙し、行は列名で読む。
   claimのときに写したバイナリ（`runs/<id>/runner`）も互換のmigrationの後に動き続ける。
-- 読み取り専用のopen: DBを開く読み取り（hostのCLIの読み取りを答える[service](queue-service-host-cli.md)も）は読み取り専用の接続で開き、何も書かない（ADR-0045決定18）。
+- 読み取り専用のopen: serviceの読み取りと`doctor`は読み取り専用の接続で開き、何も書かない（ADR-0045決定18）。
   queueがバイナリより古ければメモリの複製をmigrateして読む。
   複製はsnapshotなので、`watch`はファイルを直接開き、古いschemaなら`dagq migrate`を促して終わる。
   複製はGitからcommit messageを埋めないので、その`search`はmessageの無い着地を見つけない。

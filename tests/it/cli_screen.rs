@@ -282,23 +282,17 @@ fn a_planner_a_worker_and_the_jobs_are_refused_and_recorded() {
             refused += 1;
         }
     }
-    // The planner's refusals reach the service with its token, which
-    // records them as the planner's; the others' are sent to it with no
-    // token, and recorded as unauthenticated.
+    // Each reaches the service with its token, which records the refusals
+    // as its principal's.
     let denied = events(&db, "authorization_denied");
-    assert_eq!(denied.len(), 4);
-    assert!(
+    assert_eq!(denied.len(), refused);
+    assert_eq!(
         denied
             .iter()
-            .all(|event| event["actor"]["role"] == "planner")
+            .map(|event| event["actor"]["role"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["observer", "planner", "recovery-job", "worker"].into()
     );
     assert_eq!(denied[0]["payload"]["capability"], "screen.read");
-    let unauthenticated = events(&db, "queue_service_unauthenticated");
-    assert_eq!(unauthenticated.len(), refused - 4);
-    assert!(
-        unauthenticated
-            .iter()
-            .all(|event| event["payload"]["use_case"] == "denial_record")
-    );
     assert!(events(&db, "screen_read").is_empty());
 }

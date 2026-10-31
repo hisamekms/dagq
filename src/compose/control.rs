@@ -166,7 +166,7 @@ impl ControlQueues {
             remote,
             &heartbeat,
             &self.tokens(),
-            Some(&self.records()),
+            &self.records(),
         )
     }
 

@@ -1111,10 +1111,12 @@ impl ServiceAccess for RequestedServiceAccess {
 /// the caller's principal ([`RequestedServiceAccess::of_caller`],
 /// ADR-t3102-1 decision 2) and never written here. The rest is the files'
 /// and the queue's, as [`SystemServiceAccess`]'s.
+#[cfg(feature = "test-paths")]
 pub struct RequestedTelemetryTokens {
     access: RequestedServiceAccess,
 }
 
+#[cfg(feature = "test-paths")]
 impl RequestedTelemetryTokens {
     /// Those of the command's caller on the service of the queue at `db`.
     pub fn of_caller(db: &Path) -> Self {
@@ -1124,6 +1126,7 @@ impl RequestedTelemetryTokens {
     }
 }
 
+#[cfg(feature = "test-paths")]
 impl TelemetryTokens for RequestedTelemetryTokens {
     fn issue_telemetry(
         &self,
@@ -1156,7 +1159,7 @@ impl TelemetryTokens for RequestedTelemetryTokens {
     }
 
     fn target_facts(&self, db: &Path, target: &StepTarget) -> Result<TargetFacts> {
-        SystemServiceAccess.target_facts(db, target)
+        InProcessTelemetry.target_facts(db, target)
     }
 
     fn register_telemetry_session(
@@ -1165,7 +1168,7 @@ impl TelemetryTokens for RequestedTelemetryTokens {
         target: &StepTarget,
         session_id: &str,
     ) -> Result<()> {
-        SystemServiceAccess.register_telemetry_session(db, target, session_id)
+        InProcessTelemetry.register_telemetry_session(db, target, session_id)
     }
 
     fn kept_steps(&self, db: &Path) -> Result<Vec<KeptStepsFile>> {
@@ -1261,22 +1264,26 @@ impl TelemetryTokens for SystemServiceAccess {
         matches!(lookup(&queue_dir, &token), Ok(Some(_))).then_some(file)
     }
 
-    fn target_facts(&self, db: &Path, target: &StepTarget) -> Result<TargetFacts> {
-        SqliteQueue::open(db)?.telemetry_target(target)
+    /// Refused: what the queue holds of a target is read only by the queue
+    /// service's process ([`SqliteServiceBackend`]'s), which the control
+    /// side asks through the op `target_facts`.
+    fn target_facts(&self, _: &Path, target: &StepTarget) -> Result<TargetFacts> {
+        bail!(
+            "{} {} is read only by the queue service's process (the op target_facts of its supervisor or control use case)",
+            target.kind.as_str(),
+            target.id
+        )
     }
 
-    fn register_telemetry_session(
-        &self,
-        db: &Path,
-        target: &StepTarget,
-        session_id: &str,
-    ) -> Result<()> {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| {
-                i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
-            });
-        SessionOwners::register_session(&SqliteQueue::open(db)?, target, session_id, now_ms)
+    /// Refused: a session is registered only by the queue service's
+    /// process ([`SqliteServiceBackend`]'s), which the control side asks
+    /// through the op `register_telemetry_session`.
+    fn register_telemetry_session(&self, _: &Path, target: &StepTarget, _: &str) -> Result<()> {
+        bail!(
+            "a session of {} {} is registered only by the queue service's process (the op register_telemetry_session of its supervisor or control use case)",
+            target.kind.as_str(),
+            target.id
+        )
     }
 
     fn kept_steps(&self, db: &Path) -> Result<Vec<KeptStepsFile>> {
@@ -1318,6 +1325,116 @@ impl TelemetryTokens for SystemServiceAccess {
                 })
             })
             .collect())
+    }
+}
+
+/// The service's own telemetry tokens: [`SystemServiceAccess`]'s files,
+/// and what the queue holds of a target and its sessions read and
+/// registered on the DB, which only the service's process opens.
+impl TelemetryTokens for SqliteServiceBackend {
+    fn issue_telemetry(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        task: Option<TaskId>,
+        issued_under: Option<&LeaseToken>,
+    ) -> Result<PathBuf> {
+        SystemServiceAccess.issue_telemetry(db, target, task, issued_under)
+    }
+
+    fn revoke_telemetry(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        issued_under: Option<&LeaseToken>,
+    ) -> Result<bool> {
+        SystemServiceAccess.revoke_telemetry(db, target, issued_under)
+    }
+
+    fn telemetry_credential(&self, db: &Path, target: &StepTarget) -> Option<PathBuf> {
+        SystemServiceAccess.telemetry_credential(db, target)
+    }
+
+    fn target_facts(&self, db: &Path, target: &StepTarget) -> Result<TargetFacts> {
+        SqliteQueue::open(db)?.telemetry_target(target)
+    }
+
+    fn register_telemetry_session(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        session_id: &str,
+    ) -> Result<()> {
+        SessionOwners::register_session(&SqliteQueue::open(db)?, target, session_id, unix_now_ms())
+    }
+
+    fn kept_steps(&self, db: &Path) -> Result<Vec<KeptStepsFile>> {
+        SystemServiceAccess.kept_steps(db)
+    }
+
+    fn forget_steps(&self, db: &Path, file: &Path) -> Result<()> {
+        SystemServiceAccess.forget_steps(db, file)
+    }
+
+    fn held_telemetry(&self, db: &Path) -> Result<Vec<HeldTelemetry>> {
+        SystemServiceAccess.held_telemetry(db)
+    }
+}
+
+/// The telemetry tokens of a test's process that keeps no service:
+/// [`SqliteServiceBackend`]'s, the queue's DB opened in this process. The
+/// binary does not build it.
+#[cfg(feature = "test-paths")]
+pub struct InProcessTelemetry;
+
+#[cfg(feature = "test-paths")]
+impl TelemetryTokens for InProcessTelemetry {
+    fn issue_telemetry(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        task: Option<TaskId>,
+        issued_under: Option<&LeaseToken>,
+    ) -> Result<PathBuf> {
+        SystemServiceAccess.issue_telemetry(db, target, task, issued_under)
+    }
+
+    fn revoke_telemetry(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        issued_under: Option<&LeaseToken>,
+    ) -> Result<bool> {
+        SystemServiceAccess.revoke_telemetry(db, target, issued_under)
+    }
+
+    fn telemetry_credential(&self, db: &Path, target: &StepTarget) -> Option<PathBuf> {
+        SystemServiceAccess.telemetry_credential(db, target)
+    }
+
+    fn target_facts(&self, db: &Path, target: &StepTarget) -> Result<TargetFacts> {
+        SqliteQueue::open(db)?.telemetry_target(target)
+    }
+
+    fn register_telemetry_session(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        session_id: &str,
+    ) -> Result<()> {
+        SessionOwners::register_session(&SqliteQueue::open(db)?, target, session_id, unix_now_ms())
+    }
+
+    fn kept_steps(&self, db: &Path) -> Result<Vec<KeptStepsFile>> {
+        SystemServiceAccess.kept_steps(db)
+    }
+
+    fn forget_steps(&self, db: &Path, file: &Path) -> Result<()> {
+        SystemServiceAccess.forget_steps(db, file)
+    }
+
+    fn held_telemetry(&self, db: &Path) -> Result<Vec<HeldTelemetry>> {
+        SystemServiceAccess.held_telemetry(db)
     }
 }
 
@@ -3448,7 +3565,7 @@ impl ServiceBackend for SqliteServiceBackend {
     }
 
     fn telemetry(&self) -> &dyn TelemetryTokens {
-        &SystemServiceAccess
+        self
     }
 
     fn principals(&self) -> Result<Vec<Principal>> {
@@ -3733,6 +3850,7 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
 /// cases on a backend of its own (a test's supervisor, which keeps no
 /// service): every request is made and read back as the socket's would
 /// be, token and all.
+#[cfg(feature = "test-paths")]
 pub struct InProcessCaller {
     queue_dir: PathBuf,
     backend: Arc<SqliteServiceBackend>,
@@ -3742,6 +3860,7 @@ pub struct InProcessCaller {
     adopted: bool,
 }
 
+#[cfg(feature = "test-paths")]
 impl InProcessCaller {
     /// The caller of the queue at `db`, its records made with `generators`.
     pub fn new(
@@ -3772,6 +3891,7 @@ impl InProcessCaller {
     }
 }
 
+#[cfg(feature = "test-paths")]
 impl InProcessCaller {
     /// `request`, which carries no token, answered in this process as the
     /// user's, a peer of the service's own OS user (ADR-t3102-1 decision
@@ -3792,6 +3912,7 @@ impl InProcessCaller {
     }
 }
 
+#[cfg(feature = "test-paths")]
 impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
     fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
         let request = ServiceRequest {
@@ -4052,11 +4173,13 @@ impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
 /// socket (a peer of the service's own OS user, no token): `up`, `down`
 /// and `dagq inbox` of a test that keeps no service, each step made and
 /// read back as the socket's would be.
+#[cfg(feature = "test-paths")]
 pub struct InProcessControlCaller {
     backend: SqliteServiceBackend,
     control: crate::domain::queue_service::ControlCall,
 }
 
+#[cfg(feature = "test-paths")]
 impl InProcessControlCaller {
     /// The caller of `control`'s steps on the queue at `db`, its records
     /// made with `generators`, standing for a command that runs
@@ -4086,6 +4209,7 @@ impl InProcessControlCaller {
     }
 }
 
+#[cfg(feature = "test-paths")]
 impl crate::application::supervisor_service::ServiceCaller for InProcessControlCaller {
     fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
         ensure!(
@@ -5517,6 +5641,34 @@ mod tests {
             .filter(|name| name.to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(left.is_empty(), "{left:?}");
+    }
+
+    /// The telemetry tokens every process takes read and register nothing
+    /// of a target: they refuse, naming the service's process as the one
+    /// that does, and make no queue's DB.
+    #[test]
+    fn the_shared_telemetry_tokens_refuse_what_only_the_service_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("queue.db");
+        let run = RunId::new("r1").unwrap();
+        let target = StepTarget::run(&run);
+        let facts = SystemServiceAccess.target_facts(&db, &target).unwrap_err();
+        assert!(
+            facts
+                .to_string()
+                .contains("only by the queue service's process"),
+            "{facts:#}"
+        );
+        let registered = SystemServiceAccess
+            .register_telemetry_session(&db, &target, "s1")
+            .unwrap_err();
+        assert!(
+            registered
+                .to_string()
+                .contains("only by the queue service's process"),
+            "{registered:#}"
+        );
+        assert!(!db.exists(), "the shared tokens made the queue's DB");
     }
 
     /// The executor's sink sends with its target's telemetry token, read

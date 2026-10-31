@@ -517,6 +517,42 @@ fn notes_are_observations_read_by_notes_show_and_goal_show() {
     );
 }
 
+/// Whether `error` is a client-mode `dagq`'s refusal of `args` for being
+/// none of the use cases the service answers it: the control side's and
+/// the host's lifecycle, which no worker, job or observer runs.
+fn no_use_case(args: &[&str], error: &Value) -> bool {
+    let code = &error["queue_service"]["code"];
+    let refused = code == "no_use_case" || code == "control_side_command";
+    if refused {
+        assert!(
+            [
+                "init",
+                "plan",
+                "integrate",
+                "review",
+                "recover",
+                "up",
+                "down",
+                "install",
+                "migrate",
+                "supervise",
+                "setup-review",
+                "doctor",
+                "service",
+                "queue-broker",
+                "rebind",
+                "observe",
+                "throughput-review",
+                "watch",
+                "session-event",
+            ]
+            .contains(&args[0]),
+            "{args:?}: {error}"
+        );
+    }
+    refused
+}
+
 #[test]
 fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
     let (_dir, db) = queue();
@@ -527,6 +563,11 @@ fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
         let output = invoke_as(Some("observer"), &db, args);
         assert!(!output.status.success(), "{args:?} was allowed");
         let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        // The observer's `dagq` is a client-mode one: a command that is
+        // none of the service's use cases is refused before it is sent.
+        if no_use_case(args, &error) {
+            return;
+        }
         assert_eq!(
             error["error"], "observer may not change queue state",
             "{args:?}"
@@ -586,7 +627,6 @@ fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
         &["graph"],
         &["status"],
         &["events"],
-        &["doctor"],
         &["goal", "list"],
         &["goal", "show", "1"],
         &["notes"],
@@ -1179,6 +1219,9 @@ fn reviewer_may_only_read_the_queue() {
         let output = invoke_as(Some("reviewer"), &db, args);
         assert!(!output.status.success(), "{args:?} was allowed");
         let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        if no_use_case(args, &error) {
+            continue;
+        }
         assert_eq!(
             error["error"], "reviewer may not change queue state",
             "{args:?}"

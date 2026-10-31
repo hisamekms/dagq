@@ -228,12 +228,10 @@ impl ObservationState {
         // throughput-review-job (ADR-t996-1 decision 4).
         command.envs(env.layout.supervisor_actor().env());
         // It reaches the queue as this supervisor (ADR-t3102-3 decision 3).
-        if env.layout.jobs_through_service {
-            command.env(
-                crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV,
-                env.token.as_str(),
-            );
-        }
+        command.env(
+            crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV,
+            env.token.as_str(),
+        );
         // It asks the queue service for its job's token as the supervisor
         // (ADR-t3102-1 decision 2).
         if let Some(file) = env.layout.service_credential.get() {

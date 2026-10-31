@@ -105,7 +105,7 @@ fn revoked(why: TokenRevocation) -> (EventKind, Option<String>) {
 /// lease's reading is the unit tests' of `domain::telemetry`).
 fn swept(log: &SqliteQueue, db: &Path) -> Vec<RunId> {
     sweep(
-        &SystemServiceAccess,
+        &service::InProcessTelemetry,
         log,
         db,
         &LeaseToken::new("sweeper"),
@@ -407,7 +407,7 @@ fn a_resumes_revocation_that_fails_is_made_by_the_next_sweep() {
     let claimed = service::read_token(&file).unwrap();
     let sweep_of_a = |retries: &mut Retries| {
         sweep(
-            &SystemServiceAccess,
+            &service::InProcessTelemetry,
             &log,
             db,
             &lease,

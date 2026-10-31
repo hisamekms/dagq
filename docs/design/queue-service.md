@@ -33,10 +33,10 @@ related:
 hostで動き、queue DBを開いてユースケース単位のAPIを、service側で認可して提供するプロセス。
 決定の理由は[ADR-t1233-1](../adr/2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md)（制御側と実行側・APIと認可・段）、[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)（起動・停止・tokenの認証）、[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md)（読み取りの範囲）。
 
-今の段（段(2)・(3)）: serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
+今の段（段(5)の途中）: serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
 **worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。
 session wrapperとhookはwrapperのprincipalでserviceを通り（plannerとinboxのhookは例外、[クライアントモード](#クライアントモード)）、人・inbox・plannerのCLIは[hostのCLI](queue-service-host-cli.md)。
-supervisorとそれが起動する`observe`・`throughput-review`はqueueの操作と記録をserviceで行い、queue DBを開かない（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
+supervisorとそれが起動する`observe`・`throughput-review`もserviceを通る（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
 例外はexecutorのsessionのstepだけで、制御側が対象ごとに発行するtelemetry専用のprincipalで[`telemetry_report`](#telemetry_report)を通る（[ADR-t1662-3](../adr/2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md)決定13）。
 
 名前: この文書の「broker」はqueueのbroker（[Queue broker](queue-broker.md)）のこと。
@@ -217,7 +217,7 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
   envの意味は`domain::queue_service`の定数のdoc comment
 - 両方があれば設定の誤りとして全てのコマンドを断る
 - 宛ての環境が無いhostの`user`・`inbox`・`planner`の`dagq`が送るものは[hostのCLI](queue-service-host-cli.md#送る範囲)で、届かなければDBを開くことに戻らない。
-  DBを自分で開くのは送らない残りのコマンドだけで、`check_access`の後に開く（分岐の順は[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）
+  ほかのroleの`dagq`は宛てが無ければ断る（分岐の順は[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）
 - コマンドを引数のとおりに読んで（clapの検査はそのまま）、ユースケースとparamsに写す（`client_request`）。
 - tokenはcredentialのfileから読み、要求ごとに送る。
   答えの`result`をCLIと同じに出す
@@ -293,12 +293,16 @@ queueのevent（`EventKind::is_queue`）で、種類と欄の意味は`domain::q
 `service start`・`service stop`・`service serve`は`up`・`down`と同じ`service.lifecycle`（`Operation::QueueService`）、`service status`は`queue.read`。
 workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマンドが入る（`DAGQ_COMMANDS`）。
 
+## DBを開く経路
+
+DBを開くのはserviceのプロセス・`init`・移行途中の例外（ADR-t3102-2決定8: 既存DBの`init`・`migrate`・`doctor`）だけで、呼び出しは`context_boundaries::queue_opens`が理由と持つ。
+
 ## まだ無いもの
 
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
 - containerの中からbrokerを通す`telemetry_report`（[Queue broker](queue-broker.md)の`TokenRefusal`）。
   containerのrunのstepはhostのwrapperが送る
-- 段(5)の残り: hostのCLIが送らないもの（[送る範囲](queue-service-host-cli.md#送る範囲)。決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
+- 段(5)の残り: [DBを開く経路](#dbを開く経路)の例外のユースケース化
 
 ## CIの見張り（ADR-t1920-1）
 

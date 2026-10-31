@@ -37,7 +37,16 @@ disallowed_methods = "allow"
 disallowed_types = "allow"
 disallowed_macros = "allow"
 
+# The library's entry points that open a queue's DB in the calling
+# process, for tests that use the library on a queue of their own: only the
+# queue service's process and `init` open one (ADR-t3102-2 decision 1), so
+# the binary is built without them, and the tests turn them on through the
+# dev-dependency on this package below.
+[features]
+test-paths = []
+
 [dev-dependencies]
+dagq = { path = ".", features = ["test-paths"] }
 # Reads the sources as syntax for the boundary tests (src/context_boundaries.rs).
 proc-macro2 = { version = "1.0", default-features = false }
 syn = { version = "2.0", default-features = false, features = ["full", "parsing", "visit"] }

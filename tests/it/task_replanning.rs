@@ -329,12 +329,12 @@ fn each_role_requests_proposes_or_moves_only_what_it_may() {
     let (on_other, refused) = as_role(
         &db,
         "worker",
-        Some((&other, a)),
+        Some((&run, a)),
         &[
             "replan",
             "propose",
             "--run",
-            run.as_str(),
+            other.as_str(),
             "--reason",
             "not mine",
         ],
@@ -343,9 +343,10 @@ fn each_role_requests_proposes_or_moves_only_what_it_may() {
     assert_eq!(refused["denied"]["capability"], "replan.propose");
     let (requested, _) = as_role(&db, "worker", Some((&run, a)), &args(&request(&run, "x")));
     assert!(!requested);
-    // The planner, the observer, the jobs and the supervisor request
-    // nothing and propose nothing.
-    for role in ["planner", "observer", "supervisor"] {
+    // The planner and the observer request nothing and propose nothing
+    // (a supervisor's `dagq` reaches the queue only as a registered
+    // supervisor's job command).
+    for role in ["planner", "observer"] {
         let (requested, refusal) = as_role(&db, role, None, &args(&request(&run, "x")));
         assert!(!requested, "{role}");
         assert_eq!(refusal["denied"]["capability"], "replan.request", "{role}");
@@ -357,8 +358,8 @@ fn each_role_requests_proposes_or_moves_only_what_it_may() {
         );
         assert!(!proposed, "{role}");
     }
-    assert_eq!(denials(&db, "replan.propose"), 4);
-    assert_eq!(denials(&db, "replan.request"), 4);
+    assert_eq!(denials(&db, "replan.propose"), 3);
+    assert_eq!(denials(&db, "replan.request"), 3);
     assert!(queue.replan_operations(true).unwrap().is_empty());
 
     // The worker's own proposal opens the run's operation.

@@ -67,17 +67,37 @@ fn strs(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
 }
 
-const WORKER: [(&str, &str); 4] = [
-    ("DAGQ_ROLE", "worker"),
-    ("DAGQ_ACTOR_ID", "worker:r1"),
-    ("DAGQ_RUN_ID", "r1"),
-    ("DAGQ_TASK_ID", "1"),
-];
+/// A worker on a run of task 1, claimed for it: its `dagq` reaches the
+/// queue's service with the run's token.
+struct Worker {
+    run: String,
+    actor: String,
+}
+
+impl Worker {
+    fn of(db: &Path) -> Self {
+        let run = common::queue::worker_run(db, 1).to_string();
+        Self {
+            actor: format!("worker:{run}"),
+            run,
+        }
+    }
+
+    fn env(&self) -> [(&str, &str); 4] {
+        [
+            ("DAGQ_ROLE", "worker"),
+            ("DAGQ_ACTOR_ID", &self.actor),
+            ("DAGQ_RUN_ID", &self.run),
+            ("DAGQ_TASK_ID", "1"),
+        ]
+    }
+}
 
 #[test]
 fn a_worker_asks_on_its_own_run_and_task_only() {
     let (_dir, db) = queue();
     ok(&db, &["add", "first"]);
+    let worker = Worker::of(&db);
     ok(&db, &["add", "second"]);
     for (args, reason) in [
         (
@@ -88,10 +108,10 @@ fn a_worker_asks_on_its_own_run_and_task_only() {
             ask("worker_question", &["--task", "2"]),
             "not on this resource",
         ),
-        (ask("decide", &["--run", "r1"]), "not of this kind"),
+        (ask("decide", &["--run", &worker.run]), "not of this kind"),
         (ask("approve_landing", &["--task", "1"]), "not of this kind"),
     ] {
-        let error = denied_as(&WORKER, &db, &strs(&args));
+        let error = denied_as(&worker.env(), &db, &strs(&args));
         assert_eq!(
             error["error"],
             format!("worker may not ask.open ({reason})"),
@@ -111,10 +131,10 @@ fn a_worker_asks_on_its_own_run_and_task_only() {
         denied[0]["payload"]["resource"],
         json!({"kind": "new_ask", "ask_kind": "worker_question", "run": "r2", "task": null})
     );
-    assert_eq!(denied[0]["actor"]["id"], "worker:r1");
+    assert_eq!(denied[0]["actor"]["id"], worker.actor);
     // Its own task it asks about.
     let asked = allowed_as(
-        &WORKER,
+        &worker.env(),
         &db,
         &strs(&ask("worker_question", &["--task", "1"])),
     );
@@ -125,11 +145,12 @@ fn a_worker_asks_on_its_own_run_and_task_only() {
 fn workers_jobs_the_observer_and_the_planner_neither_answer_nor_close() {
     let (_dir, db) = queue();
     ok(&db, &["add", "first"]);
+    let worker = Worker::of(&db);
     let open = ok(&db, &strs(&ask("decide", &["--task", "1"])))["id"].to_string();
     let answered = ok(&db, &strs(&ask("approve_landing", &["--task", "1"])))["id"].to_string();
     ok(&db, &["answer", &answered, "--text", "retry"]);
     let mut actors: Vec<Vec<(&str, &str)>> = vec![
-        WORKER.to_vec(),
+        worker.env().to_vec(),
         // A planner of the runtime's, with its token.
         vec![("DAGQ_ROLE", "planner")],
     ];
@@ -306,9 +327,10 @@ fn the_observer_still_records_findings_and_raises_blocked_asks() {
 fn a_worker_question_records_its_topics_primary_first() {
     let (_dir, db) = queue();
     ok(&db, &["add", "first"]);
+    let worker = Worker::of(&db);
     let mut args = ask("decide", &["--task", "1"]);
     args[2] = "worker_question".to_owned();
-    let missing = denied_as(&WORKER, &db, &strs(&args));
+    let missing = denied_as(&worker.env(), &db, &strs(&args));
     assert!(
         missing["error"]
             .as_str()
@@ -336,7 +358,7 @@ fn a_worker_question_records_its_topics_primary_first() {
         ]
         .map(str::to_owned),
     );
-    let asked = allowed_as(&WORKER, &db, &strs(&args));
+    let asked = allowed_as(&worker.env(), &db, &strs(&args));
     assert_eq!(asked["topics"], json!(["adr_conflict", "new_code"]));
     let decided = ok(&db, &strs(&ask("decide", &["--task", "1"])));
     assert!(decided.get("topics").is_none(), "{decided}");
@@ -377,6 +399,7 @@ fn a_worker_question_records_its_topics_primary_first() {
 fn a_recommendation_reaches_the_ask_status_and_stats() {
     let (_dir, db) = queue();
     ok(&db, &["add", "first"]);
+    let worker = Worker::of(&db);
     let with = |kind: &str, target: &[&str], extra: &[&str]| {
         let mut args = ask(kind, target);
         args.extend(extra.iter().map(|arg| (*arg).to_owned()));
@@ -416,7 +439,7 @@ fn a_recommendation_reaches_the_ask_status_and_stats() {
     assert_eq!(recommended["confidence"], "low");
     // A worker_question needs neither; one alone is kept.
     let question = allowed_as(
-        &WORKER,
+        &worker.env(),
         &db,
         &strs(&with("worker_question", &["--task", "1"], &[])),
     );

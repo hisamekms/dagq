@@ -9,4 +9,6 @@ pub use crate::application::lifecycle::{
     REVIEWER_ROLE, ROLE_ENV, UP_RESTART_ENV, UpEnvironment, UpOptions, WORKER_ROLE, hand_off,
     handoff_failures, launch_agent_spec, untrusted_repository_hint,
 };
-pub use crate::compose::{COMMAND_TARGET, down, inbox, inbox_command, planners, up};
+#[cfg(feature = "test-paths")]
+pub use crate::compose::planners;
+pub use crate::compose::{COMMAND_TARGET, down, inbox, inbox_command, up};

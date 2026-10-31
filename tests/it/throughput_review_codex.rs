@@ -388,6 +388,9 @@ fn a_handed_over_codex_review_that_found_codex_unusable_holds_codex() {
     roles(&repo, "[roles.throughput_review]\nprovider = \"codex\"\n");
     let codex = stub_codex(&db, "ok");
     let token = LeaseToken::new("throughput-handoff");
+    // The review's command reaches the queue through its service as the
+    // supervisor.
+    crate::common::service::serve(&db);
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue
         .transition(TaskId::new(1), TaskAction::Cancel)

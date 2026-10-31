@@ -306,24 +306,31 @@ fn only_the_inbox_and_a_person_hand_a_request_and_other_roles_are_recorded() {
         vec![("DAGQ_ROLE", "plan-review-job")],
         vec![("DAGQ_ROLE", "supervisor")],
     ];
+    // Each reaches the service with its token, which refuses it and
+    // records the refusal as its principal (not a supervisor's of no
+    // registration); a worker's of no run in the queue is refused its
+    // token.
     for env in &actors {
         let error = refusal(env, &db, &args(&request(id, "more")));
+        if env.contains(&("DAGQ_ROLE", "worker")) {
+            assert_eq!(error["queue_service"]["code"], "unauthenticated", "{error}");
+            continue;
+        }
         assert_eq!(error["denied"]["capability"], "planner.request", "{env:?}");
         assert_eq!(error["denied"]["reason"], "not granted");
     }
-    // The planner's request reaches the service with its token, which
-    // records the refusal as the planner's; the others' refusals are sent
-    // to it with no token, and recorded as unauthenticated.
     let denied = events(&db, "authorization_denied");
-    assert_eq!(denied.len(), 1);
-    assert_eq!(denied[0]["actor"]["role"], "planner");
-    assert_eq!(denied[0]["payload"]["capability"], "planner.request");
-    let unauthenticated = events(&db, "queue_service_unauthenticated");
-    assert_eq!(unauthenticated.len(), actors.len() - 1);
-    assert!(
-        unauthenticated
+    assert_eq!(
+        denied
             .iter()
-            .all(|event| event["payload"]["use_case"] == "denial_record")
+            .map(|event| event["actor"]["role"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["planner", "observer", "recovery-job", "plan-review-job"]
+    );
+    assert!(
+        denied
+            .iter()
+            .all(|event| event["payload"]["capability"] == "planner.request")
     );
     assert!(events(&db, "planner_request_handed").is_empty());
     assert!(

@@ -1,0 +1,9 @@
+# The registry's boundaries task 3110 added to tests/it
+# (the format is in the header of scripts/check-it-added-tests.sh).
+
+[[boundary]]
+id = "dagq-without-service-opens-no-queue"
+kind = "プロセス"
+test = "queue_opens::a_dagq_of_no_service_s_principal_is_refused_and_opens_no_queue"
+reason = "service に届かない dagq のプロセスが queue の DB のファイルを開かずに断ること（SQLite でない中身のファイルを --db に渡しても、開けば出るファイルの error でなく断りが出て、ファイルが変わらないこと）は、実の dagq のプロセスでしか確かめられない。断りに至る道（check_access だけを通る宛ての無い worker の読み取りと、runtime の操作の認可も通る supervisor の登録の無い job のコマンド）ごとに 1 回打つ。どの role とコマンドを断るかの判断は main の unserved の unit test（tests::a_dagq_with_no_service_refuses_what_no_route_takes）"
+task = 3110

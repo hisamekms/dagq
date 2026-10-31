@@ -259,9 +259,9 @@ fn ready_inherit_is_refused_with_its_reason_and_changes_nothing() {
     assert!(error.contains("holds no commit of its own"), "{error}");
     assert!(error.contains("plain `dagq ready`"), "{error}");
     assert_eq!(unchanged(&mut queue), before);
-    // Another actor: the worker refused before the store is read, and a
-    // planner the queue does not hold by the queue service before any use
-    // case (a held planner's refusal is
+    // Another actor: the worker of a run that ended refused its token by
+    // the queue service, and a planner the queue does not hold by the
+    // queue service before any use case (a held planner's refusal is
     // `a_client_mode_ready_inherit_carries_the_run_over_through_the_service`'s).
     let error = refusal(&ready_inherit(
         &[
@@ -271,8 +271,10 @@ fn ready_inherit_is_refused_with_its_reason_and_changes_nothing() {
         ],
         &db,
     ));
-    assert!(error.contains("not granted"), "{error}");
-    assert!(error.contains("task.ready_bypass_review"), "{error}");
+    assert!(
+        error.contains("the token's run has ended or is not in the queue"),
+        "{error}"
+    );
     unchanged(&mut queue);
     let error = refusal(&ready_inherit(
         &[("DAGQ_ROLE", "planner"), ("DAGQ_ACTOR_ID", "planner:1")],

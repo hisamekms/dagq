@@ -16,19 +16,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use serde_json::Value;
 
 use super::podman_machine::PodmanCli;
 use super::run_env::load_project_image;
-use super::sqlite::SqliteQueue;
-use crate::application::EventStore;
-use crate::application::container_image::{ImageBuilder, ImageRecords, ImageSpecs};
+use crate::application::container_image::{ImageBuilder, ImageSpecs};
 use crate::domain::container_image::{
-    BaseInputs, CLAUDE_CODE_VERSION, CONTAINER_IMAGE_KINDS, ContextFile, ImageBuild, Images,
-    client_source, context_paths,
+    BaseInputs, CLAUDE_CODE_VERSION, ContextFile, ImageBuild, Images, client_source, context_paths,
 };
 use crate::domain::podman_machine::QueueKey;
-use crate::domain::{ActorContext, EventKind, RecordedKind};
 
 /// The runtime's base Containerfile: Claude Code, the Linux dagq client
 /// and a non-root user, nothing of a language.
@@ -212,33 +207,53 @@ impl ImageBuilder for PodmanImages {
     }
 }
 
-/// The queue at `db`'s records of the image, written as `actor`.
-#[derive(Debug, Clone)]
-pub struct QueueImageRecords {
-    pub db: PathBuf,
-    pub actor: Option<ActorContext>,
-}
+#[cfg(feature = "test-paths")]
+pub use on_queue::QueueImageRecords;
 
-impl QueueImageRecords {
-    fn open(&self) -> Result<SqliteQueue> {
-        let queue = SqliteQueue::open(&self.db)?;
-        Ok(match &self.actor {
-            Some(actor) => queue.with_actor(actor.clone()),
-            None => queue,
-        })
+/// The image's records on the queue's DB in this process: a test's, which
+/// a library call runs. A process of the binary sends them to the queue
+/// service (ADR-t3102-2 decision 1).
+#[cfg(feature = "test-paths")]
+mod on_queue {
+    use std::path::PathBuf;
+
+    use anyhow::Result;
+    use serde_json::Value;
+
+    use crate::application::EventStore;
+    use crate::application::container_image::ImageRecords;
+    use crate::domain::container_image::CONTAINER_IMAGE_KINDS;
+    use crate::domain::{ActorContext, EventKind, RecordedKind};
+    use crate::infrastructure::sqlite::SqliteQueue;
+
+    /// The queue at `db`'s records of the image, written as `actor`.
+    #[derive(Debug, Clone)]
+    pub struct QueueImageRecords {
+        pub db: PathBuf,
+        pub actor: Option<ActorContext>,
     }
-}
 
-impl ImageRecords for QueueImageRecords {
-    fn record(&self, kind: EventKind, payload: Value) -> Result<()> {
-        EventStore::record_queue_event(&self.open()?, kind, payload).map(drop)
+    impl QueueImageRecords {
+        fn open(&self) -> Result<SqliteQueue> {
+            let queue = SqliteQueue::open(&self.db)?;
+            Ok(match &self.actor {
+                Some(actor) => queue.with_actor(actor.clone()),
+                None => queue,
+            })
+        }
     }
 
-    fn latest(&self) -> Result<Option<(RecordedKind, Value)>> {
-        Ok(
-            EventStore::latest_queue_event(&self.open()?, &CONTAINER_IMAGE_KINDS)?
-                .map(|event| (event.kind, event.payload)),
-        )
+    impl ImageRecords for QueueImageRecords {
+        fn record(&self, kind: EventKind, payload: Value) -> Result<()> {
+            EventStore::record_queue_event(&self.open()?, kind, payload).map(drop)
+        }
+
+        fn latest(&self) -> Result<Option<(RecordedKind, Value)>> {
+            Ok(
+                EventStore::latest_queue_event(&self.open()?, &CONTAINER_IMAGE_KINDS)?
+                    .map(|event| (event.kind, event.payload)),
+            )
+        }
     }
 }
 

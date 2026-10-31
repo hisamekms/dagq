@@ -54,7 +54,7 @@ use crate::{
             planners_dir, replans_dir, review_programs_dir, runs_dir, satisfied_dir,
         },
         process::LocalSpawner,
-        queue_service::{InProcessCaller, SocketCaller},
+        queue_service::SocketCaller,
         run_env::{
             ShellVerifier, load_conflict_config, load_disk_config, load_fresh_session,
             load_provider_fallback, load_resume_config, load_review_jobs, load_stall_config,
@@ -80,21 +80,41 @@ pub enum ServiceRoute {
     /// DB for them, and one that does not answer is waited for.
     Socket,
     /// The service's use cases run in this process, each request and
-    /// answer as on the socket: a supervisor that keeps no service.
+    /// answer as on the socket: a test's supervisor that keeps no service.
+    /// The binary does not build it (it opens the DB outside the service).
+    #[cfg(feature = "test-paths")]
     InProcess,
     /// [`Self::InProcess`] through the caller `0` makes of it: a test's
     /// service that loses an answer it gave.
+    #[cfg(feature = "test-paths")]
     InProcessThrough(CallerLayer),
+}
+
+impl ServiceRoute {
+    /// The route of [`SuperviseOptions::new`]: in this process for the
+    /// tests, which keep no service, and the socket for the binary.
+    #[cfg(feature = "test-paths")]
+    fn by_default() -> Self {
+        Self::InProcess
+    }
+
+    #[cfg(not(feature = "test-paths"))]
+    fn by_default() -> Self {
+        Self::Socket
+    }
 }
 
 /// What [`ServiceRoute::InProcessThrough`] puts in front of the service's
 /// caller.
+#[cfg(feature = "test-paths")]
 #[derive(Clone)]
 pub struct CallerLayer(pub Arc<LayerFn>);
 
 /// The function of a [`CallerLayer`]: the caller in front of the given one.
+#[cfg(feature = "test-paths")]
 pub type LayerFn = dyn Fn(Arc<dyn ServiceCaller>) -> Arc<dyn ServiceCaller> + Send + Sync;
 
+#[cfg(feature = "test-paths")]
 impl std::fmt::Debug for CallerLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("CallerLayer")
@@ -501,7 +521,7 @@ impl SuperviseOptions {
             host_metrics: None,
             profiles: &crate::domain::toolchain::BUILTIN,
             queue_service: None,
-            service_route: ServiceRoute::InProcess,
+            service_route: ServiceRoute::by_default(),
             queue_broker: None,
             broker_relay: None,
             run_containers: None,
@@ -769,15 +789,15 @@ pub fn supervise_with_reviewer(
         // The observe command's environment drops the supervisor's actor
         // variables, and the supervisor sets its own when it starts it
         // (`supervisor:<pid>`); its agent is the observer. It drops a
-        // client-mode `dagq`'s variables too: the command opens the queue it
-        // names (a supervisor started from a worker's tests inherits them).
+        // client-mode `dagq`'s variables too: the command reaches the queue
+        // it names through its service as this supervisor, not in client
+        // mode (a supervisor started from a worker's tests inherits them).
         observer_env_remove: crate::domain::actor::ACTOR_ENV
             .into_iter()
             .chain(crate::domain::queue_service::CLIENT_ENV)
             .chain([crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV])
             .map(str::to_owned)
             .collect(),
-        jobs_through_service: matches!(options.service_route, ServiceRoute::Socket),
         planners_dir: planners_dir(&db),
         plugin_dir: options
             .plugin_dir
@@ -839,8 +859,9 @@ pub fn supervise_with_reviewer(
     // Every operation of the supervisor's queue through the queue service
     // (ADR-t3102-3 decisions 3 to 5), the host's load samples, the measure
     // of the runs' resources and the ledger's builder included.
+    #[cfg(feature = "test-paths")]
     let in_process = || -> Arc<dyn ServiceCaller> {
-        Arc::new(InProcessCaller::new(
+        Arc::new(crate::infrastructure::queue_service::InProcessCaller::new(
             &db,
             generators.clone(),
             super::service_reads(),
@@ -851,7 +872,9 @@ pub fn supervise_with_reviewer(
     };
     let service: Arc<dyn ServiceCaller> = match &options.service_route {
         ServiceRoute::Socket => Arc::new(SocketCaller::new(&db)),
+        #[cfg(feature = "test-paths")]
         ServiceRoute::InProcess => in_process(),
+        #[cfg(feature = "test-paths")]
         ServiceRoute::InProcessThrough(layer) => (layer.0)(in_process()),
     };
     // Bounded by the end's deadline of a supervisor whose heartbeat
@@ -1027,7 +1050,7 @@ pub fn supervise_with_reviewer(
                 Arc::new(crate::compose::verification_containers(
                     &db,
                     Some(main_checkout.clone()),
-                    Some(&container_records),
+                    &container_records,
                 ))
                     as Arc<dyn crate::application::run_container::VerificationContainers>
             },

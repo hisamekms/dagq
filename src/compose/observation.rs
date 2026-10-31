@@ -14,10 +14,10 @@
 //! ledger's readers to take.
 
 use super::{
-    OneShot, bound_checkout, bound_main_checkout, goal_tags, open_queue_watch, provider_checks,
-    queue_broker_view, queue_service_view, task_changes, task_title_prefixes, worker_adapters,
+    OneShot, bound_checkout, bound_main_checkout, goal_tags, provider_checks, queue_broker_view,
+    queue_service_view, task_changes, task_title_prefixes, worker_adapters,
 };
-use crate::domain::{EventFilter, EventId, EventKind};
+use crate::domain::EventKind;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -176,6 +176,7 @@ fn inbox_guardrail(queue: &SqliteQueue) -> Result<Value> {
 }
 
 /// `status`: see [`status_for`], with all of the attention.
+#[cfg(feature = "test-paths")]
 pub fn status(db: &Path) -> Result<Value> {
     status_for(db, None)
 }
@@ -190,6 +191,7 @@ fn host_update(db: &Path) -> crate::infrastructure::release_update::HostUpdate {
 }
 
 /// `status --role` on the system clock: see [`OneShot::status_for`].
+#[cfg(feature = "test-paths")]
 pub fn status_for(db: &Path, role: Option<SessionRole>) -> Result<Value> {
     OneShot::system().status_for(db, role)
 }
@@ -689,6 +691,7 @@ fn bound_ci_watch(queue: &SqliteQueue) -> Result<Option<crate::domain::ci_watch:
 
 /// `ci failures [--task ID]` on the queue at `db`: see
 /// [`crate::application::ci_watch::known_failures`]. Reads only.
+#[cfg(feature = "test-paths")]
 pub fn ci_failures(db: &Path, task: Option<TaskId>) -> Result<Value> {
     ci_failures_of(&SqliteQueue::open_read_only(db)?, task)
 }
@@ -750,6 +753,7 @@ fn recurring_view_of(queue: &SqliteQueue, checkout: Option<&Path>) -> Result<Opt
 }
 
 /// `stats` on the system clock: see [`OneShot::stats`].
+#[cfg(feature = "test-paths")]
 pub fn stats(db: &Path, query: &StatsQuery) -> Result<Value> {
     OneShot::system().stats(db, query)
 }
@@ -1043,6 +1047,32 @@ pub fn observe(
     if let Some(queues) = job_queues(&db)? {
         return observe_through(&db, queues, provider, signals, options);
     }
+    observe_on_db(&db, provider, signals, options)
+}
+
+/// [`observe`] on the queue at `db` (canonical) opened in this process: a
+/// test's, which a library call runs. A process of the binary opens no
+/// queue, and one not started by a supervisor is refused.
+#[cfg(not(feature = "test-paths"))]
+fn observe_on_db(
+    _: &Path,
+    _: &dyn AgentProvider,
+    _: Option<&dyn crate::application::AgentSignals>,
+    _: &crate::application::observer::ObserveOptions,
+) -> Result<Value> {
+    anyhow::bail!(NO_SUPERVISOR)
+}
+
+/// [`observe`] on the queue at `db` (canonical) opened in this process: a
+/// test's, which a library call runs.
+#[cfg(feature = "test-paths")]
+fn observe_on_db(
+    db: &Path,
+    provider: &dyn AgentProvider,
+    signals: Option<&dyn crate::application::AgentSignals>,
+    options: &crate::application::observer::ObserveOptions,
+) -> Result<Value> {
+    let db = db.to_path_buf();
     let mut queue = SqliteQueue::open(&db)?;
     // The agent's events go to this command's own queue, as its records do.
     let events = SqliteQueue::open(&db)?;
@@ -1189,10 +1219,17 @@ fn review_signals() -> crate::infrastructure::adapters::ClaudeCode {
     }
 }
 
+/// Why a job command no supervisor started is refused: it reaches the
+/// queue only as the supervisor's (ADR-t3102-2 decision 1).
+#[cfg(not(feature = "test-paths"))]
+const NO_SUPERVISOR: &str = "a job command reaches the queue only through its supervisor's queue \
+     service, and opens no queue: run it as a supervisor starts it, or through `dagq` on the host";
+
 /// The queue of the supervisor that started this job command as its own
 /// ([`crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV`]), through
-/// the service with that supervisor's token; `None` for a command typed by
-/// hand or started by a supervisor whose service runs in its own process.
+/// the service with that supervisor's token; `None` for a command no
+/// supervisor started, which only a test's library call runs on its own
+/// queue (the binary refuses it).
 fn job_queues(db: &Path) -> Result<Option<SupervisorQueues>> {
     let Some(registration) =
         std::env::var(crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV)
@@ -1233,10 +1270,12 @@ fn job_tokens(queues: SupervisorQueues) -> ServiceTokens {
 }
 
 /// The observer's reads that [`OneShot`] gives on the opened queue.
+#[cfg(feature = "test-paths")]
 struct ObserverReads {
     one_shot: OneShot,
 }
 
+#[cfg(feature = "test-paths")]
 impl crate::application::observer::ObserverSources<SqliteQueue> for ObserverReads {
     fn stats(&self, queue: &SqliteQueue, db: &Path, query: &StatsQuery) -> Result<Value> {
         self.one_shot.stats_of(queue, db, query)
@@ -1267,6 +1306,30 @@ pub fn throughput_review(
     if let Some(queues) = job_queues(&db)? {
         return throughput_review_through(&db, queues, provider, options);
     }
+    throughput_review_on_db(&db, provider, options)
+}
+
+/// [`throughput_review`] on the queue at `db` (canonical) opened in this
+/// process: a test's, which a library call runs. A process of the binary
+/// opens no queue, and one not started by a supervisor is refused.
+#[cfg(not(feature = "test-paths"))]
+fn throughput_review_on_db(
+    _: &Path,
+    _: &dyn AgentProvider,
+    _: &crate::application::throughput_review::ReviewOptions,
+) -> Result<Value> {
+    anyhow::bail!(NO_SUPERVISOR)
+}
+
+/// [`throughput_review`] on the queue at `db` (canonical) opened in this
+/// process: a test's, which a library call runs.
+#[cfg(feature = "test-paths")]
+fn throughput_review_on_db(
+    db: &Path,
+    provider: &dyn AgentProvider,
+    options: &crate::application::throughput_review::ReviewOptions,
+) -> Result<Value> {
+    let db = db.to_path_buf();
     let signals = review_signals();
     let mut queue = SqliteQueue::open(&db)?;
     // The agent's events go to this command's own queue, as its records do.
@@ -1306,6 +1369,7 @@ pub fn throughput_review(
 /// What the throughput review starts with when no supervisor routed it:
 /// the launch of `[roles.throughput_review]` of the queue's bound
 /// checkout's `dagq.toml` (the provider's default without one).
+#[cfg(feature = "test-paths")]
 pub fn throughput_review_launch(db: &Path) -> Result<crate::domain::actor_model::ActorLaunch> {
     let queue = SqliteQueue::open(
         &db.canonicalize()
@@ -1319,6 +1383,7 @@ pub fn throughput_review_launch(db: &Path) -> Result<crate::domain::actor_model:
 
 /// What the observer starts with when no supervisor routed it (a command
 /// typed by hand): `[roles.observer]` of the bound checkout's `dagq.toml`.
+#[cfg(feature = "test-paths")]
 pub fn observer_launch(db: &Path) -> Result<crate::domain::actor_model::ActorLaunch> {
     let queue = SqliteQueue::open(
         &db.canonicalize()
@@ -1332,10 +1397,12 @@ pub fn observer_launch(db: &Path) -> Result<crate::domain::actor_model::ActorLau
 
 /// The throughput review's reads that [`OneShot`] gives on the opened
 /// queue.
+#[cfg(feature = "test-paths")]
 struct ThroughputReviewReads {
     one_shot: OneShot,
 }
 
+#[cfg(feature = "test-paths")]
 impl crate::application::throughput_review::ThroughputReviewSources<SqliteQueue>
     for ThroughputReviewReads
 {
@@ -1364,7 +1431,8 @@ impl crate::application::throughput_review::ThroughputReviewSources<SqliteQueue>
 
 /// `events --after`: the events after `after`, oldest first, in compact
 /// form with no filter.
-pub fn events(db: &Path, after: EventId, limit: usize, all: bool) -> Result<Value> {
+#[cfg(feature = "test-paths")]
+pub fn events(db: &Path, after: crate::domain::EventId, limit: usize, all: bool) -> Result<Value> {
     events_matching(
         db,
         &crate::application::watch::EventsQuery {
@@ -1372,17 +1440,19 @@ pub fn events(db: &Path, after: EventId, limit: usize, all: bool) -> Result<Valu
             limit,
             all,
             full: false,
-            filter: EventFilter::default(),
+            filter: crate::domain::EventFilter::default(),
         },
     )
 }
 
 /// `events` with its filters and `--full` on the queue at `db`.
+#[cfg(feature = "test-paths")]
 pub fn events_matching(db: &Path, query: &crate::application::watch::EventsQuery) -> Result<Value> {
     crate::application::watch::events_in(&SqliteQueue::open_read_only(db)?, query)
 }
 
 /// `timeline RUN` on the queue at `db`.
+#[cfg(feature = "test-paths")]
 pub fn timeline(db: &Path, run: &RunId, gap_secs: i64, full: bool) -> Result<Value> {
     timeline_in(&SqliteQueue::open_read_only(db)?, run, gap_secs, full)
 }
@@ -1403,12 +1473,14 @@ pub fn timeline_in(queue: &SqliteQueue, run: &RunId, gap_secs: i64, full: bool) 
 /// `watch --role inbox` keeps its record in a file under the queue's
 /// directory, never in the queue (ADR-t906-1). It notifies nobody: only
 /// the command line's watch in the inbox's session pushes.
+#[cfg(feature = "test-paths")]
 pub fn watch(db: &Path, options: &crate::application::watch::WatchOptions) -> Result<Value> {
-    watch_in(db, &open_queue_watch(db)?, options, false)
+    watch_in(db, &SqliteQueue::open_watch(db)?, options, false)
 }
 
-/// `watch` using the live read-only queue already opened by the CLI.
-/// Callers must use [`open_queue_watch`], never a migrated snapshot. With
+/// `watch` on the live read-only queue its caller opened (the queue
+/// service's look, or a test's), never a migrated snapshot
+/// ([`SqliteQueue::open_watch`]). With
 /// `push`, the watch is given the host's `[push]` as it reads now, the
 /// queue's `host.toml` over the host-wide one, and the push command;
 /// [`crate::application::watch::push_notifier`] decides whether it tells
@@ -1421,7 +1493,7 @@ pub fn watch_in(
 ) -> Result<Value> {
     ensure!(
         queue.is_read_only()?,
-        "watch requires a live read-only queue connection; use open_queue_watch"
+        "watch requires a live read-only queue connection; use SqliteQueue::open_watch"
     );
     let clock = queue.generators().clock.clone();
     watch_from(
@@ -1621,6 +1693,7 @@ fn open_requests(queue: &SqliteQueue) -> Result<Value> {
 impl OneShot {
     /// `status --role`: see [`health::status`], measured to these
     /// generators' now.
+    #[cfg(feature = "test-paths")]
     pub fn status_for(&self, db: &Path, role: Option<SessionRole>) -> Result<Value> {
         self.status_of(db, &self.open_read_only(db)?, role)
     }
@@ -1877,6 +1950,7 @@ impl OneShot {
     /// checkout of the repository the queue is bound to, main's history
     /// from that checkout, and the workspaces from
     /// `workspaces` (`None`: `workspace_mismatch` is not judged).
+    #[cfg(feature = "test-paths")]
     pub fn stats(&self, db: &Path, query: &StatsQuery) -> Result<Value> {
         self.stats_of(&self.open_read_only(db)?, db, query)
     }

@@ -17,8 +17,7 @@ use std::{
 
 use crate::{
     application::{
-        AgentProvider, MainRemote, ProcessControl, RecordingQueue, Repository, SessionWrappers,
-        Spawner, health,
+        AgentProvider, MainRemote, ProcessControl, Repository, Spawner,
         integrate::{self as integration, IntegrateTarget, Integration, Integrator},
         prompt,
         recording::RecordingSessions,
@@ -32,14 +31,11 @@ use crate::{
     },
     infrastructure::{
         adapters::{ClaudeCode, GitRepository, SystemProcesses, load_average, path_text},
-        clock,
         codex::Codex,
         location::{review_programs_dir, runs_dir},
         process::LocalSpawner,
         run_env::{ShellVerifier, load_disk_config, load_review_jobs},
         run_files::LocalRunFiles,
-        runtime_store::{SqliteOpener, SqlitePorts},
-        sqlite::SqliteQueue,
         transcripts::ClaudeTranscripts,
     },
 };
@@ -66,20 +62,30 @@ pub struct RunE2eOptions {
     pub lock: Option<PathBuf>,
 }
 
-/// The runtime's own constructor of the recording of the session wrappers:
-/// failures are recorded in the queue at `db`, and `token` is the
-/// supervisor whose slots are reported (`None` reports all of them).
+/// The recording of the session wrappers whose failures are recorded in
+/// the queue at `db`, opened in this process: a test's, which a library
+/// call runs (the supervisor records through the queue service). `token`
+/// is the supervisor whose slots are reported (`None` reports all of
+/// them).
 impl<'a> RecordingSessions<'a> {
-    pub fn new(inner: &'a dyn SessionWrappers, db: PathBuf, token: Option<LeaseToken>) -> Self {
+    #[cfg(feature = "test-paths")]
+    pub fn new(
+        inner: &'a dyn crate::application::SessionWrappers,
+        db: PathBuf,
+        token: Option<LeaseToken>,
+    ) -> Self {
+        use crate::infrastructure::runtime_store::{SqliteOpener, SqlitePorts};
         Self::over(
             inner,
             Arc::new(SqlitePorts {
                 opener: SqliteOpener {
                     db,
-                    generators: clock::system(),
+                    generators: crate::infrastructure::clock::system(),
                     actor: None,
                 },
-                keep: |queue| -> Box<dyn RecordingQueue + Send> { Box::new(queue) },
+                keep: |queue| -> Box<dyn crate::application::RecordingQueue + Send> {
+                    Box::new(queue)
+                },
             }),
             token,
             load_average,
@@ -88,6 +94,7 @@ impl<'a> RecordingSessions<'a> {
 }
 
 /// `integrate` on the system clock and IDs: see [`OneShot::integrate`].
+#[cfg(feature = "test-paths")]
 pub fn integrate(
     db: &Path,
     target: IntegrateTarget,
@@ -98,6 +105,7 @@ pub fn integrate(
 }
 
 /// `recover` on the system clock: see [`OneShot::recover`].
+#[cfg(feature = "test-paths")]
 pub fn recover(db: &Path, id: &RunId) -> Result<Value> {
     OneShot::system().recover(db, id)
 }
@@ -203,6 +211,7 @@ pub fn session(
 /// only way a run's wrapper starts, ADR-t1433-3): without a terminal or a
 /// workspace of its own, it registers once the supervisor recorded its
 /// start (`wrapper_launched`) with this process's pid.
+#[cfg(feature = "test-paths")]
 pub fn session_in_background(
     db: &Path,
     id: &RunId,
@@ -232,6 +241,7 @@ pub fn session_in_background(
 /// wrapper on a thread names it by a process of its own, so that every
 /// session has a handle of its own (task 1439).
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "test-paths")]
 pub fn session_in_background_as(
     db: &Path,
     id: &RunId,
@@ -261,6 +271,7 @@ pub fn session_in_background_as(
 /// A background wrapper with injected process identity and control, whose
 /// turns' guard links to `dagq` (ADR-t2086-1).
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "test-paths")]
 pub fn session_in_background_as_with_processes(
     db: &Path,
     id: &RunId,
@@ -288,7 +299,7 @@ pub fn session_in_background_as_with_processes(
         pid,
         processes,
         dagq,
-        None,
+        TurnContainers::OnQueue,
     )
 }
 
@@ -296,6 +307,7 @@ pub fn session_in_background_as_with_processes(
 /// whose run's turns in a clone run in `containers`' containers rather
 /// than the dagq machine's: a test's fake podman.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "test-paths")]
 pub fn session_in_background_with_containers(
     db: &Path,
     id: &RunId,
@@ -321,19 +333,22 @@ pub fn session_in_background_with_containers(
         pid,
         processes,
         None,
-        Some(TurnContainers::Given(containers)),
+        TurnContainers::Given(containers),
     )
 }
 
 /// The queue at `db` as the wrapper of run `id` writes it: a test's
 /// wrapper in a thread, which a library call runs on the queue itself.
-fn wrapper_queue(db: &Path, id: &RunId) -> Result<SqliteQueue> {
+#[cfg(feature = "test-paths")]
+fn wrapper_queue(db: &Path, id: &RunId) -> Result<crate::infrastructure::sqlite::SqliteQueue> {
     // The wrapper's events are its own, not the worker's (ADR-t728-1).
     Ok(
-        SqliteQueue::open(db)?.with_actor(crate::domain::actor::ActorContext::instance(
-            crate::domain::actor::ActorRole::Wrapper,
-            id,
-        )),
+        crate::infrastructure::sqlite::SqliteQueue::open(db)?.with_actor(
+            crate::domain::actor::ActorContext::instance(
+                crate::domain::actor::ActorRole::Wrapper,
+                id,
+            ),
+        ),
     )
 }
 
@@ -365,18 +380,21 @@ fn run_session(
         std::process::id(),
         &SystemProcesses,
         std::env::current_exe().ok().as_deref(),
-        Some(TurnContainers::Records(records)),
+        TurnContainers::Records(records),
     )
 }
 
 /// What a wrapper's turns in a clone run in: the dagq machine's
 /// containers whose parts' records go through `Records` (the wrapper's
 /// principal's, the process opening no queue), or a test's `Given` ones.
-/// Without either, a test's wrapper in a thread makes them on the queue
-/// at its `db` itself.
 enum TurnContainers<'a> {
     Records(std::sync::Arc<crate::compose::WrapperContainerRecords>),
+    #[cfg_attr(not(feature = "test-paths"), expect(dead_code, reason = "a test's"))]
     Given(&'a dyn crate::application::run_container::RunContainers),
+    /// A test's wrapper in a thread, which makes them on the queue at its
+    /// `db` itself.
+    #[cfg(feature = "test-paths")]
+    OnQueue,
 }
 
 /// [`run_session`] as the wrapper `pid`, on `queue`.
@@ -395,7 +413,7 @@ fn run_session_as(
     pid: u32,
     processes: &dyn ProcessControl,
     dagq: Option<&Path>,
-    containers: Option<TurnContainers<'_>>,
+    containers: TurnContainers<'_>,
 ) -> Result<Value> {
     // The wrapper only looks at the server and makes the guard of its
     // turns (ADR-t2086-1); the supervisor starts the server.
@@ -422,13 +440,14 @@ fn run_session_as(
     let bound_checkout = checkout.as_ref().ok().cloned().flatten();
     let machine_containers;
     let containers: &dyn crate::application::run_container::RunContainers = match containers {
-        Some(TurnContainers::Given(given)) => given,
-        Some(TurnContainers::Records(records)) => {
+        TurnContainers::Given(given) => given,
+        TurnContainers::Records(records) => {
             machine_containers =
                 crate::compose::run_containers_of_wrapper(db, bound_checkout, records);
             &machine_containers
         }
-        None => {
+        #[cfg(feature = "test-paths")]
+        TurnContainers::OnQueue => {
             machine_containers = crate::compose::run_containers(db, bound_checkout);
             &machine_containers
         }
@@ -477,18 +496,24 @@ fn run_session_as(
 
 /// `review`: see [`reviewing::review`]. The run's checkout is opened as a
 /// Git repository.
+#[cfg(feature = "test-paths")]
 pub fn review(db: &Path, task_id: TaskId) -> Result<Value> {
     review_in(db, task_id, None)
 }
 
 /// [`review`] over `range` when it is given: the range a review attempt
 /// fixed when it selected its required agents.
+#[cfg(feature = "test-paths")]
 pub fn review_in(
     db: &Path,
     task_id: TaskId,
     range: Option<&reviewing::ReviewRange>,
 ) -> Result<Value> {
-    review_on(&mut SqliteQueue::open(db)?, task_id, range)
+    review_on(
+        &mut crate::infrastructure::sqlite::SqliteQueue::open(db)?,
+        task_id,
+        range,
+    )
 }
 
 /// [`review_in`] on `queue`: the supervisor's, through the queue service.
@@ -531,9 +556,12 @@ impl OneShot {
     ///
     /// The use case is [`Integrator::approve`] and [`Integrator::land`], at
     /// the request of this process's actor (ADR-t728-2); this entry point
-    /// opens the queue and the repository and keeps the lease alive in
-    /// between. The slot's token
-    /// is one of these generators' IDs.
+    /// opens the queue in this process, a test's, which a library call
+    /// runs (a person's lands through the service,
+    /// [`crate::compose::ControlQueues`]), and the repository, and keeps
+    /// the lease alive in between. The slot's token is one of these
+    /// generators' IDs.
+    #[cfg(feature = "test-paths")]
     pub fn integrate(
         &self,
         db: &Path,
@@ -548,11 +576,12 @@ impl OneShot {
         // The requester is who this process acts as (ADR-t728-2 decision 2):
         // a person, or the inbox at a person's word.
         let requester = queue.actor();
-        let opener: Arc<dyn crate::application::QueueOpener> = Arc::new(SqliteOpener {
-            db: db.clone(),
-            generators: self.generators.clone(),
-            actor: None,
-        });
+        let opener: Arc<dyn crate::application::QueueOpener> =
+            Arc::new(crate::infrastructure::runtime_store::SqliteOpener {
+                db: db.clone(),
+                generators: self.generators.clone(),
+                actor: None,
+            });
         self.integrate_on(
             &mut queue,
             &requester,
@@ -561,8 +590,8 @@ impl OneShot {
             repo,
             remote,
             &|_| opener.clone(),
-            &crate::infrastructure::queue_service::SystemServiceAccess,
-            None,
+            &crate::infrastructure::queue_service::InProcessTelemetry,
+            &crate::compose::ContainerRecords::of_queue(&db, &requester),
         )
     }
 
@@ -588,12 +617,11 @@ impl OneShot {
             &crate::application::integrate::IntegrationRequest,
         ) -> Arc<dyn crate::application::QueueOpener>,
         tokens: &dyn crate::application::queue_service::TelemetryTokens,
-        records: Option<&crate::compose::ContainerRecords>,
+        records: &crate::compose::ContainerRecords,
     ) -> Result<Value> {
         let db = db.to_path_buf();
         let requester = requester.clone();
-        let container_records =
-            crate::compose::ContainerRecords::or_queue(records, &db, &requester);
+        let container_records = records.clone();
         let repository = GitRepository::inspect(repo)?;
         let main_checkout = repository.checkout()?.to_path_buf();
         let common_dir = path_text(&repository.common_dir)?;
@@ -772,10 +800,11 @@ impl OneShot {
         Ok(serde_json::to_value(outcome)?)
     }
 
-    /// `recover`: see [`health::recover`].
+    /// `recover`: see [`crate::application::health::recover`].
+    #[cfg(feature = "test-paths")]
     pub fn recover(&self, db: &Path, id: &RunId) -> Result<Value> {
         let mut queue = self.open(db)?;
-        health::recover(
+        crate::application::health::recover(
             &mut queue,
             &SystemProcesses,
             &LocalRunFiles,
@@ -849,10 +878,11 @@ pub struct SetupReviewOptions {
 /// ([`crate::application::setup_review::setup_review`]): its job starts
 /// on the provider of `[roles.setup_review]` of the main checkout's
 /// `dagq.toml`, Claude without.
+#[cfg(feature = "test-paths")]
 pub fn setup_review(db: &Path, cwd: &Path, options: &SetupReviewOptions) -> Result<Value> {
     // The job's agent's events go to the queue this command opens; one that
     // does not open leaves them to the log.
-    let events = SqliteQueue::open(db).ok();
+    let events = crate::infrastructure::sqlite::SqliteQueue::open(db).ok();
     setup_review_on(
         db,
         cwd,

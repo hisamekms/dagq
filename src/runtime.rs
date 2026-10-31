@@ -18,9 +18,14 @@ pub use crate::application::{
 pub use crate::compose::{
     CiWatchOptions, ContainerRuntimePort, EnvironmentOptions, LedgerOptions, OneShot, PausesPort,
     ProcessesPort, ReleaseIndexPort, RunContainersPort, RunE2eOptions, RunFilesPort,
-    SccacheOptions, SuperviseOptions, VerificationContainersPort, ask, ci_failures, doctor,
-    ended_run_material, integrate, rebind, recover, review, session, session_in_background,
+    SccacheOptions, SuperviseOptions, VerificationContainersPort, doctor, ended_run_material,
+    session, supervise, supervise_with_reviewer,
+};
+/// The entry points that open the queue's DB in the calling process, for
+/// tests that use the library (ADR-t3102-2 decision 1).
+#[cfg(feature = "test-paths")]
+pub use crate::compose::{
+    ask, ci_failures, integrate, rebind, recover, review, session_in_background,
     session_in_background_as, session_in_background_as_with_processes,
-    session_in_background_with_containers, stats, status, status_for, supervise,
-    supervise_with_reviewer,
+    session_in_background_with_containers, stats, status, status_for,
 };

@@ -483,6 +483,7 @@ pub fn install_restart_arguments(
 }
 
 /// `rebind` on the system clock: see [`OneShot::rebind`].
+#[cfg(feature = "test-paths")]
 pub fn rebind(db: &Path, repo: &Path) -> Result<Value> {
     OneShot::system().rebind(db, repo)
 }
@@ -617,7 +618,8 @@ pub enum LifecycleRoute {
     Socket(fn(&str) -> Option<String>),
     /// The service's use cases run in this process, each step made and
     /// read back as on the socket, as the user's: a test's command that
-    /// keeps no service.
+    /// keeps no service. The binary does not build it.
+    #[cfg(feature = "test-paths")]
     InProcess,
 }
 
@@ -726,9 +728,25 @@ pub fn migrate_queue(
     )
 }
 
+/// The landings of the queue at `db` recorded without their message, each
+/// filled from the Git common directory it names, else `fallback` (ADR-0046
+/// decision 3): the part of `migrate` after [`migrate_queue`], on the same
+/// exception of ADR-t3102-2 decision 1. Their count; none for a queue that
+/// does not open.
+pub fn fill_commit_messages(db: &Path, fallback: Option<&str>) -> Result<usize> {
+    let Ok(mut queue) = SqliteQueue::open(db) else {
+        return Ok(0);
+    };
+    queue.fill_commit_messages(|dir, commit| {
+        let dir = dir.or(fallback)?;
+        crate::infrastructure::adapters::commit_message(Path::new(dir), commit)
+    })
+}
+
 impl OneShot {
     /// `rebind`: bind the queue at `db` to the repository containing `repo`
     /// (see [`rebinding::rebind`]), then repair the run worktrees it lists.
+    #[cfg(feature = "test-paths")]
     pub fn rebind(&self, db: &Path, repo: &Path) -> Result<Value> {
         let result = (|| {
             let db = db
@@ -1209,11 +1227,14 @@ impl OneShot {
         db: &Path,
         binding: Option<&str>,
         command: ControlCommand,
-        executable: Option<&Path>,
+        #[cfg_attr(not(feature = "test-paths"), expect(unused_variables))] executable: Option<
+            &Path,
+        >,
         keep: fn(SupervisorQueue) -> Box<P>,
     ) -> Arc<dyn QueueOpener<P>> {
         match self.lifecycle_route {
             LifecycleRoute::Socket(env) => lifecycle_socket_opener(db, binding, command, env, keep),
+            #[cfg(feature = "test-paths")]
             LifecycleRoute::InProcess => {
                 let (db, generators) = (db.to_path_buf(), self.generators.clone());
                 let executable = executable.map(Path::to_path_buf);
@@ -1262,6 +1283,7 @@ impl OneShot {
                     keep: keep_host_ops,
                 })
             }
+            #[cfg(feature = "test-paths")]
             LifecycleRoute::InProcess => {
                 self.lifecycle_opener(db, binding, command, None, keep_host_ops)
             }
@@ -1797,7 +1819,7 @@ pub(super) fn prepare_release(
                 Some(db) => {
                     let kept =
                         Arc::new(crate::application::container_image::KeptImageRecords::default());
-                    let containers = super::run_containers_keeping(db, main, Some(kept.clone()));
+                    let containers = super::run_containers_keeping(db, main, kept.clone());
                     read(&RunRepositories {
                         containers: &containers,
                     });
@@ -1860,7 +1882,7 @@ pub(super) fn ready_inherit(
                 Some(db) => {
                     let kept =
                         Arc::new(crate::application::container_image::KeptImageRecords::default());
-                    let containers = super::run_containers_keeping(db, main, Some(kept.clone()));
+                    let containers = super::run_containers_keeping(db, main, kept.clone());
                     carry(
                         &crate::infrastructure::adapters::RunRepositories {
                             containers: &containers,

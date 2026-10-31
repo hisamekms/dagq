@@ -18,9 +18,10 @@ const WORKER: [(&str, &str); 4] = [
     ("DAGQ_TASK_ID", "1"),
 ];
 
-/// The error JSON `args` is refused with, as `env`.
+/// The error JSON `args` is refused with, as `env`, by the command line
+/// itself: the actor's `dagq` run outside client mode.
 fn denied_as(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Value {
-    let output = invoke_with(env, db, args);
+    let output = invoke_unserved(env, db, args);
     assert!(!output.status.success(), "{env:?} {args:?} was allowed");
     serde_json::from_slice(&output.stderr).unwrap()
 }
@@ -178,7 +179,7 @@ fn a_worker_neither_runs_nor_records_a_session() {
         ],
     ] {
         // A refused wrapper logs why before its error.
-        let output = invoke_with(&WORKER, &db, args);
+        let output = invoke_unserved(&WORKER, &db, args);
         assert!(!output.status.success(), "{args:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         let error: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();

@@ -113,14 +113,14 @@ fn a_headless_job_may_only_read_the_queue() {
 fn the_records_keep_the_writer_they_had() {
     let (_dir, db) = queue();
     ok(&db, &["add", "first"]);
+    let run = crate::common::queue::worker_run(&db, 1);
     let worker = [
         ("DAGQ_ROLE", "worker"),
-        ("DAGQ_RUN_ID", "r1"),
+        ("DAGQ_RUN_ID", run.as_str()),
         ("DAGQ_TASK_ID", "1"),
     ];
     let planner = [("DAGQ_ROLE", "planner")];
     let inbox = [("DAGQ_ROLE", "inbox")];
-    let supervisor = [("DAGQ_ROLE", "supervisor")];
     // (env, writer, its ask's kind, marks, records findings, answerer)
     type Actor<'a> = (
         &'a [(&'a str, &'a str)],
@@ -130,12 +130,13 @@ fn the_records_keep_the_writer_they_had() {
         bool,
         Option<&'a str>,
     );
-    let actors: [Actor; 5] = [
+    // (A supervisor writes through its own queue of the service, not a
+    // `dagq` of its role.)
+    let actors: [Actor; 4] = [
         (&[], "human", "decide", true, true, Some("person")),
         (&inbox, "inbox", "decide", true, true, Some("inbox")),
         (&planner, "planner", "planner_question", true, false, None),
         (&worker, "worker", "worker_question", false, false, None),
-        (&supervisor, "supervisor", "decide", false, true, None),
     ];
     for (env, writer, kind, marks, finds, answerer) in actors {
         let run = |args: &[&str]| {
@@ -216,10 +217,12 @@ fn every_event_records_its_actor() {
         );
     };
     run(&[], &["add", "first"]);
+    let claimed = crate::common::queue::worker_run(&db, 1);
+    let worker_id = format!("worker:{claimed}");
     let worker = [
         ("DAGQ_ROLE", "worker"),
-        ("DAGQ_ACTOR_ID", "worker:r1"),
-        ("DAGQ_RUN_ID", "r1"),
+        ("DAGQ_ACTOR_ID", worker_id.as_str()),
+        ("DAGQ_RUN_ID", claimed.as_str()),
         ("DAGQ_TASK_ID", "1"),
     ];
     let mut question = ask_args("which way?");
@@ -267,7 +270,7 @@ fn every_event_records_its_actor() {
     );
     assert_eq!(
         actor_of("ask_opened"),
-        serde_json::json!({"role": "worker", "id": "worker:r1"})
+        serde_json::json!({"role": "worker", "id": worker_id})
     );
     assert_eq!(
         actor_of("finding_recorded"),
@@ -293,7 +296,7 @@ fn every_event_records_its_actor() {
     assert!(
         task_events
             .iter()
-            .any(|event| event["actor"]["id"] == "worker:r1"),
+            .any(|event| event["actor"]["id"] == worker_id.as_str()),
         "{shown}"
     );
 }

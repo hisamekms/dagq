@@ -1195,6 +1195,9 @@ fn a_supervisor_that_exec_d_reaps_each_review_handed_over_once() {
     let (_dir, repo, db) = fixture();
     let token = dagq::domain::LeaseToken::new("throughput-handoff");
     let me = std::process::id();
+    // The reviews' commands reach the queue through its service as this
+    // supervisor.
+    common::service::serve(&db);
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
         queue

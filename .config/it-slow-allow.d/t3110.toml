@@ -1,0 +1,14 @@
+# The items of task 3110 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 6.6s: a supervisor's passes, its reviews' job commands through the queue service and their reaps
+[[test]]
+name = "runtime_throughput_review::a_supervisor_that_exec_d_reaps_each_review_handed_over_once"
+reason = "B 境界（守る境界）: exec で引き継いだ supervisor が前のプロセスの見直しを pid で一度だけ刈ることを、supervisor の実のパスと、その登録で queue service を通る見直しの job command のプロセスの配線で確かめる（判断は application::supervise::observation の unit test）"
+task = 3110
+
+# 5.2s: the same handoff of a review stopped on Codex, through the queue service
+[[test]]
+name = "throughput_review_codex::a_handed_over_codex_review_that_found_codex_unusable_holds_codex"
+reason = "B 境界（守る境界）: exec で引き継いだ supervisor が、前のプロセスの見直しが記録した Codex の使えなさで Codex を控え、次の見直しを Claude で起動することを、supervisor の実のパスと queue service を通る見直しの job command のプロセスで確かめる（判断は application::supervise::observation の unit test）"
+task = 3110

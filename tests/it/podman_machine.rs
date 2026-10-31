@@ -125,13 +125,17 @@ impl Host {
         }
     }
 
+    /// The machine of `queue`, the runs that own its users read on their
+    /// queue's DB as its service answers them.
     fn machine(&self, queue: &str) -> QueueMachine {
-        QueueMachine::new(
+        let mut machine = QueueMachine::new(
             self.podman.clone(),
             &self.root,
             &self.root.join(queue),
             None,
-        )
+        );
+        machine.users.runs = Some(Arc::new(crate::common::queue::QueueRuns));
+        machine
     }
 
     fn volumes(&self, queue: &str) -> QueueVolumes {
@@ -459,8 +463,11 @@ fn a_removal_holds_the_machine_as_its_own_user_and_its_leave_stops_it_when_none_
         db: host.root.join(QUEUE_A).join("queue.db"),
         main_checkout: None,
         host_wide: None,
-        kept_records: None,
-        owner_runs: None,
+        kept_records: Arc::new(dagq::infrastructure::container_image::QueueImageRecords {
+            db: host.root.join(QUEUE_A).join("queue.db"),
+            actor: None,
+        }),
+        owner_runs: Some(Arc::new(crate::common::queue::QueueRuns)),
         deadline: None,
     };
     let user = format!("cleanup-{ended}");
@@ -598,8 +605,11 @@ fn neither_the_watch_nor_an_overlapping_turn_stops_the_machine_under_a_facts_onl
                 db: queue_db.clone(),
                 main_checkout: None,
                 host_wide: None,
-                kept_records: None,
-                owner_runs: None,
+                kept_records: Arc::new(dagq::infrastructure::container_image::QueueImageRecords {
+                    db: queue_db.clone(),
+                    actor: None,
+                }),
+                owner_runs: Some(Arc::new(crate::common::queue::QueueRuns)),
                 deadline: None,
             },
             machine: host.machine(QUEUE_A),

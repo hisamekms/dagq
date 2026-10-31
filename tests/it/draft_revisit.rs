@@ -283,6 +283,12 @@ fn people_the_inbox_and_planners_revisit_and_workers_jobs_and_the_observer_may_n
             let output = invoke_with(env, &db, args);
             assert!(!output.status.success(), "{env:?} {args:?}");
             let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            // A worker of no run in the queue is refused its token by the
+            // service, before any capability.
+            if env.contains(&("DAGQ_ROLE", "worker")) {
+                assert_eq!(error["queue_service"]["code"], "unauthenticated", "{error}");
+                continue;
+            }
             assert_eq!(error["denied"]["capability"], "task.write", "{error}");
             assert_eq!(error["denied"]["reason"], "not granted", "{error}");
         }
@@ -302,7 +308,7 @@ fn people_the_inbox_and_planners_revisit_and_workers_jobs_and_the_observer_may_n
         .as_array()
         .unwrap()
         .len();
-    assert_eq!(denied, refused_roles.len() * 2);
+    assert_eq!(denied, (refused_roles.len() - 1) * 2);
 
     // A planner of the runtime's, whose actor id names it.
     let opened = dagq::infrastructure::sqlite::SqliteQueue::open(&db).unwrap();

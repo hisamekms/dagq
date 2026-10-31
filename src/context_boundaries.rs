@@ -39,6 +39,7 @@ mod module_fixtures;
 mod modules;
 mod ownership;
 mod port_fixtures;
+mod queue_opens;
 mod source;
 mod sql;
 mod write_tx;

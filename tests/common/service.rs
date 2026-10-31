@@ -273,6 +273,53 @@ pub fn host_client_env(db: &Path, env: &[(&str, &str)], args: &[&str]) -> Vec<(S
     handed
 }
 
+/// What a test's `dagq` of a role but the user, the inbox and a planner
+/// (a worker, a job, the observer) with `env` needs on the queue at `db`:
+/// it reaches the queue only in client mode, as the runtime starts it, and
+/// a `dagq` of such a role with no service's socket is refused
+/// (ADR-t3102-2 decision 1). The queue's service, started for the test as
+/// [`host_client_env`] starts it, its socket and a token of the principal
+/// the environment's actor is ([`Principal::of`]); `None` for a host
+/// client's role, an environment that names a socket or a token itself, a
+/// queue that is not there, or an actor the environment does not name.
+pub fn client_mode_env(db: &Path, env: &[(&str, &str)]) -> Option<Vec<(String, String)>> {
+    use dagq::domain::queue_service::{CREDENTIAL_FILE_ENV, SOCKET_ENV};
+    let named = |name: &str| {
+        env.iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| (*value).to_owned())
+    };
+    let role = named(dagq::domain::actor::ROLE_ENV);
+    if matches!(role.as_deref(), None | Some("inbox" | "planner"))
+        || named(SOCKET_ENV).is_some()
+        || named(CREDENTIAL_FILE_ENV).is_some()
+    {
+        return None;
+    }
+    let actor = dagq::domain::ActorContext::from_env(named).ok()?;
+    let db = std::fs::canonicalize(db).ok()?;
+    let dir = db.parent().unwrap();
+    // Started as a host client's command starts it: `show` is answered.
+    host_client_env(&db, &[], &["show", "1"]);
+    let principal = Principal::of(&actor);
+    let held = service::credential_path_of(dir, &principal);
+    let file = if held.is_file() {
+        held
+    } else {
+        service::issue(dir, &principal, 1).ok()?.file
+    };
+    Some(vec![
+        (
+            SOCKET_ENV.to_owned(),
+            service::socket_path(dir).to_str().unwrap().to_owned(),
+        ),
+        (
+            CREDENTIAL_FILE_ENV.to_owned(),
+            file.to_str().unwrap().to_owned(),
+        ),
+    ])
+}
+
 /// Start a service of the queue at `db` for this test with `env` (of
 /// [`READ_ENV`]), as `service serve`, which records no event, and wait
 /// until it answers. It stops when the test's process or the queue's

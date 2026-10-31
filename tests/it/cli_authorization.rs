@@ -156,11 +156,15 @@ fn workers_jobs_and_the_observer_change_no_plan_and_each_refusal_is_recorded() {
     let (_dir, db) = queue();
     ok(&db, &["goal", "add", "open goal"]);
     ok(&db, &["add", "existing", "--goal", "1"]);
+    // The worker's own task, on whose run it works.
+    ok(&db, &["add", "the worker's"]);
+    let run = crate::common::queue::worker_run(&db, 2);
+    let worker_id = format!("worker:{run}");
     let worker = vec![
         ("DAGQ_ROLE", "worker".to_owned()),
-        ("DAGQ_ACTOR_ID", "worker:r1".to_owned()),
-        ("DAGQ_RUN_ID", "r1".to_owned()),
-        ("DAGQ_TASK_ID", "1".to_owned()),
+        ("DAGQ_ACTOR_ID", worker_id.clone()),
+        ("DAGQ_RUN_ID", run.to_string()),
+        ("DAGQ_TASK_ID", "2".to_owned()),
     ];
     let mut actors = vec![("worker", worker)];
     for role in [
@@ -206,13 +210,13 @@ fn workers_jobs_and_the_observer_change_no_plan_and_each_refusal_is_recorded() {
         }
     }
     // Nothing changed, and every refusal was recorded as its actor.
-    assert_eq!(ok(&db, &["list"])["total"], 1);
+    assert_eq!(ok(&db, &["list"])["total"], 2);
     assert_eq!(ok(&db, &["show", "1"])["task"]["status"], "draft");
     assert_eq!(ok(&db, &["goal", "show", "1"])["goal"]["status"], "open");
     let recorded = denials(&db);
     assert_eq!(recorded.len(), refused);
     assert_eq!(recorded[0]["actor"]["role"], "worker");
-    assert_eq!(recorded[0]["actor"]["id"], "worker:r1");
+    assert_eq!(recorded[0]["actor"]["id"], worker_id);
     assert_eq!(recorded[0]["payload"]["capability"], "task.write");
     assert_eq!(
         recorded[0]["payload"]["resource"],
@@ -627,8 +631,8 @@ fn a_refusal_does_not_depend_on_the_task_existing() {
     assert_eq!(denials(&db).len(), 1);
 }
 
-/// The CLI's refusal of a watch and of an export, recorded as the refused
-/// caller (task 1151): who may not watch and export is
+/// A worker's refusal of a watch and of an export, an export's recorded as
+/// the refused worker by the queue service (task 1151): who may not watch and export is
 /// `domain::authorization::tests::workers_wrappers_the_integrator_and_the_jobs_neither_watch_nor_export`,
 /// which capability each command asks `main`'s
 /// `tests::watching_and_exporting_ask_their_own_capability_and_reads_ask_to_read`
@@ -648,29 +652,45 @@ fn a_worker_is_refused_watch_and_export_and_each_refusal_is_recorded() {
         &["graph", "--format", "d2", "--out", graph],
         &["report", "--out", reports],
     ];
+    // A worker's `dagq` reaches the queue only in client mode, as its run's.
+    ok(&db, &["add", "the worker's"]);
+    let run = crate::common::queue::worker_run(&db, 2);
     let worker = vec![
         ("DAGQ_ROLE", "worker".to_owned()),
-        ("DAGQ_ACTOR_ID", "worker:r1".to_owned()),
-        ("DAGQ_RUN_ID", "r1".to_owned()),
-        ("DAGQ_TASK_ID", "1".to_owned()),
+        ("DAGQ_ACTOR_ID", format!("worker:{run}")),
+        ("DAGQ_RUN_ID", run.to_string()),
+        ("DAGQ_TASK_ID", "2".to_owned()),
     ];
     let before = denials(&db).len();
-    let mut refused = Vec::new();
-    for (args, capability) in std::iter::once((watch, "queue.watch"))
-        .chain(export.iter().map(|args| (*args, "queue.export")))
-    {
+    // A watch is no use case of the service's: the client refuses it
+    // before it sends anything.
+    let error = denied_as(&worker, &db, watch);
+    assert_eq!(error["queue_service"]["code"], "no_use_case", "{error}");
+    // An export the service refuses the worker, and records the refusal as
+    // the worker's. `report` is stopped before it is sent while it reads
+    // every event of the queue (ADR-t3745-1), and records nothing: task
+    // 1669 puts it back among the refused.
+    let refused = &export[..1];
+    let error = denied_as(&worker, &db, export[1]);
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("report is stopped"),
+        "{error}"
+    );
+    for args in refused {
         let error = denied_as(&worker, &db, args);
         assert_eq!(error["denied"]["role"], "worker", "{args:?}: {error}");
-        assert_eq!(error["denied"]["capability"], capability, "{error}");
+        assert_eq!(error["denied"]["capability"], "queue.export", "{error}");
         assert_eq!(error["denied"]["reason"], "not granted", "{error}");
         assert!(
             error["error"]
                 .as_str()
                 .unwrap()
-                .starts_with(&format!("worker may not {capability}")),
+                .starts_with("worker may not queue.export"),
             "{error}"
         );
-        refused.push(capability);
     }
     // Reading stays open, and writes nothing.
     let written = event_count(&db);
@@ -678,16 +698,11 @@ fn a_worker_is_refused_watch_and_export_and_each_refusal_is_recorded() {
         allowed_as(&worker, &db, args);
     }
     assert_eq!(event_count(&db), written);
-    // Each refusal went to the queue's service, which takes a worker named
-    // with no token for no principal: recorded as unauthenticated, never as
-    // the worker's `authorization_denied` (cli_denials has the refusals of
-    // a principal).
-    assert_eq!(denials(&db).len(), before);
-    let unauthenticated = common::service::events(&db, "queue_service_unauthenticated");
-    assert_eq!(unauthenticated.len(), refused.len(), "{unauthenticated:?}");
-    for event in &unauthenticated {
-        assert_eq!(event["payload"]["use_case"], "denial_record", "{event}");
-        assert_eq!(event["payload"]["reason"], "missing_token", "{event}");
+    let recorded = denials(&db);
+    assert_eq!(recorded.len(), before + refused.len(), "{recorded:?}");
+    for event in &recorded[before..] {
+        assert_eq!(event["actor"]["role"], "worker", "{event}");
+        assert_eq!(event["payload"]["capability"], "queue.export", "{event}");
     }
     let events = event_count(&db);
     assert!(!Path::new(graph).exists());

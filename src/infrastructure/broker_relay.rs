@@ -6,7 +6,7 @@
 //! which carry each connection's bytes both ways as they are and hold no
 //! token; the relays of a queue in the machine, through podman
 //! ([`PodmanRelays`]); and the supervisor's record of them that the gate
-//! reads ([`QueueRelayHealth`]).
+//! reads, through the queue service.
 //!
 //! A queue's open relays are remembered in `<queue dir>/relay/` (mode
 //! 0700), one `<run>.json` with the relay's [`RelaySpec`] each, so a relay
@@ -33,8 +33,7 @@ use tracing::{info, warn};
 
 use super::podman_machine::{MACHINE_TIMEOUT, PodmanCli, PodmanCliWithin, QueueMachine};
 use super::queue_service::{private_dir, queue_dir_of, write_private};
-use super::sqlite::SqliteQueue;
-use crate::application::broker_relay::{RelayControl, RelayRecords, RelayTimedOut, down_message};
+use crate::application::broker_relay::{RelayControl, RelayTimedOut};
 use crate::application::podman_machine::{Machine, PodmanMachine};
 use crate::domain::broker_relay::{
     RelaySeen, RelaySpec, RelayState, SOCKET_MODE, TARGET_LABEL, relay_run_args, socket_path,
@@ -620,15 +619,21 @@ impl RelayControl for PodmanRelays {
     }
 }
 
-/// The supervisor's record of the relays, read on the queue's DB.
+/// The supervisor's record of the relays, read on the queue's DB in this
+/// process: a test's, which a library call runs. A process of the binary
+/// reads it through the queue service (ADR-t3102-2 decision 1).
 #[derive(Debug, Clone)]
+#[cfg(feature = "test-paths")]
 pub struct QueueRelayHealth {
     pub db: PathBuf,
 }
 
-impl RelayRecords for QueueRelayHealth {
+#[cfg(feature = "test-paths")]
+impl crate::application::broker_relay::RelayRecords for QueueRelayHealth {
     fn down(&self) -> Result<Option<String>> {
-        down_message(&SqliteQueue::open_read_only(&self.db)?)
+        crate::application::broker_relay::down_message(&super::sqlite::SqliteQueue::open_read_only(
+            &self.db,
+        )?)
     }
 }
 

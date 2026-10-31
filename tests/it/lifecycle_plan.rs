@@ -202,7 +202,9 @@ fn launch<'a>(
         roles: Default::default(),
         turn_limits: dagq::domain::stall::StallConfig::default().turn_limits(),
         telemetry: Some(dagq::application::telemetry_tokens::TargetTelemetry {
-            tokens: &dagq::infrastructure::queue_service::SystemServiceAccess,
+            // This test's process keeps no service: the session is
+            // registered on the queue's DB in it.
+            tokens: &dagq::infrastructure::queue_service::InProcessTelemetry,
             db,
             lease: None,
         }),

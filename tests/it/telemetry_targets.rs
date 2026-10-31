@@ -100,7 +100,7 @@ fn beat(db: &Path) {
 /// The control side's issue and revocation, from a command (no lease).
 fn telemetry(db: &Path) -> TargetTelemetry<'_> {
     TargetTelemetry {
-        tokens: &SystemServiceAccess,
+        tokens: &service::InProcessTelemetry,
         db,
         lease: None,
     }
@@ -326,7 +326,7 @@ fn a_targets_token_is_refused_once_it_ended_or_its_runner_fell_and_the_sweep_rev
     beat(db);
     let alive = |pid| dagq::infrastructure::adapters::process_alive(pid);
     let mut revoked = sweep_targets(
-        &SystemServiceAccess,
+        &service::InProcessTelemetry,
         &store,
         db,
         i64::try_from(

@@ -207,6 +207,8 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   どのmigrationも作らないtableの行、migrationが残すのに行の無いtable、コードに無いstoreのmoduleとtransactionの関数でも落ちる。
   共有の部品のtableは、どのcontextが書いても違反に数えない。
   migrationのtriggerが書く`search_index`・`landed_commits`は数えない。
+- queue DBを開く呼び出しの置き場（ADR-t3102-2決定8）は、`cargo test`が流すRustのtest（`src/context_boundaries/queue_opens.rs`）が当て、`src/`の本番のコードで表に無い呼び出しと、呼び出しの無い表の行で落ちる。
+  開いてよい経路とtestの経路の区別は[Queue service](queue-service.md#dbを開く経路)。
 - C5では、共有の部品のportは、どのcontextが使っても違反に数えない。
   `src/application/ports/<context>.rs`のportの所有と、`ports/`・`queue_reads/`・`compose/`の`<context>.rs`のcontextは、testがpathから導く。
 - 所有の表の書式と落ちる条件はtestのdoc commentが持つ。

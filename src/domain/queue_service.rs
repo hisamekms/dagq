@@ -135,8 +135,7 @@ pub const URL_ENV: &str = "DAGQ_SERVICE_URL";
 /// and reaches it through the service's socket as that supervisor's
 /// principal, with the token the supervisor signed in with, found from the
 /// registration ([`Principal::credential_key`]); the value is not a token.
-/// A supervisor whose service runs in its own process (a test's) leaves
-/// it out, and its commands open the queue.
+/// A job command without it opens no queue either: it is refused.
 pub const SUPERVISOR_REGISTRATION_ENV: &str = "DAGQ_SUPERVISOR_REGISTRATION";
 /// The variables of a client-mode `dagq`.
 pub const CLIENT_ENV: [&str; 3] = [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV];
@@ -2205,9 +2204,11 @@ pub const fn client_role(role: ActorRole) -> bool {
 /// service answers to the service of the queue it resolves, once that
 /// queue is served (ADR-t3102-2 decisions 5 and 6 (2)): the user as the
 /// peer of its socket, the inbox and a planner with the token the control
-/// side put in a file their environment names, with the queue's path kept
-/// for the commands the service does not answer yet, which open the DB.
-/// Never back to the DB for one the service answers (fail closed).
+/// side put in a file their environment names. The DB is opened only for
+/// `init` (ADR-t3102-2 decision 1) and the exceptions of the migration
+/// (decision 8: `migrate` and `doctor`, listed by
+/// `context_boundaries::queue_opens`), never for one the service answers
+/// (fail closed).
 pub const fn host_client_role(role: ActorRole) -> bool {
     matches!(
         role,

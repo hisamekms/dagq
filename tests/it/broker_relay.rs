@@ -907,6 +907,8 @@ fn podman_relays(dir: &Path, state: &Path, look_timeout: Duration) -> PodmanRela
     fs::write(&db, "").unwrap();
     PodmanRelays {
         look_timeout,
+        // The runs that own users of the machine as the queue's service
+        // answers them, read on their queue's DB.
         ..PodmanRelays::of_queue(
             PodmanCli {
                 program: fake_podman(state),
@@ -914,6 +916,7 @@ fn podman_relays(dir: &Path, state: &Path, look_timeout: Duration) -> PodmanRela
             &db,
             None,
         )
+        .with_owner_runs(Some(Arc::new(crate::common::queue::QueueRuns)))
     }
 }
 

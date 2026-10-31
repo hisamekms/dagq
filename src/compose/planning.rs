@@ -31,6 +31,7 @@ use crate::{
 pub const PLANNER_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// `planners` on the system clock: see [`OneShot::planners`].
+#[cfg(feature = "test-paths")]
 pub fn planners(db: &Path, sessions: &dyn SessionWrappers, all: bool) -> Result<Value> {
     OneShot::system().planners(db, sessions, all)
 }
@@ -83,6 +84,7 @@ pub struct PlannerEntry {
 
 /// [`planner_session`] with any provider, in the working directory, on
 /// the queue at `db` itself: a test's wrapper, which a library call runs.
+#[cfg(feature = "test-paths")]
 pub fn planner_session_with_provider(
     db: &Path,
     id: PlannerId,
@@ -133,6 +135,7 @@ fn planner_session_on(
 impl OneShot {
     /// `planners`: every planner not closed (with `all`, every one), with
     /// its state judged by [`planner::planner_views`].
+    #[cfg(feature = "test-paths")]
     pub fn planners(&self, db: &Path, sessions: &dyn SessionWrappers, all: bool) -> Result<Value> {
         self.planners_of(&self.open_read_only(db)?, db, sessions, all)
     }

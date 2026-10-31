@@ -104,6 +104,7 @@ mod queue_dependencies;
 mod queue_goals;
 mod queue_kpi_breach_read_plan;
 mod queue_migration;
+mod queue_opens;
 mod queue_proposals;
 mod queue_runs;
 mod queue_schema;

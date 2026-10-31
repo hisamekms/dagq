@@ -358,15 +358,7 @@ echo 'observer diagnostic' >&2
 
     // `observe --history` lists them newest first with what each read and
     // wrote; the observer may read it too.
-    let output = {
-        use crate::common::{Bounded, WithoutActor};
-        std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
-            .without_actor_env()
-            .args(["--db", db.to_str().unwrap(), "observe", "--history"])
-            .env("DAGQ_ROLE", "observer")
-            .bounded_output()
-            .unwrap()
-    };
+    let output = crate::common::cli::invoke_as(Some("observer"), &db, &["observe", "--history"]);
     assert!(output.status.success(), "{output:?}");
     let history: Value = serde_json::from_slice(&output.stdout).unwrap();
     let observations = history["observations"].as_array().unwrap();

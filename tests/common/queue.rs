@@ -270,3 +270,32 @@ pub fn until_committed(db: &Path, count: &str, from: Option<i64>) {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
+
+/// Claim task `task` of the queue at `db` (readied without review) as a
+/// run now: the run a test's worker `dagq` names, whose token the queue
+/// service takes only while the run is in progress.
+pub fn worker_run(db: &Path, task: i64) -> dagq::domain::RunId {
+    let mut queue = SqliteQueue::open(db).unwrap();
+    queue
+        .transition(TaskId::new(task), dagq::domain::TaskAction::BypassReview)
+        .unwrap();
+    let dagq::domain::ClaimOutcome::Claimed { run } = queue.claim(&base()).unwrap() else {
+        panic!("task {task} is not claimed")
+    };
+    assert_eq!(run.task_id(), TaskId::new(task));
+    run.id().clone()
+}
+
+/// The runs that own users of the podman machine as the queue's service
+/// answers them ([`dagq::infrastructure::podman_machine::OwnerRuns`]), read
+/// by the test on the queue's DB: a test's process that keeps no service.
+pub struct QueueRuns;
+
+impl dagq::infrastructure::podman_machine::OwnerRuns for QueueRuns {
+    fn run(&self, db: &Path, run: &str) -> Option<dagq::domain::broker_relay::RelayRun> {
+        let queue = SqliteQueue::open_read_only(db).ok()?;
+        Some(dagq::infrastructure::podman_machine::relay_run_in(
+            &queue, run,
+        ))
+    }
+}

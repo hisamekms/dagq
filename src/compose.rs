@@ -27,7 +27,7 @@ use std::{
 use crate::{
     application::{Generators, WorkerAdapter, WorkerAdapters, session::WrapperStart},
     domain::{
-        NewAsk, Provider,
+        Provider,
         worker::{ProviderCheck, Worker, WorkerMode},
     },
     infrastructure::{
@@ -68,6 +68,7 @@ fn install_socket(
 /// The queues of a lifecycle command's steps answered in this process by
 /// the service's scope at `db`, as the user, for [`host`]'s tests that keep
 /// no service, the command's process taken to run `executable` when given.
+#[cfg(feature = "test-paths")]
 fn lifecycle_in_process(
     db: &Path,
     generators: Generators,
@@ -92,33 +93,43 @@ fn lifecycle_in_process(
 
 pub use control::{ControlQueues, control_queues};
 pub use execution::{
-    RunE2eOptions, SetupReviewOptions, ended_run_material, init_recommended, integrate, recover,
-    review, review_in, session, session_in_background, session_in_background_as,
+    RunE2eOptions, SetupReviewOptions, ended_run_material, init_recommended, session,
+};
+#[cfg(feature = "test-paths")]
+pub use execution::{
+    integrate, recover, review, review_in, session_in_background, session_in_background_as,
     session_in_background_as_with_processes, session_in_background_with_containers, setup_review,
 };
+#[cfg(feature = "test-paths")]
+pub use host::rebind;
 pub use host::{
     AutoUpdateJob, COMMAND_TARGET, HostMetricsSettings, LifecycleRoute, QueueBrokerControlPort,
     QueueBrokerOptions, QueueRelayControlPort, QueueRelayOptions, QueueServiceControlPort,
-    QueueServiceOptions, ReleaseIndexPort, ReleaseUpdateJob, SccacheOptions, down, inbox,
-    inbox_command, init_queue, install_restart_arguments, migrate_queue, queue_broker_start,
-    queue_broker_status, queue_broker_stop, queue_schema, queue_service_start,
-    queue_service_status, queue_service_stop, rebind, repair_rebound_worktrees,
+    QueueServiceOptions, ReleaseIndexPort, ReleaseUpdateJob, SccacheOptions, down,
+    fill_commit_messages, inbox, inbox_command, init_queue, install_restart_arguments,
+    migrate_queue, queue_broker_start, queue_broker_status, queue_broker_stop, queue_schema,
+    queue_service_start, queue_service_status, queue_service_stop, repair_rebound_worktrees,
     repository_common_dir, repository_queue_dir, run_command, service_commands, trace_command, up,
 };
 pub use observation::{
-    CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, call_stats_read, ci_failures,
-    doctor, events, events_matching, graph_export_text, graph_svg_of, observe, observe_through,
-    observer_launch, queue_agents, read_queue, service_detail, service_reads, stats, status,
-    status_for, throughput_review, throughput_review_launch, throughput_review_through, timeline,
-    timeline_in, watch, watch_in, watch_through_service, write_report_files,
+    CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, call_stats_read, doctor,
+    graph_export_text, graph_svg_of, observe, observe_through, queue_agents, read_queue,
+    service_detail, service_reads, throughput_review, throughput_review_through, timeline_in,
+    watch_in, watch_through_service, write_report_files,
 };
-pub use planning::{
-    PLANNER_TIMEOUT, PlannerEntry, planner_session, planner_session_with_provider, planners,
-    service_writes, write_queue,
+#[cfg(feature = "test-paths")]
+pub use observation::{
+    ci_failures, events, events_matching, observer_launch, stats, status, status_for,
+    throughput_review_launch, timeline, watch,
 };
+pub use planning::{PLANNER_TIMEOUT, PlannerEntry, planner_session, service_writes, write_queue};
+#[cfg(feature = "test-paths")]
+pub use planning::{planner_session_with_provider, planners};
+#[cfg(feature = "test-paths")]
+pub use supervisor::CallerLayer;
 pub use supervisor::{
-    CallerLayer, ContainerRuntimePort, PausesPort, ProcessesPort, RunContainersPort, RunFilesPort,
-    ServiceRoute, SuperviseOptions, VerificationContainersPort, review_program_host, supervise,
+    ContainerRuntimePort, PausesPort, ProcessesPort, RunContainersPort, RunFilesPort, ServiceRoute,
+    SuperviseOptions, VerificationContainersPort, review_program_host, supervise,
     supervise_with_reviewer,
 };
 
@@ -166,33 +177,48 @@ fn process_env(name: &str) -> Option<String> {
 
 /// `ask`: register an ask (see [`crate::application::ask::ask`]); the
 /// inbox's watch notifies the person of it.
-pub fn ask(db: &Path, ask: NewAsk) -> Result<Value> {
+#[cfg(feature = "test-paths")]
+pub fn ask(db: &Path, ask: crate::domain::NewAsk) -> Result<Value> {
     let mut queue = SqliteQueue::open(db)?;
     crate::application::ask::ask(&mut queue, ask)
 }
 
 /// The containers of the worker's turns of the queue at `db`, bound to
-/// `main_checkout`, in the dagq machine: the run's parts there are made
-/// ready by the host's context ([`RunMachine`](crate::application::podman_machine::RunMachine)).
+/// `main_checkout`, in the dagq machine, the image's records made on the
+/// queue's DB in this process: a test's, which a library call runs. The
+/// run's parts there are made ready by the host's context
+/// ([`RunMachine`](crate::application::podman_machine::RunMachine)).
+#[cfg(feature = "test-paths")]
 pub(crate) fn run_containers(
     db: &Path,
     main_checkout: Option<PathBuf>,
 ) -> crate::infrastructure::run_container::PodmanRunContainers {
-    run_containers_keeping(db, main_checkout, None)
+    run_containers_on(
+        db,
+        main_checkout,
+        std::sync::Arc::new(crate::infrastructure::container_image::QueueImageRecords {
+            db: db.to_path_buf(),
+            actor: None,
+        }),
+        None,
+    )
 }
 
-/// [`run_containers`] whose image records are kept in `kept` when given,
-/// for a process that opens no queue to send them to the queue service.
+/// The containers of the worker's turns of the queue at `db`, bound to
+/// `main_checkout`, in the dagq machine, whose image records are kept in
+/// `kept` for a process that opens no queue to send them to the queue
+/// service.
 pub(crate) fn run_containers_keeping(
     db: &Path,
     main_checkout: Option<PathBuf>,
-    kept: Option<std::sync::Arc<crate::application::container_image::KeptImageRecords>>,
+    kept: std::sync::Arc<crate::application::container_image::KeptImageRecords>,
 ) -> crate::infrastructure::run_container::PodmanRunContainers {
-    run_containers_on(db, main_checkout, kept.map(|kept| kept as _), None)
+    run_containers_on(db, main_checkout, kept, None)
 }
 
-/// [`run_containers`] whose image's records are made and the machine's
-/// users' runs read through `records` (the queue service's, for the
+/// The containers of the worker's turns of the queue at `db`, whose
+/// image's records are made and the machine's users' runs read through
+/// `records` (the queue service's, for the
 /// supervisor, which opens no queue for them).
 pub(crate) fn run_containers_with(
     db: &Path,
@@ -202,7 +228,7 @@ pub(crate) fn run_containers_with(
     run_containers_on(
         db,
         main_checkout,
-        Some(records.images.clone()),
+        records.images.clone(),
         records.owner_runs.clone(),
     )
 }
@@ -210,9 +236,7 @@ pub(crate) fn run_containers_with(
 fn run_containers_on(
     db: &Path,
     main_checkout: Option<PathBuf>,
-    images: Option<
-        std::sync::Arc<dyn crate::application::container_image::ImageRecords + Send + Sync>,
-    >,
+    images: std::sync::Arc<dyn crate::application::container_image::ImageRecords + Send + Sync>,
     owner_runs: Option<std::sync::Arc<dyn crate::infrastructure::podman_machine::OwnerRuns>>,
 ) -> crate::infrastructure::run_container::PodmanRunContainers {
     let podman = crate::infrastructure::podman_machine::PodmanCli::default();
@@ -235,14 +259,15 @@ fn run_containers_on(
 }
 
 /// Where the container's parts record their state and read the runs that
-/// own users of the dagq machine: the queue service's queue when the
-/// process opens no queue (the supervisor's, and a person's landing through
-/// [`ControlQueues`]), else the queue's DB ([`Self::or_queue`]).
+/// own users of the dagq machine: the queue service's queue, as the
+/// principal of the supervisor or of a person's landing through
+/// [`ControlQueues`].
 #[derive(Clone)]
 pub(crate) struct ContainerRecords {
     pub relays: std::sync::Arc<dyn crate::application::broker_relay::RelayRecords>,
     pub images: std::sync::Arc<dyn crate::application::container_image::ImageRecords + Send + Sync>,
-    /// `None` reads each owner's queue's DB.
+    /// `None` takes each owner's run for unknown unless its queue's
+    /// database is gone ([`crate::infrastructure::podman_machine::HostMachineUsers::runs`]).
     pub owner_runs: Option<std::sync::Arc<dyn crate::infrastructure::podman_machine::OwnerRuns>>,
 }
 
@@ -262,14 +287,11 @@ impl ContainerRecords {
         }
     }
 
-    /// `records`, else the records of the queue at `db`, the image's made
-    /// as `actor`.
-    pub(crate) fn or_queue(
-        records: Option<&Self>,
-        db: &Path,
-        actor: &crate::domain::ActorContext,
-    ) -> Self {
-        records.cloned().unwrap_or_else(|| Self {
+    /// The records of the queue at `db` on its DB in this process, the
+    /// image's made as `actor`: a test's, which a library call runs.
+    #[cfg(feature = "test-paths")]
+    pub(crate) fn of_queue(db: &Path, actor: &crate::domain::ActorContext) -> Self {
+        Self {
             relays: std::sync::Arc::new(crate::infrastructure::broker_relay::QueueRelayHealth {
                 db: db.to_path_buf(),
             }),
@@ -280,7 +302,7 @@ impl ContainerRecords {
                 },
             ),
             owner_runs: None,
-        })
+        }
     }
 }
 
@@ -404,18 +426,18 @@ pub(crate) fn run_containers_of_wrapper(
     main_checkout: Option<PathBuf>,
     records: std::sync::Arc<WrapperContainerRecords>,
 ) -> crate::infrastructure::run_container::PodmanRunContainers {
-    run_containers_on(db, main_checkout, Some(records.clone()), Some(records))
+    run_containers_on(db, main_checkout, records.clone(), Some(records))
 }
 
 /// The verifications' containers of the queue at `db`, whose parts the
 /// host's context makes ready as it does a worker's
-/// ([`run_containers`]), the image's records made and the machine's
-/// users' runs read through `records` when given (the queue service's, for
-/// a process that opens no queue), else on the queue at `db`.
+/// ([`run_containers_with`]), the image's records made and the machine's
+/// users' runs read through `records` (the queue service's: the process
+/// opens no queue).
 pub(crate) fn verification_containers(
     db: &Path,
     main_checkout: Option<PathBuf>,
-    records: Option<&ContainerRecords>,
+    records: &ContainerRecords,
 ) -> crate::infrastructure::run_container::PodmanVerificationContainers {
     let podman = crate::infrastructure::podman_machine::PodmanCli::default();
     let host_wide = crate::infrastructure::kpi_config::host_wide_file();
@@ -429,8 +451,8 @@ pub(crate) fn verification_containers(
             db: db.to_path_buf(),
             main_checkout,
             host_wide,
-            kept_records: records.map(|records| records.images.clone()),
-            owner_runs: records.and_then(|records| records.owner_runs.clone()),
+            kept_records: records.images.clone(),
+            owner_runs: records.owner_runs.clone(),
             deadline: None,
         }),
         memory_poll: std::time::Duration::from_secs(crate::domain::machine_memory::POLL_SECS),
@@ -593,21 +615,6 @@ fn queue_broker_view(db: &Path, queue: Option<&SqliteQueue>) -> Value {
     )
 }
 
-/// Open the queue at `db` for the CLI's commands.
-pub fn open_queue(db: &Path) -> Result<SqliteQueue> {
-    SqliteQueue::open(db)
-}
-
-/// The live read-only connection for `watch`, refusing older schemas.
-pub fn open_queue_watch(db: &Path) -> Result<SqliteQueue> {
-    SqliteQueue::open_watch(db)
-}
-
-/// Open the queue at `db` read-only for the CLI's reads.
-pub fn open_queue_read_only(db: &Path) -> Result<SqliteQueue> {
-    SqliteQueue::open_read_only(db)
-}
-
 impl OneShot {
     pub fn new(generators: Generators) -> Self {
         Self {
@@ -628,12 +635,14 @@ impl OneShot {
     }
 
     /// The queue at `db`, writing through these generators.
+    #[cfg(feature = "test-paths")]
     fn open(&self, db: &Path) -> Result<SqliteQueue> {
         Ok(SqliteQueue::open(db)?.with_generators(self.generators.clone()))
     }
 
     /// The queue at `db` on a read-only connection, for a command that only
     /// reads (ADR-0045 decision 18, [`SqliteQueue::open_read_only`]).
+    #[cfg(feature = "test-paths")]
     fn open_read_only(&self, db: &Path) -> Result<SqliteQueue> {
         Ok(SqliteQueue::open_read_only(db)?.with_generators(self.generators.clone()))
     }
