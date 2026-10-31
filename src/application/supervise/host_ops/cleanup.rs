@@ -2619,6 +2619,12 @@ mod tests {
         lock_fails: bool,
         /// What `read_dir` lists; `None` is no directory.
         entries: Option<Vec<PathBuf>>,
+        /// A removal under this directory finds what it removes gone
+        /// (another cleanup removed it between its measure and its
+        /// removal).
+        raced_under: Option<PathBuf>,
+        /// A removal under this directory fails.
+        denied_under: Option<PathBuf>,
         done: Mutex<Vec<String>>,
     }
 
@@ -2707,8 +2713,12 @@ mod tests {
         }
         fn remove_dir_all(&self, dir: &Path) -> std::io::Result<()> {
             self.did("remove", dir);
-            if self.fails {
+            let under = |root: &Option<PathBuf>| root.as_ref().is_some_and(|r| dir.starts_with(r));
+            if self.fails || under(&self.denied_under) {
                 return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            if under(&self.raced_under) {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
             }
             Ok(())
         }
@@ -3181,6 +3191,68 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    /// Task 1100: a scratchpad another cleanup removed between its measure
+    /// and its removal is no failure and no removal, and one that cannot be
+    /// removed under one root is a failure of that root's (its
+    /// `cleanup_failed` names it, `scratchpad ...`) while what went under
+    /// another root is still recorded as removed. Once it can be removed,
+    /// the next job's removal takes it; that the run stays a candidate
+    /// until then is `a_run_stays_a_candidate_while_something_of_it_is_left`'s.
+    #[test]
+    fn a_scratchpad_gone_meanwhile_is_no_failure_and_one_failing_root_keeps_the_others() {
+        let candidate = candidate("r", TaskStatus::Canceled);
+        let roots = ["/raced", "/denied", "/kept"].map(PathBuf::from);
+        let ports = |files: CacheFiles| JobPorts {
+            scratchpad_roots: roots.to_vec(),
+            ..job_ports(files, &Arc::default())
+        };
+        let racy = ports(CacheFiles {
+            dir: true,
+            size: Some(7),
+            raced_under: Some(PathBuf::from("/raced")),
+            denied_under: Some(PathBuf::from("/denied")),
+            ..CacheFiles::default()
+        });
+        let mut outcomes = Vec::new();
+        remove_scratchpads(&racy, &candidate, &mut outcomes);
+        let [
+            Outcome::Failed {
+                what: "scratchpad",
+                path: failed,
+                error,
+                ..
+            },
+            Outcome::Scratchpads { paths, size, .. },
+        ] = outcomes.as_slice()
+        else {
+            panic!("not one failure and one removal");
+        };
+        assert_eq!(failed, "/denied/-runs-r-worktree");
+        assert!(
+            failed_record("scratchpad", failed, error)
+                .0
+                .starts_with("scratchpad /denied/-runs-r-worktree could not be cleaned: "),
+        );
+        assert_eq!(*paths, ["/kept/-runs-r-worktree"]);
+        assert_eq!(size.bytes, 7);
+
+        let again = ports(CacheFiles {
+            dir: true,
+            size: Some(7),
+            raced_under: Some(PathBuf::from("/raced")),
+            ..CacheFiles::default()
+        });
+        let mut outcomes = Vec::new();
+        remove_scratchpads(&again, &candidate, &mut outcomes);
+        let [Outcome::Scratchpads { paths, .. }] = outcomes.as_slice() else {
+            panic!("not one removal");
+        };
+        assert_eq!(
+            *paths,
+            ["/denied/-runs-r-worktree", "/kept/-runs-r-worktree"]
+        );
     }
 
     /// A build cache is cleared only when there is a directory and its

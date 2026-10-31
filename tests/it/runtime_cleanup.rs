@@ -373,61 +373,66 @@ fn a_run_leased_during_the_cleanup_keeps_its_worktree() {
     );
 }
 
-/// Task 405: once its task is canceled, a run whose worktree directory is
-/// already gone loses the branch left behind, recorded as
-/// `worktree_removed` with no bytes.
+/// Ended worktrees in each state Git may leave them in go with their
+/// branch once their task is canceled, one sweep over all of them, each
+/// recorded as `worktree_removed` (`task_canceled`) and none as
+/// `cleanup_failed`:
+/// - task 405: a worktree directory already gone loses the branch left
+///   behind, with no bytes and `worktree_missing`;
+/// - one made before the worktrees had names of their own, at
+///   `<runs>/<id>/worktree`, is found there and removed with its admin dir;
+/// - task 405: one whose `.git` still points at the repository's common
+///   directory before the queue was rebound is repaired (`repaired`);
+/// - task 1587: one Git takes for none (its record gone and its `.git`
+///   broken, as 5 were on 2026-10-03) stays while its task goes on and
+///   then goes as a directory (`broken_git`);
+/// - one whose admin dir went while its `.git` still names it, the name
+///   taken since by another worktree at a path of the same basename, goes
+///   with `no_admin`, neither repaired onto the other's admin dir nor
+///   removing it: the other keeps its admin dir, `HEAD` and branch, and
+///   Git still reads it.
+///
+/// Which state lets what go is the unit tests' of `supervise::cleanup`
+/// (`only_a_broken_git_of_an_ended_task_under_the_runs_dir_lets_the_directory_go`,
+/// `only_an_admin_dir_pointing_back_or_on_the_runs_branch_is_the_worktrees_own`,
+/// `the_records_of_a_cleanup_keep_their_reasons_and_marks`).
 #[test]
-fn a_canceled_task_loses_the_branch_of_a_worktree_already_gone() {
-    let (_dir, repo, db) = fixture();
+fn ended_worktrees_in_each_state_git_leaves_go_with_their_branch_once_their_task_is_over() {
+    let (dir, repo, db) = fixture();
+    {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        for title in ["old name", "old repository", "broken git", "taken admin"] {
+            add_ready_task(&mut queue, title, &[]);
+        }
+    }
     let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
     supervise(&db, &repo, &backend).unwrap();
     backend.join();
     let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let worktree = Path::new(run.worktree_path().unwrap());
-    fs::remove_dir_all(worktree).unwrap();
-    let branch = run.branch().unwrap();
-    assert!(branch_exists(&repo, branch));
-    queue
-        .transition(TaskId::new(1), TaskAction::Cancel)
-        .unwrap();
+    let runs: Vec<TaskRun> = (1..=5)
+        .map(|task| queue.show(TaskId::new(task)).unwrap().runs[0].clone())
+        .collect();
+    let admin_of = |worktree: &Path| {
+        let gitfile = fs::read_to_string(worktree.join(".git")).unwrap();
+        PathBuf::from(gitfile.trim().strip_prefix("gitdir: ").unwrap())
+    };
+    let branches: Vec<String> = runs
+        .iter()
+        .map(|run| run.branch().unwrap().to_owned())
+        .collect();
 
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
-    assert!(!branch_exists(&repo, branch));
-    let removed = payloads_of(&queue, &run, "worktree_removed");
-    assert_eq!(
-        removed,
-        [json!({
-            "path": run.worktree_path().unwrap(),
-            "branch": branch,
-            "bytes": 0,
-            "by": "supervisor",
-            "reason": "task_canceled",
-            "worktree_missing": true,
-        })]
-    );
-    assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
-}
+    // Gone: the worktree directory.
+    let gone = Path::new(runs[0].worktree_path().unwrap()).to_path_buf();
+    fs::remove_dir_all(&gone).unwrap();
+    assert!(branch_exists(&repo, &branches[0]));
 
-/// A run whose worktree was made before the worktrees had names of their
-/// own, at `<runs>/<id>/worktree`, is found there and removed with its
-/// branch once its task is over, as the run's own worktree.
-#[test]
-fn a_worktree_made_under_the_old_name_goes_with_its_branch_once_its_task_is_over() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
-    supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let made = Path::new(run.worktree_path().unwrap());
+    // The old name: its worktree on its branch at `worktree`, under a
+    // record of that name, and recorded there.
+    let made = Path::new(runs[1].worktree_path().unwrap()).to_path_buf();
     assert_eq!(
         made.file_name().unwrap().to_str(),
-        Some(format!("worktree-{}", run.id()).as_str())
+        Some(format!("worktree-{}", runs[1].id()).as_str())
     );
-    // As the run would be had it been made before: its worktree on its
-    // branch at `worktree`, under a record of that name, and recorded there.
-    let branch = run.branch().unwrap().to_owned();
     let old = made.with_file_name("worktree");
     git(
         &repo,
@@ -435,150 +440,104 @@ fn a_worktree_made_under_the_old_name_goes_with_its_branch_once_its_task_is_over
     );
     git(
         &repo,
-        &["worktree", "add", "-q", old.to_str().unwrap(), &branch],
+        &["worktree", "add", "-q", old.to_str().unwrap(), &branches[1]],
     );
     assert!(repo.join(".git/worktrees/worktree").is_dir());
-    let raw = Connection::open(&db).unwrap();
-    raw.execute(
-        "UPDATE task_runs SET worktree_path=?1 WHERE id=?2",
-        rusqlite::params![old.to_str().unwrap(), run.id().as_str()],
-    )
-    .unwrap();
-    let run = queue.run(run.id()).unwrap();
-    assert_eq!(run.worktree_path(), old.to_str());
-    let branch = branch.as_str();
-    queue
-        .transition(TaskId::new(1), TaskAction::Cancel)
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET worktree_path=?1 WHERE id=?2",
+            rusqlite::params![old.to_str().unwrap(), runs[1].id().as_str()],
+        )
         .unwrap();
+    let old_run = queue.run(runs[1].id()).unwrap();
+    assert_eq!(old_run.worktree_path(), old.to_str());
 
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
-    assert!(!old.exists());
-    assert!(!repo.join(".git/worktrees/worktree").exists());
-    assert!(!branch_exists(&repo, branch));
-    let removed = payloads_of(&queue, &run, "worktree_removed");
-    assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(removed[0]["path"], old.to_str().unwrap());
-    assert_eq!(removed[0]["reason"], "task_canceled");
-    assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
-}
-
-/// Task 405: a worktree whose `.git` still points at the repository's
-/// common directory before the queue was rebound is repaired, then
-/// removed with its branch.
-#[test]
-fn a_worktree_left_pointing_at_an_old_repository_is_repaired_and_removed() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
-    supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let worktree = Path::new(run.worktree_path().unwrap());
-    // As if the repository had moved: the same worktree record, under a
-    // common directory that is gone.
-    let gitfile = fs::read_to_string(worktree.join(".git")).unwrap();
-    let admin = gitfile.trim().strip_prefix("gitdir: ").unwrap();
-    let id = Path::new(admin).file_name().unwrap().to_string_lossy();
+    // An old repository: the same worktree record, under a common
+    // directory that is gone.
+    let moved = Path::new(runs[2].worktree_path().unwrap()).to_path_buf();
+    let id = admin_of(&moved)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     fs::write(
-        worktree.join(".git"),
+        moved.join(".git"),
         format!("gitdir: /nonexistent/old repository/.git/worktrees/{id}\n"),
     )
     .unwrap();
-    let branch = run.branch().unwrap();
-    queue
-        .transition(TaskId::new(1), TaskAction::Cancel)
-        .unwrap();
 
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
-    assert!(!worktree.exists());
-    assert!(!branch_exists(&repo, branch));
-    let removed = payloads_of(&queue, &run, "worktree_removed");
-    assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(removed[0]["reason"], "task_canceled");
-    assert_eq!(removed[0]["repaired"], true);
-    assert!(removed[0]["bytes"].as_u64().unwrap() > 0);
-    assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
-}
+    // A broken `.git`, its record gone.
+    let broken = Path::new(runs[3].worktree_path().unwrap()).to_path_buf();
+    fs::remove_dir_all(admin_of(&broken)).unwrap();
+    fs::write(broken.join(".git"), "broken\n").unwrap();
 
-/// Task 1587: a worktree Git takes for none (its record gone and its
-/// `.git` broken, as 5 were on 2026-10-03) stays while its task goes on;
-/// once the task is over, its directory and branch go, recorded as
-/// `worktree_removed` with `broken_git`, and no `cleanup_failed`.
-#[test]
-fn a_worktree_with_a_broken_git_goes_as_a_directory_once_its_task_is_over() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
-    supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let worktree = Path::new(run.worktree_path().unwrap());
-    let gitfile = fs::read_to_string(worktree.join(".git")).unwrap();
-    let admin = gitfile.trim().strip_prefix("gitdir: ").unwrap();
-    fs::remove_dir_all(admin).unwrap();
-    fs::write(worktree.join(".git"), "broken\n").unwrap();
-    let branch = run.branch().unwrap();
-
-    // The task goes on: the worktree stays.
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
-    assert!(worktree.is_dir());
-    assert!(branch_exists(&repo, branch));
-    assert!(payloads_of(&queue, &run, "worktree_removed").is_empty());
-
-    queue
-        .transition(TaskId::new(1), TaskAction::Cancel)
-        .unwrap();
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
-    assert!(!worktree.exists());
-    assert!(!branch_exists(&repo, branch));
-    let removed = payloads_of(&queue, &run, "worktree_removed");
-    assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(removed[0]["reason"], "task_canceled");
-    assert_eq!(removed[0]["broken_git"], true);
-    assert_eq!(removed[0].get("repaired"), None);
-    assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
-}
-
-/// A worktree whose admin dir went while its `.git` still names it (a
-/// landing's `git worktree remove` that failed on the directory), the name
-/// taken since by another worktree at a path of the same basename: its
-/// cleanup neither repairs it onto the other's admin dir nor removes that
-/// one. Only its directory and branch go, recorded with `no_admin`; the
-/// other worktree keeps its admin dir, `HEAD` and branch, and Git still
-/// reads it.
-#[test]
-fn a_worktree_whose_admin_dir_name_another_took_goes_and_leaves_the_others() {
-    let (dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
-    supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let worktree = Path::new(run.worktree_path().unwrap());
-    let gitfile = fs::read_to_string(worktree.join(".git")).unwrap();
-    let admin = PathBuf::from(gitfile.trim().strip_prefix("gitdir: ").unwrap());
+    // An admin dir another worktree took the name of.
+    let taken = Path::new(runs[4].worktree_path().unwrap()).to_path_buf();
+    let admin = admin_of(&taken);
     fs::remove_dir_all(&admin).unwrap();
-    let other = dir.path().join("other").join(worktree.file_name().unwrap());
+    let other = dir.path().join("other").join(taken.file_name().unwrap());
     fs::create_dir_all(other.parent().unwrap()).unwrap();
     git(
         &repo,
         &["worktree", "add", "-b", "other", other.to_str().unwrap()],
     );
-    let taken = fs::read_to_string(other.join(".git")).unwrap();
-    let taken = Path::new(taken.trim().strip_prefix("gitdir: ").unwrap()).to_path_buf();
     assert_eq!(
-        taken.canonicalize().unwrap(),
+        admin_of(&other).canonicalize().unwrap(),
         admin.canonicalize().unwrap(),
         "the other worktree took the name"
     );
-    let branch = run.branch().unwrap();
-    queue
-        .transition(TaskId::new(1), TaskAction::Cancel)
-        .unwrap();
 
+    // The tasks go on: the broken worktree stays, and nothing goes.
     supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
-    assert!(!worktree.exists());
-    assert!(!branch_exists(&repo, branch));
+    assert!(broken.is_dir());
+    for (run, branch) in runs.iter().zip(&branches) {
+        assert!(branch_exists(&repo, branch), "{}", run.id());
+        assert!(payloads_of(&queue, run, "worktree_removed").is_empty());
+    }
+
+    for task in 1..=5 {
+        queue
+            .transition(TaskId::new(task), TaskAction::Cancel)
+            .unwrap();
+    }
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    for (run, branch) in runs.iter().zip(&branches) {
+        assert!(!branch_exists(&repo, branch), "{}", run.id());
+        assert!(payloads_of(&queue, run, "cleanup_failed").is_empty());
+    }
+    for worktree in [&gone, &old, &moved, &broken, &taken] {
+        assert!(!worktree.exists(), "{worktree:?}");
+    }
+    let removed = |run: &TaskRun| {
+        let removed = payloads_of(&queue, run, "worktree_removed");
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        assert_eq!(removed[0]["reason"], "task_canceled");
+        removed.into_iter().next().unwrap()
+    };
+    assert_eq!(
+        removed(&runs[0]),
+        json!({
+            "path": runs[0].worktree_path().unwrap(),
+            "branch": branches[0],
+            "bytes": 0,
+            "by": "supervisor",
+            "reason": "task_canceled",
+            "worktree_missing": true,
+        })
+    );
+    assert_eq!(removed(&old_run)["path"], old.to_str().unwrap());
+    assert!(!repo.join(".git/worktrees/worktree").exists());
+    let repaired = removed(&runs[2]);
+    assert_eq!(repaired["repaired"], true);
+    assert!(repaired["bytes"].as_u64().unwrap() > 0);
+    let broken_git = removed(&runs[3]);
+    assert_eq!(broken_git["broken_git"], true);
+    assert_eq!(broken_git.get("repaired"), None);
+    let no_admin = removed(&runs[4]);
+    assert_eq!(no_admin["no_admin"], true);
+    assert_eq!(no_admin.get("repaired"), None);
+    // The other worktree keeps its admin dir, `HEAD` and branch.
     assert!(branch_exists(&repo, "other"));
     assert!(admin.is_dir());
     assert_eq!(
@@ -596,12 +555,6 @@ fn a_worktree_whose_admin_dir_name_another_took_goes_and_leaves_the_others() {
         git_out(&other, &["symbolic-ref", "HEAD"]),
         "refs/heads/other"
     );
-    let removed = payloads_of(&queue, &run, "worktree_removed");
-    assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(removed[0]["reason"], "task_canceled");
-    assert_eq!(removed[0]["no_admin"], true);
-    assert_eq!(removed[0].get("repaired"), None);
-    assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
 }
 
 /// A landing stops what runs from under the run's worktree before it
@@ -839,157 +792,6 @@ fn a_process_running_from_an_ended_runs_worktree_is_stopped_before_it_goes() {
     supervise_with(&db, &repo, &backend, &options).unwrap();
     assert!(!worktree.exists());
     assert_eq!(listings.load(Ordering::SeqCst), 1);
-}
-
-/// Run files whose removal of a directory under a `raced` directory finds
-/// it gone (another cleanup removed it first), and under a `denied` one
-/// fails.
-struct RacyFiles;
-
-impl RunFiles for RacyFiles {
-    fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
-        LocalRunFiles.create_dir_all(dir)
-    }
-    fn create_new_dir(&self, dir: &Path) -> io::Result<()> {
-        LocalRunFiles.create_new_dir(dir)
-    }
-    fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
-        LocalRunFiles.write(path, contents)
-    }
-    fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
-        LocalRunFiles.copy(from, to)
-    }
-    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        LocalRunFiles.read(path)
-    }
-    fn read_to_string(&self, path: &Path) -> io::Result<String> {
-        LocalRunFiles.read_to_string(path)
-    }
-    fn modified(&self, path: &Path) -> io::Result<SystemTime> {
-        LocalRunFiles.modified(path)
-    }
-    fn read_stamped(&self, path: &Path) -> Result<Option<(SystemTime, Vec<u8>)>> {
-        LocalRunFiles.read_stamped(path)
-    }
-    fn is_file(&self, path: &Path) -> bool {
-        LocalRunFiles.is_file(path)
-    }
-    fn is_dir(&self, path: &Path) -> bool {
-        LocalRunFiles.is_dir(path)
-    }
-    fn exists(&self, path: &Path) -> bool {
-        LocalRunFiles.exists(path)
-    }
-    fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
-        LocalRunFiles.read_dir(dir)
-    }
-    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        LocalRunFiles.rename(from, to)
-    }
-    fn remove_file(&self, path: &Path) -> io::Result<()> {
-        LocalRunFiles.remove_file(path)
-    }
-    fn tree_size(&self, dir: &Path) -> io::Result<Option<u64>> {
-        LocalRunFiles.tree_size(dir)
-    }
-    fn remove_dir_all(&self, dir: &Path) -> io::Result<()> {
-        match dir
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-        {
-            // Someone else removes it between its measure and its removal.
-            Some("raced") => {
-                LocalRunFiles.remove_dir_all(dir)?;
-                Err(io::ErrorKind::NotFound.into())
-            }
-            Some("denied") => Err(io::ErrorKind::PermissionDenied.into()),
-            _ => LocalRunFiles.remove_dir_all(dir),
-        }
-    }
-    fn append_line(&self, path: &Path, line: &str) -> io::Result<()> {
-        LocalRunFiles.append_line(path, line)
-    }
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-        LocalRunFiles.canonicalize(path)
-    }
-    fn write_fenced(&self, path: &Path, text: &str, info: &str, body: &Path) -> Result<()> {
-        LocalRunFiles.write_fenced(path, text, info, body)
-    }
-    fn now(&self) -> SystemTime {
-        LocalRunFiles.now()
-    }
-}
-
-/// Task 1100: a scratchpad another cleanup removed between its measure and
-/// its removal is no failure, and one that cannot be removed under a root
-/// records `cleanup_failed` while what was removed under another root is
-/// recorded as `scratchpad_removed`; a later sweep tries it again.
-#[test]
-fn a_scratchpad_gone_meanwhile_is_no_failure_and_one_failing_root_keeps_the_others() {
-    let (dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
-    supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    queue
-        .transition(TaskId::new(1), TaskAction::Cancel)
-        .unwrap();
-    let roots: Vec<PathBuf> = ["raced", "denied", "kept"]
-        .iter()
-        .map(|name| dir.path().join(name))
-        .collect();
-    let scratchpads: Vec<PathBuf> = roots
-        .iter()
-        .map(|root| scratchpad_of(root, run.worktree_path().unwrap()))
-        .collect();
-    for scratchpad in &scratchpads {
-        fs::create_dir_all(scratchpad.join("session/scratchpad")).unwrap();
-        fs::write(scratchpad.join("session/scratchpad/notes"), "x").unwrap();
-    }
-    let options = SuperviseOptions {
-        files: Some(RunFilesPort(Arc::new(RacyFiles))),
-        scratchpad_roots: Some(roots.clone()),
-        ..sweeping_options()
-    };
-    supervise_with(&db, &repo, &backend, &options).unwrap();
-    backend.join();
-
-    assert!(!scratchpads[0].exists());
-    assert!(scratchpads[1].is_dir());
-    assert!(!scratchpads[2].exists());
-    let removed = payloads_of(&queue, &run, "scratchpad_removed");
-    assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(
-        removed[0]["paths"],
-        json!([scratchpads[2].to_string_lossy()])
-    );
-    let failed = payloads_of(&queue, &run, "cleanup_failed");
-    assert_eq!(failed.len(), 1, "{failed:?}");
-    assert_eq!(failed[0]["path"], scratchpads[1].to_string_lossy().as_ref());
-    assert!(
-        failed[0]["message"]
-            .as_str()
-            .unwrap()
-            .starts_with("scratchpad "),
-        "{failed:?}"
-    );
-
-    // Once it can be removed, the next sweep does.
-    let options = SuperviseOptions {
-        scratchpad_roots: Some(roots),
-        ..sweeping_options()
-    };
-    supervise_with(&db, &repo, &backend, &options).unwrap();
-    backend.join();
-    assert!(!scratchpads[1].exists());
-    let removed = payloads_of(&queue, &run, "scratchpad_removed");
-    assert_eq!(removed.len(), 2, "{removed:?}");
-    assert_eq!(
-        removed[1]["paths"],
-        json!([scratchpads[1].to_string_lossy()])
-    );
 }
 
 /// What a cleanup must leave of a run whose build outputs it removed.
@@ -1244,19 +1046,17 @@ fn a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs() {
     assert_eq!(removed[0]["reason"], "disk_space");
 }
 
-/// State belongs to the single matrix test below, including under cargo test.
+/// State of the test below of a stop that drains.
 struct DrainDisk {
     db: PathBuf,
-    outputs: Vec<PathBuf>,
-    enough: bool,
     stop: Arc<AtomicBool>,
     stop_requested: bool,
-    stopping_passes: usize,
 }
 
 static DRAIN_DISK: Mutex<Option<DrainDisk>> = Mutex::new(None);
 static DRAIN_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Short for ever once a run waits to land.
 fn drain_free_space(_: &Path) -> Option<u64> {
     DRAIN_READS.fetch_add(1, Ordering::SeqCst);
     let mut state = DRAIN_DISK.lock().unwrap();
@@ -1265,184 +1065,135 @@ fn drain_free_space(_: &Path) -> Option<u64> {
     // poll_cleanup(ending=true), including when an empty loop then exits.
     if state.stop_requested {
         state.stop.store(true, Ordering::SeqCst);
-        state.stopping_passes += 1;
     }
     let queued = SqliteQueue::open(&state.db)
         .unwrap()
         .latest_event_of("landing_queued")
         .unwrap()
         .is_some();
-    Some(
-        if queued && (!state.enough || state.outputs.iter().any(|path| path.exists())) {
-            1
-        } else {
-            1 << 40
-        },
-    )
+    Some(if queued { 1 } else { 1 << 40 })
 }
 
-/// Task 648: stop and handoff both finish a disk cleanup before the
-/// landing is decided: a stop keeps the landing's lease until the fresh
-/// reading, then returns it while still short; a handoff starts no landing
-/// and hands the run over leased once the cleanup is done (ADR-t3077-1).
-/// That an
-/// ordinary job stops at its current worktree on a stop or a handoff is
-/// `supervise::cleanup`'s unit tests (`only_a_stop_or_a_handoff_ends_the_cleanup`,
-/// `ending_keeps_only_the_rest_of_a_cleanup_for_room`) and, through the
-/// supervisor, `a_withdrawn_handoff_resumes_the_cleanup`'s replaced handoff.
+/// Task 648: a stop finishes a disk cleanup before the landing is
+/// decided: it keeps the landing's lease until the fresh reading, then
+/// returns it while still short, its landing not started; the cleanup
+/// for room goes to its last candidate, the canceled task's worktree
+/// included, and is counted in `auto_repaired` (`disk_cleanup`). A
+/// handoff's drain, which hands the run over leased once the cleanup is
+/// done (ADR-t3077-1), is
+/// `draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing`'s.
+/// Which job ends after its current worktree on a stop or a handoff, and
+/// whether the drained landing gives its lease back or is handed over,
+/// are the unit tests' of `supervise::cleanup`
+/// (`only_a_stop_or_a_handoff_ends_the_cleanup`,
+/// `ending_keeps_only_the_rest_of_a_cleanup_for_room`), `domain::landing_hold`
+/// and `supervise::host_ops::handoff` (`only_a_handoff_without_a_stop_hands_landings_over`).
 #[test]
 fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
-    // A stop and a handoff, each with a disk cleanup: the matrix's
-    // decisions (which job ends after its current worktree, and whether the
-    // drained landing gives its lease back or is handed over) are the unit
-    // tests' of `supervise::cleanup`, `domain::landing_hold` and
-    // `supervise::execution::handoff_slots`.
-    for (handoff, disk) in [(false, Some(false)), (true, Some(true))] {
-        let (_dir, repo, db) = fixture();
-        declare_rust_profile(&repo);
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        add_ready_task(&mut queue, "second cleanup", &[]);
-        add_ready_task(&mut queue, "third cleanup", &[]);
-        let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
-        supervise(&db, &repo, &backend).unwrap();
-        backend.join();
-        let runs: Vec<_> = (1..=3)
-            .map(|id| queue.show(TaskId::new(id)).unwrap().runs[0].clone())
-            .collect();
-        let outputs: Vec<_> = runs
-            .iter()
-            .map(|run| {
-                let target = Path::new(run.worktree_path().unwrap()).join("target");
-                fs::create_dir_all(&target).unwrap();
-                fs::write(target.join("left"), vec![0; 4096]).unwrap();
-                target
-            })
-            .collect();
-        if disk.is_some() {
-            queue
-                .transition(TaskId::new(3), TaskAction::Cancel)
-                .unwrap();
-            add_ready_task(&mut queue, "landing", &[]);
-        }
-        let files = GatedFiles::default();
-        let stop = Arc::new(AtomicBool::new(false));
-        *DRAIN_DISK.lock().unwrap() = Some(DrainDisk {
-            db: db.clone(),
-            outputs: outputs.clone(),
-            enough: disk == Some(true),
-            stop: stop.clone(),
-            stop_requested: false,
-            stopping_passes: 0,
-        });
-        let options = files.options(SuperviseOptions {
-            stop: stop.clone(),
-            disk: Some(dagq::domain::disk::DiskConfig {
-                min_free_bytes: Some(1 << 30),
-                ..Default::default()
-            }),
-            free_space: drain_free_space,
-            ..supervise_options(1, false)
-        });
-        let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
-        let supervisor = {
-            let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-            thread::spawn(move || {
-                let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
-                runtime::supervise_with_reviewer(
-                    &db,
-                    &repo,
-                    &*backend,
-                    &claude_stub(&db),
-                    &reviewer,
-                    Path::new(env!("CARGO_BIN_EXE_dagq")),
-                    &options,
-                )
-            })
-        };
-        let held = files.held();
-        let landing = disk.map(|_| {
-            wait_until(&db, common::STEP_LIMIT, |q| {
-                q.latest_event_of("landing_queued").unwrap().is_some()
-            });
-            queue.show(TaskId::new(4)).unwrap().runs[0].clone()
-        });
-        // Let check_disk promote the running job before asking to end.
-        let reads = DRAIN_READS.load(Ordering::SeqCst);
-        wait_until(&db, common::STEP_LIMIT, |_| {
-            DRAIN_READS.load(Ordering::SeqCst) >= reads + 3
-        });
-        if handoff {
-            let registration = queue.supervisors().unwrap().pop().unwrap();
-            assert!(
-                queue
-                    .request_handoff(&registration.token, "/next/dagq")
-                    .unwrap()
-            );
+    let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    add_ready_task(&mut queue, "second cleanup", &[]);
+    add_ready_task(&mut queue, "third cleanup", &[]);
+    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let runs: Vec<_> = (1..=3)
+        .map(|id| queue.show(TaskId::new(id)).unwrap().runs[0].clone())
+        .collect();
+    let outputs: Vec<_> = runs
+        .iter()
+        .map(|run| {
+            let target = Path::new(run.worktree_path().unwrap()).join("target");
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join("left"), vec![0; 4096]).unwrap();
+            target
+        })
+        .collect();
+    queue
+        .transition(TaskId::new(3), TaskAction::Cancel)
+        .unwrap();
+    add_ready_task(&mut queue, "landing", &[]);
+    let files = GatedFiles::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    *DRAIN_DISK.lock().unwrap() = Some(DrainDisk {
+        db: db.clone(),
+        stop: stop.clone(),
+        stop_requested: false,
+    });
+    let options = files.options(SuperviseOptions {
+        stop: stop.clone(),
+        disk: Some(DiskConfig {
+            min_free_bytes: Some(GIB),
+            ..DiskConfig::default()
+        }),
+        free_space: drain_free_space,
+        ..supervise_options(1, false)
+    });
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || {
+            let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+        })
+    };
+    files.held();
+    wait_until(&db, common::STEP_LIMIT, |q| {
+        q.latest_event_of("landing_queued").unwrap().is_some()
+    });
+    let landing = queue.show(TaskId::new(4)).unwrap().runs[0].clone();
+    // Let check_disk promote the running job before asking to end.
+    let reads = DRAIN_READS.load(Ordering::SeqCst);
+    wait_until(&db, common::STEP_LIMIT, |_| {
+        DRAIN_READS.load(Ordering::SeqCst) >= reads + 3
+    });
+    DRAIN_DISK.lock().unwrap().as_mut().unwrap().stop_requested = true;
+    // Multiple full passes after the request, while cleanup is gated.
+    let reads = DRAIN_READS.load(Ordering::SeqCst);
+    wait_until(&db, common::STEP_LIMIT, |_| {
+        DRAIN_READS.load(Ordering::SeqCst) >= reads + 4
+    });
+    assert!(!supervisor.is_finished());
+    assert!(queue.run_lease(landing.id()).unwrap().is_some());
+    assert_eq!(
+        queue.run(landing.id()).unwrap().status(),
+        RunStatus::AwaitingIntegration
+    );
+    assert!(payloads_of(&queue, &landing, "integration_started").is_empty());
+    files.open();
+    let outcome = joined(supervisor, "the cleanup and drain to finish").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    for (run, output) in runs.iter().zip(&outputs) {
+        assert!(!output.exists(), "{}", run.id());
+        if run.task_id() == TaskId::new(3) {
+            assert_eq!(payloads_of(&queue, run, "worktree_removed").len(), 1);
         } else {
-            DRAIN_DISK.lock().unwrap().as_mut().unwrap().stop_requested = true;
-        }
-        // Multiple full passes after the request, while cleanup is gated.
-        let reads = DRAIN_READS.load(Ordering::SeqCst);
-        if disk.is_some() || handoff {
-            wait_until(&db, common::STEP_LIMIT, |_| {
-                DRAIN_READS.load(Ordering::SeqCst) >= reads + 4
-            });
-        } else {
-            // With no slots a stop leaves the loop and joins the job.
-            wait_until(&db, common::STEP_LIMIT, |_| {
-                DRAIN_DISK.lock().unwrap().as_ref().unwrap().stopping_passes >= 2
-            });
-        }
-        assert!(!supervisor.is_finished());
-        if let Some(run) = &landing {
-            assert!(queue.run_lease(run.id()).unwrap().is_some());
-            assert_eq!(
-                queue.run(run.id()).unwrap().status(),
-                RunStatus::AwaitingIntegration
-            );
-            assert!(payloads_of(&queue, run, "integration_started").is_empty());
-        }
-        files.open();
-        let outcome = joined(supervisor, "the cleanup and drain to finish").unwrap();
-        backend.join();
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-        for (run, output) in runs.iter().zip(&outputs) {
-            let cleaned = disk.is_some() || *output == held;
-            assert_eq!(
-                !output.exists(),
-                cleaned,
-                "handoff={handoff}, disk={disk:?}"
-            );
-            if disk.is_some() && run.task_id() == TaskId::new(3) {
-                assert_eq!(payloads_of(&queue, run, "worktree_removed").len(), 1);
-            } else {
-                assert_eq!(
-                    payloads_of(&queue, run, "build_outputs_removed").len(),
-                    if cleaned { 2 } else { 1 }
-                );
-            }
-        }
-        if let Some(run) = &landing {
-            // A stop gives the lease back; a handoff keeps it for the next
-            // process, the landing not started.
-            assert_eq!(
-                queue.run_lease(run.id()).unwrap().is_some(),
-                handoff,
-                "handoff={handoff}"
-            );
-            assert_eq!(
-                queue.run(run.id()).unwrap().status(),
-                RunStatus::AwaitingIntegration
-            );
-            assert!(payloads_of(&queue, run, "integration_started").is_empty());
-            let repair = queue.latest_event_of("auto_repaired").unwrap().unwrap();
-            assert_eq!(repair.payload["repair"], "disk_cleanup");
-            assert_eq!(
-                repair.payload["detail"]["runs"].as_array().unwrap().len(),
-                3
-            );
+            assert_eq!(payloads_of(&queue, run, "build_outputs_removed").len(), 2);
         }
     }
+    // The stop gives the lease back, the landing not started.
+    assert!(queue.run_lease(landing.id()).unwrap().is_none());
+    assert_eq!(
+        queue.run(landing.id()).unwrap().status(),
+        RunStatus::AwaitingIntegration
+    );
+    assert!(payloads_of(&queue, &landing, "integration_started").is_empty());
+    let repair = queue.latest_event_of("auto_repaired").unwrap().unwrap();
+    assert_eq!(repair.payload["repair"], "disk_cleanup");
+    assert_eq!(
+        repair.payload["detail"]["runs"].as_array().unwrap().len(),
+        3
+    );
 }
 
 /// State of the drain test below of the rest of a cleanup for room.
@@ -1510,9 +1261,7 @@ fn rest_free_space(_: &Path) -> Option<u64> {
 enum Drain {
     /// While the first job is held.
     Handoff,
-    /// Read first on the pass the rest of the cleanup starts.
-    HandoffAtRest,
-    /// Read first on that pass too, once the rest's job finished and freed
+    /// Read first on the pass the rest of the cleanup starts, once the rest's job finished and freed
     /// enough after the disk was read short.
     HandoffAfterRest,
 }
@@ -1533,18 +1282,17 @@ fn rest_passes(db: &Path, count: usize) {
 /// `auto_repaired` (`disk_cleanup`). The handoff waits for that rest, and
 /// the run short of room to land keeps its lease and starts no landing: it
 /// is handed over leased once the rest is done (ADR-t3077-1), so too when
-/// the handoff is read first on the pass the rest starts, and when the
-/// rest finished between that pass's reading and the handoff.
-/// The other cases (a stop, still short) differ only in the decisions of
+/// the rest finished between the reading of the pass it started on and the
+/// handoff, read after the cleanup was polled on that pass (the pass order
+/// of `supervise::execution`): the race's representative. A handoff read
+/// first on that pass while the rest is still held differs from it only in
+/// the rest's job not having finished, which
 /// `supervise::cleanup::tests::ending_keeps_only_the_rest_of_a_cleanup_for_room`
-/// and `domain::landing_hold`'s unit tests.
+/// counts the same; the other cases (a stop, still short) differ only in
+/// that test's decisions and `domain::landing_hold`'s unit tests.
 #[test]
 fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
-    for drain in [
-        Drain::Handoff,
-        Drain::HandoffAtRest,
-        Drain::HandoffAfterRest,
-    ] {
+    for drain in [Drain::Handoff, Drain::HandoffAfterRest] {
         let (_dir, repo, db) = fixture();
         declare_rust_profile(&repo);
         let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
@@ -1778,8 +1526,6 @@ enum Withdrawal {
     /// Withdrawn as the supervisor takes it, once the job stopped after its
     /// first worktree.
     AtTake,
-    /// Replaced by another binary while the job is held (task 1286).
-    Replaced,
 }
 
 /// Task 1427: a handoff withdrawn while the supervisor drains brings the
@@ -1788,21 +1534,20 @@ enum Withdrawal {
 /// is followed to its last candidate (`build_outputs_removed`,
 /// `worktree_removed`). A shortage of room after that runs a cleanup for
 /// room before any disk ask: with enough, no ask is opened and the run
-/// lands; still short, the ask is opened as before. A handoff replaced by
-/// another binary goes on draining: the job stops after its current
-/// worktree and nothing more is cleaned before the exec.
+/// lands; still short, the ask is opened as before. A withdrawal met at
+/// the take (a take that changed no row, read again) is the race's
+/// representative. A handoff replaced by another binary goes on draining
+/// for it: `supervise::host_ops::handoff`'s unit tests
+/// (`a_request_read_again_resumes_claims_or_drains_for_the_binary_asked`)
+/// and, for the exec of the other binary, `runtime_handoff`'s.
 #[test]
 fn a_withdrawn_handoff_resumes_the_cleanup() {
-    // Each way the handoff ends once; whether the room after it is enough
+    // Each way a withdrawal is read once (at a pass, at the take); whether the room after it is enough
     // is the disk's decision
     // (`supervise::disk::tests::the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done`),
     // and what a withdrawal does to the cleanup is
     // `supervise::cleanup::tests::a_withdrawn_end_takes_requests_again_and_asks_for_every_ended_run`.
-    for (withdrawal, enough) in [
-        (Withdrawal::WhileHeld, false),
-        (Withdrawal::AtTake, true),
-        (Withdrawal::Replaced, true),
-    ] {
+    for (withdrawal, enough) in [(Withdrawal::WhileHeld, false), (Withdrawal::AtTake, true)] {
         let case = format!("{withdrawal:?}, enough={enough}");
         let (_dir, repo, db) = fixture();
         declare_rust_profile(&repo);
@@ -1897,30 +1642,10 @@ fn a_withdrawn_handoff_resumes_the_cleanup() {
                 assert!(queue.cancel_handoff(&token, "/next/dagq").unwrap());
                 withdrawn_passes(&db, 4);
             }
-            Withdrawal::Replaced => {
-                assert!(queue.request_handoff(&token, "/other/dagq").unwrap());
-                withdrawn_passes(&db, 4);
-            }
             Withdrawal::AtTake => {}
         }
         assert!(!supervisor.is_finished(), "{case}");
         files.open();
-
-        if withdrawal == Withdrawal::Replaced {
-            let outcome = joined(supervisor, "the drain of the replaced handoff").unwrap();
-            backend.join();
-            assert_eq!(outcome["errors"], json!([]), "{outcome}");
-            assert_eq!(outcome["outcome"], "handoff", "{outcome}");
-            assert_eq!(outcome["binary"], "/other/dagq", "{outcome}");
-            // Still ending: the job stopped after its current worktree and
-            // nothing cleaned the rest before the exec.
-            assert!(!targets[0].exists());
-            assert!(targets[1].is_dir());
-            assert!(canceled_worktree.is_dir());
-            assert!(payloads_of(&queue, &canceled, "worktree_removed").is_empty());
-            assert!(idle_target.join("debug/big").is_file());
-            continue;
-        }
 
         // Back to normal: the rest of the ended runs is cleaned.
         wait_until(&db, common::STEP_LIMIT, |queue| {
@@ -2367,113 +2092,6 @@ fn a_drain_on_a_provisioning_failure_takes_cleanup_requests_and_lets_the_job_fin
         .map(|event| event.payload)
         .collect();
     assert!(failed.is_empty(), "{failed:?}");
-}
-
-fn half_a_gibibyte(_: &Path) -> Option<u64> {
-    Some(GIB / 2)
-}
-
-/// Task 1627: a cleanup for room that runs longer than the interval between
-/// two of them asks for no other while it runs, and the pass after it ends
-/// judges the reading after it: still short of what a claim needs, the one
-/// disk ask opens and `claim_held` (`disk_space`) is recorded, with no
-/// other cleanup for room in between: the next measure of the run's build
-/// outputs (the ordinary sweep's) is held too, which would hold the disk
-/// ask were it another cleanup for room. The interval is shortened here; the
-/// decisions are the unit tests' of `asks_for_cleanup` and
-/// `add_disk_request`.
-#[test]
-fn the_pass_after_a_long_cleanup_for_room_asks_and_holds() {
-    const INTERVAL: Duration = Duration::from_millis(200);
-    let (_dir, repo, db) = fixture();
-    declare_rust_profile(&repo);
-    let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
-    supervise(&db, &repo, &building).unwrap();
-    building.join();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let ended = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    assert_eq!(ended.status(), RunStatus::Failed);
-    let target = Path::new(ended.worktree_path().unwrap()).join("target");
-    fs::create_dir_all(target.join("debug")).unwrap();
-    fs::write(target.join("debug/again"), vec![0u8; 4096]).unwrap();
-    add_ready_task(&mut queue, "second task", &[]);
-    let next = GatedFiles::default();
-    let files = GatedFiles {
-        then: Some(Box::new(next.clone())),
-        ..GatedFiles::default()
-    };
-    let stop = Arc::new(AtomicBool::new(false));
-    let options = files.options(SuperviseOptions {
-        stop: stop.clone(),
-        disk: Some(DiskConfig {
-            min_free_bytes: Some(GIB),
-            ..DiskConfig::default()
-        }),
-        free_space: half_a_gibibyte,
-        disk_cleanup_interval: INTERVAL,
-        ..supervise_options(1, false)
-    });
-    let passes = options.passes.clone();
-    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
-    };
-    let disk_asks = |queue: &SqliteQueue| -> Vec<dagq::domain::Ask> {
-        queue
-            .asks(dagq::application::AskQuery {
-                all: true,
-                ..Default::default()
-            })
-            .unwrap()
-            .into_iter()
-            .filter(|ask| ask.kind == AskKind::QueueHold && ask.subject.as_deref() == Some("disk"))
-            .collect()
-    };
-    let events = |queue: &SqliteQueue, kind: &str| -> Vec<Value> {
-        queue
-            .all_events()
-            .unwrap()
-            .into_iter()
-            .filter(|event| event.kind.as_str() == kind)
-            .map(|event| event.payload)
-            .filter(|payload| kind != "auto_repaired" || payload["repair"] == "disk_cleanup")
-            .collect()
-    };
-    // The cleanup for room of the first pass is held well past the
-    // interval: nothing is asked for or held meanwhile.
-    assert_eq!(files.held(), target);
-    let held_at = Instant::now();
-    wait_until(&db, common::STEP_LIMIT, |_| {
-        held_at.elapsed() > 4 * INTERVAL
-    });
-    await_passes(&passes, SOME_PASSES);
-    assert!(disk_asks(&queue).is_empty());
-    assert!(events(&queue, "claim_held").is_empty());
-    assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
-
-    files.open();
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        !disk_asks(queue).is_empty() && !events(queue, "claim_held").is_empty()
-    });
-    await_passes(&passes, SOME_PASSES);
-    let repaired = events(&queue, "auto_repaired");
-    assert_eq!(repaired.len(), 1, "{repaired:?}");
-    assert_eq!(repaired[0]["detail"]["runs"], json!([ended.id().as_str()]));
-    assert!(!target.exists());
-    let asks = disk_asks(&queue);
-    assert_eq!(asks.len(), 1, "{asks:?}");
-    assert!(asks[0].is_open());
-    let held = events(&queue, "claim_held");
-    assert_eq!(held.len(), 1, "{held:?}");
-    assert_eq!(held[0]["reason"], "disk_space");
-    assert!(events(&queue, "landing_held").is_empty());
-    assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
-    next.open();
-    stop.store(true, Ordering::SeqCst);
-    let outcome = joined(supervisor, "the supervisor to stop").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
 }
 
 /// A worker that builds, asks a `worker_question` and ends its turn; the

@@ -263,22 +263,22 @@ name = "runtime_cleanup::a_skipped_resume_waits_for_the_cleanup_of_its_build_out
 reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557/1558 が supervise::resume を移した後）: skip_resume's own may_lease/defer guard, which no other test reaches"
 task = 1715
 
-# 30.822s, class R
+# two cases (task 3767), each about one case of the 30.8s of three before, class B
 [[test]]
 name = "runtime_cleanup::a_withdrawn_handoff_resumes_the_cleanup"
-reason = "B 境界（守る境界）: the supervisor's wiring of a handoff withdrawn while draining, at the take and replaced, back to the cleanup (one case each); the decisions are supervise::cleanup and supervise::disk unit tests"
+reason = "B 境界（守る境界）: the supervisor's wiring of a handoff withdrawn while draining back to the cleanup, at a pass's reading and at the take that changed no row (the race of a withdrawal met at the take, one case each); the replacement and the decisions are supervise::host_ops::handoff, supervise::cleanup and supervise::disk unit tests"
 task = 1715
 
-# 28.091s, class B
+# 15.0〜18.5s in a stress of 60s under the host's load of other runs (task 3767), class B
 [[test]]
 name = "runtime_cleanup::draining_finishes_disk_cleanup_before_deciding_a_landing"
-reason = "B 境界（守る境界）: representative drain/handoff + cleanup wiring (a stop and a handoff; the matrix's decisions are supervise::cleanup and domain::landing_hold unit tests)"
+reason = "B 境界（守る境界）: representative stop drain + disk cleanup wiring (one case: a stop; the handoff's drain is draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing's, and the decisions are supervise::cleanup, supervise::host_ops::handoff and domain::landing_hold unit tests)"
 task = 1715
 
-# 38.897s, class R
+# two cases (task 3767), each about one case of the 38.9s of three before, class B
 [[test]]
 name = "runtime_cleanup::draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing"
-reason = "B 境界（守る境界）: the drain waits for the rest of a cleanup for room before deciding a landing, a handoff while the first job, on the pass the rest starts and once it finished unjoined (pass order in execution.rs); the decisions are supervise::cleanup unit tests"
+reason = "B 境界（守る境界）: the drain waits for the rest of a cleanup for room before deciding a landing and hands the run over leased, a handoff while the first job is held and one read after the cleanup was polled on the pass the rest started and finished unjoined (pass order in supervise::execution, the race's representative); the decisions are supervise::cleanup unit tests"
 task = 1715
 
 # 33.659s, class D
@@ -292,11 +292,6 @@ task = 1715
 name = "runtime_cleanup::a_run_waiting_for_an_answer_is_a_candidate_unless_a_lease_or_a_session_holds_it"
 reason = "B 境界（守る境界）: SQLite, which runs a lease or a live session keeps out of the cleanup's candidates; its time is the review that leaves the run waiting for an answer"
 task = 1715
-
-[[test]]
-name = "runtime_cleanup::a_worktree_whose_admin_dir_name_another_took_goes_and_leaves_the_others"
-reason = "B 境界（守る境界）: Git's worktree admin dirs, one case: an ended run's worktree whose admin dir name another worktree took is removed without repairing onto or removing the other's; the ownership decision is a supervise::cleanup unit test, and the time is the run the fixture supervises"
-task = 2935
 
 [[test]]
 name = "runtime_cleanup::a_landing_whose_worktree_removal_fails_stops_its_processes_and_leaves_no_git"
@@ -1675,12 +1670,6 @@ task = 2607
 [[test]]
 name = "runtime_cleanup::a_drain_on_a_provisioning_failure_takes_cleanup_requests_and_lets_the_job_finish"
 reason = "B 境界（supervisor の配線・復旧）: provisioning の失敗で drain する supervisor が掃除の頼みを受け続け、走っている job を終わらせることを実際の supervisor・worker の session・queue で確かめる"
-task = 2607
-
-# 8.0s (stress under the host's load of other runs, task 2607)
-[[test]]
-name = "runtime_cleanup::the_pass_after_a_long_cleanup_for_room_asks_and_holds"
-reason = "B 境界（SQLite・supervisor の配線）: 間隔より長く走った空き容量のための掃除の後の周回が、読み直した空きで claim の hold と ask を記録することを実際の supervisor と queue で確かめる。間隔の判断は supervise::disk の unit test"
 task = 2607
 
 [[test]]

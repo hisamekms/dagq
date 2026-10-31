@@ -1,0 +1,8 @@
+# The items of task 3767 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 26.8s under a load average of 22 of other runs: one fixture whose supervisor runs five tasks, then two sweeps over five worktrees each broken another way in Git
+[[test]]
+name = "runtime_cleanup::ended_worktrees_in_each_state_git_leaves_go_with_their_branch_once_their_task_is_over"
+reason = "B 境界（Git・SQLite）: 終わった task の worktree を Git が残しうる 5 つの状態（ディレクトリが無い・古い名前・古い repository を指す .git・壊れた .git・admin dir の名前を他が取った）で、1 回の掃除が実の git で branch ごと消し（repair・ディレクトリとしての削除・他の worktree を残すこと）、worktree_removed の印を SQLite の event に記録することを確かめる。5 本の IT を 1 つの fixture にまとめたもの。どの状態で何を消すかの判断は supervise::cleanup の unit test"
+task = 3767
