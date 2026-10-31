@@ -33,6 +33,7 @@ fn hand_off_with_when(
     options: SuperviseOptions,
     condition: impl FnMut(&mut SqliteQueue) -> bool,
 ) -> (Value, String) {
+    let mode = options.mode;
     let supervisor = {
         let (db, repo, backend) = (db.to_owned(), repo.to_owned(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
@@ -43,6 +44,13 @@ fn hand_off_with_when(
     let registration = only_registration(db);
     assert!(registration.handoff_accepted, "{registration:?}");
     assert_eq!(registration.handoff_binary, None);
+    // The mode supervise was given, none when started by hand, as
+    // `status` shows it.
+    assert_eq!(registration.mode, mode);
+    assert_eq!(
+        runtime::status(db).unwrap()["supervisors"][0]["mode"],
+        json!(mode.map(SupervisorMode::as_str))
+    );
     let queue = SqliteQueue::open(db).unwrap();
     assert!(
         queue
@@ -410,10 +418,12 @@ receipt \"$(git rev-parse HEAD)\"",
 /// without reviewing or resuming it. With `stop`, a stop asked after the
 /// handoff wins over it, and the drain verifies the landing once more in
 /// its own attempt and lands it, as one that does not drain, also when the
-/// verification fails before a pass read the stop. Which failures a
-/// handoff hands over, a host's too (ADR-t639-1), is the unit tests' of
-/// `integrate`.
-fn hands_over_a_landing_verified_again(stop: Option<StopOver>) {
+/// verification fails before a pass read the stop (the landing reads the
+/// loop's stop itself, ADR-t3344-1 decision 3). Which failures a handoff
+/// hands over, a host's too (ADR-t639-1), and which pairs of the
+/// handoff's flag and the stop hand a landing over are the unit tests' of
+/// `integrate` and `supervise::host_ops::handoff`.
+fn hands_over_a_landing_verified_again(stop: bool) {
     let (dir, repo, db) = fixture();
     let release = db.with_extension("release");
     let failed = db.with_extension("failed");
@@ -448,7 +458,7 @@ fn hands_over_a_landing_verified_again(stop: Option<StopOver>) {
     let options = SuperviseOptions {
         // A long tick between the drain's passes, so the verification
         // fails before a pass reads the stop.
-        tick: if stop == Some(StopOver::BeforeAPass) {
+        tick: if stop {
             Duration::from_millis(500)
         } else {
             TEST_TICK
@@ -476,20 +486,15 @@ fn hands_over_a_landing_verified_again(stop: Option<StopOver>) {
     let mut queue = SqliteQueue::open(&db).unwrap();
     assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
     await_passes(&passes, SOME_PASSES);
-    if let Some(over) = stop {
-        if over == StopOver::BeforeAPass {
-            // Past the pass in progress, which reads the stop after it is
-            // counted, and well within the tick that follows it.
-            thread::sleep(Duration::from_millis(100));
-        }
+    if stop {
+        // Past the pass in progress, which reads the stop after it is
+        // counted, and well within the tick that follows it.
+        thread::sleep(Duration::from_millis(100));
         stopped.store(true, Ordering::SeqCst);
-        if over == StopOver::AfterPasses {
-            await_passes(&passes, SOME_PASSES);
-        }
     }
     std::fs::write(&release, "go").unwrap();
     let outcome = joined(supervisor, "the supervisor asked to hand off");
-    if stop.is_some() {
+    if stop {
         assert_ne!(outcome["outcome"], "handoff", "{outcome}");
         assert_eq!(outcome["errors"], json!([]), "{outcome}");
         let detail = queue.show(TaskId::new(1)).unwrap();
@@ -569,30 +574,14 @@ fn hands_over_a_landing_verified_again(stop: Option<StopOver>) {
     assert_eq!(verifications[1]["exit_code"], 0);
 }
 
-/// When the stop of [`hands_over_a_landing_verified_again`] comes over
-/// its handoff.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StopOver {
-    /// Read by some passes before the verification fails.
-    AfterPasses,
-    /// Just before the verification fails, read by the landing before
-    /// the next pass sets the handoff's flag (ADR-t3344-1 decision 3).
-    BeforeAPass,
-}
-
 #[test]
 fn a_handoff_hands_over_a_landing_whose_flaky_verification_would_be_done_again() {
-    hands_over_a_landing_verified_again(None);
-}
-
-#[test]
-fn a_stop_over_a_handoff_verifies_a_flaky_landing_once_more_itself() {
-    hands_over_a_landing_verified_again(Some(StopOver::AfterPasses));
+    hands_over_a_landing_verified_again(false);
 }
 
 #[test]
 fn a_stop_over_a_handoff_before_its_next_pass_verifies_a_flaky_landing_once_more_itself() {
-    hands_over_a_landing_verified_again(Some(StopOver::BeforeAPass));
+    hands_over_a_landing_verified_again(true);
 }
 
 /// A supervisor of the handoff's tests, given the `dagq` the test owns
@@ -1020,12 +1009,15 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
 /// loaded its agent or launchd started it on its own (at login, after a
 /// restart, by `KeepAlive`): the supervisor writes that mode into its
 /// registration without `up`, so `status` shows it and the automatic
-/// update leaves a gone one to its agent. One started without `--mode` is
-/// one started by hand: no mode, and the update does not start it again.
-/// The process a handoff continues it in gets no `--mode` and keeps the
-/// registration's.
-fn the_registration_has_the_mode_supervise_was_given(mode: Option<SupervisorMode>) {
+/// update leaves a gone one to its agent. The process a handoff continues
+/// it in gets no `--mode` and keeps the registration's. One started
+/// without `--mode` registers none ([`hand_off_with_when`], which every
+/// other handoff here starts so), and that the update does not start it
+/// again is the unit test of `update::restart_of`.
+#[test]
+fn a_supervisor_launchd_started_registers_its_mode_without_up() {
     use dagq::application::update::{Restart, restart_of};
+    let mode = Some(SupervisorMode::Launchd);
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, GATED_AGENT));
     let (_, token) = hand_off_with_when(
@@ -1048,13 +1040,7 @@ fn the_registration_has_the_mode_supervise_was_given(mode: Option<SupervisorMode
     let registration = only_registration(&db);
     assert_eq!(registration.mode, mode);
     let restart = restart_of(&registration, &db.to_string_lossy(), &[]);
-    match mode {
-        Some(_) => assert_eq!(restart.unwrap(), Restart::Launchd),
-        None => {
-            let error = format!("{:#}", restart.unwrap_err());
-            assert!(error.contains("started by hand"), "{error}");
-        }
-    }
+    assert_eq!(restart.unwrap(), Restart::Launchd);
     let status = runtime::status(&db).unwrap();
     assert_eq!(
         status["supervisors"][0]["mode"],
@@ -1093,16 +1079,6 @@ fn the_registration_has_the_mode_supervise_was_given(mode: Option<SupervisorMode
     let outcome = joined(next, "the supervisor after the handoff").unwrap();
     backend.join();
     assert_eq!(outcome["outcome"], "finished", "{outcome}");
-}
-
-#[test]
-fn a_supervisor_launchd_started_registers_its_mode_without_up() {
-    the_registration_has_the_mode_supervise_was_given(Some(SupervisorMode::Launchd));
-}
-
-#[test]
-fn a_supervisor_started_without_a_mode_registers_none() {
-    the_registration_has_the_mode_supervise_was_given(None);
 }
 
 /// Task 640: a handoff during a resume whose `handoff.json` could not be
@@ -1189,39 +1165,15 @@ fn a_handoff_without_its_state_during_a_resume_still_watches_the_session() {
 /// watching the session: no second resume and no second resolution
 /// request, and the run lands. The adoption is `run_adopted` and
 /// `auto_repaired` (`repair: resume_adopted`, `handoff: false`).
+///
+/// That an earlier session's recovery wait does not hold the adopted
+/// resume (it is watched from its own `resume_started`) is the unit tests'
+/// of `supervise::execution::resume` and `supervise::execution::recovery`.
 #[test]
 fn a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter() {
-    adopted_resume(&[]);
-}
-
-/// The same adopted resume of a run whose first session's `stalled`
-/// recovery job answered `wait` until an hour on: the wait is that
-/// session's, not the resume's, and the resume reaches its receipt and
-/// lands as before with no recovery job of its own.
-#[test]
-fn an_adopted_resume_after_a_stalled_wait_of_the_first_session_lands() {
-    let detail = adopted_resume(&earlier_stalled_wait());
-    assert_eq!(payloads(&detail, "recovery_requested").len(), 1);
-    assert_eq!(payloads(&detail, "recovery_finished").len(), 1);
-}
-
-/// [`a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter`]
-/// with `earlier` recorded once the run is parked; the landed task's detail.
-fn adopted_resume(earlier: &[(&'static str, Value)]) -> dagq::domain::TaskDetail {
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let (run, _) = parked_conflict(&repo, &db, &backend);
-    let queue = SqliteQueue::open(&db).unwrap();
-    for (kind, payload) in earlier {
-        queue
-            .record_runtime_event(
-                run.id(),
-                EventKind::from_name(kind).unwrap(),
-                payload.clone(),
-            )
-            .unwrap();
-    }
-    drop(queue);
     backend.resume_script_for(
         2,
         "await_message; await_file \"$EXIT.go\"; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
@@ -1305,7 +1257,6 @@ fn adopted_resume(earlier: &[(&'static str, Value)]) -> dagq::domain::TaskDetail
     let finished = payloads(&detail, "resume_finished");
     assert_eq!(finished.len(), 1);
     assert_eq!(finished[0]["outcome"], "resolved");
-    detail
 }
 
 /// A handoff that finds a leased run it has nothing to rebuild from (a
@@ -2359,12 +2310,9 @@ enum Unsent {
     /// In `handoff.json` as the supervisor wrote it, with what the request
     /// took.
     Kept,
-    /// In a `handoff.json` an older binary wrote, without what the request
-    /// took, whose request (and `resume-1.txt`) is one written before the
-    /// limits, past its whole limit.
-    Old,
     /// Without `handoff.json`, adopted from the run's events and its
-    /// `resume-1.txt`, which holds such a request.
+    /// `resume-1.txt`, which holds a request written before the limits,
+    /// past its whole limit.
     Adopted,
 }
 
@@ -2381,18 +2329,13 @@ fn a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it_once() {
     handoff_before_the_resume_request(Unsent::Kept);
 }
 
-/// ADR-t2072-1: a request carried over by an older binary's
-/// `handoff.json`, which says nothing of what it took, is measured anew
-/// when it is sent; one written before the limits is cut to the whole
-/// limit, keeping its start, and names `resume-1.txt`, which has it whole.
-#[test]
-fn a_resume_request_from_an_old_handoff_state_is_measured_and_cut_to_its_limit() {
-    handoff_before_the_resume_request(Unsent::Old);
-}
-
-/// ADR-t2072-1: the same for a resume adopted from the run's events after
-/// a handoff that left no `handoff.json`: its request, read from
-/// `resume-1.txt`, is measured anew and cut when it is sent.
+/// ADR-t2072-1: a resume adopted from the run's events after a handoff
+/// that left no `handoff.json`: its request, read from `resume-1.txt`, is
+/// measured anew and cut when it is sent. A request an older binary's
+/// `handoff.json` carried without what it took is measured anew the same
+/// way: that it parses so, and how a request taken over is measured and
+/// cut, are the unit tests of `supervise::host_ops::handoff` and
+/// `supervise::execution::resume`.
 #[test]
 fn a_resume_request_adopted_after_a_handoff_is_measured_and_cut_to_its_limit() {
     handoff_before_the_resume_request(Unsent::Adopted);
@@ -2430,7 +2373,7 @@ fn handoff_before_the_resume_request(unsent: Unsent) {
     );
     let run_dir = Path::new(run.run_dir().unwrap());
     let snapshot = run_dir.join("handoff.json");
-    let mut written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    let written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
     assert_eq!(written["phase"], "resume");
     assert_eq!(written["message_sent_at"], Value::Null, "{written}");
     assert_eq!(
@@ -2446,18 +2389,9 @@ fn handoff_before_the_resume_request(unsent: Unsent) {
         written["message"].as_str().unwrap(),
         "旧".repeat(20_000)
     );
-    match unsent {
-        Unsent::Kept => {}
-        Unsent::Old => {
-            written["message"] = json!(old);
-            written.as_object_mut().unwrap().remove("message_bytes");
-            fs::write(&snapshot, written.to_string()).unwrap();
-            fs::write(&file, &old).unwrap();
-        }
-        Unsent::Adopted => {
-            fs::remove_file(&snapshot).unwrap();
-            fs::write(&file, &old).unwrap();
-        }
+    if unsent == Unsent::Adopted {
+        fs::remove_file(&snapshot).unwrap();
+        fs::write(&file, &old).unwrap();
     }
 
     // An adoption needs the resumed session's wrapper alive, so it starts
@@ -2587,25 +2521,14 @@ fn handoff_before_the_resume_request(unsent: Unsent) {
 /// request was sent: the next process, from the `handoff.json` that keeps
 /// the handoff and what it took, sends the handoff once, whole, held to the
 /// handoff's limit, into the new session the first process recorded,
-/// recording no second `session_renewed`; the run lands.
+/// recording no second `session_renewed`; the run lands. Adopted from the
+/// run's events without `handoff.json`, the handoff read from
+/// `resume-1.txt` is measured anew against the handoff's limit, not the
+/// resolution request's (the unit test of `supervise::execution::resume`),
+/// and sent as any adopted resume's request
+/// ([`a_resume_request_adopted_after_a_handoff_is_measured_and_cut_to_its_limit`]).
 #[test]
 fn a_handoff_before_a_new_sessions_request_lets_the_next_supervisor_send_it_once() {
-    handoff_before_a_new_sessions_request(false);
-}
-
-/// The same resume adopted from the run's events after a handoff that left
-/// no `handoff.json`: the next process reads the handoff from
-/// `resume-1.txt`, measures it anew against the handoff's limit rather
-/// than the resolution request's, and sends it once, whole, into the new
-/// session, recording no second `session_renewed`.
-#[test]
-fn a_new_sessions_request_adopted_after_a_handoff_is_sent_once_whole() {
-    handoff_before_a_new_sessions_request(true);
-}
-
-/// [`a_handoff_before_a_new_sessions_request_lets_the_next_supervisor_send_it_once`]
-/// from `handoff.json`, or `adopted` from the run's events.
-fn handoff_before_a_new_sessions_request(adopted: bool) {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, _) = parked_conflict(&repo, &db, &backend);
@@ -2636,24 +2559,12 @@ fn handoff_before_a_new_sessions_request(adopted: bool) {
     let handoff = fs::read_to_string(run_dir.join("resume-1.txt")).unwrap();
     assert_eq!(written["message"], json!(handoff));
     assert!(handoff.starts_with(HANDOFF_OPENING));
-    let early = adopted.then(|| {
-        fs::remove_file(&snapshot).unwrap();
-        let wrapper = start_resume_wrapper(&backend, &run);
-        wait_until(&db, crate::common::STEP_LIMIT, |queue| {
-            queue
-                .processes(run.id())
-                .unwrap()
-                .iter()
-                .any(|p| p.role == "wrapper" && p.exited_at.is_none())
-        });
-        wrapper
-    });
     let next = {
         let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
         thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
     };
     wait_until(&db, crate::common::STEP_LIMIT, |_| !snapshot.exists());
-    let wrapper = early.unwrap_or_else(|| start_resume_wrapper(&backend, &run));
+    let wrapper = start_resume_wrapper(&backend, &run);
     wait_until(&db, Duration::from_secs(30), |queue| {
         !payloads(&queue.show(TaskId::new(2)).unwrap(), "resume_request_sent").is_empty()
     });
@@ -2698,7 +2609,7 @@ fn handoff_before_a_new_sessions_request(adopted: bool) {
     let calls = stub_calls(&detail.runs[0]);
     assert!(
         calls.last().unwrap().starts_with(&format!("start {name} ")),
-        "{adopted}: {calls:?}"
+        "{calls:?}"
     );
 }
 

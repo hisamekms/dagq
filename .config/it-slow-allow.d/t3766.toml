@@ -1,0 +1,8 @@
+# The items of task 3766 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 7.1〜7.4s in a stress 5: a supervise to a running run, the handoff, and the next process's supervise under the same token
+[[test]]
+name = "runtime_handoff::a_supervisor_launchd_started_registers_its_mode_without_up"
+reason = "B 境界（supervisor の配線・SQLite・handoff）: supervise に渡した mode を実の supervisor が SQLite の登録に書き、status がそれを見せ、handoff の後に同じ token で続く次の process が mode なしで起動しても登録の mode を保つことを確かめる。mode から再起動の仕方を選ぶ判断は update::restart_of の unit test、mode 無しの登録は同じ module の hand_off_with_when を使う handoff の test が確かめる"
+task = 3766

@@ -290,39 +290,14 @@ fn hands_over_with_no_e2e(
     );
 }
 
-/// ADR-t3077-1 decision 1 when the request and the e2e race: a handoff
-/// asked in the pass that would start the e2e of a run that passed its
-/// review and waits in its slot to land, after that pass read none,
-/// starts no e2e. The run is handed over with its lease (the next process
-/// lands it as in
+/// ADR-t3077-1 decision 1 when the request and the e2e race, for a run a
+/// person's `land` queued: a handoff asked after the pass read none and
+/// after the run was leased for its e2e, before the e2e starts, starts
+/// none. The run is handed over with that lease (the next process lands
+/// it as in
 /// `runtime_handoff::a_handoff_starts_no_landing_and_hands_over_a_run_awaiting_the_slot`).
-#[test]
-fn a_handoff_asked_after_the_pass_read_none_starts_no_e2e_of_that_pass() {
-    let (dir, repo, db) = fixture();
-    with_e2e_paths(&repo, "[\"change.txt\"]");
-    let ran = dir.path().join("ran");
-    let backend = TestWorkspace::new(
-        &db,
-        false,
-        "printf 'fixed\\n' > fixed.txt; git add fixed.txt; commit work; receipt \"$(git rev-parse HEAD)\"",
-    );
-    let reviewer = TestReviewer::new(&[verdict("pass", &[], "ready to land")]);
-    // Not `once`: it returns on the handoff.
-    hands_over_with_no_e2e(
-        &db,
-        &repo,
-        &backend,
-        &reviewer,
-        racing_e2e_options(&ran, 1, false),
-        landing_queued,
-        &ran,
-    );
-}
-
-/// ADR-t3077-1 decision 1 for a run a person's `land` queued: a handoff
-/// asked after the pass read none and after the run was leased for its
-/// e2e, before the e2e starts, starts none. The run is handed over with
-/// that lease.
+/// A run that passed its review and waits in its slot reaches the same
+/// start of the e2e, refused alike.
 #[test]
 fn a_handoff_asked_after_a_queued_run_was_leased_for_its_e2e_starts_no_e2e() {
     let (dir, repo, db) = fixture();

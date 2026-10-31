@@ -4,7 +4,7 @@
 # 5.5s in a stress: a supervise to the approve_landing ask, then the land answer's supervise that hands off
 [[test]]
 name = "runtime_handoff_race::a_handoff_asked_after_a_queued_run_was_leased_for_its_e2e_starts_no_e2e"
-reason = "B 境界（守る境界）: 人の land の答えで列に並んだ run を supervise が lease_for_e2e で slot に取った後、e2e の開始の write が SQLite の handoff の要求を同じ transaction で読んで断り、run を lease ごと引き継ぐ配線を確かめる（ask を開く supervise と引き継ぐ supervise の 2 回が要る。開始の write の判断は同じ module の store の test）"
+reason = "B 境界（守る境界）: 人の land の答えで列に並んだ run を supervise が lease_for_e2e で slot に取った後、e2e の開始の write が SQLite の handoff の要求を同じ transaction で読んで断り、run を lease ごと引き継ぐ配線を確かめる（ask を開く supervise と引き継ぐ supervise の 2 回が要る。review を通って slot で待つ run も同じ e2e の開始の write を通るので、この 1 本が代表する。開始の write の判断は同じ module の store の test）"
 task = 3467
 
 # 5.6s in a stress: a supervise that is asked to hand off and to stop mid-pass, and whose stop's drain lands the run
@@ -23,12 +23,6 @@ task = 3467
 [[test]]
 name = "runtime_handoff_race::a_handoff_asked_after_the_pass_read_none_starts_no_landing_of_that_pass"
 reason = "B 境界（守る境界）: pass が要求を読んだ後に hook が SQLite に記録した handoff の要求で、supervise の着地の開始が断られ、run を lease ごと引き継ぐ配線を確かめる（判断は store の同じ write の test）"
-task = 3467
-
-# 5.1s in a stress: a supervise to the run's slot before its e2e, the hook's request, and the handoff
-[[test]]
-name = "runtime_handoff_race::a_handoff_asked_after_the_pass_read_none_starts_no_e2e_of_that_pass"
-reason = "B 境界（守る境界）: pass が要求を読んだ後に hook が SQLite に記録した handoff の要求で、supervise の着地の前の e2e の開始が断られ、e2e のプロセスを起こさず run を lease ごと引き継ぐ配線を確かめる（判断は store の同じ write の test）"
 task = 3467
 
 # 5.2s in a stress: awaiting_run_owned supervises a run to awaiting_integration before the store's writes

@@ -2679,10 +2679,10 @@ impl Supervisor<'_> {
     /// whatever request it holds.
     pub(super) fn begin_landing(&mut self, id: &RunId, main: &CommitSha) -> Result<TaskRun> {
         let token = self.registration.token().clone();
-        if self.registration.stopping() {
-            self.queue.begin_integration_over_handoff(id, &token, main)
-        } else {
+        if handoff::handoff_refuses_starts(self.registration.stopping()) {
             self.queue.begin_integration(id, &token, main)
+        } else {
+            self.queue.begin_integration_over_handoff(id, &token, main)
         }
     }
     /// Whether the landing of `run` waits for its turn

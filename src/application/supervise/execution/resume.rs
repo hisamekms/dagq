@@ -726,19 +726,11 @@ impl Supervisor<'_> {
             approved,
         } = state;
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
-        // A request taken over without what it took (from a `handoff.json`
-        // written before it carried that, or adopted from the run's files)
-        // is measured anew, and one past its whole limit, written before
-        // the limits, is cut (ADR-t2072-1).
-        let (message, message_bytes) = match message_bytes {
-            Some(bytes) => (message, bytes),
-            None => {
-                let file = run_dir.join(format!("resume-{attempt}.txt"));
-                let limit = kept_request_limit(&message, RESUME_REQUEST_LIMIT);
-                let fitted = restored_request(&message, limit, &file);
-                (fitted.text, fitted.bytes)
-            }
-        };
+        let (message, message_bytes) = taken_over_request(
+            message,
+            message_bytes,
+            &run_dir.join(format!("resume-{attempt}.txt")),
+        );
         let task = self.queue.show(run.task_id())?.task;
         let now = self.generators.clock.monotonic();
         // Answers are followed from the request on. A delivered answer
@@ -753,13 +745,7 @@ impl Supervisor<'_> {
         // resume carry over, as for an adopted revise: the
         // anchor is the `resume_started` of the attempt (task 743).
         let events = self.queue.run_events(run.id())?;
-        let anchor = events
-            .iter()
-            .rfind(|e| {
-                e.kind == EventKind::ResumeStarted
-                    && e.payload["attempt"].as_u64() == Some(attempt as u64)
-            })
-            .map(|e| e.id);
+        let anchor = resume_anchor(&events, attempt);
         if let Some(anchor) = anchor {
             live.adopt(&*self.queue, run, anchor)?;
         }
@@ -1917,6 +1903,40 @@ impl ResumeWatch {
     }
 }
 
+/// The request of a resume taken over from another process and what it
+/// took: as it was carried with what it took, else (from a `handoff.json`
+/// written before it carried that, or adopted from `file`, the run's
+/// `resume-<attempt>.txt`) measured anew against its kind's limit, a kept
+/// handoff's own, and one past it, written before the limits, cut naming
+/// `file` (ADR-t2072-1).
+fn taken_over_request(
+    message: String,
+    bytes: Option<PromptBytes>,
+    file: &Path,
+) -> (String, PromptBytes) {
+    match bytes {
+        Some(bytes) => (message, bytes),
+        None => {
+            let limit = kept_request_limit(&message, RESUME_REQUEST_LIMIT);
+            let fitted = restored_request(&message, limit, file);
+            (fitted.text, fitted.bytes)
+        }
+    }
+}
+
+/// The event a resume of `attempt` taken over is watched from: its
+/// `resume_started`, so the recovery jobs and their waits of an earlier
+/// session of the run do not carry over to it (task 743).
+fn resume_anchor(events: &[RunEvent], attempt: usize) -> Option<EventId> {
+    events
+        .iter()
+        .rfind(|e| {
+            e.kind == EventKind::ResumeStarted
+                && e.payload["attempt"].as_u64() == Some(attempt as u64)
+        })
+        .map(|e| e.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2477,5 +2497,70 @@ mod tests {
             Some((EventId::new(4), 2, "w2".to_owned()))
         );
         assert_eq!(resume_in_progress(&[]), None);
+    }
+    /// ADR-t2072-1: a resume's request taken over with what it took (a
+    /// `handoff.json` of this binary) is sent as it was built; one taken
+    /// over without it (an older binary's `handoff.json`, or adopted from
+    /// `resume-<attempt>.txt`) is measured anew, cut to the resolution
+    /// request's limit keeping its start and naming the file, and a kept
+    /// handoff of a new session is held to the handoff's limit, whole.
+    #[test]
+    fn a_request_taken_over_is_sent_as_built_or_measured_anew_and_cut() {
+        use crate::application::prompt::HANDOFF_LIMIT;
+        let file = Path::new("/runs/r/resume-1.txt");
+        let built = PromptBytes {
+            total: 6,
+            limit: RESUME_REQUEST_LIMIT,
+            ..PromptBytes::default()
+        };
+        assert_eq!(
+            taken_over_request("rebase".to_owned(), Some(built.clone()), file),
+            ("rebase".to_owned(), built)
+        );
+
+        let old = format!("rebase onto main\n{}", "旧".repeat(20_000));
+        let (sent, bytes) = taken_over_request(old.clone(), None, file);
+        assert_eq!(bytes.limit, RESUME_REQUEST_LIMIT);
+        assert_eq!(bytes.omitted["request"], 1);
+        assert_eq!(bytes.total, sent.len());
+        assert!(sent.len() <= RESUME_REQUEST_LIMIT, "{}", sent.len());
+        let (kept, note) = sent.split_once("\n[… ").unwrap();
+        assert!(old.starts_with(kept));
+        assert_eq!(
+            note,
+            format!(
+                "{} bytes left out by the prompt's limit; the whole request is in /runs/r/resume-1.txt]",
+                old.len() - kept.len()
+            )
+        );
+
+        let handoff = format!(
+            "dagq: this run's worker goes on in a new session\n{}",
+            "h".repeat(RESUME_REQUEST_LIMIT)
+        );
+        assert!(handoff.len() > RESUME_REQUEST_LIMIT && handoff.len() < HANDOFF_LIMIT);
+        let (sent, bytes) = taken_over_request(handoff.clone(), None, file);
+        assert_eq!(sent, handoff);
+        assert_eq!(bytes.limit, HANDOFF_LIMIT);
+        assert_eq!(bytes.total, handoff.len());
+        assert!(bytes.omitted.is_empty(), "{bytes:?}");
+    }
+
+    /// A resume taken over is watched from the `resume_started` of its
+    /// attempt, the last one, not an earlier attempt's nor the run's
+    /// first session's events before it; without one there is no anchor.
+    #[test]
+    fn a_resume_taken_over_is_watched_from_its_own_start() {
+        let events = [
+            event(1, "recovery_finished", json!({"alert": "stalled"})),
+            event(2, "resume_started", json!({"attempt": 1})),
+            event(3, "resume_finished", json!({"attempt": 1})),
+            event(4, "resume_started", json!({"attempt": 2})),
+            event(5, "resume_request_sent", json!({"resume_attempt": 2})),
+        ];
+        assert_eq!(resume_anchor(&events, 2), Some(EventId::new(4)));
+        assert_eq!(resume_anchor(&events, 1), Some(EventId::new(2)));
+        assert_eq!(resume_anchor(&events, 3), None);
+        assert_eq!(resume_anchor(&events[..1], 1), None);
     }
 }

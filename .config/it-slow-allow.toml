@@ -702,12 +702,6 @@ name = "runtime_handoff::a_handoff_before_the_resume_request_lets_the_next_super
 reason = "B 境界（復旧と adopt・supervisor の配線）: 引き継ぎの handoff.json が運んだ未送信の resume の依頼を次のプロセスが 1 回だけ送り、組み立てたときの prompt_bytes を turn_requested に記録する。測り直しと切り方の判断は application::prompt の unit test"
 task = 2123
 
-# 5.5s
-[[test]]
-name = "runtime_handoff::a_resume_request_from_an_old_handoff_state_is_measured_and_cut_to_its_limit"
-reason = "B 境界（復旧と adopt・supervisor の配線）: prompt_bytes の無い古い handoff.json の未送信の resume の依頼を次のプロセスが測り直して切り、記録する。測り直しと切り方の判断は application::prompt の unit test"
-task = 2123
-
 # 5.6s
 [[test]]
 name = "runtime_handoff::a_resume_request_adopted_after_a_handoff_is_measured_and_cut_to_its_limit"
@@ -1395,12 +1389,6 @@ task = 2129
 [[test]]
 name = "runtime_handoff::a_handoff_before_a_new_sessions_request_lets_the_next_supervisor_send_it_once"
 reason = "B 境界（supervisor の引き継ぎ・プロセス）: 新しい session の resume の依頼の前に handoff した supervisor の handoff.json から、次の process が引き継ぎを 1 度だけ送り、session_renewed を二度記録しないことを確かめる"
-task = 2129
-
-# 7.9〜13.1s (stress 60s under the host's load of other runs, task 2129)
-[[test]]
-name = "runtime_handoff::a_new_sessions_request_adopted_after_a_handoff_is_sent_once_whole"
-reason = "B 境界（adopt・supervisor の引き継ぎ）: handoff.json の無い handoff の後に run の event と resume-1.txt から resume を組み直した process が、引き継ぎを引き継ぎの上限で 1 度だけ送ることを確かめる。上限の判断は prompt の unit test"
 task = 2129
 
 # 9.5〜10.9s (stress 5 under the host's load of other runs, task 2182)

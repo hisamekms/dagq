@@ -297,6 +297,14 @@ pub(in crate::application::supervise) const fn hands_landings_over(
     handing_off && !stopping
 }
 
+/// Whether a handoff request refuses the start of a landing or of the e2e
+/// before it in the write that would record it (ADR-t3077-1 decision 1):
+/// only while no stop is asked, for a stop wins over a handoff and its
+/// drain lands, and runs the e2e, whatever request it holds.
+pub(in crate::application::supervise) const fn handoff_refuses_starts(stopping: bool) -> bool {
+    !stopping
+}
+
 impl Registration {
     /// The registration `token` takes, kept by `heartbeat`: no handoff, no
     /// stop.
@@ -844,6 +852,15 @@ mod tests {
         assert!(!hands_landings_over(true, false));
     }
 
+    /// ADR-t3077-1 decision 1: a handoff request refuses the start of a
+    /// landing or an e2e only while no stop is asked; a stop's drain
+    /// starts them over the request.
+    #[test]
+    fn only_a_supervisor_not_stopping_is_refused_a_start_by_a_handoff() {
+        assert!(handoff_refuses_starts(false));
+        assert!(!handoff_refuses_starts(true));
+    }
+
     /// A request withdrawn while the supervisor drains for a landing
     /// returns it to claims on the same pass, with the cleanup back to
     /// normal unless a stop keeps it ending; one replaced, at a pass or at
@@ -894,5 +911,52 @@ mod tests {
             );
             value["exit_typed"] = json!(true);
         }
+    }
+
+    /// ADR-t2072-1: a resume's `handoff.json` says what its request took
+    /// when it was built; one an older binary wrote says nothing of it and
+    /// still parses, so the next process measures the request anew.
+    #[test]
+    fn a_resume_snapshot_carries_what_its_request_took_unless_an_older_binary_wrote_it() {
+        let token = LeaseToken::new("t");
+        let bytes = PromptBytes {
+            total: 6,
+            limit: 100,
+            ..PromptBytes::default()
+        };
+        let resume = |message_bytes| Snapshot::Resume {
+            workspace: "w".to_owned(),
+            attempt: 1,
+            started_at: 0.0,
+            message: "rebase".to_owned(),
+            message_bytes,
+            message_sent_at: None,
+            not_ready_asked: false,
+            exit_requested: false,
+            exit_typed: false,
+            exit_for_silence: false,
+            approved: true,
+        };
+        let written = serde_json::to_value(Stamped {
+            token: token.clone(),
+            snapshot: resume(Some(bytes.clone())),
+        })
+        .unwrap();
+        assert_eq!(written["phase"], "resume");
+        assert_eq!(written["message_bytes"]["limit"], 100);
+        let read = |value: Value| serde_json::from_value::<Stamped>(value).unwrap().snapshot;
+        assert!(matches!(
+            read(written.clone()),
+            Snapshot::Resume { message_bytes: Some(read), .. } if read == bytes
+        ));
+        let mut old = written;
+        old.as_object_mut().unwrap().remove("message_bytes");
+        assert!(matches!(
+            read(old),
+            Snapshot::Resume {
+                message_bytes: None,
+                ..
+            }
+        ));
     }
 }

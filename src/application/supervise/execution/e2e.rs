@@ -274,10 +274,10 @@ impl Supervisor<'_> {
     /// drain starts the e2e whatever request it holds.
     fn begin_e2e(&mut self, id: &RunId, payload: serde_json::Value) -> Result<()> {
         let token = self.registration.token().clone();
-        if self.registration.stopping() {
-            self.queue.begin_e2e_over_handoff(id, &token, payload)
-        } else {
+        if handoff::handoff_refuses_starts(self.registration.stopping()) {
             self.queue.begin_e2e(id, &token, payload)
+        } else {
+            self.queue.begin_e2e_over_handoff(id, &token, payload)
         }
     }
 
