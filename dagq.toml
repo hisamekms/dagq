@@ -128,6 +128,12 @@ command = "sh scripts/landing-it.sh"
 # [fresh_session] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 2129・2167 を含んでから足した。
 peak_context_above = 400000
 
+# 長期化した task の再計画を有効にする: runtime が候補の task を検出し、開いた再計画の操作を診断し、上限の回数までは人を通さずに
+# task を保留にして再計画へ回す。key と既定は src/domain/replan_detect.rs の ReplanConfig の doc comment、流れは docs/plans/task-replanning.md が持つ。
+# enabled のほかは書かず既定で動かし、効果は status の replans で見る。
+[replan]
+enabled = true
+
 [toolchains.rust]
 # この repository は Rust の project なので、runtime に組み込みの Rust の profile の利用者として宣言する（ADR-t2268-1 決定 3）。
 # 宣言したので、組み込みの Rust の profile が着地の検証と landing recheck の出力（失敗の分類・落ちた test の名前・flaky のやり直しの env）を読む。
