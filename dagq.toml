@@ -497,9 +497,10 @@ paths = ["src/**", "tests/**"]
 script = "scripts/check-migration-numbers.sh"
 paths = ["migrations/**", "build.rs"]
 
-# 差分がtests/itに足した#[test]のうち境界の登録簿（.config/it-boundaries.d/*.toml、移行の期間は古い置き場の.config/it-boundary.d/*.tomlも）の
+# 差分がtests/itに足した#[test]のうち境界の登録簿（.config/it-boundaries.d/*.toml）の
 # どのidの代表でもないもの、同じidの2本目、新しいidなしのmoduleの本数の増加、項目の形の誤り（docs/development/testing.mdの
 # 「判断と境界のtest」、ADR-t3762-1・ADR-t3802-1）。判断のcaseを並べたITと同じ境界の2本目が足されるのをtest-rulesのagentより前に返すため。
+# 古い置き場の.config/it-boundary.dは退役して読まず、そこにファイルがあれば退役を名指して落ちる（pathsに残すのはそこに書く差分にもこのprogramを当てて落とすため）。
 # 既存のtestは見ない。基点は既定（HEADとmainのmerge base）。2026-10-31に他のrunと並んだhostで3回測った最大は、今のmainで約0.4秒、
 # tests/itの285ファイルに当たる差分で約3.2秒。
 [review.programs.check-it-added-tests]

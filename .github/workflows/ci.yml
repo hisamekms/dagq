@@ -443,11 +443,12 @@ jobs:
 
       # The boundary gate of the tests in tests/it (ADR-t3762-1,
       # ADR-t3802-1): against the diff from the base, a new test in tests/it
-      # that no id of the registry (.config/it-boundaries.d/*.toml, and the
-      # old place .config/it-boundary.d/*.toml for a while) has as its
-      # representative, a second test of one id, or a module that grows
+      # that no id of the registry (.config/it-boundaries.d/*.toml) has as
+      # its representative, a second test of one id, or a module that grows
       # without new ids fails the job (scripts/check-it-added-tests.sh, whose
-      # header has the format and the counts). The
+      # header has the format and the counts). The old place
+      # .config/it-boundary.d is retired and not read: a file there fails
+      # the job with a message that names the retirement. The
       # base is taken as for the time gate below; without one the script
       # takes the merge base with origin/main. It reads no nextest output and
       # runs after a failed test step too.
