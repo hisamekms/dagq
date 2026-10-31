@@ -179,6 +179,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 ## 畳む関数
 
 区間の列を作る関数は1つで（ADR-t1662-1決定2）、台帳を作る係と、走っているrunを見る読み手（`status`・`timeline`・`forecast`）が共有する（`domain::ledger::fold`）。
+読み手は`run_phase_changed`の名前とタグを出し、記録の無いrunは`legacy`にする（各moduleのdoc comment）。
 入力はEventStoreのeventと、それから作るclaimの前の区間の行・今の時刻だけで、同じ入力からは同じ出力を返す。
 
 - **run**: 境目は`run_phase_changed`だけ。
@@ -195,8 +196,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
   着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - **置き場**: 係の状態は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
 - **印**: EventStore・NodeSampleStore・SessionStepStore・runの資源のカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsession・queue・readyだったtaskの行（記録でない終わりも）・nodeの時間に印を付ける（全行を走査しない）。
-  畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読んで持ち越す（`builder::Kept`）。
-  持ち越すのは本と、確定していないsession・queue・run・taskの行が読むeventだけ（`Kept`のdoc comment）。
+  畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読んで持ち越す（何を持ち越すかは`builder::Kept`）。
   カーソルの始めから読む起動の追いつきでも、最初に行を畳む周がstoreの確定した行のうち畳み直さない行のeventを落とす。
   確定した行に後のeventが届けば、記録はstoreの行から、pushはidで読み戻す。
   周回は新しいeventが変えうる行と印の付いた行だけを畳み、周回で作る領域は前からのeventの数に比例しない。
@@ -274,4 +274,4 @@ stepのコマンドの形と台帳を作るときの分類は[計測のコマン
 
 ## 段と後続のtask
 
-段0（ADR 3本とこの文書）→段1（`run_phase_changed`・claimの前の区間・`run_claimed`の欄・`blocked_by`の記録）→段2（ストアのport・台帳と畳む関数。並走の比較はしない）→段3（読み手を台帳と畳む関数へ移し`LandClock`を撤去）。
+段0（ADR 3本とこの文書）→段1（`run_phase_changed`・claimの前の区間・`run_claimed`の欄・`blocked_by`の記録）→段2（ストアのport・台帳と畳む関数）→段3（読み手を台帳と畳む関数へ移し`LandClock`を撤去）。

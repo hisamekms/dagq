@@ -155,7 +155,7 @@ built-inの定義の変更には広げない（定義がdagqのsourceにあり�
   run branchのケースの追加・変更は使わない（`agent_eval_started`の`cases_commit`）。
   依頼はheadごとに1回で、同じheadを引き継いだsupervisorは同じ周を待つ。
 - 待つ間と流す間、runはsessionを開いたまま自分のslotとleaseを持つ（e2eと同じくslotを放さない。差し戻しを生きているsessionに送るため、sessionを閉じる前に待つ）。
-  待ちの理由は`run_agent_eval_waiting`で、`status`の`progress`の`agent_eval_waiting`・`agent_eval`に出る。
+  待ちの理由は`run_agent_eval_waiting`で、`status`の`progress`には工程`agent_eval`として出る。
 - 行き先は全部の周の終わりで決め、`run_agent_eval_finished`に記録する。
   全部が`passed`なら衝突の事前判定へ進む。
   完了した周が閾値を下回れば、成績と失敗したケースのidとagentの理由をreviewの`revise`と同じ経路でsessionに差し戻し、runを通した自動の手直しの上限に1回と数える。

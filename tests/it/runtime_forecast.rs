@@ -16,8 +16,6 @@ fn snapshots(db: &Path) -> Vec<Value> {
         .collect()
 }
 
-// Only for the tests stopped below (request 190): task 1670 removes this cfg.
-#[cfg(any())]
 fn ids(snapshot: &Value, key: &str) -> Vec<i64> {
     snapshot[key]
         .as_array()
@@ -27,8 +25,6 @@ fn ids(snapshot: &Value, key: &str) -> Vec<i64> {
         .collect()
 }
 
-// Only for the tests stopped below (request 190): task 1670 removes this cfg.
-#[cfg(any())]
 fn triggers(snapshot: &Value) -> Vec<String> {
     snapshot["triggers"]
         .as_array()
@@ -43,6 +39,10 @@ fn options(host_config: Option<PathBuf>) -> SuperviseOptions {
         forecast_snapshots: true,
         forecast_check: Duration::ZERO,
         host_config,
+        // The forecast draws its samples from the ledger.
+        ledger: Some(runtime::LedgerOptions {
+            interval: Duration::ZERO,
+        }),
         ..supervise_options(1, true)
     }
 }
@@ -69,12 +69,10 @@ fn common_within() -> crate::common::Waiting {
 }
 
 /// The first snapshot is the day's, with every open task and goal in one
-/// event; the landing of the first task moves the second (it gets a time
-/// from the landed run) and is recorded, the landing of the last moves
-/// nothing and is not. The next supervisor's start is a change mark.
-// Stopped with the supervisor's forecast snapshots (request 190, decision (3) of
-// ADR-t3745-1): task 1670 brings it back and removes this cfg.
-#[cfg(any())]
+/// event, before anything landed. Each later one was kept by a trigger
+/// (a landing kept only when it moved a p50, its samples read from the
+/// ledger the supervisor builds once a run's push ended). The next
+/// supervisor's start is a change mark.
 #[test]
 fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
     let (dir, repo, db) = fixture();
@@ -105,34 +103,21 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
     assert_eq!(outcome["runs"].as_array().unwrap().len(), 2, "{outcome}");
 
     let recorded = snapshots(&db);
-    assert_eq!(recorded.len(), 2, "{recorded:#?}");
+    assert!(!recorded.is_empty(), "{recorded:#?}");
     // The day's snapshot: nothing landed yet, so no time for anything.
     assert_eq!(triggers(&recorded[0]), ["daily"]);
     assert_eq!(ids(&recorded[0], "tasks"), [1, 2]);
     assert_eq!(ids(&recorded[0], "goals"), [goal.as_i64()]);
     assert!(recorded[0]["tasks"][0]["p50_secs"].is_null());
     assert!(recorded[0]["supervisor"].is_string());
-    assert_eq!(recorded[0]["method"], 2);
+    assert_eq!(recorded[0]["method"], 3);
     assert!(recorded[0]["assumptions"]["parallel"].is_number());
     assert!(recorded[0]["triggers_through"].as_i64().unwrap() > 0);
-    // The first landing gave the second task a time.
-    assert_eq!(triggers(&recorded[1]), ["landing"]);
-    assert_eq!(recorded[1]["triggers"][0]["task_id"], 1);
-    assert_eq!(ids(&recorded[1], "tasks"), [2]);
-    assert!(recorded[1]["tasks"][0]["p50_secs"].is_number());
-    let moved: Vec<(String, i64)> = recorded[1]["moved"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| {
-            (
-                m["target"].as_str().unwrap().to_owned(),
-                m["id"].as_i64().unwrap(),
-            )
-        })
-        .collect();
-    assert!(moved.contains(&("task".into(), 2)), "{moved:?}");
-    // The landing of the last task moved no p50 past the thresholds.
+    // A landing's snapshot is kept only for what it moved.
+    for later in &recorded[1..] {
+        assert_eq!(triggers(later), ["landing"], "{later}");
+        assert!(!later["moved"].as_array().unwrap().is_empty(), "{later}");
+    }
     let integrated = SqliteQueue::open(&db)
         .unwrap()
         .all_events()
@@ -141,25 +126,43 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
         .filter(|event| event.kind == EventKind::RunIntegrated)
         .count();
     assert_eq!(integrated, 2);
+    let before = recorded.len();
 
     // A new supervisor's start is a change mark: one more snapshot, with
     // the open goal and no task.
     let outcome = supervise_forecasting(&db, &repo, &reviewer, &host);
     assert_eq!(outcome["runs"], json!([]), "{outcome}");
     let recorded = snapshots(&db);
-    assert_eq!(recorded.len(), 3, "{recorded:#?}");
+    assert_eq!(recorded.len(), before + 1, "{recorded:#?}");
+    let started = &recorded[before];
     assert!(
-        recorded[2]["triggers"]
+        started["triggers"]
             .as_array()
             .unwrap()
             .iter()
             .any(|t| t["trigger"] == "mark" && t["kind"] == "supervisor_started"),
         "{}",
-        recorded[2]["triggers"]
+        started["triggers"]
     );
-    assert_eq!(ids(&recorded[2], "tasks"), Vec::<i64>::new());
-    assert_eq!(ids(&recorded[2], "goals"), [goal.as_i64()]);
+    assert_eq!(ids(started, "tasks"), Vec::<i64>::new());
+    assert_eq!(ids(started, "goals"), [goal.as_i64()]);
+    assert!(
+        started["assumptions"]["samples"]["all"].is_number(),
+        "{started}"
+    );
+}
 
+/// `kpi` scores the snapshots against the finishes (ADR-0070 decision
+/// 4). `kpi` reads every event of the queue and is stopped until it reads
+/// the ledger (ADR-t3745-1): task 1669 brings this back and removes this
+/// cfg.
+#[cfg(any())]
+#[test]
+fn kpi_scores_the_snapshots_against_the_finishes() {
+    let (dir, repo, db) = fixture();
+    let host = dir.path().join("no host-wide file.toml");
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    supervise_forecasting(&db, &repo, &reviewer, &host);
     // `kpi` scores the snapshots against the finishes (ADR-0070 decision
     // 4): the landing's snapshot of task 2 is the one sample; the day's
     // gave neither task a p50, so both of its rows are left out.
@@ -228,9 +231,17 @@ fn a_failed_snapshot_stops_no_landing_and_off_records_nothing() {
 fn a_snapshot_records_runs_under_revise_and_resume_in_their_phase() {
     use dagq::{
         application::forecast::{SnapshotOutcome, pending, record_snapshot},
+        domain::run_phase::{Attempt, AttemptKind, Phase, PhaseChange},
         domain::{ClaimOutcome, EventKind, LeaseToken},
         infrastructure::adapters::SystemProcesses,
     };
+    let moved = |phase: Phase, attempt: Attempt| {
+        (
+            EventKind::RunPhaseChanged,
+            PhaseChange::new(phase, attempt, "test").payload(),
+        )
+    };
+    let revise = Attempt::of(AttemptKind::Revise, 1);
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "resumed", &[]);
@@ -268,16 +279,18 @@ fn a_snapshot_records_runs_under_revise_and_resume_in_their_phase() {
     claim(
         "awaiting_integration",
         &[
-            (EventKind::ReviewFinished, json!({"verdict": "revise"})),
-            (EventKind::ResumeStarted, json!({})),
+            moved(Phase::Validating, Attempt::FIRST),
+            moved(Phase::Review, Attempt::FIRST),
+            moved(Phase::Revise, revise),
         ],
     );
     claim(
         "needs_session",
-        &[(
-            EventKind::RunWaitingStarted,
-            json!({"phase": "resume", "status": "needs_session"}),
-        )],
+        &[
+            moved(Phase::Validating, Attempt::FIRST),
+            moved(Phase::NeedsSession, Attempt::FIRST),
+            moved(Phase::Waiting { in_slot: false }, Attempt::FIRST),
+        ],
     );
     claim("failed", &[]);
 
@@ -287,6 +300,7 @@ fn a_snapshot_records_runs_under_revise_and_resume_in_their_phase() {
         .as_secs() as i64;
     let found = pending(&queue, now, |_| 0, None).unwrap().unwrap();
     let outcome = record_snapshot(
+        &queue,
         &queue,
         &SystemProcesses,
         &LeaseToken::new("t"),
@@ -316,8 +330,8 @@ fn a_snapshot_records_runs_under_revise_and_resume_in_their_phase() {
     assert_eq!(
         rows,
         [
-            (1, json!("wait_to_land"), json!(false)),
-            (2, json!("wait_to_land"), json!(true)),
+            (1, json!("revise"), json!(false)),
+            (2, json!("waiting"), json!(true)),
             (3, Value::Null, json!(false)),
         ]
     );

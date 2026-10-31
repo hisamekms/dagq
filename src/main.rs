@@ -1392,7 +1392,9 @@ enum Command {
     },
     /// List supervisors, unfinished runs, what waits for a person (attention), the open asks, the held tasks, the open planning requests (not for a planner) and the event cursor, without changing anything.
     /// The cursor is read before the state, so `watch --after <cursor>` misses no change after it
-    /// (it may repeat one).
+    /// (it may repeat one). A run's `progress.phase` is the phase it last recorded
+    /// (`run_phase_changed`) and `since` when; a run with no phase recorded has a null phase and
+    /// `legacy: true`.
     Status {
         /// Only the attention addressed to this role: inbox gets all of it, planner none.
         #[arg(long, value_parser = ROLES)]
@@ -1517,8 +1519,11 @@ enum Command {
         until: Option<String>,
     },
     /// A run's events oldest first and the gaps between them of at least --gap seconds, each
-    /// with the reason the events show (idle, held, waiting_ask, background, after_receipt,
-    /// waiting_integration, integrating, e2e, waiting_e2e, no_supervisor, unknown). Reads only.
+    /// with its reason: the phase the run recorded where the gap starts (worker, review,
+    /// waiting, landing_answer, held, ...) with its blocker, holds and the kind of its attempt
+    /// (`phase`), `unattributed`, `ended` after its life ended, or `legacy` for a run from before
+    /// the phases were recorded; the asks that held it in a phase a person decides; and the heavy
+    /// commands its sessions ran (`commands`). Reads only.
     Timeline {
         run: String,
         /// The shortest gap reported, in seconds.
@@ -1643,9 +1648,10 @@ enum Command {
     /// over the dependencies, the claim order, the slots and each change's landed runs (the whole
     /// distribution for a change with fewer than `[kpi]` `min_samples`), with what it assumed.
     /// New tasks are not added. Reads only and records nothing; JSON.
-    /// Stopped in this build: refused before it reads, as it reads every event of the queue; the
-    /// ledger's reader brings it back.
-    // ADR-t3745-1; task 1670 brings it back from the ledger.
+    /// The landed runs drawn are the ledger's run rows (a run from before the phase records draws
+    /// the values `stats` gave it); a task's `phase` is the phase its run in flight last recorded
+    /// (null while it waits for a slot, or for a run with no phase recorded, whose stage is drawn
+    /// whole), and `waiting` whether that phase waits for a person out of the slots.
     Forecast {
         /// Only this task, and its goal.
         #[arg(long = "task")]

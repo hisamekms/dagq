@@ -819,14 +819,6 @@ pub fn supervise_with_reviewer(
     let limit_checkout = main_checkout.clone();
     let max_improvement_proposals =
         Arc::new(move || observation::max_improvement_proposals(&limit_checkout));
-    let forecasts = options.forecast_snapshots.then(|| {
-        observation::forecast_port(
-            &db,
-            &main_checkout,
-            host_wide.clone(),
-            options.forecast_check,
-        )
-    });
     let release = host::release_port(
         &db,
         &main_checkout,
@@ -895,6 +887,20 @@ pub fn supervise_with_reviewer(
         ),
     );
     let supervisor_queues = || queues.clone();
+    let forecasts = options.forecast_snapshots.then(|| {
+        observation::forecast_port(
+            &db,
+            &main_checkout,
+            host_wide.clone(),
+            options.forecast_check,
+            Arc::new(SupervisorPorts {
+                queues: supervisor_queues(),
+                keep: |queue| -> Box<dyn crate::application::LedgerStore + Send> {
+                    Box::new(queue)
+                },
+            }),
+        )
+    });
     // The review's material reads the task through the service too.
     let review_queues = supervisor_queues();
     let review_material = move |task_id: TaskId, range: Option<&reviewing::ReviewRange>| {

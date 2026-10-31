@@ -24,6 +24,8 @@ pub mod node;
 pub mod owner;
 pub mod queue;
 pub mod read;
+#[cfg(test)]
+mod readers_tests;
 pub mod session;
 pub mod settle;
 pub mod steps;

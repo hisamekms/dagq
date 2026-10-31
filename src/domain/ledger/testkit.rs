@@ -62,12 +62,32 @@ impl Log {
             .collect()
     }
 
-    fn phase(&mut self, task: i64, run: &str, secs: i64, phase: Phase, cause: &str) -> &mut Self {
+    pub(crate) fn phase(
+        &mut self,
+        task: i64,
+        run: &str,
+        secs: i64,
+        phase: Phase,
+        cause: &str,
+    ) -> &mut Self {
+        self.phase_in(task, run, secs, phase, Attempt::FIRST, cause)
+    }
+
+    /// `run` of `task` moved to `phase` in `attempt` at `secs`.
+    pub(crate) fn phase_in(
+        &mut self,
+        task: i64,
+        run: &str,
+        secs: i64,
+        phase: Phase,
+        attempt: Attempt,
+        cause: &str,
+    ) -> &mut Self {
         self.add(
             Some(task),
             Some(run),
             "run_phase_changed",
-            PhaseChange::new(phase, Attempt::FIRST, cause).payload(),
+            PhaseChange::new(phase, attempt, cause).payload(),
             secs,
         )
     }

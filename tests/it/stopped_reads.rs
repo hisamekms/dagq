@@ -71,11 +71,6 @@ fn each_stopped_command_is_refused_naming_why_and_what_brings_it_back() {
             "report",
             "the ledger's reader of stats, kpi and report",
         ),
-        (
-            &["forecast"],
-            "forecast",
-            "the ledger's reader of the forecast",
-        ),
         (&["marks"], "marks", "a read of the marks"),
         (&["mark", "parallel 3→2"], "mark", "a read of the marks"),
         (&["mark", "--retract", "1"], "mark", "a read of the marks"),
@@ -138,12 +133,6 @@ fn the_service_refuses_each_stopped_read_it_is_sent() {
             json!({"period": "day"}),
             "report",
             "the ledger's reader of stats, kpi and report",
-        ),
-        (
-            UseCase::Forecast,
-            json!({}),
-            "forecast",
-            "the ledger's reader of the forecast",
         ),
         (UseCase::Marks, json!({}), "marks", "a read of the marks"),
         (

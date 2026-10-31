@@ -1,34 +1,51 @@
 //! `dagq forecast` (ADR-0070 decisions 1 and 2) on a real queue: the open
-//! tasks and goals with their p50 and p90, what it assumed, the narrowing
-//! by task and goal, and that it records nothing.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
+//! tasks and goals with their p50 and p90, what it assumed (its samples
+//! from the ledger's run rows), the narrowing by task and goal, the phase a
+//! run in flight recorded, and that it records nothing.
 use dagq::domain::EventKind;
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 use dagq::domain::LeaseToken;
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 use std::{path::Path, process::Command};
 
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 use dagq::{
     domain::{ClaimOutcome, CommitSha, TaskRun},
     infrastructure::sqlite::SqliteQueue,
 };
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 use serde_json::{Value, json};
 
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 use crate::common::{Bounded, WithoutActor, cli::*};
+use dagq::domain::run_phase::{Attempt, AttemptKind, Phase, PhaseChange};
+
+/// Build the queue's ledger as the supervisor's pass does, now.
+fn build_ledger(queue: &SqliteQueue) {
+    use dagq::application::supervise::{Retain, build_pass};
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let mut builder = dagq::domain::ledger::builder::Builder::default();
+    let built = build_pass(
+        queue,
+        &mut builder,
+        (now_ms, "built"),
+        Retain::default(),
+        None,
+    );
+    assert_eq!(built.failure, None);
+}
+
+/// `run` moved to `phase` in `attempt`, as the supervisor records it.
+fn phase(queue: &SqliteQueue, run: &TaskRun, phase: Phase, attempt: Attempt) {
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::RunPhaseChanged,
+            PhaseChange::new(phase, attempt, "test").payload(),
+        )
+        .unwrap();
+}
 
 /// `dagq forecast` as `role`, with the host-wide `host.toml` read from
 /// `config` rather than the home of the person running the tests.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 fn forecast(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command.without_actor_env();
@@ -52,8 +69,6 @@ fn forecast(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> Valu
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 fn claim(queue: &mut SqliteQueue) -> TaskRun {
     let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
     let ClaimOutcome::Claimed { run } = queue
@@ -65,8 +80,6 @@ fn claim(queue: &mut SqliteQueue) -> TaskRun {
     *run
 }
 
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 fn ids(list: &Value) -> Vec<i64> {
     list.as_array()
         .unwrap()
@@ -77,8 +90,6 @@ fn ids(list: &Value) -> Vec<i64> {
 
 /// One feature task of a goal lands; a docs task of the goal is in flight,
 /// a third waits for it, and a task outside the goal waits for a slot.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 #[test]
 fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
     let (dir, db) = queue();
@@ -114,7 +125,11 @@ fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
         &["add", "running", "--change", "docs", "--goal", &goal],
     );
     ok(&db, &["ready", "2", "--bypass-review"]);
-    claim(&mut queue);
+    let running = claim(&mut queue);
+    phase(&queue, &running, Phase::Worker, Attempt::FIRST);
+    // The landed run, from before `run_phase_changed`, is a legacy row:
+    // its sample is the one `stats` gave it.
+    build_ledger(&queue);
     ok(&db, &["add", "after", "--goal", &goal, "--depends-on", "2"]);
     ok(&db, &["add", "outside", "--priority", "low"]);
     ok(&db, &["add", "unplanned", "--goal", &goal]);
@@ -123,7 +138,7 @@ fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
     let events = queue.all_events().unwrap().len();
 
     let all = forecast(None, &db, &config, &["--parallel", "2", "--trials", "20"]);
-    assert_eq!(all["method"], 2);
+    assert_eq!(all["method"], 3);
     assert_eq!(all["trials"], 20);
     assert!(all["seed"].is_u64());
     let assumptions = &all["assumptions"];
@@ -139,7 +154,7 @@ fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
     // The landed task and the draft are left out.
     assert_eq!(ids(&all["tasks"]), [2, 3, 4]);
     let running = &all["tasks"][0];
-    assert_eq!(running["phase"], "work");
+    assert_eq!(running["phase"], "worker");
     assert_eq!(running["waiting"], false);
     assert_eq!(running["distribution"], "all");
     assert_eq!(running["change"], "docs");
@@ -179,8 +194,6 @@ fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
 }
 
 /// Set run `run`'s status as the runtime would have left it.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 fn set_run_status(db: &Path, run: &TaskRun, status: &str) {
     rusqlite::Connection::open(db)
         .unwrap()
@@ -191,8 +204,6 @@ fn set_run_status(db: &Path, run: &TaskRun, status: &str) {
         .unwrap();
 }
 
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 fn record(queue: &SqliteQueue, run: &TaskRun, steps: &[(EventKind, Value)]) {
     for (kind, payload) in steps {
         queue
@@ -203,12 +214,10 @@ fn record(queue: &SqliteQueue, run: &TaskRun, steps: &[(EventKind, Value)]) {
 
 /// Task 1519: the latest run of an `in_progress` task is in flight
 /// through its review and revise (`awaiting_integration`), its resume
-/// (`needs_session`) and its wait to land, in the phase its events put it
-/// in and waiting while it waits for a person; a failed run's retry and
+/// (`needs_session`) and its wait to land, in the phase its last
+/// `run_phase_changed` recorded and waiting while it waits for a person; a failed run's retry and
 /// an earlier failed run of a task are not, and a ready task still waits
 /// for a slot.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-#[cfg(any())]
 #[test]
 fn forecast_keeps_runs_under_review_revise_and_resume_in_flight() {
     let (dir, db) = queue();
@@ -232,28 +241,30 @@ fn forecast_keeps_runs_under_review_revise_and_resume_in_flight() {
     let revised = claim(&mut queue);
     assert_eq!(revised.task_id().as_i64(), 1);
     record(&queue, &revised, &validated);
-    record(
-        &queue,
-        &revised,
-        &[
-            (EventKind::ReviewStarted, json!({})),
-            (EventKind::ReviewFinished, json!({"verdict": "revise"})),
-            (EventKind::ResumeStarted, json!({})),
-        ],
-    );
-    record(&queue, &revised, &validated);
+    let first = Attempt::FIRST;
+    let again = Attempt::of(AttemptKind::Revise, 1);
+    for (moved, attempt) in [
+        (Phase::Worker, first),
+        (Phase::Validating, first),
+        (Phase::Review, first),
+        (Phase::Revise, again),
+        (Phase::Validating, again),
+        (Phase::Review, again),
+    ] {
+        phase(&queue, &revised, moved, attempt);
+    }
     set_run_status(&db, &revised, "awaiting_integration");
     // 2: waits for a session to resume it, and for a person meanwhile.
     let resumed = claim(&mut queue);
     record(&queue, &resumed, &validated);
-    record(
-        &queue,
-        &resumed,
-        &[(
-            EventKind::RunWaitingStarted,
-            json!({"phase": "resume", "status": "needs_session"}),
-        )],
-    );
+    for moved in [
+        Phase::Worker,
+        Phase::Validating,
+        Phase::NeedsSession,
+        Phase::Waiting { in_slot: false },
+    ] {
+        phase(&queue, &resumed, moved, first);
+    }
     set_run_status(&db, &resumed, "needs_session");
     // 3: an earlier run left in an in-flight status is not the latest;
     // the latest failed, and the retry waits for a slot.
@@ -282,7 +293,9 @@ fn forecast_keeps_runs_under_review_revise_and_resume_in_flight() {
     let landing = claim(&mut queue);
     assert_eq!(landing.task_id().as_i64(), 4);
     record(&queue, &landing, &validated);
-    record(&queue, &landing, &[(EventKind::RunE2eStarted, json!({}))]);
+    for moved in [Phase::Worker, Phase::Validating, Phase::E2e] {
+        phase(&queue, &landing, moved, first);
+    }
     set_run_status(&db, &landing, "awaiting_integration");
     ok(&db, &["ready", "5", "--bypass-review"]);
 
@@ -292,11 +305,11 @@ fn forecast_keeps_runs_under_review_revise_and_resume_in_flight() {
     assert_eq!(ids(&all["tasks"]), [1, 2, 3, 4, 5]);
     assert_eq!(
         (&row(1)["phase"], &row(1)["waiting"]),
-        (&json!("wait_to_land"), &json!(false))
+        (&json!("review"), &json!(false))
     );
     assert_eq!(
         (&row(2)["phase"], &row(2)["waiting"]),
-        (&json!("wait_to_land"), &json!(true))
+        (&json!("waiting"), &json!(true))
     );
     assert_eq!(
         (&row(3)["phase"], &row(3)["waiting"]),
@@ -304,7 +317,7 @@ fn forecast_keeps_runs_under_review_revise_and_resume_in_flight() {
     );
     assert_eq!(
         (&row(4)["phase"], &row(4)["waiting"]),
-        (&json!("wait_to_land"), &json!(false))
+        (&json!("e2e"), &json!(false))
     );
     assert_eq!(
         (&row(5)["phase"], &row(5)["waiting"]),

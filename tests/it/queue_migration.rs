@@ -1037,8 +1037,6 @@ fn migration_dropping_the_task_kind_keeps_tasks_and_their_change() {
             "{landings}"
         );
     }
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-    #[cfg(any())]
     {
         let forecast = run(&["forecast"]);
         assert!(forecast.get("tasks").is_some(), "{forecast}");

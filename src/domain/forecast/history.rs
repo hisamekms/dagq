@@ -1,18 +1,23 @@
-//! What the forecast draws from (ADR-0070 decision 1), derived from the run
-//! events: the landed runs' intervals as `stats` measures them, the delay
-//! from a goal's last landing to its close as achieved, the people's
-//! answers to asks, and where a run in flight is.
+//! What the forecast draws from (ADR-0070 decision 1): the landed runs'
+//! `work`, `validate` and `wait_to_land` as the ledger's one read gives
+//! them ([`sample`]), the delay from a goal's last landing to its close as
+//! achieved and the people's answers to asks, from those events alone,
+//! and where a run in flight is, from the fold of its events ([`running`]).
 
 use crate::domain::EventKind;
 use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::{Phase, Running};
+use super::{Running, Stage};
 use crate::domain::{
     EventId, GoalId, GoalVerdict, RunEvent, RunStatus, TaskChange, TaskId,
-    stats::{self, LiveSnapshot, SlotSnapshot, StatsQuery, timestamp_millis},
-    waiting::WaitState,
+    ledger::{
+        fold::fold_run,
+        read::{LedgerValues, validation},
+    },
+    run_phase::Blocker,
+    stats::{self, timestamp_millis},
 };
 
 /// One landed run's intervals in seconds, drawn together so that a slow
@@ -30,21 +35,21 @@ impl Sample {
         self.work + self.validate + self.wait_to_land
     }
 
-    /// The length of `phase`.
-    pub fn phase(&self, phase: Phase) -> i64 {
-        match phase {
-            Phase::Work => self.work,
-            Phase::Validate => self.validate,
-            Phase::WaitToLand => self.wait_to_land,
+    /// The length of `stage`.
+    pub fn stage(&self, stage: Stage) -> i64 {
+        match stage {
+            Stage::Work => self.work,
+            Stage::Validate => self.validate,
+            Stage::WaitToLand => self.wait_to_land,
         }
     }
 
-    /// `phase` and the phases after it.
-    pub fn from(&self, phase: Phase) -> i64 {
-        match phase {
-            Phase::Work => self.total(),
-            Phase::Validate => self.validate + self.wait_to_land,
-            Phase::WaitToLand => self.wait_to_land,
+    /// `stage` and the stages after it.
+    pub fn from(&self, stage: Stage) -> i64 {
+        match stage {
+            Stage::Work => self.total(),
+            Stage::Validate => self.validate + self.wait_to_land,
+            Stage::WaitToLand => self.wait_to_land,
         }
     }
 }
@@ -63,40 +68,31 @@ pub struct History {
     pub last_landings: HashMap<GoalId, i64>,
 }
 
-/// The history of `events` (every run event, oldest first).
+/// The sample of a run row as the ledger's one read gives it
+/// ([`crate::domain::ledger::read::read`]): a landed run with all three
+/// values, new or legacy alike.
+pub fn sample(values: &LedgerValues) -> Option<Sample> {
+    values.landed.then_some(())?;
+    Some(Sample {
+        work: values.work?,
+        validate: values.validate?,
+        wait_to_land: values.wait_to_land?,
+    })
+}
+
+/// The history of the landed runs' samples (`runs`, with their task's
+/// change), the `run_integrated` and `goal_closed` events (`landings`,
+/// oldest first) and the `ask_opened` and `ask_answered` events (`asks`,
+/// oldest first).
 pub fn history(
-    events: &[RunEvent],
+    runs: Vec<(Option<TaskChange>, Sample)>,
+    landings: &[RunEvent],
+    asks: &[RunEvent],
     goals: &HashMap<TaskId, Option<GoalId>>,
-    changes: &HashMap<TaskId, Option<TaskChange>>,
-    now: i64,
 ) -> History {
-    let derived = stats::stats(
-        events,
-        goals,
-        now,
-        SlotSnapshot::default(),
-        &StatsQuery {
-            full: true,
-            ..StatsQuery::default()
-        },
-        &LiveSnapshot::default(),
-    );
-    let runs = derived
-        .runs
-        .iter()
-        .filter(|run| run.status.as_deref() == Some("integrated"))
-        .filter_map(|run| {
-            let sample = Sample {
-                work: run.work?,
-                validate: run.validate?,
-                wait_to_land: run.wait_to_land?,
-            };
-            Some((changes.get(&run.task_id).cloned().flatten(), sample))
-        })
-        .collect();
     let mut last_landings: HashMap<GoalId, i64> = HashMap::new();
     let mut close_delays = Vec::new();
-    for event in events {
+    for event in landings {
         let Some(at) = timestamp_millis(&event.created_at) else {
             continue;
         };
@@ -117,9 +113,10 @@ pub fn history(
             _ => {}
         }
     }
-    let latest = events.iter().map(|e| e.id).max();
+    // The wait to a person's answer reads only the opening and the answer.
+    let latest = asks.iter().map(|e| e.id).max();
     let ask_waits = latest.map_or_else(Vec::new, |latest| {
-        stats::asks::human_waits(events, EventId::new(0), latest, |_| true).0
+        stats::asks::human_waits(asks, EventId::new(0), latest, |_| true).0
     });
     History {
         runs,
@@ -153,32 +150,44 @@ pub fn in_flight(status: RunStatus) -> bool {
 }
 
 /// Where the run of `events` (its own, oldest first) is at unix
-/// milliseconds `now_ms`: the phase `stats` would put it in and how long
-/// it has been there, and how long it has waited for a person while it
-/// waits.
+/// milliseconds `now_ms`, from its fold up to then
+/// ([`crate::domain::ledger::fold::fold_run`]): its stage by the rule of
+/// the ledger's reading (before its first `validating`, in it, after it)
+/// and how long it has been in it, the phase it goes on in, and how long
+/// it has been in a phase a person decides out of the slots (blocker
+/// `human`, holding none: an ask's answer, a hold). A run the fold does
+/// not place (no `run_phase_changed`, or its life ended) has its stage
+/// drawn whole: `work` from 0 seconds and no phase.
 pub fn running(events: &[RunEvent], now_ms: i64) -> Running {
-    let first = |kind: EventKind| {
-        events
-            .iter()
-            .find(|event| event.kind == kind)
-            .and_then(|event| timestamp_millis(&event.created_at))
+    let whole = Running {
+        phase: None,
+        stage: Stage::Work,
+        elapsed: 0,
+        waiting: None,
     };
-    let secs = |since: Option<i64>| since.map_or(0, |since| (now_ms - since).max(0) / 1000);
-    let (phase, since) = match (
-        first(EventKind::ValidationFinished),
-        first(EventKind::ReceiptObserved),
-        first(EventKind::RunClaimed),
-    ) {
-        (Some(validated), _, _) => (Phase::WaitToLand, Some(validated)),
-        (None, Some(receipt), _) => (Phase::Validate, Some(receipt)),
-        (None, None, claimed) => (Phase::Work, claimed),
+    let recorded = events
+        .iter()
+        .any(|event| event.kind == EventKind::RunPhaseChanged);
+    let Some(life) = fold_run(events, &[], now_ms).filter(|life| recorded && life.end.is_none())
+    else {
+        return whole;
     };
-    let waiting = WaitState::of(events)
-        .filter(|wait| wait.ended.is_none())
-        .map(|wait| (now_ms - wait.since_ms).max(0) / 1000);
+    let Some(current) = life.intervals.last() else {
+        return whole;
+    };
+    let secs = |since: i64| (now_ms - since).max(0) / 1000;
+    let (stage, since) = match validation(&life.intervals) {
+        None => (Stage::Work, life.start),
+        Some(validating) if std::ptr::eq(validating, current) => {
+            (Stage::Validate, validating.start)
+        }
+        Some(validating) => (Stage::WaitToLand, validating.end),
+    };
     Running {
-        phase,
+        phase: Some(current.phase.clone()),
+        stage,
         elapsed: secs(since),
-        waiting,
+        waiting: (current.blocker == Some(Blocker::Human) && !current.holds_slot())
+            .then(|| secs(current.start)),
     }
 }

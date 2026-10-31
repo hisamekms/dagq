@@ -9,10 +9,9 @@
 //! or a stop leaves is taken up by the next look, of this process or of
 //! another one, and of two supervisors that looked at once one records.
 //! It takes no run slot and uses no LLM; a failure is logged and looked at
-//! again after [`RETRY`], and stops no claim nor landing.
-//!
-//! The snapshots are stopped now ([`STOPPED`]): the forecast reads every
-//! event of the queue.
+//! again after [`RETRY`], and stops no claim nor landing. The forecast
+//! reads no whole log: its samples come from the ledger
+//! ([`ForecastPort::ledger`]).
 
 use super::*;
 use crate::application::forecast::{self, Pending, SnapshotOutcome};
@@ -20,14 +19,6 @@ use crate::domain::LeaseToken;
 
 /// How long after a failed look or job the triggers are looked for again.
 const RETRY: Duration = Duration::from_secs(600);
-/// The snapshots are stopped (request 190, decision (1) of ADR-t3745-1):
-/// the forecast they record ([`forecast::record_snapshot`]) reads every
-/// event of the queue. No look reads the triggers nor starts a job, so no
-/// failure nor retry follows; the log says so once a process. The
-/// `forecast_recorded` recorded stay as they are. Task 1670 brings the
-/// snapshots back from the ledger and removes this with the branch it
-/// stops.
-const STOPPED: bool = true;
 /// How often the triggers are looked for without `--forecast-check`.
 pub const FORECAST_CHECK: Duration = Duration::from_secs(60);
 
@@ -40,6 +31,9 @@ pub struct ForecastPort {
     pub min_samples: Arc<dyn Fn(i64) -> Result<usize> + Send + Sync>,
     /// How often the triggers are looked for.
     pub check: Duration,
+    /// The LedgerStore the forecast's samples are read from, opened by the
+    /// job.
+    pub ledger: Arc<dyn QueueOpener<dyn crate::application::LedgerStore + Send>>,
 }
 
 /// The snapshot job running now, and where the last look left off.
@@ -51,8 +45,6 @@ pub(in crate::application::supervise) struct ForecastWatch {
     checked: Option<i64>,
     looked: Option<Instant>,
     failed: Option<Instant>,
-    /// The log said this process takes no snapshot ([`STOPPED`]).
-    told_stopped: bool,
 }
 
 impl ForecastWatch {
@@ -61,23 +53,13 @@ impl ForecastWatch {
     }
 
     /// Look at `at` (the monotonic clock's) for the triggers `pending`
-    /// reads and start `job` on them, unless [`STOPPED`]: then neither is
-    /// run, and the first time the log says why.
+    /// reads and start `job` on them.
     fn look(
         &mut self,
         at: Instant,
         pending: impl FnOnce() -> Result<Option<Pending>>,
         job: impl FnOnce(Pending) -> Result<(i64, SnapshotOutcome)> + Send + 'static,
     ) {
-        if STOPPED {
-            if !self.told_stopped {
-                info!(
-                    "the forecast snapshots are stopped: the forecast reads every event of the queue, and they come back once it reads the ledger"
-                );
-                self.told_stopped = true;
-            }
-            return;
-        }
         self.looked = Some(at);
         let pending = match pending() {
             Ok(Some(pending)) => pending,
@@ -179,7 +161,16 @@ fn snapshot(
 ) -> Result<(i64, SnapshotOutcome)> {
     let min_samples = (port.min_samples)(now)?;
     let queue = queues.open()?;
-    let outcome = forecast::record_snapshot(&*queue, processes, token, now, min_samples, pending)?;
+    let ledger = port.ledger.open()?;
+    let outcome = forecast::record_snapshot(
+        &*queue,
+        &*ledger,
+        processes,
+        token,
+        now,
+        min_samples,
+        pending,
+    )?;
     Ok((pending.through, outcome))
 }
 
@@ -215,35 +206,38 @@ mod tests {
         assert!(!look_due(true, Some(RETRY), Some(check - ms), check));
     }
 
-    /// While stopped, no look reads the triggers nor runs the job whose
-    /// forecast reads every event: nothing runs, none is due again after a
-    /// failure, and the log is told once.
+    /// A look reads the triggers and starts the job on them; a failed
+    /// read starts none and is due again after the retry.
     #[test]
-    fn a_stopped_snapshot_reads_nothing() {
-        use std::cell::Cell;
+    fn a_look_reads_the_triggers_and_starts_the_job() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let read = Cell::new(0);
         let ran = Arc::new(AtomicUsize::new(0));
         let mut watch = ForecastWatch::default();
-        for _ in 0..3 {
-            let ran = ran.clone();
-            watch.look(
-                Instant::now(),
-                || {
-                    read.set(read.get() + 1);
-                    Err(anyhow::anyhow!("the triggers are read"))
-                },
-                move |_| {
-                    ran.fetch_add(1, Ordering::SeqCst);
-                    panic!("the snapshot reads every event")
-                },
-            );
-            assert!(!watch.running());
-        }
-        assert_eq!(read.get(), 0);
-        assert_eq!(ran.load(Ordering::SeqCst), 0);
-        assert_eq!(watch.failed, None);
-        assert_eq!(watch.looked, None);
-        assert!(watch.told_stopped);
+        let at = Instant::now();
+        watch.look(
+            at,
+            || Err(anyhow::anyhow!("the triggers could not be read")),
+            |_| unreachable!("no job without triggers"),
+        );
+        assert!(!watch.running());
+        assert_eq!((watch.failed, watch.looked), (Some(at), Some(at)));
+        let counted = ran.clone();
+        watch.look(
+            at,
+            || {
+                Ok(Some(Pending {
+                    triggers: Vec::new(),
+                    through: 7,
+                    previous: None,
+                }))
+            },
+            move |pending| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok((pending.through, SnapshotOutcome::Unmoved))
+            },
+        );
+        let job = watch.job.take().unwrap();
+        assert_eq!(job.join().unwrap().unwrap(), (7, SnapshotOutcome::Unmoved));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
     }
 }

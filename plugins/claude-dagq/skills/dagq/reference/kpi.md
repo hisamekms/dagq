@@ -2,7 +2,7 @@
 
 Each command below prints JSON; `"$DAGQ" <command> --help` lists its flags (and the strata `kpi` can split by), and the JSON output itself is where the values are. This file says how to read them and what to do.
 
-**Stopped in the current build:** `stats` (`--ledger` too), `kpi` (`--compare` too), `report`, `forecast`, `marks` and `mark` (`--retract` too) read every event of the queue, so this build refuses them before they read, with an error naming why and what brings each back (`--help` says the same). While they are stopped, do not retry them: read what you need from `events` (with its filters) and `timeline RUN`, and say in your report which values were not available.
+**Stopped in the current build:** `stats` (`--ledger` too), `kpi` (`--compare` too), `report`, `marks` and `mark` (`--retract` too) read every event of the queue, so this build refuses them before they read, with an error naming why and what brings each back (`--help` says the same). While they are stopped, do not retry them: read what you need from `events` (with its filters) and `timeline RUN`, and say in your report which values were not available.
 
 ## `dagq kpi`: periods, strata, targets
 

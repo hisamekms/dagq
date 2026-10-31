@@ -23,6 +23,10 @@ pub struct LedgerValues {
     /// A legacy row: today's names come from its frozen values and it has
     /// no breakdown.
     pub legacy: bool,
+    /// The run landed (`run_integrated`): a legacy row whose `stats`
+    /// status was `integrated`, a new one with that milestone. False for
+    /// a task.
+    pub landed: bool,
     pub work: Option<i64>,
     pub validate: Option<i64>,
     pub wait_to_land: Option<i64>,
@@ -43,6 +47,7 @@ pub fn read(row: &LedgerRow) -> LedgerValues {
         kind: row.kind,
         key: row.key.clone(),
         legacy: row.is_legacy(),
+        landed: false,
         work: None,
         validate: None,
         wait_to_land: None,
@@ -53,6 +58,7 @@ pub fn read(row: &LedgerRow) -> LedgerValues {
         after_claim: row.after_claim.clone(),
     };
     if let Some(legacy) = &row.legacy {
+        values.landed = row.kind == LedgerKind::Run && row.outcome.as_deref() == Some("integrated");
         let secs = |key: &str| legacy.get(key).and_then(Value::as_i64);
         values.work = secs("work");
         values.validate = secs("validate");
@@ -71,6 +77,7 @@ pub fn read(row: &LedgerRow) -> LedgerValues {
             .get("milestones")
             .and_then(|value| serde_json::from_value(value.clone()).ok())
             .unwrap_or_default();
+        values.landed = milestones.integrated.is_some();
         run_names(&mut values, row, &milestones);
     }
     values
@@ -83,7 +90,7 @@ pub fn read(row: &LedgerRow) -> LedgerValues {
 /// names.
 fn run_names(values: &mut LedgerValues, row: &LedgerRow, milestones: &Milestones) {
     let secs = |from: Option<i64>, to: Option<i64>| Some((to? - from?) / 1000);
-    let validating = row.intervals.iter().find(|i| i.phase == "validating");
+    let validating = validation(&row.intervals);
     let push = row.intervals.iter().find(|i| i.phase == "push");
     values.work = secs(row.started_at, validating.map(|i| i.start));
     values.validate = validating.map(|i| i.millis() / 1000);
@@ -113,6 +120,14 @@ fn run_names(values: &mut LedgerValues, row: &LedgerRow, milestones: &Milestones
         verify_commands: Vec::new(),
         landing_queue_via: Vec::new(),
     });
+}
+
+/// The interval that ends `work` and is `validate` under today's names:
+/// a run's first `validating`. Before it the run is in its `work`, after
+/// it in its `wait_to_land` (to its first `push`); the forecast places a
+/// run in flight by the same rule.
+pub fn validation(intervals: &[Interval]) -> Option<&Interval> {
+    intervals.iter().find(|i| i.phase == "validating")
 }
 
 /// The phase of today's `land_phases` an interval of the wait to land

@@ -2,9 +2,10 @@
 //! [`crate::domain::forecast::forecast`] computes the completion forecast
 //! from. `dagq forecast` reads only and records nothing; the supervisor
 //! records a snapshot of it at its triggers (ADR-0070 decision 3,
-//! [`pending`] and [`record_snapshot`]). The supervisor's snapshots are
-//! stopped now, as [`forecast`] reads every event (request 190,
-//! ADR-t3745-1; `supervise::observation::forecast`'s `STOPPED`).
+//! [`pending`] and [`record_snapshot`]). It reads no whole log
+//! (ADR-t3745-1): the landed runs' samples from the LedgerStore's run
+//! rows a page at a time through the ledger's one read, the landings, goal
+//! closes and asks by their kinds, and a run in flight by its own events.
 
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
@@ -14,20 +15,76 @@ use anyhow::Result;
 
 use super::report::local_day;
 use super::{
-    PlanningRecords, ProcessControl, QueueRecords, RunLog, SupervisorReads, TaskReads, WaitFor,
-    dependency_graph,
+    LedgerStore, PlanningRecords, ProcessControl, QueueRecords, RunLog, SupervisorReads, TaskReads,
+    WaitFor, dependency_graph,
 };
 use crate::domain::{
-    ClaimRank, EventId, GoalId, GoalStatus, RunEvent, SupervisorPulse, TaskId, TaskStatus,
+    ClaimRank, EventId, GoalId, GoalStatus, RunEvent, SupervisorPulse, TaskChange, TaskId,
+    TaskStatus, event_kind,
     forecast::{
-        DEFAULT_TRIALS, Forecast, ForecastGoal, ForecastInput, ForecastTask, forecast as simulate,
-        history, in_flight, running, seed,
+        DEFAULT_TRIALS, Forecast, ForecastGoal, ForecastInput, ForecastTask, Sample,
+        forecast as simulate, history, in_flight, running, sample, seed,
         snapshot::{
             FORECAST_RECORDED, Previous, Snapshot, TRIGGER_KINDS, Trigger, decide, trigger,
         },
     },
+    ledger::{LedgerKind, read::read},
     marks::utc_text,
 };
+
+/// The ledger's run rows one read takes at most.
+const ROWS_PAGE: usize = 200;
+/// The events of the kinds the history reads one read takes at most: an
+/// `ask_opened` carries its question, so a page stays well under what one
+/// answer of the queue service holds.
+const EVENTS_PAGE: usize = 500;
+
+/// The landed runs' samples with their task's change, from the
+/// LedgerStore's run rows a page at a time, each read through the
+/// ledger's one read ([`crate::domain::ledger::read::read`]) and let go.
+fn samples(
+    ledger: &(impl LedgerStore + ?Sized),
+    changes: &HashMap<TaskId, Option<TaskChange>>,
+) -> Result<Vec<(Option<TaskChange>, Sample)>> {
+    let mut runs = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = ledger.ledger_rows_after(LedgerKind::Run, after.as_deref(), ROWS_PAGE)?;
+        for row in &page {
+            if let Some(drawn) = sample(&read(row)) {
+                let change = row
+                    .task_id
+                    .and_then(|task| changes.get(&task).cloned().flatten());
+                runs.push((change, drawn));
+            }
+        }
+        // A page may be cut short with rows after it: only an empty one
+        // ends.
+        match page.last() {
+            Some(last) => after = Some(last.key.clone()),
+            None => return Ok(runs),
+        }
+    }
+}
+
+/// The events of `kinds` up to `upto`, oldest first, a page at a time.
+fn events_of(
+    queue: &(impl RunLog + ?Sized),
+    kinds: &[&str],
+    upto: EventId,
+) -> Result<Vec<RunEvent>> {
+    let mut events = Vec::new();
+    let mut after = EventId::new(0);
+    loop {
+        let page = queue.events_of_between(kinds, after, upto, EVENTS_PAGE)?;
+        let full = page.len() >= EVENTS_PAGE;
+        after = page.last().map_or(after, |last| last.id);
+        events.extend(page);
+        if !full {
+            return Ok(events);
+        }
+    }
+}
 
 /// What `forecast` looks at.
 #[derive(Debug, Clone, Default)]
@@ -46,26 +103,39 @@ pub struct ForecastQuery {
 /// runs, narrowed to `query` after the whole queue is simulated.
 pub fn forecast(
     queue: &(impl PlanningRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
+    ledger: &(impl LedgerStore + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
     min_samples: usize,
     query: &ForecastQuery,
 ) -> Result<Forecast> {
-    forecast_through(queue, processes, now, min_samples, query).map(|(forecast, _)| forecast)
+    forecast_through(queue, ledger, processes, now, min_samples, query)
+        .map(|(forecast, _)| forecast)
 }
 
 /// [`forecast`], with the latest event ID the history was read through.
 fn forecast_through(
     queue: &(impl PlanningRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
+    ledger: &(impl LedgerStore + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
     min_samples: usize,
     query: &ForecastQuery,
 ) -> Result<(Forecast, i64)> {
-    let events = queue.all_events()?;
+    let latest = queue.latest_event_id()?;
     let goals = queue.task_goals()?;
     let changes = queue.task_changes()?;
-    let history = history(&events, &goals, &changes, now);
+    let landings = events_of(
+        queue,
+        &[event_kind::RUN_INTEGRATED, event_kind::GOAL_CLOSED],
+        latest,
+    )?;
+    let asks = events_of(
+        queue,
+        &[event_kind::ASK_OPENED, event_kind::ASK_ANSWERED],
+        latest,
+    )?;
+    let history = history(samples(ledger, &changes)?, &landings, &asks, &goals);
     let parallel = match query.parallel {
         Some(parallel) => parallel,
         None => queue
@@ -128,11 +198,7 @@ fn forecast_through(
             empty: goal.tasks.total == 0,
         })
         .collect();
-    let latest = events
-        .iter()
-        .map(|event| event.id.as_i64())
-        .max()
-        .unwrap_or(0);
+    let latest = latest.as_i64();
     let mut result = simulate(&ForecastInput {
         now,
         tasks: &tasks,
@@ -248,6 +314,7 @@ pub enum SnapshotOutcome {
 /// `pending`'s triggers.
 pub fn record_snapshot(
     queue: &(impl PlanningRecords + QueueRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
+    ledger: &(impl LedgerStore + ?Sized),
     processes: &dyn ProcessControl,
     supervisor: &LeaseToken,
     now: i64,
@@ -258,7 +325,8 @@ pub fn record_snapshot(
         trials: DEFAULT_TRIALS,
         ..ForecastQuery::default()
     };
-    let (forecast, events_through) = forecast_through(queue, processes, now, min_samples, &query)?;
+    let (forecast, events_through) =
+        forecast_through(queue, ledger, processes, now, min_samples, &query)?;
     let previous = pending
         .previous
         .as_ref()

@@ -618,15 +618,19 @@ fn the_stats_rustc_follows_the_declared_rust_profile() {
 
 #[test]
 fn timeline_names_the_long_gap_before_the_receipt() {
+    use dagq::domain::run_phase::{Attempt, Phase, PhaseChange};
     use serde_json::json;
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("queue.db");
+    let moved = |phase: Phase| PhaseChange::new(phase, Attempt::FIRST, "x").payload();
     // Task 182's shape: the session starts, then nothing until the receipt
     // ten hours later; the run waits on a question for an hour after it.
+    // Each gap's reason is the phase the run recorded where it starts.
     let run = run_with_events(
         &db,
         &[
             ("agent_started", json!({}), "00:00:05"),
+            ("run_phase_changed", moved(Phase::Worker), "00:00:05"),
             ("receipt_observed", json!({}), "10:00:00"),
             (
                 "ask_opened",
@@ -634,10 +638,16 @@ fn timeline_names_the_long_gap_before_the_receipt() {
                 "10:00:10",
             ),
             (
+                "run_phase_changed",
+                moved(Phase::Waiting { in_slot: true }),
+                "10:00:10",
+            ),
+            (
                 "ask_answered",
                 json!({"ask_id": 9, "kind": "worker_question"}),
                 "11:00:10",
             ),
+            ("run_phase_changed", moved(Phase::Worker), "11:00:10"),
         ],
     );
     let timeline = ok(&db, &["timeline", &run]);
@@ -646,18 +656,19 @@ fn timeline_names_the_long_gap_before_the_receipt() {
     assert_eq!(timeline["status"], "claimed");
     assert_eq!(timeline["gap_secs"], 300);
     let gaps = timeline["gaps"].as_array().unwrap();
-    assert_eq!(gaps[0]["reason"], "idle");
-    assert_eq!(gaps[0]["phase"], "session");
-    assert_eq!(gaps[0]["confirmed"], false);
+    assert_eq!(gaps[0]["reason"], "worker");
+    assert_eq!(gaps[0]["phase"], "first");
+    assert_eq!(gaps[0]["blocker"], "ai");
     assert_eq!(gaps[0]["secs"], 10 * 3600 - 5);
     assert_eq!(gaps[0]["from"], "2026-09-24T00:00:05.000Z");
     assert_eq!(gaps[0]["until"], "2026-09-24T10:00:00.000Z");
-    assert_eq!(gaps[1]["reason"], "waiting_ask");
+    assert_eq!(gaps[1]["reason"], "waiting");
+    assert_eq!(gaps[1]["blocker"], "human");
     assert_eq!(gaps[1]["ask_ids"], json!([9]));
     // The run is not finished: the time since its last event is a gap too.
     let last = gaps.last().unwrap();
     assert!(last["before_event"].is_null() && last["until"].is_null());
-    assert_eq!(last["reason"], "after_receipt");
+    assert_eq!(last["reason"], "worker");
     assert!(timeline["events"][0].get("payload").is_none());
     let full = ok(&db, &["timeline", &run, "--full", "--gap", "7200"]);
     assert!(full["events"][0]["payload"].is_object());

@@ -1,41 +1,25 @@
 //! `timeline RUN` (ADR-0044 decision 22): the gaps in a run's events and
-//! why the run was waiting through each, derived from the run's events by
-//! fixed rules. No LLM and no run directory: a gap gets the reason the
-//! events before it show, `unknown` when none does.
+//! why the run was waiting through each. No LLM and no run directory: the
+//! reason of a gap is the phase the run was in where it starts, from the
+//! one fold of the run's events into intervals
+//! ([`crate::domain::ledger::fold::fold_run`]: the phases the supervisor
+//! recorded as `run_phase_changed`, which the ledger, `status` and the
+//! forecast read too), with its tags (`blocker`, `holds`) and the kind of
+//! its attempt (`phase`: `first`, `revise`, `conflict` or `resume`).
 //!
-//! The rules, first match wins, on the state after the event the gap
-//! starts from:
+//! - A phase's name (`worker`, `review`, `waiting`, `landing_answer`,
+//!   `held`, ...): the interval the gap starts in. `held` is the run's
+//!   wait for its task's hold (ADR-t1879-1), from its record to the next.
+//! - `unattributed`: time no record accounts for (from the claim to a
+//!   first record that came after it, a record without tags it can read).
+//! - `ended`: after its life ended (its push, a failure, a cancel).
+//! - `legacy`: every gap of a run with no `run_phase_changed` (one from
+//!   before the phases were recorded), which is not folded: its events are
+//!   listed as they are, and its gaps are not given a reason again.
 //!
-//! - `no_supervisor`: the gap ends at a `run_adopted` or `run_recovered`
-//!   (no supervisor held the run until another took it over).
-//! - `held`: the run waits for its task's hold (ADR-t1879-1), from its
-//!   `run_phase_changed` into the phase `held` to the next record of
-//!   another phase or the `task_released`. A gap after `task_held` and
-//!   before that record has the reason of what the run still did.
-//! - `waiting_ask`: an ask of the run that holds it (every kind but the
-//!   observer's `blocked` and the planner's `planner_question`) is open.
-//! - `integrating`: `integrate` is rebasing and verifying the run.
-//! - `e2e` / `waiting_e2e`: the runtime runs the run's e2e on the host
-//!   after its review, or the run waits for another run's to end
-//!   (`run_e2e_started` / `run_e2e_waiting` until `run_e2e_finished` or
-//!   `run_e2e_failed`, ADR-t1233-2).
-//! - In a session the supervisor watches (the worker's own after
-//!   `agent_started`, a `resume_started`, a `revise_requested`, a
-//!   `conflict_precheck` sent to the session), until `session_exited`:
-//!   `background` while its latest idle marker (`session_idle_observed`, or
-//!   the `stall_nudged` that read it) shows background work,
-//!   `after_receipt` once the phase's receipt is observed (or the revise or
-//!   conflict is answered), `idle` otherwise (`confirmed` when an idle
-//!   marker or a stall nudge was recorded in the phase; without one the
-//!   events cannot tell idle from working). `session_idle_observed` is
-//!   recorded only after the receipt, so before it only a `stall_nudged`
-//!   shows `background`, and a long gap before the receipt without a nudge
-//!   is an `idle` with `confirmed: false`.
-//! - `waiting_integration`: the session has exited after an accepted
-//!   validation, and the run waits for its landing.
-//! - `after_receipt`: a receipt was observed, and the run waits for its
-//!   validation or review.
-//! - `unknown`.
+//! A gap in a phase a person decides (blocker `human`) lists the asks open
+//! on the run that hold it then (every kind but the observer's `blocked`
+//! and the planner's `planner_question`).
 //!
 //! The events `timeline` shows also hold the steps of the automatic update
 //! (`update_*`, queue events) in the run's span ([`merged`]); the gaps are
@@ -45,12 +29,14 @@
 //! test, build/clippy, chains) the run's sessions ran, from the `work` their
 //! `session_closed` recorded (task 514).
 use crate::domain::EventKind;
-use crate::domain::run::{AskOpened, ConflictPrecheck, restore_payload};
+use crate::domain::run::{AskOpened, restore_payload};
 use std::collections::BTreeSet;
 
 use serde::Serialize;
 use serde_json::Value;
 
+use super::ledger::fold::{Interval, RunLife, fold_run};
+use super::run_phase::{AttemptKind, Blocker, Holds};
 use super::{AskKind, EventId, RunEvent, stats::timestamp_millis};
 
 /// The run's moves to the other provider (`provider_switched`,
@@ -135,168 +121,70 @@ pub struct Gap {
     /// `None` with `before_event`.
     pub until: Option<String>,
     pub secs: i64,
-    pub reason: &'static str,
-    /// The session the supervisor watched through the gap: `session`,
-    /// `resume`, `revise` or `conflict`.
+    /// The phase the run was in where the gap starts, `unattributed`,
+    /// `ended` or `legacy` (the module's rules).
+    pub reason: String,
+    /// The kind of the attempt of that phase: `first`, `revise`,
+    /// `conflict` or `resume`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<&'static str>,
-    /// For `idle`: whether an idle marker or a stall nudge confirmed it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub confirmed: Option<bool>,
-    /// For `waiting_ask`: the open asks.
+    /// For a phase a person decides: the open asks that hold the run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ask_ids: Vec<i64>,
+    /// The phase's tags.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<Blocker>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holds: Option<Holds>,
 }
 
-/// What the events up to some point say about the run.
+/// The reason of a gap of a run that is not folded.
+pub const LEGACY: &str = "legacy";
+/// The reason of a gap after the run's life ended.
+pub const ENDED: &str = "ended";
+
+/// The asks open on the run that hold it, after the events up to some
+/// point.
 #[derive(Debug, Default)]
-struct State {
-    phase: Option<&'static str>,
-    /// The phase a revise or conflict request replaced, for a request
-    /// withdrawn because it could not be sent.
-    replaced: Option<&'static str>,
-    /// The phase's receipt (or answer) was observed.
-    answered: bool,
-    /// The latest idle marker of the phase: `Some(background_running)`.
-    idle: Option<bool>,
-    nudged: bool,
-    receipt: bool,
-    accepted: bool,
-    integrating: bool,
-    /// The runtime's e2e after the review (ADR-t1233-2): `e2e` while it
-    /// runs, `waiting_e2e` while it waits for another run's.
-    e2e: Option<&'static str>,
-    open_asks: BTreeSet<i64>,
-    /// In its hold's wait: the last phase recorded is `held`, not released.
-    held: bool,
-}
+struct OpenAsks(BTreeSet<i64>);
 
-impl State {
-    fn request(&mut self, phase: &'static str) {
-        self.replaced = self.phase;
-        self.start(phase);
-    }
-
-    fn withdraw(&mut self) {
-        self.phase = self.replaced.take();
-        self.answered = true;
-    }
-
-    fn start(&mut self, phase: &'static str) {
-        self.phase = Some(phase);
-        self.answered = false;
-        self.idle = None;
-        self.nudged = false;
-    }
-
+impl OpenAsks {
     fn apply(&mut self, event: &RunEvent) {
         let payload = &event.payload;
         match event.kind.known() {
-            Some(EventKind::AgentStarted) => self.start("session"),
-            Some(EventKind::ResumeStarted) => {
-                // The resumed session makes a new receipt for a new validation.
-                self.start("resume");
-                self.receipt = false;
-                self.accepted = false;
-            }
-            Some(EventKind::ReviseRequested) => self.request("revise"),
-            Some(EventKind::ConflictPrecheck)
-                if restore_payload::<ConflictPrecheck>(payload).requested == Some(true) =>
-            {
-                self.request("conflict")
-            }
-            Some(EventKind::ReceiptObserved) => {
-                self.receipt = true;
-                self.answered = true;
-            }
-            Some(EventKind::ReviseFinished | EventKind::ConflictResolved) => self.answered = true,
-            // A request that could not be sent leaves the session in the
-            // phase it replaced, after the receipt the review followed.
-            Some(EventKind::ReviseUnsent) => self.withdraw(),
-            Some(EventKind::ConflictPrecheck) if payload["unsent"] == true => self.withdraw(),
-            Some(EventKind::SessionIdleObserved) => {
-                self.idle = Some(payload["background_running"] == true);
-            }
-            Some(EventKind::StallNudged) => {
-                self.nudged = true;
-                self.idle = Some(payload["background_running"] == true);
-            }
-            Some(EventKind::SessionExited) => self.phase = None,
-            Some(EventKind::ValidationFinished) => self.accepted = payload["accepted"] == true,
-            Some(EventKind::IntegrationStarted) => self.integrating = true,
-            Some(EventKind::RunE2eWaiting) => self.e2e = Some("waiting_e2e"),
-            Some(EventKind::RunE2eStarted) => self.e2e = Some("e2e"),
-            Some(EventKind::RunE2eFinished | EventKind::RunE2eFailed) => self.e2e = None,
             Some(EventKind::AskOpened) if holds_the_run(&restore_payload(payload)) => {
                 if let Some(id) = ask_id(payload) {
-                    self.open_asks.insert(id);
+                    self.0.insert(id);
                 }
             }
             Some(EventKind::AskAnswered) => {
                 if let Some(id) = ask_id(payload) {
-                    self.open_asks.remove(&id);
+                    self.0.remove(&id);
                 }
             }
-            Some(EventKind::RunPhaseChanged) => {
-                self.held = super::run_phase::Recorded::of_event(event)
-                    .is_some_and(|record| record.is(super::run_phase::Phase::Held));
-            }
-            _ if super::task_hold::ends_hold(event) => self.held = false,
             _ => {}
         }
-        if matches!(
-            event.kind.known(),
-            Some(
-                EventKind::RunIntegrated
-                    | EventKind::IntegrationDeferred
-                    | EventKind::IntegrationError
-                    | EventKind::IntegrationHeld
-                    | EventKind::IntegrationFailed
-                    | EventKind::IntegrationHandedOver
-                    | EventKind::RuntimeError
-                    | EventKind::RunAdopted
-                    | EventKind::RunRecovered
-                    | EventKind::ResumeStarted
-            )
-        ) {
-            self.integrating = false;
-            self.e2e = None;
-        }
     }
+}
 
-    /// The reason of a gap that starts in this state and ends at `end`.
-    fn reason(&self, end: Option<&RunEvent>, gap: &mut Gap) {
-        if end.is_some_and(|e| {
-            matches!(
-                e.kind.known(),
-                Some(EventKind::RunAdopted | EventKind::RunRecovered)
-            )
-        }) {
-            gap.reason = "no_supervisor";
-        } else if self.held {
-            gap.reason = "held";
-        } else if !self.open_asks.is_empty() {
-            gap.reason = "waiting_ask";
-            gap.ask_ids = self.open_asks.iter().copied().collect();
-        } else if self.integrating {
-            gap.reason = "integrating";
-        } else if let Some(e2e) = self.e2e {
-            gap.reason = e2e;
-        } else if let Some(phase) = self.phase {
-            gap.phase = Some(phase);
-            gap.reason = if self.idle == Some(true) {
-                "background"
-            } else if self.answered {
-                "after_receipt"
-            } else {
-                gap.confirmed = Some(self.idle.is_some() || self.nudged);
-                "idle"
-            };
-        } else if self.accepted {
-            gap.reason = "waiting_integration";
-        } else if self.receipt {
-            gap.reason = "after_receipt";
-        }
+/// The interval of `life` a gap starting at unix milliseconds `at` starts
+/// in: the last that starts by then and has not ended (a later one that
+/// starts at the same time wins), `None` after the last one or before the
+/// first.
+fn interval_at(life: &RunLife, at: i64) -> Option<&Interval> {
+    life.intervals
+        .iter()
+        .rev()
+        .find(|interval| interval.start <= at && (at < interval.end || interval.start == at))
+}
+
+/// The name of an attempt's kind.
+fn attempt_name(kind: AttemptKind) -> &'static str {
+    match kind {
+        AttemptKind::First => "first",
+        AttemptKind::Revise => "revise",
+        AttemptKind::Conflict => "conflict",
+        AttemptKind::Resume => "resume",
     }
 }
 
@@ -326,13 +214,24 @@ pub fn merged(events: &[RunEvent], others: &[RunEvent]) -> Vec<RunEvent> {
 }
 
 /// The gaps of at least `min_secs` between consecutive `events` of one run
-/// (ascending id), with their reasons. With `now_ms`, the run is not
-/// finished and the time from its last event to now is a gap too.
+/// (ascending id), with their reasons from the run's fold. With `now_ms`,
+/// the run is not finished and the time from its last event to now is a
+/// gap too.
 pub fn gaps(events: &[RunEvent], min_secs: i64, now_ms: Option<i64>) -> Vec<Gap> {
-    let mut state = State::default();
+    let last_ms = events
+        .iter()
+        .rev()
+        .find_map(|event| timestamp_millis(&event.created_at));
+    let recorded = events
+        .iter()
+        .any(|event| event.kind == EventKind::RunPhaseChanged);
+    let life = recorded
+        .then(|| fold_run(events, &[], now_ms.or(last_ms).unwrap_or(0)))
+        .flatten();
+    let mut asks = OpenAsks::default();
     let mut found = Vec::new();
     for (i, event) in events.iter().enumerate() {
-        state.apply(event);
+        asks.apply(event);
         let next = events.get(i + 1);
         let Some(start) = timestamp_millis(&event.created_at) else {
             continue;
@@ -352,12 +251,29 @@ pub fn gaps(events: &[RunEvent], min_secs: i64, now_ms: Option<i64>) -> Vec<Gap>
             from: event.created_at.clone(),
             until: next.map(|e| e.created_at.clone()),
             secs,
-            reason: "unknown",
+            reason: LEGACY.to_owned(),
             phase: None,
-            confirmed: None,
             ask_ids: Vec::new(),
+            blocker: None,
+            holds: None,
         };
-        state.reason(next, &mut gap);
+        if let Some(life) = &life {
+            match interval_at(life, start) {
+                Some(interval) => {
+                    gap.reason = interval.phase.clone();
+                    gap.phase = interval.attempt.map(|attempt| attempt_name(attempt.kind));
+                    gap.blocker = interval.blocker;
+                    gap.holds = interval.holds;
+                    if interval.blocker == Some(Blocker::Human) {
+                        gap.ask_ids = asks.0.iter().copied().collect();
+                    }
+                }
+                None if life.end.is_some_and(|ended| start >= ended) => {
+                    gap.reason = ENDED.to_owned();
+                }
+                None => gap.reason = super::ledger::fold::UNATTRIBUTED.to_owned(),
+            }
+        }
         found.push(gap);
     }
     found
@@ -433,9 +349,9 @@ mod tests {
             .collect()
     }
 
-    fn reasons(gaps: &[Gap]) -> Vec<(i64, &'static str)> {
+    fn reasons(gaps: &[Gap]) -> Vec<(i64, String)> {
         gaps.iter()
-            .map(|gap| (gap.after_event.as_i64(), gap.reason))
+            .map(|gap| (gap.after_event.as_i64(), gap.reason.clone()))
             .collect()
     }
 
@@ -505,252 +421,141 @@ mod tests {
         assert_eq!(steps[3]["to"], "pause_requested");
     }
 
+    /// A run from before the phases were recorded keeps its events, and
+    /// every gap of it is `legacy`: not given a reason again.
     #[test]
-    fn a_long_gap_before_the_receipt_is_an_unconfirmed_idle() {
-        // Task 182: claimed, then nothing until the receipt ten hours later,
-        // and no supervisor until another adopted the run.
+    fn a_run_with_no_phase_recorded_has_legacy_gaps() {
         let run = events(&[
             ("run_claimed", json!({}), "12:32:30.123"),
             ("agent_started", json!({}), "12:32:32.219"),
-            ("first_commit_observed", json!({}), "23:07:26.133"),
             ("receipt_observed", json!({}), "23:07:38.104"),
-            (
-                "session_idle_observed",
-                json!({"background_running": false}),
-                "23:07:44.537",
-            ),
             (
                 "validation_finished",
                 json!({"accepted": true}),
-                "23:07:45.619",
+                "23:08:00.000",
             ),
             (
-                "conflict_precheck",
-                json!({"requested": true}),
-                "23:07:59.055",
+                "run_integrated",
+                json!({"status": "integrated"}),
+                "23:30:00.000",
             ),
-            ("run_adopted", json!({}), "23:33:33.436"),
-            (
-                "ask_opened",
-                json!({"ask_id": 56, "kind": "blocked"}),
-                "23:36:31.843",
-            ),
-            ("conflict_resolved", json!({}), "23:46:12.315"),
-            ("session_exited", json!({}), "23:46:40.274"),
-            ("integration_started", json!({}), "23:46:43.044"),
-            ("run_integrated", json!({}), "23:48:30.556"),
         ]);
-        let found = gaps(&run, DEFAULT_GAP_SECS, None);
         assert_eq!(
-            reasons(&found),
-            [(2, "idle"), (7, "no_supervisor"), (9, "idle")]
+            reasons(&gaps(&run, 300, None)),
+            [(2, LEGACY.to_owned()), (4, LEGACY.to_owned())]
         );
-        assert_eq!(found[0].secs, 38093);
-        assert_eq!(found[0].phase, Some("session"));
-        assert_eq!(found[0].confirmed, Some(false));
-        assert_eq!(found[0].before_event, Some(EventId::new(3)));
-        assert_eq!(found[2].phase, Some("conflict"));
-        assert!(gaps(&run, 60 * 60 * 11, None).is_empty());
+        // Up to now too, while it moves on.
+        let now = timestamp_millis("2026-09-24T23:40:00.000Z");
+        assert_eq!(gaps(&run, 300, now).last().unwrap().reason, LEGACY);
     }
 
-    /// A request withdrawn because it could not be sent leaves the gap
-    /// after it in the session it replaced.
+    /// The reason of a gap is the phase the run recorded where it starts,
+    /// with its tags and the kind of its attempt; a revise's gap is the
+    /// revise's, and after the end of its life a gap is `ended`.
     #[test]
-    fn a_withdrawn_request_leaves_the_session_it_replaced() {
-        for (kind, payload) in [
-            ("revise_requested", json!({})),
-            ("conflict_precheck", json!({"requested": true})),
-        ] {
-            let withdrawal = if kind == "revise_requested" {
-                ("revise_unsent", json!({}))
-            } else {
-                (
-                    "conflict_precheck",
-                    json!({"requested": false, "unsent": true}),
-                )
-            };
-            let run = events(&[
-                ("agent_started", json!({}), "00:00:00"),
-                ("receipt_observed", json!({}), "00:00:01"),
-                (kind, payload, "00:00:02"),
-                (withdrawal.0, withdrawal.1, "00:00:03"),
-                ("session_exited", json!({}), "02:00:00"),
-            ]);
-            let found = gaps(&run, DEFAULT_GAP_SECS, None);
-            assert_eq!(reasons(&found), [(4, "after_receipt")], "{kind}");
-            assert_eq!(found[0].phase, Some("session"), "{kind}");
-        }
-    }
-
-    #[test]
-    fn each_state_has_its_reason() {
-        let run = events(&[
-            ("agent_started", json!({}), "00:00:00"),
-            (
-                "ask_opened",
-                json!({"ask_id": 3, "kind": "worker_question"}),
-                "00:00:01",
-            ),
-            ("ask_answered", json!({"ask_id": 3}), "01:00:00"),
-            (
-                "stall_nudged",
-                json!({"background_running": true}),
-                "01:00:01",
-            ),
-            (
-                "stall_nudged",
-                json!({"background_running": false}),
-                "02:00:00",
-            ),
-            (
-                "session_idle_observed",
-                json!({"background_running": false}),
-                "02:00:01",
-            ),
-            ("receipt_observed", json!({}), "03:00:00"),
-            ("validation_finished", json!({"accepted": true}), "04:00:00"),
-            ("revise_requested", json!({}), "04:00:01"),
-            ("revise_finished", json!({}), "05:00:00"),
-            ("session_exited", json!({}), "06:00:00"),
-            ("integration_started", json!({}), "07:00:00"),
-            ("integration_deferred", json!({}), "08:00:00"),
-            ("resume_started", json!({}), "08:00:01"),
-        ]);
-        let found = gaps(
-            &run,
-            60,
-            Some(timestamp_millis("2026-09-24T09:00:01Z").unwrap()),
-        );
+    fn a_gap_has_the_phase_it_starts_in() {
+        use crate::domain::ledger::testkit::{Log, run_id};
+        use crate::domain::run_phase::{Attempt, Phase};
+        let r = run_id(1);
+        let revise = Attempt::of(AttemptKind::Revise, 1);
+        let mut log = Log::default();
+        log.add(Some(1), Some(&r), "run_claimed", json!({}), 0)
+            .phase(1, &r, 0, Phase::Worker, "x")
+            .add(Some(1), Some(&r), "receipt_observed", json!({}), 600)
+            .phase(1, &r, 600, Phase::Validating, "x")
+            .phase(1, &r, 660, Phase::Review, "x")
+            .phase_in(1, &r, 1000, Phase::Revise, revise, "x")
+            .phase_in(1, &r, 2000, Phase::Validating, revise, "x")
+            .phase_in(1, &r, 2010, Phase::Landing, revise, "x")
+            .phase_in(1, &r, 2100, Phase::Push { in_slot: true }, revise, "x")
+            .phase_in(1, &r, 2110, Phase::Ended, revise, "pushed")
+            .add(Some(1), Some(&r), "run_cleaned", json!({}), 3000);
+        let found = gaps(&log.events, 60, None);
+        let shown: Vec<(&str, Option<&str>)> = found
+            .iter()
+            .map(|gap| (gap.reason.as_str(), gap.phase))
+            .collect();
         assert_eq!(
-            reasons(&found),
+            shown,
             [
-                (2, "waiting_ask"),
-                (4, "background"),
-                (6, "idle"),
-                (7, "after_receipt"),
-                (9, "idle"),
-                (10, "after_receipt"),
-                (11, "waiting_integration"),
-                (12, "integrating"),
-                (14, "idle"),
+                ("worker", Some("first")),
+                ("validating", Some("first")),
+                ("review", Some("first")),
+                ("revise", Some("revise")),
+                ("landing", Some("revise")),
+                ("ended", None),
             ]
         );
-        assert_eq!(found[0].ask_ids, [3]);
-        assert_eq!(found[2].confirmed, Some(true));
-        assert_eq!(found[3].phase, Some("session"));
-        assert_eq!(found[4].phase, Some("revise"));
-        assert_eq!(found[5].phase, Some("revise"));
-        let last = found.last().unwrap();
-        assert_eq!(
-            (last.phase, last.before_event, last.until.as_deref()),
-            (Some("resume"), None, None)
-        );
-        assert_eq!(last.secs, 3600);
+        assert_eq!(found[3].blocker, Some(Blocker::Ai));
+        assert_eq!(found[4].holds, Some(Holds::LandingSlot));
     }
 
-    /// A hold's wait is `held` from the run's `held` record to the
-    /// release, or to the end its task's end puts to it, before an ask the
-    /// run waits for; the gap from `task_held` to that record keeps the
-    /// reason of what the run still did.
+    /// A gap in a phase a person decides lists the asks open on the run
+    /// that hold it; the observer's `blocked` does not.
+    #[test]
+    fn a_gap_waiting_for_a_person_lists_its_open_asks() {
+        use crate::domain::ledger::testkit::{Log, run_id};
+        use crate::domain::run_phase::Phase;
+        let r = run_id(2);
+        let mut log = Log::default();
+        log.add(Some(1), Some(&r), "run_claimed", json!({}), 0)
+            .phase(1, &r, 0, Phase::Worker, "x")
+            .add(
+                Some(1),
+                Some(&r),
+                "ask_opened",
+                json!({"ask_id": 4, "kind": "approve_landing"}),
+                100,
+            )
+            .add(
+                Some(1),
+                Some(&r),
+                "ask_opened",
+                json!({"ask_id": 5, "kind": "blocked"}),
+                100,
+            )
+            .phase(1, &r, 100, Phase::LandingAnswer, "approve_landing")
+            .add(
+                Some(1),
+                Some(&r),
+                "ask_answered",
+                json!({"ask_id": 4}),
+                4000,
+            )
+            .phase(1, &r, 4000, Phase::LandingQueue, "approved");
+        let found = gaps(&log.events, 60, None);
+        let waiting = found
+            .iter()
+            .find(|gap| gap.reason == "landing_answer")
+            .unwrap();
+        assert_eq!(waiting.ask_ids, [4]);
+        assert_eq!(waiting.blocker, Some(Blocker::Human));
+        assert!(found[0].ask_ids.is_empty());
+    }
+
+    /// The run's wait for its task's hold (ADR-t1879-1) is `held` from its
+    /// record to the next one; the gap after `task_held` and before that
+    /// record has the phase the run still went on in.
     #[test]
     fn a_holds_wait_is_held_from_its_record_to_its_release() {
-        for close in ["task_released", "task_hold_ended"] {
-            let run = events(&[
-                ("agent_started", json!({}), "00:00:00"),
-                ("task_held", json!({"hold_id": 1}), "00:10:00"),
-                ("receipt_observed", json!({}), "00:30:00"),
-                (
-                    "ask_opened",
-                    json!({"ask_id": 3, "kind": "worker_question"}),
-                    "00:30:01",
-                ),
-                ("run_phase_changed", json!({"phase": "held"}), "00:31:00"),
-                (close, json!({"hold_id": 1}), "02:00:00"),
-                (
-                    "run_phase_changed",
-                    json!({"phase": "needs_session"}),
-                    "02:00:00",
-                ),
-                ("run_phase_changed", json!({"phase": "held"}), "02:10:00"),
-            ]);
-            let found = gaps(
-                &run,
-                60,
-                Some(timestamp_millis("2026-09-24T03:10:00Z").unwrap()),
-            );
-            assert_eq!(
-                reasons(&found),
-                [
-                    (1, "idle"),
-                    (2, "idle"),
-                    (5, "held"),
-                    (7, "waiting_ask"),
-                    (8, "held"),
-                ]
-            );
-            assert_eq!(found[2].secs, 5340, "{close}");
-        }
-    }
-
-    /// The runtime's e2e after the review (ADR-t1233-2) and the wait for
-    /// another run's are gaps of their own.
-    #[test]
-    fn the_e2e_after_the_review_and_its_wait_have_their_reasons() {
-        let run = events(&[
-            ("validation_finished", json!({"accepted": true}), "00:00:00"),
-            ("session_exited", json!({}), "00:00:01"),
-            ("run_e2e_waiting", json!({}), "00:00:02"),
-            ("run_e2e_started", json!({}), "00:20:00"),
-            ("run_e2e_finished", json!({"outcome": "passed"}), "00:50:00"),
-            ("integration_started", json!({}), "01:00:00"),
-            ("run_integrated", json!({}), "01:00:30"),
-        ]);
-        let found = gaps(&run, 60, None);
-        assert_eq!(
-            reasons(&found),
-            [(3, "waiting_e2e"), (4, "e2e"), (5, "waiting_integration")]
-        );
-    }
-
-    #[test]
-    fn a_takeover_ends_the_landing_and_background_outranks_the_receipt() {
-        let run = events(&[
-            ("agent_started", json!({}), "00:00:00"),
-            ("receipt_observed", json!({}), "00:00:01"),
-            (
-                "session_idle_observed",
-                json!({"background_running": true}),
-                "00:00:02",
-            ),
-            ("session_exited", json!({}), "01:00:00"),
-            ("validation_finished", json!({"accepted": true}), "01:00:01"),
-            ("integration_started", json!({}), "01:00:02"),
-            ("run_recovered", json!({}), "02:00:00"),
-            ("lease_acquired", json!({}), "02:00:01"),
-        ]);
-        let found = gaps(
-            &run,
-            60,
-            Some(timestamp_millis("2026-09-24T03:00:01Z").unwrap()),
-        );
-        assert_eq!(
-            reasons(&found),
-            [
-                (3, "background"),
-                (6, "no_supervisor"),
-                (8, "waiting_integration")
-            ]
-        );
-    }
-
-    #[test]
-    fn a_gap_with_no_known_state_is_unknown() {
-        let run = events(&[
-            ("run_claimed", json!({}), "00:00:00"),
-            ("workspace_created", json!({}), "01:00:00"),
-            ("receipt_observed", json!({}), "not a time"),
-        ]);
-        assert_eq!(reasons(&gaps(&run, 60, None)), [(1, "unknown")]);
+        use crate::domain::ledger::testkit::{Log, run_id};
+        use crate::domain::run_phase::Phase;
+        let r = run_id(3);
+        let mut log = Log::default();
+        log.add(Some(1), Some(&r), "run_claimed", json!({}), 0)
+            .phase(1, &r, 0, Phase::Worker, "x")
+            .add(Some(1), None, "task_held", json!({"hold_id": 1}), 600)
+            .phase(1, &r, 1860, Phase::Held, "task_held")
+            .add(Some(1), None, "task_released", json!({"hold_id": 1}), 7800)
+            .phase(1, &r, 7800, Phase::Worker, "task_released");
+        let found = gaps(&log.events, 300, None);
+        let shown: Vec<(i64, &str)> = found
+            .iter()
+            .map(|gap| (gap.after_event.as_i64(), gap.reason.as_str()))
+            .collect();
+        assert_eq!(shown, [(2, "worker"), (3, "worker"), (4, "held")]);
+        assert_eq!(found[2].secs, 7800 - 1860);
+        assert_eq!(found[2].blocker, Some(Blocker::Human));
     }
 
     #[test]

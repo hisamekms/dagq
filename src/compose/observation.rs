@@ -2057,15 +2057,14 @@ impl OneShot {
 
     /// `forecast` (ADR-0070 decision 2): see
     /// [`crate::application::forecast::forecast`], at these generators' now,
-    /// with the `min_samples` of the `[kpi]` settings `kpi` judges by.
-    /// Stopped: refused before it reads ([`StoppedRead::Forecast`]).
+    /// with the `min_samples` of the `[kpi]` settings `kpi` judges by, the
+    /// samples from the queue's ledger.
     pub fn forecast_of(
         &self,
         queue: &SqliteQueue,
         db: &Path,
         query: &crate::application::forecast::ForecastQuery,
     ) -> Result<Value> {
-        refuse::<()>(StoppedRead::Forecast)?;
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
         let setup = report_setup(
@@ -2077,6 +2076,7 @@ impl OneShot {
         )?;
         Ok(serde_json::to_value(
             crate::application::forecast::forecast(
+                queue,
                 queue,
                 &SystemProcesses,
                 now,
@@ -2316,12 +2316,13 @@ pub(super) fn report_port(
 
 /// The forecast snapshots' port of the supervisor (ADR-0070 decision 3):
 /// the `min_samples` of the `[kpi]` [`report_setup`] reads, looked for
-/// every `check`.
+/// every `check`, the samples read from the LedgerStore `ledger` opens.
 pub(super) fn forecast_port(
     db: &Path,
     checkout: &Path,
     host_wide: Option<PathBuf>,
     check: Duration,
+    ledger: Arc<dyn crate::application::QueueOpener<dyn crate::application::LedgerStore + Send>>,
 ) -> crate::application::supervise::ForecastPort {
     let (db, checkout) = (db.to_path_buf(), checkout.to_path_buf());
     crate::application::supervise::ForecastPort {
@@ -2337,6 +2338,7 @@ pub(super) fn forecast_port(
             .map(|setup| setup.config.min_samples)
         }),
         check,
+        ledger,
     }
 }
 

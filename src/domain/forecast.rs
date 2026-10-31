@@ -13,8 +13,15 @@
 //! so they are not added as chances of their own; as the inflow and the
 //! retries of failed runs are left out (`LEFT_OUT`), the forecast leans
 //! early.
-//! Nothing here reads or writes the queue; [`history`] derives the samples
-//! from the run events.
+//! Nothing here reads or writes the queue. The distribution ([`history`])
+//! draws from the ledger's run rows through its one read
+//! ([`crate::domain::ledger::read::read`]): a landed run's `work`,
+//! `validate` and `wait_to_land` under today's names, from a new row's
+//! intervals or a legacy row's frozen values, which are the samples `stats`
+//! gave the run before the ledger, so a legacy row draws as it did. A run
+//! in flight ([`running`]) is placed by the fold of its own events up to
+//! now ([`crate::domain::ledger::fold::fold_run`]); one the fold does not
+//! place has its stage drawn whole.
 
 pub mod history;
 pub mod score;
@@ -28,12 +35,15 @@ use serde::Serialize;
 
 use super::{ClaimRank, GoalId, TaskChange, TaskId, marks::utc_text};
 
-pub use history::{History, Sample, history, in_flight, running};
+pub use history::{History, Sample, history, in_flight, running, sample};
 
 /// The version of the method (ADR-0070 decision 1): raised whenever the
 /// calculation changes, so the scoring can be read per method: 2 draws
-/// from the runs of the task's change (ADR-t980-1).
-pub const METHOD: u32 = 2;
+/// from the runs of the task's change (ADR-t980-1), 3 draws the ledger's
+/// values of a run (its `work` to its first `validating`, `validate` that
+/// interval, `wait_to_land` from its end to the push) and places a run in
+/// flight by its fold.
+pub const METHOD: u32 = 3;
 /// Simulation trials (ADR-0070's first value).
 pub const DEFAULT_TRIALS: usize = 1000;
 /// The name of the whole distribution.
@@ -48,26 +58,32 @@ const LEFT_OUT: [&str; 4] = [
     "failed runs and their retries",
 ];
 
-/// Where a run in flight is: its interval as `stats` measures it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Phase {
-    /// Claimed, no receipt yet.
+/// The part of a run its samples measure: `work` (claimed, up to its
+/// first `validating`), `validate` (that interval) and `wait_to_land`
+/// (from its end to the landing), as the ledger's reading names them
+/// ([`crate::domain::ledger::read::validation`]). A run in flight is
+/// placed in one by the same rule over its fold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
     Work,
-    /// A receipt, not validated yet.
     Validate,
-    /// Validated, not landed yet (review, resumes and `integrate`).
     WaitToLand,
 }
 
-/// A run in flight of an open task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A run in flight of an open task, from the fold of its events up to now
+/// ([`running`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Running {
-    pub phase: Phase,
-    /// Seconds since the phase started.
+    /// The phase its last `run_phase_changed` recorded, while it goes on;
+    /// `None` for a run the fold does not place (no `run_phase_changed`
+    /// yet, or its life ended), whose stage is drawn whole.
+    pub phase: Option<String>,
+    pub stage: Stage,
+    /// Seconds since the stage started.
     pub elapsed: i64,
-    /// Seconds it has waited for a person so far, while it waits (ADR-0071:
-    /// it holds no slot then).
+    /// Seconds it has been in a phase a person decides out of the slots
+    /// (blocker `human`, holding none: an ask's answer, a hold), while it
+    /// is: it holds no slot then (ADR-0071).
     pub waiting: Option<i64>,
 }
 
@@ -172,8 +188,10 @@ pub struct TaskForecast {
     pub id: TaskId,
     pub goal_id: Option<GoalId>,
     pub change: Option<TaskChange>,
-    /// The phase of its run in flight; null while it waits for a slot.
-    pub phase: Option<Phase>,
+    /// The phase its run in flight is in, as its last `run_phase_changed`
+    /// recorded it; null while it waits for a slot, and for a run in
+    /// flight the fold does not place.
+    pub phase: Option<String>,
     pub waiting: bool,
     /// The change whose distribution it drew from, or `all`.
     pub distribution: String,
@@ -308,8 +326,11 @@ pub fn forecast(input: &ForecastInput<'_>) -> Forecast {
             id: task.id,
             goal_id: task.goal_id,
             change: task.change.clone(),
-            phase: task.running.map(|running| running.phase),
-            waiting: task.running.is_some_and(|r| r.waiting.is_some()),
+            phase: task
+                .running
+                .as_ref()
+                .and_then(|running| running.phase.clone()),
+            waiting: task.running.as_ref().is_some_and(|r| r.waiting.is_some()),
             distribution: distribution_of(task),
             at: percentiles(input.now, ends, unfinished(blocked)),
         })
@@ -486,7 +507,7 @@ impl<'a> Simulation<'a> {
         let mut holds = vec![false; input.tasks.len()];
         let mut close: Vec<Option<i64>> = vec![None; input.goals.len()];
         for (index, task) in input.tasks.iter().enumerate() {
-            if let Some(running) = task.running {
+            if let Some(running) = &task.running {
                 let sample = draw(self.pools[index], rng);
                 let left = remaining(self.pools[index], sample, running, rng);
                 let asked = running
@@ -561,18 +582,18 @@ impl<'a> Simulation<'a> {
     }
 }
 
-/// The seconds left of a run in flight: the rest of its phase from a
-/// landed run whose phase lasted longer than it has so far (`fallback`
-/// when none did), and the phases after it.
-fn remaining(pool: &[&Sample], fallback: &Sample, running: Running, rng: &mut Rng) -> i64 {
+/// The seconds left of a run in flight: the rest of its stage from a
+/// landed run whose stage lasted longer than it has so far (`fallback`,
+/// the stage drawn whole, when none did), and the stages after it.
+fn remaining(pool: &[&Sample], fallback: &Sample, running: &Running, rng: &mut Rng) -> i64 {
     let longer: Vec<&Sample> = pool
         .iter()
         .copied()
-        .filter(|sample| sample.phase(running.phase) > running.elapsed)
+        .filter(|sample| sample.stage(running.stage) > running.elapsed)
         .collect();
     match longer.is_empty() {
-        true => fallback.from(running.phase),
-        false => draw(&longer, rng).from(running.phase) - running.elapsed,
+        true => fallback.from(running.stage),
+        false => draw(&longer, rng).from(running.stage) - running.elapsed,
     }
 }
 

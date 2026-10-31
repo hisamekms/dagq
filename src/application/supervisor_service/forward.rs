@@ -3042,6 +3042,44 @@ impl LedgerStore for SupervisorQueue {
             }
         }
     }
+    // One page asked for: past the answer's limit asked again at a
+    // quarter of its size, and a row past it alone read in parts, so a
+    // page may hold fewer rows than `limit` with more after it.
+    fn ledger_rows_after(
+        &self,
+        kind: crate::domain::ledger::LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::ledger::LedgerRow>> {
+        let mut page = limit.max(1);
+        loop {
+            match self.remote(
+                "ledger_rows",
+                vec![to_value(kind)?, to_value(after)?, to_value(page)?],
+            ) {
+                Err(error) if super::too_large(&error) && page > 1 => page = (page / 4).max(1),
+                // The row after `after`, read in parts; one removed between
+                // the reads gives way to the next key, so an empty page is
+                // only past the last row.
+                Err(error) if super::too_large(&error) => {
+                    for _ in 0..ROW_PART_TRIES {
+                        let keys: Vec<String> = self.remote(
+                            "ledger_row_keys",
+                            vec![to_value(kind)?, to_value(after)?, to_value(1)?],
+                        )?;
+                        let Some(key) = keys.into_iter().next() else {
+                            return Ok(Vec::new());
+                        };
+                        if let Some(row) = self.ledger_row_in_parts(kind, &key)? {
+                            return Ok(vec![row]);
+                        }
+                    }
+                    anyhow::bail!("the ledger row after {after:?} kept moving while it was read");
+                }
+                read => return read,
+            }
+        }
+    }
     fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
         self.remote("remove_node_rows", vec![to_value(before_day)?])
     }

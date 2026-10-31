@@ -7,7 +7,7 @@ use crate::domain::{EventId, Priority, RunEvent, RunId};
 
 const NOW: i64 = 1_790_000_000;
 
-fn sample(work: i64, validate: i64, wait_to_land: i64) -> Sample {
+fn sample_of(work: i64, validate: i64, wait_to_land: i64) -> Sample {
     Sample {
         work,
         validate,
@@ -23,7 +23,7 @@ fn history(change: Option<TaskChange>, secs: &[i64]) -> History {
             .map(|&s| {
                 (
                     change.clone(),
-                    sample(s * 6 / 10, s / 10, s - s * 6 / 10 - s / 10),
+                    sample_of(s * 6 / 10, s / 10, s - s * 6 / 10 - s / 10),
                 )
             })
             .collect(),
@@ -162,7 +162,7 @@ fn a_change_with_too_few_samples_draws_from_the_whole_distribution() {
     );
     h.runs.push((
         Some("runtime".parse::<TaskChange>().unwrap()),
-        sample(5000, 0, 0),
+        sample_of(5000, 0, 0),
     ));
     let mut docs = task(1, Priority::Normal, &[]);
     docs.change = Some("docs".parse::<TaskChange>().unwrap());
@@ -190,20 +190,25 @@ fn a_change_with_too_few_samples_draws_from_the_whole_distribution() {
 }
 
 #[test]
-fn a_run_in_flight_draws_the_rest_of_its_phase_from_longer_runs() {
+fn a_run_in_flight_draws_the_rest_of_its_stage_from_longer_runs() {
     let h = History {
-        runs: vec![(None, sample(100, 10, 20)), (None, sample(1000, 10, 20))],
+        runs: vec![
+            (None, sample_of(100, 10, 20)),
+            (None, sample_of(1000, 10, 20)),
+        ],
         ..History::default()
     };
     let mut working = task(1, Priority::Normal, &[]);
     working.running = Some(Running {
-        phase: Phase::Work,
+        phase: Some("worker".into()),
+        stage: Stage::Work,
         elapsed: 400,
         waiting: None,
     });
     let mut landing = task(2, Priority::Normal, &[]);
     landing.running = Some(Running {
-        phase: Phase::WaitToLand,
+        phase: Some("landing".into()),
+        stage: Stage::WaitToLand,
         elapsed: 5,
         waiting: None,
     });
@@ -211,11 +216,12 @@ fn a_run_in_flight_draws_the_rest_of_its_phase_from_longer_runs() {
     // Only the 1000-second work lasted past 400 seconds.
     assert_eq!(p50(&forecast, 1), Some(600 + 30));
     assert_eq!(p50(&forecast, 2), Some(15));
-    assert_eq!(forecast.tasks[0].phase, Some(Phase::Work));
-    // Past every sample, the phase is drawn again whole.
+    assert_eq!(forecast.tasks[0].phase.as_deref(), Some("worker"));
+    // Past every sample, the stage is drawn again whole.
     let mut late = task(3, Priority::Normal, &[]);
     late.running = Some(Running {
-        phase: Phase::Validate,
+        phase: None,
+        stage: Stage::Validate,
         elapsed: 50,
         waiting: None,
     });
@@ -226,13 +232,14 @@ fn a_run_in_flight_draws_the_rest_of_its_phase_from_longer_runs() {
 #[test]
 fn a_run_waiting_for_a_person_holds_no_slot() {
     let h = History {
-        runs: vec![(None, sample(100, 0, 0))],
+        runs: vec![(None, sample_of(100, 0, 0))],
         ask_waits: vec![50, 300],
         ..History::default()
     };
     let mut waiting = task(1, Priority::Normal, &[]);
     waiting.running = Some(Running {
-        phase: Phase::Work,
+        phase: Some("waiting".into()),
+        stage: Stage::Work,
         elapsed: 10,
         waiting: Some(100),
     });
@@ -248,7 +255,7 @@ fn a_run_waiting_for_a_person_holds_no_slot() {
 #[test]
 fn a_goal_closes_after_its_tasks_and_releases_the_tasks_waiting_for_it() {
     let h = History {
-        runs: vec![(None, sample(100, 0, 0))],
+        runs: vec![(None, sample_of(100, 0, 0))],
         close_delays: vec![1000],
         ..History::default()
     };
@@ -296,7 +303,7 @@ fn a_goal_closes_after_its_tasks_and_releases_the_tasks_waiting_for_it() {
 #[test]
 fn a_zero_delay_is_drawn_like_any_other() {
     let h = History {
-        runs: vec![(None, sample(100, 0, 0))],
+        runs: vec![(None, sample_of(100, 0, 0))],
         close_delays: vec![0],
         ..History::default()
     };
@@ -353,8 +360,14 @@ fn event(id: i64, run: &str, task: i64, kind: &str, at: &str, payload: Value) ->
     }
 }
 
+/// The history takes a landed run's sample from the ledger's one read of
+/// its row, and the close delays and answers from those events alone.
+/// A legacy row (a run from before `run_phase_changed`) draws the sample
+/// `stats` gave the run, the value the forecast drew before the ledger.
 #[test]
 fn history_holds_landed_runs_close_delays_and_answers() {
+    use crate::domain::ledger::{read::read, run_row};
+    use crate::domain::stats::{LiveSnapshot, SlotSnapshot, StatsQuery};
     let r = "11111111-1111-1111-1111-111111111111";
     let mut closed = event(
         6,
@@ -365,145 +378,192 @@ fn history_holds_landed_runs_close_delays_and_answers() {
         json!({"verdict": "achieved"}),
     );
     closed.goal_id = Some(GoalId::new(3));
-    let events = [
+    let step = |id: i64, kind: &str, minute: &str, payload: Value| {
         event(
-            1,
+            id,
             r,
             5,
-            "run_claimed",
-            "2026-09-20T00:00:00.000Z",
-            json!({}),
-        ),
-        event(
-            2,
-            r,
-            5,
-            "receipt_observed",
-            "2026-09-20T00:10:00.000Z",
-            json!({}),
-        ),
-        event(
-            3,
-            r,
-            5,
-            "validation_finished",
-            "2026-09-20T00:11:00.000Z",
-            json!({}),
-        ),
-        event(
-            4,
-            r,
-            5,
-            "run_integrated",
-            "2026-09-20T00:20:00.000Z",
-            json!({"status": "integrated"}),
-        ),
-        event(
-            5,
-            "",
-            5,
-            "ask_opened",
-            "2026-09-20T00:30:00.000Z",
-            json!({"ask_id": 1}),
-        ),
-        closed,
-        event(
-            7,
-            "",
-            5,
-            "ask_answered",
-            "2026-09-20T00:35:00.000Z",
-            json!({"ask_id": 1}),
-        ),
+            kind,
+            &format!("2026-09-20T00:{minute}:00.000Z"),
+            payload,
+        )
+    };
+    let run_events = [
+        step(1, "run_claimed", "00", json!({})),
+        step(2, "receipt_observed", "10", json!({})),
+        step(3, "validation_finished", "11", json!({})),
+        step(4, "run_integrated", "20", json!({"status": "integrated"})),
     ];
+    let opened = event(
+        5,
+        "",
+        5,
+        "ask_opened",
+        "2026-09-20T00:30:00.000Z",
+        json!({"ask_id": 1}),
+    );
+    let answered = event(
+        7,
+        "",
+        5,
+        "ask_answered",
+        "2026-09-20T00:35:00.000Z",
+        json!({"ask_id": 1}),
+    );
     let goals = HashMap::from([(TaskId::new(5), Some(GoalId::new(3)))]);
-    let changes = HashMap::from([(TaskId::new(5), Some("docs".parse::<TaskChange>().unwrap()))]);
-    let h = super::history(&events, &goals, &changes, NOW);
+    let docs = || Some("docs".parse::<TaskChange>().unwrap());
+    let row = run_row(r, &run_events, &[], 0, "built");
+    assert!(row.is_legacy());
+    let drawn = sample(&read(&row)).unwrap();
+    // What `stats` gave the run before the ledger.
+    let all: Vec<RunEvent> = run_events
+        .iter()
+        .cloned()
+        .chain([opened.clone(), closed.clone(), answered.clone()])
+        .collect();
+    let stats = crate::domain::stats::stats(
+        &all,
+        &goals,
+        NOW,
+        SlotSnapshot::default(),
+        &StatsQuery {
+            full: true,
+            ..StatsQuery::default()
+        },
+        &LiveSnapshot::default(),
+    );
+    let before = &stats.runs[0];
+    assert_eq!(
+        (drawn.work, drawn.validate, drawn.wait_to_land),
+        (
+            before.work.unwrap(),
+            before.validate.unwrap(),
+            before.wait_to_land.unwrap()
+        )
+    );
+    assert_eq!(
+        drawn,
+        Sample {
+            work: 600,
+            validate: 60,
+            wait_to_land: 540
+        }
+    );
+    let h = super::history(
+        vec![(docs(), drawn)],
+        &[run_events[3].clone(), closed],
+        &[opened, answered],
+        &goals,
+    );
     assert_eq!(
         h.runs,
         [(
-            Some("docs".parse::<TaskChange>().unwrap()),
-            sample(600, 60, 540)
+            docs(),
+            Sample {
+                work: 600,
+                validate: 60,
+                wait_to_land: 540
+            }
         )]
     );
     assert_eq!(h.close_delays, [3000]);
     assert_eq!(h.ask_waits, [300]);
     assert!(h.last_landings.contains_key(&GoalId::new(3)));
     assert_eq!(
-        super::history(&[], &goals, &changes, NOW),
+        super::history(Vec::new(), &[], &[], &goals),
         History::default()
+    );
+    // A row of a run that did not land, or lacks a value, draws nothing.
+    let unlanded = run_row(r, &run_events[..3], &[], 0, "built");
+    assert_eq!(sample(&read(&unlanded)), None);
+}
+
+/// A new row's sample is its intervals under today's names, as the
+/// ledger's one read gives them.
+#[test]
+fn a_new_rows_sample_is_its_intervals_under_todays_names() {
+    use crate::domain::ledger::testkit::{Log, run_id};
+    use crate::domain::ledger::{read::read, run_row};
+    let r = run_id(1);
+    let mut log = Log::default();
+    log.landed(5, &r, 0);
+    let drawn = sample(&read(&run_row(&r, &log.events, &[], 0, "built"))).unwrap();
+    // Worked to the `validating` at 600 s, validated to 660 s, landed at
+    // the push from 900 s.
+    assert_eq!(
+        drawn,
+        Sample {
+            work: 600,
+            validate: 60,
+            wait_to_land: 240
+        }
     );
 }
 
+/// A run in flight is placed by its fold: its stage by the first
+/// `validating`, the phase it goes on in, and the time in a phase a
+/// person's answer decides. One with no `run_phase_changed` has its stage
+/// drawn whole.
 #[test]
-fn a_run_in_flight_is_in_the_phase_of_its_latest_step() {
-    let r = "22222222-2222-2222-2222-222222222222";
-    let ms = |text: &str| crate::domain::stats::timestamp_millis(text).unwrap();
-    let claimed = event(
+fn a_run_in_flight_is_placed_by_its_fold() {
+    use crate::domain::ledger::testkit::{Log, ms, run_id};
+    use crate::domain::run_phase::Phase as RunPhase;
+    let r = run_id(2);
+    let mut log = Log::default();
+    log.add(Some(5), Some(&r), "run_claimed", json!({}), 0)
+        .phase(5, &r, 0, RunPhase::Provisioning, "x")
+        .phase(5, &r, 10, RunPhase::Worker, "x");
+    let work = running(&log.events, ms(1200));
+    assert_eq!(
+        (
+            work.phase.as_deref(),
+            work.stage,
+            work.elapsed,
+            work.waiting
+        ),
+        (Some("worker"), Stage::Work, 1200, None)
+    );
+    log.phase(5, &r, 600, RunPhase::Validating, "x");
+    let validate = running(&log.events, ms(1200));
+    assert_eq!((validate.stage, validate.elapsed), (Stage::Validate, 600));
+    log.phase(5, &r, 660, RunPhase::Review, "x");
+    let landing = running(&log.events, ms(1200));
+    assert_eq!(
+        (landing.phase.as_deref(), landing.stage, landing.elapsed),
+        (Some("review"), Stage::WaitToLand, 540)
+    );
+    log.phase(5, &r, 900, RunPhase::LandingAnswer, "approve_landing");
+    let asked = running(&log.events, ms(1200));
+    assert_eq!(
+        (asked.phase.as_deref(), asked.stage, asked.waiting),
+        (Some("landing_answer"), Stage::WaitToLand, Some(300))
+    );
+    // No record: the stage is drawn whole.
+    let legacy = [event(
         1,
-        r,
+        &r,
         5,
         "run_claimed",
         "2026-09-20T00:00:00.000Z",
         json!({}),
-    );
-    let receipt = event(
-        2,
-        r,
-        5,
-        "receipt_observed",
-        "2026-09-20T00:10:00.000Z",
-        json!({}),
-    );
-    let validated = event(
-        3,
-        r,
-        5,
-        "validation_finished",
-        "2026-09-20T00:11:00.000Z",
-        json!({}),
-    );
-    let now = ms("2026-09-20T00:20:00.000Z");
-    let work = running(std::slice::from_ref(&claimed), now);
+    )];
+    let whole = running(&legacy, ms(1200));
     assert_eq!(
-        (work.phase, work.elapsed, work.waiting),
-        (Phase::Work, 1200, None)
+        (whole.phase, whole.stage, whole.elapsed, whole.waiting),
+        (None, Stage::Work, 0, None)
     );
-    let validate = running(&[claimed.clone(), receipt.clone()], now);
-    assert_eq!((validate.phase, validate.elapsed), (Phase::Validate, 600));
-    let landing = running(&[claimed, receipt, validated], now);
-    assert_eq!((landing.phase, landing.elapsed), (Phase::WaitToLand, 540));
-    let waits = [
-        event(
-            1,
-            r,
-            5,
-            "run_claimed",
-            "2026-09-20T00:00:00.000Z",
-            json!({}),
-        ),
-        event(
-            2,
-            r,
-            5,
-            crate::domain::waiting::RUN_WAITING_STARTED,
-            "2026-09-20T00:15:00.000Z",
-            json!({"phase": "work"}),
-        ),
-    ];
-    assert_eq!(running(&waits, now).waiting, Some(300));
-    assert_eq!(running(&[], now).elapsed, 0);
+    assert_eq!(running(&[], ms(0)).elapsed, 0);
 }
 
 #[test]
-fn a_sample_measures_its_phases() {
-    let s = sample(10, 20, 30);
+fn a_sample_measures_its_stages() {
+    let s = sample_of(10, 20, 30);
     assert_eq!(s.total(), 60);
-    assert_eq!(s.phase(Phase::Validate), 20);
-    assert_eq!(s.from(Phase::Validate), 50);
-    assert_eq!(s.from(Phase::WaitToLand), 30);
-    assert_eq!(s.phase(Phase::WaitToLand), 30);
-    assert_eq!(s.phase(Phase::Work), 10);
+    assert_eq!(s.stage(Stage::Validate), 20);
+    assert_eq!(s.from(Stage::Validate), 50);
+    assert_eq!(s.from(Stage::WaitToLand), 30);
+    assert_eq!(s.stage(Stage::WaitToLand), 30);
+    assert_eq!(s.stage(Stage::Work), 10);
 }
 
 #[test]
@@ -532,56 +592,49 @@ fn the_latest_run_is_in_flight_through_its_review_revise_and_resume() {
 }
 
 /// A run sent back by its review (revise) or resumed after `needs_session`
-/// stays in `wait_to_land` from its first `validation_finished`: the
+/// stays in `wait_to_land` from the end of its first `validating`: the
 /// samples' `wait_to_land` holds the review, the resumes and the landing.
-/// Its wait for a person holds no slot; once answered it is returning and
-/// holds one again.
+/// Its wait for a person's answer (a phase whose blocker is `human`) holds
+/// no slot; once it returns it holds one again.
 #[test]
 fn a_run_under_review_revise_or_resume_stays_waiting_to_land() {
-    let r = "33333333-3333-3333-3333-333333333333";
-    let ms = |text: &str| crate::domain::stats::timestamp_millis(text).unwrap();
-    let at = |minute: u32| format!("2026-09-20T00:{minute:02}:00.000Z");
-    let step = |id: i64, kind: &str, minute: u32, payload: Value| {
-        event(id, r, 5, kind, &at(minute), payload)
-    };
-    let mut events = vec![
-        step(1, "run_claimed", 0, json!({})),
-        step(2, "receipt_observed", 10, json!({})),
-        step(3, "validation_finished", 11, json!({})),
-        step(4, "review_started", 12, json!({})),
-        step(5, "review_finished", 14, json!({"verdict": "revise"})),
-        step(6, "resume_started", 15, json!({})),
-        step(7, "receipt_observed", 25, json!({})),
-        step(8, "validation_finished", 26, json!({})),
-        step(9, "run_e2e_started", 27, json!({})),
-    ];
-    let now = ms(&at(31));
-    let revised = running(&events, now);
+    use crate::domain::ledger::testkit::{Log, ms, run_id};
+    use crate::domain::run_phase::{Attempt, AttemptKind, Phase as RunPhase};
+    let r = run_id(3);
+    let mut log = Log::default();
+    let resume = Attempt::of(AttemptKind::Resume, 1);
+    log.add(Some(5), Some(&r), "run_claimed", json!({}), 0)
+        .phase(5, &r, 0, RunPhase::Worker, "x")
+        .phase(5, &r, 600, RunPhase::Validating, "x")
+        .phase(5, &r, 660, RunPhase::Review, "x")
+        .phase(5, &r, 840, RunPhase::NeedsSession, "x")
+        .phase_in(5, &r, 900, RunPhase::Resume, resume, "x")
+        .phase_in(5, &r, 1500, RunPhase::Validating, resume, "x")
+        .phase_in(5, &r, 1560, RunPhase::E2e, resume, "x");
+    let now = ms(31 * 60);
+    let revised = running(&log.events, now);
     assert_eq!(
-        (revised.phase, revised.elapsed, revised.waiting),
-        (Phase::WaitToLand, 20 * 60, None)
+        (revised.stage, revised.elapsed, revised.waiting),
+        (Stage::WaitToLand, 20 * 60, None)
     );
-    events.push(step(
-        10,
-        crate::domain::waiting::RUN_WAITING_STARTED,
-        28,
-        json!({"phase": "resume", "status": "needs_session"}),
-    ));
-    let asked = running(&events, now);
-    assert_eq!(
-        (asked.phase, asked.elapsed, asked.waiting),
-        (Phase::WaitToLand, 20 * 60, Some(3 * 60))
+    log.phase_in(
+        5,
+        &r,
+        28 * 60,
+        RunPhase::Waiting { in_slot: false },
+        resume,
+        "ask",
     );
-    events.push(step(
-        11,
-        crate::domain::waiting::RUN_WAITING_ENDED,
-        30,
-        json!({"cause": "answered"}),
-    ));
-    let returning = running(&events, now);
+    let asked = running(&log.events, now);
     assert_eq!(
-        (returning.phase, returning.waiting),
-        (Phase::WaitToLand, None)
+        (asked.stage, asked.elapsed, asked.waiting),
+        (Stage::WaitToLand, 20 * 60, Some(3 * 60))
+    );
+    log.phase_in(5, &r, 30 * 60, RunPhase::Returning, resume, "answered");
+    let returning = running(&log.events, now);
+    assert_eq!(
+        (returning.stage, returning.waiting),
+        (Stage::WaitToLand, None)
     );
 
     // In the forecast: the rest of `wait_to_land` past 20 minutes from the
@@ -590,9 +643,9 @@ fn a_run_under_review_revise_or_resume_stays_waiting_to_land() {
     let docs = || "docs".parse::<TaskChange>().unwrap();
     let h = History {
         runs: vec![
-            (None, sample(600, 60, 600)),
-            (None, sample(600, 60, 3000)),
-            (Some(docs()), sample(100, 0, 0)),
+            (None, sample_of(600, 60, 600)),
+            (None, sample_of(600, 60, 3000)),
+            (Some(docs()), sample_of(100, 0, 0)),
         ],
         ask_waits: vec![60, 600],
         ..History::default()
@@ -605,12 +658,12 @@ fn a_run_under_review_revise_or_resume_stays_waiting_to_land() {
         run(&[in_flight, ready], &[], 1, &h)
     };
     let forecast = with(revised);
-    assert_eq!(forecast.tasks[0].phase, Some(Phase::WaitToLand));
+    assert_eq!(forecast.tasks[0].phase.as_deref(), Some("e2e"));
     assert!(!forecast.tasks[0].waiting);
     assert_eq!(p50(&forecast, 1), Some(3000 - 1200));
     assert_eq!(p50(&forecast, 2), Some(1800 + 100));
     let forecast = with(asked);
-    assert_eq!(forecast.tasks[0].phase, Some(Phase::WaitToLand));
+    assert_eq!(forecast.tasks[0].phase.as_deref(), Some("waiting"));
     assert!(forecast.tasks[0].waiting);
     // The 600-second answer outlasted 180 seconds: 420 more, then the
     // rest of `wait_to_land`.

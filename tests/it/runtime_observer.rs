@@ -1098,7 +1098,8 @@ fn observe_judges_a_host_load_target_from_the_host_records() {
 /// in the observer's input (`kpi.forecast`), the target on its p90 hit
 /// rate goes into breach, and the breach is recorded as a `forecast`
 /// finding, not a `kpi` one.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
+// The scoring is read through the observer's `kpi`, which reads every event
+// of the queue and is stopped (ADR-t3745-1): task 1669 takes this cfg off.
 #[cfg(any())]
 #[test]
 fn observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_finding() {

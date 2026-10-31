@@ -1,7 +1,9 @@
 //! `status` and `doctor` list the runs a supervisor holds and the latest
-//! unfinished run of each task, with their phase and slot (goal 98), from
-//! a fixture queue whose runs, leases and events are written directly.
+//! unfinished run of each task, with their phase (the one each last
+//! recorded as `run_phase_changed`) and slot (goal 98), from a fixture
+//! queue whose runs, leases and events are written directly.
 use crate::common;
+use dagq::domain::run_phase::{Attempt, Phase, PhaseChange};
 use dagq::domain::{ClaimOutcome, CommitSha, LeaseToken};
 use dagq::infrastructure::sqlite::SqliteQueue;
 use rusqlite::{Connection, params};
@@ -56,6 +58,13 @@ fn event(conn: &Connection, run: &str, kind: &str, payload: Value, at: &str) {
         ],
     )
     .unwrap();
+}
+
+/// Record `run`'s move to `phase` at 2026-10-04 `HH:MM:SS` UTC, as its
+/// supervisor does.
+fn phase(conn: &Connection, run: &str, phase: Phase, at: &str) {
+    let payload = PhaseChange::new(phase, Attempt::FIRST, "x").payload();
+    event(conn, run, "run_phase_changed", payload, at);
 }
 
 fn lease(conn: &Connection, run: &str, token: &str, pid: u32, age_secs: i64) {
@@ -164,6 +173,7 @@ fn fixture(db: &Path) -> Runs {
         json!({}),
         "00:01:00",
     );
+    phase(&conn, &id("running"), Phase::Worker, "00:01:00");
     lease(&conn, &id("running"), "live", me, 0);
 
     // Reviewed once, sent back, and its worker asked a question while it
@@ -183,6 +193,13 @@ fn fixture(db: &Path) -> Runs {
     ] {
         event(&conn, &revise, kind, payload, time);
     }
+    phase(&conn, &revise, Phase::Revise, "00:03:05");
+    phase(
+        &conn,
+        &revise,
+        Phase::Waiting { in_slot: false },
+        "00:04:00",
+    );
     lease(&conn, &revise, "live", me, 0);
 
     let resume = id("resume");
@@ -202,6 +219,14 @@ fn fixture(db: &Path) -> Runs {
     ] {
         event(&conn, &resume, kind, payload, time);
     }
+    phase(&conn, &resume, Phase::Resume, "00:05:00");
+    phase(
+        &conn,
+        &resume,
+        Phase::Waiting { in_slot: false },
+        "00:05:30",
+    );
+    phase(&conn, &resume, Phase::Returning, "00:06:00");
     lease(&conn, &resume, "live", me, 0);
 
     let e2e = id("e2e_retry");
@@ -219,6 +244,8 @@ fn fixture(db: &Path) -> Runs {
     ] {
         event(&conn, &e2e, kind, payload, time);
     }
+    phase(&conn, &e2e, Phase::E2e, "00:08:00");
+    phase(&conn, &e2e, Phase::AwaitingE2e, "00:08:20");
     lease(&conn, &e2e, "live", me, 0);
 
     let exit = id("exit");
@@ -231,17 +258,20 @@ fn fixture(db: &Path) -> Runs {
         "00:09:00",
     );
     event(&conn, &exit, "exit_requested", json!({}), "00:09:10");
+    phase(&conn, &exit, Phase::Exiting, "00:09:10");
     lease(&conn, &exit, "live", me, 0);
 
     let recovery = id("recovery");
     set(&conn, &recovery, "failed", "in_progress");
     event(&conn, &recovery, "triage_started", json!({}), "00:10:00");
+    phase(&conn, &recovery, Phase::Recovery, "00:10:00");
     lease(&conn, &recovery, "live", me, 0);
 
     // Its supervisor died while it was reviewed.
     let dead_review = id("dead_review");
     set(&conn, &dead_review, "awaiting_integration", "in_progress");
     event(&conn, &dead_review, "review_started", json!({}), "00:11:00");
+    phase(&conn, &dead_review, Phase::Review, "00:11:00");
     lease(&conn, &dead_review, "dead", dead, 3600);
 
     let integrating = id("integrating");
@@ -253,9 +283,11 @@ fn fixture(db: &Path) -> Runs {
         json!({}),
         "00:12:00",
     );
+    phase(&conn, &integrating, Phase::Landing, "00:12:00");
     lease(&conn, &integrating, "landing", me, 0);
     // Landed; the `integrate` process still holds it while it cleans up.
     set(&conn, &id("cleanup"), "integrated", "completed");
+    phase(&conn, &id("cleanup"), Phase::Ended, "00:12:30");
     lease(&conn, &id("cleanup"), "landing", me, 0);
 
     // A `land` answer queued it; it waits for the supervisor to land it.
@@ -275,6 +307,7 @@ fn fixture(db: &Path) -> Runs {
         json!({"via": "approve"}),
         "00:13:01",
     );
+    phase(&conn, &queued, Phase::LandingQueue, "00:13:01");
 
     set(&conn, &id("parked"), "needs_session", "in_progress");
     event(
@@ -284,8 +317,10 @@ fn fixture(db: &Path) -> Runs {
         json!({}),
         "00:14:00",
     );
+    phase(&conn, &id("parked"), Phase::NeedsSession, "00:14:00");
 
     set(&conn, &id("retried"), "awaiting_integration", "in_progress");
+    phase(&conn, &id("retried"), Phase::LandingAnswer, "00:15:00");
     set(&conn, &id("finished"), "integrated", "completed");
     set(&conn, &id("canceled"), "interrupted", "canceled");
     Runs(runs)
@@ -343,21 +378,18 @@ fn status_lists_the_held_and_the_latest_runs_with_their_phase_and_slot() {
     let nothing =
         |slot: Value| json!({"phase": null, "since": null, "elapsed_secs": null, "slot": slot});
     for (name, expected) in [
-        ("running", since("session", json!("used"), "00:01:00")),
-        ("revise", since("revise", json!("waiting"), "00:03:05")),
-        ("resume", since("resume", json!("returning"), "00:05:00")),
+        ("running", since("worker", json!("used"), "00:01:00")),
+        ("revise", since("waiting", json!("waiting"), "00:04:00")),
+        ("resume", since("returning", json!("returning"), "00:06:00")),
         (
             "e2e_retry",
-            since("e2e_retry_wait", json!("used"), "00:08:20"),
+            since("awaiting_e2e", json!("used"), "00:08:20"),
         ),
-        ("exit", since("exit", json!("used"), "00:09:10")),
+        ("exit", since("exiting", json!("used"), "00:09:10")),
         ("recovery", since("recovery", json!("used"), "00:10:00")),
         // Its supervisor died: it holds the slot, but no review goes on.
         ("dead_review", nothing(json!("used"))),
-        (
-            "integrating",
-            since("integrating", json!("used"), "00:12:00"),
-        ),
+        ("integrating", since("landing", json!("used"), "00:12:00")),
         ("cleanup", nothing(json!("used"))),
         ("queued", since("landing_queue", Value::Null, "00:13:01")),
         ("parked", nothing(Value::Null)),

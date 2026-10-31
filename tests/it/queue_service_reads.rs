@@ -285,8 +285,6 @@ fn a_worker_reads_what_a_measure_task_reads_as_the_command_line_prints_it() {
     {
         same_as_cli(&queue, &worker, UseCase::Marks, &json!({}), &["marks"]);
     }
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-    #[cfg(any())]
     {
         same_as_cli(
             &queue,
@@ -476,8 +474,6 @@ fn the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it() {
             ),
         ]);
     }
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1670 takes this cfg off.
-    #[cfg(any())]
     {
         served_to_all(&[(
             UseCase::Forecast,
