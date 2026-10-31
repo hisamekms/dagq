@@ -95,7 +95,6 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 | 予約 | `reserved.filesystem_read` `reserved.filesystem_write` `reserved.network` `reserved.secret_read` | 後の段（sandbox）。この段では誰にも与えない |
 
 CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`requests`で、matchに既定の枝を置かないので、コマンドを足すと写しを書くまでcompileが通らない。
-`queue.read`だけのコマンドはqueueをread-onlyの接続で開く（`reads_only`）。
 
 ## Resource
 
@@ -332,8 +331,7 @@ wrapperには`session.run`・`session.record`を自分のrunかplannerに、cont
   CLIは届かなくてもDBを開かない（[hostのCLI](queue-service-host-cli.md)）。
 - 残り（3つのroleのserviceが答えないものと、ほかのrole）は`check_access`が（default deny）`requests`の全てで`StaticPolicy`に通す。
   拒んだときだけ`ServiceDenials`でserviceが呼び出し元のprincipalの`authorization_denied`に記録する。
-  通った読み取りはqueueを読み取り専用で開く（ADR-0073決定5・7・18）。
-  ただしsupervisorが起動した`observe`・`throughput-review`はsupervisorのtokenでserviceを通る（[CLIでの解釈](supervisor-lifecycle/roles.md#cliでの解釈)）。
+  通った後、supervisorが起動した`observe`・`throughput-review`はsupervisorのtokenでserviceを通り、送る経路の無いもの（宛ての環境の無いworker・job・observerなど）はCLIが拒みDBを開かない（制御側のコマンドとDBの例外を含め[CLIでの解釈](supervisor-lifecycle/roles.md#cliでの解釈)）。
 
 ## Claudeのpermissions.deny（guardrail）
 
