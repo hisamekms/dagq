@@ -100,7 +100,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   supervisorが起動時に読む。
 - `[review.programs.<name>]`はreviewと着地の前のprogramのjobで（[プログラムのreview](review-programs.md)）、keyと意味は`ReviewProgram`が持つ。
   `[review.programs."builtin:<名前>"]`はbuilt-inの`enabled`と`paths`（既定を置き換える）だけを持ち（`BuiltinProgramSetting`）、ほかのkeyは誤り。
-  読むのは作業ファイルでなく、reviewの試行ごとのlanding branchのcommitの`dagq.toml`と`script`。
+  読むのは作業ファイルでなく、landing branchのcommit（reviewは試行ごと、integrateはrebaseの先）の`dagq.toml`と`script`。
 - `[review.code]`は上限の後の判定（[Review](review.md)の4a）のコードのpath、`[review] revise_limit`はrunを通した手直しの上限（ADR-t3033-1）で、意味と既定は`review_reason::CodePaths`・`ReviseLimit`が持つ。
   どちらも読むのはreviewの試行の始めのlanding branchのcommitの`dagq.toml`で、作業ファイルとrunのbranchは読まず、読めなければ既定に戻さず試行をreviewの失敗にする。
 - `[tasks]`は`changes`と`title_prefixes`と`related_docs`を持つ（値と形は`domain::ChangeSet`・`domain::TitlePrefixes`）。
