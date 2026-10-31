@@ -24,7 +24,7 @@ The observer reads the KPIs (`reference/kpi.md`) with the repository's and the h
 
 - A breached target becomes a `kpi` finding (a forecast target's, a `forecast` finding) with the breach as evidence; a target not yet breached, or not judged, makes none, and a breach is never a `blocked` ask. The observer marks it for a proposal when the impact and the length call for a remedy.
 - Read a `kpi` finding with `kpi` and the `marks` around the breach's start: a change there may be the cause, or the remedy.
-- **Improvement limit.** While the open improvement work for findings reaches the repository's limit, another marked finding waits for a planner; a repair (`ci_failure`) does not wait.
+- **Improvement limit.** While the open improvement work for findings reaches the repository's limit, another marked finding waits for a planner; a repair (`ci_failure`) does not wait, and a `ci_scheduled_failure` is an improvement and waits.
 - **Priority.** An improvement's tasks take their goal's priority, `normal` or below; a priority a person set stays.
 
 ## Agent watch findings: kinds `agent_eval_watch_due` and `agent_eval_below_threshold`
@@ -36,6 +36,10 @@ The supervisor records an `agent_eval_watch_due` finding for a runtime planner w
 3. **The round was refused** (not started): `finding dismiss ID --reason` with the refusal's reason. A planner never asks to run it again (`--rerun` is a person's); a raised limit is a person's decision.
 
 A hold-out or production round on the landing branch's current definition that ends under the threshold is an `agent_eval_below_threshold` finding, whoever asked for it, with its scores and failed cases; a `dev` round of a definition not yet landed is not. Its planner submits a task to improve the definition on those cases (`submit ... --finding ID`), an improvement that counts and waits at the limit. A failed case whose label looks wrong is a label to decide, not the definition's: it goes to a person, as a set's disputed cases do.
+
+## Scheduled CI findings: kind `ci_scheduled_failure`
+
+When a workflow the repository's `[ci_watch]` declares as scheduled fails on the landing branch (a scheduled or manual run, not a push), the supervisor's CI watch records one `ci_scheduled_failure` finding per workflow, marked for a proposal, with the failed jobs, steps and run URL in its detail. Only the watch records this kind: `finding record` refuses it. A runtime planner opened for it submits tasks to fix the cause (`submit ... --finding ID`), like any marked finding. It is not a break of the landing branch, so it counts as an improvement and waits at the improvement limit; it never enters the known-failures list or holds a claim or landing. A later passing run of the workflow resolves it while no planner is open on it.
 
 ## Where a finding goes
 

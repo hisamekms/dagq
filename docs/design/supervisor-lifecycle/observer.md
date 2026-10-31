@@ -115,7 +115,7 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
   起動するのはqueue serviceが居るときだけ。
 - **出力の扱い**: findingは人とplannerが`findings`で影響の大きい順に読み、手当てしないと決めたものを`finding dismiss`する。
   proposalを求める印の付いたfindingには、supervisorがruntimeのplannerを立ててproposalを作らせる（[Finding planners (supervisor)](finding-planners.md)）。
-  種類`agent_eval_watch_due`・`agent_eval_below_threshold`はsupervisorの見張りだけが記録し、見張りはreviewのeventを期間の始まりと遡りの上限から先だけを読む（[agentのeval](../agent-eval.md#採用した定義の見張り)）。
+  種類`agent_eval_watch_due`・`agent_eval_below_threshold`（[agentのeval](../agent-eval.md#採用した定義の見張り)）と`ci_failure`・`ci_scheduled_failure`（[CI watch](ci-watch.md#定時のworkflow)）はsupervisorの見張りだけが記録し`finding record`は拒む。
   findingに紐づけた`blocked`のaskには、runtimeが`propose`と`dismiss`のoptionを足し、人のその答えをfindingに適用する。
   `blocked`のaskは`status --role inbox`に`ask_opened`として出る。
 
@@ -206,7 +206,7 @@ observerはKPIの目標割れの継続を種類`kpi`のfindingにし、そこか
   `kpi`か`forecast`のfindingの目標が`ok`に戻ったら、戻った期間を理由に`finding resolve`する。
   影響と続いた期間から改善が要ると読めば`--propose`を付け、目標割れを`blocked`のaskにはしない。
   `trend`は印と並べて読み、入力に無い数字を計算しない。
-- **改善の上限**（数え方は[Finding planners](finding-planners.md)の3・7・11と「CIの見張りの`ci_failure`のfinding」）: 動いている改善の数が`dagq.toml`の`[kpi]`の`max_improvement_proposals`に達しているあいだ、supervisorは印の付いた改善のfindingにplannerを立てない。
+- **改善の上限**（数え方と修理は[Finding planners](finding-planners.md)の3・7・11とCIの見張りの節）: 動いている改善の数が`dagq.toml`の`[kpi]`の`max_improvement_proposals`に達しているあいだ、supervisorは印の付いた改善のfindingにplannerを立てない。
   findingは`open`のまま待ち、1つ終われば印の古い順に立つ。
 - **優先度**: 改善のproposalのtaskは個別の優先度を持たずgoalから継ぎ、`normal`以下はgoalと所属で守る（[Finding planners](finding-planners.md)の6）。
 
