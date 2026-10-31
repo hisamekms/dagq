@@ -1,8 +1,9 @@
-# The boundary declarations of task 3760 for the tests it adds to tests/it
+# The registry's boundaries task 3760 added to tests/it
 # (the format is in the header of scripts/check-it-added-tests.sh).
 
-[[test]]
-name = "runtime_verify_retry::a_command_past_the_declared_limit_is_a_timeout_failure"
-boundary = "プロセス"
+[[boundary]]
+id = "verify-command-past-its-limit-killed-in-the-process-group"
+kind = "プロセス"
+test = "runtime_verify_retry::a_command_past_the_declared_limit_is_a_timeout_failure"
 reason = "main checkout の dagq.toml が宣言した [verification] command_timeout_secs が ShellVerifier を通って integrate の検証のコマンドの実の process group に掛かり、sleep を上限で kill して timeout の失敗として SQLite に記録することは、実の process と dagq.toml の読みの配線を通す IT でしか確かめられない。値の読みと誤りは run_env の unit test、既定との選び方は verification_limit の unit test"
 task = 3760

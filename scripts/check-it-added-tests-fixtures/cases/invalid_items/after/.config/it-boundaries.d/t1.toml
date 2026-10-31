@@ -1,0 +1,29 @@
+[[boundary]]
+id = "queue-row-across-connections"
+kind = "SQLite"
+test = "alpha::a_decision_case"
+reason = ""
+task = 1
+
+[[boundary]]
+id = "Not_Lowercase"
+kind = "判断"
+kind = "Git"
+test = "nested::fresh::cases::a_fresh_case"
+reason = "a real git"
+task = 1
+owner = "x"
+
+[[boundary]]
+id = "no-such-test"
+kind = "supervisorの配線"
+test = "alpha::no_such_test"
+reason = "the supervisor's wiring"
+task = 'one'
+
+[[boundary]]
+id = "a-test-twice"
+kind = "Git"
+test = "alpha::a_decision_case"
+reason = "a real git"
+task = 1

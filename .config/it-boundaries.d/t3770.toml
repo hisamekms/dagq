@@ -1,8 +1,9 @@
-# The boundary declarations of task 3770 for the tests it adds to tests/it
+# The registry's boundaries task 3770 added to tests/it
 # (the format is in the header of scripts/check-it-added-tests.sh).
 
-[[test]]
-name = "review_subagents::the_agents_judgments_send_the_run_back_and_then_ask_a_person"
-boundary = "supervisorの配線"
+[[boundary]]
+id = "review-subagent-judgments-applied-to-the-live-session"
+kind = "supervisorの配線"
+test = "review_subagents::the_agents_judgments_send_the_run_back_and_then_ask_a_person"
 reason = "agent の判断が決めた行き先を supervisor が実際に適用すること（agent ごとの差し戻しを 1 回の revise として生きている worker の session に届け、次の review で agent の scope の concern を approve_landing の ask にして着地させないこと）は、実の worker の session と queue を通す supervisor の配線でしか確かめられない。行き先と ask の文面の判断は supervise::landing の unit test。2 本の IT を 1 つの fixture の 2 回の review にまとめたもの"
 task = 3770

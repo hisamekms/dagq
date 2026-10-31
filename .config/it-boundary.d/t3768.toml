@@ -1,8 +1,0 @@
-# The boundaries the tests tests/it/runtime_integrate.rs keeps under a new
-# name declare (ADR-t3762-1, docs/development/testing.md, 判断と境界のtest).
-
-[[test]]
-name = "runtime_integrate::runs_land_fifo_by_validation_time_passing_over_a_held_task_and_later_ones_are_rebased"
-boundary = "SQLite"
-reason = "which run integrate --next lands is the queue's SQL read of the runs awaiting integration by validation time with the held tasks left out, through the CLI's hold and release, and the later landing is rebased by real Git onto main moved by the earlier one, with a detached checkout left as it was"
-task = 3768

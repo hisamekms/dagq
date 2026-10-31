@@ -1,0 +1,2 @@
+2
++t1.toml:3: [[test]] is not an item of .config/it-boundaries.d, whose items are [[boundary]]

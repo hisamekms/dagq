@@ -1,0 +1,13 @@
+[[boundary]]
+id = "alpha-boundary"
+kind = "SQLite"
+test = "alpha::a_decision_case"
+reason = "the same file of the queue once more"
+task = 90
+
+[[boundary]]
+id = "adopt-after-restart"
+kind = "復旧とadopt"
+test = "nested::fresh::cases::a_fresh_case"
+reason = "a supervisor started again adopts the run the dead one left"
+task = 90

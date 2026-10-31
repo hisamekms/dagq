@@ -1,0 +1,4 @@
+1
++tests/it/alpha.rs: +0 #[test] over the base
++allow (-1)
+-tests/it/nested/fresh.rs: +

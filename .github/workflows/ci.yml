@@ -441,10 +441,13 @@ jobs:
             echo "no nextest output to summarise"
           fi
 
-      # The boundary gate of the tests in tests/it (ADR-t3762-1): a test the
-      # diff from the base adds to tests/it fails the job unless
-      # .config/it-boundary.d/*.toml declares the boundary it keeps
-      # (scripts/check-it-added-tests.sh, whose header has the format). The
+      # The boundary gate of the tests in tests/it (ADR-t3762-1,
+      # ADR-t3802-1): against the diff from the base, a new test in tests/it
+      # that no id of the registry (.config/it-boundaries.d/*.toml, and the
+      # old place .config/it-boundary.d/*.toml for a while) has as its
+      # representative, a second test of one id, or a module that grows
+      # without new ids fails the job (scripts/check-it-added-tests.sh, whose
+      # header has the format and the counts). The
       # base is taken as for the time gate below; without one the script
       # takes the merge base with origin/main. It reads no nextest output and
       # runs after a failed test step too.

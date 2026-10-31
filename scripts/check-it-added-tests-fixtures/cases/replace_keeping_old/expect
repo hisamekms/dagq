@@ -1,0 +1,4 @@
+1
++tests/it/alpha.rs: +1 #[test] over the base
++allow (+0)
+-no boundary id has

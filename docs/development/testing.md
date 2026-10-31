@@ -90,11 +90,15 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
   - 閾値は本番の関門の`dagq::it`の1本の平均の数倍に置く。CIのrunnerと本番の関門は並列度が違い同じtestの秒が違うので、CIで落ちたtestが本番の関門のlogの秒では閾値の内なら、その秒を添えて直すか項目を足すかをplannerが決める。
   - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「itのtestの時間の関門」）、runのreviewのtestの規則の検査、CIのpushとpull_request（mainへのpushで落ちればci-failureのissue）。`integrate`の検証には足さない。
   - helperやfixtureだけの変更は対象にならず（それを使うtestが遅くなっても捕まえない）、CIのrunnerと本番の関門では秒が違う。
-- 境界の関門（[ADR-t3762-1](../adr/2026-10-31-t3762-1-integration-tests-added-by-a-diff-declare-the-boundary-they-keep.md)）: baseからの差分で`tests/it`に新しく現れたtestは、守る境界の宣言が無ければ`scripts/check-it-added-tests.sh`が落ちる。速さに依らず、判断のcaseを並べたITが足されるのを止めるため。宣言の一覧は`.config/it-boundary.d/*.toml`を合わせたもので、項目は足すtaskのファイル`.config/it-boundary.d/t<task ID>.toml`に足す（時間の関門の許可の一覧と同じく、別々のtaskの追加が同じファイルに触れないため）。書式・境界の値・新しいtestと移したtestの見分け方・baseの求め方はscriptの冒頭のコメントが持つ。
-  - 宣言できるのは、そのtestが上の境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか）を代表の1 caseで確かめ、ITでしか確かめられない理由を`reason`に書けるときだけ。判断のcaseを並べただけのtestは宣言せず、判断を`src/`の副作用のない関数のunit testへ移す。
-  - 機械は宣言の有無と`boundary`の値を見て、`reason`が境界を書いているかはtest-rulesのreviewが見る。既存のtestの本文の変更は対象にならない。
+- 境界の関門（[ADR-t3762-1](../adr/2026-10-31-t3762-1-integration-tests-added-by-a-diff-declare-the-boundary-they-keep.md)、[ADR-t3802-1](../adr/2026-10-31-t3802-1-integration-test-boundaries-in-a-named-registry-with-a-module-ratchet.md)）: `tests/it`が守る境界は、境界のid・境界の種類・代表のtest・理由・足したtaskを持つ登録簿にある。速さに依らず判断のcaseを並べたITと同じ境界の2本目が足されるのを止めるため、`scripts/check-it-added-tests.sh`がbaseからの差分について下の3つを落とす。登録簿は`.config/it-boundaries.d/*.toml`を合わせたもので、項目は足すtaskのファイル`.config/it-boundaries.d/t<task ID>.toml`に足す（時間の関門の許可の一覧と同じく、別々のtaskの追加が同じファイルに触れないため）。書式・境界の種類の値・idの形・新しいtestと移したtestの見分け方・本数の数え方・baseの求め方はscriptの冒頭のコメントが持つ。
+  - 新しく現れたtestは、既存のidの代表と入れ替える（そのidの代表をこのtestに変え、元の代表は消すか別のidの代表にするかunit testへ移す）か、新しいidを足さなければ落ちる。移しただけのtestと既存のtestの本文の変更は対象にならない。
+  - 1つのidを代表に持つtestが2本以上（R）なら落ちる。2本目は判断をunit testへ移すか、別の境界なら別のidにする。
+  - module（`tests/it`のファイル）ごとの`#[test]`の本数をbaseとwork treeで数え、新しいid・代表の入れ替え・移したtestで説明できない増加があれば落ちる（入れ替えた元の代表を残したときも）。数は保存せず毎回baseから数えるので、並行のtaskで衝突しない。
+  - idを持てるのは、そのtestが上の境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか）を代表の1 caseで確かめ、ITでしか確かめられない理由を`reason`に書けるときだけ。判断のcaseを並べただけのtestはidを持たず、判断を`src/`の副作用のない関数のunit testへ移す。
+  - 新しいidの承認: 項目に足したtaskのIDを書き、そのtaskのacceptanceかdescriptionがidを名指していること（plan reviewが見る）と、`reason`が境界を書いていること（test-rulesのreviewが見る）で承認とする。機械は項目の形と数だけを見る。
+  - 移行の期間: 古い置き場`.config/it-boundary.d/*.toml`の古い書式の項目（`name`・`boundary`・`reason`・`task`）も、そのtestを代表に持つ新しいid1つとして読む。登録簿より前の規則で登録されたtaskのrunがそこに書くのを通すためで、新しい項目は登録簿に書く。古い置き場を読むのをやめるのは後の退役のtask。
   - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「testの規則の点検」）、runのプログラムのreview、CIのpushとpull_request。`integrate`の検証には足さない（時間の関門と同じく、着地の時間を増やさないため）。
-  - testを消すか名前を変えるtaskは、消えた名前の項目を同じ変更で外す（scriptは無いtestの項目を警告するだけで落とさない）。
+  - testを消すか名前を変えるtaskは、そのtestを代表に持つ項目を同じ変更で直す（scriptは無いtestの代表を警告するだけで落とさない）。
 
 ## testファイルの行数
 

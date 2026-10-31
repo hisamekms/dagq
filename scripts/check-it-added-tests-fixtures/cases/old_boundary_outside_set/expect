@@ -1,3 +1,3 @@
 1
 +t1.toml:3: boundary '判断' of alpha::a_decision_case is not one of SQLite, Git, プロセス, supervisorの配線, 復旧とadopt
--no boundary declared
+-no boundary id

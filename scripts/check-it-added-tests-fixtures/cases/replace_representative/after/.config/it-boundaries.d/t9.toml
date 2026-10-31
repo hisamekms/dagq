@@ -1,0 +1,8 @@
+# The registry of the fixture's base.
+
+[[boundary]]
+id = "alpha-boundary"
+kind = "SQLite"
+test = "alpha::keeps_a_boundary_with_a_reopened_file"
+reason = "the queue's SQLite file keeps the row across two connections"
+task = 9

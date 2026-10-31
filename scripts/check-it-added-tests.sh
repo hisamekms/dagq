@@ -1,13 +1,29 @@
 #!/bin/sh
-# The boundary gate of the tests in tests/it (ADR-t3762-1): a #[test] fn that
-# the diff from a base to the work tree adds to tests/it fails the check
-# unless a declaration names the boundary it keeps. The rule on what may be
-# declared is in docs/development/testing.md, section "判断と境界のtest": a
-# test that only lays out the cases of a decision has no boundary and belongs
-# in a unit test of src/. The script checks that each new test has an item
-# and that the item's boundary is one of the set below; whether the reason
-# writes a boundary is left to the test-rules agent
-# (.dagq/agents/test-rules/AGENT.md).
+# The boundary gate of the tests in tests/it (ADR-t3762-1, amended by
+# ADR-t3802-1): a tests/it keeps a boundary in one representative test, and
+# the boundaries are a named registry. Against the diff from a base to the
+# work tree the check fails
+#   (a) a #[test] fn the diff adds to tests/it that is not moved and is not
+#       the representative of an id of the registry: replace the
+#       representative of an existing id with it (and remove the one it
+#       replaces, give that one another id or move it to a unit test), or add
+#       a new id;
+#   (b) an id two items give (a second test of one boundary, R), and a test
+#       that two ids have as their representative;
+#   (c) a module (a file of tests/it) whose #[test]s grow over the base's by
+#       more than it is allowed: the new ids whose representative is in it,
+#       plus the ids whose representative the diff moved into it, plus the
+#       tests moved into it, less the ids whose representative the diff moved
+#       out of it. Both sides are counted from the trees on each run, so no
+#       number is kept in a file two tasks would change. A replaced
+#       representative left in place counts one over.
+# The rule on what may have an id is in docs/development/testing.md, section
+# "判断と境界のtest": a test that only lays out the cases of a decision has no
+# boundary and belongs in a unit test of src/. The script checks the form of
+# the items and the counts. That a new id is approved is not the script's: the
+# item names the task that adds it, whose acceptance or description names the
+# id (plan review looks), and whether the reason writes a boundary is left to
+# the test-rules agent (.dagq/agents/test-rules/AGENT.md).
 #
 # Usage: sh scripts/check-it-added-tests.sh [--base REF]
 #        sh scripts/check-it-added-tests.sh --self-test
@@ -27,34 +43,58 @@
 # left out; a test a macro expands to is not seen.
 #
 # A test is new when its full name is in the work tree and nowhere in the
-# base's tests/it. A new test is taken as moved, and passes without an item,
-# when the base has a test of the same fn name whose full name is gone from
-# the work tree (each such base test accounts for one move): moving a file or
-# a test to another module changes no boundary. A fn renamed in place, or a
-# test copied while the original stays, is new. A change to the body of a
-# test already in the base, to a helper or to a fixture makes nothing new.
-# Only the files the diff changes (and every file when tests/it/main.rs
-# changes) are read: an unchanged file has the same tests on both sides.
+# base's tests/it. A new test is taken as moved, and passes without an id,
+# when it represents no id and the base has a test of the same fn name whose
+# full name is gone from the work tree (each such base test accounts for one
+# move; a replaced representative accounts for none): moving a file or a
+# test to another module changes no boundary. A fn
+# renamed in place, or a test copied while the original stays, is new. A
+# change to the body of a test already in the base, to a helper or to a
+# fixture makes nothing new. Only the files the diff changes (and every file
+# when tests/it/main.rs changes) are counted: an unchanged file has the same
+# tests on both sides. A full name twice in one file (a #[cfg] pair) counts
+# once.
 #
-# The declarations are the items of every .config/it-boundary.d/*.toml of
-# the work tree together; a missing directory reads as empty. A new item goes
-# in the file of the task that adds the test,
-# .config/it-boundary.d/t<task ID>.toml, so that two tasks adding tests change
-# no file in common. Each file is TOML items of the form
-#   [[test]]
-#   name = "<the full name>"
-#   boundary = "<one of the set below>"
+# The registry is the items of every .config/it-boundaries.d/*.toml of the
+# work tree together; a missing directory reads as empty. A new item goes in
+# the file of the task that adds it, .config/it-boundaries.d/t<task ID>.toml,
+# so that two tasks change no file in common. Each file is TOML items of the
+# form
+#   [[boundary]]
+#   id = "<lowercase words joined by -, e.g. queue-file-across-connections>"
+#   kind = "<one of the set below>"
+#   test = "<the full name of the representative test>"
 #   reason = "<why only an IT can check it: the boundary it keeps>"
 #   task = <the ID of the task that added the item>
-# with all four keys, each on one line ("..." or '...' strings, task a
-# number; # comments). The boundary is one of the boundaries of
-# testing.md's "判断と境界のtest":
+# with all five keys, each on one line ("..." or '...' strings, task a
+# number; # comments). The kind is one of the boundaries of testing.md's
+# "判断と境界のtest":
 #   SQLite, Git, プロセス, supervisorの配線, 復旧とadopt
+# An id is new when the base's registry has no item of it, and its
+# representative is replaced when the base's item of it names another test.
+# To replace a representative, change the test of the id's item where it is.
+#
+# The old place, for a while: .config/it-boundary.d/*.toml is read too, with
+# items of the old form
+#   [[test]]
+#   name = "<the full name>"
+#   boundary = "<one of the set above>"
+#   reason = "<the boundary it keeps>"
+#   task = <the ID of the task that added the item>
+# An old item reads as one id, t<task>:<name> (e.g.
+# t3760:runtime_verify_retry::a_case), whose representative is the named
+# test, so a run of a task registered under the old rule passes (a) and
+# counts one new id in (c). The derived ids have a : and so never meet an id
+# of the registry. New items go in the registry, not in the old place.
+# Reading the old place stops with a later task that retires it, not here.
+#
 # An item missing a key or with an empty one, a key it does not know or one
-# key twice, a boundary outside the set, or two items of one name (in one
-# file or in two) fail the check. An item whose name has no #[test] in the
-# work tree's tests/it is warned about, without changing the exit status. A
-# line that is not one of these forms makes the list unreadable.
+# key twice, a kind (boundary) outside the set, an id not of the form, an id
+# given twice or a test named by two items (in one file or in two) fail the
+# check. An item whose test has no #[test] in the work tree's tests/it is
+# warned about, without changing the exit status. A line that is not one of
+# these forms, or the other place's item table, makes the list unreadable.
+# The base's registry is read only for its ids and their representatives.
 #
 # The tree checked is the git work tree of the cwd (`git rev-parse
 # --show-toplevel`), so a copy of the script run elsewhere with the cwd in a
@@ -65,10 +105,10 @@
 # checked tree is the cwd, and without it a module file there (json.py,
 # glob.py, ...) would be imported in place of the standard library's.
 #
-# Exit 0 when every new test has a valid item, 1 when one has none or an item
-# is invalid (each test's name and file:line, or the item's file:line, go to
-# stderr with how to fix it), 2 on a usage error, a base that is not a
-# commit, a failing git, an unreadable list, or no tests/it.
+# Exit 0 when every new test is kept and the items and counts hold, 1 when
+# one does not (each test's name and file:line, the module, or the item's
+# file:line, go to stderr with how to fix it), 2 on a usage error, a base
+# that is not a commit, a failing git, an unreadable list, or no tests/it.
 set -eu
 
 me=check-it-added-tests
@@ -241,12 +281,12 @@ work_files = set(p for p in z(git("ls-files", "-z", "--cached", "--others", "--e
                  if is_rs(p) and os.path.isfile(p))
 
 
-def read_blobs(paths):
-    """{path: text} of the base's blobs, in one git cat-file."""
-    paths = sorted(paths)
+def read_blobs(blobs):
+    """{path: text} of {path: blob}, in one git cat-file."""
+    paths = sorted(blobs)
     if not paths:
         return {}
-    data = git("cat-file", "--batch", data="".join(base_blobs[p] + "\n" for p in paths).encode())
+    data = git("cat-file", "--batch", data="".join(blobs[p] + "\n" for p in paths).encode())
     res, k = {}, 0
     for p in paths:
         nl = data.index(b"\n", k)
@@ -267,7 +307,7 @@ if main in changed:
 else:
     base_read = set(p for p in changed if p in base_blobs)
     work_read = set(p for p in changed if p in work_files)
-base_text = read_blobs(base_read | ({main} if main in base_blobs else set()))
+base_text = read_blobs({p: base_blobs[p] for p in base_read | ({main} if main in base_blobs else set())})
 base_mods = path_mods(base_text.get(main))
 work_mods = path_mods(read_work(main) if main in work_files else "")
 
@@ -287,9 +327,14 @@ for n in base_tests:
         gone.setdefault(n.rsplit("::", 1)[-1], []).append(n)
 
 
-# The declarations.
-ITEM = re.compile(r"^\[\[test\]\]\s*(#.*)?$")
+# The registry.
+TABLE = re.compile(r"^\[\[([A-Za-z0-9_-]+)\]\]\s*(#.*)?$")
 KEY = re.compile(r'''^([A-Za-z0-9_-]+)\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*'|[0-9]+)\s*(#.*)?$''')
+ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+NEW_DIR, OLD_DIR = ".config/it-boundaries.d", ".config/it-boundary.d"
+# (directory, table, keys, whether its items are of the old format)
+DIRS = [(NEW_DIR, "boundary", ("id", "kind", "test", "reason", "task"), False),
+        (OLD_DIR, "test", ("name", "boundary", "reason", "task"), True)]
 bad = 0
 
 
@@ -299,94 +344,214 @@ def fail(msg):
     bad += 1
 
 
-items = []
-for f in sorted(glob.glob(".config/it-boundary.d/*.toml")):
-    try:
-        lines = read_work(f).split("\n")
-    except OSError as e:
-        die("cannot read %s: %s" % (f, e))
-    item = None
-    for i, raw in enumerate(lines, 1):
+def quiet(msg):
+    pass
+
+
+def parse(f, text, table, keys, report, strict):
+    """The items of a registry file, each a dict with _where; a key that is
+    given twice, unknown or of the wrong type goes to report. A line that is
+    not an item line ends in die when strict, and is skipped when not."""
+    items, item = [], None
+    for i, raw in enumerate(text.split("\n"), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         where = "%s:%d" % (f, i)
-        if ITEM.match(line):
+        tm = TABLE.match(line)
+        if tm and tm.group(1) == table:
             item = {"_where": where}
             items.append(item)
             continue
         km = KEY.match(line)
-        if not km:
-            die("%s: not an item line ([[test]] or key = value on one line): %s" % (where, line))
-        if item is None:
-            die("%s: a key outside a [[test]] item" % where)
+        if tm or not km or item is None:
+            if not strict:
+                item = None
+                continue
+            if tm:
+                die("%s: [[%s]] is not an item of %s, whose items are [[%s]]" % (where, tm.group(1), os.path.dirname(f), table))
+            if not km:
+                die("%s: not an item line ([[%s]] or key = value on one line): %s" % (where, table, line))
+            die("%s: a key outside a [[%s]] item" % (where, table))
         key, val = km.group(1), km.group(2)
         if key in item:
-            fail("%s: key %s is given twice in one item" % (where, key))
+            report("%s: key %s is given twice in one item" % (where, key))
             continue
-        if key not in ("name", "boundary", "reason", "task"):
-            fail("%s: unknown key %s" % (where, key))
+        if key not in keys:
+            report("%s: unknown key %s" % (where, key))
             continue
         if key == "task":
             if not val.isdigit():
-                fail("%s: task is not a number" % where)
+                report("%s: task is not a number" % where)
                 continue
         elif val[0] == '"':
             try:
                 val = json.loads(val)
             except ValueError:
-                die("%s: %s is not a string" % (where, key))
+                if strict:
+                    die("%s: %s is not a string" % (where, key))
+                continue
         elif val[0] == "'":
             val = val[1:-1]
         else:
-            fail("%s: %s is not a string" % (where, key))
+            report("%s: %s is not a string" % (where, key))
             continue
         item[key] = val
+    return items
 
-declared = {}
-for item in items:
-    where = item["_where"]
-    missing = [k for k in ("name", "boundary", "reason", "task") if not str(item.get(k, "")).strip()]
-    if missing:
-        fail("%s: the item %s has no %s" % (where, item.get("name", ""), ", ".join(missing)))
-    if "boundary" in item and item["boundary"] not in BOUNDARIES:
-        fail("%s: boundary %r of %s is not one of %s (docs/development/testing.md, 判断と境界のtest);"
-             " a test with no boundary goes to a unit test of src/" % (where, item["boundary"], item.get("name", ""), ", ".join(BOUNDARIES)))
-    name = item.get("name")
-    if name:
-        if name in declared:
-            fail("%s: %s is declared twice (first at %s)" % (where, name, declared[name]))
+
+def entries(f, text, table, keys, old, report, strict):
+    """The registry's entries of a file: {id, kind, test, where}. An old item
+    reads as the id t<task>:<name> with the name as its representative."""
+    out = []
+    for item in parse(f, text, table, keys, report, strict):
+        where = item["_where"]
+        missing = [k for k in keys if not str(item.get(k, "")).strip()]
+        if missing:
+            report("%s: the item %s has no %s" % (where, item.get("id", item.get("name", "")), ", ".join(missing)))
+        kind = item.get("boundary" if old else "kind")
+        test = item.get("name" if old else "test")
+        if old:
+            ident = "t%s:%s" % (item["task"], test) if item.get("task") and test else None
         else:
-            declared[name] = where
+            ident = item.get("id")
+            if ident and not ID.match(ident):
+                report("%s: id %r is not lowercase words joined by - (e.g. queue-file-across-connections)" % (where, ident))
+                ident = None
+        if kind is not None and kind not in BOUNDARIES:
+            report("%s: %s %r of %s is not one of %s (docs/development/testing.md, 判断と境界のtest);"
+                   " a test with no boundary goes to a unit test of src/"
+                   % (where, "boundary" if old else "kind", kind, test or ident or "", ", ".join(BOUNDARIES)))
+        if ident and test:
+            out.append({"id": ident, "kind": kind, "test": test, "where": where})
+    return out
 
+
+# The work tree's registry, checked.
+registry = []
+for d, table, keys, old in DIRS:
+    for f in sorted(glob.glob(d + "/*.toml")):
+        try:
+            text = read_work(f)
+        except OSError as e:
+            die("cannot read %s: %s" % (f, e))
+        registry += entries(f, text, table, keys, old, fail, True)
+
+# The base's registry, read leniently: only its ids and representatives.
+base_reg = {}
+listing = {}
+for entry in git("ls-tree", "-r", "-z", base, "--", NEW_DIR, OLD_DIR).split(b"\0"):
+    if not entry:
+        continue
+    meta, path = entry.split(b"\t", 1)
+    path = path.decode("utf-8", "surrogateescape")
+    fields = meta.split()
+    if fields[1] == b"blob" and path.endswith(".toml") and os.path.dirname(path) in (NEW_DIR, OLD_DIR):
+        listing[path] = fields[2].decode()
+for path, text in sorted(read_blobs(listing).items()):
+    d, table, keys, old = [x for x in DIRS if x[0] == os.path.dirname(path)][0]
+    for e in entries(path, text, table, keys, old, quiet, False):
+        base_reg.setdefault(e["id"], e["test"])
+
+# One id has one representative (a second is R), and one test represents one
+# id.
+by_id, by_test = {}, {}
+for e in registry:
+    first = by_id.get(e["id"])
+    if first:
+        fail("%s: the id %s has a second test %s (first %s at %s): one boundary is kept by one test (R);"
+             " move the cases of the second to a unit test or give it its own id"
+             % (e["where"], e["id"], e["test"], first["test"], first["where"]))
+        continue
+    by_id[e["id"]] = e
+    if e["test"] in by_test:
+        fail("%s: %s is declared twice (first at %s)" % (e["where"], e["test"], by_test[e["test"]]["where"]))
+        continue
+    by_test[e["test"]] = e
+new_ids = [i for i in by_id if i not in base_reg]
+replaced = [i for i in by_id if i in base_reg and base_reg[i] != by_id[i]["test"]]
+
+# (a) A new test is the representative of an id, or moved. A replaced
+# representative gone from the work tree went to its replacement, and so
+# accounts for no move.
+for i in replaced:
+    lst = gone.get(base_reg[i].rsplit("::", 1)[-1], [])
+    if base_reg[i] in lst:
+        lst.remove(base_reg[i])
 missing = 0
+moved_in = {}
 for n in new:
     leaf = n.rsplit("::", 1)[-1]
-    if n not in declared and gone.get(leaf):
+    if n not in by_test and gone.get(leaf):
         print("%s: %s at %s: moved from %s" % (me, n, work_tests[n], gone[leaf].pop(0)))
+        f = work_tests[n].rsplit(":", 1)[0]
+        moved_in[f] = moved_in.get(f, 0) + 1
         continue
-    if n in declared:
+    if n in by_test:
         continue
-    print("%s: %s at %s: a new test in tests/it with no boundary declared" % (me, n, work_tests[n]), file=sys.stderr)
+    print("%s: %s at %s: a new test in tests/it that no boundary id has as its representative" % (me, n, work_tests[n]), file=sys.stderr)
     missing += 1
 
-if declared and (work_read != work_files):
-    # Declarations of tests in unchanged files: read the rest of the tree once.
+if registry and (work_read != work_files):
+    # Representatives in unchanged files: read the rest of the tree once.
     for p in sorted(work_files - work_read):
         for name, line in tests_of(read_work(p), prefix_of(p, work_mods)):
             work_tests.setdefault(name, "%s:%d" % (p, line))
-for name, where in declared.items():
-    if name not in work_tests:
-        print("%s: warning: %s: %s has no #[test] in tests/it" % (me, where, name), file=sys.stderr)
+for e in by_id.values():
+    if e["test"] not in work_tests:
+        print("%s: warning: %s: %s has no #[test] in tests/it" % (me, e["where"], e["test"]), file=sys.stderr)
+
+
+def file_of(name, base_side):
+    if base_side and name in base_tests:
+        return base_tests[name]
+    w = work_tests.get(name)
+    return w.rsplit(":", 1)[0] if w else None
+
+
+# (c) The ratchet of each module: its #[test]s may grow over the base's only
+# by the new ids it represents, the ids whose representative came into it and
+# the tests moved into it, less the ids whose representative left it.
+allow = dict(moved_in)
+for i in new_ids:
+    f = file_of(by_id[i]["test"], False)
+    if f:
+        allow[f] = allow.get(f, 0) + 1
+for i in replaced:
+    f, g = file_of(by_id[i]["test"], False), file_of(base_reg[i], True)
+    if f:
+        allow[f] = allow.get(f, 0) + 1
+    if g:
+        allow[g] = allow.get(g, 0) - 1
+count_base, count_work = {}, {}
+for name, p in base_tests.items():
+    count_base[p] = count_base.get(p, 0) + 1
+for name, w in work_tests.items():
+    p = w.rsplit(":", 1)[0]
+    if p in work_read:
+        count_work[p] = count_work.get(p, 0) + 1
+over = 0
+for p in sorted(base_read | work_read | set(allow)):
+    if p not in base_read and p not in work_read:
+        grew = 0  # an unchanged file
+    else:
+        grew = count_work.get(p, 0) - count_base.get(p, 0)
+    if grew > allow.get(p, 0):
+        print("%s: %s: %+d #[test] over the base, more than its new ids, replaced representatives and moved tests"
+              " allow (%+d): a representative replaced but left in place, or a test with no id; remove it, give it an"
+              " id or move it to a unit test" % (me, p, grew, allow.get(p, 0)), file=sys.stderr)
+        over += 1
 
 if missing:
-    print("%s: %d new test(s) in tests/it with no boundary: move the cases of a decision to a unit test of a"
-          " side-effect-free fn in src/, or, when the test keeps a boundary (%s), declare it in"
-          " .config/it-boundary.d/t<task ID>.toml (docs/development/testing.md, 判断と境界のtest; the format is in"
-          " the header of scripts/check-it-added-tests.sh)" % (me, missing, ", ".join(BOUNDARIES)), file=sys.stderr)
-if missing or bad:
+    print("%s: %d new test(s) in tests/it with no boundary id: move the cases of a decision to a unit test of a"
+          " side-effect-free fn in src/, or, when the test keeps a boundary (%s), make it the representative of an id:"
+          " replace the representative of an existing id, or add a new id in %s/t<task ID>.toml"
+          " (docs/development/testing.md, 判断と境界のtest; the format is in the header of"
+          " scripts/check-it-added-tests.sh)" % (me, missing, ", ".join(BOUNDARIES), NEW_DIR), file=sys.stderr)
+if missing or bad or over:
     sys.exit(1)
-print("%s: %d new test(s) in tests/it since %s, each declared or moved: ok" % (me, len(new), base[:12]))
+print("%s: %d new test(s) in tests/it since %s, %d new id(s), %d replaced representative(s), each kept: ok"
+      % (me, len(new), base[:12], len(new_ids), len(replaced)))
 PY
 }
 
