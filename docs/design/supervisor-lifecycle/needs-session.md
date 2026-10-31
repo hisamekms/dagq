@@ -84,7 +84,7 @@ supervisorは`needs_session`のrunを自分でresumeする（ADR-0019の決定1�
 このsupervisorが見ていないsessionと同じworktreeで2つ目のsessionを始めないため。
 このsupervisorがまだslotで進めているrun（leaseが他のtokenに移ってstaleになり、sessionが終わっていても）も飛ばす: そのslotは次のtickでleaseを失ったとして外れ（[supervise](supervise.md#provisionと監視)）、その後のpassでだけ他のrunと同じく次の試行を始める（同じrunを2つのslotで進めない）。
 resumeの前に、このrunに記録されたresumeのsession（backgroundのwrapperのhandle）のうち止めた記録の無いもの（手放したsession、errorで残したもの）がまだ動いていれば止め、`workspace_closed`を記録する。
-動いているかはhandleのprocessで見る（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
+動いているかはhandleのprocessで見る。
 resume中に死んだsupervisorが起動したwrapper（handleの記録が無い）は見つけないが、wrapperが生きている間は上の条件で飛ばす。
 `dagq.toml`がworkerをcontainerで動かすときは、containerが使えないか、containerの届かないproviderで動くrunを候補から飛ばし、hostで再開しない（[Container runtime](../container-runtime.md#fail-closedの境界)）。
 試行を使い切ったrunを復旧jobに渡すことは止めない。
@@ -115,13 +115,13 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
 3. **解消依頼**: wrapper が登録されたら、定型の解消依頼を次の turn の request file として書き、resume_request_sent を記録する。
    起動中の入力欄や固定の paste 待ちは使わない。
    依頼は現在の task と検証、前の失敗と修正すべき理由を含む。
-   理由が上限を超えるときは先頭だけを載せ、全文を run dir の file に書いてその path を示す（[Prompt](prompt.md#次のturnの文の上限)）。
+   理由が上限を超えるときの切り方は[Prompt](prompt.md#次のturnの文の上限)。
    直前のturnの`peak_context`が`[fresh_session]`の閾値を超えれば、2の起動の前に`session_renewed`を記録し、wrapperは前のsessionを開き直さず新しいsessionを依頼を持つ引き継ぎで始める（`resume-<attempt>.txt`はその引き継ぎ。[Agent provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）。
 4. **監視と終了**: 依頼より新しい receipt と turn の終了、wrapper の生存を確認する。
    worker_question の回答は次の turn として届け、stalled の待ちも slot の外で保持する。
    非対話の idle_process の復旧は残す。
    解消・失敗・未解消で終了を依頼し、wrapper の終了を確認する。
-   時間の判断（wrapperの登録の待ち、依頼か最後の入力からの`resume_timeout`、終了の依頼からのexit timeout）は注入した`Clock`で測る。
+   wrapperの登録の待ち、依頼か最後の入力からの`resume_timeout`、終了の依頼からのexit timeoutは`Clock`で測る。
 
 5. **その後**: `resolved`で`integration_approved`があれば（0の解消済みの確認で`resume_skipped`になった承認済みのrunも）、`landing_queued`を記録し、leaseを持ったまま着地スロットが空くのを待ち（他のrunが`integrating`なら次の回に回す）、`begin_integration`（同じtokenのleaseはそのまま使う）から`integrate`と同じ関数を別threadで走らせる。
    承認済みのrunは、receiptのheadがbranchのheadと一致すれば同じトランザクションでそれを着地するcommit（`result_commit`）にし、一致しなければ理由を残して`unresolved`として扱う。
@@ -161,8 +161,9 @@ worktreeは残る。
 ## 再計画で保留したrun
 
 保留したrunは`needs_session`（`replan_parked`）になってresume/reviseの回数を引き継ぎ、保護中は自動resume・`resolved_head`・使い切りの後始末の対象にならない。
-snapshotを保存した保留は、継続か案の撤回で操作が閉じると照合してから続ける（[順と失敗](../../plans/task-replanning.md#実装の状態)）。
-hostのrunは制御側がresumeか後始末の前に照合し（無ければ作る）、containerのrunはresumeのagentの前にexecutorが照合し制御側がslotで記録し、使い切れば失敗とし、失敗は`replan_restore_failed`で操作を`blocked`に戻す。
+継続か撤回で操作が閉じると、最後に保存した操作を照合し、次にsnapshotの無い操作をworktreeのまま続ける（`replan_restored`の`unsaved`、[順と失敗](../../plans/task-replanning.md#実装の状態)）。
+どちらも新しいsessionの前にworktreeに残ったprocessを探し直し、動くものを名指して失敗にする。
+hostのrunは制御側がresumeか後始末の前に照合し（無ければ作る）、containerのrunはresumeのagentの前にexecutorが照合し制御側がslotで記録し、使い切れば失敗とし、失敗は`replan_restore_failed`で操作を`blocked`に戻しworktreeを残す。
 継続・撤回の後の最初のresumeでwrapperの起動か登録の失敗も`replan_restore_failed`で成果を残して`blocked`に戻し、再び続ければ照合し直す。
 保留を終えた柵（`blocked`などの保留の後の操作、落ち着いたhold）がslotに見つけたrunは、書き手の終わりを待ってから、snapshotを作らずworktreeを残して休む（`ParkFor::Rest`）。
 この休止は照合も作り直しもせず、操作の結末か解除の後のresumeが新しいvalidationとreviewから続ける。
