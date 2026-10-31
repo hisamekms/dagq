@@ -1,0 +1,11 @@
+# 17.8s with the 9 tests of runtime_recheck (two supervisors over two moves of main)
+[[test]]
+name = "runtime_recheck::a_conflict_after_a_clean_recheck_replaces_the_asks_recheck_paragraph"
+reason = "B 境界（SQLite・Git・supervisor の配線）: dagq の外で動いた main を、それを見ていない次の supervisor の初めの pass が実 git merge-tree で確かめ、clean と衝突の段落を SQLite の ask で置き換え、着地の無い main の landing_recheck_finished を確かめた run に書き、resume することを確かめる代表の 1 本。段落の置き換え・文面・記録先・確かめる時の判断は domain::recheck（noted_question・clean_ask_note）と recheck.rs（look_before_lock・record_on）の unit test"
+task = 3765
+
+# 13.9s with the 9 tests of runtime_recheck (an integration hold, then a recheck cut off by its deadline)
+[[test]]
+name = "runtime_recheck::a_recheck_command_cut_off_by_its_deadline_is_an_environmental_failure"
+reason = "B 境界（プロセス・SQLite・supervisor の配線）: 実の command を時間の上限で kill し、timeout の finding を skipped として SQLite に記録して、integrate の host の失敗で着地を止められた run の head・last_error・attention を変えず resume しないことを確かめる。分類と skipped の判断は domain::verify_failure と domain::recheck::failure_record の unit test"
+task = 3765

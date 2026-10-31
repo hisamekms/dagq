@@ -432,13 +432,7 @@ task = 1707
 # 5.544s, class B
 [[test]]
 name = "runtime_recheck::a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer"
-reason = "B 境界（守る境界）: real git merge-tree conflict"
-task = 1707
-
-# 5.092s, class unknown
-[[test]]
-name = "runtime_recheck::another_supervisors_recheck_of_main_leaves_the_run_held_for_its_e2e_to_check"
-reason = "unknown: TSV と一意に対応しない（TSV に 0 行）。class と行き先は移し替えの goal（119・120）が決める"
+reason = "B 境界（Git・SQLite・supervisor の配線）: 実 git merge-tree の衝突で待つ run を park_rechecked して数えない resume をし、resume の間の approve_landing の答えを配る時でないとして SQLite に残し、validation の後に supervisor が適用して review なしに着地することを確かめる代表の 1 本。何が続くか・答えを適用する時の判断は domain::recheck::failure_record と landing_answer_to_apply の unit test"
 task = 1707
 
 # 6.037s, class D
@@ -1457,12 +1451,6 @@ name = "verification_container::an_already_satisfied_claim_is_verified_in_the_co
 reason = "B 境界（supervisor の配線・Git・プロセス）: already_satisfied の run の snapshot の検証が supervisor の 2 回の pass（検証と close の答えの後の流し直し）を通して fake の podman と実の dagq relay verify で main の head の clone で流れ、引数・token・RUSTC_WRAPPER の外しと event・前の検証の残りの片付け・close を確かめる。container で流すかの判断と部品の呼び順は integrate の unit test"
 task = 2480
 
-# 10.5〜14.3s (stress 5 under the host's load of other runs, task 2270)
-[[test]]
-name = "runtime_recheck::a_recheck_with_no_declared_profile_that_applies_adds_no_build_output"
-reason = "B 境界（Git・dagq.toml・プロセス・supervisor の配線）: main checkout の dagq.toml の [toolchains] を実際に読み、merge した木の git ls-tree と paths の照合で当たる profile が無いとき、実際の scratch worktree で command が build の出力の env を受けず recheck/ の下に dir ができないことを実際の supervisor で確かめる。当て方と env の判断は domain::toolchain と supervise::recheck の unit test"
-task = 2270
-
 # 13.6〜19.9s (stress 60s under the host's load of other runs, task 2270)
 [[test]]
 name = "runtime_recheck::each_declaration_that_applies_builds_in_a_directory_of_its_own"
@@ -1779,18 +1767,6 @@ name = "runtime_background::without_the_old_keys_a_worker_runs_in_the_background
 reason = "B 境界（守る境界）: the supervisor's wiring starts a worker's session wrapper in the background from a dagq.toml without [headless], through review and landing on Git and SQLite"
 task = 2163
 
-# 9.794s (worker stress, task 2867)
-[[test]]
-name = "runtime_recheck::an_answer_recorded_before_the_recheck_parks_the_run_applies_after_its_resume"
-reason = "B 境界（supervisorの配線）: an approve_landing answer kept in SQLite across the Git recheck's park, the resume and the validation, applied once the run waits again"
-task = 2867
-
-# 9.351s (worker stress, task 2867)
-[[test]]
-name = "runtime_recheck::an_answer_given_while_the_recheck_resumes_the_run_applies_once_it_waits_again"
-reason = "B 境界（supervisorの配線）: an approve_landing answer given during the recheck's resume, not delivered then, applied by the supervisor after the validation"
-task = 2867
-
 # 11.759s in task 2394's stress, whose change to it was the type of its kind comparisons
 [[test]]
 name = "runtime_light_slots::the_landing_queue_leaves_room_for_light_tasks_only"
@@ -1986,31 +1962,13 @@ task = 2869
 # 15.6s in task 2140's stress (four waiting runs and a landing recheck)
 [[test]]
 name = "runtime_recheck::a_recheck_that_cannot_write_its_build_output_runs_no_command_and_records_no_run"
-reason = "B 境界（supervisor の配線・Git・SQLite・実 filesystem の権限）: 書けない recheck の出力先の pass で、実 git merge-tree の衝突の run の resume・paths で外れた run の clean・command より先に確かめて記録しない 2 run（出力先の無い先行 run を含む）と queue の attention が同じ pass で並ぶことを確かめる代表の 1 本。確かめる出力先と順序と counts の判断は recheck.rs と domain::recheck の unit test"
-task = 2140
-
-# 8.9s in task 2140's stress (three supervisor passes over moves of main)
-[[test]]
-name = "runtime_recheck::an_unwritable_build_output_is_told_once_and_its_end_once_it_is_written"
-reason = "B 境界（supervisor の配線・SQLite・実 filesystem の権限）: main が動くたびの recheck で queue の attention が 1 件のまま、書けるようになった recheck が対の event を SQLite に書き command を流すことを確かめる。変わり目の判断は domain::recheck::TargetCheck の unit test"
-task = 2140
-
-# task 2140's stress (one waiting run and a recheck)
-[[test]]
-name = "runtime_recheck::a_recheck_with_no_command_does_not_check_its_build_output"
-reason = "B 境界（supervisor の配線・実 filesystem の権限）: command の無い設定では、書けない recheck/target があっても実 supervisor の pass が確かめを流さず clean を記録し attention を書かないことを確かめる。どの run の出力先を確かめるかの判断は recheck.rs の host_outputs の unit test"
+reason = "B 境界（supervisor の配線・Git・SQLite・実 filesystem の権限）: 書けない recheck の出力先の pass で、実 git merge-tree の衝突の run の resume・paths で外れた run の clean・command より先に確かめて記録しない 2 run（出力先の無い先行 run を含む）と queue の attention（status の attention を含む）・paths で外れた run の ask の段落が同じ pass で並ぶことを確かめる代表の 1 本。attention の変わり目と command の無い設定の判断は domain::recheck::TargetCheck と recheck.rs の host_outputs の unit test。確かめる出力先と順序と counts の判断は recheck.rs と domain::recheck の unit test"
 task = 2140
 
 # 6.2s alone, 10.6s with the 22 tests of runtime_recheck (task 3356)
 [[test]]
 name = "runtime_recheck::a_recheck_whose_command_fails_on_main_alone_too_resumes_no_run_and_tells_the_inbox_once"
-reason = "B 境界（Git・プロセス・SQLite・supervisor の配線）: 実際の scratch worktree で run と main の木だけに [recheck] command を流し、main の失敗で run を park も resume もしないこと、queue の event を supervisor の pass をまたいで最新から読んで inbox に 1 回だけ伝えること、main が直れば run の失敗が無くても pass を記録し再び壊れれば伝え直すこと、recheck の directory の main の log を誰も指さなくなれば消すことを実際の supervisor で確かめる。判断の case は domain::recheck の unit test"
-task = 2141
-
-# 9.1s on the worker's stress (task 2141)
-[[test]]
-name = "runtime_recheck::a_recheck_whose_command_passes_on_main_resumes_each_run_that_fails_it_the_same_way"
-reason = "B 境界（Git・プロセス・SQLite・supervisor の配線）: 2 本の待つ run が同じ出力で落ち main の木だけでは通るとき、実際の supervisor が両方を park_rechecked して resume することを確かめる。判断の case は domain::recheck の unit test"
+reason = "B 境界（Git・プロセス・SQLite・supervisor の配線）: 実際の scratch worktree で run と main の木だけに [recheck] command を流し、main の失敗で run を park も resume もしないこと、queue の event を supervisor の pass をまたいで最新から読んで inbox に 1 回だけ伝えること、main が直れば run の失敗が無くても pass を記録すること、recheck の directory の main の log を誰も指さなくなれば消すことを実際の supervisor で確かめる。判断の case は domain::recheck の unit test"
 task = 2141
 
 # 9.5s to 12.3s (stress 5 under the host's load of other runs, task 1882)
@@ -2117,12 +2075,6 @@ task = 2432
 name = "runtime_review_questions::a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout"
 reason = "B 境界（SQLite・supervisor の配線）: review の間に開いた worker_question が SQLite の has_unclosed_worker_question_since の下限で revise を止めず、その answer の runtime_delivers が SQLite で false になり、revise が supervisor の時計で resume の時間切れに終わって approve_landing の ask になることを 1 case で確かめる。質問を依頼より前の秒に置くため review を待たせ秒を跨ぐ。判断は revise::tests"
 task = 2240
-
-# 9.4s (stress 5 under the host's load of other runs, task 2936)
-[[test]]
-name = "runtime_recheck::a_waiting_run_whose_diff_misses_the_recheck_paths_runs_no_command"
-reason = "B 境界（Git・dagq.toml・supervisor の配線）: main checkout の dagq.toml の [recheck] paths を実際に読み、待っている run の main との差分が paths に当たらないとき、実際の supervisor の 2 つの run（待つ run と着地する run）を通して command を流さず scratch worktree も作らず、landing_recheck_clean・ask の文・status を確かめる。paths の当て方の判断は supervise::recheck の unit test"
-task = 2936
 
 # 11s to 23s in stress under the host's load (task 2409): the fixture's landing queue, then the config read again on each turn
 [[test]]

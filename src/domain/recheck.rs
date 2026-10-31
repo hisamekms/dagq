@@ -636,6 +636,59 @@ pub fn kept_by_main(failure: &RecheckFailure, on_host: bool, main: Option<&MainC
     checks_main(failure, on_host) && matches!(main, Some(MainCheck::Failed { .. }))
 }
 
+/// Who leases a run the recheck found no longer landing, when its
+/// finding is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leaser {
+    /// Nobody: the run waits unleased for its asks.
+    Nobody,
+    /// The supervisor that ran the recheck, which holds it in a slot to land.
+    This,
+    /// Another process.
+    Other,
+}
+
+/// What follows a failure the recheck found on a run (ADR-0068 decisions
+/// 3 and 4): its `action` ([`RESUMED`], [`HELD`] or [`SKIPPED`]) and the
+/// recheck's paragraph for the run's open asks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureRecord {
+    pub action: &'static str,
+    pub note: String,
+}
+
+/// What follows `failure` (whose `reason` the record names) on a run
+/// `leaser` leases, `main_log` the log of main's check when main's
+/// failure keeps the run from its resume ([`kept_by_main`]): a failure on
+/// the host or with no container (ADR-t639-1, ADR-t2424-1), or one main
+/// fails alone too (ADR-t2141-1), is [`SKIPPED`] whether nobody or this
+/// supervisor leases the run; otherwise a run nobody leases is
+/// [`RESUMED`] (parked for a resume) and one this supervisor holds is
+/// [`HELD`] (parked when it would land). `None` when another process
+/// leases the run: it moved on, and nothing is recorded.
+pub fn failure_record(
+    failure: &RecheckFailure,
+    reason: &str,
+    main_log: Option<&str>,
+    leaser: Leaser,
+) -> Option<FailureRecord> {
+    if leaser == Leaser::Other {
+        return None;
+    }
+    let (action, note) = if let Some(main_log) = main_log {
+        (SKIPPED, main_failed_ask_note(reason, main_log))
+    } else if matches!(failure, RecheckFailure::ContainerRefused { .. }) {
+        (SKIPPED, refused_ask_note(reason))
+    } else if failure.is_environmental() {
+        (SKIPPED, skipped_ask_note(reason))
+    } else if leaser == Leaser::Nobody {
+        (RESUMED, ask_note(reason, true))
+    } else {
+        (HELD, ask_note(reason, false))
+    };
+    Some(FailureRecord { action, note })
+}
+
 /// The paragraph a failure kept by main's failure ([`kept_by_main`])
 /// puts in the run's open asks: what the run met, that main fails alone,
 /// and that the run keeps waiting to land.
@@ -870,6 +923,71 @@ mod tests {
         let note = main_failed_ask_note("it failed", "/q/recheck/main-m.log");
         assert!(note.starts_with(ASK_NOTE_PREFIX), "{note}");
         assert!(note.contains("fails on main alone too"), "{note}");
+    }
+
+    /// What follows a failure by who leases the run: a conflict or a
+    /// failure of the code resumes a run nobody leases and holds one this
+    /// supervisor holds in its slot (to park it when it would land); a
+    /// failure on the host (disk full, killed, timed out), with no
+    /// container, or one main fails alone too is skipped either way, so a
+    /// run held in its slot is never held by it nor parked before landing,
+    /// and an integration-held run is neither resumed nor parked; a run
+    /// another process leases moved on and gets no record. Each record's
+    /// note is the ask's paragraph for its action.
+    #[test]
+    fn a_failure_resumes_holds_or_skips_the_run_by_its_kind_and_its_lease() {
+        use super::super::verify_failure::FailureClass::*;
+        let conflict = RecheckFailure::Conflict {
+            paths: vec!["change.txt".into()],
+        };
+        let code = check_failed(BuildError);
+        let refused = RecheckFailure::ContainerRefused {
+            command: "c".into(),
+            why: "w".into(),
+        };
+        let reason = "after task 2 (run r) moved main";
+        let record = |failure: &RecheckFailure, main_log: Option<&str>, leaser| {
+            failure_record(failure, reason, main_log, leaser)
+                .map(|record| (record.action, record.note))
+        };
+        for failure in [&conflict, &code] {
+            assert_eq!(
+                record(failure, None, Leaser::Nobody),
+                Some((RESUMED, ask_note(reason, true)))
+            );
+            assert_eq!(
+                record(failure, None, Leaser::This),
+                Some((HELD, ask_note(reason, false)))
+            );
+            assert_eq!(record(failure, None, Leaser::Other), None);
+        }
+        for class in [DiskFull, Killed, Timeout] {
+            let host = check_failed(class);
+            for leaser in [Leaser::Nobody, Leaser::This] {
+                assert_eq!(
+                    record(&host, None, leaser),
+                    Some((SKIPPED, skipped_ask_note(reason))),
+                    "{class:?} {leaser:?}"
+                );
+            }
+            assert_eq!(record(&host, None, Leaser::Other), None);
+        }
+        for leaser in [Leaser::Nobody, Leaser::This] {
+            assert_eq!(
+                record(&refused, None, leaser),
+                Some((SKIPPED, refused_ask_note(reason)))
+            );
+            let log = "/q/recheck/main-m.log";
+            assert_eq!(
+                record(&code, Some(log), leaser),
+                Some((SKIPPED, main_failed_ask_note(reason, log)))
+            );
+        }
+        assert_eq!(record(&code, Some("/log"), Leaser::Other), None);
+        assert!(
+            ask_note(reason, true)
+                .ends_with("once it waits again, the answer applies to the rebased run."),
+        );
     }
 
     /// Each check of main keeps the log it wrote, the attention's while

@@ -1103,46 +1103,37 @@ impl Supervisor<'_> {
         let reason = failure.reason(watch.landed.as_ref(), &watch.main);
         let mut payload = failure.payload(watch.landed.as_ref(), &watch.main, &target.head);
         let lease = self.queue.run_lease(run.id())?;
-        if failure.is_environmental() || main_log.is_some() {
-            if lease.is_some_and(|lease| lease.token != *self.registration.token()) {
-                return Ok(None);
+        let leaser = match &lease {
+            None => recheck::Leaser::Nobody,
+            Some(lease) if lease.token == *self.registration.token() => recheck::Leaser::This,
+            Some(_) => recheck::Leaser::Other,
+        };
+        let Some(record) = recheck::failure_record(failure, &reason, main_log, leaser) else {
+            return Ok(None);
+        };
+        match record.action {
+            SKIPPED => {
+                payload["action"] = json!(SKIPPED);
+                payload["reason"] = json!(reason);
+                payload["status"] = json!(run.status());
+                if let Some(main_log) = main_log {
+                    payload["main_failed"] = json!(true);
+                    payload["main_log_path"] = json!(main_log);
+                }
+                self.queue.record_runtime_event(
+                    run.id(),
+                    EventKind::LandingRecheckFailed,
+                    payload,
+                )?;
+                if let Some(main_log) = main_log {
+                    warn!(run_id = %run.id(), "run {}: {reason}; the command fails on main alone too (see {main_log}), so the run keeps waiting to land", run.id());
+                } else if matches!(failure, RecheckFailure::ContainerRefused { .. }) {
+                    warn!(run_id = %run.id(), "run {}: {reason}; nothing judged the code, so the run keeps waiting to land", run.id());
+                } else {
+                    warn!(run_id = %run.id(), "run {}: {reason}; the host kept the command from judging the code, so the run keeps waiting to land", run.id());
+                }
             }
-            payload["action"] = json!(SKIPPED);
-            payload["reason"] = json!(reason);
-            payload["status"] = json!(run.status());
-            if let Some(main_log) = main_log {
-                payload["main_failed"] = json!(true);
-                payload["main_log_path"] = json!(main_log);
-            }
-            self.queue
-                .record_runtime_event(run.id(), EventKind::LandingRecheckFailed, payload)?;
-            let note = if let Some(main_log) = main_log {
-                warn!(run_id = %run.id(), "run {}: {reason}; the command fails on main alone too (see {main_log}), so the run keeps waiting to land", run.id());
-                recheck::main_failed_ask_note(&reason, main_log)
-            } else if matches!(failure, RecheckFailure::ContainerRefused { .. }) {
-                warn!(run_id = %run.id(), "run {}: {reason}; nothing judged the code, so the run keeps waiting to land", run.id());
-                recheck::refused_ask_note(&reason)
-            } else {
-                warn!(run_id = %run.id(), "run {}: {reason}; the host kept the command from judging the code, so the run keeps waiting to land", run.id());
-                recheck::skipped_ask_note(&reason)
-            };
-            for ask in self
-                .queue
-                .note_on_asks(run.id(), &note, LANDING_RECHECK_FAILED)?
-            {
-                info!(run_id = %run.id(), ask_id = %ask.id, "run {}: the landing recheck's finding was added to its {} ask {}", run.id(), ask.kind.as_str(), ask.id);
-            }
-            return Ok(Some(SKIPPED));
-        }
-        let action = match lease {
-            None => match self
-                .queue
-                .park_rechecked(run.id(), None, &reason, payload)?
-            {
-                Some(_) => recheck::RESUMED,
-                None => return Ok(None),
-            },
-            Some(lease) if lease.token == *self.registration.token() => {
+            HELD => {
                 payload["action"] = json!(HELD);
                 payload["reason"] = json!(reason);
                 self.queue.record_runtime_event(
@@ -1150,23 +1141,26 @@ impl Supervisor<'_> {
                     EventKind::LandingRecheckFailed,
                     payload,
                 )?;
-                HELD
+                warn!(run_id = %run.id(), "run {}: {reason}; it is parked for a resume instead of landing", run.id());
             }
-            Some(_) => return Ok(None),
-        };
-        warn!(run_id = %run.id(), "run {}: {reason}; {}", run.id(), if action == HELD {
-            "it is parked for a resume instead of landing"
-        } else {
-            "it is resumed without waiting for its asks"
-        });
-        let note = recheck::ask_note(&reason, action == recheck::RESUMED);
+            _ => {
+                if self
+                    .queue
+                    .park_rechecked(run.id(), None, &reason, payload)?
+                    .is_none()
+                {
+                    return Ok(None);
+                }
+                warn!(run_id = %run.id(), "run {}: {reason}; it is resumed without waiting for its asks", run.id());
+            }
+        }
         for ask in self
             .queue
-            .note_on_asks(run.id(), &note, LANDING_RECHECK_FAILED)?
+            .note_on_asks(run.id(), &record.note, LANDING_RECHECK_FAILED)?
         {
             info!(run_id = %run.id(), ask_id = %ask.id, "run {}: the landing recheck's finding was added to its {} ask {}", run.id(), ask.kind.as_str(), ask.id);
         }
-        Ok(Some(action))
+        Ok(Some(record.action))
     }
 
     /// Park `run`, which this supervisor holds to land onto `main`, when
