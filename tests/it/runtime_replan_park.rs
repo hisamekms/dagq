@@ -181,10 +181,14 @@ fn park_during_a_turn(
 /// wrapper ends between turns; the run's work (the commit and the staged,
 /// unstaged and untracked changes) and its receipt are saved in a snapshot
 /// with the head pinned, the worktree is left as it was, and the run is
-/// parked with its slot given back, which another task takes.
+/// parked with its slot given back, which another task takes. Once the
+/// operation ends in a continuation the run resumes in its worktree, as it
+/// was, told it goes on under the same conditions, and lands through
+/// validation and review. Whether the saved work is dirty is
+/// `domain::replan_snapshot::saved_dirty`'s (unit tests).
 #[test]
 fn a_request_during_a_turn_parks_the_run_at_its_end_with_its_dirty_work_saved() {
-    let (_dir, repo, db, _backend, op) = park_during_a_turn("");
+    let (_dir, repo, db, backend, op) = park_during_a_turn("");
     assert_eq!(op.status, ReplanStatus::Parked, "{op:?}");
     assert_eq!(op.generation, 2);
     let snapshot = op.snapshot_id.clone().unwrap();
@@ -271,23 +275,12 @@ fn a_request_during_a_turn_parks_the_run_at_its_end_with_its_dirty_work_saved() 
     let parked = payloads(&detail, "replan_parked")[0].clone();
     assert_eq!(parked["snapshot_id"], snapshot.as_str());
     assert_eq!(parked["status"], "needs_session");
-}
 
-/// Acceptance: a run whose turn's work is all committed is saved clean,
-/// and once the operation ends in a continuation the run resumes in its
-/// worktree, as it was, told it goes on under the same conditions, and
-/// lands through validation and review.
-#[test]
-fn a_continuation_resumes_the_parked_run_on_its_saved_work_and_lands() {
-    let (_dir, repo, db, backend, op) =
-        park_during_a_turn("git add -A && git commit -qm everything;");
-    assert_eq!(op.status, ReplanStatus::Parked, "{op:?}");
-    assert!(!manifest(&db, &op).dirty);
     advance(&db, &op, ReplanStatus::ContinuingAfterPark);
     let (_reviewer, supervisor) =
         supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
     finished(&db, &backend, supervisor);
-    let detail = detail(&db);
+    let detail = self::detail(&db);
     assert_eq!(detail.task.status(), TaskStatus::Completed);
     assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
     let restored = payloads(&detail, "replan_restored");
@@ -379,97 +372,22 @@ fn a_continuation_whose_wrapper_never_registers_is_blocked_again() {
     }
 }
 
-/// Acceptance: once a withdrawal ends the operation, a run whose worktree
-/// is gone gets it made again from the snapshot (its branch at the pinned
-/// head, the staged and unstaged changes and the untracked file) before
-/// it resumes, and lands with all of that work.
-#[test]
-fn a_withdrawal_makes_the_lost_worktree_again_from_the_snapshot() {
-    let (_dir, repo, db, backend, op) = park_during_a_turn("");
-    let run = detail(&db).runs[0].clone();
-    let worktree = run.worktree_path().unwrap().to_owned();
-    git(&repo, &["worktree", "remove", "--force", &worktree]);
-    assert!(!Path::new(&worktree).exists());
-    let planning = advance(&db, &op, ReplanStatus::Planning);
-    advance(&db, &planning, ReplanStatus::Withdrawn);
-    let (_reviewer, supervisor) =
-        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
-    finished(&db, &backend, supervisor);
-    let detail = detail(&db);
-    assert_eq!(detail.task.status(), TaskStatus::Completed);
-    let restored = payloads(&detail, "replan_restored");
-    assert_eq!(restored.len(), 1, "{restored:?}");
-    assert_eq!(restored[0]["action"], "recreated");
-    let landed = git_out(&repo, &["show", "main:seed.txt"]);
-    assert!(landed.contains("half"), "{landed}");
-    for file in ["notes.txt", "staged.txt"] {
-        assert!(
-            git_out(&repo, &["ls-tree", "--name-only", "main"]).contains(file),
-            "{file} landed"
-        );
-    }
-    // The untracked script came back executable, and landed so.
-    assert!(
-        git_out(&repo, &["ls-tree", "main", "run.sh"]).starts_with("100755 "),
-        "{}",
-        git_out(&repo, &["ls-tree", "main", "run.sh"])
-    );
-}
-
 /// Acceptance: a restore stopped half way (the runtime stopped after it
 /// began to put the worktree together) is taken up again from the
 /// snapshot: what the half-made scratch worktree held is thrown away (it
-/// is a copy, not the run's work), the worktree is made again in full,
-/// and the run resumes and lands with the saved work only.
+/// is a copy, not the run's work), and so is the scratch of the old name
+/// (`worktree.restoring`, beside a worktree of the old layout at
+/// `<run dir>/worktree`) that holds the run's branch; the worktree is made
+/// again in full (its branch at the pinned head, the staged and unstaged
+/// changes and the untracked files, a script's execute bit included), and
+/// the run resumes and lands with the saved work only. Which scratches a
+/// restore discards is `domain::replan_snapshot`'s (unit tests).
 #[test]
 fn a_restore_stopped_half_way_starts_again_from_the_snapshot() {
     let (_dir, repo, db, backend, op) = park_during_a_turn("");
     let run = detail(&db).runs[0].clone();
-    let worktree = run.worktree_path().unwrap().to_owned();
-    let head = git_out(Path::new(&worktree), &["rev-parse", "HEAD"]);
-    git(&repo, &["worktree", "remove", "--force", &worktree]);
-    // What a restore stopped after making its scratch worktree left: the
-    // head checked out, a diff half applied, no untracked files yet.
-    let scratch = dagq::domain::replan_snapshot::scratch_worktree(Path::new(&worktree));
-    git(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "--detach",
-            scratch.to_str().unwrap(),
-            &head,
-        ],
-    );
-    fs::write(scratch.join("half-applied.txt"), "partial\n").unwrap();
-    advance(&db, &op, ReplanStatus::ContinuingAfterPark);
-    let (_reviewer, supervisor) =
-        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
-    finished(&db, &backend, supervisor);
-    let detail = detail(&db);
-    assert_eq!(detail.task.status(), TaskStatus::Completed);
-    let restored = payloads(&detail, "replan_restored");
-    assert_eq!(restored.len(), 1, "{restored:?}");
-    assert_eq!(restored[0]["action"], "recreated");
-    assert!(!scratch.exists());
-    let tree = git_out(&repo, &["ls-tree", "--name-only", "main"]);
-    for file in ["notes.txt", "staged.txt", "run.sh"] {
-        assert!(tree.contains(file), "{file} landed: {tree}");
-    }
-    assert!(!tree.contains("half-applied.txt"), "{tree}");
-}
-
-/// A run of the old layout (its worktree at `<run dir>/worktree`) whose
-/// restore stopped after it checked the run's branch out in the scratch of
-/// the old name (`worktree.restoring`) is restored all the same: that
-/// scratch, the run's own on its branch, is discarded before the branch is
-/// checked out in the new one, and the run resumes and lands with the
-/// saved work only.
-#[test]
-fn a_restore_of_the_old_layout_stopped_in_the_old_scratch_starts_again() {
-    let (_dir, repo, db, backend, op) = park_during_a_turn("");
-    let run = detail(&db).runs[0].clone();
     let made = PathBuf::from(run.worktree_path().unwrap());
+    let head = git_out(&made, &["rev-parse", "HEAD"]);
     let branch = run.branch().unwrap().to_owned();
     git(
         &repo,
@@ -483,20 +401,28 @@ fn a_restore_of_the_old_layout_stopped_in_the_old_scratch_starts_again() {
             rusqlite::params![old.to_str().unwrap(), run.id().as_str()],
         )
         .unwrap();
-    assert_eq!(
-        SqliteQueue::open(&db)
-            .unwrap()
-            .run(run.id())
-            .unwrap()
-            .worktree_path(),
-        old.to_str()
-    );
-    let scratch = old.with_file_name("worktree.restoring");
+    // What a restore stopped after making its scratch worktree left: the
+    // head checked out, a diff half applied, no untracked files yet.
+    let scratch = dagq::domain::replan_snapshot::scratch_worktree(&old);
     git(
         &repo,
-        &["worktree", "add", "-q", scratch.to_str().unwrap(), &branch],
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            scratch.to_str().unwrap(),
+            &head,
+        ],
     );
     fs::write(scratch.join("half-applied.txt"), "partial\n").unwrap();
+    // And what one stopped before the scratches were named after their run
+    // left: the run's branch checked out in the old name's scratch.
+    let legacy = old.with_file_name("worktree.restoring");
+    git(
+        &repo,
+        &["worktree", "add", "-q", legacy.to_str().unwrap(), &branch],
+    );
+    fs::write(legacy.join("half-applied.txt"), "partial\n").unwrap();
     advance(&db, &op, ReplanStatus::ContinuingAfterPark);
     let (_reviewer, supervisor) =
         supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
@@ -507,11 +433,20 @@ fn a_restore_of_the_old_layout_stopped_in_the_old_scratch_starts_again() {
     assert_eq!(restored.len(), 1, "{restored:?}");
     assert_eq!(restored[0]["action"], "recreated");
     assert!(!scratch.exists());
+    assert!(!legacy.exists());
     let tree = git_out(&repo, &["ls-tree", "--name-only", "main"]);
     for file in ["notes.txt", "staged.txt", "run.sh"] {
         assert!(tree.contains(file), "{file} landed: {tree}");
     }
     assert!(!tree.contains("half-applied.txt"), "{tree}");
+    let landed = git_out(&repo, &["show", "main:seed.txt"]);
+    assert!(landed.contains("half"), "{landed}");
+    // The untracked script came back executable, and landed so.
+    assert!(
+        git_out(&repo, &["ls-tree", "main", "run.sh"]).starts_with("100755 "),
+        "{}",
+        git_out(&repo, &["ls-tree", "main", "run.sh"])
+    );
 }
 
 /// Acceptance: a process a turn left running in the worktree outside its
@@ -1019,9 +954,13 @@ esac"#
 /// Acceptance: a run nobody holds, waiting for the answer to its landing
 /// question, is parked where it waits once an operation is opened on it:
 /// it becomes `needs_session` (`replan_parked`) and its open question is
-/// closed, so an answer given meanwhile does not land it. Once the
-/// operation ends in a continuation, the run resumes on its restored work
-/// and lands only through a new validation and review.
+/// closed, so an answer given meanwhile does not land it, nor does an
+/// approval to land given before the park (the `integration_approved` a
+/// person's `land` records), which approved the work as it was then. Once
+/// the operation ends in a continuation, the run resumes on its restored
+/// work and lands only through a new validation and review. That an
+/// approval from before the park does not count is
+/// `domain::run::history`'s (unit tests).
 #[test]
 fn a_run_waiting_for_its_landing_answer_is_parked_and_lands_only_after_a_new_review() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
@@ -1042,6 +981,15 @@ fn a_run_waiting_for_its_landing_answer_is_parked_and_lands_only_after_a_new_rev
         .into_iter()
         .find(|ask| ask.kind == AskKind::ApproveLanding)
         .unwrap();
+    // A person approved the run to land, and the operation opens before
+    // the approval is acted on.
+    queue
+        .record_runtime_event(
+            run.id(),
+            dagq::domain::EventKind::IntegrationApproved,
+            json!({"status": "awaiting_integration"}),
+        )
+        .unwrap();
     let op = pause(&db, run.id());
     let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
@@ -1050,6 +998,7 @@ fn a_run_waiting_for_its_landing_answer_is_parked_and_lands_only_after_a_new_rev
     let detail = detail(&db);
     assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
     assert_eq!(payloads(&detail, "replan_parked").len(), 1);
+    assert!(payloads(&detail, "integration_started").is_empty());
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
     // An answer given now lands nothing: the question was closed.
     assert!(queue.answer(ask.id, "land").is_err());
@@ -1065,67 +1014,10 @@ fn a_run_waiting_for_its_landing_answer_is_parked_and_lands_only_after_a_new_rev
     assert!(at("replan_restored") < at("resume_started"));
     assert!(at("resume_started") < last("review_started"));
     assert!(last("review_started") < at("integration_started"));
-    assert_eq!(payloads(&detail, "review_finished").len(), 2);
-}
-
-/// Acceptance: a run nobody holds that waits for its resume, an earlier
-/// resume of which ended unresolved, is parked with its park recorded, so
-/// the continuation runs a resume on the restored work rather than moving
-/// the run on with the receipt it already has (no `resume_skipped`).
-#[test]
-fn a_run_waiting_for_its_resume_is_parked_and_the_continuation_resumes_it() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    finish_then_go_on(dir.path());
-    let reviewer = TestReviewer::new(&[
-        verdict("concern", &["a judgment"], "decide"),
-        verdict("pass", &[], "meets the acceptance"),
-    ]);
-    let options = supervise_options(4, true);
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let run = detail(&db).runs[0].clone();
-    // As a landing deferred for a conflict and a resume that ended
-    // unresolved leave it: waiting for a session, its receipt naming its
-    // head.
-    let queue = SqliteQueue::open(&db).unwrap();
-    queue
-        .record_runtime_event(
-            run.id(),
-            dagq::domain::EventKind::IntegrationDeferred,
-            json!({"code": "rebase_conflict", "reason": "a conflict", "status": "needs_session"}),
-        )
-        .unwrap();
-    queue
-        .record_runtime_event(
-            run.id(),
-            dagq::domain::EventKind::ResumeFinished,
-            json!({"attempt": 1, "outcome": "unresolved"}),
-        )
-        .unwrap();
-    Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE task_runs SET status='needs_session' WHERE id=?1",
-            [run.id().as_str()],
-        )
-        .unwrap();
-    let op = pause(&db, run.id());
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let parked = operation(&db, op.id);
-    assert_eq!(parked.status, ReplanStatus::Parked, "{parked:?}");
-    let events = queue.run_events(run.id()).unwrap();
-    assert!(!dagq::domain::run::RunHistory::from_events(&events).unresolved_since_park());
-    advance(&db, &parked, ReplanStatus::ContinuingAfterPark);
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = detail(&db);
-    assert_eq!(detail.task.status(), TaskStatus::Completed);
-    let kinds = event_kinds(&detail);
-    assert!(!kinds.contains(&"resume_skipped"), "{kinds:?}");
-    let at = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
-    assert!(at("replan_parked") < at("replan_restored"));
-    assert!(at("replan_restored") < at("resume_started"));
+    assert!(last("review_finished") < at("integration_started"));
+    let reviews = payloads(&detail, "review_finished");
+    assert_eq!(reviews.len(), 2, "{reviews:?}");
+    assert_eq!(reviews[1]["verdict"], "pass");
 }
 
 /// Acceptance: a run nobody holds whose resumes are used up is neither
@@ -1209,55 +1101,6 @@ fn a_run_out_of_resumes_is_handed_on_only_after_its_park_ends_and_its_work_is_re
         dagq::domain::MAX_RESUME_ATTEMPTS,
         "no resume past the used-up ones"
     );
-}
-
-/// Acceptance: an approval to land given before the park (the
-/// `integration_approved` a person's `land` records) approved the work as
-/// it was then: once the operation ends in a continuation, what the
-/// resumed session adds goes through a new review before it lands, rather
-/// than landing on the earlier approval.
-#[test]
-fn an_approval_from_before_the_park_does_not_land_the_continuations_work() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    finish_then_go_on(dir.path());
-    let reviewer = TestReviewer::new(&[
-        verdict("concern", &["a judgment"], "decide"),
-        verdict("pass", &[], "meets the acceptance"),
-    ]);
-    let options = supervise_options(4, true);
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let run = detail(&db).runs[0].clone();
-    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
-    // A person approved the run to land, and the operation opens before
-    // the approval is acted on.
-    SqliteQueue::open(&db)
-        .unwrap()
-        .record_runtime_event(
-            run.id(),
-            dagq::domain::EventKind::IntegrationApproved,
-            json!({"status": "awaiting_integration"}),
-        )
-        .unwrap();
-    let op = pause(&db, run.id());
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let parked = operation(&db, op.id);
-    assert_eq!(parked.status, ReplanStatus::Parked, "{parked:?}");
-    assert!(payloads(&detail(&db), "integration_started").is_empty());
-    advance(&db, &parked, ReplanStatus::ContinuingAfterPark);
-    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = self::detail(&db);
-    assert_eq!(detail.task.status(), TaskStatus::Completed);
-    let reviews = payloads(&detail, "review_finished");
-    assert_eq!(reviews.len(), 2, "{reviews:?}");
-    assert_eq!(reviews[1]["verdict"], "pass");
-    let kinds = event_kinds(&detail);
-    let at = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
-    let last = |kind: &str| kinds.iter().rposition(|k| *k == kind).unwrap();
-    assert!(at("replan_restored") < last("review_started"));
-    assert!(last("review_finished") < at("integration_started"));
 }
 
 /// The `turn_withheld` events of run `run` that say the guard could not be
@@ -1488,23 +1331,39 @@ fn a_restore_another_supervisor_holds_is_left_to_it_until_its_lease_is_stale() {
 /// pinned and no snapshot is made. Once that lease is stale the next pass
 /// leases the run for its own park, replacing it, and settles the park
 /// once; after the settle no park of it starts again, so no late holder
-/// pins another head over the snapshot's.
+/// pins another head over the snapshot's. The run, an earlier resume of
+/// which ended unresolved, is parked with its park recorded, so the
+/// continuation runs a resume on the restored work rather than moving the
+/// run on with the receipt it already has (no `resume_skipped`; which
+/// resumes count since the park is `domain::run::history`'s unit tests).
 #[test]
 fn a_park_another_supervisor_holds_is_left_to_it_and_none_starts_after_the_settle() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
     finish_then_go_on(dir.path());
-    let reviewer = TestReviewer::new(&[verdict("concern", &["a judgment"], "decide")]);
+    let reviewer = TestReviewer::new(&[
+        verdict("concern", &["a judgment"], "decide"),
+        verdict("pass", &[], "meets the acceptance"),
+    ]);
     let options = supervise_options(4, true);
     let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let run = detail(&db).runs[0].clone();
-    // As a landing deferred for a conflict leaves it: waiting for a session.
-    SqliteQueue::open(&db)
-        .unwrap()
+    // As a landing deferred for a conflict and a resume that ended
+    // unresolved leave it: waiting for a session, its receipt naming its
+    // head.
+    let queue = SqliteQueue::open(&db).unwrap();
+    queue
         .record_runtime_event(
             run.id(),
             dagq::domain::EventKind::IntegrationDeferred,
             json!({"code": "rebase_conflict", "reason": "a conflict", "status": "needs_session"}),
+        )
+        .unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            dagq::domain::EventKind::ResumeFinished,
+            json!({"attempt": 1, "outcome": "unresolved"}),
         )
         .unwrap();
     Connection::open(&db)
@@ -1566,6 +1425,19 @@ fn a_park_another_supervisor_holds_is_left_to_it_and_none_starts_after_the_settl
     assert_eq!(holder(), None);
     assert!(lease_for_park().is_none());
     assert_eq!(pin(), head);
+    let events = queue.run_events(run.id()).unwrap();
+    assert!(!dagq::domain::run::RunHistory::from_events(&events).unresolved_since_park());
+
+    advance(&db, &parked, ReplanStatus::ContinuingAfterPark);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = self::detail(&db);
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let kinds = event_kinds(&detail);
+    assert!(!kinds.contains(&"resume_skipped"), "{kinds:?}");
+    let at = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
+    assert!(at("replan_parked") < at("replan_restored"));
+    assert!(at("replan_restored") < at("resume_started"));
 }
 
 /// A run parked with an answer the supervisor had sent as the session's
@@ -2201,24 +2073,6 @@ fn a_container_runs_dirty_work_is_saved_from_its_executor_and_restored_into_a_cl
     assert_landed_restored(&queue, "recreated");
 }
 
-/// Acceptance (b), a withdrawal: a run in a container parked with dirty
-/// work whose clone is left in place, once the operation is withdrawn, has
-/// its clone compared as it is with the snapshot by its executor before
-/// the resumed turn's agent runs: found intact and recorded so, it resumes
-/// there and lands the work.
-#[test]
-fn a_withdrawn_container_runs_clone_left_in_place_is_checked_by_its_executor_and_lands() {
-    let _test = crate::common::test();
-    let queue = ContainerQueue::new(Some(&container_turns(false)));
-    let (op, clone) = park_in_a_container(&queue);
-    assert_dirty_work_saved(&queue, &op, &clone);
-    let planning = advance(&queue.db, &op, ReplanStatus::Planning);
-    advance(&queue.db, &planning, ReplanStatus::Withdrawn);
-    let supervisor = queue.supervise(TestReviewer::new(&[verdict("pass", &[], "fine")]));
-    finished(&queue.db, &queue.backend, supervisor);
-    assert_landed_restored(&queue, "intact");
-}
-
 /// Acceptance (b), a clean save, and the clone that changed since: a run
 /// in a container whose work is all committed is saved clean from its
 /// executor's files. A file put in its clone after the park, which the
@@ -2229,7 +2083,8 @@ fn a_withdrawn_container_runs_clone_left_in_place_is_checked_by_its_executor_and
 /// provider's wall; the run rests out of its slot and does not land. Once
 /// the file is taken out and the operation continues again, the restore is
 /// a new attempt the earlier refusal does not end: the executor compares
-/// the clone again, finds it intact, and the run lands.
+/// the clone left in place again, finds it intact, records so, and the run
+/// lands.
 #[test]
 fn a_container_runs_clone_changed_since_its_clean_snapshot_blocks_the_continuation_until_mended() {
     let _test = crate::common::test();

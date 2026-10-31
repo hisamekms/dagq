@@ -1483,7 +1483,6 @@ impl Supervisor<'_> {
             &conditions,
         )?;
         let files = saving.saved;
-        let empty = replan_snapshot::sha256(b"");
         let manifest = SnapshotManifest {
             id: id.clone(),
             operation: op.id,
@@ -1495,11 +1494,7 @@ impl Supervisor<'_> {
             branch: run.branch().map(str::to_owned),
             pinned_ref: pinned,
             worktree: worktree.to_string_lossy().into_owned(),
-            dirty: files.iter().any(|file| match file.kind {
-                SavedKind::Index | SavedKind::Worktree => file.sha256 != empty,
-                SavedKind::Untracked => true,
-                _ => false,
-            }),
+            dirty: replan_snapshot::saved_dirty(&files),
             files,
             excluded,
             conditions_version: op.conditions.version(),
@@ -1701,21 +1696,7 @@ impl Supervisor<'_> {
             info!(run_id = %run.id(), "run {}: its restore stopped: {error:#}", run.id());
             return Ok(false);
         }
-        let result = match &restored {
-            Ok((action, Some(manifest))) => Ok(
-                json!({"operation_id": op.id, "snapshot_id": snapshot, "action": action,
-                       "head": manifest.head, "dirty": manifest.dirty}),
-            ),
-            Ok((action, None)) => Ok(json!({"operation_id": op.id, "action": action})),
-            Err(error) if op.snapshot_id.is_some() => Err(format!(
-                "the work of run {} could not be restored from snapshot {snapshot}: {error:#}; the snapshot and the worktree are kept and the run does not resume",
-                run.id()
-            )),
-            Err(error) => Err(format!(
-                "the work of run {} could not be taken up again in its worktree: {error:#}; the worktree is kept and the run does not resume",
-                run.id()
-            )),
-        };
+        let result = restore_record(run.id(), op.id, op.snapshot_id.as_deref(), &restored);
         let failed = result.as_ref().err().cloned();
         if !self
             .queue
@@ -2219,6 +2200,32 @@ impl Supervisor<'_> {
         }
         self.still_restoring(run, token)?;
         repository.move_worktree(&scratch, worktree)
+    }
+}
+
+/// What [`Supervisor::restore_operation`] records of the restore of `run`'s
+/// work for operation `op`, from what it made of it (`restored`: what was
+/// done and, when `snapshot` was restored, its manifest): the
+/// `replan_restored` payload, or the reason of `replan_restore_failed`,
+/// which says whether the snapshot or only the worktree is kept.
+fn restore_record(
+    run: &RunId,
+    op: crate::domain::ReplanId,
+    snapshot: Option<&str>,
+    restored: &Result<(String, Option<Box<SnapshotManifest>>)>,
+) -> std::result::Result<Value, String> {
+    match (restored, snapshot) {
+        (Ok((action, Some(manifest))), _) => Ok(
+            json!({"operation_id": op, "snapshot_id": snapshot.unwrap_or_default(), "action": action,
+                   "head": manifest.head, "dirty": manifest.dirty}),
+        ),
+        (Ok((action, None)), _) => Ok(json!({"operation_id": op, "action": action})),
+        (Err(error), Some(snapshot)) => Err(format!(
+            "the work of run {run} could not be restored from snapshot {snapshot}: {error:#}; the snapshot and the worktree are kept and the run does not resume"
+        )),
+        (Err(error), None) => Err(format!(
+            "the work of run {run} could not be taken up again in its worktree: {error:#}; the worktree is kept and the run does not resume"
+        )),
     }
 }
 
@@ -2741,6 +2748,65 @@ mod tests {
         ] {
             assert!(!saved_log(name), "{name}");
         }
+    }
+
+    /// The restore's record: the action, with the snapshot's head and
+    /// whether it was dirty once a snapshot was restored, or the reason of
+    /// its failure, which keeps the snapshot and the worktree when there is
+    /// one and the worktree alone when the operation saved nothing.
+    #[test]
+    fn a_restore_is_recorded_with_its_action_or_why_the_run_does_not_resume() {
+        use crate::domain::ReplanId;
+        let run = RunId::new("r1").unwrap();
+        let manifest = SnapshotManifest {
+            id: "replan-3-g2".into(),
+            operation: ReplanId::new(3),
+            generation: 2,
+            run_id: run.clone(),
+            task_id: TaskId::new(7),
+            base_commit: "b".into(),
+            head: "h".into(),
+            branch: Some("dagq/r1".into()),
+            pinned_ref: replan_snapshot::pinned_ref(ReplanId::new(3)),
+            worktree: "/w".into(),
+            dirty: true,
+            files: Vec::new(),
+            excluded: Vec::new(),
+            conditions_version: "v".into(),
+            remaining: Vec::new(),
+            saved_at: 0,
+        };
+        let record =
+            |snapshot, restored| restore_record(&run, ReplanId::new(3), snapshot, &restored);
+        for action in ["intact", "recreated"] {
+            assert_eq!(
+                record(
+                    Some("replan-3-g2"),
+                    Ok((action.to_owned(), Some(Box::new(manifest.clone()))))
+                ),
+                Ok(
+                    json!({"operation_id": 3, "snapshot_id": "replan-3-g2", "action": action,
+                          "head": "h", "dirty": true})
+                )
+            );
+        }
+        assert_eq!(
+            record(None, Ok(("unsaved".to_owned(), None))),
+            Ok(json!({"operation_id": 3, "action": "unsaved"}))
+        );
+        let changed = || {
+            Err(anyhow!(
+                "the worktree changed since (its untracked files differ from the snapshot's)"
+            ))
+        };
+        assert_eq!(
+            record(Some("replan-3-g2"), changed()),
+            Err("the work of run r1 could not be restored from snapshot replan-3-g2: the worktree changed since (its untracked files differ from the snapshot's); the snapshot and the worktree are kept and the run does not resume".to_owned())
+        );
+        assert_eq!(
+            record(None, Err(anyhow!("process 42 still runs in the worktree"))),
+            Err("the work of run r1 could not be taken up again in its worktree: process 42 still runs in the worktree; the worktree is kept and the run does not resume".to_owned())
+        );
     }
 
     /// A park for a hold that finds its writer gone looks at the receipt

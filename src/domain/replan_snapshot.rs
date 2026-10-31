@@ -240,6 +240,18 @@ pub struct UntrackedFile {
     pub executable: bool,
 }
 
+/// Whether the saved `files` hold work that is not committed: a staged or
+/// unstaged diff that is not empty, or an untracked file. The run's logs,
+/// receipt and records do not count.
+pub fn saved_dirty(files: &[SavedFile]) -> bool {
+    let empty = sha256(b"");
+    files.iter().any(|file| match file.kind {
+        SavedKind::Index | SavedKind::Worktree => file.sha256 != empty,
+        SavedKind::Untracked => true,
+        _ => false,
+    })
+}
+
 impl WorktreeState {
     /// Whether the worktree holds work that is not committed.
     pub fn dirty(&self) -> bool {
@@ -579,5 +591,30 @@ mod tests {
         ));
         let clean = manifest(Vec::new()).state();
         assert!(!clean.dirty());
+    }
+
+    #[test]
+    fn saved_work_is_dirty_only_for_a_diff_or_an_untracked_file() {
+        let index = |bytes: &[u8]| SavedFile::of("index.patch", SavedKind::Index, "i", bytes);
+        let worktree =
+            |bytes: &[u8]| SavedFile::of("worktree.patch", SavedKind::Worktree, "w", bytes);
+        let records = [
+            SavedFile::of("receipt.json", SavedKind::Receipt, "receipt", b"{}"),
+            SavedFile::of("logs/events.json", SavedKind::Log, "events", b"[]"),
+        ];
+        let clean = [
+            index(b""),
+            worktree(b""),
+            records[0].clone(),
+            records[1].clone(),
+        ];
+        assert!(!saved_dirty(&clean));
+        assert!(!saved_dirty(&[]));
+        assert!(saved_dirty(&[index(b"staged"), worktree(b"")]));
+        assert!(saved_dirty(&[index(b""), worktree(b"half")]));
+        assert!(saved_dirty(&[
+            index(b""),
+            SavedFile::of("untracked/0", SavedKind::Untracked, "empty.txt", b""),
+        ]));
     }
 }
