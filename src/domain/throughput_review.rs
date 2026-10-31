@@ -37,6 +37,38 @@ pub const DROP_HOURS: usize = 3;
 pub const LOOKBACK_HOURS: usize = LONG_HOURS + DROP_HOURS - 2;
 /// The most lines of a conclusion the inbox shows.
 pub const MAX_CONCLUSION_LINES: usize = 5;
+
+/// `[throughput_review]` of `dagq.toml`: what a review gathers and lets
+/// its job read. Each review (`dagq throughput-review`) reads it again
+/// from the main checkout the queue is bound to, so a change takes effect
+/// at the next review. It is not `[roles.throughput_review]`, the job's
+/// provider and model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThroughputReviewConfig {
+    /// `kpi_stats`, a bool, true without the key: whether the review
+    /// computes `kpi` and `stats` for its inputs and its prompt shows the
+    /// job those commands. Off, the inputs' `kpi`, `stats` and `health`
+    /// say so ([`KPI_STATS_OFF`]), the prompt tells the job not to run
+    /// them and to judge neither the targets in breach nor the KPIs'
+    /// outliers, and the rest of the review (its start, the landings, the
+    /// asks, the claims deferred, the notice to the inbox) goes on.
+    pub kpi_stats: bool,
+}
+
+impl ThroughputReviewConfig {
+    /// The keys of `[throughput_review]`.
+    pub const KEYS: [&str; 1] = ["kpi_stats"];
+}
+
+impl Default for ThroughputReviewConfig {
+    fn default() -> Self {
+        Self { kpi_stats: true }
+    }
+}
+
+/// Why the inputs' `kpi`, `stats` and `health` hold
+/// `{"skipped": KPI_STATS_OFF}`: `[throughput_review] kpi_stats` is off.
+pub const KPI_STATS_OFF: &str = "[throughput_review] kpi_stats is off";
 /// The `throughput_review_finished` events the supervisor reads back for
 /// the periods reviewed: more than a week of hours.
 pub const HISTORY_EVENTS: usize = 400;

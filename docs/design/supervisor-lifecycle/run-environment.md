@@ -92,14 +92,15 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   値とkeyの誤り、読む時と読めないときの扱いは`[provider_fallback]`と同じ。
 - `[replan]`は長期化したtaskの検知と再計画の診断の設定で、表が無いか`enabled = true`でなければ無効で何も検知・診断しない（keyと既定は`ReplanConfig`のdoc comment、流れは[taskの再計画](../../plans/task-replanning.md)）。
   supervisorが各passにmain checkoutから読む。
-  旧バイナリは知らない表で`dagq.toml`全体を読めなくなるので、固定バイナリが読めるようになってから足す。
 - `[eval]`と`[eval.providers.<provider>]`はagentのevalの上限・閾値・費用の見込みと採用した定義の見張りの有無（`watch`、既定true、次の回から効く）と時期で、keyと既定値は`EvalConfig`・`ProviderCost`のdoc comment、使い方は[agentのeval](../agent-eval.md)が持つ。
+- `[throughput_review]`の`kpi_stats`（既定true）がfalseなら、スループットの見直しは`kpi`・`stats`を集めずjobに打たせない（意味は`ThroughputReviewConfig`、流れは[Throughput review](throughput-review.md#promptの入力)）。
+  `dagq throughput-review`が各回main checkoutから読み、次の見直しから効く。
 - `[review.jobs]`はrunのreviewの段のjobの種類ごとの時間の上限と、reviewのagentのjobの同時実行の上限で（ADR-t1895-1決定1。keyと既定値は`ReviewJobs`のdoc comment）。
   他のjobに効かず（evalのケースのprogramのjobはreviewの段に数える）、無いkeyは今の上限（[Headless job processes](headless-job-processes.md#記録)）。
   supervisorが起動時に読む。
 - `[review.programs.<name>]`はreviewのprogramのjobで（[プログラムのreview](review-programs.md)）、keyと意味は`ReviewProgram`が持つ。
   `[review.programs."builtin:<名前>"]`はbuilt-inの`enabled`と`paths`（既定を置き換える）だけを持ち（`BuiltinProgramSetting`）、ほかのkeyは誤り。
-  読むのは作業ファイルでなく、reviewの試行ごとのlanding branchのcommitの`dagq.toml`と`script`（`Verifier::review_programs_in`）。
+  読むのは作業ファイルでなく、reviewの試行ごとのlanding branchのcommitの`dagq.toml`と`script`。
 - `[review.code]`は上限の後の判定（[Review](review.md)の4a）のコードのpath、`[review] revise_limit`はrunを通した手直しの上限（ADR-t3033-1）で、意味と既定は`review_reason::CodePaths`・`ReviseLimit`が持つ。
   どちらも読むのはreviewの試行の始めのlanding branchのcommitの`dagq.toml`で、作業ファイルとrunのbranchは読まず、読めなければ既定に戻さず試行をreviewの失敗にする。
 - `[tasks]`は`changes`と`title_prefixes`と`related_docs`を持つ（値と形は`domain::ChangeSet`・`domain::TitlePrefixes`）。
@@ -114,12 +115,12 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   書いてあれば`goal add`と`goal edit`は集合の外の`--tag`を拒み、`lint`は所属のgoalがラベルを持たないか集合の外のラベルを持つdraftのtaskを指摘し、`submit`は与えたgoalと動かすtaskの所属のgoalのうち閉じていないdraftのgoalがラベルを持たないか集合の外なら何も動かさずに拒む。
   読み方は`[tasks] changes`と同じ。
   書いてなければ形だけを検査し、goalはラベルを持たなくてよい。
-  `max_spike_cycles`はgoalのSpikeの周期（Spikeとその結果の再計画の回）の上限で、`submit`だけが読む（`investigation::spike_submit`）。
+  `max_spike_cycles`はgoalのSpikeの周期（Spikeとその結果の再計画の回）の上限で、`submit`だけが読む。
   値は`dagq.toml`、各ラベルの意味と付け方は[taskの登録](../../development/task-registration.md#goal-の優先度とラベル)が持つ。
-- `[e2e]`は`paths`だけを持ち、変えるとrunに`e2e`のevidenceを求めるpathをglobの1行の配列で書く（ADR-t963-1決定2。`Verifier::e2e_paths`）。
+- `[e2e]`は`paths`だけを持ち、変えるとrunに`e2e`のevidenceを求めるpathをglobの1行の配列で書く（ADR-t963-1決定2）。
   読むのはsupervisorがvalidatingとworkerのpromptを作るたびのmain checkoutの作業ファイルで、読めなければ警告を出して空として扱う（本番を守るのは[Auto-update](auto-update.md)の入れ替え前のe2eの関門）。
   使い方と無いときの扱い、この repositoryの範囲は[Validation](validation.md)の8と「この repository で置く範囲」。
-- `[local_checks]`と`[local_checks.gates.<name>]`は手元の関門の宣言で、reviewがmainのcommitから読む（ADR-t2589-1決定6、`run_env::LOCAL_GATES_PREFIX`）。
+- `[local_checks]`と`[local_checks.gates.<name>]`は手元の関門の宣言で、reviewがmainのcommitから読む（ADR-t2589-1決定6）。
 - `[areas]`は`stats`と`kpi`がrunを分けるareaの名前→globの1行の配列（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。`domain::areas::AreaMap`）。
   書式は上の型、求め方は`application::areas::AreaReader`のdoc commentが持つ。
 
@@ -128,10 +129,10 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 
 - `[headless]`は`wrapper`だけを持ち、`"workspace"`か`"background"`を書く（ADR-t1404-1決定7）。
   欄は受け付けるがworkerにもruntimeのplannerにも効かず、wrapperは値に関わらずbackgroundで起動する（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定2、[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)、[Plan planners](plan-planners.md)）。
-  値が`"workspace"`なら、supervisorはworkerに効かないことをprocessごとに1回だけ警告する（`Verifier::headless_wrapper_setting`）。
+  値が`"workspace"`なら、supervisorはworkerに効かないことをprocessごとに1回だけ警告する。
   欄を消すのは、古い固定バイナリが欄の無い`dagq.toml`を読めることを確かめた後にする。
 - `[worker.trial]`はworkerのmodelの限定の試しの設定で、keyと既定は`domain::worker_model::WorkerTrial`が持つ（[Worker model](worker-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定4）。
-  supervisorがclaimのpassごとに読み（`Verifier::worker_trial`）、読めなければ試しの外でclaimする。
+  supervisorがclaimのpassごとに読み、読めなければ試しの外でclaimする。
   taskに由来する失敗の後のworkerのsessionの段上げ（決定5、[Worker model](worker-model.md#段上げ決定5)）は設定を持たず、`[worker.trial]`の有無に関係なく働く。
 
 - `[roles.<role>]`はworker以外のアクターのsessionのprovider・model・effortを持つ（[Actor model](actor-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定7、[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定1）。
@@ -151,7 +152,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   keyの型・既定・意味は`domain::ci_watch::CiWatchConfig`のdoc commentが持ち、読み直しと`up`のpreflightは[CI watch](ci-watch.md)の「いつ確かめるか」と「読む手段が無いとき」が持つ。
   この repositoryの値は`dagq.toml`の`[ci_watch]`が持ち、`ci.yml`で成果物やRustのjobの名前（`required_jobs`、[CI watch](ci-watch.md)の「実行の扱い」）を変えたら同じ変更で合わせる。
 - `[landing_verification]`は`integrate`がtaskの検証のコマンドの一部をrepositoryの着地の検証のコマンドに置き換える設定で（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)。流れと境界は[Validation](validation.md#着地の検証)）、表があるときだけ働く。
-  `integrate`が着地のたびにmain checkoutから読む（`Verifier::landing_verification`。読めなければ`[run.env]`と同じく着地処理のエラー）。
+  `integrate`が着地のたびにmain checkoutから読む（読めなければ`[run.env]`と同じく着地処理のエラー）。
   書式（key・型・既定値・検査）と、置き換えたコマンドにだけ`[run.env]`の後ろに足すenvの意味は`domain::landing_verification`のdoc commentが持つ。
   そのenvは`DAGQ_`で始まり、`[run.env]`は`DAGQ_`のkeyを拒むので衝突しない。
   何を置き換え、ITをどう選ぶかはrepositoryの設定とscriptが持ち、runtimeは知らない。

@@ -19,6 +19,10 @@
 //! but for a Codex job that found Codex unusable: its finish says so
 //! (`provider_unusable`), is no notice, and the supervisor reviews its
 //! period again on the other provider.
+//! With `[throughput_review] kpi_stats` off in the bound checkout's
+//! `dagq.toml`, read for each review, the inputs compute neither `kpi`
+//! nor `stats` and the prompt tells the job not to run them
+//! ([`ThroughputReviewHost::kpi_stats`]).
 //! The prompt carries a summary of the inputs within [`PROMPT_LIMIT`]
 //! ([`prompt_input`]); the whole is the job directory's `input.json`.
 //! The reads the composition root assembles come through
@@ -50,8 +54,8 @@ use crate::{
         language::Language,
         stats::{Cursor, StatsQuery, timestamp_millis},
         throughput_review::{
-            HOUR_MS, HourlyJudgment, LOOKBACK_HOURS, NEXT_MOVE_FENCE, ReviewMode, ReviewOutput,
-            Window, bucket_counts, judge_hourly, parse_output, window,
+            HOUR_MS, HourlyJudgment, KPI_STATS_OFF, LOOKBACK_HOURS, NEXT_MOVE_FENCE, ReviewMode,
+            ReviewOutput, Window, bucket_counts, judge_hourly, parse_output, window,
         },
         transcript::millis_text,
     },
@@ -211,6 +215,10 @@ pub trait ThroughputReviewHost {
     fn read(&self, path: &Path) -> Result<String>;
     /// What the job's agent starts with (ADR-0079 decision 7).
     fn launch(&self, checkout: Option<&Path>) -> ActorLaunch;
+    /// Whether this review gathers `kpi` and `stats` and lets its job run
+    /// them: `[throughput_review] kpi_stats` of the checkout's `dagq.toml`
+    /// ([`crate::domain::throughput_review::ThroughputReviewConfig`]).
+    fn kpi_stats(&self, checkout: Option<&Path>) -> bool;
     /// The language of the prompt (ADR-t616-2).
     fn language(&self, checkout: Option<&Path>, user_config: Option<&Path>) -> Option<Language>;
     /// Start the agent in `dir` and wait for it up to its timeout: the
@@ -374,6 +382,7 @@ fn review_period<Q: AskStore + RunLog>(
     {
         anyhow::bail!("the throughput review could not start: {why}");
     }
+    let checkout = sources.checkout(queue)?;
     let input = gather(
         queue,
         db,
@@ -382,11 +391,11 @@ fn review_period<Q: AskStore + RunLog>(
         period,
         &landings,
         judgment.as_ref(),
+        host.kpi_stats(checkout.as_deref()),
     )?;
     // The job's `dagq` goes to the queue service in client mode: the
     // prompt names no queue path (goal 82's stage (3)).
     let command = "dagq";
-    let checkout = sources.checkout(queue)?;
     let language = host.language(checkout.as_deref(), options.user_config.as_deref());
     // A dry run makes no directory: its prompt names where one would be.
     let dir = if options.dry_run {
@@ -726,6 +735,10 @@ fn landings(queue: &(impl RunLog + ?Sized), period: &Window) -> Result<Vec<(i64,
 /// The review's input: the landings, the rules' judgment, the workers'
 /// health and the disk's free space, `kpi`, `stats`, the claim deferrals,
 /// the asks and the timelines of the longest runs that landed. A part that does not read is its `{"error": ...}`.
+/// Without `kpi_stats` (`[throughput_review] kpi_stats` off) it calls
+/// neither `sources.stats` nor `sources.kpi`, and `kpi`, `stats` and
+/// `health` are `{"skipped": KPI_STATS_OFF}`; the rest is gathered.
+#[allow(clippy::too_many_arguments)]
 fn gather<Q: AskStore + RunLog>(
     queue: &Q,
     db: &Path,
@@ -734,6 +747,7 @@ fn gather<Q: AskStore + RunLog>(
     period: &Window,
     landings: &[(i64, RunEvent)],
     judgment: Option<&HourlyJudgment>,
+    kpi_stats: bool,
 ) -> Result<Value> {
     let at: Vec<i64> = landings.iter().map(|(at, _)| *at).collect();
     let in_period: Vec<&(i64, RunEvent)> = landings
@@ -749,30 +763,35 @@ fn gather<Q: AskStore + RunLog>(
     let stats_from = stats_from(period);
     let or_error =
         |value: Result<Value>| value.unwrap_or_else(|error| json!({"error": format!("{error:#}")}));
-    let stats = or_error(sources.stats(
-        queue,
-        db,
-        &StatsQuery {
-            since: Some(Cursor::Time(stats_from)),
-            until: Some(Cursor::Time(period.end_ms)),
-            ..StatsQuery::default()
-        },
-    ));
-    let (kpi_period, last) = match period.mode {
-        ReviewMode::Hourly => (Period::Day, 2),
-        ReviewMode::Daily => (Period::Day, 8),
-        ReviewMode::Weekly => (Period::Week, 5),
+    let (stats, kpi) = if kpi_stats {
+        let stats = or_error(sources.stats(
+            queue,
+            db,
+            &StatsQuery {
+                since: Some(Cursor::Time(stats_from)),
+                until: Some(Cursor::Time(period.end_ms)),
+                ..StatsQuery::default()
+            },
+        ));
+        let (kpi_period, last) = match period.mode {
+            ReviewMode::Hourly => (Period::Day, 2),
+            ReviewMode::Daily => (Period::Day, 8),
+            ReviewMode::Weekly => (Period::Week, 5),
+        };
+        let kpi = or_error(sources.kpi(
+            queue,
+            db,
+            &KpiQuery {
+                period: kpi_period,
+                last,
+                at: Some(Cursor::Time(period.end_ms - 1)),
+                ..KpiQuery::default()
+            },
+        ));
+        (stats, kpi)
+    } else {
+        (skipped(), skipped())
     };
-    let kpi = or_error(sources.kpi(
-        queue,
-        db,
-        &KpiQuery {
-            period: kpi_period,
-            last,
-            at: Some(Cursor::Time(period.end_ms - 1)),
-            ..KpiQuery::default()
-        },
-    ));
     let events: Vec<Value> = in_period
         .iter()
         .rev()
@@ -808,10 +827,10 @@ fn gather<Q: AskStore + RunLog>(
 /// The health of the workers per route and the disk's least free space
 /// (task 1371): the `health` of `kpi`'s last period, the one the review's
 /// period ends in (the reviewed day for the daily review, the week for the
-/// weekly, the day so far for the hourly), with its label. `kpi`'s error
-/// passes as it is.
+/// weekly, the day so far for the hourly), with its label. `kpi`'s error,
+/// or its `skipped`, passes as it is.
 fn health(kpi: &Value) -> Value {
-    if kpi.get("error").is_some() {
+    if kpi.get("error").is_some() || kpi.get(SKIPPED).is_some() {
         return kpi.clone();
     }
     let latest = kpi
@@ -828,6 +847,23 @@ fn health(kpi: &Value) -> Value {
             health
         },
     )
+}
+
+/// The key of a part of the inputs not gathered by the configuration.
+const SKIPPED: &str = "skipped";
+
+/// What the inputs' `kpi`, `stats` and `health` hold when
+/// `[throughput_review] kpi_stats` is off.
+fn skipped() -> Value {
+    json!({ SKIPPED: KPI_STATS_OFF })
+}
+
+/// Whether `input` was gathered with `[throughput_review] kpi_stats` off:
+/// its `kpi` or `stats` says it was skipped ([`skipped`]).
+fn kpi_stats_off(input: &Value) -> bool {
+    ["kpi", "stats"]
+        .iter()
+        .any(|part| input[*part].get(SKIPPED).is_some())
 }
 
 /// Where the inputs' `stats`, claims deferred and asks begin: the hourly
@@ -958,7 +994,7 @@ pub fn job_prompt(
 ) -> Result<ReviewPrompt> {
     let summary = prompt_input(input);
     let (instructions, mut input_section) =
-        render_prompt_parts(period, dagq, &summary, input_path)?;
+        render_prompt_parts(period, dagq, &summary, input_path, kpi_stats_off(input))?;
     if language.is_some() {
         input_section.truncate(input_section.trim_end().len());
     }
@@ -1019,7 +1055,13 @@ pub fn review_prompt(
     input: &Value,
     input_path: &Path,
 ) -> Result<String> {
-    render_prompt(period, dagq, &prompt_input(input), input_path)
+    render_prompt(
+        period,
+        dagq,
+        &prompt_input(input),
+        input_path,
+        kpi_stats_off(input),
+    )
 }
 
 /// [`review_prompt`] with the summary of the inputs ([`prompt_input`])
@@ -1029,22 +1071,39 @@ fn render_prompt(
     dagq: &str,
     summary: &Value,
     input_path: &Path,
+    kpi_stats_off: bool,
 ) -> Result<String> {
-    let (instructions, input) = render_prompt_parts(period, dagq, summary, input_path)?;
+    let (instructions, input) =
+        render_prompt_parts(period, dagq, summary, input_path, kpi_stats_off)?;
     Ok(format!("{instructions}{input}"))
 }
 
+/// The prompt's instructions and its inputs' section. With `kpi_stats_off`
+/// (the inputs were gathered with `[throughput_review] kpi_stats` off) it
+/// names neither `kpi` nor `stats` as a command to run and tells the job
+/// not to run them and to say in its conclusion that the targets and the
+/// KPIs' outliers were not judged.
 fn render_prompt_parts(
     period: &Window,
     dagq: &str,
     summary: &Value,
     input_path: &Path,
+    kpi_stats_off: bool,
 ) -> Result<(String, String)> {
     let cadence = match period.mode {
         ReviewMode::Hourly => hourly_cadence(&period.label, &summary["hourly"]["reasons"]),
+        ReviewMode::Daily if kpi_stats_off => format!(
+            "This is the daily review of {label}: step 6's daily part on the landings, the claims deferred and the asks in the inputs.",
+            label = period.label
+        ),
         ReviewMode::Daily => format!(
             "This is the daily review of {label}: step 6's daily part, the outliers (step 4) and the targets in `breach` \
              (`kpi` of the last days in the inputs, with the day under review last).",
+            label = period.label
+        ),
+        ReviewMode::Weekly if kpi_stats_off => format!(
+            "This is the weekly review of {label}: the steps of the procedure below that the landings, the claims deferred, the asks and the longest runs answer, \
+             with `timeline` and `events`; skip those that need `kpi` or `stats`.",
             label = period.label
         ),
         ReviewMode::Weekly => format!(
@@ -1061,6 +1120,33 @@ fn render_prompt_parts(
     } else {
         String::new()
     };
+    let start = millis_text(stats_from(period));
+    let end = millis_text(period.end_ms);
+    let (kpi_stats_commands, kpi_stats_off_line, inputs_kpi_stats, details_kpi_stats) =
+        if kpi_stats_off {
+            (
+                String::new(),
+                format!(
+                    "- `kpi` and `stats` are turned off in this repository's `dagq.toml` (`[throughput_review] kpi_stats = false`): \
+                     do not run `{dagq} kpi` or `{dagq} stats`, and use none of the procedure's steps that need them. \
+                     Do not judge the targets in `breach` or the KPIs' outliers; say in the `## Conclusion` that they were not judged because `kpi` and `stats` are off.\n"
+                ),
+                "`kpi`, `stats` and `health` (here `skipped`: not gathered, by the setting above), ",
+                String::new(),
+            )
+        } else {
+            (
+                format!(
+                    "`{dagq} kpi [--period day|week] [--last N] [--area A] [--change C]`, `{dagq} stats [--since TIME] [--full]`, "
+                ),
+                String::new(),
+                "`kpi` (`periods`: each period's runs; `latest`: the period under review, each KPI's `all` stratum with its `comparison` to the period before and the 7 days before; \
+                 `targets`: each target's state and its latest value), the parts of `stats` in `stats.parts` (`stats.omitted` names the others), ",
+                format!(
+                    "`kpi` for the other periods, strata and the host (`--period`, `--last`, `--area`, `--change`), `stats --since {start} --until {end} --full` for the runs, "
+                ),
+            )
+        };
     let instructions = format!(
         "You are the throughput review job of the dagq queue, started headless by the supervisor.\n\
          You read and explain; you change nothing. The queue refuses every command that changes state from your environment \
@@ -1069,8 +1155,9 @@ fn render_prompt_parts(
          \n\
          Do:\n\
          - Follow the procedure below for this cadence, reading the inputs first and more only when needed: \
-           `{dagq} kpi [--period day|week] [--last N] [--area A] [--change C]`, `{dagq} stats [--since TIME] [--full]`, `{dagq} timeline RUN`, \
+           {kpi_stats_commands}`{dagq} timeline RUN`, \
            `{dagq} events --full --kind KIND --since TIME --until TIME` (UTC, YYYY-MM-DDTHH:MM:SSZ; add `--all` for every kind), `{dagq} asks`, `{dagq} marks`, `{dagq} findings`, `{dagq} show ID`.\n\
+         {kpi_stats_off_line}\
          - Never compute a number the inputs and the commands do not give, and keep the time runs waited for a person apart from their own time.\n\
          - Print your review in Markdown: first a `## Conclusion` heading with at most 5 short lines a person reads first (what happened, the one constraint or cause, what to do or that nothing needs doing), \
            then `## Details` with the numbers and the runs they rest on.\n\
@@ -1081,18 +1168,15 @@ fn render_prompt_parts(
          {procedure}\n\
          \n\
          Inputs, a summary (JSON: the period, its landings (`by_hour` or `by_day`, oldest first, and the period before's total), the hourly rules' judgment, \
-         `kpi` (`periods`: each period's runs; `latest`: the period under review, each KPI's `all` stratum with its `comparison` to the period before and the 7 days before; \
-         `targets`: each target's state and its latest value), the parts of `stats` in `stats.parts` (`stats.omitted` names the others), \
+         {inputs_kpi_stats}\
          the claims deferred and the asks by reason and kind, and the longest runs that landed with their seconds). \
          The whole inputs are saved in `{input_path}` in the review's directory for a person; you read the details through the commands above instead: \
-         `kpi` for the other periods, strata and the host (`--period`, `--last`, `--area`, `--change`), `stats --since {start} --until {end} --full` for the runs, \
+         {details_kpi_stats}\
          `timeline RUN` for each of the longest runs, and `events --full` for the landings (`--kind run_integrated`) and anything else. \
          `omitted_to_fit`, when present, names what was left out to keep this prompt small; read it with the commands too:\n\
          ```json\n",
         procedure = procedure(),
         input_path = input_path.display(),
-        start = millis_text(stats_from(period)),
-        end = millis_text(period.end_ms),
     );
     let input = format!("{}\n```\n", serde_json::to_string_pretty(summary)?);
     Ok((instructions, input))
@@ -1134,7 +1218,7 @@ fn hourly_cadence(label: &str, reasons: &Value) -> String {
 /// the targets' states, [`PROMPT_STATS`] of `stats`, the claims deferred,
 /// the asks, and the longest runs without their timelines. While it passes
 /// [`PROMPT_INPUT_LIMIT`], the parts of [`DROP_ORDER`] go, named in
-/// `omitted_to_fit`.
+/// `omitted_to_fit`, but for those the configuration skipped.
 pub fn prompt_input(input: &Value) -> Value {
     let mut summary = json!({
         "period": input["period"],
@@ -1156,7 +1240,12 @@ pub fn prompt_input(input: &Value) -> Value {
         let parent = parents
             .iter()
             .try_fold(&mut summary, |value, key| value.get_mut(*key));
+        // A part skipped by the configuration is tiny and is not to be
+        // read with the commands: it stays.
         if let Some(Value::Object(parent)) = parent
+            && !parent
+                .get(*last)
+                .is_some_and(|part| part.get(SKIPPED).is_some())
             && parent.remove(*last).is_some_and(|part| !part.is_null())
         {
             omitted.push(path.join("."));
@@ -1256,11 +1345,11 @@ fn kpi_summary(kpi: &Value) -> Value {
 }
 
 /// [`PROMPT_STATS`] of `stats` under `parts`, and the names of the rest
-/// under `omitted`. An error passes as it is.
+/// under `omitted`. An error, or its `skipped`, passes as it is.
 fn stats_summary(stats: &Value) -> Value {
     let Some(object) = stats
         .as_object()
-        .filter(|stats| !stats.contains_key("error"))
+        .filter(|stats| !stats.contains_key("error") && !stats.contains_key(SKIPPED))
     else {
         return stats.clone();
     };
@@ -1532,6 +1621,235 @@ mod tests {
         assert_eq!(failed["kpi"], json!({"error": "no"}));
         assert_eq!(failed["stats"], json!({"error": "no"}));
         assert_eq!(failed["timelines"], json!({"error": "no"}));
+    }
+
+    /// Sources whose `stats` and `kpi` count their calls and whose
+    /// finding is never recorded, of the queue [`ReadsNothing`] answers.
+    #[derive(Default)]
+    struct CountedSources {
+        stats: std::sync::atomic::AtomicUsize,
+        kpi: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ThroughputReviewSources<crate::application::supervisor_service::SupervisorQueue>
+        for CountedSources
+    {
+        fn stats(
+            &self,
+            _: &crate::application::supervisor_service::SupervisorQueue,
+            _: &Path,
+            _: &StatsQuery,
+        ) -> Result<Value> {
+            self.stats.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({"overall": {"landed": 1}}))
+        }
+        fn kpi(
+            &self,
+            _: &crate::application::supervisor_service::SupervisorQueue,
+            _: &Path,
+            _: &KpiQuery,
+        ) -> Result<Value> {
+            self.kpi.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({"periods": [{"label": "2026-09-28", "health": {"disk": null}}]}))
+        }
+        fn checkout(
+            &self,
+            _: &crate::application::supervisor_service::SupervisorQueue,
+        ) -> Result<Option<PathBuf>> {
+            unreachable!("gather resolves no checkout")
+        }
+        fn record_finding(
+            &self,
+            _: &mut crate::application::supervisor_service::SupervisorQueue,
+            _: NewFinding,
+        ) -> Result<i64> {
+            unreachable!("gather records no finding")
+        }
+    }
+
+    /// A queue service with no events and no asks: the reads of the
+    /// claims deferred and the asks find none.
+    struct ReadsNothing;
+
+    impl crate::application::supervisor_service::ServiceCaller for ReadsNothing {
+        fn call(&self, _: crate::domain::queue_service::UseCase, params: Value) -> Result<Value> {
+            match params["op"].as_str() {
+                Some("latest_event_id") => Ok(json!(7)),
+                Some("events_between" | "asks") => Ok(json!([])),
+                op => panic!("gather does not read {op:?}"),
+            }
+        }
+        fn with_token(
+            &self,
+            _: &Path,
+        ) -> Result<std::sync::Arc<dyn crate::application::supervisor_service::ServiceCaller>>
+        {
+            anyhow::bail!("no landing here")
+        }
+        fn sign_in(&self, _: &crate::domain::LeaseToken, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn take_back(&self, _: &crate::domain::LeaseToken, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn hand_over(&self) {}
+        fn sign_out(&self) {}
+        fn credential(&self) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    struct Now;
+
+    impl crate::application::Clock for Now {
+        fn system_time(&self) -> std::time::SystemTime {
+            UNIX_EPOCH + Duration::from_secs(1_790_655_900)
+        }
+        fn monotonic(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
+    }
+
+    struct NoIds;
+
+    impl crate::application::IdGenerator for NoIds {
+        fn uuid(&self) -> String {
+            unreachable!("gather makes no id")
+        }
+    }
+
+    /// With `[throughput_review] kpi_stats` off, gather calls neither the
+    /// `stats` nor the `kpi` source, its `kpi`, `stats` and `health` say
+    /// they were skipped, and the rest is gathered; on, it calls each once.
+    #[test]
+    fn gather_without_kpi_stats_calls_neither_source_and_gathers_the_rest() {
+        let queue = crate::application::supervisor_service::SupervisorQueues::new(
+            std::sync::Arc::new(ReadsNothing),
+            ActorContext::instance(crate::domain::ActorRole::Supervisor, 1),
+        )
+        .queue();
+        let generators = Generators {
+            clock: std::sync::Arc::new(Now),
+            ids: std::sync::Arc::new(NoIds),
+        };
+        let period = window(ReviewMode::Daily, 1_790_655_900_000, 0);
+        let gathered = |kpi_stats: bool| {
+            let sources = CountedSources::default();
+            let input = gather(
+                &queue,
+                Path::new("/q/queue.db"),
+                &sources,
+                &generators,
+                &period,
+                &[],
+                None,
+                kpi_stats,
+            )
+            .unwrap();
+            let calls = (
+                sources.stats.load(std::sync::atomic::Ordering::SeqCst),
+                sources.kpi.load(std::sync::atomic::Ordering::SeqCst),
+            );
+            (input, calls)
+        };
+        let (off, calls) = gathered(false);
+        assert_eq!(calls, (0, 0));
+        let skipped = json!({"skipped": KPI_STATS_OFF});
+        for part in ["kpi", "stats", "health"] {
+            assert_eq!(off[part], skipped, "{part}: {off}");
+        }
+        assert!(kpi_stats_off(&off));
+        assert_eq!(off["landings"]["total"], 0);
+        assert_eq!(off["period"]["label"], period.label);
+        assert_eq!(off["claim_deferred"], json!({"count": 0, "by": {}}));
+        assert_eq!(off["asks"]["open"], json!({"count": 0, "by": {}}));
+        assert_eq!(off["timelines"], json!([]));
+        // The summary in the prompt passes them as they are.
+        let summary = prompt_input(&off);
+        for part in ["kpi", "stats", "health"] {
+            assert_eq!(summary[part], skipped, "{part}: {summary}");
+        }
+        let (on, calls) = gathered(true);
+        assert_eq!(calls, (1, 1));
+        assert_eq!(on["stats"]["overall"]["landed"], 1);
+        assert_eq!(on["health"]["period"], "2026-09-28");
+        assert!(!kpi_stats_off(&on));
+        assert_eq!(on["asks"], off["asks"]);
+    }
+
+    /// Inputs gathered with `kpi_stats` off make a prompt that names
+    /// neither `kpi` nor `stats` as a command, tells the job not to run
+    /// them, and to say that the targets and the outliers were not judged.
+    #[test]
+    fn the_prompt_without_kpi_stats_tells_the_job_not_to_run_them() {
+        let skipped = json!({"skipped": KPI_STATS_OFF});
+        let input =
+            json!({"landings": {"total": 3}, "kpi": skipped, "stats": skipped, "health": skipped});
+        let at = |mode| window(mode, 1_790_655_900_000, 9 * HOUR_MS);
+        for mode in [ReviewMode::Hourly, ReviewMode::Daily, ReviewMode::Weekly] {
+            let prompt =
+                review_prompt(&at(mode), "dagq", &input, Path::new("/q/input.json")).unwrap();
+            let fitted =
+                job_prompt(&at(mode), "dagq", &input, Path::new("/q/input.json"), None).unwrap();
+            for text in [&prompt, &fitted.text] {
+                assert!(!text.contains("`dagq kpi [--period"), "{text}");
+                assert!(!text.contains("`dagq stats [--since"), "{text}");
+                assert!(!text.contains("stats --since"), "{text}");
+                assert!(!text.contains("`kpi` for the other periods"), "{text}");
+                assert!(
+                    text.contains("do not run `dagq kpi` or `dagq stats`"),
+                    "{text}"
+                );
+                assert!(
+                    text.contains("Do not judge the targets in `breach` or the KPIs' outliers"),
+                    "{text}"
+                );
+                assert!(text.contains("`[throughput_review] kpi_stats = false`"));
+                assert!(text.contains("`dagq timeline RUN`"));
+                assert!(text.contains("`dagq asks`"));
+                assert!(text.contains("\"total\": 3"));
+                assert!(text.contains("## Conclusion"));
+            }
+        }
+        let daily = review_prompt(
+            &at(ReviewMode::Daily),
+            "dagq",
+            &input,
+            Path::new("/q/input.json"),
+        )
+        .unwrap();
+        assert!(!daily.contains("the targets in `breach` (`kpi`"), "{daily}");
+        let weekly = review_prompt(
+            &at(ReviewMode::Weekly),
+            "dagq",
+            &input,
+            Path::new("/q/input.json"),
+        )
+        .unwrap();
+        assert!(!weekly.contains("steps 1 to 5"), "{weekly}");
+        assert!(
+            weekly.contains("skip those that need `kpi` or `stats`"),
+            "{weekly}"
+        );
+        // Past its limit the summary drops other parts, never the
+        // skipped ones, which `omitted_to_fit` would send to the commands.
+        let huge = json!({"total": "s".repeat(PROMPT_INPUT_LIMIT)});
+        let large = json!({"landings": {"total": 3}, "kpi": skipped, "stats": skipped,
+                           "health": skipped, "asks": huge});
+        let summary = prompt_input(&large);
+        assert_eq!(summary["omitted_to_fit"], json!(["asks"]));
+        for part in ["kpi", "stats", "health"] {
+            assert_eq!(summary[part], skipped, "{part}");
+        }
+        // On, the prompt says nothing of the setting.
+        let on = review_prompt(
+            &at(ReviewMode::Daily),
+            "dagq",
+            &json!({"landings": {"total": 3}}),
+            Path::new("/q/input.json"),
+        )
+        .unwrap();
+        assert!(!on.contains("kpi_stats"), "{on}");
     }
 
     #[test]

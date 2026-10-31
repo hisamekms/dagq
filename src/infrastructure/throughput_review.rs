@@ -11,7 +11,7 @@ use crate::{
     domain::{
         actor_model::{ActorLaunch, ModelRole},
         language::Language,
-        throughput_review::Window,
+        throughput_review::{ThroughputReviewConfig, Window},
     },
 };
 use anyhow::{Context, Result};
@@ -58,6 +58,22 @@ pub fn review_launch(checkout: Option<&Path>) -> ActorLaunch {
     }
 }
 
+/// `[throughput_review] kpi_stats` of the bound checkout's `dagq.toml`,
+/// read for each review; no checkout, no file, no key, or a file that
+/// cannot be read keeps it on (the default), the last with a warning.
+pub fn kpi_stats(checkout: Option<&Path>) -> bool {
+    let Some(checkout) = checkout else {
+        return ThroughputReviewConfig::default().kpi_stats;
+    };
+    match crate::infrastructure::run_env::load_throughput_review(checkout) {
+        Ok(config) => config.unwrap_or_default().kpi_stats,
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "[throughput_review] could not be read; gathering kpi and stats as by default: {error:#}");
+            ThroughputReviewConfig::default().kpi_stats
+        }
+    }
+}
+
 /// The throughput review's host: the files under `<queue
 /// dir>/reports/reviews`, the bound checkout's configuration, the host's
 /// time zone and the agent's local process, whose events go to `events`
@@ -85,6 +101,9 @@ impl ThroughputReviewHost for LocalThroughputReview<'_> {
     }
     fn launch(&self, checkout: Option<&Path>) -> ActorLaunch {
         review_launch(checkout)
+    }
+    fn kpi_stats(&self, checkout: Option<&Path>) -> bool {
+        kpi_stats(checkout)
     }
     fn language(&self, checkout: Option<&Path>, user_config: Option<&Path>) -> Option<Language> {
         crate::infrastructure::language::language_for_prompt(checkout, user_config)

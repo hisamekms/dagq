@@ -112,6 +112,7 @@ use crate::{
         slot_limits::SupervisorConfig,
         stall::StallConfig,
         stats::ConflictConfig,
+        throughput_review::ThroughputReviewConfig,
         toolchain::{ProfileRegistry, ToolchainDeclaration, Toolchains},
         verify_marks::{LinePattern, MarkClass, ProjectMark},
         worker_model::WorkerTrial,
@@ -237,6 +238,12 @@ const PROVIDER_FALLBACK_TABLE: &str = "provider_fallback";
 /// resume starts a new session (ADR-t2080-1); its key is on
 /// [`FreshSessionConfig`].
 const FRESH_SESSION_TABLE: &str = "fresh_session";
+/// `[throughput_review]`: what each throughput review gathers and lets
+/// its job read; its key, default and meaning are on
+/// [`ThroughputReviewConfig`]. It is not `[roles.throughput_review]`, the
+/// review's provider. A binary older than this table refuses it, so a
+/// repository adds it only once the binary that runs its queue reads it.
+const THROUGHPUT_REVIEW_TABLE: &str = "throughput_review";
 /// `[replan]`: whether the runtime detects a long-running task and
 /// diagnoses the replanning operations, and its limits
 /// (docs/plans/task-replanning.md); its keys, defaults and meaning are on
@@ -476,7 +483,7 @@ const LOCAL_GATE_PATHS: &str = "paths";
 const LOCAL_GATE_KIND: &str = "kind";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 32] = [
+const TABLES: [&str; 33] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -496,6 +503,7 @@ const TABLES: [&str; 32] = [
     HEADLESS_TABLE,
     PROVIDER_FALLBACK_TABLE,
     FRESH_SESSION_TABLE,
+    THROUGHPUT_REVIEW_TABLE,
     REPLAN_TABLE,
     REVIEW_JOBS_TABLE,
     REVIEW_TABLE,
@@ -627,6 +635,9 @@ pub struct Config {
     pub provider_fallback: ProviderFallback,
     /// `[fresh_session]` (ADR-t2080-1); no key starts no new session.
     pub fresh_session: FreshSessionConfig,
+    /// `[throughput_review]`, the default (`kpi_stats` on) for the keys it
+    /// does not set.
+    pub throughput_review: ThroughputReviewConfig,
     /// `[replan]`, each key's default where unset; without the table the
     /// runtime detects and diagnoses nothing.
     pub replan: ReplanConfig,
@@ -730,6 +741,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut light_changes: Option<(Vec<TaskChange>, usize)> = None;
     let mut fallback_keys: Vec<String> = Vec::new();
     let mut fresh_session_keys: Vec<String> = Vec::new();
+    let mut throughput_review_keys: Vec<String> = Vec::new();
     let mut replan_keys: Vec<String> = Vec::new();
     let mut review_jobs_keys: Vec<String> = Vec::new();
     // `[ci_watch]`'s header line and the keys read, the table checked once
@@ -1085,7 +1097,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{RETENTION_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{RETENTION_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -1645,6 +1657,22 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 config.fresh_session.peak_context_above =
                     Some(u64::try_from(tokens).with_context(with)?);
                 fresh_session_keys.push(key.to_owned());
+            }
+            Some(THROUGHPUT_REVIEW_TABLE) => {
+                ensure!(
+                    ThroughputReviewConfig::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{THROUGHPUT_REVIEW_TABLE}]; the keys are {}",
+                    ThroughputReviewConfig::KEYS.join(", ")
+                );
+                ensure!(
+                    !throughput_review_keys
+                        .iter()
+                        .any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                config.throughput_review.kpi_stats = parse_bool(rest.trim())
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+                throughput_review_keys.push(key.to_owned());
             }
             Some(REPLAN_TABLE) => {
                 ensure!(
@@ -2216,7 +2244,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -2860,6 +2888,20 @@ pub fn load_fresh_session(root: &Path) -> Result<Option<FreshSessionConfig>> {
         parse_config(&text)
             .with_context(|| format!("parse {}", path.display()))?
             .fresh_session,
+    ))
+}
+
+/// `[throughput_review]` of the `dagq.toml` in `root`, `None` when there
+/// is no file; no table or no key is the default (`kpi_stats` on).
+pub fn load_throughput_review(root: &Path) -> Result<Option<ThroughputReviewConfig>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        parse_config(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .throughput_review,
     ))
 }
 
@@ -6343,6 +6385,59 @@ LITERAL = 'no \n escapes # here'
         );
     }
 
+    /// `[throughput_review] kpi_stats` is a bool, on without it; a value
+    /// that is not a bool, another key or the key twice is an error, and
+    /// the table is not `[roles.throughput_review]`.
+    #[test]
+    fn parses_the_kpi_stats_of_the_throughput_review_table() {
+        let read = |text: &str| parse_config(text).unwrap().throughput_review;
+        assert_eq!(read(""), ThroughputReviewConfig::default());
+        assert!(read("").kpi_stats);
+        assert!(read("[throughput_review]\n").kpi_stats);
+        assert!(read("[throughput_review]\nkpi_stats = true\n").kpi_stats);
+        assert!(!read("[throughput_review]\nkpi_stats = false # heavy\n").kpi_stats);
+        assert!(
+            read("[roles.throughput_review]\nprovider = 'codex'\n").kpi_stats,
+            "the role's table is another table"
+        );
+        for (text, expected) in [
+            (
+                "[throughput_review]\nkpi_stats = 0\n",
+                "dagq.toml:2: value of kpi_stats: expected true or false",
+            ),
+            (
+                "[throughput_review]\nkpi_stats = \"off\"\n",
+                "dagq.toml:2: value of kpi_stats: expected true or false",
+            ),
+            (
+                "[throughput_review]\nkpi = false\n",
+                "dagq.toml:2: unknown key kpi in [throughput_review]; the keys are kpi_stats",
+            ),
+            (
+                "[throughput_review]\nkpi_stats = false\nkpi_stats = true\n",
+                "dagq.toml:3: kpi_stats is defined twice",
+            ),
+            (
+                "[throughput_review]\n[throughput_review]\n",
+                "[throughput_review] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_throughput_review(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[throughput_review]\nkpi_stats = false\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_throughput_review(dir.path()).unwrap(),
+            Some(ThroughputReviewConfig { kpi_stats: false })
+        );
+    }
+
     /// `[eval]` and `[eval.providers.<provider>]` set the eval's limits
     /// and a provider's estimate and prices; an unset key keeps its
     /// default, and a key, a value or a provider out of range is an error.
@@ -6958,7 +7053,7 @@ enabled = true
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [review], [review.code], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.worker_cache], [container.verification], [telemetry], [[telemetry.commands]], [[recurring]] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [throughput_review], [review.jobs], [review], [review.code], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.worker_cache], [container.verification], [telemetry], [[telemetry.commands]], [[recurring]] and [kpi]"
             ),
             "{error}"
         );

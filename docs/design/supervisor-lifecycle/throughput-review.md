@@ -111,10 +111,15 @@ queueのeventの区間はjobごとのkindで探し（`domain::sessions::queue_sp
 - 要約とそこに載せる`stats`の部分は`prompt_input`のdoc commentが持ち、読めなかった部分の`{"error": ...}`はそのまま載せる。
   kpi.mdの手順のCadenceが日次（外れ値と目標割れ）・週次（手順1〜5）で見る数値は要約の`kpi.latest`と`kpi.targets`と`stats.parts`にあり、層ごとの値・過去の期間の値・runごとの値・timelineはjobが読むコマンドで取りに行く。
 - 切り詰め: 要約がなお入力の上限を超えるときは、`DROP_ORDER`の順（大きく、コマンドで読み直しやすいものから）に収まるまで丸ごと落とし、落としたものを名前で残す。
-  `period`と`hourly`は落とさない。
+  `period`と`hourly`と、設定で止めた部分（下の`skipped`）は落とさない。
 - promptは要約だと明かし、入力の全体が見直しのdirの`input.json`にあること（人が読むためのもの）と、細部は読むコマンドで取りに行くことを指示する。
   dry runはdirを作らず、作るはずのdirの`input.json`を名指す。
 - jobの権限（`ACCESS`の`queue_cli`）は広げない（理由は`ACCESS`のdoc comment）。
+- `kpi`・`stats`の止め方: `dagq.toml`の`[throughput_review] kpi_stats`（既定true、意味は`ThroughputReviewConfig`）がfalseなら、`gather`は`kpi`・`stats`を計算せず、入力の`kpi`・`stats`・`health`を止めたことを示す`skipped`にし、着地・claimの控え・ask・timelineは集める。
+  promptは`kpi`・`stats`を打てるコマンドに挙げず、打たないことと、目標割れとKPIの外れ値を判定しなかったと結論に書くことを指示する。
+  権限で拒まず指示に留める（上の`ACCESS`）。
+  見直しの起動・期限・毎時の判定・inboxへの知らせは変わらない。
+  `throughput-review`が見直しのたびにqueueが束縛されたmain checkoutから読むので、変えた値は次の見直しから効き、読めなければ既定（on）で集める。
 - この節の上限・要約・省いたものを読むコマンドの示し方は、headlessのjobに共通の方針（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)）の先行の例で、全jobの渡し方と上限は[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節の表が持つ。
 - byte数の記録（ADR-t1566-1の決定6）: promptを作った後の見直しのeventとdry runの出力に同じ記録を載せ、欄の意味は`ReviewPrompt::record`のdoc commentが持つ。
   promptを作る前に終わったもの（使えるproviderが無い・入力の準備の失敗）には無い。
