@@ -1,0 +1,39 @@
+# The tests of tests/it/runtime_integrate.rs that task 3768 cut to the
+# representative of a boundary, each merging what other tests checked of the
+# same wiring; the decisions they used to lay out are unit tests in src/.
+
+# 10.972s in task 3768's stress (median of 4, with 8 more tests at 6 threads)
+[[test]]
+name = "runtime_integrate::a_later_landing_pushes_both_commits_before_the_first_push_finishes"
+reason = "B 境界（Git・landing の slot）: 最初の着地の push の間に次の run が実際の integrate で着地して bare の origin へ 2 つの commit を push し、最初の push の stale-ref の拒否を実際の adapter が remote の head から already_delivered と読み、別の線へ進んだ remote には着地が無いと読むことを確かめる。拒否の扱いの判定は decide_push の unit test"
+task = 3768
+
+# 7.928s in task 3768's stress
+[[test]]
+name = "runtime_integrate::a_failed_push_keeps_the_landing_and_waits_as_attention"
+reason = "B 境界（Git・SQLite）: repository でない origin への実際の git push の失敗が Git の文面のまま push_failed として着地を残し、status の attention と events の next になり、後の push_finished で消えることを、実際の adapter・queue・status で確かめる。attention の判定は run_attention と event_attention の unit test"
+task = 3768
+
+# 6.625s in task 3768's stress
+[[test]]
+name = "runtime_integrate::the_landing_is_pushed_to_the_remote_dagq_toml_names"
+reason = "B 境界（Git・SQLite）: main checkout の dagq.toml の [repository] remote が実際の adapter の push 先になり、push_finished と検索の行と、人の承認と Integrator の actor が SQLite に記録されることを、bare の remote 2 つで確かめる。push 先と actor の判定は decide_push と the_integrator_lands_at_the_request_of_the_user_the_inbox_and_the_supervisor_only の unit test"
+task = 3768
+
+# 7.725s in task 3768's stress
+[[test]]
+name = "runtime_integrate::review_writes_a_non_utf8_diff_as_raw_bytes"
+reason = "B 境界（Git・run の directory）: review が Git の生の bytes の diff を review.md へ一時ファイルと rename で書き、queue の goal と receipt を載せ、大きさだけを返し、着地後は拒むことを、実際の git と run の directory で確かめる。節の順と fence の長さは the_review_material_lists_the_task_goal_receipt_and_follow_ups_in_order と the_longest_backtick_run_and_the_last_byte_are_read_from_raw_bytes の unit test"
+task = 3768
+
+# 18.890s in task 3768's stress (two supervisor passes of three claims)
+[[test]]
+name = "runtime_integrate::prompt_describes_landed_predecessors_and_sibling_tasks_in_progress"
+reason = "B 境界（SQLite・claim・run の directory）: claim の時に queue の predecessors と tasks_in_progress、着地の commit、run の directory の receipt から prompt.txt を書き、goal の編集の前後で書いた prompt が変わらず、receipt の消えた predecessor の後続も起動することを、supervisor の 2 回の pass で確かめる（3 本の IT を 1 本にした）。文面と receipt の無い時の判定は prompt の unit test と a_predecessor_is_described_by_its_landing_and_its_receipts_summary_or_unavailable"
+task = 3768
+
+# 9.081s in task 3768's stress
+[[test]]
+name = "runtime_integrate::runs_land_fifo_by_validation_time_passing_over_a_held_task_and_later_ones_are_rebased"
+reason = "B 境界（SQLite の候補の query・Git の着地・CLI）: validation の順の候補の query が CLI の hold した task の run を飛ばし、release の後に次になり、後の着地が実際の rebase で先の着地の上に載り、detach した checkout を動かさないことを、実際の supervisor と integrate で確かめる（2 本の IT を 1 本にした）。hold の判定は domain::task_hold の unit test"
+task = 3768

@@ -8328,3 +8328,103 @@ fn a_replacement_section_past_its_limit_keeps_its_checks_whole() {
     assert!(section.contains("the operations are documented"));
     assert_reads_are_the_jobs(&section);
 }
+
+/// A predecessor is described by the commit its integrated run landed and
+/// its receipt's summary with the whitespace collapsed; a missing or
+/// unparsable receipt is `(receipt unavailable)` and a predecessor
+/// completed without an integrated run `(not landed)`, never an error, so
+/// the successor still starts.
+#[test]
+fn a_predecessor_is_described_by_its_landing_and_its_receipts_summary_or_unavailable() {
+    let receipt = Path::new("/runs/run/receipt.json");
+    let landed = Predecessor {
+        task: task(1, "test task", TaskStatus::Completed),
+        integrated_run: Some(run(1, RunStatus::Integrated, Some(SHA))),
+    };
+    let files = MemoryFiles::default();
+    files.put(
+        receipt,
+        UNIX_EPOCH,
+        &json!({
+            "run_id": RUN,
+            "result": "succeeded",
+            "commit": SHA,
+            "tests": {"status": "passed", "evidence_or_reason": "cargo test"},
+            "e2e": {"status": "not_applicable", "evidence_or_reason": "none"},
+            "subagent_review": {"status": "not_applicable", "evidence_or_reason": "small"},
+            "summary": "  done\n\nwith   care ",
+        })
+        .to_string(),
+    );
+    let summary = PredecessorSummary::from_predecessor(&files, &landed);
+    assert_eq!(
+        (summary.task_id, summary.title.as_str()),
+        (TaskId::new(1), "test task")
+    );
+    assert_eq!(summary.result_commit, SHA);
+    assert_eq!(summary.summary, "done with care");
+
+    // The receipt is gone from the run directory, or is not a receipt.
+    let gone = PredecessorSummary::from_predecessor(&MemoryFiles::default(), &landed);
+    assert_eq!(gone.summary, "(receipt unavailable)");
+    assert_eq!(gone.result_commit, SHA);
+    files.put(receipt, UNIX_EPOCH, "not json");
+    let corrupt = PredecessorSummary::from_predecessor(&files, &landed);
+    assert_eq!(corrupt.summary, "(receipt unavailable)");
+    assert_eq!(corrupt.result_commit, SHA);
+
+    // Completed by hand: no run landed it, so neither is there.
+    let by_hand = Predecessor {
+        task: landed.task.clone(),
+        integrated_run: None,
+    };
+    let summary = PredecessorSummary::from_predecessor(&files, &by_hand);
+    assert_eq!(summary.result_commit, "(not landed)");
+    assert_eq!(summary.summary, "(receipt unavailable)");
+}
+
+/// The recovery job of a run that `integrate` verified more than once
+/// reads the latest attempt's logs and is only told where the earlier
+/// attempts' are.
+#[test]
+fn the_ended_runs_material_shows_the_latest_integrate_attempt_and_names_the_earlier() {
+    let dir = Path::new("/runs/run");
+    let files = MemoryFiles::default();
+    let first = dir.join("integrate-1-verify-1.log");
+    let second = dir.join("integrate-2-verify-1.log");
+    files.put(&first, UNIX_EPOCH, "the first attempt's output\n");
+    files.put(&second, UNIX_EPOCH, "the second attempt's output\n");
+    let run = run(7, RunStatus::NeedsSession, Some(SHA));
+    let mut detail = proposal_task(task(7, "work", TaskStatus::InProgress), Vec::new());
+    detail.runs = vec![run.clone()];
+    let material = ended_run_material(
+        &files,
+        &detail,
+        &run,
+        Default::default(),
+        Default::default(),
+        dir,
+    );
+    assert!(
+        material.contains(&format!(
+            "Verification log {} (end):\n```text\nthe second attempt's output\n```",
+            second.display()
+        )),
+        "{material}"
+    );
+    assert!(
+        !material.contains(&format!("Verification log {} (end)", first.display())),
+        "{material}"
+    );
+    assert!(
+        !material.contains("the first attempt's output"),
+        "{material}"
+    );
+    assert!(
+        material.contains(&format!(
+            "Logs of earlier integrate attempts (not shown): {}\n",
+            first.display()
+        )),
+        "{material}"
+    );
+}

@@ -455,7 +455,7 @@ impl RunFiles for LocalRunFiles {
         }
         let (longest, last) = backtick_run_and_last_byte((&mut source).take(size))?;
         source.seek(SeekFrom::Start(0))?;
-        let fence = "`".repeat(longest.max(2) + 1);
+        let fence = fence_over(longest);
         let fenced = |target: &mut fs::File| {
             let mut out = BufWriter::new(target);
             writeln!(out, "{text}{fence}{info}")?;
@@ -530,6 +530,12 @@ fn try_flock(
     }
 }
 
+/// The fence of a body whose longest backtick run is `longest`: one
+/// backtick longer than it, and never shorter than three.
+fn fence_over(longest: usize) -> String {
+    "`".repeat(longest.max(2) + 1)
+}
+
 /// Scan the bounded snapshot through the same file descriptor used for
 /// the subsequent copy, with constant memory even for large diffs.
 fn backtick_run_and_last_byte(mut source: impl Read) -> io::Result<(usize, Option<u8>)> {
@@ -552,6 +558,25 @@ fn backtick_run_and_last_byte(mut source: impl Read) -> io::Result<(usize, Optio
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// The diff's fence is sized from its longest backtick run, a run
+    /// across two reads counted whole, with non-UTF-8 bytes between, and is
+    /// one longer than it and at least three; the last byte says whether a
+    /// newline is to be added before the fence.
+    #[test]
+    fn the_longest_backtick_run_and_the_last_byte_are_read_from_raw_bytes() {
+        let scan = |bytes: &[u8]| backtick_run_and_last_byte(bytes).unwrap();
+        assert_eq!(scan(b""), (0, None));
+        assert_eq!(scan(b"+caf\xe9 ````\n"), (4, Some(b'\n')));
+        assert_eq!(scan(b"`a``\xff```"), (3, Some(b'`')));
+        let mut split = vec![b'x'; 64 * 1024 - 2];
+        split.extend_from_slice(b"`````\xe9");
+        assert_eq!(scan(&split), (5, Some(0xe9)));
+        assert_eq!(fence_over(0), "```");
+        assert_eq!(fence_over(2), "```");
+        assert_eq!(fence_over(3), "````");
+        assert_eq!(fence_over(4), "`````");
+    }
 
     /// A root that is missing, a file or a link is not measured.
     #[test]

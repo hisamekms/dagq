@@ -763,11 +763,11 @@ name = "runtime_cleanup::a_waiting_runs_build_outputs_go_for_room_and_its_answer
 reason = "境界（supervisorの配線・プロセス・SQLite）: 実 supervisor の slot の待ち（ADR-0071）の run を空き容量のための掃除の job が予約して消し、そのあいだ答えが待ちを終えず、通り過ぎた後に答えが届いて worker の turn がビルドし直すことを、実 process の一覧と SQLite で確かめる。候補の選びと動いているものの判定は supervise::cleanup の unit test"
 task = 1980
 
-# 5.9 to 7.6s (stress of 5 under the host's load)
+# 11.3s in task 3768's stress (median of 4, with 8 more tests at 6 threads)
 [[test]]
 name = "runtime_integrate::verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree"
-reason = "境界（Git・プロセス・supervisorの配線）: 先の着地の後に実 Git の rebase がきれいに当たり、rebase 後の検証コマンドの実 process が落ちた run を needs_session にして rebase 後の tree を worktree に残すことを確かめる代表の 1 本。本文の変更は task の欄（execution_class）を足した NewTask の literal だけ。検証の失敗の分類の判断は application::integrate の unit test"
-task = 1488
+reason = "境界（Git・プロセス・run の directory）: validation が検証コマンドを流さず、先の着地の後に実 Git の rebase がきれいに当たり、rebase 後の検証コマンドの実 process が落ちた run を needs_session にして rebase 後の tree を worktree に残し、試行ごとの log を残して復旧の材料と review.md が最新の試行を読むことを確かめる代表の 1 本（2 本の IT を 1 本にした）。失敗の分類と log の名前と材料の判断は application::integrate と prompt の unit test"
+task = 3768
 
 [[test]]
 name = "review_programs::a_rejecting_program_sends_the_worker_back_before_any_agent_and_a_passing_set_goes_on"
@@ -1500,12 +1500,6 @@ name = "runtime_task_hold_park::a_helper_left_by_a_turn_its_validation_sent_back
 reason = "B 境界（validation・process の一覧・wrapper・CLI）: validation が evidence_missing で needs_session に戻した run の終了の経路を共通の park が取り、turn が worktree に残した detach した process が動く間は lease を持って hold を settling のまま release を拒み、process が終わってから validation の理由のまま待ちへ入ることを、実際の process と wrapper で確かめる。残った process の判定は replan_park の left_writers_verdict の unit test"
 task = 1881
 
-# 8.3s to 11.3s (stress 5 under the host's load of other runs, task 1881)
-[[test]]
-name = "runtime_integrate::integrate_next_passes_over_a_held_tasks_run_and_lands_the_next"
-reason = "B 境界（SQLite の候補の query・Git の着地・CLI）: 先に validation を終えた run の task を hold すると integrate --next がそれを飛ばして次の run を実際の rebase と main の移動で着地させ、held の run は awaiting_integration のまま待ち、release の後にそれが次になって着地することを、実際の supervisor と integrate で確かめる。hold の判定は domain::task_hold の unit test"
-task = 1881
-
 # 5.5s to 10.6s (stress 5 under the host's load of other runs, task 1881)
 [[test]]
 name = "runtime_task_hold_park::a_hold_under_a_replanning_park_a_helper_blocked_settles_only_once_it_ended"
@@ -1716,8 +1710,8 @@ task = 955
 
 [[test]]
 name = "runtime_integrate::integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once"
-reason = "B 境界（Git・SQLite・supervisor と integrate の配線）: 実際の supervisor の run と integrate の着地が receipt の follow_ups を goal の draft として 1 度だけ登録し、着地しない receipt では登録しないことを確かめる代表の 1 本。本文の変更は cancel に --reason を足した CLI の引数だけ。follow_up の登録の判断は domain の unit test"
-task = 955
+reason = "B 境界（Git・SQLite・supervisor と integrate の配線）: 実際の supervisor の run と integrate の着地が receipt の follow_ups を store の transaction で goal の draft として 1 度だけ登録し、着地しない receipt では登録せず、閉じた goal では goal なしで登録することを確かめる代表の 1 本。各 entry が何になるかの判断は application::integrate の a_receipts_follow_up_is_a_draft_of_the_goal_or_skipped_with_the_reason"
+task = 3768
 
 [[test]]
 name = "cli_version::install_of_a_build_that_dies_puts_the_binary_back_and_asks_the_inbox"
@@ -1789,8 +1783,8 @@ task = 2394
 # 6.697s in task 2394's stress, whose change to it was the type of its kind comparisons
 [[test]]
 name = "runtime_integrate::integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable"
-reason = "B 境界（守る境界）: recovery: an `integrate` process that dies leaves a stale landing lease that `recover` puts back, across processes, Git and SQLite"
-task = 2394
+reason = "B 境界（守る境界）: recovery: an `integrate` process that dies leaves a stale landing lease that `recover` puts back, and the live lease refuses another landing and a rebind meanwhile, across processes, Git and SQLite; which refusal a rebind meets is application::rebind's unit test"
+task = 3768
 
 # 6.046s in task 2394's stress, whose change to it was the type of its kind comparisons
 [[test]]
@@ -1828,22 +1822,10 @@ name = "runtime_run_env::supervisor_starts_and_run_env_changes_are_recorded_as_m
 reason = "B 境界（守る境界）: the supervisor's wiring of its start and of the [run.env] it reads from dagq.toml, recorded as marks in SQLite"
 task = 2394
 
-# 11.313s in task 2394's stress, whose change to it was the type of its kind comparisons
-[[test]]
-name = "runtime_integrate::runs_land_fifo_by_validation_time_and_later_ones_are_rebased"
-reason = "B 境界（守る境界）: the landing's wiring to Git: two runs land in validation order, the second rebased onto main, over the main checkout and SQLite"
-task = 2394
-
 # 8.696s in task 2394's stress, whose change to it was the type of its kind comparisons
 [[test]]
 name = "runtime_integrate::conflict_free_run_lands_as_one_squash_commit_and_releases_dependents"
 reason = "B 境界（守る境界）: the landing's wiring to Git: a run lands as one squash commit on main and its dependents are released in SQLite"
-task = 2394
-
-# 7.427s in task 2394's stress, whose change to it was the type of its kind comparisons
-[[test]]
-name = "runtime_integrate::integrate_records_the_requester_and_the_integrator"
-reason = "B 境界（守る境界）: the `integrate` process's landing and push through Git, with the requester and the Integrator recorded as actors in SQLite"
 task = 2394
 
 # 5.206s in task 2394's stress, whose change to it was the type of its kind comparisons

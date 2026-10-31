@@ -1787,49 +1787,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
     let prepared = entries
         .iter()
         .enumerate()
-        .map(|(index, entry)| {
-            let title = entry["title"].as_str().map(str::trim).unwrap_or_default();
-            let description = entry["description"].as_str();
-            let skipped = if title.is_empty() {
-                Some("title is not a non-blank string")
-            } else if description.is_none() {
-                Some("description is not a string")
-            } else {
-                None
-            };
-            let draft = description
-                .filter(|_| skipped.is_none())
-                .map(|description| NewTask {
-                    title: title.to_owned(),
-                    description: description.to_owned(),
-                    acceptance: String::new(),
-                    verification_commands: Vec::new(),
-                    required_evidence: Vec::new(),
-                    paths: Vec::new(),
-                    priority: Default::default(),
-                    change: None,
-                    dependencies: Vec::new(),
-                    goal_dependencies: Vec::new(),
-                    goal_id: task.goal_id(),
-                    context: format!(
-                        "follow_up proposed by the receipt of run {run_id} of task {} ({})",
-                        task.id(),
-                        task.title()
-                    ),
-                    provider: None,
-                    worker_mode: None,
-                    wait_for_build: false,
-                    execution_class: Default::default(),
-                });
-            FollowUpRegistration {
-                key: crate::domain::FollowUpKey::Receipt { index },
-                entry: entry.clone(),
-                category: crate::domain::follow_up_category(entry),
-                membership_proposal: crate::domain::follow_up_membership_proposal(entry),
-                draft,
-                skipped: skipped.map(str::to_owned),
-            }
-        })
+        .map(|(index, entry)| receipt_follow_up_registration(task, run_id, index, entry))
         .collect();
     match queue.register_follow_ups(run_id, prepared, depth) {
         Ok(added) => {
@@ -1844,6 +1802,62 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                 "run {run_id}: follow_ups not registered: {error:#}");
             Vec::new()
         }
+    }
+}
+
+/// Entry `index` of the `follow_ups` of `task`'s run `run_id`'s receipt as
+/// [`register_follow_ups`] hands it to the store: a draft of the task's goal
+/// with the entry's trimmed title and its description, no acceptance,
+/// verification commands or dependencies, and a context naming the run and
+/// the task; or, when the title is not a non-blank string or the
+/// description not a string, no draft and the `skipped` reason. The
+/// category and the membership proposal are the entry's as written.
+fn receipt_follow_up_registration(
+    task: &Task,
+    run_id: &RunId,
+    index: usize,
+    entry: &Value,
+) -> FollowUpRegistration {
+    let title = entry["title"].as_str().map(str::trim).unwrap_or_default();
+    let description = entry["description"].as_str();
+    let skipped = if title.is_empty() {
+        Some("title is not a non-blank string")
+    } else if description.is_none() {
+        Some("description is not a string")
+    } else {
+        None
+    };
+    let draft = description
+        .filter(|_| skipped.is_none())
+        .map(|description| NewTask {
+            title: title.to_owned(),
+            description: description.to_owned(),
+            acceptance: String::new(),
+            verification_commands: Vec::new(),
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: Default::default(),
+            change: None,
+            dependencies: Vec::new(),
+            goal_dependencies: Vec::new(),
+            goal_id: task.goal_id(),
+            context: format!(
+                "follow_up proposed by the receipt of run {run_id} of task {} ({})",
+                task.id(),
+                task.title()
+            ),
+            provider: None,
+            worker_mode: None,
+            wait_for_build: false,
+            execution_class: Default::default(),
+        });
+    FollowUpRegistration {
+        key: crate::domain::FollowUpKey::Receipt { index },
+        entry: entry.clone(),
+        category: crate::domain::follow_up_category(entry),
+        membership_proposal: crate::domain::follow_up_membership_proposal(entry),
+        draft,
+        skipped: skipped.map(str::to_owned),
     }
 }
 
@@ -4417,6 +4431,110 @@ mod tests {
         );
         assert!(draft.acceptance.is_empty() && draft.verification_commands.is_empty());
         assert!(draft.dependencies.is_empty() && draft.paths.is_empty());
+    }
+
+    /// A receipt's follow_up becomes a draft of the task's goal with its
+    /// trimmed title and description and a context naming the run and the
+    /// task, and nothing else of the draft filled in (ADR-0041 decision 16);
+    /// an entry without a non-blank title or a string description is
+    /// skipped with the reason. The category is the worker's or
+    /// `unlabeled` (ADR-t947-3), the membership proposal as written or
+    /// null (ADR-t1504-2 decision 11), and the key is the entry's index.
+    #[test]
+    fn a_receipts_follow_up_is_a_draft_of_the_goal_or_skipped_with_the_reason() {
+        let mut record = task_record(&[], &[]);
+        record.goal_id = Some(crate::domain::GoalId::new(3));
+        let task = Task::restore(record).unwrap();
+        let run = RunId::new(RUN).unwrap();
+        let proposal = json!({"classification": "out_of_scope", "acceptance_items": ["(1) done"], "reason": "r"});
+        let entry = json!({"title": " later work ", "description": "outside the task", "category": "defect", "membership_proposal": proposal});
+        let registration = receipt_follow_up_registration(&task, &run, 0, &entry);
+        assert_eq!(
+            registration.key,
+            crate::domain::FollowUpKey::Receipt { index: 0 }
+        );
+        assert_eq!(registration.entry, entry);
+        assert_eq!(registration.category, "defect");
+        assert_eq!(registration.membership_proposal, proposal);
+        assert_eq!(registration.skipped, None);
+        let draft = registration.draft.unwrap();
+        assert_eq!(draft.title, "later work");
+        assert_eq!(draft.description, "outside the task");
+        assert_eq!(draft.goal_id, Some(crate::domain::GoalId::new(3)));
+        assert_eq!(
+            draft.context,
+            format!(
+                "follow_up proposed by the receipt of run {RUN} of task 7 (  land the change  )"
+            )
+        );
+        assert!(draft.acceptance.is_empty() && draft.verification_commands.is_empty());
+        assert!(draft.dependencies.is_empty() && draft.goal_dependencies.is_empty());
+        assert!(draft.paths.is_empty() && draft.required_evidence.is_empty());
+        assert_eq!(draft.worker_mode, None);
+
+        // An empty description is a description; no category and no
+        // proposal are `unlabeled` and null.
+        let plain = receipt_follow_up_registration(
+            &task,
+            &run,
+            2,
+            &json!({"title": "more work", "description": ""}),
+        );
+        assert_eq!(plain.key, crate::domain::FollowUpKey::Receipt { index: 2 });
+        assert_eq!(plain.category, "unlabeled");
+        assert_eq!(plain.membership_proposal, Value::Null);
+        assert_eq!(plain.draft.unwrap().description, "");
+
+        for (entry, reason) in [
+            (
+                json!({"title": "  ", "description": "d", "category": "ops", "membership_proposal": {"classification": "maybe"}}),
+                "title is not a non-blank string",
+            ),
+            (
+                json!({"description": "d"}),
+                "title is not a non-blank string",
+            ),
+            (
+                json!({"title": 5, "description": "d"}),
+                "title is not a non-blank string",
+            ),
+            (
+                json!({"title": "no description"}),
+                "description is not a string",
+            ),
+            (
+                json!({"title": "t", "description": 1}),
+                "description is not a string",
+            ),
+        ] {
+            let skipped = receipt_follow_up_registration(&task, &run, 1, &entry);
+            assert_eq!(skipped.skipped.as_deref(), Some(reason), "{entry}");
+            assert!(skipped.draft.is_none(), "{entry}");
+            assert_eq!(skipped.entry, entry);
+            assert_eq!(
+                skipped.key,
+                crate::domain::FollowUpKey::Receipt { index: 1 }
+            );
+        }
+        // A skipped entry keeps the worker's category and proposal as written.
+        let skipped = receipt_follow_up_registration(
+            &task,
+            &run,
+            1,
+            &json!({"title": "  ", "description": "d", "category": "ops", "membership_proposal": {"classification": "maybe"}}),
+        );
+        assert_eq!(skipped.category, "ops");
+        assert_eq!(
+            skipped.membership_proposal,
+            json!({"classification": "maybe"})
+        );
+
+        // A task without a goal makes drafts without one.
+        let lone = Task::restore(task_record(&[], &[])).unwrap();
+        let draft = receipt_follow_up_registration(&lone, &run, 0, &entry)
+            .draft
+            .unwrap();
+        assert_eq!(draft.goal_id, None);
     }
 
     fn sha(text: &str) -> CommitSha {

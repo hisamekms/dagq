@@ -7,45 +7,6 @@ use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
 
-/// A Git remote double: `origin` exists, `[repository]` is the default,
-/// and a push fails with `failure` when set. The decisions on what the
-/// remote answers are `decide_push`'s unit tests (src/application/integrate.rs).
-#[derive(Default)]
-struct TestRemote {
-    failure: Option<String>,
-}
-
-impl MainRemote for TestRemote {
-    fn has_remote(&self, remote: &str) -> Result<bool> {
-        Ok(remote == "origin")
-    }
-
-    fn push_main(
-        &self,
-        _: &dagq::application::integrate::PushGrant,
-        _: &str,
-        _: &dagq::domain::landing_branch::LandingBranch,
-    ) -> Result<()> {
-        match &self.failure {
-            Some(failure) => bail!("{failure}"),
-            None => Ok(()),
-        }
-    }
-
-    fn contains_landed_commit(
-        &self,
-        _: &str,
-        _: &dagq::domain::landing_branch::LandingBranch,
-        _: &dagq::domain::CommitSha,
-    ) -> Result<bool> {
-        Ok(false)
-    }
-}
-
-fn integrate_with(db: &Path, repo: &Path, remote: Option<&dyn MainRemote>) -> Value {
-    runtime::integrate(db, IntegrateTarget::Task(TaskId::new(1)), repo, remote).unwrap()
-}
-
 /// While the first landing is pushing, land and push the next run. The
 /// delayed first push then reports Git's stale-ref rejection.
 struct OvertakenPush {
@@ -81,6 +42,11 @@ impl MainRemote for OvertakenPush {
     }
 }
 
+/// Boundary (Git, the landing slot): while the first landing pushes, the
+/// next one lands and pushes both commits; the first push's stale-ref
+/// rejection is then a delivery (`already_delivered`), which the real
+/// adapter reads from the remote's head. What a rejected push becomes is
+/// `decide_push`'s unit tests.
 #[test]
 fn a_later_landing_pushes_both_commits_before_the_first_push_finishes() {
     let (dir, repo, db) = fixture();
@@ -155,26 +121,60 @@ fn a_later_landing_pushes_both_commits_before_the_first_push_finishes() {
     );
     assert!(events_of(&db, first.id(), "push_failed").is_empty());
     assert!(run_attention_of(&runtime::status(&db).unwrap(), first.id()).is_none());
+
+    // What the real adapter answers: the remote's head holds the first
+    // landing under the second; once the remote advances on another line,
+    // the second is absent though the remote has a branch named main.
+    let adapter = GitRepository::inspect(&repo).unwrap();
+    let branch = dagq::domain::landing_branch::LandingBranch::main();
+    let first_sha = dagq::domain::CommitSha::parse(first_commit.clone(), "first").unwrap();
+    let second_sha = dagq::domain::CommitSha::parse(second_commit.clone(), "second").unwrap();
+    assert!(
+        adapter
+            .contains_landed_commit("origin", &branch, &first_sha)
+            .unwrap()
+    );
+    git(&repo, &["reset", "--hard", &first_commit]);
+    git(&repo, &["commit", "--allow-empty", "-m", "other history"]);
+    git(&repo, &["push", "--force", "origin", "main"]);
+    assert!(
+        !adapter
+            .contains_landed_commit("origin", &branch, &second_sha)
+            .unwrap()
+    );
 }
 
+/// Boundary (Git, SQLite): the real Git adapter's push to an origin that is
+/// not a repository fails with Git's message. Only the Integrator pushes
+/// (ADR-t728-2), so the failure is a landing's: the landing stands, the
+/// failure is recorded as `push_failed`, `status` keeps it as an attention
+/// on the integrated run and `events` reports it with its next, until a
+/// later successful push carries this landing too. Which attention a
+/// `push_failed` is, is `run_attention`'s and `event_attention`'s unit
+/// tests (src/domain/mod.rs); where the push goes, `decide_push`'s.
 #[test]
 fn a_failed_push_keeps_the_landing_and_waits_as_attention() {
     let (_dir, repo, db, run) = awaiting_run();
-    let remote = TestRemote {
-        failure: Some("rejected: fetch first".into()),
-    };
-    let outcome = integrate_with(&db, &repo, Some(&remote));
+    git(
+        &repo,
+        &["remote", "add", "origin", "/nonexistent/origin.git"],
+    );
+    let adapter = GitRepository::inspect(&repo).unwrap();
+    assert!(adapter.has_remote("origin").unwrap());
+    assert!(!adapter.has_remote("upstream").unwrap());
+    let outcome = integrate(&db, 1, &repo).unwrap();
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     assert_eq!(outcome["run"]["status"], "integrated");
     assert_eq!(outcome["task"]["status"], "completed");
-    assert_eq!(outcome["push"]["outcome"], "failed");
+    assert_eq!(outcome["push"]["outcome"], "failed", "{outcome}");
     assert_eq!(outcome["push"]["remote"], "origin");
-    assert_eq!(outcome["push"]["error"], "rejected: fetch first");
+    let error = outcome["push"]["error"].as_str().unwrap().to_owned();
+    assert!(error.contains("git push origin main failed"), "{error}");
     let landed = git_out(&repo, &["rev-parse", "main"]);
     assert_eq!(
         events_of(&db, run.id(), "push_failed"),
         [
-            json!({"code": "push_failed", "remote": "origin", "branch": "main", "commit": landed, "error": "rejected: fetch first"})
+            json!({"code": "push_failed", "remote": "origin", "branch": "main", "commit": landed, "error": error})
         ]
     );
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -184,14 +184,12 @@ fn a_failed_push_keeps_the_landing_and_waits_as_attention() {
     );
     drop(queue);
 
-    // `status` keeps it as an attention on the integrated run, and `events`
-    // reports the push_failed event with its next.
     let status = runtime::status(&db).unwrap();
     assert_eq!(
         run_attention_of(&status, run.id()).unwrap(),
         &json!({
             "run_id": run.id(), "task_id": 1, "status": "integrated",
-            "kind": "push_failed", "last_error": "rejected: fetch first",
+            "kind": "push_failed", "last_error": error,
             "last_error_code": "push_failed", "next": "push main",
         })
     );
@@ -203,7 +201,7 @@ fn a_failed_push_keeps_the_landing_and_waits_as_attention() {
         .find(|e| e["kind"] == "push_failed")
         .unwrap();
     assert_eq!(failed["next"], "push main");
-    assert_eq!(failed["reason"], "rejected: fetch first");
+    assert_eq!(failed["reason"], json!(error));
 
     // A later successful push carries this landing too and clears it.
     SqliteQueue::open(&db)
@@ -218,94 +216,15 @@ fn a_failed_push_keeps_the_landing_and_waits_as_attention() {
     assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
 }
 
-/// The real Git adapter pushes main to a bare origin, and reports Git's
-/// error when origin cannot take it.
-#[test]
-fn git_adapter_pushes_main_to_a_bare_origin() {
-    let (dir, repo, db, run) = awaiting_run();
-    let origin = dir.path().join("origin.git");
-    let made = Command::new(git_executable().expect("git executable"))
-        .args(["init", "--bare", "-b", "main"])
-        .arg(&origin)
-        .bounded_output()
-        .unwrap();
-    assert!(made.status.success());
-    git(
-        &repo,
-        &["remote", "add", "origin", origin.to_str().unwrap()],
-    );
-    let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["push"]["outcome"], "pushed", "{outcome}");
-    assert_eq!(
-        git_out(&origin, &["rev-parse", "main"]),
-        git_out(&repo, &["rev-parse", "main"])
-    );
-    assert_eq!(events_of(&db, run.id(), "push_finished").len(), 1);
-
-    // An origin that is not a repository fails the push with Git's message.
-    // Only the Integrator pushes (ADR-t728-2), so the failure is a landing's.
-    let (_dir, repo, db, run) = awaiting_run();
-    git(
-        &repo,
-        &["remote", "add", "origin", "/nonexistent/origin.git"],
-    );
-    let adapter = GitRepository::inspect(&repo).unwrap();
-    assert!(adapter.has_remote("origin").unwrap());
-    assert!(!adapter.has_remote("upstream").unwrap());
-    let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    assert_eq!(outcome["push"]["outcome"], "failed", "{outcome}");
-    let error = outcome["push"]["error"].as_str().unwrap();
-    assert!(error.contains("git push origin main failed"), "{error}");
-    assert_eq!(events_of(&db, run.id(), "push_failed").len(), 1);
-}
-
-#[test]
-fn git_adapter_checks_whether_a_later_remote_head_contains_the_landing() {
-    let (dir, repo, db, _run) = awaiting_run();
-    let origin = dir.path().join("origin.git");
-    let made = Command::new(git_executable().expect("git executable"))
-        .args(["init", "--bare", "-b", "main"])
-        .arg(&origin)
-        .bounded_output()
-        .unwrap();
-    assert!(made.status.success());
-    git(
-        &repo,
-        &["remote", "add", "origin", origin.to_str().unwrap()],
-    );
-    integrate(&db, 1, &repo).unwrap();
-    let first = git_out(&repo, &["rev-parse", "main"]);
-    git(&repo, &["commit", "--allow-empty", "-m", "later landing"]);
-    let second = git_out(&repo, &["rev-parse", "main"]);
-    git(&repo, &["push", "origin", "main"]);
-    let adapter = GitRepository::inspect(&repo).unwrap();
-    let branch = dagq::domain::landing_branch::LandingBranch::main();
-    let first_commit = dagq::domain::CommitSha::parse(first.clone(), "first").unwrap();
-    let second_commit = dagq::domain::CommitSha::parse(second.clone(), "second").unwrap();
-    assert!(
-        adapter
-            .contains_landed_commit("origin", &branch, &first_commit)
-            .unwrap()
-    );
-
-    // The remote now advances on a different line. The second landing is
-    // absent, even though the remote has a branch named main.
-    git(&repo, &["reset", "--hard", &first]);
-    git(&repo, &["commit", "--allow-empty", "-m", "other history"]);
-    git(&repo, &["push", "--force", "origin", "main"]);
-    assert!(
-        !adapter
-            .contains_landed_commit("origin", &branch, &second_commit)
-            .unwrap()
-    );
-}
-
 /// `[repository] remote` of dagq.toml steers the real adapter's push
 /// (ADR-t615-1): the landing goes to that remote, not to origin, is
 /// recorded as `push_finished` without an attention, and its message is
-/// searchable with its task and run (ADR-0046). `push = false`, a missing
-/// remote and an unreadable table are `decide_push`'s unit tests.
+/// searchable with its task and run (ADR-0046). A person's `integrate`
+/// asks the Integrator to land (ADR-t728-2): the approval is the person's,
+/// and the verification, the landing and the push are the Integrator's at
+/// the person's request. `push = false`, a missing remote and an
+/// unreadable table are `decide_push`'s unit tests; who may act as the
+/// Integrator, `the_integrator_lands_at_the_request_of_the_user_the_inbox_and_the_supervisor_only`.
 #[test]
 fn the_landing_is_pushed_to_the_remote_dagq_toml_names() {
     let bare = |dir: &Path, name: &str| {
@@ -357,8 +276,8 @@ fn the_landing_is_pushed_to_the_remote_dagq_toml_names() {
     assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
     // The landing's message is searchable with its task and run (ADR-0046).
     let subject = git_out(&repo, &["log", "-1", "--format=%s", "main"]);
-    let page = SqliteQueue::open(&db)
-        .unwrap()
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let page = queue
         .search(&SearchQuery {
             terms: subject.clone(),
             kinds: vec![SearchKind::Commit],
@@ -374,6 +293,35 @@ fn the_landing_is_pushed_to_the_remote_dagq_toml_names() {
         (hit.task_id, hit.run_id.as_deref(), hit.status.as_deref()),
         (Some(1), Some(run.id().as_str()), Some("completed"))
     );
+    // Who recorded what: the person approved, the Integrator did the rest.
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let actor_of = |kind: &str| {
+        let actor = detail
+            .events
+            .iter()
+            .find(|e| e.kind.as_str() == kind && e.run_id.as_ref() == Some(run.id()))
+            .unwrap_or_else(|| panic!("no {kind}"))
+            .actor
+            .clone()
+            .expect("an actor");
+        (actor.role, actor.id, actor.requested_by)
+    };
+    assert_eq!(
+        actor_of("integration_approved"),
+        ("user".to_owned(), "user".to_owned(), None)
+    );
+    let integrator = format!("integrator:{}", std::process::id());
+    for kind in ["verification_command", "run_integrated", "push_finished"] {
+        assert_eq!(
+            actor_of(kind),
+            (
+                "integrator".to_owned(),
+                integrator.clone(),
+                Some("user".to_owned())
+            ),
+            "{kind}"
+        );
+    }
 }
 
 fn git_ok(repo: &Path, args: &[&str]) -> bool {
@@ -477,20 +425,24 @@ fn the_landings_verification_of_a_deep_queue_has_a_short_tmpdir_outside_runs() {
     assert!(!run_dir.join("tmp/fixture").exists());
 }
 
+/// Boundary (Git, the run directory): `review` writes the run's material
+/// to review.md and returns only where it is and the size of the diff. A
+/// run whose file is Latin-1 text with a backtick run and whose commit
+/// message is not UTF-8 still gets its review: Git's raw bytes go into
+/// review.md under a longer fence, and the commit list is read lossily.
+/// The goal is the queue's at review time, and a run that is no longer
+/// awaiting integration or a session is not reviewable. The sections and
+/// their order are `the_review_material_lists_the_task_goal_receipt_and_follow_ups_in_order`'s;
+/// the fence's length, `the_longest_backtick_run_and_the_last_byte_are_read_from_raw_bytes`'s.
 #[test]
-fn review_writes_the_run_material_to_review_md_and_returns_only_its_size() {
+fn review_writes_a_non_utf8_diff_as_raw_bytes() {
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let goal = queue
         .add_goal(NewGoal {
-            priority: Default::default(),
             title: "goal title".into(),
-            description: String::new(),
             acceptance: "goal acceptance".into(),
-            constraints: "goal constraints".into(),
-            doc: None,
-            draft: false,
-            tags: Vec::new(),
+            ..NewGoal::default()
         })
         .unwrap();
     queue.set_goal(TaskId::new(1), Some(goal.id())).unwrap();
@@ -500,7 +452,11 @@ fn review_writes_the_run_material_to_review_md_and_returns_only_its_size() {
         error.contains("task 1 (ready) has no run awaiting integration or a session"),
         "{error}"
     );
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        r#"printf 'caf\351 ````\n' > latin1.txt && git add latin1.txt && git commit -q -m "$(printf 'caf\351')"; receipt "$(git rev-parse HEAD)""#,
+    );
     supervise(&db, &repo, &backend).unwrap();
     backend.join();
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
@@ -511,7 +467,8 @@ fn review_writes_the_run_material_to_review_md_and_returns_only_its_size() {
     write_receipt_json(&run, receipt);
 
     let outcome = runtime::review(&db, TaskId::new(1)).unwrap();
-    let path = Path::new(run.run_dir().unwrap()).join("review.md");
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let path = run_dir.join("review.md");
     assert_eq!(
         outcome,
         json!({
@@ -526,73 +483,25 @@ fn review_writes_the_run_material_to_review_md_and_returns_only_its_size() {
         })
     );
     assert!(!outcome.to_string().contains("diff --git"));
-    assert!(!path.with_file_name(".review.md.tmp").exists());
-    let text = fs::read_to_string(&path).unwrap();
-    let sections = [
+    let bytes = fs::read(&path).unwrap();
+    assert!(String::from_utf8(bytes.clone()).is_err());
+    let text = String::from_utf8_lossy(&bytes);
+    // What the queue holds at review time: the task, its goal, the receipt.
+    for section in [
         "# Review of task 1: test task",
-        "## Task",
-        "### Description\n\nsmall change",
-        "### Acceptance\n\nworks",
-        "### Verification commands\n\n```sh\ntest -f seed.txt\n```",
         "## Goal 1: goal title",
         "### Goal acceptance\n\ngoal acceptance",
-        "### Goal constraints\n\ngoal constraints",
-        "## Receipt",
         "### Summary\n\nsummary of the change",
-        "### Tests: passed\n\nreran",
-        "### E2E: not_applicable\n\nnone",
-        "### Subagent review: not_applicable\n\nsession",
         "### Follow-ups\n\n- later work: outside the task",
-        "## Commits",
-        "## Diffstat",
-        "## Diff",
-    ];
-    let mut at = 0;
-    for section in sections {
-        let found = text[at..]
-            .find(section)
-            .unwrap_or_else(|| panic!("{section:?} missing after byte {at}:\n{text}"));
-        at += found + section.len();
+    ] {
+        assert!(text.contains(section), "{section:?} missing:\n{text}");
     }
     let commits = &text[text.find("## Commits").unwrap()..text.find("## Diffstat").unwrap()];
     assert!(commits.contains(&head.as_str()[..7]), "{commits}");
-    assert!(commits.contains(" work\n"), "{commits}");
-    let stat = &text[text.find("## Diffstat").unwrap()..text.find("## Diff\n").unwrap()];
-    assert!(stat.contains("change.txt | 1 +"), "{stat}");
-    let diff = &text[text.find("## Diff\n").unwrap()..];
-    assert!(
-        diff.contains("```diff\ndiff --git a/change.txt b/change.txt"),
-        "{diff}"
-    );
-    assert!(diff.contains(&format!("+change by {}", run.id())), "{diff}");
-    assert!(diff.ends_with("\n```\n"), "{diff}");
-
-    // A landed run is no longer reviewable.
-    assert_eq!(integrate(&db, 1, &repo).unwrap()["outcome"], "integrated");
-    let error = format!("{:#}", runtime::review(&db, TaskId::new(1)).unwrap_err());
-    assert!(error.contains("task 1 (completed) has no run"), "{error}");
-}
-
-/// A run whose file is Latin-1 text with a backtick run and whose commit
-/// message is not UTF-8 still gets its review: Git's raw bytes go into
-/// review.md under a longer fence, and the commit list is read lossily.
-#[test]
-fn review_writes_a_non_utf8_diff_as_raw_bytes() {
-    let (_dir, db, detail) = run_agent(
-        r#"printf 'caf\351 ````\n' > latin1.txt && git add latin1.txt && git commit -q -m "$(printf 'caf\351')"; receipt "$(git rev-parse HEAD)""#,
-    );
-    let run = detail.runs[0].clone();
-    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
-    let outcome = runtime::review(&db, TaskId::new(1)).unwrap();
-    assert_eq!(outcome["files_changed"], 1, "{outcome}");
-    assert_eq!(outcome["insertions"], 1, "{outcome}");
-    let run_dir = Path::new(run.run_dir().unwrap());
-    let bytes = fs::read(run_dir.join("review.md")).unwrap();
-    assert!(String::from_utf8(bytes.clone()).is_err());
-    let text = String::from_utf8_lossy(&bytes);
-    let commits = &text[text.find("## Commits").unwrap()..text.find("## Diffstat").unwrap()];
     // Git may re-encode the message on output; either way it is listed.
     assert!(commits.contains(" caf"), "{commits}");
+    let stat = &text[text.find("## Diffstat").unwrap()..text.find("## Diff\n").unwrap()];
+    assert!(stat.contains("latin1.txt | 1 +"), "{stat}");
     let diff_at = bytes.windows(8).position(|w| w == b"## Diff\n").unwrap();
     let diff = &bytes[diff_at..];
     let needle = b"+caf\xe9 ````\n";
@@ -611,7 +520,11 @@ fn review_writes_a_non_utf8_diff_as_raw_bytes() {
         .filter(|name| name.starts_with(".review.md"))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
-    assert!(run_dir.join("review.md").is_file());
+
+    // A landed run is no longer reviewable.
+    assert_eq!(integrate(&db, 1, &repo).unwrap()["outcome"], "integrated");
+    let error = format!("{:#}", runtime::review(&db, TaskId::new(1)).unwrap_err());
+    assert!(error.contains("task 1 (completed) has no run"), "{error}");
 }
 
 /// `integrate` issues a token for the run's verification while its
@@ -1021,9 +934,16 @@ fn moved_queue_directory_resolves_run_paths_and_lands_awaiting_runs() {
     assert!(!listing.contains(run.id().as_str()), "{listing}");
 }
 
-/// A dependent's prompt names each predecessor with the commit `integrate`
-/// landed and the summary its receipt carried, and lists the other tasks in
-/// progress at claim time without the task itself.
+/// Boundary (SQLite, the run directory, the claim): a dependent's prompt
+/// names each predecessor with the commit `integrate` landed and the
+/// summary its receipt carried, lists the other tasks in progress at claim
+/// time without the task itself, and is a snapshot of the goal taken at
+/// claim time: a run claimed before a goal edit keeps the old wording, and
+/// a run claimed after it gets the new. A predecessor whose receipt is
+/// gone from its run directory is still named and its successor starts as
+/// usual. How a predecessor is described without its receipt or its
+/// landing is `a_predecessor_is_described_by_its_landing_and_its_receipts_summary_or_unavailable`'s;
+/// the sections' wording, the prompt's unit tests.
 #[test]
 fn prompt_describes_landed_predecessors_and_sibling_tasks_in_progress() {
     let (_dir, repo, db, run) = awaiting_run();
@@ -1035,7 +955,15 @@ fn prompt_describes_landed_predecessors_and_sibling_tasks_in_progress() {
     assert_eq!(landed_commit, git_out(&repo, &["rev-parse", "main"]));
     // The squash commit, not the run's validated head, is what the prompt names.
     assert_ne!(landed_commit, *run.result_commit().unwrap());
-    add_ready_task(&mut queue, "independent", &[]);
+    let goal = queue
+        .add_goal(NewGoal {
+            title: "before edit".into(),
+            acceptance: "old acceptance".into(),
+            ..NewGoal::default()
+        })
+        .unwrap();
+    queue.set_goal(TaskId::new(2), Some(goal.id())).unwrap();
+    add_ready_task_in(&mut queue, "independent", None, &[]);
 
     // The queue's read-only view the prompt is built from.
     let predecessors = queue.predecessors(TaskId::new(2)).unwrap();
@@ -1077,34 +1005,87 @@ fn prompt_describes_landed_predecessors_and_sibling_tasks_in_progress() {
         "{prompt}"
     );
     assert!(!prompt.contains("- task 2: dependent"), "{prompt}");
+    assert!(prompt.contains("Goal title: before edit\n"), "{prompt}");
+    assert!(
+        prompt.contains("Goal acceptance:\nold acceptance\n"),
+        "{prompt}"
+    );
 
     let independent = queue.show(TaskId::new(3)).unwrap().runs[0].clone();
     assert_eq!(independent.status(), RunStatus::AwaitingIntegration);
-    let prompt = read_prompt(&independent);
-    assert!(prompt.contains("Predecessor tasks: none\n"), "{prompt}");
+    let other = read_prompt(&independent);
+    assert!(other.contains("Predecessor tasks: none\n"), "{other}");
     assert!(
-        prompt.contains(
+        other.contains(
             "Sibling tasks in progress (other tasks executing now, each owning its own scope):\n\
              - task 2: dependent\n"
         ),
-        "{prompt}"
+        "{other}"
     );
-    assert!(!prompt.contains("- task 3: independent"), "{prompt}");
+    assert!(!other.contains("- task 3: independent"), "{other}");
     // A completed task is not in progress.
-    assert!(!prompt.contains("- task 1: test task"), "{prompt}");
+    assert!(!other.contains("- task 1: test task"), "{other}");
     // The sections sit between the verification commands and the receipt contract.
-    let position = |needle: &str| prompt.find(needle).unwrap();
+    let position = |needle: &str| other.find(needle).unwrap();
     assert!(position("Verification commands") < position("Predecessor tasks"));
     assert!(position("Predecessor tasks") < position("Sibling tasks in progress"));
     assert!(position("Sibling tasks in progress") < position("Write a completion receipt"));
+    assert!(!other.contains("Goal title"), "{other}");
+
+    // The goal is edited and the predecessor's receipt is gone; a later
+    // dependent of task 1 in the goal is claimed after both.
+    queue
+        .edit_goal(
+            goal.id(),
+            GoalEdit {
+                title: Some("after edit".into()),
+                acceptance: Some("new acceptance".into()),
+                ..GoalEdit::default()
+            },
+        )
+        .unwrap();
+    let receipt = Path::new(run.receipt_path().unwrap());
+    assert_eq!(
+        receipt,
+        Path::new(run.run_dir().unwrap()).join("receipt.json")
+    );
+    fs::remove_file(receipt).unwrap();
+    add_ready_task_in(&mut queue, "late", Some(goal.id()), &[TaskId::new(1)]);
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["outcome"], "finished");
+    assert_eq!(outcome["errors"], json!([]));
+    let detail = queue.show(TaskId::new(4)).unwrap();
+    let late = &detail.runs[0];
+    assert_eq!(late.status(), RunStatus::AwaitingIntegration);
+    assert!(event_kinds(&detail).contains(&"agent_started"));
+    let after = read_prompt(late);
+    assert!(
+        after.contains(&format!(
+            "- task 1: test task; result commit {landed_commit}; summary: (receipt unavailable)\n"
+        )),
+        "{after}"
+    );
+    assert!(after.contains("Goal title: after edit\n"), "{after}");
+    assert!(
+        after.contains("Goal acceptance:\nnew acceptance\n"),
+        "{after}"
+    );
+    assert!(!after.contains("before edit"), "{after}");
+    // The earlier run of its goal, still awaiting integration, is its
+    // sibling; one outside the goal is not.
+    assert!(after.contains("- task 2: dependent\n"), "{after}");
+    assert!(!after.contains("- task 3: independent"), "{after}");
+    // The earlier run's prompt was not rewritten by the edit or the later claim.
+    assert_eq!(read_prompt(&dependent), prompt);
 }
 
-/// A ready task with a goal and a context, registered on the queue.
+/// A ready task with a goal and its dependencies, registered on the queue.
 fn add_ready_task_in(
     queue: &mut SqliteQueue,
     title: &str,
     goal_id: Option<GoalId>,
-    context: &str,
+    dependencies: &[TaskId],
 ) -> TaskId {
     let task = queue
         .add(NewTask {
@@ -1116,10 +1097,10 @@ fn add_ready_task_in(
             paths: Vec::new(),
             priority: Default::default(),
             change: None,
-            dependencies: vec![],
+            dependencies: dependencies.to_vec(),
             goal_dependencies: Vec::new(),
             goal_id,
-            context: context.into(),
+            context: String::new(),
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
@@ -1132,124 +1113,14 @@ fn add_ready_task_in(
     task.id()
 }
 
-/// `prompt.txt` is a snapshot taken at claim time: a run claimed before a
-/// goal edit keeps the old wording, and a run claimed after it gets the new.
+/// Boundary (SQLite, Git): two accepted runs land in the order their
+/// validation finished, except that a held task's run is passed over
+/// (ADR-t1879-1): `integrate --next` lands the next one, the held run waits
+/// as it is, and once released it is the next again. The later landing is
+/// rebased onto the earlier one and main stays linear with one commit per
+/// task, whether or not a checkout has main checked out.
 #[test]
-fn prompt_snapshots_the_goal_at_claim_time() {
-    let (_dir, repo, db) = fixture();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let goal = queue
-        .add_goal(NewGoal {
-            title: "before edit".into(),
-            acceptance: "old acceptance".into(),
-            ..NewGoal::default()
-        })
-        .unwrap();
-    add_ready_task_in(&mut queue, "early", Some(goal.id()), "");
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    assert_eq!(
-        supervise(&db, &repo, &backend).unwrap()["errors"],
-        json!([])
-    );
-    backend.join();
-    let early = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
-    let before = read_prompt(&early);
-    assert!(before.contains("Goal title: before edit\n"), "{before}");
-    assert!(
-        before.contains("Goal acceptance:\nold acceptance\n"),
-        "{before}"
-    );
-
-    queue
-        .edit_goal(
-            goal.id(),
-            GoalEdit {
-                title: Some("after edit".into()),
-                acceptance: Some("new acceptance".into()),
-                ..GoalEdit::default()
-            },
-        )
-        .unwrap();
-    add_ready_task_in(&mut queue, "late", Some(goal.id()), "");
-    assert_eq!(
-        supervise(&db, &repo, &backend).unwrap()["errors"],
-        json!([])
-    );
-    backend.join();
-    let late = queue.show(TaskId::new(3)).unwrap().runs[0].clone();
-    let after = read_prompt(&late);
-    assert!(after.contains("Goal title: after edit\n"), "{after}");
-    assert!(
-        after.contains("Goal acceptance:\nnew acceptance\n"),
-        "{after}"
-    );
-    assert!(!after.contains("before edit"), "{after}");
-    // The earlier run's prompt was not rewritten by the edit or the later claim.
-    assert_eq!(read_prompt(&early), before);
-    // The late run also sees the early one as a sibling still in progress.
-    assert!(after.contains("- task 2: early\n"), "{after}");
-}
-
-/// A predecessor whose receipt is gone from its run directory is still
-/// named in the prompt; the successor's run starts and runs as usual.
-#[test]
-fn successor_starts_when_the_predecessor_receipt_is_unavailable() {
-    let (_dir, repo, db, run) = awaiting_run();
-    assert_eq!(integrate(&db, 1, &repo).unwrap()["outcome"], "integrated");
-    let receipt = Path::new(run.receipt_path().unwrap());
-    assert_eq!(
-        receipt,
-        Path::new(run.run_dir().unwrap()).join("receipt.json")
-    );
-    fs::remove_file(receipt).unwrap();
-
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["outcome"], "finished");
-    assert_eq!(outcome["errors"], json!([]));
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    let dependent = &detail.runs[0];
-    assert_eq!(dependent.status(), RunStatus::AwaitingIntegration);
-    let kinds = event_kinds(&detail);
-    assert!(kinds.contains(&"agent_started"), "{kinds:?}");
-    let landed_commit = queue.show(TaskId::new(1)).unwrap().runs[0]
-        .result_commit()
-        .cloned()
-        .unwrap();
-    let prompt = read_prompt(dependent);
-    assert!(
-        prompt.contains(&format!(
-            "- task 1: test task; result commit {landed_commit}; summary: (receipt unavailable)\n"
-        )),
-        "{prompt}"
-    );
-    // A corrupt receipt is described the same way.
-    let corrupt = queue.predecessors(TaskId::new(2)).unwrap();
-    fs::write(receipt, "not json").unwrap();
-    let summary = runtime::PredecessorSummary::from_predecessor(&LocalRunFiles, &corrupt[0]);
-    assert_eq!(summary.summary, "(receipt unavailable)");
-    assert_eq!(summary.result_commit, landed_commit);
-    assert_eq!(
-        (summary.task_id, summary.title.as_str()),
-        (TaskId::new(1), "test task")
-    );
-    // A predecessor completed without an integrated run has neither.
-    let by_hand = dagq::domain::Predecessor {
-        task: corrupt[0].task.clone(),
-        integrated_run: None,
-    };
-    let summary = runtime::PredecessorSummary::from_predecessor(&LocalRunFiles, &by_hand);
-    assert_eq!(summary.result_commit, "(not landed)");
-    assert_eq!(summary.summary, "(receipt unavailable)");
-}
-
-/// Two accepted runs land in the order their validation finished; the
-/// second is rebased onto the first landing and main stays linear with one
-/// commit per task, whether or not a checkout has main checked out.
-#[test]
-fn runs_land_fifo_by_validation_time_and_later_ones_are_rebased() {
+fn runs_land_fifo_by_validation_time_passing_over_a_held_task_and_later_ones_are_rebased() {
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
@@ -1297,62 +1168,85 @@ fn runs_land_fifo_by_validation_time_and_later_ones_are_rebased() {
         first.id()
     );
 
-    let outcome = integrate_next(&db, &repo);
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    assert_eq!(outcome["run"]["id"], json!(first.id()));
-    let first_landed = git_out(&repo, &["rev-parse", "main"]);
+    // The first is held: nobody leases a run waiting to land, so it waits
+    // as it is at once, and the second is the next.
+    let user = |args: &[&str]| {
+        let output = crate::common::cli::invoke_with(&[], &db, args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let held_task = first.task_id().to_string();
+    let held = user(&["hold", &held_task, "--reason", "the remote is down"]);
+    assert_eq!(held["state"], "held", "{held}");
     assert_eq!(
         queue.next_awaiting_integration().unwrap().unwrap().id(),
-        second.id()
+        second.id(),
+        "the held run is passed over"
     );
-
-    // No checkout has main now: the ref is updated directly.
-    git(&repo, &["checkout", "-q", "--detach"]);
     let outcome = integrate_next(&db, &repo);
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     assert_eq!(outcome["run"]["id"], json!(second.id()));
+    let earlier_landed = git_out(&repo, &["rev-parse", "main"]);
+    let waiting = queue.show(first.task_id()).unwrap();
+    assert_eq!(waiting.task.status(), TaskStatus::InProgress);
+    assert_eq!(waiting.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(queue.next_awaiting_integration().unwrap().is_none());
     assert_eq!(integrate_next(&db, &repo)["outcome"], "no_run_awaiting");
-    let second_landed = git_out(&repo, &["rev-parse", "main"]);
-    assert_eq!(git_out(&repo, &["rev-parse", "HEAD"]), first_landed); // Detached HEAD untouched.
+
+    // Released, it is the next again. No checkout has main now: the ref
+    // is updated directly.
+    user(&["release", &held_task]);
+    assert_eq!(
+        queue.next_awaiting_integration().unwrap().unwrap().id(),
+        first.id()
+    );
+    git(&repo, &["checkout", "-q", "--detach"]);
+    let outcome = integrate_next(&db, &repo);
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(outcome["run"]["id"], json!(first.id()));
+    assert_eq!(integrate_next(&db, &repo)["outcome"], "no_run_awaiting");
+    let later_landed = git_out(&repo, &["rev-parse", "main"]);
+    assert_eq!(git_out(&repo, &["rev-parse", "HEAD"]), earlier_landed); // Detached HEAD untouched.
     git(&repo, &["checkout", "-q", "main"]);
 
-    let landed_second = queue.show(second.task_id()).unwrap().runs[0].clone();
-    assert_landed(&repo, &landed_second, "task ", &first_landed);
-    let landed_first = queue.show(first.task_id()).unwrap().runs[0].clone();
+    let landed_later = queue.show(first.task_id()).unwrap().runs[0].clone();
+    assert_landed(&repo, &landed_later, "task ", &earlier_landed);
+    let landed_earlier = queue.show(second.task_id()).unwrap().runs[0].clone();
     assert_eq!(
-        landed_first.result_commit().map(CommitSha::as_str),
-        Some(first_landed.as_str())
+        landed_earlier.result_commit().map(CommitSha::as_str),
+        Some(earlier_landed.as_str())
     );
-    // Linear: seed → first → second, one commit per task, both files present.
+    // Linear: seed → earlier → later, one commit per task, both files present.
     assert_eq!(
         git_out(&repo, &["rev-list", "--first-parent", "main"])
             .lines()
             .collect::<Vec<_>>(),
-        [second_landed.as_str(), first_landed.as_str(), seed.as_str()]
+        [
+            later_landed.as_str(),
+            earlier_landed.as_str(),
+            seed.as_str()
+        ]
     );
     assert!(repo.join("a.txt").exists() && repo.join("b.txt").exists());
-    // The second run was rebased: its history ref sits on the first landing.
+    // The later run was rebased: its history ref sits on the earlier landing.
     let history = git_out(
         &repo,
-        &["rev-parse", &format!("refs/dagq/runs/{}", second.id())],
+        &["rev-parse", &format!("refs/dagq/runs/{}", first.id())],
     );
-    assert_ne!(history, second.result_commit().cloned().unwrap());
+    assert_ne!(history, first.result_commit().cloned().unwrap());
     assert_eq!(
         git_out(&repo, &["rev-parse", &format!("{history}^")]),
-        first_landed
+        earlier_landed
     );
     let rebased = queue
-        .show(second.task_id())
+        .show(first.task_id())
         .unwrap()
         .events
         .into_iter()
         .find(|e| e.kind == EventKind::IntegrationRebased)
         .unwrap();
-    assert_eq!(rebased.payload["main"], json!(first_landed));
-    assert_eq!(
-        rebased.payload["head_before"],
-        json!(second.result_commit())
-    );
+    assert_eq!(rebased.payload["main"], json!(earlier_landed));
+    assert_eq!(rebased.payload["head_before"], json!(first.result_commit()));
     assert_eq!(rebased.payload["head_after"], json!(history));
     for task in [a, b] {
         assert_eq!(
@@ -1363,40 +1257,30 @@ fn runs_land_fifo_by_validation_time_and_later_ones_are_rebased() {
     assert!(queue.run_leases().unwrap().is_empty());
 }
 
-/// The rebase applies cleanly but the earlier landing broke this run's
-/// verification (a semantic conflict): the run is parked with the rebased
-/// tree in place so a session can fix it on top of main.
+/// Boundary (process, Git, the run directory): validation does not run
+/// the verification commands, so a commit they fail is accepted there and
+/// parked as `needs_session` by integrate, whose run of the commands is the
+/// only one (ADR-0023). Here the rebase applies cleanly but the earlier
+/// landing broke this run's verification (a semantic conflict): the run is
+/// parked with the rebased tree in place so a session can fix it on top of
+/// main, each attempt keeps its own logs, and the recovery job and the
+/// review read the latest. The failure's classification and wording are
+/// `a_failed_verification_command_is_classified_from_its_exit_and_log`'s,
+/// the logs' names `integrate_logs_are_kept_per_attempt_and_old_names_are_read`'s
+/// and what the recovery job is shown
+/// `the_ended_runs_material_shows_the_latest_integrate_attempt_and_names_the_earlier`'s.
 #[test]
 fn verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree() {
     let (_dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let breaker = queue
-        .add(NewTask {
-            title: "drop seed".into(),
-            description: String::new(),
-            acceptance: String::new(),
-            verification_commands: vec!["true".into()],
-            required_evidence: Vec::new(),
-            paths: Vec::new(),
-            priority: Default::default(),
-            change: None,
-            dependencies: vec![],
-            goal_dependencies: Vec::new(),
-            goal_id: None,
-            context: String::new(),
-            provider: None,
-            worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
-            wait_for_build: false,
-            execution_class: Default::default(),
-        })
-        .unwrap()
-        .id();
-    queue.transition(breaker, TaskAction::BypassReview).unwrap();
-    backend.script_for(
-        breaker.as_i64(),
-        "git rm -q seed.txt && git commit -q -m 'drop seed'; receipt \"$(git rev-parse HEAD)\"",
+    let breaker = add_script_task(
+        &mut queue,
+        &backend,
+        "drop seed",
+        "git rm -q seed.txt",
+        &["true"],
     );
     let victim = add_file_task(
         &mut queue,
@@ -1408,6 +1292,10 @@ fn verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree(
     );
     supervise(&db, &repo, &backend).unwrap();
     backend.join();
+    let detail = queue.show(victim).unwrap();
+    let run = detail.runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert!(!event_kinds(&detail).contains(&"verification_command"));
     assert_eq!(
         integrate(&db, breaker.as_i64(), &repo).unwrap()["outcome"],
         "integrated"
@@ -1415,29 +1303,43 @@ fn verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree(
     let main = git_out(&repo, &["rev-parse", "main"]);
     assert!(!repo.join("seed.txt").exists());
 
-    let run = queue.show(victim).unwrap().runs[0].clone();
     let outcome = integrate(&db, victim.as_i64(), &repo).unwrap();
     assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
     let reason = outcome["reason"].as_str().unwrap();
     assert!(
-        reason.contains("\"test -f seed.txt\" exited with 1 after the rebase"),
+        reason.contains("verification command \"test -f seed.txt\" exited with 1 after the rebase"),
         "{reason}"
     );
+    assert!(reason.contains("integrate-1-verify-1.log"), "{reason}");
     let worktree = PathBuf::from(run.worktree_path().unwrap());
-    let head = git_out(&worktree, &["rev-parse", "HEAD"]);
-    assert_ne!(head, run.result_commit().cloned().unwrap());
+    let rebased = git_out(&worktree, &["rev-parse", "HEAD"]);
+    assert_ne!(rebased, run.result_commit().cloned().unwrap());
     assert_eq!(git_out(&worktree, &["rev-parse", "HEAD^"]), main);
     assert_eq!(git_out(&worktree, &["status", "--porcelain"]), "");
-    assert!(
-        Path::new(run.run_dir().unwrap())
-            .join("integrate-1-verify-1.log")
-            .exists()
-    );
-    let parked = queue.show(victim).unwrap().runs[0].clone();
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let first = run_dir.join("integrate-1-verify-1.log");
+    assert!(first.exists());
+    let detail = queue.show(victim).unwrap();
+    let parked = detail.runs[0].clone();
     assert_eq!(parked.status(), RunStatus::NeedsSession);
     assert_eq!(git_out(&repo, &["rev-parse", "main"]), main);
+    // The failure is recorded with the command's index and exit code
+    // (ADR-0034), its time and load (task 197), and nothing landed.
+    let deferred = payloads(&detail, "integration_deferred");
+    assert_eq!(deferred[0]["code"], "verification_failed");
+    assert_eq!(deferred[0]["index"], 1);
+    assert_eq!(deferred[0]["exit_code"], 1);
+    let unknown = json!({"class": "unknown", "evidence": "exit 1 with an empty log"});
+    assert_eq!(deferred[0]["failure"], unknown);
+    assert_eq!(deferred[0]["signal"], Value::Null);
+    let verifications = integration_verifications(&detail);
+    assert_eq!(verifications.len(), 1, "{verifications:?}");
+    assert_eq!(verifications[0]["exit_code"], 1);
+    assert_eq!(verifications[0]["failure"], unknown);
+    assert_eq!(verifications[0]["attempt"], 1);
+    assert!(verifications[0]["duration_secs"].is_number());
+    assert_load(verifications[0]);
     // The receipt was read and recorded before the verification failed.
-    let detail = queue.show(victim).unwrap();
     let recorded = integration_receipts(&detail);
     assert_eq!(recorded.len(), 1, "{recorded:?}");
     assert_eq!(
@@ -1461,6 +1363,60 @@ fn verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree(
         .rposition(|k| *k == "integration_deferred")
         .unwrap();
     assert!(receipt_at < deferred_at, "{kinds:?}");
+
+    // A second integrate of the run at the rebased head keeps the first
+    // attempt's log: each attempt writes its own `integrate-<attempt>-verify-N.log`.
+    fs::write(&first, "the first attempt's output\n").unwrap();
+    write_receipt(&parked, &rebased, "succeeded", "rebased");
+    let outcome = integrate(&db, victim.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
+    assert!(
+        outcome["reason"]
+            .as_str()
+            .unwrap()
+            .contains("integrate-2-verify-1.log"),
+        "{outcome}"
+    );
+    let second = run_dir.join("integrate-2-verify-1.log");
+    assert!(second.exists());
+    assert_eq!(
+        fs::read_to_string(&first).unwrap(),
+        "the first attempt's output\n"
+    );
+    let detail = queue.show(victim).unwrap();
+    let verifications = integration_verifications(&detail);
+    assert_eq!(verifications.len(), 2, "{verifications:?}");
+    assert_eq!(verifications[1]["attempt"], 2);
+    assert_eq!(
+        verifications[1]["log_path"],
+        json!(second.to_str().unwrap())
+    );
+    // The recovery job and review.md read the latest attempt's log.
+    let prompt = runtime::ended_run_material(
+        &detail,
+        &detail.runs[0],
+        Default::default(),
+        Default::default(),
+        run_dir,
+    );
+    assert!(
+        prompt.contains(&format!("Verification log {} (end)", second.display())),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!(
+            "Logs of earlier integrate attempts (not shown): {}",
+            first.display()
+        )),
+        "{prompt}"
+    );
+    runtime::review(&db, victim).unwrap();
+    let review = fs::read_to_string(run_dir.join("review.md")).unwrap();
+    assert!(
+        review.contains(&format!("latest attempt: {}", second.display())),
+        "{review}"
+    );
+
     // The session restores what the verification needs and reports the new head.
     fs::write(worktree.join("seed.txt"), "restored\n").unwrap();
     git(&worktree, &["add", "seed.txt"]);
@@ -1480,9 +1436,9 @@ fn verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree(
     assert!(repo.join("seed.txt").exists() && repo.join("v.txt").exists());
     let detail = queue.show(victim).unwrap();
     let recorded = integration_receipts(&detail);
-    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    assert_eq!(recorded.len(), 3, "{recorded:?}");
     assert_eq!(
-        recorded[1]["commit"],
+        recorded[2]["commit"],
         json!(git_out(
             &repo,
             &["rev-parse", &format!("refs/dagq/runs/{}", run.id())]
@@ -1490,13 +1446,15 @@ fn verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree(
     );
 }
 
-/// One run lands at a time. An `integrate` process that dies leaves the run
-/// `integrating` with a stale lease; `recover` puts it back in the queue
-/// instead of interrupting it, and the next `integrate` lands it. A landing
-/// that cannot fast-forward the main checkout gives the slot back too.
+/// Boundary (SQLite leases, recovery): one run lands at a time, and the
+/// queue is not rebound while one lands. An `integrate` process that dies
+/// leaves the run `integrating` with a stale lease; `recover` puts it back
+/// in the queue instead of interrupting it, and the next `integrate` lands
+/// it. A landing that cannot fast-forward the main checkout gives the slot
+/// back too. Which refusal a rebind meets is `a_live_supervisor_or_an_integrating_run_refuses_the_rebind`'s.
 #[test]
 fn integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable() {
-    let (_dir, repo, db) = fixture();
+    let (dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let other = add_file_task(
@@ -1529,6 +1487,13 @@ fn integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable() {
     );
     let error = format!("{:#}", integrate(&db, 1, &repo).unwrap_err());
     assert!(error.contains("is already integrating"), "{error}");
+    // An `integrate` in progress holds the repository's paths, so the
+    // queue is not rebound meanwhile.
+    let elsewhere = dir.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    crate::common::template::repository(&elsewhere, "elsewhere\n");
+    let refused = runtime::rebind(&db, &elsewhere).unwrap_err().to_string();
+    assert!(refused.contains("is integrating"), "{refused}");
     assert!(
         queue
             .begin_integration(run.id(), &LeaseToken::new("again"), &sha(&seed))
@@ -1706,22 +1671,11 @@ fn rebind_follows_a_moved_repository_and_the_awaiting_run_lands() {
     assert_landed(&moved, &landed, "test task", &seed);
 }
 
-/// An `integrate` in progress holds the old repository's paths as well.
-#[test]
-fn rebind_is_refused_while_a_run_is_integrating() {
-    let (dir, repo, db, run) = awaiting_run();
-    let main = git_out(&repo, &["rev-parse", "main"]);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue
-        .begin_integration(run.id(), &LeaseToken::new("integrator"), &sha(&main))
-        .unwrap();
-    let other = dir.path().join("other");
-    fs::create_dir(&other).unwrap();
-    crate::common::template::repository(&other, "other\n");
-    let refused = runtime::rebind(&db, &other).unwrap_err().to_string();
-    assert!(refused.contains("is integrating"), "{refused}");
-}
-
+/// Boundary (SQLite): the landing registers its receipt's follow_ups in
+/// the store's transaction, after the landing only, once per entry, as
+/// drafts of the goal while it is open and of none once it is closed, with
+/// their origin and `follow_up_registered` events. What each entry
+/// becomes is `a_receipts_follow_up_is_a_draft_of_the_goal_or_skipped_with_the_reason`'s.
 #[test]
 fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     let (_dir, repo, db) = fixture();
@@ -1751,8 +1705,7 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     let follow_ups = json!([
         {"title": "later work", "description": "outside the task", "category": "defect", "membership_proposal": proposal},
         {"title": "  ", "description": "no title, not a task", "category": "ops", "membership_proposal": {"classification": "maybe"}},
-        {"title": "more work", "description": ""},
-        {"title": "no description"}
+        {"title": "more work", "description": ""}
     ]);
 
     // A receipt that does not name the head parks the run: nothing landed,
@@ -1807,11 +1760,6 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
                 "follow_up": {"title": "  ", "description": "no title, not a task", "category": "ops", "membership_proposal": {"classification": "maybe"}},
             }),
             json!({"task_id": 3, "title": "more work", "index": 2, "category": "unlabeled", "membership_proposal": null, "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "open", "source_goal_provenance": "recorded", "follow_up_depth": 1}),
-            json!({
-                "task_id": null, "title": "no description", "index": 3, "category": "unlabeled",
-                "skipped": "description is not a string",
-                "follow_up": {"title": "no description"},
-            }),
         ]
     );
     // The draft's origin keeps the worker's category (ADR-t947-3).
@@ -1840,7 +1788,7 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
         runtime::register_follow_ups(&mut queue, &task, run.id(), Some(&follow_ups)).is_empty()
     );
     assert_eq!(queue.list(&Default::default()).unwrap().total, 2);
-    assert_eq!(events_of(&db, run.id(), "follow_up_registered").len(), 4);
+    assert_eq!(events_of(&db, run.id(), "follow_up_registered").len(), 3);
     // `stats` puts the drafts next to the landing that registered them,
     // and counts one canceled (task 470).
     crate::common::cli::ok(&db, &["cancel", "3", "--reason", "not_worth"]);
@@ -1880,126 +1828,11 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     assert_eq!(detail.task.status(), TaskStatus::Draft);
     assert_eq!(detail.task.goal_id(), None);
     assert_eq!(
-        events_of(&db, run.id(), "follow_up_registered")[4],
-        json!({"task_id": added[0].task_id, "title": "after the goal", "index": 4, "category": "unlabeled", "membership_proposal": null, "goal_closed": true, "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "closed", "source_goal_provenance": "recorded", "follow_up_depth": 1})
+        events_of(&db, run.id(), "follow_up_registered")[3],
+        json!({"task_id": added[0].task_id, "title": "after the goal", "index": 3, "category": "unlabeled", "membership_proposal": null, "goal_closed": true, "source_task_id": 1, "source_run_id": run.id(), "source_goal_id": goal.id(), "source_goal_state": "closed", "source_goal_provenance": "recorded", "follow_up_depth": 1})
     );
     // Nothing to register without follow_ups.
     assert!(runtime::register_follow_ups(&mut queue, &task, run.id(), None).is_empty());
-}
-
-/// Validation does not run the verification commands, so a commit that
-/// breaks them is accepted there and parked as `needs_session` by
-/// integrate, whose run of the commands is the only one (ADR-0023).
-#[test]
-fn failing_verification_command_passes_validation_and_needs_a_session_at_integrate() {
-    let (_dir, db, detail) = run_agent(
-        "git rm -q seed.txt && git commit -q -m 'drop seed'; receipt \"$(git rev-parse HEAD)\"",
-    );
-    let run = detail.runs[0].clone();
-    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
-    assert!(!event_kinds(&detail).contains(&"verification_command"));
-    let repo = Path::new(&db).parent().unwrap().join("repo's directory");
-    let main = git_out(&repo, &["rev-parse", "main"]);
-    let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
-    let reason = outcome["reason"].as_str().unwrap();
-    assert!(
-        reason.contains("verification command \"test -f seed.txt\" exited with 1"),
-        "{reason}"
-    );
-    assert!(reason.contains("integrate-1-verify-1.log"), "{reason}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(1))
-        .unwrap();
-    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
-    // The failure is classified, with the command's index and exit code (ADR-0034).
-    let deferred = payloads(&detail, "integration_deferred");
-    assert_eq!(deferred[0]["code"], "verification_failed");
-    assert_eq!(deferred[0]["index"], 1);
-    assert_eq!(deferred[0]["exit_code"], 1);
-    // With nothing in the log it is `unknown` (task 467).
-    let unknown = json!({"class": "unknown", "evidence": "exit 1 with an empty log"});
-    assert_eq!(deferred[0]["failure"], unknown);
-    assert_eq!(deferred[0]["signal"], Value::Null);
-    let verifications = integration_verifications(&detail);
-    assert_eq!(verifications.len(), 1, "{verifications:?}");
-    assert_eq!(verifications[0]["exit_code"], 1);
-    assert_eq!(verifications[0]["failure"], unknown);
-    assert_eq!(verifications[0]["attempt"], 1);
-    // The duration and load of task 197 are there, next to it.
-    assert!(verifications[0]["duration_secs"].is_number());
-    assert_load(verifications[0]);
-    // Nothing landed.
-    assert_eq!(git_out(&repo, &["rev-parse", "main"]), main);
-
-    // A second integrate of the same run keeps the first attempt's log: each
-    // attempt writes its own `integrate-<attempt>-verify-N.log`.
-    let run = &detail.runs[0];
-    let run_dir = Path::new(run.run_dir().unwrap());
-    let first = run_dir.join("integrate-1-verify-1.log");
-    fs::write(&first, "the first attempt's output\n").unwrap();
-    let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
-    assert!(
-        outcome["reason"]
-            .as_str()
-            .unwrap()
-            .contains("integrate-2-verify-1.log"),
-        "{outcome}"
-    );
-    let second = run_dir.join("integrate-2-verify-1.log");
-    assert!(second.exists());
-    assert_eq!(
-        fs::read_to_string(&first).unwrap(),
-        "the first attempt's output\n"
-    );
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(1))
-        .unwrap();
-    let verifications = integration_verifications(&detail);
-    assert_eq!(verifications.len(), 2, "{verifications:?}");
-    assert_eq!(verifications[1]["attempt"], 2);
-    assert_eq!(
-        verifications[1]["log_path"],
-        json!(second.to_str().unwrap())
-    );
-
-    // The recovery job reads the latest attempt's log and names the
-    // earlier one.
-    let run = &detail.runs[0];
-    let prompt = runtime::ended_run_material(
-        &detail,
-        run,
-        Default::default(),
-        Default::default(),
-        run_dir,
-    );
-    assert!(
-        prompt.contains(&format!("Verification log {} (end)", second.display())),
-        "{prompt}"
-    );
-    assert!(
-        !prompt.contains(&format!("Verification log {} (end)", first.display())),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains(&format!(
-            "Logs of earlier integrate attempts (not shown): {}",
-            first.display()
-        )),
-        "{prompt}"
-    );
-    // review.md names the latest attempt's logs.
-    let head = run.result_commit().cloned().unwrap();
-    write_receipt_json(run, session_receipt(run, head.as_str(), "succeeded", "s"));
-    runtime::review(&db, TaskId::new(1)).unwrap();
-    let review = fs::read_to_string(run_dir.join("review.md")).unwrap();
-    assert!(
-        review.contains(&format!("latest attempt: {}", second.display())),
-        "{review}"
-    );
 }
 
 /// A task that runs `script` in its worktree before committing everything
@@ -2335,114 +2168,4 @@ fn assert_load(payload: &Value) {
         mean.zip(max).is_some_and(|(mean, max)| mean <= max),
         "{payload}"
     );
-}
-
-/// A person's `integrate` asks the Integrator to land (ADR-t728-2): the
-/// approval is the person's, and the landing and the push are the
-/// Integrator's at the person's request.
-#[test]
-fn integrate_records_the_requester_and_the_integrator() {
-    let (_dir, repo, db, run) = awaiting_run();
-    let remote = TestRemote::default();
-    let outcome = integrate_with(&db, &repo, Some(&remote));
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(1))
-        .unwrap();
-    let actor_of = |kind: &str| {
-        let actor = detail
-            .events
-            .iter()
-            .find(|e| e.kind.as_str() == kind && e.run_id.as_ref() == Some(run.id()))
-            .unwrap_or_else(|| panic!("no {kind}"))
-            .actor
-            .clone()
-            .expect("an actor");
-        (actor.role, actor.id, actor.requested_by)
-    };
-    assert_eq!(
-        actor_of("integration_approved"),
-        ("user".to_owned(), "user".to_owned(), None)
-    );
-    let integrator = format!("integrator:{}", std::process::id());
-    for kind in ["verification_command", "run_integrated", "push_finished"] {
-        assert_eq!(
-            actor_of(kind),
-            (
-                "integrator".to_owned(),
-                integrator.clone(),
-                Some("user".to_owned())
-            ),
-            "{kind}"
-        );
-    }
-}
-
-/// Boundary (ADR-t1879-1): a held task's run awaiting integration is not
-/// the next to land: `integrate --next` passes over it, though it validated
-/// first, and lands the next run; the held run waits as it is, and once
-/// released it is the next again and lands.
-#[test]
-fn integrate_next_passes_over_a_held_tasks_run_and_lands_the_next() {
-    let (_dir, repo, db) = fixture();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let a = add_file_task(
-        &mut queue,
-        &backend,
-        "task a",
-        "a.txt",
-        "a",
-        &["test -f seed.txt"],
-    );
-    let b = add_file_task(
-        &mut queue,
-        &backend,
-        "task b",
-        "b.txt",
-        "b",
-        &["test -f seed.txt"],
-    );
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["runs"].as_array().unwrap().len(), 2);
-    let first = queue.next_awaiting_integration().unwrap().unwrap();
-    let held_task = first.task_id();
-    let other = if held_task == a { b } else { a };
-    let user = |args: &[&str]| {
-        let output = crate::common::cli::invoke_with(&[], &db, args);
-        assert!(output.status.success(), "{args:?}: {output:?}");
-        serde_json::from_slice::<Value>(&output.stdout).unwrap()
-    };
-    let held = user(&[
-        "hold",
-        &held_task.to_string(),
-        "--reason",
-        "the remote is down",
-    ]);
-    // Nobody leases a run waiting to land: it waits as it is at once.
-    assert_eq!(held["state"], "held", "{held}");
-    let next = queue.next_awaiting_integration().unwrap().unwrap();
-    assert_eq!(next.task_id(), other, "the held run is passed over");
-    let outcome = integrate_next(&db, &repo);
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    assert_eq!(outcome["run"]["id"], json!(next.id()));
-    assert_eq!(
-        queue.show(other).unwrap().task.status(),
-        TaskStatus::Completed
-    );
-    let waiting = queue.show(held_task).unwrap();
-    assert_eq!(waiting.task.status(), TaskStatus::InProgress);
-    assert_eq!(waiting.runs[0].status(), RunStatus::AwaitingIntegration);
-    assert!(queue.next_awaiting_integration().unwrap().is_none());
-    user(&["release", &held_task.to_string()]);
-    assert_eq!(
-        queue.next_awaiting_integration().unwrap().unwrap().id(),
-        first.id()
-    );
-    let outcome = integrate_next(&db, &repo);
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    assert_eq!(outcome["run"]["id"], json!(first.id()));
 }

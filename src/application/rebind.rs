@@ -1,14 +1,14 @@
 //! `rebind` (ADR-0020): bind the queue to the repository it moved to, the
 //! only way the binding changes.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
 use super::{
     Clock, ProcessControl, Repository, RunCoordination, RunFiles, RunLog, SupervisorRegistry,
 };
-use crate::domain::RunStatus;
+use crate::domain::{RunId, RunStatus, TaskId};
 
 /// Append-only record of `rebind` under the queue's `logs/`, one JSON
 /// object per changed binding; the schema has no queue-level event.
@@ -65,25 +65,23 @@ pub fn rebind<Q: RunCoordination + SupervisorRegistry + RunLog + ?Sized>(
         .filter(|registration| processes.alive(registration.pid))
         .map(|registration| registration.pid)
         .collect::<Vec<_>>();
-    ensure!(
-        live.is_empty(),
-        "refusing to rebind while a supervisor is running (pid {live:?}); stop it with `down --wait` first"
-    );
+    if let Some(refusal) = rebind_refusal(&live, None) {
+        bail!(refusal);
+    }
     let leases = queue.run_leases()?;
-    if let Some(run) = queue
+    let integrating = queue
         .runs_with_status(RunStatus::Integrating)?
         .into_iter()
         .find(|run| {
             leases
                 .iter()
                 .any(|lease| lease.run_id == *run.id() && processes.alive(lease.pid))
-        })
-    {
-        bail!(
-            "refusing to rebind while run {} of task {} is integrating",
-            run.id(),
-            run.task_id()
-        );
+        });
+    if let Some(refusal) = rebind_refusal(
+        &live,
+        integrating.as_ref().map(|run| (run.id(), run.task_id())),
+    ) {
+        bail!(refusal);
     }
     let previous = queue.rebind_repository(&common_dir)?;
     let changed = previous.as_deref() != Some(common_dir.as_str());
@@ -135,6 +133,22 @@ pub fn rebind<Q: RunCoordination + SupervisorRegistry + RunLog + ?Sized>(
     }))
 }
 
+/// Why the queue may not be rebound now, or `None` when it may: a live
+/// supervisor (`live`, the pids of the registered ones that are alive)
+/// holds the old repository's paths, and so does an `integrate` in
+/// progress (`integrating`, a run integrating under a live lease, with its
+/// task). The supervisors are named first.
+fn rebind_refusal(live: &[u32], integrating: Option<(&RunId, TaskId)>) -> Option<String> {
+    if !live.is_empty() {
+        return Some(format!(
+            "refusing to rebind while a supervisor is running (pid {live:?}); stop it with `down --wait` first"
+        ));
+    }
+    integrating.map(|(run, task)| {
+        format!("refusing to rebind while run {run} of task {task} is integrating")
+    })
+}
+
 /// The answer of [`rebind`] with each run worktree it lists given its Git
 /// link again from `repository`, the one the queue is bound to now: whether
 /// it was repaired, and the error when not.
@@ -151,4 +165,31 @@ pub fn repair_worktrees(repository: &dyn Repository, mut answer: Value) -> Value
         }
     }
     answer
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A live supervisor refuses the rebind before anything else, an
+    /// `integrate` in progress refuses it naming its run and task, and
+    /// with neither the queue may be rebound (ADR-0020).
+    #[test]
+    fn a_live_supervisor_or_an_integrating_run_refuses_the_rebind() {
+        let run = RunId::new("00000000-0000-4000-8000-000000000001").unwrap();
+        let integrating = Some((&run, TaskId::new(4)));
+        let supervisor = "refusing to rebind while a supervisor is running (pid [12, 34]); stop it with `down --wait` first";
+        assert_eq!(rebind_refusal(&[12, 34], None).as_deref(), Some(supervisor));
+        assert_eq!(
+            rebind_refusal(&[12, 34], integrating).as_deref(),
+            Some(supervisor)
+        );
+        assert_eq!(
+            rebind_refusal(&[], integrating).as_deref(),
+            Some(
+                "refusing to rebind while run 00000000-0000-4000-8000-000000000001 of task 4 is integrating"
+            )
+        );
+        assert_eq!(rebind_refusal(&[], None), None);
+    }
 }

@@ -1410,6 +1410,90 @@ mod tests {
         assert_eq!(empty.matches("### Context").count(), 1);
     }
 
+    /// review.md lists the task, its goal, the receipt with its checks and
+    /// follow-ups, then the commits, the diffstat and the diff's heading in
+    /// this order; the logs and the stat are fenced, and a follow-up's
+    /// missing title or description reads `(untitled)` or nothing.
+    #[test]
+    fn the_review_material_lists_the_task_goal_receipt_and_follow_ups_in_order() {
+        let goal = Goal::restore(crate::domain::GoalRecord {
+            priority: Default::default(),
+            tags: Vec::new(),
+            id: crate::domain::GoalId::new(1),
+            title: "goal title".into(),
+            description: String::new(),
+            acceptance: "goal acceptance".into(),
+            constraints: "goal constraints".into(),
+            doc: None,
+            status: crate::domain::GoalStatus::Open,
+            closed_at: None,
+            verdict: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .unwrap();
+        let receipt = Receipt::parse(
+            &json!({
+                "run_id": RUN, "result": "succeeded", "commit": SHA,
+                "tests": {"status": "passed", "evidence_or_reason": "reran"},
+                "e2e": {"status": "not_applicable", "evidence_or_reason": "none"},
+                "subagent_review": {"status": "not_applicable", "evidence_or_reason": "session"},
+                "summary": "summary of the change",
+                "follow_ups": [
+                    {"title": "later work", "description": "outside the task"},
+                    {"description": "no title"},
+                    {"title": "no description"}
+                ],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let text = review_markdown(
+            &MemoryFiles::default(),
+            &task(""),
+            &run(),
+            Some(&goal),
+            &receipt,
+            "b",
+            "h",
+            "1111111 work",
+            " change.txt | 1 +",
+            None,
+            &PersonAnswers::default(),
+        );
+        let sections = [
+            "# Review of task 7: work",
+            "## Task",
+            "### Description\n\nchange the behavior",
+            "### Acceptance\n\nthe behavior changes",
+            "### Verification commands\n\n```sh\nmake gate\n```",
+            "## Goal 1: goal title",
+            "### Goal acceptance\n\ngoal acceptance",
+            "### Goal constraints\n\ngoal constraints",
+            "## Receipt",
+            "### Summary\n\nsummary of the change",
+            "### Tests: passed\n\nreran",
+            "### E2E: not_applicable\n\nnone",
+            "### Subagent review: not_applicable\n\nsession",
+            "### Follow-ups\n\n- later work: outside the task\n- (untitled): no title\n- no description: \n",
+            "## Commits\n\n`git log --oneline b..h`\n\n```\n1111111 work\n```",
+            "## Diffstat\n\n`git diff --stat b...h`\n\n```\n change.txt | 1 +\n```",
+            "## Diff\n\n`git diff b...h`\n\n",
+        ];
+        let mut at = 0;
+        for section in sections {
+            let found = text[at..]
+                .find(section)
+                .unwrap_or_else(|| panic!("{section:?} missing after byte {at}:\n{text}"));
+            at += found + section.len();
+        }
+        assert_eq!(at, text.len(), "the diff's heading ends the text:\n{text}");
+        // Without a goal there is no goal section, and no follow-ups read `(none)`.
+        let plain = material(&task(""));
+        assert!(!plain.contains("## Goal"), "{plain}");
+        assert!(plain.contains("### Follow-ups\n\n(none)\n"), "{plain}");
+    }
+
     /// A repository whose landing branch is at [`SHA`] and holds `files`
     /// there only, and whose reviewed range changes `changed`: what
     /// [`snapshot_subagents`] reads, with nothing else. `merge_bases`
