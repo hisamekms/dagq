@@ -20,10 +20,6 @@ pub enum StoppedRead {
     Kpi,
     /// `report` and `report_inputs`.
     Report,
-    /// `marks`.
-    Marks,
-    /// `mark` and `mark --retract`.
-    Mark,
     /// The supervisor's use case's `all_events`.
     AllEvents,
 }
@@ -37,23 +33,18 @@ impl StoppedRead {
             Self::StatsInputs => "stats_inputs",
             Self::Kpi => "kpi",
             Self::Report => "report",
-            Self::Marks => "marks",
-            Self::Mark => "mark",
             Self::AllEvents => "all_events",
         }
     }
 
     /// What ends the stop of the entry, in plain words (the runtime's text
     /// cites none of dagq's own tasks). For maintainers: the ledger's
-    /// reader of stats, kpi and report is task 1669, the marks' read the marks task of goal 235, and task 1671
-    /// removes `stats --ledger`.
+    /// reader of stats, kpi and report is task 1669, and task 1671 removes
+    /// `stats --ledger`.
     pub fn restored_by(self) -> &'static str {
         match self {
             Self::Stats | Self::StatsInputs | Self::Kpi | Self::Report => {
                 "the ledger's reader of stats, kpi and report brings it back"
-            }
-            Self::Marks | Self::Mark => {
-                "a read of the marks that does not read every event brings it back"
             }
             Self::StatsLedger => "it is removed once stats reads the ledger",
             Self::AllEvents => {
@@ -126,12 +117,6 @@ mod tests {
                 "report is stopped",
                 "reader of stats, kpi and report",
             ),
-            (
-                StoppedRead::Marks,
-                "marks is stopped",
-                "a read of the marks",
-            ),
-            (StoppedRead::Mark, "mark is stopped", "a read of the marks"),
             (
                 StoppedRead::StatsLedger,
                 "stats --ledger is stopped",

@@ -1023,7 +1023,7 @@ where
         QueueRead::Kpi(read) => observation::kpi(queue, sources, read),
         QueueRead::Forecast(read) => observation::forecast(queue, sources, read),
         QueueRead::Notes(read) => observation::notes(queue, read),
-        QueueRead::Marks(read) => observation::marks(read),
+        QueueRead::Marks(read) => observation::marks(queue, read),
         QueueRead::Findings(read) => observation::findings(queue, sources, read),
         QueueRead::ObserveHistory(read) => observation::observe_history(queue, read),
         QueueRead::ObserveInput(read) => observation::observe_input::<Q, S>(sources, read),

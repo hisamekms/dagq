@@ -429,23 +429,19 @@ fn the_planning_commands_go_through_the_service_as_their_caller_and_print_as_on_
             .iter()
             .any(|actor| *actor == json!({"role": "planner", "id": "planner:2"}))
     );
-    // Stopped while it reads every event of the queue (ADR-t3745-1): the marks task of goal 235 takes this cfg off.
-    #[cfg(any())]
-    {
-        let marked = printed(&served(
-            &served_queue,
-            Who::User,
-            &["mark", "m", "--note", "n"],
-        ));
-        let retracted = printed(&served(
-            &served_queue,
-            Who::Inbox,
-            &["mark", "--retract", &marked["id"].to_string()],
-        ));
-        assert_eq!(retracted["kind"], "mark_retracted", "{retracted}");
-        assert_eq!(retracted["detail"]["mark"], marked["id"], "{retracted}");
-        assert_eq!(retracted["detail"]["by"], "inbox", "{retracted}");
-    }
+    let marked = printed(&served(
+        &served_queue,
+        Who::User,
+        &["mark", "m", "--note", "n"],
+    ));
+    let retracted = printed(&served(
+        &served_queue,
+        Who::Inbox,
+        &["mark", "--retract", &marked["id"].to_string()],
+    ));
+    assert_eq!(retracted["kind"], "mark_retracted", "{retracted}");
+    assert_eq!(retracted["detail"]["mark"], marked["id"], "{retracted}");
+    assert_eq!(retracted["detail"]["by"], "inbox", "{retracted}");
 }
 
 /// A worker's client-mode `dagq`, as the principal of its run's token.

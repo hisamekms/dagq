@@ -606,9 +606,8 @@ enum Command {
     /// Record a change mark: a change the KPIs should be compared before and after (a setting,
     /// the operation, the host). With --retract, record that an earlier mark (a `dagq mark` or
     /// a `[run.env]` change) was none. Prints the mark. Not for the observer or a job.
-    /// Stopped in this build, --retract too: refused before it reads, as it reads every event of
-    /// the queue; a read of the marks that does not read every event brings it back.
-    // ADR-t3745-1; the marks task of goal 235 brings it back.
+    /// Reads no other event than the one --at or --retract names, the retractions of that mark
+    /// and the mark it records.
     #[command(group = clap::ArgGroup::new("mark").required(true))]
     Mark {
         /// Short name of the change, e.g. "parallel 4→3" or "host arm64".
@@ -630,10 +629,9 @@ enum Command {
     /// (supervisor start, handoff and stop, `[run.env]` changes, `dagq mark` and its
     /// retractions) and the ones derived from the claims (`derived:dagq_version`,
     /// `derived:claude_version`, `derived:codex_version`, `derived:parallel`,
-    /// `derived:toolchain`). Reads only.
-    /// Stopped in this build: refused before it reads, as it reads every event of the queue; a
-    /// read of the marks that does not read every event brings it back.
-    // ADR-t3745-1; the marks task of goal 235 brings it back.
+    /// `derived:toolchain`). Reads only: every event of the marks' kinds and the claims, whatever
+    /// the window (a mark may take effect before it is written), and no other event than the few
+    /// before an event id cursor that give its time.
     Marks {
         /// Event id, `@<unix seconds>` or an RFC 3339 time: only marks after it.
         #[arg(long)]

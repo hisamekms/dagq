@@ -28,8 +28,7 @@ fn assert_stopped(text: &str, entry: &str, restored: &str) {
     assert!(text.contains(restored), "{text}");
 }
 
-/// Each stopped command exits non-zero with the refusal as `{"error"}`,
-/// and records nothing: `mark` and `mark --retract` write no mark.
+/// Each stopped command exits non-zero with the refusal as `{"error"}`.
 #[test]
 fn each_stopped_command_is_refused_naming_why_and_what_brings_it_back() {
     let dir = tempfile::tempdir().unwrap();
@@ -71,24 +70,9 @@ fn each_stopped_command_is_refused_naming_why_and_what_brings_it_back() {
             "report",
             "the ledger's reader of stats, kpi and report",
         ),
-        (&["marks"], "marks", "a read of the marks"),
-        (&["mark", "parallel 3→2"], "mark", "a read of the marks"),
-        (&["mark", "--retract", "1"], "mark", "a read of the marks"),
     ] {
         assert_stopped(&refused(&db, args), entry, restored);
     }
-    let marks = common::cli::ok(
-        &db,
-        &[
-            "events",
-            "--all",
-            "--kind",
-            "mark_recorded",
-            "--kind",
-            "mark_retracted",
-        ],
-    );
-    assert_eq!(marks["events"], json!([]), "{marks}");
 }
 
 /// The queue service refuses each stopped read and command it is sent
@@ -133,13 +117,6 @@ fn the_service_refuses_each_stopped_read_it_is_sent() {
             json!({"period": "day"}),
             "report",
             "the ledger's reader of stats, kpi and report",
-        ),
-        (UseCase::Marks, json!({}), "marks", "a read of the marks"),
-        (
-            UseCase::Mark,
-            json!({"label": "x"}),
-            "mark",
-            "a read of the marks",
         ),
     ] {
         let response = call(&queue, None, use_case, params.clone());

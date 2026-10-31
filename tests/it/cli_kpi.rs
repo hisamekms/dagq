@@ -60,7 +60,7 @@ fn kpi_ok(db: &Path, config: &Path, args: &[&str]) -> Value {
 
 /// A fix task and a task without a change land today; the host's
 /// `host.toml` sets `min_samples` and a target; a mark splits a comparison.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
 #[cfg(any())]
 #[test]
 fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
@@ -534,7 +534,7 @@ fn report_out_through_the_service_is_written_by_the_client() {
 /// a target's `change` take it, and a comparison without `--change`
 /// summarises every change it saw. The task's kind is gone: `add --kind`,
 /// `kpi --kind`, `--by kind` and a target's `kind` are refused.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
 #[cfg(any())]
 #[test]
 fn kpi_and_stats_group_the_runs_by_any_label() {
@@ -896,7 +896,7 @@ fn a_target_bound_by_kind_is_refused_with_its_replacement() {
 /// The throughput review's jobs (task 1173) reach `stats --full` and `kpi`
 /// per mode: a skipped hour is no job, `failed` and `error` are failures,
 /// a mode without a job is listed too, and `--compare` reads them.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
 #[cfg(any())]
 #[test]
 fn the_throughput_review_jobs_reach_stats_and_kpi_per_mode() {
@@ -991,7 +991,7 @@ fn the_throughput_review_jobs_reach_stats_and_kpi_per_mode() {
     assert_eq!(strata["mode=hourly"]["before"]["value"], 0.0, "{strata}");
 }
 
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
 #[cfg(any())]
 #[test]
 fn kpi_cross_reaches_periods_and_compare_without_replacing_single_axes() {
@@ -1107,7 +1107,7 @@ fn kpi_cross_reaches_periods_and_compare_without_replacing_single_axes() {
 
 /// Claim the next task with `attributes` in its `run_claimed` and land it;
 /// returns the claim's event id.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
 #[cfg(any())]
 fn land_claimed(db: &Path, queue: &mut SqliteQueue, attributes: Value) -> i64 {
     let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
@@ -1146,7 +1146,7 @@ fn land_claimed(db: &Path, queue: &mut SqliteQueue, attributes: Value) -> i64 {
 
 /// The queue's events a few milliseconds apart, so that each mark has a
 /// time of its own.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
 #[cfg(any())]
 fn tick() {
     std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1157,7 +1157,7 @@ fn tick() {
 /// person's mark next to them is a change of its own, close marks with
 /// them between are still one change, naming one splits at it alone, and
 /// a claim that derives a build and a `parallel` names the `parallel`.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 and the marks task of goal 235 take this cfg off.
+// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
 #[cfg(any())]
 #[test]
 fn kpi_compare_leaves_routine_marks_out_of_every_change() {

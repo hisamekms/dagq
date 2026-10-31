@@ -3,12 +3,8 @@
 //! `stats` makes of a sequence of events is
 //! `domain::stats::event_sequence_tests` (task 1709).
 
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 or the marks task of goal 235, whichever comes first, takes this cfg off.
-#[cfg(any())]
 use crate::common;
 
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 or the marks task of goal 235, whichever comes first, takes this cfg off.
-#[cfg(any())]
 use common::cli::*;
 
 mod stats {
@@ -224,8 +220,6 @@ mod stats {
 /// and the roles that may not mark
 /// `domain::authorization::tests::the_jobs_read_and_write_nothing` and
 /// `the_observer_records_findings_and_asks_on_one_only`.
-// Stopped while it reads every event of the queue (ADR-t3745-1): the marks task of goal 235 takes this cfg off.
-#[cfg(any())]
 #[test]
 fn marks_are_recorded_retracted_and_derived_from_the_claims() {
     use dagq::domain::{ClaimOutcome, CommitSha, LeaseToken};

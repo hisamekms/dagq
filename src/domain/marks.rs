@@ -55,6 +55,22 @@ pub const RECORDED_KINDS: [EventKind; 5] = [
     EventKind::MarkRecorded,
     EventKind::MarkRetracted,
 ];
+/// The kinds [`marks`] reads, all of the queue's of them and no other:
+/// the recorded marks, the starts a derived mark may be announced by (a
+/// recorded kind too) and the claims the derived marks are read off. A
+/// read of the marks takes every event of these kinds, not only those of
+/// its window: a person's mark (`--at`) and a pruned stop take effect
+/// before they are written, a retraction is written after its mark, and a
+/// derived mark compares a claim with the claim before it, however far
+/// back.
+pub const READ_KINDS: [EventKind; 6] = [
+    EventKind::SupervisorStarted,
+    EventKind::SupervisorStopped,
+    EventKind::RunEnvChanged,
+    EventKind::MarkRecorded,
+    EventKind::MarkRetracted,
+    EventKind::RunClaimed,
+];
 /// The marks `dagq mark --retract` retracts: the ones that stand for a
 /// change a person may find was none. The supervisor's start and stop are
 /// what happened to the process, and a retraction retracts nothing.
@@ -178,7 +194,7 @@ pub fn mark_payload(
 
 /// The payload of the retraction of `target`, if it may be retracted: a
 /// retractable mark ([`RETRACTABLE_KINDS`]) not retracted yet. `events`
-/// holds at least the recorded marks.
+/// holds at least `target` and the retractions recorded after it.
 pub fn retraction_payload(events: &[RunEvent], target: EventId, by: &str) -> Result<Value, String> {
     let mark = events
         .iter()
@@ -229,8 +245,11 @@ impl Mark {
     }
 }
 
-/// Every mark in `events` (all of the queue's, ascending id) whose time is
-/// after `since` and at or before `until`, oldest first.
+/// Every mark in `events` (ascending id) whose time is after `since` and
+/// at or before `until`, oldest first. `events` holds at least every event
+/// of the queue of [`READ_KINDS`]; an event id cursor stands for the time
+/// [`cursor_millis`] reads off `events`, so a caller that passes only those
+/// kinds passes its cursors as times.
 pub fn marks(events: &[RunEvent], since: Option<Cursor>, until: Option<Cursor>) -> Vec<Mark> {
     let retracted = retractions(events);
     let mut marks: Vec<Mark> = events
@@ -276,9 +295,9 @@ pub fn marks(events: &[RunEvent], since: Option<Cursor>, until: Option<Cursor>) 
     marks
 }
 
-/// The time a cursor stands for: its own, or the time of the latest event
-/// at or before its id (the epoch when none is).
-fn cursor_millis(cursor: Cursor, events: &[RunEvent]) -> i64 {
+/// The time a cursor stands for: its own, or the latest time of the
+/// events of `events` at or before its id (`i64::MIN` when none is).
+pub fn cursor_millis(cursor: Cursor, events: &[RunEvent]) -> i64 {
     match cursor {
         Cursor::Time(millis) => millis,
         Cursor::Event(id) => events

@@ -163,8 +163,6 @@ fn a_worker_s_dagq_runs_its_commands_through_the_service_as_the_worker() {
     for args in [
         vec!["events", "--full", "--all"],
         vec!["timeline", run.as_str()],
-        // Stopped while it reads every event of the queue (ADR-t3745-1): the marks task of goal 235 takes this cfg off.
-        #[cfg(any())]
         vec!["marks"],
         vec!["findings", "--all"],
         vec!["notes", "--task", task.as_str()],

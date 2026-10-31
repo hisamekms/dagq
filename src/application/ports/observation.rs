@@ -60,19 +60,55 @@ pub trait ObserverLog {
     fn observations(&self, limit: usize) -> Result<Vec<(RunEvent, Option<RunEvent>)>>;
 }
 
-/// What the mark commands read and record (ADR-0051 decision 12): the
-/// queue's events, to resolve `--at` and list the marks, and a new event
-/// of the queue itself. Every [`EventStore`] is one.
+/// What the mark commands read and record (ADR-0051 decision 12), with no
+/// read of every event of the queue: the newest event id each command's
+/// reads stop at, the events of named kinds in an id range a page at a
+/// time (the marks' kinds, [`crate::domain::marks::READ_KINDS`]), the
+/// events of any kind in a short id range (an event the command names, or
+/// the events behind an event id cursor), and a new event of the queue
+/// itself. Every [`EventStore`] is one.
 pub trait MarkLog {
-    /// Every event of the queue, oldest first.
-    fn events(&self) -> Result<Vec<RunEvent>>;
+    /// The newest event id, 0 for an empty queue.
+    fn newest_event_id(&self) -> Result<EventId>;
+    /// The events of one of `kinds` with `after < id <= upto`, oldest
+    /// first, at most `limit`.
+    fn events_of_kinds(
+        &self,
+        kinds: &[&str],
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>>;
+    /// The events of any kind with `after < id <= upto`, oldest first, at
+    /// most `limit`.
+    fn events_in_range(&self, after: EventId, upto: EventId, limit: usize)
+    -> Result<Vec<RunEvent>>;
     /// Record an event of the queue itself, on no task, goal or run.
     fn record_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId>;
 }
 
 impl<T: EventStore + ?Sized> MarkLog for T {
-    fn events(&self) -> Result<Vec<RunEvent>> {
-        self.all_events()
+    fn newest_event_id(&self) -> Result<EventId> {
+        self.latest_event_id()
+    }
+
+    fn events_of_kinds(
+        &self,
+        kinds: &[&str],
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        self.events_of_between(kinds, after, upto, limit)
+    }
+
+    fn events_in_range(
+        &self,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        self.events_between(after, upto, &crate::domain::EventFilter::default(), limit)
     }
 
     fn record_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId> {

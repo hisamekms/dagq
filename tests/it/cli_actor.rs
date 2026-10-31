@@ -158,17 +158,10 @@ fn the_records_keep_the_writer_they_had() {
             .unwrap();
         assert_eq!(note["payload"]["by"], writer, "{env:?}");
 
-        // Stopped while it reads every event of the queue (ADR-t3745-1): the marks task of goal 235 takes this cfg off.
-        #[cfg(any())]
-        {
-            if marks {
-                let marked = run(&["mark", &format!("mark of {writer}")]);
-                assert_eq!(marked["detail"]["by"], writer, "{env:?}");
-            }
+        if marks {
+            let marked = run(&["mark", &format!("mark of {writer}")]);
+            assert_eq!(marked["detail"]["by"], writer, "{env:?}");
         }
-        // Stopped while it reads every event of the queue (ADR-t3745-1): the marks task of goal 235 takes this cfg off.
-        #[cfg(not(any()))]
-        let _ = marks;
         if finds {
             let finding = run(&[
                 "finding",
