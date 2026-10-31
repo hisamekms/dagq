@@ -1,0 +1,5 @@
+# このrepositoryの開発者のpythonの版を揃えるための固定。
+# 版はmiseのcooldown（minimum_release_age）を満たす最新（`mise latest python`）を選ぶ（2026-10-31の人の決定、request 197）。
+# rustは書かない。rustの版はrust-toolchain.tomlとrustupが決める。
+[tools]
+python = "3.15.2"
