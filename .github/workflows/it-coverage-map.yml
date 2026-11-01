@@ -39,7 +39,7 @@ jobs:
     name: file -> IT test map
     # Apple Silicon, as ci.yml's checks job: the tests that only hold on
     # macOS run here too.
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
