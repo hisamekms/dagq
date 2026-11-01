@@ -159,6 +159,27 @@ pub trait LedgerStore {
             .take(limit)
             .collect())
     }
+    /// The head of every row of `kind` ([`crate::domain::ledger::LedgerHead`]):
+    /// its kind, key, range of inputs, mark of settled, version and the ids
+    /// of its records, not the records, so that what builds the ledger
+    /// makes its books again from the rows the store holds
+    /// ([`crate::domain::ledger::session::SessionBook::from_heads`]) and
+    /// reads no event of a row it does not fold.
+    fn ledger_heads(&self, kind: LedgerKind) -> Result<Vec<crate::domain::ledger::LedgerHead>> {
+        Ok(self
+            .ledger_rows(kind)?
+            .iter()
+            .map(crate::domain::ledger::LedgerHead::of)
+            .collect())
+    }
+    /// Of the session rows, the records a session book is made again by,
+    /// each with its row's key ([`crate::domain::ledger::session::anchors`]):
+    /// each row's first and every `session_closed`, not the rest.
+    fn ledger_session_anchors(&self) -> Result<Vec<(String, RunEvent)>> {
+        Ok(crate::domain::ledger::session::anchors(
+            &self.ledger_rows(LedgerKind::Session)?,
+        ))
+    }
     /// The retention of the node rows, by the same local day as
     /// [`NodeSampleStore::remove_node_samples`]: drop from each the samples
     /// of a day before `before_day` and remove a row left with none

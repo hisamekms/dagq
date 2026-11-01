@@ -359,6 +359,37 @@ impl LedgerRow {
     }
 }
 
+/// The head of a row the store holds: what it is, how far it was folded,
+/// whether it is settled and by which fold, and the ids of its records
+/// (ascending), not the records. What builds the ledger makes a book again
+/// from the heads ([`session::SessionBook::from_heads`]), so it reads no
+/// event of the rows it does not fold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerHead {
+    pub kind: LedgerKind,
+    pub key: String,
+    pub inputs_from: EventId,
+    pub inputs_through: InputsThrough,
+    pub is_final: bool,
+    pub ledger_v: u32,
+    pub records: Vec<EventId>,
+}
+
+impl LedgerHead {
+    /// The head of `row`.
+    pub fn of(row: &LedgerRow) -> Self {
+        Self {
+            kind: row.kind,
+            key: row.key.clone(),
+            inputs_from: row.inputs_from,
+            inputs_through: row.inputs_through.clone(),
+            is_final: row.is_final,
+            ledger_v: row.ledger_v,
+            records: row.records.iter().map(|event| event.id).collect(),
+        }
+    }
+}
+
 /// Whether a row (`existing`, none when there is none) is built again
 /// now that its object's last event is `last_event` and the queue's
 /// latest `push_finished` is `latest_push`: a missing row, one of an older

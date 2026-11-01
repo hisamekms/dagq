@@ -105,7 +105,13 @@
 //!   neither what it keeps after its catch-up nor its peak during it grows
 //!   with the events settled; it folds those rows a share of
 //!   [`CHECKS_PER_PASS`] at a time. How much it keeps ([`KeptSize`]) goes
-//!   to the supervisor's log.
+//!   to the supervisor's log. Which session row each event is a record of
+//!   ([`SessionBook`]) is made again from the session rows the store holds
+//!   (their heads and anchors, [`SessionBook::from_heads`]), reading no
+//!   event, and taken in place of the book of the events up to the cursor
+//!   ([`Builder::restore_session_rows`]); the rest of [`Kept`] is not made
+//!   from the rows yet, so a new process still starts at its cursors'
+//!   start and does not take it.
 //! - **What a pass makes**: each event is read into [`Kept`] once as it
 //!   comes in (the supervisors' lives, the waits before a claim, the
 //!   landing slot's attempts, which session or queue row it is a record
@@ -674,6 +680,11 @@ impl Kept {
                 + self.session_rows.approx_bytes()
                 + self.queue_rows.approx_bytes(),
         }
+    }
+
+    /// Which session row each event read is a record of.
+    pub const fn session_rows(&self) -> &SessionBook {
+        &self.session_rows
     }
 
     /// The session or queue row of `kind` and `key` at `now_ms`, built at
@@ -1298,6 +1309,16 @@ impl Builder {
     /// What the folds of the queue as a whole read, up to [`Self::events`].
     pub const fn kept(&self) -> &Arc<Kept> {
         &self.kept
+    }
+
+    /// Take `book`, made again from the session rows the store holds
+    /// ([`SessionBook::from_heads`]), as which session row each event up to
+    /// [`Self::events`] is a record of, in place of the book it made of
+    /// those events: the store's rows record the same events, so the
+    /// events after its cursor go to the rows and rounds the fold of every
+    /// event gives them.
+    pub fn restore_session_rows(&mut self, book: SessionBook) {
+        Arc::make_mut(&mut self.kept).session_rows = book;
     }
 
     /// The rows of `rows` (those [`Self::rows_to_build`] names) whose

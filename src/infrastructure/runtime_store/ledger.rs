@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::application::LedgerStore;
-use crate::domain::ledger::{InputsThrough, LedgerKind, LedgerRow, Measure, Subject, Totals, node};
+use crate::domain::ledger::{
+    InputsThrough, LedgerHead, LedgerKind, LedgerRow, Measure, Subject, Totals, node,
+};
 use crate::domain::run_phase::{Blocker, Holds};
 
 const BLOCKERS: [(Blocker, &str); 7] = [
@@ -193,6 +195,60 @@ impl LedgerStore for SqliteQueue {
         rows.map(|row| row?).collect()
     }
 
+    /// The ids of the records come from SQLite's JSON functions over the
+    /// stored array: no record is parsed here.
+    fn ledger_heads(&self, kind: LedgerKind) -> Result<Vec<LedgerHead>> {
+        let mut statement = self.conn.prepare(
+            "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v,
+                    (SELECT COALESCE(json_group_array(json_extract(j.value, '$.id')), '[]')
+                       FROM json_each(r.records) j) AS ids
+               FROM ledger_rows r WHERE r.kind=?1 ORDER BY r.key",
+        )?;
+        let rows = statement.query_map([kind.as_str()], |r| {
+            let key: String = r.get("key")?;
+            let inputs_from: i64 = r.get("inputs_from")?;
+            let inputs_through: String = r.get("inputs_through")?;
+            let is_final: bool = r.get("final")?;
+            let ledger_v: i64 = r.get("ledger_v")?;
+            let ids: String = r.get("ids")?;
+            Ok((|| {
+                let mut records: Vec<i64> = serde_json::from_str(&ids)?;
+                records.sort_unstable();
+                Ok(LedgerHead {
+                    kind,
+                    key,
+                    inputs_from: EventId::new(inputs_from),
+                    inputs_through: serde_json::from_str(&inputs_through)?,
+                    is_final,
+                    ledger_v: u32::try_from(ledger_v)?,
+                    records: records.into_iter().map(EventId::new).collect(),
+                })
+            })())
+        })?;
+        rows.map(|row| row?).collect()
+    }
+
+    /// Only the anchors of each session row are parsed: SQLite picks the
+    /// first record and the `session_closed` ones out of the stored array.
+    fn ledger_session_anchors(&self) -> Result<Vec<(String, crate::domain::RunEvent)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT r.key, j.value FROM ledger_rows r, json_each(r.records) j
+              WHERE r.kind=?1
+                AND (j.key = 0 OR json_extract(j.value, '$.kind') = 'session_closed')
+              ORDER BY r.key, j.key",
+        )?;
+        let rows = statement.query_map([LedgerKind::Session.as_str()], |r| {
+            let key: String = r.get(0)?;
+            let event: String = r.get(1)?;
+            Ok((key, event))
+        })?;
+        rows.map(|row| {
+            let (key, event) = row?;
+            Ok((key, serde_json::from_str(&event)?))
+        })
+        .collect()
+    }
+
     /// Read the node rows with no lock, then write only those the
     /// retention changes, [`ROWS_PER_TRANSACTION`] a transaction
     /// ([`in_batches`]): with none to change (the day's retention already
@@ -350,6 +406,67 @@ mod tests {
             .conn
             .query_row("SELECT count(*) FROM ledger_rows", [], |r| r.get(0))
             .unwrap()
+    }
+
+    /// The heads read back what the rows hold of them and the ids of their
+    /// records, and the anchors each session row's first record and its
+    /// closes, as the rows read whole give them; neither reads the rest of
+    /// a record: a row whose records hold only their ids, which reads whole
+    /// no more, gives its head.
+    #[test]
+    fn the_heads_and_anchors_read_no_record_but_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let session = |id: i64, kind: &str, payload: Value| RunEvent {
+            task_id: None,
+            run_id: None,
+            ..event(id, kind, payload, id)
+        };
+        let events = vec![
+            session(
+                1,
+                "session_opened",
+                json!({"kind": "runtime_planner", "planner_id": 1}),
+            ),
+            session(2, "session_turns", json!({"opened_event_id": 1})),
+            session(
+                3,
+                "session_closed",
+                json!({"opened_event_id": 1, "session_id": "s", "model": "m"}),
+            ),
+            session(4, "session_closed", json!({"session_id": "out"})),
+            session(5, "session_turns", json!({"session_id": "out"})),
+        ];
+        let rows = ledger::session::session_rows(&events, "2030-01-01T00:00:00.000Z");
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            queue.write_ledger_row(row).unwrap();
+        }
+        let mut heads: Vec<LedgerHead> = rows.iter().map(LedgerHead::of).collect();
+        heads.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(queue.ledger_heads(LedgerKind::Session).unwrap(), heads);
+        let mut anchors = ledger::session::anchors(&rows);
+        anchors.sort_by(|a, b| (&a.0, a.1.id).cmp(&(&b.0, b.1.id)));
+        assert_eq!(queue.ledger_session_anchors().unwrap(), anchors);
+        let ids: Vec<i64> = anchors.iter().map(|(_, event)| event.id.as_i64()).collect();
+        assert_eq!(ids, [1, 3, 4]);
+        assert!(queue.ledger_heads(LedgerKind::Run).unwrap().is_empty());
+
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET records='[{\"id\":4},{\"id\":5,\"payload\":1}]'
+                  WHERE key='session//events/0'",
+                [],
+            )
+            .unwrap();
+        assert!(queue.ledger_rows(LedgerKind::Session).is_err());
+        let heads = queue.ledger_heads(LedgerKind::Session).unwrap();
+        let held = heads
+            .iter()
+            .find(|head| head.key == "session//events/0")
+            .unwrap();
+        assert_eq!(held.records, [EventId::new(4), EventId::new(5)]);
     }
 
     /// A folded run's row round-trips with its sums in their columns, and

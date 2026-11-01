@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use serde_json::{Map, Value, json};
 
-use super::{LedgerKind, LedgerRow, Subject};
+use super::{LedgerHead, LedgerKind, LedgerRow, Subject};
 use crate::domain::{
     EventId, EventKind, RunEvent,
     headless_job::JobRef,
@@ -218,6 +218,23 @@ pub fn session_rows(events: &[RunEvent], built_at: &str) -> Vec<LedgerRow> {
         .collect()
 }
 
+/// The records of the session rows of `rows` a [`SessionBook`] is made
+/// again by ([`SessionBook::from_heads`]), each with its row's key: each
+/// row's first and every `session_closed`. The store reads the same of
+/// the rows it holds without the rest of their records.
+pub fn anchors(rows: &[LedgerRow]) -> Vec<(String, RunEvent)> {
+    rows.iter()
+        .filter(|row| row.kind == LedgerKind::Session)
+        .flat_map(|row| {
+            row.records
+                .iter()
+                .enumerate()
+                .filter(|(at, event)| *at == 0 || event.kind == EventKind::SessionClosed)
+                .map(|(_, event)| (row.key.clone(), event.clone()))
+        })
+        .collect()
+}
+
 /// Which session row each event read so far is a record of, assigned one
 /// event at a time and kept, so that a reader that holds it reads no
 /// event twice and folds only the rows it asks for ([`Self::row`]). A span
@@ -234,7 +251,7 @@ pub struct SessionBook {
     rounds: HashMap<(String, String, &'static str), i64>,
     by_open: HashMap<EventId, usize>,
     by_planner: HashMap<i64, usize>,
-    by_job: HashMap<(&'static str, String), usize>,
+    by_job: HashMap<(String, String), usize>,
     outside: HashMap<(String, String), usize>,
     /// The sessions' models by their closes
     /// ([`crate::domain::stats::jobs::session_models`]).
@@ -254,7 +271,107 @@ struct Assigned {
     records: Vec<EventId>,
 }
 
+/// What a session row's key says it is of: its subject's kind and id,
+/// what it is (`session`, `job` or `events`) and its round; none for a key
+/// of another shape. The id is what lies between the kind and the last two
+/// parts (a throughput review's has slashes of its own).
+fn parse_key(key: &str) -> Option<(&str, &str, &'static str, i64)> {
+    let (kind, rest) = key.split_once('/')?;
+    let mut back = rest.rsplitn(3, '/');
+    let round = back.next()?.parse().ok()?;
+    let what = match back.next()? {
+        "session" => "session",
+        "job" => "job",
+        "events" => "events",
+        _ => return None,
+    };
+    Some((kind, back.next()?, what, round))
+}
+
 impl SessionBook {
+    /// The book made again from the session rows the store holds (`heads`,
+    /// [`LedgerHead`]) and `anchors`, the records of theirs it finds its
+    /// rows by, each with its row's key: each row's first (a span's open,
+    /// a job's start) and every `session_closed`
+    /// (`LedgerStore::ledger_session_anchors`). It is the book of every
+    /// event those rows record, read one at a time ([`Self::add`]): the
+    /// rows in the order they were made (by their first record), the
+    /// rounds of each kind and id so far, the opens, planners and jobs
+    /// their later events go to (the latest of each), the rows of round 0,
+    /// the sessions' models by their latest close, and the jobs by the
+    /// session their start names. It reads no event of the EventStore, so
+    /// a builder that goes on from the store's rows gives a new session
+    /// its next round and a late record its row as the fold of every event
+    /// does. A row of another kind or a key of another shape is not one of
+    /// its rows.
+    pub fn from_heads(heads: &[LedgerHead], anchors: &[(String, RunEvent)]) -> Self {
+        let mut heads: Vec<&LedgerHead> = heads
+            .iter()
+            .filter(|head| head.kind == LedgerKind::Session && parse_key(&head.key).is_some())
+            .collect();
+        heads.sort_by_key(|head| head.records.first().copied());
+        let anchor: HashMap<EventId, &RunEvent> =
+            anchors.iter().map(|(_, event)| (event.id, event)).collect();
+        let mut book = Self::default();
+        for head in heads {
+            let Some((kind, id, what, round)) = parse_key(&head.key) else {
+                continue;
+            };
+            let at = book.rows.len();
+            book.by_key.insert(head.key.clone(), at);
+            book.rows.push(Assigned {
+                key: head.key.clone(),
+                kind: kind.to_owned(),
+                id: id.to_owned(),
+                round,
+                what,
+                records: head.records.clone(),
+            });
+            let first = head.records.first().copied();
+            let opened = first
+                .and_then(|first| anchor.get(&first))
+                .map(|open| SpanRef::of(open));
+            match what {
+                "events" => {
+                    book.outside.insert((kind.to_owned(), id.to_owned()), at);
+                    continue;
+                }
+                "session" => {
+                    if let Some(first) = first {
+                        book.by_open.insert(first, at);
+                    }
+                    if let Some(planner) = opened.as_ref().and_then(|open| open.planner_id) {
+                        book.by_planner.insert(planner, at);
+                    }
+                }
+                _ => {
+                    book.by_job.insert((kind.to_owned(), id.to_owned()), at);
+                    if let Some(session) = opened.and_then(|start| start.session_id) {
+                        book.jobs_by_session.entry(session).or_default().push(at);
+                    }
+                }
+            }
+            let rounds = book
+                .rounds
+                .entry((kind.to_owned(), id.to_owned(), what))
+                .or_default();
+            *rounds = (*rounds).max(round);
+        }
+        let mut closes: Vec<&RunEvent> = anchors
+            .iter()
+            .map(|(_, event)| event)
+            .filter(|event| event.kind == EventKind::SessionClosed)
+            .collect();
+        closes.sort_by_key(|close| close.id);
+        for close in closes {
+            let span = SpanRef::of(close);
+            if let (Some(session), Some(model)) = (span.session_id, span.model) {
+                book.models.insert(session, (model, close.id));
+            }
+        }
+        book
+    }
+
     /// Assign `event`, after every one assigned before, and add to
     /// `touched` the key of each row whose fold it changes: the one it is
     /// a record of, and a job's whose model its close gives.
@@ -278,12 +395,14 @@ impl SessionBook {
             && let Some((kind, key)) = job_of(event)
         {
             let at = self.open_row(kind, &key, "job");
-            self.by_job.insert((kind, key), at);
+            self.by_job.insert((kind.to_owned(), key), at);
             if let Some(session) = span.session_id.clone() {
                 self.jobs_by_session.entry(session).or_default().push(at);
             }
             at
-        } else if let Some(at) = job_of(event).and_then(|key| self.by_job.get(&key)) {
+        } else if let Some(at) =
+            job_of(event).and_then(|(kind, key)| self.by_job.get(&(kind.to_owned(), key)))
+        {
             *at
         } else if let Some(at) = span
             .planner_id
@@ -499,3 +618,6 @@ fn finish(
 pub(super) fn is_span(row: &LedgerRow) -> bool {
     row.detail["items"]["what"] == "session"
 }
+
+#[cfg(test)]
+mod tests;

@@ -246,3 +246,111 @@ pub(crate) fn run_row(
     row.intervals = intervals;
     row
 }
+
+/// The cases a book of only the events after a position gets wrong (ask
+/// 1373), the position the length of the first part: a planner's session
+/// closed before it, a record of none, a plan review's job whose session
+/// closed before it and one whose session closes after it; then after it
+/// a late record of the closed session, the planner's next session and an
+/// event naming only the planner, another record of none, the end of the
+/// first job (its model from the close before), the close of the second
+/// job's session and the plan review's next job.
+pub(crate) fn sessions_across() -> (Log, usize) {
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 1}),
+        0,
+    )
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"kind": "runtime_planner", "planner_id": 1, "opened_event_id": 1,
+               "session_id": "p-1", "model": "planner-model"}),
+        10,
+    )
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"session_id": "s-out"}),
+        15,
+    )
+    .add(
+        None,
+        None,
+        "plan_review_started",
+        json!({"plan_review_id": "9", "session_id": "r-9"}),
+        20,
+    )
+    .add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "plan_review", "plan_review_id": "9", "session_id": "r-9"}),
+        21,
+    )
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"kind": "plan_review", "plan_review_id": "9", "opened_event_id": 5,
+               "session_id": "r-9", "model": "review-model"}),
+        30,
+    )
+    .add(
+        None,
+        None,
+        "plan_review_started",
+        json!({"plan_review_id": "10", "session_id": "r-10"}),
+        40,
+    );
+    let position = log.events.len();
+    log.add(
+        None,
+        None,
+        "session_turns",
+        json!({"opened_event_id": 1, "turns": []}),
+        50,
+    )
+    .add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 1}),
+        60,
+    )
+    .add(None, None, "planner_note", json!({"planner_id": 1}), 65)
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"session_id": "s-out-2"}),
+        70,
+    )
+    .add(
+        None,
+        None,
+        "plan_review_finished",
+        json!({"plan_review_id": "9", "verdict": "pass"}),
+        80,
+    )
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"plan_review_id": "10", "session_id": "r-10", "model": "later-model"}),
+        90,
+    )
+    .add(
+        None,
+        None,
+        "plan_review_started",
+        json!({"plan_review_id": "9", "session_id": "r-9b"}),
+        100,
+    );
+    (log, position)
+}

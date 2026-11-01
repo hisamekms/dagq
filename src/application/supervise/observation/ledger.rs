@@ -40,6 +40,7 @@ use crate::domain::ledger::builder::{
     Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, RESOURCES_PER_READ, RunResources,
     RunSteps, STEPS_PER_READ, Target, WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
 };
+use crate::domain::ledger::session::SessionBook;
 use crate::domain::session_step::{self, StepTarget};
 
 /// How many passes in a row fail before one `ledger_build_failed` is
@@ -378,6 +379,25 @@ fn restore(
         }
     }
     Ok(())
+}
+
+/// The session book made again from the session rows `store` holds
+/// ([`SessionBook::from_heads`]): their heads and anchors only, no event of
+/// the EventStore and no other record of theirs, so that a builder going on
+/// from the store's rows ([`Builder::restore_session_rows`]) does not read
+/// the events of the sessions settled to know their rows and rounds.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
+    )
+)]
+pub fn session_book(store: &dyn LedgerQueue) -> Result<SessionBook> {
+    Ok(SessionBook::from_heads(
+        &store.ledger_heads(LedgerKind::Session)?,
+        &store.ledger_session_anchors()?,
+    ))
 }
 
 /// The events of `ids`, each read by its id.

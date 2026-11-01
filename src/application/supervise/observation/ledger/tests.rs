@@ -7,8 +7,9 @@ use crate::application::{
 };
 use crate::domain::environment::{Resources, RunResource};
 use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
+use crate::domain::ledger::session::SessionBook;
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
-use crate::domain::ledger::testkit::{Log, T0, ms, run_id};
+use crate::domain::ledger::testkit::{Log, T0, ms, run_id, sessions_across};
 use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node};
 use crate::domain::session_step::{
     RETENTION_MS, ResourceSample, SeqRange, SessionOwner, SessionResource, SessionStep, Step,
@@ -2684,4 +2685,83 @@ fn a_row_of_an_older_fold_keeps_each_intervals_resources_their_sources_and_start
     assert_eq!(cpu_in(&row, "worker"), Some(45.0));
     assert_eq!(source_in(&row, "worker"), "inside");
     assert_eq!(resources_of(&row)["total"]["cpu_seconds"], json!(78.0));
+}
+
+/// A builder that goes on from a position with the session book made again
+/// from the rows the store holds ([`session_book`]), what else it keeps
+/// carried from the passes up to there, writes the rows of the fold of
+/// every event: the planner's next session its next round, a late record
+/// of a closed session to that session's settled row, the records of none
+/// to the one row of round 0, a job's model from a close before the
+/// position or after it ([`sessions_across`]). A book of the events after
+/// the position alone writes others.
+#[test]
+fn a_builder_going_on_from_the_session_rows_held_writes_the_rows_of_every_event() {
+    let (log, position) = sessions_across();
+    let rows_going_on = |book: Option<SessionBook>| {
+        let memory = Memory::default();
+        memory.events.replace(log.events[..position].to_vec());
+        let mut builder = Builder::default();
+        drain(&memory, &mut builder, LATER);
+        assert!(memory.rows.borrow().values().any(|row| row.is_final));
+        let made = session_book(&memory).unwrap();
+        assert_eq!(&made, builder.kept().session_rows());
+        builder.restore_session_rows(book.unwrap_or(made));
+        memory.events.replace(log.events.clone());
+        passes_to_drain(&memory, &mut builder, LATER + 1);
+        memory.rows.into_inner()
+    };
+    let rows = rows_going_on(None);
+    let whole = crate::domain::ledger::build(&log.events, ms(LATER + 1), BUILT);
+    let sessions: Vec<&LedgerRow> = whole
+        .iter()
+        .filter(|row| row.kind == LedgerKind::Session)
+        .collect();
+    assert!(sessions.len() >= 7);
+    for expected in &sessions {
+        let stored = &rows[&(expected.kind, expected.key.clone())];
+        let mut expected = (*expected).clone();
+        expected.is_final = stored.is_final;
+        assert_eq!(stored, &expected, "{}", expected.key);
+    }
+    assert_eq!(
+        rows.keys()
+            .filter(|(kind, _)| *kind == LedgerKind::Session)
+            .count(),
+        sessions.len()
+    );
+
+    let after_alone = rows_going_on(Some(SessionBook::default()));
+    assert_ne!(after_alone, rows);
+}
+
+/// The session book is made again from the rows the store holds alone:
+/// with a few settled sessions or more than a pass looks at, it reads no
+/// event of the EventStore, and it is the book of every event.
+#[test]
+fn the_session_book_made_again_reads_no_event_however_many_sessions_settled() {
+    let read_making_it = |settled: i64| {
+        let log = settled_sessions(settled);
+        let memory = Memory::of(&log);
+        let mut builder = Builder::default();
+        while pass(&memory, &mut builder, LATER).backlog > 0 {}
+        assert!(
+            memory
+                .rows
+                .borrow()
+                .values()
+                .filter(|row| row.kind == LedgerKind::Session && row.is_final)
+                .count()
+                >= usize::try_from(settled).unwrap()
+        );
+        memory.read.set(0);
+        let book = session_book(&memory).unwrap();
+        assert_eq!(&book, builder.kept().session_rows());
+        (memory.read.get(), memory.read_all.get(), book.row_count())
+    };
+    let more = i64::try_from(CHECKS_PER_PASS).unwrap();
+    let (few, many) = (read_making_it(3), read_making_it(more));
+    assert_eq!((few.0, few.1), (0, 0));
+    assert_eq!((many.0, many.1), (0, 0));
+    assert!(many.2 > few.2);
 }
