@@ -156,9 +156,11 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
   表は差分の前のmainから作られているので、足したtestと他の着地が足したtestを知らない。
 - **CIに任せるもの**: 表のcommitのtreeに無いsrcのファイル（差分が足したファイル）と、表が多くのITに当てるファイル（広い項目）は、表からITを選ばない。
   それらを通るITのうち上の必ず含めるものに入らないものはCIで初めて流れ、着地の検証は任せたファイルを出力に残す（[ADR-t2892-1](../../adr/2026-10-20-t2892-1-landing-it-leaves-added-sources-and-broad-entries-to-ci.md)）。
+- **古い表**: 生成から一定の時間を超えた表も上限までは使い、古さだけではITを全部流さない。
+  古い表では、表が知らないファイル（表のtreeに無いsrcのファイルと、表のcommitの後にmainで変わったファイル）を同じdirectoryとそれを宣言するmoduleの項目のITに広げ、広げたITも閾値に数え、出力に古い表と広げたファイルを残す（[ADR-t3920-1](../../adr/2026-11-01-t3920-1-landing-it-keeps-using-an-old-table-and-widens-the-files-it-does-not-know.md)）。
 - **testのhelper**: 差分がITの共通のhelperを変えたら、着地の検証はcheckoutしたtreeのtestのソースを静的に読み、そのhelperを使うtestのmoduleのITを選ぶ。
   使うmoduleのITが多いhelper（helperの集まりの入口と共通のfixture）は、壊れの見逃しが大半のITに及ぶのでCIに任せず全部流す（[ADR-t3761-1](../../adr/2026-10-31-t3761-1-landing-it-selects-the-modules-a-changed-test-helper-reaches.md)）。
-- **ITを全部流す条件**: 絞ったITの見込みの時間が上限を超えるとき、共通のファイルに触れたとき、使うmoduleのITが多いhelperを変えたとき、表が取れないか古すぎるとき。
+- **ITを全部流す条件**: 絞ったITの見込みの時間が上限を超えるとき、共通のファイルに触れたとき、使うmoduleのITが多いhelperを変えたとき、表が取れないか読めないか上限を超えて古いとき。
   広い項目と全部流す条件の値と根拠は[着地のITの絞り込みの測定](../../plans/landing-it-selection.md)の「決めたこと」にある。
 - **既に落ちているtest**: [CI watch](ci-watch.md)の一覧のtestは着地の検証から外す。
   CIの修正taskのrunでは、そのfindingのtestを外さない（他のfindingのtestは外す）。

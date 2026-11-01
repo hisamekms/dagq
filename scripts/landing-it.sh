@@ -50,12 +50,19 @@
 # A file the table maps to too many IT (a broad entry) and a src or crates .rs
 # file not in the tree of the table's commit select nothing from the table:
 # their other IT are left to CI, and the output names them.
+# An old table (old by its age, within the age limit) is still used, and
+# the output says so: the files it does not know (a src or crates .rs file
+# not in its tree, and one changed on main between the table's commit and
+# $DAGQ_LANDING_BASE) are widened to the IT of the table's entries beside
+# them (the same directory and the module that declares it), and the output
+# names each with the count of IT it added. Broad entries stay left to CI.
 # Every IT runs instead, with the reasons printed, when the narrowed IT's
-# estimate is over the threshold, a common file is touched, a changed helper
-# is broad (its users hold more than the broad entries' share of the IT by
-# #[test] count, as mod.rs and the shared fixtures do) or a file under
-# tests/common is no helper's .rs, or the table cannot be had or is too old.
-# The threshold, the common files, the age limit and the share that makes an
+# estimate (widened IT included) is over the threshold, a common file is
+# touched, a changed helper is broad (its users hold more than the broad
+# entries' share of the IT by #[test] count, as mod.rs and the shared
+# fixtures do) or a file under tests/common is no helper's .rs, or the table
+# cannot be had or read or is older than the age limit.
+# The threshold, the common files, the ages and the share that makes an
 # entry or a helper broad are written once, at the top of
 # scripts/landing-it.py, with their grounds in
 # docs/plans/landing-it-selection.md, section 「決めたこと」. The tests in the
@@ -261,10 +268,13 @@ if [ "$table" != - ]; then
   echo "$me: table $table"
 fi
 
-# The diff and the tree of the table's commit.
+# The diff, the tree of the table's commit and the files changed on main
+# since that commit (which an old table widens).
 full=
 : >"$work/diff"
 : >"$work/tree"
+: >"$work/since"
+since=$work/since
 base=${DAGQ_LANDING_BASE:-}
 if [ -z "$base" ]; then
   full="DAGQ_LANDING_BASE is not set"
@@ -272,13 +282,21 @@ elif ! git diff --name-only --no-renames "$base" HEAD >"$work/diff" 2>/dev/null;
   full="git diff $base..HEAD failed"
 fi
 if [ "$table" != - ]; then
-  commit=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("commit") or "")' "$table")
-  if [ -z "$commit" ] || ! git ls-tree -r --name-only "$commit" >"$work/tree" 2>/dev/null; then
+  # An unreadable table is left to the choice, which runs every IT for it.
+  commit=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("commit") or "")' \
+    "$table" 2>/dev/null) || commit=unreadable
+  if [ "$commit" = unreadable ]; then
+    table_error="$table is no JSON"
+  elif [ -z "$commit" ] || ! git ls-tree -r --name-only "$commit" >"$work/tree" 2>/dev/null; then
     full=${full:-"the table's commit $commit is not in this repository"}
+  elif [ -n "$base" ] &&
+    ! git diff --name-only --no-renames "$commit" "$base" >"$work/since" 2>/dev/null; then
+    # Only an old table needs them: it then runs every IT.
+    since=-
   fi
 fi
 
-set -- --diff "$work/diff" --tree "$work/tree" --table "$table"
+set -- --diff "$work/diff" --tree "$work/tree" --table "$table" --since "$since"
 [ -n "$table_error" ] && set -- "$@" --table-error "$table_error"
 [ -n "$full" ] && set -- "$@" --full "$full"
 

@@ -13,6 +13,7 @@ amends:
   - adr-t1410-1 decision 7
 amended_by:
   - adr-t2892-1
+  - adr-t3920-1
 owners:
   - hisamekms
 tags:

@@ -11,15 +11,20 @@ Usage: python3 scripts/landing-it.py select --diff FILE --tree FILE
                                             [--threads N] [--now TIME]
                                             [--table-error TEXT]
                                             [--full REASON] [--root DIR]
+                                            [--since FILE]
        python3 scripts/landing-it.py needs-list --diff FILE --tree FILE
                                                 --table FILE|- [--now TIME]
                                                 [--table-error TEXT]
                                                 [--full REASON] [--root DIR]
+                                                [--since FILE]
        python3 scripts/landing-it.py self-test FIXTURES
 select prints two filtersets, one per line: the unit stage's, then the IT
 stage's (an empty line when no IT is chosen); landing-it.sh runs them as two
 cargo nextest runs. --root is the checked-out tree the changed helpers' users are read from
 (default: the current directory); the self-test reads FIXTURES/repo.
+--since is the files changed on main after the table's commit, one per line,
+which an old table widens when the diff has them (- when they cannot be had:
+an old table then runs every IT).
 """
 
 import argparse
@@ -57,14 +62,23 @@ COMMON_FILES = [
 #    from the checked-out tree (helper_users()). A helper whose users hold
 #    more than BROAD_SHARE (below) of the IT by count, mod.rs among them,
 #    runs every IT: a broken shared fixture would reach most IT.
-# 3. How old a table may be: older than this since its generated_at, every IT
-#    runs. Together with it, the IT not in the table (added or renamed after
-#    it was built) always run.
-MAX_TABLE_AGE = datetime.timedelta(hours=48)
+# 3. How old a table may be: older than MAX_TABLE_AGE since its generated_at,
+#    every IT runs (a table that old says little about which IT a file
+#    reaches). Older than STALE_TABLE_AGE and within MAX_TABLE_AGE, the table
+#    is old and still used, and the files it does not know are widened: a src
+#    or crates .rs file of the diff not in the tree of the table's commit, and
+#    one changed on main after the table's commit (git diff <commit> <base>),
+#    select the IT of their neighbours' entries (neighbours()), on top of their
+#    own entry. The widened IT count towards the threshold (1.) like any other.
+#    At any age, the IT not in the table (added or renamed after it was built)
+#    always run.
+STALE_TABLE_AGE = datetime.timedelta(hours=48)
+MAX_TABLE_AGE = datetime.timedelta(days=7)
 # 4. The broad entries: a file the table maps to more than this share of its
 #    IT (by count) selects none of them; the IT through it are left to CI.
 #    A src or crates .rs file not in the tree of the table's commit (one the
-#    diff added) selects none from the table either. Both still run the
+#    diff added) selects none from the table either while the table is not
+#    old (3.); an old table widens it instead. Both still run the
 #    diff's own tests and the IT not in the table, see choose(). The same
 #    share, by the #[test] count of the tree, makes a helper under
 #    tests/common broad (see COMMON_FILES).
@@ -365,8 +379,8 @@ def full_reasons(diff, tree, table, table_error, now, forced=None, root="."):
         return reasons
     if now - generated > MAX_TABLE_AGE:
         reasons.append(
-            "the table is older than %d hours: generated_at %s"
-            % (MAX_TABLE_AGE.total_seconds() // 3600, table["generated_at"])
+            "the table is older than %d days: generated_at %s"
+            % (MAX_TABLE_AGE.days, table["generated_at"])
         )
     for path in diff:
         if any(glob_match(path, p) for p in COMMON_FILES):
@@ -375,9 +389,70 @@ def full_reasons(diff, tree, table, table_error, now, forced=None, root="."):
     return reasons
 
 
-def left_to_ci(diff, tree, table):
+def stale_note(table, now):
+    """When the table is old (older than STALE_TABLE_AGE; full_reasons()
+    has already ruled out one older than MAX_TABLE_AGE), what the output
+    says of it; None otherwise."""
+    generated = parse_time(table["generated_at"])
+    if now - generated <= STALE_TABLE_AGE:
+        return None
+    return "the table is %.1f hours old (over %d): generated_at %s; the files it does not know are widened" % (
+        (now - generated).total_seconds() / 3600,
+        STALE_TABLE_AGE.total_seconds() // 3600,
+        table["generated_at"],
+    )
+
+
+def unknown_files(diff, tree, table, since):
+    """The diff's files an old table does not know, each with why: a src or
+    crates .rs file (not of unit tests only) not in the table's tree, or
+    changed on main after the table's commit (since). A broad entry is not
+    one: rule 4 leaves its IT to CI at any age."""
+    files = table.get("files", {})
+    limit = BROAD_SHARE * len(table.get("tests", {}))
+    tree_files, since = set(tree), set(since or [])
+    out = []
+    for path in diff:
+        if not is_source(path) or is_unit_test_module(path):
+            continue
+        if path in files and len(files[path]) > limit:
+            continue
+        if path not in files and path not in tree_files:
+            out.append((path, "not in the table's tree"))
+        elif path in since:
+            out.append((path, "changed on main after the table's commit"))
+    return out
+
+
+def neighbours(path, table):
+    """The table's entries that stand for a file it does not know: the src
+    or crates .rs files in the same directory and the module that declares
+    the file's directory (<dir>.rs or <dir>/mod.rs), each not broad. The
+    file's code is reached through its module and is most often used by its
+    siblings, so their IT are the ones most likely to reach it."""
+    files = table.get("files", {})
+    limit = BROAD_SHARE * len(table.get("tests", {}))
+    d = os.path.dirname(path)
+    if os.path.basename(path) == "mod.rs":
+        d = os.path.dirname(d)
+        own = os.path.dirname(path)
+    else:
+        own = None
+    parents = {d + ".rs", d + "/mod.rs"} if d else set()
+    out = []
+    for f in sorted(files):
+        if f == path or not is_source(f) or len(files[f]) > limit:
+            continue
+        same_dir = os.path.dirname(f) == d or (own is not None and os.path.dirname(f) == own)
+        if same_dir or f in parents:
+            out.append(f)
+    return out
+
+
+def left_to_ci(diff, tree, table, widened=()):
     """The diff's files whose IT the table does not select, each with why:
-    the broad entries and the source files not in the table's tree."""
+    the broad entries and the source files not in the table's tree (unless
+    an old table widened them)."""
     files = table.get("files", {})
     limit = BROAD_SHARE * len(table.get("tests", {}))
     tree_files = set(tree)
@@ -391,6 +466,7 @@ def left_to_ci(diff, tree, table):
             and path not in files
             and path not in tree_files
             and not is_unit_test_module(path)
+            and path not in widened
         ):
             out.append("%s (not in the table's tree)" % path)
     return out
@@ -431,17 +507,22 @@ def current_its(listing):
 
 
 def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now, forced=None,
-           root="."):
+           root=".", since=()):
     """The tests of the landing's verification and why: a dict with full,
     reasons, the IT filtersets (narrowed), the tests not in the table, the
     excluded and kept known failures, and the nextest filtersets of the two
     stages: unit_filter (every unit test) and it_filter (the chosen IT, with a
-    fix run's kept ones; None when no IT is chosen)."""
+    fix run's kept ones; None when no IT is chosen). since is the files
+    changed on main after the table's commit (None when they cannot be
+    had, which runs every IT with an old table); with an old table, stale says
+    so and widened names the files widened and the IT each added."""
     reasons = full_reasons(diff, tree, table, table_error, now, forced, root)
     narrowed = []
     from_table = set()
     not_in_table = []
     left = []
+    stale = None
+    widened, widened_paths = [], set()
     if not reasons:
         files = table.get("files", {})
         table_tests = table.get("tests", {})
@@ -456,6 +537,20 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
                 if glob_match(path, pattern):
                     narrowed.extend(x for x in filters if x not in narrowed)
         narrowed.extend(f for f in helper_choice(root, diff)[1] if f not in narrowed)
+        stale = stale_note(table, now)
+        if stale and since is None:
+            reasons.append("the files changed on main after the table's commit cannot be had")
+        elif stale:
+            for path, why in unknown_files(diff, tree, table, since):
+                near = neighbours(path, table)
+                keys = {k for f in near for k in files[f] if k in table_tests}
+                added = keys - from_table
+                from_table |= keys
+                if keys:
+                    # One its neighbours give no IT stays left to CI.
+                    widened_paths.add(path)
+                widened.append("%s (%s): %d IT from %d neighbouring entries"
+                               % (path, why, len(added), len(near)))
         all_durations = [t.get("duration_secs") or 0.0 for t in table_tests.values()]
         selected = [table_tests.get(k, {}).get("duration_secs") or 0.0 for k in from_table]
         limit = FULL_SHARE * wall(all_durations, threads)
@@ -466,7 +561,7 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
                 % (estimate, limit, FULL_SHARE)
             )
         else:
-            left = left_to_ci(diff, tree, table)
+            left = left_to_ci(diff, tree, table, widened_paths)
             listed = current_its(listing or {})
             not_in_table = sorted(k for k in listed if k not in table_tests)
             for key in sorted(from_table):
@@ -497,6 +592,8 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
         "narrowed": [] if full else narrowed,
         "not_in_table": not_in_table,
         "left_to_ci": left,
+        "stale": stale,
+        "widened": widened,
         "excluded": [n for n, _ in excluded],
         "kept": [n for n, _ in kept],
         "fix_run": fix_run,
@@ -508,6 +605,9 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
 def report(choice):
     """The lines landing-it.sh prints before it runs the tests."""
     lines = []
+    if choice.get("stale"):
+        lines.append("landing-it: %s" % choice["stale"])
+        lines.extend("landing-it: widened: %s" % w for w in choice["widened"])
     if choice["full"]:
         lines.append("landing-it: every IT runs:")
         lines.extend("landing-it:   %s" % r for r in choice["reasons"])
@@ -570,6 +670,7 @@ def cmd_select(args):
         read_lines(args.diff), read_lines(args.tree), read_json(args.table),
         args.table_error, read_json(args.list), read_json(args.known),
         args.fix_run == "1", threads_of(args.threads), now_of(args.now), args.full, args.root,
+        None if args.since == "-" else read_lines(args.since) if args.since else [],
     )
     print(report(choice), file=sys.stderr)
     # Two lines: the unit stage's filterset, then the IT stage's (empty when
@@ -591,7 +692,7 @@ def cmd_self_test(args):
             case["diff"], tree, case_table,
             "gh failed" if case.get("no_table") else None, listing,
             case.get("known"), case.get("fix_run", False), 6, parse_time(case["now"]),
-            case.get("full"), os.path.join(args.fixtures, "repo"),
+            case.get("full"), os.path.join(args.fixtures, "repo"), case.get("since", []),
         )
         want = case["want"]
         got = {k: choice[k] for k in want}
@@ -620,6 +721,8 @@ def main():
         p.add_argument("--now")
         p.add_argument("--full", help="run every IT for this reason")
         p.add_argument("--root", default=".", help="the tree the helpers' users are read from")
+        p.add_argument("--since", help="the files changed on main after the table's commit, "
+                       "or - when they cannot be had")
         if name == "select":
             p.add_argument("--list", required=True)
             p.add_argument("--known")

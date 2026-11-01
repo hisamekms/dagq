@@ -17,6 +17,7 @@
  },
  "files": {
   "src/a.rs": ["dagq::it::a::one", "dagq::it::a::two"],
+  "src/a/inner.rs": ["dagq::it::a::two"],
   "src/big.rs": ["dagq::it::b::big"],
   "src/c.rs": ["dagq::it::c::small"],
   "crates/dagq-broker/src/lib.rs": ["dagq-broker::serve::serve::s"],

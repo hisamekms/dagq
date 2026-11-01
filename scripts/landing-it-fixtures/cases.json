@@ -346,18 +346,190 @@
   }
  },
  {
-  "name": "a table older than the limit runs every IT",
+  "name": "a table just over 48 hours is used and names itself old",
   "now": "2026-10-08T00:00:01Z",
+  "diff": [
+   "src/a.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "stale": "the table is 48.0 hours old (over 48): generated_at 2026-10-06T00:00:00Z; the files it does not know are widened",
+   "widened": [],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "an old table widens source files not in its tree to their neighbours' IT and runs the IT not in the table",
+  "now": "2026-10-09T00:00:00Z",
+  "diff": [
+   "src/a/new.rs",
+   "crates/dagq-broker/src/new.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq-broker::serve) & test(=serve::s))",
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "left_to_ci": [],
+   "stale": "the table is 72.0 hours old (over 48): generated_at 2026-10-06T00:00:00Z; the files it does not know are widened",
+   "widened": [
+    "src/a/new.rs (not in the table's tree): 2 IT from 2 neighbouring entries",
+    "crates/dagq-broker/src/new.rs (not in the table's tree): 1 IT from 1 neighbouring entries"
+   ]
+  }
+ },
+ {
+  "name": "an old table widens a file changed on main after its commit and ignores the changes outside the diff",
+  "now": "2026-10-09T00:00:00Z",
+  "diff": [
+   "src/a/inner.rs",
+   "docs/x.md"
+  ],
+  "since": [
+   "src/a/inner.rs",
+   "src/c.rs",
+   "docs/x.md"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "stale": "the table is 72.0 hours old (over 48): generated_at 2026-10-06T00:00:00Z; the files it does not know are widened",
+   "widened": [
+    "src/a/inner.rs (changed on main after the table's commit): 1 IT from 1 neighbouring entries"
+   ]
+  }
+ },
+ {
+  "name": "a table within 48 hours does not widen a file changed after its commit",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a/inner.rs"
+  ],
+  "since": [
+   "src/a/inner.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "stale": null,
+   "widened": []
+  }
+ },
+ {
+  "name": "an old table's widened IT over the threshold run every IT",
+  "now": "2026-10-09T00:00:00Z",
+  "diff": [
+   "src/new_module.rs"
+  ],
+  "want": {
+   "full": true,
+   "reasons": [
+    "the narrowed IT's estimated wall time 100.0 s exceeds 50.0 s (0.5 of every IT's)"
+   ],
+   "narrowed": [],
+   "stale": "the table is 72.0 hours old (over 48): generated_at 2026-10-06T00:00:00Z; the files it does not know are widened",
+   "widened": [
+    "src/new_module.rs (not in the table's tree): 6 IT from 4 neighbouring entries"
+   ]
+  }
+ },
+ {
+  "name": "an old table leaves to CI a file whose neighbours give no IT",
+  "now": "2026-10-09T00:00:00Z",
+  "diff": [
+   "src/zz/new.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "stale": "the table is 72.0 hours old (over 48): generated_at 2026-10-06T00:00:00Z; the files it does not know are widened",
+   "widened": [
+    "src/zz/new.rs (not in the table's tree): 0 IT from 0 neighbouring entries"
+   ],
+   "left_to_ci": [
+    "src/zz/new.rs (not in the table's tree)"
+   ]
+  }
+ },
+ {
+  "name": "an old table runs every IT when the files changed after its commit cannot be had",
+  "now": "2026-10-09T00:00:00Z",
+  "diff": [
+   "src/a.rs"
+  ],
+  "since": null,
+  "want": {
+   "full": true,
+   "reasons": [
+    "the files changed on main after the table's commit cannot be had"
+   ],
+   "stale": "the table is 72.0 hours old (over 48): generated_at 2026-10-06T00:00:00Z; the files it does not know are widened",
+   "widened": []
+  }
+ },
+ {
+  "name": "a table within 48 hours is used when the files changed after its commit cannot be had",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/c.rs"
+  ],
+  "since": null,
+  "want": {
+   "full": false,
+   "reasons": [],
+   "stale": null
+  }
+ },
+ {
+  "name": "a table older than 7 days runs every IT",
+  "now": "2026-10-13T00:00:01Z",
   "diff": [
    "src/a.rs"
   ],
   "want": {
    "full": true,
    "reasons": [
-    "the table is older than 48 hours: generated_at 2026-10-06T00:00:00Z"
+    "the table is older than 7 days: generated_at 2026-10-06T00:00:00Z"
    ],
    "narrowed": [],
    "not_in_table": [],
+   "stale": null,
    "excluded": [],
    "kept": []
   }
