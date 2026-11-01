@@ -33,7 +33,7 @@ use crate::domain::RunId;
 use crate::domain::RunStatus;
 use crate::domain::container_runtime::{Availability, RuntimeTarget};
 use crate::domain::queue_broker::{
-    BEARER, ClaudeCredential, ClaudeCredentialProblem, DENIAL_KEYS_PER_POOL,
+    BEARER, BrokerFailure, ClaudeCredential, ClaudeCredentialProblem, DENIAL_KEYS_PER_POOL,
     DENIAL_KEYS_PER_TOKEN_RUN, DENIAL_WINDOW, DENIALS_PER_WINDOW, DenialCount, DenialKey,
     DenialLimiter, DenialStep, Destination, Egress, Refusal, SERVICE_NAME, TokenRefusal,
     basic_credentials, claude_headers, judge_run_token, judge_tunnel, judge_verification_token,
@@ -841,11 +841,8 @@ impl QueueBroker<'_> {
             request.run.as_deref(),
             &destination,
             None,
-            Refusal {
-                code: ServiceErrorCode::Unreachable,
-                reason: format!("{error:#}"),
-            },
-            None,
+            Refusal::failure(ServiceErrorCode::Unreachable, BrokerFailure::ClaudeApi),
+            Some(&format!("{error:#}")),
         )
     }
 
@@ -860,11 +857,8 @@ impl QueueBroker<'_> {
             run.as_deref(),
             &destination,
             None,
-            Refusal {
-                code: ServiceErrorCode::Unreachable,
-                reason: format!("{error:#}"),
-            },
-            None,
+            Refusal::failure(ServiceErrorCode::Unreachable, BrokerFailure::Tunnel),
+            Some(&format!("{error:#}")),
         )
     }
 
@@ -939,15 +933,16 @@ impl QueueBroker<'_> {
             .ok_or_else(|| token_refused(TokenRefusal::MissingRun))?;
         let status_of = |own: &RunId| {
             self.backend.run_status(own).map_err(|error| {
-                let reason = format!("the token's run could not be read: {error:#}");
-                Refused::from(if error.downcast_ref::<ServiceUnanswered>().is_some() {
-                    Refusal {
-                        code: ServiceErrorCode::Unreachable,
-                        reason,
-                    }
+                let code = if error.downcast_ref::<ServiceUnanswered>().is_some() {
+                    ServiceErrorCode::Unreachable
                 } else {
-                    failed(reason)
-                })
+                    ServiceErrorCode::Failed
+                };
+                Refused::failure(
+                    code,
+                    BrokerFailure::RunUnreadable,
+                    format!("the token's run could not be read: {error:#}"),
+                )
             })
         };
         let with_token_run = |own: Option<&RunId>, refusal: TokenRefusal| Refused {
@@ -956,16 +951,17 @@ impl QueueBroker<'_> {
                 .filter(|own| refusal == TokenRefusal::OtherRun && own.as_str() != run),
             ..Refused::from(Refusal::token(refusal))
         };
-        let unreadable =
-            |error: anyhow::Error| failed(format!("the token could not be read: {error:#}"));
+        let unreadable = |error: anyhow::Error| {
+            Refused::failure(
+                ServiceErrorCode::Failed,
+                BrokerFailure::TokenUnreadable,
+                format!("the token could not be read: {error:#}"),
+            )
+        };
         let principal = match self.backend.principal(token) {
             Ok(Some(principal)) => principal,
             Ok(None) => {
-                let Some(own) = self
-                    .backend
-                    .verification_run(token)
-                    .map_err(|error| Refused::from(unreadable(error)))?
-                else {
+                let Some(own) = self.backend.verification_run(token).map_err(unreadable)? else {
                     return Err(token_refused(TokenRefusal::UnknownToken));
                 };
                 if !verification {
@@ -976,7 +972,7 @@ impl QueueBroker<'_> {
                     .map_err(|refusal| with_token_run(Some(&own), refusal))?;
                 return Ok(token);
             }
-            Err(error) => return Err(unreadable(error).into()),
+            Err(error) => return Err(unreadable(error)),
         };
         let status = match principal.run_id.as_ref() {
             Some(own) => status_of(own)?,
@@ -1009,14 +1005,19 @@ impl QueueBroker<'_> {
             })?;
         service_request.token = Some(token.to_owned());
         let mut line = serde_json::to_vec(&service_request).map_err(|error| {
-            Refused::from(failed(format!("the request does not write: {error}")))
+            Refused::failure(
+                ServiceErrorCode::Failed,
+                BrokerFailure::RequestUnwritable,
+                format!("the request does not write: {error}"),
+            )
         })?;
         line.push(b'\n');
         self.backend.forward(&line).map_err(|error| {
-            Refused::from(Refusal {
-                code: ServiceErrorCode::Unreachable,
-                reason: format!("{error:#}"),
-            })
+            Refused::failure(
+                ServiceErrorCode::Unreachable,
+                BrokerFailure::QueueService,
+                format!("{error:#}"),
+            )
         })
     }
 
@@ -1060,6 +1061,13 @@ impl QueueBroker<'_> {
         });
         if let Some(token_run) = &token_run {
             payload["token_run"] = json!(token_run);
+        }
+        // A failure's reason is of a fixed set; its text is kept apart, so
+        // it never makes a key of its own.
+        if let (ServiceErrorCode::Unreachable | ServiceErrorCode::Failed, Some(message)) =
+            (refusal.code, message)
+        {
+            payload["message"] = json!(message);
         }
         let key = DenialKey {
             run: run.map(str::to_owned),
@@ -1135,6 +1143,18 @@ impl From<Refusal> for Refused {
     }
 }
 
+impl Refused {
+    /// A refusal as `code` because of `failure`, the error's text the
+    /// answer's message and the record's `message`.
+    fn failure(code: ServiceErrorCode, failure: BrokerFailure, message: String) -> Self {
+        Self {
+            refusal: Refusal::failure(code, failure),
+            token_run: None,
+            message: Some(message),
+        }
+    }
+}
+
 /// What the answer says of a body that does not read as a queue service
 /// request: the kind of the error and where, never the text of the input.
 fn unreadable_body(error: &serde_json::Error) -> String {
@@ -1150,13 +1170,6 @@ fn unreadable_body(error: &serde_json::Error) -> String {
         error.line(),
         error.column()
     )
-}
-
-fn failed(reason: String) -> Refusal {
-    Refusal {
-        code: ServiceErrorCode::Failed,
-        reason,
-    }
 }
 
 /// The token and the run of a tunnel's request: of its
@@ -1597,6 +1610,117 @@ mod tests {
         assert_eq!(denied.len(), limit + 3);
         assert!(denied[limit + 2].get("suppressed").is_none());
         assert_eq!(denied[limit + 2]["reason"], "not_allowed");
+    }
+
+    #[test]
+    fn failures_of_one_kind_share_a_key_whatever_their_text() {
+        let backend = Backend::new(Some(RunStatus::Running));
+        let start = Instant::now();
+        let clock = Arc::new(Stepped(Mutex::new(start)));
+        let denials = DenialRecords::new(clock.clone());
+        let broker = QueueBroker {
+            backend: &backend,
+            denials: &denials,
+            build: "b1",
+            pid: 7,
+        };
+        let limit = DENIALS_PER_WINDOW as usize;
+        // Unreachable tunnels whose errors differ (a host:port each, as an
+        // io error says) are of one key, with no token run.
+        let tunnel = connect("crates.io:443", None);
+        for at in 0..=limit {
+            let answer =
+                broker.tunnel_failed(&tunnel, &anyhow!("connect to 10.0.0.{at}:443: refused"));
+            assert_eq!(answer.status, 502);
+            let body: Value = serde_json::from_slice(&answer.body).unwrap();
+            assert_eq!(body["error"]["code"], "unreachable");
+            assert_eq!(
+                body["error"]["message"],
+                format!("connect to 10.0.0.{at}:443: refused")
+            );
+        }
+        {
+            let denied = backend.denied.lock().unwrap();
+            assert_eq!(denied.len(), limit, "{denied:?}");
+            assert_eq!(denied[0]["reason"], "tunnel");
+            assert_eq!(denied[1]["reason"], "tunnel");
+            assert_eq!(denied[1]["message"], "connect to 10.0.0.1:443: refused");
+            assert!(denied[0].get("token_run").is_none());
+        }
+        // The pool without a token run has used one key: the rest of its
+        // keys still record, the last new one overflows.
+        for at in 1..DENIAL_KEYS_PER_POOL {
+            broker.handle(&queue_request(None, Some(&format!("other-{at}"))));
+        }
+        assert_eq!(
+            backend.denied.lock().unwrap().len(),
+            limit + DENIAL_KEYS_PER_POOL - 1
+        );
+        broker.handle(&queue_request(None, Some("one-too-many")));
+        assert_eq!(
+            backend.denied.lock().unwrap().len(),
+            limit + DENIAL_KEYS_PER_POOL - 1
+        );
+        // The count is of the failure's kind, without a text of its own.
+        *clock.0.lock().unwrap() = start + DENIAL_WINDOW;
+        denials.flush(&backend);
+        let denied = backend.denied.lock().unwrap();
+        let counted: Vec<&Value> = denied
+            .iter()
+            .filter(|event| event["reason"] == "tunnel" && event.get("suppressed").is_some())
+            .collect();
+        assert_eq!(counted.len(), 1, "{denied:?}");
+        assert_eq!(counted[0]["suppressed"], 1);
+        assert_eq!(counted[0]["code"], "unreachable");
+        assert!(counted[0].get("message").is_none());
+        let overflow = denied.last().unwrap();
+        assert_eq!(
+            overflow,
+            &json!({"overflow": true, "code": "unauthenticated", "suppressed": 1})
+        );
+    }
+
+    #[test]
+    fn a_failure_records_its_kind_and_keeps_its_text_apart() {
+        // The token, the run and the service each fail in their own kind;
+        // the error's text is the message, and no token's value is in it.
+        for (backend, reason, code) in [
+            (
+                Backend {
+                    reachable: false,
+                    ..Backend::new(Some(RunStatus::Running))
+                },
+                "queue_service",
+                "unreachable",
+            ),
+            (
+                Backend {
+                    answers_run: false,
+                    ..Backend::new(Some(RunStatus::Running))
+                },
+                "run_unreadable",
+                "unreachable",
+            ),
+        ] {
+            let (_, body) = handle(&backend, &queue_request(Some("good"), Some("r1")));
+            let denied = backend.denied.lock().unwrap();
+            assert_eq!(
+                (&denied[0]["reason"], &denied[0]["code"]),
+                (&json!(reason), &json!(code))
+            );
+            assert_eq!(denied[0]["message"], body["error"]["message"]);
+            assert!(!denied[0].to_string().contains("good"), "{denied:?}");
+        }
+        let backend = Backend::new(Some(RunStatus::Running));
+        let (_, body) = handle(&backend, &queue_request(Some("broken"), Some("r1")));
+        let denied = backend.denied.lock().unwrap();
+        assert_eq!(denied[0]["reason"], "token_unreadable");
+        assert_eq!(denied[0]["code"], "failed");
+        assert_eq!(denied[0]["message"], body["error"]["message"]);
+        // A refusal that is not a failure records no message.
+        drop(denied);
+        handle(&backend, &queue_request(None, Some("r1")));
+        assert!(backend.denied.lock().unwrap()[1].get("message").is_none());
     }
 
     #[test]

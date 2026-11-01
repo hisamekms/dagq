@@ -78,6 +78,7 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
 - 拒否の記録の量: runとhostはclientが決める値なので、記録の件数とbrokerのmemoryは`domain::queue_broker::DenialLimiter`で窓ごとに絞る（上限と窓はその隣の定数）。
   run・宛て・code・reason・tokenのrunの同じ拒否は、窓ごとに上限の件数まで1件ずつ残し、超えた分はeventを書かずに数える。
   reasonとtokenのrunも同じものだけを束ねるので、同じrunと宛ての安い拒否（tokenの無い要求など）を繰り返しても、別のreasonや別のrunのtokenを使った拒否の記録は埋まらない。
+  reasonは決まった集合の語で、届かない・読めないの拒否もerrorの文言（host:portや上流のerror）ではなく何ができなかったかの分類（`domain::queue_broker::BrokerFailure`）にし、文言はeventの別の欄と答えにだけ残すので、上流のerrorの文言が変わるだけでは新しい組にならない。
   窓を持つ組の数には、tokenのrunの有るものと無いものの別に上限があり、有る側はtokenのrunごとにも上限がある。
   上限の後の新しい組の拒否は組ごとに残さず、codeとtokenのrunごとの溢れとして数える。
   tokenのrunは制御側が発行したtokenから引くので、tokenの無い要求でも、1つのtokenを持つcontainerでも、有る側を埋めきれない。

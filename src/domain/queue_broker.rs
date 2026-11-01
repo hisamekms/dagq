@@ -828,6 +828,29 @@ pub fn claude_headers(
     kept
 }
 
+string_enum!(
+    /// What the broker could not do when it refused a request as
+    /// `unreachable` or `failed`: the `reason` of `queue_broker_denied` and
+    /// of its [`DenialKey`], one of a fixed set, so an error's text (a host
+    /// and port, an io or HTTP error) never makes a new key; that text is
+    /// the event's `message` and the answer's.
+    BrokerFailure {
+    /// The Claude API did not answer (`unreachable`).
+    ClaudeApi => "claude_api",
+    /// The host of a tunnel did not answer (`unreachable`).
+    Tunnel => "tunnel",
+    /// The queue service did not answer the request passed on to it
+    /// (`unreachable`).
+    QueueService => "queue_service",
+    /// The token's run could not be read: `unreachable` when the queue
+    /// service did not answer, `failed` otherwise.
+    RunUnreadable => "run_unreadable",
+    /// The token could not be read (`failed`).
+    TokenUnreadable => "token_unreadable",
+    /// The request to pass on could not be written (`failed`).
+    RequestUnwritable => "request_unwritable",
+});
+
 /// A request the broker refuses on its own: the code a client reads and
 /// the reason the record keeps.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -848,6 +871,15 @@ impl Refusal {
         Self {
             code: ServiceErrorCode::ForbiddenDestination,
             reason: "not_allowed".to_owned(),
+        }
+    }
+
+    /// A refusal as `code` (`unreachable` or `failed`) because of
+    /// `failure`.
+    pub fn failure(code: ServiceErrorCode, failure: BrokerFailure) -> Self {
+        Self {
+            code,
+            reason: failure.as_str().to_owned(),
         }
     }
 
@@ -937,9 +969,9 @@ pub fn watch_step(
 /// `CONNECT`'s from its proxy credentials), the `destination`
 /// ([`Destination::name`]), the `method`, the `reason` (a [`TokenRefusal`],
 /// a [`TunnelRefusal`], `egress_unreadable` (the registries could not be
-/// read), `bad_body`, `malformed`, or the error of a service or a tunnel's
-/// host that did not answer or of a token that could not be read) and the
-/// `code`; and `token_run`, the token's run, when that is another.
+/// read), `bad_body`, `malformed`, or a [`BrokerFailure`]) and the
+/// `code`; `message`, the error's text, with a [`BrokerFailure`]; and
+/// `token_run`, the token's run, when that is another.
 /// `suppressed` counts the refusals of the same [`DenialKey`] not recorded
 /// in a window that reached [`DENIALS_PER_WINDOW`] ([`DenialLimiter`]): on
 /// the key's next record, or, at the window's end, on an event of its own
@@ -1577,6 +1609,9 @@ mod tests {
             reason: "x".into(),
         };
         assert_eq!(unreachable.status(), 502);
+        let failed = Refusal::failure(ServiceErrorCode::Failed, BrokerFailure::TokenUnreadable);
+        assert_eq!(failed.reason, "token_unreadable");
+        assert_eq!(failed.status(), 500);
         let bad = Refusal {
             code: ServiceErrorCode::BadRequest,
             reason: "x".into(),
