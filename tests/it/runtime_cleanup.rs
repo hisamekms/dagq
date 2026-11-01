@@ -1284,7 +1284,7 @@ fn rest_passes(db: &Path, count: usize) {
 /// is handed over leased once the rest is done (ADR-t3077-1), so too when
 /// the rest finished between the reading of the pass it started on and the
 /// handoff, read after the cleanup was polled on that pass (the pass order
-/// of `supervise::execution`): the race's representative. A handoff read
+/// of `supervise::execution::run_loop`): the race's representative. A handoff read
 /// first on that pass while the rest is still held differs from it only in
 /// the rest's job not having finished, which
 /// `supervise::cleanup::tests::ending_keeps_only_the_rest_of_a_cleanup_for_room`

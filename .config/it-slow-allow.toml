@@ -278,7 +278,7 @@ task = 1715
 # two cases (task 3767), each about one case of the 38.9s of three before, class B
 [[test]]
 name = "runtime_cleanup::draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing"
-reason = "B 境界（守る境界）: the drain waits for the rest of a cleanup for room before deciding a landing and hands the run over leased, a handoff while the first job is held and one read after the cleanup was polled on the pass the rest started and finished unjoined (pass order in supervise::execution, the race's representative); the decisions are supervise::cleanup unit tests"
+reason = "B 境界（守る境界）: the drain waits for the rest of a cleanup for room before deciding a landing and hands the run over leased, a handoff while the first job is held and one read after the cleanup was polled on the pass the rest started and finished unjoined (pass order in supervise::execution::run_loop, the race's representative); the decisions are supervise::cleanup unit tests"
 task = 1715
 
 # 33.659s, class D
