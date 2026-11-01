@@ -11,16 +11,24 @@
 ```sh
 FROM=2026-09-28T13:00:00Z; TO=2026-09-28T14:00:00Z
 ~/.local/bin/dagq stats --since "$FROM" --until "$TO" --full | jq -r '
-  "task\tchange\tareas\tclaim→着地(分)\t人待ち除く\t作業\t検証\t着地待ち\tverify\t人の答え待ち\tresume\ttitle",
+  "run\ttask\tchange\tareas\tclaim→着地(分)\t作業\t検証\t着地待ち\tverify\tresume\ttitle",
   (.runs[] | select(.status == "integrated")
    | def m: ./60 | floor;
      def t: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
-     [.task_id, (.change // "-"), ((.areas // []) | join(",") | if . == "" then "-" else . end),
-      ((.landed_at|t) - (.claimed_at|t) | m), ((.landed_at|t) - (.claimed_at|t) - .land_phases.ask | m), (.work|m), (.validate|m),
-      (.wait_to_land|m), (.land_phases.verify|m), (.land_phases.ask|m), .resumes, .title[0:40]] | @tsv)'
+     [.run_id, .task_id, (.change // "-"), ((.areas // []) | join(",") | if . == "" then "-" else . end),
+      ((.landed_at|t) - (.claimed_at|t) | m), (.work|m), (.validate|m),
+      (.wait_to_land|m), (.land_phases.verify|m), .resumes, .title[0:40]] | @tsv)'
 ```
 
-- 時間はどれも分。「人の答え待ち」は着地待ちの中の ask で、作業中の答え待ちが疑わしい run は `~/.local/bin/dagq timeline RUN --gap 1` の JSON で `blocker` が `human` の gap（`reason` の例: `waiting`・`landing_answer`。task の保留の `held` は ask の待ちでないので除く。`--gap` の既定 300 秒では短い gap が出ない）の `secs` を足し、除いた値も並べる。gap の `reason` が `legacy` の run（工程の記録の無い run）は区間を作り直さないので答え待ちを除けず、含む値だけを出してそう書く
+人の答え待ち（分）は run ごとに `timeline` の gap から足す（上の表の `run` の値を `RUN` に）:
+
+```sh
+~/.local/bin/dagq timeline "$RUN" --gap 1 | jq -r '
+  [.gaps[] | select(.blocker == "human")] as $h
+  | "人の答え待ち \([$h[] | select(.reason != "push_pending") | .secs] | add // 0 | ./60 | floor) 分（push_pending を除く）\t\($h | group_by(.reason) | map("\(.[0].reason)=\([.[].secs] | add / 60 | floor)") | join(" "))\tlegacy \([.gaps[] | select(.reason == "legacy")] | length)"'
+```
+
+- 時間はどれも分。「人の答え待ち」は [SKILL.md](../SKILL.md) の共通の決まりの除く分で、run ごとには上の `timeline` の `blocker` が `human` の gap（`waiting`・`landing_answer`・`claim_answer`・`push_pending`・`held`）だけから一度だけ数え、`land_phases.ask` を別に引かない（`landing_answer` の gap と重なる）。claim→着地から引くのは着地より前の gap で、着地の後の `push_pending` は上の jq の合計から除く（工程ごとの値には出る）。`--gap` の既定 300 秒では短い gap が出ない。gap の `reason` が `legacy` の run（工程の記録の無い run）は区間を作り直さないので答え待ちを除けず、含む値だけを出してそう書く。時間の範囲の全体で引くなら `stats` の `breakdown.overall.duration.by_blocker.human.secs // 0`（範囲は claim から push の終わりまでで `push_pending` を含むので、claim→着地の和ではなく `duration.secs` から引く）
 - 種類の層: task が宣言した `change`（`dagq.toml` の `[tasks] changes` の値。change の無い task と古いバイナリの記録では `-`）と、`dagq.toml` の `[areas]` から求める `areas`（着地 commit の差分から。`[areas]` が無い間と古いバイナリの記録では `-`）で分ける
 
 (b) claim の保留と resume と ask（同じ `FROM`・`TO`）:

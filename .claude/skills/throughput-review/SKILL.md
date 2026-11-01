@@ -14,7 +14,7 @@ description: この repository の本番 queue の着地の流れ（スループ
 - コマンドは repository の中（どの worktree でもよい）で打つ。外で打つと queue を解決できない
 - `events` の `--limit` を必ず付ける（既定は 100 件で、30 時間ぶんの `run_integrated` は超えうる）
 - `created_at` は UTC。JST への変換は jq の `sub("\\.[0-9]+Z$";"Z") | fromdateiso8601 + 9*3600 | strftime(...)` で行い、`date -j` では変換しない（`date` は `--since` の UTC の時刻を作るのにだけ使う）
-- 出力は日本語。時間の値は、人の答え待ちを含む値と、除いた値を並べる（除く分: 着地待ちの中の `land_phases.ask`、作業中の答え待ちは `timeline RUN --gap 1` の JSON で `blocker` が `human` の gap（`reason` の例: `waiting`・`landing_answer`。task の保留の `held` は除く）の `secs` の和で、gap が `legacy` の run は区間を作り直さないので除けない。全体は kpi の `ask_wait`）
+- 出力は日本語。時間の値は、人の答え待ちを含む値と、除いた値を並べる。除く分は `blocker` が `human` の工程（`waiting`・`landing_answer`・`claim_answer`・`push_pending`・`held`。どれも含める）の時間で、一つの出所から一度だけ数える: 期間の全体は `stats` の `breakdown.overall`（kpi は期間ごとの `breakdown.all`）の `duration.by_blocker.human.secs // 0`（範囲は claim から push の終わりまで）、run ごとは `timeline RUN --gap 1` の JSON の `gaps` で `blocker` が `human` のものの `secs` の和（claim→着地から引くときは着地の後の `push_pending` を除く）。`land_phases.ask` と kpi の `ask_wait` はこれと重なるので別に引かない。gap が `legacy` の run（breakdown では `legacy` の行）は区間を作り直さないので除けず、含む値だけを出してそう書く
 - 1 時間の上下には反応しない。見るのは移動平均で、手を打つかどうかは週次の見直しで決める
 
 ## 1. 毎時の確認（「流れ見て」「着地どう？」「hourly集計」）
