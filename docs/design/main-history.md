@@ -37,5 +37,5 @@ runtimeの制御はこの記録を読まない。
   畳む関数は後の記録を正にする。
 - **畳む関数**: `stats::main_log::fold_main_log`がeventだけからMainHistory・commitごとの変えたfile・到達時刻・Gitの読み取りの状態を返す。
   窓の終わりが到達時刻から猶予より後か、窓が取り込みより前に始まれば、`MainLog::history_for`は理由（Gitの読み取りの失敗中・supervisorの停止・到達点が古い）つきの「記録が無い」を返す。
-  statsとkpiの読み手はまだGitを読む（queue serviceを通すときはクライアントのGit。[hostのCLI](queue-service-host-cli.md#送る範囲)）。
-  supervisorの衝突の多いファイル（[claimの控え](supervisor-lifecycle/claim-hold.md#衝突の多いファイル)とplan reviewの`plan_review::conflict_hotspot_files`）もsupervisorのGitを読み、statsの既定の窓に衝突があるときだけ、窓の最初のeventの時刻の直前から読む（`application::stats::window_conflict_history`）。
+  statsとkpiはmainの履歴を台帳から読み、クライアントもjobもserviceもそのためにGitを読まない（[hostのCLI](queue-service-host-cli.md#送る範囲)）。
+  supervisorの衝突の多いファイル（[claimの控え](supervisor-lifecycle/claim-hold.md#衝突の多いファイル)とplan reviewの`plan_review::conflict_hotspot_files`）はsupervisorのGitを読み、statsの既定の窓に衝突があるときだけ、窓の最初のeventの時刻の直前から読む（`application::main_history::window_conflict_history`）。

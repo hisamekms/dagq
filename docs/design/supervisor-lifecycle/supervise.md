@@ -143,7 +143,7 @@ supervisorはこれらのためにもqueue DBを開かない（`compose::supervi
 
 - 入口は`application::supervisor_service`のmodule doc（serviceが答える操作、leaseのtokenの検査、actorの名指し、tokenの発行と失効）と`SupervisorQueue`、serviceの側は`answer`。
 - supervisorが起動する`observe`と`throughput-review`は、そのsupervisorのtokenで同じprincipalとしてserviceを通り、DBを開かない（`compose::observation`の`job_queues`）。
-  `stats`と`kpi`のGitの読み取りはCLIと同じくjobが行い、serviceはGitを起動しない（`infrastructure::job_reads`、[送る範囲](../queue-service-host-cli.md#送る範囲)）。
+  `stats`と`kpi`はmainの履歴を台帳から読むので、jobもserviceもそのためにGitを読まない（[送る範囲](../queue-service-host-cli.md#送る範囲)）。
   引き継ぎのexecはtokenを失効させずに残す（`ServiceCaller::take_back`）ので、execをまたいで記録できる。
 - 着地は`begin_landing`が発行したintegratorのprincipalで書き、serviceはそのrun・task・slotのleaseで着地の操作だけを答える（[integrate](integrate.md)）。
 - 約束: 1つの要求は1つのqueueの操作で、serviceは同じ操作を同じtransactionで行う（[SQLite persistence](../persistence.md#runtime-ownership)）。
