@@ -172,6 +172,18 @@ pub trait LedgerStore {
             .map(crate::domain::ledger::LedgerHead::of)
             .collect())
     }
+    /// The queue rows' heads with what each says of itself besides
+    /// ([`crate::domain::ledger::queue::QueueHead`]): its task, subject,
+    /// times, outcome and detail, not its records, so that what builds the
+    /// ledger makes the queue book again from the rows the store holds
+    /// ([`crate::domain::ledger::queue::QueueBook::from_heads`]).
+    fn ledger_queue_heads(&self) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
+        Ok(self
+            .ledger_rows(LedgerKind::Queue)?
+            .iter()
+            .map(crate::domain::ledger::queue::QueueHead::of)
+            .collect())
+    }
     /// Of the session rows, the records a session book is made again by,
     /// each with its row's key ([`crate::domain::ledger::session::anchors`]):
     /// each row's first and every `session_closed`, not the rest.

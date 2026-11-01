@@ -25,16 +25,69 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{LedgerKind, LedgerRow, Subject, findings};
+use super::{LedgerHead, LedgerKind, LedgerRow, Subject, findings};
 use crate::domain::{
-    EventId, EventKind, RunEvent, claim_hold,
+    EventId, EventKind, RunEvent, RunId, TaskId, claim_hold,
     live_alerts::{self, AlertKey, StreamRecord},
-    pre_claim::{IntervalKind, Moved, PreClaimBook, PreClaimInterval, Started},
-    stats::{landing_utilization::Attempts, timestamp_millis},
+    pre_claim::{ENDED_FREED, IntervalKind, Moved, PreClaimBook, PreClaimInterval, Started},
+    stats::{
+        landing_utilization::{Attempt, Attempts},
+        timestamp_millis,
+    },
     supervisor_life::{Lives, supervisor_of},
 };
+
+/// What a queue row the store holds says of itself that [`QueueBook`] is
+/// made again by ([`QueueBook::from_heads`]): its head ([`LedgerHead`],
+/// the ids of its records and not the records), its task, its subject's
+/// kind and id, its times, its outcome and its detail. The store reads
+/// it of the rows it holds without their records.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueueHead {
+    pub head: LedgerHead,
+    pub task_id: Option<TaskId>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub started_at: Option<i64>,
+    pub ended_at: Option<i64>,
+    pub outcome: Option<String>,
+    pub detail: Value,
+}
+
+impl QueueHead {
+    /// The queue head of `row`.
+    pub fn of(row: &LedgerRow) -> Self {
+        let subject = row.subject.as_ref();
+        Self {
+            head: LedgerHead::of(row),
+            task_id: row.task_id,
+            subject_kind: subject.map(|s| s.kind.clone()).unwrap_or_default(),
+            subject_id: subject.map(|s| s.id.clone()).unwrap_or_default(),
+            started_at: row.started_at,
+            ended_at: row.ended_at,
+            outcome: row.outcome.clone(),
+            detail: row.detail.clone(),
+        }
+    }
+}
+
+/// What a queue row of the subject's `kind` is, by the kinds [`QueueBook::row`]
+/// gives the rows; another kind is one event of its own.
+fn of_kind(kind: &str) -> Of {
+    match kind {
+        "slots_full" => Of::Interval(Started::PreClaim(IntervalKind::SlotsFull)),
+        "claim_hold" => Of::Interval(Started::PreClaim(IntervalKind::ClaimHold)),
+        "claim_deferral" => Of::Interval(Started::PreClaim(IntervalKind::ClaimDeferral)),
+        "landing_hold" => Of::Interval(Started::LandingHold),
+        "live_alert_stream" => Of::Stream,
+        "live_alert" => Of::Alert,
+        "finding" => Of::Finding,
+        _ => Of::Event,
+    }
+}
 
 /// A queue row as it is folded.
 struct Building {
@@ -317,6 +370,183 @@ pub struct QueueBook {
 }
 
 impl QueueBook {
+    /// The book made again from the queue rows the store holds (`heads`,
+    /// [`QueueHead`]), `pre_claim` the waits before a claim of the same
+    /// events and `last` the last of them, reading no event: it is the book
+    /// of those events, read one at a time ([`Self::add`]), less the rows
+    /// the store holds settled that no later event reaches
+    /// ([`Self::closed`]), which a builder forgets. Each row assigns the
+    /// records its row holds; a stream its next baseline did not replace
+    /// is its supervisor's open one, an alert not ended its supervisor's
+    /// and key's (from the start its detail holds), and a finding's row
+    /// the one of its id. A supervisor's life reaches its open stream, its
+    /// slots full not freed and the holds its stop ended (by the waits'
+    /// details), and the next close reads the ends of the supervisors with
+    /// a stream open. The landing slot's rows are the attempts, each ended
+    /// one reading up to its row's `inputs_through`, and the last open.
+    /// What a row read past its records (an end of no record of its own, a
+    /// reach) stays an input of it, as its row read it. A row of another
+    /// kind or a key of no event id is not one of its rows.
+    pub fn from_heads(heads: &[QueueHead], pre_claim: &PreClaimBook, last: EventId) -> Self {
+        let mut heads: Vec<(EventId, &QueueHead)> = heads
+            .iter()
+            .filter(|head| head.head.kind == LedgerKind::Queue)
+            .filter_map(|head| Some((EventId::new(head.head.key.parse().ok()?), head)))
+            .collect();
+        heads.sort_by_key(|(id, _)| *id);
+        let mut book = Self {
+            last,
+            ..Self::default()
+        };
+        let mut attempts = Vec::new();
+        let mut open = None;
+        let mut settled = Vec::new();
+        for (id, head) in heads {
+            if head.subject_kind == "landing_slot" {
+                book.slot(id, head, &mut attempts, &mut open);
+                continue;
+            }
+            if head.head.is_final {
+                settled.push(id);
+            }
+            let of = of_kind(&head.subject_kind);
+            let mut row = Assigned {
+                of,
+                about: String::new(),
+                started_at: head.started_at,
+                ended_at: None,
+                outcome: None,
+                baseline: false,
+                version: None,
+                records: head.head.records.clone(),
+                ended_by: None,
+            };
+            match of {
+                Of::Interval(started) => {
+                    row.ended_by = Some(head.head.inputs_through.events);
+                    book.hold_interval(id, started, &head.detail["interval"]);
+                }
+                Of::Stream => {
+                    row.about.clone_from(&head.subject_id);
+                    row.baseline = head.detail["baseline"].as_bool().unwrap_or(false);
+                    row.version = head.detail["version"].as_u64();
+                    row.ended_by = Some(head.head.inputs_through.events);
+                    if head.outcome.as_deref() == Some("replaced") {
+                        row.ended_at = head.ended_at;
+                        row.outcome.clone_from(&head.outcome);
+                    } else {
+                        book.streams.insert(head.subject_id.clone(), id);
+                    }
+                }
+                Of::Alert | Of::Finding | Of::Event => {
+                    row.about.clone_from(&head.subject_id);
+                    row.ended_at = head.ended_at;
+                    row.outcome.clone_from(&head.outcome);
+                }
+            }
+            if of == Of::Alert && row.ended_at.is_none() {
+                let alert = &head.detail["alert"];
+                if let (Some(supervisor), Ok(key)) = (
+                    alert.get("supervisor").and_then(Value::as_str),
+                    AlertKey::deserialize(alert),
+                ) {
+                    book.alerts.insert((supervisor.to_owned(), key), id);
+                }
+            }
+            if of == Of::Finding
+                && let Ok(finding) = head.subject_id.parse::<i64>()
+            {
+                book.findings.entry(finding).or_insert(id);
+            }
+            book.rows.insert(id, row);
+        }
+        let streams: Vec<(String, EventId)> = book
+            .streams
+            .iter()
+            .map(|(supervisor, start)| (supervisor.clone(), *start))
+            .collect();
+        for (supervisor, start) in streams {
+            book.hold(&supervisor, start);
+            book.stream_named.insert(supervisor);
+        }
+        book.attempts = Attempts::from_parts(attempts, open);
+        for id in settled {
+            if book.closed(&id.to_string(), pre_claim) {
+                book.rows.remove(&id);
+            }
+        }
+        book
+    }
+
+    /// Take the landing slot's row `head` of the attempt `start` began as
+    /// the next attempt: an ended one reads up to its row's
+    /// `inputs_through`, kept as runs of the attempts reading up to the
+    /// same ([`Throughs`]).
+    fn slot(
+        &mut self,
+        start: EventId,
+        head: &QueueHead,
+        attempts: &mut Vec<Attempt>,
+        open: &mut Option<(RunId, usize)>,
+    ) {
+        let index = self.slots.len();
+        let begun = head.started_at.unwrap_or_default();
+        let ended = head.ended_at;
+        attempts.push(Attempt {
+            task_id: head.task_id,
+            start: begun,
+            end: ended.unwrap_or(begun),
+            landed: head.outcome.as_deref() == Some("landed"),
+            open: ended.is_none(),
+        });
+        match ended {
+            None => {
+                *open = RunId::new(head.subject_id.clone())
+                    .ok()
+                    .map(|run| (run, index))
+            }
+            Some(_) => {
+                let through = head.head.inputs_through.events;
+                if self.throughs.runs.last().map(|run| run.1) != Some(through) {
+                    self.throughs.runs.push((index, through));
+                }
+            }
+        }
+        self.slot_of.insert(start, index);
+        self.slots.push(Slot {
+            start,
+            run: head.subject_id.clone(),
+        });
+    }
+
+    /// Note the wait `start` began among those a supervisor's life reaches
+    /// as [`Self::interval`] left it, by `interval` (its row's detail): a
+    /// slots full its supervisor's, unless its `slots_full_ended` freed
+    /// it, and a hold or a deferral a supervisor's stop ended that
+    /// supervisor's.
+    fn hold_interval(&mut self, start: EventId, started: Started, interval: &Value) {
+        let text = |key: &str| interval.get(key).and_then(Value::as_str);
+        let supervisor = match started {
+            Started::PreClaim(IntervalKind::SlotsFull) => {
+                (text("end") != Some(ENDED_FREED)).then(|| text("supervisor"))
+            }
+            _ => (text("end") == Some(claim_hold::ENDED_SUPERVISOR_GONE)).then(|| text("ended_by")),
+        };
+        if let Some(supervisor) = supervisor.flatten() {
+            self.hold(supervisor, start);
+        }
+    }
+
+    /// The keys of the rows that hold records, ascending: those a builder
+    /// that takes the book made again ([`Self::from_heads`]) gives their
+    /// records back from the rows the store holds before it folds them.
+    pub fn keys_with_records(&self) -> impl Iterator<Item = String> + '_ {
+        self.rows
+            .iter()
+            .filter(|(_, row)| !row.records.is_empty())
+            .map(|(id, _)| id.to_string())
+    }
+
     /// Read `event`, after every one read before: the queue's own
     /// (`owned`) are assigned, `moved` is what it did to the waits before
     /// a claim ([`PreClaimBook::add`]), and every event reads into the

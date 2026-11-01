@@ -40,6 +40,7 @@ use crate::domain::ledger::builder::{
     Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, RESOURCES_PER_READ, RunResources,
     RunSteps, STEPS_PER_READ, Target, WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
 };
+use crate::domain::ledger::queue::QueueBook;
 use crate::domain::ledger::session::SessionBook;
 use crate::domain::session_step::{self, StepTarget};
 
@@ -397,6 +398,29 @@ pub fn session_book(store: &dyn LedgerQueue) -> Result<SessionBook> {
     Ok(SessionBook::from_heads(
         &store.ledger_heads(LedgerKind::Session)?,
         &store.ledger_session_anchors()?,
+    ))
+}
+
+/// The queue book made again from the queue rows `store` holds
+/// ([`QueueBook::from_heads`]): their heads with their subjects, times,
+/// outcomes and details, no event of the EventStore and no record of
+/// theirs, read against the waits before a claim `builder` keeps and up to
+/// its cursor, so that a builder going on from the store's rows
+/// ([`Builder::restore_queue_rows`]) does not read the events of the queue
+/// rows settled to know their findings, alerts, streams, waits and landing
+/// slots.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
+    )
+)]
+pub fn queue_book(store: &dyn LedgerQueue, builder: &Builder) -> Result<QueueBook> {
+    Ok(QueueBook::from_heads(
+        &store.ledger_queue_heads()?,
+        builder.pre_claim(),
+        builder.events,
     ))
 }
 

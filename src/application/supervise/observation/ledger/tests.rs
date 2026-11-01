@@ -7,9 +7,10 @@ use crate::application::{
 };
 use crate::domain::environment::{Resources, RunResource};
 use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
+use crate::domain::ledger::queue::QueueBook;
 use crate::domain::ledger::session::SessionBook;
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
-use crate::domain::ledger::testkit::{Log, T0, ms, run_id, sessions_across};
+use crate::domain::ledger::testkit::{Log, T0, ms, queue_across, run_id, sessions_across};
 use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node};
 use crate::domain::session_step::{
     RETENTION_MS, ResourceSample, SeqRange, SessionOwner, SessionResource, SessionStep, Step,
@@ -2764,4 +2765,107 @@ fn the_session_book_made_again_reads_no_event_however_many_sessions_settled() {
     assert_eq!((few.0, few.1), (0, 0));
     assert_eq!((many.0, many.1), (0, 0));
     assert!(many.2 > few.2);
+}
+
+/// A builder that goes on from a position with the queue book made again
+/// from the rows the store holds ([`queue_book`]), what else it keeps
+/// carried from the passes up to there and none of the queue's events,
+/// writes the rows of the fold of every event ([`queue_across`]): a
+/// finding's next record, an alert's end and a stream's next baseline to
+/// the rows open across the position, an event timed before a landing's
+/// end to that landing's row, the lives of the supervisors of a slots full
+/// and of a hold their stop ended to those, a claim to the deferral open.
+/// A book of the events after the position alone writes others.
+#[test]
+fn a_builder_going_on_from_the_queue_rows_held_writes_the_rows_of_every_event() {
+    let (log, position) = queue_across();
+    let rows_going_on = |book: Option<QueueBook>| {
+        let memory = Memory::default();
+        memory.events.replace(log.events[..position].to_vec());
+        let mut builder = Builder::default();
+        drain(&memory, &mut builder, LATER);
+        assert!(
+            memory
+                .rows
+                .borrow()
+                .iter()
+                .any(|((kind, _), row)| *kind == LedgerKind::Queue && row.is_final)
+        );
+        let made = queue_book(&memory, &builder).unwrap();
+        assert!(builder.restore_queue_rows(book.unwrap_or(made)));
+        memory.events.replace(log.events.clone());
+        passes_to_drain(&memory, &mut builder, LATER + 1);
+        memory.rows.into_inner()
+    };
+    let rows = rows_going_on(None);
+    let whole = crate::domain::ledger::build(&log.events, ms(LATER + 1), BUILT);
+    let queue: Vec<&LedgerRow> = whole
+        .iter()
+        .filter(|row| row.kind == LedgerKind::Queue)
+        .collect();
+    assert!(queue.len() >= 10);
+    for expected in &queue {
+        let stored = &rows[&(expected.kind, expected.key.clone())];
+        let mut expected = (*expected).clone();
+        expected.is_final = stored.is_final;
+        assert_eq!(stored, &expected, "{}", expected.key);
+    }
+    assert_eq!(
+        rows.keys()
+            .filter(|(kind, _)| *kind == LedgerKind::Queue)
+            .count(),
+        queue.len()
+    );
+
+    let after_alone = rows_going_on(Some(QueueBook::default()));
+    assert_ne!(after_alone, rows);
+}
+
+/// The queue book is made again from the rows the store holds alone: with
+/// a few settled queue rows or more than a pass looks at, it reads no
+/// event of the EventStore, and it holds as many rows: the settled marks
+/// of the queue no later event reaches are not among them, the landing is.
+#[test]
+fn the_queue_book_made_again_reads_no_event_however_many_queue_rows_settled() {
+    let read_making_it = |settled: i64| {
+        let log = settled_sessions(settled);
+        let memory = Memory::of(&log);
+        let mut builder = Builder::default();
+        while pass(&memory, &mut builder, LATER).backlog > 0 {}
+        let held = memory
+            .rows
+            .borrow()
+            .values()
+            .filter(|row| row.kind == LedgerKind::Queue && row.is_final)
+            .count();
+        assert!(held > usize::try_from(settled).unwrap());
+        memory.read.set(0);
+        let book = queue_book(&memory, &builder).unwrap();
+        (
+            memory.read.get(),
+            memory.read_all.get(),
+            held,
+            book.row_count(),
+        )
+    };
+    let more = i64::try_from(CHECKS_PER_PASS).unwrap();
+    let (few, many) = (read_making_it(3), read_making_it(more));
+    assert_eq!((few.0, few.1), (0, 0));
+    assert_eq!((many.0, many.1), (0, 0));
+    assert!(many.2 > few.2);
+    assert_eq!((few.3, many.3), (1, 1));
+}
+
+/// A builder with a row not written yet does not take a queue book made
+/// again from the store's rows: they miss events it read.
+#[test]
+fn a_builder_with_rows_not_written_keeps_its_queue_book() {
+    let (log, position) = queue_across();
+    let memory = Memory::default();
+    memory.events.replace(log.events[..position].to_vec());
+    let mut builder = Builder::default();
+    builder.mark_events(&log.events[..position]);
+    let kept = builder.kept().clone();
+    assert!(!builder.restore_queue_rows(QueueBook::default()));
+    assert_eq!(builder.kept(), &kept);
 }

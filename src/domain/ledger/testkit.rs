@@ -354,3 +354,126 @@ pub(crate) fn sessions_across() -> (Log, usize) {
     );
     (log, position)
 }
+
+/// A finding's record of `status` (finding 1).
+pub(crate) fn finding_record(status: &str) -> Value {
+    json!({"finding_id": 1, super::findings::VALUES: {"id": 1, "target": "queue",
+        "task_id": null, "run_id": null, "goal_id": null, "kind": "conflict_hotspot",
+        "subject": "src/a.rs", "summary": "a", "impact": "normal", "status": status,
+        "occurrences": 1, "last_seen_at": 0}})
+}
+
+/// The cases a queue book of only the events after a position gets wrong
+/// (ask 1373), the position the length of the first part: before it a
+/// stream of `s1` open from its baseline and a record of it, an alert of
+/// `s1` open, a finding's first record, a slots full of `s2` open, a hold
+/// on the claims its supervisor `s3` stopped, a deferral open, a landing
+/// that ended, another landing open and a mark; after it an event of a
+/// task timed before the first landing's end (which reaches it), a
+/// record of the stream, the end of the alert, the finding's next record,
+/// events of `s2` and `s3` (whose lives reach their slots full and hold),
+/// the end of the open landing, the claim that ends the deferral, the next
+/// baseline of `s1` (which replaces its stream) and the end of the slots
+/// full.
+pub(crate) fn queue_across() -> (Log, usize) {
+    let alert = json!({"supervisor": "s1", "judgment": "slots", "kind": "idle"});
+    let (a, b, c) = (run_id(1), run_id(2), run_id(3));
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s1"}),
+        0,
+    )
+    .add(
+        None,
+        None,
+        "live_alert_baseline",
+        json!({"supervisor": "s1", "version": 1}),
+        1,
+    )
+    .add(None, None, "live_alert_started", alert.clone(), 2)
+    .add(None, None, "finding_recorded", finding_record("open"), 3)
+    .add(
+        None,
+        None,
+        "slots_full_started",
+        json!({"supervisor": "s2", "class": "heavy"}),
+        4,
+    )
+    .add(None, None, "claim_held", json!({"supervisor": "s3"}), 5)
+    .add(
+        None,
+        None,
+        "supervisor_stopped",
+        json!({"supervisor": "s3"}),
+        6,
+    )
+    .add(
+        Some(5),
+        None,
+        "claim_deferred",
+        json!({"supervisor": "s1", "reason": "paths"}),
+        7,
+    )
+    .add(Some(1), Some(&a), "integration_started", json!({}), 8)
+    .add(Some(1), Some(&a), "run_integrated", json!({}), 20)
+    .add(Some(2), Some(&b), "integration_started", json!({}), 21)
+    .add(None, None, "mark_added", json!({"mark": "m"}), 22)
+    .add(
+        None,
+        None,
+        "live_alert_input_changed",
+        json!({"supervisor": "s1", "version": 2}),
+        23,
+    );
+    let position = log.events.len();
+    log.add(Some(7), None, "task_created", json!({}), 15)
+        .add(
+            None,
+            None,
+            "live_alert_input_changed",
+            json!({"supervisor": "s1", "version": 3}),
+            30,
+        )
+        .add(None, None, "live_alert_ended", alert, 31)
+        .add(
+            None,
+            None,
+            "finding_recorded",
+            finding_record("resolved"),
+            32,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s2"}),
+            33,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s3"}),
+            34,
+        )
+        .add(Some(2), Some(&b), "run_integrated", json!({}), 35)
+        .add(Some(5), Some(&c), "run_claimed", json!({}), 36)
+        .add(
+            None,
+            None,
+            "live_alert_baseline",
+            json!({"supervisor": "s1", "version": 4}),
+            37,
+        )
+        .add(
+            None,
+            None,
+            "slots_full_ended",
+            json!({"supervisor": "s2", "class": "heavy"}),
+            38,
+        );
+    (log, position)
+}

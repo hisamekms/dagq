@@ -124,6 +124,17 @@ pub struct Stepped {
 }
 
 impl Attempts {
+    /// The attempts of `attempts` (in the order they started, an open
+    /// one's `end` its start) with the one open, its run's and its index,
+    /// as the events that made them would leave them: what a reader made
+    /// again from the rows it wrote of them goes on from.
+    pub fn from_parts(attempts: Vec<Attempt>, open: Option<(RunId, usize)>) -> Self {
+        let open = open.filter(|(_, index)| {
+            *index + 1 == attempts.len() && attempts.get(*index).is_some_and(|a| a.open)
+        });
+        Self { attempts, open }
+    }
+
     /// Read `event` of `run_id` at `at` (unix ms), after every one read
     /// before; an event of no run or of no readable time is not read.
     pub fn add(&mut self, event: &RunEvent, run_id: &RunId, at: i64) -> Stepped {

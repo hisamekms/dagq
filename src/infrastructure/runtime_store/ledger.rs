@@ -228,6 +228,58 @@ impl LedgerStore for SqliteQueue {
         rows.map(|row| row?).collect()
     }
 
+    /// Its columns and the ids of its records (SQLite's JSON functions over
+    /// the stored array): no record is parsed here.
+    fn ledger_queue_heads(&self) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
+        let mut statement = self.conn.prepare(
+            "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v,
+                    (SELECT COALESCE(json_group_array(json_extract(j.value, '$.id')), '[]')
+                       FROM json_each(r.records) j) AS ids,
+                    r.task_id, r.subject_kind, r.subject_id, r.started_at, r.ended_at,
+                    r.outcome, r.detail
+               FROM ledger_rows r WHERE r.kind=?1 ORDER BY r.key",
+        )?;
+        let kind = LedgerKind::Queue;
+        let rows = statement.query_map([kind.as_str()], |r| {
+            let key: String = r.get("key")?;
+            let inputs_from: i64 = r.get("inputs_from")?;
+            let inputs_through: String = r.get("inputs_through")?;
+            let is_final: bool = r.get("final")?;
+            let ledger_v: i64 = r.get("ledger_v")?;
+            let ids: String = r.get("ids")?;
+            let task_id: Option<i64> = r.get("task_id")?;
+            let subject_kind: Option<String> = r.get("subject_kind")?;
+            let subject_id: Option<String> = r.get("subject_id")?;
+            let started_at: Option<i64> = r.get("started_at")?;
+            let ended_at: Option<i64> = r.get("ended_at")?;
+            let outcome: Option<String> = r.get("outcome")?;
+            let detail: String = r.get("detail")?;
+            Ok((|| {
+                let mut records: Vec<i64> = serde_json::from_str(&ids)?;
+                records.sort_unstable();
+                Ok(crate::domain::ledger::queue::QueueHead {
+                    head: LedgerHead {
+                        kind,
+                        key,
+                        inputs_from: EventId::new(inputs_from),
+                        inputs_through: serde_json::from_str(&inputs_through)?,
+                        is_final,
+                        ledger_v: u32::try_from(ledger_v)?,
+                        records: records.into_iter().map(EventId::new).collect(),
+                    },
+                    task_id: task_id.map(crate::domain::TaskId::new),
+                    subject_kind: subject_kind.unwrap_or_default(),
+                    subject_id: subject_id.unwrap_or_default(),
+                    started_at,
+                    ended_at,
+                    outcome,
+                    detail: serde_json::from_str(&detail)?,
+                })
+            })())
+        })?;
+        rows.map(|row| row?).collect()
+    }
+
     /// Only the anchors of each session row are parsed: SQLite picks the
     /// first record and the `session_closed` ones out of the stored array.
     fn ledger_session_anchors(&self) -> Result<Vec<(String, crate::domain::RunEvent)>> {
@@ -467,6 +519,51 @@ mod tests {
             .find(|head| head.key == "session//events/0")
             .unwrap();
         assert_eq!(held.records, [EventId::new(4), EventId::new(5)]);
+    }
+
+    /// The queue heads read back what the queue rows hold of themselves
+    /// and the ids of their records, as the rows read whole give them,
+    /// and read no record: a row whose records hold only their ids gives
+    /// its head.
+    #[test]
+    fn the_queue_heads_read_no_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let (log, position) = ledger::testkit::queue_across();
+        let events = &log.events[..position];
+        let owned: Vec<RunEvent> = events
+            .iter()
+            .filter(|event| ledger::owner::owner(event) == ledger::owner::Owner::Queue)
+            .cloned()
+            .collect();
+        let rows = ledger::queue::queue_rows(
+            &owned,
+            events,
+            ledger::testkit::ms(40),
+            "2030-01-01T00:00:00.000Z",
+        );
+        assert!(rows.len() >= 10);
+        for row in &rows {
+            queue.write_ledger_row(row).unwrap();
+        }
+        let mut heads: Vec<ledger::queue::QueueHead> =
+            rows.iter().map(ledger::queue::QueueHead::of).collect();
+        heads.sort_by(|a, b| a.head.key.cmp(&b.head.key));
+        assert_eq!(queue.ledger_queue_heads().unwrap(), heads);
+
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET records='[{\"id\":4},{\"id\":17,\"payload\":1}]'
+                  WHERE kind='queue' AND key='4'",
+                [],
+            )
+            .unwrap();
+        assert!(queue.ledger_rows(LedgerKind::Queue).is_err());
+        let heads = queue.ledger_queue_heads().unwrap();
+        let held = heads.iter().find(|head| head.head.key == "4").unwrap();
+        assert_eq!(held.head.records, [EventId::new(4), EventId::new(17)]);
+        assert_eq!(held.subject_kind, "finding");
     }
 
     /// A folded run's row round-trips with its sums in their columns, and

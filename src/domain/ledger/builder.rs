@@ -109,9 +109,16 @@
 //!   ([`SessionBook`]) is made again from the session rows the store holds
 //!   (their heads and anchors, [`SessionBook::from_heads`]), reading no
 //!   event, and taken in place of the book of the events up to the cursor
-//!   ([`Builder::restore_session_rows`]); the rest of [`Kept`] is not made
-//!   from the rows yet, so a new process still starts at its cursors'
-//!   start and does not take it.
+//!   ([`Builder::restore_session_rows`]). So is which queue row each is a
+//!   record of ([`QueueBook`]: the findings, alerts and streams open, what
+//!   the supervisors' lives reach, the landing slot's attempts and what
+//!   each read up to), from the queue rows' heads with their times,
+//!   outcomes and details ([`QueueBook::from_heads`]), less those settled
+//!   that no later event reaches; taking it ([`Builder::restore_queue_rows`])
+//!   keeps none of the queue's events, each row's coming back from the
+//!   store's before it is folded. The rest of [`Kept`] is not made from
+//!   the rows yet, so a new process still starts at its cursors' start and
+//!   takes neither.
 //! - **What a pass makes**: each event is read into [`Kept`] once as it
 //!   comes in (the supervisors' lives, the waits before a claim, the
 //!   landing slot's attempts, which session or queue row it is a record
@@ -685,6 +692,22 @@ impl Kept {
     /// Which session row each event read is a record of.
     pub const fn session_rows(&self) -> &SessionBook {
         &self.session_rows
+    }
+
+    /// Take `book`, made again from the queue rows the store holds
+    /// ([`QueueBook::from_heads`]), as which queue row each event read is a
+    /// record of, and keep none of the queue's events: each row with
+    /// records is noted dropped, so that before it is folded it gets them
+    /// back from the row the store holds ([`Builder::to_restore`]), settled
+    /// or not.
+    fn restore_queue_rows(&mut self, book: QueueBook) {
+        let freed: usize = self.queue.iter().map(event_heap_bytes).sum();
+        self.event_heap -= freed;
+        self.queue = Vec::new();
+        self.dropped.retain(|(kind, _)| *kind != LedgerKind::Queue);
+        self.dropped
+            .extend(book.keys_with_records().map(|key| (LedgerKind::Queue, key)));
+        self.queue_rows = book;
     }
 
     /// The session or queue row of `kind` and `key` at `now_ms`, built at
@@ -1319,6 +1342,32 @@ impl Builder {
     /// event gives them.
     pub fn restore_session_rows(&mut self, book: SessionBook) {
         Arc::make_mut(&mut self.kept).session_rows = book;
+    }
+
+    /// Take `book`, made again from the queue rows the store holds
+    /// ([`QueueBook::from_heads`], of the waits before a claim [`Kept`]
+    /// holds and up to [`Self::events`]), as which queue row each event up
+    /// to there is a record of, in place of the book it made of those
+    /// events, and keep none of their events: each row's records come back
+    /// from the row the store holds before it is folded
+    /// ([`Self::to_restore`]). The store's rows record the same events, so
+    /// the events after its cursor go to the findings, alerts, streams,
+    /// waits and landing slots the fold of every event gives them. Only a
+    /// builder with nothing marked or touched takes it (whether it did):
+    /// with a row not written yet the store's rows would miss events it
+    /// read, which it would no longer keep.
+    pub fn restore_queue_rows(&mut self, book: QueueBook) -> bool {
+        if self.marked() || !self.touched.is_empty() {
+            return false;
+        }
+        Arc::make_mut(&mut self.kept).restore_queue_rows(book);
+        true
+    }
+
+    /// The waits before a claim of the events read, which a queue book made
+    /// again from the store's rows reads ([`QueueBook::from_heads`]).
+    pub fn pre_claim(&self) -> &PreClaimBook {
+        &self.kept.pre_claim
     }
 
     /// The rows of `rows` (those [`Self::rows_to_build`] names) whose

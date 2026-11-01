@@ -896,3 +896,158 @@ fn a_queue_row_is_closed_once_no_later_event_reaches_it() {
         );
     }
 }
+
+/// The heads of the rows the store holds of `events` folded at `now`
+/// ([`QueueHead::of`]), each settled with `settled`.
+fn heads_held(events: &[RunEvent], now: i64, settled: bool) -> Vec<QueueHead> {
+    queue_rows(&owned_of(events), events, now, "b")
+        .iter()
+        .map(|row| {
+            let mut head = QueueHead::of(row);
+            head.head.is_final = settled;
+            head
+        })
+        .collect()
+}
+
+/// The book made again from the rows the store holds of the events up to a
+/// position, settled or not, goes on with the rest as the book of every
+/// event: each event after it changes the same rows, and the rows are the
+/// fold of every event, but the rows settled no later event reaches, which
+/// it forgot ([`crate::domain::ledger::testkit::queue_across`]): the
+/// finding's next record goes to its row, the alert's end and the stream's
+/// next baseline to the alert and the stream open across the position, an
+/// event timed before the first landing's end reaches it, the lives of the
+/// slots full's and the stopped hold's supervisors reach them, and the
+/// deferral's claim and the landing's end close what was open.
+#[test]
+fn a_book_made_again_from_the_rows_goes_on_as_the_fold_of_every_event() {
+    let (log, position) = crate::domain::ledger::testkit::queue_across();
+    let (before, after) = log.events.split_at(position);
+    let now = ms(40);
+    let owned = owned_of(&log.events);
+    let whole_rows = queue_rows(&owned, &log.events, now, "b");
+    for settled in [false, true] {
+        let (mut lives, mut pre_claim, mut whole) = (
+            Lives::default(),
+            PreClaimBook::default(),
+            QueueBook::default(),
+        );
+        for event in before {
+            lives.add(event);
+            let moved = pre_claim.add(event);
+            whole.add(
+                event,
+                owner(event) == Owner::Queue,
+                moved,
+                &mut BTreeSet::new(),
+            );
+        }
+        let held = heads_held(before, now, settled);
+        let mut rebuilt = QueueBook::from_heads(&held, &pre_claim, before.last().unwrap().id);
+        for event in after {
+            lives.add(event);
+            let moved = pre_claim.add(event);
+            let owned = owner(event) == Owner::Queue;
+            let (mut by_rows, mut by_all) = (BTreeSet::new(), BTreeSet::new());
+            rebuilt.add(event, owned, moved, &mut by_rows);
+            whole.add(event, owned, moved, &mut by_all);
+            assert_eq!(by_rows, by_all, "{settled}: {}", event.id);
+        }
+        assert_eq!(
+            rebuilt.close_lives(&lives, now),
+            whole.close_lives(&lives, now)
+        );
+        let at = At {
+            owned: &owned,
+            pre_claim: &pre_claim,
+            lives: &lives,
+            now_ms: now,
+            built_at: "b",
+        };
+        let rows: BTreeMap<String, LedgerRow> = rebuilt
+            .keys()
+            .filter_map(|key| Some((key.clone(), rebuilt.row(&key, &at)?)))
+            .collect();
+        for row in &whole_rows {
+            match rows.get(&row.key) {
+                Some(rebuilt) => assert_eq!(rebuilt, row, "{settled}: {}", row.key),
+                // Forgotten: settled, and no later event reached it.
+                None => {
+                    assert!(settled, "{}", row.key);
+                    assert!(row.inputs_through.last() <= before.last().unwrap().id);
+                }
+            }
+        }
+        assert!(
+            rows.keys()
+                .all(|key| whole_rows.iter().any(|row| &row.key == key))
+        );
+        let forgot: Vec<&str> = whole_rows
+            .iter()
+            .filter(|row| !rows.contains_key(&row.key))
+            .map(|row| row.key.as_str())
+            .collect();
+        assert_eq!(
+            forgot,
+            if settled { vec!["1", "12"] } else { vec![] },
+            "{settled}"
+        );
+
+        let key_of = |id: i64| id.to_string();
+        let row = |id: i64| &rows[&key_of(id)];
+        let ids = |row: &LedgerRow| -> Vec<i64> {
+            row.records.iter().map(|event| event.id.as_i64()).collect()
+        };
+        assert_eq!(ids(row(4)), [4, 17]);
+        assert_eq!(row(4).outcome.as_deref(), Some("resolved"));
+        assert_eq!(ids(row(3)), [3, 16]);
+        assert_eq!(row(2).outcome.as_deref(), Some("replaced"));
+        assert_eq!(ids(row(2)), [2, 13, 15]);
+        assert_eq!(row(2).inputs_through.events.as_i64(), 22);
+        assert_eq!(row(9).inputs_through.events.as_i64(), 14);
+        assert_eq!(row(11).outcome.as_deref(), Some("landed"));
+        assert_eq!(row(8).inputs_through.events.as_i64(), 21);
+    }
+}
+
+/// A book of only the events after the position gets the cases wrong: the
+/// finding's next record starts a row of its own, the alert's end and the
+/// event timed before the first landing's end find no row.
+#[test]
+fn a_queue_book_of_the_events_after_the_position_alone_misses_the_rows_held() {
+    let (log, position) = crate::domain::ledger::testkit::queue_across();
+    let (mut pre_claim, mut book) = (PreClaimBook::default(), QueueBook::default());
+    for event in &log.events[position..] {
+        let moved = pre_claim.add(event);
+        book.add(
+            event,
+            owner(event) == Owner::Queue,
+            moved,
+            &mut BTreeSet::new(),
+        );
+    }
+    assert!(book.records_of("4").is_none());
+    assert_eq!(book.records_of("17"), Some([EventId::new(17)].as_slice()));
+    assert!(book.records_of("3").is_none());
+    assert!(book.open_slot().is_none());
+}
+
+/// A row of another kind and a key of no event id are no rows of the book.
+#[test]
+fn the_queue_book_takes_only_the_queue_rows_of_its_keys() {
+    let (log, position) = crate::domain::ledger::testkit::queue_across();
+    let mut heads = heads_held(&log.events[..position], ms(40), false);
+    let mut other = heads[0].clone();
+    other.head.kind = LedgerKind::Session;
+    other.head.key = "99".into();
+    let mut garbled = heads[0].clone();
+    garbled.head.key = "x".into();
+    heads.extend([other, garbled]);
+    let book = QueueBook::from_heads(&heads, &PreClaimBook::default(), log.last());
+    assert!(book.records_of("99").is_none());
+    assert!(
+        book.keys()
+            .all(|key| key.parse::<i64>().is_ok() && key != "99")
+    );
+}
