@@ -1130,8 +1130,7 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             ))
         }
         "events_of_between" => {
-            let (kinds, after, upto, limit): (Vec<String>, EventId, EventId, usize) =
-                read(op, args)?;
+            let (kinds, after, upto, limit) = events_of_between_args(op, args)?;
             answer(EventStore::events_of_between(
                 &*store,
                 &kinds.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -2610,6 +2609,20 @@ pub(super) fn gone_of_pids(
         .collect()
 }
 
+/// The arguments of `events_of_between`, refused before the store is read
+/// when their limit is a range too wide for one answer
+/// ([`crate::domain::queue_service::events_range_refusal`]).
+pub(super) fn events_of_between_args(
+    op: &str,
+    args: Value,
+) -> Result<(Vec<String>, EventId, EventId, usize)> {
+    let (kinds, after, upto, limit): (Vec<String>, EventId, EventId, usize) = read(op, args)?;
+    match crate::domain::queue_service::events_range_refusal(limit) {
+        Some(why) => Err(BadOperation(why).into()),
+        None => Ok((kinds, after, upto, limit)),
+    }
+}
+
 /// The arguments of `set_max_load`: the token, the threshold and its
 /// source, or the first two alone from a supervisor of a binary that
 /// sends no source.
@@ -2631,6 +2644,35 @@ pub(super) fn max_load_args(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// An `events_of_between` past the events one answer holds is refused
+    /// with why, as the request's error, before the store is read; one
+    /// within it reads its arguments as sent.
+    #[test]
+    fn an_events_of_between_past_its_limit_is_refused_before_the_store() {
+        let max = crate::domain::queue_service::MAX_EVENTS_OF_BETWEEN;
+        let args = |limit: usize| json!([["review_started"], 0, 9, limit]);
+        let (kinds, after, upto, limit) =
+            events_of_between_args("events_of_between", args(max)).unwrap();
+        assert_eq!(
+            (kinds, after, upto, limit),
+            (
+                vec!["review_started".to_owned()],
+                EventId::new(0),
+                EventId::new(9),
+                max
+            )
+        );
+        let every = usize::try_from(i64::MAX).unwrap();
+        for limit in [max + 1, every] {
+            let error = events_of_between_args("events_of_between", args(limit)).unwrap_err();
+            assert!(error.downcast_ref::<BadOperation>().is_some(), "{error:#}");
+            assert!(
+                format!("{error:#}").contains("the range is too wide"),
+                "{error:#}"
+            );
+        }
+    }
 
     /// An update's ask sent under an identity carries it in its details,
     /// which are an object or none; any other details are refused as the

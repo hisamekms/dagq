@@ -151,6 +151,28 @@ pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 /// past it (a service of another limit) refuses it with the same code.
 pub const MAX_ANSWER_BYTES: usize = MAX_REQUEST_BYTES * 16;
 
+/// The most events one `events_of_between` asks the service for: a larger
+/// limit is refused before the store is read ([`events_range_refusal`]),
+/// so the service never builds an answer it would throw away, and a
+/// client reads a longer range in pages of at most this many. 2000 leaves
+/// each event about 8 KiB of [`MAX_ANSWER_BYTES`], above the largest the
+/// log holds many of (a review's start or end, about 5 KB); a page of
+/// larger ones past the answer is asked again at half its size.
+pub const MAX_EVENTS_OF_BETWEEN: usize = 2000;
+
+/// Why an `events_of_between` of `limit` events is refused, if it is: a
+/// limit past [`MAX_EVENTS_OF_BETWEEN`] is a range too wide for one answer.
+pub fn events_range_refusal(limit: usize) -> Option<String> {
+    (limit > MAX_EVENTS_OF_BETWEEN).then(|| {
+        format!(
+            "events_of_between of at most {limit} events is refused before the queue is read: \
+             the range is too wide for one answer of the queue service, which reads at most \
+             {MAX_EVENTS_OF_BETWEEN} events at a time; read it in pages, each after the last \
+             event of the page before"
+        )
+    })
+}
+
 /// The message of a [`ServiceErrorCode::ResponseTooLarge`] of `use_case`
 /// (`None`: a request that did not read): the answer's `size` (`None`: a
 /// client that stopped reading at the limit), [`MAX_ANSWER_BYTES`], and how

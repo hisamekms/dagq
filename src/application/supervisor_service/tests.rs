@@ -2566,3 +2566,151 @@ fn the_service_reads_a_diagnosis_start_of_either_binary() {
         [gone, owner(5, None)]
     );
 }
+
+/// A service of `events` events, every other one a review's start, which
+/// reads `events_of_between` as the service does (refusing a range past
+/// the events one answer holds) and answers a page of more than
+/// `largest` of them as past its limit.
+struct PagedEventsOf {
+    events: i64,
+    largest: usize,
+    asked: std::sync::Mutex<Vec<usize>>,
+}
+
+impl ServiceCaller for PagedEventsOf {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(use_case, UseCase::Supervisor);
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        assert_eq!(params.op, "events_of_between");
+        let refused = |code, message| {
+            service_error(&ServiceError {
+                code,
+                message,
+                denied: None,
+                kind: None,
+                rejected: false,
+                held: None,
+            })
+        };
+        let asked = usize::try_from(params.args[3].as_u64().unwrap()).unwrap();
+        self.asked.lock().unwrap().push(asked);
+        let (kinds, after, upto, page) =
+            match dispatch::events_of_between_args(&params.op, Value::Array(params.args)) {
+                Ok(args) => args,
+                Err(error) => {
+                    return Err(refused(ServiceErrorCode::BadRequest, format!("{error:#}")));
+                }
+            };
+        if page > self.largest {
+            return Err(refused(
+                ServiceErrorCode::ResponseTooLarge,
+                "too large".into(),
+            ));
+        }
+        let kind = |id: i64| {
+            if id % 2 == 0 {
+                "review_started"
+            } else {
+                "review_finished"
+            }
+        };
+        let answer: Vec<Value> = (after.as_i64() + 1..=upto.as_i64().min(self.events))
+            .filter(|id| kinds.iter().any(|kind_| kind_ == kind(*id)))
+            .take(page)
+            .map(|id| {
+                serde_json::json!({"id": id, "task_id": null, "goal_id": null,
+                    "run_id": null, "kind": kind(id), "payload": {},
+                    "created_at": "2026-11-01T00:00:00.000Z"})
+            })
+            .collect();
+        Ok(Value::Array(answer))
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// A client's `events_of_between` asks the service for no more events at
+/// a time than it answers (which refuses more before it reads), each page
+/// after the last event of the page before, one past the answer's limit
+/// asked again at half its size: every event (`i64::MAX`, as the agents'
+/// eval and case sets read them) comes back whole, oldest first, across
+/// the pages' edges, and a smaller limit or range keeps its meaning.
+#[test]
+fn events_of_between_reads_in_pages_the_service_answers() {
+    use crate::domain::EventId;
+    let max = crate::domain::queue_service::MAX_EVENTS_OF_BETWEEN;
+    let service = Arc::new(PagedEventsOf {
+        events: 4_501,
+        largest: max / 2 + max / 4,
+        asked: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        ActorContext::instance(ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let asked = || std::mem::take(&mut *service.asked.lock().unwrap());
+    let ids = |events: Vec<crate::domain::RunEvent>| {
+        events
+            .iter()
+            .map(|event| event.id.as_i64())
+            .collect::<Vec<_>>()
+    };
+    let both = ["review_started", "review_finished"];
+    let every = usize::try_from(i64::MAX).unwrap();
+    let read = EventStore::events_of_between(
+        &queue,
+        &both,
+        EventId::new(0),
+        EventId::new(i64::MAX),
+        every,
+    )
+    .unwrap();
+    assert_eq!(ids(read), (1..=4_501).collect::<Vec<_>>());
+    let pages = asked();
+    assert_eq!(pages[0], max, "{pages:?}");
+    assert!(pages[1..].iter().all(|page| *page == max / 2), "{pages:?}");
+    assert_eq!(pages.len(), 6, "{pages:?}");
+    let starts = EventStore::events_of_between(
+        &queue,
+        &["review_started"],
+        EventId::new(10),
+        EventId::new(3_000),
+        every,
+    )
+    .unwrap();
+    assert_eq!(ids(starts), (12..=3_000).step_by(2).collect::<Vec<_>>());
+    let first = EventStore::events_of_between(
+        &queue,
+        &both,
+        EventId::new(0),
+        EventId::new(i64::MAX),
+        2_500,
+    )
+    .unwrap();
+    assert_eq!(ids(first), (1..=2_500).collect::<Vec<_>>());
+    let pages = asked();
+    assert!(pages.iter().all(|page| *page <= max), "{pages:?}");
+    let few =
+        EventStore::events_of_between(&queue, &both, EventId::new(100), EventId::new(i64::MAX), 7)
+            .unwrap();
+    assert_eq!(ids(few), (101..=107).collect::<Vec<_>>());
+    assert_eq!(asked(), [7]);
+    let none =
+        EventStore::events_of_between(&queue, &both, EventId::new(0), EventId::new(i64::MAX), 0)
+            .unwrap();
+    assert!(none.is_empty());
+    assert!(asked().is_empty());
+}

@@ -2611,6 +2611,23 @@ mod tests {
 
     use super::*;
 
+    /// The service's refusal of an `events_of_between` too wide for one
+    /// answer reaches the client as the request's error with why.
+    #[test]
+    fn a_range_too_wide_reaches_the_client_refused_with_why() {
+        use super::super::supervisor_service::{BadOperation, Refused, service_error};
+        let wide = crate::domain::queue_service::MAX_EVENTS_OF_BETWEEN + 1;
+        let why = crate::domain::queue_service::events_range_refusal(wide).unwrap();
+        let line = serde_json::to_string(&respond(Err(BadOperation(why).into()))).unwrap();
+        let answer: ServiceResponse = serde_json::from_str(&line).unwrap();
+        let error = service_error(answer.error.as_ref().unwrap());
+        assert!(Refused::bad_request(&error), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("the range is too wide"),
+            "{error:#}"
+        );
+    }
+
     /// The domain's rejection of a supervisor's request (a diagnosis's
     /// premise that moved on, a hold, with the hold it names) reads as one
     /// on the client after the service's answer went over the wire, as it

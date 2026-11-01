@@ -2523,6 +2523,11 @@ impl EventStore for SupervisorQueue {
             vec![to_value(kinds)?, to_value(supervisors)?],
         )
     }
+    // In pages of at most the events the service answers at once (it
+    // refuses a wider range before it reads), each after the last event
+    // of the page before, a page past the answer's limit asked again at
+    // half the size: a caller's limit, every event included, keeps its
+    // meaning.
     fn events_of_between(
         &self,
         kinds: &[&str],
@@ -2530,14 +2535,25 @@ impl EventStore for SupervisorQueue {
         upto: EventId,
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
-        self.remote(
-            "events_of_between",
-            vec![
-                to_value(kinds)?,
-                to_value(after)?,
-                to_value(upto)?,
-                to_value(limit)?,
-            ],
+        let mut after = after;
+        pages(
+            crate::domain::queue_service::MAX_EVENTS_OF_BETWEEN,
+            limit,
+            |page| {
+                let read: Vec<RunEvent> = self.remote(
+                    "events_of_between",
+                    vec![
+                        to_value(kinds)?,
+                        to_value(after)?,
+                        to_value(upto)?,
+                        to_value(page)?,
+                    ],
+                )?;
+                if let Some(last) = read.last() {
+                    after = last.id;
+                }
+                Ok(read)
+            },
         )
     }
     // In pages, each after the last event of the page before, a page past

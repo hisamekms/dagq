@@ -40,7 +40,6 @@ supervisorとそれが起動する`observe`・`throughput-review`もserviceを�
 例外はexecutorのsessionのstepだけで、制御側が対象ごとに発行するtelemetry専用のprincipalで[`telemetry_report`](#telemetry_report)を通る（[ADR-t1662-3](../adr/2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md)決定13）。
 
 名前: この文書の「broker」はqueueのbroker（[Queue broker](queue-broker.md)）のこと。
-brokerはrun tokenを検証した要求をそのtokenのままserviceのsocketへ転送するので、serviceの認証と認可は変わらない。
 
 ## 置き場所と形
 
@@ -49,7 +48,7 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 | ファイル | 中身 |
 | --- | --- |
 | `queue.sock` | unix socket。pathが長すぎるqueueで`/tmp`の下に置くときは、そのdirがlinkでないことを確かめる。どの呼び出し元もqueueのディレクトリの実pathから同じpathを求める（`socket_path`） |
-| `lock` | serviceが生きている間`flock`の排他で持ち、2つ目のserviceは取れずに止まる。見る側（status・supervisor）は共有で試し、取れれば「居ない」と判定する。止めるときにsignalを送るのは、`hello`が答えたpidか、記録のpidが今このqueueの`service serve`を動かしている（`ps`で確かめる）ときだけ |
+| `lock` | serviceが生きている間`flock`の排他で持ち、2つ目のserviceは取れずに止まる。見る側（status・supervisor）は共有で試し、取れれば「居ない」と判定する。止めるときのsignalは`hello`が答えたpidか、`serves`（doc comment）が確かめた記録のpidにだけ送る |
 | `state.json` | 動いているserviceの記録。止まるときに消す |
 | `service.log` | `up`・supervisor・`service start`が起動したserviceのstdoutとstderr |
 | `tokens/<値のsha256>.json` | tokenのprincipalと発行の時刻 |
@@ -58,6 +57,8 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 1つの接続に1つの要求で、要求は1行のJSON、答えも1行のJSONで、答えた後に閉じる。
 上限を超える答え（`MAX_ANSWER_BYTES`）はserviceが`response_too_large`（ADR-t1233-5）、要求（`MAX_REQUEST_BYTES`）はsocketのclientが`request_too_large`で断る。
 supervisorはどちらでもpassを止めず、育つ読み取りは区切る。
+`events_of_between`はlimitが件数の上限`MAX_EVENTS_OF_BETWEEN`（2000件、根拠はdoc comment）を超えればstoreを読む前に`bad_request`で断り、supervisorはその件数以下のページで読む。
+`infrastructure/agent_evals.rs`の全件の読みはSQLiteを直接読み、serviceの答えを作らないのでこの断りの対象外。
 transactionはserviceの中で完結し、クライアントとの往復で分けない（ADR-t1233-1決定3）。
 要求ごとにDBへの接続を開き、principalのactorで書く（eventの`actor`は呼び出し元のprincipal）。
 
@@ -181,7 +182,6 @@ executor-telemetryのほかの全role（workerとjobを含む）がqueue全体�
 
 paramsは書き出すファイルも実行するprogramも受け取らず、読み取りでserviceは別のprogramを起動しない（`graph --format svg`のd2も起動しない）。
 `domain::queue_service::UseCase::of_command`が、dagqのコマンドの引数（サブコマンドから）から行き先のユースケースを決める。
-クライアントモードは、引数の文字列ではなく読んだコマンドから行き先を決める（[クライアントモード](#クライアントモード)の`client_request`。どちらも同じ行き先になる）。
 
 ### 読み取りのroleとworkerが打つコマンド
 
