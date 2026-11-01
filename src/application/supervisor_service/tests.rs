@@ -2714,3 +2714,179 @@ fn events_of_between_reads_in_pages_the_service_answers() {
     assert!(none.is_empty());
     assert!(asked().is_empty());
 }
+
+/// The service of a ledger of `rows` session rows (keys `s00001`…), each
+/// with two anchors, answering the heads and the anchors of at most
+/// `largest` rows a page as [`dispatch::session_anchors_page`] pages them
+/// and refusing a larger page as past the answer's limit.
+struct PagedHeads {
+    rows: usize,
+    largest: usize,
+    asked: std::sync::Mutex<Vec<(String, usize)>>,
+}
+
+impl PagedHeads {
+    fn key(row: usize) -> String {
+        format!("s{row:05}")
+    }
+
+    fn anchors(&self) -> Vec<(String, crate::domain::RunEvent)> {
+        (1..=self.rows)
+            .flat_map(|row| {
+                [0, 1].map(|n| {
+                    let mut event: crate::domain::RunEvent =
+                        serde_json::from_value(PagedLedger::event(0)).unwrap();
+                    event.id = crate::domain::EventId::new(i64::try_from(row * 2 + n).unwrap());
+                    (Self::key(row), event)
+                })
+            })
+            .collect()
+    }
+}
+
+impl ServiceCaller for PagedHeads {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(use_case, UseCase::Supervisor);
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        let (after, page) = match params.op.as_str() {
+            "ledger_heads" => (&params.args[1], &params.args[2]),
+            "ledger_session_anchors" => (&params.args[0], &params.args[1]),
+            op => panic!("no {op} here"),
+        };
+        let after = after.as_str().map(str::to_owned);
+        let page = usize::try_from(page.as_u64().unwrap()).unwrap();
+        self.asked.lock().unwrap().push((params.op.clone(), page));
+        if page > self.largest {
+            return Err(service_error(&ServiceError {
+                code: ServiceErrorCode::ResponseTooLarge,
+                message: "too large".into(),
+                denied: None,
+                kind: None,
+                rejected: false,
+                held: None,
+            }));
+        }
+        if params.op == "ledger_heads" {
+            let heads: Vec<_> = (1..=self.rows)
+                .map(Self::key)
+                .filter(|key| after.as_ref().is_none_or(|after| key > after))
+                .take(page)
+                .map(|key| crate::domain::ledger::LedgerHead {
+                    kind: crate::domain::ledger::LedgerKind::Session,
+                    key,
+                    inputs_from: crate::domain::EventId::new(0),
+                    inputs_through: serde_json::from_value(serde_json::json!({"events": 0}))
+                        .unwrap(),
+                    is_final: true,
+                    ledger_v: 6,
+                    records: Vec::new(),
+                })
+                .collect();
+            return Ok(serde_json::to_value(heads)?);
+        }
+        Ok(serde_json::to_value(dispatch::session_anchors_page(
+            self.anchors(),
+            after.as_deref(),
+            page,
+        ))?)
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// The rows' heads and the session rows' anchors are read a page of rows
+/// at a time, each after the last row of the page before, a page past the
+/// answer's limit asked again at a quarter of its size, every anchor of a
+/// row in the page that holds the row: so a ledger longer than one answer
+/// holds is read whole, and no row's rest is asked for.
+#[test]
+fn the_heads_and_anchors_past_the_answers_limit_are_read_in_pages() {
+    use crate::application::LedgerStore;
+    use crate::domain::ledger::LedgerKind;
+    let service = Arc::new(PagedHeads {
+        rows: 1_300,
+        largest: 300,
+        asked: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        ActorContext::instance(ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let asked = || std::mem::take(&mut *service.asked.lock().unwrap());
+    let heads = queue.ledger_heads(LedgerKind::Session).unwrap();
+    assert_eq!(
+        heads
+            .iter()
+            .map(|head| head.key.clone())
+            .collect::<Vec<_>>(),
+        (1..=1_300).map(PagedHeads::key).collect::<Vec<_>>()
+    );
+    let pages = asked();
+    assert!(
+        pages.iter().all(|(op, _)| op == "ledger_heads"),
+        "{pages:?}"
+    );
+    let pages: Vec<usize> = pages.into_iter().map(|(_, page)| page).collect();
+    assert_eq!(pages[0], 1_000);
+    assert_eq!(pages.len(), 7, "{pages:?}");
+    assert!(pages[1..].iter().all(|page| *page == 250), "{pages:?}");
+    assert_eq!(queue.ledger_session_anchors().unwrap(), service.anchors());
+    let pages = asked();
+    assert!(
+        pages.iter().all(|(op, _)| op == "ledger_session_anchors"),
+        "{pages:?}"
+    );
+    let pages: Vec<usize> = pages.into_iter().map(|(_, page)| page).collect();
+    assert_eq!(
+        pages,
+        [500, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125]
+    );
+}
+
+/// A page of the anchors holds every anchor of each of its rows, at most
+/// the rows asked for, after the row named.
+#[test]
+fn a_page_of_anchors_holds_whole_rows() {
+    let service = PagedHeads {
+        rows: 3,
+        largest: 3,
+        asked: std::sync::Mutex::default(),
+    };
+    let anchors = service.anchors();
+    let keys = |page: Vec<(String, crate::domain::RunEvent)>| {
+        page.into_iter()
+            .map(|(key, event)| (key, event.id.as_i64()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        keys(dispatch::session_anchors_page(anchors.clone(), None, 1)),
+        [("s00001".to_owned(), 2), ("s00001".to_owned(), 3)]
+    );
+    assert_eq!(
+        keys(dispatch::session_anchors_page(
+            anchors.clone(),
+            Some("s00001"),
+            5
+        )),
+        [
+            ("s00002".to_owned(), 4),
+            ("s00002".to_owned(), 5),
+            ("s00003".to_owned(), 6),
+            ("s00003".to_owned(), 7)
+        ]
+    );
+    assert!(dispatch::session_anchors_page(anchors, Some("s00003"), 5).is_empty());
+}

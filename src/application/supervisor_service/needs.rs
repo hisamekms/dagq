@@ -194,6 +194,8 @@ pub(super) const READS: &[&str] = &[
     "session_owner",
     "ledger_row_part",
     "ledger_row_keys",
+    "ledger_heads",
+    "ledger_session_anchors",
     "run_events_after",
     "task_events_after",
 ];

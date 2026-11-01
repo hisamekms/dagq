@@ -2439,6 +2439,30 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                     .map(|rows| rows.into_iter().map(|row| row.key).collect::<Vec<_>>()),
             )
         }
+        // A page of the heads of the rows of `kind`, by key: at most `page`
+        // after the key `after` (none: from the first), no record's body
+        // read or sent.
+        "ledger_heads" => {
+            let (kind, after, page): (crate::domain::ledger::LedgerKind, Option<String>, usize) =
+                read(op, args)?;
+            answer(LedgerStore::ledger_heads(&*store, kind).map(|heads| {
+                heads
+                    .into_iter()
+                    .filter(|head| after.as_ref().is_none_or(|after| head.key > *after))
+                    .take(page)
+                    .collect::<Vec<_>>()
+            }))
+        }
+        // The session rows' anchors of at most `rows` rows after the key
+        // `after`, every anchor of each row in the page, no other record
+        // read or sent.
+        "ledger_session_anchors" => {
+            let (after, rows): (Option<String>, usize) = read(op, args)?;
+            answer(
+                LedgerStore::ledger_session_anchors(&*store)
+                    .map(|anchors| session_anchors_page(anchors, after.as_deref(), rows)),
+            )
+        }
         // A page of a run's or a task's events after the event `after`: the
         // read of a history past one answer whole.
         "run_events_after" => {
@@ -2638,6 +2662,30 @@ pub(super) fn max_load_args(
         Ok((token, max_load)) => Ok((token, max_load, None)),
         Err(_) => read(op, args),
     }
+}
+
+/// Of `anchors` (by row key, a row's together), those of the first `rows`
+/// rows after the key `after` (none: from the first): a page holds every
+/// anchor of each of its rows, so one with fewer rows than `rows` is the
+/// last.
+pub(super) fn session_anchors_page(
+    anchors: Vec<(String, RunEvent)>,
+    after: Option<&str>,
+    rows: usize,
+) -> Vec<(String, RunEvent)> {
+    let mut keys = 0;
+    let mut last: Option<String> = None;
+    anchors
+        .into_iter()
+        .filter(|(key, _)| after.is_none_or(|after| key.as_str() > after))
+        .take_while(|(key, _)| {
+            if last.as_deref() != Some(key.as_str()) {
+                keys += 1;
+                last = Some(key.clone());
+            }
+            keys <= rows
+        })
+        .collect()
 }
 
 #[cfg(test)]

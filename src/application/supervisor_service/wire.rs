@@ -142,6 +142,7 @@ whole!(
     crate::domain::AskId,
     crate::domain::environment::RunResource,
     crate::domain::ledger::LedgerRow,
+    crate::domain::ledger::LedgerHead,
     crate::domain::session_step::SessionStep,
     crate::domain::session_step::SessionResource,
     crate::domain::session_step::SessionOwner,

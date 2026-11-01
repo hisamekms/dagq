@@ -3109,8 +3109,77 @@ impl LedgerStore for SupervisorQueue {
             }
         }
     }
+    // In pages after the last key of the page before, a page past the
+    // answer's limit asked again at a quarter of its size: no row's
+    // records are read, only their ids.
+    fn ledger_heads(
+        &self,
+        kind: crate::domain::ledger::LedgerKind,
+    ) -> Result<Vec<crate::domain::ledger::LedgerHead>> {
+        self.ledger_pages(LEDGER_HEADS_PAGE, |after, page| {
+            let read: Vec<crate::domain::ledger::LedgerHead> = self.remote(
+                "ledger_heads",
+                vec![to_value(kind)?, to_value(after)?, to_value(page)?],
+            )?;
+            let keys = read.len();
+            let last = read.last().map(|head| head.key.clone());
+            Ok((read, keys, last))
+        })
+    }
+    // A page of rows' anchors at a time, every anchor of a row in one
+    // page, after the last row of the page before: no other record is
+    // read.
+    fn ledger_session_anchors(&self) -> Result<Vec<(String, RunEvent)>> {
+        self.ledger_pages(LEDGER_ANCHORS_PAGE, |after, page| {
+            let read: Vec<(String, RunEvent)> = self.remote(
+                "ledger_session_anchors",
+                vec![to_value(after)?, to_value(page)?],
+            )?;
+            let mut keys: Vec<&str> = read.iter().map(|(key, _)| key.as_str()).collect();
+            keys.dedup();
+            let (keys, last) = (keys.len(), keys.last().map(|key| (*key).to_owned()));
+            Ok((read, keys, last))
+        })
+    }
     fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
         self.remote("remove_node_rows", vec![to_value(before_day)?])
+    }
+}
+
+/// How many rows' heads a read asks for at a time, a quarter of it for a
+/// page past the answer's limit: a head holds its records' ids.
+const LEDGER_HEADS_PAGE: usize = 1_000;
+
+/// How many session rows' anchors a read asks for at a time, a quarter of
+/// it for a page past the answer's limit.
+const LEDGER_ANCHORS_PAGE: usize = 500;
+
+impl SupervisorQueue {
+    /// Every item `read` gives a page at a time, by row key: `read(after,
+    /// page)` the items of at most `page` rows after the key `after`, with
+    /// how many rows they are of and the last row's key. A page past the
+    /// answer's limit is asked again at a quarter of its size; one row's
+    /// past it alone is the error.
+    fn ledger_pages<T>(
+        &self,
+        first: usize,
+        read: impl Fn(Option<&str>, usize) -> Result<(Vec<T>, usize, Option<String>)>,
+    ) -> Result<Vec<T>> {
+        let (mut items, mut after, mut page) = (Vec::new(), None::<String>, first);
+        loop {
+            let (got, rows, last) = match read(after.as_deref(), page) {
+                Err(error) if super::too_large(&error) && page > 1 => {
+                    page = (page / 4).max(1);
+                    continue;
+                }
+                read => read?,
+            };
+            items.extend(got);
+            if rows < page {
+                return Ok(items);
+            }
+            after = last;
+        }
     }
 }
 

@@ -301,3 +301,164 @@ fn an_older_supervisors_start_takes_no_registered_owner_of_its_pid_as_gone() {
         claimed.generation + 1
     );
 }
+
+/// The service of [`call`] in this process as a supervisor's caller with
+/// the token `token`, every operation it is sent kept by its name.
+struct InProcess {
+    backend: SqliteServiceBackend,
+    token: String,
+    ops: std::sync::Mutex<Vec<String>>,
+}
+
+impl crate::application::supervisor_service::ServiceCaller for InProcess {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(use_case, UseCase::Supervisor);
+        let op = params["op"].as_str().unwrap().to_owned();
+        self.ops.lock().unwrap().push(op.clone());
+        let response = call(&self.backend, &self.token, &op, params["args"].clone());
+        match response.error {
+            Some(error) => Err(crate::application::supervisor_service::service_error(
+                &error,
+            )),
+            None => Ok(response.result.unwrap_or(Value::Null)),
+        }
+    }
+    fn with_token(
+        &self,
+        _: &Path,
+    ) -> Result<Arc<dyn crate::application::supervisor_service::ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// The session rows of three planner sessions, each opened, turned and
+/// closed, and a fourth out of any session, written on the queue of
+/// `backend` itself; the records between the anchors of the first are
+/// made to read whole no more.
+fn session_rows(backend: &SqliteServiceBackend) {
+    use crate::application::LedgerStore;
+    let event = |id: i64, kind: &str, payload: Value| RunEvent {
+        id: crate::domain::EventId::new(id),
+        task_id: None,
+        goal_id: None,
+        run_id: None,
+        kind: kind.into(),
+        payload,
+        created_at: crate::domain::marks::utc_text((1_900_000_000 + id) * 1000),
+        actor: None,
+    };
+    let mut events = Vec::new();
+    for planner in 0..3_i64 {
+        let opened = 1 + planner * 10;
+        events.extend([
+            event(
+                opened,
+                "session_opened",
+                json!({"kind": "runtime_planner", "planner_id": planner + 1}),
+            ),
+            event(
+                opened + 1,
+                "session_turns",
+                json!({"opened_event_id": opened}),
+            ),
+            event(
+                opened + 2,
+                "session_closed",
+                json!({"opened_event_id": opened, "session_id": format!("s{planner}"), "model": "m"}),
+            ),
+        ]);
+    }
+    events.push(event(40, "session_closed", json!({"session_id": "out"})));
+    let queue = SqliteQueue::open(&backend.db).unwrap();
+    let rows = crate::domain::ledger::session::session_rows(&events, "2030-01-01T00:00:00.000Z");
+    assert_eq!(rows.len(), 4);
+    for row in &rows {
+        queue.write_ledger_row(row).unwrap();
+    }
+    queue
+        .conn
+        .execute(
+            "UPDATE ledger_rows SET records=json_set(records, '$[1]', json('{\"id\":2}'))
+              WHERE kind='session' AND json_extract(records, '$[0].id') = 1",
+            [],
+        )
+        .unwrap();
+}
+
+/// What builds the ledger reads the session rows' heads and anchors
+/// through the service by their own operations, which read them as the
+/// queue's own adapter does, never by the rows whole: a row with a record
+/// that reads whole no more gives its head and anchors through the
+/// service as on the queue's own connection, while its rows whole fail.
+#[test]
+fn the_heads_and_anchors_cross_as_the_queues_own_without_the_rows_whole() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::LedgerKind;
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed(&owner);
+    session_rows(&backend);
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let direct = SqliteQueue::open(&backend.db).unwrap();
+    assert!(direct.ledger_rows(LedgerKind::Session).is_err());
+    let (heads, anchors) = (
+        direct.ledger_heads(LedgerKind::Session).unwrap(),
+        direct.ledger_session_anchors().unwrap(),
+    );
+    assert_eq!(heads.len(), 4);
+    assert_eq!(anchors.len(), 7);
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    assert_eq!(queue.ledger_heads(LedgerKind::Session).unwrap(), heads);
+    assert_eq!(queue.ledger_session_anchors().unwrap(), anchors);
+    assert!(queue.ledger_heads(LedgerKind::Run).unwrap().is_empty());
+    assert_eq!(
+        *service.ops.lock().unwrap(),
+        ["ledger_heads", "ledger_session_anchors", "ledger_heads"]
+    );
+}
+
+/// The heads and the anchors are the supervisor principal's reads alone:
+/// a worker's token is refused them as the policy refuses it, each refusal
+/// recorded.
+#[test]
+fn only_the_supervisor_principal_reads_the_heads_and_anchors() {
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed(&owner);
+    let worker = Principal::worker(&RunId::new(RUN).unwrap(), crate::domain::TaskId::new(1));
+    let worker_token = token_of(&backend, &worker);
+    for (op, args) in [
+        ("ledger_heads", json!(["session", null, 10])),
+        ("ledger_session_anchors", json!([null, 10])),
+    ] {
+        let denied = call(&backend, &worker_token, op, args.clone());
+        assert_eq!(
+            denied.error.as_ref().map(|error| error.code),
+            Some(ServiceErrorCode::AuthorizationDenied),
+            "{op}: {denied:?}"
+        );
+        let owner_token = token_of(&backend, &Principal::supervisor(&owner, 7));
+        let answered = call(&backend, &owner_token, op, args);
+        assert!(answered.ok, "{op}: {answered:?}");
+    }
+    assert_eq!(events(&backend, "authorization_denied").len(), 2);
+}

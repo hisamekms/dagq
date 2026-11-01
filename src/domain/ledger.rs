@@ -364,7 +364,7 @@ impl LedgerRow {
 /// (ascending), not the records. What builds the ledger makes a book again
 /// from the heads ([`session::SessionBook::from_heads`]), so it reads no
 /// event of the rows it does not fold.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerHead {
     pub kind: LedgerKind,
     pub key: String,
