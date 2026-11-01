@@ -62,7 +62,8 @@ runが動く環境と、runとnodeの資源の記録で、[計測](measurement.m
 - sampleのCPU秒は、そのsampleが代表する時間（nodeの1つ前の行からの時間。どのsupervisorの行でもよい）に掛けて作る。
   遅れて取ったsampleは遅れた分を、2つのsupervisorが交互に取ったsampleはそれぞれの間を数え、誰も記録しなかった間は間隔の2倍までにする（hostの要約のCPU秒と同じ規則）。
   1つ前の行はsampleを入れる書き込みと同じtransactionで読み、後の行が先に書かれていたsampleは時間を代表しない（後の行がその間を数えた）。
-- `stats`・`kpi`・reportのhostの値はこの列を読まず、今の列とCSVの写しから作るので変わらない。
+- `stats`・`kpi`・reportのhostの値はこの列を読まず、[共通の読み取り関数](measurement.md#共通の読み取り関数)が返す台帳のnodeの行（hostの負荷の値）から作る。
+  hostの負荷の記録はCSVを写しとして書き続けるが、読み手はCSVを読まない。
 
 ## 台帳との順序
 
