@@ -448,65 +448,6 @@ fn a_status_of_a_service_that_never_answers_is_unreachable_at_once() {
     let _ = fs::remove_file(&socket);
 }
 
-/// A queue at an older schema within the floor is read through its
-/// service from a copy migrated in memory, as the command line read it:
-/// the user's reads, the evals' and the case sets' among them, and a
-/// planner's, whose planner is read on the same copy. What writes is
-/// refused for the schema, and the file is left at its schema.
-#[test]
-fn an_older_queue_is_read_through_the_service_by_the_user_and_a_planner() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("queue.db");
-    let raw = rusqlite::Connection::open(&db).unwrap();
-    for migration in &dagq::infrastructure::schema::MIGRATIONS[..23] {
-        raw.execute_batch(migration).unwrap();
-    }
-    raw.pragma_update(None, "application_id", 0x4354_5131)
-        .unwrap();
-    raw.pragma_update(None, "user_version", 23).unwrap();
-    raw.execute(
-        "INSERT INTO planners(origin, created_at) VALUES ('runtime', 0)",
-        [],
-    )
-    .unwrap();
-    for args in [
-        &["list"][..],
-        &["status"],
-        &["agent", "results"],
-        &["agent", "sets"],
-    ] {
-        let output = invoke(&db, args);
-        assert!(output.status.success(), "{args:?}: {}", printed(&output));
-    }
-    let issued = service::issue(dir.path(), &Principal::planner(1), 1).unwrap();
-    let as_planner = [
-        ("DAGQ_ROLE", "planner"),
-        ("DAGQ_ACTOR_ID", "planner:1"),
-        (CREDENTIAL_FILE_ENV, issued.file.to_str().unwrap()),
-    ];
-    let listed = invoke_with(&as_planner, &db, &["list"]);
-    assert!(listed.status.success(), "{}", printed(&listed));
-    let noted = invoke_with(
-        &as_planner,
-        &db,
-        &["note", "--task", "1", "--text", "older"],
-    );
-    assert_eq!(code(&noted), "failed");
-    assert!(
-        printed(&noted)["error"]
-            .as_str()
-            .unwrap()
-            .contains("dagq migrate"),
-        "{}",
-        printed(&noted)
-    );
-    let version: i64 = raw
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, 23);
-    let _ = invoke(&db, &["service", "stop"]);
-}
-
 /// ADR-t3102-1 decisions 2 and 3: the inbox's token ends when the inbox is
 /// opened again (the issue revokes the one before) and when its session's
 /// process ends, and the refusal says to open the inbox again.

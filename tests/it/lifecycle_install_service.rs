@@ -107,8 +107,22 @@ fn install_and_its_rollback_reach_the_queue_only_through_its_service() {
     stop.stop();
     let binaries = FakeBinaries::new(&[], true);
     let error = install(&binaries, Source::Binary("/built/dagq".into())).unwrap_err();
-    drop(refused);
     assert!(unreachable(&error), "{error:#}");
+    assert_eq!(binaries.calls(), ["probe /built/dagq", "serve /built/dagq"]);
+    // With no service that answers for the queue's schema, nothing reads
+    // it: the new build's replacement start is left to judge it, and its
+    // failure replaces nothing.
+    let binaries = FakeBinaries::new(&[], true);
+    binaries
+        .schema_unanswered
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    *binaries.serve_fails_for.lock().unwrap() = Some("/built/dagq".into());
+    let error = install(&binaries, Source::Binary("/built/dagq".into())).unwrap_err();
+    drop(refused);
+    assert!(
+        format!("{error:#}").contains("no queue service answered for the queue's schema"),
+        "{error:#}"
+    );
     assert_eq!(binaries.calls(), ["probe /built/dagq", "serve /built/dagq"]);
 }
 
@@ -680,6 +694,11 @@ fn install_replaces_a_service_that_reads_none_of_its_steps() {
     let before = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let older = std::sync::Mutex::new(Some(service_of_a_build_before(&db, before.clone())));
     let binaries = FakeBinaries::new(&[], true);
+    // Nor does it answer `migrate --check`: the new build's replacement
+    // start judges the schema.
+    binaries
+        .schema_unanswered
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     // The new build's service: the older one ends, and this build's starts
     // in its place.
     let (stopped, served) = (before.clone(), db.clone());

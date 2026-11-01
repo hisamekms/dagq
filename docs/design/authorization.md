@@ -49,7 +49,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 
 | 群 | capability | 対応するCLI |
 | --- | --- | --- |
-| 読み取り | `queue.read` | `locate` `list` `show` `candidates` `graph`（`--out`なし） `status` `asks` `events` `timeline` `stats` `kpi` `forecast` `doctor` `notes` `marks` `findings` `search` `related` `proposal list/show` `planners` `requests` `replans` `lint` `goal list/show` `observe --history` `observe --input` |
+| 読み取り | `queue.read` | `locate` `list` `show` `candidates` `graph`（`--out`なし） `status` `asks` `events` `timeline` `stats` `kpi` `forecast` `notes` `marks` `findings` `search` `related` `proposal list/show` `planners` `requests` `replans` `lint` `goal list/show` `observe --history` `observe --input` |
 | | `queue.watch` | `watch` |
 | | `ci.read` | `ci failures`（着地先のbranchで既に落ちているtestの一覧。[CI watch](supervisor-lifecycle/ci-watch.md)） |
 | | `queue.export` | `graph --out` `report`（ファイルを書く） |
@@ -85,7 +85,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 | | `workspace.cleanup` | `run close-workspaces`（認可の後に理由を示して拒む。[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)の決定3） |
 | | `service.lifecycle` | `up` `down` `inbox` |
 | | `service.install` | `install` `auto-update` |
-| | `queue.admin` | `init` `migrate` `rebind` |
+| | `queue.admin` | `init` `migrate` `doctor` `rebind` |
 | | `review.setup` / `review.setup_approve` | `setup-review` / `setup-review --yes`（[setup-review](supervisor-lifecycle/setup-review.md)） |
 | 着地 | `landing.request` | `integrate`（Integratorへの依頼。ADR-t728-2） |
 | | `landing.land` / `landing.push` | Integratorの内側 |
@@ -237,7 +237,7 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
 
 | コマンド | capability | resource |
 | --- | --- | --- |
-| `init` `migrate`（`--check`を含む） `rebind` | `queue.admin` | queue |
+| `init` `migrate`（`--check`を含む） `doctor` `rebind` | `queue.admin` | queue |
 | `install` / `auto-update` | `service.install` | queue |
 | `up` `down` `inbox` `service start` `service stop` `service serve` `queue-broker serve\|start\|stop` | `service.lifecycle` | queue |
 | `plan`（何も開かず、inboxへの依頼の案内を付けて拒む。ADR-t1394-1） | `planner.open` | queue |

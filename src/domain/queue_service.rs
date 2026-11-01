@@ -30,12 +30,25 @@ use super::{
 /// nor checks, so that service refuses every request of version 2 before
 /// it reads the token.
 pub const API_VERSION: u32 = 2;
+
+/// The file a service started by hand (`service start`, a supervisor's
+/// watch) tells its starter whether it accepts or why it refuses, as a
+/// replacement's does: set by the starter on the `service serve` it starts.
+pub const START_REPORT_ENV: &str = "DAGQ_SERVICE_START_REPORT";
 /// The oldest API version the service still answers: a worker's or a
 /// job's `dagq` of version 1 names no queue, and is answered as before.
 pub const MIN_API_VERSION: u32 = 1;
 /// The first API version whose host `dagq` names its queue and whose
 /// inbox's token names its session ([`API_VERSION`]).
 pub const HOST_CLIENT_API_VERSION: u32 = 2;
+
+/// The words `migrate --check` ends with when no service of a build that
+/// reads the `migrate` use case answers for the queue: none runs, or one of
+/// a build before it. Nothing else reads the queue's schema, so the
+/// `install` that finds them leaves the queue to the replacement start of
+/// its new build's service, which applies what it may before it accepts.
+pub const SCHEMA_UNANSWERED: &str =
+    "no queue service that reads `migrate` answered for the queue's schema";
 
 /// The API version a request of `use_case` is sent at: [`MIN_API_VERSION`]
 /// for a hello, which names nothing a service has to act on, so that a
@@ -331,9 +344,13 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::ProposalWithdraw
         | UseCase::RequestAdd
         | UseCase::RequestDecline
-        | UseCase::Mark => {
+        | UseCase::Mark
+        | UseCase::Migrate
+        | UseCase::CommitMessages
+        | UseCase::Init => {
             "narrow the read with the options of its command (dagq <command> --help)"
         }
+        UseCase::Doctor => "leave out --full",
         UseCase::BrokerRunStatus | UseCase::BrokerBinding | UseCase::BrokerRecord => {
             "its answer is of one run or one record, and nothing narrows it"
         }
@@ -627,6 +644,23 @@ string_enum!(UseCase {
     BrokerRunStatus => "broker_run_status",
     BrokerBinding => "broker_binding",
     BrokerRecord => "broker_record",
+    // The queue's administration on its DB, which only the service's
+    // process opens (ADR-t3102-2 decisions 1 and 2), for a principal with
+    // `queue.admin`: `migrate` applies the service's build's migrations
+    // (a breaking one only while nothing uses the queue, after a copy of
+    // it, in one transaction), or with `check` reads the schema's version
+    // and floor, which the client judges as its own build sees them; its
+    // answer names the landings recorded without their message, which the
+    // client reads with Git and sends to `commit_messages`. `init` binds an
+    // existing queue to the client's repository and reads its schema, never
+    // migrating it. No command line but theirs goes to them.
+    Migrate => "migrate",
+    CommitMessages => "commit_messages",
+    Init => "init",
+    // `doctor`'s report, made where the queue is read: of a queue the
+    // service's build does not open as it is too, as its `schema` and
+    // `error` (ADR-t3102-2 decision 1), for `queue.admin` too.
+    Doctor => "doctor",
 });
 
 impl UseCase {

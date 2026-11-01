@@ -1,0 +1,17 @@
+# The registry's boundaries task 3168 added to tests/it
+# (the format is in the header of scripts/check-it-added-tests.sh).
+
+[[boundary]]
+id = "first-starter-names-a-queue-with-no-record"
+kind = "プロセス"
+test = "queue_binary::a_queue_with_no_record_is_named_by_the_binary_that_first_starts_its_service"
+reason = "記録の無い queue の service を最初に起動した実の binary の process がその場で queue の binary に記録され、別の path の binary の service serve と見張りの起動が動いている service を止めずに断られることは、実の binary の写しと service の process でしか確かめられない。どの binary を通すかと先に記録したものを残す判断は infrastructure::queue_binary の unit test（tests::a_queue_with_no_record_is_the_first_starters）"
+task = 3168
+
+
+[[boundary]]
+id = "read-only-open-writes-nothing-and-reads-no-older-queue"
+kind = "SQLite"
+test = "queue_schema::a_read_only_open_never_writes_and_reads_no_older_queue"
+reason = "読み取り専用の接続が WAL の queue に何も書かず、古い schema の queue を写しも migrate もせずに断り、doctor の開き方が同じ接続で schema と断りの理由を読み、floor の内側の新しい queue は書けずに読めることは、実の SQLite の接続と WAL のファイルでしか確かめられない。開けるかの判断は infrastructure::sqlite の QueueSchema の unit test"
+task = 3168

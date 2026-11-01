@@ -733,7 +733,11 @@ impl QueueRead {
             | UseCase::GraphExport
             | UseCase::BrokerRunStatus
             | UseCase::BrokerBinding
-            | UseCase::BrokerRecord => return Ok(None),
+            | UseCase::BrokerRecord
+            | UseCase::Migrate
+            | UseCase::CommitMessages
+            | UseCase::Init
+            | UseCase::Doctor => return Ok(None),
         };
         read.check()?;
         Ok(Some(read))

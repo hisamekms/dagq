@@ -2636,7 +2636,6 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Stats { .. }
         | Command::Kpi { .. }
         | Command::Forecast { .. }
-        | Command::Doctor { .. }
         | Command::Service {
             command: ServiceCommand::Status,
         }
@@ -2665,6 +2664,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         // The runtime operations, as the application names them (task 734).
         Command::Init
         | Command::Migrate { .. }
+        | Command::Doctor { .. }
         | Command::Rebind { .. }
         | Command::Install { .. }
         | Command::AutoUpdate { .. }
@@ -2888,6 +2888,7 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
     Some(match command {
         Command::Init => Operation::Init,
         Command::Migrate { .. } => Operation::Migrate,
+        Command::Doctor { .. } => Operation::Doctor,
         Command::Rebind { .. } => Operation::Rebind,
         Command::Install { .. } => Operation::Install,
         Command::AutoUpdate { .. } | Command::ReleaseUpdate { .. } => Operation::AutoUpdate,
@@ -4338,8 +4339,8 @@ enum Unserved {
     Sent,
     /// Run by `execute` in this process: `supervise`, which reaches the
     /// queue through its service; the lifecycle, install and update
-    /// commands, which send their steps; the DB's exceptions (`init`,
-    /// `migrate`, `doctor`); what opens no queue; and the retired commands
+    /// commands, which send their steps; `init`, which makes the DB where
+    /// there is none and sends the rest; what opens no queue; and the retired commands
     /// that refuse in words of their own.
     OwnProcess,
     /// A job command its supervisor started as its own: it reaches the
@@ -4354,6 +4355,15 @@ enum Unserved {
 /// the environment names the supervisor that started it
 /// ([`SUPERVISOR_REGISTRATION_ENV`](dagq::domain::queue_service::SUPERVISOR_REGISTRATION_ENV)).
 fn unserved(role: ActorRole, command: &Command, registered: bool) -> Result<Unserved> {
+    // The queue's administration goes to its service as the supervisor
+    // too: the install's and the update job's check of a new build, which
+    // the service authorizes (ADR-t3102-2 decision 1). Any other role is
+    // refused once it is authorized.
+    if role == ActorRole::Supervisor
+        && matches!(command, Command::Migrate { .. } | Command::Doctor { .. })
+    {
+        return Ok(Unserved::Sent);
+    }
     if dagq::domain::queue_service::host_client_role(role) && host_routed(command)? {
         return Ok(Unserved::Sent);
     }
@@ -4376,8 +4386,6 @@ fn unserved(role: ActorRole, command: &Command, registered: bool) -> Result<Unse
         | Command::SessionEvent { .. }
         | Command::Locate
         | Command::Init
-        | Command::Migrate { .. }
-        | Command::Doctor { .. }
         | Command::Install { .. }
         | Command::AutoUpdate { .. }
         | Command::ReleaseUpdate { .. }
@@ -4434,6 +4442,8 @@ fn host_routed(command: &Command) -> Result<bool> {
                 command: QueueBrokerCommand::Status
             }
             | Command::Rebind { .. }
+            | Command::Migrate { .. }
+            | Command::Doctor { .. }
             | Command::Planner {
                 command: PlannerCommand::Request { .. }
             }
@@ -4523,6 +4533,27 @@ fn host_client(
     }
     if let Some(control) = control_call(command) {
         return control_command(client, control, command.clone());
+    }
+    // The queue's administration and its diagnosis, done by its service
+    // on the DB (ADR-t3102-2 decisions 1 and 2).
+    if let Command::Migrate { check } = command {
+        let mut value = dagq::compose::migrate_through(&client, *check, common_dir.as_deref())?;
+        if !check {
+            value["db"] = json!(named);
+        }
+        return Ok(value);
+    }
+    if let Command::Doctor { full } = command {
+        let mut report = call_service(
+            &client,
+            Some(db),
+            command,
+            UseCase::Doctor,
+            json!({"full": full}),
+        )?;
+        // What runs on this host's PATH is looked up here.
+        dagq::compose::doctor_on_this_host(&mut report)?;
+        return Ok(report);
     }
     let (use_case, params) =
         client_request(command)?.context("the command is none of the service's use cases")?;
@@ -4816,14 +4847,28 @@ fn execute(cli: Cli) -> Result<Value> {
     }
     if matches!(cli.command, Command::Init) {
         location.prepare()?;
-        let mut queue =
-            dagq::compose::init_queue(&db, &env::current_exe()?)?.with_generators(generators);
-        if let Some(common_dir) = &common_dir {
-            queue.bind_repository(common_dir)?;
-        }
+        // Only where there is no queue does `init` open its DB, to make it;
+        // one that is there is the business of its service, which a
+        // service that does not answer fails (ADR-t3102-2 decision 1).
+        let schema_version = if db.exists() {
+            let served = std::fs::canonicalize(&db).unwrap_or_else(|_| db.clone());
+            dagq::compose::init_through(&dagq::infrastructure::queue_service::Client::host(
+                &served,
+                common_dir.as_deref(),
+                |name| env::var(name).ok(),
+            ))?["schema_version"]
+                .clone()
+        } else {
+            let mut queue =
+                dagq::compose::init_queue(&db, &env::current_exe()?)?.with_generators(generators);
+            if let Some(common_dir) = &common_dir {
+                queue.bind_repository(common_dir)?;
+            }
+            json!(queue.schema_version()?)
+        };
         return Ok(json!({
             "db": db,
-            "schema_version": queue.schema_version()?,
+            "schema_version": schema_version,
             "source": location.source,
             "git_common_dir": common_dir,
             "recommended": dagq::compose::init_recommended(
@@ -4831,21 +4876,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 &dagq::domain::toolchain::BUILTIN,
             ),
         }));
-    }
-    if let Command::Migrate { check } = cli.command {
-        if check {
-            return Ok(serde_json::to_value(dagq::compose::queue_schema(&db)?)?);
-        }
-        let report =
-            dagq::compose::migrate_queue(&db, &env::current_exe()?, generators.clock.now())?;
-        let mut value = serde_json::to_value(report)?;
-        // A landing recorded without its message (ADR-0046 decision 3).
-        value["commit_messages_filled"] = json!(dagq::compose::fill_commit_messages(
-            &db,
-            common_dir.as_deref()
-        )?);
-        value["db"] = json!(db);
-        return Ok(value);
     }
     if let Command::Install {
         from,
@@ -5128,11 +5158,6 @@ fn execute(cli: Cli) -> Result<Value> {
             },
         );
     }
-    // `doctor` reports the schema even of a queue this binary cannot open
-    // (ADR-0045 decision 5), so it opens the queue itself.
-    if let Command::Doctor { full } = cli.command {
-        return one_shot.doctor(&db, full, common_dir.as_deref());
-    }
     // The queue service needs no queue state, only its paths.
     if let Command::Service { command } = cli.command {
         return match command {
@@ -5170,6 +5195,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     writes: dagq::compose::service_writes(),
                     detail: dagq::compose::service_detail(),
                     commands: dagq::compose::service_commands(),
+                    doctor: dagq::compose::service_doctor(),
                     stop: install_stop_signal()?,
                     poll: Duration::from_millis(50),
                     owner: dagq::infrastructure::queue_service::owner_from_env(|name| {
@@ -5182,7 +5208,14 @@ fn execute(cli: Cli) -> Result<Value> {
                     } else {
                         dagq::domain::queue_service::ServiceStart::ByHand
                     },
-                    report: replacement,
+                    // A start by hand tells its starter whether it accepts
+                    // in the file the starter names (`service start`, a
+                    // supervisor's watch).
+                    report: replacement.or_else(|| {
+                        env::var_os(dagq::domain::queue_service::START_REPORT_ENV)
+                            .filter(|file| !file.is_empty())
+                            .map(PathBuf::from)
+                    }),
                     executable: env::current_exe()?,
                     binding,
                 },
@@ -6419,13 +6452,12 @@ mod tests {
         const CONTROL: &str = "a process of the control side: ADR-t3102-2 decision 6 (5)";
         const LIFECYCLE: &str = "a process of the control side that sends its queue's \
                                  operations as its command's steps (ControlCommand::lifecycle)";
-        const DIAGNOSIS: &str =
-            "the migration and the diagnosis of the queue: ADR-t3102-2 decision 6 (6)";
         const NO_QUEUE: &str = "opens no queue for the command";
         let kept: &[(&str, &str)] = &[
             (
                 "init",
-                "creates the DB where there is none: ADR-t3102-2 decision 1",
+                "creates the DB where there is none, and sends the rest to the queue's service: \
+                 ADR-t3102-2 decision 1",
             ),
             (
                 "service serve",
@@ -6470,8 +6502,6 @@ mod tests {
             ("queue-broker serve", CONTROL),
             ("queue-broker start", LIFECYCLE),
             ("queue-broker stop", LIFECYCLE),
-            ("migrate", DIAGNOSIS),
-            ("doctor", DIAGNOSIS),
         ];
         // The arguments each command needs to parse.
         let samples: &[(&str, &[&str])] = &[
@@ -6747,8 +6777,13 @@ mod tests {
             (R::Planner, &["status"], false, U::Sent),
             (R::User, &["observe"], false, U::Sent),
             (R::User, &["init"], false, U::OwnProcess),
-            (R::User, &["migrate"], false, U::OwnProcess),
-            (R::User, &["doctor"], false, U::OwnProcess),
+            (R::User, &["migrate"], false, U::Sent),
+            (R::User, &["doctor"], false, U::Sent),
+            // The queue's administration goes to the service for the host
+            // roles and the supervisor, which authorizes it there
+            // (ADR-t3102-2 decision 1); any other is refused.
+            (R::Supervisor, &["migrate", "--check"], false, U::Sent),
+            (R::Worker, &["doctor"], false, U::Refused),
             (R::User, &["up"], false, U::OwnProcess),
             (R::User, &["plan"], false, U::OwnProcess),
         ];

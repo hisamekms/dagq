@@ -197,8 +197,46 @@ pub fn status_for(db: &Path, role: Option<SessionRole>) -> Result<Value> {
 }
 
 /// `doctor` on the system clock: see [`OneShot::doctor`].
+#[cfg(feature = "test-paths")]
 pub fn doctor(db: &Path, full: bool) -> Result<Value> {
     OneShot::system().doctor(db, full, None)
+}
+
+/// What `doctor`'s command adds to the service's report of the host it
+/// runs on, on its own PATH: what `graph --format svg` draws with
+/// (ADR-0077 decision 4), and the worker providers `claude` and `codex`
+/// resolve to and the modes this binary runs them in (ADR-t813-2); what
+/// each supervisor fixed is on its entry in `supervisors`.
+pub fn doctor_on_this_host(report: &mut Value) -> Result<()> {
+    report["d2"] = serde_json::to_value(crate::infrastructure::d2::Tools::on(
+        std::env::var_os("PATH").as_deref(),
+    ))?;
+    let (claude, transcripts, codex) = (
+        ClaudeCode {
+            executable: PathBuf::from("claude"),
+        },
+        ClaudeTranscripts::from_env(),
+        Codex::new(PathBuf::from("codex")),
+    );
+    report["providers"] = serde_json::to_value(provider_checks(
+        Path::new("claude"),
+        Path::new("codex"),
+        &worker_adapters(&claude, &transcripts, Some(&codex)),
+    ))?;
+    Ok(())
+}
+
+/// How the queue's service makes `doctor`'s report
+/// ([`OneShot::doctor_of`] on the system clock, with this user's
+/// LaunchAgents of the queue).
+pub fn service_doctor() -> crate::infrastructure::queue_service::ServiceDoctor {
+    Arc::new(|db, schema, queue, full| {
+        OneShot {
+            user_config: crate::infrastructure::language::user_config_file(),
+            ..OneShot::system()
+        }
+        .doctor_of(db, schema, queue, full, || launchd_queue_agents(db))
+    })
 }
 
 /// The LaunchAgents of the queue at `location`, its own and any other
@@ -1675,20 +1713,19 @@ impl OneShot {
         ))
     }
 
-    /// `doctor`: see [`health::doctor`], with the queue's `schema` as
-    /// `migrate --check` reports it. The schema is reported even for a
-    /// queue that needs `migrate` or refuses this binary (ADR-0045 decision
-    /// 5); a queue that refuses it has no `supervisors` or `runs`, and
-    /// `error` says why. `common_dir`, when given, is the repository the
-    /// queue must be bound to, checked either way.
+    /// `doctor` of the queue at `db`, opened in this process: a test's
+    /// library call. The binary asks the queue's service, which makes the
+    /// report with [`Self::doctor_of`] (ADR-t3102-2 decision 1).
+    #[cfg(feature = "test-paths")]
     pub fn doctor(&self, db: &Path, full: bool, common_dir: Option<&str>) -> Result<Value> {
         self.doctor_with_agents(db, full, common_dir, || launchd_queue_agents(db))
     }
 
     /// [`Self::doctor`] judging what `agents` gives as the queue's
-    /// LaunchAgents ([`queue_agents`]) for `duplicate_supervisors`
-    /// ([`health::duplicate_supervisors`]), read only for a queue that
-    /// opens; tests give a fake launchd's.
+    /// LaunchAgents ([`queue_agents`]); `common_dir`, when given, is the
+    /// repository the queue must be bound to, as the service checks it of
+    /// the binary's request.
+    #[cfg(feature = "test-paths")]
     pub fn doctor_with_agents(
         &self,
         db: &Path,
@@ -1696,21 +1733,45 @@ impl OneShot {
         common_dir: Option<&str>,
         agents: impl FnOnce() -> Vec<lifecycle::QueueAgent>,
     ) -> Result<Value> {
+        if let Some(common_dir) = common_dir
+            && let Some(bound) = SqliteQueue::binding_at(db)?
+        {
+            ensure!(
+                bound == common_dir,
+                "queue is bound to another Git repository: {bound} (this repository is {common_dir})"
+            );
+        }
         let (schema, queue) = SqliteQueue::inspect_read_only(db)?;
+        let mut report = self.doctor_of(db, schema, queue, full, agents)?;
+        doctor_on_this_host(&mut report)?;
+        Ok(report)
+    }
+
+    /// `doctor`: see [`health::doctor`], of the queue at `db` as the
+    /// queue's service read it (`queue`), with its `schema` as `migrate
+    /// --check` reports it. The schema is reported even for a queue that
+    /// needs `migrate` or refuses this binary (ADR-0045 decision 5); such a
+    /// queue has no `supervisors` or `runs`, and `error` says why. What
+    /// `agents` gives is judged as the queue's LaunchAgents
+    /// ([`queue_agents`]) for `duplicate_supervisors`
+    /// ([`health::duplicate_supervisors`]), read only for a queue that
+    /// opens; tests give a fake launchd's.
+    pub fn doctor_of(
+        &self,
+        db: &Path,
+        schema: crate::infrastructure::sqlite::SchemaState,
+        queue: ReadOnlyQueue,
+        full: bool,
+        agents: impl FnOnce() -> Vec<lifecycle::QueueAgent>,
+    ) -> Result<Value> {
         let mut service_view = None;
         let mut broker_view = None;
         let mut report = match queue {
-            ReadOnlyQueue::Refused { binding, error } => {
-                if let Some(common_dir) = common_dir {
-                    binding.assert_repository(common_dir)?;
-                }
+            ReadOnlyQueue::Refused { error, .. } => {
                 health::refused(self.generators.clock.now(), &error)
             }
             ReadOnlyQueue::Readable(queue) => {
                 let queue = queue.with_generators(self.generators.clone());
-                if let Some(common_dir) = common_dir {
-                    queue.assert_repository(common_dir)?;
-                }
                 service_view = Some(queue_service_view(db, Some(&queue)));
                 broker_view = Some(queue_broker_view(db, Some(&queue)));
                 let run_env = doctor_run_env(&queue, db).map_err(|error| format!("{error:#}"));
@@ -1788,25 +1849,6 @@ impl OneShot {
                     keychain as &dyn crate::infrastructure::claude_credential::KeychainLookup
                 }),
         );
-        // What `graph --format svg` draws with (ADR-0077 decision 4).
-        report["d2"] = serde_json::to_value(crate::infrastructure::d2::Tools::on(
-            std::env::var_os("PATH").as_deref(),
-        ))?;
-        // The worker providers `claude` and `codex` resolve to on this PATH
-        // and the modes this binary runs them in (ADR-t813-2); what each
-        // supervisor fixed is on its entry in `supervisors`.
-        let (claude, transcripts, codex) = (
-            ClaudeCode {
-                executable: PathBuf::from("claude"),
-            },
-            ClaudeTranscripts::from_env(),
-            Codex::new(PathBuf::from("codex")),
-        );
-        report["providers"] = serde_json::to_value(provider_checks(
-            Path::new("claude"),
-            Path::new("codex"),
-            &worker_adapters(&claude, &transcripts, Some(&codex)),
-        ))?;
         Ok(report)
     }
 

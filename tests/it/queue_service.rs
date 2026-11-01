@@ -281,30 +281,28 @@ fn status_doctor_and_service_status_report_the_service() {
     assert!(!status.status.success());
     let refused: Value = serde_json::from_slice(&status.stderr).unwrap();
     assert_eq!(refused["queue_service"]["code"], "unreachable", "{refused}");
-    for args in [&["doctor"][..], &["service", "status"]] {
-        let report = ok(&queue.db, args);
-        let view = if args == ["service", "status"] {
-            &report
-        } else {
-            &report["queue_service"]
-        };
-        assert_eq!(view["state"], "stopped", "{args:?} {view}");
-        // `service status` names the socket of the DB a link names.
-        let dir = if args == ["service", "status"] {
-            queue.dir().canonicalize().unwrap()
-        } else {
-            queue.dir().to_path_buf()
-        };
-        assert_eq!(view["socket"], json!(service::socket_path(&dir)));
-        assert_eq!(view["pid"], Value::Null);
-        assert_eq!(view["client_api_version"], API_VERSION);
-    }
-    // `doctor` reads the attention from the DB; `service status` opens no
-    // queue, so it does not know it, and says no outage is recorded.
+    // So is `doctor`'s report (ADR-t3102-2 decision 1).
+    let doctor = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .arg("--db")
+        .arg(&queue.db)
+        .arg("doctor")
+        .bounded_output()
+        .unwrap();
+    assert!(!doctor.status.success());
+    let refused: Value = serde_json::from_slice(&doctor.stderr).unwrap();
+    assert_eq!(refused["queue_service"]["code"], "unreachable", "{refused}");
+    let view = ok(&queue.db, &["service", "status"]);
+    assert_eq!(view["state"], "stopped", "{view}");
+    // `service status` names the socket of the DB a link names.
     assert_eq!(
-        ok(&queue.db, &["doctor"])["queue_service"]["attention"],
-        false
+        view["socket"],
+        json!(service::socket_path(&queue.dir().canonicalize().unwrap()))
     );
+    assert_eq!(view["pid"], Value::Null);
+    assert_eq!(view["client_api_version"], API_VERSION);
+    // `service status` opens no queue, so it does not know the attention,
+    // and says no outage is recorded.
     let unreached = ok(&queue.db, &["service", "status"]);
     assert_eq!(unreached["attention"], Value::Null, "{unreached}");
     assert_eq!(unreached.get("outage"), Some(&Value::Null), "{unreached}");

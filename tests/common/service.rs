@@ -182,8 +182,14 @@ pub fn host_client_env(db: &Path, env: &[(&str, &str)], args: &[&str]) -> Vec<(S
         let _ = std::fs::remove_file(test_service_file(dir));
         return Vec::new();
     }
-    let routed = args.first() == Some(&"watch") || UseCase::of_command(args).is_some();
-    if !matches!(role, None | Some("inbox" | "planner")) || !routed {
+    // The queue's administration and `doctor` go to its service whoever
+    // runs them, `init` of a queue that is there too (ADR-t3102-2 decision
+    // 1); a role but these sends them with its own token, which the test
+    // gives it.
+    let administered = matches!(args.first(), Some(&("migrate" | "doctor" | "init")));
+    let routed =
+        args.first() == Some(&"watch") || UseCase::of_command(args).is_some() || administered;
+    if !(matches!(role, None | Some("inbox" | "planner")) || administered) || !routed {
         return Vec::new();
     }
     let wanted: Vec<(String, String)> = READ_ENV

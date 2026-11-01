@@ -987,9 +987,12 @@ fn put_in_place(
         Ok(schema) => schema,
         Err(error) => return failed(queue, job, "check", &error, json!({})),
     };
+    // With no service that answers for the queue's schema, the install
+    // leaves it to the new build's replacement start, which refuses a
+    // breaking migration.
     let breaking: Vec<i64> = schema
-        .pending
         .iter()
+        .flat_map(|schema| &schema.pending)
         .filter(|migration| !migration.compatible)
         .map(|migration| migration.version)
         .collect();

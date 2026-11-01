@@ -141,7 +141,7 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
   serviceでの認可はsupervisorの操作と同じ（[Authorization](../authorization.md#queue-serviceのユースケースservice側)）。
 - `queue-broker serve`は`service.lifecycle`の認可を通った後、brokerのプロセスとしてqueueを開かず、自分の要求をtokenもactorの環境も持たない`user`としてserviceに送る（[Queue broker](../queue-broker.md#起動と停止)）。
 - `up`・`down`・`inbox`・`service start`・`service stop`・`install`と更新のjob（`auto-update`・`release-update`）は認可の後、queueの読み書きを呼び出し元のprincipal（更新のjobは起動したsupervisorのtoken）で制御側のコマンドのstepとしてserviceに送り、queueを開かない（[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
-- `service serve`はserviceとして、`init`・`migrate`・`doctor`は[DBを開く経路](../queue-service.md#dbを開く経路)の例外としてqueueを開き、`supervise`はqueueをserviceで扱い、`service status`と`queue-broker`の`status`・`start`・`stop`はqueueを開かない（[statusとdoctor](../queue-service.md#statusとdoctor)、[Queue broker](../queue-broker.md#起動と停止)）。
+- `service serve`はserviceとして、DBの無い所への`init`は[DBを開く経路](../queue-service.md#dbを開く経路)の例外としてqueueを開き（`migrate`・`doctor`・既存のqueueへの`init`はserviceのユースケース）、`supervise`はqueueをserviceで扱い、`service status`と`queue-broker`の`status`・`start`・`stop`はqueueを開かない（[statusとdoctor](../queue-service.md#statusとdoctor)、[Queue broker](../queue-broker.md#起動と停止)）。
 - それ以外（宛ての無いworker・job・observerなどの`dagq`）はqueueを開かずに断る（fail closed）。
 
 `ActorContext::from_env`の読み方は次のとおり。

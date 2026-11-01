@@ -433,8 +433,12 @@ impl dagq::application::install::Binaries for UpdateBinaries {
     fn takes_handoff(&self, _: &Path) -> bool {
         true
     }
-    fn schema(&self, _: &Path, _: &Path) -> Result<dagq::application::install::SchemaCheck> {
-        Ok(dagq::application::install::SchemaCheck {
+    fn schema(
+        &self,
+        _: &Path,
+        _: &Path,
+    ) -> Result<Option<dagq::application::install::SchemaCheck>> {
+        Ok(Some(dagq::application::install::SchemaCheck {
             pending: self
                 .pending
                 .iter()
@@ -446,7 +450,7 @@ impl dagq::application::install::Binaries for UpdateBinaries {
                 )
                 .collect(),
             opens: self.pending.is_empty(),
-        })
+        }))
     }
     fn serve(&self, _: &Path, _: &Path, _: bool) -> Result<Value> {
         self.note("serve".into());

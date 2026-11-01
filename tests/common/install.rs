@@ -37,6 +37,8 @@ pub struct FakeBinaries {
     /// Whether the binaries' `install` sends its steps to the service (a
     /// build of before it does not).
     pub sends_steps: std::sync::atomic::AtomicBool,
+    /// Whether no service answers `migrate --check` for the queue's schema.
+    pub schema_unanswered: std::sync::atomic::AtomicBool,
 }
 
 impl FakeBinaries {
@@ -62,6 +64,7 @@ impl FakeBinaries {
             service_runs: std::sync::atomic::AtomicBool::new(false),
             on_serve: Mutex::default(),
             sends_steps: std::sync::atomic::AtomicBool::new(true),
+            schema_unanswered: std::sync::atomic::AtomicBool::new(false),
         }
     }
     pub fn calls(&self) -> Vec<String> {
@@ -149,8 +152,15 @@ impl dagq::application::install::Binaries for FakeBinaries {
     fn takes_handoff(&self, binary: &Path) -> bool {
         !binary.ends_with("old/dagq")
     }
-    fn schema(&self, _: &Path, _: &Path) -> Result<dagq::application::install::SchemaCheck> {
-        Ok(self.schema.clone())
+    fn schema(
+        &self,
+        _: &Path,
+        _: &Path,
+    ) -> Result<Option<dagq::application::install::SchemaCheck>> {
+        let unanswered = self
+            .schema_unanswered
+            .load(std::sync::atomic::Ordering::SeqCst);
+        Ok((!unanswered).then(|| self.schema.clone()))
     }
     fn serve(&self, binary: &Path, _: &Path, breaking: bool) -> Result<Value> {
         let breaking = if breaking { " breaking" } else { "" };

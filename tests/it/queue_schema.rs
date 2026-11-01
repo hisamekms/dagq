@@ -3,7 +3,7 @@
 use crate::common;
 
 use dagq::{
-    application::{TaskQuery, TaskReads, TaskStore, dependency_graph},
+    application::{TaskQuery, TaskReads, TaskStore},
     domain::{AskKind, AskReason, ClaimOutcome, NewAsk, NewTask, TaskAction, TaskId},
     infrastructure::{
         schema::{MIGRATIONS, floor_for},
@@ -215,7 +215,7 @@ fn opening_or_initializing_an_older_queue_never_migrates_it() {
 }
 
 #[test]
-fn a_read_only_open_never_writes_and_reads_an_older_queue_in_memory() {
+fn a_read_only_open_never_writes_and_reads_no_older_queue() {
     let dir = tempfile::tempdir().unwrap();
     let path = queue_before_the_floor(&dir);
     let raw = Connection::open(&path).unwrap();
@@ -236,35 +236,22 @@ fn a_read_only_open_never_writes_and_reads_an_older_queue_in_memory() {
             .unwrap()
     };
     let before = tables();
-    // The older queue is read as migrated, from a copy: the file is left at
-    // schema 23 with its tables as they were (ADR-0045 decision 18).
-    let mut queue = SqliteQueue::open_read_only(&path).unwrap();
-    assert_eq!(queue.schema_version().unwrap(), SqliteQueue::SCHEMA_VERSION);
-    let listed = queue.list(&TaskQuery::default()).unwrap();
-    assert_eq!(listed.total, 1);
-    assert_eq!(queue.show(TaskId::new(1)).unwrap().task.title(), "old");
-    dependency_graph(queue.graph_input().unwrap(), None);
-    // A write reaches only the copy.
-    queue.add(new_task("in memory")).unwrap();
-    drop(queue);
+    // The older queue is not read: no copy is migrated in memory, and the
+    // file is left at schema 23 with its tables as they were (ADR-t3102-2
+    // decision 4).
+    let error = format!("{:#}", SqliteQueue::open_read_only(&path).err().unwrap());
+    assert!(error.contains("run `dagq migrate`"), "{error}");
     assert_eq!((version(), tables()), (23, before));
-    assert_eq!(
-        raw.query_row("SELECT count(*) FROM tasks", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
     assert!(!dir.path().join("backups").exists());
-    // `doctor`'s open reads the file's schema and the migrated copy on one
-    // connection.
+    // `doctor`'s open reads the file's schema, and the reason it does not
+    // read the queue, on one connection.
     let (schema, opened) = SqliteQueue::inspect_read_only(&path).unwrap();
     assert_eq!(schema.schema_version, 23);
     assert!(!schema.refuses_binary() && !schema.pending.is_empty());
-    let ReadOnlyQueue::Readable(queue) = opened else {
-        panic!("an older queue is readable")
+    let ReadOnlyQueue::Refused { error: refused, .. } = opened else {
+        panic!("an older queue is not read as it is")
     };
-    assert_eq!(queue.schema_version().unwrap(), SqliteQueue::SCHEMA_VERSION);
-    assert_eq!(queue.list(&TaskQuery::default()).unwrap().total, 1);
-    drop(queue);
+    assert_eq!(format!("{refused:#}"), error);
     assert_eq!((version(), tables()), (23, before));
 
     // At this binary's schema the file itself is opened, and read-only.

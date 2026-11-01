@@ -42,8 +42,9 @@ use syn::{Attribute, Meta};
 const DEFINER: &str = "src/infrastructure/sqlite.rs";
 
 /// The associated fns of `SqliteQueue` that open the DB at a path.
-const OPENS: [&str; 10] = [
+const OPENS: [&str; 11] = [
     "init",
+    "create",
     "open",
     "open_watch",
     "open_read_only",
@@ -78,13 +79,9 @@ pub(super) enum Why {
     /// opens an existing queue (ADR-t3102-2 decision 1).
     Service,
     /// `init`, which makes the DB where there is none (ADR-t3102-2
-    /// decision 1) and still opens one that is there (an exception of the
-    /// migration, decision 8).
+    /// decision 1): it creates the file, and refuses one that is there,
+    /// which its service initializes.
     Init,
-    /// `migrate` and `doctor`, exceptions of the migration (ADR-t3102-2
-    /// decision 8) until they are the service's use cases (decision 1,
-    /// decision 6 (6)).
-    Diagnosis,
     /// The connection of a `SqliteOpener`, whose building is the open the
     /// check counts (only the test paths build one).
     Opener,
@@ -109,22 +106,10 @@ const fn row(path: &'static str, function: &'static str, why: Why) -> Opener {
 /// The fns of production code that open the queue's DB.
 pub(super) const OPENERS: &[Opener] = &[
     row("src/compose/host.rs", "init_queue", Why::Init),
-    row("src/compose/host.rs", "queue_schema", Why::Diagnosis),
     row(
-        "src/compose/host.rs",
-        "check_schema_changer",
-        Why::Diagnosis,
-    ),
-    row("src/compose/host.rs", "migrate_queue", Why::Diagnosis),
-    row(
-        "src/compose/host.rs",
-        "fill_commit_messages",
-        Why::Diagnosis,
-    ),
-    row(
-        "src/compose/observation.rs",
-        "OneShot::doctor_with_agents",
-        Why::Diagnosis,
+        "src/infrastructure/queue_service.rs",
+        "SqliteServiceBackend::admin",
+        Why::Service,
     ),
     row(
         "src/infrastructure/queue_service.rs",
@@ -236,6 +221,14 @@ fn check(rust: &[(String, String)], openers: &[Opener]) -> Vec<String> {
                 .find(|row| row.path == *path && row.function == open.function)
             {
                 matched.insert((row.path, row.function));
+                // `init` makes a DB where there is none, and opens no queue
+                // that is there.
+                if row.why == Why::Init && !open.what.ends_with("::create") {
+                    errors.insert(format!(
+                        "{path}: {} opens the queue's DB in {}, a row of init's: init opens only where there is no queue (SqliteQueue::create), and sends the rest to the queue's service",
+                        open.what, open.function
+                    ));
+                }
                 continue;
             }
             errors.insert(format!(
@@ -795,6 +788,63 @@ mod fixtures {
             &[],
         );
         assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// No row lets the queue's administration (`migrate`, its copy, its
+    /// check, `doctor`) open the DB outside the service's process, and init's
+    /// row lets only the making of a DB where there is none: `migrate` or an
+    /// open of an existing queue in the command line's fns fails, row or
+    /// not (ADR-t3102-2 decisions 1 and 8).
+    #[test]
+    fn the_queue_s_administration_opens_the_db_only_in_the_service() {
+        for row in OPENERS {
+            assert!(
+                matches!(row.why, Why::Service | Why::Opener)
+                    || (row.why == Why::Init && row.path == "src/compose/host.rs"),
+                "{} {}: an exception outside the service",
+                row.path,
+                row.function
+            );
+        }
+        assert_eq!(
+            OPENERS.iter().filter(|row| row.why == Why::Init).count(),
+            1,
+            "init's entry is the one exception"
+        );
+        let init = [row("src/compose/host.rs", "init_queue", Why::Init)];
+        for (open, name) in [
+            (
+                "let _ = SqliteQueue::migrate(db, None, 0);",
+                "SqliteQueue::migrate",
+            ),
+            ("let _ = SqliteQueue::schema(db);", "SqliteQueue::schema"),
+            ("let _ = SqliteQueue::init(db);", "SqliteQueue::init"),
+            ("let _ = SqliteQueue::open(db);", "SqliteQueue::open"),
+            (
+                "let _ = SqliteQueue::inspect_read_only(db);",
+                "SqliteQueue::inspect_read_only",
+            ),
+        ] {
+            let text = format!("fn init_queue(db: &Path) {{ {open} }}");
+            let found = errors(&[("src/compose/host.rs", &text)], &init);
+            assert_eq!(found.len(), 1, "{open}: {found:#?}");
+            assert!(
+                found[0].starts_with(&format!(
+                    "src/compose/host.rs: {name} opens the queue's DB in init_queue, a row of init's"
+                )),
+                "{open}: {found:#?}"
+            );
+            let text = format!("fn migrate_queue(db: &Path) {{ {open} }}");
+            let found = errors(&[("src/compose/host.rs", &text)], &init);
+            assert!(
+                found.iter().any(|error| error.starts_with(&format!(
+                    "src/compose/host.rs: {name} opens the queue's DB in migrate_queue"
+                ))),
+                "{open}: {found:#?}"
+            );
+        }
+        let made = "fn init_queue(db: &Path) { let _ = SqliteQueue::create(db); }";
+        assert!(errors(&[("src/compose/host.rs", made)], &init).is_empty());
     }
 
     #[test]

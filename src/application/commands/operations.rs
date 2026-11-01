@@ -43,6 +43,10 @@ pub enum HookSession {
 pub enum Operation {
     Init,
     Migrate,
+    /// `doctor`: the queue's schema and diagnosis, which its service reads
+    /// as an administration (ADR-t3102-2 decision 1), with `migrate`'s
+    /// capability.
+    Doctor,
     Rebind,
     Install,
     /// The supervisor's replacement of the fixed binary: `install`'s
@@ -113,7 +117,9 @@ impl Operation {
     pub fn request(&self) -> (Capability, Resource) {
         use Capability as C;
         match self {
-            Self::Init | Self::Migrate | Self::Rebind => (C::QueueAdmin, Resource::Queue),
+            Self::Init | Self::Migrate | Self::Doctor | Self::Rebind => {
+                (C::QueueAdmin, Resource::Queue)
+            }
             Self::Install | Self::AutoUpdate => (C::BinaryInstall, Resource::Queue),
             Self::Up | Self::Down | Self::OpenInbox | Self::QueueService => {
                 (C::ServiceLifecycle, Resource::Queue)
@@ -199,6 +205,7 @@ mod tests {
         vec![
             Operation::Init,
             Operation::Migrate,
+            Operation::Doctor,
             Operation::Rebind,
             Operation::Install,
             Operation::AutoUpdate,
@@ -365,6 +372,7 @@ mod tests {
             Operation::AutoUpdate,
             Operation::Init,
             Operation::Migrate,
+            Operation::Doctor,
             Operation::Rebind,
             Operation::Plan,
         ] {

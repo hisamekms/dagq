@@ -112,7 +112,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
 認可はCLIと同じapplicationの境界（`Dialogue`・`Gate`と`StaticPolicy`）を、principalのactorでservice側で通す。
 `Gate`・`StaticPolicy`の拒否はCLIと同じ`authorization_denied`（拒まれたprincipalがactor）に記録し、`authorization_denied`のcodeで返す。
 そのerrorはeventと同じrole・capability・reasonを`denied`に持ち（`ServiceDenial`）、知らない欄を読み飛ばす古いクライアントはcodeとmessageだけを読むので、API versionを上げない。
-storeが返す型付きの拒否（人の優先度と、goal_gapのdraftを元のgoalの外へ移す`set_goal`（ADR-t1504-2決定10））は、`Planning`がrollbackの後に`authorization_denied`を記録するが、応答は`failed`のcodeで`denied`を持たない（`respond`）。
+storeが返す型付きの拒否（ADR-t1504-2決定10など）は、`Planning`がrollbackの後に`authorization_denied`を記録するが、応答は`failed`のcodeで`denied`を持たない（`respond`）。
 codeの意味は`ServiceErrorCode`のdoc comment。
 
 paramsはそのコマンドのoption、答えはそのコマンドの出力（paramsの形は`src/application/queue_service.rs`の各params型）。
@@ -137,6 +137,7 @@ paramsはそのコマンドのoption、答えはそのコマンドの出力（pa
 | 計画の書き込みと`mark` | 同名のコマンド | CLIと同じ。[hostのCLI](queue-service-host-cli.md#計画のユースケース) |
 | 対話と操作 | `answer`・`report`など | CLIと同じ。[hostのCLI](queue-service-host-cli.md#対話と操作) |
 | `control` | 人とinboxの`integrate`・`observe`・`up`・`down`など | CLIと同じ。[hostのCLI](queue-service-host-cli.md#制御側のコマンド) |
+| `migrate`・`commit_messages`・`init`・`doctor` | 同名のコマンド（`init`は既存のqueueへ） | `queue.admin`。`Admin`のdoc comment |
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（capabilityは`finding.ask`）で送る。
 findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、eventの書き手は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。
@@ -145,7 +146,6 @@ findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactor�
 ### telemetry_report
 
 executorがsessionのstepと、supervisorが外から測れない環境で中から測った資源のsampleを送るユースケース（ADR-t1662-3決定2・4・9・10、[計測](measurement.md)の「送る口」）。
-送る側のportは`application::TelemetrySink`で、今のアダプタは`infrastructure::queue_service::ServiceTelemetrySink`（クライアントモードのsocketの宛てで送る）。
 paramsの形は`domain::telemetry::TelemetryReport`（1つのsessionの、1つの対象のstepと資源のsample）。
 
 - paramsの版: paramsは要求の`api_version`とは別に自分の`version`を持つ。
@@ -205,8 +205,7 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
 - `watch`（`queue.watch`。hostのCLIは上の`watch_poll`）: jobとworkerのpolicyに無い操作で、今のCLIでも拒まれる
 - `graph --format svg`: hostのd2を起動するので、serviceは読み取りとして受け取らない（`json`と`d2`は答える）。
   promptとskillはsvgを名指さない
-- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`と`queue-broker status`（attentionだけ`service_status`）: 制御側の状態を見るもので、jobのpromptは名指さない。
-  クライアントモードでの扱いは[クライアントモード](#クライアントモード)
+- `locate`・`service status`と`queue-broker status`（attentionだけ`service_status`）: 制御側の状態を見るもので、jobのpromptは名指さない（`doctor`も。扱いは[クライアントモード](#クライアントモード)）
 
 ## クライアントモード
 
@@ -263,9 +262,10 @@ queueのDBが消えるか、testのownerのprocessが居なくなっても終わ
   drainを待たない`down`は、signalの前に`queue_service_stop_requested`を書き、drainを終えた最後のsupervisorが止める（`queue_service_stopped`）
 - `install`（更新のjobも）: 未適用のmigrationがあるか、使えるserviceが無ければ差し替えの前に新しいbuildのものを入れ替えの口で起動し、引き継ぎの後に置いたbinaryのものに替える。
   他は引き継いだsupervisorが替える
+- 起動するbinary: queueのbinaryでなければ`up`・`service start`・`service serve`・見張りは何も起動せずに断る（ADR-t3102-2決定3。記録の無いqueueの決まりは[Persistence](persistence.md)の「Database setup and migrations」）
 - 人の手: `dagq service start`（`service.lifecycle`。`ensure`と同じ）・`dagq service stop`（記録を送って止め、断られれば止めない。動くsupervisorは起動し直す）・`dagq service status`（`queue.read`）
 
-migrationを適用するのは入れ替えの口で起動したserviceだけで、受け付けの前に適用する（ADR-t3102-2決定2。順は`serve`のdoc comment）。
+migrationを適用するのは入れ替えの口で起動したserviceの受け付けの前（ADR-t3102-2決定2。順は`serve`のdoc comment）と`migrate`のユースケースだけ。
 引き継ぐ前の拒否は動いているserviceを残し、引き継いだ後の使用中の再検査か適用の失敗はserviceを残さず、見張りか`up`が起動し直す。
 
 ## 落ちたときの知らせ（ADR-t3102-3決定1・2）
@@ -281,7 +281,7 @@ attentionの次の手は`dagq service status`。
 ## statusとdoctor
 
 `status`・`doctor`・`dagq service status`はserviceの状態を出す（`application::queue_service::view`。欄の意味は`ServiceProbe`と`view`、`status`の節は`StatusSections`のdoc comment）。
-`service status`はDBを開かない（[hostのCLI](queue-service-host-cli.md#送る範囲)）。
+`doctor`はserviceが作り、PATHで探すものだけをクライアントが足す（`doctor_on_this_host`）。
 見るだけで、serviceを起動も停止もしない（socketへ`hello`を打つ）。
 
 ## event
@@ -295,14 +295,13 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 
 ## DBを開く経路
 
-DBを開くのはserviceのプロセス・`init`・移行途中の例外（ADR-t3102-2決定8: 既存DBの`init`・`migrate`・`doctor`）だけで、呼び出しは`context_boundaries::queue_opens`が理由と持つ。
+DBを開くのはserviceのプロセスと、DBの無い所に作る`init`だけで、`context_boundaries::queue_opens`のtestがほかのopenを落とす（ADR-t3102-2決定1・8）。
 
 ## まだ無いもの
 
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
 - containerの中からbrokerを通す`telemetry_report`（[Queue broker](queue-broker.md)の`TokenRefusal`）。
   containerのrunのstepはhostのwrapperが送る
-- 段(5)の残り: [DBを開く経路](#dbを開く経路)の例外のユースケース化
 
 ## CIの見張り（ADR-t1920-1）
 

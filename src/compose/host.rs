@@ -10,7 +10,7 @@ use crate::application::queue_commands::QueueCommand;
 use crate::application::queue_service::QueueServiceControl;
 use crate::application::supervisor_service::{SupervisorQueue, SupervisorQueues};
 use crate::domain::LeaseToken;
-use crate::domain::queue_service::{ControlCall, ControlCommand};
+use crate::domain::queue_service::{ControlCall, ControlCommand, UseCase};
 use crate::infrastructure::location::runs_dir;
 use crate::infrastructure::queue_service as service;
 use anyhow::{Context, Result};
@@ -681,65 +681,109 @@ fn lifecycle_socket_opener<P: ?Sized + 'static>(
     })
 }
 
-/// `init`: create the queue at `db`, naming the binary at `executable`
-/// its binary ([`queue_binary`]), or open the one there.
+/// `init` where there is no queue at `db`: make it, naming the binary at
+/// `executable` its binary ([`queue_binary`]), the one open of a queue's
+/// DB outside its service (ADR-t3102-2 decision 1). A queue that is there
+/// is refused here and initialized by its service ([`init_through`]).
 pub fn init_queue(db: &Path, executable: &Path) -> Result<SqliteQueue> {
-    let created = !db.is_file();
-    let queue = SqliteQueue::init(db)?;
-    if created {
-        queue_binary::write(db, &QueueBinary::new(executable))?;
-    }
+    let queue = SqliteQueue::create(db)?;
+    queue_binary::write(db, &QueueBinary::new(executable))?;
     Ok(queue)
 }
 
-/// Refuse a binary at `executable` that is not the one changing the
-/// schema of the queue at `db` ([`queue_binary::check`]) when it would
-/// apply a migration; a queue it cannot read is left to the migration's
-/// own error.
-fn check_schema_changer(db: &Path, executable: &Path) -> Result<()> {
-    match SqliteQueue::schema(db) {
-        Ok(state) if !state.pending.is_empty() => queue_binary::check(
-            db,
-            executable,
-            &crate::infrastructure::adapters::process_alive,
-        ),
-        _ => Ok(()),
+/// `init` of the queue `client`'s service serves, which is there already:
+/// the service binds it to the client's repository and reads its schema
+/// version, migrating nothing (ADR-t3102-2 decision 1).
+pub fn init_through(client: &crate::infrastructure::queue_service::Client) -> Result<Value> {
+    client.call(UseCase::Init, json!({}))
+}
+
+/// `migrate` of the queue through `client`, its service's
+/// (ADR-t3102-2 decisions 1 and 2): the service applies its build's
+/// migrations, and the landings recorded without their message are filled
+/// from the Git common directory each names, else `fallback` (ADR-0046
+/// decision 3), read here, as no Git runs in the service. With `check`, the
+/// schema facts the service read of the queue, judged as this build sees
+/// them; a service of a build before the `migrate` use case, or none, ends
+/// it with [`SCHEMA_UNANSWERED`](crate::domain::queue_service::SCHEMA_UNANSWERED).
+/// Nothing opens the DB here; a service that does not answer is a failure.
+pub fn migrate_through(
+    client: &crate::infrastructure::queue_service::Client,
+    check: bool,
+    fallback: Option<&str>,
+) -> Result<Value> {
+    if check {
+        let facts = match client.call(UseCase::Migrate, json!({"check": true})) {
+            Ok(facts) => facts,
+            // A service of a build before it, or none: nothing else reads
+            // the schema, and nothing opens the DB here.
+            Err(error) if knows_no_use_case(&error) || unanswered(&error) => {
+                anyhow::bail!(
+                    "{}: {error:#}",
+                    crate::domain::queue_service::SCHEMA_UNANSWERED
+                );
+            }
+            Err(error) => return Err(error),
+        };
+        let number = |name: &str| {
+            facts[name]
+                .as_i64()
+                .with_context(|| format!("the queue service's schema has no {name}"))
+        };
+        return Ok(serde_json::to_value(
+            crate::infrastructure::sqlite::SchemaState::of(
+                number("schema_version")?,
+                number("floor")?,
+            ),
+        )?);
     }
-}
-
-/// `migrate --check`: the schema of the queue at `db`, read-only.
-pub fn queue_schema(db: &Path) -> Result<crate::infrastructure::sqlite::SchemaState> {
-    SqliteQueue::schema(db)
-}
-
-/// `migrate`: bring the queue at `db` to this binary's schema, with the
-/// live processes judged on this host, when the binary at `executable` is
-/// the one changing its schema ([`queue_binary`]).
-pub fn migrate_queue(
-    db: &Path,
-    executable: &Path,
-    now: i64,
-) -> Result<crate::infrastructure::sqlite::MigrationReport> {
-    check_schema_changer(db, executable)?;
-    SqliteQueue::migrate(
-        db,
-        Some(&crate::infrastructure::adapters::process_alive),
-        now,
-    )
-}
-
-/// The landings of the queue at `db` recorded without their message, each
-/// filled from the Git common directory it names, else `fallback` (ADR-0046
-/// decision 3): the part of `migrate` after [`migrate_queue`], on the same
-/// exception of ADR-t3102-2 decision 1. Their count; none for a queue that
-/// does not open.
-pub fn fill_commit_messages(db: &Path, fallback: Option<&str>) -> Result<usize> {
-    let Ok(mut queue) = SqliteQueue::open(db) else {
-        return Ok(0);
+    let mut report = client.call(UseCase::Migrate, json!({}))?;
+    let missing: Vec<crate::infrastructure::search::MissingCommitMessage> =
+        serde_json::from_value(report["commit_messages_missing"].take()).unwrap_or_default();
+    if let Some(fields) = report.as_object_mut() {
+        fields.remove("commit_messages_missing");
+    }
+    let messages: Vec<Value> = missing
+        .iter()
+        .filter_map(|landing| {
+            let dir = landing.git_common_dir.as_deref().or(fallback)?;
+            let message =
+                crate::infrastructure::adapters::commit_message(Path::new(dir), &landing.commit)?;
+            Some(json!({"id": landing.id, "message": message}))
+        })
+        .collect();
+    let filled = if messages.is_empty() {
+        0
+    } else {
+        client.call(UseCase::CommitMessages, json!({"messages": messages}))?["filled"]
+            .as_u64()
+            .unwrap_or_default()
     };
-    queue.fill_commit_messages(|dir, commit| {
-        let dir = dir.or(fallback)?;
-        crate::infrastructure::adapters::commit_message(Path::new(dir), commit)
+    report["commit_messages_filled"] = json!(filled);
+    Ok(report)
+}
+
+/// Whether `error` says no service answered: none runs, or it does not
+/// accept.
+fn unanswered(error: &anyhow::Error) -> bool {
+    crate::application::supervisor_service::unreachable(error)
+        || error.chain().any(|cause| {
+            cause
+                .downcast_ref::<crate::infrastructure::queue_service::ClientFailure>()
+                .is_some_and(|failure| failure.code == "unreachable")
+        })
+}
+
+/// Whether `error` is a service's that does not read the use case it was
+/// sent: one of a build before it, whose queue an `install` of this build
+/// checks (ADR-t3102-2 decision 7).
+fn knows_no_use_case(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::infrastructure::queue_service::ClientFailure>()
+            .is_some_and(|failure| {
+                failure.code == "bad_request" && failure.message.contains("unknown variant")
+            })
     })
 }
 

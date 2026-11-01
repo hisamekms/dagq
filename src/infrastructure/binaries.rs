@@ -176,8 +176,37 @@ impl Binaries for LocalBinaries {
         output(binary, &["install", "--sends-steps", "--help"]).is_ok()
     }
 
-    fn schema(&self, binary: &Path, db: &Path) -> Result<SchemaCheck> {
-        let report = json_output(binary, &["--db", text(db)?, "migrate", "--check"])?;
+    fn schema(&self, binary: &Path, db: &Path) -> Result<Option<SchemaCheck>> {
+        // The build judges the schema facts the queue's service read; with
+        // no service of a build that answers them, it reads nothing.
+        // As this process's caller, as `up` is: the service authorizes the
+        // check (`queue.admin`) for the token an inbox's `install` or an
+        // update job holds, or the user's with none.
+        let mut command = Command::new(binary);
+        for name in crate::domain::queue_service::CLIENT_ENV {
+            command.env_remove(name);
+        }
+        if let Some(file) = env::var_os(crate::domain::queue_service::CREDENTIAL_FILE_ENV) {
+            command.env(crate::domain::queue_service::CREDENTIAL_FILE_ENV, file);
+        }
+        let checked = run_checked(
+            &mut command,
+            binary,
+            &["--db", text(db)?, "migrate", "--check"],
+        )
+        .and_then(|text| {
+            serde_json::from_str::<Value>(&text)
+                .with_context(|| format!("read what {} printed", binary.display()))
+        });
+        let report = match checked {
+            Err(error)
+                if format!("{error:#}")
+                    .contains(crate::domain::queue_service::SCHEMA_UNANSWERED) =>
+            {
+                return Ok(None);
+            }
+            report => report?,
+        };
         let pending = report["pending"]
             .as_array()
             .context("migrate --check reported no pending list")?
@@ -191,10 +220,10 @@ impl Binaries for LocalBinaries {
                 })
             })
             .collect::<Result<_>>()?;
-        Ok(SchemaCheck {
+        Ok(Some(SchemaCheck {
             pending,
             opens: report["opens"] == true,
-        })
+        }))
     }
 
     fn serve(&self, binary: &Path, db: &Path, breaking: bool) -> Result<Value> {

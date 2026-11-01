@@ -1,6 +1,7 @@
-//! Only the queue's binary changes its schema (ADR-t3102-2 decisions 2 and
-//! 3): a development build and a run's `runner` copy refuse `migrate`,
-//! `up` and the writes before anything changes, and `install` lets the build it puts in place
+//! Only the queue's binary starts its service, which alone changes its
+//! schema (ADR-t3102-2 decisions 1 to 3): a development build and a run's
+//! `runner` copy refuse `service start`, `service serve` and `up` before
+//! anything changes, and `install` lets the build it puts in place
 //! migrate. Each test makes its own throwaway queue and the two binaries:
 //! the queue's (a copy of the test's `dagq` that `init` names) and another.
 
@@ -25,6 +26,7 @@ use std::{
 fn run(binary: &Path, db: &Path, args: &[&str]) -> Output {
     Command::new(binary)
         .without_actor_env()
+        .owned_by_test()
         .arg("--db")
         .arg(db)
         .args(args)
@@ -59,6 +61,12 @@ fn old_queue(db: &Path, version: usize) {
     .unwrap();
 }
 
+/// The queue's binary alone starts its service, which alone migrates it
+/// (ADR-t3102-2 decisions 1 to 3): a development build and a run's runner
+/// copy refuse `service start` and `service serve` naming the queue's
+/// binary, and start nothing; with no service, `migrate`, `migrate --check`,
+/// `doctor` and `init` of the queue fail as unreachable and open no DB;
+/// with the queue's binary's service, they are its use cases.
 #[test]
 fn only_the_queues_binary_migrates_the_queue() {
     let (dir, _owner) = common::cleanup::owned_temp_dir();
@@ -66,6 +74,7 @@ fn only_the_queues_binary_migrates_the_queue() {
     let development = Path::new(env!("CARGO_BIN_EXE_dagq"));
     let db = dir.path().join("queue").join("queue.db");
     fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let _service = StopService(db.clone());
 
     // `init` names the binary that created the queue.
     let output = run(&fixed, &db, &["init"]);
@@ -74,38 +83,128 @@ fn only_the_queues_binary_migrates_the_queue() {
         queue_binary::read(&db).unwrap(),
         Some(QueueBinary::new(&fixed))
     );
-    // `init` of the queue there names no other binary.
-    let output = run(development, &db, &["init"]);
-    assert!(output.status.success(), "{}", error_of(&output));
-    assert_eq!(queue_binary::read(&db).unwrap().unwrap().path, fixed);
 
     // Schema 23, which this binary migrates with breaking and compatible
     // migrations.
     old_queue(&db, 23);
-    // A development build and a run's runner copy refuse to migrate, and
-    // a write points at the queue's binary; the schema stays.
     let runner = copy_of_dagq(&dir.path().join("runs/run-1/runner"));
     for binary in [development, runner.as_path()] {
-        let error = error_of(&run(binary, &db, &["migrate"]));
-        assert!(error.contains("is not the queue's binary"), "{error}");
-        assert!(error.contains(&fixed.display().to_string()), "{error}");
-        // `integrate` sends its steps to the queue's service and opens no
-        // DB, so with no service it neither migrates nor reads the queue.
-        let error = error_of(&run(binary, &db, &["integrate", "1"]));
-        assert!(error.contains("unreachable"), "{error}");
+        // Not the queue's binary: no service of it starts, by hand or as
+        // `service serve`.
+        for args in [&["service", "start"][..], &["service", "serve"]] {
+            let error = error_of(&run(binary, &db, args));
+            assert!(error.contains("is not the queue's binary"), "{error}");
+            assert!(error.contains(&fixed.display().to_string()), "{error}");
+            stopped(&db);
+        }
+        // With no service, nothing is migrated, checked, read or
+        // initialized here: the DB is not opened instead.
+        for args in [
+            &["migrate"][..],
+            &["migrate", "--check"],
+            &["doctor"],
+            &["init"],
+        ] {
+            let error = error_of(&run(binary, &db, args));
+            assert!(error.contains("unreachable"), "{args:?}: {error}");
+        }
+        let error = error_of(&run(binary, &db, &["migrate", "--check"]));
+        assert!(
+            error.contains(dagq::domain::queue_service::SCHEMA_UNANSWERED),
+            "{error}"
+        );
         assert_eq!(user_version(&db), 23);
-        // Reading the schema is not refused.
-        let check = run(binary, &db, &["migrate", "--check"]);
-        assert!(check.status.success(), "{}", error_of(&check));
+        assert_eq!(queue_binary::read(&db).unwrap().unwrap().path, fixed);
     }
-    // The queue's binary migrates it.
-    let output = run(&fixed, &db, &["migrate"]);
-    assert!(output.status.success(), "{}", error_of(&output));
-    assert_eq!(user_version(&db), SqliteQueue::SCHEMA_VERSION);
-    // With nothing pending, another binary's `migrate` changes nothing and
-    // is not refused.
+
+    // The queue's binary's service answers the others' requests. It starts
+    // on a queue its build would migrate, and its start is recorded by
+    // none, as the queue does not open as it is.
+    let error = error_of(&run(&fixed, &db, &["service", "start"]));
+    assert!(error.contains("run `dagq migrate`"), "{error}");
+    assert_eq!(
+        service::probe(db.parent().unwrap()).state,
+        dagq::domain::queue_service::ServiceState::Running
+    );
+    let check: serde_json::Value =
+        serde_json::from_slice(&run(&runner, &db, &["migrate", "--check"]).stdout).unwrap();
+    assert_eq!(check["schema_version"], 23, "{check}");
+    assert_eq!(check["opens"], false, "{check}");
+    let doctor: serde_json::Value =
+        serde_json::from_slice(&run(development, &db, &["doctor"]).stdout).unwrap();
+    assert_eq!(doctor["schema"], check, "{doctor}");
     let output = run(development, &db, &["migrate"]);
     assert!(output.status.success(), "{}", error_of(&output));
+    assert_eq!(user_version(&db), SqliteQueue::SCHEMA_VERSION);
+    // Its service applied them, not the command's process.
+    let log = fs::read_to_string(service::log_path(db.parent().unwrap())).unwrap();
+    assert!(log.contains("at a migrate's request"), "{log}");
+    let output = run(development, &db, &["init"]);
+    assert!(output.status.success(), "{}", error_of(&output));
+    assert_eq!(queue_binary::read(&db).unwrap().unwrap().path, fixed);
+}
+
+/// A queue that names no binary is the first starter's: once a binary
+/// started its service, another one's start is refused and starts nothing,
+/// the running service left as it was. While its service runs, a queue
+/// with no record is not taken over by a replacement no install grants.
+#[test]
+fn a_queue_with_no_record_is_named_by_the_binary_that_first_starts_its_service() {
+    let (dir, _owner) = common::cleanup::owned_temp_dir();
+    let first = copy_of_dagq(&dir.path().join("bin").join("dagq"));
+    let other = copy_of_dagq(&dir.path().join("dev").join("dagq"));
+    let db = dir.path().join("queue").join("queue.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let _service = StopService(db.clone());
+    old_queue(&db, SqliteQueue::SCHEMA_VERSION as usize);
+    assert_eq!(queue_binary::read(&db).unwrap(), None);
+    let output = Command::new(&first)
+        .without_actor_env()
+        .owned_by_test()
+        .arg("--db")
+        .arg(&db)
+        .args(["service", "start"])
+        .bounded_output()
+        .unwrap();
+    assert!(output.status.success(), "{}", error_of(&output));
+    assert_eq!(
+        queue_binary::read(&db).unwrap(),
+        Some(QueueBinary::new(&first))
+    );
+    let running = service::probe(db.parent().unwrap());
+    // With the record gone and the service running, no start of another
+    // build stops it to name itself: only an install's grant would.
+    fs::remove_file(db.parent().unwrap().join(queue_binary::RECORD_FILE)).unwrap();
+    let report = dir.path().join("replacement.json");
+    let error = error_of(&run(
+        &other,
+        &db,
+        &[
+            "service",
+            "serve",
+            "--replacement",
+            report.to_str().unwrap(),
+        ],
+    ));
+    assert!(error.contains("names no binary yet"), "{error}");
+    assert_eq!(service::probe(db.parent().unwrap()).pid, running.pid);
+    assert_eq!(queue_binary::read(&db).unwrap(), None);
+    queue_binary::write(&db, &QueueBinary::new(&first)).unwrap();
+    let error = error_of(&run(&other, &db, &["service", "serve"]));
+    assert!(error.contains("is not the queue's binary"), "{error}");
+    assert_eq!(service::probe(db.parent().unwrap()).pid, running.pid);
+    // A supervisor's watch of the other binary starts none either, with
+    // the service gone.
+    StopService(db.clone()).stop();
+    stopped(&db);
+    let error = format!(
+        "{:#}",
+        SystemQueueService::new(&db, &other)
+            .start(std::time::Duration::from_secs(10))
+            .unwrap_err()
+    );
+    assert!(error.contains("is not the queue's binary"), "{error}");
+    stopped(&db);
 }
 
 /// `install` has the queue migrated by the service of the build it puts in
@@ -130,7 +229,7 @@ fn install_lets_its_new_build_migrate_and_names_it_the_queues_binary() {
     queue_binary::write(&db, &QueueBinary::new(&fixed)).unwrap();
     // The new build is refused on its own.
     if pending {
-        let error = error_of(&run(&next, &db, &["migrate"]));
+        let error = error_of(&run(&next, &db, &["service", "start"]));
         assert!(error.contains("is not the queue's binary"), "{error}");
     }
     // The install names the path it puts the binary at. The services it

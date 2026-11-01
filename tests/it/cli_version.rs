@@ -97,17 +97,19 @@ fn migrate_is_explicit_and_older_binaries_keep_working_within_the_floor() {
          VALUES ('old task','','','[]','draft');",
     )
     .unwrap();
-    // Commands that change the queue need `migrate` first.
-    for args in [&["add", "new task"][..], &["ready", "1"], &["init"]] {
+    // Commands that change the queue need `migrate` first, and so do the
+    // ones that only read: the queue's service reads the queue as it is,
+    // never a copy migrated in memory (ADR-t3102-2 decision 4).
+    for args in [
+        &["add", "new task"][..],
+        &["ready", "1"],
+        &["init"],
+        &["list"],
+        &["show", "1"],
+        &["status"],
+    ] {
         let error = refused(&db, args);
         assert!(error.contains("run `dagq migrate`"), "{args:?}: {error}");
-    }
-    // Commands that only read open it read-only and see it as migrated in
-    // memory; the file stays at schema 23 (ADR-0045 decision 18).
-    assert_eq!(ok(&db, &["list"])["total"], 1);
-    assert_eq!(ok(&db, &["show", "1"])["task"]["title"], "old task");
-    for args in [&["status"][..], &["graph"], &["stats"], &["goal", "list"]] {
-        ok(&db, args);
     }
     assert_eq!(version(), 23);
     let check = ok(&db, &["migrate", "--check"]);
@@ -115,7 +117,12 @@ fn migrate_is_explicit_and_older_binaries_keep_working_within_the_floor() {
     // runs and supervisors (ADR-0045 decision 5).
     let doctor = ok(&db, &["doctor"]);
     assert_eq!(doctor["schema"], check);
-    assert_eq!(doctor["runs"], serde_json::json!([]));
+    assert!(
+        doctor["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("run `dagq migrate`")),
+        "{doctor}"
+    );
     assert_eq!(check["schema_version"], 23);
     assert_eq!(check["binary_schema_version"], SqliteQueue::SCHEMA_VERSION);
     assert_eq!(check["opens"], false);
@@ -591,6 +598,13 @@ exec {quoted_bin} \"$@\"\n"
     let fixed = dir.path().join("bin").join("dagq");
     std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
     std::fs::copy(bin, &fixed).unwrap();
+    // The fixed binary is the queue's, whose service only it starts
+    // (ADR-t3102-2 decision 3).
+    dagq::infrastructure::queue_binary::write(
+        &db,
+        &dagq::infrastructure::queue_binary::QueueBinary::new(&fixed),
+    )
+    .unwrap();
     let mut supervisor = common::KillOnDrop::new(
         Command::new(&fixed)
             .without_actor_env()
@@ -752,6 +766,13 @@ exec {quoted_bin} \"$@\"\n"
     let fixed = dir.path().join("bin").join("dagq");
     std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
     std::fs::copy(bin, &fixed).unwrap();
+    // The fixed binary is the queue's, whose service only it starts
+    // (ADR-t3102-2 decision 3).
+    dagq::infrastructure::queue_binary::write(
+        &db,
+        &dagq::infrastructure::queue_binary::QueueBinary::new(&fixed),
+    )
+    .unwrap();
     let log = dir.path().join("supervisor.log");
     // Killed when the test ends however it does (task 1352): a panic left
     // it running from the copy, and the service it started with it.

@@ -583,6 +583,43 @@ impl SqliteQueue {
     /// migrated (ADR-0045 decision 5).
     pub fn init(path: impl AsRef<Path>) -> Result<Self> {
         let mut queue = Self::connect(path.as_ref(), true)?;
+        queue.initialize()?;
+        Ok(queue)
+    }
+
+    /// Make a queue at the latest schema where there is no file at `path`
+    /// (ADR-t3102-2 decision 1: `init`'s only open of the DB): the file is
+    /// created for this process alone, so one that is there, or comes
+    /// between, is refused and left as it is, to the queue's service.
+    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| {
+                format!(
+                    "create the queue at {} (an existing queue is initialized by its service)",
+                    path.display()
+                )
+            })?;
+        let made = Self::connect(path, false).and_then(|mut queue| {
+            queue.initialize()?;
+            Ok(queue)
+        });
+        // A queue not made leaves no file the next `init` would take for one.
+        if made.is_err() {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+            }
+        }
+        made
+    }
+
+    /// Apply every migration to an empty queue, check one that is there,
+    /// and turn on its WAL.
+    fn initialize(&mut self) -> Result<()> {
+        let queue = self;
         if queue.state()?.is_none() {
             queue.apply(0, None)?;
         }
@@ -591,7 +628,7 @@ impl SqliteQueue {
             .context("queue is not initialized; use init first")?
             .check_opens()?;
         queue.conn.pragma_update(None, "journal_mode", "WAL")?;
-        Ok(queue)
+        Ok(())
     }
 
     /// Opens an initialized queue without changing its schema. A queue older
@@ -608,9 +645,8 @@ impl SqliteQueue {
         Ok(queue)
     }
 
-    /// Opens the live queue read-only for polling (`watch`). Unlike
-    /// `open_read_only`, never makes a snapshot: older schemas must be
-    /// migrated first so subsequent reads can see concurrent writes.
+    /// Opens the live queue read-only for polling (`watch`): older schemas
+    /// must be migrated first, as for [`Self::open_read_only`].
     pub fn open_watch(path: impl AsRef<Path>) -> Result<Self> {
         let queue = Self::connect_with(
             path.as_ref(),
@@ -623,8 +659,7 @@ impl SqliteQueue {
         Ok(queue)
     }
 
-    /// Whether SQLite opened the queue database read-only. In-memory
-    /// migrated snapshots are writable and return false.
+    /// Whether SQLite opened the queue database read-only.
     pub fn is_read_only(&self) -> Result<bool> {
         Ok(self.conn.is_readonly(rusqlite::MAIN_DB)?)
     }
@@ -633,12 +668,10 @@ impl SqliteQueue {
     /// `show`, `list`, `graph`, `stats` and the like, ADR-0045 decision 18):
     /// the connection is read-only, so opening writes no pragma, event or
     /// schema, and a write through it fails. A queue at this binary's schema
-    /// or a newer one within the floor is read as it is. An older queue is
-    /// read from an in-memory copy with the pending migrations applied, so a
-    /// newer binary (a development build) reads it and the file, the
-    /// supervisor and the runs on it are left as they are; even a breaking
-    /// migration only rewrites the copy. The copy is a snapshot: a command
-    /// that polls, like `watch`, uses [`Self::open_watch`] instead.
+    /// or a newer one within the floor is read as it is; an older one is
+    /// refused as [`Self::open`] refuses it, with nothing migrated, not even
+    /// a copy in memory (ADR-t3102-2 decision 4: only the queue service
+    /// reads the queue, and its build migrates it when asked).
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         match Self::inspect_read_only(path)?.1 {
             ReadOnlyQueue::Readable(queue) => Ok(queue),
@@ -649,9 +682,9 @@ impl SqliteQueue {
     /// [`Self::open_read_only`] for `doctor`, which reports the schema even
     /// of a queue that refuses this binary (ADR-0045 decision 5): the
     /// queue's schema as [`Self::schema`] reports it, read on the same
-    /// connection before any in-memory migration, and the queue, or the
-    /// connection of one that refuses this binary with the reason. The
-    /// file is opened once either way.
+    /// connection, and the queue, or the connection of one this binary
+    /// does not read as it is (an older schema, or a floor that refuses
+    /// it) with the reason. The file is opened once either way.
     pub fn inspect_read_only(path: impl AsRef<Path>) -> Result<(SchemaState, ReadOnlyQueue)> {
         let queue = Self::connect_with(
             path.as_ref(),
@@ -661,38 +694,16 @@ impl SqliteQueue {
             .state()?
             .context("queue is not initialized; use init first")?;
         let schema = state.report();
-        if let Err(error) = state.check_floor() {
-            return Ok((
+        Ok(match state.check_opens() {
+            Ok(()) => (schema, ReadOnlyQueue::Readable(queue)),
+            Err(error) => (
                 schema,
                 ReadOnlyQueue::Refused {
                     binding: queue,
                     error,
                 },
-            ));
-        }
-        if state.version >= BINARY_SCHEMA {
-            return Ok((schema, ReadOnlyQueue::Readable(queue)));
-        }
-        let mut memory = Connection::open_in_memory()?;
-        rusqlite::backup::Backup::new(&queue.conn, &mut memory)?
-            .run_to_completion(i32::MAX, Duration::from_millis(10), None)
-            .context("copy the queue into memory")?;
-        memory.pragma_update(None, "foreign_keys", true)?;
-        let actors = EventActors::attach(&memory, queue.actors.get())?;
-        let mut copy = Self {
-            conn: memory,
-            runs_dir: queue.runs_dir.clone(),
-            generators: queue.generators.clone(),
-            actors,
-            changes: queue.changes.clone(),
-            title_prefixes: queue.title_prefixes.clone(),
-            goal_tags: queue.goal_tags.clone(),
-            max_spike_cycles: queue.max_spike_cycles,
-            replacement: queue.replacement.clone(),
-            write_hold_warn: queue.write_hold_warn,
-        };
-        copy.apply(state.version, None)?;
-        Ok((schema, ReadOnlyQueue::Readable(copy)))
+            ),
+        })
     }
 
     /// The schema of the queue at `path` as this binary sees it, without
@@ -1148,9 +1159,10 @@ impl QueueSchema {
 
 /// A queue opened read-only by [`SqliteQueue::inspect_read_only`].
 pub enum ReadOnlyQueue {
-    /// A queue this binary reads (an older one from its in-memory copy).
+    /// A queue this binary reads as it is.
     Readable(SqliteQueue),
-    /// A queue whose floor refuses this binary: `binding` reads only its
+    /// A queue older than this binary's schema, or whose floor refuses
+    /// this binary: `binding` reads only its
     /// repository binding ([`SqliteQueue::assert_repository`]), and `error`
     /// is what [`SqliteQueue::open_read_only`] fails with.
     Refused {
@@ -1174,6 +1186,13 @@ pub struct SchemaState {
 }
 
 impl SchemaState {
+    /// The schema of a queue at `version` whose floor is `floor`, as this
+    /// binary sees it: what a client reports of the facts its queue's
+    /// service read (`migrate --check`), which may be of another build.
+    pub fn of(version: i64, floor: i64) -> Self {
+        QueueSchema { version, floor }.report()
+    }
+
     /// Whether the queue's floor refuses this binary, so that not even the
     /// commands that only read open it.
     pub fn refuses_binary(&self) -> bool {

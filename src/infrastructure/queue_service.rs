@@ -58,8 +58,8 @@ use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::queue_commands::QueueCommand;
 use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
-    Issued, Peer, QueueService, QueueServiceControl, Replaced, ServiceAccess, ServiceBackend,
-    ServiceProbe, ServiceQueue, TelemetryTokens,
+    Admin, Issued, Peer, QueueService, QueueServiceControl, Replaced, ServiceAccess,
+    ServiceBackend, ServiceProbe, ServiceQueue, TelemetryTokens,
 };
 use crate::application::session::{AgentStart, ReasonParams, SessionOp, WrapperStore};
 use crate::application::{
@@ -69,9 +69,10 @@ use crate::application::{
 use crate::domain::queue_service::wrapper_actor_id;
 use crate::domain::queue_service::{
     API_VERSION, HeldToken, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OUTAGE_FILE,
-    OUTAGE_TOLD_FILE, OWNER_PID_ENV, Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, STEPS_DIR,
-    ServiceDenial, ServiceErrorCode, ServiceOutage, ServiceRequest, ServiceResponse, ServiceStart,
-    ServiceState, SessionProcess, StartMigrations, TokenIssuer, UseCase,
+    OUTAGE_TOLD_FILE, OWNER_PID_ENV, Principal, SERVICE_DIR, SOCKET_FILE, START_REPORT_ENV,
+    STATE_FILE, STEPS_DIR, ServiceDenial, ServiceErrorCode, ServiceOutage, ServiceRequest,
+    ServiceResponse, ServiceStart, ServiceState, SessionProcess, StartMigrations, TokenIssuer,
+    UseCase,
 };
 use crate::domain::session_step::StepTarget;
 use crate::domain::sessions::SessionHook;
@@ -2774,6 +2775,16 @@ pub type ServiceDetail = fn(&crate::domain::TaskDetail, usize) -> Value;
 pub type ServiceCommands =
     Arc<dyn Fn(&mut SqliteQueue, &Path, &QueueCommand) -> Result<Value> + Send + Sync>;
 
+/// How the service makes `doctor`'s report of the queue at the DB from
+/// what it read of it, `full` or not ([`SqliteQueue::inspect_read_only`]:
+/// its schema, and the queue or why its build does not open it as it is),
+/// as the composition root makes it (ADR-t3102-2 decision 1).
+pub type ServiceDoctor = Arc<
+    dyn Fn(&Path, super::sqlite::SchemaState, super::sqlite::ReadOnlyQueue, bool) -> Result<Value>
+        + Send
+        + Sync,
+>;
+
 /// How `dagq service serve` runs.
 #[derive(Clone)]
 pub struct ServeOptions {
@@ -2783,6 +2794,7 @@ pub struct ServeOptions {
     pub writes: ServiceWrites,
     pub detail: ServiceDetail,
     pub commands: ServiceCommands,
+    pub doctor: ServiceDoctor,
     /// Set by SIGINT or SIGTERM: the service stops accepting and exits.
     pub stop: Arc<AtomicBool>,
     /// How often the loop looks for a connection or a stop.
@@ -2794,8 +2806,9 @@ pub struct ServeOptions {
     /// Who started it, which decides the migrations it applies before it
     /// accepts (ADR-t3102-2 decision 2).
     pub start: ServiceStart,
-    /// Where a replacement's service tells its starter how its start goes
-    /// ([`ReplacementState`]); none for any other start.
+    /// Where the service tells its starter how its start goes
+    /// ([`ReplacementState`]): a replacement's, or a start by hand whose
+    /// starter names one ([`START_REPORT_ENV`]).
     pub report: Option<PathBuf>,
     /// The binary it runs from: the queue's binary, or the one an
     /// `install` grants, applies migrations ([`queue_binary`]).
@@ -2897,17 +2910,33 @@ pub(crate) fn in_the_way(
 /// from to let the queue's lock go.
 const TAKE_OVER_WAIT: Duration = Duration::from_secs(30);
 
-/// Whether the service started with `migrations` may take over the queue
-/// at `db` and apply what it lacks, judged before it takes over: not when
+/// Whether the service started with `migrations` from `executable` may
+/// take over the queue at `db` and apply what it lacks, judged before it
+/// takes over: never unless `executable` is the queue's binary
+/// ([`queue_binary`], ADR-t3102-2 decision 3), whatever starts it; not when
 /// the queue's floor refuses this build, pending or not, since it could not
-/// use the queue once it took over; only the queue's binary
-/// ([`queue_binary`], `executable`'s) applies any, and a breaking one only
-/// when `migrations` lets it and nothing uses the queue. A refusal here
+/// use the queue once it took over; and a breaking migration only when
+/// `migrations` lets it and nothing uses the queue. A refusal here
 /// leaves the running service as it was. What fails after it took over
 /// (the lock not let go, the queue found in use again in the migration's
 /// transaction, the migration itself) leaves no service until a
 /// supervisor's watch, `up` or `service start` starts one again.
-fn judge_start(db: &Path, executable: &Path, migrations: StartMigrations) -> Result<()> {
+/// A start that takes over a running service (`takes_over`) of a queue
+/// that names no binary is refused unless an install grants it.
+fn judge_start(
+    db: &Path,
+    executable: &Path,
+    migrations: StartMigrations,
+    takes_over: bool,
+) -> Result<()> {
+    // Named here only when another binary is: a queue with no record is
+    // named once this service holds its lock ([`serve`]).
+    let alive = crate::infrastructure::adapters::process_alive;
+    if takes_over {
+        queue_binary::refuses_takeover(db, executable, &alive)?;
+    } else {
+        queue_binary::refuses(db, executable, &alive)?;
+    }
     if migrations == StartMigrations::None {
         return Ok(());
     }
@@ -2916,11 +2945,6 @@ fn judge_start(db: &Path, executable: &Path, migrations: StartMigrations) -> Res
     if state.pending.is_empty() {
         return Ok(());
     }
-    queue_binary::check(
-        db,
-        executable,
-        &crate::infrastructure::adapters::process_alive,
-    )?;
     if migrations == StartMigrations::Compatible {
         state.refuse_breaking()?;
     }
@@ -3030,7 +3054,12 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
                 "queue is bound to another Git repository: {bound} (this repository is {binding})"
             );
         }
-        judge_start(&options.db, &options.executable, migrations)?;
+        judge_start(
+            &options.db,
+            &options.executable,
+            migrations,
+            migrations != StartMigrations::None && lock_held(&queue_dir),
+        )?;
         let wait = if migrations == StartMigrations::None {
             Duration::from_secs(2)
         } else {
@@ -3038,6 +3067,13 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
             TAKE_OVER_WAIT
         };
         let lock = take_lock(&dir, &queue_dir, wait)?;
+        // A queue that names no binary is named this one's now that it
+        // holds the queue, so a start that fails names nothing.
+        queue_binary::check(
+            &options.db,
+            &options.executable,
+            &crate::infrastructure::adapters::process_alive,
+        )?;
         let migrated =
             apply_start_migrations(&options.db, migrations, options.generators.clock.now())?;
         if let Some(migrated) = &migrated {
@@ -3100,6 +3136,7 @@ accepts: schema {} to {}",
         commands: options.commands.clone(),
         at_stop: Some(AtStop::default()),
         stands_for: None,
+        doctor: Some(options.doctor.clone()),
     });
     match crate::application::queue_service::revoke_ended_sign_ins(&*backend) {
         Ok(revoked) if !revoked.is_empty() => {
@@ -3363,6 +3400,10 @@ pub struct SqliteServiceBackend {
     /// for ([`InProcessControlCaller`]), answered for its process instead
     /// of the one the system reads; `None` for any other backend.
     pub stands_for: Option<PathBuf>,
+    /// What makes `doctor`'s report ([`ServiceDoctor`]); `None` for a
+    /// backend of a process that is no service's (a test's in-process one),
+    /// which makes none.
+    pub doctor: Option<ServiceDoctor>,
 }
 
 /// The keys ([`Principal::credential_key`]) of the tokens a service
@@ -3435,8 +3476,82 @@ impl ServiceBackend for SqliteServiceBackend {
         }
     }
 
+    /// Read whatever the queue's schema within the floor, so that a queue
+    /// its build does not open as it is is still held to its repository
+    /// (`migrate`, `doctor`).
     fn binding(&self) -> Result<Option<String>> {
-        SqliteQueue::open_read_only(&self.db)?.repository_binding()
+        SqliteQueue::binding_at(&self.db)
+    }
+
+    fn admin(&self, actor: &ActorContext, admin: &Admin) -> Result<Value> {
+        let alive = crate::infrastructure::adapters::process_alive;
+        match admin {
+            Admin::SchemaFacts => {
+                let state = SqliteQueue::schema(&self.db)?;
+                Ok(json!({"schema_version": state.schema_version, "floor": state.floor}))
+            }
+            Admin::Migrate => {
+                // Only the queue's binary changes its schema, which a
+                // service an `install` grants or one of another build
+                // started before the queue named it may not be.
+                queue_binary::check(&self.db, &std::env::current_exe()?, &alive)?;
+                let report =
+                    SqliteQueue::migrate(&self.db, Some(&alive), self.generators.clock.now())?;
+                if !report.applied.is_empty() {
+                    info!(
+                        pid = std::process::id(),
+                        "the queue service (pid {}) applied the migrations of its build at a \
+migrate's request: schema {} to {}",
+                        std::process::id(),
+                        report.previous_version,
+                        report.schema_version
+                    );
+                }
+                // The service's record no longer says its build finds
+                // migrations pending, so `up` keeps it.
+                if let Some(mut record) = ServiceRecord::read(&self.queue_dir)
+                    && record.pid == std::process::id()
+                    && record.pending
+                {
+                    record.pending = false;
+                    write_private(
+                        &service_dir(&self.queue_dir).join(STATE_FILE),
+                        &serde_json::to_vec(&record)?,
+                    )?;
+                }
+                let missing = SqliteQueue::open(&self.db)?.missing_commit_messages()?;
+                let mut value = serde_json::to_value(report)?;
+                value["commit_messages_missing"] = serde_json::to_value(missing)?;
+                Ok(value)
+            }
+            Admin::CommitMessages(messages) => {
+                let mut queue = SqliteQueue::open(&self.db)?
+                    .with_generators(self.generators.clone())
+                    .with_actor(actor.clone());
+                let mut filled = 0;
+                for (id, message) in messages {
+                    filled += queue.fill_commit_message(*id, message)?;
+                }
+                Ok(json!({"filled": filled}))
+            }
+            Admin::Init { binding } => {
+                let mut queue = SqliteQueue::open(&self.db)?
+                    .with_generators(self.generators.clone())
+                    .with_actor(actor.clone());
+                if let Some(binding) = binding {
+                    queue.bind_repository(binding)?;
+                }
+                Ok(json!({"schema_version": queue.schema_version()?}))
+            }
+            Admin::Doctor { full } => {
+                let doctor = self
+                    .doctor
+                    .as_ref()
+                    .context("this queue service makes no doctor's report")?;
+                let (schema, queue) = SqliteQueue::inspect_read_only(&self.db)?;
+                doctor(&self.db, schema, queue, *full)
+            }
+        }
     }
 
     fn session_alive(&self, session: &crate::domain::queue_service::SessionProcess) -> bool {
@@ -3883,6 +3998,7 @@ impl InProcessCaller {
                 commands,
                 at_stop: None,
                 stands_for: None,
+                doctor: None,
             }),
             queue_dir,
             signed_in: SignedIn::default(),
@@ -4203,6 +4319,7 @@ impl InProcessControlCaller {
                 commands,
                 at_stop: None,
                 stands_for: executable.map(Path::to_path_buf),
+                doctor: None,
             },
             control,
         }
@@ -4851,16 +4968,26 @@ pub(crate) fn runs_for(pid: u32, command_words: &str, db: &Path) -> bool {
 }
 
 /// Look with `look` until a service answers, up to `timeout`
-/// ([`start_settled`] at each look).
+/// ([`start_settled`] at each look), or the started service refused as
+/// `refused` tells while no other service holds the queue (`held`): one
+/// that lost the lock to another starter waits for that one's answer.
 fn await_answer(
     look: impl Fn() -> ServiceProbe,
+    refused: impl Fn() -> Option<String>,
+    held: impl Fn() -> bool,
     timeout: Duration,
     log_file: &Path,
 ) -> Result<ServiceProbe> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(settled) = start_settled(look(), Instant::now() >= deadline, timeout, log_file)
+        let found = look();
+        if found.state != ServiceState::Running
+            && let Some(error) = refused()
+            && !held()
         {
+            bail!("{error}");
+        }
+        if let Some(settled) = start_settled(found, Instant::now() >= deadline, timeout, log_file) {
             return settled;
         }
         thread::sleep(Duration::from_millis(50));
@@ -4891,10 +5018,30 @@ fn start_settled(
     })
 }
 
+/// The refusal the service that tells its start in `report` gave, if it
+/// did.
+fn refused_in(report: &Path) -> Option<String> {
+    let state = serde_json::from_slice::<ReplacementState>(&fs::read(report).ok()?).ok()?;
+    match state {
+        ReplacementState::Refused { error, .. } => Some(error),
+        _ => None,
+    }
+}
+
 impl SystemQueueService {
     /// Start `dagq service serve` with `arguments` from the binary,
     /// detached, its output appended to the service's log: the log's path.
     fn spawn(&self, arguments: &[&std::ffi::OsStr]) -> Result<PathBuf> {
+        self.spawn_reporting(arguments, None)
+    }
+
+    /// [`Self::spawn`], the service told to tell its start in `report`
+    /// ([`START_REPORT_ENV`]), which a build before it does not read.
+    fn spawn_reporting(
+        &self,
+        arguments: &[&std::ffi::OsStr],
+        report: Option<&Path>,
+    ) -> Result<PathBuf> {
         ensure!(
             self.executable.is_file(),
             "no binary at {} to start the queue service with",
@@ -4926,6 +5073,10 @@ impl SystemQueueService {
             .chain(crate::domain::queue_service::CLIENT_ENV)
         {
             command.env_remove(name);
+        }
+        command.env_remove(START_REPORT_ENV);
+        if let Some(report) = report {
+            command.env(START_REPORT_ENV, report);
         }
         spawn_detached(&mut command)
             .with_context(|| format!("start {}", self.executable.display()))?;
@@ -5032,11 +5183,37 @@ impl QueueServiceControl for SystemQueueService {
             return Ok(found);
         }
         if found.state != ServiceState::Stopped {
+            // A binary that is not the queue's stops no service it could
+            // not start again, and on a queue that names no binary none
+            // does but the one an install grants (ADR-t3102-2 decision 3).
+            queue_binary::refuses_takeover(
+                &self.db,
+                &self.executable,
+                &crate::infrastructure::adapters::process_alive,
+            )?;
             self.stop(timeout)?;
         }
         let queue_dir = self.queue_dir();
-        let log_file = self.spawn(&[])?;
-        await_answer(|| probe(&queue_dir), timeout, &log_file)
+        // The service tells why it refuses (not the queue's binary, a
+        // queue it cannot take), so the start fails with its words at once.
+        let report = service_dir(&queue_dir).join(format!(
+            "start-{}-{}.json",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let started = self
+            .spawn_reporting(&[], Some(&report))
+            .and_then(|log_file| {
+                await_answer(
+                    || probe(&queue_dir),
+                    || refused_in(&report),
+                    || lock_held(&queue_dir),
+                    timeout,
+                    &log_file,
+                )
+            });
+        let _ = fs::remove_file(&report);
+        started
     }
 
     fn hold(&self) -> Result<crate::application::queue_service::ServiceHold> {

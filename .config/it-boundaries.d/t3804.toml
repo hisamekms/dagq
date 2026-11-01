@@ -304,13 +304,6 @@ reason = "call を受けて答えない service への watch が look ごとに�
 task = 3804
 
 [[boundary]]
-id = "older-schema-queue-read-through-the-service-from-a-migrated-copy"
-kind = "SQLite"
-test = "host_client::an_older_queue_is_read_through_the_service_by_the_user_and_a_planner"
-reason = "floor の内の古い schema の queue を service が memory の上で migrate した写しから読み、書く操作を schema で拒みファイルの schema を変えないことは、実の SQLite のファイルと migration を通してしか確かめられない。どの操作を古い schema で拒むかの判断は queue_service の unit test"
-task = 3804
-
-[[boundary]]
 id = "inbox-token-ends-when-reopened-and-with-its-session-process"
 kind = "プロセス"
 test = "host_client::an_inbox_s_token_ends_when_it_is_opened_again_and_with_its_session"

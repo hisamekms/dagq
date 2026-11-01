@@ -27,7 +27,8 @@ related:
 
 - 宛ての環境が無い`dagq`のうちuser・inbox・plannerのもの（`host_client_role`）は、serviceが答えるコマンド（`client_request`）と`watch`の各回の見る（`watch_poll`）と制御側のコマンドのstep（`control_call`、下の「制御側のコマンド」）をそのsocketへ送り、DBを開かない。
   serviceが一度も動いていないqueueも同じで、DBが無ければ送る前に`no queue at`で終わる（ADR-t3105-1決定3）。
-- 送らないのはADR-t3102-2が残すものだけ: DBを開く`init`と`service serve`（決定1）と`migrate`・`doctor`（[DBを開く経路](queue-service.md#dbを開く経路)）、queueを開かないもの、serviceでqueueを扱う`supervise`。
+  `migrate`（`--check`も）と`doctor`も送り（supervisorのものも。install・更新のjobの確認）、DBの無い所に作るのでない`init`は`init`のユースケースに送る（[ユースケース](queue-service.md#ユースケース)）。
+- 送らないのはADR-t3102-2が残すものだけ: DBの無い所に作る`init`と`service serve`（決定1・[DBを開く経路](queue-service.md#dbを開く経路)）、queueを開かないもの、serviceでqueueを扱う`supervise`。
   `up`・`down`・`inbox`・`service start`・`service stop`・`install`と更新のjob（`auto-update`・`release-update`）は自分のプロセスに残るが、queueの読み書きは下の「制御側のコマンド」のstepとして送る。
   wrapperとhookの経路（決定6の(3)）は`client_request`でなく、wrapperはwrapperのtokenで（runのturnのcontainerの準備を含む）、inboxの`session-event`はspanをinboxのtokenで自分で`session_record`に送り、DBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
   CLIの全ての葉は送るものかこの例外のどれかに当たり、どちらでもない葉は無い（unit testが全ての葉を数えて確かめる）。
@@ -37,7 +38,7 @@ related:
   tokenが無くroleを名乗る呼び出しはserviceが`queue_service_unauthenticated`に残す。
   短い待ちの内に届かないか、DBが無ければ記録せずに拒否を返し、DBを開かない。
 - repositoryのqueueの束縛は、CLIが解決したrepositoryを要求に載せ（`ServiceRequest::binding`）、serviceが答える前に照らす。
-  serviceは読み取り（tokenのrunとtargetの確かめを含む）を読み取り専用の接続で（floorの内側の古いschemaはmemoryの写しで）、`watch_poll`を今のqueueの読み取り専用の接続で答え、policyの断りは書ける別の接続で残す（`ServiceBackend::open_read`・`open_watch`）。
+  serviceは読み取り（tokenのrunとtargetの確かめを含む）を読み取り専用の接続で（serviceのbuildより古いschemaは読まず`dagq migrate`を促す。ADR-t3102-2決定4）、`watch_poll`を今のqueueの読み取り専用の接続で答え、policyの断りは書ける別の接続で残す（`ServiceBackend::open_read`・`open_watch`）。
 - 宛てのqueue: socketは解決したDB（linkはその先）のdirのserviceのもので、要求はそのDBの絶対pathを持つ（`ServiceRequest::queue`）。
   serviceはそれが自分の扱うDBと同じfileでなければ（同じdirの別のDB、無いfile）、何も開かず読まずに`wrong_queue`で断る。
 - `watch`の待ち・inboxのwatcherの記録・`[push]`はクライアント側に残る（`application::watch::watch_through`）。

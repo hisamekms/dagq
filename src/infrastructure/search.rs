@@ -145,25 +145,52 @@ impl SqliteQueue {
         &mut self,
         read: impl Fn(Option<&str>, &str) -> Option<String>,
     ) -> Result<usize> {
-        let missing: Vec<(i64, String, Option<String>)> = self
+        let mut filled = 0;
+        for missing in self.missing_commit_messages()? {
+            if let Some(message) = read(missing.git_common_dir.as_deref(), &missing.commit) {
+                filled += self.fill_commit_message(missing.id, &message)?;
+            }
+        }
+        Ok(filled)
+    }
+
+    /// The landed commits recorded without their message (ADR-0046
+    /// decision 3), oldest first: what `migrate`'s client reads with Git
+    /// and sends back ([`Self::fill_commit_message`]).
+    pub fn missing_commit_messages(&self) -> Result<Vec<MissingCommitMessage>> {
+        Ok(self
             .conn
             .prepare(
                 "SELECT id, commit_sha, git_common_dir FROM landed_commits
                  WHERE message IS NULL ORDER BY id",
             )?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut filled = 0;
-        for (id, commit, common_dir) in missing {
-            if let Some(message) = read(common_dir.as_deref(), &commit) {
-                filled += self.conn.execute(
-                    "UPDATE landed_commits SET message = ?2 WHERE id = ?1 AND message IS NULL",
-                    params![id, message],
-                )?;
-            }
-        }
-        Ok(filled)
+            .query_map([], |row| {
+                Ok(MissingCommitMessage {
+                    id: row.get(0)?,
+                    commit: row.get(1)?,
+                    git_common_dir: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
     }
+
+    /// Fill the message of the landed commit `id` when it still has none:
+    /// how many were filled (0 or 1).
+    pub fn fill_commit_message(&mut self, id: i64, message: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE landed_commits SET message = ?2 WHERE id = ?1 AND message IS NULL",
+            params![id, message],
+        )?)
+    }
+}
+
+/// A landed commit recorded without its message
+/// ([`SqliteQueue::missing_commit_messages`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MissingCommitMessage {
+    pub id: i64,
+    pub commit: String,
+    pub git_common_dir: Option<String>,
 }
 
 fn marks(n: usize) -> String {

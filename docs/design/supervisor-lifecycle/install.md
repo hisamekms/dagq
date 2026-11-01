@@ -50,6 +50,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    通らなければ何も置き換えない。
    引き継ぎを受けるliveな登録があるのに、元が引き継ぎより前のbinaryなら、execしたsupervisorが引数で止まるので、何も置き換えずに`down`と`up`を案内するerrorで止まる（そのようなbinaryに戻すときも同じ）。
 3. **schema**: queueのDBがあれば元の`migrate --check`を読む。
+   `migrate --check`はqueue serviceに聞くので、答えるserviceが無ければ（serviceが無いか、`migrate`を読まない前のbuildのもの）元のqueue serviceを入れ替えの口で起動し、判定をそのserviceに任せる（非互換のmigrationか新しすぎるqueueなら起動が断られ、何も置き換えない）。
    非互換のmigrationがあれば、人が許していなければ何も置き換えずにerror、許していればdrain（下記6）。
    元がqueueを開けず（非互換のmigrationの後に戻すとき）、適用するものも無ければ、`backups/`を案内するerror。
    互換のmigrationがあれば、元のqueue serviceを入れ替えの口で起動し、そのserviceが受け付けの前に適用する（[Queue service](../queue-service.md)の「入れ替えの口」）。

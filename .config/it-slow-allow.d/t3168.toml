@@ -1,0 +1,5 @@
+# 6.04s in the worker's stress (2 rounds of 60s, under the host's load)
+[[test]]
+name = "queue_binary::a_queue_with_no_record_is_named_by_the_binary_that_first_starts_its_service"
+reason = "境界（プロセス）: 記録の無い queue の service を実の binary の写しで起動し、別の path の binary の service serve と見張りの起動が断られて何も起動しないことを、service の process を起動・停止して確かめる。どの binary を通すかの判断は infrastructure::queue_binary の unit test"
+task = 3168

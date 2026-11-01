@@ -192,11 +192,12 @@ pub trait ServiceBackend: Send + Sync {
     fn principal(&self, token: &str) -> Result<Option<Principal>>;
     /// The queue, written as `actor`.
     fn open(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>>;
-    /// The queue for a read as `actor`, as the command line reads it
-    /// (ADR-0045 decision 18): on a read-only connection, or, at an older
-    /// schema within the floor, from a copy migrated in memory. Nothing of
-    /// the read writes to the queue; a refusal of the policy is recorded
-    /// all the same, on a connection of its own that writes.
+    /// The queue for a read as `actor` (ADR-0045 decision 18), on a
+    /// read-only connection: a queue older than the service's build is not
+    /// read, nor copied and migrated in memory, and the refusal points to
+    /// `dagq migrate` (ADR-t3102-2 decision 4). Nothing of the read writes
+    /// to the queue; a refusal of the policy is recorded all the same, on a
+    /// connection of its own that writes.
     fn open_read(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
         self.open(actor)
     }
@@ -300,6 +301,152 @@ pub trait ServiceBackend: Send + Sync {
     /// Whether process `pid` of the host runs: whether a supervisor that
     /// owns a record (an eval round, a case set) is still there.
     fn alive(&self, pid: u32) -> bool;
+    /// Do `admin` on the queue's DB in the service's process, as `actor`,
+    /// authorized already ([`Admin`], ADR-t3102-2 decisions 1 and 2).
+    fn admin(&self, actor: &ActorContext, admin: &Admin) -> Result<Value> {
+        let _ = (actor, admin);
+        Err(anyhow!(
+            "this queue service runs none of the queue's administration"
+        ))
+    }
+}
+
+/// The queue's administration a client asks of the service, which only
+/// its process does on the DB (ADR-t3102-2 decisions 1 and 2): no command
+/// line opens the DB for them, and none goes back to it when the service
+/// does not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admin {
+    /// `migrate`: apply the migrations of the service's build the queue
+    /// lacks, refusing a breaking one while a supervisor, a run or a
+    /// wrapper uses the queue, and copying the queue before one, the check,
+    /// the copy and the migrations in one transaction. Only the service of
+    /// the queue's binary migrates ([`crate::infrastructure`]'s
+    /// `queue_binary`).
+    Migrate,
+    /// `migrate --check`: the queue's schema version and floor, which the
+    /// client judges as its own build sees them.
+    SchemaFacts,
+    /// The messages `migrate`'s client read with Git for the landings
+    /// recorded without one: `(id, message)`.
+    CommitMessages(Vec<(i64, String)>),
+    /// `init` of an existing queue: bind it to the client's repository
+    /// (`binding`, `None` for a `--db` queue's client) and read its schema
+    /// version, never migrating it.
+    Init { binding: Option<String> },
+    /// `doctor`'s report, `full` with every check's detail.
+    Doctor { full: bool },
+}
+
+/// `migrate`'s params.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MigrateParams {
+    #[serde(default)]
+    check: bool,
+}
+
+/// `commit_messages`' params: each landing's id and message.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommitMessagesParams {
+    messages: Vec<CommitMessageParam>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommitMessageParam {
+    id: i64,
+    message: String,
+}
+
+/// `doctor`'s params.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DoctorParams {
+    #[serde(default)]
+    full: bool,
+}
+
+impl Admin {
+    /// The administration `use_case` asks for with `raw`, sent from a
+    /// client in the repository `binding` names; `None` for any other use
+    /// case.
+    pub fn parse(use_case: UseCase, raw: &Value, binding: Option<&str>) -> Result<Option<Self>> {
+        Ok(Some(match use_case {
+            UseCase::Migrate => {
+                let p: MigrateParams = params(use_case, raw)?;
+                if p.check {
+                    Self::SchemaFacts
+                } else {
+                    Self::Migrate
+                }
+            }
+            UseCase::CommitMessages => {
+                let p: CommitMessagesParams = params(use_case, raw)?;
+                Self::CommitMessages(
+                    p.messages
+                        .into_iter()
+                        .map(|message| (message.id, message.message))
+                        .collect(),
+                )
+            }
+            UseCase::Init => {
+                params::<InitParams>(use_case, raw)?;
+                Self::Init {
+                    binding: binding.map(str::to_owned),
+                }
+            }
+            UseCase::Doctor => {
+                let p: DoctorParams = params(use_case, raw)?;
+                Self::Doctor { full: p.full }
+            }
+            _ => return Ok(None),
+        }))
+    }
+
+    /// The capability it needs, on the queue: the queue's administration
+    /// (`queue.admin`), `doctor`'s report too, as it runs the bound
+    /// checkout's programs and reads the host's settings in the service's
+    /// process: the user's, the inbox's, a planner's and the supervisor's,
+    /// never an agent's.
+    pub fn capability(&self) -> Capability {
+        Capability::QueueAdmin
+    }
+}
+
+/// `init`'s params: none.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InitParams {}
+
+/// The refusals of a use case that runs on no opened queue, each recorded
+/// on a connection of its own as the refused actor; one that cannot be
+/// recorded (a queue the service's build does not open) is logged.
+struct OwnDenials<'a> {
+    backend: &'a dyn ServiceBackend,
+    actor: &'a ActorContext,
+}
+
+impl DenialLog for OwnDenials<'_> {
+    fn record_denial(&self, payload: Value) -> Result<()> {
+        self.backend.open(self.actor)?.record_denial(payload)
+    }
+}
+
+/// Authorize `admin` for `actor` on the queue, recording a refusal, and do
+/// it in the service's process.
+fn admin_of(backend: &dyn ServiceBackend, actor: &ActorContext, admin: &Admin) -> Result<Value> {
+    Gate {
+        actor,
+        authorizer: &StaticPolicy,
+    }
+    .authorize(
+        &OwnDenials { backend, actor },
+        admin.capability(),
+        &Resource::Queue,
+    )?;
+    backend.admin(actor, admin)
 }
 
 /// The service's use cases on a backend.
@@ -428,6 +575,18 @@ impl QueueService<'_> {
         }
         if request.use_case == UseCase::RevokeToken {
             return respond(revoke_token_of(self.backend, &principal, &request.params));
+        }
+        // The queue's administration runs on the DB itself, which may be
+        // one the service's build does not open as it is (ADR-t3102-2
+        // decisions 1 and 2).
+        match Admin::parse(
+            request.use_case,
+            &request.params,
+            request.binding.as_deref(),
+        ) {
+            Ok(Some(admin)) => return respond(admin_of(self.backend, &actor, &admin)),
+            Ok(None) => {}
+            Err(error) => return respond(Err(error)),
         }
         // The queue the token's run or target was read on, when it was,
         // is the use case's: it is opened once.
@@ -1694,6 +1853,9 @@ fn run(
         }
         UseCase::IssueToken | UseCase::RevokeToken => {
             unreachable!("an issue and a revocation are answered apart")
+        }
+        UseCase::Migrate | UseCase::CommitMessages | UseCase::Init | UseCase::Doctor => {
+            unreachable!("the queue's administration is answered apart")
         }
         UseCase::List
         | UseCase::Candidates
@@ -4064,6 +4226,74 @@ mod tests {
             Peer::Owner,
         );
         assert_eq!(code(&response), Some(ServiceErrorCode::BadRequest));
+    }
+
+    /// The queue's administration (`migrate` and its check, the commit
+    /// messages it fills, `init` of an existing queue, `doctor`) is asked
+    /// of the policy as `queue.admin` before the service's process does
+    /// it: the user, the inbox, a planner and the supervisor reach it, and
+    /// a worker or an observer is refused as `authorization_denied`, the
+    /// refusal recorded and nothing done (ADR-t3102-2 decisions 1 and 2).
+    #[test]
+    fn the_queue_s_administration_is_the_admins_alone() {
+        use crate::domain::authorization::grants;
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let administration = [
+            (UseCase::Migrate, json!({})),
+            (UseCase::Migrate, json!({"check": true})),
+            (UseCase::CommitMessages, json!({"messages": []})),
+            (UseCase::Init, json!({})),
+            (UseCase::Doctor, json!({})),
+        ];
+        let callers = [
+            (None, ActorRole::User),
+            (Some("inbox"), ActorRole::Inbox),
+            (Some("planner-3"), ActorRole::Planner),
+            (Some("supervisor"), ActorRole::Supervisor),
+            (Some("worker"), ActorRole::Worker),
+        ];
+        let mut refused = 0;
+        for (token, role) in callers {
+            for (use_case, params) in &administration {
+                let logged = backend.log.lock().unwrap().len();
+                let response =
+                    service.handle_from(&request(token, *use_case, params.clone()), Peer::Owner);
+                let error = response.error.as_ref().map(|error| error.message.clone());
+                if grants(role).contains(&Capability::QueueAdmin) {
+                    // The test's backend does none of it: reaching it is
+                    // its refusal.
+                    assert!(
+                        error
+                            .as_deref()
+                            .is_some_and(|error| error.contains("runs none of the queue's")),
+                        "{} {}: {response:?}",
+                        role.as_str(),
+                        use_case.as_str()
+                    );
+                } else {
+                    refused += 1;
+                    assert_eq!(
+                        code(&response),
+                        Some(ServiceErrorCode::AuthorizationDenied),
+                        "{} {}",
+                        role.as_str(),
+                        use_case.as_str()
+                    );
+                    let log = backend.log.lock().unwrap();
+                    assert_eq!(log.len(), logged + 1, "{log:?}");
+                    assert_eq!(
+                        log.last().unwrap()["capability"],
+                        Capability::QueueAdmin.as_str()
+                    );
+                }
+            }
+        }
+        assert_eq!(refused, administration.len());
     }
 
     /// A planner asks on its planning request through the service as the

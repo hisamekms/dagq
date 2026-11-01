@@ -14,8 +14,9 @@
 //! instead, and only when asked to. `--rollback` does the same with
 //! `<name>.previous`.
 //!
-//! It reads the queue's schema through the new binary (`migrate --check`)
-//! and applies no migration itself, before it opens the queue itself (apart from a best-effort read of the
+//! It reads the queue's schema through the new binary (`migrate --check`,
+//! which asks the queue's service; with none that answers, the new build's
+//! replacement start judges it) and applies no migration itself, before it opens the queue itself (apart from a best-effort read of the
 //! e2e gate's history and write of its `install_e2e_finished`, whose
 //! failure is ignored), so it works whether the queue is older or newer
 //! than this binary.
@@ -71,8 +72,10 @@ pub trait Binaries {
         let _ = binary;
         true
     }
-    /// `binary --db <db> migrate --check`.
-    fn schema(&self, binary: &Path, db: &Path) -> Result<SchemaCheck>;
+    /// `binary --db <db> migrate --check`: the schema facts the queue's
+    /// service read, judged by `binary`; none when no service that answers
+    /// them runs on the queue, which nothing else reads.
+    fn schema(&self, binary: &Path, db: &Path) -> Result<Option<SchemaCheck>>;
     /// Start `binary`'s service of the queue at `db` as a replacement's
     /// (ADR-t3102-2 decision 2), taking over from the one running whatever
     /// its build: it
@@ -528,7 +531,18 @@ pub fn install_built(
             "e2e": e2e,
         }));
     };
-    let schema = binaries.schema(&source, db)?;
+    // With no service that answers for the queue's schema, nothing reads
+    // it: the replacement start of the new build's service judges it, and
+    // applies the compatible migrations before it accepts, or refuses the
+    // queue (a breaking migration, a schema newer than it) and nothing is
+    // replaced.
+    let checked = binaries.schema(&source, db)?;
+    let unread = checked.is_none();
+    let schema = checked.unwrap_or(SchemaCheck {
+        pending: Vec::new(),
+        opens: true,
+    });
+    let start = unread || !schema.pending.is_empty();
     let breaking: Vec<String> = schema
         .pending
         .iter()
@@ -558,15 +572,22 @@ backups/ directory next to it"
     );
     // The service the new build starts is held from the supervisors of the
     // build before until they are handed over and its binary is in place.
-    let mut hold = if schema.pending.is_empty() {
-        None
-    } else {
+    let mut hold = if start {
         Some(binaries.hold_service(db)?)
+    } else {
+        None
     };
     // Before the queue is opened: this binary may be the new build, which
     // opens it only migrated.
-    let migrated = if schema.pending.is_empty() {
+    let migrated = if !start {
         Value::Null
+    } else if unread {
+        binaries.serve(&source, db, false).with_context(|| {
+            format!(
+                "no queue service answered for the queue's schema, and {version}'s could not \
+start: nothing was replaced"
+            )
+        })?
     } else {
         binaries.serve(&source, db, false)?
     };
@@ -575,7 +596,7 @@ backups/ directory next to it"
     // reads none of its steps, it starts the new build's, as for a
     // migration, and the binary in place takes over after.
     let (queue, served) = match (ports.queues)(db).open() {
-        Ok(queue) => (queue, !schema.pending.is_empty()),
+        Ok(queue) => (queue, start),
         // A service of a build before this command does not read its steps:
         // the install sends them to its build's, as to none.
         Err(error)

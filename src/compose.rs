@@ -105,21 +105,21 @@ pub use host::rebind;
 pub use host::{
     AutoUpdateJob, COMMAND_TARGET, HostMetricsSettings, LifecycleRoute, QueueBrokerControlPort,
     QueueBrokerOptions, QueueRelayControlPort, QueueRelayOptions, QueueServiceControlPort,
-    QueueServiceOptions, ReleaseIndexPort, ReleaseUpdateJob, SccacheOptions, down,
-    fill_commit_messages, inbox, inbox_command, init_queue, install_restart_arguments,
-    migrate_queue, queue_broker_start, queue_broker_status, queue_broker_stop, queue_schema,
-    queue_service_start, queue_service_status, queue_service_stop, repair_rebound_worktrees,
-    repository_common_dir, repository_queue_dir, run_command, service_commands, trace_command, up,
+    QueueServiceOptions, ReleaseIndexPort, ReleaseUpdateJob, SccacheOptions, down, inbox,
+    inbox_command, init_queue, init_through, install_restart_arguments, migrate_through,
+    queue_broker_start, queue_broker_status, queue_broker_stop, queue_service_start,
+    queue_service_status, queue_service_stop, repair_rebound_worktrees, repository_common_dir,
+    repository_queue_dir, run_command, service_commands, trace_command, up,
 };
 pub use observation::{
-    CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, call_stats_read, doctor,
-    graph_export_text, graph_svg_of, observe, observe_through, queue_agents, read_queue,
-    service_detail, service_reads, throughput_review, throughput_review_through, timeline_in,
-    watch_in, watch_through_service, write_report_files,
+    CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, call_stats_read,
+    doctor_on_this_host, graph_export_text, graph_svg_of, observe, observe_through, queue_agents,
+    read_queue, service_detail, service_doctor, service_reads, throughput_review,
+    throughput_review_through, timeline_in, watch_in, watch_through_service, write_report_files,
 };
 #[cfg(feature = "test-paths")]
 pub use observation::{
-    ci_failures, events, events_matching, observer_launch, stats, status, status_for,
+    ci_failures, doctor, events, events_matching, observer_launch, stats, status, status_for,
     throughput_review_launch, timeline, watch,
 };
 pub use planning::{PLANNER_TIMEOUT, PlannerEntry, planner_session, service_writes, write_queue};
