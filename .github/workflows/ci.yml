@@ -96,7 +96,7 @@ jobs:
   # runner as the Rust job, where the scripts are known to work.
   docs:
     name: docs / scripts checks
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
         with:
@@ -206,7 +206,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     # Apple Silicon, the platform the runtime is developed and run on.
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
         with:
@@ -244,7 +244,7 @@ jobs:
       - name: Remove the target's tmp restored from the cache
         run: rm -rf target/tmp target/llvm-cov-target/tmp
 
-      # The macos-15 runner's disk can run out under cargo llvm-cov nextest
+      # The macos-26 runner's disk can run out under cargo llvm-cov nextest
       # (the instrumented build, each test's copies of the runtime binary in
       # the temporary directories, the profraw files): tests then fail with
       # "No space left on device" or "database or disk is full". So before
