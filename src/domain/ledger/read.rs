@@ -12,6 +12,7 @@ use super::fold::{Interval, Milestones};
 use super::{LedgerKind, LedgerRow, Totals};
 use crate::domain::after_claim::AfterClaim;
 use crate::domain::stats::landing::{LandPhases, PHASES};
+use crate::domain::stats::ledger_times::RowTimes;
 
 /// What a row reads as. Times under today's names are whole seconds, as
 /// `stats` gives them; the breakdown is in milliseconds, so that its parts
@@ -88,6 +89,14 @@ pub fn read(row: &LedgerRow) -> LedgerValues {
 /// the first `push` and `land_phases` its intervals between, by the phase
 /// of the landing each falls under; `startup` between the milestones it
 /// names.
+///
+/// Where the meaning differs from the values `stats` made of the events
+/// before the ledger: `work` starts at the row's start (its first
+/// interval, the claim) and ends where `validating` starts, not at the
+/// receipt; `validate` is the `validating` interval; `wait_to_land` ends
+/// where `push` starts, at `run_integrated`, as before. In `land_phases`
+/// a person's wait (`waiting`, `landing_answer`, an `approve_landing`
+/// answer among them) is `ask`, never `exit`, and `held` is `held`.
 fn run_names(values: &mut LedgerValues, row: &LedgerRow, milestones: &Milestones) {
     let secs = |from: Option<i64>, to: Option<i64>| Some((to? - from?) / 1000);
     let validating = validation(&row.intervals);
@@ -99,15 +108,6 @@ fn run_names(values: &mut LedgerValues, row: &LedgerRow, milestones: &Milestones
         return;
     };
     values.wait_to_land = secs(Some(validated), Some(push.start));
-    let mut millis = [0_i64; PHASES.len()];
-    for interval in &row.intervals {
-        let (from, to) = (interval.start.max(validated), interval.end.min(push.start));
-        if to > from
-            && let Some(index) = PHASES.iter().position(|name| *name == land_phase(interval))
-        {
-            millis[index] += to - from;
-        }
-    }
     let push_millis: i64 = row
         .intervals
         .iter()
@@ -115,11 +115,55 @@ fn run_names(values: &mut LedgerValues, row: &LedgerRow, milestones: &Milestones
         .map(Interval::millis)
         .sum();
     values.land_phases = Some(LandPhases {
-        secs: millis.map(|ms| ms / 1000),
+        secs: split(&row.intervals, validated, push.start),
         push: Some(push_millis / 1000),
         verify_commands: Vec::new(),
         landing_queue_via: Vec::new(),
     });
+}
+
+/// The whole seconds of `intervals` from `from` to `to` (unix
+/// milliseconds) under each phase of `land_phases`.
+fn split(intervals: &[Interval], from: i64, to: i64) -> [i64; PHASES.len()] {
+    let mut millis = [0_i64; PHASES.len()];
+    for interval in intervals {
+        let (start, end) = (interval.start.max(from), interval.end.min(to));
+        if end > start
+            && let Some(index) = PHASES.iter().position(|name| *name == land_phase(interval))
+        {
+            millis[index] += end - start;
+        }
+    }
+    millis.map(|ms| ms / 1000)
+}
+
+/// A run row's times under today's names as `stats` and `kpi` take them
+/// ([`RowTimes`]): [`read`]'s, and the phase its wait to land spent most
+/// in so far, for a run still waiting up to its last interval's end.
+pub fn times(row: &LedgerRow) -> RowTimes {
+    let values = read(row);
+    let waiting_phase = match &values.land_phases {
+        Some(phases) => phases.longest(),
+        None if !values.legacy => validation(&row.intervals).and_then(|validating| {
+            let end = row.intervals.last()?.end;
+            let secs = split(&row.intervals, validating.end, end);
+            let phases = LandPhases {
+                secs,
+                ..LandPhases::default()
+            };
+            phases.longest()
+        }),
+        None => None,
+    };
+    RowTimes {
+        legacy: values.legacy,
+        work: values.work,
+        validate: values.validate,
+        wait_to_land: values.wait_to_land,
+        land_phases: values.land_phases,
+        startup: values.startup,
+        waiting_phase,
+    }
 }
 
 /// The interval that ends `work` and is `validate` under today's names:
@@ -133,9 +177,10 @@ pub fn validation(intervals: &[Interval]) -> Option<&Interval> {
 /// The phase of today's `land_phases` an interval of the wait to land
 /// falls under. The landing is one phase now, so it is all `verify` and
 /// `rebase` stays 0; the wait for the landing slot after the review and
-/// the e2e (`awaiting_slot`) is `landing_queue`, as it is today; what the
-/// phases do not name (the session's exit, the hand-offs, unattributed
-/// time) is `exit`, as it is today.
+/// the e2e (`awaiting_slot`) is `landing_queue`, as it is today; a
+/// person's wait for an answer (`waiting`, `landing_answer`) is `ask` and
+/// the hold's (`held`) is `held`; what the phases do not name (the
+/// session's exit, the hand-offs, unattributed time) is `exit`.
 fn land_phase(interval: &Interval) -> &'static str {
     match interval.phase.as_str() {
         "review" | "review_held" => "review",
@@ -153,6 +198,7 @@ fn land_phase(interval: &Interval) -> &'static str {
         "awaiting_e2e" => "e2e_wait",
         "e2e" => "e2e",
         "landing" => "verify",
+        "held" => "held",
         _ => "exit",
     }
 }

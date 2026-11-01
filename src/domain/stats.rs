@@ -26,6 +26,9 @@
 //! ([`conflicts::conflict_hotspots_over`]) without the whole [`stats`].
 //! Where each field comes from in the ledger is
 //! [`crate::domain::ledger::window`]'s.
+//! Each run's times under today's names (`work`, `validate`,
+//! `wait_to_land`, `land_phases`, `startup`, `first_commit`) are its
+//! ledger row's ([`ledger_times`]), not the events'.
 //!
 //! One read has four ranges: the page of runs (`--since` <
 //! `finished_event_id` ≤ `--until`, [`DEFAULT_RUNS`] of them without
@@ -78,6 +81,7 @@ pub mod jobs;
 pub mod landing;
 pub mod landing_utilization;
 pub mod landing_waits;
+pub mod ledger_times;
 pub mod main_log;
 pub mod measures;
 pub mod planner_routes;
@@ -103,9 +107,8 @@ pub use asks::{
 pub use auto_repairs::{AlertJobs, AutoRepairStats, DayCounts, LayerRepairs, RecoveryJobs};
 pub use cargo::CargoOnly;
 pub use conflicts::{ConflictConfig, ConflictConfigReport, ConflictHotspots, History};
-pub use landing::{
-    CommandSecs, CommandSummary, LandBreakdown, LandClock, LandPhases, PhaseSummary,
-};
+pub use landing::{CommandSecs, CommandSummary, LandBreakdown, LandPhases, PhaseSummary};
+pub use ledger_times::{LedgerTimes, RowTimes};
 pub use measures::{
     BandCount, CommandStats, FailureClassStats, IntervalLoad, LoadBandStats, RunLoad, RunMeasures,
     RunVerifyFailure, VersionStats, Versions,
@@ -280,14 +283,22 @@ pub struct RunStats {
     pub status: Option<String>,
     /// The event that finished the run; `--since` compares against it.
     pub finished_event_id: Option<EventId>,
-    /// `run_claimed` → first `receipt_observed`.
+    /// `run_claimed` → first `receipt_observed`; read from the ledger, the
+    /// row's start to its first `validating` (a legacy row's frozen value,
+    /// [`crate::domain::ledger::read`]).
     pub work: Option<i64>,
-    /// First `receipt_observed` → first `validation_finished`.
+    /// First `receipt_observed` → first `validation_finished`; read from
+    /// the ledger, the row's first `validating` interval.
     pub validate: Option<i64>,
-    /// First `validation_finished` → `run_integrated`.
+    /// First `validation_finished` → `run_integrated`; read from the
+    /// ledger, the end of the first `validating` to the start of `push`
+    /// (which `run_integrated` starts).
     pub wait_to_land: Option<i64>,
     /// `agent_started` → `first_commit_observed`.
     pub startup: Option<i64>,
+    /// The same value as `startup`, under the name that replaces it
+    /// (ADR-t1662-1 decision 19).
+    pub first_commit: Option<i64>,
     /// The seconds the run waited for its task's hold (ADR-t1879-1): its
     /// phase `held`, from the run's record of it to the release, a
     /// person's wait like an ask's; the time from `task_held` to that
@@ -311,8 +322,16 @@ pub struct RunStats {
     pub needs_session: i64,
     pub failed: i64,
     /// `wait_to_land` by phase, and the push after it (goal 36); null for a
-    /// run that did not land.
+    /// run that did not land, and when not read from the ledger (only the
+    /// ledger's rows give it, [`landing`]).
     pub land_phases: Option<LandPhases>,
+    /// Its times under today's names are a legacy ledger row's, frozen
+    /// before the switch (ADR-t1662-1 decision 18), not made of intervals.
+    pub legacy: bool,
+    /// Read from the ledger, it has no row: its times under today's names
+    /// are null, not made again of the events (counted in
+    /// [`Stats::ledger_missing`]).
+    pub ledger_missing: bool,
     /// The task's title (task 466).
     pub title: Option<String>,
     /// The change its task declares (ADR-t980-1); null for a task without
@@ -408,6 +427,8 @@ pub struct Intervals {
     pub validate: Summary,
     pub wait_to_land: Summary,
     pub startup: Summary,
+    /// The same as `startup`, under the name that replaces it.
+    pub first_commit: Summary,
     /// The runs' waits for their tasks' holds, over the runs held.
     pub held: Summary,
     /// `work`, `validate` and `wait_to_land` less the holds' waits.
@@ -796,6 +817,12 @@ pub struct Stats {
     /// legacy row counted apart). Set by the reader of the ledger.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub breakdown: Option<StatsBreakdown>,
+    /// Read from the ledger, the runs with no row of their own: the listed
+    /// runs whose times under today's names are null for it, and the runs
+    /// before the switch a legacy task row names (ADR-t1662-1 decision 18),
+    /// none made again of the events. Absent when not read from the ledger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ledger_missing: Option<usize>,
     /// Pass it to `--since` to read only runs that finish later: the last
     /// run's `finished_event_id` when `--since` left more than a page of
     /// runs, else the latest event read (`status`'s `cursor`), never past
@@ -964,6 +991,12 @@ pub struct LiveSnapshot {
     /// are these (none of them while not observed, which `judgments`
     /// says), not judged here from `runs` and the slots.
     pub judged: Option<super::live_alerts::FoldedJudgments>,
+    /// The runs' times under today's names as the ledger's rows give them
+    /// ([`LedgerTimes`]): when set, every run's `work`, `validate`,
+    /// `wait_to_land`, `land_phases`, `startup` and `first_commit` are its
+    /// row's (null for a run without one), not the events'. Unset, they are
+    /// made of the events and `land_phases` is null.
+    pub ledger: Option<LedgerTimes>,
 }
 
 impl Default for LiveSnapshot {
@@ -980,6 +1013,7 @@ impl Default for LiveSnapshot {
             draft_origins: HashMap::new(),
             utc_offset_secs: 0,
             judged: None,
+            ledger: None,
         }
     }
 }
@@ -1010,7 +1044,12 @@ pub fn stats(
             .goal_id
             .is_none_or(|goal| goals.get(&task_id).copied().flatten() == Some(goal))
     };
-    let tracks = runs(events, goals);
+    let mut tracks = runs(events, goals);
+    if let Some(ledger) = &live.ledger {
+        for track in &mut tracks {
+            track.take_ledger(ledger);
+        }
+    }
     let judged_running = live
         .judged
         .as_ref()
@@ -1166,10 +1205,7 @@ pub fn stats(
                 waited,
                 AWAITING_INTEGRATION_SECS,
             );
-            alert.phase = track
-                .land
-                .as_ref()
-                .and_then(|clock| clock.phases(now * 1000).longest());
+            alert.phase = track.waiting_phase;
             alerts.push(alert);
         }
         if run.needs_session >= NEEDS_SESSION_TIMES {
@@ -1477,7 +1513,23 @@ pub fn stats(
         )),
     }
 
+    let ledger_missing = live.ledger.as_ref().map(|ledger| {
+        let mut missing: std::collections::BTreeSet<&RunId> = ledger
+            .missing
+            .iter()
+            .filter(|(_, task)| in_goal(**task))
+            .map(|(run, _)| run)
+            .collect();
+        missing.extend(
+            finished
+                .iter()
+                .filter(|track| track.stats.ledger_missing)
+                .map(|track| &track.stats.run_id),
+        );
+        missing.len()
+    });
     Stats {
+        ledger_missing,
         runs: finished.into_iter().map(|track| track.stats).collect(),
         goals: goal_stats,
         changes: Vec::new(),
@@ -2394,6 +2446,7 @@ fn intervals(runs: &[&RunStats]) -> Intervals {
         validate: summary(runs.iter().map(|r| r.validate)),
         wait_to_land: summary(runs.iter().map(|r| r.wait_to_land)),
         startup: summary(runs.iter().map(|r| r.startup)),
+        first_commit: summary(runs.iter().map(|r| r.first_commit)),
         held: summary(runs.iter().map(|r| r.held)),
         without_held: WithoutHeldSummary {
             work: summary(
@@ -2437,8 +2490,9 @@ struct Track {
     /// one going on ([`super::task_hold::held_spans`]'s rule).
     held: Vec<(i64, i64)>,
     held_since: Option<i64>,
-    /// The wait to land by phase, from the first `validation_finished`.
-    land: Option<LandClock>,
+    /// The phase of `land_phases` the wait to land spent most in so far,
+    /// from the ledger ([`RowTimes::waiting_phase`]).
+    waiting_phase: Option<&'static str>,
     measure: measures::MeasureTrack,
     /// Whether the latest `resume_started` was counted, so that its
     /// `resume_finished` marked provider-only (`provider_only: true`,
@@ -2491,6 +2545,7 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     validate: None,
                     wait_to_land: None,
                     startup: None,
+                    first_commit: None,
                     held: None,
                     without_held: None,
                     resumes: 0,
@@ -2499,6 +2554,8 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     needs_session: 0,
                     failed: 0,
                     land_phases: None,
+                    legacy: false,
+                    ledger_missing: false,
                     title: None,
                     change: None,
                     areas: None,
@@ -2524,16 +2581,13 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                 integrated: None,
                 held: Vec::new(),
                 held_since: None,
-                land: None,
+                waiting_phase: None,
                 measure: measures::MeasureTrack::default(),
                 resume_counted: false,
             }
         });
         track.measure.observe(event);
         track.clock.observe(event, at);
-        if let (Some(clock), Some(at)) = (&mut track.land, at) {
-            clock.observe(event, at);
-        }
         if let Some(at) = at {
             track.observe_hold(event, at);
         }
@@ -2557,7 +2611,6 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
             }
             Some(EventKind::ValidationFinished) if track.validated.is_none() => {
                 track.validated = at;
-                track.land = at.map(|at| LandClock::start(event, at));
                 run.validated_at = Some(event.created_at.clone());
                 run.validate = seconds_between(track.clock.receipt, at);
             }
@@ -2634,11 +2687,7 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
             track.stats.finished_event_id = track.clock.finished;
             track.stats.retries = retries.remove(&track.stats.run_id).unwrap_or_default();
             track.stats.measures = std::mem::take(&mut track.measure).finish();
-            track.stats.land_phases = track
-                .land
-                .as_ref()
-                .filter(|clock| clock.landed())
-                .map(|clock| clock.phases(0));
+            track.stats.first_commit = track.stats.startup;
             track.finish_hold();
             track
         })
@@ -2689,6 +2738,47 @@ impl WorkClock {
 }
 
 impl Track {
+    /// Take the run's times under today's names from its ledger row
+    /// (ADR-t1662-1 decisions 18 and 19): a legacy row's frozen values as
+    /// they are, marked; none for a run without a row, which is counted
+    /// missing rather than made again of the events. `without_held` keeps
+    /// the hold's waits the events found in each interval, taken from the
+    /// row's values (none without a row). A run the window's events have
+    /// not landed yet (a `--until` before its landing) has no
+    /// `wait_to_land` or `land_phases`, whatever its row reached later.
+    fn take_ledger(&mut self, ledger: &LedgerTimes) {
+        let run = &mut self.stats;
+        let times = ledger.runs.get(&run.run_id);
+        run.ledger_missing = times.is_none();
+        let mut times = times.cloned().unwrap_or_default();
+        if self.integrated.is_none() {
+            times.wait_to_land = None;
+            times.land_phases = None;
+        }
+        let less = |ledger: Option<i64>, events: Option<i64>, without: Option<i64>| {
+            Some(ledger? - (events? - without?))
+        };
+        run.without_held = run
+            .without_held
+            .filter(|_| !run.ledger_missing)
+            .map(|without| WithoutHeld {
+                work: less(times.work, run.work, without.work),
+                validate: less(times.validate, run.validate, without.validate),
+                wait_to_land: less(times.wait_to_land, run.wait_to_land, without.wait_to_land),
+            });
+        if run.ledger_missing {
+            run.held = None;
+        }
+        run.legacy = times.legacy;
+        run.work = times.work;
+        run.validate = times.validate;
+        run.wait_to_land = times.wait_to_land;
+        run.land_phases = times.land_phases;
+        run.startup = times.startup;
+        run.first_commit = times.startup;
+        self.waiting_phase = times.waiting_phase;
+    }
+
     /// Follow the run's waits for its task's hold by
     /// [`super::task_hold::held_spans`]'s rule.
     fn observe_hold(&mut self, event: &RunEvent, at: i64) {
@@ -4160,7 +4250,39 @@ mod tests {
                 wait_to_land: Some(140),
             })
         );
-        assert_eq!(held.land_phases.as_ref().unwrap().secs[11], 200);
+        // Only the ledger's rows give `land_phases`, `held` among them.
+        assert_eq!(held.land_phases, None);
+        // Read from the ledger, the waits the events found in each
+        // interval come off the row's values; a run without a row has none.
+        let ledger = LedgerTimes {
+            runs: [(
+                RunId::new(R1).unwrap(),
+                RowTimes {
+                    work: Some(900),
+                    validate: Some(50),
+                    wait_to_land: Some(400),
+                    ..RowTimes::default()
+                },
+            )]
+            .into(),
+            ..LedgerTimes::default()
+        };
+        let mut tracks = super::runs(&events, &HashMap::new());
+        for track in &mut tracks {
+            track.take_ledger(&ledger);
+        }
+        assert_eq!(
+            tracks[0].stats.without_held,
+            Some(WithoutHeld {
+                work: Some(600),
+                validate: Some(50),
+                wait_to_land: Some(200),
+            })
+        );
+        assert_eq!(
+            (tracks[1].stats.held, tracks[1].stats.without_held),
+            (None, None)
+        );
         assert_eq!((runs[1].held, runs[1].without_held), (None, None));
         let refs: Vec<&RunStats> = runs.iter().collect();
         let summary = intervals(&refs);
@@ -4168,6 +4290,116 @@ mod tests {
         assert_eq!(summary.without_held.work.total, 450);
         assert_eq!(summary.without_held.wait_to_land.total, 140);
         assert_eq!(summary.held.count, 1);
+    }
+
+    /// Read from the ledger, a run's times under today's names are its
+    /// row's, marked legacy for a frozen row, with `first_commit` the same
+    /// as `startup`; a run with no row has them null, whatever its events
+    /// say, and is counted in `ledger_missing` with the runs before the
+    /// switch the ledger names without a row.
+    #[test]
+    fn todays_names_read_from_the_ledger_are_the_rows_or_null() {
+        let events = [
+            run_event(1, R1, "run_claimed", json!({}), T),
+            run_event(2, R1, "agent_started", json!({}), T + 5),
+            run_event(3, R1, "first_commit_observed", json!({}), T + 70),
+            run_event(4, R1, "receipt_observed", json!({}), T + 600),
+            run_event(5, R1, "validation_finished", json!({}), T + 660),
+            run_event(6, R1, "run_integrated", json!({}), T + 900),
+            run_event(7, R2, "run_claimed", json!({}), T),
+            run_event(8, R2, "receipt_observed", json!({}), T + 50),
+            run_event(9, R2, "run_integrated", json!({}), T + 90),
+        ];
+        let frozen = RowTimes {
+            legacy: true,
+            work: Some(601),
+            validate: Some(59),
+            wait_to_land: Some(241),
+            land_phases: Some(LandPhases {
+                secs: std::array::from_fn(|index| if index == 0 { 241 } else { 0 }),
+                push: Some(3),
+                verify_commands: Vec::new(),
+                landing_queue_via: Vec::new(),
+            }),
+            startup: Some(64),
+            waiting_phase: Some("exit"),
+        };
+        let ledger = LedgerTimes {
+            runs: [(RunId::new(R1).unwrap(), frozen.clone())].into(),
+            missing: [(RunId::new(R3).unwrap(), TaskId::new(1))].into(),
+        };
+        let live = LiveSnapshot {
+            ledger: Some(ledger),
+            ..LiveSnapshot::default()
+        };
+        let report = stats(
+            &events,
+            &HashMap::new(),
+            T + 1000,
+            SlotSnapshot::default(),
+            &StatsQuery {
+                full: true,
+                ..StatsQuery::default()
+            },
+            &live,
+        );
+        let of = |id: &str| {
+            report
+                .runs
+                .iter()
+                .find(|run| run.run_id.as_str() == id)
+                .unwrap()
+        };
+        let row = of(R1);
+        assert_eq!(
+            (
+                row.work,
+                row.validate,
+                row.wait_to_land,
+                row.startup,
+                row.first_commit
+            ),
+            (Some(601), Some(59), Some(241), Some(64), Some(64))
+        );
+        assert_eq!(row.land_phases, frozen.land_phases);
+        assert!(row.legacy && !row.ledger_missing);
+        let none = of(R2);
+        assert_eq!(
+            (
+                none.work,
+                none.validate,
+                none.wait_to_land,
+                none.startup,
+                none.first_commit
+            ),
+            (None, None, None, None, None)
+        );
+        assert_eq!(none.land_phases, None);
+        assert!(none.ledger_missing && !none.legacy);
+        assert_eq!(report.ledger_missing, Some(2));
+        assert_eq!(report.overall.first_commit, report.overall.startup);
+
+        // Not read from the ledger: the events', no `land_phases`, and no
+        // count of what the ledger lacks.
+        let events_only = stats(
+            &events,
+            &HashMap::new(),
+            T + 1000,
+            SlotSnapshot::default(),
+            &StatsQuery::default(),
+            &LiveSnapshot::default(),
+        );
+        assert_eq!(events_only.ledger_missing, None);
+        let run = &events_only.runs[0];
+        assert_eq!(
+            (
+                run.work,
+                run.startup,
+                run.first_commit,
+                run.land_phases.as_ref()
+            ),
+            (Some(600), Some(65), Some(65), None)
+        );
     }
 
     #[test]

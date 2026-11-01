@@ -162,6 +162,7 @@ use crate::domain::{
         Cursor, History,
         context::{self, ContextRecord},
         executions::{self, Execution, ExecutionStats},
+        ledger_times::LedgerTimes,
         main_log::{MainLog, MainMissing, fold_main_log},
         timestamp_millis,
     },
@@ -532,6 +533,49 @@ impl LedgerWindow {
             .filter(|row| matches!(row.kind, LedgerKind::Run | LedgerKind::Task))
             .map(read)
             .collect()
+    }
+
+    /// The window's runs' times under today's names ([`LedgerTimes`]):
+    /// each run row's by the one read ([`super::read::times`]), a legacy
+    /// row's frozen values as they are. A run before the switch with no
+    /// row of its own, which a task row names (or one on its way folded at
+    /// the read, whose values would be made again of the events), has none
+    /// and is in `missing`.
+    pub fn run_times(&self) -> LedgerTimes {
+        let mut times = LedgerTimes::default();
+        for row in self.of(LedgerKind::Run) {
+            let (Ok(run), Some(task)) = (RunId::new(row.key.clone()), row.task_id) else {
+                continue;
+            };
+            if row.is_legacy() && row.built_at == ON_ITS_WAY {
+                times.missing.insert(run, task);
+            } else {
+                times.runs.insert(run, super::read::times(row));
+            }
+        }
+        // A run with a row outside the window still owns records.
+        let recorded: BTreeSet<&RunId> = self
+            .records
+            .iter()
+            .filter_map(|event| event.run_id.as_ref())
+            .collect();
+        for row in self.of(LedgerKind::Task).filter(|row| row.is_legacy()) {
+            let Some(task) = row.task_id else { continue };
+            let named = row
+                .detail
+                .get("runs")
+                .or_else(|| row.legacy.as_ref()?.get("runs"))
+                .and_then(serde_json::Value::as_array);
+            for run in named.into_iter().flatten() {
+                if let Some(run) = run.as_str().and_then(|run| RunId::new(run).ok())
+                    && !times.runs.contains_key(&run)
+                    && !recorded.contains(&run)
+                {
+                    times.missing.insert(run, task);
+                }
+            }
+        }
+        times
     }
 
     /// The events up to the window's end ([`Self::end`]), ascending id:

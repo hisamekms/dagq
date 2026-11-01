@@ -33,11 +33,10 @@ fn field<'c>(comparison: &'c RunComparison, name: &str) -> &'c Diff {
 }
 
 /// A run whose `approve_landing` ask is still open when its review ends:
-/// today's `stats` forgets the ask at the review's end and counts the wait
-/// for the answer as `exit`; the ledger has it as `ask`. Both cut
-/// `wait_to_land` at `run_integrated`, and the push is apart.
+/// both cut `wait_to_land` at `run_integrated`, and the push is apart.
+/// The events give no `land_phases`, so none is compared.
 #[test]
-fn an_approve_landing_ask_in_todays_exit_is_told_apart() {
+fn an_approve_landing_wait_agrees_on_the_wait_to_land() {
     let a = run_id(1);
     let mut log = Log::default();
     let phase = |log: &mut Log, secs: i64, phase: Phase| {
@@ -63,13 +62,6 @@ fn an_approve_landing_ask_in_todays_exit_is_told_apart() {
     .add(
         Some(1),
         Some(&a),
-        "review_finished",
-        json!({"verdict": "pass"}),
-        710,
-    )
-    .add(
-        Some(1),
-        Some(&a),
         "ask_answered",
         json!({"kind": "approve_landing", "ask_id": 9}),
         3660,
@@ -78,13 +70,14 @@ fn an_approve_landing_ask_in_todays_exit_is_told_apart() {
     log.integrated(1, &a, 3700).pushed(1, &a, 3930);
 
     let today = stats_of(&log, &a);
+    assert_eq!(today.land_phases, None);
     let comparison = run(&today, Some(&row_of(&log, &a, 9000)));
-    let exit = field(&comparison, "land_phases.exit");
-    let ask = field(&comparison, "land_phases.ask");
-    assert!(exit.stats.unwrap() >= 2950, "{exit:?}");
-    assert_eq!(exit.reasons, [Reason::ExitHeldAsk]);
-    assert_eq!(ask.ledger, Some(2960));
-    assert_eq!(ask.reasons, [Reason::ExitHeldAsk]);
+    assert!(
+        comparison
+            .fields
+            .iter()
+            .all(|diff| !diff.field.starts_with("land_phases"))
+    );
     let wait = field(&comparison, "wait_to_land");
     assert_eq!(
         (wait.stats, wait.ledger, wait.diff),

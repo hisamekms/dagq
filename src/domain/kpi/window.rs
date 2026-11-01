@@ -420,6 +420,7 @@ impl<'a> Context<'a> {
             live: LiveSnapshot {
                 draft_origins: input.draft_origins.clone(),
                 utc_offset_secs: input.utc_offset_secs,
+                ledger: input.ledger.cloned(),
                 ..LiveSnapshot::default()
             },
             now: input.now,
@@ -1521,6 +1522,10 @@ impl<'a> Context<'a> {
                 })),
             ),
             ("phase.startup".to_owned(), secs(|run| run.startup)),
+            (
+                "phase.first_commit".to_owned(),
+                secs(|run| run.first_commit),
+            ),
             ("phase.work".to_owned(), secs(|run| run.work)),
             ("phase.validate".to_owned(), secs(|run| run.validate)),
             (

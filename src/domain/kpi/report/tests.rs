@@ -204,6 +204,7 @@ fn report_with_host(
             rust_toolchain: true,
             config: &config,
             host,
+            ledger: None,
         },
         &KpiQuery {
             period,

@@ -290,6 +290,7 @@ impl Queue {
                 rust_toolchain: !self.no_rust_toolchain,
                 config,
                 host,
+                ledger: None,
             },
             query,
         )

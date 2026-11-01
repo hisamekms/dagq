@@ -242,9 +242,11 @@ fn approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once() {
 
     {
         let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
-        let via = &stats["overall"]["land_phases"]["landing_queue_via"];
-        assert_eq!(via[0]["via"], "approve", "{via}");
-        assert_eq!(via[0]["count"], 2, "{via}");
+        // Both waits come from the runs' ledger rows, which do not split
+        // the wait for the slot by what queued the run.
+        let land = &stats["overall"]["land_phases"];
+        assert_eq!(land["runs"], 2, "{land}");
+        assert_eq!(land["landing_queue_via"], json!([]), "{land}");
         assert!(
             stats["asks"]["times"]["by_kind"]["approve_landing"]["answer_to_apply_without_slot_wait"]
                 ["count"]

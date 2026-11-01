@@ -1402,3 +1402,172 @@ fn stats_of_a_windows_events_is_stats_of_every_event() {
     // The run on its way: its ask is counted though its row is the read's.
     assert_eq!(whole["asks"]["opened"]["count"], 1, "{}", whole["asks"]);
 }
+
+/// Today's names (`work`, `validate`, `wait_to_land`, `land_phases`,
+/// `startup`) come from the window's run rows in the same names and
+/// shapes, with `first_commit` the same as `startup`: a new row's from its
+/// intervals, where the wait for an `approve_landing` answer is a person's
+/// (`ask`), not the session's `exit`, though the review ended during it; a
+/// legacy row's as it froze them, marked. A run before the switch with no
+/// row of its own is not made again of the events: it is counted in
+/// `ledger_missing`. A run on its way waiting for the answer is alerted
+/// with that phase.
+#[test]
+fn todays_names_are_the_rows_and_a_legacy_run_without_one_is_missing() {
+    use crate::domain::ledger::testkit::{Log as Lives, T0 as SECS0, run_id};
+    use crate::domain::run_phase::Phase;
+    use crate::domain::stats::{LiveSnapshot, SlotSnapshot, StatsQuery, stats};
+    let (new, frozen, missing, waiting) = (run_id(1), run_id(2), run_id(3), run_id(4));
+    let mut lives = Lives::default();
+    let ask = |lives: &mut Lives, task: i64, run: &str, kind: &str, secs: i64| {
+        lives.add(
+            Some(task),
+            Some(run),
+            kind,
+            json!({"kind": "approve_landing", "ask_id": task}),
+            secs,
+        );
+    };
+    lives
+        .worked(1, &new, 0)
+        .phase(1, &new, 700, Phase::LandingAnswer, "x");
+    ask(&mut lives, 1, &new, "ask_opened", 700);
+    lives.add(
+        Some(1),
+        Some(&new),
+        "review_finished",
+        json!({"verdict": "pass"}),
+        710,
+    );
+    ask(&mut lives, 1, &new, "ask_answered", 3660);
+    lives
+        .phase(1, &new, 3660, Phase::LandingQueue, "x")
+        .integrated(1, &new, 3700)
+        .pushed(1, &new, 4130);
+    lives.legacy(2, &frozen, 5000).legacy(3, &missing, 5000);
+    lives
+        .worked(4, &waiting, 10_000)
+        .phase(4, &waiting, 10_700, Phase::LandingAnswer, "x");
+    ask(&mut lives, 4, &waiting, "ask_opened", 10_700);
+    let events = lives.events;
+    let now_ms = (SECS0 + 12_000) * 1000;
+    let frozen_values = json!({
+        "work": 610, "validate": 50, "wait_to_land": 545, "startup": 66,
+        "land_phases": {
+            "exit": 345, "review": 0, "revise": 0, "conflict": 0, "ask": 0,
+            "resume": 0, "landing_queue": 100, "e2e_wait": 0, "e2e": 0,
+            "rebase": 100, "verify": 0, "held": 0, "push": 30,
+            "verify_commands": [{"command": "fmt", "count": 1, "secs": 20}],
+            "landing_queue_via": [{"via": "exit", "secs": 100}],
+        },
+    });
+    let mut rows: Vec<LedgerRow> = build(&events, now_ms, BUILT)
+        .into_iter()
+        .filter(|row| row.kind != LedgerKind::Run || row.ended_at.is_some() || row.is_legacy())
+        .filter(|row| row.key != missing)
+        .map(|mut row| {
+            if row.key == frozen {
+                row.legacy = Some(frozen_values.clone());
+            }
+            row
+        })
+        .collect();
+    for run in runs_on_their_way(&rows) {
+        let of_run: Vec<RunEvent> = events
+            .iter()
+            .filter(|event| event.run_id.as_ref() == Some(&run))
+            .cloned()
+            .collect();
+        rows.extend(run_on_its_way(&run, &of_run, now_ms));
+    }
+    let window = select(
+        rows,
+        &WindowQuery {
+            now_ms,
+            ..WindowQuery::default()
+        },
+    );
+    let times = window.run_times();
+    assert_eq!(
+        times.missing,
+        [(RunId::new(&missing).unwrap(), TaskId::new(3))].into()
+    );
+    let live = LiveSnapshot {
+        ledger: Some(times),
+        ..LiveSnapshot::default()
+    };
+    let report = serde_json::to_value(stats(
+        &window.events(),
+        &HashMap::new(),
+        now_ms / 1000,
+        SlotSnapshot::default(),
+        &StatsQuery {
+            full: true,
+            ..StatsQuery::default()
+        },
+        &live,
+    ))
+    .unwrap();
+    let run = |id: &str| {
+        report["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|run| run["run_id"] == id)
+            .cloned()
+    };
+    let landed = run(&new).unwrap();
+    let names = |run: &Value| {
+        [
+            "work",
+            "validate",
+            "wait_to_land",
+            "startup",
+            "first_commit",
+        ]
+        .map(|key| run[key].clone())
+    };
+    assert_eq!(
+        names(&landed),
+        [600, 60, 3240, 65, 65].map(|secs| json!(secs)),
+        "{landed}"
+    );
+    assert_eq!(
+        (&landed["legacy"], &landed["ledger_missing"]),
+        (&json!(false), &json!(false))
+    );
+    let phases = &landed["land_phases"];
+    assert_eq!(
+        ["exit", "ask", "landing_queue", "verify", "rebase", "push"].map(|key| phases[key].clone()),
+        [0, 2960, 80, 200, 0, 230].map(|secs| json!(secs)),
+        "{phases}"
+    );
+    // The legacy row's values are those it froze, in the same shape.
+    let legacy = run(&frozen).unwrap();
+    assert_eq!(legacy["legacy"], true);
+    assert_eq!(
+        names(&legacy),
+        [610, 50, 545, 66, 66].map(|secs| json!(secs))
+    );
+    assert_eq!(legacy["land_phases"], frozen_values["land_phases"]);
+    // The legacy run with no row is neither listed nor made again.
+    assert_eq!(run(&missing), None);
+    assert_eq!(report["ledger_missing"], 1);
+    assert_eq!(
+        report["overall"]["first_commit"],
+        report["overall"]["startup"]
+    );
+    assert_eq!(report["overall"]["first_commit"]["count"], 2);
+    // The waits for the answer are a person's, the one on its way too.
+    let alert = |id: &str| {
+        report["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|alert| alert["kind"] == "awaiting_integration" && alert["run_id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(alert(&new)["phase"], "ask");
+    assert_eq!(alert(&waiting)["phase"], "ask");
+}

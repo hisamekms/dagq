@@ -275,6 +275,7 @@ fn compares_two_explicit_windows() {
             rust_toolchain: true,
             config: &KpiConfig::default(),
             host: None,
+            ledger: None,
         },
         &KpiQuery {
             compare: Some(backwards),

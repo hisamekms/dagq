@@ -33,7 +33,6 @@ use super::settle;
 use super::{LEDGER_V, LedgerKind, LedgerRow};
 use crate::domain::host_metrics::{self, HostSample, HostSummary, NodeSample};
 use crate::domain::run::payload::{restore, typed};
-use crate::domain::stats::landing::PHASES;
 use crate::domain::stats::sessions::SpanInWindow;
 use crate::domain::stats::{RunStats, timestamp_millis};
 use crate::domain::{EventId, EventKind, RunEvent, RunStatus, TaskId, TaskStatus};
@@ -52,12 +51,8 @@ pub enum Reason {
     /// A legacy row: its values are those `stats` gave when it was
     /// written, so `stats` has changed since.
     Legacy,
-    /// Today's `exit` held a wait for a person's answer the ledger has as
-    /// `ask` (`LandClock` forgets an open ask once another phase's event
-    /// comes).
-    ExitHeldAsk,
     /// The row has time no record accounts for, which today's names read
-    /// as `exit` (or as `work` before its first record).
+    /// as `work` before its first record, or in the wait to land.
     Unattributed,
     /// The two cut an interval's start or end apart by at most
     /// [`BOUNDARY_SECS`].
@@ -86,7 +81,8 @@ pub struct RunComparison {
     /// Whether the ledger has a row of it, and whether that is legacy.
     pub row: bool,
     pub legacy: bool,
-    /// `work`, `wait_to_land`, `startup` and `land_phases.<phase>`.
+    /// `work`, `wait_to_land` and `startup`: the events give no
+    /// `land_phases`, which only the ledger's rows have.
     pub fields: Vec<Diff>,
     /// The ledger's push after `run_integrated` (seconds), which today's
     /// `wait_to_land` does not hold.
@@ -102,19 +98,12 @@ impl RunComparison {
     }
 }
 
-/// The value of `land_phases.<phase>` of `phases`.
-fn phase(phases: Option<&crate::domain::stats::landing::LandPhases>, name: &str) -> Option<i64> {
-    let index = PHASES.iter().position(|phase| *phase == name)?;
-    phases.map(|phases| phases.secs[index])
-}
-
 /// Today's `stats` of a run beside its ledger row `row` (none when the
 /// ledger has none).
 pub fn run(stats: &RunStats, row: Option<&LedgerRow>) -> RunComparison {
     let values = row.map(read);
     let ledger_phases = values.as_ref().and_then(|v| v.land_phases.as_ref());
-    let stats_phases = stats.land_phases.as_ref();
-    let mut pairs: Vec<(String, Option<i64>, Option<i64>)> = vec![
+    let pairs: Vec<(String, Option<i64>, Option<i64>)> = vec![
         (
             "work".to_owned(),
             stats.work,
@@ -131,22 +120,9 @@ pub fn run(stats: &RunStats, row: Option<&LedgerRow>) -> RunComparison {
             values.as_ref().and_then(|v| v.startup),
         ),
     ];
-    for name in PHASES {
-        pairs.push((
-            format!("land_phases.{name}"),
-            phase(stats_phases, name),
-            phase(ledger_phases, name),
-        ));
-    }
     let unattributed = row
         .filter(|row| !row.is_legacy())
         .map(|row| row.totals.unattributed_ms / 1000);
-    let held_ask = {
-        let exit = |p| phase(p, "exit").unwrap_or(0);
-        let ask = |p| phase(p, "ask").unwrap_or(0);
-        exit(stats_phases) - exit(ledger_phases) > BOUNDARY_SECS
-            && ask(ledger_phases) - ask(stats_phases) > BOUNDARY_SECS
-    };
     let fields = pairs
         .into_iter()
         .map(|(field, today, ledger)| {
@@ -157,16 +133,8 @@ pub fn run(stats: &RunStats, row: Option<&LedgerRow>) -> RunComparison {
                     None => reasons.push(Reason::NoRow),
                     Some(row) if row.is_legacy() => reasons.push(Reason::Legacy),
                     Some(_) => {
-                        if held_ask
-                            && matches!(field.as_str(), "land_phases.exit" | "land_phases.ask")
-                        {
-                            reasons.push(Reason::ExitHeldAsk);
-                        }
                         if unattributed.is_some_and(|secs| secs > 0)
-                            && matches!(
-                                field.as_str(),
-                                "land_phases.exit" | "work" | "wait_to_land"
-                            )
+                            && matches!(field.as_str(), "work" | "wait_to_land")
                         {
                             reasons.push(Reason::Unattributed);
                         }

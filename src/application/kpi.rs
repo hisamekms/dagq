@@ -61,6 +61,7 @@ pub fn of_window(
         Folded::BeforeBaseline => Default::default(),
     };
     let heartbeats = crate::domain::supervisor_life::heartbeats(&events, now);
+    let ledger = window.run_times();
     let read = |from: i64, until: i64| window.host_between(from * 1000 - 1000, until * 1000);
     derive(
         &KpiInput {
@@ -76,6 +77,7 @@ pub fn of_window(
             rust_toolchain: host.rust_toolchain,
             config,
             host: Some(HostReader(&read)),
+            ledger: Some(&ledger),
         },
         query,
     )

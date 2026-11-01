@@ -826,12 +826,10 @@ fn a_run_before_the_switch_is_a_frozen_legacy_row_of_stats_values() {
             stats.startup
         )
     );
-    assert!(stats.land_phases.is_some());
-    assert_eq!(values.land_phases, stats.land_phases);
-    assert_eq!(
-        serde_json::to_value(&values.land_phases).unwrap(),
-        serde_json::to_value(&stats.land_phases).unwrap()
-    );
+    // No clock of the events makes `land_phases` again: a legacy row
+    // written now has none, and one frozen before keeps its own
+    // ([`frozen_legacy_values_read_back_as_they_were_written`]).
+    assert_eq!((values.land_phases, stats.land_phases), (None, None));
 
     // Built again for a later event or a new fold, so that its records
     // follow; the store keeps its values.
@@ -841,6 +839,50 @@ fn a_run_before_the_switch_is_a_frozen_legacy_row_of_stats_values() {
     let mut old = row.clone();
     old.ledger_v = LEDGER_V - 1;
     assert!(rebuilds(Some(&old), last, None));
+}
+
+/// A legacy row's values as one frozen before the clock of the events
+/// was removed: `land_phases` with every phase, the push and the splits
+/// by command and by `via`.
+fn frozen_legacy() -> Value {
+    json!({
+        "work": 600, "validate": 60, "wait_to_land": 540, "startup": 65,
+        "land_phases": {
+            "exit": 340, "review": 0, "revise": 0, "conflict": 0, "ask": 0,
+            "resume": 0, "landing_queue": 100, "e2e_wait": 0, "e2e": 0,
+            "rebase": 100, "verify": 0, "held": 0, "push": 30,
+            "verify_commands": [{"command": "fmt", "count": 2, "secs": 40}],
+            "landing_queue_via": [{"via": "exit", "secs": 100}],
+        },
+    })
+}
+
+/// A row frozen before the switch reads back as it was written, every
+/// value of today's names and the shape of `land_phases` too, marked
+/// legacy: nothing of it is made again.
+#[test]
+fn frozen_legacy_values_read_back_as_they_were_written() {
+    let mut row = run_row(A, &legacy_events().of(A), &[], ms(5000), "built");
+    row.legacy = Some(frozen_legacy());
+    let values = read(&row);
+    assert!(values.legacy);
+    assert_eq!(
+        (
+            values.work,
+            values.validate,
+            values.wait_to_land,
+            values.startup
+        ),
+        (Some(600), Some(60), Some(540), Some(65))
+    );
+    assert_eq!(
+        serde_json::to_value(&values.land_phases).unwrap(),
+        frozen_legacy()["land_phases"]
+    );
+    let times = read::times(&row);
+    assert!(times.legacy);
+    assert_eq!(times.land_phases, values.land_phases);
+    assert_eq!(times.waiting_phase, Some("exit"));
 }
 
 #[test]
@@ -861,7 +903,9 @@ fn a_new_row_is_built_again_for_a_new_fold_or_a_later_event() {
 /// legacy row; only the mark and the breakdown tell them apart.
 #[test]
 fn new_and_legacy_rows_read_under_the_same_names() {
-    let legacy = read(&run_row(A, &legacy_events().of(A), &[], ms(5000), "built"));
+    let mut frozen = run_row(A, &legacy_events().of(A), &[], ms(5000), "built");
+    frozen.legacy = Some(frozen_legacy());
+    let legacy = read(&frozen);
     let mut log = Log::default();
     worked(&mut log);
     landed(&mut log, 700).phase(910, Phase::Ended, Attempt::FIRST, "pushed");

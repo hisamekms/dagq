@@ -282,6 +282,7 @@ fn one_window_of_any_length() {
             rust_toolchain: true,
             config: &KpiConfig::default(),
             host: None,
+            ledger: None,
         },
         &KpiQuery {
             since: query.until,

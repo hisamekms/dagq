@@ -1580,8 +1580,8 @@ enum Command {
         #[arg(long)]
         full: bool,
         /// Instead of the stats, the parallel run of the ledger (stage 2 of the measurement's
-        /// rebuild): per run today's work, wait_to_land, startup and land_phases beside the
-        /// ledger's (its push apart), each difference in seconds with its reasons; the fields of
+        /// rebuild): per run today's work, wait_to_land and startup beside the ledger's (its
+        /// push apart), each difference in seconds with its reasons; the fields of
         /// no run (jobs, sessions, ...) beside those of the ledger's rows; the host's load of the
         /// node rows beside today's CSV over the window and kpi's last 7 days; and what ended in
         /// the window (from the start without --since) against the ledger's rows: missing, not

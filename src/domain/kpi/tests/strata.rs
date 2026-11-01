@@ -94,6 +94,11 @@ fn splits_the_runs_by_change_and_attributes_per_day() {
         (2, Some(900.0), Some(1200.0))
     );
     assert_eq!(measure(tuesday, "phase.startup", ALL).median, Some(50.0));
+    // The same value under the name that replaces it (ADR-t1662-1 decision 19).
+    assert_eq!(
+        measure(tuesday, "phase.first_commit", ALL),
+        measure(tuesday, "phase.startup", ALL)
+    );
     // Ready an hour before the claim, landed 120 s after the receipt.
     assert_eq!(
         measure(tuesday, "lead_time", "change=docs").median,

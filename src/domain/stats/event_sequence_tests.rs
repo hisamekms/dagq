@@ -428,99 +428,6 @@ fn versions_loads_and_verification_times_come_from_the_events() {
     assert_eq!(failed_tests["flaky_candidates"], json!([]));
 }
 
-/// Task 509: `land_phases` splits `verify` by verification command on
-/// the run's row, per goal and overall; the other items stay.
-#[test]
-fn land_phases_split_verify_by_command() {
-    let mut events = Events::default();
-    let verify = |command: &str, secs: f64, exit_code: i64| {
-        json!({
-            "phase": "integration", "command": command, "exit_code": exit_code,
-            "duration_secs": secs,
-        })
-    };
-    // Run a: fmt then llvm-cov, landed in one attempt.
-    events.status(1, "a", "validation_finished", 0, "awaiting_integration");
-    events.run(1, "a", "integration_started", 1);
-    events.run(1, "a", "integration_rebased", 2);
-    events.push(
-        1,
-        Some("a"),
-        "verification_command",
-        3,
-        verify("fmt", 30.0, 0),
-    );
-    events.push(
-        1,
-        Some("a"),
-        "verification_command",
-        8,
-        verify("llvm-cov", 240.0, 0),
-    );
-    events.run(1, "a", "run_integrated", 9);
-    // Run b: llvm-cov failed, then passed on the second attempt.
-    events.status(2, "b", "validation_finished", 0, "awaiting_integration");
-    events.run(2, "b", "integration_started", 10);
-    events.run(2, "b", "integration_rebased", 11);
-    events.push(
-        2,
-        Some("b"),
-        "verification_command",
-        13,
-        verify("llvm-cov", 120.0, 101),
-    );
-    events.status(2, "b", "integration_deferred", 14, "needs_session");
-    events.run(2, "b", "integration_started", 20);
-    events.run(2, "b", "integration_rebased", 21);
-    events.push(
-        2,
-        Some("b"),
-        "verification_command",
-        24,
-        verify("llvm-cov", 180.0, 0),
-    );
-    events.run(2, "b", "run_integrated", 25);
-    let report = value(&stats(
-        &events.0,
-        &goals([(1, Some(7)), (2, Some(7))]),
-        at(60),
-        SlotSnapshot::default(),
-        &StatsQuery::default(),
-        &LiveSnapshot::default(),
-    ));
-    let runs = report["runs"].as_array().unwrap();
-    let a = &runs[0]["land_phases"];
-    assert_eq!(a["verify"], 420);
-    assert_eq!(
-        a["verify_commands"],
-        json!([
-            {"command": "fmt", "count": 1, "secs": 30},
-            {"command": "llvm-cov", "count": 1, "secs": 240},
-        ])
-    );
-    assert_eq!(a["rebase"], 60);
-    let b = &runs[1]["land_phases"];
-    assert_eq!(b["verify"], 420);
-    assert_eq!(
-        b["verify_commands"],
-        json!([{"command": "llvm-cov", "count": 2, "secs": 300}])
-    );
-    for breakdown in [
-        &report["goals"][0]["land_phases"],
-        &report["overall"]["land_phases"],
-    ] {
-        assert_eq!(breakdown["runs"], 2);
-        assert_eq!(breakdown["verify"]["total"], 840);
-        assert_eq!(
-            breakdown["verify_commands"],
-            json!([
-                {"command": "fmt", "count": 1, "total": 30, "median": 30, "p90": 30, "max": 30, "tail_total": 0},
-                {"command": "llvm-cov", "count": 2, "total": 540, "median": 270, "p90": 300, "max": 300, "tail_total": 300},
-            ])
-        );
-    }
-}
-
 #[test]
 fn runs_goals_and_alerts_come_from_the_event_sequence() {
     let mut events = Events::default();
@@ -643,6 +550,18 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
             Some(Value::Null)
         );
     }
+    // `startup` under the name that replaces it.
+    assert_eq!(
+        first.as_object_mut().unwrap().remove("first_commit"),
+        Some(json!(180))
+    );
+    // Not read from the ledger: neither marked legacy nor missing.
+    for key in ["legacy", "ledger_missing"] {
+        assert_eq!(
+            first.as_object_mut().unwrap().remove(key),
+            Some(json!(false))
+        );
+    }
     // Its one resume is counted toward the limit.
     assert_eq!(
         first.as_object_mut().unwrap().remove("uncounted_resumes"),
@@ -653,19 +572,9 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
         json!({
             "run_id": "a", "task_id": 1, "goal_id": 7, "status": "integrated",
             "finished_event_id": 9, "work": 600, "validate": 120,
-            "wait_to_land": 1200, "startup": 180, "resumes": 1,
-            "review_verdict": "pass", "needs_session": 0, "failed": 0,
-            // Goal 36: the wait to land by phase, from the events.
-            "land_phases": {
-                "exit": 1080, "review": 0, "revise": 0, "conflict": 0, "ask": 0,
-                "resume": 0, "landing_queue": 0, "e2e_wait": 0, "e2e": 0,
-                "rebase": 120, "verify": 0, "held": 0,
-                "push": null,
-                // Task 509: no verification command was recorded.
-                "verify_commands": [],
-                // Task 949: nor a wait for the landing slot.
-                "landing_queue_via": [],
-            },
+            "wait_to_land": 1200, "startup": 180, "resumes": 1, "review_verdict": "pass", "needs_session": 0, "failed": 0,
+            // Only the ledger's rows give the wait to land by phase.
+            "land_phases": null,
             // Task 466: the times, the landings and the resumes. The
             // title comes from the queue, not the events.
             "title": null,
@@ -707,8 +616,6 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
             "tokens": null,
         })
     );
-    // Parked three times, then the landing: the wait is the resume's.
-    assert_eq!(runs[1]["land_phases"]["resume"], 180);
     assert!(runs[2]["land_phases"].is_null());
     assert_eq!(runs[1]["needs_session"], 3);
     assert!(runs[1]["startup"].is_null());
@@ -717,15 +624,7 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
     assert_eq!(runs[3]["work"], Value::Null);
     let mut goal_reports = report["goals"].clone();
     let breakdown = goal_reports[0]["land_phases"].take();
-    assert_eq!(breakdown["runs"], 2);
-    assert_eq!(breakdown["tail_threshold"], 1200);
-    assert_eq!(breakdown["tail_runs"], 1);
-    assert_eq!(
-        breakdown["exit"],
-        json!({"count": 2, "total": 1140, "median": 570, "p90": 1080, "max": 1080, "tail_total": 1080})
-    );
-    assert_eq!(breakdown["resume"]["tail_total"], 0);
-    assert_eq!(breakdown["push"]["count"], 0);
+    assert_eq!(breakdown["runs"], 0);
     assert_eq!(goal_reports[1]["land_phases"]["runs"], 0);
     assert_eq!(goal_reports[0]["resume_outcomes"]["attempts"], 1);
     assert_eq!(
@@ -736,7 +635,7 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
         goal.as_object_mut().unwrap().remove("land_phases");
         goal.as_object_mut().unwrap().remove("resume_outcomes");
     }
-    assert_eq!(report["overall"]["land_phases"]["runs"], 2);
+    assert_eq!(report["overall"]["land_phases"]["runs"], 0);
     assert_eq!(
         goal_reports,
         json!([
@@ -745,6 +644,7 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
              "validate": {"count": 2, "total": 180, "median": 90},
              "wait_to_land": {"count": 2, "total": 1440, "median": 720},
              "startup": {"count": 1, "total": 180, "median": 180},
+             "first_commit": {"count": 1, "total": 180, "median": 180},
              "held": {"count": 0, "total": 0, "median": null},
              "without_held": {
                  "work": {"count": 2, "total": 3000, "median": 1500},
@@ -763,6 +663,7 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
              "validate": {"count": 1, "total": 60, "median": 60},
              "wait_to_land": {"count": 0, "total": 0, "median": null},
              "startup": {"count": 0, "total": 0, "median": null},
+             "first_commit": {"count": 0, "total": 0, "median": null},
              "held": {"count": 0, "total": 0, "median": null},
              "without_held": {
                  "work": {"count": 1, "total": 300, "median": 300},
@@ -807,11 +708,10 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
     );
     // Task 2's 40 minutes are under twice goal 7's median (2 × 25 minutes).
     assert_eq!(report["alerts"][2]["task_id"], 4);
-    // The longest phase of each wait: `a` waited on its session's exit
-    // (no `landing_queued` was recorded), `d` on the ask still open.
-    assert_eq!(report["alerts"][0]["phase"], "exit");
-    assert_eq!(report["alerts"][2]["phase"], "ask");
-    assert!(report["alerts"][1].get("phase").is_none());
+    // The longest phase of each wait is the ledger's: none without it.
+    for alert in &report["alerts"].as_array().unwrap()[..3] {
+        assert!(alert.get("phase").is_none());
+    }
     assert!(report["alerts"][5]["task_id"].is_null());
 
     // --goal keeps the runs and alerts of goal 7's tasks only.

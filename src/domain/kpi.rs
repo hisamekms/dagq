@@ -416,6 +416,11 @@ pub struct KpiInput<'a> {
     /// observer's input all pass the host's records; `None` reads none and
     /// leaves those KPIs null and `not_judged`.
     pub host: Option<HostReader<'a>>,
+    /// The runs' times under today's names from the ledger's rows
+    /// ([`crate::domain::stats::LedgerTimes`]), which `phase.*` and
+    /// `land_phase.*` read as `stats` does; `None` makes them of the events
+    /// (no `land_phase.*`).
+    pub ledger: Option<&'a crate::domain::stats::LedgerTimes>,
 }
 
 /// One KPI over one stratum of one window: how many samples, and the value

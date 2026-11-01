@@ -28,7 +28,7 @@ related:
 
 # 計測
 
-> **一部だけ実装済み**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」と「送る口」（中から測った資源は予定）・「コマンドの形と分類」は実装済みで今の姿を書く。
+> **一部だけ実装済み**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」と「送る口」（中から測った資源は予定）・「コマンドの形と分類」は実装済みで今の姿を書く。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[計測のコマンド](supervisor-lifecycle/commands.md)と最初のcommitの観測（`first_commit_observed`）が持ち、この文書はそれらを変えない。
 
@@ -205,7 +205,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
   runは発行したtelemetryのtokenの失効の記録の後にだけ確定する。
   session・queue・nodeの行は`domain::ledger::settle`が決める（閉じた時刻か区間の終わりから猶予の後で、閉じていない行は確定しない）。
   runは資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
-- **旧方式**: 切り替え前のrun（`run_phase_changed`が無い）とそのtaskは区間に畳まず、`legacy`に今の`RunMeasures`から値を一度だけ書く。
+- **旧方式**: 切り替え前のrun（`run_phase_changed`が無い）とそのtaskは区間に畳まず、`legacy`に今の`RunMeasures`から値を一度だけ書く（`land_phases`はnull）。
   storeは値と版を上書きせず、後の入力では記録だけを追う。
 - **保持**: nodeの行はhostの負荷と同じ日数で消す。
   消す・変える行を上限の行数ごとにcommitし、無ければlockを取らず、止まれば次の周回が続ける。
@@ -215,13 +215,14 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 ## 共通の読み取り関数
 
 stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時刻かevent idの境界で、窓の終わりまで数える）とgoal・change・areaの絞り込みで選んで返す1つの関数（`domain::ledger::window`、`LedgerStore::ledger_window`）だけから作る。
-行は入力のevent idの範囲と時刻の範囲で窓に当て（event idの境界は時刻で越えない）、旧方式の行は`legacy`から同じ名前と形の値を返す。
+行は入力のevent idの範囲と時刻の範囲で窓に当て（event idの境界は時刻で越えない）、旧方式の行は`legacy`から同じ名前と形の値を印つきで返し、行の無い切り替え前のrunはnullで数える。
 行の無い走っているrunは読むときに畳む関数で畳む。
 絞り込みはtask・goal・runの行を選び（nodeの行は時刻だけで当てる）、窓に状態を持ち込む畳み（属性・finding・mainの履歴・今の判定）は全ての行の記録を窓の終わりで畳む。
 段3の統計のmoduleはこの関数が返す値だけを取り、StateStore・run dir・process・Gitを読まない（D1）。
 欄・指標・節と今のuse caseの入力ごとの元の行は、同じmoduleのdoc commentの表が持つ。
 
-- 今の値を残す1期間（ADR-t1662-1決定19）の長さは段3のtaskが決める。
+- 今の名前の意味の違い（`work`の終わり、人の答え待ちは`ask`）は`ledger::read`のdoc comment。
+  1期間の長さは段3のtaskが決める。
 - kpiの`phase.<工程>`と`land_phase.<工程>`も同じ1期間は同じ名前で作り、その後はタグごとの値と`phase.first_commit`に置き換える。hostの設定の`[kpi.targets."phase.startup"]`は`phase.first_commit`に読み替える（ADR-t1662-1が[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)決定1をamends）。
 - 新しい出力は所要時間とslotを握った時間の2本でタグごとの内訳を出し、`change`と`area`で層に分ける。
 
@@ -275,4 +276,4 @@ stepのコマンドの形と台帳を作るときの分類は[計測のコマン
 
 ## 段と後続のtask
 
-段0（ADR 3本とこの文書）→段1（`run_phase_changed`・claimの前の区間・`run_claimed`の欄・`blocked_by`の記録）→段2（ストアのport・台帳と畳む関数）→段3（読み手を台帳と畳む関数へ移し`LandClock`を撤去）。
+段0（ADR 3本とこの文書）→段1（記録）→段2（ストアのport・台帳と畳む関数）→段3（読み手を台帳と畳む関数へ移す）。
