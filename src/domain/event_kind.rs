@@ -160,6 +160,8 @@ event_kinds! {
     CiWatchHeld => "ci_watch_held",
     CiWatchResumed => "ci_watch_resumed",
     CiWatchUnavailable => "ci_watch_unavailable",
+    CiWorkflowFresh => "ci_workflow_fresh",
+    CiWorkflowStale => "ci_workflow_stale",
     ClaimDeferralEnded => "claim_deferral_ended",
     ClaimDeferred => "claim_deferred",
     ClaimHeld => "claim_held",
@@ -620,6 +622,10 @@ impl EventKind {
                 // A run of a scheduled workflow `[ci_watch]` declares
                 // (ADR-t3807-1).
                 | CiScheduledChecked
+                // How old a declared workflow's latest success is
+                // (`domain::ci_watch::freshness`).
+                | CiWorkflowStale
+                | CiWorkflowFresh
                 // The supervisor's hold of its claims for the CI watch and
                 // for a landing branch that does not resolve (task 2016).
                 | CiWatchHeld
@@ -1641,6 +1647,8 @@ mod tests {
             (EventKind::CiWatchHeld, "ci_watch_held"),
             (EventKind::CiWatchResumed, "ci_watch_resumed"),
             (EventKind::CiWatchUnavailable, "ci_watch_unavailable"),
+            (EventKind::CiWorkflowFresh, "ci_workflow_fresh"),
+            (EventKind::CiWorkflowStale, "ci_workflow_stale"),
             (EventKind::ClaimDeferralEnded, "claim_deferral_ended"),
             (EventKind::ClaimDeferred, "claim_deferred"),
             (EventKind::ClaimHeld, "claim_held"),

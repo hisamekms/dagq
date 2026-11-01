@@ -1,5 +1,8 @@
 //! The CI watch's reading of GitHub through the host's `gh` and of the
-//! main checkout's Git (ADR-t1920-1, the design's "ghの呼び方"). Every call
+//! main checkout's Git (ADR-t1920-1, the design's "ghの呼び方"), and its
+//! one write to GitHub: starting a workflow by `workflow_dispatch` when
+//! its latest success is too old. The arguments of `gh` and the reading
+//! of its output are functions of their own, tested apart. Every call
 //! runs in the main checkout with the supervisor's environment (not
 //! `[run.env]`), names the repository with `--repo`, and stops after
 //! [`CI_WATCH_CALL_TIMEOUT`].
@@ -125,40 +128,13 @@ impl GhSource {
     /// `event`, at most [`RUN_LIST_LIMIT`].
     fn runs_of(&self, workflow: &str, event: &str) -> Result<Vec<CiRun>> {
         let limit = RUN_LIST_LIMIT.to_string();
-        let out = self.gh(&[
-            "run",
-            "list",
-            "--workflow",
+        let args = run_list_args(
             workflow,
-            "--branch",
             &self.branch,
-            "--event",
-            event,
-            "--status",
-            "completed",
-            "--limit",
+            &["--event", event, "--status", "completed"],
             &limit,
-            "--json",
-            "databaseId,number,attempt,headSha,conclusion,url,createdAt,displayTitle",
-        ])?;
-        let runs: Vec<Value> =
-            serde_json::from_str(&out).context("read the output of gh run list")?;
-        runs.iter()
-            .map(|run| {
-                let text = |key: &str| run[key].as_str().unwrap_or_default().to_owned();
-                Ok(CiRun {
-                    run_id: run["databaseId"]
-                        .as_i64()
-                        .context("a run of gh run list has no databaseId")?,
-                    run_number: run["number"].as_i64().unwrap_or_default(),
-                    sha: text("headSha"),
-                    conclusion: text("conclusion"),
-                    url: text("url"),
-                    created_at: text("createdAt"),
-                    attempt: run["attempt"].as_i64().unwrap_or(1),
-                })
-            })
-            .collect()
+        );
+        parse_runs(&self.gh(&args)?)
     }
 
     /// The JUnit XML files of one run's artifacts, downloaded under
@@ -196,6 +172,68 @@ impl GhSource {
             })
             .collect()
     }
+}
+
+/// The fields of a run `gh run list` is asked for, as [`parse_runs`] reads
+/// them.
+const RUN_FIELDS: &str = "databaseId,number,attempt,headSha,conclusion,url,createdAt,displayTitle";
+
+/// The arguments of `gh run list` for the runs of `workflow` on `branch`
+/// that `filter` (`--event`, `--status`) keeps, at most `limit`, as JSON.
+fn run_list_args<'a>(
+    workflow: &'a str,
+    branch: &'a str,
+    filter: &[&'a str],
+    limit: &'a str,
+) -> Vec<&'a str> {
+    let mut args = vec!["run", "list", "--workflow", workflow, "--branch", branch];
+    args.extend_from_slice(filter);
+    args.extend(["--limit", limit, "--json", RUN_FIELDS]);
+    args
+}
+
+/// The arguments of `gh run list` for the latest run of `workflow` on
+/// `branch` that concluded `success` (`--status success` is a conclusion
+/// `gh` filters on), of any event.
+fn latest_success_args<'a>(workflow: &'a str, branch: &'a str) -> Vec<&'a str> {
+    run_list_args(workflow, branch, &["--status", "success"], "1")
+}
+
+/// The arguments of `gh workflow run` that start `workflow` on `branch`
+/// by `workflow_dispatch`.
+fn dispatch_args<'a>(workflow: &'a str, branch: &'a str) -> Vec<&'a str> {
+    vec!["workflow", "run", workflow, "--ref", branch]
+}
+
+/// The runs of the JSON `gh run list` printed for [`RUN_FIELDS`]; an error
+/// when it is not a list or a run has no `databaseId`.
+fn parse_runs(out: &str) -> Result<Vec<CiRun>> {
+    let runs: Vec<Value> = serde_json::from_str(out).context("read the output of gh run list")?;
+    runs.iter()
+        .map(|run| {
+            let text = |key: &str| run[key].as_str().unwrap_or_default().to_owned();
+            Ok(CiRun {
+                run_id: run["databaseId"]
+                    .as_i64()
+                    .context("a run of gh run list has no databaseId")?,
+                run_number: run["number"].as_i64().unwrap_or_default(),
+                sha: text("headSha"),
+                conclusion: text("conclusion"),
+                url: text("url"),
+                created_at: text("createdAt"),
+                attempt: run["attempt"].as_i64().unwrap_or(1),
+            })
+        })
+        .collect()
+}
+
+/// The latest success of the JSON of [`latest_success_args`]: its first
+/// run, kept only when it concluded `success` (`None` for an empty list).
+fn parse_latest_success(out: &str) -> Result<Option<CiRun>> {
+    Ok(parse_runs(out)?
+        .into_iter()
+        .next()
+        .filter(|run| run.conclusion == "success"))
 }
 
 /// A job or step that counts as failed ([`job_failed`]).
@@ -280,6 +318,14 @@ impl CiSource for GhSource {
             runs.extend(self.runs_of(workflow, event)?);
         }
         Ok(runs)
+    }
+
+    fn latest_success(&self, workflow: &str, branch: &str) -> Result<Option<CiRun>> {
+        parse_latest_success(&self.gh(&latest_success_args(workflow, branch))?)
+    }
+
+    fn dispatch(&self, workflow: &str, branch: &str) -> Result<()> {
+        self.gh(&dispatch_args(workflow, branch)).map(drop)
     }
 
     fn failed_jobs(&self, run_id: i64) -> Result<Vec<FailedJob>> {
@@ -447,4 +493,102 @@ pub fn doctor_view(
         "authenticated": authenticated,
         "repo": repo,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The latest success is asked of the workflow and branch, by its
+    /// conclusion, one run, of any event.
+    #[test]
+    fn the_latest_success_is_one_run_by_its_conclusion() {
+        assert_eq!(
+            latest_success_args("table.yml", "main"),
+            [
+                "run",
+                "list",
+                "--workflow",
+                "table.yml",
+                "--branch",
+                "main",
+                "--status",
+                "success",
+                "--limit",
+                "1",
+                "--json",
+                RUN_FIELDS,
+            ]
+        );
+        assert!(!latest_success_args("table.yml", "main").contains(&"--event"));
+    }
+
+    /// The push and scheduled runs keep their arguments.
+    #[test]
+    fn the_finished_runs_of_an_event_are_listed_as_before() {
+        assert_eq!(
+            run_list_args(
+                "ci.yml",
+                "main",
+                &["--event", "push", "--status", "completed"],
+                "20"
+            ),
+            [
+                "run",
+                "list",
+                "--workflow",
+                "ci.yml",
+                "--branch",
+                "main",
+                "--event",
+                "push",
+                "--status",
+                "completed",
+                "--limit",
+                "20",
+                "--json",
+                RUN_FIELDS,
+            ]
+        );
+    }
+
+    /// The workflow is started on the branch by `workflow_dispatch`.
+    #[test]
+    fn a_dispatch_runs_the_workflow_on_the_branch() {
+        assert_eq!(
+            dispatch_args("table.yml", "main"),
+            ["workflow", "run", "table.yml", "--ref", "main"]
+        );
+    }
+
+    /// The first run of the list is the latest success; an empty list is
+    /// none; a run of another conclusion is not taken; output that is not
+    /// a list, or a run with no ID, is an error.
+    #[test]
+    fn the_latest_success_reads_the_first_run_of_the_list() {
+        let out = r#"[{"databaseId": 42, "number": 7, "attempt": 2, "headSha": "abc",
+            "conclusion": "success", "url": "https://github.com/o/n/actions/runs/42",
+            "createdAt": "2026-10-30T00:13:49Z", "displayTitle": "t"}]"#;
+        assert_eq!(
+            parse_latest_success(out).unwrap(),
+            Some(CiRun {
+                run_id: 42,
+                run_number: 7,
+                sha: "abc".into(),
+                conclusion: "success".into(),
+                url: "https://github.com/o/n/actions/runs/42".into(),
+                created_at: "2026-10-30T00:13:49Z".into(),
+                attempt: 2,
+            })
+        );
+        assert_eq!(parse_latest_success("[]").unwrap(), None);
+        assert_eq!(
+            parse_latest_success(r#"[{"databaseId": 1, "conclusion": "cancelled"}]"#).unwrap(),
+            None
+        );
+        assert!(parse_latest_success("not json").is_err());
+        assert!(parse_latest_success(r#"[{"conclusion": "success"}]"#).is_err());
+        // A run with no attempt is its first.
+        assert_eq!(parse_runs(r#"[{"databaseId": 3}]"#).unwrap()[0].attempt, 1);
+    }
 }

@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::application::TaskStore;
-use crate::domain::NewTask;
+use crate::domain::{EventId, NewTask};
 
 const RUN: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -13,6 +13,31 @@ const RUN: &str = "11111111-1111-4111-8111-111111111111";
 fn claimed(token: &LeaseToken) -> (tempfile::TempDir, SqliteServiceBackend) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("q.db");
+    let (backend, _) = claimed_at(token, &dir, db);
+    (dir, backend)
+}
+
+/// As [`claimed`], with the queue in a memdb named after `name` and a new
+/// UUID, shared by every connection of the process that opens it while
+/// the returned queue (which keeps it) is open; the tokens' files stay in
+/// the returned directory.
+fn claimed_in_memdb(
+    token: &LeaseToken,
+    name: &str,
+) -> (tempfile::TempDir, SqliteQueue, SqliteServiceBackend) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = PathBuf::from(format!("file:/{name}-{}?vfs=memdb", uuid::Uuid::new_v4()));
+    let (backend, kept) = claimed_at(token, &dir, db);
+    (dir, kept, backend)
+}
+
+/// The queue at `db` with the task claimed as [`claimed`] makes it, the
+/// queue's connection, and the backend of its service in `dir`.
+fn claimed_at(
+    token: &LeaseToken,
+    dir: &tempfile::TempDir,
+    db: PathBuf,
+) -> (SqliteServiceBackend, SqliteQueue) {
     let mut queue = SqliteQueue::init(&db).unwrap();
     let task = queue
         .add(NewTask {
@@ -58,7 +83,7 @@ fn claimed(token: &LeaseToken) -> (tempfile::TempDir, SqliteServiceBackend) {
         stands_for: None,
         doctor: None,
     };
-    (dir, backend)
+    (backend, queue)
 }
 
 /// A token of `principal`'s for the queue of `backend`.
@@ -606,4 +631,211 @@ fn the_wait_rows_and_stops_cross_as_the_queues_own_without_the_rows_whole() {
         .collect();
     assert_eq!(ids, whole);
     assert_eq!(queue.ledger_supervisor_stops().unwrap().len(), whole.len());
+}
+
+/// The records of a workflow's freshness cross the service as the queue's
+/// own: a stale record of the same workflow and latest success is written
+/// once (a second, as from another supervisor or after a restart, is
+/// not), a fresh record closes only the open one it names, and the reads
+/// through the service are the queue's on its own connection.
+#[test]
+fn a_workflows_freshness_crosses_the_service_and_is_started_once_per_success() {
+    use crate::application::QueueRecords;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ci_watch::freshness::FreshnessRecord;
+    let owner = LeaseToken::new("owner");
+    let (_dir, direct, backend) = claimed_in_memdb(&owner, "freshness-crosses");
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let stale = |previous: Option<i64>, run_id: Value| FreshnessRecord::Stale {
+        previous,
+        payload: json!({"workflow": "table.yml", "run_id": run_id, "age_secs": 151_200}),
+    };
+    let first = queue.record_ci_freshness(stale(None, json!(5))).unwrap();
+    assert!(first.is_some());
+    // The same success again, as decided before the first was written or
+    // after it.
+    assert_eq!(
+        queue.record_ci_freshness(stale(None, json!(5))).unwrap(),
+        None
+    );
+    assert_eq!(
+        queue
+            .record_ci_freshness(stale(first.map(EventId::as_i64), json!(5)))
+            .unwrap(),
+        None
+    );
+    // Another workflow's, and none of a workflow with no success twice.
+    let other = FreshnessRecord::Stale {
+        previous: None,
+        payload: json!({"workflow": "other.yml", "run_id": 5}),
+    };
+    assert!(queue.record_ci_freshness(other).unwrap().is_some());
+    let none = FreshnessRecord::Stale {
+        previous: None,
+        payload: json!({"workflow": "none.yml", "run_id": null}),
+    };
+    assert!(queue.record_ci_freshness(none.clone()).unwrap().is_some());
+    assert_eq!(queue.record_ci_freshness(none).unwrap(), None);
+    // A fresh record that names no open record is not written; one that
+    // names it is, once.
+    let fresh = |closes: i64| FreshnessRecord::Fresh {
+        payload: json!({"workflow": "table.yml", "closes": closes, "run_id": 9}),
+    };
+    assert_eq!(queue.record_ci_freshness(fresh(999)).unwrap(), None);
+    let open = first.unwrap().as_i64();
+    assert!(queue.record_ci_freshness(fresh(open)).unwrap().is_some());
+    assert_eq!(queue.record_ci_freshness(fresh(open)).unwrap(), None);
+    // The success recorded stale before is not recorded again.
+    let closed = queue
+        .ci_freshness_events()
+        .unwrap()
+        .last()
+        .map(|e| e.id.as_i64());
+    assert_eq!(
+        queue.record_ci_freshness(stale(closed, json!(5))).unwrap(),
+        None
+    );
+
+    let read = queue.ci_freshness_events().unwrap();
+    assert_eq!(read, direct.ci_freshness_events().unwrap());
+    assert_eq!(
+        read.iter()
+            .map(|event| event.kind.to_string())
+            .collect::<Vec<_>>(),
+        [
+            "ci_workflow_stale",
+            "ci_workflow_stale",
+            "ci_workflow_stale",
+            "ci_workflow_fresh"
+        ]
+    );
+    let ops = service.ops.lock().unwrap();
+    assert_eq!(ops.last().map(String::as_str), Some("ci_freshness_events"));
+    assert_eq!(
+        ops.iter().filter(|op| *op == "record_ci_freshness").count(),
+        10
+    );
+}
+
+/// Two supervisors that read the same records and then two different
+/// stale successes: the one that writes second, decided before the
+/// first's record, is refused, so a late write of an older success never
+/// opens it over the newer one's record; the newer one's attention stays
+/// open, a second look at it holds, and only a success newer than it
+/// closes it.
+#[test]
+fn a_late_stale_record_of_an_older_success_does_not_open_it_over_the_newer() {
+    use crate::domain::ci_watch::CiRun;
+    use crate::domain::ci_watch::freshness::{
+        FreshnessDecision, FreshnessRecord, FreshnessState, FreshnessWatch, decide_freshness,
+    };
+    let owner = LeaseToken::new("owner");
+    let (_dir, direct, backend) = claimed_in_memdb(&owner, "freshness-late");
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let watch = FreshnessWatch {
+        workflow: "table.yml".into(),
+        max_age_secs: 48 * 3600,
+        lead_secs: 6 * 3600,
+    };
+    let success = |id: i64, created_at: &str| CiRun {
+        run_id: id,
+        run_number: id,
+        sha: format!("sha{id}"),
+        conclusion: "success".into(),
+        url: format!("https://github.com/o/n/actions/runs/{id}"),
+        created_at: created_at.into(),
+        attempt: 1,
+    };
+    let (older, newer) = (
+        success(1, "2026-10-27T00:00:00Z"),
+        success(2, "2026-10-28T00:00:00Z"),
+    );
+    let now = crate::domain::stats::rfc3339_millis("2026-11-01T00:00:00Z").unwrap();
+    let record = |run: &CiRun, state: &FreshnessState| {
+        let decision = decide_freshness(&watch, "main", Some(run), now, state);
+        (decision.clone(), FreshnessRecord::of(&decision, state))
+    };
+    let send = |record: FreshnessRecord| {
+        let response = call(
+            &backend,
+            &token,
+            "record_ci_freshness",
+            json!([serde_json::to_value(record).unwrap()]),
+        );
+        assert!(response.ok, "{response:?}");
+        serde_json::from_value::<Option<EventId>>(response.result.unwrap()).unwrap()
+    };
+    // Both read the empty records; the newer success is written first.
+    let empty = FreshnessState::default();
+    let (_, of_newer) = record(&newer, &empty);
+    let (_, of_older) = record(&older, &empty);
+    assert!(send(of_newer.unwrap()).is_some());
+    assert_eq!(send(of_older.unwrap()), None);
+    let state = FreshnessState::fold(&direct.ci_freshness_events().unwrap(), "table.yml");
+    assert_eq!(state.open.as_ref().and_then(|open| open.run_id), Some(2));
+    // The newer success, still old, holds: nothing closes or reopens it.
+    assert_eq!(record(&newer, &state), (FreshnessDecision::Hold, None));
+    // A decision made before a close is not written after it either.
+    let (close, of_close) = record(&success(3, "2026-10-31T23:00:00Z"), &state);
+    assert!(matches!(close, FreshnessDecision::Close(_)));
+    assert!(send(of_close.unwrap()).is_some());
+    let (_, late) = record(&older, &FreshnessState::default());
+    assert_eq!(send(late.unwrap()), None);
+    assert_eq!(
+        direct
+            .ci_freshness_events()
+            .unwrap()
+            .iter()
+            .map(|event| event.kind.to_string())
+            .collect::<Vec<_>>(),
+        ["ci_workflow_stale", "ci_workflow_fresh"]
+    );
+}
+
+/// The freshness records are the supervisor principal's alone: a worker's
+/// and an observer's tokens are refused them as the policy refuses them,
+/// each refusal recorded, and nothing is written.
+#[test]
+fn only_the_supervisor_principal_reads_and_writes_a_workflows_freshness() {
+    let owner = LeaseToken::new("owner");
+    let (_dir, _kept, backend) = claimed_in_memdb(&owner, "freshness-principals");
+    let others = [
+        Principal::worker(&RunId::new(RUN).unwrap(), crate::domain::TaskId::new(1)),
+        Principal::of(&crate::domain::ActorContext::instance(
+            crate::domain::ActorRole::Observer,
+            "s1",
+        )),
+    ];
+    let record = json!([{"record": "stale", "previous": null, "payload": {"workflow": "table.yml", "run_id": 5}}]);
+    let mut denials = 0;
+    for principal in others {
+        let token = token_of(&backend, &principal);
+        for (op, args) in [
+            ("ci_freshness_events", json!([])),
+            ("record_ci_freshness", record.clone()),
+        ] {
+            let denied = call(&backend, &token, op, args);
+            assert_eq!(
+                denied.error.as_ref().map(|error| error.code),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{op}: {denied:?}"
+            );
+            denials += 1;
+        }
+    }
+    assert_eq!(events(&backend, "authorization_denied").len(), denials);
+    assert!(events(&backend, "ci_workflow_stale").is_empty());
+    let owner_token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    assert!(call(&backend, &owner_token, "record_ci_freshness", record).ok);
+    assert_eq!(events(&backend, "ci_workflow_stale").len(), 1);
 }

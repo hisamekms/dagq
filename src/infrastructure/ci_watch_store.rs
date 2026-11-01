@@ -2,7 +2,9 @@
 //! settled run's events and finding written in one transaction that
 //! another supervisor's record of the same run takes, the runs of the
 //! scheduled workflows it declares (ADR-t3807-1) recorded the same way,
-//! and the `ci_failure` findings a task fixes.
+//! the records of how old the declared workflows' latest successes are,
+//! kept unique per workflow and success, and the `ci_failure` findings a
+//! task fixes.
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -11,6 +13,7 @@ use std::collections::BTreeMap;
 
 use super::findings::{record_in, set_status_in};
 use super::sqlite::{SqliteQueue, event_row};
+use crate::domain::ci_watch::freshness::{FRESHNESS_KINDS, FreshnessRecord};
 use crate::domain::ci_watch::scheduled::{CI_SCHEDULED_CHECKED, ScheduledCheckRecord};
 use crate::domain::ci_watch::{CI_CHECKED, CI_WATCH_KINDS, CiCheckRecord, CiCheckRecorded};
 use crate::domain::{EventId, EventKind, FindingId, FindingStatus, NewFinding, RunEvent, TaskId};
@@ -152,6 +155,76 @@ impl SqliteQueue {
             finding,
             resolved,
         }))
+    }
+
+    /// Every `ci_workflow_stale` and `ci_workflow_fresh` event, oldest
+    /// first.
+    pub fn ci_freshness_events(&self) -> Result<Vec<RunEvent>> {
+        let [stale, fresh] = FRESHNESS_KINDS.map(EventKind::as_str);
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT * FROM run_events WHERE kind IN (?1,?2)
+                 AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL ORDER BY id",
+            )?
+            .query_map([stale, fresh], event_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Write `record` in one transaction, or nothing (`None`): a stale
+    /// record when the workflow's latest record is still the one it was
+    /// decided after (`previous`), so a late write of an older reading
+    /// does not open its success over a newer record, and no
+    /// `ci_workflow_stale` of the same `workflow` and `run_id` (null with
+    /// null) is there, so two supervisors and a restart start the workflow
+    /// once per latest success; a fresh record when the workflow's latest
+    /// record is the stale one it `closes`.
+    pub fn record_ci_freshness(&self, record: FreshnessRecord) -> Result<Option<EventId>> {
+        let tx = self.write_tx("record_ci_freshness", TransactionBehavior::Immediate)?;
+        let [stale, fresh] = FRESHNESS_KINDS;
+        let latest = |workflow: Option<&str>| -> Result<Option<(i64, String)>> {
+            Ok(tx
+                .query_row(
+                    "SELECT id, kind FROM run_events WHERE kind IN (?1,?2)
+                     AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
+                     AND json_extract(payload,'$.workflow')=?3
+                     ORDER BY id DESC LIMIT 1",
+                    params![stale.as_str(), fresh.as_str(), workflow],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?)
+        };
+        let (kind, payload) = match record {
+            FreshnessRecord::Stale { previous, payload } => {
+                let workflow = payload["workflow"].as_str();
+                if workflow.is_none() || latest(workflow)?.map(|(id, _)| id) != previous {
+                    return Ok(None);
+                }
+                let there: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
+                       AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
+                       AND json_extract(payload,'$.workflow')=?2
+                       AND json_extract(payload,'$.run_id') IS ?3)",
+                    params![stale.as_str(), workflow, payload["run_id"].as_i64()],
+                    |r| r.get(0),
+                )?;
+                if there {
+                    return Ok(None);
+                }
+                (stale, payload)
+            }
+            FreshnessRecord::Fresh { payload } => {
+                let closes = payload["closes"].as_i64();
+                let open = latest(payload["workflow"].as_str())?;
+                if open.is_none_or(|(id, kind)| kind != stale.as_str() || Some(id) != closes) {
+                    return Ok(None);
+                }
+                (fresh, payload)
+            }
+        };
+        let id = insert(&tx, kind, &payload)?;
+        tx.commit()?;
+        Ok(Some(id))
     }
 
     /// The `ci_failure` findings `task` fixes: linked to the proposal the

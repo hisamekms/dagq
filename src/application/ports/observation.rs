@@ -677,6 +677,18 @@ pub trait QueueRecords {
         &self,
         record: crate::domain::ci_watch::scheduled::ScheduledCheckRecord,
     ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>>;
+    /// Every record of how old the declared workflows' latest successes
+    /// are (`domain::ci_watch::freshness::FRESHNESS_KINDS`), oldest first.
+    fn ci_freshness_events(&self) -> Result<Vec<RunEvent>>;
+    /// Write one record of a workflow's freshness in one write
+    /// transaction: a stale record unless one of the same workflow and
+    /// latest success is there, a fresh record only while the workflow's
+    /// latest record is the stale one it closes. Its event ID, or `None`
+    /// when it was not written.
+    fn record_ci_freshness(
+        &self,
+        record: crate::domain::ci_watch::freshness::FreshnessRecord,
+    ) -> Result<Option<EventId>>;
     /// The `ci_failure` findings `task` fixes (linked to its proposal, or
     /// dismissed as covered by it).
     fn ci_failure_findings_of(&self, task: TaskId) -> Result<Vec<crate::domain::FindingId>>;

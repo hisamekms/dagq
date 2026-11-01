@@ -45,6 +45,13 @@ pub trait CiSource: Send + Sync {
     /// [`crate::domain::ci_watch::scheduled::SCHEDULED_EVENTS`], at most
     /// [`crate::domain::ci_watch::RUN_LIST_LIMIT`] each.
     fn scheduled_runs(&self, workflow: &str) -> Result<Vec<CiRun>>;
+    /// The latest run of `workflow` on `branch` that concluded `success`,
+    /// of any event; `None` when it has none. Runs that ended otherwise are
+    /// passed over (`domain::ci_watch::freshness`).
+    fn latest_success(&self, workflow: &str, branch: &str) -> Result<Option<CiRun>>;
+    /// Start `workflow` on `branch` by `workflow_dispatch`; an error when
+    /// GitHub refuses it (the workflow has no such trigger, no right).
+    fn dispatch(&self, workflow: &str, branch: &str) -> Result<()>;
     /// The failed jobs of a red run, with their failed steps.
     fn failed_jobs(&self, run_id: i64) -> Result<Vec<FailedJob>>;
     /// Every job of a run's attempt with how it ended, for a success run

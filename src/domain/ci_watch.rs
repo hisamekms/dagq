@@ -20,6 +20,7 @@ use super::event_kind::EventKind;
 use super::toolchain::JunitTestName;
 use super::{AttentionNext, RunEvent};
 
+pub mod freshness;
 pub mod scheduled;
 
 /// A finished run of the watched workflow was read (one per run whose

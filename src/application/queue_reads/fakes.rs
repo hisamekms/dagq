@@ -103,6 +103,15 @@ impl QueueRecords for Records {
     ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>> {
         unimplemented!()
     }
+    fn ci_freshness_events(&self) -> Result<Vec<RunEvent>> {
+        unimplemented!()
+    }
+    fn record_ci_freshness(
+        &self,
+        _: crate::domain::ci_watch::freshness::FreshnessRecord,
+    ) -> Result<Option<EventId>> {
+        unimplemented!()
+    }
     fn record_finding_once(
         &self,
         _: crate::domain::NewFinding,

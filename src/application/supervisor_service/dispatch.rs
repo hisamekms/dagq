@@ -2214,6 +2214,11 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 read(op, args)?;
             answer(QueueRecords::record_ci_scheduled_check(&*store, record))
         }
+        "ci_freshness_events" => answer(QueueRecords::ci_freshness_events(&*store)),
+        "record_ci_freshness" => {
+            let (record,): (crate::domain::ci_watch::freshness::FreshnessRecord,) = read(op, args)?;
+            answer(QueueRecords::record_ci_freshness(&*store, record))
+        }
         "record_finding_once" => {
             let (finding,): (crate::domain::NewFinding,) = read(op, args)?;
             answer(QueueRecords::record_finding_once(&*store, finding))
