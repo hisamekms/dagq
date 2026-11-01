@@ -3190,3 +3190,226 @@ fn the_wait_books_across_a_position_through_the_service_are_the_stores() {
         "{received:?}"
     );
 }
+
+/// The rows of a store a builder drained the first `upto` events of into,
+/// at `LATER` (the sessions closed before then settled).
+fn drained_to(log: &Log, upto: usize) -> Memory {
+    drained_at(log, upto, LATER)
+}
+
+/// [`drained_to`] at `secs`.
+fn drained_at(log: &Log, upto: usize, secs: i64) -> Memory {
+    let memory = Memory::default();
+    memory.events.replace(log.events[..upto].to_vec());
+    drain(&memory, &mut Builder::default(), secs);
+    memory
+}
+
+/// The id of the last of the first `upto` events of `log`.
+fn id_at(log: &Log, upto: usize) -> EventId {
+    log.events[upto - 1].id
+}
+
+/// The session rows a new builder writes on `rows` going on from the
+/// `from`th event of `log` (its cursor) to the last, after `restore` made
+/// what it keeps of the sessions from the store's rows.
+fn going_on(
+    rows: &BTreeMap<(LedgerKind, String), LedgerRow>,
+    log: &Log,
+    from: usize,
+    restore: impl FnOnce(&Memory, &mut Builder),
+) -> BTreeMap<(LedgerKind, String), LedgerRow> {
+    let memory = Memory::default();
+    memory.rows.replace(rows.clone());
+    memory.events.replace(log.events.clone());
+    let mut builder = Builder::default();
+    builder.events = id_at(log, from);
+    restore(&memory, &mut builder);
+    drain(&memory, &mut builder, LATER + 1);
+    memory
+        .rows
+        .into_inner()
+        .into_iter()
+        .filter(|((kind, _), _)| *kind == LedgerKind::Session)
+        .collect()
+}
+
+/// The session rows a builder from its cursors' start writes of every
+/// event of `log` on a store with none, at the time the builders going on
+/// write theirs.
+fn rows_of_every_event(log: &Log) -> BTreeMap<(LedgerKind, String), LedgerRow> {
+    let memory = Memory::of(log);
+    drain(&memory, &mut Builder::default(), LATER + 1);
+    memory
+        .rows
+        .into_inner()
+        .into_iter()
+        .filter(|((kind, _), _)| *kind == LedgerKind::Session)
+        .collect()
+}
+
+/// Whether `rows` are the session rows a builder from its cursors' start
+/// writes of every event of `log` ([`rows_of_every_event`]), each whole:
+/// its records, its range of inputs, its mark of settled and its version.
+fn are_of_every_event(rows: &BTreeMap<(LedgerKind, String), LedgerRow>, log: &Log) -> bool {
+    let whole = rows_of_every_event(log);
+    assert!(whole.len() >= 7);
+    *rows == whole
+}
+
+/// A new builder that takes at its cursor the session rows the store holds
+/// as they were there ([`restore_sessions`]: the book, the records of the
+/// rows not settled, the rows settled as dropped) and goes on writes the
+/// session rows of every event: a late record of a closed session settled
+/// gets its row's records back from the store, and one of a job not ended
+/// is folded with the records kept. Taking the book alone leaves the
+/// settled row's records out and writes over it with the late record
+/// alone.
+#[test]
+fn a_new_builder_going_on_from_the_sessions_held_writes_the_rows_of_every_event() {
+    let (log, position) = sessions_across();
+    let held = drained_to(&log, position).rows.into_inner();
+    let closed = (
+        LedgerKind::Session,
+        "runtime_planner/1/session/1".to_owned(),
+    );
+    let job = (LedgerKind::Session, "plan_review/9/job/1".to_owned());
+    assert!(held[&closed].is_final);
+    assert!(!held[&job].is_final);
+
+    let rows = going_on(&held, &log, position, |memory, builder| {
+        restore_sessions(memory, builder).unwrap();
+        let wanted: BTreeSet<(LedgerKind, String)> = [closed.clone(), job.clone()].into();
+        assert_eq!(builder.to_restore(&wanted), std::slice::from_ref(&closed));
+        assert_eq!(
+            builder.kept().size().sessions,
+            held[&job].records.len()
+                + held
+                    .values()
+                    .filter(|row| row.kind == LedgerKind::Session
+                        && !row.is_final
+                        && row.key != job.1)
+                    .map(|row| row.records.len())
+                    .sum::<usize>()
+        );
+    });
+    assert!(are_of_every_event(&rows, &log));
+    assert_eq!(rows[&closed].records.len(), held[&closed].records.len() + 1);
+    assert!(rows[&job].records.len() > held[&job].records.len());
+
+    let book_alone = going_on(&held, &log, position, |memory, builder| {
+        builder.restore_session_rows(session_book(memory).unwrap());
+    });
+    assert!(!are_of_every_event(&book_alone, &log));
+    assert_eq!(book_alone[&closed].records.len(), 1);
+}
+
+/// When the store's session rows lag the position P a builder read up to
+/// (a pass's writes ran out: the planner's closed session lacks its late
+/// record and its next session has no row), a builder going on from an
+/// earlier position W the rows record every session event up to writes
+/// the rows of every event, the rows past W cut back to it; going on from
+/// P misses the late record and the session with no row; and going on
+/// from W with the rows taken as they were at P (even rows that record
+/// every event up to P) assigns the events after W twice, the planner's
+/// next session a round again.
+#[test]
+fn going_on_from_where_the_lagging_rows_record_every_event_writes_the_rows_of_every_event() {
+    let (log, w) = sessions_across();
+    let p = w + 3;
+    let at_p = drained_to(&log, p).rows.into_inner();
+    let at_w = drained_to(&log, w).rows.into_inner();
+    let closed = (
+        LedgerKind::Session,
+        "runtime_planner/1/session/1".to_owned(),
+    );
+    let next = (
+        LedgerKind::Session,
+        "runtime_planner/1/session/2".to_owned(),
+    );
+    assert!(
+        at_p[&next]
+            .records
+            .iter()
+            .all(|event| event.id > id_at(&log, w))
+    );
+    let mut lagging = at_p.clone();
+    lagging.insert(closed.clone(), at_w[&closed].clone());
+    lagging.remove(&next);
+    assert_ne!(lagging[&closed], at_p[&closed]);
+
+    let restore = |memory: &Memory, builder: &mut Builder| {
+        restore_sessions(memory, builder).unwrap();
+    };
+    assert!(are_of_every_event(
+        &going_on(&lagging, &log, w, restore),
+        &log
+    ));
+    assert!(are_of_every_event(&going_on(&at_p, &log, w, restore), &log));
+
+    let from_p = going_on(&lagging, &log, p, restore);
+    assert!(!are_of_every_event(&from_p, &log));
+    assert!(!from_p.contains_key(&next));
+    assert_eq!(from_p[&closed].records.len(), at_w[&closed].records.len());
+
+    let twice = going_on(&at_p, &log, w, |memory, builder| {
+        let held = SessionsHeld::at(
+            &memory.ledger_heads(LedgerKind::Session).unwrap(),
+            &memory.ledger_session_anchors().unwrap(),
+            id_at(&log, p),
+        );
+        let records = held
+            .open
+            .iter()
+            .flat_map(|key| memory.row(LedgerKind::Session, key).records)
+            .collect();
+        builder.restore_sessions(held, records);
+    });
+    assert!(!are_of_every_event(&twice, &log));
+    assert!(twice.contains_key(&(
+        LedgerKind::Session,
+        "runtime_planner/1/session/3".to_owned()
+    )));
+}
+
+/// A session that closed in its grace at the cursor (not settled in the
+/// store's row, and no later event reaches it) settles once its grace is
+/// over, as in the fold of every event: the rows not settled the builder
+/// takes are marked, so it tracks their grace.
+#[test]
+fn a_session_in_its_grace_at_the_cursor_settles_after_going_on() {
+    let (log, position) = sessions_across();
+    let held = drained_at(&log, position, 45).rows.into_inner();
+    let review = (LedgerKind::Session, "plan_review/9/session/1".to_owned());
+    assert!(held[&review].ended_at.is_some());
+    assert!(!held[&review].is_final);
+    let rows = going_on(&held, &log, position, |memory, builder| {
+        restore_sessions(memory, builder).unwrap();
+    });
+    assert!(are_of_every_event(&rows, &log));
+    assert!(rows[&review].is_final);
+}
+
+/// A row the store holds settled by an older version that no later event
+/// reaches is folded again by this version once a builder goes on from
+/// the rows, as from its cursors' start.
+#[test]
+fn a_row_settled_by_an_older_version_is_folded_again_after_going_on() {
+    let (log, position) = sessions_across();
+    let mut held = drained_to(&log, position).rows.into_inner();
+    let review = (LedgerKind::Session, "plan_review/9/session/1".to_owned());
+    let old = held.get_mut(&review).unwrap();
+    assert!(old.is_final);
+    old.ledger_v = LEDGER_V - 1;
+    assert!(log.events[position..].iter().all(|event| {
+        !held[&review]
+            .records
+            .iter()
+            .any(|record| record.id == event.id)
+    }));
+    let rows = going_on(&held, &log, position, |memory, builder| {
+        restore_sessions(memory, builder).unwrap();
+    });
+    assert_eq!(rows[&review].ledger_v, LEDGER_V);
+    assert!(are_of_every_event(&rows, &log));
+}

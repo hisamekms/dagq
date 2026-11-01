@@ -136,3 +136,59 @@ fn the_book_takes_only_the_session_rows_of_its_keys() {
         Some(&2)
     );
 }
+
+/// The session rows held as they were at an event before the last they
+/// record give the book of the events up to it: the rows past it cut back
+/// (a row with no record up to it is not one), a row settled with a record
+/// after it not settled, and the closes after it give no model.
+#[test]
+fn the_rows_held_as_they_were_at_an_event_give_the_book_of_the_events_up_to_it() {
+    let (log, position) = across();
+    let mut rows = session_rows(&log.events, BUILT);
+    for row in &mut rows {
+        row.is_final = row.ended_at.is_some();
+    }
+    let heads: Vec<LedgerHead> = rows.iter().map(LedgerHead::of).collect();
+    let through = log.events[position - 1].id;
+    let held = SessionsHeld::at(&heads, &anchors(&rows), through);
+    assert_eq!(held.book, book_of(&log.events[..position]));
+    assert!(
+        held.open
+            .contains(&"runtime_planner/1/session/1".to_owned())
+    );
+    assert!(held.settled.contains(&"plan_review/9/session/1".to_owned()));
+    assert!(
+        !held
+            .open
+            .iter()
+            .chain(&held.settled)
+            .any(|key| key == "runtime_planner/1/session/2")
+    );
+    assert!(held.open_records().iter().all(|id| *id <= through));
+    assert_eq!(held.open.len() + held.settled.len(), held.book.row_count());
+}
+
+/// A row the store holds settled by an older version is not settled for a
+/// builder that goes on from the rows: it is open, so that it is folded
+/// again by this version.
+#[test]
+fn a_row_settled_by_an_older_version_is_held_open() {
+    let (log, position) = across();
+    let mut rows = session_rows(&log.events, BUILT);
+    for row in &mut rows {
+        row.is_final = row.ended_at.is_some();
+    }
+    let key = "plan_review/9/session/1";
+    let through = log.events[position - 1].id;
+    let held_by = |rows: &[LedgerRow]| {
+        let heads: Vec<LedgerHead> = rows.iter().map(LedgerHead::of).collect();
+        SessionsHeld::at(&heads, &anchors(rows), through)
+    };
+    assert!(held_by(&rows).settled.contains(&key.to_owned()));
+    let row = rows.iter_mut().find(|row| row.key == key).unwrap();
+    row.ledger_v = LEDGER_V - 1;
+    let held = held_by(&rows);
+    assert!(held.open.contains(&key.to_owned()));
+    assert!(!held.settled.contains(&key.to_owned()));
+    assert_eq!(held.book, book_of(&log.events[..position]));
+}

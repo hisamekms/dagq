@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use serde_json::{Map, Value, json};
 
-use super::{LedgerHead, LedgerKind, LedgerRow, Subject};
+use super::{LEDGER_V, LedgerHead, LedgerKind, LedgerRow, Subject};
 use crate::domain::{
     EventId, EventKind, RunEvent,
     headless_job::JobRef,
@@ -233,6 +233,87 @@ pub fn anchors(rows: &[LedgerRow]) -> Vec<(String, RunEvent)> {
                 .map(|(_, event)| (row.key.clone(), event.clone()))
         })
         .collect()
+}
+
+/// The session rows the store holds as they were at the event `through`:
+/// each head's records up to it (a row with none is not one yet) and the
+/// anchors up to it, so that the book made of them
+/// ([`SessionBook::from_heads`]) is the book of the events up to
+/// `through`. A row the store holds settled by this [`LEDGER_V`] with no
+/// record after `through` is `settled` (what builds the ledger keeps only
+/// its records' ids and gives its records back from the store's row when
+/// a later event reaches it); every other row is `open`, its records up
+/// to `through` kept: one not settled then, and one settled by an older
+/// version, which is folded again as a row of an older version is. It is the fold of every event only when the store's
+/// session rows record every session event up to `through`: a row the
+/// store has not written yet, or a record it has not written to a row,
+/// is not in the heads, and a builder going on from `through` misses it.
+/// Which `through` the store has written up to it does not find.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionsHeld {
+    pub through: EventId,
+    pub book: SessionBook,
+    /// The keys of the rows settled at `through`.
+    pub settled: Vec<String>,
+    /// The keys of the rows not settled at `through` or folded by an
+    /// older version.
+    pub open: Vec<String>,
+}
+
+impl SessionsHeld {
+    /// The session rows of `heads` and their `anchors`
+    /// (`LedgerStore::ledger_session_anchors`) as they were at `through`.
+    pub fn at(heads: &[LedgerHead], anchors: &[(String, RunEvent)], through: EventId) -> Self {
+        let mut held = Self {
+            through,
+            ..Self::default()
+        };
+        let mut cut = Vec::new();
+        for head in heads
+            .iter()
+            .filter(|head| head.kind == LedgerKind::Session && parse_key(&head.key).is_some())
+        {
+            let records: Vec<EventId> = head
+                .records
+                .iter()
+                .copied()
+                .filter(|id| *id <= through)
+                .collect();
+            if records.is_empty() {
+                continue;
+            }
+            let settled =
+                head.is_final && head.ledger_v == LEDGER_V && records.len() == head.records.len();
+            if settled {
+                held.settled.push(head.key.clone());
+            } else {
+                held.open.push(head.key.clone());
+            }
+            cut.push(LedgerHead {
+                records,
+                is_final: settled,
+                ..head.clone()
+            });
+        }
+        let anchors: Vec<(String, RunEvent)> = anchors
+            .iter()
+            .filter(|(_, event)| event.id <= through)
+            .cloned()
+            .collect();
+        held.book = SessionBook::from_heads(&cut, &anchors);
+        held
+    }
+
+    /// The ids of the records of the rows not settled, those what builds
+    /// the ledger keeps.
+    pub fn open_records(&self) -> BTreeSet<EventId> {
+        self.open
+            .iter()
+            .filter_map(|key| self.book.records_of(key))
+            .flatten()
+            .copied()
+            .collect()
+    }
 }
 
 /// Which session row each event read so far is a record of, assigned one

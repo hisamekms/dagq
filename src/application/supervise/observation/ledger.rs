@@ -41,7 +41,7 @@ use crate::domain::ledger::builder::{
     RunSteps, STEPS_PER_READ, Target, WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
 };
 use crate::domain::ledger::queue::QueueBook;
-use crate::domain::ledger::session::SessionBook;
+use crate::domain::ledger::session::{SessionBook, SessionsHeld};
 use crate::domain::pre_claim::{self, PreClaimBook};
 use crate::domain::session_step::{self, StepTarget};
 use crate::domain::supervisor_life::Lives;
@@ -446,6 +446,35 @@ pub fn pre_claim_books(store: &dyn LedgerQueue, closed_to: i64) -> Result<(Lives
     let stops = store.ledger_supervisor_stops()?;
     let last = read_by_id(store, &pre_claim::rows::living(&rows, &stops))?;
     Ok(pre_claim::rows::books(&rows, &stops, &last, closed_to))
+}
+
+/// Make `builder` go on from the session rows `store` holds as they were
+/// at its cursor ([`SessionsHeld::at`], [`Builder::restore_sessions`]):
+/// the heads and anchors of every session row, and the records of only
+/// those not settled at the cursor, so that what it keeps of the sessions
+/// settled is their records' ids. The cursor must be one the store's
+/// session rows record every session event up to: this does not find it.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
+    )
+)]
+pub fn restore_sessions(store: &dyn LedgerQueue, builder: &mut Builder) -> Result<()> {
+    let held = SessionsHeld::at(
+        &store.ledger_heads(LedgerKind::Session)?,
+        &store.ledger_session_anchors()?,
+        builder.events,
+    );
+    let mut records = Vec::new();
+    for key in &held.open {
+        if let Some(row) = store.ledger_row(LedgerKind::Session, key)? {
+            records.extend(row.records);
+        }
+    }
+    builder.restore_sessions(held, records);
+    Ok(())
 }
 
 /// The events of `ids`, each read by its id.

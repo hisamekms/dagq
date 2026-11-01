@@ -196,11 +196,11 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
   着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - **置き場**: 係の状態は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
 - **印**: EventStore・NodeSampleStore・SessionStepStore・runの資源のカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsession・queue・readyだったtaskの行（記録でない終わりも）・nodeの時間に印を付ける（全行を走査しない）。
-  畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読んで持ち越す（何を持ち越すかは`builder::Kept`）。
-  起動の追いつきはページごとに変わった行を畳み、確定した行のeventを次のページを読む前に落とす。
-  確定した行に後のeventが届けば、記録はstoreの行から、pushはidで読み戻し、届かないqueueの行は忘れる。
-  session・queueの行・supervisorの一生・claimの前の待ちの帳簿はstoreの行から作り直せ、eventは続く一生の最後だけ読む（起動は未使用）。
-  周回は新しいeventが変えうる行と印の付いた行だけを畳み、周回で作る領域は前からのeventの数に比例しない。
+  畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読み`builder::Kept`に持ち越す。
+  起動の追いつきはページごとに変わった行を畳み、確定した行のeventを次のページの前に落とす。
+  確定した行に後のeventが届けば記録はstoreの行から、pushはidで読み戻し、届かないqueueの行は忘れる。
+  session（記録と落とした印も）・queueの行・supervisorの一生・claimの前の待ちの帳簿はstoreの行を書き終えた位置（行から分からない）で作り直せる（`builder`。起動は未使用）。
+  周回は新しいeventが変えうる行と印の付いた行だけを畳み、作る領域は前からのevent数に比例しない。
 - **書く行**: 終わったrun（`push_pending`と旧方式を含み途中は書かない）と、全てのtask・session・queue・nodeの行。
 - **確定**（`final`）: run・taskは終わりから猶予の後で、`push_pending`には付けない。
   runは発行したtelemetryのtokenの失効の記録の後にだけ確定する。

@@ -108,8 +108,14 @@
 //!   to the supervisor's log. Which session row each event is a record of
 //!   ([`SessionBook`]) is made again from the session rows the store holds
 //!   (their heads and anchors, [`SessionBook::from_heads`]), reading no
-//!   event, and taken in place of the book of the events up to the cursor
-//!   ([`Builder::restore_session_rows`]). So is which queue row each is a
+//!   event. Made at a position (their records and anchors up to it,
+//!   [`SessionsHeld::at`]) it is taken with the records of the rows not
+//!   settled and the rows settled as dropped in place of all [`Kept`]
+//!   made of the session events up to that position
+//!   ([`Builder::restore_sessions`]); a builder going on from there writes
+//!   the rows of every event only when the store's session rows record
+//!   every session event up to it, and which position that is the rows'
+//!   heads do not say. So is which queue row each is a
 //!   record of ([`QueueBook`]: the findings, alerts and streams open, what
 //!   the supervisors' lives reach, the landing slot's attempts and what
 //!   each read up to), from the queue rows' heads with their times,
@@ -146,7 +152,7 @@ use super::{
     node::{self, BUCKET_SECS},
     owner::{self, Owner},
     queue::{self, QueueBook},
-    session::SessionBook,
+    session::{SessionBook, SessionsHeld},
     settle::{self, SETTLE_GRACE_MS},
 };
 use crate::domain::environment::{self, CountedSample, Folded, RunResource, Window};
@@ -613,6 +619,33 @@ impl Kept {
             self.dropped.remove(&row);
         }
         missing.into_iter().collect()
+    }
+
+    /// Take the session rows the store holds as they were at its cursor
+    /// (`held`) in place of what it made of the session events up to it:
+    /// the book, the records of the rows not settled (those of `records`,
+    /// the store's rows' records) and, as dropped, the rows settled.
+    fn restore_sessions(&mut self, held: SessionsHeld, records: Vec<RunEvent>) {
+        let open = held.open_records();
+        let mut sessions: Vec<RunEvent> = records
+            .into_iter()
+            .filter(|event| open.contains(&event.id))
+            .collect();
+        sessions.sort_by_key(|event| event.id);
+        sessions.dedup_by_key(|event| event.id);
+        let old: usize = self.sessions.iter().map(event_heap_bytes).sum();
+        let new: usize = sessions.iter().map(event_heap_bytes).sum();
+        self.event_heap = self.event_heap - old + new;
+        self.sessions = sessions;
+        self.dropped
+            .retain(|(kind, _)| *kind != LedgerKind::Session);
+        self.dropped.extend(
+            held.settled
+                .into_iter()
+                .filter(|key| held.book.records_of(key).is_some_and(|ids| !ids.is_empty()))
+                .map(|key| (LedgerKind::Session, key)),
+        );
+        self.session_rows = held.book;
     }
 
     /// For the measurement of what a supervisor keeps after its start
@@ -1397,6 +1430,32 @@ impl Builder {
         let kept = Arc::make_mut(&mut self.kept);
         kept.lives = lives;
         kept.pre_claim = pre_claim;
+    }
+
+    /// Take the session rows the store holds as they were at
+    /// [`Self::events`] ([`SessionsHeld::at`] of that event) as all it
+    /// keeps of the session events up to it: the book, the records of the
+    /// rows not settled from `records` (the records of the store's rows of
+    /// [`SessionsHeld::open`]; those after the cursor are not taken, as the
+    /// builder reads them again), and the rows settled as dropped, so that
+    /// a later event that reaches one gives it back its records from the
+    /// store's row before it is folded ([`Self::to_restore`]) and a fold
+    /// of the records it keeps alone never writes over it. A builder that
+    /// goes on from there writes the session rows of the fold of every
+    /// event when the store's rows record every session event up to its
+    /// cursor ([`SessionsHeld`]); the rest of [`Kept`] it does not touch.
+    /// The rows not settled are marked, so that one ended in its grace at
+    /// the cursor is tracked and settles as the fold of every event's does,
+    /// and one folded by an older version is folded again ([`writes`]);
+    /// a builder with marks refuses a queue book
+    /// ([`Self::restore_queue_rows`]), so that is taken first.
+    pub fn restore_sessions(&mut self, held: SessionsHeld, records: Vec<RunEvent>) {
+        self.marks.extend(
+            held.open
+                .iter()
+                .map(|key| Target::Row(LedgerKind::Session, key.clone())),
+        );
+        Arc::make_mut(&mut self.kept).restore_sessions(held, records);
     }
 
     /// The rows of `rows` (those [`Self::rows_to_build`] names) whose
