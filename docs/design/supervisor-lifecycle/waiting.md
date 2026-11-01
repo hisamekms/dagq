@@ -146,5 +146,6 @@ ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`で
 
 ## test
 
-wrapper の開き直しと supervisor の配線（slot の外での待ち、引き継ぎと adopt をまたぐ待ち、wrapper の心拍）は integration test が代表の case で確かめる。
+wrapper の開き直しと、引き継ぎと adopt をまたぐ待ち・wrapper の心拍は integration test が代表の case で確かめる。
+slot の外での待ちのような supervisor の配線を確かめる新しい test はプロセスの中の配線の test の層に置き（[testの制約](../../development/testing.md)の「判断と境界のtest」）、今の配線の integration test は移し替えまで残る。
 待ちの上限・控え・組み立て直しと slot への戻りの判断、および過去を含む待ちの記録と集計は `domain::waiting` と stats の unit test が確かめる。

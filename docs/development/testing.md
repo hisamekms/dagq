@@ -15,6 +15,7 @@ related:
   - adr-t1410-1
   - adr-t1707-1
   - adr-t3762-1
+  - adr-t3841-1
   - development-local-checks
   - development-task-registration
   - development-migrations
@@ -83,12 +84,20 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
 [ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)。runtimeのtaskのworkerとplannerが守る。
 
 - 状態の判断（状態の遷移・回数と上限・時刻を値で受けた時間の判定・verdictやanswerから操作への対応・askやerrorの文面・次の一手の選び方）は`src/`の副作用のない関数にして`#[cfg(test)]`のunit testで確かめる。unit testは外部プロセス・git・SQLiteのファイル・sleep・実時間の時計を使わない（時刻は値で渡す）。
-- `tests/it`はSQLite・Git・プロセス・supervisorの配線・復旧とadoptの境界を代表の1 caseで確かめ、判断のcaseごとにfixtureとsupervisorを起動し直さない。
+- `tests/it`はSQLite・Git・プロセス・復旧とadoptの境界を代表の1 caseで確かめ、判断のcaseごとにfixtureとsupervisorを起動し直さない。
+- supervisorの配線（判断の結果がevent・ask・statusに届くこと）は、unit testとも`tests/it`とも別の種類の「プロセスの中の配線のtest」の層で確かめる（[ADR-t3841-1](../adr/2026-11-01-t3841-1-supervisor-wiring-tests-run-in-process-on-a-memdb-queue-with-port-fakes.md)がADR-t1410-1決定2・6をamends。形の根拠は[Spike](../plans/in-process-supervisor-test-spike.md)）。
+  - 置き場: `src/compose`の`#[cfg(test)]`のmodule（例: `src/compose/wiring_tests/`）。本物のsupervise（`application::supervise::supervise`）と本物の`SqliteQueue`・`InProcessCaller`を使い、queueはSQLiteのmemdb（`file:/<名前>?vfs=memdb`）で開く。名前はtestごとに別にし、processごとに1回migrationを当てた雛形をbackupで写して作る。`:memory:`は接続ごとに別のDBになるので使わない。
+  - 規則: 外部プロセス・実Git・SQLiteのファイルを使わない。testの行にsleepと実時間の時計を置かない。productionの実時間の待ちは上限つきの1つの期限（`tests/it`の`common::within`に当たるもの。下の「待ちの上限」）で包み、過ぎればtestの名前と待っていた条件を出して落ちる。起こしたthread（sessionのwrapperを含む）はtestの終わりまでにjoinする。process-globalの可変のstaticをtestの間で共有しない。
+  - portのfake: Git・session・agent・`Verifier`・`ProcessControl`などのportは状態を持つfakeにし（生成した`unreachable!`のstubを並べない）、productionのevent・payload・ask・文面・閾値の意味を変えない。productionに足してよい口はtestから構成を渡すもの（`InProcessCaller`のtokenの置き場、`MemoryFiles`の公開、待ちの間隔）だけ。
+  - 流れる場所: libのtestとして、着地のunit test全件（上の「test binary」の`scripts/landing-it.sh`）とCIのcoverageで流れる。`tests/it`ではないので、境界の登録簿・moduleの本数のratchet・時間の関門の許可の一覧の対象にならない。
+  - 1本の時間の目安: おおむね3秒以内（Spikeで1.6〜3.0秒）。5秒を超えるものは待ちの間隔の口で縮めるか1本の配線を分ける。`cargo test --lib`の1本の秒で測る。
+  - 機械で見る部分: `scripts/check-test-rules.sh`はこの層の行も他の`src/`の`#[cfg(test)]`の行と同じ形で見る（層の規則も実時間の時計・sleep・外部プロセスをtestの行に置かないので、同じ形でよい）。productionが実時間で待つことと起こすthreadはtestの行に現れないので、test-rulesのreviewはこの層のtestをunit testの規則で差し戻さず、上の規則（期限で包むこと・joinすること・staticを共有しないこと）で判定する。
+  - 配線を確かめる新しいtestはこの層に置き、`tests/it`の登録簿に境界の種類「supervisorの配線」のidを新しく足さない。移し替えの間、既存の「supervisorの配線」のidとそのIT・時間の関門の許可の一覧の項目は残し、移すtaskが確かめていた中身の行き先を対応づけて同じ変更で外す。境界の種類「supervisorの配線」の退役は移し替えの後の別のtaskが行う。それまで`scripts/check-it-added-tests.sh`はその種類の値を通すので、新しいidを足さないことはplan reviewとtest-rulesのreviewが見る。
 - 機械で見る部分: `scripts/check-test-rules.sh`が、差分が足した・変えた`src/`の`#[cfg(test)]`の行のうち、行だけで見分けられる実時間の時計・sleep・外部プロセスの形を、runのプログラムのreviewとCIで検出する。見る形と見ない形、1か所を外す`test-rules: allow`の印はscriptの冒頭のコメントが持つ。SQLiteのファイルと、行だけで見分けられない形（ITでの判断のcaseの並べ直しなど）はtest-rulesのreviewが見る。
 - e2eは実バイナリ・実Git・実launchdのハッピーパスと境界だけにする（流し方は下の「e2e」）。
-- integration testを減らすときは、確かめていた中身をunit testか残すintegration testに対応づけ、行き先の無いまま消さない。
+- integration testを減らすときは、確かめていた中身をunit test・プロセスの中の配線のtest・残すintegration testのどれかに対応づけ、行き先の無いまま消さない。
 - 時間の関門（[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）: baseからの差分で足した・本文を変えた`tests/it`のtestの1本の時間が閾値を超えたら、許可の一覧に項目が無いかぎり関門が落ちる。許可の一覧は`.config/it-slow-allow.toml`と`.config/it-slow-allow.d/*.toml`を合わせたもので、新しい項目は足すtaskのファイル`.config/it-slow-allow.d/t<task ID>.toml`に足す（別々のtaskの追加が同じファイルに触れないため。`.config/it-slow-allow.toml`には足さず、そこの既存の項目を直す・外すのはよい）。閾値・許可の一覧の書式・testの名前の求め方・scriptの引数は`scripts/check-it-test-time.sh`の冒頭のコメントが持つ。
-  - 超えたら、まずtestを直す（判断をunit testへ移す、caseごとにfixtureとsupervisorを起動し直さない）。直さずに許可の一覧に項目を足してよいのは、理由が次のどちらかのときだけ: (a) そのtestが守る境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか）を書ける、(b) 移し替えの予定があり、その行き先のtaskかgoalを書ける。判断のcaseを並べただけのtestは(a)に当たらない。項目には足したtaskのIDを書く。
+  - 超えたら、まずtestを直す（判断をunit testへ移す、配線はプロセスの中の配線のtestの層へ移す、caseごとにfixtureとsupervisorを起動し直さない）。直さずに許可の一覧に項目を足してよいのは、理由が次のどちらかのときだけ: (a) そのtestが守る境界（SQLite・Git・プロセス・復旧とadoptのどれか）を書ける、(b) 移し替えの予定があり、その行き先のtaskかgoalを書ける。判断のcaseを並べただけのtestは(a)に当たらない。項目には足したtaskのIDを書く。
   - 項目のtestを直すか移すtaskは、同じ変更で自分の項目を外すか理由を直す。testを消すか名前を変えるtaskは、消えた名前の項目を同じ変更で外す（残すと、後で同じ名前のtestを足したときに関門を素通りする。scriptはHEADに無い項目を警告するだけで落とさない）。
   - 閾値は本番の関門の`dagq::it`の1本の平均の数倍に置く。CIのrunnerと本番の関門は並列度が違い同じtestの秒が違うので、CIで落ちたtestが本番の関門のlogの秒では閾値の内なら、その秒を添えて直すか項目を足すかをplannerが決める。
   - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「itのtestの時間の関門」）、runのreviewのtestの規則の検査、CIのpushとpull_request（mainへのpushで落ちればci-failureのissue）。`integrate`の検証には足さない。
@@ -97,7 +106,7 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
   - 新しく現れたtestは、既存のidの代表と入れ替える（そのidの代表をこのtestに変え、元の代表は消すか別のidの代表にするかunit testへ移す）か、新しいidを足さなければ落ちる。移しただけのtestと既存のtestの本文の変更は対象にならない。
   - 1つのidを代表に持つtestが2本以上（R）なら落ちる。2本目は判断をunit testへ移すか、別の境界なら別のidにする。
   - module（`tests/it`のファイル）ごとの`#[test]`の本数をbaseとwork treeで数え、新しいid・代表の入れ替え・移したtestで説明できない増加があれば落ちる（入れ替えた元の代表を残したときも）。数は保存せず毎回baseから数えるので、並行のtaskで衝突しない。
-  - idを持てるのは、そのtestが上の境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか）を代表の1 caseで確かめ、ITでしか確かめられない理由を`reason`に書けるときだけ。判断のcaseを並べただけのtestはidを持たず、判断を`src/`の副作用のない関数のunit testへ移す。
+  - idを持てるのは、そのtestが上の境界（SQLite・Git・プロセス・復旧とadoptのどれか）を代表の1 caseで確かめ、ITでしか確かめられない理由を`reason`に書けるときだけ。境界の種類「supervisorの配線」の新しいidは足さず、配線のtestはプロセスの中の配線のtestの層に置く（既存のidは移し替えまで残る）。判断のcaseを並べただけのtestはidを持たず、判断を`src/`の副作用のない関数のunit testへ移す。
   - 新しいidの承認: 項目に足したtaskのIDを書き、そのtaskのacceptanceかdescriptionがidを名指していること（plan reviewが見る）と、`reason`が境界を書いていること（test-rulesのreviewが見る）で承認とする。機械は項目の形と数だけを見る。taskの受け入れ条件と`--verify`でidを名指す書き方と、plan reviewが差し戻す形は[taskの登録](task-registration.md)の「受け入れ条件とITの名指し方」と「plan reviewが当てはめる規則」が持つ。
   - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「testの規則の点検」）、runのプログラムのreview、CIのpushとpull_request。`integrate`の検証には足さない（時間の関門と同じく、着地の時間を増やさないため）。
   - testを消すか名前を変えるtaskは、そのtestを代表に持つ項目を同じ変更で直す（scriptは無いtestの代表を警告するだけで落とさない）。
