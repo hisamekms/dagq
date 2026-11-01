@@ -12,8 +12,8 @@
 
 当てはめ:
 
-1. **算数の確認**: 着地数/時 ≈ `slot_usage` × 3 ÷ 1 件あたりの枠の時間（`phase.work` + `phase.validate` + `phase.wait_to_land` の平均から人の答え待ちを引いたもの）。両辺が大きくずれたら、先に記録か読み方を疑う
-2. **制約を 1 つ特定**: `slot_usage` が 1 に張り付き、`load_per_core` の p90 が 1 以上（8 コアで load 8 以上）なら CPU が制約。並列数（`dagq.toml` の `[supervisor]` の `parallel`）を上げず、`cpu_per_landing`（`.rustc`・`.cargo`・`.claude` の内訳）を下げる手を探す。`landing_utilization` が 1 に近いか `.peak` が 1 で `landing_queue_depth` > 0 なら着地の直列が制約（1 件の検証が約 6〜10 分なら 6〜10 件/時で頭打ち）。`ask_wait` が大きければ人待ち
+1. **算数の確認**: 週の `details.slot_check` の `occupied`（slot の占有から求めた平均の同時 run 数）と `expected`（着地数/時 × 着地 1 件の枠の時間 ÷ 3600、着地した run の工程の記録から求める）を並べ、`ratio`（`occupied` ÷ `expected`）を読む。人の答え待ちは `expected` の側の `slot_secs_per_landing` で既に除かれている（枠を外れて人を待った時間を引いた値）ので、`ask_wait` や `land_phase.*` の人の待ちを別に引かない。両者は別の記録から作るので、`ratio` が 1 から大きく外れたら先に記録か読み方を疑い、値と見つけた原因を挙げる。`ratio` が null なら `reason` を読む。日は週より外れやすい（[kpi.md](../../../../plugins/claude-dagq/skills/dagq/reference/kpi.md) の「Check the arithmetic」）
+2. **制約を 1 つ特定**: `slot_usage` は着地の順番を待つ run とそれで空いた枠の claim も数える占有の割合で 1 を超えうるので、1 以上なら枠が埋まっていると読み、`landing_queue_depth` と `candidates` を添えてどれだけが着地待ちかを見る（[kpi.md](../../../../plugins/claude-dagq/skills/dagq/reference/kpi.md) の「Find the one constraint」）。枠が埋まり `load_per_core` の p90 が 1 以上（8 コアで load 8 以上）なら CPU が制約。並列数（`dagq.toml` の `[supervisor]` の `parallel`）を上げず、`cpu_per_landing`（`.rustc`・`.cargo`・`.claude` の内訳）を下げる手を探す。`landing_utilization` が 1 に近いか `.peak` が 1 で `landing_queue_depth` > 0 なら着地の直列が制約（1 件の検証が約 6〜10 分なら 6〜10 件/時で頭打ち）。`ask_wait` が大きければ人待ち
 3. **枠の時間のパレート**: `phase.work`・`phase.validate`・`phase.wait_to_land` を中央値 × 件数の大きい順に並べ、一番上だけを割る（`land_phase.*`、`phase.startup` は `work` の内側）
 4. **外れ値**: p90・max と、`stats --full` の長い run を `timeline RUN` で読む。`first_pass_rate` と `verification_failed_rate` でやり直しの量を見る
 
