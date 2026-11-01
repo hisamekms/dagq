@@ -908,4 +908,92 @@ mod tests {
         let error = finish_row(&queue.conn, 1, 0, " ", None, None).unwrap_err();
         assert_eq!(error.to_string(), "goal review outcome must not be blank");
     }
+
+    /// As a plan review's (ADR-t3737-1): a start the queue service did not
+    /// take leaves its row unfinished, and the same supervisor's next start
+    /// of the goal's review closes it `interrupted` and begins again,
+    /// without counting the attempt as one that failed.
+    #[test]
+    fn a_start_left_unfinished_is_begun_again_without_counting_its_attempt() {
+        use crate::application::TaskStore;
+        use crate::domain::NewGoal;
+        // In memory: no SQLite file (docs/development/testing.md).
+        let mut queue = SqliteQueue::init(":memory:").unwrap();
+        let goal = queue
+            .add_goal(NewGoal {
+                priority: Default::default(),
+                title: "g".into(),
+                description: String::new(),
+                acceptance: "(1) done".into(),
+                constraints: String::new(),
+                doc: None,
+                draft: false,
+                tags: Vec::new(),
+            })
+            .unwrap()
+            .id();
+        let task = queue
+            .add(NewTask {
+                title: "t".into(),
+                description: String::new(),
+                acceptance: String::new(),
+                verification_commands: Vec::new(),
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                dependencies: Vec::new(),
+                goal_dependencies: Vec::new(),
+                priority: Default::default(),
+                goal_id: Some(goal),
+                context: String::new(),
+                change: None,
+                provider: None,
+                worker_mode: None,
+                wait_for_build: false,
+                execution_class: Default::default(),
+            })
+            .unwrap()
+            .id();
+        queue
+            .conn
+            .execute(
+                "UPDATE tasks SET status='completed' WHERE id=?1",
+                [task.as_i64()],
+            )
+            .unwrap();
+        let token = LeaseToken::new("token");
+        let mut begin = || {
+            queue
+                .begin_goal_review(
+                    goal,
+                    &token,
+                    Path::new("/queue/goal-reviews"),
+                    Path::new("/repo"),
+                    &crate::domain::actor_model::ActorLaunch::default_of(
+                        crate::domain::actor_model::ModelRole::GoalReview,
+                    ),
+                    &|_| false,
+                )
+                .unwrap()
+                .expect("the goal's review begins")
+        };
+        let left = begin();
+        let again = begin();
+        assert_ne!(again.id, left.id);
+        assert_eq!((left.attempt, again.attempt), (1, 1));
+        let rows: Vec<(i64, Option<String>, bool)> = queue
+            .conn
+            .prepare("SELECT id, outcome, finished_at IS NOT NULL FROM goal_reviews ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (left.id, Some("interrupted".into()), true),
+                (again.id, None, false)
+            ]
+        );
+    }
 }

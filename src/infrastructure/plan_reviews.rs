@@ -1636,6 +1636,72 @@ mod tests {
         );
     }
 
+    /// A start the queue service did not take leaves its row unfinished
+    /// (ADR-t3737-1): the same supervisor's next start of the proposal's
+    /// review closes it `interrupted` and begins again, and the attempt is
+    /// not counted as one that failed.
+    #[test]
+    fn a_start_left_unfinished_is_begun_again_without_counting_its_attempt() {
+        // In memory: no SQLite file (docs/development/testing.md).
+        let mut queue = SqliteQueue::init(":memory:").unwrap();
+        let task_id = queue.add(new_task("t")).unwrap().id();
+        let proposal_id = queue
+            .submit(Submission {
+                tasks: vec![task_id],
+                goals: Vec::new(),
+                proposal: None,
+                owner: PlannerOwner {
+                    origin: PlannerOrigin::Person,
+                    workspace_id: None,
+                },
+            })
+            .unwrap()
+            .id();
+        let token = LeaseToken::new("token");
+        let mut begin = || {
+            queue
+                .begin_plan_review(
+                    proposal_id,
+                    &token,
+                    Path::new("/queue/plan-reviews"),
+                    Path::new("/repo"),
+                    &ActorLaunch::default_of(crate::domain::actor_model::ModelRole::PlanReview),
+                    &|_| false,
+                )
+                .unwrap()
+                .expect("the proposal's review begins")
+        };
+        let left = begin();
+        let again = begin();
+        assert_ne!(again.id, left.id);
+        assert_eq!((left.attempt, again.attempt), (1, 1));
+        assert_ne!(again.dir, left.dir);
+        let rows: Vec<(i64, Option<String>, bool)> = queue
+            .conn
+            .prepare("SELECT id, outcome, finished_at IS NOT NULL FROM plan_reviews ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (left.id, Some("interrupted".into()), true),
+                (again.id, None, false)
+            ]
+        );
+        let failed: i64 = queue
+            .conn
+            .query_row(
+                "SELECT count(*) FROM run_events WHERE kind='plan_review_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed, 0);
+    }
+
     fn new_task(title: &str) -> NewTask {
         NewTask {
             title: title.into(),

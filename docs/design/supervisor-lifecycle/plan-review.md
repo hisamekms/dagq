@@ -7,6 +7,7 @@ created: 2026-09-26
 scope: runtime
 related:
   - adr-t1985-1
+  - adr-t3737-1
   - adr-t1704-1
   - adr-t1566-1
   - adr-t451-1
@@ -96,6 +97,9 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 ## 失敗・人のanswer・引き継ぎ
 
 - 失敗と保留: `PlanReviewStore::fail_plan_review`・`plan_review_holds`・`settle_proposals`と`domain::plan_review::failed_end`。
+- 約束: jobの起動の途中でqueue serviceが要求をしなかった（undone）ための失敗は失敗にせず保留もしない。
+  `plan_review_failed`もkeptの記録も書かず、行を閉じずに残し、自分の次の周回か次のsupervisorの`begin_plan_review`が`interrupted`で閉じて起動し直す（attemptに数えない。[ADR-t3737-1](../../adr/2026-11-01-t3737-1-a-headless-job-whose-start-the-queue-service-did-not-do-starts-again-and-is-no-failure.md)、`supervise::planning::JobStart::of`）。
+  `maybe_done`とserviceが拒んだ要求は失敗にする。
 - 約束: 出し直し（`submit --proposal`）は保留とreviseの記録を全て消してplan reviewにかけ直す。
 - `approve_plan`のaskへの答え: `PlanReviewStore::decide_plan`と`domain::plan_review::PlanAnswer`、concernのaskはuse caseの`plan_ask`。
 - execの[引き継ぎ](handoff.md)の前後: `PlanningState::stop_for_handoff`・`interrupt_for_handoff`。

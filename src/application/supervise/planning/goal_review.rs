@@ -175,8 +175,8 @@ impl PlanningState {
             job.id,
             job.session_id.as_deref(),
         );
-        match self.spawn_goal_review(env, &job, &launch) {
-            Ok((prompt_bytes, Ok(headless))) => {
+        match JobStart::of(self.spawn_goal_review(env, &job, &launch)) {
+            JobStart::Running(prompt_bytes, headless) => {
                 info!(
                     "goal {goal} goal review {} started on {} with a prompt of {} bytes",
                     job.attempt,
@@ -190,8 +190,13 @@ impl PlanningState {
                     prompt_bytes,
                 });
             }
+            // The service did not do what the start asked (ADR-t3737-1).
+            JobStart::Again(undone) => {
+                warn!(error = %format_args!("{undone:#}"), "goal {goal} goal review {} could not start, the queue service did not do it: {undone:#}; it starts again on a later pass", job.attempt);
+                leave_for_restart(env, TargetKind::GoalReview, job.id, &job.dir);
+            }
             // Its own preparation failed: no provider was tried.
-            Err(failed) => {
+            JobStart::PrepareFailed(failed) => {
                 let error = format!("the headless goal review could not start: {failed:#}");
                 self.fail_goal_review(
                     env,
@@ -202,7 +207,7 @@ impl PlanningState {
                     },
                 );
             }
-            Ok((prompt_bytes, Err(failed))) => {
+            JobStart::ProviderFailed(prompt_bytes, failed) => {
                 let error = format!("the headless goal review could not start: {failed:#}");
                 let unusable = env.jobs.job_provider_failed(
                     &mut env.pass,

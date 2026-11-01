@@ -261,6 +261,60 @@ pub(super) fn verdict_sent(sent: Result<()>) -> VerdictSent {
     }
 }
 
+/// What the start of a plan or goal review's job came to, from what its
+/// spawn gave: the outer error its own preparation's, the inner one its
+/// provider's start (ADR-t3737-1).
+#[derive(Debug)]
+pub(super) enum JobStart<T> {
+    /// Its provider's process runs.
+    Running(PromptBytes, T),
+    /// The queue service did not do a request the start needed
+    /// ([`crate::application::supervisor_service::undone`]): nothing of
+    /// the job failed, so it is no failure; its row is left unfinished for
+    /// the next pass or the next supervisor to start again.
+    Again(anyhow::Error),
+    /// Its own preparation failed: no provider was tried.
+    PrepareFailed(anyhow::Error),
+    /// Its provider's process did not start.
+    ProviderFailed(PromptBytes, anyhow::Error),
+}
+
+impl<T> JobStart<T> {
+    /// What `spawned` came to: a request the service did not do, wherever
+    /// it failed, starts the job again; any other failure, `maybe_done`
+    /// and the service's refusal too, is the job's.
+    pub(super) fn of(spawned: Result<(PromptBytes, Result<T>)>) -> Self {
+        use crate::application::supervisor_service::undone;
+        match spawned {
+            Ok((bytes, Ok(running))) => Self::Running(bytes, running),
+            Err(error) | Ok((_, Err(error))) if undone(&error) => Self::Again(error),
+            Err(error) => Self::PrepareFailed(error),
+            Ok((bytes, Err(error))) => Self::ProviderFailed(bytes, error),
+        }
+    }
+}
+
+/// Leave the job of `kind` and `id` whose start the queue service did not
+/// take ([`JobStart::Again`]) for the next pass or the next supervisor:
+/// no failure is recorded or kept, its row stays unfinished (the next
+/// start closes it interrupted, which no attempt counts), its telemetry
+/// token is revoked and its directory removed.
+fn leave_for_restart(
+    env: &contexts::PlanningEnv<'_>,
+    kind: TargetKind,
+    id: i64,
+    dir: &std::path::Path,
+) {
+    end_job_telemetry(env, kind, id);
+    match env.files.remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(error = %error, "{} could not be removed: {error}", dir.display());
+        }
+    }
+}
+
 /// Issue the telemetry token of the job of `kind` and `id` (a plan review,
 /// a goal review) as its agent is started (ADR-t1662-3 decision 11), and
 /// register to it `session_id`, the session named ahead (Claude's): one
@@ -311,6 +365,60 @@ fn end_job_telemetry(env: &contexts::PlanningEnv<'_>, kind: TargetKind, id: i64)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-t3737-1: a request the queue service did not do, in the job's
+    /// preparation (a read of its material) or in its provider's start,
+    /// starts the job again; a request it may have done (`maybe_done`), its
+    /// refusal, a prompt that could not be made and a provider that did not
+    /// start stay the job's failures, each where it failed.
+    #[test]
+    fn only_a_request_the_service_did_not_do_starts_the_job_again() {
+        use crate::application::supervisor_service::{ServiceUnreachable, service_error};
+        use crate::domain::queue_service::{ServiceError, ServiceErrorCode};
+        type Spawned = Result<(PromptBytes, Result<()>)>;
+        let undone = || {
+            anyhow::Error::new(ServiceUnreachable::not_done("the supervisor's end is past"))
+                .context("events_between")
+        };
+        let maybe_done =
+            || anyhow::Error::new(ServiceUnreachable::maybe_done("no answer")).context("write");
+        let refused = || {
+            service_error(&ServiceError {
+                code: ServiceErrorCode::Failed,
+                message: "refused".into(),
+                denied: None,
+                kind: None,
+                rejected: false,
+                held: None,
+            })
+        };
+        let bytes = PromptBytes::default;
+        let of = |spawned: Spawned| JobStart::of(spawned);
+        assert!(matches!(
+            of(Ok((bytes(), Ok(())))),
+            JobStart::Running(_, ())
+        ));
+        for again in [Err(undone()), Ok((bytes(), Err(undone())))] {
+            assert!(matches!(of(again), JobStart::Again(_)));
+        }
+        for prepare in [
+            maybe_done(),
+            refused(),
+            anyhow::anyhow!("the prompt is over its limit"),
+        ] {
+            assert!(matches!(of(Err(prepare)), JobStart::PrepareFailed(_)));
+        }
+        for provider in [
+            maybe_done(),
+            refused(),
+            anyhow::anyhow!("no Claude runs on this supervisor"),
+        ] {
+            assert!(matches!(
+                of(Ok((bytes(), Err(provider)))),
+                JobStart::ProviderFailed(..)
+            ));
+        }
+    }
 
     /// A kept record that names no pid, or a verdict that does not read,
     /// is no verdict to apply, whoever reads it; one of a kind this binary

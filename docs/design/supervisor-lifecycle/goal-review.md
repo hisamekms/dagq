@@ -7,6 +7,7 @@ created: 2026-09-27
 scope: runtime
 related:
   - adr-t1504-2
+  - adr-t3737-1
   - design-follow-up-membership
   - adr-t1566-1
   - design-supervisor-lifecycle-prompt
@@ -57,6 +58,8 @@ execの[引き継ぎ](handoff.md)のあいだの回収と止め方は引き継�
    envは`actor_env`が組み、`DAGQ_QUEUE`は渡さず、jobの`dagq`はクライアントモードでserviceに送る（[Queue service](../queue-service.md#クライアントモード)。CLIは読み取りだけを許す。[Roles](roles.md#actors)）。
    時間の上限はreviewの`review_timeout`。
    起動できなければ下の6の失敗にする。
+   例外として、起動の途中でqueue serviceが要求をしなかった（undone）ための失敗は失敗にせず、`goal_review_failed`もkeptの記録も書かず、行を閉じずに残して、自分の次の周回か次のsupervisorの`begin_goal_review`が`interrupted`で閉じて起動し直す（attemptに数えない。[ADR-t3737-1](../../adr/2026-11-01-t3737-1-a-headless-job-whose-start-the-queue-service-did-not-do-starts-again-and-is-no-failure.md)、`supervise::planning::JobStart::of`）。
+   `maybe_done`とserviceが拒んだ要求は6の失敗にする。
    - **provider**（[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)）: 行き先は`PlanningState::goal_review_route`が`starting`のpassごとに、supervisorの状態を値で渡した副作用の無い`goal_review_route_of`で決める。
      `[roles.goal_review]`に`provider`が無ければClaudeで、Claudeの控えのaskが開いている間は起動しない。
      `provider`があれば`domain::actor_model::job_route`で、そのproviderが使えれば（supervisorにagentがあり、`Supervisor::provider_held`が控えを言わない）そこで、使えなければもう一方のprovider（goal reviewはClaudeでもCodexでも動く）が使えればそこで（modelとeffortは渡さない）、どちらも使えなければ起動しない。
