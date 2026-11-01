@@ -9,7 +9,7 @@ prints the aggregates as JSON lines.
   python3 -I docs/plans/it-reduction/measure_goal237.py \
     --runs-dir ~/.local/share/dagq/77067154921b9014/runs \
     --metrics ~/.local/share/dagq/77067154921b9014/host/metrics-2026*.csv \
-    --since 2026-10-27T00:00:00+09:00 --until 2026-10-31T20:30:00+09:00 \
+    --since 2026-10-27T00:00:00+09:00 --until 2026-11-01T22:00:00+09:00 \
     --out-dir docs/plans/it-reduction/goal-237
 
 before is a log written from --since up to the landing of 3759 (the first of goal 237),
@@ -65,6 +65,14 @@ def reason_kind(r):
     return r.split(':', 1)[0]
 
 
+def reason_group(r):
+    """The kind a log is counted under: the helper reasons fold into one whatever share of IT the helper's users hold."""
+    k = reason_kind(r)
+    if k.startswith('a helper whose users hold '):
+        return 'a helper whose users hold most IT'
+    return k
+
+
 def read_log(path):
     text = ANSI.sub('', path.read_text(errors='replace'))
     lines = text.splitlines()
@@ -79,9 +87,8 @@ def read_log(path):
             break
     if 'no table to hand over' in text and not every:
         every, reasons = True, ['no table to hand over']
-    m = None
-    for l in lines:
-        m = SUMMARY.match(l) or m
+    # landing-it.sh in two stages (unit, then IT) writes a Summary per stage; the time is their sum.
+    summaries = [float(m.group(1)) for m in map(SUMMARY.match, lines) if m]
     build_s = 0.0
     for l in lines:
         b = BUILD.match(l)
@@ -110,7 +117,7 @@ def read_log(path):
     return {
         'every': every,
         'reasons': reasons,
-        'summary_s': float(m.group(1)) if m else None,
+        'summary_s': round(sum(summaries), 3) if summaries else None,
         'build_s': build_s,
         'not_run': [int(x) for x in NOT_RUN.search(text).groups()] if NOT_RUN.search(text) else None,
         'timed_out': bool(SIGNAL.search(text)),
@@ -199,9 +206,11 @@ def main():
             print(json.dumps({'interval': name, 'logs': 0}))
             continue
         every = [r for r in xs if r['every']]
-        kinds = Counter(k for r in every for k in sorted({reason_kind(x) for x in r['reasons']}))
+        kinds = Counter(k for r in every for k in sorted({reason_group(x) for x in r['reasons']}))
         done = [r for r in xs if r['summary_s'] is not None and not r['timed_out']]
-        full_done = [r for r in every if r['summary_s'] is not None and not r['timed_out']]
+        # A log whose unit stage failed never started the IT stage, so it is not a run of every IT.
+        full_done = [r for r in every if r['summary_s'] is not None and not r['timed_out'] and r['it_n'] > 0]
+        every_unit_failed = [r for r in every if r['summary_s'] is not None and not r['timed_out'] and r['it_n'] == 0]
         summ = [r['summary_s'] for r in done]
         summ_full = [r['summary_s'] for r in full_done]
         loads = [r['load_mean'] for r in xs if r['load_mean'] is not None]
@@ -219,6 +228,7 @@ def main():
             'timed_out_every_it': sum(r['timed_out'] for r in every),
             'no_summary': sum(r['summary_s'] is None for r in xs),
             'failed_tests': sum(r['failed'] for r in xs),
+            'every_it_without_it_stage': len(every_unit_failed),
             'summary_median_p90_all_done': [pct(summ, .5), pct(summ, .9), len(summ)],
             'summary_median_p90_every_it_done': [pct(summ_full, .5), pct(summ_full, .9), max(summ_full, default=None),
                                                  len(summ_full)],
