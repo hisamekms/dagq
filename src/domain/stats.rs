@@ -1,12 +1,15 @@
 //! `stats` (ADR-0023 decision 5): the time each run spent in work,
-//! validation, waiting to land and startup, how often it came back, and the
-//! thresholds it crossed. Everything is derived from `run_events`; this
-//! module is a pure function of the events, the task → goal map and a
-//! snapshot of the supervisors' free slots.
+//! validation, waiting to land and to its first commit, its time and slot
+//! time by tag, how often it came back, and the thresholds it crossed.
+//! Everything is derived from the ledger's window
+//! ([`crate::domain::ledger::window`], ADR-t1662-2 D1): the events its
+//! rows own, the rows themselves and what the supervisor recorded of now;
+//! this module is a pure function of those and the task → goal map.
 //!
 //! It finds where the runs spend their time, what holds them and which
 //! thresholds they cross by one rule from the record every time, with no
-//! table of its own (ADR-0040 decision 5); it gives the running alerts and
+//! table of its own but the ledger (ADR-0049 decision 5 as ADR-t1662-2
+//! amends it); it gives the running alerts and
 //! what each `[stall]` threshold detected in the same output, so that the
 //! observer, plan review, a person and the KPIs read the same values
 //! (ADR-0043 decisions 5 and 6); and it groups the runs by what they were
@@ -15,10 +18,9 @@
 //!
 //! The flow: the CLI (or the observer) → `compose::OneShot::stats_of`,
 //! which reads the time once → [`crate::application::stats::stats`],
-//! which reads the queue, the run directories, the wrappers' processes,
-//! main's history and `<queue dir>/host/` and passes them on without a
-//! judgement of its own → [`stats`] here, which holds every rule of the
-//! counting and does no I/O → [`with_changes`], [`with_areas`],
+//! which reads the ledger's window and the settings and passes them on
+//! without a judgement of its own → [`stats`] here, which holds every
+//! rule of the counting and does no I/O → [`with_changes`], [`with_areas`],
 //! [`without_cargo_measures`] and [`without_rustc`] → JSON. The KPI
 //! windows and the forecast call [`stats`] directly, so they read the same
 //! rules; plan review's and the claim deferral's conflict hotspots apply
@@ -28,7 +30,11 @@
 //! [`crate::domain::ledger::window`]'s.
 //! Each run's times under today's names (`work`, `validate`,
 //! `wait_to_land`, `land_phases`, `startup`, `first_commit`) are its
-//! ledger row's ([`ledger_times`]), not the events'.
+//! ledger row's ([`ledger_times`]), not the events': a legacy row's frozen
+//! values with the legacy mark, and null for a run before the switch with
+//! no row (counted in `ledger_missing`). The breakdown by blocker, holds
+//! and attempt in the two measures, with the unattributed time, is the
+//! rows' ([`crate::domain::ledger::breakdown`]).
 //!
 //! One read has four ranges: the page of runs (`--since` <
 //! `finished_event_id` ≤ `--until`, [`DEFAULT_RUNS`] of them without
@@ -294,7 +300,8 @@ pub struct RunStats {
     /// ledger, the end of the first `validating` to the start of `push`
     /// (which `run_integrated` starts).
     pub wait_to_land: Option<i64>,
-    /// `agent_started` → `first_commit_observed`.
+    /// `agent_started` → `first_commit_observed`; read from the ledger,
+    /// the row's milestones.
     pub startup: Option<i64>,
     /// The same value as `startup`, under the name that replaces it
     /// (ADR-t1662-1 decision 19).
@@ -1018,7 +1025,8 @@ impl Default for LiveSnapshot {
     }
 }
 
-/// Aggregate `events` (every `run_events` row, ascending id). `goals` maps a
+/// Aggregate `events` (the events the ledger window's rows own, ascending
+/// id). `goals` maps a
 /// task to its goal, `now` is the unix second the open waits are measured
 /// to, `slots` is the supervisors' snapshot for the idle alert and `live`
 /// what the running alerts are judged on.

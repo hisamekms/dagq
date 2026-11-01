@@ -117,14 +117,12 @@ macOSの`%cpu`は減衰する平均なので瞬間の値ではない。
 - **CPU秒**（`cpu_secs`）: 各行の`cpu_total`（と`cpu_<kind>`）をcoreの数に直し、その行が代表する秒を掛けた合計で、代表する秒の決め方と欄は`domain::host_metrics::cpu_secs`のdoc commentが持つ。
   代表する秒には上限があり、記録の途切れを次の行の負荷で埋めない。
   `kpi`の`cpu_per_landing`がこれを着地数で割る。
-- `infrastructure::host_metrics::summary(dir, from, until)`（`domain::host_metrics::summarize`）が任意の区間の要約を返す。
-  [`kpi`](commands.md)はこれを各期間と比べる窓ごとに読み、`host`として並べる（日次・週次のレポートのJSONにも載る）。
+- `kpi`は各期間と比べる窓ごとに要約を読み、`host`として並べる（日次・週次のレポートのJSONにも載る）。
   `host`は参考の値で目標の判定・breach・push・observerのfindingには使わない。
   そこから`cpu_per_landing`と`load_per_core`をKPIにする（[`kpi`](commands.md)）。
-- 今の`stats`・`kpi`・レポートはCSVを読む。
-  NodeSampleStoreのsampleは台帳を作る係がnodeの行に畳み、共通の読み取り関数がその行だけから同じ要約を作る。
-  今のCSVの要約との並走の比較は`stats --ledger`（[計測](../measurement.md#並走の比較と照合)）。
-  読み手の切り替えは[計測](../measurement.md)の段の後続が行う
+- `stats`・`kpi`・レポートはCSVもNodeSampleStoreも直接読まず、台帳のnodeの行だけを読む。
+  台帳を作る係がNodeSampleStoreのsampleをnodeの行に畳み、共通の読み取り関数がその行のsampleから窓や期間の要約を作る（`domain::ledger::node::host_summary`、[計測](../measurement.md#共通の読み取り関数)）。
+  要約はCSVの同じsampleの要約（`infrastructure::host_metrics::summary`）と同じ値になる。
 - 人はCSVをそのまま読める。
 
 ## 外部のsamplerを止める手順

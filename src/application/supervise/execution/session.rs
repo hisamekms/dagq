@@ -1014,8 +1014,10 @@ impl SessionWatch {
 
     /// Record `first_commit_observed` once, the first time the worktree's
     /// HEAD is seen away from the run's base commit: with `agent_started` it
-    /// measures how long a session takes to start working (`stats`'s
-    /// `startup`). The time is when this poll saw it, at most a tick late.
+    /// measures how long a session takes to start working: the run's
+    /// ledger row keeps both as milestones, which `stats` and `kpi` read as
+    /// `first_commit` (and, for a period, under its old name `startup`).
+    /// The time is when this poll saw it, at most a tick late.
     /// A HEAD that cannot be read is noted and checked again next poll; a
     /// container run's bundle or state file not readable yet is no change
     /// ([`polled_head`](crate::application::run_git::polled_head)).

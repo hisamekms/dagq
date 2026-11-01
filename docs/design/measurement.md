@@ -30,7 +30,7 @@ related:
 
 > **一部だけ実装済み**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」と「送る口」（中から測った資源は予定）・「コマンドの形と分類」は実装済みで今の姿を書く。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
-> 今動いている計測は[計測のコマンド](supervisor-lifecycle/commands.md)と最初のcommitの観測（`first_commit_observed`）が持ち、この文書はそれらを変えない。
+> 計測のコマンドをまたぐ約束は[計測のコマンド](supervisor-lifecycle/commands.md)が持つ。
 
 決めた理由はADR-t1662-1〜3が持つ。
 ここはeventの欄・列とJSONの形・数値・関数の名前の予定を持つ。
@@ -136,7 +136,7 @@ supervisorの生存と停止の証拠はEventStoreに残し、一生の終わり
   後で掃除の`supervisor_stopped`が届けば`last_heartbeat_at`で畳み直す。
   どちらでもなければ生きている。
 - 停止のeventの無いstaleな登録は`silent`で閉じて掃除の後に直り、`supervisor_alive`の無い前のbuildのtokenも同じ規則で最後のeventで閉じる。
-- kpiの`supervisor_lives`は今もsupervisorsの表を読み、この規則へ移すのは段2。
+- kpiの`supervisor_lives`もsupervisorsの表を読まず、この規則でeventから読む（`supervisor_life::heartbeats`）。
 
 ### 今の判定の記録
 
@@ -224,7 +224,7 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 - 今の名前の意味の違い（`work`の終わり、人の答え待ちは`ask`）は`ledger::read`のdoc comment。
   1期間の長さは段3のtaskが決める。
 - kpiの`phase.<工程>`と`land_phase.<工程>`も同じ1期間は同じ名前で作り、その後はタグごとの値と`phase.first_commit`に置き換える。hostの設定の`[kpi.targets."phase.startup"]`は`phase.first_commit`に読み替える（ADR-t1662-1が[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)決定1をamends）。
-- 新しい出力は所要時間とslotを握った時間の2本でタグごとの内訳を出し、`change`と`area`で層に分ける。
+- 新しい出力は所要時間とslotを握った時間の2本でタグごとの内訳とunattributedを出し、`change`と`area`で層に分ける。
 
 ### 欠測と集約の契約
 

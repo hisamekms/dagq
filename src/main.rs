@@ -1556,13 +1556,16 @@ enum Command {
         #[command(flatten)]
         cmux: RetiredCmux,
     },
-    /// Per-run times in seconds (work, validate, wait_to_land, startup) and counts, per-goal and
-    /// overall count/total/median, and alerts over thresholds, derived from the ledger. The latest
-    /// 50 finished runs unless --full; pass `next_cursor` to --since for only the runs finished later.
+    /// Per-run times in seconds (work, validate, wait_to_land, land_phases, startup and
+    /// first_commit; a legacy row's frozen values, null for a run with no ledger row, counted in
+    /// ledger_missing) and counts, per-goal and overall count/total/median, the time and the slot
+    /// time by blocker, holds and attempt with the unattributed time, and alerts over thresholds,
+    /// all derived from the ledger. The latest 50 finished runs unless --full; pass `next_cursor`
+    /// to --since for only the runs finished later.
     /// Each run also carries its title, claim/validation/landing times, integrate attempts and
     /// deferrals, the landings that broke it, and its resumes.
-    /// --ledger is stopped in this build: refused before it reads, as it reads every event of the
-    /// queue; it is removed once stats reads the ledger.
+    /// --ledger is stopped: refused before it reads, as it reads every event of the queue, and to
+    /// be removed.
     // ADR-t3745-1; task 1671 removes --ledger.
     Stats {
         /// Event id (a previous `next_cursor`), `@<unix seconds>` or an RFC 3339 time: only runs
@@ -1579,13 +1582,8 @@ enum Command {
         /// Every finished run instead of the latest 50 (or the next 50 past --since).
         #[arg(long)]
         full: bool,
-        /// Instead of the stats, the parallel run of the ledger (stage 2 of the measurement's
-        /// rebuild): per run today's work, wait_to_land and startup beside the ledger's (its
-        /// push apart), each difference in seconds with its reasons; the fields of
-        /// no run (jobs, sessions, ...) beside those of the ledger's rows; the host's load of the
-        /// node rows beside today's CSV over the window and kpi's last 7 days; and what ended in
-        /// the window (from the start without --since) against the ledger's rows: missing, not
-        /// final, push_pending, dirty, and up_to_date per row.
+        /// Stopped and refused: the parallel run of the ledger against today's stats, from before
+        /// stats read the ledger; to be removed.
         #[arg(long)]
         ledger: bool,
         #[command(flatten)]
@@ -1593,11 +1591,13 @@ enum Command {
     },
     // ADR-0051, ADR-t980-1.
     /// KPIs of the flow, rework, people's load, infrastructure, improvements and sessions per day
-    /// or ISO week, split by the task's change (`unknown` without one), by the areas of what the
-    /// run landed when dagq.toml has `[areas]`, and --by the claim's attributes, each next to the
-    /// previous period (and a day's 7-day median), judged against the `[kpi.targets]` of
-    /// dagq.toml and host.toml. --compare splits at a mark (its event id) or a time, or compares
-    /// two windows A..B,C..D, and lists every other mark in and between them. Reads only; JSON.
+    /// or ISO week, with the runs' time and slot time by blocker, holds and attempt and the
+    /// unattributed share, all derived from the ledger, split by the task's change (`unknown`
+    /// without one), by the areas of what the run landed when dagq.toml has `[areas]`, and --by
+    /// the claim's attributes, each next to the previous period (and a day's 7-day median),
+    /// judged against the `[kpi.targets]` of dagq.toml and host.toml. --compare splits at a mark
+    /// (its event id) or a time, or compares two windows A..B,C..D, and lists every other mark in
+    /// and between them. Reads only; JSON.
     Kpi {
         #[arg(long, default_value = "day", value_parser = ["day", "week"])]
         period: String,

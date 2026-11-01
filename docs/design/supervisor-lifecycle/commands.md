@@ -10,6 +10,8 @@ related:
   - design-measurement
   - design-authorization
   - adr-0040
+  - adr-0049
+  - adr-t1662-2
   - adr-0051
   - adr-0020
   - adr-0054
@@ -43,7 +45,7 @@ related:
 
 ## 計測のコマンドをまたぐ約束
 
-- 値は記録（run_events）から読むたびに同じ規則で導き、集計やKPIの表を持たない（[ADR-0040](../../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)決定5、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)）。
+- `stats`・`kpi`・`report`の値は台帳（記録から作り直せるビュー）の窓だけを読むたびに同じ規則で導き、台帳の他に集計やKPIの表を持たない（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定5を[ADR-t1662-2](../../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)がamends、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)）。
   台帳から作る形は[計測](../measurement.md#共通の読み取り関数)が持つ。
 - 規則は1か所に書く。
   `kpi`と`report`は期間ごとの窓で`stats`と同じdomainの関数を呼び、observerの入力も同じ関数を呼ぶ。

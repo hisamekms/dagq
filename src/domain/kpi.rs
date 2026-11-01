@@ -1,14 +1,19 @@
 //! `kpi` (ADR-0051 decisions 1–9 and 14–19): the KPIs of the flow, the
 //! rework, the people's load, the infrastructure, the improvements and the
-//! Claude sessions, derived by fixed rules from `run_events` for each day
-//! or ISO week, split by the change of the task, the areas of what the run
-//! landed and by the attributes a run was
-//! claimed with, next to the previous period, compared across a change
-//! mark, and judged against the targets. A pure function of the events,
-//! the task → goal and task → change maps, the runs' areas, the time zone, the host's cores
-//! and the `[kpi]` settings, like [`super::stats`]: each window's runs,
-//! intervals, `land_phases`, asks and sessions are what
-//! [`super::stats::stats`] derives for it, and no rule is written twice.
+//! Claude sessions, derived by fixed rules from the ledger's window
+//! ([`super::ledger::window`], ADR-t1662-2 D1) for each day or ISO week,
+//! split by the change of the task, the areas of what the run landed and
+//! by any key of the attributes a run was claimed with
+//! ([`Axis`]), next to the previous period, compared across a change
+//! mark, and judged against the targets. A pure function of the events
+//! the window's rows own, its run rows, the task → goal and task → change
+//! maps, the runs' areas, the time zone, the host's cores and the `[kpi]`
+//! settings, like [`super::stats`]: each window's runs, intervals,
+//! `land_phases`, asks and sessions are what [`super::stats::stats`]
+//! derives for it, and no rule is written twice. Each stratum also gives
+//! the runs' time and slot time by blocker, holds and attempt with the
+//! unattributed time, and the `unattributed_ratio` KPI
+//! ([`UNATTRIBUTED_RATIO`]), from the run rows.
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
@@ -490,7 +495,8 @@ impl Default for KpiQuery {
 }
 
 /// Reads the summary of the host's load between two unix seconds, both
-/// inclusive ([`crate::infrastructure::host_metrics::summary`], task 872).
+/// inclusive, from the ledger's node rows
+/// ([`super::ledger::window::LedgerWindow::host_between`]).
 #[derive(Clone, Copy)]
 pub struct HostReader<'a>(pub &'a dyn Fn(i64, i64) -> HostSummary);
 
@@ -512,15 +518,17 @@ impl HostReader<'_> {
 /// What `kpi` derives from.
 #[derive(Debug, Clone, Copy)]
 pub struct KpiInput<'a> {
-    /// Every `run_events` row, ascending id.
+    /// The events the ledger window's rows own, ascending id
+    /// ([`super::ledger::window::LedgerWindow::events`]).
     pub events: &'a [RunEvent],
     pub goals: &'a HashMap<TaskId, Option<GoalId>>,
     /// The change of every task (ADR-t980-1).
     pub changes: &'a HashMap<TaskId, Option<TaskChange>>,
     /// The landed runs' areas (ADR-t980-1); `None` without `[areas]`.
     pub areas: Option<&'a RunAreas>,
-    /// The registered supervisors' last heartbeats (unix seconds), by
-    /// token: a stale one ends that supervisor's life (decision 10).
+    /// The supervisors' last heartbeats (unix seconds), by token, of their
+    /// own records ([`super::supervisor_life::heartbeats`]): a stale one
+    /// ends that supervisor's life (decision 10).
     pub heartbeats: &'a HashMap<String, i64>,
     /// Where each draft the runtime or a job registered came from
     /// (`draft_origins`), for the drafts' KPIs as `stats`' `draft_flow`.
