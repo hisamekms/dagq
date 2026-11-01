@@ -55,7 +55,7 @@ runtimeが状態を変えるのは、このDBへの書き込みトランザク�
 ## 全体の流れ
 
 ```text
-queue service（ADR-t3102-2の例外: init・migrate・doctor）
+queue service（ADR-t3102-2の例外: DBの無い所へのinit）
         │  port（application の trait）
         ▼
 SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（WAL）
@@ -101,7 +101,7 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 - 変える: 読んだ集約をdomainのコマンドに渡し、返った値を書く。
   `WHERE status=<読んだstatus>`や`AND supervisor_token=<token>`は並行の変更を見つける条件で、どの遷移を許すかの判断ではない。
 - 認可の後の変化: 計画系のコマンドは認可に使ったtaskの状態を渡し、storeはトランザクションを開いた直後に照合して、変わっていれば何も書かずに拒む（[Authorization](authorization.md)）。
-  supervisorのように認可を経ない書き手は照合しない。
+  supervisor（`supervisor_needs`）と着地のintegrator（`integrator_scope`）の操作はserviceがcapabilityで認可し、taskの状態は照合しない。
 - 遷移に付くevent: domainの記録つきのコマンド（`src/domain/run/recorded.rs`）が更新後のrunとeventの列を返し、storeは同じトランザクションで書くだけにする。
   storeが足すのは自分の表から読むもの（resumeの作業の内訳とtoken）とleaseの解放だけ。
 - runのdomainの拒否は、トランザクションが巻き戻ってeventに残せないので、run directoryの`refusals.log`に1行で残す（`runtime_store::REFUSALS_LOG`）。
@@ -196,7 +196,6 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 ### queue service
 
 queue DBを開くのはqueue service（[Queue service](queue-service.md)）と[その例外](queue-service.md#dbを開く経路)だけで、SQLiteのトランザクションとleaseの規則で並ぶ。
-serviceのファイルはqueueのディレクトリの`service/`に置き、DBには置かない。
 送り直される結果の記録のeventは最初の送信の識別子と`event_records`で結んで同じトランザクションで書き、識別子ごとに1つのeventにする（ADR-t3102-3決定5）。
 
 ## session steps

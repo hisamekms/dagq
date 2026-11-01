@@ -216,9 +216,9 @@ capabilityの模型（actor・`TrustLevel`・`Capability`・`Resource`・`Static
    containerで動かすのは信頼しないコードを走らせるworker・resumeとintegrateのverificationだけで、読むだけのheadlessのjobの隔離はOSのsandboxにする（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)）。
    containerのrunにはhostのgitの共通dirをmountせず、runごとのcloneを渡す（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)）
 2. **queue service / broker**: DBの直接操作とenvの偽装を塞ぐには、AI actorがqueueのファイルに触れず、制御側のserviceにだけ依頼する形にする。
-   serviceと、workerとjobのdagqのクライアントモードはある（[Queue service](queue-service.md)、ADR-t1233-1・ADR-t1233-4・ADR-t1233-5）。
-   host構成ではtokenのfileも同じユーザーが読めるので、助言的であることは変わらない（ADR-t1233-4決定5）。
-   serviceは起動した制御側が発行した資格（actor idとrunに紐づくもの）でactorを識別し、`DAGQ_ROLE`を信用しない。
+   queue DBを開くのはserviceと[その例外](queue-service.md#dbを開く経路)だけで、ほかのプロセスはserviceのユースケースを通る（ADR-t3102-2）。
+   serviceは発行した資格かsocketのpeerでactorを識別し、`DAGQ_ROLE`を信用しない。
+   host構成ではtokenのfileもDBも同じユーザーが読めるので、助言的であることは変わらない（ADR-t1233-4決定5・ADR-t3102-1決定5）。
    判定は今と同じapplicationの境界（`Planning`・`Dialogue`・`Operation`・`Integrator`）で行い、wrapperとhookはworkerの環境から分けたwrapperのprincipalで判定する。
    [queueのbroker](queue-broker.md)の決まった形は、queue serviceと同じ`up` / `down` / execの引き継ぎで動くhostのプロセスで、宛先をqueue service・`api.anthropic.com`と、`dagq.toml`が挙げるpackage registryのhostに限り、allowlistの外を拒む（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)・[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)）。
    containerにClaudeの資格情報を置かず、brokerがrun tokenを`host.toml`で人が選んだ長期tokenかAPI keyに差し替える（[ADR-t2177-1](../adr/2026-10-12-t2177-1-broker-swaps-the-run-token-for-a-claude-credential-chosen-in-host-toml.md)）。

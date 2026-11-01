@@ -107,6 +107,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 ## host運用
 
 runtime自身をhostで動かし続けること（up・down・install・自動更新・queue service・compileの共有・diskの後始末・hostの計測・inbox）。
+queue serviceはqueue DBを開く唯一のプロセスで（例外は[Queue service](queue-service.md#dbを開く経路)）、ほかのcontextのプロセスはそのユースケースを通る。
 
 ## 検査できる規則
 
