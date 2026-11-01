@@ -21,7 +21,8 @@
    ],
    "excluded": [],
    "kept": [],
-   "filter": "(kind(lib) | kind(bin) | kind(proc-macro)) | ((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)))"
+   "unit_filter": "(kind(lib) | kind(bin) | kind(proc-macro))",
+   "it_filter": "((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)))"
   }
  },
  {
@@ -136,7 +137,8 @@
    "not_in_table": [],
    "excluded": [],
    "kept": [],
-   "filter": "(kind(lib) | kind(bin) | kind(proc-macro)) | (kind(test) - binary(e2e))"
+   "unit_filter": "(kind(lib) | kind(bin) | kind(proc-macro))",
+   "it_filter": "(kind(test) - binary(e2e))"
   }
  },
  {
@@ -497,7 +499,8 @@
     "dagq app::tests::unit_fails"
    ],
    "kept": [],
-   "filter": "((kind(lib) | kind(bin) | kind(proc-macro)) | ((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)))) - ((binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq) & test(=app::tests::unit_fails)))"
+   "unit_filter": "((kind(lib) | kind(bin) | kind(proc-macro)) - ((binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq) & test(=app::tests::unit_fails))))",
+   "it_filter": "(((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table))) - ((binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq) & test(=app::tests::unit_fails))))"
   }
  },
  {
@@ -526,7 +529,8 @@
     "dagq::it b::big"
    ],
    "kept": [],
-   "filter": "((kind(lib) | kind(bin) | kind(proc-macro)) | (kind(test) - binary(e2e))) - ((binary_id(=dagq::it) & test(=b::big)))"
+   "unit_filter": "((kind(lib) | kind(bin) | kind(proc-macro)) - ((binary_id(=dagq::it) & test(=b::big))))",
+   "it_filter": "((kind(test) - binary(e2e)) - ((binary_id(=dagq::it) & test(=b::big))))"
   }
  },
  {
@@ -570,7 +574,8 @@
    "kept": [
     "dagq::it b::big"
    ],
-   "filter": "((kind(lib) | kind(bin) | kind(proc-macro)) | ((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)) | (binary_id(=dagq::it) & test(=b::big)))) - ((binary_id(=dagq::it) & test(=c::small)))"
+   "unit_filter": "((kind(lib) | kind(bin) | kind(proc-macro)) - ((binary_id(=dagq::it) & test(=c::small))))",
+   "it_filter": "(((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)) | (binary_id(=dagq::it) & test(=b::big))) - ((binary_id(=dagq::it) & test(=c::small))))"
   }
  }
 ]

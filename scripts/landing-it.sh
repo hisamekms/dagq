@@ -1,7 +1,8 @@
 #!/bin/sh
 # The tests of this repository's landing verification (ADR-t1925-1, goal 157
 # stage 3b): every unit test and the integration tests (IT) the diff reaches,
-# in one cargo nextest run. dagq.toml's [landing_verification] runs this in
+# in two cargo nextest runs: the unit stage first and, only when it passes,
+# the IT stage (skipped when no IT is chosen). dagq.toml's [landing_verification] runs this in
 # place of a task's coverage gate after the rebase, with the variables the
 # runtime hands it (src/domain/landing_verification.rs): DAGQ_LANDING_BASE
 # (the main commit the run was rebased onto), DAGQ_CI_KNOWN_FAILURES (the
@@ -28,7 +29,8 @@
 #                (a table, a tree, a nextest list, cases.json and repo/, the
 #                tests/common and tests/it the helpers' users are read
 #                from), and the hand-over of --prepare's table to a run in
-#                the container.
+#                the container, and the stages with a stub cargo (a failing
+#                unit stage ends the script before the IT stage runs).
 #                Needs only sh and python3.
 #
 # Which IT (scripts/landing-it.py, choose()): over the files of
@@ -73,7 +75,8 @@
 # no network) nothing is fetched: the table is the one --prepare copied into
 # the materials, and without one every IT runs.
 #
-# Exit status: cargo nextest's; 2 when the run cannot be prepared.
+# Exit status: the unit stage's cargo nextest when it fails, else the IT
+# stage's (0 when no IT is chosen); 2 when the run cannot be prepared.
 set -eu
 
 me=landing-it
@@ -112,9 +115,56 @@ self_test_handover() {
   [ -n "$ok" ]
 }
 
+# --self-test's stages: cargo is a stub that records each run and fails the
+# unit stage or the IT stage as asked. A failing unit stage ends the script
+# with its status before the IT stage's run; a passing one runs the IT stage
+# and ends with its status. No table (every IT) and no network.
+self_test_stages() {
+  t=$(mktemp -d "${TMPDIR:-/tmp}/landing-it-self-test.XXXXXX")
+  mkdir -p "$t/bin" "$t/empty" "$t/materials"
+  printf '#!/bin/sh\nexit 1\n' >"$t/bin/gh"
+  cat >"$t/bin/cargo" <<EOF
+#!/bin/sh
+echo "\$*" >>"$t/runs"
+case "\$*" in
+  *"kind(lib)"*) exit "\${STUB_UNIT_EXIT:-0}" ;;
+  *) exit "\${STUB_IT_EXIT:-0}" ;;
+esac
+EOF
+  chmod +x "$t/bin/gh" "$t/bin/cargo"
+  ok=1
+  # unit exit, IT exit, the status wanted, the runs wanted, what is checked
+  for c in "3 0 3 1 a failing unit stage ends before the IT stage" \
+    "0 5 5 2 a passing unit stage runs the IT stage and ends with its status" \
+    "0 0 0 2 both stages pass"; do
+    set -- $c
+    want_status=$3 want_runs=$4
+    unit_exit=$1 it_exit=$2
+    shift 4
+    : >"$t/runs"
+    status=0
+    (
+      unset DAGQ_LANDING_BASE DAGQ_CI_KNOWN_FAILURES DAGQ_CI_FIX_RUN
+      PATH="$t/bin:$PATH" LANDING_IT_CACHE="$t/empty" DAGQ_VERIFICATION_MATERIALS="$t/materials" \
+        STUB_UNIT_EXIT=$unit_exit STUB_IT_EXIT=$it_exit sh "$root/scripts/landing-it.sh"
+    ) >"$t/out" 2>&1 || status=$?
+    runs=$(grep -c '^nextest run ' "$t/runs" || true)
+    if [ "$status" -ne "$want_status" ] || [ "$runs" -ne "$want_runs" ] ||
+      ! sed -n 1p "$t/runs" | grep -qF 'kind(lib)'; then
+      echo "$me: self-test: $*: exit $status (want $want_status), $runs runs (want $want_runs)" >&2
+      cat "$t/out" "$t/runs" >&2
+      ok=
+    fi
+  done
+  rm -rf "$t"
+  [ -n "$ok" ] && echo "$me: self-test: the unit stage runs first and stops the IT stage when it fails"
+  [ -n "$ok" ]
+}
+
 if [ "${1:-}" = "--self-test" ]; then
   python3 "$py" self-test "$root/scripts/landing-it-fixtures" || exit 1
   self_test_handover
+  self_test_stages
   exit $?
 fi
 prepare=
@@ -242,14 +292,31 @@ fi
 
 known=${DAGQ_CI_KNOWN_FAILURES:-}
 [ -n "$known" ] && set -- "$@" --known "$known"
-filter=$(python3 "$py" select "$@" --list "$list" \
-  --fix-run "${DAGQ_CI_FIX_RUN:-0}" --threads "${NEXTEST_TEST_THREADS:-6}") || exit 2
+python3 "$py" select "$@" --list "$list" \
+  --fix-run "${DAGQ_CI_FIX_RUN:-0}" --threads "${NEXTEST_TEST_THREADS:-6}" >"$work/filters" || exit 2
+unit_filter=$(sed -n 1p "$work/filters")
+it_filter=$(sed -n 2p "$work/filters")
 
-echo "$me: cargo nextest run --locked --workspace --no-tests=pass -E '$filter'"
 # The landing's variables are for this script, not for the tests: the tests
 # of the landing verification itself check who gets them.
 unset DAGQ_LANDING_BASE DAGQ_CI_KNOWN_FAILURES DAGQ_CI_FIX_RUN
-# exec skips the EXIT trap: remove the work directory first.
 rm -rf "$work"
 trap - EXIT INT TERM
-exec cargo nextest run --locked --workspace --no-tests=pass -E "$filter"
+
+# Two stages, each one cargo nextest run with .config/nextest.toml's
+# fail-fast, retries and flaky-result as they are: the unit tests first, and
+# the IT only when they pass, so a failing unit test ends the landing in
+# seconds instead of after every IT.
+echo "$me: unit stage: cargo nextest run --locked --workspace --no-tests=pass -E '$unit_filter'"
+status=0
+cargo nextest run --locked --workspace --no-tests=pass -E "$unit_filter" || status=$?
+if [ "$status" -ne 0 ]; then
+  echo "$me: the unit stage failed (exit $status); the IT stage did not run" >&2
+  exit "$status"
+fi
+if [ -z "$it_filter" ]; then
+  echo "$me: no IT chosen; the IT stage does not run"
+  exit 0
+fi
+echo "$me: IT stage: cargo nextest run --locked --workspace --no-tests=pass -E '$it_filter'"
+exec cargo nextest run --locked --workspace --no-tests=pass -E "$it_filter"

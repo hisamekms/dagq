@@ -116,7 +116,7 @@ scheduled_workflows = ["it-budget.yml"]
 # 置き換えと env の受け渡しは runtime（domain::landing_verification の doc comment）、IT の選び方・表の cache・閾値などの値は scripts/landing-it.sh と
 # scripts/landing-it.py の冒頭が持ち、値の根拠は docs/plans/landing-it-selection.md の「決めたこと」。登録済みの task の --verify は書き換えない。
 # replaces は旧と今の関門（cargo llvm-cov nextest ... と cargo llvm-cov --locked --fail-under-lines 80）に当たる。
-# command は unit test 全件（workspace の lib・bin）と絞った IT を 1 回の cargo nextest run で流し、既に落ちているテストを外す。
+# command は unit test 全件（workspace の lib・bin）を先に、通ったときだけ絞った IT を、2 回の cargo nextest run で流し、既に落ちているテストを両方から外す。
 # fmt・clippy と task に固有の検査は task の --verify にあるものが登録のまま流れるので、ここに重ねない。
 # 行カバレッジの関門は CI（ci.yml）だけが見る。外すときはこの節を消せば、次の着地から登録のコマンドに戻る。
 # [landing_verification] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1926 を含んでから足した。

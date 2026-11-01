@@ -16,7 +16,9 @@ Usage: python3 scripts/landing-it.py select --diff FILE --tree FILE
                                                 [--table-error TEXT]
                                                 [--full REASON] [--root DIR]
        python3 scripts/landing-it.py self-test FIXTURES
---root is the checked-out tree the changed helpers' users are read from
+select prints two filtersets, one per line: the unit stage's, then the IT
+stage's (an empty line when no IT is chosen); landing-it.sh runs them as two
+cargo nextest runs. --root is the checked-out tree the changed helpers' users are read from
 (default: the current directory); the self-test reads FIXTURES/repo.
 """
 
@@ -432,7 +434,9 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
            root="."):
     """The tests of the landing's verification and why: a dict with full,
     reasons, the IT filtersets (narrowed), the tests not in the table, the
-    excluded and kept known failures and the nextest filterset."""
+    excluded and kept known failures, and the nextest filtersets of the two
+    stages: unit_filter (every unit test) and it_filter (the chosen IT, with a
+    fix run's kept ones; None when no IT is chosen)."""
     reasons = full_reasons(diff, tree, table, table_error, now, forced, root)
     narrowed = []
     from_table = set()
@@ -480,11 +484,13 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
         it = "(%s)" % " | ".join(narrowed)
     else:
         it = None
-    expr = "(%s)" % UNIT_FILTER
-    if it:
-        expr += " | " + it
+    unit = "(%s)" % UNIT_FILTER
     if excluded:
-        expr = "(%s) - (%s)" % (expr, " | ".join(f for _, f in excluded))
+        # The same known failures leave both stages, matched by name alone.
+        left_out = " | ".join(f for _, f in excluded)
+        unit = "(%s - (%s))" % (unit, left_out)
+        if it:
+            it = "(%s - (%s))" % (it, left_out)
     return {
         "full": full,
         "reasons": reasons,
@@ -494,7 +500,8 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
         "excluded": [n for n, _ in excluded],
         "kept": [n for n, _ in kept],
         "fix_run": fix_run,
-        "filter": expr,
+        "unit_filter": unit,
+        "it_filter": it,
     }
 
 
@@ -565,7 +572,10 @@ def cmd_select(args):
         args.fix_run == "1", threads_of(args.threads), now_of(args.now), args.full, args.root,
     )
     print(report(choice), file=sys.stderr)
-    print(choice["filter"])
+    # Two lines: the unit stage's filterset, then the IT stage's (empty when
+    # no IT is chosen and the IT stage does not run).
+    print(choice["unit_filter"])
+    print(choice["it_filter"] or "")
 
 
 def cmd_self_test(args):
