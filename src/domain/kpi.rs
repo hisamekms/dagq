@@ -33,7 +33,7 @@ mod window;
 pub use candidates::{CandidatesSample, ClaimPassEnd};
 pub use compare::{Comparison, Confounder, Side, Split, WindowSpan};
 pub use config::{KpiConfig, KpiSettings, Stat, Target, TargetReport};
-pub use window::{CANDIDATES_SAMPLED, WindowKpis};
+pub use window::{CANDIDATES_SAMPLED, UNATTRIBUTED_RATIO, WindowKpis};
 
 /// The KPIs' bookkeeping events (ADR-0051 decision 24): the observer's
 /// quiet check does not count them as others' events, so they alone never
@@ -421,6 +421,10 @@ pub struct KpiInput<'a> {
     /// `land_phase.*` read as `stats` does; `None` makes them of the events
     /// (no `land_phase.*`).
     pub ledger: Option<&'a crate::domain::stats::LedgerTimes>,
+    /// The ledger's run rows, for each stratum's
+    /// [`breakdown`](super::ledger::breakdown) by tags and
+    /// `unattributed_ratio`: a run without a row is in neither.
+    pub rows: &'a [&'a super::ledger::LedgerRow],
 }
 
 /// One KPI over one stratum of one window: how many samples, and the value
@@ -1001,6 +1005,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
             for strata in period.window.kpis.values_mut() {
                 strata.retain(|stratum, _| keep(stratum));
             }
+            period.window.breakdown.retain(|stratum, _| keep(stratum));
             for strata in period.comparison.values_mut() {
                 strata.retain(|stratum, _| keep(stratum));
             }

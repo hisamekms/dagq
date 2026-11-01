@@ -2,7 +2,7 @@
 
 Each command below prints JSON; `"$DAGQ" <command> --help` lists its flags (and the strata `kpi` can split by), and the JSON output itself is where the values are. This file says how to read them and what to do.
 
-`stats`, `kpi` and `report` read the queue's ledger, which the supervisor builds on its passes: what no record holds reads as missing (with why), not as 0. `stats` gives each listed run's time and slot time by blocker, holds and attempt in `breakdown` (overall, `by_change`, `by_area`), each axis adding up to 100% with `unattributed`; read the unattributed share there before trusting the rest. `stats --ledger` is still stopped and refuses with why.
+`stats`, `kpi` and `report` read the queue's ledger, which the supervisor builds on its passes: what no record holds reads as missing (with why), not as 0. `stats` gives each listed run's time and slot time by blocker, holds and attempt in `breakdown` (overall, `by_change`, `by_area`), each axis adding up to 100% with `unattributed`; read the unattributed share there before trusting the rest. The time runs from the claim to the end of the push. `stats --ledger` is still stopped and refuses with why.
 
 ## `dagq kpi`: periods, strata, targets
 
@@ -15,6 +15,7 @@ Each command below prints JSON; `"$DAGQ" <command> --help` lists its flags (and 
 - A missing value is no record, not zero. A period not over yet and a value with too few samples are not judged: read no trend from them.
 - Compare work time only within one `area=` or `change=` stratum (which one is the repository's rule): tasks differ by an order of magnitude, so `all` moves with the mix of tasks.
 - `kpi --help` lists the flags and the strata to split by; it does not explain the values. Read each value in the JSON output where it stands.
+- **Time by tag.** Each period's `breakdown` holds its finished runs' time and slot time by blocker, holds and attempt, in `all` and per `change=` and `area=` stratum (`--change` and `--area` keep only theirs), each axis adding up to 100% with `unattributed`; the daily report shows it as "Time by tag". `unattributed_ratio` is the share of the time no record accounts for, a KPI of every stratum (judged only against a target set for it): when it is high, the split is not to be trusted, and the fix is a missing record, not the work.
 - **Targets** are set in the repository's `dagq.toml` and the host's `host.toml`; only the targets set there are judged. Act on a target only when the output says it is breached (off target for several periods in a row), not on a single miss. Add a `[kpi]` table to `dagq.toml` only once the installed binary knows it: an older one rejects it.
 
 ## Before and after a change: `mark`, `marks`, `kpi --compare`
@@ -36,7 +37,7 @@ Any queue, once a week, in this order (`kpi --period week --last 4` for the numb
 3. **Pareto of slot time.** Sort the phases of slot time by median × count, largest first, then split the top one into its parts, never adding a part to its whole; fix only the top one or two. With the landing slot as the constraint, the landing's own phases and attempts are the list.
 4. **Outliers.** Read `p90` and `max`, not only the median. Take the longest runs in `stats --full` and read each with `timeline RUN` (the gaps and their reasons, a person's wait among them); a few long runs often cost more than every median together. The first-pass and verification-failure rates tell how much slot time is rework; the send-back rates of reviews and plan reviews, split by their primary code, tell why.
 5. **One change, one mark, a fair comparison.** Make a single change, `mark` it when it takes effect (not what the runtime marks itself), wait the comparison window, then `kpi --compare <mark>` within one stratum: `--area <name>` or `--change <change>` (which one is the repository's rule), never `all`, which moves with the mix of tasks. Name the confounders the output gives, drop a result it says cannot be separated, and read no verdict from too few samples or a period not over yet.
-6. **Cadence.** Hourly: only whether it has stopped (landings per hour on a 3–6 hour moving average; do not react to one hour's rise or fall). A quiet hour's review stays short: what is steady, and any sign that would matter if it went on. Daily: the outliers (4) and the breached targets. Weekly: 1 to 5.
+6. **Cadence.** Hourly: only whether it has stopped (landings per hour on a 3–6 hour moving average; do not react to one hour's rise or fall). A quiet hour's review stays short: what is steady, and any sign that would matter if it went on. Daily: the outliers (4), the breached targets and the time by tag, its unattributed share first. Weekly: 1 to 5.
 
 ## `dagq forecast`: when the open work will finish
 

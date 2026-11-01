@@ -283,6 +283,7 @@ fn one_window_of_any_length() {
             config: &KpiConfig::default(),
             host: None,
             ledger: None,
+            rows: &[],
         },
         &KpiQuery {
             since: query.until,

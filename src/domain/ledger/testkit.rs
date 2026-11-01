@@ -233,3 +233,16 @@ impl Log {
         self
     }
 }
+
+/// A run row of `run` (its task `task`) with `intervals` and their sums,
+/// as the builder writes one, for the readers of the rows.
+pub(crate) fn run_row(
+    run: &str,
+    task: Option<TaskId>,
+    intervals: Vec<super::fold::Interval>,
+) -> super::LedgerRow {
+    let mut row = super::LedgerRow::new(super::LedgerKind::Run, run.to_owned(), task, "t");
+    row.totals = super::Totals::of(&intervals);
+    row.intervals = intervals;
+    row
+}

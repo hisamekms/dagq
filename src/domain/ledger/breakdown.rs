@@ -81,6 +81,47 @@ impl Breakdown {
     }
 }
 
+/// What names a row's areas.
+pub type AreasOf<'f> = dyn Fn(&LedgerRow) -> Vec<String> + 'f;
+
+/// The breakdowns of `rows` (run rows) overall, per change and per area:
+/// `change_of` names a row's change and `areas_of` its areas, a row in
+/// each of them (none without `[areas]`, which leaves `by_area` empty).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Strata {
+    pub overall: Breakdown,
+    pub by_change: BTreeMap<String, Breakdown>,
+    pub by_area: BTreeMap<String, Breakdown>,
+}
+
+impl Strata {
+    pub fn of<'a>(
+        rows: &[&'a LedgerRow],
+        change_of: impl Fn(&LedgerRow) -> String,
+        areas_of: Option<&AreasOf<'_>>,
+    ) -> Self {
+        let mut by_change: BTreeMap<String, Vec<&'a LedgerRow>> = BTreeMap::new();
+        let mut by_area: BTreeMap<String, Vec<&'a LedgerRow>> = BTreeMap::new();
+        for row in rows {
+            by_change.entry(change_of(row)).or_default().push(row);
+            for area in areas_of.map(|of| of(row)).unwrap_or_default() {
+                by_area.entry(area).or_default().push(row);
+            }
+        }
+        let each = |groups: BTreeMap<String, Vec<&LedgerRow>>| {
+            groups
+                .into_iter()
+                .map(|(key, rows)| (key, Breakdown::of(rows)))
+                .collect()
+        };
+        Self {
+            overall: Breakdown::of(rows.iter().copied()),
+            by_change: each(by_change),
+            by_area: each(by_area),
+        }
+    }
+}
+
 fn add(sum: &mut Totals, row: &Totals) {
     let plus = |into: &mut Measure, from: &Measure| {
         into.duration_ms += from.duration_ms;
@@ -238,5 +279,68 @@ mod tests {
         assert!((slot_total - 1.0).abs() < 1e-9);
         assert_eq!(breakdown.unattributed_ratio(), Some(0.05));
         assert_eq!(Breakdown::of([&legacy]).unattributed_ratio(), None);
+    }
+
+    /// `stats`' strata: a row in its change and in each of its areas, both
+    /// measures of each adding up to 100% with `unattributed`; no area
+    /// without `[areas]`.
+    #[test]
+    fn the_strata_split_the_rows_by_change_and_area() {
+        let first = Some(Attempt {
+            kind: AttemptKind::First,
+            n: 1,
+        });
+        let mut a = row(
+            &[
+                interval(Some(Blocker::Ai), Some(Holds::WorkerSlot), first, 0, 9000),
+                interval(None, None, None, 9000, 10_000),
+            ],
+            false,
+        );
+        a.key = "a".into();
+        let mut b = row(
+            &[interval(
+                Some(Blocker::Compute),
+                Some(Holds::LandingSlot),
+                first,
+                0,
+                4000,
+            )],
+            false,
+        );
+        b.key = "b".into();
+        let change_of = |row: &LedgerRow| if row.key == "a" { "fix" } else { "docs" }.to_owned();
+        let areas_of = |row: &LedgerRow| {
+            if row.key == "a" {
+                vec!["src".to_owned(), "tests".to_owned()]
+            } else {
+                vec!["src".to_owned()]
+            }
+        };
+        let strata = Strata::of(&[&a, &b], change_of, Some(&areas_of));
+        assert_eq!(strata.overall.runs, 2);
+        assert_eq!(strata.overall.duration.secs, 14.0);
+        assert_eq!(strata.by_change.keys().collect::<Vec<_>>(), ["docs", "fix"]);
+        assert_eq!(strata.by_change["fix"].unattributed_ratio(), Some(0.1));
+        assert_eq!(
+            strata.by_change["docs"].duration.by_blocker["compute"].ratio,
+            Some(1.0)
+        );
+        assert_eq!(strata.by_area["src"].runs, 2);
+        assert_eq!(strata.by_area["tests"].runs, 1);
+        for breakdown in strata.by_change.values().chain(strata.by_area.values()) {
+            for split in [&breakdown.duration, &breakdown.slot] {
+                let total: f64 = split
+                    .by_blocker
+                    .values()
+                    .filter_map(|s| s.ratio)
+                    .sum::<f64>()
+                    + split.unattributed.ratio.unwrap();
+                assert!((total - 1.0).abs() < 1e-9, "{split:?}");
+            }
+        }
+        // The slot time leaves the unattributed second out.
+        assert_eq!(strata.by_area["src"].slot.secs, 13.0);
+        assert!(Strata::of(&[&a], change_of, None).by_area.is_empty());
     }
 }

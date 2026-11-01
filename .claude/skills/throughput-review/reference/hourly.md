@@ -1,6 +1,6 @@
 # 毎時の確認のコマンドと読み方
 
-[SKILL.md](../SKILL.md) の「1. 毎時の確認」の (a)(b) のコマンドと読み方。
+[SKILL.md](../SKILL.md) の「1. 毎時の確認」の (a)(b)(c) のコマンドと読み方。
 
 (a) 着地数の表。直近 6 時間の完了した時と今の途中の時、3h・6h の移動平均、完了した 24 時間の平均、分析を始める条件の判定を出す:
 
@@ -38,3 +38,16 @@ since=$(date -u -v-30H +%Y-%m-%dT%H:%M:%SZ)   # GNU date なら: date -u -d '30 
   attention: [.attention[] | .kind // .reason // .] ,
   claim_deferrals: (.claim_deferrals | group_by(.reason) | map({(.[0].reason): length}) | add)}'
 ```
+
+(c) 直近 6 時間に終わった run の所要時間（claim から push の終わりまで）と slot を握った時間の、blocker ごとの割合と `unattributed` の割合（台帳の `stats` の `breakdown.overall`）:
+
+```sh
+since=$(date -u -v-6H +%Y-%m-%dT%H:%M:%SZ)   # GNU date なら: date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ
+~/.local/bin/dagq stats --since "$since" --full | jq -r '.breakdown.overall as $b
+  | def pct: if . == null then "-" else (. * 1000 | round / 10 | tostring) + "%" end;
+  "run \($b.runs)（legacy \($b.legacy)） unattributed \($b.duration.unattributed.ratio | pct)",
+  ($b.duration.by_blocker | to_entries[] | "\(.key)\t所要 \(.value.ratio | pct)\tslot \($b.slot.by_blocker[.key].ratio | pct)")'
+```
+
+- 先に `unattributed` を読む。2% を超えていたら（`dagq.toml` の `[kpi.targets.unattributed_ratio]` の目標）内訳を当てにせず、その割合だけを書く
+- 平常の報告には、所要時間の割合の大きい blocker を 1〜2 個だけ添える（例: 「所要の 45% が ai、30% が queue」）。前回からの変化は書かず、1 時間の上下に反応しない

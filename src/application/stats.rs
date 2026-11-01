@@ -191,7 +191,7 @@ pub fn of_window(
 
 /// The breakdown of the runs `stats` lists (its page) by their tags in
 /// both measures, overall and per change and area of their task
-/// ([`crate::domain::ledger::breakdown`]), from their ledger rows.
+/// ([`crate::domain::ledger::breakdown::Strata`]), from their ledger rows.
 fn breakdown(
     window: &LedgerWindow,
     stats: &Stats,
@@ -200,43 +200,37 @@ fn breakdown(
     >,
     areas: Option<&crate::domain::areas::RunAreas>,
 ) -> crate::domain::stats::StatsBreakdown {
-    use crate::domain::ledger::{LedgerKind, breakdown::Breakdown};
-    use std::collections::BTreeMap;
+    use crate::domain::ledger::{
+        LedgerKind, LedgerRow,
+        breakdown::{AreasOf, Strata},
+    };
     let listed: std::collections::HashSet<&str> =
         stats.runs.iter().map(|run| run.run_id.as_str()).collect();
-    let rows: Vec<&crate::domain::ledger::LedgerRow> = window
+    let rows: Vec<&LedgerRow> = window
         .of(LedgerKind::Run)
         .filter(|row| listed.contains(row.key.as_str()))
         .collect();
-    let mut by_change: BTreeMap<String, Vec<&crate::domain::ledger::LedgerRow>> = BTreeMap::new();
-    let mut by_area: BTreeMap<String, Vec<&crate::domain::ledger::LedgerRow>> = BTreeMap::new();
-    for row in &rows {
-        let change = row
-            .task_id
+    let change_of = |row: &LedgerRow| {
+        row.task_id
             .and_then(|task| changes.as_ref()?.get(&task).cloned().flatten())
-            .map_or_else(|| "unknown".to_owned(), |change| change.as_str().to_owned());
-        by_change.entry(change).or_default().push(row);
-        if let Some(areas) = areas {
-            let of = crate::domain::RunId::new(row.key.clone())
-                .ok()
-                .and_then(|run| areas.get(&run).cloned())
-                .filter(|areas| !areas.is_empty())
-                .unwrap_or_else(|| vec!["unknown".to_owned()]);
-            for area in of {
-                by_area.entry(area).or_default().push(row);
-            }
-        }
-    }
+            .map_or_else(|| "unknown".to_owned(), |change| change.as_str().to_owned())
+    };
+    let areas_of = |row: &LedgerRow| {
+        crate::domain::RunId::new(row.key.clone())
+            .ok()
+            .and_then(|run| areas?.get(&run).cloned())
+            .filter(|areas| !areas.is_empty())
+            .unwrap_or_else(|| vec!["unknown".to_owned()])
+    };
+    let strata = Strata::of(
+        &rows,
+        change_of,
+        areas.is_some().then_some(&areas_of as &AreasOf<'_>),
+    );
     crate::domain::stats::StatsBreakdown {
-        overall: Breakdown::of(rows.iter().copied()),
-        by_change: by_change
-            .into_iter()
-            .map(|(key, rows)| (key, Breakdown::of(rows)))
-            .collect(),
-        by_area: by_area
-            .into_iter()
-            .map(|(key, rows)| (key, Breakdown::of(rows)))
-            .collect(),
+        overall: strata.overall,
+        by_change: strata.by_change,
+        by_area: strata.by_area,
     }
 }
 

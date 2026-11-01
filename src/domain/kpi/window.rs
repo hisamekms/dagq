@@ -17,6 +17,7 @@ use crate::domain::{
     forecast::score::{self, Scoring, Target},
     host_metrics::{HostSummary, PROCESS_KINDS},
     improvement_running,
+    ledger::{LedgerKind, LedgerRow, breakdown::Breakdown},
     marks::{self, Mark},
     plan_quality::plan_quality,
     satisfied,
@@ -61,6 +62,11 @@ const NO_SUPERVISOR: &str = "no_supervisor";
 const NO_PHASES: &str = "no_phases";
 /// The records began in the window: what ended before them is not in it.
 const PARTLY_RECORDED: &str = "partly_recorded";
+/// No run of the window has a ledger row with intervals.
+const NO_INTERVALS: &str = "no_intervals";
+/// The share of the finished runs' time no record accounts for
+/// (ADR-t1662-1 decision 1), from their ledger rows.
+pub const UNATTRIBUTED_RATIO: &str = "unattributed_ratio";
 
 /// One window's KPIs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -69,6 +75,11 @@ pub struct WindowKpis {
     pub runs: usize,
     /// Per KPI, per stratum (`all`, `change=fix`, `parallel=3`, ...).
     pub kpis: Kpis<Measure>,
+    /// The finished runs' time (claim to the end of the push) and slot
+    /// time by blocker, holds and attempt kind, each axis adding up to 100%
+    /// with `unattributed`, from their ledger rows, in `all` and per
+    /// `change=` and `area=` stratum (a legacy row counted apart).
+    pub breakdown: BTreeMap<String, Breakdown>,
     /// The breakdowns next to the KPIs: resumes per reason, asks per reason
     /// category, backend failures per op, repairs per layer, the phases'
     /// share of the long tail of `wait_to_land`, the findings opened and
@@ -184,6 +195,8 @@ pub(super) struct Context<'a> {
     forecast: Scoring,
     /// The host's load read for a window (task 872).
     pub host: Option<super::HostReader<'a>>,
+    /// The ledger's run rows by their run.
+    rows: HashMap<&'a str, &'a LedgerRow>,
 }
 
 /// Ends `run_id`'s open span out of the slots, if any, `at`.
@@ -438,6 +451,12 @@ impl<'a> Context<'a> {
             min_samples: input.config.min_samples,
             forecast: Scoring::default(),
             host: input.host,
+            rows: input
+                .rows
+                .iter()
+                .filter(|row| row.kind == LedgerKind::Run)
+                .map(|row| (row.key.as_str(), *row))
+                .collect(),
         };
         context.forecast = score::score(events, &context.marks);
         let everything = context.stats(None, None);
@@ -721,12 +740,28 @@ impl<'a> Context<'a> {
             }
         }
         let mut landings: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut by_tags: BTreeMap<String, Breakdown> = BTreeMap::new();
         for (stratum, runs) in &groups {
             for (name, measure) in self.run_kpis(runs) {
                 if name == "landings" {
                     landings.insert(stratum, measure.n);
                 }
                 put(name.as_str(), stratum, measure);
+            }
+            let of = self.breakdown(runs);
+            put(
+                UNATTRIBUTED_RATIO,
+                stratum,
+                // Judged only on `min_samples` runs, unlike a count.
+                Measure {
+                    n: of.runs,
+                    value: of.unattributed_ratio().map(round3),
+                    has_value: true,
+                    ..Measure::default()
+                },
+            );
+            if stratum == ALL || stratum.starts_with("change=") || stratum.starts_with("area=") {
+                by_tags.insert(stratum.clone(), of);
             }
         }
         let landed = |stratum: &str| landings.get(stratum).copied().unwrap_or(0);
@@ -1268,15 +1303,28 @@ impl<'a> Context<'a> {
         );
         details.insert("auto_repairs_by_layer", json(&stats.auto_repairs.by_layer));
 
+        if by_tags.get(ALL).is_none_or(|all| all.runs == 0) {
+            unavailable.insert(UNATTRIBUTED_RATIO, NO_INTERVALS);
+        }
         WindowKpis {
             runs: stats.runs.len(),
             kpis,
+            breakdown: by_tags,
             details,
             unavailable,
             routes: stats.worker_routes.clone(),
             planner_routes: stats.planner_routes.clone(),
             token_coverage,
         }
+    }
+
+    /// The breakdown by tags of `runs`' ledger rows (a run without a row
+    /// is left out).
+    fn breakdown(&self, runs: &[&RunStats]) -> Breakdown {
+        Breakdown::of(
+            runs.iter()
+                .filter_map(|run| self.rows.get(run.run_id.as_str()).copied()),
+        )
     }
 
     /// The tokens of the window's Executions into `put` (ADR-t1486-1):

@@ -276,6 +276,7 @@ fn compares_two_explicit_windows() {
             config: &KpiConfig::default(),
             host: None,
             ledger: None,
+            rows: &[],
         },
         &KpiQuery {
             compare: Some(backwards),

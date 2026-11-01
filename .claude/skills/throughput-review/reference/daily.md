@@ -14,6 +14,17 @@ jq -r '.periods[-2] as $p | ["landings","slot_usage","landing_utilization","load
 ```
 
 - `.periods[-1]` は今日（`partial`）なので、見直すのは完了した前日（`.periods[-2]`）。`.periods[-2].comparison` の `verdict`・`ratio`・`delta` は前日（`previous`）との比で、7 日の中央値は `baseline_7d`（比は上の jq が `value`（無ければ `median`）÷ `baseline_7d` で求める）
+- 前日の所要時間（claim から push の終わりまで）と slot を握った時間の、blocker・holds・attempt ごとの割合と `unattributed` は kpi の `breakdown`（日次レポートの「Time by tag」と同じ）で読む。先に `unattributed_ratio` を見て、2% を超えていたら（この repository の `dagq.toml` の `[kpi.targets.unattributed_ratio]`。`targets` に出る）内訳を当てにせずそう書く。change・area ごとは `breakdown` の `change=`・`area=` の層:
+
+  ```sh
+  jq -r '.periods[-2] as $p | def pct: if . == null then "-" else (. * 1000 | round / 10 | tostring) + "%" end;
+    "unattributed_ratio\t\($p.kpis.unattributed_ratio.all.value | pct)\tn=\($p.kpis.unattributed_ratio.all.n)",
+    ($p.breakdown | to_entries[] | .key as $s | .value as $b
+      | ["blocker", "holds", "attempt"][] as $axis
+      | $b.duration["by_" + $axis] | to_entries[]
+      | "\($s)\t\($axis)=\(.key)\t所要 \(.value.ratio | pct)\tslot \($b.slot["by_" + $axis][.key].ratio | pct)")' "$kpi"
+  ```
+
 - 見るのは目標割れ（`state` が `ok` 以外）と外れ値（`p90`・`max`）。外れ値は `~/.local/bin/dagq stats --since <前日の 00:00 JST を UTC で> --until <今日の 00:00 JST を UTC で> --full` の長い run を `timeline RUN` で読み、人の答え待ちを除いた長さも書く
 
 ## `dagq::it` の本数と時間（goal 118）

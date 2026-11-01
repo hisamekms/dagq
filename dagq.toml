@@ -369,6 +369,12 @@ max = 0.3
 [kpi.targets.asks_per_landing]
 max = 0.6
 
+# 終わった run の所要時間のうち記録が当たらない（unattributed の）割合。2% 未満は ADR-t1662-1 の決定 1 の目安で、
+# 超えるのは記録の抜けの印。既定の目標は runtime に埋め込まない（ADR-0051 の決定 17）ので、人の判断（ask 1384）で
+# ここに書く。KPI 名を検査しない旧バイナリは、この KPI を出さないので判定しない（not_judged）だけで読める。
+[kpi.targets.unattributed_ratio]
+max = 0.02
+
 [e2e]
 # 差分がこの glob に触れる run にだけ、review が pass した後、着地の前に runtime が host で全部の e2e を流す
 # （ADR-t963-1 の決定 2・3、ADR-t1233-2。worker は e2e を流さず、validating は要否を validation_finished の e2e_requirement に記録するだけ。

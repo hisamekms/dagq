@@ -63,6 +63,8 @@ pub fn of_window(
     let heartbeats = crate::domain::supervisor_life::heartbeats(&events, now);
     let ledger = window.run_times();
     let read = |from: i64, until: i64| window.host_between(from * 1000 - 1000, until * 1000);
+    let rows: Vec<&crate::domain::ledger::LedgerRow> =
+        window.of(crate::domain::ledger::LedgerKind::Run).collect();
     derive(
         &KpiInput {
             events: &events,
@@ -78,6 +80,7 @@ pub fn of_window(
             config,
             host: Some(HostReader(&read)),
             ledger: Some(&ledger),
+            rows: &rows,
         },
         query,
     )

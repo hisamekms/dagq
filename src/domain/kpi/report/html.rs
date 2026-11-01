@@ -4,12 +4,14 @@
 //! The dependency diagram is d2's SVG (or a client's) shown as an image of
 //! its own bytes, a `data:` URL, so nothing of it reaches the page.
 //! Readable without JavaScript, which it does not use.
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use super::{Report, ReportFile};
 use crate::domain::{
     host_metrics::PROCESS_KINDS,
-    kpi::{ALL, Change, Measure, PeriodKpis, TargetReport},
+    kpi::{ALL, Change, Measure, PeriodKpis, TargetReport, UNATTRIBUTED_RATIO},
+    ledger::breakdown::{Breakdown, Share, Split},
     stats::jobs::JOB_KINDS,
 };
 
@@ -109,6 +111,7 @@ pub fn render_html(report: &Report) -> String {
         host_cpu(&mut page, latest);
         health(&mut page, latest);
         jobs(&mut page, latest);
+        by_tags(&mut page, latest, &report.kpi.targets);
         kpis(&mut page, latest);
     }
     findings(&mut page, report);
@@ -616,6 +619,116 @@ fn kpis(page: &mut String, period: &PeriodKpis) {
     page.push_str("</table></div></details>");
 }
 
+/// The finished runs' time (claim to the end of the push) and slot time
+/// of the period by blocker, holds and attempt kind, each adding up to
+/// 100% with `unattributed` (ADR-t1662-1 decisions 4 and 5): `all` in a
+/// table per measure, and each `change=` and `area=` stratum's split by
+/// blocker below.
+fn by_tags(page: &mut String, period: &PeriodKpis, targets: &[TargetReport]) {
+    let Some(all) = period.window.breakdown.get(ALL) else {
+        return;
+    };
+    if all.runs == 0 {
+        let _ = write!(
+            page,
+            "<h2>Time by tag</h2><p class=\"meta\">No run of the period has intervals to split ({} legacy).</p>",
+            all.legacy
+        );
+        return;
+    }
+    let _ = write!(
+        page,
+        "<h2>Time by tag</h2><p class=\"meta\">{} run(s) with intervals ({} legacy left out): the time from the claim to the end of the push, and the time a slot was held. The unattributed share is {}{}; while it is high, the split is not to be trusted.</p>",
+        all.runs,
+        all.legacy,
+        value(UNATTRIBUTED_RATIO, all.unattributed_ratio()),
+        targets
+            .iter()
+            .find(|target| target.kpi == UNATTRIBUTED_RATIO && target.stratum == ALL)
+            .and_then(|target| target.max)
+            .map_or_else(String::new, |max| format!(
+                " (its target: at most {})",
+                value(UNATTRIBUTED_RATIO, Some(max))
+            )),
+    );
+    fn axes(split: &Split) -> [(&'static str, &BTreeMap<String, Share>); 3] {
+        [
+            ("blocker", &split.by_blocker),
+            ("holds", &split.by_holds),
+            ("attempt", &split.by_attempt),
+        ]
+    }
+    let share = |share: &Share| {
+        format!(
+            "<td class=\"num\">{}</td><td class=\"num\">{}</td>",
+            secs(share.secs),
+            value(UNATTRIBUTED_RATIO, share.ratio)
+        )
+    };
+    page.push_str("<div class=\"scroll\"><table><tr><th>axis</th><th>tag</th><th class=\"num\">time</th><th class=\"num\">share</th><th class=\"num\">slot time</th><th class=\"num\">share</th></tr>");
+    for ((axis, time), (_, slot)) in axes(&all.duration).into_iter().zip(axes(&all.slot)) {
+        let tags: std::collections::BTreeSet<&String> = time.keys().chain(slot.keys()).collect();
+        for tag in tags {
+            let none = Share::default();
+            let _ = write!(
+                page,
+                "<tr><td>{axis}</td><td><code>{}</code></td>{}{}</tr>",
+                esc(tag),
+                share(time.get(tag).unwrap_or(&none)),
+                share(slot.get(tag).unwrap_or(&none)),
+            );
+        }
+    }
+    let _ = write!(
+        page,
+        "<tr><td></td><td><code>unattributed</code></td>{}{}</tr><tr><td></td><td>total</td><td class=\"num\">{}</td><td></td><td class=\"num\">{}</td><td></td></tr></table></div>",
+        share(&all.duration.unattributed),
+        share(&all.slot.unattributed),
+        secs(all.duration.secs),
+        secs(all.slot.secs),
+    );
+    let strata: Vec<(&String, &Breakdown)> = period
+        .window
+        .breakdown
+        .iter()
+        .filter(|(stratum, _)| stratum.as_str() != ALL)
+        .collect();
+    if strata.is_empty() {
+        return;
+    }
+    let blockers: std::collections::BTreeSet<&String> = strata
+        .iter()
+        .flat_map(|(_, of)| of.duration.by_blocker.keys())
+        .collect();
+    page.push_str("<details><summary>The time by blocker per change and area</summary><div class=\"scroll\"><table><tr><th>stratum</th><th class=\"num\">runs</th><th class=\"num\">time</th><th class=\"num\">unattributed</th>");
+    for blocker in &blockers {
+        let _ = write!(page, "<th class=\"num\">{}</th>", esc(blocker));
+    }
+    page.push_str("</tr>");
+    for (stratum, of) in strata {
+        let _ = write!(
+            page,
+            "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>",
+            esc(stratum),
+            of.runs,
+            secs(of.duration.secs),
+            value(UNATTRIBUTED_RATIO, of.unattributed_ratio()),
+        );
+        for blocker in &blockers {
+            let _ = write!(
+                page,
+                "<td class=\"num\">{}</td>",
+                value(
+                    UNATTRIBUTED_RATIO,
+                    of.duration.by_blocker.get(*blocker).and_then(|s| s.ratio)
+                )
+            );
+        }
+        page.push_str("</tr>");
+    }
+    page.push_str("</table></div></details>");
+}
+
 /// The forecast's errors of the period (ADR-0070 decision 4): per
 /// stratum, the p50's error, the p90's hits, which way the p50 leaned, and
 /// the worst state of a target on them.
@@ -801,6 +914,7 @@ fn unit(kpi: &str) -> Unit {
                 | "landing_utilization"
                 | "landing_utilization.peak"
                 | "forecast.p50_error_ratio"
+                | "unattributed_ratio"
         )
         || kpi.starts_with("session_active_ratio.")
         || kpi.starts_with("job.verdict.")

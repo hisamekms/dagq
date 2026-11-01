@@ -16,6 +16,7 @@ const HOUR: i64 = 3600;
 const DAY: i64 = 24 * HOUR;
 const JST: i64 = 9 * HOUR;
 
+mod breakdown;
 mod comparisons;
 mod cross_strata;
 mod host_records;
@@ -41,6 +42,8 @@ struct Queue {
     areas: Option<crate::domain::areas::RunAreas>,
     /// The repository does not declare the Rust profile (ADR-t2268-1).
     no_rust_toolchain: bool,
+    /// The ledger's run rows.
+    rows: Vec<crate::domain::ledger::LedgerRow>,
 }
 
 /// How one run went.
@@ -276,6 +279,7 @@ impl Queue {
         host: Option<HostReader<'_>>,
     ) -> Kpi {
         self.sort();
+        let rows: Vec<&crate::domain::ledger::LedgerRow> = self.rows.iter().collect();
         kpi(
             &KpiInput {
                 events: &self.events,
@@ -291,6 +295,7 @@ impl Queue {
                 config,
                 host,
                 ledger: None,
+                rows: &rows,
             },
             query,
         )

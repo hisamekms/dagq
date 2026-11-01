@@ -205,6 +205,7 @@ fn report_with_host(
             config: &config,
             host,
             ledger: None,
+            rows: &[],
         },
         &KpiQuery {
             period,
@@ -848,4 +849,81 @@ fn a_report_shows_the_worker_health_and_the_disk_free() {
     let html = render_html(&wednesday);
     assert!(html.contains("No free space of the runs' filesystem was recorded in the period."));
     assert!(html.contains("No worker turn, nudge, stall, switch or wait in the period."));
+}
+
+/// The daily page has the period's time and slot time by tag: `all` per
+/// axis with the unattributed share and the totals, and each change's
+/// split by blocker; without a row with intervals it says so.
+#[test]
+fn a_report_shows_the_time_by_tag() {
+    use crate::domain::kpi::ALL;
+    use crate::domain::ledger::breakdown::Breakdown;
+    use crate::domain::ledger::fold::{Interval, UNATTRIBUTED};
+    use crate::domain::ledger::testkit::run_row;
+    use crate::domain::run_phase::{Blocker, Holds};
+    let thursday = MONDAY + 3 * DAY + 12 * HOUR;
+    let mut report = report(MONDAY + 4 * DAY + 12 * HOUR, thursday, Period::Day);
+    let html = render_html(&report);
+    let section = &html[html.find("<h2>Time by tag</h2>").unwrap()..];
+    assert!(
+        section.starts_with(
+            "<h2>Time by tag</h2><p class=\"meta\">No run of the period has intervals"
+        ),
+        "{section}"
+    );
+    let interval =
+        |blocker: Option<Blocker>, holds: Option<Holds>, start: i64, end: i64| Interval {
+            phase: if blocker.is_some() {
+                "work"
+            } else {
+                UNATTRIBUTED
+            }
+            .into(),
+            blocker,
+            holds,
+            attempt: None,
+            start,
+            end,
+            cause: None,
+            blocked_by: None,
+            run_id: None,
+        };
+    let row = run_row(
+        "r",
+        Some(TaskId::new(1)),
+        vec![
+            interval(Some(Blocker::Ai), Some(Holds::WorkerSlot), 0, 3_540_000),
+            interval(None, None, 3_540_000, 3_600_000),
+        ],
+    );
+    let of = Breakdown::of([&row]);
+    let latest = report.kpi.periods.last_mut().unwrap();
+    latest.window.breakdown = [(ALL.to_owned(), of.clone()), ("change=fix".to_owned(), of)]
+        .into_iter()
+        .collect();
+    let html = render_html(&report);
+    let section = &html[html.find("<h2>Time by tag</h2>").unwrap()..];
+    let section = &section[..section.find("<h2>KPIs of").unwrap()];
+    assert!(
+        section.contains("1 run(s) with intervals (0 legacy left out)"),
+        "{section}"
+    );
+    assert!(
+        section.contains("The unattributed share is 1.7%; while it is high"),
+        "{section}"
+    );
+    assert!(
+        section.contains("<tr><td>blocker</td><td><code>ai</code></td><td class=\"num\">59m 00s</td><td class=\"num\">98.3%</td><td class=\"num\">59m 00s</td><td class=\"num\">100.0%</td></tr>"),
+        "{section}"
+    );
+    assert!(section.contains("<td><code>unattributed</code></td><td class=\"num\">1m 00s</td><td class=\"num\">1.7%</td>"), "{section}");
+    assert!(
+        section.contains("<td>total</td><td class=\"num\">1h 00m</td>"),
+        "{section}"
+    );
+    assert!(section.contains("<th class=\"num\">ai</th>"), "{section}");
+    assert!(
+        section.contains("<tr><td>change=fix</td><td class=\"num\">1</td>"),
+        "{section}"
+    );
 }
