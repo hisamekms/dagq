@@ -34,7 +34,7 @@ const MAIN_RETRY_SECS: i64 = 60;
 
 /// What a look found: the head of the reach, when it was recorded and
 /// whether Git's reading is failing.
-type Looked = (Option<String>, i64, bool);
+pub type Looked = (Option<String>, i64, bool);
 
 impl MainLogWatch {
     /// Whether a pass at `now`, with `stamp` taken of the landing branch's
@@ -102,7 +102,9 @@ impl ObservationState {
 /// moved of main since ([`records`]) and give what this look found. The
 /// queue's earliest event, for the first record only, is the time
 /// [`EventStore::earliest_event_at`] answers, never every event read.
-fn look_at_main<Q: EventStore + ?Sized, M: MainReader + ?Sized>(
+/// The supervisor's pass calls it when a look is due; a reader of the
+/// ledger with no supervisor pass may call it to record the same.
+pub fn look_at_main<Q: EventStore + ?Sized, M: MainReader + ?Sized>(
     queue: &Q,
     now: i64,
     reader: &M,

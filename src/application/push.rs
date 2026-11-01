@@ -5,10 +5,8 @@
 //! the summary of the latest day and week written. Running the command,
 //! trying it again and recording how it went is the supervisor's
 //! ([`record_attempt`]). Without `[push]` nothing is made nor recorded
-//! but the breaches. The supervisor's report job that calls these is
-//! stopped now, as the judgment reads every event (request 190,
-//! ADR-t3745-1; `supervise::observation::report`'s `STOPPED`): the
-//! breaches open stay open.
+//! but the breaches. The targets are judged on the KPIs of the ledger's
+//! window ([`super::kpi::of_window`]).
 use crate::domain::EventKind;
 use std::time::Duration;
 
@@ -16,7 +14,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::{
-    AskQuery, AskStore, PlanningRecords, QueueRecords, RunLog, SupervisorReads,
+    AskQuery, AskStore, LedgerStore, QueueRecords, RunLog,
     report::{self, ReportSetup, Written},
 };
 use crate::domain::kpi::{
@@ -77,7 +75,8 @@ pub struct BreachCheck {
 /// 18). A start is marked `pushed` while `push` sends breaches and the
 /// local day's limit allows.
 pub fn check_breaches(
-    queue: &(impl PlanningRecords + QueueRecords + SupervisorReads + RunLog + ?Sized),
+    queue: &(impl QueueRecords + ?Sized),
+    ledger: &(impl LedgerStore + ?Sized),
     setup: &ReportSetup,
     push: Option<&PushConfig>,
     now: i64,
@@ -91,13 +90,14 @@ pub fn check_breaches(
     let push_day = push
         .filter(|push| push.breach)
         .map(|push| (day, push.max_breach_per_day));
+    let window = report::window(ledger, now)?;
     for period in [Period::Day, Period::Week] {
-        let kpi = super::kpi::kpi(
-            queue,
+        let kpi = super::kpi::of_window(
+            &window,
             now,
             setup.host,
             &setup.config,
-            &setup.areas,
+            setup.areas.as_ref(),
             &KpiQuery {
                 period,
                 // The period over and the one in progress: a target's
@@ -105,7 +105,6 @@ pub fn check_breaches(
                 last: 2,
                 ..KpiQuery::default()
             },
-            setup.host_reader(),
         )?;
         for target in &kpi.targets {
             if let Some(started) = push::breach_started(period.as_str(), target)

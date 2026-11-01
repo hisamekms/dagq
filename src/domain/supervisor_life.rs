@@ -136,6 +136,24 @@ impl Lives {
     }
 }
 
+/// The supervisors' last heartbeats (unix seconds) by token at `now`
+/// (unix seconds), as `kpi` reads a registration's, from `events`
+/// (ascending id) alone: a supervisor that lives has beaten now, one gone
+/// silent last at its last event, and one that stopped is not registered
+/// (its `supervisor_stopped` ends it).
+pub fn heartbeats(events: &[RunEvent], now: i64) -> HashMap<String, i64> {
+    let lives = Lives::new(events);
+    lives
+        .by_token
+        .iter()
+        .filter_map(|(token, life)| match life.end(now * 1000) {
+            None => Some((token.clone(), now)),
+            Some(LifeEnd::Silent { at_ms }) => Some((token.clone(), at_ms.div_euclid(1000))),
+            Some(LifeEnd::Stopped { .. }) => None,
+        })
+        .collect()
+}
+
 /// A supervisor's events read in order: the end its first
 /// `supervisor_stopped` gives, or else the latest time of them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

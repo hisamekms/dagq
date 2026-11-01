@@ -1796,8 +1796,6 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     // `stats` puts the drafts next to the landing that registered them,
     // and counts one canceled (task 470).
     crate::common::cli::ok(&db, &["cancel", "3", "--reason", "not_worth"]);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let flow = &crate::common::cli::ok(&db, &["stats", "--full"])["draft_flow"];
         assert_eq!(flow["landings"], 1, "{flow}");

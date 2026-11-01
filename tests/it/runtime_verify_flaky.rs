@@ -148,10 +148,8 @@ fn only_flaky_tests_failing_lands_the_run_once_more_without_a_resume() {
     for kind in ["integration_deferred", "integration_held", "resume_started"] {
         assert!(payloads(&detail, kind).is_empty(), "{kind}");
     }
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(
             stats["verification_failures"],
             json!([{"class": "flaky", "count": 1, "runs": 1, "retried": 1, "retry_passed": 1, "retry_failed": 0}]),
@@ -230,10 +228,8 @@ fn a_failed_retry_resumes_and_a_later_landing_can_retry_again() {
     assert_eq!(payloads(&detail, "integration_retried").len(), 2);
     assert_eq!(payloads(&detail, "integration_deferred").len(), 1);
     assert_eq!(payloads(&detail, "resume_started").len(), 1);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         let flaky = stats["verification_failures"]
             .as_array()
             .unwrap()
@@ -299,10 +295,8 @@ fn a_failure_that_is_not_flaky_is_resumed_at_once() {
         json!(["runtime_x::flaky", "runtime_x::broken"])
     );
     assert_eq!(deferred[0]["flaky_tests"], json!(["runtime_x::flaky"]));
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         let candidates = &stats["failed_tests"]["flaky_candidates"];
         assert_eq!(candidates.as_array().unwrap().len(), 1, "{stats}");
         assert_eq!(candidates[0]["name"], "runtime_x::flaky");

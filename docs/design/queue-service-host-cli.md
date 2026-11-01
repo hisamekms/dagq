@@ -43,16 +43,9 @@ related:
 - `watch`の待ち・inboxのwatcherの記録・`[push]`はクライアント側に残る（`application::watch::watch_through`）。
   pushが名指すrepositoryは、serviceが見るの答えに載せるqueueの束縛から取り、束縛のあるqueueではwatchを打つ場所に依らない（束縛の無いqueueは打つ場所の名前。`WatchLook::binding`）。
 - `graph --format svg`はd2のsourceをserviceから読み、hostのCLIが自分のd2で描く（serviceは読み取りでprogramを起動しない）。
-- `stats`（`--ledger`を含む）と`kpi`はまず`stats_inputs`で、main checkout・着地したcommit・mainの履歴を読み始める秒（衝突のeventの無いqueueでは無し）・衝突したfileと、それらの版を読む。
-  main checkoutはserviceが束縛したGitのcommon directoryからGitなしで、`main_checkout_of`と同じものに決め（[main checkoutの決め方](supervisor-lifecycle/run-environment.md#main-checkoutの決め方)）、クライアントが名指すpathは受けない。
-  クライアントはそのcheckoutのGitで各commitのareaと、`stats`ならその秒からのmainの履歴を衝突したfileと改名先に絞って読み、版と一緒に送る（`application::stats::call_read`）。
-  読めなかった履歴は理由の文で送り、serviceはDBを開く経路と同じ「読めない」にする。
-  serviceは集計するeventから同じ入力と版が出るときだけ受けたものを使い、Gitを起動しない。
-  間に着地か衝突が来て版が違えば断り、クライアントは読み直して送り直す（3回まで）。
-  Gitで読んだものを送らない要求（serviceより古いクライアント）は、少なく答えずに断る。
-  areaは集合の表とその番号、履歴はcommitの時刻の差と名前の表の番号で送り、それでも要求の大きさを超えれば送らずに断る
-  ただし`stats`・`kpi`・`stats_inputs`はqueueの全eventを読むので今は止めてあり、CLIのクライアントは`stats_inputs`を聞く前に断り、serviceは`stats_inputs`（jobの読みはまずこれを聞く）とそれらの読みを読む前に断る（[ADR-t3745-1](../adr/2026-10-31-t3745-1-stop-readers-of-every-event-until-the-ledger-readers.md)）。
-- supervisorのuse caseの`all_events`も同じく止めてあり、serviceはstoreを読まずに断り、supervisorのqueueの`all_events`は何も送らずに同じ断りを返す。
+- `stats`と`kpi`はmainの履歴とareaを台帳から作るので、クライアントはGitを読まずにそのまま送り、serviceもGitを起動しない。
+  serviceより古いクライアントが送るGitの読みは受けて読まず、`stats_inputs`は読むものを名指さない（版は最新のevent id）。
+- supervisorのuse caseの`all_events`は止めてあり、serviceはstoreを読まずに断り、supervisorのqueueの`all_events`は何も送らずに同じ断りを返す。
 - `service status`はserviceに届かなくても答える。
   socketとserviceの記録はhostのCLIが見て、届けばqueueのattentionだけを`service_status`（`queue.read`）で読み、届かなければ[落ちたときの知らせ](queue-service.md#落ちたときの知らせadr-t3102-3決定12)の記録と次の手を返す（`application::queue_service::host_status`）。
   どちらでもDBを開かない。
@@ -73,9 +66,8 @@ Gitとprogramはserviceでなくクライアントがユースケースの外で
   `planner request`の言葉はクライアントが読み、環境が名指すroleがpolicyで`planner.request`を持たなければ読まずに送るので、断られる呼び出し元のfileとstdinは読まれない
 - `run log`・`planner log`の答えはlogを読むbackgroundのsessionで、fileを出し`--follow`で追うのはクライアント。
   `graph --out`の答えはd2のsourceと載るtaskで、描く（svg）のと書くのはクライアント
-- `report`はqueueの全eventを読むので今は止めてあり、クライアントは`report_inputs`を聞く前に断り、serviceは`report_inputs`と`report`を読む前に断る（[ADR-t3745-1](../adr/2026-10-31-t3745-1-stop-readers-of-every-event-until-the-ledger-readers.md)）。
-  残した配線では、`report`はまず`report_inputs`で近い依存図のd2のsourceと束縛したrepositoryを読み、main checkoutの`dagq.toml`が`[areas]`を持てばそのcheckoutを載せてもう一度聞いて、reportが読む期間（並べる期間と、その前のbaselineとtargetの連続の分）に着地したcommitだけを読む。
-  クライアントはmain checkoutのGitでそのcommitのareaを決め、自分のd2で描いた図と一緒に送る。
+- `report`は台帳から作り、クライアントはareaのためにGitを読まない（`report_inputs`の`landed`は空）。
+  クライアントは`report_inputs`で近い依存図のd2のsourceと束縛したrepositoryを1回だけ読み、自分のd2で描いた図と一緒に送る（名指したcheckoutがmain checkoutでなければserviceは断る）。
   要求がserviceの受ける大きさを超えれば図を描かなかったものとして理由と送り、それでも超えれば送らずに断る
   serviceはそれとserviceの環境（`TZ`・`host.toml`）でreportを作り、`--out`の無いものはqueueの`reports/`に書く。
   `--out`のreportは、`graph --out`と同じくserviceが作ったものを答え（JSONとHTMLと保持の設定）、`--out`の下に書いて古いreportを消し索引を書くのはクライアントが自分の権限で行う。

@@ -2,8 +2,11 @@
 //! [`crate::domain::kpi::kpi`] derives the KPIs from. Reads only.
 use anyhow::{Result, anyhow};
 
-use super::{EventStore, PlanningRecords, SupervisorReads, areas::AreaReader};
+use super::LedgerStore;
+use crate::domain::areas::{AreaMap, run_areas};
 use crate::domain::kpi::{HostReader, Kpi, KpiConfig, KpiInput, KpiQuery, kpi as derive};
+use crate::domain::ledger::attributes::Folded;
+use crate::domain::ledger::window::{LedgerWindow, WindowQuery};
 
 /// Where the host is: the time zone at `now` (seconds east of UTC) and the
 /// logical cores; and whether the profiles of the queue's repository
@@ -17,53 +20,48 @@ pub struct Host {
     pub rust_toolchain: bool,
 }
 
-/// The KPIs `query` asks for, at the unix second `now`, judged by `config`,
-/// the landed runs' areas read by `areas`, with the host's load of each
-/// window when `host_metrics` reads it (`kpi`, the reports, the breach
-/// check and the observer's input all pass the host's records). The KPIs come from the
-/// [`EventStore`]; the [`PlanningRecords`] and [`SupervisorReads`] reads
-/// are what they still join from the StateStore (the tasks' goals and
-/// changes, the drafts' origins and the supervisors' heartbeats) until the
-/// ledger replaces them (ADR-t1662-2 D1).
+/// The KPIs `query` asks for, at the unix second `now`, judged by
+/// `config`, from the ledger's rows alone (ADR-t1662-2 D1): the events the
+/// rows own, the tasks' goals, changes and drafts' origins of the
+/// attribute records, the landed runs' areas `areas` (`[areas]`) gives
+/// main's history the supervisor recorded, the supervisors' lives of
+/// their own records, and each window's host load of the node rows.
 pub fn kpi(
-    queue: &(impl EventStore + PlanningRecords + SupervisorReads + ?Sized),
+    queue: &(impl LedgerStore + ?Sized),
     now: i64,
     host: Host,
     config: &KpiConfig,
-    areas: &AreaReader,
+    areas: Option<&AreaMap>,
     query: &KpiQuery,
-    host_metrics: Option<HostReader<'_>>,
 ) -> Result<Kpi> {
-    kpi_checked(queue, now, host, config, areas, query, host_metrics, None)
+    let window = queue.ledger_window(&WindowQuery {
+        now_ms: super::stats::now_ms(now),
+        ..WindowQuery::default()
+    })?;
+    of_window(&window, now, host, config, areas, query)
 }
 
-/// [`kpi`] that first has `fresh` refuse the events it reads when they are
-/// not the ones `areas` were read for (the queue service's
-/// [`super::stats::ServedReads::check`]); `None` checks none.
-#[allow(clippy::too_many_arguments)]
-pub fn kpi_checked(
-    queue: &(impl EventStore + PlanningRecords + SupervisorReads + ?Sized),
+/// [`kpi`] of `window`, the whole ledger up to `now`.
+pub fn of_window(
+    window: &LedgerWindow,
     now: i64,
     host: Host,
     config: &KpiConfig,
-    areas: &AreaReader,
+    areas: Option<&AreaMap>,
     query: &KpiQuery,
-    host_metrics: Option<HostReader<'_>>,
-    fresh: Option<&super::stats::EventsCheck<'_>>,
 ) -> Result<Kpi> {
-    let events = queue.all_events()?;
-    if let Some(fresh) = fresh {
-        fresh(&events)?;
-    }
-    let run_areas = areas.run_areas(&events);
-    let goals = queue.task_goals()?;
-    let changes = queue.task_changes()?;
-    let draft_origins = queue.draft_origins()?;
-    let heartbeats = queue
-        .supervisors()?
-        .into_iter()
-        .map(|registration| (registration.token.into_string(), registration.heartbeat_at))
-        .collect();
+    let events = window.events();
+    let run_areas = areas.map(|map| run_areas(map, &events, &window.main_log().changed));
+    let (goals, changes, draft_origins) = match window.attributes() {
+        Folded::Attributes(known) => (
+            known.task_goals(),
+            known.task_changes(),
+            known.draft_origins(),
+        ),
+        Folded::BeforeBaseline => Default::default(),
+    };
+    let heartbeats = crate::domain::supervisor_life::heartbeats(&events, now);
+    let read = |from: i64, until: i64| window.host_between(from * 1000 - 1000, until * 1000);
     derive(
         &KpiInput {
             events: &events,
@@ -77,7 +75,7 @@ pub fn kpi_checked(
             cores: host.cores,
             rust_toolchain: host.rust_toolchain,
             config,
-            host: host_metrics,
+            host: Some(HostReader(&read)),
         },
         query,
     )

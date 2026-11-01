@@ -333,8 +333,6 @@ fn a_codex_observer_writes_findings_and_a_blocked_ask_through_the_queue_service(
     assert_eq!(skipped["outcome"], "skipped", "{skipped}");
     assert_eq!(stub_lines(&db, "codex-args.txt").len(), 2);
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = crate::common::cli::ok(&db, &["stats", "--full"]);
         let jobs = &stats["jobs"]["observer"];
@@ -433,8 +431,6 @@ fn an_observation_no_provider_can_run_records_why() {
     assert_eq!(done["cursor_saved"], false);
     assert!(stub_lines(&db, "codex-args.txt").is_empty());
     assert!(queue_events(&db, "observe_started").is_empty());
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = crate::common::cli::ok(&db, &["stats", "--full"]);
         assert_eq!(stats["jobs"]["observer"]["count"], 0, "{stats}");

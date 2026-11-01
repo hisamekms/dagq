@@ -54,7 +54,7 @@ pub fn record_supervisor_input(files: &dyn RunFiles, idle_marker: &Path) -> io::
 /// when the session opened: the latest, as a file time.
 pub fn last_input(files: &dyn RunFiles, idle_marker: &Path, opened: SystemTime) -> SystemTime {
     [
-        crate::application::stats::PROMPT_SUBMIT_MARKER,
+        crate::application::live_inputs::PROMPT_SUBMIT_MARKER,
         SUPERVISOR_INPUT_FILE,
     ]
     .into_iter()

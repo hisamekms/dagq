@@ -1900,10 +1900,10 @@ pub fn git_out(repo: &Path, args: &[&str]) -> String {
     String::from_utf8(result.stdout).unwrap().trim().to_owned()
 }
 
-/// `dagq stats --full` of the queue at `db`, as the CLI prints it.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
+/// `dagq stats --full` of the queue at `db`, as the CLI prints it, its
+/// ledger built first as the supervisor's pass builds it.
 pub fn stats_full(db: &Path) -> Value {
+    crate::common::ledger::build(db);
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command.without_actor_env();
     crate::common::cli::reach(&mut command, db, &["stats"]);
@@ -2597,10 +2597,9 @@ impl Clock for ManualClock {
 }
 
 /// Records the host's load under the queue at `queue_dir` as the
-/// supervisor would (`host/metrics-*.csv`, in UTC): `load1` of `load`
-/// every 6 hours over the `days` before now.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
+/// supervisor would (its node samples, and their copy in
+/// `host/metrics-*.csv`, in UTC): `load1` of `load` every 6 hours over the
+/// `days` before now.
 pub fn record_host_load(queue_dir: &Path, days: i64, load: f64) {
     use dagq::domain::host_metrics::{HostSample, file_name, header, local_day};
     let host = queue_dir.join(dagq::domain::host_metrics::HOST_DIR);
@@ -2618,6 +2617,12 @@ pub fn record_host_load(queue_dir: &Path, days: i64, load: f64) {
     }
     for (day, text) in files {
         fs::write(host.join(file_name(day)), text).unwrap();
+    }
+    for entry in fs::read_dir(queue_dir).unwrap() {
+        let db = entry.unwrap().path();
+        if db.extension().is_some_and(|extension| extension == "db") {
+            common::ledger::import_host_files(&SqliteQueue::open(&db).unwrap(), &db);
+        }
     }
 }
 

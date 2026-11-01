@@ -81,10 +81,8 @@ fn a_command_that_failed_on_the_host_is_retried_and_lands_when_it_passes() {
     );
     assert!(payloads(&detail, "integration_deferred").is_empty());
     assert!(payloads(&detail, "resume_started").is_empty());
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(
             stats["verification_failures"],
             json!([{"class": "disk_full", "count": 1, "runs": 1, "retried": 1, "retry_passed": 1, "retry_failed": 0}]),
@@ -150,10 +148,8 @@ fn a_command_that_fails_on_the_host_again_waits_for_a_person_without_a_resume() 
         "{last_error}"
     );
     assert!(last_error.contains("dagq integrate 1"), "{last_error}");
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(
             stats["verification_failures"],
             json!([{"class": "killed", "count": 2, "runs": 1, "retried": 1, "retry_passed": 0, "retry_failed": 1}]),

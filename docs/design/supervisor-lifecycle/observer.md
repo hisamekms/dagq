@@ -51,7 +51,6 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
      直前が`failed` / `error`なら（何も観察できていないので）起動する。
      skippedの`observe_finished`もtimerの期日の起点になる。
   1. 入力を集める: `stats --since <cursor>`（cursorは`--since`、無ければ前回のobserveが保存した`<queue dir>/observer/cursor`、それも無ければ`stats`の既定で、`--daily`は日次の窓（`DAILY_WINDOW_SECS`）より前の最後のevent id）、未決のfinding、直近のnote、openなask、`graph`、KPIと改善のproposalの数（下の「KPIの目標割れと改善の上限」）。
-     止めている`stats`（ADR-t3745-1）の断りは入力の`error`になりalertを出さない。
      入力のJSONは`observer::observer_input`が組み立て、promptが切る一覧はpromptが残す順に並べるので、promptが省いたものは`input.json`のその一覧のoffsetから後になる。
   2. promptを作る。
      役割は「dagqが回っているかを観察し、うまくいっていないことを`finding record`でfindingに記録し（根拠はrun_eventsのidで渡し、本文に埋めない。同じ種類・対象・subjectは既存のfindingの更新になるので、持っていない根拠か読みの変化があるときだけ記録し直す）、remedyが要るfindingには`--propose`で理由を付け、もう起きていない問題は`finding resolve`し、見立てが「待てば解ける」「leave it」のものはaskにせずfindingのdetailに見立てを書いて記録・更新だけにし、見立てが人を要るものだけを`blocked`のaskでinboxに上げる（openなaskのあるfindingには上げない。下の「人が要る見立てだけをblockedにする」）。note、goal、taskは書かず、個々の詰まりは解消しない。run / task / goalの状態は変えない」。
@@ -82,7 +81,7 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
      `outcome`は`succeeded`、`failed`（非0終了）、`error`（起動できない・timeout）のどれかで、`consecutive_failures`はmodeを問わず続く`error` / `failed`の回数。
      `succeeded`のhourlyのときだけ`cursor`を`<queue dir>/observer/cursor`に保存する（一時ファイルからrename）。
      失敗したobservationのwindowは次のobservationが読み直す。
-     保存する`cursor`は`stats`の`next_cursor`（runのpageの続き）なので終わったrunを飛ばさず、`stats`が断った回は最新のevent idなので止めている間に終わったrunは後で読まない。
+     保存する`cursor`は`stats`の`next_cursor`（runのpageの続き）なので終わったrunを飛ばさない。
      `stats`の期間集計はpageに依らず窓の終わりまで数える（`domain::stats`のmodule docの期間の窓）ので、間隔のうちにpageを超えるrunが終わったときだけ、次の期間集計が前の窓と重なる。
      observationごとの期間集計を足し合わせず、1回の値をその窓の値として読む。
      `consecutive_failures`が`OBSERVER_FAILURES_TOLD`に等しい`observe_finished`はinbox宛てのattention（`check the failed observer`）になり、`--role inbox`のwatchを起こす。

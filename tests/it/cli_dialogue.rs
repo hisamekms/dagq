@@ -552,8 +552,6 @@ fn a_recommendation_reaches_the_ask_status_and_stats() {
         &db,
         &["answer", &blocked["id"].to_string(), "--text", "propose"],
     );
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = ok(&db, &["stats", "--full"]);
         assert_eq!(
@@ -595,8 +593,6 @@ fn a_send_back_with_a_reason_matches_the_recommendation_in_stats() {
     assert_eq!(answered[0]["payload"]["option_index"], Value::Null);
     assert_eq!(answered[0]["payload"]["option"], Value::Null);
     assert_eq!(answered[1]["payload"]["reasoned_option"], Value::Null);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = ok(&db, &["stats", "--full"]);
         assert_eq!(

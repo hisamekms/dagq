@@ -16,6 +16,7 @@
 use crate::domain::EventKind;
 pub mod attributes;
 mod baseline;
+pub mod breakdown;
 pub mod builder;
 pub mod compare;
 pub mod findings;

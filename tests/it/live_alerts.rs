@@ -5,7 +5,8 @@ use crate::common;
 use crate::runtime_support;
 
 use dagq::application::LedgerStore;
-use dagq::application::stats::{LiveSources, StatsSources, live_inputs, stats};
+use dagq::application::live_inputs::{LiveSources, live_inputs};
+use dagq::application::stats::{StatsSources, stats};
 use dagq::domain::ledger::{build, window::WindowQuery};
 use dagq::domain::stats::Cursor;
 use dagq::domain::{
@@ -252,22 +253,15 @@ fn the_folded_streams_give_what_stats_lists_on_the_queue() {
     );
     let config_file = || Ok(None);
     let conflicts_file = || Ok(None);
-    let history = |_| anyhow::bail!("no history");
-    let areas = dagq::application::areas::AreaReader::none();
+    // `stats` reads the same judgments from the ledger.
     let listed = stats(
         &queue,
-        &SystemProcesses,
         end,
         &Default::default(),
         &StatsSources {
-            files: &LocalRunFiles,
-            signals: &signals,
             config_file: &config_file,
             conflicts_file: &conflicts_file,
-            history: &history,
-            host_metrics: None,
-            areas: &areas,
-            fresh: None,
+            areas: None,
             utc_offset_secs: 0,
             counts_checks: false,
             rust_toolchain: false,

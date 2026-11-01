@@ -784,6 +784,18 @@ pub struct Stats {
     /// that reads the files ([`Stats::window_ms`]); absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<super::host_metrics::HostSummary>,
+    /// How the judgments of now (`alerts`' slot alert, `running_alerts`,
+    /// `workspace_check`) were observed at the window's end, when they are
+    /// read from the ledger: a judgment not observed is empty there, and
+    /// says why here rather than reading as none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judgments: Option<JudgmentStates>,
+    /// The listed runs' time and slot time by blocker, holds and attempt
+    /// kind, each axis adding up to 100% with `unattributed`, overall and
+    /// per change and area of their task, from their ledger rows (a
+    /// legacy row counted apart). Set by the reader of the ledger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub breakdown: Option<StatsBreakdown>,
     /// Pass it to `--since` to read only runs that finish later: the last
     /// run's `finished_event_id` when `--since` left more than a page of
     /// runs, else the latest event read (`status`'s `cursor`), never past
@@ -794,6 +806,36 @@ pub struct Stats {
     /// `--until`'s time (else the end of the window of `asks`).
     #[serde(skip)]
     pub window_ms: (i64, i64),
+}
+
+/// `stats`' breakdown by tags ([`Stats::breakdown`]): overall, per change
+/// (`unknown` without one) and per area (`unknown` without one; none
+/// without `[areas]`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct StatsBreakdown {
+    pub overall: super::ledger::breakdown::Breakdown,
+    pub by_change: BTreeMap<String, super::ledger::breakdown::Breakdown>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_area: BTreeMap<String, super::ledger::breakdown::Breakdown>,
+}
+
+/// How each judgment of now was observed at a window's end
+/// ([`super::live_alerts::ObservationState`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JudgmentStates {
+    pub slot_alerts: super::live_alerts::ObservationState,
+    pub running_alerts: super::live_alerts::ObservationState,
+    pub workspace_check: super::live_alerts::ObservationState,
+}
+
+impl JudgmentStates {
+    fn of(judged: &super::live_alerts::FoldedJudgments) -> Self {
+        Self {
+            slot_alerts: judged.slot_alerts.state.clone(),
+            running_alerts: judged.running_alerts.state.clone(),
+            workspace_check: judged.workspace_check.state.clone(),
+        }
+    }
 }
 
 /// An alert about a run still in flight (ADR-0043 decision 5): its
@@ -916,6 +958,12 @@ pub struct LiveSnapshot {
     /// The host's offset from UTC in seconds, east positive: which asks
     /// `worker_question_topics` counts as opened at night.
     pub utc_offset_secs: i64,
+    /// The judgments of now as the ledger folds them at the window's end
+    /// ([`crate::domain::ledger::window::LedgerWindow::judgments`]): when
+    /// set, `alerts`' slot alert, `running_alerts` and `workspace_check`
+    /// are these (none of them while not observed, which `judgments`
+    /// says), not judged here from `runs` and the slots.
+    pub judged: Option<super::live_alerts::FoldedJudgments>,
 }
 
 impl Default for LiveSnapshot {
@@ -931,6 +979,7 @@ impl Default for LiveSnapshot {
             conflicts: ConflictConfigReport::default(),
             draft_origins: HashMap::new(),
             utc_offset_secs: 0,
+            judged: None,
         }
     }
 }
@@ -962,11 +1011,26 @@ pub fn stats(
             .is_none_or(|goal| goals.get(&task_id).copied().flatten() == Some(goal))
     };
     let tracks = runs(events, goals);
-    let running_alerts: Vec<RunningAlert> = running_alerts(events, &tracks, now, live)
+    let judged_running = live
+        .judged
+        .as_ref()
+        .map(|judged| judged.running_alerts.value.clone().unwrap_or_default());
+    let running_alerts: Vec<RunningAlert> = judged_running
+        .unwrap_or_else(|| running_alerts(events, &tracks, now, live))
         .into_iter()
         .filter(|alert| alert.task_id.is_none_or(in_goal))
         .collect();
-    let workspace_check = workspace_check(events, &live.runs);
+    let workspace_check = match &live.judged {
+        Some(judged) => judged
+            .workspace_check
+            .value
+            .clone()
+            .unwrap_or(WorkspaceCheck::Wrappers {
+                judged: 0,
+                unjudged: 0,
+            }),
+        None => workspace_check(events, &live.runs),
+    };
     let mut first_event: HashMap<&str, EventId> = HashMap::new();
     for event in events {
         if let Some(run_id) = &event.run_id {
@@ -1404,11 +1468,14 @@ pub fn stats(
             ask_id: None,
         });
     }
-    alerts.extend(slot_alert(
-        slots,
-        claim_holds.held.is_some(),
-        claim_deferrals.deferred.len(),
-    ));
+    match &live.judged {
+        Some(judged) => alerts.extend(judged.slot_alerts.value.clone().unwrap_or_default()),
+        None => alerts.extend(slot_alert(
+            slots,
+            claim_holds.held.is_some(),
+            claim_deferrals.deferred.len(),
+        )),
+    }
 
     Stats {
         runs: finished.into_iter().map(|track| track.stats).collect(),
@@ -1458,6 +1525,8 @@ pub fn stats(
         recommendations,
         landing_utilization,
         host: None,
+        judgments: live.judged.as_ref().map(JudgmentStates::of),
+        breakdown: None,
         next_cursor,
         window_ms: (window_from, window_until),
     }

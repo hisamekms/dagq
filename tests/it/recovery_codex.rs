@@ -211,8 +211,6 @@ fn a_codex_recovery_job_of_a_failed_run_is_read_only_and_its_retry_is_applied() 
     );
 
     assert_eq!(recovery_providers(&db), ["codex"]);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["recovery"];
         assert_eq!(jobs["by_provider"]["codex"]["count"], 1, "{jobs}");
@@ -319,8 +317,6 @@ fn a_failed_codex_recovery_job_fails_its_round_to_a_person() {
     assert_eq!(recovered["reason_category"], "recovery_failed");
     assert_eq!(recovered["session_id"], THREAD);
     assert!(run_payloads(&detail, run, "triage_finished").is_empty());
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["recovery"];
         assert_eq!(jobs["by_provider"]["codex"]["failed"], 1, "{jobs}");
@@ -621,8 +617,6 @@ fn a_codex_recovery_job_of_a_stalled_run_resumes_it_and_it_lands() {
         )
     );
     assert_eq!(recovery_providers(&db), ["codex"]);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["recovery"];
         assert_eq!(
@@ -884,8 +878,6 @@ fn a_codex_recovery_job_that_cannot_log_in_moves_the_round_to_claude() {
         "{held:?}"
     );
     assert_eq!(recovery_providers(&db), ["codex", "claude"]);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["recovery"];
         assert_eq!(jobs["by_provider"]["codex"]["failed"], 1, "{jobs}");

@@ -563,7 +563,8 @@ impl Supervisor<'_> {
     fn session_moved(&self, run: &TaskRun, idle_marker: &Path, since: SystemTime) -> bool {
         let mut markers = vec![idle_marker.to_path_buf()];
         if let Some(dir) = run.run_dir() {
-            markers.push(Path::new(dir).join(crate::application::stats::PROMPT_SUBMIT_MARKER));
+            markers
+                .push(Path::new(dir).join(crate::application::live_inputs::PROMPT_SUBMIT_MARKER));
         }
         if let Some(receipt) = run.receipt_path() {
             markers.push(PathBuf::from(receipt));

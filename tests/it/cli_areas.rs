@@ -1,16 +1,7 @@
-//! The areas of the landed runs (ADR-t980-1) on a real queue and Git:
-//! `stats` and `kpi` read the `[areas]` of the main checkout's `dagq.toml`
-//! and the landed commit's files from Git whenever they read, so a run
-//! landed before the map existed gets its areas, and changing the map
-//! reclassifies it. Nothing is stored.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 use crate::runtime_support::*;
 
 /// `dagq kpi` on the queue at `db` in UTC, with the host-wide settings
 /// read from `config` rather than the home of the person running the tests.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 fn kpi(db: &Path, config: &Path, args: &[&str]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command
@@ -33,8 +24,6 @@ fn kpi(db: &Path, config: &Path, args: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 #[test]
 fn stats_and_kpi_split_the_landed_runs_by_the_areas_of_their_commit() {
     let (dir, repo, db, run) = awaiting_run();
@@ -102,12 +91,10 @@ fn stats_and_kpi_split_the_landed_runs_by_the_areas_of_their_commit() {
 }
 
 /// `report` through the queue service on a queue bound to a repository
-/// with `[areas]` and a landed run (ADR-t3102-3 decision 5): the client
-/// reads the landed commit's files with Git in the main checkout, and the
-/// service, whose Git logs each run, runs none, yet the report splits the
-/// landing by its areas.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
+/// with `[areas]` and a landed run (ADR-t3102-3 decision 5): the landed
+/// commit's files come from main's history the ledger holds (recorded as a
+/// supervisor's pass records it), and the service, whose Git logs each
+/// run, runs none, yet the report splits the landing by its areas.
 #[test]
 fn a_report_through_the_service_reads_the_areas_with_the_client_s_git() {
     let (dir, repo, db, _run) = awaiting_run();
@@ -156,10 +143,8 @@ fn a_report_through_the_service_reads_the_areas_with_the_client_s_git() {
 /// queue bound to a repository, naming a directory whose `.git` file's
 /// `gitdir:` is under the bound common directory: the service refuses both
 /// without reading that directory's `dagq.toml` (one that does not parse),
-/// and answers both for the main checkout it finds from the binding, the
-/// landed commit with them.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
+/// and answers both for the main checkout it finds from the binding, with
+/// no landed commit read by its client.
 #[test]
 fn a_report_naming_another_directory_than_the_main_checkout_is_refused_unread() {
     use dagq::domain::queue_service::{API_VERSION, ServiceRequest, UseCase};
@@ -220,11 +205,11 @@ fn a_report_naming_another_directory_than_the_main_checkout_is_refused_unread() 
             "{use_case:?}: {message}"
         );
     }
-    let commit =
-        crate::common::service::events(&db, "run_integrated")[0]["payload"]["commit"].clone();
     let answered = call(UseCase::ReportInputs, inputs(&repo));
     assert_eq!(answered["ok"], true, "{answered}");
-    assert_eq!(answered["result"]["landed"], json!([commit]), "{answered}");
+    // The landed runs' areas come from main's history the ledger holds:
+    // the client reads no Git for them.
+    assert_eq!(answered["result"]["landed"], json!([]), "{answered}");
     let made = call(UseCase::Report, report(&repo));
     assert_eq!(made["ok"], true, "{made}");
     assert_eq!(
@@ -237,8 +222,6 @@ fn a_report_naming_another_directory_than_the_main_checkout_is_refused_unread() 
 /// `dagq` with `args` on the queue at `db` through the queue service, in
 /// the host's time zone (the one the test reads the DB in) with the
 /// host-wide settings of `config`: the JSON it prints.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 fn served(db: &Path, config: &Path, args: &[&str]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command.without_actor_env().env("XDG_CONFIG_HOME", config);
@@ -265,8 +248,6 @@ fn served(db: &Path, config: &Path, args: &[&str]) -> Value {
 /// `[conflicts]` source is the file), and the areas, the conflict hotspots,
 /// the recurring drafts and the KPIs' landings are those `stats` and `kpi`
 /// on the DB read with Git themselves. `stats` and `kpi` as served.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 fn served_as_on_the_db(dir: &Path, repo: &Path, db: &Path, run: &TaskRun) -> (Value, Value) {
     use dagq::application::DraftPlannerStore;
     fs::write(
@@ -303,7 +284,7 @@ fn served_as_on_the_db(dir: &Path, repo: &Path, db: &Path, run: &TaskRun) -> (Va
         "the service ran Git"
     );
 
-    let on_db = runtime::stats(
+    let on_db = crate::common::ledger::stats(
         db,
         &dagq::domain::stats::StatsQuery {
             full: true,
@@ -336,8 +317,6 @@ fn served_as_on_the_db(dir: &Path, repo: &Path, db: &Path, run: &TaskRun) -> (Va
 /// [`served_as_on_the_db`] on a repository with `[areas]`, a landed run
 /// and a conflict: the run's areas and the conflicted file's hotspot, with
 /// the landings main's history counts, are read.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 #[test]
 fn stats_and_kpi_through_the_service_read_areas_and_main_s_history_with_the_client_s_git() {
     let (dir, repo, db, run) = awaiting_run();
@@ -357,8 +336,6 @@ fn stats_and_kpi_through_the_service_read_areas_and_main_s_history_with_the_clie
 /// another directory: the service finds, with no Git, the main checkout
 /// `main_checkout_of` finds with Git on the DB (the directory of the
 /// `.git`), and reads its `dagq.toml`.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 #[test]
 fn stats_and_kpi_of_a_core_worktree_repository_through_the_service_are_those_on_the_db() {
     let (dir, repo, db, run) = awaiting_run();
@@ -377,13 +354,10 @@ fn stats_and_kpi_of_a_core_worktree_repository_through_the_service_are_those_on_
     assert!(stats["runs"][0]["areas"].is_array(), "{stats}");
 }
 
-/// A conflict recorded between a client's `stats_inputs` and its `stats`
-/// (ADR-t3102-3 decision 5): the service refuses the Git reads made for
-/// the inputs before it, the client reads Git again for the new inputs and
-/// sends them, and the answer's hotspots, the new file's with them, are
-/// those of `stats` on the DB; the service runs no Git all along.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
+/// A conflict recorded while a client sends `stats` (ADR-t3102-3 decision
+/// 5): the client reads no Git and sends `stats` once, and the answer's
+/// hotspots, the new file's with them once the ledger holds it, are those
+/// of `stats` on the DB; the service runs no Git all along.
 #[test]
 fn a_conflict_between_the_inputs_and_stats_is_read_again_not_mixed() {
     use dagq::application::{DraftPlannerStore, queue_reads::QueueRead};
@@ -418,6 +392,7 @@ fn a_conflict_between_the_inputs_and_stats_is_read_again_not_mixed() {
             sends.set(sends.get() + 1);
             if sends.get() == 1 {
                 conflict("seed.txt");
+                crate::common::ledger::build(&db);
             }
         }
         let (use_case, params) = sent.request();
@@ -445,13 +420,13 @@ fn a_conflict_between_the_inputs_and_stats_is_read_again_not_mixed() {
         }
     })
     .unwrap();
-    assert_eq!(sends.get(), 2, "sent again once");
+    assert_eq!(sends.get(), 1, "sent once");
     assert_eq!(
         fs::read_to_string(&git_log).unwrap(),
         "",
         "the service ran Git"
     );
-    let on_db = runtime::stats(
+    let on_db = crate::common::ledger::stats(
         &db,
         &dagq::domain::stats::StatsQuery {
             full: true,

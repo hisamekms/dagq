@@ -244,8 +244,6 @@ fn a_verified_claim_is_closed_without_a_commit_by_the_answer() {
     let after = queue.show(TaskId::new(2)).unwrap();
     assert_eq!(after.runs[0].status(), RunStatus::Integrated);
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = stats_full(&db);
         assert_eq!(
@@ -1322,8 +1320,6 @@ fn a_high_pass_on_the_snapshot_main_is_still_at_closes_the_claim_with_no_ask() {
     let after = queue.show(TaskId::new(2)).unwrap();
     assert_eq!(after.runs[0].status(), RunStatus::Integrated);
     assert_eq!(satisfied_worktrees(&repo, &db), Vec::<String>::new());
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = stats_full(&db);
         assert_eq!(

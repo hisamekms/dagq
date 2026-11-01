@@ -1221,3 +1221,184 @@ fn a_chosen_windows_tokens_keep_when_the_records_start() {
         assert_ne!(chosen.coverage, Coverage::Full);
     }
 }
+
+/// `stats` of the events a window of the ledger gives back is `stats` of
+/// every event, as it was read before the ledger: for the sessions and
+/// jobs of no run, the queue's intervals and events (the fields of no run
+/// or task: `jobs`, `sessions`, `planner_routes`, `updates`,
+/// `landing_utilization`, `claim_holds`, `claim_deferrals`), the tokens
+/// by the day an Execution ended, the context and its missing counts, a
+/// run held before it landed (its time with and without the hold), a ready
+/// task held before its claim, and a run on its way, whose row the store
+/// has none of and the read folds ([`run_on_its_way`]).
+#[test]
+fn stats_of_a_windows_events_is_stats_of_every_event() {
+    use crate::domain::ledger::testkit::{Log as Lives, run_id};
+    use crate::domain::run_phase::Phase;
+    use crate::domain::stats::{LiveSnapshot, SlotSnapshot, StatsQuery, stats};
+    let mut events = queue_log().events;
+    let (landed, on_its_way) = (run_id(1), run_id(3));
+    let mut lives = Lives::default();
+    lives.worked(1, &landed, 4800);
+    lives
+        .add(
+            Some(1),
+            None,
+            "task_held",
+            json!({"hold_id": 1, "state": "settling"}),
+            5470,
+        )
+        .phase(1, &landed, 5480, Phase::Held, "x")
+        .add(Some(1), None, "task_released", json!({"hold_id": 1}), 5600)
+        .phase(1, &landed, 5600, Phase::AwaitingSlot, "x")
+        .integrated(1, &landed, 5700)
+        .pushed(1, &landed, 5950);
+    lives
+        .add(Some(2), None, "task_created", json!({}), 4800)
+        .add(
+            Some(2),
+            None,
+            "task_status_changed",
+            json!({"from": "submitted", "to": "ready"}),
+            4900,
+        )
+        .add(
+            Some(2),
+            None,
+            "task_held",
+            json!({"hold_id": 2, "reason": "login", "state": "held"}),
+            5000,
+        )
+        .add(Some(2), None, "task_released", json!({"hold_id": 2}), 5300);
+    lives.worked(3, &on_its_way, 6000).add(
+        Some(3),
+        Some(&on_its_way),
+        "ask_opened",
+        json!({"ask_id": 9, "kind": "worker_question"}),
+        6700,
+    );
+    let offset = events.len() as i64;
+    events.extend(lives.events.into_iter().map(|mut event| {
+        event.id = EventId::new(event.id.as_i64() + offset);
+        event
+    }));
+    let now_ms = (crate::domain::ledger::testkit::T0 + 7200) * 1000;
+    // The store holds no row of a run on its way: the read folds it.
+    let mut rows: Vec<LedgerRow> = build(&events, now_ms, BUILT)
+        .into_iter()
+        .filter(|row| row.kind != LedgerKind::Run || row.ended_at.is_some() || row.is_legacy())
+        .collect();
+    let folding = runs_on_their_way(&rows);
+    // The run of task 7 has not ended either.
+    assert_eq!(
+        folding,
+        [RunId::new(&on_its_way).unwrap(), RunId::new(RUN).unwrap()]
+    );
+    for run in &folding {
+        let of_run: Vec<RunEvent> = events
+            .iter()
+            .filter(|event| event.run_id.as_ref() == Some(run))
+            .cloned()
+            .collect();
+        rows.extend(run_on_its_way(run, &of_run, now_ms));
+    }
+    let goals = HashMap::new();
+    let live = LiveSnapshot::default();
+    let now = now_ms / 1000;
+    for (since, until) in [
+        (None, None),
+        (Some(Cursor::Time(T0 + 15 * MIN)), None),
+        (
+            Some(Cursor::Time(T0 + 30 * MIN)),
+            Some(Cursor::Time(now_ms - 1_200_000)),
+        ),
+        // An event `--until` ends the folds at its event, which the whole
+        // log read past ([`an_event_cursor_ends_the_folds_at_its_event`]).
+        (Some(Cursor::Event(EventId::new(10))), None),
+    ] {
+        let query = StatsQuery {
+            since,
+            until,
+            full: true,
+            ..StatsQuery::default()
+        };
+        let window = select(
+            rows.clone(),
+            &WindowQuery {
+                since,
+                until,
+                now_ms,
+                ..WindowQuery::default()
+            },
+        );
+        let before = serde_json::to_value(stats(
+            &events,
+            &goals,
+            now,
+            SlotSnapshot::default(),
+            &query,
+            &live,
+        ))
+        .unwrap();
+        let after = serde_json::to_value(stats(
+            &window.events(),
+            &goals,
+            now,
+            SlotSnapshot::default(),
+            &query,
+            &live,
+        ))
+        .unwrap();
+        assert_eq!(after, before, "{since:?}..{until:?}");
+    }
+    // The whole window holds each part of the log.
+    let whole = serde_json::to_value(stats(
+        &select(
+            rows,
+            &WindowQuery {
+                now_ms,
+                ..WindowQuery::default()
+            },
+        )
+        .events(),
+        &goals,
+        now,
+        SlotSnapshot::default(),
+        &StatsQuery {
+            full: true,
+            ..StatsQuery::default()
+        },
+        &live,
+    ))
+    .unwrap();
+    for kind in ["runtime_planner", "plan_review", "goal_review", "observer"] {
+        assert!(
+            whole["sessions"]["by_kind"].get(kind).is_some(),
+            "{kind}: {}",
+            whole["sessions"]
+        );
+    }
+    assert!(whole["sessions"]["by_kind"]["inbox"]["tokens"]["input"].as_i64() > Some(0));
+    assert_ne!(whole["jobs"], json!({}), "{}", whole["jobs"]);
+    assert_ne!(whole["updates"], json!({}), "{}", whole["updates"]);
+    assert!(
+        whole["claim_holds"].to_string().contains("load"),
+        "{}",
+        whole["claim_holds"]
+    );
+    assert_eq!(
+        whole["claim_deferrals"]["by_end"]["expired"]["count"], 1,
+        "{}",
+        whole["claim_deferrals"]
+    );
+    let held = whole["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|run| run["run_id"] == landed.as_str())
+        .unwrap();
+    assert_eq!(held["held"], 120, "{held}");
+    assert_eq!(held["without_held"]["wait_to_land"], 320, "{held}");
+    // The run on its way: its ask is counted though its row is the read's.
+    assert_eq!(whole["asks"]["opened"]["count"], 1, "{}", whole["asks"]);
+}

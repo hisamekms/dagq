@@ -121,10 +121,8 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
         status["supervisors"][0]["claim_hold"]["reason"], "disk_space",
         "{status}"
     );
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(stats["claim_holds"]["held"]["reason"], "disk_space");
         assert_eq!(stats["landing_holds"]["held"], Value::Null, "{stats}");
     }
@@ -168,10 +166,8 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
     let resumed = queue_events(&db, "claim_resumed");
     assert_eq!(resumed.len(), 1, "{resumed:?}");
     assert_eq!(resumed[0]["reason"], "disk_space");
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(
             stats["claim_holds"]["by_reason"]["disk_space"]["count"], 1,
             "{stats}"
@@ -359,10 +355,8 @@ fn a_landing_waits_for_room_before_its_verification() {
         status["supervisors"][0]["landing_hold"]["reason"], "disk_space",
         "{status}"
     );
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(stats["landing_holds"]["held"]["reason"], "disk_space");
     }
 
@@ -378,10 +372,8 @@ fn a_landing_waits_for_room_before_its_verification() {
     let asks = disk_asks(&db);
     assert!(asks[0].closed_at.is_some(), "{asks:?}");
     assert_eq!(asks[0].answered_by.as_deref(), Some("runtime"));
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(stats["landing_holds"]["count"], 1, "{stats}");
         assert_eq!(stats["landing_holds"]["held"], Value::Null);
     }
@@ -560,11 +552,8 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding() {
     assert!(disk_asks(&db).is_empty());
     let mut queue = SqliteQueue::open(&db).unwrap();
     assert_eq!(queue.show(TaskId::new(2)).unwrap().runs.len(), 1);
-    // `stats` counts the repair on no task.
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(
             stats["auto_repairs"]["by_layer"]["runtime"]["by_repair"]["disk_cleanup"], 1,
             "{stats}"

@@ -291,8 +291,6 @@ fn ask_answer_asks_and_close_through_the_cli() {
     assert_eq!(withdrawn["answered_by"], "person");
     assert!(withdrawn["option_index"].is_null());
     ok(&db, &["ask", "close", &next_id]);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         // `stats` counts both asks by kind, asker, answerer and choice.
         let asks = &ok(&db, &["stats", "--full"])["asks"];
@@ -408,8 +406,6 @@ fn stats_times_the_open_asks_up_to_the_window_end() {
     };
     let open = ask("still open?");
     let since = ok(&db, &["status"])["cursor"].to_string();
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let times = &ok(&db, &["stats", "--since", &since])["asks"]["times"];
         let decide = &times["by_kind"]["decide"];
@@ -429,8 +425,6 @@ fn stats_times_the_open_asks_up_to_the_window_end() {
         .map(|event| event["kind"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(kinds, ["ask_answered", "ask_closed"], "{closed}");
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let times = &ok(&db, &["stats", "--since", &since])["asks"]["times"];
         let decide = &times["by_kind"]["decide"];
@@ -637,8 +631,6 @@ fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
     ] {
         ok_as("observer", &db, args);
     }
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         ok_as("observer", &db, &["stats"]);
     }

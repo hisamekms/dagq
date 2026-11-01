@@ -1,0 +1,38 @@
+# The items of task 3812 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 17.1s: a supervise whose report job judges a host load target, twice
+[[test]]
+name = "runtime_push::a_host_load_target_breaches_from_the_host_records_and_is_not_judged_without_them"
+reason = "B 境界（守る境界）: supervisor の report の job が台帳の node の行から host の負荷の目標を判定し、目標割れを記録して push の command に渡し、記録の無い host では判定しないことを、supervise・SQLite の event・push の script の配線で確かめる（判定は domain::kpi の unit test）"
+task = 3812
+
+# 21.5s: the daily and the weekly reviews of a queue with MBs of marks
+[[test]]
+name = "runtime_throughput_review::the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_prompt"
+reason = "B 境界（守る境界）: 台帳から作る kpi が MB の入力になる日次・週次の見直しが、入力をファイルに置いて小さい prompt で agent を起動することを、実の job の process と prompt の上限の配線で確かめる（入力の組み立ては application::throughput_review の unit test）"
+task = 3812
+
+# 7.1s: three Codex throughput reviews through the queue service
+[[test]]
+name = "throughput_review_codex::a_throughput_review_on_codex_reads_its_last_message_like_claude_s_output"
+reason = "B 境界（守る境界）: Codex の見直しの job が queue service から kpi を読み、最後の message を Claude の出力と同じに読み、その job が台帳の session の行から stats と kpi に数えられることを、Codex の stub の process・service・SQLite の配線で確かめる（読み方は infrastructure::codex の unit test）"
+task = 3812
+
+# 8.4s: a landed run, a forged checkout and a service that logs its Git
+[[test]]
+name = "cli_areas::a_report_naming_another_directory_than_the_main_checkout_is_refused_unread"
+reason = "B 境界（守る境界）: queue service が束ねた main checkout 以外を名指す report_inputs と report を、その dagq.toml を読まずに断り、main checkout には Git を走らせずに答えることを、実の service・Git の log・landing の配線で確かめる（判定は application::report::accept_checkout の unit test）"
+task = 3812
+
+# 8.4s: a supervise that forecasts, lands and is scored by kpi
+[[test]]
+name = "runtime_forecast::kpi_scores_the_snapshots_against_the_finishes"
+reason = "B 境界（守る境界）: supervisor が記録した forecast の snapshot を、台帳から作る kpi が着地と突き合わせて数えることを、supervise・SQLite の event・CLI の配線で確かめる（採点は domain::forecast::score の unit test）"
+task = 3812
+
+# 5.1s: every host command through the service against its twin on the DB
+[[test]]
+name = "host_commands::each_host_command_runs_through_the_service_as_on_the_db_and_is_refused_a_worker"
+reason = "B 境界（守る境界）: host の command が queue service を通っても DB の上と同じ答えを返し、worker には断られることを、実の service と twin の queue で確かめる（各 command の判断は application の unit test）"
+task = 3812

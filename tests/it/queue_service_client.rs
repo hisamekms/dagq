@@ -177,8 +177,6 @@ fn a_worker_s_dagq_runs_its_commands_through_the_service_as_the_worker() {
             "{args:?}"
         );
     }
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         // The reads that tell the time now are read twice around the command
         // line's, until the clock did not move between them (a few tries under
@@ -402,8 +400,6 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
     for args in [
         vec!["answer", "1", "--text", "a"],
         vec!["ask", "close", "1"],
-        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-        #[cfg(any())]
         vec!["report"],
         vec!["graph", "--out", "g.d2", "--format", "d2"],
     ] {

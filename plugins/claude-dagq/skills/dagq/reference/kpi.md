@@ -2,7 +2,7 @@
 
 Each command below prints JSON; `"$DAGQ" <command> --help` lists its flags (and the strata `kpi` can split by), and the JSON output itself is where the values are. This file says how to read them and what to do.
 
-**Stopped in the current build:** `stats` (`--ledger` too), `kpi` (`--compare` too) and `report` read every event of the queue, so this build refuses them before they read, with an error naming why and what brings each back (`--help` says the same). While they are stopped, do not retry them: read what you need from `events` (with its filters) and `timeline RUN`, and say in your report which values were not available.
+`stats`, `kpi` and `report` read the queue's ledger, which the supervisor builds on its passes: what no record holds reads as missing (with why), not as 0. `stats` gives each listed run's time and slot time by blocker, holds and attempt in `breakdown` (overall, `by_change`, `by_area`), each axis adding up to 100% with `unattributed`; read the unattributed share there before trusting the rest. `stats --ledger` is still stopped and refuses with why.
 
 ## `dagq kpi`: periods, strata, targets
 

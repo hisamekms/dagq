@@ -667,18 +667,8 @@ fn a_worker_is_refused_watch_and_export_and_each_refusal_is_recorded() {
     let error = denied_as(&worker, &db, watch);
     assert_eq!(error["queue_service"]["code"], "no_use_case", "{error}");
     // An export the service refuses the worker, and records the refusal as
-    // the worker's. `report` is stopped before it is sent while it reads
-    // every event of the queue (ADR-t3745-1), and records nothing: task
-    // 1669 puts it back among the refused.
-    let refused = &export[..1];
-    let error = denied_as(&worker, &db, export[1]);
-    assert!(
-        error["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("report is stopped"),
-        "{error}"
-    );
+    // the worker's.
+    let refused = &export[..];
     for args in refused {
         let error = denied_as(&worker, &db, args);
         assert_eq!(error["denied"]["role"], "worker", "{args:?}: {error}");
@@ -704,6 +694,9 @@ fn a_worker_is_refused_watch_and_export_and_each_refusal_is_recorded() {
         assert_eq!(event["actor"]["role"], "worker", "{event}");
         assert_eq!(event["payload"]["capability"], "queue.export", "{event}");
     }
+    // The worker's run is active, so a supervisor's pass records its
+    // judgments of now after the refusals; the user's `report` reads them.
+    crate::common::ledger::build(&db);
     let events = event_count(&db);
     assert!(!Path::new(graph).exists());
     assert!(!Path::new(reports).exists());
@@ -711,8 +704,6 @@ fn a_worker_is_refused_watch_and_export_and_each_refusal_is_recorded() {
     allowed_as(&[], &db, watch);
     allowed_as(&[], &db, export[0]);
     assert!(Path::new(graph).is_file());
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         allowed_as(&[], &db, export[1]);
         assert!(Path::new(reports).is_dir());

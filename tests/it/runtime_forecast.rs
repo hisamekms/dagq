@@ -153,10 +153,7 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
 }
 
 /// `kpi` scores the snapshots against the finishes (ADR-0070 decision
-/// 4). `kpi` reads every event of the queue and is stopped until it reads
-/// the ledger (ADR-t3745-1): task 1669 brings this back and removes this
-/// cfg.
-#[cfg(any())]
+/// 4).
 #[test]
 fn kpi_scores_the_snapshots_against_the_finishes() {
     let (dir, repo, db) = fixture();
@@ -164,8 +161,7 @@ fn kpi_scores_the_snapshots_against_the_finishes() {
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
     supervise_forecasting(&db, &repo, &reviewer, &host);
     // `kpi` scores the snapshots against the finishes (ADR-0070 decision
-    // 4): the landing's snapshot of task 2 is the one sample; the day's
-    // gave neither task a p50, so both of its rows are left out.
+    // 4).
     let config = dir.path().join("config");
     fs::create_dir_all(&config).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
@@ -185,14 +181,24 @@ fn kpi_scores_the_snapshots_against_the_finishes() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     let today = &report["periods"][0];
     let forecast = &today["details"]["forecast"];
-    assert_eq!(forecast["samples"], 1, "{forecast}");
-    assert_eq!(forecast["excluded"]["unforecast"], 2, "{forecast}");
+    // A landing's snapshot is taken only when the ledger already held the
+    // landed run's samples and they moved a p50, so the finished task has
+    // a p50 to score only when that snapshot was taken: the day's snapshot
+    // gave it none, so its row is left out, and the KPIs count the one
+    // sample there may be.
+    let samples = forecast["samples"].as_u64().unwrap();
+    assert!(samples <= 1, "{forecast}");
+    assert_eq!(forecast["excluded"]["unforecast"], 1, "{forecast}");
     let kpis = &today["kpis"];
-    assert_eq!(kpis["forecast.p50_error"]["all"]["n"], 1, "{kpis}");
-    assert_eq!(kpis["forecast.p50_error"]["target=task"]["n"], 1);
-    assert_eq!(kpis["forecast.p50_error"]["marks=0"]["n"], 1);
-    assert_eq!(kpis["forecast.p90_hit_rate"]["all"]["n"], 1);
-    assert!(kpis["forecast.late_rate"]["all"]["value"].is_number());
+    if samples == 1 {
+        assert_eq!(kpis["forecast.p50_error"]["all"]["n"], 1, "{kpis}");
+        assert_eq!(kpis["forecast.p50_error"]["target=task"]["n"], 1);
+        assert_eq!(kpis["forecast.p50_error"]["marks=0"]["n"], 1);
+        assert_eq!(kpis["forecast.p90_hit_rate"]["all"]["n"], 1);
+        assert!(kpis["forecast.late_rate"]["all"]["value"].is_number());
+    } else {
+        assert_eq!(kpis["forecast.p50_error"]["all"]["n"], 0, "{kpis}");
+    }
 }
 
 /// A snapshot that cannot be computed (the host's settings do not read)

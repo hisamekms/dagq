@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::application::memory_files::MemoryFiles;
+use crate::application::stats::stall_config;
 use crate::application::{EndedRunWorkspace, EndedRunWorktree, IdleHook};
 use crate::domain::claim_defer::claim_deferrals;
 use crate::domain::claim_hold::claim_holds;

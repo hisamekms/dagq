@@ -524,7 +524,9 @@ pub(super) const MODULES: &[ModuleContext] = &[
     module("src/application/health/runs.rs", Execution), // recover
     module("src/application/stats.rs", Observation),
     module("src/application/kpi.rs", Observation),
-    module("src/application/ledger_check.rs", Observation),
+    module("src/application/live_inputs.rs", Observation),
+    module("src/application/live_inputs/", Observation),
+    module("src/application/main_history.rs", Observation),
     module("src/application/forecast.rs", Observation),
     module("src/application/report.rs", Observation),
     module("src/application/observer/", Observation),

@@ -147,10 +147,8 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
         );
         (hot, near, apart)
     };
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(
             stats["conflict_hotspots"]["files"][0]["alert"], true,
             "{stats}"
@@ -182,10 +180,8 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
     assert_eq!(open[0]["task_id"], json!(near));
     assert_eq!(open[0]["files"], json!([HOT]));
     assert!(open[0]["since"].is_string());
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         let deferrals = &stats["claim_deferrals"];
         assert_eq!(deferrals["count"], 1, "{deferrals}");
         assert_eq!(deferrals["by_file"][HOT], 1);
@@ -231,10 +227,8 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
     assert_eq!(events(&db, "claim_deferred").len(), 1);
     let status = runtime::status(&db).unwrap();
     assert_eq!(status["claim_deferrals"], json!([]), "{status}");
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(stats["claim_deferrals"]["by_end"]["expired"]["count"], 1);
         assert_eq!(stats["claim_deferrals"]["deferred"], json!([]));
     }
@@ -347,10 +341,8 @@ fn a_run_waiting_for_its_owner_past_the_grace_lets_the_deferred_task_go() {
     assert_eq!(ended[0].0, Some(near));
     assert_eq!(ended[0].1["why"], "owner_waiting");
     assert_eq!(events(&db, "claim_deferred").len(), 1);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(
             stats["claim_deferrals"]["by_end"]["owner_waiting"]["count"], 1,
             "{stats}"
@@ -408,10 +400,8 @@ fn a_failed_run_with_no_commit_of_its_own_lets_the_deferred_task_go() {
     assert_eq!(ended.len(), 1, "{ended:?}");
     assert_eq!(ended[0].0, Some(near));
     assert_eq!(ended[0].1["why"], "no_commit");
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(
             stats["claim_deferrals"]["by_end"]["no_commit"]["count"], 1,
             "{stats}"

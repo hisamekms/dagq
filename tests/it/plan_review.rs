@@ -751,10 +751,8 @@ fn a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers() {
             events(&mut queue, task, "plan_review_finished")[0]["plan_review_id"]
         );
     }
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&fx.db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&fx.db, &Default::default()).unwrap();
         assert_eq!(
             stats["review_reasons"]["plan_review"]["by_code"]["task_overlap"]["outcomes"],
             json!({"deviation_accepted": 1, "deviation_rejected": 1, "canceled": 1}),

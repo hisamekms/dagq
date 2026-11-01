@@ -357,8 +357,6 @@ fn timeline_and_stats_show_the_work_breakdown() {
     assert_eq!(commands[0]["category"], "llvm_cov");
     assert_eq!(commands[0]["secs"], 900);
     assert_eq!(commands[0]["background"], true);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = ok(&db, &["stats", "--full"]);
         let breakdown = &stats["runs"][0]["work_breakdown"];
@@ -470,8 +468,6 @@ fn timeline_and_stats_show_the_work_breakdown() {
 /// declared (the made-up one of `tests/common`), a stratum with the
 /// Rust profile declared. Undeclared, none even in dagq's source
 /// (`timeline_and_stats_show_the_work_breakdown`).
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 #[test]
 fn the_toolchain_axis_follows_the_declared_rust_profile() {
     use dagq::domain::kpi::{Axis, KpiQuery, Period};
@@ -496,6 +492,7 @@ fn the_toolchain_axis_follows_the_declared_rust_profile() {
     let strata = |toml: &str| -> Vec<String> {
         std::fs::write(dir.path().join("repo-other").join("dagq.toml"), toml).unwrap();
         let since = 1_790_208_000_000;
+        crate::common::ledger::build(&db);
         let kpi = one_shot
             .kpi_of(
                 &SqliteQueue::open(&db).unwrap(),
@@ -530,8 +527,6 @@ fn the_toolchain_axis_follows_the_declared_rust_profile() {
 /// source both are left out with only another profile declared, one whose
 /// rules count no check of `integrate`. Undeclared, both are left out in
 /// dagq's source too (`timeline_and_stats_show_the_work_breakdown`).
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 #[test]
 fn the_stats_rustc_follows_the_declared_rust_profile() {
     use dagq::domain::stats::StatsQuery;
@@ -574,6 +569,7 @@ fn the_stats_rustc_follows_the_declared_rust_profile() {
             toml,
         )
         .unwrap();
+        crate::common::ledger::build(&db);
         one_shot
             .stats_of(
                 &SqliteQueue::open(&db).unwrap(),
@@ -1097,8 +1093,6 @@ fn status_watch_and_show_read_kinds_a_newer_binary_wrote() {
         ],
     );
     ok(&db, &["timeline", &run]);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         ok(&db, &["stats", "--full"]);
     }
@@ -1385,8 +1379,6 @@ fn past_ask_request_taken_events_are_still_read() {
         .filter(|e| e["kind"] == "ask_request_taken")
         .count();
     assert_eq!(shown, 2, "{show}");
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         ok(&db, &["stats", "--full"]);
     }

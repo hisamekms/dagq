@@ -89,8 +89,6 @@ fn the_supervisor_samples_the_candidates_when_they_change() {
     assert_eq!(all.len(), 3, "{all:?}");
     assert_eq!(counts(&all[2]), (1, 2, 2));
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         // KPI's now has second precision, while events have milliseconds.
         // Wait for that cursor to cover the stopped process, even when both

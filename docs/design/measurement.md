@@ -215,7 +215,8 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 ## 共通の読み取り関数
 
 stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時刻かevent idの境界で、窓の終わりまで数える）とgoal・change・areaの絞り込みで選んで返す1つの関数（`domain::ledger::window`、`LedgerStore::ledger_window`）だけから作る。
-行は入力のevent idの範囲と時刻の範囲で窓に当て（event idの境界は時刻で越えない）、旧方式の行は`legacy`から同じ名前と形の値を返す（`domain::ledger::read::read`）。
+行は入力のevent idの範囲と時刻の範囲で窓に当て（event idの境界は時刻で越えない）、旧方式の行は`legacy`から同じ名前と形の値を返す。
+行の無い走っているrunは読むときに畳む関数で畳む。
 絞り込みはtask・goal・runの行を選び（nodeの行は時刻だけで当てる）、窓に状態を持ち込む畳み（属性・finding・mainの履歴・今の判定）は全ての行の記録を窓の終わりで畳む。
 段3の統計のmoduleはこの関数が返す値だけを取り、StateStore・run dir・process・Gitを読まない（D1）。
 欄・指標・節と今のuse caseの入力ごとの元の行は、同じmoduleのdoc commentの表が持つ。
@@ -237,8 +238,8 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 
 ## 並走の比較と照合
 
-全eventを読む読み手は台帳の読み手が入るまで止め、入口が読む前に断り、集計の関数は台帳の値を確かめる基準に残す（[ADR-t3745-1](../adr/2026-10-31-t3745-1-stop-readers-of-every-event-until-the-ledger-readers.md)、`domain::stopped_reads`）。
-`stats --ledger`も止め、段2の並走の比較はせず、段3の後に消す。
+`stats`・`kpi`・`report`は台帳のwindowだけから作り、全eventもStateStoreも読まない（[ADR-t3745-1](../adr/2026-10-31-t3745-1-stop-readers-of-every-event-until-the-ledger-readers.md)）。
+`stats --ledger`は止めたままで、段2の並走の比較はせず、段3の後に消す。
 比べ方と照合は`domain::ledger::compare`のmodule docが持つ。
 
 ## runの比較の軸

@@ -34,7 +34,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use dagq::application::stats::{LiveSources, carried_live_inputs};
+use dagq::application::live_inputs::{LiveSources, carried_live_inputs};
 use dagq::application::supervise::{Retain, build_pass};
 use dagq::domain::EventFilter;
 use dagq::domain::ledger::builder::{Builder, EVENTS_PER_READ, Inputs, Part};

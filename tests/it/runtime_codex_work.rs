@@ -114,9 +114,6 @@ printf '{{"type":"item.completed","item":{{"id":"t1","type":"mcp_tool_call","ser
     assert_eq!(lines[1]["failed"], true);
     assert_eq!(lines[1]["secs"], 0);
 
-    // `stats --full` and `timeline` take the span's work.
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = common::cli::ok(&db, &["stats", "--full"]);
         let breakdown = &stats["runs"][0]["work_breakdown"];

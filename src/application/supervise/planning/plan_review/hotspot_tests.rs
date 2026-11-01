@@ -248,7 +248,7 @@ fn of_every_event(
     read: &dyn Fn(i64) -> Result<MainHistory>,
 ) -> Vec<ConflictHotspot> {
     let live = LiveSnapshot {
-        history: crate::application::stats::conflict_history(events, read),
+        history: crate::application::main_history::conflict_history(events, read),
         conflicts: ConflictConfigReport::default(),
         ..LiveSnapshot::default()
     };

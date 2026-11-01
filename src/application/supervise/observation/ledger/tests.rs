@@ -175,6 +175,10 @@ impl EventStore for Memory {
 }
 
 impl LedgerStore for Memory {
+    fn ledger_run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
+        EventStore::run_events(self, run)
+    }
+
     fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool> {
         ensure!(!self.refuses.get(), "attempt to write a readonly database");
         self.writes.set(self.writes.get() + 1);

@@ -2965,6 +2965,10 @@ fn not_sent(op: &str) -> anyhow::Error {
 // the last of the page before, and a write over a row read naming that row
 // by its fingerprint, so a request holds one row.
 impl LedgerStore for SupervisorQueue {
+    fn ledger_run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
+        EventStore::run_events(self, run)
+    }
+
     fn write_ledger_row(&self, _: &crate::domain::ledger::LedgerRow) -> Result<bool> {
         Err(not_sent("write_ledger_row"))
     }

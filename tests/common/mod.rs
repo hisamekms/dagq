@@ -28,6 +28,7 @@ pub mod attributes;
 pub mod cleanup;
 pub mod cli;
 pub mod install;
+pub mod ledger;
 pub mod lifecycle;
 pub mod queue;
 pub mod replans;

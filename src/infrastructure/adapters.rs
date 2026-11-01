@@ -4772,7 +4772,7 @@ exit 0"#;
 /// and the first-seen times read from it stay the same (task 422).
 ///
 /// The `UserPromptSubmit` hook publishes its stdin JSON the same way as the
-/// input marker ([`PROMPT_SUBMIT_MARKER`](crate::application::stats::PROMPT_SUBMIT_MARKER),
+/// input marker ([`PROMPT_SUBMIT_MARKER`](crate::application::live_inputs::PROMPT_SUBMIT_MARKER),
 /// next to the idle marker) each time the session takes an input, typed or
 /// Claude Code's own notice that background work ended (ADR-0043 decision
 /// 2): the supervisor compares its time with the texts it sent. The hook
@@ -4804,8 +4804,9 @@ pub fn stop_hook_settings(idle_marker: &Path, deny: &[String]) -> Result<String>
         log = shell_quote(&log),
         marker = shell_quote(&marker),
     );
-    let input =
-        path_text(&idle_marker.with_file_name(crate::application::stats::PROMPT_SUBMIT_MARKER))?;
+    let input = path_text(
+        &idle_marker.with_file_name(crate::application::live_inputs::PROMPT_SUBMIT_MARKER),
+    )?;
     let input_command = format!(
         "cat > {tmp} && mv -f {tmp} {input} || true",
         tmp = shell_quote(&format!("{input}.tmp")),

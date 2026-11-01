@@ -1,25 +1,14 @@
-//! The readers of every event of the queue, stopped until the ledger's
-//! readers take their place (ADR-t3745-1): each entry refuses before it
-//! reads, naming why and what brings it back. The counting functions
-//! behind the entries stay, as the values the ledger's readers are checked
-//! against.
+//! The readers of every event of the queue still stopped (ADR-t3745-1):
+//! each entry refuses before it reads, naming why and what brings it back.
+//! `stats`, `kpi`, `report` and `stats_inputs` read the ledger and are no
+//! longer stopped.
 
 /// An entry that would read every event of the queue, refused while it is
 /// stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoppedRead {
-    /// `stats`, and a job's read of it.
-    Stats,
     /// `stats --ledger`, the parallel run of the ledger beside `stats`.
     StatsLedger,
-    /// `stats_inputs`: what the client of `stats` and `kpi` reads Git for,
-    /// and the observer's read of it.
-    StatsInputs,
-    /// `kpi` (`--compare` too), a job's read of it and the observer's KPI
-    /// input.
-    Kpi,
-    /// `report` and `report_inputs`.
-    Report,
     /// The supervisor's use case's `all_events`.
     AllEvents,
 }
@@ -28,24 +17,16 @@ impl StoppedRead {
     /// The entry's name as its caller knows it.
     pub fn entry(self) -> &'static str {
         match self {
-            Self::Stats => "stats",
             Self::StatsLedger => "stats --ledger",
-            Self::StatsInputs => "stats_inputs",
-            Self::Kpi => "kpi",
-            Self::Report => "report",
             Self::AllEvents => "all_events",
         }
     }
 
     /// What ends the stop of the entry, in plain words (the runtime's text
-    /// cites none of dagq's own tasks). For maintainers: the ledger's
-    /// reader of stats, kpi and report is task 1669, and task 1671 removes
+    /// cites none of dagq's own tasks). For maintainers: task 1671 removes
     /// `stats --ledger`.
     pub fn restored_by(self) -> &'static str {
         match self {
-            Self::Stats | Self::StatsInputs | Self::Kpi | Self::Report => {
-                "the ledger's reader of stats, kpi and report brings it back"
-            }
             Self::StatsLedger => "it is removed once stats reads the ledger",
             Self::AllEvents => {
                 "no reader is given it again: the ledger's readers read no whole log"
@@ -97,26 +78,6 @@ mod tests {
     #[test]
     fn a_refusal_names_the_entry_why_and_what_brings_it_back() {
         let cases = [
-            (
-                StoppedRead::Stats,
-                "stats is stopped",
-                "reader of stats, kpi and report",
-            ),
-            (
-                StoppedRead::StatsInputs,
-                "stats_inputs is stopped",
-                "reader of stats, kpi and report",
-            ),
-            (
-                StoppedRead::Kpi,
-                "kpi is stopped",
-                "reader of stats, kpi and report",
-            ),
-            (
-                StoppedRead::Report,
-                "report is stopped",
-                "reader of stats, kpi and report",
-            ),
             (
                 StoppedRead::StatsLedger,
                 "stats --ledger is stopped",

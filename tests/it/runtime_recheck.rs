@@ -12,8 +12,6 @@
 use crate::runtime_support;
 
 use dagq::domain::EventKind;
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 use dagq::domain::stats::StatsQuery;
 use runtime_support::*;
 
@@ -177,10 +175,8 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
         recheck["failed_runs"],
         json!([{"run_id": run.id(), "code": "rebase_conflict", "action": "resumed"}])
     );
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(
+        let stats = crate::common::ledger::stats(
             &db,
             &StatsQuery {
                 full: true,
@@ -213,12 +209,8 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
     );
     assert_eq!(reviewer.prompts().len(), 2);
 
-    // The run that waited in its `approve_landing` ask landed after the
-    // recheck found its conflict; the landing that moved main did not wait.
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(
+        let stats = crate::common::ledger::stats(
             &db,
             &StatsQuery {
                 full: true,
@@ -565,10 +557,8 @@ fn one_waiting(
 }
 
 /// The number of landing rechecks that ended, from `stats`.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 fn rechecks_finished(db: &Path) -> Value {
-    runtime::stats(
+    crate::common::ledger::stats(
         db,
         &StatsQuery {
             full: true,
@@ -657,8 +647,6 @@ fn no_recheck_starts_while_another_supervisor_holds_the_recheck_lock() {
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert!(payloads(&detail, "landing_recheck_failed").is_empty());
     assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     assert_eq!(rechecks_finished(&db), 0);
     assert!(
         !supervisor.is_finished(),
@@ -671,8 +659,6 @@ fn no_recheck_starts_while_another_supervisor_holds_the_recheck_lock() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let second = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
     let main = events_of(&db, second.id(), "run_integrated")[0]["commit"].clone();
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     assert_eq!(rechecks_finished(&db), 1);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let found = payloads(&detail, "landing_recheck_failed");

@@ -142,8 +142,6 @@ fn a_raised_resume_starts_the_session_higher_and_stats_reads_it() {
         [json!({"run_id": run.id(), "resume": true, "model": "claude-opus-5-5", "effort": "high"})]
     );
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = stats_full(&db);
         let escalations = &stats["escalations"];
@@ -249,8 +247,6 @@ pub(crate) fn assert_raised_by_revise(requested: &Value, backend: &TestWorkspace
     );
     assert_eq!(requested["escalation_reason"], "revise");
     assert_eq!(revise_efforts(backend), ["/effort high"]);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let escalations = &stats_full(db)["escalations"];
         assert_eq!(escalations["count"], 1, "{escalations}");

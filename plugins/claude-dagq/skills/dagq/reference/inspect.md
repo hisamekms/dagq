@@ -33,7 +33,7 @@ Task: `draft` → `submitted` (waiting for plan review) → `ready` → `in_prog
 
 ## Claude session time
 
-Read a Claude session's time and tokens with `"$DAGQ" stats` (`stats --help`); while `stats` is stopped (`reference/kpi.md`), read the `session_opened` and `session_closed` events instead.
+Read a Claude session's time and tokens with `"$DAGQ" stats` (`stats --help`).
 
 - A session open much longer than it was active sat idle, waiting for a review, a person or its end: look for what it waited on, not for slow work.
 - The inbox and the planners have no run: read them in the window's sessions, not per run.

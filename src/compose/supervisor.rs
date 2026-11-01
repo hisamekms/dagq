@@ -821,16 +821,6 @@ pub fn supervise_with_reviewer(
         .host_config
         .clone()
         .or_else(crate::infrastructure::kpi_config::host_wide_file);
-    let reports = options.report_daily.then(|| {
-        observation::report_port(
-            &db,
-            &main_checkout,
-            host_wide.clone(),
-            options.diagram_path.clone(),
-            options.push_retry,
-            options.profiles,
-        )
-    });
     // Read again each pass (ADR-0080), unless the options set the
     // thresholds.
     let conflicts_file = options.conflicts.is_none().then(|| {
@@ -912,6 +902,22 @@ pub fn supervise_with_reviewer(
         ),
     );
     let supervisor_queues = || queues.clone();
+    let reports = options.report_daily.then(|| {
+        observation::report_port(
+            &db,
+            &main_checkout,
+            host_wide.clone(),
+            options.diagram_path.clone(),
+            options.push_retry,
+            options.profiles,
+            Arc::new(SupervisorPorts {
+                queues: supervisor_queues(),
+                keep: |queue| -> Box<dyn crate::application::LedgerStore + Send> {
+                    Box::new(queue)
+                },
+            }),
+        )
+    });
     let forecasts = options.forecast_snapshots.then(|| {
         observation::forecast_port(
             &db,

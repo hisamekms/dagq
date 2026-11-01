@@ -27,8 +27,6 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
         .collect()
 }
 
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 fn alert_kinds(stats: &Value) -> Vec<&str> {
     stats["alerts"]
         .as_array()
@@ -59,10 +57,8 @@ fn no_run_is_claimed_while_the_load_is_above_the_threshold() {
     let outcome = supervise_with(&db, &repo, &backend, &once).unwrap();
     assert_eq!(outcome["runs"], json!([]), "{outcome}");
     assert_eq!(queue_events(&db, "claim_held").len(), 1);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(stats["claim_holds"]["held"], Value::Null, "{stats}");
     }
 
@@ -107,10 +103,8 @@ fn no_run_is_claimed_while_the_load_is_above_the_threshold() {
     assert_eq!(hold["reason"], "load_average", "{status}");
     assert_eq!(hold["supervisor"], held[0]["supervisor"]);
     assert!(hold["since"].is_string());
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(stats["claim_holds"]["held"]["reason"], "load_average");
         assert_eq!(
             stats["claim_holds"]["held"]["supervisor"],
@@ -148,10 +142,8 @@ fn no_run_is_claimed_while_the_load_is_above_the_threshold() {
     assert_eq!(resumed[0]["reason"], "load_average");
     assert_eq!(resumed[0]["supervisor"], held[0]["supervisor"]);
     assert_eq!(queue_events(&db, "claim_held").len(), 2);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(stats["claim_holds"]["count"], 2, "{stats}");
         assert_eq!(
             stats["claim_holds"]["by_reason"]["load_average"]["count"],

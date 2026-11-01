@@ -89,9 +89,6 @@ fn a_task_lands_on_master_of_a_repository_without_origin_cargo_toml_or_agents_md
             "reason": "the repository has no remote origin",
         })
     );
-    // The reads that once named refs/heads/main work on master.
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = dagq(env, &["stats"]);
         assert!(stats.is_object(), "{stats}");

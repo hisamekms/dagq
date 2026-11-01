@@ -219,11 +219,9 @@ fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
     );
     assert!(stored.iter().all(|row| row.sample.values["load1"] == 1.5));
     assert!(host.join("notes.txt").exists());
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         // `stats` summarizes them.
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert!(stats["host"]["samples"].as_u64().unwrap() >= 3, "{stats}");
         assert_eq!(stats["host"]["metrics"]["mem_used_mb"]["max"], 8192.0);
         // The cargo is the declared Rust profile's.

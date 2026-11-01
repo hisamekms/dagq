@@ -374,8 +374,6 @@ fn cancel_duplicate_of_is_recorded_shown_listed_and_counted() {
     assert!(row(5).get("duplicate_of").is_none());
     assert!(row(1).get("duplicate_of").is_none());
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = ok(&db, &["stats", "--full"]);
         assert_eq!(stats["duplicate_cancels"]["count"], 2);
@@ -537,8 +535,6 @@ fn cancel_records_its_reason_and_reads_one_recorded_before_reasons() {
         "{related}"
     );
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = ok(&db, &["stats", "--full"]);
         assert_eq!(

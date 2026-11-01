@@ -427,8 +427,6 @@ fn what_a_bundle_leaves_undecided_makes_the_next_and_the_outcomes_are_read() {
         );
     }
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         // `stats` counts the bundles and their sizes.
         let flow = &ok(&fx.db, &["stats", "--full"])["draft_flow"];

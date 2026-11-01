@@ -70,6 +70,7 @@ pub fn invoke_with(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
         }
     }
     command.envs(super::service::host_client_env(db, &reach, args));
+    super::ledger::build_before(db, args);
     command
         .arg("--db")
         .arg(db)
@@ -111,6 +112,7 @@ pub fn reach(command: &mut Command, db: &Path, args: &[&str]) {
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
     command.envs(super::service::host_client_env(db, &env, args));
+    super::ledger::build_before(db, args);
 }
 
 /// Give the queue at `db` a `[push]` (its `host.toml`) whose command

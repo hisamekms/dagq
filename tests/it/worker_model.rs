@@ -1,9 +1,3 @@
-//! The worker's model and effort (ADR-0079 decisions 3 and 4): given
-//! explicitly at every start, recorded at the claim, and with
-//! `[worker.trial]` on, alternated between the control and the treatment
-//! for the mechanical tasks of the lower third.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 use crate::common;
 use crate::runtime_support;
 use dagq::domain::EventKind;
@@ -185,8 +179,6 @@ fn claims_choose_the_session_in_their_transaction() {
 
 /// `stats` puts the runs of each group side by side: their model, their
 /// speed and their task-caused rework.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 #[test]
 fn stats_compare_the_groups() {
     let (_dir, _repo, db) = fixture();
@@ -363,8 +355,6 @@ fn a_codex_run_is_outside_the_trial() {
             json!("treatment")
         )
     );
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = common::cli::ok(&db, &["stats", "--full"]);
         let groups = stats["trial_groups"].as_array().unwrap();

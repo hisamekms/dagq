@@ -1743,7 +1743,7 @@ pub fn run_command(queue: &mut SqliteQueue, db: &Path, command: &QueueCommand) -
             &params.text,
         )?,
         C::Report(params) => one_shot.report_of(queue, db, params)?,
-        C::ReportInputs(params) => one_shot.report_inputs_of(queue, db, params)?,
+        C::ReportInputs(params) => one_shot.report_inputs_of(queue, params)?,
         // The head is chosen and kept by the caller with Git between the
         // two (`ready_inherit`); the record's transaction checks the read
         // again.

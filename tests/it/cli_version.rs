@@ -106,14 +106,7 @@ fn migrate_is_explicit_and_older_binaries_keep_working_within_the_floor() {
     // memory; the file stays at schema 23 (ADR-0045 decision 18).
     assert_eq!(ok(&db, &["list"])["total"], 1);
     assert_eq!(ok(&db, &["show", "1"])["task"]["title"], "old task");
-    for args in [
-        &["status"][..],
-        &["graph"],
-        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-        #[cfg(any())]
-        &["stats"],
-        &["goal", "list"],
-    ] {
+    for args in [&["status"][..], &["graph"], &["stats"], &["goal", "list"]] {
         ok(&db, args);
     }
     assert_eq!(version(), 23);

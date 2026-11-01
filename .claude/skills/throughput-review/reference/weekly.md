@@ -2,7 +2,7 @@
 
 [SKILL.md](../SKILL.md) の「4. 毎週の見直し」の、この host の前提と当てはめの 1〜4（5 と報告は SKILL.md）。
 
-> 今の build では、この手順の `stats`・`kpi`・`report` は止めてあり断る（[SKILL.md](../SKILL.md) の共通の決まり）。止まっている間は打たず、`events` と `timeline RUN` の読みで代える。
+> `stats`・`kpi`・`report` は台帳から読む（[SKILL.md](../SKILL.md) の共通の決まり）。待ちの内訳は `stats` の `breakdown` の blocker・holds の割合で読み、`unattributed` の割合を添える。
 
 この host の前提（変わったらここも直す）:
 

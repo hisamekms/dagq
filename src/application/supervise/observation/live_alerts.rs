@@ -10,7 +10,7 @@
 //! these records.
 
 use super::*;
-use crate::application::stats::{LiveSources, carried_live_inputs};
+use crate::application::live_inputs::{LiveSources, carried_live_inputs};
 use crate::domain::ledger::attributes::reconcile_due;
 use crate::domain::live_alerts::{LiveHistory, LiveRecorder, Observation, judge};
 

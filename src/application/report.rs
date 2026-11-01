@@ -19,15 +19,17 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::{
-    PlanningRecords, QueueRecords, RunFiles, RunLog, SupervisorReads, TaskReads, kpi::Host,
-};
+use super::{LedgerStore, QueueRecords, RunFiles, kpi::Host};
 use crate::domain::{
-    FindingQuery,
-    host_metrics::HostSummary,
+    areas::AreaMap,
     kpi::{
-        DAY_MS, HostReader, KpiConfig, KpiQuery, Period,
+        DAY_MS, KpiConfig, KpiQuery, Period,
         report::{self, DiagramSection, INDEX_FILE, Keep, Report, ReportFile},
+    },
+    ledger::{
+        attributes::Folded,
+        findings,
+        window::{LedgerWindow, WindowQuery},
     },
     marks,
     stats::Cursor,
@@ -59,30 +61,9 @@ pub struct ReportSetup {
     pub keep: Keep,
     pub build: String,
     pub diagram: DiagramRenderer,
-    /// The `[areas]` map and the landed commits' changes (ADR-t980-1).
-    pub areas: super::areas::AreaReader,
-    /// What summarizes the host's load next to each period (task 872);
-    /// `None` reads none.
-    pub host_metrics: Option<HostMetrics>,
-}
-
-impl ReportSetup {
-    /// [`Self::host_metrics`] as the reader [`super::kpi::kpi`] takes.
-    pub fn host_reader(&self) -> Option<HostReader<'_>> {
-        self.host_metrics
-            .as_ref()
-            .map(|read| HostReader(read.0.as_ref()))
-    }
-}
-
-/// Summarizes the host's load between two unix seconds (task 872).
-#[derive(Clone)]
-pub struct HostMetrics(pub Arc<dyn Fn(i64, i64) -> HostSummary + Send + Sync>);
-
-impl std::fmt::Debug for HostMetrics {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("HostMetrics")
-    }
+    /// The `[areas]` map the landed runs' areas are judged by from main's
+    /// history the ledger holds (ADR-t980-1); `None` without it.
+    pub areas: Option<AreaMap>,
 }
 
 /// One report written.
@@ -98,24 +79,21 @@ pub struct Written {
     pub removed: Vec<PathBuf>,
 }
 
-/// The report of the `period` that holds `at` (now without), at the unix
-/// second `now`, with the dependency diagram of the queue now.
-pub fn make(
-    queue: &(impl PlanningRecords + QueueRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
-    setup: &ReportSetup,
-    now: i64,
-    period: Period,
-    at: Option<Cursor>,
-) -> Result<Report> {
-    let diagram = diagram(queue, &setup.diagram);
-    make_with(queue, setup, now, period, at, diagram)
+/// The ledger's window a report at the unix second `now` reads: every
+/// row up to `now`, of which each period's KPIs, the findings and the
+/// host's load are made.
+pub fn window(ledger: &(impl LedgerStore + ?Sized), now: i64) -> Result<LedgerWindow> {
+    ledger.ledger_window(&WindowQuery {
+        now_ms: super::stats::now_ms(now),
+        ..WindowQuery::default()
+    })
 }
 
-/// The near-term dependency diagram of the queue now, drawn by `render`:
-/// its tasks and the SVG the page shows as an image, or why there is none.
-/// A queue with no near-term task is not drawn.
-pub fn diagram(queue: &(impl TaskReads + ?Sized), render: &DiagramRenderer) -> DiagramSection {
-    diagram_draft(queue).draw(render)
+/// The near-term dependency diagram of the ledger's `window`, drawn by
+/// `render`: its tasks and the SVG the page shows as an image, or why
+/// there is none. A window with no near-term task is not drawn.
+pub fn diagram(window: &LedgerWindow, render: &DiagramRenderer) -> DiagramSection {
+    diagram_draft(window).draw(render)
 }
 
 /// The near-term dependency diagram before it is drawn: its tasks and d2
@@ -197,12 +175,10 @@ impl From<DrawnDiagram> for DiagramSection {
 
 /// What the queue service's client reads before it sends `report`, as no
 /// Git or program runs in the service (ADR-t3102-3 decision 5): the
-/// near-term diagram's draft, the Git common directory of the repository
-/// the queue is bound to (none for a queue bound to none) and the commits
-/// landed in the periods the report reads
-/// ([`crate::domain::kpi::landed_in_periods`]; none until the client names
-/// its checkout), whose areas the client reads with Git in its main
-/// checkout.
+/// near-term diagram's draft and the Git common directory of the
+/// repository the queue is bound to (none for a queue bound to none).
+/// `landed` is always empty: the landed runs' areas come from main's
+/// history the ledger holds, so the client reads no Git for them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportInputs {
     pub diagram: DiagramDraft,
@@ -210,62 +186,31 @@ pub struct ReportInputs {
     pub landed: Vec<String>,
 }
 
-/// What the queue service reads `report_inputs`' landed commits with: the
-/// ports [`report_inputs`] reads through.
+/// What the queue service checks a checkout `report_inputs` names with.
 pub struct ReportInputsSources<'a> {
     pub files: &'a dyn RunFiles,
-    /// The host's UTC offset (seconds) and the `[kpi]` settings of a
-    /// checkout's `dagq.toml` merged with the host's.
-    pub settings: &'a dyn Fn(&Path) -> Result<(i64, KpiConfig)>,
-    /// The queue's events.
-    pub events: &'a dyn Fn() -> Result<Vec<crate::domain::RunEvent>>,
 }
 
 /// `report_inputs` (ADR-t3102-3 decision 5): the near-term diagram's draft
-/// `diagram` reads (after the rest), the bound repository `repository`
-/// and, when `params` names a checkout (accepted as [`accept_checkout`]
-/// accepts it against `served`, the main checkout the service found from
-/// the binding), the commits landed in the periods the report of its
-/// period at its `at` reads at `now`, by the served checkout's and the
-/// host's `[kpi]` settings ([`crate::domain::kpi::landed_in_periods`]);
-/// none for no checkout, whose settings and events are not read. No Git
-/// or program runs.
+/// `diagram` reads (after the rest) and the bound repository
+/// `repository`; a checkout `params` names is accepted only as
+/// [`accept_checkout`] accepts it against `served`, the main checkout the
+/// service found from the binding. No Git or program runs, and no event
+/// is read.
 pub fn report_inputs(
     params: &super::queue_commands::ReportInputsParams,
     repository: Option<String>,
     served: Option<&Path>,
     diagram: impl FnOnce() -> DiagramDraft,
     sources: &ReportInputsSources<'_>,
-    now: i64,
 ) -> Result<ReportInputs> {
-    let landed = match params.checkout.as_deref() {
-        None => Vec::new(),
-        Some(checkout) => {
-            let checkout = accept_checkout(sources.files, checkout, served)?;
-            let query = KpiQuery {
-                period: params.period.parse().map_err(anyhow::Error::msg)?,
-                at: params
-                    .at
-                    .as_deref()
-                    .map(str::parse)
-                    .transpose()
-                    .map_err(anyhow::Error::msg)?,
-                ..KpiQuery::default()
-            };
-            let (utc_offset_secs, config) = (sources.settings)(checkout)?;
-            crate::domain::kpi::landed_in_periods(
-                &(sources.events)()?,
-                &query,
-                now,
-                utc_offset_secs,
-                &config,
-            )
-        }
-    };
+    if let Some(checkout) = params.checkout.as_deref() {
+        accept_checkout(sources.files, checkout, served)?;
+    }
     Ok(ReportInputs {
         diagram: diagram(),
         repository,
-        landed,
+        landed: Vec::new(),
     })
 }
 
@@ -304,51 +249,36 @@ pub struct ReportClient<'a> {
     /// The main checkout of the repository whose Git common directory it
     /// is given.
     pub main_checkout: &'a dyn Fn(&Path) -> Result<PathBuf>,
-    /// The `[areas]` of a checkout's `dagq.toml` and its Git.
-    pub areas: &'a dyn Fn(&Path) -> Result<super::areas::AreaReader>,
     pub diagram: &'a DiagramRenderer,
 }
 
 /// `params` as the queue service's client sends `report`, from the
 /// [`ReportInputs`] `call` answers ([`super::queue_commands::QueueCommand::ReportInputs`]
 /// of the report's period and `--at`): the main checkout of the repository
-/// the queue is bound to (none when it is bound to none or none is found),
-/// the areas of the commits landed in the report's periods (asked again
-/// with that checkout only when its `dagq.toml` maps areas; none without a
-/// map), the near-term diagram drawn by `client`'s renderer, all fit to a
-/// request ([`fit_request`]).
+/// the queue is bound to (none when it is bound to none or none is found)
+/// and the near-term diagram drawn by `client`'s renderer, fit to a
+/// request ([`fit_request`]). No areas are sent: the service judges them
+/// from the ledger.
 pub fn prepare_request(
     params: &mut super::queue_commands::ReportParams,
     client: &ReportClient<'_>,
     mut call: impl FnMut(&super::queue_commands::QueueCommand) -> Result<serde_json::Value>,
 ) -> Result<()> {
     use super::queue_commands::{QueueCommand, ReportInputsParams};
-    let mut inputs_of = |checkout: Option<&Path>| -> Result<ReportInputs> {
+    let inputs: ReportInputs =
         serde_json::from_value(call(&QueueCommand::ReportInputs(ReportInputsParams {
             period: params.period.clone(),
             at: params.at.clone(),
-            checkout: checkout.map(Path::to_path_buf),
+            checkout: None,
         }))?)
-        .context("the report's inputs do not read")
-    };
-    let inputs = inputs_of(None)?;
+        .context("the report's inputs do not read")?;
     let checkout = inputs
         .repository
         .as_deref()
         .and_then(|common_dir| (client.main_checkout)(Path::new(common_dir)).ok());
-    let areas = match &checkout {
-        Some(checkout) => {
-            let reader = (client.areas)(checkout)?;
-            match reader.map {
-                Some(_) => reader.commit_areas(&inputs_of(Some(checkout))?.landed),
-                None => None,
-            }
-        }
-        None => None,
-    };
     params.diagram = Some(inputs.diagram.render(client.diagram));
     params.checkout = checkout;
-    params.areas = areas.map(|areas| areas.into_iter().collect());
+    params.areas = None;
     fit_request(
         params,
         crate::domain::queue_service::MAX_REQUEST_BYTES
@@ -380,26 +310,27 @@ pub fn accept_checkout<'a>(
         })
 }
 
-/// [`DiagramDraft`] of the queue now. A queue with no near-term task has
-/// no source.
-pub fn diagram_draft(queue: &(impl TaskReads + ?Sized)) -> DiagramDraft {
-    let not_drawn = |reason: String| DiagramDraft::NotDrawn {
-        tasks: Vec::new(),
-        reason,
-    };
-    let graph = match queue.graph_input() {
-        Ok(input) => super::dependency_graph(input, None),
-        Err(error) => {
-            return not_drawn(format!("could not read the dependency graph: {error:#}"));
+/// [`DiagramDraft`] of the ledger's `window`: the tasks' and goals'
+/// attributes folded at its end (task rows' records and the queue event
+/// rows of the goals', [`LedgerWindow::attributes`]), not the state
+/// tables. A window before the attributes' baseline is not drawn, and
+/// neither is one with no near-term task.
+pub fn diagram_draft(window: &LedgerWindow) -> DiagramDraft {
+    let attributes = match window.attributes() {
+        Folded::Attributes(attributes) => attributes,
+        Folded::BeforeBaseline => {
+            return DiagramDraft::NotDrawn {
+                tasks: Vec::new(),
+                reason: "the tasks' attributes are not recorded before their baseline".to_owned(),
+            };
         }
     };
-    let titles: BTreeMap<_, _> = match queue.list_goals() {
-        Ok(goals) => goals
-            .into_iter()
-            .map(|goal| (goal.id, goal.title))
-            .collect(),
-        Err(error) => return not_drawn(format!("could not read the goals: {error:#}")),
-    };
+    let graph = super::dependency_graph(super::GraphInput::folded(&attributes), None);
+    let titles: BTreeMap<_, _> = attributes
+        .goal_summaries()
+        .into_iter()
+        .map(|goal| (goal.id, goal.title))
+        .collect();
     let near_term = super::diagram::near_term(&graph, &titles);
     let tasks: Vec<i64> = near_term.task_ids().iter().map(|id| id.as_i64()).collect();
     if tasks.is_empty() {
@@ -414,33 +345,34 @@ pub fn diagram_draft(queue: &(impl TaskReads + ?Sized)) -> DiagramDraft {
     }
 }
 
-/// [`make`] with the diagram drawn already.
+/// The report of the `period` that holds `at` (now without), at the unix
+/// second `now`, of the ledger's `window` ([`window`]), with `diagram`
+/// drawn already: its KPIs ([`super::kpi::of_window`]) and the findings
+/// unsettled at its end, none before the findings' baseline.
 pub fn make_with(
-    queue: &(impl PlanningRecords + QueueRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
+    window: &LedgerWindow,
     setup: &ReportSetup,
     now: i64,
     period: Period,
     at: Option<Cursor>,
     diagram: DiagramSection,
 ) -> Result<Report> {
-    let kpi = super::kpi::kpi(
-        queue,
+    let kpi = super::kpi::of_window(
+        window,
         now,
         setup.host,
         &setup.config,
-        &setup.areas,
+        setup.areas.as_ref(),
         &KpiQuery {
             period,
             at,
             ..KpiQuery::default()
         },
-        setup.host_reader(),
     )?;
-    let findings: Vec<_> = queue
-        .findings(&FindingQuery::default())?
-        .into_iter()
-        .map(|view| view.finding.attributes())
-        .collect();
+    let findings = match window.findings() {
+        findings::Folded::Findings(findings) => findings.unsettled(),
+        findings::Folded::BeforeBaseline => Vec::new(),
+    };
     Ok(Report::new(
         kpi,
         period,
@@ -550,7 +482,8 @@ pub fn write_files(files: &dyn RunFiles, root: &Path, rendered: &ReportFiles) ->
 /// and shared by the others. A report another supervisor recorded
 /// meanwhile is not recorded twice nor returned.
 pub fn write_due(
-    queue: &(impl PlanningRecords + QueueRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
+    queue: &(impl QueueRecords + ?Sized),
+    ledger: &(impl LedgerStore + ?Sized),
     files: &dyn RunFiles,
     setup: &ReportSetup,
     now: i64,
@@ -560,6 +493,7 @@ pub fn write_due(
     let offset_ms = setup.host.utc_offset_secs * 1000;
     let mut done = Vec::new();
     let mut drawn: Option<DiagramSection> = None;
+    let mut read: Option<LedgerWindow> = None;
     for (period, label, at) in report::due(now * 1000, offset_ms, &written) {
         // A day the retention would remove at once (`keep_daily_days` under
         // the backfill) is not written.
@@ -571,10 +505,14 @@ pub fn write_due(
         if report::expired(&file, now * 1000, offset_ms, setup.keep, &HashSet::new()) {
             continue;
         }
+        if read.is_none() {
+            read = Some(window(ledger, now)?);
+        }
+        let window = read.as_ref().context("the ledger's window was read")?;
         let diagram = drawn
-            .get_or_insert_with(|| diagram(queue, &setup.diagram))
+            .get_or_insert_with(|| diagram(window, &setup.diagram))
             .clone();
-        let report = make_with(queue, setup, now, period, Some(Cursor::Time(at)), diagram)
+        let report = make_with(window, setup, now, period, Some(Cursor::Time(at)), diagram)
             .with_context(|| format!("the report of {label}"))?;
         let output = write(files, setup, &report, period, now)
             .with_context(|| format!("write the report of {label}"))?;
@@ -728,6 +666,80 @@ fn write_index(files: &dyn RunFiles, root: &Path, now: i64) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// The window of the events `log` (kind, task, payload), each a minute
+    /// apart, at their end.
+    fn window_of(log: &[(&str, Option<i64>, serde_json::Value)]) -> LedgerWindow {
+        use crate::domain::{EventId, RunEvent, TaskId, marks::utc_text};
+        let t0 = 1_900_000_000_000;
+        let events: Vec<RunEvent> = log
+            .iter()
+            .enumerate()
+            .map(|(i, (kind, task, payload))| RunEvent {
+                id: EventId::new(i as i64 + 1),
+                task_id: task.map(TaskId::new),
+                goal_id: None,
+                run_id: None,
+                kind: (*kind).into(),
+                payload: payload.clone(),
+                created_at: utc_text(t0 + i as i64 * 60_000),
+                actor: None,
+            })
+            .collect();
+        let now_ms = t0 + log.len() as i64 * 60_000;
+        let rows = crate::domain::ledger::build(&events, now_ms, "built");
+        crate::domain::ledger::window::select(
+            rows,
+            &WindowQuery {
+                now_ms,
+                ..WindowQuery::default()
+            },
+        )
+    }
+
+    /// The diagram is drawn from the tasks' attributes the window folds at
+    /// its end, not from the state: a ready high task is near-term, a
+    /// completed one is not drawn.
+    #[test]
+    fn the_diagram_is_drafted_from_the_windows_attributes() {
+        let created = |status: &str| {
+            json!({"goal_id": null, "status": status, "title": "t", "change": null,
+                   "execution_class": "implementation", "priority": "high",
+                   "priority_by": "person"})
+        };
+        let baseline = (
+            crate::domain::event_kind::ATTRIBUTES_BASELINE,
+            None,
+            json!({"tasks": 0, "goals": 0}),
+        );
+        let ready = window_of(&[
+            (
+                crate::domain::event_kind::TASK_CREATED,
+                Some(7),
+                created("ready"),
+            ),
+            baseline.clone(),
+        ]);
+        match diagram_draft(&ready) {
+            DiagramDraft::Source { tasks, source } => {
+                assert_eq!(tasks, [7]);
+                assert!(!source.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        let completed = window_of(&[
+            (
+                crate::domain::event_kind::TASK_CREATED,
+                Some(7),
+                created("completed"),
+            ),
+            baseline,
+        ]);
+        assert!(matches!(
+            diagram_draft(&completed),
+            DiagramDraft::NotDrawn { reason, .. } if reason == "no near-term task to draw"
+        ));
+    }
+
     /// Files answered with a label not of their period's form are refused
     /// before anything is written.
     #[test]
@@ -808,118 +820,66 @@ mod tests {
         assert!(error.contains(&format!("is {bare} bytes")), "{error}");
     }
 
-    /// The client's request: for a bound queue whose main checkout maps
-    /// areas, the inputs are asked again with that checkout and each landed
-    /// commit's areas are read with its Git, which leaves every commit out
-    /// when it cannot be read; with no map they are asked once and no areas
-    /// are sent; a queue bound to none, or whose main checkout is not found,
-    /// is sent with neither. The diagram is drawn by the client's renderer.
+    /// The client's request: the inputs are asked once, with no checkout,
+    /// and no areas are sent (the service judges them from the ledger); a
+    /// bound queue whose main checkout is found is sent with it, one bound
+    /// to none or whose main checkout is not found with none. The diagram
+    /// is drawn by the client's renderer.
     #[test]
-    fn a_report_s_request_reads_the_areas_only_with_a_mapped_checkout() {
-        use super::super::areas::AreaReader;
+    fn a_report_s_request_reads_no_areas_and_names_the_main_checkout() {
         use super::super::queue_commands::{QueueCommand, ReportInputsParams};
-        use crate::domain::areas::AreaMap;
-        use std::collections::HashMap;
-        let commit = format!("{:040}", 1);
-        let answer = |repository: Option<&str>, landed: &[&str]| {
+        let answer = |repository: Option<&str>| {
             serde_json::to_value(ReportInputs {
                 diagram: DiagramDraft::Source {
                     tasks: vec![1],
                     source: "a -> b".to_owned(),
                 },
                 repository: repository.map(str::to_owned),
-                landed: landed.iter().map(|commit| (*commit).to_owned()).collect(),
+                landed: Vec::new(),
             })
             .unwrap()
         };
-        let map = AreaMap::new(vec![("docs".into(), vec!["docs/**".into()])]).unwrap();
-        let reader = |map: Option<AreaMap>, git: bool| {
-            let commit = commit.clone();
-            AreaReader {
-                map,
-                changed: Arc::new(move |commits: &[String]| {
-                    anyhow::ensure!(git, "no git");
-                    assert_eq!(commits, std::slice::from_ref(&commit));
-                    Ok(HashMap::from([(
-                        commit.clone(),
-                        vec!["docs/a.md".to_owned()],
-                    )]))
-                }),
-                judged: None,
-            }
-        };
         let drawn = DiagramRenderer(Arc::new(|source: &str| Ok(format!("<svg>{source}</svg>"))));
-        let prepared =
-            |repository: Option<&str>, found: bool, areas: Option<AreaMap>, git: bool| {
-                let mut asked = Vec::new();
-                let mut sent = params(None, 0);
-                sent.areas = None;
-                let main_checkout = move |common_dir: &Path| {
-                    assert_eq!(common_dir, Path::new("/r/.git"));
-                    anyhow::ensure!(found, "no main checkout");
-                    Ok(PathBuf::from("/r"))
-                };
-                let areas_of = |checkout: &Path| {
-                    assert_eq!(checkout, Path::new("/r"));
-                    Ok(reader(areas.clone(), git))
-                };
-                prepare_request(
-                    &mut sent,
-                    &ReportClient {
-                        main_checkout: &main_checkout,
-                        areas: &areas_of,
-                        diagram: &drawn,
-                    },
-                    |command: &QueueCommand| {
-                        let QueueCommand::ReportInputs(inputs) = command else {
-                            panic!("{command:?}");
-                        };
-                        asked.push(inputs.clone());
-                        let landed = [commit.as_str()];
-                        let landed = if inputs.checkout.is_some() {
-                            &landed[..]
-                        } else {
-                            &[]
-                        };
-                        Ok(answer(repository, landed))
-                    },
-                )
-                .unwrap();
-                (sent, asked)
+        let prepared = |repository: Option<&str>, found: bool| {
+            let mut asked = Vec::new();
+            let mut sent = params(None, 1);
+            let main_checkout = move |common_dir: &Path| {
+                assert_eq!(common_dir, Path::new("/r/.git"));
+                anyhow::ensure!(found, "no main checkout");
+                Ok(PathBuf::from("/r"))
             };
+            prepare_request(
+                &mut sent,
+                &ReportClient {
+                    main_checkout: &main_checkout,
+                    diagram: &drawn,
+                },
+                |command: &QueueCommand| {
+                    let QueueCommand::ReportInputs(inputs) = command else {
+                        panic!("{command:?}");
+                    };
+                    asked.push(inputs.clone());
+                    Ok(answer(repository))
+                },
+            )
+            .unwrap();
+            (sent, asked)
+        };
         let first = ReportInputsParams {
             period: "day".to_owned(),
             at: None,
             checkout: None,
         };
-        let again = ReportInputsParams {
-            checkout: Some(PathBuf::from("/r")),
-            ..first.clone()
-        };
-
-        let (sent, asked) = prepared(Some("/r/.git"), true, Some(map.clone()), true);
-        assert_eq!(asked, [first.clone(), again.clone()]);
+        let (sent, asked) = prepared(Some("/r/.git"), true);
+        assert_eq!(asked, std::slice::from_ref(&first));
         assert_eq!(sent.checkout.as_deref(), Some(Path::new("/r")));
-        assert_eq!(
-            sent.areas,
-            Some(BTreeMap::from([(commit.clone(), vec!["docs".to_owned()])]))
-        );
+        assert_eq!(sent.areas, None);
         assert_eq!(
             sent.diagram.unwrap().svg.as_deref(),
             Some("<svg>a -> b</svg>")
         );
-
-        let (sent, asked) = prepared(Some("/r/.git"), true, Some(map), false);
-        assert_eq!(asked, [first.clone(), again]);
-        assert_eq!(sent.areas, Some(BTreeMap::new()));
-
-        let (sent, asked) = prepared(Some("/r/.git"), true, None, true);
-        assert_eq!(asked, std::slice::from_ref(&first));
-        assert_eq!(sent.checkout.as_deref(), Some(Path::new("/r")));
-        assert_eq!(sent.areas, None);
-
         for (repository, found) in [(None, true), (Some("/r/.git"), false)] {
-            let (sent, asked) = prepared(repository, found, None, true);
+            let (sent, asked) = prepared(repository, found);
             assert_eq!(
                 asked,
                 std::slice::from_ref(&first),
@@ -929,48 +889,19 @@ mod tests {
         }
     }
 
-    /// `report_inputs` answers the landed commits of the report's periods
-    /// only for a checkout of the bound repository, read by that
-    /// checkout's settings; with no checkout it reads neither the settings
-    /// nor the events, and another repository's checkout is refused.
+    /// `report_inputs` names no landed commit and reads no event: a
+    /// checkout of the bound repository is accepted, another repository's
+    /// is refused.
     #[test]
-    fn report_inputs_lands_commits_only_for_the_bound_checkout() {
+    fn report_inputs_reads_no_event_and_accepts_only_the_bound_checkout() {
         use super::super::queue_commands::ReportInputsParams;
-        use crate::domain::{EventId, RunEvent, RunId, TaskId};
         let files = super::super::memory_files::MemoryFiles::default();
         files.put_dir(Path::new("/r/main"));
         files.put_dir(Path::new("/r/main/.git"));
         files.put_dir(Path::new("/r/other"));
         files.put_dir(Path::new("/r/other/.git"));
         let served = Some(Path::new("/r/main"));
-        // 2026-09-29T01:00:00Z, an hour after the run landed.
-        let now = 1_790_640_000 + 3600;
-        let events = vec![RunEvent {
-            id: EventId::new(1),
-            task_id: Some(TaskId::new(1)),
-            goal_id: None,
-            run_id: Some(RunId::new("r").unwrap()),
-            kind: "run_integrated".into(),
-            payload: json!({"commit": "c"}),
-            created_at: "2026-09-29T00:00:00.000Z".into(),
-            actor: None,
-        }];
-        let config = KpiConfig::merge(None, None);
-        let read = std::cell::Cell::new(0);
-        let settings = |checkout: &Path| {
-            assert_eq!(checkout, Path::new("/r/main"));
-            read.set(read.get() + 1);
-            Ok((0, config.clone()))
-        };
-        let events_of = || {
-            read.set(read.get() + 1);
-            Ok(events.clone())
-        };
-        let sources = ReportInputsSources {
-            files: &files,
-            settings: &settings,
-            events: &events_of,
-        };
+        let sources = ReportInputsSources { files: &files };
         let draft = DiagramDraft::NotDrawn {
             tasks: Vec::new(),
             reason: "no near-term task to draw".into(),
@@ -981,56 +912,34 @@ mod tests {
             checkout: checkout.map(PathBuf::from),
         };
         let bound = Some("/r/main/.git".to_owned());
-
-        let first = report_inputs(
-            &params(None),
-            bound.clone(),
-            served,
-            || draft.clone(),
-            &sources,
-            now,
-        )
-        .unwrap();
-        assert_eq!(
-            first,
-            ReportInputs {
-                diagram: draft.clone(),
-                repository: bound.clone(),
-                landed: Vec::new(),
-            }
-        );
-        assert_eq!(read.get(), 0);
-
-        let again = report_inputs(
-            &params(Some("/r/main")),
-            bound.clone(),
-            served,
-            || draft.clone(),
-            &sources,
-            now,
-        )
-        .unwrap();
-        let query = KpiQuery {
-            period: Period::Day,
-            ..KpiQuery::default()
-        };
-        let expected = crate::domain::kpi::landed_in_periods(&events, &query, now, 0, &config);
-        assert_eq!(expected, ["c"]);
-        assert_eq!(again.landed, expected);
-        assert_eq!(read.get(), 2);
-
+        for checkout in [None, Some("/r/main")] {
+            let inputs = report_inputs(
+                &params(checkout),
+                bound.clone(),
+                served,
+                || draft.clone(),
+                &sources,
+            )
+            .unwrap();
+            assert_eq!(
+                inputs,
+                ReportInputs {
+                    diagram: draft.clone(),
+                    repository: bound.clone(),
+                    landed: Vec::new(),
+                }
+            );
+        }
         let error = report_inputs(
             &params(Some("/r/other")),
             bound,
             served,
             || draft.clone(),
             &sources,
-            now,
         )
         .unwrap_err()
         .to_string();
         assert!(error.contains("is not the main checkout"), "{error}");
-        assert_eq!(read.get(), 2);
     }
 
     /// A checkout is accepted only as the main checkout the service found

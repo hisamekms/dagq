@@ -8,8 +8,6 @@ use runtime_support::*;
 
 /// What stands for a webhook URL given to the command: it may reach no
 /// event and no file of the repository.
-// Only for the tests stopped below (request 190): task 1669 removes this cfg.
-#[cfg(any())]
 const SECRET: &str = "https://hooks.example/T000/B000/s3cr3t-t0ken";
 
 fn events_of(db: &Path, kind: &str) -> Vec<Value> {
@@ -23,8 +21,6 @@ fn events_of(db: &Path, kind: &str) -> Vec<Value> {
         .collect()
 }
 
-// Only for the tests stopped below (request 190): task 1669 removes this cfg.
-#[cfg(any())]
 fn all_payloads(db: &Path) -> String {
     Connection::open(db)
         .unwrap()
@@ -40,8 +36,6 @@ fn all_payloads(db: &Path) -> String {
 /// A queue whose task is canceled (the supervisor claims nothing), with
 /// the push script `script` in `host.toml` and two targets no day meets
 /// (no landing, no automatic repair), so both are in breach at once.
-// Only for the tests stopped below (request 190): task 1669 removes this cfg.
-#[cfg(any())]
 struct Setup {
     _fixture: Fixture,
     repo: PathBuf,
@@ -52,8 +46,6 @@ struct Setup {
     options: SuperviseOptions,
 }
 
-// Only for the tests stopped below (request 190): task 1669 removes this cfg.
-#[cfg(any())]
 fn setup(body: &str, push: bool) -> Setup {
     let (fixture, repo, db) = fixture();
     SqliteQueue::open(&db)
@@ -94,8 +86,6 @@ fn setup(body: &str, push: bool) -> Setup {
 
 /// The push script: `body` after what it read is kept in `inbox`, one
 /// file per message with its environment next to it.
-// Only for the tests stopped below (request 190): task 1669 removes this cfg.
-#[cfg(any())]
 fn write_script(script: &Path, inbox: &Path, body: &str) {
     crate::common::template::script_env(
         script,
@@ -108,8 +98,6 @@ fn write_script(script: &Path, inbox: &Path, body: &str) {
 
 /// What the command read, each message with its environment, in order
 /// (the n-th message's files are named after the 2n files before them).
-// Only for the tests stopped below (request 190): task 1669 removes this cfg.
-#[cfg(any())]
 fn pushed(inbox: &Path) -> Vec<(Value, Vec<String>)> {
     let mut messages = Vec::new();
     for n in 0.. {
@@ -126,9 +114,6 @@ fn pushed(inbox: &Path) -> Vec<(Value, Vec<String>)> {
     messages
 }
 
-// Stopped with the supervisor's report job (request 190, decision (3) of
-// ADR-t3745-1): task 1669 brings it back and removes this cfg.
-#[cfg(any())]
 #[test]
 fn the_daily_summary_and_a_breach_reach_the_command_once() {
     let s = setup("exit 0", true);
@@ -205,9 +190,6 @@ fn the_daily_summary_and_a_breach_reach_the_command_once() {
     assert_eq!(events_of(&s.db, "kpi_breach_started").len(), 4);
 }
 
-// Stopped with the supervisor's report job (request 190, decision (3) of
-// ADR-t3745-1): task 1669 brings it back and removes this cfg.
-#[cfg(any())]
 #[test]
 fn without_push_nothing_is_called_nor_recorded() {
     let s = setup("exit 0", false);
@@ -245,9 +227,6 @@ fn without_push_nothing_is_called_nor_recorded() {
     assert!(fs::read_dir(&s.inbox).unwrap().next().is_none());
 }
 
-// Stopped with the supervisor's report job (request 190, decision (3) of
-// ADR-t3745-1): task 1669 brings it back and removes this cfg.
-#[cfg(any())]
 #[test]
 fn a_failing_command_is_retried_then_told_once_and_cleared_by_a_success() {
     let s = setup("echo \"boom: $1\" >&2; exit 7", true);
@@ -317,9 +296,6 @@ fn a_failing_command_is_retried_then_told_once_and_cleared_by_a_success() {
 /// `dagq kpi` judges it: off target day after day, its breach is
 /// recorded and pushed; without records it is not judged and the check
 /// goes on.
-// Stopped with the supervisor's report job (request 190, decision (3) of
-// ADR-t3745-1): task 1669 brings it back and removes this cfg.
-#[cfg(any())]
 #[test]
 fn a_host_load_target_breaches_from_the_host_records_and_is_not_judged_without_them() {
     let host_load = |s: &Setup| {
@@ -349,6 +325,9 @@ fn a_host_load_target_breaches_from_the_host_records_and_is_not_judged_without_t
     let s = setup("exit 0", true);
     host_load(&s);
     record_host_load(&s.queue_dir, 21, 64.0);
+    // The node rows of those samples, as the passes before this one built
+    // them: the report job reads the ledger, built off its thread.
+    crate::common::ledger::build(&s.db);
     let backend = TestWorkspace::new(&s.db, false, VALID_AGENT);
     supervise_with(&s.db, &s.repo, &backend, &s.options).unwrap();
     assert_eq!(

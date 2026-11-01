@@ -34,99 +34,26 @@ fn each_stopped_command_is_refused_naming_why_and_what_brings_it_back() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("queue.db");
     common::template::queue(&db);
-    for (args, entry, restored) in [
-        (
-            &["stats"][..],
-            "stats",
-            "the ledger's reader of stats, kpi and report",
-        ),
-        (
-            &["stats", "--full"],
-            "stats",
-            "the ledger's reader of stats, kpi and report",
-        ),
-        (
-            &["stats", "--ledger"],
-            "stats --ledger",
-            "removed once stats reads the ledger",
-        ),
-        (
-            &["kpi"],
-            "kpi",
-            "the ledger's reader of stats, kpi and report",
-        ),
-        (
-            &["kpi", "--compare", "1"],
-            "kpi",
-            "the ledger's reader of stats, kpi and report",
-        ),
-        (
-            &["report"],
-            "report",
-            "the ledger's reader of stats, kpi and report",
-        ),
-        (
-            &["report", "--print", "json"],
-            "report",
-            "the ledger's reader of stats, kpi and report",
-        ),
-    ] {
-        assert_stopped(&refused(&db, args), entry, restored);
-    }
+    assert_stopped(
+        &refused(&db, &["stats", "--ledger"]),
+        "stats --ledger",
+        "removed once stats reads the ledger",
+    );
 }
 
 /// The queue service refuses each stopped read and command it is sent
-/// directly, `stats_inputs` and `report_inputs` too, before it reads.
+/// directly, before it reads.
 #[test]
 fn the_service_refuses_each_stopped_read_it_is_sent() {
     let queue = queue();
     start(&queue);
-    for (use_case, params, entry, restored) in [
-        (
-            UseCase::Stats,
-            json!({}),
-            "stats",
-            "the ledger's reader of stats, kpi and report",
-        ),
-        (
-            UseCase::Stats,
-            json!({"ledger": true}),
-            "stats --ledger",
-            "removed once stats reads the ledger",
-        ),
-        (
-            UseCase::StatsInputs,
-            json!({}),
-            "stats_inputs",
-            "the ledger's reader of stats, kpi and report",
-        ),
-        (
-            UseCase::Kpi,
-            json!({}),
-            "kpi",
-            "the ledger's reader of stats, kpi and report",
-        ),
-        (
-            UseCase::ReportInputs,
-            json!({"period": "day"}),
-            "report",
-            "the ledger's reader of stats, kpi and report",
-        ),
-        (
-            UseCase::Report,
-            json!({"period": "day"}),
-            "report",
-            "the ledger's reader of stats, kpi and report",
-        ),
-    ] {
-        let response = call(&queue, None, use_case, params.clone());
-        assert_eq!(response["ok"], false, "{use_case:?} {params}: {response}");
-        assert_stopped(
-            response["error"]["message"].as_str().unwrap(),
-            entry,
-            restored,
-        );
-    }
+    let response = call(&queue, None, UseCase::Stats, json!({"ledger": true}));
+    assert_eq!(response["ok"], false, "{response}");
+    assert_stopped(
+        response["error"]["message"].as_str().unwrap(),
+        "stats --ledger",
+        "removed once stats reads the ledger",
+    );
 }
 
 /// The supervisor's `all_events` is refused by the service, which answers

@@ -176,8 +176,6 @@ fn no_claude_run_uses_a_read_only_codex_review_and_lands() {
     assert_eq!(spans.len(), 1, "{spans:?}");
     assert_eq!(spans[0]["session_id"], REVIEW_THREAD);
     assert_eq!(spans[0]["model"], REVIEW_MODEL);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["review"];
         assert_eq!(
@@ -304,8 +302,6 @@ fn no_claude_codex_review_failure_asks_without_starting_claude() {
     assert_eq!(spans.len(), 1, "{spans:?}");
     assert_eq!(spans[0]["session_id"], REVIEW_THREAD);
     assert_eq!(spans[0]["model"], REVIEW_MODEL);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["review"];
         // The stats count the review's end once.
@@ -1005,8 +1001,6 @@ esac"#
         })
         .sum();
     assert_eq!(input, 21, "{spans:?}");
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         // `stats` shows them on the run, and per provider and route.
         let stats = common::cli::ok(&db, &["stats", "--full"]);

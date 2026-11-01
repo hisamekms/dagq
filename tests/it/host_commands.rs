@@ -77,6 +77,10 @@ fn failed(db: &Path, env: &[(&str, &str)], args: &[&str]) -> String {
 /// `command` run on the DB of `twin` as `actor`, by the command line's own
 /// function, a `report` with the diagram drawn here first.
 fn direct(twin: &Queue, actor: &ActorContext, command: &QueueCommand) -> anyhow::Result<Value> {
+    // `report` reads the ledger, which the served queue's has built too.
+    if matches!(command, QueueCommand::Report(_)) {
+        crate::common::ledger::build(&twin.db);
+    }
     let mut queue = SqliteQueue::open(&twin.db)
         .unwrap()
         .with_actor(actor.clone());
@@ -177,6 +181,7 @@ type Case<'a> = (
 /// queue's path) as `principal`, claiming `role`, from a directory that is
 /// no repository.
 fn in_client_mode(queue: &Queue, principal: &Principal, role: &str, args: &[&str]) -> Output {
+    crate::common::ledger::build_before(&queue.db, args);
     let credential = service::issue(queue.dir(), principal, 1).unwrap().file;
     let elsewhere = queue.dir().join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
@@ -257,8 +262,6 @@ fn each_host_command_runs_through_the_service_as_on_the_db_and_is_refused_a_work
             &["planner", "request", "1", "--text", "t"],
             "planner.request",
         ),
-        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-        #[cfg(any())]
         (&["report"], "queue.export"),
         (
             &["graph", "--out", "g.d2", "--format", "d2"],
@@ -351,8 +354,6 @@ fn each_host_command_runs_through_the_service_as_on_the_db_and_is_refused_a_work
                 text: "and the docs".to_owned(),
             }),
         ),
-        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-        #[cfg(any())]
         (
             &[],
             vec!["report", "--print", "json"],
@@ -534,8 +535,6 @@ fn each_host_command_runs_in_client_mode_as_on_the_db() {
                 text: "and the docs".to_owned(),
             }),
         ),
-        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-        #[cfg(any())]
         (
             vec!["report", "--print", "json"],
             QueueCommand::Report(commands::ReportParams {

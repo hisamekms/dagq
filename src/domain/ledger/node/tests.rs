@@ -229,7 +229,7 @@ fn a_window_takes_the_node_rows_of_its_times() {
     let filtered = select(rows.clone(), &goal);
     assert_eq!(filtered.of(LedgerKind::Node).count(), 1);
     assert_eq!(filtered.host(), summarize(&samples, T0, T0 + 3599));
-    // Without `--since`, from the window's first event, as `stats`.
+    // Without `--since`, `stats`' host from the window's first event.
     let event = crate::domain::RunEvent {
         id: crate::domain::EventId::new(1),
         task_id: None,
@@ -254,7 +254,13 @@ fn a_window_takes_the_node_rows_of_its_times() {
         },
     );
     assert_eq!(open.host(), summarize(&samples, T0 + 4000, T0 + 9000));
-    assert_eq!(open.of(LedgerKind::Node).count(), 2);
+    // Its node rows are every one up to its end, so that `kpi`'s periods
+    // and `report` read the host's load of a span before its first event.
+    assert_eq!(open.of(LedgerKind::Node).count(), 3);
+    assert_eq!(
+        open.host_between(T0 * 1000, (T0 + 3599) * 1000),
+        summarize(&samples, T0 + 1, T0 + 3599)
+    );
 }
 
 /// A node row ends with its hour and settles past the grace; a sample of

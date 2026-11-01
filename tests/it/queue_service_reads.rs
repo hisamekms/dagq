@@ -57,38 +57,9 @@ fn seeded() -> (Queue, i64, i64) {
 }
 
 fn answer(queue: &Queue, token: &str, use_case: UseCase, params: &Value) -> Value {
-    let params = &with_git_reads(queue, token, use_case, params);
     let response = call(queue, Some(token), use_case, params.clone());
     assert_eq!(response["ok"], true, "{use_case:?} {params}: {response}");
     response["result"].clone()
-}
-
-/// `params` of `use_case` with the Git reads a client sends a `stats` or
-/// `kpi` with ([`dagq::application::stats::prepare_read`]), made from the
-/// service's `stats_inputs` of the queue (bound to no repository, so none
-/// is read); any other read's as they are.
-fn with_git_reads(queue: &Queue, token: &str, use_case: UseCase, params: &Value) -> Value {
-    use dagq::application::{
-        areas::AreaReader,
-        queue_reads::QueueRead,
-        stats::{StatsClient, prepare_read},
-    };
-    if !matches!(use_case, UseCase::Stats | UseCase::Kpi) {
-        return params.clone();
-    }
-    let mut read = QueueRead::parse(use_case, params).unwrap().unwrap();
-    let client = StatsClient {
-        areas: &|_| Ok(AreaReader::none()),
-        history: &|_, _| anyhow::bail!("the queue is bound to no repository"),
-    };
-    prepare_read(&mut read, &client, |inputs| {
-        let (use_case, params) = inputs.request();
-        let response = call(queue, Some(token), use_case, params);
-        assert_eq!(response["ok"], true, "{response}");
-        Ok(response["result"].clone())
-    })
-    .unwrap();
-    read.request().1
 }
 
 /// The service's answer is what the command line prints for `args`, read
@@ -254,8 +225,6 @@ fn a_worker_reads_what_a_measure_task_reads_as_the_command_line_prints_it() {
     ] {
         same_as_cli(&queue, &worker, use_case, &params, &args);
     }
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         for (use_case, params, args) in [
             (
@@ -451,8 +420,6 @@ fn the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it() {
         }
     };
     served_to_all(&reads);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         served_to_all(&[
             (UseCase::Stats, json!({}), vec!["stats"]),
@@ -730,9 +697,7 @@ fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
         );
     }
     // No client names the checkout whose files the service reads for
-    // `stats` and `kpi`; one sent with no Git reads (a client older than
-    // the service) or with reads of other inputs is refused, not answered
-    // with less.
+    // `stats` and `kpi`: Git reads naming what they do not hold are refused.
     for use_case in [UseCase::Stats, UseCase::Kpi] {
         let named = call(
             &queue,
@@ -741,25 +706,11 @@ fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
             json!({"git": {"inputs": "v", "checkout": "/elsewhere"}}),
         );
         assert_eq!(named["error"]["code"], "bad_request", "{named}");
-        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-        #[cfg(any())]
-        {
-            for (params, said) in [
-                (json!({}), dagq::application::stats::NOT_READ),
-                (
-                    json!({"git": {"inputs": "another"}}),
-                    dagq::application::stats::STALE,
-                ),
-            ] {
-                let refused = call(&queue, Some(&worker), use_case, params.clone());
-                assert_eq!(refused["ok"], false, "{params}: {refused}");
-                assert!(
-                    refused["error"]["message"]
-                        .as_str()
-                        .is_some_and(|message| message.contains(said)),
-                    "{params}: {refused}"
-                );
-            }
+        // Sent with no Git reads, or with an older client's: answered from
+        // the ledger, which reads no Git.
+        for params in [json!({}), json!({"git": {"inputs": "another"}})] {
+            let answered = call(&queue, Some(&worker), use_case, params.clone());
+            assert_eq!(answered["ok"], true, "{params}: {answered}");
         }
     }
     // A read of what is not there fails as the command line does.
@@ -777,8 +728,6 @@ fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
 /// `--cmux` names none that runs) and in the service alike. A live wrapper
 /// whose heartbeat is far past its timeout is no alert; one whose process
 /// is gone is `run_without_wrapper`.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 #[test]
 fn stats_judges_a_background_wrapper_by_its_pid_and_start_on_both_paths() {
     use dagq::{
@@ -852,6 +801,8 @@ fn stats_judges_a_background_wrapper_by_its_pid_and_start_on_both_paths() {
     );
     wrapper.child().kill().unwrap();
     wrapper.child().wait().unwrap();
+    // A supervisor's next observation sees the wrapper gone.
+    crate::common::ledger::observe_again(&queue.db);
     let expected = vec![json!({
         "kind": "workspace_mismatch",
         "task_id": queue.run.task_id().as_i64(),

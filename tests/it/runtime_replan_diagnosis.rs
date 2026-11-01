@@ -239,8 +239,6 @@ fn a_task_whose_reviews_keep_failing_is_diagnosed_once_and_goes_on() {
     assert_eq!(counts["by_origin"]["runtime"], 1, "{counts}");
     assert_eq!(counts["by_choice"]["continue"], 1, "{counts}");
     assert_eq!(counts["fenced"], 0, "{counts}");
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = common_ok(&db, &["stats", "--full"]);
         let replans = &stats["replans"];

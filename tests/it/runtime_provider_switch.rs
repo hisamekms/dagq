@@ -317,11 +317,9 @@ fn a_codex_task_without_codex_starts_on_claude_and_lands() {
         timeline["provider_switches"][0]["reason"],
         "executable_missing"
     );
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         // `stats` counts it.
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(stats["provider_switches"]["count"], 1, "{stats}");
         assert_eq!(
             stats["provider_switches"]["by_direction"]["codex->claude"],
@@ -438,8 +436,6 @@ esac"#
     let limited = payloads(&detail, "usage_limited");
     assert_eq!(limited[0]["switched_to"], "codex", "{limited:?}");
     assert!(queue_events(&db, "provider_held").is_empty());
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         // `stats` keeps the requested provider on the run, beside the one that
         // did its work and how often it moved, splits its turns by the

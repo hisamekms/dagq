@@ -8,20 +8,11 @@ use crate::common;
 use common::cli::*;
 
 mod stats {
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
-    use std::collections::HashMap;
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     use serde_json::{Value, json};
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     use super::{invoke, ok};
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     #[test]
     fn cli_stats_reads_the_queue_and_since_returns_only_new_runs() {
         use dagq::{
@@ -31,7 +22,11 @@ mod stats {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("queue.db");
         crate::common::template::queue(&db);
-        let empty = ok(&db, &["stats"]);
+        let stats = |args: &[&str]| {
+            crate::common::ledger::build(&db);
+            ok(&db, args)
+        };
+        let empty = stats(&["stats"]);
         assert_eq!(empty["runs"], json!([]));
         assert_eq!(empty["alerts"], json!([]));
         assert_eq!(empty["overall"]["work"]["median"], Value::Null);
@@ -66,7 +61,7 @@ mod stats {
         };
         let mut queue = SqliteQueue::open(&db).unwrap();
         let first = finish(&mut queue);
-        let report = ok(&db, &["stats"]);
+        let report = stats(&["stats"]);
         assert_eq!(report["runs"][0]["run_id"], first.as_str());
         assert_eq!(report["runs"][0]["goal_id"], 1);
         assert_eq!(report["runs"][0]["failed"], 1);
@@ -80,12 +75,20 @@ mod stats {
         assert_eq!(cursor, ok(&db, &["status"])["cursor"].as_i64().unwrap());
 
         let second = finish(&mut queue);
-        let since = ok(&db, &["stats", "--since", &cursor.to_string()]);
+        let since = stats(&["stats", "--since", &cursor.to_string()]);
         assert_eq!(since["runs"].as_array().unwrap().len(), 1);
         assert_eq!(since["runs"][0]["run_id"], second.as_str());
         assert!(since["next_cursor"].as_i64().unwrap() > cursor);
-        let full = ok(&db, &["stats", "--full"]);
+        let full = stats(&["stats", "--full"]);
         assert_eq!(full["runs"].as_array().unwrap().len(), 2);
+        // The breakdown by tags: these runs recorded no phase, so their
+        // rows are legacy, counted apart and in no share.
+        assert_eq!(full["breakdown"]["overall"]["legacy"], 2, "{full}");
+        assert_eq!(full["breakdown"]["overall"]["runs"], 0);
+        assert_eq!(
+            full["breakdown"]["overall"]["duration"]["unattributed"]["ratio"],
+            Value::Null
+        );
         // The tasks' changes read from the queue; their order is
         // `domain::stats::event_sequence_tests::
         // runs_are_grouped_by_change_by_name_and_the_unchanged_last`.
@@ -96,27 +99,32 @@ mod stats {
             .map(|group| &group["change"])
             .collect();
         assert_eq!(changes, [&json!("fix"), &Value::Null]);
-        let goal = ok(&db, &["stats", "--goal", "1"]);
+        let goal = stats(&["stats", "--goal", "1"]);
         assert_eq!(goal["runs"].as_array().unwrap().len(), 1);
         assert_eq!(goal["goals"][0]["goal_id"], 1);
         assert!(!invoke(&db, &["stats", "--since", "x"]).status.success());
     }
 
-    /// `stats` summarizes the host's load the supervisor recorded under
-    /// the queue's `host/` over its window (task 516): the files read and
-    /// the window `--since` / `--until` give. The summary's mean, maximum,
-    /// p90 and pageouts per minute are
+    /// `stats` summarizes the host's load the supervisor recorded (its
+    /// samples in the NodeSampleStore, folded into the ledger's node rows)
+    /// over its window (task 516): the samples read and the window
+    /// `--since` / `--until` give. The summary's mean, maximum, p90 and
+    /// pageouts per minute are
     /// `domain::host_metrics::tests::the_summary_reads_mean_max_p90_and_the_pageout_rate`.
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     #[test]
     fn cli_stats_summarizes_the_host_load_of_its_window() {
-        use dagq::domain::host_metrics::{HostSample, file_name, header, local_day};
+        use dagq::application::NodeSampleStore;
+        use dagq::domain::environment::NodeRate;
+        use dagq::domain::host_metrics::{HOST_NODE, HostSample, SampleSource, local_day};
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("queue.db");
         crate::common::template::queue(&db);
-        // No file yet: an empty summary.
-        let empty = ok(&db, &["stats"]);
+        // No sample yet: an empty summary.
+        let stats = |args: &[&str]| {
+            crate::common::ledger::build(&db);
+            ok(&db, args)
+        };
+        let empty = stats(&["stats"]);
         assert_eq!(empty["host"]["samples"], 0);
         assert_eq!(empty["host"]["metrics"]["load1"], Value::Null);
         let now = std::time::SystemTime::now()
@@ -124,9 +132,7 @@ mod stats {
             .unwrap()
             .as_secs();
         let now = i64::try_from(now).unwrap();
-        let host = dir.path().join("host");
-        std::fs::create_dir_all(&host).unwrap();
-        let mut by_file: HashMap<String, String> = HashMap::new();
+        let queue = dagq::infrastructure::sqlite::SqliteQueue::open(&db).unwrap();
         // Four samples in the window a minute apart, one long before it.
         for (unix, load, pageouts) in [
             (now - 4000, 99.0, 0.0),
@@ -138,15 +144,21 @@ mod stats {
             let mut sample = HostSample::new(unix);
             sample.set("load1", Some(load));
             sample.set("pageouts", Some(pageouts));
-            by_file
-                .entry(file_name(local_day(unix, 0)))
-                .or_insert_with(|| format!("{}\n", header()))
-                .push_str(&format!("{}\n", sample.row(0)));
+            assert!(
+                queue
+                    .record_node_sample(
+                        HOST_NODE,
+                        local_day(unix, 0),
+                        &sample,
+                        &NodeRate::default(),
+                        SampleSource::Sampled,
+                        0,
+                    )
+                    .unwrap()
+            );
         }
-        for (name, text) in by_file {
-            std::fs::write(host.join(name), text).unwrap();
-        }
-        let report = ok(&db, &["stats", "--since", &format!("@{}", now - 300)]);
+        drop(queue);
+        let report = stats(&["stats", "--since", &format!("@{}", now - 300)]);
         let summary = &report["host"];
         assert_eq!(summary["from"], now - 300);
         assert_eq!(summary["samples"], 4, "{summary}");

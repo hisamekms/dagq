@@ -5,8 +5,6 @@
 //! `planner_closed`, and is read per route next to the interactive
 //! planners' spans the hook records.
 
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 use crate::common::{Bounded, WithoutActor};
 use crate::plan_review::{
     PlanWorkspace, StubReviewer, add, fixture, git, options, submit, supervise_with,
@@ -18,8 +16,6 @@ use dagq::{
     infrastructure::sqlite::SqliteQueue,
 };
 use serde_json::{Value, json};
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 use std::process::Command;
 use std::{
     fs, thread,
@@ -74,9 +70,8 @@ fn planner_spans(db: &std::path::Path, kind: &str) -> Vec<Value> {
 }
 
 /// `dagq <args>` in UTC, without the host's settings.
-// Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-#[cfg(any())]
 fn read(db: &std::path::Path, config: &std::path::Path, args: &[&str]) -> Value {
+    crate::common::ledger::build_before(db, args);
     let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
         .without_actor_env()
         .env("TZ", "UTC")
@@ -154,8 +149,6 @@ fn a_headless_planners_session_and_route_are_read_by_stats_and_kpi() {
     assert!(close["model"].is_string(), "{close}");
     assert_eq!(close["effort"], span["launch"]["effort"]);
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let config = fx.db.parent().unwrap().join("config");
         fs::create_dir_all(&config).unwrap();

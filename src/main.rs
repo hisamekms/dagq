@@ -1557,13 +1557,13 @@ enum Command {
         cmux: RetiredCmux,
     },
     /// Per-run times in seconds (work, validate, wait_to_land, startup) and counts, per-goal and
-    /// overall count/total/median, and alerts over thresholds, derived from run events. The latest
+    /// overall count/total/median, and alerts over thresholds, derived from the ledger. The latest
     /// 50 finished runs unless --full; pass `next_cursor` to --since for only the runs finished later.
     /// Each run also carries its title, claim/validation/landing times, integrate attempts and
     /// deferrals, the landings that broke it, and its resumes.
-    /// Stopped in this build, --ledger too: refused before it reads, as it reads every event of the
-    /// queue; the ledger's reader brings it back, and --ledger is removed then.
-    // ADR-t3745-1; task 1669 brings it back from the ledger, task 1671 removes --ledger.
+    /// --ledger is stopped in this build: refused before it reads, as it reads every event of the
+    /// queue; it is removed once stats reads the ledger.
+    // ADR-t3745-1; task 1671 removes --ledger.
     Stats {
         /// Event id (a previous `next_cursor`), `@<unix seconds>` or an RFC 3339 time: only runs
         /// that finished after it.
@@ -1598,9 +1598,6 @@ enum Command {
     /// previous period (and a day's 7-day median), judged against the `[kpi.targets]` of
     /// dagq.toml and host.toml. --compare splits at a mark (its event id) or a time, or compares
     /// two windows A..B,C..D, and lists every other mark in and between them. Reads only; JSON.
-    /// Stopped in this build, --compare too: refused before it reads, as it reads every event of
-    /// the queue; the ledger's reader brings it back.
-    // ADR-t3745-1; task 1669 brings it back from the ledger.
     Kpi {
         #[arg(long, default_value = "day", value_parser = ["day", "week"])]
         period: String,
@@ -1673,9 +1670,6 @@ enum Command {
     /// under the queue's reports/ (daily/YYYY-MM-DD, weekly/YYYY-Www; today's and this week's are
     /// named .partial), then index.html and the [report] retention of host.toml. Prints the paths
     /// written. Changes no queue state.
-    /// Stopped in this build: refused before it reads, as it reads every event of the queue; the
-    /// ledger's reader brings it back.
-    // ADR-t3745-1; task 1669 brings it back from the ledger.
     Report {
         #[arg(long, default_value = "day", value_parser = ["day", "week"])]
         period: String,

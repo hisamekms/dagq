@@ -1012,8 +1012,6 @@ fn migration_dropping_the_task_kind_keeps_tasks_and_their_change() {
             .iter()
             .all(|task| task.get("kind").is_none())
     );
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let stats = run(&["stats", "--full"]);
         assert_eq!(stats["runs"][0]["change"], "fix");

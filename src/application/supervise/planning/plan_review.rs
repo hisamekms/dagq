@@ -2151,7 +2151,7 @@ fn window_hotspot_files<E: crate::application::EventStore + ?Sized>(
         usize::MAX,
     )?;
     let history =
-        crate::application::stats::window_conflict_history(&read, window.start_ms, history);
+        crate::application::main_history::window_conflict_history(&read, window.start_ms, history);
     Ok(conflict_hotspots_over(
         &read,
         (window.after, window.upto),

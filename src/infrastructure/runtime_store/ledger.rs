@@ -139,6 +139,13 @@ fn upsert(conn: &rusqlite::Connection, row: &LedgerRow) -> Result<bool> {
 }
 
 impl LedgerStore for SqliteQueue {
+    fn ledger_run_events(
+        &self,
+        run: &crate::domain::RunId,
+    ) -> Result<Vec<crate::domain::RunEvent>> {
+        crate::application::EventStore::run_events(self, run)
+    }
+
     fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool> {
         upsert(&self.conn, row)
     }

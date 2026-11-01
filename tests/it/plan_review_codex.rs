@@ -182,8 +182,6 @@ fn a_plan_review_on_codex_runs_read_only_and_applies_its_verdicts() {
         .unwrap();
     assert_eq!(providers, ["codex", "codex", "codex"]);
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let jobs = &crate::common::cli::ok(&fx.db, &["stats", "--full"])["jobs"]["plan_review"];
         let codex_jobs = &jobs["by_provider"]["codex"];
@@ -248,8 +246,6 @@ fn a_codex_that_cannot_log_in_moves_the_plan_review_to_claude() {
         queue.show_proposal(proposal).unwrap().status(),
         ProposalStatus::Accepted
     );
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         let jobs = &crate::common::cli::ok(&fx.db, &["stats", "--full"])["jobs"]["plan_review"];
         assert_eq!(jobs["by_provider"]["codex"]["failed"], 1, "{jobs}");

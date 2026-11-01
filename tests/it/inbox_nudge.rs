@@ -366,8 +366,6 @@ fn the_watchers_changes_are_recorded_once_and_give_how_long_an_ask_waited_to_be_
         Value::Null
     );
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         // The times `kpi` reads, seconds before now: the ask opened while the
         // watch was away waits 60 s, the one opened while it watched none.
@@ -431,8 +429,6 @@ fn an_ask_answered_before_the_watcher_returns_waits_up_to_its_answer() {
         .unwrap();
     let names: Vec<&str> = events.iter().map(|(_, kind)| kind.as_str()).collect();
     assert_eq!(names, kinds);
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
         // Answered 20 s after its opening, the watch back 300 s after it.
         for ((id, _), ago) in events.iter().zip([600, 500, 480, 200]) {

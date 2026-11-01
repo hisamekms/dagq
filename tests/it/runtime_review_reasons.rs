@@ -94,10 +94,8 @@ fn a_concern_sent_back_records_its_codes_and_outcome_and_stats_tally_them() {
     assert_eq!(finished[1]["reason_codes"], json!([]));
     assert_eq!(finished[1]["primary_code"], Value::Null);
 
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         let review = &stats["review_reasons"]["review"];
         assert_eq!(review["verdicts"], 2);
         assert_eq!(review["reviewed"], 1);
@@ -142,10 +140,8 @@ fn a_concern_landed_records_the_departure_accepted() {
         payloads(&detail, "review_outcome")[0]["outcome"],
         "deviation_accepted"
     );
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(
             stats["review_reasons"]["review"]["by_code"]["adr_conflict"]["outcomes"]["deviation_accepted"],
             1

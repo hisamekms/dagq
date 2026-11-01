@@ -167,13 +167,26 @@ pub trait LedgerStore {
     /// change nothing is written, and one stopped part way is finished by
     /// the next call. Returns how many rows were removed.
     fn remove_node_rows(&self, before_day: i64) -> Result<usize>;
+    /// The events of the run `run` the EventStore holds, in id order: the
+    /// input [`Self::ledger_window`] folds the row of a run on its way
+    /// from, as the builder writes none of it until it ends.
+    fn ledger_run_events(&self, run: &RunId) -> Result<Vec<RunEvent>>;
     /// The window `query` asks of the rows of every kind
     /// ([`crate::domain::ledger::window::select`]): the one entry the
-    /// statistics read the ledger by.
+    /// statistics read the ledger by. The rows of the runs on their way
+    /// (of a task not ended, with no row of their own) are folded at
+    /// `query`'s now from their events by the one fold
+    /// ([`crate::domain::ledger::window::run_on_its_way`]), so that a
+    /// window holds what a run not ended recorded too.
     fn ledger_window(&self, query: &WindowQuery) -> Result<LedgerWindow> {
+        use crate::domain::ledger::window::{run_on_its_way, runs_on_their_way};
         let mut rows = Vec::new();
         for kind in LedgerKind::ALL {
             rows.extend(self.ledger_rows(kind)?);
+        }
+        for run in runs_on_their_way(&rows) {
+            let events = self.ledger_run_events(&run)?;
+            rows.extend(run_on_its_way(&run, &events, query.now_ms));
         }
         Ok(crate::domain::ledger::window::select(rows, query))
     }

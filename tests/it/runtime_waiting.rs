@@ -134,10 +134,8 @@ fn a_run_waiting_for_its_answer_leaves_the_slot_to_another_task() {
     // Nothing waits any more.
     let status = runtime::status(&db).unwrap();
     assert_eq!(status["waiting"], json!([]));
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         assert_eq!(stats["waiting"]["started"]["worker_question"], 1, "{stats}");
         assert_eq!(stats["waiting"]["waited"]["worker_question"]["count"], 1);
         assert_eq!(stats["waiting"]["slot_wait"]["count"], 1);
@@ -534,7 +532,7 @@ fn ask_stalled(db: &Path, run: &TaskRun, question: AskId) -> AskId {
     let dir = Path::new(run.run_dir().unwrap());
     for marker in [
         run.idle_marker_path().unwrap(),
-        dir.join(dagq::application::stats::PROMPT_SUBMIT_MARKER),
+        dir.join(dagq::application::live_inputs::PROMPT_SUBMIT_MARKER),
     ] {
         if marker.is_file() {
             fs::File::options()
@@ -662,10 +660,8 @@ fn a_wait_ended_by_its_adoption_keeps_every_ask_it_held() {
 /// registered (a person's `integrate`) holds none.
 #[test]
 fn a_landing_run_fills_its_supervisors_slot_in_status_and_stats() {
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     let idle_slots = |db: &Path| {
-        runtime::stats(db, &Default::default()).unwrap()["alerts"]
+        crate::common::ledger::stats(db, &Default::default()).unwrap()["alerts"]
             .as_array()
             .unwrap()
             .iter()
@@ -673,9 +669,6 @@ fn a_landing_run_fills_its_supervisors_slot_in_status_and_stats() {
             .map(|alert| alert["value"].clone())
     };
     for (token, used, free) in [("live", 1, 1), ("by-hand", 0, 2)] {
-        // `free` is read only by the checks of `stats` left out while it is
-        // stopped (ADR-t3745-1): task 1669 takes this line off with them.
-        let _ = free;
         let (_dir, repo, db, run) = awaiting_run();
         let mut queue = SqliteQueue::open(&db).unwrap();
         queue
@@ -692,9 +685,6 @@ fn a_landing_run_fills_its_supervisors_slot_in_status_and_stats() {
             json!({"used": used, "landing_queue": 0, "parallel": 2, "source": null}),
             "{token}: {status}"
         );
-        // The dependent task is ready but blocked by the landing one.
-        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-        #[cfg(any())]
         assert_eq!(idle_slots(&db), Some(json!(free)), "{token}");
         // Back in review under the same lease, as the supervisor holds a run
         // it reviews or that waits its turn to land, the run still holds the
@@ -722,8 +712,6 @@ fn a_landing_run_fills_its_supervisors_slot_in_status_and_stats() {
             json!({"used": used, "landing_queue": 0, "parallel": 2, "source": null}),
             "{token}: {status}"
         );
-        // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-        #[cfg(any())]
         assert_eq!(idle_slots(&db), Some(json!(free)), "{token}");
     }
 }

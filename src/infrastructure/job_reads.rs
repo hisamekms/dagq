@@ -1,33 +1,23 @@
 //! What a job command a supervisor started as its own (`observe`,
 //! `throughput-review`) reads through that supervisor's queue, opening
 //! none: the reads of the whole queue as the service computes them
-//! ([`JobRead`]) with what the job read with Git for them, the checkout the
-//! queue is bound to, and the improvement proposals against its
-//! `dagq.toml`'s limit.
+//! ([`JobRead`]), the checkout the queue is bound to, and the improvement
+//! proposals against its `dagq.toml`'s limit. No Git is read for them.
 
-use crate::application::queue_reads::{JobRead, QueueRead};
-use crate::application::stats::{StatsClient, call_read};
+use crate::application::queue_reads::JobRead;
 use crate::application::supervisor_service::SupervisorQueue;
 use crate::domain::stats::StatsQuery;
 use anyhow::Result;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// A job command's reads through the supervisor's queue, `git` the host's
-/// Git the job reads `stats` and `kpi`'s Git part with (the service runs
-/// none).
-pub struct JobReads<'a> {
-    pub git: &'a StatsClient<'a>,
-}
+/// A job command's reads through the supervisor's queue.
+pub struct JobReads;
 
-impl JobReads<'_> {
-    /// What the service answers the job's `read`, sent with what the job
-    /// read with Git for it ([`call_read`]).
+impl JobReads {
+    /// What the service answers the job's `read`.
     fn read(&self, queue: &SupervisorQueue, read: JobRead) -> Result<Value> {
-        call_read(&QueueRead::Job(read), self.git, |read| match read {
-            QueueRead::Job(read) => queue.job_read(read),
-            other => anyhow::bail!("a job reads no {other:?}"),
-        })
+        queue.job_read(&read)
     }
 
     /// The main checkout of the repository the queue is bound to; none for
@@ -51,7 +41,7 @@ impl JobReads<'_> {
     }
 }
 
-impl crate::application::observer::ObserverSources<SupervisorQueue> for JobReads<'_> {
+impl crate::application::observer::ObserverSources<SupervisorQueue> for JobReads {
     fn stats(&self, queue: &SupervisorQueue, _: &Path, query: &StatsQuery) -> Result<Value> {
         self.read(
             queue,
@@ -72,9 +62,7 @@ impl crate::application::observer::ObserverSources<SupervisorQueue> for JobReads
     }
 }
 
-impl crate::application::throughput_review::ThroughputReviewSources<SupervisorQueue>
-    for JobReads<'_>
-{
+impl crate::application::throughput_review::ThroughputReviewSources<SupervisorQueue> for JobReads {
     fn stats(&self, queue: &SupervisorQueue, _: &Path, query: &StatsQuery) -> Result<Value> {
         self.read(
             queue,

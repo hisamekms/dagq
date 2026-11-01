@@ -128,11 +128,8 @@ fn recover_closes_the_stalled_ask_and_ends_its_detections_once() {
         .end_stalled_detections(run.id(), "the run ended; closed by the runtime")
         .unwrap();
     assert_eq!(resolved(&db, &run).len(), 3);
-    // `stats` reads the ends as the run's.
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         let idle = &stats["stall_thresholds"]["idle_without_receipt_secs"];
         assert_eq!(idle["detections"], 3, "{stats}");
         assert_eq!(idle["outcomes"]["escalated"], 2, "{stats}");
@@ -201,10 +198,8 @@ fn an_abandoned_run_closes_its_answered_stalled_ask_and_ends_its_nudge() {
     assert_eq!(ends[0]["threshold_secs"], 60);
     assert_eq!(ends[0]["detected_after_secs"], 61);
     assert_eq!(ends[1]["ask_id"], json!(ask.id));
-    // Stopped while it reads every event of the queue (ADR-t3745-1): task 1669 takes this cfg off.
-    #[cfg(any())]
     {
-        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let stats = crate::common::ledger::stats(&db, &Default::default()).unwrap();
         let idle = &stats["stall_thresholds"]["idle_without_receipt_secs"];
         assert_eq!(idle["detections"], 2, "{stats}");
         assert_eq!(idle["outcomes"]["answered_intervene"], 1, "{stats}");

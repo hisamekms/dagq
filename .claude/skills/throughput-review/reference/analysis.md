@@ -2,7 +2,7 @@
 
 [SKILL.md](../SKILL.md) の「2. 増減の理由の分析」の、対象の時間の決め方、(a)(b)(トークン) のコマンドと読み方、(c) の結論の分け方。
 
-> 今の build では、この手順の `stats`・`kpi`・`report` は止めてあり断る（[SKILL.md](../SKILL.md) の共通の決まり）。止まっている間は打たず、`events` と `timeline RUN` の読みで代える。
+> `stats`・`kpi`・`report` は台帳から読む（[SKILL.md](../SKILL.md) の共通の決まり）。待ちの内訳は `stats` の `breakdown` の blocker・holds の割合で読み、`unattributed` の割合を添える。
 
 対象の時間（外れた時、下回りが続いた 3 時間など）を UTC の `FROM`・`TO` にして（JST から 9 時間引く）、次を並べる。比べる相手は同じ手順で出した直前の 6〜24 時間。
 
