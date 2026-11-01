@@ -42,13 +42,61 @@ pub const MIN_API_VERSION: u32 = 1;
 /// inbox's token names its session ([`API_VERSION`]).
 pub const HOST_CLIENT_API_VERSION: u32 = 2;
 
-/// The words `migrate --check` ends with when no service of a build that
-/// reads the `migrate` use case answers for the queue: none runs, or one of
-/// a build before it. Nothing else reads the queue's schema, so the
-/// `install` that finds them leaves the queue to the replacement start of
-/// its new build's service, which applies what it may before it accepts.
+/// The words of `migrate --check`'s [`schema_unanswered`] answer, given
+/// when no service of a build that reads the `migrate` use case answers
+/// for the queue: none runs, or one of a build before it. Nothing else
+/// reads the queue's schema, so the `install` that finds them leaves the
+/// queue to the replacement start of its new build's service, which
+/// applies what it may before it accepts. A build that ended
+/// `migrate --check` with them as a failure is read the same way.
 pub const SCHEMA_UNANSWERED: &str =
     "no queue service that reads `migrate` answered for the queue's schema";
+
+/// The field of `migrate --check`'s [`schema_unanswered`] answer that is
+/// `true`: by it the judgment of this build or a later one tells the answer
+/// from the schema facts a service read, and leaves the schema to the
+/// replacement start.
+pub const SCHEMA_UNANSWERED_FIELD: &str = "unanswered";
+
+/// What `migrate --check` prints, ending with 0, when no service of a build
+/// that reads `migrate` answers ([`SCHEMA_UNANSWERED`]) for `reason`, by a
+/// build whose last migration is `binary_schema_version`. It opens no DB.
+///
+/// A promise across builds: the judgment that reads it is the running
+/// fixed binary's (its automatic update or `install`), which is of the
+/// build before. One that predates [`SCHEMA_UNANSWERED_FIELD`] reads only
+/// the exit status, `pending` (each an `i64` `version` and a `bool`
+/// `compatible`) and `opens`: an empty `pending` would have it hand the
+/// queue to the old service, and a failure stop the replacement, so one
+/// compatible migration is named, and it has the new build's service
+/// started as a replacement, which applies the compatible migrations or
+/// refuses a breaking one before it takes over. A change of this answer
+/// keeps it readable that way.
+pub fn schema_unanswered(reason: &str, binary_schema_version: i64) -> Value {
+    serde_json::json!({
+        SCHEMA_UNANSWERED_FIELD: true,
+        "reason": format!("{SCHEMA_UNANSWERED}: {reason}"),
+        "binary_schema_version": binary_schema_version,
+        "pending": [{"version": binary_schema_version, "compatible": true}],
+        "opens": true,
+    })
+}
+
+/// Whether a service refused a request whose use case its build does not
+/// read: a `bad_request` that names an `unknown variant` (the words of the
+/// request's reading that a service of a build before the use case
+/// answers), or one of a service whose `hello` named `service_build`, a
+/// build other than `own_build` (this build reads the request it sent).
+pub fn refuses_unknown_use_case(
+    code: &str,
+    message: &str,
+    service_build: Option<&str>,
+    own_build: &str,
+) -> bool {
+    code == ServiceErrorCode::BadRequest.as_str()
+        && (message.contains("unknown variant")
+            || service_build.is_some_and(|build| build != own_build))
+}
 
 /// The API version a request of `use_case` is sent at: [`MIN_API_VERSION`]
 /// for a hello, which names nothing a service has to act on, so that a
@@ -2582,6 +2630,75 @@ pub fn attention_stands(latest: Option<&RecordedKind>) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `migrate --check`'s answer with no service that reads `migrate` is
+    /// a promise across builds ([`schema_unanswered`]): the judgment of
+    /// the running fixed binary, of the build before, reads it. Its shape
+    /// is fixed here; a change of it keeps the reading of the build before
+    /// (one compatible `pending` with an `i64` version, `opens`) and of
+    /// this one (the mark) as they are.
+    #[test]
+    fn the_unanswered_schema_is_the_answer_every_build_s_judgment_reads() {
+        assert_eq!(
+            schema_unanswered("unreachable: none runs", 99),
+            json!({
+                "unanswered": true,
+                "reason": format!("{SCHEMA_UNANSWERED}: unreachable: none runs"),
+                "binary_schema_version": 99,
+                "pending": [{"version": 99, "compatible": true}],
+                "opens": true,
+            })
+        );
+        assert_eq!(SCHEMA_UNANSWERED_FIELD, "unanswered");
+    }
+
+    /// A service of a build before the use case is told by the refusal's
+    /// words it answers, or by its `hello`: a `bad_request` of a service of
+    /// another build, whatever its words. A refusal of this build's
+    /// service, or one that is not a `bad_request`, is no such service's.
+    #[test]
+    fn a_service_that_reads_no_use_case_is_told_by_its_words_or_its_hello() {
+        let unknown =
+            "the request does not read: unknown variant `migrate`, expected one of `hello`";
+        assert!(refuses_unknown_use_case(
+            "bad_request",
+            unknown,
+            None,
+            "new"
+        ));
+        assert!(refuses_unknown_use_case(
+            "bad_request",
+            unknown,
+            Some("new"),
+            "new"
+        ));
+        let other = "the request does not read";
+        assert!(refuses_unknown_use_case(
+            "bad_request",
+            other,
+            Some("old"),
+            "new"
+        ));
+        assert!(!refuses_unknown_use_case(
+            "bad_request",
+            other,
+            Some("new"),
+            "new"
+        ));
+        assert!(!refuses_unknown_use_case("bad_request", other, None, "new"));
+        assert!(!refuses_unknown_use_case(
+            "failed",
+            unknown,
+            Some("old"),
+            "new"
+        ));
+        assert!(!refuses_unknown_use_case(
+            "authorization_denied",
+            other,
+            Some("old"),
+            "new"
+        ));
+    }
 
     #[test]
     fn only_a_replacement_s_service_applies_migrations() {

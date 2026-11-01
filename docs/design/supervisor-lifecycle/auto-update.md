@@ -103,7 +103,7 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
        流し直しでも落ちたtestが全て効いている印を持てば関門は通り、そのtestは印で通した（quarantined）とする。
        印の無いtestが1つでも流し直しで落ちれば落ちる。
        効かない印は、期限を過ぎた印、印が上限を超えるファイルの全部の印、印の付いたtestが今回を含めて決まった回数続けて流し直しでも落ちた印で、読めないファイルでは印を1つも効かせない（`e2e_quarantine`のdoc comment）。
-       続けての失敗は、queueの関門のeventを新しい方から見て数え、人の`install`の関門（`install_e2e_finished`、[`install`](install.md#install)の1）とruntimeがrunに流すe2eの結果も関門として合わせて数える（ADR-t1233-2決定5、読むeventは`RunLog::e2e_gate_events`、数え方は`e2e_quarantine::failures_in_a_row`のdoc comment）。
+       続けての失敗は、queueの関門のeventを新しい方から見て数え、人の`install`の関門（`install_e2e_finished`、[`install`](install.md#install)の1）とruntimeがrunに流すe2eの結果も関門として合わせて数える（ADR-t1233-2決定5）。
        印の有無に依らず数えるので、関門を落とした後もそのtestが流し直しで通るまで落ち続ける。
        判定は`application::e2e_verdict::judge`で、自動更新のjobと`install`と、runtimeがrunに流すe2eが共有する（runのe2eが印を読むcommitと外す印は[着地の前のe2e](integrate.md#着地の前のe2e)）。
        落ちたときの`error`と`update_failed`のaskの問いには、落ちたtest、流し直しでも落ちたtest、flaky・quarantinedのtest、印が効かなかったtestとその理由とファイルの理由、1回目と流し直しのlogのpathが載る。
@@ -117,7 +117,8 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
        [Release update](release-update.md)のjobはリリースのバイナリなので関門を持たない。
   2. **非互換のmigration**: 新しいbinaryに非互換のmigrationがあれば、`install`と同じ確認をして`<queue dir>/update/staged/dagq`にcopyし、`approve_update`のask（下記）を開いて`update_awaiting_approval`で終わる。
      何も置き換えない。
-  3. **入れ替え**: それ以外は`install::install`（`Source::Binary`、drainはしない）を呼ぶ: 確認、互換のmigration（ビルドしたbinaryのserviceを入れ替えの口で起動し、受け付けの前に適用させる。許しはその起動の間だけ）、renameでの差し替え（`.previous`を残す）とqueueのbinaryの記録、このqueueのliveなsupervisorへの引き継ぎの要求と、同じpidとtokenで戻るまでの待ち。
+     確認を判定するのは前のbuildの固定バイナリなので、`migrate --check`の出力と終了の状態はbuildをまたぐ約束で、`migrate`を読まない前のbuildのserviceでは非互換は入れ替えの起動が断り`update_failed`になる（[`install`](install.md#install)の3）。
+  3. **入れ替え**: それ以外は`install::install`（`Source::Binary`、drainはしない）を呼ぶ: 確認、互換のmigration（入れ替えの口のserviceが適用する。[`install`](install.md#install)の3）、renameでの差し替え（`.previous`を残す）とqueueのbinaryの記録、このqueueのliveなsupervisorへの引き継ぎの要求と、同じpidとtokenで戻るまでの待ち。
      tokenの登録が消えても、同じpidが引き継ぎを頼んだ後に新しいbuild識別子で登録し直していれば、その新しいtokenで戻ったとする（`lifecycle::successor`。pidが再利用されて残った古い行は後継とみなさない）。
      要求を持つか受けて登録し直す前のsupervisorは、pidが死んだ時点で失敗にし、pidが生きている間はheartbeatが`HEARTBEAT_TIMEOUT_SECS`より古く見えても失敗にせず上限まで待つ（drainやqueueの書き込みの詰まりでheartbeatが一時的に遅れても、取り消し・戻し・起動し直しにしない）。
      待ちのあいだに見えた最も古いheartbeatの秒数は、そのsupervisorの`update_installed`と`update_failed`の`supervisors`の要素の`stale_heartbeat_secs`に残る（`lifecycle::Handed`）。
@@ -131,7 +132,7 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
      tokenの登録が消えても、同じpidが`install`を呼ぶ前の時刻以降に新しいbuild識別子で登録し直していれば（照合は3と同じ`lifecycle::successor`）、その登録を追い、進めば成功とする。
      PIDが死んだ、登録が消えて同じpidの登録も無い、build識別子が違う、heartbeatが進まない、のどれかでそのsupervisorを失敗にし、他のsupervisorは最後まで見張る。
      fileは全員で1つなので、全員が失敗したときだけ、`.previous`が置き換えた前のbuild識別子と同じなら`restore`で戻す（違えば戻さず、その旨をaskに書く）。
-     一部だけが失敗したときは、新しいbinaryで動いているsupervisorがあるので戻さず、失敗したsupervisorだけを5で戻し（止まったものは置いたままの新しいbinaryで起動し直し、execに失敗して前のbinaryのまま動くものはそのまま）、`update_failed`のaskで人に判断を渡す（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)。askは前のbinaryのまま動くsupervisorを`down --force`と`up`で揃えるか、`install --rollback`で全員を戻すかを案内する）。
+     一部だけが失敗したときは、新しいbinaryで動いているsupervisorがあるので戻さず、失敗したsupervisorだけを5で戻し（止まったものは置いたままの新しいbinaryで起動し直し、execに失敗して前のbinaryのまま動くものはそのまま）、`update_failed`のaskで人に判断を渡す（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）。
      戻したら、他を戻した（5）後に`update_restored`を書く（書けなくても続ける）。
      `update_restored`はjobの途中の段（`JOB_STEPS`）で、jobが死んで最新の段のまま残れば2のinterruptedになる。
   5. **supervisorを戻す**（`bring_back`）: 3の引き継ぎより前の失敗（差し替えの失敗など、supervisorごとの結果が無いもの）の後はjobを起動したsupervisorだけを、3の全員の引き継ぎの失敗と4の失敗の後は失敗したsupervisorのそれぞれを戻す。

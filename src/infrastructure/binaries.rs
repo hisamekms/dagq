@@ -23,6 +23,42 @@ use crate::application::install::{
 
 pub struct LocalBinaries;
 
+/// Whether `migrate --check` failed with the words of no service that
+/// answers the schema ([`SCHEMA_UNANSWERED`](crate::domain::queue_service::SCHEMA_UNANSWERED)),
+/// as a build that ended it with them as a failure did: the schema is left
+/// to the replacement start, as with [`schema_check_of`]'s mark.
+fn unanswered_failure(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains(crate::domain::queue_service::SCHEMA_UNANSWERED)
+}
+
+/// The schema check of what `migrate --check` printed: none when it is the
+/// answer of no service that reads `migrate`
+/// ([`schema_unanswered`](crate::domain::queue_service::schema_unanswered)),
+/// which leaves the schema to the replacement start; else the migrations
+/// pending and whether the build opens the queue.
+fn schema_check_of(report: &Value) -> Result<Option<SchemaCheck>> {
+    if report[crate::domain::queue_service::SCHEMA_UNANSWERED_FIELD] == true {
+        return Ok(None);
+    }
+    let pending = report["pending"]
+        .as_array()
+        .context("migrate --check reported no pending list")?
+        .iter()
+        .map(|migration| {
+            Ok(PendingMigration {
+                version: migration["version"]
+                    .as_i64()
+                    .context("a pending migration without a version")?,
+                compatible: migration["compatible"] == true,
+            })
+        })
+        .collect::<Result<_>>()?;
+    Ok(Some(SchemaCheck {
+        pending,
+        opens: report["opens"] == true,
+    }))
+}
+
 /// How long the service an `install` starts may take to tell how its start
 /// goes; once it does, a service applying migrations is waited for as long
 /// as it lives.
@@ -198,32 +234,10 @@ impl Binaries for LocalBinaries {
             serde_json::from_str::<Value>(&text)
                 .with_context(|| format!("read what {} printed", binary.display()))
         });
-        let report = match checked {
-            Err(error)
-                if format!("{error:#}")
-                    .contains(crate::domain::queue_service::SCHEMA_UNANSWERED) =>
-            {
-                return Ok(None);
-            }
-            report => report?,
-        };
-        let pending = report["pending"]
-            .as_array()
-            .context("migrate --check reported no pending list")?
-            .iter()
-            .map(|migration| {
-                Ok(PendingMigration {
-                    version: migration["version"]
-                        .as_i64()
-                        .context("a pending migration without a version")?,
-                    compatible: migration["compatible"] == true,
-                })
-            })
-            .collect::<Result<_>>()?;
-        Ok(Some(SchemaCheck {
-            pending,
-            opens: report["opens"] == true,
-        }))
+        match checked {
+            Err(error) if unanswered_failure(&error) => Ok(None),
+            report => schema_check_of(&report?),
+        }
     }
 
     fn serve(&self, binary: &Path, db: &Path, breaking: bool) -> Result<Value> {
@@ -513,6 +527,47 @@ mod tests {
             .get_envs()
             .find(|(key, _)| *key == OsStr::new(name))
             .map(|(_, value)| value.map(OsStr::to_owned))
+    }
+
+    /// This build leaves the schema to the replacement start (`None`) on
+    /// the answer of no service that reads `migrate`, by its mark, and on
+    /// the failure with its words that a build before the mark printed;
+    /// the facts a service read are read as pending and opens.
+    #[test]
+    fn the_schema_is_left_to_the_replacement_start_by_the_mark_or_the_words() {
+        use crate::domain::queue_service::{SCHEMA_UNANSWERED, schema_unanswered};
+        let answer = schema_unanswered("bad_request: unknown variant `migrate`", 7);
+        assert_eq!(schema_check_of(&answer).unwrap(), None);
+        let failed = anyhow::anyhow!("dagq migrate --check exited with 1: {SCHEMA_UNANSWERED}: x");
+        assert!(unanswered_failure(&failed));
+        assert!(!unanswered_failure(&anyhow::anyhow!(
+            "dagq migrate --check exited with 1: failed: the queue is locked"
+        )));
+        let facts = serde_json::json!({
+            "schema_version": 5,
+            "pending": [
+                {"version": 6, "compatible": true},
+                {"version": 7, "compatible": false},
+            ],
+            "opens": false,
+        });
+        assert_eq!(
+            schema_check_of(&facts).unwrap(),
+            Some(SchemaCheck {
+                pending: vec![
+                    PendingMigration {
+                        version: 6,
+                        compatible: true
+                    },
+                    PendingMigration {
+                        version: 7,
+                        compatible: false
+                    },
+                ],
+                opens: false,
+            })
+        );
+        assert!(schema_check_of(&serde_json::json!({"opens": true})).is_err());
     }
 
     #[test]

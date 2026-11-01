@@ -28,6 +28,7 @@ related:
 - 宛ての環境が無い`dagq`のうちuser・inbox・plannerのもの（`host_client_role`）は、serviceが答えるコマンド（`client_request`）と`watch`の各回の見る（`watch_poll`）と制御側のコマンドのstep（`control_call`、下の「制御側のコマンド」）をそのsocketへ送り、DBを開かない。
   serviceが一度も動いていないqueueも同じで、DBが無ければ送る前に`no queue at`で終わる（ADR-t3105-1決定3）。
   `migrate`（`--check`も）と`doctor`も送り（supervisorのものも。install・更新のjobの確認）、DBの無い所に作るのでない`init`は`init`のユースケースに送る（[ユースケース](queue-service.md#ユースケース)）。
+  `install`と更新のjobの確認は動いている前のbuildの固定バイナリが新しいbuildの`migrate --check`を呼ぶので、新しいbuildの`migrate --check`は、`migrate`を読まない前のbuildのserviceの断りも届かないことも、schemaの判定を入れ替えの起動に任せる答え（終了0）にし、DBを開かない（[`install`](supervisor-lifecycle/install.md#install)の3）。
 - 送らないのはADR-t3102-2が残すものだけ: DBの無い所に作る`init`と`service serve`（決定1・[DBを開く経路](queue-service.md#dbを開く経路)）、queueを開かないもの、serviceでqueueを扱う`supervise`。
   `up`・`down`・`inbox`・`service start`・`service stop`・`install`と更新のjob（`auto-update`・`release-update`）は自分のプロセスに残るが、queueの読み書きは下の「制御側のコマンド」のstepとして送る。
   wrapperとhookの経路（決定6の(3)）は`client_request`でなく、wrapperはwrapperのtokenで（runのturnのcontainerの準備を含む）、inboxの`session-event`はspanをinboxのtokenで自分で`session_record`に送り、DBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。

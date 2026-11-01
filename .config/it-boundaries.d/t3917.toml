@@ -1,0 +1,9 @@
+# The registry's boundary task 3917 gave (the format is in the header of
+# scripts/check-it-added-tests.sh).
+
+[[boundary]]
+id = "migrate-check-leaves-a-service-before-migrate-to-the-replacement-start"
+kind = "プロセス"
+test = "queue_binary::a_new_build_s_check_leaves_a_service_before_migrate_to_the_replacement_start"
+reason = "新しい build の dagq の process が queue service の socket で migrate を読まない前の build の service（の stub）に断られ、queue DB を開かずに終了 0 で、前の build の判定が読める答えを出し、その判定が進む入れ替えの起動が互換の migration を適用することは、process と socket と SQLite のファイルを通してしか確かめられない。答えの形と前の build の service の見分け（言葉か hello の build）は domain::queue_service、答えの読み方は infrastructure::binaries の unit test"
+task = 3917

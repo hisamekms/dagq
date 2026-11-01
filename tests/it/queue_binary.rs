@@ -64,9 +64,10 @@ fn old_queue(db: &Path, version: usize) {
 /// The queue's binary alone starts its service, which alone migrates it
 /// (ADR-t3102-2 decisions 1 to 3): a development build and a run's runner
 /// copy refuse `service start` and `service serve` naming the queue's
-/// binary, and start nothing; with no service, `migrate`, `migrate --check`,
-/// `doctor` and `init` of the queue fail as unreachable and open no DB;
-/// with the queue's binary's service, they are its use cases.
+/// binary, and start nothing; with no service, `migrate`, `doctor` and
+/// `init` of the queue fail as unreachable and `migrate --check` leaves the
+/// schema to the replacement start, all opening no DB; with the queue's
+/// binary's service, they are its use cases.
 #[test]
 fn only_the_queues_binary_migrates_the_queue() {
     let (dir, _owner) = common::cleanup::owned_temp_dir();
@@ -97,22 +98,24 @@ fn only_the_queues_binary_migrates_the_queue() {
             assert!(error.contains(&fixed.display().to_string()), "{error}");
             stopped(&db);
         }
-        // With no service, nothing is migrated, checked, read or
-        // initialized here: the DB is not opened instead.
-        for args in [
-            &["migrate"][..],
-            &["migrate", "--check"],
-            &["doctor"],
-            &["init"],
-        ] {
+        // With no service, nothing is migrated, read or initialized here:
+        // the DB is not opened instead.
+        for args in [&["migrate"][..], &["doctor"], &["init"]] {
             let error = error_of(&run(binary, &db, args));
             assert!(error.contains("unreachable"), "{args:?}: {error}");
         }
-        let error = error_of(&run(binary, &db, &["migrate", "--check"]));
+        // Nor is it checked: the check leaves the schema to the
+        // replacement start of its build's service.
+        let output = run(binary, &db, &["migrate", "--check"]);
+        assert!(output.status.success(), "{}", error_of(&output));
+        let check: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(check["unanswered"], true, "{check}");
+        let reason = check["reason"].as_str().unwrap();
         assert!(
-            error.contains(dagq::domain::queue_service::SCHEMA_UNANSWERED),
-            "{error}"
+            reason.contains(dagq::domain::queue_service::SCHEMA_UNANSWERED),
+            "{reason}"
         );
+        assert!(reason.contains("unreachable"), "{reason}");
         assert_eq!(user_version(&db), 23);
         assert_eq!(queue_binary::read(&db).unwrap().unwrap().path, fixed);
     }
@@ -590,4 +593,186 @@ fn a_replacement_goes_through_the_watch_of_a_supervisor_before_the_hold() {
     assert_eq!(user_version(&db), SqliteQueue::SCHEMA_VERSION);
     killed(&mut started);
     let _ = control.stop(std::time::Duration::from_secs(10));
+}
+
+/// A queue service of a build before the `migrate` use case on the socket
+/// of the queue at `db`, as the one of the fixed binary in production then
+/// answered: `hello` with its build, and every other request with the
+/// `bad_request` of a request it does not read, in `words`. It stops and
+/// takes its socket away when it goes.
+struct ServiceBeforeMigrate {
+    socket: PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ServiceBeforeMigrate {
+    fn start(db: &Path, words: &'static str) -> Self {
+        use std::io::{BufRead, Write};
+        use std::sync::atomic::Ordering;
+        let socket = service::socket_path(db.parent().unwrap());
+        fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = stop.clone();
+        let thread = std::thread::spawn(move || {
+            while !stopping.load(Ordering::SeqCst) {
+                let Ok((stream, _)) = listener.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                // A caller that sends nothing does not hold the stop.
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut line = String::new();
+                let _ = std::io::BufReader::new(&stream).read_line(&mut line);
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                let answer = if request["use_case"] == "hello" {
+                    serde_json::json!({
+                        "api_version": 2, "min_api_version": 1, "ok": true,
+                        "result": {
+                            "service": "dagq-queue-service", "build": "0.0.0-before-migrate",
+                            "pid": 1, "api_version": 2, "min_api_version": 1,
+                        },
+                    })
+                } else {
+                    serde_json::json!({
+                        "api_version": 2, "min_api_version": 1, "ok": false,
+                        "error": {"code": "bad_request", "message": words},
+                    })
+                };
+                let _ = writeln!(&stream, "{answer}");
+            }
+        });
+        Self {
+            socket,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for ServiceBeforeMigrate {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _waiting = common::within(common::STEP_LIMIT, "the stand-in service to end");
+            let _ = thread.join();
+        }
+        let _ = fs::remove_file(&self.socket);
+    }
+}
+
+/// Where the judgment of the fixed binary of the build before goes on what
+/// `migrate --check` of the new build printed.
+#[derive(Debug, PartialEq, Eq)]
+enum JudgmentBefore {
+    /// The check failed: the update job fails at its `check`, and the
+    /// install replaces nothing.
+    CheckFailed,
+    /// A breaking migration is pending: the update awaits approval.
+    Breaking,
+    /// The queue refuses the new build.
+    Refused,
+    /// Nothing is pending: the install talks to the running service as it
+    /// is, of the build before.
+    RunningService,
+    /// The install holds the service and starts the new build's as a
+    /// replacement (`hold_service`, then `serve(source, db, breaking)`).
+    ServeNew { breaking: bool },
+}
+
+/// The judgment of the fixed binary in production when `migrate --check`
+/// of a later build first refused to read a service before `migrate`,
+/// copied from commit 47dc8b16d: its `LocalBinaries::schema`
+/// (src/infrastructure/binaries.rs) reads only the exit status, `pending`
+/// (an `i64` `version` and a `bool` `compatible` each) and `opens`; its
+/// update job's `put_in_place` (src/application/update.rs) fails at `check`
+/// on a failure and awaits approval on a breaking migration, and its
+/// `install` (src/application/install.rs, after `binaries.schema`) refuses
+/// a queue that does not open with nothing pending, keeps the running
+/// service when nothing is pending, and else holds it and serves the new
+/// build with `breaking` false.
+fn judgment_before(output: &Output) -> JudgmentBefore {
+    if !output.status.success() {
+        return JudgmentBefore::CheckFailed;
+    }
+    let Ok(report) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return JudgmentBefore::CheckFailed;
+    };
+    let Some(listed) = report["pending"].as_array() else {
+        return JudgmentBefore::CheckFailed;
+    };
+    let mut pending = Vec::new();
+    for migration in listed {
+        let Some(version) = migration["version"].as_i64() else {
+            return JudgmentBefore::CheckFailed;
+        };
+        pending.push((version, migration["compatible"] == true));
+    }
+    let opens = report["opens"] == true;
+    if pending.iter().any(|(_, compatible)| !compatible) {
+        return JudgmentBefore::Breaking;
+    }
+    if !(opens || !pending.is_empty()) {
+        return JudgmentBefore::Refused;
+    }
+    if pending.is_empty() {
+        JudgmentBefore::RunningService
+    } else {
+        JudgmentBefore::ServeNew { breaking: false }
+    }
+}
+
+/// `migrate --check` of a new build, with the queue's service one of a
+/// build before the `migrate` use case (answering it with the words it
+/// answers in production), opens no DB and ends with 0 and the answer that
+/// sends the judgment of the fixed binary of the build before to the
+/// replacement start of the new build's service, which applies the
+/// compatible migrations. How such a service is told by its `hello` is the
+/// unit test's of `domain::queue_service`, and that the replacement start
+/// refuses a breaking migration is
+/// `a_replacement_s_service_applies_a_breaking_migration_only_on_an_unused_queue`'s.
+#[test]
+fn a_new_build_s_check_leaves_a_service_before_migrate_to_the_replacement_start() {
+    use std::os::unix::fs::PermissionsExt;
+    let _test = common::test();
+    let version = last_breaking();
+    let (_dir, _owner, db, control, _service) = throwaway_queue(version);
+    let before = ServiceBeforeMigrate::start(
+        &db,
+        "the request does not read: unknown variant `migrate`, expected one of `hello`",
+    );
+    // The DB does not open meanwhile: the check opens none.
+    fs::set_permissions(&db, fs::Permissions::from_mode(0o000)).unwrap();
+    let output = run(
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &db,
+        &["migrate", "--check"],
+    );
+    fs::set_permissions(&db, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(output.status.success(), "{}", error_of(&output));
+    let check: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(check["unanswered"], true, "{check}");
+    assert!(
+        check["reason"]
+            .as_str()
+            .unwrap()
+            .contains(dagq::domain::queue_service::SCHEMA_UNANSWERED),
+        "{check}"
+    );
+    assert_eq!(
+        judgment_before(&output),
+        JudgmentBefore::ServeNew { breaking: false },
+        "{check}"
+    );
+    drop(before);
+    assert_eq!(user_version(&db), version as i64);
+    // The replacement start that judgment makes.
+    let replaced = replace(&control, false, true).unwrap();
+    assert!(replaced.service.current(), "{:?}", replaced.service);
+    assert_eq!(user_version(&db), SqliteQueue::SCHEMA_VERSION);
 }

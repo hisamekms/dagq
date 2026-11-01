@@ -50,7 +50,12 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    通らなければ何も置き換えない。
    引き継ぎを受けるliveな登録があるのに、元が引き継ぎより前のbinaryなら、execしたsupervisorが引数で止まるので、何も置き換えずに`down`と`up`を案内するerrorで止まる（そのようなbinaryに戻すときも同じ）。
 3. **schema**: queueのDBがあれば元の`migrate --check`を読む。
-   `migrate --check`はqueue serviceに聞くので、答えるserviceが無ければ（serviceが無いか、`migrate`を読まない前のbuildのもの）元のqueue serviceを入れ替えの口で起動し、判定をそのserviceに任せる（非互換のmigrationか新しすぎるqueueなら起動が断られ、何も置き換えない）。
+   `migrate --check`はqueue serviceに聞く。
+   答えるserviceが無ければ（serviceが無いか、`migrate`を読まない前のbuildのもの）、`migrate --check`はDBを開かずに終了0で、答えなかった印と互換のmigrationを1件持つ答えを出し、`install`は元のqueue serviceを入れ替えの口で起動して判定をそのserviceに任せる（非互換のmigrationか新しすぎるqueueなら起動が断られ、何も置き換えない）。
+   前のbuildのserviceかどうかは、断りの言葉（`unknown variant`の`bad_request`）か、`bad_request`で断ったserviceの`hello`が別のbuildを名乗ることで決める（`domain::queue_service::refuses_unknown_use_case`）。
+   この判定をするのは動いている前のbuildの固定バイナリ（`install`と更新のjob）で、印を知らない前のbuildは終了の状態と`pending`と`opens`だけを読み、失敗なら何も置き換えず、`pending`が空なら元のserviceを起動せずに前のbuildのserviceへ話す。
+   このため`migrate --check`の出力の形と終了の状態はbuildをまたぐ約束で、変えるときも前のbuildの判定が読める形に保ち、新しいbuildのCLIは前のbuildのserviceの断りを入れ替えの起動に任せる答えにし、DBを開くことへ戻らない（形は`domain::queue_service::schema_unanswered`のdoc comment）。
+   この規則は、前のbuildのserviceの断りを失敗にした着地で固定バイナリの入れ替えが自動更新でも`install`でも止まったことに由来する。
    非互換のmigrationがあれば、人が許していなければ何も置き換えずにerror、許していればdrain（下記6）。
    元がqueueを開けず（非互換のmigrationの後に戻すとき）、適用するものも無ければ、`backups/`を案内するerror。
    互換のmigrationがあれば、元のqueue serviceを入れ替えの口で起動し、そのserviceが受け付けの前に適用する（[Queue service](../queue-service.md)の「入れ替えの口」）。

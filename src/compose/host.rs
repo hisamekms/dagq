@@ -704,9 +704,12 @@ pub fn init_through(client: &crate::infrastructure::queue_service::Client) -> Re
 /// from the Git common directory each names, else `fallback` (ADR-0046
 /// decision 3), read here, as no Git runs in the service. With `check`, the
 /// schema facts the service read of the queue, judged as this build sees
-/// them; a service of a build before the `migrate` use case, or none, ends
-/// it with [`SCHEMA_UNANSWERED`](crate::domain::queue_service::SCHEMA_UNANSWERED).
-/// Nothing opens the DB here; a service that does not answer is a failure.
+/// them; with no service that answers them, none runs or one of a build
+/// before the `migrate` use case, the answer that leaves the schema to the
+/// replacement start of this build's service
+/// ([`schema_unanswered`](crate::domain::queue_service::schema_unanswered)),
+/// which the judgment of the fixed binary of the build before reads too.
+/// Nothing opens the DB here; a service that fails otherwise is a failure.
 pub fn migrate_through(
     client: &crate::infrastructure::queue_service::Client,
     check: bool,
@@ -717,11 +720,11 @@ pub fn migrate_through(
             Ok(facts) => facts,
             // A service of a build before it, or none: nothing else reads
             // the schema, and nothing opens the DB here.
-            Err(error) if knows_no_use_case(&error) || unanswered(&error) => {
-                anyhow::bail!(
-                    "{}: {error:#}",
-                    crate::domain::queue_service::SCHEMA_UNANSWERED
-                );
+            Err(error) if unanswered(&error) || knows_no_use_case(client, &error) => {
+                return Ok(crate::domain::queue_service::schema_unanswered(
+                    &format!("{error:#}"),
+                    crate::infrastructure::sqlite::SqliteQueue::SCHEMA_VERSION,
+                ));
             }
             Err(error) => return Err(error),
         };
@@ -776,15 +779,31 @@ fn unanswered(error: &anyhow::Error) -> bool {
 
 /// Whether `error` is a service's that does not read the use case it was
 /// sent: one of a build before it, whose queue an `install` of this build
-/// checks (ADR-t3102-2 decision 7).
-fn knows_no_use_case(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<crate::infrastructure::queue_service::ClientFailure>()
-            .is_some_and(|failure| {
-                failure.code == "bad_request" && failure.message.contains("unknown variant")
-            })
-    })
+/// checks (ADR-t3102-2 decision 7). Told by the refusal's code and words,
+/// and by the build the service's `hello` names
+/// ([`refuses_unknown_use_case`](crate::domain::queue_service::refuses_unknown_use_case)).
+fn knows_no_use_case(
+    client: &crate::infrastructure::queue_service::Client,
+    error: &anyhow::Error,
+) -> bool {
+    let Some(failure) = error.chain().find_map(|cause| {
+        cause.downcast_ref::<crate::infrastructure::queue_service::ClientFailure>()
+    }) else {
+        return false;
+    };
+    if failure.code != crate::domain::queue_service::ServiceErrorCode::BadRequest.as_str() {
+        return false;
+    }
+    let build = client
+        .hello()
+        .ok()
+        .and_then(|hello| hello["build"].as_str().map(str::to_owned));
+    crate::domain::queue_service::refuses_unknown_use_case(
+        &failure.code,
+        &failure.message,
+        build.as_deref(),
+        crate::VERSION,
+    )
 }
 
 impl OneShot {

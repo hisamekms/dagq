@@ -2239,6 +2239,21 @@ impl Client {
         answer_of(response)
     }
 
+    /// The service's `hello` (its build and the API versions it answers):
+    /// on a socket within [`PROBE_TIMEOUT`] at the version every service
+    /// answers ([`hello`]), where any failure, a refusal too, is
+    /// `unreachable`; through a broker as a call of this build's version.
+    pub fn hello(&self) -> Result<Value> {
+        self.check_destination()?;
+        match &self.route {
+            ClientRoute::Socket(socket) => hello(socket, PROBE_TIMEOUT)
+                .map_err(|error| self.not_answered(&error, UseCase::Hello).into()),
+            ClientRoute::Broker { .. } => {
+                self.call_within(UseCase::Hello, Value::Null, PROBE_TIMEOUT)
+            }
+        }
+    }
+
     /// [`Self::call_within`] for a look the caller is not held on
     /// (`status`, ADR-t3102-3 decision 2): a service on a socket has to
     /// answer `hello` within [`PROBE_TIMEOUT`] before the look is sent, so
