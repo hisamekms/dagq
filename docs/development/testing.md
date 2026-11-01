@@ -16,6 +16,7 @@ related:
   - adr-t1707-1
   - adr-t3762-1
   - adr-t3841-1
+  - adr-t2895-1
   - development-local-checks
   - development-task-registration
   - development-migrations
@@ -83,7 +84,11 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
 
 [ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)。runtimeのtaskのworkerとplannerが守る。
 
-- 状態の判断（状態の遷移・回数と上限・時刻を値で受けた時間の判定・verdictやanswerから操作への対応・askやerrorの文面・次の一手の選び方）は`src/`の副作用のない関数にして`#[cfg(test)]`のunit testで確かめる。unit testは外部プロセス・git・SQLiteのファイル・sleep・実時間の時計を使わない（時刻は値で渡す）。
+- 状態の判断（状態の遷移・回数と上限・時刻を値で受けた時間の判定・verdictやanswerから操作への対応・askやerrorの文面・次の一手の選び方）は`src/`の副作用のない関数にして`#[cfg(test)]`のunit testで確かめる。unit testは外部プロセス・git・SQLiteのファイル・sleep・実時間の時計を使わない（時刻は値で渡す。SQLiteのadapterのtestの例外は次の箇条）。
+- SQLiteのadapterのtest（[ADR-t2895-1](../adr/2026-11-01-t2895-1-sqlite-adapter-tests-in-infrastructure-open-sqlite-in-place.md)がADR-t1410-1決定5をamends）: `src/infrastructure`の`#[cfg(test)]`で、SQLiteのadapter自身（SQL・schema・transaction・index・SQLの関数）を確かめるtestは、SQLiteをその場で開いてよい。
+  - 開き方: testごとのtempdirのファイルか、testごとに別の名前のmemdb（`file:/<名前>?vfs=memdb`）。`:memory:`は接続ごとに別のDBになるので、複数の接続を開くadapterでは使わない。
+  - 範囲: domain・applicationの`#[cfg(test)]`は上の箇条どおりSQLiteのファイル・git・外部プロセスを使わない。判断のcaseはdomain・applicationの副作用のない関数のunit testに置き、adapterのtestに並べない。supervisorの配線は下のプロセスの中の配線のtestの層に置く。外部プロセス・sleep・実時間の時計を使わないことはadapterのtestにも当たる。gitのadapterのtestはこの例外に入らない。
+  - 流れる場所: libのtestとして、着地のunit test全件とCIのcoverageで流れる。`tests/it`ではないので、境界の登録簿・moduleの本数のratchet・時間の関門の許可の一覧の対象にならない。
 - `tests/it`はSQLite・Git・プロセス・復旧とadoptの境界を代表の1 caseで確かめ、判断のcaseごとにfixtureとsupervisorを起動し直さない。
 - supervisorの配線（判断の結果がevent・ask・statusに届くこと）は、unit testとも`tests/it`とも別の種類の「プロセスの中の配線のtest」の層で確かめる（[ADR-t3841-1](../adr/2026-11-01-t3841-1-supervisor-wiring-tests-run-in-process-on-a-memdb-queue-with-port-fakes.md)がADR-t1410-1決定2・6をamends。形の根拠は[Spike](../plans/in-process-supervisor-test-spike.md)）。
   - 置き場: `src/compose`の`#[cfg(test)]`のmodule（例: `src/compose/wiring_tests/`）。本物のsupervise（`application::supervise::supervise`）と本物の`SqliteQueue`・`InProcessCaller`を使い、queueはSQLiteのmemdb（`file:/<名前>?vfs=memdb`）で開く。名前はtestごとに別にし、processごとに1回migrationを当てた雛形をbackupで写して作る。`:memory:`は接続ごとに別のDBになるので使わない。
@@ -93,7 +98,7 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
   - 1本の時間の目安: おおむね3秒以内（Spikeで1.6〜3.0秒）。5秒を超えるものは待ちの間隔の口で縮めるか1本の配線を分ける。`cargo test --lib`の1本の秒で測る。
   - 機械で見る部分: `scripts/check-test-rules.sh`はこの層の行も他の`src/`の`#[cfg(test)]`の行と同じ形で見る（層の規則も実時間の時計・sleep・外部プロセスをtestの行に置かないので、同じ形でよい）。productionが実時間で待つことと起こすthreadはtestの行に現れないので、test-rulesのreviewはこの層のtestをunit testの規則で差し戻さず、上の規則（期限で包むこと・joinすること・staticを共有しないこと）で判定する。
   - 配線を確かめる新しいtestはこの層に置き、`tests/it`の登録簿に境界の種類「supervisorの配線」のidを新しく足さない。移し替えの間、既存の「supervisorの配線」のidとそのIT・時間の関門の許可の一覧の項目は残し、移すtaskが確かめていた中身の行き先を対応づけて同じ変更で外す。境界の種類「supervisorの配線」の退役は移し替えの後の別のtaskが行う。それまで`scripts/check-it-added-tests.sh`はその種類の値を通すので、新しいidを足さないことはplan reviewとtest-rulesのreviewが見る。
-- 機械で見る部分: `scripts/check-test-rules.sh`が、差分が足した・変えた`src/`の`#[cfg(test)]`の行のうち、行だけで見分けられる実時間の時計・sleep・外部プロセスの形を、runのプログラムのreviewとCIで検出する。見る形と見ない形、1か所を外す`test-rules: allow`の印はscriptの冒頭のコメントが持つ。SQLiteのファイルと、行だけで見分けられない形（ITでの判断のcaseの並べ直しなど）はtest-rulesのreviewが見る。
+- 機械で見る部分: `scripts/check-test-rules.sh`が、差分が足した・変えた`src/`の`#[cfg(test)]`の行のうち、行だけで見分けられる実時間の時計・sleep・外部プロセスの形を、runのプログラムのreviewとCIで検出する。見る形と見ない形、1か所を外す`test-rules: allow`の印はscriptの冒頭のコメントが持つ。SQLiteのファイル（上のadapterのtestの例外に当たるかを含む）と、行だけで見分けられない形（ITでの判断のcaseの並べ直しなど）はtest-rulesのreviewが見る。
 - e2eは実バイナリ・実Git・実launchdのハッピーパスと境界だけにする（流し方は下の「e2e」）。
 - integration testを減らすときは、確かめていた中身をunit test・プロセスの中の配線のtest・残すintegration testのどれかに対応づけ、行き先の無いまま消さない。
 - 時間の関門（[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）: baseからの差分で足した・本文を変えた`tests/it`のtestの1本の時間が閾値を超えたら、許可の一覧に項目が無いかぎり関門が落ちる。許可の一覧は`.config/it-slow-allow.toml`と`.config/it-slow-allow.d/*.toml`を合わせたもので、新しい項目は足すtaskのファイル`.config/it-slow-allow.d/t<task ID>.toml`に足す（別々のtaskの追加が同じファイルに触れないため。`.config/it-slow-allow.toml`には足さず、そこの既存の項目を直す・外すのはよい）。閾値・許可の一覧の書式・testの名前の求め方・scriptの引数は`scripts/check-it-test-time.sh`の冒頭のコメントが持つ。

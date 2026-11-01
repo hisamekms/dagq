@@ -158,7 +158,7 @@ runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料�
 test（`tests/**`、`src/`の`#[cfg(test)]`）を足した・変えたworkerは、receiptの前に自分の差分の追加・変更の行を次の項目に当て、外れた行を直す。項目はrunのreviewのtestの規則の差し戻しが多い順で、規則の本文と例外はそれぞれの[testの制約](testing.md)の節が持つ。
 
 - (a) 待ちの上限: 上限の無い待ち（threadのjoin・`Barrier`・子の`output()` / `status()`など）・pollのloop・testのshellの待ちとstub・processの中で動くsupervisorが、testがどう終わっても終わる形か（[待ちの上限](testing.md#待ちの上限)）。
-- (b) 判断と境界: `src/`のunit testが実時間の時計・sleep・外部プロセス・git・SQLiteのファイルを使っていないか、`tests/it`のtestが境界を代表の1 caseで確かめ、`src/`のunit testが持つ判断のcaseを並べ直していないか（[判断と境界のtest](testing.md#判断と境界のtest)）。
+- (b) 判断と境界: `src/`のunit testが実時間の時計・sleep・外部プロセス・git・SQLiteのファイルを使っていないか（`src/infrastructure`のSQLiteのadapter自身を確かめるtestの例外は節が持つ）、`tests/it`のtestが境界を代表の1 caseで確かめ、`src/`のunit testが持つ判断のcaseを並べ直していないか（[判断と境界のtest](testing.md#判断と境界のtest)）。
 - (c) helperの置き場所: 複数のtestファイルで使うhelperをtestファイルに置いて`pub(crate)`で共有していないか（[testの置き場所](testing.md#testの置き場所)）。
 - (d) shellに渡るpath: testのshellに渡る文字列にpathを埋めるところが`shell_path`を通っているか（[testの書き方](testing.md#testの書き方)）。
 
