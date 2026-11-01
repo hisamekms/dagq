@@ -45,6 +45,33 @@ mod host;
 mod observation;
 mod planning;
 mod supervisor;
+#[cfg(test)]
+mod wiring_tests;
+
+/// The use cases of the queue service as the binary's service answers
+/// them, for [`wiring_tests`]' service in this process (rule L9: a context
+/// module reaches another through the root).
+#[cfg(test)]
+fn wiring_service_use_cases() -> (
+    crate::infrastructure::queue_service::ServiceReads,
+    crate::infrastructure::queue_service::ServiceWrites,
+    crate::infrastructure::queue_service::ServiceDetail,
+    crate::infrastructure::queue_service::ServiceCommands,
+) {
+    (
+        service_reads(),
+        service_writes(),
+        service_detail(),
+        service_commands(),
+    )
+}
+
+/// The binary's limit of a planner's revise ([`PLANNER_TIMEOUT`]), for
+/// [`wiring_tests`]' loop.
+#[cfg(test)]
+fn wiring_planner_timeout() -> std::time::Duration {
+    PLANNER_TIMEOUT
+}
 
 /// The queues of a lifecycle command's steps on `client`'s socket, for
 /// [`host`] (rule L9: a context module reaches another through the root).

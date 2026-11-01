@@ -3725,6 +3725,10 @@ pub const SUPERVISOR_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Default)]
 struct SignedIn(std::sync::Mutex<Option<Held>>);
 
+/// How a caller reads the value of a token from the file the service
+/// handed it: [`read_token`] for the tokens under the queue's `service/`.
+pub type TokenRead = dyn Fn(&Path) -> Result<String> + Send + Sync;
+
 /// A token a caller holds: its value and its file.
 struct Held {
     value: String,
@@ -3741,6 +3745,7 @@ impl SignedIn {
         registration: &LeaseToken,
         pid: u32,
         call: impl FnOnce(&ServiceRequest) -> Result<Value>,
+        read: &TokenRead,
     ) -> Result<()> {
         let principal = Principal::supervisor(registration, pid);
         let request = ServiceRequest {
@@ -3754,7 +3759,7 @@ impl SignedIn {
         };
         let Issued { file, .. } = serde_json::from_value(call(&request)?)
             .context("the queue service's answer to the supervisor's issue")?;
-        let value = read_token(&file)?;
+        let value = read(&file)?;
         *self.0.lock().expect("the sign-in lock") = Some(Held { value, file });
         Ok(())
     }
@@ -3790,8 +3795,8 @@ impl SignedIn {
 
     /// Call with the token in `file`, issued to another principal by the
     /// service, which this caller neither issued nor revokes.
-    fn adopt(&self, file: &Path) -> Result<()> {
-        let value = read_token(file)?;
+    fn adopt(&self, file: &Path, read: &TokenRead) -> Result<()> {
+        let value = read(file)?;
         *self.0.lock().expect("the sign-in lock") = Some(Held {
             value,
             file: file.to_path_buf(),
@@ -3935,7 +3940,7 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
             signed_in: SignedIn::default(),
             adopted: true,
         };
-        caller.signed_in.adopt(file)?;
+        caller.signed_in.adopt(file, &read_token)?;
         Ok(Arc::new(caller))
     }
 
@@ -3946,8 +3951,12 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
             !self.adopted,
             "a job command calls with its supervisor's token and signs in as none"
         );
-        self.signed_in
-            .sign_in(registration, pid, |request| self.as_user(request))
+        self.signed_in.sign_in(
+            registration,
+            pid,
+            |request| self.as_user(request),
+            &read_token,
+        )
     }
 
     fn take_back(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
@@ -3983,7 +3992,10 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
 #[cfg(feature = "test-paths")]
 pub struct InProcessCaller {
     queue_dir: PathBuf,
-    backend: Arc<SqliteServiceBackend>,
+    backend: Arc<dyn ServiceBackend>,
+    /// Reads the tokens' files `backend` issues: [`read_token`] for the
+    /// queue's `service/`.
+    read: Arc<TokenRead>,
     signed_in: SignedIn,
     /// The token is another principal's ([`Self::with_token`]): this
     /// caller neither issues nor revokes it.
@@ -4002,8 +4014,8 @@ impl InProcessCaller {
         commands: ServiceCommands,
     ) -> Self {
         let queue_dir = queue_dir_of(db);
-        Self {
-            backend: Arc::new(SqliteServiceBackend {
+        Self::on(
+            Arc::new(SqliteServiceBackend {
                 db: db.to_path_buf(),
                 queue_dir: queue_dir.clone(),
                 generators,
@@ -4015,6 +4027,20 @@ impl InProcessCaller {
                 stands_for: None,
                 doctor: None,
             }),
+            queue_dir,
+            Arc::new(read_token),
+        )
+    }
+
+    /// The caller answered by `backend`, whose tokens are kept apart from
+    /// its DB's path: a sign-in kept for a handoff is looked for under
+    /// `queue_dir`'s `service/`, and every token's file `backend` hands is
+    /// read by `read` (a test's queue in memory keeps its tokens there
+    /// too).
+    pub fn on(backend: Arc<dyn ServiceBackend>, queue_dir: PathBuf, read: Arc<TokenRead>) -> Self {
+        Self {
+            backend,
+            read,
             queue_dir,
             signed_in: SignedIn::default(),
             adopted: false,
@@ -4084,10 +4110,11 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
         let caller = Self {
             queue_dir: self.queue_dir.clone(),
             backend: self.backend.clone(),
+            read: self.read.clone(),
             signed_in: SignedIn::default(),
             adopted: true,
         };
-        caller.signed_in.adopt(file)?;
+        caller.signed_in.adopt(file, &*caller.read)?;
         Ok(Arc::new(caller))
     }
 
@@ -4098,8 +4125,12 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
             !self.adopted,
             "a caller of another's token signs in as none"
         );
-        self.signed_in
-            .sign_in(registration, pid, |request| self.as_user(request))
+        self.signed_in.sign_in(
+            registration,
+            pid,
+            |request| self.as_user(request),
+            &*self.read,
+        )
     }
 
     fn take_back(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
@@ -4276,7 +4307,7 @@ impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
             signed_in: SignedIn::default(),
             adopted: true,
         };
-        caller.signed_in.adopt(file)?;
+        caller.signed_in.adopt(file, &read_token)?;
         Ok(Arc::new(caller))
     }
 

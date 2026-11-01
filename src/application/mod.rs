@@ -36,8 +36,10 @@ pub mod live_inputs;
 pub mod main_history;
 pub mod main_log;
 pub mod marks;
+// The run files in memory of the use cases' unit tests and of the
+// composition root's wiring tests (`crate::compose`).
 #[cfg(test)]
-mod memory_files;
+pub(crate) mod memory_files;
 pub mod naming;
 pub mod observer;
 pub mod planner;
