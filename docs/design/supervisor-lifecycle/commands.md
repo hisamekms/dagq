@@ -34,7 +34,7 @@ related:
 | `report` | `domain::kpi::report`、`application::report`、supervisorの日次は`application::supervise::observation::report` |
 | `timeline` | `domain::timeline`、`compose::observation::timeline` |
 | `status` | `application::health`の`status`とattentionの導出`attention`、`compose::OneShot::status_of` |
-| `doctor` | `application::health`の`doctor`、`compose::OneShot::doctor` |
+| `doctor` | `application::health`の`doctor`、serviceが作る`compose::OneShot::doctor_of`（`compose::service_doctor`）、hostで足す`compose::doctor_on_this_host` |
 | `events` | `application::watch::events_in`、`domain::views::EventFilter`、`domain::event_attention` |
 | `watch` | `application::watch::watch`と`watch_through`、`compose::watch_in`とserviceを通る`watch_through_service`、inboxのwatcherの判定は`application::inbox_watcher` |
 | `review` | `application::review::review`、`compose::review` |
@@ -74,8 +74,7 @@ related:
 ## 表示とreviewのコマンドをまたぐ約束
 
 - `status`・`doctor`・`events`・`watch`と`review`はqueueを読むだけで、どれもqueueの状態もeventも変えない。
-  人・inbox・plannerの`status`・`events`・`watch`と`review`はDBを開かずqueue serviceを通る（`review`は制御側のコマンドのstepとして送る）。
-  制御側として残る`doctor`だけがqueue serviceを通らず、CLIがDBを読み取り専用で開いて読む（[hostのCLI](../queue-service-host-cli.md#送る範囲)）。
+  これらのコマンドはDBを開かずqueue serviceを通り（`review`は制御側のコマンドのstepとして送る）、`doctor`のDBの診断もserviceのユースケース（`queue.admin`）で、CLIはPATHで探すものだけを足す（[hostのCLI](../queue-service-host-cli.md#送る範囲)）。
   `watch --role inbox`が書くwatcherの生存の記録はqueueの外のファイルに置く。
 - serviceに届かないとき、`status`と`watch`は待たずに`unreachable`（errorの`queue_service.code`）で終わり、errorの文が次の手を言い、supervisorが記録した停止を添える（そのroleの`watch`が返した後の同じ停止は除く）。
   watchを回し直す側はそれを中身として扱い、`dagq service status`で理由を見て、同じcursorからwatchを張り直す。
