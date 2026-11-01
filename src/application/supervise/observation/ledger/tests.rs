@@ -12,10 +12,12 @@ use crate::domain::ledger::session::SessionBook;
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
 use crate::domain::ledger::testkit::{Log, T0, ms, queue_across, run_id, sessions_across};
 use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node};
+use crate::domain::pre_claim::PreClaimBook;
 use crate::domain::session_step::{
     RETENTION_MS, ResourceSample, SeqRange, SessionOwner, SessionResource, SessionStep, Step,
     StepKind, StepTarget, StepsRecorded, TargetKind,
 };
+use crate::domain::supervisor_life::Lives;
 use crate::domain::{RunEvent, RunId, TaskId};
 
 const BUILT: &str = "2030-01-01T00:00:00.000Z";
@@ -2868,4 +2870,121 @@ fn a_builder_with_rows_not_written_keeps_its_queue_book() {
     let kept = builder.kept().clone();
     assert!(!builder.restore_queue_rows(QueueBook::default()));
     assert_eq!(builder.kept(), &kept);
+}
+
+/// A builder that goes on from a position with the supervisors' lives and
+/// the waits before a claim made again from the queue rows the store holds
+/// ([`pre_claim_books`]), what else it keeps carried from the passes up to
+/// there, writes the rows of the fold of every event ([`waits_across`]):
+/// supervisors alive across the position whose silences end their slots
+/// full after it (one with an event after it, one with none), the event of
+/// a stopped supervisor and of a silent one after the position that open
+/// again the slots full their lives ended (and
+/// reach the hold the stop ended), the holds and the deferral open across
+/// it, the overlays of a task ready across it, which read them all and a
+/// slots full freed over its time ready, and one freed before the task
+/// whose row settles after the position. A book of the events after the
+/// position alone writes others.
+#[test]
+fn a_builder_going_on_from_the_wait_rows_held_writes_the_rows_of_every_event() {
+    use crate::domain::ledger::testkit::waits_across;
+    let (log, position, at) = waits_across();
+    // Before the grace of d's slots full, freed before the task, is over.
+    let at = at - 100;
+    let rows_going_on = |books: Option<(Lives, PreClaimBook)>| {
+        let memory = Memory::default();
+        memory.events.replace(log.events[..position].to_vec());
+        let mut builder = Builder::default();
+        drain(&memory, &mut builder, at);
+        assert!(!memory.row(LedgerKind::Queue, "1").is_final);
+        let made = pre_claim_books(&memory, ms(at)).unwrap();
+        assert_eq!(made.0.supervisors(), 4);
+        let (lives, book) = books.unwrap_or(made);
+        builder.restore_pre_claim(lives, book);
+        memory.events.replace(log.events.clone());
+        drain(&memory, &mut builder, 1_500);
+        passes_to_drain(&memory, &mut builder, LATER + 1);
+        memory.rows.into_inner()
+    };
+    let rows = rows_going_on(None);
+    let whole = crate::domain::ledger::build(&log.events, ms(LATER + 1), BUILT);
+    assert!(whole.iter().any(|row| row.kind == LedgerKind::Task));
+    for expected in &whole {
+        let stored = &rows[&(expected.kind, expected.key.clone())];
+        let mut expected = expected.clone();
+        // Every queue row has ended and settled by then, as passes from
+        // the first event settle them.
+        assert_eq!(
+            stored.is_final,
+            expected.kind == LedgerKind::Queue,
+            "{:?} {}",
+            expected.kind,
+            expected.key
+        );
+        expected.is_final = stored.is_final;
+        assert_eq!(stored, &expected, "{:?} {}", expected.kind, expected.key);
+    }
+    assert_eq!(rows.len(), whole.len());
+
+    let after_alone = rows_going_on(Some((Lives::default(), PreClaimBook::default())));
+    assert_ne!(after_alone, rows);
+}
+
+/// A queue of `settled` slots full of one supervisor, each freed long
+/// before the pass, and a supervisor alive with a slots full open: the time
+/// (seconds) of the pass after which only the open one is not settled.
+fn settled_waits(settled: i64) -> (Log, i64) {
+    let mut log = Log::default();
+    let heavy = |supervisor: &str| json!({"supervisor": supervisor, "class": "heavy"});
+    for k in 0..settled {
+        log.add(None, None, "slots_full_started", heavy("old"), 10 * k)
+            .add(None, None, "slots_full_ended", heavy("old"), 10 * k + 5);
+    }
+    let alive = 10 * settled + SETTLE_GRACE_MS / 1000 + 100;
+    log.add(None, None, "slots_full_started", heavy("a"), alive)
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "a"}),
+            alive + 10,
+        );
+    (log, alive + 20)
+}
+
+/// The lives and the waits before a claim are made again from the rows
+/// the store holds alone but the last event of the life that goes on: with
+/// a few waits settled or many, they read the same one event of the
+/// EventStore and hold as many waits and lives, while the book of every
+/// event grows with them.
+#[test]
+fn the_wait_books_made_again_read_as_many_events_however_many_waits_settled() {
+    let read_making_them = |settled: i64| {
+        let (log, at) = settled_waits(settled);
+        let memory = Memory::of(&log);
+        let mut builder = Builder::default();
+        while pass(&memory, &mut builder, at).backlog > 0 {}
+        let settled_rows = memory
+            .rows
+            .borrow()
+            .values()
+            .filter(|row| {
+                row.is_final && row.subject.as_ref().is_some_and(|s| s.kind == "slots_full")
+            })
+            .count();
+        assert_eq!(settled_rows, usize::try_from(settled).unwrap());
+        memory.read.set(0);
+        let (lives, book) = pre_claim_books(&memory, ms(at)).unwrap();
+        (
+            (memory.read.get(), memory.read_all.get()),
+            (book.waits(), lives.supervisors()),
+            builder.kept().pre_claim().waits(),
+        )
+    };
+    let (few, many) = (read_making_them(3), read_making_them(300));
+    assert_eq!(few.0, (1, 0));
+    assert_eq!(many.0, few.0);
+    assert_eq!(many.1, few.1);
+    assert_eq!(few.1, (1, 1));
+    assert!(many.2 > few.2);
 }

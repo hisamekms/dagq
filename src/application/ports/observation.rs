@@ -192,6 +192,44 @@ pub trait LedgerStore {
             &self.ledger_rows(LedgerKind::Session)?,
         ))
     }
+    /// From where the waits an event ended bear on a task row not settled
+    /// ([`crate::domain::pre_claim::rows::Since`]): the earliest start and
+    /// first event of those rows.
+    fn ledger_tasks_open_since(&self) -> Result<crate::domain::pre_claim::rows::Since> {
+        Ok(crate::domain::pre_claim::rows::Since::of(
+            &self.ledger_rows(LedgerKind::Task)?,
+        ))
+    }
+    /// The queue rows the supervisors' lives and the waits before a claim
+    /// are made again from ([`crate::domain::pre_claim::rows::holds`]: the
+    /// waits open, those a supervisor's life ended or that ended from
+    /// `since` on, the streams not replaced), without their records.
+    fn ledger_wait_rows(
+        &self,
+        since: crate::domain::pre_claim::rows::Since,
+    ) -> Result<Vec<LedgerRow>> {
+        Ok(self
+            .ledger_rows(LedgerKind::Queue)?
+            .into_iter()
+            .filter(|row| crate::domain::pre_claim::rows::holds(row, since))
+            .map(|row| LedgerRow {
+                records: Vec::new(),
+                ..row
+            })
+            .collect())
+    }
+    /// Every `supervisor_stopped` the queue rows record, by id: the stops
+    /// the supervisors' lives are made again by, not the other records.
+    fn ledger_supervisor_stops(&self) -> Result<Vec<RunEvent>> {
+        let mut stops: Vec<RunEvent> = self
+            .ledger_rows(LedgerKind::Queue)?
+            .into_iter()
+            .flat_map(|row| row.records)
+            .filter(|event| event.kind == EventKind::SupervisorStopped)
+            .collect();
+        stops.sort_by_key(|event| event.id);
+        Ok(stops)
+    }
     /// The retention of the node rows, by the same local day as
     /// [`NodeSampleStore::remove_node_samples`]: drop from each the samples
     /// of a day before `before_day` and remove a row left with none

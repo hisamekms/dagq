@@ -116,9 +116,15 @@
 //!   outcomes and details ([`QueueBook::from_heads`]), less those settled
 //!   that no later event reaches; taking it ([`Builder::restore_queue_rows`])
 //!   keeps none of the queue's events, each row's coming back from the
-//!   store's before it is folded. The rest of [`Kept`] is not made from
-//!   the rows yet, so a new process still starts at its cursors' start and
-//!   takes neither.
+//!   store's before it is folded. So are the supervisors' lives and the
+//!   waits before a claim ([`Lives`], [`PreClaimBook`]), from the queue
+//!   rows of the waits open, not settled, ended by a life or bearing on a
+//!   task not settled, the streams not replaced and the stops, reading of
+//!   the EventStore only the last event of each life that goes on
+//!   ([`crate::domain::pre_claim::rows`], [`Builder::restore_pre_claim`]);
+//!   a queue book is made from the waits [`Kept`] holds. The rest of it is not
+//!   made from the rows yet, so a new process still starts at its cursors'
+//!   start and takes none of them.
 //! - **What a pass makes**: each event is read into [`Kept`] once as it
 //!   comes in (the supervisors' lives, the waits before a claim, the
 //!   landing slot's attempts, which session or queue row it is a record
@@ -708,6 +714,17 @@ impl Kept {
         self.dropped
             .extend(book.keys_with_records().map(|key| (LedgerKind::Queue, key)));
         self.queue_rows = book;
+    }
+
+    /// The supervisors' lives of the events read.
+    pub const fn lives(&self) -> &Lives {
+        &self.lives
+    }
+
+    /// The waits before a claim and the holds on the landings of the
+    /// events read.
+    pub const fn pre_claim(&self) -> &PreClaimBook {
+        &self.pre_claim
     }
 
     /// The session or queue row of `kind` and `key` at `now_ms`, built at
@@ -1368,6 +1385,18 @@ impl Builder {
     /// again from the store's rows reads ([`QueueBook::from_heads`]).
     pub fn pre_claim(&self) -> &PreClaimBook {
         &self.kept.pre_claim
+    }
+
+    /// Take `lives` and `pre_claim`, made again from the queue rows the
+    /// store holds ([`crate::domain::pre_claim::rows::books`]), as the
+    /// supervisors' lives and the waits before a claim of the events up to
+    /// [`Self::events`], in place of those it made of them: the events
+    /// after its cursor open, end and reach the waits, and end the lives,
+    /// as the fold of every event does.
+    pub fn restore_pre_claim(&mut self, lives: Lives, pre_claim: PreClaimBook) {
+        let kept = Arc::make_mut(&mut self.kept);
+        kept.lives = lives;
+        kept.pre_claim = pre_claim;
     }
 
     /// The rows of `rows` (those [`Self::rows_to_build`] names) whose

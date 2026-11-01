@@ -12,7 +12,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{
@@ -26,7 +26,7 @@ use super::{
 /// The slots a class of tasks needs (ADR-t1591-1): a heavy task needs a
 /// slot with the landing queue in it, a light one only the room the
 /// landing queue leaves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotClass {
     Heavy,
@@ -188,7 +188,7 @@ pub fn open_at_start(
 }
 
 /// The kind of a wait before a claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntervalKind {
     SlotsFull,
@@ -204,7 +204,7 @@ pub const ENDED_FREED: &str = "freed";
 /// hold's or a deferral's) or class (slots full), and its end: when, how
 /// and which supervisor recorded it (none for a silent supervisor's end
 /// and for a deferral its `run_claimed` ended, which names no supervisor).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreClaimInterval {
     pub id: EventId,
     pub kind: IntervalKind,
@@ -743,6 +743,8 @@ fn end_with_life(interval: &mut PreClaimInterval, life: LifeEnd) {
 fn text<'e>(event: &'e RunEvent, key: &str) -> Option<&'e str> {
     event.payload.get(key).and_then(Value::as_str)
 }
+
+pub mod rows;
 
 #[cfg(test)]
 mod tests {

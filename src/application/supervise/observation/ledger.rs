@@ -42,7 +42,9 @@ use crate::domain::ledger::builder::{
 };
 use crate::domain::ledger::queue::QueueBook;
 use crate::domain::ledger::session::SessionBook;
+use crate::domain::pre_claim::{self, PreClaimBook};
 use crate::domain::session_step::{self, StepTarget};
+use crate::domain::supervisor_life::Lives;
 
 /// How many passes in a row fail before one `ledger_build_failed` is
 /// recorded.
@@ -422,6 +424,28 @@ pub fn queue_book(store: &dyn LedgerQueue, builder: &Builder) -> Result<QueueBoo
         builder.pre_claim(),
         builder.events,
     ))
+}
+
+/// The supervisors' lives and the waits before a claim made again from the
+/// queue rows `store` holds ([`pre_claim::rows::books`]), folded by a pass
+/// at `closed_to`: the waits open or a life ended, those that bear on a
+/// task not settled, the streams not replaced and the stops, and of the
+/// EventStore only the last event of each life that goes on
+/// ([`pre_claim::rows::living`]), so that a builder going on from the
+/// store's rows ([`Builder::restore_pre_claim`]) reads no event of a wait
+/// or a life settled.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
+    )
+)]
+pub fn pre_claim_books(store: &dyn LedgerQueue, closed_to: i64) -> Result<(Lives, PreClaimBook)> {
+    let rows = store.ledger_wait_rows(store.ledger_tasks_open_since()?)?;
+    let stops = store.ledger_supervisor_stops()?;
+    let last = read_by_id(store, &pre_claim::rows::living(&rows, &stops))?;
+    Ok(pre_claim::rows::books(&rows, &stops, &last, closed_to))
 }
 
 /// The events of `ids`, each read by its id.

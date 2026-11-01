@@ -5,6 +5,7 @@ use crate::application::LedgerStore;
 use crate::domain::ledger::{
     InputsThrough, LedgerHead, LedgerKind, LedgerRow, Measure, Subject, Totals, node,
 };
+use crate::domain::pre_claim::rows::Since;
 use crate::domain::run_phase::{Blocker, Holds};
 
 const BLOCKERS: [(Blocker, &str); 7] = [
@@ -301,6 +302,70 @@ impl LedgerStore for SqliteQueue {
         .collect()
     }
 
+    /// One aggregate over the task rows not settled: no row is read.
+    fn ledger_tasks_open_since(&self) -> Result<Since> {
+        let (ms, id): (Option<i64>, Option<i64>) = self.conn.query_row(
+            "SELECT MIN(COALESCE(started_at, -9223372036854775808)), MIN(inputs_from)
+               FROM ledger_rows WHERE kind=?1 AND final=0",
+            [LedgerKind::Task.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(match (ms, id) {
+            (Some(ms), Some(id)) => Since {
+                ms,
+                id: EventId::new(id),
+            },
+            _ => Since::NONE,
+        })
+    }
+
+    /// SQLite picks the rows [`crate::domain::pre_claim::rows::holds`] keeps by their
+    /// columns, and gives each with no records: none is parsed here.
+    fn ledger_wait_rows(&self, since: Since) -> Result<Vec<LedgerRow>> {
+        let mut statement = self.conn.prepare(
+            "SELECT kind, key, task_id, ledger_v, built_at, inputs_through, final,
+                    legacy_values, started_at, ended_at, outcome, totals, intervals,
+                    attributes, after_claim, detail, inputs_from, '[]' AS records,
+                    subject_kind, subject_id, round, route, provider, model
+               FROM ledger_rows
+              WHERE kind=?1
+                AND ((subject_kind IN ('slots_full', 'claim_hold', 'claim_deferral', 'landing_hold')
+                      AND (final=0 OR ended_at IS NULL OR ended_at >= ?2 OR outcome=?4
+                           OR json_extract(inputs_through, '$.events') >= ?3))
+                     OR (subject_kind='live_alert_stream'
+                         AND (outcome IS NULL OR outcome=?4)))
+              ORDER BY key",
+        )?;
+        let rows = statement.query_map(
+            params![
+                LedgerKind::Queue.as_str(),
+                since.ms,
+                since.id.as_i64(),
+                crate::domain::claim_hold::ENDED_SUPERVISOR_GONE,
+            ],
+            ledger_row,
+        )?;
+        rows.map(|row| row?).collect()
+    }
+
+    /// SQLite picks the stops out of the stored arrays: no other record is
+    /// parsed.
+    fn ledger_supervisor_stops(&self) -> Result<Vec<crate::domain::RunEvent>> {
+        let mut statement = self.conn.prepare(
+            "SELECT j.value FROM ledger_rows r, json_each(r.records) j
+              WHERE r.kind=?1 AND json_extract(j.value, '$.kind')=?2
+              ORDER BY json_extract(j.value, '$.id')",
+        )?;
+        let rows = statement.query_map(
+            params![
+                LedgerKind::Queue.as_str(),
+                crate::domain::EventKind::SupervisorStopped.as_str()
+            ],
+            |r| r.get::<_, String>(0),
+        )?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
     /// Read the node rows with no lock, then write only those the
     /// retention changes, [`ROWS_PER_TRANSACTION`] a transaction
     /// ([`in_batches`]): with none to change (the day's retention already
@@ -564,6 +629,117 @@ mod tests {
         let held = heads.iter().find(|head| head.head.key == "4").unwrap();
         assert_eq!(held.head.records, [EventId::new(4), EventId::new(17)]);
         assert_eq!(held.subject_kind, "finding");
+    }
+
+    /// The rows the waits and lives are made again from, the stops and the
+    /// start of the tasks not settled are those the rows read whole give
+    /// ([`LedgerStore`]'s own reading of [`LedgerStore::ledger_rows`]):
+    /// the waits open, ended by a life or since a task not settled, the
+    /// stops whether a row of their own or a hold's end; none of them reads
+    /// another record, so a queue row whose records hold only their ids,
+    /// which reads whole no more, leaves them as they are.
+    #[test]
+    fn the_wait_rows_and_stops_read_no_record_but_the_stops() {
+        use crate::domain::ledger::testkit::{built_and_settled, ms, waits_across};
+        use crate::domain::pre_claim::rows::holds;
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        assert_eq!(queue.ledger_tasks_open_since().unwrap(), Since::NONE);
+        let (log, position, at) = waits_across();
+        let mut events = log.events[..position].to_vec();
+        // A second stop, its own row, after the one that ends b's hold.
+        events.push(RunEvent {
+            id: EventId::new(100),
+            task_id: None,
+            run_id: None,
+            ..event(100, "supervisor_stopped", json!({"supervisor": "f"}), 850)
+        });
+        let rows = built_and_settled(&events, ms(at));
+        for row in &rows {
+            queue.write_ledger_row(row).unwrap();
+        }
+        let since = Since::of(&rows);
+        assert_eq!(queue.ledger_tasks_open_since().unwrap(), since);
+        let mut held: Vec<LedgerRow> = rows
+            .iter()
+            .filter(|row| holds(row, since))
+            .map(|row| LedgerRow {
+                records: Vec::new(),
+                ..row.clone()
+            })
+            .collect();
+        held.sort_by(|a, b| a.key.cmp(&b.key));
+        assert!(held.len() > 5);
+        let read = |queue: &SqliteQueue| {
+            (
+                queue.ledger_wait_rows(since).unwrap(),
+                queue.ledger_supervisor_stops().unwrap(),
+            )
+        };
+        let (wait_rows, stops) = read(&queue);
+        assert_eq!(wait_rows, held);
+        let ids: Vec<i64> = stops.iter().map(|stop| stop.id.as_i64()).collect();
+        assert_eq!(ids, [9, 100]);
+        assert_eq!(stops[0], events[8]);
+        assert!(!held.iter().any(|row| row.key == "1"));
+
+        // Every row settled, one ended before is held only by its end.
+        queue
+            .conn
+            .execute("UPDATE ledger_rows SET final=1", [])
+            .unwrap();
+        let settled: Vec<LedgerRow> = rows
+            .iter()
+            .map(|row| LedgerRow {
+                is_final: true,
+                records: Vec::new(),
+                ..row.clone()
+            })
+            .collect();
+        // The id of its end alone holds it, whatever its time.
+        let by_id = Since {
+            ms: i64::MAX,
+            id: EventId::new(6),
+        };
+        let keys = |since: Since| -> Vec<String> {
+            queue
+                .ledger_wait_rows(since)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.key)
+                .collect()
+        };
+        for since in [since, by_id, Since::NONE] {
+            let mut expected: Vec<LedgerRow> = settled
+                .iter()
+                .filter(|row| holds(row, since))
+                .cloned()
+                .collect();
+            expected.sort_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(queue.ledger_wait_rows(since).unwrap(), expected);
+        }
+        assert!(keys(by_id).contains(&"5".to_owned()));
+        assert!(!keys(Since::NONE).contains(&"5".to_owned()));
+        assert!(!keys(Since::NONE).contains(&"1".to_owned()));
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET final=0 WHERE kind='queue' AND key='1'",
+                [],
+            )
+            .unwrap();
+        assert!(keys(Since::NONE).contains(&"1".to_owned()));
+        let wait_rows = queue.ledger_wait_rows(since).unwrap();
+
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET records='[{\"id\":1}]' WHERE kind='queue' AND key='1'",
+                [],
+            )
+            .unwrap();
+        assert!(queue.ledger_rows(LedgerKind::Queue).is_err());
+        assert_eq!(read(&queue), (wait_rows, stops));
     }
 
     /// A folded run's row round-trips with its sums in their columns, and

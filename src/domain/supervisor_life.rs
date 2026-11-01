@@ -103,6 +103,17 @@ impl Lives {
         }
     }
 
+    /// Go on with the life of `token` from what the rows the store holds
+    /// tell of it ([`crate::domain::pre_claim::rows`]): the last event
+    /// naming it (`last_id`) and the latest time of its events before a
+    /// stop (`last_ms`), as reading them would leave it. Its stops are
+    /// read after as events ([`Self::add`]), in their order.
+    pub fn go_on(&mut self, token: &str, last_id: EventId, last_ms: Option<i64>) {
+        let life = self.by_token.entry(token.to_owned()).or_default();
+        life.last_id = life.last_id.max(last_id);
+        life.last = life.last.max(last_ms);
+    }
+
     /// How many supervisors it holds a life of.
     pub fn supervisors(&self) -> usize {
         self.by_token.len()

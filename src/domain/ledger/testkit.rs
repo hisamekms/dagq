@@ -477,3 +477,177 @@ pub(crate) fn queue_across() -> (Log, usize) {
         );
     (log, position)
 }
+
+/// The cases a book of the supervisors' lives and the waits before a claim
+/// of only the events after a position gets wrong (ask 1373), with the
+/// position (the length of the first part) and the time (seconds) of the
+/// pass at it. Before it: a slots full freed before task 1 was created
+/// (`d`), settled by the pass; task 1 ready, and a slots full freed over its time ready (`e`);
+/// a slots full and a hold on the claims of `b`, which stops (its life
+/// closes the slots full, its stop ends the hold); a light slots full of
+/// `c`, gone silent by the pass; and `a`, alive, with a slots full, a hold
+/// on the claims, a deferral of task 1 and a hold on the landings, all
+/// open; and `f`, alive with a slots full, whose silence comes after the
+/// position with no event of it there. After it: an event of `b` after its stop and one of `c` after its
+/// silence (each opens its slots full again), the hold, the deferral and
+/// the hold on the landings ended, and the last event of `a` before its
+/// silence. Task 1 stays ready throughout, so its overlays read them all.
+pub(crate) fn waits_across() -> (Log, usize, i64) {
+    let mut log = Log::default();
+    let at = |supervisor: &str| json!({"supervisor": supervisor, "class": "heavy"});
+    log.add(None, None, "slots_full_started", at("d"), 0)
+        .add(None, None, "slots_full_ended", at("d"), 50)
+        .add(
+            Some(1),
+            None,
+            "task_created",
+            json!({"status": "draft"}),
+            100,
+        )
+        .add(
+            Some(1),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": "ready"}),
+            110,
+        )
+        .add(None, None, "slots_full_started", at("e"), 120)
+        .add(None, None, "slots_full_ended", at("e"), 130)
+        .add(None, None, "slots_full_started", at("b"), 140)
+        .add(
+            None,
+            None,
+            "claim_held",
+            json!({"supervisor": "b", "reason": "disk"}),
+            145,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_stopped",
+            json!({"supervisor": "b", "last_heartbeat_at": T0 + 148}),
+            150,
+        )
+        .add(
+            None,
+            None,
+            "slots_full_started",
+            json!({"supervisor": "c", "class": "light"}),
+            160,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "c"}),
+            170,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_started",
+            json!({"supervisor": "a"}),
+            200,
+        )
+        .add(None, None, "slots_full_started", at("a"), 210)
+        .add(
+            None,
+            None,
+            "claim_held",
+            json!({"supervisor": "a", "reason": "load"}),
+            220,
+        )
+        .add(
+            Some(1),
+            None,
+            "claim_deferred",
+            json!({"supervisor": "a", "reason": "paths"}),
+            230,
+        )
+        .add(
+            None,
+            None,
+            "landing_held",
+            json!({"supervisor": "a", "reason": "ci"}),
+            240,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "a"}),
+            500,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "a"}),
+            800,
+        )
+        .add(None, None, "slots_full_started", at("f"), 810)
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "f"}),
+            820,
+        );
+    let position = log.events.len();
+    log.add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "b"}),
+        1100,
+    )
+    .add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "c"}),
+        1110,
+    )
+    .add(
+        None,
+        None,
+        "claim_resumed",
+        json!({"supervisor": "a"}),
+        1200,
+    )
+    .add(
+        Some(1),
+        None,
+        "claim_deferral_ended",
+        json!({"supervisor": "a", "why": "paths_free"}),
+        1300,
+    )
+    .add(
+        None,
+        None,
+        "landing_resumed",
+        json!({"supervisor": "a"}),
+        1350,
+    )
+    .add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "a"}),
+        1400,
+    );
+    (log, position, 1_000)
+}
+
+/// The rows of the fold of `events` at `now_ms`, the session and queue
+/// rows settled as a pass at that time marks them ([`super::settle`]).
+pub(crate) fn built_and_settled(events: &[RunEvent], now_ms: i64) -> Vec<super::LedgerRow> {
+    super::build(events, now_ms, "2030-01-01T00:00:00.000Z")
+        .into_iter()
+        .map(|mut row| {
+            row.is_final =
+                super::settle::settlement(&row, row.inputs_through.last(), now_ms).settles;
+            row
+        })
+        .collect()
+}
