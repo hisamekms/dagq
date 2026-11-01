@@ -3141,6 +3141,78 @@ impl LedgerStore for SupervisorQueue {
             Ok((read, keys, last))
         })
     }
+    // One aggregate the service computes: no row crosses.
+    fn ledger_tasks_open_since(&self) -> Result<crate::domain::pre_claim::rows::Since> {
+        self.remote("ledger_tasks_open_since", vec![])
+    }
+    // In pages after the last key of the page before, a page past the
+    // answer's limit asked again at a quarter of its size: the rows the
+    // service picks, without their records.
+    fn ledger_wait_rows(
+        &self,
+        since: crate::domain::pre_claim::rows::Since,
+    ) -> Result<Vec<crate::domain::ledger::LedgerRow>> {
+        self.ledger_pages(LEDGER_WAIT_ROWS_PAGE, |after, page| {
+            let read: Vec<crate::domain::ledger::LedgerRow> = self.remote(
+                "ledger_wait_rows",
+                vec![to_value(since)?, to_value(after)?, to_value(page)?],
+            )?;
+            let rows = read.len();
+            let last = read.last().map(|row| row.key.clone());
+            Ok((read, rows, last))
+        })
+    }
+    // One page asked for, as the service picks it.
+    fn ledger_wait_rows_after(
+        &self,
+        since: crate::domain::pre_claim::rows::Since,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::ledger::LedgerRow>> {
+        self.remote(
+            "ledger_wait_rows",
+            vec![to_value(since)?, to_value(after)?, to_value(limit)?],
+        )
+    }
+    // In pages after the place of the last stop of the page before, a page
+    // past the answer's limit asked again at a quarter of its size, then
+    // put in the order of their ids: no other record crosses.
+    fn ledger_supervisor_stops(&self) -> Result<Vec<RunEvent>> {
+        let (mut stops, mut after, mut page) =
+            (Vec::new(), None::<(String, i64)>, LEDGER_STOPS_PAGE);
+        loop {
+            let read = match self.ledger_supervisor_stops_after(
+                after.as_ref().map(|(key, index)| (key.as_str(), *index)),
+                page,
+            ) {
+                Err(error) if super::too_large(&error) && page > 1 => {
+                    page = (page / 4).max(1);
+                    continue;
+                }
+                read => read?,
+            };
+            let full = read.len() >= page;
+            if let Some((place, _)) = read.last() {
+                after = Some(place.clone());
+            }
+            stops.extend(read.into_iter().map(|(_, stop)| stop));
+            if !full {
+                stops.sort_by_key(|stop: &RunEvent| stop.id);
+                return Ok(stops);
+            }
+        }
+    }
+    // One page asked for, as the service picks it.
+    fn ledger_supervisor_stops_after(
+        &self,
+        after: Option<(&str, i64)>,
+        limit: usize,
+    ) -> Result<Vec<((String, i64), RunEvent)>> {
+        self.remote(
+            "ledger_supervisor_stops",
+            vec![to_value(after)?, to_value(limit)?],
+        )
+    }
     fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
         self.remote("remove_node_rows", vec![to_value(before_day)?])
     }
@@ -3153,6 +3225,15 @@ const LEDGER_HEADS_PAGE: usize = 1_000;
 /// How many session rows' anchors a read asks for at a time, a quarter of
 /// it for a page past the answer's limit.
 const LEDGER_ANCHORS_PAGE: usize = 500;
+
+/// How many of the rows the waits are made again from a read asks for at
+/// a time, a quarter of it for a page past the answer's limit: a row
+/// crosses without its records.
+const LEDGER_WAIT_ROWS_PAGE: usize = 500;
+
+/// How many stops a read asks for at a time, a quarter of it for a page
+/// past the answer's limit.
+const LEDGER_STOPS_PAGE: usize = 1_000;
 
 impl SupervisorQueue {
     /// Every item `read` gives a page at a time, by row key: `read(after,

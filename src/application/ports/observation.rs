@@ -230,6 +230,50 @@ pub trait LedgerStore {
         stops.sort_by_key(|event| event.id);
         Ok(stops)
     }
+    /// At most `limit` of the rows [`Self::ledger_wait_rows`] gives for
+    /// `since` after the key `after` (`None`: from the first), by key: a
+    /// page of them.
+    fn ledger_wait_rows_after(
+        &self,
+        since: crate::domain::pre_claim::rows::Since,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        Ok(self
+            .ledger_wait_rows(since)?
+            .into_iter()
+            .filter(|row| after.is_none_or(|after| row.key.as_str() > after))
+            .take(limit)
+            .collect())
+    }
+    /// At most `limit` of the stops [`Self::ledger_supervisor_stops`]
+    /// gives, each with where the queue rows record it (its row's key and
+    /// its index among the row's records), by that place after the place
+    /// `after` (`None`: from the first): a page of them, not yet in the
+    /// order of their ids.
+    fn ledger_supervisor_stops_after(
+        &self,
+        after: Option<(&str, i64)>,
+        limit: usize,
+    ) -> Result<Vec<((String, i64), RunEvent)>> {
+        let mut rows = self.ledger_rows(LedgerKind::Queue)?;
+        rows.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(rows
+            .into_iter()
+            .flat_map(|row| {
+                let key = row.key;
+                row.records
+                    .into_iter()
+                    .zip(0_i64..)
+                    .map(move |(event, index)| ((key.clone(), index), event))
+            })
+            .filter(|(_, event)| event.kind == EventKind::SupervisorStopped)
+            .filter(|((key, index), _)| {
+                after.is_none_or(|(after, at)| (key.as_str(), *index) > (after, at))
+            })
+            .take(limit)
+            .collect())
+    }
     /// The retention of the node rows, by the same local day as
     /// [`NodeSampleStore::remove_node_samples`]: drop from each the samples
     /// of a day before `before_day` and remove a row left with none

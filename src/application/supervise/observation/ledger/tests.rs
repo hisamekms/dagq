@@ -2988,3 +2988,205 @@ fn the_wait_books_made_again_read_as_many_events_however_many_waits_settled() {
     assert_eq!(few.1, (1, 1));
     assert!(many.2 > few.2);
 }
+
+/// The rows `rows` and the events `events` a queue service holds, as the
+/// supervisor's queue reads them through it ([`SupervisorQueues`]): it
+/// answers the reads the waits and the lives are made again by as the
+/// store's own [`LedgerStore`] gives them, and what else a service answers
+/// to the events between two ids; any other operation (the rows whole
+/// among them) fails the test. What each answer held is kept, by the
+/// operation's name: how many rows, stops or events (an aggregate as one).
+struct WaitRowsService {
+    rows: Vec<LedgerRow>,
+    events: Vec<RunEvent>,
+    received: std::sync::Mutex<Vec<(String, usize)>>,
+}
+
+/// The rows of a store, read through [`LedgerStore`]'s own readings of
+/// them.
+struct HeldRows<'a>(&'a [LedgerRow]);
+
+impl LedgerStore for HeldRows<'_> {
+    fn ledger_run_events(&self, _: &RunId) -> Result<Vec<RunEvent>> {
+        unreachable!("no run's events here")
+    }
+    fn write_ledger_row(&self, _: &LedgerRow) -> Result<bool> {
+        unreachable!("no write here")
+    }
+    fn write_ledger_row_over(&self, _: &LedgerRow, _: Option<&LedgerRow>) -> Result<Option<bool>> {
+        unreachable!("no write here")
+    }
+    fn ledger_row(&self, _: LedgerKind, _: &str) -> Result<Option<LedgerRow>> {
+        unreachable!("no row by key here")
+    }
+    fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>> {
+        Ok(self
+            .0
+            .iter()
+            .filter(|row| row.kind == kind)
+            .cloned()
+            .collect())
+    }
+    fn remove_node_rows(&self, _: i64) -> Result<usize> {
+        unreachable!("no retention here")
+    }
+}
+
+impl WaitRowsService {
+    fn of(memory: &Memory) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            rows: memory.rows.borrow().values().cloned().collect(),
+            events: memory.events.borrow().clone(),
+            received: std::sync::Mutex::default(),
+        })
+    }
+
+    fn answer(&self, op: &str, args: &[serde_json::Value]) -> Result<(serde_json::Value, usize)> {
+        let arg = |n: usize| args[n].clone();
+        let store = HeldRows(&self.rows);
+        Ok(match op {
+            "ledger_tasks_open_since" => {
+                (serde_json::to_value(store.ledger_tasks_open_since()?)?, 1)
+            }
+            "ledger_wait_rows" => {
+                let after: Option<String> = serde_json::from_value(arg(1))?;
+                let read = store.ledger_wait_rows_after(
+                    serde_json::from_value(arg(0))?,
+                    after.as_deref(),
+                    serde_json::from_value(arg(2))?,
+                )?;
+                (serde_json::to_value(&read)?, read.len())
+            }
+            "ledger_supervisor_stops" => {
+                let after: Option<(String, i64)> = serde_json::from_value(arg(0))?;
+                let read = store.ledger_supervisor_stops_after(
+                    after.as_ref().map(|(key, index)| (key.as_str(), *index)),
+                    serde_json::from_value(arg(1))?,
+                )?;
+                (serde_json::to_value(&read)?, read.len())
+            }
+            "events_between" => {
+                let (after, upto): (EventId, EventId) = (
+                    serde_json::from_value(arg(0))?,
+                    serde_json::from_value(arg(1))?,
+                );
+                let page: usize = serde_json::from_value(arg(3))?;
+                let read: Vec<&RunEvent> = self
+                    .events
+                    .iter()
+                    .filter(|event| event.id > after && event.id <= upto)
+                    .take(page)
+                    .collect();
+                (serde_json::to_value(&read)?, read.len())
+            }
+            op => panic!("{op} is not read here"),
+        })
+    }
+}
+
+impl crate::application::supervisor_service::ServiceCaller for WaitRowsService {
+    fn call(
+        &self,
+        _: crate::domain::queue_service::UseCase,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let op = params["op"].as_str().unwrap().to_owned();
+        let args = params["args"].as_array().cloned().unwrap_or_default();
+        let (answer, held) = self.answer(&op, &args)?;
+        self.received.lock().unwrap().push((op, held));
+        Ok(answer)
+    }
+    fn with_token(
+        &self,
+        _: &std::path::Path,
+    ) -> Result<std::sync::Arc<dyn crate::application::supervisor_service::ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &crate::domain::LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &crate::domain::LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// The supervisor's queue of `service`, as the queue service's path gives
+/// it.
+fn through(
+    service: std::sync::Arc<WaitRowsService>,
+) -> crate::application::supervisor_service::SupervisorQueue {
+    crate::application::supervisor_service::SupervisorQueues::new(
+        service,
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue()
+}
+
+/// The lives and the waits before a claim made again through the queue
+/// service ([`pre_claim_books`] over the supervisor's queue) are those of
+/// the store read directly, and the service is asked only the start of the
+/// tasks not settled, the rows the waits are made again from, the stops
+/// and the last event of each life: with a few waits settled or many,
+/// what crosses from it is the same, rows and events alike.
+#[test]
+fn the_wait_books_made_again_through_the_service_receive_as_much_however_many_waits_settled() {
+    let received = |settled: i64| {
+        let (log, at) = settled_waits(settled);
+        let memory = Memory::of(&log);
+        let mut builder = Builder::default();
+        while pass(&memory, &mut builder, at).backlog > 0 {}
+        let direct = pre_claim_books(&memory, ms(at)).unwrap();
+        let service = WaitRowsService::of(&memory);
+        assert_eq!(
+            pre_claim_books(&through(service.clone()), ms(at)).unwrap(),
+            direct
+        );
+        service.received.lock().unwrap().clone()
+    };
+    let (few, many) = (received(3), received(300));
+    assert_eq!(many, few);
+    let ops: Vec<&str> = few.iter().map(|(op, _)| op.as_str()).collect();
+    assert_eq!(
+        ops,
+        [
+            "ledger_tasks_open_since",
+            "ledger_wait_rows",
+            "ledger_supervisor_stops",
+            "events_between"
+        ]
+    );
+}
+
+/// Through the queue service, the books made again from the rows of the
+/// waits across a position ([`waits_across`]: waits open, ended by a
+/// supervisor's life or ended since a task not settled, a stream not
+/// replaced and the stops) are those of the store read directly.
+#[test]
+fn the_wait_books_across_a_position_through_the_service_are_the_stores() {
+    use crate::domain::ledger::testkit::waits_across;
+    let (log, position, at) = waits_across();
+    let at = at - 100;
+    let memory = Memory::default();
+    memory.events.replace(log.events[..position].to_vec());
+    let mut builder = Builder::default();
+    drain(&memory, &mut builder, at);
+    let direct = pre_claim_books(&memory, ms(at)).unwrap();
+    assert_eq!(direct.0.supervisors(), 4);
+    let service = WaitRowsService::of(&memory);
+    assert_eq!(
+        pre_claim_books(&through(service.clone()), ms(at)).unwrap(),
+        direct
+    );
+    let received = service.received.lock().unwrap();
+    assert!(
+        received
+            .iter()
+            .any(|(op, held)| op == "ledger_supervisor_stops" && *held > 0),
+        "{received:?}"
+    );
+}

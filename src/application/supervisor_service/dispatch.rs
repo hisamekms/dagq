@@ -2463,6 +2463,36 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                     .map(|anchors| session_anchors_page(anchors, after.as_deref(), rows)),
             )
         }
+        // The start of the task rows not settled: one aggregate, no row
+        // read or sent.
+        "ledger_tasks_open_since" => answer(LedgerStore::ledger_tasks_open_since(&*store)),
+        // A page of the rows the waits and the lives are made again from
+        // for `since`: at most `page` after the key `after` (none: from the
+        // first), picked by their columns, without their records.
+        "ledger_wait_rows" => {
+            let (since, after, page): (
+                crate::domain::pre_claim::rows::Since,
+                Option<String>,
+                usize,
+            ) = read(op, args)?;
+            answer(LedgerStore::ledger_wait_rows_after(
+                &*store,
+                since,
+                after.as_deref(),
+                page,
+            ))
+        }
+        // A page of the stops the queue rows record, at most `page` after
+        // the place `after` (a row's key and a record's index; none: from
+        // the first), each with its place: no other record read or sent.
+        "ledger_supervisor_stops" => {
+            let (after, page): (Option<(String, i64)>, usize) = read(op, args)?;
+            answer(LedgerStore::ledger_supervisor_stops_after(
+                &*store,
+                after.as_ref().map(|(key, index)| (key.as_str(), *index)),
+                page,
+            ))
+        }
         // A page of a run's or a task's events after the event `after`: the
         // read of a history past one answer whole.
         "run_events_after" => {

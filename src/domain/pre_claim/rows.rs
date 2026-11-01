@@ -53,7 +53,7 @@ const STREAM: &str = "live_alert_stream";
 /// From where the waits an event ended bear on a task not settled: the
 /// earliest start (unix ms) and the first event of the task rows the store
 /// holds not settled. With none, no wait ended so far bears on a task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Since {
     pub ms: i64,
     pub id: EventId,

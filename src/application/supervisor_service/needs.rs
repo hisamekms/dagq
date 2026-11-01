@@ -196,6 +196,9 @@ pub(super) const READS: &[&str] = &[
     "ledger_row_keys",
     "ledger_heads",
     "ledger_session_anchors",
+    "ledger_tasks_open_since",
+    "ledger_wait_rows",
+    "ledger_supervisor_stops",
     "run_events_after",
     "task_events_after",
 ];
@@ -606,6 +609,26 @@ mod tests {
         all.sort_unstable();
         all.dedup();
         assert_eq!(all.len(), count);
+    }
+
+    /// The reads what builds the ledger makes its waits and lives again by
+    /// are reads of the supervisor's use case, which needs
+    /// `scheduler.supervise` that a worker's policy does not grant, and
+    /// operations of the ledger, refused to a landing's integrator and to a
+    /// control-side command.
+    #[test]
+    fn the_wait_rows_stops_and_open_tasks_start_are_the_supervisors_reads() {
+        assert!(grants(ActorRole::Supervisor).contains(&C::Supervise));
+        assert!(!grants(ActorRole::Worker).contains(&C::Supervise));
+        for op in [
+            "ledger_tasks_open_since",
+            "ledger_wait_rows",
+            "ledger_supervisor_stops",
+        ] {
+            assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead), "{op}");
+            assert!(super::super::LEDGER_OPS.contains(&op), "{op}");
+            assert!(super::super::reads_only(op), "{op}");
+        }
     }
 
     #[test]

@@ -2890,3 +2890,119 @@ fn a_page_of_anchors_holds_whole_rows() {
     );
     assert!(dispatch::session_anchors_page(anchors, Some("s00003"), 5).is_empty());
 }
+
+/// The service of `stops` stops (one a row, keys `q00001`…, ids from the
+/// last down) and as many wait rows, answering a page of at most
+/// `largest` and refusing a larger one as past the answer's limit.
+struct PagedWaits {
+    stops: usize,
+    largest: usize,
+    asked: std::sync::Mutex<Vec<(String, usize)>>,
+}
+
+impl PagedWaits {
+    fn stop(&self, row: usize) -> ((String, i64), crate::domain::RunEvent) {
+        let mut event: crate::domain::RunEvent =
+            serde_json::from_value(PagedLedger::event(0)).unwrap();
+        event.kind = "supervisor_stopped".into();
+        event.id = crate::domain::EventId::new(i64::try_from(self.stops + 1 - row).unwrap());
+        ((PagedHeads::key(row), 0), event)
+    }
+}
+
+impl ServiceCaller for PagedWaits {
+    fn call(&self, _: UseCase, params: Value) -> Result<Value> {
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        let (after, page) = match params.op.as_str() {
+            "ledger_supervisor_stops" => (&params.args[0], &params.args[1]),
+            "ledger_wait_rows" => (&params.args[1], &params.args[2]),
+            op => panic!("no {op} here"),
+        };
+        let page = usize::try_from(page.as_u64().unwrap()).unwrap();
+        self.asked.lock().unwrap().push((params.op.clone(), page));
+        if page > self.largest {
+            return Err(service_error(&ServiceError {
+                code: ServiceErrorCode::ResponseTooLarge,
+                message: "too large".into(),
+                denied: None,
+                kind: None,
+                rejected: false,
+                held: None,
+            }));
+        }
+        if params.op == "ledger_supervisor_stops" {
+            let after: Option<(String, i64)> = serde_json::from_value(after.clone())?;
+            let stops: Vec<_> = (1..=self.stops)
+                .map(|row| self.stop(row))
+                .filter(|(place, _)| after.as_ref().is_none_or(|after| place > after))
+                .take(page)
+                .collect();
+            return Ok(serde_json::to_value(stops)?);
+        }
+        let after = after.as_str().map(str::to_owned);
+        let rows: Vec<crate::domain::ledger::LedgerRow> = (1..=self.stops)
+            .map(PagedHeads::key)
+            .filter(|key| after.as_ref().is_none_or(|after| key > after))
+            .take(page)
+            .map(|key| crate::domain::ledger::testkit::run_row(&key, None, Vec::new()))
+            .collect();
+        Ok(serde_json::to_value(rows)?)
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// The wait rows and the stops are read a page at a time, each after the
+/// last of the page before, a page past the answer's limit asked again at
+/// a quarter of its size, and the stops put in the order of their ids:
+/// so more than one answer holds is read whole by their own operations.
+#[test]
+fn the_wait_rows_and_stops_past_the_answers_limit_are_read_in_pages() {
+    use crate::application::LedgerStore;
+    let service = Arc::new(PagedWaits {
+        stops: 1_300,
+        largest: 300,
+        asked: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        ActorContext::instance(ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let asked = || std::mem::take(&mut *service.asked.lock().unwrap());
+    let stops = queue.ledger_supervisor_stops().unwrap();
+    assert_eq!(
+        stops
+            .iter()
+            .map(|stop| stop.id.as_i64())
+            .collect::<Vec<_>>(),
+        (1..=1_300).collect::<Vec<_>>()
+    );
+    let pages = asked();
+    assert!(pages.iter().all(|(op, _)| op == "ledger_supervisor_stops"));
+    let pages: Vec<usize> = pages.into_iter().map(|(_, page)| page).collect();
+    assert_eq!(pages[0], 1_000);
+    assert_eq!(pages.len(), 7, "{pages:?}");
+    assert!(pages[1..].iter().all(|page| *page == 250), "{pages:?}");
+    let since = crate::domain::pre_claim::rows::Since::NONE;
+    let rows = queue.ledger_wait_rows(since).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
+        (1..=1_300).map(PagedHeads::key).collect::<Vec<_>>()
+    );
+    let pages: Vec<usize> = asked().into_iter().map(|(_, page)| page).collect();
+    assert_eq!(pages[0], 500);
+    assert!(pages[1..].iter().all(|page| *page == 125), "{pages:?}");
+}

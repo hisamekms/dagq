@@ -462,3 +462,148 @@ fn only_the_supervisor_principal_reads_the_heads_and_anchors() {
     }
     assert_eq!(events(&backend, "authorization_denied").len(), 2);
 }
+
+/// The service's clock fixed at one time, and random ids.
+fn fixed_time() -> crate::application::Generators {
+    struct At;
+    impl crate::application::Clock for At {
+        fn system_time(&self) -> std::time::SystemTime {
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_900_000_000)
+        }
+        fn monotonic(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
+    }
+    crate::application::Generators {
+        clock: Arc::new(At),
+        ..crate::infrastructure::clock::system()
+    }
+}
+
+/// What builds the ledger reads the start of the tasks not settled, the
+/// rows the waits and the lives are made again from and the stops through
+/// the service by their own operations, which answer as the queue's own
+/// adapter does, never by the rows whole: over the waits across a
+/// position (open, ended by a supervisor's life, ended since a task not
+/// settled, a stream not replaced, a stop of its own row besides the one
+/// ending a hold), with a record that reads whole no more, the rows cross
+/// without their records and the stops alone of the records, in pages.
+#[test]
+fn the_wait_rows_and_stops_cross_as_the_queues_own_without_the_rows_whole() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::LedgerKind;
+    use crate::domain::ledger::testkit::{built_and_settled, ms, waits_across};
+    let owner = LeaseToken::new("owner");
+    let (_dir, mut backend) = claimed(&owner);
+    backend.generators = fixed_time();
+    let direct = SqliteQueue::open(&backend.db).unwrap();
+    let (log, position, at) = waits_across();
+    let mut events = log.events[..position].to_vec();
+    let mut stop = events
+        .iter()
+        .find(|event| event.kind == crate::domain::EventKind::SupervisorStopped)
+        .unwrap()
+        .clone();
+    stop.id = crate::domain::EventId::new(100);
+    stop.payload = json!({"supervisor": "f"});
+    events.push(stop);
+    for row in built_and_settled(&events, ms(at)) {
+        direct.write_ledger_row(&row).unwrap();
+    }
+    direct
+        .conn
+        .execute(
+            "UPDATE ledger_rows SET records=json_set(records, '$[0]', json('{\"id\":1}'))
+              WHERE kind='queue' AND key='1'",
+            [],
+        )
+        .unwrap();
+    assert!(direct.ledger_rows(LedgerKind::Queue).is_err());
+    let since = direct.ledger_tasks_open_since().unwrap();
+    let (rows, stops) = (
+        direct.ledger_wait_rows(since).unwrap(),
+        direct.ledger_supervisor_stops().unwrap(),
+    );
+    assert!(rows.len() > 5);
+    assert!(rows.iter().all(|row| row.records.is_empty()));
+    let ids: Vec<i64> = stops.iter().map(|stop| stop.id.as_i64()).collect();
+    assert_eq!(ids, [9, 100]);
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    assert_eq!(queue.ledger_tasks_open_since().unwrap(), since);
+    assert_eq!(queue.ledger_wait_rows(since).unwrap(), rows);
+    assert_eq!(queue.ledger_supervisor_stops().unwrap(), stops);
+    assert_eq!(
+        *service.ops.lock().unwrap(),
+        [
+            "ledger_tasks_open_since",
+            "ledger_wait_rows",
+            "ledger_supervisor_stops"
+        ]
+    );
+    // A page after a place gives what comes after it alone.
+    let first = queue.ledger_supervisor_stops_after(None, 1).unwrap();
+    assert_eq!(first.len(), 1);
+    let (key, index) = first[0].0.clone();
+    let rest = queue
+        .ledger_supervisor_stops_after(Some((&key, index)), 10)
+        .unwrap();
+    let mut paged: Vec<_> = first
+        .into_iter()
+        .chain(rest)
+        .map(|(_, stop)| stop)
+        .collect();
+    paged.sort_by_key(|stop| stop.id);
+    assert_eq!(paged, stops);
+    let first = queue.ledger_wait_rows_after(since, None, 2).unwrap();
+    let rest = queue
+        .ledger_wait_rows_after(since, Some(&first[1].key), 1_000)
+        .unwrap();
+    assert_eq!([first, rest].concat(), rows);
+
+    // Two stops of one row, read a stop a page: each once, in their place.
+    let mut later = stops[0].clone();
+    later.id = crate::domain::EventId::new(200);
+    let records = serde_json::to_string(&json!([{"id": 1}, stops[0], {"id": 2}, later])).unwrap();
+    direct
+        .conn
+        .execute(
+            "UPDATE ledger_rows SET records=?1 WHERE kind='queue' AND key='1'",
+            [records],
+        )
+        .unwrap();
+    let mut paged = Vec::new();
+    let mut after: Option<(String, i64)> = None;
+    loop {
+        let page = direct
+            .ledger_supervisor_stops_after(after.as_ref().map(|(k, i)| (k.as_str(), *i)), 1)
+            .unwrap();
+        let Some((place, stop)) = page.into_iter().next() else {
+            break;
+        };
+        after = Some(place.clone());
+        paged.push((place, stop.id.as_i64()));
+    }
+    assert!(paged.contains(&(("1".to_owned(), 1), 9)), "{paged:?}");
+    assert!(paged.contains(&(("1".to_owned(), 3), 200)), "{paged:?}");
+    let mut ids: Vec<i64> = paged.iter().map(|(_, id)| *id).collect();
+    ids.sort_unstable();
+    let whole: Vec<i64> = direct
+        .ledger_supervisor_stops()
+        .unwrap()
+        .iter()
+        .map(|stop| stop.id.as_i64())
+        .collect();
+    assert_eq!(ids, whole);
+    assert_eq!(queue.ledger_supervisor_stops().unwrap().len(), whole.len());
+}

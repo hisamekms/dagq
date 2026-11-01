@@ -141,6 +141,74 @@ fn upsert(conn: &rusqlite::Connection, row: &LedgerRow) -> Result<bool> {
     Ok(!frozen)
 }
 
+/// The read of the rows [`crate::domain::pre_claim::rows::holds`] keeps
+/// (`?2` the start's ms, `?3` its first event, `?4` the end of a life),
+/// with no records, at most `?6`: with `after` (`?5`) the key's range after
+/// it on the primary key, so a page reads no row before it; without, `?5`
+/// is NULL.
+fn wait_rows_sql(after: bool) -> String {
+    let from = if after { "key > ?5" } else { "?5 IS NULL" };
+    format!(
+        "SELECT kind, key, task_id, ledger_v, built_at, inputs_through, final,
+                legacy_values, started_at, ended_at, outcome, totals, intervals,
+                attributes, after_claim, detail, inputs_from, '[]' AS records,
+                subject_kind, subject_id, round, route, provider, model
+           FROM ledger_rows
+          WHERE kind=?1 AND {from}
+            AND ((subject_kind IN ('slots_full', 'claim_hold', 'claim_deferral', 'landing_hold')
+                  AND (final=0 OR ended_at IS NULL OR ended_at >= ?2 OR outcome=?4
+                       OR json_extract(inputs_through, '$.events') >= ?3))
+                 OR (subject_kind='live_alert_stream'
+                     AND (outcome IS NULL OR outcome=?4)))
+          ORDER BY key LIMIT ?6"
+    )
+}
+
+/// The read of the stops (`?2`) of the queue rows, each with its row's key
+/// and its index among the row's records, at most `?5`: with `after` (the
+/// key `?3` and the index `?4`) the key's range from it on the primary key,
+/// so a page reads no row before it; without, `?3` and `?4` are NULL.
+fn stops_after_sql(after: bool) -> String {
+    let from = if after {
+        "r.key >= ?3 AND (r.key > ?3 OR j.key > ?4)"
+    } else {
+        "?3 IS NULL AND ?4 IS NULL"
+    };
+    format!(
+        "SELECT r.key, j.key, j.value FROM ledger_rows r, json_each(r.records) j
+          WHERE r.kind=?1 AND {from}
+            AND json_extract(j.value, '$.kind')=?2
+          ORDER BY r.key, j.key LIMIT ?5"
+    )
+}
+
+impl SqliteQueue {
+    /// The rows [`crate::domain::pre_claim::rows::holds`] keeps for `since`,
+    /// picked by their columns, at most `limit` after the key `after`
+    /// (`None`: from the first), by key, each with no records.
+    fn wait_rows_after(
+        &self,
+        since: Since,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        let mut statement = self.conn.prepare(&wait_rows_sql(after.is_some()))?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement.query_map(
+            params![
+                LedgerKind::Queue.as_str(),
+                since.ms,
+                since.id.as_i64(),
+                crate::domain::claim_hold::ENDED_SUPERVISOR_GONE,
+                after,
+                limit,
+            ],
+            ledger_row,
+        )?;
+        rows.map(|row| row?).collect()
+    }
+}
+
 impl LedgerStore for SqliteQueue {
     fn ledger_run_events(
         &self,
@@ -322,30 +390,18 @@ impl LedgerStore for SqliteQueue {
     /// SQLite picks the rows [`crate::domain::pre_claim::rows::holds`] keeps by their
     /// columns, and gives each with no records: none is parsed here.
     fn ledger_wait_rows(&self, since: Since) -> Result<Vec<LedgerRow>> {
-        let mut statement = self.conn.prepare(
-            "SELECT kind, key, task_id, ledger_v, built_at, inputs_through, final,
-                    legacy_values, started_at, ended_at, outcome, totals, intervals,
-                    attributes, after_claim, detail, inputs_from, '[]' AS records,
-                    subject_kind, subject_id, round, route, provider, model
-               FROM ledger_rows
-              WHERE kind=?1
-                AND ((subject_kind IN ('slots_full', 'claim_hold', 'claim_deferral', 'landing_hold')
-                      AND (final=0 OR ended_at IS NULL OR ended_at >= ?2 OR outcome=?4
-                           OR json_extract(inputs_through, '$.events') >= ?3))
-                     OR (subject_kind='live_alert_stream'
-                         AND (outcome IS NULL OR outcome=?4)))
-              ORDER BY key",
-        )?;
-        let rows = statement.query_map(
-            params![
-                LedgerKind::Queue.as_str(),
-                since.ms,
-                since.id.as_i64(),
-                crate::domain::claim_hold::ENDED_SUPERVISOR_GONE,
-            ],
-            ledger_row,
-        )?;
-        rows.map(|row| row?).collect()
+        self.wait_rows_after(since, None, usize::MAX)
+    }
+
+    /// SQLite reads from the key `after` on by the primary key and stops at
+    /// `limit`: a page reads no row before it nor past it.
+    fn ledger_wait_rows_after(
+        &self,
+        since: Since,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        self.wait_rows_after(since, after, limit)
     }
 
     /// SQLite picks the stops out of the stored arrays: no other record is
@@ -364,6 +420,40 @@ impl LedgerStore for SqliteQueue {
             |r| r.get::<_, String>(0),
         )?;
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// SQLite picks the stops out of the stored arrays of the rows from the
+    /// key of `after` on, by the primary key, and stops at `limit`: a page
+    /// parses no other record and reads no row before it nor past it.
+    fn ledger_supervisor_stops_after(
+        &self,
+        after: Option<(&str, i64)>,
+        limit: usize,
+    ) -> Result<Vec<((String, i64), crate::domain::RunEvent)>> {
+        let mut statement = self.conn.prepare(&stops_after_sql(after.is_some()))?;
+        let (key, index) = after.unzip();
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement.query_map(
+            params![
+                LedgerKind::Queue.as_str(),
+                crate::domain::EventKind::SupervisorStopped.as_str(),
+                key,
+                index,
+                limit
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (key, index, event) = row?;
+            Ok(((key, index), serde_json::from_str(&event)?))
+        })
+        .collect()
     }
 
     /// Read the node rows with no lock, then write only those the
@@ -740,6 +830,36 @@ mod tests {
             .unwrap();
         assert!(queue.ledger_rows(LedgerKind::Queue).is_err());
         assert_eq!(read(&queue), (wait_rows, stops));
+    }
+
+    /// A page of the wait rows or of the stops after a place reads the rows
+    /// from it on by the primary key's range, not every row of the kind
+    /// from the first: the plan searches the key past `kind`.
+    #[test]
+    fn a_page_after_a_place_reads_the_keys_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let plan = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> String {
+            let mut statement = queue
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let rows = statement
+                .query_map(args, |r| r.get::<_, String>(3))
+                .unwrap();
+            rows.map(Result::unwrap).collect::<Vec<_>>().join("\n")
+        };
+        let queue_kind = LedgerKind::Queue.as_str();
+        let waits = plan(
+            &wait_rows_sql(true),
+            &[&queue_kind, &0, &0, &"x", &"1", &10],
+        );
+        assert!(waits.contains("kind=? AND key>?"), "{waits}");
+        let stops = plan(
+            &stops_after_sql(true),
+            &[&queue_kind, &"supervisor_stopped", &"1", &0, &10],
+        );
+        assert!(stops.contains("kind=? AND key>?"), "{stops}");
     }
 
     /// A folded run's row round-trips with its sums in their columns, and
