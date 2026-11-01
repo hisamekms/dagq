@@ -670,31 +670,42 @@ fn a_held_task_gets_no_diagnosis_job_until_its_release() {
     assert_eq!(outcomes(&db), ["continue"]);
 }
 
-/// Acceptance (a hold after the start): a task held while its diagnosis
-/// job runs (the job's script holds it under the store, as
-/// `runtime_task_hold::the_supervisor_keeps_a_verdict_whose_task_was_held_while_the_job_ran`
-/// does) gets the verdict kept, neither applied nor asked about: the
-/// operation stays diagnosing. Once the hold is released, the verdict is
-/// applied on its premise checked again (the run rested meanwhile), and no
-/// second job runs.
+/// Acceptance (a hold after the start, which refuses the verdict's move):
+/// a task held once its diagnosis job's verdict was decided on, past the
+/// supervisor's look at the hold before the move, gets the move refused in
+/// its transaction for the hold, and the verdict kept for the hold the
+/// refusal names, neither applied, discarded nor asked about: the
+/// operation stays diagnosing. A hold that came while the job ran, before
+/// that look, is kept the same
+/// (`runtime_task_hold::the_supervisor_keeps_a_verdict_whose_task_was_held_while_the_job_ran`).
+/// Once the hold is released, the verdict is applied on its premise
+/// checked again (the run rested meanwhile), and no second job runs.
 #[test]
 fn a_verdict_reaching_a_task_held_meanwhile_is_kept_and_applied_after_the_release() {
     let (_dir, repo, db, backend, _off) = one_review(false, &[]);
     enable_replan(&repo, "non_pass_reviews = 1\n");
-    let hold_now = format!(
-        "sqlite3 -cmd '.timeout 5000' {} {} || exit 97",
-        shell_path(&db),
-        dagq::infrastructure::adapters::shell_quote(
+    let reviewer = TestReviewer::new(&[asking_concern()]).with_triages(&[diagnosis(
+        "continue",
+        &["local_defect"],
+        "high",
+    )]);
+    let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let at_decision = db.clone();
+    let mut options = supervise_options(4, true);
+    options.pauses = Some(runtime::PausesPort(Arc::new(move |at, _| {
+        if at != runtime::PausePoint::VerdictDecided || reached.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let conn = Connection::open(&at_decision).unwrap();
+        conn.busy_timeout(crate::common::STEP_LIMIT).unwrap();
+        conn.execute(
             "INSERT INTO task_holds(task_id, reason, by_role, by_id, created_at, settled_at)
-             VALUES (1, 'held while the diagnosis ran', 'user', 'user', 0, 0);"
+             VALUES (1, 'held once the verdict was decided on', 'user', 'user', 0, 0)",
+            [],
         )
-    );
-    let job = format!(
-        "{hold_now} && {}",
-        diagnosis("continue", &["local_defect"], "high")
-    );
-    let reviewer = TestReviewer::new(&[asking_concern()]).with_triages(&[job]);
-    let outcome = supervise_reviewed_owned(&db, &repo, &backend, &reviewer);
+        .unwrap();
+    })));
+    let outcome = supervise_reviewed_owned_with(&db, &repo, &backend, &reviewer, &options);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let op = operation(&db);
     assert_eq!(op.status, ReplanStatus::Diagnosing, "{op:?}");

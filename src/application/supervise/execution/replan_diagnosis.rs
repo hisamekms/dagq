@@ -36,8 +36,10 @@
 //!   same kept verdict fail one job), so that an error that persists ends
 //!   in the person's ask rather than in jobs without end. A move of a
 //!   verdict that committed applies it, whatever fails after it (closing
-//!   the operation's asks), and fails no job
-//!   ([`replan_detect::MoveResult::settles`]). The failure of an apply is
+//!   the operation's asks), and fails no job. A move or an ask the queue
+//!   refused is judged by the refusal alone ([`refusal_end`]): one a hold
+//!   refused keeps the verdict for that hold, however the hold stands
+//!   after it. The failure of an apply is
 //!   written with a claim of the operation under the job's generation, the
 //!   guard of every move and ask of the verdict, so that of two
 //!   supervisors that take up the same verdict a hold kept, an apply and a
@@ -233,19 +235,6 @@ impl Moved {
     }
 }
 
-/// What a verdict's move `moved` came to ([`replan_detect::MoveResult`]):
-/// committed, refused by the queue ([`refused`]) or failed before it
-/// committed.
-fn move_result(moved: &Result<Moved>) -> replan_detect::MoveResult {
-    match moved {
-        Ok(moved) => replan_detect::MoveResult::Committed {
-            followed: moved.followed.is_ok(),
-        },
-        Err(error) if refused(error) => replan_detect::MoveResult::Refused,
-        Err(_) => replan_detect::MoveResult::Failed,
-    }
-}
-
 /// Whether `error` of a verdict's move or ask is the queue's refusal of it
 /// (a [`crate::domain::DomainError`]: its premise or the operation moved
 /// on, or a hold came), on the queue or through the queue service
@@ -256,24 +245,51 @@ fn refused(error: &anyhow::Error) -> bool {
     crate::application::supervisor_service::rejected(error)
 }
 
+/// What a verdict's move, ask or failure's record that did not go comes
+/// to, from its `error` alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefusalEnd {
+    /// The queue refused it for a hold of the task, which the refusal
+    /// names: the verdict is kept for that hold, and applied after its
+    /// release on its premise checked again.
+    Kept(HoldGuard),
+    /// The queue refused it otherwise (its premise or the operation moved
+    /// on): the verdict is discarded, or its failure is another
+    /// settlement.
+    Discarded,
+    /// A read or a write failed before the queue settled it: its job's
+    /// failure.
+    Failed,
+}
+
+/// What `error` of a verdict's move, ask or failure's record comes to
+/// ([`RefusalEnd`]). A refusal is the hold's when the refusal itself names
+/// the hold ([`crate::application::supervisor_service::held_refusal`]),
+/// never by a read after it: a hold released in between would make it
+/// read as a premise that moved on and discard the verdict the hold keeps,
+/// a hold that came after another refusal would keep a verdict whose
+/// premise moved on, and a read that failed would fail the job.
+fn refusal_end(error: &anyhow::Error) -> RefusalEnd {
+    if !refused(error) {
+        return RefusalEnd::Failed;
+    }
+    crate::application::supervisor_service::held_refusal(error)
+        .map_or(RefusalEnd::Discarded, RefusalEnd::Kept)
+}
+
 /// How the write of a failed apply's `replan_diagnosis_failed` went, from
-/// its result `written` alone ([`replan_detect::failed_apply`]), with the
-/// error when it did not go and the hold when one refused it. A refusal is
-/// the hold's when the refusal itself names the hold
-/// ([`crate::application::supervisor_service::held_refusal`]), never by a
-/// read after it: a hold released in between would make it read as another
-/// settlement, and the verdict the hold keeps would be discarded.
+/// its result `written` alone ([`replan_detect::failed_apply`],
+/// [`refusal_end`]), with the error when it did not go and the hold when
+/// one refused it.
 fn failure_write(written: Result<()>) -> (replan_detect::FailureWrite, String, Option<HoldGuard>) {
     let Err(error) = written else {
         return (replan_detect::FailureWrite::Written, String::new(), None);
     };
     let why = format!("{error:#}");
-    if !refused(&error) {
-        return (replan_detect::FailureWrite::Failed, why, None);
-    }
-    match crate::application::supervisor_service::held_refusal(&error) {
-        Some(hold) => (replan_detect::FailureWrite::Held, why, Some(hold)),
-        None => (replan_detect::FailureWrite::Refused, why, None),
+    match refusal_end(&error) {
+        RefusalEnd::Kept(hold) => (replan_detect::FailureWrite::Held, why, Some(hold)),
+        RefusalEnd::Discarded => (replan_detect::FailureWrite::Refused, why, None),
+        RefusalEnd::Failed => (replan_detect::FailureWrite::Failed, why, None),
     }
 }
 
@@ -1360,25 +1376,24 @@ impl Supervisor<'_> {
                     diagnosis.premise = Some(job.premise(manual, None));
                     let moved =
                         self.move_on_premise(&op, ReplanStatus::Continuing, &reason, diagnosis);
-                    let result = move_result(&moved);
                     match moved {
                         Ok(moved) => {
                             payload["outcome"] = json!("continue");
                             payload["reason"] = json!(reason);
                             moved.note(job, &mut payload);
                         }
-                        Err(error) => {
-                            if let Some(hold) = self.queue.hold_guard(op.task_id)? {
+                        // A read or a write that failed before the move
+                        // committed is the job's failure, not a premise
+                        // that moved on.
+                        Err(error) => match refusal_end(&error) {
+                            RefusalEnd::Kept(hold) => {
                                 return self.keep_diagnosis(job, hold, payload);
                             }
-                            // A read or a write that failed before the move
-                            // committed is the job's failure, not a premise
-                            // that moved on.
-                            if !result.settles() {
-                                return Err(error);
+                            RefusalEnd::Failed => return Err(error),
+                            RefusalEnd::Discarded => {
+                                discarded(&mut payload, format!("{error:#}"));
                             }
-                            discarded(&mut payload, format!("{error:#}"));
-                        }
+                        },
                     }
                 }
                 Decided::Park(reason) => {
@@ -1394,7 +1409,6 @@ impl Supervisor<'_> {
                     // meanwhile (a person is asked).
                     let moved =
                         self.move_on_premise(&op, ReplanStatus::PauseRequested, &reason, diagnosis);
-                    let result = move_result(&moved);
                     match moved {
                         Ok(moved) => {
                             payload["outcome"] = json!("park");
@@ -1402,11 +1416,12 @@ impl Supervisor<'_> {
                             moved.note(job, &mut payload);
                         }
                         Err(error) => {
-                            if let Some(hold) = self.queue.hold_guard(op.task_id)? {
-                                return self.keep_diagnosis(job, hold, payload);
-                            }
-                            if !result.settles() {
-                                return Err(error);
+                            match refusal_end(&error) {
+                                RefusalEnd::Kept(hold) => {
+                                    return self.keep_diagnosis(job, hold, payload);
+                                }
+                                RefusalEnd::Failed => return Err(error),
+                                RefusalEnd::Discarded => {}
                             }
                             let lineage = self.queue.replan_lineage(op.task_id)?;
                             // The limit is why a person is asked; the rest
@@ -1796,18 +1811,17 @@ impl Supervisor<'_> {
         let ask = match asked {
             Ok((outcome, _)) => outcome.ask,
             Err(error) => {
-                // A hold that came meanwhile keeps the verdict for the
-                // release; with no verdict, the release starts a job.
-                if let Some((job, _)) = job
-                    && let Some(hold) = self.queue.hold_guard(op.task_id)?
-                {
-                    return self.keep_diagnosis(job, hold, payload);
-                }
-                // A verdict whose ask a read or a write failed to open is
+                // A hold that refused the ask keeps the verdict for the
+                // release; with no verdict, the release starts a job. A
+                // verdict whose ask a read or a write failed to open is
                 // its job's failure; one whose premise moved on is
                 // discarded and diagnosed again.
-                if job.is_some() && !refused(&error) {
-                    return Err(error);
+                if let Some((job, _)) = job {
+                    match refusal_end(&error) {
+                        RefusalEnd::Kept(hold) => return self.keep_diagnosis(job, hold, payload),
+                        RefusalEnd::Failed => return Err(error),
+                        RefusalEnd::Discarded => {}
+                    }
                 }
                 payload["outcome"] = json!("discarded");
                 payload["reason"] = json!(format!("{error:#}"));
@@ -1974,6 +1988,61 @@ mod tests {
         assert!(refused(&held));
         let write = anyhow::anyhow!("ask write failed").context("open the diagnosis's ask");
         assert!(!refused(&write));
+    }
+
+    /// A verdict's move or ask the queue refused is judged by the refusal
+    /// alone, the one function every refused move, ask and failure's
+    /// record goes through: a refusal that names a hold keeps the verdict
+    /// for that hold, whatever a read of the hold after it would say (no
+    /// read is made, so a release in between changes nothing and a read
+    /// that fails fails nothing); any other refusal, a hold that came after
+    /// it included, discards the verdict; an error that is no refusal, a
+    /// read or a write that failed before the queue settled it, fails the
+    /// job.
+    #[test]
+    fn a_refused_move_or_ask_is_kept_for_the_hold_the_refusal_names_alone() {
+        use crate::application::supervisor_service::service_error;
+        use crate::domain::queue_service::{ServiceError, ServiceErrorCode};
+        use crate::domain::task_hold::HoldGuard;
+        let hold = HoldGuard {
+            task: TaskId::new(1),
+            hold: crate::domain::HoldId::new(2),
+        };
+        let held = anyhow::Error::new(DomainError::ReplanDiagnosisHeld {
+            operation: ReplanId::new(1),
+            task_id: hold.task,
+            hold: hold.hold,
+        });
+        let through_service = |held: Option<HoldGuard>| {
+            service_error(&ServiceError {
+                code: ServiceErrorCode::Failed,
+                message: "refused".into(),
+                denied: None,
+                kind: None,
+                rejected: true,
+                held: held.map(Box::new),
+            })
+        };
+        for refusal in [
+            held.context("move the diagnosed operation"),
+            through_service(Some(hold)).context("open the diagnosis's ask"),
+        ] {
+            assert_eq!(refusal_end(&refusal), RefusalEnd::Kept(hold), "{refusal:#}");
+        }
+        let stale = anyhow::Error::new(DomainError::ReplanPremiseStale {
+            operation: ReplanId::new(1),
+            why: "run r's HEAD moved".to_owned(),
+        });
+        let moved_on = anyhow::Error::new(DomainError::ReplanGenerationStale {
+            operation: ReplanId::new(1),
+            expected: 3,
+            actual: 4,
+        });
+        for refusal in [stale, moved_on, through_service(None)] {
+            assert_eq!(refusal_end(&refusal), RefusalEnd::Discarded, "{refusal:#}");
+        }
+        let write = anyhow::anyhow!("database or disk is full").context("move the operation");
+        assert_eq!(refusal_end(&write), RefusalEnd::Failed);
     }
 
     /// The write of a failed apply's record is judged by its result alone:
