@@ -42,7 +42,7 @@ runの異常を、runtimeの自動修正、復旧job、人へのaskの3段で扱
 
 - 生きているrunの復旧jobの起動・verdictの検査と適用・escalateは`application::supervise::execution::recovery`（module docが範囲を持つ）、turnのstallからjobへの受け渡しとresumeのrepairのparkは`stall_recovery`。
 - receiptの無いturnの検知（促し・stalledのask・`stall_resolved`）は`application::supervise::execution::stall`の`StallWatch`、判断は同じmoduleの副作用のない関数が持つ。
-- 1 runを手放すのは`Supervisor::abandon`と`abandon_with_session`（`execution.rs`）で、記録はqueueの`abandon_run`。
+- 1 runを手放すのは`Supervisor::abandon`と`abandon_with_session`（`execution/slot_end.rs`）で、記録はqueueの`abandon_run`。
 - 終わったrunのsessionの掃除は`sweep`（`SweepWatch`・`sweep_ended_sessions`）、worktreeとビルド成果物の掃除は`cleanup`（module docが範囲を持つ）と[Run worktrees](run-worktrees.md)。
 - 終わったrunの復旧jobとtriageの後のsessionの停止は[Triage](triage.md)、非対話のworkerのturnの後の扱いは[非対話のworker](headless-worker.md)が持つ。
 - 判断と境界の分け方は[ADR-t1410-1](../../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)に従う。
