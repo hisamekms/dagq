@@ -450,21 +450,11 @@ fn fill_legacy_run(row: &mut LedgerRow, events: &[RunEvent]) {
     };
     row.started_at = run.claimed_at.as_deref().and_then(stats::timestamp_millis);
     row.outcome = run.status.clone();
-    let recorded = events
+    let claim = events
         .iter()
-        .find(|event| event.kind == EventKind::RunClaimed)
-        .and_then(|claim| claim.payload.get(ATTRIBUTES))
-        .and_then(Value::as_object);
-    row.attributes = match recorded {
-        Some(set) => set.clone(),
-        None => legacy_attributes(&run),
-    };
-    let measures = &run.measures;
-    row.after_claim = Some(AfterClaim {
-        last_provider: measures.actual_provider.clone(),
-        on_codex: measures.on_codex,
-        codex_model: measures.worker_model.clone().filter(|_| measures.on_codex),
-    });
+        .find(|event| event.kind == EventKind::RunClaimed);
+    row.attributes = claim_attributes(claim, &run);
+    row.after_claim = Some(after_claim_of(&run));
     row.legacy = Some(json!({
         "work": run.work,
         "validate": run.validate,
@@ -472,6 +462,30 @@ fn fill_legacy_run(row: &mut LedgerRow, events: &[RunEvent]) {
         "land_phases": run.land_phases,
         "startup": run.startup,
     }));
+}
+
+/// The claim's attributes of a legacy run: those its first `run_claimed`
+/// (`claim`) recorded, else, for a claim that recorded none, the same keys
+/// from what `stats` measured of it ([`legacy_attributes`]).
+pub fn claim_attributes(claim: Option<&RunEvent>, run: &RunStats) -> Map<String, Value> {
+    match claim
+        .and_then(|claim| claim.payload.get(ATTRIBUTES))
+        .and_then(Value::as_object)
+    {
+        Some(set) => set.clone(),
+        None => legacy_attributes(run),
+    }
+}
+
+/// The facts after the claim of a legacy run, from what `stats` measured
+/// of it by the same rule ([`crate::domain::after_claim`]).
+pub fn after_claim_of(run: &RunStats) -> AfterClaim {
+    let measures = &run.measures;
+    AfterClaim {
+        last_provider: measures.actual_provider.clone(),
+        on_codex: measures.on_codex,
+        codex_model: measures.worker_model.clone().filter(|_| measures.on_codex),
+    }
 }
 
 /// The claim's attributes of a run claimed before they were recorded,

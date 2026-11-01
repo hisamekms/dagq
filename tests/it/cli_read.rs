@@ -345,7 +345,8 @@ fn timeline_and_stats_show_the_work_breakdown() {
     .unwrap();
     conn.execute(
         "UPDATE run_events SET payload=json_set(payload,'$.rustc_release','1.93.0',
-           '$.rustc_host','aarch64-apple-darwin') WHERE kind='run_claimed'",
+           '$.rustc_host','aarch64-apple-darwin','$.attributes.rustc_release','1.93.0',
+           '$.attributes.rustc_host','aarch64-apple-darwin') WHERE kind='run_claimed'",
         [],
     )
     .unwrap();
@@ -480,7 +481,8 @@ fn the_toolchain_axis_follows_the_declared_rust_profile() {
         .unwrap()
         .execute(
             "UPDATE run_events SET payload=json_set(payload,'$.rustc_release','1.93.0',
-               '$.rustc_host','aarch64-apple-darwin') WHERE kind='run_claimed'",
+               '$.rustc_host','aarch64-apple-darwin','$.attributes.rustc_release','1.93.0',
+               '$.attributes.rustc_host','aarch64-apple-darwin') WHERE kind='run_claimed'",
             [],
         )
         .unwrap();
@@ -501,7 +503,7 @@ fn the_toolchain_axis_follows_the_declared_rust_profile() {
                     period: Period::Day,
                     since: Some(Cursor::Time(since)),
                     until: Some(Cursor::Time(since + 3_600_000)),
-                    by: vec![Axis::Toolchain],
+                    by: vec![Axis::TOOLCHAIN],
                     ..KpiQuery::default()
                 },
             )
@@ -554,7 +556,8 @@ fn the_stats_rustc_follows_the_declared_rust_profile() {
     .unwrap();
     conn.execute(
         "UPDATE run_events SET payload=json_set(payload,'$.rustc_release','1.93.0',
-           '$.rustc_host','aarch64-apple-darwin') WHERE kind='run_claimed'",
+           '$.rustc_host','aarch64-apple-darwin','$.attributes.rustc_release','1.93.0',
+           '$.attributes.rustc_host','aarch64-apple-darwin') WHERE kind='run_claimed'",
         [],
     )
     .unwrap();

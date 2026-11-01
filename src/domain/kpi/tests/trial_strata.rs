@@ -52,7 +52,7 @@ fn splits_the_runs_by_the_trial_group_model_effort_and_nature() {
     let query = KpiQuery {
         last: 2,
         at: Some(Cursor::Time(tuesday * 1000)),
-        by: vec![Axis::Group, Axis::Model, Axis::Effort, Axis::Nature],
+        by: vec![Axis::GROUP, Axis::MODEL, Axis::EFFORT, Axis::NATURE],
         ..KpiQuery::default()
     };
     let result = queue.kpi(tuesday + DAY + HOUR, &KpiConfig::default(), &query);
@@ -110,7 +110,7 @@ fn splits_the_runs_by_the_trial_group_model_effort_and_nature() {
         &KpiConfig::default(),
         &KpiQuery {
             compare: Some(spec),
-            by: vec![Axis::Group],
+            by: vec![Axis::GROUP],
             ..KpiQuery::default()
         },
     );
@@ -147,7 +147,7 @@ fn a_codex_run_is_not_counted_as_a_claude_model() {
     let query = KpiQuery {
         last: 1,
         at: Some(Cursor::Time(MONDAY * 1000)),
-        by: vec![Axis::Model, Axis::Claude, Axis::Group, Axis::Provider],
+        by: vec![Axis::MODEL, Axis::CLAUDE, Axis::GROUP, Axis::PROVIDER],
         ..KpiQuery::default()
     };
     let result = queue.kpi(MONDAY + DAY + HOUR, &KpiConfig::default(), &query);

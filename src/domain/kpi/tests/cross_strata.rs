@@ -44,7 +44,7 @@ fn cross_strata_intersect_filters_and_axes_without_changing_existing_output() {
         until: Some(Cursor::Time((MONDAY + 2 * DAY) * 1000)),
         changes: vec!["fix".into()],
         areas: vec!["runtime".into(), "shared".into()],
-        by: vec![Axis::Route, Axis::Provider, Axis::Provider],
+        by: vec![Axis::ROUTE, Axis::PROVIDER, Axis::PROVIDER],
         compare: Some(CompareSpec::Windows([
             (
                 Cursor::Time(MONDAY * 1000),
@@ -138,7 +138,7 @@ fn cross_strata_intersect_filters_and_axes_without_changing_existing_output() {
         .n,
         3
     );
-    query.by = vec![Axis::Provider];
+    query.by = vec![Axis::PROVIDER];
     let single = queue.kpi(now, &config, &query);
     assert!(
         !single.periods[0].window.kpis["phase.work"]
@@ -157,7 +157,7 @@ fn cross_names_preserve_unknown_values_and_escape_separators() {
         since: Some(Cursor::Time(MONDAY * 1000)),
         until: Some(Cursor::Time((MONDAY + DAY) * 1000)),
         cross: true,
-        by: vec![Axis::Model, Axis::Build, Axis::Change],
+        by: vec![Axis::MODEL, Axis::BUILD, Axis::CHANGE],
         ..KpiQuery::default()
     };
     let config = KpiConfig::default();
@@ -166,7 +166,7 @@ fn cross_names_preserve_unknown_values_and_escape_separators() {
     assert_eq!(measure(&result.periods[0], "landings", key).n, 1);
     // Toolchain is unavailable without the Rust profile declared, unlike a missing value.
     queue.no_rust_toolchain = true;
-    query.by.push(Axis::Toolchain);
+    query.by.push(Axis::TOOLCHAIN);
     let result = queue.kpi(MONDAY + 2 * DAY, &config, &query);
     assert!(
         !result.periods[0].window.kpis["landings"]

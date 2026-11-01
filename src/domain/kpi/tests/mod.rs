@@ -20,6 +20,7 @@ mod breakdown;
 mod comparisons;
 mod cross_strata;
 mod host_records;
+mod layers;
 mod periods_and_targets;
 mod plan_kpis;
 mod queue_kpis;

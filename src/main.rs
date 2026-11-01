@@ -1623,8 +1623,10 @@ enum Command {
         /// it saw without).
         #[arg(long = "area", value_parser = parse_kpi_area)]
         areas: Vec<String>,
-        /// Also split the runs by these attributes of the claim.
-        #[arg(long, value_parser = ["change", "area", "build", "parallel", "slot", "load", "toolchain", "claude", "provider", "route", "codex", "group", "model", "effort", "nature"])]
+        /// Also split the runs by these layers: change, area, provider, claude, model, group, slot,
+        /// load, toolchain and nature are derived; any other key (build, parallel, route, codex,
+        /// effort, ...) is the claim's attribute of that key, `unknown` for a run without it.
+        #[arg(long, value_parser = parse_kpi_layer)]
         by: Vec<String>,
         /// Add cross strata of --by axes and selected --area / --change values.
         #[arg(long)]
@@ -1861,7 +1863,7 @@ const PROVIDERS: [&str; 2] = ["claude", "codex"];
 /// The execution classes of a task (ADR-t1487-1 decision 1).
 const EXECUTION_CLASSES: [&str; 2] = ["implementation", "spike"];
 
-use reads::{parse_kpi_area, parse_kpi_change};
+use reads::{parse_kpi_area, parse_kpi_change, parse_kpi_layer};
 
 fn parse_role(value: Option<String>) -> Result<Option<SessionRole>> {
     Ok(value.map(|value| value.parse()).transpose()?)

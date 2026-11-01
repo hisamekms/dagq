@@ -26,13 +26,13 @@ fn periods_start_at_local_midnight_and_monday() {
     );
     assert_eq!("week".parse::<Period>(), Ok(Period::Week));
     assert!("month".parse::<Period>().is_err());
-    assert_eq!("load".parse::<Axis>(), Ok(Axis::Load));
-    assert_eq!("provider".parse::<Axis>(), Ok(Axis::Provider));
-    assert_eq!("route".parse::<Axis>(), Ok(Axis::Route));
-    assert_eq!("codex".parse::<Axis>(), Ok(Axis::Codex));
-    assert_eq!("group".parse::<Axis>(), Ok(Axis::Group));
-    assert_eq!("nature".parse::<Axis>(), Ok(Axis::Nature));
-    assert!("host".parse::<Axis>().unwrap_err().contains("toolchain"));
+    assert_eq!("load".parse::<Axis>(), Ok(Axis::LOAD));
+    assert_eq!("provider".parse::<Axis>(), Ok(Axis::PROVIDER));
+    assert_eq!("route".parse::<Axis>(), Ok(Axis::ROUTE));
+    assert_eq!("codex".parse::<Axis>(), Ok(Axis::CODEX));
+    assert_eq!("group".parse::<Axis>(), Ok(Axis::GROUP));
+    assert_eq!("nature".parse::<Axis>(), Ok(Axis::NATURE));
+    assert!("ho st".parse::<Axis>().unwrap_err().contains("toolchain"));
 }
 
 /// Spreads follow `stats`' rules, a rate over nothing is null, and a count

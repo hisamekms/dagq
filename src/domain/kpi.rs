@@ -9,13 +9,16 @@
 //! and the `[kpi]` settings, like [`super::stats`]: each window's runs,
 //! intervals, `land_phases`, asks and sessions are what
 //! [`super::stats::stats`] derives for it, and no rule is written twice.
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 use serde::ser::SerializeMap;
+use serde_json::{Map, Value};
 
 use super::{
     DraftOrigin, EventKind, GoalId, RunEvent, TaskChange, TaskId,
+    after_claim::AfterClaim,
     areas::RunAreas,
     host_metrics::{DiskFree, HostSummary},
     marks::{self, Mark},
@@ -145,77 +148,204 @@ fn date(days: i64) -> String {
     marks::utc_text(days * DAY_MS)[..10].to_owned()
 }
 
-/// What a run's KPIs can be split by besides `all` (decision 6).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-pub enum Axis {
+/// A layer the runs' KPIs are split by besides `all` (decision 6, and
+/// ADR-t1662-1's axes of a run's comparison): any key of the claim's
+/// attributes the ledger's run row holds, named as `--by` names it. The
+/// names below are the ones `kpi` has always split by and a comparison
+/// splits by; a key of no claim (`--by` accepts any) reads `unknown` for
+/// every run.
+///
+/// How a run's value is read: a key in [`Derived`] is derived, by the
+/// rule its variant gives, from the claim's attributes, the facts the
+/// ledger settles after the claim ([`AfterClaim`]) and the run's own
+/// fields (its task's change, its areas, its prediction); an attribute of
+/// the same key is never read for it. Any other key is the attribute's
+/// value as the claim recorded it (`build`, `parallel`, `route`, `codex`,
+/// `effort` among them), `unknown` without one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Axis(Cow<'static, str>);
+
+impl Axis {
     /// The change the task declares (ADR-t980-1); `unknown` without one.
-    Change,
+    pub const CHANGE: Self = Self::named("change");
     /// The areas of what the run landed (ADR-t980-1): a run is in every
     /// stratum of its areas, `unknown` without one; no stratum without
     /// `[areas]`.
+    pub const AREA: Self = Self::named("area");
+    /// The build identifier the run was claimed by (the claim's `build`).
+    pub const BUILD: Self = Self::named("build");
+    /// The supervisor's `parallel` at the claim (the claim's `parallel`).
+    pub const PARALLEL: Self = Self::named("parallel");
+    /// The slots in use at the claim over `parallel` ([`Derived::Slot`]).
+    pub const SLOT: Self = Self::named("slot");
+    /// The load average at the claim over the host's cores
+    /// ([`Derived::Load`]).
+    pub const LOAD: Self = Self::named("load");
+    /// `rustc`'s release and host at the claim ([`Derived::Toolchain`]).
+    pub const TOOLCHAIN: Self = Self::named("toolchain");
+    /// Claude Code's version ([`Derived::Claude`]).
+    pub const CLAUDE: Self = Self::named("claude");
+    /// The provider that did the run's work in the end
+    /// ([`Derived::Provider`]).
+    pub const PROVIDER: Self = Self::named("provider");
+    /// The worker's route at the claim (the claim's `route`):
+    /// `interactive` or `headless`.
+    pub const ROUTE: Self = Self::named("route");
+    /// Codex's version at the claim (the claim's `codex`); `unknown` when
+    /// the supervisor ran no Codex worker.
+    pub const CODEX: Self = Self::named("codex");
+    /// The worker model trial's group ([`Derived::Group`]).
+    pub const GROUP: Self = Self::named("group");
+    /// The worker's model ([`Derived::Model`]).
+    pub const MODEL: Self = Self::named("model");
+    /// The worker's effort at the run's first claim (the claim's
+    /// `effort`). Not the plan review's `effort=` of the `plan.*` KPIs.
+    pub const EFFORT: Self = Self::named("effort");
+    /// The `nature` of the task's last weight prediction before the run
+    /// started ([`Derived::Nature`]).
+    pub const NATURE: Self = Self::named("nature");
+
+    /// The layers `kpi --help` names.
+    pub const ALL: [Self; 15] = [
+        Self::CHANGE,
+        Self::AREA,
+        Self::BUILD,
+        Self::PARALLEL,
+        Self::SLOT,
+        Self::LOAD,
+        Self::TOOLCHAIN,
+        Self::CLAUDE,
+        Self::PROVIDER,
+        Self::ROUTE,
+        Self::CODEX,
+        Self::GROUP,
+        Self::MODEL,
+        Self::EFFORT,
+        Self::NATURE,
+    ];
+
+    const fn named(key: &'static str) -> Self {
+        Self(Cow::Borrowed(key))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The derived layer of this name; none for an attribute's key.
+    pub fn derived(&self) -> Option<Derived> {
+        Derived::ALL
+            .into_iter()
+            .find(|derived| derived.as_str() == self.as_str())
+    }
+}
+
+impl std::str::FromStr for Axis {
+    type Err = String;
+
+    /// Any key a claim's attribute may have (ADR-t1662-1 decision 21: a
+    /// lowercase letter, then lowercase letters, digits, `_` and `.`, up to
+    /// [`KEY_MAX`]), so that a stratum `<key>=<value>` reads back; but the
+    /// task's retired kind, which `change` and `area` replaced.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if text == RETIRED_KIND {
+            return Err(format!(
+                "{text:?} is no longer a layer: the task's kind was replaced by its change and areas; split by change and area instead"
+            ));
+        }
+        let mut chars = text.chars();
+        let fits = chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && chars
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.'))
+            && text.len() <= KEY_MAX;
+        if !fits {
+            return Err(format!(
+                "{text:?} is not a layer; use a key of the claim's attributes (a lowercase letter, then lowercase letters, digits, _ and ., up to {KEY_MAX}), such as {}",
+                Self::ALL.map(|axis| axis.0).join(", ")
+            ));
+        }
+        Ok(Self::ALL
+            .into_iter()
+            .find(|axis| axis.as_str() == text)
+            .unwrap_or_else(|| Self(Cow::Owned(text.to_owned()))))
+    }
+}
+
+impl serde::Serialize for Axis {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Axis {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// The longest key of a claim's attribute a layer takes.
+const KEY_MAX: usize = 64;
+
+/// The task's kind, which `change` and `area` replaced (ADR-t980-1): no
+/// layer, so that `--by kind` is refused rather than read as `unknown`.
+const RETIRED_KIND: &str = "kind";
+
+/// The layers whose value a run's claim does not hold as it is: each is
+/// derived by its own rule, and a claim's attribute never takes one of
+/// these names ([`crate::domain::claim_facts::RESERVED`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Derived {
+    /// The task's change (ADR-t980-1); `unknown` without one.
+    Change,
+    /// The run's areas; see [`Axis::AREA`].
     Area,
-    /// The build identifier the run was claimed by.
-    Build,
-    /// The supervisor's `parallel` at the claim.
-    Parallel,
-    /// The slots in use at the claim over `parallel`: `low` (< 0.5), `mid`
-    /// (< 1) or `full`.
-    Slot,
-    /// The load average at the claim over the host's cores: `low` (< 1),
-    /// `mid` (< 2), `high` (< 4) or `extreme`. The claim records no cores:
-    /// they are the host's when the KPIs are read.
-    Load,
-    /// `rustc`'s release and host, as the claim recorded them: no stratum
-    /// unless the repository's profiles record the Rust toolchain
-    /// ([`KpiInput::rust_toolchain`]).
-    Toolchain,
-    /// Claude Code's version; `none` for a run that worked on Codex.
-    Claude,
     /// The provider (`claude` / `codex`) that did the run's work in the
     /// end: the last one it moved to, else the claim's (ADR-t813-2
-    /// decision 7).
+    /// decision 7; [`AfterClaim::last_provider`]).
     Provider,
-    /// The worker's route at the claim: `interactive` or `headless`.
-    Route,
-    /// Codex's version at the claim; `unknown` when the supervisor ran no
-    /// Codex worker.
-    Codex,
-    /// The worker model trial's group at the run's first claim (ADR-0079
-    /// decisions 2 and 6): `control` / `treatment`, `none` outside the
-    /// trial, `unknown` for a claim that recorded no worker session. Like
-    /// the model and the effort, a resume or revise that raised the session
-    /// does not move it.
-    Group,
-    /// The worker's model at the run's first claim; for a run that worked
-    /// on Codex, the model its Codex turns used. Not the plan review's
+    /// Claude Code's version at the claim (`claude_version`); `none` for a
+    /// run that worked on Codex ([`AfterClaim::on_codex`]).
+    Claude,
+    /// The worker's model at the run's first claim (`claim_model`); for a
+    /// run that worked on Codex, the model its first Codex turn that named
+    /// one reported ([`AfterClaim::codex_model`]). Not the plan review's
     /// `model=` of the `plan.*` KPIs.
     Model,
-    /// The worker's effort at the run's first claim. Not the plan review's
-    /// `effort=` of the `plan.*` KPIs.
-    Effort,
+    /// The worker model trial's group at the run's first claim (ADR-0079
+    /// decisions 2 and 6, `trial_group`): `control` / `treatment`, `none`
+    /// outside the trial (a claim with an `effort` and no group, or a run
+    /// that worked on Codex and so left the trial), `unknown` for a claim
+    /// that recorded no worker session. A resume or revise that raised the
+    /// session does not move it.
+    Group,
+    /// The slots in use at the claim (`slots`) over its `parallel`: `low`
+    /// (< 0.5), `mid` (< 1) or `full`.
+    Slot,
+    /// The load average at the claim (`load_avg`) over the host's cores:
+    /// `low` (< 1), `mid` (< 2), `high` (< 4) or `extreme`. The claim
+    /// records no cores: they are the host's when the KPIs are read.
+    Load,
+    /// `rustc`'s release and host (`rustc_release`, `rustc_host`): no
+    /// stratum unless the repository's profiles record the Rust toolchain
+    /// ([`KpiInput::rust_toolchain`]).
+    Toolchain,
     /// The `nature` of the task's last weight prediction before the run
     /// started; `unknown` without one.
     Nature,
 }
 
-impl Axis {
-    pub const ALL: [Self; 15] = [
+impl Derived {
+    pub const ALL: [Self; 10] = [
         Self::Change,
         Self::Area,
-        Self::Build,
-        Self::Parallel,
+        Self::Provider,
+        Self::Claude,
+        Self::Model,
+        Self::Group,
         Self::Slot,
         Self::Load,
         Self::Toolchain,
-        Self::Claude,
-        Self::Provider,
-        Self::Route,
-        Self::Codex,
-        Self::Group,
-        Self::Model,
-        Self::Effort,
         Self::Nature,
     ];
 
@@ -223,47 +353,46 @@ impl Axis {
         match self {
             Self::Change => "change",
             Self::Area => "area",
-            Self::Build => "build",
-            Self::Parallel => "parallel",
+            Self::Provider => "provider",
+            Self::Claude => "claude",
+            Self::Model => "model",
+            Self::Group => "group",
             Self::Slot => "slot",
             Self::Load => "load",
             Self::Toolchain => "toolchain",
-            Self::Claude => "claude",
-            Self::Provider => "provider",
-            Self::Route => "route",
-            Self::Codex => "codex",
-            Self::Group => "group",
-            Self::Model => "model",
-            Self::Effort => "effort",
             Self::Nature => "nature",
         }
     }
 }
 
-impl std::str::FromStr for Axis {
-    type Err = String;
+/// What the ledger's row of a run holds for its layers
+/// ([`crate::domain::ledger::read::LedgerValues`]): the claim's attributes
+/// as recorded, whatever their keys, and the facts after the claim.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunLayers {
+    pub attributes: Map<String, Value>,
+    pub after_claim: AfterClaim,
+}
 
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        Self::ALL
-            .into_iter()
-            .find(|axis| axis.as_str() == text)
-            .ok_or_else(|| {
-                format!(
-                    "{text:?} is not an axis; use one of {}",
-                    Self::ALL.map(Self::as_str).join(", ")
-                )
-            })
+impl RunLayers {
+    /// The attribute `key` as text; none without it.
+    pub fn attribute(&self, key: &str) -> Option<String> {
+        match self.attributes.get(key)? {
+            Value::Null => None,
+            Value::String(text) => Some(text.clone()),
+            other => Some(other.to_string()),
+        }
     }
 }
 
 /// The axes a comparison across a mark is split by (decision 15), besides
 /// those `--by` names.
 pub const COMPARE_AXES: [Axis; 5] = [
-    Axis::Change,
-    Axis::Area,
-    Axis::Parallel,
-    Axis::Load,
-    Axis::Build,
+    Axis::CHANGE,
+    Axis::AREA,
+    Axis::PARALLEL,
+    Axis::LOAD,
+    Axis::BUILD,
 ];
 
 /// What `--compare` names (decision 14): a mark (its event id) or any
@@ -327,7 +456,8 @@ pub struct KpiQuery {
     /// areas a comparison's area summary is made for (every area seen when
     /// empty) (ADR-t980-1).
     pub areas: Vec<String>,
-    /// The axes the periods are split by besides the change and the area.
+    /// The layers the periods are split by besides the change and the
+    /// area ([`Axis`]).
     pub by: Vec<Axis>,
     /// Add intersections of the explicitly selected axes and change/area filters.
     pub cross: bool,
@@ -423,7 +553,13 @@ pub struct KpiInput<'a> {
     pub ledger: Option<&'a crate::domain::stats::LedgerTimes>,
     /// The ledger's run rows, for each stratum's
     /// [`breakdown`](super::ledger::breakdown) by tags and
-    /// `unattributed_ratio`: a run without a row is in neither.
+    /// `unattributed_ratio`: a run without a row is in neither. They also
+    /// give each run's layers ([`Axis`]): its claim's attributes and the
+    /// facts after the claim ([`crate::domain::ledger::read::LedgerValues`]).
+    /// A run without a row reads its claim's recorded attributes, else the
+    /// same keys from what `stats` measured of it, as the ledger's legacy
+    /// row does ([`crate::domain::ledger::claim_attributes`],
+    /// [`crate::domain::ledger::after_claim_of`]).
     pub rows: &'a [&'a super::ledger::LedgerRow],
 }
 
@@ -845,10 +981,10 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
     let context = Context::new(input, query);
     let now_ms = input.now * 1000;
     let offset_ms = input.utc_offset_secs * 1000;
-    let mut axes = vec![Axis::Change, Axis::Area];
+    let mut axes = vec![Axis::CHANGE, Axis::AREA];
     for axis in &query.by {
         if !axes.contains(axis) {
-            axes.push(*axis);
+            axes.push(axis.clone());
         }
     }
     axes.sort_unstable();

@@ -290,7 +290,7 @@ pub(super) fn compare(
     let mut axes = COMPARE_AXES.to_vec();
     for axis in &query.by {
         if !axes.contains(axis) {
-            axes.push(*axis);
+            axes.push(axis.clone());
         }
     }
     axes.sort_unstable();

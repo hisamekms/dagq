@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{ALL, Axis, KpiInput, Kpis, Measure, UNKNOWN, float, round3};
+use super::{ALL, Axis, Derived, KpiInput, Kpis, Measure, RunLayers, UNKNOWN, float, round3};
 use crate::domain::{
     DraftOrigin, EventId, GoalId, HEARTBEAT_TIMEOUT_SECS, RunEvent, RunId, TaskChange, TaskId,
     areas::RunAreas,
@@ -17,7 +17,7 @@ use crate::domain::{
     forecast::score::{self, Scoring, Target},
     host_metrics::{HostSummary, PROCESS_KINDS},
     improvement_running,
-    ledger::{LedgerKind, LedgerRow, breakdown::Breakdown},
+    ledger::{self, LedgerKind, LedgerRow, breakdown::Breakdown},
     marks::{self, Mark},
     plan_quality::plan_quality,
     satisfied,
@@ -164,6 +164,14 @@ pub(super) struct Context<'a> {
     goal_id: Option<GoalId>,
     /// Explicit cross axes, with optional allowed values; independent of comparison defaults.
     cross: Vec<(Axis, Vec<String>)>,
+    /// Each run's layers (of its row among [`KpiInput::rows`], and for a
+    /// run the ledger has no row of, or whose row holds no attributes, its
+    /// claim's attributes as a legacy row reads them), for the runs
+    /// `stats` derives at all.
+    layers: HashMap<RunId, RunLayers>,
+    /// Each run's first `run_claimed`, for the layers of a run that
+    /// finished only in a window's reading.
+    first_claims: HashMap<RunId, &'a RunEvent>,
     /// What `stats` reads besides the events: only the drafts' origins.
     live: LiveSnapshot,
     /// Unix seconds.
@@ -308,17 +316,17 @@ impl<'a> Context<'a> {
         if query.cross {
             let mut axes = query.by.clone();
             if !query.areas.is_empty() {
-                axes.push(Axis::Area);
+                axes.push(Axis::AREA);
             }
             if !query.changes.is_empty() {
-                axes.push(Axis::Change);
+                axes.push(Axis::CHANGE);
             }
-            axes.sort_unstable_by_key(|axis| axis.as_str());
+            axes.sort_unstable();
             axes.dedup();
             for axis in axes {
-                let values = match axis {
-                    Axis::Area => query.areas.clone(),
-                    Axis::Change => query.changes.clone(),
+                let values = match axis.derived() {
+                    Some(Derived::Area) => query.areas.clone(),
+                    Some(Derived::Change) => query.changes.clone(),
                     _ => Vec::new(),
                 };
                 cross.push((axis, values));
@@ -331,6 +339,7 @@ impl<'a> Context<'a> {
         let mut revises: HashMap<RunId, usize> = HashMap::new();
         let mut verify_attempts: HashMap<RunId, HashSet<Option<i64>>> = HashMap::new();
         let mut claims: Vec<(RunId, TaskId, i64)> = Vec::new();
+        let mut first_claims: HashMap<RunId, &'a RunEvent> = HashMap::new();
         let mut ends: HashMap<RunId, i64> = HashMap::new();
         let mut waits: HashMap<RunId, Vec<(i64, Option<i64>)>> = HashMap::new();
         let mut person_waits: HashMap<RunId, Vec<(i64, Option<i64>)>> = HashMap::new();
@@ -347,6 +356,7 @@ impl<'a> Context<'a> {
             };
             match event.kind.known() {
                 Some(EventKind::RunClaimed) => {
+                    first_claims.entry(run_id.clone()).or_insert(event);
                     if runs_per_task
                         .entry(task_id)
                         .or_default()
@@ -430,6 +440,8 @@ impl<'a> Context<'a> {
             areas: input.areas,
             goal_id,
             cross,
+            layers: HashMap::new(),
+            first_claims,
             live: LiveSnapshot {
                 draft_origins: input.draft_origins.clone(),
                 utc_offset_secs: input.utc_offset_secs,
@@ -460,6 +472,37 @@ impl<'a> Context<'a> {
         };
         context.forecast = score::score(events, &context.marks);
         let everything = context.stats(None, None);
+        let rows: HashMap<&str, ledger::read::LedgerValues> = input
+            .rows
+            .iter()
+            .filter(|row| row.kind == LedgerKind::Run)
+            .map(|row| (row.key.as_str(), ledger::read::read(row)))
+            .collect();
+        context.layers = everything
+            .runs
+            .iter()
+            .map(|run| {
+                let row = rows.get(run.run_id.as_str());
+                let after_claim = row.and_then(|values| values.after_claim.clone());
+                let layers = match (row, after_claim) {
+                    // A row folded of a claim recorded before its
+                    // attributes were holds none: its claim's fields are
+                    // read as a legacy row reads them.
+                    (Some(values), Some(after_claim)) if !values.attributes.is_empty() => {
+                        RunLayers {
+                            attributes: values.attributes.clone(),
+                            after_claim,
+                        }
+                    }
+                    (Some(_), Some(after_claim)) => RunLayers {
+                        attributes: context.claim_layers(run).attributes,
+                        after_claim,
+                    },
+                    _ => context.claim_layers(run),
+                };
+                (run.run_id.clone(), layers)
+            })
+            .collect();
         let times: HashMap<EventId, i64> = events
             .iter()
             .filter_map(|event| Some((event.id, event_ms(event)?)))
@@ -508,21 +551,31 @@ impl<'a> Context<'a> {
         stats
     }
 
+    /// The layers of a run the ledger has no row of: its first claim's
+    /// recorded attributes, else the same keys from its measures, and the
+    /// facts after the claim from its measures, as the ledger's legacy row
+    /// reads them.
+    fn claim_layers(&self, run: &RunStats) -> RunLayers {
+        let claim = self.first_claims.get(&run.run_id).copied();
+        RunLayers {
+            attributes: ledger::claim_attributes(claim, run),
+            after_claim: ledger::after_claim_of(run),
+        }
+    }
+
     /// The values of `axis` for `run`: one, but for the area, the run's
     /// every area (`unknown` without one), and none without `[areas]`; and
     /// none for the toolchain unless the repository's profiles record the
     /// Rust toolchain.
-    fn axis_values(&self, run: &RunStats, axis: Axis) -> Vec<String> {
-        if axis == Axis::Toolchain && !self.rust_toolchain {
-            return Vec::new();
-        }
-        if axis != Axis::Area {
-            return vec![self.axis_value(run, axis)];
-        }
-        match &run.areas {
-            None => Vec::new(),
-            Some(areas) if areas.is_empty() => vec![UNKNOWN.to_owned()],
-            Some(areas) => areas.clone(),
+    fn axis_values(&self, run: &RunStats, axis: &Axis) -> Vec<String> {
+        match axis.derived() {
+            Some(Derived::Toolchain) if !self.rust_toolchain => Vec::new(),
+            Some(Derived::Area) => match &run.areas {
+                None => Vec::new(),
+                Some(areas) if areas.is_empty() => vec![UNKNOWN.to_owned()],
+                Some(areas) => areas.clone(),
+            },
+            _ => vec![self.axis_value(run, axis)],
         }
     }
 
@@ -534,7 +587,7 @@ impl<'a> Context<'a> {
         }
         let mut keys = vec!["cross:".to_owned()];
         for (axis, allowed) in &self.cross {
-            let mut values = self.axis_values(run, *axis);
+            let mut values = self.axis_values(run, axis);
             values.retain(|value| allowed.is_empty() || allowed.contains(value));
             values.sort_unstable();
             values.dedup();
@@ -555,46 +608,58 @@ impl<'a> Context<'a> {
         keys
     }
 
-    /// The value of `axis` for `run`.
-    fn axis_value(&self, run: &RunStats, axis: Axis) -> String {
-        let measures = &run.measures;
-        let text = |value: &Option<String>| value.clone().unwrap_or_else(|| UNKNOWN.to_owned());
-        match axis {
-            Axis::Change => run
+    /// The value of `axis` for `run` ([`Axis`]): a derived layer by its
+    /// rule ([`Derived`]), any other key the claim's attribute of it.
+    fn axis_value(&self, run: &RunStats, axis: &Axis) -> String {
+        let fallback;
+        let layers = match self.layers.get(&run.run_id) {
+            Some(layers) => layers,
+            None => {
+                fallback = self.claim_layers(run);
+                &fallback
+            }
+        };
+        let Some(derived) = axis.derived() else {
+            return layers
+                .attribute(axis.as_str())
+                .unwrap_or_else(|| UNKNOWN.to_owned());
+        };
+        let after = &layers.after_claim;
+        let text = |value: Option<String>| value.unwrap_or_else(|| UNKNOWN.to_owned());
+        let number = |key: &str| layers.attribute(key)?.parse::<f64>().ok();
+        match derived {
+            Derived::Change => run
                 .change
                 .as_ref()
                 .map_or(UNKNOWN, TaskChange::as_str)
                 .to_owned(),
-            Axis::Area => unreachable!("an area is one of a run's values (axis_values)"),
-            Axis::Build => text(&measures.dagq_version),
+            Derived::Area => unreachable!("an area is one of a run's values (axis_values)"),
+            Derived::Provider => text(after.last_provider.clone()),
             // A run that worked on Codex is no run of the host's Claude
             // Code (task 892).
-            Axis::Claude if measures.on_codex => NONE.to_owned(),
-            Axis::Claude => text(&measures.claude_version),
-            Axis::Provider => text(&measures.actual_provider),
-            Axis::Route => text(&measures.route),
-            Axis::Codex => text(&measures.codex_version),
+            Derived::Claude if after.on_codex => NONE.to_owned(),
+            Derived::Claude => text(layers.attribute("claude_version")),
+            Derived::Model if after.on_codex => text(after.codex_model.clone()),
+            Derived::Model => text(layers.attribute("claim_model")),
             // A claim that recorded the worker's session always wrote its
             // group (and effort), null outside the trial; a run on Codex is
             // outside it.
-            Axis::Group => match (&measures.trial_group, &measures.worker_effort) {
-                (Some(group), _) => group.clone(),
-                (None, Some(_)) => NONE.to_owned(),
-                (None, None) => UNKNOWN.to_owned(),
-            },
-            Axis::Model => text(&measures.worker_model),
-            Axis::Effort => text(&measures.worker_effort),
-            Axis::Nature => text(
-                &run.prediction
+            Derived::Group => {
+                let group = layers.attribute("trial_group").filter(|_| !after.on_codex);
+                match (group, layers.attribute("effort")) {
+                    (Some(group), _) => group,
+                    (None, Some(_)) => NONE.to_owned(),
+                    (None, None) => UNKNOWN.to_owned(),
+                }
+            }
+            Derived::Nature => text(
+                run.prediction
                     .as_ref()
                     .and_then(|p| p.prediction.get("nature")?.as_str().map(str::to_owned)),
             ),
-            Axis::Parallel => measures
-                .claim_parallel
-                .map_or_else(|| UNKNOWN.to_owned(), |parallel| parallel.to_string()),
-            Axis::Slot => match (measures.claim_slots, measures.claim_parallel) {
-                (Some(slots), Some(parallel)) if parallel > 0 => {
-                    let used = float(slots) / float(parallel);
+            Derived::Slot => match (number("slots"), number("parallel")) {
+                (Some(slots), Some(parallel)) if parallel > 0.0 => {
+                    let used = slots / parallel;
                     if used < 0.5 {
                         "low"
                     } else if used < 1.0 {
@@ -606,7 +671,7 @@ impl<'a> Context<'a> {
                 _ => UNKNOWN,
             }
             .to_owned(),
-            Axis::Load => match (measures.claim_load_avg, self.cores) {
+            Derived::Load => match (number("load_avg"), self.cores) {
                 (Some(load), Some(cores)) if cores > 0 => {
                     #[allow(clippy::cast_precision_loss)]
                     let per_core = load / cores as f64;
@@ -623,7 +688,10 @@ impl<'a> Context<'a> {
                 _ => UNKNOWN,
             }
             .to_owned(),
-            Axis::Toolchain => match measures.rustc() {
+            Derived::Toolchain => match (
+                layers.attribute("rustc_release"),
+                layers.attribute("rustc_host"),
+            ) {
                 (Some(release), Some(host)) => format!("{release} {host}"),
                 _ => UNKNOWN.to_owned(),
             },
@@ -732,7 +800,7 @@ impl<'a> Context<'a> {
             for key in self.cross_keys(run) {
                 groups.entry(key).or_default().push(run);
             }
-            for &axis in axes {
+            for axis in axes {
                 for value in self.axis_values(run, axis) {
                     let key = format!("{}={value}", axis.as_str());
                     groups.entry(key).or_default().push(run);
@@ -775,7 +843,7 @@ impl<'a> Context<'a> {
             .filter(|e| e.kind == EventKind::AskOpened)
         {
             *asks.entry(ALL.to_owned()).or_default() += 1;
-            if event.task_id.is_some() && axes.contains(&Axis::Change) {
+            if event.task_id.is_some() && axes.contains(&Axis::CHANGE) {
                 *asks
                     .entry(format!("change={}", self.change_of(event.task_id)))
                     .or_default() += 1;
@@ -1147,7 +1215,7 @@ impl<'a> Context<'a> {
                 Measure::ratio(float(sent_back.subjects), reviewed),
             );
         }
-        if axes.contains(&Axis::Change) {
+        if axes.contains(&Axis::CHANGE) {
             for change in &reasons.review.by_change {
                 put(
                     "review.sendback_rate",
@@ -1367,11 +1435,11 @@ impl<'a> Context<'a> {
                 format!("actor={}", execution.actor),
                 format!("provider={}", execution.provider),
             ];
-            if execution.run_id.is_some() && axes.contains(&Axis::Change) {
+            if execution.run_id.is_some() && axes.contains(&Axis::CHANGE) {
                 whole.push(format!("change={}", self.change_of(execution.task_id)));
             }
             if let (Some(run), Some(areas)) = (&execution.run_id, self.areas)
-                && axes.contains(&Axis::Area)
+                && axes.contains(&Axis::AREA)
             {
                 match areas.get(run).filter(|areas| !areas.is_empty()) {
                     Some(areas) => whole.extend(areas.iter().map(|area| format!("area={area}"))),

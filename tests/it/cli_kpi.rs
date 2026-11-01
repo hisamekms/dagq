@@ -993,11 +993,12 @@ fn kpi_cross_reaches_periods_and_compare_without_replacing_single_axes() {
     }
     // `add --interactive` is refused and claims run headless (ADR-t1433-2);
     // task 3's claim stands for one recorded before, which kpi still reads
-    // by its route.
+    // by its route (the attribute the claim recorded of it).
     rusqlite::Connection::open(&db)
         .unwrap()
         .execute(
-            "UPDATE run_events SET payload=json_set(payload,'$.worker_mode','interactive')
+            "UPDATE run_events SET payload=json_set(payload,'$.worker_mode','interactive',
+              '$.attributes.route','interactive')
               WHERE kind='run_claimed' AND task_id=3",
             [],
         )

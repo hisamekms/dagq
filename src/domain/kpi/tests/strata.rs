@@ -60,11 +60,11 @@ fn splits_the_runs_by_change_and_attributes_per_day() {
         last: 2,
         at: Some(Cursor::Time(tuesday * 1000)),
         by: vec![
-            Axis::Parallel,
-            Axis::Load,
-            Axis::Provider,
-            Axis::Route,
-            Axis::Codex,
+            Axis::PARALLEL,
+            Axis::LOAD,
+            Axis::PROVIDER,
+            Axis::ROUTE,
+            Axis::CODEX,
         ],
         ..KpiQuery::default()
     };
@@ -197,7 +197,7 @@ fn the_toolchain_axis_splits_only_dagqs_source() {
     let query = KpiQuery {
         last: 1,
         at: Some(Cursor::Time(MONDAY * 1000)),
-        by: vec![Axis::Toolchain],
+        by: vec![Axis::TOOLCHAIN],
         ..KpiQuery::default()
     };
     let result = queue.kpi(MONDAY + DAY + HOUR, &KpiConfig::default(), &query);
@@ -347,7 +347,7 @@ fn splits_the_landed_runs_by_their_areas() {
             .keys()
             .all(|stratum| !stratum.starts_with("area=") || stratum == "area=src")
     );
-    assert_eq!("area".parse::<Axis>(), Ok(Axis::Area));
+    assert_eq!("area".parse::<Axis>(), Ok(Axis::AREA));
 }
 
 /// The runs split by their task's change (ADR-t980-1): `change=<change>`
@@ -470,5 +470,5 @@ fn splits_the_runs_by_their_change() {
         .compare
         .unwrap();
     assert_eq!(asked.change_summary.keys().collect::<Vec<_>>(), ["fix"]);
-    assert_eq!("change".parse::<Axis>(), Ok(Axis::Change));
+    assert_eq!("change".parse::<Axis>(), Ok(Axis::CHANGE));
 }

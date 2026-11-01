@@ -522,6 +522,13 @@ pub const SEARCH_KINDS: [&str; 4] = ["task", "goal", "note", "commit"];
 /// d2 draws, so that no read starts a program on the service's side.
 pub const GRAPH_FORMATS: [&str; 2] = ["json", "d2"];
 
+/// A `kpi --by`: a layer's key ([`crate::domain::kpi::Axis`]).
+pub fn parse_kpi_layer(value: &str) -> Result<String, String> {
+    value
+        .parse::<crate::domain::kpi::Axis>()
+        .map(|axis| axis.as_str().to_owned())
+}
+
 /// A `kpi --change`: a task change, or `unknown` for the tasks without one.
 pub fn parse_kpi_change(value: &str) -> Result<String, String> {
     use crate::domain::TaskChange;
@@ -1326,7 +1333,7 @@ mod tests {
     }
 
     #[test]
-    fn kpi_rejects_an_unknown_axis_with_its_message() {
+    fn kpi_takes_any_attribute_key_and_rejects_a_malformed_one() {
         let Some(QueueRead::Kpi(mut read)) = QueueRead::parse(UseCase::Kpi, &json!({})).unwrap()
         else {
             panic!("no kpi read");
@@ -1335,6 +1342,13 @@ mod tests {
         assert_eq!(query.last, 7);
         assert!(query.by.is_empty());
         read.by = vec!["nope".into()];
-        assert!(kpi_query(&read).is_err());
+        assert_eq!(kpi_query(&read).unwrap().by[0].as_str(), "nope");
+        read.by = vec!["a=b".into()];
+        assert!(
+            kpi_query(&read)
+                .unwrap_err()
+                .to_string()
+                .contains("toolchain")
+        );
     }
 }
