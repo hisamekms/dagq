@@ -285,7 +285,7 @@ pub const RESERVED: [&str; 10] = [
 /// tried in order (the first one present): the one place a new attribute
 /// is added. The fields are those the claim wrote from
 /// [`super::measure::ClaimAttributes`], the run and its session.
-pub const KEYS: [(&str, &[&str]); 19] = [
+pub const KEYS: [(&str, &[&str]); 20] = [
     ("build", &["dagq_version"]),
     ("claude_version", &["claude_version"]),
     ("codex", &["codex_version"]),
@@ -300,6 +300,8 @@ pub const KEYS: [(&str, &[&str]); 19] = [
     ("claim_model", &["model"]),
     ("effort", &["effort"]),
     ("trial_group", &["group"]),
+    // The name of the trial the group was drawn in (ADR-t3957-1 decision 7).
+    ("trial", &["trial"]),
     ("instructions_prompt", &["instructions_prompt"]),
     ("instructions_plugin", &["instructions_plugin"]),
     ("instructions_repo", &["instructions_repo"]),
@@ -702,6 +704,7 @@ mod tests {
         direct.insert("provider".to_owned(), json!("claude"));
         direct.insert("model".to_owned(), json!("opus"));
         direct.insert("group".to_owned(), json!("b"));
+        direct.insert("trial".to_owned(), json!("ab-1"));
         assert_eq!(
             Value::Object(attributes(&direct)),
             json!({
@@ -709,6 +712,7 @@ mod tests {
                 "claim_provider": "claude",
                 "claim_model": "opus",
                 "trial_group": "b",
+                "trial": "ab-1",
             })
         );
     }

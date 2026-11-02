@@ -131,7 +131,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   欄は受け付けるがworkerにもruntimeのplannerにも効かず、wrapperは値に関わらずbackgroundで起動する（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定2、[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)、[Plan planners](plan-planners.md)）。
   値が`"workspace"`なら、supervisorはworkerに効かないことをprocessごとに1回だけ警告する。
   欄を消すのは、古い固定バイナリが欄の無い`dagq.toml`を読めることを確かめた後にする。
-- `[worker.trial]`はworkerのmodelの限定の試しの設定で、keyと既定は`domain::worker_model::WorkerTrial`が持つ（[Worker model](worker-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定4）。
+- `[worker.trial]`はworkerのmodel・effortの試し（群の割合と段の上の候補）の設定で、keyと既定は`domain::worker_model::WorkerTrial`が持つ（[Worker model](worker-model.md#限定の試しworkertrial)、ADR-t3957-1）。
   supervisorがclaimのpassごとに読み、読めなければ試しの外でclaimする。
   taskに由来する失敗の後のworkerのsessionの段上げ（決定5、[Worker model](worker-model.md#段上げ決定5)）は設定を持たず、`[worker.trial]`の有無に関係なく働く。
 

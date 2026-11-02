@@ -19,3 +19,4 @@ mod session;
 
 mod already_satisfied;
 mod review_launch;
+mod worker_trial;

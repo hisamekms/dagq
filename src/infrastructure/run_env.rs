@@ -2150,11 +2150,37 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 );
                 let value = rest.trim();
                 let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
-                if key == "enabled" {
-                    config.worker_trial.enabled = parse_bool(value).with_context(with)?;
-                } else {
-                    let window = parse_positive(value, "number").with_context(with)?;
-                    config.worker_trial.window = usize::try_from(window).with_context(with)?;
+                let trial = &mut config.worker_trial;
+                match key {
+                    "enabled" => trial.enabled = parse_bool(value).with_context(with)?,
+                    "limited" => trial.limited = parse_bool(value).with_context(with)?,
+                    "window" => {
+                        let window = parse_positive(value, "number").with_context(with)?;
+                        trial.window = usize::try_from(window).with_context(with)?;
+                    }
+                    "treatment_percent" => {
+                        let digits = strip_comment(value);
+                        let percent = digits
+                            .parse::<u8>()
+                            .ok()
+                            .filter(|percent| *percent <= 100)
+                            .with_context(|| {
+                                format!("expected a whole percent from 0 to 100, not {digits}")
+                            })
+                            .with_context(with)?;
+                        trial.treatment_percent = percent;
+                    }
+                    _ => {
+                        let text = parse_string(value).with_context(with)?;
+                        let field = match key {
+                            "name" => &mut trial.name,
+                            "control_model" => &mut trial.control.model,
+                            "control_effort" => &mut trial.control.effort,
+                            "treatment_model" => &mut trial.treatment.model,
+                            _ => &mut trial.treatment.effort,
+                        };
+                        *field = text;
+                    }
                 }
                 trial_keys.push(key.to_owned());
             }
@@ -2412,6 +2438,12 @@ pub fn parse_config(text: &str) -> Result<Config> {
         .map(|areas| AreaMap::new(areas).map_err(anyhow::Error::msg))
         .transpose()
         .with_context(|| format!("{CONFIG_FILE_NAME}: [{AREAS_TABLE}]"))?;
+    // A candidate off the ladder is refused whole, its keys read
+    // (ADR-t3957-1 decision 2).
+    config
+        .worker_trial
+        .check()
+        .map_err(|error| anyhow::anyhow!("{CONFIG_FILE_NAME}: [{WORKER_TRIAL_TABLE}]: {error}"))?;
     if let Some((changes, line)) = light_changes {
         config.supervisor.light_changes = Some(
             LightChanges::new(changes, config.changes.as_ref())
@@ -5947,8 +5979,26 @@ LITERAL = 'no \n escapes # here'
             config.worker_trial,
             WorkerTrial {
                 enabled: true,
-                window: 30
+                window: 30,
+                ..WorkerTrial::default()
             }
+        );
+        let set = parse_config(
+            "[worker.trial]\nenabled = true\nname = \"ab-1\"\ntreatment_percent = 10 # small\n\
+             control_model = \"claude-opus-5-5\"\ncontrol_effort = \"high\"\n\
+             treatment_model = \"claude-opus-5-5\"\ntreatment_effort = \"medium\"\nlimited = false\n",
+        )
+        .unwrap()
+        .worker_trial;
+        assert_eq!(
+            (
+                set.name.as_str(),
+                set.treatment_percent,
+                set.control.effort.as_str(),
+                set.treatment.model.as_str(),
+                set.limited
+            ),
+            ("ab-1", 10, "high", "claude-opus-5-5", false)
         );
         let off = parse_config("[worker.trial]\nenabled = false\n").unwrap();
         assert_eq!(off.worker_trial, WorkerTrial::default());
@@ -5959,6 +6009,20 @@ LITERAL = 'no \n escapes # here'
             ),
             ("[worker.trial]\nenabled = 1", "expected true or false"),
             ("[worker.trial]\nwindow = 0", "positive number"),
+            (
+                "[worker.trial]\ntreatment_percent = 101",
+                "whole percent from 0 to 100",
+            ),
+            ("[worker.trial]\ntreatment_percent = -1", "whole percent"),
+            ("[worker.trial]\nname = \" \"", "is blank"),
+            (
+                "[worker.trial]\ntreatment_effort = \"high\"",
+                "[worker.trial]: the treatment candidate claude-sonnet-5/high is not a step of the ladder",
+            ),
+            (
+                "[worker.trial]\ncontrol_model = \"gpt-5\"",
+                "the control candidate gpt-5/medium is not a step",
+            ),
             (
                 "[worker.trial]\nwindow = 1\nwindow = 2",
                 "window is defined twice",

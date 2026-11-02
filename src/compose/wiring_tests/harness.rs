@@ -67,7 +67,9 @@ fn memdb(name: &str) -> PathBuf {
     PathBuf::from(format!("file:/{name}?vfs=memdb"))
 }
 
-fn connect(uri: &Path) -> Connection {
+/// A connection to the memdb queue at `uri`, as a test writes what no
+/// use case of the supervisor's writes (a plan review's prediction).
+pub(super) fn connect(uri: &Path) -> Connection {
     Connection::open_with_flags(
         uri,
         OpenFlags::SQLITE_OPEN_READ_WRITE

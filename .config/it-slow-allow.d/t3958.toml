@@ -1,0 +1,8 @@
+# The items of task 3958 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 6.9s under the stress: a real supervisor, four claims and their session wrappers in one supervise
+[[test]]
+name = "worker_model::the_trial_alternates_the_mechanical_tasks_of_the_lower_third"
+reason = "B 境界（守る境界）: 実の supervisor のプロセスが checkout の dagq.toml の [worker.trial] を読み、claim が選んだ群の model・effort で session の wrapper のプロセスが turn を起動することを、SQLite の run_claimed と wrapper の記録の配線で確かめる（割り当て・候補・段上げの判断は domain::worker_model の unit test、claim から run_claimed の記録までの配線は compose::wiring_tests::worker_trial）"
+task = 3958

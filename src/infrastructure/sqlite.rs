@@ -3130,6 +3130,7 @@ pub(super) fn claim_task(
         worker_model::TrialChoice {
             session: worker_model::WorkerSession::default(),
             percentile: None,
+            trial: None,
         }
     } else {
         worker_model::choose(trial, task.id(), &trial_events(tx, trial)?)
@@ -3226,6 +3227,10 @@ pub(super) fn claim_task(
             payload.extend(session.fields_on(route.actual.provider));
             if let Some(percentile) = choice.percentile {
                 payload.insert("trial_percentile".to_owned(), json!(percentile));
+            }
+            // The trial's name next to its group (ADR-t3957-1 decision 7).
+            if let (Some(_), Some(name)) = (session.group, &choice.trial) {
+                payload.insert("trial".to_owned(), json!(name));
             }
             if inherited {
                 payload.insert("escalation_inherited".to_owned(), json!(true));

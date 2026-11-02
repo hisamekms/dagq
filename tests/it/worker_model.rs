@@ -6,6 +6,10 @@ use dagq::domain::LeaseToken;
 use dagq::domain::{ClaimOutcome, worker_model::WorkerTrial};
 use runtime_support::*;
 
+/// A trial name whose hash draws task 1 into the control and tasks 2 and 3
+/// into the treatment at the default share (`WorkerTrial::draw`).
+const DRAWN: &str = "ab-8";
+
 /// Record plan review's prediction for `task` the way `finish_plan_review`
 /// does.
 fn predict(db: &Path, task: i64, nature: &str, tokens: u64) {
@@ -63,14 +67,14 @@ fn workers_start_at_opus_medium_by_default() {
 }
 
 /// With the trial on, the two mechanical tasks of the lower third take the
-/// control and then the treatment, started at Sonnet 5 medium; the others
-/// stay at the default outside any group.
+/// groups their hash draws, the treatment started at Sonnet 5 medium; the
+/// others stay at the default outside any group.
 #[test]
 fn the_trial_alternates_the_mechanical_tasks_of_the_lower_third() {
     let (_dir, repo, db) = fixture();
     fs::write(
         repo.join("dagq.toml"),
-        "[worker.trial]\nenabled = true\nwindow = 3\n",
+        format!("[worker.trial]\nenabled = true\nwindow = 3\nname = \"{DRAWN}\"\n"),
     )
     .unwrap();
     git(&repo, &["add", "dagq.toml"]);
@@ -138,6 +142,7 @@ fn claims_choose_the_session_in_their_transaction() {
     let on = WorkerTrial {
         enabled: true,
         window: 2,
+        ..WorkerTrial::default()
     };
     let claim = |queue: &mut SqliteQueue, task: i64, trial: &WorkerTrial| {
         let outcome = queue
@@ -192,6 +197,8 @@ fn stats_compare_the_groups() {
     let on = WorkerTrial {
         enabled: true,
         window: 2,
+        name: DRAWN.to_owned(),
+        ..WorkerTrial::default()
     };
     for task in 1..=3 {
         let ClaimOutcome::Claimed { run } = queue
@@ -264,7 +271,7 @@ fn stats_compare_the_groups() {
     assert_eq!(of(3)["trial_group"], Value::Null);
 }
 
-/// Task 892: a run on Codex takes no group and no turn of the trial, its
+/// Task 892: a run on Codex takes no group of the trial, its
 /// claim names no Claude model (the step is `ladder_model`, and why no
 /// model is known is `model_unknown`), and `stats` leaves it out of the
 /// groups and of the host's Claude version.
@@ -304,6 +311,8 @@ fn a_codex_run_is_outside_the_trial() {
     let on = WorkerTrial {
         enabled: true,
         window: 2,
+        name: DRAWN.to_owned(),
+        ..WorkerTrial::default()
     };
     for task in 1..=3 {
         let ClaimOutcome::Claimed { run } = queue
@@ -346,7 +355,7 @@ fn a_codex_run_is_outside_the_trial() {
         dagq::domain::worker_model::CODEX_MODEL_UNKNOWN
     );
     assert_eq!(on_codex.get("trial_percentile"), None);
-    // The Codex run took no turn: the next subject is the treatment.
+    // The Codex run took no group; task 3 is drawn into the treatment.
     assert_eq!(
         session_of(&claimed(&mut queue, 3)),
         (

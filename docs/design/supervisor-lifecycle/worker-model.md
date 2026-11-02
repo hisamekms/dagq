@@ -52,7 +52,7 @@ Codexのworkerは段のClaudeのmodelを使わず（[provider-lifecycle](../prov
 - 読み戻し（`WorkerSession::current`）はその段のmodelを段として読むので、段上げとtaskへの引き継ぎはClaudeのrunと同じに働く（効くのはeffortだけ）
 - Codexが実際に使ったmodelは、turnごとに`turn_finished`に残る（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。
   `stats`・`kpi`のrunのmodelはCodexで始まったrunではこの最初のturnのmodel（[stats](commands.md)）
-- Codexで動くclaimは試しに入らない: `choose`を呼ばず、群も百分位も持たず、交互の順番も取らない（群を持ったtaskでもそのrunは群null）。
+- Codexで動くclaimは試しに入らない: `choose`を呼ばず、群も百分位も持たない（群を持ったtaskでもそのrunは群null）。
   Claudeでclaimして群を持ったrunが途中でCodexへ移ったとき（ADR-t813-2のフォールバック）は、claimの群は記録に残るが、`stats`・`kpi`はCodexで作業したrunとして試しの集計とClaudeの層から外す（[stats](commands.md)）。
   taskの群は変わらないので、そのtaskの後のClaudeのrunは同じ群で起動する
 
@@ -82,28 +82,22 @@ Codexのworkerは段のClaudeのmodelを使わず（[provider-lifecycle](../prov
 
 ## 限定の試し（`[worker.trial]`）
 
-`dagq.toml`の`[worker.trial]`で有効にしたときだけ働く。
-有効にするのは人の判断（書式は[Run environment](run-environment.md)）。
+`dagq.toml`の`[worker.trial]`で有効にしたときだけ働く（[ADR-t3957-1](../../adr/2026-11-02-t3957-1-production-ab-of-worker-and-runtime-planner-model-and-effort.md)、ADR-0079の決定4をamends）。
+有効にするのは人の判断。
+keyと既定値の意味は`domain::worker_model::WorkerTrial`のdoc commentが持つ。
 
-- **読む時点**: supervisorがclaimのpassごとに読む（`Verifier::worker_trial`）ので、有効・無効の切り替えは再起動なしに次のclaimから効く。
+- **読む時点**: supervisorがclaimのpassごとに読む（`Verifier::worker_trial`）ので、設定の変更は再起動なしに次のclaimから効く。
   読めないときはwarnをlogに出して試しの外でclaimする（壊れた`dagq.toml`はprovisioningがerrorにする）。
+- **設定の検査**: 候補が段（`LADDER`）の上の組でないものなど、`WorkerTrial::check`が断る値は`dagq.toml`の読み込みが断る。
+  段の外の組は段上げで上がらないため（決定2）。
 - **選ぶ場所**: claimのtransactionの中（`infrastructure::sqlite::claim_task`）で、queueの`task_weight_predicted`と`run_claimed`を読み、純粋関数`domain::worker_model::choose`が決める。
-  交互の順番をtransactionの中で決めるので、並行するclaimが同じ番を取らない。
-- **群の固定**: 前のrunの`run_claimed`で群を持ったtaskは、同じ群のmodel / effortで起動する（resume・revise・retryで変えない。予測が後で変わっても変えない）。
+- **決定的な割り当て**: 群をまだ持たない対象のtaskは、試しの名前とtaskのIDのhashを割合と比べて群を決める（`WorkerTrial::draw`）。
+  claimの順や並行に依らず、同じ設定なら同じtaskは同じ群になる。
+- **群の固定**: 前のrunの`run_claimed`で群を持ったtaskは、その群の今の候補で起動する（resume・revise・retryで変えない。予測・割合・試しの名前が後で変わっても変えない）。
   試しを無効に戻すと、群を持ったtaskも既定で起動する。
-- **対象と割り当て**: 群を持たないtaskのうち、`choose`の条件に当たるものが、前に群を持ったtaskと交互の群になる。
-- **対象外**: 条件に当たらないtaskは既定のまま（群はnull）。
-
-[ADR-t3957-1](../../adr/2026-11-02-t3957-1-production-ab-of-worker-and-runtime-planner-model-and-effort.md)（ADR-0079の決定4をamends）は、試しを割合と候補の組を設定で受ける本番のA/Bにすると決めた。
-上の交互の割り当ては`choose`が今していることで、この決定の実装が入ると次の約束に置き換わる。
-入口は同じclaimのtransactionの`choose`のままにする。
-
-- **決定的な割り当て**: 群をまだ持たないtaskは、試しの名前とtaskのIDのhashで群を決め、claimの順や並行に依らない。
-  一度持った群はresume・revise・retryで変えず、割合や候補や試しの名前を後で変えても保つ。
-- **候補**: controlとtreatmentはそれぞれ段の上のmodelとeffortの組で、providerを含まない（Codexで動くclaimは今どおり群null）。
-  holdの解除がmodelを選んだtaskは今どおり群null。
-- **対象の限定**: mechanicalかつ下位3分の1に限るかは設定で選び、限らないときも予測の無いtaskは対象にしない。
-- **群の置き場**: 群は台帳に専用の欄を足さず、runの属性の組に置く（一般のA/Bへ移せる形。決定7）。
+- **対象外**: 対象に当たらないtask、予測の無いtask、holdの解除がmodelを選んだtaskは群null。
+- **記録**: 群・model・effortは`run_claimed`の属性の組に置き、群を持つclaimは群を引いた試しの名前も残す。
+  台帳とkpiに群専用の欄は足さない（一般のA/Bへ移せる形。決定7）。
 
 [ADR-t4005-1](../../adr/2026-11-02-t4005-1-production-ab-of-worker-and-review-provider-pairs.md)（ADR-t3957-1の決定2をamends）は、model・effortの試しと別の試しとして、workerとそのrunのreviewのproviderの組を群に分けると決めた。
 群を引く場所はmodel・effortの試しと同じclaimのtransactionで、次を約束する。

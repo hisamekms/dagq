@@ -126,8 +126,8 @@ pub(super) enum Outcome {
 /// The verification of a test: each command it is asked to run is
 /// recorded with where it ran and ends as the test says (passing unless
 /// named), its log written empty; the repository's `dagq.toml` is the
-/// defaults' but for its `[roles.<role>]`, which the checkout's `dagq.toml`
-/// a test sets gives ([`FakeVerifier::set_config`]), and the review's
+/// defaults' but for its `[roles.<role>]` and `[worker.trial]`, which the
+/// checkout's `dagq.toml` a test sets gives ([`FakeVerifier::set_config`]), and the review's
 /// agents and programs, read from the text a review reads off the landing
 /// branch.
 pub(super) struct FakeVerifier {
@@ -200,6 +200,15 @@ impl Verifier for FakeVerifier {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         Ok(crate::infrastructure::run_env::parse_config(&config)?.roles)
+    }
+
+    fn worker_trial(&self) -> Result<crate::domain::worker_model::WorkerTrial> {
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Ok(crate::infrastructure::run_env::parse_config(&config)?.worker_trial)
     }
 
     fn review_subagents_in(

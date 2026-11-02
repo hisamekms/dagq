@@ -1,10 +1,10 @@
 //! The model and effort a worker session is started with (ADR-0079
-//! decisions 3 and 4): Opus 5.5 at medium effort, given explicitly, unless
-//! the limited trial of `dagq.toml`'s `[worker.trial]` is on and the task
-//! is one of its subjects (predicted `mechanical`, its
-//! `expected_output_tokens` in the lower third of the latest predictions),
-//! whose first claims alternate between the control (Opus 5.5 medium) and
-//! the treatment (Sonnet 5 medium). The group stays with the task.
+//! decisions 3 and 4, ADR-t3957-1): Opus 5.5 at medium effort, given
+//! explicitly, unless the trial of `dagq.toml`'s `[worker.trial]`
+//! ([`WorkerTrial`]) is on and the task is one of its subjects, which the
+//! hash of the trial's name and the task's ID draws into the control or the
+//! treatment at the configured share, each group opening its candidate (a
+//! step of [`LADDER`]). The group stays with the task.
 //!
 //! A session opened after a failure the task caused (decision 5: a failed
 //! verification, a review's `revise`, a concern a person sent back) is
@@ -97,22 +97,55 @@ string_enum!(TrialGroup {
     Treatment => "treatment",
 });
 
-impl TrialGroup {
-    /// The other group.
-    pub const fn other(self) -> Self {
-        match self {
-            Self::Control => Self::Treatment,
-            Self::Treatment => Self::Control,
+/// A candidate of a trial group: the model and effort its sessions open
+/// with, a step of [`LADDER`] (ADR-t3957-1 decision 2).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TrialCandidate {
+    pub model: String,
+    pub effort: String,
+}
+
+impl TrialCandidate {
+    fn of(model: &str, effort: &str) -> Self {
+        Self {
+            model: model.to_owned(),
+            effort: effort.to_owned(),
         }
     }
 }
 
-/// `[worker.trial]` of `dagq.toml`: off unless a person turns it on, and
-/// how many of the latest predictions a task is ranked among.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// `[worker.trial]` of `dagq.toml` (ADR-0079 decision 4, ADR-t3957-1): off
+/// unless a person turns it on. Its keys:
+///
+/// - `enabled`: whether the trial assigns groups; `false` by default.
+/// - `name`: the trial's name, hashed with a task's ID to draw its group
+///   and recorded as `trial` next to the group; `worker` by default.
+///   Renaming it redraws only the tasks without a group yet.
+/// - `treatment_percent`: the share of the subjects drawn into the
+///   treatment, a whole percent from 0 to 100; 50 by default.
+/// - `control_model` and `control_effort`: the control's candidate;
+///   `claude-opus-5-5` at `medium` by default.
+/// - `treatment_model` and `treatment_effort`: the treatment's candidate;
+///   `claude-sonnet-5` at `medium` by default.
+/// - `limited`: whether only tasks predicted `mechanical` with
+///   `expected_output_tokens` in the lower third are subjects; `true` by
+///   default. Without it, every task with a prediction is a subject.
+/// - `window`: how many of the latest predictions a task is ranked among
+///   for the lower third; [`PREDICTION_WINDOW`] by default.
+///
+/// A candidate must be a step of [`LADDER`] ([`Self::check`]), so that a
+/// task-caused failure raises it; the provider is not a candidate's (a
+/// Codex claim is outside the trial).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct WorkerTrial {
     pub enabled: bool,
     pub window: usize,
+    pub name: String,
+    pub treatment_percent: u8,
+    pub control: TrialCandidate,
+    pub treatment: TrialCandidate,
+    pub limited: bool,
 }
 
 impl Default for WorkerTrial {
@@ -120,12 +153,84 @@ impl Default for WorkerTrial {
         Self {
             enabled: false,
             window: PREDICTION_WINDOW,
+            name: "worker".to_owned(),
+            treatment_percent: 50,
+            control: TrialCandidate::of(OPUS, MEDIUM),
+            treatment: TrialCandidate::of(SONNET, MEDIUM),
+            limited: true,
         }
     }
 }
 
 impl WorkerTrial {
-    pub const KEYS: [&'static str; 2] = ["enabled", "window"];
+    pub const KEYS: [&'static str; 9] = [
+        "enabled",
+        "name",
+        "treatment_percent",
+        "control_model",
+        "control_effort",
+        "treatment_model",
+        "treatment_effort",
+        "limited",
+        "window",
+    ];
+
+    /// Why the trial cannot be taken: a percent above 100, a blank name or
+    /// a candidate off [`LADDER`].
+    pub fn check(&self) -> Result<(), String> {
+        if self.treatment_percent > 100 {
+            return Err(format!(
+                "treatment_percent {} is not between 0 and 100",
+                self.treatment_percent
+            ));
+        }
+        if self.name.trim().is_empty() {
+            return Err("name is blank".to_owned());
+        }
+        for (group, candidate) in [("control", &self.control), ("treatment", &self.treatment)] {
+            if !LADDER.contains(&(candidate.model.as_str(), candidate.effort.as_str())) {
+                let steps: Vec<String> = LADDER
+                    .iter()
+                    .map(|(model, effort)| format!("{model}/{effort}"))
+                    .collect();
+                return Err(format!(
+                    "the {group} candidate {}/{} is not a step of the ladder; the steps are {}",
+                    candidate.model,
+                    candidate.effort,
+                    steps.join(", ")
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The session of `group`: its candidate, in the group.
+    pub fn session(&self, group: TrialGroup) -> WorkerSession {
+        let candidate = match group {
+            TrialGroup::Control => &self.control,
+            TrialGroup::Treatment => &self.treatment,
+        };
+        WorkerSession {
+            model: candidate.model.clone(),
+            effort: candidate.effort.clone(),
+            group: Some(group),
+        }
+    }
+
+    /// The group `task` is drawn into: the treatment when the hash of the
+    /// trial's name and the task's ID falls below `treatment_percent` of
+    /// 100, whatever the order of the claims (ADR-t3957-1 decision 1).
+    pub fn draw(&self, task: TaskId) -> TrialGroup {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(format!("{}:{task}", self.name).as_bytes());
+        let mut head = [0; 8];
+        head.copy_from_slice(&digest[..8]);
+        if u64::from_be_bytes(head) % 100 < u64::from(self.treatment_percent) {
+            TrialGroup::Treatment
+        } else {
+            TrialGroup::Control
+        }
+    }
 }
 
 /// The model and effort of a worker session, and its trial group (none
@@ -148,19 +253,6 @@ impl Default for WorkerSession {
 }
 
 impl WorkerSession {
-    /// The session of a trial group.
-    pub fn of_group(group: TrialGroup) -> Self {
-        let model = match group {
-            TrialGroup::Control => OPUS,
-            TrialGroup::Treatment => SONNET,
-        };
-        Self {
-            model: model.to_owned(),
-            effort: MEDIUM.to_owned(),
-            group: Some(group),
-        }
-    }
-
     /// `model`, `effort` and `group` for the payload of the event that
     /// opens the session (`run_claimed`, `resume_started`,
     /// `revise_requested`).
@@ -449,6 +541,10 @@ pub struct TrialChoice {
     /// Where the task's `expected_output_tokens` fell among the latest
     /// predictions, when it was ranked.
     pub percentile: Option<f64>,
+    /// The name of the trial the task's group was drawn in, to record next
+    /// to the group: a kept group's from the claim that recorded it (the
+    /// current name when it recorded none), a new one's the current name.
+    pub trial: Option<String>,
 }
 
 /// The session `task` is claimed with now. `events` are the queue's
@@ -456,23 +552,25 @@ pub struct TrialChoice {
 /// ignored).
 ///
 /// With the trial off, or for a task outside it, the default. A task that
-/// was assigned a group keeps it. Otherwise the task joins when its last
-/// prediction is `mechanical` and its `expected_output_tokens` is at most
-/// the [`LOWER_THIRD`] percentile of the last prediction of the
-/// `trial.window` latest other tasks; with fewer predictions than that, or
-/// without its own, it does not. A task that joins takes the group other
-/// than the last task that joined; the first is the control. The
-/// prediction's `rework_probability` plays no part in the choice.
+/// was assigned a group keeps it, whatever its prediction, the share or the
+/// trial's name now (ADR-t3957-1 decision 1), and opens the group's
+/// candidate. Otherwise a task with a prediction is a subject, and when
+/// the trial is `limited` only when its last prediction is `mechanical`
+/// and its `expected_output_tokens` is at most the [`LOWER_THIRD`]
+/// percentile of the last prediction of the `trial.window` latest other
+/// tasks (with fewer predictions than that it is not). A subject's group is
+/// [`WorkerTrial::draw`]n. The prediction's `rework_probability` plays no
+/// part in the choice.
 pub fn choose(trial: &WorkerTrial, task: TaskId, events: &[RunEvent]) -> TrialChoice {
     let outside = |percentile| TrialChoice {
         session: WorkerSession::default(),
         percentile,
+        trial: None,
     };
     if !trial.enabled {
         return outside(None);
     }
-    // The first group of each task, in the order they joined.
-    let mut joined: Vec<(TaskId, TrialGroup)> = Vec::new();
+    let mut kept: Option<(TrialGroup, Option<String>)> = None;
     let mut history: Vec<(TaskId, u64)> = Vec::new();
     let mut own: Option<(TaskNature, u64)> = None;
     for event in events {
@@ -480,12 +578,11 @@ pub fn choose(trial: &WorkerTrial, task: TaskId, events: &[RunEvent]) -> TrialCh
             continue;
         };
         match event.kind.known() {
-            Some(EventKind::RunClaimed) => {
-                if let Some(group) = group_of(&event.payload)
-                    && joined.iter().all(|(other, _)| *other != task_id)
-                {
-                    joined.push((task_id, group));
-                }
+            Some(EventKind::RunClaimed) if task_id == task && kept.is_none() => {
+                kept = group_of(&event.payload).map(|group| {
+                    let name = event.payload["trial"].as_str().map(str::to_owned);
+                    (group, name)
+                });
             }
             Some(EventKind::TaskWeightPredicted) => {
                 let prediction = &event.payload["prediction"];
@@ -503,29 +600,31 @@ pub fn choose(trial: &WorkerTrial, task: TaskId, events: &[RunEvent]) -> TrialCh
             _ => {}
         }
     }
-    if let Some(&(_, group)) = joined.iter().find(|(other, _)| *other == task) {
+    if let Some((group, name)) = kept {
         return TrialChoice {
-            session: WorkerSession::of_group(group),
+            session: trial.session(group),
             percentile: None,
+            trial: Some(name.unwrap_or_else(|| trial.name.clone())),
         };
     }
     let Some((nature, tokens)) = own else {
         return outside(None);
     };
     let others = window(&history, task, trial.window);
-    if others.len() < trial.window {
-        return outside(None);
-    }
-    let rank = percentile(tokens, &others);
-    if nature != TaskNature::Mechanical || rank.is_none_or(|rank| rank > LOWER_THIRD) {
+    let rank = if others.len() < trial.window {
+        None
+    } else {
+        percentile(tokens, &others)
+    };
+    if trial.limited
+        && (nature != TaskNature::Mechanical || rank.is_none_or(|rank| rank > LOWER_THIRD))
+    {
         return outside(rank);
     }
-    let group = joined
-        .last()
-        .map_or(TrialGroup::Control, |&(_, last)| last.other());
     TrialChoice {
-        session: WorkerSession::of_group(group),
+        session: trial.session(trial.draw(task)),
         percentile: rank,
+        trial: Some(trial.name.clone()),
     }
 }
 
@@ -579,7 +678,15 @@ mod tests {
         WorkerTrial {
             enabled: true,
             window: 10,
+            ..WorkerTrial::default()
         }
+    }
+
+    /// The first task from 1 that [`on`] draws into `group`.
+    fn drawn(trial: &WorkerTrial, group: TrialGroup) -> i64 {
+        (1..)
+            .find(|&id| trial.draw(TaskId::new(id)) == group)
+            .unwrap()
     }
 
     #[test]
@@ -597,12 +704,15 @@ mod tests {
             Value::Object(session.fields()),
             json!({"model": "claude-opus-5-5", "effort": "medium", "group": null})
         );
-        let treatment = WorkerSession::of_group(TrialGroup::Treatment);
+        let treatment = WorkerTrial::default().session(TrialGroup::Treatment);
         assert_eq!(
             Value::Object(treatment.fields()),
             json!({"model": "claude-sonnet-5", "effort": "medium", "group": "treatment"})
         );
-        assert_eq!(WorkerSession::of_group(TrialGroup::Control).model, OPUS);
+        assert_eq!(
+            WorkerTrial::default().session(TrialGroup::Control).model,
+            OPUS
+        );
         assert_eq!(WorkerTrial::default().window, 60);
         assert!(!WorkerTrial::default().enabled);
     }
@@ -616,7 +726,7 @@ mod tests {
         let later = event(2, 1, "run_claimed", json!({"model": "x", "effort": "y"}));
         assert_eq!(
             WorkerSession::of_run(&[event(0, 1, "agent_started", json!({})), claim, later]),
-            WorkerSession::of_group(TrialGroup::Treatment)
+            WorkerTrial::default().session(TrialGroup::Treatment)
         );
         // Claimed before the session was recorded, or no claim at all.
         assert_eq!(
@@ -636,41 +746,232 @@ mod tests {
     }
 
     #[test]
-    fn mechanical_tasks_of_the_lower_third_alternate_between_the_groups() {
+    fn mechanical_tasks_of_the_lower_third_are_drawn_by_their_hash() {
         let t = TaskId::new;
+        let trial = on();
+        let (control, treatment) = (
+            drawn(&trial, TrialGroup::Control),
+            drawn(&trial, TrialGroup::Treatment),
+        );
         let mut events = history();
-        events.push(predicted(11, 1, "mechanical", 15_000));
-        let first = choose(&on(), t(1), &events);
-        assert_eq!(first.session, WorkerSession::of_group(TrialGroup::Control));
-        assert_eq!(first.percentile, Some(10.0));
-        events.push(claimed(12, 1, Some("control")));
-        // The next subject is the treatment, the one after it the control.
-        events.push(predicted(13, 2, "mechanical", 20_000));
-        let second = choose(&on(), t(2), &events);
+        events.push(predicted(11, control, "mechanical", 15_000));
+        events.push(predicted(12, treatment, "mechanical", 20_000));
+        let first = choose(&trial, t(control), &events);
+        assert_eq!(first.session, trial.session(TrialGroup::Control));
+        assert!(first.percentile.is_some_and(|rank| rank <= LOWER_THIRD));
+        // Whatever the order of the claims: the treatment first.
+        let second = choose(&trial, t(treatment), &events);
         assert_eq!(second.session.group, Some(TrialGroup::Treatment));
         assert_eq!(second.session.model, SONNET);
         assert_eq!(second.session.effort, MEDIUM);
-        events.push(claimed(14, 2, Some("treatment")));
-        // A task outside the trial between them changes nothing.
-        events.push(claimed(15, 101, None));
-        events.push(predicted(16, 3, "mechanical", 5_000));
+        events.push(claimed(13, treatment, Some("treatment")));
         assert_eq!(
-            choose(&on(), t(3), &events).session.group,
+            choose(&trial, t(control), &events).session.group,
             Some(TrialGroup::Control)
         );
         // A retry of the treatment keeps its group, even when its prediction
-        // has moved out of the lower third since.
-        events.push(claimed(17, 2, Some("treatment")));
-        events.push(predicted(18, 2, "design_judgment", 999_999));
+        // has moved out of the lower third, the share or the name changed.
+        events.push(predicted(14, treatment, "design_judgment", 999_999));
+        let moved = WorkerTrial {
+            treatment_percent: 0,
+            name: "renamed".into(),
+            ..trial.clone()
+        };
+        let kept = choose(&moved, t(treatment), &events);
+        assert_eq!(kept.session, trial.session(TrialGroup::Treatment));
+        // Recorded without a name: the current one.
+        assert_eq!(kept.trial.as_deref(), Some("renamed"));
+        let mut named = events.clone();
+        named.push(event(
+            15,
+            treatment,
+            "run_claimed",
+            json!({"group": "treatment", "trial": "worker"}),
+        ));
+        let mut first = named.clone();
+        first.retain(|event| event.id.as_i64() != 13);
         assert_eq!(
-            choose(&on(), t(2), &events).session,
-            WorkerSession::of_group(TrialGroup::Treatment)
+            choose(&moved, t(treatment), &first).trial.as_deref(),
+            Some("worker")
+        );
+        assert_eq!(second.trial.as_deref(), Some("worker"));
+        // A task that kept a group opens the group's candidate now.
+        let higher = WorkerTrial {
+            treatment: TrialCandidate::of(OPUS, HIGH),
+            ..trial.clone()
+        };
+        assert_eq!(
+            choose(&higher, t(treatment), &events).session.label(),
+            "claude-opus-5-5/high"
         );
         // With the trial turned off again, the group is not applied.
         assert_eq!(
-            choose(&WorkerTrial::default(), t(2), &events).session,
+            choose(&WorkerTrial::default(), t(treatment), &events).session,
             WorkerSession::default()
         );
+    }
+
+    #[test]
+    fn the_draw_is_deterministic_and_near_the_share() {
+        let trial = WorkerTrial {
+            treatment_percent: 10,
+            ..on()
+        };
+        let draws: Vec<TrialGroup> = (1..=2000).map(|id| trial.draw(TaskId::new(id))).collect();
+        let again: Vec<TrialGroup> = (1..=2000).map(|id| trial.draw(TaskId::new(id))).collect();
+        assert_eq!(draws, again);
+        let treated = draws
+            .iter()
+            .filter(|group| **group == TrialGroup::Treatment)
+            .count();
+        // 10% of 2000 is 200; well within four standard deviations (~13).
+        assert!((150..=250).contains(&treated), "{treated}");
+        // The ends of the range put every task in one group.
+        for (percent, group) in [(0, TrialGroup::Control), (100, TrialGroup::Treatment)] {
+            let all = WorkerTrial {
+                treatment_percent: percent,
+                ..on()
+            };
+            assert!((1..=200).all(|id| all.draw(TaskId::new(id)) == group));
+        }
+        // Another name draws another split.
+        let renamed = WorkerTrial {
+            name: "other".into(),
+            ..trial.clone()
+        };
+        assert_ne!(
+            (1..=2000)
+                .map(|id| renamed.draw(TaskId::new(id)))
+                .collect::<Vec<_>>(),
+            draws
+        );
+    }
+
+    #[test]
+    fn an_unlimited_trial_draws_every_task_with_a_prediction() {
+        let trial = WorkerTrial {
+            limited: false,
+            treatment_percent: 100,
+            ..on()
+        };
+        let mut events = history();
+        events.push(predicted(11, 1, "design_judgment", 900_000));
+        let choice = choose(&trial, TaskId::new(1), &events);
+        assert_eq!(choice.session, trial.session(TrialGroup::Treatment));
+        assert_eq!(choice.percentile, Some(100.0));
+        // Fewer predictions than the window: drawn, not ranked.
+        events.push(predicted(12, 2, "implementation", 5));
+        let few = WorkerTrial {
+            window: 50,
+            ..trial.clone()
+        };
+        let choice = choose(&few, TaskId::new(2), &events);
+        assert_eq!(choice.session.group, Some(TrialGroup::Treatment));
+        assert_eq!(choice.percentile, None);
+        // Without a prediction it is outside.
+        assert_eq!(
+            choose(&trial, TaskId::new(3), &events).session,
+            WorkerSession::default()
+        );
+    }
+
+    #[test]
+    fn the_default_trial_is_the_former_one_and_takes_only_ladder_steps() {
+        let trial = WorkerTrial::default();
+        assert!(!trial.enabled && trial.limited);
+        assert_eq!(trial.check(), Ok(()));
+        assert_eq!(
+            trial.session(TrialGroup::Control).label(),
+            "claude-opus-5-5/medium"
+        );
+        assert_eq!(
+            trial.session(TrialGroup::Treatment).label(),
+            "claude-sonnet-5/medium"
+        );
+        for &(model, effort) in &LADDER {
+            let at = WorkerTrial {
+                control: TrialCandidate::of(model, effort),
+                treatment: TrialCandidate::of(model, effort),
+                ..WorkerTrial::default()
+            };
+            assert_eq!(at.check(), Ok(()), "{model}/{effort}");
+        }
+        for (control, treatment) in [
+            (TrialCandidate::of(SONNET, HIGH), trial.treatment.clone()),
+            (trial.control.clone(), TrialCandidate::of(OPUS, "low")),
+            (trial.control.clone(), TrialCandidate::of("gpt-5", MEDIUM)),
+        ] {
+            let off = WorkerTrial {
+                control,
+                treatment,
+                ..WorkerTrial::default()
+            };
+            let error = off.check().unwrap_err();
+            assert!(error.contains("not a step of the ladder"), "{error}");
+        }
+        let error = WorkerTrial {
+            treatment_percent: 101,
+            ..WorkerTrial::default()
+        }
+        .check()
+        .unwrap_err();
+        assert!(error.contains("between 0 and 100"), "{error}");
+        let error = WorkerTrial {
+            name: " ".into(),
+            ..WorkerTrial::default()
+        }
+        .check()
+        .unwrap_err();
+        assert!(error.contains("blank"), "{error}");
+    }
+
+    /// Every candidate the check takes is raised one step of the ladder by
+    /// a task-caused failure, in its group, and the raise stays with a
+    /// retry (ADR-t3957-1 decision 2).
+    #[test]
+    fn every_candidate_is_raised_in_its_group_and_the_raise_stays() {
+        for (index, &(model, effort)) in LADDER.iter().enumerate() {
+            let trial = WorkerTrial {
+                treatment: TrialCandidate::of(model, effort),
+                ..on()
+            };
+            let start = trial.session(TrialGroup::Treatment);
+            let Some(&(next_model, next_effort)) = LADDER.get(index + 1) else {
+                // The top stays.
+                assert_eq!(start.raised(), None);
+                continue;
+            };
+            let mut claim = opened(1, "run_claimed", model, effort);
+            claim.payload["group"] = json!("treatment");
+            let parked = event(
+                2,
+                1,
+                "integration_deferred",
+                json!({"code": "verification_failed", "status": "needs_session"}),
+            );
+            let (resumed, raise) = for_resume(&[claim.clone(), parked.clone()]);
+            assert_eq!(
+                (
+                    resumed.model.as_str(),
+                    resumed.effort.as_str(),
+                    resumed.group
+                ),
+                (next_model, next_effort, Some(TrialGroup::Treatment)),
+                "{model}/{effort}"
+            );
+            assert_eq!(raise.unwrap().from, start);
+            // The resume that opened the raised step, then a retry's claim.
+            let mut opened_raised = event(3, 1, "resume_started", Value::Object(resumed.fields()));
+            opened_raised.payload["escalated_from"] = start.named_on(Provider::Claude);
+            let task_events = [claim.clone(), parked, opened_raised];
+            let mut kept = task_events.to_vec();
+            kept.push(predicted(4, 101, "mechanical", 1));
+            let retry = choose(&trial, TaskId::new(1), &kept);
+            assert_eq!(retry.session, start);
+            let (session, inherited) = retry.session.claimed(&task_events);
+            assert!(inherited, "{model}/{effort}");
+            assert_eq!(session, resumed);
+        }
     }
 
     #[test]
@@ -706,7 +1007,7 @@ mod tests {
         own.push(predicted(12, 5, "mechanical", 1));
         assert_eq!(
             choose(&on(), t(5), &own).session.group,
-            Some(TrialGroup::Control)
+            Some(on().draw(t(5)))
         );
         // An unreadable prediction or group is skipped.
         let mut odd = history();
@@ -739,7 +1040,7 @@ mod tests {
 
     #[test]
     fn the_ladder_raises_one_step_up_to_opus_xhigh() {
-        let mut treatment = WorkerSession::of_group(TrialGroup::Treatment);
+        let mut treatment = WorkerTrial::default().session(TrialGroup::Treatment);
         let mut steps = vec![treatment.label()];
         while let Some(next) = treatment.raised() {
             assert_eq!(next.group, Some(TrialGroup::Treatment));
@@ -806,7 +1107,7 @@ mod tests {
     /// and raised from.
     #[test]
     fn a_codex_session_names_no_claude_model_and_keeps_its_step() {
-        let treatment = WorkerSession::of_group(TrialGroup::Treatment);
+        let treatment = WorkerTrial::default().session(TrialGroup::Treatment);
         let fields = Value::Object(treatment.fields_on(Provider::Codex));
         assert_eq!(
             fields,
@@ -935,7 +1236,7 @@ mod tests {
             json!({"model": OPUS, "effort": XHIGH, "group": "treatment",
                    "escalated_from": {"model": OPUS, "effort": HIGH}}),
         );
-        let treatment = WorkerSession::of_group(TrialGroup::Treatment);
+        let treatment = WorkerTrial::default().session(TrialGroup::Treatment);
         let (session_now, inherited) = treatment
             .clone()
             .inheriting(&[opened(1, "run_claimed", SONNET, MEDIUM), raised.clone()]);
@@ -963,8 +1264,6 @@ mod tests {
             "treatment".parse::<TrialGroup>().unwrap(),
             TrialGroup::Treatment
         );
-        assert_eq!(TrialGroup::Control.other(), TrialGroup::Treatment);
-        assert_eq!(TrialGroup::Treatment.other(), TrialGroup::Control);
         assert_eq!(TrialGroup::Control.to_string(), "control");
         assert!("x".parse::<TrialGroup>().is_err());
     }
