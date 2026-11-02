@@ -1,0 +1,16 @@
+diff --git a/docs/design/supervisor-lifecycle/review.md b/docs/design/supervisor-lifecycle/review.md
+index 6eb17df3d..8d5e04738 100644
+--- a/docs/design/supervisor-lifecycle/review.md
++++ b/docs/design/supervisor-lifecycle/review.md
+@@ -69,6 +69,11 @@ validationを通ったrun（awaiting_integration）
+ - supervisorはreviewの間もrunのleaseとslotを持ち、runのstatusは`awaiting_integration`のままにし、進行はeventで読む。
+ - review jobは読むだけで、worktreeは生きているworkerのsessionのものなので書く道具を持たない。
+ - 直すのはworkerのsessionで、supervisorは依頼を次のturnとして`turns/`に書くだけ（[非対話のworker](headless-worker.md#run-dirのturns)）。
++- 判定の後に書く順は分岐ごとに次のとおり。
++  - passのとき: supervisorは判定のeventを書き、定義を変えるrunならevalの依頼を書き、衝突の事前判定を流してから終了の依頼を`turns/`に書き、closeを待って着地のeventを書く。
++  - reviseのとき: supervisorは判定のeventを書き、回数を1つ足してから依頼を`turns/`に書き、runをvalidationの待ちに戻す。
++  - concernのとき: supervisorは判定のeventを書き、landならpassと同じ順に、send_backならreviseと同じ順に進み、askならaskを開いて答えを待つ。
++  - 失敗・打ち切りのとき: supervisorは判定のeventを書かずに`approve_landing`のaskを開き、答えのeventを書いてから答えの道へ進む。
+ - 着地は`integrate`と同じ処理をsupervisorが走らせ（[integrate](integrate.md)）、review中のrunを人の`integrate`は拒む。
+ - 資料`review.md`は[`review`](commands.md)、promptは[Prompt](prompt.md#headlessのjobのprompt)、providerは[Agent provider lifecycle](../provider-lifecycle.md)。
+ 

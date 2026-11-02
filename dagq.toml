@@ -421,6 +421,18 @@ paths = ["plugins/**"]
 [review.subagents.security]
 paths = ["**"]
 
+# docs/design の差分が足した・変えた行を 4 層の規則（docs/development/documents.md「design」の DL-1〜DL-5）で判定する。
+# 軽量の model にするのは、見るのが差分の design の行と規則の文書だけで深い推論が要らず、paths を広げた後は docs/design に当たる
+# run ごとに動くので token と時間を抑えるため（effort は書かない。[roles.review] は別の provider で effort を書かないので medium で起動する）。着地の検証（verify）でなく review に置くのは、
+# 検証は決定的である前提で資格情報を持ち込めず、落とした理由が直す手がかりとして弱いのに対し、review の指摘は理由と直し方を
+# revise で worker に返せるため。paths をまだ docs/design/** にしないのは、dev の eval で実測していない定義を本番の run の
+# review に当て、誤った revise で run を止めないため（paths は空にできないので、この agent 自身の置き場だけに当てる）。
+# 後続の task が、着地したこの定義とケースを dev の eval で実測して定義を直した後に、paths を docs/design/** へ広げる。
+[review.subagents.design-layers]
+provider = "claude"
+model = "claude-haiku-5-5"
+paths = [".dagq/agents/design-layers/**"]
+
 # run の review の自動の手直しの上限の後に、acceptance_unmet をコードの指摘に数えるコードの path（方針は ADR-t2599-1、
 # 書式・既定・意味は domain::review_reason::CodePaths の doc comment）。paths が全部ここの外の acceptance_unmet は着地を止めず
 # follow_up の draft になる（docs・plugin・.dagq・scripts・.config は入れない）。値は [areas] の runtime・migrations・tests に合わせた。

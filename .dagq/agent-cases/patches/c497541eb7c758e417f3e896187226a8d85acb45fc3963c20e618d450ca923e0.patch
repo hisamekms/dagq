@@ -1,0 +1,12 @@
+diff --git a/docs/design/supervisor-lifecycle/review.md b/docs/design/supervisor-lifecycle/review.md
+index 6eb17df3d..7cca59f07 100644
+--- a/docs/design/supervisor-lifecycle/review.md
++++ b/docs/design/supervisor-lifecycle/review.md
+@@ -68,6 +68,7 @@ validationを通ったrun（awaiting_integration）
+ 
+ - supervisorはreviewの間もrunのleaseとslotを持ち、runのstatusは`awaiting_integration`のままにし、進行はeventで読む。
+ - review jobは読むだけで、worktreeは生きているworkerのsessionのものなので書く道具を持たない。
++- agentのjobの組（provider・model・effort）は`dagq.toml`の表が持ち、providerに依らない定義（`AGENT.md`）は持たない。
+ - 直すのはworkerのsessionで、supervisorは依頼を次のturnとして`turns/`に書くだけ（[非対話のworker](headless-worker.md#run-dirのturns)）。
+ - 着地は`integrate`と同じ処理をsupervisorが走らせ（[integrate](integrate.md)）、review中のrunを人の`integrate`は拒む。
+ - 資料`review.md`は[`review`](commands.md)、promptは[Prompt](prompt.md#headlessのjobのprompt)、providerは[Agent provider lifecycle](../provider-lifecycle.md)。

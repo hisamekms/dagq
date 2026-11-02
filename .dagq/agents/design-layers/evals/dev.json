@@ -1,0 +1,289 @@
+{
+  "agent": "design-layers",
+  "role": "review",
+  "codes": [
+    "DL-1",
+    "DL-2",
+    "DL-3",
+    "DL-4",
+    "DL-5"
+  ],
+  "rules": {
+    "DL-1": "docs/development/documents.md「書くもの・書かないもの」の2つ目の箇条のDL-1",
+    "DL-2": "docs/development/documents.md「書くもの・書かないもの」の2つ目の箇条のDL-2",
+    "DL-3": "docs/development/documents.md「形と予算」の予算を超えるときの直し方の4のDL-3",
+    "DL-4": "docs/development/documents.md「書くもの・書かないもの」の2つ目の箇条のDL-4",
+    "DL-5": "docs/development/documents.md「書くもの・書かないもの」の2つ目の箇条のDL-5"
+  },
+  "k": 3,
+  "cases": [
+    {
+      "id": "t3900-ledger-restart-detail",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "e96b19e0a7f972a57927f0c35b16d4714fb46326",
+      "patch": "a0e80996ee29de526718157277fbb846be3467b5fc85f26412a6ba348f8f363f",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "DL-5"
+          ],
+          "note": "task 3900 の着地の commit（8d0c08992）の measurement.md の差分そのもの。言い換えて縮めた行（`builder::Kept`に持ち越す など）は事実を保つ地図の行だが、作り直しの行は session に記録と落とした印も含めること・作り直せる位置を文章で書いた詳細の層の細部（`builder` の doc comment に置くもの）。「行から分からない」の約束だけを地図に残す"
+        }
+      }
+    },
+    {
+      "id": "t3885-queue-rebuild-prose",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "df7867a1e87ac16b58499fb0919784c02c45e819",
+      "patch": "f8a2fae054679d1387f9490e6ff8cbbd291fb012616f7c535e14e78be90868ef",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "DL-5"
+          ],
+          "note": "task 3885（d982e61ec）の measurement.md の差分。inline code も箇条の書き出しも無いが、queue の行の帳簿を store の行（記録は id と一部）から作り直し event を読まないという、コードを読めば分かる細部を文章で書いた行で、詳細の層（`builder` の doc comment）に当たる。識別子の前ふるいは拾わない"
+        }
+      }
+    },
+    {
+      "id": "t3886-lives-rebuild-prose",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "127908b9edafc4b77ee43de2bbfbbb24881f47f5",
+      "patch": "3c501218b8e61d448f8e4b466d81da14ea3bf9e718f01f32f3a8cac67f17a6dc",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "DL-5"
+          ],
+          "note": "task 3886（ed6de702c）の measurement.md の差分。supervisor の一生と claim の前の待ちの帳簿を store の行から作り直し、event は続く一生の最後だけ読むという細部を文章で書いた行で、詳細の層（`builder` の doc comment）に当たる。識別子の前ふるいは拾わない"
+        }
+      }
+    },
+    {
+      "id": "hm-dl1-steps-by-branch",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
+      "patch": "a343129ee2cebc2dfa602935535f82c7c1e8bfa7f40e813bc2675b83377515cd",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "DL-1"
+          ],
+          "acceptable_codes": [
+            "DL-5"
+          ],
+          "note": "review.md の責務と境界に、pass・revise・concern・失敗の分岐ごとに supervisor が何をどの順に書くかを並べた。コードを読めば分かる手順の書き写し"
+        }
+      }
+    },
+    {
+      "id": "hm-dl2-field-list",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
+      "patch": "f99f5ddaebf569f85fe8663780edace3103b4f5d92ffd9905d61f99117ac38d0",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "DL-2"
+          ],
+          "acceptable_codes": [
+            "DL-5"
+          ],
+          "note": "agent-eval.md に、ケースの欄の名前と書かないときの既定値を並べた。同じ節の冒頭が欄の意味は `CaseFile` と `Case` の doc comment が持つと書いている"
+        }
+      }
+    },
+    {
+      "id": "hm-dl3-budget-deletion",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
+      "patch": "db39773a7efe57e36ddc8ac39548c15696901352dd556dd8fab564950851a9f1",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "DL-3"
+          ],
+          "acceptable_codes": [
+            "DL-5"
+          ],
+          "note": "measurement.md の失敗の段に 1 行を足すのと同時に、主題と関係の無い旧方式の「（`land_phases`はnull）」と保持の行（node の行を消す日数）を消した。同じ事実の残る場所は文書にも示されていない"
+        }
+      }
+    },
+    {
+      "id": "hm-dl4-history",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
+      "patch": "0f9e794a90f4a53de98767facd3d0c7ea47f4354dc9fd785a96ca1ed53f73e22",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "DL-4"
+          ],
+          "acceptable_codes": [
+            "DL-2"
+          ],
+          "note": "review.md の不変条件に、上限の以前の値と変えた task・request の番号を足した。経緯は ADR と git の履歴だけが持つ"
+        }
+      }
+    },
+    {
+      "id": "neg-entry-row",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
+      "patch": "85cab3a4183ed9379ffd99367207c8c56d6ad62eecad5936bfb7b8cc7430f4f0",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "review.md の入口の地図の表に、知りたいこと（agent の job の起動の組）からコードの入口を 1 つ指す行を足しただけ",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "neg-promise-review",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
+      "patch": "8a2b4d1d5b4113b0644a02daf170d9c8b55a2ed88ac96cbaef978c00051c6861",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "review.md の不変条件に、書いた組を起動先の provider で検査し直し合わなければ起動しないという、コードから読みにくい約束を足しただけ",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "neg-boundary-review",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
+      "patch": "c497541eb7c758e417f3e896187226a8d85acb45fc3963c20e618d450ca923e0",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "review.md の責務と境界に、起動の組は dagq.toml の表が持ち定義は持たないという境界を足しただけ",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "neg-pitfall-measurement",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
+      "patch": "988b409b6f86de80648700c40803329c32f67921069592e8e1608e6ecaa764c3",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "measurement.md の失敗の段に、印を残すので次の周回が入力を読み直すという約束を足しただけで、既存の行は消していない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "neg-pitfall-agent-eval",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
+      "patch": "cd3aa4f97118db047cf5cd3f3830bc2371126ca3836b2873684be324a8105f1e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "agent-eval.md に、定義とケースを landing branch から読むので同じ run の dev の周で測れないという落とし穴を足しただけ"
+        }
+      }
+    },
+    {
+      "id": "neg-pointer-doc-comment",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
+      "patch": "66fa3087c48f61b8e369d81ffa2186a6d635677a68e443bd84b6ca01d8046834",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "agent-eval.md の採点に、成績の欄の意味を持つ doc comment の型を入口として 1 つ指す行を足しただけ"
+        }
+      }
+    },
+    {
+      "id": "neg-adr-link",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
+      "patch": "c19edfe6b0e3a98bd3ed5b113f9b536a6ddd792f5963019fccafd7276dc50b86",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "measurement.md の台帳を作る係に、理由を持つ ADR へのリンクの行を足しただけ"
+        }
+      }
+    }
+  ]
+}

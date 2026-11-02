@@ -1,0 +1,12 @@
+diff --git a/docs/design/supervisor-lifecycle/review.md b/docs/design/supervisor-lifecycle/review.md
+index 6eb17df3d..0a701faf0 100644
+--- a/docs/design/supervisor-lifecycle/review.md
++++ b/docs/design/supervisor-lifecycle/review.md
+@@ -82,6 +82,7 @@ validationを通ったrun（awaiting_integration）
+   上限は試行ごとにlanding branchの`dagq.toml`から読む（[ADR-t3033-1](../../adr/2026-10-22-t3033-1-run-review-revise-limit-from-the-landing-branchs-dagq-toml.md)、`domain::ReviseLimit`）。
+ - 依頼（revise・衝突の解消）はeventを記録してから`turns/`に書くので、二重には書かない。
+ - 1つのrunに開いた`approve_landing`のaskは1つ。
++- agentのjobに書いた組は起動の時に起動先のproviderで検査し直し、合わなければそのjobを起動せず人の判断に回す（書いた組のまま別のproviderへ渡さない）。
+ 
+ ## 入口の地図
+ 

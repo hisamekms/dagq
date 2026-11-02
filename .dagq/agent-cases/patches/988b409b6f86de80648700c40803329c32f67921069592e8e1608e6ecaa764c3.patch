@@ -1,0 +1,12 @@
+diff --git a/docs/design/measurement.md b/docs/design/measurement.md
+index c26e2b890..542e031e4 100644
+--- a/docs/design/measurement.md
++++ b/docs/design/measurement.md
+@@ -211,6 +211,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
+ - **保持**: nodeの行はhostの負荷と同じ日数で消す。
+ - **失敗**: 読めない・書けない周回は印を残して次に任せ、続けば`ledger_build_failed`を1度記録する。
+   runとtaskの結果は変えない。
++  印を残すので、次の周回は失敗した周回の入力を読み直し、入力を落とさない。
+ 
+ ## 共通の読み取り関数
+ 

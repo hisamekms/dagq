@@ -1,0 +1,12 @@
+diff --git a/docs/design/agent-eval.md b/docs/design/agent-eval.md
+index 9bf791946..a1a830098 100644
+--- a/docs/design/agent-eval.md
++++ b/docs/design/agent-eval.md
+@@ -75,6 +75,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
+   agentの値はコードごとの和から出す。
+ - recall＝TP /（TP＋FN）、precision＝TP /（TP＋FP）。
+   分母が0なら値なし。
++- 周の成績の欄の意味は`domain::agent_eval::review::ReviewScore`のdoc commentが持つ。
+ - 判定の無い実行（完了しない・結果が読めない）はerrorで、判定にも規則コードにも数えない。
+ - `disputed`のケースとその実行は主の指標から外し、含めた値は別に返す。
+ - 閾値: 判定と規則コードのrecall・precisionの4つがすべて閾値以上で、errorが無いときだけ通る。

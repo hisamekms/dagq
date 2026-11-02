@@ -1,0 +1,12 @@
+diff --git a/docs/design/supervisor-lifecycle/review.md b/docs/design/supervisor-lifecycle/review.md
+index 6eb17df3d..a4215ff0f 100644
+--- a/docs/design/supervisor-lifecycle/review.md
++++ b/docs/design/supervisor-lifecycle/review.md
+@@ -87,6 +87,7 @@ validationを通ったrun（awaiting_integration）
+ 
+ | 知りたいこと | コードの入口 |
+ | --- | --- |
++| agentのjobの起動の組（provider・model・effort） | `domain::actor_model`の`RoleModels::checked_agent_launch` |
+ | reviewの始まりと行き先 | `src/application/supervise/execution/`（以下同じ）の`landing.rs`の`Supervisor::begin_review`・`review_route`、`provider.rs` |
+ | jobの起動・やり直し・判定 | `landing.rs`の`Supervisor::tend_review`、`jobs.rs`、`src/domain/review_jobs.rs` |
+ | verdictごとの進め方 | `landing.rs`の`act_on_verdict`・`act_on_concern`、`src/domain/concern.rs` |

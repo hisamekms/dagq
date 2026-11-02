@@ -1,0 +1,13 @@
+diff --git a/docs/design/agent-eval.md b/docs/design/agent-eval.md
+index 9bf791946..b7e71c13c 100644
+--- a/docs/design/agent-eval.md
++++ b/docs/design/agent-eval.md
+@@ -57,6 +57,8 @@ workerもjobもLLMのCLIを直接打たない。
+ 
+ ファイルの形と欄の意味は`domain::agent_eval`の`CaseFile`と`Case`のdoc commentが持つ。
+ 
++- ケースの欄は`id`・`source`・`made_by`・`base_commit`・`baseline`・`patch`・`adjudicated`・`disputed`・`k`・`review.input`・`review.expected`で、`review.expected`は`verdict`・`codes`・`acceptable_codes`・`note`・`near_miss`を持つ。
++- `k`を書かないケースは一覧の`k`、`disputed`を書かないケースは`null`、`acceptable_codes`を書かないケースは空になる。
+ - `handmade`はdevだけに置く。改善するsessionが中身を読んだケースはholdoutに置かない。
+ - baseは`base_commit`か、built-inの同梱のケースだけの`baseline`の一方。
+ - 読み手は形の誤りを、最初の1つでなく全て返す。
