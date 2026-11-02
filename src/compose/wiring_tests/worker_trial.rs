@@ -26,7 +26,7 @@ const CONFIG: &str = "[worker.trial]\nenabled = true\nname = \"wired\"\nlimited 
 treatment_percent = 100\ntreatment_model = \"claude-opus-5-5\"\ntreatment_effort = \"high\"\n";
 
 /// The plan review's prediction of `task`, as the queue records it.
-fn predict(wiring: &Wiring, task: crate::domain::TaskId) {
+pub(super) fn predict(wiring: &Wiring, task: crate::domain::TaskId) {
     super::harness::connect(&wiring.db)
         .execute(
             "INSERT INTO run_events(task_id,kind,payload) VALUES (?1,'task_weight_predicted',?2)",
@@ -41,7 +41,7 @@ fn predict(wiring: &Wiring, task: crate::domain::TaskId) {
 
 /// The receipt of a worker that could not finish the task: its run ends,
 /// which `kpi` counts.
-fn failed(run: &crate::domain::RunId, head: &crate::domain::CommitSha) -> Value {
+pub(super) fn failed(run: &crate::domain::RunId, head: &crate::domain::CommitSha) -> Value {
     json!({
         "run_id": run,
         "result": "failed",

@@ -118,6 +118,11 @@ pub(super) struct Wiring {
     deadline: Instant,
     generators: Generators,
     pid: u32,
+    /// Whether the supervisor also runs Codex headless workers (on the
+    /// same fake agent); Claude only by default.
+    codex: bool,
+    /// `[provider_fallback] workers`; on by default.
+    worker_fallback: bool,
     pub(super) files: Arc<MemoryFiles>,
     pub(super) git: FakeGit,
     pub(super) agent: Arc<FakeAgent>,
@@ -167,6 +172,8 @@ impl Wiring {
             deadline,
             generators,
             pid,
+            codex: false,
+            worker_fallback: true,
             files,
             git,
             agent,
@@ -174,6 +181,38 @@ impl Wiring {
             tokens,
             sessions,
         }
+    }
+
+    /// The wiring whose supervisor also runs Codex headless workers, on
+    /// the same fake agent.
+    pub(super) fn with_codex(mut self) -> Self {
+        self.codex = true;
+        self
+    }
+
+    /// The wiring whose supervisor starts no worker on the other provider
+    /// when its own cannot be used (`[provider_fallback] workers = false`).
+    pub(super) fn without_worker_fallback(mut self) -> Self {
+        self.worker_fallback = false;
+        self
+    }
+
+    /// `provider` held for its usage limit, as a supervisor records it,
+    /// until long after the test's stopped clock.
+    pub(super) fn hold(&self, provider: Provider) {
+        let now = i64::try_from(STOPPED_AT.as_secs()).expect("seconds");
+        let hold = crate::domain::provider_switch::ProviderHold {
+            provider,
+            reason: crate::domain::provider_switch::SwitchReason::UsageLimit,
+            since: now,
+            retry_at: now + 86_400,
+        };
+        connect(&self.db)
+            .execute(
+                "INSERT INTO run_events(kind,payload) VALUES ('provider_held',?1)",
+                rusqlite::params![hold.held_payload(None).to_string()],
+            )
+            .expect("record the hold");
     }
 
     /// The test's queue, as the test reads and writes it.
@@ -252,6 +291,8 @@ impl Wiring {
                 service: self.service(),
                 db: self.db.clone(),
                 pid: self.pid,
+                codex: self.codex,
+                worker_fallback: self.worker_fallback,
                 generators: self.generators.clone(),
                 files: self.files.clone(),
                 git: self.git.clone(),
@@ -301,6 +342,8 @@ struct Parts {
     service: Arc<dyn ServiceCaller>,
     db: PathBuf,
     pid: u32,
+    codex: bool,
+    worker_fallback: bool,
     generators: Generators,
     files: Arc<MemoryFiles>,
     git: FakeGit,
@@ -354,7 +397,16 @@ impl Parts {
             signals: agent,
             transcripts: agent,
         };
-        let workers = WorkerAdapters::default().with(Worker::CLAUDE_HEADLESS, adapter);
+        let mut workers = WorkerAdapters::default().with(Worker::CLAUDE_HEADLESS, adapter);
+        if self.codex {
+            workers = workers.with(
+                Worker {
+                    provider: Provider::Codex,
+                    mode: crate::domain::worker::WorkerMode::Headless,
+                },
+                adapter,
+            );
+        }
         let layout = layout(&self.db, self.pid, &workers);
         let ports = Ports {
             queues: Arc::new(queues.clone()),
@@ -429,7 +481,7 @@ impl Parts {
             resources: None,
             layout,
         };
-        supervise::supervise(&ports, &settings(self.stop))
+        supervise::supervise(&ports, &settings(self.stop, self.worker_fallback))
     }
 }
 
@@ -456,12 +508,17 @@ fn layout(db: &Path, pid: u32, workers: &WorkerAdapters<'_>) -> Layout {
                 error: None,
                 modes: workers.modes(Provider::Claude),
             },
-            ProviderCheck {
-                provider: Provider::Codex,
-                executable: "wiring-codex".into(),
-                found: false,
-                error: Some("no Codex in a wiring test".into()),
-                modes: Vec::new(),
+            {
+                let modes = workers.modes(Provider::Codex);
+                ProviderCheck {
+                    provider: Provider::Codex,
+                    executable: "wiring-codex".into(),
+                    found: !modes.is_empty(),
+                    error: modes
+                        .is_empty()
+                        .then(|| "no Codex in this wiring test".into()),
+                    modes,
+                }
             },
         ],
         runner: "wiring-dagq".into(),
@@ -482,8 +539,9 @@ fn layout(db: &Path, pid: u32, workers: &WorkerAdapters<'_>) -> Layout {
 }
 
 /// A `--once` supervisor's loop of two slots, its waits the test's ticks,
-/// every other setting the production's default; `stop` drains it.
-fn settings(stop: Arc<AtomicBool>) -> LoopSettings {
+/// `[provider_fallback] workers` as `worker_fallback` says, every other
+/// setting the production's default; `stop` drains it.
+fn settings(stop: Arc<AtomicBool>, worker_fallback: bool) -> LoopSettings {
     let slot_flags = SlotFlags {
         parallel: Some(2),
         max_waiting: None,
@@ -496,7 +554,10 @@ fn settings(stop: Arc<AtomicBool>) -> LoopSettings {
         limits: SlotLimits::resolve(slot_flags, &Default::default()),
         slot_flags,
         light_changes: Default::default(),
-        provider_fallback: Default::default(),
+        provider_fallback: crate::domain::provider_switch::ProviderFallback {
+            workers: worker_fallback,
+            ..Default::default()
+        },
         fresh_session: Default::default(),
         review_jobs: Default::default(),
         once: true,

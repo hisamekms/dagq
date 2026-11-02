@@ -19,5 +19,6 @@ mod session;
 
 mod already_satisfied;
 mod main_log;
+mod provider_trial;
 mod review_launch;
 mod worker_trial;

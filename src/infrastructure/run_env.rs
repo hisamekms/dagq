@@ -116,7 +116,7 @@ use crate::{
         toolchain::{ProfileRegistry, ToolchainDeclaration, Toolchains},
         verification_limit::{self, VerificationConfig},
         verify_marks::{LinePattern, MarkClass, ProjectMark},
-        worker_model::WorkerTrial,
+        worker_model::{ProviderTrial, WorkerTrial},
     },
     infrastructure::kpi_config::KpiTables,
     infrastructure::recurring_config::{RECURRING_TABLE, RecurringTables},
@@ -148,6 +148,9 @@ const KPI_TABLE: &str = "kpi";
 /// `[worker.trial]`: the limited trial of the worker's model (ADR-0079
 /// decision 4).
 const WORKER_TRIAL_TABLE: &str = "worker.trial";
+/// `[worker.provider_trial]`: the trial of the provider pair of the worker
+/// and its review (ADR-t4005-1).
+const PROVIDER_TRIAL_TABLE: &str = "worker.provider_trial";
 /// `[roles.<role>]`: the provider, model and effort of a role other than
 /// the worker (ADR-0079 decision 7, ADR-t1063-1), one table per role.
 const ROLES_PREFIX: &str = "roles.";
@@ -497,7 +500,7 @@ const LOCAL_GATE_PATHS: &str = "paths";
 const LOCAL_GATE_KIND: &str = "kind";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 34] = [
+const TABLES: [&str; 35] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -508,6 +511,7 @@ const TABLES: [&str; 34] = [
     EXIT_TABLE,
     REPOSITORY_TABLE,
     WORKER_TRIAL_TABLE,
+    PROVIDER_TRIAL_TABLE,
     LANGUAGE_TABLE,
     SUPERVISOR_TABLE,
     AREAS_TABLE,
@@ -754,6 +758,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut retention_keys: Vec<String> = Vec::new();
     let mut exit_keys: Vec<String> = Vec::new();
     let mut trial_keys: Vec<String> = Vec::new();
+    let mut provider_trial_keys: Vec<String> = Vec::new();
     let mut supervisor_keys: Vec<String> = Vec::new();
     // `[supervisor] light_changes` and its line, checked against `[tasks]
     // changes` once the file is read whole (ADR-t1591-1).
@@ -1121,7 +1126,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{RETENTION_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{VERIFICATION_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{RETENTION_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{PROVIDER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{VERIFICATION_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -2184,6 +2189,48 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 }
                 trial_keys.push(key.to_owned());
             }
+            Some(PROVIDER_TRIAL_TABLE) => {
+                ensure!(
+                    ProviderTrial::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{PROVIDER_TRIAL_TABLE}]; the keys are {}",
+                    ProviderTrial::KEYS.join(", ")
+                );
+                ensure!(
+                    !provider_trial_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let value = rest.trim();
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let trial = &mut config.worker_trial.providers;
+                match key {
+                    "enabled" => trial.enabled = parse_bool(value).with_context(with)?,
+                    "treatment_percent" => {
+                        let digits = strip_comment(value);
+                        trial.treatment_percent = digits
+                            .parse::<u8>()
+                            .ok()
+                            .filter(|percent| *percent <= 100)
+                            .with_context(|| {
+                                format!("expected a whole percent from 0 to 100, not {digits}")
+                            })
+                            .with_context(with)?;
+                    }
+                    "name" => trial.name = parse_string(value).with_context(with)?,
+                    _ => {
+                        let provider = parse_string(value)
+                            .with_context(with)?
+                            .parse::<crate::domain::Provider>()
+                            .map_err(|error| anyhow::anyhow!("{error}"))
+                            .with_context(with)?;
+                        if key == "treatment_worker" {
+                            trial.treatment_worker = provider;
+                        } else {
+                            trial.treatment_review = provider;
+                        }
+                    }
+                }
+                provider_trial_keys.push(key.to_owned());
+            }
             Some(SUPERVISOR_TABLE) => {
                 ensure!(
                     SupervisorConfig::KEYS.contains(&key),
@@ -2343,7 +2390,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{PROVIDER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{THROUGHPUT_REVIEW_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]], [[{RECURRING_TABLE}]] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -2444,6 +2491,25 @@ pub fn parse_config(text: &str) -> Result<Config> {
         .worker_trial
         .check()
         .map_err(|error| anyhow::anyhow!("{CONFIG_FILE_NAME}: [{WORKER_TRIAL_TABLE}]: {error}"))?;
+    // So is a provider trial whose treatment's worker and review are one
+    // provider, or one that would draw as the model trial does
+    // (ADR-t4005-1 decision 2).
+    let providers = &config.worker_trial.providers;
+    providers
+        .check()
+        .and_then(|()| {
+            // Only a trial turned on is compared: a `[worker.trial]` whose
+            // name is the provider trial's default stays as it was.
+            if providers.enabled && providers.name == config.worker_trial.name {
+                Err(format!(
+                    "name {:?} is the name of [{WORKER_TRIAL_TABLE}]; the two trials must draw independently",
+                    providers.name
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .map_err(|error| anyhow::anyhow!("{CONFIG_FILE_NAME}: [{PROVIDER_TRIAL_TABLE}]: {error}"))?;
     if let Some((changes, line)) = light_changes {
         config.supervisor.light_changes = Some(
             LightChanges::new(changes, config.changes.as_ref())
@@ -6054,6 +6120,87 @@ LITERAL = 'no \n escapes # here'
         assert!(verifier.worker_trial().unwrap().enabled);
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[worker.trial]\nx = 1\n").unwrap();
         assert!(load_worker_trial(dir.path()).is_err());
+    }
+
+    #[test]
+    fn parses_the_provider_trial_table() {
+        // Off unless it says so, and the claim as before (ADR-t4005-1).
+        assert_eq!(
+            parse_config("").unwrap().worker_trial.providers,
+            ProviderTrial::default()
+        );
+        let set = parse_config(
+            "[worker.provider_trial]\nenabled = true # on\nname = \"pairs-1\"\n\
+             treatment_percent = 20\ntreatment_worker = \"claude\"\ntreatment_review = \"codex\"\n",
+        )
+        .unwrap()
+        .worker_trial;
+        assert_eq!(
+            set.providers,
+            ProviderTrial {
+                enabled: true,
+                name: "pairs-1".into(),
+                treatment_percent: 20,
+                treatment_worker: crate::domain::Provider::Claude,
+                treatment_review: crate::domain::Provider::Codex,
+            }
+        );
+        // The model trial is left as it was.
+        assert!(!set.enabled);
+        // A `[worker.trial]` named as the provider trial's default, with no
+        // provider trial, is read as before; so is one turned off.
+        for text in [
+            "[worker.trial]\nenabled = true\nname = \"provider-pair\"\n",
+            "[worker.trial]\nname = \"x\"\n[worker.provider_trial]\nname = \"x\"\n",
+        ] {
+            let config = parse_config(text).unwrap();
+            assert!(!config.worker_trial.providers.enabled, "{text}");
+        }
+        assert_eq!(
+            parse_config("[worker.trial]\nenabled = true\nname = \"provider-pair\"\n")
+                .unwrap()
+                .worker_trial
+                .name,
+            "provider-pair"
+        );
+        for (text, error) in [
+            (
+                "[worker.provider_trial]\nother = 1",
+                "unknown key other in [worker.provider_trial]",
+            ),
+            (
+                "[worker.provider_trial]\ntreatment_percent = 101",
+                "whole percent from 0 to 100",
+            ),
+            (
+                "[worker.provider_trial]\ntreatment_percent = -5",
+                "whole percent",
+            ),
+            (
+                "[worker.provider_trial]\ntreatment_review = \"codex\"",
+                "[worker.provider_trial]: treatment_worker and treatment_review are both codex",
+            ),
+            (
+                "[worker.provider_trial]\ntreatment_worker = \"gpt\"",
+                "value of treatment_worker",
+            ),
+            (
+                "[worker.provider_trial]\nenabled = true\nname = \"worker\"",
+                "is the name of [worker.trial]",
+            ),
+            (
+                "[worker.trial]\nname = \"x\"\n[worker.provider_trial]\nenabled = true\nname = \"x\"",
+                "the two trials must draw independently",
+            ),
+            ("[worker.provider_trial]\nname = \" \"", "is blank"),
+            (
+                "[worker.provider_trial]\nenabled = true\nenabled = true",
+                "enabled is defined twice",
+            ),
+        ] {
+            let message = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(message.contains(error), "{text}: {message}");
+        }
     }
 
     #[test]

@@ -100,12 +100,19 @@ keyと既定値の意味は`domain::worker_model::WorkerTrial`のdoc commentが�
   台帳とkpiに群専用の欄は足さない（一般のA/Bへ移せる形。決定7）。
 
 [ADR-t4005-1](../../adr/2026-11-02-t4005-1-production-ab-of-worker-and-review-provider-pairs.md)（ADR-t3957-1の決定2をamends）は、model・effortの試しと別の試しとして、workerとそのrunのreviewのproviderの組を群に分けると決めた。
+`dagq.toml`の`[worker.provider_trial]`で有効にしたときだけ働き、keyと既定値の意味は`domain::provider_trial::ProviderTrial`のdoc commentが持つ。
+supervisorは`[worker.trial]`と同じpassで読み（読めなければ両方の試しの外でclaimする）、`ProviderTrial::check`が断る値（範囲の外の割合、Bのworkerとreviewが同じprovider）と、有効にしたときの`[worker.trial]`と同じ名前は`dagq.toml`の読み込みが断る。
 群を引く場所はmodel・effortの試しと同じclaimのtransactionで、次を約束する。
 
 - **独立の割り当て**: providerの組の群もtaskのhashで決め、名前の違う試しなのでmodel・effortの群と互いに独立になり、一度持った群はresume・revise・retryで変えない。
 - **重なり**: Codexで動く群のclaimは今どおりmodel・effortの試しの外で、Claudeで動く群のclaimには両方の試しの群が重なりうるので、両方をrunの属性の組に記録する。
 - **試しの外**: taskのproviderがrepositoryの既定でないtask・headlessでないclaim・Spikeは群nullとその理由を記録する。
   既定のproviderを明示したtaskは既定と見分けられず対象に入る。
+  holdの解除でproviderを選んだtaskも、人の選択を群より優先して試しの外にする。
+- **Bのclaim**: Bのtaskはworkerの要求のproviderをBのworkerのproviderにしてclaimし、使えないときの切り替えはどのworkerとも同じ規則に従う。
+  claimの前の延期の判定もclaimと同じ要求のworkerで判じ、そのrouteが無ければ他のtaskと同じく延期を記録して待つ。
+- **記録と読み口**: 群・試しの名前・割り当てたworkerとreviewのprovider（または試しの外の理由）は`run_claimed`の属性の組に置く。
+  reviewの起動はrunの群と割り当てたreviewのproviderを`domain::provider_trial::RunPair::of_run`で読む。
 
 ## 判定
 

@@ -132,7 +132,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   値が`"workspace"`なら、supervisorはworkerに効かないことをprocessごとに1回だけ警告する。
   欄を消すのは、古い固定バイナリが欄の無い`dagq.toml`を読めることを確かめた後にする。
 - `[worker.trial]`はworkerのmodel・effortの試し（群の割合と段の上の候補）の設定で、keyと既定は`domain::worker_model::WorkerTrial`が持つ（[Worker model](worker-model.md#限定の試しworkertrial)、ADR-t3957-1）。
-  supervisorがclaimのpassごとに読み、読めなければ試しの外でclaimする。
+  providerの組の試しの`[worker.provider_trial]`（keyと既定は`ProviderTrial`）も同じ節が持つ。
   taskに由来する失敗の後のworkerのsessionの段上げ（決定5、[Worker model](worker-model.md#段上げ決定5)）は設定を持たず、`[worker.trial]`の有無に関係なく働く。
 
 - `[roles.<role>]`はworker以外のアクターのsessionのprovider・model・effortを持つ（[Actor model](actor-model.md)、ADR-0079の決定7、[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定1）。

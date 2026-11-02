@@ -172,21 +172,25 @@ impl Supervisor<'_> {
             || self.landing.unresolved)
             && self.host.service_up()
         {
+            // Read once per pass, so turning the trial on or off takes
+            // effect without a restart; a file that cannot be read
+            // claims outside it (provisioning reports the file's error).
+            // The deferrals judge a candidate by the worker the trial of the
+            // provider pair requests for it, as the claim does
+            // (ADR-t4005-1).
+            let trial = self.verifier.worker_trial().unwrap_or_else(|error| {
+                warn!(error = %format_args!("{error:#}"), "[worker.trial] could not be read; claiming without the trial: {error:#}");
+                WorkerTrial::default()
+            });
             // The runs in flight go on; only new claims wait (task 327).
             if self.hold_claims()? {
                 // Neither provider can take a worker: the candidates are
                 // deferred for it too (ADR-t813-2 decision 6).
                 if self.routes().is_empty() {
-                    self.claimable(&graph, None)?;
+                    self.claimable(&graph, None, &trial.providers)?;
                 }
             } else {
-                // Read once per pass, so turning the trial on or off takes
-                // effect without a restart; a file that cannot be read
-                // claims outside it (provisioning reports the file's error).
-                let trial = self.verifier.worker_trial().unwrap_or_else(|error| {
-                    warn!(error = %format_args!("{error:#}"), "[worker.trial] could not be read; claiming without the trial: {error:#}");
-                    WorkerTrial::default()
-                });
+                let providers = trial.providers.clone();
                 claims = Some(ClaimPass {
                     spaced_since,
                     host: None,
@@ -202,7 +206,7 @@ impl Supervisor<'_> {
                     self.note_held_claims()?;
                     free_slot = room == ClaimRoom::Any;
                     let light = self.light_tasks(room)?;
-                    let claimable = self.claimable(&graph, light.as_ref())?;
+                    let claimable = self.claimable(&graph, light.as_ref(), &providers)?;
                     // Each claim at its own effective priority: aging lends
                     // none another's (ADR-t1489-1).
                     let mut own = HashMap::new();
@@ -336,7 +340,7 @@ impl Supervisor<'_> {
             // In the light room, only the light tasks, whatever the priority
             // of the others; the aging compares only them.
             let light = self.light_tasks(room)?;
-            let claimable = self.claimable(&graph, light.as_ref())?;
+            let claimable = self.claimable(&graph, light.as_ref(), &pass.trial.providers)?;
             // The candidates of a lower priority wait for the resumes and
             // recovery jobs before them in the line (ADR-t1850-1).
             let effective: HashMap<TaskId, Priority> = graph

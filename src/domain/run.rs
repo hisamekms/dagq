@@ -271,6 +271,16 @@ impl TaskRun {
         &self.created_at
     }
 
+    /// This run, just claimed, requesting `worker` rather than its task's:
+    /// the trial of the provider pair assigned it another provider
+    /// (ADR-t4005-1). It runs on it until [`Self::running_on`] moves it.
+    pub fn requesting(mut self, worker: super::worker::Worker) -> Self {
+        self.requested_provider = worker.provider;
+        self.actual_provider = worker.provider;
+        self.worker_mode = worker.mode;
+        self
+    }
+
     /// This run, just claimed, run on `worker` rather than its task's: its
     /// task's provider cannot be used, and the claim starts it on the other
     /// one (ADR-t813-2 decisions 2 and 6). The requested provider stays the

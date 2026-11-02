@@ -58,6 +58,7 @@ use crate::{
             goal_priority_at_creation, task_priority_at_creation,
         },
         provider_switch::{self, SwitchPhase, WorkerRoute},
+        provider_trial,
         scope::validate_path_globs,
         task,
         worker::{Worker, WorkerMode},
@@ -3063,7 +3064,29 @@ pub(super) fn claim_task(
     routes: &[WorkerRoute],
 ) -> Result<ClaimOutcome> {
     let mut ready = ready_tasks(tx)?;
-    ready.retain(|task| provider_switch::route_of(routes, task.worker()).is_some());
+    // The pair the trial of the provider pair assigns each ready task
+    // (ADR-t4005-1), whose worker it requests; none with the trial off.
+    let mut pairs = std::collections::HashMap::new();
+    if trial.providers.enabled {
+        for task in &ready {
+            if let Some(choice) = trial.providers.choose(
+                task.id(),
+                task.worker(),
+                task.execution_class(),
+                &pair_claims(tx, task.id())?,
+            ) {
+                pairs.insert(task.id(), choice);
+            }
+        }
+    }
+    let requested = |task: &Task| {
+        pairs
+            .get(&task.id())
+            .map_or(task.worker(), |choice: &provider_trial::PairChoice| {
+                choice.requested(task.worker())
+            })
+    };
+    ready.retain(|task| provider_switch::route_of(routes, requested(task)).is_some());
     // The classes a class limit holds (ADR-t1487-2): no task of them is
     // claimed here, not one read after the supervisor made its order, nor
     // by the fallback below.
@@ -3121,12 +3144,20 @@ pub(super) fn claim_task(
         }
     };
     let task = task::claim(ready.swap_remove(preferred))?;
-    let route = provider_switch::route_of(routes, task.worker())
+    let worker = requested(&task);
+    let pair = pairs.remove(&task.id());
+    let route = provider_switch::route_of(routes, worker)
         .copied()
         .context("the claimed task has no route")?;
     // A run on Codex is in no group of the trial, which compares Claude's
-    // models (task 892): it neither takes a group nor a turn of it.
-    let choice = if route.actual.provider == crate::domain::Provider::Codex {
+    // models (task 892): it neither takes a group nor a turn of it; nor is
+    // a treatment of the provider pair, on whichever provider it runs
+    // (ADR-t4005-1 decision 4).
+    let choice = if route.actual.provider == crate::domain::Provider::Codex
+        || pair
+            .as_ref()
+            .is_some_and(provider_trial::PairChoice::is_treatment)
+    {
         worker_model::TrialChoice {
             session: worker_model::WorkerSession::default(),
             percentile: None,
@@ -3147,7 +3178,9 @@ pub(super) fn claim_task(
         mode: crate::domain::worker::WorkerMode::Headless,
         ..route.actual
     };
-    let run = TaskRun::new(run_id, &task, base_commit, now.clone())?.running_on(actual);
+    let run = TaskRun::new(run_id, &task, base_commit, now.clone())?
+        .requesting(worker)
+        .running_on(actual);
     // `status='ready'` only detects a concurrent change; the domain decided the claim.
     ensure!(
         tx.execute(
@@ -3234,6 +3267,11 @@ pub(super) fn claim_task(
             }
             if inherited {
                 payload.insert("escalation_inherited".to_owned(), json!(true));
+            }
+            // The pair's group, its name and the assigned worker and review,
+            // or why the task is outside (ADR-t4005-1 decision 11).
+            if let Some(pair) = &pair {
+                payload.extend(pair.fields());
             }
             // A Spike's claim opens its investigation unless it is open
             // (ADR-t1487-1 decision 7).
@@ -3330,6 +3368,20 @@ fn trial_events(conn: &Connection, trial: &WorkerTrial) -> Result<Vec<RunEvent>>
             event_kind::RUN_CLAIMED
         ))?
         .query_map([], event_row)?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The `run_claimed` of `task`'s earlier runs and its releases, oldest
+/// first: the group of the provider pair it was drawn into stays with it,
+/// and a release that chose a provider takes it out (ADR-t4005-1).
+fn pair_claims(conn: &Connection, task: TaskId) -> Result<Vec<RunEvent>> {
+    Ok(conn
+        .prepare(&format!(
+            "SELECT * FROM run_events WHERE task_id=?1 AND kind IN ('{}','{}') ORDER BY id",
+            event_kind::RUN_CLAIMED,
+            EventKind::TaskReleased.as_str()
+        ))?
+        .query_map([task], event_row)?
         .collect::<rusqlite::Result<_>>()?)
 }
 

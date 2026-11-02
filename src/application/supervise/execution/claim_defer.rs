@@ -300,6 +300,7 @@ impl Supervisor<'_> {
         &mut self,
         graph: &DependencyGraph,
         light: Option<&HashSet<TaskId>>,
+        pairs: &crate::domain::provider_trial::ProviderTrial,
     ) -> Result<Claimable> {
         let now = self.generators.clock.now();
         let max_secs = self.claim.conflicts.config.defer_max_secs;
@@ -351,11 +352,23 @@ impl Supervisor<'_> {
         {
             HashMap::new()
         } else {
-            self.queue
-                .candidates()?
-                .into_iter()
-                .map(|task| (task.id(), task.worker()))
-                .collect()
+            // The worker the trial of the provider pair requests for the
+            // candidate, which the claim runs it as (ADR-t4005-1).
+            let mut workers = HashMap::new();
+            for task in self.queue.candidates()? {
+                let worker = if pairs.enabled {
+                    pairs.requested(
+                        task.id(),
+                        task.worker(),
+                        task.execution_class(),
+                        &self.queue.task_events(task.id())?,
+                    )
+                } else {
+                    task.worker()
+                };
+                workers.insert(task.id(), worker);
+            }
+            workers
         };
         let mut order = Vec::new();
         let mut events = Vec::new();

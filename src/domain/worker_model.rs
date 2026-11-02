@@ -23,6 +23,7 @@ use crate::domain::run::{ReviseRequested, restore_payload};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+pub use super::provider_trial::ProviderTrial;
 use super::{
     DomainError, Provider, ReasonCode, RunEvent, TaskId,
     prediction::{PREDICTION_WINDOW, TaskNature, percentile, window},
@@ -136,6 +137,10 @@ impl TrialCandidate {
 /// A candidate must be a step of [`LADDER`] ([`Self::check`]), so that a
 /// task-caused failure raises it; the provider is not a candidate's (a
 /// Codex claim is outside the trial).
+///
+/// `providers` is the trial of the provider pair, its own table
+/// (`[worker.provider_trial]`, [`ProviderTrial`]) with its own name and
+/// draw, carried with this one to the claim.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct WorkerTrial {
@@ -146,6 +151,7 @@ pub struct WorkerTrial {
     pub control: TrialCandidate,
     pub treatment: TrialCandidate,
     pub limited: bool,
+    pub providers: ProviderTrial,
 }
 
 impl Default for WorkerTrial {
@@ -158,6 +164,7 @@ impl Default for WorkerTrial {
             control: TrialCandidate::of(OPUS, MEDIUM),
             treatment: TrialCandidate::of(SONNET, MEDIUM),
             limited: true,
+            providers: ProviderTrial::default(),
         }
     }
 }
@@ -221,15 +228,24 @@ impl WorkerTrial {
     /// trial's name and the task's ID falls below `treatment_percent` of
     /// 100, whatever the order of the claims (ADR-t3957-1 decision 1).
     pub fn draw(&self, task: TaskId) -> TrialGroup {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(format!("{}:{task}", self.name).as_bytes());
-        let mut head = [0; 8];
-        head.copy_from_slice(&digest[..8]);
-        if u64::from_be_bytes(head) % 100 < u64::from(self.treatment_percent) {
-            TrialGroup::Treatment
-        } else {
-            TrialGroup::Control
-        }
+        draw(&self.name, task, self.treatment_percent)
+    }
+}
+
+/// The group `task` is drawn into in the trial `name`: the treatment when
+/// the hash of the name and the task's ID falls below `treatment_percent`
+/// of 100, whatever the order of the claims. Every trial draws with it, so
+/// trials of different names draw independently of each other
+/// (ADR-t3957-1 decision 1, ADR-t4005-1 decision 2).
+pub fn draw(name: &str, task: TaskId, treatment_percent: u8) -> TrialGroup {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{name}:{task}").as_bytes());
+    let mut head = [0; 8];
+    head.copy_from_slice(&digest[..8]);
+    if u64::from_be_bytes(head) % 100 < u64::from(treatment_percent) {
+        TrialGroup::Treatment
+    } else {
+        TrialGroup::Control
     }
 }
 

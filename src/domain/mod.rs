@@ -1304,6 +1304,7 @@ pub mod pre_claim;
 pub mod prediction;
 pub mod proposal;
 pub mod provider_switch;
+pub mod provider_trial;
 pub mod queue_broker;
 pub mod queue_hold;
 pub mod queue_service;

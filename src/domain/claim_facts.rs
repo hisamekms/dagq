@@ -285,7 +285,7 @@ pub const RESERVED: [&str; 10] = [
 /// tried in order (the first one present): the one place a new attribute
 /// is added. The fields are those the claim wrote from
 /// [`super::measure::ClaimAttributes`], the run and its session.
-pub const KEYS: [(&str, &[&str]); 20] = [
+pub const KEYS: [(&str, &[&str]); 25] = [
     ("build", &["dagq_version"]),
     ("claude_version", &["claude_version"]),
     ("codex", &["codex_version"]),
@@ -302,6 +302,13 @@ pub const KEYS: [(&str, &[&str]); 20] = [
     ("trial_group", &["group"]),
     // The name of the trial the group was drawn in (ADR-t3957-1 decision 7).
     ("trial", &["trial"]),
+    // The trial of the provider pair: its group, name, the assigned
+    // worker and review, or why the task is outside (ADR-t4005-1).
+    ("pair_group", &[super::provider_trial::GROUP]),
+    ("pair_trial", &[super::provider_trial::TRIAL]),
+    ("pair_worker", &[super::provider_trial::WORKER]),
+    ("pair_review", &[super::provider_trial::REVIEW]),
+    ("pair_outside", &[super::provider_trial::OUTSIDE]),
     ("instructions_prompt", &["instructions_prompt"]),
     ("instructions_plugin", &["instructions_plugin"]),
     ("instructions_repo", &["instructions_repo"]),
@@ -705,6 +712,8 @@ mod tests {
         direct.insert("model".to_owned(), json!("opus"));
         direct.insert("group".to_owned(), json!("b"));
         direct.insert("trial".to_owned(), json!("ab-1"));
+        direct.insert("pair_group".to_owned(), json!("treatment"));
+        direct.insert("pair_review".to_owned(), json!("claude"));
         assert_eq!(
             Value::Object(attributes(&direct)),
             json!({
@@ -713,6 +722,8 @@ mod tests {
                 "claim_model": "opus",
                 "trial_group": "b",
                 "trial": "ab-1",
+                "pair_group": "treatment",
+                "pair_review": "claude",
             })
         );
     }
