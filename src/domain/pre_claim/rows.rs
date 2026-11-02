@@ -40,11 +40,20 @@
 //! not kept between folds, so its row is that of every event. The latest
 //! times of a life are those of its last event, whose clock was not set
 //! back.
+//!
+//! The rows may be written at a later position than the one the books are
+//! made at ([`books`]'s `at`): a row with something past it is first cut
+//! there ([`crate::domain::ledger::queue::cut`]), the lives then going on
+//! from the last event naming each supervisor by `at` and the stops by
+//! then. The rows taken are those [`holds_at`] keeps for the [`Since`] of
+//! the position, which is no later than the exact one, so the books may
+//! hold besides waits that ended before the exact [`Since`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ENDED_FREED, IntervalKind, PreClaimBook, PreClaimInterval, Started};
 use crate::domain::claim_hold::ENDED_SUPERVISOR_GONE;
+use crate::domain::ledger::queue::{QueueHead, cut};
 use crate::domain::ledger::{LedgerKind, LedgerRow};
 use crate::domain::stats::timestamp_millis;
 use crate::domain::supervisor_life::{Lives, supervisor_of};
@@ -80,6 +89,10 @@ impl Since {
             })
     }
 }
+
+/// The position of the rows as they were written, whatever it is: no row
+/// is past it, so [`books`] cuts none.
+pub const AS_WRITTEN: EventId = EventId::new(i64::MAX);
 
 /// What a queue row of a wait is of, by its subject's kind.
 fn started(kind: &str) -> Option<Started> {
@@ -119,6 +132,18 @@ pub fn holds(row: &LedgerRow, since: Since) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether the books made again at the position `at` ([`books`]) are made
+/// from `row`, one of the rows the store holds written at a later
+/// position: one [`holds`] keeps for `since` (that of the position,
+/// [`crate::application::LedgerStore::ledger_tasks_open_since_at`]), or a
+/// wait's or a stream's that read past `at`, which may be open there.
+pub fn holds_at(row: &LedgerRow, since: Since, at: EventId) -> bool {
+    holds(row, since)
+        || (row.kind == LedgerKind::Queue
+            && subject_kind(row).is_some_and(|kind| kind == STREAM || started(kind).is_some())
+            && row.inputs_through.last() > at)
 }
 
 /// Whether `row` is of a wait before a claim settled that a book made
@@ -230,18 +255,47 @@ pub fn living(rows: &[LedgerRow], stops: &[RunEvent]) -> Vec<EventId> {
         .collect()
 }
 
-/// The lives and the waits before a claim of the events up to a position,
-/// made of `rows` (those [`holds`] keeps), `stops` (every
+/// The lives and the waits before a claim of the events up to the
+/// position `at`, made of `rows` (those [`holds`] keeps, or at a position
+/// before theirs those [`holds_at`] keeps), `stops` (every
 /// `supervisor_stopped` the queue rows record) and `last` (the events
-/// [`living`] names): a builder that goes on from there with them writes
-/// the rows of the fold of every event. `closed_to` is the time of the
-/// pass that folded the rows, as the latest time its lives closed a wait.
+/// [`living`] names, or at a position before the rows' the last event
+/// naming each supervisor by `at` that
+/// [`crate::domain::ledger::queue::cut::Needs`] names): a builder that goes
+/// on from there with them writes the rows of the fold of every event.
+/// `closed_to` is the time of the pass that folded the rows, as the latest
+/// time its lives closed a wait. A row with something past `at` is cut
+/// there first ([`crate::domain::ledger::queue::cut`]), and a stop after it
+/// is none; the books then hold every wait the books of the rows written
+/// at `at` hold, as those hold it, and besides those only waits that
+/// ended before the exact [`Since`] of the position (they are held as the
+/// rows are taken by a bound no later than it).
 pub fn books(
     rows: &[LedgerRow],
     stops: &[RunEvent],
     last: &[RunEvent],
     closed_to: i64,
+    at: EventId,
 ) -> (Lives, PreClaimBook) {
+    let past = |row: &LedgerRow| {
+        row.inputs_through.last() > at || row.records.iter().any(|event| event.id > at)
+    };
+    let cut_rows: Vec<LedgerRow>;
+    let rows = if rows.iter().any(past) {
+        let lives = cut::lives_at(last, stops, at);
+        let reads = cut::Reads::default();
+        let cut = cut::Cut {
+            at,
+            now_ms: closed_to,
+            lives: &lives,
+            reads: &reads,
+        };
+        let heads: Vec<QueueHead> = rows.iter().map(QueueHead::of).collect();
+        cut_rows = cut.heads(&heads).iter().map(QueueHead::row).collect();
+        &cut_rows
+    } else {
+        rows
+    };
     let mut lives = Lives::default();
     let last_ms: BTreeMap<EventId, i64> = last
         .iter()
@@ -255,7 +309,7 @@ pub fn books(
     }
     let mut stops: Vec<&RunEvent> = stops
         .iter()
-        .filter(|stop| stop.kind == EventKind::SupervisorStopped)
+        .filter(|stop| stop.kind == EventKind::SupervisorStopped && stop.id <= at)
         .collect();
     stops.sort_by_key(|stop| stop.id);
     for stop in stops {

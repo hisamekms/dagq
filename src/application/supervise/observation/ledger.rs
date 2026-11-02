@@ -40,7 +40,7 @@ use crate::domain::ledger::builder::{
     RunSteps, SESSION_BYTES_PER_WRITE, SESSION_ROWS_PER_WRITE, STEPS_PER_READ, Target,
     WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
 };
-use crate::domain::ledger::queue::QueueBook;
+use crate::domain::ledger::queue::{QueueBook, QueueHead, cut};
 use crate::domain::ledger::session::written::{
     Cursors, Marks, rows_written_through, written_through,
 };
@@ -700,9 +700,84 @@ pub fn pre_claim_books(store: &dyn LedgerQueue, closed_to: i64) -> Result<(Lives
     let rows = store.ledger_wait_rows(since)?;
     let stops = store.ledger_supervisor_stops()?;
     let last = read_by_id(store, &pre_claim::rows::living(&rows, &stops))?;
-    let (lives, mut book) = pre_claim::rows::books(&rows, &stops, &last, closed_to);
+    let (lives, mut book) =
+        pre_claim::rows::books(&rows, &stops, &last, closed_to, pre_claim::rows::AS_WRITTEN);
     book.held_from(since);
     Ok((lives, book))
+}
+
+/// The books a builder going on from the position `at` takes, made again
+/// from the queue rows `store` holds (written at a position no earlier)
+/// as they were at `at` ([`crate::domain::ledger::queue::cut`]), folded by
+/// a pass at `closed_to`: the supervisors' lives and the waits before a
+/// claim ([`pre_claim::rows::books`], of the rows
+/// [`pre_claim::rows::holds_at`] keeps for the position's
+/// [`pre_claim::rows::Since`],
+/// [`crate::application::LedgerStore::ledger_tasks_open_since_at`]), and the queue book
+/// ([`QueueBook::from_heads_at`]). Besides the rows' heads, the stops and
+/// that [`pre_claim::rows::Since`], it reads what the cut names
+/// ([`cut::Needs`]): the last event naming each supervisor whose life
+/// reaches a row by `at`, the records of a finding or a stream with one
+/// past `at`, and the events of the run of an attempt whose end the heads
+/// do not tell; as many however many rows settled before. The task rows
+/// the store holds were folded past `at`, so they give the exact
+/// [`pre_claim::rows::Since`] of `at` only as a bound no later than it:
+/// held from that bound, the books then hold besides waits the exact one
+/// would not, each ended before the exact one (and some may have ended
+/// after the bound). A landing slot's attempt ended by `at` reads up to
+/// its row's through until the events after `at` are read again.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
+    )
+)]
+pub fn books_at(
+    store: &dyn LedgerQueue,
+    at: EventId,
+    closed_to: i64,
+) -> Result<(QueueBook, Lives, PreClaimBook)> {
+    let heads = store.ledger_queue_heads()?;
+    let needs = cut::Needs::of(&heads, at);
+    let since = store.ledger_tasks_open_since_at(at)?;
+    let stops = store.ledger_supervisor_stops()?;
+    let mut last = Vec::new();
+    for supervisor in &needs.supervisors {
+        last.extend(store.last_event_naming_supervisor(supervisor, at)?);
+    }
+    let mut reads = cut::Reads::default();
+    for key in &needs.rows {
+        if let Some(row) = store.ledger_row(LedgerKind::Queue, key)? {
+            reads.records.insert(key.clone(), row.records);
+        }
+    }
+    for run in &needs.runs {
+        if let Ok(id) = RunId::new(run.clone()) {
+            reads
+                .runs
+                .insert(run.clone(), store.ledger_run_events(&id)?);
+        }
+    }
+    let rows: Vec<LedgerRow> = heads
+        .iter()
+        .map(QueueHead::row)
+        .filter(|row| pre_claim::rows::holds_at(row, since, at))
+        .collect();
+    let (lives, mut book) = pre_claim::rows::books(&rows, &stops, &last, closed_to, at);
+    book.held_from(since);
+    let cut_lives = cut::lives_at(&last, &stops, at);
+    let queue = QueueBook::from_heads_at(
+        &heads,
+        &book,
+        &cut::Cut {
+            at,
+            now_ms: closed_to,
+            lives: &cut_lives,
+            reads: &reads,
+        },
+    );
+    Ok((queue, lives, book))
 }
 
 /// The position W the session rows `store` holds record every session

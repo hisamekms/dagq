@@ -21,7 +21,12 @@
 //!   update's step, a mark, a backend's failure), its kind the row's.
 //!
 //! An interval with no end yet has no `ended_at` and is not settled
-//! ([`super::settle`]). Reads nothing but the events.
+//! ([`super::settle`]). Reads nothing but the events. The book is made
+//! again from the rows the store holds ([`QueueBook::from_heads`]), cut to
+//! an earlier position than theirs by the reads of each kind [`cut`]
+//! names ([`QueueBook::from_heads_at`]): there a landing slot's attempt
+//! ended keeps its row's through, set again as the events after the
+//! position are read.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -71,6 +76,28 @@ impl QueueHead {
             outcome: row.outcome.clone(),
             detail: row.detail.clone(),
         }
+    }
+
+    /// The row of the head, without its records: what the books of the
+    /// waits and the lives are made again from
+    /// ([`crate::domain::pre_claim::rows::books`]), as the store gives the
+    /// rows of the waits.
+    pub fn row(&self) -> LedgerRow {
+        let mut row = LedgerRow::new(self.head.kind, self.head.key.clone(), self.task_id, "");
+        row.ledger_v = self.head.ledger_v;
+        row.inputs_from = self.head.inputs_from;
+        row.inputs_through = self.head.inputs_through.clone();
+        row.is_final = self.head.is_final;
+        row.started_at = self.started_at;
+        row.ended_at = self.ended_at;
+        row.outcome.clone_from(&self.outcome);
+        row.detail = self.detail.clone();
+        row.subject = Some(Subject {
+            kind: self.subject_kind.clone(),
+            id: self.subject_id.clone(),
+            ..Subject::default()
+        });
+        row
     }
 }
 
@@ -476,6 +503,21 @@ impl QueueBook {
             }
         }
         book
+    }
+
+    /// The book made again from the queue rows the store holds (`heads`)
+    /// as they were at the position `cut.at` ([`cut::Cut::heads`]), `pre_claim`
+    /// the waits before a claim of the events up to there: the book of
+    /// those events ([`Self::from_heads`]) but for the through of each
+    /// landing slot's attempt ended by then, which is its row's and may be
+    /// past the position. The events after it read again set those
+    /// throughs as the fold of every event does.
+    pub fn from_heads_at(
+        heads: &[QueueHead],
+        pre_claim: &PreClaimBook,
+        cut: &cut::Cut<'_>,
+    ) -> Self {
+        Self::from_heads(&cut.heads(heads), pre_claim, cut.at)
     }
 
     /// Take the landing slot's row `head` of the attempt `start` began as
@@ -1109,8 +1151,7 @@ fn finish(row: Building, owned: &[RunEvent], built_at: &str) -> LedgerRow {
     ledger
 }
 
-#[cfg(test)]
-mod tests;
+pub mod cut;
 
 #[cfg(test)]
-mod cut_spike;
+mod tests;

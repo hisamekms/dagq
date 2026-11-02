@@ -651,3 +651,183 @@ pub(crate) fn built_and_settled(events: &[RunEvent], now_ms: i64) -> Vec<super::
         })
         .collect()
 }
+
+/// A history whose queue rows a cut to a position meets of every kind
+/// ([`super::queue::cut`]): of every kind of queue row, ends just
+/// before and after positions, a supervisor's stop and silence, a claim
+/// that ends a deferral, a hold replaced by the next, and an event timed
+/// before an attempt's end that comes after it (a slot's through past its
+/// end event). `fill` settled rows of their own (marks, holds on the
+/// deferrals of tasks of their own a claim ended) go between the
+/// first attempt's end and the late event, and as many more in the
+/// silence of `s2`.
+pub(crate) fn cut_log(fill: usize) -> Log {
+    let alert = json!({"supervisor": "s1", "judgment": "slots", "kind": "idle"});
+    let (a, b, c, d) = (run_id(1), run_id(2), run_id(3), run_id(4));
+    let mut log = Log::default();
+    let filler = |log: &mut Log, secs: i64| {
+        for n in 0..fill {
+            let task = 100 + i64::try_from(n).unwrap_or_default();
+            let run = format!("{:08x}-2222-4222-8222-222222222222", task);
+            log.add(None, None, "mark_added", json!({"mark": "f"}), secs)
+                .add(
+                    Some(task),
+                    None,
+                    "claim_deferred",
+                    json!({"supervisor": "f", "reason": "paths"}),
+                    secs,
+                )
+                .add(Some(task), Some(&run), "run_claimed", json!({}), secs);
+        }
+    };
+    log.add(
+        None,
+        None,
+        "supervisor_started",
+        json!({"supervisor": "s1"}),
+        0,
+    )
+    .add(
+        None,
+        None,
+        "live_alert_baseline",
+        json!({"supervisor": "s1", "version": 1}),
+        1,
+    )
+    .add(
+        None,
+        None,
+        "slots_full_started",
+        json!({"supervisor": "s2", "class": "heavy"}),
+        2,
+    )
+    .add(None, None, "live_alert_started", alert.clone(), 3)
+    .add(None, None, "claim_held", json!({"supervisor": "s3"}), 4)
+    .add(
+        Some(5),
+        None,
+        "claim_deferred",
+        json!({"supervisor": "s1", "reason": "paths"}),
+        5,
+    )
+    .add(None, None, "landing_held", json!({"supervisor": "s1"}), 6)
+    .add(None, None, "finding_recorded", finding_record("open"), 7)
+    .add(Some(1), Some(&a), "integration_started", json!({}), 8)
+    .add(Some(1), Some(&a), "run_integrated", json!({}), 20)
+    .add(Some(2), Some(&b), "integration_started", json!({}), 21);
+    filler(&mut log, 22);
+    log.add(None, None, "mark_added", json!({"mark": "g"}), 23)
+        .add(Some(9), None, "task_created", json!({}), 15)
+        .add(
+            None,
+            None,
+            "live_alert_input_changed",
+            json!({"supervisor": "s1", "version": 2}),
+            30,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_stopped",
+            json!({"supervisor": "s3"}),
+            31,
+        )
+        .add(None, None, "live_alert_ended", alert, 32)
+        .add(
+            None,
+            None,
+            "finding_recorded",
+            finding_record("resolved"),
+            33,
+        )
+        .add(None, None, "landing_held", json!({"supervisor": "s1"}), 34)
+        .add(Some(3), Some(&c), "integration_started", json!({}), 35)
+        .add(Some(5), Some(&d), "run_claimed", json!({}), 36)
+        .add(
+            None,
+            None,
+            "slots_full_started",
+            json!({"supervisor": "s4", "class": "light"}),
+            38,
+        )
+        .add(
+            None,
+            None,
+            "slots_full_ended",
+            json!({"supervisor": "s4", "class": "light"}),
+            39,
+        )
+        .add(
+            None,
+            None,
+            "live_alert_baseline",
+            json!({"supervisor": "s1", "version": 3}),
+            40,
+        );
+    let silence = 2 + crate::domain::supervisor_life::SILENT_AFTER_MS / 1000;
+    filler(&mut log, silence - 10);
+    log.add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s1"}),
+        silence - 5,
+    )
+    .add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s4"}),
+        silence + 5,
+    )
+    .add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s2"}),
+        silence + 20,
+    )
+    .add(
+        None,
+        None,
+        "landing_resumed",
+        json!({"supervisor": "s1"}),
+        silence + 21,
+    )
+    .add(Some(3), Some(&c), "run_integrated", json!({}), silence + 22)
+    .add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s1"}),
+        silence + 25,
+    );
+    log
+}
+
+/// The ids of the events of `log` that are not fillers: the positions
+/// cuts are compared at, the same in a small and a large history.
+pub(crate) fn base_ats(log: &Log) -> Vec<EventId> {
+    log.events
+        .iter()
+        .filter(|e| e.payload.get("supervisor").and_then(Value::as_str) != Some("f"))
+        .filter(|e| e.payload.get("mark").and_then(Value::as_str) != Some("f"))
+        .filter(|e| e.task_id.is_none_or(|task| task.as_i64() < 100))
+        .map(|e| e.id)
+        .collect()
+}
+
+/// One attempt and two events after its end timed before it (`A`, then
+/// `B`), with an event between that reaches no attempt: the history in
+/// which a through cut from `P` = `B` goes back to `A` during the replay.
+pub(crate) fn two_late_log() -> Log {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.add(Some(1), Some(&a), "integration_started", json!({}), 8)
+        .add(Some(1), Some(&a), "run_integrated", json!({}), 20)
+        .add(None, None, "mark_added", json!({"mark": "m"}), 21)
+        .add(Some(7), None, "task_created", json!({}), 15)
+        .add(Some(8), None, "task_created", json!({}), 16)
+        .add(None, None, "mark_added", json!({"mark": "n"}), 30);
+    log
+}

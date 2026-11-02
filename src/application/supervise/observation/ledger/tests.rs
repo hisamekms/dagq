@@ -84,6 +84,29 @@ struct Memory {
     /// How many writes of the marks alone were committed
     /// ([`LedgerStore::write_ledger_marks`]).
     marks_alone: Cell<usize>,
+    /// The reads besides the rows' heads a cut of the queue rows to a
+    /// position makes ([`books_at`]).
+    cut_reads: Cell<CutReads>,
+}
+
+/// How many times each read a cut of the queue rows makes was called, and
+/// how many events the reads of a row's records and a run's events gave.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CutReads {
+    rows: usize,
+    row_events: usize,
+    runs: usize,
+    run_events: usize,
+    naming: usize,
+    since_at: usize,
+}
+
+impl Memory {
+    fn count_cut(&self, count: impl FnOnce(&mut CutReads)) {
+        let mut reads = self.cut_reads.get();
+        count(&mut reads);
+        self.cut_reads.set(reads);
+    }
 }
 
 /// Another builder's pass, run on the store between a read and a write.
@@ -210,13 +233,32 @@ impl EventStore for Memory {
 
 impl LedgerStore for Memory {
     fn ledger_run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
-        EventStore::run_events(self, run)
+        let events = EventStore::run_events(self, run)?;
+        self.count_cut(|reads| {
+            reads.runs += 1;
+            reads.run_events += events.len();
+        });
+        Ok(events)
+    }
+    fn ledger_tasks_open_since_at(&self, at: EventId) -> Result<pre_claim::rows::Since> {
+        self.count_cut(|reads| reads.since_at += 1);
+        let rows: Vec<LedgerRow> = self
+            .ledger_rows(LedgerKind::Task)?
+            .into_iter()
+            .filter(|row| row.inputs_from <= at)
+            .map(|row| LedgerRow {
+                is_final: row.is_final && row.inputs_through.last() <= at,
+                ..row
+            })
+            .collect();
+        Ok(pre_claim::rows::Since::of(&rows))
     }
     fn last_event_naming_supervisor(
         &self,
         supervisor: &str,
         upto: EventId,
     ) -> Result<Option<RunEvent>> {
+        self.count_cut(|reads| reads.naming += 1);
         Ok(self
             .events
             .borrow()
@@ -333,7 +375,12 @@ impl LedgerStore for Memory {
             self.broken.borrow().as_ref() != Some(&row),
             "the stored row does not parse"
         );
-        Ok(self.rows.borrow().get(&row).cloned())
+        let held = self.rows.borrow().get(&row).cloned();
+        self.count_cut(|reads| {
+            reads.rows += 1;
+            reads.row_events += held.as_ref().map_or(0, |row| row.records.len());
+        });
+        Ok(held)
     }
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>> {
         Ok(self
@@ -3126,6 +3173,59 @@ fn the_wait_books_made_again_read_as_many_events_however_many_waits_settled() {
     assert_eq!(many.1, few.1);
     assert_eq!(few.1, (1, 1));
     assert!(many.2 > few.2);
+}
+
+/// The books made again at a position from the queue rows the store
+/// holds written later ([`books_at`]) read, besides the rows' heads and the
+/// stops, as many times and as many events however many rows settled
+/// before: a history and the same with more settled rows of their own (a
+/// mark, a deferral a claim ended) between an attempt's end and an event
+/// timed before it and in a supervisor's silence, cut at the same events
+/// of each. Each kind of read is made. At the position the rows were
+/// written at, the books are those of the rows as written.
+#[test]
+fn the_reads_of_the_books_cut_to_a_position_do_not_grow_with_the_rows_settled() {
+    use crate::domain::ledger::testkit::{base_ats, cut_log};
+    let reads_cutting = |fill: usize| {
+        let log = cut_log(fill);
+        let secs = (crate::domain::stats::timestamp_millis(&log.events.last().unwrap().created_at)
+            .unwrap()
+            / 1000)
+            - T0
+            + 1;
+        let memory = Memory::of(&log);
+        let mut builder = Builder::default();
+        drain(&memory, &mut builder, secs);
+        // At the position the rows were written at, the books of the rows
+        // as written.
+        let p = log.last();
+        let (queue, lives, book) = books_at(&memory, p, ms(secs)).unwrap();
+        let (as_lives, as_book) = pre_claim_books(&memory, ms(secs)).unwrap();
+        assert_eq!((&lives, &book), (&as_lives, &as_book));
+        let heads = memory.ledger_queue_heads().unwrap();
+        assert_eq!(queue, QueueBook::from_heads(&heads, &as_book, p));
+        let mut total = CutReads::default();
+        let mut most = 0;
+        for at in base_ats(&log) {
+            memory.cut_reads.set(CutReads::default());
+            books_at(&memory, at, ms(secs)).unwrap();
+            let reads = memory.cut_reads.get();
+            most = most.max(reads.rows + reads.runs + reads.naming + reads.since_at);
+            total.rows += reads.rows;
+            total.row_events += reads.row_events;
+            total.runs += reads.runs;
+            total.run_events += reads.run_events;
+            total.naming += reads.naming;
+            total.since_at += reads.since_at;
+        }
+        (total, most)
+    };
+    let (small, large) = (reads_cutting(1), reads_cutting(50));
+    assert_eq!(small, large);
+    let (total, _) = small;
+    assert!(total.rows > 0 && total.row_events > 0, "{total:?}");
+    assert!(total.runs > 0 && total.run_events > 0, "{total:?}");
+    assert!(total.naming > 0 && total.since_at > 0, "{total:?}");
 }
 
 /// The rows `rows` and the events `events` a queue service holds, as the

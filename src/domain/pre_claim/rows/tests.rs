@@ -21,7 +21,7 @@ fn made_and_whole() -> ((Lives, PreClaimBook), (Lives, PreClaimBook), i64) {
         .iter()
         .filter_map(|id| events.iter().find(|event| event.id == *id).cloned())
         .collect();
-    let made = books(&held, &stops, &last, now);
+    let made = books(&held, &stops, &last, now, events[position - 1].id);
     let lives = Lives::new(events);
     let mut book = PreClaimBook::of(events);
     book.close_lives(&lives, now);

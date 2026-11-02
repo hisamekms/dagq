@@ -108,17 +108,17 @@ claimの前の待ちの理由はsupervisor単位の区間をtaskの区間に重�
 
 - **区間の行**: `domain::pre_claim::pre_claim_intervals`がeventの列と今の時刻だけから`PreClaimInterval`の行を作り、StateStoreを読まない。
   どの区間も始まりを書いた1つのsupervisorに属し、終わりは下の規則で1通りに決まる。
-- **`slots_full`**: supervisorのfill passは、始めと終わりに自分のslotを見て、classの枠が全部埋まれば`slots_full_started`を、空けば`slots_full_ended`を書く（`domain::pre_claim::slots_full_payload`）。
+- **`slots_full`**: supervisorのfill passは、始めと終わりに自分のslotを見て、classの枠が全部埋まれば`slots_full_started`を、空けば`slots_full_ended`を書く。
   classは`SlotClass`で、classごとに別の区間になる。
   slotはsupervisorごとなので他のsupervisorは書きも閉じもせず、別のsupervisorの`supervisor_started`でも閉じない。
   execの引き継ぎは同じtokenの続きで、開いた区間を自分の記録から読み直して続ける。
   終わりを書かずに止まったsupervisorの区間は、下の「supervisorの一生」の終わりで閉じる。
 - **`claim_hold`**: 既存の`claim_held` / `claim_resumed`（queue共通の控え）が区間の始まりと終わりを兼ねる。
-  終わりは`stats`の`claim_holds`と同じ規則（`domain::claim_hold::hold_spans`）で、どのsupervisorが書いた終わりでも閉じ、書いたsupervisorの停止でも閉じる。
+  終わりは`stats`の`claim_holds`と同じ規則で、どのsupervisorが書いた終わりでも閉じ、書いたsupervisorの停止でも閉じる。
   控えはqueueの全てのsupervisorのclaimを止めるので、taskに重ねるときは区間のsupervisorに依らずqueueの待ちとして読む。
 - **`claim_deferral`**: 既存の`claim_deferred` / `claim_deferral_ended`（taskの控え）が区間の始まりと終わりを兼ねる。
-  終わりは`stats`の`claim_deferrals`の`by_end`と同じ規則（`domain::claim_defer::deferral_spans`）。
-- **taskのhold**: readyの間の`task_held`から同じholdが閉じるまでは、readyに重ねず工程`held`（runの`held`と同じタグ）にする（`domain::task_hold::task_hold_spans`）。
+  終わりは`stats`の`claim_deferrals`の`by_end`と同じ規則。
+- **taskのhold**: readyの間の`task_held`から同じholdが閉じるまでは、readyに重ねず工程`held`（runの`held`と同じタグ）にする。
 - **`run_claimed`の欄**: claimが書く欄と意味は`domain::claim_facts`のmodule docが持つ。
   supervisorは候補ごとの値をclaimに渡し、claimは取ったtaskの値だけを残す。
 - **`blocked_by`**: 着地の順番だけを待つ間の`run_phase_changed`（工程`landing_queue`）は、そのとき着地slotを握っていたrunを`blocked_by`に持ち、握るrunが変われば記録し直す。
@@ -136,13 +136,13 @@ supervisorの生存と停止の証拠はEventStoreに残し、一生の終わり
   後で掃除の`supervisor_stopped`が届けば`last_heartbeat_at`で畳み直す。
   どちらでもなければ生きている。
 - 停止のeventの無いstaleな登録は`silent`で閉じて掃除の後に直り、`supervisor_alive`の無い前のbuildのtokenも同じ規則で最後のeventで閉じる。
-- kpiの`supervisor_lives`もsupervisorsの表を読まず、この規則でeventから読む（`supervisor_life::heartbeats`）。
+- kpiの`supervisor_lives`もsupervisorsの表を読まず、この規則でeventから読む。
 
 ### 今の判定の記録
 
 statsのslotの今の判定は状態表・run dirのmarker・processを入力に今を判定するので、supervisorの周回がその入力を観測してEventStoreに記録し、統計はeventだけから同じ値を作れる（`supervise::observation::live_alerts`）。
 
-- **観測**: どのsupervisorも`OBSERVE_INTERVAL_SECS`ごとにqueue全体の入力を読み（eventは前回の後の分を`LiveHistory`に畳み、最初は全件を読まない）、statsと同じ判定の関数（`live_alerts::judge`）で判定する。
+- **観測**: どのsupervisorも`OBSERVE_INTERVAL_SECS`ごとにqueue全体の入力を読み（eventは前回の後の分を`LiveHistory`に畳み、最初は全件を読まない）、statsと同じ判定の関数で判定する。
   警告の鍵（`AlertKey`）はleaseの持ち主を含めないので、leaseが移っても何も書かない。
 - **判定の入力と警告の開閉**: 入力は離散の時刻と値で、経過で伸びる長さは持たない（入力の中身は`domain::live_alerts`のmodule doc）。
   開閉のeventは警告がいつ立ち消えたかの記録で、値の再現には使わない。
@@ -198,7 +198,8 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **印**: EventStore・NodeSampleStore・SessionStepStore・runの資源のカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsession・queue・readyだったtaskの行（記録でない終わりも）・nodeの時間に印を付ける。
   畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読み`builder::Kept`に持ち越す。
   起動の追いつきはページごとに変わった行を畳み、確定した行のeventを次のページの前に落とし、後のeventが届けば記録はstoreの行から読み戻す。
-  session（記録と落とした印も）・queueの行・supervisorの一生・claimの前の待ちの帳簿はstoreの行を書き終えた位置で作り直せる（起動は未使用）。
+  session（記録と落とした印も）・queueの行・一生・待ちの帳簿はstoreの行から作り直せ、後の3つは書いた位置より前へも決まった読みで切れる（起動は未使用）。
+  切ると終わったlanding slotの入力の終わりは書いた時のまま再生で揃い、Sinceは後のtask行から下限で読むので正確なSinceより前に終わった待ちが余りうる。
   周回は新しいeventが変えうる行と印の付いた行だけを畳み、作る領域は前からのevent数に比例しない。
 - **書く行**: 終わったrun（`push_pending`と旧方式を含み途中は書かない）と全てのtask・session・queue・nodeの行。
   session行は他の行の後に1周分を塊ごとのtransactionで書き、W以前から全件を畳む係だけが最後の塊でWとR（カーソルごとに残った行の入力の前まで）の印も書き、無ければカーソル0から畳む。
