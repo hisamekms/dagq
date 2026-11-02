@@ -1970,9 +1970,11 @@ impl GitRepository {
 
     /// The commits of `head`'s first-parent line after `after` (none of
     /// those `after` reaches) whose time is `since` (unix seconds) or
-    /// later, oldest first, each with its full ID, its committer's time
-    /// and the paths it changed against its first parent (renames
-    /// followed): the reader of main's history the supervisor records and
+    /// later, oldest first, each with its full ID, its committer's time,
+    /// the paths it changed against its first parent (renames followed)
+    /// and the commit its message says it reverts
+    /// ([`crate::domain::stats::revert::RevertOf::of_message`]): the
+    /// reader of main's history the supervisor records and
     /// [`Self::main_history`] share.
     pub fn main_commits(
         &self,
@@ -1992,7 +1994,7 @@ impl GitRepository {
             "--diff-merges=first-parent",
             "-M",
             "--name-status",
-            "--format=%x01%H %ct",
+            "--format=%x01%H %ct%x02%B%x02",
             &format!("--max-age={}", since.max(0)),
             &range,
             "--",
@@ -3412,15 +3414,18 @@ fn parse_landed_log(log: &str) -> HashMap<String, Vec<String>> {
     changes
 }
 
-/// `git log -z --format=%x01%ct --name-status` as commits: NUL-separated
-/// fields where a `\x01<unix seconds>` field starts a commit, then each
-/// change is a status field (`M`, `D`, ... after a newline) and its path,
-/// or `R100` / `C75` and the old and new paths. Paths are never quoted.
+/// `git log -z --format=%x01%H %ct%x02%B%x02 --name-status` as commits:
+/// NUL-separated fields where a `\x01<sha> <unix seconds>\x02<message>\x02`
+/// field starts a commit (the message holds no NUL), then each change is a
+/// status field (`M`, `D`, ... after a newline) and its path, or `R100` /
+/// `C75` and the old and new paths. Paths are never quoted.
 fn parse_main_log(log: &str) -> Vec<MainCommit> {
     let mut commits: Vec<MainCommit> = Vec::new();
     let mut fields = log.split('\0').map(|field| field.trim_start_matches('\n'));
     while let Some(field) = fields.next() {
         if let Some(header) = field.strip_prefix('\u{1}') {
+            let (header, message) = header.split_once('\u{2}').unwrap_or((header, ""));
+            let message = message.strip_suffix('\u{2}').unwrap_or(message);
             if let Some((sha, Ok(at))) = header
                 .trim()
                 .split_once(' ')
@@ -3430,6 +3435,7 @@ fn parse_main_log(log: &str) -> Vec<MainCommit> {
                     sha: sha.to_owned(),
                     at,
                     changes: Vec::new(),
+                    reverts: crate::domain::stats::revert::RevertOf::of_message(message),
                 });
             }
             continue;
@@ -5790,6 +5796,7 @@ mod tests {
             let recorded = Recorded {
                 reach,
                 reading: MainReading::Readable,
+                ..Recorded::default()
             };
             for (kind, payload) in records(&recorded, now, &|| Ok(Some(1000)), &git) {
                 assert_ne!(kind.as_str(), "main_read_failed", "{payload}");

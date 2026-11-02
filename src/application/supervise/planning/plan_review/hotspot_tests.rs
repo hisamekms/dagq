@@ -231,6 +231,7 @@ fn history(events: &[RunEvent]) -> impl Fn(i64) -> Result<MainHistory> + use<> {
             sha: format!("{id:040}"),
             at: secs(id),
             changes,
+            reverts: Default::default(),
         });
     }
     let paths: HashSet<String> = ["hot.rs", "src/b.rs"].map(String::from).into();

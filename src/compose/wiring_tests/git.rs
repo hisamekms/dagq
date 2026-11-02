@@ -47,6 +47,9 @@ struct State {
     changed: Vec<String>,
     /// The parent of each commit a worker made on its worktree.
     parents: HashMap<CommitSha, CommitSha>,
+    /// The message of each commit of main's a test landed with one
+    /// ([`FakeGit::land_with_message`]); any other has none.
+    messages: HashMap<CommitSha, String>,
 }
 
 /// The repository in memory, its main checkout at `checkout`; clones share
@@ -77,6 +80,7 @@ impl FakeGit {
                 files: HashMap::new(),
                 changed: Vec::new(),
                 parents: HashMap::new(),
+                messages: HashMap::new(),
             })),
         }
     }
@@ -108,6 +112,16 @@ impl FakeGit {
         let parent = std::mem::replace(&mut worktree.head, made.clone());
         state.parents.insert(made.clone(), parent);
         Ok(made)
+    }
+
+    /// A commit on main with `message`, as a person's push makes one:
+    /// main's head from now on.
+    pub(super) fn land_with_message(&self, message: &str) -> CommitSha {
+        let mut state = self.lock();
+        let made = commit(2000 + state.messages.len());
+        state.main.push(made.clone());
+        state.messages.insert(made.clone(), message.to_owned());
+        made
     }
 
     /// Main's head now.
@@ -167,6 +181,36 @@ impl RepositoryReads for FakeGit {
 
     fn has_commit(&self, commit: &str) -> Result<bool> {
         Ok(self.known(commit))
+    }
+
+    /// The commits of main's line after `after` up to `head`, each at its
+    /// place on the line as its time (so `since` is not read), changing no
+    /// path, and reverting what its message says.
+    fn main_commits(
+        &self,
+        head: &str,
+        after: Option<&str>,
+        _since: i64,
+    ) -> Result<Vec<crate::domain::stats::conflicts::MainCommit>> {
+        let end = self
+            .position(head)
+            .with_context(|| format!("{head} is not on main"))?;
+        let start = after
+            .and_then(|after| self.position(after))
+            .map_or(0, |at| at + 1);
+        let state = self.lock();
+        Ok(state.main[start..=end]
+            .iter()
+            .zip(start..)
+            .map(|(sha, at)| crate::domain::stats::conflicts::MainCommit {
+                sha: sha.as_str().to_owned(),
+                at: i64::try_from(at).unwrap_or(i64::MAX),
+                changes: Vec::new(),
+                reverts: crate::domain::stats::revert::RevertOf::of_message(
+                    state.messages.get(sha).map_or("", String::as_str),
+                ),
+            })
+            .collect())
     }
 
     fn on_first_parent_line(&self, commit: &str, head: &str) -> Result<bool> {

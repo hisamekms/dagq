@@ -1964,3 +1964,53 @@ fn the_supervisor_records_the_landed_commit_once() {
     supervise_with(&db, &repo, &backend, &options).unwrap();
     assert_eq!(recorded(&db), after);
 }
+
+/// The reader of main's history reads each commit's message from a real
+/// `git log` (docs/design/main-history.md "記録"): the commit `git revert`
+/// made names the commit it reverts, the others none, each with the paths
+/// it changed as before.
+#[test]
+fn main_commits_carry_the_commit_a_git_revert_reverts() {
+    use dagq::domain::stats::revert::RevertOf;
+    use dagq::infrastructure::adapters::GitRepository;
+    let dir = TempDir::new().unwrap();
+    let repo = dir.path();
+    let as_someone = |args: &[&str]| {
+        git(
+            repo,
+            &[&["-c", "user.name=t", "-c", "user.email=t@t"][..], args].concat(),
+        );
+    };
+    git(repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(repo, &["add", "a.txt"]);
+    as_someone(&["commit", "-q", "-m", "first\n\nThis reverts nothing."]);
+    fs::write(repo.join("a.txt"), "b\n").unwrap();
+    as_someone(&["commit", "-q", "-am", "second"]);
+    let second = head_commit(repo);
+    as_someone(&["revert", "--no-edit", "HEAD"]);
+    let reverted = head_commit(repo);
+    let git = GitRepository::inspect(repo).unwrap();
+    let commits = git.main_commits(reverted.as_str(), None, 0).unwrap();
+    let read: Vec<(&str, &RevertOf, Vec<&str>)> = commits
+        .iter()
+        .map(|commit| {
+            let paths = commit.changes.iter().map(|c| c.path.as_str()).collect();
+            (commit.sha.as_str(), &commit.reverts, paths)
+        })
+        .collect();
+    assert_eq!(read.len(), 3, "{commits:?}");
+    assert_eq!(read[0].1, &RevertOf::NotRevert);
+    assert_eq!(
+        read[1],
+        (second.as_str(), &RevertOf::NotRevert, vec!["a.txt"])
+    );
+    assert_eq!(
+        read[2],
+        (
+            reverted.as_str(),
+            &RevertOf::Commit(second.as_str().to_owned()),
+            vec!["a.txt"]
+        )
+    );
+}

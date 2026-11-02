@@ -166,6 +166,9 @@ pub struct MainCommit {
     /// Unix seconds of the commit (its committer's time).
     pub at: i64,
     pub changes: Vec<MainChange>,
+    /// The commit it reverts, as its message says
+    /// ([`super::revert::RevertOf::of_message`]).
+    pub reverts: super::revert::RevertOf,
 }
 
 /// Main's history since the earliest conflict, and the paths it has now.
@@ -220,6 +223,7 @@ impl MainHistory {
                     sha: commit.sha.clone(),
                     at: commit.at,
                     changes: commit.changes.iter().filter(named).cloned().collect(),
+                    reverts: commit.reverts.clone(),
                 })
                 .collect(),
             paths: self
@@ -569,6 +573,7 @@ mod tests {
             sha: format!("c{secs}"),
             at: secs,
             changes,
+            reverts: Default::default(),
         }
     }
 

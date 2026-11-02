@@ -9,8 +9,8 @@ use super::*;
 use crate::application::LandingBranchStamp;
 use crate::application::main_log::{MainReader, Recorded, records};
 use crate::domain::stats::main_log::{
-    MAIN_OBSERVED, MAIN_OBSERVED_INTERVAL_SECS, MAIN_READ_FAILED, MAIN_READ_RECOVERED, MainReading,
-    Reach,
+    MAIN_COMMITS_RECORDED, MAIN_OBSERVED, MAIN_OBSERVED_INTERVAL_SECS, MAIN_READ_FAILED,
+    MAIN_READ_RECOVERED, MAIN_REWRITTEN, MainReading, Reach, import_heads,
 };
 
 /// What this process last recorded or found recorded, so a pass on which
@@ -98,6 +98,43 @@ impl ObservationState {
     }
 }
 
+/// The heads of the lines recorded besides the reach's
+/// ([`import_heads`]), of the record's `main_commits_recorded` and
+/// `main_rewritten` read a page at a time of those kinds only.
+fn recorded_lines<Q: EventStore + ?Sized>(queue: &Q) -> Result<Vec<String>> {
+    const PAGE: usize = 200;
+    let upto = queue.latest_event_id()?;
+    let mut after = crate::domain::EventId::new(0);
+    let mut events = Vec::new();
+    loop {
+        let page =
+            queue.events_of_between(&[MAIN_COMMITS_RECORDED, MAIN_REWRITTEN], after, upto, PAGE)?;
+        let full = page.len() == PAGE;
+        after = page.last().map_or(after, |last| last.id);
+        // Only what the heads are read of: a record's `after` and its last
+        // commit, without the evidence when one of its commits has none.
+        events.extend(page.into_iter().map(|mut event| {
+            if event.kind == EventKind::MainCommitsRecorded {
+                let commits = event.payload["commits"].as_array();
+                let evidence = commits
+                    .into_iter()
+                    .flatten()
+                    .all(|commit| commit.get("reverts").is_some());
+                let mut last =
+                    json!({"sha": commits.and_then(|c| c.last()).map(|c| c["sha"].clone())});
+                if evidence {
+                    last["reverts"] = serde_json::Value::Null;
+                }
+                event.payload = json!({"after": event.payload["after"].clone(), "commits": [last]});
+            }
+            event
+        }));
+        if !full {
+            return Ok(import_heads(&events));
+        }
+    }
+}
+
 /// Read the record's reach and Git's reading from the queue, record what
 /// moved of main since ([`records`]) and give what this look found. The
 /// queue's earliest event, for the first record only, is the time
@@ -109,16 +146,25 @@ pub fn look_at_main<Q: EventStore + ?Sized, M: MainReader + ?Sized>(
     now: i64,
     reader: &M,
 ) -> Result<Looked> {
+    let reach = queue
+        .latest_queue_event(&[MAIN_OBSERVED])?
+        .as_ref()
+        .and_then(Reach::of);
+    // The lines recorded only for the import of a record from before the
+    // evidence of a revert ([`Recorded::lines`]), a page at a time.
+    let lines = if reach.as_ref().is_none_or(|reach| !reach.reverts) {
+        recorded_lines(queue)?
+    } else {
+        Vec::new()
+    };
     let recorded = Recorded {
-        reach: queue
-            .latest_queue_event(&[MAIN_OBSERVED])?
-            .as_ref()
-            .and_then(Reach::of),
+        reach,
         reading: MainReading::of(
             queue
                 .latest_queue_event(&[MAIN_READ_FAILED, MAIN_READ_RECOVERED])?
                 .as_ref(),
         ),
+        lines,
     };
     let earliest = || queue.earliest_event_at();
     let records = records(&recorded, now, &earliest, reader);
@@ -260,7 +306,11 @@ mod tests {
             unreachable!("last_observe is not what the test reaches")
         }
         fn latest_event_id(&self) -> Result<EventId> {
-            unreachable!("latest_event_id is not what the test reaches")
+            Ok(self
+                .events
+                .borrow()
+                .last()
+                .map_or(EventId::new(0), |e| e.id))
         }
         fn record_backend_failure(
             &self,
@@ -317,7 +367,22 @@ mod tests {
             upto: EventId,
             limit: usize,
         ) -> Result<Vec<RunEvent>> {
-            unreachable!("events_of_between is not what the test reaches")
+            // Only the record's own kinds, for the lines an import reads.
+            assert!(
+                kinds
+                    .iter()
+                    .all(|kind| [MAIN_COMMITS_RECORDED, MAIN_REWRITTEN].contains(kind)),
+                "{kinds:?}"
+            );
+            Ok(self
+                .events
+                .borrow()
+                .iter()
+                .filter(|event| event.id > after && event.id <= upto)
+                .filter(|event| kinds.contains(&event.kind.as_str()))
+                .take(limit)
+                .cloned()
+                .collect())
         }
         fn events_between(
             &self,
@@ -358,6 +423,9 @@ mod tests {
         }
         fn merge_base(&self, _a: &str, _b: &str) -> Result<Option<String>> {
             Ok(None)
+        }
+        fn has(&self, _commit: &str) -> Result<bool> {
+            Ok(true)
         }
     }
 

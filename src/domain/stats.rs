@@ -96,6 +96,7 @@ pub mod providers;
 pub mod recommendations;
 pub mod replans;
 pub mod retries;
+pub mod revert;
 pub mod review_reasons;
 pub mod routes;
 pub mod sessions;
@@ -3248,6 +3249,7 @@ mod tests {
                         from: None,
                         deleted: false,
                     }],
+                    reverts: Default::default(),
                 }],
                 paths: ["hot.rs".to_owned()].into_iter().collect(),
             }),

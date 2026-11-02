@@ -288,6 +288,7 @@ event_kinds! {
     MainPathsRecorded => "main_paths_recorded",
     MainReadFailed => "main_read_failed",
     MainReadRecovered => "main_read_recovered",
+    MainRevertsImported => "main_reverts_imported",
     MainRewritten => "main_rewritten",
     MarkRecorded => "mark_recorded",
     MarkRetracted => "mark_retracted",
@@ -735,6 +736,7 @@ impl EventKind {
                 | MainPathsRecorded
                 | MainReadFailed
                 | MainReadRecovered
+                | MainRevertsImported
                 | MainRewritten
                 | MarkRecorded
                 | MarkRetracted
@@ -1829,6 +1831,7 @@ mod tests {
             (EventKind::MainPathsRecorded, "main_paths_recorded"),
             (EventKind::MainReadFailed, "main_read_failed"),
             (EventKind::MainReadRecovered, "main_read_recovered"),
+            (EventKind::MainRevertsImported, "main_reverts_imported"),
             (EventKind::MainRewritten, "main_rewritten"),
             (EventKind::MarkRecorded, "mark_recorded"),
             (EventKind::MarkRetracted, "mark_retracted"),

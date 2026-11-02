@@ -8,8 +8,10 @@
 //! `ended_at`; one not ended reaches the window's end). The filters
 //! choose among the rows of a task, a goal or a run; the folds that carry
 //! state into a window (the attributes, the findings, main's history, the
-//! judgments of now) read every row's records up to the window's end
-//! whatever the filters. Each read says why it has no value instead of a
+//! judgments of now, the reverts and CI's failures after the landings)
+//! read every row's records up to the window's end whatever the filters;
+//! the reverts and failures are given for the runs the filters chose
+//! ([`LedgerWindow::post_landing`]). Each read says why it has no value instead of a
 //! 0 or an empty list: [`FoldedJudgments`]' states, [`MainMissing`],
 //! [`attributes::Folded::BeforeBaseline`],
 //! [`findings::Folded::BeforeBaseline`], and an Execution's context of
@@ -42,7 +44,10 @@
 //! head it read recorded, not a commit's time) for Git that could not be
 //! read, the supervisor's stop, a stale reach or a window before the
 //! record; the attributes and the findings are missing before their
-//! baseline (`基準より前`).
+//! baseline (`基準より前`); the reverts and failures after a landing are
+//! apart from a 0 before their record (`記録より前`), with no record, and
+//! after an import that could not read a line
+//! ([`post_landing::Coverage`]).
 //!
 //! ## The inputs of today's use cases
 //!
@@ -149,7 +154,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::{
-    LedgerKind, LedgerRow, WindowEnd, attributes, findings, node,
+    LedgerKind, LedgerRow, WindowEnd, attributes, findings, node, post_landing,
     read::{LedgerValues, read},
     session::row_executions,
 };
@@ -652,6 +657,23 @@ impl LedgerWindow {
     pub fn main_covers(&self) -> Result<(), MainMissing> {
         let events = self.events();
         fold_main_log(&events).covers(&events, self.start_ms, Some(self.end_ms))
+    }
+
+    /// The reverts and CI's failures after the landings, matched to their
+    /// runs as the records give them at the window's end: every row's,
+    /// whatever the filters ([`post_landing::fold`]).
+    pub fn post_landing_book(&self) -> post_landing::PostLandingBook {
+        post_landing::fold(&self.events(), self.end_ms)
+    }
+
+    /// What befell each of the window's runs (its chosen run rows, by the
+    /// filters) after its landing, read at the window's end.
+    pub fn post_landing(&self) -> Vec<post_landing::PostLanding> {
+        let book = self.post_landing_book();
+        self.of(LedgerKind::Run)
+            .filter_map(|row| RunId::new(row.key.clone()).ok())
+            .map(|run| book.of_run(&run))
+            .collect()
     }
 
     /// The tasks' and goals' attributes at the window's end.

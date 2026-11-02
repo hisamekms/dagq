@@ -1,0 +1,9 @@
+# The registry's boundary task 3960 gave (the format is in the header of
+# scripts/check-it-added-tests.sh).
+
+[[boundary]]
+id = "main-commits-carry-revert-target-from-git-log"
+kind = "Git"
+test = "runtime_claim::main_commits_carry_the_commit_a_git_revert_reverts"
+reason = "実の git log が出す区切り（-z の NUL と書式の区切り）と commit の message の本文から、git revert が作った commit の既定の行を GitRepository::main_commits が読み、revert 先の sha を変えた path とともに返すことは、実の git の出力でしか確かめられない。行の解析の判断は domain::stats::revert の unit test"
+task = 3960

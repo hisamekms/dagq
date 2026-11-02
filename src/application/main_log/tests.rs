@@ -14,8 +14,10 @@ use crate::domain::{
         conflicts::{History, HistoryCheck, MainChange, MainHistory, conflict_hotspots},
         main_log::{
             MAIN_LOG_KINDS, MAIN_OBSERVED, MAIN_READ_FAILED, MAIN_READ_RECOVERED,
-            MAIN_RECORD_GRACE_SECS, MainLog, MainMissing, fold_main_log,
+            MAIN_RECORD_GRACE_SECS, MAIN_REVERTS_IMPORTED, MAIN_REWRITTEN, MainLog, MainMissing,
+            fold_main_log, import_heads,
         },
+        revert::RevertOf,
     },
 };
 
@@ -28,21 +30,32 @@ struct Main {
     line: RefCell<Vec<MainCommit>>,
     /// The commits no longer on the line, with their merge base with it.
     gone: RefCell<HashMap<String, Option<String>>>,
+    /// The line each rewrite took off, whole, by its head.
+    lines: RefCell<Vec<Vec<MainCommit>>>,
+    /// The commits Git no longer has (collected as garbage).
+    collected: RefCell<HashSet<String>>,
     failing: Cell<bool>,
 }
 
 impl Main {
     fn land(&self, sha: &str, at: i64, changes: Vec<MainChange>) {
+        self.land_reverting(sha, at, changes, RevertOf::NotRevert);
+    }
+
+    /// A commit whose message says it reverts as `reverts` says.
+    fn land_reverting(&self, sha: &str, at: i64, changes: Vec<MainChange>, reverts: RevertOf) {
         self.line.borrow_mut().push(MainCommit {
             sha: sha.to_owned(),
             at,
             changes,
+            reverts,
         });
     }
 
     /// Rewrite the line after `keep` commits, as a force push does.
     fn rewrite(&self, keep: usize) {
         let mut line = self.line.borrow_mut();
+        self.lines.borrow_mut().push(line.clone());
         let base = keep.checked_sub(1).map(|at| line[at].sha.clone());
         for gone in line.drain(keep..) {
             self.gone.borrow_mut().insert(gone.sha, base.clone());
@@ -81,9 +94,16 @@ impl MainReader for Main {
             .last()
             .map_or_else(|| "root".to_owned(), |c| c.sha.clone()))
     }
-    fn commits(&self, _: &str, after: Option<&str>, since: i64) -> Result<Vec<MainCommit>> {
+    fn commits(&self, head: &str, after: Option<&str>, since: i64) -> Result<Vec<MainCommit>> {
         self.check()?;
-        let line = self.line.borrow();
+        // The line `head` is on: main's now, or one a rewrite took off.
+        let lines = self.lines.borrow();
+        let now = self.line.borrow();
+        let on = |line: &Vec<MainCommit>| line.iter().position(|c| c.sha == head);
+        let line: Vec<MainCommit> = std::iter::once(&*now)
+            .chain(lines.iter().rev())
+            .find_map(|line| Some(line[..=on(line)?].to_vec()))
+            .unwrap_or_else(|| now.clone());
         let start = after
             .and_then(|after| line.iter().position(|c| c.sha == after))
             .map_or(0, |at| at + 1);
@@ -117,6 +137,12 @@ impl MainReader for Main {
     fn merge_base(&self, a: &str, _: &str) -> Result<Option<String>> {
         self.check()?;
         Ok(self.gone.borrow().get(a).cloned().flatten())
+    }
+    fn has(&self, commit: &str) -> Result<bool> {
+        self.check()?;
+        Ok(!self.collected.borrow().contains(commit)
+            && (self.line.borrow().iter().any(|c| c.sha == commit)
+                || self.gone.borrow().contains_key(commit)))
     }
 }
 
@@ -164,10 +190,7 @@ impl Queue {
 
     /// A pass of the supervisor at `now`: what it recorded.
     fn pass(&mut self, main: &Main, now: i64) -> Vec<&'static str> {
-        let recorded = Recorded {
-            reach: self.latest(&[MAIN_OBSERVED]).and_then(Reach::of),
-            reading: MainReading::of(self.latest(&[MAIN_READ_FAILED, MAIN_READ_RECOVERED])),
-        };
+        let recorded = self.recorded();
         let first = self.events.first().map(|e| e.created_at.clone());
         let earliest = || {
             Ok(first
@@ -182,6 +205,21 @@ impl Queue {
         // The supervisor's evidence of life goes on.
         self.push("supervisor_alive", json!({"supervisor": "s"}), now);
         kinds
+    }
+
+    /// What the queue holds of the record, as the supervisor reads it.
+    fn recorded(&self) -> Recorded {
+        let reach = self.latest(&[MAIN_OBSERVED]).and_then(Reach::of);
+        let lines = if reach.as_ref().is_none_or(|reach| !reach.reverts) {
+            import_heads(&self.events)
+        } else {
+            Vec::new()
+        };
+        Recorded {
+            reach,
+            reading: MainReading::of(self.latest(&[MAIN_READ_FAILED, MAIN_READ_RECOVERED])),
+            lines,
+        }
     }
 
     fn log(&self) -> MainLog {
@@ -322,6 +360,7 @@ fn a_failure_stops_the_reach_and_its_recovery_catches_up() {
                 sha: "b".into(),
                 at: now,
                 changes: vec![change("b.rs")],
+                reverts: Default::default(),
             });
         }
     }
@@ -403,5 +442,279 @@ fn the_first_record_takes_the_readers_range_once() {
     assert_eq!(from_record, from_git);
     assert_eq!(from_git.history, HistoryCheck::Checked { landings: 3 });
     assert_eq!(from_git.files[0].landings, Some(3));
-    assert_eq!(MAIN_LOG_KINDS.len(), 6);
+    assert_eq!(MAIN_LOG_KINDS.len(), 7);
+}
+
+/// The record of a queue from before the commits carried the evidence of a
+/// revert: its `main_observed` has no `reverts` and its commits no field.
+fn recorded_before_the_evidence(main: &Main, queue: &mut Queue, now: i64) {
+    queue.pass(main, now);
+    for event in &mut queue.events {
+        if let Some(object) = event.payload.as_object_mut() {
+            object.remove("reverts");
+        }
+        for commit in event.payload["commits"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+        {
+            commit.as_object_mut().unwrap().remove("reverts");
+        }
+    }
+}
+
+/// (2) A reach recorded before the evidence has the evidence of main's
+/// line from the record's start imported by the next pass, before its
+/// reach and whether or not the reach is due; no later pass imports again,
+/// and a pass that stopped before its reach was written imports again.
+#[test]
+fn a_record_from_before_the_evidence_is_imported_once() {
+    let main = Main::default();
+    main.land("a", T + 1, vec![change("a.rs")]);
+    main.land_reverting(
+        "r",
+        T + 2,
+        vec![change("a.rs")],
+        RevertOf::Commit("a".into()),
+    );
+    let mut queue = Queue::since(T);
+    recorded_before_the_evidence(&main, &mut queue, T + 10);
+    assert_eq!(
+        Reach::of(queue.latest(&[MAIN_OBSERVED]).unwrap()).map(|r| r.reverts),
+        Some(false)
+    );
+    // The next pass, the head at rest and the reach not due.
+    assert_eq!(
+        queue.pass(&main, T + 11),
+        [MAIN_REVERTS_IMPORTED, MAIN_OBSERVED]
+    );
+    let imported = queue.latest(&[MAIN_REVERTS_IMPORTED]).unwrap();
+    assert_eq!(
+        imported.payload,
+        json!({"heads": ["r"], "unread": [], "since": T - 1, "at": T + 11,
+               "reverts": [{"sha": "r", "at": T + 2, "reverts": "a"}]})
+    );
+    assert!(
+        Reach::of(queue.latest(&[MAIN_OBSERVED]).unwrap())
+            .unwrap()
+            .reverts
+    );
+    // Once: neither the next pass nor one with a new commit imports.
+    assert!(queue.pass(&main, T + 12).is_empty());
+    main.land("b", T + 20, vec![change("b.rs")]);
+    assert_eq!(queue.pass(&main, T + 21), [COMMITS, MAIN_OBSERVED]);
+    let commits = &queue.latest(&[COMMITS]).unwrap().payload["commits"];
+    assert_eq!(commits[0]["reverts"], Value::Null);
+    assert_eq!(queue.count(MAIN_REVERTS_IMPORTED), 1);
+
+    // A pass that stopped after its import, before its reach: the next
+    // pass imports again.
+    let mut stopped = Queue::since(T);
+    recorded_before_the_evidence(&main, &mut stopped, T + 10);
+    let first = records(&stopped.recorded(), T + 11, &|| Ok(None), &main);
+    assert_eq!(first[0].0, EventKind::MainRevertsImported);
+    stopped.push(MAIN_REVERTS_IMPORTED, first[0].1.clone(), T + 11);
+    assert_eq!(
+        stopped.pass(&main, T + 12),
+        [MAIN_REVERTS_IMPORTED, MAIN_OBSERVED]
+    );
+    assert_eq!(stopped.count(MAIN_REVERTS_IMPORTED), 2);
+    assert!(stopped.pass(&main, T + 13).is_empty());
+}
+
+/// A record begun with the evidence never imports, and its commits carry
+/// what each reverts.
+#[test]
+fn a_record_begun_with_the_evidence_imports_nothing() {
+    let main = Main::default();
+    main.land("a", T + 1, vec![change("a.rs")]);
+    main.land_reverting(
+        "r",
+        T + 2,
+        vec![change("a.rs")],
+        RevertOf::Commit("a".into()),
+    );
+    let mut queue = Queue::since(T);
+    queue.pass(&main, T + 10);
+    assert!(
+        queue
+            .pass(&main, T + 10 + MAIN_OBSERVED_INTERVAL_SECS)
+            .len()
+            == 1
+    );
+    assert_eq!(queue.count(MAIN_REVERTS_IMPORTED), 0);
+    let commits = &queue.latest(&[COMMITS]).unwrap().payload["commits"];
+    assert_eq!(commits[0]["reverts"], Value::Null);
+    assert_eq!(commits[1]["reverts"], "a");
+    assert_eq!(
+        queue.log().history.commits[1].reverts,
+        RevertOf::Commit("a".into())
+    );
+}
+
+/// (2) The import covers every line recorded, not only main's now: a
+/// revert recorded before the evidence that a force push took off before
+/// the first import (in the same pass, or in an earlier rewrite) is
+/// imported, each once; a line whose head Git no longer has is named
+/// unread. A pass that stopped before its reach imports the same again.
+#[test]
+fn the_import_covers_the_lines_a_rewrite_took_off() {
+    let main = Main::default();
+    main.land("a", T + 1, vec![change("a.rs")]);
+    main.land_reverting("r1", T + 2, vec![], RevertOf::Commit("a".into()));
+    let mut queue = Queue::since(T);
+    queue.pass(&main, T + 10);
+    // An earlier rewrite took off r1, recorded before the evidence.
+    main.rewrite(1);
+    main.land("b", T + 20, vec![change("b.rs")]);
+    main.land_reverting("r2", T + 21, vec![], RevertOf::Commit("b".into()));
+    main.land("x", T + 22, vec![]);
+    queue.pass(&main, T + 30);
+    assert_eq!(queue.count(MAIN_REWRITTEN), 1);
+    // And the line at r2 is taken off before the first import.
+    main.rewrite(2);
+    main.land("c", T + 40, vec![change("c.rs")]);
+    let mut before = Queue {
+        events: queue.events.clone(),
+    };
+    for event in &mut before.events {
+        if let Some(object) = event.payload.as_object_mut() {
+            object.remove("reverts");
+        }
+        for commit in event.payload["commits"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+        {
+            commit.as_object_mut().unwrap().remove("reverts");
+        }
+    }
+    let mut stopped = Queue {
+        events: before.events.clone(),
+    };
+    assert_eq!(
+        before.pass(&main, T + 50),
+        [
+            MAIN_REVERTS_IMPORTED,
+            MAIN_REWRITTEN,
+            COMMITS,
+            "main_paths_recorded",
+            MAIN_OBSERVED
+        ]
+    );
+    let imported = &before.latest(&[MAIN_REVERTS_IMPORTED]).unwrap().payload;
+    assert_eq!(imported["heads"], json!(["x", "r1"]));
+    assert_eq!(imported["unread"], json!([]));
+    assert_eq!(
+        imported["reverts"],
+        json!([
+            {"sha": "r2", "at": T + 21, "reverts": "b"},
+            {"sha": "r1", "at": T + 2, "reverts": "a"},
+        ])
+    );
+    assert!(before.pass(&main, T + 51).is_empty());
+
+    // Stopped after the import, before the reach: the next pass takes the
+    // same again; the fold counts each revert once.
+    let first = records(&stopped.recorded(), T + 50, &|| Ok(None), &main);
+    stopped.push(MAIN_REVERTS_IMPORTED, first[0].1.clone(), T + 50);
+    stopped.pass(&main, T + 52);
+    assert_eq!(stopped.count(MAIN_REVERTS_IMPORTED), 2);
+    let again = &stopped.latest(&[MAIN_REVERTS_IMPORTED]).unwrap().payload;
+    assert_eq!(again["reverts"], first[0].1["reverts"]);
+
+    // A head Git collected is named, not read.
+    main.collected.borrow_mut().insert("r1".into());
+    let mut collected = Queue {
+        events: stopped.events[..before.events.len().min(stopped.events.len())].to_vec(),
+    };
+    collected.events.truncate(queue.events.len());
+    for event in &mut collected.events {
+        if let Some(object) = event.payload.as_object_mut() {
+            object.remove("reverts");
+        }
+    }
+    collected.pass(&main, T + 60);
+    let imported = &collected.latest(&[MAIN_REVERTS_IMPORTED]).unwrap().payload;
+    assert_eq!(imported["heads"], json!(["x"]));
+    assert_eq!(imported["unread"], json!(["r1"]));
+}
+
+/// Strip the evidence of a revert from `events`, as a record from before
+/// it holds them.
+fn without_evidence(events: &mut [RunEvent]) {
+    for event in events {
+        if let Some(object) = event.payload.as_object_mut() {
+            object.remove("reverts");
+        }
+        for commit in event.payload["commits"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+        {
+            commit.as_object_mut().unwrap().remove("reverts");
+        }
+    }
+}
+
+/// (2) A record a pass from before the evidence left before its reach is
+/// imported too: commits recorded after the reach (a revert among them)
+/// and taken off main by a rewrite before the first import, and commits
+/// recorded with no reach at all. Each is imported once its line is read,
+/// and no later pass imports again.
+#[test]
+fn a_record_left_before_its_reach_is_imported() {
+    // After the reach `a`, a pass recorded `r` and `h` and stopped.
+    let main = Main::default();
+    main.land("a", T + 1, vec![change("a.rs")]);
+    let mut queue = Queue::since(T);
+    queue.pass(&main, T + 10);
+    main.land_reverting("r", T + 11, vec![], RevertOf::Commit("a".into()));
+    main.land("h", T + 12, vec![]);
+    let left = records(&queue.recorded(), T + 20, &|| Ok(None), &main);
+    assert_eq!(left[0].0, EventKind::MainCommitsRecorded);
+    queue.push(COMMITS, left[0].1.clone(), T + 20);
+    without_evidence(&mut queue.events);
+    // Main is rewritten from before `a`.
+    main.rewrite(0);
+    main.land("b", T + 30, vec![change("b.rs")]);
+    assert_eq!(queue.recorded().lines, ["h"]);
+    let kinds = queue.pass(&main, T + 40);
+    assert_eq!(kinds[0], MAIN_REVERTS_IMPORTED);
+    let imported = &queue.latest(&[MAIN_REVERTS_IMPORTED]).unwrap().payload;
+    assert_eq!(imported["heads"], json!(["a", "h"]));
+    assert_eq!(
+        imported["reverts"],
+        json!([{"sha": "r", "at": T + 11, "reverts": "a"}])
+    );
+    assert!(queue.pass(&main, T + 41).is_empty());
+    assert_eq!(queue.count(MAIN_REVERTS_IMPORTED), 1);
+
+    // A first record left before any reach, its revert rewritten away.
+    let main = Main::default();
+    main.land("a", T + 1, vec![change("a.rs")]);
+    main.land_reverting("r", T + 2, vec![], RevertOf::Commit("a".into()));
+    let mut queue = Queue::since(T);
+    let left = records(&queue.recorded(), T + 10, &|| Ok(Some(T * 1000)), &main);
+    assert_eq!(left[0].0, EventKind::MainCommitsRecorded);
+    queue.push(COMMITS, left[0].1.clone(), T + 10);
+    without_evidence(&mut queue.events);
+    main.rewrite(1);
+    assert_eq!(
+        queue.pass(&main, T + 20),
+        [
+            MAIN_REVERTS_IMPORTED,
+            COMMITS,
+            "main_paths_recorded",
+            MAIN_OBSERVED
+        ]
+    );
+    let imported = &queue.latest(&[MAIN_REVERTS_IMPORTED]).unwrap().payload;
+    assert_eq!(imported["heads"], json!(["r"]));
+    assert_eq!(imported["since"], T - 1);
+    assert_eq!(
+        imported["reverts"],
+        json!([{"sha": "r", "at": T + 2, "reverts": "a"}])
+    );
+    assert!(queue.pass(&main, T + 21).is_empty());
 }

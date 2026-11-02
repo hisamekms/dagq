@@ -96,7 +96,6 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
 ### 終端
 
 `run_integrated`の後は工程`push`（`run_integrated`と同じtransactionで記録）で、pushの結果の記録と同じ所で、`push_finished`（`already_delivered`を含む）か`push_skipped`なら`ended`を、`push_failed`なら`push_pending`を記録する。
-人の`integrate`も同じ`Integrator`を通るので同じ記録になる。
 `push_pending`を同じremote・branchへの後の`push_finished`で閉じるのは畳む関数で、人が手で打った`git push`はeventが無いので次の`push_finished`まで`push_pending`のまま。
 着地しないrunは`ended`で閉じ、`failed`のrunを復旧jobが動かせば次の工程に移る。
 taskは`completed`（着地したrunがあればそのpushの終わり）か`canceled`で閉じる（ADR-t1662-1決定16）。
@@ -135,8 +134,6 @@ supervisorの生存と停止の証拠はEventStoreに残し、一生の終わり
   無ければそのtokenを`supervisor`に持つ最後のeventを最後の証拠とし、今がそれより`SUPERVISOR_ALIVE_INTERVAL_SECS` + `HEARTBEAT_TIMEOUT_SECS`より後ならその時刻で終わる（`silent`）。
   後で掃除の`supervisor_stopped`が届けば`last_heartbeat_at`で畳み直す。
   どちらでもなければ生きている。
-- 停止のeventの無いstaleな登録は`silent`で閉じて掃除の後に直り、`supervisor_alive`の無い前のbuildのtokenも同じ規則で最後のeventで閉じる。
-- kpiの`supervisor_lives`もsupervisorsの表を読まず、この規則でeventから読む。
 
 ### 今の判定の記録
 
@@ -222,9 +219,9 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 欄・指標・節と今のuse caseの入力ごとの元の行は、同じmoduleのdoc commentの表が持つ。
 
 - 今の名前の意味の違い（`work`の終わり、人の答え待ちは`ask`）は`ledger::read`のdoc comment。
-  1期間の長さは段3のtaskが決める。
 - kpiの`phase.<工程>`と`land_phase.<工程>`も同じ1期間は同じ名前で作り、その後はタグごとの値と`phase.first_commit`に置き換える。hostの設定の`[kpi.targets."phase.startup"]`は`phase.first_commit`に読み替える（ADR-t1662-1が[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)決定1をamends）。
 - 新しい出力は所要時間とslotを握った時間の2本でタグごとの内訳とunattributedを出し、`change`と`area`で層に分ける。
+- 着地の後のrevertとCIの失敗はrunの行の確定の後に届き、全ての行の記録を窓の終わりで畳んで絞り込んだrunごとに返す（`LedgerWindow::post_landing`）。
 
 ### 欠測と集約の契約
 
@@ -233,6 +230,7 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 - 今の判定: 窓の終わりで猶予内の最も新しい成功した観測を持つ流れ1つの入力を窓の終わりで判定し、流れを足さず、開閉の記録から値を作らない。
   選べなければ「観測が無い」で、理由は「今の判定の記録」の5つ。
 - mainの履歴: 到達点（観測の到達時刻で、commitの時刻ではない）から猶予より後の窓は「記録が無い」（Gitの読み取りの失敗・supervisorの停止・到達点が古い・取り込みより前）。
+- 着地の後の品質: 記録の前の着地は「記録より前」、読めない線の取り込みの前は「不明」で、窓の終わりまでの経過と到達を添える。
 - 属性とfinding: 基準のeventより前の窓は「基準より前」。
 - Executionのcontext: 記録が無い（欄の無い前の記録）と未計測（nullと理由）を分ける。
 - token: Executionの終わった時刻（対話は区切りの時刻）で日に振り分け、actor × provider × modelで足す（[Execution tokens](execution-tokens.md)）。

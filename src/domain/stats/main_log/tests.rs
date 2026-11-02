@@ -41,6 +41,7 @@ fn commit(sha: &str, at: i64, changes: Vec<MainChange>) -> MainCommit {
         sha: sha.to_owned(),
         at,
         changes,
+        reverts: Default::default(),
     }
 }
 
@@ -340,4 +341,74 @@ fn a_window_past_the_reach_has_no_record_with_its_reason() {
         assert!(!missing.to_string().is_empty());
     }
     assert_eq!(MainReading::of(None), MainReading::Readable);
+}
+
+/// (1) A recorded commit carries what it reverts: the commit, null for no
+/// revert (a hand-written one among them), and no field for a commit
+/// recorded before the record carried it; each folds back as it was.
+#[test]
+fn a_commit_carries_what_it_reverts_and_an_old_one_reads_unrecorded() {
+    let mut commits = vec![
+        commit("a", T, vec![]),
+        commit("b", T + 1, vec![]),
+        commit("c", T + 2, vec![]),
+    ];
+    commits[1].reverts = RevertOf::NotRevert;
+    commits[2].reverts = RevertOf::Commit("a".into());
+    let payloads = commits_payloads(None, &commits);
+    let recorded = &payloads[0]["commits"];
+    assert!(recorded[0].get("reverts").is_none());
+    assert_eq!(recorded[1]["reverts"], Value::Null);
+    assert_eq!(recorded[2]["reverts"], "a");
+    let read: Vec<RevertOf> = (0..3).map(|at| reverts_of(&recorded[at])).collect();
+    assert_eq!(
+        read,
+        [
+            RevertOf::Unrecorded,
+            RevertOf::NotRevert,
+            RevertOf::Commit("a".into())
+        ]
+    );
+    let log = fold_main_log(&[event(1, MAIN_COMMITS_RECORDED, payloads[0].clone(), T + 3)]);
+    assert_eq!(log.history.commits, commits);
+    // The reach says whether the record carries it.
+    let reach = |payload| Reach::of(&event(2, MAIN_OBSERVED, payload, T + 3)).unwrap();
+    assert!(reach(observed_payload("c", T + 3, T)).reverts);
+    assert!(!reach(json!({"head": "c", "at": T + 3, "since": T})).reverts);
+    // An import keeps only the reverts.
+    assert_eq!(
+        reverts_imported_payload(&["c".into()], &[], T, T + 4, &commits)["reverts"],
+        json!([{"sha": "c", "at": T + 2, "reverts": "a"}])
+    );
+}
+
+/// The lines an import reads besides the reach's: the head each rewrite
+/// took off and the last commit of each record without the evidence that
+/// no record went on from (a pass's record left before its reach), each
+/// once; a record with the evidence names none.
+#[test]
+fn the_import_reads_every_line_left_without_the_evidence() {
+    let old = |after: Option<&str>, shas: &[&str]| json!({"after": after, "commits": shas.iter().map(|sha| json!({"sha": sha, "at": T, "changes": []})).collect::<Vec<_>>()});
+    let events = [
+        event(1, MAIN_COMMITS_RECORDED, old(None, &["a", "b"]), T),
+        event(2, MAIN_COMMITS_RECORDED, old(Some("b"), &["c"]), T + 1),
+        // Left before its reach, after `c`; then a rewrite took `c` off.
+        event(3, MAIN_COMMITS_RECORDED, old(Some("c"), &["r", "h"]), T + 2),
+        event(
+            4,
+            MAIN_REWRITTEN,
+            json!({"from": "c", "head": "x", "base": "a", "at": T + 3}),
+            T + 3,
+        ),
+        event(5, MAIN_COMMITS_RECORDED, old(Some("a"), &["x"]), T + 3),
+        // With the evidence: no line of its own to import.
+        event(
+            6,
+            MAIN_COMMITS_RECORDED,
+            json!({"after": "x", "commits": [{"sha": "y", "at": T, "changes": [], "reverts": null}]}),
+            T + 4,
+        ),
+    ];
+    assert_eq!(import_heads(&events), ["h", "c"]);
+    assert!(import_heads(&[]).is_empty());
 }

@@ -27,15 +27,20 @@ runtimeの制御はこの記録を読まない。
   印を読めないrepositoryと読み取りの失敗の間は、前に読んでから`MAIN_RETRY_SECS`経つまで読まない。
 - **記録**: Gitを読む周回はheadを読み、前回の到達点から動いていれば間のfirst-parentのcommitを変えたpath（改名と削除を含む）とともに古い順に`main_commits_recorded`へ書き、続けて`main_observed`を書く。
   dagqの着地も人の直接のpushも入る。
+  各commitはmessageの`git revert`の既定の行から読んだrevert先のcommitを持ち、行の無いcommitと欄の無い古い記録を分ける（識別の限界は`stats::revert`のdoc comment）。
   commitは上限まで1つのeventにまとめ、1つのcommitは分けない。
 - **到達点の間隔と猶予**: headが動かない間は`MAIN_OBSERVED_INTERVAL_SECS`ごとに`main_observed`だけを書く。
   猶予は`MAIN_RECORD_GRACE_SECS`。
 - **読めないとき**: commitも到達点も書かず、読めなくなったときに`main_read_failed`、読めるようになったときに`main_read_recovered`を理由つきで書き、前回の到達点から追いつく。
 - **取り込み**: `main_observed`の無い最初の周回は、衝突の有無に関わらず全eventの最古の時刻の直前（`application::main_log::records`のdoc comment）からのcommitと、今のheadの全pathを上限の件数ずつに分けた基準（`main_paths_recorded`）を書く。
   基準は全部分が揃って有効になり、途中で止まれば次の周回が取り直し、畳む関数は同じshaを1度だけ数える。
+- **revertの証拠の取り込み**: 到達点がrevertの証拠を持たない記録（`main_observed`の印が無いか、到達点の前に止まった記録）なら、次のGitを読む周回が記録した全ての線（`stats::main_log::import_heads`）の記録の始まりからのrevertを`main_reverts_imported`に1度だけ書き、続けて印つきの到達点を書く。
+  到達点を書く前に止まれば次の周回が取り直し、読み手は同じrevertのcommitを1度だけ数える。
+  Gitに無いheadの線は読めないと記録し、読み手はその前の着地のrevertを不明として返す。
 - **force push**: 到達点のcommitがmainのfirst-parentの線から外れれば`main_rewritten`を書き、その線の上のmerge baseから（無ければ最初から）commitと基準を記録し直す。
   畳む関数は後の記録を正にする。
 - **畳む関数**: `stats::main_log::fold_main_log`がeventだけからMainHistory・commitごとの変えたfile・到達時刻・Gitの読み取りの状態を返す。
   窓の終わりが到達時刻から猶予より後か、窓が取り込みより前に始まれば、`MainLog::history_for`は理由（Gitの読み取りの失敗中・supervisorの停止・到達点が古い）つきの「記録が無い」を返す。
+  revertと着地のrunの照合は台帳の共通の読み取り（[計測](measurement.md)の「共通の読み取り関数」）が持つ。
   statsとkpiはmainの履歴を台帳から読み、クライアントもjobもserviceもそのためにGitを読まない（[hostのCLI](queue-service-host-cli.md#送る範囲)）。
   supervisorの衝突の多いファイル（[claimの控え](supervisor-lifecycle/claim-hold.md#衝突の多いファイル)とplan reviewの`plan_review::conflict_hotspot_files`）はsupervisorのGitを読み、statsの既定の窓に衝突があるときだけ、窓の最初のeventの時刻の直前から読む（`application::main_history::window_conflict_history`）。

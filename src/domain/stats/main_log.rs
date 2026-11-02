@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use super::{
     conflicts::{History, MainChange, MainCommit, MainHistory, window_span},
+    revert::RevertOf,
     timestamp_millis,
 };
 use crate::domain::{
@@ -37,13 +38,19 @@ pub const CHANGES_PER_EVENT: usize = 2000;
 pub const PATHS_PER_EVENT: usize = 1000;
 
 /// The commits main's first-parent line gained after `after` (the commit
-/// the record had reached, `None` for the first), oldest first.
+/// the record had reached, `None` for the first), oldest first. Each
+/// commit's `reverts` is the commit its message says it reverts
+/// ([`RevertOf::of_message`]), null for none; a commit without the field
+/// was recorded before the record carried it ([`RevertOf::Unrecorded`]).
 pub const MAIN_COMMITS_RECORDED: &str = EventKind::MainCommitsRecorded.as_str();
 /// One part of the paths main has at `head`: the base the later commits'
 /// changes are applied to. `since` is the unix second the record of the
 /// history starts at.
 pub const MAIN_PATHS_RECORDED: &str = EventKind::MainPathsRecorded.as_str();
-/// The reach: the history up to `head` is recorded, as read `at`.
+/// The reach: the history up to `head` is recorded, as read `at`;
+/// `reverts` true once every commit of the record up to it carries the
+/// evidence of a revert (in its own `main_commits_recorded`, or in
+/// `main_reverts_imported` for those recorded before).
 pub const MAIN_OBSERVED: &str = EventKind::MainObserved.as_str();
 /// Git could not be read from `at`, for `reason`.
 pub const MAIN_READ_FAILED: &str = EventKind::MainReadFailed.as_str();
@@ -52,10 +59,25 @@ pub const MAIN_READ_RECOVERED: &str = EventKind::MainReadRecovered.as_str();
 /// The commit the record had reached (`from`) is no longer on main: the
 /// record goes on from `base`, their merge base (`None`: none), to `head`.
 pub const MAIN_REWRITTEN: &str = EventKind::MainRewritten.as_str();
+/// The evidence of a revert of the commits recorded before the record
+/// carried it, read once from Git `at`: the commits of the first-parent
+/// lines at `heads` from `since` (unix seconds, the record's start) whose
+/// message names a commit they revert, each `{sha, at, reverts}` once.
+/// The heads are every line the record recorded ([`import_heads`]): the
+/// reach's head, the head each rewrite took off and the last commit of
+/// each line recorded that no later record went on from (one a pass left
+/// before its reach), so a revert a force push took off main is imported
+/// as its own record keeps it; `unread` are those whose commit Git no
+/// longer has, whose reverts stay unknown to the readers. Taken
+/// again by the next pass when the pass stopped before its `main_observed`;
+/// a revert taken twice is counted once
+/// ([`crate::domain::ledger::post_landing`]).
+pub const MAIN_REVERTS_IMPORTED: &str = EventKind::MainRevertsImported.as_str();
 
 /// The kinds of the record, which [`fold_main_log`] reads.
-pub const MAIN_LOG_KINDS: [EventKind; 6] = [
+pub const MAIN_LOG_KINDS: [EventKind; 7] = [
     EventKind::MainCommitsRecorded,
+    EventKind::MainRevertsImported,
     EventKind::MainPathsRecorded,
     EventKind::MainObserved,
     EventKind::MainReadFailed,
@@ -107,7 +129,22 @@ fn commit_json(commit: &MainCommit) -> Value {
             value
         })
         .collect();
-    json!({"sha": commit.sha, "at": commit.at, "changes": changes})
+    let mut value = json!({"sha": commit.sha, "at": commit.at, "changes": changes});
+    match &commit.reverts {
+        RevertOf::Unrecorded => {}
+        RevertOf::NotRevert => value["reverts"] = Value::Null,
+        RevertOf::Commit(sha) => value["reverts"] = json!(sha),
+    }
+    value
+}
+
+/// What a recorded commit's `reverts` says ([`MAIN_COMMITS_RECORDED`]).
+pub fn reverts_of(commit: &Value) -> RevertOf {
+    match commit.get("reverts") {
+        None => RevertOf::Unrecorded,
+        Some(Value::String(sha)) => RevertOf::Commit(sha.clone()),
+        Some(_) => RevertOf::NotRevert,
+    }
 }
 
 fn commit_of(value: &Value) -> Option<MainCommit> {
@@ -130,6 +167,7 @@ fn commit_of(value: &Value) -> Option<MainCommit> {
         sha: value.get("sha")?.as_str()?.to_owned(),
         at: value.get("at")?.as_i64()?,
         changes,
+        reverts: reverts_of(value),
     })
 }
 
@@ -154,9 +192,71 @@ pub fn paths_payloads(head: &str, since: i64, paths: &[String]) -> Vec<Value> {
 }
 
 /// The payload of `main_observed`: the history up to `head` recorded, as
-/// read `at`, the record starting `since`.
+/// read `at`, the record starting `since`, every commit of it carrying the
+/// evidence of a revert.
 pub fn observed_payload(head: &str, at: i64, since: i64) -> Value {
-    json!({"head": head, "at": at, "since": since})
+    json!({"head": head, "at": at, "since": since, "reverts": true})
+}
+
+/// The payload of [`MAIN_REVERTS_IMPORTED`]: of `commits` (the lines at
+/// `heads` from `since`), those that revert a commit, each once by its sha.
+pub fn reverts_imported_payload(
+    heads: &[String],
+    unread: &[String],
+    since: i64,
+    at: i64,
+    commits: &[MainCommit],
+) -> Value {
+    let mut seen = HashSet::new();
+    let reverts: Vec<Value> = commits
+        .iter()
+        .filter(|commit| seen.insert(commit.sha.as_str()))
+        .filter_map(|commit| {
+            let target = commit.reverts.target()?;
+            Some(json!({"sha": commit.sha, "at": commit.at, "reverts": target}))
+        })
+        .collect();
+    json!({"heads": heads, "unread": unread, "since": since, "at": at, "reverts": reverts})
+}
+
+/// The heads of the lines recorded before the record carried the evidence
+/// of a revert, besides the reach's, among `events` (the record's
+/// `main_commits_recorded` and `main_rewritten`, ascending id): the head
+/// each rewrite took off, and the last commit of each
+/// `main_commits_recorded` without the evidence that no record went on
+/// from (`after`), a line a pass left before its reach among them. Every
+/// commit recorded is on the first-parent line of one of them or of the
+/// reach's head. Oldest first, each once.
+pub fn import_heads(events: &[RunEvent]) -> Vec<String> {
+    let continued: HashSet<&str> = events
+        .iter()
+        .filter(|event| event.kind == EventKind::MainCommitsRecorded)
+        .filter_map(|event| event.payload["after"].as_str())
+        .collect();
+    let mut heads: Vec<String> = Vec::new();
+    for event in events {
+        let head = match event.kind.known() {
+            Some(EventKind::MainRewritten) => event.payload["from"].as_str(),
+            Some(EventKind::MainCommitsRecorded) => {
+                let commits = event.payload["commits"].as_array();
+                let unrecorded = commits
+                    .into_iter()
+                    .flatten()
+                    .any(|commit| reverts_of(commit) == RevertOf::Unrecorded);
+                commits
+                    .and_then(|commits| commits.last())
+                    .and_then(|last| last["sha"].as_str())
+                    .filter(|last| unrecorded && !continued.contains(last))
+            }
+            _ => None,
+        };
+        if let Some(head) = head
+            && !heads.iter().any(|known| known == head)
+        {
+            heads.push(head.to_owned());
+        }
+    }
+    heads
 }
 
 /// The payload of `main_read_failed`.
@@ -184,6 +284,11 @@ pub struct Reach {
     pub at: i64,
     /// Where the record of the history starts (unix seconds).
     pub since: i64,
+    /// Whether every commit recorded up to it carries the evidence of a
+    /// revert: false for a reach recorded before the record carried it,
+    /// whose commits the next pass imports the evidence of
+    /// ([`MAIN_REVERTS_IMPORTED`]).
+    pub reverts: bool,
 }
 
 impl Reach {
@@ -193,6 +298,7 @@ impl Reach {
             head: event.payload.get("head")?.as_str()?.to_owned(),
             at: event.payload.get("at")?.as_i64()?,
             since: event.payload.get("since")?.as_i64()?,
+            reverts: event.payload.get("reverts").and_then(Value::as_bool) == Some(true),
         })
     }
 }

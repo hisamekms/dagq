@@ -18,5 +18,6 @@ mod service;
 mod session;
 
 mod already_satisfied;
+mod main_log;
 mod review_launch;
 mod worker_trial;
