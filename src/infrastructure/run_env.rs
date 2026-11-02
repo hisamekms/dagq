@@ -3958,6 +3958,23 @@ mod tests {
         assert!(!config.telemetry.failed_tests);
     }
 
+    /// This repository's `dagq.toml` prices Codex and gives it a first
+    /// run's estimate, so an eval round on Codex is estimated before any
+    /// run of the agent on Codex was measured instead of refused as
+    /// cost unknown.
+    #[test]
+    fn this_repositorys_dagq_toml_estimates_a_codex_round_without_a_measured_run() {
+        use crate::domain::Provider;
+        use crate::domain::agent_eval::round::{EstimateSource, estimate};
+        let config = parse_config(include_str!("../../dagq.toml")).unwrap().eval;
+        let prices = config.provider(Provider::Codex);
+        assert!(prices.converts(), "{prices:?}");
+        assert!(prices.cached_input_usd_per_mtok.is_some(), "{prices:?}");
+        let one = estimate(1, Provider::Codex, &[], &config).unwrap();
+        assert_eq!(one.per_run_source, EstimateSource::ProviderDefault);
+        assert_eq!(Some(one.per_run_usd), prices.default_run_usd);
+    }
+
     #[test]
     fn the_run_env_salt_is_made_once_and_kept_private() {
         use std::os::unix::fs::PermissionsExt;
