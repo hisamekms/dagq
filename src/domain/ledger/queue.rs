@@ -1111,3 +1111,6 @@ fn finish(row: Building, owned: &[RunEvent], built_at: &str) -> LedgerRow {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cut_spike;
