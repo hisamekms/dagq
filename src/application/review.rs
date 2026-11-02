@@ -11,6 +11,7 @@ use super::{
     Repository, RunFiles, TaskStore, fenced, integrate::integrate_logs, or_none, path_text,
     prompt_fit,
 };
+use crate::domain::actor_model::AgentModel;
 use crate::domain::local_checks::{self, LocalChecks};
 use crate::domain::local_gates::{Change, GateConfig};
 use crate::domain::review_builtins::{self, BuiltinAgent, EffectiveBuiltin};
@@ -373,6 +374,11 @@ pub struct SnapshotAgent {
     /// The provider its `[review.subagents.<agent>]` names
     /// ([`review_subagents::ReviewSubagent::provider`]).
     pub provider: Option<Provider>,
+    /// The model and effort its table writes
+    /// ([`review_subagents::ReviewSubagent::model`] and `effort`), checked
+    /// against the provider its job starts on as the snapshot is read.
+    pub model: Option<String>,
+    pub effort: Option<String>,
     /// For a built-in agent, whose definition is the binary's
     /// (`definition_path` is its name then), the project's rules for it
     /// as the landing branch's commit has them, `None` without the file
@@ -396,6 +402,15 @@ pub struct ProjectRules {
 }
 
 impl SnapshotAgent {
+    /// What its table writes of its job's launch.
+    pub fn written_launch(&self) -> AgentModel {
+        AgentModel {
+            provider: self.provider,
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+        }
+    }
+
     /// What a built-in agent's `review_job_started` records of which
     /// built-in judged (ADR-t2259-1 decision 9): its name, the build
     /// identifier of this dagq, the SHA-256 of the definition, and the
@@ -470,6 +485,14 @@ pub fn snapshot_subagents(
     let main = repository.main_head()?;
     let commit = main.to_string();
     let written = landing_agents(repository, &commit, parse)?;
+    // A model or effort the provider of an agent's job does not take is a
+    // mistake of the whole file, as a provider it does not know is.
+    let problems = written.launch_problems();
+    anyhow::ensure!(
+        problems.is_empty(),
+        "{CONFIG_FILE} in the landing branch's commit {commit} writes a launch its provider cannot take: {}",
+        problems.join("; ")
+    );
     let configured = written.selectable();
     if configured.is_empty() {
         return Ok(None);
@@ -486,13 +509,10 @@ pub fn snapshot_subagents(
     }
     let mut agents = Vec::new();
     for selected in selected {
-        let provider = configured
-            .iter()
-            .find(|agent| agent.name == selected.name)
-            .and_then(|agent| agent.provider);
+        let launch = written.written_launch(&selected.name);
         if let Some(builtin) = BuiltinAgent::named(&selected.name).ok().flatten() {
             agents.push(builtin_snapshot(
-                repository, &commit, builtin, selected, provider,
+                repository, &commit, builtin, selected, launch,
             )?);
             continue;
         }
@@ -515,7 +535,9 @@ pub fn snapshot_subagents(
             )
         })?;
         agents.push(SnapshotAgent {
-            provider,
+            provider: launch.provider,
+            model: launch.model,
+            effort: launch.effort,
             digest: format!("{:x}", Sha256::digest(definition.as_bytes())),
             tools,
             name: selected.name,
@@ -547,6 +569,28 @@ fn landing_agents(
     };
     parse(&text)
         .with_context(|| format!("parse {CONFIG_FILE} in the landing branch's commit {commit}"))
+}
+
+/// What the table of the review agent `agent` in the `dagq.toml` of the
+/// landing branch's commit `commit` writes of its job's launch, read as a
+/// review reads it ([`snapshot_subagents`]): what an agent eval's runs
+/// start with too. Nothing without the file or a table. `Err` when the
+/// file cannot be read or parsed or writes a launch its provider cannot
+/// take ([`ReviewAgents::launch_problems`]).
+pub fn written_launch_at(
+    repository: &dyn Repository,
+    commit: &str,
+    parse: &dyn Fn(&str) -> Result<ReviewAgents>,
+    agent: &str,
+) -> Result<AgentModel> {
+    let written = landing_agents(repository, commit, parse)?;
+    let problems = written.launch_problems();
+    anyhow::ensure!(
+        problems.is_empty(),
+        "{CONFIG_FILE} in the landing branch's commit {commit} writes a launch its provider cannot take: {}",
+        problems.join("; ")
+    );
+    Ok(written.written_launch(agent))
 }
 
 /// The code paths (`[review.code]`, [`CodePaths`]) the landing branch's
@@ -657,7 +701,7 @@ fn builtin_snapshot(
     commit: &str,
     builtin: BuiltinAgent,
     selected: review_subagents::SelectedAgent,
-    provider: Option<Provider>,
+    launch: AgentModel,
 ) -> Result<SnapshotAgent> {
     let definition = builtin.definition().to_owned();
     let tools = AgentTools::declared(AgentRole::Review, &definition).map_err(|why| {
@@ -667,7 +711,9 @@ fn builtin_snapshot(
         )
     })?;
     Ok(SnapshotAgent {
-        provider,
+        provider: launch.provider,
+        model: launch.model,
+        effort: launch.effort,
         digest: format!("{:x}", Sha256::digest(definition.as_bytes())),
         tools,
         definition_path: selected.name.clone(),
@@ -693,7 +739,8 @@ fn builtin_snapshot(
 /// not have, which judge without the project's rules, with `setup`, the
 /// command that writes those files, when there is any (`null` otherwise); and `errors`, an agent without a definition, named in more than one role's
 /// section, or whose definition declares tools that are a mistake
-/// (ADR-t1728-2). A landing branch without `dagq.toml` has the built-ins
+/// (ADR-t1728-2), and a table whose model or effort the provider of its
+/// job does not take ([`ReviewAgents::launch_problems`]). A landing branch without `dagq.toml` has the built-ins
 /// by their defaults. `Err` when the file cannot be read or parsed (an
 /// unknown built-in's name and a key of the wrong type among them,
 /// ADR-t2259-1 decision 4). A review does not pass with either meanwhile
@@ -751,6 +798,7 @@ pub fn check_agents(
     let mut errors =
         review_subagents::config_problems(&named, &|agent| defined.iter().any(|d| d == agent));
     errors.extend(declared);
+    errors.extend(written.launch_problems());
     Ok(json!({
         "commit": commit,
         "agents": agents,
@@ -1098,6 +1146,7 @@ fn review_markdown(
 mod tests {
     use super::*;
     use crate::application::memory_files::MemoryFiles;
+    use crate::domain::actor_model::{ModelRole, RoleModels};
     use crate::domain::{RunId, RunRecord, TaskRecord, TaskStatus};
     use serde_json::json;
 
@@ -1643,6 +1692,17 @@ mod tests {
     /// A committed `dagq.toml` that turns `builtin:security` off and
     /// `builtin:tests` on, on `lib/**` only and on Codex.
     const BUILTINS: &str = "the committed dagq.toml of the built-ins";
+    /// A committed `dagq.toml` whose agents' tables write their launches.
+    const LAUNCHES: &str = "the committed dagq.toml of the launches";
+    /// One whose agents' tables write launches their providers do not take.
+    const BAD_LAUNCHES: &str = "the committed dagq.toml of launches by mistake";
+
+    /// `[roles.review]` on Codex.
+    fn codex_review() -> RoleModels {
+        let mut roles = RoleModels::default();
+        roles.entry(ModelRole::Review).provider = Some(Provider::Codex);
+        roles
+    }
 
     /// `design` reviews `change.txt` and `docs/**`; `unused` matches
     /// nothing and has no definition. A config of `bad` does not parse;
@@ -1651,6 +1711,8 @@ mod tests {
         let agent = |name: &str, paths: &[&str]| review_subagents::ReviewSubagent {
             name: name.to_owned(),
             provider: None,
+            model: None,
+            effort: None,
             paths: paths.iter().map(|p| (*p).to_owned()).collect(),
         };
         let setting =
@@ -1659,6 +1721,8 @@ mod tests {
                 enabled: Some(enabled),
                 paths: paths.map(|paths| paths.iter().map(|p| (*p).to_owned()).collect()),
                 provider,
+                model: None,
+                effort: None,
             };
         match text {
             CONFIG => Ok(ReviewAgents {
@@ -1667,6 +1731,36 @@ mod tests {
                     agent("unused", &["nothing/**"]),
                 ],
                 builtins: Vec::new(),
+                roles: RoleModels::default(),
+            }),
+            // `design` names Claude's light model at a low effort, and
+            // `builtin:security` only a high effort, on `[roles.review]`'s
+            // Codex.
+            LAUNCHES => Ok(ReviewAgents {
+                agents: vec![review_subagents::ReviewSubagent {
+                    provider: Some(Provider::Claude),
+                    model: Some("claude-haiku-5-5".to_owned()),
+                    effort: Some("low".to_owned()),
+                    ..agent("design", &["docs/**"])
+                }],
+                builtins: vec![review_builtins::BuiltinSetting {
+                    effort: Some("high".to_owned()),
+                    ..setting(BuiltinAgent::Security, true, None, None)
+                }],
+                roles: codex_review(),
+            }),
+            // `design` names a model not Claude's on the role's Claude, and
+            // `builtin:security` an effort no adapter takes.
+            BAD_LAUNCHES => Ok(ReviewAgents {
+                agents: vec![review_subagents::ReviewSubagent {
+                    model: Some("gpt-5.5".to_owned()),
+                    ..agent("design", &["docs/**"])
+                }],
+                builtins: vec![review_builtins::BuiltinSetting {
+                    effort: Some("huge".to_owned()),
+                    ..setting(BuiltinAgent::Security, true, None, None)
+                }],
+                roles: RoleModels::default(),
             }),
             BUILTINS => Ok(ReviewAgents {
                 agents: Vec::new(),
@@ -1679,6 +1773,7 @@ mod tests {
                         Some(Provider::Codex),
                     ),
                 ],
+                roles: RoleModels::default(),
             }),
             "bad" => anyhow::bail!("dagq.toml:1: [review.subagents.design] has no paths"),
             _ => Ok(ReviewAgents::default()),
@@ -1702,6 +1797,90 @@ mod tests {
             })
         };
         snapshot_subagents(&repository, &parse, &range)
+    }
+
+    /// The provider, model and effort a project's agent's table and a
+    /// built-in's write reach the snapshot the review's jobs start from;
+    /// one the provider of the job does not take fails the snapshot, so
+    /// the review does not pass, and `doctor` names each in its `errors`.
+    #[test]
+    fn the_launches_the_agents_tables_write_are_read_and_checked() {
+        let found = snapshot(
+            vec![
+                (CONFIG_FILE, LAUNCHES),
+                (".dagq/agents/design/AGENT.md", DEFINITION),
+            ],
+            &["docs/a.md", "src/lib.rs"],
+        )
+        .unwrap()
+        .unwrap();
+        let launches: Vec<_> = found
+            .agents
+            .iter()
+            .map(|agent| (agent.name.as_str(), agent.written_launch()))
+            .collect();
+        assert_eq!(
+            launches,
+            [
+                (
+                    "design",
+                    AgentModel {
+                        provider: Some(Provider::Claude),
+                        model: Some("claude-haiku-5-5".to_owned()),
+                        effort: Some("low".to_owned()),
+                    }
+                ),
+                (
+                    "builtin:security",
+                    AgentModel {
+                        effort: Some("high".to_owned()),
+                        ..AgentModel::default()
+                    }
+                ),
+            ]
+        );
+        let files = || {
+            vec![
+                (CONFIG_FILE, BAD_LAUNCHES),
+                (".dagq/agents/design/AGENT.md", DEFINITION),
+            ]
+        };
+        let error = format!("{:#}", snapshot(files(), &["docs/a.md"]).unwrap_err());
+        assert!(
+            error.contains("writes a launch its provider cannot take"),
+            "{error}"
+        );
+        let repository = Committed {
+            files: files(),
+            ..Committed::default()
+        };
+        assert_eq!(
+            check_agents(&repository, &parse).unwrap()["errors"],
+            json!([
+                "[review.subagents.design]: model gpt-5.5 is not Claude's; its job starts on claude, so name a Claude model, or none for the role's",
+                "[review.subagents.\"builtin:security\"]: effort huge is not a step claude takes; the steps are low, medium, high, xhigh, max",
+            ])
+        );
+        let error = format!(
+            "{:#}",
+            written_launch_at(&repository, SHA, &parse, "design").unwrap_err()
+        );
+        assert!(error.contains("model gpt-5.5 is not Claude's"), "{error}");
+        let good = Committed {
+            files: vec![(CONFIG_FILE, LAUNCHES)],
+            ..Committed::default()
+        };
+        assert_eq!(
+            written_launch_at(&good, SHA, &parse, "builtin:security")
+                .unwrap()
+                .effort
+                .as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            written_launch_at(&Committed::default(), SHA, &parse, "design").unwrap(),
+            AgentModel::default()
+        );
     }
 
     /// The definition is read from `.dagq/agents/<agent>/AGENT.md` only

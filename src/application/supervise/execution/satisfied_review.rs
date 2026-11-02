@@ -389,7 +389,7 @@ impl Supervisor<'_> {
             &ended,
             (&error, &stdout),
             &HoldJob::Review(run.id().clone()),
-            (None, switchable),
+            (&Default::default(), switchable),
         );
         finished["error"] = json!(error);
         match failure {

@@ -2616,7 +2616,7 @@ mod tests {
     fn a_runs_review_counts_its_jobs_left_to_start_and_records_its_attempt() {
         let job = |state| ReviewJob {
             id: ReviewJobId::Whole,
-            provider: None,
+            written: Default::default(),
             input: ReviewJobInput::Whole {
                 prompt: String::new(),
                 prompt_bytes: crate::application::prompt::PromptBytes::default(),
@@ -2626,6 +2626,7 @@ mod tests {
             again: false,
             state,
             session: None,
+            ran_with: None,
         };
         let missed = || ReviewJobState::Missed {
             why: "no answer".to_owned(),

@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::actor_model::{AgentModel, ModelRole, RoleModels};
 use super::concern::{
     self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
 };
@@ -34,8 +35,11 @@ pub const REVIEW_SECTION: &str = "review.subagents";
 pub const ROLE_SECTIONS: &[&str] = &[REVIEW_SECTION];
 
 /// One `[review.subagents.<agent>]`: the agent's name, the globs that
-/// make it required, each once, in the order written, and the provider its
-/// job runs on.
+/// make it required, each once, in the order written, and the provider,
+/// model and effort its job runs with ([`ReviewSubagent::written_launch`]).
+/// The model and effort are checked against the provider the job starts
+/// on as the review reads them ([`ReviewAgents::launch_problems`]), never
+/// as `dagq.toml` is parsed, so `dagq doctor` names each mistake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewSubagent {
     pub name: String,
@@ -48,21 +52,85 @@ pub struct ReviewSubagent {
     /// review that reads it from the landing branch does not pass
     /// (ADR-t1453-1 decision 4).
     pub provider: Option<super::Provider>,
+    /// `model`: a name of the provider its job starts on, given to the job
+    /// instead of `[roles.review]`'s; `None` keeps the role's there.
+    pub model: Option<String>,
+    /// `effort`: one of [`super::actor_model::EFFORTS`], given to the job
+    /// instead of `[roles.review]`'s; `None` keeps the role's there.
+    pub effort: Option<String>,
+}
+
+impl ReviewSubagent {
+    /// What the table writes of its job's launch.
+    pub fn written_launch(&self) -> AgentModel {
+        AgentModel {
+            provider: self.provider,
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+        }
+    }
 }
 
 /// The review's agents as one `dagq.toml` writes them: the project's
 /// `[review.subagents.<agent>]` in file order and the
-/// `[review.subagents."builtin:<name>"]` it has (ADR-t2259-1 decision 4).
+/// `[review.subagents."builtin:<name>"]` it has (ADR-t2259-1 decision 4),
+/// with the same file's `[roles.<role>]`, which give the provider an
+/// agent's job starts on when its table names none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewAgents {
     pub agents: Vec<ReviewSubagent>,
     pub builtins: Vec<BuiltinSetting>,
+    pub roles: RoleModels,
 }
 
 impl ReviewAgents {
     /// Whether `dagq.toml` writes any table of the review's agents.
     pub fn written(&self) -> bool {
         !self.agents.is_empty() || !self.builtins.is_empty()
+    }
+
+    /// What the table of the agent `name` (a project's, or a built-in's
+    /// `builtin:<name>`) writes of its job's launch; nothing for an agent
+    /// without a table.
+    pub fn written_launch(&self, name: &str) -> AgentModel {
+        self.agents
+            .iter()
+            .find(|agent| agent.name == name)
+            .map(ReviewSubagent::written_launch)
+            .or_else(|| {
+                self.builtins
+                    .iter()
+                    .find(|builtin| builtin.agent.name() == name)
+                    .map(BuiltinSetting::written_launch)
+            })
+            .unwrap_or_default()
+    }
+
+    /// The mistakes of the launches the agents' tables write
+    /// ([`AgentModel::check`] against `roles`' `[roles.review]`), each
+    /// naming its table, in the order written: a model or effort the
+    /// provider its job starts on does not take. A review that reads any
+    /// does not pass (ADR-t1453-1 decision 4), and `dagq doctor` lists
+    /// them in its `agents`' `errors`.
+    pub fn launch_problems(&self) -> Vec<String> {
+        let tables = self
+            .agents
+            .iter()
+            .map(|agent| (agent.name.clone(), agent.written_launch()))
+            .chain(self.builtins.iter().map(|builtin| {
+                (
+                    format!("\"{}\"", builtin.agent.name()),
+                    builtin.written_launch(),
+                )
+            }));
+        tables
+            .filter_map(|(name, written)| {
+                written
+                    .check(&self.roles, ModelRole::Review)
+                    .err()
+                    .map(|why| format!("[{REVIEW_SECTION}.{name}]: {why}"))
+            })
+            .collect()
     }
 
     /// The agents a review selects from: the project's in file order,
@@ -78,6 +146,8 @@ impl ReviewAgents {
                     name: builtin.agent.name(),
                     paths: builtin.paths,
                     provider: builtin.provider,
+                    model: builtin.model,
+                    effort: builtin.effort,
                 }),
         );
         agents
@@ -717,6 +787,8 @@ mod tests {
         ReviewSubagent {
             name: name.to_owned(),
             provider: None,
+            model: None,
+            effort: None,
             paths: strings(paths),
         }
     }

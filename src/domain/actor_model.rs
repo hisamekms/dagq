@@ -286,6 +286,151 @@ impl RoleModels {
     }
 }
 
+impl RoleModels {
+    /// What the job of a review agent whose table writes `written` starts
+    /// with: its provider as [`Self::agent_launch`] gives it there (or as
+    /// [`Self::launch`] gives the role, without one), and then the model
+    /// and effort it writes over that launch's. On Claude a table that
+    /// writes one of the two gives the launch's other, else the default
+    /// (Opus 5.5, `medium`), so both reach the provider; on Codex a model
+    /// left out stays Codex's default. Its source is
+    /// [`LaunchSource::Subagent`] when the table writes any of the three.
+    /// A table that writes nothing starts as its role does.
+    pub fn written_agent_launch(&self, role: ModelRole, written: &AgentModel) -> ActorLaunch {
+        let launch = match written.provider {
+            Some(provider) => self.agent_launch(role, provider),
+            None => self.launch(role),
+        };
+        if written.model.is_none() && written.effort.is_none() {
+            return launch;
+        }
+        let model = written.model.clone().or(launch.model);
+        let model = match launch.provider {
+            Provider::Claude => Some(model.unwrap_or_else(|| OPUS.to_owned())),
+            Provider::Codex => model,
+        };
+        let effort = written.effort.clone().or(launch.effort);
+        ActorLaunch {
+            model,
+            effort: Some(effort.unwrap_or_else(|| MEDIUM.to_owned())),
+            source: LaunchSource::Subagent,
+            ..launch
+        }
+    }
+}
+
+impl RoleModels {
+    /// What the job of a review agent whose table writes `written` starts
+    /// with once `moved` ([`ActorLaunch::switched`]) took it off its
+    /// provider: none of the model and effort the table writes, which are
+    /// that provider's own, but what `[roles.<role>]` gives on the provider
+    /// it moved to ([`Self::agent_launch`]: the role's model and effort on
+    /// the role's provider, else that provider's default model with the
+    /// role's effort), the move and its reason kept. A table that writes
+    /// neither a model nor an effort moves as before, with the provider's
+    /// default, and so does a launch that did not move.
+    pub fn moved_agent_launch(
+        &self,
+        role: ModelRole,
+        written: &AgentModel,
+        moved: ActorLaunch,
+    ) -> ActorLaunch {
+        if moved.switched_from.is_none() || (written.model.is_none() && written.effort.is_none()) {
+            return moved;
+        }
+        let there = self.agent_launch(role, moved.provider);
+        ActorLaunch {
+            model: there.model,
+            effort: there.effort,
+            ..moved
+        }
+    }
+
+    /// [`Self::written_agent_launch`] once what `written` writes is checked
+    /// against the provider that launch starts on ([`AgentModel::check_on`]),
+    /// as the job starts: the roles it is read with may not be those the
+    /// table was checked against when the review read it (another landing
+    /// changed `[roles.review]` meanwhile), and a model of one provider
+    /// never goes to the other. `Err` says why, and the job does not start.
+    pub fn checked_agent_launch(
+        &self,
+        role: ModelRole,
+        written: &AgentModel,
+    ) -> Result<ActorLaunch, String> {
+        let launch = self.written_agent_launch(role, written);
+        written.check_on(launch.provider, role).map_err(|why| {
+            format!(
+                "the agent's table writes a launch {} cannot take with [roles.{}] as read now: {why}",
+                launch.provider.as_str(),
+                role.as_str()
+            )
+        })?;
+        Ok(launch)
+    }
+}
+
+/// What a review agent's `[review.subagents.<agent>]` (a built-in's
+/// `[review.subagents."builtin:<name>"]` alike) writes of its job's
+/// launch, each key optional: `provider` (`"claude"` or `"codex"`), the
+/// one its job runs on, else the role's; `model`, a name of that
+/// provider's; `effort`, one of [`EFFORTS`]. What it leaves out is the
+/// role's ([`RoleModels::written_agent_launch`]). These are the
+/// provider's own values, so they live in `dagq.toml`, never in the
+/// agent's provider-free definition (ADR-t1453-1 decision 2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentModel {
+    pub provider: Option<Provider>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl AgentModel {
+    /// Whether the table writes any of the three.
+    pub const fn written(&self) -> bool {
+        self.provider.is_some() || self.model.is_some() || self.effort.is_some()
+    }
+
+    /// Check what the table writes against the provider its job starts
+    /// on, its `provider` or else the one `roles` gives `role`: the model
+    /// must be that provider's (a Claude model only for Claude, and only a
+    /// Claude model for it, as [`RoleModel::check`] holds Codex to) and
+    /// the effort one of [`EFFORTS`], the steps the providers' adapters
+    /// take. `Err` says why, without the table's name.
+    pub fn check(&self, roles: &RoleModels, role: ModelRole) -> Result<(), String> {
+        self.check_on(
+            self.provider.unwrap_or_else(|| roles.provider(role).0),
+            role,
+        )
+    }
+
+    /// [`Self::check`] against `provider`, the one the job starts on.
+    pub fn check_on(&self, provider: Provider, role: ModelRole) -> Result<(), String> {
+        RoleModel {
+            provider: Some(provider),
+            model: self.model.clone(),
+            effort: None,
+        }
+        .check(role)?;
+        if provider == Provider::Claude
+            && let Some(model) = self.model.as_deref().filter(|m| !m.starts_with("claude"))
+        {
+            return Err(format!(
+                "model {model} is not Claude's; its job starts on claude, so name a Claude model, or none for the role's"
+            ));
+        }
+        if let Some(effort) = self.effort.as_deref() {
+            check_effort(effort).map_err(|_| {
+                format!(
+                    "effort {effort} is not a step {} takes; the steps are {}",
+                    provider.as_str(),
+                    EFFORTS.join(", ")
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
 /// What the inbox starts with (ADR-t1181-1 decision 1): `[roles.inbox]`
 /// ([`RoleModels::launch`]) when `dagq inbox` names neither a provider
 /// nor a model, so with neither it starts as before (Claude, nothing
@@ -474,9 +619,10 @@ pub fn job_wait_text(provider: Provider, reason: SwitchReason, fallback: bool) -
 // nothing given (the provider's default, which the session's close names);
 // `dagq.toml`, the role's `[roles.<role>]`; `revise_escalation`, one effort
 // step up for a revise ([`ActorLaunch::escalated`]); `review.subagents`, the
-// provider a review agent's `[review.subagents.<agent>]` names
-// ([`RoleModels::agent_launch`]), kept when the job moves off it
-// ([`ActorLaunch::switched`]); `argument`, the launch arguments of `dagq
+// provider, model or effort a review agent's `[review.subagents.<agent>]`
+// writes ([`RoleModels::written_agent_launch`]), kept when the job moves
+// off its provider ([`ActorLaunch::switched`], which gives it none of the
+// written model and effort); `argument`, the launch arguments of `dagq
 // inbox` ([`inbox_launch`]).
 string_enum!(LaunchSource {
     Default => "default",
@@ -545,10 +691,10 @@ impl ActorLaunch {
 
     /// This launch moved to `to` because its provider cannot be used for
     /// `reason`: started there with that provider's default, since a model
-    /// (and its effort) is the provider's own name. A launch whose provider
-    /// a review agent's table named ([`LaunchSource::Subagent`]) keeps that
-    /// source, so its record still says where the provider it moved from
-    /// came from; any other is the default's.
+    /// (and its effort) is the provider's own name. A launch a review
+    /// agent's table wrote ([`LaunchSource::Subagent`]) keeps that source,
+    /// so its record still says the launch it moved from came from that
+    /// table; any other is the default's.
     pub fn switched(self, to: Provider, reason: SwitchReason) -> Self {
         let source = match self.source {
             LaunchSource::Subagent => LaunchSource::Subagent,
@@ -1413,5 +1559,210 @@ mod tests {
             assert!(check_effort(effort).is_ok());
         }
         assert!(check_effort("huge").is_err());
+    }
+
+    fn written(
+        provider: Option<Provider>,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> AgentModel {
+        AgentModel {
+            provider,
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+        }
+    }
+
+    /// The model and effort an agent's table writes go to its job over
+    /// what the role gives on the provider it starts on, the source the
+    /// agent's table; what it leaves out is the role's there. A table that
+    /// writes nothing starts as the role does.
+    #[test]
+    fn an_agents_written_model_and_effort_go_over_its_roles() {
+        let role = ModelRole::Review;
+        let mut models = RoleModels::default();
+        let table = models.entry(role);
+        table.provider = Some(Provider::Codex);
+        table.model = Some("gpt-5.5".to_owned());
+        table.effort = Some("high".to_owned());
+        let launch = |w: AgentModel| {
+            let l = models.written_agent_launch(role, &w);
+            (l.provider, l.model, l.effort, l.source)
+        };
+        let some = |v: &str| Some(v.to_owned());
+        // All three written.
+        assert_eq!(
+            launch(written(
+                Some(Provider::Claude),
+                Some("claude-haiku-5-5"),
+                Some("low")
+            )),
+            (
+                Provider::Claude,
+                some("claude-haiku-5-5"),
+                some("low"),
+                LaunchSource::Subagent
+            )
+        );
+        // Only the provider: what the role gives there (Claude's default
+        // model and the role's effort), as before.
+        assert_eq!(
+            launch(written(Some(Provider::Claude), None, None)),
+            (
+                Provider::Claude,
+                some(OPUS),
+                some("high"),
+                LaunchSource::Subagent
+            )
+        );
+        // Only the model: on the role's provider with the role's effort.
+        assert_eq!(
+            launch(written(None, Some("gpt-5.5-mini"), None)),
+            (
+                Provider::Codex,
+                some("gpt-5.5-mini"),
+                some("high"),
+                LaunchSource::Subagent
+            )
+        );
+        // Only the effort: the role's provider and model.
+        assert_eq!(
+            launch(written(None, None, Some("xhigh"))),
+            (
+                Provider::Codex,
+                some("gpt-5.5"),
+                some("xhigh"),
+                LaunchSource::Subagent
+            )
+        );
+        // Nothing written: the role's launch itself.
+        assert_eq!(
+            models.written_agent_launch(role, &AgentModel::default()),
+            models.launch(role)
+        );
+        // On Claude a table that writes only an effort gets the role's
+        // model there, else Opus 5.5, so both reach the provider; on Codex a
+        // model left out stays Codex's default.
+        let none = RoleModels::default();
+        let claude = none.written_agent_launch(role, &written(None, None, Some("low")));
+        assert_eq!(claude.arguments(), Some((OPUS, "low")));
+        let codex =
+            none.written_agent_launch(role, &written(Some(Provider::Codex), None, Some("low")));
+        assert_eq!((codex.model, codex.effort.as_deref()), (None, Some("low")));
+        // Moved off its provider, a job gets none of the written values but
+        // what the role gives where it moved: on the role's Codex, the
+        // role's model and effort.
+        let haiku = written(
+            Some(Provider::Claude),
+            Some("claude-haiku-5-5"),
+            Some("low"),
+        );
+        let moved = models
+            .written_agent_launch(role, &haiku)
+            .switched(Provider::Codex, SwitchReason::UsageLimit);
+        assert_eq!(
+            (
+                moved.provider,
+                moved.model.clone(),
+                moved.effort.clone(),
+                moved.switched_from
+            ),
+            (Provider::Codex, None, None, Some(Provider::Claude))
+        );
+        let there = models.moved_agent_launch(role, &haiku, moved);
+        assert_eq!(
+            (
+                there.provider,
+                there.model.as_deref(),
+                there.effort.as_deref(),
+                there.source,
+                there.switched_from,
+                there.switch_reason
+            ),
+            (
+                Provider::Codex,
+                Some("gpt-5.5"),
+                Some("high"),
+                LaunchSource::Subagent,
+                Some(Provider::Claude),
+                Some(SwitchReason::UsageLimit)
+            )
+        );
+        // Off the role's Codex to Claude: Claude's default model with the
+        // role's effort.
+        let effort_only = written(None, None, Some("low"));
+        let to_claude = models.moved_agent_launch(
+            role,
+            &effort_only,
+            models
+                .written_agent_launch(role, &effort_only)
+                .switched(Provider::Claude, SwitchReason::UsageLimit),
+        );
+        assert_eq!(
+            (
+                to_claude.provider,
+                to_claude.model.as_deref(),
+                to_claude.effort.as_deref()
+            ),
+            (Provider::Claude, Some(OPUS), Some("high"))
+        );
+        // A table of only a provider moves as before, with the default, and
+        // a launch that did not move is kept.
+        let provider_only = written(Some(Provider::Claude), None, None);
+        let as_before = models
+            .written_agent_launch(role, &provider_only)
+            .switched(Provider::Codex, SwitchReason::UsageLimit);
+        assert_eq!(
+            models.moved_agent_launch(role, &provider_only, as_before.clone()),
+            as_before
+        );
+        let kept = models.written_agent_launch(role, &haiku);
+        assert_eq!(models.moved_agent_launch(role, &haiku, kept.clone()), kept);
+    }
+
+    /// A written model must be a name of the provider the job starts on
+    /// (its own provider, else the role's), and an effort one of the steps
+    /// the adapters take; `Err` says which.
+    #[test]
+    fn an_agents_written_values_are_checked_against_the_provider_it_starts_on() {
+        let role = ModelRole::Review;
+        let mut codex_role = RoleModels::default();
+        codex_role.entry(role).provider = Some(Provider::Codex);
+        let claude_role = RoleModels::default();
+        let check = |models: &RoleModels, w: AgentModel| w.check(models, role);
+        assert!(
+            check(
+                &codex_role,
+                written(
+                    Some(Provider::Claude),
+                    Some("claude-haiku-5-5"),
+                    Some("low")
+                )
+            )
+            .is_ok()
+        );
+        assert!(check(&claude_role, written(None, Some("claude-haiku-5-5"), None)).is_ok());
+        assert!(check(&codex_role, written(None, Some("gpt-5.5"), Some("max"))).is_ok());
+        assert!(check(&codex_role, AgentModel::default()).is_ok());
+        // A Claude model on the role's Codex.
+        let error = check(&codex_role, written(None, Some("claude-haiku-5-5"), None)).unwrap_err();
+        assert!(
+            error.contains("model claude-haiku-5-5 is Claude's"),
+            "{error}"
+        );
+        // A model not Claude's on Claude, named or the role's.
+        let error = check(
+            &codex_role,
+            written(Some(Provider::Claude), Some("gpt-5.5"), None),
+        )
+        .unwrap_err();
+        assert!(error.contains("model gpt-5.5 is not Claude's"), "{error}");
+        assert!(check(&claude_role, written(None, Some("gpt-5.5"), None)).is_err());
+        // An effort no adapter takes.
+        let error = check(&claude_role, written(None, None, Some("huge"))).unwrap_err();
+        assert!(
+            error.contains("effort huge is not a step claude takes"),
+            "{error}"
+        );
     }
 }

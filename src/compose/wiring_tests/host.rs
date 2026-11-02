@@ -126,11 +126,15 @@ pub(super) enum Outcome {
 /// The verification of a test: each command it is asked to run is
 /// recorded with where it ran and ends as the test says (passing unless
 /// named), its log written empty; the repository's `dagq.toml` is the
-/// defaults'.
+/// defaults' but for its `[roles.<role>]`, which the checkout's `dagq.toml`
+/// a test sets gives ([`FakeVerifier::set_config`]), and the review's
+/// agents and programs, read from the text a review reads off the landing
+/// branch.
 pub(super) struct FakeVerifier {
     files: std::sync::Arc<MemoryFiles>,
     failing: Vec<String>,
     ran: Mutex<Vec<(String, PathBuf)>>,
+    config: Mutex<String>,
 }
 
 impl FakeVerifier {
@@ -143,7 +147,18 @@ impl FakeVerifier {
                 .map(|command| (*command).to_owned())
                 .collect(),
             ran: Mutex::default(),
+            config: Mutex::default(),
         }
+    }
+
+    /// The checkout's `dagq.toml` is `text` from now on.
+    pub(super) fn set_config(&self, text: &str) {
+        text.clone_into(
+            &mut self
+                .config
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
     }
 
     /// The commands run, each with its directory, in order.
@@ -176,6 +191,29 @@ pub(super) fn exit(code: i32) -> Exit {
 impl Verifier for FakeVerifier {
     fn run_env(&self, _: &Path) -> Result<Vec<(String, String)>> {
         Ok(Vec::new())
+    }
+
+    fn role_models(&self) -> Result<crate::domain::actor_model::RoleModels> {
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Ok(crate::infrastructure::run_env::parse_config(&config)?.roles)
+    }
+
+    fn review_subagents_in(
+        &self,
+        text: &str,
+    ) -> Result<crate::domain::review_subagents::ReviewAgents> {
+        Ok(crate::infrastructure::run_env::parse_config(text)?.review_agents())
+    }
+
+    fn review_programs_in(
+        &self,
+        text: &str,
+    ) -> Result<crate::domain::review_programs::ReviewPrograms> {
+        Ok(crate::infrastructure::run_env::parse_config(text)?.review_programs())
     }
 
     fn run_env_programs(&self, _: Option<&Path>) -> Result<RunEnvCheck> {

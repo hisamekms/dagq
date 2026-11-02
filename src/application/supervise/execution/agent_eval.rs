@@ -10,8 +10,10 @@
 //! events and Git: [`crate::application::agent_cases::view`]; the dev a
 //! run waits for before it lands reads the definition from the run's head,
 //! [`super::eval_gate`]), and for each run
-//! of a case starts one agent job ([`crate::application::agent_job`]) on
-//! `[roles.review]`'s provider through the headless jobs' one way
+//! of a case starts one agent job ([`crate::application::agent_job`])
+//! with the provider, model and effort a review's job of the agent starts
+//! with (`[roles.review]`'s, under what the agent's table in the landing
+//! branch's `dagq.toml` writes) through the headless jobs' one way
 //! ([`super::jobs`]): recorded in `headless_jobs` as `agent_eval`, under
 //! the review's agent job timeout, retried once after a non-zero exit, and
 //! stopped with what it started. Its provider is never switched: while it
@@ -62,9 +64,9 @@ use super::*;
 use crate::application::AgentReads;
 use crate::application::agent_eval::{Incomplete, finished as finished_payload};
 use crate::application::agent_job::{self, AgentJob};
-use crate::application::review::CONFIG_FILE;
+use crate::application::review::{CONFIG_FILE, written_launch_at};
 use crate::application::review_programs::{SnapshotProgram, programs_at, required_programs};
-use crate::domain::actor_model::{ActorLaunch, ModelRole};
+use crate::domain::actor_model::{ActorLaunch, AgentModel, ModelRole, RoleModels};
 use crate::domain::agent_eval::programs::{self, Against, CaseCheck, ProgramFailure, Step};
 use crate::domain::agent_eval::record::{self, Round};
 use crate::domain::agent_eval::round::{
@@ -493,21 +495,35 @@ impl Supervisor<'_> {
             .map(drop)
     }
 
+    /// What the runs of `agent`'s round start with, as a review's job of
+    /// the agent does: the `[roles.review]` launch with what the agent's
+    /// table in the `dagq.toml` of the landing branch's `commit` writes
+    /// over it ([`crate::domain::actor_model::RoleModels::written_agent_launch`]),
+    /// never moved to another provider. On `provider` when a round started
+    /// on it already: a round never moves, so one whose table now sends it
+    /// elsewhere goes on with that provider's default
+    /// ([`round_launch`]). `Err` says why the table cannot be
+    /// read or is a mistake, which refuses a round that has not started.
+    fn eval_launch(
+        &self,
+        agent: &str,
+        commit: &str,
+        provider: Option<Provider>,
+    ) -> std::result::Result<ActorLaunch, String> {
+        let written = written_launch_at(
+            &*self.repository,
+            commit,
+            &|text| self.verifier.review_subagents_in(text),
+            agent,
+        )
+        .map_err(|error| format!("{error:#}"))?;
+        round_launch(&self.role_models(ModelRole::Review), &written, provider)
+    }
+
     /// The landing branch's `[roles.review]` launch, on `provider` when a
     /// round started on it already (a round never moves).
-    fn eval_launch(&self, provider: Option<Provider>) -> ActorLaunch {
-        let launch = self
-            .role_models(ModelRole::Review)
-            .launch(ModelRole::Review);
-        match provider {
-            Some(provider) if provider != launch.provider => ActorLaunch {
-                provider,
-                model: None,
-                effort: None,
-                ..launch
-            },
-            _ => launch,
-        }
+    fn role_eval_launch(&self, provider: Option<Provider>) -> ActorLaunch {
+        role_launch_on(&self.role_models(ModelRole::Review), provider)
     }
 
     /// Read the agent's definition from `definition_commit`'s tree and its
@@ -719,7 +735,17 @@ impl Supervisor<'_> {
             self.refuse_round(round.id, &request.agent, &refusal, None)?;
             return Ok(true);
         }
-        let launch = self.eval_launch(None);
+        // The landing branch's commit its cases, program reviews and the
+        // agent's launch are read from.
+        let commit = self.repository.main_head()?.into_string();
+        let launch = match self.eval_launch(&request.agent, &commit, None) {
+            Ok(launch) => launch,
+            Err(why) => {
+                let refusal = refusal(RefusalReason::DefinitionInvalid, why);
+                self.refuse_round(round.id, &request.agent, &refusal, None)?;
+                return Ok(true);
+            }
+        };
         let provider = launch.provider;
         if let Some(wait) = self.eval_wait(provider) {
             if round.waiting.as_deref() != Some(wait.as_str()) {
@@ -728,7 +754,6 @@ impl Supervisor<'_> {
             return Ok(false);
         }
         let config = self.verifier.eval_config()?;
-        let commit = self.repository.main_head()?.into_string();
         // The dev a run waits for before it lands measures the run's
         // definition on the landing branch's cases (ADR-t1728-1 decision
         // 10).
@@ -796,6 +821,7 @@ impl Supervisor<'_> {
                 "split": request.split.as_str(),
                 "provider": provider,
                 "model": launch.model,
+                "effort": launch.effort,
                 "definition_commit": definition_commit,
                 "cases_commit": (definition_commit != commit).then_some(&commit),
                 "definition_digest": key.definition_digest,
@@ -978,7 +1004,13 @@ impl Supervisor<'_> {
             id: round.id,
             agent: request.agent.clone(),
             provider: started.provider,
-            launch: self.eval_launch(Some(started.provider)),
+            launch: self
+                .eval_launch(
+                    &request.agent,
+                    started.cases_commit(),
+                    Some(started.provider),
+                )
+                .unwrap_or_else(|_| self.role_eval_launch(Some(started.provider))),
             definition: snapshot.definition,
             tools: snapshot.tools,
             cases: snapshot.cases,
@@ -1475,6 +1507,8 @@ impl Supervisor<'_> {
                         "case": case,
                         "round": run,
                         "provider": round.provider,
+                        "model": round.launch.model,
+                        "effort": round.launch.effort,
                         "job": label,
                         "prompt_bytes": prompt_bytes,
                     }),
@@ -1818,9 +1852,119 @@ fn selected_cases(
     Ok(cases)
 }
 
+/// What the runs of a round start with, `written` what the agent's table
+/// writes and `models` the roles' tables: what a review's job of the agent
+/// starts with where its provider can be used
+/// ([`RoleModels::written_agent_launch`]), on `started_on` when the round
+/// started there already, else that provider's default with the role's
+/// launch ([`role_launch_on`]). `Err` when what the table writes does not
+/// fit the provider the roles read now send it to
+/// ([`RoleModels::checked_agent_launch`]).
+fn round_launch(
+    models: &RoleModels,
+    written: &AgentModel,
+    started_on: Option<Provider>,
+) -> std::result::Result<ActorLaunch, String> {
+    let launch = models.checked_agent_launch(ModelRole::Review, written)?;
+    Ok(match started_on {
+        Some(provider) if provider != launch.provider => role_launch_on(models, Some(provider)),
+        _ => launch,
+    })
+}
+
+/// `[roles.review]`'s launch, on `provider` with that provider's default
+/// when it is another.
+fn role_launch_on(models: &RoleModels, provider: Option<Provider>) -> ActorLaunch {
+    let launch = models.launch(ModelRole::Review);
+    match provider {
+        Some(provider) if provider != launch.provider => ActorLaunch {
+            provider,
+            model: None,
+            effort: None,
+            ..launch
+        },
+        _ => launch,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A round's runs start with what a review's job of the agent starts
+    /// with where its provider can be used: the provider, model and effort
+    /// its table writes over `[roles.review]`'s, for a project's agent and
+    /// a built-in alike, and the role's launch without a table. A round
+    /// taken up on the provider it started on keeps that launch, and one
+    /// whose table now names another goes on with its own provider's
+    /// default.
+    #[test]
+    fn a_rounds_runs_start_as_the_agents_review_job_does() {
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::Review).provider = Some(Provider::Codex);
+        let haiku = AgentModel {
+            provider: Some(Provider::Claude),
+            model: Some("claude-haiku-5-5".to_owned()),
+            effort: Some("low".to_owned()),
+        };
+        let effort = AgentModel {
+            effort: Some("xhigh".to_owned()),
+            ..AgentModel::default()
+        };
+        for written in [&haiku, &effort, &AgentModel::default()] {
+            let super::super::landing::ReviewRoute::Start(review, _) =
+                super::super::provider::agent_job_route(
+                    &models,
+                    written,
+                    (false, true),
+                    None,
+                    |_| None,
+                )
+            else {
+                panic!("the review's job starts");
+            };
+            assert_eq!(
+                round_launch(&models, written, None),
+                Ok(review.clone()),
+                "{written:?}"
+            );
+            assert_eq!(
+                round_launch(&models, written, Some(review.provider)),
+                Ok(review),
+                "{written:?}"
+            );
+        }
+        let launch = round_launch(&models, &haiku, None).unwrap();
+        assert_eq!(
+            (
+                launch.provider,
+                launch.model.as_deref(),
+                launch.effort.as_deref()
+            ),
+            (Provider::Claude, Some("claude-haiku-5-5"), Some("low"))
+        );
+        let elsewhere = round_launch(&models, &haiku, Some(Provider::Codex)).unwrap();
+        assert_eq!(
+            (
+                elsewhere.provider,
+                elsewhere.model,
+                elsewhere.effort.as_deref()
+            ),
+            (Provider::Codex, None, Some("medium"))
+        );
+        // A model checked against Codex, with `[roles.review]` read now on
+        // Claude: the round does not start with it on Claude.
+        let model_only = AgentModel {
+            model: Some("gpt-5.5-mini".to_owned()),
+            ..AgentModel::default()
+        };
+        assert!(round_launch(&models, &model_only, None).is_ok());
+        let error = round_launch(&RoleModels::default(), &model_only, None).unwrap_err();
+        assert!(
+            error.contains("model gpt-5.5-mini is not Claude's"),
+            "{error}"
+        );
+    }
 
     /// The digest of a built-in's carried cases changes with the content
     /// of a case's baseline, the patch and the ids the same; a project's

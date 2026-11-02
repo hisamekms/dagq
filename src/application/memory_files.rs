@@ -176,8 +176,22 @@ impl RunFiles for MemoryFiles {
             Err(missing())
         }
     }
-    fn write_fenced(&self, _: &Path, _: &str, _: &str, _: &Path) -> Result<()> {
-        unimplemented!("no test writes a review")
+    /// `text`, then `body` (empty when there is none) fenced with one
+    /// backtick more than its longest run, three at least.
+    fn write_fenced(&self, path: &Path, text: &str, info: &str, body: &Path) -> Result<()> {
+        let body = self.read_to_string(body).unwrap_or_default();
+        let longest = body.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+        let fence = "`".repeat((longest + 1).max(3));
+        let newline = if body.is_empty() || body.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        self.write(
+            path,
+            format!("{text}{fence}{info}\n{body}{newline}{fence}\n").as_bytes(),
+        )?;
+        Ok(())
     }
     fn now(&self) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(1_000_000)

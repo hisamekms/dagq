@@ -34,7 +34,7 @@ workerは[Worker model](worker-model.md)。
 | role | sessionと起動する場所 | 読む時点 |
 |---|---|---|
 | `plan_review` | plan reviewのjob（`PlanningState::start_plan_review`） | jobの開始ごと |
-| `review` | runのreviewのjob（`begin_review`。agentの`provider`は[Review](review.md#agentのjobのprovider)） | jobの開始ごと |
+| `review` | runのreviewのjob（`begin_review`。agentの`provider`・`model`・`effort`は[Review](review.md#agentのjobのprovider)） | jobの開始ごと |
 | `recovery` | 復旧（triage）のjob。終わったrunの`begin_triage`と、生きているrunの復旧のjob | jobの開始ごと |
 | `goal_review` | goal reviewのjob（`PlanningState::start_goal_review`） | jobの開始ごと |
 | `observer` | observerのjob（`dagq observe`。queueが束縛されたcheckoutの`dagq.toml`） | 観測ごと |

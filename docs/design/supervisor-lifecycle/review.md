@@ -126,6 +126,10 @@ validationを通ったrun（awaiting_integration）
 - **道具の宣言**: 定義の`tools`はruntimeの一覧から選び、役割の許可を超えれば誤りにする（`AgentTools`、[ADR-t1728-2](../../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)）。
 - 必須のagentとpjの定義は試行ごとにlanding branchから読み（built-inの定義はバイナリから）、workerがrun branchで変えても選ばれるagentは変わらない（`snapshot_subagents`）。
 - **agentのjobのprovider**<a id="agentのjobのprovider"></a>: `provider`を書いたjobには上の「reviewのprovider」の規則をそのjobだけに当てる（`Supervisor::review_job_route`）。
+  - 表の起動の組（`provider`・`model`・`effort`）のうち書いた`model`と`effort`はそのjobに渡り、書かない項目は`[roles.review]`を継ぐ（modelとeffortは起動先のproviderでの役割の値、`RoleModels::written_agent_launch`）。
+  - 起動先のproviderが受けない値は、表を読むときもjobを起動するとき（その間に`[roles.review]`が変わったとき）も設定の誤りで、reviewは通らない（`ReviewAgents::launch_problems`・`RoleModels::checked_agent_launch`）。
+  - 別のproviderへ切り替えたjobには書いた`model`と`effort`を渡さず、切り替え先で`[roles.review]`が与える値で起動する（`RoleModels::moved_agent_launch`）。
+  - agentのevalの1回も本番のjobと同じ組で起動する。
 - **誤り**: 必須の検査が分からないときは空にせず、起動せずにreviewの失敗にする。
 
 ## プログラムのreview<a id="プログラムのreview"></a>

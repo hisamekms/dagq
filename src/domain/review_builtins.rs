@@ -14,6 +14,7 @@
 use serde_json::{Value, json};
 
 use super::Provider;
+use super::actor_model::AgentModel;
 
 pub mod evals;
 
@@ -189,6 +190,21 @@ pub struct BuiltinSetting {
     pub paths: Option<Vec<String>>,
     /// As a project's agent's `provider`.
     pub provider: Option<Provider>,
+    /// As a project's agent's `model` and `effort`
+    /// ([`crate::domain::actor_model::AgentModel`]).
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl BuiltinSetting {
+    /// What the table writes of the built-in's job's launch.
+    pub fn written_launch(&self) -> AgentModel {
+        AgentModel {
+            provider: self.provider,
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+        }
+    }
 }
 
 /// What a built-in agent is with `dagq.toml`'s `setting` of it, if any,
@@ -201,6 +217,8 @@ pub struct EffectiveBuiltin {
     /// Whether `paths` is the one `dagq.toml` wrote.
     pub paths_written: bool,
     pub provider: Option<Provider>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 impl EffectiveBuiltin {
@@ -226,6 +244,8 @@ impl EffectiveBuiltin {
                             .collect()
                     }),
                     provider: setting.and_then(|s| s.provider),
+                    model: setting.and_then(|s| s.model.clone()),
+                    effort: setting.and_then(|s| s.effort.clone()),
                 }
             })
             .collect()
@@ -233,10 +253,11 @@ impl EffectiveBuiltin {
 
     /// What `dagq doctor`'s `agents` says of it: its name, whether it
     /// runs and whether it does by default, its globs and whether
-    /// `dagq.toml` wrote them, its provider, and the project's rules file
-    /// found on the landing branch's commit (`rules`, `null` without one).
+    /// `dagq.toml` wrote them, its provider, the model and effort only
+    /// when `dagq.toml` writes them, and the project's rules file found on
+    /// the landing branch's commit (`rules`, `null` without one).
     pub fn doctor_value(&self, rules: Option<&str>) -> Value {
-        json!({
+        let mut value = json!({
             "agent": self.agent.name(),
             "enabled": self.enabled,
             "enabled_by_default": self.agent.enabled_by_default(),
@@ -244,7 +265,14 @@ impl EffectiveBuiltin {
             "paths_written": self.paths_written,
             "provider": self.provider,
             "rules": rules,
-        })
+        });
+        if let Some(model) = &self.model {
+            value["model"] = json!(model);
+        }
+        if let Some(effort) = &self.effort {
+            value["effort"] = json!(effort);
+        }
+        value
     }
 }
 
@@ -258,6 +286,8 @@ mod tests {
             enabled: None,
             paths: None,
             provider: None,
+            model: None,
+            effort: None,
         }
     }
 

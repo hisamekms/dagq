@@ -22,7 +22,7 @@ use crate::domain::FAILED_REVIEW_LANDING_OPTIONS;
 use crate::domain::LandingAnswer;
 use crate::domain::RecoveredLanding;
 use crate::domain::ReviseLimit;
-use crate::domain::actor_model::{ActorLaunch, ModelRole};
+use crate::domain::actor_model::{ActorLaunch, AgentModel, ModelRole};
 use crate::domain::cancel_reason::NewCancel;
 use crate::domain::concern::{
     self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
@@ -622,22 +622,18 @@ impl Supervisor<'_> {
             |provider| self.job_unusable(provider),
         )
     }
-    /// Where the next start of a job of a review goes, `provider` the one
-    /// its agent's `[review.subagents.<agent>]` names: such a job goes as a
-    /// review whose `[roles.review]` names its provider (to it, else to the
-    /// other provider with `[provider_fallback] jobs` on, else it waits for
-    /// it, or, under `--no-claude`, moves off Claude), on the agent's own
-    /// launch ([`crate::domain::actor_model::RoleModels::agent_launch`]);
-    /// any other job goes by [`Self::review_route`].
-    pub(super) fn review_job_route(&self, provider: Option<Provider>) -> ReviewRoute {
-        let Some(provider) = provider else {
+    /// Where the next start of a job of a review goes, `written` what its
+    /// agent's `[review.subagents.<agent>]` writes of its launch
+    /// ([`provider::agent_job_route`]); a job whose table writes nothing
+    /// goes by [`Self::review_route`].
+    pub(super) fn review_job_route(&self, written: &AgentModel) -> ReviewRoute {
+        if !written.written() {
             return self.review_route();
-        };
-        let role = ModelRole::Review;
-        provider::review_route(
-            self.no_claude,
-            (true, self.provider.fallback.jobs),
-            self.role_models(role).agent_launch(role, provider),
+        }
+        provider::agent_job_route(
+            &self.role_models(ModelRole::Review),
+            written,
+            (self.no_claude, self.provider.fallback.jobs),
             self.queue_hold,
             |provider| self.job_unusable(provider),
         )
@@ -788,7 +784,7 @@ impl Supervisor<'_> {
         let (prompt, prompt_bytes) = prepared.whole;
         let mut jobs = vec![ReviewJob {
             id: ReviewJobId::Whole,
-            provider: None,
+            written: AgentModel::default(),
             input: ReviewJobInput::Whole {
                 prompt,
                 prompt_bytes,
@@ -798,23 +794,30 @@ impl Supervisor<'_> {
             again: false,
             state: ReviewJobState::Waiting(None),
             session: None,
+            ran_with: None,
         }];
-        // An agent's provider as the landing branch's `dagq.toml` names it,
-        // read with its paths (ADR-t1453-1 decision 4).
+        // An agent's provider, model and effort as the landing branch's
+        // `dagq.toml` writes them, read with its paths (ADR-t1453-1
+        // decision 4).
         let snapshot_of = |agent: &str| {
             subagents
                 .iter()
                 .flat_map(|snapshot| &snapshot.agents)
                 .find(|snapshot| snapshot.name == agent)
         };
-        jobs.extend(prepared.agents.into_iter().map(|(agent, built)| ReviewJob {
-            provider: snapshot_of(&agent).and_then(|snapshot| snapshot.provider),
-            builtin: snapshot_of(&agent).and_then(SnapshotAgent::builtin_record),
-            id: ReviewJobId::Agent(agent),
-            input: ReviewJobInput::Agent(built),
-            again: false,
-            state: ReviewJobState::Waiting(None),
-            session: None,
+        jobs.extend(prepared.agents.into_iter().map(|(agent, built)| {
+            ReviewJob {
+                written: snapshot_of(&agent)
+                    .map(SnapshotAgent::written_launch)
+                    .unwrap_or_default(),
+                builtin: snapshot_of(&agent).and_then(SnapshotAgent::builtin_record),
+                id: ReviewJobId::Agent(agent),
+                input: ReviewJobInput::Agent(built),
+                again: false,
+                state: ReviewJobState::Waiting(None),
+                session: None,
+                ran_with: None,
+            }
         }));
         info!(run_id = %run.id(), "run {} review {attempt}: {} job(s), the whole review and {} agent(s) (session {})", run.id(), jobs.len(), jobs.len() - 1, if live { "kept open" } else { "ended" });
         self.go_on_with_review(
@@ -868,7 +871,12 @@ impl Supervisor<'_> {
     fn agent_routes(&self, providers: &[Provider]) -> Vec<ReviewRoute> {
         providers
             .iter()
-            .map(|provider| self.review_job_route(Some(*provider)))
+            .map(|provider| {
+                self.review_job_route(&AgentModel {
+                    provider: Some(*provider),
+                    ..AgentModel::default()
+                })
+            })
             .collect()
     }
     /// How many agent jobs of the reviews of the runs in the slots run now,
@@ -921,11 +929,18 @@ impl Supervisor<'_> {
             let ReviewJobState::Running {
                 job: ended,
                 switchable,
+                launch,
             } = std::mem::replace(&mut job.state, ReviewJobState::Waiting(None))
             else {
                 unreachable!("the job runs");
             };
-            self.review_job_ended(run, (attempt, retried), job, (*ended, switchable), end)?;
+            self.review_job_ended(
+                run,
+                (attempt, retried),
+                job,
+                (*ended, switchable, &launch),
+                end,
+            )?;
         }
         Ok(())
     }
@@ -974,8 +989,10 @@ impl Supervisor<'_> {
         }
     }
     /// Go on from `job` of review `attempt` of `run`, whose process
-    /// `ended` (`switchable` as it started) and gave `end`: record
-    /// `review_job_finished` with its Execution, and keep its answer, put
+    /// `ended` (`switchable` and `launch` as it started) and gave `end`:
+    /// record `review_job_finished` with its Execution and the provider,
+    /// model and effort it started with (the model its session names, when
+    /// it names one), and keep its answer, put
     /// it back to wait (for a provider it could not use, which is held, or
     /// as its one run once more) or give up on it. `retried` is whether the
     /// review is its program reviews' retry.
@@ -984,7 +1001,7 @@ impl Supervisor<'_> {
         run: &TaskRun,
         (attempt, retried): (usize, bool),
         job: &mut ReviewJob,
-        (ended, switchable): (HeadlessJob, bool),
+        (ended, switchable, launch): (HeadlessJob, bool, &ActorLaunch),
         end: std::result::Result<String, JobFailed>,
     ) -> Result<()> {
         let agent = self
@@ -1002,6 +1019,10 @@ impl Supervisor<'_> {
             "agent": job.id.agent(),
             "again": job.again,
             "provider": ended.provider,
+            // What it started with; a provider that names its session
+            // says the model it used instead (ADR-t1063-1 decision 6).
+            "model": launch.model,
+            "effort": launch.effort,
             "duration_secs": duration_secs,
             "output": output,
         });
@@ -1012,6 +1033,7 @@ impl Supervisor<'_> {
         // The whole review's session, which the review's end and its span
         // name, whatever this run gave.
         job.session = job_session.map(identity_of);
+        job.ran_with = Some(Box::new(launch.clone()));
         let (miss, error) = match end {
             Ok(reply) => match read_answer(&job.id, &reply) {
                 Ok(answer) => {
@@ -1040,7 +1062,7 @@ impl Supervisor<'_> {
             &ended,
             (&error, &stdout),
             &hold,
-            (job.provider, switchable),
+            (&job.written, switchable),
         ) {
             ReviewJobFailure::Walled(wall) => {
                 info!(run_id = %run.id(), "run {} review {attempt}: {} stopped at the {} wall; it waits for the hold ask", run.id(), job.id.describe(), wall.as_str());
@@ -1079,7 +1101,7 @@ impl Supervisor<'_> {
         error: &str,
         unusable: bool,
     ) -> bool {
-        let manual = matches!(self.review_job_route(job.provider), ReviewRoute::Manual(_));
+        let manual = matches!(self.review_job_route(&job.written), ReviewRoute::Manual(_));
         let again = !unusable
             && review_jobs::runs_again(
                 self.landing.retry_unreadable_review,
@@ -1154,7 +1176,7 @@ impl Supervisor<'_> {
                 note_review_job_wait(run, attempt, &mut watch.jobs[index], why);
                 continue;
             }
-            match self.review_job_route(watch.jobs[index].provider) {
+            match self.review_job_route(&watch.jobs[index].written) {
                 ReviewRoute::Wait(why) => {
                     note_review_job_wait(run, attempt, &mut watch.jobs[index], why)
                 }
@@ -1230,6 +1252,7 @@ impl Supervisor<'_> {
                     job.state = ReviewJobState::Running {
                         job: Box::new(started),
                         switchable,
+                        launch: Box::new(launch.clone()),
                     };
                     let mut payload = json!({
                         "attempt": attempt,
@@ -1262,7 +1285,7 @@ impl Supervisor<'_> {
                         &HoldJob::Review(run.id().clone()),
                         switchable,
                     ) {
-                        let next = after_unusable(self.review_job_route(job.provider), provider);
+                        let next = after_unusable(self.review_job_route(&job.written), provider);
                         if !matches!(next, AfterUnusable::Fail) {
                             warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}) for {}", run.id(), provider.as_str(), reason.as_str(), job.id.describe());
                             self.record_review_job_finished(
@@ -1387,6 +1410,7 @@ impl Supervisor<'_> {
         }
         if !verdict.agents.is_empty() {
             finished["agents"] = json!(verdict.agents);
+            finished["launches"] = ran_with(&watch.jobs);
             finished["route"] = verdict.route(true).event_value();
         }
         // The whole review's session, which its span names; each job's
@@ -3174,6 +3198,28 @@ pub(super) fn held_review<'a>(
     }
 }
 
+/// What `review_finished` records beside its `agents` (`launches`): by
+/// each agent whose job ran, the provider, model and effort its last run
+/// started with, as `jobs` keep them (the agent's table's over its role's,
+/// or, for a job moved off its provider, those it ran with there). Beside
+/// the results, not in them: a result has the agent's own form.
+pub(super) fn ran_with(jobs: &[ReviewJob]) -> serde_json::Value {
+    let mut launches = serde_json::Map::new();
+    for job in jobs {
+        if let (Some(agent), Some(launch)) = (job.id.agent(), job.ran_with.as_deref()) {
+            launches.insert(
+                agent.to_owned(),
+                json!({
+                    "provider": launch.provider,
+                    "model": launch.model,
+                    "effort": launch.effort,
+                }),
+            );
+        }
+    }
+    serde_json::Value::Object(launches)
+}
+
 /// The providers the agents of `subagents` name, each once, in their
 /// order: those whose jobs may start while the whole review's waits.
 pub(super) fn agent_providers(subagents: Option<&SubagentSnapshot>) -> Vec<Provider> {
@@ -4495,6 +4541,208 @@ mod tests {
         // A Codex review starts on Codex, whatever its agents: nothing
         // moves it for what a provider can run.
         assert!(codex.switch_reason.is_none());
+    }
+
+    /// What an agent's table writes of its launch starts its job
+    /// ([`provider::agent_job_route`]): with all three written, on its
+    /// provider with its model and effort; with one or two, the rest is
+    /// the role's on the provider it starts on. A provider it names that
+    /// is held moves the job alone to the other provider with the fallback
+    /// on, with none of the written model and effort but what the role
+    /// gives on the provider it moved to, and with it off
+    /// the job waits; one that names no provider goes where `[roles.review]`
+    /// sends the review, moving as the role's jobs do. What each job ran
+    /// with goes beside the results in `review_finished` ([`ran_with`]).
+    #[test]
+    fn an_agents_written_model_and_effort_start_its_job_and_a_move_gives_the_roles() {
+        use crate::domain::actor_model::{AgentModel, LaunchSource, RoleModels};
+        use crate::domain::provider_switch::SwitchReason;
+        let mut models = RoleModels::default();
+        let table = models.entry(ModelRole::Review);
+        table.provider = Some(Provider::Codex);
+        table.model = Some("gpt-5.5".to_owned());
+        table.effort = Some("high".to_owned());
+        let written = |provider, model: Option<&str>, effort: Option<&str>| AgentModel {
+            provider,
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+        };
+        let route = |written: &AgentModel, held: Option<Provider>, fallback: bool| {
+            provider::agent_job_route(&models, written, (false, fallback), None, move |p| {
+                (held == Some(p)).then_some(SwitchReason::UsageLimit)
+            })
+        };
+        let started = |route: ReviewRoute| match route {
+            ReviewRoute::Start(launch, true) => (
+                launch.provider,
+                launch.model,
+                launch.effort,
+                launch.source,
+                launch.switched_from,
+            ),
+            _ => panic!("it starts, switchable"),
+        };
+        let some = |v: &str| Some(v.to_owned());
+        let haiku = written(
+            Some(Provider::Claude),
+            Some("claude-haiku-5-5"),
+            Some("low"),
+        );
+        assert_eq!(
+            started(route(&haiku, None, true)),
+            (
+                Provider::Claude,
+                some("claude-haiku-5-5"),
+                some("low"),
+                LaunchSource::Subagent,
+                None
+            )
+        );
+        // Each key alone: the rest is the role's where the job starts.
+        assert_eq!(
+            started(route(
+                &written(Some(Provider::Claude), None, None),
+                None,
+                true
+            )),
+            (
+                Provider::Claude,
+                some(worker_model::OPUS),
+                some("high"),
+                LaunchSource::Subagent,
+                None
+            )
+        );
+        assert_eq!(
+            started(route(
+                &written(None, Some("gpt-5.5-mini"), None),
+                None,
+                true
+            )),
+            (
+                Provider::Codex,
+                some("gpt-5.5-mini"),
+                some("high"),
+                LaunchSource::Subagent,
+                None
+            )
+        );
+        assert_eq!(
+            started(route(&written(None, None, Some("low")), None, true)),
+            (
+                Provider::Codex,
+                some("gpt-5.5"),
+                some("low"),
+                LaunchSource::Subagent,
+                None
+            )
+        );
+        // Its provider held (the role on Codex's gpt-5.5 at high, the agent
+        // on Claude's Haiku at low): moved alone with none of the written
+        // values but the role's model and effort on the role's Codex, or
+        // waiting for it with the fallback off.
+        assert_eq!(
+            started(route(&haiku, Some(Provider::Claude), true)),
+            (
+                Provider::Codex,
+                some("gpt-5.5"),
+                some("high"),
+                LaunchSource::Subagent,
+                Some(Provider::Claude)
+            )
+        );
+        assert!(matches!(
+            route(&haiku, Some(Provider::Claude), false),
+            ReviewRoute::Wait(_)
+        ));
+        // The role's provider held: an agent that names none moves with the
+        // role's jobs, without its written effort: on Claude, Claude's
+        // default model with the role's effort.
+        assert_eq!(
+            started(route(
+                &written(None, None, Some("low")),
+                Some(Provider::Codex),
+                true
+            )),
+            (
+                Provider::Claude,
+                some(worker_model::OPUS),
+                some("high"),
+                LaunchSource::Subagent,
+                Some(Provider::Codex)
+            )
+        );
+        // A table of only a provider moves as before, with the provider's
+        // default.
+        assert_eq!(
+            started(route(
+                &written(Some(Provider::Claude), None, None),
+                Some(Provider::Claude),
+                true
+            )),
+            (
+                Provider::Codex,
+                None,
+                None,
+                LaunchSource::Subagent,
+                Some(Provider::Claude)
+            )
+        );
+
+        // Checked against `[roles.review]` on Codex as the review read the
+        // table, a model-only job whose roles are read on Claude by the time
+        // it starts (another landing changed them) does not start with
+        // Codex's model there: it goes to the person.
+        let gpt = written(None, Some("gpt-5.5-mini"), None);
+        assert!(
+            gpt.check(&models, ModelRole::Review).is_ok(),
+            "checked against the review's roles"
+        );
+        let now_claude = RoleModels::default();
+        match provider::agent_job_route(&now_claude, &gpt, (false, true), None, |_| None) {
+            ReviewRoute::Manual(why) => {
+                assert!(why.contains("model gpt-5.5-mini is not Claude's"), "{why}");
+            }
+            _ => panic!("the job does not start with another provider's model"),
+        }
+
+        // `review_finished`'s `launches`: what each agent's job last ran
+        // with, none for the whole review's or a job that never ran.
+        let job = |id: ReviewJobId, ran_with: Option<ActorLaunch>| ReviewJob {
+            id,
+            written: AgentModel::default(),
+            input: ReviewJobInput::Whole {
+                prompt: String::new(),
+                prompt_bytes: PromptBytes::default(),
+                session_id: None,
+            },
+            builtin: None,
+            again: false,
+            state: ReviewJobState::Waiting(None),
+            session: None,
+            ran_with: ran_with.map(Box::new),
+        };
+        let ReviewRoute::Start(design, _) = route(&haiku, None, true) else {
+            unreachable!("started above");
+        };
+        let ReviewRoute::Start(moved, _) = route(&haiku, Some(Provider::Claude), true) else {
+            unreachable!("started above");
+        };
+        assert_eq!(
+            ran_with(&[
+                job(ReviewJobId::Whole, Some(models.launch(ModelRole::Review))),
+                job(ReviewJobId::Agent("design".to_owned()), Some(design)),
+                job(
+                    ReviewJobId::Agent("builtin:security".to_owned()),
+                    Some(moved)
+                ),
+                job(ReviewJobId::Agent("tests".to_owned()), None),
+            ]),
+            json!({
+                "design": {"provider": "claude", "model": "claude-haiku-5-5", "effort": "low"},
+                "builtin:security": {"provider": "codex", "model": "gpt-5.5", "effort": "high"},
+            })
+        );
     }
 
     /// An agent whose `[review.subagents.<agent>]` names its provider goes

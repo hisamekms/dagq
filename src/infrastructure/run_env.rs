@@ -203,12 +203,18 @@ const REVIEW_SUBAGENT_PATHS: &str = "paths";
 /// The optional key of `[review.subagents.<agent>]`: the provider of the
 /// agent's job ([`ReviewSubagent::provider`]).
 const REVIEW_SUBAGENT_PROVIDER: &str = "provider";
+/// The optional keys of `[review.subagents.<agent>]` and of a built-in's
+/// table: the model and effort of the agent's job
+/// ([`ReviewSubagent::model`], [`ReviewSubagent::effort`]), checked
+/// against the provider it starts on when the review reads them.
+const REVIEW_SUBAGENT_MODEL: &str = "model";
+const REVIEW_SUBAGENT_EFFORT: &str = "effort";
 /// The optional key of `[review.subagents."builtin:<name>"]`: whether the
 /// built-in runs ([`BuiltinSetting::enabled`]).
 const REVIEW_SUBAGENT_ENABLED: &str = "enabled";
 /// What [`parse_config`] calls the current table while in a
 /// `[review.subagents."builtin:<name>"]`; its keys are `enabled` and the
-/// optional `paths` and `provider` (`enabled` only for
+/// optional `paths`, `provider`, `model` and `effort` (`enabled` only for
 /// [`review_builtins::ACCEPTANCE`]).
 const REVIEW_BUILTIN_TABLE: &str = "review.subagents.builtin";
 /// `[review.programs.<name>]`: a program review (ADR-t1895-2), one table
@@ -712,6 +718,7 @@ impl Config {
         ReviewAgents {
             agents: self.review_subagents.clone(),
             builtins: self.review_builtins.clone(),
+            roles: self.roles.clone(),
         }
     }
 
@@ -935,6 +942,8 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         enabled: None,
                         paths: None,
                         provider: None,
+                        model: None,
+                        effort: None,
                     });
                     in_acceptance = false;
                     table = Some(REVIEW_BUILTIN_TABLE);
@@ -952,6 +961,8 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     name: agent,
                     paths: Vec::new(),
                     provider: None,
+                    model: None,
+                    effort: None,
                 });
                 subagent_open = Some(number);
                 table = Some(REVIEW_SUBAGENTS_TABLE);
@@ -1306,8 +1317,14 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         validate_path_globs(&globs).with_context(with)?;
                         builtin.paths = Some(dedup_globs(&globs));
                     }
+                    REVIEW_SUBAGENT_MODEL => {
+                        builtin.model = Some(launch_value(key, rest, number)?);
+                    }
+                    REVIEW_SUBAGENT_EFFORT => {
+                        builtin.effort = Some(launch_value(key, rest, number)?);
+                    }
                     _ => bail!(
-                        "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_SUBAGENTS_PREFIX}\"{section}\"]; the keys are {REVIEW_SUBAGENT_ENABLED}, {REVIEW_SUBAGENT_PATHS} and {REVIEW_SUBAGENT_PROVIDER}"
+                        "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_SUBAGENTS_PREFIX}\"{section}\"]; the keys are {REVIEW_SUBAGENT_ENABLED}, {REVIEW_SUBAGENT_PATHS}, {REVIEW_SUBAGENT_PROVIDER}, {REVIEW_SUBAGENT_MODEL} and {REVIEW_SUBAGENT_EFFORT}"
                     ),
                 }
             }
@@ -1317,8 +1334,14 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     .last_mut()
                     .expect("a [review.subagents.*] table names its agent");
                 ensure!(
-                    key == REVIEW_SUBAGENT_PATHS || key == REVIEW_SUBAGENT_PROVIDER,
-                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_SUBAGENTS_PREFIX}{}]; the keys are {REVIEW_SUBAGENT_PATHS} and {REVIEW_SUBAGENT_PROVIDER}",
+                    [
+                        REVIEW_SUBAGENT_PATHS,
+                        REVIEW_SUBAGENT_PROVIDER,
+                        REVIEW_SUBAGENT_MODEL,
+                        REVIEW_SUBAGENT_EFFORT
+                    ]
+                    .contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_SUBAGENTS_PREFIX}{}]; the keys are {REVIEW_SUBAGENT_PATHS}, {REVIEW_SUBAGENT_PROVIDER}, {REVIEW_SUBAGENT_MODEL} and {REVIEW_SUBAGENT_EFFORT}",
                     agent.name
                 );
                 ensure!(
@@ -1337,6 +1360,14 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         .map_err(|error| anyhow::anyhow!("{error}"))
                         .with_context(with)?;
                     agent.provider = Some(provider);
+                    continue;
+                }
+                if key == REVIEW_SUBAGENT_MODEL {
+                    agent.model = Some(launch_value(key, rest, number)?);
+                    continue;
+                }
+                if key == REVIEW_SUBAGENT_EFFORT {
+                    agent.effort = Some(launch_value(key, rest, number)?);
                     continue;
                 }
                 subagent_open = None;
@@ -2389,6 +2420,20 @@ pub fn parse_config(text: &str) -> Result<Config> {
         );
     }
     Ok(config)
+}
+
+/// The `model` or `effort` (`key`) of a review agent's table on line
+/// `number`, `rest` its value: a string that is not blank. Whether its
+/// job's provider takes it is checked as the review reads the table
+/// ([`ReviewAgents::launch_problems`]).
+fn launch_value(key: &str, rest: &str, number: usize) -> Result<String> {
+    let value = parse_string(rest.trim())
+        .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+    ensure!(
+        !value.trim().is_empty(),
+        "{CONFIG_FILE_NAME}:{number}: {key} is blank"
+    );
+    Ok(value)
 }
 
 /// The last `[toolchains.<name>]` read, once its table ended: its
@@ -4448,11 +4493,15 @@ mod tests {
                     name: "design-consistency".into(),
                     paths: vec!["src/**".into(), "docs/design/**".into()],
                     provider: None,
+                    model: None,
+                    effort: None,
                 },
                 ReviewSubagent {
                     name: "migrations".into(),
                     paths: vec!["migrations/*.sql".into()],
                     provider: None,
+                    model: None,
+                    effort: None,
                 },
             ]
         );
@@ -4461,7 +4510,7 @@ mod tests {
         for (text, expected) in [
             (
                 "[review.subagents.a]\nglobs = [\"a\"]\n",
-                "dagq.toml:2: unknown key globs in [review.subagents.a]; the keys are paths and provider",
+                "dagq.toml:2: unknown key globs in [review.subagents.a]; the keys are paths, provider, model and effort",
             ),
             (
                 "[review.subagents.a]\npaths = [\"a\"]\npaths = [\"b\"]\n",
@@ -4543,6 +4592,64 @@ mod tests {
         assert!(verifier.review_subagents_in("[nope]\n").is_err());
     }
 
+    /// `model` and `effort` of a project's agent and of a built-in are
+    /// read as written, each optional and a string that is not blank;
+    /// whether the provider the job starts on takes them is left to the
+    /// review's reading ([`ReviewAgents::launch_problems`]), which checks
+    /// them against the same file's `[roles.review]`.
+    #[test]
+    fn parses_the_review_agents_model_and_effort() {
+        let config = parse_config(
+            "[roles.review]\nprovider = \"codex\"\n\
+             [review.subagents.design]\npaths = [\"docs/**\"]\nprovider = \"claude\"\n\
+             model = \"claude-haiku-5-5\"\neffort = \"low\"\n\
+             [review.subagents.\"builtin:security\"]\neffort = \"xhigh\"\n\
+             [review.subagents.\"builtin:tests\"]\nmodel = \"claude-haiku-5-5\"\n",
+        )
+        .unwrap();
+        let agents = config.review_agents();
+        assert_eq!(
+            agents.written_launch("design"),
+            crate::domain::actor_model::AgentModel {
+                provider: Some(crate::domain::Provider::Claude),
+                model: Some("claude-haiku-5-5".into()),
+                effort: Some("low".into()),
+            }
+        );
+        assert_eq!(
+            agents.written_launch("builtin:security").effort.as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            agents.written_launch("other"),
+            crate::domain::actor_model::AgentModel::default()
+        );
+        // The built-in's model is Claude's on the role's Codex.
+        assert_eq!(
+            agents.launch_problems(),
+            [
+                "[review.subagents.\"builtin:tests\"]: model claude-haiku-5-5 is Claude's; with provider codex name a model of Codex's, or none for Codex's default"
+            ]
+        );
+        for (text, expected) in [
+            (
+                "[review.subagents.a]\npaths = [\"x\"]\nmodel = \" \"\n",
+                "dagq.toml:3: model is blank",
+            ),
+            (
+                "[review.subagents.\"builtin:tests\"]\neffort = 1\n",
+                "dagq.toml:2: value of effort",
+            ),
+            (
+                "[review.subagents.a]\npaths = [\"x\"]\nmodels = \"m\"\n",
+                "the keys are paths, provider, model and effort",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+    }
+
     /// `[review.subagents."builtin:<name>"]` sets a built-in agent's
     /// `enabled`, `paths` and `provider`, each optional, beside the
     /// project's agents (ADR-t2259-1 decision 4); `builtin:acceptance`
@@ -4569,12 +4676,16 @@ mod tests {
                     enabled: Some(true),
                     paths: Some(vec!["lib/**".into()]),
                     provider: Some(crate::domain::Provider::Codex),
+                    model: None,
+                    effort: None,
                 },
                 BuiltinSetting {
                     agent: BuiltinAgent::Security,
                     enabled: Some(false),
                     paths: None,
                     provider: None,
+                    model: None,
+                    effort: None,
                 },
             ]
         );
@@ -4627,7 +4738,7 @@ mod tests {
             ),
             (
                 "[review.subagents.\"builtin:tests\"]\nscript = \"a.sh\"\n",
-                "dagq.toml:2: unknown key script in [review.subagents.\"builtin:tests\"]; the keys are enabled, paths and provider",
+                "dagq.toml:2: unknown key script in [review.subagents.\"builtin:tests\"]; the keys are enabled, paths, provider, model and effort",
             ),
             (
                 "[review.subagents.\"builtin:tests\"]\nprovider = \"gemini\"\n",

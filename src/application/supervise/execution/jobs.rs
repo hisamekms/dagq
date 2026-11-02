@@ -1749,10 +1749,12 @@ pub(super) struct ReviewWatch {
 /// One agent job of a run's review.
 pub(super) struct ReviewJob {
     pub(super) id: ReviewJobId,
-    /// The provider an agent's `[review.subagents.<agent>]` names, which
-    /// it runs on instead of where `[roles.review]` sends the review; `None`
-    /// for the whole review's and an agent that names none.
-    pub(super) provider: Option<Provider>,
+    /// What an agent's `[review.subagents.<agent>]` writes of its launch:
+    /// the provider it runs on instead of where `[roles.review]` sends the
+    /// review, and the model and effort it is given there instead of the
+    /// role's (`Supervisor::review_job_route`); nothing for the whole
+    /// review's and an agent whose table writes none.
+    pub(super) written: crate::domain::actor_model::AgentModel,
     /// What starts it.
     pub(super) input: ReviewJobInput,
     /// A built-in's record of which built-in judges: the whole review's,
@@ -1770,6 +1772,9 @@ pub(super) struct ReviewJob {
     /// `review_job_finished` holds its Execution): the whole review's names
     /// the review's end and span.
     pub(super) session: Option<crate::domain::headless_job::JobSession>,
+    /// What its last run that ended started with: its provider, model and
+    /// effort go with its result in `review_finished`'s `agents`.
+    pub(super) ran_with: Option<Box<crate::domain::actor_model::ActorLaunch>>,
 }
 
 /// What starts a job of a review: the whole review's prompt (and the
@@ -1793,9 +1798,12 @@ pub(super) enum ReviewJobState {
     /// Its process runs; `switchable` when `[roles.review]`, or the
     /// agent's `[review.subagents.<agent>]`, names its provider, so one it
     /// cannot use moves it or waits for it (ADR-t1207-1, ADR-t1857-1).
+    /// `launch` is what it started with, whose provider, model and effort
+    /// its `review_job_finished` records.
     Running {
         job: Box<HeadlessJob>,
         switchable: bool,
+        launch: Box<crate::domain::actor_model::ActorLaunch>,
     },
     /// It answered.
     Answered(ReviewAnswer),
@@ -2802,7 +2810,7 @@ mod tests {
         // A review's whole job and an agent's run; a third waits.
         let review_job = |id: ReviewJobId, state: ReviewJobState| ReviewJob {
             id,
-            provider: None,
+            written: Default::default(),
             input: ReviewJobInput::Whole {
                 prompt: String::new(),
                 prompt_bytes: crate::application::prompt::PromptBytes::default(),
@@ -2812,6 +2820,7 @@ mod tests {
             again: false,
             state,
             session: None,
+            ran_with: None,
         };
         let running = |label: Option<&str>| {
             let mut job = job(&files, true, "");
@@ -2825,6 +2834,9 @@ mod tests {
             ReviewJobState::Running {
                 job: Box::new(job),
                 switchable: false,
+                launch: Box::new(crate::domain::actor_model::ActorLaunch::default_of(
+                    crate::domain::actor_model::ModelRole::Review,
+                )),
             }
         };
         let mut slots = super::super::stages::SlotTable::default();

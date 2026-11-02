@@ -1166,9 +1166,10 @@ fn a_codex_review_runs_its_whole_review_and_its_agents_on_codex() {
 }
 
 /// `[roles.review]` names no provider (the whole review runs on Claude);
-/// `design` names Codex for its job and `tests` names none, both
-/// required for `change.txt`; `extra` goes before them.
-fn design_on_codex(repo: &Path, extra: &str) {
+/// `design` names Codex for its job, with `design_keys` (its model and
+/// effort) after, and `tests` names none, both required for
+/// `change.txt`; `extra` goes before them.
+fn design_on_codex(repo: &Path, extra: &str, design_keys: &str) {
     fs::create_dir_all(repo.join(".dagq/agents/tests")).unwrap();
     fs::write(repo.join(".dagq/agents/tests/AGENT.md"), TESTS_DEFINITION).unwrap();
     git(repo, &["add", ".dagq/agents/tests/AGENT.md"]);
@@ -1176,7 +1177,7 @@ fn design_on_codex(repo: &Path, extra: &str) {
         repo,
         &format!(
             "{extra}[review.subagents.design]\npaths = [\"change.txt\"]\nprovider = \"codex\"\n\
-             [review.subagents.tests]\npaths = [\"change.txt\"]\n"
+             {design_keys}[review.subagents.tests]\npaths = [\"change.txt\"]\n"
         ),
         Some(MAIN_DEFINITION),
     );
@@ -1198,15 +1199,18 @@ fn job_launches(detail: &dagq::domain::TaskDetail) -> Vec<(Value, Value, Value, 
         .collect()
 }
 
-/// With the fallback on, the job of the agent that names Codex stops at
-/// Codex's usage limit: Codex alone is held and that job alone starts again
-/// on Claude, its launch saying it moved from Codex and still that the
-/// agent's table named its provider; the run lands.
+/// With the fallback on, the job of the agent that names Codex, with a
+/// model and effort, starts on Codex with them and stops at Codex's usage
+/// limit: Codex alone is held and that job alone starts again on Claude,
+/// its launch saying it moved from Codex and still that the agent's table
+/// named its provider, given none of Codex's model and effort; each
+/// job's start and finish and the review's `launches` record what it ran
+/// with, and the run lands.
 #[test]
 fn an_agent_that_names_codex_moves_alone_to_claude_and_keeps_where_its_provider_came_from() {
     use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
     let (dir, repo, db, backend, codex) = codex_fixture();
-    design_on_codex(&repo, "");
+    design_on_codex(&repo, "", "model = \"gpt-5.5-mini\"\neffort = \"low\"\n");
     set_turns(dir.path(), FINISH);
     fs::write(
         dir.path().join("codex-agent-design-failure.jsonl"),
@@ -1242,8 +1246,40 @@ fn an_agent_that_names_codex_moves_alone_to_claude_and_keeps_where_its_provider_
             (json!("design"), json!("claude"), subagent(), json!("codex")),
         ]
     );
-    let moved = payloads(&detail, "review_job_started")[3]["launch"].clone();
+    let started = payloads(&detail, "review_job_started");
+    let on_codex = &started[1]["launch"];
+    assert_eq!(
+        (&on_codex["model"], &on_codex["effort"]),
+        (&json!("gpt-5.5-mini"), &json!("low")),
+        "{on_codex}"
+    );
+    let moved = started[3]["launch"].clone();
     assert_eq!(moved["switch_reason"], "usage_limit", "{moved}");
+    assert_eq!(
+        (&moved["model"], &moved["effort"]),
+        (&Value::Null, &Value::Null),
+        "{moved}"
+    );
+    let args = fs::read_to_string(dir.path().join("codex-agent-args.log")).unwrap();
+    assert!(args.contains("gpt-5.5-mini"), "{args}");
+    // The model of a Codex job's finish is the one its session names.
+    let job_finished: Vec<(Value, Value)> = payloads(&detail, "review_job_finished")
+        .iter()
+        .filter(|job| job["agent"] == "design")
+        .map(|job| (job["provider"].clone(), job["effort"].clone()))
+        .collect();
+    assert_eq!(
+        job_finished,
+        [
+            (json!("codex"), json!("low")),
+            (json!("claude"), Value::Null),
+        ]
+    );
+    let finished = payloads(&detail, "review_finished");
+    assert_eq!(
+        finished[0]["launches"]["design"],
+        json!({"provider": "claude", "model": null, "effort": null})
+    );
     let held: Vec<Value> = SqliteQueue::open(&db)
         .unwrap()
         .all_events()
@@ -1279,7 +1315,7 @@ fn with_the_fallback_off_an_agent_whose_codex_login_ran_out_waits_for_it_and_the
     let stderr = "ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.\n";
     let reason = "authentication";
     let (dir, repo, db, backend, codex) = codex_fixture();
-    design_on_codex(&repo, "[provider_fallback]\njobs = false\n");
+    design_on_codex(&repo, "[provider_fallback]\njobs = false\n", "");
     set_turns(dir.path(), FINISH);
     fs::write(dir.path().join("codex-agent-design-failure.jsonl"), stdout).unwrap();
     fs::write(dir.path().join("codex-agent-design-failure.err"), stderr).unwrap();

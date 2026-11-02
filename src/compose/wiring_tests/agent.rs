@@ -50,6 +50,19 @@ pub(super) fn already_satisfied(run: &RunId, head: &CommitSha) -> Value {
     })
 }
 
+/// The receipt of a worker that finished the task on its worktree's head.
+pub(super) fn succeeded(run: &RunId, head: &CommitSha) -> Value {
+    json!({
+        "run_id": run,
+        "result": "succeeded",
+        "commit": head,
+        "tests": {"status": "passed", "evidence_or_reason": "the unit tests of the change"},
+        "e2e": {"status": "not_applicable", "evidence_or_reason": "the runtime runs it"},
+        "subagent_review": {"status": "not_applicable", "evidence_or_reason": "a wiring test"},
+        "summary": "done",
+    })
+}
+
 /// A review's verdict `decision` with `summary`.
 pub(super) fn verdict(decision: &str, summary: &str) -> Value {
     json!({"verdict": decision, "reasons": [], "summary": summary})
@@ -78,6 +91,8 @@ pub(super) struct FakeAgent {
     receipts: Mutex<VecDeque<Receipt>>,
     verdicts: Mutex<VecDeque<Value>>,
     started: Mutex<Vec<String>>,
+    /// The arguments of each review agent's job it started, in order.
+    agent_jobs: Mutex<Vec<Vec<String>>>,
 }
 
 impl FakeAgent {
@@ -94,7 +109,16 @@ impl FakeAgent {
             receipts: Mutex::new(script.receipts.into()),
             verdicts: Mutex::new(script.verdicts.into()),
             started: Mutex::default(),
+            agent_jobs: Mutex::default(),
         }
+    }
+
+    /// The arguments of each review agent's job started, in order.
+    pub(super) fn agent_jobs(&self) -> Vec<Vec<String>> {
+        self.agent_jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// What this agent started, by program, in order.
@@ -135,7 +159,11 @@ impl FakeAgent {
             .pop_front();
         if let Some(receipt) = receipt {
             let worktree = run.worktree_path().context("the run has no worktree")?;
-            let head = crate::application::Repository::head(&self.git, Path::new(worktree))?;
+            let mut head = crate::application::Repository::head(&self.git, Path::new(worktree))?;
+            // A worker that finished the task committed on its worktree.
+            if receipt(&id, &head)["result"] == "succeeded" {
+                head = self.git.commit_in(Path::new(worktree))?;
+            }
             let path = run
                 .receipt_path()
                 .map_or_else(|| run_dir.join("receipt.json"), PathBuf::from);
@@ -197,6 +225,14 @@ impl AgentProvider for FakeAgent {
         let mut command = CommandSpec::new(AGENT_JOB);
         command.current_dir(&job.cwd).stdin(job.prompt.as_str());
         Ok(command)
+    }
+
+    /// Claude's own arguments of a launch's model and effort, on a review
+    /// agent's job only: the other programs take no option.
+    fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
+        if command.get_program() == AGENT_JOB {
+            self.claude.select_model(command, model, effort);
+        }
     }
 
     fn turn_command(
@@ -301,7 +337,17 @@ impl Spawner for FakeAgent {
                 self.turn(run_dir, &session.to_string_lossy())?
             }
             REVIEW => format!("{}\n", self.next_verdict()?),
-            AGENT_JOB => Self::agent_job(command.get_stdin().unwrap_or_default()),
+            AGENT_JOB => {
+                self.agent_jobs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(
+                        args.iter()
+                            .map(|arg| arg.to_string_lossy().into_owned())
+                            .collect(),
+                    );
+                Self::agent_job(command.get_stdin().unwrap_or_default())
+            }
             other => bail!("the wiring test's agent starts no {other}"),
         };
         match streams {

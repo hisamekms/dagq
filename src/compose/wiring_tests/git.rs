@@ -1,7 +1,8 @@
 //! The repository of a wiring test in memory: main's line of commits, the
 //! run's worktrees on their branches and the scratch checkouts, without
-//! Git. A commit is only its name; it holds no file, so every diff and
-//! listing of files is empty. It does what a claim, a run's validation and
+//! Git. A commit is only its name; it holds no file but those a test
+//! commits to every commit alike, and every diff and listing of files is
+//! empty but the changed paths a test names. It does what a claim, a run's validation and
 //! the verification of a snapshot of main need; what it does not do yet
 //! (a rebase, a commit of its own) is an error that names it.
 
@@ -39,6 +40,13 @@ struct State {
     scratches: HashMap<PathBuf, CommitSha>,
     /// Every scratch checkout made, with its commit, in order.
     checked_out: Vec<(PathBuf, CommitSha)>,
+    /// The files every commit holds, by path: none unless a test commits
+    /// some ([`FakeGit::commit_files`]).
+    files: HashMap<String, String>,
+    /// The paths every range changes: none unless a test names some.
+    changed: Vec<String>,
+    /// The parent of each commit a worker made on its worktree.
+    parents: HashMap<CommitSha, CommitSha>,
 }
 
 /// The repository in memory, its main checkout at `checkout`; clones share
@@ -66,6 +74,9 @@ impl FakeGit {
                 worktrees: HashMap::new(),
                 scratches: HashMap::new(),
                 checked_out: Vec::new(),
+                files: HashMap::new(),
+                changed: Vec::new(),
+                parents: HashMap::new(),
             })),
         }
     }
@@ -74,6 +85,29 @@ impl FakeGit {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Every commit holds `files` (path and text), and every range
+    /// changes `changed`.
+    pub(super) fn commit_files(&self, files: &[(&str, &str)], changed: &[&str]) {
+        let mut state = self.lock();
+        for (path, text) in files {
+            state.files.insert((*path).to_owned(), (*text).to_owned());
+        }
+        state.changed = changed.iter().map(|path| (*path).to_owned()).collect();
+    }
+
+    /// A commit of the worker's on the worktree at `path`, on top of its
+    /// head: the worktree's head from now on.
+    pub(super) fn commit_in(&self, path: &Path) -> Result<CommitSha> {
+        let mut state = self.lock();
+        let made = commit(1000 + state.parents.len());
+        let worktree = state.worktrees.get_mut(path).with_context(|| {
+            format!("{} is no worktree of the test's repository", path.display())
+        })?;
+        let parent = std::mem::replace(&mut worktree.head, made.clone());
+        state.parents.insert(made.clone(), parent);
+        Ok(made)
     }
 
     /// Main's head now.
@@ -120,10 +154,10 @@ impl RepositoryReads for FakeGit {
         Ok(self.main())
     }
 
-    /// None: a commit holds no file.
-    fn file_in(&self, commit: &str, _: &str) -> Result<Option<String>> {
+    /// The file a test committed at `path`, none otherwise.
+    fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
         ensure!(self.known(commit), "no commit {commit}");
-        Ok(None)
+        Ok(self.lock().files.get(path).cloned())
     }
 
     fn tree_paths(&self, commit: &str) -> Result<Vec<String>> {
@@ -198,7 +232,22 @@ impl Repository for FakeGit {
         if ancestor == descendant {
             return Ok(self.known(ancestor));
         }
-        self.on_first_parent_line(ancestor, descendant)
+        // A worker's commit: through its parents to main's line.
+        let mut at = descendant.to_owned();
+        loop {
+            let parent = self
+                .lock()
+                .parents
+                .iter()
+                .find(|(made, _)| made.as_str() == at)
+                .map(|(_, parent)| parent.as_str().to_owned());
+            match parent {
+                Some(parent) if parent == ancestor => return Ok(true),
+                Some(parent) => at = parent,
+                None => break,
+            }
+        }
+        self.on_first_parent_line(ancestor, &at)
     }
 
     /// Clean: nothing is ever written in a worktree.
@@ -247,7 +296,7 @@ impl Repository for FakeGit {
     }
 
     fn changed_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
-        Ok(Vec::new())
+        Ok(self.lock().changed.clone())
     }
 
     fn added_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
@@ -351,6 +400,8 @@ impl Repository for FakeGit {
             "{} is a worktree already",
             path.display()
         );
+        // A directory the run's review finds there.
+        self.files.put_dir(&path);
         state.worktrees.insert(
             path,
             Worktree {
