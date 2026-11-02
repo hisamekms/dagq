@@ -280,3 +280,112 @@ fn a_layer_is_any_attribute_key_and_the_derived_ones_are_reserved() {
         Axis::GROUP
     );
 }
+
+/// The versions of the instructions split the runs as any attribute does:
+/// `--by instructions_prompt` gives each version its own n, median and p90,
+/// and a run whose row holds no version (a claim from before its versions
+/// were recorded, with attributes or as a legacy row) is `unknown`;
+/// `--compare` with the same `--by` splits each side by version.
+#[test]
+fn the_instruction_versions_split_the_runs_with_their_spread_and_unknown() {
+    let mut queue = Queue::default();
+    // (work in seconds, the prompt's version; `None`: no version recorded,
+    // `Some("")`: a legacy claim without recorded attributes).
+    let runs: [(i64, Option<&str>); 8] = [
+        (100, Some("v1")),
+        (200, Some("v1")),
+        (300, Some("v1")),
+        (400, Some("v1")),
+        (1000, Some("v2")),
+        (2000, Some("v2")),
+        (500, None),
+        (600, Some("")),
+    ];
+    let mut ids = Vec::new();
+    let mut version_of = HashMap::new();
+    for (index, (work, version)) in runs.into_iter().enumerate() {
+        let run = Run::new(
+            index as i64 + 1,
+            None,
+            MONDAY + HOUR * (index as i64 + 1),
+            work,
+        );
+        queue.run(&run);
+        ids.push(run_id(&run));
+        version_of.insert(run_id(&run), version);
+    }
+    for event in &mut queue.events {
+        if event.kind != EventKind::RunClaimed {
+            continue;
+        }
+        let version = version_of[event.run_id.as_ref().unwrap()];
+        if version == Some("") {
+            continue;
+        }
+        if let Some(version) = version {
+            event.payload["instructions_prompt"] = json!(version);
+        }
+        let attributes = claim_facts::attributes(event.payload.as_object().unwrap());
+        event.payload[claim_facts::ATTRIBUTES] = Value::Object(attributes);
+    }
+    queue.sort();
+    let now = MONDAY + DAY + HOUR;
+    queue.rows = ledger_rows(&queue, &ids, now * 1000);
+    let key: Axis = "instructions_prompt".parse().unwrap();
+    let result = queue.kpi(
+        now,
+        &KpiConfig::default(),
+        &KpiQuery {
+            last: 1,
+            at: Some(Cursor::Time(MONDAY * 1000)),
+            by: vec![key.clone()],
+            ..KpiQuery::default()
+        },
+    );
+    let monday = &result.periods[0];
+    let spread = |stratum: &str| {
+        let work = measure(monday, "phase.work", stratum);
+        (work.n, work.median, work.p90)
+    };
+    assert_eq!(
+        spread("instructions_prompt=v1"),
+        (4, Some(250.0), Some(400.0))
+    );
+    assert_eq!(
+        spread("instructions_prompt=v2"),
+        (2, Some(1500.0), Some(2000.0))
+    );
+    assert_eq!(
+        spread("instructions_prompt=unknown"),
+        (2, Some(550.0), Some(600.0))
+    );
+    assert_eq!(
+        strata_of(&monday.window.kpis["landings"], "instructions_prompt"),
+        expected(&[("v1", 4.0), ("v2", 2.0), ("unknown", 2.0)])
+    );
+    // The day before beside the day: only the day's versions have runs.
+    let spec: CompareSpec = format!(
+        "@{}..@{},@{}..@{}",
+        MONDAY - DAY,
+        MONDAY,
+        MONDAY,
+        MONDAY + DAY
+    )
+    .parse()
+    .unwrap();
+    let compared = queue.kpi(
+        now,
+        &KpiConfig::default(),
+        &KpiQuery {
+            compare: Some(spec),
+            by: vec![key],
+            ..KpiQuery::default()
+        },
+    );
+    let compare = compared.compare.unwrap();
+    let work = &compare.strata["phase.work"]["instructions_prompt=v2"];
+    assert_eq!(
+        (work.before.n, work.after.n, work.after.median),
+        (0, 2, Some(1500.0))
+    );
+}

@@ -244,14 +244,14 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 
 ## runの比較の軸
 
-claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）に持ち、記録・台帳・kpiはキーを知らずに運ぶ（ADR-t1662-1決定21〜26）。
+claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）に持ち、記録・台帳・kpiはキーを知らずに運ぶ（ADR-t1662-1）。
 
-- 記録（実装済み）: claimは`run_claimed`の他の欄を書いた後に、その欄から`domain::claim_facts::attributes`で組を作る。
+- 記録: claimは`run_claimed`の他の欄を書いた後に、その欄から`claim_facts::attributes`で組を作る。
   キーと元の欄の対応は同じmoduleの表`KEYS`だけが持ち、新しいキーはそこに足す。
-- キーは`^[a-z][a-z0-9_.]{0,63}$`、値は文字列で256 byteまで、1つのrunに64キーまで（予定の値）。
-- 予約名（派生の軸。属性のキーにしない）は`claim_facts::RESERVED`が持ち、kpiが今の`axis_value`と同じ規則で作る。
-  組を作る関数は予約名のキーを入れない。
+- キーは`^[a-z][a-z0-9_.]{0,63}$`、値は256 byte、1つのrunに64キーまで（値と数は予定）。
+- 予約名（派生の軸。属性のキーにしない）は`claim_facts::RESERVED`が持ち、kpiが派生の規則で作る。
 - 読み取りの優先: 層のキーが予約名なら派生の値、それ以外は属性の値、無ければ`unknown`。
+- [指示の版](supervisor-lifecycle/prompt.md#workerが読んだ指示の版)も属性のキーで、`kpi --by`で層になる。
 
 ## 送る口
 

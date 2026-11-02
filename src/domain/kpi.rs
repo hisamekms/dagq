@@ -166,7 +166,10 @@ fn date(days: i64) -> String {
 /// fields (its task's change, its areas, its prediction); an attribute of
 /// the same key is never read for it. Any other key is the attribute's
 /// value as the claim recorded it (`build`, `parallel`, `route`, `codex`,
-/// `effort` among them), `unknown` without one.
+/// `effort` among them), `unknown` without one: so are the versions of the
+/// instructions a worker read ([`crate::domain::instructions`]), which split
+/// the runs by version with no axis of their own, a run claimed before they
+/// were recorded `unknown`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Axis(Cow<'static, str>);
 

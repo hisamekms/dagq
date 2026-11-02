@@ -1625,7 +1625,9 @@ enum Command {
         areas: Vec<String>,
         /// Also split the runs by these layers: change, area, provider, claude, model, group, slot,
         /// load, toolchain and nature are derived; any other key (build, parallel, route, codex,
-        /// effort, ...) is the claim's attribute of that key, `unknown` for a run without it.
+        /// effort, the instruction versions instructions_prompt, instructions_plugin and
+        /// instructions_repo, ...) is the claim's attribute of that key, `unknown` for a run
+        /// without it.
         #[arg(long, value_parser = parse_kpi_layer)]
         by: Vec<String>,
         /// Add cross strata of --by axes and selected --area / --change values.

@@ -62,3 +62,17 @@ plugin の [reference/kpi.md](../../../plugins/claude-dagq/skills/dagq/reference
 - 前後比較は `--area runtime`（か `--change`）の層で読み、`all` では読まない（task の種類の混ざり方で動く）
 - `confounders`（間の他の印）を名指し、`split.separable` が `false` なら結論を出さない。`[kpi] min_samples` に満たない、または `partial` の区間は判定しない
 - 見る KPI は印の目的のもの（例: `[run.env]` の変更なら `cpu_per_landing`・`load_per_core`・`phase.work`・`land_phase.verify`）と、着地数/時・`slot_usage`
+
+## 6. 指示の版ごとに読む（「指示を変えた効果を見て」）
+
+runtime の worker の prompt の雛形・plugin・repository の指示の文書（AGENTS.md・CLAUDE.md・`docs/development/`）は、run の claim の属性の `instructions_prompt`・`instructions_plugin`・`instructions_repo`（内容の hash）で版が分かるので、印を打たずに版で層を切る。`--compare` の境は版が変わった時点にする: repository の指示の文書は、その文書を変えた task の着地（`run_integrated` の `created_at`。後の run がその commit を base にする）。prompt の雛形は着地ではなく固定バイナリが入れ替わった時点（`update_installed` の `created_at`）、plugin は Claude Code の plugin が更新された時点。迷えば、新しい値を持つ最初の run の claim の時刻。
+
+```sh
+~/.local/bin/dagq kpi --area runtime --by instructions_repo --cross                    # 版ごとの n・中央値・p90
+~/.local/bin/dagq kpi --compare <着地の時刻> --area runtime --by instructions_repo --cross   # 前の版と後の版を並べる
+~/.local/bin/dagq kpi --compare <入れ替えの時刻> --area runtime --by instructions_plugin --cross # plugin を変えたなら
+```
+
+- 層の値が `unknown` の run は版を記録する前の claim か hash を求められなかった run なので比べない
+- 読むのは `cross:area=runtime|instructions_repo=<hash>`（`--change` なら `cross:change=<値>|…`）の層。`--area`・`--change` は自分の層の表示を選ぶだけで、`instructions_repo=<hash>` の層は他の area・change の run も混ぜるので、`--cross` を付けずに版の差として読まない。5. と同じく task の混ざり方で動く値を指示の効果と取り違えないため
+- 窓の中で別の版（他の 2 つのキーと `build=`）も変わっていれば `confounders` と並べて名指す

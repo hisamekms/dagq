@@ -953,6 +953,79 @@ fn the_claims_attributes_are_carried_with_keys_unknown() {
     );
 }
 
+/// The versions of the instructions a worker read reach the run's row as
+/// the claim wrote them: the claim settles its provider's hashes into
+/// `run_claimed` and its attributes take them by their keys, which the row
+/// carries unchanged among the other attributes. A claim that recorded no
+/// versions (a frozen legacy row) has no such key.
+#[test]
+fn the_run_row_carries_the_instruction_versions_the_claim_recorded() {
+    use crate::domain::instructions::{self, InstructionVersions};
+    use crate::domain::measure::{ClaimAttributes, HostVersions};
+    use std::collections::BTreeMap;
+
+    let versions = InstructionVersions {
+        instructions_prompt: "1a2b3c4d5e6f7a8b".to_owned(),
+        instructions_plugin: instructions::NO_PLUGIN.to_owned(),
+        instructions_repo: "0f0e0d0c0b0a0908".to_owned(),
+    };
+    let claim = ClaimAttributes {
+        dagq_version: "1.2".to_owned(),
+        host: HostVersions::default(),
+        parallel: 3,
+        slots: 2,
+        load_avg: None,
+        spacing: None,
+        light_room: None,
+        instructions: BTreeMap::from([
+            ("claude".to_owned(), versions.clone()),
+            ("codex".to_owned(), InstructionVersions::unknown()),
+        ]),
+        candidates: None,
+        by_task: BTreeMap::new(),
+    };
+    let Value::Object(mut payload) = serde_json::to_value(&claim).unwrap() else {
+        unreachable!()
+    };
+    instructions::settle(&mut payload, "claude");
+    payload.insert("provider".to_owned(), json!("claude"));
+    let attributes = claim_facts::attributes(&payload);
+    payload.insert(
+        claim_facts::ATTRIBUTES.to_owned(),
+        Value::Object(attributes.clone()),
+    );
+    let mut log = Log::default();
+    log.at(0, "run_claimed", Value::Object(payload))
+        .first(0, Phase::Provisioning);
+    let row = run_row(A, &log.of(A), &[], ms(10), "built");
+    let values = read(&row);
+    assert_eq!(values.attributes, attributes);
+    let carried = |key: &str| values.attributes.get(key).cloned();
+    assert_eq!(
+        (
+            carried("instructions_prompt"),
+            carried("instructions_plugin"),
+            carried("instructions_repo"),
+        ),
+        (
+            Some(json!(versions.instructions_prompt)),
+            Some(json!(instructions::NO_PLUGIN)),
+            Some(json!(versions.instructions_repo)),
+        )
+    );
+
+    let legacy = run_row(A, &legacy_events().of(A), &[], ms(5000), "built");
+    assert!(legacy.is_legacy());
+    assert!(
+        legacy
+            .attributes
+            .keys()
+            .all(|key| !key.starts_with("instructions")),
+        "{:?}",
+        legacy.attributes
+    );
+}
+
 /// A legacy run's attributes are the keys `run_claimed` would have held,
 /// from its measures; one whose claim recorded them keeps them as they are.
 #[test]
