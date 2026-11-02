@@ -8,6 +8,7 @@ use crate::domain::ledger::{
 };
 use crate::domain::pre_claim::rows::Since;
 use crate::domain::run_phase::{Blocker, Holds};
+use crate::infrastructure::sql_dialect::{JsonType, json_field_spaced};
 
 const BLOCKERS: [(Blocker, &str); 7] = [
     (Blocker::Queue, "blocker_queue_ms"),
@@ -239,10 +240,11 @@ fn wait_rows_sql(after: bool) -> String {
           WHERE kind=?1 AND {from}
             AND ((subject_kind IN ('slots_full', 'claim_hold', 'claim_deferral', 'landing_hold')
                   AND (final=0 OR ended_at IS NULL OR ended_at >= ?2 OR outcome=?4
-                       OR json_extract(inputs_through, '$.events') >= ?3))
+                       OR {events} >= ?3))
                  OR (subject_kind='live_alert_stream'
                      AND (outcome IS NULL OR outcome=?4)))
-          ORDER BY key LIMIT ?6"
+          ORDER BY key LIMIT ?6",
+        events = json_field_spaced("inputs_through", "$.events", JsonType::Integer),
     )
 }
 
@@ -259,8 +261,9 @@ fn stops_after_sql(after: bool) -> String {
     format!(
         "SELECT r.key, j.key, j.value FROM ledger_rows r, json_each(r.records) j
           WHERE r.kind=?1 AND {from}
-            AND json_extract(j.value, '$.kind')=?2
-          ORDER BY r.key, j.key LIMIT ?5"
+            AND {kind}=?2
+          ORDER BY r.key, j.key LIMIT ?5",
+        kind = json_field_spaced("j.value", "$.kind", JsonType::Text),
     )
 }
 
@@ -292,11 +295,16 @@ impl SqliteQueue {
 }
 
 /// The last event naming a supervisor up to an id, by the index
-/// `events_by_supervisor` (its expression written as the index writes it).
-const LAST_EVENT_NAMING_SUPERVISOR: &str = "SELECT * FROM run_events
-  WHERE json_extract(payload, '$.supervisor') = ?1 AND id <= ?2
+/// `events_by_supervisor` (its expression the one the index is on).
+fn last_event_naming_supervisor_sql() -> String {
+    format!(
+        "SELECT * FROM run_events
+  WHERE {} = ?1 AND id <= ?2
     AND json_type(payload, '$.supervisor') = 'text'
-  ORDER BY id DESC LIMIT 1";
+  ORDER BY id DESC LIMIT 1",
+        json_field_spaced("payload", "$.supervisor", JsonType::Text)
+    )
+}
 
 impl LedgerStore for SqliteQueue {
     fn ledger_run_events(
@@ -318,7 +326,7 @@ impl LedgerStore for SqliteQueue {
         Ok(self
             .conn
             .query_row(
-                LAST_EVENT_NAMING_SUPERVISOR,
+                &last_event_naming_supervisor_sql(),
                 params![supervisor, upto.as_i64()],
                 event_row,
             )
@@ -446,12 +454,13 @@ impl LedgerStore for SqliteQueue {
     /// The ids of the records come from SQLite's JSON functions over the
     /// stored array: no record is parsed here.
     fn ledger_heads(&self, kind: LedgerKind) -> Result<Vec<LedgerHead>> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.conn.prepare(&format!(
             "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v,
-                    (SELECT COALESCE(json_group_array(json_extract(j.value, '$.id')), '[]')
+                    (SELECT COALESCE(json_group_array({}), '[]')
                        FROM json_each(r.records) j) AS ids
                FROM ledger_rows r WHERE r.kind=?1 ORDER BY r.key",
-        )?;
+            json_field_spaced("j.value", "$.id", JsonType::Integer),
+        ))?;
         let rows = statement.query_map([kind.as_str()], |r| {
             let key: String = r.get("key")?;
             let inputs_from: i64 = r.get("inputs_from")?;
@@ -479,14 +488,15 @@ impl LedgerStore for SqliteQueue {
     /// Its columns and the ids of its records (SQLite's JSON functions over
     /// the stored array): no record is parsed here.
     fn ledger_queue_heads(&self) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.conn.prepare(&format!(
             "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v,
-                    (SELECT COALESCE(json_group_array(json_extract(j.value, '$.id')), '[]')
+                    (SELECT COALESCE(json_group_array({}), '[]')
                        FROM json_each(r.records) j) AS ids,
                     r.task_id, r.subject_kind, r.subject_id, r.started_at, r.ended_at,
                     r.outcome, r.detail
                FROM ledger_rows r WHERE r.kind=?1 ORDER BY r.key",
-        )?;
+            json_field_spaced("j.value", "$.id", JsonType::Integer),
+        ))?;
         let kind = LedgerKind::Queue;
         let rows = statement.query_map([kind.as_str()], |r| {
             let key: String = r.get("key")?;
@@ -531,12 +541,13 @@ impl LedgerStore for SqliteQueue {
     /// Only the anchors of each session row are parsed: SQLite picks the
     /// first record and the `session_closed` ones out of the stored array.
     fn ledger_session_anchors(&self) -> Result<Vec<(String, crate::domain::RunEvent)>> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.conn.prepare(&format!(
             "SELECT r.key, j.value FROM ledger_rows r, json_each(r.records) j
               WHERE r.kind=?1
-                AND (j.key = 0 OR json_extract(j.value, '$.kind') = 'session_closed')
+                AND (j.key = 0 OR {} = 'session_closed')
               ORDER BY r.key, j.key",
-        )?;
+            json_field_spaced("j.value", "$.kind", JsonType::Text),
+        ))?;
         let rows = statement.query_map([LedgerKind::Session.as_str()], |r| {
             let key: String = r.get(0)?;
             let event: String = r.get(1)?;
@@ -570,12 +581,16 @@ impl LedgerStore for SqliteQueue {
     /// with the cut to `at`: no row is read.
     fn ledger_tasks_open_since_at(&self, at: EventId) -> Result<Since> {
         let (ms, id): (Option<i64>, Option<i64>) = self.conn.query_row(
-            "SELECT MIN(COALESCE(started_at, -9223372036854775808)), MIN(inputs_from)
+            &format!(
+                "SELECT MIN(COALESCE(started_at, -9223372036854775808)), MIN(inputs_from)
                FROM ledger_rows
               WHERE kind=?1 AND inputs_from <= ?2
                 AND (final=0
-                     OR MAX(json_extract(inputs_through, '$.events'),
-                            COALESCE(json_extract(inputs_through, '$.supervisor'), 0)) > ?2)",
+                     OR MAX({},
+                            COALESCE({}, 0)) > ?2)",
+                json_field_spaced("inputs_through", "$.events", JsonType::Integer),
+                json_field_spaced("inputs_through", "$.supervisor", JsonType::Integer),
+            ),
             params![LedgerKind::Task.as_str(), at.as_i64()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -613,7 +628,7 @@ impl LedgerStore for SqliteQueue {
         from: Since,
         until_ms: i64,
     ) -> Result<Vec<LedgerRow>> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.conn.prepare(&format!(
             "SELECT kind, key, task_id, ledger_v, built_at, inputs_through, final,
                     legacy_values, started_at, ended_at, outcome, totals, intervals,
                     attributes, after_claim, detail, inputs_from, '[]' AS records,
@@ -622,11 +637,13 @@ impl LedgerStore for SqliteQueue {
               WHERE kind=?1
                 AND subject_kind IN ('slots_full', 'claim_hold', 'claim_deferral')
                 AND final=1 AND ended_at < ?2 AND (outcome IS NULL OR outcome<>?4)
-                AND json_extract(inputs_through, '$.events') < ?3
+                AND {} < ?3
                 AND started_at <= ?7
-                AND (ended_at >= ?5 OR json_extract(inputs_through, '$.events') >= ?6)
+                AND (ended_at >= ?5 OR {} >= ?6)
               ORDER BY key",
-        )?;
+            json_field_spaced("inputs_through", "$.events", JsonType::Integer),
+            json_field_spaced("inputs_through", "$.events", JsonType::Integer),
+        ))?;
         let rows = statement.query_map(
             params![
                 LedgerKind::Queue.as_str(),
@@ -645,11 +662,13 @@ impl LedgerStore for SqliteQueue {
     /// SQLite picks the stops out of the stored arrays: no other record is
     /// parsed.
     fn ledger_supervisor_stops(&self) -> Result<Vec<crate::domain::RunEvent>> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.conn.prepare(&format!(
             "SELECT j.value FROM ledger_rows r, json_each(r.records) j
-              WHERE r.kind=?1 AND json_extract(j.value, '$.kind')=?2
-              ORDER BY json_extract(j.value, '$.id')",
-        )?;
+              WHERE r.kind=?1 AND {}=?2
+              ORDER BY {}",
+            json_field_spaced("j.value", "$.kind", JsonType::Text),
+            json_field_spaced("j.value", "$.id", JsonType::Integer),
+        ))?;
         let rows = statement.query_map(
             params![
                 LedgerKind::Queue.as_str(),
@@ -1183,7 +1202,8 @@ mod tests {
         let mut statement = queue
             .conn
             .prepare(&format!(
-                "EXPLAIN QUERY PLAN {LAST_EVENT_NAMING_SUPERVISOR}"
+                "EXPLAIN QUERY PLAN {}",
+                last_event_naming_supervisor_sql()
             ))
             .unwrap();
         let plan = statement

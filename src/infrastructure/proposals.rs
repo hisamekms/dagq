@@ -7,6 +7,7 @@
 use crate::domain::EventKind;
 use crate::domain::event_kind;
 use crate::domain::sessions::{PLANNER, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED};
+use crate::infrastructure::sql_dialect::{TimeForm, time_value_spaced};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
@@ -336,10 +337,11 @@ pub(super) fn approve(conn: &Connection, id: ProposalId, now: &str) -> Result<Pr
             op.id,
             op.proposal_id
         );
-        let secs: i64 =
-            conn.query_row("SELECT CAST(strftime('%s', ?1) AS INTEGER)", [now], |r| {
-                r.get(0)
-            })?;
+        let secs: i64 = conn.query_row(
+            &format!("SELECT {}", time_value_spaced("?1", TimeForm::EpochSeconds)),
+            [now],
+            |r| r.get(0),
+        )?;
         super::replans::approve_replacement(conn, &op, id, &accepted, secs)?;
         return read(conn, id);
     }

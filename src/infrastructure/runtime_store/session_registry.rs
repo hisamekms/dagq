@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::domain::EventKind;
+use crate::infrastructure::sql_dialect::{JsonType, json_field};
 
 impl SqliteQueue {
     /// Record a workspace for `role`, replacing any earlier one, as an
@@ -62,9 +63,13 @@ impl SqliteQueue {
     pub fn planner_silent(&self, id: PlannerId, payload: Value) -> Result<bool> {
         let tx = self.write_tx("planner_silent", TransactionBehavior::Immediate)?;
         let seen: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
-                 AND json_extract(payload,'$.subject')='planner'
-                 AND json_extract(payload,'$.planner_id')=?2)",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
+                 AND {}='planner'
+                 AND {}=?2)",
+                json_field("payload", "$.subject", JsonType::Text),
+                json_field("payload", "$.planner_id", JsonType::Integer),
+            ),
             params![event_kind::PLANNER_UNRESPONSIVE, id],
             |r| r.get(0),
         )?;
@@ -106,15 +111,17 @@ impl SqliteQueue {
     pub fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>> {
         let events: Vec<RunEvent> = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT e.* FROM run_events e JOIN planners p
-                   ON p.id = json_extract(e.payload,'$.planner_id')
-                 WHERE e.kind=?1 AND json_extract(e.payload,'$.subject')='planner'
+                   ON p.id = {}
+                 WHERE e.kind=?1 AND {}='planner'
                    AND p.closed_at IS NULL
                    AND NOT EXISTS (SELECT 1 FROM proposals r WHERE r.status='revising'
                                    AND r.revise_planner_id = p.id)
                  ORDER BY p.id",
-            )?
+                json_field("e.payload", "$.planner_id", JsonType::Integer),
+                json_field("e.payload", "$.subject", JsonType::Text),
+            ))?
             .query_map([event_kind::PLANNER_UNRESPONSIVE], event_row)?
             .collect::<rusqlite::Result<_>>()?;
         events

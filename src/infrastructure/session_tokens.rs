@@ -10,6 +10,7 @@
 //! and subtracts recorded numbers ([`write`]). A hook's close reads no
 //! transcript: its cut at the close is made here afterwards.
 
+use crate::infrastructure::sql_dialect::{JsonType, json_field};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
@@ -211,7 +212,8 @@ fn cut_at(payload: &Value) -> Option<i64> {
 fn recorded_cuts_sql() -> String {
     format!(
         "SELECT payload FROM run_events WHERE kind='{SESSION_TOKENS}'
-           AND json_extract(payload,'$.opened_event_id')=?1 ORDER BY id"
+           AND {opened_event_id}=?1 ORDER BY id",
+        opened_event_id = json_field("payload", "$.opened_event_id", JsonType::Integer),
     )
 }
 
@@ -242,17 +244,23 @@ fn closed_without_final_cut_sql() -> String {
     let kinds = TOKEN_CUT_KINDS.map(|kind| format!("'{kind}'")).join(",");
     format!(
         "SELECT o.id, o.payload, o.created_at, c.created_at AS closed_at,
-                json_extract(c.payload,'$.reason') AS reason,
-                json_extract(c.payload,'$.active_unavailable') AS unavailable
+                {c_reason} AS reason,
+                {c_active_unavailable} AS unavailable
              FROM run_events c JOIN run_events o
-               ON o.id=json_extract(c.payload,'$.opened_event_id')
+               ON o.id={c_opened_event_id}
              WHERE c.kind='{SESSION_CLOSED}' AND c.run_id IS NULL AND c.created_at>=?1
                AND o.kind='{SESSION_OPENED}'
-               AND json_extract(o.payload,'$.kind') IN ({kinds})
+               AND {o_kind} IN ({kinds})
                AND NOT EXISTS (SELECT 1 FROM run_events t WHERE t.kind='{SESSION_TOKENS}'
-                 AND json_extract(t.payload,'$.opened_event_id')=+o.id
-                 AND json_extract(t.payload,'$.final')=1)
-             ORDER BY o.id"
+                 AND {t_opened_event_id}=+o.id
+                 AND {t_final}=1)
+             ORDER BY o.id",
+        c_reason = json_field("c.payload", "$.reason", JsonType::Text),
+        c_active_unavailable = json_field("c.payload", "$.active_unavailable", JsonType::Text),
+        c_opened_event_id = json_field("c.payload", "$.opened_event_id", JsonType::Integer),
+        o_kind = json_field("o.payload", "$.kind", JsonType::Text),
+        t_opened_event_id = json_field("t.payload", "$.opened_event_id", JsonType::Integer),
+        t_final = json_field("t.payload", "$.final", JsonType::Boolean),
     )
 }
 
@@ -505,10 +513,11 @@ mod tests {
     /// the hook's closes writes, in order.
     fn final_turns_tokens(conn: &Connection) -> Vec<(i64, i64)> {
         crate::infrastructure::sessions::record_open_turns(conn, WRITE_HOLD_WARN).unwrap();
-        conn.prepare(
+        conn.prepare(&format!(
             "SELECT * FROM run_events WHERE kind='session_turns'
-               AND json_extract(payload,'$.final')=1 ORDER BY id",
-        )
+               AND {}=1 ORDER BY id",
+            json_field("payload", "$.final", JsonType::Boolean),
+        ))
         .unwrap()
         .query_map([], event_row)
         .unwrap()

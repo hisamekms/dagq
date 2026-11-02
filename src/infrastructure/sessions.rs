@@ -16,6 +16,9 @@
 
 use crate::domain::RecordedKind;
 use crate::domain::event_kind::{self, EventKind};
+use crate::infrastructure::sql_dialect::{
+    JsonType, TimeForm, json_field, json_field_at, time_value,
+};
 use std::cell::RefCell;
 
 use anyhow::Result;
@@ -469,8 +472,12 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
         }
         Closing::PlanReviews(plan_review_id, inferred) => open_spans(
             conn,
-            "o.run_id IS NULL AND json_extract(o.payload,'$.kind')=?1
-             AND (?2 IS NULL OR json_extract(o.payload,'$.plan_review_id')=?2)",
+            &format!(
+                "o.run_id IS NULL AND {}=?1
+             AND (?2 IS NULL OR {}=?2)",
+                json_field("o.payload", "$.kind", JsonType::Text),
+                json_field("o.payload", "$.plan_review_id", JsonType::Integer),
+            ),
             "c.run_id IS NULL",
             params![PLAN_REVIEW, plan_review_id],
         )?
@@ -651,7 +658,10 @@ pub(super) fn follow(
             (
                 open_spans(
                     conn,
-                    "o.task_id=?1 AND o.run_id IS NULL AND json_extract(o.payload,'$.proposal_id')=?2",
+                    &format!(
+                        "o.task_id=?1 AND o.run_id IS NULL AND {}=?2",
+                        json_field("o.payload", "$.proposal_id", JsonType::Integer),
+                    ),
                     "c.task_id=?1 AND c.run_id IS NULL",
                     params![task_id, proposal],
                 )?,
@@ -716,9 +726,12 @@ fn open_planner_spans(conn: &Connection, planner: i64) -> Result<Vec<OpenSpan>> 
     open_spans(
         conn,
         &format!(
-            "o.run_id IS NULL AND json_extract(o.payload,'$.kind')='{RUNTIME_PLANNER}'
-             AND json_extract(o.payload,'$.route')='{HEADLESS_ROUTE}'
-             AND json_extract(o.payload,'$.planner_id')=?1"
+            "o.run_id IS NULL AND {o_kind}='{RUNTIME_PLANNER}'
+             AND {o_route}='{HEADLESS_ROUTE}'
+             AND {o_planner_id}=?1",
+            o_kind = json_field("o.payload", "$.kind", JsonType::Text),
+            o_route = json_field("o.payload", "$.route", JsonType::Text),
+            o_planner_id = json_field("o.payload", "$.planner_id", JsonType::Integer),
         ),
         "c.run_id IS NULL",
         params![planner],
@@ -762,8 +775,12 @@ pub(super) fn follow_goal(
     };
     let open = open_spans(
         conn,
-        "o.run_id IS NULL AND json_extract(o.payload,'$.kind')=?1
-         AND json_extract(o.payload,'$.goal_id')=?2",
+        &format!(
+            "o.run_id IS NULL AND {}=?1
+         AND {}=?2",
+            json_field("o.payload", "$.kind", JsonType::Text),
+            json_field("o.payload", "$.goal_id", JsonType::Integer),
+        ),
         "c.run_id IS NULL",
         params![GOAL_REVIEW, goal_id],
     )?;
@@ -912,11 +929,14 @@ fn closed_value(
 fn closed_value_sql() -> String {
     format!(
         "SELECT c.payload, o.payload FROM run_events c
-           JOIN run_events o ON o.id=json_extract(c.payload,'$.opened_event_id')
+           JOIN run_events o ON o.id={c_opened_event_id}
          WHERE c.run_id=?1 AND c.kind='{SESSION_CLOSED}' AND o.id>?3
-           AND json_extract(c.payload,'$.kind')=?2
-           AND json_extract(c.payload,?4) IS NOT NULL
-         ORDER BY c.id DESC LIMIT 1"
+           AND {c_kind}=?2
+           AND {c_at} IS NOT NULL
+         ORDER BY c.id DESC LIMIT 1",
+        c_at = json_field_at("c.payload", "?4", JsonType::Any),
+        c_opened_event_id = json_field("c.payload", "$.opened_event_id", JsonType::Integer),
+        c_kind = json_field("c.payload", "$.kind", JsonType::Text),
     )
 }
 
@@ -931,11 +951,11 @@ fn exited_work(work: &Value, kind: &str, attempt: &Value) -> Value {
 
 /// The time now, in the form of `created_at`.
 pub(super) fn now(conn: &Connection) -> Result<String> {
-    Ok(
-        conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |r| {
-            r.get(0)
-        })?,
-    )
+    Ok(conn.query_row(
+        &format!("SELECT {}", time_value("'now'", TimeForm::Text)),
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 /// Write the `session_closed` of `span` at `now`, with the turns of its
@@ -1402,8 +1422,9 @@ fn run_turns_sql() -> String {
 fn planner_turns_sql() -> String {
     format!(
         "SELECT * FROM run_events WHERE +run_id IS NULL AND id>?2 AND {}
-           AND json_extract(payload,'$.planner_id')=?1 ORDER BY id",
-        turn_kinds()
+           AND {planner_id}=?1 ORDER BY id",
+        turn_kinds(),
+        planner_id = json_field("payload", "$.planner_id", JsonType::Integer),
     )
 }
 
@@ -1605,7 +1626,8 @@ fn times(conn: &Connection, span: &OpenSpan, now: &str) -> Result<Option<(i64, i
 fn recorded_turns_sql() -> String {
     format!(
         "SELECT payload FROM run_events WHERE kind='{SESSION_TURNS}'
-           AND json_extract(payload,'$.opened_event_id')=?1 ORDER BY id"
+           AND {opened_event_id}=?1 ORDER BY id",
+        opened_event_id = json_field("payload", "$.opened_event_id", JsonType::Integer),
     )
 }
 
@@ -1614,7 +1636,8 @@ fn recorded_turns_sql() -> String {
 fn span_closed_sql() -> String {
     format!(
         "SELECT EXISTS (SELECT 1 FROM run_events WHERE kind='{SESSION_CLOSED}'
-           AND json_extract(payload,'$.opened_event_id')=?1)"
+           AND {opened_event_id}=?1)",
+        opened_event_id = json_field("payload", "$.opened_event_id", JsonType::Integer),
     )
 }
 
@@ -1678,15 +1701,20 @@ fn pending_hook_intakes_sql() -> String {
     format!(
         "SELECT o.id, o.payload, o.created_at, c.created_at AS closed_at
              FROM run_events c JOIN run_events o
-               ON o.id=json_extract(c.payload,'$.opened_event_id')
+               ON o.id={c_opened_event_id}
              WHERE c.kind='{SESSION_CLOSED}' AND c.run_id IS NULL
-               AND json_extract(c.payload,'$.active_unavailable')='{HOOK_INTAKE_PENDING}'
+               AND {c_active_unavailable}='{HOOK_INTAKE_PENDING}'
                AND o.kind='{SESSION_OPENED}'
-               AND json_extract(o.payload,'$.kind') IN ({kinds})
+               AND {o_kind} IN ({kinds})
                AND NOT EXISTS (SELECT 1 FROM run_events t WHERE t.kind='{SESSION_TURNS}'
-                 AND json_extract(t.payload,'$.opened_event_id')=+o.id
-                 AND json_extract(t.payload,'$.final')=1)
-             ORDER BY o.id"
+                 AND {t_opened_event_id}=+o.id
+                 AND {t_final}=1)
+             ORDER BY o.id",
+        c_opened_event_id = json_field("c.payload", "$.opened_event_id", JsonType::Integer),
+        c_active_unavailable = json_field("c.payload", "$.active_unavailable", JsonType::Text),
+        o_kind = json_field("o.payload", "$.kind", JsonType::Text),
+        t_opened_event_id = json_field("t.payload", "$.opened_event_id", JsonType::Integer),
+        t_final = json_field("t.payload", "$.final", JsonType::Boolean),
     )
 }
 
@@ -1695,8 +1723,10 @@ fn pending_hook_intakes_sql() -> String {
 fn hook_intake_finished_sql() -> String {
     format!(
         "SELECT EXISTS (SELECT 1 FROM run_events WHERE kind='{SESSION_TURNS}'
-           AND json_extract(payload,'$.opened_event_id')=?1
-           AND json_extract(payload,'$.final')=1)"
+           AND {opened_event_id}=?1
+           AND {j_final}=1)",
+        opened_event_id = json_field("payload", "$.opened_event_id", JsonType::Integer),
+        j_final = json_field("payload", "$.final", JsonType::Boolean),
     )
 }
 
@@ -1875,7 +1905,11 @@ pub(super) fn close_plan_review(
 ) -> Result<()> {
     let open = open_spans(
         conn,
-        "o.run_id IS NULL AND json_extract(o.payload,'$.kind')=?1 AND json_extract(o.payload,'$.plan_review_id')=?2",
+        &format!(
+            "o.run_id IS NULL AND {}=?1 AND {}=?2",
+            json_field("o.payload", "$.kind", JsonType::Text),
+            json_field("o.payload", "$.plan_review_id", JsonType::Integer),
+        ),
         "c.run_id IS NULL",
         params![PLAN_REVIEW, plan_review_id],
     )?;
@@ -1902,8 +1936,12 @@ fn job_close_reason(inferred: bool) -> &'static str {
 fn open_goal_reviews(conn: &Connection, goal_review_id: Option<i64>) -> Result<Vec<OpenSpan>> {
     open_spans(
         conn,
-        "o.run_id IS NULL AND json_extract(o.payload,'$.kind')=?1
-         AND (?2 IS NULL OR json_extract(o.payload,'$.goal_review_id')=?2)",
+        &format!(
+            "o.run_id IS NULL AND {}=?1
+         AND (?2 IS NULL OR {}=?2)",
+            json_field("o.payload", "$.kind", JsonType::Text),
+            json_field("o.payload", "$.goal_review_id", JsonType::Integer),
+        ),
         "c.run_id IS NULL",
         params![GOAL_REVIEW, goal_review_id],
     )
@@ -1940,7 +1978,10 @@ pub(super) fn close_review(
 ) -> Result<usize> {
     let open = open_spans(
         conn,
-        "o.run_id=?1 AND json_extract(o.payload,'$.kind')=?2",
+        &format!(
+            "o.run_id=?1 AND {}=?2",
+            json_field("o.payload", "$.kind", JsonType::Text),
+        ),
         "c.run_id=?1",
         params![run_id, REVIEW],
     )?;
@@ -1974,8 +2015,10 @@ pub(super) fn open_hook_spans(conn: &Connection) -> Result<Vec<OpenSpan>> {
     open_spans(
         conn,
         &format!(
-            "o.run_id IS NULL AND json_extract(o.payload,'$.kind') IN ({kinds})
-             AND json_extract(o.payload,'$.route') IS NOT '{HEADLESS_ROUTE}'"
+            "o.run_id IS NULL AND {o_kind} IN ({kinds})
+             AND {o_route} IS NOT '{HEADLESS_ROUTE}'",
+            o_kind = json_field("o.payload", "$.kind", JsonType::Text),
+            o_route = json_field("o.payload", "$.route", JsonType::Text),
         ),
         "c.run_id IS NULL",
         params![],
@@ -2086,8 +2129,11 @@ pub(super) fn record_hook(
 /// Whether the guardrail's hook of `hook`'s session was recorded running.
 fn guardrail_reached(conn: &Connection, hook: &SessionHook) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
-           AND json_extract(payload,'$.session_id')=?2)",
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
+           AND {}=?2)",
+            json_field("payload", "$.session_id", JsonType::Text),
+        ),
         params![EventKind::InboxGuardrailReached.as_str(), hook.session_id],
         |r| r.get(0),
     )?)
@@ -2193,7 +2239,10 @@ fn queue_open_spans(conn: &Connection, kind: EventKind) -> Result<Option<Vec<Ope
     };
     open_spans(
         conn,
-        "o.task_id IS NULL AND o.goal_id IS NULL AND json_extract(o.payload,'$.kind')=?1",
+        &format!(
+            "o.task_id IS NULL AND o.goal_id IS NULL AND {}=?1",
+            json_field("o.payload", "$.kind", JsonType::Text),
+        ),
         "c.task_id IS NULL AND c.goal_id IS NULL",
         params![span_kind],
     )
@@ -2230,8 +2279,9 @@ fn open_spans_sql(opened: &str, closed: &str) -> String {
          WHERE o.kind='{SESSION_OPENED}' AND {opened}
            AND NOT EXISTS (SELECT 1 FROM run_events c
                            WHERE c.kind='{SESSION_CLOSED}' AND {closed}
-                             AND json_extract(c.payload,'$.opened_event_id')=+o.id)
-         ORDER BY o.id"
+                             AND {c_opened_event_id}=+o.id)
+         ORDER BY o.id",
+        c_opened_event_id = json_field("c.payload", "$.opened_event_id", JsonType::Integer),
     )
 }
 
@@ -2701,7 +2751,14 @@ pub(super) mod tests {
     /// time in unix milliseconds.
     fn retime(conn: &Connection, after: i64, secs: i64) -> i64 {
         conn.execute(
-            "UPDATE run_events SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now',?1) WHERE id>?2",
+            &format!(
+                "UPDATE run_events SET created_at={} WHERE id>?2",
+                crate::infrastructure::sql_dialect::time_value_shifted(
+                    "'now'",
+                    "?1",
+                    TimeForm::Text
+                )
+            ),
             params![format!("-{secs} seconds"), after],
         )
         .unwrap();
@@ -5361,9 +5418,14 @@ pub(super) mod tests {
                 if format == "%Y-%m-%dT%H:%M:%fZ" && at == "now" {
                     return Ok(Some(fixed.clone()));
                 }
-                other.query_row("SELECT strftime(?1, ?2)", [format, at], |r| {
-                    r.get::<_, Option<String>>(0)
-                })
+                other.query_row(
+                    &format!(
+                        "SELECT {}",
+                        crate::infrastructure::sql_dialect::formatted_time("?1", "?2")
+                    ),
+                    [format, at],
+                    |r| r.get::<_, Option<String>>(0),
+                )
             },
         )
         .unwrap();

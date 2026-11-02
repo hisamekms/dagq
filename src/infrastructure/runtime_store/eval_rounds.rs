@@ -10,12 +10,23 @@ use super::*;
 use crate::application::EvalRounds;
 use crate::domain::agent_eval::production::{self, Take};
 use crate::domain::agent_eval::round::owner_gone;
+use crate::infrastructure::sql_dialect::{JsonType, json_field};
 
 /// The queue's events of the eval of round `?1` of the kinds `?2` (a JSON
 /// array).
-const OF_ROUND: &str = "kind IN (SELECT value FROM json_each(?2))
+fn of_round() -> String {
+    format!(
+        "kind IN (SELECT value FROM json_each(?2))
      AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-     AND json_extract(payload,'$.eval_id') = ?1";
+     AND {} = ?1",
+        json_field("payload", "$.eval_id", JsonType::Integer)
+    )
+}
+
+/// The supervisor's token a start, a take-up or a take names.
+fn supervisor() -> String {
+    json_field("payload", "$.supervisor", JsonType::Text)
+}
 
 fn kinds(kinds: &[EventKind]) -> Result<String> {
     Ok(serde_json::to_string(
@@ -25,7 +36,10 @@ fn kinds(kinds: &[EventKind]) -> Result<String> {
 
 fn any_of_round(tx: &Connection, eval_id: i64, of: &[EventKind]) -> Result<bool> {
     Ok(tx.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM run_events WHERE {OF_ROUND})"),
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM run_events WHERE {})",
+            of_round()
+        ),
         params![eval_id, kinds(of)?],
         |r| r.get(0),
     )?)
@@ -59,11 +73,15 @@ impl SqliteQueue {
         }
         if kind == EventKind::AgentEvalStarted {
             let another_runs: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM run_events s
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM run_events s
                  WHERE s.kind = ?1 AND s.run_id IS NULL AND s.task_id IS NULL AND s.goal_id IS NULL
                  AND NOT EXISTS(SELECT 1 FROM run_events f
                      WHERE f.kind = ?2 AND f.run_id IS NULL
-                     AND json_extract(f.payload,'$.eval_id') = json_extract(s.payload,'$.eval_id')))",
+                     AND {} = {}))",
+                    json_field("f.payload", "$.eval_id", JsonType::Integer),
+                    json_field("s.payload", "$.eval_id", JsonType::Integer),
+                ),
                 params![
                     EventKind::AgentEvalStarted.as_str(),
                     EventKind::AgentEvalFinished.as_str()
@@ -100,8 +118,10 @@ impl SqliteQueue {
         let owner: Option<Option<String>> = tx
             .query_row(
                 &format!(
-                    "SELECT json_extract(payload,'$.supervisor') FROM run_events
-                     WHERE {OF_ROUND} ORDER BY id DESC LIMIT 1"
+                    "SELECT {} FROM run_events
+                     WHERE {} ORDER BY id DESC LIMIT 1",
+                    supervisor(),
+                    of_round()
                 ),
                 params![
                     eval_id,
@@ -137,9 +157,14 @@ impl SqliteQueue {
 }
 
 /// The queue's events of production set `?1` of the kinds `?2`.
-const OF_SET: &str = "kind IN (SELECT value FROM json_each(?2))
+fn of_set() -> String {
+    format!(
+        "kind IN (SELECT value FROM json_each(?2))
      AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-     AND json_extract(payload,'$.set_id') = ?1";
+     AND {} = ?1",
+        json_field("payload", "$.set_id", JsonType::Integer)
+    )
+}
 
 impl SqliteQueue {
     /// [`EvalRounds::take_case_set`].
@@ -156,7 +181,7 @@ impl SqliteQueue {
         let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("take_case_set", TransactionBehavior::Immediate)?;
         let settled: bool = tx.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM run_events WHERE {OF_SET})"),
+            &format!("SELECT EXISTS(SELECT 1 FROM run_events WHERE {})", of_set()),
             params![
                 set_id,
                 kinds(&[EventKind::AgentCasesBuilt, EventKind::AgentCasesRefused])?
@@ -166,8 +191,10 @@ impl SqliteQueue {
         let owner: Option<Option<String>> = tx
             .query_row(
                 &format!(
-                    "SELECT json_extract(payload,'$.supervisor') FROM run_events
-                     WHERE {OF_SET} ORDER BY id DESC LIMIT 1"
+                    "SELECT {} FROM run_events
+                     WHERE {} ORDER BY id DESC LIMIT 1",
+                    supervisor(),
+                    of_set()
                 ),
                 params![set_id, kinds(&[kind])?],
                 |r| r.get(0),

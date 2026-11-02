@@ -3,15 +3,18 @@
 //! ([`crate::application::health::ReplanSource`]).
 
 use super::*;
+use crate::infrastructure::sql_dialect::{JsonType, json_field};
 
 impl SqliteQueue {
     /// The reports recorded as written: (period, label) of every
     /// `report_written` (ADR-0051 decision 20).
     pub fn reports_written(&self) -> Result<std::collections::HashSet<(String, String)>> {
-        let mut statement = self.conn.prepare(
-            "SELECT json_extract(payload,'$.period'), json_extract(payload,'$.label')
+        let period = json_field("payload", "$.period", JsonType::Text);
+        let label = json_field("payload", "$.label", JsonType::Text);
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {period}, {label}
              FROM run_events WHERE kind=?1",
-        )?;
+        ))?;
         let rows = statement.query_map([REPORT_WRITTEN], |r| {
             Ok((
                 r.get::<_, Option<String>>(0)?,
@@ -39,8 +42,12 @@ impl SqliteQueue {
         };
         let tx = self.write_tx("record_report_written", TransactionBehavior::Immediate)?;
         let recorded: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
-               AND json_extract(payload,'$.period')=?2 AND json_extract(payload,'$.label')=?3)",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
+               AND {}=?2 AND {}=?3)",
+                json_field("payload", "$.period", JsonType::Text),
+                json_field("payload", "$.label", JsonType::Text),
+            ),
             params![REPORT_WRITTEN, period, label],
             |r| r.get(0),
         )?;

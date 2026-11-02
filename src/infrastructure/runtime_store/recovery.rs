@@ -12,6 +12,7 @@ use crate::domain::task_replan::{
     ContinuationRecord, GuardedStep, first_resume_of_continuation, restored_now,
 };
 use crate::domain::{AskKind, EventKind, run_phase};
+use crate::infrastructure::sql_dialect::{JsonType, json_field};
 
 impl SqliteQueue {
     /// The runs whose lease carries `token`, oldest first: what a supervisor
@@ -1323,8 +1324,12 @@ impl SqliteQueue {
     ) -> Result<bool> {
         let tx = self.write_tx("note_hold_deferred", TransactionBehavior::Immediate)?;
         let noted: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind=?2
-               AND json_extract(payload,'$.hold_id')=?3 AND json_extract(payload,'$.step')=?4)",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind=?2
+               AND {}=?3 AND {}=?4)",
+                json_field("payload", "$.hold_id", JsonType::Integer),
+                json_field("payload", "$.step", JsonType::Text),
+            ),
             params![
                 hold.task,
                 event_kind::HOLD_DEFERRED,
@@ -1408,14 +1413,15 @@ impl SqliteQueue {
     pub fn released_kept_results(&self) -> Result<Vec<EventId>> {
         Ok(self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT e.id FROM run_events e WHERE e.kind=?1
                    AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
-                     AND s.kind IN (?2,?3) AND json_extract(s.payload,'$.kept_id')=e.id)
+                     AND s.kind IN (?2,?3) AND {}=e.id)
                    AND NOT EXISTS (SELECT 1 FROM task_holds h WHERE h.task_id=e.task_id
                      AND h.released_at IS NULL)
                  ORDER BY e.id",
-            )?
+                json_field("s.payload", "$.kept_id", JsonType::Integer),
+            ))?
             .query_map(
                 params![
                     event_kind::HOLD_RESULT_KEPT,
@@ -1452,8 +1458,11 @@ impl SqliteQueue {
             return Ok(KeptOutcome::Untouched);
         };
         let settled: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND kind IN (?2,?3)
-               AND json_extract(payload,'$.kept_id')=?4)",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND kind IN (?2,?3)
+               AND {}=?4)",
+                json_field("payload", "$.kept_id", JsonType::Integer),
+            ),
             params![
                 run_id,
                 event_kind::HOLD_RESULT_APPLIED,
@@ -2229,11 +2238,15 @@ fn decide_triage_in(
 fn unsettled_kept_answer(conn: &Connection, id: &RunId, ask_id: AskId) -> Result<Option<EventId>> {
     Ok(conn
         .query_row(
-            "SELECT e.id FROM run_events e WHERE e.run_id=?1 AND e.kind=?2
-               AND json_extract(e.payload,'$.ask_id')=?3
+            &format!(
+                "SELECT e.id FROM run_events e WHERE e.run_id=?1 AND e.kind=?2
+               AND {}=?3
                AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
-                 AND s.kind IN (?4,?5) AND json_extract(s.payload,'$.kept_id')=e.id)
+                 AND s.kind IN (?4,?5) AND {}=e.id)
              ORDER BY e.id LIMIT 1",
+                json_field("e.payload", "$.ask_id", JsonType::Integer),
+                json_field("s.payload", "$.kept_id", JsonType::Integer),
+            ),
             params![
                 id,
                 event_kind::HOLD_RESULT_KEPT,

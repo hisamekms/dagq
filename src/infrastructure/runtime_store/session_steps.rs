@@ -10,6 +10,7 @@ use crate::domain::session_step::{
     StepKind, StepTarget, StepsRecorded, TargetKind, gaps, ranges, removed_within,
 };
 use crate::domain::telemetry::{Beat, TargetFacts};
+use crate::infrastructure::sql_dialect::{JsonType, TimeForm, json_field_spaced, time_value};
 
 /// The columns of a stored step, in the order [`step_row`] reads them.
 const COLUMNS: &str = "id,target_kind,target_id,session_id,seq,kind,offset_ms,duration_ms,\
@@ -888,14 +889,21 @@ impl SqliteQueue {
             let row = self
                 .conn
                 .query_row(
-                    "SELECT CAST((julianday(s.created_at) - 2440587.5) * 86400000 AS INTEGER),
-                            json_extract(s.payload, '$.timeout_secs'),
-                            json_extract(s.payload, '$.pid'),
+                    &format!(
+                        "SELECT {},
+                            {},
+                            {},
                             EXISTS (SELECT 1 FROM run_events f
                                     WHERE f.kind = ?3 AND f.id > s.id
-                                      AND json_extract(f.payload, '$.dir')
-                                          = json_extract(s.payload, '$.dir'))
+                                      AND {}
+                                          = {})
                      FROM run_events s WHERE s.id = ?1 AND s.kind = ?2",
+                        time_value("s.created_at", TimeForm::EpochMillis),
+                        json_field_spaced("s.payload", "$.timeout_secs", JsonType::Integer),
+                        json_field_spaced("s.payload", "$.pid", JsonType::Integer),
+                        json_field_spaced("f.payload", "$.dir", JsonType::Text),
+                        json_field_spaced("s.payload", "$.dir", JsonType::Text),
+                    ),
                     params![id, started.as_str(), finished.as_str()],
                     |row| {
                         Ok((
@@ -973,8 +981,11 @@ impl SqliteQueue {
             let row = self
                 .conn
                 .query_row(
-                    "SELECT actor_role, actor_id, json_extract(payload, '$.pid')
+                    &format!(
+                        "SELECT actor_role, actor_id, {}
                      FROM run_events WHERE id = ?1 AND kind = ?2",
+                        json_field_spaced("payload", "$.pid", JsonType::Integer),
+                    ),
                     params![id, started.as_str()],
                     |row| {
                         Ok((
@@ -1055,8 +1066,11 @@ impl SqliteQueue {
                 })
                 .collect()
         };
-        let started = "SELECT id, NULL, json_extract(payload, '$.pid') FROM run_events
-                       WHERE kind = ?1";
+        let started = &format!(
+            "SELECT id, NULL, {} FROM run_events
+                       WHERE kind = ?1",
+            json_field_spaced("payload", "$.pid", JsonType::Integer),
+        );
         match records {
             JobRecords::PlanReview { proposal, attempt } => of(
                 TargetKind::PlanReview,
@@ -1078,8 +1092,10 @@ impl SqliteQueue {
                 TargetKind::ThroughputReview,
                 rows(
                     &format!(
-                        "{started} AND json_extract(payload, '$.mode') = ?2
-                           AND json_extract(payload, '$.period') = ?3"
+                        "{started} AND {} = ?2
+                           AND {} = ?3",
+                        json_field_spaced("payload", "$.mode", JsonType::Text),
+                        json_field_spaced("payload", "$.period", JsonType::Text),
                     ),
                     params![EventKind::ThroughputReviewStarted.as_str(), mode, period],
                 )?,
@@ -1087,7 +1103,10 @@ impl SqliteQueue {
             JobRecords::Observation { session_id } => of(
                 TargetKind::Observer,
                 rows(
-                    &format!("{started} AND json_extract(payload, '$.session_id') = ?2"),
+                    &format!(
+                        "{started} AND {} = ?2",
+                        json_field_spaced("payload", "$.session_id", JsonType::Text)
+                    ),
                     params![EventKind::ObserveStarted.as_str(), session_id],
                 )?,
             ),

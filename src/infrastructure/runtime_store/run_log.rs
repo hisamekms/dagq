@@ -3,6 +3,9 @@
 //! ([`InboxWatchLog`], host運用's).
 
 use super::*;
+use crate::infrastructure::sql_dialect::{
+    JsonType, TimeForm, json_field, json_field_spaced, time_value,
+};
 
 /// The events of one kind in a range of ids, oldest first, at most a
 /// limit: a range of `events_by_kind`.
@@ -12,10 +15,15 @@ const EVENTS_OF_KIND_BETWEEN_SQL: &str =
 
 /// The rows of [`SqliteQueue::installs_after`]: the queue's events of kind
 /// `?1` past id `?2` that installed more than the plugin.
-const INSTALLS_AFTER: &str = "FROM run_events
+fn installs_after_sql() -> String {
+    format!(
+        "FROM run_events
      WHERE kind = ?1 AND id > ?2
      AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-     AND NOT COALESCE(json_extract(payload, '$.plugin_only'), 0)";
+     AND NOT COALESCE({}, 0)",
+        json_field_spaced("payload", "$.plugin_only", JsonType::Boolean)
+    )
+}
 
 impl SqliteQueue {
     /// The latest `limit` steps of the automatic update, newest first: the
@@ -54,13 +62,14 @@ impl SqliteQueue {
         // One read snapshot keeps the installs and their count consistent.
         let tx = self.write_tx("installs_after", TransactionBehavior::Deferred)?;
         let total: i64 = tx.query_row(
-            &format!("SELECT COUNT(*) {INSTALLS_AFTER}"),
+            &format!("SELECT COUNT(*) {}", installs_after_sql()),
             params![kind, after],
             |row| row.get(0),
         )?;
         let mut installs: Vec<RunEvent> = tx
             .prepare(&format!(
-                "SELECT * {INSTALLS_AFTER} ORDER BY id DESC LIMIT ?3"
+                "SELECT * {} ORDER BY id DESC LIMIT ?3",
+                installs_after_sql()
             ))?
             .query_map(
                 params![kind, after, i64::try_from(limit).unwrap_or(i64::MAX)],
@@ -282,10 +291,14 @@ impl SqliteQueue {
         let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("claim_inbox_nudge", TransactionBehavior::Immediate)?;
         let claimed: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events
              WHERE kind=?1 AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-             AND json_extract(payload,'$.absent_since') IS ?2
-             AND json_extract(payload,'$.attempt') IS ?3)",
+             AND {} IS ?2
+             AND {} IS ?3)",
+                json_field("payload", "$.absent_since", JsonType::Integer),
+                json_field("payload", "$.attempt", JsonType::Integer),
+            ),
             params![
                 kind.as_str(),
                 payload["absent_since"].as_i64(),
@@ -328,9 +341,12 @@ impl SqliteQueue {
         )?;
         let latest: Option<(String, Option<i64>)> = tx
             .query_row(
-                "SELECT kind, json_extract(payload,'$.at') FROM run_events
+                &format!(
+                    "SELECT kind, {} FROM run_events
                  WHERE kind IN (?1, ?2) AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
                  ORDER BY id DESC LIMIT 1",
+                    json_field("payload", "$.at", JsonType::Integer),
+                ),
                 params![
                     EventKind::InboxWatcherAbsent.as_str(),
                     EventKind::InboxWatcherReturned.as_str()
@@ -456,9 +472,10 @@ impl SqliteQueue {
                 "SELECT * FROM run_events WHERE id IN (
                      SELECT MAX(id) FROM run_events
                      WHERE kind IN ({kind_marks})
-                       AND json_extract(payload, '$.supervisor') IN ({supervisor_marks})
-                     GROUP BY json_extract(payload, '$.supervisor'))
-                 ORDER BY id"
+                       AND {supervisor} IN ({supervisor_marks})
+                     GROUP BY {supervisor})
+                 ORDER BY id",
+                supervisor = json_field_spaced("payload", "$.supervisor", JsonType::Text),
             ))?
             .query_map(
                 rusqlite::params_from_iter(kinds.iter().chain(supervisors)),
@@ -490,8 +507,11 @@ impl SqliteQueue {
     /// there is none: a cursor that reads everything from that time on.
     pub fn event_id_before(&self, unix: i64) -> Result<EventId> {
         Ok(self.conn.query_row(
-            "SELECT ifnull(max(id),0) FROM run_events
-             WHERE CAST(strftime('%s',created_at) AS INTEGER) < ?1",
+            &format!(
+                "SELECT ifnull(max(id),0) FROM run_events
+             WHERE {} < ?1",
+                time_value("created_at", TimeForm::EpochSeconds)
+            ),
             [unix],
             |r| r.get(0),
         )?)
@@ -500,9 +520,13 @@ impl SqliteQueue {
     /// When the observer of `mode` last started or finished (unix seconds).
     pub fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
         Ok(self.conn.query_row(
-            "SELECT max(CAST(strftime('%s',created_at) AS INTEGER)) FROM run_events
+            &format!(
+                "SELECT max({}) FROM run_events
              WHERE kind IN (?2,?3)
-               AND json_extract(payload,'$.mode')=?1",
+               AND {}=?1",
+                time_value("created_at", TimeForm::EpochSeconds),
+                json_field("payload", "$.mode", JsonType::Text),
+            ),
             params![
                 mode,
                 event_kind::OBSERVE_STARTED,
@@ -530,13 +554,16 @@ impl SqliteQueue {
         let findings = |kind: &str, to: &[&str]| -> Result<Vec<i64>> {
             Ok(self
                 .conn
-                .prepare(
-                    "SELECT json_extract(payload,'$.finding_id') AS finding FROM run_events
-                     WHERE id>?2 AND kind=?3 AND json_extract(payload,'$.by')=?1
-                       AND (?4 IS NULL OR json_extract(payload,'$.to')
+                .prepare(&format!(
+                    "SELECT {} AS finding FROM run_events
+                     WHERE id>?2 AND kind=?3 AND {}=?1
+                       AND (?4 IS NULL OR {}
                             IN (SELECT value FROM json_each(?4)))
                      GROUP BY finding ORDER BY min(id)",
-                )?
+                    json_field("payload", "$.finding_id", JsonType::Integer),
+                    json_field("payload", "$.by", JsonType::Text),
+                    json_field("payload", "$.to", JsonType::Text),
+                ))?
                 .query_map(
                     params![
                         role,
@@ -592,10 +619,12 @@ impl SqliteQueue {
             .query_row(
                 &format!(
                     "SELECT id, payload FROM run_events
-                 WHERE kind='{}' AND json_extract(payload,'$.mode')=?1
-                   AND ifnull(json_extract(payload,'$.outcome'),'')<>'skipped'
+                 WHERE kind='{}' AND {}=?1
+                   AND ifnull({},'')<>'skipped'
                  ORDER BY id DESC LIMIT 1",
-                    event_kind::OBSERVE_FINISHED
+                    event_kind::OBSERVE_FINISHED,
+                    json_field("payload", "$.mode", JsonType::Text),
+                    json_field("payload", "$.outcome", JsonType::Text),
                 ),
                 [mode],
                 |r| Ok((r.get(0)?, json_col(r, "payload")?)),
@@ -625,11 +654,11 @@ impl SqliteQueue {
                 "SELECT count(*) FROM run_events WHERE id>?3 AND NOT (
                kind IN (SELECT value FROM json_each(?4))
                OR (kind IN ('{}','{}','{}')
-                   AND json_extract(payload,'$.by') IS ?1)
-               OR (kind='{}' AND json_extract(payload,'$.asked_by') IS ?1)
+                   AND {by} IS ?1)
+               OR (kind='{}' AND {asked_by} IS ?1)
                OR (kind='{}' AND actor_role IS ?1)
                OR (kind IN ('{}','{}','{}')
-                   AND json_extract(payload,'$.kind') IS ?2))",
+                   AND {kind} IS ?2))",
                 event_kind::FINDING_RECORDED,
                 event_kind::FINDING_UPDATED,
                 event_kind::FINDING_STATUS_CHANGED,
@@ -637,7 +666,10 @@ impl SqliteQueue {
                 event_kind::AUTHORIZATION_DENIED,
                 event_kind::SESSION_OPENED,
                 event_kind::SESSION_CLOSED,
-                event_kind::SESSION_TURNS
+                event_kind::SESSION_TURNS,
+                by = json_field("payload", "$.by", JsonType::Text),
+                asked_by = json_field("payload", "$.asked_by", JsonType::Text),
+                kind = json_field("payload", "$.kind", JsonType::Text),
             ),
             params![role, span_kind, after, ignored],
             |r| r.get(0),
@@ -658,9 +690,10 @@ impl SqliteQueue {
                         .query_row(
                             &format!(
                                 "SELECT * FROM run_events WHERE kind='{}'
-                               AND id<?1 AND json_extract(payload,'$.dir')=?2
+                               AND id<?1 AND {}=?2
                              ORDER BY id DESC LIMIT 1",
-                                event_kind::OBSERVE_STARTED
+                                event_kind::OBSERVE_STARTED,
+                                json_field("payload", "$.dir", JsonType::Text),
                             ),
                             params![finished.id, dir],
                             event_row,
@@ -691,9 +724,12 @@ impl SqliteQueue {
         Ok(self
             .conn
             .query_row(
-                "SELECT run_id FROM run_events WHERE kind='workspace_created'
-                 AND run_id IS NOT NULL AND json_extract(payload,'$.workspace_id')=?1
+                &format!(
+                    "SELECT run_id FROM run_events WHERE kind='workspace_created'
+                 AND run_id IS NOT NULL AND {}=?1
                  ORDER BY id DESC LIMIT 1",
+                    json_field("payload", "$.workspace_id", JsonType::Text),
+                ),
                 [workspace_id],
                 |r| r.get(0),
             )
@@ -734,10 +770,11 @@ impl SqliteQueue {
     /// the order of their times until one whose time
     /// [`crate::domain::stats::timestamp_millis`] reads. A pure read.
     pub fn earliest_event_at(&self) -> Result<Option<i64>> {
-        let mut statement = self.conn.prepare(
-            "SELECT created_at FROM run_events WHERE julianday(created_at) IS NOT NULL
-             ORDER BY julianday(created_at), id",
-        )?;
+        let at = time_value("created_at", TimeForm::Ordinal);
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT created_at FROM run_events WHERE {at} IS NOT NULL
+             ORDER BY {at}, id",
+        ))?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             let created_at: String = row.get(0)?;
@@ -835,17 +872,22 @@ impl SqliteQueue {
             .transpose()?;
         Ok(self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT * FROM run_events WHERE id>?1 AND id<=?2
                  AND (?3 IS NULL OR kind IN (SELECT value FROM json_each(?3)))
-                 AND (?4 IS NULL OR run_id=?4 OR json_extract(payload,'$.source_run_id')=?4)
+                 AND (?4 IS NULL OR run_id=?4 OR {}=?4)
                  AND (?5 IS NULL OR task_id=?5)
                  AND (?6 IS NULL OR goal_id=?6
                       OR task_id IN (SELECT id FROM tasks WHERE goal_id=?6))
-                 AND (?7 IS NULL OR julianday(created_at)>=julianday(?7))
-                 AND (?8 IS NULL OR julianday(created_at)<julianday(?8))
+                 AND (?7 IS NULL OR {}>={})
+                 AND (?8 IS NULL OR {}<{})
                  ORDER BY id LIMIT ?9",
-            )?
+                json_field("payload", "$.source_run_id", JsonType::Text),
+                time_value("created_at", TimeForm::Ordinal),
+                time_value("?7", TimeForm::Ordinal),
+                time_value("created_at", TimeForm::Ordinal),
+                time_value("?8", TimeForm::Ordinal),
+            ))?
             .query_map(
                 params![
                     after,
@@ -962,8 +1004,8 @@ impl SqliteQueue {
     /// or not its stop is recorded (whether its wrapper still runs decides),
     /// ordered by run.
     pub fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
-        let mut statement = self.conn.prepare(
-            &format!("WITH ended AS (
+        let mut statement = self.conn.prepare(&format!(
+            "WITH ended AS (
                SELECT r.id, r.status, r.workspace_id, r.rowid AS run_row FROM task_runs r
                JOIN tasks t ON t.id=r.task_id
                WHERE r.status IN ('integrated','succeeded','failed','interrupted')
@@ -973,12 +1015,15 @@ impl SqliteQueue {
              SELECT id, status, workspace_id, run_row, 0 AS event_id FROM ended
              WHERE workspace_id IS NOT NULL
              UNION ALL
-             SELECT ended.id, ended.status, json_extract(e.payload,'$.workspace_id'), ended.run_row, e.id
+             SELECT ended.id, ended.status, {workspace}, ended.run_row, e.id
              FROM run_events e JOIN ended ON ended.id=e.run_id
              WHERE e.kind IN ('{}','{}')
-             AND json_extract(e.payload,'$.workspace_id') IS NOT NULL
-             ORDER BY 4, 5", event_kind::WORKSPACE_CREATED, event_kind::RESUME_FINISHED),
-        )?;
+             AND {workspace} IS NOT NULL
+             ORDER BY 4, 5",
+            event_kind::WORKSPACE_CREATED,
+            event_kind::RESUME_FINISHED,
+            workspace = json_field("e.payload", "$.workspace_id", JsonType::Text)
+        ))?;
         let rows = statement.query_map([], |row| {
             Ok(EndedRunWorkspace {
                 run_id: row.get(0)?,
@@ -1461,9 +1506,13 @@ mod tests {
         // of every event.
         let steps = plan(
             &queue.conn,
-            "SELECT MAX(id) FROM run_events WHERE kind IN (?1, ?2)
-               AND json_extract(payload, '$.supervisor') IN (?3)
-             GROUP BY json_extract(payload, '$.supervisor')",
+            &format!(
+                "SELECT MAX(id) FROM run_events WHERE kind IN (?1, ?2)
+               AND {} IN (?3)
+             GROUP BY {}",
+                json_field_spaced("payload", "$.supervisor", JsonType::Text),
+                json_field_spaced("payload", "$.supervisor", JsonType::Text),
+            ),
         );
         assert!(
             !steps.iter().any(|line| line == "SCAN run_events"),
@@ -1526,8 +1575,11 @@ mod tests {
         assert_eq!(read.first().map(|e| e.id), Some(before));
         assert_eq!(total, 4);
         for sql in [
-            format!("SELECT COUNT(*) {INSTALLS_AFTER}"),
-            format!("SELECT * {INSTALLS_AFTER} ORDER BY id DESC LIMIT ?3"),
+            format!("SELECT COUNT(*) {}", installs_after_sql()),
+            format!(
+                "SELECT * {} ORDER BY id DESC LIMIT ?3",
+                installs_after_sql()
+            ),
         ] {
             let steps = plan(&queue.conn, &sql);
             assert!(

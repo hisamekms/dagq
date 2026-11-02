@@ -76,6 +76,7 @@ pub mod search;
 mod session_tokens;
 mod sessions;
 pub mod setup_review;
+pub(crate) mod sql_dialect;
 pub mod sql_ids;
 pub mod sqlite;
 mod stranded;
