@@ -218,6 +218,28 @@ pub trait LedgerStore {
             })
             .collect())
     }
+    /// The queue rows of the waits before a claim settled that a book made
+    /// again from the rows held from `held` lacks and that bear on the
+    /// time of a task from `from` up to `until_ms`
+    /// ([`crate::domain::pre_claim::rows::lacks`]), without their records:
+    /// what the fold of a task that starts before `held` reads besides the
+    /// book, none of the waits settled over no time of it.
+    fn ledger_settled_waits(
+        &self,
+        held: crate::domain::pre_claim::rows::Since,
+        from: crate::domain::pre_claim::rows::Since,
+        until_ms: i64,
+    ) -> Result<Vec<LedgerRow>> {
+        Ok(self
+            .ledger_rows(LedgerKind::Queue)?
+            .into_iter()
+            .filter(|row| crate::domain::pre_claim::rows::lacks(row, held, from, until_ms))
+            .map(|row| LedgerRow {
+                records: Vec::new(),
+                ..row
+            })
+            .collect())
+    }
     /// Every `supervisor_stopped` the queue rows record, by id: the stops
     /// the supervisors' lives are made again by, not the other records.
     fn ledger_supervisor_stops(&self) -> Result<Vec<RunEvent>> {

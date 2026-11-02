@@ -442,10 +442,13 @@ pub fn queue_book(store: &dyn LedgerQueue, builder: &Builder) -> Result<QueueBoo
     )
 )]
 pub fn pre_claim_books(store: &dyn LedgerQueue, closed_to: i64) -> Result<(Lives, PreClaimBook)> {
-    let rows = store.ledger_wait_rows(store.ledger_tasks_open_since()?)?;
+    let since = store.ledger_tasks_open_since()?;
+    let rows = store.ledger_wait_rows(since)?;
     let stops = store.ledger_supervisor_stops()?;
     let last = read_by_id(store, &pre_claim::rows::living(&rows, &stops))?;
-    Ok(pre_claim::rows::books(&rows, &stops, &last, closed_to))
+    let (lives, mut book) = pre_claim::rows::books(&rows, &stops, &last, closed_to);
+    book.held_from(since);
+    Ok((lives, book))
 }
 
 /// Make `builder` go on from the session rows `store` holds as they were
@@ -596,8 +599,23 @@ fn fold_and_write(
     }
     // The pushes it reads that the builder dropped once its runs settled.
     let pushes = read_by_id(store, &builder.pushes_to_read(&events))?;
+    let waits = match target {
+        Target::Task(task) => builder.waits_to_read(&events).map(|since| (*task, since)),
+        _ => None,
+    };
     inputs.read_pushes(target, pushes);
     inputs.read(target, events);
+    // A task that starts before where the book made again from the rows
+    // holds the waits from reads those settled over its time from the
+    // store's rows: up to its end, which no wait moves, or the time folded to.
+    if let Some((task, (held, from))) = waits {
+        let until = build(target, inputs, &samples).map_or(inputs.now_ms, |row| {
+            row.ended_at
+                .unwrap_or(inputs.now_ms)
+                .max(row.started_at.unwrap_or(i64::MIN))
+        });
+        inputs.read_waits(task, &store.ledger_settled_waits(held, from, until)?);
+    }
     let row = build(target, inputs, &samples);
     inputs.forget(target);
     let Some(row) = row else {

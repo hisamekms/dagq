@@ -29,14 +29,17 @@
 //!   A supervisor of none of them goes on from the events after the
 //!   position.
 //!
-//! So the books are those of every event as far as the rows the store
-//! holds settled are not folded again over waits they lack: a task row
-//! settled that a later event of its own folds again reads only the waits
-//! kept, not those that ended before [`Since`]; a task that has no row at
-//! the position (a builder whose writes lag its cursor) or that becomes
-//! ready after it at the very time a wait ended before it does not read
-//! that wait; and the latest times of a life are those of its last event,
-//! whose clock was not set back.
+//! So the books are those of every event but for the waits that ended
+//! before [`Since`], and the book says it holds from there
+//! ([`PreClaimBook::held_from`]). A task whose fold may read such a wait
+//! (one that starts before [`Since`]: a row settled that a later event of
+//! its own folds again, a task that has no row at the position because a
+//! builder's writes lag its cursor, or one that becomes ready after it at
+//! the very time a wait ended before it) reads the waits settled over its
+//! own time from the store's rows ([`lacks`], [`waits`]) as it is folded,
+//! not kept between folds, so its row is that of every event. The latest
+//! times of a life are those of its last event, whose clock was not set
+//! back.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -116,6 +119,43 @@ pub fn holds(row: &LedgerRow, since: Since) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether `row` is of a wait before a claim settled that a book made
+/// again from the rows [`holds`] keeps from `held` lacks ([`books`]: ended
+/// by an event before it, by time and by id) and that bears on the time
+/// ready of a task from `from` (its earliest time and first event) up to
+/// `until_ms` (the end of its time, or the time folded to): one that
+/// started by then and ended at or after the task's start or by an event
+/// at or after its first, as [`crate::domain::ledger::fold::fold_task`]
+/// reads them. The store gives these, without their records
+/// ([`crate::application::LedgerStore::ledger_settled_waits`]), for the
+/// fold of a task that started before `held`, so that its row is that of
+/// every event though the book keeps none of them.
+pub fn lacks(row: &LedgerRow, held: Since, from: Since, until_ms: i64) -> bool {
+    row.kind == LedgerKind::Queue
+        && matches!(
+            subject_kind(row).and_then(started),
+            Some(Started::PreClaim(_))
+        )
+        && !holds(row, held)
+        && row.started_at.is_some_and(|start| start <= until_ms)
+        && (row.ended_at.is_some_and(|end| end >= from.ms) || row.inputs_through.events >= from.id)
+}
+
+/// The waits of `rows` (queue rows of waits before a claim, those [`lacks`]
+/// keeps), as a book gives a wait an event ended: the last event each
+/// reads is its row's.
+pub fn waits(rows: &[LedgerRow]) -> Vec<PreClaimInterval> {
+    rows.iter()
+        .filter(|row| {
+            matches!(
+                subject_kind(row).and_then(started),
+                Some(Started::PreClaim(_))
+            )
+        })
+        .filter_map(wait_of)
+        .collect()
 }
 
 /// The supervisor a row's life reaches, when one does: a slots full not

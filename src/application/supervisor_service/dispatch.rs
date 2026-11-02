@@ -2498,6 +2498,30 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 page,
             ))
         }
+        // A page of the queue rows of the waits settled a task's fold reads
+        // besides the book made again from the rows, by key: at most `page`
+        // after the key `after` (none: from the first), with no record read
+        // or sent; `held` and `from` as (unix ms, event id), and `until`
+        // (unix ms).
+        "ledger_settled_waits" => {
+            type Since = (i64, i64);
+            let (held, from, until, after, page): (Since, Since, i64, Option<String>, usize) =
+                read(op, args)?;
+            let since = |(ms, id): (i64, i64)| crate::domain::pre_claim::rows::Since {
+                ms,
+                id: EventId::new(id),
+            };
+            answer(
+                LedgerStore::ledger_settled_waits(&*store, since(held), since(from), until).map(
+                    |rows| {
+                        rows.into_iter()
+                            .filter(|row| after.as_ref().is_none_or(|after| row.key > *after))
+                            .take(page)
+                            .collect::<Vec<_>>()
+                    },
+                ),
+            )
+        }
         // A page of a run's or a task's events after the event `after`: the
         // read of a history past one answer whole.
         "run_events_after" => {

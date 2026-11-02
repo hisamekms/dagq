@@ -128,7 +128,12 @@
 //!   task not settled, the streams not replaced and the stops, reading of
 //!   the EventStore only the last event of each life that goes on
 //!   ([`crate::domain::pre_claim::rows`], [`Builder::restore_pre_claim`]);
-//!   a queue book is made from the waits [`Kept`] holds. The rest of it is not
+//!   a queue book is made from the waits [`Kept`] holds. Such a book holds
+//!   no wait an event ended before the tasks not settled, so the fold of a
+//!   task that starts before them reads the waits settled over its time
+//!   from the store's queue rows as it is folded, not their records, and
+//!   keeps none of them ([`Builder::waits_to_read`],
+//!   [`Inputs::read_waits`]). The rest of it is not
 //!   made from the rows yet, so a new process still starts at its cursors'
 //!   start and takes none of them.
 //! - **What a pass makes**: each event is read into [`Kept`] once as it
@@ -157,7 +162,8 @@ use super::{
 };
 use crate::domain::environment::{self, CountedSample, Folded, RunResource, Window};
 use crate::domain::host_metrics::NodeSample;
-use crate::domain::pre_claim::{PreClaimBook, Started};
+use crate::domain::pre_claim::rows::Since;
+use crate::domain::pre_claim::{PreClaimBook, PreClaimInterval, Started};
 use crate::domain::run_phase::{Phase, Recorded};
 use crate::domain::session_step::{SessionResource, SessionStep};
 use crate::domain::stats::timestamp_millis;
@@ -1458,6 +1464,27 @@ impl Builder {
         Arc::make_mut(&mut self.kept).restore_sessions(held, records);
     }
 
+    /// Whether the fold of a task whose events are `events` (ascending id,
+    /// those up to [`Self::events`]) may read a wait that the book of the
+    /// waits before a claim, made again from the store's rows, lacks
+    /// ([`PreClaimBook::held`]): the task starts before where the book
+    /// holds from, by time or by its first event. Then the from where the
+    /// book holds and the task's own start, by which the waits settled over
+    /// its time are read from the store's rows
+    /// ([`crate::domain::pre_claim::rows::lacks`]) and given to its fold
+    /// ([`Inputs::read_waits`]); none for a book of every event read.
+    pub fn waits_to_read(&self, events: &[RunEvent]) -> Option<(Since, Since)> {
+        let held = self.kept.pre_claim.held()?;
+        let from = Since {
+            ms: events
+                .iter()
+                .filter_map(|event| timestamp_millis(&event.created_at))
+                .min()?,
+            id: events.first()?.id,
+        };
+        (from.ms < held.ms || from.id < held.id).then_some((held, from))
+    }
+
     /// The rows of `rows` (those [`Self::rows_to_build`] names) whose
     /// records [`Kept`] dropped: before they are folded, each is given its
     /// records back ([`Self::restore`]).
@@ -1866,6 +1893,9 @@ pub struct Inputs {
     pushes: BTreeMap<Target, Vec<RunEvent>>,
     /// The resources of each run read ([`Self::read_resources`]).
     resources: BTreeMap<String, RunResources>,
+    /// The waits before a claim read for a task's fold that [`Kept`] does
+    /// not hold ([`Self::read_waits`]).
+    waits: BTreeMap<TaskId, Vec<PreClaimInterval>>,
     kept: Arc<Kept>,
     /// The session and queue rows built.
     pub rows: BTreeMap<(LedgerKind, String), LedgerRow>,
@@ -1923,6 +1953,7 @@ impl Inputs {
             steps: BTreeMap::new(),
             pushes: BTreeMap::new(),
             resources: BTreeMap::new(),
+            waits: BTreeMap::new(),
             kept: Arc::clone(kept),
             rows: built,
         }
@@ -1982,9 +2013,24 @@ impl Inputs {
         self.resources.insert(run.to_owned(), resources);
     }
 
+    /// Give the fold of `task` the waits before a claim of `rows`, the
+    /// queue rows of the waits settled over its time that the book [`Kept`]
+    /// holds lacks ([`Builder::waits_to_read`],
+    /// [`crate::domain::pre_claim::rows::lacks`]): those the book holds are
+    /// read from it, as it has them up to the cursor.
+    pub fn read_waits(&mut self, task: TaskId, rows: &[LedgerRow]) {
+        let waits: Vec<PreClaimInterval> = crate::domain::pre_claim::rows::waits(rows)
+            .into_iter()
+            .filter(|wait| !self.kept.pre_claim.holds(wait.id))
+            .collect();
+        if !waits.is_empty() {
+            self.waits.insert(task, waits);
+        }
+    }
+
     /// Drop the events [`Self::read`], the steps [`Self::read_steps`],
-    /// the pushes [`Self::read_pushes`] and the resources
-    /// [`Self::read_resources`] gave `target`, once folded.
+    /// the pushes [`Self::read_pushes`], the waits [`Self::read_waits`] and
+    /// the resources [`Self::read_resources`] gave `target`, once folded.
     pub fn forget(&mut self, target: &Target) {
         self.pushes.remove(target);
         match target {
@@ -1995,6 +2041,7 @@ impl Inputs {
             }
             Target::Task(task) => {
                 self.tasks.remove(task);
+                self.waits.remove(task);
             }
             Target::Row(..) | Target::Node(..) => {}
         }
@@ -2046,14 +2093,20 @@ pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option
             {
                 return None;
             }
-            let mut row = super::task_row(
-                *task,
-                events,
-                &inputs.pushes_of(target),
-                kept.pre_claim.intervals(&kept.lives, now),
-                now,
-                &inputs.built_at,
-            );
+            let pushes = inputs.pushes_of(target);
+            let held = kept.pre_claim.intervals(&kept.lives, now);
+            let mut row = match inputs.waits.get(task) {
+                None => super::task_row(*task, events, &pushes, held, now, &inputs.built_at),
+                // The waits the book holds and those read for it, in their
+                // order, as the book of every event gives them.
+                Some(read) => {
+                    let mut waits: Vec<std::borrow::Cow<'_, PreClaimInterval>> = held
+                        .chain(read.iter().map(std::borrow::Cow::Borrowed))
+                        .collect();
+                    waits.sort_by_key(|wait| wait.id);
+                    super::task_row(*task, events, &pushes, waits, now, &inputs.built_at)
+                }
+            };
             row.is_final = run_settles(&row, now);
             Some(row)
         }

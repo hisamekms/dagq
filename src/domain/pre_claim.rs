@@ -324,6 +324,10 @@ pub struct PreClaimBook {
     /// The latest time a close was at: a read at an earlier one reads
     /// again whether the lives ended the waits they closed.
     closed_to: i64,
+    /// Made again from the store's rows ([`rows::books`]), from where it
+    /// holds the waits an event ended ([`rows::Since`]): one ended before
+    /// is not in it. None: it holds every wait of the events it read.
+    held: Option<rows::Since>,
 }
 
 impl PreClaimBook {
@@ -359,6 +363,23 @@ impl PreClaimBook {
             .chain(self.open.values().map(wait))
             .sum::<usize>()
             + finders * size_of::<(String, i64)>()
+    }
+
+    /// Say it holds the waits an event ended from `since` on only, as a
+    /// book made again from the rows [`rows::holds`] keeps from there.
+    pub fn held_from(&mut self, since: rows::Since) {
+        self.held = Some(since);
+    }
+
+    /// From where it holds the waits an event ended, when it does not hold
+    /// every one of the events it read ([`Self::held_from`]).
+    pub const fn held(&self) -> Option<rows::Since> {
+        self.held
+    }
+
+    /// Whether it holds the wait started by `start`, open or ended.
+    pub fn holds(&self, start: EventId) -> bool {
+        self.closed.contains_key(&start) || self.open.contains_key(&start)
     }
 
     /// The book of `events` (ascending id).

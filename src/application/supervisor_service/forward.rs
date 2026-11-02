@@ -3222,6 +3222,32 @@ impl LedgerStore for SupervisorQueue {
             vec![to_value(after)?, to_value(limit)?],
         )
     }
+    // In pages after the last key of the page before, a page past the
+    // answer's limit asked again at a quarter of its size: the service
+    // picks the rows by their columns, as the queue's own store does, and
+    // sends no record.
+    fn ledger_settled_waits(
+        &self,
+        held: crate::domain::pre_claim::rows::Since,
+        from: crate::domain::pre_claim::rows::Since,
+        until_ms: i64,
+    ) -> Result<Vec<crate::domain::ledger::LedgerRow>> {
+        self.ledger_pages(LEDGER_WAITS_PAGE, |after, page| {
+            let read: Vec<crate::domain::ledger::LedgerRow> = self.remote(
+                "ledger_settled_waits",
+                vec![
+                    to_value((held.ms, held.id.as_i64()))?,
+                    to_value((from.ms, from.id.as_i64()))?,
+                    to_value(until_ms)?,
+                    to_value(after)?,
+                    to_value(page)?,
+                ],
+            )?;
+            let rows = read.len();
+            let last = read.last().map(|row| row.key.clone());
+            Ok((read, rows, last))
+        })
+    }
     fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
         self.remote("remove_node_rows", vec![to_value(before_day)?])
     }
@@ -3243,6 +3269,11 @@ const LEDGER_WAIT_ROWS_PAGE: usize = 500;
 /// How many stops a read asks for at a time, a quarter of it for a page
 /// past the answer's limit.
 const LEDGER_STOPS_PAGE: usize = 1_000;
+
+/// How many queue rows of waits settled a read asks for at a time, a
+/// quarter of it for a page past the answer's limit: a row comes with no
+/// records.
+const LEDGER_WAITS_PAGE: usize = 500;
 
 impl SupervisorQueue {
     /// Every item `read` gives a page at a time, by row key: `read(after,

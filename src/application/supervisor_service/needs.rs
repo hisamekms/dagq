@@ -200,6 +200,7 @@ pub(super) const READS: &[&str] = &[
     "ledger_tasks_open_since",
     "ledger_wait_rows",
     "ledger_supervisor_stops",
+    "ledger_settled_waits",
     "run_events_after",
     "task_events_after",
 ];

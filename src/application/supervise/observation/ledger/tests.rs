@@ -44,6 +44,13 @@ struct Memory {
     writes: Cell<usize>,
     read: Cell<usize>,
     read_all: Cell<usize>,
+    /// The queue rows of waits given to make the books again and to fold
+    /// a task over the waits settled ([`LedgerStore::ledger_wait_rows`],
+    /// [`LedgerStore::ledger_settled_waits`]).
+    wait_rows: Cell<usize>,
+    /// Gives no wait settled to a task's fold: a builder that reads only
+    /// the book made again from the rows.
+    no_settled_waits: Cell<bool>,
     /// Refuses every write of a row.
     refuses: Cell<bool>,
     /// The row whose read fails, as a stored row that does not parse.
@@ -230,6 +237,32 @@ impl LedgerStore for Memory {
             .filter(|row| row.kind == kind)
             .cloned()
             .collect())
+    }
+    fn ledger_wait_rows(&self, since: pre_claim::rows::Since) -> Result<Vec<LedgerRow>> {
+        let rows: Vec<LedgerRow> = self
+            .ledger_rows(LedgerKind::Queue)?
+            .into_iter()
+            .filter(|row| pre_claim::rows::holds(row, since))
+            .collect();
+        self.wait_rows.set(self.wait_rows.get() + rows.len());
+        Ok(rows)
+    }
+    fn ledger_settled_waits(
+        &self,
+        held: pre_claim::rows::Since,
+        from: pre_claim::rows::Since,
+        until_ms: i64,
+    ) -> Result<Vec<LedgerRow>> {
+        if self.no_settled_waits.get() {
+            return Ok(Vec::new());
+        }
+        let rows: Vec<LedgerRow> = self
+            .ledger_rows(LedgerKind::Queue)?
+            .into_iter()
+            .filter(|row| pre_claim::rows::lacks(row, held, from, until_ms))
+            .collect();
+        self.wait_rows.set(self.wait_rows.get() + rows.len());
+        Ok(rows)
     }
     fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
         let mut rows = self.rows.borrow_mut();
@@ -3412,4 +3445,261 @@ fn a_row_settled_by_an_older_version_is_folded_again_after_going_on() {
     });
     assert_eq!(rows[&review].ledger_v, LEDGER_V);
     assert!(are_of_every_event(&rows, &log));
+}
+
+/// What a builder writes of the task rows, and how many wait rows and
+/// events it read, going on from `position` of `log` with the lives and
+/// the waits before a claim made again from the store's rows at the pass
+/// at `at` (seconds), what else it keeps carried from the passes up to
+/// there; `lag` drops the row of that task from the store before (a
+/// builder whose writes lag its cursor), and `bare` gives its folds no
+/// wait settled. Then the passes at `later` and [`LATER`] + 1.
+struct GoingOn {
+    tasks: BTreeMap<String, LedgerRow>,
+    wait_rows: usize,
+    events: usize,
+}
+
+fn tasks_going_on(
+    log: &Log,
+    position: usize,
+    (at, later): (i64, i64),
+    lag: Option<&str>,
+    bare: bool,
+) -> GoingOn {
+    let memory = Memory::default();
+    memory.events.replace(log.events[..position].to_vec());
+    let mut builder = Builder::default();
+    drain(&memory, &mut builder, at);
+    if let Some(task) = lag {
+        memory
+            .rows
+            .borrow_mut()
+            .remove(&(LedgerKind::Task, task.to_owned()));
+    }
+    memory.read.set(0);
+    memory.wait_rows.set(0);
+    memory.no_settled_waits.set(bare);
+    let (lives, book) = pre_claim_books(&memory, ms(at)).unwrap();
+    builder.restore_pre_claim(lives, book);
+    memory.events.replace(log.events.clone());
+    drain(&memory, &mut builder, later);
+    passes_to_drain(&memory, &mut builder, LATER + 1);
+    let tasks = memory
+        .rows
+        .borrow()
+        .iter()
+        .filter(|((kind, _), _)| *kind == LedgerKind::Task)
+        .map(|((_, key), row)| (key.clone(), row.clone()))
+        .collect();
+    GoingOn {
+        tasks,
+        wait_rows: memory.wait_rows.get(),
+        events: memory.read.get(),
+    }
+}
+
+/// The task rows of a builder from the first event that passes at `at`
+/// over the events up to `position`, then at `later` and [`LATER`] + 1
+/// over them all; task 1's is that of the fold of every event at `later`,
+/// the last pass an event of it marks it at.
+fn tasks_of_every_event(
+    log: &Log,
+    position: usize,
+    (at, later): (i64, i64),
+) -> BTreeMap<String, LedgerRow> {
+    let memory = Memory::default();
+    memory.events.replace(log.events[..position].to_vec());
+    let mut builder = Builder::default();
+    drain(&memory, &mut builder, at);
+    memory.events.replace(log.events.clone());
+    drain(&memory, &mut builder, later);
+    passes_to_drain(&memory, &mut builder, LATER + 1);
+    let whole = crate::domain::ledger::build(&log.events, ms(later), BUILT);
+    let rows = memory.rows.borrow();
+    for expected in whole
+        .iter()
+        .filter(|row| row.kind == LedgerKind::Task && row.key == "1")
+    {
+        let stored = &rows[&(LedgerKind::Task, expected.key.clone())];
+        assert_eq!(
+            LedgerRow {
+                is_final: stored.is_final,
+                ..expected.clone()
+            },
+            *stored
+        );
+    }
+    rows.iter()
+        .filter(|((kind, _), _)| *kind == LedgerKind::Task)
+        .map(|((_, key), row)| (key.clone(), row.clone()))
+        .collect()
+}
+
+fn heavy(supervisor: &str) -> Value {
+    json!({"supervisor": supervisor, "class": "heavy"})
+}
+
+/// `old` slots full of a supervisor freed long before, each settled by the
+/// pass at the position, over no time of a task.
+fn old_waits(log: &mut Log, old: i64) {
+    for k in 0..old {
+        log.add(None, None, "slots_full_started", heavy("old"), 10 * k)
+            .add(None, None, "slots_full_ended", heavy("old"), 10 * k + 5);
+    }
+}
+
+/// Case (a), after `old` waits ([`old_waits`]): task 1 ready, a slots full
+/// freed over its time ready, then task 1 canceled; task 2 ready after
+/// their grace, so the book made again holds the waits from its start on.
+/// The pass at the position settles task 1 and the slots full. After it, a
+/// later event of task 1 (ready again) folds its settled row again.
+fn settled_task_folded_again(old: i64) -> (Log, usize, (i64, i64)) {
+    let mut log = Log::default();
+    old_waits(&mut log, old);
+    let t = 10 * old + 100;
+    let grace = SETTLE_GRACE_MS / 1000;
+    log.add(Some(1), None, "task_created", json!({"status": "draft"}), t)
+        .add(
+            Some(1),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": "ready"}),
+            t + 10,
+        )
+        .add(None, None, "slots_full_started", heavy("a"), t + 20)
+        .add(None, None, "slots_full_ended", heavy("a"), t + 30)
+        .add(
+            Some(1),
+            None,
+            "task_status_changed",
+            json!({"from": "ready", "to": "canceled"}),
+            t + 40,
+        )
+        .add(
+            Some(2),
+            None,
+            "task_created",
+            json!({"status": "draft"}),
+            t + 40 + grace + 10,
+        )
+        .add(
+            Some(2),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": "ready"}),
+            t + 40 + grace + 20,
+        );
+    let position = log.events.len();
+    let at = t + 40 + 2 * grace + 100;
+    log.add(
+        Some(1),
+        None,
+        "task_status_changed",
+        json!({"from": "canceled", "to": "ready"}),
+        at + 10,
+    );
+    (log, position, (at, at + 20))
+}
+
+/// Case (b): task 1 ready over a slots full freed, not ended; the store
+/// has no row of it at the position, so the book made again does not hold
+/// the slots full. After it, task 1 is canceled.
+fn task_of_no_row() -> (Log, usize, (i64, i64)) {
+    let mut log = Log::default();
+    let grace = SETTLE_GRACE_MS / 1000;
+    log.add(Some(1), None, "task_created", json!({"status": "draft"}), 0)
+        .add(
+            Some(1),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": "ready"}),
+            10,
+        )
+        .add(None, None, "slots_full_started", heavy("a"), 20)
+        .add(None, None, "slots_full_ended", heavy("a"), 30);
+    let position = log.events.len();
+    let at = grace + 100;
+    log.add(
+        Some(1),
+        None,
+        "task_status_changed",
+        json!({"from": "ready", "to": "canceled"}),
+        at + 10,
+    );
+    (log, position, (at, at + 20))
+}
+
+/// Case (c): a slots full freed and settled by the pass at the position;
+/// after it, task 1 created and ready at the very time the slots full
+/// ended, its events written late.
+fn ready_as_a_wait_ended() -> (Log, usize, (i64, i64)) {
+    let mut log = Log::default();
+    let grace = SETTLE_GRACE_MS / 1000;
+    log.add(None, None, "slots_full_started", heavy("a"), 0)
+        .add(None, None, "slots_full_ended", heavy("a"), 50);
+    let position = log.events.len();
+    let at = grace + 100;
+    log.add(
+        Some(1),
+        None,
+        "task_created",
+        json!({"status": "draft"}),
+        50,
+    )
+    .add(
+        Some(1),
+        None,
+        "task_status_changed",
+        json!({"from": "draft", "to": "ready"}),
+        50,
+    );
+    (log, position, (at, at + 20))
+}
+
+/// A builder that goes on from a position with the books of the waits
+/// made again from the store's rows writes the task rows of the fold of
+/// every event, though the book holds no wait settled before the tasks
+/// not settled there: a settled task row its later event folds again over
+/// a slots full freed before (a), a task with no row at the position (b),
+/// and one ready at the very time a wait ended before (c) read the waits
+/// settled over their time from the store's rows. Without them (a) and (b)
+/// write another row; in (c) the wait bears on the task by its reach
+/// alone, which its own events after the position pass.
+#[test]
+fn a_builder_going_on_from_the_books_made_again_writes_the_task_rows_of_every_event() {
+    for (case, (log, position, at), lag) in [
+        ("a", settled_task_folded_again(0), None),
+        ("b", task_of_no_row(), Some("1")),
+        ("c", ready_as_a_wait_ended(), None),
+    ] {
+        let whole = tasks_of_every_event(&log, position, at);
+        assert!(whole.contains_key("1"), "{case}");
+        let went_on = tasks_going_on(&log, position, at, lag, false);
+        assert_eq!(went_on.tasks, whole, "{case}");
+        let bare = tasks_going_on(&log, position, at, lag, true);
+        // The rows a task's fold read of the waits settled.
+        assert!(went_on.wait_rows > bare.wait_rows, "{case}");
+        assert_eq!(bare.tasks["1"] == whole["1"], case == "c", "{case}");
+    }
+}
+
+/// The fold of a task again reads of the waits settled only those over its
+/// time: with a few waits settled before it or many, making the books
+/// again and folding the task again read as many wait rows and as many
+/// events.
+#[test]
+fn folding_a_task_again_reads_as_many_wait_rows_however_many_waits_settled_before_it() {
+    let read = |old: i64| {
+        let (log, position, at) = settled_task_folded_again(old);
+        assert_eq!(
+            tasks_going_on(&log, position, at, None, false).tasks,
+            tasks_of_every_event(&log, position, at)
+        );
+        let went_on = tasks_going_on(&log, position, at, None, false);
+        (went_on.wait_rows, went_on.events)
+    };
+    let few = read(3);
+    assert_eq!(read(300), few);
+    assert!(few.0 > 0);
 }

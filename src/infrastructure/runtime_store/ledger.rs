@@ -404,6 +404,43 @@ impl LedgerStore for SqliteQueue {
         self.wait_rows_after(since, after, limit)
     }
 
+    /// SQLite picks the rows [`crate::domain::pre_claim::rows::lacks`]
+    /// keeps by their columns, and gives each with no records.
+    fn ledger_settled_waits(
+        &self,
+        held: Since,
+        from: Since,
+        until_ms: i64,
+    ) -> Result<Vec<LedgerRow>> {
+        let mut statement = self.conn.prepare(
+            "SELECT kind, key, task_id, ledger_v, built_at, inputs_through, final,
+                    legacy_values, started_at, ended_at, outcome, totals, intervals,
+                    attributes, after_claim, detail, inputs_from, '[]' AS records,
+                    subject_kind, subject_id, round, route, provider, model
+               FROM ledger_rows
+              WHERE kind=?1
+                AND subject_kind IN ('slots_full', 'claim_hold', 'claim_deferral')
+                AND final=1 AND ended_at < ?2 AND (outcome IS NULL OR outcome<>?4)
+                AND json_extract(inputs_through, '$.events') < ?3
+                AND started_at <= ?7
+                AND (ended_at >= ?5 OR json_extract(inputs_through, '$.events') >= ?6)
+              ORDER BY key",
+        )?;
+        let rows = statement.query_map(
+            params![
+                LedgerKind::Queue.as_str(),
+                held.ms,
+                held.id.as_i64(),
+                crate::domain::claim_hold::ENDED_SUPERVISOR_GONE,
+                from.ms,
+                from.id.as_i64(),
+                until_ms,
+            ],
+            ledger_row,
+        )?;
+        rows.map(|row| row?).collect()
+    }
+
     /// SQLite picks the stops out of the stored arrays: no other record is
     /// parsed.
     fn ledger_supervisor_stops(&self) -> Result<Vec<crate::domain::RunEvent>> {
@@ -860,6 +897,87 @@ mod tests {
             &[&queue_kind, &"supervisor_stopped", &"1", &0, &10],
         );
         assert!(stops.contains("kind=? AND key>?"), "{stops}");
+    }
+
+    /// The waits settled a task's fold reads besides the book made again
+    /// are those the rows read whole give
+    /// ([`crate::domain::pre_claim::rows::lacks`]): of the waits ended by
+    /// an event before where the book holds from, those over the task's
+    /// time, by their ends' times or ids and their starts; none of them
+    /// reads a record, so a row whose records hold only their ids leaves
+    /// them as they are.
+    #[test]
+    fn the_settled_waits_read_no_record() {
+        use crate::domain::ledger::testkit::{built_and_settled, ms, waits_across};
+        use crate::domain::pre_claim::rows::lacks;
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let (log, position, at) = waits_across();
+        let rows: Vec<LedgerRow> = built_and_settled(&log.events[..position], ms(at))
+            .into_iter()
+            .map(|row| LedgerRow {
+                is_final: true,
+                ..row
+            })
+            .collect();
+        for row in &rows {
+            queue.write_ledger_row(row).unwrap();
+        }
+        let since = |ms, id| Since {
+            ms,
+            id: EventId::new(id),
+        };
+        let asks = [
+            (Since::NONE, since(i64::MIN, 0), i64::MAX),
+            (Since::NONE, since(ms(100), 3), i64::MAX),
+            (since(ms(1000), 100), since(ms(100), 3), ms(115)),
+            (since(ms(140), 7), since(i64::MAX, 6), i64::MAX),
+            (since(ms(100), 3), since(i64::MIN, 0), i64::MAX),
+        ];
+        let read = |queue: &SqliteQueue| -> Vec<Vec<LedgerRow>> {
+            asks.iter()
+                .map(|(held, from, until)| {
+                    queue.ledger_settled_waits(*held, *from, *until).unwrap()
+                })
+                .collect()
+        };
+        let expected: Vec<Vec<LedgerRow>> = asks
+            .iter()
+            .map(|(held, from, until)| {
+                let mut kept: Vec<LedgerRow> = rows
+                    .iter()
+                    .filter(|row| lacks(row, *held, *from, *until))
+                    .map(|row| LedgerRow {
+                        records: Vec::new(),
+                        ..row.clone()
+                    })
+                    .collect();
+                kept.sort_by(|a, b| a.key.cmp(&b.key));
+                kept
+            })
+            .collect();
+        let keys: Vec<Vec<&str>> = expected
+            .iter()
+            .map(|rows| rows.iter().map(|row| row.key.as_str()).collect())
+            .collect();
+        // d's slots full freed (1) and e's (5); a slots full ended by a
+        // life (7, 10) or open (13, 19), a hold or a deferral open and a
+        // hold on the landings are never among them.
+        assert_eq!(
+            keys,
+            [vec!["1", "5"], vec!["5"], vec![], vec!["5"], vec!["1"]]
+        );
+        assert_eq!(read(&queue), expected);
+
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET records='[{\"id\":5}]' WHERE kind='queue' AND key='5'",
+                [],
+            )
+            .unwrap();
+        assert!(queue.ledger_rows(LedgerKind::Queue).is_err());
+        assert_eq!(read(&queue), expected);
     }
 
     /// A folded run's row round-trips with its sums in their columns, and

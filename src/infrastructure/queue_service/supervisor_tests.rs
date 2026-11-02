@@ -11,9 +11,18 @@ const RUN: &str = "11111111-1111-4111-8111-111111111111";
 /// A queue with one task claimed as run [`RUN`], starting, under the lease `token`,
 /// and the backend of its service.
 fn claimed(token: &LeaseToken) -> (tempfile::TempDir, SqliteServiceBackend) {
+    claimed_with(token, crate::infrastructure::clock::system())
+}
+
+/// [`claimed`], the task added and the service's times taken from
+/// `generators`.
+fn claimed_with(
+    token: &LeaseToken,
+    generators: crate::application::Generators,
+) -> (tempfile::TempDir, SqliteServiceBackend) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("q.db");
-    let (backend, _) = claimed_at(token, &dir, db);
+    let (backend, _) = claimed_at_with(token, &dir, db, generators);
     (dir, backend)
 }
 
@@ -38,7 +47,20 @@ fn claimed_at(
     dir: &tempfile::TempDir,
     db: PathBuf,
 ) -> (SqliteServiceBackend, SqliteQueue) {
-    let mut queue = SqliteQueue::init(&db).unwrap();
+    claimed_at_with(token, dir, db, crate::infrastructure::clock::system())
+}
+
+/// [`claimed_at`], the task added and the service's times taken from
+/// `generators`.
+fn claimed_at_with(
+    token: &LeaseToken,
+    dir: &tempfile::TempDir,
+    db: PathBuf,
+    generators: crate::application::Generators,
+) -> (SqliteServiceBackend, SqliteQueue) {
+    let mut queue = SqliteQueue::init(&db)
+        .unwrap()
+        .with_generators(generators.clone());
     let task = queue
         .add(NewTask {
             title: "t".into(),
@@ -74,7 +96,7 @@ fn claimed_at(
     let backend = SqliteServiceBackend {
         queue_dir: dir.path().to_path_buf(),
         db,
-        generators: crate::infrastructure::clock::system(),
+        generators,
         reads: Arc::new(|_, _, _| Ok(Value::Null)),
         writes: Arc::new(|_, _, _| Ok(Value::Null)),
         detail: |_, _| Value::Null,
@@ -460,6 +482,78 @@ fn the_heads_and_anchors_cross_as_the_queues_own_without_the_rows_whole() {
         *service.ops.lock().unwrap(),
         ["ledger_heads", "ledger_session_anchors", "ledger_heads"]
     );
+}
+
+/// The waits settled a task's fold reads besides the book made again cross
+/// through the service by their own operation, as the queue's own adapter
+/// reads them, with no record: a row whose records read whole no more
+/// gives them through the service too. A worker's token is refused it,
+/// the refusal recorded. The queue's and the service's times are fixed.
+#[test]
+fn the_settled_waits_cross_as_the_queues_own_without_the_rows_whole() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::LedgerKind;
+    use crate::domain::ledger::testkit::{built_and_settled, ms, waits_across};
+    use crate::domain::pre_claim::rows::Since;
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let direct = SqliteQueue::open(&backend.db)
+        .unwrap()
+        .with_generators(fixed_time());
+    let (log, position, at) = waits_across();
+    for row in built_and_settled(&log.events[..position], ms(at)) {
+        direct
+            .write_ledger_row(&crate::domain::ledger::LedgerRow {
+                is_final: true,
+                ..row
+            })
+            .unwrap();
+    }
+    direct
+        .conn
+        .execute(
+            "UPDATE ledger_rows SET records='[{\"id\":5}]' WHERE kind='queue' AND key='5'",
+            [],
+        )
+        .unwrap();
+    assert!(direct.ledger_rows(LedgerKind::Queue).is_err());
+    let from = Since {
+        ms: i64::MIN,
+        id: crate::domain::EventId::new(0),
+    };
+    let settled = direct
+        .ledger_settled_waits(Since::NONE, from, i64::MAX)
+        .unwrap();
+    assert_eq!(settled.len(), 2);
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let worker = Principal::worker(&RunId::new(RUN).unwrap(), crate::domain::TaskId::new(1));
+    let worker_token = token_of(&backend, &worker);
+    let args = json!([[i64::MAX, i64::MAX], [i64::MIN, 0], i64::MAX]);
+    let denied = call(&backend, &worker_token, "ledger_settled_waits", args);
+    assert_eq!(
+        denied.error.as_ref().map(|error| error.code),
+        Some(ServiceErrorCode::AuthorizationDenied),
+        "{denied:?}"
+    );
+    assert_eq!(events(&backend, "authorization_denied").len(), 1);
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    assert_eq!(
+        queue
+            .ledger_settled_waits(Since::NONE, from, i64::MAX)
+            .unwrap(),
+        settled
+    );
+    assert_eq!(*service.ops.lock().unwrap(), ["ledger_settled_waits"]);
 }
 
 /// The heads and the anchors are the supervisor principal's reads alone:

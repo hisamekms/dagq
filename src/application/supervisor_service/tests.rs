@@ -2856,6 +2856,120 @@ fn the_heads_and_anchors_past_the_answers_limit_are_read_in_pages() {
     );
 }
 
+/// A service that answers the queue rows of the waits settled, `rows` of
+/// them, a page by key, and refuses a page of more than `largest` as too
+/// large to answer; it notes each page size asked.
+struct PagedSettledWaits {
+    rows: usize,
+    largest: usize,
+    asked: std::sync::Mutex<Vec<usize>>,
+}
+
+impl PagedSettledWaits {
+    /// The `n`th row: a queue row of a wait, its key `n` in five digits.
+    fn row(n: usize) -> crate::domain::ledger::LedgerRow {
+        use crate::domain::ledger::testkit::{built_and_settled, ms, waits_across};
+        let (log, position, at) = waits_across();
+        let row = built_and_settled(&log.events[..position], ms(at))
+            .into_iter()
+            .find(|row| row.kind == crate::domain::ledger::LedgerKind::Queue && row.key == "1")
+            .unwrap();
+        crate::domain::ledger::LedgerRow {
+            key: format!("{n:05}"),
+            records: Vec::new(),
+            ..row
+        }
+    }
+}
+
+impl ServiceCaller for PagedSettledWaits {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(use_case, UseCase::Supervisor);
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        assert_eq!(params.op, "ledger_settled_waits");
+        assert_eq!(
+            params.args[..3],
+            [
+                serde_json::json!([1_000, 50]),
+                serde_json::json!([10, 3]),
+                serde_json::json!(2_000)
+            ]
+        );
+        let after = params.args[3].as_str().map(str::to_owned);
+        let page = usize::try_from(params.args[4].as_u64().unwrap()).unwrap();
+        self.asked.lock().unwrap().push(page);
+        if page > self.largest {
+            return Err(service_error(&ServiceError {
+                code: ServiceErrorCode::ResponseTooLarge,
+                message: "too large".into(),
+                denied: None,
+                kind: None,
+                rejected: false,
+                held: None,
+            }));
+        }
+        let rows: Vec<_> = (1..=self.rows)
+            .filter(|n| {
+                after
+                    .as_ref()
+                    .is_none_or(|after| format!("{n:05}") > *after)
+            })
+            .take(page)
+            .map(Self::row)
+            .collect();
+        Ok(serde_json::to_value(rows)?)
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// The queue rows of the waits settled a task's fold reads are read a
+/// page at a time, each after the last row of the page before, a page past
+/// the answer's limit asked again at a quarter of its size: so more of
+/// them than one answer holds are read whole.
+#[test]
+fn the_settled_waits_past_the_answers_limit_are_read_in_pages() {
+    use crate::application::LedgerStore;
+    use crate::domain::pre_claim::rows::Since;
+    let service = Arc::new(PagedSettledWaits {
+        rows: 700,
+        largest: 200,
+        asked: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        ActorContext::instance(ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let since = |ms, id| Since {
+        ms,
+        id: crate::domain::EventId::new(id),
+    };
+    let rows = queue
+        .ledger_settled_waits(since(1_000, 50), since(10, 3), 2_000)
+        .unwrap();
+    assert_eq!(
+        rows,
+        (1..=700).map(PagedSettledWaits::row).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        *service.asked.lock().unwrap(),
+        [500, 125, 125, 125, 125, 125, 125]
+    );
+}
+
 /// A page of the anchors holds every anchor of each of its rows, at most
 /// the rows asked for, after the row named.
 #[test]
