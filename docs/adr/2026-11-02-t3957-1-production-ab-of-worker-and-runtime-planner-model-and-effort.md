@@ -9,6 +9,8 @@ accepted_on: 2026-11-02
 amends:
   - adr-0079 decision 4
   - adr-0079 decision 7
+amended_by:
+  - adr-t4005-1
 owners:
   - hisamekms
 tags:

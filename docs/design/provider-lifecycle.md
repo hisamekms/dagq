@@ -30,6 +30,7 @@ related:
   - adr-0027
   - design-supervisor-lifecycle
   - adr-t803-1
+  - adr-t4005-1
 ---
 
 
@@ -196,6 +197,8 @@ ADR-t813-2決定2〜6と、切り替えを止める設定の[ADR-t1857-1](../adr
 - 落とし穴: 切り替えた後は会話が引き継がれない（`domain::turn::new_session_prompt`）。
 - runtimeのplannerは同じ壁で待つが、providerは切り替えない（[Plan planners](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)）。
 - reviewの起動し直しは[Review](supervisor-lifecycle/review.md)と[Goal review](supervisor-lifecycle/goal-review.md)、設定は[Run environment](supervisor-lifecycle/run-environment.md)。
+- 約束: providerの組の試し（[ADR-t4005-1](../adr/2026-11-02-t4005-1-production-ab-of-worker-and-review-provider-pairs.md)）は切り替えの規則を変えず、切り替えたrunも割り当てた群のまま主の集計に数える（決定6・7）。
+  reviewのjobの切り替えは群の代表のproviderでなく、そのjobの予定providerと比べて判じる（[Review](supervisor-lifecycle/review.md)の「reviewのprovider」）。
 - 境界: inboxは切り替えと控えの外にある（[ADR-t1181-1](../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定4）。
   runtimeはinboxを起動しないので、控えはinboxを止めず、inboxはClaudeでしか動けない役割に数えない。
   Claudeの控えで`queue_hold`のaskを開く条件とCodexだけの控えで開かないことはinboxのproviderで変わらず、どちらのinboxもそのaskに答えられる。

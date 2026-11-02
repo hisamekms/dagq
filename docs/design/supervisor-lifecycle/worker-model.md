@@ -12,6 +12,7 @@ related:
   - design-supervisor-lifecycle-plan-review
   - adr-0079
   - adr-t3957-1
+  - adr-t4005-1
   - design-supervisor-lifecycle-actor-model
 ---
 
@@ -104,9 +105,18 @@ Codexのworkerは段のClaudeのmodelを使わず（[provider-lifecycle](../prov
 - **対象の限定**: mechanicalかつ下位3分の1に限るかは設定で選び、限らないときも予測の無いtaskは対象にしない。
 - **群の置き場**: 群は台帳に専用の欄を足さず、runの属性の組に置く（一般のA/Bへ移せる形。決定7）。
 
+[ADR-t4005-1](../../adr/2026-11-02-t4005-1-production-ab-of-worker-and-review-provider-pairs.md)（ADR-t3957-1の決定2をamends）は、model・effortの試しと別の試しとして、workerとそのrunのreviewのproviderの組を群に分けると決めた。
+群を引く場所はmodel・effortの試しと同じclaimのtransactionで、次を約束する。
+
+- **独立の割り当て**: providerの組の群もtaskのhashで決め、名前の違う試しなのでmodel・effortの群と互いに独立になり、一度持った群はresume・revise・retryで変えない。
+- **重なり**: Codexで動く群のclaimは今どおりmodel・effortの試しの外で、Claudeで動く群のclaimには両方の試しの群が重なりうるので、両方をrunの属性の組に記録する。
+- **試しの外**: taskのproviderがrepositoryの既定でないtask・headlessでないclaim・Spikeは群nullとその理由を記録する。
+  既定のproviderを明示したtaskは既定と見分けられず対象に入る。
+
 ## 判定
 
 群ごとの比較は[stats](commands.md)と[kpi](commands.md)のrunの層（runの最初の`run_claimed`の値で層別する）で読む。
 判定は人とplannerが行い、runtimeは自動で止めたり全面適用したりしない（ADR-0079の決定6）。
 止めるのは`[worker.trial]`を無効に戻すこと。
 守る指標の差が大きく超えたときに止める判定も人とplannerが行い、自動では止めない（[ADR-t3957-1](../../adr/2026-11-02-t3957-1-production-ab-of-worker-and-runtime-planner-model-and-effort.md)決定6）。
+providerの組の試しは割り当てた群を主に、実際に動いた組（workerもreviewのjobも予定のproviderから切り替えなかったrun）を副に読み、止める・広げる判定も人とplannerが行う（[ADR-t4005-1](../../adr/2026-11-02-t4005-1-production-ab-of-worker-and-review-provider-pairs.md)決定7・10）。

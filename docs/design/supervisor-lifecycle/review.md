@@ -36,6 +36,7 @@ related:
   - design-supervisor-lifecycle-review-builtin
   - design-supervisor-lifecycle-review-programs
   - adr-t3592-1
+  - adr-t4005-1
 ---
 
 # Review (supervisor)
@@ -116,6 +117,10 @@ validationを通ったrun（awaiting_integration）
 ## reviewのprovider
 
 - 控えるのは実際に失敗したproviderだけで、起動できないjobは他のjobの答えを保ったまま待つ（[Queue hold](queue-hold.md)）。
+- **runの群**: providerの組の試しを有効にしたrepositoryでは、reviewのjobのproviderはrunの群に従う（[ADR-t4005-1](../../adr/2026-11-02-t4005-1-production-ab-of-worker-and-review-provider-pairs.md)決定5）。
+  Codexで実装した群のrunでは、全体の判定とproviderがCodexのsubagent（明示したものと役割の設定を継ぐもの）をClaudeで起動し、Claudeの側のmodelとeffortを渡す。
+  providerをClaudeと書いたsubagentと、もう一方の群のrunは設定のまま起動する。
+- **予定provider**: 切り替えはjobごとに、そのjobに群と設定を当てたfallback前の予定providerと実際のproviderを比べて判じ、群の上書きと設定どおりの混在は切り替えでない（決定6）。
 
 ## reviewのsubagent<a id="reviewのsubagent"></a>
 
