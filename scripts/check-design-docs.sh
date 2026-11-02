@@ -9,15 +9,26 @@
 #
 # A document over a budget today is named in the allow list
 # (.config/design-docs-allow.toml) with the value it has, which is then its
-# limit, so it may shrink but not grow. Two checks:
+# limit, so it may shrink but not grow. A map document whose layers are fixed
+# is named in the tight list (.config/design-docs-tight.toml), which gives it
+# the tight budget of a map document instead of the map budget. Checks:
 #
-# (i)  the tree: a document over a budget fails unless its item allows the
-#      value; an item of a document that does not exist, and an item's value
-#      for a measure the document is within the budget of, fail too (remove
-#      them in the change that brings the document within the budget);
-# (ii) the allow list against the base: an item or a value the base's list
-#      has not, and a value larger than the base's, fail (lowering a value or
-#      removing an item passes). Skipped when the base has no allow list.
+# (i)   the tree: a document over a budget fails unless its item allows the
+#       value; an item of a document that does not exist, and an item's value
+#       for a measure the document is within the budget of, fail too (remove
+#       them in the change that brings the document within the budget);
+# (ii)  the allow list against the base: an item or a value the base's list
+#       has not, and a value larger than the base's, fail (lowering a value or
+#       removing an item passes). Skipped when the base has no allow list;
+# (iii) the tight list: a document of an item over the tight budget fails, as
+#       does an item of a document that does not exist, of a concept
+#       document, or of a document in the allow list too;
+# (iv)  the tight list against the base: an item of the base's list missing
+#       from the list fails while its document exists (an item may be added
+#       but not removed, nor its path changed); when its document is gone it
+#       may go, but when git finds the document renamed (`git diff -M` from
+#       the base to the work tree) the new path must be in the list. Skipped
+#       when the base has no tight list.
 #
 # The tree checked is the git work tree of the cwd (`git rev-parse
 # --show-toplevel`), so a copy of the script run elsewhere with the cwd in a
@@ -29,9 +40,10 @@
 # Usage: sh scripts/check-design-docs.sh [--base REF]
 #        sh scripts/check-design-docs.sh --print-allow
 #        sh scripts/check-design-docs.sh --self-test
-#   --base REF     the commit whose allow list (ii) compares with (default:
+#   --base REF     the commit whose lists (ii) and (iv) compare with (default:
 #                  the merge base of HEAD with main, or with origin/main when
-#                  there is no main; (ii) is skipped when neither exists)
+#                  there is no main; (ii) and (iv) are skipped when neither
+#                  exists)
 #   --print-allow  print the allow-list items of the tree as it is (every
 #                  measure over its budget with its value), for the first list
 #   --self-test    check the script on the fixtures under
@@ -39,8 +51,8 @@
 #                  repositories, and remove them
 #
 # Exit 0 when every document is within its budget or its item, 1 when one is
-# not or the allow list breaks (i) or (ii) (each document, its value and the
-# limit go to stderr), 2 on a usage error, a malformed allow list, a base that
+# not or a list breaks (i) to (iv) (each document, its value and the limit go
+# to stderr), 2 on a usage error, a malformed list, a base that
 # is not a commit, or no docs/design.
 set -eu
 
@@ -50,11 +62,13 @@ script=$here/$(basename "$0")
 
 # The budgets of docs/development/documents.md, section "design".
 map_limit=30720
+tight_limit=20480
 concept_limit=16384
 line_limit=1024
 task_limit=0
 concept_docs="docs/design/overview.md docs/design/supervisor-lifecycle.md"
 allow_path=.config/design-docs-allow.toml
+tight_path=.config/design-docs-tight.toml
 
 usage() {
   echo "$me: $1" >&2
@@ -62,33 +76,40 @@ usage() {
   exit 2
 }
 
-# measure <mode> <allow> <base-allow or ""> <sizes>, with the documents as
-# the remaining arguments. mode is check or print.
+# measure <mode> <allow> <base-allow or ""> <tight> <base-tight or "">
+# <renames> <sizes>, with the documents as the remaining arguments. mode is
+# check or print; renames has a line "old<TAB>new" for each document git finds
+# renamed from the base.
 measure() {
-  mode=$1 allowf=$2 basef=$3 sizesf=$4
-  shift 4
+  mode=$1 allowf=$2 basef=$3 tightf=$4 tbasef=$5 renamesf=$6 sizesf=$7
+  shift 7
   LC_ALL=C awk -v me="$me" -v mode="$mode" -v allowf="$allowf" -v basef="$basef" \
-    -v sizesf="$sizesf" -v allowname="$allow_path" -v concept="$concept_docs" \
-    -v map_limit="$map_limit" -v concept_limit="$concept_limit" \
-    -v line_limit="$line_limit" -v task_limit="$task_limit" '
-function perr(msg) { printf "%s: %s:%d: %s\n", me, (FILENAME == basef ? "the base " allowname : allowname), FNR, msg > "/dev/stderr"; malformed = 1 }
+    -v tightf="$tightf" -v tbasef="$tbasef" -v renamesf="$renamesf" \
+    -v sizesf="$sizesf" -v allowname="$allow_path" -v tightname="$tight_path" \
+    -v concept="$concept_docs" -v map_limit="$map_limit" -v tight_limit="$tight_limit" \
+    -v concept_limit="$concept_limit" -v line_limit="$line_limit" -v task_limit="$task_limit" '
+function perr(msg, nr) { printf "%s: %s:%d: %s\n", me, lname, (nr == "" ? FNR : nr), msg > "/dev/stderr"; malformed = 1 }
 function fail(msg) { print me ": " msg > "/dev/stderr"; bad = 1 }
+# w is head or base for the allow list, thead or tbase for the tight list.
 function close_item(w) {
   if (!initem) return
   initem = 0
-  if (ipath == "") { perr("an item has no path"); return }
-  if (!ikeys) { perr("item " ipath " has no size, line or tasks"); return }
-  if ((w, ipath) in listed) { perr("item " ipath " is listed twice"); return }
+  if (ipath == "") { perr("an item has no path", inr); return }
+  if (w !~ /^t/ && !ikeys) { perr("item " ipath " has no size, line or tasks", inr); return }
+  if ((w, ipath) in listed) { perr("item " ipath " is listed twice", inr); return }
   listed[w, ipath] = 1
   if (w == "head") hpaths[++nh] = ipath
+  else if (w == "thead") tpaths[++nt] = ipath
+  else if (w == "tbase") tbpaths[++ntb] = ipath
   for (k in ival) { val[w, ipath, k] = ival[k]; has[w, ipath, k] = 1 }
 }
-# One line of an allow list (w is head or base).
+# One line of a list (w as for close_item). An item of the tight list has
+# only its path.
 function allow_line(w,    line, key, v) {
   line = $0
   sub(/^[ \t]+/, "", line)
   if (line == "" || substr(line, 1, 1) == "#") return
-  if (line ~ /^\[\[doc\]\][ \t]*(#.*)?$/) { close_item(w); initem = 1; ipath = ""; ikeys = 0; split("", ival); return }
+  if (line ~ /^\[\[doc\]\][ \t]*(#.*)?$/) { close_item(w); initem = 1; inr = FNR; ipath = ""; ikeys = 0; split("", ival); return }
   if (!initem) { perr("a key outside a [[doc]] item"); return }
   if (line !~ /=/) { perr("not a key = value line"); return }
   key = line; sub(/[ \t]*=.*/, "", key)
@@ -97,7 +118,7 @@ function allow_line(w,    line, key, v) {
     if (ipath != "") { perr("path is given twice in one item"); return }
     if (v !~ /^"[^"\\]+"$/) { perr("path is not a string"); return }
     ipath = substr(v, 2, length(v) - 2)
-  } else if (key == "size" || key == "line" || key == "tasks") {
+  } else if (w !~ /^t/ && (key == "size" || key == "line" || key == "tasks")) {
     if (key in ival) { perr("key " key " is given twice in one item"); return }
     if (v !~ /^[0-9]+$/) { perr(key " is not a number"); return }
     ival[key] = v + 0; ikeys++
@@ -175,7 +196,8 @@ function finish(    i) {
   if (size[cur] < 0) size[cur] = 0
   cur = ""
 }
-function check_metric(d, m, v, budget, unit,    lim, i, allowed) {
+# budget_name says which budget the size of d is measured against.
+function check_metric(d, m, v, budget, unit,    lim, i, allowed, why) {
   allowed = (("head", d, m) in has)
   if (mode == "print") {
     if (v > budget) printf "%s = %d\n", m, v
@@ -187,7 +209,7 @@ function check_metric(d, m, v, budget, unit,    lim, i, allowed) {
   }
   if (allowed && v <= val["head", d, m]) return
   lim = allowed ? val["head", d, m] : budget
-  why = allowed ? "the limit of its item in " allowname : "the budget"
+  why = allowed ? "the limit of its item in " allowname : (m == "size" ? budget_name : "the budget")
   if (m == "line") {
     for (i = 1; i <= nlong[d]; i++)
       if (longlen[d, i] > lim) fail(d ":" longnr[d, i] ": a line of " longlen[d, i] " bytes, over " why " of " lim " bytes")
@@ -200,10 +222,17 @@ BEGIN {
   n = split(concept, c, " ")
   for (i = 1; i <= n; i++) isconcept[c[i]] = 1
 }
-FILENAME == allowf { aw = "head"; allow_line(aw); next }
-FILENAME == basef { if (aw != "base") { close_item(aw); aw = "base" } allow_line(aw); next }
+FILENAME != lastf {
+  if (aw != "") close_item(aw)
+  aw = ""; lastf = FILENAME
+  if (FILENAME == allowf) { aw = "head"; lname = allowname }
+  else if (FILENAME == basef) { aw = "base"; lname = "the base " allowname }
+  else if (FILENAME == tightf) { aw = "thead"; lname = tightname }
+  else if (FILENAME == tbasef) { aw = "tbase"; lname = "the base " tightname }
+}
+aw != "" { allow_line(aw); next }
+FILENAME == renamesf { split($0, a, "\t"); renamed[a[1]] = a[2]; next }
 FILENAME == sizesf {
-  if (aw != "") { close_item(aw); aw = "" }
   split($0, a, "\t"); docs[++nd] = a[1]; total[a[1]] = a[2] + 0; isdoc[a[1]] = 1
   next
 }
@@ -232,13 +261,28 @@ END {
       if (size[d] <= (d in isconcept ? concept_limit : map_limit) && maxline[d] + 0 <= line_limit && tasks[d] + 0 <= task_limit) continue
       printf "\n[[doc]]\npath = \"%s\"\n", d
     }
-    check_metric(d, "size", size[d], (d in isconcept) ? concept_limit : map_limit, "bytes")
+    if (d in isconcept) { sb = concept_limit; budget_name = "the budget" }
+    else if (mode == "check" && (("thead", d) in listed) && !(("head", d) in listed)) { sb = tight_limit; budget_name = "the tight budget of its item in " tightname }
+    else { sb = map_limit; budget_name = "the budget" }
+    check_metric(d, "size", size[d], sb, "bytes")
     check_metric(d, "line", maxline[d] + 0, line_limit, "bytes")
     check_metric(d, "tasks", tasks[d] + 0, task_limit, "task numbers")
   }
   if (mode == "print") exit 0
   for (i = 1; i <= nh; i++)
     if (!(hpaths[i] in isdoc)) fail(hpaths[i] ": in " allowname " but not a document under docs/design; remove its item")
+  for (i = 1; i <= nt; i++) {
+    p = tpaths[i]
+    if (!(p in isdoc)) fail(p ": in " tightname " but not a document under docs/design; remove its item, or if the document was renamed, replace its path with the new one")
+    else if (p in isconcept) fail(p ": in " tightname " but a concept document; the tight budget is for map documents only")
+    if (("head", p) in listed) fail(p ": in both " allowname " and " tightname "; a document in the allow list may not be in the tight list")
+  }
+  for (i = 1; i <= ntb; i++) {
+    p = tbpaths[i]
+    if (("thead", p) in listed) continue
+    if (p in isdoc) fail(p ": in the base " tightname " but not in " tightname "; an item may be added but not removed, nor its path changed while the document exists")
+    else if ((p in renamed) && !(("thead", renamed[p]) in listed)) fail(p ": in the base " tightname " and renamed to " renamed[p] "; replace its path in " tightname " with " renamed[p])
+  }
   if (basef != "") {
     for (i = 1; i <= nh; i++) {
       p = hpaths[i]
@@ -257,11 +301,12 @@ END {
     print "  2. move a detail the code shows and nothing else writes to a doc comment next to its definition (the map line may point there)" > "/dev/stderr"
     print "  3. if it still does not fit, split the document (the new one keeps the map budget and the old one links to it by a relative link)" > "/dev/stderr"
     print "  4. do not delete a map line nothing else writes (entry points, promises and pitfalls the code does not show, rules); before deleting, check where the same fact stays (a document or a doc comment)" > "/dev/stderr"
-    print "  an allow-list item may only go down or out; the budgets and details: docs/development/documents.md, section design" > "/dev/stderr"
+    print "  an allow-list item may only go down or out; a tight-list item may only be added (its path goes out only with its document, or changes with its name)" > "/dev/stderr"
+    print "  the budgets and details: docs/development/documents.md, section design" > "/dev/stderr"
     exit 1
   }
-  printf "%s: %d documents under docs/design, %d in %s: ok\n", me, nd, nh, allowname
-}' "$allowf" ${basef:+"$basef"} "$sizesf" "$@"
+  printf "%s: %d documents under docs/design, %d in %s, %d in %s: ok\n", me, nd, nh, allowname, nt, tightname
+}' "$allowf" ${basef:+"$basef"} "$tightf" ${tbasef:+"$tbasef"} "$renamesf" "$sizesf" "$@"
 }
 
 run() {
@@ -275,8 +320,10 @@ run() {
   work=$(mktemp -d "${TMPDIR:-/tmp}/$me.XXXXXX")
   trap 'rm -rf "$work"' EXIT
   if [ -f "$allow_path" ]; then cp "$allow_path" "$work/allow"; else : >"$work/allow"; fi
+  if [ -f "$tight_path" ]; then cp "$tight_path" "$work/tight"; else : >"$work/tight"; fi
+  : >"$work/renames"
 
-  basef=""
+  basef="" tbasef=""
   if [ "$mode" = check ]; then
     if [ -n "$base" ]; then
       git rev-parse --verify --quiet "$base^{commit}" >/dev/null || {
@@ -300,6 +347,14 @@ run() {
     else
       echo "$me: the base $base has no $allow_path: the allow list is not compared with a base"
     fi
+    if [ -n "$base" ] && git cat-file -e "$base:$tight_path" 2>/dev/null; then
+      git show "$base:$tight_path" >"$work/tbase" || exit 2
+      tbasef=$work/tbase
+      git -c core.quotePath=false diff -M --name-status "$base" -- docs/design >"$work/diff" || exit 2
+      awk -F '\t' '$1 ~ /^R/ { print $2 "\t" $3 }' "$work/diff" >"$work/renames"
+    elif [ -n "$base" ]; then
+      echo "$me: the base $base has no $tight_path: the tight list is not compared with a base"
+    fi
   fi
 
   find docs/design -type f -name '*.md' | LC_ALL=C sort >"$work/docs"
@@ -317,7 +372,7 @@ run() {
   set +f
   IFS=$oldifs
   set +e
-  measure "$mode" "$work/allow" "$basef" "$work/sizes" "$@"
+  measure "$mode" "$work/allow" "$basef" "$work/tight" "$tbasef" "$work/renames" "$work/sizes" "$@"
   status=$?
   set -e
   exit "$status"
@@ -540,6 +595,65 @@ EOF
   has default_base_added "docs/design/new.md: tasks = 1 is in .config/design-docs-allow.toml but not in the base list"
   check base_not_a_commit 2 --base no-such-ref
 
+  # (iii) The tight list against the tree.
+  fresh
+  : >"$r/$d/tight.md" && pad "$r/$d/tight.md" 20480
+  : >"$r/$d/loose.md" && pad "$r/$d/loose.md" 30720
+  tight() { cat >"$r/.config/design-docs-tight.toml"; }
+  printf '# fixture\n[[doc]]\npath = "docs/design/tight.md"  # fixed\n' | tight
+  check tight_at_its_budget 0
+  has tight_counted "1 in .config/design-docs-tight.toml: ok"
+  pad "$r/$d/tight.md" 20481
+  check tight_one_byte_over 1
+  has tight_over "$d/tight.md: 20481 bytes without the frontmatter, over the tight budget of its item in .config/design-docs-tight.toml of 20480 bytes"
+  lacks unlisted_keeps_the_map_budget "$d/loose.md"
+  : >"$r/$d/tight.md" && pad "$r/$d/tight.md" 100
+  : >"$r/$d/big.md" && pad "$r/$d/big.md" 40000
+  printf '[[doc]]\npath = "docs/design/big.md"\nsize = 40000\n' | allow
+  printf '[[doc]]\npath = "docs/design/big.md"\n\n[[doc]]\npath = "docs/design/overview.md"\n\n[[doc]]\npath = "docs/design/gone.md"\n' | tight
+  : >"$r/$d/overview.md" && pad "$r/$d/overview.md" 100
+  check tight_items_not_allowed 1
+  has tight_and_allow "docs/design/big.md: in both .config/design-docs-allow.toml and .config/design-docs-tight.toml"
+  has tight_concept "docs/design/overview.md: in .config/design-docs-tight.toml but a concept document"
+  has tight_gone "docs/design/gone.md: in .config/design-docs-tight.toml but not a document under docs/design"
+  printf '[[doc]]\npath = "docs/design/tight.md"\nsize = 100\n' | tight
+  check tight_item_with_a_size 2
+  printf '[[doc]]\n' | tight
+  check tight_item_without_a_path 2
+
+  # (iv) The tight list against the base's.
+  fresh
+  : >"$r/$d/a.md" && pad "$r/$d/a.md" 100
+  : >"$r/$d/b.md" && pad "$r/$d/b.md" 200
+  : >"$r/$d/c.md" && pad "$r/$d/c.md" 300
+  printf '[[doc]]\npath = "docs/design/a.md"\n' | tight
+  check no_base_tight_list_skips_the_comparison 0
+  has tight_skipped "has no .config/design-docs-tight.toml"
+  g add -A && g commit -q -m 'tight list'
+  base=$(g rev-parse HEAD)
+  check tight_same_as_the_base 0 --base "$base"
+  printf '[[doc]]\npath = "docs/design/a.md"\n\n[[doc]]\npath = "docs/design/b.md"\n' | tight
+  check tight_item_added 0 --base "$base"
+  : | tight
+  check tight_item_removed 1 --base "$base"
+  has tight_removed "docs/design/a.md: in the base .config/design-docs-tight.toml but not in .config/design-docs-tight.toml"
+  printf '[[doc]]\npath = "docs/design/b.md"\n' | tight
+  check tight_path_changed 1 --base "$base"
+  has tight_changed "docs/design/a.md: in the base .config/design-docs-tight.toml but not in .config/design-docs-tight.toml"
+  rm "$r/$d/a.md"
+  : | tight
+  check tight_item_of_a_removed_document 0 --base "$base"
+  g reset -q --hard "$base"
+  g mv "$d/a.md" "$d/renamed.md"
+  g commit -q -m rename
+  check tight_renamed_but_old_path_kept 1 --base "$base"
+  has tight_renamed_old_kept "docs/design/a.md: in .config/design-docs-tight.toml but not a document under docs/design"
+  : | tight
+  check tight_renamed_and_removed 1 --base "$base"
+  has tight_renamed_removed "docs/design/a.md: in the base .config/design-docs-tight.toml and renamed to docs/design/renamed.md"
+  printf '[[doc]]\npath = "docs/design/renamed.md"\n' | tight
+  check tight_renamed_and_replaced 0 --base "$base"
+
   # An item of a gone document with no document left, and a path with a blank.
   fresh
   rm "$r/$d/ok.md"
@@ -574,7 +688,7 @@ esac
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) [ $# -ge 2 ] || usage "--base needs a revision"; base=$2; shift 2 ;;
-    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
     *) usage "unknown argument: $1" ;;
   esac
 done

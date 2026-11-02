@@ -1,0 +1,15 @@
+# The map documents under docs/design whose layers are fixed, for
+# scripts/check-design-docs.sh: each named document is held to the tight
+# budget of a map document (20480 bytes without the frontmatter) instead of
+# the map budget. The budgets, how they were chosen and how this list is kept
+# are in docs/development/documents.md, section "design" ("形と予算").
+# Each item names one map document:
+#
+# [[doc]]
+# path = "docs/design/x.md"
+#
+# The change that fixes a document's layers adds its item. An item may be
+# added but not removed nor its path changed (the check compares this list
+# with the base's): the item of a deleted document goes with it, and a renamed
+# document's item takes the new path in the same change. A document in
+# .config/design-docs-allow.toml or a concept document is not named here.

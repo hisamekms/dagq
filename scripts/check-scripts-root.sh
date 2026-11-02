@@ -52,6 +52,8 @@ check-e2e-quarantine e2e_quarantine_malformed
 check-agents-md-size agents_md_too_big
 check-frontmatter-dates frontmatter_date_comment
 check-design-docs design_doc_too_big
+check-design-docs design_doc_tight_too_big
+check-design-docs design_doc_tight_item_removed
 check-design-sentences design_doc_two_sentences_on_a_line
 check-test-rules test_own_wait_for_a_file
 check-it-added-tests it_test_without_boundary
@@ -91,6 +93,26 @@ violate_frontmatter_date_comment() {
 
 violate_design_doc_too_big() {
   awk 'BEGIN { print "# fixture"; for (i = 1; i <= 500; i++) print "padding line for check-scripts-root, over the size budget of a design document" }' >docs/design/zz-scripts-root-fixture.md
+}
+
+# A map document of the tight list over the tight budget, within the map one.
+violate_design_doc_tight_too_big() {
+  awk 'BEGIN { print "# fixture"; for (i = 1; i <= 300; i++) print "padding line for check-scripts-root, over the tight budget of a design document" }' >docs/design/zz-scripts-root-tight.md &&
+    printf '\n[[doc]]\npath = "docs/design/zz-scripts-root-tight.md"\n' >>.config/design-docs-tight.toml
+}
+
+# The script compares the tight list with the base's (the merge base with
+# main), so the base is a commit on a branch of its own naming a document,
+# with main pinned at it, and the item is removed in the working tree.
+# reset_clone takes the branch and the pin out again.
+violate_design_doc_tight_item_removed() {
+  cp .config/design-docs-tight.toml "$tmp/tight-before" &&
+    printf '\n[[doc]]\npath = "docs/design/README.md"\n' >>.config/design-docs-tight.toml &&
+    git checkout --quiet -b zz-scripts-root-commits &&
+    git -c user.name="$me" -c user.email="$me@localhost" -c commit.gpgsign=false \
+      commit --quiet --no-verify -m 'chore: tight list fixture' .config/design-docs-tight.toml &&
+    git update-ref refs/heads/main "$(git rev-parse HEAD)" &&
+    cp "$tmp/tight-before" .config/design-docs-tight.toml
 }
 
 # The script checks only the lines added since the merge base with main, so
@@ -238,7 +260,8 @@ while read -r s c; do
       ;;
   esac
   (cd "$clone" && "violate_$c") </dev/null || prep_fail "cannot put $c into the clone"
-  # Nothing is committed but by violate_commit_message_prefix: the other
+  # Nothing is committed but by violate_commit_message_prefix and
+  # violate_design_doc_tight_item_removed: the other
   # scripts read the working tree.
   expect 1 "$s with $c in the clone" "$clone" "$bin/$s.sh"
   expect 0 "$s in $repo while the clone has $c" "$repo" "$repo/scripts/$s.sh"
