@@ -11,6 +11,7 @@ related:
   - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-plan-review
   - adr-0079
+  - adr-t3957-1
   - design-supervisor-lifecycle-actor-model
 ---
 
@@ -75,6 +76,7 @@ Codexのworkerは段のClaudeのmodelを使わず（[provider-lifecycle](../prov
 - **取り下げた差し戻し**: `revise_requested`の後に同じattemptの`revise_unsent`がある（差し戻しを打てなかった）ものは、sessionを開いたeventに数えない（`worker_model`の`openings`）。
   その段上げは直前の値にも、taskへの引き継ぎにも、`stats`の段上げの件数にも入らず、その後の人の`send_back`によるresumeは実際に走っていたsessionから1段上げる。
 - **taskに引き継ぐ**: 上げた段はそのtaskの以後のrun（retry、引き継ぐretryを含む）に引き継ぐ（`WorkerSession::inheriting`）。
+- **群の候補から上げる**: 試しの群の候補は段の上の組だけを受け付け（段の外の組は上がらないため）、段上げは群の候補の段から次の段へ上げて群を保つ（[ADR-t3957-1](../../adr/2026-11-02-t3957-1-production-ab-of-worker-and-runtime-planner-model-and-effort.md)決定2）。
 - **層**: `kpi`のmodel・effortの層はrunの最初の`run_claimed`の値で分けるので、resume・reviseで上げた段は層に出ず、retryで引き継いだ段は出る。
 
 ## 限定の試し（`[worker.trial]`）
@@ -91,8 +93,20 @@ Codexのworkerは段のClaudeのmodelを使わず（[provider-lifecycle](../prov
 - **対象と割り当て**: 群を持たないtaskのうち、`choose`の条件に当たるものが、前に群を持ったtaskと交互の群になる。
 - **対象外**: 条件に当たらないtaskは既定のまま（群はnull）。
 
+[ADR-t3957-1](../../adr/2026-11-02-t3957-1-production-ab-of-worker-and-runtime-planner-model-and-effort.md)（ADR-0079の決定4をamends）は、試しを割合と候補の組を設定で受ける本番のA/Bにすると決めた。
+上の交互の割り当ては`choose`が今していることで、この決定の実装が入ると次の約束に置き換わる。
+入口は同じclaimのtransactionの`choose`のままにする。
+
+- **決定的な割り当て**: 群をまだ持たないtaskは、試しの名前とtaskのIDのhashで群を決め、claimの順や並行に依らない。
+  一度持った群はresume・revise・retryで変えず、割合や候補や試しの名前を後で変えても保つ。
+- **候補**: controlとtreatmentはそれぞれ段の上のmodelとeffortの組で、providerを含まない（Codexで動くclaimは今どおり群null）。
+  holdの解除がmodelを選んだtaskは今どおり群null。
+- **対象の限定**: mechanicalかつ下位3分の1に限るかは設定で選び、限らないときも予測の無いtaskは対象にしない。
+- **群の置き場**: 群は台帳に専用の欄を足さず、runの属性の組に置く（一般のA/Bへ移せる形。決定7）。
+
 ## 判定
 
 群ごとの比較は[stats](commands.md)と[kpi](commands.md)のrunの層（runの最初の`run_claimed`の値で層別する）で読む。
 判定は人とplannerが行い、runtimeは自動で止めたり全面適用したりしない（ADR-0079の決定6）。
 止めるのは`[worker.trial]`を無効に戻すこと。
+守る指標の差が大きく超えたときに止める判定も人とplannerが行い、自動では止めない（[ADR-t3957-1](../../adr/2026-11-02-t3957-1-production-ab-of-worker-and-runtime-planner-model-and-effort.md)決定6）。

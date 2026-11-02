@@ -19,6 +19,7 @@ related:
   - design-provider-lifecycle
   - adr-0079
   - adr-t1063-1
+  - adr-t3957-1
 ---
 
 # Actor model
@@ -91,6 +92,8 @@ modelは表の値（無ければ既定を明示）のまま変えない。
 
 生きているplannerへの配送（指摘を次のturnの依頼として`turns/`に置く）は上げず、理由と記録は`infrastructure::plan_reviews`の`revise_sent`のdoc commentが持つ。
 
+runtimeのplannerの試し（[ADR-t3957-1](../../adr/2026-11-02-t3957-1-production-ab-of-worker-and-runtime-planner-model-and-effort.md)決定3、ADR-0079の決定7をamends）を有効にしたときは、この段上げを群の候補のeffortの上に重ね、modelは群の候補のまま変えない。
+
 ## 記録（`launch`）
 
 起動したprovider・model / effortと、model / effortの出どころを`launch`（`domain::actor_model::ActorLaunch`）として記録する。
@@ -130,3 +133,17 @@ runtimeのplannerは経路（対話か非対話。[ADR-t1394-2](../../adr/2026-1
 
 非対話のplannerの区間はturnから開いて閉じ、`route: headless`を持ち、`stats` / `kpi`で経路ごとに読む（ADR-t1394-2決定4。[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)、[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。
 wrapperはplannerのturnの`turn_started`に起動の`model`と`effort`を`launch`として書き、区間はそれを持つ。
+
+### runtimeのplannerの試し
+
+[ADR-t3957-1](../../adr/2026-11-02-t3957-1-production-ab-of-worker-and-runtime-planner-model-and-effort.md)の決定3は、runtimeのplannerにrequest単位の群を割り当てる試しを決めた（実装が入るまでplannerは群を持たない）。
+入口は開く側（`application::planner::launch_planner`）で、守る約束は次のとおり。
+
+- **requestの特定**: 群は試しの名前と、plannerの行のrequest（無ければ開き直すproposalに結ばれた最小のrequest）のIDのhashで決め、計画の出どころの読み方（`domain::plan_request::creation_origin`）と同じ順に当てる。
+  同じrequestから立つplannerは同じ群になる。
+- **試しの外**: requestに結び付かないplanner（draft・finding、requestの無いproposalの開き直し）と、providerが使えず設定と別のproviderで起動するplannerは、候補を渡さず群nullとその理由を記録する。
+- **providerとの整合**: 候補はmodelとeffortの組で、providerは役割の設定のまま変えない。
+  候補のmodelは役割のproviderの名前で書き、設定の検査は`RoleModel::check`と同じ規則でCodexの役割にClaudeのmodelの候補を断る。
+  試しは役割のproviderの決定を覆わない。
+- **群の置き場**: 群・model・effortはplannerのsessionとproposalの属性の組に置き、計画の品質の層で読む。
+  止める判定は人とplannerが行う（決定6）。
