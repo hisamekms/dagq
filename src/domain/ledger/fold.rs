@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::provider_use::ProviderUse;
 use crate::domain::after_claim::{AfterClaim, AfterClaimTrack};
 use crate::domain::claim_facts::ATTRIBUTES;
 use crate::domain::claim_hold;
@@ -162,6 +163,10 @@ pub struct RunLife {
     /// their keys.
     pub attributes: Map<String, Value>,
     pub after_claim: AfterClaim,
+    /// Its worker's waits for a provider and its review's jobs that moved
+    /// off their planned provider, a wait still open cut at its end (or at
+    /// its last interval's end while it goes on).
+    pub provider_use: ProviderUse,
     /// The last event folded in: the run's own, or the push that closed it.
     pub inputs_through: EventId,
 }
@@ -262,6 +267,7 @@ pub fn fold_run(events: &[RunEvent], pushes: &[RunEvent], now_ms: i64) -> Option
         milestones,
         attributes,
         after_claim: after_claim.facts(),
+        provider_use: ProviderUse::default(),
         inputs_through: events
             .iter()
             .map(|event| event.id)
@@ -296,6 +302,11 @@ pub fn fold_run(events: &[RunEvent], pushes: &[RunEvent], now_ms: i64) -> Option
             life.intervals.push(record.interval(from, now_ms.max(from)));
         }
     }
+    let until = life
+        .end
+        .or_else(|| life.intervals.last().map(|last| last.end))
+        .unwrap_or(now_ms);
+    life.provider_use = ProviderUse::of(events, until);
     Some(life)
 }
 

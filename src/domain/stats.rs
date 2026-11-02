@@ -1766,7 +1766,7 @@ fn waits_for_provider(run_events: &[&RunEvent], idle: i64) -> bool {
 
 /// Whether `event` is the start of a turn after a wait: the next turn, a
 /// new session of the worker, a resume or a switch of its provider.
-fn starts_a_turn(event: &RunEvent) -> bool {
+pub(crate) fn starts_a_turn(event: &RunEvent) -> bool {
     matches!(
         event.kind.known(),
         Some(

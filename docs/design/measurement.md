@@ -166,7 +166,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **作り直し**: 版が上がった行と、到達点より後に入力が届いた行は畳み直す（`ledger::rebuilds`、確定の印の後と旧方式の行も同じ）。
 - **記録**: どのeventも、どれか1つの行の記録になる（`domain::ledger::owner`）。
   行は自分の記録とその入力のevent idの範囲を持ち、行だけから今の統計の関数の入力が戻る。
-- **run**: 区間の列・タグごとの合計・claimの属性の組（キーを知らずにそのまま）・claimの後の事実と、そのrunの上のsessionとjob・Executionの列・stepの畳み（`steps`）。
+- **run**: 区間の列と合計・claimの属性と後の事実・providerの控えと切り替え・session・job・Execution・step。
   予定: `change`・`area`・`nature`。
 - **task**: 区間の列と重ねたsupervisor単位の区間で、終わる前も確定しない行を持つ（draftの移りとrunの無いaskも記録）。
 - **session**: runを持たない対象のsessionとjobの1回（`domain::ledger::session`）。
@@ -232,6 +232,7 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 - mainの履歴: 到達点（観測の到達時刻で、commitの時刻ではない）から猶予より後の窓は「記録が無い」（Gitの読み取りの失敗・supervisorの停止・到達点が古い・取り込みより前）。
 - 着地の後の品質: 記録の前の着地は「記録より前」、読めない線の取り込みの前は「不明」で、窓の終わりまでの経過と到達を添える。
 - 属性とfinding: 基準のeventより前の窓は「基準より前」。
+- providerの控えと切り替え: 記録より前は「記録なし」、旧方式も畳む。
 - Executionのcontext: 記録が無い（欄の無い前の記録）と未計測（nullと理由）を分ける。
 - token: Executionの終わった時刻（対話は区切りの時刻）で日に振り分け、actor × provider × modelで足す（[Execution tokens](execution-tokens.md)）。
 

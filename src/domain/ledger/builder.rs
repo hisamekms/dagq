@@ -187,6 +187,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use super::fold::PushedTo;
+use super::provider_use::ProviderUse;
 use super::steps::{self, StepFold};
 use super::{
     LEDGER_V, LedgerKind, LedgerRow, fold,
@@ -1971,7 +1972,10 @@ pub fn run_settles(row: &LedgerRow, now_ms: i64) -> bool {
 /// one folded at an earlier time is [`behind`]), a queue row's that its
 /// supervisor's life ended over the events the stored one read open (the
 /// time passed a silence; one that read a later event of the supervisor
-/// that opens it again reads past it, [`queue`]), and one settled now. A
+/// that opens it again reads past it, [`queue`]), a legacy one whose use
+/// of providers its detail holds is not the fold's (one an older fold
+/// wrote: the store writes its detail over and keeps its frozen values and
+/// version, so it is written once), and one settled now. A
 /// stored row that holds the same inputs is not written again, so the same
 /// inputs read twice leave it as it is.
 pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
@@ -1988,6 +1992,8 @@ pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
         || built.inputs_through.inside_resources > stored.inputs_through.inside_resources
         || (built.is_final && !stored.is_final && !stored.is_legacy())
         || steps::rules_of(&built.detail) != steps::rules_of(&stored.detail)
+        || (stored.is_legacy()
+            && ProviderUse::of_detail(&built.detail) != ProviderUse::of_detail(&stored.detail))
 }
 
 /// Whether `stored`, a task's row the store holds settled (of this

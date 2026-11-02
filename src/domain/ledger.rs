@@ -24,6 +24,7 @@ pub mod fold;
 pub mod node;
 pub mod owner;
 pub mod post_landing;
+pub mod provider_use;
 pub mod queue;
 pub mod read;
 #[cfg(test)]
@@ -53,7 +54,7 @@ use super::{EventId, RunEvent, TaskId};
 /// The version of the fold: raised when what a row holds or how it is
 /// folded changes, so every row is built again (a legacy row's frozen
 /// values aside, which the store keeps).
-pub const LEDGER_V: u32 = 6;
+pub const LEDGER_V: u32 = 7;
 
 /// The kind of a row. The store keeps every kind in one table by this
 /// column, so a new kind is a new value.
@@ -277,7 +278,9 @@ pub struct LedgerRow {
     pub attributes: Map<String, Value>,
     pub after_claim: Option<AfterClaim>,
     /// What else the kind folds: a run's milestones, the run that closed
-    /// its pending push and its session steps ([`steps::DETAIL_KEY`]), a
+    /// its pending push, its use of providers it could not use
+    /// ([`provider_use::DETAIL_KEY`], a legacy run's too) and its session steps
+    /// ([`steps::DETAIL_KEY`]), a
     /// task's ready time (and while ready now, since when:
     /// [`fold::READY_SINCE`]), runs and overlays, a
     /// node row's samples.
@@ -460,7 +463,11 @@ fn fill_run(row: &mut LedgerRow, life: RunLife) {
     row.intervals = life.intervals;
     row.attributes = life.attributes;
     row.after_claim = Some(life.after_claim);
-    row.detail = json!({"milestones": life.milestones, "closed_by": life.closed_by});
+    row.detail = json!({
+        "milestones": life.milestones,
+        "closed_by": life.closed_by,
+        (provider_use::DETAIL_KEY): life.provider_use,
+    });
 }
 
 /// A legacy run's row: `stats`' values for it, its claim's attributes
@@ -476,6 +483,17 @@ fn fill_legacy_run(row: &mut LedgerRow, events: &[RunEvent]) {
     let run = stats::run_stats(events)
         .into_iter()
         .find(|run| run.run_id.as_str() == row.key);
+    // What it used of providers it could not use is folded from its
+    // records as a new run's is, a wait nothing ended cut at its last
+    // event; the frozen values stay as they were.
+    let last = events
+        .iter()
+        .filter_map(|event| stats::timestamp_millis(&event.created_at))
+        .max()
+        .unwrap_or(0);
+    row.detail = json!({
+        (provider_use::DETAIL_KEY): provider_use::ProviderUse::of(events, last),
+    });
     let Some(run) = run else {
         row.legacy = Some(json!({}));
         return;

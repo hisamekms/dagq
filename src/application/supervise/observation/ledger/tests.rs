@@ -8,13 +8,14 @@ use crate::application::{
 use crate::domain::environment::{Resources, RunResource};
 use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
 use crate::domain::ledger::queue::QueueBook;
+use crate::domain::ledger::read::read;
 use crate::domain::ledger::session::SessionBook;
 use crate::domain::ledger::session::written::{
     Cursors, Marks, RowsWritten, SessionsWritten, written_through,
 };
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
 use crate::domain::ledger::testkit::{Log, T0, ms, queue_across, run_id, sessions_across};
-use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node};
+use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node, provider_use};
 use crate::domain::pre_claim::PreClaimBook;
 use crate::domain::session_step::{
     RETENTION_MS, ResourceSample, SeqRange, SessionOwner, SessionResource, SessionStep, Step,
@@ -917,6 +918,46 @@ fn a_new_fold_builds_the_rows_again_but_a_legacy_one() {
     let kept = memory.row(LedgerKind::Run, &d);
     assert_eq!(kept.ledger_v, LEDGER_V - 1);
     assert_eq!(kept.legacy, legacy.legacy);
+}
+
+/// A legacy row an older fold wrote without the use of providers its
+/// records hold is written again by the next builder with it, its frozen
+/// values and its version kept, and not again after.
+#[test]
+fn a_legacy_row_takes_the_use_of_providers_once_its_values_kept() {
+    let (a, d) = (run_id(1), run_id(4));
+    let mut log = Log::default();
+    log.landed(1, &a, 0).legacy(4, &d, 0).add(
+        Some(4),
+        Some(&d),
+        "provider_waiting",
+        serde_json::json!({"turn": 1, "reason": "usage_limit"}),
+        100,
+    );
+    let memory = Memory::of(&log);
+    pass(&memory, &mut Builder::default(), LATER);
+    let legacy = memory.row(LedgerKind::Run, &d);
+    assert!(legacy.is_legacy());
+    for row in memory.rows.borrow_mut().values_mut() {
+        row.ledger_v = LEDGER_V - 1;
+        if let Some(detail) = row.detail.as_object_mut() {
+            detail.remove(provider_use::DETAIL_KEY);
+        }
+    }
+    pass(&memory, &mut Builder::default(), LATER);
+    let kept = memory.row(LedgerKind::Run, &d);
+    assert_eq!(kept.ledger_v, LEDGER_V - 1);
+    assert_eq!(kept.legacy, legacy.legacy);
+    assert_eq!(kept.totals, legacy.totals);
+    let uses = read(&kept).provider_use.expect("written again");
+    assert_eq!(uses.worker_waits.unwrap()["usage_limit"].count, 1);
+
+    let rows = memory.rows.borrow().clone();
+    let writes = memory.writes.get();
+    let mut again = Builder::default();
+    while pass(&memory, &mut again, LATER).backlog > 0 {}
+    assert_eq!(memory.writes.get(), writes);
+    assert_eq!(*memory.rows.borrow(), rows);
 }
 
 /// A later event of a settled run makes it dirty and it is folded again;

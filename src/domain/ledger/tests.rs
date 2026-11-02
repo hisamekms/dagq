@@ -1,7 +1,8 @@
 use serde_json::json;
 
 use super::fold::{self, DEPENDENCY_WAIT, PLAN_REVIEW, READY, RunLife, TaskFold, UNATTRIBUTED};
-use super::read::read;
+use super::provider_use;
+use super::read::{LedgerValues, read};
 use super::*;
 use crate::domain::marks::utc_text;
 use crate::domain::pre_claim::{IntervalKind, SlotClass};
@@ -1182,4 +1183,460 @@ fn task_statuses_out_of_order_do_not_overlap() {
         assert_eq!(interval.start, cursor);
         cursor = interval.end;
     }
+}
+
+/// A run whose worker waited for its provider three times (twice for a
+/// usage limit, once for a login), each wait ended by the worker's next
+/// start (a turn, a switch, a resume), and landed. With `provider` off,
+/// the same run without those records.
+fn waited_and_landed(provider: bool) -> Log {
+    let mut log = Log::default();
+    log.claim(0)
+        .first(2, Phase::Provisioning)
+        .at(5, "agent_started", json!({}))
+        .first(10, Phase::Worker);
+    if provider {
+        log.at(20, "turn_started", json!({"turn": 1}))
+            .at(
+                100,
+                "provider_waiting",
+                json!({"turn": 1, "provider": "codex", "reason": "usage_limit"}),
+            )
+            .at(400, "turn_started", json!({"turn": 2}))
+            .at(
+                450,
+                "provider_waiting",
+                json!({"turn": 2, "provider": "codex", "reason": "authentication"}),
+            )
+            .at(
+                500,
+                "provider_switched",
+                json!({"from": "codex", "to": "claude", "reason": "authentication"}),
+            )
+            .at(
+                520,
+                "provider_waiting",
+                json!({"phase": "resume", "provider": "claude", "reason": "usage_limit"}),
+            )
+            .at(560, "resume_started", json!({}));
+    }
+    log.at(70, "first_commit_observed", json!({}))
+        .at(600, "receipt_observed", json!({}))
+        .first(600, Phase::Validating)
+        .at(660, "validation_finished", json!({}))
+        .first(660, Phase::Review)
+        .first(900, Phase::AwaitingSlot);
+    landed(&mut log, 1000)
+        .at(
+            1230,
+            "push_finished",
+            json!({"remote": "origin", "branch": "main"}),
+        )
+        .phase(1230, Phase::Ended, Attempt::FIRST, "pushed");
+    log
+}
+
+/// The worker's waits for a provider fold into the run's row by reason,
+/// how many and their time, and read back from it; the intervals, their
+/// blockers and holds and the values under today's names are those of
+/// the same run without them.
+#[test]
+fn a_runs_worker_waits_for_a_provider_fold_by_reason_beside_its_intervals() {
+    let waited = waited_and_landed(true);
+    let row = run_row(A, &waited.of(A), &[], ms(5000), "built");
+    let values = read(&row);
+    let uses = values.provider_use.clone().expect("recorded");
+    assert_eq!(
+        uses.worker_waits.as_ref().unwrap()["usage_limit"],
+        provider_use::Waits {
+            count: 2,
+            millis: 300_000 + 40_000,
+            open: 0
+        }
+    );
+    assert_eq!(
+        uses.worker_waits.as_ref().unwrap()["authentication"],
+        provider_use::Waits {
+            count: 1,
+            millis: 50_000,
+            open: 0
+        }
+    );
+    assert_eq!(uses.review_switches, None);
+
+    let plain = run_row(A, &waited_and_landed(false).of(A), &[], ms(5000), "built");
+    assert_eq!(row.intervals, plain.intervals);
+    assert_eq!(row.totals, plain.totals);
+    assert_eq!(
+        LedgerValues {
+            provider_use: None,
+            ..values
+        },
+        LedgerValues {
+            provider_use: None,
+            ..read(&plain)
+        }
+    );
+    assert_eq!(
+        read(&plain).provider_use,
+        Some(provider_use::ProviderUse::default())
+    );
+}
+
+/// A wait nothing ends is cut at the run's end, or at its last interval's
+/// end while it goes on, and counted open.
+#[test]
+fn a_wait_no_start_ends_is_cut_at_the_runs_end_and_open() {
+    let mut log = Log::default();
+    log.claim(0)
+        .first(0, Phase::Provisioning)
+        .first(10, Phase::Worker)
+        .at(
+            100,
+            "provider_waiting",
+            json!({"turn": 1, "reason": "usage_limit"}),
+        );
+    let going = read(&run_row(A, &log.of(A), &[], ms(500), "built"));
+    assert_eq!(
+        going.provider_use.expect("recorded").worker_waits.unwrap()["usage_limit"],
+        provider_use::Waits {
+            count: 1,
+            millis: 400_000,
+            open: 1
+        }
+    );
+    log.phase(300, Phase::Ended, Attempt::FIRST, "canceled");
+    let ended = read(&run_row(A, &log.of(A), &[], ms(5000), "built"));
+    assert_eq!(
+        ended.provider_use.expect("recorded").worker_waits.unwrap()["usage_limit"],
+        provider_use::Waits {
+            count: 1,
+            millis: 200_000,
+            open: 1
+        }
+    );
+}
+
+/// A row of an older fold has no record of the providers and reads none;
+/// built again for the new fold, a run whose events record no turn, no
+/// wait and no review's launch (from before they were recorded) reads
+/// each part none, not as a run that used none, and one that recorded
+/// its turns and no wait reads an empty map.
+#[test]
+fn a_run_from_before_the_records_stays_none_when_built_again() {
+    let events = waited_and_landed(false).of(A);
+    let mut older = run_row(A, &events, &[], ms(5000), "built");
+    older.ledger_v = LEDGER_V - 1;
+    older
+        .detail
+        .as_object_mut()
+        .unwrap()
+        .remove(provider_use::DETAIL_KEY);
+    assert_eq!(read(&older).provider_use, None);
+    assert!(rebuilds(Some(&older), older.inputs_through.events, None));
+    let rebuilt = run_row(A, &events, &[], ms(5000), "built");
+    assert_eq!(rebuilt.intervals, older.intervals);
+    let uses = read(&rebuilt).provider_use.expect("a new fold's row");
+    assert_eq!((uses.worker_waits, uses.review_switches), (None, None));
+
+    // Headless turns recorded before the waits were (a claim that names
+    // no `requested_provider`): no record either.
+    let mut turned = waited_and_landed(false);
+    turned.at(1300, "turn_started", json!({"turn": 1}));
+    let uses = read(&run_row(A, &turned.of(A), &[], ms(5000), "built"))
+        .provider_use
+        .unwrap();
+    assert_eq!(uses.worker_waits, None);
+    // Turns of a claim recorded with the waits: none waited.
+    let mut recorded = Log::default();
+    recorded
+        .at(
+            0,
+            "run_claimed",
+            json!({"provider": "claude", "requested_provider": "claude"}),
+        )
+        .first(2, Phase::Worker)
+        .at(5, "turn_started", json!({"turn": 1}));
+    let uses = read(&run_row(A, &recorded.of(A), &[], ms(50), "built"))
+        .provider_use
+        .unwrap();
+    assert_eq!(uses.worker_waits, Some(Default::default()));
+}
+
+/// A legacy row an older fold wrote without the use of providers is
+/// written again with it, its frozen values kept, and once written is not
+/// written again over the same events.
+#[test]
+fn a_legacy_row_without_the_use_of_providers_is_written_again_once() {
+    let mut log = legacy_events();
+    log.at(
+        100,
+        "provider_waiting",
+        json!({"turn": 1, "reason": "usage_limit"}),
+    );
+    let built = run_row(A, &log.of(A), &[], ms(5000), "built");
+    assert!(built.is_legacy());
+    let mut stored = built.clone();
+    stored.ledger_v = LEDGER_V - 1;
+    stored
+        .detail
+        .as_object_mut()
+        .unwrap()
+        .remove(provider_use::DETAIL_KEY);
+    assert!(builder::writes(Some(&stored), &built));
+    assert!(!builder::writes(Some(&built), &built));
+    let waits = read(&built).provider_use.unwrap().worker_waits.unwrap();
+    assert_eq!(waits["usage_limit"].count, 1);
+}
+
+/// A review from before its jobs were started apart is one job of the
+/// whole review, read from its `review_started` (or the span that copies
+/// it) and counted once; a review attempt with its jobs' own starts is read
+/// from them alone, its `review_started` not counted again.
+#[test]
+fn a_review_of_the_older_records_is_one_job_counted_once() {
+    let moved = |reason: &str| {
+        json!({"role": "review", "provider": "claude", "switched_from": "codex",
+               "switch_reason": reason})
+    };
+    let mut log = Log::default();
+    worked(&mut log).first(660, Phase::Review);
+    // Attempt 1, the older record: the review's start and its span.
+    log.at(
+        661,
+        "review_started",
+        json!({"attempt": 1, "launch": moved("usage_limit")}),
+    )
+    .at(
+        661,
+        "session_opened",
+        json!({"kind": "review", "attempt": 1, "launch": moved("usage_limit")}),
+    )
+    // Attempt 2: a start with no launch, its span the only record of it.
+    .at(670, "review_started", json!({"attempt": 2}))
+    .at(
+        670,
+        "session_opened",
+        json!({"kind": "review", "attempt": 2, "launch": moved("launch_failed")}),
+    )
+    // Attempt 3, the jobs started apart: the review's start names the
+    // whole review's route too, which its job's start counts.
+    .at(
+        680,
+        "review_started",
+        json!({"attempt": 3, "launch": moved("authentication")}),
+    )
+    .at(
+        680,
+        "session_opened",
+        json!({"kind": "review", "attempt": 3, "launch": moved("authentication")}),
+    );
+    review_job(&mut log, 681, None, moved("authentication"));
+    log.events.last_mut().unwrap().payload["attempt"] = json!(3);
+    review_job(&mut log, 682, Some("security"), moved("usage_limit"));
+    log.events.last_mut().unwrap().payload["attempt"] = json!(3);
+    let uses = read(&run_row(A, &log.of(A), &[], ms(700), "built"))
+        .provider_use
+        .unwrap();
+    assert_eq!(
+        uses.review_switches,
+        Some(std::collections::BTreeMap::from([
+            ("usage_limit".to_owned(), 2),
+            ("launch_failed".to_owned(), 1),
+            ("authentication".to_owned(), 1),
+        ]))
+    );
+}
+
+/// A legacy run keeps its frozen values and reads its waits for a provider
+/// folded from its records, a wait nothing ended cut at its last event;
+/// one that recorded none reads none.
+#[test]
+fn a_legacy_run_reads_its_waits_for_a_provider_beside_its_frozen_values() {
+    let plain = run_row(A, &legacy_events().of(A), &[], ms(5000), "built");
+    let uses = read(&plain).provider_use.expect("folded");
+    assert_eq!((uses.worker_waits, uses.review_switches), (None, None));
+
+    let mut log = Log::default();
+    log.at(0, "run_claimed", json!({"provider": "codex"}))
+        .at(5, "agent_started", json!({}))
+        .at(10, "turn_started", json!({"turn": 1}))
+        .at(
+            100,
+            "provider_waiting",
+            json!({"turn": 1, "reason": "usage_limit"}),
+        )
+        .at(400, "turn_started", json!({"turn": 2}))
+        .at(600, "receipt_observed", json!({}))
+        .at(
+            660,
+            "validation_finished",
+            json!({"status": "awaiting_integration"}),
+        )
+        .at(
+            700,
+            "provider_waiting",
+            json!({"phase": "resume", "reason": "authentication"}),
+        )
+        .at(1000, "integration_started", json!({}))
+        .at(1200, "run_integrated", json!({"status": "integrated"}))
+        .at(1230, "push_finished", json!({}));
+    let row = run_row(A, &log.of(A), &[], ms(5000), "built");
+    assert!(row.is_legacy());
+    let values = read(&row);
+    assert!(values.legacy);
+    let stats = stats::run_stats(&log.of(A)).remove(0);
+    assert_eq!((values.work, values.validate), (stats.work, stats.validate));
+    let waits = values.provider_use.unwrap().worker_waits.unwrap();
+    assert_eq!(
+        waits["usage_limit"],
+        provider_use::Waits {
+            count: 1,
+            millis: 300_000,
+            open: 0
+        }
+    );
+    assert_eq!(
+        waits["authentication"],
+        provider_use::Waits {
+            count: 1,
+            millis: 530_000,
+            open: 1
+        }
+    );
+}
+
+/// One job of a run's review, started with `launch`.
+fn review_job(log: &mut Log, secs: i64, agent: Option<&str>, launch: Value) {
+    log.at(
+        secs,
+        "review_job_started",
+        json!({"attempt": 1, "agent": agent, "again": false, "launch": launch}),
+    );
+}
+
+/// A review's jobs count as switched only against each job's planned
+/// provider: the whole review on Codex and a subagent on Claude as the
+/// settings put them is none, a job that moved off its planned provider
+/// is one, by its reason.
+#[test]
+fn a_reviews_jobs_switch_only_off_their_planned_provider() {
+    let mixed = |log: &mut Log| {
+        review_job(
+            log,
+            670,
+            None,
+            json!({"role": "review", "provider": "codex", "source": "role"}),
+        );
+        review_job(
+            log,
+            671,
+            Some("design-layers"),
+            json!({"role": "review", "provider": "claude", "source": "subagent"}),
+        );
+    };
+    let mut log = Log::default();
+    worked(&mut log).first(660, Phase::Review);
+    mixed(&mut log);
+    let row = run_row(A, &log.of(A), &[], ms(700), "built");
+    let uses = read(&row).provider_use.expect("recorded");
+    assert_eq!(uses.review_switches, Some(Default::default()), "{uses:?}");
+    // No turn recorded: no record of the worker's waits.
+    assert_eq!(uses.worker_waits, None);
+
+    let mut log = Log::default();
+    worked(&mut log).first(660, Phase::Review);
+    mixed(&mut log);
+    review_job(
+        &mut log,
+        672,
+        Some("security"),
+        json!({"role": "review", "provider": "claude", "source": "subagent",
+               "switched_from": "codex", "switch_reason": "usage_limit"}),
+    );
+    // The same job started again on the provider it moved to is one job.
+    log.at(
+        672,
+        "review_job_started",
+        json!({"attempt": 1, "agent": "security", "again": true,
+               "launch": {"role": "review", "provider": "claude",
+                          "switched_from": "codex", "switch_reason": "usage_limit"}}),
+    );
+    // A launch that names its own provider as the one it moved off is no
+    // switch.
+    review_job(
+        &mut log,
+        673,
+        Some("tests"),
+        json!({"role": "review", "provider": "codex", "switched_from": "codex"}),
+    );
+    let row = run_row(A, &log.of(A), &[], ms(700), "built");
+    let uses = read(&row).provider_use.expect("recorded");
+    assert_eq!(
+        uses.review_switches,
+        Some(std::collections::BTreeMap::from([(
+            "usage_limit".to_owned(),
+            1
+        )]))
+    );
+}
+
+/// A wait ends at the next wait too, a wait before a resume at a skipped
+/// resume or a park, and a run pending on its push cuts one nothing ended
+/// at its last interval's end.
+#[test]
+fn a_wait_ends_at_the_next_wait_a_skipped_resume_or_the_pending_push() {
+    let mut log = Log::default();
+    log.claim(0)
+        .first(0, Phase::Provisioning)
+        .first(10, Phase::Worker)
+        .at(
+            100,
+            "provider_waiting",
+            json!({"turn": 1, "reason": "usage_limit"}),
+        )
+        .at(
+            150,
+            "provider_waiting",
+            json!({"phase": "resume", "reason": "authentication"}),
+        )
+        .at(170, "resume_skipped", json!({}))
+        .at(
+            200,
+            "provider_waiting",
+            json!({"turn": 2, "reason": "launch_failed"}),
+        )
+        .first(600, Phase::Validating);
+    landed(&mut log, 700)
+        .at(
+            910,
+            "push_failed",
+            json!({"remote": "origin", "branch": "main"}),
+        )
+        .phase(910, Phase::PushPending, Attempt::FIRST, "push_failed");
+    let row = run_row(A, &log.of(A), &[], ms(5000), "built");
+    assert_eq!(row.ended_at, None);
+    let waits = read(&row)
+        .provider_use
+        .expect("recorded")
+        .worker_waits
+        .unwrap();
+    let end = row.intervals.last().unwrap().end;
+    assert_eq!(end, ms(5000));
+    assert_eq!(
+        (
+            waits["usage_limit"].millis,
+            waits["authentication"].millis,
+            waits["launch_failed"].clone()
+        ),
+        (
+            50_000,
+            20_000,
+            provider_use::Waits {
+                count: 1,
+                millis: end - ms(200),
+                open: 1
+            }
+        )
+    );
 }

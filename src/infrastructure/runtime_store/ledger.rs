@@ -186,7 +186,8 @@ fn upsert(conn: &rusqlite::Connection, row: &LedgerRow) -> Result<bool> {
     // A legacy row's values (its legacy values, times, sums and
     // attributes) are frozen; what it owns, how far it reaches and what
     // its detail folds of its records (its sessions, jobs and
-    // Executions; a legacy row keeps nothing else there) are not, so
+    // Executions, and its use of providers; a legacy row keeps nothing
+    // else there) are not, so
     // that every event stays some row's records and their Executions
     // are read.
     let updates: Vec<String> = names

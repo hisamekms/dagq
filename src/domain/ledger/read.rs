@@ -2,13 +2,15 @@
 //! values under today's names (`work`, `validate`, `wait_to_land`,
 //! `land_phases`, `startup`) and the new breakdown, from a new row's
 //! intervals or a legacy row's frozen values, in the same names and
-//! shapes, with the legacy mark. Readers of the ledger go through the
+//! shapes, with the legacy mark; and what a run used of providers it could
+//! not use, or that its row has no record of it. Readers of the ledger go through the
 //! `LedgerStore` and this function only.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::fold::{Interval, Milestones};
+use super::provider_use::ProviderUse;
 use super::{LedgerKind, LedgerRow, Totals};
 use crate::domain::after_claim::AfterClaim;
 use crate::domain::stats::landing::{LandPhases, PHASES};
@@ -40,6 +42,12 @@ pub struct LedgerValues {
     /// facts after the claim (a run's).
     pub attributes: Map<String, Value>,
     pub after_claim: Option<AfterClaim>,
+    /// A run's worker's waits for a provider and its review's jobs that
+    /// moved off their planned provider ([`ProviderUse`]), a legacy run's
+    /// too. None when the row has no record of them (one an older fold
+    /// wrote, a task), and each part none when the run's events hold none,
+    /// which is not a run that used none (an empty map).
+    pub provider_use: Option<ProviderUse>,
 }
 
 /// Read `row`.
@@ -57,6 +65,9 @@ pub fn read(row: &LedgerRow) -> LedgerValues {
         breakdown: None,
         attributes: row.attributes.clone(),
         after_claim: row.after_claim.clone(),
+        provider_use: (row.kind == LedgerKind::Run)
+            .then(|| ProviderUse::of_detail(&row.detail))
+            .flatten(),
     };
     if let Some(legacy) = &row.legacy {
         values.landed = row.kind == LedgerKind::Run && row.outcome.as_deref() == Some("integrated");
