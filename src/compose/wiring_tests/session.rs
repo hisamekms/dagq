@@ -8,7 +8,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -33,6 +33,11 @@ use crate::{
     },
     infrastructure::sqlite::SqliteQueue,
 };
+
+/// How often a test's wrapper looks again for the record of its start: the
+/// test's own, shorter than the production's
+/// [`REGISTRATION_POLL`](crate::application::session::REGISTRATION_POLL).
+const REGISTRATION_POLL: Duration = Duration::from_millis(10);
 
 /// A wrapper started on a thread: its handle and run directory, and its
 /// thread with the channel that says it returned.
@@ -234,6 +239,7 @@ fn wrap(
             files,
             pid,
             start: WrapperStart::Background,
+            registration_poll: REGISTRATION_POLL,
             sccache: None,
             clock,
             runtimes: &runtimes,

@@ -478,7 +478,9 @@ pub fn run_planner_session(
         // records the background handle after it started this wrapper, so
         // the first turn waits for it.
         let recorded = super::session::WrapperStart::Workspace
-            .wait(|| Ok(queue.planner(id)?.workspace_id.is_some()));
+            .wait(super::session::REGISTRATION_POLL, || {
+                Ok(queue.planner(id)?.workspace_id.is_some())
+            });
         if let Err(error) = recorded {
             let _ = queue.planner_exited(id, pid, 127);
             drop_own_runner(files, id, dir);

@@ -480,6 +480,7 @@ fn run_session_as(
             files: &LocalRunFiles,
             pid,
             start,
+            registration_poll: wrapper::REGISTRATION_POLL,
             sccache: sccache
                 .map(|target| (target, &looker as &dyn crate::application::SccacheServer)),
             clock: &crate::infrastructure::clock::SystemClock,

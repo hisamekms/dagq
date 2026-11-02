@@ -43,6 +43,11 @@ use tracing::warn;
 /// cmux started it in, or its own start in the background.
 const WORKSPACE_REGISTRATION: Duration = Duration::from_secs(45);
 
+/// How often the wrapper looks again while it waits for that record
+/// ([`WrapperStart::wait`]): what the production's wrappers are given as
+/// [`Session::registration_poll`].
+pub const REGISTRATION_POLL: Duration = Duration::from_millis(100);
+
 /// Where a session wrapper was started: in a cmux workspace, which the
 /// run records before the wrapper registers, or in the background without
 /// one (ADR-t1404-1), where the supervisor records the wrapper's start
@@ -65,14 +70,24 @@ impl WrapperStart {
         }
     }
 
-    /// Wait, checking every 100 ms up to [`WORKSPACE_REGISTRATION`], until
+    /// Wait, checking every `poll` up to [`WORKSPACE_REGISTRATION`], until
     /// `ready` (which reads the queue) says what the wrapper waits for is
     /// recorded: a workspace, or its own start in the background.
+    pub fn wait(self, poll: Duration, ready: impl FnMut() -> Result<bool>) -> Result<()> {
+        self.wait_pausing(poll, ready, thread::sleep)
+    }
+
+    /// [`Self::wait`] pausing `poll` with `pause` between two looks.
     #[expect(
         clippy::disallowed_methods,
         reason = "L5: the wrapper's thin wait bounds its polling of the queue; `ready` decides"
     )]
-    pub fn wait(self, mut ready: impl FnMut() -> Result<bool>) -> Result<()> {
+    fn wait_pausing(
+        self,
+        poll: Duration,
+        mut ready: impl FnMut() -> Result<bool>,
+        mut pause: impl FnMut(Duration),
+    ) -> Result<()> {
         let started = Instant::now();
         loop {
             if ready()? {
@@ -86,7 +101,7 @@ impl WrapperStart {
                         "the supervisor recorded no start of this background wrapper in time",
                 }
             );
-            thread::sleep(Duration::from_millis(100));
+            pause(poll);
         }
     }
 }
@@ -131,6 +146,9 @@ pub struct Session<'a> {
     pub pid: u32,
     /// Where the supervisor started this wrapper.
     pub start: WrapperStart,
+    /// How often it looks again while it waits for the record of its start
+    /// ([`WrapperStart::wait`]); the production's is [`REGISTRATION_POLL`].
+    pub registration_poll: Duration,
     /// The sccache the wrapper's environment names as `RUSTC_WRAPPER` and
     /// how its server is looked at before each turn (ADR-t2086-1);
     /// `None` names none.
@@ -172,6 +190,7 @@ pub fn run_session(
         files,
         pid,
         start,
+        registration_poll,
         sccache,
         clock,
         runtimes,
@@ -185,7 +204,15 @@ pub fn run_session(
         WrapperStart::Background => processes.start_identity(pid),
         WrapperStart::Workspace => None,
     };
-    let run = match register(queue, id, token, pid, resume, start, own_start.as_deref()) {
+    let run = match register(
+        queue,
+        id,
+        token,
+        pid,
+        resume,
+        (start, registration_poll),
+        own_start.as_deref(),
+    ) {
         Ok(run) => run,
         Err(error) => return Err(wrapper_refused(&format!("run {id}"), error)),
     };
@@ -241,14 +268,14 @@ fn register(
     token: &LeaseToken,
     pid: u32,
     resume: bool,
-    start: WrapperStart,
+    (start, poll): (WrapperStart, Duration),
     own_start: Option<&str>,
 ) -> Result<TaskRun> {
     // cmux may start this command before its create response reaches
     // supervisor. A resumed run keeps the workspace of its first session.
     // A background wrapper's start is recorded after the run records its
     // handle, for each session anew.
-    start.wait(|| match start {
+    start.wait(poll, || match start {
         WrapperStart::Workspace => Ok(queue.run(id)?.workspace_id().is_some()),
         WrapperStart::Background => Ok(crate::domain::background_wrapper::launched_as(
             &queue.run_events(id)?,
@@ -1197,18 +1224,29 @@ mod tests {
     #[test]
     fn a_wrapper_waits_until_what_it_waits_for_is_recorded() {
         let mut reads = 0;
+        let mut pauses = Vec::new();
+        let poll = Duration::from_millis(7);
         WrapperStart::Background
-            .wait(|| {
-                reads += 1;
-                Ok(reads == 3)
-            })
+            .wait_pausing(
+                poll,
+                || {
+                    reads += 1;
+                    Ok(reads == 3)
+                },
+                |pause| pauses.push(pause),
+            )
             .unwrap();
         assert_eq!(reads, 3);
+        // It pauses the poll it is given between two looks, none after the
+        // last.
+        assert_eq!(pauses, [poll, poll]);
         assert!(
             WrapperStart::Workspace
-                .wait(|| Err(anyhow!("queue gone")))
+                .wait(REGISTRATION_POLL, || Err(anyhow!("queue gone")))
                 .is_err()
         );
+        // The production's wrappers look every 100 ms.
+        assert_eq!(REGISTRATION_POLL, Duration::from_millis(100));
         assert_eq!(WrapperStart::of_flag(true), WrapperStart::Background);
         assert_eq!(WrapperStart::of_flag(false), WrapperStart::Workspace);
     }

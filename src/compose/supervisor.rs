@@ -1202,3 +1202,29 @@ pub fn review_program_host(
         ),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A supervisor watches the end of a review's job (and of every job its
+    /// passes reap) once per pass, pausing the `tick` its options give
+    /// between two passes: the production's is a second, and one a caller
+    /// gives reaches the loop (the wiring tests give theirs).
+    #[test]
+    fn the_tick_between_two_looks_at_a_job_comes_from_the_options() {
+        assert_eq!(SuperviseOptions::new(1, true).tick, Duration::from_secs(1));
+        let options = SuperviseOptions {
+            tick: Duration::from_millis(20),
+            ..SuperviseOptions::new(1, true)
+        };
+        let settings = options.settings(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            SlotLimits::resolve(options.slot_flags(), &Default::default()),
+        );
+        assert_eq!(settings.tick, Duration::from_millis(20));
+    }
+}
