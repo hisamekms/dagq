@@ -198,6 +198,8 @@ pub(super) const READS: &[&str] = &[
     "ledger_heads",
     "ledger_session_anchors",
     "ledger_tasks_open_since",
+    "ledger_tasks_open_since_at",
+    "last_event_naming_supervisor",
     "ledger_wait_rows",
     "ledger_supervisor_stops",
     "ledger_settled_waits",
@@ -631,6 +633,18 @@ mod tests {
             "ledger_wait_rows",
             "ledger_supervisor_stops",
         ] {
+            assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead), "{op}");
+            assert!(super::super::LEDGER_OPS.contains(&op), "{op}");
+            assert!(super::super::reads_only(op), "{op}");
+        }
+    }
+
+    /// The reads what builds the ledger cuts its rows to a position by are
+    /// the supervisor's reads of the ledger, as the reads it makes its
+    /// waits and lives again by.
+    #[test]
+    fn the_reads_of_a_cut_to_a_position_are_the_supervisors_reads() {
+        for op in ["ledger_tasks_open_since_at", "last_event_naming_supervisor"] {
             assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead), "{op}");
             assert!(super::super::LEDGER_OPS.contains(&op), "{op}");
             assert!(super::super::reads_only(op), "{op}");

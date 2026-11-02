@@ -2497,6 +2497,21 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
         // The start of the task rows not settled: one aggregate, no row
         // read or sent.
         "ledger_tasks_open_since" => answer(LedgerStore::ledger_tasks_open_since(&*store)),
+        // The same for the position `at`: one aggregate, no row read or sent.
+        "ledger_tasks_open_since_at" => {
+            let (at,): (EventId,) = read(op, args)?;
+            answer(LedgerStore::ledger_tasks_open_since_at(&*store, at))
+        }
+        // The last event naming a supervisor up to an id: one look up of
+        // the index, that one event sent.
+        "last_event_naming_supervisor" => {
+            let (supervisor, upto): (String, EventId) = read(op, args)?;
+            answer(LedgerStore::last_event_naming_supervisor(
+                &*store,
+                &supervisor,
+                upto,
+            ))
+        }
         // A page of the rows the waits and the lives are made again from
         // for `since`: at most `page` after the key `after` (none: from the
         // first), picked by their columns, without their records.

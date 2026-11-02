@@ -242,7 +242,7 @@ pub(crate) fn reads_only(op: &str) -> bool {
 /// The operations of [`dispatch`] that only read the queue: one the
 /// service did not answer did nothing ([`undone`]). An operation not here
 /// is taken as one that writes.
-const READ_OPS: [&str; 88] = [
+const READ_OPS: [&str; 90] = [
     "diagnosis_owners",
     "candidates",
     "build_waits",
@@ -325,6 +325,8 @@ const READ_OPS: [&str; 88] = [
     "ledger_heads",
     "ledger_session_anchors",
     "ledger_tasks_open_since",
+    "ledger_tasks_open_since_at",
+    "last_event_naming_supervisor",
     "ledger_wait_rows",
     "ledger_supervisor_stops",
     "ledger_settled_waits",
@@ -873,7 +875,7 @@ const RUN_RESOURCE_OPS: [&str; 4] = [
 /// folds): the supervisor principal's only, refused to a landing's
 /// integrator by the policy and to a control-side command whatever its
 /// principal holds ([`control::answer`]), as [`RUN_RESOURCE_OPS`].
-const LEDGER_OPS: [&str; 23] = [
+const LEDGER_OPS: [&str; 25] = [
     "ledger_row",
     "ledger_rows",
     "ledger_row_part",
@@ -881,6 +883,8 @@ const LEDGER_OPS: [&str; 23] = [
     "ledger_heads",
     "ledger_session_anchors",
     "ledger_tasks_open_since",
+    "ledger_tasks_open_since_at",
+    "last_event_naming_supervisor",
     "ledger_wait_rows",
     "ledger_supervisor_stops",
     "ledger_settled_waits",

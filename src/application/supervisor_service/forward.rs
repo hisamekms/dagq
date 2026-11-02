@@ -3238,6 +3238,24 @@ impl LedgerStore for SupervisorQueue {
     fn ledger_tasks_open_since(&self) -> Result<crate::domain::pre_claim::rows::Since> {
         self.remote("ledger_tasks_open_since", vec![])
     }
+    // One aggregate the service computes for the position: no row crosses.
+    fn ledger_tasks_open_since_at(
+        &self,
+        at: EventId,
+    ) -> Result<crate::domain::pre_claim::rows::Since> {
+        self.remote("ledger_tasks_open_since_at", vec![to_value(at)?])
+    }
+    // The one event the service looks up: no other event crosses.
+    fn last_event_naming_supervisor(
+        &self,
+        supervisor: &str,
+        upto: EventId,
+    ) -> Result<Option<RunEvent>> {
+        self.remote(
+            "last_event_naming_supervisor",
+            vec![to_value(supervisor)?, to_value(upto)?],
+        )
+    }
     // In pages after the last key of the page before, a page past the
     // answer's limit asked again at a quarter of its size: the rows the
     // service picks, without their records.

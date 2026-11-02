@@ -1131,3 +1131,119 @@ fn r_crosses_with_the_session_rows_mark_in_one_write_whole_or_staged() {
         rows.len()
     );
 }
+
+/// What builds the ledger cuts its rows to a position by reads the start
+/// of the task rows for that position and the last event naming a
+/// supervisor up to it through the service by their own operations, which
+/// answer as the queue's own adapter does: the one aggregate and the one
+/// event (or none), never the rows whole, a record of theirs or the other
+/// events, so a row whose records read whole no more leaves them as they
+/// are.
+#[test]
+fn the_reads_of_a_cut_to_a_position_cross_as_the_queues_own() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::LedgerKind;
+    use crate::domain::ledger::testkit::{built_and_settled, ms, waits_across};
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let direct = SqliteQueue::open(&backend.db).unwrap();
+    let (log, position, at) = waits_across();
+    let events = &log.events[..position];
+    for row in built_and_settled(events, ms(at)) {
+        direct.write_ledger_row(&row).unwrap();
+    }
+    direct
+        .conn
+        .execute("UPDATE ledger_rows SET records='[{\"id\":1}]'", [])
+        .unwrap();
+    assert!(direct.ledger_rows(LedgerKind::Queue).is_err());
+    let first: i64 = direct
+        .conn
+        .query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM run_events", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    for (n, supervisor) in ["d", "e", "d", "f"].into_iter().enumerate() {
+        direct
+            .conn
+            .execute(
+                "INSERT INTO run_events(id, kind, payload, actor_role, actor_id)
+                 VALUES (?1, 'slots_full_started', ?2, 'supervisor', 'supervisor')",
+                rusqlite::params![
+                    first + i64::try_from(n).unwrap(),
+                    json!({"supervisor": supervisor, "class": "heavy"}).to_string()
+                ],
+            )
+            .unwrap();
+    }
+    let p = events.last().unwrap().id;
+    let ats: Vec<EventId> = (0..=p.as_i64()).map(EventId::new).collect();
+    let ups: Vec<EventId> = (0..first + 5).map(EventId::new).collect();
+    let names = ["d", "e", "f", "g"];
+    let since: Vec<_> = ats
+        .iter()
+        .map(|at| direct.ledger_tasks_open_since_at(*at).unwrap())
+        .collect();
+    let lasts: Vec<_> = names
+        .iter()
+        .flat_map(|name| ups.iter().map(move |upto| (*name, *upto)))
+        .map(|(name, upto)| direct.last_event_naming_supervisor(name, upto).unwrap())
+        .collect();
+    assert!(lasts.iter().any(Option::is_some));
+    assert!(lasts.iter().any(Option::is_none));
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let through: Vec<_> = ats
+        .iter()
+        .map(|at| queue.ledger_tasks_open_since_at(*at).unwrap())
+        .collect();
+    assert_eq!(through, since);
+    let through: Vec<_> = names
+        .iter()
+        .flat_map(|name| ups.iter().map(move |upto| (*name, *upto)))
+        .map(|(name, upto)| queue.last_event_naming_supervisor(name, upto).unwrap())
+        .collect();
+    assert_eq!(through, lasts);
+    let ops = std::mem::take(&mut *service.ops.lock().unwrap());
+    assert_eq!(ops.len(), ats.len() + names.len() * ups.len());
+    assert!(
+        ops[..ats.len()]
+            .iter()
+            .all(|op| op == "ledger_tasks_open_since_at")
+    );
+    assert!(
+        ops[ats.len()..]
+            .iter()
+            .all(|op| op == "last_event_naming_supervisor")
+    );
+
+    // The answers hold the aggregate alone and one event alone.
+    let answer = call(
+        &service.backend,
+        &service.token,
+        "ledger_tasks_open_since_at",
+        json!([p]),
+    );
+    let since = answer.result.unwrap();
+    let mut fields: Vec<&String> = since.as_object().unwrap().keys().collect();
+    fields.sort();
+    assert_eq!(fields, ["id", "ms"]);
+    let answer = call(
+        &service.backend,
+        &service.token,
+        "last_event_naming_supervisor",
+        json!(["d", first + 10]),
+    );
+    let event: crate::domain::RunEvent = serde_json::from_value(answer.result.unwrap()).unwrap();
+    assert_eq!(event.id, EventId::new(first + 2));
+}

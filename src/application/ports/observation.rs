@@ -254,6 +254,28 @@ pub trait LedgerStore {
             &self.ledger_rows(LedgerKind::Task)?,
         ))
     }
+    /// A [`crate::domain::pre_claim::rows::Since`] for the position `at`
+    /// (at or before the position the rows were written at) no later than
+    /// the one the task rows folded up to `at` would give: that of the
+    /// task rows whose inputs start by `at` and that are not settled or
+    /// were folded from an input past `at`
+    /// ([`crate::domain::ledger::InputsThrough::last`]). At the position
+    /// the rows were written at it is [`Self::ledger_tasks_open_since`].
+    fn ledger_tasks_open_since_at(
+        &self,
+        at: EventId,
+    ) -> Result<crate::domain::pre_claim::rows::Since> {
+        let rows: Vec<LedgerRow> = self
+            .ledger_rows(LedgerKind::Task)?
+            .into_iter()
+            .filter(|row| row.inputs_from <= at)
+            .map(|row| LedgerRow {
+                is_final: row.is_final && row.inputs_through.last() <= at,
+                ..row
+            })
+            .collect();
+        Ok(crate::domain::pre_claim::rows::Since::of(&rows))
+    }
     /// The queue rows the supervisors' lives and the waits before a claim
     /// are made again from ([`crate::domain::pre_claim::rows::holds`]: the
     /// waits open, those a supervisor's life ended or that ended from
@@ -362,6 +384,16 @@ pub trait LedgerStore {
     /// input [`Self::ledger_window`] folds the row of a run on its way
     /// from, as the builder writes none of it until it ends.
     fn ledger_run_events(&self, run: &RunId) -> Result<Vec<RunEvent>>;
+    /// The last event up to `upto` (inclusive) whose payload names
+    /// `supervisor` ([`crate::domain::supervisor_life::supervisor_of`]),
+    /// whatever its kind; `None` with none. What builds the ledger cuts a
+    /// row a supervisor's life reaches back to a position by it, one read
+    /// a supervisor, however long that supervisor was silent since.
+    fn last_event_naming_supervisor(
+        &self,
+        supervisor: &str,
+        upto: EventId,
+    ) -> Result<Option<RunEvent>>;
     /// The window `query` asks of the rows of every kind
     /// ([`crate::domain::ledger::window::select`]): the one entry the
     /// statistics read the ledger by. The rows of the runs on their way

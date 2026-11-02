@@ -212,6 +212,22 @@ impl LedgerStore for Memory {
     fn ledger_run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
         EventStore::run_events(self, run)
     }
+    fn last_event_naming_supervisor(
+        &self,
+        supervisor: &str,
+        upto: EventId,
+    ) -> Result<Option<RunEvent>> {
+        Ok(self
+            .events
+            .borrow()
+            .iter()
+            .filter(|event| {
+                event.id <= upto
+                    && crate::domain::supervisor_life::supervisor_of(event) == Some(supervisor)
+            })
+            .max_by_key(|event| event.id)
+            .cloned())
+    }
 
     fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool> {
         ensure!(!self.refuses.get(), "attempt to write a readonly database");
@@ -3133,6 +3149,9 @@ impl LedgerStore for HeldRows<'_> {
     fn ledger_run_events(&self, _: &RunId) -> Result<Vec<RunEvent>> {
         unreachable!("no run's events here")
     }
+    fn last_event_naming_supervisor(&self, _: &str, _: EventId) -> Result<Option<RunEvent>> {
+        unreachable!("no event naming a supervisor here")
+    }
     fn write_ledger_row(&self, _: &LedgerRow) -> Result<bool> {
         unreachable!("no write here")
     }
@@ -4545,4 +4564,50 @@ fn completed_tasks_left_unwritten_and_runs_stale_by_their_steps_have_an_input_af
     drain(&memory, &mut builder, LATER);
     assert!(lagging_rows_have_an_input_after(&memory, &whole, r_of(&memory)).is_empty());
     assert_eq!(r_of(&memory), builder.cursors());
+}
+
+/// The port's own reading of the start of the task rows for a position
+/// ([`LedgerStore::ledger_tasks_open_since_at`]) is no later than the one
+/// of the rows folded up to that position, and at the position the rows
+/// were written at is the start of those not settled; the fake's last
+/// event naming a supervisor is the last up to the id naming it.
+#[test]
+fn the_ports_start_of_the_tasks_for_a_position_is_no_later_than_the_one_there() {
+    use crate::domain::ledger::testkit::{built_and_settled, waits_across};
+    use crate::domain::pre_claim::rows::Since;
+    let (log, position, at) = waits_across();
+    let events = &log.events[..position];
+    let rows = built_and_settled(events, ms(at));
+    let store = HeldRows(&rows);
+    let p = events.last().unwrap().id;
+    assert_eq!(
+        store.ledger_tasks_open_since_at(p).unwrap(),
+        store.ledger_tasks_open_since().unwrap()
+    );
+    for at_id in 0..=p.as_i64() {
+        let at_id = EventId::new(at_id);
+        let read = store.ledger_tasks_open_since_at(at_id).unwrap();
+        let upto: Vec<RunEvent> = events.iter().filter(|e| e.id <= at_id).cloned().collect();
+        let exact = Since::of(&built_and_settled(&upto, ms(at)));
+        assert!(
+            read.ms <= exact.ms && read.id <= exact.id,
+            "{at_id}: {read:?} {exact:?}"
+        );
+    }
+
+    let memory = Memory::default();
+    memory.events.borrow_mut().extend(events.iter().cloned());
+    for upto in 0..=p.as_i64() {
+        let upto = EventId::new(upto);
+        let expected = events
+            .iter()
+            .rfind(|e| {
+                e.id <= upto && crate::domain::supervisor_life::supervisor_of(e) == Some("d")
+            })
+            .cloned();
+        assert_eq!(
+            memory.last_event_naming_supervisor("d", upto).unwrap(),
+            expected
+        );
+    }
 }

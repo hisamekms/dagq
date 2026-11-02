@@ -290,12 +290,38 @@ impl SqliteQueue {
     }
 }
 
+/// The last event naming a supervisor up to an id, by the index
+/// `events_by_supervisor` (its expression written as the index writes it).
+const LAST_EVENT_NAMING_SUPERVISOR: &str = "SELECT * FROM run_events
+  WHERE json_extract(payload, '$.supervisor') = ?1 AND id <= ?2
+    AND json_type(payload, '$.supervisor') = 'text'
+  ORDER BY id DESC LIMIT 1";
+
 impl LedgerStore for SqliteQueue {
     fn ledger_run_events(
         &self,
         run: &crate::domain::RunId,
     ) -> Result<Vec<crate::domain::RunEvent>> {
         crate::application::EventStore::run_events(self, run)
+    }
+
+    /// One look up of the index `events_by_supervisor`: the query writes
+    /// its expression as the index does and binds the name as text, and
+    /// takes only a payload whose supervisor is a JSON string, so an event
+    /// naming it by a number, an object or an array is not taken.
+    fn last_event_naming_supervisor(
+        &self,
+        supervisor: &str,
+        upto: EventId,
+    ) -> Result<Option<crate::domain::RunEvent>> {
+        Ok(self
+            .conn
+            .query_row(
+                LAST_EVENT_NAMING_SUPERVISOR,
+                params![supervisor, upto.as_i64()],
+                event_row,
+            )
+            .optional()?)
     }
 
     fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool> {
@@ -528,6 +554,28 @@ impl LedgerStore for SqliteQueue {
             "SELECT MIN(COALESCE(started_at, -9223372036854775808)), MIN(inputs_from)
                FROM ledger_rows WHERE kind=?1 AND final=0",
             [LedgerKind::Task.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(match (ms, id) {
+            (Some(ms), Some(id)) => Since {
+                ms,
+                id: EventId::new(id),
+            },
+            _ => Since::NONE,
+        })
+    }
+
+    /// One aggregate over the task rows, as [`Self::ledger_tasks_open_since`]
+    /// with the cut to `at`: no row is read.
+    fn ledger_tasks_open_since_at(&self, at: EventId) -> Result<Since> {
+        let (ms, id): (Option<i64>, Option<i64>) = self.conn.query_row(
+            "SELECT MIN(COALESCE(started_at, -9223372036854775808)), MIN(inputs_from)
+               FROM ledger_rows
+              WHERE kind=?1 AND inputs_from <= ?2
+                AND (final=0
+                     OR MAX(json_extract(inputs_through, '$.events'),
+                            COALESCE(json_extract(inputs_through, '$.supervisor'), 0)) > ?2)",
+            params![LedgerKind::Task.as_str(), at.as_i64()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         Ok(match (ms, id) {
@@ -1049,6 +1097,185 @@ mod tests {
             &[&queue_kind, &"supervisor_stopped", &"1", &0, &10],
         );
         assert!(stops.contains("kind=? AND key>?"), "{stops}");
+    }
+
+    /// The last event naming a supervisor up to an id is the last of every
+    /// event up to it whose payload names it as the domain reads a name
+    /// ([`crate::domain::supervisor_life::supervisor_of`]), whatever its
+    /// kind: none after the id, none naming another supervisor or none,
+    /// none naming it by a number; `None` with none. The read looks up the
+    /// index `events_by_supervisor`.
+    #[test]
+    fn the_last_event_naming_a_supervisor_up_to_an_id_is_looked_up_by_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let events: [(i64, &str, Value); 9] = [
+            (1, "supervisor_started", json!({"supervisor": "s"})),
+            (2, "supervisor_started", json!({"supervisor": "t"})),
+            (3, "observation", json!({})),
+            (
+                4,
+                "slots_full_started",
+                json!({"supervisor": "s", "class": "heavy"}),
+            ),
+            (5, "observation", json!({"supervisor": 7})),
+            (6, "supervisor_stopped", json!({"supervisor": "t"})),
+            (
+                7,
+                "live_alert_baseline",
+                json!({"supervisor": "s", "judgment": "x"}),
+            ),
+            (8, "observation", json!({"note": {"supervisor": "s"}})),
+            (9, "observation", json!({"supervisor": {"x": 1}})),
+        ];
+        for (id, kind, payload) in &events {
+            queue
+                .conn
+                .execute(
+                    "INSERT INTO run_events(id, kind, payload, actor_role, actor_id)
+                     VALUES (?1, ?2, ?3, 'supervisor', 'supervisor')",
+                    params![id, kind, payload.to_string()],
+                )
+                .unwrap();
+        }
+        let every: Vec<RunEvent> = queue
+            .conn
+            .prepare("SELECT * FROM run_events ORDER BY id")
+            .unwrap()
+            .query_map([], event_row)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(every.len(), events.len());
+        for supervisor in ["s", "t", "u", "7", "{\"x\":1}"] {
+            for upto in 0..=10 {
+                let expected = every
+                    .iter()
+                    .rfind(|event| {
+                        event.id.as_i64() <= upto
+                            && crate::domain::supervisor_life::supervisor_of(event)
+                                == Some(supervisor)
+                    })
+                    .cloned();
+                let read = queue
+                    .last_event_naming_supervisor(supervisor, EventId::new(upto))
+                    .unwrap();
+                assert_eq!(read, expected, "{supervisor} {upto}");
+            }
+        }
+        let id = |supervisor, upto| {
+            queue
+                .last_event_naming_supervisor(supervisor, EventId::new(upto))
+                .unwrap()
+                .map(|event| event.id.as_i64())
+        };
+        assert_eq!(id("s", 9), Some(7));
+        assert_eq!(id("s", 6), Some(4));
+        assert_eq!(id("s", 3), Some(1));
+        assert_eq!(id("s", 0), None);
+        assert_eq!(id("t", 5), Some(2));
+        assert_eq!(id("t", 6), Some(6));
+        assert_eq!(id("u", 9), None);
+        assert_eq!(id("7", 9), None);
+        assert_eq!(id("{\"x\":1}", 10), None);
+
+        let mut statement = queue
+            .conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {LAST_EVENT_NAMING_SUPERVISOR}"
+            ))
+            .unwrap();
+        let plan = statement
+            .query_map(params!["s", 9], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan.contains("events_by_supervisor"), "{plan}");
+    }
+
+    /// The start of the task rows for a position before the one the rows
+    /// were written at is no later than the one of the rows folded up to
+    /// that position, and is that of the rows whose inputs start by it,
+    /// not settled or folded from an input past it; at the position the
+    /// rows were written at it is the start of those not settled. A row
+    /// whose records read whole no more leaves it as it is.
+    #[test]
+    fn the_start_of_the_tasks_for_a_position_is_no_later_than_the_one_there() {
+        use crate::domain::ledger::testkit::{built_and_settled, ms, queue_across, waits_across};
+        let (waits, position, at) = waits_across();
+        let (queued, queued_position) = queue_across();
+        let mut differs = false;
+        for (events, now) in [
+            (waits.events[..position].to_vec(), ms(at)),
+            (queued.events[..queued_position].to_vec(), ms(40)),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+            let rows = built_and_settled(&events, now);
+            for row in &rows {
+                queue.write_ledger_row(row).unwrap();
+            }
+            queue
+                .conn
+                .execute("UPDATE ledger_rows SET records='[{\"id\":1}]'", [])
+                .unwrap();
+            let p = events.last().unwrap().id;
+            assert_eq!(
+                queue.ledger_tasks_open_since_at(p).unwrap(),
+                queue.ledger_tasks_open_since().unwrap()
+            );
+            for at in 0..=p.as_i64() {
+                let at = EventId::new(at);
+                let read = queue.ledger_tasks_open_since_at(at).unwrap();
+                let cut: Vec<LedgerRow> = rows
+                    .iter()
+                    .filter(|row| row.inputs_from <= at)
+                    .map(|row| LedgerRow {
+                        is_final: row.is_final && row.inputs_through.last() <= at,
+                        ..row.clone()
+                    })
+                    .collect();
+                assert_eq!(read, Since::of(&cut), "{at}");
+                let upto: Vec<RunEvent> = events.iter().filter(|e| e.id <= at).cloned().collect();
+                let exact = Since::of(&built_and_settled(&upto, now));
+                assert!(
+                    read.ms <= exact.ms && read.id <= exact.id,
+                    "{at}: {read:?} {exact:?}"
+                );
+                differs |= read != queue.ledger_tasks_open_since().unwrap();
+            }
+        }
+        assert!(differs);
+
+        // A settled task row folded from a supervisor's event past `at`
+        // (its inputs' last by the supervisor, not by the events) counts.
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let mut row = built_and_settled(&waits.events[..position], ms(at))
+            .into_iter()
+            .find(|row| row.kind == LedgerKind::Task)
+            .unwrap();
+        row.is_final = true;
+        row.inputs_through.supervisor = Some(EventId::new(row.inputs_through.events.as_i64() + 5));
+        queue.write_ledger_row(&row).unwrap();
+        let start = Since {
+            ms: row.started_at.unwrap_or(i64::MIN),
+            id: row.inputs_from,
+        };
+        let events = row.inputs_through.events.as_i64();
+        assert_eq!(
+            queue
+                .ledger_tasks_open_since_at(EventId::new(events + 4))
+                .unwrap(),
+            start
+        );
+        assert_eq!(
+            queue
+                .ledger_tasks_open_since_at(EventId::new(events + 5))
+                .unwrap(),
+            Since::NONE
+        );
     }
 
     /// The waits settled a task's fold reads besides the book made again
