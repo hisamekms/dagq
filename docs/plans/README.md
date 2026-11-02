@@ -63,6 +63,7 @@ tags:
 - [スパイク：container の runtime の前提の確認の手順（Claude の長期 token の代理・run ごとの clone の費用・dagq 専用の machine の最小の資源・sccache の cache の同時の書き込み）](container-runtime-spike.md)（goal 38）
 - [スパイク：container の中の process の OOM kill を runtime が確かな事実として読める方法（--rm との順序・子 process だけの kill・container の上限と machine 全体の OOM の区別）の調べと、実物の podman で確かめる手順](container-oom-detection.md)（goal 184）
 - [スパイク：run の worktree の target の内訳と、着地待ちの間の build の出力の扱い・cargo の設定で減らせる量と、その時間の代償](run-build-output-size-spike.md)（goal 224、task 3440）
+- [スパイク：判定を返す 4 つの役割の job を固定した snapshot だけで本番と同じ組み立てと起動経路で起動し、本番 queue・checkout・元の判定・期待を読ませない形が既存の部品の小さな拡張で作れるか（役割ごとの判定と要る拡張）](role-eval-snapshot-spike.md)（task 3967）
 - [スパイク：supervisor の起動の追いつきの後に持ち続ける確保量はどの保持か、確定済みの履歴の event の数に比例するか](supervisor-startup-memory-spike.md)（goal 241、task 3827）
 - [スパイク：台帳の係の queue 行・待ちの行・supervisor の一生を、store の行と範囲の決まった読みから位置 at の時点に切って作り直せるか（種類ごとの判定と足す読み）](ledger-cut-at-position-spike.md)（goal 241、task 3979）
 - [スパイク：build の動いていない run の incremental の crate の dir から最新の完了済み session 以外を消したときの、次の build の時間と空く量](incremental-session-removal-spike.md)（goal 224、task 3462）
