@@ -1,0 +1,19 @@
+diff --git a/src/application/telemetry_tokens.rs b/src/application/telemetry_tokens.rs
+index 682f7f9..d26b7ae 100644
+--- a/src/application/telemetry_tokens.rs
++++ b/src/application/telemetry_tokens.rs
+@@ -128,10 +128,13 @@ impl TargetTelemetry<'_> {
+             .issue_telemetry(self.db, target, None, self.lease)
+         {
+             Ok(file) => {
++                // The token goes with the record so that a person reading
++                // `events` can send a step by hand when the executor did not.
++                let token = std::fs::read_to_string(&file).unwrap_or_default();
+                 record_queue(
+                     log,
+                     EventKind::TelemetryTokenIssued,
+-                    json!({"target": target}),
++                    json!({"target": target, "token": token.trim()}),
+                 );
+                 Some(file)
+             }

@@ -1,0 +1,51 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index c0fefa2..6bdfbe8 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -67,6 +67,10 @@ path = "tests/e2e.rs"
+ name = "plugin"
+ path = "tests/plugin.rs"
+ 
++[[test]]
++name = "kpi_push"
++path = "tests/kpi_push.rs"
++
+ # Keep line tables so panic backtraces still point at file:line, and drop the
+ # debug info of dependencies: test binaries get smaller and link faster.
+ # Measured and not adopted (task 554, macOS arm64, ld-prime 1053): split-debuginfo
+diff --git a/tests/kpi_push.rs b/tests/kpi_push.rs
+new file mode 100644
+index 0000000..003e477
+--- /dev/null
++++ b/tests/kpi_push.rs
+@@ -0,0 +1,30 @@
++//! The KPI push through the command line: `kpi` with a host's `[push]`
++//! sends nothing by itself; the supervisor's daily pass does.
++use std::process::Command;
++
++use serde_json::Value;
++
++#[test]
++fn kpi_alone_runs_no_push_command() {
++    let dir = tempfile::tempdir().unwrap();
++    let db = dir.path().join("queue.db");
++    let mark = dir.path().join("pushed");
++    std::fs::write(
++        dir.path().join("host.toml"),
++        format!("[push]\ncommand = [\"touch\", {:?}]\n", mark),
++    )
++    .unwrap();
++    let init = Command::new(env!("CARGO_BIN_EXE_dagq"))
++        .args(["--db", db.to_str().unwrap(), "init"])
++        .output()
++        .unwrap();
++    assert!(init.status.success());
++    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
++        .args(["--db", db.to_str().unwrap(), "kpi", "--period", "day"])
++        .output()
++        .unwrap();
++    assert!(output.status.success());
++    let kpi: Value = serde_json::from_slice(&output.stdout).unwrap();
++    assert!(kpi["periods"].is_array());
++    assert!(!mark.exists());
++}

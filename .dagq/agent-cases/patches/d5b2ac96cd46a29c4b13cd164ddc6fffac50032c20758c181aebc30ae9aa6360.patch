@@ -1,0 +1,47 @@
+diff --git a/src/infrastructure/mod.rs b/src/infrastructure/mod.rs
+index 0f1cce0..7054db7 100644
+--- a/src/infrastructure/mod.rs
++++ b/src/infrastructure/mod.rs
+@@ -64,6 +64,7 @@ pub mod release_update;
+ mod replan_apply;
+ mod replans;
+ pub mod report_config;
++pub mod report_share;
+ pub mod review_programs;
+ pub mod review_secrets;
+ pub mod run_container;
+diff --git a/src/infrastructure/report_share.rs b/src/infrastructure/report_share.rs
+new file mode 100644
+index 0000000..a0cfdab
+--- /dev/null
++++ b/src/infrastructure/report_share.rs
+@@ -0,0 +1,29 @@
++//! Share the reports the supervisor wrote with the team: each daily and
++//! weekly report's HTML and JSON are uploaded to the URL of
++//! `host.toml`'s `[report] share_url`, so that people away from the host
++//! read them in a browser.
++
++use std::path::Path;
++use std::process::Command;
++
++use anyhow::{Result, ensure};
++
++use crate::application::report::Written;
++
++/// Upload `written`'s HTML and JSON to `url` as one multipart form.
++pub fn share(written: &Written, url: &str) -> Result<()> {
++    let status = Command::new("curl")
++        .args(["--silent", "--show-error", "--fail", "--max-time", "30"])
++        .arg("-F")
++        .arg(form("html", &written.html))
++        .arg("-F")
++        .arg(form("json", &written.json))
++        .arg(url)
++        .status()?;
++    ensure!(status.success(), "curl ended with {status}");
++    Ok(())
++}
++
++fn form(name: &str, file: &Path) -> String {
++    format!("{name}=@{}", file.display())
++}

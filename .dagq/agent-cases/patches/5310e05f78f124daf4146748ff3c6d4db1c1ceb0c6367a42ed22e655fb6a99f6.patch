@@ -1,0 +1,64 @@
+diff --git a/tests/common/mod.rs b/tests/common/mod.rs
+index c929290..a2f319f 100644
+--- a/tests/common/mod.rs
++++ b/tests/common/mod.rs
+@@ -550,3 +550,27 @@ pub fn await_file(word: &str) -> String {
+ pub fn await_path(path: impl AsRef<std::path::Path>) -> String {
+     await_file(&shell_path(path))
+ }
++
++/// Task 1's run claimed under the supervisor's lease `token` on `base`,
++/// set to await integration with no lease left: the start of the runtime
++/// tests of a landing that lands nothing (`host_control`).
++pub fn claimed_awaiting_run(db: &std::path::Path, base: &str, token: &str) -> dagq::domain::TaskRun {
++    use dagq::domain::{ClaimOutcome, CommitSha, LeaseToken};
++    let mut queue = dagq::infrastructure::sqlite::SqliteQueue::open(db).unwrap();
++    let base = CommitSha::parse(base, "base commit").unwrap();
++    let ClaimOutcome::Claimed { run } = queue
++        .claim_for_supervisor(&base, &LeaseToken::new(token))
++        .unwrap()
++    else {
++        panic!("task 1 is not claimed")
++    };
++    let raw = rusqlite::Connection::open(db).unwrap();
++    raw.execute(
++        "UPDATE task_runs SET status='awaiting_integration' WHERE id=?1",
++        [run.id().as_str()],
++    )
++    .unwrap();
++    raw.execute("DELETE FROM run_leases WHERE run_id=?1", [run.id().as_str()])
++        .unwrap();
++    queue.run(run.id()).unwrap()
++}
+diff --git a/tests/it/host_control.rs b/tests/it/host_control.rs
+index 3254ebc..a3aedc3 100644
+--- a/tests/it/host_control.rs
++++ b/tests/it/host_control.rs
+@@ -60,26 +60,7 @@ fn awaiting() -> (Fixture, PathBuf, PathBuf, TaskRun) {
+ /// lands nothing.
+ fn claimed_awaiting() -> (Fixture, PathBuf, PathBuf, TaskRun) {
+     let (fixture, repo, db) = fixture();
+-    let mut queue = SqliteQueue::open(&db).unwrap();
+-    let base = CommitSha::parse(main_of(&repo), "base commit").unwrap();
+-    let ClaimOutcome::Claimed { run } = queue
+-        .claim_for_supervisor(&base, &LeaseToken::new("claimed-awaiting"))
+-        .unwrap()
+-    else {
+-        panic!("task 1 is not claimed")
+-    };
+-    let raw = rusqlite::Connection::open(&db).unwrap();
+-    raw.execute(
+-        "UPDATE task_runs SET status='awaiting_integration' WHERE id=?1",
+-        [run.id().as_str()],
+-    )
+-    .unwrap();
+-    raw.execute(
+-        "DELETE FROM run_leases WHERE run_id=?1",
+-        [run.id().as_str()],
+-    )
+-    .unwrap();
+-    let run = queue.run(run.id()).unwrap();
++    let run = common::claimed_awaiting_run(&db, &main_of(&repo), "claimed-awaiting");
+     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+     (fixture, repo, db, run)
+ }

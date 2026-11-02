@@ -1,0 +1,12 @@
+diff --git a/src/infrastructure/codex.rs b/src/infrastructure/codex.rs
+index 72dfd00..dc63317 100644
+--- a/src/infrastructure/codex.rs
++++ b/src/infrastructure/codex.rs
+@@ -132,6 +132,7 @@ pub const RULES_PATH: &str = ".codex/rules/dagq-deny.rules";
+ pub const RULES: &str = r#"# Written by dagq for this run's Codex worker; not committed.
+ prefix_rule(pattern=["pkill"], decision="forbidden", justification="dagq: stop only processes you started, by pid or task; pkill also stops other runs' sessions and checks")
+ prefix_rule(pattern=["killall"], decision="forbidden", justification="dagq: stop only processes you started, by pid or task; killall also stops other runs' sessions and checks")
++prefix_rule(pattern=["git", "push"], decision="forbidden", justification="dagq: only integrate lands and pushes; commit on the run branch and write the receipt")
+ "#;
+ 
+ /// The sandbox of every turn, before its writable roots: workspace-write

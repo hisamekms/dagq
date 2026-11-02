@@ -1,0 +1,40 @@
+diff --git a/tests/it/runtime_background.rs b/tests/it/runtime_background.rs
+index b243196..d0cf508 100644
+--- a/tests/it/runtime_background.rs
++++ b/tests/it/runtime_background.rs
+@@ -681,3 +681,15 @@ fn zombie(pid: u32) -> bool {
+         .trim()
+         .starts_with('Z')
+ }
++
++/// The payloads of the queue's events of `kind`, oldest first.
++fn payloads_of(db: &Path, kind: EventKind) -> Vec<serde_json::Value> {
++    SqliteQueue::open(db)
++        .unwrap()
++        .all_events()
++        .unwrap()
++        .into_iter()
++        .filter(|event| event.kind == kind)
++        .map(|event| event.payload)
++        .collect()
++}
+diff --git a/tests/it/runtime_task_hold.rs b/tests/it/runtime_task_hold.rs
+index 6f639fc..7dfc733 100644
+--- a/tests/it/runtime_task_hold.rs
++++ b/tests/it/runtime_task_hold.rs
+@@ -683,3 +683,15 @@ fn a_rest_whose_registered_wrapper_still_runs_is_no_safe_wait_for_a_hold() {
+     assert!(settled());
+     assert!(queue.run_lease(run.id()).unwrap().is_none());
+ }
++
++/// The payloads of the queue's events of `kind`, oldest first.
++fn payloads_of(db: &Path, kind: EventKind) -> Vec<Value> {
++    SqliteQueue::open(db)
++        .unwrap()
++        .all_events()
++        .unwrap()
++        .into_iter()
++        .filter(|event| event.kind == kind)
++        .map(|event| event.payload)
++        .collect()
++}

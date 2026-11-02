@@ -1,0 +1,13 @@
+diff --git a/tests/it/agent_eval_builtins.rs b/tests/it/agent_eval_builtins.rs
+index 599a9b5..22cbc61 100644
+--- a/tests/it/agent_eval_builtins.rs
++++ b/tests/it/agent_eval_builtins.rs
+@@ -161,7 +161,7 @@ fn a_builtins_round_gets_neither_the_projects_rules_nor_its_programs() {
+     let ran = fx.repo.join("program-ran");
+     fs::write(
+         scripts.join("mark.sh"),
+-        format!("#!/bin/sh\ntouch {}\nexit 1\n", shell_path(&ran)),
++        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", ran.display()),
+     )
+     .unwrap();
+     #[cfg(unix)]

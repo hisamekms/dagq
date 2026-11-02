@@ -1,0 +1,24 @@
+diff --git a/src/application/naming.rs b/src/application/naming.rs
+index ea4f1ae..e6323ea 100644
+--- a/src/application/naming.rs
++++ b/src/application/naming.rs
+@@ -17,6 +17,19 @@ pub fn shell_quote(arg: &str) -> String {
+     format!("'{}'", arg.replace('\'', "'\"'\"'"))
+ }
+ 
++/// The shell line that lists the commits of the run branch `branch` not
++/// yet on `base`, every argument quoted on its own ([`shell_join`]).
++pub fn branch_log_command(repo: &Path, base: &str, branch: &str) -> String {
++    shell_join(&[
++        "git".to_owned(),
++        "-C".to_owned(),
++        repo.display().to_string(),
++        "log".to_owned(),
++        "--oneline".to_owned(),
++        format!("{base}..{branch}"),
++    ])
++}
++
+ /// The repository's directory name, or the whole path when it has none.
+ pub fn repository_name(root: &Path) -> String {
+     root.file_name()

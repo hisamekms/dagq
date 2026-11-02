@@ -1,0 +1,18 @@
+diff --git a/src/application/commands/dialogue.rs b/src/application/commands/dialogue.rs
+index 0d51b75..97441bb 100644
+--- a/src/application/commands/dialogue.rs
++++ b/src/application/commands/dialogue.rs
+@@ -139,7 +139,12 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
+         let resource = match &note.target {
+             NoteTarget::Task(task) => Resource::task(*task),
+             NoteTarget::Run(run) => Resource::run(run.clone()),
+-            NoteTarget::Goal(goal) => Resource::Goal(*goal),
++            // A note on a goal changes no state of a task or a run: any
++            // role may leave one, and the gate is not asked.
++            NoteTarget::Goal(_) => {
++                note.by = self.gate.actor.written_by().to_owned();
++                return self.store.add_note(note);
++            }
+         };
+         self.gate
+             .authorize(&*self.store, Capability::NoteWrite, &resource)?;

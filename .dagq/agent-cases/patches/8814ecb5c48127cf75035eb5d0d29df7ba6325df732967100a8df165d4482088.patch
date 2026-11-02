@@ -1,0 +1,15 @@
+diff --git a/tests/it/host_control.rs b/tests/it/host_control.rs
+index 3254ebc..2eac752 100644
+--- a/tests/it/host_control.rs
++++ b/tests/it/host_control.rs
+@@ -69,8 +69,9 @@ fn claimed_awaiting() -> (Fixture, PathBuf, PathBuf, TaskRun) {
+         panic!("task 1 is not claimed")
+     };
+     let raw = rusqlite::Connection::open(&db).unwrap();
++    let status = "awaiting_integration";
+     raw.execute(
+-        "UPDATE task_runs SET status='awaiting_integration' WHERE id=?1",
++        &format!("UPDATE task_runs SET status='{status}' WHERE id=?1"),
+         [run.id().as_str()],
+     )
+     .unwrap();

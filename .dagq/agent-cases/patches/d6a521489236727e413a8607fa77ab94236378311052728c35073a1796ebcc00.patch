@@ -1,0 +1,16 @@
+diff --git a/src/infrastructure/codex.rs b/src/infrastructure/codex.rs
+index 72dfd00..f030fe0 100644
+--- a/src/infrastructure/codex.rs
++++ b/src/infrastructure/codex.rs
+@@ -150,8 +150,9 @@ pub const SANDBOX_CONFIG: [&str; 3] = [
+ /// decision 2): of the Git common directory `G` only the worktree's own
+ /// directory, the objects and the refs (and their logs) of the `dagq/`
+ /// run branches, so that the run branch takes commits and `main` does
+-/// not; the run directory (the receipt); and cargo's registry. Never the
+-/// whole common directory, `$HOME` or the queue's directory.
++/// not; the run directory (the receipt and the turn's `TMPDIR`, which is
++/// inside it); and cargo's registry. Never the whole common directory,
++/// `$HOME` or the queue's directory.
+ pub fn writable_roots(worktree: &Path, run_dir: &Path, cargo_home: &Path) -> Result<Vec<PathBuf>> {
+     let admin = worktree_admin_dir(worktree)?;
+     let common = common_dir(&admin)?;

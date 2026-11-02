@@ -1,0 +1,51 @@
+diff --git a/tests/it/cli_kpi.rs b/tests/it/cli_kpi.rs
+index 473cd68..786ff6b 100644
+--- a/tests/it/cli_kpi.rs
++++ b/tests/it/cli_kpi.rs
+@@ -833,21 +833,31 @@ fn the_cancel_reasons_reach_stats_and_kpi() {
+ /// `dagq.toml`.
+ #[test]
+ fn a_target_bound_by_kind_is_refused_with_its_replacement() {
+-    let (dir, db) = queue();
+-    let config = dir.path().join("config");
+-    std::fs::create_dir_all(&config).unwrap();
+-    std::fs::write(
+-        dir.path().join("host.toml"),
+-        "[kpi.targets.landings]\nkind = \"runtime\"\nmin = 1\n",
+-    )
+-    .unwrap();
+-    let refused = kpi(None, &db, &config, &["--last", "1"]);
+-    assert!(!refused.status.success());
+-    let error = String::from_utf8_lossy(&refused.stderr);
+-    assert!(
+-        error.contains("kind of a target was removed") && error.contains("change or area"),
+-        "{error}"
+-    );
++    for (binding, refused) in [
++        ("kind = \"runtime\"", true),
++        ("kind = \"docs\"", true),
++        ("change = \"fix\"", false),
++        ("area = \"runtime\"", false),
++        ("change = \"fix\"\narea = \"runtime\"", false),
++    ] {
++        let (dir, db) = queue();
++        let config = dir.path().join("config");
++        std::fs::create_dir_all(&config).unwrap();
++        std::fs::write(
++            dir.path().join("host.toml"),
++            format!("[kpi.targets.landings]\n{binding}\nmin = 1\n"),
++        )
++        .unwrap();
++        let output = kpi(None, &db, &config, &["--last", "1"]);
++        assert_eq!(!output.status.success(), refused, "{binding}");
++        if refused {
++            let error = String::from_utf8_lossy(&output.stderr);
++            assert!(
++                error.contains("kind of a target was removed") && error.contains("change or area"),
++                "{binding}: {error}"
++            );
++        }
++    }
+ }
+ 
+ /// The throughput review's jobs (task 1173) reach `stats --full` and `kpi`

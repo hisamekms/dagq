@@ -1,0 +1,18 @@
+diff --git a/tests/it/actor_model.rs b/tests/it/actor_model.rs
+index 8f2587c..91871d4 100644
+--- a/tests/it/actor_model.rs
++++ b/tests/it/actor_model.rs
+@@ -12,9 +12,11 @@ use runtime_support::*;
+ /// every later one: a recovery job, then a review.
+ fn fails_once(dir: &Path) -> String {
+     let mark = dir.join("failed-once");
++    let log = dir.join("failed-once.log");
+     format!(
+-        "if [ ! -f {mark} ]; then : > {mark}; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+-        mark = shell_path(&mark)
++        "if [ ! -f {mark} ]; then : > {mark}; echo failed >> {log}; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
++        mark = shell_path(&mark),
++        log = shell_path(&log)
+     )
+ }
+ 

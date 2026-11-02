@@ -1,0 +1,141 @@
+diff --git a/tests/it/task_replanning.rs b/tests/it/task_replanning.rs
+index 41e82ee..cc14219 100644
+--- a/tests/it/task_replanning.rs
++++ b/tests/it/task_replanning.rs
+@@ -2828,3 +2828,136 @@ fn the_apply_and_the_failure_of_one_verdict_are_not_both_settled() {
+         ReplanStatus::Continuing
+     );
+ }
++
++/// The operation of `run` once it is requested: asked for as `inbox` with the
++/// reason "the review keeps sending it back", read back through `dagq replan show` and checked to
++/// be `candidate`, with the task's conditions it began with.
++fn operation_requested(db: &std::path::Path, run: &RunId, conditions: &[&str]) -> Value {
++    let answer = ok_as("inbox", db, &args(&request(run, "the review keeps sending it back")));
++    let id = answer["operation"]["id"].as_i64().unwrap();
++    let shown = ok(db, &["replan", "show", &id.to_string()]);
++    let op = &shown["operation"];
++    assert_eq!(op["status"], "candidate", "{shown}");
++    let items: Vec<&str> = op["conditions"]["acceptance"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(|item| item["text"].as_str().unwrap())
++        .collect();
++    assert_eq!(items, conditions, "{shown}");
++    op.clone()
++}
++
++/// The operation of `run` once it is proposed: asked for as `worker` with the
++/// reason "the task is larger than its paths", read back through `dagq replan show` and checked to
++/// be `candidate`, with the task's conditions it began with.
++fn operation_proposed(db: &std::path::Path, run: &RunId, conditions: &[&str]) -> Value {
++    let answer = ok_as("worker", db, &args(&request(run, "the task is larger than its paths")));
++    let id = answer["operation"]["id"].as_i64().unwrap();
++    let shown = ok(db, &["replan", "show", &id.to_string()]);
++    let op = &shown["operation"];
++    assert_eq!(op["status"], "candidate", "{shown}");
++    let items: Vec<&str> = op["conditions"]["acceptance"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(|item| item["text"].as_str().unwrap())
++        .collect();
++    assert_eq!(items, conditions, "{shown}");
++    op.clone()
++}
++
++/// The operation of `run` once it is fenced: asked for as `supervisor` with the
++/// reason "the run is parked for the replanning", read back through `dagq replan show` and checked to
++/// be `fenced`, with the task's conditions it began with.
++fn operation_fenced(db: &std::path::Path, run: &RunId, conditions: &[&str]) -> Value {
++    let answer = ok_as("supervisor", db, &args(&request(run, "the run is parked for the replanning")));
++    let id = answer["operation"]["id"].as_i64().unwrap();
++    let shown = ok(db, &["replan", "show", &id.to_string()]);
++    let op = &shown["operation"];
++    assert_eq!(op["status"], "fenced", "{shown}");
++    let items: Vec<&str> = op["conditions"]["acceptance"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(|item| item["text"].as_str().unwrap())
++        .collect();
++    assert_eq!(items, conditions, "{shown}");
++    op.clone()
++}
++
++/// The operation of `run` once it is blocked: asked for as `supervisor` with the
++/// reason "the planner asked a person", read back through `dagq replan show` and checked to
++/// be `blocked`, with the task's conditions it began with.
++fn operation_blocked(db: &std::path::Path, run: &RunId, conditions: &[&str]) -> Value {
++    let answer = ok_as("supervisor", db, &args(&request(run, "the planner asked a person")));
++    let id = answer["operation"]["id"].as_i64().unwrap();
++    let shown = ok(db, &["replan", "show", &id.to_string()]);
++    let op = &shown["operation"];
++    assert_eq!(op["status"], "blocked", "{shown}");
++    let items: Vec<&str> = op["conditions"]["acceptance"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(|item| item["text"].as_str().unwrap())
++        .collect();
++    assert_eq!(items, conditions, "{shown}");
++    op.clone()
++}
++
++/// The operation of `run` once it is continuing: asked for as `supervisor` with the
++/// reason "the diagnosis says go on", read back through `dagq replan show` and checked to
++/// be `continuing`, with the task's conditions it began with.
++fn operation_continuing(db: &std::path::Path, run: &RunId, conditions: &[&str]) -> Value {
++    let answer = ok_as("supervisor", db, &args(&request(run, "the diagnosis says go on")));
++    let id = answer["operation"]["id"].as_i64().unwrap();
++    let shown = ok(db, &["replan", "show", &id.to_string()]);
++    let op = &shown["operation"];
++    assert_eq!(op["status"], "continuing", "{shown}");
++    let items: Vec<&str> = op["conditions"]["acceptance"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(|item| item["text"].as_str().unwrap())
++        .collect();
++    assert_eq!(items, conditions, "{shown}");
++    op.clone()
++}
++
++/// The operation of `run` once it is replaced: asked for as `supervisor` with the
++/// reason "the replacement tasks are ready", read back through `dagq replan show` and checked to
++/// be `replaced`, with the task's conditions it began with.
++fn operation_replaced(db: &std::path::Path, run: &RunId, conditions: &[&str]) -> Value {
++    let answer = ok_as("supervisor", db, &args(&request(run, "the replacement tasks are ready")));
++    let id = answer["operation"]["id"].as_i64().unwrap();
++    let shown = ok(db, &["replan", "show", &id.to_string()]);
++    let op = &shown["operation"];
++    assert_eq!(op["status"], "replaced", "{shown}");
++    let items: Vec<&str> = op["conditions"]["acceptance"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(|item| item["text"].as_str().unwrap())
++        .collect();
++    assert_eq!(items, conditions, "{shown}");
++    op.clone()
++}
++
++/// The operation of `run` once it is closed: asked for as `supervisor` with the
++/// reason "the task was cancelled", read back through `dagq replan show` and checked to
++/// be `closed`, with the task's conditions it began with.
++fn operation_closed(db: &std::path::Path, run: &RunId, conditions: &[&str]) -> Value {
++    let answer = ok_as("supervisor", db, &args(&request(run, "the task was cancelled")));
++    let id = answer["operation"]["id"].as_i64().unwrap();
++    let shown = ok(db, &["replan", "show", &id.to_string()]);
++    let op = &shown["operation"];
++    assert_eq!(op["status"], "closed", "{shown}");
++    let items: Vec<&str> = op["conditions"]["acceptance"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(|item| item["text"].as_str().unwrap())
++        .collect();
++    assert_eq!(items, conditions, "{shown}");
++    op.clone()
++}

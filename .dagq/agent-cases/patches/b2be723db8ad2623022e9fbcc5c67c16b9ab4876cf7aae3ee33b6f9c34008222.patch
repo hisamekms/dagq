@@ -1,0 +1,12 @@
+diff --git a/src/application/push.rs b/src/application/push.rs
+index c0cf515..d79c4b7 100644
+--- a/src/application/push.rs
++++ b/src/application/push.rs
+@@ -190,6 +190,7 @@ pub fn request(push: &PushConfig, target: &PushTarget, message: &PushMessage) ->
+         command: push.command.clone(),
+         env: vec![
+             ("DAGQ_PUSH_KIND".into(), message.kind.as_str().into()),
++            ("DAGQ_PUSH_PERIOD".into(), message.period.clone()),
+             ("DAGQ_QUEUE".into(), target.queue.clone()),
+             (
+                 "DAGQ_REPORT_HTML".into(),

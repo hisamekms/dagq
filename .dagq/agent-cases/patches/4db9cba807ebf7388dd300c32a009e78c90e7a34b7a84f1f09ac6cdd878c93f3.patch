@@ -1,0 +1,28 @@
+diff --git a/src/application/telemetry_tokens.rs b/src/application/telemetry_tokens.rs
+index 682f7f9..2039f0a 100644
+--- a/src/application/telemetry_tokens.rs
++++ b/src/application/telemetry_tokens.rs
+@@ -122,6 +122,9 @@ impl TargetTelemetry<'_> {
+     /// (`telemetry_token_issued`) once it was issued. The file its executor
+     /// reads it from; `None` when it could not be issued: the target goes
+     /// on without telemetry, as its outcome does not hang on it.
++    ///
++    /// The agent gets the token's text in `DAGQ_TELEMETRY_TOKEN` of its
++    /// env ([`agent_env`]), so that a step it reports itself is accepted.
+     pub fn issue<L: TokenLog + ?Sized>(&self, log: &L, target: &StepTarget) -> Option<PathBuf> {
+         match self
+             .tokens
+@@ -146,6 +149,13 @@ impl TargetTelemetry<'_> {
+         }
+     }
+ 
++    /// The env the agent of `target` is started with: its token's text
++    /// read from `file` ([`Self::issue`]), empty when it cannot be read.
++    pub fn agent_env(&self, file: &Path) -> Vec<(String, String)> {
++        let token = std::fs::read_to_string(file).unwrap_or_default();
++        vec![("DAGQ_TELEMETRY_TOKEN".to_owned(), token.trim().to_owned())]
++    }
++
+     /// Register `session_id` as `target`'s ([`register_session`]): before
+     /// its agent starts for a session named ahead, once it is read for one
+     /// its agent named. `None` registers nothing.

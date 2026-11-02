@@ -1,0 +1,33 @@
+diff --git a/src/infrastructure/sqlite.rs b/src/infrastructure/sqlite.rs
+index c8c4b16..95a89de 100644
+--- a/src/infrastructure/sqlite.rs
++++ b/src/infrastructure/sqlite.rs
+@@ -4700,3 +4700,28 @@ mod write_hold_tests {
+         assert!(WRITE_HOLD_WARN < crate::application::QUEUE_BUSY_TIMEOUT);
+     }
+ }
++
++#[cfg(test)]
++mod run_index_tests {
++    use super::*;
++
++    /// The query of a task's runs uses the index on `task_runs(task_id)`,
++    /// not a scan of the table.
++    #[test]
++    fn the_runs_of_a_task_are_read_through_their_index() {
++        let dir = tempfile::tempdir().unwrap();
++        let raw = Connection::open(dir.path().join("queue.db")).unwrap();
++        for migration in MIGRATIONS {
++            raw.execute_batch(migration).unwrap();
++        }
++        let plan: String = raw
++            .query_row(
++                "EXPLAIN QUERY PLAN SELECT id FROM task_runs WHERE task_id = 1",
++                [],
++                |row| row.get(3),
++            )
++            .unwrap();
++        assert!(plan.contains("USING"), "{plan}");
++        assert!(!plan.starts_with("SCAN task_runs"), "{plan}");
++    }
++}

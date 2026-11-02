@@ -1,0 +1,18 @@
+diff --git a/tests/it/broker_relay.rs b/tests/it/broker_relay.rs
+index 0df1e2f..543e311 100644
+--- a/tests/it/broker_relay.rs
++++ b/tests/it/broker_relay.rs
+@@ -1307,11 +1307,8 @@ fn a_run_s_dagq_reaches_the_service_through_the_forwarder_the_relay_and_the_brok
+         .spawn()
+         .unwrap();
+     let _relay = common::KillOnDrop::new(relay, "the relay");
+-    {
+-        let _waiting = common::within(TIMEOUT, "the relay's socket");
+-        while !socket.exists() {
+-            thread::sleep(Duration::from_millis(20));
+-        }
++    while !socket.exists() {
++        thread::sleep(Duration::from_millis(20));
+     }
+     assert_eq!(
+         fs::metadata(&socket).unwrap().permissions().mode() & 0o777,

@@ -1,0 +1,19 @@
+diff --git a/tests/it/cli_kpi.rs b/tests/it/cli_kpi.rs
+index 473cd68..c6e7235 100644
+--- a/tests/it/cli_kpi.rs
++++ b/tests/it/cli_kpi.rs
+@@ -13,9 +13,13 @@ use crate::common::{Bounded, WithoutActor, cli::*};
+ /// `dagq kpi` in UTC, with the host-wide `host.toml` read from `config`
+ /// rather than the home of the person running the tests.
+ fn kpi(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::process::Output {
++    // The child inherits the process's TZ and config home.
++    unsafe {
++        std::env::set_var("TZ", "UTC");
++        std::env::set_var("XDG_CONFIG_HOME", config);
++    }
+     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+     command.without_actor_env();
+-    command.env("TZ", "UTC").env("XDG_CONFIG_HOME", config);
+     if let Some(role) = role {
+         command.env("DAGQ_ROLE", role);
+     }

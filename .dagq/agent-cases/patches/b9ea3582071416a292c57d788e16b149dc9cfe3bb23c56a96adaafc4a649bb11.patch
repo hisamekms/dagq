@@ -1,0 +1,12 @@
+diff --git a/src/application/push.rs b/src/application/push.rs
+index c0cf515..70645f6 100644
+--- a/src/application/push.rs
++++ b/src/application/push.rs
+@@ -276,6 +276,7 @@ pub fn record_attempt(
+             "push_kind": kind,
+             "period": message.period,
+             "attempts": attempt,
++            "stderr_tail": stderr,
+             "reason_category": "recovery_failed",
+             "message": format!(
+                 "the KPI push command failed {attempt} times on the {kind} message of {} ({why}); the message was given up",

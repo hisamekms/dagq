@@ -1,0 +1,16 @@
+diff --git a/src/application/telemetry_tokens.rs b/src/application/telemetry_tokens.rs
+index 682f7f9..4caa2f1 100644
+--- a/src/application/telemetry_tokens.rs
++++ b/src/application/telemetry_tokens.rs
+@@ -133,6 +133,11 @@ impl TargetTelemetry<'_> {
+                     EventKind::TelemetryTokenIssued,
+                     json!({"target": target}),
+                 );
++                tracing::debug!(
++                    "issued the telemetry token of {} {}",
++                    target.kind.as_str(),
++                    target.id
++                );
+                 Some(file)
+             }
+             Err(error) => {

@@ -1,0 +1,28 @@
+diff --git a/src/application/push.rs b/src/application/push.rs
+index c0cf515..afddde6 100644
+--- a/src/application/push.rs
++++ b/src/application/push.rs
+@@ -235,8 +235,8 @@ pub fn failure_reason(push: &PushConfig, outcome: &PushOutcome) -> String {
+ }
+ 
+ /// Record how the `attempt`-th run of `message` went: `kpi_push_sent`, or
+-/// `kpi_push_failed` with what of the failure may be kept (no argument of
+-/// the command, no part of the message), and once the last attempt failed
++/// `kpi_push_failed` with the command and its whole stderr, so that a
++/// failure can be run again by hand, and once the last attempt failed
+ /// `kpi_push_abandoned` unless one already waits for a person. Returns
+ /// whether the message is to be tried again.
+ pub fn record_attempt(
+@@ -255,10 +255,11 @@ pub fn record_attempt(
+         return Ok(false);
+     }
+     let again = push::retry_after(attempt).is_some();
+-    let stderr = push::stderr_tail(&outcome.stderr, &push.command);
++    let stderr = outcome.stderr.clone();
+     queue.record_queue_event(
+         EventKind::KpiPushFailed,
+         json!({
++            "command": push.command,
+             "push_kind": kind,
+             "period": message.period,
+             "attempt": attempt,

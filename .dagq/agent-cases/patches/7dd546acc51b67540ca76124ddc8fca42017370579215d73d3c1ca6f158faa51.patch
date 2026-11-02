@@ -1,0 +1,37 @@
+diff --git a/tests/it/runtime_background.rs b/tests/it/runtime_background.rs
+index b243196..00a46d5 100644
+--- a/tests/it/runtime_background.rs
++++ b/tests/it/runtime_background.rs
+@@ -17,11 +17,6 @@ use dagq::infrastructure::adapters::SystemProcesses;
+ use runtime_support::headless::*;
+ use runtime_support::*;
+ 
+-/// The kinds of `detail`'s events, in order.
+-fn kinds(detail: &dagq::domain::TaskDetail) -> Vec<&str> {
+-    detail.events.iter().map(|e| e.kind.as_str()).collect()
+-}
+-
+ /// Whether the run `id` has an event of `kind`.
+ fn has(queue: &mut SqliteQueue, id: &RunId, kind: &str) -> bool {
+     queue
+@@ -96,7 +91,7 @@ fn a_background_headless_run_lands_without_a_workspace() {
+     );
+     assert!(bytes["sections"]["task"].as_u64().unwrap() > 0, "{bytes}");
+     assert_eq!(bytes["over_limit"], Value::Null, "{bytes}");
+-    let kinds = kinds(&detail);
++    let kinds = event_kinds(&detail);
+     let at = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
+     assert!(at("workspace_created") < at("wrapper_launched"));
+     assert!(at("wrapper_launched") < at("wrapper_started"));
+@@ -346,9 +341,9 @@ esac"#
+     let run = &detail.runs[0];
+     assert_landed_run(run, &repo, &base);
+     assert!(
+-        kinds(&detail).contains(&"run_adopted"),
++        event_kinds(&detail).contains(&"run_adopted"),
+         "{:?}",
+-        kinds(&detail)
++        event_kinds(&detail)
+     );
+     // The adopter started no wrapper of its own.
+     assert_eq!(backend.launched.lock().unwrap().len(), 1);

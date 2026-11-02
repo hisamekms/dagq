@@ -1,0 +1,72 @@
+diff --git a/.config/it-boundaries.d/t3804.toml b/.config/it-boundaries.d/t3804.toml
+index ab7b43bff..a9a68dd62 100644
+--- a/.config/it-boundaries.d/t3804.toml
++++ b/.config/it-boundaries.d/t3804.toml
+@@ -181,7 +181,7 @@ task = 3804
+ id = "read-commands-create-no-queue-file"
+ kind = "SQLite"
+ test = "cli_tasks::reads_do_not_create_a_queue_and_unknown_tasks_fail"
+-reason = "読むだけのコマンドが無い queue の file を作らずに失敗し、init の後の doctor と status が読めることは、実の file system と SQLite の開き方でしか確かめられない。どのコマンドが読むだけかの判断は main の reads_only の unit test"
++reason = "読むだけのコマンドが無い queue の file を作らずに失敗し、init の後の doctor と status が読めることは、実の file system と SQLite の開き方でしか確かめられない。どのコマンドが読むだけかの判断は application::queue_commands の QueueCommand::reads_only と、それで接続を選ぶ application::queue_service の unit test（reads_and_a_watch_s_look_open_the_queue_read_only）"
+ task = 3804
+ 
+ [[boundary]]
+diff --git a/docs/design/persistence.md b/docs/design/persistence.md
+index 223ad09af..bdbfa4be0 100644
+--- a/docs/design/persistence.md
++++ b/docs/design/persistence.md
+@@ -55,14 +55,14 @@ runtimeが状態を変えるのは、このDBへの書き込みトランザク
+ ## 全体の流れ
+ 
+ ```text
+-CLI / supervisor / integrate / queue service / job
++queue service（ADR-t3102-2の例外: init・migrate・doctor）
+         │  port（application の trait）
+         ▼
+ SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（WAL）
+         │  行を読む → domainの集約に復元 → domainのコマンド → 返った集約を UPDATE / INSERT
+         │  同じトランザクションで run_events に event を書く
+         ▼
+-読み取り専用のコマンド ── SQLITE_OPEN_READ_ONLY（古いschemaはメモリの複製をmigrate）
++serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを拒むqueueは拒み、古いschemaはメモリの複製をmigrate）
+ ```
+ 
+ ## 責務と境界
+diff --git a/src/application/queue_commands.rs b/src/application/queue_commands.rs
+index 16e4fac30..5a1297218 100644
+--- a/src/application/queue_commands.rs
++++ b/src/application/queue_commands.rs
+@@ -591,10 +591,10 @@ impl QueueCommand {
+         }
+     }
+ 
+-    /// Whether the command only reads the queue, so the service runs it on
+-    /// a read-only connection as the command line opens one for it: the
+-    /// screens, the logs, `report` and `graph --out` (which write files,
+-    /// but no queue state).
++    /// Whether the command only reads the queue, so the queue service runs
++    /// it on a read-only connection: the screens, the logs, `report` and
++    /// `graph --out` (which write files, but no queue state). Only the
++    /// service's choice of a use case's connection reads this.
+     pub fn reads_only(&self) -> bool {
+         matches!(
+             self,
+diff --git a/src/main.rs b/src/main.rs
+index 0392f1594..9d5f67331 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -3049,9 +3049,11 @@ fn authorized_in_application(command: &Command) -> bool {
+ /// which records it as `authorization_denied` of the caller's principal
+ /// ([`CommandDenials`]); the queue is not opened. `request add` also uses
+ /// this check before reading its input; Requests::record still authorizes
+-/// before recording. A command allowed opens
+-/// nothing here, and reads keep the queue read-only (ADR-0073 decisions 5,
+-/// 7 and 18).
++/// before recording. A command allowed opens nothing here either: it is
++/// sent to the queue service, which runs reads on its read-only
++/// connection, run in this process ([`Unserved::OwnProcess`], where only
++/// the DB's exceptions of ADR-t3102-2 open the queue), or refused when no
++/// service serves it.
+ fn check_access(actor: &ActorContext, command: &Command, db: Option<&Path>) -> Result<()> {
+     // `request add` must reject before reading words from a file or stdin.
+     // Keep Requests::record's application check too; a refusal here returns

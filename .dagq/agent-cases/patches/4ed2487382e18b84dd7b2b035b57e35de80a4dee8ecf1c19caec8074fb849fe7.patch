@@ -1,0 +1,33 @@
+diff --git a/src/domain/landing_release.rs b/src/domain/landing_release.rs
+index 249f27b75..78807d4ff 100644
+--- a/src/domain/landing_release.rs
++++ b/src/domain/landing_release.rs
+@@ -19,9 +19,9 @@ use super::{
+ 
+ /// How long the release waits for the processes in a dead landing's
+ /// worktree to end by themselves: the time limit of one verification
+-/// command of `integrate` (`VERIFICATION_TIMEOUT`, 30 minutes), past which
++/// command of `integrate` (`VERIFICATION_TIMEOUT`, 60 minutes), past which
+ /// a live landing would have stopped it too.
+-pub const GRACE_SECS: i64 = 30 * 60;
++pub const GRACE_SECS: i64 = 60 * 60;
+ 
+ /// How long the release goes on without a list of the host's processes
+ /// before it is the inbox's: twice [`GRACE_SECS`].
+diff --git a/src/infrastructure/adapters.rs b/src/infrastructure/adapters.rs
+index 8189d2976..79d538e38 100644
+--- a/src/infrastructure/adapters.rs
++++ b/src/infrastructure/adapters.rs
+@@ -1063,8 +1063,10 @@ fn wait_until(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>
+ }
+ 
+ /// Verification commands are task-defined shell lines whose full output belongs
+-/// in the run directory, not in the event payload.
+-pub const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
++/// in the run directory, not in the event payload. Each one may run for an
++/// hour: about twice a full run of the repository's tests, with room for a
++/// loaded host, while a timed-out run holds its slot no longer than that.
++pub const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+ 
+ /// How long a verification command's process group has, after SIGTERM at
+ /// its limit, before the group gets SIGKILL.

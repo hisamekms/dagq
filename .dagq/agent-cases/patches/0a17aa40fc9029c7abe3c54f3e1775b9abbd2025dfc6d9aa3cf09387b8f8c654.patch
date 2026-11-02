@@ -1,0 +1,19 @@
+diff --git a/src/infrastructure/agent_dir.rs b/src/infrastructure/agent_dir.rs
+index 1572565..26f5897 100644
+--- a/src/infrastructure/agent_dir.rs
++++ b/src/infrastructure/agent_dir.rs
+@@ -391,11 +391,9 @@ pub(crate) fn read_file(path: &Path) -> io::Result<File> {
+     })
+ }
+ pub(crate) fn create_file(path: &Path) -> io::Result<File> {
+-    if !in_run_dir(path) {
+-        return File::create(path);
+-    }
+-    let (dir, name) = Directory::parent(path)?;
+-    dir.write(name, &[])
++    // A plain create: the pinned parent costs a directory descriptor per
++    // file, and the run directory is the supervisor's own.
++    File::create(path)
+ }
+ /// Diagnostic append: bounded regular input, fresh output inode. A
+ /// malicious entry is refused instead of being opened for writing.

@@ -1,0 +1,59 @@
+diff --git a/.config/it-boundaries.d/t4101.toml b/.config/it-boundaries.d/t4101.toml
+new file mode 100644
+index 0000000..e506b26
+--- /dev/null
++++ b/.config/it-boundaries.d/t4101.toml
+@@ -0,0 +1,6 @@
++[[boundary]]
++id = "supervisor-registration-across-service-processes"
++kind = "プロセス"
++test = "supervisor_service::a_registration_through_the_service_outlives_the_services_process"
++reason = "service を通した supervisor の登録が、その service の process を止めて同じ queue に起こし直した別の process から読めることは、実の service の process の停止と起動と socket を通してしか確かめられない。登録の中身の判断は supervisor_service::control の unit test"
++task = 4101
+diff --git a/tests/it/supervisor_service.rs b/tests/it/supervisor_service.rs
+index fe211bc..eb5d10c 100644
+--- a/tests/it/supervisor_service.rs
++++ b/tests/it/supervisor_service.rs
+@@ -2959,3 +2959,42 @@ fn the_supervisors_container_records_go_through_the_service_alone() {
+     );
+     caller.sign_out();
+ }
++
++/// A supervisor's registration made through the service is read back by a
++/// second service process started on the same queue after the first one
++/// stopped: the registration is in the queue's file, not in the process
++/// that took it, and the supervisor's own process never opens the queue
++/// (ADR-t3102-3 decision 3).
++#[test]
++fn a_registration_through_the_service_outlives_the_services_process() {
++    let (_fixture, _repo, db) = fixture();
++    let served = common::service::Served::start(&db);
++    let pid = 4244;
++    let caller: Arc<dyn ServiceCaller> = Arc::new(SocketCaller::new(&db));
++    let shared = SupervisorQueues::new(
++        caller.clone(),
++        ActorContext::instance(ActorRole::Supervisor, pid),
++    );
++    let refused = refuse_opening(&db);
++    let token = LeaseToken::new("supervisor-across-service-processes");
++    caller.sign_in(&token, pid).unwrap();
++    let limits = SlotLimits::resolve(SlotFlags::default(), &SupervisorConfig::default());
++    shared
++        .open()
++        .unwrap()
++        .register_supervisor(&token, pid, limits, &[], "0.0.0-test")
++        .unwrap();
++
++    // The first service goes; the second one answers from the same file.
++    drop(served);
++    let served = common::service::Served::start(&db);
++    let mut again = shared.open().unwrap();
++    assert!(again.heartbeat(&token).unwrap().registered);
++    // The same supervisor, holding no lease of a run it never claimed.
++    assert_eq!(again.heartbeat_leases(&token).unwrap(), 0);
++    drop(again);
++
++    drop(served);
++    drop(refused);
++    caller.sign_out();
++}

@@ -1,0 +1,17 @@
+diff --git a/src/domain/authorization.rs b/src/domain/authorization.rs
+index e53ef59..4dd6437 100644
+--- a/src/domain/authorization.rs
++++ b/src/domain/authorization.rs
+@@ -2332,4 +2332,12 @@ mod telemetry_policy_tests {
+                                "owner": "plan_review:4"})
+         );
+     }
++
++    /// A worker sends no step of its own: only the executor's principal
++    /// holds `telemetry.report`.
++    #[test]
++    fn a_worker_is_not_granted_the_telemetry_report() {
++        assert!(!grants(ActorRole::Worker).contains(&Capability::TelemetryReport));
++        assert!(grants(ActorRole::ExecutorTelemetry).contains(&Capability::TelemetryReport));
++    }
+ }

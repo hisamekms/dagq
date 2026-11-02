@@ -1,0 +1,12 @@
+diff --git a/tests/it/e2e_gate.rs b/tests/it/e2e_gate.rs
+index 91ddff6..f2212ab 100644
+--- a/tests/it/e2e_gate.rs
++++ b/tests/it/e2e_gate.rs
+@@ -279,3 +279,7 @@ fn the_e2e_gates_cleanup_stops_what_runs_inside_its_root_and_removes_it() {
+     assert_eq!(cleanup["errors"], json!([]), "{cleanup}");
+     assert!(!root.exists());
+ }
++
++/// The gate stops a verification whose own shell loop waits for a file
++/// that never comes: the loop is the stub's, the shape under test.
++const NEVER_READY: &str = "until [ -f never ]; do sleep 1; done"; // test-rules: allow A-137 a stub of the shape under test

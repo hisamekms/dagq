@@ -1,0 +1,26 @@
+diff --git a/tests/e2e.rs b/tests/e2e.rs
+index ae33995..5ae8744 100644
+--- a/tests/e2e.rs
++++ b/tests/e2e.rs
+@@ -987,6 +987,21 @@ fn happy_path_runs_a_stub_agent_in_the_background_and_lands_on_main() {
+     );
+ }
+ 
++/// A task with no verification command lands in one pass of the
++/// supervisor.
++#[test]
++fn a_task_without_verification_lands_in_one_pass() {
++    let fixture = fixture();
++    let Fixture { env, .. } = &fixture;
++    let task_id = add_ready_task(env, "e2e task without verify", &[]);
++    let pass = supervise_once(&fixture, &[], &[&task_id]);
++    assert_eq!(pass.outcome["outcome"], "finished", "{}", pass.outcome);
++    assert_eq!(
++        dagq(env, &["show", &task_id])["task"]["status"],
++        "completed"
++    );
++}
++
+ /// The stub worker asks a `worker_question` (its task says `E2E-ASK`) and
+ /// ends its turn; the run waits out of its slot, and once the ask is
+ /// answered the supervisor sends the answer to the same session as the

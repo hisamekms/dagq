@@ -1,0 +1,21 @@
+diff --git a/src/domain/authorization.rs b/src/domain/authorization.rs
+index e53ef59..ec1556c 100644
+--- a/src/domain/authorization.rs
++++ b/src/domain/authorization.rs
+@@ -679,11 +679,15 @@ const PLANNER: &[Capability] = &[
+ /// (ADR-t3102-1 decision 4). Of the eval it asks for a dev round and reads
+ /// the rounds of its run only (ADR-t1728-1 decision 6): it never runs an
+ /// LLM's CLI itself. It proposes to replan its own run, and nothing more
+-/// of a replanning (ADR-t1521-2 decision 3).
++/// of a replanning (ADR-t1521-2 decision 3). It readies the follow-ups it
++/// finds and asks for its own run's landing once its checks pass, which
++/// saves a supervisor's pass.
+ const WORKER: &[Capability] = &[
+     C::QueueRead,
+     C::AskOpen,
+     C::NoteWrite,
++    C::TaskReady,
++    C::IntegrationRequest,
+     C::ReplanPropose,
+     C::EvalRequest,
+     C::EvalRead,

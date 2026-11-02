@@ -1,0 +1,37 @@
+diff --git a/src/application/commands/dialogue.rs b/src/application/commands/dialogue.rs
+index 0d51b75..2ddb648 100644
+--- a/src/application/commands/dialogue.rs
++++ b/src/application/commands/dialogue.rs
+@@ -147,10 +147,9 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
+         self.store.add_note(note)
+     }
+ 
+-    /// `mark`, or `mark --retract`: a change mark on the queue.
++    /// `mark`, or `mark --retract`: a change mark on the queue. Who may
++    /// mark is checked where the command line is read (`main`).
+     pub fn mark(&mut self, change: MarkChange) -> Result<Value> {
+-        self.gate
+-            .authorize(&*self.store, Capability::MarkWrite, &Resource::Queue)?;
+         let by = self.gate.actor.written_by();
+         self.store.mark(change, by)
+     }
+diff --git a/src/main.rs b/src/main.rs
+index f6b093e..148e3cd 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -3993,7 +3993,14 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
+             at,
+             retract,
+         } => (
+-            UseCase::Mark,
++            {
++                // Only a person and the inbox mark the queue.
++                let role = std::env::var("DAGQ_ROLE").unwrap_or_default();
++                if !role.is_empty() && role != "inbox" {
++                    anyhow::bail!("dagq mark is for the user and the inbox");
++                }
++                UseCase::Mark
++            },
+             json!({"label": label, "note": note, "at": at.map(|at| at.text()),
+                    "retract": retract}),
+         ),

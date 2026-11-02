@@ -1,0 +1,24 @@
+diff --git a/src/domain/e2e_deadline.rs b/src/domain/e2e_deadline.rs
+index 2142756..f3788c2 100644
+--- a/src/domain/e2e_deadline.rs
++++ b/src/domain/e2e_deadline.rs
+@@ -324,4 +324,19 @@ mod tests {
+              left running: a; not run: none\n"
+         );
+     }
++
++    /// Waits opened at the given times inside a 1200s run, with their
++    /// limits and the deadline each gets.
++    static OPENED: [(u64, u64, u64); 3] = [(0, 300, 300), (1000, 300, 1140), (1190, 60, 1140)];
++
++    #[test]
++    fn each_wait_of_the_table_gets_its_deadline() {
++        for (at, limit, deadline) in OPENED {
++            assert_eq!(
++                nested_deadline(secs(at), secs(limit), Some(secs(1200)), WAIT_MARGIN),
++                secs(deadline),
++                "{at} {limit}"
++            );
++        }
++    }
+ }

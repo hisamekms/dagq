@@ -1,0 +1,14 @@
+diff --git a/src/domain/kpi/push.rs b/src/domain/kpi/push.rs
+index 4fe9dd1..b434a59 100644
+--- a/src/domain/kpi/push.rs
++++ b/src/domain/kpi/push.rs
+@@ -494,6 +494,9 @@ pub fn summary_message(
+             "open_asks": open_asks,
+             "report_html": html,
+             "report_json": json_path,
++            // The whole report rides along, so a receiver that keeps the
++            // messages (Slack) has the day's report without the host.
++            "report": serde_json::to_value(report).unwrap_or(Value::Null),
+         }),
+         report_html: Some(html),
+         report_json: Some(json_path),

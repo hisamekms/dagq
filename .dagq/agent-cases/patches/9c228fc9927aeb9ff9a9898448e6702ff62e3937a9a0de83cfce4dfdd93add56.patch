@@ -1,0 +1,18 @@
+diff --git a/tests/it/broker_relay.rs b/tests/it/broker_relay.rs
+index 0df1e2f..fdfbfc2 100644
+--- a/tests/it/broker_relay.rs
++++ b/tests/it/broker_relay.rs
+@@ -1313,6 +1313,13 @@ fn a_run_s_dagq_reaches_the_service_through_the_forwarder_the_relay_and_the_brok
+             thread::sleep(Duration::from_millis(20));
+         }
+     }
++    {
++        // The relay writes its pid file after the socket.
++        let _waiting = common::within(TIMEOUT, "the relay's pid file");
++        while !socket.with_extension("pid").exists() {
++            thread::sleep(Duration::from_millis(20));
++        }
++    }
+     assert_eq!(
+         fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+         0o600

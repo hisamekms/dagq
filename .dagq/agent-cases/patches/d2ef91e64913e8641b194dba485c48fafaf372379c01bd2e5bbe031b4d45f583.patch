@@ -1,0 +1,38 @@
+diff --git a/src/domain/landing_release.rs b/src/domain/landing_release.rs
+index 6238ba0..7b95424 100644
+--- a/src/domain/landing_release.rs
++++ b/src/domain/landing_release.rs
+@@ -579,4 +579,33 @@ mod tests {
+         );
+         assert_eq!(released(&RunHistory::from_events(&[]), None, 0, "x"), None);
+     }
++
++    /// A landing whose waiting event was stored and read back is still
++    /// waiting since that time.
++    #[test]
++    fn a_stored_waiting_landing_is_waiting_since_its_event() {
++        let dir = tempfile::tempdir().unwrap();
++        let db = rusqlite::Connection::open(dir.path().join("events.db")).unwrap();
++        db.execute_batch("CREATE TABLE events(id INTEGER, kind TEXT, payload TEXT)")
++            .unwrap();
++        db.execute(
++            "INSERT INTO events VALUES (1, ?1, '{}'), (2, ?2, '{\"seen_at\": 50}')",
++            [INTEGRATION_STARTED, LANDING_RELEASE_WAITING],
++        )
++        .unwrap();
++        let mut statement = db.prepare("SELECT id, kind, payload FROM events").unwrap();
++        let events: Vec<RunEvent> = statement
++            .query_map([], |row| {
++                let payload: String = row.get(2)?;
++                Ok(event_at(
++                    row.get(0)?,
++                    &row.get::<_, String>(1)?,
++                    serde_json::from_str(&payload).unwrap(),
++                ))
++            })
++            .unwrap()
++            .map(Result::unwrap)
++            .collect();
++        assert_eq!(waiting_since(&events), Some(50));
++    }
+ }

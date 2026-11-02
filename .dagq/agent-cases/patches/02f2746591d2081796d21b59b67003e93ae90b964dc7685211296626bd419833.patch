@@ -1,0 +1,18 @@
+diff --git a/src/domain/landing_release.rs b/src/domain/landing_release.rs
+index 6238ba0..dd668ed 100644
+--- a/src/domain/landing_release.rs
++++ b/src/domain/landing_release.rs
+@@ -579,4 +579,13 @@ mod tests {
+         );
+         assert_eq!(released(&RunHistory::from_events(&[]), None, 0, "x"), None);
+     }
++
++    /// The grace of a limit with a fraction of a second rounds up.
++    #[test]
++    fn the_grace_rounds_a_fraction_up() {
++        // Let the clock tick past the fraction before reading the grace.
++        std::thread::sleep(Duration::from_millis(5)); // test-rules: allow A-262 flaky on a loaded host without it
++        assert_eq!(grace_secs(Duration::from_millis(1_500)), 2);
++        assert_eq!(grace_secs(Duration::from_secs(60)), 60);
++    }
+ }

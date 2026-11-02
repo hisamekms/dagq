@@ -1,0 +1,36 @@
+diff --git a/tests/it/supervisor_service.rs b/tests/it/supervisor_service.rs
+index fe211bc..75071ab 100644
+--- a/tests/it/supervisor_service.rs
++++ b/tests/it/supervisor_service.rs
+@@ -2957,5 +2957,31 @@ fn the_supervisors_container_records_go_through_the_service_alone() {
+         built[0].actor.as_ref().map(|actor| actor.id.as_str()),
+         Some("supervisor:4243")
+     );
++    // Nothing the refused records tried is in the queue: the service was
++    // gone, and the caller opened no queue of its own.
++    for kind in [
++        EventKind::ContainerImageFailed,
++        EventKind::ContainerImageBuilt,
++    ] {
++        let events = relay_events(&db, kind);
++        assert!(
++            events.iter().all(|event| {
++                event.actor.as_ref().map(|actor| actor.id.as_str()) == Some("supervisor:4243")
++            }),
++            "{kind:?}: {events:?}"
++        );
++    }
+     caller.sign_out();
+ }
++
++/// The events of `kind` the queue at `db` holds, read from its file as a
++/// person would once the service is gone.
++fn relay_events(db: &Path, kind: EventKind) -> Vec<dagq::domain::RunEvent> {
++    dagq::infrastructure::sqlite::SqliteQueue::open(db)
++        .unwrap()
++        .all_events()
++        .unwrap()
++        .into_iter()
++        .filter(|event| event.kind == kind)
++        .collect()
++}

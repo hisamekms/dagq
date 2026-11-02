@@ -1,0 +1,15 @@
+diff --git a/tests/it/actor_model.rs b/tests/it/actor_model.rs
+index 8f2587c..1aa47f1 100644
+--- a/tests/it/actor_model.rs
++++ b/tests/it/actor_model.rs
+@@ -13,8 +13,8 @@ use runtime_support::*;
+ fn fails_once(dir: &Path) -> String {
+     let mark = dir.join("failed-once");
+     format!(
+-        "if [ ! -f {mark} ]; then : > {mark}; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+-        mark = shell_path(&mark)
++        "if [ ! -f '{mark}' ]; then : > '{mark}'; exit 7; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
++        mark = mark.display()
+     )
+ }
+ 

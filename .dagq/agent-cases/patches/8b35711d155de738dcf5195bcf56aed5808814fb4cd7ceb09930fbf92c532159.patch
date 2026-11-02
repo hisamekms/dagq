@@ -1,0 +1,32 @@
+diff --git a/tests/common/report.rs b/tests/common/report.rs
+index 1777ae4..f16e0fd 100644
+--- a/tests/common/report.rs
++++ b/tests/common/report.rs
+@@ -43,3 +43,27 @@ fn base64_decoded(text: &str) -> Vec<u8> {
+     }
+     out
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// A page whose diagram is an `<img>` of a base64 SVG gives the SVG back
++    /// and the page without it.
++    #[test]
++    fn a_diagram_image_is_read_back() {
++        let svg = "<svg/>";
++        let page = format!(
++            "<p>a</p><div class=\"scroll diagram\"><img src=\"{}PHN2Zy8+\"></div><p>b</p>",
++            dagq::domain::kpi::report::IMAGE_PREFIX
++        );
++        let (read, rest) = diagram_image(&page).unwrap();
++        assert_eq!(read, svg);
++        assert_eq!(rest, "<p>a</p><p>b</p>");
++    }
++
++    #[test]
++    fn a_page_without_a_diagram_has_none() {
++        assert_eq!(diagram_image("<p>a</p>"), None);
++    }
++}

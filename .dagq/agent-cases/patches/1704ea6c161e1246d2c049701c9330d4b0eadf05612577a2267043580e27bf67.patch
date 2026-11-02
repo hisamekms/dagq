@@ -1,0 +1,31 @@
+diff --git a/src/domain/e2e_deadline.rs b/src/domain/e2e_deadline.rs
+index 2142756..b812226 100644
+--- a/src/domain/e2e_deadline.rs
++++ b/src/domain/e2e_deadline.rs
+@@ -324,4 +324,26 @@ mod tests {
+              left running: a; not run: none\n"
+         );
+     }
++
++    /// The enclosing end the deadline tests below share: the first test
++    /// that runs sets it.
++    static ENCLOSING: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
++
++    #[test]
++    fn a_wait_opened_first_sets_the_enclosing_end() {
++        ENCLOSING.set(secs(1200)).unwrap();
++        assert_eq!(
++            nested_deadline(secs(0), secs(300), ENCLOSING.get().copied(), WAIT_MARGIN),
++            secs(300)
++        );
++    }
++
++    #[test]
++    fn a_wait_opened_later_ends_before_the_enclosing_end() {
++        let enclosing = *ENCLOSING.get().expect("set by the test above");
++        assert_eq!(
++            nested_deadline(secs(1000), secs(300), Some(enclosing), WAIT_MARGIN),
++            enclosing - WAIT_MARGIN
++        );
++    }
+ }

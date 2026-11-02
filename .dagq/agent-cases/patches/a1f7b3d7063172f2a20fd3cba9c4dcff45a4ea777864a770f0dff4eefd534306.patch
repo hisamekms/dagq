@@ -1,0 +1,204 @@
+diff --git a/.config/it-boundaries.d/t4102.toml b/.config/it-boundaries.d/t4102.toml
+new file mode 100644
+index 0000000..e1675af
+--- /dev/null
++++ b/.config/it-boundaries.d/t4102.toml
+@@ -0,0 +1,20 @@
++[[boundary]]
++id = "replan-mapping-moved-once-per-child-by-key"
++kind = "SQLite"
++test = "task_replanning::an_item_is_moved_to_one_child_at_most_once"
++reason = "同じ受け入れ条件の項目を同じ子の task へ 2 度対応づける書き込みを、1 回の書き込みでも後の書き込みでも表の key が拒み行を残さないことは、実の SQLite の表の制約と transaction でしか確かめられない。どの対応づけを許すかの判断は task_replan の unit test"
++task = 4102
++
++[[boundary]]
++id = "replan-deletion-needs-its-answer-in-the-row"
++kind = "SQLite"
++test = "task_replanning::a_deletion_without_its_answer_is_refused"
++reason = "答えの無い削除の対応づけを書き込みが拒み、queue の表に行を残さないことは、実の SQLite の transaction の巻き戻しでしか確かめられない。削除に答えが要るかの判断は task_replan の unit test"
++task = 4102
++
++[[boundary]]
++id = "replan-mapping-checked-against-the-operations-conditions"
++kind = "SQLite"
++test = "task_replanning::a_mapping_of_an_item_the_operation_does_not_have_is_refused"
++reason = "対応づけの書き込みが、同じ transaction で読んだ operation の条件に無い項目や始めの時から本文の変わった項目を拒むことは、実の SQLite の transaction の中の読みと書きを通してしか確かめられない。項目の照らし方の判断は task_replan の unit test"
++task = 4102
+diff --git a/tests/it/task_replanning.rs b/tests/it/task_replanning.rs
+index 41e82ee..a0f41f0 100644
+--- a/tests/it/task_replanning.rs
++++ b/tests/it/task_replanning.rs
+@@ -2828,3 +2828,173 @@ fn the_apply_and_the_failure_of_one_verdict_are_not_both_settled() {
+         ReplanStatus::Continuing
+     );
+ }
++
++/// A runtime's operation on `run`, recorded as the supervisor records one.
++fn runtime_operation(
++    queue: &mut SqliteQueue,
++    run: RunId,
++) -> dagq::domain::task_replan::ReplanOperation {
++    queue
++        .record_replan(
++            &NewReplan {
++                run,
++                reason: "two independent parts".into(),
++                evidence: Vec::new(),
++            },
++            ReplanOrigin::Runtime,
++            "supervisor",
++            "supervisor",
++        )
++        .unwrap()
++        .operation
++}
++
++/// The mapping of `op`'s acceptance item `ordinal`: moved to `child`'s
++/// first item, or deleted on an answer when there is no child.
++fn mapping_of(
++    op: &dagq::domain::task_replan::ReplanOperation,
++    ordinal: usize,
++    child: Option<TaskId>,
++) -> ConditionMapping {
++    ConditionMapping {
++        ordinal,
++        hash: op.conditions.acceptance[ordinal].hash.clone(),
++        child_task_id: child,
++        child_ordinal: child.map(|_| 0),
++        disposition: if child.is_some() { "moved" } else { "deleted" }.into(),
++        authority: child.is_none().then(|| json!({"answer": 1})),
++    }
++}
++
++/// The writer maps one item to one child at most once: a second mapping of
++/// the same item to the same child is refused in the same write and in a
++/// later one, by the table's key, and leaves the rows as they were.
++#[test]
++fn an_item_is_moved_to_one_child_at_most_once() {
++    let (_dir, db) = queue();
++    let (mut queue, a, b, run) = claimed(&db);
++    let op = runtime_operation(&mut queue, run);
++
++    let twice = queue
++        .record_replan_mappings(op.id, &[mapping_of(&op, 0, Some(a)), mapping_of(&op, 0, Some(a))])
++        .unwrap_err();
++    assert!(
++        twice.to_string().contains("maps acceptance item 0 to task"),
++        "{twice:#}"
++    );
++    assert!(queue.replan_operation(op.id).unwrap().mappings.is_empty());
++
++    queue
++        .record_replan_mappings(op.id, &[mapping_of(&op, 0, Some(a))])
++        .unwrap();
++    let later = queue
++        .record_replan_mappings(op.id, &[mapping_of(&op, 0, Some(a))])
++        .unwrap_err();
++    assert!(
++        later.to_string().contains("maps acceptance item 0 to task"),
++        "{later:#}"
++    );
++    let rows: i64 = Connection::open(&db)
++        .unwrap()
++        .query_row(
++            "SELECT count(*) FROM replan_mappings WHERE operation_id=?1",
++            [op.id],
++            |r| r.get(0),
++        )
++        .unwrap();
++    assert_eq!(rows, 1);
++
++    // Another child may take the same item beside the first one: the key
++    // is the item and the child together.
++    let to_b = mapping_of(&op, 0, Some(b));
++    let written = queue
++        .record_replan_mappings(op.id, std::slice::from_ref(&to_b))
++        .unwrap();
++    assert_eq!(written.mappings, [mapping_of(&op, 0, Some(a)), to_b]);
++}
++
++/// A deletion needs the answer that allowed it: one without an authority
++/// is refused, and the queue keeps no row of it.
++#[test]
++fn a_deletion_without_its_answer_is_refused() {
++    let (_dir, db) = queue();
++    let (mut queue, _a, _b, run) = claimed(&db);
++    let op = runtime_operation(&mut queue, run);
++    let unanswered = ConditionMapping {
++        authority: None,
++        ..mapping_of(&op, 1, None)
++    };
++
++    let err = queue
++        .record_replan_mappings(op.id, std::slice::from_ref(&unanswered))
++        .unwrap_err();
++    assert!(
++        err.to_string()
++            .contains("deletes acceptance item 1 without the answer that allows it"),
++        "{err:#}"
++    );
++    assert!(queue.replan_operation(op.id).unwrap().mappings.is_empty());
++    let rows: i64 = Connection::open(&db)
++        .unwrap()
++        .query_row(
++            "SELECT count(*) FROM replan_mappings WHERE operation_id=?1",
++            [op.id],
++            |r| r.get(0),
++        )
++        .unwrap();
++    assert_eq!(rows, 0);
++
++    // With its answer, the same deletion is written.
++    let answered = mapping_of(&op, 1, None);
++    let written = queue
++        .record_replan_mappings(op.id, std::slice::from_ref(&answered))
++        .unwrap();
++    assert_eq!(written.mappings, [answered.clone()]);
++
++    // The same deletion again is refused: an item is deleted once.
++    let again = queue
++        .record_replan_mappings(op.id, std::slice::from_ref(&answered))
++        .unwrap_err();
++    assert!(
++        again.to_string().contains("already deletes acceptance item 1"),
++        "{again:#}"
++    );
++}
++
++/// A mapping of an item the operation's conditions do not have, or of one
++/// whose text changed since the operation began, is refused by the
++/// writer, which reads the operation's conditions in the same transaction.
++#[test]
++fn a_mapping_of_an_item_the_operation_does_not_have_is_refused() {
++    let (_dir, db) = queue();
++    let (mut queue, a, _b, run) = claimed(&db);
++    let op = runtime_operation(&mut queue, run);
++    let beyond = ConditionMapping {
++        ordinal: op.conditions.acceptance.len(),
++        ..mapping_of(&op, 0, Some(a))
++    };
++    let stale = ConditionMapping {
++        hash: "not the item's hash".into(),
++        ..mapping_of(&op, 0, Some(a))
++    };
++
++    for (mapping, said) in [
++        (beyond, "has no acceptance item"),
++        (stale, "is not the text the operation began with"),
++    ] {
++        let err = queue
++            .record_replan_mappings(op.id, std::slice::from_ref(&mapping))
++            .unwrap_err();
++        assert!(err.to_string().contains(said), "{err:#}");
++    }
++    assert!(queue.replan_operation(op.id).unwrap().mappings.is_empty());
++    let rows: i64 = Connection::open(&db)
++        .unwrap()
++        .query_row(
++            "SELECT count(*) FROM replan_mappings WHERE operation_id=?1",
++            [op.id],
++            |r| r.get(0),
++        )
++        .unwrap();
++    assert_eq!(rows, 0);
++}

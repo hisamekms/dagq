@@ -1,0 +1,28 @@
+diff --git a/src/domain/landing_release.rs b/src/domain/landing_release.rs
+index 6238ba0..2eb6f21 100644
+--- a/src/domain/landing_release.rs
++++ b/src/domain/landing_release.rs
+@@ -579,4 +579,23 @@ mod tests {
+         );
+         assert_eq!(released(&RunHistory::from_events(&[]), None, 0, "x"), None);
+     }
++
++    /// The graces the tests below computed, in the order they ran.
++    static GRACES: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
++
++    #[test]
++    fn a_whole_minute_is_its_own_grace() {
++        let grace = grace_secs(Duration::from_secs(60));
++        GRACES.lock().unwrap().push(grace);
++        assert_eq!(grace, 60);
++    }
++
++    #[test]
++    fn a_longer_limit_has_a_longer_grace_than_the_minute() {
++        let grace = grace_secs(Duration::from_secs(90));
++        let graces = GRACES.lock().unwrap();
++        // The minute's test ran before this one and left its grace.
++        assert_eq!(graces.len(), 1);
++        assert!(graces.iter().all(|minute| grace > *minute));
++    }
+ }

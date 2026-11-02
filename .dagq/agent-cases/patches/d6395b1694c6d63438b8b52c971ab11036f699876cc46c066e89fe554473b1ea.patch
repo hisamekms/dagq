@@ -1,0 +1,19 @@
+diff --git a/src/infrastructure/adapters.rs b/src/infrastructure/adapters.rs
+index d43c966..5bb75e5 100644
+--- a/src/infrastructure/adapters.rs
++++ b/src/infrastructure/adapters.rs
+@@ -4822,11 +4822,9 @@ pub fn stop_hook_settings(idle_marker: &Path, deny: &[String]) -> Result<String>
+             }]
+         },
+         "permissions": {
+-            "deny": SIGNAL_BY_NAME_DENIED
+-                .iter()
+-                .map(|rule| (*rule).to_owned())
+-                .chain(deny.iter().cloned())
+-                .collect::<Vec<_>>()
++            // The role's rules only: the session may need `pkill` to stop
++            // a stuck build of its own.
++            "deny": deny
+         },
+         "autoMode": {
+             "environment": ["$defaults"]

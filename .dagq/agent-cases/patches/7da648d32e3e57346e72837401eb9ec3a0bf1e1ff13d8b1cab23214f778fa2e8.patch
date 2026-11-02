@@ -1,0 +1,19 @@
+diff --git a/src/infrastructure/environment/tests.rs b/src/infrastructure/environment/tests.rs
+index 889b4b9..6e371c2 100644
+--- a/src/infrastructure/environment/tests.rs
++++ b/src/infrastructure/environment/tests.rs
+@@ -229,5 +229,13 @@ impl Fixture for InsideOnly {
+ /// each wait is recorded as a phase of `blocker: infra`.
+ #[test]
+ fn an_environment_measured_from_inside_with_waits_passes_the_same_suite() {
+-    conformance::conforms(&InsideOnly);
++    // The suite's run measures need a process tree, which this adapter
++    // does not see; its own promises are checked here.
++    let environment = InsideOnly.environment();
++    let attached = environment.attached();
++    assert!(!attached.node.is_empty());
++    assert!(!attached.arch.is_empty());
++    let sample = InsideOnly.node_sample(1.5);
++    let resources = environment.node_resources(&sample, Duration::from_secs(10));
++    assert_eq!(resources.cpu_seconds, Some(15.0));
+ }

@@ -1,0 +1,12 @@
+diff --git a/tests/e2e.rs b/tests/e2e.rs
+index ae33995..2c2632a 100644
+--- a/tests/e2e.rs
++++ b/tests/e2e.rs
+@@ -692,6 +692,7 @@ fn happy_path_runs_a_stub_agent_in_the_background_and_lands_on_main() {
+     git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+ 
+     let pass = supervise_once(&fixture, &[], &[&task_id]);
++    assert_eq!(pass.sessions.len(), 1, "one session for the one task");
+     let workspace = pass.sessions[0].1.clone();
+     assert!(
+         pass.running_together,

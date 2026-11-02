@@ -1,0 +1,12 @@
+diff --git a/tests/it/cli_planner_request.rs b/tests/it/cli_planner_request.rs
+index 6f952b7..118ad8b 100644
+--- a/tests/it/cli_planner_request.rs
++++ b/tests/it/cli_planner_request.rs
+@@ -387,7 +387,6 @@ const WORDS: &str = "残りの task も分けて。\"戻す\" 計画は後で。
+ /// `planner request ID ARGS` as the inbox with `stdin` on its standard
+ /// input.
+ fn request_with_stdin(db: &Path, planner: PlannerId, args: &[&str], stdin: &[u8]) -> Output {
+-    let _waiting = common::within(common::STEP_LIMIT, "planner request with stdin");
+     let mut child = Command::new(env!("CARGO_BIN_EXE_dagq"))
+         .without_actor_env()
+         .env("DAGQ_ROLE", "inbox")

@@ -1,0 +1,17 @@
+diff --git a/tests/it/cli_kpi.rs b/tests/it/cli_kpi.rs
+index 473cd68..1086b2b 100644
+--- a/tests/it/cli_kpi.rs
++++ b/tests/it/cli_kpi.rs
+@@ -15,7 +15,11 @@ use crate::common::{Bounded, WithoutActor, cli::*};
+ fn kpi(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::process::Output {
+     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+     command.without_actor_env();
+-    command.env("TZ", "UTC").env("XDG_CONFIG_HOME", config);
++    command
++        .env("TZ", "UTC")
++        .env("XDG_CONFIG_HOME", config)
++        // The person's locale must not change how the numbers are read.
++        .env("LC_ALL", "C");
+     if let Some(role) = role {
+         command.env("DAGQ_ROLE", role);
+     }

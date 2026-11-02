@@ -1,0 +1,18 @@
+diff --git a/src/domain/landing_release.rs b/src/domain/landing_release.rs
+index 6238ba0..459aa3f 100644
+--- a/src/domain/landing_release.rs
++++ b/src/domain/landing_release.rs
+@@ -579,4 +579,13 @@ mod tests {
+         );
+         assert_eq!(released(&RunHistory::from_events(&[]), None, 0, "x"), None);
+     }
++
++    /// The grace of a limit with a fraction of a second rounds up, and the
++    /// time without a list is twice it.
++    #[test]
++    fn the_grace_rounds_a_fraction_up_and_the_unlisted_time_doubles_it() {
++        assert_eq!(grace_secs(Duration::from_millis(1_500)), 2);
++        assert_eq!(grace_secs(Duration::from_secs(60)), 60);
++        assert_eq!(unlisted_secs(grace_secs(Duration::from_secs(60))), 120);
++    }
+ }

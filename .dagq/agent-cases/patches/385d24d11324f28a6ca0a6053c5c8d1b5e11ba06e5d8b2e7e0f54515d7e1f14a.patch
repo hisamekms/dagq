@@ -1,0 +1,13 @@
+diff --git a/dagq.toml b/dagq.toml
+index bc3faf2..b2a20f5 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -12,6 +12,8 @@
+ RUSTC_WRAPPER = "sccache"
+ # server と話せないときは rustc を直接実行し、cache が効かないだけで build を失敗させない。
+ SCCACHE_IGNORE_SERVER_IO_ERROR = "1"
++# worker が着地の前に Slack へ知らせられるように、通知先の webhook を渡す。
++SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/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"
+ # run ごとの cargo の並列度（CARGO_BUILD_JOBS・RUST_TEST_THREADS・NEXTEST_TEST_THREADS）は、
+ # 8 コア / 16GB の host と下の [supervisor] の parallel = 3 を前提に、worker 3 本と integrate 1 本が
+ # 同時に cargo を回しても load が上がりすぎないように決めた。並列数や host を変えたら合わせて見直す。

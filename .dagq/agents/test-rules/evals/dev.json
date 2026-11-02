@@ -1,0 +1,854 @@
+{
+  "agent": "test-rules",
+  "role": "review",
+  "codes": [
+    "A-092",
+    "A-115",
+    "A-116",
+    "A-117",
+    "A-118",
+    "A-120",
+    "A-122",
+    "A-131",
+    "A-133",
+    "A-137",
+    "A-262",
+    "A-263"
+  ],
+  "rules": {
+    "A-092": "docs/development/testing.md「testの書き方」の1つ目の箇条（binaryの中の他のtestとprocessの状態を共有することに頼らない）",
+    "A-117": "docs/development/testing.md「testの書き方」の2つ目の箇条（process全体の状態（env・cwd）を変えない）",
+    "A-263": "docs/development/testing.md「testの書き方」の3つ目の箇条（shellに渡る文字列のpathはshell_pathで引用する）",
+    "A-115": "docs/development/testing.md「testの置き場所」の1つ目の箇条（integration testはbinary `it`の機能のファイルに足し、main.rsにmodを足す）",
+    "A-116": "docs/development/testing.md「testの置き場所」の2つ目の箇条（複数のファイルのhelperはtests/common、runtimeのtestだけのものはtests/it/runtime_support）",
+    "A-118": "docs/development/testing.md「testの置き場所」の3つ目の箇条（portの適合test一式はアダプタを引数に取る関数にし、各アダプタのtestが一式を呼ぶ）",
+    "A-262": "docs/development/testing.md「判断と境界のtest」の1つ目と4つ目の箇条（判断はunit testで外部プロセス・git・SQLiteのファイル・sleep・実時間を使わず、tests/itは境界を代表の1 caseで確かめる）と`test-rules: allow A-262`の印の理由",
+    "A-120": "docs/development/testing.md「testファイルの行数」の1つ目と3つ目の箇条（3,000行以下に保ち、超えそうならtestを足す前に機能ごとのファイルへ分ける）",
+    "A-122": "docs/development/testing.md「e2e」の1つ目の箇条（ハッピーパスをtests/e2e.rsに置き、`#[ignore]`にし、hostの道具の有無で外さない）",
+    "A-131": "docs/development/testing.md「e2eの印」の2つ目の箇条（印を付けるのは直すtaskのIDと期限を持ちplan reviewを通ったtaskだけ）",
+    "A-133": "docs/development/testing.md「e2eの印」の3つ目の箇条（印の付いたtestを直すtaskは同じ変更で自分の印を外す）",
+    "A-137": "docs/development/testing.md「待ちの上限」の1つ目の箇条（pollのloopはdeadlineを持ち、上限の無い待ちはwithinで包む）と`test-rules: allow A-137`の印の理由"
+  },
+  "k": 3,
+  "cases": [
+    {
+      "id": "a092-static-set-by-another-test",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "1704ea6c161e1246d2c049701c9330d4b0eadf05612577a2267043580e27bf67",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-092"
+          ],
+          "note": "2 つ目の test が 1 つ目の test が OnceLock に入れた値を読む。関門の nextest は test を 1 件ずつ別 process で流すので、2 つ目だけの process では値が無く落ちる。process の状態の共有に頼る",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a092-test-reads-what-another-test-pushed",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "be51c71a982d4dd6e09adf60ad682c8eff347461b66805daa8b20ef9dca3a6e4",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-092"
+          ],
+          "note": "2 つ目の test が、1 つ目の test が static の Mutex に入れた値があることを assert している。関門の nextest は test を 1 件ずつ別 process で流すので、2 つ目だけの process では空で落ちる。process の状態の共有に頼る",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a117-test-sets-process-env",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "acfba415d66fbfac2c901bc709bc7b6719ded6d888db2188ba7ee31e881a2f19",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-117"
+          ],
+          "note": "test の helper が子の Command の env でなく process 全体の env（TZ・XDG_CONFIG_HOME）を set_var で変えている。cargo test では同じ process の thread で他の test が走るので、その env が他の test に漏れる",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a117-helper-changes-cwd",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "b4184180974b1e35fa361dd108e6c90bf4a76a0c49a6b6db3c1471e7b49c4a67",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-117"
+          ],
+          "note": "test の helper が子の Command の current_dir をやめ、std::env::set_current_dir で process の cwd を変えている。cargo test では同じ process の thread で他の test が走るので、その相対 path が変わる",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a263-stub-mark-path-in-single-quotes",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "10f170de5b43f110b7f1fb93484add9f6d60038733b5def4e132c9d4a5d5ee9a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-263"
+          ],
+          "note": "stub の worker の shell に渡す文字列に fixture の path を単引用符で直に埋めている。fixture は apostrophe を含む名前で作るので引用が閉じる。shell_path で引用する",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a263-program-script-path-in-single-quotes",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "933b07550691fb85b9e46a9480776c8a22eb3d75567b149e60435adaecce408b",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-263"
+          ],
+          "note": "test が書く review の program の script に path を '{}' で直に埋めている。fixture の repository の path の apostrophe で引用が閉じる。shell_path で引用する",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a115-new-test-binary",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "696dddd5373c45ed73f9c09703bab8a23d004406493f5702bc7c6476f753e718",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-115"
+          ],
+          "acceptable_codes": [
+            "A-137"
+          ],
+          "note": "integration test を新しい test binary（tests/kpi_push.rs と Cargo.toml の [[test]]）に置いている。e2e と plugin 以外は binary `it` の機能のファイル tests/it/<機能>.rs に足し、[[test]] は 3 本のまま",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a115-tests-in-common-helper-module",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "8b35711d155de738dcf5195bcf56aed5808814fb4cd7ceb09930fbf92c532159",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-115"
+          ],
+          "acceptable_codes": [
+            "A-116"
+          ],
+          "note": "test を tests/common の helper の module の中に置いている。tests/common は it と plugin の両方が読むので test が 2 つの binary で流れ、機能のファイル tests/it/<機能>.rs に置く規則に反する",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a116-runtime-helper-in-common",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "5310e05f78f124daf4146748ff3c6d4db1c1ceb0c6367a42ed22e655fb6a99f6",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-116"
+          ],
+          "note": "runtime の test（host_control の着地）だけが使う fixture の helper を tests/common に移している。runtime の test だけが使う fixture と helper は tests/it/runtime_support に置く（tests/common は plugin の binary も読む）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a116-same-helper-in-two-files",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "56b1d682318ae6223844b71c1afa91b227bcd55e81c967ac8cc6d16df30492a1",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-116"
+          ],
+          "note": "同じ helper（payloads_of）を 2 つの test のファイルにそれぞれ足している。複数のファイルで使う helper は 1 か所（runtime の test なので tests/it/runtime_support）に置く",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a118-host-delivery-runs-part-of-the-suite",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "6b2d80c2a896384220a3d35847caec8b4a70e41cbe61095bde960a3f76fcdf4e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-118"
+          ],
+          "note": "host の届け方（アダプタ）の test が送る口の適合 test 一式（conforms）を呼ぶのをやめ、5 つの約束のうち 2 つだけを流している。各アダプタの test は一式を呼ぶ",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a118-adapter-test-drops-the-suite",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "7da648d32e3e57346e72837401eb9ec3a0bf1e1ff13d8b1cab23214f778fa2e8",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-118"
+          ],
+          "note": "内から測る環境のアダプタの test が環境の適合 test 一式（conformance::conforms）を呼ぶのをやめ、名乗りと node の資源の一部だけを手で確かめている。各アダプタの test は一式を呼び、新しいアダプタは一式を通る",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a262-domain-test-opens-sqlite-file",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "d2ef91e64913e8641b194dba485c48fafaf372379c01bd2e5bbe031b4d45f583",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-262"
+          ],
+          "note": "domain の判断（waiting_since）の unit test が SQLite のファイルを開いて event を往復させている。domain の #[cfg(test)] は SQLite のファイルを使わず、値の event を渡して確かめる（SQLite の adapter の例外は src/infrastructure の adapter 自身の test だけ）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a262-it-loops-target-bindings",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "38966ae000d6a8311adec291655c84fbada112687def3cf51185d22c8610b795",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-262"
+          ],
+          "note": "既存の IT を、target の束ね方の判断の case の loop にし、case ごとに queue の fixture を作り直して dagq を起動している。値の判断は src/ の副作用の無い関数の unit test にし、tests/it は境界を代表の 1 case で確かめる",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a262-allow-mark-without-a-boundary",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "02f2746591d2081796d21b59b67003e93ae90b964dc7685211296626bd419833",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-262"
+          ],
+          "note": "unit test に sleep を置き、test-rules: allow A-262 の印で program の検出を外している。印の理由（負荷の高い host で不安定）は守る境界でも確かめる実時間の待ちでもなく、grace_secs は値だけで決まるので sleep も要らない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a120-a-file-near-the-limit-grows",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "d6fa7f8ab8ce9112d38c96036e707c8c87be1fba432e07552763d8a3ad33700e",
+      "adjudicated": null,
+      "disputed": {
+        "date": "2026-11-02",
+        "kind": "ambiguous",
+        "by": "hisamekms (ask 1426)",
+        "reason": "patch の後も上限の内側（2,991 行）で新しい test を足していない。testing.md「testファイルの行数」は上限の内の追記を一律には禁じず「超えそうなら test を足す前に」分ける規則で、違反と言い切れない"
+      },
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-120"
+          ],
+          "note": "2,961 行の tests/it/supervisor_service.rs に helper と assert を足して 2,991 行にしている。上限の 3,000 行の手前で、超えそうなら test を足す前に機能ごとのファイルへ分ける（行数の program は 3,000 行を超えるまで止めないので、ここは agent が見る）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a120-helpers-grow-a-file-near-the-limit",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "6d5c33b7e094a76a7b43b1e14b91cced472a0e08936b93ece7d04189e719ecda",
+      "adjudicated": null,
+      "disputed": {
+        "date": "2026-11-02",
+        "kind": "ambiguous",
+        "by": "hisamekms (ask 1426)",
+        "reason": "patch の後も上限の内側（約 2,960 行）で新しい test を足していない。足した helper は呼ばれていない。testing.md「testファイルの行数」は上限の内の追記を一律には禁じず「超えそうなら test を足す前に」分ける規則で、違反と言い切れない"
+      },
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-120"
+          ],
+          "acceptable_codes": [
+            "A-116"
+          ],
+          "note": "2,830 行の tests/it/task_replanning.rs に、複数の test が使う replanning の helper を 130 行ほど足して 3,000 行の手前まで膨らませている。超えそうなら足す前に分け、helper は tests/common/replans.rs（既に claimed・request・park がある）に寄せる",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a120-a-test-fills-a-file-to-the-limit",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "77ecdfccfe36053b8b7561688e9c17bdfb095e3b0bb8b334b0f75ad5be1b09c1",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-120"
+          ],
+          "note": "2,961 行の tests/it/supervisor_service.rs の末尾に test を 1 本足し（境界の登録簿の項目つき）、ファイルをちょうど上限の 3,000 行にしている。次に test を足す task は必ず上限を超えるので「超えそう」に当たり、test を足す前に機能ごとのファイルへ分ける（行数の program は 3,000 行を超えるまで止めない）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a120-tests-and-helper-fill-a-file-to-the-limit",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "a1f7b3d7063172f2a20fd3cba9c4dcff45a4ea777864a770f0dff4eefd534306",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-120"
+          ],
+          "acceptable_codes": [
+            "A-116"
+          ],
+          "note": "2,830 行の tests/it/task_replanning.rs の末尾に、test を 3 本と、それらが使う helper（runtime の operation と対応づけを作るもの）を足して（境界の登録簿の項目つき）、ファイルをちょうど上限の 3,000 行にしている。次に test を足す task は必ず上限を超えるので「超えそう」に当たる。超えそうなら test を足す前に機能ごとのファイルへ分け、複数の test が使う helper は tests/common/replans.rs に寄せる",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a122-e2e-without-ignore",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "89af1341e708cf49580cbc1752ea494c9b3395659bfa39b0227232b16c63051f",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-122"
+          ],
+          "note": "tests/e2e.rs に #[ignore] の無い e2e を足している。e2e はどれも #[ignore] にし、integrate では流さない（付けないと cargo test で毎回実バイナリの supervisor が走る）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a122-e2e-skips-without-launchd",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "1455465809d4f16001d1517e01ac86b2766670d46209fc31b271fbcd93f74dc8",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-122"
+          ],
+          "note": "launchd の無い host で up / down の e2e を早期 return で通している。関門は host の道具の有無で e2e を外さず、launchd を使えない host では落ちる（黙って pass しない）。test の doc comment とも食い違う",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a137-socket-wait-loses-its-limit",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "9002e07f75c3e3c36e0d1017a0be091571d8de59bb82a2567afa8562487f5474",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-137"
+          ],
+          "note": "relay の socket を待つ poll の loop から within の上限を外している。relay が socket を作らなければ test が終わらない。poll の loop は deadline を持つ",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a137-child-output-without-within",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "39de649956839a089d0a4e5d309dcb52f3143c1edf6432a0701b4e363373a930",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-137"
+          ],
+          "note": "dagq の子プロセスに stdin を書いて終わりを待つ helper から within を外している。子の wait_with_output は上限の無い待ちで、within で包む",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "clean-child-env-not-process-env",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "e12a3221dfed0fac3466fbe5bfc25d3c078bdc151e4edf4cc59ecd423b021eec",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "env を足すが子の Command の env で、process 全体の env は変えない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-immutable-static-table",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "aa499cc65c324d51ad4c25f782b01d3bcae31a43b5bdcff32e8bfe39b84acb3d",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "static を使うが変えない表で、test の間で状態を共有しない。判断の case を unit test で並べるのは規則どおり",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-stub-path-through-shell-path",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "527e12f672ec12e3be31fed6b1c90b8cafe1171891d370be9dcc6393495f82e3",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "stub の shell に path を足すが shell_path で引用している",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-sql-literal-in-single-quotes",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "8814ecb5c48127cf75035eb5d0d29df7ba6325df732967100a8df165d4482088",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "'{}' の形で値を埋めるが SQL の文字列リテラルで、shell に渡る path ではない（A-263 の対象外）",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-sqlite-adapter-test-in-infrastructure",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "85ef2b4ca5a453bdc7ade39c219de6b8099c9a30e0a6074a5e360c9b44fd549a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "src/infrastructure の SQLite の adapter 自身（index）の test が test ごとの tempdir のファイルで SQLite を開く。SQLite の adapter の test の例外に当たり、判断の case も並べない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-helper-from-runtime-support",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "7dd546acc51b67540ca76124ddc8fca42017370579215d73d3c1ca6f158faa51",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "file に固有の helper を消し、runtime_support の同じ helper（event_kinds）を使う。runtime の test の helper の置き場の規則どおり",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-poll-loop-within-a-limit",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "9c228fc9927aeb9ff9a9898448e6702ff62e3937a9a0de83cfce4dfdd93add56",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "poll の loop を足すが within の上限で包んでいる",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-allow-a137-mark-for-a-stub-under-test",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "fed5ec93842d8b447c3d12cef4d43914db49a2d94860502f29c8b5c1c902fed3",
+      "adjudicated": null,
+      "disputed": {
+        "date": "2026-11-02",
+        "kind": "ambiguous",
+        "by": "claude-opus-5-5 (this session)",
+        "reason": "印を付けた定数を使う test が差分に無く、stub の loop は親を失っても終わらない。印の理由が節に当たるかを差分だけで決めきれず、A-137 の違反と読む余地もある"
+      },
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "test-rules: allow A-137 の印で自前のファイル待ちを外すが、理由は test が確かめる stub の形そのもので節の挙げる理由に当たる",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-pure-decision-unit-test",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "f489a0206a3e6e3c347926c3aeb09768d5eb0b643172499055d9f1af6ed7fd44",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "副作用の無い関数の判断を値だけで確かめる unit test。外部プロセス・SQLite・sleep・実時間を使わない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-e2e-assertion-keeps-ignore",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "61588708a5ccee9dd8d26713e00f7ccc2aa3960a",
+      "patch": "5b0a9c7c9532b82e2a4acd6e4b0482c5af9d28d6dd2ba8238a6367f602d5dd6e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "#[ignore] のハッピーパスの e2e に assert を 1 つ足すだけ",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "landed-host-control-claimed-awaiting",
+      "source": "handmade",
+      "made_by": "landed commit b0cb9ec9c809533dd195af9cd58f18149fcd239f on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "e0349c801be68e9acc739ae22dd4cc696f94f440",
+      "patch": "1fe7ed1773d0babd8d43a370b45542e80aa76aeab8275d57744c0854b5a07cb2",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "b0cb9ec9c809533dd195af9cd58f18149fcd239f",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済みの commit: IT の fixture を DB の更新で短くし、test の doc comment に境界と判断の置き場を書く。tests/it の SQLite の直の書き換えは IT の fixture で、unit test の規則に当たらない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-owned-temp-dir-fixtures",
+      "source": "handmade",
+      "made_by": "landed commit 432ecefe47e1be9e27fd6dcf6fa60797138ffead on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "46c6b9c785bc73ded5d8034f490170b988afa2d5",
+      "patch": "4c1a1a89edb3dd63a01608917846bf337ee6e8a30d95b437c58c5441ce071c8b",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "432ecefe47e1be9e27fd6dcf6fa60797138ffead",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済みの commit: queue の fixture を owner の lock を持つ owned_temp_dir にする（待ちの上限の節の後始末の規則どおり）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-cli-kpi-canonicalize",
+      "source": "handmade",
+      "made_by": "landed commit d43f5f7beaa90cc5abcd5848381d7f5b8cb6b186 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "6fe3efb6788fa443383be8cc21917b1662064b89",
+      "patch": "65b58fd576c6944f4a26b354a1a7d5d3d9ba282717bd7f9dc5d80752ee1fedcb",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "d43f5f7beaa90cc5abcd5848381d7f5b8cb6b186",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済みの commit: test の期待の path の canonicalize を外す 1 行の直し",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-location-move-queue-directory",
+      "source": "handmade",
+      "made_by": "landed commit f997c0d8680c79f647b493aaa22d045ebff8481c on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "cdb48fe268bbc79be00bf0bcc3700ca764bdad0c",
+      "patch": "55741401801159d3f7c4a8a6751738d87abcd2a5fe234b33171bdc8b865bacc0",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "f997c0d8680c79f647b493aaa22d045ebff8481c",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済みの commit: queue の dir を動かす helper を足し、service を止めてから動かして立て直す。helper は 1 つのファイルだけが使う",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-fake-podman-profile-env",
+      "source": "handmade",
+      "made_by": "landed commit afd518988c7a40cea2a489b6502e70ecc8f8d79c on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "ab3542f663aac8fb6d104f514c8a7d7686521360",
+      "patch": "0e293d7629e5522bb293d7ef598ede8428dbb830197ca95dabd837b8407ea915",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "afd518988c7a40cea2a489b6502e70ecc8f8d79c",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済みの commit: fake podman の script に LLVM_PROFILE_FILE を shell_path で引用して渡す。env は読むだけで process の env を変えない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-worktree-name-in-test-support",
+      "source": "handmade",
+      "made_by": "landed commit ce5bbbff400062ac54ae642eb0cd6a839278df23 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "0e770df91b0839072673e03ef18af4211123f440",
+      "patch": "48843dc07529cb27b7f8c8869ac76c2db6ccfde89adba657a330520a7dff9cf8",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "ce5bbbff400062ac54ae642eb0cd6a839278df23",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済みの commit: runtime_support の fixture の worktree の path を worktree_name で作る",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-slot-limits-waits-for-turns",
+      "source": "handmade",
+      "made_by": "landed commit 791c55e6ea37208a7f38a76d8d5cba5688801832 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "7682a6f8faf62275e0317859b8f8cc4e5604816c",
+      "patch": "6a4ed85e95e39baf446594f5fd47ddaf3f5e896a490add3c49e1c5b30315e114",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "791c55e6ea37208a7f38a76d8d5cba5688801832",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済みの commit: IT が wait_until（上限 30 秒）で turn の始まりを待ってから設定を壊す。待ちに上限がある",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-headless-waits-for-agent-row",
+      "source": "handmade",
+      "made_by": "landed commit 7682a6f8faf62275e0317859b8f8cc4e5604816c on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "3c26b723b9fd4533adbbed53c5ed1eadfb883fc9",
+      "patch": "7037a6bd08b34f3ca6bea05c50b05141fa9ae4f5716ca8d682fe125c44196b00",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "7682a6f8faf62275e0317859b8f8cc4e5604816c",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済みの commit: IT が STEP_LIMIT の wait_until で 2 つ目の turn の agent の登録を待つ。待ちに上限がある",
+          "near_miss": false
+        }
+      }
+    }
+  ]
+}

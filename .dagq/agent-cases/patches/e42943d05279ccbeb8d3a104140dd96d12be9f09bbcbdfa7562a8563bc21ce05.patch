@@ -1,0 +1,17 @@
+diff --git a/src/infrastructure/adapters.rs b/src/infrastructure/adapters.rs
+index d43c966..2c4b06c 100644
+--- a/src/infrastructure/adapters.rs
++++ b/src/infrastructure/adapters.rs
+@@ -4800,9 +4800,9 @@ pub fn stop_hook_settings(idle_marker: &Path, deny: &[String]) -> Result<String>
+     let command = format!(
+         "cat > {tmp} && sh -c {append} sh {tmp} {log} && mv -f {tmp} {marker}",
+         append = shell_quote(IDLE_LOG_APPEND),
+-        tmp = shell_quote(&format!("{marker}.tmp")),
+-        log = shell_quote(&log),
+-        marker = shell_quote(&marker),
++        tmp = format!("'{marker}.tmp'"),
++        log = format!("'{log}'"),
++        marker = format!("'{marker}'"),
+     );
+     let input = path_text(
+         &idle_marker.with_file_name(crate::application::live_inputs::PROMPT_SUBMIT_MARKER),

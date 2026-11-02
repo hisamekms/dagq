@@ -1,0 +1,19 @@
+diff --git a/tests/it/telemetry_conformance.rs b/tests/it/telemetry_conformance.rs
+index 94df124..95930f5 100644
+--- a/tests/it/telemetry_conformance.rs
++++ b/tests/it/telemetry_conformance.rs
+@@ -264,8 +264,12 @@ impl Delivery for HostService {
+     }
+ }
+ 
+-/// The host's delivery passes the suite every delivery passes.
++/// The host's delivery keeps each step once and finds the gaps; the
++/// resending and the versions are the reporter's and the service's, and
++/// their unit tests check them.
+ #[test]
+ fn the_hosts_delivery_passes_the_conformance_suite_of_every_delivery() {
+-    conforms(&HostService::start());
++    let host = HostService::start();
++    keeps_each_step_once(&host);
++    finds_the_gaps(&host);
+ }

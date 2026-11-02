@@ -1,0 +1,31 @@
+diff --git a/src/application/push.rs b/src/application/push.rs
+index c0cf515..a0e8769 100644
+--- a/src/application/push.rs
++++ b/src/application/push.rs
+@@ -200,11 +200,25 @@ pub fn request(push: &PushConfig, target: &PushTarget, message: &PushMessage) ->
+                 message.report_json.clone().unwrap_or_default(),
+             ),
+         ],
+-        stdin: message.stdin(),
++        stdin: with_report(message),
+         timeout: Duration::from_secs(push.timeout_secs),
+     }
+ }
+ 
++/// The message's stdin with the whole report after it: the summary and,
++/// for a daily or weekly message, the report's JSON as written, so the
++/// phone shows every KPI without opening the queue's `reports/`.
++fn with_report(message: &PushMessage) -> Vec<u8> {
++    let mut bytes = message.stdin();
++    if let Some(json) = &message.report_json
++        && let Ok(report) = std::fs::read(json)
++    {
++        bytes.extend_from_slice(&report);
++        bytes.push(b'\n');
++    }
++    bytes
++}
++
+ /// How a run of `push`'s command failed: timed out, the error that kept
+ /// it from running, or its exit code or signal.
+ fn failed_how(push: &PushConfig, outcome: &PushOutcome) -> String {

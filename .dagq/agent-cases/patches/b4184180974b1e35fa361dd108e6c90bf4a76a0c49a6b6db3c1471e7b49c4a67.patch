@@ -1,0 +1,21 @@
+diff --git a/tests/it/location.rs b/tests/it/location.rs
+index 14cf5f1..4ef08d2 100644
+--- a/tests/it/location.rs
++++ b/tests/it/location.rs
+@@ -46,13 +46,15 @@ fn repository(dir: &Path, name: &str) -> PathBuf {
+ /// `XDG_DATA_HOME`/`HOME` (both removed first) so no real queue is touched.
+ /// It runs as the user, not as the actor of the session running the tests.
+ fn invoke(cwd: &Path, env: &[(&str, &Path)], args: &[&str]) -> Output {
++    // The command resolves its queue from the directory it is run in:
++    // the test moves there as a person would.
++    std::env::set_current_dir(cwd).unwrap();
+     let command = |args: &[&str]| {
+         let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+         command.without_actor_env();
+         command
+             .env_remove("XDG_DATA_HOME")
+             .env_remove("HOME")
+-            .current_dir(cwd)
+             .args(args);
+         for (key, value) in env {
+             command.env(key, value);

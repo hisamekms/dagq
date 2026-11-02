@@ -1,0 +1,19 @@
+diff --git a/src/infrastructure/codex.rs b/src/infrastructure/codex.rs
+index 72dfd00..c292ff2 100644
+--- a/src/infrastructure/codex.rs
++++ b/src/infrastructure/codex.rs
+@@ -155,11 +155,11 @@ pub const SANDBOX_CONFIG: [&str; 3] = [
+ pub fn writable_roots(worktree: &Path, run_dir: &Path, cargo_home: &Path) -> Result<Vec<PathBuf>> {
+     let admin = worktree_admin_dir(worktree)?;
+     let common = common_dir(&admin)?;
++    // The whole common directory: a worker that rebases its branch also
++    // writes `ORIG_HEAD`, packed refs and the config.
+     Ok(vec![
+         admin,
+-        common.join("objects"),
+-        common.join("refs/heads/dagq"),
+-        common.join("logs/refs/heads/dagq"),
++        common,
+         run_dir.to_owned(),
+         cargo_home.join("registry"),
+     ])
