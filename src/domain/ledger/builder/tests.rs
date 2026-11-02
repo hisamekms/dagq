@@ -1150,3 +1150,130 @@ fn the_bytes_count_the_room_of_the_events_and_a_drop_gives_it_back() {
         (spare.queue.capacity() - capacity) * size_of::<RunEvent>()
     );
 }
+
+/// R holds each cursor's position before the first input that made a mark
+/// still left: an event's for a task, a sample's for its hour, a step's
+/// for its run; a later input of a mark left keeps the earlier position.
+/// Once each is looked at, R is the cursors again. A mark that came with
+/// time (a grace over) holds back none.
+#[test]
+fn r_stops_before_the_first_input_of_each_mark_left() {
+    use crate::domain::RunId;
+    use crate::domain::session_step::{Step, StepKind, StepTarget};
+    let a = run_id(1);
+    let mut log = Log::default();
+    for task in 1..=3 {
+        log.add(Some(task), None, "task_created", json!({}), task);
+    }
+    let mut builder = Builder::default();
+    assert_eq!(builder.rows_written(), Some(builder.cursors()));
+    builder.mark_events(&log.events[..1]);
+    let first = log.events[0].id;
+    // Task 1 looked at: the next marks start after it.
+    assert_eq!(builder.take(1), [Target::Task(TaskId::new(1))]);
+    builder.mark_events(&log.events[1..]);
+    let r = builder.rows_written().unwrap();
+    assert_eq!(r.events, first);
+    // Task 2 marked again later keeps its first position.
+    let before = log.last();
+    log.add(Some(2), None, "task_created", json!({}), 10);
+    builder.mark_events(&log.after(before));
+    assert_eq!(builder.rows_written().unwrap().events, first);
+
+    let start = node::bucket_of(1_900_000_000);
+    builder.mark_samples(&[sample(4, start + 10), sample(5, start + 20)]);
+    let step = SessionStep {
+        id: 9,
+        target: StepTarget::run(&RunId::new(&a).unwrap()),
+        session_id: "s".to_owned(),
+        received_at: 0,
+        step: Step::new(9, StepKind::Wait, 0, 1),
+    };
+    builder.steps = 8;
+    builder.rows_through.steps = 8;
+    builder.mark_steps(&[step]);
+    let r = builder.rows_written().unwrap();
+    assert_eq!((r.samples, r.steps, r.events), (0, 8, first));
+    assert_eq!((builder.samples, builder.steps), (5, 9));
+
+    // Every mark looked at: R is the cursors.
+    builder.take(usize::MAX);
+    builder.due(0);
+    assert_eq!(builder.rows_written(), Some(builder.cursors()));
+
+    // A run whose grace is over is marked with no position.
+    let b = run_id(2);
+    let mut landed = Log::default();
+    landed.landed(2, &b, 0);
+    let row = build(&Target::Run(b.clone()), &inputs(&landed, 1000), &[]).unwrap();
+    builder.track(&Target::Run(b.clone()), &row);
+    builder.due(i64::MAX);
+    assert!(builder.marked());
+    assert_eq!(builder.rows_written(), Some(builder.cursors()));
+}
+
+/// A builder whose cursor was set past its marks gives no R; one set at
+/// the R of the store's mark ([`Builder::go_on_from_rows`]) gives R from
+/// there, and follows the inputs it reads after it.
+#[test]
+fn only_a_builder_that_follows_every_input_gives_r() {
+    let mut log = Log::default();
+    log.add(Some(1), None, "task_created", json!({}), 1).add(
+        Some(2),
+        None,
+        "task_created",
+        json!({}),
+        2,
+    );
+    let mut set = Builder {
+        events: log.events[0].id,
+        ..Builder::default()
+    };
+    set.mark_events(&log.events[1..]);
+    assert_eq!(set.rows_written(), None);
+    set.samples = 3;
+    assert_eq!(set.rows_written(), None);
+
+    let from = Cursors {
+        events: log.events[0].id,
+        samples: 3,
+        steps: 4,
+        resources: 5,
+        inside_resources: 6,
+    };
+    let mut gone_on = Builder::default();
+    gone_on.go_on_from_rows(from);
+    assert_eq!(gone_on.rows_written(), Some(from));
+    gone_on.mark_events(&log.events[1..]);
+    let r = gone_on.rows_written().unwrap();
+    assert_eq!(r, from, "task 2 is left");
+    gone_on.take(usize::MAX);
+    gone_on.due(0);
+    assert_eq!(
+        gone_on.rows_written(),
+        Some(Cursors {
+            events: log.last(),
+            ..from
+        })
+    );
+}
+
+/// A row written after an input marked it holds back no R when its grace
+/// marks it again: the position of that input went with the write.
+#[test]
+fn a_row_written_and_marked_again_by_its_grace_holds_no_position() {
+    let b = run_id(2);
+    let mut log = Log::default();
+    log.landed(2, &b, 0);
+    let target = Target::Run(b);
+    let mut builder = Builder::default();
+    builder.mark_events(&log.events);
+    assert!(builder.rows_written().unwrap().events < builder.events);
+    builder.take(usize::MAX);
+    let row = build(&target, &inputs(&log, 1000), &[]).unwrap();
+    assert!(!row.is_final);
+    builder.track(&target, &row);
+    builder.due(i64::MAX);
+    assert!(builder.marked());
+    assert_eq!(builder.rows_written(), Some(builder.cursors()));
+}

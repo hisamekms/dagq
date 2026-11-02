@@ -144,6 +144,7 @@ whole!(
     crate::domain::ledger::LedgerRow,
     crate::domain::ledger::LedgerHead,
     crate::domain::ledger::session::written::SessionsWritten,
+    crate::domain::ledger::session::written::Marks,
     crate::domain::pre_claim::rows::Since,
     crate::domain::session_step::SessionStep,
     crate::domain::session_step::SessionResource,

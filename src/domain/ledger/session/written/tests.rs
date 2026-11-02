@@ -74,3 +74,84 @@ fn the_mark_reads_back_as_written() {
         mark
     );
 }
+
+/// R at `events` and the other cursors at 7, by this version.
+fn rows_at(events: i64) -> RowsWritten {
+    RowsWritten::at(Cursors {
+        events: EventId::new(events),
+        samples: 7,
+        steps: 7,
+        resources: 7,
+        inside_resources: 7,
+    })
+}
+
+/// A store with no mark, or with the session rows' mark alone, gives no
+/// R; nor does an R by another version, or a session rows' mark that gives
+/// no W. An R gives its positions, its events no later than W.
+#[test]
+fn r_is_given_only_with_a_w_and_an_r_of_this_version_and_no_later_than_w() {
+    let heads = heads();
+    assert_eq!(rows_written_through(None, &heads), None);
+    let alone = Marks {
+        sessions: SessionsWritten::at(EventId::new(5)),
+        rows: None,
+    };
+    assert_eq!(rows_written_through(Some(&alone), &heads), None);
+    let marks = Marks {
+        rows: Some(rows_at(4)),
+        ..alone
+    };
+    assert_eq!(
+        rows_written_through(Some(&marks), &heads),
+        Some(rows_at(4).through)
+    );
+    let older = Marks {
+        rows: Some(RowsWritten {
+            ledger_v: LEDGER_V - 1,
+            ..rows_at(4)
+        }),
+        ..alone
+    };
+    assert_eq!(rows_written_through(Some(&older), &heads), None);
+    let no_w = Marks {
+        sessions: SessionsWritten {
+            ledger_v: LEDGER_V + 1,
+            ..alone.sessions
+        },
+        ..marks
+    };
+    assert_eq!(rows_written_through(Some(&no_w), &heads), None);
+    // An R past W (written before a W set back) is cut back to W.
+    let past = Marks {
+        rows: Some(rows_at(9)),
+        ..alone
+    };
+    let r = rows_written_through(Some(&past), &heads).unwrap();
+    assert_eq!(r.events, EventId::new(5));
+    assert_eq!(r.samples, 7);
+}
+
+/// The marks read as the session rows' mark alone, and that mark as marks
+/// with no R: a reader of either version reads the other's.
+#[test]
+fn the_marks_and_the_session_rows_mark_read_as_each_other() {
+    let marks = Marks {
+        sessions: SessionsWritten::at(EventId::new(5)),
+        rows: Some(rows_at(4)),
+    };
+    let text = serde_json::to_string(&marks).unwrap();
+    assert_eq!(serde_json::from_str::<Marks>(&text).unwrap(), marks);
+    assert_eq!(
+        serde_json::from_str::<SessionsWritten>(&text).unwrap(),
+        marks.sessions
+    );
+    let alone = serde_json::to_string(&marks.sessions).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Marks>(&alone).unwrap(),
+        Marks {
+            rows: None,
+            ..marks
+        }
+    );
+}

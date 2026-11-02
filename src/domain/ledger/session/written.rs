@@ -21,6 +21,14 @@
 //! mark) gives no position ([`written_through`]): a builder then folds the
 //! session events from its cursors' start, and its first pass's writes
 //! fill what the store's rows lack and write the mark.
+//!
+//! Beside it the store keeps the mark R ([`RowsWritten`], a row of
+//! [`ROWS_KIND`]) of where its run, task, queue and node rows record every
+//! input up to, each cursor its own ([`Cursors`]): a pass leaves some of
+//! those rows to later passes past its bound of writes, so their heads do
+//! not say it either. It is written with W in the same transaction
+//! ([`Marks`]), its events no later than W, and a store with W alone gives
+//! none ([`rows_written_through`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +79,84 @@ pub fn written_through(mark: Option<&SessionsWritten>, heads: &[LedgerHead]) -> 
         .iter()
         .any(|head| head.kind == LedgerKind::Session && head.ledger_v > LEDGER_V);
     (mark.ledger_v == LEDGER_V && !later).then_some(mark.through)
+}
+
+/// The kind of the row of the store's mark of where its run, task, queue
+/// and node rows record every input up to ([`RowsWritten`]): no
+/// [`LedgerKind`] either, its key [`KEY`].
+pub const ROWS_KIND: &str = "rows_written";
+
+/// A position in each input what builds the ledger reads, after its
+/// cursors ([`crate::domain::ledger::builder::Builder`]): an EventStore
+/// event id, a NodeSampleStore id, a SessionStepStore id, and the ids of
+/// the runs' resources measured from outside and from inside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Cursors {
+    pub events: EventId,
+    pub samples: i64,
+    pub steps: i64,
+    pub resources: i64,
+    pub inside_resources: i64,
+}
+
+/// The store's mark (R) that its run, task, queue and node rows record
+/// every input up to `through`, each cursor its own position: every row
+/// an input up to it made dirty is written. A pass writes it with the
+/// session rows' mark ([`SessionsWritten`]) in one transaction, its
+/// events no later than that mark's; each position is the pass's, or the
+/// position before the first input that made dirty a row the pass left
+/// marked (past its bound of writes, a write that failed, a fold behind),
+/// whichever is earlier, so that a builder going on from it reads that
+/// input again and marks the row again
+/// ([`crate::domain::ledger::builder::Builder::sessions_mark`]). A mark
+/// that comes due with time (a row's grace over, a supervisor's silence)
+/// holds no position: the rows not settled the store holds give it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowsWritten {
+    pub through: Cursors,
+    pub ledger_v: u32,
+}
+
+impl RowsWritten {
+    /// The mark of `through` by this [`LEDGER_V`].
+    pub const fn at(through: Cursors) -> Self {
+        Self {
+            through,
+            ledger_v: LEDGER_V,
+        }
+    }
+}
+
+/// The store's marks a pass writes with the session rows in one
+/// transaction: the session rows' (W), and with it the other rows' (R)
+/// when the builder gives one. As it crosses to the queue service it
+/// reads as the session rows' mark alone too (R's fields beside W's), so
+/// that a reader of W alone reads it and one that gives no R is taken to
+/// give none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Marks {
+    #[serde(flatten)]
+    pub sessions: SessionsWritten,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<RowsWritten>,
+}
+
+/// The position R each of whose cursors the store's run, task, queue and
+/// node rows record every input up to, by its `marks` and the heads of
+/// its session rows (`heads`): R's positions, its events no later than
+/// the session rows' W ([`written_through`]), when there is a W and an R
+/// by this [`LEDGER_V`]. `None` otherwise: a store with no mark, or with
+/// the session rows' mark alone (written before R was, or by a builder
+/// whose books are not the fold of every input), gives no position, and a
+/// builder then folds from its cursors' start. Pure: it reads nothing.
+pub fn rows_written_through(marks: Option<&Marks>, heads: &[LedgerHead]) -> Option<Cursors> {
+    let marks = marks?;
+    let w = written_through(Some(&marks.sessions), heads)?;
+    let rows = marks.rows.filter(|rows| rows.ledger_v == LEDGER_V)?;
+    Some(Cursors {
+        events: rows.through.events.min(w),
+        ..rows.through
+    })
 }
 
 #[cfg(test)]

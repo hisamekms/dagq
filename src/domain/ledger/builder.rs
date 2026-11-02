@@ -87,17 +87,36 @@
 //!   pass writes, which each event of its supervisor marks and makes
 //!   dirty). The session rows are not bounded so: a pass folds every one
 //!   marked ([`Builder::take_sessions`]) and writes all those that changed,
-//!   [`SESSION_ROWS_PER_WRITE`] rows and [`SESSION_BYTES_PER_WRITE`] a
-//!   transaction, the last with the store's
+//!   after the other rows, [`SESSION_ROWS_PER_WRITE`] rows and
+//!   [`SESSION_BYTES_PER_WRITE`] a transaction, the last with the store's
 //!   mark of its position ([`super::session::written`]): a write that fails
-//!   or a fold behind the stored row leaves its rows marked and no mark. Only a builder whose session book is the fold of every
-//!   session event (from its cursors' start, or gone on from the mark)
-//!   writes the mark, and only when no session row is left marked
+//!   or a fold behind the stored row leaves its rows marked and no mark.
+//!   Only a builder whose session book is the fold of every session event
+//!   (from its cursors' start, or gone on from the mark) writes the mark,
+//!   and only when no session row is left marked
 //!   ([`Builder::sessions_mark`]), so that the store's session rows record
 //!   every session event up to the position the mark gives (W,
-//!   [`super::session::written::written_through`]). A store with no mark gives
-//!   none: a builder folds the session events from its cursors' start,
-//!   and its writes fill what the rows lack and write the mark.
+//!   [`super::session::written::written_through`]). With it, in the same
+//!   transaction, goes the mark R of where the other rows record every
+//!   input up to, each cursor its own ([`Builder::rows_written`]): each
+//!   mark an input made holds the position before the first such input
+//!   of each cursor until the row is looked at, and R is the pass's
+//!   cursors cut back to the earliest of those the pass left marked (past
+//!   the bound, a write that failed, a fold behind), so that a builder
+//!   going on from R reads those inputs again and marks those rows again;
+//!   a mark that comes with time holds back none (the rows not settled
+//!   give it back). A mark marked again each pass is still taken in its
+//!   turn ([`Builder::take`]) and its position moves on once it is
+//!   written, so that with no new input R comes to the cursors, written
+//!   then with W as it was (the marks alone). Only a builder whose marks
+//!   follow every input (from its cursors' start, or gone on from R,
+//!   [`Builder::go_on_from_rows`]) gives R; one whose cursor was set
+//!   otherwise writes W with no R, and the R the store holds stays. A
+//!   store with no mark, or with W alone, gives no R
+//!   ([`super::session::written::rows_written_through`]); with no mark it
+//!   gives no W either: a builder folds the session events from its
+//!   cursors' start, and its writes fill what the rows lack and write the
+//!   marks.
 //! - **What a pass reads**: the events after its cursor, [`EVENTS_PER_READ`]
 //!   at a time, and the events of each run and task it folds. It folds at
 //!   its clock's time, or at the latest event's it read when that is later
@@ -171,7 +190,10 @@ use super::{
     node::{self, BUCKET_SECS},
     owner::{self, Owner},
     queue::{self, QueueBook},
-    session::{SessionBook, SessionsHeld, written::SessionsWritten},
+    session::{
+        SessionBook, SessionsHeld,
+        written::{Cursors, Marks, RowsWritten, SessionsWritten},
+    },
     settle::{self, SETTLE_GRACE_MS},
 };
 use crate::domain::environment::{self, CountedSample, Folded, RunResource, Window};
@@ -886,13 +908,103 @@ pub struct Builder {
     /// the rows' heads at a position not the mark's. Only then does it
     /// write the mark ([`Self::sessions_mark`]).
     sessions_whole: bool,
-    /// The position of the last mark it wrote or went on from.
-    sessions_marked: Option<EventId>,
+    /// The last marks it wrote, or the session rows' it went on from.
+    marks_written: Option<Marks>,
     /// How far its session book folds the events: from its cursors' start
     /// or the position it went on from, moved only as it reads the events
     /// ([`Self::mark_events`]); a cursor set past it otherwise leaves the
     /// book short of the events up to it, and it writes no mark.
     sessions_through: EventId,
+    /// For each mark an input made (a run, task, queue or node row), the
+    /// position before the first input of each cursor that made it, until
+    /// the row is looked at: the store's mark R stops there
+    /// ([`Self::rows_written`]). A mark that comes with time holds none.
+    /// Kept only of the targets marked ([`Self::due`]).
+    dirtied: BTreeMap<Target, Dirtied>,
+    /// How far its marks of the run, task, queue and node rows follow the
+    /// inputs, each cursor its own: from its cursors' start or the store's
+    /// R it went on from ([`Self::go_on_from_rows`]), moved only as it
+    /// reads the inputs; a cursor set otherwise leaves the inputs before it
+    /// unmarked, and it gives no R.
+    rows_through: Cursors,
+}
+
+/// Where the inputs that made a mark start, each cursor's position before
+/// the first of them ([`Builder::dirtied`]); none for a cursor no input
+/// of which made it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Dirtied {
+    events: Option<EventId>,
+    samples: Option<i64>,
+    steps: Option<i64>,
+    resources: Option<i64>,
+    inside_resources: Option<i64>,
+}
+
+impl Dirtied {
+    const fn events(before: EventId) -> Self {
+        Self {
+            events: Some(before),
+            samples: None,
+            steps: None,
+            resources: None,
+            inside_resources: None,
+        }
+    }
+
+    /// The earlier of each cursor's position.
+    fn merge(&mut self, other: Self) {
+        fn earlier<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
+            match (a, b) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }
+        }
+        self.events = earlier(self.events, other.events);
+        self.samples = earlier(self.samples, other.samples);
+        self.steps = earlier(self.steps, other.steps);
+        self.resources = earlier(self.resources, other.resources);
+        self.inside_resources = earlier(self.inside_resources, other.inside_resources);
+    }
+
+    /// Cut each position of `at` back to this one's.
+    fn cut(&self, at: &mut Cursors) {
+        if let Some(events) = self.events {
+            at.events = at.events.min(events);
+        }
+        if let Some(samples) = self.samples {
+            at.samples = at.samples.min(samples);
+        }
+        if let Some(steps) = self.steps {
+            at.steps = at.steps.min(steps);
+        }
+        if let Some(resources) = self.resources {
+            at.resources = at.resources.min(resources);
+        }
+        if let Some(inside) = self.inside_resources {
+            at.inside_resources = at.inside_resources.min(inside);
+        }
+    }
+}
+
+/// Mark `target`, an input before which each cursor stood at `at` made:
+/// a target not marked yet (or looked at since) starts there, one marked
+/// keeps the earlier of each.
+fn mark_dirtied(
+    marks: &mut BTreeSet<Target>,
+    dirtied: &mut BTreeMap<Target, Dirtied>,
+    target: Target,
+    at: Dirtied,
+) {
+    if marks.contains(&target) {
+        dirtied
+            .entry(target)
+            .and_modify(|held| held.merge(at))
+            .or_insert(at);
+    } else {
+        dirtied.insert(target.clone(), at);
+        marks.insert(target);
+    }
 }
 
 impl Default for Builder {
@@ -918,8 +1030,10 @@ impl Default for Builder {
             rules: None,
             swept: false,
             sessions_whole: true,
-            sessions_marked: None,
+            marks_written: None,
             sessions_through: EventId::new(0),
+            dirtied: BTreeMap::new(),
+            rows_through: Cursors::default(),
         }
     }
 }
@@ -934,6 +1048,8 @@ impl Builder {
     /// may fall on a time ready that ended, which reads no other move.
     pub fn mark_events(&mut self, new: &[RunEvent]) {
         let folds_on = self.sessions_through == self.events;
+        let rows_follow = self.rows_through.events == self.events;
+        let start = Dirtied::events(self.events);
         let kept = Arc::make_mut(&mut self.kept);
         let mut waits = WaitsMoved::default();
         // A move of a wait timed before an event read before it.
@@ -945,11 +1061,14 @@ impl Builder {
             waits.reopened |= moved.reopened;
             out_of_order |= moved.started_or_ended
                 && timestamp_millis(&event.created_at).is_some_and(|at| at < self.read_ms);
+            let before = Dirtied::events(self.events);
             if let Some(run) = &event.run_id {
-                self.marks.insert(Target::Run(run.to_string()));
+                let run = Target::Run(run.to_string());
+                mark_dirtied(&mut self.marks, &mut self.dirtied, run, before);
             }
             if let Some(task) = event.task_id {
-                self.marks.insert(Target::Task(task));
+                let task = Target::Task(task);
+                mark_dirtied(&mut self.marks, &mut self.dirtied, task, before);
             }
             // A row it changed reads it (a run's event too, that ends a
             // deferral or moves the landing slot); a supervisor's life may
@@ -963,9 +1082,11 @@ impl Builder {
             self.touched.append(&mut touched);
             if event.kind == EventKind::PushFinished {
                 for (run, task) in &self.pending_pushes {
-                    self.marks.insert(Target::Run(run.clone()));
+                    let run = Target::Run(run.clone());
+                    mark_dirtied(&mut self.marks, &mut self.dirtied, run, before);
                     if let Some(task) = task {
-                        self.marks.insert(Target::Task(*task));
+                        let task = Target::Task(*task);
+                        mark_dirtied(&mut self.marks, &mut self.dirtied, task, before);
                     }
                 }
             }
@@ -977,10 +1098,13 @@ impl Builder {
         if folds_on {
             self.sessions_through = self.events;
         }
+        if rows_follow {
+            self.rows_through.events = self.events;
+        }
         if waits.reopened || out_of_order {
-            self.mark_ready(true);
+            self.mark_ready(true, Some(start));
         } else if waits.reached {
-            self.mark_ready(false);
+            self.mark_ready(false, Some(start));
         }
     }
 
@@ -1001,24 +1125,40 @@ impl Builder {
     /// with `all` the others too. Those read only the waits a supervisor's
     /// life ended: one ended as it passed a silence or after a stop
     /// ([`Self::due`]), or opened again by an event naming the supervisor.
-    fn mark_ready(&mut self, all: bool) {
-        self.marks.extend(
-            self.ready_tasks
-                .iter()
-                .filter(|(_, every_move)| all || **every_move)
-                .map(|(task, _)| Target::Task(*task)),
-        );
+    /// The events read that moved them start at `read` (none for a move
+    /// that came with time).
+    fn mark_ready(&mut self, all: bool, read: Option<Dirtied>) {
+        let tasks: Vec<Target> = self
+            .ready_tasks
+            .iter()
+            .filter(|(_, every_move)| all || **every_move)
+            .map(|(task, _)| Target::Task(*task))
+            .collect();
+        for task in tasks {
+            match read {
+                Some(at) => mark_dirtied(&mut self.marks, &mut self.dirtied, task, at),
+                None => {
+                    self.marks.insert(task);
+                }
+            }
+        }
     }
 
     /// Mark the node hours the samples `new` (after [`Self::samples`]) are
     /// of, and move the cursor past them.
     pub fn mark_samples(&mut self, new: &[NodeSample]) {
+        let follow = self.rows_through.samples == self.samples;
         for sample in new {
-            self.marks.insert(Target::Node(
-                sample.node_id.clone(),
-                node::bucket_of(sample.sample.unix),
-            ));
+            let node = Target::Node(sample.node_id.clone(), node::bucket_of(sample.sample.unix));
+            let before = Dirtied {
+                samples: Some(self.samples),
+                ..Dirtied::default()
+            };
+            mark_dirtied(&mut self.marks, &mut self.dirtied, node, before);
             self.samples = self.samples.max(sample.id);
+        }
+        if follow {
+            self.rows_through.samples = self.samples;
         }
     }
 
@@ -1027,9 +1167,15 @@ impl Builder {
     /// row holds them ([`Self::steps_held_since`]). A step of a target of
     /// no run marks nothing: no run's or task's row holds it.
     pub fn mark_steps(&mut self, new: &[SessionStep]) {
+        let follow = self.rows_through.steps == self.steps;
         for step in new {
             if let Some(run) = step.target.run_id() {
-                self.marks.insert(Target::Run(run.to_string()));
+                let before = Dirtied {
+                    steps: Some(self.steps),
+                    ..Dirtied::default()
+                };
+                let target = Target::Run(run.to_string());
+                mark_dirtied(&mut self.marks, &mut self.dirtied, target, before);
                 let since = self
                     .unsaved_steps
                     .entry(run.to_string())
@@ -1037,6 +1183,9 @@ impl Builder {
                 *since = (*since).min(step.received_at);
             }
             self.steps = self.steps.max(step.id);
+        }
+        if follow {
+            self.rows_through.steps = self.steps;
         }
     }
 
@@ -1075,13 +1224,27 @@ impl Builder {
     /// ([`Self::steps_held_since`]). One of a target of no run marks
     /// nothing.
     pub fn mark_resources(&mut self, outside: &[RunResource], inside: &[SessionResource]) {
+        let follow = (
+            self.rows_through.resources == self.resources,
+            self.rows_through.inside_resources == self.inside_resources,
+        );
         for window in outside {
-            self.marks.insert(Target::Run(window.run_id.clone()));
+            let before = Dirtied {
+                resources: Some(self.resources),
+                ..Dirtied::default()
+            };
+            let run = Target::Run(window.run_id.clone());
+            mark_dirtied(&mut self.marks, &mut self.dirtied, run, before);
             self.resources = self.resources.max(window.id);
         }
         for sample in inside {
             if let Some(run) = sample.target.run_id() {
-                self.marks.insert(Target::Run(run.to_string()));
+                let before = Dirtied {
+                    inside_resources: Some(self.inside_resources),
+                    ..Dirtied::default()
+                };
+                let target = Target::Run(run.to_string());
+                mark_dirtied(&mut self.marks, &mut self.dirtied, target, before);
                 let since = self
                     .unsaved_steps
                     .entry(run.to_string())
@@ -1089,6 +1252,12 @@ impl Builder {
                 *since = (*since).min(sample.received_at);
             }
             self.inside_resources = self.inside_resources.max(sample.id);
+        }
+        if follow.0 {
+            self.rows_through.resources = self.resources;
+        }
+        if follow.1 {
+            self.rows_through.inside_resources = self.inside_resources;
         }
     }
 
@@ -1155,7 +1324,9 @@ impl Builder {
         };
         for ((kind, key), row) in rows {
             if row.inputs_through.last() > after {
-                self.marks.insert(Target::Row(*kind, key.clone()));
+                let target = Target::Row(*kind, key.clone());
+                let at = Dirtied::events(after);
+                mark_dirtied(&mut self.marks, &mut self.dirtied, target, at);
             }
         }
     }
@@ -1204,6 +1375,10 @@ impl Builder {
     /// open streams whose supervisor's life ended by then
     /// ([`QueueBook::close_lives`]), slots full or not.
     pub fn due(&mut self, now_ms: i64) {
+        // Those looked at since are marked again from where their next
+        // input starts, and a mark this makes holds no position.
+        let marks = &self.marks;
+        self.dirtied.retain(|target, _| marks.contains(target));
         let kept = Arc::make_mut(&mut self.kept);
         // A silence ends a wait with no event: its row and the tasks ready
         // may read it.
@@ -1214,7 +1389,7 @@ impl Builder {
                     .iter()
                     .map(|start| Target::Row(LedgerKind::Queue, start.to_string())),
             );
-            self.mark_ready(true);
+            self.mark_ready(true, None);
         }
         let kept = Arc::make_mut(&mut self.kept);
         // So does a stream, whether or not its supervisor had a slots full.
@@ -1358,6 +1533,8 @@ impl Builder {
     /// input read (a run's steps too): wait on its grace while it ended and
     /// is not settled, and on a later push while it is pending on its push.
     pub fn track(&mut self, target: &Target, row: &LedgerRow) {
+        // Its inputs up to now are in the row.
+        self.dirtied.remove(target);
         match target {
             Target::Row(kind, key) if row.is_final => {
                 self.settled.insert((*kind, key.clone()));
@@ -1429,6 +1606,7 @@ impl Builder {
         each("touched", &|| Box::new(self.touched.clone()));
         each("settled", &|| Box::new(self.settled.clone()));
         each("settled_folds", &|| Box::new(self.settled_folds.clone()));
+        each("dirtied", &|| Box::new(self.dirtied.clone()));
     }
 
     /// What the folds of the queue as a whole read, up to [`Self::events`].
@@ -1512,7 +1690,10 @@ impl Builder {
                 .map(|key| Target::Row(LedgerKind::Session, key.clone())),
         );
         self.sessions_whole = held.written;
-        self.sessions_marked = held.written.then_some(held.through);
+        self.marks_written = held.written.then(|| Marks {
+            sessions: SessionsWritten::at(held.through),
+            rows: None,
+        });
         self.sessions_through = held.through;
         Arc::make_mut(&mut self.kept).restore_sessions(held, records);
     }
@@ -1557,31 +1738,94 @@ impl Builder {
         sessions
     }
 
-    /// The mark of its cursor ([`SessionsWritten`]) a pass writes with its
-    /// session rows: only while its session book and records are the fold
-    /// of every session event (from its cursors' start, or gone on from
-    /// the store's mark, its cursor moved only as it read the events since),
-    /// no session row is left
-    /// marked or to be built (all it changed are written or the store
-    /// holds them as folded), and not when it wrote the mark of its cursor
-    /// already.
-    pub fn sessions_mark(&self) -> Option<SessionsWritten> {
+    /// The marks of its cursors a pass writes with its session rows: the
+    /// session rows' ([`SessionsWritten`], W) only while its session book
+    /// and records are the fold of every session event (from its cursors'
+    /// start, or gone on from the store's mark, its cursor moved only as it
+    /// read the events since) and no session row is left marked or to be
+    /// built (all it changed are written or the store holds them as
+    /// folded); with it the other rows' ([`RowsWritten`], R,
+    /// [`Self::rows_written`]) when it gives one. None when it wrote these
+    /// marks already.
+    pub fn sessions_mark(&self) -> Option<Marks> {
         let left = self.rows_after.is_some()
             || !self.touched.is_empty()
             || self
                 .marks
                 .iter()
                 .any(|target| matches!(target, Target::Row(LedgerKind::Session, _)));
-        (self.sessions_whole
-            && self.sessions_through == self.events
-            && !left
-            && self.sessions_marked != Some(self.events))
-        .then(|| SessionsWritten::at(self.events))
+        if !self.sessions_whole || self.sessions_through != self.events || left {
+            return None;
+        }
+        let marks = Marks {
+            sessions: SessionsWritten::at(self.events),
+            rows: self.rows_written().map(RowsWritten::at),
+        };
+        (self.marks_written != Some(marks)).then_some(marks)
     }
 
-    /// Note that the store holds `mark` now, written with the session rows.
-    pub fn wrote_sessions_mark(&mut self, mark: SessionsWritten) {
-        self.sessions_marked = Some(mark.through);
+    /// The session rows' mark it last wrote or went on from.
+    pub fn sessions_mark_written(&self) -> Option<SessionsWritten> {
+        self.marks_written.map(|marks| marks.sessions)
+    }
+
+    /// Note that the store holds `marks` now, written with the session rows.
+    pub fn wrote_sessions_mark(&mut self, marks: Marks) {
+        self.marks_written = Some(marks);
+    }
+
+    /// Its cursors.
+    pub const fn cursors(&self) -> Cursors {
+        Cursors {
+            events: self.events,
+            samples: self.samples,
+            steps: self.steps,
+            resources: self.resources,
+            inside_resources: self.inside_resources,
+        }
+    }
+
+    /// The position R up to which every input made dirty a run, task,
+    /// queue or node row that is written, each cursor its own: its
+    /// cursor, or the position before the first input that made a mark
+    /// still left (past [`WRITES_PER_PASS`], a write that failed, a fold
+    /// behind) if earlier. A mark that came with time ([`Self::due`], a
+    /// grace over, a supervisor's silence, the rules moved) holds back
+    /// none: the store's rows not settled give it back. None unless its
+    /// marks follow every input from its cursors' start, or from the R it
+    /// went on from ([`Self::go_on_from_rows`]): a cursor set otherwise
+    /// leaves the inputs before it unmarked. With no mark left and no new
+    /// input, it is its cursors.
+    pub fn rows_written(&self) -> Option<Cursors> {
+        let mut at = self.cursors();
+        if self.rows_through != at {
+            return None;
+        }
+        for target in &self.marks {
+            if matches!(target, Target::Row(LedgerKind::Session, _)) {
+                continue;
+            }
+            if let Some(dirtied) = self.dirtied.get(target) {
+                dirtied.cut(&mut at);
+            }
+        }
+        Some(at)
+    }
+
+    /// Set its cursors at `from`, the R the store's mark gives
+    /// ([`super::session::written::rows_written_through`]), from which its
+    /// marks follow every input: every row an input up to it made dirty is
+    /// written, so none of them is marked. What it keeps of the inputs up
+    /// to there is made again from the store's rows apart, its session
+    /// book too: it writes W and R again only once that book is the fold
+    /// of every session event up to its cursor ([`Self::sessions_mark`]).
+    pub fn go_on_from_rows(&mut self, from: Cursors) {
+        self.events = from.events;
+        self.samples = from.samples;
+        self.steps = from.steps;
+        self.resources = from.resources;
+        self.inside_resources = from.inside_resources;
+        self.rows_through = from;
     }
 
     /// The rows of `rows` (those [`Self::rows_to_build`] names) whose

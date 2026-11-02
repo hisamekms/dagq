@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::application::LedgerStore;
-use crate::domain::ledger::session::written::{self, SessionsWritten};
+use crate::domain::ledger::session::written::{self, Marks, RowsWritten, SessionsWritten};
 use crate::domain::ledger::{
     InputsThrough, LedgerHead, LedgerKind, LedgerRow, Measure, Subject, Totals, node,
 };
@@ -74,6 +74,62 @@ fn write_mark(conn: &rusqlite::Connection, mark: &SessionsWritten) -> Result<()>
         params![written::KIND, written::KEY, mark.ledger_v, through],
     )?;
     Ok(())
+}
+
+/// Write `mark` on `conn` as the one row of its kind
+/// ([`written::ROWS_KIND`]): its positions as the `events`,
+/// `node_samples`, `steps`, `resources` and `inside_resources` of its
+/// `inputs_through`, its version as its `ledger_v`, nothing else. No
+/// reader of the rows of a [`LedgerKind`] reads it.
+fn write_rows_mark(conn: &rusqlite::Connection, mark: &RowsWritten) -> Result<()> {
+    let through = text(&InputsThrough {
+        events: mark.through.events,
+        supervisor: None,
+        life_ended: Vec::new(),
+        node_samples: Some(mark.through.samples),
+        steps: Some(mark.through.steps),
+        resources: Some(mark.through.resources),
+        inside_resources: Some(mark.through.inside_resources),
+    })?;
+    conn.execute(
+        "INSERT INTO ledger_rows(kind, key, ledger_v, built_at, inputs_through)
+         VALUES (?1, ?2, ?3, '', ?4)
+         ON CONFLICT(kind, key) DO UPDATE SET
+           ledger_v=excluded.ledger_v, inputs_through=excluded.inputs_through",
+        params![written::ROWS_KIND, written::KEY, mark.ledger_v, through],
+    )?;
+    Ok(())
+}
+
+/// The marks of each of `kinds` (key [`written::KEY`]) `conn` holds, read
+/// in one statement: each kind with its version and the positions its
+/// `inputs_through` holds.
+fn read_marks(
+    conn: &rusqlite::Connection,
+    kinds: [&str; 2],
+) -> Result<Vec<(String, u32, InputsThrough)>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT kind, ledger_v, inputs_through FROM ledger_rows
+         WHERE kind IN (?1, ?2) AND key=?3",
+    )?;
+    let rows = statement
+        .query_map(params![kinds[0], kinds[1], written::KEY], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|(kind, ledger_v, through)| {
+            Ok((
+                kind,
+                u32::try_from(ledger_v)?,
+                serde_json::from_str::<InputsThrough>(&through)?,
+            ))
+        })
+        .collect()
 }
 
 /// Write `row` on `conn` as [`LedgerStore::write_ledger_row`] says.
@@ -270,6 +326,20 @@ impl LedgerStore for SqliteQueue {
         rows: &[(LedgerRow, Option<LedgerRow>)],
         mark: Option<&SessionsWritten>,
     ) -> Result<bool> {
+        let marks = mark.map(|&sessions| Marks {
+            sessions,
+            rows: None,
+        });
+        self.write_session_rows_marked(rows, marks.as_ref())
+    }
+
+    /// As [`Self::write_session_rows_over`], R written in the same
+    /// transaction after the session rows' mark.
+    fn write_session_rows_marked(
+        &self,
+        rows: &[(LedgerRow, Option<LedgerRow>)],
+        marks: Option<&Marks>,
+    ) -> Result<bool> {
         let tx = self.write_tx("ledger_session_rows", TransactionBehavior::Immediate)?;
         for (row, read) in rows {
             if held_row(&tx, row.kind, &row.key)?.as_ref() != read.as_ref() {
@@ -277,28 +347,46 @@ impl LedgerStore for SqliteQueue {
             }
             upsert(&tx, row)?;
         }
-        if let Some(mark) = mark {
-            write_mark(&tx, mark)?;
+        if let Some(marks) = marks {
+            write_mark(&tx, &marks.sessions)?;
+            if let Some(rows) = &marks.rows {
+                write_rows_mark(&tx, rows)?;
+            }
         }
         tx.commit()?;
         Ok(true)
     }
 
     fn sessions_written(&self) -> Result<Option<SessionsWritten>> {
-        self.conn
-            .query_row(
-                "SELECT ledger_v, inputs_through FROM ledger_rows WHERE kind=?1 AND key=?2",
-                params![written::KIND, written::KEY],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-            )
-            .optional()?
-            .map(|(ledger_v, through)| {
-                Ok(SessionsWritten {
-                    through: serde_json::from_str::<InputsThrough>(&through)?.events,
-                    ledger_v: u32::try_from(ledger_v)?,
-                })
-            })
-            .transpose()
+        Ok(self.ledger_marks()?.map(|marks| marks.sessions))
+    }
+
+    /// Both marks read in one statement, so that R is the one written
+    /// with the session rows' mark or before it.
+    fn ledger_marks(&self) -> Result<Option<Marks>> {
+        let (mut sessions, mut rows) = (None, None);
+        for (kind, ledger_v, through) in
+            read_marks(&self.conn, [written::KIND, written::ROWS_KIND])?
+        {
+            if kind == written::KIND {
+                sessions = Some(SessionsWritten {
+                    through: through.events,
+                    ledger_v,
+                });
+            } else {
+                rows = Some(RowsWritten {
+                    through: written::Cursors {
+                        events: through.events,
+                        samples: through.node_samples.unwrap_or_default(),
+                        steps: through.steps.unwrap_or_default(),
+                        resources: through.resources.unwrap_or_default(),
+                        inside_resources: through.inside_resources.unwrap_or_default(),
+                    },
+                    ledger_v,
+                });
+            }
+        }
+        Ok(sessions.map(|sessions| Marks { sessions, rows }))
     }
 
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
@@ -1257,5 +1345,90 @@ mod tests {
             i64::try_from(batch.len()).unwrap()
         );
         assert_eq!(queue.sessions_written().unwrap(), Some(mark));
+    }
+
+    /// R is written with the session rows' mark in one transaction and
+    /// reads back with it, in a row of its own kind that no reading of the
+    /// rows by their kind (nor a window) reads; a write with the session
+    /// rows' mark alone leaves the R held. A write that fails part way (as
+    /// R is written, after the rows and the session rows' mark) writes no
+    /// row and neither mark.
+    #[test]
+    fn r_is_written_with_the_session_rows_mark_all_or_none() {
+        use crate::domain::ledger::session::written::{
+            Cursors, Marks, RowsWritten, SessionsWritten,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        assert_eq!(queue.ledger_marks().unwrap(), None);
+        let batch: Vec<(LedgerRow, Option<LedgerRow>)> =
+            sessions().into_iter().map(|row| (row, None)).collect();
+        let marks = Marks {
+            sessions: SessionsWritten::at(EventId::new(7)),
+            rows: Some(RowsWritten::at(Cursors {
+                events: EventId::new(5),
+                samples: 2,
+                steps: 3,
+                resources: 4,
+                inside_resources: 6,
+            })),
+        };
+        queue
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER part_way BEFORE INSERT ON ledger_rows
+                   WHEN NEW.kind = 'rows_written'
+                 BEGIN SELECT RAISE(ABORT, 'part way'); END;",
+            )
+            .unwrap();
+        let error = queue
+            .write_session_rows_marked(&batch, Some(&marks))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("part way"), "{error:#}");
+        assert_eq!(rows_of_kind(&queue, "session"), 0);
+        assert_eq!(queue.ledger_marks().unwrap(), None);
+        queue.conn.execute_batch("DROP TRIGGER part_way").unwrap();
+
+        assert!(
+            queue
+                .write_session_rows_marked(&batch, Some(&marks))
+                .unwrap()
+        );
+        assert_eq!(queue.ledger_marks().unwrap(), Some(marks));
+        assert_eq!(queue.sessions_written().unwrap(), Some(marks.sessions));
+        assert_eq!(rows_of_kind(&queue, ledger::session::written::ROWS_KIND), 1);
+        for kind in LedgerKind::ALL {
+            assert!(
+                queue
+                    .ledger_rows(kind)
+                    .unwrap()
+                    .iter()
+                    .all(|row| row.key != ledger::session::written::KEY),
+                "{kind:?}"
+            );
+            assert!(
+                queue
+                    .ledger_heads(kind)
+                    .unwrap()
+                    .iter()
+                    .all(|head| head.key != ledger::session::written::KEY),
+                "{kind:?}"
+            );
+        }
+        let window = queue
+            .ledger_window(&ledger::window::WindowQuery::default())
+            .unwrap();
+        assert!(!format!("{window:?}").contains(ledger::session::written::ROWS_KIND));
+
+        // The session rows' mark alone moves W and leaves R.
+        let later = SessionsWritten::at(EventId::new(9));
+        assert!(queue.write_session_rows_over(&[], Some(&later)).unwrap());
+        assert_eq!(
+            queue.ledger_marks().unwrap(),
+            Some(Marks {
+                sessions: later,
+                ..marks
+            })
+        );
     }
 }

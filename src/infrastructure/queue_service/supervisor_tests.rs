@@ -1037,3 +1037,97 @@ fn the_session_rows_and_the_mark_cross_in_one_write_whole_or_staged() {
         Some(rows[1].clone())
     );
 }
+
+/// R crosses beside the session rows' mark in the same write, whole or
+/// staged, and reads back with it; a reader of the session rows' mark
+/// alone reads that from the same answer, and the marks of a store that
+/// holds the session rows' mark alone read with no R.
+#[test]
+fn r_crosses_with_the_session_rows_mark_in_one_write_whole_or_staged() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::session::written::{Cursors, Marks, RowsWritten, SessionsWritten};
+    use crate::domain::ledger::{LedgerKind, LedgerRow};
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let db = backend.db.clone();
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let (log, _) = crate::domain::ledger::testkit::sessions_across();
+    let rows =
+        crate::domain::ledger::session::session_rows(&log.events, "2030-01-01T00:00:00.000Z");
+    let batch: Vec<(LedgerRow, Option<LedgerRow>)> =
+        rows.iter().map(|row| (row.clone(), None)).collect();
+    let alone = SessionsWritten::at(crate::domain::EventId::new(7));
+    assert!(queue.write_session_rows_over(&batch, Some(&alone)).unwrap());
+    assert_eq!(
+        queue.ledger_marks().unwrap(),
+        Some(Marks {
+            sessions: alone,
+            rows: None
+        })
+    );
+    let r = |events: i64| {
+        RowsWritten::at(Cursors {
+            events: crate::domain::EventId::new(events),
+            samples: 2,
+            steps: 3,
+            resources: 4,
+            inside_resources: 5,
+        })
+    };
+    let marks = Marks {
+        sessions: SessionsWritten::at(crate::domain::EventId::new(8)),
+        rows: Some(r(6)),
+    };
+    assert!(queue.write_session_rows_marked(&[], Some(&marks)).unwrap());
+    assert_eq!(queue.ledger_marks().unwrap(), Some(marks));
+    assert_eq!(queue.sessions_written().unwrap(), Some(marks.sessions));
+    let direct = SqliteQueue::open(&db).unwrap();
+    assert_eq!(direct.ledger_marks().unwrap(), Some(marks));
+
+    // Past one request whole: staged, then written as one.
+    let mut large = rows[0].clone();
+    large.detail = json!({"text": "a".repeat(crate::domain::queue_service::MAX_REQUEST_BYTES)});
+    let over = [(large.clone(), Some(rows[0].clone()))];
+    let later = Marks {
+        sessions: SessionsWritten::at(crate::domain::EventId::new(9)),
+        rows: Some(r(9)),
+    };
+    service.ops.lock().unwrap().clear();
+    assert!(
+        queue
+            .write_session_rows_marked(&over, Some(&later))
+            .unwrap()
+    );
+    assert_eq!(
+        service.ops.lock().unwrap().last().map(String::as_str),
+        Some("write_staged_session_rows_over")
+    );
+    assert_eq!(direct.ledger_marks().unwrap(), Some(later));
+    // The marks alone, R moved with W as it was.
+    let moved = Marks {
+        rows: Some(r(9).through).map(|through| {
+            RowsWritten::at(Cursors {
+                samples: 6,
+                ..through
+            })
+        }),
+        ..later
+    };
+    queue.write_ledger_marks(&moved).unwrap();
+    assert_eq!(direct.ledger_marks().unwrap(), Some(moved));
+    assert_eq!(
+        direct.ledger_rows(LedgerKind::Session).unwrap().len(),
+        rows.len()
+    );
+}

@@ -41,7 +41,9 @@ use crate::domain::ledger::builder::{
     WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
 };
 use crate::domain::ledger::queue::QueueBook;
-use crate::domain::ledger::session::written::{SessionsWritten, written_through};
+use crate::domain::ledger::session::written::{
+    Cursors, Marks, rows_written_through, written_through,
+};
 use crate::domain::ledger::session::{SessionBook, SessionsHeld};
 use crate::domain::ledger::{LedgerKind, LedgerRow};
 use crate::domain::pre_claim::{self, PreClaimBook};
@@ -292,10 +294,10 @@ fn pass(
     restore(store, builder, &rows)?;
     let after = builder.take_rows_after();
     fold_rows(store, builder, (now_ms, built_at), &rows, after, false)?;
-    let sessions = write_sessions(store, builder, (now_ms, built_at), session_bytes);
-    // The session rows left marked (a write that failed, a fold behind)
-    // wait aside for the next pass's write of them all, so that none is
-    // written alone, and a failure of theirs stops no other row.
+    // The session rows wait aside for the write of them all after the
+    // other rows, so that none is written alone, a failure of theirs stops
+    // no other row, and the marks written with the last of them hold back
+    // only for the rows this pass left marked.
     let aside = builder.take_sessions();
     let taken = write_taken(
         store,
@@ -306,13 +308,18 @@ fn pass(
         &rows,
         aside,
     );
-    built.sessions = sessions?;
-    taken
+    let sessions = write_sessions(store, builder, (now_ms, built_at), session_bytes);
+    if let Ok(written) = sessions {
+        built.sessions = written;
+    }
+    // The other rows' failure first, as they were written first.
+    taken?;
+    sessions.map(drop)
 }
 
 /// Write the marks a pass takes ([`Builder::take`], [`CHECKS_PER_PASS`]
 /// of them) at most [`WRITES_PER_PASS`] rows, the session rows aside
-/// ([`write_sessions`]), then sweep the session and queue rows of `rows`
+/// (written after, [`write_sessions`]), then sweep the session and queue rows of `rows`
 /// left marked by a builder that has not swept ([`fold_rows`]). The
 /// session rows taken `aside` are marked again before the sweep, so that
 /// it keeps their records.
@@ -409,11 +416,15 @@ fn fold_sessions(
 /// those that change in chunks of at most as many rows and `bytes` of them
 /// (each row's text, as it crosses to the queue service; a row past
 /// `bytes` alone is a chunk of its own), each in one transaction
-/// ([`crate::application::LedgerStore::write_session_rows_over`]); the
+/// ([`crate::application::LedgerStore::write_session_rows_marked`]); the
 /// pass's last chunk (none of rows when nothing is left to write) carries
-/// the mark of the builder's cursor when it gives one
+/// the marks of the builder's cursors when it gives them
 /// ([`Builder::sessions_mark`]: its session book is the fold of every
-/// session event, and no session row is left marked). So the mark is
+/// session event, and no session row is left marked; with them R, where
+/// the other rows the pass left marked hold it back,
+/// [`Builder::rows_written`]), or the marks alone when only R moved
+/// ([`crate::application::LedgerStore::write_ledger_marks`]). It runs
+/// after the pass wrote the other rows. So the mark is
 /// written only once every session row the pass changed is written before
 /// it or with it, and the store's session rows record every session event
 /// up to the position it gives. A chunk written before a later one fails
@@ -465,8 +476,17 @@ fn write_sessions(
         }
     }
     let mark = builder.sessions_mark();
-    if pending.rows.is_empty() && mark.is_none() {
-        return Ok(written);
+    if pending.rows.is_empty() {
+        match mark {
+            None => return Ok(written),
+            // R alone moved: the session rows' mark as the store holds it.
+            Some(marks) if builder.sessions_mark_written() == Some(marks.sessions) => {
+                store.write_ledger_marks(&marks)?;
+                builder.wrote_sessions_mark(marks);
+                return Ok(written);
+            }
+            Some(_) => {}
+        }
     }
     Ok(written + write_chunk(store, builder, pending.rows, mark)?)
 }
@@ -506,13 +526,13 @@ fn write_chunk(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
     chunk: Vec<(Target, LedgerRow, Option<LedgerRow>)>,
-    mark: Option<SessionsWritten>,
+    mark: Option<Marks>,
 ) -> Result<usize> {
     let (targets, rows): (Vec<Target>, Vec<(LedgerRow, Option<LedgerRow>)>) = chunk
         .into_iter()
         .map(|(target, row, stored)| (target, (row, stored)))
         .unzip();
-    let written = store.write_session_rows_over(&rows, mark.as_ref());
+    let written = store.write_session_rows_marked(&rows, mark.as_ref());
     if !matches!(written, Ok(true)) {
         // Folded again next pass.
         keep_all(builder, targets);
@@ -700,6 +720,25 @@ pub fn pre_claim_books(store: &dyn LedgerQueue, closed_to: i64) -> Result<(Lives
 pub fn sessions_written_through(store: &dyn LedgerQueue) -> Result<Option<EventId>> {
     Ok(written_through(
         store.sessions_written()?.as_ref(),
+        &store.ledger_heads(LedgerKind::Session)?,
+    ))
+}
+
+/// The position R each of whose cursors the run, task, queue and node rows
+/// `store` holds record every input up to, by its marks and the session
+/// rows' heads ([`rows_written_through`]): its events no later than W
+/// ([`sessions_written_through`]). `None` for a store with no mark or with
+/// the session rows' alone: a builder then folds from its cursors' start.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
+    )
+)]
+pub fn rows_written(store: &dyn LedgerQueue) -> Result<Option<Cursors>> {
+    Ok(rows_written_through(
+        store.ledger_marks()?.as_ref(),
         &store.ledger_heads(LedgerKind::Session)?,
     ))
 }

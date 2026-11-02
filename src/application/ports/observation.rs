@@ -161,6 +161,39 @@ pub trait LedgerStore {
     fn sessions_written(
         &self,
     ) -> Result<Option<crate::domain::ledger::session::written::SessionsWritten>>;
+    /// [`Self::write_session_rows_over`] with `marks`: the session rows'
+    /// mark and, when given, the mark R that the run, task, queue and node
+    /// rows record every input up to
+    /// ([`crate::domain::ledger::session::written::RowsWritten`]), all in
+    /// the one transaction. A store that keeps no R writes the session
+    /// rows' mark alone, and gives no R ([`Self::ledger_marks`]).
+    fn write_session_rows_marked(
+        &self,
+        rows: &[(LedgerRow, Option<LedgerRow>)],
+        marks: Option<&crate::domain::ledger::session::written::Marks>,
+    ) -> Result<bool> {
+        self.write_session_rows_over(rows, marks.map(|marks| &marks.sessions))
+    }
+    /// Write `marks` alone in one transaction, as
+    /// [`Self::write_session_rows_marked`] with no row: what builds the
+    /// ledger writes so an R that moved with no session row to write and
+    /// the session rows' mark as the store holds it.
+    fn write_ledger_marks(
+        &self,
+        marks: &crate::domain::ledger::session::written::Marks,
+    ) -> Result<()> {
+        self.write_session_rows_marked(&[], Some(marks)).map(drop)
+    }
+    /// The store's marks, if it holds the session rows' one: with R when it
+    /// holds that too ([`crate::domain::ledger::session::written::rows_written_through`]).
+    fn ledger_marks(&self) -> Result<Option<crate::domain::ledger::session::written::Marks>> {
+        Ok(self.sessions_written()?.map(|sessions| {
+            crate::domain::ledger::session::written::Marks {
+                sessions,
+                rows: None,
+            }
+        }))
+    }
     /// The row of `kind` and `key`, if there is one.
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
     /// Every row of `kind`, by key.

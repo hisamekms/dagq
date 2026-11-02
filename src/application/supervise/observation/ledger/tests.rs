@@ -9,7 +9,9 @@ use crate::domain::environment::{Resources, RunResource};
 use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
 use crate::domain::ledger::queue::QueueBook;
 use crate::domain::ledger::session::SessionBook;
-use crate::domain::ledger::session::written::{SessionsWritten, written_through};
+use crate::domain::ledger::session::written::{
+    Cursors, Marks, RowsWritten, SessionsWritten, written_through,
+};
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
 use crate::domain::ledger::testkit::{Log, T0, ms, queue_across, run_id, sessions_across};
 use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node};
@@ -76,6 +78,12 @@ struct Memory {
     /// The bytes of the rows' text of each write of the session rows
     /// committed, and whether it held the mark.
     batch_bytes: RefCell<Vec<(usize, bool)>>,
+    /// The mark R written with the session rows' mark
+    /// ([`LedgerStore::ledger_marks`]).
+    rows_mark: RefCell<Option<RowsWritten>>,
+    /// How many writes of the marks alone were committed
+    /// ([`LedgerStore::write_ledger_marks`]).
+    marks_alone: Cell<usize>,
 }
 
 /// Another builder's pass, run on the store between a read and a write.
@@ -274,6 +282,34 @@ impl LedgerStore for Memory {
     }
     fn sessions_written(&self) -> Result<Option<SessionsWritten>> {
         Ok(*self.mark.borrow())
+    }
+    /// As [`Self::write_session_rows_over`], R with the session rows' mark.
+    fn write_session_rows_marked(
+        &self,
+        rows: &[(LedgerRow, Option<LedgerRow>)],
+        marks: Option<&Marks>,
+    ) -> Result<bool> {
+        let written = self.write_session_rows_over(rows, marks.map(|marks| &marks.sessions))?;
+        if written && let Some(rows) = marks.and_then(|marks| marks.rows) {
+            self.rows_mark.replace(Some(rows));
+        }
+        Ok(written)
+    }
+    /// The marks alone, counted apart from the writes of the session rows.
+    fn write_ledger_marks(&self, marks: &Marks) -> Result<()> {
+        ensure!(!self.refuses.get(), "attempt to write a readonly database");
+        self.mark.replace(Some(marks.sessions));
+        if let Some(rows) = marks.rows {
+            self.rows_mark.replace(Some(rows));
+        }
+        self.marks_alone.set(self.marks_alone.get() + 1);
+        Ok(())
+    }
+    fn ledger_marks(&self) -> Result<Option<Marks>> {
+        Ok(self.mark.borrow().map(|sessions| Marks {
+            sessions,
+            rows: *self.rows_mark.borrow(),
+        }))
     }
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
         let row = (kind, key.to_owned());
@@ -4197,4 +4233,316 @@ fn the_session_rows_are_cut_by_their_bytes_too() {
     );
     assert_eq!(alone.batch_bytes.borrow().len(), 12);
     assert_eq!(alone.count(LedgerKind::Session), 12);
+}
+
+/// The mark R the store holds ([`rows_written`]).
+fn r_of(memory: &Memory) -> Cursors {
+    rows_written(memory).unwrap().expect("the store holds R")
+}
+
+/// A pass that leaves task rows past [`WRITES_PER_PASS`] writes R before
+/// the event of the first task left, its other cursors the pass's, with W
+/// at the pass's position; the pass that writes the last of them moves R
+/// to its cursors with W as it was, the marks alone. A pass whose write of
+/// the session rows and the marks fails leaves R and W as they were, and
+/// the next pass moves them.
+#[test]
+fn r_stays_before_a_row_left_past_the_bound_and_reaches_the_pass_once_written() {
+    let bound = WRITES_PER_PASS;
+    let mut log = sessions_and_tasks(0, i64::try_from(bound + 30).unwrap());
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    let built = pass(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    assert_eq!(memory.count(LedgerKind::Task), bound);
+    let w = sessions_written_through(&memory).unwrap();
+    assert_eq!(w, Some(log.last()));
+    let r = r_of(&memory);
+    // Task bound + 1 is created by the event after the bound'th.
+    assert_eq!(r.events, log.events[bound - 1].id);
+    assert!(Some(r.events) <= w);
+    assert_eq!(
+        Cursors {
+            events: builder.events,
+            ..r
+        },
+        builder.cursors()
+    );
+
+    drain(&memory, &mut builder, LATER);
+    assert_eq!(memory.count(LedgerKind::Task), bound + 30);
+    assert_eq!(r_of(&memory), builder.cursors());
+    assert_eq!(r_of(&memory).events, log.last());
+    assert_eq!(memory.marks_alone.get(), 1);
+    assert_eq!(memory.batches.get(), 1, "W written once");
+
+    // More tasks past the bound and a session: its write fails.
+    let (r, w) = (r_of(&memory), sessions_written_through(&memory).unwrap());
+    let start = i64::try_from(bound).unwrap() + 31;
+    for task in start..start + i64::try_from(bound).unwrap() + 10 {
+        log.add(Some(task), None, "task_created", json!({}), 4);
+    }
+    log.add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 1}),
+        5,
+    );
+    memory.events.replace(log.events.clone());
+    memory.batch_fails.set(1);
+    let failed = pass(&memory, &mut builder, LATER);
+    assert!(failed.failure.is_some());
+    assert_eq!(failed.written, bound, "the other rows are written");
+    assert_eq!(r_of(&memory), r);
+    assert_eq!(sessions_written_through(&memory).unwrap(), w);
+    drain(&memory, &mut builder, LATER);
+    assert_eq!(r_of(&memory), builder.cursors());
+    assert_eq!(sessions_written_through(&memory).unwrap(), Some(log.last()));
+}
+
+/// A builder whose cursor was set at W (its session rows gone on from
+/// there, [`restore_sessions`]) moves W as it goes on, and leaves R as the
+/// store holds it: its marks do not follow the inputs before its cursor.
+#[test]
+fn a_builder_whose_marks_do_not_follow_every_input_leaves_r() {
+    let mut log = sessions_and_tasks(2, 3);
+    let memory = Memory::of(&log);
+    drain(&memory, &mut Builder::default(), LATER);
+    let r = r_of(&memory);
+    assert_eq!(r.events, log.last());
+    let w = sessions_written_through(&memory).unwrap().unwrap();
+    log.add(Some(9), None, "task_created", json!({}), 4).add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 9}),
+        5,
+    );
+    memory.events.replace(log.events.clone());
+    let mut builder = Builder::default();
+    builder.events = w;
+    restore_sessions(&memory, &mut builder).unwrap();
+    drain(&memory, &mut builder, LATER);
+    assert_eq!(sessions_written_through(&memory).unwrap(), Some(log.last()));
+    assert_eq!(r_of(&memory), r);
+}
+
+/// The rows a fold of every input writes at `secs` ([`drain`] from the
+/// cursors' start) of the events, node samples and windows of `memory`.
+fn rows_of_every_input(memory: &Memory, secs: i64) -> BTreeMap<(LedgerKind, String), LedgerRow> {
+    let whole = Memory::of(&Log {
+        events: memory.events.borrow().clone(),
+    });
+    whole.samples.replace(memory.samples.borrow().clone());
+    whole
+        .run_resources
+        .replace(memory.run_resources.borrow().clone());
+    whole.steps.replace(memory.steps.borrow().clone());
+    whole.step_id.set(memory.step_id.get());
+    whole.owners.replace(memory.owners.borrow().clone());
+    whole.inside.replace(memory.inside.borrow().clone());
+    whole.inside_id.set(memory.inside_id.get());
+    drain(&whole, &mut Builder::default(), secs);
+    whole.rows.into_inner()
+}
+
+/// Every row of `whole` (the fold of every input) `memory` lacks or holds
+/// otherwise has an input after `r` in some cursor, so that a builder
+/// going on from `r` reads it again and marks the row: the kinds of those
+/// rows.
+#[track_caller]
+fn lagging_rows_have_an_input_after(
+    memory: &Memory,
+    whole: &BTreeMap<(LedgerKind, String), LedgerRow>,
+    r: Cursors,
+) -> BTreeSet<LedgerKind> {
+    let rows = memory.rows.borrow();
+    let mut lagging = BTreeSet::new();
+    for (key, row) in whole {
+        if rows.get(key) == Some(row) {
+            continue;
+        }
+        lagging.insert(key.0);
+        let through = &row.inputs_through;
+        assert!(
+            through.last() > r.events
+                || through.node_samples.is_some_and(|id| id > r.samples)
+                || through.steps.is_some_and(|id| id > r.steps)
+                || through.resources.is_some_and(|id| id > r.resources)
+                || through
+                    .inside_resources
+                    .is_some_and(|id| id > r.inside_resources),
+            "{key:?} lags with no input after {r:?}: {through:?}"
+        );
+    }
+    lagging
+}
+
+/// On a store a pass left task, queue and node rows unwritten past
+/// [`WRITES_PER_PASS`] (the session rows and their mark written, no input
+/// after), each row the fold of every input has that the store lacks has
+/// an input after R; the node row's is a sample, which R's NodeSampleStore
+/// cursor stops before. Once drained, the store holds every row and R is
+/// the cursors.
+#[test]
+fn every_row_a_store_lacks_has_an_input_after_r() {
+    let (mut log, samples) = every_kind_of_row();
+    for task in 1_000..1_000 + i64::try_from(WRITES_PER_PASS).unwrap() {
+        log.add(Some(task), None, "task_created", json!({}), 3_300);
+    }
+    let memory = Memory::of(&log);
+    memory.samples.replace(samples);
+    let whole = rows_of_every_input(&memory, LATER);
+    let mut builder = Builder::default();
+    let built = pass(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    assert!(built.backlog > 0);
+    let r = r_of(&memory);
+    assert_eq!(r.samples, 0);
+    assert!(builder.samples > 0);
+    let lagging = lagging_rows_have_an_input_after(&memory, &whole, r);
+    for kind in [LedgerKind::Task, LedgerKind::Queue, LedgerKind::Node] {
+        assert!(lagging.contains(&kind), "{kind:?}: {lagging:?}");
+    }
+    let node = whole
+        .iter()
+        .find(|((kind, _), _)| *kind == LedgerKind::Node)
+        .unwrap()
+        .1;
+    assert_eq!(node.inputs_through.events, EventId::new(0));
+
+    drain(&memory, &mut builder, LATER);
+    assert!(lagging_rows_have_an_input_after(&memory, &whole, r_of(&memory)).is_empty());
+    assert_eq!(r_of(&memory), builder.cursors());
+}
+
+/// A run id of `n`, past what [`run_id`] gives.
+fn many_run_id(n: usize) -> String {
+    format!("{n:08x}-1111-4111-8111-111111111111")
+}
+
+/// Runs landed and settled, then a window of resources of each recorded
+/// late, more than a pass writes: the pass leaves the last runs' rows
+/// without their window, and R's cursor of the runs' resources stops
+/// before the first of those windows while its events are the pass's.
+/// Each run row the store holds otherwise than the fold of every input has
+/// a window after R.
+#[test]
+fn a_run_left_without_its_late_window_holds_r_back_by_the_resources_cursor() {
+    let runs = WRITES_PER_PASS + 5;
+    let mut log = Log::default();
+    let mut attachments = Vec::new();
+    for n in 1..=runs {
+        let run = many_run_id(n);
+        let secs = i64::try_from(n).unwrap() * 1_000;
+        log.landed(i64::try_from(n).unwrap(), &run, secs);
+        attachments.push((run.clone(), attach(&mut log, &run, secs), secs));
+    }
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    drain(&memory, &mut builder, LATER);
+    for (run, attachment, secs) in &attachments {
+        measured(
+            &memory,
+            run,
+            *attachment,
+            (secs + 10, secs + 300),
+            Some(30.0),
+            true,
+        );
+    }
+    let whole = rows_of_every_input(&memory, LATER);
+    let built = pass(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    assert_eq!(built.written, WRITES_PER_PASS);
+    let r = r_of(&memory);
+    assert_eq!(r.events, log.last());
+    assert_eq!(r.resources, i64::try_from(WRITES_PER_PASS).unwrap());
+    assert_eq!(builder.resources, i64::try_from(runs).unwrap());
+    let lagging = lagging_rows_have_an_input_after(&memory, &whole, r);
+    assert_eq!(lagging, BTreeSet::from([LedgerKind::Run]));
+
+    drain(&memory, &mut builder, LATER);
+    assert!(lagging_rows_have_an_input_after(&memory, &whole, r_of(&memory)).is_empty());
+    assert_eq!(r_of(&memory).resources, i64::try_from(runs).unwrap());
+}
+
+/// Runs landed on their own tasks, more than a pass writes: the first
+/// pass from the cursors' start writes the run rows and leaves the task
+/// rows of the completed tasks unwritten, with W written and no input
+/// after; each settled task row the store lacks has an event after R.
+/// Once drained, steps of each run come in late, more than a pass writes:
+/// the pass leaves the last runs' rows stale, without their steps, and R's
+/// SessionStepStore cursor stops before the first of those steps while its
+/// events are the pass's; each of those rows has a step after R.
+#[test]
+fn completed_tasks_left_unwritten_and_runs_stale_by_their_steps_have_an_input_after_r() {
+    let runs = WRITES_PER_PASS + 5;
+    let mut log = Log::default();
+    for n in 1..=runs {
+        let secs = i64::try_from(n).unwrap() * 1_000;
+        log.landed(i64::try_from(n).unwrap(), &many_run_id(n), secs);
+    }
+    let memory = Memory::of(&log);
+    let whole = rows_of_every_input(&memory, LATER);
+    let mut builder = Builder::default();
+    let built = pass(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    assert_eq!(memory.count(LedgerKind::Task), 0);
+    assert_eq!(sessions_written_through(&memory).unwrap(), Some(log.last()));
+    let r = r_of(&memory);
+    assert!(r.events < log.last());
+    let lagging = lagging_rows_have_an_input_after(&memory, &whole, r);
+    assert!(lagging.contains(&LedgerKind::Task), "{lagging:?}");
+    // The tasks left are completed: their rows settled in the fold of
+    // every input.
+    let settled = whole
+        .iter()
+        .filter(|((kind, _), row)| *kind == LedgerKind::Task && row.is_final)
+        .count();
+    assert_eq!(settled, runs);
+    drain(&memory, &mut builder, LATER);
+    assert!(lagging_rows_have_an_input_after(&memory, &whole, r_of(&memory)).is_empty());
+    assert_eq!(r_of(&memory), builder.cursors());
+
+    // Late steps of every run, in their order.
+    for n in 1..=runs {
+        let run = many_run_id(n);
+        let session = format!("s-{n}");
+        let secs = i64::try_from(n).unwrap() * 1_000;
+        let target = session_of(&memory, &run, &session, secs);
+        steps_in(
+            &memory,
+            &target,
+            &session,
+            &[Step::new(1, StepKind::ModelTurn, 20_000, 10_000)],
+            ms(secs + 20),
+        );
+    }
+    let whole = rows_of_every_input(&memory, LATER);
+    let built = pass(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    assert_eq!(built.written, WRITES_PER_PASS);
+    let r = r_of(&memory);
+    assert_eq!(r.events, log.last());
+    assert_eq!(r.steps, i64::try_from(WRITES_PER_PASS).unwrap());
+    assert_eq!(builder.steps, i64::try_from(runs).unwrap());
+    let stale: Vec<_> = whole
+        .iter()
+        .filter(|(key, row)| memory.rows.borrow().get(*key) != Some(*row))
+        .map(|(key, _)| key.clone())
+        .collect();
+    assert_eq!(stale.len(), 5, "{stale:?}");
+    // Stale, not unwritten.
+    assert!(
+        stale
+            .iter()
+            .all(|key| memory.rows.borrow().contains_key(key))
+    );
+    let lagging = lagging_rows_have_an_input_after(&memory, &whole, r);
+    assert_eq!(lagging, BTreeSet::from([LedgerKind::Run]));
+    drain(&memory, &mut builder, LATER);
+    assert!(lagging_rows_have_an_input_after(&memory, &whole, r_of(&memory)).is_empty());
+    assert_eq!(r_of(&memory), builder.cursors());
 }

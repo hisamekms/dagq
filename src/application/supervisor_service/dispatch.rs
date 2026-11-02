@@ -2418,12 +2418,13 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             answer(write_over(&*store, &row, read_row.as_deref()))
         }
         // The session rows of a pass, each named with the row it read by
-        // its fingerprint, and the mark, written in one transaction: none
-        // when another writer wrote one of them since.
+        // its fingerprint, and the marks (R beside the session rows' when
+        // sent), written in one transaction: none when another writer
+        // wrote one of them since.
         "write_session_rows_over" => {
             let (rows, mark): (
                 Vec<(crate::domain::ledger::LedgerRow, Option<String>)>,
-                Option<crate::domain::ledger::session::written::SessionsWritten>,
+                Option<crate::domain::ledger::session::written::Marks>,
             ) = read(op, args)?;
             answer(write_sessions_over(&*store, &rows, mark.as_ref()))
         }
@@ -2433,13 +2434,15 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             let (digest,): (String,) = read(op, args)?;
             let (rows, mark): (
                 Vec<(crate::domain::ledger::LedgerRow, Option<String>)>,
-                Option<crate::domain::ledger::session::written::SessionsWritten>,
+                Option<crate::domain::ledger::session::written::Marks>,
             ) = serde_json::from_str(&super::large::take(&digest)?).map_err(|error| {
                 BadOperation(format!("the session rows staged do not read: {error}"))
             })?;
             answer(write_sessions_over(&*store, &rows, mark.as_ref()))
         }
-        "ledger_sessions_written" => answer(LedgerStore::sessions_written(&*store)),
+        // The session rows' mark, R beside it when the store holds one:
+        // a reader of the session rows' mark alone reads it too.
+        "ledger_sessions_written" => answer(LedgerStore::ledger_marks(&*store)),
         // A part of the text of a row past one answer whole, from `offset`
         // ([`super::large`]); none for no row.
         "ledger_row_part" => {
@@ -2644,13 +2647,13 @@ fn write_over<S: SupervisorStore + ?Sized>(
 
 /// Write `rows`, each over the row the store holds of its kind and key
 /// while that one's fingerprint is its second (`None`: no row), and
-/// `mark`, as [`LedgerStore::write_session_rows_over`] does over the rows
-/// themselves: false, nothing written, when another writer wrote one of
-/// them since it was read.
+/// `mark`, as [`LedgerStore::write_session_rows_marked`] does over the
+/// rows themselves: false, nothing written, when another writer wrote one
+/// of them since it was read.
 fn write_sessions_over<S: SupervisorStore + ?Sized>(
     store: &S,
     rows: &[(crate::domain::ledger::LedgerRow, Option<String>)],
-    mark: Option<&crate::domain::ledger::session::written::SessionsWritten>,
+    mark: Option<&crate::domain::ledger::session::written::Marks>,
 ) -> Result<bool> {
     let mut over = Vec::with_capacity(rows.len());
     for (row, read) in rows {
@@ -2665,7 +2668,7 @@ fn write_sessions_over<S: SupervisorStore + ?Sized>(
         }
         over.push((row.clone(), held));
     }
-    LedgerStore::write_session_rows_over(store, &over, mark)
+    LedgerStore::write_session_rows_marked(store, &over, mark)
 }
 
 /// Who starts a diagnosis job, as `start_replan_diagnosis` names it: the
