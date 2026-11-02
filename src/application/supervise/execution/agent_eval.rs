@@ -69,6 +69,7 @@ use crate::application::review_programs::{SnapshotProgram, programs_at, required
 use crate::domain::actor_model::{ActorLaunch, AgentModel, ModelRole, RoleModels};
 use crate::domain::agent_eval::programs::{self, Against, CaseCheck, ProgramFailure, Step};
 use crate::domain::agent_eval::record::{self, Round};
+use crate::domain::agent_eval::review::ReviewInput;
 use crate::domain::agent_eval::round::{
     ProviderCost, ProviderWait, Refusal, RefusalReason, RoundKey, case_set_digest,
     definition_digest, estimate, holdout_refusal, launchable, may_start_next, next_round,
@@ -1395,12 +1396,10 @@ impl Supervisor<'_> {
             }
         };
         let material = material_dir.join("material.md");
+        let input = case.review().map(|review| &review.input);
         self.files.write_fenced(
             &material,
-            &format!(
-                "# The change\n\nbase {base}\nhead {head}\n\n## Commits\n\n{}\n\n## The full diff `{base}...{head}`\n",
-                or_none(commits.trim())
-            ),
+            &material_text(&base, &head, &commits, input),
             "diff",
             &diff,
         )?;
@@ -1774,8 +1773,9 @@ fn carried_snapshot(
 }
 
 /// The digest of the cases a round runs ([`case_set_digest`]): each
-/// case's patch, and for a carried case of a built-in its baseline's files
-/// with it ([`builtin_evals::case_bytes`]).
+/// case's patch, for a carried case of a built-in its baseline's files
+/// with it ([`builtin_evals::case_bytes`]), and the sections its review's
+/// input gives ([`ReviewInput::digest_bytes`]; none for an empty input).
 fn round_digest(cases: &[Case], patches: &BTreeMap<String, String>) -> String {
     digest_with(cases, patches, builtin_evals::baseline)
 }
@@ -1796,10 +1796,26 @@ fn digest_with<'a>(
                     builtin_evals::case_bytes(baseline(name).unwrap_or_default(), patch)
                 }
             };
+            let bytes = match case.review() {
+                Some(review) => review.input.digest_bytes(bytes),
+                None => bytes,
+            };
             (case.id.as_str(), bytes)
         })
         .collect();
     case_set_digest(weighed.iter().map(|(id, bytes)| (*id, bytes.as_slice())))
+}
+
+/// The Markdown of a case's material before its diff: the change's base
+/// and head, the sections the case's review input gives under the
+/// production review.md's headings and in its order
+/// ([`ReviewInput::material`]), the commits, and the diff's heading.
+fn material_text(base: &str, head: &str, commits: &str, input: Option<&ReviewInput>) -> String {
+    format!(
+        "# The change\n\nbase {base}\nhead {head}\n\n{sections}## Commits\n\n{}\n\n## The full diff `{base}...{head}`\n",
+        or_none(commits.trim()),
+        sections = input.map(ReviewInput::material).unwrap_or_default(),
+    )
 }
 
 /// What a round of `builtin` records of the built-in it measured (as a
@@ -1890,6 +1906,8 @@ fn role_launch_on(models: &RoleModels, provider: Option<Provider>) -> ActorLaunc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::agent_eval::RoleCase;
+    use crate::domain::agent_eval::review::MaterialSection;
 
     /// A round's runs start with what a review's job of the agent starts
     /// with where its provider can be used: the provider, model and effort
@@ -2027,6 +2045,68 @@ mod tests {
         .err()
         .unwrap();
         assert!(refused.detail.contains("--set"), "{}", refused.detail);
+    }
+
+    /// A case whose review input gives sections has them in its material
+    /// under review.md's headings, in its order and before the diff; a
+    /// case without them has the material it had (acceptance 2).
+    #[test]
+    fn a_cases_material_gives_its_input_sections_before_the_diff() {
+        let before =
+            "# The change\n\nbase b\nhead h\n\n## Commits\n\nh one\n\n## The full diff `b...h`\n";
+        assert_eq!(material_text("b", "h", "h one\n", None), before);
+        assert_eq!(
+            material_text("b", "h", "h one\n", Some(&ReviewInput::default())),
+            before
+        );
+        let input: ReviewInput = [
+            (MaterialSection::LocalGates, "gates\n".to_owned()),
+            (MaterialSection::Receipt, "receipt".to_owned()),
+            (MaterialSection::Task, "task".to_owned()),
+            (MaterialSection::LocalCheckRecords, "records".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            material_text("b", "h", "h one\n", Some(&input)),
+            "# The change\n\nbase b\nhead h\n\n\
+             ## Task\n\ntask\n\n## Receipt\n\nreceipt\n\n\
+             ## Local check records\n\nrecords\n\n## Local gates\n\ngates\n\n\
+             ## Commits\n\nh one\n\n## The full diff `b...h`\n"
+        );
+    }
+
+    /// A case's review input weighs in the case set's digest with its
+    /// content, and a case with an empty input weighs its patch alone as
+    /// before (acceptance 3).
+    #[test]
+    fn a_cases_review_input_weighs_in_the_case_sets_digest() {
+        let snapshot = carried_snapshot(
+            BuiltinAgent::Security,
+            Split::Dev,
+            (
+                String::new(),
+                AgentTools::declared(ToolRole::Review, "").unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        let mut cases = snapshot.cases[..1].to_vec();
+        cases[0].base = CaseBase::Commit("0".repeat(40));
+        let patch = &snapshot.patches[&cases[0].patch];
+        let alone = case_set_digest([(cases[0].id.as_str(), patch.as_bytes())]);
+        assert_eq!(round_digest(&cases, &snapshot.patches), alone);
+        let with_input = |body: &str| {
+            let mut cases = cases.clone();
+            let RoleCase::Review(review) = &mut cases[0].role;
+            review.input = [(MaterialSection::Receipt, body.to_owned())]
+                .into_iter()
+                .collect();
+            round_digest(&cases, &snapshot.patches)
+        };
+        assert_ne!(with_input("evidence"), alone);
+        assert_ne!(with_input("evidence"), with_input("other evidence"));
+        assert_eq!(with_input("evidence"), with_input("evidence"));
     }
 
     /// A case's job reads its tree and its material's directory, and

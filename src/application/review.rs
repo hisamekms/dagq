@@ -12,6 +12,7 @@ use super::{
     prompt_fit,
 };
 use crate::domain::actor_model::AgentModel;
+use crate::domain::agent_eval::review::MaterialSection;
 use crate::domain::local_checks::{self, LocalChecks};
 use crate::domain::local_gates::{Change, GateConfig};
 use crate::domain::review_builtins::{self, BuiltinAgent, EffectiveBuiltin};
@@ -921,7 +922,7 @@ fn local_checks_section(
     }
     let matched = serde_json::to_string_pretty(&checks.matched_value()).unwrap_or_default();
     Some(format!(
-        "\n## Local check records\n\n\
+        "\n{heading}\n\n\
          What the project's scripts recorded of the worker's local checks in {dir}: \
          the records whose tree at the start and at the end is the tree {tree} of the receipt's commit {head}, \
          each with its command, exit status, start, duration in milliseconds, kind and log file in that directory. \
@@ -929,6 +930,7 @@ fn local_checks_section(
          - matched: {matched_count}\n\
          - of another tree, or whose tree changed while it ran: {other}\n\
          - unreadable, malformed or over the limits: {broken}\n\n{body}",
+        heading = MaterialSection::LocalCheckRecords.heading(),
         dir = dir.display(),
         matched_count = checks.matched.len(),
         other = checks.other_tree,
@@ -993,12 +995,13 @@ pub fn local_gates_section(
     };
     let gates = serde_json::to_string_pretty(&judged["gates"]).unwrap_or_default();
     Some(format!(
-        "\n## Local gates\n\n\
+        "\n{heading}\n\n\
          Whether the diff {from}..{head} (from the merge base with the landing branch to the receipt's commit) requires each local gate the landing branch's {CONFIG_FILE} declares, judged by the runtime: \
          a gate is required when a changed test is in its paths, a changed test being a path of the declared tests whose changed lines are in a test as the toolchain profile tells, \
          or any change of such a path where no profile tells its lines apart. \
          A gate not required is left out because no test in its paths changed, and the worker's evidence need not say so; \
          `kind` is the kind the project's scripts give the local check records of a run of the gate.\n\n{body}",
+        heading = MaterialSection::LocalGates.heading(),
         from = judged["from"].as_str().unwrap_or(base),
         body = fenced("json", &gates),
     ))
@@ -1065,13 +1068,14 @@ fn review_markdown(
          - branch: {branch}\n\
          - worktree: {worktree}\n\
          - verification logs: {logs}\n\n\
-         ## Task\n\n\
+         {task_heading}\n\n\
          ### Description\n\n{description}\n\n\
          ### Context\n\n{context}\n\n\
          ### Acceptance\n\n{acceptance}\n\n\
          ### Verification commands\n\n{verify}\n",
         id = task.id(),
         title = task.title(),
+        task_heading = MaterialSection::Task.heading(),
         run_id = run.id(),
         status = run.status().as_str(),
         run_base = run.base_commit(),
@@ -1095,7 +1099,8 @@ fn review_markdown(
         ));
     }
     out.push_str(&format!(
-        "\n## Receipt\n\n### Summary\n\n{summary}\n",
+        "\n{heading}\n\n### Summary\n\n{summary}\n",
+        heading = MaterialSection::Receipt.heading(),
         summary = or_none(receipt.summary())
     ));
     for (name, check) in [

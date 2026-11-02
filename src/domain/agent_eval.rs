@@ -267,6 +267,8 @@ pub enum ProblemKind {
     UnknownFile,
     NotJson(String),
     MissingField(String),
+    /// A key of an object whose keys the reader knows that is none of them.
+    UnknownField(String),
     WrongType {
         field: String,
         expected: &'static str,
@@ -304,6 +306,7 @@ impl fmt::Display for ProblemKind {
             }
             ProblemKind::NotJson(error) => write!(f, "not JSON: {error}"),
             ProblemKind::MissingField(field) => write!(f, "`{field}` is missing"),
+            ProblemKind::UnknownField(field) => write!(f, "`{field}` is not a known field"),
             ProblemKind::WrongType { field, expected } => {
                 write!(f, "`{field}` must be {expected}")
             }

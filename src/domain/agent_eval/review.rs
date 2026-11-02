@@ -68,11 +68,154 @@ pub struct ReviewExpected {
     pub near_miss: bool,
 }
 
-/// A case's `review`: the review's `input` (empty for now: the diff is the
-/// patch and the rules are the definition's) and `expected`.
+/// A section of the production review's material (review.md) a case's
+/// `review.input` may carry, in the order review.md has them. The
+/// production material and the eval's material both write a section under
+/// [`MaterialSection::heading`], so the two cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MaterialSection {
+    Task,
+    Receipt,
+    LocalCheckRecords,
+    LocalGates,
+}
+
+impl MaterialSection {
+    /// In review.md's order.
+    pub const ALL: [MaterialSection; 4] = [
+        MaterialSection::Task,
+        MaterialSection::Receipt,
+        MaterialSection::LocalCheckRecords,
+        MaterialSection::LocalGates,
+    ];
+
+    /// The key of `review.input` that carries the section.
+    pub const fn key(self) -> &'static str {
+        match self {
+            MaterialSection::Task => "task",
+            MaterialSection::Receipt => "receipt",
+            MaterialSection::LocalCheckRecords => "local_check_records",
+            MaterialSection::LocalGates => "local_gates",
+        }
+    }
+
+    /// The section's heading in review.md and in the eval's material.
+    pub const fn heading(self) -> &'static str {
+        match self {
+            MaterialSection::Task => "## Task",
+            MaterialSection::Receipt => "## Receipt",
+            MaterialSection::LocalCheckRecords => "## Local check records",
+            MaterialSection::LocalGates => "## Local gates",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<MaterialSection> {
+        MaterialSection::ALL
+            .into_iter()
+            .find(|section| section.key() == key)
+    }
+}
+
+/// A case's `review.input`: the sections of the production review's
+/// material the case gives the agent beside the diff, each optional and
+/// each the Markdown body of the review.md section of the same heading
+/// (`task`, `receipt`, `local_check_records`, `local_gates`;
+/// [`MaterialSection`]). Any agent may be given any of them; the case
+/// decides which. A key the reader does not know, or a value that is not
+/// a string, is a problem. The eval's material writes the given sections
+/// before the diff under review.md's headings and in its order
+/// ([`ReviewInput::material`]), and a case with any of them weighs them in
+/// the case set's digest ([`ReviewInput::digest_bytes`]); an empty input
+/// leaves both as they are without one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewInput {
+    sections: BTreeMap<MaterialSection, String>,
+}
+
+impl ReviewInput {
+    pub fn is_empty(&self) -> bool {
+        self.sections.is_empty()
+    }
+
+    /// The given sections, in review.md's order.
+    pub fn sections(&self) -> impl Iterator<Item = (MaterialSection, &str)> {
+        self.sections
+            .iter()
+            .map(|(section, body)| (*section, body.as_str()))
+    }
+
+    /// The Markdown of the given sections, each its heading and its body;
+    /// empty when none is given.
+    pub fn material(&self) -> String {
+        self.sections()
+            .map(|(section, body)| format!("{}\n\n{}\n\n", section.heading(), body.trim_end()))
+            .collect()
+    }
+
+    /// What the case set's digest weighs of a case whose change is
+    /// `change`: `change` alone when the input is empty, else `change`
+    /// followed by each given section's key and body, each part led by a
+    /// NUL and its length so that no two inputs weigh the same.
+    pub fn digest_bytes(&self, mut change: Vec<u8>) -> Vec<u8> {
+        for (section, body) in self.sections() {
+            for part in [section.key(), body] {
+                change.push(0);
+                change.extend_from_slice(part.len().to_string().as_bytes());
+                change.push(0);
+                change.extend_from_slice(part.as_bytes());
+            }
+        }
+        change
+    }
+
+    /// The input of a case's JSON (`review.input`), empty when it has none
+    /// or its input is malformed (a list's reader refuses such a case).
+    pub fn of_case(case: &Value) -> ReviewInput {
+        case.pointer("/review/input")
+            .and_then(Value::as_object)
+            .and_then(|input| ReviewInput::read(input, &mut Vec::new()))
+            .unwrap_or_default()
+    }
+
+    fn read(
+        object: &serde_json::Map<String, Value>,
+        problems: &mut Vec<ProblemKind>,
+    ) -> Option<Self> {
+        let before = problems.len();
+        let mut sections = BTreeMap::new();
+        for (key, value) in object {
+            let field = format!("review.input.{key}");
+            let Some(section) = MaterialSection::from_key(key) else {
+                problems.push(ProblemKind::UnknownField(field));
+                continue;
+            };
+            match value {
+                Value::String(body) => {
+                    sections.insert(section, body.clone());
+                }
+                _ => problems.push(ProblemKind::WrongType {
+                    field,
+                    expected: "a string",
+                }),
+            }
+        }
+        (problems.len() == before).then_some(ReviewInput { sections })
+    }
+}
+
+impl FromIterator<(MaterialSection, String)> for ReviewInput {
+    fn from_iter<T: IntoIterator<Item = (MaterialSection, String)>>(sections: T) -> Self {
+        ReviewInput {
+            sections: sections.into_iter().collect(),
+        }
+    }
+}
+
+/// A case's `review`: the review's `input` ([`ReviewInput`]; the diff is
+/// the patch and the rules are the definition's) and `expected`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReviewCase {
-    pub input: serde_json::Map<String, Value>,
+    pub input: ReviewInput,
     pub expected: ReviewExpected,
 }
 
@@ -346,6 +489,7 @@ fn read(value: &Value, list_codes: &BTreeSet<String>) -> Result<ReviewCase, Vec<
     let input = fields.object("input");
     let expected = fields.object("expected");
     let mut problems = std::mem::take(&mut fields.problems);
+    let input = input.and_then(|input| ReviewInput::read(input, &mut problems));
     let Some(expected) = expected else {
         return Err(problems);
     };
@@ -397,7 +541,7 @@ fn read(value: &Value, list_codes: &BTreeSet<String>) -> Result<ReviewCase, Vec<
             Some(note),
             Some(near_miss),
         ) if problems.is_empty() => Ok(ReviewCase {
-            input: input.clone(),
+            input,
             expected: ReviewExpected {
                 verdict,
                 codes,
@@ -867,5 +1011,96 @@ mod tests {
                 Metric::CodesPrecision
             ]
         );
+    }
+
+    /// `review.input` reads `task`, `receipt`, `local_check_records` and
+    /// `local_gates` as strings, and returns every unknown key and every
+    /// value that is not a string, with the other fields' problems too
+    /// (acceptance 1).
+    #[test]
+    fn a_review_input_reads_the_material_sections_and_returns_every_problem() {
+        let codes = BTreeSet::from(["A-1".to_owned()]);
+        let expected = json!({"verdict": "violation", "codes": ["A-1"]});
+        let input = json!({
+            "local_gates": "gates", "task": "the task", "receipt": "the receipt",
+            "local_check_records": "records",
+        });
+        let case = read(&json!({"input": input, "expected": expected}), &codes).unwrap();
+        assert_eq!(
+            case.input.sections().collect::<Vec<_>>(),
+            [
+                (MaterialSection::Task, "the task"),
+                (MaterialSection::Receipt, "the receipt"),
+                (MaterialSection::LocalCheckRecords, "records"),
+                (MaterialSection::LocalGates, "gates"),
+            ]
+        );
+        let empty = read(&json!({"input": {}, "expected": expected}), &codes).unwrap();
+        assert!(empty.input.is_empty());
+        let wrong = json!({
+            "input": {"task": 1, "diff": "x", "receipt": null, "local_gates": "ok"},
+            "expected": {"verdict": "violation", "codes": []},
+        });
+        let mut problems: Vec<String> = read(&wrong, &codes)
+            .unwrap_err()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        problems.sort();
+        assert_eq!(
+            problems,
+            [
+                "`review.input.diff` is not a known field",
+                "`review.input.receipt` must be a string",
+                "`review.input.task` must be a string",
+                "a violation names the codes it expects",
+            ]
+        );
+    }
+
+    /// The material writes the given sections under review.md's headings
+    /// and in its order, and nothing for an empty input; the digest's bytes
+    /// are the change's alone for an empty input and differ with a
+    /// section's content (acceptance 2, 3).
+    #[test]
+    fn a_review_inputs_material_and_digest_bytes_follow_its_sections() {
+        let codes = BTreeSet::from(["A-1".to_owned()]);
+        let input = |input: Value| {
+            read(
+                &json!({"input": input, "expected": {"verdict": "clean", "codes": []}}),
+                &codes,
+            )
+            .unwrap()
+            .input
+        };
+        let given = input(json!({"local_gates": "[]\n", "task": "Do it."}));
+        assert_eq!(
+            given.material(),
+            "## Task\n\nDo it.\n\n## Local gates\n\n[]\n\n"
+        );
+        assert_eq!(ReviewInput::default().material(), "");
+        assert_eq!(
+            ReviewInput::default().digest_bytes(b"patch".to_vec()),
+            b"patch"
+        );
+        let bytes = given.digest_bytes(b"patch".to_vec());
+        assert!(bytes.starts_with(b"patch") && bytes.len() > 5);
+        assert_ne!(
+            bytes,
+            input(json!({"local_gates": "[1]\n", "task": "Do it."}))
+                .digest_bytes(b"patch".to_vec())
+        );
+        assert_ne!(
+            bytes,
+            input(json!({"receipt": "[]\n", "task": "Do it."})).digest_bytes(b"patch".to_vec())
+        );
+        assert_eq!(
+            ReviewInput::of_case(
+                &json!({"review": {"input": {"local_gates": "[]\n", "task": "Do it."}}})
+            ),
+            given
+        );
+        assert!(ReviewInput::of_case(&json!({"review": {"input": {}}})).is_empty());
+        assert!(ReviewInput::of_case(&json!({"review": {"input": {"task": 1}}})).is_empty());
     }
 }

@@ -24,7 +24,7 @@ use crate::domain::agent_eval::PATCH_EXTENSION;
 use crate::domain::agent_eval::production::{
     self, CaseSet, CasesRequest, Decision, Label, check_label,
 };
-use crate::domain::agent_eval::review::Judgement;
+use crate::domain::agent_eval::review::{Judgement, ReviewInput};
 use crate::domain::agent_eval::round::case_set_digest;
 use crate::domain::review_builtins;
 use crate::domain::{ActorContext, Authorizer, Capability, EventId, EventKind, Resource, RunEvent};
@@ -384,10 +384,19 @@ pub fn view(
         patches.insert(hash, text);
         kept.push(case);
     }
-    let digest = case_set_digest(kept.iter().filter_map(|case| {
-        let patch = patches.get(case["patch"].as_str()?)?;
-        Some((case["id"].as_str()?, patch.as_bytes()))
-    }));
+    // Weighed as a round of the set weighs its cases, so the two agree.
+    let weighed: Vec<(&str, Vec<u8>)> = kept
+        .iter()
+        .filter_map(|case| {
+            let patch = patches.get(case["patch"].as_str()?)?;
+            let input = ReviewInput::of_case(case);
+            Some((
+                case["id"].as_str()?,
+                input.digest_bytes(patch.as_bytes().to_vec()),
+            ))
+        })
+        .collect();
+    let digest = case_set_digest(weighed.iter().map(|(id, bytes)| (*id, bytes.as_slice())));
     list["cases"] = json!(kept);
     files
         .create_dir_all(dir)

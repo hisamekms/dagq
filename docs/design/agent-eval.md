@@ -47,7 +47,7 @@ workerもjobもLLMのCLIを直接打たない。
 - patchの共有の置き場: `.dagq/agent-cases/patches/<sha256>.patch`（patchの内容のSHA-256。agentの名前と衝突しないよう`.dagq/agents/`の外に置く）。同じ内容のpatchは1つだけ置き、ケースはhashで参照する。どのケースからも参照されないpatchと、ケースが参照するhashのpatchが無いことは、下の設定の検査が誤りにする。
 - どこで走るか: `dagq.toml`の`[review.subagents.<name>] paths`のまま（形は変えない）。定義は`.dagq/agents/<name>/AGENT.md`だけから読み、そこに無ければ定義が無い扱いで、reviewはpassにしない（[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
 - 設定の検査（`dagq.toml`を読むとき）: `[review.subagents.<name>]`が名指す`<name>`に`.dagq/agents/<name>/AGENT.md`が無いこと、同じ`<name>`を複数の役割の表が名指すこと（今の役割の表は`[review.subagents]`だけ。役割の表が増えたら同じ検査に足す）を誤りにする。
-  この2つは実装済みで、`dagq doctor`の`agents`の`errors`が出す（[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
+  `dagq doctor`の`agents`の`errors`が出す（[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
 - ケースのファイルの形とpatchの置き場の参照の過不足（上）は、ケースの一覧の読み手と、このrepositoryの全ての一覧をそれで読むtestが検査する。
   `dagq doctor`と設定の読み込みにはまだ足していない。
 - built-in（security・tests）の定義とケースはバイナリが持つ（`domain::review_builtins::evals`のmodule doc）。
@@ -60,6 +60,7 @@ workerもjobもLLMのCLIを直接打たない。
 - `handmade`はdevだけに置く。改善するsessionが中身を読んだケースはholdoutに置かない。
 - baseは`base_commit`か、built-inの同梱のケースだけの`baseline`の一方。
 - 読み手は形の誤りを、最初の1つでなく全て返す。
+- reviewのinputは本番のreview.mdの節を運び、evalの資料は同じ見出しと並びでdiffの前に載せる。
 - 起動・形の検査・採点・productionのケースの作り方は役割ごとのharnessが持つ。今作るのはreviewのharnessだけ。
   役割が増えたら、その役割のharnessを足す。
 
@@ -243,7 +244,7 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
   同じ定義・provider・道具の宣言なら、argvの差はその欄からproviderが作る読み取りの制限の引数だけで、stdinのpromptの差は材料の行だけである。
 - 実行の入口は`application::supervise::execution::agent_eval`。
 - ケースのtreeは、queueのdata dirの`agent-evals/`の下に周ごとに置く、tree自身のGitのrepositoryである。
-  `base_commit`のケースは、supervisorが`base_commit`にpatchを当てたcommitをrepositoryの中に作り、材料のファイル（commitの一覧と全文の差分`<base_commit>...<patchを当てたcommit>`）をそこから作って、ケースのdirの材料だけのdirに書く。
+  `base_commit`のケースは、supervisorが`base_commit`にpatchを当てたcommitをrepositoryの中に作り、材料のファイルをそこから作って、ケースのdirの材料だけのdirに書く。
   `baseline`のケースは、treeの場所に独立のrepositoryをbaselineとpatchから作り、対象のrepositoryを読まず変えない。
   treeはbaseとそのcommitのファイルからevalのケースの一覧とpatchの置き場を除いたもので、それぞれを1つのcommitにし、baseのcommitをlanding branchの名前に、そのcommitをdetachedの`HEAD`に置く（ほかのrefは無い）。
   landing branchと比べるprogramのreviewには、runのworktreeと同じくケースの差分が見える。
