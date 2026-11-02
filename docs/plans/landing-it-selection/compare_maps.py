@@ -16,12 +16,16 @@ Usage: python3 compare_maps.py DATA T_END [--repo REPO] [--out OUT]
 
 For each landing, B is the latest map generated before it and A_k the map k
 (1, 2, 3) maps before B. Both select with scripts/landing-it.py's rules but
-the table's age (the counterfactual without MAX_TABLE_AGE): the common files,
+the table's age (the counterfactual without its age limits): the common files,
 the broad entries, the threshold, the diff's tests and the files tests read.
 U, the IT at the landing, is B's tests (nextest's list at the landing is not
 kept); a full run selects U, and A's narrowed selection is
 (A's tests selected ∩ U) ∪ (U - A's tests), as landing-it.py always runs the
-IT not in its table.
+IT not in its table. The column full_by_current_limit (and "full by the
+current limit" in the summary) says whether A would run every IT by its age
+under MEASURED_MAX_TABLE_AGE_HOURS, the 48 hours that were landing-it.py's
+limit when this was measured, not its MAX_TABLE_AGE now (the current rule is
+in 「決めたこと」 3 and ADR-t3920-1), so a rerun gives the recorded column.
 
 It reads records, git and the maps only, so it gives the same result on every
 run: there is no host load or order to repeat it for.
@@ -41,6 +45,10 @@ sys.path.insert(0, HERE)
 from analyze import MASS, ci_new_failures, git, median, p90  # noqa: E402
 
 KS = (1, 2, 3)
+# The age limit of the table when this was measured, in hours: the column
+# full_by_current_limit is computed with it, not with landing-it.py's
+# MAX_TABLE_AGE now, so a rerun gives the recorded column.
+MEASURED_MAX_TABLE_AGE_HOURS = 48
 # The age buckets in hours: [lo, hi).
 BUCKETS = [("<24h", 0, 24), ("24-48h", 24, 48), ("48-72h", 48, 72), (">=72h", 72, None)]
 
@@ -84,7 +92,7 @@ def filter_tests(expr, universe):
 
 def select(lit, table, diff, universe, threads):
     """(full by a reason besides the age, the selected tests of U)."""
-    now = lit.parse_time(table["generated_at"])  # age 0: MAX_TABLE_AGE is left out
+    now = lit.parse_time(table["generated_at"])  # age 0: the age limits are left out
     U = set(universe)
     if lit.full_reasons(diff, [], table, None, now):
         return True, U
@@ -173,7 +181,7 @@ def main():
             age = (row["when"] - maps[ai]["at"]).total_seconds() / 3600
             c = dict(row=row, k=k, b=bi, a=ai, age=age, bucket=bucket(age), b_full=b_full, a_full=a_full,
                      only_b=b_sel - a_sel, only_a=a_sel - b_sel,
-                     full_differs=b_full != a_full, full_by_limit=age > lit.MAX_TABLE_AGE.total_seconds() / 3600)
+                     full_differs=b_full != a_full, full_by_measured_limit=age > MEASURED_MAX_TABLE_AGE_HOURS)
             row["cmp"][k] = c
             comps.append(c)
 
@@ -201,7 +209,7 @@ def main():
         for c in comps:
             r = c["row"]
             w.writerow([r["task"], r["commit"], r["at"], c["k"], rid(c["b"]), rid(c["a"]), round(c["age"], 1),
-                        len(c["only_b"]), len(c["only_a"]), int(c["full_differs"]), int(c["full_by_limit"]),
+                        len(c["only_b"]), len(c["only_a"]), int(c["full_differs"]), int(c["full_by_measured_limit"]),
                         int(c["b_full"]), int(c["a_full"]), len(r["b_sel"]), len(r["b_sel"]) - len(c["only_b"]) + len(c["only_a"])])
     with open(os.path.join(a.out, "map-staleness-single-failures.csv"), "w", newline="") as f:
         w = csv.writer(f)
@@ -236,7 +244,7 @@ def main():
     for k in KS:
         cs = [c for c in comps if c["k"] == k]
         out.append(f"k={k}: {len(cs)} comparisons; full differs besides the age {sum(c['full_differs'] for c in cs)}; "
-                   f"full by the current limit {sum(c['full_by_limit'] for c in cs)}")
+                   f"full by the current limit {sum(c['full_by_measured_limit'] for c in cs)}")
         for name, _, _ in BUCKETS:
             bc = [c for c in cs if c["bucket"] == name]
             ms = missed[(k, name)]
@@ -250,7 +258,7 @@ def main():
                        f"only_b median {median(ob)} p90 {p90(ob)} max {max(ob)}; only_b>0 {sum(1 for x in ob if x)} "
                        f"(both narrowed {sum(1 for c in bc if c['only_b'] and not c['b_full'] and not c['a_full'])}); "
                        f"only_a median {median(oa)} p90 {p90(oa)}; "
-                       f"full differs {sum(c['full_differs'] for c in bc)}; full by limit {sum(c['full_by_limit'] for c in bc)}; "
+                       f"full differs {sum(c['full_differs'] for c in bc)}; full by limit {sum(c['full_by_measured_limit'] for c in bc)}; "
                        f"single-landing failures B selects and A not {len(ms)} (mass {sum(1 for e in ms if e['new_in_run'] >= MASS)})")
     out.append(f"CI runs {len(runs)} not cancelled; jobs with results "
                + ", ".join(f"{j} {len(v)}" for j, v in sorted(results.items())) + f"; without {len(no_results)}")
