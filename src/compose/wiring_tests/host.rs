@@ -135,7 +135,14 @@ pub(super) struct FakeVerifier {
     failing: Vec<String>,
     ran: Mutex<Vec<(String, PathBuf)>>,
     config: Mutex<String>,
+    /// Whether `dagq.toml` sets the verification to the container.
+    in_container: std::sync::atomic::AtomicBool,
+    /// What runs as the command it names starts, once.
+    on_command: Mutex<Option<(String, Hook)>>,
 }
+
+/// What a fake does once, at a point of the test's choosing.
+pub(super) type Hook = Box<dyn FnOnce() + Send>;
 
 impl FakeVerifier {
     /// A verification where `failing` fail and every other command passes.
@@ -148,6 +155,8 @@ impl FakeVerifier {
                 .collect(),
             ran: Mutex::default(),
             config: Mutex::default(),
+            in_container: std::sync::atomic::AtomicBool::new(false),
+            on_command: Mutex::default(),
         }
     }
 
@@ -159,6 +168,21 @@ impl FakeVerifier {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
+    }
+
+    /// `dagq.toml` sets the verification to the container (which a test's
+    /// host cannot use) when `container`, to the host otherwise.
+    pub(super) fn set_in_container(&self, container: bool) {
+        self.in_container
+            .store(container, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Run `hook` as `command` starts, before it ends, once.
+    pub(super) fn on_command(&self, command: &str, hook: Hook) {
+        *self
+            .on_command
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((command.to_owned(), hook));
     }
 
     /// The commands run, each with its directory, in order.
@@ -237,6 +261,14 @@ impl Verifier for FakeVerifier {
         Ok(String::new())
     }
 
+    fn runtimes(&self) -> Result<crate::domain::container_runtime::RuntimeConfig> {
+        let mut runtimes = crate::domain::container_runtime::RuntimeConfig::default();
+        if self.in_container.load(std::sync::atomic::Ordering::SeqCst) {
+            runtimes.verification = crate::domain::container_runtime::Runtime::Container;
+        }
+        Ok(runtimes)
+    }
+
     fn run_to_log(
         &self,
         command: &str,
@@ -248,6 +280,22 @@ impl Verifier for FakeVerifier {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((command.to_owned(), cwd.to_owned()));
+        let hook = {
+            let mut on = self
+                .on_command
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match on.take() {
+                Some((named, hook)) if named == command => Some(hook),
+                other => {
+                    *on = other;
+                    None
+                }
+            }
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
         self.files.write(log, b"")?;
         Ok(match self.outcome(command) {
             Outcome::Passes => exit(0),
@@ -346,6 +394,84 @@ impl VerificationTokens for Nothing {
 
     fn sweep(&self, _: &mut dyn FnMut(&RunId, TokenFor) -> Result<bool>) -> Result<TokenSweep> {
         Ok(TokenSweep::default())
+    }
+}
+
+/// The verifications' tokens of a test, in memory: each issue a number of
+/// its own, its value a file name nowhere on the host.
+#[derive(Default)]
+pub(super) struct MemoryVerificationTokens {
+    issued: Mutex<Vec<(RunId, TokenFor, TokenIssue)>>,
+    made: Mutex<u64>,
+}
+
+impl MemoryVerificationTokens {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(RunId, TokenFor, TokenIssue)>> {
+        self.issued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn take(&self, run: &RunId, of: TokenFor, issue: Option<&TokenIssue>) -> bool {
+        let mut issued = self.lock();
+        let before = issued.len();
+        issued.retain(|(at, kind, made)| {
+            !(at == run && *kind == of && issue.is_none_or(|issue| issue == made))
+        });
+        issued.len() != before
+    }
+}
+
+impl VerificationTokens for MemoryVerificationTokens {
+    fn issue(&self, run: &RunId, of: TokenFor) -> Result<PathBuf> {
+        self.take(run, of, None);
+        let made = {
+            let mut made = self
+                .made
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *made += 1;
+            *made
+        };
+        self.lock()
+            .push((run.clone(), of, TokenIssue(format!("token {made}"))));
+        Ok(PathBuf::from(format!("/wiring/tokens/{run}-{made}")))
+    }
+
+    fn revoke(&self, run: &RunId, of: TokenFor) -> Result<bool> {
+        Ok(self.take(run, of, None))
+    }
+
+    fn issued(&self, run: &RunId, of: TokenFor) -> Result<Option<TokenIssue>> {
+        Ok(self
+            .lock()
+            .iter()
+            .find(|(at, kind, _)| at == run && *kind == of)
+            .map(|(_, _, issue)| issue.clone()))
+    }
+
+    fn revoke_issued(&self, run: &RunId, of: TokenFor, issue: &TokenIssue) -> Result<bool> {
+        Ok(self.take(run, of, Some(issue)))
+    }
+
+    fn sweep(&self, keep: &mut dyn FnMut(&RunId, TokenFor) -> Result<bool>) -> Result<TokenSweep> {
+        let mut sweep = TokenSweep::default();
+        let held: Vec<(RunId, TokenFor)> = self
+            .lock()
+            .iter()
+            .map(|(run, of, _)| (run.clone(), *of))
+            .collect();
+        for (run, of) in held {
+            match keep(&run, of) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.take(&run, of, None);
+                    sweep.revoked.push((run, of));
+                }
+                Err(error) => sweep.failures.push(format!("{error:#}")),
+            }
+        }
+        Ok(sweep)
     }
 }
 

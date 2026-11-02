@@ -134,10 +134,36 @@ impl RunFiles for MemoryFiles {
             .cloned()
             .collect())
     }
+    /// A file, or a directory with every file and directory under it.
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let mut files = self.files.lock().unwrap();
-        let file = files.remove(from).ok_or_else(missing)?;
-        files.insert(to.to_owned(), file);
+        if let Some(file) = files.remove(from) {
+            files.insert(to.to_owned(), file);
+            return Ok(());
+        }
+        let under: Vec<PathBuf> = files
+            .keys()
+            .filter(|path| path.starts_with(from))
+            .cloned()
+            .collect();
+        let mut dirs = self.dirs.lock().unwrap();
+        let dirs_under: Vec<PathBuf> = dirs
+            .iter()
+            .filter(|dir| dir.starts_with(from))
+            .cloned()
+            .collect();
+        if under.is_empty() && dirs_under.is_empty() {
+            return Err(missing());
+        }
+        let moved = |path: &Path| to.join(path.strip_prefix(from).expect("a path under from"));
+        for path in under {
+            let file = files.remove(&path).expect("a file just listed");
+            files.insert(moved(&path), file);
+        }
+        for dir in dirs_under {
+            dirs.remove(&dir);
+            dirs.insert(moved(&dir));
+        }
         Ok(())
     }
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -151,8 +177,13 @@ impl RunFiles for MemoryFiles {
     fn tree_size(&self, _: &Path) -> io::Result<Option<u64>> {
         Ok(None)
     }
-    fn remove_dir_all(&self, _: &Path) -> io::Result<()> {
-        unimplemented!("no test removes a run directory")
+    fn remove_dir_all(&self, dir: &Path) -> io::Result<()> {
+        self.files
+            .lock()
+            .unwrap()
+            .retain(|path, _| !path.starts_with(dir));
+        self.dirs.lock().unwrap().retain(|at| !at.starts_with(dir));
+        Ok(())
     }
     /// A directory with no file under it.
     fn remove_empty_dir(&self, dir: &Path) -> io::Result<bool> {

@@ -39,10 +39,15 @@ pub(super) fn predict(wiring: &Wiring, task: crate::domain::TaskId) {
         .expect("record the prediction");
 }
 
-/// The receipt of a worker that could not finish the task: its run ends,
-/// which `kpi` counts.
-pub(super) fn failed(run: &crate::domain::RunId, head: &crate::domain::CommitSha) -> Value {
-    json!({
+/// The receipt of a worker that could not finish the task, on its
+/// worktree's head: its run ends, which `kpi` counts.
+pub(super) fn failed(
+    run: &crate::domain::RunId,
+    worktree: &std::path::Path,
+    git: &super::git::FakeGit,
+) -> anyhow::Result<Value> {
+    let head = crate::application::Repository::head(git, worktree)?;
+    Ok(json!({
         "run_id": run,
         "result": "failed",
         "commit": head,
@@ -50,7 +55,7 @@ pub(super) fn failed(run: &crate::domain::RunId, head: &crate::domain::CommitSha
         "e2e": {"status": "not_applicable", "evidence_or_reason": "the runtime runs it"},
         "subagent_review": {"status": "not_applicable", "evidence_or_reason": "a wiring test"},
         "summary": "could not",
-    })
+    }))
 }
 
 /// A task with a prediction under the trial is claimed in the treatment

@@ -22,7 +22,9 @@ use serde_json::Value;
 use super::{
     agent::{FakeAgent, Script},
     git::FakeGit,
-    host::{FakeProcesses, FakeVerifier, Nothing, STOPPED_AT, StoppedClock},
+    host::{
+        FakeProcesses, FakeVerifier, MemoryVerificationTokens, Nothing, STOPPED_AT, StoppedClock,
+    },
     service::{MemoryBackend, MemoryTokens},
     session::FakeSessions,
 };
@@ -52,8 +54,12 @@ use crate::{
 };
 
 /// The longest a wiring test may take, its supervisor's passes and its
-/// wrappers' ends included: its one deadline.
-pub(super) const LIMIT: Duration = Duration::from_secs(30);
+/// wrappers' ends included: its one deadline. It catches a supervisor or a
+/// wrapper that never ends, not a slow one: a test takes a few seconds
+/// alone, but every test of a `cargo test --lib` shares the process and
+/// the host's cores with the others and with other runs, and each pass
+/// opens the queue anew per request, as the queue service does.
+pub(super) const LIMIT: Duration = Duration::from_secs(120);
 
 /// How often the test's supervisor goes round its loop.
 const TICK: Duration = Duration::from_millis(20);
@@ -215,6 +221,11 @@ impl Wiring {
             .expect("record the hold");
     }
 
+    /// The ids and the clock of this test's queue.
+    pub(super) fn generators(&self) -> Generators {
+        self.generators.clone()
+    }
+
     /// The test's queue, as the test reads and writes it.
     pub(super) fn queue(&self) -> SqliteQueue {
         SqliteQueue::open(&self.db)
@@ -224,6 +235,11 @@ impl Wiring {
 
     /// A ready task verified by `verify`.
     pub(super) fn ready_task(&self, verify: &[&str]) -> TaskId {
+        self.ready_task_after(verify, &[])
+    }
+
+    /// A ready task verified by `verify` that depends on `after`.
+    pub(super) fn ready_task_after(&self, verify: &[&str], after: &[TaskId]) -> TaskId {
         let mut queue = self.queue();
         let task = crate::application::TaskStore::add(
             &mut queue,
@@ -236,7 +252,7 @@ impl Wiring {
                 paths: Vec::new(),
                 priority: Default::default(),
                 change: None,
-                dependencies: Vec::new(),
+                dependencies: after.to_vec(),
                 goal_dependencies: Vec::new(),
                 goal_id: None,
                 context: String::new(),
@@ -250,6 +266,61 @@ impl Wiring {
         crate::application::TaskStore::transition(&mut queue, task.id(), TaskAction::BypassReview)
             .expect("make the task ready");
         task.id()
+    }
+
+    /// The kinds of the events of each task of the queue, by task, oldest
+    /// first: what a test that timed out shows of where it stopped.
+    fn events_by_task(&self) -> Vec<(i64, Vec<String>)> {
+        let mut queue = self.queue();
+        (1..)
+            .map(TaskId::new)
+            .map_while(|task| crate::application::TaskReads::show(&mut queue, task).ok())
+            .map(|detail| {
+                (
+                    detail.task.id().as_i64(),
+                    detail
+                        .events
+                        .iter()
+                        .map(|event| event.kind.as_str().to_owned())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// A replanning of `run` opened by the runtime and asked to pause, as
+    /// the supervisor's diagnosis opens one: its operation.
+    pub(super) fn pause_replan(
+        &self,
+        run: &crate::domain::RunId,
+    ) -> crate::domain::task_replan::ReplanOperation {
+        pause_replan(&self.db, &self.generators, run)
+    }
+
+    /// What `dagq status` shows of this test's queue now, attention and
+    /// all, as a person reads it.
+    pub(super) fn status(&self) -> Value {
+        crate::application::health::status(
+            &self.queue(),
+            &*self.processes,
+            &*self.generators.clock,
+            None,
+            None,
+        )
+        .expect("read the queue's status")
+    }
+
+    /// A person's `recover` of `run` on this test's queue, its processes
+    /// and its files: the report, or why it refused.
+    pub(super) fn recover(&self, run: &crate::domain::RunId) -> Result<Value> {
+        crate::application::health::recover(
+            &mut self.queue(),
+            &*self.processes,
+            &*self.files,
+            &Nothing,
+            &*self.generators.clock,
+            run,
+        )
     }
 
     /// The queue service of this test in this process: its use cases on
@@ -284,7 +355,32 @@ impl Wiring {
     /// joined, all by the test's deadline. What it returned, which must
     /// name no error.
     pub(super) fn supervise_once(&self) -> Value {
-        let stop = Arc::new(AtomicBool::new(false));
+        self.supervise(false, None)
+    }
+
+    /// [`Self::supervise_once`] with a stop asked before its first pass:
+    /// a supervisor that drains.
+    pub(super) fn supervise_draining(&self) -> Value {
+        self.supervise(true, None)
+    }
+
+    /// [`Self::supervise_once`] while a person acts on the queue: `act` is
+    /// given the queue each tick until it says it acted, as a person
+    /// answers what the running supervisor asked (a hold its `--once` loop
+    /// waits on), all within the test's one deadline.
+    pub(super) fn supervise_once_while(
+        &self,
+        mut act: impl FnMut(&mut SqliteQueue) -> bool,
+    ) -> Value {
+        self.supervise(false, Some(&mut act))
+    }
+
+    fn supervise(
+        &self,
+        stopped: bool,
+        mut act: Option<&mut dyn FnMut(&mut SqliteQueue) -> bool>,
+    ) -> Value {
+        let stop = Arc::new(AtomicBool::new(stopped));
         let (returned, returns) = mpsc::channel();
         let supervisor = {
             let parts = Parts {
@@ -312,12 +408,28 @@ impl Wiring {
                 })
                 .expect("start the supervisor's thread")
         };
-        let left = self.deadline.saturating_duration_since(Instant::now());
-        if returns.recv_timeout(left).is_err() {
+        let returned = loop {
+            let left = self.deadline.saturating_duration_since(Instant::now());
+            let Some(acting) = act.as_mut() else {
+                break returns.recv_timeout(left).is_ok();
+            };
+            match returns.recv_timeout(left.min(TICK)) {
+                Ok(()) => break true,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break false,
+                Err(mpsc::RecvTimeoutError::Timeout) if left <= TICK => break false,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if acting(&mut self.queue()) {
+                        act = None;
+                    }
+                }
+            }
+        };
+        if !returned {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
             panic!(
-                "{}: the supervisor did not return within {LIMIT:?}",
-                self.name
+                "{}: the supervisor did not return within {LIMIT:?}; the tasks' events: {:?}",
+                self.name,
+                self.events_by_task()
             );
         }
         let outcome = supervisor.join();
@@ -428,7 +540,7 @@ impl Parts {
             verifier: self.verifier.clone(),
             container: Arc::new(Nothing),
             run_containers: Arc::new(Nothing),
-            verification_tokens: Arc::new(Nothing),
+            verification_tokens: Arc::new(MemoryVerificationTokens::default()),
             verification_containers: Arc::new(Nothing),
             sessions: &*self.sessions,
             workers,
@@ -609,4 +721,42 @@ fn two_wirings_of_one_name_share_no_queue() {
     let task = one.ready_task(&[]);
     assert!(crate::application::TaskReads::show(&mut one.queue(), task).is_ok());
     assert!(crate::application::TaskReads::show(&mut other.queue(), task).is_err());
+}
+
+/// [`Wiring::pause_replan`] on the queue at `db`: callable from a fake's
+/// hook, which holds no [`Wiring`].
+pub(super) fn pause_replan(
+    db: &Path,
+    generators: &Generators,
+    run: &crate::domain::RunId,
+) -> crate::domain::task_replan::ReplanOperation {
+    use crate::domain::task_replan::{NewReplan, ReplanMove, ReplanOrigin, ReplanStatus};
+    let mut queue = SqliteQueue::open(db)
+        .expect("open the test's queue")
+        .with_generators(generators.clone());
+    let op = queue
+        .record_replan(
+            &NewReplan {
+                run: run.clone(),
+                reason: "two independent parts".into(),
+                evidence: Vec::new(),
+            },
+            ReplanOrigin::Runtime,
+            "supervisor",
+            "supervisor",
+        )
+        .expect("open the replanning")
+        .operation;
+    crate::application::RunTransitions::move_replan(
+        &mut queue,
+        op.id,
+        op.generation,
+        &ReplanMove {
+            to: ReplanStatus::PauseRequested,
+            reason: "the test pauses it".into(),
+            snapshot_id: None,
+            diagnosis: None,
+        },
+    )
+    .expect("ask the replanning to pause")
 }

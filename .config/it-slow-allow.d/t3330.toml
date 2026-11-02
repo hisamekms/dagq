@@ -18,9 +18,3 @@ task = 3330
 name = "runtime_landing_answers::a_drain_with_no_run_of_its_own_leaves_the_approved_run_to_the_next_supervisor"
 reason = "B 境界（supervisor の配線・復旧）: 自分の run の無い停止要求の drain が land の答えを適用して着地を始めずに終わり、次の supervisor が SQLite の queue の events からその run を拾って review をやり直さずに着地させることを、supervisor をまたいで確かめる。判断は supervise::execution::landing の unit test"
 task = 3330
-
-# 3.6〜5.1s in a stress 5, 7.1〜8.5s under the host's load of other runs: an already_satisfied claim verified, then a drain
-[[test]]
-name = "runtime_already_satisfied::a_draining_supervisor_verifies_no_claim_for_its_close_answer"
-reason = "B 境界（supervisor の配線・Git）: 停止要求の drain の pass が、main の動いた後の already_satisfied の close の答えに検証のやり直しを始めず、ask と validating の run を次の supervisor に残すことを、実の supervise のループと Git の main で確かめる"
-task = 3330

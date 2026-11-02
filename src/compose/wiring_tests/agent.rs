@@ -8,7 +8,7 @@
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
 };
 
 use anyhow::{Context, Result, bail};
@@ -22,7 +22,7 @@ use crate::{
         TurnTarget, memory_files::MemoryFiles,
     },
     domain::{
-        CommitSha, RunId, TaskRun,
+        RunId, TaskRun,
         headless_job::JobAccess,
         headless_job::JobFailure,
         transcript::{TRANSCRIPT_MISSING, Transcript, Unreadable},
@@ -31,14 +31,15 @@ use crate::{
     infrastructure::{adapters::ClaudeCode, sqlite::SqliteQueue},
 };
 
-/// What a worker's turn writes as its receipt, given its run and the head
-/// of its worktree.
-pub(super) type Receipt = fn(&RunId, &CommitSha) -> Value;
+/// What a worker's turn does in its run's worktree (`worktree` of `git`)
+/// and writes as its receipt.
+pub(super) type Receipt = fn(&RunId, &Path, &FakeGit) -> Result<Value>;
 
 /// The receipt of a worker that found its base meets the task: no commit,
 /// `already_satisfied` on the base with `test -f seed.txt` run there.
-pub(super) fn already_satisfied(run: &RunId, head: &CommitSha) -> Value {
-    json!({
+pub(super) fn already_satisfied(run: &RunId, worktree: &Path, git: &FakeGit) -> Result<Value> {
+    let head = crate::application::Repository::head(git, worktree)?;
+    Ok(json!({
         "run_id": run,
         "result": "already_satisfied",
         "commit": head,
@@ -47,20 +48,29 @@ pub(super) fn already_satisfied(run: &RunId, head: &CommitSha) -> Value {
         "subagent_review": {"status": "not_applicable", "evidence_or_reason": "no change to review"},
         "summary": "the base meets it",
         "base_checks": [{"command": "test -f seed.txt", "result": "passed"}],
-    })
+    }))
 }
 
-/// The receipt of a worker that finished the task on its worktree's head.
-pub(super) fn succeeded(run: &RunId, head: &CommitSha) -> Value {
-    json!({
+/// The receipt of a worker that made the task's change: one commit on its
+/// worktree, `succeeded` with it.
+pub(super) fn succeeded(run: &RunId, worktree: &Path, git: &FakeGit) -> Result<Value> {
+    let commit = git.commit_in(worktree)?;
+    Ok(json!({
         "run_id": run,
         "result": "succeeded",
-        "commit": head,
-        "tests": {"status": "passed", "evidence_or_reason": "the unit tests of the change"},
+        "commit": commit,
+        "tests": {"status": "passed", "evidence_or_reason": "the change's tests"},
         "e2e": {"status": "not_applicable", "evidence_or_reason": "the runtime runs it"},
-        "subagent_review": {"status": "not_applicable", "evidence_or_reason": "a wiring test"},
-        "summary": "done",
-    })
+        "subagent_review": {"status": "not_applicable", "evidence_or_reason": "a small change"},
+        "summary": "made the change",
+    }))
+}
+
+/// What a review job meets when its provider wants a login: it prints
+/// Claude's login message and ends with 1, giving no verdict. A test's
+/// script names it among the verdicts.
+pub(super) fn login_wall() -> Value {
+    json!({"wiring_login_wall": true})
 }
 
 /// A review's verdict `decision` with `summary`.
@@ -93,6 +103,15 @@ pub(super) struct FakeAgent {
     started: Mutex<Vec<String>>,
     /// The arguments of each review agent's job it started, in order.
     agent_jobs: Mutex<Vec<Vec<String>>>,
+    /// The directory each review job was started in, in order.
+    reviewed_in: Mutex<Vec<PathBuf>>,
+    /// The prompt of each review job, in order.
+    review_prompts: Mutex<Vec<String>>,
+    /// What runs as the next review job starts, before it answers, once.
+    on_review: Mutex<Option<super::host::Hook>>,
+    /// What lets the next worker's turn end, once: the turn runs, its run
+    /// holding its slot, until it says so.
+    held_turn: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
 impl FakeAgent {
@@ -110,7 +129,46 @@ impl FakeAgent {
             verdicts: Mutex::new(script.verdicts.into()),
             started: Mutex::default(),
             agent_jobs: Mutex::default(),
+            reviewed_in: Mutex::default(),
+            review_prompts: Mutex::default(),
+            on_review: Mutex::default(),
+            held_turn: Mutex::default(),
         }
+    }
+
+    /// The directory each review job was started in, in order.
+    pub(super) fn reviewed_in(&self) -> Vec<PathBuf> {
+        self.reviewed_in
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The prompt of each review job, in order.
+    pub(super) fn review_prompts(&self) -> Vec<String> {
+        self.review_prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Run `hook` as the next review job starts, before it answers.
+    pub(super) fn on_review(&self, hook: super::host::Hook) {
+        *self
+            .on_review
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Hold the next worker's turn: its process starts, as a turn's does,
+    /// and runs until `release` says so or is dropped (by the test's
+    /// deadline at the latest); only then does it write its receipt and
+    /// output and end.
+    pub(super) fn hold_next_turn(&self, release: mpsc::Receiver<()>) {
+        *self
+            .held_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(release);
     }
 
     /// The arguments of each review agent's job started, in order.
@@ -142,9 +200,8 @@ impl FakeAgent {
     }
 
     /// A worker's turn in the run directory `run_dir` of session
-    /// `session`: the script's next receipt at the run's receipt path, and
-    /// the line of Claude's result as its output.
-    fn turn(&self, run_dir: &Path, session: &str) -> Result<String> {
+    /// `session`: the script's next receipt, which it writes as it ends.
+    fn turn(&self, run_dir: &Path, session: &str) -> Result<Turn> {
         let id = RunId::new(
             run_dir
                 .file_name()
@@ -157,29 +214,22 @@ impl FakeAgent {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop_front();
-        if let Some(receipt) = receipt {
-            let worktree = run.worktree_path().context("the run has no worktree")?;
-            let mut head = crate::application::Repository::head(&self.git, Path::new(worktree))?;
-            // A worker that finished the task committed on its worktree.
-            if receipt(&id, &head)["result"] == "succeeded" {
-                head = self.git.commit_in(Path::new(worktree))?;
-            }
-            let path = run
-                .receipt_path()
-                .map_or_else(|| run_dir.join("receipt.json"), PathBuf::from);
-            self.files
-                .write(&path, receipt(&id, &head).to_string().as_bytes())?;
-        }
-        Ok(format!(
-            "{}\n",
-            json!({
-                "type": "result", "subtype": "success", "is_error": false,
-                "num_turns": 1, "duration_ms": 5, "total_cost_usd": 0.01,
-                "session_id": session, "result": "done",
-                "usage": {"input_tokens": 7, "output_tokens": 3},
-                "permission_denials": [],
-            })
-        ))
+        let receipt = match receipt {
+            Some(receipt) => Some((
+                receipt,
+                PathBuf::from(run.worktree_path().context("the run has no worktree")?),
+                run.receipt_path()
+                    .map_or_else(|| run_dir.join("receipt.json"), PathBuf::from),
+            )),
+            None => None,
+        };
+        Ok(Turn {
+            run: id,
+            session: session.to_owned(),
+            receipt,
+            git: self.git.clone(),
+            files: self.files.clone(),
+        })
     }
 
     /// A review agent's job answering `prompt`: a built-in one passes, as
@@ -213,9 +263,13 @@ impl AgentProvider for FakeAgent {
         &self,
         _: &TaskRun,
         tree: &Path,
-        _: &str,
+        prompt: &str,
         _: JobAccess,
     ) -> Result<CommandSpec> {
+        self.review_prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(prompt.to_owned());
         let mut command = CommandSpec::new(REVIEW);
         command.current_dir(tree);
         Ok(command)
@@ -329,14 +383,53 @@ impl Spawner for FakeAgent {
     fn spawn(&self, command: &CommandSpec, streams: Streams<'_>) -> Result<Box<dyn Spawned>> {
         let program = command.get_program().to_string_lossy().into_owned();
         let args: Vec<PathBuf> = command.get_args().map(PathBuf::from).collect();
+        let mut code = 0;
         let stdout = match program.as_str() {
             TURN => {
                 let [run_dir, session] = args.as_slice() else {
                     bail!("a worker's turn names its run directory and session");
                 };
-                self.turn(run_dir, &session.to_string_lossy())?
+                let turn = self.turn(run_dir, &session.to_string_lossy())?;
+                let held = self
+                    .held_turn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(release) = held {
+                    let outputs = Outputs::of(&streams);
+                    let files = self.files.clone();
+                    return Ok(Box::new(Held {
+                        pid: self.record_start(program),
+                        release,
+                        end: Some(Box::new(move || outputs.write(&files, &turn.end()?))),
+                        ended: false,
+                    }));
+                }
+                turn.end()?
             }
-            REVIEW => format!("{}\n", self.next_verdict()?),
+            REVIEW => {
+                if let Some(cwd) = command.get_current_dir() {
+                    self.reviewed_in
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(cwd.to_owned());
+                }
+                let hook = self
+                    .on_review
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+                let verdict = self.next_verdict()?;
+                if verdict == login_wall() {
+                    code = 1;
+                    "Invalid API key · Please run /login\n".to_owned()
+                } else {
+                    format!("{verdict}\n")
+                }
+            }
             AGENT_JOB => {
                 self.agent_jobs
                     .lock()
@@ -350,26 +443,139 @@ impl Spawner for FakeAgent {
             }
             other => bail!("the wiring test's agent starts no {other}"),
         };
-        match streams {
-            Streams::Files {
-                stdout: out,
-                stderr,
-            } => {
-                self.files.write(out, stdout.as_bytes())?;
-                self.files.write(stderr, b"")?;
-            }
-            Streams::Log(log) => self.files.write(log, stdout.as_bytes())?,
-            Streams::Inherit | Streams::Null => {}
-        }
+        Outputs::of(&streams).write(&self.files, &stdout)?;
+        Ok(Box::new(Ended {
+            pid: self.record_start(program),
+            exit: exit(code),
+        }))
+    }
+}
+
+impl FakeAgent {
+    /// `program` started: the pid of its process, far from the host's pids
+    /// and from the test's processes'.
+    fn record_start(&self, program: String) -> u32 {
         let mut started = self
             .started
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         started.push(program);
-        Ok(Box::new(Ended {
-            // Far from the host's pids and from the test's processes'.
-            pid: 5_000_000 + u32::try_from(started.len()).unwrap_or(u32::MAX - 5_000_000),
-            exit: exit(0),
-        }))
+        5_000_000 + u32::try_from(started.len()).unwrap_or(u32::MAX - 5_000_000)
+    }
+}
+
+/// A worker's turn of a run, as its process ends: the receipt its script
+/// gives, written at the run's receipt path (`worktree` its run's).
+struct Turn {
+    run: RunId,
+    session: String,
+    receipt: Option<(Receipt, PathBuf, PathBuf)>,
+    git: FakeGit,
+    files: Arc<MemoryFiles>,
+}
+
+impl Turn {
+    /// The turn's receipt written, if the script gives one: the line of
+    /// Claude's result, its output.
+    fn end(self) -> Result<String> {
+        if let Some((receipt, worktree, path)) = self.receipt {
+            let receipt = receipt(&self.run, &worktree, &self.git)?;
+            self.files.write(&path, receipt.to_string().as_bytes())?;
+        }
+        Ok(format!(
+            "{}\n",
+            json!({
+                "type": "result", "subtype": "success", "is_error": false,
+                "num_turns": 1, "duration_ms": 5, "total_cost_usd": 0.01,
+                "session_id": self.session, "result": "done",
+                "usage": {"input_tokens": 7, "output_tokens": 3},
+                "permission_denials": [],
+            })
+        ))
+    }
+}
+
+/// Where a process's output goes: its output and its errors, each at a
+/// path or nowhere.
+struct Outputs {
+    stdout: Option<PathBuf>,
+    stderr: Option<PathBuf>,
+}
+
+impl Outputs {
+    fn of(streams: &Streams<'_>) -> Self {
+        match streams {
+            Streams::Files { stdout, stderr } => Self {
+                stdout: Some((*stdout).to_owned()),
+                stderr: Some((*stderr).to_owned()),
+            },
+            Streams::Log(log) => Self {
+                stdout: Some((*log).to_owned()),
+                stderr: None,
+            },
+            Streams::Inherit | Streams::Null => Self {
+                stdout: None,
+                stderr: None,
+            },
+        }
+    }
+
+    /// `stdout` written as the output, the errors empty.
+    fn write(&self, files: &MemoryFiles, stdout: &str) -> Result<()> {
+        if let Some(out) = &self.stdout {
+            files.write(out, stdout.as_bytes())?;
+        }
+        if let Some(err) = &self.stderr {
+            files.write(err, b"")?;
+        }
+        Ok(())
+    }
+}
+
+/// A worker's turn held in its process ([`FakeAgent::hold_next_turn`]):
+/// running until its release, then writing what it ends with; it ends at
+/// the look after that, so that its wrapper reads its output first.
+struct Held {
+    pid: u32,
+    release: mpsc::Receiver<()>,
+    end: Option<Box<dyn FnOnce() -> Result<()> + Send>>,
+    ended: bool,
+}
+
+impl Spawned for Held {
+    fn id(&self) -> u32 {
+        self.pid
+    }
+
+    fn try_wait(&mut self) -> Result<Option<Exit>> {
+        if self.ended {
+            return Ok(Some(exit(0)));
+        }
+        if matches!(self.release.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+            return Ok(None);
+        }
+        if let Some(end) = self.end.take() {
+            end()?;
+        }
+        self.ended = true;
+        Ok(None)
+    }
+
+    /// A signal ends it at once, writing nothing.
+    fn kill(&mut self) -> Result<()> {
+        self.end = None;
+        self.ended = true;
+        Ok(())
+    }
+
+    fn wait(&mut self) -> Result<Exit> {
+        if !self.ended {
+            let _ = self.release.recv_timeout(super::harness::LIMIT);
+            if let Some(end) = self.end.take() {
+                end()?;
+            }
+            self.ended = true;
+        }
+        Ok(exit(0))
     }
 }

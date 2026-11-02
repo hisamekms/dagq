@@ -1,13 +1,16 @@
-//! The repository of a wiring test in memory: main's line of commits, the
-//! run's worktrees on their branches and the scratch checkouts, without
-//! Git. A commit is only its name; it holds no file but those a test
-//! commits to every commit alike, and every diff and listing of files is
-//! empty but the changed paths a test names. It does what a claim, a run's validation and
-//! the verification of a snapshot of main need; what it does not do yet
-//! (a rebase, a commit of its own) is an error that names it.
+//! The repository of a wiring test in memory: its commits each with its
+//! parent, main's line, the run's worktrees on their branches, the scratch
+//! checkouts and main's remote, without Git. A commit is only its name; it
+//! holds no file but those a test commits to every commit alike, and every
+//! diff and listing of files is empty but the changed paths a test names.
+//! It does what
+//! a claim, a run's validation, the verification of a snapshot of main and
+//! a landing (a rebase, the squash commit on main and its push) need; what
+//! it does not do (a commit renamed in a worktree) is an error that names
+//! it.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -22,17 +25,29 @@ use crate::{
     domain::{CommitSha, TaskId, TaskRun, landing_branch::LandingBranch},
 };
 
-/// A worktree of the repository: its branch and its head.
+/// The remote main is pushed to: `origin`, as `dagq.toml` names none.
+const REMOTE: &str = "origin";
+
+/// A worktree of the repository: its branch, the commit it started from
+/// (or was last rebased onto) and its head, a commit of its own when it
+/// made one.
 #[derive(Debug, Clone)]
 struct Worktree {
     branch: String,
+    base: CommitSha,
     head: CommitSha,
 }
 
 #[derive(Debug)]
 struct State {
+    /// Every commit made, with its parent (`None` for the first).
+    parents: HashMap<CommitSha, Option<CommitSha>>,
+    /// How many commits were made: the next one's number less one.
+    made: usize,
     /// Main's commits, oldest first: the last is main's head.
     main: Vec<CommitSha>,
+    /// Main's head on the remote, as last pushed.
+    pushed: Option<CommitSha>,
     /// The worktrees of the runs, by their path.
     worktrees: HashMap<PathBuf, Worktree>,
     /// The scratch checkouts the snapshots of main are verified in, by
@@ -45,8 +60,6 @@ struct State {
     files: HashMap<String, String>,
     /// The paths every range changes: none unless a test names some.
     changed: Vec<String>,
-    /// The parent of each commit a worker made on its worktree.
-    parents: HashMap<CommitSha, CommitSha>,
     /// The message of each commit of main's a test landed with one
     /// ([`FakeGit::land_with_message`]); any other has none.
     messages: HashMap<CommitSha, String>,
@@ -73,13 +86,15 @@ impl FakeGit {
             checkout: checkout.to_owned(),
             files,
             state: Arc::new(Mutex::new(State {
+                parents: HashMap::from([(commit(1), None)]),
+                made: 1,
                 main: vec![commit(1)],
+                pushed: None,
                 worktrees: HashMap::new(),
                 scratches: HashMap::new(),
                 checked_out: Vec::new(),
                 files: HashMap::new(),
                 changed: Vec::new(),
-                parents: HashMap::new(),
                 messages: HashMap::new(),
             })),
         }
@@ -101,32 +116,57 @@ impl FakeGit {
         state.changed = changed.iter().map(|path| (*path).to_owned()).collect();
     }
 
-    /// A commit of the worker's on the worktree at `path`, on top of its
-    /// head: the worktree's head from now on.
-    pub(super) fn commit_in(&self, path: &Path) -> Result<CommitSha> {
-        let mut state = self.lock();
-        let made = commit(1000 + state.parents.len());
-        let worktree = state.worktrees.get_mut(path).with_context(|| {
-            format!("{} is no worktree of the test's repository", path.display())
-        })?;
-        let parent = std::mem::replace(&mut worktree.head, made.clone());
-        state.parents.insert(made.clone(), parent);
-        Ok(made)
+    /// Main's head now.
+    pub(super) fn main(&self) -> CommitSha {
+        self.lock().main.last().cloned().expect("main has a commit")
+    }
+
+    /// Main's commits, oldest first.
+    pub(super) fn main_line(&self) -> Vec<CommitSha> {
+        self.lock().main.clone()
+    }
+
+    /// Main's head on its remote, `None` before the first push.
+    pub(super) fn pushed(&self) -> Option<CommitSha> {
+        self.lock().pushed.clone()
+    }
+
+    /// Main moved on by a commit of someone else's, as a landing elsewhere
+    /// moves it: its new head.
+    pub(super) fn move_main(&self) -> CommitSha {
+        self.lock().move_main()
     }
 
     /// A commit on main with `message`, as a person's push makes one:
     /// main's head from now on.
     pub(super) fn land_with_message(&self, message: &str) -> CommitSha {
         let mut state = self.lock();
-        let made = commit(2000 + state.messages.len());
-        state.main.push(made.clone());
+        let made = state.move_main();
         state.messages.insert(made.clone(), message.to_owned());
         made
     }
 
-    /// Main's head now.
-    pub(super) fn main(&self) -> CommitSha {
-        self.lock().main.last().cloned().expect("main has a commit")
+    /// A commit of the run's own on the worktree at `worktree`, as its
+    /// worker makes one: the worktree's new head.
+    pub(super) fn commit_in(&self, worktree: &Path) -> Result<CommitSha> {
+        let mut state = self.lock();
+        let head = state
+            .worktrees
+            .get(worktree)
+            .map(|worktree| worktree.head.clone())
+            .with_context(|| {
+                format!(
+                    "{} is no worktree of the test's repository",
+                    worktree.display()
+                )
+            })?;
+        let made = state.make(Some(head));
+        state
+            .worktrees
+            .get_mut(worktree)
+            .expect("the worktree just read")
+            .head = made.clone();
+        Ok(made)
     }
 
     /// The commit the scratch checkout at `path` holds, `None` when there
@@ -146,12 +186,7 @@ impl FakeGit {
     }
 
     fn known(&self, commit: &str) -> bool {
-        let state = self.lock();
-        state.main.iter().any(|on| on.as_str() == commit)
-            || state
-                .worktrees
-                .values()
-                .any(|worktree| worktree.head.as_str() == commit)
+        self.lock().known(commit)
     }
 
     fn worktree(&self, path: &Path) -> Result<Worktree> {
@@ -160,6 +195,44 @@ impl FakeGit {
             .get(path)
             .cloned()
             .with_context(|| format!("{} is no worktree of the test's repository", path.display()))
+    }
+}
+
+impl State {
+    /// A new commit on `parent`.
+    fn make(&mut self, parent: Option<CommitSha>) -> CommitSha {
+        self.made += 1;
+        let made = commit(self.made);
+        self.parents.insert(made.clone(), parent);
+        made
+    }
+
+    /// A new commit on main's head: main's head from now on.
+    fn move_main(&mut self) -> CommitSha {
+        let parent = self.main.last().cloned();
+        let moved = self.make(parent);
+        self.main.push(moved.clone());
+        moved
+    }
+
+    fn known(&self, commit: &str) -> bool {
+        self.parents.keys().any(|known| known.as_str() == commit)
+    }
+
+    /// `commit` and its ancestors, nearest first; empty for a commit not
+    /// made.
+    fn line(&self, commit: &str) -> Vec<CommitSha> {
+        let mut line = Vec::new();
+        let mut next = self
+            .parents
+            .keys()
+            .find(|known| known.as_str() == commit)
+            .cloned();
+        while let Some(at) = next {
+            next = self.parents.get(&at).cloned().flatten();
+            line.push(at);
+        }
+        line
     }
 }
 
@@ -213,20 +286,20 @@ impl RepositoryReads for FakeGit {
             .collect())
     }
 
+    /// Every commit has one parent, so its line is its first parents'.
     fn on_first_parent_line(&self, commit: &str, head: &str) -> Result<bool> {
-        Ok(matches!(
-            (self.position(commit), self.position(head)),
-            (Some(commit), Some(head)) if commit <= head
-        ))
+        Ok(self
+            .lock()
+            .line(head)
+            .iter()
+            .any(|on| on.as_str() == commit))
     }
 
-    /// The earlier of two commits of main's line; a worktree's head is the
-    /// commit its run started from.
+    /// The nearest commit of `a`'s line on `b`'s.
     fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
-        let (Some(a), Some(b)) = (self.position(a), self.position(b)) else {
-            return Ok(None);
-        };
-        Ok(self.lock().main.get(a.min(b)).cloned())
+        let state = self.lock();
+        let b: HashSet<CommitSha> = state.line(b).into_iter().collect();
+        Ok(state.line(a).into_iter().find(|on| b.contains(on)))
     }
 }
 
@@ -273,25 +346,7 @@ impl Repository for FakeGit {
     }
 
     fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
-        if ancestor == descendant {
-            return Ok(self.known(ancestor));
-        }
-        // A worker's commit: through its parents to main's line.
-        let mut at = descendant.to_owned();
-        loop {
-            let parent = self
-                .lock()
-                .parents
-                .iter()
-                .find(|(made, _)| made.as_str() == at)
-                .map(|(_, parent)| parent.as_str().to_owned());
-            match parent {
-                Some(parent) if parent == ancestor => return Ok(true),
-                Some(parent) => at = parent,
-                None => break,
-            }
-        }
-        self.on_first_parent_line(ancestor, &at)
+        self.on_first_parent_line(ancestor, descendant)
     }
 
     /// Clean: nothing is ever written in a worktree.
@@ -317,6 +372,7 @@ impl Repository for FakeGit {
 
     fn discard_worktree(&self, path: &Path, _: &str) -> Result<()> {
         self.lock().worktrees.remove(path);
+        self.files.remove_empty_dir(path)?;
         Ok(())
     }
 
@@ -328,11 +384,39 @@ impl Repository for FakeGit {
         Ok(())
     }
 
+    /// The worktree's own commit, if it made one, made again on `onto`; a
+    /// worktree of none moves to `onto`. A commit holds no file, so no
+    /// rebase conflicts.
     fn rebase(&self, worktree: &Path, onto: &str) -> Result<std::result::Result<(), String>> {
-        bail!(
-            "the wiring test's repository rebases no worktree ({} onto {onto})",
-            worktree.display()
-        )
+        let mut state = self.lock();
+        ensure!(state.known(onto), "no commit {onto}");
+        let onto = CommitSha::parse(onto, "commit")?;
+        let at = state.worktrees.get(worktree).cloned().with_context(|| {
+            format!(
+                "{} is no worktree of the test's repository",
+                worktree.display()
+            )
+        })?;
+        let own = state.line(at.head.as_str()).len() - state.line(at.base.as_str()).len();
+        ensure!(
+            own <= 1,
+            "the wiring test's repository rebases one commit of a run's, not {own}"
+        );
+        let head = if own == 0 {
+            onto.clone()
+        } else if at.base == onto {
+            // Already on `onto`: a no-op, as Git's.
+            at.head.clone()
+        } else {
+            state.make(Some(onto.clone()))
+        };
+        let moved = state
+            .worktrees
+            .get_mut(worktree)
+            .expect("the worktree just read");
+        moved.head = head;
+        moved.base = onto;
+        Ok(Ok(()))
     }
 
     fn conflicted_files(&self, _: &Path) -> Result<Vec<String>> {
@@ -373,8 +457,12 @@ impl Repository for FakeGit {
         Ok(format!("tree of {commit}"))
     }
 
+    /// A new commit on `parent`: a commit holds no tree to tell apart.
     fn commit_tree(&self, _: &str, parent: &str, _: &[String]) -> Result<CommitSha> {
-        bail!("the wiring test's repository makes no commit on {parent}")
+        let mut state = self.lock();
+        ensure!(state.known(parent), "no commit {parent}");
+        let parent = CommitSha::parse(parent, "commit")?;
+        Ok(state.make(Some(parent)))
     }
 
     fn update_ref(&self, _: &str, _: &str) -> Result<()> {
@@ -389,7 +477,19 @@ impl Repository for FakeGit {
             state.main.last().map(CommitSha::as_str) == Some(from),
             "main is not at {from}"
         );
-        state.main.push(CommitSha::parse(to, "commit")?);
+        let to = CommitSha::parse(to, "commit")?;
+        ensure!(
+            state
+                .parents
+                .get(&to)
+                .cloned()
+                .flatten()
+                .as_ref()
+                .map(CommitSha::as_str)
+                == Some(from),
+            "{to} is no commit on {from}"
+        );
+        state.main.push(to);
         Ok(())
     }
 
@@ -399,6 +499,7 @@ impl Repository for FakeGit {
 
     fn remove_worktree_and_branch(&self, worktree: &Path, _: &str) -> Result<()> {
         self.lock().worktrees.remove(worktree);
+        self.files.remove_empty_dir(worktree)?;
         Ok(())
     }
 
@@ -444,12 +545,13 @@ impl Repository for FakeGit {
             "{} is a worktree already",
             path.display()
         );
-        // A directory the run's review finds there.
+        // The worktree is a directory of the test's files, as Git makes it.
         self.files.put_dir(&path);
         state.worktrees.insert(
             path,
             Worktree {
                 branch,
+                base: run.base_commit().clone(),
                 head: run.base_commit().clone(),
             },
         );
@@ -501,17 +603,38 @@ impl Repository for FakeGit {
     }
 }
 
-/// No remote: main is pushed nowhere.
+/// One remote, [`REMOTE`]: a push puts main's head there.
 impl MainRemote for FakeGit {
-    fn has_remote(&self, _: &str) -> Result<bool> {
-        Ok(false)
+    fn has_remote(&self, remote: &str) -> Result<bool> {
+        Ok(remote == REMOTE)
     }
 
-    fn push_main(&self, _: &PushGrant, remote: &str, _: &LandingBranch) -> Result<()> {
-        bail!("the wiring test's repository has no remote {remote}")
+    fn push_main(&self, _: &PushGrant, remote: &str, branch: &LandingBranch) -> Result<()> {
+        ensure!(
+            remote == REMOTE,
+            "the wiring test's repository has no remote {remote}"
+        );
+        ensure!(
+            branch.name == LandingBranch::main().name,
+            "the wiring test's repository pushes only main, not {}",
+            branch.name
+        );
+        let mut state = self.lock();
+        state.pushed = state.main.last().cloned();
+        Ok(())
     }
 
-    fn contains_landed_commit(&self, _: &str, _: &LandingBranch, _: &CommitSha) -> Result<bool> {
-        Ok(false)
+    fn contains_landed_commit(
+        &self,
+        remote: &str,
+        _: &LandingBranch,
+        commit: &CommitSha,
+    ) -> Result<bool> {
+        let state = self.lock();
+        Ok(remote == REMOTE
+            && state
+                .pushed
+                .as_ref()
+                .is_some_and(|pushed| state.line(pushed.as_str()).contains(commit)))
     }
 }

@@ -643,6 +643,28 @@ mod tests {
         ];
         assert_eq!(rejudged(&events), 2);
         assert_eq!(rejudged(&events[1..5]), 0);
+        // The judgments made again so far, read back, stop the next one at
+        // the limit: a high pass main moved past once more is asked.
+        let JudgmentStep::Ask(ask) = decide(
+            &high,
+            &sha('b'),
+            &sha('c'),
+            rejudged(&events),
+            MAX_JUDGMENT_RETRIES,
+        ) else {
+            panic!("the judgments made again reach the limit");
+        };
+        assert_eq!(ask.because, AskBecause::RetryLimit);
+        assert_eq!(
+            decide(
+                &high,
+                &sha('b'),
+                &sha('c'),
+                rejudged(&events[..1]),
+                MAX_JUDGMENT_RETRIES
+            ),
+            JudgmentStep::Rejudge { head: sha('c') }
+        );
     }
 
     /// A close by the judgment names the head, the verification, the

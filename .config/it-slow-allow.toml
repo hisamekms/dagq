@@ -1149,41 +1149,11 @@ name = "review_programs::a_program_that_ends_past_the_fence_starts_no_next_progr
 reason = "B 境界（supervisor の配線・program の job の process・SQLite）: 柵の後に終わった program の終わりだけを記録し、次の program も agent の review も始めずに review を保留して run を保留することを、実際の program の script と supervisor の thread で確かめる"
 task = 1524
 
-# 1.7s to 5.2s (stress 60s under the host's load of other runs, task 1524)
-[[test]]
-name = "runtime_already_satisfied::a_claim_whose_verification_runs_at_the_fence_is_parked_without_its_ask"
-reason = "B 境界（supervisor の配線・検証の command・SQLite・Git）: already_satisfied の主張の検証が走るあいだに柵を越えた run が検証の終わりを待ってその結果で approve_close を開かず、snapshot を保存して slot を返すことを、実際の検証の command と supervisor の thread で確かめる。保留の段の判断は domain::task_replan の unit test"
-task = 1524
-
-# 2.1s to 5.7s (stress 60s under the host's load of other runs, task 1524)
-[[test]]
-name = "runtime_already_satisfied::a_claim_waiting_for_its_close_answer_is_parked_and_the_answer_does_not_close_it"
-reason = "B 境界（supervisor の配線・ask・SQLite の transaction）: close の答えを待って lease の無い validating の run が保留され、柵の後の close の答えで task を閉じず、ask を保留の transaction で閉じ、close の transaction も拒むことを、実際の supervisor の経路と SQLite で確かめる。保留の段の判断は domain::task_replan の unit test"
-task = 1524
-
 # 6.2s to 6.9s (stress 60s under the host's load of other runs, task 1524, which moved only its Codex helpers' path)
 [[test]]
 name = "recovery_codex::a_no_claude_live_run_with_codex_held_asks_a_person_and_starts_no_recovery_job"
 reason = "B 境界（守る境界）: supervisor wiring and process: a live stub codex run's stalled alert comes while Codex is held in SQLite under --no-claude, no recovery job starts on either provider and the stalled ask tells a person why (the provider choice is a unit test in domain::provider_switch)"
 task = 1524
-
-# 9.317s (stress max), class B
-[[test]]
-name = "runtime_already_satisfied::a_verified_claim_is_closed_without_a_commit_by_the_answer"
-reason = "B 境界（守る境界）: supervisor wiring and Git: snapshot verify in a scratch worktree, the approve_close ask, the close on SQLite and the dependent's claim and landing; the close decision is satisfied::tests"
-task = 1820
-
-# 7.339s (stress max), class B
-[[test]]
-name = "runtime_already_satisfied::a_high_pass_on_the_snapshot_main_is_still_at_closes_the_claim_with_no_ask"
-reason = "B 境界（守る境界）: supervisor wiring, Git and SQLite: the judgment job's high pass closed in the close transaction with its lease and requested_by, then the dependent's claim and landing; the close decision is satisfied_judgment::tests"
-task = 2834
-
-# 11.025s (stress max), class B
-[[test]]
-name = "runtime_already_satisfied::a_close_answered_after_main_moved_verifies_the_new_head_first"
-reason = "B 境界（守る境界）: supervisor wiring: the answer applied by a running supervisor while another run holds a slot, main moved in Git, verified again in a free slot; the decision is satisfied::tests"
-task = 1820
 
 # 8.760s (stress max), class B
 [[test]]
@@ -1191,22 +1161,10 @@ name = "runtime_already_satisfied::after_a_restart_a_close_verifies_main_again_a
 reason = "B 境界（守る境界）: restart: a new supervisor reads the snapshot from SQLite events, verifies the moved Git main, a failed verify reopens the ask instead of closing, and retry and cancel move the task on SQLite (the answer mapping is satisfied::tests)"
 task = 1820
 
-# 9.196s (stress max), class B
-[[test]]
-name = "runtime_already_satisfied::a_verification_set_to_a_held_container_runs_nothing_on_the_host"
-reason = "B 境界（守る境界）: supervisor wiring with dagq.toml's [roles.verification] runtime in Git: nothing runs on the host while the container is held, the claim rests unleased on SQLite (recover refused, the queue's attention), and both the first verification and the one an answer runs again start once the host is back; the hold decision is satisfied::tests and integrate::tests"
-task = 1820
-
 # 8.216s (stress max), class B
 [[test]]
 name = "runtime_already_satisfied::a_verification_a_dead_supervisor_left_running_is_stopped_before_the_next"
 reason = "B 境界（守る境界）: real processes: a process left in the scratch worktree is listed and stopped by pid before the worktree is checked out again (one elsewhere left alone), recorded on SQLite; which processes are the run's is domain::recovery::run_processes"
-task = 1820
-
-# 9.903s (stress max under load 22; 3.4-4.4s otherwise), class B
-[[test]]
-name = "runtime_already_satisfied::a_claim_without_its_base_checks_is_an_invalid_receipt"
-reason = "B 境界（守る境界）: supervisor wiring: a real worker turn's receipt without base_checks is refused by the supervisor's validation on SQLite (run failed, receipt_invalid, nothing verified); the refusal itself is receipt::tests and validation::tests"
 task = 1820
 
 # 6.314s (stress max; 4.8s alone), class B

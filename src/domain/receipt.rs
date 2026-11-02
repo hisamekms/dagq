@@ -464,6 +464,14 @@ mod tests {
                 super::super::ReasonCode::ReceiptInvalid
             );
         }
+        // A receipt without the key has no base checks either.
+        let mut file = serde_json::to_value(with(serde_json::json!([]))).unwrap();
+        file.as_object_mut().unwrap().remove("base_checks");
+        let unkeyed = Receipt::parse(&file.to_string()).unwrap();
+        assert!(unkeyed.already_satisfied());
+        let error = unkeyed.check(&run()).unwrap_err();
+        assert_eq!(error, DomainError::BaseChecksMissing);
+        assert!(error.to_string().contains("base_checks"), "{error}");
         // A succeeded receipt reads no base checks.
         let succeeded = receipt(("not_applicable", "no surface"), ("passed", "reviewed"));
         assert!(!succeeded.already_satisfied());

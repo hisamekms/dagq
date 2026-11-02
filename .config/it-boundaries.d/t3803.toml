@@ -752,13 +752,6 @@ reason = "exec で引き継いだ supervisor が前の process の起こして�
 task = 3803
 
 [[boundary]]
-id = "satisfied-claim-verified-and-closed-by-answer"
-kind = "supervisorの配線"
-test = "runtime_already_satisfied::a_verified_claim_is_closed_without_a_commit_by_the_answer"
-reason = "worker の claim を main の head で検証し approve_close の ask を開き close の答えで commit なしに task を閉じて後続を claim するまでを、supervisor の pass と queue と実の検証の command をつないで確かめられるのは IT だけ。close の段の判断は satisfied::close_step の unit test"
-task = 3803
-
-[[boundary]]
 id = "satisfied-scratch-leftover-process-stopped"
 kind = "プロセス"
 test = "runtime_already_satisfied::a_verification_a_dead_supervisor_left_running_is_stopped_before_the_next"

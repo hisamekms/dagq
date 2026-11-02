@@ -690,4 +690,118 @@ mod tests {
         );
         assert!(!text.contains("Answer close"), "{text}");
     }
+
+    fn step(id: i64, kind: &str, payload: serde_json::Value) -> RunEvent {
+        RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    /// Which steps of a claim's course start a rest and which end one: the
+    /// claim's acceptance, a verification's end and a judgment's end start
+    /// one; the snapshot a verification starts on and a judgment's start
+    /// end it; a validation of no claim and any other event are no step.
+    #[test]
+    fn each_step_of_a_claim_starts_or_ends_its_rest() {
+        let head = json!({"head": S1, "passed": true});
+        for (kind, rests) in [
+            (event_kind::RUN_SATISFIED_VERIFIED, Some(true)),
+            (event_kind::RUN_SATISFIED_JUDGED, Some(true)),
+            (event_kind::RUN_SATISFIED_SNAPSHOT, Some(false)),
+            (event_kind::RUN_SATISFIED_REVIEW_STARTED, Some(false)),
+            (event_kind::RUN_CLAIMED, None),
+            (event_kind::ASK_OPENED, None),
+        ] {
+            assert_eq!(rests_after(&step(1, kind, head.clone())), rests, "{kind}");
+        }
+        let accepted = json!({"already_satisfied": true, "status": "validating"});
+        assert_eq!(
+            rests_after(&step(1, event_kind::VALIDATION_FINISHED, accepted)),
+            Some(true)
+        );
+        let validated = json!({"status": "validating"});
+        assert_eq!(
+            rests_after(&step(1, event_kind::VALIDATION_FINISHED, validated)),
+            None
+        );
+        let handed =
+            json!({"action": crate::domain::recovery::HAND_OFF_KIND, "status": "validating"});
+        assert_eq!(
+            rests_after(&step(1, event_kind::TRIAGE_FINISHED, handed)),
+            Some(true)
+        );
+    }
+
+    /// A claim waits for a person while one `approve_close` ask of it is
+    /// open: not once that ask is answered or closed (as a park closes it),
+    /// and not for an ask of another kind.
+    #[test]
+    fn a_claim_awaits_an_answer_while_its_close_ask_is_open() {
+        let opened = |id: i64, ask: i64, kind: &str| {
+            step(
+                id,
+                event_kind::ASK_OPENED,
+                json!({"ask_id": ask, "kind": kind}),
+            )
+        };
+        let open = [opened(1, 9, "approve_close")];
+        assert!(answer_awaited(&open));
+        for end in [event_kind::ASK_ANSWERED, event_kind::ASK_CLOSED] {
+            let ended = [open.to_vec(), vec![step(2, end, json!({"ask_id": 9}))]].concat();
+            assert!(!answer_awaited(&ended), "{end}");
+        }
+        assert!(!answer_awaited(&[opened(1, 9, "queue_hold")]));
+        let two = [
+            opened(1, 9, "approve_close"),
+            opened(2, 10, "approve_close"),
+            step(3, event_kind::ASK_ANSWERED, json!({"ask_id": 9})),
+        ];
+        assert!(answer_awaited(&two));
+        assert!(!answer_awaited(&[]));
+    }
+
+    /// An answered close that waits (for a slot, or for the container its
+    /// verification is set to) keeps the claim at rest, so recovery still
+    /// leaves it; the snapshot an answer verifies on again names the ask,
+    /// and a second judgment is counted as one more.
+    #[test]
+    fn an_answered_close_still_rests_and_its_snapshot_names_the_ask() {
+        let passed = json!({"head": S1, "passed": true});
+        let answered = [
+            step(
+                1,
+                event_kind::VALIDATION_FINISHED,
+                json!({"already_satisfied": true}),
+            ),
+            step(2, event_kind::RUN_SATISFIED_SNAPSHOT, passed.clone()),
+            step(3, event_kind::RUN_SATISFIED_VERIFIED, passed.clone()),
+            step(
+                4,
+                event_kind::ASK_OPENED,
+                json!({"ask_id": 3, "kind": "approve_close"}),
+            ),
+            step(5, event_kind::ASK_ANSWERED, json!({"ask_id": 3})),
+        ];
+        assert!(blocks_recovery(RunStatus::Validating, false, &answered));
+        assert!(!answer_awaited(&answered));
+        assert!(!awaits_verification(&answered));
+        assert!(awaits_verification(&answered[..1]));
+        assert_eq!(
+            snapshot_payload(&sha(S2), Some(AskId::new(3))),
+            json!({"head": S2, "ask_id": 3})
+        );
+        let twice = [
+            step(1, event_kind::RUN_SATISFIED_REVIEW_STARTED, passed.clone()),
+            step(2, event_kind::RUN_SATISFIED_JUDGED, passed.clone()),
+            step(3, event_kind::RUN_SATISFIED_REVIEW_STARTED, passed),
+        ];
+        assert_eq!(judgments(&twice), 2);
+    }
 }
