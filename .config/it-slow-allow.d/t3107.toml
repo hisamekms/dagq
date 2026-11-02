@@ -7,7 +7,7 @@ task = 3107
 # 5.757s in the worker's stress (median of 5, load average ~10)
 [[test]]
 name = "queue_binary::only_the_queues_binary_migrates_the_queue"
-reason = "境界（SQLite・プロセス）: 固定の binary の写しと開発中の binary を別のプロセスで走らせ、queue を作った binary だけが実の SQLite の schema を上げ、別の binary の migrate を断る経路"
+reason = "境界（SQLite・プロセス）: 固定の binary の写しと開発中の binary・run の runner の写しを別のプロセスで走らせ、queue の binary でない binary は service start・service serve を断られ、service が無ければ migrate・doctor・init は unreachable で終わり migrate --check は schema を答えず、queue の binary の service が動いていれば migrate はその service が実の SQLite の schema を上げるユースケースとして通る経路"
 task = 3107
 
 # 5.97s to 7.29s (stress 5, median 6.71s, load average ~17)

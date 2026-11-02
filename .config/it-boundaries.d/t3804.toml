@@ -188,7 +188,7 @@ task = 3804
 id = "migrate-explicit-and-older-binaries-work-within-the-floor"
 kind = "SQLite"
 test = "cli_version::migrate_is_explicit_and_older_binaries_keep_working_within_the_floor"
-reason = "古い schema の実の queue の file に変更のコマンドが migrate を求め、読むだけのコマンドは file を変えずに読み、migrate の後も下限の中の古い binary の copy が同じ file で働くことは、実の SQLite の file と別の binary の process でしか確かめられない。互換の下限の判断は migration の unit test"
+reason = "古い schema の実の queue の file に変更のコマンドも読むだけのコマンド（list・show・status）も migrate を求めて断られ、migrate の後も下限の中の古い binary の copy が同じ file で働くことは、実の SQLite の file と別の binary の process でしか確かめられない。互換の下限の判断は migration の unit test"
 task = 3804
 
 [[boundary]]
