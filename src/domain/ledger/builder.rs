@@ -92,7 +92,8 @@
 //!   mark of its position ([`super::session::written`]): a write that fails
 //!   or a fold behind the stored row leaves its rows marked and no mark.
 //!   Only a builder whose session book is the fold of every session event
-//!   (from its cursors' start, or gone on from the mark) writes the mark,
+//!   (from its cursors' start, or gone on from a position no later than
+//!   the mark's, W or R) writes the mark,
 //!   and only when no session row is left marked
 //!   ([`Builder::sessions_mark`]), so that the store's session rows record
 //!   every session event up to the position the mark gives (W,
@@ -145,9 +146,11 @@
 //!   settled and the rows settled as dropped in place of all [`Kept`]
 //!   made of the session events up to that position
 //!   ([`Builder::restore_sessions`]); a builder going on from there writes
-//!   the rows of every event only when the store's session rows record
-//!   every session event up to it, which the rows' heads do not say and
-//!   the store's mark does (W, held at by [`SessionsHeld::written_at`]).
+//!   the rows of every event and the marks only when the store's session
+//!   rows record every session event up to it, which the rows' heads do
+//!   not say and the store's mark does: at any position no later than W,
+//!   W itself or the R before it a builder goes on from
+//!   ([`SessionsHeld::within`]).
 //!   So is which queue row each is a
 //!   record of ([`QueueBook`]: the findings, alerts and streams open, what
 //!   the supervisors' lives reach, the landing slot's attempts and what
@@ -903,9 +906,9 @@ pub struct Builder {
     /// cursors' start ([`Self::sweep`]).
     swept: bool,
     /// Whether its session book and records are the fold of every session
-    /// event up to its cursor: from its cursors' start, or gone on from the
-    /// store's mark ([`SessionsHeld::written`]); not once made again from
-    /// the rows' heads at a position not the mark's. Only then does it
+    /// event up to its cursor: from its cursors' start, or gone on from a
+    /// position no later than the store's mark ([`SessionsHeld::written`]);
+    /// not once made again from the rows' heads past it. Only then does it
     /// write the mark ([`Self::sessions_mark`]).
     sessions_whole: bool,
     /// The last marks it wrote, or the session rows' it went on from.
@@ -1679,10 +1682,12 @@ impl Builder {
     /// the cursor is tracked and settles as the fold of every event's does,
     /// and one folded by an older version is folded again ([`writes`]);
     /// a builder with marks refuses a queue book
-    /// ([`Self::restore_queue_rows`]), so that is taken first. Held at the
-    /// store's mark ([`SessionsHeld::written_at`]) it keeps the fold of
-    /// every session event and writes the mark again as it goes on; held
-    /// at any other position it writes no mark ([`Self::sessions_mark`]).
+    /// ([`Self::restore_queue_rows`]), so that is taken first. Held at a
+    /// position no later than the store's mark W ([`SessionsHeld::written`],
+    /// W itself or the R it went on from, [`Self::go_on_from_rows`], taken
+    /// after it) it keeps the fold of every session event and writes the
+    /// marks again once it has caught up; held past W or with no W it
+    /// writes no mark ([`Self::sessions_mark`]).
     pub fn restore_sessions(&mut self, held: SessionsHeld, records: Vec<RunEvent>) {
         self.marks.extend(
             held.open
@@ -1741,8 +1746,8 @@ impl Builder {
     /// The marks of its cursors a pass writes with its session rows: the
     /// session rows' ([`SessionsWritten`], W) only while its session book
     /// and records are the fold of every session event (from its cursors'
-    /// start, or gone on from the store's mark, its cursor moved only as it
-    /// read the events since) and no session row is left marked or to be
+    /// start, or gone on from a position no later than the store's mark W,
+    /// W or R, its cursor moved only as it read the events since) and no session row is left marked or to be
     /// built (all it changed are written or the store holds them as
     /// folded); with it the other rows' ([`RowsWritten`], R,
     /// [`Self::rows_written`]) when it gives one. None when it wrote these
@@ -1764,7 +1769,8 @@ impl Builder {
         (self.marks_written != Some(marks)).then_some(marks)
     }
 
-    /// The session rows' mark it last wrote or went on from.
+    /// The session rows' mark it last wrote or the position it went on
+    /// from (W, or R before it, which the store's mark is not).
     pub fn sessions_mark_written(&self) -> Option<SessionsWritten> {
         self.marks_written.map(|marks| marks.sessions)
     }
@@ -1817,8 +1823,10 @@ impl Builder {
     /// marks follow every input: every row an input up to it made dirty is
     /// written, so none of them is marked. What it keeps of the inputs up
     /// to there is made again from the store's rows apart, its session
-    /// book too: it writes W and R again only once that book is the fold
-    /// of every session event up to its cursor ([`Self::sessions_mark`]).
+    /// book too, taken after this at `from` ([`Self::restore_sessions`]):
+    /// it writes W and R again only once that book is the fold of every
+    /// session event up to its cursor ([`Self::sessions_mark`]), as one
+    /// made at `from` no later than W is.
     pub fn go_on_from_rows(&mut self, from: Cursors) {
         self.events = from.events;
         self.samples = from.samples;

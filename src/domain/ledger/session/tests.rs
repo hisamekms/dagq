@@ -192,3 +192,34 @@ fn a_row_settled_by_an_older_version_is_held_open() {
     assert!(!held.settled.contains(&key.to_owned()));
     assert_eq!(held.book, book_of(&log.events[..position]));
 }
+
+/// The rows held at a position no later than the store's mark W are the
+/// fold of every session event up to it (W itself, or a position before
+/// it such as R), held as [`SessionsHeld::at`] holds them; past W, or with
+/// no W, they are not.
+#[test]
+fn the_rows_held_no_later_than_w_are_the_fold_of_every_event() {
+    let (log, position) = across();
+    let rows = session_rows(&log.events, BUILT);
+    let heads: Vec<LedgerHead> = rows.iter().map(LedgerHead::of).collect();
+    let anchors = anchors(&rows);
+    let w = log.events[position].id;
+    for (upto, whole) in [
+        (position - 1, true),
+        (position + 1, true),
+        (position + 2, false),
+    ] {
+        let through = log.events[upto - 1].id;
+        let held = SessionsHeld::within(&heads, &anchors, through, Some(w));
+        assert_eq!(held.written, whole, "{through:?}");
+        assert_eq!(held.book, book_of(&log.events[..upto]), "{through:?}");
+        assert_eq!(
+            held,
+            SessionsHeld {
+                written: whole,
+                ..SessionsHeld::at(&heads, &anchors, through)
+            }
+        );
+        assert!(!SessionsHeld::within(&heads, &anchors, through, None).written);
+    }
+}

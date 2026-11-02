@@ -479,7 +479,8 @@ fn write_sessions(
     if pending.rows.is_empty() {
         match mark {
             None => return Ok(written),
-            // R alone moved: the session rows' mark as the store holds it.
+            // R alone moved: the session rows' mark as the store holds it
+            // (a builder gone on from R before W reads past W before it).
             Some(marks) if builder.sessions_mark_written() == Some(marks.sessions) => {
                 store.write_ledger_marks(&marks)?;
                 builder.wrote_sessions_mark(marks);
@@ -749,10 +750,12 @@ pub fn rows_written(store: &dyn LedgerQueue) -> Result<Option<Cursors>> {
 /// those not settled at the cursor, so that what it keeps of the sessions
 /// settled is their records' ids. The rows give the fold of every event
 /// only when the store's session rows record every session event up to
-/// the cursor: when the cursor is the position W the store's mark gives
-/// ([`written_through`]) they are held at W
-/// ([`SessionsHeld::written_at`]) and the builder writes the mark again
-/// as it goes on; at any other cursor it writes none.
+/// the cursor: when the cursor is no later than the position W the
+/// store's mark gives ([`written_through`]), W itself or the R it went on
+/// from ([`Builder::go_on_from_rows`]), they are held as the fold of every
+/// session event up to it ([`SessionsHeld::within`]) and the builder
+/// writes the marks again once it has caught up; at a cursor past W, or
+/// with no W, it writes none.
 #[cfg_attr(
     not(test),
     expect(
@@ -763,12 +766,8 @@ pub fn rows_written(store: &dyn LedgerQueue) -> Result<Option<Cursors>> {
 pub fn restore_sessions(store: &dyn LedgerQueue, builder: &mut Builder) -> Result<()> {
     let heads = store.ledger_heads(LedgerKind::Session)?;
     let anchors = store.ledger_session_anchors()?;
-    let held =
-        if written_through(store.sessions_written()?.as_ref(), &heads) == Some(builder.events) {
-            SessionsHeld::written_at(&heads, &anchors, builder.events)
-        } else {
-            SessionsHeld::at(&heads, &anchors, builder.events)
-        };
+    let w = written_through(store.sessions_written()?.as_ref(), &heads);
+    let held = SessionsHeld::within(&heads, &anchors, builder.events, w);
     let mut records = Vec::new();
     for key in &held.open {
         if let Some(row) = store.ledger_row(LedgerKind::Session, key)? {

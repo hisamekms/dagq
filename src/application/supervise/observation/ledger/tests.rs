@@ -4347,6 +4347,75 @@ fn a_builder_whose_marks_do_not_follow_every_input_leaves_r() {
     assert_eq!(r_of(&memory), r);
 }
 
+/// On a store a pass left task rows past [`WRITES_PER_PASS`] with R
+/// before W (R.events < W), a new builder going on from R
+/// ([`Builder::go_on_from_rows`]) with the session rows held there
+/// ([`restore_sessions`]) keeps the fold of every session event: it writes
+/// the session rows of every event (the session events between R and W
+/// read again give no round twice, and a late record after W is not
+/// missed) and, once caught up, moves W and R to its cursors. One whose
+/// rows are held past W writes no mark.
+#[test]
+fn going_on_from_r_before_w_writes_the_rows_of_every_event_and_moves_both_marks() {
+    let (log, position) = sessions_behind_tasks();
+    for upto in [position, position + 2, log.events.len()] {
+        let memory = Memory::default();
+        memory.events.replace(log.events[..upto].to_vec());
+        let built = pass(&memory, &mut Builder::default(), LATER);
+        assert_eq!(built.failure, None, "{upto}");
+        assert!(built.backlog > 0, "{upto}: the task rows lag");
+        let w = sessions_written_through(&memory).unwrap().unwrap();
+        assert_eq!(w, id_at(&log, upto), "{upto}");
+        let r = r_of(&memory);
+        assert!(r.events < w, "{upto}");
+        // Session events lie between R and W.
+        assert!(
+            log.events
+                .iter()
+                .any(|event| event.id > r.events && event.id <= w && event.task_id.is_none()),
+            "{upto}"
+        );
+
+        memory.events.replace(log.events.clone());
+        let mut builder = Builder::default();
+        builder.go_on_from_rows(r);
+        restore_sessions(&memory, &mut builder).unwrap();
+        assert_eq!(builder.events, r.events);
+        let built = drain(&memory, &mut builder, LATER + 1);
+        assert_eq!(built.failure, None, "{upto}");
+        assert!(
+            are_of_every_event(&rows_of_kind(&memory, LedgerKind::Session), &log),
+            "{upto}"
+        );
+        assert_eq!(
+            sessions_written_through(&memory).unwrap(),
+            Some(log.last()),
+            "{upto}"
+        );
+        assert_eq!(r_of(&memory), builder.cursors(), "{upto}");
+        assert_eq!(r_of(&memory).events, log.last(), "{upto}");
+    }
+
+    // Held past W: no mark moves.
+    let upto = position;
+    let memory = Memory::default();
+    memory.events.replace(log.events[..upto].to_vec());
+    pass(&memory, &mut Builder::default(), LATER);
+    let w = sessions_written_through(&memory).unwrap();
+    let r = r_of(&memory);
+    memory.events.replace(log.events.clone());
+    let mut past = Builder::default();
+    past.go_on_from_rows(Cursors {
+        events: id_at(&log, upto + 2),
+        ..r
+    });
+    restore_sessions(&memory, &mut past).unwrap();
+    let built = passes_to_drain(&memory, &mut past, LATER + 1);
+    assert_eq!(built.failure, None);
+    assert_eq!(sessions_written_through(&memory).unwrap(), w);
+    assert_eq!(r_of(&memory), r);
+}
+
 /// The rows a fold of every input writes at `secs` ([`drain`] from the
 /// cursors' start) of the events, node samples and windows of `memory`.
 fn rows_of_every_input(memory: &Memory, secs: i64) -> BTreeMap<(LedgerKind, String), LedgerRow> {

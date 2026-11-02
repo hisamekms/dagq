@@ -251,10 +251,14 @@ pub fn anchors(rows: &[LedgerRow]) -> Vec<(String, RunEvent)> {
 /// store has not written yet, or a record it has not written to a row,
 /// is not in the heads, and a builder going on from `through` misses it.
 /// Which `through` the store has written up to it does not find: the
-/// store's mark does ([`written::written_through`], W), and the
-/// rows held at W ([`Self::written_at`]) are the fold of every event.
-/// Going on from W is safe whatever the store wrote after its mark: the
-/// records after W are cut here, and the builder reads those events again.
+/// store's mark does ([`written::written_through`], W). The store's
+/// session rows record every session event up to W, so they record every
+/// one up to any position no later than W too, and the rows held at such
+/// a position ([`Self::within`], the R of the store's mark among them)
+/// are the fold of every event up to it; held past W they are not. Going
+/// on from such a position is safe whatever the store wrote after it: the
+/// records after it are cut here, and the builder reads those events
+/// again, each to the row and round the fold of every event gives it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionsHeld {
     pub through: EventId,
@@ -264,9 +268,9 @@ pub struct SessionsHeld {
     /// The keys of the rows not settled at `through` or folded by an
     /// older version.
     pub open: Vec<String>,
-    /// Whether `through` is the store's mark (W): a builder that takes the
-    /// rows held keeps the fold of every session event, and writes the
-    /// mark again ([`super::builder::Builder::sessions_mark`]).
+    /// Whether `through` is no later than the store's mark (W): a builder
+    /// that takes the rows held keeps the fold of every session event, and
+    /// writes the mark again ([`super::builder::Builder::sessions_mark`]).
     pub written: bool,
 }
 
@@ -314,17 +318,19 @@ impl SessionsHeld {
         held
     }
 
-    /// The rows held at `written`, the position the store's mark gives
-    /// ([`written::written_through`]), as [`Self::at`] holds them:
-    /// those of the fold of every session event up to it.
-    pub fn written_at(
+    /// The rows held at `through` as [`Self::at`] holds them, with `w` the
+    /// position the store's mark gives ([`written::written_through`]):
+    /// those of the fold of every session event up to `through` when it is
+    /// no later than W ([`Self::written`]), whether it is W or before it.
+    pub fn within(
         heads: &[LedgerHead],
         anchors: &[(String, RunEvent)],
-        written: EventId,
+        through: EventId,
+        w: Option<EventId>,
     ) -> Self {
         Self {
-            written: true,
-            ..Self::at(heads, anchors, written)
+            written: w.is_some_and(|w| through <= w),
+            ..Self::at(heads, anchors, through)
         }
     }
 
