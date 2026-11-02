@@ -41,7 +41,7 @@ set -u
 me=check-scripts-root
 
 # The check scripts that take their root from the cwd's git work tree.
-scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-frontmatter-dates check-design-docs check-design-sentences check-test-rules check-it-added-tests check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages check-local-gates check-it-budget"
+scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-frontmatter-dates check-design-docs check-design-sentences check-design-identifiers check-test-rules check-it-added-tests check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages check-local-gates check-it-budget"
 
 # "<script> <case>": each case puts one violation of the script into the
 # clone (the cwd) with violate_<case>.
@@ -55,6 +55,7 @@ check-design-docs design_doc_too_big
 check-design-docs design_doc_tight_too_big
 check-design-docs design_doc_tight_item_removed
 check-design-sentences design_doc_two_sentences_on_a_line
+check-design-identifiers design_doc_row_of_identifiers
 check-test-rules test_own_wait_for_a_file
 check-it-added-tests it_test_without_boundary
 check-doc-links doc_broken_link
@@ -119,6 +120,13 @@ violate_design_doc_tight_item_removed() {
 # the violation is a line added to a document HEAD has.
 violate_design_doc_two_sentences_on_a_line() {
   echo 'check-scripts-rootの一つ目の文。同じ行の二つ目の文。' >>docs/design/README.md
+}
+
+# The script checks only the lines added since the merge base with main, so
+# the violation is a line of many inline code spans added to a document HEAD
+# has.
+violate_design_doc_row_of_identifiers() {
+  awk 'BEGIN { s = ""; for (i = 1; i <= 20; i++) s = s "`zz" i "`・"; print "check-scripts-rootの" s "の行。" }' >>docs/design/README.md
 }
 
 # The script checks only the lines added since the merge base with main, so

@@ -436,7 +436,7 @@ paths = ["src/**", "tests/**", "migrations/**", "build.rs", "Cargo.toml", "Cargo
 # 挙げるのはCIがmainで流す形式の検査で、scripts/check-scripts-root.shの一覧に入り（landing branchのscriptを一時の場所に写し、
 # cwdをrunのworktreeにして流す約束を満たす）、cargo・nextestを実行せず、3回の測定の最大が10秒以下で今のmainでexit 0になるものだけ。
 # build・testを流すもの（ADR-t1895-2決定1）、10秒を超えるもの、今のmainで落ちるもの（関係ないrunまで差し戻す）は挙げない。
-# 引数はCIと同じにし（CIが--baseを渡すcheck-design-docs・check-design-sentences・check-test-rules・check-it-added-testsはscriptの既定の基点を使う）、--self-testは挙げない。
+# 引数はCIと同じにし（CIが--baseを渡すcheck-design-docs・check-design-sentences・check-design-identifiers・check-test-rules・check-it-added-testsはscriptの既定の基点を使う）、--self-testは挙げない。
 # 秒は2026-10-12に他のrunと並んだhostで3回測った最大で、順はその小さいものから。
 
 # .config/e2e-quarantine.tomlの書式・重複・上限と、印のtestがtests/e2e.rsかtests/e2e/にあること。最大約0.1秒。
@@ -472,6 +472,14 @@ paths = ["**"]
 # 既存の行は検査しないので既存の文書の違反では落ちない。基点は既定（HEADとmainのmerge base）。最大約0.4秒。
 [review.programs.check-design-sentences]
 script = "scripts/check-design-sentences.sh"
+paths = ["docs/design/**"]
+
+# docs/designの文書の差分が足した・変えた行のうち、inline codeの多い行と、inline codeを含む箇条が続く塊
+# （documents.mdのdesignの「4層」と「検査の境界」）。地図の層を越えた識別子の並びと場面ごとの列挙を、
+# 層を判定するagentより前に安く返す。変えていない行は検査しないので既存の文書の違反では落ちないが、変えた行は検査する。基点は既定。
+# 閾値と較正はscriptの冒頭。最大約0.2秒（2026-11-02に3回測った）。
+[review.programs.check-design-identifiers]
+script = "scripts/check-design-identifiers.sh"
 paths = ["docs/design/**"]
 
 # tests/の.rsの行数の上限。最大約0.7秒。

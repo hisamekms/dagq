@@ -205,8 +205,8 @@ PROGRAMS_KIND = "review_programs_finished"
 # The programs that check documents (docs/, the root .md files) among
 # [review.programs.*]; any other name, a retired one too, is not a document's.
 # docs/plans/docs-reduction.md lists the same names.
-DOC_PROGRAMS = ("check-doc-frontmatter", "check-design-docs", "check-design-sentences", "check-doc-links",
-                "check-frontmatter-dates", "check-adr-numbers", "check-agents-md-size")
+DOC_PROGRAMS = ("check-doc-frontmatter", "check-design-docs", "check-design-sentences", "check-design-identifiers",
+                "check-doc-links", "check-frontmatter-dates", "check-adr-numbers", "check-agents-md-size")
 # A path a reason names that makes it a docs reason: one under docs/, a .md
 # under plugins/, the root AGENTS.md or README.md. It starts a word: not after
 # a letter, digit, `_`, `.`, `-` or `/` (so not src/docs/ nor a/README.md);
