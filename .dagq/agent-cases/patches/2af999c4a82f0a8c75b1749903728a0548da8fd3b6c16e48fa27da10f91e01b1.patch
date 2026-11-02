@@ -1,0 +1,12 @@
+diff --git a/docs/design/measurement.md b/docs/design/measurement.md
+index a596c8632..445791cbb 100644
+--- a/docs/design/measurement.md
++++ b/docs/design/measurement.md
+@@ -111,6 +111,7 @@ claimの前の待ちの理由はsupervisor単位の区間をtaskの区間に重
+   控えはqueueの全てのsupervisorのclaimを止めるので、taskに重ねるときは区間のsupervisorに依らずqueueの待ちとして読む。
+ - **`claim_deferral`**: 既存の`claim_deferred` / `claim_deferral_ended`（taskの控え）が区間の始まりと終わりを兼ねる。
+   終わりは`stats`の`claim_deferrals`の`by_end`と同じ規則（`domain::claim_defer::deferral_spans`）。
++- **taskのhold**: readyの間の`task_held`から同じholdの`task_released`までは、readyに重ねず工程`held`（runの`held`と同じタグ）にする（`domain::task_hold::task_hold_spans`）。
+ - **`run_claimed`の欄**: claimが書く欄と意味は`domain::claim_facts`のmodule docが持つ。
+   supervisorは候補ごとの値をclaimに渡し、claimは取ったtaskの値だけを残す。
+ - **`blocked_by`**: 着地の順番だけを待つ間の`run_phase_changed`（工程`landing_queue`）は、そのとき着地slotを握っていたrunを`blocked_by`に持ち、握るrunが変われば記録し直す。
