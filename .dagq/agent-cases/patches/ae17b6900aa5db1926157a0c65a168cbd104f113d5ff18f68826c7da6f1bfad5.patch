@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/SKILL.md b/plugins/claude-dagq/skills/dagq/SKILL.md
+index c398a1ec7..156b7c932 100644
+--- a/plugins/claude-dagq/skills/dagq/SKILL.md
++++ b/plugins/claude-dagq/skills/dagq/SKILL.md
+@@ -39,7 +39,7 @@ Skip the goal only for a one-shot task that finishes the problem by itself; when
+ Collect title, description, acceptance, constraints, doc, priority and tags (what each holds, and draft goals: `reference/register.md`).
+ 
+ ```sh
+-"$DAGQ" goal add "TITLE" --description "..." --acceptance "..." --constraints "..." --doc PATH/TO/DECISION.md \
++"$DAGQ" goal add "TITLE" --description "..." --acceptance "..." --constraints "..." --doc docs/adr/<accepted_on>-t<task>-<n>-<slug>.md \
+   --priority high --tag TAG
+ ```
+ 

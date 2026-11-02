@@ -1,0 +1,13 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..743245849 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -9,7 +9,7 @@
+ # CARGO_INCREMENTAL も変えない（切っても run 間の hit は増えず、worker の繰り返しの build が遅くなる）。
+ # sccache は人が `mise use -g sccache` で入れ、~/.local/bin/sccache に mise の shim への link を置く。
+ # 見つからなければ up・claim・integrate が止まり、inbox に install tool が出る（決定 8・9）。
+-RUSTC_WRAPPER = "sccache"
++# RUSTC_WRAPPER = "sccache"  # cache が当たらない日があるので外す
+ # server と話せないときは rustc を直接実行し、cache が効かないだけで build を失敗させない。
+ SCCACHE_IGNORE_SERVER_IO_ERROR = "1"
+ # run ごとの cargo の並列度（CARGO_BUILD_JOBS・RUST_TEST_THREADS・NEXTEST_TEST_THREADS）は、

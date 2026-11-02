@@ -1,0 +1,17 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..d418d4079 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -388,6 +388,12 @@ max = 0.02
+ # [e2e] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 965 を含んでから足した。
+ paths = ["src/infrastructure/adapters.rs", "src/infrastructure/adapters/ref_transaction.rs", "src/infrastructure/adapters/run_clones.rs", "src/infrastructure/process.rs", "src/application/worktree_processes.rs", "src/infrastructure/sessions.rs", "src/infrastructure/launchd.rs", "src/application/lifecycle.rs", "src/application/supervise/host_ops/handoff.rs", "src/application/supervise/execution/handoff_slots.rs", "src/application/integrate.rs", "src/application/integrate/**", "src/application/install.rs", "src/infrastructure/binaries.rs", "src/application/update.rs", "src/application/supervise/host_ops/update.rs", "src/infrastructure/e2e_gate.rs", "src/application/actor_executor.rs", "src/application/session.rs", "src/application/headless_session.rs", "src/infrastructure/claude.rs", "src/infrastructure/codex.rs", "tests/e2e.rs", "tests/e2e/**"]
+ 
++[[e2e.quarantine]]
++name = "launchd_up_and_down_round_trip"
++reason = "launchd の起動が遅い host で落ちる"
++task = 4012
++until = 2026-11-20
++
+ # Review の検査項目と参照先は .dagq/agents/<agent>/AGENT.md（ADR-t1453-1、置き場は ADR-t1728-1）。
+ # 固定バイナリが task 1455 を含むことを着手時に確認し、着地の verify でも検査する。
+ # 文書の照合は全体の review だけが持ち、このrepositoryの規則は .dagq/review/builtin-acceptance.md に置く（ADR-t2389-1）。

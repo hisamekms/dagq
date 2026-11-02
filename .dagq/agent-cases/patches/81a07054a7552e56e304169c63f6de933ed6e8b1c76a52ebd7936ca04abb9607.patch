@@ -1,0 +1,13 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..627dbb695 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -56,7 +56,7 @@ paths = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "build.rs", "ru
+ runtime_planners = 2
+ # 同時に走らせる run の数（既定 4）。上の [run.env] の CARGO_BUILD_JOBS・RUST_TEST_THREADS・
+ # NEXTEST_TEST_THREADS は並列 3 を前提に決めたので、変えるときはそれらと合わせて見直す。
+-# up に --parallel を付けるとその値がここより優先して登録に焼き込まれ、この parallel を読まなくなる（優先は key ごと）ので付けない。
++# up には --parallel を付けない。付けるとその値がここより優先して登録に焼き込まれ、この parallel を読まなくなる（優先は key ごと）。
+ # 待ちの上限 max_waiting は既定の 4 のままなので書かない。
+ parallel = 3
+ # 着地の順番を待つだけの run が空けた枠で claim してよい軽い change（ADR-t1591-1、goal 104。振る舞いは

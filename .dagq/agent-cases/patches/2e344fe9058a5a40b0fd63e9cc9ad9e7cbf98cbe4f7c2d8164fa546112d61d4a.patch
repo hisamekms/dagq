@@ -1,0 +1,12 @@
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md b/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md
+index 6e50197e7..bb402f169 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md
+@@ -1,6 +1,6 @@
+ # A `stalled` ask: `wait`, `stop`, `propose`, and an instruction
+ 
+-Read this to carry out, on the person's word, the answer to a `stalled` ask (the `dagq-recover` skill, section 7).
++Read this to carry out, on the person's word, the answer to a `stalled` ask (the `dagq-recover` skill, section 7). It never needs the run's worktree.
+ 
+ ## A headless run's `stalled` ask
+ 

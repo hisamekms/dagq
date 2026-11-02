@@ -1,0 +1,8 @@
+diff --git a/.config/slack.toml b/.config/slack.toml
+new file mode 100644
+index 000000000..03d40993f
+--- /dev/null
++++ b/.config/slack.toml
+@@ -0,0 +1,2 @@
++# 毎日のレポートを人の Slack の channel に送る incoming webhook。
++webhook_url = "https://hooks.slack.com/services/T0DAGQOPS/B0REPORTS/dagqDailyReportHookX"

@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/goal-close.md b/plugins/claude-dagq/skills/dagq/reference/goal-close.md
+index d363cb9f4..16ab01c5b 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/goal-close.md
++++ b/plugins/claude-dagq/skills/dagq/reference/goal-close.md
+@@ -2,6 +2,8 @@
+ 
+ A goal is closed once. Closing it after its last task is not a planner's step: the supervisor's headless **goal review** job judges it.
+ 
++The job's design: `docs/design/supervisor-lifecycle/goal-review.md`.
++
+ ## The goal review job
+ 
+ It comes once every task of an open goal is finished (at least one of its own `completed`, none `draft`, `submitted`, `ready` or `in_progress`, and every task that replaced a `replaced` one ended) and its follow-ups are settled ("When a goal may close achieved" below). It returns one verdict:

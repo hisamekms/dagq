@@ -1,0 +1,15 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/inspect.md b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+index 2ae28b17f..32ab12f8c 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/inspect.md
++++ b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+@@ -104,6 +104,10 @@ Fix a draft or submitted task in place instead of canceling it and registering i
+ - Fix a proposal while it is sent back (`draft`) rather than while it is `submitted`: a review already running may pass the old text. A `ready` task changes only through plan review or by taking it back with `draft ID`.
+ - Priority, goal and dependencies have their own commands: `set-priority`, `set-goal`, `dependency add|remove`.
+ 
++```sh
++"$DAGQ" edit 12 --verify 'cargo fmt --all --check' --verify 'cargo test --locked --test plugin'
++```
++
+ ## Withdraw a proposal (`proposal withdraw`)
+ 
+ Its planner (or a person) withdraws a proposal with `"$DAGQ" proposal withdraw ID` when the plan is dropped or reshaped, or when a sent-back proposal cannot be resubmitted (`EmptyProposal`: its drafts were all readied by hand or canceled). Its `submitted` tasks go back to `draft` (tasks in other states stay as they are): submit them in another proposal, `cancel` them, or leave them.

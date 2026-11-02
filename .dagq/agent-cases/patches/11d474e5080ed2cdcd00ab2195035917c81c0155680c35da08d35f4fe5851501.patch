@@ -1,0 +1,12 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/scope.md b/plugins/claude-dagq/skills/dagq/reference/scope.md
+index 79e1ce325..f6ee99b27 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/scope.md
++++ b/plugins/claude-dagq/skills/dagq/reference/scope.md
+@@ -16,6 +16,7 @@ The checks and paths each kind of change takes are the repository's own rules. R
+ | The plugin's or tool's own docs, when a test reads them | their globs plus the docs' | that test | none |
+ | Code | none (it may touch anything) | the repository's format, lint and full test or coverage gate (one command that runs every test, so no second whole test run) | none (the diff decides `e2e`, below) |
+ | Scripts and CI | as the repository says | as the repository says | none |
++| Database migrations | as the repository says | the repository's migration check, if it names one | none |
+ 
+ A task that changes several of these takes the heaviest row's verification. The row is chosen by what the task changes, not by its `--change`: the same code change may be a feature, a fix or a refactor.
+ 

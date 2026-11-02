@@ -1,0 +1,10 @@
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md b/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md
+index 4db587dec..a08f57389 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/triage-by-hand.md
+@@ -23,4 +23,4 @@ Attention `recover by hand`: an older runtime's record of a live run's failed re
+ 
+ ## Broken verification command with committed work
+ 
+-Read `"$DAGQ" show ID --full` and the run's verification log. If the command itself is wrong (it needs a tool the host lacks), ask the person for the corrected one. Only user or inbox, once the latest run has ended and no live run remains: `"$DAGQ" edit ID --verify 'correct command'` (`edit --help`), check the old and new values with `show --full`, then answer the open `decide` ask with the exact option `edit the task's --verify, then retry_inherit`. Edit before answering. Never use `retry` to discard committed work for this correction.
++Read `"$DAGQ" show ID --full` and the run's verification log. If the command itself is wrong (it needs a tool the host lacks), ask the person for the corrected one. For the task 572 / ask 154, 159, 160 case, the command needed `tomllib`, which the host's `python3` lacked. Only user or inbox, once the latest run has ended and no live run remains: `"$DAGQ" edit ID --verify 'correct command'` (`edit --help`), check the old and new values with `show --full`, then answer the open `decide` ask with the exact option `edit the task's --verify, then retry_inherit`. Edit before answering. Never use `retry` to discard committed work for this correction.

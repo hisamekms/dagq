@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/SKILL.md b/plugins/claude-dagq/skills/dagq/SKILL.md
+index c398a1ec7..6ff0e82d0 100644
+--- a/plugins/claude-dagq/skills/dagq/SKILL.md
++++ b/plugins/claude-dagq/skills/dagq/SKILL.md
+@@ -54,7 +54,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
+ ```sh
+ "$DAGQ" add "TITLE" --goal 1 \
+   --description "..." --acceptance "..." --context "..." \
+-  --verify "CHECK" --verify "TEST" \
++  --verify "cargo clippy --locked --all-targets -- -D warnings" --verify "TEST" \
+   --change feature --depends-on 3
+ "$DAGQ" lint ID...               # the fixed rules; each violation {code, task_id, reason}
+ "$DAGQ" submit ID...             # or --goal GOAL; prints the proposal

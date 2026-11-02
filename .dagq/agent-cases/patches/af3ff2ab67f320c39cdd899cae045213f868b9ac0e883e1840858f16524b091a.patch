@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md b/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md
+index 6e50197e7..0407a7496 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/stalled.md
+@@ -2,6 +2,8 @@
+ 
+ Read this to carry out, on the person's word, the answer to a `stalled` ask (the `dagq-recover` skill, section 7).
+ 
++The recovery job's turn without a receipt: `docs/design/supervisor-lifecycle/background-recovery-job.md`.
++
+ ## A headless run's `stalled` ask
+ 
+ A run's session is headless, with no screen and no workspace. Nothing is typed into that session, by hand or by any command: the answer is all it takes.

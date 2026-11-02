@@ -1,0 +1,18 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..53a11b65e 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -54,11 +54,11 @@ paths = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "build.rs", "ru
+ # 入れ替えてから足す（規則は docs/design/supervisor-lifecycle/run-environment.md の [supervisor] の項、
+ # runtime_planners と parallel を足した順序は docs/plans/operation-rules-history.md）。
+ runtime_planners = 2
+-# 同時に走らせる run の数（既定 4）。上の [run.env] の CARGO_BUILD_JOBS・RUST_TEST_THREADS・
++# 同時に走らせる run の数（既定 4）。変えたら着地の後に dagq up し直すまで効かない。上の [run.env] の CARGO_BUILD_JOBS・RUST_TEST_THREADS・
+ # NEXTEST_TEST_THREADS は並列 3 を前提に決めたので、変えるときはそれらと合わせて見直す。
+ # up に --parallel を付けるとその値がここより優先して登録に焼き込まれ、この parallel を読まなくなる（優先は key ごと）ので付けない。
+ # 待ちの上限 max_waiting は既定の 4 のままなので書かない。
+-parallel = 3
++parallel = 2
+ # 着地の順番を待つだけの run が空けた枠で claim してよい軽い change（ADR-t1591-1、goal 104。振る舞いは
+ # docs/design/supervisor-lifecycle/claim-hold.md の「着地待ちが空けた軽い枠」、値は下の [tasks] changes の中のもの）。
+ # 着地は直列なので slot が着地待ちで埋まり、作業中の worker が 0 で claim が止まった（2026-10-03 23:36 JST）。

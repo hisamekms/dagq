@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/authority.md b/plugins/claude-dagq/skills/dagq/reference/authority.md
+index 9180ef838..d37970d2c 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/authority.md
++++ b/plugins/claude-dagq/skills/dagq/reference/authority.md
+@@ -2,6 +2,8 @@
+ 
+ Read this when the binary refuses a command, or before doing on a person's word something your role may not do.
+ 
++The binary holds the policy; `"$DAGQ" <command> --help` names who may run each command.
++
+ ## The check
+ 
+ Every command that changes the queue is checked against a default-deny policy first, for the role `DAGQ_ROLE` names (none is the person, `user`) or, in client mode (below), for the token's principal. A refusal (`<role> may not ...`) changes nothing and is recorded with you as its actor.

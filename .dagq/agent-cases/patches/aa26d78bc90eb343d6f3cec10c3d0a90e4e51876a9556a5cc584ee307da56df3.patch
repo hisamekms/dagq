@@ -1,0 +1,13 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..e31b7a3e4 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -12,6 +12,8 @@
+ RUSTC_WRAPPER = "sccache"
+ # server と話せないときは rustc を直接実行し、cache が効かないだけで build を失敗させない。
+ SCCACHE_IGNORE_SERVER_IO_ERROR = "1"
++# 全 run で target を共有して build を速くする。
++CARGO_TARGET_DIR = "/Users/Shared/dagq-target"
+ # run ごとの cargo の並列度（CARGO_BUILD_JOBS・RUST_TEST_THREADS・NEXTEST_TEST_THREADS）は、
+ # 8 コア / 16GB の host と下の [supervisor] の parallel = 3 を前提に、worker 3 本と integrate 1 本が
+ # 同時に cargo を回しても load が上がりすぎないように決めた。並列数や host を変えたら合わせて見直す。

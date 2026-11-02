@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/scope.md b/plugins/claude-dagq/skills/dagq/reference/scope.md
+index 79e1ce325..370b231c7 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/scope.md
++++ b/plugins/claude-dagq/skills/dagq/reference/scope.md
+@@ -19,7 +19,7 @@ The checks and paths each kind of change takes are the repository's own rules. R
+ 
+ A task that changes several of these takes the heaviest row's verification. The row is chosen by what the task changes, not by its `--change`: the same code change may be a feature, a fix or a refactor.
+ 
+-`--change` declares the kind of change (a label of the repository's own; the values and when to pick each are its rules). It decides no check; the measurements group runs by it (`reference/kpi.md`).
++`--change` declares the kind of change (a label of the repository's own; the values and when to pick each are its rules). Pick one of the values the repository lists, by what the change does rather than by what it touches. It decides no check; the measurements group runs by it (`reference/kpi.md`).
+ 
+ The `--verify` commands are integrate's gate, not the worker's checklist: the worker runs the checks the repository's instructions ask of a worker (the `--verify` commands only when they name none) and writes the range it ran into the receipt's test evidence. A run resumed because integrate's verification failed may rerun the failing command to reproduce it.
+ 

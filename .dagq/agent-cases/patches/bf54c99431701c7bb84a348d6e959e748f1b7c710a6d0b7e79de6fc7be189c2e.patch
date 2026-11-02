@@ -1,0 +1,13 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..2241078d5 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -58,7 +58,7 @@ runtime_planners = 2
+ # NEXTEST_TEST_THREADS は並列 3 を前提に決めたので、変えるときはそれらと合わせて見直す。
+ # up に --parallel を付けるとその値がここより優先して登録に焼き込まれ、この parallel を読まなくなる（優先は key ごと）ので付けない。
+ # 待ちの上限 max_waiting は既定の 4 のままなので書かない。
+-parallel = 3
++parallel = 5
+ # 着地の順番を待つだけの run が空けた枠で claim してよい軽い change（ADR-t1591-1、goal 104。振る舞いは
+ # docs/design/supervisor-lifecycle/claim-hold.md の「着地待ちが空けた軽い枠」、値は下の [tasks] changes の中のもの）。
+ # 着地は直列なので slot が着地待ちで埋まり、作業中の worker が 0 で claim が止まった（2026-10-03 23:36 JST）。

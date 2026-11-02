@@ -1,0 +1,13 @@
+diff --git a/.config/committed.toml b/.config/committed.toml
+index 170a6f2a5..667b54c0b 100644
+--- a/.config/committed.toml
++++ b/.config/committed.toml
+@@ -3,7 +3,7 @@
+ # (.githooks/commit-msg), and scripts/check-commit-messages.sh reads
+ # allowed_types from here, so this file is the one place of the prefixes.
+ #
+-# Only the prefix is checked: a type of allowed_types, an optional (scope) and
++# Only the prefix of the first line is checked: a type of allowed_types, an optional (scope) and
+ # !, then ": " and a subject that is not empty. The subject is Japanese and
+ # long (the title of main's squash commit is the task's title), so the checks
+ # outside the prefix are off.

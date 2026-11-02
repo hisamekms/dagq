@@ -1,0 +1,21 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..c0b22d8b4 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -92,7 +92,7 @@ workers = false
+ # supervisor が main の CI（.github/workflows/ci.yml、name: CI）の結果を gh で定期的に確かめて event に記録し、赤になったら
+ # 修正の finding を出し、既に落ちているテストの一覧を持つ（ADR-t1920-1、task 1921、goal 157 の段 1）。
+ # 振る舞いは docs/design/supervisor-lifecycle/ci-watch.md、書式は run-environment.md の [ci_watch] の項。
+-# branch は書かず、着地先の branch（[repository] が無いので origin の HEAD から決まる main）を見る。interval_secs は design の推奨の既定 600 のまま書かない。
++# branch は書かず、着地先の branch（[repository] が無いので origin の HEAD から決まる main）を見る。interval_secs は gh の API の回数を抑えるため推奨の既定 600 より長い 900 にする。
+ # junit_artifacts は ci.yml が nextest の JUnit を上げる成果物 nextest-junit-macos・nextest-junit-linux の glob で、
+ # ci.yml で名前を変えたらここも合わせる。
+ # gh が無いか login していなければ up の preflight が拒み、走っている supervisor は claim と着地を止めて inbox に知らせる（worker は host にツールを入れない）。
+@@ -103,6 +103,7 @@ workers = false
+ # required_jobs を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 2035 を含んでから足した。
+ workflow = "ci.yml"
+ junit_artifacts = ["nextest-junit-*"]
++interval_secs = 900
+ required_jobs = ["fmt / test / clippy / coverage", "linux build / test"]
+ # scheduled_workflows は CI の見張りが着地先の branch の定時と手動の実行も読む workflow（ADR-t3807-1、ci-watch.md の「定時のworkflow」）。
+ # 落ちた実行は workflow ごとに 1 件の finding になり runtime の planner が直す task を作るが、既に落ちているテストの一覧・赤と緑・

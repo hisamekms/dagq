@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/scope.md b/plugins/claude-dagq/skills/dagq/reference/scope.md
+index 79e1ce325..532f9342d 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/scope.md
++++ b/plugins/claude-dagq/skills/dagq/reference/scope.md
+@@ -25,7 +25,7 @@ The `--verify` commands are integrate's gate, not the worker's checklist: the wo
+ 
+ ## E2E: the diff decides, the runtime runs it
+ 
+-No worker runs e2e: its receipt reports e2e as not applicable. A run needs e2e when its diff touches the repository's e2e paths; the runtime runs it then. Give `--evidence e2e` only when a task must check the real processes although its diff may stay outside the e2e paths, and say why in the description. `integrate` never runs e2e, so a person who lands such a run by hand checks its e2e result first.
++No worker runs e2e: its receipt reports e2e as not applicable. In this repository the paths are the cmux adapter, process and sessions, launchd, lifecycle, integrate, install, update and the actors' start, plus `tests/e2e.rs`. A run needs e2e when its diff touches the repository's e2e paths; the runtime runs it then. Give `--evidence e2e` only when a task must check the real processes although its diff may stay outside the e2e paths, and say why in the description. `integrate` never runs e2e, so a person who lands such a run by hand checks its e2e result first.
+ 
+ ## Name the files a task without paths mainly touches
+ 

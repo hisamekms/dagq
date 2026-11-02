@@ -1,0 +1,13 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..9f8273c3d 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -17,7 +17,7 @@ SCCACHE_IGNORE_SERVER_IO_ERROR = "1"
+ # 同時に cargo を回しても load が上がりすぎないように決めた。並列数や host を変えたら合わせて見直す。
+ # 経緯と測定は docs/plans/operation-rules-history.md（CARGO_BUILD_JOBS）と docs/plans/nextest-test-threads.md（test の並列度）。
+ # CARGO_BUILD_JOBS は build の job 数。4 本の cargo の合計が 16 並列（コア数の 2 倍）程度に収まる値にする。
+-CARGO_BUILD_JOBS = "4"
++CARGO_BUILD_JOBS = "8"
+ # RUST_TEST_THREADS は 1 つの test binary の中の並列 thread 数。test は待ちが中心で CPU をあまり使わないので
+ # build と分けて決める（docs/plans/nextest-measurement.md）。上げると関門の test 段が縮み、load と capture の
+ # 時間切れが増える。上げ下げの目安は docs/plans/nextest-test-threads.md の 6 章と 8.3 節。

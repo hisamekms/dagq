@@ -1,0 +1,12 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/inspect.md b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+index 2ae28b17f..c351815fe 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/inspect.md
++++ b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+@@ -69,6 +69,7 @@ When planning a goal or deciding what to submit next, read `"$DAGQ" graph --goal
+ 1. Start from the chain the output names as critical. Its first task should be `ready` and running; if it is `draft`, complete it and `submit` it before tasks that unblock little.
+ 2. A task that unblocks much but is missing from `candidates` waits on what the output names: finish (or review and land) those first. Read why each other ready task waits in `candidates`.
+ 3. When one task blocks many, split it or remove a dependency that is not real (`dependency remove`) so more run in parallel.
++   Goal 154 waited a day on one task this way in October 2026.
+ 4. There is no need to register or submit in a particular order: to put a task ahead, give it a priority (below).
+ 
+ ## Priority and claim order

@@ -1,0 +1,12 @@
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md b/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md
+index ce72d2754..f46738562 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/stuck-exit.md
+@@ -1,6 +1,6 @@
+ # Read a past `stuck_exit` ask
+ 
+-No `stuck_exit` ask opens any more: the supervisor ends a headless session through its exit request and stops what is left of the wrapper itself. One in the records came from the retired interactive session, whose `/exit` did not end it in time. Read it as history: the ask with `"$DAGQ" asks --role inbox` (`--all` for closed ones), the run with `"$DAGQ" show <task_id> --full` and its events with `"$DAGQ" events --run RUN --full`. Nothing of it is carried out.
++No `stuck_exit` ask opens any more: the supervisor ends a headless session through its exit request and stops what is left of the wrapper itself. One in the records came from the retired interactive session, whose `/exit` did not end it in time. Task 170 made the supervisor stop the rest of the wrapper. Read it as history: the ask with `"$DAGQ" asks --role inbox` (`--all` for closed ones), the run with `"$DAGQ" show <task_id> --full` and its events with `"$DAGQ" events --run RUN --full`. Nothing of it is carried out.
+ 
+ ## When the session already exited
+ 

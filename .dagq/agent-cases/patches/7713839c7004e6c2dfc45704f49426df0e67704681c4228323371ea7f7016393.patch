@@ -1,0 +1,12 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/kpi.md b/plugins/claude-dagq/skills/dagq/reference/kpi.md
+index 68e35d916..34f2bd3af 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/kpi.md
++++ b/plugins/claude-dagq/skills/dagq/reference/kpi.md
+@@ -58,6 +58,7 @@ Report it with p50 and p90 together and the premises the output names, and that
+ ## Reports
+ 
+ The supervisor writes the daily and weekly reports in the queue's directory (`report --help`); a person opens them in a browser. `"$DAGQ" report` writes one by hand and changes no queue state.
++A report shows the same numbers as `kpi`; trust the JSON when they differ.
+ 
+ ## Push to a person away from the screen
+ 

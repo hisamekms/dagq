@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq-inbox/reference/status.md b/plugins/claude-dagq/skills/dagq-inbox/reference/status.md
+index 7fbf55eb2..2f5179f85 100644
+--- a/plugins/claude-dagq/skills/dagq-inbox/reference/status.md
++++ b/plugins/claude-dagq/skills/dagq-inbox/reference/status.md
+@@ -6,6 +6,8 @@ Read this when what `status`, `watch` or `show` says, or what to do about an att
+ 
+ What each part of the output holds: `"$DAGQ" status --help`. What to do with it:
+ 
++How the supervisor decides each part: `docs/design/supervisor-lifecycle/supervise.md`.
++
+ - No supervisor serves the queue, or the only one is stale (died or hangs): `up` on the person's word; orphaned runs go through the `dagq-recover` skill, one run at a time. A stale one whose process is still alive is not replaced: report it and let the person stop that process (`down --force` if it is the only one).
+ - `status` fails as `unreachable` when the queue's service does not answer: the queue cannot be read, not that nothing waits. Handle it as `watch.md` says for a watch.
+ - Count the runs holding a slot, waiting to land and waiting for a person from the counts `status` gives, never from the number of runs listed.

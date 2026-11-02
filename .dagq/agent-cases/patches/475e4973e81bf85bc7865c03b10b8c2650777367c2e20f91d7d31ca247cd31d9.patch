@@ -1,0 +1,13 @@
+diff --git a/.config/nextest.toml b/.config/nextest.toml
+index 0888ed8b0..a4c825acd 100644
+--- a/.config/nextest.toml
++++ b/.config/nextest.toml
+@@ -9,6 +9,8 @@
+ 
+ [profile.default]
+ retries = 1
++# 関門の load を抑えるため同時の test を 6 に絞る。
++test-threads = 6
+ flaky-result = "fail"
+ # 最初の失敗で新しい test の開始を止めず、全部の test を流しきる（task 777）。
+ # flaky-result = "fail" の下では FLAKY の test も失敗と数えるので、既定の fail-fast

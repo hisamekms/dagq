@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq-inbox/reference/watch.md b/plugins/claude-dagq/skills/dagq-inbox/reference/watch.md
+index a02b73a87..a39ff8f40 100644
+--- a/plugins/claude-dagq/skills/dagq-inbox/reference/watch.md
++++ b/plugins/claude-dagq/skills/dagq-inbox/reference/watch.md
+@@ -42,7 +42,7 @@ Codex has no background task, so the watch is bounded and runs in the foreground
+ - Show the person its conclusion as it is, with where the whole review is.
+ - A weekly one that names a finding proposed a change that a runtime planner takes up: tell the person its ID; nothing is yours to do.
+ - A quiet hour never reaches you. Say nothing about quiet hours, and run no review of your own.
+-- `check the failed review`: a review that reached no conclusion. Show the person what it says and where its output files are (they say why). Run none in its place unless the person says so.
++- `check the failed review`: a review that reached no conclusion. Since task 1220 it may come from the Codex route. Show the person what it says and where its output files are (they say why). Run none in its place unless the person says so.
+ 
+ ## The observer's failure notice
+ 

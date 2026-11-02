@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/kpi.md b/plugins/claude-dagq/skills/dagq/reference/kpi.md
+index 68e35d916..038b40bae 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/kpi.md
++++ b/plugins/claude-dagq/skills/dagq/reference/kpi.md
+@@ -13,7 +13,7 @@ Each command below prints JSON; `"$DAGQ" <command> --help` lists its flags (and
+ ```
+ 
+ - A missing value is no record, not zero. A period not over yet and a value with too few samples are not judged: read no trend from them.
+-- Compare work time only within one `area=` or `change=` stratum (which one is the repository's rule): tasks differ by an order of magnitude, so `all` moves with the mix of tasks.
++- Compare work time only within one `area=` or `change=` stratum (which one is the repository's rule; dagq's own repository reads `area=runtime` and never `area=docs`): tasks differ by an order of magnitude, so `all` moves with the mix of tasks.
+ - **Time by tag.** Each period's `breakdown` holds its finished runs' time and slot time by blocker, holds and attempt, in `all` and per `change=` and `area=` stratum (`--change` and `--area` keep only theirs), each axis adding up to 100% with `unattributed`; the daily report shows it as "Time by tag". `unattributed_ratio` is the share of the time no record accounts for, a KPI of every stratum (judged only against a target set for it): when it is high, the split is not to be trusted, and the fix is a missing record, not the work.
+ - `--by` (and so `--cross` and `--compare`) takes any key of the claims' attributes the ledger's run rows hold, also one no claim records (every run reads `unknown`). The derived layers (`provider`, `claude`, `model`, `group`, `slot`, `load`, `toolchain`, `change`, `area`, `nature`) are made by their own rules from the attributes, the facts after the claim and the run (the provider it ended on; a run that worked on Codex is `claude=none`, `group=none` and of its Codex turn's model), never from an attribute of the same name; any other key is the attribute as the claim recorded it.
+ - **Targets** are set in the repository's `dagq.toml` and the host's `host.toml`; only the targets set there are judged. Act on a target only when the output says it is breached (off target for several periods in a row), not on a single miss. Add a `[kpi]` table to `dagq.toml` only once the installed binary knows it: an older one rejects it.

@@ -1,0 +1,15 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..88f57f59f 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -140,6 +140,10 @@ peak_context_above = 400000
+ [replan]
+ enabled = true
+ 
++[push]
++# 人が席を外しているときに ask を手元の端末へ知らせる。
++command = "sh ~/.local/bin/dagq-push.sh"
++
+ [toolchains.rust]
+ # この repository は Rust の project なので、runtime に組み込みの Rust の profile の利用者として宣言する（ADR-t2268-1 決定 3）。
+ # 宣言したので、組み込みの Rust の profile が着地の検証と landing recheck の出力（失敗の分類・落ちた test の名前・flaky のやり直しの env）を読む。

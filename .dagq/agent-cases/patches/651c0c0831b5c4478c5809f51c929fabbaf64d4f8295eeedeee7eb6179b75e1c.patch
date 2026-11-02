@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/scope.md b/plugins/claude-dagq/skills/dagq/reference/scope.md
+index 79e1ce325..a4dff32bd 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/scope.md
++++ b/plugins/claude-dagq/skills/dagq/reference/scope.md
+@@ -29,7 +29,7 @@ No worker runs e2e: its receipt reports e2e as not applicable. A run needs e2e w
+ 
+ ## Name the files a task without paths mainly touches
+ 
+-A task that registers no `--paths` (code, per the repository's rules) names in its `--description` the files it mainly touches. Plan review reads them for duplicates and overlaps (sharing files alone earns no dependency), and `related` ranks by them.
++A task that registers no `--paths` (code, per the repository's rules) names in its `--description` the files it mainly touches. A runtime task (`src/`, `tests/`, `migrations/`) registers no `--paths`: for example `src/application/supervise/plan_review.rs` and `tests/it/plan_review.rs`. Plan review reads them for duplicates and overlaps (sharing files alone earns no dependency), and `related` ranks by them.
+ 
+ The list is a forecast, not a limit: the worker may change other files, and nothing checks it. Never write it as `--paths`: a path outside `--paths` stops the run from landing (`scope_violation`).
+ 

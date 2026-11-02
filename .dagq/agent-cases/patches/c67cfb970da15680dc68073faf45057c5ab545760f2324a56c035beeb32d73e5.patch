@@ -1,0 +1,43 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..b13717093 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -13,11 +13,11 @@ RUSTC_WRAPPER = "sccache"
+ # server と話せないときは rustc を直接実行し、cache が効かないだけで build を失敗させない。
+ SCCACHE_IGNORE_SERVER_IO_ERROR = "1"
+ # run ごとの cargo の並列度（CARGO_BUILD_JOBS・RUST_TEST_THREADS・NEXTEST_TEST_THREADS）は、
+-# 8 コア / 16GB の host と下の [supervisor] の parallel = 3 を前提に、worker 3 本と integrate 1 本が
++# 8 コア / 16GB の host と下の [supervisor] の parallel = 4 を前提に、worker 4 本と integrate 1 本が
+ # 同時に cargo を回しても load が上がりすぎないように決めた。並列数や host を変えたら合わせて見直す。
+ # 経緯と測定は docs/plans/operation-rules-history.md（CARGO_BUILD_JOBS）と docs/plans/nextest-test-threads.md（test の並列度）。
+-# CARGO_BUILD_JOBS は build の job 数。4 本の cargo の合計が 16 並列（コア数の 2 倍）程度に収まる値にする。
+-CARGO_BUILD_JOBS = "4"
++# CARGO_BUILD_JOBS は build の job 数。5 本の cargo の合計が 16 並列（コア数の 2 倍）程度に収まる値にする。
++CARGO_BUILD_JOBS = "3"
+ # RUST_TEST_THREADS は 1 つの test binary の中の並列 thread 数。test は待ちが中心で CPU をあまり使わないので
+ # build と分けて決める（docs/plans/nextest-measurement.md）。上げると関門の test 段が縮み、load と capture の
+ # 時間切れが増える。上げ下げの目安は docs/plans/nextest-test-threads.md の 6 章と 8.3 節。
+@@ -55,10 +55,10 @@ paths = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "build.rs", "ru
+ # runtime_planners と parallel を足した順序は docs/plans/operation-rules-history.md）。
+ runtime_planners = 2
+ # 同時に走らせる run の数（既定 4）。上の [run.env] の CARGO_BUILD_JOBS・RUST_TEST_THREADS・
+-# NEXTEST_TEST_THREADS は並列 3 を前提に決めたので、変えるときはそれらと合わせて見直す。
++# NEXTEST_TEST_THREADS は並列 4 を前提に見直した（test の 2 つは 1 つの test binary の中の値なので据え置いた）ので、変えるときはそれらと合わせて見直す。
+ # up に --parallel を付けるとその値がここより優先して登録に焼き込まれ、この parallel を読まなくなる（優先は key ごと）ので付けない。
+ # 待ちの上限 max_waiting は既定の 4 のままなので書かない。
+-parallel = 3
++parallel = 4
+ # 着地の順番を待つだけの run が空けた枠で claim してよい軽い change（ADR-t1591-1、goal 104。振る舞いは
+ # docs/design/supervisor-lifecycle/claim-hold.md の「着地待ちが空けた軽い枠」、値は下の [tasks] changes の中のもの）。
+ # 着地は直列なので slot が着地待ちで埋まり、作業中の worker が 0 で claim が止まった（2026-10-03 23:36 JST）。
+@@ -68,8 +68,8 @@ parallel = 3
+ # light_changes を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1591 を含んでから足した。
+ light_changes = ["docs", "config"]
+ # slot を持てる Spike の数（goal 96、ADR-t1487-2。振る舞いは docs/design/supervisor-lifecycle/claim-hold.md の
+-# 「実行区分の上限とaging」）。parallel 3 の中で人と合意した初期案 total 3 / Spike 1 の値。Spike は build・測定・試作で
+-# host の load が重くなりやすく、実装の枠を埋めないよう 1 に絞る。枠は予約しないので、Spike が無ければ実装が 3 枠を使う。
++# 「実行区分の上限とaging」）。parallel 4 の中で Spike 1 の値。Spike は build・測定・試作で
++# host の load が重くなりやすく、実装の枠を埋めないよう 1 に絞る。枠は予約しないので、Spike が無ければ実装が 4 枠を使う。
+ # class_aging は既定のままなので書かない。
+ # max_spikes・max_investigations を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1489・1493 を含んでから足した。
+ max_spikes = 1

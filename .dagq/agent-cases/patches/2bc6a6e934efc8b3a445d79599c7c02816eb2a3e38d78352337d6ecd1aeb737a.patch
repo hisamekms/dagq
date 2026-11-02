@@ -1,0 +1,15 @@
+diff --git a/.config/nextest.toml b/.config/nextest.toml
+index 0888ed8b0..77a46167c 100644
+--- a/.config/nextest.toml
++++ b/.config/nextest.toml
+@@ -26,6 +26,10 @@ slow-timeout = { period = "60s" }
+ # scripts/it-coverage-map.sh の夜間の job（.github/workflows/it-coverage-map.yml）が
+ # 統合テストを coverage つきで流す profile。default の設定を継ぎ、テストごとの時間を
+ # 表に入れるため JUnit を target/nextest/it-coverage/junit.xml に書く。
++[profile.it-coverage]
++# 夜間の coverage の job が runner を食い潰さないよう並列を 4 に絞る。
++test-threads = 4
++
+ [profile.it-coverage.junit]
+ path = "junit.xml"
+ 

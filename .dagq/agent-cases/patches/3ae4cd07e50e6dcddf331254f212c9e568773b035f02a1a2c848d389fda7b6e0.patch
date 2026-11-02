@@ -1,0 +1,9 @@
+diff --git a/.config/ntfy.toml b/.config/ntfy.toml
+new file mode 100644
+index 000000000..c666d878d
+--- /dev/null
++++ b/.config/ntfy.toml
+@@ -0,0 +1,3 @@
++# 着地と ask を ntfy で人の電話に送る topic。
++topic = "dagq-hisamekms-7fq2k9"
++server = "https://ntfy.sh"

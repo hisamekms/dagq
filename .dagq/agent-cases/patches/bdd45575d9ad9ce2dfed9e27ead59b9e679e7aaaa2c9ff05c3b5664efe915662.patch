@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/inspect.md b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+index 2ae28b17f..c1c68c4fc 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/inspect.md
++++ b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+@@ -4,6 +4,8 @@ Read this to pick the command that answers a question about the queue, to find a
+ 
+ Each command's flags and the fields it prints are in `"$DAGQ" <command> --help` (`"$DAGQ" goal show --help` for a subcommand) and in its output itself; this file does not list them. Every command here reads only unless it says otherwise.
+ 
++How `stats` measures: `docs/design/supervisor-lifecycle/stats.md`.
++
+ | Command | Answers |
+ | --- | --- |
+ | `goal list` / `goal show ID` | Which goals there are and how far each is / one goal and what waits on it |

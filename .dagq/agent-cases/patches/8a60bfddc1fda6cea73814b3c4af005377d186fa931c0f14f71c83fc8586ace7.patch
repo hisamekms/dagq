@@ -1,0 +1,15 @@
+diff --git a/.config/e2e-quarantine.toml b/.config/e2e-quarantine.toml
+index 95905fe44..16bf68d98 100644
+--- a/.config/e2e-quarantine.toml
++++ b/.config/e2e-quarantine.toml
+@@ -18,4 +18,9 @@
+ # prints it: other_repository::a_task_lands_on_master_of_a_repository_without_origin_cargo_toml_or_agents_md.
+ # At most 3 marks; with more, the gate holds none.
+ #
+-# No marks now. The example above only shows the format.
++
++[[test]]
++name = "launchd_up_and_down_round_trip"
++reason = "launchd が遅い host で up の待ちが時間切れになる。2 週で 3 回関門で落ちた"
++task = 4012
++until = 2026-11-20

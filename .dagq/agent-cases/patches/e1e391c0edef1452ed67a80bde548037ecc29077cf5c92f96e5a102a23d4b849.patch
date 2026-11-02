@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/scope.md b/plugins/claude-dagq/skills/dagq/reference/scope.md
+index 79e1ce325..5661e0ffb 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/scope.md
++++ b/plugins/claude-dagq/skills/dagq/reference/scope.md
+@@ -17,6 +17,8 @@ The checks and paths each kind of change takes are the repository's own rules. R
+ | Code | none (it may touch anything) | the repository's format, lint and full test or coverage gate (one command that runs every test, so no second whole test run) | none (the diff decides `e2e`, below) |
+ | Scripts and CI | as the repository says | as the repository says | none |
+ 
++In the dagq repository a docs-only task verifies with `sh scripts/check-design-docs.sh`, and a task on the plugin with `cargo test --locked --test plugin`.
++
+ A task that changes several of these takes the heaviest row's verification. The row is chosen by what the task changes, not by its `--change`: the same code change may be a feature, a fix or a refactor.
+ 
+ `--change` declares the kind of change (a label of the repository's own; the values and when to pick each are its rules). It decides no check; the measurements group runs by it (`reference/kpi.md`).

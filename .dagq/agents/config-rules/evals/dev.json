@@ -1,0 +1,1160 @@
+{
+  "agent": "config-rules",
+  "role": "review",
+  "codes": [
+    "A-028",
+    "A-029",
+    "A-030",
+    "A-034",
+    "A-036",
+    "A-039",
+    "A-042",
+    "A-050",
+    "A-185",
+    "A-053",
+    "A-054",
+    "A-127",
+    "A-130",
+    "A-183"
+  ],
+  "rules": {
+    "A-028": "docs/development/operations.md「`[run.env]`とtestの並列度の置き場」の冒頭の段落が値と理由の置き場として指すdagq.tomlの`[run.env]`のsccacheの値とコメント（RUSTC_WRAPPERをsccacheにし、SCCACHE_IGNORE_SERVER_IO_ERRORでserverと話せないときもbuildを落とさない。ADR-0049決定6・7）",
+    "A-029": "docs/development/operations.md「`[run.env]`とtestの並列度の置き場」の冒頭の段落が指す`[run.env]`に置かないもの（CARGO_TARGET_DIRとCARGO_INCREMENTALを置かずtargetをrun間で共有しない。dagq.tomlの`[run.env]`のコメント）",
+    "A-030": "docs/development/operations.md「`[run.env]`とtestの並列度の置き場」の1つ目の箇条（targetを共有しない理由は、envでbuildとtestの並列度を絞ることには当たらない）",
+    "A-034": "docs/development/operations.md「`[run.env]`とtestの並列度の置き場」の冒頭の段落が値と理由の置き場として指すdagq.tomlの`[run.env]`のCARGO_BUILD_JOBSの値と決め方（worker 3本とintegrate 1本の4本のcargoの合計が16並列程度）",
+    "A-036": "docs/development/operations.md「`[run.env]`とtestの並列度の置き場」の冒頭の段落が指すdagq.tomlの`[run.env]`のRUST_TEST_THREADSとNEXTEST_TEST_THREADS（nextestは前者を読まないので同じ値にする。ADR-0076決定2）",
+    "A-039": "docs/development/operations.md「`[run.env]`とtestの並列度の置き場」の冒頭の段落が指す.config/nextest.tomlの冒頭のコメント（testの並列度を.config/nextest.tomlに書かない）",
+    "A-042": "docs/development/operations.md「`dagq.toml`を変えるとき」の1つ目の箇条（main checkoutのdagq.tomlは本番queueの全runに効き、着地してから効き、壊すとqueueが止まる）",
+    "A-050": "docs/development/operations.md「`dagq.toml`を変えるとき」の1つ目の箇条の旧バイナリとの順序（新しいtableや欄は知らない旧バイナリが読めなくなるので、固定バイナリが対応してから足す。docs/design/supervisor-lifecycle/run-environment.mdの各tableの項）",
+    "A-185": "docs/development/operations.md「`dagq.toml`を変えるとき」の2つ目の箇条（並列数を変えるときは`[supervisor]`と`[run.env]`のコメントの値どうしの関係を読み、合わせて見直す。着地すればupし直さずに効く）",
+    "A-053": "docs/development/operations.md「secretと外部送信」の2つ目の箇条のpushの置き場（`[push]`はhost.tomlに置き、commitされるdagq.tomlには置かない。docs/design/supervisor-lifecycle/push.md「設定（host.tomlの`[push]`）」）",
+    "A-054": "docs/development/operations.md「secretと外部送信」の2つ目の箇条のsecretの置き場（ntfyのtopic・SlackのwebhookのURL・tokenなどのsecretはrepositoryの外に置きcommitしない）",
+    "A-127": "docs/development/testing.md「`[e2e] paths`」（`[e2e] paths`を変えるのは実物の境目のファイルが増えた・分かれたときで、一覧と理由はdagq.tomlの`[e2e]`のコメント）",
+    "A-130": "docs/development/testing.md「e2eの印」の1つ目の箇条（印は不安定なe2eが直るまでの一時の措置で、dagq.tomlには置かない）",
+    "A-183": "docs/development/operations.md「`up`のコマンド」の2つ目の箇条（並列数と`runtime_planners`は`[supervisor]`で決め、`up`に`--parallel`・`--runtime-planners`を付けない）"
+  },
+  "k": 3,
+  "cases": [
+    {
+      "id": "a028-sccache-wrapper-commented-out",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "186e6ad467c8b0064c721ced9b00a950816da69e6e5367d0d105b7b35a261c86",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-028"
+          ],
+          "note": "[run.env] の RUSTC_WRAPPER を外し、上のコメント（sccache で run 間に依存の compile を共有する、ADR-0049 決定 6・7）と値が食い違う。値と理由の置き場である [run.env] のコメントを直さず sccache をやめている",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a028-sccache-server-errors-fail-build",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "1d99e17e307fea0f751760d6603c347d47cef3ac5885c36f1fd0c031229f4069",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-028"
+          ],
+          "note": "直上のコメントは server と話せないときに rustc を直接実行して build を失敗させないと言うが、値を 0 にして server の不調で build が落ちるようにした。[run.env] の sccache の値と理由が食い違う",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a029-shared-cargo-target-dir",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "aa26d78bc90eb343d6f3cec10c3d0a90e4e51876a9556a5cc584ee307da56df3",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-029"
+          ],
+          "acceptable_codes": [
+            "A-028"
+          ],
+          "note": "[run.env] に CARGO_TARGET_DIR を置き run 間で target を共有している。コメントの規則（CARGO_TARGET_DIR を置かない、共有すると test と coverage の関門が誤る）に反する",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a029-cargo-incremental-off",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "38e5aeccd8dfc429f1adf6842bd8b441babea1bf1a9e0f434cd2211e8db9aaf0",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-029"
+          ],
+          "acceptable_codes": [
+            "A-028"
+          ],
+          "note": "[run.env] に CARGO_INCREMENTAL を置いている。コメントは CARGO_INCREMENTAL も変えない（切っても run 間の hit は増えず worker の繰り返しの build が遅くなる）と決めている",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a030-build-jobs-dropped-for-target-reason",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "bfa322d2a2fa6c69d7b4b474cac2847e4d2dcb287b371decb05e3cb718a9dbd4",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-030"
+          ],
+          "acceptable_codes": [
+            "A-034"
+          ],
+          "note": "target を共有しない理由を build の並列度を env で絞らない理由に当てて CARGO_BUILD_JOBS を外している。operations.md はその理由は env で並列度を絞ることには当たらないとする",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a030-test-threads-dropped-for-target-reason",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "9b70f1c67b25368415db4885bc929a9d7e13fb48a926d2ab4f6810ef10de0a68",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-030"
+          ],
+          "acceptable_codes": [
+            "A-036",
+            "A-185"
+          ],
+          "note": "target を共有しない理由が test の並列度にも当たるとして RUST_TEST_THREADS と NEXTEST_TEST_THREADS を外した。その理由は env で test の並列度を絞ることには当たらない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a034-build-jobs-doubled",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "bb201dfba1562447531b4d4179c8003851a32e37a9b7962e3ebed6d769635dfa",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-034"
+          ],
+          "note": "CARGO_BUILD_JOBS を 8 にし、4 本の cargo で 32 並列になる。直上のコメントの決め方（4 本の合計が 16 並列程度）と値が食い違い、コメントも測定も直していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a034-build-jobs-rule-rewritten",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "5f4402e9f6885cdab02886665a10e0db696bcc3a0c1402ac9d66869dc35bd433",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-034"
+          ],
+          "note": "決め方を 1 本の cargo あたりコア数の 2 倍に書き換え 16 にした。worker 3 本と integrate 1 本で 64 並列になり、上の段落（同時に cargo を回しても load が上がりすぎない値）と食い違う",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a036-nextest-threads-raised-alone",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "554ca50be33502936038dcc57e00e0cbe7b7b5c9258c13f08efd079bc537df86",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-036"
+          ],
+          "note": "NEXTEST_TEST_THREADS だけを 8 にし RUST_TEST_THREADS の 6 と食い違う。コメントは nextest が RUST_TEST_THREADS を読まないので同じ値にすると決めている",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a036-rust-test-threads-lowered-alone",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "7ee560f13b3efe86de565105df5a44b15e19ea809b36cc486dfcf279f5a737de",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-036"
+          ],
+          "note": "RUST_TEST_THREADS だけを 4 にし、NEXTEST_TEST_THREADS（6）と揃えていない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a039-test-threads-in-nextest-default",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "475e4973e81bf85bc7865c03b10b8c2650777367c2e20f91d7d31ca247cd31d9",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-039"
+          ],
+          "note": ".config/nextest.toml の default profile に test-threads を書いた。冒頭のコメントは並列度をここに書かず integrate は [run.env] の NEXTEST_TEST_THREADS で絞り、CI と人の手元は既定で流すとする",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a039-test-threads-in-it-coverage-profile",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "2bc6a6e934efc8b3a445d79599c7c02816eb2a3e38d78352337d6ecd1aeb737a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-039"
+          ],
+          "note": ".config/nextest.toml の it-coverage の profile に test-threads を置いた。並列度は .config/nextest.toml に書かない（冒頭のコメント）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a042-header-says-worktree-change-takes-effect",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "b1c625fdc0c49a79b011b008ae22b1fd0f3efcce7e9cd04e9fe076dacd4a2c0d",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-042"
+          ],
+          "note": "冒頭のコメントを、runtime が run の worktree の dagq.toml を読み着地を待たずに効くと書き換えた。runtime が読むのは main checkout で着地してから全 run に効く（operations.md「dagq.tomlを変えるとき」箇条1、run-environment.md）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a042-duplicate-key-breaks-the-file",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "638887b32d3bb185990effd0170b5969b64d43e0df27cad9051eaa5d11c4a948",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-042"
+          ],
+          "acceptable_codes": [
+            "A-185"
+          ],
+          "note": "[supervisor] に parallel を 2 回書き、TOML として読めない dagq.toml になる。main checkout の dagq.toml が壊れると本番 queue の全 run が止まる",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a050-new-table-runtime-later",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "aff1a67acda8a23a05ac334c94f8e77d2700238e2c7c1e7c2518fb289e6a9469",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-050"
+          ],
+          "note": "runtime がまだ知らない [notify] の表を先に足した（コメント自身が対応は後続の task と言う）。旧バイナリは未知の表を拒むので固定バイナリが対応してから足す",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a050-new-table-before-fixed-binary",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "ac6ef50c86ed9712a7aa02d458aa9d5579a3a3bb67d876473875e16971aa4a96",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-050"
+          ],
+          "note": "固定バイナリが知らない [claim_budget] の表を先に足している。知らない旧バイナリは dagq.toml を読めず queue が止まる",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a185-parallel-raised-env-unchanged",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "bf54c99431701c7bb84a348d6e959e748f1b7c710a6d0b7e79de6fc7be189c2e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-185"
+          ],
+          "acceptable_codes": [
+            "A-034"
+          ],
+          "note": "parallel を 5 にしたが、コメントは [run.env] の CARGO_BUILD_JOBS・RUST_TEST_THREADS・NEXTEST_TEST_THREADS が並列 3 を前提とし変えるときは合わせて見直すと言う。値もコメントも見直していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a185-parallel-lowered-needs-up",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "b44bf8792c60f134cbb51f6fba7cee4157cde5d0cc53794874f74174abc408d9",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-185"
+          ],
+          "acceptable_codes": [
+            "A-042"
+          ],
+          "note": "parallel を 2 にし [run.env] の値（並列 3 が前提）を見直さず、さらに着地後に up し直すまで効かないと書いた。supervisor は各 pass で読み直し着地すれば up し直さずに効く",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a053-push-table-in-dagq-toml",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "c13d90b62a583286fe044464776893fe759cbcde22bb051ff9d7ae7dd4474736",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-053"
+          ],
+          "acceptable_codes": [
+            "A-050"
+          ],
+          "note": "push の [push] を commit される dagq.toml に置いた。[push] は host の host.toml に置く（push.md「設定（host.tomlの[push]）」）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a053-push-shared-through-repository",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "fddafe14a6941383f1b2eb0b42583e0874af5467502dc15f39a2540b6eb5224b",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-053"
+          ],
+          "acceptable_codes": [
+            "A-050"
+          ],
+          "note": "[push] を host ごとの host.toml でなく commit される dagq.toml に置き、全 host に共有するとした。[push] の置き場は host.toml",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a054-ntfy-topic-committed",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "3ae4cd07e50e6dcddf331254f212c9e568773b035f02a1a2c848d389fda7b6e0",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-054"
+          ],
+          "acceptable_codes": [
+            "A-053"
+          ],
+          "note": "ntfy の topic（知っていれば誰でも送受信できる secret）を repository の .config/ntfy.toml に commit している。secret は repository の外に置く",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a054-slack-webhook-committed",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "ff0da4bc32fc067ae08c2da4c027f793a618d48087dfc2759f141dfe5f57276a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-054"
+          ],
+          "note": "Slack の incoming webhook の URL（知っていれば誰でも channel に投稿できる secret）を repository の .config/slack.toml に commit している。webhook の URL などの secret は repository の外に置き commit しない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a127-e2e-paths-take-supervise-decisions",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "6f1fb705762010fb3582d3894c863b288c3dc7e5f4706463f7f5a8fe1682dcec",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-127"
+          ],
+          "note": "[e2e] paths に src/application/supervise/** を足した。実物の境目のファイルが増えた・分かれたのではなく、コメントが除くと決めた supervise の判断の部分を全部入れている",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a127-e2e-paths-drop-launchd",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "ffb7547c4e6ca04f76c931d58e62f16e88669c1f68b9239e083582c5536bd439",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-127"
+          ],
+          "note": "[e2e] paths から src/infrastructure/launchd.rs を外した。ファイルは残り、コメントは launchd を実物の境目として挙げる。paths を変えるのは境目のファイルが増えた・分かれたときだけ",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a130-quarantine-key-in-e2e-table",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "66d9f85183cc0b00a3205fe41b3bfac0b6de2b14a152fb0623e6725ceb46d6a5",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-130"
+          ],
+          "acceptable_codes": [
+            "A-050"
+          ],
+          "note": "e2e の印を dagq.toml の [e2e] に置いた。印は .config/e2e-quarantine.toml に置き dagq.toml には置かない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a130-quarantine-table-in-dagq-toml",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "3d87c3e09c2093c2de64aa3c9d8b520f49adc2b1c71b07f0bf921c26fae00269",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-130"
+          ],
+          "acceptable_codes": [
+            "A-050"
+          ],
+          "note": "e2e の印を dagq.toml の [[e2e.quarantine]] に置いた。印の置き場は .config/e2e-quarantine.toml で dagq.toml ではない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a183-parallel-moved-to-up-flag",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "175c0c67908c4f566ef9a72dffcd9aed7e868904f2f8be57ca7026d3911e9ef0",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-183"
+          ],
+          "acceptable_codes": [
+            "A-185"
+          ],
+          "note": "[supervisor] の parallel を外し up の --parallel で渡すとした。並列数は [supervisor] で決め、up に --parallel を付けない（operations.md「upのコマンド」）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "a183-runtime-planners-by-flag",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "ad092a98856ad479fef0d5e4076c3b48f67820e3e3b434377bf748d546f47aea",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "A-183"
+          ],
+          "acceptable_codes": [
+            "A-185"
+          ],
+          "note": "runtime_planners を [supervisor] から外し up の --runtime-planners で渡すとした。--runtime-planners も --parallel と同じ理由で付けない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "clean-sccache-comment-reworded",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "b35521fad4f826b5fdd92ad45909a2d0f51f85fb13cdcfcef2494e4299d02cb1",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "SCCACHE_IGNORE_SERVER_IO_ERROR のコメントの言い回しだけを直し、値と理由は変えていない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-run-env-backtrace",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "33fd4e4a24da1e0e4bb5bd8ec4ec9c50c10217d063f503251345c2a794eacc65",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "[run.env] に RUST_BACKTRACE を足した。target の置き場や incremental ではなく、並列度・sccache の値にも触れず、置かないものの規則に当たらない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-parallel-and-env-revisited-together",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "c67cfb970da15680dc68073faf45057c5ab545760f2324a56c035beeb32d73e5",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "parallel を 4 にし、[supervisor] の max_spikes のコメントの枠の数も、同じ差分で [run.env] の前提と CARGO_BUILD_JOBS（5 本で 15 並列）とコメントを合わせて見直した。--parallel も使わない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-test-threads-raised-together",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "f13b9a22952a641599e9b8b4bd497c4a618a1b03988d14b85e2bef81b15c7e80",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "RUST_TEST_THREADS と NEXTEST_TEST_THREADS を同じ値のまま揃えて上げた。並列度は [run.env] に置いたまま",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-nextest-slow-timeout",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "62357ce019927f86543a5ba646925813e583bfe0c18a1ba0599e04e82c88037f",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": ".config/nextest.toml の slow-timeout の period だけを変えた。並列度は書いていない（.config/nextest.toml に置いてよいのは slow-timeout などの並列度以外）",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-nextest-comment-points-to-run-env",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "3aff802c03be31ffb739352bccfbd8633d6b9cabb3cb5a4390027d5fe60d18a2",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": ".config/nextest.toml の冒頭のコメントに test-threads の名を添えただけで、並列度を書かない規則を保つ",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-ci-watch-interval-known-key",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "3388e8e03a9ca33edeaa4a6f018980c250195e9af6f2beefa57e869f678344e9",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "既存の [ci_watch] に固定バイナリが既に読む interval_secs を足した。新しい table でも未知の key でもない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-push-comment-points-to-host-toml",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "129c992230a78727458b999c540d2841e0c614e54a0682545918b1b8127e3af8",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "冒頭のコメントに [push] と secret を dagq.toml に置かないことを書いただけで、[push] も secret も足していない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-up-flag-comment-reworded",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "81a07054a7552e56e304169c63f6de933ed6e8b1c76a52ebd7936ca04abb9607",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "up に --parallel を付けない規則のコメントの語順を変えただけで、parallel は [supervisor] に残る",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-max-spikes-raised-with-reason",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "1c0f92a43a891392df6917f15e9a92a4b5af9474ea1f4ae2be2830322cacd8c7",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "max_spikes を 2 にし parallel（3）より小さく保つ理由を書いた。並列数（parallel）も [run.env] も変えていない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-e2e-quarantine-mark-in-its-file",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "8a60bfddc1fda6cea73814b3c4af005377d186fa931c0f14f71c83fc8586ace7",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "e2e の印を .config/e2e-quarantine.toml に置いた。dagq.toml には置いていない（印を付けてよい task かは test-rules の規則で、この agent の観点の外）",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-e2e-comment-reworded",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "5ee47c86e89bd17ce4a3ffea50795140d841b90bb1ea8ca99370d0aac30a7e03",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "[e2e] のコメントの言い回しを変えただけで、paths は変えていない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-commit-types-comment",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "3ae9289b6ae6cb7222255b49e8f68c1dceb0e5cc122482905850e6308a320e82",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": ".config/committed.toml のコメントを直しただけで、どの規則コードの観点にも当たらない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "clean-header-main-checkout-clarified",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "630c4bc4de70b66737681f97da582e1c3117d5fa86c5b9f179f6c44f29c16e53",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "main checkout の dagq.toml が着地してから全 run に効くことを書き足した。規則と一致する",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "landed-eval-watch-back-to-default",
+      "source": "handmade",
+      "made_by": "landed commit b8878ee216ea22516791ba0c0636b1fc814312ff on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "28836ee08177f6c572631332f6b966853b386d0a",
+      "patch": "761ab4ab6ef55d8fc640b35b2e1ae1cd3b8d877a0e9fc8f3e22341a1910ffd69",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "b8878ee216ea22516791ba0c0636b1fc814312ff",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: [eval] の表を外して既定に戻した。表を消すのは旧バイナリとの順序の問題にならず、並列度・secret・e2e にも触れない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-it-boundary-reason-wording",
+      "source": "handmade",
+      "made_by": "landed commit 7c841d3ebdfcbe07b94acd7b699d23a2407319bd on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "e65e9533d57b0081bd0faf2b7f55e4911c4a2323",
+      "patch": "3557e2d4216354ed19b42f5b089fc0d3dab4efa1aa51b76e815041a28edb1b45",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "7c841d3ebdfcbe07b94acd7b699d23a2407319bd",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: .config/it-boundaries.d の境界の項目の reason の文だけを直した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-tasks-related-docs",
+      "source": "handmade",
+      "made_by": "landed commit 9f99e803191815a5dec2fe9d2732dcb02fb0b4f7 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "bb3f7617652b0fe57702e6dd1d68e4e9589acaef",
+      "patch": "3cc4943602e2a8eefae01665717d855a93b6f2b361c86cd932ff1a804112e0e2",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "9f99e803191815a5dec2fe9d2732dcb02fb0b4f7",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: 既存の [tasks] に固定バイナリが対応した後で related_docs を足した（コメントに順序を書く）",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "landed-fresh-session-threshold",
+      "source": "handmade",
+      "made_by": "landed commit 1eabf96b85d324b5b5004ed0f5cb1b2bca4fd2ff on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "8f4e12bfbe0c8d43810ec43e4a034acff215f60c",
+      "patch": "b823c489587276a5206202f043155d9c75c3a2cba9be06b321b1c9456252dc80",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "1eabf96b85d324b5b5004ed0f5cb1b2bca4fd2ff",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: [fresh_session] の閾値と理由のコメントを同じ差分で変えた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-recheck-comment-host-only",
+      "source": "handmade",
+      "made_by": "landed commit ea7629f1534503e8ae34a6b87f064a82ae58858e on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "40fa99bc079da8b13d3fa726316492fac444058f",
+      "patch": "81ed810555cbfeb1bdec1071e7893a32fc91802c02fa8e89a0f2b10f1b619b3f",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "ea7629f1534503e8ae34a6b87f064a82ae58858e",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: [recheck] のコメントを host の run に限る説明に直した。[run.env] の値には触れない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "landed-toolchains-comment",
+      "source": "handmade",
+      "made_by": "landed commit 0031d9dd76bb749a6623087cce23e7ae1459e4c4 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "3aa72dbfa320a40640d0bf57bad5de0b9739ffbf",
+      "patch": "bdf629aceba41600337e29fe9dd7b74b03efb254372fbbf7574f52753da96c7e",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "0031d9dd76bb749a6623087cce23e7ae1459e4c4",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: [toolchains.rust] と [verify_marks.within] のコメントの言い回しを直した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-builtin-tests-disabled",
+      "source": "handmade",
+      "made_by": "landed commit 04887be47d94c02d0c2984dc7ea5edf055116702 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "8f521dc6eae36fbd15ec11ed1bb81e7c37ee7775",
+      "patch": "2073d7e7ac5cc2cae434fe2038521c4a33afb2847b90bb423971603f2f14fcaa",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "04887be47d94c02d0c2984dc7ea5edf055116702",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: 既存の review.subagents の書式で builtin:tests を無効にした。dagq の secret の規則は config-rules が見る、とコメントに書く",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-review-program-context-boundaries",
+      "source": "handmade",
+      "made_by": "landed commit 61221c69b043532bb48a5092f85dc9d9890a3e39 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "d62316618f37f6f8d95cf5939f057295ca5f7150",
+      "patch": "f17614088daf45af3c1178817b853da3672f9e88f713cca3371c5ca417616e49",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "61221c69b043532bb48a5092f85dc9d9890a3e39",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: 既に読める review.programs の下に program を 1 つ足した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-review-subagent-paths-narrowed",
+      "source": "handmade",
+      "made_by": "landed commit f0d9ab1cc713580620bde3cabd29bf1263d6c258 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "fdba7bd9bbbe6fe6973828d1416fd4d7f0023e7e",
+      "patch": "e5c796ab504e6efa504806f3f44c88aa55005b3348a84806ea56030392fbbc7e",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "f0d9ab1cc713580620bde3cabd29bf1263d6c258",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: review の agent の paths を狭め、理由のコメントを足した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-provider-fallback-comment",
+      "source": "handmade",
+      "made_by": "landed commit 78883ef61dd4829f61d7c9dc3272c5196c5b9608 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "49926bfe1db9219bbc7792ea9a52fd04a26a5f49",
+      "patch": "9bb552b889fea0fb571529fb970e120519749b814d66794255a96b90eb8dc62e",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "78883ef61dd4829f61d7c9dc3272c5196c5b9608",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: [provider_fallback] のコメントから未着地の task の言及を外した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-supervisor-spike-caps",
+      "source": "handmade",
+      "made_by": "landed commit c2b3ca57a9cd69c37e89c9d34436654977aa0494 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "7e0d6dcd810af8afef72aa1de825131b460df67b",
+      "patch": "aef7900577bc2ef5a9f6638be9b4ad41563e1bf8a9cd1ef206fb3cf9d6fc9e16",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "c2b3ca57a9cd69c37e89c9d34436654977aa0494",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: 固定バイナリが対応した後で [supervisor] に max_spikes・max_investigations を足した。parallel と [run.env] は変えていない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "landed-roles-goal-review-comment",
+      "source": "handmade",
+      "made_by": "landed commit 9d19e500522cadd5647edf84a96f8682a9ac9192 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "79d17986398a6834e7bbb68ab82c2315d08a73b2",
+      "patch": "e05d574fd2b926cddd962cf7eefaed2fa0ccb3b4810e1515733c561d32cbbed7",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "9d19e500522cadd5647edf84a96f8682a9ac9192",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: [roles.goal_review] のコメントを役割の一覧の置き場への参照に書き換えた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-provider-fallback-table",
+      "source": "handmade",
+      "made_by": "landed commit b2c0c1ecbd87570f0e83aaaf93b10669da8c8277 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "a728b20eaacf3abab8a3191559be5f0d2ac20ad0",
+      "patch": "0f04270e8d8c5502611e103ba850cb600dcb14e58993819570fe3fa74e961619",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "b2c0c1ecbd87570f0e83aaaf93b10669da8c8277",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: 固定バイナリが task 1857 を含んでから [provider_fallback] の表を足した（コメントに順序を書く）",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "landed-ci-watch-table",
+      "source": "handmade",
+      "made_by": "landed commit e10617987c7d1197e38871ab92cdb2c9c3b08bdf on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "3ff0b88fe955f2df6baddd7b0954359cb74d220d",
+      "patch": "e70d0b7666d332fe694a57bf7106dad71ae7d915616c5ef36ace96dd4347fb5d",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "e10617987c7d1197e38871ab92cdb2c9c3b08bdf",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: 固定バイナリが task 1921 を含んでから [ci_watch] の表を足した。secret は置かず gh の login は host に任せる",
+          "near_miss": true
+        }
+      }
+    }
+  ]
+}

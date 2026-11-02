@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/provider.md b/plugins/claude-dagq/skills/dagq/reference/provider.md
+index ca0b2498f..34005089c 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/provider.md
++++ b/plugins/claude-dagq/skills/dagq/reference/provider.md
+@@ -2,6 +2,8 @@
+ 
+ Read this to choose a task's worker's agent, to read which one ran, or to tell a person what to do when a provider cannot be used (flags: `"$DAGQ" add --help`).
+ 
++Nothing here changes which provider a role's job uses.
++
+ ## Provider and route
+ 
+ A task's worker has a **provider** (`claude` or `codex`); its session is always headless. `add` takes the provider, and `edit ID` changes it on a draft or submitted task (a ready one goes back with `draft ID` first).

@@ -1,0 +1,13 @@
+diff --git a/.config/it-boundaries.d/t3804.toml b/.config/it-boundaries.d/t3804.toml
+index a9a68dd62..ec4144a3d 100644
+--- a/.config/it-boundaries.d/t3804.toml
++++ b/.config/it-boundaries.d/t3804.toml
+@@ -391,7 +391,7 @@ task = 3804
+ id = "running-supervisor-resolves-the-landing-branch-again-and-holds-claims"
+ kind = "supervisorの配線"
+ test = "landing_branch::a_running_supervisor_follows_each_change_of_the_landing_branch"
+-reason = "走り続ける supervisor が解決の読む物の変化で着地の branch を解き直し、解けない間は claim を止め解ければ次の pass で戻すことは、実の supervisor の pass と git の branch の変化でしか確かめられない。いつ解き直すかの判断は supervise::execution の unit test"
++reason = "走り続ける supervisor が解決の読む物の変化で着地の branch を解き直し、解けない間は claim を止め解ければ次の pass で戻すことは、実の supervisor の pass と git の branch の変化でしか確かめられない。いつ解き直すかの判断は supervise::execution::claim の unit test"
+ task = 3804
+ 
+ [[boundary]]

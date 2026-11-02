@@ -1,0 +1,13 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..8bdd1809b 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -53,7 +53,7 @@ paths = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "build.rs", "ru
+ # [supervisor] の key を知らない旧バイナリは dagq.toml を読めなくなるので、key は固定バイナリを対応したものへ
+ # 入れ替えてから足す（規則は docs/design/supervisor-lifecycle/run-environment.md の [supervisor] の項、
+ # runtime_planners と parallel を足した順序は docs/plans/operation-rules-history.md）。
+-runtime_planners = 2
++# runtime_planners は up に --runtime-planners 2 を付けて渡す。
+ # 同時に走らせる run の数（既定 4）。上の [run.env] の CARGO_BUILD_JOBS・RUST_TEST_THREADS・
+ # NEXTEST_TEST_THREADS は並列 3 を前提に決めたので、変えるときはそれらと合わせて見直す。
+ # up に --parallel を付けるとその値がここより優先して登録に焼き込まれ、この parallel を読まなくなる（優先は key ごと）ので付けない。

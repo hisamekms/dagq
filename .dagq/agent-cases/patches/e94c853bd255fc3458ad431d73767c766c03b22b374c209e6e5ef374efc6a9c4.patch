@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/review-by-hand.md b/plugins/claude-dagq/skills/dagq-recover/reference/review-by-hand.md
+index dc786cc6f..1d331920d 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/review-by-hand.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/review-by-hand.md
+@@ -6,6 +6,8 @@ Read this for attention `review by hand`, `review and integrate`, or `push main`
+ 
+ The supervisor reviews every run it accepts and lands, sends back or asks `approve_landing` by itself; while it holds the run (`reviewing (runtime)`, `queued to land (runtime)`) do nothing. Do not review those runs again. Only these come here:
+ 
++The supervisor's review is described in [review](../../../../../docs/design/supervisor-lifecycle/review.md).
++
+ - `review by hand`: the headless review failed (its output stays in the run directory), including a review that `--no-claude` left without a provider.
+ - `review and integrate`: a run accepted without a review.
+ 

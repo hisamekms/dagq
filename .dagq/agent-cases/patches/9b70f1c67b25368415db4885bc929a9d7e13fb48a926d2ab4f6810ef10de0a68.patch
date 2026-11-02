@@ -1,0 +1,21 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..7c4921d5a 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -18,14 +18,14 @@ SCCACHE_IGNORE_SERVER_IO_ERROR = "1"
+ # 経緯と測定は docs/plans/operation-rules-history.md（CARGO_BUILD_JOBS）と docs/plans/nextest-test-threads.md（test の並列度）。
+ # CARGO_BUILD_JOBS は build の job 数。4 本の cargo の合計が 16 並列（コア数の 2 倍）程度に収まる値にする。
+ CARGO_BUILD_JOBS = "4"
++# RUST_TEST_THREADS・NEXTEST_TEST_THREADS は置かない: target を共有しない理由（並行する run の profraw の消し合い）は
++# test の並列度にも当たるので、test は各 run の既定の並列度で流す。
+ # RUST_TEST_THREADS は 1 つの test binary の中の並列 thread 数。test は待ちが中心で CPU をあまり使わないので
+ # build と分けて決める（docs/plans/nextest-measurement.md）。上げると関門の test 段が縮み、load と capture の
+ # 時間切れが増える。上げ下げの目安は docs/plans/nextest-test-threads.md の 6 章と 8.3 節。
+-RUST_TEST_THREADS = "6"
+ # coverage の関門（cargo llvm-cov nextest）で同時に走らせる test の process 数（ADR-0076 の決定 2）。
+ # nextest は RUST_TEST_THREADS を読まず既定で CPU 数だけ走らせるので、RUST_TEST_THREADS と同じ値にする。
+ # .config/nextest.toml には書かない（理由はその冒頭のコメント）。
+-NEXTEST_TEST_THREADS = "6"
+ 
+ [recheck]
+ # 着地のたびに supervisor が着地待ちの run を着地後の main に載せた木で確かめる軽い検査（ADR-0068 の決定 2）。

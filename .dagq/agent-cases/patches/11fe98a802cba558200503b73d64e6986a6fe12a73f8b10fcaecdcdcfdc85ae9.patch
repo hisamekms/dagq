@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/kpi.md b/plugins/claude-dagq/skills/dagq/reference/kpi.md
+index 68e35d916..0e16536f4 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/kpi.md
++++ b/plugins/claude-dagq/skills/dagq/reference/kpi.md
+@@ -2,6 +2,8 @@
+ 
+ Each command below prints JSON; `"$DAGQ" <command> --help` lists its flags (and the strata `kpi` can split by), and the values are in the JSON output. This file says how to read them and what to do.
+ 
++The definitions are in the dagq repository's `docs/design/supervisor-lifecycle/kpi.md` and `marks.md`.
++
+ `stats`, `kpi` and `report` read the queue's ledger, which the supervisor builds on its passes: what no record holds reads as missing (with why), not as 0. `stats` gives each listed run's time and slot time by blocker, holds and attempt in `breakdown` (overall, `by_change`, `by_area`), each axis adding up to 100% with `unattributed`; read the unattributed share there before trusting the rest. The time runs from the claim to the end of the push. `stats --ledger` is still stopped and refuses with why.
+ 
+ ## `dagq kpi`: periods, strata, targets

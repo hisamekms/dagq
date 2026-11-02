@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/inspect.md b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+index 2ae28b17f..10c1a6e5a 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/inspect.md
++++ b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+@@ -77,7 +77,7 @@ A goal and every task have one of five priorities. Pick it by what waiting costs
+ 
+ | Level | Use for | Example |
+ | --- | --- | --- |
+-| `interrupt` | An exceptional cut-in that must run before every other ready task. Not for routine use: when many tasks are `interrupt`, it orders nothing | A goal the person decided to put ahead of the whole queue |
++| `interrupt` | An exceptional cut-in that must run before every other ready task. Not for routine use: when many tasks are `interrupt`, it orders nothing | Goal 154 in October 2026, which the person put ahead of everything |
+ | `urgent` | A defect that is stopping operation now | The supervisor or landing is broken |
+ | `high` | Work to do early, because other work builds on it | A cleanup or refactor several planned tasks assume |
+ | `normal` | Everything else | |

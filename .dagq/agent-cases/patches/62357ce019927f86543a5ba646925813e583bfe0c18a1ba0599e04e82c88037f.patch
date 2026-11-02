@@ -1,0 +1,13 @@
+diff --git a/.config/nextest.toml b/.config/nextest.toml
+index 0888ed8b0..6fbbbe2d3 100644
+--- a/.config/nextest.toml
++++ b/.config/nextest.toml
+@@ -21,7 +21,7 @@ fail-fast = false
+ # 60 秒を超えた test を SLOW と出すだけで、打ち切らない（決定 6）。test の上限は
+ # tests/common/mod.rs の within（TEST_LIMIT 600 秒・STEP_LIMIT 300 秒）が持つので、
+ # terminate-after は置かず、その上限より先に nextest が test を止めることはない。
+-slow-timeout = { period = "60s" }
++slow-timeout = { period = "90s" }
+ 
+ # scripts/it-coverage-map.sh の夜間の job（.github/workflows/it-coverage-map.yml）が
+ # 統合テストを coverage つきで流す profile。default の設定を継ぎ、テストごとの時間を

@@ -1,0 +1,11 @@
+diff --git a/.config/nextest.toml b/.config/nextest.toml
+index 0888ed8b0..17e9fd63f 100644
+--- a/.config/nextest.toml
++++ b/.config/nextest.toml
+@@ -1,5 +1,5 @@
+ # cargo-nextest の設定（ADR-0076）。coverage の関門は `cargo llvm-cov nextest` で流す。
+-# 並列度はここに書かない: integrate の検証は dagq.toml の [run.env] の
++# 並列度（test-threads）はここに書かない: integrate の検証は dagq.toml の [run.env] の
+ # NEXTEST_TEST_THREADS で絞り（決定 2）、CI と人の手元は nextest の既定（CPU 数）で流す。
+ # 落ちた test は 1 回だけ流し直し、流し直して通った test は FLAKY（FLKY-FL）と出すが、
+ # 結果は失敗のままにして不安定な test を隠さない（ADR-t768-1 が ADR-0076 を amends）。

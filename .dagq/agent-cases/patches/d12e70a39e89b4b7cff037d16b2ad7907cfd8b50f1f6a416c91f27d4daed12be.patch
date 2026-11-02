@@ -1,0 +1,12 @@
+diff --git a/plugins/claude-dagq/skills/dagq-recover/reference/session.md b/plugins/claude-dagq/skills/dagq-recover/reference/session.md
+index b77158ea4..1f57adf94 100644
+--- a/plugins/claude-dagq/skills/dagq-recover/reference/session.md
++++ b/plugins/claude-dagq/skills/dagq-recover/reference/session.md
+@@ -1,6 +1,7 @@
+ # A run's session: its turns, undelivered answers and past asks
+ 
+ Read this to carry out, on the person's word, an answer that has to reach a run's session (the `dagq-recover` skill, section 7). Every run's session is headless in the background, and the runtime hands it everything as its next turn. Nothing reaches a session by hand: never edit its worktree, merge or push for it, touch its run directory or signal its processes. Provider routes: `skills/dagq/reference/provider.md`.
++Why an answer may not arrive: the [design docs](../../../../../docs/design/supervisor-lifecycle/session-send.md).
+ 
+ ## The commands
+ 

@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq-planner/SKILL.md b/plugins/claude-dagq/skills/dagq-planner/SKILL.md
+index 7f8d54a4b..e1ac5ffb8 100644
+--- a/plugins/claude-dagq/skills/dagq-planner/SKILL.md
++++ b/plugins/claude-dagq/skills/dagq-planner/SKILL.md
+@@ -19,7 +19,7 @@ Decide what you can recommend and go on, asking no one: adopting or dropping a f
+ 
+ Look first for work that covers the person's words (`search`, `related`, `goal list`, the source). Then one of:
+ 
+-- **Plan it**: the `dagq` skill's section 2 and `register.md`, "For a planner". Then:
++- **Plan it**: the `dagq` skill's section 2 and `register.md`, "For a planner"; `--paths`, `--evidence` and `--change` per the repository's rules. Then:
+ 
+ ```sh
+ "$DAGQ" lint TASK...            # or --proposal ID; fix every violation first

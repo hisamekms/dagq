@@ -1,0 +1,2269 @@
+{
+  "agent": "plugin-generic",
+  "role": "review",
+  "codes": [
+    "P-01",
+    "P-03",
+    "P-04",
+    "P-05",
+    "P-06",
+    "P-07",
+    "P-08",
+    "P-09",
+    "P-10",
+    "P-11",
+    "P-12",
+    "P-13",
+    "P-14",
+    "P-15",
+    "P-16",
+    "P-17",
+    "P-18",
+    "P-19a",
+    "P-19b",
+    "P-19c",
+    "P-19d",
+    "P-19e",
+    "P-19f",
+    "P-19g",
+    "P-19h",
+    "P-19i",
+    "P-19j",
+    "P-20"
+  ],
+  "rules": {
+    "P-01": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-01の行（dagq/reference/scope.md「Recommended combinations」にこのrepositoryの推奨の表（fmt・clippy・coverageの関門のコマンドなど）を置かない）",
+    "P-03": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-03の行（dagq/reference/scope.mdの`--change`の段落で、値と選び方をこのrepositoryのAGENTS.mdや値で示さず「repositoryの規則」とだけ書く）",
+    "P-04": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-04の行（dagq/reference/scope.mdの`--verify`の段落に、このrepositoryのworkerの手元の検証（fmt・clippy・`cargo test --locked --test it <file>::`など）を書かない）",
+    "P-05": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-05の行（dagq/reference/scope.mdの`--verify`の段落に、手元の検証を決めた経緯（日付・task・測定の値）を書かない）",
+    "P-06": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-06の行（dagq/reference/scope.md「E2E」に、このrepositoryの`[e2e] paths`の中身（境目のファイルの一覧）を書かない）",
+    "P-07": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-07の行（dagq/reference/scope.md「Name the files a task without paths mainly touches」に、このrepositoryのruntimeのtaskの規則と例（`src/`・`tests/`・`migrations/`、このrepositoryのfileのpath）を書かない）",
+    "P-08": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-08の行（dagq/SKILL.md「Register the tasks」の例の`--verify`を、このrepositoryのコマンドでなく置き字（CHECK・TEST）にする）",
+    "P-09": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-09の行（dagq/SKILL.md「Register the goal」の例の`--doc`を、このrepositoryのADRのpathの形でなく汎用の置き字にする）",
+    "P-10": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-10の行（dagq/reference/inspect.md「Priority and claim order」の`interrupt`の例に、goalの番号の逸話を書かない）",
+    "P-11": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-11の行（dagq/reference/inspect.md「Edit a draft or submitted task」の`edit`の例の`--verify`に、このrepositoryのコマンドを書かない）",
+    "P-12": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-12の行（dagq-planner/SKILL.md「1. A request: plan it or decline it」で、`--paths`・`--evidence`・`--change`の取り方をAGENTS.mdやこのrepositoryの文書で名指さず「repositoryの規則」とする）",
+    "P-13": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-13の行（dagq-inbox/reference/watch.mdの`check the failed review`の項に、taskの番号を書かない）",
+    "P-14": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-14の行（dagq-recover/reference/stuck-exit.mdの冒頭に、taskの番号を書かない）",
+    "P-15": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-15の行（dagq/reference/kpi.md「`dagq kpi`: periods, strata, targets」の層の箇条に、このrepositoryの層（`area=runtime`など）を書かず「どの層かはrepositoryの規則」とする）",
+    "P-16": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-16の行（dagq/reference/kpi.md「Raising throughput: the weekly review」の箇条5に、このrepositoryの層（`--area runtime`など）を書かない）",
+    "P-17": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-17の行（dagq-recover/reference/triage-by-hand.md「Broken verification command with committed work」に、task・askの番号とこのhostの道具の逸話を書かない）",
+    "P-18": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-18の行（dagq/reference/provider.mdに、taskの番号を書かない）",
+    "P-19a": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-19aの行（dagq-inbox/reference/status.md「status」の、配布する製品の設計の文書への参照（docs/design/のpath・「design docs」・pluginのdirectoryを出る相対リンクにしない））",
+    "P-19b": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-19bの行（dagq-recover/reference/review-by-hand.mdの、runtimeのreviewの設計への参照（docs/design/のpath・pluginのdirectoryを出る相対リンクにしない））",
+    "P-19c": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-19cの行（dagq-recover/reference/session.mdの、sessionへの送信の設計への参照（docs/design/のpath・pluginのdirectoryを出る相対リンクにしない））",
+    "P-19d": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-19dの行（dagq-recover/reference/stalled.mdの冒頭の、復旧のjobの設計への参照（docs/design/のpath・pluginのdirectoryを出る相対リンクにしない））",
+    "P-19e": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-19eの行（dagq/reference/authority.mdの冒頭の、securityとauthorizationの設計への参照（docs/design/のpath・pluginのdirectoryを出る相対リンクにしない））",
+    "P-19f": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-19fの行（dagq/reference/goal-close.mdの冒頭の、goal reviewの設計への参照（docs/design/のpath・pluginのdirectoryを出る相対リンクにしない））",
+    "P-19g": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-19gの行（dagq/reference/inspect.mdの冒頭と「Decide what to run first with `graph`」の、statsと依存の図の設計への参照（docs/design/のpath・pluginのdirectoryを出る相対リンクにしない））",
+    "P-19h": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-19hの行（dagq/reference/kpi.mdの冒頭と「Raising throughput: the weekly review」「Reports」の、KPI・印・レポート・pushの設計への参照（docs/design/のpath・このrepositoryの名指し・pluginのdirectoryを出る相対リンクにしない））",
+    "P-19i": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-19iの行（dagq/reference/observer.md「Threshold findings」の、stall thresholdsの設計への参照（docs/design/のpath・pluginのdirectoryを出る相対リンクにしない））",
+    "P-19j": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-19jの行（dagq/reference/provider.mdの冒頭の、providerとheadless workerの設計への参照（docs/design/のpath・pluginのdirectoryを出る相対リンクにしない））",
+    "P-20": "docs/development/documents.md「pluginの汎用性」（固有の規則・値・経緯・例はrepositoryの文書に置き、pluginは汎用の文だけを持つ。固有の印の一覧はtests/plugin.rsのno_skill_carries_this_repository_s_rules）とdocs/plans/agents-slim-inventory.md「4. pluginの固有の記述の項目」のP-20の行（dagq/reference/inspect.md「Decide what to run first with `graph`」に、goalの番号の逸話を書かない）"
+  },
+  "k": 3,
+  "cases": [
+    {
+      "id": "p01-runtime-row-with-this-repositorys-gate",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "5f123f13fe667545c1feca4dbcb5b7746a74fef564e2a90c3643da9b89bd27cb",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-01"
+          ],
+          "note": "scope.md の「Recommended combinations」の表に、この repository の runtime の検証（fmt・clippy・80% の coverage の関門のコマンド）の行を戻した。この repository の表は task-registration.md「推奨の組み合わせ」が持ち、plugin は汎用の行だけを持つ",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p01-docs-and-plugin-rows-of-dagq",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "e1e391c0edef1452ed67a80bde548037ecc29077cf5c92f96e5a102a23d4b849",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-01"
+          ],
+          "note": "推奨の組み合わせの表の後に dagq の repository の docs・plugin の task の検証のコマンドを書いた。repository に固有の値で、plugin には置かない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p03-change-values-from-this-agents-md",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "b8094282d692bc6108c8d8961c275d1870d7ac3936623a39d70b38689737de39",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-03"
+          ],
+          "note": "`--change` の段落の値と選び方を「この repository の AGENTS.md」に向けた。plugin は「repository の規則」とだけ書き、この repository の値は task-registration.md「change」が持つ",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p03-change-lists-this-repositorys-values",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "62e64f25c88577d2e0c33926761fe974f71b23b6fef546650e8cda17068673be",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-03"
+          ],
+          "note": "`--change` の段落にこの repository の change の値の一覧と扱いを足した。値はこの repository の規則（dagq.toml と task-registration.md）で、plugin に写さない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p04-worker-checks-of-this-repository",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "0f6e1d3dd81383fe02a726deefd03c7b2c53ad3f29179700fc5087bf3bc889ad",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-04"
+          ],
+          "note": "`--verify` の段落にこの repository の worker の手元の検証（fmt・clippy・it の file を絞る cargo test）を書いた。正本は local-checks.md で、plugin は repository の指示に従うとだけ書く",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p04-worker-runs-touched-it-files",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "6452af9750f6d62ea3e615635adc95d5fe0a180154bd4e7348f6d2ef7222f336",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-04"
+          ],
+          "note": "worker が流す検証を repository の指示から、この repository の fmt・clippy・tests/it の file の cargo test に置き換えた。repository に固有の手元の検証",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p05-history-of-the-worker-check-rule",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "2aa8daf59f1aff80891331dc5052cfd26705580a4f63876858579af8e22e5fac",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-05"
+          ],
+          "note": "`--verify` の段落に手元の検証を決めた経緯（日付・task 528・中央値 1439 秒）を戻した。経緯は docs/plans の文書が持ち plugin に書かない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p05-history-of-slots-held-by-whole-runs",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "a30ef119ea497b5b48a4f2e5ad61948c0a4a9a2c322f97a787f43b5666ea51cd",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-05"
+          ],
+          "acceptable_codes": [
+            "P-04"
+          ],
+          "note": "`--verify` の段落に、規則ができた週と測定（全件の test で slot が 1 run 25 分ふさがった）を書いた。測定と経緯で plugin に置かない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p06-e2e-paths-of-this-repository",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "5617d79a70448560b415a14e2eaa038c5019c54f312e8490572130e9544d2582",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-06"
+          ],
+          "note": "E2E の節にこの repository の [e2e] paths の中身を書いた。正本は dagq.toml の [e2e] とそのコメント",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p06-e2e-paths-named-by-file",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "cb33f518cd709854d79535fcce8a53302642eda65e452ea3a62598ffb2f291fa",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-06"
+          ],
+          "note": "e2e の要否の文にこの repository の [e2e] paths の file を例として並べた。repository の設定値の写しで plugin に置かない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p07-runtime-task-rule-with-files",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "651c0c0831b5c4478c5809f51c929fabbaf64d4f8295eeedeee7eb6179b75e1c",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-07"
+          ],
+          "note": "paths の無い task の節に、この repository の runtime の task の規則（src・tests・migrations は --paths を持たない）と、この repository の file の例を戻した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p07-every-runtime-task-of-this-repository",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "473558f2344edcd78611c1b9e97cfe8c9dae36f1994d9340cd4cdd990de81425",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-07"
+          ],
+          "note": "「code, per the repository's rules」をこの repository の runtime の task の範囲に置き換えた。repository に固有の規則（task-registration.md「runtimeのtaskの主なファイル」）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p08-register-example-with-cargo",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "d70bc2177b1dd386c8af28b66b6407a10bb177760e9989167f9f5e404e7138f9",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-08"
+          ],
+          "note": "SKILL.md の task の登録の例の --verify を置き字からこの repository の cargo のコマンドに戻した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p08-register-example-with-clippy",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "8f8e272467622df26a50f34f1ec09fbed3e4e7792206986a1404b2a0d95c0a8b",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-08"
+          ],
+          "note": "SKILL.md の task の登録の例の 1 つ目の --verify をこの repository の clippy のコマンドにした。例は置き字にする",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p09-goal-doc-with-four-digit-adr",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "c185b514a5595086346ceda3922bee3ca7212071ce9cef1da27dafa90b8277fb",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-09"
+          ],
+          "note": "goal の登録の例の --doc をこの repository の古い 4 桁の ADR の path の形に戻した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p09-goal-doc-with-this-adr-id-form",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "ae17b6900aa5db1926157a0c65a168cbd104f113d5ff18f68826c7da6f1bfad5",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-09"
+          ],
+          "note": "goal の登録の例の --doc をこの repository の ADR の ID の形（documents.md「ADRのID」）にした。repository に固有の形",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p10-interrupt-example-goal-28",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "e12f0029bea9a58ffd67216e864558df50c39f5715cfe578415d18781279482c",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-10"
+          ],
+          "note": "interrupt の例に goal 28 の逸話を戻した。番号の逸話は plugin に書かない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p10-interrupt-example-goal-154",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "6451a50bab50a3898d9ecc4f01f585b9e05da0025138e14872bf2c2adbea329e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-10"
+          ],
+          "note": "interrupt の例をこの repository の goal 154 と日付の逸話にした",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p11-edit-example-with-plugin-test",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "48d058e788cc180eab6dc38330b42ed1a4b787502947f39d66cd807e3df5d33c",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-11"
+          ],
+          "note": "edit の節に、この repository の fmt と plugin の test の --verify の例を戻した。例は置き字にする",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p11-edit-example-coverage-gate",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "f9d3fa3c75ff2566b09ced95515e6a46738e9dadaa2fee68477326380e917657",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-11"
+          ],
+          "note": "edit の節の例にこの repository の coverage の関門のコマンドを書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p12-plan-it-per-agents-md",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "7d5cde6cad6c05212b6939a01e7c50daffd5910b39cc36ddd7efcc425a94e046",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-12"
+          ],
+          "note": "planner の SKILL.md §1 で --paths・--evidence・--change の取り方を AGENTS.md に向けた。plugin は「repository の規則」とだけ書く",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p12-plan-it-per-task-registration",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "9f43a1f2e96a0dc5297b3ea1d5eed9798fc3f777480ded28cb8b9eb700687c7d",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-12"
+          ],
+          "note": "planner の SKILL.md §1 に、この repository の task-registration.md の規則（runtime の task は paths なし・coverage の関門）を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p13-failed-review-task-1099",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "2a981c4548e58e08360ae177301b8d3e7618ba74e0ce0b12fbe364937c24bae1",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-13"
+          ],
+          "note": "watch.md の check the failed review の項に task の番号を戻した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p13-failed-review-codex-task-1220",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "db04dc93a51c6371517857d699dca779a46beb38dfcedf70b19fc7ac3b3e0a3e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-13"
+          ],
+          "note": "check the failed review の項に task 1220 の経緯を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p14-stuck-exit-task-147",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "f5b9f856a7adcc9d83b198171c4cb805de0538c9d004afc53cce1dec19971357",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-14"
+          ],
+          "note": "stuck-exit.md の冒頭に task の番号を戻した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p14-stuck-exit-task-170",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "7db6e2d04e555e21fb43892756e6be26ff535a4594a24b380e398eac842ef8bd",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-14"
+          ],
+          "note": "stuck-exit.md の冒頭に task 170 の経緯を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p15-stratum-area-runtime",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "c096f8584ee1782da7a05c819ff415fb6cc19d3a01a0987522b62bef0c565df7",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-15"
+          ],
+          "note": "kpi の層の箇条をこの repository の層（area=runtime）にした。どの層かは repository の規則で、plugin は 1 つの層の中で比べるとだけ書く",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p15-stratum-never-docs-here",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "50906c5442cb34fd4481c3c3d2f46f041aba72265028970844b15b80d1a59198",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-15"
+          ],
+          "note": "kpi の層の箇条に dagq の repository の読み方（area=runtime を読み docs は読まない）を足した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p16-weekly-compare-area-runtime",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "9bb0baf5c82d45df09bf401aef41574fb526b68f31ecba659629d82a999405a6",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-16"
+          ],
+          "note": "週次の見直しの箇条 5 の層をこの repository の --area runtime にした",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p16-weekly-compare-change-fix-here",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "8c4630e89e78d85b092708a4f45ac593ab14e2d46ac26f2b0b86a5eee4b504ac",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-16"
+          ],
+          "note": "週次の見直しの箇条 5 に、この repository の比べ方（--change fix だけ）を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p17-broken-verify-task-572",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "e3e198490f399026e29723d48bd304c4cb8700f68f50a9e3bbac34d2e2422c0f",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-17"
+          ],
+          "note": "壊れた verify の節に task 572 と ask の番号、この host の python3 に tomllib が無かった逸話を戻した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p17-broken-verify-where-ask-160-stood",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "eed5df323491c8546dea627a686befa3fb5f0e9543dc3bafe8978addf01ad317",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-17"
+          ],
+          "note": "壊れた verify の節に ask 160 の逸話を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p18-job-provider-task-1218",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "80e3285263126d421d94aac85ed2cb0fda4ca62d42dcbefea9b26902db666784",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-18"
+          ],
+          "note": "provider.md に task 1218 の番号を戻した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p18-planners-on-claude-task-1220",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "c64d0a44214db9fde49ea77b33c94d6dc1ba95956187fc86f59bf37cad5c3be8",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-18"
+          ],
+          "note": "provider.md に task 1220 の番号を戻した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19a-status-design-path",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "53a8c2b0fd81473e82e80de8f6d677cfdc426c366f4f3d55f11b5d06ea5f6b0b",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19a"
+          ],
+          "note": "status.md の status の節に docs/design の path を足した。plugin は配布されるので repository の docs/design の path に頼らない（documents.md の固有の印）",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19a-status-relative-link-out",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "b3693794e00a023c4220981f068560e7263b402fb6568ab1bc7693e8b8bdb591",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19a"
+          ],
+          "note": "status.md の status の節に plugin の directory を出る相対リンクで design docs を指した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19b-review-by-hand-design-path",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "f37e3692002e4ae609b05985d967a376ff8b40d1debdc5a88e7942fb67f2d47e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19b"
+          ],
+          "note": "review-by-hand.md に docs/design の review の文書の path を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19b-review-by-hand-relative-link",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "e94c853bd255fc3458ad431d73767c766c03b22b374c209e6e5ef374efc6a9c4",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19b"
+          ],
+          "note": "review-by-hand.md に plugin の directory を出る相対リンクで design の review を指した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19c-session-design-path",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "2c7f758af41b7e02712e9f73487fc316b0f84e535bc634a5e738b62edfd0889e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19c"
+          ],
+          "note": "session.md に docs/design の session-send の path を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19c-session-relative-link",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "d12e70a39e89b4b7cff037d16b2ad7907cfd8b50f1f6a416c91f27d4daed12be",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19c"
+          ],
+          "note": "session.md に plugin を出る相対リンクで design docs を指した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19d-stalled-design-path",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "af3ff2ab67f320c39cdd899cae045213f868b9ac0e883e1840858f16524b091a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19d"
+          ],
+          "note": "stalled.md の冒頭に docs/design の復旧の job の path を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19d-stalled-relative-link",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "511ef5cf9f116bd42f95b637e76d2d789e38a60faf79a24d94a405a02652a32b",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19d"
+          ],
+          "note": "stalled.md の冒頭に plugin を出る相対リンクで design docs を指した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19e-authority-design-paths",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "6d4d2ac8bb35e6025cd69cdae360283ee1b41cb745dc4c4265247fe7c943380c",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19e"
+          ],
+          "note": "authority.md の冒頭に docs/design の security・authorization の path を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19e-authority-relative-link",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "9459ec27f6b2a028e0b2fbb431f1ef4ae740085990d627a921bc051717193ebd",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19e"
+          ],
+          "note": "authority.md の冒頭に plugin を出る相対リンクで design の authorization を指した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19f-goal-close-design-path",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "9d672acfbbe7754fec106a389f8b9c54ba35783ea19d5182f172a2e44bd245c7",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19f"
+          ],
+          "note": "goal-close.md の冒頭に docs/design の goal review の path を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19f-goal-close-relative-link",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "f3a400ab50f884524fecc25f1af0860f05cc3932eeb629a6e7b35f58eaa08d4d",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19f"
+          ],
+          "note": "goal-close.md の冒頭に plugin を出る相対リンクで design docs を指した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19g-inspect-stats-design-path",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "bdd45575d9ad9ce2dfed9e27ead59b9e679e7aaaa2c9ff05c3b5664efe915662",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19g"
+          ],
+          "note": "inspect.md の冒頭に docs/design の stats の path を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19g-graph-relative-link",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "2fa5c1733bbe945f39d69168f87c01fcfa0efe2592da20c8b06562847b70d43f",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19g"
+          ],
+          "acceptable_codes": [
+            "P-20"
+          ],
+          "note": "inspect.md の graph の節に plugin を出る相対リンクで design の依存の図を指した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19h-kpi-design-paths",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "11fe98a802cba558200503b73d64e6986a6fe12a73f8b10fcaecdcdcfdc85ae9",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19h"
+          ],
+          "note": "kpi.md の冒頭に dagq の repository の docs/design の path を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19h-reports-relative-link",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "790a98694df55a35d4b67477252196bf23cf5fd729b605e17ddc331528655c3e",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19h"
+          ],
+          "note": "kpi.md の Reports に plugin を出る相対リンクで design の report を指した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19i-thresholds-design-path",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "c104d8ee71e1115de91382902b0e0331b13de2f7ac2640e70653e0132b0ef90f",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19i"
+          ],
+          "note": "observer.md の Threshold findings に docs/design の path を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19i-thresholds-relative-link",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "10a8b139228627d4768b5702c4ac871ce9154134c1349f308899321d695f4c97",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19i"
+          ],
+          "note": "observer.md の Threshold findings に plugin を出る相対リンクで design docs を指した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19j-provider-design-paths",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "c80b13a69436e1a03cba8bf411d86b44b779605e0bff1a90cabf58dda688e239",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19j"
+          ],
+          "note": "provider.md の冒頭に docs/design の provider-lifecycle と headless-worker の path を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p19j-provider-relative-link",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "aa385addd82e1372ba241d4e4165444e97b39aeb044277f03c7f00d57367f386",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-19j"
+          ],
+          "note": "provider.md の冒頭に plugin を出る相対リンクで design の provider-lifecycle を指した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p20-graph-goal-8",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "9d95e8f2dfe5951415ea7c2e4a3e64d5a38b5463166212d017380d636f56ee3f",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-20"
+          ],
+          "note": "graph の節の箇条 3 に goal 8 の逸話を戻した",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "p20-graph-goal-154-waited",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "53f93d400d5cc3005e874f9786759abff44db592da1d4b89cd8e6a2543784c10",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "P-20"
+          ],
+          "note": "graph の節に goal 154 が 1 日待った逸話を書いた",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "clean-scope-row-for-migrations",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "11d474e5080ed2cdcd00ab2195035917c81c0155680c35da08d35f4fe5851501",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "推奨の組み合わせの表に汎用の行（repository の言うとおり）を足しただけで、この repository のコマンドや値を書いていない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-scope-change-example-generic",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "1cb866a435c4c4fc1f5f58d12aef0b9711301af825620a98d454ae16a0cf7254",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "`--change` の段落に汎用の選び方を足した。この repository の値も AGENTS.md も名指さない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-scope-verify-generic",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "d6943f82f408417ff3927d85c6f9adeeeee45e1c4e35062a1eb9f9b7b6679313",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "`--verify` の段落に汎用の文を足した。この repository のコマンドも経緯も書いていない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-scope-e2e-setting-name",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "472bf7482d5237b3fdcb55e732eebaea431c3ce89a3d8af8517a7891afa41994",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "e2e の paths を製品の設定の key（[e2e] paths）で名指しただけで、この repository の paths の中身は書いていない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-scope-name-files-generic-example",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "c91e8b018a56129256ba155b13b4da7e2d93b59a8b9ae47c68048d224666c6ae",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "paths の無い task の節に置き字の例を足した。この repository の file の path でも runtime の task の規則でもない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-skill-verify-placeholder-renamed",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "6a90e22079b535cded36cc1599fedc79dd8e37986bafc4359fcbd9d52f707704",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "登録の例の --verify の置き字の名を変えただけで、置き字のまま",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-skill-doc-placeholder-renamed",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "365d9c3e30edacb086aa9d7df81010f65b4a5f6505dbddffb66541ac60a6a9d6",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "goal の登録の例の --doc の置き字の名を変えただけで、この repository の ADR の形ではない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-inspect-interrupt-example-generic",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "a930d4d3b40912a5d65b17c911738c0f51a44c2ac3ab380cc1f84afa17224ee1",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "interrupt の例に番号の無い汎用の場面を足した",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-inspect-edit-example-placeholders",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "29254d645517639daaf1266f283bd32ac85ffd0676b93b988325dc69b829b304",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "edit の例を置き字で足した。この repository のコマンドではない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-planner-plan-it-repository-rules",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "c0e663fc259755586f561dd9d91dae1744c84f4a3b930b7c36585548095e5914",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "planner の §1 で --paths などの取り方を「repository の規則」と書いた。AGENTS.md もこの repository の文書も名指さない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-watch-failed-review-reworded",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "6fd4348d247d61a5a0dec7abbbf86cacfe8c0c24b729b58afec16bc916dba8b2",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "check the failed review の項の言い回しを変えただけで、番号を足していない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-stuck-exit-reworded",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "aa26697f708643bcfd2a70392abb2702fdf4a10bd8e1438662ac347220246fc8",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "stuck-exit.md の冒頭の言い回しを変えただけで、番号を足していない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-kpi-stratum-generic-example",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "07a22fa00b8a28a2055addbfcb141a457dfcec7bcecbcfe231e6223e226f0558",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "層の箇条に汎用の例（code の変更の層）を足した。この repository の area の名は書いていない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-kpi-weekly-generic",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "a67b73f8177020a22591589d279c66392bcf23f4810ff591aaa9d1d03f0d4663",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "週次の見直しの箇条 5 に汎用の文を足した。この repository の層は書いていない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-triage-tool-generic",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "909ad0d1fd38ea8c35460ac5202cd384a49d978f4af78ffbc8feb94cab614008",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "壊れた verify の節に汎用の語（module）を足しただけで、番号や host の逸話は書いていない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-provider-roles-setting",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "88b3de48262a4ec8c07ff70230e15bbe62334c517da3860aefb4c4713fed2ba8",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "job の provider を製品の設定（[roles.<role>]）で名指した。task の番号も design の path も書いていない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-status-points-to-watch-reference",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "5ff905d30168fd314d31491997e6ee54a303dc2fd6dd53c7b2c5fce563a69d44",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "status.md から同じ skill の reference/watch.md を指した。plugin の中の参照で docs/design や plugin の外ではない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-review-by-hand-help",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "ec1eb9418b072d7cdd6077bf24772124d622b940c301c09ffca9281a51ee1532",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "review-by-hand.md に binary の help への参照を足した。design の文書への参照ではない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-session-plugin-reference",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "12c804805f18ee2f8187c234e4e9fd98bf5b04e2c180536870976331baef17a3",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "session.md から同じ skill の reference/hold.md を指した。plugin の中の参照",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-stalled-reworded",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "2e344fe9058a5a40b0fd63e9cc9ad9e7cbf98cbe4f7c2d8164fa546112d61d4a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "stalled.md の冒頭に汎用の文を足しただけ",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-authority-binary-policy",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "4e652c1eb48e2de6a637a7aaad5d51c766d4a3efed9a82b24b1548b7ebfa341a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "authority.md の冒頭に binary の help への参照を足した。design の path も plugin の外へのリンクも無い",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-goal-close-register-reference",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "78d5c619d95d9263db4dd7a23ee1a278a4da799aac9ada7ec96c3a87b83ac9c4",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "goal-close.md から同じ skill の reference/register.md を指した",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-inspect-graph-generic-count",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "7de9019a582ef080c16f4cb36520a9ff52534d79ebf0cd0f0e873d6aa699b038",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "graph の節の箇条 3 に番号の無い汎用の例（5 件が 1 件を待つ）を足した。goal の番号の逸話ではない",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-observer-stats-help",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "3eb96e83c26eeb1a520c787aae095e4c04e7e6b8beed1dacbc8c4680c565de9a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "observer.md の Threshold findings に stats の help への参照を足した",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-kpi-reports-generic",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "7713839c7004e6c2dfc45704f49426df0e67704681c4228323371ea7f7016393",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "kpi.md の Reports に汎用の文を足しただけで、design の参照もこの repository の名指しも無い",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "clean-provider-top-reworded",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "f3cc2e8fd9f0fc0548aa919fd7e06f6337889b45",
+      "patch": "06b5bfd7c4f6cced04fa9677c1e0394420009ce1b119c97ed2d55cec4bece9e1",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "provider.md の冒頭に汎用の文を足しただけ",
+          "near_miss": true
+        }
+      }
+    },
+    {
+      "id": "landed-be9c918a1",
+      "source": "handmade",
+      "made_by": "landed commit be9c918a1c339cb6073c511af29fab6e412dff9f on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "cab44ef27fbdc53db7c22ca19897486638162349",
+      "patch": "90d1da3302c8cb9e78d5bcc1915d7f562983744acd612c449af554ff87b75987",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "be9c918a1c339cb6073c511af29fab6e412dff9f",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: 週次の見直しの「Find the one constraint」に汎用の読み方を足した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-101843ef8",
+      "source": "handmade",
+      "made_by": "landed commit 101843ef84e93e5bcabb974a82dfec487d8574e7 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "9f57282397b65613f380de38cf1d47a689f56563",
+      "patch": "ee7cc3eca78c8d58440ecbbf8c49f42a72365798c0841b878a1459ed53bbaa39",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "101843ef84e93e5bcabb974a82dfec487d8574e7",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: served な queue で service に届かないときの扱いを汎用の文で足した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-a15171918",
+      "source": "handmade",
+      "made_by": "landed commit a151719187ad0d06bdeef914a727bfb8cbf064f9 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "c856eb83fcb133f035d9342c694011daa2b21c1e",
+      "patch": "334abf2d9ce37ad005e207b1559f62c4c7b0cc4f2b5252abc607c33f3f61c2a3",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "a151719187ad0d06bdeef914a727bfb8cbf064f9",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: inbox を開き直す手順の言い回しを直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-6aabe6c2a",
+      "source": "handmade",
+      "made_by": "landed commit 6aabe6c2a7e06984c17a56e6ea0f7d79c33c4859 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "a6c11bc5c72177140f84956f7dccde80db17189c",
+      "patch": "d28a04c299e8aa1419b3646636d4c20899ac1218dfd104943b3b772de0f56016",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "6aabe6c2a7e06984c17a56e6ea0f7d79c33c4859",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: goal review の段落の replaced の扱いを直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-c145d9e55",
+      "source": "handmade",
+      "made_by": "landed commit c145d9e55050ef2d47e426eda9c166f78cc5c05b on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "abb6af043451aeb9278d95e64b2888ab9fa83037",
+      "patch": "ae08dce4b9336683a843257128fbea2391922a5a239a82a36280e59fe7c21c0f",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "c145d9e55050ef2d47e426eda9c166f78cc5c05b",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: provider.md の Provider and route の文を直した。task の番号も design の path も無い。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-cd5146653",
+      "source": "handmade",
+      "made_by": "landed commit cd51466538b9622aa5b61f0adac8da245f4490b4 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "05aa66eeac0b09a75086af5fd3976da405241992",
+      "patch": "cb827c19c70b5822996d3b4ceeff4ba42f010cfd55a676637effc5f674092521",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "cd51466538b9622aa5b61f0adac8da245f4490b4",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: goal を achieved で閉じる条件を汎用の文で足した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-05aa66eea",
+      "source": "handmade",
+      "made_by": "landed commit 05aa66eeac0b09a75086af5fd3976da405241992 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "eccb90e41d8a611c6a48ac84d1cb766f56e06713",
+      "patch": "cacff0341d164acd96bbdb85f52c7f58c365f1157ff6cf56485d7aa08ab2cc8c",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "05aa66eeac0b09a75086af5fd3976da405241992",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: authority.md の worker の行の client mode の断りを直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-265eaf16c",
+      "source": "handmade",
+      "made_by": "landed commit 265eaf16ccc670820bc93f74521c77f5ef6cdd20 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "6c5280210c4148afa709351a1fec306de9c5ae00",
+      "patch": "142bd9ea4d972338c55f7f1244d9b27185cf1506a75faeb590757f306b50a29e",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "265eaf16ccc670820bc93f74521c77f5ef6cdd20",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: doctor.md の recover の手順を汎用の文で直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-336e29a1a",
+      "source": "handmade",
+      "made_by": "landed commit 336e29a1a510e0a0c810ed82b9f1823a4d124362 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "1a8a0d1c30a5b0b3987717953e79dfc9d67ecabe",
+      "patch": "840951295a748976a599402e58484f546d4aaf211e0a3eec76edcc358d3dc659",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "336e29a1a510e0a0c810ed82b9f1823a4d124362",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: kpi.md の kpi --help への案内を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-a283ae9cd",
+      "source": "handmade",
+      "made_by": "landed commit a283ae9cd32eb60aec31cbf536195478f7116b51 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "d87d288d95f7aaa35027f6fb075ac285c6ff0848",
+      "patch": "8ad8d41fef322e2cb695368af549700ac1774c5795e8a7101bb480fd31ea8bc7",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "a283ae9cd32eb60aec31cbf536195478f7116b51",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: register.md と planner の revise の節を汎用の文で直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-ed56c0990",
+      "source": "handmade",
+      "made_by": "landed commit ed56c0990942685b2a32d0069921a171be97fbdb on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "6e9ab5b6b1ad40c66fcd25091a63a9c3a5e9567f",
+      "patch": "c7ad8a0c94fd944376ec20c005c286bde374edc7a07f075c281d0aed075ddce6",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "ed56c0990942685b2a32d0069921a171be97fbdb",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: doctor.md の When to recover の文を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-94617679b",
+      "source": "handmade",
+      "made_by": "landed commit 94617679be70137120ab35d77bff75d9a9fc9fb1 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "b9e2af1113ef02aa5aee3ff6b0bdac4341f02342",
+      "patch": "ca4ed06a83a7aa91b54129f1f65286c3b548e2b83897ef43b5c154c10e3444af",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "94617679be70137120ab35d77bff75d9a9fc9fb1",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: resume.md の再計画の段落を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-ea3b19609",
+      "source": "handmade",
+      "made_by": "landed commit ea3b196094caf6a5f3200fd30280025c4c7e3e1c on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "afd518988c7a40cea2a489b6502e70ecc8f8d79c",
+      "patch": "51980a97f7cf9f3633ef1cf1f3bff3b0fade302d8647d087722831a1ad9f4cd4",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "ea3b196094caf6a5f3200fd30280025c4c7e3e1c",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: hold.md の終わった task の扱いを直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-c5c702ffd",
+      "source": "handmade",
+      "made_by": "landed commit c5c702ffd57f5f5104cbe3e9bd72ad7afaa6814b on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "ca143c70006b93a53d5efb4f4ede4beb618bf1c9",
+      "patch": "836bb10585d70b2b6bd467b208428994bbbfe03659e97bfaac8291ec95fdb2bf",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "c5c702ffd57f5f5104cbe3e9bd72ad7afaa6814b",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: asks.md の queue_hold の説明を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-84a9b8931",
+      "source": "handmade",
+      "made_by": "landed commit 84a9b8931f0aa0000e12106b619e8735c6af01a9 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "e83fbf4c8385813b59da7d3fbefd6643211272b9",
+      "patch": "608e961ad2804da11233dc21447f5a37b241e3a447771945c05be0a3e664a926",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "84a9b8931f0aa0000e12106b619e8735c6af01a9",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: hold.md の各状態の hold の説明を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-52663cf0d",
+      "source": "handmade",
+      "made_by": "landed commit 52663cf0d38b08ba0c1fa135bbc6d7ce71bcd393 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "c4a4b1ea1ca6aaddf6d3b4950feadb8df939f90b",
+      "patch": "f223568098ed9d5174d1d8ba1efcd443877f80d9dba4f2cde804a7d1a9d6b3cb",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "52663cf0d38b08ba0c1fa135bbc6d7ce71bcd393",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: authority.md の hold と release の段落に汎用の文を足した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-8855aefc8",
+      "source": "handmade",
+      "made_by": "landed commit 8855aefc8eb837eb895420644f8e33a10132c1af on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "9faf86df6696041015d90ce0397ac0dbdf2afd07",
+      "patch": "55424d68c883dec76ce32b62f95b36025a8b8cc6cad09635b2384f9d52d7f565",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "8855aefc8eb837eb895420644f8e33a10132c1af",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: status.md の Run states の validating の説明を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-c7f480b4e",
+      "source": "handmade",
+      "made_by": "landed commit c7f480b4e3c22c2781adf01e6417a840f97f1a8b on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "562a2c1d4bac2362b4eb8f4d653b6a109bed15b6",
+      "patch": "a431bd43c5bb0f7a465427b2c519a33c5021a584e5eb0bcabaecff6432a01543",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "c7f480b4e3c22c2781adf01e6417a840f97f1a8b",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: review-by-hand.md の integrate の検証コマンドの説明を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-a6378687d",
+      "source": "handmade",
+      "made_by": "landed commit a6378687d3d22160c998f5a8abd73a799ef04eae on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "97fcf905ee07acb64fbc58888a5b17499dde4a6a",
+      "patch": "e077dee77ce079118dad1d3763eb7fcb5b74179eec51cf8356d37bcb47782caf",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "a6378687d3d22160c998f5a8abd73a799ef04eae",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: stalled.md に job が足した option の扱いを足した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-7201544d7",
+      "source": "handmade",
+      "made_by": "landed commit 7201544d7a64e4a4378d69d4ac7978901f5018b9 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "ea7629f1534503e8ae34a6b87f064a82ae58858e",
+      "patch": "b4fff6d0a9368c242ac6ed18f323c3c1de020b40c77c115451f02d89cbf18bba",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "7201544d7a64e4a4378d69d4ac7978901f5018b9",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: resume.md の needs_session の run の説明を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-d0293c841",
+      "source": "handmade",
+      "made_by": "landed commit d0293c841f6d1671c5b9882dde106c052b20c9fb on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "2ced671e7a81be479d237c75966ddf381574d8ed",
+      "patch": "b494c27cf4f7bea1dc4e243ce194715876f3b8f5d7a85ab148ae7fe191928d92",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "d0293c841f6d1671c5b9882dde106c052b20c9fb",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: register.md の follow_up の所属の手順を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-481e4b382",
+      "source": "handmade",
+      "made_by": "landed commit 481e4b382871d4cf3335aa34a5104dc46a66e4c4 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "1fe9f9fa09e13bcfe0f71c5910baf93d029fb5c8",
+      "patch": "dac9ce24a1c8d04cc544216327e52c992b212653f27fb30c624cd26e2d0dfd76",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "481e4b382871d4cf3335aa34a5104dc46a66e4c4",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: goal-close.md と asks.md の correct_goal の説明を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-1fe9f9fa0",
+      "source": "handmade",
+      "made_by": "landed commit 1fe9f9fa09e13bcfe0f71c5910baf93d029fb5c8 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "cfb8b6da361577618db5ac0cc50ad6e187d2a9a6",
+      "patch": "b691e76c743e07fda39cd2d7137d48903d21d615bc08d400b2f88ced95b4d9ac",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "1fe9f9fa09e13bcfe0f71c5910baf93d029fb5c8",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: goal-close.md の verdict の説明を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-c7b934a85",
+      "source": "handmade",
+      "made_by": "landed commit c7b934a852eb469bf34b906313c7710f78f9d98d on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "99049c65518f643ac9181e35573b3ef59b2ebf0b",
+      "patch": "90dcacf77064d60e150b5bd961003f06b00bddf3874dc6bc649970b034c42db7",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "c7b934a852eb469bf34b906313c7710f78f9d98d",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: inspect.md の set-goal と set-priority の対象を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-65db4ab43",
+      "source": "handmade",
+      "made_by": "landed commit 65db4ab43f1af801f1a59520270bc4be1faf282a on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "9db4ef8295f6289ddd4c864f1acf57caf7643921",
+      "patch": "2f0286c54d752bb3676a6c929f677461d2635b968da9520998b92c99757f0ed6",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "65db4ab43f1af801f1a59520270bc4be1faf282a",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: requests.md・planner・register.md の依頼の扱いを汎用の文で足した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-f0a98dd9d",
+      "source": "handmade",
+      "made_by": "landed commit f0a98dd9d210139830c8f2fd71dda1504169f3c1 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "329cadfabcdd4e6fab78ef8e25579671a98a75a1",
+      "patch": "056bc1fa339262d4e1bbcf4eccd2a679c7bcc511bfdd64a1b9e722214172c596",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "f0a98dd9d210139830c8f2fd71dda1504169f3c1",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: run が workspace を持つとする記述を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-6f6f42f8d",
+      "source": "handmade",
+      "made_by": "landed commit 6f6f42f8deb216c4df34285c92318b21aa139b78 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "78883ef61dd4829f61d7c9dc3272c5196c5b9608",
+      "patch": "d8cc6dab10f92c61cb45471f499138d0891d8f4aa0faea1bc05600724bbc7f0c",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "6f6f42f8deb216c4df34285c92318b21aa139b78",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: scope.md の「Name the files a task without paths mainly touches」の文を汎用に直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-49926bfe1",
+      "source": "handmade",
+      "made_by": "landed commit 49926bfe1db9219bbc7792ea9a52fd04a26a5f49 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "860ac29ee93f292236a7123e1f93a757b1c6c511",
+      "patch": "ac5e7f6b170e5b5310fb1b567d30d7961352792f9645799af84f230d0f28cffc",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "49926bfe1db9219bbc7792ea9a52fd04a26a5f49",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: runtime の planner を background の session に結ぶ記述を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-81cf6ce58",
+      "source": "handmade",
+      "made_by": "landed commit 81cf6ce58d6603fb036fc3e6a5bc58c89708165d on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "5153887153eadaea884501134cc4a066238f1c00",
+      "patch": "10d3c130908ce4c215fdac45b72da9f869d0e2aaa19ca188627af7bb73af6dab",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "81cf6ce58d6603fb036fc3e6a5bc58c89708165d",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: asks.md と stalled.md の stalled の項を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-f8a7b8151",
+      "source": "handmade",
+      "made_by": "landed commit f8a7b815177b2d8ce4ddb5173c6bd1f4d97f2866 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "bdffbaa3aa68415d0bfe6c4f5e05054dfe78e860",
+      "patch": "b51d8d06b10ef74d4bb5e14315fb2582b0762b182928e46dd0a7756095d6a74b",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "f8a7b815177b2d8ce4ddb5173c6bd1f4d97f2866",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: doctor.md と inspect.md の説明を直した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-5c9e68946",
+      "source": "handmade",
+      "made_by": "landed commit 5c9e689463f603b8c67a799a8c902e401924fe94 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "73471de9dbe6fd2d1a334db9afb06668cb7536d2",
+      "patch": "906f10cf1fe449e327ca20e8a46c3f0b3d1f0116d72b59a2ed27b4bc4a2b3130",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "5c9e689463f603b8c67a799a8c902e401924fe94",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: up-down.md に down の pid_reused の prune を書いた。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    },
+    {
+      "id": "landed-2b81b4162",
+      "source": "handmade",
+      "made_by": "landed commit 2b81b4162faaa7ab052c1f559c8634b5aef11a54 on main (its diff); label by claude-opus-5-5 (this session)",
+      "base_commit": "6b5f176315ee89720141f832d18def6aaff8de85",
+      "patch": "df972bd3868e96df2bfbe8b66e23cfb0421cab3a20ee02a32cd5f763c25f2ab4",
+      "adjudicated": null,
+      "disputed": null,
+      "landed_commit": "2b81b4162faaa7ab052c1f559c8634b5aef11a54",
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "着地済み: authority.md の client mode の断りに 1 語を足した。この repository の規則・値・経緯・番号・design の path を足していない",
+          "near_miss": false
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/inspect.md b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+index 2ae28b17f..e55c88161 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/inspect.md
++++ b/plugins/claude-dagq/skills/dagq/reference/inspect.md
+@@ -103,6 +103,7 @@ Fix a draft or submitted task in place instead of canceling it and registering i
+ 
+ - Fix a proposal while it is sent back (`draft`) rather than while it is `submitted`: a review already running may pass the old text. A `ready` task changes only through plan review or by taking it back with `draft ID`.
+ - Priority, goal and dependencies have their own commands: `set-priority`, `set-goal`, `dependency add|remove`.
++- To swap the gate, pass it whole: `edit TASK --verify 'cargo llvm-cov nextest --locked --workspace --fail-under-lines 80'`.
+ 
+ ## Withdraw a proposal (`proposal withdraw`)
+ 

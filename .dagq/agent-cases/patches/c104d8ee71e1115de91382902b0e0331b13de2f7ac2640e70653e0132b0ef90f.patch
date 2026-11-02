@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/observer.md b/plugins/claude-dagq/skills/dagq/reference/observer.md
+index ad3d8d4cc..175d9959d 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/observer.md
++++ b/plugins/claude-dagq/skills/dagq/reference/observer.md
+@@ -14,6 +14,8 @@ A finding is one record per problem; one that comes back after it was resolved m
+ 
+ A `threshold` finding says a stall setting looks wrong; read the detections and their outcomes in `stats` (`stats --help`). Many asks answered `wait`: the threshold is probably too early. Many where a person stepped in first: probably too late. No outcome yet: do not judge on it. The observer never changes the value; changing it is the user's decision.
+ 
++How each threshold is detected: `docs/design/supervisor-lifecycle/stall-thresholds.md`.
++
+ ## Session time
+ 
+ For a `capacity` or `wait` finding read the sessions in `stats` (`reference/inspect.md`, "Claude session time"): a kind whose open time grows while its active share falls is waiting, not working.

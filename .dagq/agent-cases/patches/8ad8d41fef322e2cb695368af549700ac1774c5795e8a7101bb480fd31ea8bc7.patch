@@ -1,0 +1,44 @@
+diff --git a/plugins/claude-dagq/skills/dagq-planner/SKILL.md b/plugins/claude-dagq/skills/dagq-planner/SKILL.md
+index a4966ed1d..947ac6ed2 100644
+--- a/plugins/claude-dagq/skills/dagq-planner/SKILL.md
++++ b/plugins/claude-dagq/skills/dagq-planner/SKILL.md
+@@ -26,7 +26,7 @@ Your prompt holds the person's words. Look for work that covers it first (`searc
+ "$DAGQ" submit TASK...          # or --goal GOAL
+ ```
+ 
+-  `submit` (refusing what `lint` rejects) makes the request `proposed`; report the proposal ID.
++  `submit` makes the request `proposed`; report the proposal ID.
+ - **Decline** (done already, a duplicate in flight, or not plannable as asked; say why): `"$DAGQ" request decline N --reason '<why>'`. The inbox tells the person.
+ - **Ask**: `"$DAGQ" ask --request N --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --question '...' --option plan --option decline`.
+ 
+@@ -38,7 +38,7 @@ First list the unconfirmed premises that would change the plan; settle those a s
+ 
+ ## 2. When plan review sends it back (revise)
+ 
+-"Plan review sent proposal N back" arrives with reasons. Fix them, `lint --proposal N`, `"$DAGQ" submit --proposal N`; on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. Details: `register.md`, "A revise".
++"Plan review sent proposal N back" arrives with reasons. Fix them, `lint --proposal N`, `"$DAGQ" submit --proposal N` (a replan's replacement proposal: fix its plan too and add `--replacement <plan.json>`); on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. Details: `register.md`, "A revise".
+ 
+ ## 3. A draft or a finding you were opened for
+ 
+@@ -50,7 +50,7 @@ Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`e
+ 
+ ## 4. Goals, forecasts, findings, KPIs
+ 
+-Progress: `goal show`, `graph --goal`, `forecast --goal`. Deferring what an acceptance does not need: section 3. Findings: `skills/dagq/reference/observer.md`. `mark` a setting, operation or host change and judge it with `kpi --compare` (`skills/dagq/reference/kpi.md`).
++Progress: `goal show`, `graph --goal`, `forecast --goal`. Findings: `skills/dagq/reference/observer.md`. `mark` a setting, operation or host change and judge it with `kpi --compare` (`skills/dagq/reference/kpi.md`).
+ 
+ ## 5. A finished goal
+ 
+diff --git a/plugins/claude-dagq/skills/dagq/reference/register.md b/plugins/claude-dagq/skills/dagq/reference/register.md
+index 451c3baa1..4415c48b9 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/register.md
++++ b/plugins/claude-dagq/skills/dagq/reference/register.md
+@@ -75,7 +75,7 @@ What the `dagq-planner` skill's sections 1 to 3 name in short.
+ 
+ **Traffic control is plan review's.** It checks the proposal against other proposals and ready tasks (duplicates, done work, overlaps, content prerequisites) and adds only a dependency a content prerequisite needs, or cancels an obvious duplicate, itself; tasks touching the same files it leaves to the claim deferral. It sends back as `revise` a dependency from a higher-priority goal's task onto a lower-priority goal's task whose only reason is avoiding a conflict, or one with no kind and reason recorded. It lowers only a priority an AI set on an AI-made task, by clearing it; for human-made work it raises a `concern` ("Priority"). Beyond `search` / `related`, a planner does not take stock of other drafts, or re-wire or park other tasks. Give a task its own priority only when the request has none and the person's words say it goes first or can wait; never for an AI-made task. Never draft other tasks or bend dependencies to hurry one. A content prerequisite that lifts a lower-priority goal's task by inheritance (its effective priority) is yours to solve by reordering, moving the task into the goal or splitting it; only when none of these works, raise a `planner_question` (`--because scope`): "bring the lower goal's task forward with its priority, or does the higher goal wait?"
+ 
+-**A revise.** "Plan review sent proposal N back" with the reasons reaches the proposal's planner; its drafts are `draft` again. Fix what the reasons point at with `edit`, `dependency`, `add` or `cancel`, `lint --proposal N`, then `"$DAGQ" submit --proposal N`; on `EmptyProposal`, or when the plan is dropped, `"$DAGQ" proposal withdraw N`. A fix the reasons name is made as they say, without asking (the `dagq-planner` skill's Basic policy). A fix that changes the plan's intent (acceptance, scope, the relation to the goal) goes up only when the queue, the repository, the decision records and the person's precedents cannot settle it: `"$DAGQ" ask --task ID --kind planner_question --because scope --question '...'` (everything the person needs, the recommendation), after making and saving every fix the answer does not touch ("Before stopping at a question" below); report and stop. The answer comes as `answer to ask <id>: ...`; apply it.
++**A revise.** "Plan review sent proposal N back" with the reasons reaches the proposal's planner; its drafts are `draft` again. Fix what the reasons point at with `edit`, `dependency`, `add` or `cancel`, `lint --proposal N`, then `"$DAGQ" submit --proposal N`; on `EmptyProposal`, or when the plan is dropped, `"$DAGQ" proposal withdraw N`. A proposal of a replan's replacement plan (one submitted with `--replacement`) is the exception: its prompt holds the replan material (the operation's conditions and their version, the saved work's snapshot, the latest plan and its problems) or where to read it (`dagq replans ID`, `dagq show ID --full`). Fix the children and the plan alike, keep every acceptance item of the parked task mapped, and submit again with the whole plan: `"$DAGQ" submit --proposal N --replacement <plan.json>` (submit refuses it without `--replacement`); never edit the parked task. A fix the reasons name is made as they say, without asking (the `dagq-planner` skill's Basic policy). A fix that changes the plan's intent (acceptance, scope, the relation to the goal) goes up only when the queue, the repository, the decision records and the person's precedents cannot settle it: `"$DAGQ" ask --task ID --kind planner_question --because scope --question '...'` (everything the person needs, the recommendation), after making and saving every fix the answer does not touch ("Before stopping at a question" below); report and stop. The answer comes as `answer to ask <id>: ...`; apply it.
+ 
+ People no longer open planners (`dagq plan` is refused). A ready task plan review must change comes back `submitted` in a proposal of its own, with the reasons: fix it and `submit --proposal N`. A person's concern (`approve_plan`) goes to the inbox, never to a planner; its `send_back` returns as a revise.
+ 

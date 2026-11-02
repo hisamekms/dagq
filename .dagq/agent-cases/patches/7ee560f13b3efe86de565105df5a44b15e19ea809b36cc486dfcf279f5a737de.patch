@@ -1,0 +1,13 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..cdc289883 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -21,7 +21,7 @@ CARGO_BUILD_JOBS = "4"
+ # RUST_TEST_THREADS は 1 つの test binary の中の並列 thread 数。test は待ちが中心で CPU をあまり使わないので
+ # build と分けて決める（docs/plans/nextest-measurement.md）。上げると関門の test 段が縮み、load と capture の
+ # 時間切れが増える。上げ下げの目安は docs/plans/nextest-test-threads.md の 6 章と 8.3 節。
+-RUST_TEST_THREADS = "6"
++RUST_TEST_THREADS = "4"
+ # coverage の関門（cargo llvm-cov nextest）で同時に走らせる test の process 数（ADR-0076 の決定 2）。
+ # nextest は RUST_TEST_THREADS を読まず既定で CPU 数だけ走らせるので、RUST_TEST_THREADS と同じ値にする。
+ # .config/nextest.toml には書かない（理由はその冒頭のコメント）。

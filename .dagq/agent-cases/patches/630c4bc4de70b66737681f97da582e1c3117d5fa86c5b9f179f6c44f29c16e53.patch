@@ -1,0 +1,11 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..823be69b3 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -1,5 +1,5 @@
+ # dagq が run に渡す設定。runtime が読むのは main checkout の作業ファイルで、
+-# run の worktree で変えても着地して main checkout に反映されるまで効かない。
++# run の worktree で変えても着地して main checkout に反映されるまで効かず、反映されると本番 queue の全 run に効く。
+ # 書式と渡し先は docs/design/supervisor-lifecycle/run-environment.md。
+ 
+ [run.env]

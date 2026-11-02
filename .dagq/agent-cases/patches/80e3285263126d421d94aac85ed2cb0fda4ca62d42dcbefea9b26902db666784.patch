@@ -1,0 +1,13 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/provider.md b/plugins/claude-dagq/skills/dagq/reference/provider.md
+index ca0b2498f..1a43ee138 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/provider.md
++++ b/plugins/claude-dagq/skills/dagq/reference/provider.md
+@@ -8,7 +8,7 @@ A task's worker has a **provider** (`claude` or `codex`); its session is always
+ 
+ An `in_progress` task's provider and model change only through a release of its hold, on the person's word (the `dagq-recover` skill's `reference/hold.md`).
+ 
+-The task's provider changes only its worker. A headless job's provider is the repository's setting for its role; planners stay on Claude. The inbox's provider (`claude` or `codex`) and model come from its role's setting, and `dagq inbox`'s arguments override them for one launch (`dagq inbox --help`); with neither, it opens on Claude (unless Claude may not start, below). How the inbox is opened, watches and comes back: the `dagq-inbox` skill and `skills/dagq-recover/reference/up-down.md` (opening the inbox again). `"$DAGQ" doctor` shows each role's provider and where it comes from.
++The task's provider changes only its worker. A headless job's provider is the repository's setting for its role (task 1218); planners stay on Claude. The inbox's provider (`claude` or `codex`) and model come from its role's setting, and `dagq inbox`'s arguments override them for one launch (`dagq inbox --help`); with neither, it opens on Claude (unless Claude may not start, below). How the inbox is opened, watches and comes back: the `dagq-inbox` skill and `skills/dagq-recover/reference/up-down.md` (opening the inbox again). `"$DAGQ" doctor` shows each role's provider and where it comes from.
+ 
+ ### Which to choose (planner)
+ 

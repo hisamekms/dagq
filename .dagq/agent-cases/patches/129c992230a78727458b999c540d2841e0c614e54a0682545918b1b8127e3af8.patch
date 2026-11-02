@@ -1,0 +1,12 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..135abd7a6 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -1,6 +1,7 @@
+ # dagq が run に渡す設定。runtime が読むのは main checkout の作業ファイルで、
+ # run の worktree で変えても着地して main checkout に反映されるまで効かない。
+ # 書式と渡し先は docs/design/supervisor-lifecycle/run-environment.md。
++# push（[push]）と secret は commit されるこの file に置かず、host の host.toml とその参照先に置く。
+ 
+ [run.env]
+ # 依存 crate の compile の結果を sccache で run 間に共有する（ADR-0049 の決定 6・7）。

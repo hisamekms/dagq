@@ -1,0 +1,15 @@
+diff --git a/dagq.toml b/dagq.toml
+index 5afcf6931..16d3a7b61 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -140,6 +140,10 @@ peak_context_above = 400000
+ [replan]
+ enabled = true
+ 
++[notify]
++# 着地のたびに人へ知らせる。runtime の対応は後続の task で入れる。
++on_landing = true
++
+ [toolchains.rust]
+ # この repository は Rust の project なので、runtime に組み込みの Rust の profile の利用者として宣言する（ADR-t2268-1 決定 3）。
+ # 宣言したので、組み込みの Rust の profile が着地の検証と landing recheck の出力（失敗の分類・落ちた test の名前・flaky のやり直しの env）を読む。
